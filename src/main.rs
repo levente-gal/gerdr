@@ -33,10 +33,12 @@ mod feature_agents;
 mod feature_build;
 mod feature_diff;
 mod feature_graph;
+mod feature_plan_review;
 mod feature_review;
 mod feature_workspace;
 mod features;
 mod find;
+mod finding_dialog;
 mod frecency;
 mod fuzzy;
 mod git;
@@ -68,9 +70,11 @@ mod pane_control;
 mod pane_drag;
 mod pane_moves;
 mod paths;
+mod plan_sheet;
 mod prepare;
 mod problems;
 mod profile_import;
+mod project_commands;
 mod project_list;
 mod project_lock;
 mod project_menu;
@@ -1210,6 +1214,8 @@ pub enum Action {
     Split(Dir),
     /// Close the focused pane.
     ClosePane,
+    /// Send the prompt of the stage agent waiting in the focused pane.
+    SendPrompt,
     /// Focus the pane next to the focused one.
     FocusSide(Side),
     /// Move focus to the next (1) or previous (-1) pane of the tab.
@@ -4347,6 +4353,7 @@ impl Gerdr {
             Action::PaneMenu => self.open_pane_menu(),
             Action::Split(dir) => self.split_pane(dir),
             Action::ClosePane => self.close_pane(),
+            Action::SendPrompt => self.send_focused_prompt(),
             Action::FocusSide(side) => {
                 let area = self.content_rect();
                 self.focus_pane(|tab| {
@@ -5500,9 +5507,7 @@ impl Gerdr {
                 // marks on its header.
                 if let Some(feature) = self.workspace_feature(w) {
                     view.name = feature_workspace::feature_label(&ws.name, &ws.dir, &feature.title);
-                    view.stages = (feature::Stage::ALL.iter())
-                        .map(|s| features::stage_mark(feature, *s))
-                        .collect();
+                    view.feature = Some(self.feature_card(feature));
                 }
                 // Folded by hand, else while quiet and not the active one.
                 view.folded = self
@@ -6480,8 +6485,11 @@ impl Gerdr {
             checkout: self.checkout_view(),
             confirm: self.confirm_view(),
             new_feature: self.new_feature_view(),
+            finding_dialog: self.finding_dialog_view(),
             identity: self.identity_view(),
+            commands: self.commands_view(),
             manual_test: self.manual_test_view(),
+            plan_sheet: self.plan_sheet_view(),
             features: self.feature_tab_view(),
             project_menu: self.project_menu_view(),
             worktrees: self.worktrees_view(),

@@ -32,11 +32,12 @@
 //! (`Feature::stale` / the patch reading), so read-only holds by check,
 //! not by flag.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use super::Stage;
+use super::{Feature, Stage};
 
 /// Which CLI a command runs, for its flags.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -102,6 +103,24 @@ pub struct Needs {
     pub template: &'static str,
 }
 
+/// The final plan, Plan review's own file.
+pub const FINAL_PLAN: &str = "plan-final.md";
+
+/// What the agent of `feature`'s `stage` needs now: `needs`, but Plan
+/// review's reviewer writes its suggestions until the final plan is due.
+pub fn run_needs(feature: &super::Feature, stage: Stage) -> Option<Needs> {
+    let need = needs(stage)?;
+    let writing = feature.plan_review.as_ref().is_some_and(|r| r.writing);
+    if stage == Stage::PlanReview && !writing {
+        return Some(Needs {
+            artifact: Some(super::plan_review::FILE),
+            template: "plan-review",
+            ..need
+        });
+    }
+    Some(need)
+}
+
 /// What `stage` needs of its agent; `None` for a stage no agent runs.
 pub fn needs(stage: Stage) -> Option<Needs> {
     match stage {
@@ -114,6 +133,13 @@ pub fn needs(stage: Stage) -> Option<Needs> {
             read_only: true,
             artifact: Some("plan.md"),
             template: "plan",
+        }),
+        // Its own file is the final plan: what is reviewed, approved and
+        // read by Build. `run_needs` says what its reviewer writes first.
+        Stage::PlanReview => Some(Needs {
+            read_only: true,
+            artifact: Some(FINAL_PLAN),
+            template: "plan-final",
         }),
         Stage::Build => Some(Needs {
             read_only: false,
@@ -129,12 +155,10 @@ pub fn needs(stage: Stage) -> Option<Needs> {
     }
 }
 
-/// The shell command that starts `base` (an `[agents]` command such as
-/// `claude`) on the prompt in `prompt`, allowed into `dirs` too.
-/// The prompt goes in as `"$(cat '<prompt>')"`, so a long one with quotes
-/// and newlines arrives whole. A CLI gerdr knows gets `--` before it, so no
-/// flag can take the prompt for its own value, whether gerdr added the flag
-/// or the `[agents]` command ends in one.
+/// The shell command that opens `base` (an `[agents]` command such as
+/// `claude`) for the prompt in `prompt`, allowed into `dirs` too. The prompt
+/// isn't on it: the agent waits, so the user can pick its model in its own
+/// view, until told to read the file (see `Gerdr::send_stage_prompt`).
 ///
 /// The command keeps its chat's id in `session_file(prompt)`, for a CLI that
 /// can go back to it.
@@ -152,13 +176,6 @@ pub fn command_line(base: &str, prompt: &Path, dirs: &[PathBuf]) -> String {
         )),
         Flavor::Codex | Flavor::T3 | Flavor::Other => {}
     }
-    if Flavor::of(base).adds_dirs() {
-        line.push_str(" --");
-    }
-    line.push_str(&format!(
-        " \"$(cat {})\"",
-        shell_quote(&prompt.to_string_lossy())
-    ));
     line
 }
 
@@ -246,6 +263,10 @@ pub struct StageRun {
     /// for a run from before gerdr kept chats.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub base: String,
+    /// The model it last used, as its chat names it ("grok-4.7"), once read
+    /// (`read_models`). Kept here as the chat may be cleaned up later.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     /// The herdr pane it runs in, while known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pane: Option<String>,
@@ -277,12 +298,21 @@ pub struct StageRun {
     /// `Blocked:` line in its build log (see `artifacts::blocked`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocked: Option<Blocked>,
+    /// Its agent waits for the prompt, which the user sends once they
+    /// picked its model. Never for one in T3 Code: that one has its draft.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub held: bool,
 }
 
 impl StageRun {
     /// Whether its agent is still around: a pane, or a place in T3 Code.
     pub fn live(&self) -> bool {
         self.pane.is_some() || self.t3.is_some()
+    }
+
+    /// Whether its agent is there, waiting for the user to send its prompt.
+    pub fn waits_to_send(&self) -> bool {
+        self.held && self.live()
     }
 
     /// Its T3 Code thread's id, once it was sent.
@@ -305,7 +335,8 @@ impl StageRun {
 
     /// Whether its chat can be gone back to once its tab is closed.
     pub fn resumes(&self) -> bool {
-        !self.base.is_empty() && Flavor::of(&self.base).resumes()
+        // A chat its prompt never reached has nothing to go back to.
+        !self.held && !self.base.is_empty() && Flavor::of(&self.base).resumes()
     }
 
     /// Its chat's id, as its command kept it. None until the command ran.
@@ -322,6 +353,119 @@ pub struct Blocked {
     pub at: u64,
 }
 
+/// How much of a transcript's end is read first for its model: most of a
+/// long chat needn't be read to find its last answer.
+const TRANSCRIPT_TAIL: u64 = 256 * 1024;
+
+/// The model of the last answer in a Claude Code transcript's `text`. Lines
+/// it wrote itself name `<synthetic>`, and subagents' their own.
+fn last_claude_model(text: &str) -> Option<String> {
+    text.lines()
+        .rev()
+        .filter(|l| l.contains("\"model\""))
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter(|v| v["type"] == "assistant" && v["isSidechain"] != true)
+        .find_map(|v| {
+            let model = v["message"]["model"].as_str()?;
+            (!model.is_empty() && model != "<synthetic>").then(|| model.to_owned())
+        })
+}
+
+/// The model of Claude Code chat `id`, from its transcript under `projects`
+/// (one folder per working directory). None without an answer yet.
+fn claude_model(projects: &Path, id: &str) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let name = format!("{id}.jsonl");
+    let path = (std::fs::read_dir(projects).ok()?.flatten())
+        .map(|dir| dir.path().join(&name))
+        .find(|path| path.is_file())?;
+    let mut file = std::fs::File::open(&path).ok()?;
+    let from = file.metadata().ok()?.len().saturating_sub(TRANSCRIPT_TAIL);
+    file.seek(SeekFrom::Start(from)).ok()?;
+    // A line cut by the seek isn't JSON: it is passed over.
+    let mut tail = Vec::new();
+    file.read_to_end(&mut tail).ok()?;
+    last_claude_model(&String::from_utf8_lossy(&tail)).or_else(|| {
+        let whole = (from > 0).then(|| std::fs::read(&path).ok())??;
+        last_claude_model(&String::from_utf8_lossy(&whole))
+    })
+}
+
+/// `hex` as the text it spells.
+fn from_hex(hex: &str) -> Option<String> {
+    let bytes = hex.as_bytes().chunks(2).map(|pair| {
+        let pair = std::str::from_utf8(pair).ok()?;
+        u8::from_str_radix(pair, 16).ok()
+    });
+    String::from_utf8(bytes.collect::<Option<Vec<u8>>>()?).ok()
+}
+
+/// The model of Cursor CLI chat `id`, from its store under `chats` (one
+/// folder per working directory). None for a chat that never answered.
+fn cursor_model(chats: &Path, id: &str) -> Option<String> {
+    let db = (std::fs::read_dir(chats).ok()?.flatten())
+        .map(|dir| dir.path().join(id).join("store.db"))
+        .find(|db| db.is_file())?;
+    let read = || -> rusqlite::Result<String> {
+        crate::cursor_agents::open_read_only(&db)?.query_row(
+            "SELECT value FROM meta WHERE key = '0'",
+            [],
+            |row| row.get(0),
+        )
+    };
+    // Asked again at every read of the feature while it runs, and its agent's
+    // name shows meanwhile: not worth a toast, nor a line each time.
+    let meta = read()
+        .inspect_err(|err| tracing::debug!("reading {}: {err}", db.display()))
+        .ok()?;
+    let meta: serde_json::Value = serde_json::from_str(&from_hex(&meta)?).ok()?;
+    let model = meta["lastUsedModel"].as_str()?;
+    (!model.is_empty()).then(|| model.to_owned())
+}
+
+/// Where the agents keep their chats.
+struct ChatDirs {
+    claude: PathBuf,
+    cursor: PathBuf,
+}
+
+impl ChatDirs {
+    fn here() -> Option<Self> {
+        let home = crate::home_dir()?;
+        let claude = (std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from))
+            .unwrap_or_else(|| home.join(".claude"));
+        Some(Self {
+            claude: claude.join("projects"),
+            cursor: home.join(".cursor").join("chats"),
+        })
+    }
+}
+
+/// The models found for `feature`'s runs, by stage, with the run each read
+/// was of. Reads files and databases, so not on the UI thread. A done stage
+/// with its model kept isn't read again. A chat that can't be read has no
+/// model and says nothing: it is asked again at every read of the feature,
+/// and its agent's name shows in the model's place.
+pub fn read_models(feature: &Feature) -> BTreeMap<Stage, (u32, String)> {
+    ChatDirs::here().map_or_else(BTreeMap::new, |dirs| models_in(feature, &dirs))
+}
+
+fn models_in(feature: &Feature, dirs: &ChatDirs) -> BTreeMap<Stage, (u32, String)> {
+    (feature.runs.iter())
+        .filter(|(stage, run)| run.model.is_none() || !feature.is_done(**stage))
+        .filter_map(|(stage, run)| {
+            let model = match Flavor::of(&run.base) {
+                Flavor::Claude => claude_model(&dirs.claude, &run.session()?),
+                Flavor::Cursor => cursor_model(&dirs.cursor, &run.session()?),
+                // Its thread names it when bound; the others can't be told
+                // a chat id to look for.
+                Flavor::T3 | Flavor::Codex | Flavor::Other => None,
+            }?;
+            Some((*stage, (run.n, model)))
+        })
+        .collect()
+}
+
 /// A Build agent's stop after a milestone: `build.md` ticks `done` of
 /// `total` milestones, and the agent waits.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -335,6 +479,154 @@ pub struct Stop {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A transcript line of an answer by `model`.
+    fn answer(model: &str, sidechain: bool) -> String {
+        format!(
+            "{{\"type\":\"assistant\",\"isSidechain\":{sidechain},\"message\":{{\"model\":\"{model}\"}}}}\n"
+        )
+    }
+
+    /// A folder of its own for test `name`, gone with the test.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let id = std::process::id();
+            let dir = std::env::temp_dir().join(format!("gerdr-model-{name}-{id}"));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A Claude Code chat `id` of `text`, in a folder of a working directory.
+    fn transcript(name: &str, id: &str, text: &str) -> Scratch {
+        let dir = Scratch::new(name);
+        let cwd = dir.path().join("-home-me-x");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::write(cwd.join(format!("{id}.jsonl")), text).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_claude_chat_names_the_model_of_its_last_real_answer() {
+        let text = [
+            answer("claude-sonnet-5-5", false),
+            answer("claude-opus-5-5", false),
+            answer("claude-haiku-5-5", true),
+            answer("<synthetic>", false),
+            "{\"type\":\"user\",\"model\":\"nope\"}\n".to_owned(),
+        ]
+        .concat();
+        let dir = transcript("claude", "c1", &text);
+        assert_eq!(
+            claude_model(dir.path(), "c1").as_deref(),
+            Some("claude-opus-5-5")
+        );
+        assert_eq!(claude_model(dir.path(), "other"), None);
+        assert_eq!(claude_model(&dir.path().join("none"), "c1"), None);
+    }
+
+    #[test]
+    fn a_claude_answer_older_than_the_tail_is_still_found() {
+        let filler = "{\"type\":\"user\"}\n".repeat(TRANSCRIPT_TAIL as usize / 8);
+        let dir = transcript("tail", "c1", &(answer("claude-opus-5-5", false) + &filler));
+        assert_eq!(
+            claude_model(dir.path(), "c1").as_deref(),
+            Some("claude-opus-5-5")
+        );
+    }
+
+    /// A Cursor chat `id` whose first meta row is `meta`, as hex; none
+    /// without one.
+    fn cursor_chat(name: &str, id: &str, meta: Option<&str>) -> Scratch {
+        let dir = Scratch::new(name);
+        let chat = dir.path().join("hash-of-cwd").join(id);
+        std::fs::create_dir_all(&chat).unwrap();
+        let db = rusqlite::Connection::open(chat.join("store.db")).unwrap();
+        db.execute("CREATE TABLE meta (key TEXT, value TEXT)", [])
+            .unwrap();
+        if let Some(meta) = meta {
+            let hex: String = meta.bytes().map(|b| format!("{b:02x}")).collect();
+            db.execute("INSERT INTO meta VALUES ('0', ?1)", [hex])
+                .unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn a_cursor_chat_names_its_last_used_model() {
+        let dir = cursor_chat("cursor", "k1", Some("{\"lastUsedModel\":\"grok-4.7\"}"));
+        assert_eq!(cursor_model(dir.path(), "k1").as_deref(), Some("grok-4.7"));
+        assert_eq!(cursor_model(dir.path(), "other"), None);
+    }
+
+    #[test]
+    fn a_cursor_chat_without_a_model_names_none() {
+        let empty = cursor_chat("empty", "k1", None);
+        assert_eq!(cursor_model(empty.path(), "k1"), None);
+        let unused = cursor_chat("unused", "k1", Some("{\"lastUsedModel\":\"\"}"));
+        assert_eq!(cursor_model(unused.path(), "k1"), None);
+        let broken = cursor_chat("broken", "k1", Some("not json"));
+        assert_eq!(cursor_model(broken.path(), "k1"), None);
+    }
+
+    #[test]
+    fn models_are_read_by_flavor_and_once_for_a_done_stage() {
+        let chats = cursor_chat("chats", "k1", Some("{\"lastUsedModel\":\"grok-4.7\"}"));
+        let data = Scratch::new("data");
+        let prompt = data.path().join("plan-1.md");
+        std::fs::write(session_file(&prompt), "k1\n").unwrap();
+        let dirs = ChatDirs {
+            claude: data.path().join("none"),
+            cursor: chats.path().to_owned(),
+        };
+        let run = |base: &str, model: Option<&str>| StageRun {
+            n: 3,
+            base: base.to_owned(),
+            model: model.map(str::to_owned),
+            prompt: prompt.clone(),
+            ..StageRun::default()
+        };
+        let mut f = crate::feature::tests::feature("a", 1);
+        f.runs.insert(Stage::Plan, run("cursor-agent", None));
+        f.runs.insert(Stage::Build, run("codex", None));
+        let found = models_in(&f, &dirs);
+        assert_eq!(found.get(&Stage::Plan), Some(&(3, "grok-4.7".to_owned())));
+        assert_eq!(found.get(&Stage::Build), None);
+        // One still running is read again: it may be switched.
+        f.runs.insert(Stage::Plan, run("cursor-agent", Some("old")));
+        assert_eq!(models_in(&f, &dirs).len(), 1);
+        // Done, the model kept stands.
+        let mark = crate::feature::Mark {
+            at: 1,
+            by: "you".to_owned(),
+            note: String::new(),
+            patch: None,
+        };
+        f.marks.insert(Stage::Plan, mark);
+        assert!(models_in(&f, &dirs).is_empty());
+    }
+
+    #[test]
+    fn a_run_saved_before_models_were_kept_still_loads() {
+        let run: StageRun = serde_json::from_str(
+            r#"{"n":1,"agent":"Cursor","command":"c","prompt":"/p.md","template":"t","started":1}"#,
+        )
+        .unwrap();
+        assert_eq!(run.model, None);
+    }
 
     #[test]
     fn flavors_go_by_program_name() {
@@ -355,33 +647,29 @@ mod tests {
     fn command_lines_per_flavor() {
         let prompt = Path::new("/d/my feature/prompts/plan-1.md");
         let dirs = [PathBuf::from("/d/my feature")];
-        let cat = "\"$(cat '/d/my feature/prompts/plan-1.md')\"";
         let id = "'/d/my feature/prompts/plan-1.session'";
         assert_eq!(
             command_line("claude", prompt, &dirs),
             format!(
                 "claude --add-dir '/d/my feature' \
-                 --session-id \"$(tee {id} </proc/sys/kernel/random/uuid)\" -- {cat}"
+                 --session-id \"$(tee {id} </proc/sys/kernel/random/uuid)\""
             )
         );
         assert_eq!(
             command_line("cursor-agent", prompt, &dirs),
             format!(
                 "cursor-agent --trust --add-dir '/d/my feature' \
-                 --resume \"$(cursor-agent create-chat | tee {id})\" -- {cat}"
+                 --resume \"$(cursor-agent create-chat | tee {id})\""
             )
         );
         assert_eq!(
             command_line("codex", prompt, &dirs),
-            format!("codex --add-dir '/d/my feature' -- {cat}")
+            "codex --add-dir '/d/my feature'"
         );
-        assert_eq!(
-            command_line("aider --yes", prompt, &dirs),
-            "aider --yes \"$(cat '/d/my feature/prompts/plan-1.md')\""
-        );
+        assert_eq!(command_line("aider --yes", prompt, &dirs), "aider --yes");
         assert_eq!(
             command_line("claude", Path::new("/p.md"), &[]),
-            "claude --session-id \"$(tee /p.session </proc/sys/kernel/random/uuid)\" -- \"$(cat /p.md)\""
+            "claude --session-id \"$(tee /p.session </proc/sys/kernel/random/uuid)\""
         );
     }
 
@@ -455,6 +743,35 @@ mod tests {
         assert!(!run("aider").resumes());
         // A run from before gerdr kept chats.
         assert!(!run("").resumes());
+    }
+
+    #[test]
+    fn a_held_run_has_no_chat_to_go_back_to_and_says_if_it_can_be_sent() {
+        let run = StageRun {
+            base: "claude".into(),
+            pane: Some("p1".into()),
+            held: true,
+            ..StageRun::default()
+        };
+        assert!(!run.resumes());
+        assert!(run.waits_to_send());
+        let closed = StageRun {
+            pane: None,
+            ..run.clone()
+        };
+        assert!(!closed.waits_to_send());
+        let sent = StageRun { held: false, ..run };
+        assert!(sent.resumes());
+        assert!(!sent.waits_to_send());
+    }
+
+    #[test]
+    fn a_run_saved_before_holding_was_already_sent() {
+        let json = r#"{"n":1,"agent":"Claude Code","command":"claude","prompt":"/p.md","template":"builtin:plan@1","started":5}"#;
+        let run: StageRun = serde_json::from_str(json).unwrap();
+        assert!(!run.held);
+        // And one sent saves as it was.
+        assert!(!serde_json::to_string(&run).unwrap().contains("held"));
     }
 
     #[test]

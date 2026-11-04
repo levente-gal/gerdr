@@ -128,6 +128,7 @@ impl DocOf {
         match self.file {
             DocFile::Evidence => "Evidence",
             DocFile::Stage(Stage::Plan) => "Plan",
+            DocFile::Stage(Stage::PlanReview) => "Final plan",
             DocFile::Stage(_) => "Brief",
         }
     }
@@ -871,6 +872,9 @@ impl WorktreeDiff {
         if self.feature.is_some() {
             buttons.extend([B::MarkViewed, B::NextUnviewed]);
         }
+        if self.diff.comments_to_visit().is_some() {
+            buttons.push(B::NextComment);
+        }
         if self.reviewed() {
             buttons.extend([B::Approve, B::SendBack]);
         }
@@ -895,10 +899,15 @@ impl WorktreeDiff {
                     B::Comment if self.diff.plain && self.diff.cursor.is_none() => {
                         "comment on the file".into()
                     }
+                    B::Comment if self.diff.on_finding() => "edit the finding".into(),
                     B::Comment => "comment on the lines".into(),
                     B::Close if self.commit.is_some() || self.doc.is_some() => "back".into(),
                     B::Close if self.feature.as_ref().is_some_and(|f| f.back) => "back".into(),
                     B::Close => "close".into(),
+                    B::NextComment => match self.diff.comments_to_visit() {
+                        Some("finding") => "next, previous finding".into(),
+                        _ => "next, previous comment".into(),
+                    },
                     B::GoOn => match self.doc.as_ref().and_then(|d| d.current) {
                         Some(current) => format!("go to {}", current.label()),
                         None => "go on".into(),
@@ -910,6 +919,7 @@ impl WorktreeDiff {
                     B::SendBack | B::Reopen => SEND_BACK_KEY,
                     B::MarkViewed => "Space",
                     B::NextUnviewed => NEXT_UNVIEWED_KEY,
+                    B::NextComment => "] / [",
                     button => key_name(button),
                 }
                 .into(),
@@ -1093,10 +1103,14 @@ impl WorktreeDiff {
     }
 
     /// Why the last key or click did nothing, if it says; and what was
-    /// decided of an AI review finding.
-    pub fn take_error(&mut self) -> (Option<String>, Option<(String, Decision)>) {
+    /// decided of an AI review finding, and the finding to edit.
+    pub fn take_error(&mut self) -> (Option<String>, Option<(String, Decision)>, Option<String>) {
         let signals = self.diff.take_signals();
-        (signals.error.flatten(), signals.decided)
+        (
+            signals.error.flatten(),
+            signals.decided,
+            signals.edit_finding,
+        )
     }
 
     /// Whether `path` is this worktree's.
@@ -1433,7 +1447,7 @@ impl crate::Gerdr {
     /// panel asks it; why it did nothing said briefly.
     fn worktree_done(&mut self, done: Option<Done>) -> Option<crate::repos::Outcome> {
         self.worktree_save_review();
-        let (error, decided) = self
+        let (error, decided, edit_finding) = self
             .wd_mut()
             .map(WorktreeDiff::take_error)
             .unwrap_or_default();
@@ -1442,6 +1456,9 @@ impl crate::Gerdr {
         }
         if let Some((id, decision)) = decided {
             self.feature_decide(id, decision);
+        }
+        if let Some(id) = edit_finding {
+            self.feature_edit_finding(&id);
         }
         let commit = self.wd().is_some_and(|wd| wd.commit.is_some());
         let doc = self.wd().is_some_and(|wd| wd.doc.is_some());
@@ -1804,7 +1821,14 @@ mod tests {
         // the keys and closing.
         let hints: Vec<ReposButton> = wd.hints().iter().map(|h| h.button).collect();
         use ReposButton as B;
-        let all = [B::Comment, B::CopyReview, B::ClearReview, B::Help, B::Close];
+        let all = [
+            B::Comment,
+            B::NextComment,
+            B::CopyReview,
+            B::ClearReview,
+            B::Help,
+            B::Close,
+        ];
         assert_eq!(hints, all);
         assert_eq!(wd.press(ReposButton::Help, ENV), None);
         assert!(wd.sheet(ENV).is_some());
@@ -1961,7 +1985,15 @@ mod tests {
             .iter()
             .map(|h| h.button)
             .collect();
-        assert_eq!(buttons, [ReposButton::CopyReview, ReposButton::ClearReview]);
+        assert_eq!(
+            buttons,
+            [
+                ReposButton::PrevComment,
+                ReposButton::NextComment,
+                ReposButton::CopyReview,
+                ReposButton::ClearReview
+            ]
+        );
         // Asked on a sheet, which takes the keys: Esc keeps it.
         let clear = ReposHit::Button(ReposButton::ClearReview);
         assert_eq!(wd.click(clear, ENV), None);
@@ -2210,7 +2242,7 @@ mod tests {
         assert_eq!(comment.lines[0].number, 2);
         assert!(matches!(
             wd.diff.rows[parts.end],
-            crate::diff_view::DiffRow::Comment { .. }
+            crate::diff_view::DiffRow::CommentHead { .. }
         ));
     }
 

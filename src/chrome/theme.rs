@@ -439,6 +439,26 @@ mod tests {
                 let ratio = contrast(p.on_accent, colour);
                 assert!(ratio >= 4.5, "{name}: on_accent on {what} is {ratio:.2}:1");
             }
+            // A finding's "AI review" tag.
+            for (what, ink, colour) in [
+                ("high", p.on_accent, p.error),
+                ("medium", p.on_accent, p.warning),
+                ("low", p.elevated, p.text),
+                ("dismissed", p.elevated, p.muted),
+            ] {
+                let ratio = contrast(ink, colour);
+                assert!(ratio >= 3.0, "{name}: tag on {what} is {ratio:.2}:1");
+            }
+            // A comment's heading on its band, its first row's card.
+            for (what, colour) in [
+                ("your comment", super::mix(p.elevated, p.accent, 0.18)),
+                ("high", super::mix(p.elevated, p.error, 0.32)),
+                ("medium", super::mix(p.elevated, p.warning, 0.32)),
+                ("low", super::mix(p.elevated, p.text, 0.24)),
+            ] {
+                let ratio = contrast(p.text, colour);
+                assert!(ratio >= 4.5, "{name}: {what} heading is {ratio:.2}:1");
+            }
             // A status pill's word on its own tint of the panel.
             let pill = super::mix(p.panel, p.warning, 0.12);
             let ratio = contrast(p.warning, pill);

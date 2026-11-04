@@ -24,6 +24,7 @@ use crate::{
     ci::{self, Subject},
     ci_watch::ci_state_word,
     cli_agents::CliAgent,
+    feature::Stage,
     git::Worktree,
     home_dir,
     inbox::Section,
@@ -118,6 +119,18 @@ fn feature_fields(f: &crate::feature::Feature) -> Vec<(String, String)> {
     ]
 }
 
+/// The tooltip of stage dot `k` of feature `f`, about `anchor`.
+fn stage_tooltip(f: &crate::feature::Feature, k: usize, anchor: Rect) -> Option<Tooltip> {
+    let stage = *Stage::ALL.get(k)?;
+    let state = match crate::features::stage_mark(f, stage) {
+        chrome::StageMark::Done => "done",
+        chrome::StageMark::Current => "current",
+        chrome::StageMark::Later => "later",
+    };
+    let text = format!("{} \u{b7} {state}", stage.label());
+    Some(Tooltip::new(&text, anchor).fields(vec![("About".to_owned(), stage.about().to_owned())]))
+}
+
 /// What a workspace's tooltip says of the venv its new shells activate.
 fn venv_word(venv: &VenvSetting) -> String {
     match venv {
@@ -157,6 +170,11 @@ impl Gerdr {
                 self.sidebar_feature_count(),
                 self.sidebar_width,
                 self.density,
+            )
+            .with_feature_head(
+                !workspaces.is_empty(),
+                chrome::features_waiting(&workspaces, &self.feature_rows()),
+                self.sidebar_width,
             )
             .scrolled_over(
                 self.sidebar_scroll.pos(),
@@ -336,6 +354,11 @@ impl Gerdr {
                     self.sidebar_feature_count(),
                     self.sidebar_width,
                     self.density,
+                )
+                .with_feature_head(
+                    !workspaces.is_empty(),
+                    chrome::features_waiting(workspaces, &self.feature_rows()),
+                    self.sidebar_width,
                 );
         // Held to what the rows now take, and moved to show the active
         // workspace when another becomes it: gliding there, or at once
@@ -370,7 +393,10 @@ impl Gerdr {
                 worktrees: hit == Some(SidebarHit::Worktrees(i)),
                 fold: hit == Some(SidebarHit::Fold(i)),
                 ci: hit == Some(SidebarHit::CiMark(i)),
-                stages: hit == Some(SidebarHit::Stages(i)),
+                stage: match hit {
+                    Some(SidebarHit::Stage(w, k)) if w == i => Some(k),
+                    _ => None,
+                },
                 by_hand: self.workspace_folded(i).is_some(),
             })
             .collect();
@@ -416,6 +442,11 @@ impl Gerdr {
                 others: quantize(hover.alpha(SidebarHit::CiPrs(i), now)),
             })
             .collect();
+        let feature_dot = match hit {
+            Some(SidebarHit::FeatureDot(n, k)) => Some((n, k)),
+            _ => None,
+        };
+        let features_plus = quantize(hover.alpha(SidebarHit::NewFeature, now));
         let plus = quantize(hover.alpha(SidebarHit::Plus, now));
         let plus_open = self
             .context_menu
@@ -435,6 +466,8 @@ impl Gerdr {
             ci,
             inbox,
             features,
+            feature_dot,
+            features_plus,
             plus,
             plus_open,
             repos,
@@ -624,6 +657,8 @@ impl Gerdr {
             }
             (SidebarHit::InboxTitle, BTN_LEFT) => self.open_inbox(Some(Section::Agents)),
             (SidebarHit::FeaturesTitle, BTN_LEFT) => self.open_features(),
+            (SidebarHit::NewFeature, BTN_LEFT) => self.open_new_feature(None),
+            (SidebarHit::FeaturesWaiting, BTN_LEFT) => self.open_inbox(Some(Section::Gates)),
             (SidebarHit::Feature(n), BTN_LEFT) => {
                 if let Some(f) = self.sidebar_feature(n) {
                     let (project, slug) = (f.project.clone(), f.slug.clone());
@@ -656,10 +691,21 @@ impl Gerdr {
                 }
             }
             (SidebarHit::Ci(i) | SidebarHit::CiMark(i), BTN_LEFT) => self.focus_repo_tab(i),
-            (SidebarHit::Stages(i), BTN_LEFT) => {
-                if let Some(f) = self.workspace_feature(i) {
+            (SidebarHit::Stage(i, k), BTN_LEFT) => {
+                if let (Some(f), Some(stage)) = (self.workspace_feature(i), Stage::ALL.get(k)) {
                     let (project, slug) = (f.project.clone(), f.slug.clone());
-                    self.open_feature(&project, &slug);
+                    self.open_feature_at(&project, &slug, *stage);
+                }
+            }
+            (SidebarHit::FeatureDot(n, k), BTN_LEFT) => {
+                if let (Some(f), Some(stage)) = (self.sidebar_feature(n), Stage::ALL.get(k)) {
+                    let (project, slug) = (f.project.clone(), f.slug.clone());
+                    // Another project's feature: entering it opens its page.
+                    if self.project.as_deref() == Some(project.as_str()) {
+                        self.open_feature_at(&project, &slug, *stage);
+                    } else {
+                        self.open_linked_feature(&project, &slug);
+                    }
                 }
             }
             (SidebarHit::Fold(i), BTN_LEFT) => self.toggle_fold(i),
@@ -951,6 +997,19 @@ impl Gerdr {
                     None => tip,
                 })
             }
+            SidebarHit::NewFeature => {
+                Some(Tooltip::new("New feature\u{2026}", layout.features_plus?))
+            }
+            SidebarHit::FeaturesWaiting => {
+                let views: Vec<_> = workspaces.iter().map(|w| w.0.clone()).collect();
+                let n = chrome::features_waiting(&views, &self.feature_rows());
+                let text = match n {
+                    1 => "1 feature waits for you".to_owned(),
+                    n => format!("{n} features wait for you"),
+                };
+                let tip = Tooltip::new(&text, layout.features_waiting?);
+                Some(tip.key("click to see them in the inbox"))
+            }
             SidebarHit::Feature(n) => {
                 let f = self.sidebar_feature(n)?;
                 let rect = *layout.features.get(n)?;
@@ -962,13 +1021,20 @@ impl Gerdr {
                 let home = self.home_name(f);
                 Some(tip.key(&format!("click to switch to {home} and open its panel")))
             }
-            // A feature's own workspace: its feature's stage marks.
-            SidebarHit::Stages(i) => {
+            // A feature's own workspace: a stage of it.
+            SidebarHit::Stage(i, k) => {
                 let f = self.workspace_feature(i)?;
                 let rect = layout.rows.get(i)?.stages?;
-                let text = format!("Feature \u{201c}{}\u{201d}", f.title);
-                let tip = Tooltip::new(&text, rect).fields(feature_fields(f));
-                Some(tip.key("click to open its panel, or Open feature in its menu"))
+                Some(stage_tooltip(f, k, rect)?.key("click to open this stage"))
+            }
+            SidebarHit::FeatureDot(n, k) => {
+                let f = self.sidebar_feature(n)?;
+                let tip = stage_tooltip(f, k, *layout.features.get(n)?)?;
+                if self.project.as_deref() == Some(f.project.as_str()) {
+                    return Some(tip.key("click to open this stage"));
+                }
+                let home = self.home_name(f);
+                Some(tip.key(&format!("click to switch to {home} and open its panel")))
             }
             SidebarHit::Inbox(i, k) => {
                 let card = agents.get(i)?.get(k)?;
@@ -1148,14 +1214,16 @@ impl Gerdr {
                 }
                 Some(MenuSpec { anchor: at, items })
             }
-            SidebarHit::FeaturesTitle => Some(MenuSpec {
-                anchor: at,
-                items: vec![
-                    MenuItem::new("Open features", MenuAction::Features),
-                    MenuItem::new("New feature\u{2026}", MenuAction::NewFeature(None)),
-                ],
-            }),
-            SidebarHit::Feature(n) => {
+            SidebarHit::FeaturesTitle | SidebarHit::NewFeature | SidebarHit::FeaturesWaiting => {
+                Some(MenuSpec {
+                    anchor: at,
+                    items: vec![
+                        MenuItem::new("Open features", MenuAction::Features),
+                        MenuItem::new("New feature\u{2026}", MenuAction::NewFeature(None)),
+                    ],
+                })
+            }
+            SidebarHit::Feature(n) | SidebarHit::FeatureDot(n, _) => {
                 let f = self.sidebar_feature(n)?;
                 let open = MenuAction::OpenFeature(f.project.clone(), f.slug.clone());
                 // Another project's feature: its folder in the shown one.

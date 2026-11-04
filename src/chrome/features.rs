@@ -5,20 +5,28 @@
 //! each scrolled on its own), and
 //! the stage marks the sidebar's feature rows show.
 
-use std::{cell::RefCell, rc::Rc, sync::Arc};
+use std::{
+    cell::RefCell,
+    collections::{HashMap, hash_map::DefaultHasher},
+    hash::{Hash, Hasher},
+    rc::Rc,
+    sync::Arc,
+};
 
 use super::{
-    ButtonStyle, CHECKBOX_GAP, CHECKBOX_ROW, Canvas, Check, DETAIL_FONT_SIZE, DIALOG_WIDTH, DOT,
-    Dot, FONT_SIZE, FieldSpot, LABEL_FONT_SIZE, ListBar, POPUP_RADIUS, Painter, Palette, QUIT_BODY,
-    QUIT_BUTTON, QUIT_BUTTON_GAP, QUIT_LINE_GAP, QUIT_PADDING, QUIT_TITLE, Rect, Rgb, SHADOW,
-    SMALL_FONT_SIZE, Thumb, agent_icon, band, button_width, check, chevron_down, chevron_side,
-    copy, cross, dialog_buttons, field_text, focus_ring, footer_hint_spots, gutter_track,
-    hint_strs, icon_sdf, measure, measure_bold, measured_footer_height, mix, phys, physical, plus,
-    rect_px, segment_tint, status_dot, tab, trash,
+    AGENT_ICON, ButtonStyle, CHECKBOX_GAP, CHECKBOX_ROW, Canvas, Check, DETAIL_FONT_SIZE,
+    DIALOG_WIDTH, DOT, Dot, FONT_SIZE, FieldSpot, LABEL_FONT_SIZE, ListBar, POPUP_RADIUS, Painter,
+    Palette, QUIT_BODY, QUIT_BUTTON, QUIT_BUTTON_GAP, QUIT_LINE_GAP, QUIT_PADDING, QUIT_TITLE,
+    Rect, Rgb, SHADOW, SMALL_FONT_SIZE, Thumb, agent_icon, band, button_width, check, chevron_down,
+    chevron_side, copy, cross, dialog_buttons, field_text, focus_ring, footer_hint_spots,
+    gutter_track, hint_strs, icon_sdf, measure, measure_bold, measured_footer_height, mix, phys,
+    physical, plus, rect_px, segment_tint, status_dot, tab, trash,
 };
+use super::{code_mark, eye, flask, magnifier, plan_review_mark, ship_arrow, sparkle, text_lines};
 use crate::text_field::Line;
 use crate::{
     agent_icons::AgentIcon,
+    feature::Stage,
     md_blocks::{DocBlock, ItemMark},
 };
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
@@ -358,8 +366,12 @@ pub enum NodeMark {
     /// Done, but the code changed since: a warning ring.
     Stale,
     /// The current stage, with a gate waiting for the user (a file to
-    /// review, a stop to go on from): a warning dot.
+    /// review, a stop to go on from): a warning dot. Or a done stage whose
+    /// agent waits with work sent back to it.
     Waiting,
+    /// Done, its agent running again on work sent back to it: filled in the
+    /// accent and pulsing, over the current stage, where nothing runs then.
+    Fixing,
 }
 
 /// A stage's node on the feature tab's rail.
@@ -372,6 +384,9 @@ pub struct RailNode {
     pub mark: NodeMark,
     /// Its page is the one shown.
     pub selected: bool,
+    /// What a done stage's agent ran as: its logo, and its model, else its
+    /// name. Under `line`, as the slot is too narrow for both on one row.
+    pub agent: Option<(AgentIcon, String)>,
 }
 
 /// The feature tab's areas the keyboard moves between, with Tab.
@@ -382,6 +397,8 @@ pub enum TabArea {
     Stages,
     /// The repositories' strip or rows: the keys pick a repository.
     Repos,
+    /// AI review's finding cards: the keys pick and decide one.
+    Findings,
 }
 
 /// The feature tab's columns, each scrolled on its own: the index into
@@ -398,15 +415,14 @@ impl TabColumn {
 }
 
 /// A button on a stage's page. What it does is for `crate::features` to
-/// know, by its index in `StagePage::buttons`.
+/// know, by its index in `StagePage::buttons`. Its key is left to the footer's
+/// hints.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PageButton {
     pub label: String,
-    /// `Primary` for the one to press next, `Destructive` for one that
-    /// throws work away.
+    /// `Primary` for the one to press next, which Enter presses, `Quiet`
+    /// for one to have at hand that nothing asks for.
     pub style: ButtonStyle,
-    /// The key that presses it, shown after the label ("⏎"), if any.
-    pub key: Option<&'static str>,
 }
 
 /// An agent to pick on a stage's page: the one its next start runs is lit.
@@ -420,7 +436,7 @@ pub struct AgentChip {
     pub off: bool,
 }
 
-/// A part of a stage's page, under its button row.
+/// A part of a stage's page, under its title and what it says.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PageSection {
     /// A stage's agent: its logo and name, its dot, where it runs, and
@@ -432,9 +448,9 @@ pub enum PageSection {
         /// "working · tab 2", or why it isn't running.
         status: String,
         tail: Vec<String>,
-        /// The index in `StagePage::buttons` of the card's own button
-        /// (Show agent), if any.
-        button: Option<usize>,
+        /// The indices in `StagePage::buttons` of what acts on the agent
+        /// (Show agent, Restart), drawn left of `picks`, which they go by.
+        buttons: Vec<usize>,
         /// The agents to pick for the stage's next start, if it offers any.
         picks: Vec<AgentChip>,
     },
@@ -446,6 +462,8 @@ pub enum PageSection {
         state: CheckLine,
         buttons: Vec<usize>,
     },
+    /// An AI review finding, with what can be done of it.
+    Finding(FindingCard),
     /// A labelled list of lines in their tones: the checks, findings,
     /// criteria, the Ship check, a done stage's note.
     Lines {
@@ -468,6 +486,38 @@ pub enum PageSection {
         total: usize,
         items: Vec<(bool, String)>,
     },
+}
+
+/// What a finding's card says it is, by its colour.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FindingTag {
+    High,
+    Medium,
+    Low,
+    /// The user added it.
+    Yours,
+}
+
+/// An AI review finding as its stage's page shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FindingCard {
+    pub tag: FindingTag,
+    pub title: String,
+    /// Where it stands, once decided: "to fix".
+    pub state: String,
+    /// Its id, and where in the code it is.
+    pub place: String,
+    pub body: String,
+    /// The fix to make, labelled: the reviewer's or the user's.
+    pub fix: String,
+    /// The user's comment on it, labelled.
+    pub note: String,
+    /// It no longer asks for anything: fixed or dismissed.
+    pub faded: bool,
+    /// It has the keyboard.
+    pub selected: bool,
+    /// The indices in `StagePage::buttons` of the buttons it holds.
+    pub buttons: Vec<usize>,
 }
 
 /// The selected stage's page, in the feature tab's middle column.
@@ -505,7 +555,7 @@ pub struct FeatureTabView {
     /// The label of the header's last button, removing its worktrees
     /// (Abandon…, Remove worktrees…), after `FEATURE_BUTTONS`.
     pub remove: &'static str,
-    /// The eight stages, in order.
+    /// The nine stages, in order.
     pub rail: Vec<RailNode>,
     /// The strip's chips, or with `expanded` the rows, all it could hold.
     pub repos: Vec<FeatureRepoRow>,
@@ -575,6 +625,8 @@ pub enum FeatureTabHit {
     /// A segment of Build's milestone choice: 0 one agent, 1 one per
     /// milestone.
     MilestoneMode(usize),
+    /// A finding's card, as `FeatureTabLayout::finding_cards` has them.
+    Finding(usize),
     Hint(usize),
 }
 
@@ -628,6 +680,8 @@ pub struct FeatureTabLayout {
     pub agent_picks: Option<(Rect, Vec<Rect>)>,
     /// Build's milestone choice: its outline and two segments, unscrolled.
     pub milestone_mode: Option<(Rect, [Rect; 2])>,
+    /// Each finding's card, in the page's order.
+    pub finding_cards: Vec<Rect>,
     /// The footer, and where each hint goes in it.
     pub hints: Rect,
     pub hint_spots: Vec<(usize, Rect)>,
@@ -690,6 +744,13 @@ impl FeatureTabLayout {
                         let (_, segments) = self.milestone_mode.as_ref()?;
                         let i = segments.iter().position(|r| r.contains(at))?;
                         Some(FeatureTabHit::MilestoneMode(i))
+                    })
+                    .or_else(|| {
+                        let on = |r: &Rect| r.contains(at);
+                        self.finding_cards
+                            .iter()
+                            .position(on)
+                            .map(FeatureTabHit::Finding)
                     }),
                 TabColumn::Activity => None,
             };
@@ -762,6 +823,25 @@ impl FeatureTabLayout {
         Some(to.clamp(0.0, room))
     }
 
+    /// How far down the page to scroll, from `down`, to show finding `i`:
+    /// its top first when it is taller than the page shows.
+    pub fn reveal_finding(&self, i: usize, down: f64) -> Option<f64> {
+        let place = self.columns[TabColumn::Page as usize]?;
+        let card = self.finding_cards.get(i)?;
+        let top = f64::from(card.loc.y - place.loc.y) - f64::from(CARD_PAD);
+        let bottom = f64::from(card.loc.y - place.loc.y + card.size.h) + f64::from(CARD_PAD);
+        let view = f64::from(place.size.h);
+        let room = f64::from(self.scroll_room(TabColumn::Page));
+        let to = if top < down || bottom - top > view {
+            top
+        } else if bottom > down + view {
+            bottom - view
+        } else {
+            return Some(down);
+        };
+        Some(to.clamp(0.0, room))
+    }
+
     /// The column whose place holds `pos`: where the wheel goes.
     pub fn column_at(&self, pos: Point<i32, Logical>) -> Option<TabColumn> {
         TabColumn::ALL
@@ -814,6 +894,8 @@ const NODE_LINE: i32 = 16;
 /// How far a label's second line sits under its first, when it is too
 /// wide for its slot and takes the short line's place.
 const RAIL_LABEL_STEP: i32 = 16;
+/// The room between a done stage's agent logo and its model on the rail.
+const RAIL_AGENT_GAP: i32 = 4;
 /// The room left between a node and the line joining it to the next.
 const CONNECTOR_GAP: i32 = 6;
 /// How wide the activity's column is: the page takes the rest.
@@ -857,12 +939,22 @@ const DOT_ROOM: i32 = 18;
 /// A line of small text, of body text, and of an agent's pane.
 const SMALL_LINE: i32 = 20;
 const BODY_LINE: i32 = 22;
+/// How high a stage page's title is.
+const TITLE_LINE: i32 = BODY_LINE + 6;
 const TAIL_LINE: i32 = 18;
 /// The gap between the parts of a page.
 const PAGE_GAP: i32 = 16;
 /// An agent card's inner room and its header's height.
 const AGENT_PAD: i32 = 10;
+/// The room between the parts of a finding's card.
+const FINDING_GAP: i32 = 6;
 const AGENT_HEAD: i32 = 28;
+/// Where an agent card's name starts, past its logo and dot.
+const AGENT_TEXT_AT: i32 = 36;
+/// The room an agent card keeps for its status beside its buttons.
+const AGENT_STATUS_MIN: i32 = 96;
+/// Between an agent card's head and the rows of buttons that left it.
+const AGENT_ROWS_GAP: i32 = 4;
 /// An agent card's chips: the outline's height, as its button's, the room
 /// between it and its chips, a chip's width, a logo's size, and the label
 /// in front of them on a card with no head.
@@ -909,6 +1001,8 @@ pub(super) enum Ink {
     Text,
     Muted,
     Error,
+    Warning,
+    Accent,
     Tone(CheckTone),
 }
 
@@ -918,6 +1012,8 @@ impl Ink {
             Self::Text => p.text,
             Self::Muted => p.muted,
             Self::Error => p.error,
+            Self::Warning => p.warning,
+            Self::Accent => p.accent,
             Self::Tone(tone) => tone.color(p),
         }
     }
@@ -948,9 +1044,12 @@ pub(super) enum Piece {
     MilestoneMode { fresh: bool },
     /// The file card of `StagePage::sections[i]`.
     File(usize),
+    /// The frame of the finding card of `StagePage::sections[i]`, with its
+    /// buttons; its text goes in pieces of its own.
+    FindingCard(usize),
     /// `FeatureTabView::repos[i]`.
     Repo(usize),
-    /// `StagePage::buttons[i]`, not on an agent or file card.
+    /// `StagePage::buttons[i]`, one acting on the stage as a whole.
     Button(usize),
     /// `FeatureTabView::activity[row]`, its `what` wrapped in `lines`.
     Activity { row: usize, lines: Vec<String> },
@@ -997,6 +1096,33 @@ fn words(text: &str) -> Vec<String> {
     words
 }
 
+thread_local! {
+    /// What `wrapped` measured, by a hash of what it was asked: the tab is
+    /// laid out every frame, and a page of findings has many long texts.
+    static WRAP_MEMO: RefCell<HashMap<u64, Rc<Vec<String>>>> = RefCell::new(HashMap::new());
+}
+
+/// How many texts `WRAP_MEMO` holds before it starts again.
+const WRAP_MEMOS: usize = 2048;
+
+/// `wrap_all` of `text`, kept: a page of findings has many long texts.
+fn wrapped(text: &str, size: f32, width: i32) -> Rc<Vec<String>> {
+    let mut hasher = DefaultHasher::new();
+    (text, size.to_bits(), width).hash(&mut hasher);
+    let key = hasher.finish();
+    WRAP_MEMO.with_borrow_mut(|memo| {
+        if let Some(lines) = memo.get(&key) {
+            return lines.clone();
+        }
+        if memo.len() >= WRAP_MEMOS {
+            memo.clear();
+        }
+        let lines = Rc::new(wrap_all(text, size, width));
+        memo.insert(key, lines.clone());
+        lines
+    })
+}
+
 /// `wrap` to at most `max` lines.
 fn wrap_to(text: &str, size: f32, width: i32, max: usize) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
@@ -1015,6 +1141,42 @@ fn wrap_to(text: &str, size: f32, width: i32, max: usize) -> Vec<String> {
     }
     if !line.is_empty() || lines.is_empty() {
         lines.push(line);
+    }
+    lines
+}
+
+/// `text` in full, in lines no wider than `width` at `size`: its own line
+/// breaks kept, and what is too long for a line (a long word, a bracket
+/// group that never closes) broken where it must be, so that no part of it
+/// is cut when painted.
+pub(super) fn wrap_all(text: &str, size: f32, width: i32) -> Vec<String> {
+    (text.lines())
+        .filter(|para| !para.trim().is_empty())
+        .flat_map(|para| wrap_to(para, size, width, usize::MAX))
+        .flat_map(|line| break_long(line, size, width))
+        .collect()
+}
+
+/// `line` broken to fit `width` at `size`: at its last space that fits,
+/// else inside its word.
+fn break_long(line: String, size: f32, width: i32) -> Vec<String> {
+    let mut lines = Vec::new();
+    if width_of(&line, size) <= width as f32 {
+        lines.push(line);
+        return lines;
+    }
+    let mut now = String::new();
+    for ch in line.chars() {
+        now.push(ch);
+        if now.chars().count() > 1 && width_of(&now, size) > width as f32 {
+            let at = now.trim_end().rfind(' ').filter(|at| *at > 0);
+            let cut = at.unwrap_or(now.len() - ch.len_utf8());
+            let rest = now.split_off(cut);
+            lines.push(std::mem::replace(&mut now, rest.trim_start().to_owned()));
+        }
+    }
+    if !now.trim().is_empty() {
+        lines.push(now);
     }
     lines
 }
@@ -1195,16 +1357,6 @@ fn doc_laid_out(blocks: &Arc<Vec<DocBlock>>, w: i32) -> (Rc<Vec<(Rect, Piece)>>,
     })
 }
 
-/// What a page button says: its label, then its key.
-/// The UI font has neither "⏎" nor "↵": a button's key shows it as
-/// "Enter", as the hints do.
-fn page_label(button: &PageButton) -> String {
-    match button.key {
-        Some(key) => format!("{}  {}", button.label, key.replace('\u{23ce}', "Enter")),
-        None => button.label.clone(),
-    }
-}
-
 /// A column's contents, stacked from its top.
 struct Stack {
     x: i32,
@@ -1238,6 +1390,100 @@ impl Stack {
                 },
             );
         }
+    }
+
+    /// `text` wrapped to the column, all of it, a line `h` high each.
+    fn all_text(&mut self, text: &str, font: Font, ink: Ink, bold: bool, h: i32) {
+        // Bold runs wider than `wrapped` measures.
+        let w = if bold { self.w - self.w / 16 } else { self.w };
+        for line in wrapped(text, font.size(), w).iter() {
+            self.put(
+                h,
+                Piece::Text {
+                    text: line.clone(),
+                    font,
+                    ink,
+                    bold,
+                },
+            );
+        }
+    }
+
+    /// Finding card `k`: its frame, its text, and `buttons`' places in it.
+    fn finding(
+        &mut self,
+        k: usize,
+        card: &FindingCard,
+        page: &StagePage,
+        buttons: &mut [Option<Rect>],
+    ) -> Rect {
+        let frame_at = self.pieces.len();
+        let (x, w, top) = (self.x, self.w, self.y);
+        self.x += AGENT_PAD;
+        self.w = (w - 2 * AGENT_PAD).max(1);
+        self.y += AGENT_PAD;
+        let body = if card.faded { Ink::Muted } else { Ink::Text };
+        self.all_text(&card.title, Font::Body, body, true, BODY_LINE);
+        // Its tag in its colour, then the rest of the line muted.
+        let tag = match card.tag {
+            FindingTag::High => "high",
+            FindingTag::Medium => "medium",
+            FindingTag::Low => "low",
+            FindingTag::Yours => "yours",
+        };
+        let ink = match (card.faded, card.tag) {
+            (true, _) | (_, FindingTag::Low) => Ink::Muted,
+            (_, FindingTag::High) => Ink::Error,
+            (_, FindingTag::Medium) => Ink::Warning,
+            (_, FindingTag::Yours) => Ink::Accent,
+        };
+        let size = Font::Small.size();
+        let tag_w = width_of(tag, size).ceil() as i32 + 1;
+        self.pieces.push((
+            Rectangle::new((self.x, self.y).into(), (tag_w, TAIL_LINE).into()),
+            Piece::Text {
+                text: tag.to_owned(),
+                font: Font::Small,
+                ink,
+                bold: false,
+            },
+        ));
+        let mut rest = vec![String::new()];
+        rest.extend((!card.state.is_empty()).then(|| card.state.clone()));
+        rest.push(card.place.clone());
+        let rest = rest.join(" \u{b7} ");
+        let (left, width) = (self.x, self.w);
+        self.x = left + tag_w;
+        self.w = (width - tag_w).max(1);
+        self.all_text(rest.trim_start(), Font::Small, Ink::Muted, false, TAIL_LINE);
+        (self.x, self.w) = (left, width);
+        for text in [&card.body, &card.fix, &card.note] {
+            if !text.is_empty() {
+                self.y += FINDING_GAP;
+                self.all_text(text, Font::Body, body, false, BODY_LINE);
+            }
+        }
+        let held: Vec<usize> = (card.buttons.iter().copied())
+            .filter(|b| *b < page.buttons.len())
+            .collect();
+        if !held.is_empty() {
+            self.y += FINDING_GAP;
+            let widths: Vec<i32> = (held.iter())
+                .map(|b| button_width(&page.buttons[*b].label))
+                .collect();
+            let placed = rows_from_right(&widths, self.x, self.x + self.w);
+            for (b, (bx, row)) in held.iter().zip(&placed) {
+                let by = self.y + row * (ROW_BUTTON + QUIT_BUTTON_GAP);
+                let w = button_width(&page.buttons[*b].label);
+                buttons[*b] = Some(Rectangle::new((*bx, by).into(), (w, ROW_BUTTON).into()));
+            }
+            self.y += rows_height(&placed);
+        }
+        self.y += AGENT_PAD;
+        (self.x, self.w) = (x, w);
+        let frame = Rectangle::new((x, top).into(), (w, self.y - top).into());
+        self.pieces.insert(frame_at, (frame, Piece::FindingCard(k)));
+        frame
     }
 
     /// The activity's rows, newest first.
@@ -1444,6 +1690,40 @@ fn repos_toggle_label(view: &FeatureTabView) -> Option<String> {
     (!view.expanded && view.more > 0).then(|| format!("{} more", view.more))
 }
 
+/// How wide things `widths` wide are on one row, with their gaps.
+fn row_width(widths: &[i32]) -> i32 {
+    widths.iter().sum::<i32>() + QUIT_BUTTON_GAP * (widths.len() as i32 - 1).max(0)
+}
+
+/// Where things `widths` wide go, in their order, between `left` and
+/// `right`: each its `x` and row, as many to a row as fit, the rows ending
+/// at `right`.
+fn rows_from_right(widths: &[i32], left: i32, right: i32) -> Vec<(i32, i32)> {
+    let mut rows: Vec<Vec<i32>> = Vec::new();
+    for &w in widths {
+        match rows.last_mut() {
+            Some(row) if row_width(row) + QUIT_BUTTON_GAP + w <= right - left => row.push(w),
+            _ => rows.push(vec![w]),
+        }
+    }
+    let mut placed = Vec::with_capacity(widths.len());
+    for (r, row) in rows.iter().enumerate() {
+        let mut x = right - row_width(row);
+        for w in row {
+            placed.push((x, r as i32));
+            x += w + QUIT_BUTTON_GAP;
+        }
+    }
+    placed
+}
+
+/// How high the rows of `rows_from_right` are, none for nothing placed.
+fn rows_height(placed: &[(i32, i32)]) -> i32 {
+    placed
+        .last()
+        .map_or(0, |(_, row)| (row + 1) * ROW_BUTTON + row * QUIT_BUTTON_GAP)
+}
+
 /// The page's column: the selected stage's title, about, status, buttons
 /// and sections, then the activity if it has no column.
 /// How wide `n` agent chips' outline is, with the room.
@@ -1499,11 +1779,44 @@ fn page_stack(
     buttons: &mut [Option<Rect>],
     agent_picks: &mut Option<(Rect, Vec<Rect>)>,
     milestone_mode: &mut Option<(Rect, [Rect; 2])>,
+    finding_cards: &mut Vec<Rect>,
     activity: bool,
 ) {
     let page = &view.page;
+    // What acts on the stage as a whole: what no card holds. At the title's
+    // right if it fits, else in rows of their own further down.
+    let held: Vec<usize> = page
+        .sections
+        .iter()
+        .flat_map(|sec| match sec {
+            PageSection::Agent { buttons, .. } => buttons.clone(),
+            PageSection::File { buttons, .. } => buttons.clone(),
+            PageSection::Finding(card) => card.buttons.clone(),
+            _ => Vec::new(),
+        })
+        .collect();
+    let free: Vec<usize> = (0..page.buttons.len())
+        .filter(|i| !held.contains(i))
+        .collect();
+    let widths: Vec<i32> = (free.iter())
+        .map(|i| button_width(&page.buttons[*i].label))
+        .collect();
+    let (left, right) = (s.x, s.x + s.w);
+    let title_w = measure_bold(&page.title, Font::Heading.size())
+        .unwrap_or_else(|| width_of(&page.title, Font::Heading.size()))
+        .ceil() as i32;
+    let beside = row_width(&widths) <= s.w - title_w - PAGE_GAP;
+    if beside {
+        let y = s.y + (TITLE_LINE - ROW_BUTTON) / 2;
+        for (i, (x, _)) in free.iter().zip(rows_from_right(&widths, left, right)) {
+            let w = button_width(&page.buttons[*i].label);
+            let rect = Rectangle::new((x, y).into(), (w, ROW_BUTTON).into());
+            buttons[*i] = Some(rect);
+            s.pieces.push((rect, Piece::Button(*i)));
+        }
+    }
     s.put(
-        BODY_LINE + 6,
+        TITLE_LINE,
         Piece::Text {
             text: page.title.clone(),
             font: Font::Heading,
@@ -1516,34 +1829,17 @@ fn page_stack(
         s.y += 4;
         s.text(&status.text, Font::Body, Ink::Tone(status.tone), BODY_LINE);
     }
-    // The buttons no card holds, wrapped in rows.
-    let held: Vec<usize> = page
-        .sections
-        .iter()
-        .flat_map(|sec| match sec {
-            PageSection::Agent { button, .. } => button.iter().copied().collect(),
-            PageSection::File { buttons, .. } => buttons.clone(),
-            _ => Vec::new(),
-        })
-        .collect();
-    let free: Vec<usize> = (0..page.buttons.len())
-        .filter(|i| !held.contains(i))
-        .collect();
-    if !free.is_empty() {
+    if !beside {
         s.y += 10;
-        let mut x = s.x;
-        for i in free {
-            let w = button_width(&page_label(&page.buttons[i]));
-            if x > s.x && x + w > s.x + s.w {
-                x = s.x;
-                s.y += TAB_BUTTON + QUIT_BUTTON_GAP;
-            }
-            let rect = Rectangle::new((x, s.y).into(), (w, TAB_BUTTON).into());
-            buttons[i] = Some(rect);
-            s.pieces.push((rect, Piece::Button(i)));
-            x += w + QUIT_BUTTON_GAP;
+        let placed = rows_from_right(&widths, left, right);
+        for (i, (x, row)) in free.iter().zip(&placed) {
+            let w = button_width(&page.buttons[*i].label);
+            let y = s.y + row * (ROW_BUTTON + QUIT_BUTTON_GAP);
+            let rect = Rectangle::new((*x, y).into(), (w, ROW_BUTTON).into());
+            buttons[*i] = Some(rect);
+            s.pieces.push((rect, Piece::Button(*i)));
         }
-        s.y += TAB_BUTTON;
+        s.y += rows_height(&placed);
     }
     for (k, section) in page.sections.iter().enumerate() {
         if matches!(section, PageSection::Doc { .. }) {
@@ -1555,37 +1851,67 @@ fn page_stack(
             PageSection::Agent {
                 name,
                 tail,
-                button,
+                buttons: held,
                 picks,
                 ..
             } => {
+                let held: Vec<usize> = (held.iter().copied())
+                    .filter(|b| *b < page.buttons.len())
+                    .collect();
                 let tail_h = match tail.len() {
                     0 => 0,
                     n => n as i32 * TAIL_LINE + 4,
                 };
-                let card = s.put(AGENT_PAD * 2 + AGENT_HEAD + tail_h, Piece::Agent(k));
-                let row = card.loc.y + AGENT_PAD + (AGENT_HEAD - ROW_BUTTON) / 2;
-                let mut right = card.loc.x + card.size.w - AGENT_PAD;
-                if let Some(b) = button.filter(|b| *b < page.buttons.len()) {
-                    let w = button_width(&page_label(&page.buttons[b]));
-                    buttons[b] = Some(Rectangle::new(
-                        (right - w, row).into(),
-                        (w, ROW_BUTTON).into(),
-                    ));
-                    right -= w + QUIT_BUTTON_GAP;
+                let inner = (s.w - 2 * AGENT_PAD).max(1);
+                let inner_x = s.x + AGENT_PAD;
+                let inner_right = inner_x + inner;
+                let widths = (held.iter()).map(|b| button_width(&page.buttons[*b].label));
+                if name.is_empty() {
+                    // No run yet: its chips after their label, its buttons
+                    // at the card's end.
+                    let widths: Vec<i32> = widths.collect();
+                    let card = s.put(AGENT_PAD * 2 + AGENT_HEAD, Piece::Agent(k));
+                    let row = card.loc.y + AGENT_PAD + (AGENT_HEAD - ROW_BUTTON) / 2;
+                    let placed = rows_from_right(&widths, inner_x, inner_right);
+                    for (b, ((x, _), w)) in held.iter().zip(placed.iter().zip(&widths)) {
+                        buttons[*b] =
+                            Some(Rectangle::new((*x, row).into(), (*w, ROW_BUTTON).into()));
+                    }
+                    if !picks.is_empty() {
+                        let from = inner_x + PICK_LABEL;
+                        let end = placed
+                            .first()
+                            .map_or(inner_right, |(x, _)| x - QUIT_BUTTON_GAP);
+                        *agent_picks = Some(agent_pick_rects(picks.len(), from, row, end - from));
+                    }
+                    continue;
                 }
-                if !picks.is_empty() {
-                    // No run yet: after their label. A run: at the head's
-                    // end, its name and status taking what is left.
-                    let left = card.loc.x + AGENT_PAD + PICK_LABEL;
-                    let (x, room) = match name.is_empty() {
-                        true => (left, right - left),
-                        false => {
-                            let room = agent_picks_width(picks.len()).min(right - left);
-                            (right - room, room)
-                        }
-                    };
-                    *agent_picks = Some(agent_pick_rects(picks.len(), x, row, room));
+                // A run: buttons, then chips, at the head's end while its
+                // name and some of its status keep room, else in rows below.
+                let chips = (!picks.is_empty()).then(|| agent_picks_width(picks.len()));
+                let widths: Vec<i32> = widths.chain(chips).collect();
+                let name_w = measure_bold(name, FONT_SIZE)
+                    .unwrap_or_else(|| width_of(name, FONT_SIZE))
+                    .ceil() as i32;
+                let fits = row_width(&widths) <= inner - AGENT_TEXT_AT - name_w - AGENT_STATUS_MIN;
+                let placed = rows_from_right(&widths, inner_x, inner_right);
+                let below = match fits {
+                    true => 0,
+                    false => rows_height(&placed) + AGENT_ROWS_GAP,
+                };
+                let card = s.put(AGENT_PAD * 2 + AGENT_HEAD + below + tail_h, Piece::Agent(k));
+                let head_y = card.loc.y + AGENT_PAD + (AGENT_HEAD - ROW_BUTTON) / 2;
+                let rows_y = card.loc.y + AGENT_PAD + AGENT_HEAD + AGENT_ROWS_GAP;
+                let spot = |(x, row): &(i32, i32)| match fits {
+                    true => (*x, head_y),
+                    false => (*x, rows_y + row * (ROW_BUTTON + QUIT_BUTTON_GAP)),
+                };
+                for ((b, place), w) in held.iter().zip(&placed).zip(&widths) {
+                    buttons[*b] = Some(Rectangle::new(spot(place).into(), (*w, ROW_BUTTON).into()));
+                }
+                if let (Some(w), Some(place)) = (chips, placed.last()) {
+                    let (x, y) = spot(place);
+                    *agent_picks = Some(agent_pick_rects(picks.len(), x, y, w));
                 }
             }
             PageSection::MilestoneMode { fresh } => {
@@ -1598,11 +1924,15 @@ fn page_stack(
                 let mut bx = card.loc.x + card.size.w - AGENT_PAD;
                 let by = card.loc.y + AGENT_PAD + (AGENT_HEAD - ROW_BUTTON) / 2;
                 for &b in held.iter().rev().filter(|b| **b < page.buttons.len()) {
-                    let w = button_width(&page_label(&page.buttons[b]));
+                    let w = button_width(&page.buttons[b].label);
                     bx -= w;
                     buttons[b] = Some(Rectangle::new((bx, by).into(), (w, ROW_BUTTON).into()));
                     bx -= QUIT_BUTTON_GAP;
                 }
+            }
+            PageSection::Finding(card) => {
+                let frame = s.finding(k, card, page, buttons);
+                finding_cards.push(frame);
             }
             PageSection::Lines { label, lines } => {
                 if !label.is_empty() {
@@ -1721,7 +2051,14 @@ pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayou
             let (left, next) = slot(i);
             rail_label(&node.label, next - left - 4).len() > 1
         });
-    let rail_h = NODE + NODE_GAP + NODE_LABEL + NODE_LINE + if wraps { RAIL_LABEL_STEP } else { 0 };
+    // So is one that says what ran a done stage.
+    let ran = view.rail.iter().any(|node| node.agent.is_some());
+    let rail_h = NODE
+        + NODE_GAP
+        + NODE_LABEL
+        + NODE_LINE
+        + if wraps { RAIL_LABEL_STEP } else { 0 }
+        + if ran { NODE_LINE } else { 0 };
     let nodes = (0..view.rail.len() as i32)
         .map(|i| {
             let (left, next) = slot(i);
@@ -1865,6 +2202,7 @@ pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayou
     let mut page_buttons = vec![None; view.page.buttons.len()];
     let mut agent_picks = None;
     let mut milestone_mode = None;
+    let mut finding_cards = Vec::new();
     for column in TabColumn::ALL {
         let Some(place) = columns[column as usize] else {
             continue;
@@ -1889,6 +2227,7 @@ pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayou
                 &mut page_buttons,
                 &mut agent_picks,
                 &mut milestone_mode,
+                &mut finding_cards,
                 columns[TabColumn::Activity as usize].is_none(),
             ),
             TabColumn::Activity => {
@@ -1920,6 +2259,7 @@ pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayou
         page_buttons,
         agent_picks,
         milestone_mode,
+        finding_cards,
         hints,
         hint_spots,
         pieces,
@@ -2077,7 +2417,8 @@ const PULSE_PEAK: f32 = 0.7;
 /// Where the glow pulsing round the current stage's node goes on the tab
 /// showing `view`, laid out as `l`, if a stage is current.
 pub fn feature_tab_pulse(view: &FeatureTabView, l: &FeatureTabLayout) -> Option<Rect> {
-    let i = view.rail.iter().position(|n| n.mark == NodeMark::Current)?;
+    let at = |mark| view.rail.iter().position(|n| n.mark == mark);
+    let i = at(NodeMark::Fixing).or_else(|| at(NodeMark::Current))?;
     let spot = node_circle(*l.nodes.get(i)?);
     Some(Rectangle::new(
         (spot.loc.x - PULSE_HALO, spot.loc.y - PULSE_HALO).into(),
@@ -2766,10 +3107,10 @@ impl Painter {
             let (a, b) = (circle(pair[0]), circle(pair[1]));
             let from = a.loc.x + NODE + CONNECTOR_GAP;
             let to = b.loc.x - CONNECTOR_GAP;
-            let done = matches!(
-                view.rail.get(i).map(|n| n.mark),
-                Some(NodeMark::Done | NodeMark::Stale)
-            );
+            // A stage with work sent back to it was passed all the same.
+            let past = |i: usize| view.rail.get(i).map(|n| n.mark);
+            let done = matches!(past(i), Some(NodeMark::Done | NodeMark::Stale))
+                || !matches!(past(i + 1), Some(NodeMark::Later) | None);
             let color = if done { p.success } else { p.border };
             if to > from {
                 c.fill(
@@ -2824,11 +3165,19 @@ impl Painter {
                     (label.size.w, NODE_LINE).into(),
                 );
                 let color = match node.mark {
-                    NodeMark::Current => p.accent,
+                    NodeMark::Current | NodeMark::Fixing => p.accent,
                     NodeMark::Waiting | NodeMark::Stale => p.warning,
                     _ => p.muted,
                 };
                 self.centred_cut(c, &node.line, DETAIL_FONT_SIZE, line, false, scale, color);
+            }
+            if let Some((icon, what)) = &node.agent {
+                let below = (lines.len() as i32 - 1) * RAIL_LABEL_STEP + NODE_LINE;
+                let row = Rectangle::new(
+                    (label.loc.x, label.loc.y + NODE_LABEL + below).into(),
+                    (label.size.w, NODE_LINE).into(),
+                );
+                self.rail_agent(c, *icon, what, row, scale, p);
             }
         }
         // The rule under the rail.
@@ -2883,6 +3232,39 @@ impl Painter {
         }
     }
 
+    /// What ran a done stage on the rail: `icon` then `what`, centred
+    /// together in `row`, `what` cut at its end when too wide.
+    fn rail_agent(
+        &self,
+        c: &mut Canvas,
+        icon: AgentIcon,
+        what: &str,
+        row: Rect,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let (x, end) = phys(row, scale);
+        let logo = ((AGENT_ICON + RAIL_AGENT_GAP) as f64 * scale) as f32;
+        let width = logo + self.text_width(what, DETAIL_FONT_SIZE, scale);
+        let from = (x + ((end - x) - width) / 2.0).max(x);
+        let spot = Rectangle::new(
+            ((f64::from(from) / scale).round() as i32, row.loc.y).into(),
+            (AGENT_ICON, row.size.h).into(),
+        );
+        agent_icon(c, spot, AGENT_ICON, icon, p.muted, scale);
+        let text = (from + logo).round();
+        self.text(
+            c,
+            what,
+            DETAIL_FONT_SIZE,
+            text,
+            end,
+            band(row, scale),
+            scale,
+            p.muted,
+        );
+    }
+
     /// A rail node in `spot` for stage `number`, marked `mark`.
     fn rail_node(
         &self,
@@ -2912,11 +3294,11 @@ impl Painter {
                 disc(c, ring, mix(p.background, color, 0.18));
                 icon_sdf(c, spot, scale, color, |x, y| check(x, y, s * 1.1));
             }
-            NodeMark::Current | NodeMark::Waiting => {
-                let color = if mark == NodeMark::Current {
-                    p.accent
-                } else {
+            NodeMark::Current | NodeMark::Waiting | NodeMark::Fixing => {
+                let color = if mark == NodeMark::Waiting {
                     p.warning
+                } else {
+                    p.accent
                 };
                 disc(c, 0.0, color);
                 self.bold_centred(c, &number, spot, scale, p.on_accent);
@@ -3249,7 +3631,7 @@ impl Painter {
                     dot,
                     status,
                     tail,
-                    button,
+                    buttons,
                     picks,
                 }) = view.page.sections.get(*k)
                 else {
@@ -3288,6 +3670,15 @@ impl Painter {
                         agent_icon(c, *rect, PICK_ICON, chip.icon, tint, scale);
                     }
                 }
+                let held: Vec<Rect> = (buttons.iter())
+                    .filter_map(|i| l.page_buttons.get(*i).copied().flatten())
+                    .map(at)
+                    .collect();
+                for (i, r) in (buttons.iter())
+                    .filter_map(|i| Some((*i, l.page_buttons.get(*i).copied().flatten()?)))
+                {
+                    self.page_button(c, view, i, at(r), scale, p);
+                }
                 if name.is_empty() {
                     return;
                 }
@@ -3295,17 +3686,19 @@ impl Painter {
                 agent_icon(c, icon_spot, 16, *icon, p.text, scale);
                 // A dot at work blinks: it is composed over the tab.
                 status_dot(c, agent_card_dot(rect), *dot, scale, p);
-                let button_rect = button.and_then(|i| l.page_buttons.get(i).copied().flatten());
                 let track = (!picks.is_empty())
                     .then_some(l.agent_picks.as_ref())
                     .flatten()
                     .map(|(track, _)| at(*track));
-                let end_x = track
-                    .or(button_rect)
-                    .map_or(head.loc.x + head.size.w, |r| r.loc.x - QUIT_BUTTON_GAP);
+                // What shares the head's row ends its text.
+                let end_x = (held.iter().chain(&track))
+                    .filter(|r| r.loc.y < head.loc.y + AGENT_HEAD)
+                    .map(|r| r.loc.x - QUIT_BUTTON_GAP)
+                    .min()
+                    .unwrap_or(head.loc.x + head.size.w);
                 let text = Rectangle::new(
-                    (head.loc.x + 36, head.loc.y).into(),
-                    ((end_x - head.loc.x - 36).max(1), AGENT_HEAD).into(),
+                    (head.loc.x + AGENT_TEXT_AT, head.loc.y).into(),
+                    ((end_x - head.loc.x - AGENT_TEXT_AT).max(1), AGENT_HEAD).into(),
                 );
                 let (tx, tend) = phys(text, scale);
                 let hb = band(text, scale);
@@ -3320,13 +3713,11 @@ impl Painter {
                     scale,
                     p.muted,
                 );
+                // From the card's foot: rows of buttons may come before it.
+                let tail_top = rect.loc.y + rect.size.h - AGENT_PAD - tail.len() as i32 * TAIL_LINE;
                 for (j, tail_line) in tail.iter().enumerate() {
                     let r = Rectangle::new(
-                        (
-                            head.loc.x,
-                            head.loc.y + AGENT_HEAD + 4 + j as i32 * TAIL_LINE,
-                        )
-                            .into(),
+                        (head.loc.x, tail_top + j as i32 * TAIL_LINE).into(),
                         (head.size.w, TAIL_LINE).into(),
                     );
                     let (lx, lend) = phys(r, scale);
@@ -3340,9 +3731,6 @@ impl Painter {
                         scale,
                         p.muted,
                     );
-                }
-                if let (Some(i), Some(r)) = (button, button_rect) {
-                    self.page_button(c, view, *i, at(r), scale, p);
                 }
             }
             Piece::Repo(i) => {
@@ -3437,6 +3825,25 @@ impl Painter {
                 let from = after + (8.0 * s).round();
                 self.text(c, &state.text, SMALL_FONT_SIZE, from, tend, hb, scale, ink);
                 for &i in buttons {
+                    if let Some(r) = l.page_buttons.get(i).copied().flatten() {
+                        self.page_button(c, view, i, at(r), scale, p);
+                    }
+                }
+            }
+            Piece::FindingCard(k) => {
+                let Some(PageSection::Finding(card)) = view.page.sections.get(*k) else {
+                    return;
+                };
+                card_frame(c, rect, scale, p);
+                // Inside the frame: the column cuts off what goes past it.
+                if card.selected {
+                    let (x, y, w, h) = rect_px(rect, scale);
+                    let (s, b) = (scale as f32, (2.0 * scale as f32).round());
+                    let r = AGENT_RADIUS * s;
+                    c.rounded(x, y, w, h, r, p.accent);
+                    c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, r - b, p.background);
+                }
+                for &i in &card.buttons {
                     if let Some(r) = l.page_buttons.get(i).copied().flatten() {
                         self.page_button(c, view, i, at(r), scale, p);
                     }
@@ -3542,7 +3949,7 @@ impl Painter {
         let hovered = view.hover == Some(FeatureTabHit::PageButton(i));
         self.button(
             c,
-            &page_label(button),
+            &button.label,
             rect,
             (hovered, false),
             button.style,
@@ -3551,8 +3958,7 @@ impl Painter {
         );
     }
 
-    /// A feature's stages as a row of `marks` in `rect`, from the right:
-    /// what the sidebar's feature rows end with.
+    /// A feature's stages as a row of `marks` in `rect`, from its left.
     pub(super) fn stage_marks(
         &self,
         c: &mut Canvas,
@@ -3564,11 +3970,11 @@ impl Painter {
         let s = scale as f32;
         let n = marks.len() as i32;
         let pitch = STAGE_DOT + STAGE_DOT_GAP;
-        let x0 = rect.loc.x + rect.size.w - n * pitch + STAGE_DOT_GAP;
+        debug_assert!(n * pitch - STAGE_DOT_GAP <= rect.size.w || rect.size.w == 0);
         let y = rect.loc.y + (rect.size.h - STAGE_DOT) / 2;
         for (i, mark) in marks.iter().enumerate() {
             let spot = Rectangle::new(
-                (x0 + i as i32 * pitch, y).into(),
+                (rect.loc.x + i as i32 * pitch, y).into(),
                 (STAGE_DOT, STAGE_DOT).into(),
             );
             icon_sdf(c, spot, scale, mark.color(p), |x, y| {
@@ -3578,21 +3984,85 @@ impl Painter {
     }
 }
 
-/// A sidebar row for an open feature: its title and its stages' marks.
+/// How a feature's current stage stands, for its card's mark and line.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum CardTone {
+    /// Nothing runs and nothing waits.
+    #[default]
+    Idle,
+    /// An agent or a job of it runs.
+    Working,
+    /// It waits for the user.
+    Waits,
+    /// It failed or is blocked.
+    Failed,
+}
+
+impl CardTone {
+    /// The colour of the card's stage mark.
+    pub(super) fn mark_color(self, p: &Palette) -> Rgb {
+        match self {
+            Self::Idle => p.placeholder,
+            Self::Working => p.accent,
+            Self::Waits => p.warning,
+            Self::Failed => p.error,
+        }
+    }
+
+    /// The colour of the card's line.
+    pub(super) fn text_color(self, p: &Palette) -> Rgb {
+        match self {
+            Self::Idle | Self::Working => p.muted,
+            Self::Waits => p.warning,
+            // The error colour alone is short of 4.5:1 on a hovered row.
+            Self::Failed => mix(p.error, p.text, 0.3),
+        }
+    }
+}
+
+/// What a feature's card says of it, on its row in the Features section or
+/// on the header of its own workspace.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct FeatureCard {
+    pub marks: Vec<StageMark>,
+    /// The stage it is at; none once every stage is done.
+    pub stage: Option<Stage>,
+    /// How that stage stands, in words: "Build · milestone 2/5".
+    pub line: String,
+    pub tone: CardTone,
+    /// Whether a gate holds it for the user, as the inbox counts them.
+    pub gate: bool,
+    /// How many repositories it holds.
+    pub repos: usize,
+}
+
+impl FeatureCard {
+    /// Whether it shows how many repositories it holds: only with several.
+    pub(super) fn shows_repos(&self) -> bool {
+        self.repos > 1
+    }
+}
+
+/// A sidebar row for an open feature that has no workspace.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct FeatureRowView {
     pub title: String,
-    pub marks: Vec<StageMark>,
+    pub card: FeatureCard,
 }
 
-impl FeatureRowView {
-    /// The mark the row starts with: the current stage's, else done.
-    pub(super) fn mark(&self) -> StageMark {
-        if self.marks.contains(&StageMark::Current) {
-            StageMark::Current
-        } else {
-            StageMark::Done
-        }
+/// Signed distance to the mark of `stage` (none: every stage is done),
+/// centred on the origin.
+pub(super) fn stage_glyph(stage: Option<Stage>, x: f32, y: f32, s: f32) -> f32 {
+    match stage {
+        Some(Stage::Discover) => magnifier(x, y, s),
+        Some(Stage::Plan) => text_lines(x, y, s),
+        Some(Stage::PlanReview) => plan_review_mark(x, y, s),
+        Some(Stage::Build) => code_mark(x, y, s),
+        Some(Stage::Verify) | None => check(x, y, s),
+        Some(Stage::AiReview) => sparkle(x, y, s),
+        Some(Stage::CodeReview) => eye(x, y, s),
+        Some(Stage::ManualTest) => flask(x, y, s),
+        Some(Stage::Ship) => ship_arrow(x, y, s),
     }
 }
 
@@ -3600,14 +4070,23 @@ impl FeatureRowView {
 pub(super) const STAGE_DOT: i32 = 8;
 pub(super) const STAGE_DOT_GAP: i32 = 3;
 
+/// Which of the stage dots starting at `dots` is at `x`: the nearest, as
+/// the gaps between them belong to them.
+pub(super) fn stage_dot_at(dots: Rect, x: f64) -> usize {
+    let pitch = (STAGE_DOT + STAGE_DOT_GAP) as f64;
+    let at = ((x - dots.loc.x as f64 + STAGE_DOT_GAP as f64 / 2.0) / pitch).max(0.0) as usize;
+    at.min(Stage::ALL.len() - 1)
+}
+
 /// How wide `marks` stage dots are in a sidebar row.
 pub(super) fn stage_marks_width(marks: usize) -> i32 {
-    marks as i32 * (STAGE_DOT + STAGE_DOT_GAP) - STAGE_DOT_GAP
+    (marks as i32 * (STAGE_DOT + STAGE_DOT_GAP) - STAGE_DOT_GAP).max(0)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chrome::sidebar::feature_dots_rect as feature_row_dots;
     use crate::chrome::{ONE_DARK, ONE_LIGHT, ONE_LIGHT_PAGE, contrast, inside};
 
     #[test]
@@ -3665,7 +4144,10 @@ mod tests {
         let ws = |name: &str, feature: bool| {
             let mut ws = WorkspaceView::new(name.into(), WorkspaceKind::Terminal, &[]);
             if feature {
-                ws.stages = vec![StageMark::Done, StageMark::Current];
+                ws.feature = Some(FeatureCard {
+                    marks: vec![StageMark::Done, StageMark::Current],
+                    ..FeatureCard::default()
+                });
             }
             ws
         };
@@ -3682,6 +4164,202 @@ mod tests {
         let mixed = [ws("b", true), ws("a", false)];
         let layout = sidebar_layout_at(&mixed, &[], 260, d);
         assert!(layout.features_title.is_none());
+    }
+
+    #[test]
+    fn a_feature_card_keeps_its_dots_where_its_name_starts() {
+        use crate::WorkspaceKind;
+        use crate::chrome::{Density, SIDEBAR_MIN_WIDTH, WorkspaceView, sidebar_layout_at};
+        let d = Density::Comfortable;
+        let mut ws = WorkspaceView::new("Bulk".into(), WorkspaceKind::Terminal, &[]);
+        ws.branch = Some("feature/bulk".into());
+        ws.feature = Some(FeatureCard {
+            marks: vec![StageMark::Later; Stage::ALL.len()],
+            repos: 3,
+            ..FeatureCard::default()
+        });
+        let layout = sidebar_layout_at(std::slice::from_ref(&ws), &[], 200, d);
+        let row = &layout.rows[0];
+        let (name, dots) = (row.name, row.stages.expect("its dots"));
+        assert_eq!(dots.loc.x, name.loc.x);
+        // Its branch comes from its name, so its line holds only the rest.
+        assert_eq!(row.branch, None);
+        let count = row.repos.expect("its count of repositories");
+        assert!(count.loc.x >= dots.loc.x + dots.size.w);
+        // The line under the dots, within the header.
+        let info = row.info.expect("its line");
+        assert_eq!(info.loc.y, dots.loc.y + dots.size.h);
+        assert_eq!(info.loc.y + info.size.h, row.rect.loc.y + row.rect.size.h);
+        // Too narrow for the count, the dots stay and the count goes.
+        let narrow = sidebar_layout_at(std::slice::from_ref(&ws), &[], SIDEBAR_MIN_WIDTH, d);
+        assert_eq!(narrow.rows[0].stages.map(|r| r.loc.x), Some(dots.loc.x));
+        assert_eq!(narrow.rows[0].repos, None);
+    }
+
+    #[test]
+    fn the_features_rule_offers_to_start_a_feature() {
+        use crate::WorkspaceKind;
+        use crate::chrome::{Density, SidebarHit, WorkspaceView, sidebar_layout_at};
+        let d = Density::Comfortable;
+        let ws = WorkspaceView::new("api".into(), WorkspaceKind::Terminal, &[]);
+        let plain = || sidebar_layout_at(std::slice::from_ref(&ws), &[], 200, d);
+        let end = plain().max_scroll(0);
+        let mid = |r: Rect| (r.loc.x as f64 + 8.0, r.loc.y as f64 + 8.0).into();
+        // No feature yet: the heading shows, and counts toward scrolling.
+        let empty = || {
+            plain()
+                .with_features(0, 200, d)
+                .with_feature_head(true, 0, 200)
+        };
+        let scrolled = empty().scrolled(4, 0);
+        let empty = empty();
+        assert!(empty.features.is_empty());
+        let title = empty.features_title.expect("a heading");
+        let plus = empty.features_plus.expect("a plus");
+        assert_eq!(empty.hit(mid(plus)), Some(SidebarHit::NewFeature));
+        assert_eq!(empty.hit(mid(title)), Some(SidebarHit::FeaturesTitle));
+        assert!(empty.max_scroll(0) > end);
+        // On the rule: just over the heading, and inside the sidebar.
+        assert_eq!(plus.loc.y + plus.size.h, title.loc.y);
+        assert!(plus.loc.x + plus.size.w <= 200);
+        // The empty sidebar has only its hint: no project to start one in.
+        let none = sidebar_layout_at(&[], &[], 200, d)
+            .with_features(0, 200, d)
+            .with_feature_head(false, 0, 200);
+        assert!(none.features_title.is_none() && none.features_plus.is_none());
+        // It moves with the rows.
+        let moved = scrolled.features_plus.expect("a plus");
+        assert_eq!(moved.loc.y, plus.loc.y - 4);
+    }
+
+    #[test]
+    fn the_features_heading_counts_what_waits_beside_the_label_only() {
+        use crate::WorkspaceKind;
+        use crate::chrome::{
+            Density, SIDEBAR_MIN_WIDTH, SidebarHit, WorkspaceView, features_waiting,
+            sidebar_layout_at,
+        };
+        let d = Density::Comfortable;
+        let waits = FeatureCard {
+            gate: true,
+            ..FeatureCard::default()
+        };
+        let mut on_workspace = WorkspaceView::new("api".into(), WorkspaceKind::Terminal, &[]);
+        on_workspace.feature = Some(waits.clone());
+        let rows = [
+            FeatureRowView {
+                title: "a".into(),
+                card: waits,
+            },
+            FeatureRowView {
+                title: "b".into(),
+                card: FeatureCard::default(),
+            },
+        ];
+        let workspaces = [on_workspace];
+        assert_eq!(features_waiting(&workspaces, &rows), 2);
+        let layout = sidebar_layout_at(&workspaces, &[], 200, d)
+            .with_features(2, 200, d)
+            .with_feature_head(true, 2, 200);
+        let pill = layout.features_waiting.expect("a pill");
+        let mid = (pill.loc.x as f64 + 2.0, pill.loc.y as f64 + 8.0).into();
+        assert_eq!(layout.hit(mid), Some(SidebarHit::FeaturesWaiting));
+        let quiet = sidebar_layout_at(&workspaces, &[], 200, d)
+            .with_features(2, 200, d)
+            .with_feature_head(true, 0, 200);
+        assert_eq!(quiet.features_waiting, None);
+        let narrow = sidebar_layout_at(&workspaces, &[], SIDEBAR_MIN_WIDTH, d)
+            .with_features(2, SIDEBAR_MIN_WIDTH, d)
+            .with_feature_head(true, 2, SIDEBAR_MIN_WIDTH);
+        assert_eq!(narrow.features_waiting, None, "it never covers the label");
+    }
+
+    #[test]
+    fn the_strip_of_agents_leaves_a_feature_cards_lines_alone() {
+        use crate::agent_icons::AgentIcon;
+        use crate::chrome::{Density, WorkspaceView, sidebar_layout_at};
+        let mut ws = WorkspaceView::new("Bulk".into(), crate::WorkspaceKind::Terminal, &[]);
+        ws.picks = vec![AgentIcon::Claude];
+        ws.feature = Some(FeatureCard {
+            marks: vec![StageMark::Later; Stage::ALL.len()],
+            ..FeatureCard::default()
+        });
+        let layout = sidebar_layout_at(std::slice::from_ref(&ws), &[], 200, Density::Comfortable);
+        let (mut placed, height) = (layout, 600);
+        placed.place_strips(0, height);
+        let row = &placed.rows[0];
+        let info = row.info.expect("its line");
+        assert_eq!(
+            row.picks.expect("its strip").loc.y,
+            info.loc.y + info.size.h
+        );
+    }
+
+    #[test]
+    fn a_click_on_the_stage_dots_lands_on_the_nearest() {
+        use crate::chrome::{Density, SidebarHit, WorkspaceView, sidebar_layout_at};
+        let d = Density::Comfortable;
+        let mut ws = WorkspaceView::new("Bulk".into(), crate::WorkspaceKind::Terminal, &[]);
+        ws.feature = Some(FeatureCard {
+            marks: vec![StageMark::Later; Stage::ALL.len()],
+            ..FeatureCard::default()
+        });
+        let layout = sidebar_layout_at(std::slice::from_ref(&ws), &[], 200, d)
+            .with_features(1, 200, d)
+            .with_feature_head(true, 0, 200);
+        let pitch = STAGE_DOT + STAGE_DOT_GAP;
+        let on = |dots: Rect, k: i32| {
+            let x = dots.loc.x + k * pitch + STAGE_DOT / 2;
+            (x as f64, (dots.loc.y + dots.size.h / 2) as f64).into()
+        };
+        let dots = layout.rows[0].stages.expect("its dots");
+        for k in 0..Stage::ALL.len() {
+            let hit = layout.hit(on(dots, k as i32));
+            assert_eq!(hit, Some(SidebarHit::Stage(0, k)));
+            assert_eq!(hit.and_then(SidebarHit::row), Some(0));
+        }
+        // A row's dots light the row, and its other parts stay the row.
+        let row = layout.features[0];
+        let dots = feature_row_dots(row);
+        for k in 0..Stage::ALL.len() {
+            let hit = layout.hit(on(dots, k as i32)).expect("a dot");
+            assert_eq!(hit, SidebarHit::FeatureDot(0, k));
+            assert_eq!(hit.pill(), SidebarHit::Feature(0));
+        }
+        let title = (row.loc.x as f64 + 40.0, row.loc.y as f64 + 4.0).into();
+        assert_eq!(layout.hit(title), Some(SidebarHit::Feature(0)));
+    }
+
+    #[test]
+    fn a_feature_card_only_counts_several_repositories() {
+        let card = |repos| FeatureCard {
+            repos,
+            ..FeatureCard::default()
+        };
+        assert!(!card(1).shows_repos());
+        assert!(card(2).shows_repos());
+    }
+
+    #[test]
+    fn a_feature_card_reads_on_the_panels_in_both_themes() {
+        use crate::chrome::{mix, sidebar::ACTIVE_TINT};
+        let tones = [
+            CardTone::Idle,
+            CardTone::Working,
+            CardTone::Waits,
+            CardTone::Failed,
+        ];
+        for p in [&ONE_DARK, &ONE_LIGHT] {
+            let active = mix(p.panel, p.selected, ACTIVE_TINT);
+            for tone in tones {
+                for ground in [p.panel, p.element, active] {
+                    let mark = contrast(tone.mark_color(p), ground);
+                    assert!(mark >= 3.0, "{tone:?} mark at {mark:.2}:1");
+                    let text = contrast(tone.text_color(p), ground);
+                    assert!(text >= 4.5, "{tone:?} text at {text:.2}:1");
+                }
+            }
+        }
     }
 
     #[test]
@@ -4462,7 +5140,7 @@ mod tests {
         let _ = step(&view, 1, 0.0, 1.0);
         let l = tab_at(&view, 1920);
         let halo = feature_tab_pulse(&view, &l).unwrap();
-        assert!(halo.contains_rect(node_circle(l.nodes[2])));
+        assert!(halo.contains_rect(node_circle(l.nodes[3])));
         let (drawn, parts) = step(&view, 2, 0.8, 0.4);
         assert_eq!(drawn, 0);
         let glow = (parts.iter())
@@ -4610,6 +5288,18 @@ mod tests {
     }
 
     #[test]
+    fn the_rail_is_a_line_taller_once_it_says_what_ran_a_stage() {
+        let frame = Rectangle::from_size((1400, 800).into());
+        let height = |view: &FeatureTabView| feature_tab_layout(view, frame).nodes[0].size.h;
+        let mut view = super::super::golden::feature_tab();
+        let with = height(&view);
+        for node in &mut view.rail {
+            node.agent = None;
+        }
+        assert_eq!(with, height(&view) + NODE_LINE);
+    }
+
+    #[test]
     fn agent_chips_too_wide_together_share_the_room() {
         let (track, chips) = agent_pick_rects(8, 10, 20, 150);
         assert!(track.size.w <= 150, "{track:?}");
@@ -4618,19 +5308,206 @@ mod tests {
     }
 
     #[test]
-    fn a_runs_chips_share_its_heads_row_left_of_its_button() {
+    fn rows_from_right_fill_from_the_first_and_end_at_the_right() {
+        // Two fit, the third starts a row, all ending at 100.
+        assert_eq!(
+            rows_from_right(&[40, 40, 60], 0, 100),
+            [
+                (100 - 40 - QUIT_BUTTON_GAP - 40, 0),
+                (100 - 40, 0),
+                (100 - 60, 1)
+            ]
+        );
+        assert_eq!(
+            rows_height(&rows_from_right(&[40, 40, 60], 0, 100)),
+            2 * ROW_BUTTON + QUIT_BUTTON_GAP
+        );
+        assert_eq!(rows_height(&[]), 0);
+    }
+
+    /// A view with a page of `n` finding cards, each with three buttons.
+    fn findings_view(n: usize, text: &str) -> FeatureTabView {
+        let mut view = tab_view();
+        view.page.buttons.clear();
+        view.page.sections.clear();
+        for i in 0..n {
+            let at = view.page.buttons.len();
+            for label in ["Fix", "Edit\u{2026}", "Dismiss\u{2026}", "Show in diff"] {
+                view.page.buttons.push(PageButton {
+                    label: label.to_owned(),
+                    style: ButtonStyle::Plain,
+                });
+            }
+            view.page.sections.push(PageSection::Finding(FindingCard {
+                tag: FindingTag::High,
+                title: format!("Finding {i}: {text}"),
+                state: String::new(),
+                place: format!("r1-{i} \u{b7} src/a.rs:12"),
+                body: format!("{text}\n\n{text}"),
+                fix: format!("Fix: {text}"),
+                note: String::new(),
+                faded: false,
+                selected: false,
+                buttons: (at..at + 4).collect(),
+            }));
+        }
+        view
+    }
+
+    #[test]
+    fn a_finding_cards_frame_holds_all_its_text_and_buttons_at_any_width() {
+        let text = "a long sentence that goes on and on ".repeat(12);
+        let view = findings_view(2, &text);
+        for width in [870, 1200, 1920] {
+            let l = tab_at(&view, width);
+            let page = &l.pieces[TabColumn::Page as usize];
+            assert_eq!(l.finding_cards.len(), 2);
+            let (a, b) = (l.finding_cards[0], l.finding_cards[1]);
+            assert!(a.loc.y + a.size.h <= b.loc.y, "cards apart at {width}");
+            for (k, card) in l.finding_cards.iter().enumerate() {
+                let at = page
+                    .iter()
+                    .position(|(r, p)| r == card && matches!(p, Piece::FindingCard(i) if *i == k));
+                let at = at.expect("its frame");
+                // The frame paints first, under what it holds.
+                let held: Vec<&Rect> = page[at + 1..]
+                    .iter()
+                    .take_while(|(_, p)| !matches!(p, Piece::FindingCard(_)))
+                    .filter(|(_, p)| matches!(p, Piece::Text { .. }))
+                    .map(|(r, _)| r)
+                    .collect();
+                assert!(held.len() > 4, "all of its text at {width}");
+                for r in held {
+                    assert!(card.contains_rect(*r), "{r:?} in {card:?} at {width}");
+                }
+                for b in k * 4..k * 4 + 4 {
+                    let r = l.page_buttons[b].expect("placed");
+                    assert!(card.contains_rect(r), "button {b} in {card:?} at {width}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_narrow_card_wraps_its_buttons_rather_than_cut_them() {
+        let view = findings_view(1, "short");
+        let l = tab_at(&view, 420);
+        let card = l.finding_cards[0];
+        for b in 0..4 {
+            let r = l.page_buttons[b].expect("placed");
+            assert!(card.contains_rect(r), "{r:?} in {card:?}");
+        }
+    }
+
+    #[test]
+    fn a_card_is_hit_past_its_buttons_and_the_keyboards_one_scrolls_into_view() {
+        let view = findings_view(30, "some words");
+        let l = tab_at(&view, 1200);
+        let (card, button) = (l.finding_cards[1], l.page_buttons[4].unwrap());
+        let on = (card.loc.x + 3, card.loc.y + 3).into();
+        assert_eq!(l.hit(&view, on), Some(FeatureTabHit::Finding(1)));
+        assert_eq!(
+            l.hit(&view, centre(button)),
+            Some(FeatureTabHit::PageButton(4))
+        );
+        // In view: where it was. Below: its bottom shows. Above: its top.
+        assert_eq!(l.reveal_finding(0, 0.0), Some(0.0));
+        let place = l.columns[TabColumn::Page as usize].unwrap();
+        let last = l.finding_cards[29];
+        let to = l.reveal_finding(29, 0.0).unwrap();
+        assert!(to > 0.0);
+        assert!(
+            f64::from(last.loc.y + last.size.h - place.loc.y)
+                <= to + f64::from(place.size.h) + f64::from(CARD_PAD)
+        );
+        assert!(l.reveal_finding(0, to).unwrap() < to);
+        assert_eq!(l.reveal_finding(99, 0.0), None);
+    }
+
+    /// Run by hand (`--ignored --nocapture`): what a full page of findings,
+    /// at the import's caps, costs a frame's layout.
+    #[test]
+    #[ignore]
+    fn a_full_page_of_findings_lays_out_fast() {
+        let text = "word ".repeat(800);
+        let view = findings_view(100, &text);
+        let first = std::time::Instant::now();
+        let _ = tab_at(&view, 1920);
+        let first = first.elapsed();
+        let again = std::time::Instant::now();
+        let _ = tab_at(&view, 1920);
+        println!("first layout {first:?}, then {:?}", again.elapsed());
+    }
+
+    #[test]
+    fn a_stages_own_buttons_end_its_titles_line_and_leave_when_they_dont_fit() {
+        let title_row = |view: &FeatureTabView, width: i32| {
+            let l = tab_at(view, width);
+            let (title, _) = l.pieces[TabColumn::Page as usize][..]
+                .iter()
+                .find(|(_, p)| matches!(p, Piece::Text { bold: true, .. }))
+                .expect("a title");
+            let title = *title;
+            let free = l.page_buttons[0].expect("placed");
+            (title, free)
+        };
+        let view = tab_view();
+        let (title, free) = title_row(&view, 1180);
+        assert!(free.loc.y >= title.loc.y);
+        assert!(free.loc.y + free.size.h <= title.loc.y + title.size.h);
+        assert_eq!(free.loc.x + free.size.w, title.loc.x + title.size.w);
+        // Too many for the title's line: below what the page says, at its end.
+        let mut many = tab_view();
+        many.page.buttons = (0..12)
+            .map(|i| PageButton {
+                label: format!("Button {i}"),
+                style: ButtonStyle::Plain,
+            })
+            .collect();
+        let (title, first) = title_row(&many, 1180);
+        assert!(first.loc.y >= title.loc.y + title.size.h);
+    }
+
+    #[test]
+    fn a_narrow_agent_card_keeps_its_name_and_moves_its_buttons_below() {
+        let view = tab_with_picks(false);
+        let wide = tab_at(&view, 1180);
+        let narrow = tab_at(&view, 420);
+        let card = |l: &FeatureTabLayout| {
+            l.pieces[TabColumn::Page as usize]
+                .iter()
+                .find(|(_, p)| matches!(p, Piece::Agent(_)))
+                .map(|(r, _)| *r)
+                .expect("a card")
+        };
+        let (wide_card, narrow_card) = (card(&wide), card(&narrow));
+        assert!(narrow_card.size.h > wide_card.size.h);
+        let (track, _) = narrow.agent_picks.clone().expect("placed");
+        assert!(track.loc.y >= narrow_card.loc.y + AGENT_PAD + AGENT_HEAD);
+        assert!(
+            track.loc.x >= narrow_card.loc.x,
+            "{track:?} {narrow_card:?}"
+        );
+        assert!(track.loc.y + track.size.h <= narrow_card.loc.y + narrow_card.size.h);
+        for r in narrow.page_buttons.iter().flatten() {
+            assert!(r.loc.x >= narrow_card.loc.x, "{r:?} {narrow_card:?}");
+        }
+    }
+
+    #[test]
+    fn a_runs_chips_end_its_heads_row_right_of_its_buttons() {
         let view = tab_with_picks(false);
         let l = tab_at(&view, 1180);
         let (track, _) = l.agent_picks.clone().expect("placed");
         let button = (view.page.sections.iter())
             .find_map(|s| match s {
-                PageSection::Agent { button, .. } => *button,
+                PageSection::Agent { buttons, .. } => buttons.last().copied(),
                 _ => None,
             })
             .and_then(|i| l.page_buttons[i])
             .expect("the fixture's card has a button");
         assert_eq!(track.loc.y, button.loc.y);
         assert_eq!(track.size.h, button.size.h);
-        assert_eq!(track.loc.x + track.size.w + QUIT_BUTTON_GAP, button.loc.x);
+        assert_eq!(button.loc.x + button.size.w + QUIT_BUTTON_GAP, track.loc.x);
     }
 }

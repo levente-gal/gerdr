@@ -22,6 +22,7 @@ mod confirm;
 mod consts;
 mod drop;
 mod features;
+mod finding_dialog;
 mod footer;
 #[cfg(test)]
 mod golden;
@@ -35,6 +36,8 @@ mod menu;
 mod painter;
 mod pane_bar;
 mod placeholder;
+mod plan_sheet;
+mod project_commands;
 mod project_menu;
 mod quit;
 mod repos;
@@ -73,6 +76,7 @@ pub use confirm::*;
 pub use consts::*;
 pub use drop::*;
 pub use features::*;
+pub use finding_dialog::*;
 pub use footer::*;
 pub use help::*;
 pub use hints::*;
@@ -85,6 +89,8 @@ pub use menu::*;
 pub use painter::*;
 pub use pane_bar::*;
 pub use placeholder::*;
+pub use plan_sheet::*;
+pub use project_commands::*;
 pub use project_menu::*;
 pub use quit::*;
 pub use repos::*;
@@ -162,10 +168,15 @@ pub struct ChromeView {
     pub confirm: Option<ConfirmView>,
     /// Set while the new feature dialog is open.
     pub new_feature: Option<NewFeatureView>,
+    pub finding_dialog: Option<FindingDialogView>,
     /// Set while the name and email dialog is open.
     pub identity: Option<IdentityView>,
+    /// Set while the project commands dialog is open.
+    pub commands: Option<CommandsView>,
     /// Set while the manual test sheet is open.
     pub manual_test: Option<ManualTestView>,
+    /// Set while the plan review's sheet is open.
+    pub plan_sheet: Option<PlanSheetView>,
     /// Set while the feature panel is open.
     pub features: Option<FeatureTabView>,
     /// Set while the project menu is open.
@@ -222,8 +233,11 @@ pub struct Chrome {
     checkout: Overlay<(CheckoutView, Size<i32, Logical>, Theme, f64)>,
     confirm: Overlay<(ConfirmView, Size<i32, Logical>, Theme, f64)>,
     new_feature: Overlay<(NewFeatureView, Size<i32, Logical>, Theme, f64)>,
+    finding_dialog: Overlay<(FindingDialogView, Size<i32, Logical>, Theme, f64)>,
     identity: Overlay<(IdentityView, Size<i32, Logical>, Theme, f64)>,
+    commands: Overlay<(CommandsView, Size<i32, Logical>, Theme, f64)>,
     manual_test: Overlay<(ManualTestView, Size<i32, Logical>, Theme, f64)>,
+    plan_sheet: Overlay<(PlanSheetView, Size<i32, Logical>, Theme, f64)>,
     features: FeatureTabLayers,
     project_menu: ProjectMenuLayers,
     worktrees: WorktreesLayers,
@@ -287,8 +301,11 @@ impl Chrome {
             checkout: Overlay::default(),
             confirm: Overlay::default(),
             new_feature: Overlay::default(),
+            finding_dialog: Overlay::default(),
             identity: Overlay::default(),
+            commands: Overlay::default(),
             manual_test: Overlay::default(),
+            plan_sheet: Overlay::default(),
             features: FeatureTabLayers::default(),
             project_menu: ProjectMenuLayers::default(),
             worktrees: WorktreesLayers::default(),
@@ -467,6 +484,18 @@ impl Chrome {
                     });
                     parts.extend(scrimmed(part, output, theme.palette()));
                 }
+                Kind::FindingDialog => {
+                    let dialog = view.finding_dialog.take().map(|v| {
+                        let (loc, size) = shadowed(finding_dialog_layout(&v, output).panel);
+                        ((v, output, theme, scale), loc, size)
+                    });
+                    let part = self
+                        .finding_dialog
+                        .part(dialog, now, true, |(v, output, ..)| {
+                            painter.finding_dialog(v, *output, scale, theme.palette())
+                        });
+                    parts.extend(scrimmed(part, output, theme.palette()));
+                }
                 Kind::GitIdentity => {
                     let dialog = view.identity.take().map(|v| {
                         let (loc, size) =
@@ -478,6 +507,16 @@ impl Chrome {
                     });
                     parts.extend(scrimmed(part, output, theme.palette()));
                 }
+                Kind::ProjectCommands => {
+                    let dialog = view.commands.take().map(|v| {
+                        let (loc, size) = shadowed(commands_layout(&v, output).panel);
+                        ((v, output, theme, scale), loc, size)
+                    });
+                    let part = self.commands.part(dialog, now, true, |(v, output, ..)| {
+                        painter.commands_dialog(v, *output, scale, theme.palette())
+                    });
+                    parts.extend(scrimmed(part, output, theme.palette()));
+                }
                 Kind::ManualTest => {
                     let sheet = view.manual_test.take().map(|v| {
                         let (loc, size) = shadowed(manual_test_layout(&v, output).panel);
@@ -485,6 +524,16 @@ impl Chrome {
                     });
                     let part = self.manual_test.part(sheet, now, true, |(v, output, ..)| {
                         painter.manual_test_sheet(v, *output, scale, theme.palette())
+                    });
+                    parts.extend(scrimmed(part, output, theme.palette()));
+                }
+                Kind::PlanSheet => {
+                    let sheet = view.plan_sheet.take().map(|v| {
+                        let (loc, size) = shadowed(plan_sheet_layout(&v, output).panel);
+                        ((v, output, theme, scale), loc, size)
+                    });
+                    let part = self.plan_sheet.part(sheet, now, true, |(v, output, ..)| {
+                        painter.plan_sheet(v, *output, scale, theme.palette())
                     });
                     parts.extend(scrimmed(part, output, theme.palette()));
                 }
@@ -1083,6 +1132,11 @@ fn hit_rects(
         view.sidebar_width,
         view.density,
     )
+    .with_feature_head(
+        !view.sidebar.workspaces.is_empty(),
+        features_waiting(&view.sidebar.workspaces, &view.sidebar.features),
+        view.sidebar_width,
+    )
     .scrolled_over(
         view.sidebar.state.scroll,
         view.sidebar.state.over,
@@ -1101,6 +1155,8 @@ fn hit_rects(
     rects.extend(sidebar.inbox_title);
     rects.extend(sidebar.inbox.iter().map(|(_, _, rect)| *rect));
     rects.extend(sidebar.features_title);
+    rects.extend(sidebar.features_plus);
+    rects.extend(sidebar.features_waiting);
     rects.extend(sidebar.features.iter().copied());
     let strip_w = output.w - view.sidebar_width;
     let shift = |rect: Rect| {

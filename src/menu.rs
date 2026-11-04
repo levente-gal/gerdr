@@ -93,6 +93,7 @@ pub enum MenuAction {
     Scrollback(u32),
     RestartPane(u32),
     StopPane(u32),
+    SendPrompt(u32),
     /// Take the web page in pane `id` of the active tab back, forward, or
     /// load it again.
     WebStep(u32, crate::web_control::WebStep),
@@ -155,6 +156,22 @@ pub enum MenuAction {
         project: String,
         slug: String,
         repo: Box<crate::feature::ContextRepo>,
+    },
+    /// Undo removing one of the user's own suggestions of a plan review:
+    /// put it back at index `at`.
+    RestoreSuggestion {
+        project: String,
+        slug: String,
+        at: usize,
+        suggestion: Box<crate::feature::plan_review::Suggestion>,
+    },
+    /// Undo a save of the project commands dialog.
+    RestoreProjectCommands(Vec<crate::project_commands::CommandsBefore>),
+    /// Open the project commands dialog, for feature `slug` if one is given.
+    EditCommands {
+        project: String,
+        slug: Option<String>,
+        tab: crate::chrome::CommandsTab,
     },
     /// Read the project files again, after one was edited by hand.
     ReloadProjects,
@@ -423,6 +440,10 @@ impl Gerdr {
                 self.focus_pane(|_| Some(id));
                 self.stop_focused_pane();
             }
+            MenuAction::SendPrompt(id) => {
+                self.focus_pane(|_| Some(id));
+                self.send_focused_prompt();
+            }
             MenuAction::WebStep(id, step) => {
                 self.web_pane_step(id, step);
             }
@@ -468,11 +489,21 @@ impl Gerdr {
                 triage,
             } => self.inbox_undelete(&project, todo, at, triage),
             MenuAction::ServiceErrorsRestore(before) => self.restore_service_errors(*before),
+            MenuAction::RestoreProjectCommands(before) => self.restore_project_commands(before),
+            MenuAction::EditCommands { project, slug, tab } => {
+                self.open_project_commands(&project, slug.as_deref(), tab);
+            }
             MenuAction::RestoreContextRepo {
                 project,
                 slug,
                 repo,
             } => self.restore_context_repo(&project, &slug, *repo),
+            MenuAction::RestoreSuggestion {
+                project,
+                slug,
+                at,
+                suggestion,
+            } => self.restore_suggestion(&project, &slug, at, *suggestion),
             MenuAction::ReloadProjects => self.reload_projects(),
         }
     }

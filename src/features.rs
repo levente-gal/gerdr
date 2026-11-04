@@ -14,19 +14,21 @@
 //! `feature_workspace`), full size, painted from `feature_tab_view` (its
 //! state is `FeaturePanel`). It can't be closed, moved or renamed; closing
 //! the workspace takes it along. A header with the feature's buttons, the
-//! eight stages as a rail, and under it the repositories', the picked
+//! nine stages as a rail, and under it the repositories', the picked
 //! stage's page's and the activity's columns, each scrolled on its own
 //! (on a narrow tab the repositories are a row of chips and the activity
 //! goes at the page's end). Tab moves the keyboard between the rail and
 //! the repositories; the arrows (Ctrl+J/K), Home and End pick a stage's
 //! page or a repository, which scrolls into view. Enter does the page's
-//! next thing (start, show or review the stage's agent, let Build go on
-//! after a milestone, run Verify's checks, mark it done, ship) or the
+//! next thing (start or show the stage's agent, send it its prompt once its
+//! model is picked, review what it wrote, let Build go on after a milestone,
+//! run Verify's checks, mark it done, ship) or the
 //! repository's (unfold the rows, press a row's button); Ctrl+PgUp/Ctrl+PgDn
 //! go to the previous or next feature, Ctrl+O opens a tab in the feature's folder,
 //! Ctrl+Shift+O opens the pull request of the repository picked, or on
 //! Verify's page its evidence, Ctrl+R starts the stage's agent afresh,
 //! Ctrl+Shift+R shows its agent, or goes back to its chat if its tab closed,
+//! Ctrl+Shift+U sets its worktrees up (Build and Verify: copies what they lack),
 //! Ctrl+C copies its path, Ctrl+N starts a new one, Ctrl+Shift+L unfolds the
 //! repository strip into rows of every repository it can hold (Esc folds them
 //! first), Del on a repository of several takes it out (asking when it is on
@@ -62,10 +64,10 @@ use crate::{
     Gerdr,
     agent_icons::AgentIcon,
     chrome::{
-        self, ActivityRow, AgentChip, ButtonStyle, CheckLine, CheckTone, Dot, FeatureRepoRow,
-        FeatureTabHit, FeatureTabView, MAX_CHECK_LINES, NewFeatureHit, NewFeatureRepo,
-        NewFeatureView, NodeMark, PageButton, PageSection, RailNode, RepoKind, RepoNote, StageMark,
-        StagePage, TabArea, TabColumn,
+        self, ActivityRow, AgentChip, ButtonStyle, CheckLine, CheckTone, CommandsTab, Dot,
+        FeatureRepoRow, FeatureTabHit, FeatureTabView, FindingCard, FindingTag, MAX_CHECK_LINES,
+        NewFeatureHit, NewFeatureRepo, NewFeatureView, NodeMark, PageButton, PageSection, RailNode,
+        RepoKind, RepoNote, StageMark, StagePage, TabArea, TabColumn,
     },
     doc_review::DocFile,
     feature::{
@@ -75,7 +77,9 @@ use crate::{
         hook::Guard,
         layout::{self, AddSpec, Created, Found, LinkSpec, Root},
         patch::{self, Reading},
-        review_import::{CodeRead, FindingState},
+        review_import::{
+            self, CodeRead, Decision, Finding as ReviewFinding, FindingState, Severity,
+        },
         ship::{self, Action, Probe},
         store,
     },
@@ -97,6 +101,15 @@ pub struct Features {
     /// By project id, oldest first.
     pub all: BTreeMap<String, Vec<Feature>>,
     pub dialog: Option<NewFeatureDialog>,
+    /// The project commands dialog, while it is open.
+    pub commands: Option<crate::project_commands::CommandsDialog>,
+    /// What was typed in it and not saved, for its next opening.
+    pub commands_drafts:
+        BTreeMap<crate::project_commands::CommandsScope, crate::project_commands::CommandsDraft>,
+    /// The dialog asking for a finding's text (see `finding_dialog`).
+    pub finding_dialog: Option<crate::finding_dialog::FindingDialog>,
+    /// What was typed in it and left, for its next opening on the same.
+    pub finding_drafts: crate::finding_dialog::Drafts,
     pub panel: Option<FeaturePanel>,
     /// The feature last shown in the panel, by project: the features key
     /// opens it again.
@@ -125,7 +138,7 @@ pub struct Features {
     watching: bool,
     /// The serial of the last dialog opened: a root found for an older one
     /// is dropped.
-    serial: u64,
+    pub(crate) serial: u64,
     /// A feature of another project to show in the panel once that
     /// project is entered, by project and slug (see `open_linked_feature`).
     pending: Option<(String, String)>,
@@ -137,6 +150,8 @@ pub struct Features {
     pub(crate) build: crate::feature_build::BuildState,
     /// The manual test sheet, while it is open (see `manual_test`).
     pub(crate) manual: Option<crate::manual_test::ManualSheet>,
+    /// The plan review's sheet, while it is open (see `plan_sheet`).
+    pub(crate) plan_sheet: Option<crate::plan_sheet::PlanSheet>,
     /// The acceptance criteria of each open feature's brief, by project
     /// and slug, as last read: none kept for a brief without.
     pub(crate) criteria: BTreeMap<(String, String), Vec<feature::manual::Criterion>>,
@@ -236,6 +251,13 @@ pub(crate) enum Done {
     T3Told {
         thread: String,
         result: Result<(), String>,
+    },
+    /// The repositories of `project` for the commands dialog of `serial`,
+    /// with what their files suggest.
+    CommandsFound {
+        serial: u64,
+        project: String,
+        result: Result<Vec<(String, feature::suggest::Suggested)>, String>,
     },
     Found {
         serial: u64,
@@ -347,6 +369,21 @@ pub(crate) enum Done {
     },
     /// The code and `review.json` read once run `n` of the AI review
     /// agent was done, its file at `stamp` (see `feature_review`).
+    PlanReviewBaseline {
+        project: String,
+        slug: String,
+        /// The code's patch-id as a plan review's agent starts.
+        result: Result<String, String>,
+    },
+    /// The code and what the agent wrote, once run `n` of Plan review's
+    /// agent rested, its file at `stamp` (see `feature_plan_review`).
+    PlanReviewRead {
+        project: String,
+        slug: String,
+        n: u32,
+        stamp: crate::feature_agents::Stamp,
+        result: Result<Box<crate::feature_plan_review::PlanRead>, String>,
+    },
     ReviewRead {
         project: String,
         slug: String,
@@ -387,7 +424,7 @@ pub(crate) enum Done {
     SetUp {
         project: String,
         slug: String,
-        result: Result<(), String>,
+        report: feature::setup::Report,
     },
     /// Verify's checks of feature `slug` ran: run `n`.
     #[allow(dead_code)] // sent from `feature_build` (inc 4 contract)
@@ -417,8 +454,8 @@ pub enum Finding {
     Failed(String),
 }
 
-/// A project of the store the feature panel offers repositories of, as far
-/// as it is known.
+/// A project the feature panel looks for repositories in, as far as it is
+/// known.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RepoSource {
     /// The project's id; `None`: the feature's home project.
@@ -765,6 +802,9 @@ pub struct FeaturePanel {
     pub picked_at: Option<Stage>,
     /// The repository with the keyboard while `focus` is `Repos`.
     pub repo: usize,
+    /// The card with the keyboard while `focus` is `Findings`, as
+    /// `finding_cards` has them.
+    pub finding: usize,
     /// The repository (`Repo::key`) a first Del was on: a second takes it
     /// out, any other key lets it go.
     pub armed: Option<String>,
@@ -776,8 +816,10 @@ pub struct FeaturePanel {
     /// Every key of the tab is listed in place of the page (F1).
     pub keys: bool,
     pub tab_hover: Option<FeatureTabHit>,
-    /// The projects' repositories to offer on the expanded repositories
-    /// (home first), read off the thread when it opens and on each expand.
+    /// Where the expanded repositories look (home first): the feature's
+    /// project, which they offer the rest of, and those it already links,
+    /// for what it holds or held of them. Read off the thread when it opens
+    /// and on each expand.
     pub sources: Vec<RepoSource>,
     /// The repositories show as rows, with all they could be, over the page.
     pub expanded: bool,
@@ -797,6 +839,8 @@ pub enum PanelOutcome {
     Ship,
     /// Start this agent stage's agent (fresh: even if one runs).
     StartAgent(Stage, bool),
+    /// Tell the agent waiting on this stage to read its prompt.
+    SendPrompt(Stage),
     /// Show this agent stage's agent.
     ShowAgent(Stage),
     /// Go back to the chat of this agent stage's agent, its tab closed.
@@ -808,14 +852,39 @@ pub enum PanelOutcome {
     Continue(Stage),
     /// Run Verify's checks (again).
     RunChecks,
+    /// Set the feature's worktrees up (again): copy what they lack.
+    SetUp,
     /// Show the diff at AI review's first finding to decide.
     Findings,
     /// Send AI review's findings to fix to the Build agent.
     SendFixes,
+    /// Open the project commands dialog on this tab.
+    EditCommands(CommandsTab),
+    /// Decide this finding of AI review.
+    DecideFinding(String, Decision),
+    /// Ask why, then dismiss this finding.
+    AskDismiss(String),
+    /// Ask for this finding's fix and comment.
+    EditFinding(String),
+    /// Ask for a comment of the user's own, to go with the fixes.
+    AddComment,
+    /// Show this finding in the diff.
+    ShowFinding(String),
+    /// Say why a key did nothing to a finding.
+    FindingRefused(&'static str),
     /// Review the feature's diff (Code review).
     CodeReview,
     /// Open the manual test sheet (Manual test, with criteria).
     ManualTest,
+    /// Open Plan review's suggestions, to decide them.
+    PlanSuggestions,
+    /// The suggestions are decided: start the final plan, or with nothing
+    /// accepted, go on with the plan as it is.
+    WriteFinalPlan,
+    /// Skip Plan review, asking first when something would be lost.
+    SkipPlanReview,
+    /// Back from the final plan to the decisions on the suggestions.
+    ChangeDecisions,
     /// Show Verify's `evidence.md`.
     Evidence,
     /// Open this pull request's page.
@@ -879,8 +948,8 @@ pub enum RepoEntry {
     Context(usize),
     /// `Feature::removed` at this index.
     Removed(usize),
-    /// A repository of `FeaturePanel::sources` the feature has nothing to
-    /// do with yet: `repo` in the root of `source`.
+    /// A repository of the feature's project it has nothing to do with
+    /// yet: `repo` in the root of `FeaturePanel::sources[source]`.
     Offered { source: usize, repo: usize },
 }
 
@@ -904,13 +973,19 @@ pub fn repo_entries(feature: &Feature, sources: &[RepoSource], expanded: bool) -
 }
 
 /// The rows only the expanded repositories show: those taken out, those
-/// not added. A shipped feature's repositories can't change: none.
+/// of its project not added. Other projects stay out, unless the feature
+/// still links the one a repository was taken out of. A shipped feature's
+/// repositories can't change: none.
 pub fn repos_offered(feature: &Feature, sources: &[RepoSource]) -> Vec<RepoEntry> {
     if !linkable(feature) {
         return Vec::new();
     }
-    let mut entries: Vec<RepoEntry> = (0..feature.removed.len()).map(RepoEntry::Removed).collect();
-    for (at, source) in sources.iter().enumerate() {
+    let mut entries: Vec<RepoEntry> = (feature.removed.iter().enumerate())
+        .filter(|(_, gone)| (gone.project.as_deref()).is_none_or(|id| feature.link(id).is_some()))
+        .map(|(i, _)| RepoEntry::Removed(i))
+        .collect();
+    let home = (sources.iter().enumerate()).filter(|(_, source)| source.project.is_none());
+    for (at, source) in home {
         let Finding::Found(root) = &source.finding else {
             continue;
         };
@@ -1022,6 +1097,9 @@ pub struct RowCtx {
     /// probe found them (see `page::Docs`): an earlier stage locks by
     /// them, and the brief's and the plan's pages offer Review.
     pub written: [bool; Stage::ALL.len()],
+    /// The Build agent's dot while it runs again with Build done (see
+    /// `Gerdr::build_agent_fixing`).
+    pub fixing: Option<Dot>,
 }
 
 impl RowCtx {
@@ -1033,7 +1111,7 @@ impl RowCtx {
     /// Whether `stage`'s file is there to read on its page: Discover's
     /// and Plan's only.
     fn wrote(self, stage: Stage) -> bool {
-        matches!(stage, Stage::Discover | Stage::Plan) && self.has_file(stage)
+        matches!(stage, Stage::Discover | Stage::Plan | Stage::PlanReview) && self.has_file(stage)
     }
 
     /// The stage that locks done `stage` of `feature`: see
@@ -1083,6 +1161,7 @@ pub fn row_action(feature: &Feature, row: PanelRow, ctx: RowCtx) -> Option<Panel
             StageMark::Done => PanelOutcome::Untick(stage),
             StageMark::Current if stage == Stage::Ship => PanelOutcome::Ship,
             StageMark::Current if stage == Stage::Verify && ctx.checks => PanelOutcome::RunChecks,
+            StageMark::Current if stage == Stage::PlanReview => plan_review_action(feature),
             StageMark::Current if stage == Stage::AiReview => review_action(feature),
             StageMark::Current if stage == Stage::CodeReview => PanelOutcome::CodeReview,
             StageMark::Current if stage == Stage::ManualTest && ctx.criteria > 0 => {
@@ -1111,8 +1190,93 @@ fn agent_button(
     if run.live() {
         return Some(("Show agent", PanelOutcome::ShowAgent(stage)));
     }
+    // Its prompt is still to send, also from a done Build: fixes wait so.
+    if run.held {
+        return (feature.status == Status::Open)
+            .then_some(("Start agent", PanelOutcome::StartAgent(stage, false)));
+    }
     (feature.status == Status::Open && run.resumes() && ctx.locked_by(feature, stage).is_none())
         .then_some(("Resume agent", PanelOutcome::ResumeAgent(stage)))
+}
+
+/// Where a done Build's agent stands with work sent back to it: fixes,
+/// review comments, failed tests. The stage the feature is at is a later
+/// one, so the rail and that stage's page say so.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Rework {
+    /// In its tab, waiting for the user to send its prompt.
+    Waits,
+    /// Its prompt still to send, and its tab closed.
+    Closed,
+    /// Waiting in T3 Code as a draft.
+    Draft,
+    /// Running, with this dot.
+    Runs(Dot),
+}
+
+impl Rework {
+    /// Its mark and short line on the rail.
+    fn node(self) -> (NodeMark, String) {
+        let (mark, line) = match self {
+            Rework::Waits => (NodeMark::Waiting, "waiting to send"),
+            Rework::Closed => (NodeMark::Waiting, "agent closed"),
+            Rework::Draft => (NodeMark::Waiting, "draft in T3 Code"),
+            Rework::Runs(_) => (NodeMark::Fixing, "running again"),
+        };
+        (mark, line.to_owned())
+    }
+
+    /// How it colours the feature's sidebar card.
+    fn tone(self) -> chrome::CardTone {
+        match self {
+            Rework::Runs(_) => chrome::CardTone::Working,
+            Rework::Waits | Rework::Closed | Rework::Draft => chrome::CardTone::Waits,
+        }
+    }
+
+    /// What its agent's card says.
+    fn status(self) -> &'static str {
+        match self {
+            Rework::Waits => "waiting for you \u{b7} pick a model and send the prompt",
+            Rework::Closed => "its tab closed \u{b7} Start agent opens it again",
+            Rework::Draft => "draft in T3 Code \u{b7} pick a model and send it",
+            Rework::Runs(_) => "running again",
+        }
+    }
+}
+
+/// How `feature`'s Build agent stands with work sent back to it, if any.
+fn rework(feature: &Feature, ctx: RowCtx) -> Option<Rework> {
+    if feature.status != Status::Open || !feature.is_done(Stage::Build) {
+        return None;
+    }
+    let run = feature.runs.get(&Stage::Build)?;
+    if run.t3 == Some(feature::agents::T3Run::Draft) {
+        return Some(Rework::Draft);
+    }
+    if run.held {
+        return Some(if run.live() {
+            Rework::Waits
+        } else {
+            Rework::Closed
+        });
+    }
+    ctx.fixing.map(Rework::Runs)
+}
+
+/// `rework`, on the page of `stage` when `stage` is where the feature is at.
+fn rework_on(feature: &Feature, stage: Stage, ctx: RowCtx) -> Option<Rework> {
+    (stage > Stage::Build && stage_mark(feature, stage) == StageMark::Current)
+        .then(|| rework(feature, ctx))
+        .flatten()
+}
+
+/// What the key for an agent's tab does on `stage`'s page: the Build agent's
+/// while work sent back to it is under way, else what `agent_button` says.
+fn agent_key(feature: &Feature, stage: Stage, ctx: RowCtx) -> Option<(&'static str, PanelOutcome)> {
+    rework_on(feature, stage, ctx)
+        .and_then(|_| agent_button(feature, Stage::Build, ctx))
+        .or_else(|| agent_button(feature, stage, ctx))
 }
 
 /// What an agent stage's row does: start its agent, show it while its
@@ -1120,11 +1284,178 @@ fn agent_button(
 /// stopped after a milestone, it is let go on.
 fn agent_action(feature: &Feature, stage: Stage) -> PanelOutcome {
     match feature.runs.get(&stage) {
+        Some(run) if run.waits_to_send() => PanelOutcome::SendPrompt(stage),
         Some(run) if run.stop.is_some() => PanelOutcome::Continue(stage),
         Some(run) if run.ready.is_some() && stage != Stage::Build => PanelOutcome::OpenDoc(stage),
         Some(run) if run.live() => PanelOutcome::ShowAgent(stage),
         Some(run) if run.resumes() => PanelOutcome::ResumeAgent(stage),
         _ => PanelOutcome::StartAgent(stage, false),
+    }
+}
+
+/// What Plan review's row does: as any agent stage's while its agent
+/// reviews or writes the final plan; in between, the suggestions to decide,
+/// then what comes of them.
+fn plan_review_action(feature: &Feature) -> PanelOutcome {
+    let stage = Stage::PlanReview;
+    if feature.runs.get(&stage).is_some_and(|r| r.waits_to_send()) {
+        return PanelOutcome::SendPrompt(stage);
+    }
+    match crate::feature_plan_review::deciding(feature) {
+        Some(review) if review.open() > 0 => PanelOutcome::PlanSuggestions,
+        Some(_) => PanelOutcome::WriteFinalPlan,
+        None => agent_action(feature, stage),
+    }
+}
+
+/// AI review's findings on `stage`'s page of `feature`, once read: those
+/// to decide first, those gone to the end, each group in the order raised.
+pub(crate) fn finding_cards(feature: &Feature, stage: Stage) -> Vec<&ReviewFinding> {
+    if stage != Stage::AiReview {
+        return Vec::new();
+    }
+    let ready = (feature.runs.get(&stage)).is_some_and(|r| r.ready.is_some());
+    let Some(review) = feature.review.as_ref().filter(|_| ready) else {
+        return Vec::new();
+    };
+    let rank = |state: FindingState| match state {
+        FindingState::Open => 0,
+        FindingState::Fix => 1,
+        FindingState::Sent => 2,
+        FindingState::Fixed => 3,
+        FindingState::Dismissed => 4,
+    };
+    let mut cards: Vec<&ReviewFinding> = review.findings.iter().collect();
+    cards.sort_by_key(|f| rank(f.state));
+    cards
+}
+
+/// Whether a comment of the user's can be added on `stage`'s page of
+/// `feature`: AI review, current, its findings read.
+fn can_comment(feature: &Feature, stage: Stage) -> bool {
+    stage == Stage::AiReview
+        && feature.status == Status::Open
+        && feature.current() == Some(stage)
+        && (feature.runs.get(&stage)).is_some_and(|r| r.ready.is_some())
+        && feature.review.is_some()
+}
+
+/// What dismissing `f` does: an item of the user's own goes at once, with
+/// nothing to tell themselves; a finding asks why.
+fn dismiss_outcome(f: &ReviewFinding) -> PanelOutcome {
+    match f.yours {
+        true => PanelOutcome::DecideFinding(
+            f.id.clone(),
+            Decision::Dismiss(review_import::DROPPED.to_owned()),
+        ),
+        false => PanelOutcome::AskDismiss(f.id.clone()),
+    }
+}
+
+/// The buttons on `f`'s card: what can be decided of it while AI review is
+/// `current`, and showing it in the diff when it has a file.
+fn finding_buttons(f: &ReviewFinding, current: bool) -> Vec<(PageButton, PanelOutcome)> {
+    let button = |label: &str, style| PageButton {
+        label: label.to_owned(),
+        style,
+    };
+    let plain = |label: &str| button(label, ButtonStyle::Plain);
+    let id = || f.id.clone();
+    let mut out = Vec::new();
+    let undecided = matches!(f.state, FindingState::Open | FindingState::Fix);
+    if current {
+        match f.state {
+            FindingState::Open => {
+                out.push((
+                    plain("Fix"),
+                    PanelOutcome::DecideFinding(id(), Decision::Fix),
+                ));
+            }
+            FindingState::Fix if !f.yours => {
+                let back = PanelOutcome::DecideFinding(id(), Decision::Reopen);
+                out.push((plain("Don't fix"), back));
+            }
+            FindingState::Dismissed => {
+                let back = PanelOutcome::DecideFinding(id(), Decision::Reopen);
+                out.push((plain("Reopen"), back));
+            }
+            _ => {}
+        }
+        if undecided {
+            out.push((plain("Edit\u{2026}"), PanelOutcome::EditFinding(id())));
+            let label = if f.yours { "Drop" } else { "Dismiss\u{2026}" };
+            out.push((plain(label), dismiss_outcome(f)));
+        }
+    }
+    if !f.file.is_empty() {
+        out.push((
+            button("Show in diff", ButtonStyle::Quiet),
+            PanelOutcome::ShowFinding(id()),
+        ));
+    }
+    out
+}
+
+/// The finding a card's button acts on.
+fn outcome_finding(outcome: &PanelOutcome) -> Option<&str> {
+    match outcome {
+        PanelOutcome::DecideFinding(id, _)
+        | PanelOutcome::AskDismiss(id)
+        | PanelOutcome::EditFinding(id)
+        | PanelOutcome::ShowFinding(id) => Some(id),
+        _ => None,
+    }
+}
+
+/// `f`'s card on AI review's page, its buttons those in `actions`.
+fn finding_card(
+    f: &ReviewFinding,
+    multi: bool,
+    actions: &[(PageButton, PanelOutcome)],
+) -> FindingCard {
+    let tag = match (f.yours, f.severity) {
+        (true, _) => FindingTag::Yours,
+        (_, Severity::High) => FindingTag::High,
+        (_, Severity::Medium) => FindingTag::Medium,
+        (_, Severity::Low) => FindingTag::Low,
+    };
+    let state = match f.state {
+        FindingState::Open => String::new(),
+        FindingState::Fix => "to fix".to_owned(),
+        FindingState::Sent => "sent to Build".to_owned(),
+        FindingState::Fixed => "fixed".to_owned(),
+        FindingState::Dismissed => format!("dismissed: {}", f.reason),
+    };
+    let mut place = vec![f.id.clone()];
+    if !f.file.is_empty() {
+        place.push(review_import::location(f, multi));
+        if !f.placed {
+            place.push("not in the diff".to_owned());
+        }
+    }
+    let fix = match &f.my_fix {
+        Some(fix) => format!("Your fix: {fix}"),
+        None if f.fix.is_empty() => String::new(),
+        None => format!("Fix: {}", f.fix),
+    };
+    let note = match f.note.is_empty() {
+        true => String::new(),
+        false => format!("Your comment: {}", f.note),
+    };
+    FindingCard {
+        tag,
+        title: f.title.clone(),
+        state,
+        place: place.join(" \u{b7} "),
+        body: f.body.clone(),
+        fix,
+        note,
+        faded: matches!(f.state, FindingState::Fixed | FindingState::Dismissed),
+        selected: false,
+        buttons: (actions.iter().enumerate())
+            .filter(|(_, (_, o))| outcome_finding(o) == Some(f.id.as_str()))
+            .map(|(i, _)| i)
+            .collect(),
     }
 }
 
@@ -1141,6 +1472,7 @@ fn review_action(feature: &Feature) -> PanelOutcome {
     match review {
         Some(r) if r.count(FindingState::Open) > 0 => PanelOutcome::Findings,
         Some(r) if r.count(FindingState::Fix) > 0 => PanelOutcome::SendFixes,
+        _ if run.waits_to_send() => PanelOutcome::SendPrompt(stage),
         _ if run.live() => PanelOutcome::ShowAgent(stage),
         _ if run.resumes() => PanelOutcome::ResumeAgent(stage),
         _ => PanelOutcome::StartAgent(stage, false),
@@ -1169,15 +1501,9 @@ fn review_line(feature: &Feature, agent: Option<&str>) -> Option<String> {
     let fix = review.count(FindingState::Fix);
     let sent = review.count(FindingState::Sent);
     Some(if open > 0 {
-        format!(
-            "{} to decide \u{b7} Enter to review",
-            plural(open, "finding")
-        )
+        format!("{} to decide", plural(open, "finding"))
     } else if fix > 0 {
-        format!(
-            "{} to fix \u{b7} Enter to send to Build",
-            plural(fix, "finding")
-        )
+        format!("{} to fix", plural(fix, "finding"))
     } else if sent > 0 {
         format!("{} sent to Build", plural(sent, "finding"))
     } else if review.findings.is_empty() {
@@ -1243,16 +1569,21 @@ fn row_hint(feature: &Feature, row: PanelRow, ctx: RowCtx) -> &'static str {
 fn action_hint(action: &PanelOutcome) -> &'static str {
     match action {
         PanelOutcome::StartAgent(..) => "start agent",
+        PanelOutcome::SendPrompt(_) => "send prompt",
         PanelOutcome::ShowAgent(_) => "show agent",
         PanelOutcome::ResumeAgent(_) => "resume agent",
         PanelOutcome::OpenDoc(Stage::Discover) => "review brief",
         PanelOutcome::OpenDoc(_) => "review plan",
         PanelOutcome::Continue(_) => "continue",
         PanelOutcome::RunChecks => "run checks",
-        PanelOutcome::Findings => "review findings",
+        PanelOutcome::SetUp => "set up",
+        PanelOutcome::Findings => "review in diff",
         PanelOutcome::SendFixes => "send fixes",
+        PanelOutcome::EditCommands(_) => "edit commands",
         PanelOutcome::CodeReview => "review code",
         PanelOutcome::ManualTest => "test",
+        PanelOutcome::PlanSuggestions => "decide",
+        PanelOutcome::WriteFinalPlan => "go on",
         PanelOutcome::Tick => "mark done",
         PanelOutcome::Ship => "ship\u{2026}",
         PanelOutcome::Untick(_) => "reopen",
@@ -1270,15 +1601,25 @@ fn stage_button(feature: &Feature, stage: Stage, ctx: RowCtx) -> Option<&'static
         PanelOutcome::Ship => Some("Ship\u{2026}"),
         PanelOutcome::Untick(_) => Some("Reopen"),
         PanelOutcome::StartAgent(..) => Some("Start agent"),
+        PanelOutcome::SendPrompt(_) => Some("Send prompt"),
         PanelOutcome::ShowAgent(_) => Some("Show agent"),
         PanelOutcome::ResumeAgent(_) => Some("Resume agent"),
         PanelOutcome::OpenDoc(_) => Some("Review"),
         PanelOutcome::Continue(_) => Some("Continue"),
         PanelOutcome::RunChecks => Some("Run checks"),
-        PanelOutcome::Findings => Some("Review findings"),
+        PanelOutcome::Findings => Some("Review in diff"),
         PanelOutcome::SendFixes => Some("Send fixes"),
         PanelOutcome::CodeReview => Some("Review code"),
         PanelOutcome::ManualTest => Some("Test\u{2026}"),
+        PanelOutcome::PlanSuggestions => Some("Decide\u{2026}"),
+        PanelOutcome::WriteFinalPlan => {
+            let accepted = (feature.plan_review.as_ref()).is_some_and(|r| r.any_accepted());
+            Some(if accepted {
+                "Write final plan"
+            } else {
+                "Use the plan as it is"
+            })
+        }
         _ => None,
     }
 }
@@ -1689,7 +2030,7 @@ impl FeaturePanel {
         let entries = repo_entries(feature, &self.sources, self.expanded);
         let repos = entries.len();
         self.repo = self.repo.min(repos.saturating_sub(1));
-        if repos == 0 {
+        if repos == 0 && self.focus == TabArea::Repos {
             self.focus = TabArea::Stages;
         }
         let entry = entries.get(self.repo).copied();
@@ -1699,6 +2040,12 @@ impl FeaturePanel {
             self.unpick();
         }
         let stage = self.page_stage(feature);
+        let cards = finding_cards(feature, stage);
+        self.finding = self.finding.min(cards.len().saturating_sub(1));
+        if self.focus == TabArea::Findings && (cards.is_empty() || self.expanded) {
+            self.focus = TabArea::Stages;
+        }
+        let card = cards.get(self.finding).copied();
         let ctrl = mods.ctrl && !mods.alt && !mods.logo;
         let plain = !(mods.ctrl || mods.alt || mods.logo);
         let bare = plain && !mods.shift;
@@ -1756,20 +2103,61 @@ impl FeaturePanel {
                         self.repo_pick = None;
                     }
                 }
+                TabArea::Findings => {
+                    self.finding = step.from(self.finding, cards.len().saturating_sub(1));
+                }
             }
             return None;
         }
         let row = match (self.focus, entry) {
-            (TabArea::Stages, _) => PanelRow::Stage(stage),
+            (TabArea::Stages | TabArea::Findings, _) => PanelRow::Stage(stage),
             (TabArea::Repos, Some(RepoEntry::Held(i))) => PanelRow::Repo(i),
             (TabArea::Repos, _) => PanelRow::Other,
         };
         match sym {
             Keysym::Tab | Keysym::ISO_Left_Tab if plain => {
-                self.focus = match self.focus {
-                    TabArea::Stages if repos > 0 => TabArea::Repos,
-                    _ => TabArea::Stages,
-                };
+                let mut stops = vec![TabArea::Stages];
+                if !cards.is_empty() && !self.expanded {
+                    stops.push(TabArea::Findings);
+                }
+                if repos > 0 {
+                    stops.push(TabArea::Repos);
+                }
+                let at = stops.iter().position(|s| *s == self.focus).unwrap_or(0);
+                let back = mods.shift || sym == Keysym::ISO_Left_Tab;
+                let by = if back { stops.len() - 1 } else { 1 };
+                self.focus = stops[(at + by) % stops.len()];
+            }
+            // The card with the keyboard: the diff's keys for a finding.
+            Keysym::f | Keysym::F if bare && self.focus == TabArea::Findings => {
+                let f = card?;
+                return Some(match review_import::fix_key(f.state) {
+                    Ok(decision) => PanelOutcome::DecideFinding(f.id.clone(), decision),
+                    Err(why) => PanelOutcome::FindingRefused(why),
+                });
+            }
+            Keysym::e | Keysym::E if ctrl && !mods.shift && self.focus == TabArea::Findings => {
+                return Some(PanelOutcome::EditFinding(card?.id.clone()));
+            }
+            Keysym::Delete | Keysym::KP_Delete if bare && self.focus == TabArea::Findings => {
+                let f = card?;
+                return Some(match review_import::dismiss_key(f.state) {
+                    Ok(None) => dismiss_outcome(f),
+                    Ok(Some(decision)) => PanelOutcome::DecideFinding(f.id.clone(), decision),
+                    Err(why) => PanelOutcome::FindingRefused(why),
+                });
+            }
+            Keysym::Return | Keysym::KP_Enter if plain && self.focus == TabArea::Findings => {
+                let f = card?;
+                return Some(match f.file.is_empty() {
+                    true => PanelOutcome::EditFinding(f.id.clone()),
+                    false => PanelOutcome::ShowFinding(f.id.clone()),
+                });
+            }
+            Keysym::c | Keysym::C
+                if bare && self.focus != TabArea::Repos && can_comment(feature, stage) =>
+            {
+                return Some(PanelOutcome::AddComment);
             }
             // A locked stage's is refused when done, saying why; any other
             // stage has nothing to reopen.
@@ -1804,7 +2192,7 @@ impl FeaturePanel {
             Keysym::o | Keysym::O if ctrl => return Some(PanelOutcome::Open(feature.dir.clone())),
             Keysym::c | Keysym::C if ctrl => return Some(PanelOutcome::CopyPath),
             Keysym::r | Keysym::R if ctrl && mods.shift => {
-                return agent_button(feature, stage, ctx).map(|(_, outcome)| outcome);
+                return agent_key(feature, stage, ctx).map(|(_, outcome)| outcome);
             }
             Keysym::r | Keysym::R if ctrl => {
                 return fresh_stage(feature, row)
@@ -1818,6 +2206,23 @@ impl FeaturePanel {
                 return Some(PanelOutcome::FreshMilestones(!feature.fresh_milestones));
             }
             Keysym::l | Keysym::L if ctrl && mods.shift => self.toggle_repos(),
+            Keysym::u | Keysym::U if ctrl && mods.shift && offers_setup(feature, stage) => {
+                return Some(PanelOutcome::SetUp);
+            }
+            Keysym::e | Keysym::E if ctrl && !mods.shift && offers_setup(feature, stage) => {
+                return Some(PanelOutcome::EditCommands(commands_tab(stage)));
+            }
+            Keysym::k | Keysym::K if ctrl && mods.shift && plan_review_open(feature, stage) => {
+                return Some(PanelOutcome::SkipPlanReview);
+            }
+            Keysym::d | Keysym::D
+                if ctrl
+                    && mods.shift
+                    && plan_review_open(feature, stage)
+                    && feature.plan_review.as_ref().is_some_and(|r| r.writing) =>
+            {
+                return Some(PanelOutcome::ChangeDecisions);
+            }
             Keysym::Delete | Keysym::KP_Delete if ctrl && mods.shift => {
                 return start_over_stage(feature, stage, ctx).map(PanelOutcome::StartOver);
             }
@@ -1858,20 +2263,23 @@ fn stage_index(stage: Stage) -> usize {
     Stage::ALL.iter().position(|s| *s == stage).unwrap_or(0)
 }
 
-/// What Enter does on `stage`'s page of `feature`: its button marked
-/// with Enter, else, on a later stage, says which comes first. On a done
+/// What Enter does on `stage`'s page of `feature`: its primary button,
+/// else, on a later stage, says which comes first. On a done
 /// stage it goes to the current one: Reopen has its own key.
 fn page_enter(feature: &Feature, stage: Stage, ctx: RowCtx) -> Option<PanelOutcome> {
     page_actions(feature, stage, ctx)
         .into_iter()
-        .find(|(b, _)| b.key == Some(ENTER_MARK))
+        .find(|(b, _)| b.style == ButtonStyle::Primary)
         .map(|(_, outcome)| outcome)
         .or_else(|| row_action(feature, PanelRow::Stage(stage), ctx))
         .filter(|outcome| !matches!(outcome, PanelOutcome::Untick(_)))
 }
 
-/// The key mark of the page button Enter presses.
-const ENTER_MARK: &str = "\u{23ce}";
+/// Whether `stage` is the Plan review `feature` is at: what can be skipped.
+fn plan_review_open(feature: &Feature, stage: Stage) -> bool {
+    stage == Stage::PlanReview && feature.status == Status::Open && feature.current() == Some(stage)
+}
+
 /// The key of a done stage's Reopen.
 const REOPEN_KEY: &str = "Ctrl+Shift+Enter";
 /// The key of the current stage's Start over.
@@ -1882,7 +2290,8 @@ const START_OVER_KEY: &str = "Ctrl+Shift+Del";
 /// current one, then Reopen unless it is locked), then its agent's tab, a
 /// fresh agent, starting over, Verify's evidence, AI review's fixes to
 /// send, and Ship's pull requests. A later stage has none.
-/// The page's clicks and Enter both go by this list.
+/// The page's clicks and Enter both go by this list. Where each is drawn is
+/// the page's to say: on the card of what it acts on, else at the title.
 pub fn page_actions(
     feature: &Feature,
     stage: Stage,
@@ -1892,38 +2301,60 @@ pub fn page_actions(
     if mark == StageMark::Later {
         return Vec::new();
     }
-    let button = |label: &str, style, key| PageButton {
+    let button = |label: &str, style| PageButton {
         label: label.to_owned(),
         style,
-        key,
     };
     let row = PanelRow::Stage(stage);
     let mut out = Vec::new();
+    // First whatever the stage's mark: a fresh Build agent for fixes waits
+    // on a done Build.
+    let send = PanelOutcome::SendPrompt(stage);
+    let waits = feature.status == Status::Open
+        && (feature.runs.get(&stage)).is_some_and(|run| run.waits_to_send());
+    if waits {
+        out.push((button("Send prompt", ButtonStyle::Primary), send.clone()));
+    }
+    // Work sent back to the Build agent, seen from the stage the feature is
+    // at: what it waits for comes first.
+    let back = rework_on(feature, stage, ctx);
+    if back == Some(Rework::Waits) {
+        out.push((
+            button("Send prompt", ButtonStyle::Primary),
+            PanelOutcome::SendPrompt(Stage::Build),
+        ));
+    }
     if let (StageMark::Done, Some(current)) = (mark, feature.current()) {
         let label = format!("Go to {}", current.label());
-        out.push((
-            button(&label, ButtonStyle::Primary, Some(ENTER_MARK)),
-            PanelOutcome::GoToCurrent,
-        ));
+        let style = match waits {
+            true => ButtonStyle::Plain,
+            false => ButtonStyle::Primary,
+        };
+        out.push((button(&label, style), PanelOutcome::GoToCurrent));
     }
     if let (Some(label), Some(main)) = (
         stage_button(feature, stage, ctx),
-        row_action(feature, row, ctx),
+        row_action(feature, row, ctx).filter(|main| *main != send),
     ) {
         // Reopen is no default: Enter leaves a done stage be.
-        let (style, key) = match main {
-            PanelOutcome::Untick(_) => (ButtonStyle::Plain, Some(REOPEN_KEY)),
-            _ => (ButtonStyle::Primary, Some(ENTER_MARK)),
+        let style = match main {
+            PanelOutcome::Untick(_) => ButtonStyle::Plain,
+            _ if back == Some(Rework::Waits) => ButtonStyle::Plain,
+            _ => ButtonStyle::Primary,
         };
-        out.push((button(label, style, key), main));
+        out.push((button(label, style), main));
     }
     let has =
         |out: &[(PageButton, PanelOutcome)], o: &PanelOutcome| out.iter().any(|(_, x)| x == o);
     // Also on a done stage: its agent's chat is still worth reading.
     if let Some((label, outcome)) = agent_button(feature, stage, ctx).filter(|(_, o)| !has(&out, o))
     {
-        let key = Some("Ctrl+Shift+R");
-        out.push((button(label, ButtonStyle::Plain, key), outcome));
+        out.push((button(label, ButtonStyle::Plain), outcome));
+    }
+    if back.is_some()
+        && let Some((label, outcome)) = agent_button(feature, Stage::Build, ctx)
+    {
+        out.push((button(label, ButtonStyle::Plain), outcome));
     }
     // The brief's or the plan's file, once there: the page shows it, its tab
     // works on it. What opens that tab already is that button.
@@ -1934,37 +2365,66 @@ pub fn page_actions(
             StageMark::Done => "Open",
             _ => "Review",
         };
-        out.push((button(label, ButtonStyle::Plain, None), open));
+        out.push((button(label, ButtonStyle::Plain), open));
+    }
+    if plan_review_open(feature, stage) {
+        let suggestions = PanelOutcome::PlanSuggestions;
+        let decided = crate::feature_plan_review::deciding(feature).is_some();
+        if decided && !has(&out, &suggestions) {
+            out.push((button("Decide\u{2026}", ButtonStyle::Plain), suggestions));
+        }
+        if feature.plan_review.as_ref().is_some_and(|r| r.writing) {
+            let label = "Change decisions\u{2026}";
+            out.push((
+                button(label, ButtonStyle::Plain),
+                PanelOutcome::ChangeDecisions,
+            ));
+        }
+        let skip = PanelOutcome::SkipPlanReview;
+        out.push((button("Skip review", ButtonStyle::Plain), skip));
     }
     if let Some(stage) = fresh_stage(feature, row) {
         let fresh = PanelOutcome::StartAgent(stage, true);
-        out.push((
-            button("Restart agent", ButtonStyle::Plain, Some("Ctrl+R")),
-            fresh,
-        ));
+        out.push((button("Restart", ButtonStyle::Quiet), fresh));
     }
     if let Some(stage) = start_over_stage(feature, stage, ctx) {
         out.push((
-            button(
-                "Start over\u{2026}",
-                ButtonStyle::Destructive,
-                Some(START_OVER_KEY),
-            ),
+            button("Start over\u{2026}", ButtonStyle::Quiet),
             PanelOutcome::StartOver(stage),
         ));
     }
     if let Some(page) = row_page(feature, row) {
-        out.push((
-            button("Evidence", ButtonStyle::Plain, Some("Ctrl+Shift+O")),
-            page,
-        ));
+        out.push((button("Evidence", ButtonStyle::Plain), page));
+    }
+    if offers_setup(feature, stage) {
+        let ran = (feature.setup.as_ref()).is_some_and(|run| run.finished.is_some());
+        let label = if ran { "Set up again" } else { "Set up" };
+        out.push((button(label, ButtonStyle::Quiet), PanelOutcome::SetUp));
+        // It matters once Verify has nothing to run.
+        let wanted = stage == Stage::Verify && mark == StageMark::Current && !ctx.checks;
+        let style = match wanted {
+            true => ButtonStyle::Plain,
+            false => ButtonStyle::Quiet,
+        };
+        let edit = PanelOutcome::EditCommands(commands_tab(stage));
+        out.push((button("Commands\u{2026}", style), edit));
     }
     let fixes = (feature.review.as_ref()).is_some_and(|r| r.count(FindingState::Fix) > 0);
     if mark == StageMark::Current && fixes && has(&out, &PanelOutcome::Findings) {
         out.push((
-            button("Send fixes", ButtonStyle::Plain, None),
+            button("Send fixes", ButtonStyle::Plain),
             PanelOutcome::SendFixes,
         ));
+    }
+    if can_comment(feature, stage) {
+        out.push((
+            button("Add comment\u{2026}", ButtonStyle::Plain),
+            PanelOutcome::AddComment,
+        ));
+    }
+    let current = mark == StageMark::Current;
+    for f in finding_cards(feature, stage) {
+        out.extend(finding_buttons(f, current));
     }
     if stage == Stage::Ship {
         let one = feature.shipping.prs.len() == 1;
@@ -1974,10 +2434,28 @@ pub fn page_actions(
                 false => format!("Open {}", pr_tail(&pr.url)),
             };
             let open = PanelOutcome::OpenPr(pr.url.clone());
-            out.push((button(&label, ButtonStyle::Plain, None), open));
+            out.push((button(&label, ButtonStyle::Plain), open));
         }
     }
     out
+}
+
+/// Whether `stage`'s page offers to set `feature`'s worktrees up: those
+/// where tests and builds run, once reached.
+fn commands_tab(stage: Stage) -> CommandsTab {
+    match stage {
+        Stage::Build => CommandsTab::Setup,
+        _ => CommandsTab::Checks,
+    }
+}
+
+/// Whether `stage`'s page of `feature` offers to set its worktrees up, and
+/// so to edit the project's commands.
+fn offers_setup(feature: &Feature, stage: Stage) -> bool {
+    matches!(stage, Stage::Build | Stage::Verify)
+        && feature.status == Status::Open
+        && !feature.repos.is_empty()
+        && stage_mark(feature, stage) != StageMark::Later
 }
 
 /// The name of the feature tab's header button `i`: `FEATURE_BUTTONS`,
@@ -2105,6 +2583,7 @@ impl Gerdr {
             self.show_error(format!("Couldn't save \u{201c}{title}\u{201d}: {err}"));
         }
         self.manual_sheet_follows();
+        self.plan_sheet_follows();
     }
 
     /// The slugs of the features the panel lists for `project`.
@@ -2161,6 +2640,11 @@ impl Gerdr {
     /// to is kept and said.
     fn feature_done(&mut self, done: Done) {
         match done {
+            Done::CommandsFound {
+                serial,
+                project,
+                result,
+            } => self.commands_found(serial, &project, result),
             Done::Found {
                 serial,
                 from,
@@ -2345,6 +2829,18 @@ impl Gerdr {
                 stamp,
                 result,
             } => self.review_read(&project, &slug, n, stamp, result),
+            Done::PlanReviewBaseline {
+                project,
+                slug,
+                result,
+            } => self.plan_review_baseline(&project, &slug, result),
+            Done::PlanReviewRead {
+                project,
+                slug,
+                n,
+                stamp,
+                result,
+            } => self.plan_review_read(&project, &slug, n, stamp, result),
             Done::Shipped {
                 project,
                 slug,
@@ -2380,10 +2876,10 @@ impl Gerdr {
             Done::SetUp {
                 project,
                 slug,
-                result,
+                report,
             } => {
                 self.unbusy(&project, &slug, Job::Setup);
-                self.setup_done(&project, &slug, result);
+                self.setup_done(&project, &slug, report);
             }
             Done::Verified {
                 project,
@@ -2450,6 +2946,7 @@ impl Gerdr {
             checks,
             criteria,
             written,
+            fixing: self.build_agent_fixing(feature),
         }
     }
 
@@ -2566,6 +3063,7 @@ impl Gerdr {
     /// Probe what is due.
     fn feature_watch_tick(&mut self) {
         self.manual_sheet_follows();
+        self.plan_sheet_follows();
         let mut due = Vec::new();
         if let Some(panel) = &self.features.panel {
             due.push((panel.project.clone(), panel.slug.clone(), PANEL_EVERY));
@@ -2629,6 +3127,7 @@ impl Gerdr {
         self.feature_work(None, move |_| Done::Probed {
             probe: Probe {
                 docs: feature::page::read_docs(&data),
+                models: feature::agents::read_models(&feature),
                 ..ship::probe(&feature, &modes)
             },
             project,
@@ -2658,6 +3157,7 @@ impl Gerdr {
         self.feature_work(None, move |_| Done::Probed {
             probe: Probe {
                 docs: feature::page::read_docs(&data),
+                models: feature::agents::read_models(&feature),
                 ..ship::probe_finished(&feature)
             },
             project,
@@ -2668,6 +3168,7 @@ impl Gerdr {
     /// A probe of feature `slug` of `project` is back: its code changed
     /// sends it back, its squash merged makes it done.
     fn feature_probed(&mut self, project: &str, slug: &str, mut probe: Probe) {
+        self.feature_models_are(project, slug, std::mem::take(&mut probe.models));
         let key = (project.to_owned(), slug.to_owned());
         let open = (self.feature(project, slug)).is_some_and(|f| f.status == Status::Open);
         let probed = self.features.probes.entry(key).or_default();
@@ -2701,6 +3202,31 @@ impl Gerdr {
         }
         if again {
             self.probe_feature(project, slug);
+        }
+    }
+
+    /// The models feature `slug`'s agents use, as last read: kept with their
+    /// runs. A run started since the read isn't the one it was of.
+    fn feature_models_are(
+        &mut self,
+        project: &str,
+        slug: &str,
+        models: BTreeMap<Stage, (u32, String)>,
+    ) {
+        let Some(f) = self.feature_mut(project, slug) else {
+            return;
+        };
+        let mut changed = false;
+        for (stage, (n, model)) in models {
+            if let Some(run) = f.runs.get_mut(&stage).filter(|r| r.n == n)
+                && run.model.as_ref() != Some(&model)
+            {
+                run.model = Some(model);
+                changed = true;
+            }
+        }
+        if changed {
+            self.save_feature(project, slug);
         }
     }
 
@@ -2978,17 +3504,19 @@ impl Gerdr {
             return;
         };
         let (workspace_dirs, ignore, bases) = root_search(project);
+        let others = self.other_projects_dirs(id);
         self.feature_work(None, move |_| Done::Found {
             serial,
             from: layout::main_top(&from),
-            result: layout::find_root(&from, &workspace_dirs, &ignore, &bases),
+            result: layout::find_project_root(&from, &workspace_dirs, &others, &ignore, &bases),
         });
     }
 
     /// Read off the thread (checklist D3) which repositories the feature
-    /// panel can offer: those of its project and of the store's others.
-    /// What was found before stays until the new read is in. A project
-    /// with no workspace folder has none to offer. A shipped feature's
+    /// panel can offer: those of its project, and of the projects it links
+    /// for what it holds or held of them. What was found before stays until
+    /// the new read is in. A linked project with no workspace folder has
+    /// none to find. A shipped feature's
     /// repositories can't change: it looks nowhere.
     pub(crate) fn find_repo_sources(&mut self) {
         let Some(panel) = self.features.panel.as_ref() else {
@@ -3007,8 +3535,9 @@ impl Gerdr {
         let mut sources = Vec::new();
         let mut finds = Vec::new();
         // The home project first, whatever its place in the store.
-        let (home, others): (Vec<_>, Vec<_>) =
-            (self.projects.projects.iter()).partition(|p| p.id == project);
+        let (home, others): (Vec<_>, Vec<_>) = (self.projects.projects.iter())
+            .filter(|p| p.id == project || feature.link(&p.id).is_some())
+            .partition(|p| p.id == project);
         for p in home.into_iter().chain(others) {
             let is_home = p.id == project;
             let search = root_search(p);
@@ -3023,20 +3552,29 @@ impl Gerdr {
                 project: source.clone(),
                 name: p.name.clone(),
             });
-            finds.push((source, from, search));
+            finds.push((source, from, search, self.other_projects_dirs(&p.id)));
         }
         if let Some(panel) = self.features.panel.as_mut() {
             panel.sources = sources;
         }
-        for (source, from, (dirs, ignore, bases)) in finds {
+        for (source, from, (dirs, ignore, bases), others) in finds {
             let (project, slug) = (project.clone(), slug.clone());
             self.feature_work(None, move |_| Done::FoundRepos {
                 project,
                 slug,
                 source,
-                result: layout::find_root(&from, &dirs, &ignore, &bases),
+                result: layout::find_project_root(&from, &dirs, &others, &ignore, &bases),
             });
         }
+    }
+
+    /// The workspace folders of every project but `id`, whose repositories
+    /// are theirs.
+    pub(crate) fn other_projects_dirs(&self, id: &str) -> Vec<PathBuf> {
+        (self.projects.projects.iter())
+            .filter(|p| p.id != id)
+            .flat_map(|p| p.workspaces.iter().map(|w| w.dir.clone()))
+            .collect()
     }
 
     /// The repository `key` as the feature panel's sources found it: its
@@ -3077,7 +3615,7 @@ impl Gerdr {
     }
 
     /// Make feature `slug` hold repository `key` on its branch: a new
-    /// worktree from its base, its project linked if it wasn't. Taken
+    /// worktree from its base. Taken
     /// out before, it gets a new branch.
     fn add_repo_to_feature(&mut self, project: &str, slug: &str, key: &str) {
         if self.repos_locked(project, slug) {
@@ -3091,31 +3629,13 @@ impl Gerdr {
         let Finding::Found(root) = source.finding else {
             return;
         };
-        let linked = |id: &str| {
-            self.feature(project, slug)
-                .is_some_and(|f| f.link(id).is_some())
+        let add = AddSpec {
+            project: source.project,
+            name: source.name,
+            root,
+            names: vec![found.name],
         };
-        let (links, adds) = match source.project {
-            Some(id) if !linked(&id) => (
-                vec![LinkSpec {
-                    project: id,
-                    name: source.name,
-                    root,
-                    touched: vec![found.name],
-                }],
-                Vec::new(),
-            ),
-            at => (
-                Vec::new(),
-                vec![AddSpec {
-                    project: at,
-                    name: source.name,
-                    root,
-                    names: vec![found.name],
-                }],
-            ),
-        };
-        self.link_repos(project.to_owned(), slug.to_owned(), links, adds);
+        self.link_repos(project.to_owned(), slug.to_owned(), vec![add]);
     }
 
     /// Let agents of feature `slug` read repository `key`'s main checkout:
@@ -3228,7 +3748,15 @@ impl Gerdr {
             let (dirs, ignore, bases) = root_search(p);
             let root = match dirs.first() {
                 Some(from) => {
-                    finds.push((p.id.clone(), from.clone(), dirs.clone(), ignore, bases));
+                    let theirs = self.other_projects_dirs(&p.id);
+                    finds.push((
+                        p.id.clone(),
+                        from.clone(),
+                        dirs.clone(),
+                        theirs,
+                        ignore,
+                        bases,
+                    ));
                     Finding::Looking
                 }
                 None => Finding::Failed("it has no workspace with a folder".into()),
@@ -3244,11 +3772,11 @@ impl Gerdr {
         if let Some(dialog) = self.features.dialog.as_mut() {
             dialog.others = others;
         }
-        for (project, from, dirs, ignore, bases) in finds {
+        for (project, from, dirs, theirs, ignore, bases) in finds {
             self.feature_work(None, move |_| Done::FoundOther {
                 serial,
                 project,
-                result: layout::find_root(&from, &dirs, &ignore, &bases),
+                result: layout::find_project_root(&from, &dirs, &theirs, &ignore, &bases),
             });
         }
     }
@@ -3375,6 +3903,7 @@ impl Gerdr {
             setup: None,
             verify: None,
             review: None,
+            plan_review: None,
             viewed: Default::default(),
             manual: None,
         };
@@ -3392,17 +3921,10 @@ impl Gerdr {
         self.refresh_feature_graphs(&project, &slug, true);
     }
 
-    /// Link `links` to open feature `slug` and bring `adds` into its folders
-    /// off the thread, shown in the tasks panel meanwhile. A setup or check
+    /// Bring `adds` into the folders of open feature `slug` off the thread, shown in the tasks panel meanwhile. A setup or check
     /// under way has a copy of the feature that wouldn't see them: refused
     /// meanwhile.
-    fn link_repos(
-        &mut self,
-        project: String,
-        slug: String,
-        links: Vec<LinkSpec>,
-        adds: Vec<AddSpec>,
-    ) {
+    fn link_repos(&mut self, project: String, slug: String, adds: Vec<AddSpec>) {
         let Some(feature) = self.feature(&project, &slug).cloned() else {
             return self.show_warning("That feature is gone".into());
         };
@@ -3412,9 +3934,7 @@ impl Gerdr {
                 feature.title
             ));
         }
-        let names: Vec<String> = (links.iter().map(|l| l.name.clone()))
-            .chain(adds.iter().flat_map(|a| a.names.iter().cloned()))
-            .collect();
+        let names: Vec<String> = adds.iter().flat_map(|a| a.names.iter().cloned()).collect();
         let busy = Busy {
             project: project.clone(),
             slug: slug.clone(),
@@ -3427,7 +3947,7 @@ impl Gerdr {
             ),
         };
         self.feature_work(Some(busy), move |_| {
-            let result = layout::link_more(&feature, &links, &adds);
+            let result = layout::link_more(&feature, &[], &adds);
             Done::Linked {
                 project,
                 slug,
@@ -3730,6 +4250,15 @@ impl Gerdr {
             }
         }
         self.open_feature(project, slug);
+        // Suggestions to decide open over the panel.
+        let deciding = stage == Stage::PlanReview
+            && (self.feature(project, slug))
+                .filter(|f| f.status == Status::Open && f.current() == Some(stage))
+                .and_then(crate::feature_plan_review::deciding)
+                .is_some_and(|r| r.open() > 0);
+        if deciding {
+            self.open_plan_sheet(project, slug);
+        }
         // Manual test with criteria opens its sheet over the panel.
         let testing = stage == Stage::ManualTest
             && self
@@ -3805,12 +4334,20 @@ impl Gerdr {
         let ctx = self.row_ctx(&feature);
         let panel = self.features.panel.as_mut()?;
         let before = (panel.focus, panel.repo, panel.expanded);
+        let card_before = panel.finding;
         let outcome = panel.key(mods, sym, &feature, &slugs, ctx);
         let now = (self.features.panel.as_ref()).map(|p| (p.focus, p.repo, p.expanded));
         if now.is_some_and(|(focus, repo, expanded)| {
             focus == TabArea::Repos && (focus, repo, expanded) != before
         }) {
             self.reveal_feature_repo();
+        }
+        let card_now = (self.features.panel.as_ref()).map(|p| (p.focus, p.finding));
+        if card_now.is_some_and(|(focus, card)| {
+            focus == TabArea::Findings && (focus != before.0 || card != card_before)
+        }) {
+            self.sync_feature_page();
+            self.reveal_feature_finding();
         }
         if now.is_some_and(|(_, _, expanded)| expanded && !before.2) {
             self.find_repo_sources();
@@ -3869,6 +4406,23 @@ impl Gerdr {
         }
     }
 
+    /// Scroll the feature tab's page to show the finding with the keyboard,
+    /// as laid out now.
+    fn reveal_feature_finding(&mut self) {
+        let Some((_, layout)) = self.feature_tab_parts() else {
+            return;
+        };
+        let Some(panel) = self.features.panel.as_mut() else {
+            return;
+        };
+        let scroll = &mut panel.scroll[TabColumn::Page as usize];
+        if let Some(to) = layout.reveal_finding(panel.finding, scroll.pos())
+            && to != scroll.pos()
+        {
+            scroll.jump(to);
+        }
+    }
+
     /// Unfold the feature tab's repositories or fold them, reading again
     /// what they can offer when they unfold.
     fn toggle_feature_repos(&mut self) {
@@ -3904,9 +4458,11 @@ impl Gerdr {
                 None => self.show_warning("Nothing left to mark done".into()),
             },
             PanelOutcome::Ship => self.ask_ship_feature(&project, &slug),
+            PanelOutcome::SetUp => self.set_up_again(&project, &slug),
             PanelOutcome::StartAgent(stage, fresh) => {
                 self.start_stage_agent(&project, &slug, stage, fresh)
             }
+            PanelOutcome::SendPrompt(stage) => self.send_stage_prompt(&project, &slug, stage),
             PanelOutcome::ShowAgent(stage) => self.show_stage_agent(&project, &slug, stage),
             PanelOutcome::ResumeAgent(stage) => self.resume_stage_agent(&project, &slug, stage),
             PanelOutcome::OpenDoc(stage) => {
@@ -3929,8 +4485,25 @@ impl Gerdr {
                 self.open_feature_diff(&project, &slug, first.as_deref());
             }
             PanelOutcome::SendFixes => self.send_findings(&project, &slug),
+            PanelOutcome::EditCommands(tab) => {
+                self.open_project_commands(&project, Some(&slug), tab);
+            }
+            PanelOutcome::DecideFinding(id, decision) => {
+                self.decide_finding(&project, &slug, &id, decision);
+            }
+            PanelOutcome::AskDismiss(id) => self.ask_dismiss_finding(&project, &slug, &id),
+            PanelOutcome::EditFinding(id) => self.ask_edit_finding(&project, &slug, &id),
+            PanelOutcome::AddComment => self.ask_add_comment(&project, &slug),
+            PanelOutcome::ShowFinding(id) => {
+                self.open_feature_diff(&project, &slug, Some(&id));
+            }
+            PanelOutcome::FindingRefused(why) => self.show_warning(why.to_owned()),
             PanelOutcome::CodeReview => self.open_feature_diff(&project, &slug, None),
             PanelOutcome::ManualTest => self.open_manual_test(&project, &slug),
+            PanelOutcome::PlanSuggestions => self.open_plan_sheet(&project, &slug),
+            PanelOutcome::WriteFinalPlan => self.write_final_plan(&project, &slug),
+            PanelOutcome::SkipPlanReview => self.ask_skip_plan_review(&project, &slug),
+            PanelOutcome::ChangeDecisions => self.ask_change_decisions(&project, &slug),
             PanelOutcome::OpenPr(url) => self.open_feature_page(&project, &slug, url),
             PanelOutcome::PickAgent(stage, name) => {
                 self.pick_stage_agent(&project, &slug, stage, &name);
@@ -4723,6 +5296,13 @@ impl Gerdr {
         let outcome = match hit {
             FeatureTabHit::Tab | FeatureTabHit::Column(_) | FeatureTabHit::AgentPickOff(_) => None,
             FeatureTabHit::MilestoneMode(i) => Some(PanelOutcome::FreshMilestones(i == 1)),
+            FeatureTabHit::Finding(i) => {
+                if let Some(panel) = self.features.panel.as_mut() {
+                    panel.focus = TabArea::Findings;
+                    panel.finding = i;
+                }
+                None
+            }
             FeatureTabHit::AgentPick(i) => {
                 let stage = (self.features.panel.as_ref())
                     .filter(|p| !p.keys)
@@ -4904,7 +5484,10 @@ impl Gerdr {
         !matches!(
             self.feature_tab_hit(pos),
             None | Some(
-                FeatureTabHit::Tab | FeatureTabHit::Column(_) | FeatureTabHit::AgentPickOff(_)
+                FeatureTabHit::Tab
+                    | FeatureTabHit::Column(_)
+                    | FeatureTabHit::AgentPickOff(_)
+                    | FeatureTabHit::Finding(_)
             )
         )
     }
@@ -5044,10 +5627,7 @@ impl Gerdr {
             code_review: self.code_review_line(&panel.project, &panel.slug),
             picks: self.chips_of(&panel.project, &panel.slug, panel.page_stage(feature)),
             manual: manual_counts.map(crate::manual_test::counts_text),
-            manual_gate: manual_counts.map(|n| {
-                let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
-                (count(n.passed), count(n.total()))
-            }),
+            manual_gate: manual_counts.map(manual_gate),
         };
         Some(tab_view(panel, feature, &slugs, &state, now))
     }
@@ -5058,9 +5638,41 @@ impl Gerdr {
             .into_iter()
             .map(|f| chrome::FeatureRowView {
                 title: self.row_title(f),
-                marks: Stage::ALL.iter().map(|s| stage_mark(f, *s)).collect(),
+                card: self.feature_card(f),
             })
             .collect()
+    }
+
+    /// What `f`'s card says, on its row or its workspace's header.
+    pub(crate) fn feature_card(&self, f: &Feature) -> chrome::FeatureCard {
+        let mine = || {
+            let busy = self.features.busy.iter();
+            busy.filter(|b| b.project == f.project && b.slug == f.slug)
+        };
+        let doing = |job: Job| mine().find(|b| b.job == job).map(|b| b.what.as_str());
+        let key = (f.project.clone(), f.slug.clone());
+        let manual = self.manual_counts(f).map(manual_gate);
+        let ctx = self.row_ctx(f);
+        let line = LineState {
+            probe: (self.features.probes.get(&key)).and_then(|p| p.last.as_ref()),
+            shipping: mine().any(|b| b.job == Job::Ship),
+            checks: ctx.checks,
+            setup: doing(Job::Setup),
+            verify: doing(Job::Verify),
+            manual_gate: manual,
+        };
+        let gate = crate::feature_agents::gate_of(f, |_| manual).is_some();
+        let busy = mine().next().is_some();
+        let back = rework(f, ctx);
+        let (stage, text, tone) = card_status(f, &line, gate, busy, back, feature::now());
+        chrome::FeatureCard {
+            marks: Stage::ALL.iter().map(|s| stage_mark(f, *s)).collect(),
+            stage,
+            line: text,
+            tone,
+            gate,
+            repos: f.repos.len(),
+        }
     }
 
     /// A sidebar row's title for `f`: another project's feature (one
@@ -5250,7 +5862,7 @@ fn removal_body(losses: &[String]) -> String {
 
 /// What `layout::find_root` goes by in project `project`: its workspaces'
 /// folders, the repositories it ignores, and their base branches.
-fn root_search(
+pub(crate) fn root_search(
     project: &crate::projects::Project,
 ) -> (Vec<PathBuf>, Vec<String>, Vec<(String, String)>) {
     let dirs = project.workspaces.iter().map(|w| w.dir.clone()).collect();
@@ -5488,7 +6100,7 @@ fn verify_line(feature: &Feature, ctx: RowCtx, running: Option<&str>) -> Option<
     }
     let current = feature.status == Status::Open && feature.current() == Some(Stage::Verify);
     if current && !ctx.checks {
-        return Some("no checks set: Mark done by hand".into());
+        return Some("no checks for its repositories: set some, or Mark done by hand".into());
     }
     let run = feature
         .verify
@@ -5577,6 +6189,102 @@ fn is_stale(feature: &Feature, stage: Stage, probe: Option<&Probe>) -> bool {
         && stale_from(feature, probe).is_some_and(|from| stage_index(stage) >= stage_index(from))
 }
 
+/// How many of Manual test's criteria passed, of how many (see
+/// `feature_agents::gate_of`).
+fn manual_gate(n: crate::feature::manual::Counts) -> (u32, u32) {
+    let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+    (count(n.passed), count(n.total()))
+}
+
+/// What a current stage's short line reads besides its feature (see
+/// `current_line`), on the rail and on the sidebar's cards.
+struct LineState<'a> {
+    probe: Option<&'a Probe>,
+    shipping: bool,
+    checks: bool,
+    setup: Option<&'a str>,
+    verify: Option<&'a str>,
+    manual_gate: Option<(u32, u32)>,
+}
+
+impl<'a> From<&PanelState<'a>> for LineState<'a> {
+    fn from(state: &PanelState<'a>) -> Self {
+        Self {
+            probe: state.probe,
+            shipping: state.shipping,
+            checks: state.ctx.checks,
+            setup: state.setup,
+            verify: state.verify,
+            manual_gate: state.manual_gate,
+        }
+    }
+}
+
+/// The stage a card shows, its line and its tone. Work sent back to Build
+/// speaks for the card, as it does on the rail (see `Rework::node`).
+fn card_status(
+    feature: &Feature,
+    state: &LineState,
+    gate: bool,
+    busy: bool,
+    back: Option<Rework>,
+    now: u64,
+) -> (Option<Stage>, String, chrome::CardTone) {
+    if let Some(back) = back {
+        let line = format!("{} \u{b7} {}", Stage::Build.label(), back.node().1);
+        return (Some(Stage::Build), line, back.tone());
+    }
+    let stage = feature.current();
+    let line = card_line(feature, stage, state, now);
+    (stage, line, card_tone(feature, stage, state, gate, busy))
+}
+
+/// A card's line for `feature` at `stage`: the stage and how it stands,
+/// else how long nothing happened to it.
+fn card_line(feature: &Feature, stage: Option<Stage>, state: &LineState, now: u64) -> String {
+    let Some(stage) = stage else {
+        return "Every stage done".to_owned();
+    };
+    let mut what = current_line(feature, stage, state, now);
+    if what.is_empty() {
+        let last = feature.history.iter().map(|e| e.at).max();
+        what = projects::ago(now, last.unwrap_or(feature.created));
+    }
+    format!("{} \u{b7} {what}", stage.label())
+}
+
+/// How `feature` at `stage` stands, for its card; `gate`: a gate holds it,
+/// `busy`: a job of it runs.
+fn card_tone(
+    feature: &Feature,
+    stage: Option<Stage>,
+    state: &LineState,
+    gate: bool,
+    busy: bool,
+) -> chrome::CardTone {
+    let run = stage.and_then(|stage| feature.runs.get(&stage));
+    let failed = match stage {
+        Some(Stage::Build) => {
+            run.is_none() && (feature.setup.as_ref()).is_some_and(|s| s.failed.is_some())
+        }
+        Some(Stage::Verify) => (feature.verify.as_ref()).is_some_and(|v| v.passed == Some(false)),
+        Some(Stage::Ship) => {
+            let check = state.probe.and_then(|p| p.ship.as_ref());
+            check.is_some_and(|c| !c.blockers.is_empty())
+        }
+        _ => false,
+    };
+    if failed {
+        chrome::CardTone::Failed
+    } else if gate {
+        chrome::CardTone::Waits
+    } else if busy || run.is_some_and(feature::agents::StageRun::live) {
+        chrome::CardTone::Working
+    } else {
+        chrome::CardTone::Idle
+    }
+}
+
 /// Whether the current `stage` of `feature` waits for the user: a file to
 /// review, a stop to go on from, findings to decide (see
 /// `feature_agents::gate_of`).
@@ -5593,10 +6301,11 @@ fn running_for(now: u64, started: u64) -> String {
 }
 
 /// The short line under current `stage`'s node on the rail.
-fn current_line(feature: &Feature, stage: Stage, state: &PanelState, now: u64) -> String {
+fn current_line(feature: &Feature, stage: Stage, state: &LineState, now: u64) -> String {
     let run = feature.runs.get(&stage);
     let agent = || match run {
         Some(run) if run.t3 == Some(feature::agents::T3Run::Draft) => "draft in T3 Code".to_owned(),
+        Some(run) if run.waits_to_send() => "waiting to send".to_owned(),
         Some(run) if run.live() => running_for(now, run.started),
         Some(_) => "agent closed".to_owned(),
         None => String::new(),
@@ -5606,6 +6315,12 @@ fn current_line(feature: &Feature, stage: Stage, state: &PanelState, now: u64) -
         Stage::Discover | Stage::Plan if run.is_some_and(|r| r.ready.is_some()) => {
             "ready for review".into()
         }
+        Stage::PlanReview => match crate::feature_plan_review::deciding(feature) {
+            Some(review) if review.open() > 0 => format!("{} to decide", review.open()),
+            Some(_) => "all decided".into(),
+            None if run.is_some_and(|r| r.ready.is_some()) => "ready for review".into(),
+            None => agent(),
+        },
         Stage::Build if state.setup.is_some() => "setting up".into(),
         Stage::Build if failed_setup && run.is_none() => "setup failed".into(),
         Stage::Build if run.is_some_and(|r| r.blocked.is_some()) => "blocked".into(),
@@ -5616,7 +6331,7 @@ fn current_line(feature: &Feature, stage: Stage, state: &PanelState, now: u64) -
         Stage::Verify if state.verify.is_some() => "running".into(),
         Stage::Verify => match &feature.verify {
             Some(v) if v.passed == Some(false) => "failed".into(),
-            _ if !state.ctx.checks => "mark by hand".into(),
+            _ if !state.checks => "mark by hand".into(),
             _ => String::new(),
         },
         Stage::AiReview => {
@@ -5657,29 +6372,43 @@ fn current_line(feature: &Feature, stage: Stage, state: &PanelState, now: u64) -
 
 /// `stage`'s node on the rail of `feature`.
 fn rail_node(feature: &Feature, stage: Stage, state: &PanelState, now: u64) -> RailNode {
-    let (mark, line) = match stage_mark(feature, stage) {
-        StageMark::Done if is_stale(feature, stage, state.probe) => {
+    let done = stage_mark(feature, stage) == StageMark::Done;
+    let agent = (feature.runs.get(&stage).filter(|_| done)).map(|run| {
+        let what = run.model.as_deref().map_or(run.agent.as_str(), short_model);
+        (AgentIcon::from_agent(&run.agent), what.to_owned())
+    });
+    let back = rework(feature, state.ctx).filter(|_| stage == Stage::Build);
+    let (mark, line) = match (stage_mark(feature, stage), back) {
+        (_, Some(back)) => back.node(),
+        (StageMark::Done, _) if is_stale(feature, stage, state.probe) => {
             (NodeMark::Stale, "code changed".to_owned())
         }
-        StageMark::Done => {
+        (StageMark::Done, _) => {
             let at = feature.marks.get(&stage).map_or(0, |m| m.at);
             (NodeMark::Done, projects::ago(now, at))
         }
-        StageMark::Current => {
+        (StageMark::Current, _) => {
             let mark = match waits(feature, stage, state) {
                 true => NodeMark::Waiting,
                 false => NodeMark::Current,
             };
-            (mark, current_line(feature, stage, state, now))
+            (mark, current_line(feature, stage, &state.into(), now))
         }
-        StageMark::Later => (NodeMark::Later, String::new()),
+        (StageMark::Later, _) => (NodeMark::Later, String::new()),
     };
     RailNode {
         label: stage.label().to_owned(),
         line,
         mark,
         selected: false,
+        agent,
     }
+}
+
+/// `model` where its agent's logo stands beside it: Claude's says the first
+/// word of its names.
+fn short_model(model: &str) -> &str {
+    model.strip_prefix("claude-").unwrap_or(model)
 }
 
 /// A line in `tone`.
@@ -5698,8 +6427,24 @@ fn lines(label: &str, lines: Vec<CheckLine>) -> PageSection {
     }
 }
 
-/// The card of `stage`'s agent in `feature`, once one ran: its button the
-/// page's Show agent or Resume agent, if `actions` has one.
+/// The indices in `actions` of what acts on `stage`'s agent: the buttons of
+/// its card.
+fn agent_buttons(stage: Stage, actions: &[(PageButton, PanelOutcome)]) -> Vec<usize> {
+    (actions.iter().enumerate())
+        .filter(|(_, (_, outcome))| match outcome {
+            PanelOutcome::SendPrompt(s)
+            | PanelOutcome::ShowAgent(s)
+            | PanelOutcome::ResumeAgent(s)
+            | PanelOutcome::Continue(s)
+            | PanelOutcome::StartAgent(s, _) => *s == stage,
+            _ => false,
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// The card of `stage`'s agent in `feature`, once one ran or one can be
+/// picked, with the page's buttons in `actions` that act on it.
 fn agent_card(
     feature: &Feature,
     stage: Stage,
@@ -5708,6 +6453,7 @@ fn agent_card(
     now: u64,
 ) -> Option<PageSection> {
     let picks = state.picks.clone();
+    let buttons = agent_buttons(stage, actions);
     let Some(run) = feature.runs.get(&stage) else {
         return (!picks.is_empty()).then(|| PageSection::Agent {
             icon: AgentIcon::Generic,
@@ -5715,23 +6461,39 @@ fn agent_card(
             dot: Dot::Unknown,
             status: String::new(),
             tail: Vec::new(),
-            button: None,
+            buttons,
             picks,
         });
     };
     let mark = stage_mark(feature, stage);
     let current = mark == StageMark::Current;
-    let dot = match mark {
-        StageMark::Done => Dot::Done,
-        StageMark::Current if run.live() => state.agent_status.map_or(Dot::Unknown, Dot::of_status),
+    let back = rework(feature, state.ctx).filter(|_| stage == Stage::Build);
+    let dot = match (mark, back) {
+        (_, Some(Rework::Runs(dot))) => dot,
+        (StageMark::Done, _) => Dot::Done,
+        (StageMark::Current, _) if run.live() => {
+            state.agent_status.map_or(Dot::Unknown, Dot::of_status)
+        }
         _ => Dot::Unknown,
     };
+    // The card's head names the agent already.
     let status = match (current, &state.agent) {
-        (true, Some(line)) => line.clone(),
-        _ => format!("started {}", projects::ago(now, run.started)),
+        // On a done Build too, where fixes wait: `started` would hide that.
+        _ if run.waits_to_send() => {
+            "waiting for you \u{b7} pick a model and send the prompt".to_owned()
+        }
+        (true, Some(line)) => (line.strip_prefix(run.agent.as_str()))
+            .map_or(line.as_str(), str::trim_start)
+            .to_owned(),
+        _ => {
+            let started = format!("started {}", projects::ago(now, run.started));
+            match &run.model {
+                Some(model) => format!("{model} \u{b7} {started}"),
+                None => started,
+            }
+        }
     };
-    let show = PanelOutcome::ShowAgent(stage);
-    let resume = PanelOutcome::ResumeAgent(stage);
+    let status = back.map_or(status, |back| back.status().to_owned());
     // The tail read is the current stage's agent's, while its pane is.
     let tail = match current && run.pane.is_some() {
         true => state.tail.to_vec(),
@@ -5743,8 +6505,33 @@ fn agent_card(
         dot,
         status,
         tail,
-        button: actions.iter().position(|(_, o)| *o == show || *o == resume),
+        buttons,
         picks,
+    })
+}
+
+/// The Build agent's card on the page of the stage `feature` is at, while
+/// work sent back to that agent is under way: this page's own agent is
+/// another one, and this is the page the user comes back to.
+fn rework_card(
+    feature: &Feature,
+    stage: Stage,
+    state: &PanelState,
+    actions: &[(PageButton, PanelOutcome)],
+) -> Option<PageSection> {
+    let back = rework_on(feature, stage, state.ctx)?;
+    let run = feature.runs.get(&Stage::Build)?;
+    Some(PageSection::Agent {
+        icon: AgentIcon::from_agent(&run.agent),
+        name: run.agent.clone(),
+        dot: match back {
+            Rework::Runs(dot) => dot,
+            _ => Dot::Unknown,
+        },
+        status: format!("Build agent \u{b7} {}", back.status()),
+        tail: Vec::new(),
+        buttons: agent_buttons(Stage::Build, actions),
+        picks: Vec::new(),
     })
 }
 
@@ -5783,6 +6570,15 @@ fn file_line(feature: &Feature, stage: Stage, ctx: RowCtx) -> CheckLine {
     let written = ctx.wrote(stage);
     match feature.runs.get(&stage) {
         Some(run) if run.ready.is_some() => line("ready for review", CheckTone::Ready),
+        // Its agent hasn't its prompt yet: nothing is being written.
+        Some(run) if run.held => {
+            let what = if written {
+                "written"
+            } else {
+                "not written yet"
+            };
+            line(what, CheckTone::Note)
+        }
         Some(run) if run.sent_back > 0 => {
             let n = run.sent_back;
             line(
@@ -5824,13 +6620,65 @@ fn checks_lines(feature: &Feature, state: &PanelState) -> Vec<CheckLine> {
         }
         Some(run) => vec![line(format!("run {} running", run.n), CheckTone::Note)],
         None if !state.ctx.checks => {
-            vec![line("no checks set: Mark done by hand", CheckTone::Note)]
+            vec![line(
+                "no checks for its repositories: set some, or Mark done by hand",
+                CheckTone::Note,
+            )]
         }
         None => vec![line("not run yet", CheckTone::Note)],
     }
 }
 
+/// The setup's section of `feature`'s page, as `state` has it: what runs,
+/// or once it ended what went wrong and what it copied.
+fn setup_section(feature: &Feature, state: &PanelState) -> Option<PageSection> {
+    if let Some(what) = state.setup {
+        return Some(lines("Setup", vec![line(inline(what), CheckTone::Note)]));
+    }
+    let run = feature
+        .setup
+        .as_ref()
+        .filter(|run| run.finished.is_some())?;
+    let failed = (run.failed.iter()).map(|why| line(format!("failed: {why}"), CheckTone::Blocker));
+    let missed = (run.not_copied.iter())
+        .map(|what| line(format!("couldn't copy {what}"), CheckTone::Blocker));
+    let copied = (run.copied.iter()).map(|what| line(format!("copied {what}"), CheckTone::Note));
+    let mut out: Vec<_> = failed.chain(missed).chain(copied).collect();
+    if out.is_empty() {
+        out.push(line("nothing was missing", CheckTone::Note));
+    }
+    Some(lines("Setup", capped(out, CheckTone::Note)))
+}
+
 /// AI review's findings in `feature`, by state, once read.
+fn suggestions_section(feature: &Feature) -> Option<PageSection> {
+    use crate::feature::plan_review::State;
+    let review = feature.plan_review.as_ref().filter(|r| r.stamp.is_some())?;
+    if review.suggestions.is_empty() {
+        return Some(lines(
+            "Suggestions",
+            vec![line("nothing to change", CheckTone::Ready)],
+        ));
+    }
+    let states = [
+        (State::Open, "to decide", CheckTone::Blocker),
+        (State::Accepted, "accepted", CheckTone::Ready),
+        (State::Rejected, "rejected", CheckTone::Note),
+    ];
+    let mut rows: Vec<CheckLine> = (states.into_iter())
+        .filter_map(|(state, what, tone)| match review.count(state) {
+            0 => None,
+            n => Some(line(format!("{n} {what}"), tone)),
+        })
+        .collect();
+    let not_found = review.not_found();
+    if not_found > 0 {
+        let text = format!("{} not found in the code", plural(not_found, "citation"));
+        rows.push(line(text, CheckTone::Blocker));
+    }
+    Some(lines("Suggestions", rows))
+}
+
 fn findings_lines(feature: &Feature) -> Vec<CheckLine> {
     let ready = (feature.runs.get(&Stage::AiReview)).is_some_and(|r| r.ready.is_some());
     let Some(review) = feature.review.as_ref().filter(|_| ready) else {
@@ -5853,6 +6701,28 @@ fn findings_lines(feature: &Feature) -> Vec<CheckLine> {
             n => Some(line(format!("{} {what}", plural(n, "finding")), tone)),
         })
         .collect()
+}
+
+/// How AI review's findings in `feature` stand, in a few words: "4 to
+/// decide · 1 to fix".
+fn findings_count(feature: &Feature) -> String {
+    let Some(review) = feature.review.as_ref() else {
+        return String::new();
+    };
+    [
+        (FindingState::Open, "to decide"),
+        (FindingState::Fix, "to fix"),
+        (FindingState::Sent, "sent to Build"),
+        (FindingState::Fixed, "fixed"),
+        (FindingState::Dismissed, "dismissed"),
+    ]
+    .into_iter()
+    .filter_map(|(state, what)| match review.count(state) {
+        0 => None,
+        n => Some(format!("{n} {what}")),
+    })
+    .collect::<Vec<_>>()
+    .join(" \u{b7} ")
 }
 
 /// The milestones of `stage`'s file (Plan's, Build's) by name, as `probe`
@@ -5924,6 +6794,7 @@ fn stage_page(
         sections.extend(agent_card(feature, stage, state, actions, now));
     }
     if mark != StageMark::Later {
+        sections.extend(rework_card(feature, stage, state, actions));
         if let Some(m) = feature.marks.get(&stage).filter(|m| !m.note.is_empty()) {
             sections.push(lines("Note", vec![line(m.note.clone(), CheckTone::Note)]));
         }
@@ -5939,6 +6810,16 @@ fn stage_page(
         }
         let card = || agent_card(feature, stage, state, actions, now);
         match stage {
+            Stage::PlanReview => {
+                sections.extend(card());
+                if let Some(section) = suggestions_section(feature) {
+                    sections.push(section);
+                }
+                if state.ctx.wrote(stage) {
+                    sections.push(file_card(feature, stage, state.ctx, actions));
+                    sections.extend(doc_of(state.probe, stage));
+                }
+            }
             Stage::Discover | Stage::Plan => {
                 sections.extend(card());
                 sections.push(file_card(feature, stage, state.ctx, actions));
@@ -5951,12 +6832,7 @@ fn stage_page(
                     let why = line(blocked.why.clone(), CheckTone::Blocker);
                     sections.push(lines("Blocked", vec![why]));
                 }
-                if let Some(what) = state.setup {
-                    sections.push(lines("Setup", vec![line(inline(what), CheckTone::Note)]));
-                } else if let Some(why) = feature.setup.as_ref().and_then(|s| s.failed.as_deref()) {
-                    let text = format!("failed: {why}");
-                    sections.push(lines("Setup", vec![line(text, CheckTone::Blocker)]));
-                }
+                sections.extend(setup_section(feature, state));
                 sections.extend(card());
                 if milestone_switch(feature, stage) {
                     sections.push(PageSection::MilestoneMode {
@@ -5973,10 +6849,35 @@ fn stage_page(
                 });
                 sections.extend(milestones_of(state.probe, stage).or(counted));
             }
-            Stage::Verify => sections.push(lines("Checks", checks_lines(feature, state))),
+            Stage::Verify => {
+                sections.push(lines("Checks", checks_lines(feature, state)));
+                sections.extend(setup_section(feature, state));
+            }
             Stage::AiReview => {
                 sections.extend(card());
-                sections.push(lines("Findings", findings_lines(feature)));
+                let cards = finding_cards(feature, stage);
+                if cards.is_empty() {
+                    sections.push(lines("Findings", findings_lines(feature)));
+                } else {
+                    let label = format!("Findings \u{b7} {}", findings_count(feature));
+                    let comments = state.probe.map_or(0, |p| p.docs.comments);
+                    let mut notes = Vec::new();
+                    if comments > 0 && mark == StageMark::Current {
+                        let goes = if comments == 1 { "goes" } else { "go" };
+                        let text = format!(
+                            "{} from the diff {goes} with the fixes",
+                            plural(comments, "comment")
+                        );
+                        notes.push(line(text, CheckTone::Note));
+                    }
+                    sections.push(lines(&label, notes));
+                    let multi = feature.many_repos();
+                    sections.extend(
+                        cards
+                            .into_iter()
+                            .map(|f| PageSection::Finding(finding_card(f, multi, actions))),
+                    );
+                }
             }
             Stage::CodeReview if mark == StageMark::Current => {
                 let text = (state.code_review.clone())
@@ -6005,8 +6906,10 @@ fn stage_page(
     }
     // The agent's card says what it does: the status line needn't again.
     let carded = |l: &CheckLine| {
-        (sections.iter())
-            .any(|s| matches!(s, PageSection::Agent { status, .. } if *status == l.text))
+        (sections.iter()).any(|s| {
+            matches!(s, PageSection::Agent { status, .. }
+                if !status.is_empty() && l.text.ends_with(status.as_str()))
+        })
     };
     let status = status.filter(|l| !carded(l));
     // A restart runs the agent picked: the button says so when it's another.
@@ -6080,7 +6983,7 @@ fn activity(feature: &Feature, now: u64) -> Vec<ActivityRow> {
 
 /// Every key the feature tab takes, by where it works, as F1 lists them:
 /// (heading, [(keys, what they do)]).
-const TAB_KEYS: [(&str, &[(&str, &str)]); 3] = [
+const TAB_KEYS: [(&str, &[(&str, &str)]); 4] = [
     (
         "Stages",
         &[
@@ -6101,6 +7004,11 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 3] = [
                 "start the current stage over, after asking",
             ),
             ("Ctrl+Shift+O", "Verify's evidence"),
+            (
+                "Ctrl+Shift+U",
+                "copy what the worktrees lack: Build and Verify",
+            ),
+            ("Ctrl+E", "edit the project's commands: Build and Verify"),
             ("Ctrl+R", "start the stage's agent afresh"),
             ("Ctrl+Shift+R", "show the stage's agent, or resume its chat"),
             ("Ctrl+Shift+A", "pick the stage's next agent"),
@@ -6108,6 +7016,20 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 3] = [
                 "Ctrl+Shift+B",
                 "Build: one agent, or a fresh agent per milestone",
             ),
+            ("Ctrl+Shift+K", "skip Plan review"),
+            ("Ctrl+Shift+D", "change the decisions on a final plan"),
+        ],
+    ),
+    (
+        "AI review's findings",
+        &[
+            ("Up / Down", "previous or next finding"),
+            ("Home / End", "first or last finding"),
+            ("f", "fix the finding, or take that back"),
+            ("Ctrl+E", "edit its fix, or comment on it"),
+            ("Del", "dismiss it, saying why, or reopen it"),
+            ("Enter", "show it in the diff"),
+            ("c", "add a comment of your own, to go with the fixes"),
         ],
     ),
     (
@@ -6131,7 +7053,7 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 3] = [
     (
         "Anywhere on the tab",
         &[
-            ("Tab / Shift+Tab", "stages or repositories"),
+            ("Tab / Shift+Tab", "stages, findings or repositories"),
             ("PgUp / PgDn", "scroll the page"),
             ("Ctrl+PgUp / Ctrl+PgDn", "previous or next feature"),
             ("Ctrl+O", "open a tab in the feature's folder"),
@@ -6231,6 +7153,34 @@ fn tab_hints(
                 });
             }
         }
+        TabArea::Findings => {
+            let card = (finding_cards(feature, stage).get(panel.finding)).copied();
+            hints.push(hint("Up / Down", "finding"));
+            if let Some(f) = card {
+                match f.state {
+                    FindingState::Open | FindingState::Dismissed => hints.push(hint("f", "fix")),
+                    FindingState::Fix => hints.push(hint("f", "don't fix")),
+                    _ => {}
+                }
+                if matches!(f.state, FindingState::Open | FindingState::Fix) {
+                    hints.push(hint("Ctrl+E", "edit\u{2026}"));
+                    hints.push(match f.yours {
+                        true => hint("Del", "drop"),
+                        false => hint("Del", "dismiss\u{2026}"),
+                    });
+                } else if f.state == FindingState::Dismissed {
+                    hints.push(hint("Del", "reopen"));
+                }
+                hints.push(match f.file.is_empty() {
+                    true => hint("Enter", "edit\u{2026}"),
+                    false => hint("Enter", "show in diff"),
+                });
+            }
+            if can_comment(feature, stage) {
+                hints.push(hint("c", "add comment\u{2026}"));
+            }
+            hints.push(hint("Tab", if repos { "repositories" } else { "stages" }));
+        }
         _ => {
             let row = PanelRow::Stage(stage);
             hints.push(hint("Left / Right", "stage"));
@@ -6244,11 +7194,20 @@ fn tab_hints(
             if matches!(row_action(feature, row, ctx), Some(PanelOutcome::Untick(_))) {
                 hints.push(hint(REOPEN_KEY, "reopen"));
             }
-            if repos {
+            if can_comment(feature, stage) {
+                hints.push(hint("c", "add comment\u{2026}"));
+            }
+            if !finding_cards(feature, stage).is_empty() && !panel.expanded {
+                hints.push(hint("Tab", "findings"));
+            } else if repos {
                 hints.push(hint("Tab", "repositories"));
             }
             if row_page(feature, row).is_some() {
                 hints.push(hint("Ctrl+Shift+O", "evidence"));
+            }
+            if offers_setup(feature, stage) {
+                hints.push(hint("Ctrl+Shift+U", "set up"));
+                hints.push(hint("Ctrl+E", "edit commands"));
             }
             if fresh_stage(feature, row).is_some() {
                 hints.push(hint("Ctrl+R", "fresh agent"));
@@ -6256,7 +7215,7 @@ fn tab_hints(
             if start_over_stage(feature, stage, ctx).is_some() {
                 hints.push(hint(START_OVER_KEY, "start over\u{2026}"));
             }
-            if let Some((label, outcome)) = agent_button(feature, stage, ctx)
+            if let Some((label, outcome)) = agent_key(feature, stage, ctx)
                 && page_enter(feature, stage, ctx).as_ref() != Some(&outcome)
             {
                 hints.push(hint("Ctrl+Shift+R", &label.to_lowercase()));
@@ -6289,6 +7248,7 @@ fn tab_hints(
         },
     ));
     let del_abandons = match entry {
+        _ if panel.focus == TabArea::Findings => false,
         Some(RepoEntry::Held(_)) => !feature.many_repos(),
         Some(_) => false,
         None => true,
@@ -6305,19 +7265,12 @@ fn tab_hints(
 const NOT_ADDED: &str = "Not added";
 
 /// The group of rows `entry` belongs in, by its heading.
-fn entry_group<'a>(feature: &Feature, sources: &'a [RepoSource], entry: RepoEntry) -> &'a str {
+fn entry_group(feature: &Feature, entry: RepoEntry) -> &'static str {
     match entry {
         RepoEntry::Held(i) if feature.repos.get(i).is_some_and(|r| r.touched) => "In feature",
         RepoEntry::Held(_) | RepoEntry::Context(_) => "Context, read only",
         RepoEntry::Removed(_) => "Removed",
-        RepoEntry::Offered { source, .. } => match sources.get(source) {
-            Some(RepoSource {
-                project: Some(_),
-                name,
-                ..
-            }) => name,
-            _ => NOT_ADDED,
-        },
+        RepoEntry::Offered { .. } => NOT_ADDED,
     }
 }
 
@@ -6400,7 +7353,7 @@ fn tab_view(
     let repos: Vec<FeatureRepoRow> = (entries.iter())
         .map(|entry| {
             let mut row = repo_row(panel, feature, *entry, state, now);
-            let caption = entry_group(feature, &panel.sources, *entry);
+            let caption = entry_group(feature, *entry);
             if group != Some(caption) {
                 group = Some(caption);
                 row.group = Some(caption.to_owned());
@@ -6435,7 +7388,7 @@ fn tab_view(
             ..rail_node(feature, *s, state, now)
         })
         .collect();
-    let page = match panel.keys {
+    let mut page = match panel.keys {
         true => keys_page(),
         false => stage_page(
             feature,
@@ -6445,6 +7398,15 @@ fn tab_view(
             now,
         ),
     };
+    if panel.focus == TabArea::Findings && !panel.expanded {
+        let cards = (page.sections.iter_mut()).filter_map(|s| match s {
+            PageSection::Finding(card) => Some(card),
+            _ => None,
+        });
+        if let Some(card) = cards.into_iter().nth(panel.finding) {
+            card.selected = true;
+        }
+    }
     // A finished feature's code isn't read (`ship::probe_finished`).
     let read = state.probe.filter(|_| feature.status == Status::Open);
     let repos_error = match read.map(|p| &p.reading) {
@@ -6463,9 +7425,11 @@ fn tab_view(
     if feature.status == Status::Done {
         sub = format!("done \u{b7} {sub}");
     }
-    let focus = match repos.is_empty() {
-        true => TabArea::Stages,
-        false => panel.focus,
+    let carded = !panel.expanded && !finding_cards(feature, stage).is_empty();
+    let focus = match panel.focus {
+        TabArea::Repos if repos.is_empty() => TabArea::Stages,
+        TabArea::Findings if !carded => TabArea::Stages,
+        focus => focus,
     };
     let at = panel.repo.min(repos.len().saturating_sub(1));
     let picked = (entries.get(at))
@@ -6569,6 +7533,7 @@ pub(crate) mod tests {
             setup: None,
             verify: None,
             review: None,
+            plan_review: None,
             viewed: Default::default(),
             manual: None,
         }
@@ -6872,7 +7837,7 @@ pub(crate) mod tests {
 
     #[test]
     fn del_on_a_repository_of_several_asks_or_arms_by_what_it_holds() {
-        let f = feature("b", vec![repo("api", true), repo("web", true)], 2);
+        let f = feature("b", vec![repo("api", true), repo("web", true)], 3);
         let mut panel = FeaturePanel {
             project: "acme".into(),
             slug: "b".into(),
@@ -6887,7 +7852,7 @@ pub(crate) mod tests {
         );
         assert_eq!(panel.armed, None);
         // One the feature doesn't change arms first.
-        let old = feature("c", vec![repo("api", true), repo("ui", false)], 2);
+        let old = feature("c", vec![repo("api", true), repo("ui", false)], 3);
         assert_eq!(press(&mut panel, &old, key(Keysym::Delete)), None);
         assert_eq!(panel.armed.as_deref(), Some("ui"));
         assert_eq!(
@@ -6905,7 +7870,7 @@ pub(crate) mod tests {
             Some(PanelOutcome::Remove)
         );
         // So on a feature's only repository.
-        let mut one = feature("c", vec![repo("api", true)], 2);
+        let mut one = feature("c", vec![repo("api", true)], 3);
         one.multi = false;
         panel.focus = TabArea::Repos;
         panel.repo = 0;
@@ -6917,7 +7882,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_repository_that_can_leave_shows_its_button() {
-        let mut f = feature("b", vec![repo("api", true), repo("web", true)], 2);
+        let mut f = feature("b", vec![repo("api", true), repo("web", true)], 3);
         assert!(repo_removable(&f, 0) && repo_removable(&f, 1));
         f.repos[1].touched = false;
         assert!(!repo_removable(&f, 0), "the last one to change stays");
@@ -6934,13 +7899,13 @@ pub(crate) mod tests {
 
     #[test]
     fn panel_keys_move_through_stages_and_repositories_and_ask_for_actions() {
-        let f = feature("b", vec![repo("api", true), repo("web", false)], 2);
+        let f = feature("b", vec![repo("api", true), repo("web", false)], 3);
         let mut panel = FeaturePanel {
             project: "acme".into(),
             slug: "b".into(),
             ..FeaturePanel::default()
         };
-        // It starts on the current stage's page: Plan done, Build next,
+        // It starts on the current stage's page: Plan review done, Build next,
         // its agent to start.
         assert_eq!(panel.focus, TabArea::Stages);
         assert_eq!(panel.page_stage(&f), Stage::Build);
@@ -6950,19 +7915,16 @@ pub(crate) mod tests {
         );
         // Left and Right (Up, Down, Ctrl+J/K) pick another stage's page.
         assert_eq!(press(&mut panel, &f, key(Keysym::Left)), None);
-        assert_eq!(panel.page_stage(&f), Stage::Plan);
+        assert_eq!(panel.page_stage(&f), Stage::PlanReview);
         // A done stage's Enter goes on to the current one; only its own
         // key reopens it.
         assert_eq!(
             press(&mut panel, &f, key(Keysym::Return)),
             Some(PanelOutcome::GoToCurrent)
         );
-        let actions = page_actions(&f, Stage::Plan, RowCtx::default());
-        assert_eq!(actions[1].1, PanelOutcome::Untick(Stage::Plan));
-        assert_eq!(
-            (actions[1].0.style, actions[1].0.key),
-            (ButtonStyle::Plain, Some(REOPEN_KEY))
-        );
+        let actions = page_actions(&f, Stage::PlanReview, RowCtx::default());
+        assert_eq!(actions[1].1, PanelOutcome::Untick(Stage::PlanReview));
+        assert_eq!(actions[1].0.style, ButtonStyle::Plain);
         press(&mut panel, &f, ctrl(Keysym::j));
         press(&mut panel, &f, key(Keysym::Right));
         assert_eq!(panel.page_stage(&f), Stage::Verify);
@@ -6972,7 +7934,7 @@ pub(crate) mod tests {
         );
         press(&mut panel, &f, ctrl(Keysym::k));
         press(&mut panel, &f, key(Keysym::Up));
-        assert_eq!(panel.page_stage(&f), Stage::Plan);
+        assert_eq!(panel.page_stage(&f), Stage::PlanReview);
         press(&mut panel, &f, key(Keysym::Home));
         assert_eq!(panel.page_stage(&f), Stage::Discover);
         press(&mut panel, &f, key(Keysym::Left));
@@ -7060,7 +8022,7 @@ pub(crate) mod tests {
 
     #[test]
     fn without_repositories_tab_stays_on_the_stages() {
-        let f = feature("b", Vec::new(), 2);
+        let f = feature("b", Vec::new(), 3);
         let mut panel = FeaturePanel::default();
         press(&mut panel, &f, key(Keysym::Tab));
         assert_eq!(panel.focus, TabArea::Stages);
@@ -7070,7 +8032,7 @@ pub(crate) mod tests {
 
     #[test]
     fn another_page_starts_at_its_top() {
-        let f = feature("b", vec![repo("api", true)], 2);
+        let f = feature("b", vec![repo("api", true)], 3);
         let mut panel = FeaturePanel {
             project: "acme".into(),
             slug: "b".into(),
@@ -7103,7 +8065,7 @@ pub(crate) mod tests {
         panel.hold_page(panel.page_key(&f));
         assert_eq!(panel.page_stage(&f), Stage::Discover);
         panel.scroll[page].jump(120.0);
-        let moved_on = feature("b", vec![repo("api", true)], 3);
+        let moved_on = feature("b", vec![repo("api", true)], 4);
         assert_eq!(panel.page_stage(&moved_on), Stage::Verify);
         assert_eq!(
             tab_view(&panel, &moved_on, &slugs, &state, 2_060).scroll[page],
@@ -7118,7 +8080,7 @@ pub(crate) mod tests {
 
     #[test]
     fn f1_lists_every_key_in_place_of_the_page() {
-        let f = feature("b", vec![repo("api", true), repo("web", false)], 2);
+        let f = feature("b", vec![repo("api", true), repo("web", false)], 3);
         let mut panel = FeaturePanel {
             project: "acme".into(),
             slug: "b".into(),
@@ -7193,7 +8155,7 @@ pub(crate) mod tests {
     /// A multi-repository feature with `api` and `web` on its branch,
     /// `docs` as context and `auth` taken out.
     fn every_kind_of_row() -> Feature {
-        let mut f = feature("b", vec![repo("api", true), repo("web", true)], 2);
+        let mut f = feature("b", vec![repo("api", true), repo("web", true)], 3);
         f.add_context(context_of("docs"));
         f.note_removed(None, "auth".into(), 5);
         f
@@ -7201,7 +8163,7 @@ pub(crate) mod tests {
 
     #[test]
     fn leaving_an_active_repository_always_asks() {
-        let mut f = feature("b", vec![repo("api", true), repo("ui", false)], 2);
+        let mut f = feature("b", vec![repo("api", true), repo("ui", false)], 3);
         let keys = |k: &str| vec![k.to_owned()];
         assert!(
             removal_asks(&f, &keys("api"), &[]),
@@ -7424,15 +8386,46 @@ pub(crate) mod tests {
                 .find(|(key, _)| key == "Del")
                 .map(|(_, what)| what.clone())
         };
-        let two = feature("b", vec![repo("api", true), repo("web", true)], 2);
+        let two = feature("b", vec![repo("api", true), repo("web", true)], 3);
         assert_eq!(del(&two, 0).as_deref(), Some("remove repository"));
         // The last one of several left: Del would only be refused.
         let mut last = two.clone();
         last.repos.pop();
         assert_eq!(del(&last, 0), None);
         // The only one a feature has: Del abandons it, and says so.
-        let one = feature("b", vec![repo("api", true)], 2);
+        let one = feature("b", vec![repo("api", true)], 3);
         assert_eq!(del(&one, 0).as_deref(), Some("abandon"));
+    }
+
+    #[test]
+    fn only_the_project_of_the_feature_is_offered() {
+        let mut f = every_kind_of_row();
+        f.note_removed(Some("admin".into()), "panel".into(), 6);
+        f.note_removed(Some("tools".into()), "cli".into(), 7);
+        f.links.push(feature::Link {
+            project: "admin".into(),
+            root: "/admin".into(),
+            dir: "/admin/.features/b".into(),
+            multi: true,
+        });
+        let mut sources = sources_with(&["api", "auth", "docs", "infra", "web"]);
+        sources.push(RepoSource {
+            project: Some("admin".into()),
+            name: "Admin".into(),
+            finding: sources_with(&["panel", "users"]).remove(0).finding,
+        });
+        let keys: Vec<String> = (repos_offered(&f, &sources).into_iter())
+            .filter_map(|e| entry_key(&f, &sources, e))
+            .collect();
+        // Not a project it doesn't link, nor the rest of one it does; taken
+        // out of one it links, it can come back.
+        assert_eq!(keys, ["admin:panel", "auth", "infra"]);
+        let back = RepoEntry::Removed(1);
+        assert_eq!(
+            entry_key(&f, &sources, back).as_deref(),
+            Some("admin:panel")
+        );
+        assert_eq!(entry_buttons(&f, &sources, back).len(), 2);
     }
 
     #[test]
@@ -7487,10 +8480,10 @@ pub(crate) mod tests {
 
     #[test]
     fn a_picked_page_holds_until_the_feature_moves_on() {
-        let mut f = feature("b", vec![repo("api", true)], 2);
+        let mut f = feature("b", vec![repo("api", true)], 3);
         let mut panel = FeaturePanel::default();
         press(&mut panel, &f, key(Keysym::Left));
-        assert_eq!(panel.page_stage(&f), Stage::Plan);
+        assert_eq!(panel.page_stage(&f), Stage::PlanReview);
         // Build ticked: the pick is dropped, the new current shows.
         let mark = f.marks[&Stage::Plan].clone();
         f.marks.insert(Stage::Build, mark);
@@ -7513,13 +8506,13 @@ pub(crate) mod tests {
         panel.unpick();
         assert_eq!(panel.page_stage(&f), Stage::Build);
         // A feature with every stage done shows Ship.
-        let done = feature("d", vec![repo("api", true)], 8);
+        let done = feature("d", vec![repo("api", true)], 9);
         assert_eq!(FeaturePanel::default().page_stage(&done), Stage::Ship);
     }
 
     #[test]
     fn the_tab_shows_repositories_the_rail_and_the_right_hints() {
-        let f = feature("b", vec![repo("api", true), repo("web", false)], 3);
+        let f = feature("b", vec![repo("api", true), repo("web", false)], 4);
         let panel = FeaturePanel {
             project: "acme".into(),
             slug: "b".into(),
@@ -7537,8 +8530,9 @@ pub(crate) mod tests {
         assert_eq!(view.repos_error, None);
         let marks: Vec<NodeMark> = view.rail.iter().map(|s| s.mark).collect();
         assert_eq!(
-            &marks[..5],
+            &marks[..6],
             [
+                NodeMark::Done,
                 NodeMark::Done,
                 NodeMark::Done,
                 NodeMark::Done,
@@ -7546,13 +8540,13 @@ pub(crate) mod tests {
                 NodeMark::Later
             ]
         );
-        assert_eq!(view.rail.len(), 8);
+        assert_eq!(view.rail.len(), 9);
         assert_eq!(view.rail[0].line, "1m ago");
-        assert_eq!(view.rail[3].line, "mark by hand");
-        assert_eq!(view.rail[4].line, "");
+        assert_eq!(view.rail[4].line, "mark by hand");
+        assert_eq!(view.rail[5].line, "");
         let selected: Vec<bool> = view.rail.iter().map(|n| n.selected).collect();
         assert_eq!(selected.iter().filter(|s| **s).count(), 1);
-        assert!(selected[3]);
+        assert!(selected[4]);
         assert_eq!(view.page.title, "Verify");
         assert_eq!(
             stage_detail(&f, Stage::Discover, &state, 2_060),
@@ -7560,7 +8554,7 @@ pub(crate) mod tests {
         );
         assert_eq!(
             stage_detail(&f, Stage::Verify, &state, 2_060),
-            "no checks set: Mark done by hand"
+            "no checks for its repositories: set some, or Mark done by hand"
         );
         assert_eq!(view.which, Some((0, 1)));
         assert_eq!(
@@ -7574,6 +8568,8 @@ pub(crate) mod tests {
                 "Left / Right",
                 "Enter",
                 "Tab",
+                "Ctrl+Shift+U",
+                "Ctrl+E",
                 "Ctrl+O",
                 "Ctrl+C",
                 "Ctrl+N",
@@ -7653,9 +8649,345 @@ pub(crate) mod tests {
         }
     }
 
+    /// A run of `base` whose agent waits for its prompt, its tab `pane`.
+    fn held_run(pane: Option<&str>) -> feature::agents::StageRun {
+        feature::agents::StageRun {
+            base: "claude".into(),
+            held: true,
+            ..agent_run(pane, None)
+        }
+    }
+
+    #[test]
+    fn enter_sends_the_prompt_of_an_agent_waiting_for_it() {
+        let mut f = feature("b", vec![repo("api", true)], 1);
+        f.runs.insert(Stage::Plan, held_run(Some("p1")));
+        let send = PanelOutcome::SendPrompt(Stage::Plan);
+        let actions = page_actions(&f, Stage::Plan, RowCtx::default());
+        assert_eq!(actions[0].1, send);
+        assert_eq!(actions[0].0.style, ButtonStyle::Primary);
+        assert_eq!(actions[0].0.label, "Send prompt");
+        assert_eq!(
+            page_outcomes(&f, Stage::Plan)
+                .iter()
+                .filter(|o| **o == send)
+                .count(),
+            1
+        );
+        assert!(page_outcomes(&f, Stage::Plan).contains(&PanelOutcome::ShowAgent(Stage::Plan)));
+        assert_eq!(
+            page_enter(&f, Stage::Plan, RowCtx::default()),
+            Some(send.clone())
+        );
+        // Nothing is being written while it waits.
+        assert_eq!(
+            file_line(&f, Stage::Plan, RowCtx::default()),
+            line("not written yet", CheckTone::Note)
+        );
+        assert_eq!(
+            file_line(&f, Stage::Plan, wrote_all()),
+            line("written", CheckTone::Note)
+        );
+        // It sits on the agent's card, with what else acts on the agent.
+        assert!(agent_buttons(Stage::Plan, &actions).contains(&0));
+    }
+
+    #[test]
+    fn a_waiting_agents_closed_tab_opens_again_rather_than_resume() {
+        let mut f = feature("b", vec![repo("api", true)], 1);
+        f.runs.insert(Stage::Plan, held_run(None));
+        let out = page_outcomes(&f, Stage::Plan);
+        assert!(out.contains(&PanelOutcome::StartAgent(Stage::Plan, false)));
+        assert!(!out.contains(&PanelOutcome::SendPrompt(Stage::Plan)));
+        assert!(!out.contains(&PanelOutcome::ResumeAgent(Stage::Plan)));
+        assert_eq!(
+            page_enter(&f, Stage::Plan, RowCtx::default()),
+            Some(PanelOutcome::StartAgent(Stage::Plan, false))
+        );
+    }
+
+    #[test]
+    fn a_verify_with_nothing_to_run_points_to_its_commands() {
+        let f = feature("v", vec![repo("api", true)], 4);
+        assert_eq!(f.current(), Some(Stage::Verify));
+        let edit = PanelOutcome::EditCommands(CommandsTab::Checks);
+        let style = |ctx: RowCtx| {
+            let actions = page_actions(&f, Stage::Verify, ctx);
+            let found = actions.into_iter().find(|(_, o)| *o == edit);
+            found.map(|(button, _)| button.style)
+        };
+        assert_eq!(style(RowCtx::default()), Some(ButtonStyle::Plain));
+        let checks = RowCtx {
+            checks: true,
+            ..RowCtx::default()
+        };
+        assert_eq!(style(checks), Some(ButtonStyle::Quiet));
+        // Enter still does what it did: the button doesn't take over.
+        assert_eq!(
+            page_enter(&f, Stage::Verify, RowCtx::default()),
+            Some(PanelOutcome::Tick)
+        );
+        // Not offered on stages that have no commands.
+        let actions = page_actions(&f, Stage::AiReview, RowCtx::default());
+        assert!(
+            !actions
+                .iter()
+                .any(|(_, o)| matches!(o, PanelOutcome::EditCommands(_)))
+        );
+    }
+
+    #[test]
+    fn fixes_waiting_on_a_done_build_can_be_sent_from_its_page() {
+        // Build done, a later stage current: a fresh agent for fixes waits.
+        let mut f = feature("b", vec![repo("api", true)], 4);
+        assert!(f.is_done(Stage::Build));
+        f.runs.insert(Stage::Build, held_run(Some("p1")));
+        let send = PanelOutcome::SendPrompt(Stage::Build);
+        let actions = page_actions(&f, Stage::Build, RowCtx::default());
+        assert_eq!(actions[0].1, send);
+        assert_eq!(actions[0].0.style, ButtonStyle::Primary);
+        let primaries = (actions.iter())
+            .filter(|(b, _)| b.style == ButtonStyle::Primary)
+            .count();
+        assert_eq!(primaries, 1);
+        assert_eq!(page_enter(&f, Stage::Build, RowCtx::default()), Some(send));
+        let page = stage_page(&f, Stage::Build, &PanelState::default(), &actions, 2_000);
+        assert!(page.sections.iter().any(|s| matches!(
+            s,
+            PageSection::Agent { status, .. } if status.starts_with("waiting for you")
+        )));
+        // Its tab closed: it can still open again from there.
+        f.runs.insert(Stage::Build, held_run(None));
+        assert!(
+            page_outcomes(&f, Stage::Build)
+                .contains(&PanelOutcome::StartAgent(Stage::Build, false))
+        );
+    }
+
+    #[test]
+    fn work_sent_back_to_build_shows_on_the_page_of_the_stage_at_hand() {
+        // At AI review, its findings sent, the Build agent back on them.
+        let stage = Stage::AiReview;
+        let mut f = feature("b", vec![repo("api", true)], 5);
+        assert_eq!(f.current(), Some(stage));
+        let mut live = held_run(Some("p1"));
+        live.held = false;
+        f.runs.insert(Stage::Build, live);
+        let card = |f: &Feature, ctx: RowCtx| {
+            let state = PanelState {
+                ctx,
+                ..PanelState::default()
+            };
+            let actions = page_actions(f, stage, ctx);
+            let page = stage_page(f, stage, &state, &actions, 2_000);
+            let shown = page.sections.first().and_then(|s| match s {
+                PageSection::Agent {
+                    status,
+                    dot,
+                    buttons,
+                    ..
+                } => {
+                    let labels = buttons.iter().map(|b| actions[*b].0.label.clone());
+                    Some((status.clone(), *dot, labels.collect::<Vec<_>>()))
+                }
+                _ => None,
+            });
+            let node = rail_node(f, Stage::Build, &state, 2_000);
+            (shown, (node.mark, node.line))
+        };
+        // At rest, nothing says it is at work.
+        let at_rest = RowCtx::default();
+        assert_eq!(rework_on(&f, stage, at_rest), None);
+        assert_eq!(card(&f, at_rest).1.0, NodeMark::Done);
+        // Running: its node and a card with a way to its tab.
+        let running = RowCtx {
+            fixing: Some(Dot::Working),
+            ..RowCtx::default()
+        };
+        let (shown, node) = card(&f, running);
+        assert_eq!(
+            shown,
+            Some((
+                "Build agent \u{b7} running again".to_owned(),
+                Dot::Working,
+                vec!["Show agent".to_owned()]
+            ))
+        );
+        assert_eq!(node, (NodeMark::Fixing, "running again".to_owned()));
+        let show = PanelOutcome::ShowAgent(Stage::Build);
+        assert_eq!(agent_key(&f, stage, running).map(|k| k.1), Some(show));
+        // Enter stays this page's: it only runs.
+        assert_ne!(
+            page_enter(&f, stage, running),
+            Some(PanelOutcome::SendPrompt(Stage::Build))
+        );
+        // Waiting for its prompt: sending it is what Enter does.
+        f.runs.insert(Stage::Build, held_run(Some("p1")));
+        let (shown, node) = card(&f, at_rest);
+        let (status, _, buttons) = shown.unwrap();
+        assert!(status.starts_with("Build agent \u{b7} waiting for you"));
+        assert_eq!(buttons, ["Send prompt", "Show agent"]);
+        assert_eq!(node, (NodeMark::Waiting, "waiting to send".to_owned()));
+        assert_eq!(
+            page_enter(&f, stage, at_rest),
+            Some(PanelOutcome::SendPrompt(Stage::Build))
+        );
+        let actions = page_actions(&f, stage, at_rest);
+        let primaries = (actions.iter())
+            .filter(|(b, _)| b.style == ButtonStyle::Primary)
+            .count();
+        assert_eq!(primaries, 1);
+        // Its tab closed: it can open again, and Enter is this page's again.
+        f.runs.insert(Stage::Build, held_run(None));
+        let (shown, node) = card(&f, at_rest);
+        assert_eq!(shown.unwrap().2, ["Start agent"]);
+        assert_eq!(node, (NodeMark::Waiting, "agent closed".to_owned()));
+        assert_ne!(
+            page_enter(&f, stage, at_rest),
+            Some(PanelOutcome::StartAgent(Stage::Build, false))
+        );
+        // Build's own page says it too, not "done".
+        f.runs.insert(Stage::Build, held_run(Some("p1")));
+        f.runs.get_mut(&Stage::Build).unwrap().held = false;
+        let state = PanelState {
+            ctx: running,
+            ..PanelState::default()
+        };
+        let actions = page_actions(&f, Stage::Build, running);
+        let page = stage_page(&f, Stage::Build, &state, &actions, 2_000);
+        assert!(page.sections.iter().any(|s| matches!(
+            s,
+            PageSection::Agent { status, dot: Dot::Working, .. } if status == "running again"
+        )));
+    }
+
+    #[test]
+    fn the_reviewer_waits_for_its_prompt_too() {
+        let mut f = feature("b", vec![repo("api", true)], 5);
+        assert_eq!(f.current(), Some(Stage::AiReview));
+        f.runs.insert(Stage::AiReview, held_run(Some("p1")));
+        assert_eq!(review_action(&f), PanelOutcome::SendPrompt(Stage::AiReview));
+        f.runs.insert(Stage::AiReview, held_run(None));
+        assert_eq!(
+            review_action(&f),
+            PanelOutcome::StartAgent(Stage::AiReview, false)
+        );
+    }
+
     fn page_outcomes(f: &Feature, stage: Stage) -> Vec<PanelOutcome> {
         let actions = page_actions(f, stage, RowCtx::default());
         actions.into_iter().map(|(_, o)| o).collect()
+    }
+
+    #[test]
+    fn plan_review_goes_from_its_agent_to_the_decisions_to_the_final_plan() {
+        use crate::feature::plan_review::{self, Decision, PlanReview};
+        let mut f = feature("p", vec![repo("api", true)], 2);
+        let stage = Stage::PlanReview;
+        let ctx = RowCtx::default();
+        assert_eq!(f.current(), Some(stage));
+        let names = |f: &Feature| -> Vec<String> {
+            let actions = page_actions(f, stage, RowCtx::default());
+            actions.iter().map(|(b, _)| b.label.clone()).collect()
+        };
+        // Nothing runs until asked for, and it can be skipped at once.
+        assert_eq!(names(&f), ["Start agent", "Skip review"]);
+        assert_eq!(
+            page_enter(&f, stage, ctx),
+            Some(PanelOutcome::StartAgent(stage, false))
+        );
+        let state = PanelState::default();
+        assert_eq!(stage_page(&f, stage, &state, &[], 2_000).sections.len(), 0);
+        // Read in with one to decide: the sheet is the way on.
+        let text = r#"{"suggestions": [{"kind": "question", "plan": "M1", "title": "Which?",
+            "why": "w"}, {"kind": "question", "plan": "M1", "title": "How?", "why": "w"}]}"#;
+        let mut review = PlanReview {
+            stamp: Some((1, 1)),
+            ..PlanReview::default()
+        };
+        plan_review::import(&mut review, 1, plan_review::parse(text).unwrap());
+        f.plan_review = Some(review);
+        assert_eq!(
+            page_enter(&f, stage, ctx),
+            Some(PanelOutcome::PlanSuggestions)
+        );
+        assert_eq!(
+            names(&f),
+            ["Decide\u{2026}", "Skip review", "Start over\u{2026}"]
+        );
+        assert_eq!(rail_node(&f, stage, &state, 2_000).line, "2 to decide");
+        let page = stage_page(&f, stage, &state, &[], 2_000);
+        assert_eq!(
+            page.sections,
+            [lines(
+                "Suggestions",
+                vec![line("2 to decide", CheckTone::Blocker)]
+            )]
+        );
+        assert_eq!(
+            crate::feature_agents::gate_of(&f, |_| None).map(|g| g.2),
+            Some(crate::feature_agents::GateKind::Suggestions { open: 2 })
+        );
+        // All rejected: nothing for a final plan to add.
+        let review = f.plan_review.as_mut().unwrap();
+        plan_review::decide(review, "r1-1", Decision::Reject).unwrap();
+        plan_review::decide(review, "r1-2", Decision::Reject).unwrap();
+        assert_eq!(
+            page_enter(&f, stage, ctx),
+            Some(PanelOutcome::WriteFinalPlan)
+        );
+        assert_eq!(
+            names(&f),
+            [
+                "Use the plan as it is",
+                "Decide\u{2026}",
+                "Skip review",
+                "Start over\u{2026}"
+            ]
+        );
+        assert_eq!(rail_node(&f, stage, &state, 2_000).line, "all decided");
+        // One accepted: a final plan.
+        let review = f.plan_review.as_mut().unwrap();
+        plan_review::set_note(review, "r1-1", "This one");
+        plan_review::decide(review, "r1-1", Decision::Accept).unwrap();
+        assert_eq!(names(&f)[0], "Write final plan");
+        // Being written: its agent's page, and a way back.
+        f.plan_review.as_mut().unwrap().writing = true;
+        f.runs.insert(
+            stage,
+            crate::feature::agents::StageRun {
+                n: 2,
+                ready: Some(50),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            page_enter(&f, stage, ctx),
+            Some(PanelOutcome::OpenDoc(stage))
+        );
+        assert!(names(&f).contains(&"Change decisions\u{2026}".to_owned()));
+        assert_eq!(
+            crate::feature_agents::gate_of(&f, |_| None).map(|g| g.2),
+            Some(crate::feature_agents::GateKind::Review)
+        );
+        // Its keys, only there.
+        let mut panel = FeaturePanel::default();
+        let shift = ModifiersState {
+            ctrl: true,
+            shift: true,
+            ..ModifiersState::default()
+        };
+        assert_eq!(
+            press(&mut panel, &f, (shift, Keysym::K)),
+            Some(PanelOutcome::SkipPlanReview)
+        );
+        assert_eq!(
+            press(&mut panel, &f, (shift, Keysym::D)),
+            Some(PanelOutcome::ChangeDecisions)
+        );
+        let later = feature("q", vec![repo("api", true)], 3);
+        assert_eq!(press(&mut panel, &later, (shift, Keysym::K)), None);
+        assert_eq!(press(&mut panel, &later, (shift, Keysym::D)), None);
     }
 
     #[test]
@@ -7673,7 +9005,7 @@ pub(crate) mod tests {
         let actions = page_actions(&f, Stage::Plan, RowCtx::default());
         let page = stage_page(&f, Stage::Plan, &PanelState::default(), &actions, 2_000);
         let button = page.sections.iter().find_map(|s| match s {
-            PageSection::Agent { button, .. } => *button,
+            PageSection::Agent { buttons, .. } => buttons.first().copied(),
             _ => None,
         });
         assert_eq!(
@@ -7685,7 +9017,7 @@ pub(crate) mod tests {
     #[test]
     fn only_a_kept_chat_of_an_open_feature_resumes() {
         let resume = PanelOutcome::ResumeAgent(Stage::Plan);
-        let mut f = feature("b", vec![repo("api", true)], 2);
+        let mut f = feature("b", vec![repo("api", true)], 3);
         f.status = Status::Abandoned;
         f.runs.insert(Stage::Plan, kept_run("claude"));
         assert!(!page_outcomes(&f, Stage::Plan).contains(&resume));
@@ -7698,7 +9030,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_tab_still_there_is_shown_not_resumed() {
-        let mut f = feature("b", vec![repo("api", true)], 2);
+        let mut f = feature("b", vec![repo("api", true)], 3);
         f.runs.insert(
             Stage::Plan,
             feature::agents::StageRun {
@@ -7853,7 +9185,7 @@ pub(crate) mod tests {
 
     #[test]
     fn build_continues_after_a_milestone_and_offers_no_mark() {
-        let mut f = feature("b", vec![repo("api", true)], 2);
+        let mut f = feature("b", vec![repo("api", true)], 3);
         let build = PanelRow::Stage(Stage::Build);
         let none = RowCtx::default();
         // No agent yet: Enter starts one; never a mark.
@@ -7896,7 +9228,7 @@ pub(crate) mod tests {
 
     #[test]
     fn verify_runs_its_checks_when_it_has_some_else_is_marked() {
-        let f = feature("v", vec![repo("api", true)], 3);
+        let f = feature("v", vec![repo("api", true)], 4);
         let verify = PanelRow::Stage(Stage::Verify);
         let checks = RowCtx {
             checks: true,
@@ -7923,7 +9255,7 @@ pub(crate) mod tests {
             Some(PanelOutcome::Tick)
         );
         // Later stages aren't run early.
-        let early = feature("e", vec![repo("api", true)], 2);
+        let early = feature("e", vec![repo("api", true)], 3);
         assert_eq!(
             row_action(&early, verify, checks),
             Some(PanelOutcome::NotYet(Stage::Build))
@@ -7932,7 +9264,7 @@ pub(crate) mod tests {
 
     #[test]
     fn evidence_opens_from_the_verify_row_once_a_run_wrote_it() {
-        let mut f = feature("v", vec![repo("api", true)], 3);
+        let mut f = feature("v", vec![repo("api", true)], 4);
         let mut panel = FeaturePanel {
             ..FeaturePanel::default()
         };
@@ -7973,7 +9305,7 @@ pub(crate) mod tests {
 
     #[test]
     fn builds_row_says_setup_first_then_its_agent() {
-        let mut f = feature("b", vec![repo("api", true)], 2);
+        let mut f = feature("b", vec![repo("api", true)], 3);
         let agent = Some("Claude Code working");
         assert_eq!(build_line(&f, None, agent).as_deref(), agent);
         assert_eq!(build_line(&f, None, None), None);
@@ -7995,6 +9327,7 @@ pub(crate) mod tests {
             started: 1_000,
             finished: Some(1_100),
             failed: Some("api: `npm ci` exited with 1".into()),
+            ..Default::default()
         });
         assert_eq!(
             build_line(&f, None, None).as_deref(),
@@ -8012,7 +9345,7 @@ pub(crate) mod tests {
             stage_detail(&f, Stage::Build, &state, 2_000),
             "setup failed: api: `npm ci` exited with 1"
         );
-        let done = feature("d", vec![repo("api", true)], 3);
+        let done = feature("d", vec![repo("api", true)], 4);
         assert_eq!(
             stage_detail(&done, Stage::Build, &state, 2_060),
             "done 1m ago by you"
@@ -8021,7 +9354,7 @@ pub(crate) mod tests {
 
     #[test]
     fn verifys_row_says_what_runs_failed_or_that_it_has_no_checks() {
-        let mut f = feature("v", vec![repo("api", true)], 3);
+        let mut f = feature("v", vec![repo("api", true)], 4);
         let checks = RowCtx {
             checks: true,
             ..RowCtx::default()
@@ -8029,7 +9362,7 @@ pub(crate) mod tests {
         let none = RowCtx::default();
         assert_eq!(
             verify_line(&f, none, None).as_deref(),
-            Some("no checks set: Mark done by hand")
+            Some("no checks for its repositories: set some, or Mark done by hand")
         );
         assert_eq!(verify_line(&f, checks, None), None);
         assert_eq!(
@@ -8137,6 +9470,7 @@ pub(crate) mod tests {
                 ..Reading::default()
             }),
             guards: BTreeMap::new(),
+            models: BTreeMap::new(),
             ship,
             merged: false,
             stats: BTreeMap::new(),
@@ -8157,7 +9491,7 @@ pub(crate) mod tests {
             agents::StageRun,
             review_import::{AiReview, Finding},
         };
-        let mut f = feature("r", vec![repo("api", true)], 4);
+        let mut f = feature("r", vec![repo("api", true)], 5);
         f.runs.insert(
             Stage::AiReview,
             StageRun {
@@ -8191,7 +9525,7 @@ pub(crate) mod tests {
         use FindingState as S;
         let row = PanelRow::Stage(Stage::AiReview);
         let none = RowCtx::default();
-        let fresh = feature("r", vec![repo("api", true)], 4);
+        let fresh = feature("r", vec![repo("api", true)], 5);
         assert_eq!(
             row_action(&fresh, row, none),
             Some(PanelOutcome::StartAgent(Stage::AiReview, false))
@@ -8212,22 +9546,19 @@ pub(crate) mod tests {
         );
         let open = reviewing(&[S::Open, S::Open, S::Fix, S::Dismissed], true);
         assert_eq!(row_action(&open, row, none), Some(PanelOutcome::Findings));
-        assert_eq!(row_hint(&open, row, none), "review findings");
+        assert_eq!(row_hint(&open, row, none), "review in diff");
         assert_eq!(
             stage_button(&open, Stage::AiReview, none),
-            Some("Review findings")
+            Some("Review in diff")
         );
         assert_eq!(
             review_line(&open, None).as_deref(),
-            Some("2 findings to decide \u{b7} Enter to review")
+            Some("2 findings to decide")
         );
         let fix = reviewing(&[S::Fix, S::Dismissed], true);
         assert_eq!(row_action(&fix, row, none), Some(PanelOutcome::SendFixes));
         assert_eq!(row_hint(&fix, row, none), "send fixes");
-        assert_eq!(
-            review_line(&fix, None).as_deref(),
-            Some("1 finding to fix \u{b7} Enter to send to Build")
-        );
+        assert_eq!(review_line(&fix, None).as_deref(), Some("1 finding to fix"));
         let sent = reviewing(&[S::Sent, S::Sent], true);
         assert_eq!(
             review_line(&sent, None).as_deref(),
@@ -8259,24 +9590,303 @@ pub(crate) mod tests {
         let view = tab_view(&panel, &open, &slugs, &state, 2_060);
         assert_eq!(
             stage_detail(&open, Stage::AiReview, &state, 2_060),
-            "2 findings to decide \u{b7} Enter to review"
+            "2 findings to decide"
         );
-        assert_eq!(view.page.buttons[0].label, "Review findings");
-        assert_eq!(view.rail[4].mark, NodeMark::Waiting);
-        assert_eq!(view.rail[4].line, "2 to decide");
+        assert_eq!(view.page.buttons[0].label, "Review in diff");
+        assert_eq!(view.rail[5].mark, NodeMark::Waiting);
+        assert_eq!(view.rail[5].line, "2 to decide");
         assert!(
             view.hints
                 .contains(&("Ctrl+R".into(), "fresh agent".into()))
         );
         assert!(
             view.hints
-                .contains(&("Enter".into(), "review findings".into()))
+                .contains(&("Enter".into(), "review in diff".into()))
+        );
+    }
+
+    fn cards_of(view: &FeatureTabView) -> Vec<&FindingCard> {
+        (view.page.sections.iter())
+            .filter_map(|s| match s {
+                PageSection::Finding(card) => Some(card),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The labels of `card`'s buttons on `page`.
+    fn card_labels<'a>(page: &'a StagePage, card: &FindingCard) -> Vec<&'a str> {
+        (card.buttons.iter())
+            .map(|b| page.buttons[*b].label.as_str())
+            .collect()
+    }
+
+    /// `f` with its AI review on its page and its findings placed in a file.
+    fn carded(states: &[FindingState]) -> Feature {
+        let mut f = reviewing(states, true);
+        for (i, finding) in (f.review.as_mut().unwrap().findings.iter_mut()).enumerate() {
+            finding.file = format!("src/{i}.rs");
+            finding.title = format!("Title {i}");
+            finding.placed = true;
+        }
+        f
+    }
+
+    #[test]
+    fn findings_show_as_cards_to_decide_first_each_with_what_it_can_do() {
+        use FindingState as S;
+        let mut f = carded(&[S::Dismissed, S::Fix, S::Open, S::Sent, S::Fixed]);
+        (f.review.as_mut().unwrap().findings[0]).reason = "by design".into();
+        let panel = FeaturePanel::default();
+        let slugs = vec!["r".to_owned()];
+        let view = tab_view(&panel, &f, &slugs, &PanelState::default(), 2_060);
+        let cards = cards_of(&view);
+        let titles: Vec<&str> = cards.iter().map(|c| c.title.as_str()).collect();
+        assert_eq!(
+            titles,
+            ["Title 2", "Title 1", "Title 3", "Title 4", "Title 0"]
+        );
+        let labels: Vec<Vec<&str>> = cards.iter().map(|c| card_labels(&view.page, c)).collect();
+        assert_eq!(
+            labels[0],
+            ["Fix", "Edit\u{2026}", "Dismiss\u{2026}", "Show in diff"]
+        );
+        assert_eq!(
+            labels[1],
+            [
+                "Don't fix",
+                "Edit\u{2026}",
+                "Dismiss\u{2026}",
+                "Show in diff"
+            ]
+        );
+        assert_eq!(labels[2], ["Show in diff"]);
+        assert_eq!(labels[3], ["Show in diff"]);
+        assert_eq!(labels[4], ["Reopen", "Show in diff"]);
+        assert_eq!(cards[1].state, "to fix");
+        assert_eq!(cards[4].state, "dismissed: by design");
+        assert!(cards[4].faded && !cards[0].faded);
+        assert!(cards[0].place.contains("src/2.rs"));
+        // No button of a card is the page's own, and the count says it all.
+        let on_cards: Vec<usize> = cards.iter().flat_map(|c| c.buttons.clone()).collect();
+        let own: Vec<&str> = (0..view.page.buttons.len())
+            .filter(|b| !on_cards.contains(b))
+            .map(|b| view.page.buttons[b].label.as_str())
+            .collect();
+        assert!(
+            own.contains(&"Review in diff") && own.contains(&"Add comment\u{2026}"),
+            "{own:?}"
+        );
+        assert!(view.page.sections.iter().any(|s| matches!(s,
+            PageSection::Lines { label, .. }
+                if label == "Findings \u{b7} 1 to decide \u{b7} 1 to fix \u{b7} 1 sent to Build \u{b7} 1 fixed \u{b7} 1 dismissed")));
+    }
+
+    #[test]
+    fn a_finding_says_whose_fix_it_is_and_an_item_of_yours_has_no_place() {
+        use FindingState as S;
+        let mut f = carded(&[S::Open, S::Fix]);
+        let findings = &mut f.review.as_mut().unwrap().findings;
+        findings[0].fix = "Reviewer's".into();
+        findings[1].fix = "Reviewer's".into();
+        findings[1].my_fix = Some("Mine".into());
+        findings[1].note = "Careful".into();
+        review_import::add(f.review.as_mut().unwrap(), "Also rename it\nIt reads badly").unwrap();
+        let panel = FeaturePanel::default();
+        let slugs = vec!["r".to_owned()];
+        let view = tab_view(&panel, &f, &slugs, &PanelState::default(), 2_060);
+        let cards = cards_of(&view);
+        assert_eq!(cards[0].fix, "Fix: Reviewer's");
+        assert_eq!(cards[1].fix, "Your fix: Mine");
+        assert_eq!(cards[1].note, "Your comment: Careful");
+        let yours = cards[2];
+        assert_eq!(yours.tag, FindingTag::Yours);
+        assert_eq!(yours.title, "Also rename it");
+        assert_eq!(yours.body, "It reads badly");
+        assert_eq!(yours.place, "u1");
+        assert_eq!(card_labels(&view.page, yours), ["Edit\u{2026}", "Drop"]);
+    }
+
+    #[test]
+    fn a_done_ai_review_only_shows_its_findings() {
+        use FindingState as S;
+        let mut f = carded(&[S::Fixed, S::Dismissed]);
+        f.tick(2_070, "gerdr", None);
+        assert_ne!(f.current(), Some(Stage::AiReview));
+        let mut panel = FeaturePanel::default();
+        panel.pick(&f, Stage::AiReview);
+        let slugs = vec!["r".to_owned()];
+        let view = tab_view(&panel, &f, &slugs, &PanelState::default(), 2_080);
+        let cards = cards_of(&view);
+        assert_eq!(cards.len(), 2);
+        for card in cards {
+            assert_eq!(card_labels(&view.page, card), ["Show in diff"]);
+        }
+        assert!(
+            !view
+                .page
+                .buttons
+                .iter()
+                .any(|b| b.label.starts_with("Add comment"))
+        );
+        assert_eq!(press(&mut panel, &f, key(Keysym::c)), None);
+    }
+
+    #[test]
+    fn tab_goes_through_the_findings_and_shift_tab_comes_back() {
+        use FindingState as S;
+        let f = carded(&[S::Open]);
+        let mut panel = FeaturePanel::default();
+        assert_eq!(panel.focus, TabArea::Stages);
+        press(&mut panel, &f, key(Keysym::Tab));
+        assert_eq!(panel.focus, TabArea::Findings);
+        press(&mut panel, &f, key(Keysym::Tab));
+        assert_eq!(panel.focus, TabArea::Repos);
+        press(&mut panel, &f, key(Keysym::Tab));
+        assert_eq!(panel.focus, TabArea::Stages);
+        let shift = ModifiersState {
+            shift: true,
+            ..ModifiersState::default()
+        };
+        press(&mut panel, &f, (shift, Keysym::ISO_Left_Tab));
+        assert_eq!(panel.focus, TabArea::Repos);
+        press(&mut panel, &f, (shift, Keysym::ISO_Left_Tab));
+        assert_eq!(panel.focus, TabArea::Findings);
+        press(&mut panel, &f, (shift, Keysym::ISO_Left_Tab));
+        assert_eq!(panel.focus, TabArea::Stages);
+        // With no cards the findings are no stop, and lose the keyboard.
+        let none = reviewing(&[S::Open], false);
+        press(&mut panel, &none, key(Keysym::Tab));
+        assert_eq!(panel.focus, TabArea::Repos);
+        panel.focus = TabArea::Findings;
+        press(&mut panel, &none, key(Keysym::F2));
+        assert_eq!(panel.focus, TabArea::Stages);
+    }
+
+    #[test]
+    fn the_keys_pick_a_card_and_decide_it_as_in_the_diff() {
+        use FindingState as S;
+        let mut f = carded(&[S::Open, S::Fix, S::Dismissed, S::Sent]);
+        let mut panel = FeaturePanel {
+            focus: TabArea::Findings,
+            ..FeaturePanel::default()
+        };
+        let id = |n: &str| n.to_owned();
+        // r1-1, undecided.
+        assert_eq!(
+            press(&mut panel, &f, key(Keysym::f)),
+            Some(PanelOutcome::DecideFinding(id("r1-1"), Decision::Fix))
+        );
+        assert_eq!(
+            press(&mut panel, &f, key(Keysym::Delete)),
+            Some(PanelOutcome::AskDismiss(id("r1-1")))
+        );
+        assert_eq!(
+            press(&mut panel, &f, ctrl(Keysym::e)),
+            Some(PanelOutcome::EditFinding(id("r1-1")))
+        );
+        assert_eq!(
+            press(&mut panel, &f, key(Keysym::Return)),
+            Some(PanelOutcome::ShowFinding(id("r1-1")))
+        );
+        // r1-2, to fix: Down is the next card, as ordered.
+        assert_eq!(press(&mut panel, &f, key(Keysym::Down)), None);
+        assert_eq!(panel.finding, 1);
+        assert_eq!(
+            press(&mut panel, &f, key(Keysym::f)),
+            Some(PanelOutcome::DecideFinding(id("r1-2"), Decision::Reopen))
+        );
+        // r1-4, sent: nothing to decide, and it says why.
+        assert_eq!(press(&mut panel, &f, key(Keysym::Down)), None);
+        assert_eq!(
+            press(&mut panel, &f, key(Keysym::f)),
+            Some(PanelOutcome::FindingRefused(review_import::SENT))
+        );
+        // r1-3, dismissed, last: both of its keys bring it back or fix it.
+        assert_eq!(press(&mut panel, &f, key(Keysym::End)), None);
+        assert_eq!(
+            press(&mut panel, &f, key(Keysym::f)),
+            Some(PanelOutcome::DecideFinding(id("r1-3"), Decision::Fix))
+        );
+        assert_eq!(
+            press(&mut panel, &f, key(Keysym::Delete)),
+            Some(PanelOutcome::DecideFinding(id("r1-3"), Decision::Reopen))
+        );
+        // A comment from anywhere on the page.
+        assert_eq!(
+            press(&mut panel, &f, key(Keysym::c)),
+            Some(PanelOutcome::AddComment)
+        );
+        panel.focus = TabArea::Stages;
+        assert_eq!(
+            press(&mut panel, &f, key(Keysym::c)),
+            Some(PanelOutcome::AddComment)
+        );
+        // Over the repositories it isn't offered.
+        panel.focus = TabArea::Repos;
+        assert_eq!(press(&mut panel, &f, key(Keysym::c)), None);
+        panel.focus = TabArea::Stages;
+        // Off the cards Del is the tab's, and f nothing.
+        assert_eq!(
+            press(&mut panel, &f, key(Keysym::Delete)),
+            Some(PanelOutcome::Remove)
+        );
+        assert_eq!(press(&mut panel, &f, key(Keysym::f)), None);
+        // An item of the user's: dropped at once, Enter edits it.
+        let added = review_import::add(f.review.as_mut().unwrap(), "Rename it").unwrap();
+        (f.review.as_mut().unwrap().findings).retain(|finding| finding.id == added);
+        panel.focus = TabArea::Findings;
+        panel.finding = 0;
+        assert_eq!(
+            press(&mut panel, &f, key(Keysym::Delete)),
+            Some(PanelOutcome::DecideFinding(
+                added.clone(),
+                Decision::Dismiss(review_import::DROPPED.to_owned())
+            ))
+        );
+        assert_eq!(
+            press(&mut panel, &f, key(Keysym::Return)),
+            Some(PanelOutcome::EditFinding(added))
         );
     }
 
     #[test]
+    fn the_card_with_the_keyboard_shows_it_and_the_hints_say_what_it_takes() {
+        use FindingState as S;
+        let f = carded(&[S::Open, S::Fix]);
+        let panel = FeaturePanel {
+            focus: TabArea::Findings,
+            finding: 1,
+            ..FeaturePanel::default()
+        };
+        let slugs = vec!["r".to_owned()];
+        let view = tab_view(&panel, &f, &slugs, &PanelState::default(), 2_060);
+        assert_eq!(view.focus, TabArea::Findings);
+        let selected: Vec<bool> = cards_of(&view).iter().map(|c| c.selected).collect();
+        assert_eq!(selected, [false, true]);
+        for hint in [
+            ("Up / Down", "finding"),
+            ("f", "don't fix"),
+            ("Ctrl+E", "edit\u{2026}"),
+            ("Del", "dismiss\u{2026}"),
+            ("Enter", "show in diff"),
+            ("c", "add comment\u{2026}"),
+            ("Tab", "repositories"),
+        ] {
+            let hint = (hint.0.to_owned(), hint.1.to_owned());
+            assert!(view.hints.contains(&hint), "{hint:?}: {:?}", view.hints);
+        }
+        // Del is the card's here: it says so once.
+        assert_eq!(view.hints.iter().filter(|(k, _)| k == "Del").count(), 1);
+        let stages = FeaturePanel::default();
+        let view = tab_view(&stages, &f, &slugs, &PanelState::default(), 2_060);
+        assert!(view.hints.contains(&("Tab".into(), "findings".into())));
+        assert!(cards_of(&view).iter().all(|c| !c.selected));
+    }
+
+    #[test]
     fn code_review_shows_the_diff() {
-        let f = feature("c", vec![repo("api", true)], 5);
+        let f = feature("c", vec![repo("api", true)], 6);
         let row = PanelRow::Stage(Stage::CodeReview);
         let none = RowCtx::default();
         assert_eq!(row_action(&f, row, none), Some(PanelOutcome::CodeReview));
@@ -8316,7 +9926,7 @@ pub(crate) mod tests {
 
     #[test]
     fn manual_test_opens_its_sheet_when_the_brief_has_criteria() {
-        let f = feature("m", vec![repo("api", true)], 6);
+        let f = feature("m", vec![repo("api", true)], 7);
         assert_eq!(f.current(), Some(Stage::ManualTest));
         let row = PanelRow::Stage(Stage::ManualTest);
         // Without criteria it is marked done by hand, as before.
@@ -8354,7 +9964,7 @@ pub(crate) mod tests {
 
     #[test]
     fn ship_is_asked_for_not_ticked_and_bound_stages_tick_as_before() {
-        let shipping = feature("s", vec![repo("api", true)], 7);
+        let shipping = feature("s", vec![repo("api", true)], 8);
         let ship = PanelRow::Stage(Stage::Ship);
         assert_eq!(
             row_action(&shipping, ship, RowCtx::default()),
@@ -8374,7 +9984,7 @@ pub(crate) mod tests {
             stage_button(&shipping, Stage::Build, RowCtx::default()),
             None
         );
-        let verifying = feature("v", vec![repo("api", true)], 3);
+        let verifying = feature("v", vec![repo("api", true)], 4);
         let verify = PanelRow::Stage(Stage::Verify);
         let none = RowCtx::default();
         assert_eq!(
@@ -8402,7 +10012,7 @@ pub(crate) mod tests {
         let mut f = feature(
             "d",
             vec![repo("api", true), repo("web", true), repo("ui", false)],
-            8,
+            9,
         );
         f.status = Status::Done;
         let url = "https://github.com/acme/api/pull/12";
@@ -8466,7 +10076,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_push_not_guarded_shows_on_its_repository() {
-        let f = feature("g", vec![repo("api", true), repo("web", true)], 3);
+        let f = feature("g", vec![repo("api", true), repo("web", true)], 4);
         let mut p = probe(None);
         p.guards.insert("api".into(), Guard::On);
         p.guards
@@ -8480,7 +10090,7 @@ pub(crate) mod tests {
 
     #[test]
     fn the_ship_check_shows_what_stops_it_or_that_it_is_ready() {
-        let f = feature("s", vec![repo("api", true)], 7);
+        let f = feature("s", vec![repo("api", true)], 8);
         let none = check_lines(&f, None, false, 2_060);
         assert_eq!(texts(&none), [("checking\u{2026}", CheckTone::Note)]);
         let blocked = probe(check(&["api is dirty", "web is behind"], Vec::new(), &[]));
@@ -8522,7 +10132,7 @@ pub(crate) mod tests {
         assert_eq!(lines.len(), 1);
         assert!(lines[0].text.starts_with("Squash started"));
         // Only while Ship is the current stage.
-        let building = feature("b", vec![repo("api", true)], 2);
+        let building = feature("b", vec![repo("api", true)], 3);
         assert!(check_lines(&building, Some(&ready), false, 2_060).is_empty());
     }
 
@@ -8585,17 +10195,17 @@ pub(crate) mod tests {
 
     #[test]
     fn the_watch_looks_at_open_features_bound_to_their_code() {
-        assert!(!watched(&feature("a", vec![repo("api", true)], 2)));
-        assert!(watched(&feature("b", vec![repo("api", true)], 3)));
+        assert!(!watched(&feature("a", vec![repo("api", true)], 3)));
+        assert!(watched(&feature("b", vec![repo("api", true)], 4)));
         let mut squashing = feature("c", vec![repo("api", true)], 1);
         squashing.shipping.squash_at = Some(1);
         assert!(watched(&squashing));
         assert_eq!(watch_every(&squashing), PANEL_EVERY);
         assert_eq!(
-            watch_every(&feature("b", vec![repo("api", true)], 3)),
+            watch_every(&feature("b", vec![repo("api", true)], 4)),
             WATCH_EVERY
         );
-        let mut done = feature("d", vec![repo("api", true)], 8);
+        let mut done = feature("d", vec![repo("api", true)], 9);
         done.status = Status::Done;
         assert!(!watched(&done));
     }
@@ -8606,7 +10216,7 @@ pub(crate) mod tests {
         open.title = "Open".into();
         let mut abandoned = feature("b", vec![repo("api", true)], 1);
         abandoned.status = Status::Abandoned;
-        let mut done = feature("c", vec![repo("api", true)], 8);
+        let mut done = feature("c", vec![repo("api", true)], 9);
         done.status = Status::Done;
         let all = vec![open, abandoned, done];
         let shown: Vec<&str> = sidebar_features(&all)
@@ -8684,8 +10294,87 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn setup_is_offered_where_tests_run_once_they_are_reached() {
+        let at_build = feature("b", vec![repo("api", true)], 3);
+        assert!(offers_setup(&at_build, Stage::Build));
+        assert!(!offers_setup(&at_build, Stage::Verify));
+        assert!(!offers_setup(&at_build, Stage::Plan));
+        let mut f = feature("b", vec![repo("api", true)], 4);
+        assert!(offers_setup(&f, Stage::Build));
+        assert!(offers_setup(&f, Stage::Verify));
+        assert!(!offers_setup(&f, Stage::AiReview));
+        let setup = |f: &Feature| {
+            let actions = page_actions(f, Stage::Verify, RowCtx::default());
+            let on = actions.iter().find(|(_, o)| *o == PanelOutcome::SetUp);
+            on.map(|(b, _)| (b.label.clone(), b.style))
+        };
+        assert_eq!(setup(&f), Some(("Set up".into(), ButtonStyle::Quiet)));
+        // Cut short by gerdr quitting: not run, as far as the button goes.
+        f.setup = Some(feature::setup::SetupRun::default());
+        assert_eq!(setup(&f).unwrap().0, "Set up");
+        f.setup = Some(feature::setup::SetupRun {
+            finished: Some(2),
+            ..Default::default()
+        });
+        assert_eq!(setup(&f).unwrap().0, "Set up again");
+        f.status = Status::Abandoned;
+        assert_eq!(setup(&f), None);
+    }
+
+    #[test]
+    fn the_setup_section_says_what_went_wrong_then_what_it_copied() {
+        let mut f = feature("b", vec![repo("api", true)], 3);
+        let state = PanelState::default();
+        assert_eq!(setup_section(&f, &state), None);
+        // Under way, and cut short by gerdr quitting.
+        f.setup = Some(feature::setup::SetupRun::default());
+        assert_eq!(setup_section(&f, &state), None);
+        let step = "Setting up \u{201c}B\u{201d}: api: copying .venv".to_owned();
+        let running = PanelState {
+            setup: Some(&step),
+            ..PanelState::default()
+        };
+        let PageSection::Lines { lines: said, .. } = setup_section(&f, &running).unwrap() else {
+            panic!("not lines");
+        };
+        assert_eq!(said[0].tone, CheckTone::Note);
+        f.setup = Some(feature::setup::SetupRun {
+            finished: Some(2),
+            ..Default::default()
+        });
+        assert_eq!(
+            setup_section(&f, &state),
+            Some(lines(
+                "Setup",
+                vec![line("nothing was missing", CheckTone::Note)]
+            ))
+        );
+        f.setup = Some(feature::setup::SetupRun {
+            finished: Some(2),
+            failed: Some("api: `npm ci` exited with 1".into()),
+            copied: vec!["api: .env".into()],
+            not_copied: vec!["api: .venv (exited with 1)".into()],
+            ..Default::default()
+        });
+        assert_eq!(
+            setup_section(&f, &state),
+            Some(lines(
+                "Setup",
+                vec![
+                    line("failed: api: `npm ci` exited with 1", CheckTone::Blocker),
+                    line(
+                        "couldn't copy api: .venv (exited with 1)",
+                        CheckTone::Blocker
+                    ),
+                    line("copied api: .env", CheckTone::Note),
+                ]
+            ))
+        );
+    }
+
+    #[test]
     fn a_running_build_shows_its_agent_then_its_milestones() {
-        let mut f = feature("b", vec![repo("api", true)], 2);
+        let mut f = feature("b", vec![repo("api", true)], 3);
         let mut run = agent_run(Some("p1"), None);
         run.started = 1_000;
         f.runs.insert(Stage::Build, run);
@@ -8700,16 +10389,16 @@ pub(crate) mod tests {
             labels(&actions),
             [
                 ("Show agent", PanelOutcome::ShowAgent(Stage::Build)),
-                (
-                    "Restart agent",
-                    PanelOutcome::StartAgent(Stage::Build, true)
-                ),
+                ("Restart", PanelOutcome::StartAgent(Stage::Build, true)),
                 ("Start over\u{2026}", PanelOutcome::StartOver(Stage::Build)),
+                ("Set up", PanelOutcome::SetUp),
+                (
+                    "Commands\u{2026}",
+                    PanelOutcome::EditCommands(CommandsTab::Setup)
+                ),
             ]
         );
         assert_eq!(actions[0].0.style, ButtonStyle::Primary);
-        assert_eq!(actions[0].0.key, Some("\u{23ce}"));
-        assert_eq!(actions[1].0.key, Some("Ctrl+R"));
         let page = stage_page(&f, Stage::Build, &state, &actions, 2_000);
         assert_eq!(page.title, "Build");
         // The agent's card below says what it does.
@@ -8721,9 +10410,9 @@ pub(crate) mod tests {
                     icon: AgentIcon::Claude,
                     name: "Claude Code".into(),
                     dot: Dot::Working,
-                    status: "Claude Code working \u{b7} started 16m ago".into(),
+                    status: "working \u{b7} started 16m ago".into(),
                     tail: Vec::new(),
-                    button: Some(0),
+                    buttons: vec![0, 1],
                     picks: Vec::new(),
                 },
                 PageSection::MilestoneMode { fresh: false }
@@ -8752,10 +10441,10 @@ pub(crate) mod tests {
                 items: Vec::new()
             })
         );
-        let PageSection::Agent { button, .. } = &page.sections[0] else {
+        let PageSection::Agent { buttons, .. } = &page.sections[0] else {
             panic!("the agent's card first");
         };
-        assert_eq!(*button, Some(1));
+        assert_eq!(buttons[..2], [0, 1], "Continue, then Show agent");
         let node = rail_node(&f, Stage::Build, &state, 2_000);
         assert_eq!(
             (node.mark, node.line.as_str()),
@@ -8766,6 +10455,7 @@ pub(crate) mod tests {
             started: 1_000,
             finished: Some(1_100),
             failed: Some("api: `npm ci` exited with 1".into()),
+            ..Default::default()
         });
         let page = stage_page(&f, Stage::Build, &state, &actions, 2_000);
         assert_eq!(
@@ -8807,7 +10497,7 @@ pub(crate) mod tests {
             [
                 ("Review", PanelOutcome::OpenDoc(Stage::Plan)),
                 ("Show agent", PanelOutcome::ShowAgent(Stage::Plan)),
-                ("Restart agent", PanelOutcome::StartAgent(Stage::Plan, true)),
+                ("Restart", PanelOutcome::StartAgent(Stage::Plan, true)),
                 ("Start over\u{2026}", PanelOutcome::StartOver(Stage::Plan)),
             ]
         );
@@ -8816,16 +10506,20 @@ pub(crate) mod tests {
         assert_eq!(page.status, None);
         assert!(matches!(
             &page.sections[0],
-            PageSection::Agent { status, .. } if status == "Claude Code done \u{b7} plan.md ready"
+            PageSection::Agent { status, .. } if status == "done \u{b7} plan.md ready"
         ));
         assert!(matches!(
             page.sections[0],
             PageSection::Agent {
                 dot: Dot::Unknown,
-                button: Some(1),
                 ..
             }
         ));
+        // Show agent and Restart are its card's, Start over the stage's.
+        let PageSection::Agent { buttons, .. } = &page.sections[0] else {
+            panic!("the agent's card first");
+        };
+        assert_eq!(*buttons, [1, 2]);
         assert_eq!(
             page.sections[1],
             file("plan.md", line("ready for review", CheckTone::Ready), &[0])
@@ -8907,7 +10601,7 @@ pub(crate) mod tests {
         assert!(
             labels(&plan).contains(&("Start over\u{2026}", PanelOutcome::StartOver(Stage::Plan)))
         );
-        // Plan's Restart agent doesn't reopen the brief: it stays locked.
+        // Plan's Restart doesn't reopen the brief: it stays locked.
         assert!(
             labels(&plan)
                 .iter()
@@ -8939,7 +10633,7 @@ pub(crate) mod tests {
     #[test]
     fn panel_keys_reopen_and_start_over_a_stage() {
         let mut panel = FeaturePanel::default();
-        let f = feature("k", vec![repo("api", true)], 2);
+        let f = feature("k", vec![repo("api", true)], 3);
         let ctrl_shift = ModifiersState {
             ctrl: true,
             shift: true,
@@ -8956,12 +10650,12 @@ pub(crate) mod tests {
         // On Build, current with nothing made: nothing to start over or reopen.
         assert_eq!(press(&mut panel, &f, reopen), None);
         assert_eq!(press(&mut panel, &f, start_over), None);
-        // On Plan, done: it reopens.
+        // On Plan review, done: it reopens.
         press(&mut panel, &f, key(Keysym::Left));
-        assert_eq!(panel.page_stage(&f), Stage::Plan);
+        assert_eq!(panel.page_stage(&f), Stage::PlanReview);
         assert_eq!(
             press(&mut panel, &f, reopen),
-            Some(PanelOutcome::Untick(Stage::Plan))
+            Some(PanelOutcome::Untick(Stage::PlanReview))
         );
         assert_eq!(press(&mut panel, &f, start_over), None);
     }
@@ -9026,7 +10720,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_failed_verify_lists_its_failures_and_who_fixes_them() {
-        let mut f = feature("v", vec![repo("api", true)], 3);
+        let mut f = feature("v", vec![repo("api", true)], 4);
         let fails = vec![
             "api: `npm test` exited with 1".to_owned(),
             "web: lint".into(),
@@ -9055,6 +10749,11 @@ pub(crate) mod tests {
                 ("Run checks", PanelOutcome::RunChecks),
                 ("Start over\u{2026}", PanelOutcome::StartOver(Stage::Verify)),
                 ("Evidence", PanelOutcome::Evidence),
+                ("Set up", PanelOutcome::SetUp),
+                (
+                    "Commands\u{2026}",
+                    PanelOutcome::EditCommands(CommandsTab::Checks)
+                ),
             ]
         );
         let page = stage_page(&f, Stage::Verify, &state, &actions, 2_000);
@@ -9095,7 +10794,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_blocked_ship_says_what_stops_it() {
-        let f = feature("s", vec![repo("api", true)], 7);
+        let f = feature("s", vec![repo("api", true)], 8);
         let p = probe(check(&["api has uncommitted changes"], Vec::new(), &[]));
         let state = PanelState {
             probe: Some(&p),
@@ -9128,25 +10827,87 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_cards_line_says_the_stage_and_how_it_stands_else_how_long_it_sat() {
+        let state = LineState::from(&PanelState::default());
+        let now = 10 * 86_400;
+        let mut f = feature("d", vec![repo("api", true)], 2);
+        f.created = 0;
+        f.history = vec![feature::Event {
+            at: now - 3 * 86_400,
+            what: "Plan ticked".into(),
+        }];
+        assert_eq!(
+            card_line(&f, Some(Stage::Build), &state, now),
+            format!("Build \u{b7} {}", projects::ago(now, now - 3 * 86_400)),
+        );
+        let setting_up = LineState {
+            setup: Some("npm ci"),
+            ..LineState::from(&PanelState::default())
+        };
+        assert_eq!(
+            card_line(&f, Some(Stage::Build), &setting_up, now),
+            "Build \u{b7} setting up",
+        );
+        assert_eq!(card_line(&f, None, &state, now), "Every stage done");
+    }
+
+    #[test]
+    fn a_card_says_what_the_rail_says_of_work_sent_back_to_build() {
+        use chrome::CardTone::{Waits, Working};
+        let state = LineState::from(&PanelState::default());
+        let mut f = feature("d", vec![repo("api", true)], 5);
+        f.verify = Some(feature::verify::VerifyRun {
+            passed: Some(false),
+            ..Default::default()
+        });
+        let status = |back| card_status(&f, &state, false, false, back, 0);
+        let runs = status(Some(Rework::Runs(Dot::Working)));
+        assert_eq!(runs.0, Some(Stage::Build));
+        assert_eq!(runs.1, "Build \u{b7} running again");
+        assert_eq!(runs.2, Working);
+        let waits = status(Some(Rework::Waits));
+        assert_eq!(waits.1, "Build \u{b7} waiting to send");
+        assert_eq!(waits.2, Waits);
+        assert_eq!(status(None).0, f.current());
+    }
+
+    #[test]
+    fn a_cards_tone_puts_a_failure_over_a_gate_over_work() {
+        use chrome::CardTone::{Failed, Idle, Waits, Working};
+        let state = LineState::from(&PanelState::default());
+        let f = feature("d", vec![repo("api", true)], 2);
+        let tone = |gate, busy| card_tone(&f, Some(Stage::Build), &state, gate, busy);
+        assert_eq!(tone(false, false), Idle);
+        assert_eq!(tone(false, true), Working);
+        assert_eq!(tone(true, true), Waits);
+        let mut verify = feature("d", vec![repo("api", true)], 3);
+        verify.verify = Some(feature::verify::VerifyRun {
+            passed: Some(false),
+            ..Default::default()
+        });
+        assert_eq!(
+            card_tone(&verify, Some(Stage::Verify), &state, true, true),
+            Failed
+        );
+    }
+
+    #[test]
     fn a_done_stage_says_when_and_reopens_and_a_later_one_waits() {
         let mut f = feature("d", vec![repo("api", true)], 2);
         f.marks.get_mut(&Stage::Plan).unwrap().note = "looks good".into();
-        let mut built = feature("d", vec![repo("api", true)], 3);
+        let mut built = feature("d", vec![repo("api", true)], 4);
         built.marks.get_mut(&Stage::Plan).unwrap().note = "looks good".into();
         let state = PanelState::default();
         let actions = page_actions(&f, Stage::Plan, RowCtx::default());
         assert_eq!(
             labels(&actions),
             [
-                ("Go to Build", PanelOutcome::GoToCurrent),
+                ("Go to Plan review", PanelOutcome::GoToCurrent),
                 ("Reopen", PanelOutcome::Untick(Stage::Plan)),
             ]
         );
         assert_eq!(actions[0].0.style, ButtonStyle::Primary);
-        assert_eq!(
-            (actions[1].0.style, actions[1].0.key),
-            (ButtonStyle::Plain, Some(REOPEN_KEY))
-        );
+        assert_eq!(actions[1].0.style, ButtonStyle::Plain);
         let page = stage_page(&f, Stage::Plan, &state, &actions, 2_060);
         assert_eq!(
             page.status,
@@ -9283,7 +11044,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_finished_features_tab_shows_no_code_error_nor_stale_marks() {
-        let mut f = feature("d", vec![repo("api", true)], 8);
+        let mut f = feature("d", vec![repo("api", true)], 9);
         f.status = Status::Done;
         let p = Probe {
             stats: BTreeMap::from([("api".to_owned(), (4, 1))]),
@@ -9419,7 +11180,7 @@ pub(crate) mod tests {
             probe: Some(&p),
             ..PanelState::default()
         };
-        let f = feature("b", vec![repo("api", true)], 2);
+        let f = feature("b", vec![repo("api", true)], 3);
         assert!(!has_doc(&stage_page(&f, Stage::Build, &state, &[], 2_000)));
     }
 
@@ -9446,7 +11207,7 @@ pub(crate) mod tests {
 
     #[test]
     fn the_build_page_shows_its_log_by_name_and_its_agent_tail() {
-        let mut f = feature("b", vec![repo("api", true)], 2);
+        let mut f = feature("b", vec![repo("api", true)], 3);
         f.runs.insert(Stage::Build, agent_run(Some("p1"), None));
         f.runs.get_mut(&Stage::Build).unwrap().stop = Some(feature::agents::Stop {
             done: 1,
@@ -9490,8 +11251,65 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_done_stage_on_the_rail_says_what_ran_it() {
+        let run = |agent: &str, model: Option<&str>| feature::agents::StageRun {
+            agent: agent.to_owned(),
+            model: model.map(str::to_owned),
+            ..feature::agents::StageRun::default()
+        };
+        let mut f = feature("b", vec![repo("api", true)], 2);
+        let state = PanelState::default();
+        let agent_of = |f: &Feature, stage| rail_node(f, stage, &state, 2_000).agent;
+        // Done with no agent, as by hand: nothing to say.
+        assert_eq!(agent_of(&f, Stage::Discover), None);
+        // Its model, without the word its logo says; else the agent's name.
+        f.runs
+            .insert(Stage::Discover, run("Claude Code", Some("claude-opus-5-5")));
+        f.runs.insert(Stage::Plan, run("Codex", None));
+        assert_eq!(
+            agent_of(&f, Stage::Discover),
+            Some((AgentIcon::Claude, "opus-5-5".to_owned()))
+        );
+        assert_eq!(
+            agent_of(&f, Stage::Plan),
+            Some((AgentIcon::Codex, "Codex".to_owned()))
+        );
+        // Not done yet: it is on the page, and its line says how it goes.
+        f.runs.insert(Stage::Build, run("Cursor", Some("grok-4.7")));
+        assert_eq!(agent_of(&f, Stage::Build), None);
+    }
+
+    #[test]
+    fn an_agent_card_of_a_stage_gone_by_names_its_model() {
+        let mut f = feature("b", vec![repo("api", true)], 1);
+        let run = feature::agents::StageRun {
+            agent: "Cursor".to_owned(),
+            model: Some("grok-4.7".to_owned()),
+            started: 1_000,
+            ..feature::agents::StageRun::default()
+        };
+        f.runs.insert(Stage::Discover, run.clone());
+        f.runs.insert(Stage::Plan, run);
+        let state = PanelState {
+            agent: Some("Cursor working".into()),
+            ..PanelState::default()
+        };
+        let status_of = |stage| match agent_card(&f, stage, &state, &[], 2_000) {
+            Some(PageSection::Agent { status, .. }) => status,
+            other => panic!("no card: {other:?}"),
+        };
+        assert!(
+            status_of(Stage::Discover).starts_with("grok-4.7 \u{b7} started "),
+            "{}",
+            status_of(Stage::Discover)
+        );
+        // The current stage's says what it does, as its status line does.
+        assert_eq!(status_of(Stage::Plan), "working");
+    }
+
+    #[test]
     fn a_repository_row_shows_its_line_stat_once_read() {
-        let f = feature("b", vec![repo("api", true), repo("web", true)], 2);
+        let f = feature("b", vec![repo("api", true), repo("web", true)], 3);
         let panel = FeaturePanel {
             project: "acme".into(),
             slug: "b".into(),
@@ -9512,7 +11330,7 @@ pub(crate) mod tests {
 
     #[test]
     fn ctrl_shift_b_flips_the_milestone_choice_on_builds_page_only() {
-        let mut f = feature("b", vec![repo("api", true)], 2);
+        let mut f = feature("b", vec![repo("api", true)], 3);
         let mods = ModifiersState {
             ctrl: true,
             shift: true,
@@ -9539,7 +11357,7 @@ pub(crate) mod tests {
 
     #[test]
     fn only_an_open_build_offers_the_milestone_choice() {
-        let mut f = feature("b", vec![repo("api", true)], 2);
+        let mut f = feature("b", vec![repo("api", true)], 3);
         assert!(milestone_switch(&f, Stage::Build));
         assert!(!milestone_switch(&f, Stage::Plan));
         let state = PanelState::default();
@@ -9560,7 +11378,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_blocked_build_says_why_on_its_page_and_rail() {
-        let mut f = feature("b", vec![repo("api", true)], 2);
+        let mut f = feature("b", vec![repo("api", true)], 3);
         let mut run = agent_run(Some("p1"), None);
         run.blocked = Some(feature::agents::Blocked {
             why: "the plan names no such table".into(),
@@ -9609,7 +11427,7 @@ pub(crate) mod tests {
         assert!(name.is_empty());
         assert_eq!(picks, &chips);
         // Run by another: the restart says who comes next.
-        let mut f2 = feature("b", vec![repo("r", true)], 2);
+        let mut f2 = feature("b", vec![repo("r", true)], 3);
         f2.runs.insert(
             Stage::Build,
             feature::agents::StageRun {
@@ -9629,7 +11447,7 @@ pub(crate) mod tests {
         f2.runs.get_mut(&Stage::Build).unwrap().agent = "Cursor".into();
         let actions = page_actions(&f2, Stage::Build, RowCtx::default());
         let page = stage_page(&f2, Stage::Build, &state, &actions, 2_000);
-        assert_eq!(restart(&page).as_deref(), Some("Restart agent"));
+        assert_eq!(restart(&page).as_deref(), Some("Restart"));
         // No chips, no card on a stage without a run.
         f.status = Status::Abandoned;
         let page = stage_page(&f, Stage::Build, &PanelState::default(), &[], 2_000);

@@ -19,7 +19,7 @@
 use super::{
     BAR_BUTTON, BAR_BUTTON_GAP, BAR_INSET, BAR_NOTE_GAP, Canvas, DETAIL_FONT_SIZE, Dot,
     PANE_BAR_HEIGHT, Painter, Palette, Rect, Rgb, SHADOW, STATUS_GAP, STATUS_WIDTH, band,
-    centred_dot, chevron_side, copy, cross, icon_sdf, mix, physical, rect_px, restart_arrow,
+    centred_dot, chevron_side, copy, cross, icon_sdf, mix, physical, rect_px, restart_arrow, send,
     status_dot, status_mark, stop, text_lines, zoom_corners,
 };
 use crate::herdr::AgentStatus;
@@ -95,11 +95,11 @@ pub fn pane_bar_rect(pane: Rect, kind: BarButtons) -> Rect {
         BarButtons::Web { .. } => {
             ((pane.size.w as f64 * PILL_WEB_SHARE).round() as i32).clamp(PILL_WEB_MIN, PILL_WEB_MAX)
         }
-        BarButtons::None | BarButtons::Terminal => PILL_APP,
+        BarButtons::None | BarButtons::Terminal | BarButtons::Waiting => PILL_APP,
     };
     let w = want.min(room);
     let h = match kind {
-        BarButtons::Terminal => PILL_TERMINAL_HEIGHT,
+        BarButtons::Terminal | BarButtons::Waiting => PILL_TERMINAL_HEIGHT,
         BarButtons::Web { .. } | BarButtons::None => BAR_PILL_HEIGHT,
     };
     let h = h.min(pane.size.h - PILL_TOP - 1).max(0);
@@ -288,6 +288,8 @@ pub fn pane_bar_hit(
 /// A button in a pane's bar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BarButton {
+    /// Tell the agent waiting in this terminal to read its stage's prompt.
+    SendPrompt,
     Scrollback,
     Restart,
     Stop,
@@ -311,6 +313,8 @@ pub enum BarButtons {
     None,
     /// A terminal: its scrollback, and restart and stop what runs in it.
     Terminal,
+    /// A terminal whose stage agent waits for its prompt: that to send too.
+    Waiting,
     /// A web page: back and forward (while its page has a `history` to
     /// go through) and reload at the start, its address in a field
     /// filling the rest, and copy it at the end.
@@ -323,6 +327,12 @@ impl BarButtons {
         match self {
             Self::None => &[],
             Self::Terminal => &[BarButton::Scrollback, BarButton::Restart, BarButton::Stop],
+            Self::Waiting => &[
+                BarButton::SendPrompt,
+                BarButton::Scrollback,
+                BarButton::Restart,
+                BarButton::Stop,
+            ],
             Self::Web { history: true } => &[
                 BarButton::Back,
                 BarButton::Forward,
@@ -339,7 +349,7 @@ impl BarButtons {
         match self {
             Self::Web { history: true } => 3,
             Self::Web { history: false } => 1,
-            Self::None | Self::Terminal => 0,
+            Self::None | Self::Terminal | Self::Waiting => 0,
         }
     }
 }
@@ -445,7 +455,8 @@ impl PaneBarView {
     /// Whether its pill starts with a mark saying how its command is: a
     /// terminal's, once something has run in it.
     fn has_mark(&self) -> bool {
-        self.buttons == BarButtons::Terminal && self.status != BarStatus::Idle
+        matches!(self.buttons, BarButtons::Terminal | BarButtons::Waiting)
+            && self.status != BarStatus::Idle
     }
 
     /// Where its mark goes, in the pill at `pill`.
@@ -732,7 +743,8 @@ impl Painter {
                 BarButton::Stop => view.can_stop,
                 BarButton::Back => view.can_back,
                 BarButton::Forward => view.can_forward,
-                BarButton::Scrollback
+                BarButton::SendPrompt
+                | BarButton::Scrollback
                 | BarButton::Reload
                 | BarButton::CopyUrl
                 | BarButton::Zoom
@@ -753,10 +765,14 @@ impl Painter {
                 mix(p.placeholder, background, 0.5)
             } else if hovered {
                 p.text
+            } else if button == BarButton::SendPrompt {
+                // What the agent waits for: never faint.
+                p.accent
             } else {
                 rest
             };
             match button {
+                BarButton::SendPrompt => icon_sdf(c, rect, scale, color, |x, y| send(x, y, s)),
                 BarButton::Restart | BarButton::Reload => {
                     icon_sdf(c, rect, scale, color, |x, y| restart_arrow(x, y, s))
                 }
@@ -1175,6 +1191,11 @@ mod tests {
         assert_eq!(
             order(BarButtons::Terminal),
             [BarButtons::Terminal.buttons(), &[BarButton::Close]].concat()
+        );
+        // A waiting agent's bar leads what stays at its end with the arrow.
+        assert_eq!(
+            order(BarButtons::Waiting)[0],
+            BarButton::SendPrompt,
         );
     }
 

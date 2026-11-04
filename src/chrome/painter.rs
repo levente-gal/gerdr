@@ -156,6 +156,9 @@ pub enum ButtonStyle {
     /// Outlined like a plain one, its label dimmed (still readable): one
     /// that can't be pressed now. Hovering doesn't light it.
     Off,
+    /// Only its label, until hovered, when it is lit as a plain one: one
+    /// to have at hand that nothing asks for.
+    Quiet,
 }
 
 impl From<bool> for ButtonStyle {
@@ -739,7 +742,8 @@ impl Painter {
     /// A button in `rect` like the quit dialog's, labelled `label`, in
     /// `style`: plain, the primary one in the accent, or a destructive
     /// one in the error colour (`true` and `false` stand for primary and
-    /// plain), or dimmed while it can't be pressed. `(hovered, focused)`
+    /// plain), dimmed while it can't be pressed, or only its label until
+    /// hovered. `(hovered, focused)`
     /// lightens it and rings it, the ring in the button's own colour.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn button(
@@ -778,7 +782,8 @@ impl Painter {
                 c.rounded(x, y, w, h, r, fill);
                 p.on_accent
             }
-            ButtonStyle::Plain | ButtonStyle::Off => {
+            ButtonStyle::Quiet if !hovered => p.text,
+            ButtonStyle::Plain | ButtonStyle::Off | ButtonStyle::Quiet => {
                 let fill = if hovered { p.button_hover() } else { p.element };
                 c.rounded(x, y, w, h, r, p.border);
                 c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, r - b, fill);

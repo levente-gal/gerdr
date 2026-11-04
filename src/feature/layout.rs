@@ -122,6 +122,44 @@ pub fn find_root(
     root_of(home, repos, ignore, bases)
 }
 
+/// `find_root` for a project among others, whose workspaces are `other_dirs`:
+/// the repositories another project has as a workspace are that project's, so
+/// they stay out.
+///
+/// Having one as a workspace too doesn't make it this project's when it sits
+/// outside this root: such a workspace is a shortcut to the other project. It
+/// is this project's when it sits in this root as well, since projects can
+/// share a folder. The repository it was started from always stays, and a
+/// root keeps all it found rather than be left with none.
+pub fn find_project_root(
+    dir: &Path,
+    workspace_dirs: &[PathBuf],
+    other_dirs: &[PathBuf],
+    ignore: &[String],
+    bases: &[(String, String)],
+) -> Result<Root, String> {
+    let mut root = find_root(dir, workspace_dirs, ignore, bases)?;
+    let tops = |dirs: &[PathBuf]| -> Vec<PathBuf> {
+        (dirs.iter())
+            .filter_map(|d| main_top(&above_features(d)))
+            .collect()
+    };
+    let (own, others) = (tops(workspace_dirs), tops(other_dirs));
+    let here = main_top(&above_features(dir));
+    let kept: Vec<Found> = (root.repos.iter())
+        .filter(|r| {
+            !others.contains(&r.main)
+                || here.as_ref() == Some(&r.main)
+                || (own.contains(&r.main) && r.main.starts_with(&root.path))
+        })
+        .cloned()
+        .collect();
+    if !kept.is_empty() {
+        root.repos = kept;
+    }
+    Ok(root)
+}
+
 /// The folder holding `dir`'s nearest `.features` folder, else `dir`.
 fn above_features(dir: &Path) -> PathBuf {
     dir.ancestors()
@@ -1361,6 +1399,7 @@ mod tests {
             setup: None,
             verify: None,
             review: None,
+            plan_review: None,
             viewed: Default::default(),
             manual: None,
             history: Vec::new(),
@@ -1864,6 +1903,76 @@ mod tests {
         // Ignored ones stay out, wherever they are.
         let root = find_root(&api, &dirs, &["tool".into()], &[]).unwrap();
         assert_eq!(names(&root), ["api", "unopened", "web"]);
+    }
+
+    #[test]
+    fn a_repository_of_another_project_stays_out() {
+        let t = Temp::new();
+        let app = t.0.join("app");
+        let personal = t.0.join("personal");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::create_dir_all(&personal).unwrap();
+        let repo_in = |folder: &Path, name: &str| {
+            let repo = folder.join(name);
+            std::fs::create_dir(&repo).unwrap();
+            run(&repo, &["init", "-q", "-b", "main"]);
+            commit(&repo, "a", "first");
+            repo
+        };
+        let api = repo_in(&app, "api");
+        let web = repo_in(&app, "web");
+        let theirs = repo_in(&app, "theirs");
+        let shared = repo_in(&app, "shared");
+        let tool = repo_in(&personal, "tool");
+        let gerdr = repo_in(&personal, "gerdr");
+        // A plain folder among the workspaces, as a home folder is, and a
+        // feature's folder.
+        let home = t.0.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let features = app.join(FEATURES_DIR).join("x");
+        std::fs::create_dir_all(&features).unwrap();
+        let dirs = [
+            home.clone(),
+            api.clone(),
+            web.clone(),
+            shared.clone(),
+            gerdr.clone(),
+            tool.clone(),
+            features.clone(),
+        ];
+        let others = [gerdr.clone(), theirs.clone(), shared.clone(), home];
+        let names_from = |from: &Path| {
+            let root = find_project_root(from, &dirs, &others, &[], &[]).unwrap();
+            assert_eq!(root.path, app);
+            names(&root).join(" ")
+        };
+
+        // Out: the workspace at another project's repository, and the one
+        // the folder holds that only another project has. In: the one
+        // nobody else has, and the one shared in this root.
+        let own = "api shared tool web";
+        assert_eq!(names_from(&features), own);
+        assert_eq!(names_from(&api), own);
+        // Started from it, it stays.
+        assert_eq!(names_from(&gerdr), "api gerdr shared tool web");
+
+        // With no other project all stay, as `find_root` found them.
+        let all = find_project_root(&api, &dirs, &[], &[], &[]).unwrap();
+        assert_eq!(
+            names(&all),
+            ["api", "gerdr", "shared", "theirs", "tool", "web"]
+        );
+
+        // A project on a repository of its own keeps it, shared or not.
+        let root =
+            find_project_root(&gerdr, std::slice::from_ref(&gerdr), &dirs, &[], &[]).unwrap();
+        assert_eq!(names(&root), ["gerdr"]);
+
+        // A project all of whose repositories others have keeps them.
+        let everyone = [api.clone(), web.clone(), theirs.clone(), shared.clone()];
+        let root =
+            find_project_root(&app, std::slice::from_ref(&app), &everyone, &[], &[]).unwrap();
+        assert_eq!(names(&root), ["api", "shared", "theirs", "web"]);
     }
 
     #[test]

@@ -32,10 +32,10 @@ use super::{
     Canvas, DETAIL_FONT_SIZE, Density, Dot, FONT_SIZE, FieldSpot, GAP, HEADER_BUTTON,
     HEADER_MARGIN, HEADER_NAME_END, HEADER_NAME_GAP, PADDING, PILL_HEIGHT, PILL_PADDING,
     POPUP_RADIUS, Painter, Palette, ROW_ICON_WIDTH, ROW_INSET, ROW_PICTURE_SIZE, ROW_RADIUS,
-    ROWS_TOP, Rect, Rgb, SHADOW, SMALL_FONT_SIZE, STATUS_GAP, STATUS_WIDTH, StageMark, TAB_LINE,
+    ROWS_TOP, Rect, Rgb, SHADOW, SMALL_FONT_SIZE, STATUS_GAP, STATUS_WIDTH, TAB_LINE,
     TINY_FONT_SIZE, TabView, agent_icon, app, arrow, band, centred_dot, chevron_down, ci_mark,
     cross, distinct, ellipsis, folder, git_branch, icon_sdf, measure, mix, new_tab, physical,
-    rect_px, restart_arrow, sparkle, status_dot, status_mark, terminal, tray,
+    rect_px, restart_arrow, sparkle, stages_mark, status_dot, status_mark, terminal, tray,
 };
 use crate::WorkspaceKind;
 use crate::agent_icons::AgentIcon;
@@ -140,7 +140,7 @@ const BLOCKED_TINT: f32 = 0.15;
 /// breathing; the rest comes and goes with the pulse.
 const BLOCKED_REST: f32 = 0.4;
 /// How much of the selection colour tints the active workspace's block.
-const ACTIVE_TINT: f32 = 0.45;
+pub(super) const ACTIVE_TINT: f32 = 0.45;
 /// How strongly the active workspace's header buttons show at rest, as
 /// a fraction of their hovered look.
 const ACTIVE_BUTTONS: f32 = 0.45;
@@ -160,10 +160,22 @@ const INBOX_GAP: i32 = 6;
 /// The features section under the workspaces: the room from the last
 /// block to its heading, with a rule across the sidebar halfway, and its
 /// heading's height (a header's, as it heads a list of its own).
-const SECTION_TOP: i32 = 12;
+const SECTION_TOP: i32 = 16;
 const SECTION_TITLE: i32 = 26;
+const FEATURES_LABEL: &str = "Features";
+/// How big the "+" on the rule is, the room the rule leaves it each side,
+/// and how far past it each way a click still lands on it.
+const FEATURES_PLUS: i32 = 16;
+const FEATURES_PLUS_GAP: i32 = 2;
+const FEATURES_PLUS_REACH: (i32, i32) = (4, 2);
 /// The line under a feature row's title holding its stage dots.
 const STAGE_LINE: i32 = 12;
+/// The line under a feature's stage dots saying how its stage stands.
+const FEATURE_INFO_LINE: i32 = 15;
+/// How far a feature row's lines tuck up under its title.
+const FEATURE_TUCK: i32 = 3;
+/// How wide a feature's count of repositories is.
+const REPO_COUNT_WIDTH: i32 = 44;
 /// The most of an inbox row its workspace's name takes, as a part of it.
 const INBOX_PLACE: f32 = 0.4;
 /// The gap between an agent row's name and what it is on.
@@ -746,10 +758,9 @@ pub struct WorkspaceView {
     /// How many errors its services printed that weren't looked at: a
     /// pill counting them on its header, left of its status.
     pub errors: usize,
-    /// The stage marks of the feature it is the workspace of, as the
-    /// Features section shows them (see `FeatureRowView`): at the right
-    /// end of the line under its name. Empty when it is no feature's.
-    pub stages: Vec<StageMark>,
+    /// The card of the feature it is the workspace of: its stage marks
+    /// on the line under its name, and how its stage stands on one more.
+    pub feature: Option<super::FeatureCard>,
 }
 
 /// What a GitHub section shows: a chip per branch or pull request, a line
@@ -896,7 +907,7 @@ impl WorkspaceView {
             restart: false,
             picks: Vec::new(),
             errors: 0,
-            stages: Vec::new(),
+            feature: None,
         }
     }
 
@@ -915,18 +926,27 @@ impl WorkspaceView {
         let lines = self.attention_lines(density) as i32;
         let bottom = if lines > 0 { ATTENTION_BOTTOM } else { 0 };
         let (name, branch) = self.header_lines(density);
-        name + branch + lines * TAB_LINE + bottom
+        name + branch + self.info_line() + lines * TAB_LINE + bottom
     }
 
     /// The heights of its header's name band and of the line under it
     /// holding its branch: with a branch, it has both, so a long name
     /// keeps the width and the branch always shows.
     fn header_lines(&self, density: Density) -> (i32, i32) {
-        let under = self.branch.is_some() || !self.stages.is_empty();
+        let under = self.branch.is_some() || self.feature.is_some();
         match (under, density) {
             (false, _) => (header_height(density), 0),
             (true, Density::Comfortable) => (NAME_LINE, BRANCH_LINE),
             (true, Density::Compact) => (NAME_LINE_COMPACT, BRANCH_LINE_COMPACT),
+        }
+    }
+
+    /// The height of the line under its feature's stage marks.
+    fn info_line(&self) -> i32 {
+        if self.feature.is_some() {
+            FEATURE_INFO_LINE
+        } else {
+            0
         }
     }
 
@@ -1032,8 +1052,8 @@ pub struct RowState {
     pub worktrees: bool,
     pub fold: bool,
     pub ci: bool,
-    /// Whether the pointer is on its feature's stage marks.
-    pub stages: bool,
+    /// Which of its feature's stage marks the pointer is on.
+    pub stage: Option<usize>,
     /// Folded or unfolded by hand, not left to fold while quiet.
     pub by_hand: bool,
 }
@@ -1089,6 +1109,11 @@ pub struct SidebarState {
     /// The hover alpha of each feature row, as `SidebarView::features`
     /// lists them.
     pub features: Vec<u8>,
+    /// The stage dot under the pointer in a feature row: the row, as
+    /// `features` lists them, and the dot.
+    pub feature_dot: Option<(usize, usize)>,
+    /// The hover alpha of the "+" on the Features section's rule.
+    pub features_plus: u8,
     /// The "+" button's hover alpha, and whether its menu is open.
     pub plus: u8,
     pub plus_open: bool,
@@ -1139,6 +1164,13 @@ impl SidebarState {
 
     fn feature(&self, n: usize) -> u8 {
         self.features.get(n).copied().unwrap_or(0)
+    }
+
+    /// The stage dot under the pointer in feature row `n`.
+    fn dot_of(&self, n: usize) -> Option<usize> {
+        self.feature_dot
+            .filter(|(row, _)| *row == n)
+            .map(|(_, k)| k)
     }
 }
 
@@ -1222,9 +1254,15 @@ pub struct RowLayout {
     pub picks: Option<Rect>,
     /// The count of its other worktrees, when it has any.
     pub worktrees: Option<Rect>,
-    /// Its feature's stage marks, when it is a feature's workspace: at the
-    /// right end of the line under its name, right of the CI mark.
+    /// Its feature's stage marks, when it is a feature's workspace: where
+    /// the line under its name starts.
     pub stages: Option<Rect>,
+    /// What of that line is free for its git marks, past the stage marks.
+    pub git: Option<Rect>,
+    /// Its feature's count of repositories, when it holds several.
+    pub repos: Option<Rect>,
+    /// The line under the stage marks saying how its stage stands.
+    pub info: Option<Rect>,
     /// The lines under the header of the worktrees needing a look, when
     /// it shows any.
     pub attention: Option<Rect>,
@@ -1244,7 +1282,9 @@ impl RowLayout {
 
     /// Where its strip of agents sits under the header, and over it.
     fn strip_spots(&self) -> (i32, i32) {
-        let below = self.agent.loc.y + self.agent.size.h + self.branch.map_or(0, |b| b.size.h);
+        let line = self.branch.or(self.stages).map_or(0, |b| b.size.h);
+        let info = self.info.map_or(0, |i| i.size.h);
+        let below = self.agent.loc.y + self.agent.size.h + line + info;
         (below, self.agent.loc.y - STRIP_HEIGHT)
     }
 
@@ -1306,6 +1346,13 @@ pub struct SidebarLayout {
     /// open features, and a row per feature (see `with_features`).
     pub features_title: Option<Rect>,
     pub features: Vec<Rect>,
+    /// The "+" on the rule over the heading, starting a feature; and the
+    /// pill on the heading counting the features that wait for the user
+    /// (see `with_feature_head`).
+    pub features_plus: Option<Rect>,
+    pub features_waiting: Option<Rect>,
+    /// How many of the workspaces are features'.
+    pub feature_workspaces: usize,
     /// One per workspace.
     pub rows: Vec<RowLayout>,
     /// Per workspace, its agent rows as drawn (the most pressing first):
@@ -1378,8 +1425,8 @@ pub enum SidebarHit {
     Worktrees(usize),
     Fold(usize),
     CiMark(usize),
-    /// The stage marks of the feature it is the workspace of.
-    Stages(usize),
+    /// Stage dot `k` of the feature it is the workspace of.
+    Stage(usize, usize),
     /// Line `k` of workspace `i`'s worktrees needing a look: the worktree
     /// `k` of `WorkspaceView::needing_attention`, or the "+N more" line.
     Attention(usize, usize),
@@ -1396,8 +1443,14 @@ pub enum SidebarHit {
     More(usize),
     /// The "Features" heading: it opens the feature panel.
     FeaturesTitle,
-    /// Feature `n` of `SidebarView::features`.
+    /// The "+" on the Features section's rule: it starts a feature.
+    NewFeature,
+    /// The heading's count of features waiting for the user: it opens the
+    /// inbox on their gates.
+    FeaturesWaiting,
+    /// Feature `n` of `SidebarView::features`, and stage dot `k` of it.
     Feature(usize),
+    FeatureDot(usize, usize),
     /// Workspace `i`'s GitHub section off its chips and count (its mark,
     /// its line labels, the gaps), chip `k` of it (as `CiView::chips` lists
     /// them), and its count of other pull requests.
@@ -1421,7 +1474,7 @@ impl SidebarHit {
             | Self::Worktrees(i)
             | Self::Fold(i)
             | Self::CiMark(i)
-            | Self::Stages(i)
+            | Self::Stage(i, _)
             | Self::Attention(i, _) => Some(i),
             _ => None,
         }
@@ -1439,6 +1492,7 @@ impl SidebarHit {
         match (self.row(), self) {
             (Some(i), _) => Self::Row(i),
             (None, Self::CardClose(i, k)) => Self::Card(i, k),
+            (None, Self::FeatureDot(n, _)) => Self::Feature(n),
             (None, _) => self,
         }
     }
@@ -1473,11 +1527,25 @@ impl SidebarLayout {
         if let Some((i, k, _)) = self.inbox.iter().find(|(_, _, rect)| inside(*rect)) {
             return Some(SidebarHit::Inbox(*i, *k));
         }
+        if self
+            .features_plus
+            .is_some_and(|r| inside(features_plus_reach(r)))
+        {
+            return Some(SidebarHit::NewFeature);
+        }
+        if self.features_waiting.is_some_and(inside) {
+            return Some(SidebarHit::FeaturesWaiting);
+        }
         if self.features_title.is_some_and(inside) {
             return Some(SidebarHit::FeaturesTitle);
         }
         if let Some(n) = self.features.iter().position(|r| inside(*r)) {
-            return Some(SidebarHit::Feature(n));
+            let dots = feature_dots_rect(self.features[n]);
+            return Some(if inside(dots) {
+                SidebarHit::FeatureDot(n, super::stage_dot_at(dots, pos.x))
+            } else {
+                SidebarHit::Feature(n)
+            });
         }
         for (i, closes) in self.card_closes.iter().enumerate() {
             if let Some((k, _)) = closes.iter().find(|(_, rect)| inside(*rect)) {
@@ -1522,8 +1590,8 @@ impl SidebarLayout {
             SidebarHit::Worktrees(i)
         } else if row.ci.is_some_and(inside) {
             SidebarHit::CiMark(i)
-        } else if row.stages.is_some_and(inside) {
-            SidebarHit::Stages(i)
+        } else if let Some(dots) = row.stages.filter(|r| inside(*r)) {
+            SidebarHit::Stage(i, super::stage_dot_at(dots, pos.x))
         } else if let Some(lines) = row.attention.filter(|r| inside(*r)) {
             SidebarHit::Attention(i, ((pos.y - lines.loc.y as f64) / TAB_LINE as f64) as usize)
         } else if row.chip.is_some_and(inside) {
@@ -1552,7 +1620,11 @@ impl SidebarLayout {
         if let Some(last) = self.features.last() {
             return last.loc.y + last.size.h + CHILD_GAP + INBOX_GAP;
         }
-        self.blocks_end()
+        // The heading alone, offering to start a feature, ends it too.
+        let heading = self
+            .features_title
+            .map_or(i32::MIN, |t| t.loc.y + t.size.h + INBOX_GAP);
+        self.blocks_end().max(heading)
     }
 
     /// Where the workspaces' blocks end (the "Needs you" list's end, or
@@ -1577,6 +1649,22 @@ impl SidebarLayout {
             self.features_title = title;
         }
         self.features = rows;
+        self
+    }
+
+    /// This layout with the Features heading's own buttons, in a sidebar
+    /// `width` wide, once `with_features` placed the rows: `offer` shows the
+    /// heading with no feature yet, so the first one can be started, and
+    /// `waiting` features wait for the user.
+    pub fn with_feature_head(mut self, offer: bool, waiting: usize, width: i32) -> Self {
+        if offer && self.features_title.is_none() {
+            self.features_title = Some(features_title_rect(self.blocks_end(), width));
+        }
+        let count = self.feature_workspaces + self.features.len();
+        self.features_plus = self.features_title.map(features_plus_rect);
+        self.features_waiting = self
+            .features_title
+            .and_then(|title| features_waiting_rect(title, count, waiting));
         self
     }
 
@@ -1647,6 +1735,8 @@ impl SidebarLayout {
         let up = |r: &mut Rect| r.loc.y -= by;
         self.inbox_title.iter_mut().for_each(up);
         self.features_title.iter_mut().for_each(up);
+        self.features_plus.iter_mut().for_each(up);
+        self.features_waiting.iter_mut().for_each(up);
         self.features.iter_mut().for_each(up);
         for (_, _, r) in &mut self.inbox {
             up(r);
@@ -1671,6 +1761,9 @@ impl SidebarLayout {
                 &mut row.ci,
                 &mut row.worktrees,
                 &mut row.stages,
+                &mut row.git,
+                &mut row.repos,
+                &mut row.info,
                 &mut row.attention,
             ]
             .into_iter()
@@ -1792,19 +1885,57 @@ fn features_rects(
         return (None, Vec::new(), y);
     }
     let title = heading.then(|| features_title_rect(y, width));
-    // A row per feature, as an agent row with a line under its first
-    // for the stage dots.
+    // A row per feature, as an agent row with lines under its first for
+    // the stage dots and how the stage stands.
     let child_w = (width - GAP - ROW_INSET - CHILD_X).max(0);
     let mut y = title.map_or(y, |t| t.loc.y + SECTION_TITLE);
     let rows = (0..n)
         .map(|_| {
-            let h = agent_row(density) + STAGE_LINE;
+            let h = agent_row(density) + STAGE_LINE + FEATURE_INFO_LINE - FEATURE_TUCK;
             let rect = Rectangle::new((CHILD_X, y).into(), (child_w, h).into());
             y += h + CHILD_GAP;
             rect
         })
         .collect();
     (title, rows, y + INBOX_GAP)
+}
+
+/// The part of `r` from `x`, `w` wide.
+fn within_x(r: Rect, x: i32, w: i32) -> Rect {
+    Rectangle::new((x, r.loc.y).into(), (w, r.size.h).into())
+}
+
+/// Where a feature row at `row` has its stage dots: where its title
+/// starts, on the line above the last.
+pub(super) fn feature_dots_rect(row: Rect) -> Rect {
+    Rectangle::new(
+        (
+            row.loc.x - CHILD_X + NAME_X,
+            row.loc.y + row.size.h - FEATURE_INFO_LINE - STAGE_LINE,
+        )
+            .into(),
+        (
+            super::stage_marks_width(crate::feature::Stage::ALL.len()),
+            STAGE_LINE,
+        )
+            .into(),
+    )
+}
+
+/// Where a feature row at `row` says how its stage stands: its last line.
+fn feature_info_rect(row: Rect) -> Rect {
+    Rectangle::new(
+        (
+            row.loc.x - CHILD_X + NAME_X,
+            row.loc.y + row.size.h - FEATURE_INFO_LINE,
+        )
+            .into(),
+        (
+            row.size.w - (NAME_X - CHILD_X) - CHILD_PAD,
+            FEATURE_INFO_LINE,
+        )
+            .into(),
+    )
 }
 
 /// The "Features" heading of a section starting at `y`, under its rule,
@@ -1814,6 +1945,49 @@ fn features_title_rect(y: i32, width: i32) -> Rect {
         (0, y + SECTION_TOP).into(),
         (width - GAP, SECTION_TITLE).into(),
     )
+}
+
+/// The "+" of the heading at `title`: on the rule over it, in the column
+/// of the workspaces' "×".
+fn features_plus_rect(title: Rect) -> Rect {
+    let right = title.loc.x + title.size.w - ROW_INSET;
+    Rectangle::new(
+        (
+            right - (CLOSE_SLOT + FEATURES_PLUS) / 2,
+            title.loc.y - SECTION_TOP,
+        )
+            .into(),
+        (FEATURES_PLUS, SECTION_TOP).into(),
+    )
+}
+
+/// How far a click lands on the "+" at `plus`.
+fn features_plus_reach(plus: Rect) -> Rect {
+    let (x, y) = FEATURES_PLUS_REACH;
+    Rectangle::new(
+        (plus.loc.x - x, plus.loc.y - y).into(),
+        (plus.size.w + 2 * x, plus.size.h + 2 * y).into(),
+    )
+}
+
+/// The pill of `waiting` features on the heading at `title` that counts
+/// `count`: left of the count, while it fits beside the label.
+fn features_waiting_rect(title: Rect, count: usize, waiting: usize) -> Option<Rect> {
+    if waiting == 0 {
+        return None;
+    }
+    let right = title.loc.x + title.size.w - ROW_INSET - CHILD_PAD;
+    let w = pill_extent(waiting);
+    let x = right - text_extent(&count.to_string(), DETAIL_FONT_SIZE) - TITLE_GAP - w;
+    let label_end = NAME_X + text_extent(FEATURES_LABEL, SMALL_FONT_SIZE) + TITLE_GAP;
+    (x >= label_end).then(|| Rectangle::new((x, title.loc.y).into(), (w, title.size.h).into()))
+}
+
+/// How many features of `workspaces` and `rows` wait for the user.
+pub fn features_waiting(workspaces: &[WorkspaceView], rows: &[super::FeatureRowView]) -> usize {
+    let on_workspaces = workspaces.iter().filter_map(|ws| ws.feature.as_ref());
+    let cards = on_workspaces.chain(rows.iter().map(|row| &row.card));
+    cards.filter(|card| card.gate).count()
 }
 
 /// Where a part of the features section with `n` rows, from its top,
@@ -1837,7 +2011,7 @@ fn features_part_rects(
 /// feature workspace at the end.
 fn features_from(workspaces: &[WorkspaceView]) -> Option<usize> {
     let n = (workspaces.iter().rev())
-        .take_while(|ws| !ws.stages.is_empty())
+        .take_while(|ws| ws.feature.is_some())
         .count();
     (n > 0).then(|| workspaces.len() - n)
 }
@@ -1891,6 +2065,7 @@ pub fn sidebar_layout_at(
         // count at that line's right end.
         let h = ws.height(density);
         let (title_h, branch_h) = ws.header_lines(density);
+        let info_h = ws.info_line();
         let rect = Rectangle::new((0, y).into(), (width - GAP, h).into());
         let title = Rectangle::new((0, y).into(), (width - GAP, title_h).into());
         let slot = |x: i32, w: i32| Rectangle::new((x, y).into(), (w, title_h).into());
@@ -1909,7 +2084,7 @@ pub fn sidebar_layout_at(
         let picks = (!ws.picks.is_empty()).then(|| {
             let w = ws.picks.len().min(room) as i32 * AGENT_SLOT;
             Rectangle::new(
-                (strip_end - w, y + title_h + branch_h).into(),
+                (strip_end - w, y + title_h + branch_h + info_h).into(),
                 (w, STRIP_HEIGHT).into(),
             )
         });
@@ -1926,36 +2101,57 @@ pub fn sidebar_layout_at(
             end -= w;
             slot(end, w)
         });
+        // A feature's stage marks where its name starts; they stay, what
+        // follows on the line goes when it doesn't fit.
+        let stages = ws
+            .feature
+            .as_ref()
+            .map(|card| below(NAME_X, super::stage_marks_width(card.marks.len())));
+        let floor = stages.map_or(i32::MIN, |s| s.loc.x + s.size.w + NAME_GAP);
         // The CI mark and the count: at the right end of the branch's
         // line, else of the header.
         let mut branch_end = right;
         let mut take = |w: i32| {
-            if branch_h > 0 {
-                branch_end -= w;
-                below(branch_end, w)
-            } else {
+            if branch_h == 0 {
                 end -= w;
-                slot(end, w)
+                Some(slot(end, w))
+            } else if branch_end - w >= floor {
+                branch_end -= w;
+                Some(below(branch_end, w))
+            } else {
+                None
             }
         };
-        // A feature's stage marks first, rightmost of the line, their
-        // right end at a feature row's.
-        let stages = (!ws.stages.is_empty())
-            .then(|| take(super::stage_marks_width(ws.stages.len()) + NAME_GAP + CHILD_PAD));
-        let ci_mark = ws.ci_mark().then(|| take(CI_SLOT));
-        let worktrees = (!ws.worktrees().is_empty()).then(|| take(WORKTREE_COUNT_WIDTH));
+        let ci_mark = ws.ci_mark().then(|| take(CI_SLOT)).flatten();
+        let worktrees = (!ws.worktrees().is_empty())
+            .then(|| take(WORKTREE_COUNT_WIDTH))
+            .flatten();
+        let card = ws.feature.as_ref();
+        let repos = card
+            .filter(|card| card.shows_repos())
+            .and_then(|_| take(REPO_COUNT_WIDTH + CHILD_PAD))
+            .map(|r| Rectangle::new(r.loc, (REPO_COUNT_WIDTH, r.size.h).into()));
+        let git = card.map(|_| below(floor, (branch_end - floor).max(0)));
+        let info = card.map(|_| {
+            Rectangle::new(
+                (NAME_X, y + title_h + branch_h).into(),
+                ((right - CHILD_PAD - NAME_X).max(0), info_h).into(),
+            )
+        });
         // The name may reach under the "×", the restart button and the
         // agent button, which show only under the pointer, while nothing else is right of them.
         let name_end = if end == buttons { right } else { end };
         let name = slot(NAME_X, (name_end - NAME_GAP - NAME_X).max(0));
         let branch = ws
             .branch
-            .is_some()
-            .then(|| below(NAME_X, (branch_end - NAME_GAP - NAME_X).max(0)));
+            .as_ref()
+            // A feature's branch comes from its name: its tooltip says it.
+            .filter(|_| ws.feature.is_none())
+            .map(|_| below(NAME_X, (branch_end - NAME_GAP - NAME_X).max(0)));
         let fold = foldable.then(|| slot(ROW_INSET, ICON_X - ROW_INSET));
         let attention = (attention_lines > 0).then(|| {
             Rectangle::new(
-                (ROW_INSET, y + title_h + branch_h).into(),
+                (ROW_INSET, y + title_h + branch_h + info_h).into(),
                 (width - GAP - 2 * ROW_INSET, attention_lines * TAB_LINE).into(),
             )
         });
@@ -1974,6 +2170,9 @@ pub fn sidebar_layout_at(
             picks,
             worktrees,
             stages,
+            git,
+            repos,
+            info,
             attention,
         });
         y += h;
@@ -2043,6 +2242,9 @@ pub fn sidebar_layout_at(
         inbox,
         features_title,
         features: Vec::new(),
+        features_plus: None,
+        features_waiting: None,
+        feature_workspaces: first_feature.map_or(0, |f| workspaces.len() - f),
         rows,
         cards: card_rects,
         card_closes,
@@ -2165,14 +2367,24 @@ impl Painter {
         let density = state.density;
         let layout = sidebar_layout_at(&view.workspaces, &view.agents, size.w, density)
             .with_features(view.features.len(), size.w, density)
+            .with_feature_head(
+                !view.workspaces.is_empty(),
+                features_waiting(&view.workspaces, &view.features),
+                size.w,
+            )
             .scrolled_over(state.scroll, state.over, size.h);
         self.sidebar_inbox(&mut c, view, &layout, scale, p);
         if let Some(title) = layout.features_title {
             let workspaces =
                 features_from(&view.workspaces).map_or(0, |f| view.workspaces.len() - f);
-            self.features_heading(&mut c, title, workspaces + view.features.len(), scale, p);
+            let heading = FeaturesHeading {
+                count: workspaces + view.features.len(),
+                waiting: features_waiting(&view.workspaces, &view.features),
+                plus: state.features_plus,
+            };
+            self.features_heading(&mut c, title, &heading, scale, p);
             let rows: Vec<_> = (view.features.iter().zip(&layout.features).enumerate())
-                .map(|(n, (row, rect))| (row, state.feature(n), *rect))
+                .map(|(n, (row, rect))| (row, state.feature(n), state.dot_of(n), *rect))
                 .collect();
             self.feature_rows(&mut c, &rows, density, scale, p);
         }
@@ -2392,63 +2604,87 @@ impl Painter {
         );
     }
 
-    /// The features section's heading at `title`, counting `count`
-    /// features, under a rule across the sidebar.
-    fn features_heading(&self, c: &mut Canvas, title: Rect, count: usize, scale: f64, p: &Palette) {
+    /// The features section's heading at `title`, under a rule across the
+    /// sidebar with a "+" on it to start a feature.
+    fn features_heading(
+        &self,
+        c: &mut Canvas,
+        title: Rect,
+        heading: &FeaturesHeading,
+        scale: f64,
+        p: &Palette,
+    ) {
         let px = |v: i32| (v as f64 * scale).round() as i32;
+        let s = scale as f32;
+        let plus = features_plus_rect(title);
         let rule_y = px(title.loc.y - SECTION_TOP / 2);
         let rule_h = px(GAP).max(1);
         let rule_x = px(ROW_INSET);
-        let rule_w = px(title.loc.x + title.size.w - ROW_INSET) - rule_x;
-        c.fill(rule_x, rule_y, rule_w, rule_h, p.border);
-        self.section_heading(c, title, git_branch, "Features", Some(count), scale, p);
+        let rule_end = px(plus.loc.x - FEATURES_PLUS_GAP);
+        c.fill(rule_x, rule_y, rule_end - rule_x, rule_h, p.border);
+        let hover = alpha(heading.plus);
+        if hover > 0.0 {
+            let (x, y, w, h) = rect_px(plus, scale);
+            c.rounded(x, y, w, h, ROW_RADIUS * s, mix(p.panel, p.element, hover));
+        }
+        icon_sdf(c, plus, scale, mix(p.placeholder, p.text, hover), |x, y| {
+            super::plus(x, y, 0.0, 0.0, 4.0 * s, s)
+        });
+        let count = (heading.count > 0).then_some(heading.count);
+        self.section_heading(c, title, stages_mark, FEATURES_LABEL, count, scale, p);
+        let pill = features_waiting_rect(title, heading.count, heading.waiting);
+        if let Some(pill) = pill {
+            self.header_pill(c, heading.waiting, pill, p.warning, scale, p);
+        }
     }
 
     /// The features section's rows of features with no workspace: each a
     /// feature, its hover alpha and where it goes. A row has the mark of
     /// the stage the feature is at under the heading's icon, the feature's
-    /// title under its label, and a dot per stage on a line under the
-    /// title.
+    /// title under its label, a dot per stage on a line under the title,
+    /// and how that stage stands on a line under them.
     fn feature_rows(
         &self,
         c: &mut Canvas,
-        rows: &[(&super::FeatureRowView, u8, Rect)],
+        rows: &[(&super::FeatureRowView, u8, Option<usize>, Rect)],
         density: Density,
         scale: f64,
         p: &Palette,
     ) {
         let px = |v: i32| (v as f64 * scale).round() as i32;
         let s = scale as f32;
-        for (row, hover, rect) in rows {
+        for (row, hover, dot, rect) in rows {
             let hover = alpha(*hover);
             if hover > 0.0 {
                 let (x, y, w, h) = rect_px(*rect, scale);
                 c.rounded(x, y, w, h, ROW_RADIUS * s, mix(p.panel, p.element, hover));
             }
-            // The dot in the column of the heading's icon and of the
-            // agent rows' status dots.
+            // The stage's mark in the column of the heading's icon and of
+            // the workspaces' kind icons.
             let first = blocked_band(*rect, density);
             let spot = Rectangle::new(
-                (
-                    rect.loc.x - CHILD_X + ICON_X + (ROW_ICON_WIDTH - super::STAGE_DOT) / 2,
-                    first.loc.y + (first.size.h - super::STAGE_DOT) / 2,
-                )
-                    .into(),
-                (super::STAGE_DOT, super::STAGE_DOT).into(),
+                (rect.loc.x - CHILD_X + ICON_X, first.loc.y).into(),
+                (ROW_ICON_WIDTH, first.size.h).into(),
             );
-            let mark = row.mark();
-            icon_sdf(c, spot, scale, mark.color(p), |x, y| {
-                super::stage_dot(mark, x, y, 7.0 * s)
-            });
+            self.stage_mark(c, &row.card, spot, scale, p);
             // The title where the heading's label starts, across the
-            // row; the stages' dots on the line under it.
+            // row; the lines the workspaces' cards have under it.
             let text_x = px(rect.loc.x - CHILD_X + NAME_X);
-            let dots = super::stage_marks_width(row.marks.len());
-            let marks = Rectangle::new(
-                (rect.loc.x - CHILD_X + NAME_X, first.loc.y + first.size.h).into(),
-                (dots, STAGE_LINE - CHILD_PAD / 2).into(),
-            );
-            self.stage_marks(c, &row.marks, marks, scale, p);
+            let dots = feature_dots_rect(*rect);
+            if let Some(k) = dot {
+                let under = mix(p.panel, p.element, hover);
+                self.lit_stage_dot(c, dots, *k, under, scale, p);
+            }
+            self.stage_marks(c, &row.card.marks, dots, scale, p);
+            if row.card.shows_repos() {
+                let end = rect.loc.x + rect.size.w - CHILD_PAD;
+                let count = within_x(dots, end - REPO_COUNT_WIDTH, REPO_COUNT_WIDTH);
+                if count.loc.x >= dots.loc.x + dots.size.w + NAME_GAP {
+                    self.repo_count(c, row.card.repos, count, scale, p);
+                }
+            }
+            let end = px(rect.loc.x + rect.size.w - CHILD_PAD) as f32;
+            self.card_line(c, &row.card, feature_info_rect(*rect), end, scale, p);
             self.text(
                 c,
                 &row.title,
@@ -2460,6 +2696,83 @@ impl Painter {
                 p.text,
             );
         }
+    }
+
+    /// The pill lighting stage dot `k` of the dots at `dots`, on `under`,
+    /// as it opens that stage.
+    fn lit_stage_dot(
+        &self,
+        c: &mut Canvas,
+        dots: Rect,
+        k: usize,
+        under: Rgb,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let pad = 2;
+        let (d, gap) = (super::STAGE_DOT, super::STAGE_DOT_GAP);
+        let pill = Rectangle::new(
+            (
+                dots.loc.x + k as i32 * (d + gap) - pad,
+                dots.loc.y + (dots.size.h - d) / 2 - pad,
+            )
+                .into(),
+            (d + 2 * pad, d + 2 * pad).into(),
+        );
+        let (x, y, w, h) = rect_px(pill, scale);
+        c.rounded(x, y, w, h, h / 2.0, mix(under, p.text, 0.18));
+    }
+
+    /// The mark of the stage `card`'s feature is at, in `spot`.
+    fn stage_mark(
+        &self,
+        c: &mut Canvas,
+        card: &super::FeatureCard,
+        spot: Rect,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let small = 0.8 * scale as f32;
+        icon_sdf(c, spot, scale, card.tone.mark_color(p), |x, y| {
+            super::stage_glyph(card.stage, x, y, small)
+        });
+    }
+
+    /// The line of `card` saying how its stage stands, in `rect` up to
+    /// `end`.
+    fn card_line(
+        &self,
+        c: &mut Canvas,
+        card: &super::FeatureCard,
+        rect: Rect,
+        end: f32,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let x = (rect.loc.x as f64 * scale).round() as f32;
+        let color = card.tone.text_color(p);
+        let band = band(rect, scale);
+        self.text(c, &card.line, DETAIL_FONT_SIZE, x, end, band, scale, color);
+    }
+
+    /// The count of a feature's `repos` at the right end of `rect`, in
+    /// words: a mark beside a number counts worktrees on the same line.
+    fn repo_count(&self, c: &mut Canvas, repos: usize, rect: Rect, scale: f64, p: &Palette) {
+        let text = format!("{repos} repos");
+        let w = self.text_width(&text, DETAIL_FONT_SIZE, scale);
+        let end = ((rect.loc.x + rect.size.w) as f64 * scale).round() as f32;
+        let band = band(rect, scale);
+        let x = (end - w).round();
+        self.text(
+            c,
+            &text,
+            DETAIL_FONT_SIZE,
+            x,
+            end + 1.0,
+            band,
+            scale,
+            p.muted,
+        );
     }
 
     /// Workspace `i`'s header and what is under it, where `layout` has
@@ -2593,6 +2906,12 @@ impl Painter {
         let icon = at(ICON_X, ROW_ICON_WIDTH);
         let small = 0.8 * s;
         match ws.kind {
+            // A feature's workspace says where the feature is instead.
+            _ if ws.feature.is_some() => {
+                if let Some(card) = &ws.feature {
+                    self.stage_mark(c, card, icon, scale, p);
+                }
+            }
             WorkspaceKind::Project => {
                 icon_sdf(c, icon, scale, p.placeholder, |x, y| folder(x, y, small))
             }
@@ -2685,22 +3004,25 @@ impl Painter {
             );
         }
 
-        // Its feature's stage marks, on a pill within their line under
-        // the pointer, as they open the feature panel.
-        if let Some(marks) = row.stages {
-            let dots = Rectangle::new(
-                (marks.loc.x + NAME_GAP, marks.loc.y).into(),
-                (marks.size.w - NAME_GAP - CHILD_PAD, marks.size.h).into(),
-            );
-            if row_state.stages {
-                let pill = Rectangle::new(
-                    (dots.loc.x - COUNT_PILL_PAD, dots.loc.y + 1).into(),
-                    (dots.size.w + 2 * COUNT_PILL_PAD, dots.size.h - 2).into(),
-                );
-                let (x, y, w, h) = rect_px(pill, scale);
-                c.rounded(x, y, w, h, 4.0 * s, mix(surface, p.text, 0.1));
+        // Its feature's card: the stage marks, the one under the pointer
+        // lit as it opens that stage, what else its line has, and how its
+        // stage stands.
+        if let (Some(card), Some(marks)) = (&ws.feature, row.stages) {
+            if let Some(k) = row_state.stage {
+                self.lit_stage_dot(c, marks, k, surface, scale, p);
             }
-            self.stage_marks(c, &ws.stages, dots, scale, p);
+            self.stage_marks(c, &card.marks, marks, scale, p);
+            if let Some(count) = row.repos {
+                self.repo_count(c, card.repos, count, scale, p);
+            }
+            if let (Some(line), Some(git)) = (row.git, &ws.git) {
+                let (x, end) = (px(line.loc.x) as f32, px(line.loc.x + line.size.w) as f32);
+                self.git_marks(c, git, x, end, band(line, scale), scale, p);
+            }
+            if let Some(info) = row.info {
+                let end = px(info.loc.x + info.size.w) as f32;
+                self.card_line(c, card, info, end, scale, p);
+            }
         }
 
         // The mark of its CI, while that needs no look or it is folded.
@@ -3597,13 +3919,22 @@ struct InboxKey {
     scale: f64,
 }
 
+/// What the Features heading says: how many features there are and how
+/// many wait for the user, and its "+" button's hover alpha.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FeaturesHeading {
+    count: usize,
+    waiting: usize,
+    plus: u8,
+}
+
 /// What the feature rows are drawn from: each row and its hover alpha;
 /// then as `BlockKey`.
 #[derive(Clone, Debug, PartialEq)]
 struct FeaturesKey {
-    /// The heading's count, when the part starts with the heading.
-    heading: Option<usize>,
-    rows: Vec<(super::FeatureRowView, u8)>,
+    /// The heading, when the part starts with it.
+    heading: Option<FeaturesHeading>,
+    rows: Vec<(super::FeatureRowView, u8, Option<usize>)>,
     density: Density,
     width: i32,
     theme: super::Theme,
@@ -3681,11 +4012,11 @@ impl Painter {
         let mut c = Canvas::new(physical((key.width, end).into(), scale));
         c.fill(0, 0, c.w, c.h, p.panel);
         sidebar_edge(&mut c, scale, p);
-        if let (Some(title), Some(count)) = (title, key.heading) {
-            self.features_heading(&mut c, title, count, scale, p);
+        if let (Some(title), Some(heading)) = (title, &key.heading) {
+            self.features_heading(&mut c, title, heading, scale, p);
         }
         let rows: Vec<_> = (key.rows.iter().zip(rects))
-            .map(|((row, hover), rect)| (row, *hover, rect))
+            .map(|((row, hover, dot), rect)| (row, *hover, *dot, rect))
             .collect();
         self.feature_rows(&mut c, &rows, key.density, scale, p);
         c.into_buffer(true)
@@ -3732,7 +4063,12 @@ impl SidebarLayers {
         let size: Size<i32, Logical> = (width, output.h).into();
         let state = &sidebar.state;
         let mut layout = sidebar_layout_at(&sidebar.workspaces, &sidebar.agents, width, density)
-            .with_features(sidebar.features.len(), width, density);
+            .with_features(sidebar.features.len(), width, density)
+            .with_feature_head(
+                !sidebar.workspaces.is_empty(),
+                features_waiting(&sidebar.workspaces, &sidebar.features),
+                width,
+            );
         let max = layout.max_scroll(output.h);
         let scroll = state.scroll.clamp(0.0, max as f64);
         // How far the rows go down from where the layout has them.
@@ -3839,20 +4175,30 @@ impl SidebarLayers {
         let workspaces =
             features_from(&sidebar.workspaces).map_or(0, |f| sidebar.workspaces.len() - f);
         let heading = layout.features_title.map(|title| title.loc.y - SECTION_TOP);
-        let count = workspaces + layout.features.len();
+        let head = FeaturesHeading {
+            count: workspaces + layout.features.len(),
+            waiting: features_waiting(&sidebar.workspaces, &sidebar.features),
+            plus: state.features_plus,
+        };
         let all: Vec<usize> = (0..sidebar.features.len()).collect();
         let pieces = if workspaces > 0 {
             let rows = layout.features.first().map(|r| (r.loc.y, None, &all[..]));
-            [heading.map(|top| (top, Some(count), &[][..])), rows]
+            [heading.map(|top| (top, Some(head), &[][..])), rows]
         } else {
-            [heading.map(|top| (top, Some(count), &all[..])), None]
+            [heading.map(|top| (top, Some(head), &all[..])), None]
         };
         for (top, heading, rows) in pieces.into_iter().flatten() {
             let (.., h) = features_part_rects(heading.is_some(), rows.len(), width, density);
             if h > 0 && shows(top, h) {
                 let rows = rows
                     .iter()
-                    .map(|&n| (sidebar.features[n].clone(), state.feature(n)))
+                    .map(|&n| {
+                        (
+                            sidebar.features[n].clone(),
+                            state.feature(n),
+                            state.dot_of(n),
+                        )
+                    })
                     .collect();
                 let key = FeaturesKey {
                     heading,
@@ -4038,7 +4384,7 @@ mod tests {
             restart: false,
             picks: Vec::new(),
             errors: 0,
-            stages: Vec::new(),
+            feature: None,
         }
     }
 
@@ -5534,16 +5880,24 @@ mod tests {
                 rows_of(parts[n].buffer.clone(), scale, 0, BAR_HEIGHT),
                 rows_of(whole.clone(), scale, 0, BAR_HEIGHT)
             );
+            // The Features heading, offering to start a feature: nothing
+            // else is drawn at its height.
+            let heading = &parts[0];
+            assert_eq!(heading.loc.y, (layout.blocks_end()) as f64);
+            assert_eq!(
+                rows_of(heading.buffer.clone(), scale, 0, heading.size.h),
+                rows_of(whole.clone(), scale, heading.loc.y as i32, heading.size.h)
+            );
             // The "Needs you" list, then the blocks from the last.
             let title = layout.inbox_title.unwrap();
-            let inbox = &parts[0];
+            let inbox = &parts[1];
             assert_eq!(inbox.loc.y, title.loc.y as f64);
             assert_eq!(
                 rows_of(inbox.buffer.clone(), scale, 0, inbox.size.h),
                 rows_of(whole.clone(), scale, title.loc.y, inbox.size.h)
             );
-            assert_eq!(n, 1 + layout.blocks.len());
-            for (part, block) in parts[1..n].iter().zip(layout.blocks.iter().rev()) {
+            assert_eq!(n, 2 + layout.blocks.len());
+            for (part, block) in parts[2..n].iter().zip(layout.blocks.iter().rev()) {
                 let over = super::BLOCK_OVER;
                 assert_eq!(part.loc.y, (block.loc.y - over) as f64);
                 assert_eq!(
@@ -5587,15 +5941,17 @@ mod tests {
             view
         };
         // Mid-list, scrolled by a fraction and stretched past the top:
-        // under its header. The last, with no cards and scrolled to the
-        // end: over its header, so it is not cut off.
-        for (w, scroll, over, flips) in [(2, 40.4, 3.6, false), (11, 1e6, 0.0, true)] {
+        // under its header. The last, scrolled to the end: under its header
+        // too, as the Features heading leaves it the room. (Where that room
+        // is missing it goes over: see the layout's own tests.)
+        for (w, scroll, over, flips) in [(2, 40.4, 3.6, false), (11, 1e6, 0.0, false)] {
             let mut view = open(w, scroll, over);
             if flips {
                 view.agents[w].clear();
             }
             let parts = sidebar_parts(&mut super::SidebarLayers::default(), view.clone(), 0.0);
             let hit = sidebar_layout(&view.workspaces, &view.agents, 240)
+                .with_feature_head(true, 0, 240)
                 .scrolled_over(scroll, over, 400);
             let row = hit.rows[w];
             let strip = row.picks.unwrap();

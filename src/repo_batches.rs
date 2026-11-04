@@ -1333,6 +1333,7 @@ impl Gerdr {
                     let part = layout.modes.as_ref()?.1.get(i)?;
                     Some(Tooltip::new(crate::md_preview::NO_EXTENSION, *part))
                 }
+                ReposHit::Button(_) | ReposHit::DiffRestore(_) => button_tip(&view, &layout, pos),
                 _ => None,
             };
         }
@@ -1403,8 +1404,12 @@ impl Gerdr {
                 let chip = repo(i)?.chip.as_ref()?;
                 Some(Tooltip::new(&chip.tip, *rect))
             }
-            // Why an action can't be done now.
+            ReposHit::DiffRestore(_) => button_tip(&view, &layout, pos),
+            // A button's key, or why an action can't be done now.
             ReposHit::Button(button) if view.branch.menu.is_none() => {
+                if let Some(tip) = button_tip(&view, &layout, pos) {
+                    return Some(tip);
+                }
                 let hint = view
                     .hints
                     .iter()
@@ -2530,6 +2535,13 @@ impl Gerdr {
         self.zed_open_existing(root, files);
     }
 
+    /// Open `file` of the checkout at `root`, at `line`, in the Zed on that
+    /// checkout: whichever has it, else a new tab with one in workspace `w`.
+    pub(crate) fn open_line_in_zed(&mut self, w: usize, root: &Path, file: &Path, line: usize) {
+        let place = zed_place(file, Position { line, col: None });
+        self.open_in_worktree_zed(w, root, &[place]);
+    }
+
     /// Hand `files` (`root` with none) to the Zed window used last, the
     /// one just focused.
     fn zed_open_existing(&mut self, root: &Path, files: &[PathBuf]) {
@@ -2576,6 +2588,38 @@ pub(crate) fn search_tip(layout: &chrome::ReposLayout, part: SearchPart) -> Opti
         SearchPart::Field => return None,
     };
     Some(Tooltip::new(text, *rect).key(key))
+}
+
+/// The tip of the button at `pos`, when its key isn't on it (the diff's
+/// title row and rows, the result bar): what it says, and its key. The
+/// footer's show theirs; a button with no key has no tip.
+pub(crate) fn button_tip(
+    view: &ReposView,
+    layout: &chrome::ReposLayout,
+    pos: Point<f64, Logical>,
+) -> Option<Tooltip> {
+    let at = |r: &chrome::Rect| r.to_f64().contains(pos);
+    let detail = &view.detail;
+    let title = || {
+        let (button, rect) = layout.detail_title_buttons.iter().find(|(_, r)| at(r))?;
+        let hint = detail.title_buttons.iter().find(|h| h.button == *button)?;
+        Some((hint, *rect))
+    };
+    let row = || {
+        let (i, button, rect) = layout.detail_row_buttons.iter().find(|(_, _, r)| at(r))?;
+        let on_it = |(j, h): &&(usize, Hint)| j == i && h.button == *button;
+        let (_, hint) = detail.row_buttons.iter().find(on_it)?;
+        Some((hint, *rect))
+    };
+    let result = || {
+        let bar = view.result.as_ref()?;
+        layout.result.filter(|r| at(r))?;
+        let (button, rect) = layout.buttons.iter().find(|(_, r)| at(r))?;
+        let hint = bar.buttons.iter().find(|h| h.button == *button)?;
+        Some((hint, *rect))
+    };
+    let (hint, rect) = title().or_else(row).or_else(result)?;
+    (!hint.key.is_empty()).then(|| Tooltip::new(&sentence(&hint.label), rect).key(&hint.key))
 }
 
 /// A menu of `hints`, each with its key and dimmed when it can't be done

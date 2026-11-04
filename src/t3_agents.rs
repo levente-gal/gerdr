@@ -2111,6 +2111,7 @@ impl crate::Gerdr {
             id: row.id,
             agent: Some(agent),
         });
+        r.model = row.model.clone();
         let model = row.model.unwrap_or_else(|| "its model".to_owned());
         f.log(
             crate::feature::now(),

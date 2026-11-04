@@ -44,6 +44,9 @@ pub struct Docs {
     /// The brief and the plan as their pages show them; none for a file
     /// not there, and a note for one that can't be read.
     pub previews: BTreeMap<Stage, Arc<Vec<DocBlock>>>,
+    /// The comments the user left in the feature's diff: they go to Build
+    /// with AI review's fixes, or wait for Code review.
+    pub comments: usize,
 }
 
 impl Docs {
@@ -75,18 +78,34 @@ fn preview_of(path: &Path) -> Result<Vec<DocBlock>, std::io::Error> {
     Ok(md_blocks::blocks(&std::fs::read_to_string(path)?))
 }
 
+/// How many comments of the user's the diff of the feature with data dir
+/// `data` holds. A bad file counts as none: opening the diff says so, and
+/// sets it aside.
+fn own_comments(data: &Path) -> usize {
+    std::fs::read(data.join(crate::feature_diff::COMMENTS))
+        .ok()
+        .and_then(|raw| serde_json::from_slice::<crate::review::Review>(&raw).ok())
+        .map_or(0, |review| review.own())
+}
+
 /// Read the stage files in feature data dir `data`. A file that can't be
 /// read is still there: its stage's page shows why in its place, and Review
 /// says so too when pressed.
 pub fn read_docs(data: &Path) -> Docs {
     let mut docs = Docs {
         written: artifacts::outputs(data),
+        comments: own_comments(data),
         ..Docs::default()
     };
     docs.changed = (docs.written.iter().copied())
         .filter(|stage| artifacts::changed_since_approved(data, *stage))
         .collect();
-    for stage in [Stage::Discover, Stage::Plan, Stage::Build] {
+    for stage in [
+        Stage::Discover,
+        Stage::Plan,
+        Stage::PlanReview,
+        Stage::Build,
+    ] {
         let Some(path) = artifacts::path(data, stage).filter(|_| docs.written.contains(&stage))
         else {
             continue;

@@ -405,6 +405,7 @@ impl Gerdr {
         };
         // Features of projects added or edited, read again with them.
         self.load_features();
+        self.commands_reloaded();
         self.refresh_project_menu();
         self.refresh_switcher();
         // What couldn't be read is told before what couldn't be done.

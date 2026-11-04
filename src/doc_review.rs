@@ -164,7 +164,7 @@ pub fn state(feature: Option<&Feature>, stage: Stage, docs: &Docs, now: u64) -> 
     };
     if let Some(mark) = feature.marks.get(&stage) {
         let word = match stage {
-            Stage::Discover | Stage::Plan => "approved",
+            Stage::Discover | Stage::Plan | Stage::PlanReview => "approved",
             _ => "done",
         };
         let mut state = match feature.locked_by(stage, |s| docs.written.contains(&s)) {
@@ -584,7 +584,7 @@ mod tests {
 
     #[test]
     fn the_evidence_header_says_how_the_run_went() {
-        let mut f = crate::features::tests::feature("login", Vec::new(), 3);
+        let mut f = crate::features::tests::feature("login", Vec::new(), 4);
         assert_eq!(evidence_state(None, false), "feature gone");
         assert_eq!(evidence_state(Some(&f), false), "no run yet");
         f.verify = Some(crate::feature::verify::VerifyRun {
