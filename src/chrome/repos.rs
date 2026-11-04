@@ -110,10 +110,9 @@ const DIFF_BAR: i32 = 3;
 const COMMENT_INDENT: i32 = 12;
 /// How far the line and shadow under the pinned header reach down.
 const PIN_SHADOW: i32 = 5;
-/// A button on a diff row: its padding, the gap before its key, the gap
-/// between two, and how far in from the row's ends and edges it sits.
+/// A button on a diff row: its padding, the gap between two, and how far
+/// in from the row's ends and edges it sits.
 const ROW_CHIP_PAD: i32 = 8;
-const ROW_CHIP_KEY_GAP: i32 = 6;
 const ROW_CHIP_GAP: i32 = 4;
 const ROW_CHIP_INSET: i32 = 2;
 /// How strongly an added or removed line is tinted, and its changed
@@ -490,7 +489,7 @@ pub enum Tone {
 pub struct ResultBar {
     pub text: String,
     pub tone: Tone,
-    /// `Undo`, `RetryFailed`, with their keys.
+    /// `Undo`, `RetryFailed`: their keys in their tips, as `without_key`.
     pub buttons: Vec<Hint>,
 }
 
@@ -1238,13 +1237,18 @@ fn hint_width(hint: &Hint) -> i32 {
         + text_extent(&hint.label, SMALL_FONT_SIZE, SMALL_CHAR)
 }
 
-/// How wide a button on a diff row is: its label, then its key muted.
+/// `hint` as a button outside the footer draws it: its label alone. Only
+/// the footer shows keys; the others' are in their tips.
+fn without_key(hint: &Hint) -> Hint {
+    Hint {
+        key: String::new(),
+        ..hint.clone()
+    }
+}
+
+/// How wide a button on a diff row is: its label with room either side.
 fn row_chip_width(hint: &Hint) -> i32 {
-    let key = match hint.key.is_empty() {
-        true => 0,
-        false => ROW_CHIP_KEY_GAP + text_extent(&hint.key, KEY_FONT_SIZE, KEY_CHAR),
-    };
-    2 * ROW_CHIP_PAD + text_extent(&hint.label, SMALL_FONT_SIZE, SMALL_CHAR) + key
+    2 * ROW_CHIP_PAD + text_extent(&hint.label, SMALL_FONT_SIZE, SMALL_CHAR)
 }
 
 /// Where the buttons `widths` wide go on a diff row in `row`: in order,
@@ -2053,7 +2057,7 @@ fn parts(view: &ReposView, panel: Rect) -> Parts {
     let mut detail_title_buttons = Vec::new();
     let mut right = tabs_x - REPOS_TAB_GAP * 2;
     for hint in view.detail.title_buttons.iter().rev() {
-        let bw = hint_width(hint);
+        let bw = hint_width(&without_key(hint));
         right -= bw;
         if right < detail.loc.x + detail.size.w / 3 {
             break;
@@ -2108,7 +2112,7 @@ fn parts(view: &ReposView, panel: Rect) -> Parts {
         let mut right = inner_x + inner_w;
         let by = rect.loc.y + (REPOS_RESULT - ROW_BUTTON) / 2;
         for (i, hint) in bar.buttons.iter().enumerate().rev() {
-            let bw = hint_width(hint);
+            let bw = hint_width(&without_key(hint));
             right -= bw;
             if right < inner_x + inner_w / 2 {
                 break;
@@ -3591,7 +3595,7 @@ impl Painter {
                 .find(|h| h.button == button)
             {
                 let hit = ReposHit::Button(button);
-                self.hint_button(c, view, hint, hit, rect, scale, p);
+                self.hint_button(c, view, &without_key(hint), hit, rect, scale, p);
             }
         }
         let border = px(1).max(1);
@@ -4284,8 +4288,7 @@ impl Painter {
 
     /// The buttons of the detail's row `look`, each in its rect of
     /// `rects`: the first of them (keeping the comment written, writing
-    /// one) in the accent, the others plain; lighter under the pointer,
-    /// with their key muted after their label.
+    /// one) in the accent, the others plain; lighter under the pointer.
     fn row_chips(
         &self,
         c: &mut Canvas,
@@ -4300,17 +4303,17 @@ impl Painter {
             let r = (h / 2.0).min(BUTTON_RADIUS * s);
             let b = s.round().max(1.0);
             let hovered = look.hover == Some(ReposHit::Button(hint.button));
-            let (fill, label, key) = if k == 0 {
+            let (fill, label) = if k == 0 {
                 let fill = if hovered {
                     mix(p.accent, p.on_accent, 0.15)
                 } else {
                     p.accent
                 };
-                (fill, p.on_accent, mix(p.accent, p.on_accent, 0.7))
+                (fill, p.on_accent)
             } else {
                 let fill = if hovered { p.selected } else { p.element };
                 c.rounded(x, y, w, h, r, p.border);
-                (fill, p.text, p.muted)
+                (fill, p.text)
             };
             if k == 0 {
                 c.rounded(x, y, w, h, r, fill);
@@ -4319,7 +4322,7 @@ impl Painter {
             }
             let chip_band = band(rect, scale);
             let tx = x + (ROW_CHIP_PAD as f32 * s).round();
-            let end = self.mixed_text(
+            self.mixed_text(
                 c,
                 &hint.label,
                 SMALL_FONT_SIZE,
@@ -4329,19 +4332,6 @@ impl Painter {
                 scale,
                 label,
             );
-            if !hint.key.is_empty() {
-                let kx = end + (ROW_CHIP_KEY_GAP as f32 * s).round();
-                self.mixed_text(
-                    c,
-                    &hint.key,
-                    KEY_FONT_SIZE,
-                    kx,
-                    x + w,
-                    chip_band,
-                    scale,
-                    key,
-                );
-            }
         }
     }
 
@@ -4599,7 +4589,7 @@ impl Painter {
         for &(i, rect) in buttons {
             let hint = &bar.buttons[i];
             let hit = ReposHit::Button(hint.button);
-            self.hint_button(c, view, hint, hit, rect, scale, p);
+            self.hint_button(c, view, &without_key(hint), hit, rect, scale, p);
         }
     }
 
@@ -7142,6 +7132,67 @@ mod tests {
         ];
         view.hover = Some(ReposHit::DiffRestore(2));
         view
+    }
+
+    /// The full panel with a keyed button on the title row too.
+    fn with_keyed_buttons() -> ReposView {
+        let mut view = with_restore();
+        view.detail.title_buttons = vec![hint(ReposButton::Approve, "Ctrl+Enter", None)];
+        view
+    }
+
+    #[test]
+    fn only_the_footers_buttons_take_room_for_their_keys() {
+        use ReposButton::*;
+        let view = with_keyed_buttons();
+        let layout = repos_layout(&view, repos_panel_rect((1600, 900).into()));
+        let wide = |button| layout.buttons.iter().find(|(b, _)| *b == button).unwrap().1;
+        assert_eq!(
+            layout.detail_title_buttons[0].1.size.w,
+            hint_width(&hint(Approve, "", None))
+        );
+        assert_eq!(wide(Undo).size.w, hint_width(&hint(Undo, "", None)));
+        let commit = hint(Commit, "Ctrl+Enter", None);
+        assert_eq!(wide(Commit).size.w, hint_width(&commit));
+        assert!(hint_width(&commit) > hint_width(&hint(Commit, "", None)));
+        assert_eq!(
+            row_chip_width(&hint(Comment, "Ctrl+Shift+Del", None)),
+            row_chip_width(&hint(Comment, "", None))
+        );
+    }
+
+    #[test]
+    fn a_button_without_its_key_says_it_in_its_tip() {
+        use ReposButton::*;
+        let view = with_keyed_buttons();
+        let layout = repos_layout(&view, repos_panel_rect((1600, 900).into()));
+        let tip = |rect: Rect| {
+            let pos = (
+                rect.loc.x as f64 + rect.size.w as f64 / 2.0,
+                rect.loc.y as f64 + rect.size.h as f64 / 2.0,
+            );
+            crate::repo_batches::button_tip(&view, &layout, pos.into())
+                .map(|t| (t.text, t.key.unwrap_or_default()))
+        };
+        let said = |text: &str, key: &str| Some((text.to_owned(), key.to_owned()));
+        let on_row = |row: usize, button: ReposButton| {
+            let found = (layout.detail_row_buttons.iter())
+                .find(|(i, b, _)| *i == row && *b == button)
+                .unwrap();
+            found.2
+        };
+        let wide = |button| layout.buttons.iter().find(|(b, _)| *b == button).unwrap().1;
+
+        assert_eq!(
+            tip(layout.detail_title_buttons[0].1),
+            said("Approve", "Ctrl+Enter")
+        );
+        assert_eq!(tip(wide(Undo)), said("Undo", "Alt+Z"));
+        assert_eq!(tip(on_row(4, Comment)), said("Comment", "C"));
+        assert_eq!(tip(on_row(4, Restore)), said("Restore", "R"));
+        // No key, nothing to say; the footer's shows its own.
+        assert_eq!(tip(on_row(2, Restore)), None);
+        assert_eq!(tip(wide(Commit)), None);
     }
 
     /// With `GERDR_DUMP_DIR` set, write the panel there as images to look

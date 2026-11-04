@@ -42,6 +42,15 @@ rules, for reviewing a branch before it merges.
 A chord means one thing across all panels. A verb with direction says it in
 the label ("Merge main into branch", "Squash into main").
 
+A key is written in one place, not on the button that does the same thing:
+
+- A button shows its label only, with no key on it or in its text.
+- The footer shows the panel's keys, as keycaps. A click on a hint presses its
+  key, so a footer hint isn't a button in this sense.
+- A tooltip shows a button's key on hover.
+- F1 lists every key, including those the footer can't fit.
+- A menu row may show its key at its right end, since a menu has no footer.
+
 ## Destructive actions
 
 - Ask before anything that stops a running process, deletes unmerged work or

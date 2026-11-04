@@ -5355,7 +5355,7 @@ impl Panel {
                     .into_iter()
                     .map(|button| Hint {
                         button,
-                        label: lower_first(button.label()),
+                        label: button.label().into(),
                         key: key_name(button).into(),
                         disabled: None,
                     })
@@ -6492,7 +6492,7 @@ mod tests {
             (buttons[0].button, buttons[0].key.as_str()),
             (ReposButton::Undo, "Alt+Z")
         );
-        assert_eq!(buttons[0].label, "undo");
+        assert_eq!(buttons[0].label, "Undo");
         press(&mut panel, none(), Keysym::Tab, &ctx);
         assert_eq!(
             press(&mut panel, none(), Keysym::Return, &ctx),
@@ -9854,7 +9854,7 @@ mod tests {
                 .iter()
                 .any(|(j, h)| *j == i && h.button == ReposButton::Restore)
         };
-        // No key puts the hunk back, so its button shows none.
+        // No key puts the hunk back, so its button has none.
         let key = |i: usize| {
             let restore = |(j, h): &&(usize, Hint)| *j == i && h.button == ReposButton::Restore;
             view.detail

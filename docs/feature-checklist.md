@@ -70,6 +70,9 @@ How to use it:
 - **K5** Shift+Tab goes back; Ctrl+J/K move; Ctrl+N/P never move.
 - **K6** A key that changed meaning is listed in the merge report under
   "keys that changed".
+- **K7** A button shows its label only. Its key goes in the footer, its tooltip
+  and F1, never on the button or in its text. Footer hints and menu rows may
+  show keys.
 
 ## O. Overlays, popups, panels
 
@@ -191,6 +194,7 @@ added | grep -E 'let _ = |\.ok\(\);|debug!\('           # E2 dropped errors
 added | grep -E 'Command::new|spawn\('                  # E2 new tool calls
 added | grep -E 'kill|stop_|close_|remove_dir|delete'   # C1 direct destructive calls
 added | grep -E 'Keysym::|KEY_[A-Z]'                    # K1 new chords
+added | grep -E 'keycaps\(|KEY_FONT_SIZE|hint_button\('  # K7 key on a button
 added | grep -E 'radius|[0-9]+\.0 *[,)]|width: [0-9]+'  # L1 literal sizes
 added | grep -E 'show_[a-z]+\(|toast' | grep '\."'      # W2 full stop in toasts
 added | grep -E 'project|workspace' | grep '"'          # W1 term in user text

@@ -3334,46 +3334,46 @@ const GOLDEN_DOC_TAB: [[u64; 8]; 4] = [
     // Dark at 1
     [
         0xe3291f02faaf07c4, // doc_preview_1180
-        0xa37bfebfb8a116a9, // doc_review_1180
-        0x64027be631e6f797, // doc_review_no_browser
+        0x4af9130a9b0c1e78, // doc_review_1180
+        0xd56be0a254359a36, // doc_review_no_browser
         0x163df7c54996fb12, // doc_preview_1920
-        0xe84bd20b374af24e, // doc_split_1920
-        0xf0ee57f894f597ee, // doc_review_850
-        0x3fd2cd87c27c4b86, // doc_approved_1180
-        0x33eb8eed4d64a092, // doc_locked_1180
+        0x146ef2c66d529cd6, // doc_split_1920
+        0x8dc4abbd4a4453aa, // doc_review_850
+        0x991e984d1cf58986, // doc_approved_1180
+        0xc795c2ffa685e118, // doc_locked_1180
     ],
     // Dark at 2
     [
         0xb80f9bdca4ec1495, // doc_preview_1180
-        0x23d306dcac83db03, // doc_review_1180
-        0x19443f75f4e57da8, // doc_review_no_browser
+        0xd15dbc2eeae8d5cc, // doc_review_1180
+        0x7c58f8622b115083, // doc_review_no_browser
         0xe1f51d6886965409, // doc_preview_1920
-        0xd7989b82d2317fa0, // doc_split_1920
-        0x6a43d0181fc8f5d0, // doc_review_850
-        0x41896b837fde7366, // doc_approved_1180
-        0x1de54ea09b2ca636, // doc_locked_1180
+        0xa843db297b42f35c, // doc_split_1920
+        0x0d72543f5d6587c5, // doc_review_850
+        0xc29bb6d56b5beb67, // doc_approved_1180
+        0x8a385f9aa43a43b8, // doc_locked_1180
     ],
     // Light at 1
     [
         0xa18686a06ead007c, // doc_preview_1180
-        0xb02ec2e53fc64403, // doc_review_1180
-        0xe7a3716510ea0311, // doc_review_no_browser
+        0xb82c5e0088f5f4c2, // doc_review_1180
+        0x64bb2e6df8dd639f, // doc_review_no_browser
         0xf113a8e16264d641, // doc_preview_1920
-        0xe75a3733822a4267, // doc_split_1920
-        0x0f5727b322834702, // doc_review_850
-        0x3560847e6b3019a5, // doc_approved_1180
-        0x01bf10f87abe7168, // doc_locked_1180
+        0x6e494dd4063c4bf6, // doc_split_1920
+        0x59eff04f58c92d40, // doc_review_850
+        0x4d6fa62f8b977f1d, // doc_approved_1180
+        0xf1603167ed70f699, // doc_locked_1180
     ],
     // Light at 2
     [
         0x2ac5806777ef660a, // doc_preview_1180
-        0x66b0b0ceaffd7146, // doc_review_1180
-        0x85244a608bd0ae93, // doc_review_no_browser
+        0x6e1716682c599e65, // doc_review_1180
+        0xa3e94f33bb76c764, // doc_review_no_browser
         0x04633b82213dc5ff, // doc_preview_1920
-        0x0592a8393fac561a, // doc_split_1920
-        0x258307cd05494b74, // doc_review_850
-        0xcb982bb9429e2128, // doc_approved_1180
-        0x691c58703fe3a45f, // doc_locked_1180
+        0x8d1275261b45972b, // doc_split_1920
+        0x6d05f471266e78e8, // doc_review_850
+        0x84732f985b636d39, // doc_approved_1180
+        0x153567080b2689aa, // doc_locked_1180
     ],
 ];
 
