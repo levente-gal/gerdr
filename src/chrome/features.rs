@@ -370,6 +370,15 @@ pub struct PageButton {
     pub key: Option<&'static str>,
 }
 
+/// An agent to pick on a stage's page: the one its next start runs is lit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentChip {
+    pub name: String,
+    pub lit: bool,
+    /// It can't be picked: it built the code this stage reviews.
+    pub off: bool,
+}
+
 /// A part of a stage's page, under its button row.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PageSection {
@@ -385,6 +394,8 @@ pub enum PageSection {
         /// The index in `StagePage::buttons` of the card's own button
         /// (Show agent), if any.
         button: Option<usize>,
+        /// The agents to pick for the stage's next start, if it offers any.
+        picks: Vec<AgentChip>,
     },
     /// A stage's file (`brief.md`, `plan.md`): its name, how it stands,
     /// and the indices in `StagePage::buttons` of the buttons it holds
@@ -484,6 +495,10 @@ pub enum FeatureTabHit {
     MoreRepos(usize),
     /// Index as in `StagePage::buttons`.
     PageButton(usize),
+    /// An agent's chip on the page's agent card, as its `picks` has them.
+    AgentPick(usize),
+    /// One of those that can't be picked: it only says why.
+    AgentPickOff(usize),
     Hint(usize),
 }
 
@@ -524,6 +539,9 @@ pub struct FeatureTabLayout {
     pub more_repos: Vec<(Rect, usize, String)>,
     /// Each page button's place, indexed as `StagePage::buttons`.
     pub page_buttons: Vec<Option<Rect>>,
+    /// The agent card's chips: their outline, and each chip as its `picks`
+    /// has them.
+    pub agent_picks: Option<(Rect, Vec<Rect>)>,
     /// The footer, and where each hint goes in it.
     pub hints: Rect,
     pub hint_spots: Vec<(usize, Rect)>,
@@ -576,12 +594,30 @@ impl FeatureTabLayout {
                     .page_buttons
                     .iter()
                     .position(|b| b.is_some_and(|b| b.contains(at)))
-                    .map(FeatureTabHit::PageButton),
+                    .map(FeatureTabHit::PageButton)
+                    .or_else(|| self.agent_pick_at(view, at)),
                 TabColumn::Activity => None,
             };
             return found.or(Some(FeatureTabHit::Column(column)));
         }
         Some(FeatureTabHit::Tab)
+    }
+
+    /// The agent's chip at `at` (unscrolled).
+    fn agent_pick_at(
+        &self,
+        view: &FeatureTabView,
+        at: Point<i32, Logical>,
+    ) -> Option<FeatureTabHit> {
+        let (_, chips) = self.agent_picks.as_ref()?;
+        let i = chips.iter().position(|c| c.contains(at))?;
+        let off = view.page.sections.iter().any(|s| {
+            matches!(s, PageSection::Agent { picks, .. } if picks.get(i).is_some_and(|c| c.off))
+        });
+        Some(match off {
+            true => FeatureTabHit::AgentPickOff(i),
+            false => FeatureTabHit::AgentPick(i),
+        })
     }
 
     /// The repository row, chip or button at `at` (unscrolled).
@@ -723,6 +759,12 @@ const PAGE_GAP: i32 = 16;
 /// An agent card's inner room and its header's height.
 const AGENT_PAD: i32 = 10;
 const AGENT_HEAD: i32 = 28;
+/// An agent card's row of chips: the outline's height, the room between it
+/// and its chips, above it when the card has a head, and its label's.
+const PICK_TRACK: i32 = ROW_BUTTON + 2 * PICK_TRACK_PAD;
+const PICK_TRACK_PAD: i32 = 2;
+const PICK_GAP: i32 = 8;
+const PICK_LABEL: i32 = 48;
 const AGENT_RADIUS: f32 = 6.0;
 /// A milestone's row, and the progress bar's height.
 const MILESTONE_ROW: i32 = 22;
@@ -975,7 +1017,36 @@ fn repo_stack(view: &FeatureTabView, s: &mut Stack, repos: &mut Vec<(Rect, Optio
 
 /// The page's column: the selected stage's title, about, status, buttons
 /// and sections, then the activity if it has no column.
-fn page_stack(view: &FeatureTabView, s: &mut Stack, buttons: &mut [Option<Rect>], activity: bool) {
+/// Where an agent card's chips go on a row at `(x, y)`, `room` wide: their
+/// outline and each chip, shrunk alike when they don't fit.
+fn agent_pick_rects(picks: &[AgentChip], x: i32, y: i32, room: i32) -> (Rect, Vec<Rect>) {
+    let widths: Vec<i32> = picks.iter().map(|c| button_width(&c.name)).collect();
+    let inner = (room - 2 * PICK_TRACK_PAD).max(1);
+    let total: i32 = widths.iter().sum();
+    let n = picks.len().max(1) as i32;
+    let even = inner / n;
+    let (top, h) = (y + PICK_TRACK_PAD, ROW_BUTTON);
+    let mut cx = x + PICK_TRACK_PAD;
+    let chips: Vec<Rect> = widths
+        .iter()
+        .map(|w| {
+            let w = if total > inner { even } else { *w };
+            let chip = Rectangle::new((cx, top).into(), (w, h).into());
+            cx += w;
+            chip
+        })
+        .collect();
+    let track = Rectangle::new((x, y).into(), (cx + PICK_TRACK_PAD - x, PICK_TRACK).into());
+    (track, chips)
+}
+
+fn page_stack(
+    view: &FeatureTabView,
+    s: &mut Stack,
+    buttons: &mut [Option<Rect>],
+    agent_picks: &mut Option<(Rect, Vec<Rect>)>,
+    activity: bool,
+) {
     let page = &view.page;
     s.put(
         BODY_LINE + 6,
@@ -1023,12 +1094,34 @@ fn page_stack(view: &FeatureTabView, s: &mut Stack, buttons: &mut [Option<Rect>]
     for (k, section) in page.sections.iter().enumerate() {
         s.y += PAGE_GAP;
         match section {
-            PageSection::Agent { tail, button, .. } => {
+            PageSection::Agent {
+                name,
+                tail,
+                button,
+                picks,
+                ..
+            } => {
                 let tail_h = match tail.len() {
                     0 => 0,
                     n => n as i32 * TAIL_LINE + 4,
                 };
-                let card = s.put(AGENT_PAD * 2 + AGENT_HEAD + tail_h, Piece::Agent(k));
+                // No run yet: only the chips, no head to say who runs.
+                let head_h = match name.is_empty() {
+                    true => 0,
+                    false => AGENT_HEAD + tail_h,
+                };
+                let picks_h = match (picks.is_empty(), head_h) {
+                    (true, _) => 0,
+                    (false, 0) => PICK_TRACK,
+                    (false, _) => PICK_TRACK + PICK_GAP,
+                };
+                let card = s.put(AGENT_PAD * 2 + head_h + picks_h, Piece::Agent(k));
+                if !picks.is_empty() {
+                    let x = card.loc.x + AGENT_PAD + PICK_LABEL;
+                    let y = card.loc.y + card.size.h - AGENT_PAD - PICK_TRACK;
+                    let room = card.size.w - 2 * AGENT_PAD - PICK_LABEL;
+                    *agent_picks = Some(agent_pick_rects(picks, x, y, room));
+                }
                 if let Some(b) = button.filter(|b| *b < page.buttons.len()) {
                     let w = button_width(&page_label(&page.buttons[b]));
                     buttons[b] = Some(Rectangle::new(
@@ -1282,6 +1375,7 @@ pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayou
     let mut pieces: [Vec<(Rect, Piece)>; 3] = Default::default();
     let mut content = [0; 3];
     let mut page_buttons = vec![None; view.page.buttons.len()];
+    let mut agent_picks = None;
     for column in TabColumn::ALL {
         let Some(place) = columns[column as usize] else {
             continue;
@@ -1298,6 +1392,7 @@ pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayou
                 view,
                 &mut s,
                 &mut page_buttons,
+                &mut agent_picks,
                 columns[TabColumn::Activity as usize].is_none(),
             ),
             TabColumn::Activity => {
@@ -1323,6 +1418,7 @@ pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayou
         repos,
         more_repos,
         page_buttons,
+        agent_picks,
         hints,
         hint_spots,
         pieces,
@@ -1595,7 +1691,7 @@ fn slice_view(view: &FeatureTabView, slice: TabSlice, strip: bool) -> FeatureTab
                 || strip && matches!(hit, H::Repo(_) | H::RepoButton(_) | H::MoreRepos(_))
         }
         TabSlice::Column(TabColumn::Repos) => matches!(hit, H::Repo(_) | H::RepoButton(_)),
-        TabSlice::Column(TabColumn::Page) => matches!(hit, H::PageButton(_)),
+        TabSlice::Column(TabColumn::Page) => matches!(hit, H::PageButton(_) | H::AgentPick(_)),
         TabSlice::Column(TabColumn::Activity) => false,
         TabSlice::Hints => matches!(hit, H::Hint(_)),
     });
@@ -2541,11 +2637,39 @@ impl Painter {
                     status,
                     tail,
                     button,
+                    picks,
                 }) = view.page.sections.get(*k)
                 else {
                     return;
                 };
                 let head = card_frame(c, rect, scale, p);
+                if let Some((track, chips)) = (!picks.is_empty())
+                    .then_some(l.agent_picks.as_ref())
+                    .flatten()
+                {
+                    let track = at(*track);
+                    let label = Rectangle::new(
+                        (head.loc.x, track.loc.y).into(),
+                        (PICK_LABEL, track.size.h).into(),
+                    );
+                    line(c, "Agent", label, SMALL_FONT_SIZE, p.muted);
+                    let segments: Vec<(&str, Rect)> = (picks.iter().map(|c| c.name.as_str()))
+                        .zip(chips.iter().map(|r| at(*r)))
+                        .collect();
+                    let on = picks.iter().position(|c| c.lit).unwrap_or(usize::MAX);
+                    let hover = match view.hover {
+                        Some(FeatureTabHit::AgentPick(i)) => Some(i),
+                        _ => None,
+                    };
+                    let off: Vec<usize> = (picks.iter().enumerate())
+                        .filter(|(_, c)| c.off)
+                        .map(|(i, _)| i)
+                        .collect();
+                    self.segmented_off(c, track, &segments, (on, hover, &off), scale, p);
+                }
+                if name.is_empty() {
+                    return;
+                }
                 let icon_spot = Rectangle::new(head.loc, (16, AGENT_HEAD).into());
                 agent_icon(c, icon_spot, 16, *icon, p.text, scale);
                 // A dot at work blinks: it is composed over the tab.
@@ -3425,5 +3549,78 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The fixture's agent card, with chips.
+    fn tab_with_picks(off: bool) -> FeatureTabView {
+        let mut view = tab_view();
+        let chips = vec![
+            AgentChip {
+                name: "Claude Code".into(),
+                lit: true,
+                off: false,
+            },
+            AgentChip {
+                name: "Cursor".into(),
+                lit: false,
+                off,
+            },
+        ];
+        let card = view
+            .page
+            .sections
+            .iter_mut()
+            .find_map(|s| match s {
+                PageSection::Agent { picks, .. } => Some(picks),
+                _ => None,
+            })
+            .expect("the fixture has an agent card");
+        *card = chips;
+        view
+    }
+
+    #[test]
+    fn an_agent_chip_is_hit_where_it_shows_also_scrolled() {
+        let mut view = tab_with_picks(false);
+        let l = tab_at(&view, 1180);
+        let (track, chips) = l.agent_picks.clone().expect("placed");
+        assert!(chips[0].size.w > 0 && chips[1].loc.x >= chips[0].loc.x + chips[0].size.w);
+        let page = l.columns[TabColumn::Page as usize].unwrap();
+        assert!(inside(page, track));
+        assert_eq!(
+            l.hit(&view, centre(chips[1])),
+            Some(FeatureTabHit::AgentPick(1))
+        );
+        view.scroll[TabColumn::Page as usize] = 12.0;
+        let lifted = Point::from((centre(chips[0]).x, centre(chips[0]).y - 12));
+        assert_eq!(l.hit(&view, lifted), Some(FeatureTabHit::AgentPick(0)));
+    }
+
+    #[test]
+    fn a_chip_that_cant_be_picked_only_says_why() {
+        let view = tab_with_picks(true);
+        let l = tab_at(&view, 1180);
+        let (_, chips) = l.agent_picks.clone().expect("placed");
+        assert_eq!(
+            l.hit(&view, centre(chips[1])),
+            Some(FeatureTabHit::AgentPickOff(1))
+        );
+    }
+
+    #[test]
+    fn agent_chips_too_wide_together_share_the_room() {
+        let chip = |name: &str| AgentChip {
+            name: name.into(),
+            lit: false,
+            off: false,
+        };
+        let picks = [
+            chip("A very long agent name indeed"),
+            chip("Another long agent name"),
+        ];
+        let (track, chips) = agent_pick_rects(&picks, 10, 20, 150);
+        assert!(track.size.w <= 150, "{track:?}");
+        assert_eq!(chips[0].size.w, chips[1].size.w);
+        assert!(chips[1].loc.x + chips[1].size.w <= 10 + 150, "{chips:?}");
     }
 }

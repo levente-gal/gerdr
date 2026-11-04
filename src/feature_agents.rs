@@ -25,10 +25,11 @@ use std::{
 
 use crate::{
     Gerdr, agents,
+    chrome::AgentChip,
     cli_agents::CliAgent,
     feature::{
         self, Feature, PerProject, Stage, Status,
-        agents::{StageRun, Stop, command_line, needs},
+        agents::{Flavor, StageRun, Stop, command_line, needs},
         artifacts,
         patch::Reading,
         review_import::FindingState,
@@ -36,6 +37,7 @@ use crate::{
     },
     herdr::AgentStatus,
     projects,
+    projects::Workflow,
     prompts::{self, render::Vars},
 };
 
@@ -415,14 +417,23 @@ enum Pick {
     Refused(String),
 }
 
-/// Where the user names AI review's agent, or lets Build's review itself.
-const REVIEWER_SETTING: &str = "add \"workflow\": {\"agents\": {\"ai-review\": \u{2026}}} with another agent to the project's file, or \"allow_same_reviewer\": true in its \"workflow\"";
+/// Where the user picks AI review's agent, or lets Build's review itself.
+const REVIEWER_SETTING: &str = "pick another agent on AI review's page, or add \"allow_same_reviewer\": true to the \"workflow\" of the project's file";
 
 /// The program a command line runs, without its folder: `claude` for
 /// `/usr/bin/claude --yes`.
 fn program(command: &str) -> &str {
     let first = command.split_whitespace().next().unwrap_or("");
     first.rsplit('/').next().unwrap_or(first)
+}
+
+/// Whether `name`, run by `command`, is `builder` (an agent's name and
+/// command): the same name, or the same program.
+fn same_agent(name: &str, command: &str, builder: Option<(&str, &str)>) -> bool {
+    builder.is_some_and(|(b_name, b_command)| {
+        let (prog, b_prog) = (program(command), program(b_command));
+        b_name.eq_ignore_ascii_case(name) || (!prog.is_empty() && prog.eq_ignore_ascii_case(b_prog))
+    })
 }
 
 /// The agent to review the code built by `builder` (Build's agent: its
@@ -437,13 +448,7 @@ fn pick_reviewer(
     installed: &[CliAgent],
     allow_same: bool,
 ) -> Pick {
-    let same = |name: &str, command: &str| {
-        builder.is_some_and(|(b_name, b_command)| {
-            let (prog, b_prog) = (program(command), program(b_command));
-            b_name.eq_ignore_ascii_case(name)
-                || (!prog.is_empty() && prog.eq_ignore_ascii_case(b_prog))
-        })
-    };
+    let same = |name: &str, command: &str| same_agent(name, command, builder);
     let configured = configured.map(str::trim).filter(|c| !c.is_empty());
     if configured.is_some() {
         let Some((name, command)) = pick_agent(configured, installed) else {
@@ -470,6 +475,138 @@ fn pick_reviewer(
             "No agent but {name}, which built the code, is installed to review it; install another, or {REVIEWER_SETTING}"
         )),
     }
+}
+
+/// Who built `feature`'s code, for AI review to differ from: Build's last
+/// run, else the agent Build will start. Build marked done by hand has none.
+fn builder_of(
+    feature: &Feature,
+    workflow: Option<&Workflow>,
+    installed: &[CliAgent],
+) -> Option<(String, String)> {
+    if let Some(run) = feature.runs.get(&Stage::Build) {
+        return Some((run.agent.clone(), run.command.clone()));
+    }
+    if feature.is_done(Stage::Build) {
+        return None;
+    }
+    match stage_pick(feature, Stage::Build, workflow, installed) {
+        Pick::Agent(name, command) => Some((name, command)),
+        _ => None,
+    }
+}
+
+/// The agent `stage` starts when nothing is picked on its page: the
+/// project's `workflow.agents`, else the first installed that may.
+fn default_pick(
+    feature: &Feature,
+    stage: Stage,
+    workflow: Option<&Workflow>,
+    installed: &[CliAgent],
+) -> Pick {
+    let set = workflow
+        .and_then(|w| w.agents.get(&stage))
+        .map(String::as_str);
+    resolve_pick(set, feature, stage, workflow, installed)
+}
+
+/// The agent `configured` (a name or a command, if any) gives `stage`.
+fn resolve_pick(
+    configured: Option<&str>,
+    feature: &Feature,
+    stage: Stage,
+    workflow: Option<&Workflow>,
+    installed: &[CliAgent],
+) -> Pick {
+    if stage == Stage::AiReview {
+        let builder = builder_of(feature, workflow, installed);
+        let builder = builder.as_ref().map(|(n, c)| (n.as_str(), c.as_str()));
+        let allow_same = workflow.is_some_and(|w| w.allow_same_reviewer);
+        return pick_reviewer(configured, builder, installed, allow_same);
+    }
+    pick_agent(configured, installed)
+        .map_or(Pick::NoCli, |(name, command)| Pick::Agent(name, command))
+}
+
+/// The agent `stage` of `feature` starts: the one picked on its page, else
+/// `default_pick`. Its page and the start both ask here, so the chip lit
+/// is the agent that runs. A picked agent since uninstalled is refused: its
+/// name is no command to run.
+fn stage_pick(
+    feature: &Feature,
+    stage: Stage,
+    workflow: Option<&Workflow>,
+    installed: &[CliAgent],
+) -> Pick {
+    let Some(picked) = feature.stage_agents.get(&stage) else {
+        return default_pick(feature, stage, workflow, installed);
+    };
+    let there = |a: &CliAgent| a.command().is_some() && a.name.eq_ignore_ascii_case(picked);
+    if !installed.iter().any(there) {
+        return Pick::Refused(format!(
+            "{picked}, picked for {}, isn't installed: pick another agent on its page",
+            stage.label()
+        ));
+    }
+    resolve_pick(Some(picked), feature, stage, workflow, installed)
+}
+
+/// The chips on `stage`'s page to pick its agent with: the installed
+/// agents stages are offered, and whatever the project's file gives it
+/// besides. None on a stage no agent runs, one that is done, or a feature
+/// that is closed.
+pub(crate) fn stage_chips(
+    feature: &Feature,
+    stage: Stage,
+    workflow: Option<&Workflow>,
+    installed: &[CliAgent],
+) -> Vec<AgentChip> {
+    if feature.status != Status::Open || needs(stage).is_none() || feature.is_done(stage) {
+        return Vec::new();
+    }
+    let mut agents: Vec<(String, String)> = installed
+        .iter()
+        .filter_map(|a| {
+            let command = a.command()?;
+            matches!(Flavor::of(command), Flavor::Claude | Flavor::Cursor)
+                .then(|| (a.name.clone(), command.to_owned()))
+        })
+        .collect();
+    if let Pick::Agent(name, command) = default_pick(feature, stage, workflow, installed)
+        && !agents.iter().any(|(n, _)| n.eq_ignore_ascii_case(&name))
+    {
+        agents.push((name, command));
+    }
+    let picked = feature.stage_agents.get(&stage).cloned();
+    let lit = picked.or(match stage_pick(feature, stage, workflow, installed) {
+        Pick::Agent(name, _) => Some(name),
+        _ => None,
+    });
+    let allow_same = workflow.is_some_and(|w| w.allow_same_reviewer);
+    let builder = (stage == Stage::AiReview && !allow_same)
+        .then(|| builder_of(feature, workflow, installed))
+        .flatten();
+    let builder = builder.as_ref().map(|(n, c)| (n.as_str(), c.as_str()));
+    agents
+        .into_iter()
+        .map(|(name, command)| AgentChip {
+            lit: lit
+                .as_deref()
+                .is_some_and(|l| l.eq_ignore_ascii_case(&name)),
+            off: same_agent(&name, &command, builder),
+            name,
+        })
+        .collect()
+}
+
+/// The chip after the one lit among `chips` that can be picked, round the
+/// ends; `None` when no other can.
+fn next_chip(chips: &[AgentChip]) -> Option<&AgentChip> {
+    let at = chips.iter().position(|c| c.lit);
+    let start = at.map_or(0, |i| i + 1);
+    (0..chips.len())
+        .map(|k| &chips[(start + k) % chips.len()])
+        .find(|c| !c.off && !c.lit)
 }
 
 /// `stage` as file names have it: `discover`, `ai-review`.
@@ -698,6 +835,53 @@ impl Gerdr {
         }
     }
 
+    /// The chips on `stage`'s page of feature `slug` (see `stage_chips`).
+    pub(crate) fn chips_of(&self, project: &str, slug: &str, stage: Stage) -> Vec<AgentChip> {
+        let workflow = self.projects.project(project).map(|p| &p.workflow);
+        self.feature(project, slug).map_or_else(Vec::new, |f| {
+            stage_chips(f, stage, workflow, &self.cli_agents)
+        })
+    }
+
+    /// Run `stage` of feature `slug` with the agent `name`, from its next
+    /// start on: one that runs now goes on. The one the project gives it
+    /// anyway needs no pick, so the project's file stays what it follows.
+    pub(crate) fn pick_stage_agent(&mut self, project: &str, slug: &str, stage: Stage, name: &str) {
+        let chips = self.chips_of(project, slug, stage);
+        if !chips.iter().any(|c| c.name == name && !c.off && !c.lit) {
+            return;
+        }
+        let workflow = self.projects.project(project).map(|p| &p.workflow);
+        let Some(feature) = self.feature(project, slug) else {
+            return;
+        };
+        let by_default = matches!(
+            default_pick(feature, stage, workflow, &self.cli_agents),
+            Pick::Agent(agent, _) if agent.eq_ignore_ascii_case(name)
+        );
+        let Some(feature) = self.feature_mut(project, slug) else {
+            return;
+        };
+        if by_default {
+            feature.stage_agents.remove(&stage);
+        } else {
+            feature.stage_agents.insert(stage, name.to_owned());
+        }
+        feature.log(
+            feature::now(),
+            format!("{} agent set to {name}", stage.label()),
+        );
+        self.save_feature(project, slug);
+    }
+
+    /// Pick the next agent `stage`'s chips offer (Ctrl+Shift+A).
+    pub(crate) fn cycle_stage_agent(&mut self, project: &str, slug: &str, stage: Stage) {
+        let chips = self.chips_of(project, slug, stage);
+        if let Some(next) = next_chip(&chips) {
+            self.pick_stage_agent(project, slug, stage, &next.name);
+        }
+    }
+
     /// Start `stage`'s agent for feature `slug` (`fresh`: a new one even
     /// when its last run's pane is still there).
     pub fn start_stage_agent(&mut self, project: &str, slug: &str, stage: Stage, fresh: bool) {
@@ -741,16 +925,7 @@ impl Gerdr {
         };
         let names = self.projects.names(&feature);
         let workflow = self.projects.project(project).map(|p| &p.workflow);
-        let configured = workflow.and_then(|w| w.agents.get(&stage).cloned());
-        let allow_same = workflow.is_some_and(|w| w.allow_same_reviewer);
-        let picked = if stage == Stage::AiReview {
-            let builder =
-                (feature.runs.get(&Stage::Build)).map(|r| (r.agent.as_str(), r.command.as_str()));
-            pick_reviewer(configured.as_deref(), builder, &self.cli_agents, allow_same)
-        } else {
-            pick_agent(configured.as_deref(), &self.cli_agents)
-                .map_or(Pick::NoCli, |(name, command)| Pick::Agent(name, command))
-        };
+        let picked = stage_pick(&feature, stage, workflow, &self.cli_agents);
         let (agent, base) = match picked {
             Pick::Agent(agent, base) => (agent, base),
             Pick::NoCli => {
@@ -1595,7 +1770,10 @@ mod tests {
             Pick::NoCli
         );
         // Built by Claude Code set as a command: the same agent.
-        let by_claude = Some(("claude", "/usr/bin/claude --add-dir /d -- \"$(cat /d/p.md)\""));
+        let by_claude = Some((
+            "claude",
+            "/usr/bin/claude --add-dir /d -- \"$(cat /d/p.md)\"",
+        ));
         assert_eq!(pick_reviewer(None, by_claude, &installed, false), codex);
         let Pick::Refused(why) = pick_reviewer(Some("Claude Code"), by_claude, &installed, false)
         else {
@@ -2144,5 +2322,157 @@ mod tests {
         assert!(line.contains("/data/a/evidence.md") && !line.trim().contains('\n'));
         let line = prompts::render_builtin("continue", &v).unwrap();
         assert!(line.contains("/data/a/build.md") && !line.trim().contains('\n'));
+    }
+
+    fn claude_and_cursor() -> [CliAgent; 2] {
+        [
+            agent("Claude Code", Start::Command("claude".into())),
+            agent("Cursor", Start::Command("cursor-agent".into())),
+        ]
+    }
+
+    fn with_agents(entries: &[(Stage, &str)]) -> Workflow {
+        Workflow {
+            agents: entries.iter().map(|(s, a)| (*s, (*a).to_owned())).collect(),
+            ..Workflow::default()
+        }
+    }
+
+    fn who(pick: Pick) -> String {
+        match pick {
+            Pick::Agent(name, _) => name,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    fn lit(chips: &[AgentChip]) -> Vec<&str> {
+        let on = chips.iter().filter(|c| c.lit);
+        on.map(|c| c.name.as_str()).collect()
+    }
+
+    #[test]
+    fn a_pick_beats_the_project_file_which_beats_the_first_installed() {
+        let installed = claude_and_cursor();
+        let mut f = feature("a", vec![repo("r", true)], 0);
+        let plan = Stage::Plan;
+        assert_eq!(who(stage_pick(&f, plan, None, &installed)), "Claude Code");
+        let set = with_agents(&[(plan, "Cursor")]);
+        assert_eq!(who(stage_pick(&f, plan, Some(&set), &installed)), "Cursor");
+        f.stage_agents.insert(plan, "Claude Code".into());
+        let picked = stage_pick(&f, plan, Some(&set), &installed);
+        assert_eq!(who(picked), "Claude Code");
+    }
+
+    #[test]
+    fn a_pick_since_uninstalled_warns_and_runs_no_command() {
+        let installed = [agent("Claude Code", Start::Command("claude".into()))];
+        let mut f = feature("a", vec![repo("r", true)], 0);
+        f.stage_agents.insert(Stage::Plan, "Cursor".into());
+        let Pick::Refused(why) = stage_pick(&f, Stage::Plan, None, &installed) else {
+            panic!("a name isn't a command");
+        };
+        assert!(
+            why.contains("Cursor") && why.contains("isn't installed"),
+            "{why}"
+        );
+        let chips = stage_chips(&f, Stage::Plan, None, &installed);
+        assert!(lit(&chips).is_empty(), "{chips:?}");
+    }
+
+    #[test]
+    fn the_chips_offer_claude_and_cursor_and_light_who_starts() {
+        let mut installed = claude_and_cursor().to_vec();
+        installed.insert(0, agent("Codex", Start::Command("codex".into())));
+        installed.insert(0, agent("T3 Code", Start::T3));
+        let mut f = feature("a", vec![repo("r", true)], 0);
+        let names =
+            |chips: &[AgentChip]| -> Vec<String> { chips.iter().map(|c| c.name.clone()).collect() };
+        // Codex comes first of the commands, so it is who would start.
+        let chips = stage_chips(&f, Stage::Build, None, &installed);
+        assert_eq!(names(&chips), ["Claude Code", "Cursor", "Codex"]);
+        assert_eq!(lit(&chips), ["Codex"]);
+        f.stage_agents.insert(Stage::Build, "Cursor".into());
+        let chips = stage_chips(&f, Stage::Build, None, &installed);
+        assert_eq!(lit(&chips), ["Cursor"]);
+    }
+
+    #[test]
+    fn the_project_files_own_command_gets_a_chip_of_its_own() {
+        let installed = claude_and_cursor();
+        let f = feature("a", vec![repo("r", true)], 0);
+        let set = with_agents(&[(Stage::Plan, "opencode --prompt")]);
+        let chips = stage_chips(&f, Stage::Plan, Some(&set), &installed);
+        assert_eq!(chips.len(), 3);
+        assert_eq!(lit(&chips), ["opencode"]);
+    }
+
+    #[test]
+    fn only_stages_still_ahead_with_an_agent_have_chips() {
+        let installed = claude_and_cursor();
+        let mut f = feature("a", vec![repo("r", true)], 2);
+        assert!(stage_chips(&f, Stage::Discover, None, &installed).is_empty());
+        assert_eq!(stage_chips(&f, Stage::Build, None, &installed).len(), 2);
+        assert_eq!(stage_chips(&f, Stage::AiReview, None, &installed).len(), 2);
+        assert!(stage_chips(&f, Stage::Verify, None, &installed).is_empty());
+        f.status = Status::Abandoned;
+        assert!(stage_chips(&f, Stage::Build, None, &installed).is_empty());
+    }
+
+    #[test]
+    fn the_builder_can_review_only_when_the_project_allows_it() {
+        let installed = claude_and_cursor();
+        let mut f = feature("a", vec![repo("r", true)], 0);
+        // Build hasn't run: who it will start counts.
+        f.stage_agents.insert(Stage::Build, "Cursor".into());
+        let chips = stage_chips(&f, Stage::AiReview, None, &installed);
+        assert_eq!(
+            chips.iter().map(|c| c.off).collect::<Vec<_>>(),
+            [false, true]
+        );
+        assert_eq!(lit(&chips), ["Claude Code"]);
+        // Its run counts over any pick.
+        let run = StageRun {
+            agent: "Claude Code".into(),
+            command: "claude --add-dir /d -- \"$(cat /d/p.md)\"".into(),
+            ..StageRun::default()
+        };
+        f.runs.insert(Stage::Build, run);
+        let chips = stage_chips(&f, Stage::AiReview, None, &installed);
+        assert_eq!(
+            chips.iter().map(|c| c.off).collect::<Vec<_>>(),
+            [true, false]
+        );
+        assert_eq!(lit(&chips), ["Cursor"]);
+        // Picked before Build ran, then refused at the start.
+        f.stage_agents.insert(Stage::AiReview, "Claude Code".into());
+        let refused = stage_pick(&f, Stage::AiReview, None, &installed);
+        assert!(matches!(refused, Pick::Refused(_)), "{refused:?}");
+        let allowed = Workflow {
+            allow_same_reviewer: true,
+            ..Workflow::default()
+        };
+        let chips = stage_chips(&f, Stage::AiReview, Some(&allowed), &installed);
+        assert!(chips.iter().all(|c| !c.off), "{chips:?}");
+        let picked = stage_pick(&f, Stage::AiReview, Some(&allowed), &installed);
+        assert_eq!(who(picked), "Claude Code");
+    }
+
+    #[test]
+    fn the_next_chip_skips_the_lit_and_the_off_and_goes_round() {
+        let chip = |name: &str, lit, off| AgentChip {
+            name: name.into(),
+            lit,
+            off,
+        };
+        let name = |chips: &[AgentChip]| next_chip(chips).map(|c| c.name.clone());
+        let two = [chip("a", true, false), chip("b", false, false)];
+        assert_eq!(name(&two).as_deref(), Some("b"));
+        let back = [chip("a", false, false), chip("b", true, false)];
+        assert_eq!(name(&back).as_deref(), Some("a"));
+        let none = [chip("a", true, false), chip("b", false, true)];
+        assert_eq!(name(&none), None);
+        let unlit = [chip("a", false, true), chip("b", false, false)];
+        assert_eq!(name(&unlit).as_deref(), Some("b"));
+        assert_eq!(next_chip(&[]), None);
     }
 }

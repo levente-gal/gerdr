@@ -57,9 +57,10 @@ use crate::{
     Gerdr,
     agent_icons::AgentIcon,
     chrome::{
-        self, ActivityRow, ButtonStyle, CheckLine, CheckTone, Dot, FeatureRepoRow, FeatureTabHit,
-        FeatureTabView, MAX_CHECK_LINES, NewFeatureHit, NewFeatureRepo, NewFeatureView, NodeMark,
-        PageButton, PageSection, RailNode, StageMark, StagePage, TabArea, TabColumn,
+        self, ActivityRow, AgentChip, ButtonStyle, CheckLine, CheckTone, Dot, FeatureRepoRow,
+        FeatureTabHit, FeatureTabView, MAX_CHECK_LINES, NewFeatureHit, NewFeatureRepo,
+        NewFeatureView, NodeMark, PageButton, PageSection, RailNode, StageMark, StagePage, TabArea,
+        TabColumn,
     },
     doc_review::DocFile,
     doc_tab::DocMode,
@@ -798,6 +799,10 @@ pub enum PanelOutcome {
     Untick(Stage),
     /// A later stage can't be marked yet: this one comes first.
     NotYet(Stage),
+    /// Run this agent stage with this agent, from its next start on.
+    PickAgent(Stage, String),
+    /// Pick the next agent this agent stage's chips offer.
+    CycleAgent(Stage),
     /// Make this repository one the feature changes.
     Touch(String),
     /// Open a tab in this folder: the feature's, or a repository's
@@ -1393,6 +1398,9 @@ impl FeaturePanel {
                     .map(|stage| PanelOutcome::StartAgent(stage, true));
             }
             Keysym::n | Keysym::N if ctrl => return Some(PanelOutcome::New),
+            Keysym::a | Keysym::A if ctrl && mods.shift && needs(stage).is_some() => {
+                return Some(PanelOutcome::CycleAgent(stage));
+            }
             Keysym::l | Keysym::L if ctrl && mods.shift && linkable(feature) => {
                 return Some(PanelOutcome::LinkProject);
             }
@@ -2697,6 +2705,7 @@ impl Gerdr {
             }],
             shipping: Default::default(),
             runs: Default::default(),
+            stage_agents: Default::default(),
             setup: None,
             verify: None,
             review: None,
@@ -3224,6 +3233,10 @@ impl Gerdr {
             PanelOutcome::CodeReview => self.open_feature_diff(&project, &slug, None),
             PanelOutcome::ManualTest => self.open_manual_test(&project, &slug),
             PanelOutcome::OpenPr(url) => self.open_feature_page(&project, &slug, url),
+            PanelOutcome::PickAgent(stage, name) => {
+                self.pick_stage_agent(&project, &slug, stage, &name);
+            }
+            PanelOutcome::CycleAgent(stage) => self.cycle_stage_agent(&project, &slug, stage),
             PanelOutcome::Untick(stage) => {
                 let Some(feature) = self.feature_mut(&project, &slug) else {
                     return;
@@ -3904,7 +3917,17 @@ impl Gerdr {
             return;
         };
         let outcome = match hit {
-            FeatureTabHit::Tab | FeatureTabHit::Column(_) => None,
+            FeatureTabHit::Tab | FeatureTabHit::Column(_) | FeatureTabHit::AgentPickOff(_) => None,
+            FeatureTabHit::AgentPick(i) => {
+                let stage = (self.features.panel.as_ref())
+                    .filter(|p| !p.keys)
+                    .map(|p| p.page_stage(&feature));
+                stage.and_then(|stage| {
+                    let mut chips = self.chips_of(&feature.project, &feature.slug, stage);
+                    (i < chips.len())
+                        .then(|| PanelOutcome::PickAgent(stage, chips.swap_remove(i).name))
+                })
+            }
             FeatureTabHit::Hint(i) => {
                 let keys = self
                     .feature_tab_view()
@@ -3994,6 +4017,12 @@ impl Gerdr {
                 let label = header_label(view.remove, i)?;
                 Some(Tooltip::new(label, *layout.buttons.get(i)?))
             }
+            FeatureTabHit::AgentPickOff(i) => {
+                let (_, chips) = layout.agent_picks.as_ref()?;
+                let mut spot = *chips.get(i)?;
+                spot.loc.y -= view.scroll[TabColumn::Page as usize].round() as i32;
+                Some(Tooltip::new("Built the code, so it can't review it", spot))
+            }
             FeatureTabHit::Prev | FeatureTabHit::Next => {
                 let (_, prev, next) = layout.switch?;
                 Some(match hit? {
@@ -4010,7 +4039,9 @@ impl Gerdr {
     pub fn feature_tab_control_at(&self, pos: Point<f64, Logical>) -> bool {
         !matches!(
             self.feature_tab_hit(pos),
-            None | Some(FeatureTabHit::Tab | FeatureTabHit::Column(_))
+            None | Some(
+                FeatureTabHit::Tab | FeatureTabHit::Column(_) | FeatureTabHit::AgentPickOff(_)
+            )
         )
     }
 
@@ -4149,6 +4180,7 @@ impl Gerdr {
             setup: doing(Job::Setup),
             verify: doing(Job::Verify),
             code_review: self.code_review_line(&panel.project, &panel.slug),
+            picks: self.chips_of(&panel.project, &panel.slug, panel.page_stage(feature)),
             manual: manual_counts.map(crate::manual_test::counts_text),
             manual_gate: manual_counts.map(|n| {
                 let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
@@ -4499,6 +4531,9 @@ struct PanelState<'a> {
     /// How many of Manual test's criteria passed, of how many (see
     /// `feature_agents::gate_of`).
     manual_gate: Option<(u32, u32)>,
+    /// The chips to pick the agent of the stage on the page with (see
+    /// `feature_agents::stage_chips`).
+    picks: Vec<AgentChip>,
 }
 
 /// `what` a task does as an inline status: "Setting up “T”" reads
@@ -4765,7 +4800,18 @@ fn agent_card(
     actions: &[(PageButton, PanelOutcome)],
     now: u64,
 ) -> Option<PageSection> {
-    let run = feature.runs.get(&stage)?;
+    let picks = state.picks.clone();
+    let Some(run) = feature.runs.get(&stage) else {
+        return (!picks.is_empty()).then(|| PageSection::Agent {
+            icon: AgentIcon::Generic,
+            name: String::new(),
+            dot: Dot::Unknown,
+            status: String::new(),
+            tail: Vec::new(),
+            button: None,
+            picks,
+        });
+    };
     let mark = stage_mark(feature, stage);
     let current = mark == StageMark::Current;
     let dot = match mark {
@@ -4792,6 +4838,7 @@ fn agent_card(
         status,
         tail,
         button: actions.iter().position(|(_, o)| *o == show),
+        picks,
     })
 }
 
@@ -4939,6 +4986,10 @@ fn stage_page(
             line(text, tone)
         }),
     };
+    // A stage not reached yet may start by itself: its agent is picked ahead.
+    if mark == StageMark::Later {
+        sections.extend(agent_card(feature, stage, state, actions, now));
+    }
     if mark != StageMark::Later {
         if let Some(m) = feature.marks.get(&stage).filter(|m| !m.note.is_empty()) {
             sections.push(lines("Note", vec![line(m.note.clone(), CheckTone::Note)]));
@@ -5008,11 +5059,23 @@ fn stage_page(
             .any(|s| matches!(s, PageSection::Agent { status, .. } if *status == l.text))
     };
     let status = status.filter(|l| !carded(l));
+    // A restart runs the agent picked: the button says so when it's another.
+    let lit = state.picks.iter().find(|c| c.lit).map(|c| c.name.as_str());
+    let other = lit.filter(|lit| {
+        (feature.runs.get(&stage)).is_some_and(|run| !run.agent.eq_ignore_ascii_case(lit))
+    });
+    let label = |(b, o): &(PageButton, PanelOutcome)| match other {
+        Some(lit) if *o == PanelOutcome::StartAgent(stage, true) => PageButton {
+            label: format!("Restart with {lit}"),
+            ..b.clone()
+        },
+        _ => b.clone(),
+    };
     StagePage {
         title: stage.label().to_owned(),
         about: stage.about().to_owned(),
         status,
-        buttons: actions.iter().map(|(b, _)| b.clone()).collect(),
+        buttons: actions.iter().map(label).collect(),
         sections,
     }
 }
@@ -5078,6 +5141,7 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 3] = [
             ("Enter", "the page's main button (not Reopen)"),
             ("Ctrl+Shift+O", "Verify's evidence"),
             ("Ctrl+R", "start the stage's agent afresh"),
+            ("Ctrl+Shift+A", "pick the stage's next agent"),
         ],
     ),
     (
@@ -5135,6 +5199,7 @@ fn tab_hints(
     stage: Stage,
     slugs: &[String],
     ctx: RowCtx,
+    picks: &[AgentChip],
 ) -> Vec<(String, String)> {
     let hint = |k: &str, what: &str| (k.to_owned(), what.to_owned());
     if panel.keys {
@@ -5173,6 +5238,9 @@ fn tab_hints(
             }
             if fresh_stage(feature, row).is_some() {
                 hints.push(hint("Ctrl+R", "fresh agent"));
+            }
+            if picks.iter().filter(|c| !c.off).count() > 1 {
+                hints.push(hint("Ctrl+Shift+A", "pick agent"));
             }
         }
     }
@@ -5278,7 +5346,7 @@ fn tab_view(
             s.map_or(0.0, |s| s.pos() - s.overscroll())
         }),
         hover: panel.tab_hover,
-        hints: tab_hints(panel, feature, stage, slugs, state.ctx),
+        hints: tab_hints(panel, feature, stage, slugs, state.ctx, &state.picks),
     }
 }
 
@@ -5345,6 +5413,7 @@ pub(crate) mod tests {
             history: Vec::new(),
             shipping: Default::default(),
             runs: Default::default(),
+            stage_agents: Default::default(),
             setup: None,
             verify: None,
             review: None,
@@ -7072,6 +7141,7 @@ pub(crate) mod tests {
                 status: "Claude Code working \u{b7} started 16m ago".into(),
                 tail: Vec::new(),
                 button: Some(0),
+                picks: Vec::new(),
             }]
         );
         let node = rail_node(&f, Stage::Build, &state, 2_000);
@@ -7586,5 +7656,91 @@ pub(crate) mod tests {
         let stats: Vec<_> = view.repos.iter().map(|r| r.stat).collect();
         // The one not read shows none, not a zero.
         assert_eq!(stats, [Some((12, 3)), None]);
+    }
+
+    #[test]
+    fn a_stage_ahead_shows_its_chips_and_a_restart_names_the_other_agent() {
+        let chips = vec![
+            AgentChip {
+                name: "Claude Code".into(),
+                lit: false,
+                off: false,
+            },
+            AgentChip {
+                name: "Cursor".into(),
+                lit: true,
+                off: false,
+            },
+        ];
+        let state = PanelState {
+            picks: chips.clone(),
+            ..PanelState::default()
+        };
+        let mut f = feature("a", vec![repo("r", true)], 0);
+        // Not reached yet: only the chips, no head.
+        let page = stage_page(&f, Stage::Build, &state, &[], 2_000);
+        let [PageSection::Agent { name, picks, .. }] = page.sections.as_slice() else {
+            panic!("{:?}", page.sections);
+        };
+        assert!(name.is_empty());
+        assert_eq!(picks, &chips);
+        // Run by another: the restart says who comes next.
+        let mut f2 = feature("b", vec![repo("r", true)], 2);
+        f2.runs.insert(
+            Stage::Build,
+            feature::agents::StageRun {
+                agent: "Claude Code".into(),
+                ..Default::default()
+            },
+        );
+        let actions = page_actions(&f2, Stage::Build, RowCtx::default());
+        let page = stage_page(&f2, Stage::Build, &state, &actions, 2_000);
+        let restart = |page: &StagePage| {
+            (page.buttons.iter())
+                .find(|b| b.label.starts_with("Restart"))
+                .map(|b| b.label.clone())
+        };
+        assert_eq!(restart(&page).as_deref(), Some("Restart with Cursor"));
+        // The agent that runs is the one picked: nothing to say.
+        f2.runs.get_mut(&Stage::Build).unwrap().agent = "Cursor".into();
+        let actions = page_actions(&f2, Stage::Build, RowCtx::default());
+        let page = stage_page(&f2, Stage::Build, &state, &actions, 2_000);
+        assert_eq!(restart(&page).as_deref(), Some("Restart agent"));
+        // No chips, no card on a stage without a run.
+        f.status = Status::Abandoned;
+        let page = stage_page(&f, Stage::Build, &PanelState::default(), &[], 2_000);
+        assert!(page.sections.is_empty(), "{:?}", page.sections);
+    }
+
+    #[test]
+    fn ctrl_shift_a_asks_for_the_next_agent_on_an_agent_stage_only() {
+        let f = feature("a", vec![repo("r", true)], 0);
+        let mut panel = FeaturePanel {
+            slug: "a".into(),
+            ..FeaturePanel::default()
+        };
+        let mods = ModifiersState {
+            ctrl: true,
+            shift: true,
+            ..ModifiersState::default()
+        };
+        let ctx = RowCtx::default();
+        let press = |p: &mut FeaturePanel| p.key(&mods, Keysym::A, &f, &[], ctx);
+        assert_eq!(
+            press(&mut panel),
+            Some(PanelOutcome::CycleAgent(Stage::Discover))
+        );
+        panel.pick(&f, Stage::Verify);
+        assert_eq!(press(&mut panel), None);
+    }
+
+    #[test]
+    fn the_feature_keys_old_record_has_no_picks_and_a_pick_round_trips() {
+        let mut f = feature("a", vec![repo("r", true)], 0);
+        let json = serde_json::to_string(&f).unwrap();
+        assert!(!json.contains("stage_agents"), "{json}");
+        f.stage_agents.insert(Stage::Plan, "Cursor".into());
+        let json = serde_json::to_string(&f).unwrap();
+        assert_eq!(serde_json::from_str::<Feature>(&json).unwrap(), f);
     }
 }

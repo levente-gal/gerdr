@@ -1065,6 +1065,7 @@ mod tests {
             marks: Default::default(),
             shipping: Default::default(),
             runs: Default::default(),
+            stage_agents: Default::default(),
             setup: None,
             verify: None,
             review: None,

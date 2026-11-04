@@ -25,6 +25,7 @@ rules, for reviewing a branch before it merges.
 | F2 | Rename. |
 | Ctrl+S | Switch to / check out a branch (repos, worktrees). |
 | Ctrl+Shift+S | Squash a worktree into main. |
+| Ctrl+Shift+A | Pick the next agent on the feature tab's selected stage (the chips on its agent card). It applies from the agent's next start; one running goes on. |
 | Ctrl+Shift+L | Link another project to a feature, so it spans that project's repositories too: the new feature dialog's project picker (again: back to the repositories; also its "Link project…" button), or the feature tab before Ship. |
 | Ctrl+Q | Stop a project's session (project menu). |
 | Ctrl+H / Ctrl+Shift+H | Snooze / snooze until tomorrow; Alt+H shows the hidden items (inbox). |

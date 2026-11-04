@@ -322,6 +322,7 @@ pub struct Workflow {
     pub ship: Option<crate::feature::ShipMode>,
     /// The agent each stage starts, by the picker's name ("Claude Code")
     /// or command (`claude`); without one, the first agent CLI installed.
+    /// A feature's own pick on a stage's page goes over it.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub agents: std::collections::BTreeMap<crate::feature::Stage, String>,
     /// The commands that set up a new feature's worktree, by repository

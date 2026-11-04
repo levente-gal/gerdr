@@ -11,7 +11,9 @@
 //! The CLIs' flags, as checked on 2026-11-02:
 //!
 //! - `claude [--add-dir <dir>]… -- "<prompt>"`: interactive, prompt first.
-//! - `cursor-agent [--add-dir <dir>]… -- "<prompt>"`.
+//! - `cursor-agent --trust [--add-dir <dir>]… -- "<prompt>"`: a folder it
+//!   doesn't know stops at a trust question before the prompt, and each
+//!   feature's folder is new (checked on 2026-11-04).
 //! - `codex [--add-dir <dir>]… -- "<prompt>"`.
 //!
 //! The `--` matters: claude's `--add-dir` takes any number of directories,
@@ -54,6 +56,11 @@ impl Flavor {
             "cursor-agent" => Flavor::Cursor,
             _ => Flavor::Other,
         }
+    }
+
+    /// Whether it asks to trust a new folder unless told not to.
+    pub fn asks_trust(self) -> bool {
+        self == Flavor::Cursor
     }
 
     /// Whether it takes `--add-dir`.
@@ -110,6 +117,9 @@ pub fn needs(stage: Stage) -> Option<Needs> {
 pub fn command_line(base: &str, prompt: &Path, dirs: &[PathBuf]) -> String {
     use crate::desktop::shell_quote;
     let mut line = base.trim().to_owned();
+    if Flavor::of(base).asks_trust() {
+        line.push_str(" --trust");
+    }
     if Flavor::of(base).adds_dirs() {
         for dir in dirs {
             line.push_str(" --add-dir ");
@@ -188,9 +198,10 @@ mod tests {
     fn command_lines_per_flavor() {
         let prompt = Path::new("/d/my feature/prompts/plan-1.md");
         let dirs = [PathBuf::from("/d/my feature")];
-        for base in ["claude", "codex", "cursor-agent"] {
+        for base in ["claude", "codex", "cursor-agent --trust"] {
+            let program = base.split(' ').next().unwrap();
             assert_eq!(
-                command_line(base, prompt, &dirs),
+                command_line(program, prompt, &dirs),
                 format!(
                     "{base} --add-dir '/d/my feature' -- \"$(cat '/d/my feature/prompts/plan-1.md')\""
                 )

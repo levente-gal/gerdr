@@ -2040,6 +2040,7 @@ pub(super) fn feature_tab() -> super::FeatureTabView {
                         "\u{203a} Reading web/src/export/Dialog.tsx".into(),
                     ],
                     button: Some(2),
+                    picks: Vec::new(),
                 },
                 PageSection::Milestones {
                     done: 3,
@@ -2116,6 +2117,7 @@ fn feature_tab_plan_review() -> super::FeatureTabView {
                 status: "waiting for you \u{b7} tab 2".into(),
                 tail: Vec::new(),
                 button: Some(2),
+                picks: Vec::new(),
             },
             PageSection::File {
                 name: "plan.md".into(),
@@ -2268,6 +2270,61 @@ fn feature_tab_later() -> super::FeatureTabView {
     view
 }
 
+/// The chips of an agent card: Claude Code, Cursor, which `lit`, and
+/// whether Claude Code built the code.
+fn agent_chips(lit: usize, off: bool) -> Vec<super::AgentChip> {
+    ["Claude Code", "Cursor"]
+        .iter()
+        .enumerate()
+        .map(|(i, name)| super::AgentChip {
+            name: (*name).into(),
+            lit: i == lit,
+            off: off && i == 0,
+        })
+        .collect()
+}
+
+/// AI review not reached yet: only the chips, the builder's off.
+fn feature_tab_picks_later() -> super::FeatureTabView {
+    use super::{CheckTone, Dot, PageSection, StagePage};
+    use crate::{agent_icons::AgentIcon, feature::Stage};
+    let mut view = feature_tab();
+    select_node(&mut view, 4);
+    view.page = StagePage {
+        title: "AI review".into(),
+        about: Stage::AiReview.about().into(),
+        status: Some(tab_line("Comes after Verify", CheckTone::Note)),
+        buttons: Vec::new(),
+        sections: vec![PageSection::Agent {
+            icon: AgentIcon::Generic,
+            name: String::new(),
+            dot: Dot::Unknown,
+            status: String::new(),
+            tail: Vec::new(),
+            button: None,
+            picks: agent_chips(1, true),
+        }],
+    };
+    view
+}
+
+/// Build running with claude, Cursor picked for its restart, the pointer
+/// on Claude Code's chip.
+fn feature_tab_picks_running() -> super::FeatureTabView {
+    use super::PageSection;
+    let mut view = feature_tab();
+    for section in &mut view.page.sections {
+        if let PageSection::Agent { picks, .. } = section {
+            *picks = agent_chips(1, false);
+        }
+    }
+    if let Some(restart) = (view.page.buttons.iter_mut()).find(|b| b.label == "Restart agent") {
+        restart.label = "Restart with Cursor".into();
+    }
+    view.hover = Some(super::FeatureTabHit::AgentPick(0));
+    view
+}
+
 /// The keyboard on the repositories, on shared, the pointer on its Touch.
 fn feature_tab_repos() -> super::FeatureTabView {
     let mut view = feature_tab();
@@ -2341,7 +2398,7 @@ fn feature_tab_rail_wrap() -> super::FeatureTabView {
 }
 
 /// The feature tab's fixtures, by name.
-fn feature_tabs() -> [(&'static str, super::FeatureTabView); 11] {
+fn feature_tabs() -> [(&'static str, super::FeatureTabView); 13] {
     [
         ("tab_build", feature_tab()),
         ("tab_plan_review", feature_tab_plan_review()),
@@ -2354,11 +2411,13 @@ fn feature_tabs() -> [(&'static str, super::FeatureTabView); 11] {
         ("tab_more_repos", feature_tab_more_repos()),
         ("tab_more_repos_mid", feature_tab_more_repos_mid()),
         ("tab_rail_wrap", feature_tab_rail_wrap()),
+        ("tab_picks_later", feature_tab_picks_later()),
+        ("tab_picks_running", feature_tab_picks_running()),
     ]
 }
 
 /// Each fixture at the width it shows best at, and Build at all three.
-const TAB_SURFACES: [(&str, i32); 14] = [
+const TAB_SURFACES: [(&str, i32); 16] = [
     ("tab_build", 860),
     ("tab_build", 1180),
     ("tab_build", 1920),
@@ -2373,9 +2432,11 @@ const TAB_SURFACES: [(&str, i32); 14] = [
     ("tab_more_repos_mid", 850),
     ("tab_rail_wrap", 500),
     ("tab_rail_wrap", 1180),
+    ("tab_picks_later", 1180),
+    ("tab_picks_running", 860),
 ];
 
-const FEATURE_TAB: [&str; 14] = [
+const FEATURE_TAB: [&str; 16] = [
     "tab_build_860",
     "tab_build_1180",
     "tab_build_1920",
@@ -2390,6 +2451,8 @@ const FEATURE_TAB: [&str; 14] = [
     "tab_more_repos_mid_850",
     "tab_rail_wrap_500",
     "tab_rail_wrap_1180",
+    "tab_picks_later_1180",
+    "tab_picks_running_860",
 ];
 
 fn paint_feature_tab(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
@@ -2410,7 +2473,7 @@ fn paint_feature_tab(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
 }
 
 /// The recorded hashes of `FEATURE_TAB`, per case in `CASES`.
-const GOLDEN_FEATURE_TAB: [[u64; 14]; 4] = [
+const GOLDEN_FEATURE_TAB: [[u64; 16]; 4] = [
     // Dark at 1
     [
         0xab7c76988146b933, // tab_build_860
@@ -2427,6 +2490,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 14]; 4] = [
         0xbc318450690884c4, // tab_more_repos_mid_850
         0x5e323e7803fe1623, // tab_rail_wrap_500
         0xac45aa4c271428ee, // tab_rail_wrap_1180
+        0x3888bbee8cd4d5aa, // tab_picks_later_1180
+        0x731f85bf6bf22fd0, // tab_picks_running_860
     ],
     // Dark at 2
     [
@@ -2444,6 +2509,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 14]; 4] = [
         0x16000a6216c9d8e0, // tab_more_repos_mid_850
         0x67776fb07872293c, // tab_rail_wrap_500
         0x0b835aa2820daa32, // tab_rail_wrap_1180
+        0x2850b3bb86da68f9, // tab_picks_later_1180
+        0x270d22cd53ec1d09, // tab_picks_running_860
     ],
     // Light at 1
     [
@@ -2461,6 +2528,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 14]; 4] = [
         0x03738b19c20cd82d, // tab_more_repos_mid_850
         0xe7e99fdaf13c744a, // tab_rail_wrap_500
         0xae0e84b880f07569, // tab_rail_wrap_1180
+        0xc4c01c352f51d2a0, // tab_picks_later_1180
+        0xcbb3e52abd56986f, // tab_picks_running_860
     ],
     // Light at 2
     [
@@ -2478,6 +2547,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 14]; 4] = [
         0xb2e4c16e9dab739d, // tab_more_repos_mid_850
         0xa53326434579f1eb, // tab_rail_wrap_500
         0x4b7f9187b711ad7b, // tab_rail_wrap_1180
+        0x82c8db277f4c2a1b, // tab_picks_later_1180
+        0xa25af1d0ca559f90, // tab_picks_running_860
     ],
 ];
 

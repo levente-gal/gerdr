@@ -277,6 +277,11 @@ pub struct Feature {
     /// The agent stages' latest runs (see `agents`).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub runs: BTreeMap<Stage, agents::StageRun>,
+    /// The agent picked on a stage's page, by the name the picker gives
+    /// it; over the project's `workflow.agents`, and only where it differs
+    /// from what that gives.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub stage_agents: BTreeMap<Stage, String>,
     /// Its worktrees' setup, once started (see `setup`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub setup: Option<setup::SetupRun>,
@@ -593,6 +598,7 @@ pub(crate) mod tests {
             history: Vec::new(),
             shipping: Default::default(),
             runs: Default::default(),
+            stage_agents: Default::default(),
             setup: None,
             verify: None,
             review: None,
@@ -663,6 +669,7 @@ pub(crate) mod tests {
             history: Vec::new(),
             shipping: Shipping::default(),
             runs: BTreeMap::new(),
+            stage_agents: BTreeMap::new(),
             setup: None,
             verify: None,
             review: None,
