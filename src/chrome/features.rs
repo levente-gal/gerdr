@@ -3594,6 +3594,14 @@ pub(super) fn stage_glyph(stage: Option<Stage>, x: f32, y: f32, s: f32) -> f32 {
 pub(super) const STAGE_DOT: i32 = 8;
 pub(super) const STAGE_DOT_GAP: i32 = 3;
 
+/// Which of the stage dots starting at `dots` is at `x`: the nearest, as
+/// the gaps between them belong to them.
+pub(super) fn stage_dot_at(dots: Rect, x: f64) -> usize {
+    let pitch = (STAGE_DOT + STAGE_DOT_GAP) as f64;
+    let at = ((x - dots.loc.x as f64 + STAGE_DOT_GAP as f64 / 2.0) / pitch).max(0.0) as usize;
+    at.min(Stage::ALL.len() - 1)
+}
+
 /// How wide `marks` stage dots are in a sidebar row.
 pub(super) fn stage_marks_width(marks: usize) -> i32 {
     (marks as i32 * (STAGE_DOT + STAGE_DOT_GAP) - STAGE_DOT_GAP).max(0)
@@ -3602,6 +3610,7 @@ pub(super) fn stage_marks_width(marks: usize) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chrome::sidebar::feature_dots_rect as feature_row_dots;
     use crate::chrome::{ONE_DARK, ONE_LIGHT, ONE_LIGHT_PAGE, contrast, inside};
 
     #[test]
@@ -3787,6 +3796,62 @@ mod tests {
             .with_features(2, SIDEBAR_MIN_WIDTH, d)
             .with_feature_head(true, 2, SIDEBAR_MIN_WIDTH);
         assert_eq!(narrow.features_waiting, None, "it never covers the label");
+    }
+
+    #[test]
+    fn the_strip_of_agents_leaves_a_feature_cards_lines_alone() {
+        use crate::agent_icons::AgentIcon;
+        use crate::chrome::{Density, WorkspaceView, sidebar_layout_at};
+        let mut ws = WorkspaceView::new("Bulk".into(), crate::WorkspaceKind::Terminal, &[]);
+        ws.picks = vec![AgentIcon::Claude];
+        ws.feature = Some(FeatureCard {
+            marks: vec![StageMark::Later; Stage::ALL.len()],
+            ..FeatureCard::default()
+        });
+        let layout = sidebar_layout_at(std::slice::from_ref(&ws), &[], 200, Density::Comfortable);
+        let (mut placed, height) = (layout, 600);
+        placed.place_strips(0, height);
+        let row = &placed.rows[0];
+        let info = row.info.expect("its line");
+        assert_eq!(
+            row.picks.expect("its strip").loc.y,
+            info.loc.y + info.size.h
+        );
+    }
+
+    #[test]
+    fn a_click_on_the_stage_dots_lands_on_the_nearest() {
+        use crate::chrome::{Density, SidebarHit, WorkspaceView, sidebar_layout_at};
+        let d = Density::Comfortable;
+        let mut ws = WorkspaceView::new("Bulk".into(), crate::WorkspaceKind::Terminal, &[]);
+        ws.feature = Some(FeatureCard {
+            marks: vec![StageMark::Later; Stage::ALL.len()],
+            ..FeatureCard::default()
+        });
+        let layout = sidebar_layout_at(std::slice::from_ref(&ws), &[], 200, d)
+            .with_features(1, 200, d)
+            .with_feature_head(true, 0, 200);
+        let pitch = STAGE_DOT + STAGE_DOT_GAP;
+        let on = |dots: Rect, k: i32| {
+            let x = dots.loc.x + k * pitch + STAGE_DOT / 2;
+            (x as f64, (dots.loc.y + dots.size.h / 2) as f64).into()
+        };
+        let dots = layout.rows[0].stages.expect("its dots");
+        for k in 0..Stage::ALL.len() {
+            let hit = layout.hit(on(dots, k as i32));
+            assert_eq!(hit, Some(SidebarHit::Stage(0, k)));
+            assert_eq!(hit.and_then(SidebarHit::row), Some(0));
+        }
+        // A row's dots light the row, and its other parts stay the row.
+        let row = layout.features[0];
+        let dots = feature_row_dots(row);
+        for k in 0..Stage::ALL.len() {
+            let hit = layout.hit(on(dots, k as i32)).expect("a dot");
+            assert_eq!(hit, SidebarHit::FeatureDot(0, k));
+            assert_eq!(hit.pill(), SidebarHit::Feature(0));
+        }
+        let title = (row.loc.x as f64 + 40.0, row.loc.y as f64 + 4.0).into();
+        assert_eq!(layout.hit(title), Some(SidebarHit::Feature(0)));
     }
 
     #[test]

@@ -1645,7 +1645,7 @@ fn feature_workspace_sidebar() -> SidebarView {
                 RowState::default(),
                 RowState {
                     hover: 16,
-                    stages: true,
+                    stage: Some(3),
                     ..RowState::default()
                 },
             ],
@@ -1683,6 +1683,7 @@ fn features_sidebar() -> SidebarView {
         ],
         state: SidebarState {
             features: vec![0, 16],
+            feature_dot: Some((1, 2)),
             ..SidebarState::default()
         },
     }
@@ -1822,41 +1823,41 @@ const GOLDEN_FEATURES: [[u64; 7]; 4] = [
     // Dark at 1
     [
         0x73e88729cb0c3112, // new_feature
-        0xbc9a27bc5d0444d7, // sidebar_features
+        0xd0e56cacb8c258c7, // sidebar_features
         0xab580425d0a50879, // manual_test
         0x8e4d20f7c6316567, // manual_test_note
-        0xd3a95a045bf9d74a, // sidebar_feature_workspace
-        0xcda66ae37d2eb8f9, // sidebar_needs_you
+        0x23890712b97b425a, // sidebar_feature_workspace
+        0xd6a388f7237421b9, // sidebar_needs_you
         0x0cbbecc8e276c3fc, // sidebar_no_features
     ],
     // Dark at 2
     [
         0xbc9770d9310bd319, // new_feature
-        0x54a35acd45115829, // sidebar_features
+        0x53c543082da45049, // sidebar_features
         0xc14927ebcde55bf1, // manual_test
         0xb520dd662440b737, // manual_test_note
-        0x4249641392673996, // sidebar_feature_workspace
-        0x8c98269f717d8ffc, // sidebar_needs_you
+        0xe0710e77b61d3b26, // sidebar_feature_workspace
+        0x5faed7d5e02521fc, // sidebar_needs_you
         0xf97a94d1cbc468b6, // sidebar_no_features
     ],
     // Light at 1
     [
         0xb1780dfd60b1e9a8, // new_feature
-        0xd96f507e20a06de8, // sidebar_features
+        0xd1c8b6c9f5857340, // sidebar_features
         0x093b890ce5537eef, // manual_test
         0xa74e12b563efbdaf, // manual_test_note
-        0xe9088eeaa5bf78be, // sidebar_feature_workspace
-        0x7bb6f18e8ef52647, // sidebar_needs_you
+        0x677808d0001c062a, // sidebar_feature_workspace
+        0xf3ad198b44bfc63f, // sidebar_needs_you
         0xb97e2bad7455858d, // sidebar_no_features
     ],
     // Light at 2
     [
         0x757537a93b40f9fa, // new_feature
-        0xe3c348529d7cc6d0, // sidebar_features
+        0xf343c28fc7a4fe50, // sidebar_features
         0xed40d3ad66f63314, // manual_test
         0x1239c6f64e145f2f, // manual_test_note
-        0xbdf3371a2667d7db, // sidebar_feature_workspace
-        0x5e7809e8d036bcb3, // sidebar_needs_you
+        0x612743da0781f55b, // sidebar_feature_workspace
+        0xec2f2a25df12f5a3, // sidebar_needs_you
         0x7ae57ba63db05473, // sidebar_no_features
     ],
 ];
