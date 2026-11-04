@@ -169,7 +169,11 @@ impl Gerdr {
     /// whether it was just opened. Only the shown project's features have
     /// workspaces: another's says which project to switch to. `None` (with
     /// a toast) when it couldn't.
-    fn ensure_feature_workspace(&mut self, project: &str, slug: &str) -> Option<(usize, bool)> {
+    pub(crate) fn ensure_feature_workspace(
+        &mut self,
+        project: &str,
+        slug: &str,
+    ) -> Option<(usize, bool)> {
         let Some(feature) = self.feature(project, slug) else {
             self.show_warning("That feature is gone".into());
             return None;

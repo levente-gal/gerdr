@@ -39,6 +39,9 @@ pub struct TestRun {
     pub outcome: Option<Outcome>,
     /// Whether the user has seen it since it finished.
     pub seen: bool,
+    /// The Verify run whose check it is, by its number: how it went comes
+    /// from there, not from what its pane shows (see `sync_check_cards`).
+    pub check: Option<u32>,
 }
 
 /// How a finished run went.
@@ -258,6 +261,14 @@ pub fn step(
         let Some(info) = &pane.process else { continue };
         let found = test_command(info);
         let at = runs.iter().position(|r| r.pane_id == pane.pane_id);
+        // A running check says itself how it ends.
+        if let Some(i) = at
+            && runs[i].check.is_some()
+            && runs[i].outcome.is_none()
+        {
+            runs[i].tab_id = pane.tab_id.clone();
+            continue;
+        }
         match (found, at) {
             (Some(found), Some(i)) if runs[i].pid == found.pid => {
                 runs[i].tab_id = pane.tab_id.clone();
@@ -276,6 +287,7 @@ pub fn step(
                     started: now,
                     outcome: None,
                     seen: false,
+                    check: None,
                 };
                 match at {
                     Some(i) => runs[i] = run,
@@ -297,7 +309,24 @@ pub fn step(
 }
 
 /// `took` as a card says it: `42s`, `3m 12s`, `1h 5m`.
-fn took(took: Duration) -> String {
+/// How a check that ended shows on its card.
+fn check_outcome(o: &crate::feature::verify::Outcome) -> Outcome {
+    let state = match (o.passed(), o.interrupted) {
+        (true, _) => CiState::Passed,
+        (false, true) => CiState::Unknown,
+        (false, false) => CiState::Failed,
+    };
+    // The exit code says how it went: counts only that agree with it.
+    let (said, counted) = verdict(&o.tail, &o.command);
+    let counted = counted.filter(|_| said == state);
+    Outcome {
+        state,
+        summary: counted.or_else(|| (!o.passed()).then(|| o.how())),
+        took: Duration::from_secs(o.secs),
+    }
+}
+
+pub(crate) fn took(took: Duration) -> String {
     let s = took.as_secs();
     match s {
         s if s < 60 => format!("{s}s"),
@@ -396,6 +425,7 @@ impl Gerdr {
         for (run, shown) in self.test_runs.iter_mut().zip(shown) {
             run.seen |= run.outcome.is_some() && shown;
         }
+        self.sync_check_cards();
     }
 
     /// Whether the user sees herdr pane `pane_id` now.
@@ -450,18 +480,113 @@ impl Gerdr {
     }
 
     /// Show the pane of the test run in `pane_id`; a finished run is seen.
-    pub(crate) fn focus_test_run(&mut self, pane_id: &str) {
+    /// Whether it shows.
+    pub(crate) fn focus_test_run(&mut self, pane_id: &str) -> bool {
         if !self.show_herdr_pane(pane_id) {
-            return;
+            return false;
         }
         if let Some(run) = self.test_runs.iter_mut().find(|r| r.pane_id == pane_id) {
             run.seen |= run.outcome.is_some();
         }
+        true
     }
 
-    /// Take the card of the test run in `pane_id` off the sidebar.
+    /// Take the card of the test run in `pane_id` off the sidebar. A check's
+    /// stays off until it runs again.
     pub(crate) fn dismiss_test(&mut self, pane_id: &str) {
+        let check = (self.test_runs.iter()).any(|r| r.pane_id == pane_id && r.check.is_some());
         self.test_runs.retain(|r| r.pane_id != pane_id);
+        if !check {
+            return;
+        }
+        let Some(project) = self.project.clone() else {
+            return;
+        };
+        let held: Vec<String> = (self.features.all.get(&project).into_iter().flatten())
+            .filter(|f| {
+                (f.verify.as_ref())
+                    .is_some_and(|v| v.checks.iter().any(|c| c.pane.as_deref() == Some(pane_id)))
+            })
+            .map(|f| f.slug.clone())
+            .collect();
+        for slug in held {
+            if let Some(run) = (self.feature_mut(&project, &slug)).and_then(|f| f.verify.as_mut()) {
+                for c in &mut run.checks {
+                    c.card_off |= c.pane.as_deref() == Some(pane_id);
+                }
+            }
+            self.save_feature(&project, &slug);
+        }
+    }
+
+    /// Make the cards say what the shown project's features' Verify checks
+    /// are at, those whose terminals are open. They come from the features'
+    /// records, so they are there again after a gerdr restart or a project
+    /// switch. A check ended before the card was made has been seen.
+    pub(crate) fn sync_check_cards(&mut self) {
+        let Some(all) = (self.project.as_ref()).and_then(|p| self.features.all.get(p)) else {
+            return;
+        };
+        let rows = all
+            .iter()
+            .filter_map(|f| f.verify.as_ref())
+            .flat_map(|v| &v.checks);
+        let panes: Vec<&PaneState> = self.herdr_tabs.values().flat_map(|d| &d.panes).collect();
+        let rows: Vec<_> = rows.collect();
+        // A check no longer among them takes its card along: its terminal
+        // may stay, for the user to look at.
+        self.test_runs.retain(|r| {
+            r.check.is_none_or(|run| {
+                let pane = Some(r.pane_id.as_str());
+                rows.iter()
+                    .any(|row| row.pane.as_deref() == pane && row.run == run)
+            })
+        });
+        let mut new = Vec::new();
+        for row in rows.into_iter().filter(|row| !row.card_off) {
+            let Some(pane_id) = row.pane.as_deref() else {
+                continue;
+            };
+            let at = self.test_runs.iter().position(|r| r.pane_id == pane_id);
+            let current = at.filter(|i| self.test_runs[*i].check == Some(row.run));
+            if let Some(i) = current {
+                if self.test_runs[i].outcome.is_none()
+                    && let Some(o) = &row.outcome
+                {
+                    self.test_runs[i].outcome = Some(check_outcome(o));
+                }
+                continue;
+            }
+            // Something the user ran since has its own card.
+            if at.is_some_and(|i| self.test_runs[i].check.is_none()) {
+                continue;
+            }
+            let Some(pane) = panes.iter().find(|p| p.pane_id == pane_id) else {
+                continue;
+            };
+            let short = row.command.lines().next().unwrap_or_default().to_owned();
+            let run = TestRun {
+                pane_id: pane_id.to_owned(),
+                workspace_id: pane.workspace_id.clone(),
+                tab_id: pane.tab_id.clone(),
+                pid: row.run as i32,
+                command: short.clone(),
+                short,
+                dir: Some(row.dir.clone()),
+                folder: Some(row.place().to_owned()),
+                started: Instant::now(),
+                outcome: row.outcome.as_ref().map(check_outcome),
+                seen: row.outcome.is_some(),
+                check: Some(row.run),
+            };
+            new.push((at, run));
+        }
+        for (at, run) in new {
+            match at {
+                Some(i) => self.test_runs[i] = run,
+                None => self.test_runs.push(run),
+            }
+        }
     }
 }
 

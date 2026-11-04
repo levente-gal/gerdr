@@ -221,6 +221,10 @@ impl Gerdr {
     /// it recorded forgotten; what shows its file gone. The stage before it
     /// can be reopened again.
     pub(crate) fn start_over_now(&mut self, project: &str, slug: &str, stage: Stage) {
+        // What runs of the stage goes with it, its terminals staying.
+        if stage == Stage::Verify {
+            self.halt_checks(project, slug, None);
+        }
         if let Some(why) = self.start_over_refused(project, slug, stage) {
             return self.show_warning(why);
         }

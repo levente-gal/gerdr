@@ -152,7 +152,8 @@ How to use it:
   row (chip "setup" or "checks", the feature named), says what runs on its
   stage's page on the feature tab ("setting up: api: npm ci (2 of 3)"),
   has the project's timeout, and Enter on a stage whose work runs says so
-  rather than starting it again.
+  rather than starting it again. Verify's checks each run in a terminal of
+  the feature's workspace, all at once, and stop from their cards on its page.
 
 ## X. State across places
 

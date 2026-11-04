@@ -550,7 +550,7 @@ impl CommandsDialog {
     /// project.
     fn row_view(&self, row: &Row, slot: &Slot, heading: Option<String>) -> CommandsRow {
         let tag = if row.is_feature() {
-            Some("runs last, in the feature folder")
+            Some("in the feature folder")
         } else if row.missing {
             Some("not found")
         } else if row.in_feature {
@@ -634,7 +634,7 @@ impl CommandsDialog {
             tab: self.tab,
             body: match self.tab {
                 CommandsTab::Checks => {
-                    "One command per line. A check that changes the code fails Verify."
+                    "One command per line, run at once (&& keeps an order). A check that changes code fails Verify."
                 }
                 CommandsTab::Setup => {
                     "One command per line. They run in a new worktree, once it has its files."

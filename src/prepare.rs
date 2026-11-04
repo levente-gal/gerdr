@@ -74,6 +74,11 @@ pub struct Tools {
     pub nvm_sh: bool,
     /// nvm.fish.
     pub nvm_fish: bool,
+    /// Where mise, fnm and nvm's `nvm.sh` are: a shell without rc files has
+    /// none of their hooks (see `background_command`).
+    pub mise_bin: Option<PathBuf>,
+    pub fnm_bin: Option<PathBuf>,
+    pub nvm_script: Option<PathBuf>,
 }
 
 impl Tools {
@@ -88,14 +93,22 @@ impl Tools {
         let fish_functions = env_dir("XDG_CONFIG_HOME")
             .or_else(|| under_home(".config"))
             .map(|config| config.join("fish/functions"));
+        let mise_bin = find_program("mise");
+        let fnm_bin = find_program("fnm");
+        let nvm_script = nvm_dir
+            .map(|dir| dir.join("nvm.sh"))
+            .filter(|script| script.is_file());
         Self {
             pyenv_root,
             poetry: find_program("poetry"),
             pipenv: find_program("pipenv"),
-            mise: find_program("mise").is_some(),
-            fnm: find_program("fnm").is_some(),
-            nvm_sh: nvm_dir.is_some_and(|dir| dir.join("nvm.sh").is_file()),
+            mise: mise_bin.is_some(),
+            fnm: fnm_bin.is_some(),
+            nvm_sh: nvm_script.is_some(),
             nvm_fish: fish_functions.is_some_and(|dir| dir.join("nvm.fish").is_file()),
+            mise_bin,
+            fnm_bin,
+            nvm_script,
         }
     }
 }
@@ -489,6 +502,58 @@ impl Plan {
     }
 }
 
+/// `command` for a shell without rc files, which `sh -c` is: what a new
+/// terminal in `dir` gets from its rc files and its line comes first, so it
+/// runs on the same Node and venv. Like there, a Node version that can't be
+/// switched to doesn't stop it, and the venv comes first in `PATH`. `command`
+/// stays as it is when there is nothing to get.
+pub fn background_command(
+    command: &str,
+    dir: &Path,
+    ws_dir: &Path,
+    venv: &VenvSetting,
+    tools: &Tools,
+) -> String {
+    let prep = Prep {
+        pane_id: String::new(),
+        pane_cwd: dir.to_path_buf(),
+        ws_dir: ws_dir.to_path_buf(),
+        venv: venv.clone(),
+        captured_env: Vec::new(),
+        cd: None,
+        command: None,
+    };
+    let plan = Plan::new(&prep, tools);
+    let quoted = |path: &Path| shell_quote(&path.to_string_lossy());
+    let hook = |bin: &Path, args: &str| format!("eval \"$({} {args})\"", quoted(bin));
+    let mut first = Vec::new();
+    if let Some(mise) = &tools.mise_bin {
+        // Its hook reads the version files itself, and the rest it manages.
+        first.push(hook(mise, "env -s bash"));
+    } else if let Some(node) = &plan.node {
+        let version = shell_quote(&node.version);
+        if let Some(fnm) = &tools.fnm_bin {
+            first.push(hook(fnm, "env --shell bash"));
+            first.push(format!("{} use {version}", quoted(fnm)));
+        } else if let Some(nvm) = &tools.nvm_script {
+            first.push(format!(". {}", quoted(nvm)));
+            first.push(format!("nvm use {version}"));
+        }
+    }
+    let venv = (plan.venv.as_ref())
+        .map(|venv| venv.join("bin/activate"))
+        .filter(|script| script.is_file());
+    if first.is_empty() && venv.is_none() {
+        return command.to_owned();
+    }
+    let run = format!("sh -c {}", shell_quote(command));
+    first.push(match venv {
+        Some(script) => format!(". {} && {run}", quoted(&script)),
+        None => run,
+    });
+    first.join("; ")
+}
+
 /// What to do next with a pane waiting for its line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Step {
@@ -705,6 +770,9 @@ mod tests {
         fnm: false,
         nvm_sh: false,
         nvm_fish: false,
+        mise_bin: None,
+        fnm_bin: None,
+        nvm_script: None,
     };
 
     /// The line a POSIX shell gets, without any tools.
@@ -722,6 +790,54 @@ mod tests {
             cd: None,
             command: None,
         }
+    }
+
+    #[test]
+    fn a_background_command_gets_the_venv_and_node_of_a_new_terminal() {
+        let tmp = TempDir::new();
+        let dir = tmp.dir("ws/app");
+        let ws = tmp.dir("ws");
+        let run = |tools: &Tools, venv: &VenvSetting| {
+            background_command("npm ci", &dir, &ws, venv, tools)
+        };
+        // Nothing to get: it stays as it is, not one more shell around it.
+        assert_eq!(run(&NONE, &VenvSetting::Auto), "npm ci");
+        let venv = tmp.venv("ws/app/.venv");
+        let inner = "sh -c 'npm ci'";
+        let activate = format!(". {} && {inner}", venv.join("bin/activate").display());
+        assert_eq!(run(&NONE, &VenvSetting::Auto), activate);
+        // The workspace's setting holds, as for its terminals.
+        assert_eq!(run(&NONE, &VenvSetting::Off), "npm ci");
+        // mise's hook comes first and may fail without stopping the rest.
+        let mise = Tools {
+            mise: true,
+            mise_bin: Some("/m/mise".into()),
+            ..NONE
+        };
+        assert_eq!(
+            run(&mise, &VenvSetting::Auto),
+            format!("eval \"$(/m/mise env -s bash)\"; {activate}")
+        );
+        // A pinned version: fnm's or else nvm's, the venv after it.
+        std::fs::write(dir.join(".nvmrc"), "20.1\n").unwrap();
+        let fnm = Tools {
+            fnm: true,
+            fnm_bin: Some("/f/fnm".into()),
+            ..NONE
+        };
+        assert_eq!(
+            run(&fnm, &VenvSetting::Off),
+            format!("eval \"$(/f/fnm env --shell bash)\"; /f/fnm use 20.1; {inner}")
+        );
+        let nvm = Tools {
+            nvm_sh: true,
+            nvm_script: Some("/n/nvm.sh".into()),
+            ..NONE
+        };
+        assert_eq!(
+            run(&nvm, &VenvSetting::Auto),
+            format!(". /n/nvm.sh; nvm use 20.1; {activate}")
+        );
     }
 
     #[test]

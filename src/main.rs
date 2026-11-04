@@ -31,6 +31,7 @@ mod doc_tab;
 mod feature;
 mod feature_agents;
 mod feature_build;
+mod feature_checks;
 mod feature_diff;
 mod feature_graph;
 mod feature_plan_review;
@@ -2036,6 +2037,36 @@ impl Gerdr {
         Some((pid?, pane))
     }
 
+    /// A new herdr pane in `cwd` for workspace `w`: split off `target`, or
+    /// in a new herdr tab, or workspace if `w` has none yet. `None` without
+    /// herdr.
+    fn open_herdr_pane(
+        &mut self,
+        w: usize,
+        target: Option<String>,
+        split: Dir,
+        cwd: &Path,
+    ) -> Option<Result<herdr::PaneInfo, String>> {
+        let env = self.herdr.as_ref()?.pane_env(&self.socket_name);
+        let ws = &self.workspaces[w];
+        let workspace_id = ws.herdr_id().map(str::to_owned);
+        let (dir, name, kind) = (ws.dir.clone(), ws.name.clone(), ws.kind);
+        let record = ws.record.clone();
+        let new_workspace = target.is_none() && workspace_id.is_none();
+        let herdr = self.herdr.as_mut()?;
+        let pane = match (target, workspace_id) {
+            (Some(target), _) => herdr.pane_split(&target, split, cwd, &env),
+            (None, Some(workspace_id)) => herdr.tab_create(&workspace_id, cwd, &env),
+            (None, None) => {
+                herdr.workspace_create(&dir, &name, kind == WorkspaceKind::Project, &env)
+            }
+        };
+        if new_workspace && let Ok(pane) = &pane {
+            self.mirror_herdr(&record, &pane.workspace_id);
+        }
+        Some(pane)
+    }
+
     fn new_herdr_pane(
         &mut self,
         w: usize,
@@ -2043,24 +2074,12 @@ impl Gerdr {
         split: Dir,
         run: Option<(PathBuf, Option<String>)>,
     ) -> Option<herdr::PaneInfo> {
-        let env = self.herdr.as_ref()?.pane_env(&self.socket_name);
         let ws = &self.workspaces[w];
         let target = t
             .and_then(|t| ws.tabs.get(t)?.herdr_split_target())
             .map(|p| p.pane_id.clone());
-        let workspace_id = ws.herdr_id().map(str::to_owned);
-        let (dir, name, kind) = (ws.dir.clone(), ws.name.clone(), ws.kind);
-        let record = ws.record.clone();
-        let new_workspace = target.is_none() && workspace_id.is_none();
-        let herdr = self.herdr.as_mut()?;
-        let pane = match (target, workspace_id) {
-            (Some(target), _) => herdr.pane_split(&target, split, &dir, &env),
-            (None, Some(workspace_id)) => herdr.tab_create(&workspace_id, &dir, &env),
-            (None, None) => {
-                herdr.workspace_create(&dir, &name, kind == WorkspaceKind::Project, &env)
-            }
-        };
-        let pane = match pane {
+        let dir = ws.dir.clone();
+        let pane = match self.open_herdr_pane(w, target, split, &dir)? {
             Ok(pane) => pane,
             Err(err) => {
                 // It goes on as a plain terminal, which won't persist.
@@ -2070,11 +2089,7 @@ impl Gerdr {
                 return None;
             }
         };
-        let herdr = self.herdr.as_mut()?;
-        let socket = herdr.socket().to_path_buf();
-        if new_workspace {
-            self.mirror_herdr(&record, &pane.workspace_id);
-        }
+        let socket = self.herdr.as_ref()?.socket().to_path_buf();
         // The new shell gets the workspace's venv.
         let venv = self
             .herdr_record(&pane.workspace_id)
@@ -3148,7 +3163,9 @@ impl Gerdr {
             agents::AgentKey::Herdr(pane_id) => self.focus_herdr_agent(pane_id),
             agents::AgentKey::Cursor(chat) => self.focus_cursor_chat(chat),
             agents::AgentKey::Ci(link) => self.open_ci_link(link.clone()),
-            agents::AgentKey::Test(pane_id) => self.focus_test_run(pane_id),
+            agents::AgentKey::Test(pane_id) => {
+                self.focus_test_run(pane_id);
+            }
             agents::AgentKey::T3(thread) => self.focus_t3_thread(thread),
         }
     }

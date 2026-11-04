@@ -493,6 +493,12 @@ pub enum FindingTag {
     Low,
     /// The user added it.
     Yours,
+    /// Verify's check, by how it stands.
+    Passed,
+    Failed,
+    Running,
+    Stopped,
+    NotRun,
 }
 
 /// An AI review finding as its stage's page shows it.
@@ -1413,12 +1419,18 @@ impl Stack {
             FindingTag::Medium => "medium",
             FindingTag::Low => "low",
             FindingTag::Yours => "yours",
+            FindingTag::Passed => "passed",
+            FindingTag::Failed => "failed",
+            FindingTag::Running => "running",
+            FindingTag::Stopped => "stopped",
+            FindingTag::NotRun => "not run",
         };
         let ink = match (card.faded, card.tag) {
-            (true, _) | (_, FindingTag::Low) => Ink::Muted,
-            (_, FindingTag::High) => Ink::Error,
-            (_, FindingTag::Medium) => Ink::Warning,
-            (_, FindingTag::Yours) => Ink::Accent,
+            (true, _) | (_, FindingTag::Low | FindingTag::NotRun) => Ink::Muted,
+            (_, FindingTag::High | FindingTag::Failed) => Ink::Error,
+            (_, FindingTag::Medium | FindingTag::Stopped) => Ink::Warning,
+            (_, FindingTag::Yours | FindingTag::Running) => Ink::Accent,
+            (_, FindingTag::Passed) => Ink::Tone(CheckTone::Ready),
         };
         let size = Font::Small.size();
         let tag_w = width_of(tag, size).ceil() as i32 + 1;

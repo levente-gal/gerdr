@@ -1499,7 +1499,11 @@ pub fn foreground_command(
     } else {
         leader.argv.iter().map(String::as_str).collect()
     };
-    if denied(&leader.name, &argv) {
+    // A check of a Verify run belongs to that run: gerdr runs it, when asked.
+    let check = argv
+        .iter()
+        .any(|arg| crate::feature::verify::runs_check(arg));
+    if check || denied(&leader.name, &argv) {
         return untracked(true);
     }
     if !argv.first().is_some_and(|argv0| usable_argv0(argv0)) {

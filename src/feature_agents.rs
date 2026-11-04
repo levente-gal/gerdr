@@ -1398,6 +1398,7 @@ impl Gerdr {
             return;
         };
         self.fixing_tick(&project);
+        self.adopt_checks(&project);
         let Some(all) = self.features.all.get(&project) else {
             return;
         };

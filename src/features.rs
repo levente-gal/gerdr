@@ -83,6 +83,7 @@ use crate::{
         ship::{self, Action, Probe},
         store,
     },
+    feature_checks::{check_passed, checks_running},
     feature_graph::stop_graphs,
     herdr::AgentStatus,
     home_dir,
@@ -425,6 +426,21 @@ pub(crate) enum Done {
         project: String,
         slug: String,
         report: feature::setup::Report,
+    },
+    /// The code run `n` of feature `slug`'s checks is to run on was read.
+    ChecksBegun {
+        project: String,
+        slug: String,
+        n: u32,
+        begun: feature::verify::Begun,
+    },
+    /// Check `index` of run `n` of feature `slug` ended.
+    CheckEnded {
+        project: String,
+        slug: String,
+        n: u32,
+        index: usize,
+        outcome: feature::verify::Outcome,
     },
     /// Verify's checks of feature `slug` ran: run `n`.
     #[allow(dead_code)] // sent from `feature_build` (inc 4 contract)
@@ -852,6 +868,16 @@ pub enum PanelOutcome {
     Continue(Stage),
     /// Run Verify's checks (again).
     RunChecks,
+    /// Run again those of Verify's checks that didn't pass.
+    RunFailed,
+    /// Run this one of Verify's checks again.
+    RerunCheck(usize),
+    /// Stop this one of Verify's checks.
+    StopCheck(usize),
+    /// Stop all of Verify's checks.
+    StopChecks,
+    /// Show the terminal of this one of Verify's checks.
+    ShowCheck(usize),
     /// Set the feature's worktrees up (again): copy what they lack.
     SetUp,
     /// Show the diff at AI review's first finding to decide.
@@ -1402,6 +1428,116 @@ fn outcome_finding(outcome: &PanelOutcome) -> Option<&str> {
         | PanelOutcome::EditFinding(id)
         | PanelOutcome::ShowFinding(id) => Some(id),
         _ => None,
+    }
+}
+
+/// `stage`'s checks in `feature`, as its page lists them: Verify's only.
+pub(crate) fn check_rows(feature: &Feature, stage: Stage) -> &[feature::verify::CheckRun] {
+    match (stage, feature.verify.as_ref()) {
+        (Stage::Verify, Some(run)) => run.checks.as_slice(),
+        _ => &[],
+    }
+}
+
+/// Whether some of `stage`'s checks in `feature` can run again alone: the run
+/// ended, and not all failed, or running them all would do.
+fn has_failed_checks(feature: &Feature, stage: Stage) -> bool {
+    let rows = check_rows(feature, stage);
+    !checks_running(feature)
+        && rows.iter().any(check_passed)
+        && rows.iter().any(|row| !check_passed(row))
+}
+
+/// The buttons on check `i`'s card: its terminal, then stopping it while it
+/// runs, or running it again while Verify is `current`.
+fn check_buttons(
+    i: usize,
+    row: &feature::verify::CheckRun,
+    feature: &Feature,
+    current: bool,
+) -> Vec<(PageButton, PanelOutcome)> {
+    let plain = |label: &str| PageButton {
+        label: label.to_owned(),
+        style: ButtonStyle::Plain,
+    };
+    let mut out = Vec::new();
+    if row.pane.is_some() {
+        out.push((plain("Show"), PanelOutcome::ShowCheck(i)));
+    }
+    let running = checks_running(feature);
+    if running && row.outcome.is_none() {
+        out.push((plain("Stop"), PanelOutcome::StopCheck(i)));
+    } else if current && !running {
+        out.push((plain("Run again"), PanelOutcome::RerunCheck(i)));
+    }
+    out
+}
+
+/// The check an action on a card is about.
+fn outcome_check(outcome: &PanelOutcome) -> Option<usize> {
+    match outcome {
+        PanelOutcome::RerunCheck(i) | PanelOutcome::StopCheck(i) | PanelOutcome::ShowCheck(i) => {
+            Some(*i)
+        }
+        _ => None,
+    }
+}
+
+/// Check `i`'s card on Verify's page, its buttons those in `actions`: how it
+/// went, and the last line it printed when it failed. A check not run again
+/// says which run its result is from.
+fn check_card(
+    i: usize,
+    row: &feature::verify::CheckRun,
+    feature: &Feature,
+    actions: &[(PageButton, PanelOutcome)],
+) -> FindingCard {
+    let run = feature.verify.as_ref().map_or(0, |v| v.n);
+    let (tag, mut place, body) = match &row.outcome {
+        Some(o) if o.passed() => {
+            let (said, counted) = crate::test_runs::verdict(&o.tail, &row.command);
+            let counted = counted.filter(|_| said == crate::ci::CiState::Passed);
+            (FindingTag::Passed, counted, String::new())
+        }
+        // Cut short: how, unless its tag says so, and nothing it printed
+        // says more.
+        Some(o) if o.interrupted => {
+            let how = Some(o.how()).filter(|how| how != "stopped");
+            (FindingTag::Stopped, how, String::new())
+        }
+        Some(o) => {
+            let last = (o.tail.lines().rev()).find(|line| !line.trim().is_empty());
+            (
+                FindingTag::Failed,
+                Some(o.how()),
+                last.unwrap_or_default().to_owned(),
+            )
+        }
+        None if checks_running(feature) => (FindingTag::Running, None, String::new()),
+        None => (FindingTag::NotRun, None, String::new()),
+    };
+    let mut state = (row.outcome.as_ref())
+        .map(|o| crate::test_runs::took(std::time::Duration::from_secs(o.secs)))
+        .unwrap_or_default();
+    if row.outcome.is_some() && row.run != run {
+        state = format!("{state} \u{b7} from run {}", row.run);
+    }
+    let mut at = vec![row.place().to_owned()];
+    at.extend(place.take());
+    FindingCard {
+        tag,
+        title: row.command.lines().next().unwrap_or_default().to_owned(),
+        state,
+        place: at.join(" \u{b7} "),
+        body,
+        fix: String::new(),
+        note: String::new(),
+        faded: false,
+        selected: false,
+        buttons: (actions.iter().enumerate())
+            .filter(|(_, (_, o))| outcome_check(o) == Some(i))
+            .map(|(i, _)| i)
+            .collect(),
     }
 }
 
@@ -2039,8 +2175,10 @@ impl FeaturePanel {
         }
         let stage = self.page_stage(feature);
         let cards = finding_cards(feature, stage);
-        self.finding = self.finding.min(cards.len().saturating_sub(1));
-        if self.focus == TabArea::Findings && (cards.is_empty() || self.expanded) {
+        let checks = check_rows(feature, stage);
+        let carded = cards.len() + checks.len();
+        self.finding = self.finding.min(carded.saturating_sub(1));
+        if self.focus == TabArea::Findings && (carded == 0 || self.expanded) {
             self.focus = TabArea::Stages;
         }
         let card = cards.get(self.finding).copied();
@@ -2102,7 +2240,7 @@ impl FeaturePanel {
                     }
                 }
                 TabArea::Findings => {
-                    self.finding = step.from(self.finding, cards.len().saturating_sub(1));
+                    self.finding = step.from(self.finding, carded.saturating_sub(1));
                 }
             }
             return None;
@@ -2115,7 +2253,7 @@ impl FeaturePanel {
         match sym {
             Keysym::Tab | Keysym::ISO_Left_Tab if plain => {
                 let mut stops = vec![TabArea::Stages];
-                if !cards.is_empty() && !self.expanded {
+                if carded > 0 && !self.expanded {
                     stops.push(TabArea::Findings);
                 }
                 if repos > 0 {
@@ -2125,6 +2263,36 @@ impl FeaturePanel {
                 let back = mods.shift || sym == Keysym::ISO_Left_Tab;
                 let by = if back { stops.len() - 1 } else { 1 };
                 self.focus = stops[(at + by) % stops.len()];
+            }
+            // A check's card with the keyboard.
+            Keysym::Return | Keysym::KP_Enter
+                if plain && self.focus == TabArea::Findings && !checks.is_empty() =>
+            {
+                return Some(PanelOutcome::ShowCheck(self.finding));
+            }
+            Keysym::r if bare && self.focus == TabArea::Findings && !checks.is_empty() => {
+                return Some(PanelOutcome::RerunCheck(self.finding));
+            }
+            Keysym::s if bare && self.focus == TabArea::Findings && !checks.is_empty() => {
+                return Some(PanelOutcome::StopCheck(self.finding));
+            }
+            // All of them, from anywhere on the page.
+            Keysym::r | Keysym::R
+                if plain
+                    && mods.shift
+                    && self.focus != TabArea::Repos
+                    && has_failed_checks(feature, stage) =>
+            {
+                return Some(PanelOutcome::RunFailed);
+            }
+            Keysym::s | Keysym::S
+                if plain
+                    && mods.shift
+                    && self.focus != TabArea::Repos
+                    && stage == Stage::Verify
+                    && checks_running(feature) =>
+            {
+                return Some(PanelOutcome::StopChecks);
             }
             // The card with the keyboard: the diff's keys for a finding.
             Keysym::f | Keysym::F if bare && self.focus == TabArea::Findings => {
@@ -2420,6 +2588,21 @@ pub fn page_actions(
     let current = mark == StageMark::Current;
     for f in finding_cards(feature, stage) {
         out.extend(finding_buttons(f, current));
+    }
+    if current && has_failed_checks(feature, stage) {
+        out.push((
+            button("Run failed", ButtonStyle::Plain),
+            PanelOutcome::RunFailed,
+        ));
+    }
+    if stage == Stage::Verify && checks_running(feature) {
+        out.push((
+            button("Stop all", ButtonStyle::Quiet),
+            PanelOutcome::StopChecks,
+        ));
+    }
+    for (i, row) in check_rows(feature, stage).iter().enumerate() {
+        out.extend(check_buttons(i, row, feature, current));
     }
     if stage == Stage::Ship {
         let one = feature.shipping.prs.len() == 1;
@@ -2885,6 +3068,19 @@ impl Gerdr {
                 self.unbusy(&project, &slug, Job::Verify);
                 self.verify_done(&project, &slug, n, evidence);
             }
+            Done::ChecksBegun {
+                project,
+                slug,
+                n,
+                begun,
+            } => self.checks_begun(&project, &slug, n, begun),
+            Done::CheckEnded {
+                project,
+                slug,
+                n,
+                index,
+                outcome,
+            } => self.check_ended(&project, &slug, n, index, outcome),
         }
     }
 
@@ -4471,6 +4667,11 @@ impl Gerdr {
                 Some(_) => self.run_verify(&project, &slug),
                 None => {}
             },
+            PanelOutcome::RunFailed => self.rerun_failed_checks(&project, &slug),
+            PanelOutcome::RerunCheck(index) => self.rerun_check(&project, &slug, index),
+            PanelOutcome::StopCheck(index) => self.stop_checks(&project, &slug, Some(index)),
+            PanelOutcome::StopChecks => self.stop_checks(&project, &slug, None),
+            PanelOutcome::ShowCheck(index) => self.show_check(&project, &slug, index),
             PanelOutcome::Evidence => self.open_evidence(&project, &slug),
             PanelOutcome::Findings => {
                 let first = self
@@ -6586,7 +6787,14 @@ fn checks_lines(feature: &Feature, state: &PanelState) -> Vec<CheckLine> {
         }
         Some(run) if run.passed == Some(false) => {
             let mut out = vec![line(format!("run {} failed", run.n), CheckTone::Blocker)];
-            let failures = (run.failures.iter()).map(|f| line(f.clone(), CheckTone::Blocker));
+            // A check's card says how it failed; this says the rest.
+            let on_card = |f: &String| {
+                (run.checks.iter())
+                    .any(|c| c.outcome.is_some() && f.starts_with(&format!("{}: `", c.repo)))
+            };
+            let failures = (run.failures.iter())
+                .filter(|f| !on_card(f))
+                .map(|f| line(f.clone(), CheckTone::Blocker));
             out.extend(capped(failures.collect(), CheckTone::Blocker));
             let most = feature::verify::MAX_FIXES;
             if run.fixes >= most {
@@ -6813,7 +7021,20 @@ fn stage_page(
                 sections.extend(milestones_of(state.probe, stage).or(counted));
             }
             Stage::Verify => {
-                sections.push(lines("Checks", checks_lines(feature, state)));
+                let rows = check_rows(feature, stage);
+                let mut said = checks_lines(feature, state);
+                // Its status says the first, and the cards say the rest of
+                // how the checks stand.
+                if !rows.is_empty() && !said.is_empty() {
+                    said.remove(0);
+                }
+                if rows.is_empty() || !said.is_empty() {
+                    sections.push(lines("Checks", said));
+                }
+                sections
+                    .extend((rows.iter().enumerate()).map(|(i, row)| {
+                        PageSection::Finding(check_card(i, row, feature, actions))
+                    }));
                 sections.extend(setup_section(feature, state));
             }
             Stage::AiReview => {
@@ -6967,6 +7188,10 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 4] = [
                 "start the current stage over, after asking",
             ),
             ("Ctrl+Shift+O", "Verify's evidence"),
+            ("Tab", "Verify: to the checks, then Up / Down through them"),
+            ("Enter", "a check: show its terminal"),
+            ("r / s", "a check: run it again, stop it"),
+            ("Shift+R / Shift+S", "Verify: run the failed ones, stop all"),
             (
                 "Ctrl+Shift+U",
                 "copy what the worktrees lack: Build and Verify",
@@ -7112,6 +7337,28 @@ fn tab_hints(
                 });
             }
         }
+        TabArea::Findings if !check_rows(feature, stage).is_empty() => {
+            let rows = check_rows(feature, stage);
+            hints.push(hint("Up / Down", "check"));
+            let row = rows.get(panel.finding.min(rows.len() - 1));
+            if row.is_some_and(|row| row.pane.is_some()) {
+                hints.push(hint("Enter", "show terminal"));
+            }
+            let running = checks_running(feature);
+            if running && row.is_some_and(|row| row.outcome.is_none()) {
+                hints.push(hint("s", "stop"));
+            }
+            if !running && feature.current() == Some(stage) {
+                hints.push(hint("r", "run again"));
+            }
+            if has_failed_checks(feature, stage) {
+                hints.push(hint("Shift+R", "run failed"));
+            }
+            if running {
+                hints.push(hint("Shift+S", "stop all"));
+            }
+            hints.push(hint("Tab", if repos { "repositories" } else { "stages" }));
+        }
         TabArea::Findings => {
             let card = (finding_cards(feature, stage).get(panel.finding)).copied();
             hints.push(hint("Up / Down", "finding"));
@@ -7156,8 +7403,16 @@ fn tab_hints(
             if can_comment(feature, stage) {
                 hints.push(hint("c", "add comment\u{2026}"));
             }
+            if has_failed_checks(feature, stage) && feature.current() == Some(stage) {
+                hints.push(hint("Shift+R", "run failed"));
+            }
+            if stage == Stage::Verify && checks_running(feature) {
+                hints.push(hint("Shift+S", "stop all"));
+            }
             if !finding_cards(feature, stage).is_empty() && !panel.expanded {
                 hints.push(hint("Tab", "findings"));
+            } else if !check_rows(feature, stage).is_empty() && !panel.expanded {
+                hints.push(hint("Tab", "checks"));
             } else if repos {
                 hints.push(hint("Tab", "repositories"));
             }
@@ -7377,7 +7632,8 @@ fn tab_view(
     if feature.status == Status::Done {
         sub = format!("done \u{b7} {sub}");
     }
-    let carded = !panel.expanded && !finding_cards(feature, stage).is_empty();
+    let carded = !panel.expanded
+        && !(finding_cards(feature, stage).is_empty() && check_rows(feature, stage).is_empty());
     let focus = match panel.focus {
         TabArea::Repos if repos.is_empty() => TabArea::Stages,
         TabArea::Findings if !carded => TabArea::Stages,
@@ -9175,6 +9431,122 @@ pub(crate) mod tests {
             press(&mut panel, &f, ctrl(Keysym::r)),
             Some(PanelOutcome::StartAgent(Stage::Build, true))
         );
+    }
+
+    /// A feature on Verify with a passed and a failed check, its run ended.
+    fn verified(running: bool) -> Feature {
+        use feature::verify::{CheckRun, Outcome, VerifyRun};
+        let mut f = feature("v", vec![repo("api", true)], 4);
+        let row = |command: &str, exit: i32| CheckRun {
+            repo: "api".into(),
+            command: command.into(),
+            pane: Some(format!("p-{command}")),
+            run: 2,
+            outcome: Some(Outcome {
+                exit: Some(exit),
+                tail: "first\nboom\n".into(),
+                ..Outcome::default()
+            }),
+            ..CheckRun::default()
+        };
+        let mut checks = vec![row("lint", 0), row("test", 1)];
+        if running {
+            checks[1].outcome = None;
+        }
+        f.verify = Some(VerifyRun {
+            n: 2,
+            opened: true,
+            finished: (!running).then_some(1),
+            checks,
+            ..VerifyRun::default()
+        });
+        f
+    }
+
+    #[test]
+    fn verifys_checks_are_cards_with_their_own_keys() {
+        let shift = |sym| {
+            let mods = ModifiersState {
+                shift: true,
+                ..ModifiersState::default()
+            };
+            (mods, sym)
+        };
+        let f = verified(false);
+        let mut panel = FeaturePanel::default();
+        // The page's own keys, from the stages already.
+        assert_eq!(
+            press(&mut panel, &f, shift(Keysym::R)),
+            Some(PanelOutcome::RunFailed)
+        );
+        assert_eq!(press(&mut panel, &f, key(Keysym::r)), None);
+        // Tab goes to the cards, Up and Down through them.
+        assert_eq!(press(&mut panel, &f, key(Keysym::Tab)), None);
+        assert_eq!(panel.focus, TabArea::Findings);
+        assert_eq!(press(&mut panel, &f, key(Keysym::Down)), None);
+        assert_eq!(
+            press(&mut panel, &f, key(Keysym::Return)),
+            Some(PanelOutcome::ShowCheck(1))
+        );
+        assert_eq!(
+            press(&mut panel, &f, key(Keysym::r)),
+            Some(PanelOutcome::RerunCheck(1))
+        );
+        // While they run: stop, not run again.
+        let running = verified(true);
+        assert_eq!(
+            press(&mut panel, &running, key(Keysym::s)),
+            Some(PanelOutcome::StopCheck(1))
+        );
+        assert_eq!(
+            press(&mut panel, &running, shift(Keysym::S)),
+            Some(PanelOutcome::StopChecks)
+        );
+        assert_eq!(press(&mut panel, &running, shift(Keysym::R)), None);
+        // A key of the findings does nothing here.
+        assert_eq!(press(&mut panel, &f, key(Keysym::f)), None);
+    }
+
+    #[test]
+    fn verifys_page_holds_a_card_per_check() {
+        let labels = |f: &Feature| -> Vec<String> {
+            let actions = page_actions(f, Stage::Verify, RowCtx::default());
+            actions.into_iter().map(|(b, _)| b.label).collect()
+        };
+        let f = verified(false);
+        let shown = labels(&f);
+        assert!(shown.contains(&"Run failed".to_owned()), "{shown:?}");
+        assert!(!shown.contains(&"Stop all".to_owned()), "{shown:?}");
+        let actions = page_actions(&f, Stage::Verify, RowCtx::default());
+        let rows = check_rows(&f, Stage::Verify);
+        let (passed, failed) = (
+            check_card(0, &rows[0], &f, &actions),
+            check_card(1, &rows[1], &f, &actions),
+        );
+        assert_eq!(passed.tag, FindingTag::Passed);
+        assert_eq!(passed.body, "");
+        assert_eq!(failed.tag, FindingTag::Failed);
+        assert_eq!(failed.place, "api \u{b7} exited with 1");
+        assert_eq!(failed.body, "boom");
+        let held: Vec<&str> = (failed.buttons.iter())
+            .map(|i| actions[*i].0.label.as_str())
+            .collect();
+        assert_eq!(held, ["Show", "Run again"]);
+
+        let running = verified(true);
+        let shown = labels(&running);
+        assert!(shown.contains(&"Stop all".to_owned()), "{shown:?}");
+        assert!(!shown.contains(&"Run failed".to_owned()), "{shown:?}");
+        let actions = page_actions(&running, Stage::Verify, RowCtx::default());
+        let rows = check_rows(&running, Stage::Verify);
+        let card = check_card(1, &rows[1], &running, &actions);
+        assert_eq!(card.tag, FindingTag::Running);
+        let held: Vec<&str> = (card.buttons.iter())
+            .map(|i| actions[*i].0.label.as_str())
+            .collect();
+        assert_eq!(held, ["Show", "Stop"]);
+        // A later stage's page has none.
+        assert!(check_rows(&f, Stage::Build).is_empty());
     }
 
     #[test]

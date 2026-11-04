@@ -2376,7 +2376,7 @@ fn commands(case: usize) -> super::CommandsView {
         };
     let mut view = super::CommandsView {
         tab: super::CommandsTab::Checks,
-        body: "One command per line. A check that changes the code fails Verify.",
+        body: "One command per line, run at once (&& keeps an order). A check that changes code fails Verify.",
         note: None,
         rows: vec![
             row(
@@ -2387,12 +2387,7 @@ fn commands(case: usize) -> super::CommandsView {
             ),
             row("web", None, Some("npm test"), ""),
             row("old", Some("not found"), None, "make check"),
-            row(
-                "Whole feature",
-                Some("runs last, in the feature folder"),
-                None,
-                "",
-            ),
+            row("Whole feature", Some("in the feature folder"), None, ""),
         ],
         limit: Some("1200".into()),
         focus: super::CommandsFocus::Row(0),
@@ -2463,31 +2458,31 @@ const COMMANDS: [&str; 4] = [
 const GOLDEN_COMMANDS: [[u64; 4]; 4] = [
     // Dark at 1
     [
-        0xd6bf5af610f0bd06, // commands
+        0x1cc3fb9bbc5e8eca, // commands
         0x8b5544100aae6646, // commands_setup
-        0xd81c40d1dd654852, // commands_stale
-        0x657246e86cdf7372, // commands_low
+        0x5f6e8d33498d735e, // commands_stale
+        0xd00f868aa03d6932, // commands_low
     ],
     // Dark at 2
     [
-        0x5775f007fed8b1cc, // commands
+        0x4f9812744fbb1fb7, // commands
         0x863ddf0b9049bd4f, // commands_setup
-        0x05101c4675da91ff, // commands_stale
-        0xb7cea580a9433698, // commands_low
+        0xee3aa69c564604d0, // commands_stale
+        0x95939744a5800b4f, // commands_low
     ],
     // Light at 1
     [
-        0xe0956360ba5ba9c3, // commands
+        0xb85ca1f9bceb8212, // commands
         0x8b7dff0bbc21e4b4, // commands_setup
-        0xbdaf70c200a4a05b, // commands_stale
-        0x7b406309e623b194, // commands_low
+        0x876ba609d52e1f5e, // commands_stale
+        0xfa5da00ab95f5061, // commands_low
     ],
     // Light at 2
     [
-        0xbba92d23fdb687c3, // commands
+        0x1303b91e1d876816, // commands
         0xff37bc0fc6539ba8, // commands_setup
-        0xb5105bc40bdca039, // commands_stale
-        0x08a0e3bc2186d289, // commands_low
+        0x1ba86a4f6c66674c, // commands_stale
+        0x03823def11970d00, // commands_low
     ],
 ];
 
@@ -3853,6 +3848,105 @@ fn tab_findings() -> super::FeatureTabView {
     view
 }
 
+/// The feature tab on Verify with a card of each way a check can stand, the
+/// second with the keyboard.
+fn tab_checks() -> super::FeatureTabView {
+    use super::{
+        ButtonStyle, CheckTone, FindingCard, FindingTag, NodeMark, PageButton, PageSection,
+    };
+    use crate::feature::Stage;
+    let mut view = feature_tab();
+    at_stage(&mut view, 4, NodeMark::Current, "running");
+    view.focus = super::TabArea::Findings;
+    view.page.title = "Verify".into();
+    view.page.about = Stage::Verify.about().into();
+    view.page.status = None;
+    view.page.buttons.clear();
+    view.page.sections = vec![PageSection::Lines {
+        label: "Checks".into(),
+        lines: vec![tab_line("Verifying: 3 of 5 done", CheckTone::Note)],
+    }];
+    let button = |label: &str, style| PageButton {
+        label: label.into(),
+        style,
+    };
+    view.page
+        .buttons
+        .push(button("Run checks", ButtonStyle::Primary));
+    view.page
+        .buttons
+        .push(button("Stop all", ButtonStyle::Quiet));
+    type Card<'a> = (
+        &'a [&'a str],
+        FindingTag,
+        &'a str,
+        &'a str,
+        &'a str,
+        &'a str,
+    );
+    let cards: [Card; 5] = [
+        (
+            &["Show", "Run again"],
+            FindingTag::Passed,
+            "cargo test",
+            "1m 12s",
+            "api \u{b7} 142 passed",
+            "",
+        ),
+        (
+            &["Show", "Run again"],
+            FindingTag::Failed,
+            "npm test",
+            "8s",
+            "web \u{b7} exited with 1",
+            "Dialog.test.tsx (1 of 14) failed",
+        ),
+        (
+            &["Show", "Stop"],
+            FindingTag::Running,
+            "npm run lint",
+            "",
+            "web",
+            "",
+        ),
+        (
+            &["Show", "Run again"],
+            FindingTag::Stopped,
+            "./e2e.sh",
+            "4s",
+            "feature folder",
+            "",
+        ),
+        (
+            &["Run again"],
+            FindingTag::NotRun,
+            "cargo clippy",
+            "",
+            "api",
+            "",
+        ),
+    ];
+    for (i, (labels, tag, title, state, place, body)) in cards.into_iter().enumerate() {
+        let at = view.page.buttons.len();
+        for label in labels {
+            view.page.buttons.push(button(label, ButtonStyle::Plain));
+        }
+        view.page.sections.push(PageSection::Finding(FindingCard {
+            tag,
+            title: title.into(),
+            state: state.into(),
+            place: place.into(),
+            body: body.into(),
+            fix: String::new(),
+            note: String::new(),
+            faded: false,
+            selected: i == 1,
+            buttons: (at..at + labels.len()).collect(),
+        }));
+    }
+    view
+}
+
 /// The finding dialog, editing a finding's fix.
 fn finding_dialog(error: bool) -> super::FindingDialogView {
     let field = |label, text: &str, placeholder, rows| {
@@ -4289,6 +4383,56 @@ fn dump_doc_tab() {
                 buffer,
                 width,
             );
+        }
+    }
+}
+
+const CHECK_CARDS: [&str; 2] = ["tab_checks_1180", "tab_checks_860"];
+
+/// The recorded hashes of `CHECK_CARDS`, per case in `CASES`.
+const GOLDEN_CHECK_CARDS: [[u64; 2]; 4] = [
+    [0xd12dc0cc0811f861, 0x7538898736f3ceb2],
+    [0x25c641441286084b, 0xd1ceec8d8d479280],
+    [0xe822a78b4d94cd02, 0x34c15295560f0dbe],
+    [0x16901b00165443cb, 0x8d17c94d68bd0d66],
+];
+
+#[test]
+fn verifys_check_cards_paint_the_same_pixels() {
+    let golden: Vec<&[u64]> = GOLDEN_CHECK_CARDS
+        .iter()
+        .map(|row| row.as_slice())
+        .collect();
+    let view = tab_checks();
+    check_each(&CHECK_CARDS, &golden, |painter, theme, scale, surface| {
+        let w = if surface == 0 { 1180 } else { 860 };
+        hash(super::feature_tab_composed(
+            painter,
+            &view,
+            (w, TAB_HEIGHT).into(),
+            theme,
+            scale,
+        ))
+    });
+}
+
+/// With `GERDR_DUMP_DIR` set, write Verify's check cards there.
+#[test]
+fn dump_check_cards() {
+    let Some(dir) = std::env::var_os("GERDR_DUMP_DIR") else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    let _ = std::fs::create_dir_all(&dir);
+    let painter = Painter::new();
+    let view = tab_checks();
+    for (theme, scale) in CASES {
+        let tag = format!("{}_{}", theme.name(), scale);
+        let px = |v: i32| (v as f64 * scale).round() as usize;
+        for w in [1180, 860] {
+            let tab =
+                super::feature_tab_composed(&painter, &view, (w, TAB_HEIGHT).into(), theme, scale);
+            dump(&dir, &format!("tab_checks_{w}_{tag}"), tab, px(w));
         }
     }
 }

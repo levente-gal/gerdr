@@ -24,8 +24,10 @@
 //!
 //! Then the repository's commands from the store file run
 //! (`"workflow": {"setup": {"services-api": ["npm ci"]}}`), in its worktree.
-//! Every command runs with `sh -c`, stdin closed, its output appended to
-//! `setup.log` in the feature data dir, for at most `TIMEOUT`. The first
+//! Every command runs with `sh -c`, on the Node and venv a new terminal
+//! there gets (`prepare::background_command`), stdin closed, its output
+//! appended to `setup.log` in the feature data dir, for at most `TIMEOUT`.
+//! The first
 //! one that fails stops the setup: its repository, command and exit go in
 //! the error. Each command runs in a process group of its own, and the
 //! group is killed when it ends or times out, so nothing it started
@@ -50,6 +52,10 @@ use super::{
     Feature, PerProject, Repo,
     layout::{git, shown},
     now,
+};
+use crate::{
+    prepare::{Tools, background_command},
+    projects::VenvSetting,
 };
 
 /// The name of an ignored folder copied whatever it holds; any folder with
@@ -351,11 +357,13 @@ pub fn run(
     feature: &Feature,
     commands: &PerRepo,
     extras: &PerRepo,
+    venv: &VenvSetting,
     log: &Path,
     progress: &mut dyn FnMut(String),
 ) -> Report {
     let mut report = Report::default();
-    if let Err(why) = run_into(&mut report, feature, commands, extras, log, progress) {
+    let result = run_into(&mut report, feature, commands, extras, venv, log, progress);
+    if let Err(why) = result {
         report.failed = Some(why);
     }
     report
@@ -367,6 +375,7 @@ fn run_into(
     feature: &Feature,
     commands: &PerRepo,
     extras: &PerRepo,
+    venv: &VenvSetting,
     log: &Path,
     progress: &mut dyn FnMut(String),
 ) -> Result<(), String> {
@@ -386,6 +395,8 @@ fn run_into(
         .collect();
     repos.sort_by_key(|r| r.key());
     let total: usize = repos.iter().map(|r| lines_of(commands, r).len()).sum();
+    // Asking poetry or pipenv takes a moment: only with something to run.
+    let tools = (total > 0).then(Tools::detect).unwrap_or_default();
     let mut i = 0;
     for repo in repos {
         let name = &repo.key();
@@ -433,8 +444,9 @@ fn run_into(
                 .try_clone()
                 .map_err(|err| format!("couldn't write to {}: {err}", shown(log)))?;
             let started = Instant::now();
+            let activated = background_command(command, &repo.worktree, &feature.dir, venv, &tools);
             let exit = shell(
-                command,
+                &activated,
                 &repo.worktree,
                 &feature.slug,
                 Stdio::from(out),
@@ -577,7 +589,7 @@ pub(super) fn shell_until(
 }
 
 /// Send `signal` to every process of process group `group`.
-fn kill_group(group: i32, signal: i32) {
+pub(super) fn kill_group(group: i32, signal: i32) {
     if group > 0 {
         // SAFETY: kill takes no pointers; a group already gone is ESRCH.
         unsafe {
@@ -626,7 +638,14 @@ mod tests {
     }
 
     fn set_up(f: &Feature, extras: &PerRepo, t: &Temp) -> Report {
-        run(f, &none(), extras, &t.0.join("setup.log"), &mut |_| {})
+        run(
+            f,
+            &none(),
+            extras,
+            &VenvSetting::Auto,
+            &t.0.join("setup.log"),
+            &mut |_| {},
+        )
     }
 
     #[test]
@@ -643,9 +662,14 @@ mod tests {
             .into(),
         };
         let mut said = Vec::new();
-        let report = run(&f, &commands, &none(), &t.0.join("setup.log"), &mut |s| {
-            said.push(s)
-        });
+        let report = run(
+            &f,
+            &commands,
+            &none(),
+            &VenvSetting::Auto,
+            &t.0.join("setup.log"),
+            &mut |s| said.push(s),
+        );
         assert_eq!(report.failed, None);
         assert_eq!(
             said,
@@ -683,7 +707,9 @@ mod tests {
             ("zzz", &["touch never"]),
         ]);
         let mut said = Vec::new();
-        let report = run(&f, &commands, &none(), &log, &mut |s| said.push(s));
+        let report = run(&f, &commands, &none(), &VenvSetting::Auto, &log, &mut |s| {
+            said.push(s)
+        });
         assert_eq!(
             report.failed.as_deref(),
             Some("web: `exit 3` exited with 3")
@@ -706,7 +732,14 @@ mod tests {
         );
         assert!(text.contains("== exited with 3 after"), "{text}");
         // A second run appends.
-        run(&f, &map(&[("api", &["true"])]), &none(), &log, &mut |_| {});
+        run(
+            &f,
+            &map(&[("api", &["true"])]),
+            &none(),
+            &VenvSetting::Auto,
+            &log,
+            &mut |_| {},
+        );
         let again = std::fs::read_to_string(&log).unwrap();
         assert!(again.starts_with(&text) && again.len() > text.len());
     }
@@ -724,7 +757,9 @@ mod tests {
         put(&web.worktree, "node_modules/own", "");
         let log = t.0.join("setup.log");
         let mut said = Vec::new();
-        let report = run(&f, &none(), &none(), &log, &mut |s| said.push(s));
+        let report = run(&f, &none(), &none(), &VenvSetting::Auto, &log, &mut |s| {
+            said.push(s)
+        });
         assert_eq!(said, ["api: copying node_modules"]);
         let copied = api.worktree.join("node_modules/x/i.js");
         // Copy-on-write or not, depending on the file system under /tmp.

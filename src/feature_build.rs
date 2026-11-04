@@ -13,7 +13,8 @@
 //! no change in an untouched repository, at least one commit. Then gerdr
 //! marks Build done on that code and runs Verify.
 //!
-//! Verify: the store file's checks (see `feature::verify`) run off the
+//! Verify: the store file's checks (see `feature::verify`) run in terminals
+//! (see `feature_checks`), and are waited for off the
 //! thread; `evidence.md` is written either way. Passing marks Verify done
 //! on the code the checks ran on. Failing sends the failures to the Build
 //! agent, in its tab while it lives, else to a fresh one, up to
@@ -23,6 +24,8 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    path::Path,
+    sync::{Arc, atomic::AtomicBool},
     time::{Duration, Instant},
 };
 
@@ -35,7 +38,7 @@ use crate::{
         patch::{self, Reading},
         setup::{self, SetupRun},
         store,
-        verify::{self, Evidence, VerifyRun},
+        verify::{self, Evidence, Scope, VerifyRun},
     },
     feature_agents::{self, Stamp, Watch},
     features::{Busy, Done, Job},
@@ -70,7 +73,11 @@ pub(crate) struct BuildState {
     /// Features being set up now.
     setting_up: BTreeSet<Key>,
     /// Features whose Verify checks run now.
-    verifying: BTreeSet<Key>,
+    pub(crate) verifying: BTreeSet<Key>,
+    /// Which checks the next run of a feature's runs, while its code is read.
+    pub(crate) scopes: BTreeMap<Key, Scope>,
+    /// What stops the running checks of a feature, by their index.
+    pub(crate) stops: BTreeMap<Key, Arc<Vec<AtomicBool>>>,
     /// Features whose Build agent was sent Verify's failures to fix: the
     /// code is probed once it rests, not at the patch watch's next round.
     fixing: BTreeMap<Key, Fixing>,
@@ -229,6 +236,21 @@ fn set_checks(project: &str, slug: &str) -> (String, MenuAction) {
     ("Set checks".to_owned(), action)
 }
 
+/// Write `evidence` of `feature` to its file in `data`; a file that can't be
+/// written is one more thing that failed.
+pub(crate) fn write_evidence(feature: &Feature, data: &Path, mut evidence: Evidence) -> Evidence {
+    let path = data.join(verify::EVIDENCE);
+    let written = std::fs::create_dir_all(data)
+        .and_then(|()| std::fs::write(&path, verify::markdown(feature, &evidence)));
+    if let Err(err) = written {
+        tracing::warn!("writing {}: {err}", path.display());
+        evidence
+            .problems
+            .push(format!("couldn't write {}: {err}", verify::EVIDENCE));
+    }
+    evidence
+}
+
 /// Whether Verify's checks can run on `feature` now (`running`: they run
 /// already, `checks`: how many are set); else why not.
 fn verify_refusal(feature: &Feature, running: bool, checks: usize) -> Result<(), String> {
@@ -381,6 +403,7 @@ impl Gerdr {
         }
         let commands = self.projects.workflows(&feature, |w| w.setup.clone());
         let extras = self.projects.workflows(&feature, |w| w.copy.clone());
+        let venv = self.feature_venv(project, slug);
         let key = (project.to_owned(), slug.to_owned());
         if !self.features.build.setting_up.insert(key) {
             return false;
@@ -426,7 +449,7 @@ impl Gerdr {
                     what: format!("Setting up \u{201c}{title}\u{201d}: {what}"),
                 });
             };
-            let report = setup::run(&feature, &commands, &extras, &log, &mut progress);
+            let report = setup::run(&feature, &commands, &extras, &venv, &log, &mut progress);
             Done::SetUp {
                 project,
                 slug,
@@ -738,17 +761,17 @@ impl Gerdr {
 
     // ----------------------------------------------------------- verify
 
-    /// Run Verify's checks on feature `slug` off the thread.
+    /// Run all of Verify's checks on feature `slug`.
     pub fn run_verify(&mut self, project: &str, slug: &str) {
+        self.run_checks(project, slug, Scope::All);
+    }
+
+    /// Run `scope`'s checks of Verify on feature `slug`, in terminals.
+    pub(crate) fn run_checks(&mut self, project: &str, slug: &str, scope: Scope) {
         let Some(feature) = self.feature(project, slug).cloned() else {
             return;
         };
         let config = self.projects.workflows(&feature, |w| w.verify.clone());
-        // One timeout for the run: the home project's.
-        let timeout = self
-            .projects
-            .project(project)
-            .and_then(|p| p.workflow.verify_timeout);
         let checks = verify::checks(&feature, &config);
         let key = (project.to_owned(), slug.to_owned());
         let running = self.features.build.verifying.contains(&key);
@@ -757,6 +780,18 @@ impl Gerdr {
             let fix = verify_refusal(&feature, running, 1).is_ok();
             let action = fix.then(|| set_checks(project, slug));
             return self.toast_with(why, Level::Warning, action);
+        }
+        // They run in terminals, of the project shown.
+        if self.project.as_deref() != Some(project) {
+            let title = &feature.title;
+            return self.show_error(format!(
+                "\u{201c}{title}\u{201d} is a feature of another project: switch to it to run its checks"
+            ));
+        }
+        if self.herdr.is_none() {
+            return self.show_error(
+                "The checks run in herdr's terminals, and herdr isn't connected".into(),
+            );
         }
         // The checks need what the setup copies. A feature made before it
         // copied anything hasn't had one.
@@ -775,21 +810,27 @@ impl Gerdr {
                 "Setting up \u{201c}{title}\u{201d}; its checks run once it is done"
             ));
         }
-        let timeout = timeout.map_or(verify::TIMEOUT, std::time::Duration::from_secs);
         let now = feature::now();
         let last = feature.verify.as_ref();
         let n = last.map_or(1, |v| v.n + 1);
         let fixes = last.map_or(0, |v| v.fixes);
+        // What the last run said stays until its code is read: then the
+        // checks that are not run again keep it, on the same code.
+        let (checks, patch) =
+            last.map_or((Vec::new(), None), |v| (v.checks.clone(), v.patch.clone()));
         if let Some(f) = self.feature_mut(project, slug) {
             f.verify = Some(VerifyRun {
                 n,
                 started: now,
                 fixes,
+                checks,
+                patch,
                 ..VerifyRun::default()
             });
             f.log(now, format!("Verify run {n} started"));
             self.save_feature(project, slug);
         }
+        self.features.build.scopes.insert(key.clone(), scope);
         self.features.build.verifying.insert(key);
         let title = feature.title.clone();
         let busy = Busy {
@@ -801,33 +842,19 @@ impl Gerdr {
         };
         let data = store::dir(None, project, slug);
         let (project, slug) = (project.to_owned(), slug.to_owned());
-        self.feature_work(Some(busy), move |tx| {
-            let mut progress = |what: String| {
-                // It fails only once gerdr quits: nothing is left to show
-                // the progress in.
-                let _ = tx.send(Done::Progress {
-                    project: project.clone(),
-                    slug: slug.clone(),
-                    job: Job::Verify,
-                    what: format!("Verifying \u{201c}{title}\u{201d}: {what}"),
-                });
-            };
-            let mut evidence = verify::run(&feature, &checks, timeout, &mut progress);
-            let path = data.join(verify::EVIDENCE);
-            let written = std::fs::create_dir_all(&data)
-                .and_then(|()| std::fs::write(&path, verify::markdown(&feature, &evidence)));
-            if let Err(err) = written {
-                tracing::warn!("writing {}: {err}", path.display());
-                evidence
-                    .problems
-                    .push(format!("couldn't write {}: {err}", verify::EVIDENCE));
-            }
-            Done::Verified {
+        self.feature_work(Some(busy), move |_| match verify::begin(&feature) {
+            Ok(begun) => Done::ChecksBegun {
                 project,
                 slug,
                 n,
-                evidence,
-            }
+                begun,
+            },
+            Err(evidence) => Done::Verified {
+                project,
+                slug,
+                n,
+                evidence: write_evidence(&feature, &data, *evidence),
+            },
         });
     }
 
@@ -837,6 +864,8 @@ impl Gerdr {
     pub(crate) fn verify_done(&mut self, project: &str, slug: &str, n: u32, evidence: Evidence) {
         let key = (project.to_owned(), slug.to_owned());
         self.features.build.verifying.remove(&key);
+        self.features.build.stops.remove(&key);
+        self.features.build.scopes.remove(&key);
         let now = feature::now();
         let passed = evidence.passed();
         let failures = evidence.failures();
@@ -850,6 +879,12 @@ impl Gerdr {
         run.patch = Some(evidence.patch.clone()).filter(|p| !p.is_empty());
         run.passed = Some(passed);
         run.failures = failures.clone();
+        // Nothing ran on this code: the last run's say nothing of it.
+        if evidence.outcomes.is_empty() {
+            for check in &mut run.checks {
+                check.outcome = None;
+            }
+        }
         let fixes = run.fixes;
         let first = failures
             .first()
@@ -888,6 +923,13 @@ impl Gerdr {
         }
         if snapshot.status != Status::Open || snapshot.current() != Some(Stage::Verify) {
             return self.show_warning(format!("Verify of \u{201c}{title}\u{201d} failed: {first}"));
+        }
+        // A check cut short says nothing of the code: no fix to ask for.
+        if let Some(cut) = evidence.outcomes.iter().find(|o| o.interrupted) {
+            let (command, how) = (&cut.command, cut.how());
+            return self.show_warning(format!(
+                "The checks of \u{201c}{title}\u{201d} didn't all run: `{command}` {how}"
+            ));
         }
         let alive = (snapshot.runs.get(&Stage::Build))
             .is_some_and(|r| r.agent_key().is_some() && self.stage_run_state(r).1);
