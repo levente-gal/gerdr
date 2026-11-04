@@ -4906,6 +4906,7 @@ fn agent_card(
 fn file_card(
     feature: &Feature,
     stage: Stage,
+    written: bool,
     actions: &[(PageButton, PanelOutcome)],
 ) -> PageSection {
     let own = [
@@ -4917,7 +4918,7 @@ fn file_card(
         name: crate::feature::artifacts::name(stage)
             .unwrap_or("file")
             .to_owned(),
-        state: file_line(feature, stage),
+        state: file_line(feature, stage, written),
         buttons: (actions.iter().enumerate())
             .filter(|(_, (b, o))| b.style == ButtonStyle::Plain && own.contains(o))
             .map(|(i, _)| i)
@@ -4925,8 +4926,10 @@ fn file_card(
     }
 }
 
-/// How Discover's or Plan's file stands in `feature`.
-fn file_line(feature: &Feature, stage: Stage) -> CheckLine {
+/// How Discover's or Plan's file stands in `feature`, `written`: it is
+/// there. A restarted agent leaves the last run's file be until it writes
+/// its own, so the card doesn't say it is gone.
+fn file_line(feature: &Feature, stage: Stage, written: bool) -> CheckLine {
     if feature.is_done(stage) {
         return line("approved", CheckTone::Ready);
     }
@@ -4939,6 +4942,11 @@ fn file_line(feature: &Feature, stage: Stage) -> CheckLine {
                 CheckTone::Note,
             )
         }
+        Some(run) if written && run.pane.is_some() => line(
+            "written \u{b7} the agent may still change it",
+            CheckTone::Note,
+        ),
+        _ if written => line("written", CheckTone::Note),
         Some(_) => line("being written", CheckTone::Note),
         None => line("not written yet", CheckTone::Note),
     }
@@ -5060,7 +5068,8 @@ fn stage_page(
         match stage {
             Stage::Discover | Stage::Plan => {
                 sections.extend(card());
-                sections.push(file_card(feature, stage, actions));
+                let written = state.ctx.wrote(stage);
+                sections.push(file_card(feature, stage, written, actions));
                 sections.extend(milestones_of(state.probe, stage));
             }
             Stage::Build => {
@@ -7417,8 +7426,58 @@ pub(crate) mod tests {
         let run = f.runs.get_mut(&Stage::Plan).unwrap();
         (run.ready, run.sent_back) = (None, 2);
         assert_eq!(
-            file_line(&f, Stage::Plan),
+            file_line(&f, Stage::Plan, true),
             line("sent back \u{d7}2, being written again", CheckTone::Note)
+        );
+    }
+
+    #[test]
+    fn a_restarted_agent_leaves_the_file_shown_as_written() {
+        let mut f = feature("r", vec![repo("api", true)], 0);
+        // The file card and its Review button read the same probe.
+        let written = RowCtx {
+            written: [true, true],
+            ..RowCtx::default()
+        };
+        // Restarted: the new run isn't ready, the last run's brief is there.
+        f.runs.insert(Stage::Discover, agent_run(Some("p2"), None));
+        let actions = page_actions(&f, Stage::Discover, written);
+        let review = PanelOutcome::ReviewDoc(Stage::Discover);
+        assert!(labels(&actions).contains(&("Review", review)));
+        let state = PanelState {
+            ctx: written,
+            ..PanelState::default()
+        };
+        let page = stage_page(&f, Stage::Discover, &state, &actions, 2_000);
+        let card = (page.sections.iter()).find_map(|s| match s {
+            PageSection::File { state, .. } => Some(state.clone()),
+            _ => None,
+        });
+        let kept = line(
+            "written \u{b7} the agent may still change it",
+            CheckTone::Note,
+        );
+        assert_eq!(card, Some(kept));
+        // Nothing there yet: it is being written, as before.
+        assert_eq!(
+            file_line(&f, Stage::Discover, false),
+            line("being written", CheckTone::Note)
+        );
+        // That agent's tab closed: nothing is changing the file.
+        f.runs.get_mut(&Stage::Discover).unwrap().pane = None;
+        assert_eq!(
+            file_line(&f, Stage::Discover, true),
+            line("written", CheckTone::Note)
+        );
+        // Never had an agent, the file put there by hand.
+        f.runs.remove(&Stage::Discover);
+        assert_eq!(
+            file_line(&f, Stage::Discover, true),
+            line("written", CheckTone::Note)
+        );
+        assert_eq!(
+            file_line(&f, Stage::Discover, false),
+            line("not written yet", CheckTone::Note)
         );
     }
 
