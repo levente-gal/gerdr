@@ -25,6 +25,7 @@ use std::{
 
 use crate::{
     Gerdr, agents,
+    agent_icons::AgentIcon,
     chrome::AgentChip,
     cli_agents::CliAgent,
     feature::{
@@ -590,6 +591,7 @@ pub(crate) fn stage_chips(
     agents
         .into_iter()
         .map(|(name, command)| AgentChip {
+            icon: AgentIcon::from_agent(&name),
             lit: lit
                 .as_deref()
                 .is_some_and(|l| l.eq_ignore_ascii_case(&name)),
@@ -867,10 +869,6 @@ impl Gerdr {
         } else {
             feature.stage_agents.insert(stage, name.to_owned());
         }
-        feature.log(
-            feature::now(),
-            format!("{} agent set to {name}", stage.label()),
-        );
         self.save_feature(project, slug);
     }
 
@@ -2460,6 +2458,7 @@ mod tests {
     #[test]
     fn the_next_chip_skips_the_lit_and_the_off_and_goes_round() {
         let chip = |name: &str, lit, off| AgentChip {
+            icon: AgentIcon::from_agent(name),
             name: name.into(),
             lit,
             off,

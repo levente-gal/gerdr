@@ -448,6 +448,16 @@ fn mono_in(
     pen
 }
 
+/// The colour of what segment `i` of a segmented control holds: `on` is
+/// the one lit, `off` the ones that can't be picked.
+pub(super) fn segment_tint(i: usize, on: usize, off: &[usize], p: &Palette) -> Rgb {
+    match (i == on, off.contains(&i)) {
+        (true, _) => p.text,
+        (false, true) => p.placeholder,
+        (false, false) => p.muted,
+    }
+}
+
 impl Painter {
     pub(super) fn new() -> Self {
         let font = load_font(find_font());
@@ -819,12 +829,32 @@ impl Painter {
         scale: f64,
         p: &Palette,
     ) {
+        let rects: Vec<Rect> = segments.iter().map(|&(_, rect)| rect).collect();
+        self.segment_grounds(c, track, &rects, (on, hover, off), scale, p);
+        for (i, &(label, rect)) in segments.iter().enumerate() {
+            let color = segment_tint(i, on, off, p);
+            self.centered(c, label, SMALL_FONT_SIZE, rect, scale, color);
+        }
+    }
+
+    /// What `segmented_off` paints under its labels: the outline `track`,
+    /// and the fill of the segment that is on or under the pointer. For
+    /// segments that hold something else, in `segment_tint`.
+    pub(super) fn segment_grounds(
+        &self,
+        c: &mut Canvas,
+        track: Rect,
+        rects: &[Rect],
+        (on, hover, off): (usize, Option<usize>, &[usize]),
+        scale: f64,
+        p: &Palette,
+    ) {
         let s = scale as f32;
         let (x, y, w, h) = rect_px(track, scale);
         let (b, r) = (((scale).round() as f32).max(1.0), BUTTON_RADIUS * s);
         c.rounded(x, y, w, h, r, p.border);
         c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, r - b, p.element);
-        for (i, &(label, rect)) in segments.iter().enumerate() {
+        for (i, &rect) in rects.iter().enumerate() {
             let fill = if i == on {
                 Some(p.selected)
             } else if hover == Some(i) && !off.contains(&i) {
@@ -836,12 +866,6 @@ impl Painter {
                 let (x, y, w, h) = rect_px(rect, scale);
                 c.rounded(x, y, w, h, ROW_HIGHLIGHT_RADIUS * s, fill);
             }
-            let color = match (i == on, off.contains(&i)) {
-                (true, _) => p.text,
-                (false, true) => p.placeholder,
-                (false, false) => p.muted,
-            };
-            self.centered(c, label, SMALL_FONT_SIZE, rect, scale, color);
         }
     }
 

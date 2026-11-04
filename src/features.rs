@@ -4042,11 +4042,17 @@ impl Gerdr {
                 let label = header_label(view.remove, i)?;
                 Some(Tooltip::new(label, *layout.buttons.get(i)?))
             }
-            FeatureTabHit::AgentPickOff(i) => {
+            // Logos alone: their names.
+            FeatureTabHit::AgentPick(i) | FeatureTabHit::AgentPickOff(i) => {
                 let (_, chips) = layout.agent_picks.as_ref()?;
                 let mut spot = *chips.get(i)?;
                 spot.loc.y -= view.scroll[TabColumn::Page as usize].round() as i32;
-                Some(Tooltip::new("Built the code, so it can't review it", spot))
+                let chip = view.agent_chip(i)?;
+                let text = match chip.off {
+                    true => format!("{} built the code, so it can't review it", chip.name),
+                    false => chip.name.clone(),
+                };
+                Some(Tooltip::new(&text, spot))
             }
             FeatureTabHit::Prev | FeatureTabHit::Next => {
                 let (_, prev, next) = layout.switch?;
@@ -7687,11 +7693,13 @@ pub(crate) mod tests {
     fn a_stage_ahead_shows_its_chips_and_a_restart_names_the_other_agent() {
         let chips = vec![
             AgentChip {
+                icon: AgentIcon::from_agent("Claude Code"),
                 name: "Claude Code".into(),
                 lit: false,
                 off: false,
             },
             AgentChip {
+                icon: AgentIcon::from_agent("Cursor"),
                 name: "Cursor".into(),
                 lit: true,
                 off: false,

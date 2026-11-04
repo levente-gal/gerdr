@@ -2277,6 +2277,7 @@ fn agent_chips(lit: usize, off: bool) -> Vec<super::AgentChip> {
         .iter()
         .enumerate()
         .map(|(i, name)| super::AgentChip {
+            icon: crate::agent_icons::AgentIcon::from_agent(name),
             name: (*name).into(),
             lit: i == lit,
             off: off && i == 0,
@@ -2490,8 +2491,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 16]; 4] = [
         0xbc318450690884c4, // tab_more_repos_mid_850
         0x5e323e7803fe1623, // tab_rail_wrap_500
         0xac45aa4c271428ee, // tab_rail_wrap_1180
-        0x3888bbee8cd4d5aa, // tab_picks_later_1180
-        0x731f85bf6bf22fd0, // tab_picks_running_860
+        0xc5d81745aa8344fa, // tab_picks_later_1180
+        0x99738de657365076, // tab_picks_running_860
     ],
     // Dark at 2
     [
@@ -2509,8 +2510,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 16]; 4] = [
         0x16000a6216c9d8e0, // tab_more_repos_mid_850
         0x67776fb07872293c, // tab_rail_wrap_500
         0x0b835aa2820daa32, // tab_rail_wrap_1180
-        0x2850b3bb86da68f9, // tab_picks_later_1180
-        0x270d22cd53ec1d09, // tab_picks_running_860
+        0x76bbcb0909ed87c3, // tab_picks_later_1180
+        0xe73d2375a828a0be, // tab_picks_running_860
     ],
     // Light at 1
     [
@@ -2528,8 +2529,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 16]; 4] = [
         0x03738b19c20cd82d, // tab_more_repos_mid_850
         0xe7e99fdaf13c744a, // tab_rail_wrap_500
         0xae0e84b880f07569, // tab_rail_wrap_1180
-        0xc4c01c352f51d2a0, // tab_picks_later_1180
-        0xcbb3e52abd56986f, // tab_picks_running_860
+        0xd1a780b2fa4aecf4, // tab_picks_later_1180
+        0x2c6aa6f30c1af15e, // tab_picks_running_860
     ],
     // Light at 2
     [
@@ -2547,8 +2548,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 16]; 4] = [
         0xb2e4c16e9dab739d, // tab_more_repos_mid_850
         0xa53326434579f1eb, // tab_rail_wrap_500
         0x4b7f9187b711ad7b, // tab_rail_wrap_1180
-        0x82c8db277f4c2a1b, // tab_picks_later_1180
-        0xa25af1d0ca559f90, // tab_picks_running_860
+        0xa44b255d481a949e, // tab_picks_later_1180
+        0x9a50304d4c453b9d, // tab_picks_running_860
     ],
 ];
 
