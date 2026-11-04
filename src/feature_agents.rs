@@ -805,10 +805,10 @@ pub(crate) fn agent_line(
         if watch.is_some_and(|w| w.checking.is_some()) {
             return "reading the findings".into();
         }
-    } else if run.ready.is_some() {
-        return format!("{file} ready for review");
     }
-    if let Some((_, why)) = watch.and_then(|w| w.refused.as_ref()) {
+    // A file ready is the file's to say: the agent is only asked about itself.
+    let written = run.ready.is_some() && stage != Stage::Build;
+    if let Some((_, why)) = watch.and_then(|w| w.refused.as_ref()).filter(|_| !written) {
         return format!("not ready: {why}");
     }
     if run.t3 == Some(T3Run::Draft) {
@@ -822,7 +822,7 @@ pub(crate) fn agent_line(
         };
     }
     let missing = watch.map(|w| w.missing.as_slice()).unwrap_or_default();
-    if run.nudged {
+    if run.nudged && !written {
         return match missing.first() {
             Some(lack) => format!("nudged: {lack}"),
             None => format!("nudged to write {file}"),
@@ -2216,8 +2216,14 @@ mod tests {
             "Claude Code working \u{b7} started 3m ago"
         );
         assert_eq!(
-            agent_line(&run(Some(1_100)), Stage::Discover, None, None, now),
-            "brief.md ready for review"
+            agent_line(
+                &run(Some(1_100)),
+                Stage::Discover,
+                Some(AgentStatus::Idle),
+                None,
+                now
+            ),
+            "Claude Code waiting for you \u{b7} started 3m ago"
         );
         let mut nudged = r.clone();
         nudged.nudged = true;

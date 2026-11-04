@@ -1883,7 +1883,8 @@ const START_OVER_KEY: &str = "Ctrl+Shift+Del";
 /// current one, then Reopen unless it is locked), then its agent's tab, a
 /// fresh agent, starting over, Verify's evidence, AI review's fixes to
 /// send, and Ship's pull requests. A later stage has none.
-/// The page's clicks and Enter both go by this list.
+/// The page's clicks and Enter both go by this list. Where each is drawn is
+/// the page's to say: on the card of what it acts on, else at the title.
 pub fn page_actions(
     feature: &Feature,
     stage: Stage,
@@ -1937,11 +1938,11 @@ pub fn page_actions(
     }
     if let Some(stage) = fresh_stage(feature, row) {
         let fresh = PanelOutcome::StartAgent(stage, true);
-        out.push((button("Restart agent", ButtonStyle::Plain), fresh));
+        out.push((button("Restart", ButtonStyle::Quiet), fresh));
     }
     if let Some(stage) = start_over_stage(feature, stage, ctx) {
         out.push((
-            button("Start over\u{2026}", ButtonStyle::Destructive),
+            button("Start over\u{2026}", ButtonStyle::Quiet),
             PanelOutcome::StartOver(stage),
         ));
     }
@@ -5657,8 +5658,23 @@ fn lines(label: &str, lines: Vec<CheckLine>) -> PageSection {
     }
 }
 
-/// The card of `stage`'s agent in `feature`, once one ran: its button the
-/// page's Show agent or Resume agent, if `actions` has one.
+/// The indices in `actions` of what acts on `stage`'s agent: the buttons of
+/// its card.
+fn agent_buttons(stage: Stage, actions: &[(PageButton, PanelOutcome)]) -> Vec<usize> {
+    (actions.iter().enumerate())
+        .filter(|(_, (_, outcome))| match outcome {
+            PanelOutcome::ShowAgent(s)
+            | PanelOutcome::ResumeAgent(s)
+            | PanelOutcome::Continue(s)
+            | PanelOutcome::StartAgent(s, _) => *s == stage,
+            _ => false,
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// The card of `stage`'s agent in `feature`, once one ran or one can be
+/// picked, with the page's buttons in `actions` that act on it.
 fn agent_card(
     feature: &Feature,
     stage: Stage,
@@ -5667,6 +5683,7 @@ fn agent_card(
     now: u64,
 ) -> Option<PageSection> {
     let picks = state.picks.clone();
+    let buttons = agent_buttons(stage, actions);
     let Some(run) = feature.runs.get(&stage) else {
         return (!picks.is_empty()).then(|| PageSection::Agent {
             icon: AgentIcon::Generic,
@@ -5674,7 +5691,7 @@ fn agent_card(
             dot: Dot::Unknown,
             status: String::new(),
             tail: Vec::new(),
-            button: None,
+            buttons,
             picks,
         });
     };
@@ -5685,12 +5702,13 @@ fn agent_card(
         StageMark::Current if run.live() => state.agent_status.map_or(Dot::Unknown, Dot::of_status),
         _ => Dot::Unknown,
     };
+    // The card's head names the agent already.
     let status = match (current, &state.agent) {
-        (true, Some(line)) => line.clone(),
+        (true, Some(line)) => (line.strip_prefix(run.agent.as_str()))
+            .map_or(line.as_str(), str::trim_start)
+            .to_owned(),
         _ => format!("started {}", projects::ago(now, run.started)),
     };
-    let show = PanelOutcome::ShowAgent(stage);
-    let resume = PanelOutcome::ResumeAgent(stage);
     // The tail read is the current stage's agent's, while its pane is.
     let tail = match current && run.pane.is_some() {
         true => state.tail.to_vec(),
@@ -5702,7 +5720,7 @@ fn agent_card(
         dot,
         status,
         tail,
-        button: actions.iter().position(|(_, o)| *o == show || *o == resume),
+        buttons,
         picks,
     })
 }
@@ -5949,7 +5967,8 @@ fn stage_page(
     // The agent's card says what it does: the status line needn't again.
     let carded = |l: &CheckLine| {
         (sections.iter())
-            .any(|s| matches!(s, PageSection::Agent { status, .. } if *status == l.text))
+            .any(|s| matches!(s, PageSection::Agent { status, .. }
+                if !status.is_empty() && l.text.ends_with(status.as_str())))
     };
     let status = status.filter(|l| !carded(l));
     // A restart runs the agent picked: the button says so when it's another.
@@ -7625,7 +7644,7 @@ pub(crate) mod tests {
         let actions = page_actions(&f, Stage::Plan, RowCtx::default());
         let page = stage_page(&f, Stage::Plan, &PanelState::default(), &actions, 2_000);
         let button = page.sections.iter().find_map(|s| match s {
-            PageSection::Agent { button, .. } => *button,
+            PageSection::Agent { buttons, .. } => buttons.first().copied(),
             _ => None,
         });
         assert_eq!(
@@ -8653,7 +8672,7 @@ pub(crate) mod tests {
             [
                 ("Show agent", PanelOutcome::ShowAgent(Stage::Build)),
                 (
-                    "Restart agent",
+                    "Restart",
                     PanelOutcome::StartAgent(Stage::Build, true)
                 ),
                 ("Start over\u{2026}", PanelOutcome::StartOver(Stage::Build)),
@@ -8670,9 +8689,9 @@ pub(crate) mod tests {
                 icon: AgentIcon::Claude,
                 name: "Claude Code".into(),
                 dot: Dot::Working,
-                status: "Claude Code working \u{b7} started 16m ago".into(),
+                status: "working \u{b7} started 16m ago".into(),
                 tail: Vec::new(),
-                button: Some(0),
+                buttons: vec![0, 1],
                 picks: Vec::new(),
             }]
         );
@@ -8699,10 +8718,10 @@ pub(crate) mod tests {
                 items: Vec::new()
             })
         );
-        let PageSection::Agent { button, .. } = &page.sections[0] else {
+        let PageSection::Agent { buttons, .. } = &page.sections[0] else {
             panic!("the agent's card first");
         };
-        assert_eq!(*button, Some(1));
+        assert_eq!(buttons[..2], [0, 1], "Continue, then Show agent");
         let node = rail_node(&f, Stage::Build, &state, 2_000);
         assert_eq!(
             (node.mark, node.line.as_str()),
@@ -8754,7 +8773,7 @@ pub(crate) mod tests {
             [
                 ("Review", PanelOutcome::OpenDoc(Stage::Plan)),
                 ("Show agent", PanelOutcome::ShowAgent(Stage::Plan)),
-                ("Restart agent", PanelOutcome::StartAgent(Stage::Plan, true)),
+                ("Restart", PanelOutcome::StartAgent(Stage::Plan, true)),
                 ("Start over\u{2026}", PanelOutcome::StartOver(Stage::Plan)),
             ]
         );
@@ -8763,16 +8782,20 @@ pub(crate) mod tests {
         assert_eq!(page.status, None);
         assert!(matches!(
             &page.sections[0],
-            PageSection::Agent { status, .. } if status == "Claude Code done \u{b7} plan.md ready"
+            PageSection::Agent { status, .. } if status == "done \u{b7} plan.md ready"
         ));
         assert!(matches!(
             page.sections[0],
             PageSection::Agent {
                 dot: Dot::Unknown,
-                button: Some(1),
                 ..
             }
         ));
+        // Show agent and Restart are its card's, Start over the stage's.
+        let PageSection::Agent { buttons, .. } = &page.sections[0] else {
+            panic!("the agent's card first");
+        };
+        assert_eq!(*buttons, [1, 2]);
         assert_eq!(
             page.sections[1],
             file("plan.md", line("ready for review", CheckTone::Ready), &[0])
@@ -8854,7 +8877,7 @@ pub(crate) mod tests {
         assert!(
             labels(&plan).contains(&("Start over\u{2026}", PanelOutcome::StartOver(Stage::Plan)))
         );
-        // Plan's Restart agent doesn't reopen the brief: it stays locked.
+        // Plan's Restart doesn't reopen the brief: it stays locked.
         assert!(
             labels(&plan)
                 .iter()
@@ -9503,7 +9526,7 @@ pub(crate) mod tests {
         f2.runs.get_mut(&Stage::Build).unwrap().agent = "Cursor".into();
         let actions = page_actions(&f2, Stage::Build, RowCtx::default());
         let page = stage_page(&f2, Stage::Build, &state, &actions, 2_000);
-        assert_eq!(restart(&page).as_deref(), Some("Restart agent"));
+        assert_eq!(restart(&page).as_deref(), Some("Restart"));
         // No chips, no card on a stage without a run.
         f.status = Status::Abandoned;
         let page = stage_page(&f, Stage::Build, &PanelState::default(), &[], 2_000);

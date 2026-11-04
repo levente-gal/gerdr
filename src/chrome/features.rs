@@ -403,8 +403,8 @@ impl TabColumn {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PageButton {
     pub label: String,
-    /// `Primary` for the one to press next, which Enter presses,
-    /// `Destructive` for one that throws work away.
+    /// `Primary` for the one to press next, which Enter presses, `Quiet`
+    /// for one to have at hand that nothing asks for.
     pub style: ButtonStyle,
 }
 
@@ -419,7 +419,7 @@ pub struct AgentChip {
     pub off: bool,
 }
 
-/// A part of a stage's page, under its button row.
+/// A part of a stage's page, under its title and what it says.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PageSection {
     /// A stage's agent: its logo and name, its dot, where it runs, and
@@ -431,9 +431,9 @@ pub enum PageSection {
         /// "working · tab 2", or why it isn't running.
         status: String,
         tail: Vec<String>,
-        /// The index in `StagePage::buttons` of the card's own button
-        /// (Show agent), if any.
-        button: Option<usize>,
+        /// The indices in `StagePage::buttons` of what acts on the agent
+        /// (Show agent, Restart), drawn left of `picks`, which they go by.
+        buttons: Vec<usize>,
         /// The agents to pick for the stage's next start, if it offers any.
         picks: Vec<AgentChip>,
     },
@@ -843,12 +843,20 @@ const DOT_ROOM: i32 = 18;
 /// A line of small text, of body text, and of an agent's pane.
 const SMALL_LINE: i32 = 20;
 const BODY_LINE: i32 = 22;
+/// How high a stage page's title is.
+const TITLE_LINE: i32 = BODY_LINE + 6;
 const TAIL_LINE: i32 = 18;
 /// The gap between the parts of a page.
 const PAGE_GAP: i32 = 16;
 /// An agent card's inner room and its header's height.
 const AGENT_PAD: i32 = 10;
 const AGENT_HEAD: i32 = 28;
+/// Where an agent card's name starts, past its logo and dot.
+const AGENT_TEXT_AT: i32 = 36;
+/// The room an agent card keeps for its status beside its buttons.
+const AGENT_STATUS_MIN: i32 = 96;
+/// Between an agent card's head and the rows of buttons that left it.
+const AGENT_ROWS_GAP: i32 = 4;
 /// An agent card's chips: the outline's height, as its button's, the room
 /// between it and its chips, a chip's width, a logo's size, and the label
 /// in front of them on a card with no head.
@@ -932,7 +940,7 @@ pub(super) enum Piece {
     File(usize),
     /// `FeatureTabView::repos[i]`.
     Repo(usize),
-    /// `StagePage::buttons[i]`, not on an agent or file card.
+    /// `StagePage::buttons[i]`, one acting on the stage as a whole.
     Button(usize),
     /// `FeatureTabView::activity[row]`, its `what` wrapped in `lines`.
     Activity { row: usize, lines: Vec<String> },
@@ -1416,6 +1424,40 @@ fn repos_toggle_label(view: &FeatureTabView) -> Option<String> {
     (!view.expanded && view.more > 0).then(|| format!("{} more", view.more))
 }
 
+/// How wide things `widths` wide are on one row, with their gaps.
+fn row_width(widths: &[i32]) -> i32 {
+    widths.iter().sum::<i32>() + QUIT_BUTTON_GAP * (widths.len() as i32 - 1).max(0)
+}
+
+/// Where things `widths` wide go, in their order, between `left` and
+/// `right`: each its `x` and row, as many to a row as fit, the rows ending
+/// at `right`.
+fn rows_from_right(widths: &[i32], left: i32, right: i32) -> Vec<(i32, i32)> {
+    let mut rows: Vec<Vec<i32>> = Vec::new();
+    for &w in widths {
+        match rows.last_mut() {
+            Some(row) if row_width(row) + QUIT_BUTTON_GAP + w <= right - left => row.push(w),
+            _ => rows.push(vec![w]),
+        }
+    }
+    let mut placed = Vec::with_capacity(widths.len());
+    for (r, row) in rows.iter().enumerate() {
+        let mut x = right - row_width(row);
+        for w in row {
+            placed.push((x, r as i32));
+            x += w + QUIT_BUTTON_GAP;
+        }
+    }
+    placed
+}
+
+/// How high the rows of `rows_from_right` are, none for nothing placed.
+fn rows_height(placed: &[(i32, i32)]) -> i32 {
+    placed.last().map_or(0, |(_, row)| {
+        (row + 1) * ROW_BUTTON + row * QUIT_BUTTON_GAP
+    })
+}
+
 /// The page's column: the selected stage's title, about, status, buttons
 /// and sections, then the activity if it has no column.
 /// How wide `n` agent chips' outline is, with the room.
@@ -1451,8 +1493,39 @@ fn page_stack(
     activity: bool,
 ) {
     let page = &view.page;
+    // What acts on the stage as a whole: what no card holds. At the title's
+    // right if it fits, else in rows of their own further down.
+    let held: Vec<usize> = page
+        .sections
+        .iter()
+        .flat_map(|sec| match sec {
+            PageSection::Agent { buttons, .. } => buttons.clone(),
+            PageSection::File { buttons, .. } => buttons.clone(),
+            _ => Vec::new(),
+        })
+        .collect();
+    let free: Vec<usize> = (0..page.buttons.len())
+        .filter(|i| !held.contains(i))
+        .collect();
+    let widths: Vec<i32> = (free.iter())
+        .map(|i| button_width(&page.buttons[*i].label))
+        .collect();
+    let (left, right) = (s.x, s.x + s.w);
+    let title_w = measure_bold(&page.title, Font::Heading.size())
+        .unwrap_or_else(|| width_of(&page.title, Font::Heading.size()))
+        .ceil() as i32;
+    let beside = row_width(&widths) <= s.w - title_w - PAGE_GAP;
+    if beside {
+        let y = s.y + (TITLE_LINE - ROW_BUTTON) / 2;
+        for (i, (x, _)) in free.iter().zip(rows_from_right(&widths, left, right)) {
+            let w = button_width(&page.buttons[*i].label);
+            let rect = Rectangle::new((x, y).into(), (w, ROW_BUTTON).into());
+            buttons[*i] = Some(rect);
+            s.pieces.push((rect, Piece::Button(*i)));
+        }
+    }
     s.put(
-        BODY_LINE + 6,
+        TITLE_LINE,
         Piece::Text {
             text: page.title.clone(),
             font: Font::Heading,
@@ -1465,34 +1538,17 @@ fn page_stack(
         s.y += 4;
         s.text(&status.text, Font::Body, Ink::Tone(status.tone), BODY_LINE);
     }
-    // The buttons no card holds, wrapped in rows.
-    let held: Vec<usize> = page
-        .sections
-        .iter()
-        .flat_map(|sec| match sec {
-            PageSection::Agent { button, .. } => button.iter().copied().collect(),
-            PageSection::File { buttons, .. } => buttons.clone(),
-            _ => Vec::new(),
-        })
-        .collect();
-    let free: Vec<usize> = (0..page.buttons.len())
-        .filter(|i| !held.contains(i))
-        .collect();
-    if !free.is_empty() {
+    if !beside {
         s.y += 10;
-        let mut x = s.x;
-        for i in free {
-            let w = button_width(&page.buttons[i].label);
-            if x > s.x && x + w > s.x + s.w {
-                x = s.x;
-                s.y += TAB_BUTTON + QUIT_BUTTON_GAP;
-            }
-            let rect = Rectangle::new((x, s.y).into(), (w, TAB_BUTTON).into());
-            buttons[i] = Some(rect);
-            s.pieces.push((rect, Piece::Button(i)));
-            x += w + QUIT_BUTTON_GAP;
+        let placed = rows_from_right(&widths, left, right);
+        for (i, (x, row)) in free.iter().zip(&placed) {
+            let w = button_width(&page.buttons[*i].label);
+            let y = s.y + row * (ROW_BUTTON + QUIT_BUTTON_GAP);
+            let rect = Rectangle::new((*x, y).into(), (w, ROW_BUTTON).into());
+            buttons[*i] = Some(rect);
+            s.pieces.push((rect, Piece::Button(*i)));
         }
-        s.y += TAB_BUTTON;
+        s.y += rows_height(&placed);
     }
     for (k, section) in page.sections.iter().enumerate() {
         if matches!(section, PageSection::Doc { .. }) {
@@ -1504,37 +1560,68 @@ fn page_stack(
             PageSection::Agent {
                 name,
                 tail,
-                button,
+                buttons: held,
                 picks,
                 ..
             } => {
+                let held: Vec<usize> = (held.iter().copied())
+                    .filter(|b| *b < page.buttons.len())
+                    .collect();
                 let tail_h = match tail.len() {
                     0 => 0,
                     n => n as i32 * TAIL_LINE + 4,
                 };
-                let card = s.put(AGENT_PAD * 2 + AGENT_HEAD + tail_h, Piece::Agent(k));
-                let row = card.loc.y + AGENT_PAD + (AGENT_HEAD - ROW_BUTTON) / 2;
-                let mut right = card.loc.x + card.size.w - AGENT_PAD;
-                if let Some(b) = button.filter(|b| *b < page.buttons.len()) {
-                    let w = button_width(&page.buttons[b].label);
-                    buttons[b] = Some(Rectangle::new(
-                        (right - w, row).into(),
-                        (w, ROW_BUTTON).into(),
-                    ));
-                    right -= w + QUIT_BUTTON_GAP;
+                let inner = (s.w - 2 * AGENT_PAD).max(1);
+                let inner_x = s.x + AGENT_PAD;
+                let inner_right = inner_x + inner;
+                let widths = (held.iter()).map(|b| button_width(&page.buttons[*b].label));
+                if name.is_empty() {
+                    // No run yet: its chips after their label, its buttons
+                    // at the card's end.
+                    let widths: Vec<i32> = widths.collect();
+                    let card = s.put(AGENT_PAD * 2 + AGENT_HEAD, Piece::Agent(k));
+                    let row = card.loc.y + AGENT_PAD + (AGENT_HEAD - ROW_BUTTON) / 2;
+                    let placed = rows_from_right(&widths, inner_x, inner_right);
+                    for (b, ((x, _), w)) in held.iter().zip(placed.iter().zip(&widths)) {
+                        buttons[*b] =
+                            Some(Rectangle::new((*x, row).into(), (*w, ROW_BUTTON).into()));
+                    }
+                    if !picks.is_empty() {
+                        let from = inner_x + PICK_LABEL;
+                        let end = placed.first().map_or(inner_right, |(x, _)| x - QUIT_BUTTON_GAP);
+                        *agent_picks = Some(agent_pick_rects(picks.len(), from, row, end - from));
+                    }
+                    continue;
                 }
-                if !picks.is_empty() {
-                    // No run yet: after their label. A run: at the head's
-                    // end, its name and status taking what is left.
-                    let left = card.loc.x + AGENT_PAD + PICK_LABEL;
-                    let (x, room) = match name.is_empty() {
-                        true => (left, right - left),
-                        false => {
-                            let room = agent_picks_width(picks.len()).min(right - left);
-                            (right - room, room)
-                        }
-                    };
-                    *agent_picks = Some(agent_pick_rects(picks.len(), x, row, room));
+                // A run: buttons, then chips, at the head's end while its
+                // name and some of its status keep room, else in rows below.
+                let chips = (!picks.is_empty()).then(|| agent_picks_width(picks.len()));
+                let widths: Vec<i32> = widths.chain(chips).collect();
+                let name_w = measure_bold(name, FONT_SIZE)
+                    .unwrap_or_else(|| width_of(name, FONT_SIZE))
+                    .ceil() as i32;
+                let fits = row_width(&widths) <= inner - AGENT_TEXT_AT - name_w - AGENT_STATUS_MIN;
+                let placed = rows_from_right(&widths, inner_x, inner_right);
+                let below = match fits {
+                    true => 0,
+                    false => rows_height(&placed) + AGENT_ROWS_GAP,
+                };
+                let card = s.put(
+                    AGENT_PAD * 2 + AGENT_HEAD + below + tail_h,
+                    Piece::Agent(k),
+                );
+                let head_y = card.loc.y + AGENT_PAD + (AGENT_HEAD - ROW_BUTTON) / 2;
+                let rows_y = card.loc.y + AGENT_PAD + AGENT_HEAD + AGENT_ROWS_GAP;
+                let spot = |(x, row): &(i32, i32)| match fits {
+                    true => (*x, head_y),
+                    false => (*x, rows_y + row * (ROW_BUTTON + QUIT_BUTTON_GAP)),
+                };
+                for ((b, place), w) in held.iter().zip(&placed).zip(&widths) {
+                    buttons[*b] = Some(Rectangle::new(spot(place).into(), (*w, ROW_BUTTON).into()));
+                }
+                if let (Some(w), Some(place)) = (chips, placed.last()) {
+                    let (x, y) = spot(place);
+                    *agent_picks = Some(agent_pick_rects(picks.len(), x, y, w));
                 }
             }
             PageSection::File { buttons: held, .. } => {
@@ -3168,7 +3255,7 @@ impl Painter {
                     dot,
                     status,
                     tail,
-                    button,
+                    buttons,
                     picks,
                 }) = view.page.sections.get(*k)
                 else {
@@ -3207,6 +3294,15 @@ impl Painter {
                         agent_icon(c, *rect, PICK_ICON, chip.icon, tint, scale);
                     }
                 }
+                let held: Vec<Rect> = (buttons.iter())
+                    .filter_map(|i| l.page_buttons.get(*i).copied().flatten())
+                    .map(at)
+                    .collect();
+                for (i, r) in (buttons.iter())
+                    .filter_map(|i| Some((*i, l.page_buttons.get(*i).copied().flatten()?)))
+                {
+                    self.page_button(c, view, i, at(r), scale, p);
+                }
                 if name.is_empty() {
                     return;
                 }
@@ -3214,17 +3310,19 @@ impl Painter {
                 agent_icon(c, icon_spot, 16, *icon, p.text, scale);
                 // A dot at work blinks: it is composed over the tab.
                 status_dot(c, agent_card_dot(rect), *dot, scale, p);
-                let button_rect = button.and_then(|i| l.page_buttons.get(i).copied().flatten());
                 let track = (!picks.is_empty())
                     .then_some(l.agent_picks.as_ref())
                     .flatten()
                     .map(|(track, _)| at(*track));
-                let end_x = track
-                    .or(button_rect)
-                    .map_or(head.loc.x + head.size.w, |r| r.loc.x - QUIT_BUTTON_GAP);
+                // What shares the head's row ends its text.
+                let end_x = (held.iter().chain(&track))
+                    .filter(|r| r.loc.y < head.loc.y + AGENT_HEAD)
+                    .map(|r| r.loc.x - QUIT_BUTTON_GAP)
+                    .min()
+                    .unwrap_or(head.loc.x + head.size.w);
                 let text = Rectangle::new(
-                    (head.loc.x + 36, head.loc.y).into(),
-                    ((end_x - head.loc.x - 36).max(1), AGENT_HEAD).into(),
+                    (head.loc.x + AGENT_TEXT_AT, head.loc.y).into(),
+                    ((end_x - head.loc.x - AGENT_TEXT_AT).max(1), AGENT_HEAD).into(),
                 );
                 let (tx, tend) = phys(text, scale);
                 let hb = band(text, scale);
@@ -3239,13 +3337,11 @@ impl Painter {
                     scale,
                     p.muted,
                 );
+                // From the card's foot: rows of buttons may come before it.
+                let tail_top = rect.loc.y + rect.size.h - AGENT_PAD - tail.len() as i32 * TAIL_LINE;
                 for (j, tail_line) in tail.iter().enumerate() {
                     let r = Rectangle::new(
-                        (
-                            head.loc.x,
-                            head.loc.y + AGENT_HEAD + 4 + j as i32 * TAIL_LINE,
-                        )
-                            .into(),
+                        (head.loc.x, tail_top + j as i32 * TAIL_LINE).into(),
                         (head.size.w, TAIL_LINE).into(),
                     );
                     let (lx, lend) = phys(r, scale);
@@ -3259,9 +3355,6 @@ impl Painter {
                         scale,
                         p.muted,
                     );
-                }
-                if let (Some(i), Some(r)) = (button, button_rect) {
-                    self.page_button(c, view, *i, at(r), scale, p);
                 }
             }
             Piece::Repo(i) => {
@@ -4506,19 +4599,89 @@ mod tests {
     }
 
     #[test]
-    fn a_runs_chips_share_its_heads_row_left_of_its_button() {
+    fn rows_from_right_fill_from_the_first_and_end_at_the_right() {
+        // Two fit, the third starts a row, all ending at 100.
+        assert_eq!(
+            rows_from_right(&[40, 40, 60], 0, 100),
+            [
+                (100 - 40 - QUIT_BUTTON_GAP - 40, 0),
+                (100 - 40, 0),
+                (100 - 60, 1)
+            ]
+        );
+        assert_eq!(
+            rows_height(&rows_from_right(&[40, 40, 60], 0, 100)),
+            2 * ROW_BUTTON + QUIT_BUTTON_GAP
+        );
+        assert_eq!(rows_height(&[]), 0);
+    }
+
+    #[test]
+    fn a_stages_own_buttons_end_its_titles_line_and_leave_when_they_dont_fit() {
+        let title_row = |view: &FeatureTabView, width: i32| {
+            let l = tab_at(view, width);
+            let (title, _) = l.pieces[TabColumn::Page as usize][..]
+                .iter()
+                .find(|(_, p)| matches!(p, Piece::Text { bold: true, .. }))
+                .expect("a title");
+            let title = *title;
+            let free = l.page_buttons[0].expect("placed");
+            (title, free)
+        };
+        let view = tab_view();
+        let (title, free) = title_row(&view, 1180);
+        assert!(free.loc.y >= title.loc.y);
+        assert!(free.loc.y + free.size.h <= title.loc.y + title.size.h);
+        assert_eq!(free.loc.x + free.size.w, title.loc.x + title.size.w);
+        // Too many for the title's line: below what the page says, at its end.
+        let mut many = tab_view();
+        many.page.buttons = (0..12)
+            .map(|i| PageButton {
+                label: format!("Button {i}"),
+                style: ButtonStyle::Plain,
+            })
+            .collect();
+        let (title, first) = title_row(&many, 1180);
+        assert!(first.loc.y >= title.loc.y + title.size.h);
+    }
+
+    #[test]
+    fn a_narrow_agent_card_keeps_its_name_and_moves_its_buttons_below() {
+        let view = tab_with_picks(false);
+        let wide = tab_at(&view, 1180);
+        let narrow = tab_at(&view, 420);
+        let card = |l: &FeatureTabLayout| {
+            l.pieces[TabColumn::Page as usize]
+                .iter()
+                .find(|(_, p)| matches!(p, Piece::Agent(_)))
+                .map(|(r, _)| *r)
+                .expect("a card")
+        };
+        let (wide_card, narrow_card) = (card(&wide), card(&narrow));
+        assert!(narrow_card.size.h > wide_card.size.h);
+        let (track, _) = narrow.agent_picks.clone().expect("placed");
+        assert!(track.loc.y >= narrow_card.loc.y + AGENT_PAD + AGENT_HEAD);
+        assert!(track.loc.x >= narrow_card.loc.x, "{track:?} {narrow_card:?}");
+        assert!(track.loc.y + track.size.h <= narrow_card.loc.y + narrow_card.size.h);
+        for r in narrow.page_buttons.iter().flatten() {
+            assert!(r.loc.x >= narrow_card.loc.x, "{r:?} {narrow_card:?}");
+        }
+    }
+
+    #[test]
+    fn a_runs_chips_end_its_heads_row_right_of_its_buttons() {
         let view = tab_with_picks(false);
         let l = tab_at(&view, 1180);
         let (track, _) = l.agent_picks.clone().expect("placed");
         let button = (view.page.sections.iter())
             .find_map(|s| match s {
-                PageSection::Agent { button, .. } => *button,
+                PageSection::Agent { buttons, .. } => buttons.last().copied(),
                 _ => None,
             })
             .and_then(|i| l.page_buttons[i])
             .expect("the fixture's card has a button");
         assert_eq!(track.loc.y, button.loc.y);
         assert_eq!(track.size.h, button.size.h);
-        assert_eq!(track.loc.x + track.size.w + QUIT_BUTTON_GAP, button.loc.x);
+        assert_eq!(button.loc.x + button.size.w + QUIT_BUTTON_GAP, track.loc.x);
     }
 }
