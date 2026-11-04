@@ -68,7 +68,6 @@ use crate::{
         StagePage, TabArea, TabColumn,
     },
     doc_review::DocFile,
-    doc_tab::DocMode,
     feature::{
         self, Event, Feature, Pr, Repo, Stage, Status,
         agents::needs,
@@ -418,8 +417,8 @@ pub enum Finding {
     Failed(String),
 }
 
-/// A project of the store the feature panel offers repositories of, as far
-/// as it is known.
+/// A project the feature panel looks for repositories in, as far as it is
+/// known.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RepoSource {
     /// The project's id; `None`: the feature's home project.
@@ -777,8 +776,10 @@ pub struct FeaturePanel {
     /// Every key of the tab is listed in place of the page (F1).
     pub keys: bool,
     pub tab_hover: Option<FeatureTabHit>,
-    /// The projects' repositories to offer on the expanded repositories
-    /// (home first), read off the thread when it opens and on each expand.
+    /// Where the expanded repositories look (home first): the feature's
+    /// project, which they offer the rest of, and those it already links,
+    /// for what it holds or held of them. Read off the thread when it opens
+    /// and on each expand.
     pub sources: Vec<RepoSource>,
     /// The repositories show as rows, with all they could be, over the page.
     pub expanded: bool,
@@ -802,10 +803,8 @@ pub enum PanelOutcome {
     ShowAgent(Stage),
     /// Go back to the chat of this agent stage's agent, its tab closed.
     ResumeAgent(Stage),
-    /// Review this agent stage's file.
-    ReviewDoc(Stage),
-    /// Show the stage's file in its tab, as it stands (a new tab as
-    /// `DocMode::default_for` it).
+    /// Show the stage's file in its tab: one already open as it stands, a
+    /// new one as `DocMode::opens_on` it.
     OpenDoc(Stage),
     /// Let this agent stage's agent go on after a milestone stop.
     Continue(Stage),
@@ -880,8 +879,8 @@ pub enum RepoEntry {
     Context(usize),
     /// `Feature::removed` at this index.
     Removed(usize),
-    /// A repository of `FeaturePanel::sources` the feature has nothing to
-    /// do with yet: `repo` in the root of `source`.
+    /// A repository of the feature's project it has nothing to do with
+    /// yet: `repo` in the root of `FeaturePanel::sources[source]`.
     Offered { source: usize, repo: usize },
 }
 
@@ -905,13 +904,19 @@ pub fn repo_entries(feature: &Feature, sources: &[RepoSource], expanded: bool) -
 }
 
 /// The rows only the expanded repositories show: those taken out, those
-/// not added. A shipped feature's repositories can't change: none.
+/// of its project not added. Other projects stay out, unless the feature
+/// still links the one a repository was taken out of. A shipped feature's
+/// repositories can't change: none.
 pub fn repos_offered(feature: &Feature, sources: &[RepoSource]) -> Vec<RepoEntry> {
     if !linkable(feature) {
         return Vec::new();
     }
-    let mut entries: Vec<RepoEntry> = (0..feature.removed.len()).map(RepoEntry::Removed).collect();
-    for (at, source) in sources.iter().enumerate() {
+    let mut entries: Vec<RepoEntry> = (feature.removed.iter().enumerate())
+        .filter(|(_, gone)| (gone.project.as_deref()).is_none_or(|id| feature.link(id).is_some()))
+        .map(|(i, _)| RepoEntry::Removed(i))
+        .collect();
+    let home = (sources.iter().enumerate()).filter(|(_, source)| source.project.is_none());
+    for (at, source) in home {
         let Finding::Found(root) = &source.finding else {
             continue;
         };
@@ -1247,7 +1252,7 @@ fn action_hint(action: &PanelOutcome) -> &'static str {
         PanelOutcome::ShowAgent(_) => "show agent",
         PanelOutcome::ResumeAgent(_) => "resume agent",
         PanelOutcome::OpenDoc(Stage::Discover) => "review brief",
-        PanelOutcome::OpenDoc(_) | PanelOutcome::ReviewDoc(_) => "review plan",
+        PanelOutcome::OpenDoc(_) => "review plan",
         PanelOutcome::Continue(_) => "continue",
         PanelOutcome::RunChecks => "run checks",
         PanelOutcome::Findings => "review findings",
@@ -1273,8 +1278,7 @@ fn stage_button(feature: &Feature, stage: Stage, ctx: RowCtx) -> Option<&'static
         PanelOutcome::StartAgent(..) => Some("Start agent"),
         PanelOutcome::ShowAgent(_) => Some("Show agent"),
         PanelOutcome::ResumeAgent(_) => Some("Resume agent"),
-        PanelOutcome::OpenDoc(Stage::Discover) => Some("Review brief"),
-        PanelOutcome::OpenDoc(_) | PanelOutcome::ReviewDoc(_) => Some("Review plan"),
+        PanelOutcome::OpenDoc(_) => Some("Review"),
         PanelOutcome::Continue(_) => Some("Continue"),
         PanelOutcome::RunChecks => Some("Run checks"),
         PanelOutcome::Findings => Some("Review findings"),
@@ -1857,20 +1861,18 @@ fn stage_index(stage: Stage) -> usize {
     Stage::ALL.iter().position(|s| *s == stage).unwrap_or(0)
 }
 
-/// What Enter does on `stage`'s page of `feature`: its button marked
-/// with Enter, else, on a later stage, says which comes first. On a done
+/// What Enter does on `stage`'s page of `feature`: its primary button,
+/// else, on a later stage, says which comes first. On a done
 /// stage it goes to the current one: Reopen has its own key.
 fn page_enter(feature: &Feature, stage: Stage, ctx: RowCtx) -> Option<PanelOutcome> {
     page_actions(feature, stage, ctx)
         .into_iter()
-        .find(|(b, _)| b.key == Some(ENTER_MARK))
+        .find(|(b, _)| b.style == ButtonStyle::Primary)
         .map(|(_, outcome)| outcome)
         .or_else(|| row_action(feature, PanelRow::Stage(stage), ctx))
         .filter(|outcome| !matches!(outcome, PanelOutcome::Untick(_)))
 }
 
-/// The key mark of the page button Enter presses.
-const ENTER_MARK: &str = "\u{23ce}";
 /// The key of a done stage's Reopen.
 const REOPEN_KEY: &str = "Ctrl+Shift+Enter";
 /// The key of the current stage's Start over.
@@ -1891,17 +1893,16 @@ pub fn page_actions(
     if mark == StageMark::Later {
         return Vec::new();
     }
-    let button = |label: &str, style, key| PageButton {
+    let button = |label: &str, style| PageButton {
         label: label.to_owned(),
         style,
-        key,
     };
     let row = PanelRow::Stage(stage);
     let mut out = Vec::new();
     if let (StageMark::Done, Some(current)) = (mark, feature.current()) {
         let label = format!("Go to {}", current.label());
         out.push((
-            button(&label, ButtonStyle::Primary, Some(ENTER_MARK)),
+            button(&label, ButtonStyle::Primary),
             PanelOutcome::GoToCurrent,
         ));
     }
@@ -1910,65 +1911,47 @@ pub fn page_actions(
         row_action(feature, row, ctx),
     ) {
         // Reopen is no default: Enter leaves a done stage be.
-        let (style, key) = match main {
-            PanelOutcome::Untick(_) => (ButtonStyle::Plain, Some(REOPEN_KEY)),
-            _ => (ButtonStyle::Primary, Some(ENTER_MARK)),
+        let style = match main {
+            PanelOutcome::Untick(_) => ButtonStyle::Plain,
+            _ => ButtonStyle::Primary,
         };
-        out.push((button(label, style, key), main));
+        out.push((button(label, style), main));
     }
     let has =
         |out: &[(PageButton, PanelOutcome)], o: &PanelOutcome| out.iter().any(|(_, x)| x == o);
     // Also on a done stage: its agent's chat is still worth reading.
     if let Some((label, outcome)) = agent_button(feature, stage, ctx).filter(|(_, o)| !has(&out, o))
     {
-        let key = Some("Ctrl+Shift+R");
-        out.push((button(label, ButtonStyle::Plain, key), outcome));
+        out.push((button(label, ButtonStyle::Plain), outcome));
     }
     // The brief's or the plan's file, once there: the page shows it, its tab
     // works on it. What opens that tab already is that button.
-    if ctx.wrote(stage) {
-        let review = PanelOutcome::ReviewDoc(stage);
-        if mark == StageMark::Done {
-            // Nothing to review on a done stage: it is only read.
-            let label = match stage {
-                Stage::Discover => "Open brief",
-                _ => "Open plan",
-            };
-            out.push((
-                button(label, ButtonStyle::Plain, None),
-                PanelOutcome::OpenDoc(stage),
-            ));
-        } else if !has(&out, &review) && !has(&out, &PanelOutcome::OpenDoc(stage)) {
-            out.push((button("Review", ButtonStyle::Plain, None), review));
-        }
+    let open = PanelOutcome::OpenDoc(stage);
+    if ctx.wrote(stage) && !has(&out, &open) {
+        // Nothing to review on a done stage: it is only read.
+        let label = match mark {
+            StageMark::Done => "Open",
+            _ => "Review",
+        };
+        out.push((button(label, ButtonStyle::Plain), open));
     }
     if let Some(stage) = fresh_stage(feature, row) {
         let fresh = PanelOutcome::StartAgent(stage, true);
-        out.push((
-            button("Restart agent", ButtonStyle::Plain, Some("Ctrl+R")),
-            fresh,
-        ));
+        out.push((button("Restart agent", ButtonStyle::Plain), fresh));
     }
     if let Some(stage) = start_over_stage(feature, stage, ctx) {
         out.push((
-            button(
-                "Start over\u{2026}",
-                ButtonStyle::Destructive,
-                Some(START_OVER_KEY),
-            ),
+            button("Start over\u{2026}", ButtonStyle::Destructive),
             PanelOutcome::StartOver(stage),
         ));
     }
     if let Some(page) = row_page(feature, row) {
-        out.push((
-            button("Evidence", ButtonStyle::Plain, Some("Ctrl+Shift+O")),
-            page,
-        ));
+        out.push((button("Evidence", ButtonStyle::Plain), page));
     }
     let fixes = (feature.review.as_ref()).is_some_and(|r| r.count(FindingState::Fix) > 0);
     if mark == StageMark::Current && fixes && has(&out, &PanelOutcome::Findings) {
         out.push((
-            button("Send fixes", ButtonStyle::Plain, None),
+            button("Send fixes", ButtonStyle::Plain),
             PanelOutcome::SendFixes,
         ));
     }
@@ -1980,7 +1963,7 @@ pub fn page_actions(
                 false => format!("Open {}", pr_tail(&pr.url)),
             };
             let open = PanelOutcome::OpenPr(pr.url.clone());
-            out.push((button(&label, ButtonStyle::Plain, None), open));
+            out.push((button(&label, ButtonStyle::Plain), open));
         }
     }
     out
@@ -2984,17 +2967,19 @@ impl Gerdr {
             return;
         };
         let (workspace_dirs, ignore, bases) = root_search(project);
+        let others = self.other_projects_dirs(id);
         self.feature_work(None, move |_| Done::Found {
             serial,
             from: layout::main_top(&from),
-            result: layout::find_root(&from, &workspace_dirs, &ignore, &bases),
+            result: layout::find_project_root(&from, &workspace_dirs, &others, &ignore, &bases),
         });
     }
 
     /// Read off the thread (checklist D3) which repositories the feature
-    /// panel can offer: those of its project and of the store's others.
-    /// What was found before stays until the new read is in. A project
-    /// with no workspace folder has none to offer. A shipped feature's
+    /// panel can offer: those of its project, and of the projects it links
+    /// for what it holds or held of them. What was found before stays until
+    /// the new read is in. A linked project with no workspace folder has
+    /// none to find. A shipped feature's
     /// repositories can't change: it looks nowhere.
     pub(crate) fn find_repo_sources(&mut self) {
         let Some(panel) = self.features.panel.as_ref() else {
@@ -3013,8 +2998,9 @@ impl Gerdr {
         let mut sources = Vec::new();
         let mut finds = Vec::new();
         // The home project first, whatever its place in the store.
-        let (home, others): (Vec<_>, Vec<_>) =
-            (self.projects.projects.iter()).partition(|p| p.id == project);
+        let (home, others): (Vec<_>, Vec<_>) = (self.projects.projects.iter())
+            .filter(|p| p.id == project || feature.link(&p.id).is_some())
+            .partition(|p| p.id == project);
         for p in home.into_iter().chain(others) {
             let is_home = p.id == project;
             let search = root_search(p);
@@ -3029,20 +3015,29 @@ impl Gerdr {
                 project: source.clone(),
                 name: p.name.clone(),
             });
-            finds.push((source, from, search));
+            finds.push((source, from, search, self.other_projects_dirs(&p.id)));
         }
         if let Some(panel) = self.features.panel.as_mut() {
             panel.sources = sources;
         }
-        for (source, from, (dirs, ignore, bases)) in finds {
+        for (source, from, (dirs, ignore, bases), others) in finds {
             let (project, slug) = (project.clone(), slug.clone());
             self.feature_work(None, move |_| Done::FoundRepos {
                 project,
                 slug,
                 source,
-                result: layout::find_root(&from, &dirs, &ignore, &bases),
+                result: layout::find_project_root(&from, &dirs, &others, &ignore, &bases),
             });
         }
+    }
+
+    /// The workspace folders of every project but `id`, whose repositories
+    /// are theirs.
+    fn other_projects_dirs(&self, id: &str) -> Vec<PathBuf> {
+        (self.projects.projects.iter())
+            .filter(|p| p.id != id)
+            .flat_map(|p| p.workspaces.iter().map(|w| w.dir.clone()))
+            .collect()
     }
 
     /// The repository `key` as the feature panel's sources found it: its
@@ -3083,7 +3078,7 @@ impl Gerdr {
     }
 
     /// Make feature `slug` hold repository `key` on its branch: a new
-    /// worktree from its base, its project linked if it wasn't. Taken
+    /// worktree from its base. Taken
     /// out before, it gets a new branch.
     fn add_repo_to_feature(&mut self, project: &str, slug: &str, key: &str) {
         if self.repos_locked(project, slug) {
@@ -3097,31 +3092,13 @@ impl Gerdr {
         let Finding::Found(root) = source.finding else {
             return;
         };
-        let linked = |id: &str| {
-            self.feature(project, slug)
-                .is_some_and(|f| f.link(id).is_some())
+        let add = AddSpec {
+            project: source.project,
+            name: source.name,
+            root,
+            names: vec![found.name],
         };
-        let (links, adds) = match source.project {
-            Some(id) if !linked(&id) => (
-                vec![LinkSpec {
-                    project: id,
-                    name: source.name,
-                    root,
-                    touched: vec![found.name],
-                }],
-                Vec::new(),
-            ),
-            at => (
-                Vec::new(),
-                vec![AddSpec {
-                    project: at,
-                    name: source.name,
-                    root,
-                    names: vec![found.name],
-                }],
-            ),
-        };
-        self.link_repos(project.to_owned(), slug.to_owned(), links, adds);
+        self.link_repos(project.to_owned(), slug.to_owned(), vec![add]);
     }
 
     /// Let agents of feature `slug` read repository `key`'s main checkout:
@@ -3234,7 +3211,8 @@ impl Gerdr {
             let (dirs, ignore, bases) = root_search(p);
             let root = match dirs.first() {
                 Some(from) => {
-                    finds.push((p.id.clone(), from.clone(), dirs.clone(), ignore, bases));
+                    let theirs = self.other_projects_dirs(&p.id);
+                    finds.push((p.id.clone(), from.clone(), dirs.clone(), theirs, ignore, bases));
                     Finding::Looking
                 }
                 None => Finding::Failed("it has no workspace with a folder".into()),
@@ -3250,11 +3228,11 @@ impl Gerdr {
         if let Some(dialog) = self.features.dialog.as_mut() {
             dialog.others = others;
         }
-        for (project, from, dirs, ignore, bases) in finds {
+        for (project, from, dirs, theirs, ignore, bases) in finds {
             self.feature_work(None, move |_| Done::FoundOther {
                 serial,
                 project,
-                result: layout::find_root(&from, &dirs, &ignore, &bases),
+                result: layout::find_project_root(&from, &dirs, &theirs, &ignore, &bases),
             });
         }
     }
@@ -3397,17 +3375,10 @@ impl Gerdr {
         self.refresh_feature_graphs(&project, &slug, true);
     }
 
-    /// Link `links` to open feature `slug` and bring `adds` into its folders
-    /// off the thread, shown in the tasks panel meanwhile. A setup or check
+    /// Bring `adds` into the folders of open feature `slug` off the thread, shown in the tasks panel meanwhile. A setup or check
     /// under way has a copy of the feature that wouldn't see them: refused
     /// meanwhile.
-    fn link_repos(
-        &mut self,
-        project: String,
-        slug: String,
-        links: Vec<LinkSpec>,
-        adds: Vec<AddSpec>,
-    ) {
+    fn link_repos(&mut self, project: String, slug: String, adds: Vec<AddSpec>) {
         let Some(feature) = self.feature(&project, &slug).cloned() else {
             return self.show_warning("That feature is gone".into());
         };
@@ -3417,9 +3388,7 @@ impl Gerdr {
                 feature.title
             ));
         }
-        let names: Vec<String> = (links.iter().map(|l| l.name.clone()))
-            .chain(adds.iter().flat_map(|a| a.names.iter().cloned()))
-            .collect();
+        let names: Vec<String> = adds.iter().flat_map(|a| a.names.iter().cloned()).collect();
         let busy = Busy {
             project: project.clone(),
             slug: slug.clone(),
@@ -3432,7 +3401,7 @@ impl Gerdr {
             ),
         };
         self.feature_work(Some(busy), move |_| {
-            let result = layout::link_more(&feature, &links, &adds);
+            let result = layout::link_more(&feature, &[], &adds);
             Done::Linked {
                 project,
                 slug,
@@ -3914,12 +3883,8 @@ impl Gerdr {
             }
             PanelOutcome::ShowAgent(stage) => self.show_stage_agent(&project, &slug, stage),
             PanelOutcome::ResumeAgent(stage) => self.resume_stage_agent(&project, &slug, stage),
-            PanelOutcome::ReviewDoc(stage) => {
-                let file = DocFile::Stage(stage);
-                self.open_doc_tab(&project, &slug, file, Some(DocMode::Review));
-            }
             PanelOutcome::OpenDoc(stage) => {
-                self.open_doc_tab(&project, &slug, DocFile::Stage(stage), None);
+                self.open_doc_tab(&project, &slug, DocFile::Stage(stage));
             }
             PanelOutcome::Continue(stage) => self.continue_stage_agent(&project, &slug, stage),
             PanelOutcome::RunChecks => match self.feature(&project, &slug) {
@@ -5846,23 +5811,22 @@ fn agent_card(
     })
 }
 
-/// The card of Discover's or Plan's file in `feature`: how it stands,
-/// with the page's plain Review of it in `actions` (a primary Review stays
-/// in the page's row, as the button to press next).
+/// The card of Discover's or Plan's file in `feature`: how it stands, with
+/// the page's button to its tab in `actions`, plain or the one to press next.
 fn file_card(
     feature: &Feature,
     stage: Stage,
     ctx: RowCtx,
     actions: &[(PageButton, PanelOutcome)],
 ) -> PageSection {
-    let own = [PanelOutcome::ReviewDoc(stage), PanelOutcome::OpenDoc(stage)];
+    let own = PanelOutcome::OpenDoc(stage);
     PageSection::File {
         name: crate::feature::artifacts::name(stage)
             .unwrap_or("file")
             .to_owned(),
         state: file_line(feature, stage, ctx),
         buttons: (actions.iter().enumerate())
-            .filter(|(_, (b, o))| b.style == ButtonStyle::Plain && own.contains(o))
+            .filter(|(_, (_, o))| *o == own)
             .map(|(i, _)| i)
             .collect(),
     }
@@ -6377,19 +6341,12 @@ fn tab_hints(
 const NOT_ADDED: &str = "Not added";
 
 /// The group of rows `entry` belongs in, by its heading.
-fn entry_group<'a>(feature: &Feature, sources: &'a [RepoSource], entry: RepoEntry) -> &'a str {
+fn entry_group(feature: &Feature, entry: RepoEntry) -> &'static str {
     match entry {
         RepoEntry::Held(i) if feature.repos.get(i).is_some_and(|r| r.touched) => "In feature",
         RepoEntry::Held(_) | RepoEntry::Context(_) => "Context, read only",
         RepoEntry::Removed(_) => "Removed",
-        RepoEntry::Offered { source, .. } => match sources.get(source) {
-            Some(RepoSource {
-                project: Some(_),
-                name,
-                ..
-            }) => name,
-            _ => NOT_ADDED,
-        },
+        RepoEntry::Offered { .. } => NOT_ADDED,
     }
 }
 
@@ -6472,7 +6429,7 @@ fn tab_view(
     let repos: Vec<FeatureRepoRow> = (entries.iter())
         .map(|entry| {
             let mut row = repo_row(panel, feature, *entry, state, now);
-            let caption = entry_group(feature, &panel.sources, *entry);
+            let caption = entry_group(feature, *entry);
             if group != Some(caption) {
                 group = Some(caption);
                 row.group = Some(caption.to_owned());
@@ -7030,10 +6987,7 @@ pub(crate) mod tests {
         );
         let actions = page_actions(&f, Stage::Plan, RowCtx::default());
         assert_eq!(actions[1].1, PanelOutcome::Untick(Stage::Plan));
-        assert_eq!(
-            (actions[1].0.style, actions[1].0.key),
-            (ButtonStyle::Plain, Some(REOPEN_KEY))
-        );
+        assert_eq!(actions[1].0.style, ButtonStyle::Plain);
         press(&mut panel, &f, ctrl(Keysym::j));
         press(&mut panel, &f, key(Keysym::Right));
         assert_eq!(panel.page_stage(&f), Stage::Verify);
@@ -7507,6 +7461,37 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn only_the_project_of_the_feature_is_offered() {
+        let mut f = every_kind_of_row();
+        f.note_removed(Some("admin".into()), "panel".into(), 6);
+        f.note_removed(Some("tools".into()), "cli".into(), 7);
+        f.links.push(feature::Link {
+            project: "admin".into(),
+            root: "/admin".into(),
+            dir: "/admin/.features/b".into(),
+            multi: true,
+        });
+        let mut sources = sources_with(&["api", "auth", "docs", "infra", "web"]);
+        sources.push(RepoSource {
+            project: Some("admin".into()),
+            name: "Admin".into(),
+            finding: sources_with(&["panel", "users"]).remove(0).finding,
+        });
+        let keys: Vec<String> = (repos_offered(&f, &sources).into_iter())
+            .filter_map(|e| entry_key(&f, &sources, e))
+            .collect();
+        // Not a project it doesn't link, nor the rest of one it does; taken
+        // out of one it links, it can come back.
+        assert_eq!(keys, ["admin:panel", "auth", "infra"]);
+        let back = RepoEntry::Removed(1);
+        assert_eq!(
+            entry_key(&f, &sources, back).as_deref(),
+            Some("admin:panel")
+        );
+        assert_eq!(entry_buttons(&f, &sources, back).len(), 2);
+    }
+
+    #[test]
     fn the_unfolded_rows_say_their_groups_and_what_failed() {
         let f = every_kind_of_row();
         let mut panel = FeaturePanel {
@@ -7909,7 +7894,7 @@ pub(crate) mod tests {
         );
         assert_eq!(
             stage_button(&f, Stage::Plan, RowCtx::default()),
-            Some("Review plan")
+            Some("Review")
         );
         assert_eq!(hints(&panel, &f, &state)[1], pair("Enter", "review plan"));
         // Ctrl+R only on the agent stage's own page.
@@ -8779,8 +8764,6 @@ pub(crate) mod tests {
             ]
         );
         assert_eq!(actions[0].0.style, ButtonStyle::Primary);
-        assert_eq!(actions[0].0.key, Some("\u{23ce}"));
-        assert_eq!(actions[1].0.key, Some("Ctrl+R"));
         let page = stage_page(&f, Stage::Build, &state, &actions, 2_000);
         assert_eq!(page.title, "Build");
         // The agent's card below says what it does.
@@ -8873,7 +8856,7 @@ pub(crate) mod tests {
         assert_eq!(
             labels(&actions),
             [
-                ("Review plan", PanelOutcome::OpenDoc(Stage::Plan)),
+                ("Review", PanelOutcome::OpenDoc(Stage::Plan)),
                 ("Show agent", PanelOutcome::ShowAgent(Stage::Plan)),
                 ("Restart agent", PanelOutcome::StartAgent(Stage::Plan, true)),
                 ("Start over\u{2026}", PanelOutcome::StartOver(Stage::Plan)),
@@ -8896,7 +8879,7 @@ pub(crate) mod tests {
         ));
         assert_eq!(
             page.sections[1],
-            file("plan.md", line("ready for review", CheckTone::Ready), &[])
+            file("plan.md", line("ready for review", CheckTone::Ready), &[0])
         );
         let node = rail_node(&f, Stage::Plan, &state, 2_000);
         assert_eq!(
@@ -8930,7 +8913,7 @@ pub(crate) mod tests {
             [
                 ("Go to Plan", PanelOutcome::GoToCurrent),
                 ("Reopen", PanelOutcome::Untick(Stage::Discover)),
-                ("Open brief", PanelOutcome::OpenDoc(Stage::Discover)),
+                ("Open", PanelOutcome::OpenDoc(Stage::Discover)),
             ]
         );
         assert_eq!(
@@ -8943,7 +8926,7 @@ pub(crate) mod tests {
             labels(&page_actions(&f, Stage::Discover, locked)),
             [
                 ("Go to Plan", PanelOutcome::GoToCurrent),
-                ("Open brief", PanelOutcome::OpenDoc(Stage::Discover)),
+                ("Open", PanelOutcome::OpenDoc(Stage::Discover)),
             ]
         );
         assert_eq!(
@@ -9053,7 +9036,7 @@ pub(crate) mod tests {
         // Restarted: the new run isn't ready, the last run's brief is there.
         f.runs.insert(Stage::Discover, agent_run(Some("p2"), None));
         let actions = page_actions(&f, Stage::Discover, written);
-        let review = PanelOutcome::ReviewDoc(Stage::Discover);
+        let review = PanelOutcome::OpenDoc(Stage::Discover);
         assert!(labels(&actions).contains(&("Review", review)));
         let state = PanelState {
             ctx: written,
@@ -9256,10 +9239,7 @@ pub(crate) mod tests {
             ]
         );
         assert_eq!(actions[0].0.style, ButtonStyle::Primary);
-        assert_eq!(
-            (actions[1].0.style, actions[1].0.key),
-            (ButtonStyle::Plain, Some(REOPEN_KEY))
-        );
+        assert_eq!(actions[1].0.style, ButtonStyle::Plain);
         let page = stage_page(&f, Stage::Plan, &state, &actions, 2_060);
         assert_eq!(
             page.status,
@@ -9423,7 +9403,7 @@ pub(crate) mod tests {
         assert!(
             !none
                 .iter()
-                .any(|(_, o)| *o == PanelOutcome::ReviewDoc(Stage::Plan))
+                .any(|(_, o)| *o == PanelOutcome::OpenDoc(Stage::Plan))
         );
         let written = RowCtx {
             written: [true; Stage::ALL.len()],
@@ -9431,22 +9411,21 @@ pub(crate) mod tests {
         };
         let actions = page_actions(&f, Stage::Plan, written);
         let got = labels(&actions);
-        assert!(got.contains(&("Review", PanelOutcome::ReviewDoc(Stage::Plan))));
+        assert!(got.contains(&("Review", PanelOutcome::OpenDoc(Stage::Plan))));
         assert!(!got.iter().any(|(label, _)| *label == "Preview"));
         // Ready for review: the primary reviews, no second Review.
         f.runs.get_mut(&Stage::Plan).unwrap().ready = Some(1_500);
         let actions = page_actions(&f, Stage::Plan, written);
         let reviews = (actions.iter())
-            .filter(|(_, o)| {
-                matches!(
-                    o,
-                    PanelOutcome::ReviewDoc(Stage::Plan) | PanelOutcome::OpenDoc(Stage::Plan)
-                )
-            })
+            .filter(|(_, o)| *o == PanelOutcome::OpenDoc(Stage::Plan))
             .count();
         assert_eq!(reviews, 1);
-        // The primary Review stays in the page's row, the file's card
-        // holding nothing.
+        // The primary Review stays on the file's card, as the plain one does.
+        let held = actions
+            .iter()
+            .position(|(_, o)| *o == PanelOutcome::OpenDoc(Stage::Plan))
+            .unwrap();
+        assert_eq!(actions[held].0.style, ButtonStyle::Primary);
         let page = stage_page(&f, Stage::Plan, &PanelState::default(), &actions, 2_000);
         let card = page
             .sections
@@ -9457,7 +9436,7 @@ pub(crate) mod tests {
             Some(&file(
                 "plan.md",
                 line("ready for review", CheckTone::Ready),
-                &[]
+                &[held]
             ))
         );
         // Its milestones by name, as the probe read them.
@@ -9537,7 +9516,7 @@ pub(crate) mod tests {
         assert!(!has_doc(&stage_page(&f, Stage::Build, &state, &[], 2_000)));
     }
 
-    /// A brief ready for review: its page's one review is "Review brief",
+    /// A brief ready for review: its page's one review is "Review",
     /// and nothing offers a preview of what the page shows.
     #[test]
     fn a_ready_brief_has_one_review_and_no_preview() {
@@ -9550,16 +9529,10 @@ pub(crate) mod tests {
         };
         let actions = page_actions(&f, Stage::Discover, written);
         let got = labels(&actions);
-        assert!(got.iter().any(|(label, _)| *label == "Review brief"));
+        assert!(got.iter().any(|(label, _)| *label == "Review"));
         assert!(!got.iter().any(|(label, _)| label.contains("Preview")));
         let reviews = (actions.iter())
-            .filter(|(_, o)| {
-                matches!(
-                    o,
-                    PanelOutcome::ReviewDoc(Stage::Discover)
-                        | PanelOutcome::OpenDoc(Stage::Discover)
-                )
-            })
+            .filter(|(_, o)| *o == PanelOutcome::OpenDoc(Stage::Discover))
             .count();
         assert_eq!(reviews, 1);
     }

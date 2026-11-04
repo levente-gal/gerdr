@@ -400,15 +400,14 @@ impl TabColumn {
 }
 
 /// A button on a stage's page. What it does is for `crate::features` to
-/// know, by its index in `StagePage::buttons`.
+/// know, by its index in `StagePage::buttons`. Its key is left to the footer's
+/// hints.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PageButton {
     pub label: String,
-    /// `Primary` for the one to press next, `Destructive` for one that
-    /// throws work away.
+    /// `Primary` for the one to press next, which Enter presses,
+    /// `Destructive` for one that throws work away.
     pub style: ButtonStyle,
-    /// The key that presses it, shown after the label ("⏎"), if any.
-    pub key: Option<&'static str>,
 }
 
 /// An agent to pick on a stage's page: the one its next start runs is lit.
@@ -442,7 +441,7 @@ pub enum PageSection {
     },
     /// A stage's file (`brief.md`, `plan.md`): its name, how it stands,
     /// and the indices in `StagePage::buttons` of the buttons it holds
-    /// (Review), drawn at the card's right.
+    /// (Review or Open, plain or primary), drawn at the card's right.
     File {
         name: String,
         state: CheckLine,
@@ -1180,16 +1179,6 @@ fn doc_laid_out(blocks: &Arc<Vec<DocBlock>>, w: i32) -> (Rc<Vec<(Rect, Piece)>>,
     })
 }
 
-/// What a page button says: its label, then its key.
-/// The UI font has neither "⏎" nor "↵": a button's key shows it as
-/// "Enter", as the hints do.
-fn page_label(button: &PageButton) -> String {
-    match button.key {
-        Some(key) => format!("{}  {}", button.label, key.replace('\u{23ce}', "Enter")),
-        None => button.label.clone(),
-    }
-}
-
 /// A column's contents, stacked from its top.
 struct Stack {
     x: i32,
@@ -1495,7 +1484,7 @@ fn page_stack(
         s.y += 10;
         let mut x = s.x;
         for i in free {
-            let w = button_width(&page_label(&page.buttons[i]));
+            let w = button_width(&page.buttons[i].label);
             if x > s.x && x + w > s.x + s.w {
                 x = s.x;
                 s.y += TAB_BUTTON + QUIT_BUTTON_GAP;
@@ -1529,7 +1518,7 @@ fn page_stack(
                 let row = card.loc.y + AGENT_PAD + (AGENT_HEAD - ROW_BUTTON) / 2;
                 let mut right = card.loc.x + card.size.w - AGENT_PAD;
                 if let Some(b) = button.filter(|b| *b < page.buttons.len()) {
-                    let w = button_width(&page_label(&page.buttons[b]));
+                    let w = button_width(&page.buttons[b].label);
                     buttons[b] = Some(Rectangle::new(
                         (right - w, row).into(),
                         (w, ROW_BUTTON).into(),
@@ -1556,7 +1545,7 @@ fn page_stack(
                 let mut bx = card.loc.x + card.size.w - AGENT_PAD;
                 let by = card.loc.y + AGENT_PAD + (AGENT_HEAD - ROW_BUTTON) / 2;
                 for &b in held.iter().rev().filter(|b| **b < page.buttons.len()) {
-                    let w = button_width(&page_label(&page.buttons[b]));
+                    let w = button_width(&page.buttons[b].label);
                     bx -= w;
                     buttons[b] = Some(Rectangle::new((bx, by).into(), (w, ROW_BUTTON).into()));
                     bx -= QUIT_BUTTON_GAP;
@@ -3474,7 +3463,7 @@ impl Painter {
         let hovered = view.hover == Some(FeatureTabHit::PageButton(i));
         self.button(
             c,
-            &page_label(button),
+            &button.label,
             rect,
             (hovered, false),
             button.style,
