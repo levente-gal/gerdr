@@ -1365,7 +1365,7 @@ fn npm_title_argv(title: &str) -> Option<Vec<&str>> {
 
 /// The words of `command`, as `shell_quote` quoted them: single quotes and
 /// backslashes undone.
-fn split_command(command: &str) -> Vec<String> {
+pub(crate) fn split_command(command: &str) -> Vec<String> {
     let mut words = Vec::new();
     let mut word: Option<String> = None;
     let mut chars = command.chars();

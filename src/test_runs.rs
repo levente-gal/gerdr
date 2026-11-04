@@ -114,6 +114,25 @@ pub fn test_command(info: &ProcessInfo) -> Option<Found> {
         [] => leader.cmdline.split_whitespace().collect(),
         argv => argv.iter().map(String::as_str).collect(),
     };
+    let (short, command) = named_tests(&words)?;
+    Some(Found {
+        pid: leader.pid,
+        command,
+        short,
+    })
+}
+
+/// Whether `command`, a command line as `shell_quote` quoted it, runs tests
+/// (see `test_command`).
+pub fn runs_tests(command: &str) -> bool {
+    let words = crate::projects::split_command(command);
+    let words: Vec<&str> = words.iter().map(String::as_str).collect();
+    named_tests(&words).is_some()
+}
+
+/// The words naming the tests the command line `words` runs, and the line
+/// as a card shows it; `None` if it runs none (see `test_command`).
+fn named_tests(words: &[&str]) -> Option<(String, String)> {
     let base = |word: &str| word.rsplit('/').next().unwrap_or(word).to_owned();
     let (argv0, args) = words.split_first()?;
     let program = base(argv0);
@@ -132,36 +151,30 @@ pub fn test_command(info: &ProcessInfo) -> Option<Found> {
             .collect();
         shown.join(" ")
     };
-    let (short, command) = if testy(&program) {
-        (program, command(&words))
+    if testy(&program) {
+        return Some((program, command(words)));
+    }
+    let named: Vec<&str> = args
+        .iter()
+        .copied()
+        .filter(|a| !a.starts_with('-'))
+        .collect();
+    let script_allowed = interpreter(&program);
+    let at = named.iter().take(2).position(|a| {
+        !a.contains(char::is_whitespace)
+            && (script_allowed || !path_like(a))
+            && testy(&base(a))
+            && !unversioned(&base(a)).contains('.')
+    })?;
+    // A script run by its path (`python3 /usr/bin/pytest`) is named alone.
+    if path_like(named[at]) {
+        let script = args.iter().position(|a| *a == named[at]).unwrap_or(0);
+        Some((base(named[at]), command(&args[script..])))
     } else {
-        let named: Vec<&str> = args
-            .iter()
-            .copied()
-            .filter(|a| !a.starts_with('-'))
-            .collect();
-        let script_allowed = interpreter(&program);
-        let at = named.iter().take(2).position(|a| {
-            !a.contains(char::is_whitespace)
-                && (script_allowed || !path_like(a))
-                && testy(&base(a))
-                && !unversioned(&base(a)).contains('.')
-        })?;
-        // A script run by its path (`python3 /usr/bin/pytest`) is named alone.
-        if path_like(named[at]) {
-            let script = args.iter().position(|a| *a == named[at]).unwrap_or(0);
-            (base(named[at]), command(&args[script..]))
-        } else {
-            let mut short = vec![program];
-            short.extend(named[..=at].iter().map(|a| a.to_string()));
-            (short.join(" "), command(&words))
-        }
-    };
-    Some(Found {
-        pid: leader.pid,
-        command,
-        short,
-    })
+        let mut short = vec![program];
+        short.extend(named[..=at].iter().map(|a| a.to_string()));
+        Some((short.join(" "), command(words)))
+    }
 }
 
 /// The number before each `word` in `line` (`212 passed; 0 failed`).
@@ -545,6 +558,31 @@ mod tests {
         let mut idle = info(&["cargo", "test"]);
         idle.foreground_process_group_id = Some(10);
         assert_eq!(test_command(&idle), None);
+    }
+
+    #[test]
+    fn a_saved_command_line_tells_tests_too() {
+        for tests in [
+            "python /home/me/app/.venv/bin/pytest",
+            "python -m pytest -x",
+            "python manage.py test",
+            "cargo test",
+            "npm test",
+            "uv run pytest",
+        ] {
+            assert!(runs_tests(tests), "{tests}");
+        }
+        for service in [
+            "python /home/me/app/.venv/bin/celery -A app worker -l INFO",
+            "python manage.py runserver",
+            "bash ./runlocal.sh",
+            "npm run dev",
+            // A quoted prompt is one word, whatever its words.
+            "claude 'test it all'",
+            "",
+        ] {
+            assert!(!runs_tests(service), "{service}");
+        }
     }
 
     #[test]

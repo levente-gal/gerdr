@@ -42,6 +42,7 @@ use crate::{
     inbox_sources, inbox_store, project_lock,
     service_errors::ServiceError,
     service_watch::{self, Report, Service},
+    test_runs,
 };
 
 /// The prefix of a notification's key for a service's error:
@@ -256,7 +257,7 @@ impl Gerdr {
     }
 
     /// The services project `project`'s records keep: the commands its
-    /// panes run again after a reboot.
+    /// panes run again after a reboot, test runs aside (see `feed_services`).
     fn recorded_services(&self, project: &str) -> Vec<Service> {
         let Some(p) = self.projects.project(project) else {
             return Vec::new();
@@ -266,9 +267,10 @@ impl Gerdr {
             .filter(|r| r.herdr_id.is_some())
             .flat_map(|r| &r.panes)
             .filter_map(|pane| {
-                Some(Service {
+                let command = pane.restart_command()?;
+                (!test_runs::runs_tests(command)).then(|| Service {
                     pane_id: pane.pane_id.clone(),
-                    command: pane.restart_command()?.to_owned(),
+                    command: command.to_owned(),
                 })
             })
             .collect()
@@ -303,8 +305,9 @@ impl Gerdr {
 
     /// Tell the watcher of the project shown which panes run services now:
     /// those that ran long enough or that gerdr runs again (see
-    /// `Remembered::long`), and those its records keep. Show an error asked
-    /// for in another project once it does.
+    /// `Remembered::long`), and those its records keep. A test run is no
+    /// service, however long it runs: it ends by itself, and its card tells
+    /// how it went. Show an error asked for in another project once it does.
     pub fn feed_services(&mut self) {
         let Some(project) = self.project.clone() else {
             return;
@@ -323,6 +326,7 @@ impl Gerdr {
                 list.push(service);
             }
         }
+        list.retain(|s| !test_runs::runs_tests(&s.command));
         // Only the panes there: a record may outlive its pane a while.
         let live: Vec<&str> = self
             .herdr_tabs
