@@ -543,7 +543,10 @@ impl Feature {
     /// Forget `stage`'s run, its number kept for the next one.
     pub fn forget_run(&mut self, stage: Stage) {
         if let Some(run) = self.runs.remove(&stage) {
-            self.run_counts.insert(stage, run.n);
+            // Never back: a parked run with a lower number can be forgotten
+            // after a later one (see `feature_plan_review`).
+            let counted = self.run_counts.entry(stage).or_default();
+            *counted = run.n.max(*counted);
         }
     }
 
@@ -797,6 +800,21 @@ pub(crate) mod tests {
         let plan = |s: Stage| s == Stage::Plan;
         assert_eq!(f.current(), Some(Stage::Discover));
         assert_eq!(f.standing(Stage::Discover, plan), Standing::Open);
+    }
+
+    #[test]
+    fn a_run_number_is_never_used_twice() {
+        let run = |n| agents::StageRun {
+            n,
+            ..agents::StageRun::default()
+        };
+        let mut f = done_up_to(Stage::Plan);
+        // The reviewer, the writer, then the reviewer back and forgotten.
+        f.runs.insert(Stage::PlanReview, run(2));
+        f.forget_run(Stage::PlanReview);
+        f.runs.insert(Stage::PlanReview, run(1));
+        f.forget_run(Stage::PlanReview);
+        assert_eq!(f.next_run(Stage::PlanReview), 3);
     }
 
     #[test]

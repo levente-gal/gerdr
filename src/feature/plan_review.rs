@@ -624,8 +624,14 @@ pub fn prompt_vars(review: Option<&PlanReview>) -> [(&'static str, String); 4] {
         .collect::<Vec<_>>()
         .join("\n");
     [
-        ("plan_review.accepted", listed(review, State::Accepted, true)),
-        ("plan_review.rejected", listed(review, State::Rejected, false)),
+        (
+            "plan_review.accepted",
+            listed(review, State::Accepted, true),
+        ),
+        (
+            "plan_review.rejected",
+            listed(review, State::Rejected, false),
+        ),
         ("plan_review.open", open),
         (
             "plan_review.accepted_ids",
@@ -690,8 +696,8 @@ mod tests {
         assert!(parse("nope").unwrap_err()[0].starts_with("it isn't JSON"));
         let big = format!("{{\"suggestions\":[], \"x\":\"{}\"}}", "x".repeat(300_000));
         assert!(parse(&big).unwrap_err()[0].contains("larger than"));
-        let lacks = parse(r#"{"suggestions": [{"kind": "gap", "severity": "huge"}, 3]}"#)
-            .unwrap_err();
+        let lacks =
+            parse(r#"{"suggestions": [{"kind": "gap", "severity": "huge"}, 3]}"#).unwrap_err();
         for wanted in [
             "suggestion 1's severity isn't high, medium or low",
             "suggestion 1 has no title",
@@ -939,7 +945,8 @@ mod tests {
         decide(&mut review, "r1-2", Decision::Accept).unwrap();
         assert_eq!(unmapped(&review, "# no section"), ["r1-1", "r1-2"]);
         // Named elsewhere doesn't count; a longer id doesn't either.
-        let text = "## Milestones\n- [ ] r1-2\n\n## Review changes\n- r1-1: Milestone 2\n- r1-22: x\n";
+        let text =
+            "## Milestones\n- [ ] r1-2\n\n## Review changes\n- r1-1: Milestone 2\n- r1-22: x\n";
         assert_eq!(unmapped(&review, text), ["r1-2"]);
         let both = "## Review changes\n- r1-1: Milestone 2\n- r1-2: Milestone 1\n";
         assert!(unmapped(&review, both).is_empty());

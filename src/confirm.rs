@@ -100,16 +100,10 @@ pub enum Then {
     },
     /// Start this current stage of this project's feature over (see
     /// `Gerdr::start_over_now`).
-    SkipPlanReview {
-        project: String,
-        slug: String,
-    },
+    SkipPlanReview { project: String, slug: String },
     /// Go back from the final plan to the decisions on the suggestions (see
     /// `Gerdr::change_decisions_now`).
-    ChangeDecisions {
-        project: String,
-        slug: String,
-    },
+    ChangeDecisions { project: String, slug: String },
     StartOverStage {
         project: String,
         slug: String,

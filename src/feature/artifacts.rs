@@ -36,7 +36,8 @@ pub fn path(dir: &Path, stage: Stage) -> Option<PathBuf> {
 /// The plan a stage's agent works from, under feature data dir `dir`: past
 /// Plan review, the final plan if it made one; else the plan as approved.
 pub fn plan_for(dir: &Path, stage: Stage) -> Option<PathBuf> {
-    let final_plan = path(dir, Stage::PlanReview).filter(|p| stage > Stage::PlanReview && p.is_file());
+    let final_plan =
+        path(dir, Stage::PlanReview).filter(|p| stage > Stage::PlanReview && p.is_file());
     final_plan.or_else(|| path(dir, Stage::Plan))
 }
 
@@ -224,7 +225,11 @@ pub fn archive_final_plan(dir: &Path) -> Result<(), String> {
         if !from.is_file() {
             continue;
         }
-        let name = from.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        let name = from
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
         std::fs::create_dir_all(&archive)
             .map_err(|e| format!("making {}: {e}", archive.display()))?;
         let slot = archive_slot(&archive, &name);

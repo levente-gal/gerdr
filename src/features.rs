@@ -1348,7 +1348,11 @@ fn stage_button(feature: &Feature, stage: Stage, ctx: RowCtx) -> Option<&'static
         PanelOutcome::PlanSuggestions => Some("Decide\u{2026}"),
         PanelOutcome::WriteFinalPlan => {
             let accepted = (feature.plan_review.as_ref()).is_some_and(|r| r.any_accepted());
-            Some(if accepted { "Write final plan" } else { "Use the plan as it is" })
+            Some(if accepted {
+                "Write final plan"
+            } else {
+                "Use the plan as it is"
+            })
         }
         _ => None,
     }
@@ -1954,9 +1958,7 @@ fn page_enter(feature: &Feature, stage: Stage, ctx: RowCtx) -> Option<PanelOutco
 
 /// Whether `stage` is the Plan review `feature` is at: what can be skipped.
 fn plan_review_open(feature: &Feature, stage: Stage) -> bool {
-    stage == Stage::PlanReview
-        && feature.status == Status::Open
-        && feature.current() == Some(stage)
+    stage == Stage::PlanReview && feature.status == Status::Open && feature.current() == Some(stage)
 }
 
 /// The key of a done stage's Reopen.
@@ -2039,7 +2041,10 @@ pub fn page_actions(
         }
         if feature.plan_review.as_ref().is_some_and(|r| r.writing) {
             let label = "Change decisions\u{2026}";
-            out.push((button(label, ButtonStyle::Plain), PanelOutcome::ChangeDecisions));
+            out.push((
+                button(label, ButtonStyle::Plain),
+                PanelOutcome::ChangeDecisions,
+            ));
         }
         let skip = PanelOutcome::SkipPlanReview;
         out.push((button("Skip review", ButtonStyle::Plain), skip));
@@ -8051,13 +8056,22 @@ pub(crate) mod tests {
         };
         plan_review::import(&mut review, 1, plan_review::parse(text).unwrap());
         f.plan_review = Some(review);
-        assert_eq!(page_enter(&f, stage, ctx), Some(PanelOutcome::PlanSuggestions));
-        assert_eq!(names(&f), ["Decide\u{2026}", "Skip review", "Start over\u{2026}"]);
+        assert_eq!(
+            page_enter(&f, stage, ctx),
+            Some(PanelOutcome::PlanSuggestions)
+        );
+        assert_eq!(
+            names(&f),
+            ["Decide\u{2026}", "Skip review", "Start over\u{2026}"]
+        );
         assert_eq!(rail_node(&f, stage, &state, 2_000).line, "2 to decide");
         let page = stage_page(&f, stage, &state, &[], 2_000);
         assert_eq!(
             page.sections,
-            [lines("Suggestions", vec![line("2 to decide", CheckTone::Blocker)])]
+            [lines(
+                "Suggestions",
+                vec![line("2 to decide", CheckTone::Blocker)]
+            )]
         );
         assert_eq!(
             crate::feature_agents::gate_of(&f, |_| None).map(|g| g.2),
@@ -8067,7 +8081,10 @@ pub(crate) mod tests {
         let review = f.plan_review.as_mut().unwrap();
         plan_review::decide(review, "r1-1", Decision::Reject).unwrap();
         plan_review::decide(review, "r1-2", Decision::Reject).unwrap();
-        assert_eq!(page_enter(&f, stage, ctx), Some(PanelOutcome::WriteFinalPlan));
+        assert_eq!(
+            page_enter(&f, stage, ctx),
+            Some(PanelOutcome::WriteFinalPlan)
+        );
         assert_eq!(
             names(&f),
             [
@@ -8093,7 +8110,10 @@ pub(crate) mod tests {
                 ..Default::default()
             },
         );
-        assert_eq!(page_enter(&f, stage, ctx), Some(PanelOutcome::OpenDoc(stage)));
+        assert_eq!(
+            page_enter(&f, stage, ctx),
+            Some(PanelOutcome::OpenDoc(stage))
+        );
         assert!(names(&f).contains(&"Change decisions\u{2026}".to_owned()));
         assert_eq!(
             crate::feature_agents::gate_of(&f, |_| None).map(|g| g.2),

@@ -32,7 +32,8 @@ use crate::{
     feature::{
         self, Feature, PerProject, Stage, Status,
         agents::{
-            Flavor, StageRun, Stop, T3Run, command_line, needs, resume_line, run_needs, session_file,
+            Flavor, StageRun, Stop, T3Run, command_line, needs, resume_line, run_needs,
+            session_file,
         },
         artifacts, graph, layout,
         patch::Reading,
@@ -271,7 +272,10 @@ fn judge(
 /// Whether `text` is a good `stage` file for `feature`; else what it
 /// lacks. A multi-repository plan must name the touched repositories.
 pub(crate) fn validate(feature: &Feature, stage: Stage, text: &str) -> Result<(), Vec<String>> {
-    let review = feature.plan_review.as_ref().filter(|_| stage == Stage::PlanReview);
+    let review = feature
+        .plan_review
+        .as_ref()
+        .filter(|_| stage == Stage::PlanReview);
     if stage == Stage::PlanReview && !review.is_some_and(|r| r.writing) {
         return plan_review::parse(text).map(drop);
     }
@@ -2237,8 +2241,14 @@ mod tests {
         assert_eq!(names(&f), Some((Some("plan-final.md"), "plan-final")));
         // A plan, saying where each accepted one went.
         let lacks = validate(&f, stage, PLAN).unwrap_err();
-        assert!(lacks.iter().any(|l| l.contains("Review changes")), "{lacks:?}");
-        assert!(lacks.iter().any(|l| l.contains("doesn't name u1")), "{lacks:?}");
+        assert!(
+            lacks.iter().any(|l| l.contains("Review changes")),
+            "{lacks:?}"
+        );
+        assert!(
+            lacks.iter().any(|l| l.contains("doesn't name u1")),
+            "{lacks:?}"
+        );
         let good = format!("{PLAN}\n## Review changes\n- u1: Milestones\n");
         assert_eq!(validate(&f, stage, &good), Ok(()));
         assert_eq!(validate(&f, Stage::Plan, PLAN), Ok(()));

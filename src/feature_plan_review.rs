@@ -450,7 +450,10 @@ impl Gerdr {
         let Some(feature) = self.feature(project, slug) else {
             return Vec::new();
         };
-        let parked = feature.plan_review.as_ref().and_then(|r| r.reviewer.as_ref());
+        let parked = feature
+            .plan_review
+            .as_ref()
+            .and_then(|r| r.reviewer.as_ref());
         (feature.runs.get(&STAGE).into_iter().chain(parked))
             .filter_map(|run| run.pane.clone())
             .filter(|pane| self.herdr_pane_place(pane).is_some())
@@ -473,9 +476,10 @@ impl Gerdr {
         let Some(feature) = self.feature(project, slug) else {
             return;
         };
-        let decided = feature.plan_review.as_ref().is_some_and(|r| {
-            (r.suggestions.iter()).any(|s| s.state != plan_review::State::Open)
-        });
+        let decided = feature
+            .plan_review
+            .as_ref()
+            .is_some_and(|r| (r.suggestions.iter()).any(|s| s.state != plan_review::State::Open));
         let live = !self.plan_review_panes(project, slug).is_empty();
         if !decided && !live {
             return self.skip_plan_review_now(project, slug);
@@ -633,7 +637,11 @@ mod tests {
         plan_review::check_citations(&mut raws, &[("api".to_owned(), dir.clone())]);
         let mut review = PlanReview::default();
         plan_review::import(&mut review, 1, raws);
-        let found: Vec<_> = review.suggestions[0].evidence.iter().map(|e| e.found).collect();
+        let found: Vec<_> = review.suggestions[0]
+            .evidence
+            .iter()
+            .map(|e| e.found)
+            .collect();
         assert_eq!(found, [Some(true), Some(false)]);
         assert_eq!(review.not_found(), 1);
         let _ = std::fs::remove_dir_all(&dir);
