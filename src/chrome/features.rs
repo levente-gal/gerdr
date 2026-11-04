@@ -4,6 +4,8 @@
 //! stage page's and activity's columns, each scrolled on its own), and
 //! the stage marks the sidebar's feature rows show.
 
+use std::{cell::RefCell, rc::Rc, sync::Arc};
+
 use super::{
     ButtonStyle, CHECKBOX_GAP, CHECKBOX_ROW, Canvas, Check, DETAIL_FONT_SIZE, DIALOG_WIDTH, DOT,
     Dot, FONT_SIZE, FieldSpot, LABEL_FONT_SIZE, ListBar, POPUP_RADIUS, Painter, Palette, QUIT_BODY,
@@ -13,8 +15,11 @@ use super::{
     measure, measure_bold, measured_footer_height, mix, phys, physical, plus, rect_px,
     segment_tint, status_dot, tab, trash,
 };
-use crate::agent_icons::AgentIcon;
 use crate::text_field::Line;
+use crate::{
+    agent_icons::AgentIcon,
+    md_blocks::{DocBlock, ItemMark},
+};
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
@@ -401,7 +406,7 @@ pub enum PageSection {
     },
     /// A stage's file (`brief.md`, `plan.md`): its name, how it stands,
     /// and the indices in `StagePage::buttons` of the buttons it holds
-    /// (Review, Preview), drawn at the card's right.
+    /// (Review), drawn at the card's right.
     File {
         name: String,
         state: CheckLine,
@@ -412,6 +417,12 @@ pub enum PageSection {
     Lines {
         label: String,
         lines: Vec<CheckLine>,
+    },
+    /// The file named `name` to read, as its blocks, in the page's place
+    /// for it: after all else, however long it is.
+    Doc {
+        name: String,
+        blocks: Arc<Vec<DocBlock>>,
     },
     /// The milestones, "done of total", with a bar, and each by name when
     /// known (`true` = done; empty until Inc 2 reads them).
@@ -855,6 +866,15 @@ pub(super) enum Piece {
     Button(usize),
     /// `FeatureTabView::activity[row]`, its `what` wrapped in `lines`.
     Activity { row: usize, lines: Vec<String> },
+    /// What a file's list item starts with, right in its gutter.
+    ItemMark(ItemMark),
+    /// A line of a file's code block, cut where the column ends, on the
+    /// block's ground; an empty one is the block's edge.
+    CodeLine(String),
+    /// The bar beside a file's quote.
+    QuoteBar,
+    /// A file's thematic break.
+    Rule,
 }
 
 /// How wide `text` is at `size`, in logical pixels, guessed when there is
@@ -938,6 +958,155 @@ fn activity_dot(c: &mut Canvas, spot: Rect, tone: CheckTone, scale: f64, p: &Pal
 /// The most lines an activity row takes; the last ends in "…".
 const ACTIVITY_LINES: usize = 2;
 
+/// A file's blocks on the page: the room above a block, its list items'
+/// indent and gutter, a quote's indent and bar, a code block's inner room,
+/// and how far in lists stop indenting more.
+const DOC_GAP: i32 = 8;
+const DOC_HEADING_GAP: i32 = 14;
+const DOC_ITEM_GAP: i32 = 2;
+const DOC_INDENT: i32 = 16;
+const DOC_MARK: i32 = 20;
+const DOC_QUOTE: i32 = 12;
+const DOC_QUOTE_BAR: i32 = 3;
+const DOC_CODE_PAD: i32 = 8;
+const DOC_DEPTH_MAX: u8 = 4;
+const DOC_RULE: i32 = 13;
+/// How far off a line's width added up by word may be from it measured
+/// whole, in logical pixels: kerning and rounding at each space.
+const DOC_WIDTH_SLACK: f32 = 8.0;
+
+/// `text` broken into lines no wider than `width` by `measure`, all of it
+/// kept: a word wider than a line (a URL) breaks where it must. A long file
+/// has many words: a line's width is added up word by word, and measured
+/// whole only when that comes within `DOC_WIDTH_SLACK` of the edge.
+fn doc_lines(text: &str, width: i32, measure: impl Fn(&str) -> f32) -> Vec<String> {
+    let width = width as f32;
+    let space = measure("a a") - 2.0 * measure("a");
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    let mut used = 0.0;
+    for word in text.split_whitespace() {
+        let wide = measure(word);
+        if !line.is_empty() {
+            let about = used + space + wide;
+            if about < width - DOC_WIDTH_SLACK {
+                line.push(' ');
+                line.push_str(word);
+                used = about;
+                continue;
+            }
+            if about <= width + DOC_WIDTH_SLACK {
+                let longer = format!("{line} {word}");
+                let whole = measure(&longer);
+                if whole <= width {
+                    line = longer;
+                    used = whole;
+                    continue;
+                }
+            }
+            lines.push(std::mem::take(&mut line));
+        }
+        if wide <= width {
+            line = word.to_owned();
+            used = wide;
+            continue;
+        }
+        let mut rest = word;
+        while measure(rest) > width {
+            let ends: Vec<usize> = rest.char_indices().skip(1).map(|(i, _)| i).collect();
+            let fit = ends.partition_point(|end| measure(&rest[..*end]) <= width);
+            let Some(end) = fit
+                .checked_sub(1)
+                .map(|i| ends[i])
+                .or(ends.first().copied())
+            else {
+                break;
+            };
+            lines.push(rest[..end].to_owned());
+            rest = &rest[end..];
+        }
+        line = rest.to_owned();
+        used = measure(rest);
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
+}
+
+/// What a number mark says.
+fn number_mark(n: usize) -> String {
+    format!("{n}.")
+}
+
+/// A file's blocks laid out for a column `w` wide, from `(0, 0)`.
+fn doc_stack(blocks: &[DocBlock], w: i32) -> Stack {
+    let mut s = Stack {
+        x: 0,
+        w,
+        y: 0,
+        pieces: Vec::new(),
+    };
+    for (i, block) in blocks.iter().enumerate() {
+        if i > 0 {
+            s.y += match block {
+                DocBlock::Heading { .. } => DOC_HEADING_GAP,
+                DocBlock::Item {
+                    mark: ItemMark::Under,
+                    ..
+                } => DOC_GAP / 2,
+                DocBlock::Item { .. } if matches!(blocks[i - 1], DocBlock::Item { .. }) => {
+                    DOC_ITEM_GAP
+                }
+                _ => DOC_GAP,
+            };
+        }
+        s.doc_block(block);
+    }
+    s
+}
+
+/// The latest file laid out, with the width: laying one out measures its
+/// every word, and the tab is laid out every frame. It holds on to what it
+/// was laid out from, so that can't be another's at the same address.
+struct DocMemo {
+    blocks: Arc<Vec<DocBlock>>,
+    w: i32,
+    pieces: Rc<Vec<(Rect, Piece)>>,
+    h: i32,
+}
+
+/// How many files `DOC_MEMO` holds: the stages looked between.
+const DOC_MEMOS: usize = 2;
+
+thread_local! {
+    static DOC_MEMO: RefCell<Vec<DocMemo>> = const { RefCell::new(Vec::new()) };
+}
+
+/// `blocks` laid out for a column `w` wide: the pieces from `(0, 0)`, and
+/// how high they all are.
+fn doc_laid_out(blocks: &Arc<Vec<DocBlock>>, w: i32) -> (Rc<Vec<(Rect, Piece)>>, i32) {
+    DOC_MEMO.with_borrow_mut(|memo| {
+        let found = (memo.iter()).position(|m| m.w == w && Arc::ptr_eq(&m.blocks, blocks));
+        let entry = match found {
+            Some(i) => memo.remove(i),
+            None => {
+                let s = doc_stack(blocks, w);
+                DocMemo {
+                    blocks: blocks.clone(),
+                    w,
+                    h: s.y,
+                    pieces: Rc::new(s.pieces),
+                }
+            }
+        };
+        let laid = (entry.pieces.clone(), entry.h);
+        memo.insert(0, entry);
+        memo.truncate(DOC_MEMOS);
+        laid
+    })
+}
+
 /// What a page button says: its label, then its key.
 /// The UI font has neither "⏎" nor "↵": a button's key shows it as
 /// "Enter", as the hints do.
@@ -996,6 +1165,114 @@ impl Stack {
             let h = lines.len() as i32 * TAIL_LINE + 6;
             self.put(h, Piece::Activity { row, lines });
         }
+    }
+
+    /// `text` as a file's text: all of its lines, a line `h` high each.
+    fn doc_text(&mut self, text: &str, font: Font, ink: Ink, bold: bool, h: i32) {
+        let size = font.size();
+        let lines = match bold {
+            true => doc_lines(text, self.w, |t| {
+                measure_bold(t, size).unwrap_or_else(|| width_of(t, size))
+            }),
+            false => doc_lines(text, self.w, |t| width_of(t, size)),
+        };
+        for text in lines {
+            self.put(
+                h,
+                Piece::Text {
+                    text,
+                    font,
+                    ink,
+                    bold,
+                },
+            );
+        }
+    }
+
+    /// Run `body` in the column `by` further in.
+    fn doc_indented(&mut self, by: i32, body: impl FnOnce(&mut Stack)) {
+        let (x, w) = (self.x, self.w);
+        let by = by.min(w - 1).max(0);
+        self.x += by;
+        self.w -= by;
+        body(self);
+        self.x = x;
+        self.w = w;
+    }
+
+    /// A list item, its text hanging right of its mark.
+    fn doc_item(&mut self, depth: u8, mark: ItemMark, text: &str) {
+        let gutter = match mark {
+            ItemMark::Number(n) => {
+                let w = width_of(&number_mark(n), Font::Body.size()).ceil() as i32 + 6;
+                w.max(DOC_MARK)
+            }
+            _ => DOC_MARK,
+        };
+        let indent = i32::from(depth.min(DOC_DEPTH_MAX)) * DOC_INDENT;
+        let top = self.y;
+        self.doc_indented(indent, |s| {
+            if mark != ItemMark::Under {
+                let spot = Rectangle::new((s.x, s.y).into(), (gutter, BODY_LINE).into());
+                s.pieces.push((spot, Piece::ItemMark(mark)));
+            }
+            s.doc_indented(gutter, |s| {
+                s.doc_text(text, Font::Body, Ink::Text, false, BODY_LINE);
+            });
+        });
+        // A mark with no words of its own still takes its line.
+        self.y = self.y.max(top + BODY_LINE);
+    }
+
+    /// A file's block, from here down.
+    fn doc_block(&mut self, block: &DocBlock) {
+        match block {
+            DocBlock::Heading { level: 1, text } => {
+                self.doc_text(text, Font::Heading, Ink::Text, true, BODY_LINE + 6);
+            }
+            DocBlock::Heading { text, .. } => {
+                self.doc_text(text, Font::Body, Ink::Text, true, BODY_LINE);
+            }
+            DocBlock::Para(text) => self.doc_text(text, Font::Body, Ink::Text, false, BODY_LINE),
+            DocBlock::Note(text) => self.doc_text(text, Font::Body, Ink::Muted, false, BODY_LINE),
+            DocBlock::Item { depth, mark, text } => self.doc_item(*depth, *mark, text),
+            DocBlock::Code(lines) => {
+                let edge = |s: &mut Stack| s.put(DOC_CODE_PAD / 2, Piece::CodeLine(String::new()));
+                edge(self);
+                for code in lines {
+                    self.put(SMALL_LINE, Piece::CodeLine(code.clone()));
+                }
+                edge(self);
+            }
+            DocBlock::Quote(text) => {
+                let top = self.y;
+                self.doc_indented(DOC_QUOTE, |s| {
+                    s.doc_text(text, Font::Body, Ink::Muted, false, BODY_LINE);
+                });
+                let bar =
+                    Rectangle::new((self.x, top).into(), (DOC_QUOTE_BAR, self.y - top).into());
+                self.pieces.push((bar, Piece::QuoteBar));
+            }
+            DocBlock::Table(rows) => {
+                for (i, row) in rows.iter().enumerate() {
+                    self.doc_text(row, Font::Small, Ink::Text, i == 0, SMALL_LINE);
+                }
+            }
+            DocBlock::Rule => {
+                self.put(DOC_RULE, Piece::Rule);
+            }
+        }
+    }
+
+    /// A file's blocks, from here down.
+    fn doc(&mut self, blocks: &Arc<Vec<DocBlock>>) {
+        let (laid, h) = doc_laid_out(blocks, self.w);
+        let (x, y) = (self.x, self.y);
+        self.pieces.extend(laid.iter().map(|(rect, piece)| {
+            let at = Rectangle::new((rect.loc.x + x, rect.loc.y + y).into(), rect.size);
+            (at, piece.clone())
+        }));
+        self.y += h;
     }
 }
 
@@ -1108,8 +1385,12 @@ fn page_stack(
         s.y += TAB_BUTTON;
     }
     for (k, section) in page.sections.iter().enumerate() {
+        if matches!(section, PageSection::Doc { .. }) {
+            continue;
+        }
         s.y += PAGE_GAP;
         match section {
+            PageSection::Doc { .. } => {}
             PageSection::Agent {
                 name,
                 tail,
@@ -1191,10 +1472,22 @@ fn page_stack(
             }
         }
     }
-    if activity && !view.activity.is_empty() {
+    let inline = activity && !view.activity.is_empty();
+    if inline {
         s.y += PAGE_GAP;
         s.caption("Activity");
         s.activity(&view.activity);
+    }
+    // Last: however long it is, what else the page says stays near its top.
+    for section in &page.sections {
+        if let PageSection::Doc { name, blocks } = section {
+            s.y += PAGE_GAP;
+            // Away from its file's card, it says what it is.
+            if inline {
+                s.caption(name);
+            }
+            s.doc(blocks);
+        }
     }
 }
 
@@ -1610,7 +1903,8 @@ pub(super) enum TabSlice {
     /// The header, the rail and its rule, and a narrow tab's strip of
     /// repository chips: from the tab's top to the columns.
     Head,
-    /// A column's contents, unscrolled: scrolling it moves its buffer.
+    /// A column's contents, unscrolled: scrolling it moves its buffer. A
+    /// very long column's buffer holds only what shows (see `TALL_COLUMN`).
     Column(TabColumn),
     Hints,
 }
@@ -1620,29 +1914,21 @@ pub(super) enum TabSlice {
 const TALL_COLUMN: f64 = 8192.0;
 
 impl FeatureTabLayout {
-    /// Where `slice` goes on the tab, scrolled `down` (its column's
-    /// scroll), and whether it moves with it: a column's contents in
-    /// full when they're not too tall at `scale`, from the column's top
-    /// (so it shows `down` higher), else only what shows. `None` for a
-    /// column the tab hasn't, or one with nothing in it.
-    pub(super) fn slice_rect(
-        &self,
-        slice: TabSlice,
-        down: f64,
-        scale: f64,
-    ) -> Option<(Rect, bool)> {
+    /// What of the tab, laid out unscrolled, `slice` holds when scrolled
+    /// `down` (its column's scroll): a column's contents in full when
+    /// they're not too tall at `scale`, else only what shows. A column's
+    /// shows `down` higher than this, so at its place. `None` for a column
+    /// the tab hasn't, or one with nothing in it.
+    pub(super) fn slice_rect(&self, slice: TabSlice, down: f64, scale: f64) -> Option<Rect> {
         match slice {
             TabSlice::Head => {
                 let bottom = self.columns[TabColumn::Page as usize]?.loc.y;
-                Some((
-                    Rectangle::new(
-                        self.frame.loc,
-                        (self.frame.size.w, bottom - self.frame.loc.y).into(),
-                    ),
-                    false,
+                Some(Rectangle::new(
+                    self.frame.loc,
+                    (self.frame.size.w, bottom - self.frame.loc.y).into(),
                 ))
             }
-            TabSlice::Hints => Some((self.hints, false)),
+            TabSlice::Hints => Some(self.hints),
             TabSlice::Column(column) => {
                 let place = self.columns[column as usize]?;
                 let x = place.loc.x + CARD_PAD;
@@ -1652,12 +1938,12 @@ impl FeatureTabLayout {
                     return None;
                 }
                 if f64::from(h) * scale <= TALL_COLUMN {
-                    return Some((Rectangle::new((x, place.loc.y).into(), (w, h).into()), true));
+                    return Some(Rectangle::new((x, place.loc.y).into(), (w, h).into()));
                 }
                 let dy = down.round() as i32;
-                Some((
-                    Rectangle::new((x, place.loc.y + dy).into(), (w, place.size.h).into()),
-                    false,
+                Some(Rectangle::new(
+                    (x, place.loc.y + dy).into(),
+                    (w, place.size.h).into(),
                 ))
             }
         }
@@ -1800,17 +2086,13 @@ impl FeatureTabLayers {
             let strip = l.strip.is_some();
             let at = |r: Rect| Point::from((area.loc.x + r.loc.x, area.loc.y + r.loc.y));
             let slice = |cache: &mut super::Cached<SliceKey>, slice: TabSlice, down: f64| {
-                let (region, moves) = l.slice_rect(slice, down, scale)?;
-                let mut key = slice_view(view, slice, strip);
-                if let (TabSlice::Column(c), false) = (slice, moves) {
-                    key.scroll[c as usize] = down;
-                }
+                let region = l.slice_rect(slice, down, scale)?;
+                let key = slice_view(view, slice, strip);
                 let buffer = cache.get((key, region, output, theme, scale), |_| {
                     drawn.set(drawn.get() + 1);
                     painter.feature_tab_slice(view, output, slice, region, scale, p)
                 });
-                let part = Part::new(buffer, at(region), region.size, 1.0);
-                Some((part, moves))
+                Some(Part::new(buffer, at(region), region.size, 1.0))
             };
             // Inside a column's card's edge: what of it shows.
             let inside = |place: Rect| {
@@ -1862,20 +2144,13 @@ impl FeatureTabLayers {
                     );
                 }
                 let inside = inside(place);
-                if let Some((part, moves)) = slice(&mut columns[i], TabSlice::Column(column), down)
-                {
-                    let part = match moves {
-                        true => {
-                            let loc = (part.loc.x, part.loc.y - down).into();
-                            part.at(loc)
-                        }
-                        false => part,
-                    };
-                    parts.push(part.clipped(inside));
+                if let Some(part) = slice(&mut columns[i], TabSlice::Column(column), down) {
+                    let loc = (part.loc.x, part.loc.y - down).into();
+                    parts.push(part.at(loc).clipped(inside));
                 }
             }
-            parts.extend(slice(hints, TabSlice::Hints, 0.0).map(|(part, _)| part));
-            parts.extend(slice(head, TabSlice::Head, 0.0).map(|(part, _)| part));
+            parts.extend(slice(hints, TabSlice::Hints, 0.0));
+            parts.extend(slice(head, TabSlice::Head, 0.0));
             parts
         };
         self.overlay.parts(
@@ -2621,6 +2896,47 @@ impl Painter {
                     c.rounded(x, y, (w * f).max(h), h, h / 2.0, p.accent);
                 }
             }
+            Piece::ItemMark(mark) => {
+                let spot = Rectangle::new((rect.loc.x, rect.loc.y + 4).into(), (14, 14).into());
+                match mark {
+                    ItemMark::Bullet => {
+                        icon_sdf(c, spot, scale, p.muted, |x, y| x.hypot(y) - 2.0 * s)
+                    }
+                    ItemMark::Task(true) => {
+                        icon_sdf(c, spot, scale, p.success, |x, y| check(x, y, s));
+                    }
+                    ItemMark::Task(false) => icon_sdf(c, spot, scale, p.muted, |x, y| {
+                        stage_dot(StageMark::Later, x, y, 9.0 * s)
+                    }),
+                    ItemMark::Number(n) => {
+                        line(c, &number_mark(*n), rect, FONT_SIZE, p.muted);
+                    }
+                    ItemMark::Under => {}
+                }
+            }
+            Piece::CodeLine(text) => {
+                // On whole pixels, so a block's lines meet with no seam.
+                let (x, y, w, h) = rect_px(rect, scale);
+                c.fill(x as i32, y as i32, w as i32, h as i32, p.element);
+                let pad = (f64::from(DOC_CODE_PAD) * scale) as f32;
+                let (from, to) = (x + pad, x + w - pad);
+                let b = band(rect, scale);
+                self.mono_text(c, text, SMALL_FONT_SIZE, from, to, b, scale, p.text);
+            }
+            Piece::QuoteBar => {
+                let (x, y, w, h) = rect_px(rect, scale);
+                c.rounded(x, y, w, h, w / 2.0, p.border);
+            }
+            Piece::Rule => {
+                let (x, y, w, h) = rect_px(rect, scale);
+                c.fill(
+                    x as i32,
+                    (y + h / 2.0) as i32,
+                    w as i32,
+                    s.ceil() as i32,
+                    p.border,
+                );
+            }
             Piece::Milestone { done, next, text } => {
                 let mark = Rectangle::new((rect.loc.x, rect.loc.y + 4).into(), (14, 14).into());
                 let (stage, color) = match (done, next) {
@@ -3271,6 +3587,182 @@ mod tests {
         assert!(narrow.scroll_room(TabColumn::Page) > room);
     }
 
+    /// A measure of one unit a character.
+    fn chars(text: &str) -> f32 {
+        text.chars().count() as f32
+    }
+
+    #[test]
+    fn a_files_lines_keep_all_of_it_and_break_a_long_word() {
+        assert_eq!(doc_lines("a bb ccc", 4, chars), ["a bb", "ccc"]);
+        // Brackets don't hold words together, as they do on a card's line.
+        assert_eq!(doc_lines("x [a b c]", 4, chars), ["x [a", "b c]"]);
+        assert_eq!(
+            doc_lines("see abcdefghij end", 4, chars),
+            ["see", "abcd", "efgh", "ij", "end"]
+        );
+        assert!(doc_lines("", 4, chars).is_empty());
+        // Too narrow for a character: still all of it, one to a line.
+        assert_eq!(doc_lines("abc", 0, chars), ["a", "b", "c"]);
+        // Wider than one unit a byte can't split a character.
+        assert_eq!(
+            doc_lines("\u{e9}\u{e9}\u{e9}", 2, chars).concat(),
+            "\u{e9}\u{e9}\u{e9}"
+        );
+    }
+
+    /// `view`'s page carrying `blocks` as its file.
+    fn with_doc(mut view: FeatureTabView, blocks: Vec<DocBlock>) -> FeatureTabView {
+        view.page.sections.push(PageSection::Doc {
+            name: "brief.md".to_owned(),
+            blocks: Arc::new(blocks),
+        });
+        view
+    }
+
+    fn says(piece: &Piece, what: &str) -> bool {
+        matches!(piece, Piece::Text { text, .. } if text == what)
+    }
+
+    /// The file goes last wherever it is put; on a narrow tab, under the
+    /// activity that came in beside it, with its name over it.
+    #[test]
+    fn a_file_reads_under_all_else_on_its_page() {
+        let blocks = vec![DocBlock::Para("the-doc-text".to_owned())];
+        let view = with_doc(tab_view(), blocks);
+        let page = TabColumn::Page as usize;
+        let place = |l: &FeatureTabLayout, what: &dyn Fn(&Piece) -> bool| {
+            (l.pieces[page].iter()).position(|(_, piece)| what(piece))
+        };
+        let wide = tab_at(&view, 1920);
+        let text = place(&wide, &|p| says(p, "the-doc-text")).expect("its text");
+        assert_eq!(text, wide.pieces[page].len() - 1);
+        assert!(!(wide.pieces[page].iter()).any(|(_, p)| *p == Piece::Caption("BRIEF.MD".into())));
+        let narrow = tab_at(&view, ACTIVITY_BELOW - 1);
+        let text = place(&narrow, &|p| says(p, "the-doc-text")).expect("its text");
+        assert_eq!(text, narrow.pieces[page].len() - 1);
+        let caption = place(&narrow, &|p| *p == Piece::Caption("BRIEF.MD".into()));
+        assert_eq!(caption, Some(text - 1));
+        let activity = place(&narrow, &|p| *p == Piece::Caption("ACTIVITY".into()));
+        assert!(activity.expect("its activity") < text - 1);
+    }
+
+    /// A list item's lines all start right of its mark, deeper the deeper.
+    #[test]
+    fn a_list_items_text_hangs_right_of_its_mark() {
+        let long = "word ".repeat(80);
+        let item = |depth, mark| DocBlock::Item {
+            depth,
+            mark,
+            text: long.clone(),
+        };
+        let blocks = [item(0, ItemMark::Bullet), item(1, ItemMark::Number(3))];
+        let s = doc_stack(&blocks, 300);
+        let marks: Vec<Rect> = (s.pieces.iter())
+            .filter(|(_, p)| matches!(p, Piece::ItemMark(_)))
+            .map(|(r, _)| *r)
+            .collect();
+        assert_eq!(marks.len(), 2);
+        assert_eq!(marks[0].loc.x, 0);
+        assert_eq!(marks[1].loc.x, DOC_INDENT);
+        let lines = |under: i32, to: i32| -> Vec<Rect> {
+            (s.pieces.iter())
+                .filter(|(r, p)| {
+                    matches!(p, Piece::Text { .. }) && r.loc.y >= under && r.loc.y < to
+                })
+                .map(|(r, _)| *r)
+                .collect()
+        };
+        let first = lines(0, marks[1].loc.y);
+        assert!(first.len() > 1, "it wraps");
+        assert!(first.iter().all(|r| r.loc.x == DOC_MARK));
+        let second = lines(marks[1].loc.y, s.y);
+        assert!(second.len() > 1, "it wraps");
+        let x = second[0].loc.x;
+        assert!(x >= DOC_INDENT + DOC_MARK);
+        assert!(second.iter().all(|r| r.loc.x == x));
+        for r in first.iter().chain(&second) {
+            assert!(r.loc.x + r.size.w <= 300);
+        }
+    }
+
+    /// Laid out every frame, a file is measured once a width; its next
+    /// read, equal or not, is another `Arc` and laid out anew.
+    #[test]
+    fn a_file_is_laid_out_once_a_width() {
+        let blocks = Arc::new(vec![DocBlock::Para("words to lay out".to_owned())]);
+        let (first, h) = doc_laid_out(&blocks, 300);
+        let (again, same) = doc_laid_out(&blocks, 300);
+        assert!(Rc::ptr_eq(&first, &again));
+        assert_eq!(h, same);
+        let (wider, _) = doc_laid_out(&blocks, 400);
+        assert!(!Rc::ptr_eq(&first, &wider));
+        // Going between two widths, both are kept.
+        assert!(Rc::ptr_eq(&first, &doc_laid_out(&blocks, 300).0));
+        let other = Arc::new(blocks.as_ref().clone());
+        assert!(!Rc::ptr_eq(&first, &doc_laid_out(&other, 300).0));
+    }
+
+    /// A long file scrolls its page, and painting it paints only what
+    /// shows; a hover or a scroll draws no more for it.
+    #[test]
+    fn a_long_file_scrolls_and_draws_only_its_slice() {
+        use crate::chrome::Theme;
+        use std::time::{Duration, Instant};
+        let line = DocBlock::Para("a line of the plan".to_owned());
+        let view = with_doc(tab_view(), vec![line; 500]);
+        let plain = tab_at(&tab_view(), 1920);
+        let l = tab_at(&view, 1920);
+        assert!(l.scroll_room(TabColumn::Page) > plain.scroll_room(TabColumn::Page) + 5_000);
+        assert!(l.thumb(TabColumn::Page, 0.0).is_some());
+        let painter = crate::chrome::Painter::new();
+        let area = Rectangle::from_size((1920, 900).into());
+        let mut layers = FeatureTabLayers::default();
+        let t0 = Instant::now();
+        let step = |layers: &mut FeatureTabLayers, view: &FeatureTabView, k: u64| {
+            let before = layers.drawn.get();
+            layers.parts(
+                Some(view.clone()),
+                area,
+                Theme::Dark,
+                1.0,
+                t0 + Duration::from_secs(k),
+                &painter,
+                0.5,
+                None,
+            );
+            layers.drawn.get() - before
+        };
+        step(&mut layers, &view, 0);
+        step(&mut layers, &view, 1);
+        assert_eq!(step(&mut layers, &view, 2), 0);
+        let mut hovered = view.clone();
+        hovered.hover = Some(FeatureTabHit::Node(3));
+        assert_eq!(step(&mut layers, &hovered, 3), 1);
+        // Scrolled, its buffer holds what shows now, and stays at the
+        // column: it doesn't go down the tab by as much.
+        let mut scrolled = hovered.clone();
+        scrolled.scroll[TabColumn::Page as usize] = 4000.4;
+        assert_eq!(step(&mut layers, &scrolled, 4), 1);
+        assert_eq!(step(&mut layers, &scrolled, 5), 0);
+        let place = feature_tab_layout(&scrolled, area).columns[TabColumn::Page as usize].unwrap();
+        let parts = layers.parts(
+            Some(scrolled),
+            area,
+            Theme::Dark,
+            1.0,
+            t0 + Duration::from_secs(6),
+            &painter,
+            0.5,
+            None,
+        );
+        let page = parts
+            .iter()
+            .find(|p| p.clip.is_some_and(|c| c.loc.x == place.loc.x + 1))
+            .unwrap();
+        assert!((page.loc.y - f64::from(place.loc.y)).abs() <= 0.5);
+    }
+
     /// How long drawing the tab's parts takes at 2810x1856, scale 1:
     /// all of them, then after a page button's hover changes, a column
     /// scrolls a step and a rail node's hover changes. Run with `cargo
@@ -3333,6 +3825,57 @@ mod tests {
         run("hover rail node", &|v, i| {
             v.hover = Some(FeatureTabHit::Node(i % 2));
         });
+    }
+
+    /// How long the tab takes with a long file on its page: laid out at
+    /// first, laid out again, and its parts for a frame with nothing to
+    /// draw. Run with `cargo test --profile fast --bin gerdr
+    /// a_long_files_cost -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn a_long_files_cost() {
+        use crate::chrome::Theme;
+        use std::time::{Duration, Instant};
+        let painter = crate::chrome::Painter::new();
+        let area = Rectangle::from_size((1920, 1080).into());
+        let para = "A line of the plan that says what is to be done, and goes on \
+                    long enough to wrap in a column of the tab at this width.";
+        // 500 lines, and as much as `FILE_MAX` lets through.
+        for n in [500, 512 * 1024 / para.len()] {
+            let view = with_doc(tab_view(), vec![DocBlock::Para(para.to_owned()); n]);
+            let start = Instant::now();
+            let l = feature_tab_layout(&view, area);
+            eprintln!("{n} blocks, first layout: {:?}", start.elapsed());
+            eprintln!("  {} pieces", l.pieces[TabColumn::Page as usize].len());
+            let start = Instant::now();
+            for _ in 0..20 {
+                feature_tab_layout(&view, area);
+            }
+            eprintln!("  layout: {:?}", start.elapsed() / 20);
+            let mut layers = FeatureTabLayers::default();
+            let t0 = Instant::now();
+            let mut frame = |view: &FeatureTabView, k: u64| {
+                layers.parts(
+                    Some(view.clone()),
+                    area,
+                    Theme::Dark,
+                    1.0,
+                    t0 + Duration::from_secs(k),
+                    &painter,
+                    0.5,
+                    None,
+                );
+            };
+            let start = Instant::now();
+            frame(&view, 0);
+            eprintln!("  first parts: {:?}", start.elapsed());
+            frame(&view, 1);
+            let start = Instant::now();
+            for k in 0..20 {
+                frame(&view, 2 + k);
+            }
+            eprintln!("  parts, nothing to draw: {:?}", start.elapsed() / 20);
+        }
     }
 
     /// A change to one slice of the view draws only that slice again,

@@ -21,7 +21,7 @@ pub fn builtin(name: &str) -> Option<(&'static str, u32)> {
         "nudge" => (include_str!("../../assets/prompts/nudge.md"), 1),
         "send-back" => (include_str!("../../assets/prompts/send-back.md"), 1),
         "rules" => (include_str!("../../assets/prompts/rules.md"), 1),
-        "repos" => (include_str!("../../assets/prompts/repos.md"), 2),
+        "repos" => (include_str!("../../assets/prompts/repos.md"), 3),
         _ => return None,
     })
 }
@@ -59,6 +59,7 @@ mod tests {
             ("brief.path", "/d/bulk-edit/brief.md"),
             ("plan.path", "/d/bulk-edit/plan.md"),
             ("evidence.path", "/d/bulk-edit/evidence.md"),
+            ("graphs", ""),
             ("evidence", evidence),
             ("branch", "feature/bulk-edit"),
             ("multi_repo", if multi { "yes" } else { "" }),

@@ -531,7 +531,7 @@ impl WorktreeDiff {
             (false, _) => &[
                 ("Esc", "back to the feature"),
                 ("F1", "list the keys"),
-                (PREVIEW_KEY, "go to the next of Preview, Review and Split"),
+                (PREVIEW_KEY, "go between Review and Split"),
                 (APPROVE_KEY, "approve the file as it is"),
                 (SEND_BACK_KEY, "send it back to its agent with the comments"),
                 ("Shift+C", "in the review, comment on the whole file"),

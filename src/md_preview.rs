@@ -34,7 +34,7 @@ pub const PAGE: &str = "preview.html";
 pub const PREVIEW_KEY: &str = "Ctrl+Shift+V";
 
 /// A file bigger than this isn't rendered: the page says so.
-const FILE_MAX: u64 = 512 * 1024;
+pub(crate) const FILE_MAX: u64 = 512 * 1024;
 
 /// Where a preview that can't open tells the user to look (see
 /// `problems`).

@@ -595,7 +595,7 @@ fn keep_out(root: &Root) -> Result<Vec<PathBuf>, String> {
 /// `line` in the git exclude file of the repository at `repo`, shared by
 /// its worktrees: nothing tracked changes, so nothing of it can be
 /// committed. The file, when it changed.
-fn exclude_line(repo: &Path, line: &str) -> Result<Option<PathBuf>, String> {
+pub(super) fn exclude_line(repo: &Path, line: &str) -> Result<Option<PathBuf>, String> {
     let common = git(
         repo,
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
@@ -934,11 +934,18 @@ fn take_down(branch: &str, repos: &[&Repo], dir: &Path, force: bool, failed: &mu
 }
 
 /// Remove a feature folder whose worktrees are gone: its links, then the
-/// folder; anything else in it only with `force`.
+/// folder; anything else in it only with `force`. Its code graph is no
+/// work to lose: it is built again from the code.
 fn clear_dir(dir: &Path, force: bool) -> Result<(), String> {
     if force {
         return std::fs::remove_dir_all(dir)
             .map_err(|err| format!("couldn't remove {}: {err}", shown(dir)));
+    }
+    let graph = dir.join(super::graph::OUT_DIR);
+    if graph.symlink_metadata().is_ok()
+        && let Err(err) = std::fs::remove_dir_all(&graph)
+    {
+        tracing::warn!("removing {}: {err}", graph.display());
     }
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.filter_map(Result::ok) {
@@ -1892,6 +1899,41 @@ mod tests {
                 .unwrap_err()
                 .contains("no repository zzz")
         );
+    }
+
+    #[test]
+    fn a_code_graph_is_no_work_to_lose_and_goes_with_the_folder() {
+        let t = Temp::new();
+        t.repo("api", "main");
+        t.repo("web", "main");
+        let root = find_root(&t.0, &[], &[], &[]).unwrap();
+        let created = create(&root, "login", &[]).unwrap();
+        let dir = created.dir.clone();
+        let f = feature_of(&root, created, "login");
+        // On top of a multi-repository folder, which no repository sees.
+        let graph = dir.join(super::super::graph::OUT_DIR);
+        std::fs::create_dir_all(&graph).unwrap();
+        std::fs::write(graph.join("graph.json"), "{}").unwrap();
+        assert!(losses(&f).is_empty());
+        remove(&f, false).unwrap();
+        assert!(!dir.exists());
+    }
+
+    #[test]
+    fn a_single_repositorys_kept_out_code_graph_goes_with_its_worktree() {
+        let t = Temp::new();
+        let repo = t.repo("app", "main");
+        let root = find_root(&repo, std::slice::from_ref(&repo), &[], &[]).unwrap();
+        let created = create(&root, "login", &[]).unwrap();
+        let dir = created.dir.clone();
+        let f = feature_of(&root, created, "login");
+        exclude_line(&dir, "/graphify-out/").unwrap();
+        let graph = dir.join(super::super::graph::OUT_DIR);
+        std::fs::create_dir_all(&graph).unwrap();
+        std::fs::write(graph.join("graph.json"), "{}").unwrap();
+        assert!(losses(&f).is_empty());
+        remove(&f, false).unwrap();
+        assert!(!dir.exists());
     }
 
     #[test]

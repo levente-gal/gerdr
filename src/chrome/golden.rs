@@ -2169,7 +2169,6 @@ fn feature_tab_plan_review() -> super::FeatureTabView {
         status: Some(tab_line("plan.md is ready for review", CheckTone::Blocker)),
         buttons: vec![
             button("Review", ButtonStyle::Primary, Some("\u{23ce}")),
-            button("Preview", ButtonStyle::Plain, None),
             button("Show agent", ButtonStyle::Plain, None),
         ],
         sections: vec![
@@ -2179,16 +2178,141 @@ fn feature_tab_plan_review() -> super::FeatureTabView {
                 dot: Dot::Idle,
                 status: "waiting for you \u{b7} tab 2".into(),
                 tail: Vec::new(),
-                button: Some(2),
+                button: Some(1),
                 picks: Vec::new(),
             },
             PageSection::File {
                 name: "plan.md".into(),
                 state: tab_line("ready for review", CheckTone::Ready),
-                buttons: vec![1],
+                buttons: Vec::new(),
             },
         ],
     };
+    view
+}
+
+/// A brief as a file's page shows it, every kind of block in it.
+fn doc_blocks() -> Vec<crate::md_blocks::DocBlock> {
+    use crate::md_blocks::{DocBlock, ItemMark};
+    let item = |depth, mark, text: &str| DocBlock::Item {
+        depth,
+        mark,
+        text: text.into(),
+    };
+    vec![
+        DocBlock::Heading {
+            level: 1,
+            text: "Log in with a password".into(),
+        },
+        DocBlock::Para(
+            "People sign in with an email and a password, and stay signed in. A wrong \
+             password says so, without saying which of the two it was."
+                .into(),
+        ),
+        DocBlock::Heading {
+            level: 2,
+            text: "What it does".into(),
+        },
+        item(
+            0,
+            ItemMark::Bullet,
+            "After five tries the account waits a minute, and says for how long.",
+        ),
+        item(
+            1,
+            ItemMark::Bullet,
+            "The wait is per account, not per address.",
+        ),
+        item(
+            0,
+            ItemMark::Number(2),
+            "A reset link goes to the email, and works once.",
+        ),
+        item(0, ItemMark::Task(true), "Sessions last thirty days."),
+        item(
+            0,
+            ItemMark::Task(false),
+            "See https://example.com/a-link-too-long-to-fit-on-any-line-of-this-column-so-it-breaks-where-it-must-to-keep-all-of-it",
+        ),
+        DocBlock::Quote("Nobody asked for a second factor yet, and this doesn't add one.".into()),
+        DocBlock::Code(vec![
+            "POST /login".into(),
+            "{ \"email\": \"a@b.c\", \"password\": \"...\" }".into(),
+        ]),
+        DocBlock::Table(vec![
+            "Case \u{b7} Reply".into(),
+            "Wrong password \u{b7} 401".into(),
+            "Too many tries \u{b7} 429".into(),
+        ]),
+        DocBlock::Rule,
+        DocBlock::Note("Too big to show here: use Review".into()),
+    ]
+}
+
+/// Discover's brief ready: the page reads it, a button reviews it.
+fn feature_tab_discover_brief() -> super::FeatureTabView {
+    use super::{ButtonStyle, CheckTone, Dot, NodeMark, PageButton, PageSection, StagePage};
+    use crate::{agent_icons::AgentIcon, feature::Stage};
+    let mut view = feature_tab();
+    at_stage(&mut view, 0, NodeMark::Waiting, "ready for review");
+    view.page = StagePage {
+        title: "Discover".into(),
+        about: Stage::Discover.about().into(),
+        status: Some(tab_line("brief.md is ready for review", CheckTone::Blocker)),
+        buttons: vec![
+            PageButton {
+                label: "Review brief".into(),
+                style: ButtonStyle::Primary,
+                key: Some("\u{23ce}"),
+            },
+            PageButton {
+                label: "Show agent".into(),
+                style: ButtonStyle::Plain,
+                key: None,
+            },
+        ],
+        sections: vec![
+            PageSection::Agent {
+                icon: AgentIcon::Claude,
+                name: "claude".into(),
+                dot: Dot::Idle,
+                status: "waiting for you \u{b7} tab 2".into(),
+                tail: Vec::new(),
+                button: Some(1),
+                picks: Vec::new(),
+            },
+            PageSection::File {
+                name: "brief.md".into(),
+                state: tab_line("ready for review", CheckTone::Ready),
+                buttons: Vec::new(),
+            },
+            PageSection::Doc {
+                name: "brief.md".into(),
+                blocks: std::sync::Arc::new(doc_blocks()),
+            },
+        ],
+    };
+    view
+}
+
+/// A plan too long for its column, its milestones over it, scrolled.
+fn feature_tab_plan_long() -> super::FeatureTabView {
+    use super::{CheckTone, NodeMark, PageSection, TabColumn};
+    let mut view = feature_tab_plan_review();
+    at_stage(&mut view, 1, NodeMark::Waiting, "ready for review");
+    let blocks = (0..12).flat_map(|_| doc_blocks()).collect();
+    let items = vec![(true, "API".to_owned()), (false, "UI".to_owned())];
+    view.page.sections.push(PageSection::Milestones {
+        done: 1,
+        total: 2,
+        items,
+    });
+    view.page.sections.push(PageSection::Doc {
+        name: "plan.md".into(),
+        blocks: std::sync::Arc::new(blocks),
+    });
+    view.page.status = Some(tab_line("plan.md is ready for review", CheckTone::Blocker));
+    view.scroll[TabColumn::Page as usize] = 300.0;
     view
 }
 
@@ -2341,7 +2465,6 @@ fn feature_tab_brief(locked: bool) -> super::FeatureTabView {
         ));
     }
     buttons.push(button("Open brief", ButtonStyle::Plain, None));
-    buttons.push(button("Preview", ButtonStyle::Plain, None));
     let (status, state) = match locked {
         true => (
             "Done 1h ago by you \u{b7} locked: Plan has plan.md",
@@ -2354,14 +2477,20 @@ fn feature_tab_brief(locked: bool) -> super::FeatureTabView {
         about: Stage::Discover.about().into(),
         status: Some(tab_line(status, CheckTone::Ready)),
         buttons,
-        sections: vec![PageSection::File {
-            name: "brief.md".into(),
-            state: tab_line(state, CheckTone::Ready),
-            buttons: match locked {
-                true => vec![1, 2],
-                false => vec![2, 3],
+        sections: vec![
+            PageSection::File {
+                name: "brief.md".into(),
+                state: tab_line(state, CheckTone::Ready),
+                buttons: match locked {
+                    true => vec![1],
+                    false => vec![2],
+                },
             },
-        }],
+            PageSection::Doc {
+                name: "brief.md".into(),
+                blocks: std::sync::Arc::new(doc_blocks()),
+            },
+        ],
     };
     let mut hints = vec![
         ("Left / Right", "stage"),
@@ -2399,7 +2528,6 @@ fn feature_tab_start_over() -> super::FeatureTabView {
         status: Some(tab_line("plan.md is ready for review", CheckTone::Blocker)),
         buttons: vec![
             button("Review", ButtonStyle::Primary, Some("\u{23ce}")),
-            button("Preview", ButtonStyle::Plain, None),
             button("Restart agent", ButtonStyle::Plain, Some("Ctrl+R")),
             button(
                 "Start over\u{2026}",
@@ -2407,12 +2535,29 @@ fn feature_tab_start_over() -> super::FeatureTabView {
                 Some("Ctrl+Shift+Del"),
             ),
         ],
-        sections: vec![PageSection::File {
-            name: "plan.md".into(),
-            state: tab_line("ready for review", CheckTone::Ready),
-            buttons: vec![1],
-        }],
+        sections: vec![
+            PageSection::File {
+                name: "plan.md".into(),
+                state: tab_line("ready for review", CheckTone::Ready),
+                buttons: Vec::new(),
+            },
+            PageSection::Doc {
+                name: "plan.md".into(),
+                blocks: std::sync::Arc::new(doc_blocks()),
+            },
+        ],
     };
+    let hints = [
+        ("Left / Right", "stage"),
+        ("Enter", "review plan"),
+        ("Tab", "repositories"),
+        ("Ctrl+O", "open tab"),
+        ("Ctrl+C", "copy path"),
+        ("F1", "all keys"),
+    ];
+    view.hints = (hints.iter())
+        .map(|(k, a)| ((*k).to_owned(), (*a).to_owned()))
+        .collect();
     view
 }
 
@@ -2603,7 +2748,7 @@ fn feature_tab_rail_wrap() -> super::FeatureTabView {
 }
 
 /// The feature tab's fixtures, by name.
-fn feature_tabs() -> [(&'static str, super::FeatureTabView); 17] {
+fn feature_tabs() -> [(&'static str, super::FeatureTabView); 19] {
     [
         ("tab_build", feature_tab()),
         ("tab_plan_review", feature_tab_plan_review()),
@@ -2622,11 +2767,13 @@ fn feature_tabs() -> [(&'static str, super::FeatureTabView); 17] {
         ("tab_approved", feature_tab_approved()),
         ("tab_locked", feature_tab_locked()),
         ("tab_start_over", feature_tab_start_over()),
+        ("tab_discover_brief", feature_tab_discover_brief()),
+        ("tab_plan_long", feature_tab_plan_long()),
     ]
 }
 
 /// Each fixture at the width it shows best at, and Build at all three.
-const TAB_SURFACES: [(&str, i32); 21] = [
+const TAB_SURFACES: [(&str, i32); 24] = [
     ("tab_build", 860),
     ("tab_build", 1180),
     ("tab_build", 1920),
@@ -2648,9 +2795,12 @@ const TAB_SURFACES: [(&str, i32); 21] = [
     ("tab_approved", 1180),
     ("tab_locked", 1180),
     ("tab_start_over", 1180),
+    ("tab_discover_brief", 1180),
+    ("tab_discover_brief", 860),
+    ("tab_plan_long", 1180),
 ];
 
-const FEATURE_TAB: [&str; 21] = [
+const FEATURE_TAB: [&str; 24] = [
     "tab_build_860",
     "tab_build_1180",
     "tab_build_1920",
@@ -2672,16 +2822,19 @@ const FEATURE_TAB: [&str; 21] = [
     "tab_approved_1180",
     "tab_locked_1180",
     "tab_start_over_1180",
+    "tab_discover_brief_1180",
+    "tab_discover_brief_860",
+    "tab_plan_long_1180",
 ];
 
 /// The recorded hashes of `FEATURE_TAB`, per case in `CASES`.
-const GOLDEN_FEATURE_TAB: [[u64; 21]; 4] = [
+const GOLDEN_FEATURE_TAB: [[u64; 24]; 4] = [
     // Dark at 1
     [
         0xab7c76988146b933, // tab_build_860
         0xafa33d7bf6b96f95, // tab_build_1180
         0x2edd90f8815151bc, // tab_build_1920
-        0x2feb811507ad9ad5, // tab_plan_review_1180
+        0xef9c0e6657c788bc, // tab_plan_review_1180
         0xcd847a6568a005e8, // tab_verify_failed_1920
         0x98e69e2db7da2b19, // tab_ship_blocked_1180
         0xdb3b8f1e1f9e17eb, // tab_done_1920
@@ -2696,16 +2849,19 @@ const GOLDEN_FEATURE_TAB: [[u64; 21]; 4] = [
         0x99738de657365076, // tab_picks_running_860
         0x846d510a1650a771, // tab_resume_1180
         0x9b13d1415d51938c, // tab_resume_860
-        0x0d89b260275ae8b1, // tab_approved_1180
-        0x80f682e509119784, // tab_locked_1180
-        0x3503ea767a1bee85, // tab_start_over_1180
+        0x39eadd7fa410d650, // tab_approved_1180
+        0xad81eaf7cac76fa5, // tab_locked_1180
+        0x74b4ad6475d74c77, // tab_start_over_1180
+        0x34decd0d4673fff6, // tab_discover_brief_1180
+        0x7dc37ebc897ad332, // tab_discover_brief_860
+        0xc8741c1c5dff5c5d, // tab_plan_long_1180
     ],
     // Dark at 2
     [
         0x11e5857e9e9a3fbf, // tab_build_860
         0x97a9accaf3019f10, // tab_build_1180
         0xff16eab90c483c31, // tab_build_1920
-        0xdd8e3e36d41d428b, // tab_plan_review_1180
+        0x6ba5c53a2d63f01d, // tab_plan_review_1180
         0x454ba84afa7d9d09, // tab_verify_failed_1920
         0x37aa3a0a4560a891, // tab_ship_blocked_1180
         0x97b1fc7842bbbf06, // tab_done_1920
@@ -2720,16 +2876,19 @@ const GOLDEN_FEATURE_TAB: [[u64; 21]; 4] = [
         0xe73d2375a828a0be, // tab_picks_running_860
         0x589c27cc84b52cd6, // tab_resume_1180
         0xb7c4fc70a51ea543, // tab_resume_860
-        0x5939f251bc673eb6, // tab_approved_1180
-        0x37a2122b18bc2ee3, // tab_locked_1180
-        0xe4c6c7186494487e, // tab_start_over_1180
+        0x76569004d8b06b59, // tab_approved_1180
+        0xf81473720c24b0bc, // tab_locked_1180
+        0xed85a4cc1c5b6b40, // tab_start_over_1180
+        0x53b7af7220a44448, // tab_discover_brief_1180
+        0xa155d202ba43ab69, // tab_discover_brief_860
+        0xfd9ff94dad490698, // tab_plan_long_1180
     ],
     // Light at 1
     [
         0x28854bd740fef650, // tab_build_860
         0x30ff0cca15357e75, // tab_build_1180
         0x5f34c051cf5a2803, // tab_build_1920
-        0x9e6ced722a470604, // tab_plan_review_1180
+        0x1d23fcb8663d606d, // tab_plan_review_1180
         0xf9491c38484fe292, // tab_verify_failed_1920
         0xd4382c14f1fdc6da, // tab_ship_blocked_1180
         0xd651e461bab3c526, // tab_done_1920
@@ -2744,16 +2903,19 @@ const GOLDEN_FEATURE_TAB: [[u64; 21]; 4] = [
         0x2c6aa6f30c1af15e, // tab_picks_running_860
         0x184835d662cd8025, // tab_resume_1180
         0x99c6938e78f9f4e0, // tab_resume_860
-        0xb07709310121e218, // tab_approved_1180
-        0x8a56e9eae58dae15, // tab_locked_1180
-        0x6886bc958f2de166, // tab_start_over_1180
+        0xf045c72f789d9f28, // tab_approved_1180
+        0xb54cf9c6c0040d2d, // tab_locked_1180
+        0xaed9f7608e45c53c, // tab_start_over_1180
+        0x06cee71d0b39fd32, // tab_discover_brief_1180
+        0xee47b5147d19820e, // tab_discover_brief_860
+        0xbb07bf48aa661251, // tab_plan_long_1180
     ],
     // Light at 2
     [
         0x6d78d2aba22ec9b1, // tab_build_860
         0x6f9ed9768b863931, // tab_build_1180
         0xa499ed71e1f32c81, // tab_build_1920
-        0xd55a9bfe3930be62, // tab_plan_review_1180
+        0x0a9c42f145462e7b, // tab_plan_review_1180
         0xfdf6b29d1c7e227a, // tab_verify_failed_1920
         0x73b9c08e76158874, // tab_ship_blocked_1180
         0x56f50cc615e71d21, // tab_done_1920
@@ -2768,9 +2930,12 @@ const GOLDEN_FEATURE_TAB: [[u64; 21]; 4] = [
         0x9a50304d4c453b9d, // tab_picks_running_860
         0x642ff83fbcf2a16d, // tab_resume_1180
         0xd6a7d2d339fb6bc1, // tab_resume_860
-        0xf3c8cb09ab23ff2f, // tab_approved_1180
-        0x0db756665c25d62a, // tab_locked_1180
-        0x5ee5174d47d01643, // tab_start_over_1180
+        0x319f4ad9102f34cc, // tab_approved_1180
+        0x7aed49b71835a4c5, // tab_locked_1180
+        0x15e01ab6d2217ec6, // tab_start_over_1180
+        0x0d3b6d60fae657e4, // tab_discover_brief_1180
+        0x329a2617d9cc8297, // tab_discover_brief_860
+        0xe6491a1a5c28d0d6, // tab_plan_long_1180
     ],
 ];
 
@@ -2927,6 +3092,9 @@ fn doc_tab_closed(locked: bool) -> super::ReposView {
         false => "approved 1h ago by you".into(),
     };
     view.summary_tone = crate::chrome::Tone::Success;
+    // A brief's tab has Review and Split only, and this one isn't wide enough
+    // for Split.
+    view.modes = None;
     view
 }
 
@@ -2987,8 +3155,8 @@ const GOLDEN_DOC_TAB: [[u64; 8]; 4] = [
         0x163df7c54996fb12, // doc_preview_1920
         0xe84bd20b374af24e, // doc_split_1920
         0xf0ee57f894f597ee, // doc_review_850
-        0x14ff1db1033ebab8, // doc_approved_1180
-        0x1098438e0809b7ac, // doc_locked_1180
+        0x3fd2cd87c27c4b86, // doc_approved_1180
+        0x33eb8eed4d64a092, // doc_locked_1180
     ],
     // Dark at 2
     [
@@ -2998,8 +3166,8 @@ const GOLDEN_DOC_TAB: [[u64; 8]; 4] = [
         0xe1f51d6886965409, // doc_preview_1920
         0xd7989b82d2317fa0, // doc_split_1920
         0x6a43d0181fc8f5d0, // doc_review_850
-        0xf61bf3d43c28e4e0, // doc_approved_1180
-        0xab55207336f0f88c, // doc_locked_1180
+        0x41896b837fde7366, // doc_approved_1180
+        0x1de54ea09b2ca636, // doc_locked_1180
     ],
     // Light at 1
     [
@@ -3009,8 +3177,8 @@ const GOLDEN_DOC_TAB: [[u64; 8]; 4] = [
         0x50dcf4fa733c2761, // doc_preview_1920
         0xf8b91e043addce35, // doc_split_1920
         0xc0b7a7bdb73caf1b, // doc_review_850
-        0x1106fd610dbd0790, // doc_approved_1180
-        0xc1131c10e75a8fc5, // doc_locked_1180
+        0xa93501dea209e676, // doc_approved_1180
+        0x0b1096da905fd34b, // doc_locked_1180
     ],
     // Light at 2
     [
@@ -3020,8 +3188,8 @@ const GOLDEN_DOC_TAB: [[u64; 8]; 4] = [
         0xad043f4a3dce9b22, // doc_preview_1920
         0xa46109d5bb9516f7, // doc_split_1920
         0x004dd9cbf09f97ac, // doc_review_850
-        0xe2353e81d3719bff, // doc_approved_1180
-        0x91f0272ec014d39a, // doc_locked_1180
+        0x6d1e2c6085670016, // doc_approved_1180
+        0x8a582ebb63d68533, // doc_locked_1180
     ],
 ];
 

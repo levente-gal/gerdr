@@ -29,6 +29,7 @@
 
 pub mod agents;
 pub mod artifacts;
+pub mod graph;
 pub mod hook;
 pub mod layout;
 pub mod manual;

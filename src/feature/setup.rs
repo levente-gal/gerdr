@@ -23,6 +23,7 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
 
@@ -227,6 +228,28 @@ pub(super) fn shell(
     stderr: Stdio,
     timeout: Duration,
 ) -> Exit {
+    shell_until(
+        command,
+        dir,
+        slug,
+        stdout,
+        stderr,
+        timeout,
+        &AtomicBool::new(false),
+    )
+}
+
+/// `shell` that `stop` ends too, like the timeout does: then what it
+/// returns says nothing, and the caller knows why it ended.
+pub(super) fn shell_until(
+    command: &str,
+    dir: &Path,
+    slug: &str,
+    stdout: Stdio,
+    stderr: Stdio,
+    timeout: Duration,
+    stop: &AtomicBool,
+) -> Exit {
     use std::os::unix::process::{CommandExt, ExitStatusExt};
     let mut cmd = Command::new("sh");
     cmd.arg("-c")
@@ -250,7 +273,7 @@ pub(super) fn shell(
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break Some(status),
-            Ok(None) if started.elapsed() >= timeout => break None,
+            Ok(None) if started.elapsed() >= timeout || stop.load(Ordering::Relaxed) => break None,
             Ok(None) => std::thread::sleep(Duration::from_millis(50)),
             Err(_) => break None,
         }

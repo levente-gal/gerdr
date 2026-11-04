@@ -32,7 +32,7 @@ use crate::{
     feature::{
         self, Feature, PerProject, Stage, Status,
         agents::{Flavor, StageRun, Stop, command_line, needs, resume_line, session_file},
-        artifacts,
+        artifacts, graph,
         patch::Reading,
         review_import::FindingState,
         store, verify,
@@ -681,6 +681,10 @@ pub(crate) fn vars(
     } else {
         String::new()
     };
+    let graphs = (graph::folders(feature).iter())
+        .map(|folder| format!("- {}", graph::file(&folder.dir).display()))
+        .collect::<Vec<_>>()
+        .join("\n");
     [
         ("feature.title", feature.title.clone()),
         ("feature.slug", feature.slug.clone()),
@@ -702,6 +706,7 @@ pub(crate) fn vars(
         ),
         ("repos", repos),
         ("projects", projects),
+        ("graphs", graphs),
         ("comments", String::new()),
         ("comments.path", String::new()),
         ("missing", String::new()),
@@ -990,6 +995,7 @@ impl Gerdr {
         let Some(need) = needs(stage) else {
             return false;
         };
+        self.refresh_feature_graphs(project, slug, false);
         let names = self.projects.names(&feature);
         let workflow = self.projects.project(project).map(|p| &p.workflow);
         let picked = stage_pick(&feature, stage, workflow, &self.cli_agents);
@@ -1351,7 +1357,6 @@ impl Gerdr {
         }
         let title = feature.title.clone();
         self.save_feature(project, slug);
-        self.open_doc_tab_behind(project, slug, stage);
         let summary = format!(
             "{} of \u{201c}{title}\u{201d} is ready for review",
             doc_word(stage)
@@ -2179,6 +2184,29 @@ mod tests {
         let v = vars(&one, &names, Path::new("/data/b"), Stage::Plan);
         assert_eq!((v["repos"].as_str(), v["projects"].as_str()), ("api", ""));
         assert_eq!(v["multi_repo"], "");
+    }
+
+    #[test]
+    fn prompts_name_the_code_graphs_of_projects_that_keep_them() {
+        let dir = std::env::temp_dir().join(format!("gerdr-prompt-graph-{}", std::process::id()));
+        let main = dir.join("api");
+        std::fs::create_dir_all(main.join(graph::OUT_DIR)).unwrap();
+        std::fs::write(graph::file(&main), "{}").unwrap();
+        let mut f = feature("a", vec![repo("api", true)], 0);
+        f.multi = false;
+        let names = PerProject::all("Acme".to_owned());
+        let without = vars(&f, &names, Path::new("/data/a"), Stage::Plan);
+        assert_eq!(without["graphs"], "");
+        let text = prompts::render_builtin("plan", &without).unwrap();
+        assert!(!text.contains("graphify"));
+        f.repos[0].main = main;
+        let with = vars(&f, &names, Path::new("/data/a"), Stage::Plan);
+        let file = graph::file(&f.dir);
+        assert_eq!(with["graphs"], format!("- {}", file.display()));
+        let text = prompts::render_builtin("plan", &with).unwrap();
+        assert!(text.contains("graphify query"));
+        assert!(text.contains(&format!("from:\n\n{}\n\nAfter", with["graphs"])));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
