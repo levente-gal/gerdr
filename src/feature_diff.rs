@@ -6,8 +6,9 @@
 //! viewed (see `feature::viewed`); Space ticks it. AI review's findings
 //! show as comments of their own, on their line, else on their file's
 //! header, else in the list of those not on a line, each with Fix and
-//! Dismiss. The user's own comments are kept in the feature's data dir
-//! (`code-review-comments.json`) until sent back to the Build agent.
+//! Dismiss; `]` and `[` go through them. The user's own comments are kept
+//! in the feature's data dir (`code-review-comments.json`) until sent back
+//! to the Build agent. Each card's heading says whose it is.
 //!
 //! Approve, only at the Code review stage, wants every file viewed as it
 //! is now, no comment left, nothing uncommitted and no finding holding up.
@@ -43,7 +44,7 @@ pub const STILL_READING: &str = "Still reading the diff";
 pub const NO_OWN_COMMENT: &str = "Add a comment first: press c on a line";
 
 /// The keys of a feature's code review, before the diff's own (F1).
-pub const KEYS: [(&str, &str); 8] = [
+pub const KEYS: [(&str, &str); 9] = [
     ("Esc", "close the code review"),
     ("F1", "list the keys"),
     ("Ctrl+Enter", "approve Code review"),
@@ -57,6 +58,7 @@ pub const KEYS: [(&str, &str); 8] = [
         "go to the next or the previous file not viewed",
     ),
     ("f", "fix the finding, or take that back"),
+    ("c", "on a finding, edit its fix or comment on it"),
     ("Del", "dismiss the finding, saying why, or reopen it"),
 ];
 
@@ -244,6 +246,8 @@ impl FeatureOf {
         let single = (self.repos.len() == 1).then(|| &self.repos[0]);
         self.findings
             .iter()
+            // An item the user added with no file has no place here.
+            .filter(|f| !f.file.is_empty())
             .map(|f| {
                 let repo = (self.repos.iter().find(|r| r.name == f.repo)).or(single);
                 let root = repo.map(|r| r.root.clone()).unwrap_or_default();
@@ -265,14 +269,11 @@ pub fn finding_comment(f: &Finding, root: PathBuf, file: Option<&FileDiff>) -> C
             .into_iter()
             .find(|l| l.number == n && l.kind != LineKind::Removed)
     });
-    let tag = match f.state {
-        FindingState::Open => String::new(),
-        FindingState::Fix => " \u{b7} to fix".into(),
-        FindingState::Sent => " \u{b7} sent to fix".into(),
-        FindingState::Fixed => " \u{b7} fixed".into(),
-        FindingState::Dismissed => format!(" \u{b7} dismissed: {}", f.reason),
-    };
-    let mut text = format!("{} \u{b7} {}{tag}", f.severity.label(), f.title);
+    // Its severity and where it stands are on the card's heading.
+    let mut text = f.title.clone();
+    if f.state == FindingState::Dismissed && !f.reason.is_empty() {
+        text.push_str(&format!("\nDismissed: {}", f.reason));
+    }
     if let (Some(n), None) = (f.line, on) {
         text.push_str(&format!("\nline {n}"));
     }
@@ -280,9 +281,16 @@ pub fn finding_comment(f: &Finding, root: PathBuf, file: Option<&FileDiff>) -> C
         text.push('\n');
         text.push_str(&f.body);
     }
-    if !f.fix.is_empty() {
+    if let Some(fix) = &f.my_fix {
+        text.push_str("\nYour fix: ");
+        text.push_str(fix);
+    } else if !f.fix.is_empty() {
         text.push_str("\nFix: ");
         text.push_str(&f.fix);
+    }
+    if !f.note.is_empty() {
+        text.push_str("\nYour comment: ");
+        text.push_str(&f.note);
     }
     Comment {
         root,
@@ -710,17 +718,33 @@ impl Gerdr {
         };
         let (project, slug) = (fe.project.clone(), fe.slug.clone());
         self.decide_finding(&project, &slug, &id, decision);
-        let findings = (self.feature(&project, &slug))
+        self.feature_findings_changed(&project, &slug);
+    }
+
+    /// The findings of `project`'s `slug` changed: the open code review, if
+    /// it is of that feature, shows them as the record has them.
+    pub(crate) fn feature_findings_changed(&mut self, project: &str, slug: &str) {
+        let findings = (self.feature(project, slug))
             .and_then(|f| f.review.as_ref())
             .map(|r| r.findings.clone())
             .unwrap_or_default();
         let env = self.worktree_env();
         if let Some(wd) = self.wd_mut()
-            && let Some(fe) = wd.feature.as_mut()
+            && let Some(fe) =
+                (wd.feature.as_mut()).filter(|fe| fe.project == project && fe.slug == slug)
         {
             fe.findings = findings;
             wd.place_findings(env);
         }
+    }
+
+    /// Edit finding `id` of the open code review, in the finding dialog.
+    pub(crate) fn feature_edit_finding(&mut self, id: &str) {
+        let Some(fe) = self.feature_of() else {
+            return;
+        };
+        let (project, slug) = (fe.project.clone(), fe.slug.clone());
+        self.ask_edit_finding(&project, &slug, id);
     }
 
     /// Approve Code review, unless something holds it up (said why).
@@ -972,6 +996,42 @@ mod tests {
     }
 
     #[test]
+    fn a_findings_card_shows_the_users_words_and_an_item_with_no_file_stays_off_the_diff() {
+        let f = Finding {
+            id: "r1-1".into(),
+            file: "src/a.rs".into(),
+            title: "Off".into(),
+            fix: "Reviewer's".into(),
+            my_fix: Some("Mine".into()),
+            note: "Careful".into(),
+            ..Finding::default()
+        };
+        let c = finding_comment(&f, "/w/api".into(), None);
+        assert!(c.text.contains("Your fix: Mine"), "{}", c.text);
+        assert!(c.text.contains("Your comment: Careful"), "{}", c.text);
+        assert!(!c.text.contains("Reviewer's"), "{}", c.text);
+        let fe = FeatureOf {
+            repos: vec![RepoOf {
+                name: "api".into(),
+                root: "/w/api".into(),
+                ..RepoOf::default()
+            }],
+            findings: vec![
+                f,
+                Finding {
+                    id: "u1".into(),
+                    yours: true,
+                    ..Finding::default()
+                },
+            ],
+            ..FeatureOf::default()
+        };
+        let comments = fe.finding_comments(&HashMap::new());
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0].flag.as_ref().unwrap().id, "r1-1");
+    }
+
+    #[test]
     fn findings_sit_on_their_line_else_on_their_file() {
         let line = |number, kind, text: &str| Line {
             kind,
@@ -1010,7 +1070,8 @@ mod tests {
             (c.lines[0].kind, c.lines[0].text.as_str()),
             (LineKind::Added, "new")
         );
-        assert_eq!(c.text, "high \u{b7} Leaks\nIt leaks.\nFix: Close it.");
+        // Its severity and state are on its heading (`review::Flag`).
+        assert_eq!(c.text, "Leaks\nIt leaks.\nFix: Close it.");
         assert_eq!(c.flag.as_ref().map(|f| f.id.as_str()), Some("r1-1"));
         // Its line not in the diff: on the file, saying the line.
         f.line = Some(9);
@@ -1018,16 +1079,13 @@ mod tests {
         f.reason = "on purpose".into();
         let c = finding_comment(&f, "/w/api".into(), Some(&file));
         assert!(c.lines.is_empty());
-        assert!(
-            c.text
-                .starts_with("high \u{b7} Leaks \u{b7} dismissed: on purpose\nline 9\n")
-        );
+        assert!(c.text.starts_with("Leaks\nDismissed: on purpose\nline 9\n"));
     }
 
     #[test]
     fn its_view_is_read_only_with_viewed_ticks_and_finding_cards() {
         use crate::{
-            chrome::{Density, ReposButton, ReposHit},
+            chrome::{Density, DetailRow, ReposButton, ReposHit},
             diff_view::Outcome,
             worktree_diff::Done,
         };
@@ -1097,6 +1155,35 @@ mod tests {
             crate::worktree_diff::ALL_VIEWED,
         )));
         assert_eq!(wd.key(&mods, down, down, ENV), all);
+        // Its finding is gone to from anywhere, and the title counts it.
+        wd.diff.cursor = None;
+        let right = Keysym::bracketright;
+        assert_eq!(wd.key(&ModifiersState::default(), right, right, ENV), None);
+        let view = wd.view(ENV);
+        assert!(view.title.ends_with("1 finding, open"), "{}", view.title);
+        assert!(view.rows.iter().any(|row| matches!(
+            row,
+            DetailRow::CommentHead { finding: Some(f), place }
+                if f.severity == "medium" && place == "finding 1 of 1"
+        )));
+        let hint = wd
+            .hints()
+            .into_iter()
+            .find(|h| h.button == ReposButton::NextComment);
+        let hint = hint.expect("the footer goes to it too");
+        assert_eq!(
+            (hint.key.as_str(), hint.label.as_str()),
+            ("] / [", "next, previous finding")
+        );
+        // The title's button goes to it too, from elsewhere.
+        wd.diff.cursor = None;
+        let next = ReposHit::Button(ReposButton::NextComment);
+        assert_eq!(wd.click(next, ENV), None);
+        let on = wd.diff.cursor.as_ref().map(|c| wd.diff.rows[c.row]);
+        assert!(
+            matches!(on, Some(crate::diff_view::DiffRow::CommentHead { .. })),
+            "{on:?}"
+        );
         // Its code isn't edited.
         let refused = Some(Done::Diff(Outcome::Notice(
             crate::worktree_diff::FEATURE_READ_ONLY,

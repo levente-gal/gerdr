@@ -98,6 +98,12 @@ pub fn repos_detail_line(density: Density) -> i32 {
     }
 }
 const REPOS_MONO_SIZE: f32 = 14.0;
+/// How strongly a finding's heading band takes its severity's colour.
+const COMMENT_HEAD_TINT: f32 = 0.24;
+/// Between the parts of a comment's heading.
+const COMMENT_HEAD_GAP: i32 = 8;
+/// A finding's "AI review" tag's padding.
+const COMMENT_TAG_PAD: i32 = 6;
 /// A file's header in the diff: its fold chevron's room, its checkbox's,
 /// and its status letter's pill; how far in a diff line's text starts,
 /// past the bar marking it added or removed, and that bar's width.
@@ -616,9 +622,16 @@ pub enum DetailRow {
     Line(crate::diff::Line),
     /// What isn't a hunk: `Binary file`, an untracked folder's files.
     Note(String),
-    /// A row of a review comment: the first and last of its rows round
-    /// its card. An AI review finding's card takes its `tone` (by
-    /// severity, muted once dismissed); the user's own have none.
+    /// A review comment's heading: who wrote it and where it is among
+    /// those of its kind (`place`: `finding 2 of 5`). The first of its card.
+    CommentHead {
+        /// What the AI reviewer found; none for the user's own.
+        finding: Option<FindingHead>,
+        place: String,
+    },
+    /// A row of a review comment: the last of its rows rounds its card. An
+    /// AI review finding's card takes its `tone` (by severity, muted once
+    /// dismissed); the user's own have none.
     Comment {
         text: String,
         first: bool,
@@ -634,6 +647,16 @@ pub enum DetailRow {
         first: bool,
         last: bool,
     },
+}
+
+/// What an AI review finding's heading says.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FindingHead {
+    /// `high`.
+    pub severity: String,
+    /// `to fix`; none while undecided.
+    pub state: Option<String>,
+    pub tone: Tone,
 }
 
 /// A repository's header in the diff.
@@ -797,6 +820,10 @@ pub enum ReposButton {
     MarkViewed,
     /// A feature's code review: go to the next file not viewed.
     NextUnviewed,
+    /// Go to the next review comment or finding in the diff, or the one
+    /// before.
+    NextComment,
+    PrevComment,
 }
 
 impl ReposButton {
@@ -862,6 +889,8 @@ impl ReposButton {
             ReposButton::ReopenFinding => "Reopen",
             ReposButton::MarkViewed => "Viewed",
             ReposButton::NextUnviewed => "Next unviewed",
+            ReposButton::NextComment => "Next comment",
+            ReposButton::PrevComment => "Previous comment",
         }
     }
 }
@@ -2654,6 +2683,23 @@ pub fn name_first(path: &str) -> (&str, String) {
     (&to[cut..], rest)
 }
 
+/// The colour of the words on a solid `tone` tag ("AI review").
+fn comment_tag_ink(tone: Tone, p: &Palette) -> Rgb {
+    match tone {
+        Tone::Normal | Tone::Muted => p.elevated,
+        _ => p.on_accent,
+    }
+}
+
+/// The colour of a finding's heading words on its band, dim as its card's
+/// once dismissed.
+fn comment_head_word(tone: Tone, p: &Palette) -> Rgb {
+    match tone {
+        Tone::Muted => p.muted,
+        _ => p.text,
+    }
+}
+
 /// The colour of `tone` in `p`.
 fn tone_color(tone: Tone, p: &Palette) -> Rgb {
     match tone {
@@ -4200,6 +4246,17 @@ impl Painter {
                     p.placeholder,
                 );
             }
+            DetailRow::CommentHead { finding, place } => {
+                self.comment_head(
+                    c,
+                    (bx + inset, bend),
+                    row_band,
+                    (finding.as_ref(), place),
+                    lit.is_some(),
+                    scale,
+                    p,
+                );
+            }
             DetailRow::Comment {
                 text,
                 first,
@@ -4359,6 +4416,85 @@ impl Painter {
             c.rounded(x0, top, x1 - x0, bottom - top, r, fill);
         });
         x0 + (COMMENT_INDENT as f32 * s).round()
+    }
+
+    /// A review comment's heading, the first row of its card, says whose
+    /// it is at a glance: on a finding, a band in its severity's colour, a
+    /// solid "AI review" tag, the severity and where it stands; on the
+    /// user's own, the plain card and "Your comment". Then its `place`.
+    #[allow(clippy::too_many_arguments)]
+    fn comment_head(
+        &self,
+        c: &mut Canvas,
+        (x0, x1): (f32, f32),
+        row_band: (i32, i32),
+        (finding, place): (Option<&FindingHead>, &str),
+        lit: bool,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let s = scale as f32;
+        let (y, h) = row_band;
+        let accent = finding.map_or(p.accent, |f| tone_color(f.tone, p));
+        // Grey takes less of a band to show, and the words stay readable.
+        let band_tint = match finding.map(|f| f.tone) {
+            Some(Tone::Normal | Tone::Muted) => COMMENT_HEAD_TINT - 0.08,
+            Some(_) => COMMENT_HEAD_TINT,
+            None => 0.1,
+        };
+        let strength = band_tint + if lit { 0.08 } else { 0.0 };
+        let fill = mix(p.elevated, accent, strength);
+        let mut pen = self.comment_card(c, (x0, x1), row_band, (true, false), fill, scale);
+        c.fill(
+            x0 as i32,
+            y,
+            (2.0 * s).round().max(1.0) as i32,
+            h,
+            mix(p.elevated, accent, 0.7),
+        );
+        let Some(finding) = finding else {
+            let word = "Your comment";
+            self.bold_text(c, word, SMALL_FONT_SIZE, pen, x1, row_band, scale, p.text);
+            pen += self.bold_width(word, SMALL_FONT_SIZE, scale) + COMMENT_HEAD_GAP as f32 * s;
+            self.mixed_text(c, place, SMALL_FONT_SIZE, pen, x1, row_band, scale, p.muted);
+            return;
+        };
+        let word = "AI review";
+        let pad = (COMMENT_TAG_PAD as f32 * s).round();
+        let w = self.bold_width(word, SMALL_FONT_SIZE, scale) + 2.0 * pad;
+        let tag_h = (h as f32 - 2.0 * s.round()).max(1.0);
+        let tag_y = (y as f32 + (h as f32 - tag_h) / 2.0).round();
+        c.rounded(pen, tag_y, w, tag_h, CHIP_RADIUS * s, accent);
+        let ink = comment_tag_ink(finding.tone, p);
+        let tag_band = (tag_y as i32, tag_h as i32);
+        self.bold_text(
+            c,
+            word,
+            SMALL_FONT_SIZE,
+            pen + pad,
+            x1,
+            tag_band,
+            scale,
+            ink,
+        );
+        pen += w + COMMENT_HEAD_GAP as f32 * s;
+        let words = comment_head_word(finding.tone, p);
+        self.bold_text(
+            c,
+            &finding.severity,
+            SMALL_FONT_SIZE,
+            pen,
+            x1,
+            row_band,
+            scale,
+            words,
+        );
+        pen += self.bold_width(&finding.severity, SMALL_FONT_SIZE, scale);
+        let rest = match &finding.state {
+            Some(state) => format!(" \u{b7} {state} \u{b7} {place}"),
+            None => format!(" \u{b7} {place}"),
+        };
+        self.mixed_text(c, &rest, SMALL_FONT_SIZE, pen, x1, row_band, scale, words);
     }
 
     /// At the right of a header, ending at `right` (physical pixels):
@@ -5592,9 +5728,13 @@ mod tests {
                         "    let changes = parse_changes(&out);",
                         &[],
                     ),
+                    DetailRow::CommentHead {
+                        finding: None,
+                        place: "comment 1 of 1".into(),
+                    },
                     DetailRow::Comment {
                         text: "Why -z here? Paths with newlines".into(),
-                        first: true,
+                        first: false,
                         last: false,
                         tone: None,
                     },

@@ -166,6 +166,7 @@ enum Intercepted {
     Tasks(crate::tasks::Outcome),
     /// The new feature dialog asked for this.
     NewFeature(crate::features::DialogOutcome),
+    FindingDialog(crate::finding_dialog::FindingDialogOutcome),
     /// The name and email dialog asked for this.
     Identity(crate::git_identity::IdentityOutcome),
     /// The project commands dialog asked for this.
@@ -195,6 +196,7 @@ pub enum Overlay {
     Tasks,
     /// The new feature dialog, with its title field.
     NewFeature,
+    FindingDialog,
     /// The name and email dialog, with its two fields.
     Identity,
     /// The project commands dialog, with a field per repository.
@@ -346,6 +348,7 @@ impl Gerdr {
                             // pastes, and repeat what they take while held.
                             let fielded = match dialog {
                                 overlay::Overlay::NewFeature => Some(Overlay::NewFeature),
+                                overlay::Overlay::FindingDialog => Some(Overlay::FindingDialog),
                                 overlay::Overlay::GitIdentity => Some(Overlay::Identity),
                                 overlay::Overlay::ProjectCommands => Some(Overlay::Commands),
                                 overlay::Overlay::ManualTest => Some(Overlay::ManualTest),
@@ -815,6 +818,7 @@ impl Gerdr {
             O::Confirm => _ = self.confirm_click(pos),
             O::Tasks => self.tasks_click(pos),
             O::NewFeature => self.new_feature_click(pos),
+            O::FindingDialog => self.finding_dialog_click(pos),
             O::GitIdentity => self.identity_click(pos),
             O::ProjectCommands => self.commands_click(pos),
             O::ManualTest => self.manual_test_click(pos),
@@ -878,6 +882,7 @@ impl Gerdr {
             O::Confirm => self.confirm_controls().iter().any(on),
             O::Tasks => self.tasks_controls().iter().any(on),
             O::NewFeature => self.new_feature_controls().iter().any(on),
+            O::FindingDialog => self.finding_dialog_controls().iter().any(on),
             O::GitIdentity => self.identity_controls().iter().any(on),
             O::ProjectCommands => self.commands_controls().iter().any(on),
             O::ManualTest => self.manual_test_controls().iter().any(on),
@@ -1274,6 +1279,7 @@ impl Gerdr {
             }
             Intercepted::Tasks(outcome) => self.apply_tasks(outcome),
             Intercepted::NewFeature(outcome) => self.apply_new_feature(outcome),
+            Intercepted::FindingDialog(outcome) => self.apply_finding_dialog(outcome),
             Intercepted::Identity(outcome) => self.apply_identity(outcome),
             Intercepted::Commands(outcome) => self.apply_commands(outcome),
             Intercepted::ManualTest(outcome) => self.apply_manual_test(outcome),
@@ -1303,6 +1309,7 @@ impl Gerdr {
             O::Switcher => self.switcher.as_ref().map(|s| Overlay::Switcher(s.serial)),
             O::Tasks => Some(Overlay::Tasks),
             O::NewFeature => Some(Overlay::NewFeature),
+            O::FindingDialog => Some(Overlay::FindingDialog),
             O::GitIdentity => Some(Overlay::Identity),
             O::ProjectCommands => Some(Overlay::Commands),
             O::ManualTest => Some(Overlay::ManualTest),
@@ -1353,6 +1360,9 @@ impl Gerdr {
             Overlay::NewFeature => self
                 .new_feature_key(mods, sym, typed)
                 .map(Intercepted::NewFeature),
+            Overlay::FindingDialog => self
+                .finding_dialog_key(mods, sym, typed)
+                .map(Intercepted::FindingDialog),
             Overlay::Identity => self
                 .identity_key(mods, sym, typed)
                 .map(Intercepted::Identity),
@@ -1412,7 +1422,8 @@ impl Gerdr {
                 self.content_rect(),
                 scale,
             )),
-            Overlay::Tasks | Overlay::Features => None,
+            // Its fields hold lines: it places their carets itself.
+            Overlay::Tasks | Overlay::Features | Overlay::FindingDialog => None,
             Overlay::NewFeature => Some(chrome::new_feature_field(
                 &self.new_feature_view()?,
                 size,
@@ -1452,6 +1463,7 @@ impl Gerdr {
             Overlay::Switcher(_) => Some(self.switcher.as_mut()?.field_mut()),
             Overlay::Tasks | Overlay::Features => None,
             Overlay::NewFeature => Some(&mut self.features.dialog.as_mut()?.title),
+            Overlay::FindingDialog => self.finding_dialog_field_mut(),
             Overlay::Identity => self.identity_field_mut(),
             Overlay::Commands => self.commands_field_mut(),
             Overlay::ManualTest => self

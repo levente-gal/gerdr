@@ -482,7 +482,7 @@ impl Painter {
     /// caret and selection where they are when `focused`, and `placeholder`
     /// while it is empty.
     #[allow(clippy::too_many_arguments)]
-    fn lines_field(
+    fn command_lines(
         &self,
         c: &mut Canvas,
         whole: &Line,
@@ -598,7 +598,7 @@ impl Painter {
                     CommandsTab::Checks => "No checks",
                     CommandsTab::Setup => "No setup commands",
                 };
-                self.lines_field(
+                self.command_lines(
                     c,
                     &row.line,
                     placeholder,

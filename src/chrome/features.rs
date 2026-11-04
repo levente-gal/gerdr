@@ -5,7 +5,13 @@
 //! each scrolled on its own), and
 //! the stage marks the sidebar's feature rows show.
 
-use std::{cell::RefCell, rc::Rc, sync::Arc};
+use std::{
+    cell::RefCell,
+    collections::{HashMap, hash_map::DefaultHasher},
+    hash::{Hash, Hasher},
+    rc::Rc,
+    sync::Arc,
+};
 
 use super::{
     AGENT_ICON, ButtonStyle, CHECKBOX_GAP, CHECKBOX_ROW, Canvas, Check, DETAIL_FONT_SIZE,
@@ -385,6 +391,8 @@ pub enum TabArea {
     Stages,
     /// The repositories' strip or rows: the keys pick a repository.
     Repos,
+    /// AI review's finding cards: the keys pick and decide one.
+    Findings,
 }
 
 /// The feature tab's columns, each scrolled on its own: the index into
@@ -448,6 +456,8 @@ pub enum PageSection {
         state: CheckLine,
         buttons: Vec<usize>,
     },
+    /// An AI review finding, with what can be done of it.
+    Finding(FindingCard),
     /// A labelled list of lines in their tones: the checks, findings,
     /// criteria, the Ship check, a done stage's note.
     Lines {
@@ -467,6 +477,38 @@ pub enum PageSection {
         total: usize,
         items: Vec<(bool, String)>,
     },
+}
+
+/// What a finding's card says it is, by its colour.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FindingTag {
+    High,
+    Medium,
+    Low,
+    /// The user added it.
+    Yours,
+}
+
+/// An AI review finding as its stage's page shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FindingCard {
+    pub tag: FindingTag,
+    pub title: String,
+    /// Where it stands, once decided: "to fix".
+    pub state: String,
+    /// Its id, and where in the code it is.
+    pub place: String,
+    pub body: String,
+    /// The fix to make, labelled: the reviewer's or the user's.
+    pub fix: String,
+    /// The user's comment on it, labelled.
+    pub note: String,
+    /// It no longer asks for anything: fixed or dismissed.
+    pub faded: bool,
+    /// It has the keyboard.
+    pub selected: bool,
+    /// The indices in `StagePage::buttons` of the buttons it holds.
+    pub buttons: Vec<usize>,
 }
 
 /// The selected stage's page, in the feature tab's middle column.
@@ -571,6 +613,8 @@ pub enum FeatureTabHit {
     AgentPick(usize),
     /// One of those that can't be picked: it only says why.
     AgentPickOff(usize),
+    /// A finding's card, as `FeatureTabLayout::finding_cards` has them.
+    Finding(usize),
     Hint(usize),
 }
 
@@ -622,6 +666,8 @@ pub struct FeatureTabLayout {
     /// The agent card's chips: their outline, and each chip as its `picks`
     /// has them.
     pub agent_picks: Option<(Rect, Vec<Rect>)>,
+    /// Each finding's card, in the page's order.
+    pub finding_cards: Vec<Rect>,
     /// The footer, and where each hint goes in it.
     pub hints: Rect,
     pub hint_spots: Vec<(usize, Rect)>,
@@ -679,7 +725,14 @@ impl FeatureTabLayout {
                     .iter()
                     .position(|b| b.is_some_and(|b| b.contains(at)))
                     .map(FeatureTabHit::PageButton)
-                    .or_else(|| self.agent_pick_at(view, at)),
+                    .or_else(|| self.agent_pick_at(view, at))
+                    .or_else(|| {
+                        let on = |r: &Rect| r.contains(at);
+                        self.finding_cards
+                            .iter()
+                            .position(on)
+                            .map(FeatureTabHit::Finding)
+                    }),
                 TabColumn::Activity => None,
             };
             return found.or(Some(FeatureTabHit::Column(column)));
@@ -745,6 +798,25 @@ impl FeatureTabLayout {
             top - f64::from(CARD_PAD)
         } else if bottom + f64::from(CARD_PAD) > down + view {
             bottom + f64::from(CARD_PAD) - view
+        } else {
+            return Some(down);
+        };
+        Some(to.clamp(0.0, room))
+    }
+
+    /// How far down the page to scroll, from `down`, to show finding `i`:
+    /// its top first when it is taller than the page shows.
+    pub fn reveal_finding(&self, i: usize, down: f64) -> Option<f64> {
+        let place = self.columns[TabColumn::Page as usize]?;
+        let card = self.finding_cards.get(i)?;
+        let top = f64::from(card.loc.y - place.loc.y) - f64::from(CARD_PAD);
+        let bottom = f64::from(card.loc.y - place.loc.y + card.size.h) + f64::from(CARD_PAD);
+        let view = f64::from(place.size.h);
+        let room = f64::from(self.scroll_room(TabColumn::Page));
+        let to = if top < down || bottom - top > view {
+            top
+        } else if bottom > down + view {
+            bottom - view
         } else {
             return Some(down);
         };
@@ -855,6 +927,8 @@ const TAIL_LINE: i32 = 18;
 const PAGE_GAP: i32 = 16;
 /// An agent card's inner room and its header's height.
 const AGENT_PAD: i32 = 10;
+/// The room between the parts of a finding's card.
+const FINDING_GAP: i32 = 6;
 const AGENT_HEAD: i32 = 28;
 /// Where an agent card's name starts, past its logo and dot.
 const AGENT_TEXT_AT: i32 = 36;
@@ -906,6 +980,8 @@ pub(super) enum Ink {
     Text,
     Muted,
     Error,
+    Warning,
+    Accent,
     Tone(CheckTone),
 }
 
@@ -915,6 +991,8 @@ impl Ink {
             Self::Text => p.text,
             Self::Muted => p.muted,
             Self::Error => p.error,
+            Self::Warning => p.warning,
+            Self::Accent => p.accent,
             Self::Tone(tone) => tone.color(p),
         }
     }
@@ -943,6 +1021,9 @@ pub(super) enum Piece {
     Agent(usize),
     /// The file card of `StagePage::sections[i]`.
     File(usize),
+    /// The frame of the finding card of `StagePage::sections[i]`, with its
+    /// buttons; its text goes in pieces of its own.
+    FindingCard(usize),
     /// `FeatureTabView::repos[i]`.
     Repo(usize),
     /// `StagePage::buttons[i]`, one acting on the stage as a whole.
@@ -990,6 +1071,33 @@ fn words(text: &str) -> Vec<String> {
         depth = depth.max(0);
     }
     words
+}
+
+thread_local! {
+    /// What `wrapped` measured, by a hash of what it was asked: the tab is
+    /// laid out every frame, and a page of findings has many long texts.
+    static WRAP_MEMO: RefCell<HashMap<u64, Rc<Vec<String>>>> = RefCell::new(HashMap::new());
+}
+
+/// How many texts `WRAP_MEMO` holds before it starts again.
+const WRAP_MEMOS: usize = 2048;
+
+/// `wrap_all` of `text`, kept: a page of findings has many long texts.
+fn wrapped(text: &str, size: f32, width: i32) -> Rc<Vec<String>> {
+    let mut hasher = DefaultHasher::new();
+    (text, size.to_bits(), width).hash(&mut hasher);
+    let key = hasher.finish();
+    WRAP_MEMO.with_borrow_mut(|memo| {
+        if let Some(lines) = memo.get(&key) {
+            return lines.clone();
+        }
+        if memo.len() >= WRAP_MEMOS {
+            memo.clear();
+        }
+        let lines = Rc::new(wrap_all(text, size, width));
+        memo.insert(key, lines.clone());
+        lines
+    })
 }
 
 /// `wrap` to at most `max` lines.
@@ -1261,6 +1369,100 @@ impl Stack {
         }
     }
 
+    /// `text` wrapped to the column, all of it, a line `h` high each.
+    fn all_text(&mut self, text: &str, font: Font, ink: Ink, bold: bool, h: i32) {
+        // Bold runs wider than `wrapped` measures.
+        let w = if bold { self.w - self.w / 16 } else { self.w };
+        for line in wrapped(text, font.size(), w).iter() {
+            self.put(
+                h,
+                Piece::Text {
+                    text: line.clone(),
+                    font,
+                    ink,
+                    bold,
+                },
+            );
+        }
+    }
+
+    /// Finding card `k`: its frame, its text, and `buttons`' places in it.
+    fn finding(
+        &mut self,
+        k: usize,
+        card: &FindingCard,
+        page: &StagePage,
+        buttons: &mut [Option<Rect>],
+    ) -> Rect {
+        let frame_at = self.pieces.len();
+        let (x, w, top) = (self.x, self.w, self.y);
+        self.x += AGENT_PAD;
+        self.w = (w - 2 * AGENT_PAD).max(1);
+        self.y += AGENT_PAD;
+        let body = if card.faded { Ink::Muted } else { Ink::Text };
+        self.all_text(&card.title, Font::Body, body, true, BODY_LINE);
+        // Its tag in its colour, then the rest of the line muted.
+        let tag = match card.tag {
+            FindingTag::High => "high",
+            FindingTag::Medium => "medium",
+            FindingTag::Low => "low",
+            FindingTag::Yours => "yours",
+        };
+        let ink = match (card.faded, card.tag) {
+            (true, _) | (_, FindingTag::Low) => Ink::Muted,
+            (_, FindingTag::High) => Ink::Error,
+            (_, FindingTag::Medium) => Ink::Warning,
+            (_, FindingTag::Yours) => Ink::Accent,
+        };
+        let size = Font::Small.size();
+        let tag_w = width_of(tag, size).ceil() as i32 + 1;
+        self.pieces.push((
+            Rectangle::new((self.x, self.y).into(), (tag_w, TAIL_LINE).into()),
+            Piece::Text {
+                text: tag.to_owned(),
+                font: Font::Small,
+                ink,
+                bold: false,
+            },
+        ));
+        let mut rest = vec![String::new()];
+        rest.extend((!card.state.is_empty()).then(|| card.state.clone()));
+        rest.push(card.place.clone());
+        let rest = rest.join(" \u{b7} ");
+        let (left, width) = (self.x, self.w);
+        self.x = left + tag_w;
+        self.w = (width - tag_w).max(1);
+        self.all_text(rest.trim_start(), Font::Small, Ink::Muted, false, TAIL_LINE);
+        (self.x, self.w) = (left, width);
+        for text in [&card.body, &card.fix, &card.note] {
+            if !text.is_empty() {
+                self.y += FINDING_GAP;
+                self.all_text(text, Font::Body, body, false, BODY_LINE);
+            }
+        }
+        let held: Vec<usize> = (card.buttons.iter().copied())
+            .filter(|b| *b < page.buttons.len())
+            .collect();
+        if !held.is_empty() {
+            self.y += FINDING_GAP;
+            let widths: Vec<i32> = (held.iter())
+                .map(|b| button_width(&page.buttons[*b].label))
+                .collect();
+            let placed = rows_from_right(&widths, self.x, self.x + self.w);
+            for (b, (bx, row)) in held.iter().zip(&placed) {
+                let by = self.y + row * (ROW_BUTTON + QUIT_BUTTON_GAP);
+                let w = button_width(&page.buttons[*b].label);
+                buttons[*b] = Some(Rectangle::new((*bx, by).into(), (w, ROW_BUTTON).into()));
+            }
+            self.y += rows_height(&placed);
+        }
+        self.y += AGENT_PAD;
+        (self.x, self.w) = (x, w);
+        let frame = Rectangle::new((x, top).into(), (w, self.y - top).into());
+        self.pieces.insert(frame_at, (frame, Piece::FindingCard(k)));
+        frame
+    }
+
     /// The activity's rows, newest first.
     fn activity(&mut self, rows: &[ActivityRow]) {
         for (row, a) in rows.iter().enumerate() {
@@ -1494,9 +1696,9 @@ fn rows_from_right(widths: &[i32], left: i32, right: i32) -> Vec<(i32, i32)> {
 
 /// How high the rows of `rows_from_right` are, none for nothing placed.
 fn rows_height(placed: &[(i32, i32)]) -> i32 {
-    placed.last().map_or(0, |(_, row)| {
-        (row + 1) * ROW_BUTTON + row * QUIT_BUTTON_GAP
-    })
+    placed
+        .last()
+        .map_or(0, |(_, row)| (row + 1) * ROW_BUTTON + row * QUIT_BUTTON_GAP)
 }
 
 /// The page's column: the selected stage's title, about, status, buttons
@@ -1531,6 +1733,7 @@ fn page_stack(
     s: &mut Stack,
     buttons: &mut [Option<Rect>],
     agent_picks: &mut Option<(Rect, Vec<Rect>)>,
+    finding_cards: &mut Vec<Rect>,
     activity: bool,
 ) {
     let page = &view.page;
@@ -1542,6 +1745,7 @@ fn page_stack(
         .flat_map(|sec| match sec {
             PageSection::Agent { buttons, .. } => buttons.clone(),
             PageSection::File { buttons, .. } => buttons.clone(),
+            PageSection::Finding(card) => card.buttons.clone(),
             _ => Vec::new(),
         })
         .collect();
@@ -1629,7 +1833,9 @@ fn page_stack(
                     }
                     if !picks.is_empty() {
                         let from = inner_x + PICK_LABEL;
-                        let end = placed.first().map_or(inner_right, |(x, _)| x - QUIT_BUTTON_GAP);
+                        let end = placed
+                            .first()
+                            .map_or(inner_right, |(x, _)| x - QUIT_BUTTON_GAP);
                         *agent_picks = Some(agent_pick_rects(picks.len(), from, row, end - from));
                     }
                     continue;
@@ -1647,10 +1853,7 @@ fn page_stack(
                     true => 0,
                     false => rows_height(&placed) + AGENT_ROWS_GAP,
                 };
-                let card = s.put(
-                    AGENT_PAD * 2 + AGENT_HEAD + below + tail_h,
-                    Piece::Agent(k),
-                );
+                let card = s.put(AGENT_PAD * 2 + AGENT_HEAD + below + tail_h, Piece::Agent(k));
                 let head_y = card.loc.y + AGENT_PAD + (AGENT_HEAD - ROW_BUTTON) / 2;
                 let rows_y = card.loc.y + AGENT_PAD + AGENT_HEAD + AGENT_ROWS_GAP;
                 let spot = |(x, row): &(i32, i32)| match fits {
@@ -1676,6 +1879,10 @@ fn page_stack(
                     buttons[b] = Some(Rectangle::new((bx, by).into(), (w, ROW_BUTTON).into()));
                     bx -= QUIT_BUTTON_GAP;
                 }
+            }
+            PageSection::Finding(card) => {
+                let frame = s.finding(k, card, page, buttons);
+                finding_cards.push(frame);
             }
             PageSection::Lines { label, lines } => {
                 if !label.is_empty() {
@@ -1944,6 +2151,7 @@ pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayou
     let mut content = [0; 3];
     let mut page_buttons = vec![None; view.page.buttons.len()];
     let mut agent_picks = None;
+    let mut finding_cards = Vec::new();
     for column in TabColumn::ALL {
         let Some(place) = columns[column as usize] else {
             continue;
@@ -1967,6 +2175,7 @@ pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayou
                 &mut s,
                 &mut page_buttons,
                 &mut agent_picks,
+                &mut finding_cards,
                 columns[TabColumn::Activity as usize].is_none(),
             ),
             TabColumn::Activity => {
@@ -1997,6 +2206,7 @@ pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayou
         more_repos,
         page_buttons,
         agent_picks,
+        finding_cards,
         hints,
         hint_spots,
         pieces,
@@ -3543,6 +3753,25 @@ impl Painter {
                     }
                 }
             }
+            Piece::FindingCard(k) => {
+                let Some(PageSection::Finding(card)) = view.page.sections.get(*k) else {
+                    return;
+                };
+                card_frame(c, rect, scale, p);
+                // Inside the frame: the column cuts off what goes past it.
+                if card.selected {
+                    let (x, y, w, h) = rect_px(rect, scale);
+                    let (s, b) = (scale as f32, (2.0 * scale as f32).round());
+                    let r = AGENT_RADIUS * s;
+                    c.rounded(x, y, w, h, r, p.accent);
+                    c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, r - b, p.background);
+                }
+                for &i in &card.buttons {
+                    if let Some(r) = l.page_buttons.get(i).copied().flatten() {
+                        self.page_button(c, view, i, at(r), scale, p);
+                    }
+                }
+            }
             Piece::Button(i) => self.page_button(c, view, *i, rect, scale, p),
             Piece::Activity { row, lines } => {
                 let Some(a) = view.activity.get(*row) else {
@@ -4717,6 +4946,120 @@ mod tests {
         assert_eq!(rows_height(&[]), 0);
     }
 
+    /// A view with a page of `n` finding cards, each with three buttons.
+    fn findings_view(n: usize, text: &str) -> FeatureTabView {
+        let mut view = tab_view();
+        view.page.buttons.clear();
+        view.page.sections.clear();
+        for i in 0..n {
+            let at = view.page.buttons.len();
+            for label in ["Fix", "Edit\u{2026}", "Dismiss\u{2026}", "Show in diff"] {
+                view.page.buttons.push(PageButton {
+                    label: label.to_owned(),
+                    style: ButtonStyle::Plain,
+                });
+            }
+            view.page.sections.push(PageSection::Finding(FindingCard {
+                tag: FindingTag::High,
+                title: format!("Finding {i}: {text}"),
+                state: String::new(),
+                place: format!("r1-{i} \u{b7} src/a.rs:12"),
+                body: format!("{text}\n\n{text}"),
+                fix: format!("Fix: {text}"),
+                note: String::new(),
+                faded: false,
+                selected: false,
+                buttons: (at..at + 4).collect(),
+            }));
+        }
+        view
+    }
+
+    #[test]
+    fn a_finding_cards_frame_holds_all_its_text_and_buttons_at_any_width() {
+        let text = "a long sentence that goes on and on ".repeat(12);
+        let view = findings_view(2, &text);
+        for width in [870, 1200, 1920] {
+            let l = tab_at(&view, width);
+            let page = &l.pieces[TabColumn::Page as usize];
+            assert_eq!(l.finding_cards.len(), 2);
+            let (a, b) = (l.finding_cards[0], l.finding_cards[1]);
+            assert!(a.loc.y + a.size.h <= b.loc.y, "cards apart at {width}");
+            for (k, card) in l.finding_cards.iter().enumerate() {
+                let at = page
+                    .iter()
+                    .position(|(r, p)| r == card && matches!(p, Piece::FindingCard(i) if *i == k));
+                let at = at.expect("its frame");
+                // The frame paints first, under what it holds.
+                let held: Vec<&Rect> = page[at + 1..]
+                    .iter()
+                    .take_while(|(_, p)| !matches!(p, Piece::FindingCard(_)))
+                    .filter(|(_, p)| matches!(p, Piece::Text { .. }))
+                    .map(|(r, _)| r)
+                    .collect();
+                assert!(held.len() > 4, "all of its text at {width}");
+                for r in held {
+                    assert!(card.contains_rect(*r), "{r:?} in {card:?} at {width}");
+                }
+                for b in k * 4..k * 4 + 4 {
+                    let r = l.page_buttons[b].expect("placed");
+                    assert!(card.contains_rect(r), "button {b} in {card:?} at {width}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_narrow_card_wraps_its_buttons_rather_than_cut_them() {
+        let view = findings_view(1, "short");
+        let l = tab_at(&view, 420);
+        let card = l.finding_cards[0];
+        for b in 0..4 {
+            let r = l.page_buttons[b].expect("placed");
+            assert!(card.contains_rect(r), "{r:?} in {card:?}");
+        }
+    }
+
+    #[test]
+    fn a_card_is_hit_past_its_buttons_and_the_keyboards_one_scrolls_into_view() {
+        let view = findings_view(30, "some words");
+        let l = tab_at(&view, 1200);
+        let (card, button) = (l.finding_cards[1], l.page_buttons[4].unwrap());
+        let on = (card.loc.x + 3, card.loc.y + 3).into();
+        assert_eq!(l.hit(&view, on), Some(FeatureTabHit::Finding(1)));
+        assert_eq!(
+            l.hit(&view, centre(button)),
+            Some(FeatureTabHit::PageButton(4))
+        );
+        // In view: where it was. Below: its bottom shows. Above: its top.
+        assert_eq!(l.reveal_finding(0, 0.0), Some(0.0));
+        let place = l.columns[TabColumn::Page as usize].unwrap();
+        let last = l.finding_cards[29];
+        let to = l.reveal_finding(29, 0.0).unwrap();
+        assert!(to > 0.0);
+        assert!(
+            f64::from(last.loc.y + last.size.h - place.loc.y)
+                <= to + f64::from(place.size.h) + f64::from(CARD_PAD)
+        );
+        assert!(l.reveal_finding(0, to).unwrap() < to);
+        assert_eq!(l.reveal_finding(99, 0.0), None);
+    }
+
+    /// Run by hand (`--ignored --nocapture`): what a full page of findings,
+    /// at the import's caps, costs a frame's layout.
+    #[test]
+    #[ignore]
+    fn a_full_page_of_findings_lays_out_fast() {
+        let text = "word ".repeat(800);
+        let view = findings_view(100, &text);
+        let first = std::time::Instant::now();
+        let _ = tab_at(&view, 1920);
+        let first = first.elapsed();
+        let again = std::time::Instant::now();
+        let _ = tab_at(&view, 1920);
+        println!("first layout {first:?}, then {:?}", again.elapsed());
+    }
+
     #[test]
     fn a_stages_own_buttons_end_its_titles_line_and_leave_when_they_dont_fit() {
         let title_row = |view: &FeatureTabView, width: i32| {
@@ -4762,7 +5105,10 @@ mod tests {
         assert!(narrow_card.size.h > wide_card.size.h);
         let (track, _) = narrow.agent_picks.clone().expect("placed");
         assert!(track.loc.y >= narrow_card.loc.y + AGENT_PAD + AGENT_HEAD);
-        assert!(track.loc.x >= narrow_card.loc.x, "{track:?} {narrow_card:?}");
+        assert!(
+            track.loc.x >= narrow_card.loc.x,
+            "{track:?} {narrow_card:?}"
+        );
         assert!(track.loc.y + track.size.h <= narrow_card.loc.y + narrow_card.size.h);
         for r in narrow.page_buttons.iter().flatten() {
             assert!(r.loc.x >= narrow_card.loc.x, "{r:?} {narrow_card:?}");
