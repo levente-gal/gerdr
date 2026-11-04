@@ -30,7 +30,7 @@ use crate::{
     cli_agents::CliAgent,
     feature::{
         self, Feature, PerProject, Stage, Status,
-        agents::{Flavor, StageRun, Stop, command_line, needs},
+        agents::{Flavor, StageRun, Stop, command_line, needs, resume_line, session_file},
         artifacts,
         patch::Reading,
         review_import::FindingState,
@@ -754,7 +754,10 @@ pub(crate) fn agent_line(
     }
     let started = format!("started {}", projects::ago(now, run.started));
     if run.pane.is_none() {
-        return format!("{} closed \u{b7} {started}", run.agent);
+        return match run.resumes() {
+            true => format!("{} closed \u{b7} can be resumed", run.agent),
+            false => format!("{} closed \u{b7} {started}", run.agent),
+        };
     }
     let missing = watch.map(|w| w.missing.as_slice()).unwrap_or_default();
     if run.nudged {
@@ -898,10 +901,69 @@ impl Gerdr {
         if !fresh && let Some(pane) = pane.filter(|p| self.herdr_pane_place(p).is_some()) {
             return self.focus_agent(&agents::AgentKey::Herdr(pane));
         }
+        if !fresh && feature.runs.get(&stage).is_some_and(StageRun::resumes) {
+            return self.resume_stage_agent(project, slug, stage);
+        }
         if stage == Stage::Build && self.setup_before_build(project, slug, fresh || first) {
             return;
         }
         self.launch_stage_agent(project, slug, stage, &[]);
+    }
+
+    /// Go back to the chat of `stage`'s last agent of feature `slug`, its
+    /// tab closed, in a new tab. The stage stays where it was: a done one
+    /// stays done, and an open one waits for the agent to work again.
+    pub(crate) fn resume_stage_agent(&mut self, project: &str, slug: &str, stage: Stage) {
+        let Some(feature) = self.feature(project, slug).cloned() else {
+            return;
+        };
+        if feature.status != Status::Open {
+            let title = &feature.title;
+            return self.show_warning(format!("\u{201c}{title}\u{201d} isn't open"));
+        }
+        let Some(run) = feature.runs.get(&stage).filter(|r| r.resumes()) else {
+            return self.show_warning(format!("{} has no chat to resume", stage.label()));
+        };
+        // Its tab came back since the page was drawn: one chat, one tab.
+        if let Some(pane) = (run.pane.clone()).filter(|p| self.herdr_pane_place(p).is_some()) {
+            return self.focus_agent(&agents::AgentKey::Herdr(pane));
+        }
+        let Some(session) = run.session() else {
+            tracing::warn!("no chat id in {}", session_file(&run.prompt).display());
+            let fresh = match feature.current() == Some(stage) {
+                true => "; Ctrl+R starts a new agent",
+                false => "",
+            };
+            return self.show_warning(format!(
+                "Couldn't find {}'s chat on {}{fresh}",
+                run.agent,
+                stage.label()
+            ));
+        };
+        let data = store::dir(None, project, slug);
+        let command = resume_line(&run.base, &session, &feature.agent_dirs(&data));
+        let agent = run.agent.clone();
+        let opened = self.open_feature_tab(project, slug, &feature.dir, Some(command));
+        let Some(pane) = opened else {
+            tracing::warn!("no tab for {agent}'s chat on {}", stage.label());
+            return self.show_error(format!("Couldn't open a tab for {agent}'s chat"));
+        };
+        let Some(f) = self.feature_mut(project, slug) else {
+            return;
+        };
+        let Some(r) = f.runs.get_mut(&stage) else {
+            return;
+        };
+        r.pane = Some(pane);
+        f.log(
+            feature::now(),
+            format!("{} agent resumed: {agent}", stage.label()),
+        );
+        self.save_feature(project, slug);
+        self.features
+            .agents
+            .remove(&(project.to_owned(), slug.to_owned(), stage));
+        self.show_success(format!("Resumed {agent} on {}", stage.label()));
     }
 
     /// Start a new run of `stage`'s agent, its prompt rendered with `extra`
@@ -981,6 +1043,7 @@ impl Gerdr {
             n,
             agent: agent.clone(),
             command,
+            base,
             pane,
             prompt,
             template: format!("builtin:{}@{version}", need.template),
