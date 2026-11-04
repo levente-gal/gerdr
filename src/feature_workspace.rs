@@ -282,6 +282,9 @@ impl Gerdr {
                 title,
                 result: layout::link_docs(&dir, multi, &data),
             });
+            // A feature made before there were graphs, or before its
+            // project had one.
+            self.refresh_feature_graphs(&project, &slug, true);
         }
     }
 

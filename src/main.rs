@@ -32,6 +32,7 @@ mod feature;
 mod feature_agents;
 mod feature_build;
 mod feature_diff;
+mod feature_graph;
 mod feature_review;
 mod feature_workspace;
 mod features;

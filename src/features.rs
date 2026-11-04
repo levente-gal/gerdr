@@ -42,6 +42,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -68,6 +69,7 @@ use crate::{
     feature::{
         self, Event, Feature, Pr, Stage, Status,
         agents::needs,
+        graph,
         hook::Guard,
         layout::{self, Created, LinkSpec, Root},
         patch::{self, Reading},
@@ -75,6 +77,7 @@ use crate::{
         ship::{self, Action, Probe},
         store,
     },
+    feature_graph::stop_graphs,
     herdr::AgentStatus,
     home_dir, paths, projects,
     scroll::{Bounds, Motion, Scroll},
@@ -103,6 +106,10 @@ pub struct Features {
     /// The feature folders whose docs link was seen to this run:
     /// `link_feature_docs` goes once for each.
     pub(crate) docs_linked: BTreeSet<PathBuf>,
+    /// The code graph builds running, by project and slug, to stop.
+    pub(crate) graphs: BTreeMap<(String, String), Arc<graph::Run>>,
+    /// Whether the user was told graphify is missing, this run.
+    pub(crate) graphify_told: bool,
     /// What the Ship sheet open or last open asked to do, by project and
     /// slug: what shipping does once confirmed.
     asked: BTreeMap<(String, String), Asked>,
@@ -198,6 +205,8 @@ pub(crate) enum Job {
     Setup,
     /// Running Verify's checks (see `feature::verify`).
     Verify,
+    /// Building its code graphs (see `feature::graph`): holds nothing up.
+    Graph,
 }
 
 /// Work on a feature running off the UI thread.
@@ -239,6 +248,13 @@ pub(crate) enum Done {
     DocsLinked {
         title: String,
         result: Result<Option<PathBuf>, String>,
+    },
+    /// A build of feature `slug`'s code graphs ended.
+    Graphed {
+        project: String,
+        slug: String,
+        title: String,
+        built: graph::Built,
     },
     /// Projects linked to open feature `slug`, or not.
     Linked {
@@ -1616,7 +1632,7 @@ fn pick_feature(slugs: &[String], open: Option<&str>, last: Option<&str>) -> Opt
 }
 
 /// A folder as the chrome shows it, from the home folder as `~`.
-fn tilde(path: &Path) -> String {
+pub(crate) fn tilde(path: &Path) -> String {
     paths::display(path, home_dir().as_deref(), 60)
 }
 
@@ -1806,6 +1822,12 @@ impl Gerdr {
                     ));
                 }
             },
+            Done::Graphed {
+                project,
+                slug,
+                title,
+                built,
+            } => self.feature_graphs_built(&project, &slug, &title, built),
             Done::Linked {
                 project,
                 slug,
@@ -1958,12 +1980,13 @@ impl Gerdr {
             .retain(|b| !(b.project == project && b.slug == slug && b.job == job));
     }
 
-    /// Whether feature `slug` of `project` has work running off the thread.
+    /// Whether feature `slug` of `project` has work running off the thread
+    /// that other work on it must wait for.
     pub(crate) fn feature_busy(&self, project: &str, slug: &str) -> bool {
         self.features
             .busy
             .iter()
-            .any(|b| b.project == project && b.slug == slug)
+            .any(|b| b.project == project && b.slug == slug && b.job != Job::Graph)
     }
 
     /// Feature `slug`'s work of kind `job` running off the thread.
@@ -2774,6 +2797,7 @@ impl Gerdr {
         }
         self.show_success(text);
         self.start_setup(&project, &slug);
+        self.refresh_feature_graphs(&project, &slug, true);
     }
 
     /// Link `links` to open feature `slug` off the thread, shown in the
@@ -2840,6 +2864,7 @@ impl Gerdr {
             names.join(", ")
         ));
         self.probe_feature(project, slug);
+        self.refresh_feature_graphs(project, slug, true);
     }
 
     /// A left click while the new feature dialog is open.
@@ -3552,16 +3577,20 @@ impl Gerdr {
                 feature.title
             ),
         };
+        let graphs = self.running_feature_graphs(project, slug);
         let (project, slug, projects) = (project.to_owned(), slug.to_owned(), projects.to_vec());
-        self.feature_work(Some(busy), move |_| Done::Unlinked {
-            results: (projects.into_iter())
-                .map(|id| {
-                    let result = layout::unlink(&feature, &id, force);
-                    (id, result)
-                })
-                .collect(),
-            project,
-            slug,
+        self.feature_work(Some(busy), move |_| {
+            stop_graphs(graphs);
+            Done::Unlinked {
+                results: (projects.into_iter())
+                    .map(|id| {
+                        let result = layout::unlink(&feature, &id, force);
+                        (id, result)
+                    })
+                    .collect(),
+                project,
+                slug,
+            }
         });
     }
 
@@ -3909,11 +3938,15 @@ impl Gerdr {
         // worktrees go.
         let (p, s) = (project.clone(), slug.clone());
         self.close_feature_workspace_then(&p, &s, move |gerdr| {
-            gerdr.feature_work(Some(busy), move |_| Done::Removed {
-                result: layout::remove(&feature, force),
-                project,
-                slug,
-                abandon,
+            let graphs = gerdr.running_feature_graphs(&project, &slug);
+            gerdr.feature_work(Some(busy), move |_| {
+                stop_graphs(graphs);
+                Done::Removed {
+                    result: layout::remove(&feature, force),
+                    project,
+                    slug,
+                    abandon,
+                }
             });
         });
     }
@@ -4320,6 +4353,7 @@ fn task_of(busy: &Busy, title: Option<&str>, project: &str) -> Task {
     let chip = match busy.job {
         Job::Setup => "setup",
         Job::Verify => "checks",
+        Job::Graph => "graph",
         _ => "feature",
     };
     let detail = match title {
@@ -6715,6 +6749,16 @@ pub(crate) mod tests {
             "Acme",
         );
         assert_eq!(task.chip, "checks");
+        assert_eq!(task.detail, "Acme");
+        let task = task_of(
+            &busy(
+                Job::Graph,
+                "Building the code graph of \u{201c}Bulk\u{201d}",
+            ),
+            Some("Bulk"),
+            "Acme",
+        );
+        assert_eq!(task.chip, "graph");
         assert_eq!(task.detail, "Acme");
         let task = task_of(
             &busy(Job::Create, "Creating \u{201c}Bulk\u{201d}"),

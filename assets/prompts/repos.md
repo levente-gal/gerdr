@@ -20,3 +20,13 @@ under {{feature.dir}}:
 The code is the repository in {{feature.dir}}: {{repos}}
 {{/if}}
 {{/if}}
+{{#if graphs}}
+
+graphify keeps a graph of this code. Ask it before you search the code, with
+`graphify query "<question>" --graph <file>`, from:
+
+{{graphs}}
+
+After you change code, run `graphify update .` in the folder that holds that
+file's `graphify-out`, not in a repository under it.
+{{/if}}
