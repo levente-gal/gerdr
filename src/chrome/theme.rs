@@ -101,6 +101,15 @@ impl Theme {
             Theme::Light => &ONE_LIGHT,
         }
     }
+
+    /// The colours of a full page of reading and work rather than chrome
+    /// around an app: the feature tab and a stage file's tab.
+    pub(crate) fn page_palette(self) -> &'static Palette {
+        match self {
+            Theme::Dark => &ONE_DARK,
+            Theme::Light => &ONE_LIGHT_PAGE,
+        }
+    }
 }
 
 /// The colours the chrome uses, named after Zed's theme keys.
@@ -248,6 +257,19 @@ pub(super) const ONE_LIGHT: Palette = Palette {
     ],
 };
 
+/// One Light brightened for a full page: white cards on the ground an
+/// app's own page has, so the tab's first look matches the terminal and
+/// editor tabs beside it and text gets more contrast than on the panels.
+pub(super) const ONE_LIGHT_PAGE: Palette = Palette {
+    background: hex(0xfafafa),
+    panel: hex(0xffffff),
+    elevated: hex(0xffffff),
+    element: hex(0xf2f2f3),
+    selected: hex(0xe6e6e8),
+    border_variant: hex(0xe3e3e5),
+    ..ONE_LIGHT
+};
+
 impl Palette {
     /// The colour code of `kind` is drawn in.
     pub(super) fn code(&self, kind: Kind) -> Rgb {
@@ -321,7 +343,7 @@ pub(super) fn mix(a: Rgb, b: Rgb, t: f32) -> Rgb {
 
 #[cfg(test)]
 mod tests {
-    use super::{ONE_DARK, ONE_LIGHT, Palette, Rgb, Theme, ThemeMode};
+    use super::{ONE_DARK, ONE_LIGHT, ONE_LIGHT_PAGE, Palette, Rgb, Theme, ThemeMode};
 
     /// WCAG relative luminance.
     fn luminance([r, g, b]: Rgb) -> f64 {
@@ -344,7 +366,11 @@ mod tests {
 
     #[test]
     fn text_colours_read_on_their_backgrounds() {
-        for (name, p) in [("One Dark", &ONE_DARK), ("One Light", &ONE_LIGHT)] {
+        for (name, p) in [
+            ("One Dark", &ONE_DARK),
+            ("One Light", &ONE_LIGHT),
+            ("One Light page", &ONE_LIGHT_PAGE),
+        ] {
             let p: &Palette = p;
             for (what, colour) in [
                 ("placeholder", p.placeholder),
@@ -363,7 +389,11 @@ mod tests {
 
     #[test]
     fn a_hovered_button_shows_on_a_selected_row_and_its_label_reads() {
-        for (name, p) in [("One Dark", &ONE_DARK), ("One Light", &ONE_LIGHT)] {
+        for (name, p) in [
+            ("One Dark", &ONE_DARK),
+            ("One Light", &ONE_LIGHT),
+            ("One Light page", &ONE_LIGHT_PAGE),
+        ] {
             let p: &Palette = p;
             let hover = p.button_hover();
             let label = contrast(p.text, hover);
@@ -380,7 +410,11 @@ mod tests {
 
     #[test]
     fn status_colours_read_as_text_marks_and_badges() {
-        for (name, p) in [("One Dark", &ONE_DARK), ("One Light", &ONE_LIGHT)] {
+        for (name, p) in [
+            ("One Dark", &ONE_DARK),
+            ("One Light", &ONE_LIGHT),
+            ("One Light page", &ONE_LIGHT_PAGE),
+        ] {
             let p: &Palette = p;
             for (what, colour) in [
                 ("accent", p.accent),

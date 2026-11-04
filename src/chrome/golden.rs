@@ -2936,57 +2936,57 @@ const GOLDEN_FEATURE_TAB: [[u64; 24]; 4] = [
     ],
     // Light at 1
     [
-        0xc47b0800098f1990, // tab_build_860
-        0xf8323a4e57cb863e, // tab_build_1180
-        0xe46b142ab9dd23de, // tab_build_1920
-        0xd2cfd7155c8cf276, // tab_plan_review_1180
-        0xa106245aabc523db, // tab_verify_failed_1920
-        0x8b03166d25197031, // tab_ship_blocked_1180
-        0x6ac02a7725d44265, // tab_done_1920
-        0xa5d56eaa7393d23e, // tab_later_860
-        0x4552246fb8779558, // tab_repos_1180
-        0x586d9d8bea1588bb, // tab_repos_error_860
-        0x73b9556a6f5bce7b, // tab_more_repos_850
-        0x7ac496be40380b4d, // tab_more_repos_mid_850
-        0xfe50f7590a5f2838, // tab_rail_wrap_500
-        0x0bdb0f58b697f3dd, // tab_rail_wrap_1180
-        0x8da49a93ac9a7009, // tab_picks_later_1180
-        0x305061aced36a49e, // tab_picks_running_860
-        0x1a989e064c8e0d26, // tab_resume_1180
-        0x59bde3e9307caa20, // tab_resume_860
-        0x955a72a8dd3e6af3, // tab_approved_1180
-        0x797c2fd13725c662, // tab_locked_1180
-        0xc9b7ac524ff04d57, // tab_start_over_1180
-        0x19e17752db3d3c31, // tab_discover_brief_1180
-        0x69558fb1849e31ce, // tab_discover_brief_860
-        0x97485739423af87a, // tab_plan_long_1180
+        0x76cbc62239200fd8, // tab_build_860
+        0x0246fc23e3a00474, // tab_build_1180
+        0xaabdedb952a42e38, // tab_build_1920
+        0xd68c31a9645e2e79, // tab_plan_review_1180
+        0xb390589003cec17e, // tab_verify_failed_1920
+        0x7ae33913d65e3f9e, // tab_ship_blocked_1180
+        0x39c77efef3e7bdee, // tab_done_1920
+        0xdf172392c323d4fc, // tab_later_860
+        0xeb10c19509bce237, // tab_repos_1180
+        0xa4b756ac6e063f66, // tab_repos_error_860
+        0x11ef0fbb75803cfd, // tab_more_repos_850
+        0xc22e2ba1e3c185ea, // tab_more_repos_mid_850
+        0xfa565e8a9c1e031f, // tab_rail_wrap_500
+        0x8bc6890a452c2379, // tab_rail_wrap_1180
+        0xe81c961e773f66e3, // tab_picks_later_1180
+        0xde9f9a70e781109c, // tab_picks_running_860
+        0x45f0f911affb18ad, // tab_resume_1180
+        0xfa1810b41c823b99, // tab_resume_860
+        0x06b9ccc8958b8c29, // tab_approved_1180
+        0xb58f88505140f4cb, // tab_locked_1180
+        0xfbd4a8d97d0ea7a5, // tab_start_over_1180
+        0x04a0834fc8290ca0, // tab_discover_brief_1180
+        0x1a943ed67089538d, // tab_discover_brief_860
+        0xa1594a42ab217777, // tab_plan_long_1180
     ],
     // Light at 2
     [
-        0x0e9c0b1edfa3d30b, // tab_build_860
-        0xccfa373474fa8a62, // tab_build_1180
-        0x3d43b06b60527970, // tab_build_1920
-        0x4ff3a82a63c461d4, // tab_plan_review_1180
-        0x3bc58b402294f0bb, // tab_verify_failed_1920
-        0x6b688c7051bdb494, // tab_ship_blocked_1180
-        0xc6f7e437c6c208df, // tab_done_1920
-        0x6774ecdf4a3cd435, // tab_later_860
-        0xa86d6c08fd0105bd, // tab_repos_1180
-        0x225ee1d532426c69, // tab_repos_error_860
-        0xa790e44192435058, // tab_more_repos_850
-        0xe6ce5bb519d732e7, // tab_more_repos_mid_850
-        0xa92b70b171b47cfd, // tab_rail_wrap_500
-        0x4074a7364f10d8a4, // tab_rail_wrap_1180
-        0x42876176bb70af74, // tab_picks_later_1180
-        0xe5f4db146997cf97, // tab_picks_running_860
-        0x5431620bcb9231b2, // tab_resume_1180
-        0x1ab830b731ebb86f, // tab_resume_860
-        0x412f3bc258c8cbb3, // tab_approved_1180
-        0x68d8e1766f407a6a, // tab_locked_1180
-        0x34108f43f2624701, // tab_start_over_1180
-        0x1bda047e1afe8f73, // tab_discover_brief_1180
-        0x01ac6b05f7ec84cd, // tab_discover_brief_860
-        0x1f606aeeece9a365, // tab_plan_long_1180
+        0x9f9aa4a416c9bb2c, // tab_build_860
+        0xdf5bd3c167255bcc, // tab_build_1180
+        0x71c0fea77ddaf889, // tab_build_1920
+        0xb078f450ac83eefc, // tab_plan_review_1180
+        0x8584c3638cbd98cb, // tab_verify_failed_1920
+        0x23f10333e4e17727, // tab_ship_blocked_1180
+        0x9ffcd9b2bf3492e6, // tab_done_1920
+        0x7dc4c3eba857ea84, // tab_later_860
+        0xbe6462e8708cbeb7, // tab_repos_1180
+        0x1cc00f47617911b3, // tab_repos_error_860
+        0x310b0ab54aa3dc42, // tab_more_repos_850
+        0xad5e886e4134fbe2, // tab_more_repos_mid_850
+        0x8d0153b71926a111, // tab_rail_wrap_500
+        0xb7b6603bb792f97d, // tab_rail_wrap_1180
+        0x62be02930be25f94, // tab_picks_later_1180
+        0xa257f4a5c61d55d4, // tab_picks_running_860
+        0x5d50db21793c7528, // tab_resume_1180
+        0xf7675adebc797ece, // tab_resume_860
+        0xf9da97f5f65bd142, // tab_approved_1180
+        0x050079822c7ca8bf, // tab_locked_1180
+        0x2a0756d92ae17f64, // tab_start_over_1180
+        0xe8fca0e6f8c33a09, // tab_discover_brief_1180
+        0x2770e977364ae95b, // tab_discover_brief_860
+        0xbf80fad3b4d4b205, // tab_plan_long_1180
     ],
 ];
 
@@ -3187,7 +3187,7 @@ fn doc_tab_buffer(
     scale: f64,
 ) -> MemoryRenderBuffer {
     let area = smithay::utils::Rectangle::from_size((w, TAB_HEIGHT).into());
-    painter.repos(view, area, scale, theme.palette())
+    painter.repos(view, area, scale, theme.page_palette())
 }
 
 fn paint_doc_tab(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
@@ -3222,25 +3222,25 @@ const GOLDEN_DOC_TAB: [[u64; 8]; 4] = [
     ],
     // Light at 1
     [
-        0xe4e0f55663b52bf6, // doc_preview_1180
-        0xbb4ab41188424904, // doc_review_1180
-        0x63af7b57b49e8dcb, // doc_review_no_browser
-        0x50dcf4fa733c2761, // doc_preview_1920
-        0xf8b91e043addce35, // doc_split_1920
-        0xc0b7a7bdb73caf1b, // doc_review_850
-        0xa93501dea209e676, // doc_approved_1180
-        0x0b1096da905fd34b, // doc_locked_1180
+        0xa18686a06ead007c, // doc_preview_1180
+        0xb02ec2e53fc64403, // doc_review_1180
+        0xe7a3716510ea0311, // doc_review_no_browser
+        0xf113a8e16264d641, // doc_preview_1920
+        0xe75a3733822a4267, // doc_split_1920
+        0x0f5727b322834702, // doc_review_850
+        0x3560847e6b3019a5, // doc_approved_1180
+        0x01bf10f87abe7168, // doc_locked_1180
     ],
     // Light at 2
     [
-        0x0ee8bb97e0ae3be2, // doc_preview_1180
-        0x61302e165ee90366, // doc_review_1180
-        0x917b364ae6a116ec, // doc_review_no_browser
-        0xad043f4a3dce9b22, // doc_preview_1920
-        0xa46109d5bb9516f7, // doc_split_1920
-        0x004dd9cbf09f97ac, // doc_review_850
-        0x6d1e2c6085670016, // doc_approved_1180
-        0x8a582ebb63d68533, // doc_locked_1180
+        0x2ac5806777ef660a, // doc_preview_1180
+        0x66b0b0ceaffd7146, // doc_review_1180
+        0x85244a608bd0ae93, // doc_review_no_browser
+        0x04633b82213dc5ff, // doc_preview_1920
+        0x0592a8393fac561a, // doc_split_1920
+        0x258307cd05494b74, // doc_review_850
+        0xcb982bb9429e2128, // doc_approved_1180
+        0x691c58703fe3a45f, // doc_locked_1180
     ],
 ];
 
