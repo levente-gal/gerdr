@@ -379,7 +379,7 @@ impl Gerdr {
         self.features.build.setting_up.remove(&key);
         let pending = self.features.build.pending.remove(&key);
         if let Some(keys) = self.features.build.after_setup.remove(&key) {
-            self.check_remove_repos(project.to_owned(), slug.to_owned(), keys);
+            self.check_remove_repos(project.to_owned(), slug.to_owned(), keys, false);
         }
         let now = feature::now();
         let Some(feature) = self.feature_mut(project, slug) else {

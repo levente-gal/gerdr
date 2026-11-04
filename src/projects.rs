@@ -886,10 +886,12 @@ impl Store {
         };
         crate::feature::PerProject {
             home: name(&feature.project),
-            links: feature
-                .links
-                .iter()
-                .map(|l| (l.project.clone(), name(&l.project)))
+            // Those of its context repositories and of those taken out too:
+            // neither needs a link.
+            links: (feature.links.iter().map(|l| l.project.as_str()))
+                .chain(feature.context.iter().filter_map(|c| c.project.as_deref()))
+                .chain(feature.removed.iter().filter_map(|r| r.project.as_deref()))
+                .map(|id| (id.to_owned(), name(id)))
                 .collect(),
         }
     }

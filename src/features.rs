@@ -63,17 +63,17 @@ use crate::{
     chrome::{
         self, ActivityRow, AgentChip, ButtonStyle, CheckLine, CheckTone, Dot, FeatureRepoRow,
         FeatureTabHit, FeatureTabView, MAX_CHECK_LINES, NewFeatureHit, NewFeatureRepo,
-        NewFeatureView, NodeMark, PageButton, PageSection, RailNode, StageMark, StagePage, TabArea,
-        TabColumn,
+        NewFeatureView, NodeMark, PageButton, PageSection, RailNode, RepoKind, RepoNote, StageMark,
+        StagePage, TabArea, TabColumn,
     },
     doc_review::DocFile,
     doc_tab::DocMode,
     feature::{
-        self, Event, Feature, Pr, Stage, Status,
+        self, Event, Feature, Pr, Repo, Stage, Status,
         agents::needs,
         graph,
         hook::Guard,
-        layout::{self, AddSpec, Created, LinkSpec, Root},
+        layout::{self, AddSpec, Created, Found, LinkSpec, Root},
         patch::{self, Reading},
         review_import::{CodeRead, FindingState},
         ship::{self, Action, Probe},
@@ -81,10 +81,13 @@ use crate::{
     },
     feature_graph::stop_graphs,
     herdr::AgentStatus,
-    home_dir, paths, projects,
+    home_dir,
+    menu::MenuAction,
+    paths, projects,
     scroll::{Bounds, Motion, Scroll},
     tasks::Task,
     text_field::{Edit, TextField},
+    toast::Level,
     tooltip::Tooltip,
 };
 
@@ -241,6 +244,15 @@ pub(crate) enum Done {
         result: Result<Root, String>,
     },
     /// The root of `project`, another project the dialog can link.
+    /// A root the feature panel looks in for repositories to offer (see
+    /// `Gerdr::find_repo_sources`).
+    FoundRepos {
+        project: String,
+        slug: String,
+        /// The project it is of; `None`: the feature's home project.
+        source: Option<String>,
+        result: Result<Root, String>,
+    },
     FoundOther {
         serial: u64,
         project: String,
@@ -299,12 +311,14 @@ pub(crate) enum Done {
         slug: String,
         keys: Vec<String>,
         result: Result<Vec<String>, String>,
+        to_context: bool,
     },
     /// Repositories taken out of feature `slug`, or not: per `Repo::key`.
     ReposRemoved {
         project: String,
         slug: String,
         results: Vec<(String, Result<(), String>)>,
+        to_context: bool,
     },
     Probed {
         project: String,
@@ -403,6 +417,17 @@ pub enum Finding {
     Looking,
     Found(Root),
     Failed(String),
+}
+
+/// A project of the store the feature panel offers repositories of, as far
+/// as it is known.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RepoSource {
+    /// The project's id; `None`: the feature's home project.
+    pub project: Option<String>,
+    /// Its name.
+    pub name: String,
+    pub finding: Finding,
 }
 
 /// Another project of the store the new feature dialog can link: the
@@ -897,6 +922,16 @@ pub struct FeaturePanel {
     /// Every key of the tab is listed in place of the page (F1).
     pub keys: bool,
     pub tab_hover: Option<FeatureTabHit>,
+    /// The projects' repositories to offer on the expanded repositories
+    /// (home first), read off the thread when it opens and on each expand.
+    pub sources: Vec<RepoSource>,
+    /// The repositories show as rows, with all they could be, over the page.
+    pub expanded: bool,
+    /// Where the keyboard goes back to when they collapse.
+    pub collapse_to: TabArea,
+    /// The button Left and Right picked on the selected row (see
+    /// `FeaturePanel::picked`).
+    pub repo_pick: Option<usize>,
 }
 
 /// What the feature panel asks gerdr to do.
@@ -951,6 +986,15 @@ pub enum PanelOutcome {
     Touch(String),
     /// Take this repository (`Repo::key`) out of the feature.
     RemoveRepo(String),
+    /// Make the feature hold this repository, on its branch: one it
+    /// doesn't hold now, offered by `FeaturePanel::sources`.
+    AddToFeature(String),
+    /// Let agents read this repository's main checkout, as context.
+    AddContext(String),
+    /// Take this repository out of the feature, keeping it as context.
+    MakeContext(String),
+    /// Stop offering this repository to agents as context.
+    DropContext(String),
     /// Open a tab in this folder: the feature's, or a repository's
     /// worktree.
     Open(PathBuf),
@@ -969,8 +1013,138 @@ pub enum PanelOutcome {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PanelRow {
     Repo(usize),
+    /// A repository row the feature doesn't hold: only its buttons act.
+    Other,
     Stage(Stage),
 }
+
+/// A row of the feature tab's repositories, which `FeaturePanel::repo`
+/// counts in. See `repo_entries`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RepoEntry {
+    /// `Feature::repos` at this index.
+    Held(usize),
+    /// `Feature::context` at this index.
+    Context(usize),
+    /// `Feature::removed` at this index.
+    Removed(usize),
+    /// A repository of `FeaturePanel::sources` the feature has nothing to
+    /// do with yet: `repo` in the root of `source`.
+    Offered { source: usize, repo: usize },
+}
+
+/// The repositories the feature tab lists, in order: those on the feature's
+/// branch, then those agents only read. Expanded, those it could take
+/// follow, so what collapsed shows is the start of what expanded shows and
+/// the selected row keeps its meaning across the two.
+pub fn repo_entries(feature: &Feature, sources: &[RepoSource], expanded: bool) -> Vec<RepoEntry> {
+    let held = |touched: bool| {
+        (feature.repos.iter().enumerate())
+            .filter(move |(_, repo)| repo.touched == touched)
+            .map(|(i, _)| RepoEntry::Held(i))
+    };
+    let mut entries: Vec<RepoEntry> = (held(true).chain(held(false)))
+        .chain((0..feature.context.len()).map(RepoEntry::Context))
+        .collect();
+    if expanded {
+        entries.extend(repos_offered(feature, sources));
+    }
+    entries
+}
+
+/// The rows only the expanded repositories show: those taken out, those
+/// not added. A shipped feature's repositories can't change: none.
+pub fn repos_offered(feature: &Feature, sources: &[RepoSource]) -> Vec<RepoEntry> {
+    if !linkable(feature) {
+        return Vec::new();
+    }
+    let mut entries: Vec<RepoEntry> = (0..feature.removed.len()).map(RepoEntry::Removed).collect();
+    for (at, source) in sources.iter().enumerate() {
+        let Finding::Found(root) = &source.finding else {
+            continue;
+        };
+        for (repo, found) in root.repos.iter().enumerate() {
+            let key = feature::repo_key(source.project.as_deref(), &found.name);
+            let known = feature.repo(&key).is_some()
+                || feature.context.iter().any(|c| c.key() == key)
+                || feature.removed.iter().any(|r| r.key() == key);
+            if !known {
+                entries.push(RepoEntry::Offered { source: at, repo });
+            }
+        }
+    }
+    entries
+}
+
+/// The `Repo::key` of the repository in `entry`.
+pub fn entry_key(feature: &Feature, sources: &[RepoSource], entry: RepoEntry) -> Option<String> {
+    match entry {
+        RepoEntry::Held(i) => feature.repos.get(i).map(Repo::key),
+        RepoEntry::Context(i) => feature.context.get(i).map(|c| c.key()),
+        RepoEntry::Removed(i) => feature.removed.get(i).map(|r| r.key()),
+        RepoEntry::Offered { source, repo } => {
+            let source = sources.get(source)?;
+            let Finding::Found(root) = &source.finding else {
+                return None;
+            };
+            let found = root.repos.get(repo)?;
+            Some(feature::repo_key(source.project.as_deref(), &found.name))
+        }
+    }
+}
+
+/// The buttons on the row of `entry`, with what they do. A repository can
+/// only join what a source still finds it in: a removed one whose folder
+/// went has none.
+pub fn entry_buttons(
+    feature: &Feature,
+    sources: &[RepoSource],
+    entry: RepoEntry,
+) -> Vec<(&'static str, PanelOutcome)> {
+    let Some(key) = entry_key(feature, sources, entry) else {
+        return Vec::new();
+    };
+    let found = || {
+        linkable(feature)
+            && sources.iter().any(|source| {
+                matches!(&source.finding, Finding::Found(root)
+                if root.repos.iter().any(|r| {
+                    feature::repo_key(source.project.as_deref(), &r.name) == key
+                }))
+            })
+    };
+    match entry {
+        RepoEntry::Held(i) => {
+            let Some(repo) = feature.repos.get(i) else {
+                return Vec::new();
+            };
+            if !repo.touched {
+                return vec![(FEATURE_BUTTON, PanelOutcome::Touch(key))];
+            }
+            let mut buttons = Vec::new();
+            if let Some(pr) = pr_of(feature, &key) {
+                buttons.push(("Open PR", PanelOutcome::OpenPr(pr.url.clone())));
+            }
+            if repo_removable(feature, i) {
+                buttons.push((CONTEXT_BUTTON, PanelOutcome::MakeContext(key)));
+            }
+            buttons
+        }
+        RepoEntry::Context(_) if found() => {
+            vec![(FEATURE_BUTTON, PanelOutcome::AddToFeature(key))]
+        }
+        RepoEntry::Removed(_) | RepoEntry::Offered { .. } if found() => vec![
+            (FEATURE_BUTTON, PanelOutcome::AddToFeature(key.clone())),
+            (CONTEXT_BUTTON, PanelOutcome::AddContext(key)),
+        ],
+        _ => Vec::new(),
+    }
+}
+
+/// The button adding a repository to the feature, on its branch.
+const FEATURE_BUTTON: &str = "Feature";
+/// The button keeping a repository for agents to read.
+const CONTEXT_BUTTON: &str = "Context";
 
 /// Where `stage` stands in `feature`.
 pub fn stage_mark(feature: &Feature, stage: Stage) -> StageMark {
@@ -1049,6 +1223,7 @@ pub fn row_action(feature: &Feature, row: PanelRow, ctx: RowCtx) -> Option<Panel
                 PanelOutcome::Touch(repo.key())
             })
         }
+        PanelRow::Other => None,
         PanelRow::Stage(stage) => Some(match stage_mark(feature, stage) {
             StageMark::Done if ctx.locked_by(feature, stage).is_some() => {
                 feature.current()?;
@@ -1202,6 +1377,7 @@ fn row_page(feature: &Feature, row: PanelRow) -> Option<PanelOutcome> {
         PanelRow::Repo(i) => {
             repo_button(feature, i).filter(|out| matches!(out, PanelOutcome::OpenPr(_)))
         }
+        PanelRow::Other => None,
         PanelRow::Stage(Stage::Verify) => has_evidence(feature).then_some(PanelOutcome::Evidence),
         PanelRow::Stage(_) => None,
     }
@@ -1230,7 +1406,7 @@ fn action_hint(action: &PanelOutcome) -> &'static str {
         PanelOutcome::Ship => "ship\u{2026}",
         PanelOutcome::Untick(_) => "reopen",
         PanelOutcome::GoToCurrent => "go to the current stage",
-        PanelOutcome::Touch(_) => "touch",
+        PanelOutcome::Touch(_) => "add to feature",
         PanelOutcome::Open(_) => "open tab",
         _ => "",
     }
@@ -1543,6 +1719,110 @@ impl FeaturePanel {
         }
     }
 
+    /// The repository row at `at` takes the keyboard.
+    fn select_row(&mut self, at: usize) {
+        self.focus = TabArea::Repos;
+        self.repo_pick = (self.repo == at).then_some(self.repo_pick).flatten();
+        self.repo = at;
+    }
+
+    /// The row of repository `key` takes the keyboard, if it has one.
+    pub fn select_repo(&mut self, feature: &Feature, key: &str) {
+        let at = repo_entries(feature, &self.sources, self.expanded)
+            .into_iter()
+            .position(|e| entry_key(feature, &self.sources, e).as_deref() == Some(key));
+        if let Some(at) = at {
+            self.select_row(at);
+            self.repo_pick = None;
+        }
+    }
+
+    /// `select_repo`, leaving the keyboard where it is and the button
+    /// `pick` picked: what the rows did before them changed, not the user.
+    fn select_repo_keeping(&mut self, feature: &Feature, key: &str, pick: Option<usize>) {
+        let focus = self.focus;
+        self.select_repo(feature, key);
+        self.focus = focus;
+        self.repo_pick = pick;
+    }
+
+    /// Show the repositories as rows, or back as the strip's chips. The
+    /// keyboard goes to the rows, and back to where it was. A row past
+    /// what collapsed lists is left to clamp to the last chip.
+    pub fn toggle_repos(&mut self) {
+        self.expanded = !self.expanded;
+        self.repo_pick = None;
+        if self.expanded {
+            self.collapse_to = self.focus;
+            self.focus = TabArea::Repos;
+            self.scroll[TabColumn::Repos as usize] = Scroll::default();
+        } else {
+            self.focus = self.collapse_to;
+        }
+    }
+
+    /// The button on the row of `entry` that Enter presses: the one Left
+    /// and Right picked, else the first of a row that has nothing else to
+    /// do. A row the feature holds opens its tab until one is picked.
+    pub fn picked(&self, feature: &Feature, entry: RepoEntry) -> Option<usize> {
+        let buttons = entry_buttons(feature, &self.sources, entry).len();
+        let first = (!matches!(entry, RepoEntry::Held(_))).then_some(0);
+        self.repo_pick
+            .filter(|at| *at < buttons)
+            .or(first)
+            .filter(|at| *at < buttons)
+    }
+
+    /// Left (`back`) or Right on the row of `entry`.
+    fn pick_button(&mut self, feature: &Feature, entry: RepoEntry, back: bool) {
+        let buttons = entry_buttons(feature, &self.sources, entry).len();
+        let picked = self.picked(feature, entry);
+        self.repo_pick = match (picked, back) {
+            _ if buttons == 0 => None,
+            (None, false) => Some(0),
+            (Some(at), false) => Some((at + 1).min(buttons - 1)),
+            (Some(at), true) if at > 0 => Some(at - 1),
+            (Some(_), true) if matches!(entry, RepoEntry::Held(_)) => None,
+            (at, true) => at,
+        };
+    }
+
+    /// Del with the keyboard on the row of `entry`, if it is one the
+    /// feature can do without. A repository on the feature's branch asks
+    /// (see `ask_remove_repos`), so its Del acts at once; one that goes by
+    /// itself arms first (checklist C4). Rows the feature doesn't hold have
+    /// nothing to take out, and never fall through to abandoning it.
+    fn delete_row(
+        &mut self,
+        feature: &Feature,
+        entry: RepoEntry,
+        armed: Option<String>,
+    ) -> Option<PanelOutcome> {
+        let arm = |panel: &mut Self, key: String, then: PanelOutcome| {
+            if armed.as_ref() == Some(&key) {
+                return Some(then);
+            }
+            panel.armed = Some(key);
+            None
+        };
+        match entry {
+            RepoEntry::Held(i) if feature.many_repos() => {
+                let repo = feature.repos.get(i)?;
+                let key = repo.key();
+                match repo.touched {
+                    true => Some(PanelOutcome::RemoveRepo(key)),
+                    false => arm(self, key.clone(), PanelOutcome::RemoveRepo(key)),
+                }
+            }
+            RepoEntry::Held(_) => Some(PanelOutcome::Remove),
+            RepoEntry::Context(i) if linkable(feature) => {
+                let key = feature.context.get(i)?.key();
+                arm(self, key.clone(), PanelOutcome::DropContext(key))
+            }
+            _ => None,
+        }
+    }
+
     /// Handle a key over `feature`, one of `slugs` listed.
     fn key(
         &mut self,
@@ -1552,11 +1832,13 @@ impl FeaturePanel {
         slugs: &[String],
         ctx: RowCtx,
     ) -> Option<PanelOutcome> {
-        let repos = feature.repos.len();
+        let entries = repo_entries(feature, &self.sources, self.expanded);
+        let repos = entries.len();
         self.repo = self.repo.min(repos.saturating_sub(1));
         if repos == 0 {
             self.focus = TabArea::Stages;
         }
+        let entry = entries.get(self.repo).copied();
         let armed = self.armed.take();
         // The pick no longer holds once the feature moved on.
         if self.stage.is_some() && self.picked_at != feature.current() {
@@ -1575,6 +1857,23 @@ impl FeaturePanel {
         if sym == Keysym::F1 && bare {
             self.keys = true;
             return None;
+        }
+        // Esc folds the rows first, and steps back as ever after that.
+        if sym == Keysym::Escape && bare && self.expanded {
+            self.toggle_repos();
+            return None;
+        }
+        // On the rows Left and Right go through the row's buttons.
+        if plain && self.expanded && self.focus == TabArea::Repos {
+            let back = match sym {
+                Keysym::Left | Keysym::KP_Left => Some(true),
+                Keysym::Right | Keysym::KP_Right => Some(false),
+                _ => None,
+            };
+            if let (Some(back), Some(entry)) = (back, entry) {
+                self.pick_button(feature, entry, back);
+                return None;
+            }
         }
         let step = match sym {
             Keysym::Up | Keysym::KP_Up | Keysym::Left | Keysym::KP_Left if plain => {
@@ -1596,13 +1895,20 @@ impl FeaturePanel {
                     let to = step.from(at, Stage::ALL.len() - 1);
                     self.pick(feature, Stage::ALL[to]);
                 }
-                TabArea::Repos => self.repo = step.from(self.repo, repos.saturating_sub(1)),
+                TabArea::Repos => {
+                    let to = step.from(self.repo, repos.saturating_sub(1));
+                    if to != self.repo {
+                        self.repo = to;
+                        self.repo_pick = None;
+                    }
+                }
             }
             return None;
         }
-        let row = match self.focus {
-            TabArea::Stages => PanelRow::Stage(stage),
-            TabArea::Repos => PanelRow::Repo(self.repo),
+        let row = match (self.focus, entry) {
+            (TabArea::Stages, _) => PanelRow::Stage(stage),
+            (TabArea::Repos, Some(RepoEntry::Held(i))) => PanelRow::Repo(i),
+            (TabArea::Repos, _) => PanelRow::Other,
         };
         match sym {
             Keysym::Tab | Keysym::ISO_Left_Tab if plain => {
@@ -1620,10 +1926,19 @@ impl FeaturePanel {
                     .then_some(PanelOutcome::Untick(stage));
             }
             Keysym::Return | Keysym::KP_Enter => {
-                return match self.focus {
-                    TabArea::Stages => page_enter(feature, stage, ctx),
-                    TabArea::Repos => row_action(feature, row, ctx),
-                };
+                if self.focus == TabArea::Stages {
+                    return page_enter(feature, stage, ctx);
+                }
+                if !self.expanded {
+                    self.toggle_repos();
+                    return None;
+                }
+                let picked = entry.and_then(|e| {
+                    let mut buttons = entry_buttons(feature, &self.sources, e);
+                    let at = self.picked(feature, e)?;
+                    (at < buttons.len()).then(|| buttons.swap_remove(at).1)
+                });
+                return picked.or_else(|| row_action(feature, row, ctx));
             }
             Keysym::Prior | Keysym::KP_Prior | Keysym::Next | Keysym::KP_Next
                 if ctrl && !mods.shift =>
@@ -1645,21 +1960,12 @@ impl FeaturePanel {
             Keysym::a | Keysym::A if ctrl && mods.shift && needs(stage).is_some() => {
                 return Some(PanelOutcome::CycleAgent(stage));
             }
-            Keysym::l | Keysym::L if ctrl && mods.shift && linkable(feature) => {
-                return Some(PanelOutcome::LinkProject);
-            }
+            Keysym::l | Keysym::L if ctrl && mods.shift => self.toggle_repos(),
             Keysym::Delete | Keysym::KP_Delete if ctrl && mods.shift => {
                 return start_over_stage(feature, stage, ctx).map(PanelOutcome::StartOver);
             }
-            // A repository of several goes by itself, armed first.
-            Keysym::Delete | Keysym::KP_Delete
-                if plain && self.focus == TabArea::Repos && feature.many_repos() =>
-            {
-                let key = feature.repos.get(self.repo)?.key();
-                if armed.as_ref() == Some(&key) {
-                    return Some(PanelOutcome::RemoveRepo(key));
-                }
-                self.armed = Some(key);
+            Keysym::Delete | Keysym::KP_Delete if plain && self.focus == TabArea::Repos => {
+                return self.delete_row(feature, entry?, armed);
             }
             Keysym::Delete | Keysym::KP_Delete if plain => return Some(PanelOutcome::Remove),
             _ => {}
@@ -2024,6 +2330,40 @@ impl Gerdr {
                     dialog.found(result);
                 }
             }
+            Done::FoundRepos {
+                project,
+                slug,
+                source,
+                result,
+            } => {
+                if let Err(why) = &result {
+                    let of = source.as_deref().unwrap_or(&project);
+                    tracing::warn!("finding the repositories of project {of}: {why}");
+                }
+                let found = match result {
+                    Ok(root) => Finding::Found(root),
+                    Err(why) => Finding::Failed(why),
+                };
+                let key = (project.clone(), slug.clone());
+                let open = (self.features.panel.as_mut())
+                    .filter(|p| p.project == project && p.slug == slug);
+                let feature = (self.features.all.get(&project))
+                    .and_then(|list| list.iter().find(|f| f.slug == slug));
+                if let Some(panel) = open.or_else(|| self.features.parked.get_mut(&key))
+                    && let Some(feature) = feature
+                    && let Some(at) = panel.sources.iter().position(|s| s.project == source)
+                {
+                    // New rows may come before the selected one: it stays.
+                    let entries = repo_entries(feature, &panel.sources, panel.expanded);
+                    let held = (entries.get(panel.repo))
+                        .and_then(|e| entry_key(feature, &panel.sources, *e));
+                    let pick = panel.repo_pick;
+                    panel.sources[at].finding = found;
+                    if let Some(key) = held {
+                        panel.select_repo_keeping(feature, &key, pick);
+                    }
+                }
+            }
             Done::FoundOther {
                 serial,
                 project,
@@ -2102,18 +2442,20 @@ impl Gerdr {
                 project,
                 slug,
                 keys,
+                to_context,
                 result,
             } => {
                 self.unbusy(&project, &slug, Job::RemoveRepos);
-                self.ask_remove_repos(project, slug, keys, result);
+                self.ask_remove_repos(project, slug, keys, to_context, result);
             }
             Done::ReposRemoved {
                 project,
                 slug,
+                to_context,
                 results,
             } => {
                 self.unbusy(&project, &slug, Job::RemoveRepos);
-                self.feature_repos_removed(&project, &slug, results);
+                self.feature_repos_removed(&project, &slug, to_context, results);
             }
             Done::Removed {
                 project,
@@ -2786,20 +3128,238 @@ impl Gerdr {
         let Some(project) = self.projects.project(id) else {
             return;
         };
-        let workspace_dirs: Vec<PathBuf> =
-            project.workspaces.iter().map(|w| w.dir.clone()).collect();
-        let ignore = project.workflow.ignore.clone();
-        let bases: Vec<(String, String)> = project
-            .workflow
-            .base
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
+        let (workspace_dirs, ignore, bases) = root_search(project);
         self.feature_work(None, move |_| Done::Found {
             serial,
             from: layout::main_top(&from),
             result: layout::find_root(&from, &workspace_dirs, &ignore, &bases),
         });
+    }
+
+    /// Read off the thread (checklist D3) which repositories the feature
+    /// panel can offer: those of its project and of the store's others.
+    /// What was found before stays until the new read is in. A project
+    /// with no workspace folder has none to offer. A shipped feature's
+    /// repositories can't change: it looks nowhere.
+    pub(crate) fn find_repo_sources(&mut self) {
+        let Some(panel) = self.features.panel.as_ref() else {
+            return;
+        };
+        let (project, slug) = (panel.project.clone(), panel.slug.clone());
+        let Some(feature) = self.feature(&project, &slug).filter(|f| linkable(f)) else {
+            return;
+        };
+        let home_dir = feature.dir.clone();
+        let known = |source: &Option<String>| {
+            (panel.sources.iter())
+                .find(|s| s.project == *source)
+                .map_or(Finding::Looking, |s| s.finding.clone())
+        };
+        let mut sources = Vec::new();
+        let mut finds = Vec::new();
+        // The home project first, whatever its place in the store.
+        let (home, others): (Vec<_>, Vec<_>) =
+            (self.projects.projects.iter()).partition(|p| p.id == project);
+        for p in home.into_iter().chain(others) {
+            let is_home = p.id == project;
+            let search = root_search(p);
+            let from = match is_home {
+                true => Some(home_dir.clone()),
+                false => search.0.first().cloned(),
+            };
+            let Some(from) = from else { continue };
+            let source = (!is_home).then(|| p.id.clone());
+            sources.push(RepoSource {
+                finding: known(&source),
+                project: source.clone(),
+                name: p.name.clone(),
+            });
+            finds.push((source, from, search));
+        }
+        if let Some(panel) = self.features.panel.as_mut() {
+            panel.sources = sources;
+        }
+        for (source, from, (dirs, ignore, bases)) in finds {
+            let (project, slug) = (project.clone(), slug.clone());
+            self.feature_work(None, move |_| Done::FoundRepos {
+                project,
+                slug,
+                source,
+                result: layout::find_root(&from, &dirs, &ignore, &bases),
+            });
+        }
+    }
+
+    /// The repository `key` as the feature panel's sources found it: its
+    /// source, the root holding it, and where it is.
+    fn offered_repo(&self, key: &str) -> Option<(RepoSource, Found)> {
+        let panel = self.features.panel.as_ref()?;
+        panel.sources.iter().find_map(|source| {
+            let Finding::Found(root) = &source.finding else {
+                return None;
+            };
+            let found = (root.repos.iter())
+                .find(|r| feature::repo_key(source.project.as_deref(), &r.name) == key)?;
+            Some((source.clone(), found.clone()))
+        })
+    }
+
+    /// Why feature `slug` can't change its repositories now, said; `false`
+    /// when it can.
+    fn repos_locked(&mut self, project: &str, slug: &str) -> bool {
+        let Some(feature) = self.feature(project, slug) else {
+            self.show_warning("That feature is gone".into());
+            return true;
+        };
+        let title = feature.title.clone();
+        if !linkable(feature) {
+            self.show_warning(format!(
+                "\u{201c}{title}\u{201d} has shipped; its repositories can't change now"
+            ));
+            return true;
+        }
+        if self.feature_busy(project, slug) {
+            self.show_warning(format!(
+                "\u{201c}{title}\u{201d} is busy; try again once it is done"
+            ));
+            return true;
+        }
+        false
+    }
+
+    /// Make feature `slug` hold repository `key` on its branch: a new
+    /// worktree from its base, its project linked if it wasn't. Taken
+    /// out before, it gets a new branch.
+    fn add_repo_to_feature(&mut self, project: &str, slug: &str, key: &str) {
+        if self.repos_locked(project, slug) {
+            return;
+        }
+        let Some((source, found)) = self.offered_repo(key) else {
+            return self.show_warning(format!(
+                "{key} wasn't found among the projects' repositories"
+            ));
+        };
+        let Finding::Found(root) = source.finding else {
+            return;
+        };
+        let linked = |id: &str| {
+            self.feature(project, slug)
+                .is_some_and(|f| f.link(id).is_some())
+        };
+        let (links, adds) = match source.project {
+            Some(id) if !linked(&id) => (
+                vec![LinkSpec {
+                    project: id,
+                    name: source.name,
+                    root,
+                    touched: vec![found.name],
+                }],
+                Vec::new(),
+            ),
+            at => (
+                Vec::new(),
+                vec![AddSpec {
+                    project: at,
+                    name: source.name,
+                    root,
+                    names: vec![found.name],
+                }],
+            ),
+        };
+        self.link_repos(project.to_owned(), slug.to_owned(), links, adds, Vec::new());
+    }
+
+    /// Let agents of feature `slug` read repository `key`'s main checkout:
+    /// no git, no worktree. An agent running keeps what it started with,
+    /// which the toast says.
+    fn add_context_repo(&mut self, project: &str, slug: &str, key: &str) {
+        if self.repos_locked(project, slug) {
+            return;
+        }
+        let Some((source, found)) = self.offered_repo(key) else {
+            return self.show_warning(format!(
+                "{key} wasn't found among the projects' repositories"
+            ));
+        };
+        let repo = feature::ContextRepo {
+            name: found.name,
+            main: found.main,
+            project: source.project,
+        };
+        let Some(feature) = self.feature_mut(project, slug) else {
+            return;
+        };
+        feature.log(feature::now(), format!("added {key} as context"));
+        feature.add_context(repo);
+        self.save_feature(project, slug);
+        self.select_repo(project, slug, key);
+        self.show_success(context_text(&self.repo_name(project, slug, key)));
+    }
+
+    /// Stop offering repository `key` to agents of feature `slug`: nothing
+    /// is lost, and the toast can undo it (checklist C4).
+    fn drop_context_repo(&mut self, project: &str, slug: &str, key: &str) {
+        if self.repos_locked(project, slug) {
+            return;
+        }
+        let named = self.repo_name(project, slug, key);
+        let Some(feature) = self.feature_mut(project, slug) else {
+            return;
+        };
+        let Some(repo) = feature.context.iter().find(|c| c.key() == key).cloned() else {
+            return;
+        };
+        let now = feature::now();
+        feature.context.retain(|c| c.key() != key);
+        feature.note_removed(repo.project.clone(), repo.name.clone(), now);
+        feature.log(now, format!("removed {key} from context"));
+        let title = feature.title.clone();
+        self.save_feature(project, slug);
+        self.select_repo(project, slug, key);
+        let undo = MenuAction::RestoreContextRepo {
+            project: project.to_owned(),
+            slug: slug.to_owned(),
+            repo: Box::new(repo),
+        };
+        self.toast_with(
+            format!("\u{201c}{title}\u{201d} no longer has {named} as context"),
+            Level::Success,
+            Some(("Undo".to_owned(), undo)),
+        );
+    }
+
+    /// Undo `drop_context_repo`.
+    pub(crate) fn restore_context_repo(
+        &mut self,
+        project: &str,
+        slug: &str,
+        repo: feature::ContextRepo,
+    ) {
+        let Some(feature) = self.feature_mut(project, slug) else {
+            return self.show_warning("That feature is gone".into());
+        };
+        let key = repo.key();
+        // Added to the feature since: it holds it, which is more.
+        if feature.repo(&key).is_some() {
+            return;
+        }
+        feature.log(feature::now(), format!("added {key} as context"));
+        feature.add_context(repo);
+        self.save_feature(project, slug);
+        self.select_repo(project, slug, &key);
+    }
+
+    /// The row of repository `key` takes the keyboard on the panel of
+    /// feature `slug`, wherever it went: it moved group.
+    fn select_repo(&mut self, project: &str, slug: &str, key: &str) {
+        let Some(feature) = self.feature(project, slug).cloned() else {
+            return;
+        };
+        let open =
+            (self.features.panel.as_mut()).filter(|p| p.project == project && p.slug == slug);
+        if let Some(panel) = open {
+            panel.select_repo(&feature, key);
+        }
     }
 
     /// Open the dialog linking repositories and other projects to open
@@ -2865,19 +3425,10 @@ impl Gerdr {
         let mut others = Vec::new();
         let mut finds = Vec::new();
         for p in self.projects.projects.iter().filter(|p| p.id != home) {
-            let dirs: Vec<PathBuf> = p.workspaces.iter().map(|w| w.dir.clone()).collect();
+            let (dirs, ignore, bases) = root_search(p);
             let root = match dirs.first() {
                 Some(from) => {
-                    let bases: Vec<(String, String)> = (p.workflow.base.iter())
-                        .map(|(k, v)| (k.clone(), v.clone()))
-                        .collect();
-                    finds.push((
-                        p.id.clone(),
-                        from.clone(),
-                        dirs.clone(),
-                        p.workflow.ignore.clone(),
-                        bases,
-                    ));
+                    finds.push((p.id.clone(), from.clone(), dirs.clone(), ignore, bases));
                     Finding::Looking
                 }
                 None => Finding::Failed("it has no workspace with a folder".into()),
@@ -2943,11 +3494,13 @@ impl Gerdr {
                 removes,
             } => {
                 // Refused before anything starts, so neither half runs alone.
-                if !removes.is_empty() && !self.may_remove_repos(&dialog.project, &slug, &removes) {
+                if !removes.is_empty()
+                    && !self.may_remove_repos(&dialog.project, &slug, &removes, false)
+                {
                     return;
                 }
                 if links.is_empty() && adds.is_empty() {
-                    self.check_remove_repos(dialog.project, slug, removes);
+                    self.check_remove_repos(dialog.project, slug, removes, false);
                 } else {
                     self.link_repos(dialog.project, slug, links, adds, removes);
                 }
@@ -3144,6 +3697,9 @@ impl Gerdr {
         feature.insert_repos(joined);
         let title = feature.title.clone();
         self.save_feature(project, slug);
+        if let Some(key) = keys.first() {
+            self.select_repo(project, slug, key);
+        }
         if self.project.as_deref() == Some(project) && self.features.dialog.is_none() {
             self.open_feature(project, slug);
         }
@@ -3157,7 +3713,7 @@ impl Gerdr {
                 self.features.build.after_setup.insert(key, removes);
             }
         } else if !removes.is_empty() {
-            self.check_remove_repos(project, slug, removes);
+            self.check_remove_repos(project, slug, removes, false);
         }
     }
 
@@ -3374,11 +3930,15 @@ impl Gerdr {
                 slug: slug.clone(),
                 ..FeaturePanel::default()
             });
+            let fresh = panel.sources.is_empty();
             self.features.panel = Some(panel);
             self.features.shown.insert(project.clone(), slug.clone());
             self.sync_feature_page();
             self.probe_feature(&project, &slug);
             self.watch_feature_tail();
+            if fresh {
+                self.find_repo_sources();
+            }
         }
         self.refresh_pointer_focus();
     }
@@ -3480,12 +4040,16 @@ impl Gerdr {
         let feature = self.feature(&panel.project, &panel.slug).cloned()?;
         let ctx = self.row_ctx(&feature);
         let panel = self.features.panel.as_mut()?;
-        let before = (panel.focus, panel.repo);
+        let before = (panel.focus, panel.repo, panel.expanded);
         let outcome = panel.key(mods, sym, &feature, &slugs, ctx);
-        let moved = (self.features.panel.as_ref())
-            .is_some_and(|p| p.focus == TabArea::Repos && (p.focus, p.repo) != before);
-        if moved {
+        let now = (self.features.panel.as_ref()).map(|p| (p.focus, p.repo, p.expanded));
+        if now.is_some_and(|(focus, repo, expanded)| {
+            focus == TabArea::Repos && (focus, repo, expanded) != before
+        }) {
             self.reveal_feature_repo();
+        }
+        if now.is_some_and(|(_, _, expanded)| expanded && !before.2) {
+            self.find_repo_sources();
         }
         self.sync_feature_page();
         outcome
@@ -3538,6 +4102,18 @@ impl Gerdr {
             && to != scroll.pos()
         {
             scroll.jump(to);
+        }
+    }
+
+    /// Unfold the feature tab's repositories or fold them, reading again
+    /// what they can offer when they unfold.
+    fn toggle_feature_repos(&mut self) {
+        let Some(panel) = self.features.panel.as_mut() else {
+            return;
+        };
+        panel.toggle_repos();
+        if panel.expanded {
+            self.find_repo_sources();
         }
     }
 
@@ -3609,10 +4185,19 @@ impl Gerdr {
             PanelOutcome::Touch(repo) => self.touch_repo(&project, &slug, repo),
             PanelOutcome::RemoveRepo(key) => {
                 let keys = vec![key];
-                if self.may_remove_repos(&project, &slug, &keys) {
-                    self.check_remove_repos(project.clone(), slug.clone(), keys);
+                if self.may_remove_repos(&project, &slug, &keys, false) {
+                    self.check_remove_repos(project.clone(), slug.clone(), keys, false);
                 }
             }
+            PanelOutcome::MakeContext(key) => {
+                let keys = vec![key];
+                if self.may_remove_repos(&project, &slug, &keys, true) {
+                    self.check_remove_repos(project.clone(), slug.clone(), keys, true);
+                }
+            }
+            PanelOutcome::AddToFeature(key) => self.add_repo_to_feature(&project, &slug, &key),
+            PanelOutcome::AddContext(key) => self.add_context_repo(&project, &slug, &key),
+            PanelOutcome::DropContext(key) => self.drop_context_repo(&project, &slug, &key),
             PanelOutcome::Open(dir) => {
                 if !dir.exists() {
                     return self.show_error(format!("{} is gone", tilde(&dir)));
@@ -3680,6 +4265,25 @@ impl Gerdr {
         match feature.repo(key) {
             Some(repo) => self.projects.names(feature).label(repo),
             None => key.to_owned(),
+        }
+    }
+
+    /// What repository `key` of feature `slug` is called on screen, held
+    /// by it or not.
+    fn repo_name(&self, project: &str, slug: &str, key: &str) -> String {
+        let Some(feature) = self.feature(project, slug) else {
+            return key.to_owned();
+        };
+        let names = self.projects.names(feature);
+        if let Some(repo) = feature.repo(key) {
+            return names.label(repo);
+        }
+        let context = (feature.context.iter()).find(|c| c.key() == key);
+        let gone = (feature.removed.iter()).find(|r| r.key() == key);
+        match (context, gone) {
+            (Some(c), _) => names.label_of(c.project.as_deref(), &c.name),
+            (_, Some(r)) => names.label_of(r.project.as_deref(), &r.name),
+            _ => key.to_owned(),
         }
     }
 
@@ -3751,7 +4355,13 @@ impl Gerdr {
 
     /// Whether repositories `keys` can leave feature `slug` now, whatever
     /// they hold; else says why not.
-    fn may_remove_repos(&mut self, project: &str, slug: &str, keys: &[String]) -> bool {
+    fn may_remove_repos(
+        &mut self,
+        project: &str,
+        slug: &str,
+        keys: &[String],
+        to_context: bool,
+    ) -> bool {
         let Some(feature) = self.feature(project, slug) else {
             self.show_warning("That feature is gone".into());
             return false;
@@ -3771,7 +4381,10 @@ impl Gerdr {
                 "\u{201c}{title}\u{201d} has shipped; its repositories can't change now"
             ))
         } else if let Some(why) = layout::removal_refusal(feature, keys) {
-            Some(format!("Can't remove {named}: {why}"))
+            Some(match to_context {
+                true => format!("Can't make {named} context only: {why}"),
+                false => format!("Can't remove {named}: {why}"),
+            })
         } else {
             let goes = |r: &feature::Repo| keys.contains(&r.key());
             // A link left with none takes its folder along.
@@ -3797,7 +4410,13 @@ impl Gerdr {
 
     /// Look at what taking repositories `keys` out of feature `slug` loses,
     /// off the thread, then ask (see `ask_remove_repos`).
-    pub(crate) fn check_remove_repos(&mut self, project: String, slug: String, keys: Vec<String>) {
+    pub(crate) fn check_remove_repos(
+        &mut self,
+        project: String,
+        slug: String,
+        keys: Vec<String>,
+        to_context: bool,
+    ) {
         let Some(feature) = self.feature(&project, &slug).cloned() else {
             return;
         };
@@ -3816,49 +4435,70 @@ impl Gerdr {
             project,
             slug,
             keys,
+            to_context,
         });
     }
 
-    /// Take repositories `keys` out of feature `slug` at once when nothing
-    /// is lost; else ask first, naming what is (checklist C2). Commits stop
-    /// them, with a word on why.
+    /// Take repositories `keys` out of feature `slug`. One on the feature's
+    /// branch always asks first: its branch goes, whatever it holds, and
+    /// the question names what is lost with it. Others go at once when
+    /// nothing is lost. Commits stop them, with a word on why. `to_context`:
+    /// they stay on as context (see `remove_repos`).
     fn ask_remove_repos(
         &mut self,
         project: String,
         slug: String,
         keys: Vec<String>,
+        to_context: bool,
         result: Result<Vec<String>, String>,
     ) {
         let losses = match result {
             Ok(losses) => losses,
             Err(why) => return self.show_warning(format!("Can't remove it: {why}")),
         };
-        if losses.is_empty() {
-            return self.remove_repos(&project, &slug, &keys, false);
-        }
         let Some(feature) = self.feature(&project, &slug) else {
             return;
         };
+        if !removal_asks(feature, &keys, &losses) {
+            return self.remove_repos(&project, &slug, &keys, false, to_context);
+        }
         let named: Vec<String> = (keys.iter()).map(|k| self.repo_label(feature, k)).collect();
-        let question = format!(
-            "Remove {} from \u{201c}{}\u{201d}?",
-            named.join(", "),
-            feature.title
-        );
+        let named = named.join(", ");
+        let (question, go) = match to_context {
+            true => (format!("Make {named} context only?"), "Make context"),
+            false => (
+                format!("Remove {named} from \u{201c}{}\u{201d}?", feature.title),
+                "Remove",
+            ),
+        };
         let repos = keys.len();
         let then = crate::confirm::Then::RemoveRepos {
             project,
             slug,
             keys,
-            force: true,
+            force: !losses.is_empty(),
+            to_context,
         };
-        self.ask_remove_worktrees(question, remove_repos_body(repos, &losses), "Remove", then);
+        self.ask_remove_worktrees(
+            question,
+            remove_repos_body(repos, &losses, to_context),
+            go,
+            then,
+        );
     }
 
     /// Take repositories `keys` out of feature `slug` off the thread: their
-    /// worktrees and branches go (`force`: with what they lose).
-    pub fn remove_repos(&mut self, project: &str, slug: &str, keys: &[String], force: bool) {
-        if !self.may_remove_repos(project, slug, keys) {
+    /// worktrees and branches go (`force`: with what they lose), and with
+    /// `to_context` agents go on reading their main checkouts.
+    pub fn remove_repos(
+        &mut self,
+        project: &str,
+        slug: &str,
+        keys: &[String],
+        force: bool,
+        to_context: bool,
+    ) {
+        if !self.may_remove_repos(project, slug, keys, to_context) {
             return;
         }
         let Some(feature) = self.feature(project, slug).cloned() else {
@@ -3886,6 +4526,7 @@ impl Gerdr {
                 results: layout::remove_repos(&feature, &keys, force),
                 project,
                 slug,
+                to_context,
             }
         });
     }
@@ -3896,6 +4537,7 @@ impl Gerdr {
         &mut self,
         project: &str,
         slug: &str,
+        to_context: bool,
         results: Vec<(String, Result<(), String>)>,
     ) {
         let Some(feature) = self.feature(project, slug) else {
@@ -3923,16 +4565,33 @@ impl Gerdr {
         let now = feature::now();
         let title = feature.title.clone();
         for key in &gone {
+            let held = feature.repo(key).cloned().filter(|_| to_context);
             drop_repo(feature, key, now);
-            feature.log(now, format!("removed {key}"));
+            match held {
+                Some(repo) => {
+                    feature.add_context(feature::ContextRepo {
+                        name: repo.name,
+                        main: repo.main,
+                        project: repo.project,
+                    });
+                    feature.log(now, format!("made {key} context only"));
+                }
+                None => feature.log(now, format!("removed {key}")),
+            }
         }
         if !gone.is_empty() {
             self.save_feature(project, slug);
-            self.show_success(format!(
-                "\u{201c}{title}\u{201d} no longer holds {}",
-                named.join(", ")
-            ));
+            self.show_success(match to_context {
+                true => context_text(&named.join(", ")),
+                false => format!(
+                    "\u{201c}{title}\u{201d} no longer holds {}",
+                    named.join(", ")
+                ),
+            });
             self.rebuild_feature_graphs(project, slug);
+        }
+        if let Some(key) = gone.first() {
+            self.select_repo(project, slug, key);
         }
         if !failed.is_empty() {
             self.show_error(format!("Couldn't remove {}", failed.join("; ")));
@@ -4341,36 +5000,52 @@ impl Gerdr {
                 }
                 None
             }
-            FeatureTabHit::Repo(i) | FeatureTabHit::MoreRepos(i) => {
-                if let Some(panel) = self
-                    .features
-                    .panel
-                    .as_mut()
-                    .filter(|_| i < feature.repos.len())
-                {
-                    panel.focus = TabArea::Repos;
-                    panel.repo = i;
+            FeatureTabHit::ToggleRepos => {
+                self.toggle_feature_repos();
+                None
+            }
+            // A chip unfolds the rows, on its own.
+            FeatureTabHit::Repo(i) => {
+                if (self.features.panel.as_ref()).is_some_and(|p| !p.expanded) {
+                    self.toggle_feature_repos();
+                }
+                if let Some(panel) = self.features.panel.as_mut() {
+                    panel.select_row(i);
                 }
                 None
             }
-            FeatureTabHit::RepoButton(i) => {
-                // Its row takes the keyboard too.
-                if let Some(panel) =
-                    (self.features.panel.as_mut()).filter(|_| i < feature.repos.len())
-                {
-                    panel.focus = TabArea::Repos;
-                    panel.repo = i;
+            FeatureTabHit::MoreRepos(i) => {
+                if let Some(panel) = self.features.panel.as_mut() {
+                    panel.select_row(i);
                 }
-                repo_button(&feature, i)
+                None
+            }
+            FeatureTabHit::RepoButton(i, b) => {
+                // Its row takes the keyboard too.
+                let panel = self.features.panel.as_mut();
+                panel.and_then(|panel| {
+                    panel.select_row(i);
+                    panel.repo_pick = Some(b);
+                    let entries = repo_entries(&feature, &panel.sources, panel.expanded);
+                    let mut buttons = entry_buttons(&feature, &panel.sources, *entries.get(i)?);
+                    (b < buttons.len()).then(|| buttons.swap_remove(b).1)
+                })
             }
             FeatureTabHit::RepoRemove(i) => {
-                if let Some(panel) =
-                    (self.features.panel.as_mut()).filter(|_| i < feature.repos.len())
-                {
-                    panel.focus = TabArea::Repos;
-                    panel.repo = i;
-                }
-                (feature.repos.get(i)).map(|r| PanelOutcome::RemoveRepo(r.key()))
+                let panel = self.features.panel.as_mut();
+                panel.and_then(|panel| {
+                    panel.select_row(i);
+                    let entries = repo_entries(&feature, &panel.sources, panel.expanded);
+                    match entries.get(i)? {
+                        RepoEntry::Held(i) => {
+                            Some(PanelOutcome::RemoveRepo(feature.repos.get(*i)?.key()))
+                        }
+                        RepoEntry::Context(i) => {
+                            Some(PanelOutcome::DropContext(feature.context.get(*i)?.key()))
+                        }
+                        _ => None,
+                    }
+                })
             }
             FeatureTabHit::PageButton(i) => {
                 let stage = (self.features.panel.as_ref())
@@ -4384,7 +5059,6 @@ impl Gerdr {
             FeatureTabHit::Button(0) => Some(PanelOutcome::Open(feature.dir.clone())),
             FeatureTabHit::Button(1) => Some(PanelOutcome::CopyPath),
             FeatureTabHit::Button(2) => Some(PanelOutcome::New),
-            FeatureTabHit::Button(3) => Some(PanelOutcome::LinkProject),
             FeatureTabHit::Button(_) => Some(PanelOutcome::Remove),
         };
         self.sync_feature_page();
@@ -4415,6 +5089,24 @@ impl Gerdr {
             FeatureTabHit::Button(i) if layout.compact => {
                 let label = header_label(view.remove, i)?;
                 Some(Tooltip::new(label, *layout.buttons.get(i)?))
+            }
+            FeatureTabHit::ToggleRepos => {
+                let text = match view.expanded {
+                    true => "Hide the repositories (Ctrl+Shift+L)",
+                    false => "Show all repositories (Ctrl+Shift+L)",
+                };
+                Some(Tooltip::new(text, layout.repos_toggle))
+            }
+            // What joining or leaving makes of the repository.
+            FeatureTabHit::RepoButton(i, b) => {
+                let feature = self.panel_feature()?;
+                let panel = self.features.panel.as_ref()?;
+                let entries = repo_entries(feature, &panel.sources, panel.expanded);
+                let buttons = entry_buttons(feature, &panel.sources, *entries.get(i)?);
+                let text = repo_button_tip(feature, &buttons.get(b)?.1)?;
+                let mut spot = *layout.repo_buttons.get(i)?.get(b)?;
+                spot.loc.y -= view.scroll[TabColumn::Repos as usize].round() as i32;
+                Some(Tooltip::new(&text, spot))
             }
             // Logos alone: their names.
             FeatureTabHit::AgentPick(i) | FeatureTabHit::AgentPickOff(i) => {
@@ -4467,8 +5159,7 @@ impl Gerdr {
         self.sync_feature_page();
         let pos = self.pointer.to_i32_round();
         let on_strip = (self.feature_tab_parts()).is_some_and(|(_, l)| {
-            l.columns[TabColumn::Repos as usize].is_none()
-                && l.strip.is_some_and(|r| r.contains(pos))
+            l.columns[TabColumn::Repos as usize].is_none() && l.strip.contains(pos)
         });
         if on_strip {
             return self.feature_strip_scroll(motion);
@@ -4488,7 +5179,11 @@ impl Gerdr {
     /// The wheel over the narrow tab's repository chips: the next one down
     /// (or up) takes the keyboard.
     fn feature_strip_scroll(&mut self, motion: Motion) {
-        let Some(repos) = self.panel_feature().map(|f| f.repos.len()) else {
+        let sources = (self.features.panel.as_ref()).map_or(&[][..], |p| p.sources.as_slice());
+        let Some(repos) = self
+            .panel_feature()
+            .map(|f| repo_entries(f, sources, false).len())
+        else {
             return;
         };
         let rows = self.motion_rows(motion, TAB_NOTCH);
@@ -4496,8 +5191,7 @@ impl Gerdr {
             return;
         }
         if let Some(panel) = self.features.panel.as_mut() {
-            panel.focus = TabArea::Repos;
-            panel.repo = strip_step(panel.repo, rows, repos);
+            panel.select_row(strip_step(panel.repo, rows, repos));
         }
         let time = self.start_time.elapsed().as_millis() as u32;
         self.pointer_moved(self.pointer, time);
@@ -4747,15 +5441,33 @@ fn drop_repo(feature: &mut Feature, key: &str, now: u64) {
         .retain(|l| repos.iter().any(|r| r.project.as_ref() == Some(&l.project)));
 }
 
+/// Whether taking `keys` out of `feature` asks first: when `losses` go
+/// with them, and always for a repository on the feature's branch.
+fn removal_asks(feature: &Feature, keys: &[String], losses: &[String]) -> bool {
+    !losses.is_empty() || (keys.iter()).any(|k| feature.repo(k).is_some_and(|r| r.touched))
+}
+
 /// What a confirm dialog about taking repositories out says of `losses`,
-/// what goes with their worktrees.
-fn remove_repos_body(repos: usize, losses: &[String]) -> String {
+/// what goes with their worktrees, and of what happens after: as context
+/// agents go on reading them; else they can come back, on a new branch
+/// and without what was lost.
+fn remove_repos_body(repos: usize, losses: &[String], to_context: bool) -> String {
     let what = if repos == 1 {
         "Its worktree and branch go"
     } else {
         "Their worktrees and branches go"
     };
-    format!("{what}, and with them {}", losses.join(", "))
+    let lost = match losses {
+        [] => format!("{what}; nothing in them is lost"),
+        losses => format!("{what}, and with them {}", losses.join(", ")),
+    };
+    let after = match (to_context, repos) {
+        (true, 1) => "Agents started from now on read its main checkout",
+        (true, _) => "Agents started from now on read their main checkouts",
+        (false, 1) => "You can add it back, on a new branch",
+        (false, _) => "You can add them back, on new branches",
+    };
+    format!("{lost}. {after}.")
 }
 
 /// What a confirm dialog about removing a feature's worktrees says of
@@ -4766,6 +5478,41 @@ fn removal_body(losses: &[String]) -> String {
         [one] => format!("Its worktrees go, and with them {one}"),
         more => format!("Its worktrees go, and with them {}", more.join(", ")),
     }
+}
+
+/// What `layout::find_root` goes by in project `project`: its workspaces'
+/// folders, the repositories it ignores, and their base branches.
+fn root_search(
+    project: &crate::projects::Project,
+) -> (Vec<PathBuf>, Vec<String>, Vec<(String, String)>) {
+    let dirs = project.workspaces.iter().map(|w| w.dir.clone()).collect();
+    let bases = (project.workflow.base.iter())
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    (dirs, project.workflow.ignore.clone(), bases)
+}
+
+/// What a repository row's button does beyond its one word, as its
+/// tooltip says it.
+fn repo_button_tip(feature: &Feature, outcome: &PanelOutcome) -> Option<String> {
+    match outcome {
+        PanelOutcome::Touch(_) | PanelOutcome::AddToFeature(_) => {
+            Some(format!("Add a worktree on {}", feature.branch()))
+        }
+        PanelOutcome::AddContext(_) => {
+            Some("Agents can read its main checkout; no worktree".to_owned())
+        }
+        PanelOutcome::MakeContext(_) => {
+            Some("Removes its worktree; agents can read its main checkout".to_owned())
+        }
+        _ => None,
+    }
+}
+
+/// What the toast says when repository `named` becomes context: an agent
+/// already running keeps what it started with.
+fn context_text(named: &str) -> String {
+    format!("Agents started from now on can read {named}")
 }
 
 /// Whether the repositories of `feature` can still change: open, and not
@@ -5623,11 +6370,11 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 3] = [
             ("Ctrl+O", "open a tab in the feature's folder"),
             ("Ctrl+C", "copy the feature's path"),
             ("Ctrl+N", "new feature"),
-            ("Ctrl+Shift+L", "link or remove repositories, before Ship"),
+            ("Ctrl+Shift+L", "show or hide all repositories"),
             (
                 "Del",
-                "on a repository of several, remove it (press twice); else abandon the feature, \
-                 or remove its worktrees once done",
+                "on a repository of several, remove it (one on the branch asks, others press \
+                 twice); else abandon the feature, or remove its worktrees once done",
             ),
             ("F1", "list these keys; any key puts them away"),
         ],
@@ -5669,20 +6416,47 @@ fn tab_hints(
         return vec![hint("Esc", "back to the page"), hint("F1", "hide the keys")];
     }
     let mut hints = Vec::new();
-    let repos = !feature.repos.is_empty();
+    let entries = repo_entries(feature, &panel.sources, panel.expanded);
+    let repos = !entries.is_empty();
+    let entry = (entries
+        .get(panel.repo.min(entries.len().saturating_sub(1)))
+        .copied())
+    .filter(|_| panel.focus == TabArea::Repos);
     match panel.focus {
         TabArea::Repos if repos => {
-            let row = PanelRow::Repo(panel.repo.min(feature.repos.len() - 1));
-            hints.push(hint("Up / Down", "repository"));
-            let enter = row_hint(feature, row, ctx);
-            if !enter.is_empty() {
-                hints.push(hint("Enter", enter));
+            let row = match entry {
+                Some(RepoEntry::Held(i)) => PanelRow::Repo(i),
+                _ => PanelRow::Other,
+            };
+            let buttons = entry.map_or(Vec::new(), |e| entry_buttons(feature, &panel.sources, e));
+            if panel.expanded {
+                hints.push(hint("Up / Down", "repository"));
+                if !buttons.is_empty() {
+                    hints.push(hint("Left / Right", "button"));
+                }
+                let picked = entry.and_then(|e| panel.picked(feature, e));
+                let enter = match picked.and_then(|at| buttons.get(at)) {
+                    Some((label, _)) => format!("{} button", label.to_lowercase()),
+                    None => row_hint(feature, row, ctx).to_owned(),
+                };
+                if !enter.is_empty() {
+                    hints.push(hint("Enter", &enter));
+                }
+                hints.push(hint("Esc", "hide them"));
+            } else {
+                hints.push(hint("Left / Right", "repository"));
+                hints.push(hint("Enter", "show all"));
             }
             hints.push(hint("Tab", "stages"));
             if row_page(feature, row).is_some() {
                 hints.push(hint("Ctrl+Shift+O", "open PR"));
             }
-            if feature.many_repos() {
+            let removable = match entry {
+                Some(RepoEntry::Held(_)) => feature.many_repos(),
+                Some(RepoEntry::Context(_)) => linkable(feature),
+                _ => false,
+            };
+            if removable {
                 hints.push(if panel.armed.is_some() {
                     hint("Del", "again to remove")
                 } else {
@@ -5733,14 +6507,109 @@ fn tab_hints(
         hint("Ctrl+C", "copy path"),
         hint("Ctrl+N", "new"),
     ]);
-    if linkable(feature) {
-        hints.push(hint("Ctrl+Shift+L", "link repositories"));
-    }
-    if panel.focus != TabArea::Repos || !repos || !feature.many_repos() {
+    hints.push(hint(
+        "Ctrl+Shift+L",
+        match panel.expanded {
+            true => "hide repositories",
+            false => "all repositories",
+        },
+    ));
+    let del_abandons = match entry {
+        Some(RepoEntry::Held(_)) => !feature.many_repos(),
+        Some(_) => false,
+        None => true,
+    };
+    if del_abandons {
         hints.push(hint("Del", &remove_label(feature).to_lowercase()));
     }
     hints.push(hint("F1", "all keys"));
     hints
+}
+
+/// The heading over the home project's repositories the feature could
+/// take.
+const NOT_ADDED: &str = "Not added";
+
+/// The group of rows `entry` belongs in, by its heading.
+fn entry_group<'a>(feature: &Feature, sources: &'a [RepoSource], entry: RepoEntry) -> &'a str {
+    match entry {
+        RepoEntry::Held(i) if feature.repos.get(i).is_some_and(|r| r.touched) => "In feature",
+        RepoEntry::Held(_) | RepoEntry::Context(_) => "Context, read only",
+        RepoEntry::Removed(_) => "Removed",
+        RepoEntry::Offered { source, .. } => match sources.get(source) {
+            Some(RepoSource {
+                project: Some(_),
+                name,
+                ..
+            }) => name,
+            _ => NOT_ADDED,
+        },
+    }
+}
+
+/// The row of `entry` on the feature tab, as `state` has it.
+fn repo_row(
+    panel: &FeaturePanel,
+    feature: &Feature,
+    entry: RepoEntry,
+    state: &PanelState,
+    now: u64,
+) -> FeatureRepoRow {
+    let key = entry_key(feature, &panel.sources, entry).unwrap_or_default();
+    let mut row = FeatureRepoRow {
+        name: key.clone(),
+        line: String::new(),
+        kind: RepoKind::Other,
+        group: None,
+        busy: state.busy.contains(&key.as_str()),
+        buttons: (entry_buttons(feature, &panel.sources, entry).into_iter())
+            .map(|(label, _)| label)
+            .collect(),
+        remove: false,
+        stat: None,
+    };
+    match entry {
+        RepoEntry::Held(i) => {
+            if let Some(repo) = feature.repos.get(i) {
+                row.name = state.names.label(repo);
+                row.line = repo_line(feature, repo, state.probe);
+                row.kind = match repo.touched {
+                    true => RepoKind::Active,
+                    false => RepoKind::Context,
+                };
+                row.remove = repo_removable(feature, i);
+                row.stat = state.probe.and_then(|p| p.stats.get(&key).copied());
+            }
+        }
+        RepoEntry::Context(i) => {
+            if let Some(repo) = feature.context.get(i) {
+                row.name = state.names.label_of(repo.project.as_deref(), &repo.name);
+                row.line = tilde(&repo.main);
+                row.kind = RepoKind::Context;
+                row.remove = linkable(feature);
+            }
+        }
+        RepoEntry::Removed(i) => {
+            if let Some(gone) = feature.removed.get(i) {
+                row.name = state.names.label_of(gone.project.as_deref(), &gone.name);
+                row.line = format!("removed {}", projects::ago(now, gone.at));
+            }
+        }
+        RepoEntry::Offered { source, repo } => {
+            let source = panel.sources.get(source);
+            if let Some(source) = source
+                && let Finding::Found(root) = &source.finding
+                && let Some(found) = root.repos.get(repo)
+            {
+                row.name = found.name.clone();
+                row.line = found.base.clone();
+            }
+        }
+    }
+    if panel.armed.as_ref() == Some(&key) {
+        row.line = "Press Del again".to_owned();
+    }
+    row
 }
 
 /// What the feature tab shows of `feature`, one of `slugs`, as `state`
@@ -5752,26 +6621,36 @@ fn tab_view(
     state: &PanelState,
     now: u64,
 ) -> FeatureTabView {
-    let repos: Vec<FeatureRepoRow> = feature
-        .repos
-        .iter()
-        .enumerate()
-        .map(|(i, r)| FeatureRepoRow {
-            name: state.names.label(r),
-            line: if panel.armed.as_ref() == Some(&r.key()) {
-                "Press Del again".to_owned()
-            } else {
-                repo_line(feature, r, state.probe)
-            },
-            touched: r.touched,
-            busy: state.busy.contains(&r.key().as_str()),
-            remove: repo_removable(feature, i),
-            button: match repo_button(feature, i) {
-                Some(PanelOutcome::Touch(_)) => Some("Touch"),
-                Some(PanelOutcome::OpenPr(_)) => Some("Open PR"),
-                _ => None,
-            },
-            stat: state.probe.and_then(|p| p.stats.get(&r.key()).copied()),
+    let entries = repo_entries(feature, &panel.sources, panel.expanded);
+    let mut group = None;
+    let repos: Vec<FeatureRepoRow> = (entries.iter())
+        .map(|entry| {
+            let mut row = repo_row(panel, feature, *entry, state, now);
+            let caption = entry_group(feature, &panel.sources, *entry);
+            if group != Some(caption) {
+                group = Some(caption);
+                row.group = Some(caption.to_owned());
+            }
+            row
+        })
+        .collect();
+    let repo_notes = (panel.sources.iter())
+        .filter(|_| panel.expanded && linkable(feature))
+        .filter_map(|source| {
+            let (text, error) = match &source.finding {
+                Finding::Looking => ("looking\u{2026}".to_owned(), false),
+                Finding::Failed(why) => (format!("couldn't read: {why}"), true),
+                Finding::Found(_) => return None,
+            };
+            let caption = match source.project {
+                None => NOT_ADDED.to_owned(),
+                Some(_) => source.name.clone(),
+            };
+            Some(RepoNote {
+                caption,
+                text,
+                error,
+            })
         })
         .collect();
     let stage = panel.page_stage(feature);
@@ -5814,15 +6693,23 @@ fn tab_view(
         true => TabArea::Stages,
         false => panel.focus,
     };
+    let at = panel.repo.min(repos.len().saturating_sub(1));
+    let picked = (entries.get(at))
+        .filter(|_| panel.expanded && focus == TabArea::Repos)
+        .and_then(|e| panel.picked(feature, *e));
     FeatureTabView {
         title: feature.title.clone(),
         sub,
         which,
         remove: remove_label(feature),
         rail,
-        repo: panel.repo.min(repos.len().saturating_sub(1)),
+        repo: at,
         repos,
         repos_error,
+        expanded: panel.expanded,
+        more: repos_offered(feature, &panel.sources).len(),
+        picked,
+        repo_notes,
         focus,
         page,
         activity: activity(feature, now),
@@ -5855,8 +6742,7 @@ fn tab_bounds(layout: &chrome::FeatureTabLayout, col: TabColumn) -> Bounds {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::feature::{Mark, Repo, ship::ShipCheck};
-    use layout::Found;
+    use crate::feature::{Mark, ship::ShipCheck};
 
     pub(crate) fn repo(name: &str, touched: bool) -> Repo {
         Repo {
@@ -6365,13 +7251,19 @@ pub(crate) mod tests {
         let keys: Vec<String> = f.repos.iter().map(|r| r.key()).collect();
         assert_eq!(keys, ["api"]);
         assert_eq!(
-            remove_repos_body(1, &["admin:panel: 2 changed files".into()]),
-            "Its worktree and branch go, and with them admin:panel: 2 changed files"
+            remove_repos_body(1, &["admin:panel: 2 changed files".into()], false),
+            "Its worktree and branch go, and with them admin:panel: 2 changed files. \
+             You can add it back, on a new branch."
+        );
+        assert_eq!(
+            remove_repos_body(1, &[], true),
+            "Its worktree and branch go; nothing in them is lost. \
+             Agents started from now on read its main checkout."
         );
     }
 
     #[test]
-    fn del_on_a_repository_of_several_arms_then_takes_it_out() {
+    fn del_on_a_repository_of_several_asks_or_arms_by_what_it_holds() {
         let f = feature("b", vec![repo("api", true), repo("web", true)], 2);
         let mut panel = FeaturePanel {
             project: "acme".into(),
@@ -6380,18 +7272,24 @@ pub(crate) mod tests {
             repo: 1,
             ..FeaturePanel::default()
         };
-        assert_eq!(press(&mut panel, &f, key(Keysym::Delete)), None);
-        assert_eq!(panel.armed.as_deref(), Some("web"));
+        // One on the feature's branch: the question guards it, not arming.
         assert_eq!(
             press(&mut panel, &f, key(Keysym::Delete)),
             Some(PanelOutcome::RemoveRepo("web".into()))
         );
-        // Any other key lets it go.
-        press(&mut panel, &f, key(Keysym::Delete));
-        press(&mut panel, &f, key(Keysym::Up));
         assert_eq!(panel.armed, None);
-        assert_eq!(press(&mut panel, &f, key(Keysym::Delete)), None);
-        assert_eq!(panel.armed.as_deref(), Some("api"));
+        // One the feature doesn't change arms first.
+        let old = feature("c", vec![repo("api", true), repo("ui", false)], 2);
+        assert_eq!(press(&mut panel, &old, key(Keysym::Delete)), None);
+        assert_eq!(panel.armed.as_deref(), Some("ui"));
+        assert_eq!(
+            press(&mut panel, &old, key(Keysym::Delete)),
+            Some(PanelOutcome::RemoveRepo("ui".into()))
+        );
+        // Any other key lets it go.
+        press(&mut panel, &old, key(Keysym::Delete));
+        press(&mut panel, &old, key(Keysym::End));
+        assert_eq!(panel.armed, None);
         // On the stages it is the feature's, as it was.
         panel.focus = TabArea::Stages;
         assert_eq!(
@@ -6480,13 +7378,20 @@ pub(crate) mod tests {
         // Tab moves to the repositories, where the same keys move.
         press(&mut panel, &f, key(Keysym::Tab));
         assert_eq!(panel.focus, TabArea::Repos);
+        press(&mut panel, &f, key(Keysym::Right));
+        assert_eq!(panel.repo, 1);
+        press(&mut panel, &f, key(Keysym::Left));
+        assert_eq!(panel.repo, 0);
+        assert_eq!(panel.page_stage(&f), Stage::Ship, "the page stays");
+        // Enter on a chip unfolds the rows, where it does the row's thing.
+        assert_eq!(press(&mut panel, &f, key(Keysym::Return)), None);
+        assert!(panel.expanded);
         assert_eq!(
             press(&mut panel, &f, key(Keysym::Return)),
             Some(PanelOutcome::Open("/work/.features/bulk/api".into()))
         );
-        press(&mut panel, &f, key(Keysym::Right));
+        press(&mut panel, &f, key(Keysym::Down));
         assert_eq!(panel.repo, 1);
-        assert_eq!(panel.page_stage(&f), Stage::Ship, "the page stays");
         assert_eq!(
             press(&mut panel, &f, key(Keysym::Return)),
             Some(PanelOutcome::Touch("web".into()))
@@ -6511,18 +7416,15 @@ pub(crate) mod tests {
             press(&mut panel, &f, ctrl(Keysym::n)),
             Some(PanelOutcome::New)
         );
-        assert_eq!(
-            press(&mut panel, &f, ctrl_shift(Keysym::L)),
-            Some(PanelOutcome::LinkProject)
-        );
+        assert_eq!(press(&mut panel, &f, ctrl_shift(Keysym::L)), None);
+        assert!(!panel.expanded, "the chord folds what Enter unfolded");
         let mut shipped = f.clone();
         shipped
             .marks
             .insert(Stage::Ship, f.marks.values().next().unwrap().clone());
-        assert_eq!(
-            press(&mut panel, &shipped, ctrl_shift(Keysym::L)),
-            None,
-            "a shipped feature spans no more projects"
+        assert!(
+            repos_offered(&shipped, &[]).is_empty(),
+            "a shipped feature takes no more repositories"
         );
         let focus = std::mem::replace(&mut panel.focus, TabArea::Stages);
         assert_eq!(
@@ -6664,16 +7566,270 @@ pub(crate) mod tests {
         assert!(!panel.keys);
     }
 
+    fn sources_with(found: &[&str]) -> Vec<RepoSource> {
+        vec![RepoSource {
+            project: None,
+            name: "acme".into(),
+            finding: Finding::Found(root(found)),
+        }]
+    }
+
+    fn context_of(name: &str) -> feature::ContextRepo {
+        feature::ContextRepo {
+            name: name.into(),
+            main: PathBuf::from(format!("/work/{name}")),
+            project: None,
+        }
+    }
+
+    /// A multi-repository feature with `api` and `web` on its branch,
+    /// `docs` as context and `auth` taken out.
+    fn every_kind_of_row() -> Feature {
+        let mut f = feature("b", vec![repo("api", true), repo("web", true)], 2);
+        f.add_context(context_of("docs"));
+        f.note_removed(None, "auth".into(), 5);
+        f
+    }
+
+    #[test]
+    fn leaving_an_active_repository_always_asks() {
+        let mut f = feature("b", vec![repo("api", true), repo("ui", false)], 2);
+        let keys = |k: &str| vec![k.to_owned()];
+        assert!(
+            removal_asks(&f, &keys("api"), &[]),
+            "nothing lost, still asks"
+        );
+        assert!(!removal_asks(&f, &keys("ui"), &[]), "not on the branch");
+        assert!(removal_asks(
+            &f,
+            &keys("ui"),
+            &["ui: 1 changed file".into()]
+        ));
+        f.repos[0].touched = false;
+        assert!(!removal_asks(&f, &keys("api"), &[]));
+    }
+
+    #[test]
+    fn rows_run_held_context_removed_then_not_added() {
+        let f = every_kind_of_row();
+        let sources = sources_with(&["api", "auth", "docs", "infra", "web"]);
+        assert_eq!(
+            repo_entries(&f, &sources, true),
+            [
+                RepoEntry::Held(0),
+                RepoEntry::Held(1),
+                RepoEntry::Context(0),
+                RepoEntry::Removed(0),
+                RepoEntry::Offered { source: 0, repo: 3 },
+            ]
+        );
+        // Collapsed lists only what is involved.
+        assert_eq!(
+            repo_entries(&f, &sources, false),
+            [
+                RepoEntry::Held(0),
+                RepoEntry::Held(1),
+                RepoEntry::Context(0)
+            ]
+        );
+        assert_eq!(repos_offered(&f, &sources).len(), 2);
+        // A shipped feature's repositories can't change.
+        let mut done = f.clone();
+        done.status = Status::Done;
+        assert!(repos_offered(&done, &sources).is_empty());
+    }
+
+    #[test]
+    fn each_kind_of_row_has_its_buttons() {
+        let f = every_kind_of_row();
+        let sources = sources_with(&["api", "auth", "docs", "infra", "web"]);
+        let of = |entry| -> Vec<PanelOutcome> {
+            entry_buttons(&f, &sources, entry)
+                .into_iter()
+                .map(|(_, then)| then)
+                .collect()
+        };
+        assert_eq!(
+            of(RepoEntry::Held(0)),
+            [PanelOutcome::MakeContext("api".into())]
+        );
+        assert_eq!(
+            of(RepoEntry::Context(0)),
+            [PanelOutcome::AddToFeature("docs".into())]
+        );
+        assert_eq!(
+            of(RepoEntry::Removed(0)),
+            [
+                PanelOutcome::AddToFeature("auth".into()),
+                PanelOutcome::AddContext("auth".into())
+            ]
+        );
+        assert_eq!(
+            of(RepoEntry::Offered { source: 0, repo: 3 }),
+            [
+                PanelOutcome::AddToFeature("infra".into()),
+                PanelOutcome::AddContext("infra".into())
+            ]
+        );
+        // A removed one whose folder went can't come back.
+        let gone = sources_with(&["api", "docs", "web"]);
+        assert!(entry_buttons(&f, &gone, RepoEntry::Removed(0)).is_empty());
+    }
+
+    #[test]
+    fn del_goes_by_the_kind_of_row() {
+        let f = every_kind_of_row();
+        let mut panel = FeaturePanel {
+            focus: TabArea::Repos,
+            expanded: true,
+            sources: sources_with(&["api", "auth", "docs", "infra", "web"]),
+            ..FeaturePanel::default()
+        };
+        // Context arms, then goes without a question.
+        panel.repo = 2;
+        assert_eq!(press(&mut panel, &f, key(Keysym::Delete)), None);
+        assert_eq!(panel.armed.as_deref(), Some("docs"));
+        assert_eq!(
+            press(&mut panel, &f, key(Keysym::Delete)),
+            Some(PanelOutcome::DropContext("docs".into()))
+        );
+        // Rows it doesn't hold have nothing to take out, least of all it.
+        for row in [3, 4] {
+            panel.repo = row;
+            assert_eq!(press(&mut panel, &f, key(Keysym::Delete)), None);
+            assert_eq!(panel.armed, None);
+        }
+    }
+
+    #[test]
+    fn esc_folds_the_rows_and_gives_the_keyboard_back() {
+        let f = every_kind_of_row();
+        let mut panel = FeaturePanel::default();
+        assert_eq!(panel.focus, TabArea::Stages);
+        assert_eq!(press(&mut panel, &f, ctrl_shift(Keysym::L)), None);
+        assert!(panel.expanded);
+        assert_eq!(panel.focus, TabArea::Repos, "the rows have the keyboard");
+        assert_eq!(press(&mut panel, &f, key(Keysym::Escape)), None);
+        assert!(!panel.expanded);
+        assert_eq!(panel.focus, TabArea::Stages, "where it was");
+        // The chord folds them too.
+        press(&mut panel, &f, ctrl_shift(Keysym::L));
+        press(&mut panel, &f, ctrl_shift(Keysym::L));
+        assert!(!panel.expanded);
+        assert_eq!(panel.focus, TabArea::Stages);
+    }
+
+    #[test]
+    fn left_and_right_pick_a_rows_button_for_enter() {
+        let f = every_kind_of_row();
+        let mut panel = FeaturePanel {
+            focus: TabArea::Repos,
+            expanded: true,
+            sources: sources_with(&["api", "auth", "docs", "infra", "web"]),
+            ..FeaturePanel::default()
+        };
+        // A row not held has nothing but its buttons: the first is picked.
+        panel.repo = 3;
+        assert_eq!(
+            press(&mut panel, &f, key(Keysym::Return)),
+            Some(PanelOutcome::AddToFeature("auth".into()))
+        );
+        press(&mut panel, &f, key(Keysym::Right));
+        press(&mut panel, &f, key(Keysym::Right));
+        assert_eq!(panel.repo, 3, "the sides don't leave the row");
+        assert_eq!(
+            press(&mut panel, &f, key(Keysym::Return)),
+            Some(PanelOutcome::AddContext("auth".into()))
+        );
+        press(&mut panel, &f, key(Keysym::Left));
+        assert_eq!(
+            press(&mut panel, &f, key(Keysym::Return)),
+            Some(PanelOutcome::AddToFeature("auth".into()))
+        );
+        // Another row starts over.
+        press(&mut panel, &f, key(Keysym::Right));
+        press(&mut panel, &f, key(Keysym::Up));
+        assert_eq!(panel.repo_pick, None);
+        // One the feature holds opens until a button is picked, and back.
+        panel.repo = 0;
+        let opens = Some(PanelOutcome::Open(f.repos[0].worktree.clone()));
+        assert_eq!(press(&mut panel, &f, key(Keysym::Return)), opens);
+        press(&mut panel, &f, key(Keysym::Right));
+        assert_eq!(
+            press(&mut panel, &f, key(Keysym::Return)),
+            Some(PanelOutcome::MakeContext("api".into()))
+        );
+        press(&mut panel, &f, key(Keysym::Left));
+        assert_eq!(press(&mut panel, &f, key(Keysym::Return)), opens);
+    }
+
+    #[test]
+    fn rows_arriving_keep_the_selected_one() {
+        let f = every_kind_of_row();
+        let mut panel = FeaturePanel {
+            focus: TabArea::Stages,
+            expanded: true,
+            repo: 3,
+            ..FeaturePanel::default()
+        };
+        panel.sources = sources_with(&["auth"]);
+        assert_eq!(
+            entry_key(
+                &f,
+                &panel.sources,
+                repo_entries(&f, &panel.sources, true)[3]
+            )
+            .as_deref(),
+            Some("auth")
+        );
+        panel.select_repo_keeping(&f, "auth", Some(1));
+        assert_eq!(panel.repo, 3);
+        assert_eq!(panel.focus, TabArea::Stages, "the keyboard stays");
+        assert_eq!(panel.repo_pick, Some(1));
+    }
+
+    #[test]
+    fn the_unfolded_rows_say_their_groups_and_what_failed() {
+        let f = every_kind_of_row();
+        let mut panel = FeaturePanel {
+            expanded: true,
+            sources: sources_with(&["api", "auth", "docs", "infra", "web"]),
+            ..FeaturePanel::default()
+        };
+        panel.sources.push(RepoSource {
+            project: Some("tools".into()),
+            name: "tools".into(),
+            finding: Finding::Failed("no such folder".into()),
+        });
+        let slugs = vec!["b".to_owned()];
+        let view = tab_view(&panel, &f, &slugs, &PanelState::default(), 2_060);
+        let groups: Vec<&str> = (view.repos.iter())
+            .filter_map(|r| r.group.as_deref())
+            .collect();
+        assert_eq!(
+            groups,
+            ["In feature", "Context, read only", "Removed", "Not added"]
+        );
+        assert_eq!(view.more, 2);
+        assert_eq!(view.repo_notes.len(), 1);
+        assert!(
+            view.repo_notes[0].error,
+            "a failed read isn't an empty group"
+        );
+        assert_eq!(view.repo_notes[0].caption, "tools");
+        // Collapsed lists only those involved, and still knows how many more.
+        panel.expanded = false;
+        let view = tab_view(&panel, &f, &slugs, &PanelState::default(), 2_060);
+        assert_eq!(view.repos.len(), 3);
+        assert_eq!(view.more, 2);
+    }
+
     #[test]
     fn header_buttons_and_the_strip_wheel() {
         assert_eq!(header_label("Abandon", 0), Some("Open tab"));
         assert_eq!(header_label("Abandon", 2), Some("New feature\u{2026}"));
-        assert_eq!(
-            header_label("Abandon", 3),
-            Some("Link repositories\u{2026}")
-        );
-        assert_eq!(header_label("Abandon", 4), Some("Abandon"));
-        assert_eq!(header_label("Abandon", 5), None);
+        assert_eq!(header_label("Abandon", 3), Some("Abandon"));
+        assert_eq!(header_label("Abandon", 4), None);
         // The wheel over the chips steps the repositories, stopping at
         // the ends.
         assert_eq!(strip_step(0, 1, 3), 1);
@@ -6798,12 +7954,24 @@ pub(crate) mod tests {
         assert_eq!(
             &hints[..4],
             [
-                ("Up / Down", "repository"),
-                ("Enter", "touch"),
+                ("Left / Right", "repository"),
+                ("Enter", "show all"),
                 ("Tab", "stages"),
                 ("Del", "remove repository"),
             ]
         );
+        // Unfolded they go through the rows and the row's buttons.
+        let unfolded = FeaturePanel {
+            expanded: true,
+            ..on_repos
+        };
+        let view = tab_view(&unfolded, &f, &three, &state, 2_060);
+        let hints: Vec<(&str, &str)> = (view.hints.iter())
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        assert_eq!(hints[0], ("Up / Down", "repository"));
+        assert!(hints.contains(&("Left / Right", "button")), "{hints:?}");
+        assert!(hints.contains(&("Esc", "hide them")), "{hints:?}");
         // A probe that couldn't read the code says so.
         let failed = Probe {
             reading: Err("git exited with 128".into()),
@@ -7627,10 +8795,10 @@ pub(crate) mod tests {
         let state = PanelState::default();
         panel.repo = 0;
         let view = tab_view(&panel, &f, &slugs, &state, 2_060);
-        assert_eq!(view.repos[0].button, Some("Open PR"));
+        assert_eq!(view.repos[0].buttons.first(), Some(&"Open PR"));
         assert_eq!(view.repos[0].line, "feature/bulk \u{b7} PR api/pull/12");
-        assert_eq!(view.repos[1].button, None);
-        assert_eq!(view.repos[2].button, Some("Touch"));
+        assert!(view.repos[1].buttons.is_empty(), "a shipped one's can't go");
+        assert_eq!(view.repos[2].buttons.first(), Some(&FEATURE_BUTTON));
         assert!(
             view.hints
                 .contains(&("Ctrl+Shift+O".into(), "open PR".into()))

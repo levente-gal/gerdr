@@ -72,13 +72,14 @@ pub enum Then {
         force: bool,
     },
     /// Take these repositories (`Repo::key`) out of this project's feature,
-    /// `force`: with the work their worktrees hold (see
-    /// `Gerdr::remove_repos`).
+    /// `force`: with the work their worktrees hold, `to_context`: staying on
+    /// as context (see `Gerdr::remove_repos`).
     RemoveRepos {
         project: String,
         slug: String,
         keys: Vec<String>,
         force: bool,
+        to_context: bool,
     },
     /// Ship this project's feature as its Ship check said (see
     /// `Gerdr::ship_feature`).
@@ -601,7 +602,8 @@ impl Gerdr {
                 slug,
                 keys,
                 force,
-            } => self.remove_repos(&project, &slug, &keys, force),
+                to_context,
+            } => self.remove_repos(&project, &slug, &keys, force, to_context),
             Then::ShipFeature { project, slug } => self.ship_feature(&project, &slug),
             Then::ApproveStage {
                 project,

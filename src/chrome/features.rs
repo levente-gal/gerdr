@@ -1,7 +1,8 @@
 //! The features' surfaces (see `crate::features`): the new feature dialog
 //! over everything, the feature tab (the full-size first tab of a
-//! feature's workspace: a header, the stages' rail, and the repositories',
-//! stage page's and activity's columns, each scrolled on its own), and
+//! feature's workspace: a header, the stages' rail, the repositories' strip
+//! that unfolds into rows, and the stage page's and activity's columns,
+//! each scrolled on its own), and
 //! the stage marks the sidebar's feature rows show.
 
 use std::{cell::RefCell, rc::Rc, sync::Arc};
@@ -10,8 +11,8 @@ use super::{
     ButtonStyle, CHECKBOX_GAP, CHECKBOX_ROW, Canvas, Check, DETAIL_FONT_SIZE, DIALOG_WIDTH, DOT,
     Dot, FONT_SIZE, FieldSpot, LABEL_FONT_SIZE, ListBar, POPUP_RADIUS, Painter, Palette, QUIT_BODY,
     QUIT_BUTTON, QUIT_BUTTON_GAP, QUIT_LINE_GAP, QUIT_PADDING, QUIT_TITLE, Rect, Rgb, SHADOW,
-    SMALL_FONT_SIZE, Thumb, agent_icon, band, button_width, check, chevron_side, copy, cross,
-    dialog_buttons, field_text, focus_ring, folder_plus, footer_hint_spots, gutter_track,
+    SMALL_FONT_SIZE, Thumb, agent_icon, band, button_width, check, chevron_down, chevron_side,
+    copy, cross, dialog_buttons, field_text, focus_ring, footer_hint_spots, gutter_track,
     hint_strs, icon_sdf, measure, measure_bold, measured_footer_height, mix, phys, physical, plus,
     rect_px, segment_tint, status_dot, tab, trash,
 };
@@ -47,12 +48,7 @@ const SWITCH_W: i32 = 28;
 /// check, Verify's failures): past it, the last says how many more.
 pub const MAX_CHECK_LINES: usize = 4;
 /// The feature tab's header buttons, before the one removing worktrees.
-pub const FEATURE_BUTTONS: [&str; 4] = [
-    "Open tab",
-    "Copy path",
-    "New feature\u{2026}",
-    "Link repositories\u{2026}",
-];
+pub const FEATURE_BUTTONS: [&str; 3] = ["Open tab", "Copy path", "New feature\u{2026}"];
 
 /// Where a stage stands in a feature, for its mark.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -272,18 +268,52 @@ pub fn new_feature_field(view: &NewFeatureView, size: Size<i32, Logical>, scale:
 
 // ----------------------------------------------------------------- panel
 
+/// What a repository is to the feature, by its dot.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum RepoKind {
+    /// On the feature's branch.
+    Active,
+    /// Agents read it, and the feature doesn't change it.
+    Context,
+    /// Not in the feature: taken out, or never added.
+    #[default]
+    Other,
+}
+
+impl RepoKind {
+    /// Its dot's colour. Other sits between border and muted, so it stays
+    /// quieter than the rest and still shows on a selected row's fill.
+    fn color(self, p: &Palette) -> Rgb {
+        match self {
+            RepoKind::Active => p.success,
+            RepoKind::Context => p.muted,
+            RepoKind::Other => mix(p.border, p.muted, 0.85),
+        }
+    }
+}
+
+/// What the unfolded rows say about a group they couldn't list yet.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RepoNote {
+    pub caption: String,
+    pub text: String,
+    pub error: bool,
+}
+
 /// A repository of the feature panel.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FeatureRepoRow {
     pub name: String,
     /// Its branch, or the base it is at as context.
     pub line: String,
-    pub touched: bool,
+    pub kind: RepoKind,
+    /// The heading of the group it starts, on the unfolded rows.
+    pub group: Option<String>,
     /// Being touched now.
     pub busy: bool,
-    /// The label of its button: Touch for one the feature doesn't change,
-    /// Open PR for one with a pull request; none else.
-    pub button: Option<&'static str>,
+    /// The labels of its buttons: what else it can be, Open PR for one
+    /// with a pull request.
+    pub buttons: Vec<&'static str>,
     /// Whether it shows the button taking it out of the feature.
     pub remove: bool,
     /// Lines added and removed since its base, uncommitted changes
@@ -353,7 +383,7 @@ pub enum TabArea {
     /// The rail: the keys pick a stage's page.
     #[default]
     Stages,
-    /// The repositories' column: the keys pick a repository.
+    /// The repositories' strip or rows: the keys pick a repository.
     Repos,
 }
 
@@ -477,13 +507,21 @@ pub struct FeatureTabView {
     pub remove: &'static str,
     /// The eight stages, in order.
     pub rail: Vec<RailNode>,
+    /// The strip's chips, or with `expanded` the rows, all it could hold.
     pub repos: Vec<FeatureRepoRow>,
-    /// Why the repositories couldn't be read, shown in their column in
-    /// place of an empty list.
+    /// Why the repositories couldn't be read, shown over them.
     pub repos_error: Option<String>,
     /// The repository with the keyboard while `focus` is `Repos`.
     pub repo: usize,
     pub focus: TabArea,
+    /// The repositories show as rows in a card, not chips on the strip.
+    pub expanded: bool,
+    /// How many repositories the rows offer beyond the strip's chips.
+    pub more: usize,
+    /// The button the keyboard picked on the selected row.
+    pub picked: Option<usize>,
+    /// Groups of rows not read yet, or that couldn't be: `expanded` only.
+    pub repo_notes: Vec<RepoNote>,
     pub page: StagePage,
     pub activity: Vec<ActivityRow>,
     /// How far each column is scrolled down, in logical pixels, indexed
@@ -518,7 +556,10 @@ pub enum FeatureTabHit {
     Node(usize),
     /// Index as in `FeatureTabView::repos`.
     Repo(usize),
-    RepoButton(usize),
+    /// A row's button: the row, then which of its `buttons`.
+    RepoButton(usize, usize),
+    /// The chevron at the strip's end, folding and unfolding the rows.
+    ToggleRepos,
     /// The × on a repository's row, as in `FeatureTabView::repos`.
     RepoRemove(usize),
     /// The narrow tab's "+N" / "N+" chip at an end of the repositories'
@@ -553,18 +594,24 @@ pub struct FeatureTabLayout {
     pub nodes: Vec<Rect>,
     /// Each column's place (its card), indexed by `TabColumn`: Activity
     /// has none when the tab is narrower than `ACTIVITY_BELOW` (its rows
-    /// go at the end of the page), and Repos none when narrower than
-    /// `REPOS_BELOW`, where the repositories are a row of chips in
-    /// `strip` under the rail.
+    /// go at the end of the page), and Repos none until the rows unfold,
+    /// when it goes across the tab over the others.
     pub columns: [Option<Rect>; 3],
     /// How tall each column's contents are, indexed by `TabColumn`: how
     /// far it may scroll is this less its place's height.
     pub content: [i32; 3],
-    /// The row of repository chips under the rail, on a narrow tab.
-    pub strip: Option<Rect>,
-    /// Each repository's row (or chip, in `strip`, not scrolled) and its
-    /// button, indexed as `FeatureTabView::repos`.
-    pub repos: Vec<(Rect, Option<Rect>)>,
+    /// The line of the repositories under the rail.
+    pub strip: Rect,
+    /// Its label, naming the repositories.
+    pub repos_label: Rect,
+    /// The chevron at its end, with what is left to see before it.
+    pub repos_toggle: Rect,
+    /// Each repository's row (or chip, in `strip`, not scrolled), indexed
+    /// as `FeatureTabView::repos`.
+    pub repos: Vec<Rect>,
+    /// Each row's buttons, as its `buttons` has them; empty for one with
+    /// no room, for a chip.
+    pub repo_buttons: Vec<Vec<Rect>>,
     /// Each repository's × (`FeatureRepoRow::remove`), as in `repos`.
     pub repo_removes: Vec<Option<Rect>>,
     /// On the strip, the chips standing for the repositories that don't
@@ -607,11 +654,15 @@ impl FeatureTabLayout {
         if let Some(n) = self.nodes.iter().position(on) {
             return Some(FeatureTabHit::Node(n));
         }
-        if self.strip.is_some_and(|s| s.contains(pos)) {
+        if on(&self.repos_toggle) {
+            return Some(FeatureTabHit::ToggleRepos);
+        }
+        if on(&self.strip) {
             if let Some((_, i, _)) = self.more_repos.iter().find(|(r, ..)| on(r)) {
                 return Some(FeatureTabHit::MoreRepos(*i));
             }
-            return self.repo_at(pos).or(Some(FeatureTabHit::Tab));
+            let chip = (!view.expanded).then(|| self.repo_at(pos));
+            return chip.flatten().or(Some(FeatureTabHit::Tab));
         }
         for column in TabColumn::ALL {
             let Some(place) = self.columns[column as usize] else {
@@ -653,12 +704,13 @@ impl FeatureTabLayout {
 
     /// The repository row, chip or button at `at` (unscrolled).
     fn repo_at(&self, at: Point<i32, Logical>) -> Option<FeatureTabHit> {
-        for (i, (row, button)) in self.repos.iter().enumerate() {
+        for (i, row) in self.repos.iter().enumerate() {
             if (self.repo_removes.get(i).copied().flatten()).is_some_and(|b| b.contains(at)) {
                 return Some(FeatureTabHit::RepoRemove(i));
             }
-            if button.is_some_and(|b| b.contains(at)) {
-                return Some(FeatureTabHit::RepoButton(i));
+            let buttons = self.repo_buttons.get(i).map_or(&[][..], Vec::as_slice);
+            if let Some(b) = buttons.iter().position(|b| b.contains(at)) {
+                return Some(FeatureTabHit::RepoButton(i, b));
             }
             if row.contains(at) {
                 return Some(FeatureTabHit::Repo(i));
@@ -677,11 +729,11 @@ impl FeatureTabLayout {
     /// Where the repositories' column should stand, scrolled `down` now,
     /// to show repository `i`'s row whole: `down` when it shows already,
     /// else the nearest that does (the column's top for the first, so its
-    /// caption shows too, and its end for the last). `None` on a narrow tab, whose strip of chips
-    /// shows the selected one by itself.
+    /// caption shows too, and its end for the last). `None` while folded:
+    /// the strip of chips shows the selected one by itself.
     pub fn reveal_repo(&self, i: usize, down: f64) -> Option<f64> {
         let place = self.columns[TabColumn::Repos as usize]?;
-        let (row, _) = self.repos.get(i)?;
+        let row = self.repos.get(i)?;
         let top = f64::from(row.loc.y - place.loc.y);
         let bottom = top + f64::from(row.size.h);
         let view = f64::from(place.size.h);
@@ -754,16 +806,11 @@ const NODE_LINE: i32 = 16;
 const RAIL_LABEL_STEP: i32 = 16;
 /// The room left between a node and the line joining it to the next.
 const CONNECTOR_GAP: i32 = 6;
-/// How wide the repositories' and activity's columns are: the page
-/// between them takes the rest.
-pub const REPOS_W: i32 = 220;
+/// How wide the activity's column is: the page takes the rest.
 pub const ACTIVITY_W: i32 = 240;
 /// Narrower than this, the activity has no column: its rows go at the
 /// end of the page.
 pub const ACTIVITY_BELOW: i32 = 1180;
-/// Narrower than this (O4), the repositories are a row of chips under
-/// the rail.
-pub const REPOS_BELOW: i32 = 870;
 /// The gap between the columns' cards, the room inside them, and their
 /// corners.
 const COLUMN_GAP: i32 = 12;
@@ -778,10 +825,23 @@ const CHIP_PAD: i32 = 10;
 const CHIP_GAP: i32 = 6;
 /// A column's uppercase caption.
 const CAPTION: i32 = 22;
-/// A repository's row (its name, then its branch under it) and the gap
-/// between two.
-const REPO_ROW: i32 = 42;
+/// A repository's row on the unfolded card, and the gap between two.
+const REPO_ROW: i32 = 28;
 const REPO_GAP: i32 = 4;
+/// The room above a group of rows' heading, past the first.
+const REPO_GROUP_GAP: i32 = 6;
+/// The room after the strip's label.
+const REPOS_LABEL_GAP: i32 = 10;
+/// What the strip's label says.
+const REPOS_LABEL: &str = "Repos";
+/// How wide the chevron is on the strip's toggle, beside its text.
+const TOGGLE_ICON: i32 = 22;
+/// At least this many rows show when unfolded, however short the tab,
+/// else the card takes at most `REPOS_CARD_SHARE` percent of the body.
+const REPOS_CARD_ROWS: i32 = 3;
+const REPOS_CARD_SHARE: i32 = 40;
+/// A row's second part shows only with this much room.
+const REPO_LINE_MIN: i32 = 40;
 /// Room for a dot left of a row's text.
 const DOT_ROOM: i32 = 18;
 /// A line of small text, of body text, and of an agent's pane.
@@ -1290,14 +1350,14 @@ impl Stack {
     }
 }
 
-/// The repositories' column, from its caption.
+/// The repositories' unfolded rows, by group.
 fn repo_stack(
     view: &FeatureTabView,
     s: &mut Stack,
-    repos: &mut Vec<(Rect, Option<Rect>)>,
+    repos: &mut Vec<Rect>,
+    buttons: &mut Vec<Vec<Rect>>,
     removes: &mut Vec<Option<Rect>>,
 ) {
-    s.caption("Repositories");
     if let Some(why) = &view.repos_error {
         s.text(
             &format!("couldn't read: {why}"),
@@ -1305,26 +1365,69 @@ fn repo_stack(
             Ink::Error,
             SMALL_LINE,
         );
-        return;
     }
     for (i, repo) in view.repos.iter().enumerate() {
+        if let Some(group) = &repo.group {
+            if i > 0 {
+                s.y += REPO_GROUP_GAP;
+            }
+            s.caption(group);
+        }
         let row = s.put(REPO_ROW, Piece::Repo(i));
         s.y += REPO_GAP;
         let y = row.loc.y + (REPO_ROW - ROW_BUTTON) / 2;
-        let remove = (repo.remove && !repo.busy).then(|| {
-            Rectangle::new(
-                (row.loc.x + row.size.w - ROW_BUTTON - 4, y).into(),
-                (ROW_BUTTON, ROW_BUTTON).into(),
-            )
-        });
-        let end = remove.map_or(row.loc.x + row.size.w - 4, |r| r.loc.x - 2);
-        let button = repo.button.filter(|_| !repo.busy).map(|label| {
+        // The × keeps its slot on every row, so the buttons line up.
+        let slot = row.loc.x + row.size.w - ROW_BUTTON - 4;
+        removes.push(
+            (repo.remove && !repo.busy)
+                .then(|| Rectangle::new((slot, y).into(), (ROW_BUTTON, ROW_BUTTON).into())),
+        );
+        // From the right. One with no room left has none: the keys reach it.
+        let mut rects = vec![Rect::default(); repo.buttons.len()];
+        let mut end = slot - 2;
+        let left = row.loc.x + DOT_ROOM + 4 + STAT_NAME_MIN;
+        for (b, label) in repo.buttons.iter().enumerate().rev() {
             let w = button_width(label);
-            Rectangle::new((end - w, y).into(), (w, ROW_BUTTON).into())
-        });
-        repos.push((row, button));
-        removes.push(remove);
+            if repo.busy || end - w < left {
+                break;
+            }
+            rects[b] = Rectangle::new((end - w, y).into(), (w, ROW_BUTTON).into());
+            end -= w + QUIT_BUTTON_GAP;
+        }
+        buttons.push(rects);
+        repos.push(row);
     }
+    for (i, note) in view.repo_notes.iter().enumerate() {
+        if i > 0 || !view.repos.is_empty() {
+            s.y += REPO_GROUP_GAP;
+        }
+        s.caption(&note.caption);
+        let ink = if note.error { Ink::Error } else { Ink::Muted };
+        s.text(&note.text, Font::Small, ink, SMALL_LINE);
+    }
+    if view.repos.is_empty() && view.repo_notes.is_empty() && view.repos_error.is_none() {
+        s.text("No repositories", Font::Small, Ink::Muted, SMALL_LINE);
+    }
+}
+
+/// How wide a repository's lines changed are, or nothing for none.
+fn stat_width(stat: Option<(usize, usize)>) -> i32 {
+    let Some((added, removed)) = stat else {
+        return 0;
+    };
+    let parts = [
+        (added > 0).then(|| format!("+{added}")),
+        (removed > 0).then(|| format!("\u{2212}{removed}")),
+    ];
+    let parts = parts.iter().flatten();
+    let widths = parts.map(|t| width_of(t, DETAIL_FONT_SIZE).ceil() as i32);
+    let widths: Vec<i32> = widths.collect();
+    widths.iter().sum::<i32>() + STAT_SPACE * (widths.len() as i32 - 1).max(0)
+}
+
+/// What the strip's toggle says beside its chevron.
+fn repos_toggle_label(view: &FeatureTabView) -> Option<String> {
+    (!view.expanded && view.more > 0).then(|| format!("{} more", view.more))
 }
 
 /// The page's column: the selected stage's title, about, status, buttons
@@ -1595,47 +1698,39 @@ pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayou
     let hint_spots = footer_hint_spots(&hint_strs(&view.hints), hints);
 
     let mut repos = Vec::new();
+    let mut repo_buttons = Vec::new();
     let mut repo_removes = Vec::new();
     let mut more_repos = Vec::new();
-    let strip = (width < REPOS_BELOW).then(|| {
-        let strip = Rectangle::new((x, body_top).into(), (inner, CHIP_ROW).into());
-        body_top += CHIP_ROW + COLUMN_GAP;
-        strip
+    let strip = Rectangle::new((x, body_top).into(), (inner, CHIP_ROW).into());
+    body_top += CHIP_ROW + COLUMN_GAP;
+    let chip_y = strip.loc.y + (CHIP_ROW - ROW_BUTTON) / 2;
+    let label_w = width_of(REPOS_LABEL, SMALL_FONT_SIZE).ceil() as i32;
+    let repos_label = Rectangle::new((x, strip.loc.y).into(), (label_w, CHIP_ROW).into());
+    let toggle_w = repos_toggle_label(view).map_or(ROW_BUTTON, |label| {
+        CHIP_PAD + width_of(&label, SMALL_FONT_SIZE).ceil() as i32 + TOGGLE_ICON
     });
-    if let Some(strip) = strip
-        && view.repos_error.is_none()
-    {
+    let repos_toggle = Rectangle::new(
+        (right - toggle_w, chip_y).into(),
+        (toggle_w, ROW_BUTTON).into(),
+    );
+    if !view.expanded && view.repos_error.is_none() {
         // The chips that fit, from the selected one if it would be past
-        // them; the selected one's button at the strip's end.
-        let y = strip.loc.y + (CHIP_ROW - ROW_BUTTON) / 2;
-        let remove = (view.repos.get(view.repo))
-            // Only with the keyboard on the chips: the chip it acts on then shows.
-            .filter(|r| view.focus == TabArea::Repos && r.remove && !r.busy)
-            .map(|_| {
-                Rectangle::new(
-                    (right - ROW_BUTTON, y).into(),
-                    (ROW_BUTTON, ROW_BUTTON).into(),
-                )
-            });
-        let button_end = remove.map_or(right, |r| r.loc.x - 2);
-        let button = view
-            .repos
-            .get(view.repo)
-            .and_then(|r| r.button.filter(|_| !r.busy))
-            .map(|label| {
-                let w = button_width(label);
-                Rectangle::new((button_end - w, y).into(), (w, ROW_BUTTON).into())
-            });
-        let end = button.map_or(button_end, |b| b.loc.x) - QUIT_BUTTON_GAP;
+        // them.
+        let start = x + label_w + REPOS_LABEL_GAP;
+        let end = repos_toggle.loc.x - QUIT_BUTTON_GAP;
         let chip_w = |r: &FeatureRepoRow| {
-            width_of(&r.name, SMALL_FONT_SIZE).ceil() as i32 + DOT_ROOM + 2 * CHIP_PAD
+            let stat = match stat_width(r.stat) {
+                0 => 0,
+                w => w + STAT_GAP,
+            };
+            width_of(&r.name, SMALL_FONT_SIZE).ceil() as i32 + stat + DOT_ROOM + 2 * CHIP_PAD
         };
         let n = view.repos.len();
         let more_w = |label: &str| width_of(label, SMALL_FONT_SIZE).ceil() as i32 + 2 * CHIP_PAD;
         // How many chips fit from `from` after a chip `lead` wide, with
         // room kept for the "+N" chip when some are left over.
         let fits = |from: usize, lead: i32| {
-            let mut cx = x + lead;
+            let mut cx = start + lead;
             let mut k = 0;
             for (j, r) in view.repos[from..].iter().enumerate() {
                 let left = n - from - j - 1;
@@ -1661,22 +1756,21 @@ pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayou
             first => more_w(&more_label(first, false)) + CHIP_GAP,
         };
         let shown = first..first + fits(first, lead);
-        let chip_y = strip.loc.y + (CHIP_ROW - ROW_BUTTON) / 2;
         if first > 0 {
             let w = more_w(&more_label(first, false));
-            let chip = Rectangle::new((x, chip_y).into(), (w, ROW_BUTTON).into());
+            let chip = Rectangle::new((start, chip_y).into(), (w, ROW_BUTTON).into());
             more_repos.push((chip, first - 1, more_label(first, false)));
         }
-        let mut cx = x + lead;
+        let mut cx = start + lead;
         for (i, repo) in view.repos.iter().enumerate() {
             if !shown.contains(&i) {
-                repos.push((Rect::default(), None));
+                repos.push(Rect::default());
                 continue;
             }
             let w = chip_w(repo);
             let chip = Rectangle::new((cx, chip_y).into(), (w, ROW_BUTTON).into());
             cx += w + CHIP_GAP;
-            repos.push((chip, None));
+            repos.push(chip);
         }
         if shown.end < n {
             let label = more_label(n - shown.end, true);
@@ -1684,27 +1778,41 @@ pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayou
             let chip = Rectangle::new((cx, chip_y).into(), (w, ROW_BUTTON).into());
             more_repos.push((chip, shown.end, label));
         }
-        // The selected one's button even when its chip doesn't show.
-        if let Some(slot) = repos.get_mut(view.repo) {
-            slot.1 = button;
-        }
+        repo_buttons = vec![Vec::new(); repos.len()];
         repo_removes = vec![None; repos.len()];
-        if let Some(slot) = repo_removes.get_mut(view.repo) {
-            *slot = remove;
-        }
     }
 
     let bottom = hints.loc.y - 4;
+    // Unfolded, the rows' card goes across the tab, as tall as they need
+    // up to its share of the body, pushing the other columns down.
+    let repos_card = view.expanded.then(|| {
+        let mut dry = Stack {
+            x: 0,
+            w: (inner - 2 * CARD_PAD).max(1),
+            y: 0,
+            pieces: Vec::new(),
+        };
+        repo_stack(
+            view,
+            &mut dry,
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut Vec::new(),
+        );
+        let body = (bottom - body_top).max(0);
+        let least = REPOS_CARD_ROWS * (REPO_ROW + REPO_GAP) + CAPTION + 2 * CARD_PAD;
+        let cap = (body * REPOS_CARD_SHARE / 100).max(least).min(body);
+        let h = (dry.y + 2 * CARD_PAD).min(cap);
+        let card = Rectangle::new((x, body_top).into(), (inner, h).into());
+        body_top += h + COLUMN_GAP;
+        card
+    });
     let col_h = (bottom - body_top).max(0);
     let card = |cx: i32, w: i32| Rectangle::new((cx, body_top).into(), (w, col_h).into());
     let mut columns = [None; 3];
-    let mut page_x = x;
+    let page_x = x;
     let mut page_w = inner;
-    if strip.is_none() {
-        columns[TabColumn::Repos as usize] = Some(card(x, REPOS_W));
-        page_x += REPOS_W + COLUMN_GAP;
-        page_w -= REPOS_W + COLUMN_GAP;
-    }
+    columns[TabColumn::Repos as usize] = repos_card;
     if width >= ACTIVITY_BELOW {
         columns[TabColumn::Activity as usize] = Some(card(right - ACTIVITY_W, ACTIVITY_W));
         page_w -= ACTIVITY_W + COLUMN_GAP;
@@ -1726,7 +1834,13 @@ pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayou
             pieces: Vec::new(),
         };
         match column {
-            TabColumn::Repos => repo_stack(view, &mut s, &mut repos, &mut repo_removes),
+            TabColumn::Repos => repo_stack(
+                view,
+                &mut s,
+                &mut repos,
+                &mut repo_buttons,
+                &mut repo_removes,
+            ),
             TabColumn::Page => page_stack(
                 view,
                 &mut s,
@@ -1754,7 +1868,10 @@ pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayou
         columns,
         content,
         strip,
+        repos_label,
+        repos_toggle,
         repos,
+        repo_buttons,
         repo_removes,
         more_repos,
         page_buttons,
@@ -1849,7 +1966,7 @@ const REPO_DOT: i32 = 8;
 /// Where the dot of a repository's row at `row` goes, left of its name.
 fn repo_row_dot(row: Rect) -> Rect {
     Rectangle::new(
-        (row.loc.x + 6, row.loc.y + 8).into(),
+        (row.loc.x + 6, row.loc.y + (row.size.h - REPO_DOT) / 2).into(),
         (REPO_DOT, REPO_DOT).into(),
     )
 }
@@ -1875,8 +1992,8 @@ fn repo_blinker(spot: Rect) -> Rect {
 /// Where the blinking dots of the feature tab showing `view` go, laid
 /// out as `l`: the dot of an agent card whose agent is at work, and of a
 /// repository being touched. Each as laid out, unscrolled, with the
-/// column it is in (and scrolls with); `None` for one in the head (a
-/// narrow tab's strip of chips).
+/// column it is in (and scrolls with); `None` for one in the head (the
+/// strip's chips).
 pub fn feature_tab_blinkers(
     view: &FeatureTabView,
     l: &FeatureTabLayout,
@@ -1892,17 +2009,17 @@ pub fn feature_tab_blinkers(
     }
     if view.repos_error.is_none() {
         let busy = |i: usize| view.repos.get(i).is_some_and(|r| r.busy);
-        match l.strip {
-            Some(_) => dots.extend(
+        match view.expanded {
+            false => dots.extend(
                 (l.repos.iter().enumerate())
-                    .filter(|(i, (chip, _))| busy(*i) && chip.size.w > 0)
-                    .map(|(_, (chip, _))| (repo_blinker(repo_chip_dot(*chip)), None)),
+                    .filter(|(i, chip)| busy(*i) && chip.size.w > 0)
+                    .map(|(_, chip)| (repo_blinker(repo_chip_dot(*chip)), None)),
             ),
-            None => {
-                dots.extend((l.repos.iter().enumerate()).filter(|(i, _)| busy(*i)).map(
-                    |(_, (row, _))| (repo_blinker(repo_row_dot(*row)), Some(TabColumn::Repos)),
-                ))
-            }
+            true => dots.extend(
+                (l.repos.iter().enumerate())
+                    .filter(|(i, _)| busy(*i))
+                    .map(|(_, row)| (repo_blinker(repo_row_dot(*row)), Some(TabColumn::Repos))),
+            ),
         }
     }
     dots
@@ -1957,7 +2074,8 @@ impl FeatureTabLayout {
     pub(super) fn slice_rect(&self, slice: TabSlice, down: f64, scale: f64) -> Option<Rect> {
         match slice {
             TabSlice::Head => {
-                let bottom = self.columns[TabColumn::Page as usize]?.loc.y;
+                // To the strip's end: it fills, and any column's card is below.
+                let bottom = self.strip.loc.y + self.strip.size.h + COLUMN_GAP;
                 Some(Rectangle::new(
                     self.frame.loc,
                     (self.frame.size.w, bottom - self.frame.loc.y).into(),
@@ -1986,9 +2104,8 @@ impl FeatureTabLayout {
 }
 
 /// `view` with only what `slice` draws from it kept (and the rest
-/// emptied): what its buffer is cached by, with where it goes. `strip`:
-/// the tab has a strip of repository chips in its head.
-fn slice_view(view: &FeatureTabView, slice: TabSlice, strip: bool) -> FeatureTabView {
+/// emptied): what its buffer is cached by, with where it goes.
+fn slice_view(view: &FeatureTabView, slice: TabSlice) -> FeatureTabView {
     let mut v = FeatureTabView {
         title: String::new(),
         sub: String::new(),
@@ -1999,6 +2116,10 @@ fn slice_view(view: &FeatureTabView, slice: TabSlice, strip: bool) -> FeatureTab
         repos_error: None,
         repo: 0,
         focus: TabArea::Stages,
+        expanded: view.expanded,
+        more: 0,
+        picked: None,
+        repo_notes: Vec::new(),
         page: StagePage {
             title: String::new(),
             about: String::new(),
@@ -2012,6 +2133,7 @@ fn slice_view(view: &FeatureTabView, slice: TabSlice, strip: bool) -> FeatureTab
         hints: Vec::new(),
     };
     use FeatureTabHit as H;
+    let strip = !view.expanded;
     let repos = |v: &mut FeatureTabView| {
         v.repos = view.repos.clone();
         v.repos_error = view.repos_error.clone();
@@ -2020,15 +2142,13 @@ fn slice_view(view: &FeatureTabView, slice: TabSlice, strip: bool) -> FeatureTab
     };
     v.hover = view.hover.filter(|hit| match slice {
         TabSlice::Head => {
-            matches!(hit, H::Prev | H::Next | H::Button(_) | H::Node(_))
-                || strip
-                    && matches!(
-                        hit,
-                        H::Repo(_) | H::RepoButton(_) | H::RepoRemove(_) | H::MoreRepos(_)
-                    )
+            matches!(
+                hit,
+                H::Prev | H::Next | H::Button(_) | H::Node(_) | H::ToggleRepos
+            ) || strip && matches!(hit, H::Repo(_) | H::MoreRepos(_))
         }
         TabSlice::Column(TabColumn::Repos) => {
-            matches!(hit, H::Repo(_) | H::RepoButton(_) | H::RepoRemove(_))
+            matches!(hit, H::Repo(_) | H::RepoButton(..) | H::RepoRemove(_))
         }
         TabSlice::Column(TabColumn::Page) => matches!(hit, H::PageButton(_) | H::AgentPick(_)),
         TabSlice::Column(TabColumn::Activity) => false,
@@ -2042,11 +2162,16 @@ fn slice_view(view: &FeatureTabView, slice: TabSlice, strip: bool) -> FeatureTab
             v.remove = view.remove;
             v.rail = view.rail.clone();
             v.focus = view.focus;
+            v.more = view.more;
             if strip {
                 repos(&mut v);
             }
         }
-        TabSlice::Column(TabColumn::Repos) => repos(&mut v),
+        TabSlice::Column(TabColumn::Repos) => {
+            repos(&mut v);
+            v.picked = view.picked;
+            v.repo_notes = view.repo_notes.clone();
+        }
         TabSlice::Column(TabColumn::Page) => {
             v.page = view.page.clone();
             v.activity = view.activity.clone();
@@ -2124,11 +2249,10 @@ impl FeatureTabLayers {
             let (Some(view), Some(l)) = (&view, &layout) else {
                 return Vec::new();
             };
-            let strip = l.strip.is_some();
             let at = |r: Rect| Point::from((area.loc.x + r.loc.x, area.loc.y + r.loc.y));
             let slice = |cache: &mut super::Cached<SliceKey>, slice: TabSlice, down: f64| {
                 let region = l.slice_rect(slice, down, scale)?;
-                let key = slice_view(view, slice, strip);
+                let key = slice_view(view, slice);
                 let buffer = cache.get((key, region, output, theme, scale), |_| {
                     drawn.set(drawn.get() + 1);
                     painter.feature_tab_slice(view, output, slice, region, scale, p)
@@ -2579,7 +2703,6 @@ impl Painter {
                 0 => tab(x, y, s * 0.8),
                 1 => copy(x, y, s * 1.2),
                 2 => plus(x, y, 0.0, 0.0, 4.5 * s, s),
-                3 => folder_plus(x, y, s),
                 _ => trash(x, y, s),
             });
         }
@@ -2668,10 +2791,7 @@ impl Painter {
             c.fill(0, px(y), c.w, px(1).max(1), p.border_variant);
         }
 
-        // On a narrow tab, the repositories as chips.
-        if let Some(strip) = l.strip {
-            self.repo_strip(c, view, l, strip, scale, p);
-        }
+        self.repo_strip(c, view, l, scale, p);
     }
 
     /// The tab's hints, on `c`.
@@ -2800,82 +2920,115 @@ impl Painter {
         );
     }
 
-    /// The repositories as a row of chips in `strip`, or why they
-    /// couldn't be read.
+    /// The repositories' line under the rail: its label, the chips or why
+    /// they couldn't be read, and the toggle.
     fn repo_strip(
         &self,
         c: &mut Canvas,
         view: &FeatureTabView,
         l: &FeatureTabLayout,
-        strip: Rect,
         scale: f64,
         p: &Palette,
     ) {
         let s = scale as f32;
-        if let Some(why) = &view.repos_error {
-            let (x, end) = phys(strip, scale);
-            let text = format!("couldn't read: {why}");
+        let line = |c: &mut Canvas, text: &str, r: Rect, color: Rgb| {
+            let (x, end) = phys(r, scale);
             self.text(
                 c,
-                &text,
+                text,
                 SMALL_FONT_SIZE,
                 x,
                 end,
-                band(strip, scale),
+                band(r, scale),
                 scale,
-                p.error,
+                color,
+            )
+        };
+        let focused = view.focus == TabArea::Repos;
+        let label = if focused { p.accent } else { p.muted };
+        line(c, REPOS_LABEL, l.repos_label, label);
+        let chip_ground = |c: &mut Canvas, chip: Rect, edge: Rgb, fill: Rgb| {
+            let (x, y, w, h) = rect_px(chip, scale);
+            let b = s.round().max(1.0);
+            c.rounded(x, y, w, h, h / 2.0, edge);
+            c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, h / 2.0 - b, fill);
+        };
+        let lit_fill =
+            |lit: bool| super::row_fill(p, false, if lit { 1.0 } else { 0.0 }).unwrap_or(p.panel);
+        if !view.expanded
+            && let Some(why) = &view.repos_error
+        {
+            let from = l.repos_label.loc.x + l.repos_label.size.w + REPOS_LABEL_GAP;
+            let text = Rectangle::new(
+                (from, l.strip.loc.y).into(),
+                (
+                    (l.repos_toggle.loc.x - QUIT_BUTTON_GAP - from).max(1),
+                    CHIP_ROW,
+                )
+                    .into(),
             );
-            return;
+            line(c, &format!("couldn't read: {why}"), text, p.error);
         }
-        for (i, ((chip, button), repo)) in l.repos.iter().zip(&view.repos).enumerate() {
-            if chip.size.w > 0 {
-                let selected = i == view.repo && view.focus == TabArea::Repos;
+        if !view.expanded {
+            for (i, (chip, repo)) in l.repos.iter().zip(&view.repos).enumerate() {
+                if chip.size.w <= 0 {
+                    continue;
+                }
+                let selected = i == view.repo && focused;
                 let lit = matches!(view.hover, Some(FeatureTabHit::Repo(r)) if r == i);
-                let (x, y, w, h) = rect_px(*chip, scale);
                 let fill =
                     super::row_fill(p, selected, if lit { 1.0 } else { 0.0 }).unwrap_or(p.panel);
-                let b = s.round().max(1.0);
                 // The keyboard's chip has the accent's outline.
                 let edge = if selected { p.accent } else { p.border_variant };
-                c.rounded(x, y, w, h, h / 2.0, edge);
-                c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, h / 2.0 - b, fill);
+                chip_ground(c, *chip, edge, fill);
                 self.repo_dot(c, repo_chip_dot(*chip), repo, scale, p);
+                let from = chip.loc.x + CHIP_PAD + DOT_ROOM - 4;
+                let to = chip.loc.x + chip.size.w - CHIP_PAD;
+                let room = Rectangle::new(
+                    (from, chip.loc.y).into(),
+                    ((to - from).max(0), chip.size.h).into(),
+                );
+                let name_end = match self.repo_stat(c, repo.stat, room, scale, p) {
+                    Some(stat) => stat - STAT_GAP,
+                    None => to + CHIP_PAD,
+                };
                 let text = Rectangle::new(
-                    (chip.loc.x + CHIP_PAD + DOT_ROOM - 4, chip.loc.y).into(),
-                    (chip.size.w - CHIP_PAD - DOT_ROOM + 4, chip.size.h).into(),
+                    (from, chip.loc.y).into(),
+                    ((name_end - from).max(1), chip.size.h).into(),
                 );
-                let (tx, tend) = phys(text, scale);
-                let color = if repo.touched { p.text } else { p.muted };
-                self.text(
-                    c,
-                    &repo.name,
-                    SMALL_FONT_SIZE,
-                    tx,
-                    tend,
-                    band(text, scale),
-                    scale,
-                    color,
-                );
-            }
-            if let (Some(b), Some(label)) = (button, repo.button) {
-                let hovered = view.hover == Some(FeatureTabHit::RepoButton(i));
-                self.button(c, label, *b, (hovered, false), ButtonStyle::Plain, scale, p);
-            }
-            if let Some(b) = l.repo_removes.get(i).copied().flatten() {
-                self.repo_remove(c, view, i, b, scale, p);
+                let color = match repo.kind {
+                    RepoKind::Active => p.text,
+                    _ => p.muted,
+                };
+                line(c, &repo.name, text, color);
             }
         }
         // The chips standing for those that don't fit.
         for (chip, i, label) in &l.more_repos {
             let lit = view.hover == Some(FeatureTabHit::MoreRepos(*i));
-            let (x, y, w, h) = rect_px(*chip, scale);
-            let fill = super::row_fill(p, false, if lit { 1.0 } else { 0.0 }).unwrap_or(p.panel);
-            let b = s.round().max(1.0);
-            c.rounded(x, y, w, h, h / 2.0, p.border_variant);
-            c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, h / 2.0 - b, fill);
+            chip_ground(c, *chip, p.border_variant, lit_fill(lit));
             let color = if lit { p.text } else { p.muted };
             self.centered(c, label, SMALL_FONT_SIZE, *chip, scale, color);
         }
+        // The toggle: what is left to see, and which way it goes.
+        let rect = l.repos_toggle;
+        let lit = view.hover == Some(FeatureTabHit::ToggleRepos);
+        chip_ground(c, rect, p.border_variant, lit_fill(lit));
+        let color = if lit { p.text } else { p.muted };
+        let mut icon = rect;
+        if let Some(label) = repos_toggle_label(view) {
+            let text = Rectangle::new(
+                (rect.loc.x + CHIP_PAD, rect.loc.y).into(),
+                ((rect.size.w - CHIP_PAD - TOGGLE_ICON).max(1), rect.size.h).into(),
+            );
+            line(c, &label, text, color);
+            icon.loc.x = rect.loc.x + rect.size.w - TOGGLE_ICON;
+            icon.size.w = TOGGLE_ICON;
+        }
+        let up = view.expanded;
+        icon_sdf(c, icon, scale, color, |x, y| {
+            chevron_down(x, if up { -y } else { y }, s)
+        });
     }
 
     /// The × taking repository `i` out of the feature, in `rect`.
@@ -2897,20 +3050,26 @@ impl Painter {
         icon_sdf(c, rect, scale, color, |x, y| cross(x, y, 0.8 * s));
     }
 
-    /// A repository's dot in `spot`: touched in the success colour, else
-    /// a quiet one. One being touched blinks: it is composed over the tab
-    /// (see `feature_tab_blinkers`).
+    /// A repository's dot in `spot`: on the branch in the success colour,
+    /// context a ring, else a quiet one. One being touched blinks: it is
+    /// composed over the tab (see `feature_tab_blinkers`).
     fn repo_dot(&self, c: &mut Canvas, spot: Rect, repo: &FeatureRepoRow, scale: f64, p: &Palette) {
-        let color = if repo.busy {
+        if repo.busy {
             return;
-        } else if repo.touched {
-            p.success
-        } else {
-            // Between the two, to show on a selected row's fill too.
-            mix(p.border, p.muted, 0.4)
-        };
+        }
         let d = spot.size.w as f32 * scale as f32;
-        icon_sdf(c, spot, scale, color, |x, y| x.hypot(y) - d / 2.0);
+        let solid = |x: f32, y: f32| x.hypot(y) - d / 2.0;
+        match repo.kind {
+            RepoKind::Active | RepoKind::Other => {
+                icon_sdf(c, spot, scale, repo.kind.color(p), solid)
+            }
+            RepoKind::Context => {
+                let line = 1.5 * scale as f32;
+                icon_sdf(c, spot, scale, repo.kind.color(p), |x, y| {
+                    (x.hypot(y) - (d - line) / 2.0).abs() - line / 2.0
+                });
+            }
+        }
     }
 
     /// One of a column's pieces, in `rect` (scrolled by `dy`).
@@ -2934,9 +3093,7 @@ impl Painter {
         };
         match piece {
             Piece::Caption(text) => {
-                let focused = view.focus == TabArea::Repos && text == "REPOSITORIES";
-                let color = if focused { p.accent } else { p.muted };
-                line(c, text, rect, DETAIL_FONT_SIZE, color);
+                line(c, text, rect, DETAIL_FONT_SIZE, p.muted);
             }
             Piece::Text {
                 text,
@@ -3131,46 +3288,63 @@ impl Painter {
                 let selected = view.focus == TabArea::Repos && view.repo == *i;
                 let lit = matches!(
                     view.hover,
-                    Some(FeatureTabHit::Repo(r) | FeatureTabHit::RepoButton(r) | FeatureTabHit::RepoRemove(r))
+                    Some(FeatureTabHit::Repo(r) | FeatureTabHit::RepoButton(r, _) | FeatureTabHit::RepoRemove(r))
                         if r == *i
                 );
                 self.row_highlight(c, rect, (selected, if lit { 1.0 } else { 0.0 }), scale, p);
-                let button = l.repos.get(*i).and_then(|(_, b)| *b).map(at);
+                let buttons = l.repo_buttons.get(*i).map_or(&[][..], Vec::as_slice);
                 let remove = l.repo_removes.get(*i).copied().flatten().map(at);
-                let end = button
+                let first = buttons.iter().find(|b| b.size.w > 0).copied().map(at);
+                let end = first
                     .or(remove)
                     .map_or(rect.loc.x + rect.size.w - 4, |b| b.loc.x - QUIT_BUTTON_GAP);
                 let left = rect.loc.x + DOT_ROOM + 4;
-                // The lines it changes, at the end of its name's line,
-                // when they leave the name room.
+                let y = rect.loc.y + (rect.size.h - 20) / 2;
+                // The lines it changes, right of its name and line, when
+                // they leave the name room.
                 let stat = Rectangle::new(
-                    (left + STAT_NAME_MIN, rect.loc.y + 2).into(),
+                    (left + STAT_NAME_MIN, y).into(),
                     ((end - left - STAT_NAME_MIN).max(0), 20).into(),
                 );
-                let name_end = match self.repo_stat(c, repo.stat, stat, scale, p) {
+                let text_end = match self.repo_stat(c, repo.stat, stat, scale, p) {
                     Some(from) => from - STAT_GAP,
                     None => end,
                 };
-                let name = Rectangle::new(
-                    (left, rect.loc.y + 2).into(),
-                    ((name_end - left).max(1), 20).into(),
-                );
                 self.repo_dot(c, repo_row_dot(rect), repo, scale, p);
-                let color = if repo.touched { p.text } else { p.muted };
-                line(c, &repo.name, name, FONT_SIZE, color);
-                let branch = Rectangle::new(
-                    (name.loc.x, name.loc.y + 20).into(),
-                    ((end - left).max(1), 18).into(),
-                );
                 let detail = if repo.busy {
                     format!("{} \u{b7} touching\u{2026}", repo.line)
                 } else {
                     repo.line.clone()
                 };
-                line(c, &detail, branch, DETAIL_FONT_SIZE, p.muted);
-                if let (Some(b), Some(label)) = (button, repo.button) {
-                    let hovered = view.hover == Some(FeatureTabHit::RepoButton(*i));
-                    self.button(c, label, b, (hovered, false), ButtonStyle::Plain, scale, p);
+                // The name whole if the line then still fits, else its share.
+                let room = (text_end - left).max(1);
+                let name_w = width_of(&repo.name, FONT_SIZE).ceil() as i32 + 1;
+                let line_w = width_of(&detail, DETAIL_FONT_SIZE).ceil() as i32 + 1;
+                let name_w = match name_w + PLACE_GAP + line_w <= room {
+                    true => name_w,
+                    false => name_w.min(room * 45 / 100),
+                };
+                let name = Rectangle::new((left, y).into(), (name_w.max(1), 20).into());
+                let color = match repo.kind {
+                    RepoKind::Active => p.text,
+                    _ => p.muted,
+                };
+                line(c, &repo.name, name, FONT_SIZE, color);
+                let from = left + name_w + PLACE_GAP;
+                if text_end - from >= REPO_LINE_MIN {
+                    let place = Rectangle::new((from, y).into(), ((text_end - from), 20).into());
+                    line(c, &detail, place, DETAIL_FONT_SIZE, p.muted);
+                }
+                for (b, (spot, label)) in buttons.iter().zip(&repo.buttons).enumerate() {
+                    if spot.size.w <= 0 {
+                        continue;
+                    }
+                    let hovered = view.hover == Some(FeatureTabHit::RepoButton(*i, b));
+                    let style = match selected && view.picked == Some(b) {
+                        true => ButtonStyle::Primary,
+                        false => ButtonStyle::Plain,
+                    };
+                    self.button(c, label, at(*spot), (hovered, false), style, scale, p);
                 }
                 if let Some(b) = remove {
                     self.repo_remove(c, view, *i, b, scale, p);
@@ -3490,31 +3664,117 @@ mod tests {
     fn the_tab_drops_columns_as_it_narrows() {
         let view = tab_view();
         let wide = tab_at(&view, 1920);
-        assert!(
-            TabColumn::ALL
-                .iter()
-                .all(|c| wide.columns[*c as usize].is_some())
-        );
-        assert!(wide.strip.is_none() && !wide.compact);
+        assert!(wide.columns[TabColumn::Page as usize].is_some());
+        assert!(wide.columns[TabColumn::Activity as usize].is_some());
+        assert!(!wide.compact);
         let at = tab_at(&view, ACTIVITY_BELOW);
         assert!(at.columns[TabColumn::Activity as usize].is_some());
         let under = tab_at(&view, ACTIVITY_BELOW - 1);
         assert!(under.columns[TabColumn::Activity as usize].is_none());
-        assert!(under.columns[TabColumn::Repos as usize].is_some());
         assert!(!under.compact);
-        let compact = tab_at(&view, COMPACT_BUTTONS_BELOW - 1);
-        assert!(compact.compact && compact.strip.is_none());
-        let narrow = tab_at(&view, REPOS_BELOW - 1);
-        assert!(narrow.columns[TabColumn::Repos as usize].is_none());
-        assert!(narrow.columns[TabColumn::Activity as usize].is_none());
-        assert!(narrow.strip.is_some());
-        // The page keeps its room (the plan's 420 px at least) where the
-        // columns beside it are.
-        const PAGE_MIN_W: i32 = 420;
-        for w in [REPOS_BELOW, ACTIVITY_BELOW] {
-            let page = tab_at(&view, w).columns[TabColumn::Page as usize].unwrap();
-            assert!(page.size.w >= PAGE_MIN_W, "{w}: {}", page.size.w);
+        assert!(tab_at(&view, COMPACT_BUTTONS_BELOW - 1).compact);
+        // The repositories are a line on every width, until they unfold.
+        for w in [800, ACTIVITY_BELOW, 1920] {
+            let l = tab_at(&view, w);
+            assert!(l.columns[TabColumn::Repos as usize].is_none());
+            assert!(l.strip.size.w > 0 && l.repos_toggle.size.w > 0);
         }
+        // The page keeps its room beside the activity.
+        const PAGE_MIN_W: i32 = 420;
+        let page = tab_at(&view, ACTIVITY_BELOW).columns[TabColumn::Page as usize].unwrap();
+        assert!(page.size.w >= PAGE_MIN_W, "{}", page.size.w);
+    }
+
+    /// `tab_view` with its repositories' rows unfolded.
+    fn unfolded() -> FeatureTabView {
+        let mut view = tab_view();
+        view.expanded = true;
+        view
+    }
+
+    #[test]
+    fn the_rows_unfold_across_the_tab_over_the_page() {
+        let view = unfolded();
+        let l = tab_at(&view, 1920);
+        let card = l.columns[TabColumn::Repos as usize].unwrap();
+        let page = l.columns[TabColumn::Page as usize].unwrap();
+        let activity = l.columns[TabColumn::Activity as usize].unwrap();
+        assert_eq!(card.size.w, l.strip.size.w);
+        assert!(card.loc.y >= l.strip.loc.y + l.strip.size.h);
+        assert!(page.loc.y >= card.loc.y + card.size.h);
+        assert_eq!(page.loc.y, activity.loc.y);
+        // Folded, the page starts where the card did.
+        let folded = tab_at(&tab_view(), 1920);
+        assert_eq!(
+            folded.columns[TabColumn::Page as usize].unwrap().loc.y,
+            card.loc.y
+        );
+        // The rows don't chip: the strip only holds its toggle.
+        assert!(l.more_repos.is_empty());
+        assert_eq!(
+            l.hit(&view, centre(l.repos_toggle)),
+            Some(FeatureTabHit::ToggleRepos)
+        );
+    }
+
+    #[test]
+    fn many_rows_stop_at_their_share_of_the_body_and_scroll() {
+        let mut view = unfolded();
+        let row = view.repos[0].clone();
+        view.repos = vec![row; 40];
+        let l = tab_at(&view, 1920);
+        let card = l.columns[TabColumn::Repos as usize].unwrap();
+        let body = l.hints.loc.y - 4 - card.loc.y;
+        assert!(card.size.h <= body * REPOS_CARD_SHARE / 100 + 1);
+        assert!(l.scroll_room(TabColumn::Repos) > 0);
+        let page = l.columns[TabColumn::Page as usize].unwrap();
+        assert!(page.size.h > 100, "{}", page.size.h);
+    }
+
+    #[test]
+    fn a_rows_buttons_line_up_and_each_hits() {
+        let mut view = unfolded();
+        view.repos[0].buttons = vec!["Context"];
+        view.repos[1].buttons = vec!["Feature", "Context"];
+        view.repos[1].remove = false;
+        let l = tab_at(&view, 1000);
+        let (one, two) = (&l.repo_buttons[0], &l.repo_buttons[1]);
+        assert_eq!(one[0].loc.x + one[0].size.w, two[1].loc.x + two[1].size.w);
+        assert!(two[0].loc.x + two[0].size.w <= two[1].loc.x);
+        assert_eq!(
+            l.hit(&view, centre(two[0])),
+            Some(FeatureTabHit::RepoButton(1, 0))
+        );
+        assert_eq!(
+            l.hit(&view, centre(two[1])),
+            Some(FeatureTabHit::RepoButton(1, 1))
+        );
+        let remove = l.repo_removes[0].unwrap();
+        assert_eq!(
+            l.hit(&view, centre(remove)),
+            Some(FeatureTabHit::RepoRemove(0))
+        );
+        assert!(l.repo_removes[1].is_none());
+        // A row too narrow for them keeps none, and no overlap.
+        let thin = tab_at(&view, 200);
+        assert!(thin.repo_buttons[1].iter().all(|b| b.size.w == 0));
+    }
+
+    #[test]
+    fn the_context_dot_differs_from_the_quiet_one() {
+        let painter = crate::chrome::Painter::new();
+        let spot: Rect = Rectangle::from_size((REPO_DOT, REPO_DOT).into());
+        let pixels = |kind: RepoKind| {
+            let mut c = Canvas::new(physical((REPO_DOT, REPO_DOT).into(), 2.0));
+            let p = crate::chrome::Theme::Dark.palette();
+            c.fill(0, 0, c.w, c.h, p.panel);
+            let mut row = tab_view().repos[0].clone();
+            row.kind = kind;
+            painter.repo_dot(&mut c, spot, &row, 2.0, p);
+            c.px.clone()
+        };
+        assert_ne!(pixels(RepoKind::Context), pixels(RepoKind::Other));
+        assert_ne!(pixels(RepoKind::Active), pixels(RepoKind::Other));
     }
 
     #[test]
@@ -3554,16 +3814,6 @@ mod tests {
         for (i, n) in l.nodes.iter().enumerate() {
             assert_eq!(hit(&l, &view, *n), Some(FeatureTabHit::Node(i)));
         }
-        let (row, button) = l.repos[2];
-        assert_eq!(
-            l.hit(&view, (row.loc.x + 4, row.loc.y + 4).into()),
-            Some(FeatureTabHit::Repo(2))
-        );
-        assert_eq!(
-            hit(&l, &view, button.unwrap()),
-            Some(FeatureTabHit::RepoButton(2))
-        );
-        assert!(l.repos[0].1.is_none());
         let first = l.page_buttons[0].unwrap();
         assert_eq!(hit(&l, &view, first), Some(FeatureTabHit::PageButton(0)));
         let (i, spot) = l.hint_spots[0];
@@ -3595,21 +3845,20 @@ mod tests {
         let mut view = tab_view();
         view.repo = 2;
         let l = tab_at(&view, 860);
-        let (chip, _) = l.repos[1];
+        let chip = l.repos[1];
         assert_eq!(l.hit(&view, centre(chip)), Some(FeatureTabHit::Repo(1)));
-        // The selected repository's button, at the strip's end.
-        let button = l.repos[2].1.unwrap();
+        // Folded it only informs: no button, no ×.
+        assert!(l.repo_buttons.iter().all(|b| b.is_empty()));
+        assert!(l.repo_removes.iter().all(|r| r.is_none()));
         assert_eq!(
-            l.hit(&view, centre(button)),
-            Some(FeatureTabHit::RepoButton(2))
+            l.hit(&view, centre(l.repos_toggle)),
+            Some(FeatureTabHit::ToggleRepos)
         );
-        let strip = l.strip.unwrap();
-        assert!(button.loc.x + button.size.w <= strip.loc.x + strip.size.w);
     }
 
     #[test]
     fn the_selected_repository_scrolls_into_view() {
-        let mut view = tab_view();
+        let mut view = unfolded();
         let row = view.repos[1].clone();
         view.repos = (0..30)
             .map(|i| FeatureRepoRow {
@@ -3622,7 +3871,7 @@ mod tests {
         let room = f64::from(l.scroll_room(TabColumn::Repos));
         assert!(room > 0.0);
         let shows = |i: usize, down: f64| {
-            let r = l.repos[i].0;
+            let r = l.repos[i];
             let top = f64::from(r.loc.y) - down;
             top >= f64::from(place.loc.y)
                 && top + f64::from(r.size.h) <= f64::from(place.loc.y + place.size.h)
@@ -3637,8 +3886,9 @@ mod tests {
         assert!(up < room && shows(5, up) && !shows(5, up + 20.0));
         // The last lands at the end, no further.
         assert_eq!(l.reveal_repo(29, 0.0), Some(room));
-        // A narrow tab's chips have no column to scroll.
-        assert_eq!(tab_at(&view, REPOS_BELOW - 1).reveal_repo(20, 0.0), None);
+        // Folded chips have no column to scroll.
+        view.expanded = false;
+        assert_eq!(tab_at(&view, 1920).reveal_repo(20, 0.0), None);
     }
 
     #[test]
@@ -3979,9 +4229,9 @@ mod tests {
             );
             (layers.drawn.get() - before, parts)
         };
-        // The head, the hints and the three columns, then the ground once
+        // The head, the hints and the two columns, then the ground once
         // it starts to show.
-        assert_eq!(step(&mut layers, &view, 0).0, 5);
+        assert_eq!(step(&mut layers, &view, 0).0, 4);
         assert_eq!(step(&mut layers, &view, 1).0, 1);
         assert_eq!(step(&mut layers, &view, 2).0, 0);
         view.hover = Some(FeatureTabHit::PageButton(0));
@@ -4016,7 +4266,7 @@ mod tests {
             })
             .collect();
         let l = tab_at(&view, 850);
-        let shown = l.repos.iter().filter(|(r, _)| r.size.w > 0).count();
+        let shown = l.repos.iter().filter(|r| r.size.w > 0).count();
         assert!(shown > 0 && shown < 12);
         let [(chip, i, label)] = l.more_repos.as_slice() else {
             panic!("one mark: {:?}", l.more_repos);
@@ -4025,8 +4275,7 @@ mod tests {
             (*i, label.as_str()),
             (shown, format!("+{}", 12 - shown).as_str())
         );
-        let strip = l.strip.unwrap();
-        assert!(chip.loc.x + chip.size.w <= strip.loc.x + strip.size.w);
+        assert!(chip.loc.x + chip.size.w <= l.repos_toggle.loc.x);
         assert_eq!(
             l.hit(&view, centre(*chip)),
             Some(FeatureTabHit::MoreRepos(shown))
@@ -4036,8 +4285,8 @@ mod tests {
         let l = tab_at(&view, 850);
         let (lead, i, label) = &l.more_repos[0];
         assert_eq!((*i, label.as_str()), (9, "10+"));
-        assert!(l.repos[10].0.size.w > 0);
-        assert!(lead.loc.x + lead.size.w <= l.repos[10].0.loc.x);
+        assert!(l.repos[10].size.w > 0);
+        assert!(lead.loc.x + lead.size.w <= l.repos[10].loc.x);
         assert_eq!(
             l.hit(&view, centre(*lead)),
             Some(FeatureTabHit::MoreRepos(9))
@@ -4097,17 +4346,19 @@ mod tests {
             *dot = Dot::Idle;
         }
         view.repos[1].busy = true;
+        view.expanded = true;
         let l = tab_at(&view, 1920);
         let dots = feature_tab_blinkers(&view, &l);
         assert_eq!(dots.len(), 1);
         assert_eq!(dots[0].1, Some(TabColumn::Repos));
-        assert!(l.repos[1].0.contains_rect(dots[0].0));
+        assert!(l.repos[1].contains_rect(dots[0].0));
 
+        view.expanded = false;
         let l = tab_at(&view, 850);
         let dots = feature_tab_blinkers(&view, &l);
         assert_eq!(dots.len(), 1);
         assert_eq!(dots[0].1, None);
-        assert!(l.repos[1].0.contains_rect(dots[0].0));
+        assert!(l.repos[1].contains_rect(dots[0].0));
         view.repos_error = Some("no".into());
         assert!(feature_tab_blinkers(&view, &tab_at(&view, 850)).is_empty());
     }
@@ -4176,6 +4427,19 @@ mod tests {
             node.mark = NodeMark::Done;
         }
         assert_eq!(feature_tab_pulse(&view, &l), None);
+    }
+
+    /// Each kind of dot reads on a row at rest, hovered and selected.
+    #[test]
+    fn the_repository_dots_read_on_the_rows_in_both_themes() {
+        for p in [&ONE_DARK, &ONE_LIGHT] {
+            for kind in [RepoKind::Active, RepoKind::Context, RepoKind::Other] {
+                for ground in [p.panel, p.element, p.selected] {
+                    let ratio = contrast(kind.color(p), ground);
+                    assert!(ratio >= 3.0, "{kind:?} on {ground:?} at {ratio:.2}:1");
+                }
+            }
+        }
     }
 
     /// The line stat's colours read on the repositories' column, on a

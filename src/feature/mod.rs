@@ -674,9 +674,18 @@ impl PerProject<String> {
     /// What `repo` is called on screen, with these projects' names: its
     /// name, a linked project's as "<project>: <repo>".
     pub fn label(&self, repo: &Repo) -> String {
-        match &repo.project {
-            None => repo.name.clone(),
-            Some(id) => format!("{}: {}", self.links.get(id).unwrap_or(id), repo.name),
+        self.label_of(repo.project.as_deref(), &repo.name)
+    }
+
+    /// The same of repository `name` of `project`, held by the feature or
+    /// not.
+    pub fn label_of(&self, project: Option<&str>, name: &str) -> String {
+        match project {
+            None => name.to_owned(),
+            Some(id) => {
+                let of = self.links.get(id).map_or(id, |p| p.as_str());
+                format!("{of}: {name}")
+            }
         }
     }
 }
@@ -719,7 +728,10 @@ pub(crate) mod tests {
         let plan = |s: Stage| s == Stage::Plan;
         assert_eq!(f.standing(Stage::Plan, nothing), Standing::Open);
         assert_eq!(f.standing(Stage::Discover, nothing), Standing::Approved);
-        assert_eq!(f.standing(Stage::Discover, plan), Standing::Locked(Stage::Plan));
+        assert_eq!(
+            f.standing(Stage::Discover, plan),
+            Standing::Locked(Stage::Plan)
+        );
         // The next one done locks it, file or not.
         let f = done_up_to(Stage::Plan);
         assert_eq!(f.locked_by(Stage::Discover, nothing), Some(Stage::Plan));

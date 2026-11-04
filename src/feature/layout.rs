@@ -2239,6 +2239,34 @@ mod tests {
     }
 
     #[test]
+    fn a_repository_taken_out_comes_back_on_a_new_branch() {
+        let t = Temp::new();
+        let (_api, web) = (t.repo("api", "main"), t.repo("web", "main"));
+        let root = find_root(&t.0, &[], &[], &[]).unwrap();
+        let created = create(&root, "x", &["api".into(), "web".into()]).unwrap();
+        let mut f = feature_of(&root, created, "x");
+        let keys = ["web".to_owned()];
+        // Uncommitted work the user agreed to lose stays lost.
+        let lost = f.repos[1].worktree.join("lost");
+        std::fs::write(&lost, "x").unwrap();
+        assert_eq!(remove_repos(&f, &keys, true), [(keys[0].clone(), Ok(()))]);
+        f.repos.retain(|r| r.key() != "web");
+        f.note_removed(None, "web".into(), 7);
+        assert!(!branch_exists(&web, "feature/x"));
+
+        let added = add_repos(&f, None, &root, &["web".into()]).unwrap();
+        f.insert_repos(added);
+        assert!(f.removed.is_empty(), "it isn't removed anymore");
+        let back = f.repo("web").unwrap();
+        assert!(back.touched);
+        assert_eq!(
+            run(&back.worktree, &["branch", "--show-current"]).trim(),
+            "feature/x"
+        );
+        assert!(!lost.exists());
+    }
+
+    #[test]
     fn repositories_join_a_feature_folder_later() {
         let t = Temp::new();
         let (api, web, zed) = (

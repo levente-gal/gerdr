@@ -150,6 +150,12 @@ pub enum MenuAction {
     /// A toast's "Undo" after a service's error was ignored, or ignored
     /// no more: put it back as it was.
     ServiceErrorsRestore(Box<crate::services::ErrorsSnapshot>),
+    /// Undo dropping a feature's context repository.
+    RestoreContextRepo {
+        project: String,
+        slug: String,
+        repo: Box<crate::feature::ContextRepo>,
+    },
     /// Read the project files again, after one was edited by hand.
     ReloadProjects,
     /// Join project `id`, open in another gerdr, here (see
@@ -462,6 +468,11 @@ impl Gerdr {
                 triage,
             } => self.inbox_undelete(&project, todo, at, triage),
             MenuAction::ServiceErrorsRestore(before) => self.restore_service_errors(*before),
+            MenuAction::RestoreContextRepo {
+                project,
+                slug,
+                repo,
+            } => self.restore_context_repo(&project, &slug, *repo),
             MenuAction::ReloadProjects => self.reload_projects(),
         }
     }
