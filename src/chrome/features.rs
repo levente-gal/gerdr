@@ -113,13 +113,10 @@ pub struct NewFeatureView {
     pub root_failed: bool,
     /// The Projects row: the home project and those linked.
     pub projects: String,
-    /// The label of the Projects row's button (`LINK_BUTTON`); none
-    /// when linking to an open feature, where the rows are the picker.
-    pub link: Option<&'static str>,
+    /// The label of the Projects row's button (`LINK_BUTTON`).
+    pub link: &'static str,
     /// The rows: the repositories, or the projects to link.
     pub repos: Vec<NewFeatureRepo>,
-    /// The label of the button doing it: Create, or Link.
-    pub go: &'static str,
     /// The first repository shown, when not all fit.
     pub top: usize,
     /// What is wrong with the form, as a sentence.
@@ -2455,19 +2452,17 @@ impl Painter {
         let root_color = if view.root_failed { p.error } else { p.muted };
         line(&mut c, &view.root, layout.root, FONT_SIZE, root_color);
         let mut projects = layout.projects;
-        if let Some(label) = view.link {
-            projects.size.w = layout.link.loc.x - projects.loc.x - QUIT_BUTTON_GAP;
-            let hovered = view.hover == Some(NewFeatureHit::Link);
-            self.button(
-                &mut c,
-                label,
-                shift(layout.link),
-                (hovered, false),
-                ButtonStyle::Plain,
-                scale,
-                p,
-            );
-        }
+        projects.size.w = layout.link.loc.x - projects.loc.x - QUIT_BUTTON_GAP;
+        let hovered = view.hover == Some(NewFeatureHit::Link);
+        self.button(
+            &mut c,
+            view.link,
+            shift(layout.link),
+            (hovered, false),
+            ButtonStyle::Plain,
+            scale,
+            p,
+        );
         line(&mut c, &view.projects, projects, FONT_SIZE, p.muted);
 
         let shown = view.repos.iter().enumerate().skip(view.top);
@@ -2539,8 +2534,7 @@ impl Painter {
                 self.dialog_keys(&mut c, &view.keys, row, end, scale, p);
             }
         }
-        let labels = [NEW_FEATURE_BUTTONS[0], view.go];
-        for (i, (rect, label)) in layout.buttons.iter().zip(labels).enumerate() {
+        for (i, (rect, label)) in layout.buttons.iter().zip(NEW_FEATURE_BUTTONS).enumerate() {
             let style = if i == CREATE {
                 ButtonStyle::Primary
             } else {

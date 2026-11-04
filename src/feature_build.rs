@@ -48,9 +48,6 @@ pub(crate) struct BuildState {
     pub(crate) pending: BTreeSet<Key>,
     /// Features being set up now.
     setting_up: BTreeSet<Key>,
-    /// Repositories (`Repo::key`) to take out of a feature once its setup
-    /// is done: a setup works on a copy of the feature.
-    pub after_setup: BTreeMap<Key, Vec<String>>,
     /// Features whose Verify checks run now.
     verifying: BTreeSet<Key>,
     /// Features whose Build agent was sent Verify's failures to fix: the
@@ -378,9 +375,6 @@ impl Gerdr {
         let key = (project.to_owned(), slug.to_owned());
         self.features.build.setting_up.remove(&key);
         let pending = self.features.build.pending.remove(&key);
-        if let Some(keys) = self.features.build.after_setup.remove(&key) {
-            self.check_remove_repos(project.to_owned(), slug.to_owned(), keys, false);
-        }
         let now = feature::now();
         let Some(feature) = self.feature_mut(project, slug) else {
             return;

@@ -22,16 +22,17 @@
 //! page or a repository, which scrolls into view. Enter does the page's
 //! next thing (start, show or review the stage's agent, let Build go on
 //! after a milestone, run Verify's checks, mark it done, ship) or the
-//! repository's (touch it, open a tab in it); Ctrl+PgUp/Ctrl+PgDn go to the
-//! previous or next feature, Ctrl+O opens a tab in the feature's folder,
+//! repository's (unfold the rows, press a row's button); Ctrl+PgUp/Ctrl+PgDn
+//! go to the previous or next feature, Ctrl+O opens a tab in the feature's folder,
 //! Ctrl+Shift+O opens the pull request of the repository picked, or on
 //! Verify's page its evidence, Ctrl+R starts the stage's agent afresh,
 //! Ctrl+Shift+R shows its agent, or goes back to its chat if its tab closed,
-//! Ctrl+C copies its path, Ctrl+N starts a new one, Ctrl+Shift+L links or
-//! takes out repositories, Del on a repository of several takes it out
-//! (pressed twice), Del elsewhere abandons the feature (or, once done,
-//! removes its worktrees) after asking, and F1 lists every
-//! key in place of the page. A done stage's Enter does nothing: Reopen is
+//! Ctrl+C copies its path, Ctrl+N starts a new one, Ctrl+Shift+L unfolds the
+//! repository strip into rows of every repository it can hold (Esc folds them
+//! first), Del on a repository of several takes it out (asking when it is on
+//! the feature's branch, else pressed twice), Del elsewhere abandons the
+//! feature (or, once done, removes its worktrees) after asking, and F1 lists
+//! every key in place of the page. A done stage's Enter does nothing: Reopen is
 //! only clicked. Each feature's panel is kept as it was left.
 //!
 //! The marks from Build on are bound to the code (see `feature::patch`):
@@ -284,8 +285,6 @@ pub(crate) enum Done {
         slug: String,
         names: Vec<String>,
         result: Result<layout::MoreLinked, String>,
-        /// What goes once they are in (`Repo::key`).
-        removes: Vec<String>,
     },
     Touched {
         project: String,
@@ -439,29 +438,11 @@ pub struct Other {
     /// Its root, found like the home one's.
     pub root: Finding,
     pub linked: bool,
-    /// Linked already (linking to an open feature): unticked, its
-    /// repositories leave the feature.
-    pub kept: bool,
     /// Per repository of its root: whether the feature holds it.
     pub touched: Vec<bool>,
 }
 
-/// A repository an open feature holds, as the link dialog starts from it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct KeptRepo {
-    /// `None`: the home project's.
-    pub project: Option<String>,
-    pub name: String,
-    /// Its `Repo::key`.
-    pub key: String,
-    /// On the feature's branch; else read-only, as a feature made before
-    /// linking can hold one.
-    pub touched: bool,
-}
-
-/// The new feature dialog's state, while it is open. With `existing`,
-/// it links repositories and projects to that open feature instead, and
-/// takes out those unticked.
+/// The new feature dialog's state, while it is open.
 #[derive(Debug)]
 pub struct NewFeatureDialog {
     pub project: String,
@@ -482,10 +463,6 @@ pub struct NewFeatureDialog {
     pub others: Vec<Other>,
     /// The rows are the project picker's, not the repositories.
     pub picking: bool,
-    /// The slug of the open feature it links repositories to.
-    pub existing: Option<String>,
-    /// What that feature holds now.
-    pub kept: Vec<KeptRepo>,
 }
 
 /// What a row of the new feature dialog is.
@@ -511,14 +488,6 @@ pub enum DialogOutcome {
         touched: Vec<String>,
         links: Vec<LinkSpec>,
     },
-    /// Link these projects to open feature `slug`, bring these repositories
-    /// into its folders, and take these out (by `Repo::key`).
-    Link {
-        slug: String,
-        links: Vec<LinkSpec>,
-        adds: Vec<AddSpec>,
-        removes: Vec<String>,
-    },
 }
 
 impl NewFeatureDialog {
@@ -536,31 +505,18 @@ impl NewFeatureDialog {
             from,
             others: Vec::new(),
             picking: false,
-            existing: None,
-            kept: Vec::new(),
         }
     }
 
-    /// What the open feature holds of `project` (`None`: the home one) by
-    /// the name `name`.
-    fn held(&self, project: Option<&str>, name: &str) -> Option<&KeptRepo> {
-        (self.kept.iter()).find(|k| k.project.as_deref() == project && k.name == name)
-    }
-
     /// The root was found, or not: every repository of the project is
-    /// offered. Of several, the one it was opened from is ticked; linking
-    /// to an open feature, those it holds.
+    /// offered. Of several, the one it was opened from is ticked.
     fn found(&mut self, result: Result<Root, String>) {
         match result {
             Ok(root) => {
-                let linking = self.existing.is_some();
                 self.touched = root
                     .repos
                     .iter()
-                    .map(|r| match linking {
-                        true => self.held(None, &r.name).is_some(),
-                        false => !root.multi || self.from.starts_with(&r.main),
-                    })
+                    .map(|r| !root.multi || self.from.starts_with(&r.main))
                     .collect();
                 self.root = Finding::Found(root);
             }
@@ -569,27 +525,17 @@ impl NewFeatureDialog {
         self.error = None;
     }
 
-    /// Project `project`'s root was found, or not. Linked already, what the
-    /// feature holds of it is ticked; else nothing, unless it has only one
-    /// repository to link it for.
+    /// Project `project`'s root was found, or not. Nothing of it is ticked,
+    /// unless it has only one repository to link it for.
     fn found_other(&mut self, project: &str, result: Result<Root, String>) {
         let Some(k) = self.others.iter().position(|o| o.project == project) else {
             return;
-        };
-        let held: Option<Vec<bool>> = match &result {
-            Ok(root) if self.others[k].kept => Some(
-                (root.repos.iter())
-                    .map(|r| self.held(Some(project), &r.name).is_some())
-                    .collect(),
-            ),
-            _ => None,
         };
         let other = &mut self.others[k];
         other.root = match result {
             Ok(root) if root.repos.is_empty() => Finding::Failed("no repositories in it".into()),
             Ok(root) => {
-                other.touched =
-                    held.unwrap_or_else(|| vec![root.repos.len() == 1; root.repos.len()]);
+                other.touched = vec![root.repos.len() == 1; root.repos.len()];
                 Finding::Found(root)
             }
             Err(why) => Finding::Failed(why),
@@ -618,7 +564,6 @@ impl NewFeatureDialog {
     /// the home root's when it holds several.
     fn multi(&self) -> bool {
         self.picking
-            || self.existing.is_some()
             || matches!(&self.root, Finding::Found(root) if root.multi)
             || self.others.iter().any(|o| o.linked)
     }
@@ -633,10 +578,7 @@ impl NewFeatureDialog {
         match row {
             DialogRow::Home(_) => !matches!(&self.root, Finding::Found(root) if root.multi),
             DialogRow::Linked(..) => false,
-            DialogRow::Project(k) => {
-                let o = &self.others[k];
-                !o.kept && !matches!(o.root, Finding::Found(_))
-            }
+            DialogRow::Project(k) => !matches!(self.others[k].root, Finding::Found(_)),
         }
     }
 
@@ -658,11 +600,11 @@ impl NewFeatureDialog {
         self.error = None;
     }
 
-    /// The projects ticked and found, not linked already.
+    /// The projects ticked and found.
     fn links(&self) -> Vec<LinkSpec> {
         self.others
             .iter()
-            .filter(|o| o.linked && !o.kept)
+            .filter(|o| o.linked)
             .filter_map(|o| {
                 let Finding::Found(root) = &o.root else {
                     return None;
@@ -680,71 +622,10 @@ impl NewFeatureDialog {
             .collect()
     }
 
-    /// The repositories ticked that the open feature doesn't hold, of each
-    /// project that has a folder in it.
-    fn adds(&self) -> Vec<AddSpec> {
-        if self.existing.is_none() {
-            return Vec::new();
-        }
-        let mut adds = Vec::new();
-        let mut add = |project: Option<&str>, name: &str, root: &Finding, ticks: &[bool]| {
-            let Finding::Found(root) = root else {
-                return;
-            };
-            let names: Vec<String> = (root.repos.iter().zip(ticks))
-                .filter(|(r, t)| **t && self.held(project, &r.name).is_none())
-                .map(|(r, _)| r.name.clone())
-                .collect();
-            if !names.is_empty() {
-                adds.push(AddSpec {
-                    project: project.map(str::to_owned),
-                    name: name.to_owned(),
-                    root: root.clone(),
-                    names,
-                });
-            }
-        };
-        add(None, &self.project, &self.root, &self.touched);
-        for o in self.others.iter().filter(|o| o.kept && o.linked) {
-            add(Some(&o.project), &o.name, &o.root, &o.touched);
-        }
-        adds
-    }
-
-    /// What the open feature holds that was unticked, by `Repo::key`: a
-    /// project unticked takes all of its.
-    fn removes(&self) -> Vec<String> {
-        if self.existing.is_none() {
-            return Vec::new();
-        }
-        let mut removes = Vec::new();
-        let mut unticked = |project: Option<&str>, root: &Finding, ticks: &[bool]| {
-            if let Finding::Found(root) = root {
-                for (r, t) in root.repos.iter().zip(ticks) {
-                    if let (false, Some(k)) = (*t, self.held(project, &r.name)) {
-                        removes.push(k.key.clone());
-                    }
-                }
-            }
-        };
-        unticked(None, &self.root, &self.touched);
-        for o in self.others.iter().filter(|o| o.kept && o.linked) {
-            unticked(Some(&o.project), &o.root, &o.touched);
-        }
-        for o in self.others.iter().filter(|o| o.kept && !o.linked) {
-            let of = |k: &&KeptRepo| k.project.as_deref() == Some(o.project.as_str());
-            removes.extend(self.kept.iter().filter(of).map(|k| k.key.clone()));
-        }
-        removes
-    }
-
-    /// A new project ticked with none of its repositories, as a form error.
+    /// A project ticked with none of its repositories, as a form error.
     fn unpicked(&self) -> Option<String> {
         let o = (self.others.iter()).find(|o| {
-            o.linked
-                && !o.kept
-                && matches!(o.root, Finding::Found(_))
-                && !o.touched.iter().any(|t| *t)
+            o.linked && matches!(o.root, Finding::Found(_)) && !o.touched.iter().any(|t| *t)
         })?;
         Some(format!("Tick a repository of {}, or unlink it.", o.name))
     }
@@ -753,18 +634,6 @@ impl NewFeatureDialog {
     fn create(&self) -> Result<DialogOutcome, String> {
         if let Some(why) = self.unpicked() {
             return Err(why);
-        }
-        if let Some(slug) = &self.existing {
-            let (links, adds, removes) = (self.links(), self.adds(), self.removes());
-            if links.is_empty() && adds.is_empty() && removes.is_empty() {
-                return Err("Tick a repository to add, or untick one to remove.".into());
-            }
-            return Ok(DialogOutcome::Link {
-                slug: slug.clone(),
-                links,
-                adds,
-                removes,
-            });
         }
         let title = self.title.trim();
         if title.is_empty() {
@@ -799,24 +668,15 @@ impl NewFeatureDialog {
     /// Switch the rows between the repositories and the project picker.
     fn pick(&mut self) {
         self.picking = !self.picking;
-        // The picker's rows have the keyboard, found yet or not, and an open
-        // feature's dialog has no title to go back to.
-        self.focus = (self.picking || self.existing.is_some()).then_some(0);
+        // The picker's rows have the keyboard, found yet or not.
+        self.focus = self.picking.then_some(0);
         self.top = 0;
         self.error = None;
     }
 
-    /// Move the keyboard between the title and the rows; linking to an
-    /// open feature, between the rows only.
+    /// Move the keyboard between the title and the rows.
     fn step(&mut self, back: bool) {
         let n = if self.multi() { self.repos() } else { 0 };
-        if self.existing.is_some() {
-            if n > 0 {
-                let at = self.focus.unwrap_or(0);
-                self.focus = Some(if back { (at + n - 1) % n } else { (at + 1) % n });
-            }
-            return;
-        }
         let at = self.focus.map_or(0, |i| i + 1);
         let to = if back {
             (at + n) % (n + 1)
@@ -856,8 +716,6 @@ impl NewFeatureDialog {
                 // cleared, then closed.
                 if self.picking {
                     self.pick();
-                } else if self.existing.is_some() {
-                    return Some(DialogOutcome::Cancel);
                 } else if self.focus.is_some() {
                     self.focus = None;
                 } else if !self.title.is_empty() {
@@ -883,10 +741,7 @@ impl NewFeatureDialog {
                     self.toggle(i);
                 }
             }
-            _ if self.focus.is_none()
-                && self.existing.is_none()
-                && self.title.key(mods, sym, typed) == Edit::Changed =>
-            {
+            _ if self.focus.is_none() && self.title.key(mods, sym, typed) == Edit::Changed => {
                 self.error = None;
             }
             _ => {}
@@ -1002,9 +857,6 @@ pub enum PanelOutcome {
     /// Abandon it, or once done remove its worktrees, after asking.
     Remove,
     New,
-    /// Link another project to it, before Ship: it spans that one's
-    /// repositories too.
-    LinkProject,
     /// Show the feature with this slug.
     Show(String),
 }
@@ -2404,10 +2256,9 @@ impl Gerdr {
                 slug,
                 names,
                 result,
-                removes,
             } => {
                 self.unbusy(&project, &slug, Job::Link);
-                self.feature_linked(&project, &slug, &names, result, removes);
+                self.feature_linked(&project, &slug, &names, result);
             }
             Done::Created {
                 project,
@@ -3266,7 +3117,7 @@ impl Gerdr {
                 }],
             ),
         };
-        self.link_repos(project.to_owned(), slug.to_owned(), links, adds, Vec::new());
+        self.link_repos(project.to_owned(), slug.to_owned(), links, adds);
     }
 
     /// Let agents of feature `slug` read repository `key`'s main checkout:
@@ -3362,55 +3213,6 @@ impl Gerdr {
         }
     }
 
-    /// Open the dialog linking repositories and other projects to open
-    /// feature `slug` of `project`, in place of its panel: what the feature
-    /// holds starts ticked, and leaves it unticked. Only before it ships.
-    pub fn open_link_projects(&mut self, project: &str, slug: &str) {
-        let Some(feature) = self.feature(project, slug) else {
-            return;
-        };
-        let title = feature.title.clone();
-        if !linkable(feature) {
-            return self.show_warning(format!(
-                "\u{201c}{title}\u{201d} has shipped; its repositories can't change now"
-            ));
-        }
-        if self.feature_busy(project, slug) {
-            return self.show_warning(format!(
-                "\u{201c}{title}\u{201d} is busy; try again once it is done"
-            ));
-        }
-        let kept: Vec<String> = feature.links.iter().map(|l| l.project.clone()).collect();
-        let held: Vec<KeptRepo> = (feature.repos.iter())
-            .map(|r| KeptRepo {
-                project: r.project.clone(),
-                name: r.name.clone(),
-                key: r.key(),
-                touched: r.touched,
-            })
-            .collect();
-        let dir = feature.dir.clone();
-        self.features.serial += 1;
-        let serial = self.features.serial;
-        let mut dialog = NewFeatureDialog::new(project.to_owned(), serial, dir.clone());
-        dialog.existing = Some(slug.to_owned());
-        dialog.kept = held;
-        dialog.title.set(&title);
-        self.context_menu = None;
-        self.stop_key_repeat();
-        self.features.dialog = Some(dialog);
-        self.find_home_root(project, dir, serial);
-        self.find_others();
-        if let Some(dialog) = self.features.dialog.as_mut() {
-            for other in &mut dialog.others {
-                other.kept = kept.contains(&other.project);
-                other.linked = other.kept;
-            }
-            dialog.focus = Some(0);
-        }
-        self.refresh_pointer_focus();
-    }
-
     /// List the store's other projects in the dialog's picker, once, and
     /// find each one's root off the thread (checklist D3), as the home
     /// one's is: from its first workspace's folder.
@@ -3418,7 +3220,7 @@ impl Gerdr {
         let Some(dialog) = self.features.dialog.as_ref() else {
             return;
         };
-        if !(dialog.picking || dialog.existing.is_some()) || !dialog.others.is_empty() {
+        if !dialog.picking || !dialog.others.is_empty() {
             return;
         }
         let (home, serial) = (dialog.project.clone(), dialog.serial);
@@ -3438,7 +3240,6 @@ impl Gerdr {
                 name: p.name.clone(),
                 root,
                 linked: false,
-                kept: false,
                 touched: Vec::new(),
             });
         }
@@ -3487,25 +3288,6 @@ impl Gerdr {
         self.refresh_pointer_focus();
         let (title, root, touched, links) = match outcome {
             DialogOutcome::Cancel => return,
-            DialogOutcome::Link {
-                slug,
-                links,
-                adds,
-                removes,
-            } => {
-                // Refused before anything starts, so neither half runs alone.
-                if !removes.is_empty()
-                    && !self.may_remove_repos(&dialog.project, &slug, &removes, false)
-                {
-                    return;
-                }
-                if links.is_empty() && adds.is_empty() {
-                    self.check_remove_repos(dialog.project, slug, removes, false);
-                } else {
-                    self.link_repos(dialog.project, slug, links, adds, removes);
-                }
-                return;
-            }
             DialogOutcome::Create {
                 title,
                 root,
@@ -3612,16 +3394,15 @@ impl Gerdr {
     }
 
     /// Link `links` to open feature `slug` and bring `adds` into its folders
-    /// off the thread, shown in the tasks panel meanwhile. `removes` go once
-    /// that is done (see `feature_linked`). A setup or check under way has a
-    /// copy of the feature that wouldn't see them: refused meanwhile.
+    /// off the thread, shown in the tasks panel meanwhile. A setup or check
+    /// under way has a copy of the feature that wouldn't see them: refused
+    /// meanwhile.
     fn link_repos(
         &mut self,
         project: String,
         slug: String,
         links: Vec<LinkSpec>,
         adds: Vec<AddSpec>,
-        removes: Vec<String>,
     ) {
         let Some(feature) = self.feature(&project, &slug).cloned() else {
             return self.show_warning("That feature is gone".into());
@@ -3653,21 +3434,18 @@ impl Gerdr {
                 slug,
                 names,
                 result,
-                removes,
             }
         });
     }
 
-    /// `names` were linked to feature `slug`, or not: kept, its panel shown
-    /// again, and what joined set up. Then `removes` go, once a setup that
-    /// started is done, as a feature can't change under one.
+    /// `names` were linked to feature `slug`, or not: kept, and what joined
+    /// set up.
     fn feature_linked(
         &mut self,
         project: &str,
         slug: &str,
         names: &[String],
         result: Result<layout::MoreLinked, String>,
-        removes: Vec<String>,
     ) {
         let (made, repos) = match result {
             Ok(made) => made,
@@ -3700,21 +3478,10 @@ impl Gerdr {
         if let Some(key) = keys.first() {
             self.select_repo(project, slug, key);
         }
-        if self.project.as_deref() == Some(project) && self.features.dialog.is_none() {
-            self.open_feature(project, slug);
-        }
         self.show_success(linked_text(&title, names, &root, &ignores));
         self.probe_feature(project, slug);
         self.rebuild_feature_graphs(project, slug);
-        let (project, slug) = (project.to_owned(), slug.to_owned());
-        if self.start_setup_of(&project, &slug, Some(keys)) {
-            if !removes.is_empty() {
-                let key = (project, slug);
-                self.features.build.after_setup.insert(key, removes);
-            }
-        } else if !removes.is_empty() {
-            self.check_remove_repos(project, slug, removes, false);
-        }
+        self.start_setup_of(project, slug, Some(keys));
     }
 
     /// A left click while the new feature dialog is open.
@@ -3742,9 +3509,7 @@ impl Gerdr {
                 None
             }
             Some(NewFeatureHit::Field) => {
-                if dialog.existing.is_none() {
-                    dialog.focus = None;
-                }
+                dialog.focus = None;
                 None
             }
             Some(NewFeatureHit::Link) => {
@@ -4212,7 +3977,6 @@ impl Gerdr {
             }
             PanelOutcome::Remove => self.check_remove_feature(&project, &slug),
             PanelOutcome::New => self.open_new_feature(None),
-            PanelOutcome::LinkProject => self.open_link_projects(&project, &slug),
             // In its own tab, its workspace opened if need be.
             PanelOutcome::Show(to) => self.open_feature(&project, &to),
         }
@@ -4595,12 +4359,6 @@ impl Gerdr {
         }
         if !failed.is_empty() {
             self.show_error(format!("Couldn't remove {}", failed.join("; ")));
-        }
-        if self.project.as_deref() == Some(project)
-            && self.features.dialog.is_none()
-            && self.features.panel.is_none()
-        {
-            self.open_feature(project, slug);
         }
         self.probe_feature(project, slug);
     }
@@ -5523,16 +5281,11 @@ fn linkable(feature: &Feature) -> bool {
 
 /// What the new feature dialog shows of `dialog`, in project `project`.
 fn new_feature_view(dialog: &NewFeatureDialog, project: String) -> NewFeatureView {
-    let linking = dialog.existing.is_some();
-    let place = |base: &str, project: Option<&str>, name: &str, ticked: bool, fixed: bool| {
-        let word = match (fixed, ticked, dialog.held(project, name)) {
-            (true, ..) => "the only repository",
-            (_, true, Some(k)) if !k.touched => "read-only",
-            (_, true, Some(_)) => "linked",
-            (_, false, Some(_)) => "leaves once applied",
-            (_, true, None) if linking => "joins once applied",
-            (_, true, None) => "linked",
-            (_, false, None) => "left out",
+    let place = |base: &str, ticked: bool, fixed: bool| {
+        let word = match (fixed, ticked) {
+            (true, _) => "the only repository",
+            (_, true) => "linked",
+            (_, false) => "left out",
         };
         format!("from {base} \u{b7} {word}")
     };
@@ -5566,7 +5319,7 @@ fn new_feature_view(dialog: &NewFeatureDialog, project: String) -> NewFeatureVie
                     let (r, touched) = (root.repos.get(i)?, *dialog.touched.get(i)?);
                     NewFeatureRepo {
                         name: r.name.clone(),
-                        place: place(&r.base, None, &r.name, touched, fixed),
+                        place: place(&r.base, touched, fixed),
                         touched,
                         fixed,
                     }
@@ -5579,7 +5332,7 @@ fn new_feature_view(dialog: &NewFeatureDialog, project: String) -> NewFeatureVie
                     let (r, touched) = (root.repos.get(i)?, *other.touched.get(i)?);
                     NewFeatureRepo {
                         name: format!("{}: {}", other.name, r.name),
-                        place: place(&r.base, Some(&other.project), &r.name, touched, false),
+                        place: place(&r.base, touched, false),
                         touched,
                         fixed: false,
                     }
@@ -5587,8 +5340,6 @@ fn new_feature_view(dialog: &NewFeatureDialog, project: String) -> NewFeatureVie
                 DialogRow::Project(k) => {
                     let other = &dialog.others[k];
                     let place = match &other.root {
-                        _ if other.kept && !other.linked => "unlinked once applied".to_owned(),
-                        _ if other.kept => "linked already".to_owned(),
                         Finding::Looking => "finding repositories\u{2026}".to_owned(),
                         Finding::Failed(why) => format!("can't link: {why}"),
                         Finding::Found(root) => found(root),
@@ -5618,25 +5369,14 @@ fn new_feature_view(dialog: &NewFeatureDialog, project: String) -> NewFeatureVie
         ("Ctrl+Shift+L", "link project")
     });
     // Esc steps back as `NewFeatureDialog::key` has it.
-    keys.push(if dialog.picking {
-        ("Esc", "back")
-    } else if linking {
-        ("Esc", "close")
-    } else if dialog.focus.is_some() {
+    keys.push(if dialog.picking || dialog.focus.is_some() {
         ("Esc", "back")
     } else if !dialog.title.is_empty() {
         ("Esc", "clear")
     } else {
         ("Esc", "close")
     });
-    let heading = if linking {
-        format!(
-            "Link repositories to \u{201c}{}\u{201d}",
-            dialog.title.trim()
-        )
-    } else {
-        format!("New feature in \u{201c}{project}\u{201d}")
-    };
+    let heading = format!("New feature in \u{201c}{project}\u{201d}");
     NewFeatureView {
         heading,
         title: dialog.title.line(),
@@ -5644,18 +5384,8 @@ fn new_feature_view(dialog: &NewFeatureDialog, project: String) -> NewFeatureVie
         root,
         root_failed,
         projects,
-        link: Some(chrome::LINK_BUTTON[usize::from(dialog.picking)]),
+        link: chrome::LINK_BUTTON[usize::from(dialog.picking)],
         repos,
-        go: match (
-            linking,
-            dialog.links().is_empty() && dialog.adds().is_empty(),
-            dialog.removes().is_empty(),
-        ) {
-            (false, ..) => "Create",
-            (true, _, true) => "Link",
-            (true, true, false) => "Remove",
-            (true, false, false) => "Apply",
-        },
         top: dialog.top,
         error: dialog.error.clone(),
         hover: dialog.hover,
@@ -6354,10 +6084,17 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 3] = [
         "Repositories",
         &[
             ("Up / Down", "previous or next repository"),
-            ("Left / Right", "previous or next repository"),
+            (
+                "Left / Right",
+                "previous or next repository; with all shown, the row's button",
+            ),
             ("Ctrl+K / Ctrl+J", "previous or next repository"),
             ("Home / End", "first or last repository"),
-            ("Enter", "open a tab in it, or touch it"),
+            (
+                "Enter",
+                "show all repositories; with all shown, press the row's button",
+            ),
+            ("Esc", "hide them again"),
             ("Ctrl+Shift+O", "open its pull request"),
         ],
     ),
@@ -6944,7 +6681,6 @@ pub(crate) mod tests {
             name: name.into(),
             root: Finding::Looking,
             linked: false,
-            kept: false,
             touched: Vec::new(),
         }
     }
@@ -6969,7 +6705,7 @@ pub(crate) mod tests {
         d.found_other("admin", Ok(root(&["panel", "jobs"])));
         d.found_other("docs", Err("no git repository".into()));
         let view = new_feature_view(&d, "Acme".into());
-        assert_eq!(view.link, Some(chrome::LINK_BUTTON[1]));
+        assert_eq!(view.link, chrome::LINK_BUTTON[1]);
         let places: Vec<&str> = view.repos.iter().map(|r| r.place.as_str()).collect();
         let found = format!("In {} \u{b7} 2 repositories", tilde(Path::new("/work")));
         assert_eq!(places, [found.as_str(), "can't link: no git repository"]);
@@ -7046,185 +6782,19 @@ pub(crate) mod tests {
         assert_eq!(links[0].touched, ["panel"]);
     }
 
-    /// A repository an open feature holds, as its dialog starts from.
-    fn kept(project: Option<&str>, name: &str, touched: bool) -> KeptRepo {
-        KeptRepo {
-            project: project.map(str::to_owned),
-            name: name.into(),
-            key: project.map_or_else(|| name.to_owned(), |p| format!("{p}:{name}")),
-            touched,
-        }
-    }
-
-    /// The link dialog of open feature "Bulk export", holding `api` of the
-    /// home root's `api`, `web` and `jobs`, and `panel` of linked project
-    /// Admin's `panel` and `tools`; Docs is linked to nothing yet.
-    fn link_dialog() -> NewFeatureDialog {
-        let mut d = NewFeatureDialog::new("acme".into(), 1, PathBuf::new());
-        d.existing = Some("bulk".into());
-        d.title.set("Bulk export");
-        d.kept = vec![kept(None, "api", true), kept(Some("admin"), "panel", true)];
-        d.others = vec![other("admin", "Admin"), other("docs", "Docs")];
-        (d.others[0].kept, d.others[0].linked) = (true, true);
-        d.found(Ok(root(&["api", "jobs", "web"])));
-        d.found_other("admin", Ok(root(&["panel", "tools"])));
-        d.found_other("docs", Ok(root(&["site", "wiki"])));
-        d.focus = Some(0);
-        d
-    }
-
-    #[test]
-    fn the_link_dialog_starts_from_what_the_feature_holds() {
-        let mut d = link_dialog();
-        assert_eq!(d.touched, [true, false, false]);
-        assert_eq!(d.others[0].touched, [true, false]);
-        let view = new_feature_view(&d, "Acme".into());
-        assert_eq!(
-            view.heading,
-            "Link repositories to \u{201c}Bulk export\u{201d}"
-        );
-        assert_eq!(view.link, Some(chrome::LINK_BUTTON[0]));
-        assert_eq!(view.go, "Link");
-        let names: Vec<&str> = view.repos.iter().map(|r| r.name.as_str()).collect();
-        assert_eq!(
-            names,
-            ["api", "jobs", "web", "Admin: panel", "Admin: tools"]
-        );
-        assert_eq!(view.repos[0].place, "from main \u{b7} linked");
-        assert_eq!(view.repos[1].place, "from main \u{b7} left out");
-        assert_eq!(dkey(&mut d, key(Keysym::Return)), None, "nothing changed");
-        assert_eq!(
-            d.error.as_deref(),
-            Some("Tick a repository to add, or untick one to remove.")
-        );
-        type_into(&mut d, "x");
-        assert_eq!(&*d.title, "Bulk export", "its title isn't edited");
-        assert_eq!(
-            dkey(&mut d, key(Keysym::Escape)),
-            Some(DialogOutcome::Cancel)
-        );
-    }
-
-    #[test]
-    fn the_link_dialog_adds_and_removes_by_ticks() {
-        let mut d = link_dialog();
-        d.toggle(2); // web joins
-        d.toggle(4); // Admin's tools joins
-        d.toggle(3); // Admin's panel leaves
-        let view = new_feature_view(&d, "Acme".into());
-        assert_eq!(view.repos[2].place, "from main \u{b7} joins once applied");
-        assert_eq!(view.repos[3].place, "from main \u{b7} leaves once applied");
-        assert_eq!(view.go, "Apply");
-        let Ok(DialogOutcome::Link {
-            slug,
-            links,
-            adds,
-            removes,
-        }) = d.create()
-        else {
-            panic!("it links");
-        };
-        assert_eq!(slug, "bulk");
-        assert!(links.is_empty(), "no new project");
-        let adds: Vec<(Option<&str>, &[String])> = adds
-            .iter()
-            .map(|a| (a.project.as_deref(), &a.names[..]))
-            .collect();
-        assert_eq!(
-            adds,
-            [
-                (None, &["web".to_owned()][..]),
-                (Some("admin"), &["tools".to_owned()][..])
-            ]
-        );
-        assert_eq!(removes, ["admin:panel"]);
-
-        // Only taking out: the button says so.
-        let mut d = link_dialog();
-        d.toggle(0);
-        let view = new_feature_view(&d, "Acme".into());
-        assert_eq!(view.go, "Remove");
-    }
-
-    #[test]
-    fn a_read_only_repository_of_an_old_feature_says_so_and_can_leave() {
-        let mut d = link_dialog();
-        d.kept.push(kept(None, "web", false));
-        d.found(Ok(root(&["api", "jobs", "web"])));
-        let view = new_feature_view(&d, "Acme".into());
-        assert_eq!(view.repos[2].place, "from main \u{b7} read-only");
-        d.toggle(2);
-        let Ok(DialogOutcome::Link { removes, .. }) = d.create() else {
-            panic!("it takes it out");
-        };
-        assert_eq!(removes, ["web"]);
-    }
-
-    #[test]
-    fn the_link_dialogs_picker_links_a_project_with_a_repository_picked() {
-        let mut d = link_dialog();
-        dkey(&mut d, ctrl_shift(Keysym::L));
-        assert!(d.picking);
-        assert_eq!(d.focus, Some(0));
-        let view = new_feature_view(&d, "Acme".into());
-        assert_eq!(view.link, Some(chrome::LINK_BUTTON[1]));
-        assert_eq!(view.repos[0].place, "linked already");
-        d.toggle(1);
-        // Esc leaves the picker first; the dialog closes only after that.
-        assert_eq!(dkey(&mut d, key(Keysym::Escape)), None);
-        assert!(!d.picking);
-        assert_eq!(d.focus, Some(0));
-        assert_eq!(
-            d.create().unwrap_err(),
-            "Tick a repository of Docs, or unlink it."
-        );
-        let names = new_feature_view(&d, "Acme".into()).repos;
-        assert_eq!(names[5].name, "Docs: site");
-        d.toggle(5);
-        let Ok(DialogOutcome::Link { links, adds, .. }) = d.create() else {
-            panic!("it links");
-        };
-        assert_eq!(links[0].project, "docs");
-        assert_eq!(links[0].touched, ["site"]);
-        assert!(adds.is_empty());
-    }
-
     #[test]
     fn a_project_of_one_repository_starts_ticked() {
-        let mut d = link_dialog();
-        d.others.push(other("ops", "Ops"));
+        let mut d = NewFeatureDialog::new("acme".into(), 1, "/work/api".into());
+        d.title.set("Bulk export");
+        d.others = vec![other("ops", "Ops")];
+        d.found(Ok(root(&["api"])));
         d.found_other("ops", Ok(root(&["infra"])));
-        assert_eq!(d.others[2].touched, [true]);
-        d.others[2].linked = true;
-        let Ok(DialogOutcome::Link { links, .. }) = d.create() else {
-            panic!("it links");
+        assert_eq!(d.others[0].touched, [true]);
+        d.others[0].linked = true;
+        let Ok(DialogOutcome::Create { links, .. }) = d.create() else {
+            panic!("it creates");
         };
         assert_eq!(links[0].touched, ["infra"]);
-    }
-
-    #[test]
-    fn a_linked_project_unticked_takes_all_it_holds_out() {
-        let mut d = link_dialog();
-        dkey(&mut d, ctrl_shift(Keysym::L));
-        d.toggle(0);
-        let view = new_feature_view(&d, "Acme".into());
-        assert_eq!(view.repos[0].place, "unlinked once applied");
-        assert_eq!(view.go, "Remove");
-        let Ok(DialogOutcome::Link { removes, adds, .. }) = d.create() else {
-            panic!("it takes it out");
-        };
-        assert_eq!(removes, ["admin:panel"]);
-        assert!(adds.is_empty(), "its ticks go with it");
-    }
-
-    #[test]
-    fn a_home_root_not_found_adds_and_removes_nothing() {
-        let mut d = NewFeatureDialog::new("acme".into(), 1, PathBuf::new());
-        d.existing = Some("bulk".into());
-        d.kept = vec![kept(None, "api", true)];
-        d.others = vec![other("admin", "Admin")];
-        d.found(Err("gone".into()));
-        assert!(d.adds().is_empty() && d.removes().is_empty());
     }
 
     #[test]

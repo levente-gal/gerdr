@@ -9,11 +9,11 @@ rules, for reviewing a branch before it merges.
 
 | Key | Meaning everywhere |
 | --- | --- |
-| Esc | Step back one level: clear the query, then leave a sub-mode (search, comment, rename), then close. The footer hint reads "clear" while there is something to clear, "close" otherwise. A comment or commit draft is kept, never thrown away by Esc. |
+| Esc | Step back one level: clear the query, then leave a sub-mode (search, comment, rename), then close. On the feature tab it folds the repository rows first. The footer hint reads "clear" while there is something to clear, "close" otherwise. A comment or commit draft is kept, never thrown away by Esc. |
 | Enter | Do the selected row's main action. On the feature tab's page of a done stage it goes to the current stage: it never undoes a done stage. |
 | Up / Down, PgUp / PgDn, Home / End | Move the selection. Ctrl+J / Ctrl+K also move it. Ctrl+N / Ctrl+P never move it. Where there is no list to page through, PgUp / PgDn scroll a page (the feature tab's stage page). |
 | Tab / Shift+Tab | Next / previous focus area or form field. Shift+Tab always goes the other way. |
-| Left / Right | Move along a row of choices laid out across: the feature tab's stage rail (previous / next stage's page; Up / Down step it too). |
+| Left / Right | Move along a row of choices laid out across: the feature tab's stage rail (previous / next stage's page; Up / Down step it too), its repository strip, and the buttons of an unfolded repository row. |
 | Ctrl+PgUp / Ctrl+PgDn | Previous / next item of a set shown one at a time: the feature tab's previous / next feature (its ‹ › buttons). |
 | Ctrl+N | New / create (project, branch, todo). |
 | Ctrl+O | Open (in a tab, in the browser, the file). |
@@ -27,11 +27,11 @@ rules, for reviewing a branch before it merges.
 | Ctrl+S | Switch to / check out a branch (repos, worktrees). |
 | Ctrl+Shift+S | Squash a worktree into main. |
 | Ctrl+Shift+A | Pick the next agent on the feature tab's selected stage (the chips on its agent card). It applies from the agent's next start; one running goes on. |
-| Ctrl+Shift+L | In the new feature dialog, the project picker (again: back to the repositories; also its "Link project…" button). On the feature tab before Ship, the dialog that links more repositories and projects, and removes those unticked (also its "Link repositories…" button; the same picker inside). |
+| Ctrl+Shift+L | In the new feature dialog, the project picker (again: back to the repositories; also its "Link project…" button). On the feature tab, show or hide all repositories: the strip unfolds into rows of what the feature holds, its context, those removed and those not added, each with the buttons of what it can become (also the strip's end button). |
 | Ctrl+Q | Stop a project's session (project menu). |
 | Ctrl+H / Ctrl+Shift+H | Snooze / snooze until tomorrow; Alt+H shows the hidden items (inbox). |
 | Ctrl+F or / | Search within what has focus. |
-| Del | Delete the selected row: the first press arms it (row shows "Press Del again"), the second deletes; an Undo toast follows when it can be undone. On a repository of a feature with several, Del takes it out of the feature the same way; it asks first if that loses uncommitted work, and refuses one with commits. Elsewhere on the feature tab, Del abandons the feature. On an AI review finding in a feature's code review, Del dismisses it and asks why first (no arming), or reopens a dismissed one; `f` marks it to fix. In a feature's manual test sheet, Del clears a criterion's result at once (no arming: Space or `f` gives it again). |
+| Del | Delete the selected row: the first press arms it (row shows "Press Del again"), the second deletes; an Undo toast follows when it can be undone. On a repository of a feature with several, Del takes it out of the feature: one on the feature's branch asks at once (no arming, see "Destructive actions"), and is refused with commits; one kept only as context arms, and offers Undo. Elsewhere on the feature tab, Del abandons the feature. On an AI review finding in a feature's code review, Del dismisses it and asks why first (no arming), or reopens a dismissed one; `f` marks it to fix. In a feature's manual test sheet, Del clears a criterion's result at once (no arming: Space or `f` gives it again). |
 | Ctrl+Shift+Del | Abandon what is in progress, asking first: abort a merge or rebase (repos), start the feature tab's current stage over. Starting over closes its agent, moves what it made to the feature's archive and frees the stage before it. |
 | Ctrl+Del | Dismiss every listed row of the selected row's group (inbox Services; also its label's "Dismiss all" button). One Undo toast brings them all back. |
 | Ctrl+I | Ignore the selected service error, or stop ignoring it (inbox). An ignored error goes under "Ignored errors", folded to its count; Alt+I (or the label's Show button, or a click on the label) lists them, dim. It sends no notifications or counts. Del there forgets it (armed first). Undo toast. |
@@ -52,6 +52,9 @@ the label ("Merge main into branch", "Squash into main").
 - A dialog offers "Don't ask again" only where the choice is remembered and
   can be found again in Settings.
 - Cheap destructive actions don't ask; they show an Undo toast instead.
+- One exception, asked for: a repository on a feature's branch never leaves the
+  feature without asking, even with nothing to lose. It takes a worktree and a
+  branch with it, and agents may be working there.
 
 ## Feedback
 

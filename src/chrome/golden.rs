@@ -1574,14 +1574,13 @@ fn new_feature() -> super::NewFeatureView {
         root: "~/Work/aft".into(),
         root_failed: false,
         projects: "Projects: aft (home) \u{b7} billing".into(),
-        link: Some(super::LINK_BUTTON[0]),
+        link: super::LINK_BUTTON[0],
         repos: vec![
             repo("api", "dev", true),
             repo("shared", "main", false),
             repo("web", "dev", true),
             repo("billing: ledger", "main", false),
         ],
-        go: "Create",
         top: 0,
         error: None,
         hover: Some(super::NewFeatureHit::Button(1)),
@@ -1590,44 +1589,6 @@ fn new_feature() -> super::NewFeatureView {
             ("Space", "tick"),
             ("Ctrl+Shift+L", "link project"),
             ("Esc", "clear"),
-        ],
-    }
-}
-
-/// The dialog linking repositories to an open feature: one held, one read-only
-/// from before, one to join, one to leave and one left out, the keyboard on
-/// a row.
-fn link_repositories() -> super::NewFeatureView {
-    let repo = |name: &str, word: &str, touched| super::NewFeatureRepo {
-        name: name.into(),
-        place: format!("from main \u{b7} {word}"),
-        touched,
-        fixed: false,
-    };
-    super::NewFeatureView {
-        heading: "Link repositories to \u{201c}Bulk export of invoices\u{201d}".into(),
-        title: Line::from("Bulk export of invoices"),
-        focus: Some(2),
-        root: "~/Work/aft".into(),
-        root_failed: false,
-        projects: "Projects: aft (home) \u{b7} billing".into(),
-        link: Some(super::LINK_BUTTON[0]),
-        repos: vec![
-            repo("api", "linked", true),
-            repo("shared", "read-only", true),
-            repo("web", "joins once applied", true),
-            repo("billing: ledger", "leaves once applied", false),
-            repo("billing: tools", "left out", false),
-        ],
-        go: "Apply",
-        top: 0,
-        error: None,
-        hover: None,
-        keys: vec![
-            ("Tab", "next"),
-            ("Space", "tick"),
-            ("Ctrl+Shift+L", "link project"),
-            ("Esc", "close"),
         ],
     }
 }
@@ -1723,7 +1684,6 @@ fn paint_features(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
     let size = FEATURE_OUTPUT.into();
     vec![
         hash(painter.new_feature_dialog(&new_feature(), size, scale, p)),
-        hash(painter.new_feature_dialog(&link_repositories(), size, scale, p)),
         hash(painter.sidebar_view(&features_sidebar(), (260, 520).into(), scale, p)),
         hash(painter.manual_test_sheet(&manual_test(false), size, scale, p)),
         hash(painter.manual_test_sheet(&manual_test(true), size, scale, p)),
@@ -1803,9 +1763,8 @@ fn manual_test(note: bool) -> super::ManualTestView {
     }
 }
 
-const FEATURES: [&str; 7] = [
+const FEATURES: [&str; 6] = [
     "new_feature",
-    "link_repositories",
     "sidebar_features",
     "manual_test",
     "manual_test_note",
@@ -1814,11 +1773,10 @@ const FEATURES: [&str; 7] = [
 ];
 
 /// The recorded hashes of `FEATURES`, per case in `CASES`.
-const GOLDEN_FEATURES: [[u64; 7]; 4] = [
+const GOLDEN_FEATURES: [[u64; 6]; 4] = [
     // Dark at 1
     [
         0x73e88729cb0c3112, // new_feature
-        0x4ddd08db7595a51f, // link_repositories
         0x5e017fbffabde99b, // sidebar_features
         0xab580425d0a50879, // manual_test
         0x8e4d20f7c6316567, // manual_test_note
@@ -1828,7 +1786,6 @@ const GOLDEN_FEATURES: [[u64; 7]; 4] = [
     // Dark at 2
     [
         0xbc9770d9310bd319, // new_feature
-        0xb66988f58867d0dc, // link_repositories
         0x095e2dfbb584cb35, // sidebar_features
         0xc14927ebcde55bf1, // manual_test
         0xb520dd662440b737, // manual_test_note
@@ -1838,7 +1795,6 @@ const GOLDEN_FEATURES: [[u64; 7]; 4] = [
     // Light at 1
     [
         0xb1780dfd60b1e9a8, // new_feature
-        0xbcdb4d7bf0d05f81, // link_repositories
         0xd22590056de00ae5, // sidebar_features
         0x093b890ce5537eef, // manual_test
         0xa74e12b563efbdaf, // manual_test_note
@@ -1848,7 +1804,6 @@ const GOLDEN_FEATURES: [[u64; 7]; 4] = [
     // Light at 2
     [
         0x757537a93b40f9fa, // new_feature
-        0xcce2bb81c277d994, // link_repositories
         0x5e1381a968fcc82e, // sidebar_features
         0xed40d3ad66f63314, // manual_test
         0x1239c6f64e145f2f, // manual_test_note
@@ -1883,12 +1838,6 @@ fn dump_features() {
             &dir,
             &format!("new_feature_{tag}"),
             painter.new_feature_dialog(&new_feature(), size, scale, p),
-            px(dialog.size.w + shadow),
-        );
-        dump(
-            &dir,
-            &format!("link_repositories_{tag}"),
-            painter.new_feature_dialog(&link_repositories(), size, scale, p),
             px(dialog.size.w + shadow),
         );
         for (name, note) in [("manual_test", false), ("manual_test_note", true)] {

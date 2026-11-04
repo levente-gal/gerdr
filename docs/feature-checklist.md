@@ -23,7 +23,8 @@ How to use it:
   click or key handler.
 - **C2** It asks only when something is lost: a running process, unmerged
   work, something that can't be undone. An idle chat or empty shell closes
-  at once.
+  at once. One exception: a repository on a feature's branch never leaves
+  the feature without asking, even with nothing to lose.
 - **C3** Dialog buttons: Cancel left and default, the action right in
   `ButtonStyle::Destructive`. Enter means Cancel until the user moves.
 - **C4** Cheap deletes don't ask. A row delete arms on the first Del
