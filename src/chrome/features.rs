@@ -8,13 +8,13 @@
 use std::{cell::RefCell, rc::Rc, sync::Arc};
 
 use super::{
-    ButtonStyle, CHECKBOX_GAP, CHECKBOX_ROW, Canvas, Check, DETAIL_FONT_SIZE, DIALOG_WIDTH, DOT,
-    Dot, FONT_SIZE, FieldSpot, LABEL_FONT_SIZE, ListBar, POPUP_RADIUS, Painter, Palette, QUIT_BODY,
-    QUIT_BUTTON, QUIT_BUTTON_GAP, QUIT_LINE_GAP, QUIT_PADDING, QUIT_TITLE, Rect, Rgb, SHADOW,
-    SMALL_FONT_SIZE, Thumb, agent_icon, band, button_width, check, chevron_down, chevron_side,
-    copy, cross, dialog_buttons, field_text, focus_ring, footer_hint_spots, gutter_track,
-    hint_strs, icon_sdf, measure, measure_bold, measured_footer_height, mix, phys, physical, plus,
-    rect_px, segment_tint, status_dot, tab, trash,
+    AGENT_ICON, ButtonStyle, CHECKBOX_GAP, CHECKBOX_ROW, Canvas, Check, DETAIL_FONT_SIZE,
+    DIALOG_WIDTH, DOT, Dot, FONT_SIZE, FieldSpot, LABEL_FONT_SIZE, ListBar, POPUP_RADIUS, Painter,
+    Palette, QUIT_BODY, QUIT_BUTTON, QUIT_BUTTON_GAP, QUIT_LINE_GAP, QUIT_PADDING, QUIT_TITLE,
+    Rect, Rgb, SHADOW, SMALL_FONT_SIZE, Thumb, agent_icon, band, button_width, check, chevron_down,
+    chevron_side, copy, cross, dialog_buttons, field_text, focus_ring, footer_hint_spots,
+    gutter_track, hint_strs, icon_sdf, measure, measure_bold, measured_footer_height, mix, phys,
+    physical, plus, rect_px, segment_tint, status_dot, tab, trash,
 };
 use crate::text_field::Line;
 use crate::{
@@ -372,6 +372,9 @@ pub struct RailNode {
     pub mark: NodeMark,
     /// Its page is the one shown.
     pub selected: bool,
+    /// What a done stage's agent ran as: its logo, and its model, else its
+    /// name. Under `line`, as the slot is too narrow for both on one row.
+    pub agent: Option<(AgentIcon, String)>,
 }
 
 /// The feature tab's areas the keyboard moves between, with Tab.
@@ -800,6 +803,8 @@ const NODE_LINE: i32 = 16;
 /// How far a label's second line sits under its first, when it is too
 /// wide for its slot and takes the short line's place.
 const RAIL_LABEL_STEP: i32 = 16;
+/// The room between a done stage's agent logo and its model on the rail.
+const RAIL_AGENT_GAP: i32 = 4;
 /// The room left between a node and the line joining it to the next.
 const CONNECTOR_GAP: i32 = 6;
 /// How wide the activity's column is: the page takes the rest.
@@ -1753,7 +1758,14 @@ pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayou
             let (left, next) = slot(i);
             rail_label(&node.label, next - left - 4).len() > 1
         });
-    let rail_h = NODE + NODE_GAP + NODE_LABEL + NODE_LINE + if wraps { RAIL_LABEL_STEP } else { 0 };
+    // So is one that says what ran a done stage.
+    let ran = view.rail.iter().any(|node| node.agent.is_some());
+    let rail_h = NODE
+        + NODE_GAP
+        + NODE_LABEL
+        + NODE_LINE
+        + if wraps { RAIL_LABEL_STEP } else { 0 }
+        + if ran { NODE_LINE } else { 0 };
     let nodes = (0..view.rail.len() as i32)
         .map(|i| {
             let (left, next) = slot(i);
@@ -2854,6 +2866,14 @@ impl Painter {
                 };
                 self.centred_cut(c, &node.line, DETAIL_FONT_SIZE, line, false, scale, color);
             }
+            if let Some((icon, what)) = &node.agent {
+                let below = (lines.len() as i32 - 1) * RAIL_LABEL_STEP + NODE_LINE;
+                let row = Rectangle::new(
+                    (label.loc.x, label.loc.y + NODE_LABEL + below).into(),
+                    (label.size.w, NODE_LINE).into(),
+                );
+                self.rail_agent(c, *icon, what, row, scale, p);
+            }
         }
         // The rule under the rail.
         if let Some(last) = l.nodes.first() {
@@ -2905,6 +2925,39 @@ impl Painter {
         } else {
             self.text(c, text, size, from, end, band(rect, scale), scale, color);
         }
+    }
+
+    /// What ran a done stage on the rail: `icon` then `what`, centred
+    /// together in `row`, `what` cut at its end when too wide.
+    fn rail_agent(
+        &self,
+        c: &mut Canvas,
+        icon: AgentIcon,
+        what: &str,
+        row: Rect,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let (x, end) = phys(row, scale);
+        let logo = ((AGENT_ICON + RAIL_AGENT_GAP) as f64 * scale) as f32;
+        let width = logo + self.text_width(what, DETAIL_FONT_SIZE, scale);
+        let from = (x + ((end - x) - width) / 2.0).max(x);
+        let spot = Rectangle::new(
+            ((f64::from(from) / scale).round() as i32, row.loc.y).into(),
+            (AGENT_ICON, row.size.h).into(),
+        );
+        agent_icon(c, spot, AGENT_ICON, icon, p.muted, scale);
+        let text = (from + logo).round();
+        self.text(
+            c,
+            what,
+            DETAIL_FONT_SIZE,
+            text,
+            end,
+            band(row, scale),
+            scale,
+            p.muted,
+        );
     }
 
     /// A rail node in `spot` for stage `number`, marked `mark`.
@@ -4588,6 +4641,18 @@ mod tests {
             l.hit(&view, centre(chips[1])),
             Some(FeatureTabHit::AgentPickOff(1))
         );
+    }
+
+    #[test]
+    fn the_rail_is_a_line_taller_once_it_says_what_ran_a_stage() {
+        let frame = Rectangle::from_size((1400, 800).into());
+        let height = |view: &FeatureTabView| feature_tab_layout(view, frame).nodes[0].size.h;
+        let mut view = super::super::golden::feature_tab();
+        let with = height(&view);
+        for node in &mut view.rail {
+            node.agent = None;
+        }
+        assert_eq!(with, height(&view) + NODE_LINE);
     }
 
     #[test]

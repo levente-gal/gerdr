@@ -102,6 +102,9 @@ pub struct Probe {
     pub stats: BTreeMap<String, (usize, usize)>,
     /// The stage files in its data dir, and their milestones.
     pub docs: page::Docs,
+    /// The models its stages' agents use, with the run each read was of
+    /// (`agents::read_models`).
+    pub models: BTreeMap<Stage, (u32, String)>,
 }
 
 /// Each project's ship mode setting, if it has one (`Workflow::ship`).
@@ -147,6 +150,7 @@ pub fn probe(feature: &Feature, modes: &Modes) -> Probe {
         merged,
         stats: page::stats(feature.touched().filter(|r| r.worktree.is_dir())),
         docs: page::Docs::default(),
+        models: BTreeMap::new(),
     }
 }
 
@@ -164,6 +168,7 @@ pub fn probe_finished(feature: &Feature) -> Probe {
         merged: false,
         stats: page::stats(feature.touched().filter(|r| r.worktree.is_dir())),
         docs: page::Docs::default(),
+        models: BTreeMap::new(),
     }
 }
 

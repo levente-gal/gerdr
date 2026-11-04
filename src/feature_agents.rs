@@ -1260,6 +1260,7 @@ impl Gerdr {
         };
         let now = feature::now();
         let run = StageRun {
+            model: None,
             n,
             agent: agent.clone(),
             command,

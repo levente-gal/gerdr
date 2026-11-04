@@ -2640,6 +2640,7 @@ impl Gerdr {
         self.feature_work(None, move |_| Done::Probed {
             probe: Probe {
                 docs: feature::page::read_docs(&data),
+                models: feature::agents::read_models(&feature),
                 ..ship::probe(&feature, &modes)
             },
             project,
@@ -2669,6 +2670,7 @@ impl Gerdr {
         self.feature_work(None, move |_| Done::Probed {
             probe: Probe {
                 docs: feature::page::read_docs(&data),
+                models: feature::agents::read_models(&feature),
                 ..ship::probe_finished(&feature)
             },
             project,
@@ -2679,6 +2681,7 @@ impl Gerdr {
     /// A probe of feature `slug` of `project` is back: its code changed
     /// sends it back, its squash merged makes it done.
     fn feature_probed(&mut self, project: &str, slug: &str, mut probe: Probe) {
+        self.feature_models_are(project, slug, std::mem::take(&mut probe.models));
         let key = (project.to_owned(), slug.to_owned());
         let open = (self.feature(project, slug)).is_some_and(|f| f.status == Status::Open);
         let probed = self.features.probes.entry(key).or_default();
@@ -2712,6 +2715,31 @@ impl Gerdr {
         }
         if again {
             self.probe_feature(project, slug);
+        }
+    }
+
+    /// The models feature `slug`'s agents use, as last read: kept with their
+    /// runs. A run started since the read isn't the one it was of.
+    fn feature_models_are(
+        &mut self,
+        project: &str,
+        slug: &str,
+        models: BTreeMap<Stage, (u32, String)>,
+    ) {
+        let Some(f) = self.feature_mut(project, slug) else {
+            return;
+        };
+        let mut changed = false;
+        for (stage, (n, model)) in models {
+            if let Some(run) = f.runs.get_mut(&stage).filter(|r| r.n == n)
+                && run.model.as_ref() != Some(&model)
+            {
+                run.model = Some(model);
+                changed = true;
+            }
+        }
+        if changed {
+            self.save_feature(project, slug);
         }
     }
 
@@ -5647,6 +5675,11 @@ fn current_line(feature: &Feature, stage: Stage, state: &PanelState, now: u64) -
 
 /// `stage`'s node on the rail of `feature`.
 fn rail_node(feature: &Feature, stage: Stage, state: &PanelState, now: u64) -> RailNode {
+    let done = stage_mark(feature, stage) == StageMark::Done;
+    let agent = (feature.runs.get(&stage).filter(|_| done)).map(|run| {
+        let what = run.model.as_deref().map_or(run.agent.as_str(), short_model);
+        (AgentIcon::from_agent(&run.agent), what.to_owned())
+    });
     let (mark, line) = match stage_mark(feature, stage) {
         StageMark::Done if is_stale(feature, stage, state.probe) => {
             (NodeMark::Stale, "code changed".to_owned())
@@ -5669,7 +5702,14 @@ fn rail_node(feature: &Feature, stage: Stage, state: &PanelState, now: u64) -> R
         line,
         mark,
         selected: false,
+        agent,
     }
+}
+
+/// `model` where its agent's logo stands beside it: Claude's says the first
+/// word of its names.
+fn short_model(model: &str) -> &str {
+    model.strip_prefix("claude-").unwrap_or(model)
 }
 
 /// A line in `tone`.
@@ -5738,7 +5778,13 @@ fn agent_card(
         (true, Some(line)) => (line.strip_prefix(run.agent.as_str()))
             .map_or(line.as_str(), str::trim_start)
             .to_owned(),
-        _ => format!("started {}", projects::ago(now, run.started)),
+        _ => {
+            let started = format!("started {}", projects::ago(now, run.started));
+            match &run.model {
+                Some(model) => format!("{model} \u{b7} {started}"),
+                None => started,
+            }
+        }
     };
     // The tail read is the current stage's agent's, while its pane is.
     let tail = match current && run.pane.is_some() {
@@ -8242,6 +8288,7 @@ pub(crate) mod tests {
                 ..Reading::default()
             }),
             guards: BTreeMap::new(),
+            models: BTreeMap::new(),
             ship,
             merged: false,
             stats: BTreeMap::new(),
@@ -9585,6 +9632,63 @@ pub(crate) mod tests {
             s,
             PageSection::Agent { tail, .. } if !tail.is_empty()
         )));
+    }
+
+    #[test]
+    fn a_done_stage_on_the_rail_says_what_ran_it() {
+        let run = |agent: &str, model: Option<&str>| feature::agents::StageRun {
+            agent: agent.to_owned(),
+            model: model.map(str::to_owned),
+            ..feature::agents::StageRun::default()
+        };
+        let mut f = feature("b", vec![repo("api", true)], 2);
+        let state = PanelState::default();
+        let agent_of = |f: &Feature, stage| rail_node(f, stage, &state, 2_000).agent;
+        // Done with no agent, as by hand: nothing to say.
+        assert_eq!(agent_of(&f, Stage::Discover), None);
+        // Its model, without the word its logo says; else the agent's name.
+        f.runs
+            .insert(Stage::Discover, run("Claude Code", Some("claude-opus-5-5")));
+        f.runs.insert(Stage::Plan, run("Codex", None));
+        assert_eq!(
+            agent_of(&f, Stage::Discover),
+            Some((AgentIcon::Claude, "opus-5-5".to_owned()))
+        );
+        assert_eq!(
+            agent_of(&f, Stage::Plan),
+            Some((AgentIcon::Codex, "Codex".to_owned()))
+        );
+        // Not done yet: it is on the page, and its line says how it goes.
+        f.runs.insert(Stage::Build, run("Cursor", Some("grok-4.7")));
+        assert_eq!(agent_of(&f, Stage::Build), None);
+    }
+
+    #[test]
+    fn an_agent_card_of_a_stage_gone_by_names_its_model() {
+        let mut f = feature("b", vec![repo("api", true)], 1);
+        let run = feature::agents::StageRun {
+            agent: "Cursor".to_owned(),
+            model: Some("grok-4.7".to_owned()),
+            started: 1_000,
+            ..feature::agents::StageRun::default()
+        };
+        f.runs.insert(Stage::Discover, run.clone());
+        f.runs.insert(Stage::Plan, run);
+        let state = PanelState {
+            agent: Some("Cursor working".into()),
+            ..PanelState::default()
+        };
+        let status_of = |stage| match agent_card(&f, stage, &state, &[], 2_000) {
+            Some(PageSection::Agent { status, .. }) => status,
+            other => panic!("no card: {other:?}"),
+        };
+        assert!(
+            status_of(Stage::Discover).starts_with("grok-4.7 \u{b7} started "),
+            "{}",
+            status_of(Stage::Discover)
+        );
+        // The current stage's says what it does, as its status line does.
+        assert_eq!(status_of(Stage::Plan), "working");
     }
 
     #[test]
