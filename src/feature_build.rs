@@ -21,12 +21,15 @@
 //! back to Build (the patch watch), and the loop goes round. A project
 //! without checks keeps Verify a manual mark.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    time::{Duration, Instant},
+};
 
 use crate::{
     Gerdr,
     agents::AgentKey,
-    chrome::CommandsTab,
+    chrome::{CommandsTab, Dot},
     feature::{
         self, Feature, Stage, Status,
         patch::{self, Reading},
@@ -53,6 +56,10 @@ pub(crate) const AGENT_QUIT: &str = "its agent has quit";
 pub(crate) const FRESH_BUILD_AGENT: &str =
     "a fresh Build agent, which waits for you to send its prompt";
 
+/// How long an agent just sent work counts as running before herdr sees it
+/// at work.
+const FIXING_STARTS: Duration = Duration::from_secs(30);
+
 /// What Build and Verify keep while gerdr runs; not saved.
 #[derive(Debug, Default)]
 pub(crate) struct BuildState {
@@ -75,6 +82,8 @@ struct Fixing {
     agent: AgentKey,
     /// It was seen working since it was sent the failures.
     worked: bool,
+    /// When it was sent them, or last still waited for its prompt.
+    since: Instant,
 }
 
 /// Whether the Build agent's start waits for the feature's setup.
@@ -995,8 +1004,28 @@ impl Gerdr {
             Fixing {
                 agent,
                 worked: false,
+                since: Instant::now(),
             },
         );
+    }
+
+    /// The dot of `feature`'s Build agent while it runs again with Build
+    /// done: just sent work, or seen at work (what was sent isn't known
+    /// after a restart). A line it never acted on stops counting.
+    pub(crate) fn build_agent_fixing(&self, feature: &Feature) -> Option<Dot> {
+        let run = feature.runs.get(&Stage::Build).filter(|r| !r.held)?;
+        if !feature.is_done(Stage::Build) || !run.live() {
+            return None;
+        }
+        let key = (feature.project.clone(), feature.slug.clone());
+        let sent = (self.features.build.fixing.get(&key))
+            .is_some_and(|f| f.worked || f.since.elapsed() < FIXING_STARTS);
+        match self.stage_run_state(run).0 {
+            Some(status @ (AgentStatus::Working | AgentStatus::Blocked)) => {
+                Some(Dot::of_status(status))
+            }
+            _ => sent.then_some(Dot::Working),
+        }
     }
 
     /// The Build agent watched as fixing feature `slug`, if any, is now
@@ -1041,6 +1070,10 @@ impl Gerdr {
                 .and_then(|f| f.runs.get(&Stage::Build))
                 .is_some_and(|r| r.held);
             if held {
+                // Its work starts once its prompt goes.
+                if let Some(f) = self.features.build.fixing.get_mut(&key) {
+                    f.since = Instant::now();
+                }
                 continue;
             }
             match fixing_next(fixing.worked, status, alive) {

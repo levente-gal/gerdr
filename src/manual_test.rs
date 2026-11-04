@@ -579,6 +579,8 @@ impl Gerdr {
                 }
                 tracing::info!("sent {n} manual test failures of {project}/{slug} to Build");
                 self.manual_saved(&project, &slug);
+                self.close_manual_test();
+                self.show_build_agent(&project, &slug);
             }
         }
     }

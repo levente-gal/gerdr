@@ -1095,6 +1095,9 @@ pub struct RowCtx {
     /// probe found them (see `page::Docs`): an earlier stage locks by
     /// them, and the brief's and the plan's pages offer Review.
     pub written: [bool; Stage::ALL.len()],
+    /// The Build agent's dot while it runs again with Build done (see
+    /// `Gerdr::build_agent_fixing`).
+    pub fixing: Option<Dot>,
 }
 
 impl RowCtx {
@@ -1192,6 +1195,78 @@ fn agent_button(
     }
     (feature.status == Status::Open && run.resumes() && ctx.locked_by(feature, stage).is_none())
         .then_some(("Resume agent", PanelOutcome::ResumeAgent(stage)))
+}
+
+/// Where a done Build's agent stands with work sent back to it: fixes,
+/// review comments, failed tests. The stage the feature is at is a later
+/// one, so the rail and that stage's page say so.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Rework {
+    /// In its tab, waiting for the user to send its prompt.
+    Waits,
+    /// Its prompt still to send, and its tab closed.
+    Closed,
+    /// Waiting in T3 Code as a draft.
+    Draft,
+    /// Running, with this dot.
+    Runs(Dot),
+}
+
+impl Rework {
+    /// Its mark and short line on the rail.
+    fn node(self) -> (NodeMark, String) {
+        let (mark, line) = match self {
+            Rework::Waits => (NodeMark::Waiting, "waiting to send"),
+            Rework::Closed => (NodeMark::Waiting, "agent closed"),
+            Rework::Draft => (NodeMark::Waiting, "draft in T3 Code"),
+            Rework::Runs(_) => (NodeMark::Fixing, "running again"),
+        };
+        (mark, line.to_owned())
+    }
+
+    /// What its agent's card says.
+    fn status(self) -> &'static str {
+        match self {
+            Rework::Waits => "waiting for you \u{b7} pick a model and send the prompt",
+            Rework::Closed => "its tab closed \u{b7} Start agent opens it again",
+            Rework::Draft => "draft in T3 Code \u{b7} pick a model and send it",
+            Rework::Runs(_) => "running again",
+        }
+    }
+}
+
+/// How `feature`'s Build agent stands with work sent back to it, if any.
+fn rework(feature: &Feature, ctx: RowCtx) -> Option<Rework> {
+    if feature.status != Status::Open || !feature.is_done(Stage::Build) {
+        return None;
+    }
+    let run = feature.runs.get(&Stage::Build)?;
+    if run.t3 == Some(feature::agents::T3Run::Draft) {
+        return Some(Rework::Draft);
+    }
+    if run.held {
+        return Some(if run.live() {
+            Rework::Waits
+        } else {
+            Rework::Closed
+        });
+    }
+    ctx.fixing.map(Rework::Runs)
+}
+
+/// `rework`, on the page of `stage` when `stage` is where the feature is at.
+fn rework_on(feature: &Feature, stage: Stage, ctx: RowCtx) -> Option<Rework> {
+    (stage > Stage::Build && stage_mark(feature, stage) == StageMark::Current)
+        .then(|| rework(feature, ctx))
+        .flatten()
+}
+
+/// What the key for an agent's tab does on `stage`'s page: the Build agent's
+/// while work sent back to it is under way, else what `agent_button` says.
+fn agent_key(feature: &Feature, stage: Stage, ctx: RowCtx) -> Option<(&'static str, PanelOutcome)> {
+    rework_on(feature, stage, ctx)
+        .and_then(|_| agent_button(feature, Stage::Build, ctx))
+        .or_else(|| agent_button(feature, stage, ctx))
 }
 
 /// What an agent stage's row does: start its agent, show it while its
@@ -2107,7 +2182,7 @@ impl FeaturePanel {
             Keysym::o | Keysym::O if ctrl => return Some(PanelOutcome::Open(feature.dir.clone())),
             Keysym::c | Keysym::C if ctrl => return Some(PanelOutcome::CopyPath),
             Keysym::r | Keysym::R if ctrl && mods.shift => {
-                return agent_button(feature, stage, ctx).map(|(_, outcome)| outcome);
+                return agent_key(feature, stage, ctx).map(|(_, outcome)| outcome);
             }
             Keysym::r | Keysym::R if ctrl => {
                 return fresh_stage(feature, row)
@@ -2227,6 +2302,15 @@ pub fn page_actions(
     if waits {
         out.push((button("Send prompt", ButtonStyle::Primary), send.clone()));
     }
+    // Work sent back to the Build agent, seen from the stage the feature is
+    // at: what it waits for comes first.
+    let back = rework_on(feature, stage, ctx);
+    if back == Some(Rework::Waits) {
+        out.push((
+            button("Send prompt", ButtonStyle::Primary),
+            PanelOutcome::SendPrompt(Stage::Build),
+        ));
+    }
     if let (StageMark::Done, Some(current)) = (mark, feature.current()) {
         let label = format!("Go to {}", current.label());
         let style = match waits {
@@ -2242,6 +2326,7 @@ pub fn page_actions(
         // Reopen is no default: Enter leaves a done stage be.
         let style = match main {
             PanelOutcome::Untick(_) => ButtonStyle::Plain,
+            _ if back == Some(Rework::Waits) => ButtonStyle::Plain,
             _ => ButtonStyle::Primary,
         };
         out.push((button(label, style), main));
@@ -2250,6 +2335,11 @@ pub fn page_actions(
         |out: &[(PageButton, PanelOutcome)], o: &PanelOutcome| out.iter().any(|(_, x)| x == o);
     // Also on a done stage: its agent's chat is still worth reading.
     if let Some((label, outcome)) = agent_button(feature, stage, ctx).filter(|(_, o)| !has(&out, o))
+    {
+        out.push((button(label, ButtonStyle::Plain), outcome));
+    }
+    if back.is_some()
+        && let Some((label, outcome)) = agent_button(feature, Stage::Build, ctx)
     {
         out.push((button(label, ButtonStyle::Plain), outcome));
     }
@@ -2843,6 +2933,7 @@ impl Gerdr {
             checks,
             criteria,
             written,
+            fixing: self.build_agent_fixing(feature),
         }
     }
 
@@ -6132,22 +6223,24 @@ fn rail_node(feature: &Feature, stage: Stage, state: &PanelState, now: u64) -> R
         let what = run.model.as_deref().map_or(run.agent.as_str(), short_model);
         (AgentIcon::from_agent(&run.agent), what.to_owned())
     });
-    let (mark, line) = match stage_mark(feature, stage) {
-        StageMark::Done if is_stale(feature, stage, state.probe) => {
+    let back = rework(feature, state.ctx).filter(|_| stage == Stage::Build);
+    let (mark, line) = match (stage_mark(feature, stage), back) {
+        (_, Some(back)) => back.node(),
+        (StageMark::Done, _) if is_stale(feature, stage, state.probe) => {
             (NodeMark::Stale, "code changed".to_owned())
         }
-        StageMark::Done => {
+        (StageMark::Done, _) => {
             let at = feature.marks.get(&stage).map_or(0, |m| m.at);
             (NodeMark::Done, projects::ago(now, at))
         }
-        StageMark::Current => {
+        (StageMark::Current, _) => {
             let mark = match waits(feature, stage, state) {
                 true => NodeMark::Waiting,
                 false => NodeMark::Current,
             };
             (mark, current_line(feature, stage, state, now))
         }
-        StageMark::Later => (NodeMark::Later, String::new()),
+        (StageMark::Later, _) => (NodeMark::Later, String::new()),
     };
     RailNode {
         label: stage.label().to_owned(),
@@ -6220,9 +6313,13 @@ fn agent_card(
     };
     let mark = stage_mark(feature, stage);
     let current = mark == StageMark::Current;
-    let dot = match mark {
-        StageMark::Done => Dot::Done,
-        StageMark::Current if run.live() => state.agent_status.map_or(Dot::Unknown, Dot::of_status),
+    let back = rework(feature, state.ctx).filter(|_| stage == Stage::Build);
+    let dot = match (mark, back) {
+        (_, Some(Rework::Runs(dot))) => dot,
+        (StageMark::Done, _) => Dot::Done,
+        (StageMark::Current, _) if run.live() => {
+            state.agent_status.map_or(Dot::Unknown, Dot::of_status)
+        }
         _ => Dot::Unknown,
     };
     // The card's head names the agent already.
@@ -6242,6 +6339,7 @@ fn agent_card(
             }
         }
     };
+    let status = back.map_or(status, |back| back.status().to_owned());
     // The tail read is the current stage's agent's, while its pane is.
     let tail = match current && run.pane.is_some() {
         true => state.tail.to_vec(),
@@ -6255,6 +6353,31 @@ fn agent_card(
         tail,
         buttons,
         picks,
+    })
+}
+
+/// The Build agent's card on the page of the stage `feature` is at, while
+/// work sent back to that agent is under way: this page's own agent is
+/// another one, and this is the page the user comes back to.
+fn rework_card(
+    feature: &Feature,
+    stage: Stage,
+    state: &PanelState,
+    actions: &[(PageButton, PanelOutcome)],
+) -> Option<PageSection> {
+    let back = rework_on(feature, stage, state.ctx)?;
+    let run = feature.runs.get(&Stage::Build)?;
+    Some(PageSection::Agent {
+        icon: AgentIcon::from_agent(&run.agent),
+        name: run.agent.clone(),
+        dot: match back {
+            Rework::Runs(dot) => dot,
+            _ => Dot::Unknown,
+        },
+        status: format!("Build agent \u{b7} {}", back.status()),
+        tail: Vec::new(),
+        buttons: agent_buttons(Stage::Build, actions),
+        picks: Vec::new(),
     })
 }
 
@@ -6511,6 +6634,7 @@ fn stage_page(
         sections.extend(agent_card(feature, stage, state, actions, now));
     }
     if mark != StageMark::Later {
+        sections.extend(rework_card(feature, stage, state, actions));
         if let Some(m) = feature.marks.get(&stage).filter(|m| !m.note.is_empty()) {
             sections.push(lines("Note", vec![line(m.note.clone(), CheckTone::Note)]));
         }
@@ -6917,7 +7041,7 @@ fn tab_hints(
             if start_over_stage(feature, stage, ctx).is_some() {
                 hints.push(hint(START_OVER_KEY, "start over\u{2026}"));
             }
-            if let Some((label, outcome)) = agent_button(feature, stage, ctx)
+            if let Some((label, outcome)) = agent_key(feature, stage, ctx)
                 && page_enter(feature, stage, ctx).as_ref() != Some(&outcome)
             {
                 hints.push(hint("Ctrl+Shift+R", &label.to_lowercase()));
@@ -8456,6 +8580,103 @@ pub(crate) mod tests {
             page_outcomes(&f, Stage::Build)
                 .contains(&PanelOutcome::StartAgent(Stage::Build, false))
         );
+    }
+
+    #[test]
+    fn work_sent_back_to_build_shows_on_the_page_of_the_stage_at_hand() {
+        // At AI review, its findings sent, the Build agent back on them.
+        let stage = Stage::AiReview;
+        let mut f = feature("b", vec![repo("api", true)], 5);
+        assert_eq!(f.current(), Some(stage));
+        let mut live = held_run(Some("p1"));
+        live.held = false;
+        f.runs.insert(Stage::Build, live);
+        let card = |f: &Feature, ctx: RowCtx| {
+            let state = PanelState {
+                ctx,
+                ..PanelState::default()
+            };
+            let actions = page_actions(f, stage, ctx);
+            let page = stage_page(f, stage, &state, &actions, 2_000);
+            let shown = page.sections.first().and_then(|s| match s {
+                PageSection::Agent {
+                    status,
+                    dot,
+                    buttons,
+                    ..
+                } => {
+                    let labels = buttons.iter().map(|b| actions[*b].0.label.clone());
+                    Some((status.clone(), *dot, labels.collect::<Vec<_>>()))
+                }
+                _ => None,
+            });
+            let node = rail_node(f, Stage::Build, &state, 2_000);
+            (shown, (node.mark, node.line))
+        };
+        // At rest, nothing says it is at work.
+        let at_rest = RowCtx::default();
+        assert_eq!(rework_on(&f, stage, at_rest), None);
+        assert_eq!(card(&f, at_rest).1.0, NodeMark::Done);
+        // Running: its node and a card with a way to its tab.
+        let running = RowCtx {
+            fixing: Some(Dot::Working),
+            ..RowCtx::default()
+        };
+        let (shown, node) = card(&f, running);
+        assert_eq!(
+            shown,
+            Some((
+                "Build agent \u{b7} running again".to_owned(),
+                Dot::Working,
+                vec!["Show agent".to_owned()]
+            ))
+        );
+        assert_eq!(node, (NodeMark::Fixing, "running again".to_owned()));
+        let show = PanelOutcome::ShowAgent(Stage::Build);
+        assert_eq!(agent_key(&f, stage, running).map(|k| k.1), Some(show));
+        // Enter stays this page's: it only runs.
+        assert_ne!(
+            page_enter(&f, stage, running),
+            Some(PanelOutcome::SendPrompt(Stage::Build))
+        );
+        // Waiting for its prompt: sending it is what Enter does.
+        f.runs.insert(Stage::Build, held_run(Some("p1")));
+        let (shown, node) = card(&f, at_rest);
+        let (status, _, buttons) = shown.unwrap();
+        assert!(status.starts_with("Build agent \u{b7} waiting for you"));
+        assert_eq!(buttons, ["Send prompt", "Show agent"]);
+        assert_eq!(node, (NodeMark::Waiting, "waiting to send".to_owned()));
+        assert_eq!(
+            page_enter(&f, stage, at_rest),
+            Some(PanelOutcome::SendPrompt(Stage::Build))
+        );
+        let actions = page_actions(&f, stage, at_rest);
+        let primaries = (actions.iter())
+            .filter(|(b, _)| b.style == ButtonStyle::Primary)
+            .count();
+        assert_eq!(primaries, 1);
+        // Its tab closed: it can open again, and Enter is this page's again.
+        f.runs.insert(Stage::Build, held_run(None));
+        let (shown, node) = card(&f, at_rest);
+        assert_eq!(shown.unwrap().2, ["Start agent"]);
+        assert_eq!(node, (NodeMark::Waiting, "agent closed".to_owned()));
+        assert_ne!(
+            page_enter(&f, stage, at_rest),
+            Some(PanelOutcome::StartAgent(Stage::Build, false))
+        );
+        // Build's own page says it too, not "done".
+        f.runs.insert(Stage::Build, held_run(Some("p1")));
+        f.runs.get_mut(&Stage::Build).unwrap().held = false;
+        let state = PanelState {
+            ctx: running,
+            ..PanelState::default()
+        };
+        let actions = page_actions(&f, Stage::Build, running);
+        let page = stage_page(&f, Stage::Build, &state, &actions, 2_000);
+        assert!(page.sections.iter().any(|s| matches!(
+            s,
+            PageSection::Agent { status, dot: Dot::Working, .. } if status == "running again"
+        )));
     }
 
     #[test]

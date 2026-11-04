@@ -20,7 +20,7 @@ rules, for reviewing a branch before it merges.
 | Ctrl+Shift+O | Open the selected row's page where Ctrl+O already opens a tab (feature tab: a repository's pull request, or Verify's evidence once a run of its checks wrote it). |
 | Ctrl+E | Edit (settings, a todo, open the file in the editor, an AI review finding's card; on the feature tab's Build and Verify, the project's commands: Setup and Checks). |
 | Ctrl+R | Refresh / reload (feature tab: start the selected stage's agent afresh, Build's too). |
-| Ctrl+Shift+R | On the feature tab: show the selected stage's agent, done stage or not, or go back to its chat in a new tab once its tab is closed (Claude Code and Cursor; Ctrl+R starts afresh). |
+| Ctrl+Shift+R | On the feature tab: show the selected stage's agent, done stage or not, or go back to its chat in a new tab once its tab is closed (Claude Code and Cursor; Ctrl+R starts afresh). On a later stage's page, while work sent back to the Build agent is under way, it shows that agent. |
 | Ctrl+Enter / Ctrl+Shift+Enter | The panel's finishing action: commit / commit and push (repos), create (branch menu), approve / send back (a file under review, a feature's code review; Verify's evidence is only read, so there it says so and does nothing); mark passed / send the failures to Build (a feature's manual test sheet); write the final plan, or use the plan as it is / ask the reviewer (a plan review's sheet: while suggestions are still to decide, Ctrl+Enter stays and says how many). On the file of a done stage, which is only read: go to the current stage / reopen the stage, as on its page in the feature tab (Ctrl+Shift+Enter there), until the stage after it has made something. |
 | Ctrl+Shift+V | In a feature's file's tab: go between Review and Split (its brief or plan, read on the stage's page), or to the next of Preview, Review and Split (Verify's evidence). Split, the two side by side, following its edits and caret and scrolling together, is there only on an output 1400 px wide or more. A new tab of a brief or plan opens on Split there, on Review on a narrower one; pressing its button again only switches to the open tab, keeping what it shows. Esc goes back to the feature tab. |
 | F2 | Rename. |
@@ -84,6 +84,11 @@ A key is written in one place, not on the button that does the same thing:
   `problems::report` as well, so it can be seen after the toast is gone. It
   also lands in the log file.
 - Every edit to files on disk (diff view cuts, restores) says what it did.
+- Work the user sends to an agent (findings, review comments, failed tests)
+  shows that agent's tab, where it runs or waits for its prompt. Work gerdr
+  sends by itself doesn't take the screen. Either way the stage's node on the
+  rail and the page of the stage the feature is at say the agent runs again or
+  waits, with a way to its tab.
 
 ## Words
 

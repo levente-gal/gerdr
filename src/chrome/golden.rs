@@ -3210,6 +3210,41 @@ fn feature_tab_held() -> super::FeatureTabView {
     view
 }
 
+/// At AI review, its findings sent to the Build agent, which runs again.
+fn feature_tab_fixing() -> super::FeatureTabView {
+    use super::{ButtonStyle, CheckTone, Dot, NodeMark, PageButton, PageSection, StagePage};
+    use crate::{agent_icons::AgentIcon, feature::Stage};
+    let mut view = feature_tab();
+    at_stage(&mut view, 5, NodeMark::Current, "findings read");
+    view.rail[3].mark = NodeMark::Fixing;
+    view.rail[3].line = "running again".into();
+    view.page = StagePage {
+        title: "AI review".into(),
+        about: Stage::AiReview.about().into(),
+        status: None,
+        buttons: vec![PageButton {
+            label: "Show agent".into(),
+            style: ButtonStyle::Plain,
+        }],
+        sections: vec![
+            PageSection::Agent {
+                icon: AgentIcon::Claude,
+                name: "claude".into(),
+                dot: Dot::Working,
+                status: "Build agent \u{b7} running again".into(),
+                tail: Vec::new(),
+                buttons: vec![0],
+                picks: Vec::new(),
+            },
+            super::PageSection::Lines {
+                label: "Findings".into(),
+                lines: vec![tab_line("2 sent to fix", CheckTone::Note)],
+            },
+        ],
+    };
+    view
+}
+
 fn feature_tab_t3_draft() -> super::FeatureTabView {
     use super::{CheckTone, Dot, PageSection, StagePage};
     use crate::{agent_icons::AgentIcon, feature::Stage};
@@ -3388,7 +3423,7 @@ fn feature_tab_rail_wrap() -> super::FeatureTabView {
 }
 
 /// The feature tab's fixtures, by name.
-fn feature_tabs() -> [(&'static str, super::FeatureTabView); 24] {
+fn feature_tabs() -> [(&'static str, super::FeatureTabView); 25] {
     [
         ("tab_build", feature_tab()),
         ("tab_plan_ready", feature_tab_plan_ready()),
@@ -3409,6 +3444,7 @@ fn feature_tabs() -> [(&'static str, super::FeatureTabView); 24] {
         ("tab_t3_draft", feature_tab_t3_draft()),
         ("tab_held", feature_tab_held()),
         ("tab_resume", feature_tab_resume()),
+        ("tab_fixing", feature_tab_fixing()),
         ("tab_approved", feature_tab_approved()),
         ("tab_locked", feature_tab_locked()),
         ("tab_start_over", feature_tab_start_over()),
@@ -3418,7 +3454,7 @@ fn feature_tabs() -> [(&'static str, super::FeatureTabView); 24] {
 }
 
 /// Each fixture at the width it shows best at, and Build at all three.
-const TAB_SURFACES: [(&str, i32); 30] = [
+const TAB_SURFACES: [(&str, i32); 31] = [
     ("tab_build", 860),
     ("tab_build", 1180),
     ("tab_build", 1920),
@@ -3443,6 +3479,7 @@ const TAB_SURFACES: [(&str, i32); 30] = [
     ("tab_held", 860),
     ("tab_resume", 1180),
     ("tab_resume", 860),
+    ("tab_fixing", 1180),
     ("tab_approved", 1180),
     ("tab_locked", 1180),
     ("tab_start_over", 1180),
@@ -3451,7 +3488,7 @@ const TAB_SURFACES: [(&str, i32); 30] = [
     ("tab_plan_long", 1180),
 ];
 
-const FEATURE_TAB: [&str; 30] = [
+const FEATURE_TAB: [&str; 31] = [
     "tab_build_860",
     "tab_build_1180",
     "tab_build_1920",
@@ -3476,6 +3513,7 @@ const FEATURE_TAB: [&str; 30] = [
     "tab_held_860",
     "tab_resume_1180",
     "tab_resume_860",
+    "tab_fixing_1180",
     "tab_approved_1180",
     "tab_locked_1180",
     "tab_start_over_1180",
@@ -3485,7 +3523,7 @@ const FEATURE_TAB: [&str; 30] = [
 ];
 
 /// The recorded hashes of `FEATURE_TAB`, per case in `CASES`.
-const GOLDEN_FEATURE_TAB: [[u64; 30]; 4] = [
+const GOLDEN_FEATURE_TAB: [[u64; 31]; 4] = [
     // Dark at 1
     [
         0x332b7228d6306b6d, // tab_build_860
@@ -3512,6 +3550,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 30]; 4] = [
         0x959063741091a5e0, // tab_held_860
         0x32dfb9ea19dc6ce5, // tab_resume_1180
         0x3dc610bcf46145d9, // tab_resume_860
+        0x5f8c8c6f813d9705, // tab_fixing_1180
         0x1ca019021d57d8c7, // tab_approved_1180
         0xc6318e4fe0bc1706, // tab_locked_1180
         0xd35d28e964e71244, // tab_start_over_1180
@@ -3545,6 +3584,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 30]; 4] = [
         0x0f4db73107d01bbf, // tab_held_860
         0x390926dd9747f056, // tab_resume_1180
         0x64fddb303f071664, // tab_resume_860
+        0xfaa0db85b1661c70, // tab_fixing_1180
         0x81dcfe933b50d1c7, // tab_approved_1180
         0x9eb70b3d664962c7, // tab_locked_1180
         0x9553d8c366a08944, // tab_start_over_1180
@@ -3578,6 +3618,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 30]; 4] = [
         0x31ab23617fe6347d, // tab_held_860
         0x159317f24b4657ab, // tab_resume_1180
         0x4320eabc301a6ee1, // tab_resume_860
+        0x11f148962fd8aa61, // tab_fixing_1180
         0xf6951ad2aa678c10, // tab_approved_1180
         0xc603896aa3e8ed79, // tab_locked_1180
         0x080148cb08d206bd, // tab_start_over_1180
@@ -3611,6 +3652,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 30]; 4] = [
         0x67bfd4b0c407cbf1, // tab_held_860
         0xc659c9318b078c0e, // tab_resume_1180
         0x4036574b8badfc88, // tab_resume_860
+        0x2e8e4d642b66d681, // tab_fixing_1180
         0x90004c75fcd97c6c, // tab_approved_1180
         0x214715da487d7e6d, // tab_locked_1180
         0x88932cd5b3fffe7d, // tab_start_over_1180
