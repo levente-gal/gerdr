@@ -1512,6 +1512,8 @@ impl Gerdr {
         // A copy that can't be kept only costs saying it changed later.
         if let Err(why) = artifacts::keep_approved(&data, stage) {
             tracing::warn!("keeping {project}/{slug}'s file as approved: {why}");
+            let text = format!("Approved, but later edits to this file won't show: {why}");
+            self.show_warning(text);
         }
         let now = feature::now();
         let Some(feature) = self.feature_mut(project, slug) else {
