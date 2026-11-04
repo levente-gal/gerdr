@@ -175,7 +175,7 @@ const FEATURE_INFO_LINE: i32 = 15;
 /// How far a feature row's lines tuck up under its title.
 const FEATURE_TUCK: i32 = 3;
 /// How wide a feature's count of repositories is.
-const REPO_COUNT_WIDTH: i32 = 26;
+const REPO_COUNT_WIDTH: i32 = 44;
 /// The most of an inbox row its workspace's name takes, as a part of it.
 const INBOX_PLACE: f32 = 0.4;
 /// The gap between an agent row's name and what it is on.
@@ -2755,27 +2755,21 @@ impl Painter {
         self.text(c, &card.line, DETAIL_FONT_SIZE, x, end, band, scale, color);
     }
 
-    /// The count of a feature's `repos` at the right end of `rect`: with a
-    /// folder, as the branch mark beside a number counts worktrees.
+    /// The count of a feature's `repos` at the right end of `rect`, in
+    /// words: a mark beside a number counts worktrees on the same line.
     fn repo_count(&self, c: &mut Canvas, repos: usize, rect: Rect, scale: f64, p: &Palette) {
-        let px = |v: i32| (v as f64 * scale).round() as i32;
-        let s = scale as f32;
-        let n = repos.to_string();
-        let n_w = (self.text_width(&n, DETAIL_FONT_SIZE, scale) / s).ceil() as i32;
-        let end = rect.loc.x + rect.size.w;
-        let icon = within_x(
-            rect,
-            end - n_w - BRANCH_ICON_GAP - BRANCH_ICON_WIDTH,
-            BRANCH_ICON_WIDTH,
-        );
-        icon_sdf(c, icon, scale, p.placeholder, |x, y| folder(x, y, 0.75 * s));
+        let text = format!("{repos} repos");
+        let w = self.text_width(&text, DETAIL_FONT_SIZE, scale);
+        let end = ((rect.loc.x + rect.size.w) as f64 * scale).round() as f32;
+        let band = band(rect, scale);
+        let x = (end - w).round();
         self.text(
             c,
-            &n,
+            &text,
             DETAIL_FONT_SIZE,
-            px(end - n_w) as f32,
-            px(end) as f32,
-            band(rect, scale),
+            x,
+            end + 1.0,
+            band,
             scale,
             p.muted,
         );
