@@ -1580,6 +1580,9 @@ impl FeaturePanel {
 
     /// The row of repository `key` takes the keyboard, if it has one.
     pub fn select_repo(&mut self, feature: &Feature, key: &str) {
+        // The rows just changed under a pointer that stayed: what it was
+        // over is somewhere else now, until it moves.
+        self.tab_hover = None;
         let at = repo_entries(feature, &self.sources, self.expanded)
             .into_iter()
             .position(|e| entry_key(feature, &self.sources, e).as_deref() == Some(key));
@@ -1604,6 +1607,7 @@ impl FeaturePanel {
     pub fn toggle_repos(&mut self) {
         self.expanded = !self.expanded;
         self.repo_pick = None;
+        self.tab_hover = None;
         if self.expanded {
             self.collapse_to = self.focus;
             self.focus = TabArea::Repos;
@@ -5208,7 +5212,8 @@ fn removal_asks(feature: &Feature, keys: &[String], losses: &[String]) -> bool {
 /// What a confirm dialog about taking repositories out says of `losses`,
 /// what goes with their worktrees, and of what happens after: as context
 /// agents go on reading them; else they can come back, on a new branch
-/// and without what was lost.
+/// and without what was lost. A line each: together they don't fit the
+/// dialog's width.
 fn remove_repos_body(repos: usize, losses: &[String], to_context: bool) -> String {
     let what = if repos == 1 {
         "Its worktree and branch go"
@@ -5225,7 +5230,7 @@ fn remove_repos_body(repos: usize, losses: &[String], to_context: bool) -> Strin
         (false, 1) => "You can add it back, on a new branch",
         (false, _) => "You can add them back, on new branches",
     };
-    format!("{lost}. {after}.")
+    format!("{lost}.\n{after}.")
 }
 
 /// What a confirm dialog about removing a feature's worktrees says of
@@ -6189,7 +6194,7 @@ fn tab_hints(
                 hints.push(hint("Ctrl+Shift+O", "open PR"));
             }
             let removable = match entry {
-                Some(RepoEntry::Held(_)) => feature.many_repos(),
+                Some(RepoEntry::Held(i)) => feature.many_repos() && repo_removable(feature, i),
                 Some(RepoEntry::Context(_)) => linkable(feature),
                 _ => false,
             };
@@ -6822,12 +6827,12 @@ pub(crate) mod tests {
         assert_eq!(keys, ["api"]);
         assert_eq!(
             remove_repos_body(1, &["admin:panel: 2 changed files".into()], false),
-            "Its worktree and branch go, and with them admin:panel: 2 changed files. \
+            "Its worktree and branch go, and with them admin:panel: 2 changed files.\n\
              You can add it back, on a new branch."
         );
         assert_eq!(
             remove_repos_body(1, &[], true),
-            "Its worktree and branch go; nothing in them is lost. \
+            "Its worktree and branch go; nothing in them is lost.\n\
              Agents started from now on read its main checkout."
         );
     }
@@ -7356,6 +7361,45 @@ pub(crate) mod tests {
         assert_eq!(panel.repo, 3);
         assert_eq!(panel.focus, TabArea::Stages, "the keyboard stays");
         assert_eq!(panel.repo_pick, Some(1));
+    }
+
+    #[test]
+    fn rows_changing_forget_what_the_pointer_was_over() {
+        let f = every_kind_of_row();
+        let mut panel = FeaturePanel {
+            expanded: true,
+            tab_hover: Some(FeatureTabHit::RepoRemove(1)),
+            ..FeaturePanel::default()
+        };
+        panel.select_repo(&f, "api");
+        assert_eq!(panel.tab_hover, None);
+        panel.tab_hover = Some(FeatureTabHit::Repo(1));
+        panel.toggle_repos();
+        assert_eq!(panel.tab_hover, None);
+    }
+
+    #[test]
+    fn del_says_remove_only_where_it_removes() {
+        let del = |f: &Feature, repo: usize| {
+            let panel = FeaturePanel {
+                focus: TabArea::Repos,
+                repo,
+                ..FeaturePanel::default()
+            };
+            let view = tab_view(&panel, f, &["b".to_owned()], &PanelState::default(), 2_060);
+            (view.hints.iter())
+                .find(|(key, _)| key == "Del")
+                .map(|(_, what)| what.clone())
+        };
+        let two = feature("b", vec![repo("api", true), repo("web", true)], 2);
+        assert_eq!(del(&two, 0).as_deref(), Some("remove repository"));
+        // The last one of several left: Del would only be refused.
+        let mut last = two.clone();
+        last.repos.pop();
+        assert_eq!(del(&last, 0), None);
+        // The only one a feature has: Del abandons it, and says so.
+        let one = feature("b", vec![repo("api", true)], 2);
+        assert_eq!(del(&one, 0).as_deref(), Some("abandon"));
     }
 
     #[test]
