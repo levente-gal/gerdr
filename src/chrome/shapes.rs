@@ -58,6 +58,18 @@ pub(super) fn ship_arrow(x: f32, y: f32, s: f32) -> f32 {
     shaft.min(left).min(right).min(line) - STROKE * s
 }
 
+/// Signed distance to Plan review's mark, centred on the origin: a plan's
+/// lines with a check beside them.
+pub(super) fn plan_review_mark(x: f32, y: f32, s: f32) -> f32 {
+    let line = |ax: f32, ay: f32, bx: f32, by: f32| segment(x, y, ax * s, ay * s, bx * s, by * s);
+    line(-6.0, -4.5, 6.0, -4.5)
+        .min(line(-6.0, 0.0, -2.0, 0.0))
+        .min(line(-6.0, 4.5, -2.0, 4.5))
+        .min(line(0.0, 2.0, 2.0, 4.5))
+        .min(line(2.0, 4.5, 6.0, -0.5))
+        - STROKE * s
+}
+
 /// Signed distance to Build's mark, centred on the origin: code's angle
 /// brackets round a slash.
 pub(super) fn code_mark(x: f32, y: f32, s: f32) -> f32 {
@@ -118,6 +130,15 @@ pub(super) fn app(x: f32, y: f32, s: f32) -> f32 {
         .min(segment(x, y, c.0, c.1, a.0, a.1))
         - STROKE * s;
     frame.min(play)
+}
+
+/// Signed distance to an arrow going right, centred on the origin: sending
+/// an agent its prompt.
+pub(super) fn send(x: f32, y: f32, s: f32) -> f32 {
+    let shaft = segment(x, y, -5.0 * s, 0.0, 4.5 * s, 0.0);
+    let up = segment(x, y, 0.5 * s, -4.0 * s, 4.5 * s, 0.0);
+    let down = segment(x, y, 0.5 * s, 4.0 * s, 4.5 * s, 0.0);
+    shaft.min(up).min(down) - STROKE * s
 }
 
 /// The ">" prompt of the terminal icons.

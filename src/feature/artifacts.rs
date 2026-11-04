@@ -33,6 +33,14 @@ pub fn path(dir: &Path, stage: Stage) -> Option<PathBuf> {
     Some(dir.join(name(stage)?))
 }
 
+/// The plan a stage's agent works from, under feature data dir `dir`: past
+/// Plan review, the final plan if it made one; else the plan as approved.
+pub fn plan_for(dir: &Path, stage: Stage) -> Option<PathBuf> {
+    let final_plan =
+        path(dir, Stage::PlanReview).filter(|p| stage > Stage::PlanReview && p.is_file());
+    final_plan.or_else(|| path(dir, Stage::Plan))
+}
+
 /// Where `stage`'s file is kept as its agent last wrote it, under
 /// feature data dir `dir`: `brief-written.md`. Compared with the file at
 /// send back, it tells whether the user edited it in the review.
@@ -157,6 +165,9 @@ fn stage_files(stage: Stage) -> Vec<&'static str> {
     if stage == Stage::Verify {
         files.push(super::verify::EVIDENCE);
     }
+    if stage == Stage::PlanReview {
+        files.push(super::plan_review::FILE);
+    }
     files
 }
 
@@ -204,6 +215,31 @@ pub fn archive_stage(dir: &Path, stage: Stage) -> Result<Vec<(String, String)>, 
         .collect())
 }
 
+/// Move the final plan and its review comments to the archive of feature
+/// data dir `dir`, leaving the suggestions: the decisions are still good.
+pub fn archive_final_plan(dir: &Path) -> Result<(), String> {
+    let stage = Stage::PlanReview;
+    let archive = dir.join(ARCHIVE);
+    let comments = comments_path(dir, stage);
+    for from in path(dir, stage).into_iter().chain([comments]) {
+        if !from.is_file() {
+            continue;
+        }
+        let name = from
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        std::fs::create_dir_all(&archive)
+            .map_err(|e| format!("making {}: {e}", archive.display()))?;
+        let slot = archive_slot(&archive, &name);
+        std::fs::rename(&from, &slot)
+            .map_err(|e| format!("moving {name} to {}: {e}", slot.display()))?;
+    }
+    drop_kept(dir, stage);
+    Ok(())
+}
+
 /// Drop the copies kept of `stage`'s file: they compare with a file now
 /// gone. One that won't go is only logged: each is written anew before it
 /// is next compared.
@@ -237,7 +273,7 @@ pub fn check(stage: Stage, text: &str) -> Result<(), Vec<String>> {
                 lacks.push("no acceptance criterion as Given/When/Then".into());
             }
         }
-        Stage::Plan => {
+        Stage::Plan | Stage::PlanReview => {
             if doc.need("Milestones", &mut lacks)
                 && !doc
                     .get("Milestones")
@@ -251,6 +287,9 @@ pub fn check(stage: Stage, text: &str) -> Result<(), Vec<String>> {
             doc.need("Merge order", &mut lacks);
             if !doc.lines.iter().any(|line| migrations_line(line)) {
                 lacks.push("no “Migrations:” line".into());
+            }
+            if stage == Stage::PlanReview {
+                doc.need("Review changes", &mut lacks);
             }
         }
         Stage::Build if doc.need("Milestones", &mut lacks) => match milestones(text) {

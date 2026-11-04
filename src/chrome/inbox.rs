@@ -9,12 +9,12 @@
 
 use super::{
     BUTTON_RADIUS, Badge, Canvas, DETAIL_FONT_SIZE, DOT, DOT_SLOT, Dot, FIELD_GAP, FONT_SIZE,
-    FieldSpot, HELP_MARGIN, HELP_PADDING, KEY_FONT_SIZE, LABEL_FONT_SIZE, MENU_MARK_GAP,
-    MENU_MARK_WIDTH, MENU_RADIUS, PADDING, POPUP_RADIUS, PROJECT_MENU_INPUT, PROJECT_MENU_PADDING,
-    Painter, Palette, ROW_BUTTON, ROW_BUTTON_INSET, Rect, Rgb, SHADOW, SMALL_FONT_SIZE, STROKE,
-    agent_icon, band, cross, dot_slot, folder, footer_height, footer_hint_spots, git_branch,
-    hint_at, hint_strs, icon_sdf, measure, mix, pencil, phys, plus, rect_px, robot, rounded_rect,
-    row_dot, row_fill, search::query_text, segment, status_dot, tray,
+    FieldSpot, HELP_MARGIN, HELP_PADDING, LABEL_FONT_SIZE, MENU_MARK_GAP, MENU_MARK_WIDTH,
+    MENU_RADIUS, PADDING, POPUP_RADIUS, PROJECT_MENU_INPUT, PROJECT_MENU_PADDING, Painter, Palette,
+    ROW_BUTTON, ROW_BUTTON_INSET, Rect, Rgb, SHADOW, SMALL_FONT_SIZE, STROKE, agent_icon, band,
+    cross, dot_slot, folder, footer_height, footer_hint_spots, git_branch, hint_at, hint_strs,
+    icon_sdf, measure, mix, pencil, phys, plus, rect_px, robot, rounded_rect, row_dot, row_fill,
+    search::query_text, segment, status_dot, tray,
 };
 use crate::git::{GitStatus, InProgress};
 use crate::text_field::Line;
@@ -485,14 +485,9 @@ fn row_buttons(buttons: &[InboxButton], rect: Rect) -> Vec<Rect> {
         .collect()
 }
 
-/// How wide a detail's button is: its label, then its key with `keys`.
-fn detail_button_width(button: &InboxButton, keys: bool) -> i32 {
-    let key = if button.key.is_empty() || !keys {
-        0
-    } else {
-        MENU_MARK_GAP + extent(&button.key, KEY_FONT_SIZE)
-    };
-    2 * BUTTON_PAD + extent(&button.label, SMALL_FONT_SIZE) + key
+/// How wide a detail's button is: its label with room either side.
+fn detail_button_width(button: &InboxButton) -> i32 {
+    2 * BUTTON_PAD + extent(&button.label, SMALL_FONT_SIZE)
 }
 
 /// Where the parts of the detail showing `detail` go in `rect`.
@@ -507,8 +502,6 @@ struct DetailParts {
     block: Option<Rect>,
     /// The first of its buttons that fit, along the bottom.
     buttons: Vec<Rect>,
-    /// They show their keys: they do unless that takes them a second row.
-    keys: bool,
 }
 
 /// The detail's parts in `rect`: its title row; its fields, then the
@@ -520,15 +513,10 @@ fn detail_parts(detail: &InboxDetailView, rect: Rect) -> DetailParts {
     let bottom = rect.loc.y + rect.size.h - HELP_PADDING;
 
     // The buttons, flowed in rows; those that don't fit are left out.
-    let one_row = |keys: bool| {
-        let widths = detail.buttons.iter().map(|b| detail_button_width(b, keys));
-        widths.sum::<i32>() + BUTTON_GAP * (detail.buttons.len() as i32 - 1) <= w
-    };
-    let keys = one_row(true) || !one_row(false);
     let mut rows: Vec<Vec<i32>> = Vec::new();
     let mut row_w = 0;
     for button in &detail.buttons {
-        let bw = detail_button_width(button, keys).min(w);
+        let bw = detail_button_width(button).min(w);
         let fits = !rows.is_empty() && row_w + BUTTON_GAP + bw <= w;
         if fits && let Some(row) = rows.last_mut() {
             row.push(bw);
@@ -600,7 +588,6 @@ fn detail_parts(detail: &InboxDetailView, rect: Rect) -> DetailParts {
         heading,
         block,
         buttons,
-        keys,
     }
 }
 
@@ -1830,17 +1817,14 @@ impl Painter {
             let hot = view.hover == Some(InboxHit::DetailButton(k));
             // The first is what Enter does: in the accent.
             let primary = k == 0;
-            let (label_color, key_color) = if primary {
-                (p.on_accent, mix(p.accent, p.on_accent, 0.8))
-            } else {
-                (p.text, p.placeholder)
-            };
-            // The button's own look; its label and key go on it here.
+            let label_color = if primary { p.on_accent } else { p.text };
+            // The button's own look; its label goes on it here, in the
+            // small font.
             self.button(c, "", button, (hot, false), primary, scale, p);
             let (x, right) = phys(button, scale);
             let button_band = band(button, scale);
             let pad = px(BUTTON_PAD) as f32;
-            let after = self.text(
+            self.text(
                 c,
                 &b.label,
                 SMALL_FONT_SIZE,
@@ -1850,18 +1834,6 @@ impl Painter {
                 scale,
                 label_color,
             );
-            if parts.keys && !b.key.is_empty() {
-                self.text(
-                    c,
-                    &b.key,
-                    KEY_FONT_SIZE,
-                    after + px(MENU_MARK_GAP) as f32,
-                    right - pad + s,
-                    button_band,
-                    scale,
-                    key_color,
-                );
-            }
         }
     }
 }
@@ -2056,6 +2028,14 @@ mod tests {
             label: label.into(),
             key: key.into(),
         }
+    }
+
+    #[test]
+    fn a_detail_buttons_key_takes_no_room_on_it() {
+        assert_eq!(
+            detail_button_width(&button("Snooze", "Ctrl+Shift+H")),
+            detail_button_width(&button("Snooze", ""))
+        );
     }
 
     fn item(id: &str, title: &str, subtitle: &str, tone: InboxTone, age: &str) -> InboxRow {

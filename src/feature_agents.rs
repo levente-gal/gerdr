@@ -31,9 +31,13 @@ use crate::{
     cli_agents::CliAgent,
     feature::{
         self, Feature, PerProject, Stage, Status,
-        agents::{Flavor, StageRun, Stop, T3Run, command_line, needs, resume_line, session_file},
+        agents::{
+            Flavor, StageRun, Stop, T3Run, command_line, needs, resume_line, run_needs,
+            session_file,
+        },
         artifacts, graph, layout,
         patch::Reading,
+        plan_review,
         review_import::FindingState,
         store, verify,
     },
@@ -75,11 +79,17 @@ pub enum GateKind {
     /// `fix` the user wants fixed, not sent to Build yet (stage: AI
     /// review).
     Findings { open: u32, fix: u32 },
+    /// Plan review's suggestions wait: `open` of them to decide, then the
+    /// final plan to start (stage: Plan review).
+    Suggestions { open: u32 },
     /// Code review waits for the user to review the diff.
     CodeReview,
     /// Manual test waits for the user to try the brief's criteria:
     /// `passed` of `total` passed on the code as it is.
     ManualTest { passed: u32, total: u32 },
+    /// The stage's agent is open, waiting for its model to be picked and
+    /// its prompt sent. Started by gerdr, it would sit there unseen.
+    SendPrompt,
 }
 
 /// How long a file must stay good and unchanged to count as done when
@@ -262,8 +272,20 @@ fn judge(
 /// Whether `text` is a good `stage` file for `feature`; else what it
 /// lacks. A multi-repository plan must name the touched repositories.
 pub(crate) fn validate(feature: &Feature, stage: Stage, text: &str) -> Result<(), Vec<String>> {
+    let review = feature
+        .plan_review
+        .as_ref()
+        .filter(|_| stage == Stage::PlanReview);
+    if stage == Stage::PlanReview && !review.is_some_and(|r| r.writing) {
+        return plan_review::parse(text).map(drop);
+    }
     let mut lacks = artifacts::check(stage, text).err().unwrap_or_default();
-    if stage == Stage::Plan && feature.many_repos() {
+    if let Some(review) = review {
+        for id in plan_review::unmapped(review, text) {
+            lacks.push(format!("Review changes doesn't name {id}"));
+        }
+    }
+    if matches!(stage, Stage::Plan | Stage::PlanReview) && feature.many_repos() {
         // By plain name: a plan's `web:api` names `api` too.
         let mut touched: Vec<&str> = feature.touched().map(|r| r.name.as_str()).collect();
         touched.sort_unstable();
@@ -320,9 +342,22 @@ pub(crate) fn gate_of(
     if f.status != Status::Open {
         return None;
     }
+    // Any stage's: a fresh Build agent for fixes waits on a done Build.
+    if let Some((stage, run)) = f.runs.iter().find(|(_, run)| run.waits_to_send()) {
+        return Some((*stage, run.started, GateKind::SendPrompt));
+    }
     let stage = f.current()?;
     match stage {
         Stage::Discover | Stage::Plan => {
+            let since = f.runs.get(&stage)?.ready?;
+            Some((stage, since, GateKind::Review))
+        }
+        Stage::PlanReview => {
+            if let Some(review) = crate::feature_plan_review::deciding(f) {
+                let open = u32::try_from(review.open()).unwrap_or(u32::MAX);
+                let since = review.stamp.map_or(f.created, |s| s.0);
+                return Some((stage, since, GateKind::Suggestions { open }));
+            }
             let since = f.runs.get(&stage)?.ready?;
             Some((stage, since, GateKind::Review))
         }
@@ -530,6 +565,13 @@ fn resolve_pick(
     workflow: Option<&Workflow>,
     installed: &[CliAgent],
 ) -> Pick {
+    if stage == Stage::PlanReview {
+        // Better another agent than the one that planned, but a fresh chat
+        // of the same one still reads with fresh eyes.
+        let planner = feature.runs.get(&Stage::Plan);
+        let planner = planner.map(|r| (r.agent.as_str(), r.command.as_str()));
+        return pick_reviewer(configured, planner, installed, true);
+    }
     if stage == Stage::AiReview {
         let builder = builder_of(feature, workflow, installed);
         let builder = builder.as_ref().map(|(n, c)| (n.as_str(), c.as_str()));
@@ -729,9 +771,16 @@ pub(crate) fn vars(
         ("feature.dir", feature.dir.display().to_string()),
         ("feature.data", data.display().to_string()),
         ("project.name", names.home.clone()),
-        ("artifact.path", path(artifacts::path(data, stage))),
+        (
+            "artifact.path",
+            path(
+                run_needs(feature, stage)
+                    .and_then(|need| need.artifact)
+                    .map(|name| data.join(name)),
+            ),
+        ),
         ("brief.path", path(artifacts::path(data, Stage::Discover))),
-        ("plan.path", path(artifacts::path(data, Stage::Plan))),
+        ("plan.path", path(artifacts::plan_for(data, stage))),
         (
             "evidence.path",
             data.join(verify::EVIDENCE).display().to_string(),
@@ -773,6 +822,7 @@ pub(crate) fn vars(
         ("review.open", String::new()),
     ]
     .into_iter()
+    .chain(plan_review::prompt_vars(feature.plan_review.as_ref()))
     .map(|(k, v)| (k.to_owned(), v))
     .collect()
 }
@@ -805,14 +855,24 @@ pub(crate) fn agent_line(
         if watch.is_some_and(|w| w.checking.is_some()) {
             return "reading the findings".into();
         }
-    } else if run.ready.is_some() {
-        return format!("{file} ready for review");
     }
-    if let Some((_, why)) = watch.and_then(|w| w.refused.as_ref()) {
+    // A file ready is the file's to say: the agent is only asked about itself.
+    let written = run.ready.is_some() && stage != Stage::Build;
+    if let Some((_, why)) = watch.and_then(|w| w.refused.as_ref()).filter(|_| !written) {
         return format!("not ready: {why}");
     }
     if run.t3 == Some(T3Run::Draft) {
         return "draft in T3 Code \u{b7} pick a model and send it".into();
+    }
+    if run.waits_to_send() {
+        // Told something in its tab: the stage's prompt is still to send.
+        if status == Some(AgentStatus::Working) {
+            return "working \u{b7} its prompt wasn't sent".into();
+        }
+        return "waiting for you \u{b7} pick a model and send the prompt".into();
+    }
+    if run.held {
+        return format!("{} closed \u{b7} its prompt wasn't sent", run.agent);
     }
     let started = format!("started {}", projects::ago(now, run.started));
     if !run.live() {
@@ -822,7 +882,7 @@ pub(crate) fn agent_line(
         };
     }
     let missing = watch.map(|w| w.missing.as_slice()).unwrap_or_default();
-    if run.nudged {
+    if run.nudged && !written {
         return match missing.first() {
             Some(lack) => format!("nudged: {lack}"),
             None => format!("nudged to write {file}"),
@@ -887,6 +947,7 @@ fn doc_word(stage: Stage) -> &'static str {
     match stage {
         Stage::Discover => "Brief",
         Stage::Plan => "Plan",
+        Stage::PlanReview => "Final plan",
         _ => stage.label(),
     }
 }
@@ -954,6 +1015,11 @@ impl Gerdr {
         if needs(stage).is_none() {
             return self.show_warning(format!("No agent runs {} yet", stage.label()));
         }
+        // Before `startable`: a fresh Build agent for fixes waits while Build
+        // is done, and what it was to be told is in its prompt.
+        if !fresh && feature.runs.get(&stage).is_some_and(|r| r.held) {
+            return self.reopen_held_agent(project, slug, stage);
+        }
         if let Err(why) = startable(feature, stage) {
             return self.show_warning(why);
         }
@@ -973,6 +1039,135 @@ impl Gerdr {
             return;
         }
         self.launch_stage_agent(project, slug, stage, &[]);
+    }
+
+    /// Show the agent waiting for `stage`'s prompt of feature `slug`, in a
+    /// new tab if its tab closed. The run stays, so the prompt it waits for
+    /// isn't lost, whatever it was rendered with. Its chat id is a new one:
+    /// the last never got a message.
+    fn reopen_held_agent(&mut self, project: &str, slug: &str, stage: Stage) {
+        let Some(feature) = self.feature(project, slug).cloned() else {
+            return;
+        };
+        if feature.status != Status::Open {
+            let title = &feature.title;
+            return self.show_warning(format!("\u{201c}{title}\u{201d} isn't open"));
+        }
+        let Some(run) = feature.runs.get(&stage) else {
+            return;
+        };
+        if let Some(pane) = (run.pane.clone()).filter(|p| self.herdr_pane_place(p).is_some()) {
+            return self.focus_agent(&agents::AgentKey::Herdr(pane));
+        }
+        let agent = run.agent.clone();
+        let command = run.command.clone();
+        let opened = self.open_feature_tab(project, slug, &feature.dir, Some(command));
+        let Some(pane) = opened else {
+            tracing::warn!("no tab for {agent}, waiting on {}", stage.label());
+            return self.show_error(format!("Couldn't open a tab for {agent}"));
+        };
+        let Some(f) = self.feature_mut(project, slug) else {
+            return;
+        };
+        let Some(r) = f.runs.get_mut(&stage) else {
+            return;
+        };
+        r.pane = Some(pane.clone());
+        f.log(
+            feature::now(),
+            format!("{} agent's tab opened again: {agent}", stage.label()),
+        );
+        self.save_feature(project, slug);
+        self.features
+            .agents
+            .remove(&(project.to_owned(), slug.to_owned(), stage));
+        if stage == Stage::Build {
+            self.fixing_moved(project, slug, agents::AgentKey::Herdr(pane));
+        }
+        self.show_success(held_text(&agent, stage, &feature.title));
+    }
+
+    /// The feature and stage of the active project whose agent waits for
+    /// its prompt in herdr pane `pane`. Panes are named per project's
+    /// session, so only the active project's can be it.
+    pub(crate) fn waiting_stage(&self, pane: &str) -> Option<(String, Stage)> {
+        let all = self.features.all.get(self.project.as_ref()?)?;
+        all.iter()
+            .filter(|f| f.status == Status::Open)
+            .find_map(|f| {
+                let (stage, _) = (f.runs.iter())
+                    .find(|(_, r)| r.waits_to_send() && r.pane.as_deref() == Some(pane))?;
+                Some((f.slug.clone(), *stage))
+            })
+    }
+
+    /// Tell the agent waiting on `stage` of feature `slug` to read its
+    /// prompt, in one line: a terminal agent would send a pasted line break
+    /// as Enter. From here on its work is watched. Its tab gone, or its CLI
+    /// quit, the run forgets the tab, and Start agent opens one again.
+    pub(crate) fn send_stage_prompt(&mut self, project: &str, slug: &str, stage: Stage) {
+        let Some(feature) = self.feature(project, slug).cloned() else {
+            return;
+        };
+        let Some(run) = feature.runs.get(&stage).filter(|r| r.held).cloned() else {
+            return self.show_warning(format!("{}'s prompt was sent already", stage.label()));
+        };
+        if feature.status != Status::Open {
+            let title = &feature.title;
+            return self.show_warning(format!("\u{201c}{title}\u{201d} isn't open"));
+        }
+        let pane = (run.pane.clone()).filter(|p| self.herdr_pane_place(p).is_some());
+        let sent = match &pane {
+            None => Err(String::from(crate::feature_build::TAB_GONE)),
+            Some(pane) => {
+                let data = store::dir(None, project, slug);
+                let names = self.projects.names(&feature);
+                let mut values = vars(&feature, &names, &data, stage);
+                values.insert("prompt.path".into(), run.prompt.display().to_string());
+                prompts::render_builtin("start", &values)
+                    .map_err(|e| e.to_string())
+                    .and_then(|line| self.tell_agent_pane(pane, line.trim()))
+            }
+        };
+        let agent = run.agent;
+        if let Err(why) = sent {
+            tracing::warn!(
+                "sending {} prompt of {project}/{slug} to {agent}: {why}",
+                stage.label()
+            );
+            let lost = pane.is_none() || why == crate::feature_build::AGENT_QUIT;
+            if lost
+                && let Some(r) = self
+                    .feature_mut(project, slug)
+                    .and_then(|f| f.runs.get_mut(&stage))
+            {
+                r.pane = None;
+                self.save_feature(project, slug);
+            }
+            let then = if lost {
+                "; Start agent opens it again"
+            } else {
+                ""
+            };
+            return self.show_warning(format!("Couldn't send the prompt to {agent}: {why}{then}"));
+        }
+        let now = feature::now();
+        let Some(f) = self.feature_mut(project, slug) else {
+            return;
+        };
+        let Some(r) = f.runs.get_mut(&stage) else {
+            return;
+        };
+        r.held = false;
+        r.nudged = false;
+        // Its work starts now: what it writes is new from here.
+        r.started = now;
+        f.log(now, format!("{} prompt sent to {agent}", stage.label()));
+        self.save_feature(project, slug);
+        self.features
+            .agents
+            .remove(&(project.to_owned(), slug.to_owned(), stage));
+        self.show_success(format!("Sent the prompt to {agent}"));
     }
 
     /// Go back to the chat of `stage`'s last agent of feature `slug`, its
@@ -1039,8 +1234,12 @@ impl Gerdr {
 
     /// Start a new run of `stage`'s agent, its prompt rendered with `extra`
     /// over the feature's values (`comments` when it is sent back with
-    /// them, `evidence` for a Build agent fixing Verify's failures).
-    /// Whether it started.
+    /// them, `evidence` for a Build agent fixing Verify's failures). New work
+    /// for an agent that still waits goes to that agent, model picked and
+    /// all, not to a second tab: its new prompt names the one it never got.
+    /// Whether it started. It starts waiting: the user picks its model and
+    /// sends the prompt (see `send_stage_prompt`), clicked or not, and in
+    /// T3 Code sends its draft.
     pub(crate) fn launch_stage_agent(
         &mut self,
         project: &str,
@@ -1051,7 +1250,7 @@ impl Gerdr {
         let Some(feature) = self.feature(project, slug).cloned() else {
             return false;
         };
-        let Some(need) = needs(stage) else {
+        let Some(need) = run_needs(&feature, stage) else {
             return false;
         };
         self.refresh_feature_graphs(project, slug, false);
@@ -1091,9 +1290,16 @@ impl Gerdr {
         for (key, value) in extra {
             values.insert((*key).to_owned(), value.clone());
         }
+        if stage == Stage::PlanReview {
+            self.plan_review_starts(project, slug);
+        }
         let version = prompts::builtin(need.template).map_or(0, |(_, v)| v);
+        let waiting = takes_new_work(last, &base, extra)
+            .filter(|r| (r.pane.as_deref()).is_some_and(|p| self.herdr_pane_place(p).is_some()));
         let text = match prompts::render_builtin(need.template, &values) {
-            Ok(text) => text,
+            Ok(text) => {
+                waiting.map_or_else(|| text.clone(), |r| with_earlier_prompt(&text, &r.prompt))
+            }
             Err(err) => {
                 tracing::warn!("rendering the {} prompt: {err}", need.template);
                 self.show_error(format!(
@@ -1117,14 +1323,25 @@ impl Gerdr {
         } else {
             command_line(&base, &prompt, &feature.agent_dirs(&data))
         };
+        // Its chat goes on under the new prompt: `resume` looks beside that.
+        if let Some(r) = waiting
+            && let Err(err) = std::fs::copy(session_file(&r.prompt), session_file(&prompt))
+        {
+            tracing::warn!("keeping the chat id of {}: {err}", r.prompt.display());
+        }
         // The agent runs in a tab of the feature's own workspace; T3 Code's
         // once the user sends its draft.
-        let pane = match in_t3 {
-            true => None,
-            false => self.open_feature_tab(project, slug, &feature.dir, Some(command.clone())),
+        let pane = match (in_t3, waiting) {
+            (true, _) => None,
+            (false, Some(r)) => r.pane.clone(),
+            (false, None) => {
+                self.open_feature_tab(project, slug, &feature.dir, Some(command.clone()))
+            }
         };
+        let told = waiting.is_some();
         let now = feature::now();
         let run = StageRun {
+            model: None,
             n,
             agent: agent.clone(),
             command,
@@ -1138,15 +1355,21 @@ impl Gerdr {
             ready: None,
             sent_back: last.map_or(0, |r| r.sent_back),
             stop: None,
+            held: !in_t3,
         };
+        let opened = run.pane.clone();
         let Some(feature) = self.feature_mut(project, slug) else {
             return false;
         };
         feature.runs.insert(stage, run);
-        feature.log(
-            now,
-            format!("{} agent started: {agent} (run {n})", stage.label()),
-        );
+        let what = match told {
+            true => format!(
+                "{} agent waiting got new work: {agent} (run {n})",
+                stage.label()
+            ),
+            false => format!("{} agent started: {agent} (run {n})", stage.label()),
+        };
+        feature.log(now, what);
         let title = feature.title.clone();
         self.save_feature(project, slug);
         self.features
@@ -1156,10 +1379,12 @@ impl Gerdr {
             self.t3_stage_drafted(project, slug, stage, &title);
             return true;
         }
-        self.show_success(format!(
-            "Started {agent} on {} of \u{201c}{title}\u{201d}",
-            stage.label()
-        ));
+        // No tab: opening it said why.
+        if opened.is_some() {
+            let text = held_text(&agent, stage, &title);
+            self.notify_feature(project, slug, opened, &text);
+            self.show_success(text);
+        }
         true
     }
 
@@ -1191,15 +1416,34 @@ impl Gerdr {
         let now = Instant::now();
         for (feature, stage, run) in runs {
             let key = (project.clone(), feature.slug.clone(), stage);
+            if run.held {
+                // No work to judge yet, only a tab to lose, unless the user
+                // told it what to do themselves and its file shows it.
+                let alive = self.stage_run_state(&run).1;
+                let watch = self.features.agents.entry(key.clone()).or_default();
+                if held_tab_gone(watch, alive, now) && run.live() {
+                    self.forget_pane(&project, &feature.slug, stage);
+                    continue;
+                }
+                let data = store::dir(None, &project, &feature.slug);
+                let wrote = artifacts::path(&data, stage)
+                    .map(|path| read_file(&feature, stage, &path, run.started));
+                if alive && wrote.is_some_and(|file| file.finished().is_some()) {
+                    self.held_agent_wrote(&project, &feature.slug, stage);
+                }
+                continue;
+            }
             if self.t3_stage_thread_sent(&feature, stage, &run) {
                 continue;
             }
             let (status, alive) = self.stage_run_state(&run);
             let data = store::dir(None, &project, &feature.slug);
-            let Some(path) = artifacts::path(&data, stage) else {
+            let need = run_needs(&feature, stage);
+            let Some(path) = need.and_then(|n| n.artifact).map(|name| data.join(name)) else {
                 continue;
             };
             let build = stage == Stage::Build;
+            let deciding = crate::feature_plan_review::deciding(&feature);
             let back = build && run.ready.is_some();
             let working = matches!(status, Some(AgentStatus::Working | AgentStatus::Blocked));
             if back || (build && working && run.stop.is_some()) {
@@ -1242,14 +1486,24 @@ impl Gerdr {
                 status,
                 alive,
                 &file,
-                stage == Stage::Discover,
+                // Asked about its suggestions, it may only answer: a chat.
+                stage == Stage::Discover || deciding.is_some(),
                 run.nudged,
                 now,
             );
             match verdict {
                 Verdict::Wait => {}
+                // Read in already: only a rewrite is news.
+                Verdict::Ready(stamp) if deciding.is_some_and(|r| r.stamp == Some(stamp)) => {
+                    if !alive && run.live() {
+                        self.forget_pane(&project, &feature.slug, stage);
+                    }
+                }
                 Verdict::Ready(stamp)
-                    if matches!(stage, Stage::Plan | Stage::Build | Stage::AiReview) =>
+                    if matches!(
+                        stage,
+                        Stage::Plan | Stage::PlanReview | Stage::Build | Stage::AiReview
+                    ) =>
                 {
                     // A refused file is read again now and then: the
                     // user may have undone the agent's changes, or
@@ -1266,6 +1520,9 @@ impl Gerdr {
                             }
                             Stage::Plan => {
                                 self.check_plan_code(&project, &feature.slug, run.n, stamp);
+                            }
+                            Stage::PlanReview => {
+                                self.check_plan_review_code(&project, &feature.slug, run.n, stamp);
                             }
                             _ => self.check_review_code(&project, &feature.slug, run.n, stamp),
                         }
@@ -1288,6 +1545,29 @@ impl Gerdr {
                 Verdict::Gone => {}
             }
         }
+    }
+
+    /// The agent waiting on `stage` of feature `slug` wrote the stage's file,
+    /// told by the user in its tab: its prompt isn't needed, and from here it
+    /// is watched like any other.
+    fn held_agent_wrote(&mut self, project: &str, slug: &str, stage: Stage) {
+        let Some(f) = self.feature_mut(project, slug) else {
+            return;
+        };
+        let Some(r) = f.runs.get_mut(&stage) else {
+            return;
+        };
+        r.held = false;
+        let agent = r.agent.clone();
+        let what = format!(
+            "{} agent wrote its file with no prompt sent: {agent}",
+            stage.label()
+        );
+        f.log(feature::now(), what);
+        self.save_feature(project, slug);
+        self.features
+            .agents
+            .remove(&(project.to_owned(), slug.to_owned(), stage));
     }
 
     /// What agent `key` does, if known, and whether it is still there.
@@ -1436,7 +1716,7 @@ impl Gerdr {
     }
 
     /// `stage` of feature `slug` is done with a good file: its gate waits.
-    fn stage_ready(&mut self, project: &str, slug: &str, stage: Stage) {
+    pub(crate) fn stage_ready(&mut self, project: &str, slug: &str, stage: Stage) {
         let now = feature::now();
         let Some(feature) = self.feature_mut(project, slug) else {
             return;
@@ -1662,7 +1942,7 @@ impl Gerdr {
             .pane
             .as_deref()
             .is_some_and(|p| self.herdr_pane_place(p).is_some());
-        let mut sent = Err(String::from("its tab is gone"));
+        let mut sent = Err(String::from(crate::feature_build::TAB_GONE));
         if alive && let Some(pane) = run.pane.clone() {
             sent = std::fs::create_dir_all(data.join("prompts"))
                 .and_then(|()| std::fs::write(&file, &comments))
@@ -1734,6 +2014,44 @@ fn stop_is_new(stop: Option<Stop>, done: u32, total: u32) -> bool {
 }
 
 /// Whether `stage`'s agent can start for `feature`; else why not.
+/// The run whose agent takes a new prompt carrying `extra` in place of a new
+/// agent starting from `base`: `last` if it still waits, on that command.
+/// With no `extra` the new run is a restart, which asks for a new agent.
+fn takes_new_work<'a>(
+    last: Option<&'a StageRun>,
+    base: &str,
+    extra: &[(&str, String)],
+) -> Option<&'a StageRun> {
+    last.filter(|r| !extra.is_empty() && r.waits_to_send() && r.base == base)
+}
+
+/// Prompt `text`, naming the one at `earlier` its agent never got.
+fn with_earlier_prompt(text: &str, earlier: &Path) -> String {
+    format!(
+        "{}\n\nYou never got the prompt in {}: read it and do that too.\n",
+        text.trim_end(),
+        earlier.display()
+    )
+}
+
+/// What gerdr says of `agent` opened on `stage` of feature `title`.
+fn held_text(agent: &str, stage: Stage, title: &str) -> String {
+    format!(
+        "{agent} is open on {} of \u{201c}{title}\u{201d}: pick a model, then send the prompt",
+        stage.label()
+    )
+}
+
+/// Whether the tab of an agent waiting for its prompt is gone: not there
+/// for `STABLE`, as herdr may only be coming back.
+fn held_tab_gone(watch: &mut Watch, alive: bool, now: Instant) -> bool {
+    if alive {
+        watch.gone = None;
+        return false;
+    }
+    now.duration_since(*watch.gone.get_or_insert(now)) >= STABLE
+}
+
 fn startable(feature: &Feature, stage: Stage) -> Result<(), String> {
     if feature.status != Status::Open {
         return Err(format!("\u{201c}{}\u{201d} isn't open", feature.title));
@@ -1751,6 +2069,115 @@ fn startable(feature: &Feature, stage: Stage) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_agent_waiting_for_its_prompt_is_a_gate_while_its_tab_is_there() {
+        let mut f = crate::features::tests::feature(
+            "a",
+            vec![crate::features::tests::repo("api", true)],
+            1,
+        );
+        let held = StageRun {
+            pane: Some("p1".into()),
+            held: true,
+            started: 7,
+            ..StageRun::default()
+        };
+        f.runs.insert(Stage::Plan, held.clone());
+        assert_eq!(
+            gate_of(&f, |_| None),
+            Some((Stage::Plan, 7, GateKind::SendPrompt))
+        );
+        // Its tab closed: nothing waits there until it opens again.
+        let closed = StageRun {
+            pane: None,
+            ..held.clone()
+        };
+        f.runs.insert(Stage::Plan, closed);
+        assert_eq!(gate_of(&f, |_| None), None);
+        // Fixes waiting on a done Build, past the current stage.
+        let mut f = crate::features::tests::feature(
+            "a",
+            vec![crate::features::tests::repo("api", true)],
+            4,
+        );
+        f.runs.insert(Stage::Build, held);
+        assert_eq!(
+            gate_of(&f, |_| None),
+            Some((Stage::Build, 7, GateKind::SendPrompt))
+        );
+    }
+
+    #[test]
+    fn a_waiting_agents_tab_is_gone_only_after_it_stayed_gone() {
+        let at = Instant::now();
+        let mut watch = Watch::default();
+        assert!(!held_tab_gone(&mut watch, false, at));
+        assert!(!held_tab_gone(&mut watch, false, at + STABLE / 2));
+        // Back in time: herdr only reconnected.
+        assert!(!held_tab_gone(&mut watch, true, at + STABLE / 2));
+        assert!(!held_tab_gone(&mut watch, false, at + STABLE));
+        assert!(held_tab_gone(&mut watch, false, at + STABLE * 2));
+    }
+
+    #[test]
+    fn new_work_goes_to_an_agent_that_still_waits_on_the_same_command() {
+        let held = StageRun {
+            base: "claude".into(),
+            pane: Some("p1".into()),
+            held: true,
+            ..StageRun::default()
+        };
+        let fixes = [("fixes", String::from("x"))];
+        assert_eq!(takes_new_work(Some(&held), "claude", &fixes), Some(&held));
+        // A restart asks for a new agent, another command is another agent.
+        assert_eq!(takes_new_work(Some(&held), "claude", &[]), None);
+        assert_eq!(takes_new_work(Some(&held), "cursor-agent", &fixes), None);
+        let closed = StageRun {
+            pane: None,
+            ..held.clone()
+        };
+        assert_eq!(takes_new_work(Some(&closed), "claude", &fixes), None);
+        let sent = StageRun {
+            held: false,
+            ..held
+        };
+        assert_eq!(takes_new_work(Some(&sent), "claude", &fixes), None);
+        assert_eq!(takes_new_work(None, "claude", &fixes), None);
+    }
+
+    #[test]
+    fn a_new_prompt_names_the_one_its_agent_never_got() {
+        let text = with_earlier_prompt("Fix this.\n", Path::new("/d/build-1.md"));
+        assert_eq!(
+            text,
+            "Fix this.\n\nYou never got the prompt in /d/build-1.md: read it and do that too.\n"
+        );
+    }
+
+    #[test]
+    fn a_waiting_agents_line_says_what_the_user_is_to_do() {
+        let held = StageRun {
+            agent: "Claude Code".into(),
+            pane: Some("p1".into()),
+            held: true,
+            ..StageRun::default()
+        };
+        let line = |run: &StageRun| agent_line(run, Stage::Plan, Some(AgentStatus::Idle), None, 9);
+        assert_eq!(
+            line(&held),
+            "waiting for you \u{b7} pick a model and send the prompt"
+        );
+        assert_eq!(
+            agent_line(&held, Stage::Plan, Some(AgentStatus::Working), None, 9),
+            "working \u{b7} its prompt wasn't sent"
+        );
+        let closed = StageRun { pane: None, ..held };
+        assert_eq!(
+            line(&closed),
+            "Claude Code closed \u{b7} its prompt wasn't sent"
+        );
+    }
 
     #[test]
     fn a_file_sent_back_after_the_user_edited_it_says_so() {
@@ -1791,6 +2218,73 @@ mod tests {
             ready,
             ..StageRun::default()
         }
+    }
+
+    #[test]
+    fn plan_reviews_two_files_are_checked_for_what_each_must_say() {
+        use crate::feature::plan_review::{self, PlanReview};
+        let mut f = crate::features::tests::feature(
+            "a",
+            vec![crate::features::tests::repo("api", true)],
+            2,
+        );
+        let stage = Stage::PlanReview;
+        // The reviewer's, until the final plan is due.
+        assert_eq!(validate(&f, stage, r#"{"suggestions": []}"#), Ok(()));
+        assert!(validate(&f, stage, PLAN).is_err());
+        let names = |f: &Feature| run_needs(f, stage).map(|n| (n.artifact, n.template));
+        assert_eq!(names(&f), Some((Some("plan-review.json"), "plan-review")));
+        let mut review = PlanReview::default();
+        plan_review::add_own(&mut review, "Add a metric");
+        review.writing = true;
+        f.plan_review = Some(review);
+        assert_eq!(names(&f), Some((Some("plan-final.md"), "plan-final")));
+        // A plan, saying where each accepted one went.
+        let lacks = validate(&f, stage, PLAN).unwrap_err();
+        assert!(
+            lacks.iter().any(|l| l.contains("Review changes")),
+            "{lacks:?}"
+        );
+        assert!(
+            lacks.iter().any(|l| l.contains("doesn't name u1")),
+            "{lacks:?}"
+        );
+        let good = format!("{PLAN}\n## Review changes\n- u1: Milestones\n");
+        assert_eq!(validate(&f, stage, &good), Ok(()));
+        assert_eq!(validate(&f, Stage::Plan, PLAN), Ok(()));
+    }
+
+    #[test]
+    fn past_plan_review_the_final_plan_is_the_plan() {
+        let names = PerProject::all("Acme".to_owned());
+        let f = crate::features::tests::feature(
+            "a",
+            vec![crate::features::tests::repo("api", true)],
+            3,
+        );
+        let data = std::env::temp_dir().join(format!("gerdr-final-{}", std::process::id()));
+        std::fs::create_dir_all(&data).unwrap();
+        let plan_of = |stage| vars(&f, &names, &data, stage)["plan.path"].clone();
+        let plan = data.join("plan.md").display().to_string();
+        let last = data.join("plan-final.md");
+        assert_eq!(plan_of(Stage::Build), plan);
+        std::fs::write(&last, "final").unwrap();
+        // Its own agent works from the plan it reviewed, whatever is there.
+        assert_eq!(plan_of(Stage::PlanReview), plan);
+        let final_path = last.display().to_string();
+        assert_eq!(plan_of(Stage::Build), final_path);
+        assert_eq!(plan_of(Stage::AiReview), final_path);
+        // Set aside, the suggestions stay and the plan is the plan again.
+        std::fs::write(data.join(plan_review::FILE), "{}").unwrap();
+        artifacts::archive_final_plan(&data).unwrap();
+        assert!(!last.exists());
+        assert!(data.join(plan_review::FILE).is_file());
+        assert!(data.join("archive/plan-final-1.md").is_file());
+        assert_eq!(plan_of(Stage::Build), plan);
+        // Starting over takes both.
+        artifacts::archive_stage(&data, Stage::PlanReview).unwrap();
+        assert!(!data.join(plan_review::FILE).exists());
+        let _ = std::fs::remove_dir_all(&data);
     }
 
     #[test]
@@ -1852,14 +2346,14 @@ mod tests {
         gone.status = Status::Abandoned;
         assert!(approval(&gone, Stage::Plan, Some(PLAN)).is_err());
         // AI review and Code review pass by their own checks only.
-        let reviewing = feature("a", vec![repo("api", true)], 4);
+        let reviewing = feature("a", vec![repo("api", true)], 5);
         assert_eq!(reviewing.current(), Some(Stage::AiReview));
         let review = "{\"findings\": []}";
         assert_eq!(
             approval(&reviewing, Stage::AiReview, Some(review)),
             Err("AI review is done once its findings are decided".into())
         );
-        let coding = feature("a", vec![repo("api", true)], 5);
+        let coding = feature("a", vec![repo("api", true)], 6);
         assert_eq!(coding.current(), Some(Stage::CodeReview));
         assert_eq!(
             approval(&coding, Stage::CodeReview, None),
@@ -1976,7 +2470,7 @@ mod tests {
             state,
             ..Finding::default()
         };
-        let mut f = feature("a", vec![repo("api", true)], 4);
+        let mut f = feature("a", vec![repo("api", true)], 5);
         f.runs.insert(Stage::AiReview, run(None));
         f.review = Some(AiReview {
             findings: vec![
@@ -2003,7 +2497,7 @@ mod tests {
         );
         f.review.as_mut().unwrap().findings[2].state = FindingState::Sent;
         assert_eq!(gate_of(&f, |_| None), None);
-        let mut code = feature("b", vec![repo("api", true)], 5);
+        let mut code = feature("b", vec![repo("api", true)], 6);
         assert_eq!(
             gate_of(&code, |_| None),
             Some((Stage::CodeReview, 2_000, GateKind::CodeReview))
@@ -2011,7 +2505,7 @@ mod tests {
         code.marks.get_mut(&Stage::AiReview).unwrap().at = 3_000;
         assert_eq!(gate_of(&code, |_| None).map(|g| g.1), Some(3_000));
         // Manual test waits only while the brief has criteria.
-        let testing = feature("c", vec![repo("api", true)], 6);
+        let testing = feature("c", vec![repo("api", true)], 7);
         assert_eq!(gate_of(&testing, |_| None), None);
         assert_eq!(gate_of(&testing, |_| Some((0, 0))), None);
         assert_eq!(
@@ -2057,7 +2551,7 @@ mod tests {
 
     #[test]
     fn the_review_prompt_gets_its_file_and_the_diffs() {
-        let f = feature("a", vec![repo("api", true)], 4);
+        let f = feature("a", vec![repo("api", true)], 5);
         let mut v = vars(
             &f,
             &PerProject::all("Acme".to_owned()),
@@ -2216,8 +2710,14 @@ mod tests {
             "Claude Code working \u{b7} started 3m ago"
         );
         assert_eq!(
-            agent_line(&run(Some(1_100)), Stage::Discover, None, None, now),
-            "brief.md ready for review"
+            agent_line(
+                &run(Some(1_100)),
+                Stage::Discover,
+                Some(AgentStatus::Idle),
+                None,
+                now
+            ),
+            "Claude Code waiting for you \u{b7} started 3m ago"
         );
         let mut nudged = r.clone();
         nudged.nudged = true;
@@ -2478,9 +2978,9 @@ mod tests {
         let mut review = feature("a", vec![repo("api", true)], 1);
         review.runs.insert(Stage::Plan, run(Some(400)));
         // Build's ready says it was marked done: no review.
-        let mut built = feature("b", vec![repo("api", true)], 2);
+        let mut built = feature("b", vec![repo("api", true)], 3);
         built.runs.insert(Stage::Build, run(Some(100)));
-        let mut stopped = feature("c", vec![repo("api", true)], 2);
+        let mut stopped = feature("c", vec![repo("api", true)], 3);
         let mut r = run(None);
         r.stop = Some(Stop {
             done: 2,
@@ -2489,7 +2989,7 @@ mod tests {
         });
         stopped.runs.insert(Stage::Build, r);
         let failed = |slug: &str, fixes: u32| {
-            let mut f = feature(slug, vec![repo("api", true)], 3);
+            let mut f = feature(slug, vec![repo("api", true)], 4);
             f.verify = Some(verify::VerifyRun {
                 n: 4,
                 started: 150,
@@ -2563,7 +3063,7 @@ mod tests {
 
     #[test]
     fn the_build_prompt_gets_the_plan_evidence_and_branch() {
-        let f = feature("a", vec![repo("api", true)], 2);
+        let f = feature("a", vec![repo("api", true)], 3);
         let v = vars(
             &f,
             &PerProject::all("Acme".to_owned()),
@@ -2745,7 +3245,7 @@ mod tests {
     #[test]
     fn only_stages_still_ahead_with_an_agent_have_chips() {
         let installed = claude_and_cursor();
-        let mut f = feature("a", vec![repo("r", true)], 2);
+        let mut f = feature("a", vec![repo("r", true)], 3);
         assert!(stage_chips(&f, Stage::Discover, None, &installed).is_empty());
         assert_eq!(stage_chips(&f, Stage::Build, None, &installed).len(), 2);
         assert_eq!(stage_chips(&f, Stage::AiReview, None, &installed).len(), 2);

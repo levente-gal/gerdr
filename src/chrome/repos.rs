@@ -98,6 +98,12 @@ pub fn repos_detail_line(density: Density) -> i32 {
     }
 }
 const REPOS_MONO_SIZE: f32 = 14.0;
+/// How strongly a finding's heading band takes its severity's colour.
+const COMMENT_HEAD_TINT: f32 = 0.24;
+/// Between the parts of a comment's heading.
+const COMMENT_HEAD_GAP: i32 = 8;
+/// A finding's "AI review" tag's padding.
+const COMMENT_TAG_PAD: i32 = 6;
 /// A file's header in the diff: its fold chevron's room, its checkbox's,
 /// and its status letter's pill; how far in a diff line's text starts,
 /// past the bar marking it added or removed, and that bar's width.
@@ -110,10 +116,9 @@ const DIFF_BAR: i32 = 3;
 const COMMENT_INDENT: i32 = 12;
 /// How far the line and shadow under the pinned header reach down.
 const PIN_SHADOW: i32 = 5;
-/// A button on a diff row: its padding, the gap before its key, the gap
-/// between two, and how far in from the row's ends and edges it sits.
+/// A button on a diff row: its padding, the gap between two, and how far
+/// in from the row's ends and edges it sits.
 const ROW_CHIP_PAD: i32 = 8;
-const ROW_CHIP_KEY_GAP: i32 = 6;
 const ROW_CHIP_GAP: i32 = 4;
 const ROW_CHIP_INSET: i32 = 2;
 /// How strongly an added or removed line is tinted, and its changed
@@ -490,7 +495,7 @@ pub enum Tone {
 pub struct ResultBar {
     pub text: String,
     pub tone: Tone,
-    /// `Undo`, `RetryFailed`, with their keys.
+    /// `Undo`, `RetryFailed`: their keys in their tips, as `without_key`.
     pub buttons: Vec<Hint>,
 }
 
@@ -617,9 +622,16 @@ pub enum DetailRow {
     Line(crate::diff::Line),
     /// What isn't a hunk: `Binary file`, an untracked folder's files.
     Note(String),
-    /// A row of a review comment: the first and last of its rows round
-    /// its card. An AI review finding's card takes its `tone` (by
-    /// severity, muted once dismissed); the user's own have none.
+    /// A review comment's heading: who wrote it and where it is among
+    /// those of its kind (`place`: `finding 2 of 5`). The first of its card.
+    CommentHead {
+        /// What the AI reviewer found; none for the user's own.
+        finding: Option<FindingHead>,
+        place: String,
+    },
+    /// A row of a review comment: the last of its rows rounds its card. An
+    /// AI review finding's card takes its `tone` (by severity, muted once
+    /// dismissed); the user's own have none.
     Comment {
         text: String,
         first: bool,
@@ -635,6 +647,16 @@ pub enum DetailRow {
         first: bool,
         last: bool,
     },
+}
+
+/// What an AI review finding's heading says.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FindingHead {
+    /// `high`.
+    pub severity: String,
+    /// `to fix`; none while undecided.
+    pub state: Option<String>,
+    pub tone: Tone,
 }
 
 /// A repository's header in the diff.
@@ -798,6 +820,10 @@ pub enum ReposButton {
     MarkViewed,
     /// A feature's code review: go to the next file not viewed.
     NextUnviewed,
+    /// Go to the next review comment or finding in the diff, or the one
+    /// before.
+    NextComment,
+    PrevComment,
 }
 
 impl ReposButton {
@@ -863,6 +889,8 @@ impl ReposButton {
             ReposButton::ReopenFinding => "Reopen",
             ReposButton::MarkViewed => "Viewed",
             ReposButton::NextUnviewed => "Next unviewed",
+            ReposButton::NextComment => "Next comment",
+            ReposButton::PrevComment => "Previous comment",
         }
     }
 }
@@ -1238,13 +1266,18 @@ fn hint_width(hint: &Hint) -> i32 {
         + text_extent(&hint.label, SMALL_FONT_SIZE, SMALL_CHAR)
 }
 
-/// How wide a button on a diff row is: its label, then its key muted.
+/// `hint` as a button outside the footer draws it: its label alone. Only
+/// the footer shows keys; the others' are in their tips.
+fn without_key(hint: &Hint) -> Hint {
+    Hint {
+        key: String::new(),
+        ..hint.clone()
+    }
+}
+
+/// How wide a button on a diff row is: its label with room either side.
 fn row_chip_width(hint: &Hint) -> i32 {
-    let key = match hint.key.is_empty() {
-        true => 0,
-        false => ROW_CHIP_KEY_GAP + text_extent(&hint.key, KEY_FONT_SIZE, KEY_CHAR),
-    };
-    2 * ROW_CHIP_PAD + text_extent(&hint.label, SMALL_FONT_SIZE, SMALL_CHAR) + key
+    2 * ROW_CHIP_PAD + text_extent(&hint.label, SMALL_FONT_SIZE, SMALL_CHAR)
 }
 
 /// Where the buttons `widths` wide go on a diff row in `row`: in order,
@@ -2053,7 +2086,7 @@ fn parts(view: &ReposView, panel: Rect) -> Parts {
     let mut detail_title_buttons = Vec::new();
     let mut right = tabs_x - REPOS_TAB_GAP * 2;
     for hint in view.detail.title_buttons.iter().rev() {
-        let bw = hint_width(hint);
+        let bw = hint_width(&without_key(hint));
         right -= bw;
         if right < detail.loc.x + detail.size.w / 3 {
             break;
@@ -2108,7 +2141,7 @@ fn parts(view: &ReposView, panel: Rect) -> Parts {
         let mut right = inner_x + inner_w;
         let by = rect.loc.y + (REPOS_RESULT - ROW_BUTTON) / 2;
         for (i, hint) in bar.buttons.iter().enumerate().rev() {
-            let bw = hint_width(hint);
+            let bw = hint_width(&without_key(hint));
             right -= bw;
             if right < inner_x + inner_w / 2 {
                 break;
@@ -2648,6 +2681,23 @@ pub fn name_first(path: &str) -> (&str, String) {
         rest.push_str(from);
     }
     (&to[cut..], rest)
+}
+
+/// The colour of the words on a solid `tone` tag ("AI review").
+fn comment_tag_ink(tone: Tone, p: &Palette) -> Rgb {
+    match tone {
+        Tone::Normal | Tone::Muted => p.elevated,
+        _ => p.on_accent,
+    }
+}
+
+/// The colour of a finding's heading words on its band, dim as its card's
+/// once dismissed.
+fn comment_head_word(tone: Tone, p: &Palette) -> Rgb {
+    match tone {
+        Tone::Muted => p.muted,
+        _ => p.text,
+    }
 }
 
 /// The colour of `tone` in `p`.
@@ -3591,7 +3641,7 @@ impl Painter {
                 .find(|h| h.button == button)
             {
                 let hit = ReposHit::Button(button);
-                self.hint_button(c, view, hint, hit, rect, scale, p);
+                self.hint_button(c, view, &without_key(hint), hit, rect, scale, p);
             }
         }
         let border = px(1).max(1);
@@ -4196,6 +4246,17 @@ impl Painter {
                     p.placeholder,
                 );
             }
+            DetailRow::CommentHead { finding, place } => {
+                self.comment_head(
+                    c,
+                    (bx + inset, bend),
+                    row_band,
+                    (finding.as_ref(), place),
+                    lit.is_some(),
+                    scale,
+                    p,
+                );
+            }
             DetailRow::Comment {
                 text,
                 first,
@@ -4284,8 +4345,7 @@ impl Painter {
 
     /// The buttons of the detail's row `look`, each in its rect of
     /// `rects`: the first of them (keeping the comment written, writing
-    /// one) in the accent, the others plain; lighter under the pointer,
-    /// with their key muted after their label.
+    /// one) in the accent, the others plain; lighter under the pointer.
     fn row_chips(
         &self,
         c: &mut Canvas,
@@ -4300,17 +4360,17 @@ impl Painter {
             let r = (h / 2.0).min(BUTTON_RADIUS * s);
             let b = s.round().max(1.0);
             let hovered = look.hover == Some(ReposHit::Button(hint.button));
-            let (fill, label, key) = if k == 0 {
+            let (fill, label) = if k == 0 {
                 let fill = if hovered {
                     mix(p.accent, p.on_accent, 0.15)
                 } else {
                     p.accent
                 };
-                (fill, p.on_accent, mix(p.accent, p.on_accent, 0.7))
+                (fill, p.on_accent)
             } else {
                 let fill = if hovered { p.selected } else { p.element };
                 c.rounded(x, y, w, h, r, p.border);
-                (fill, p.text, p.muted)
+                (fill, p.text)
             };
             if k == 0 {
                 c.rounded(x, y, w, h, r, fill);
@@ -4319,7 +4379,7 @@ impl Painter {
             }
             let chip_band = band(rect, scale);
             let tx = x + (ROW_CHIP_PAD as f32 * s).round();
-            let end = self.mixed_text(
+            self.mixed_text(
                 c,
                 &hint.label,
                 SMALL_FONT_SIZE,
@@ -4329,19 +4389,6 @@ impl Painter {
                 scale,
                 label,
             );
-            if !hint.key.is_empty() {
-                let kx = end + (ROW_CHIP_KEY_GAP as f32 * s).round();
-                self.mixed_text(
-                    c,
-                    &hint.key,
-                    KEY_FONT_SIZE,
-                    kx,
-                    x + w,
-                    chip_band,
-                    scale,
-                    key,
-                );
-            }
         }
     }
 
@@ -4369,6 +4416,85 @@ impl Painter {
             c.rounded(x0, top, x1 - x0, bottom - top, r, fill);
         });
         x0 + (COMMENT_INDENT as f32 * s).round()
+    }
+
+    /// A review comment's heading, the first row of its card, says whose
+    /// it is at a glance: on a finding, a band in its severity's colour, a
+    /// solid "AI review" tag, the severity and where it stands; on the
+    /// user's own, the plain card and "Your comment". Then its `place`.
+    #[allow(clippy::too_many_arguments)]
+    fn comment_head(
+        &self,
+        c: &mut Canvas,
+        (x0, x1): (f32, f32),
+        row_band: (i32, i32),
+        (finding, place): (Option<&FindingHead>, &str),
+        lit: bool,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let s = scale as f32;
+        let (y, h) = row_band;
+        let accent = finding.map_or(p.accent, |f| tone_color(f.tone, p));
+        // Grey takes less of a band to show, and the words stay readable.
+        let band_tint = match finding.map(|f| f.tone) {
+            Some(Tone::Normal | Tone::Muted) => COMMENT_HEAD_TINT - 0.08,
+            Some(_) => COMMENT_HEAD_TINT,
+            None => 0.1,
+        };
+        let strength = band_tint + if lit { 0.08 } else { 0.0 };
+        let fill = mix(p.elevated, accent, strength);
+        let mut pen = self.comment_card(c, (x0, x1), row_band, (true, false), fill, scale);
+        c.fill(
+            x0 as i32,
+            y,
+            (2.0 * s).round().max(1.0) as i32,
+            h,
+            mix(p.elevated, accent, 0.7),
+        );
+        let Some(finding) = finding else {
+            let word = "Your comment";
+            self.bold_text(c, word, SMALL_FONT_SIZE, pen, x1, row_band, scale, p.text);
+            pen += self.bold_width(word, SMALL_FONT_SIZE, scale) + COMMENT_HEAD_GAP as f32 * s;
+            self.mixed_text(c, place, SMALL_FONT_SIZE, pen, x1, row_band, scale, p.muted);
+            return;
+        };
+        let word = "AI review";
+        let pad = (COMMENT_TAG_PAD as f32 * s).round();
+        let w = self.bold_width(word, SMALL_FONT_SIZE, scale) + 2.0 * pad;
+        let tag_h = (h as f32 - 2.0 * s.round()).max(1.0);
+        let tag_y = (y as f32 + (h as f32 - tag_h) / 2.0).round();
+        c.rounded(pen, tag_y, w, tag_h, CHIP_RADIUS * s, accent);
+        let ink = comment_tag_ink(finding.tone, p);
+        let tag_band = (tag_y as i32, tag_h as i32);
+        self.bold_text(
+            c,
+            word,
+            SMALL_FONT_SIZE,
+            pen + pad,
+            x1,
+            tag_band,
+            scale,
+            ink,
+        );
+        pen += w + COMMENT_HEAD_GAP as f32 * s;
+        let words = comment_head_word(finding.tone, p);
+        self.bold_text(
+            c,
+            &finding.severity,
+            SMALL_FONT_SIZE,
+            pen,
+            x1,
+            row_band,
+            scale,
+            words,
+        );
+        pen += self.bold_width(&finding.severity, SMALL_FONT_SIZE, scale);
+        let rest = match &finding.state {
+            Some(state) => format!(" \u{b7} {state} \u{b7} {place}"),
+            None => format!(" \u{b7} {place}"),
+        };
+        self.mixed_text(c, &rest, SMALL_FONT_SIZE, pen, x1, row_band, scale, words);
     }
 
     /// At the right of a header, ending at `right` (physical pixels):
@@ -4599,7 +4725,7 @@ impl Painter {
         for &(i, rect) in buttons {
             let hint = &bar.buttons[i];
             let hit = ReposHit::Button(hint.button);
-            self.hint_button(c, view, hint, hit, rect, scale, p);
+            self.hint_button(c, view, &without_key(hint), hit, rect, scale, p);
         }
     }
 
@@ -5602,9 +5728,13 @@ mod tests {
                         "    let changes = parse_changes(&out);",
                         &[],
                     ),
+                    DetailRow::CommentHead {
+                        finding: None,
+                        place: "comment 1 of 1".into(),
+                    },
                     DetailRow::Comment {
                         text: "Why -z here? Paths with newlines".into(),
-                        first: true,
+                        first: false,
                         last: false,
                         tone: None,
                     },
@@ -7142,6 +7272,67 @@ mod tests {
         ];
         view.hover = Some(ReposHit::DiffRestore(2));
         view
+    }
+
+    /// The full panel with a keyed button on the title row too.
+    fn with_keyed_buttons() -> ReposView {
+        let mut view = with_restore();
+        view.detail.title_buttons = vec![hint(ReposButton::Approve, "Ctrl+Enter", None)];
+        view
+    }
+
+    #[test]
+    fn only_the_footers_buttons_take_room_for_their_keys() {
+        use ReposButton::*;
+        let view = with_keyed_buttons();
+        let layout = repos_layout(&view, repos_panel_rect((1600, 900).into()));
+        let wide = |button| layout.buttons.iter().find(|(b, _)| *b == button).unwrap().1;
+        assert_eq!(
+            layout.detail_title_buttons[0].1.size.w,
+            hint_width(&hint(Approve, "", None))
+        );
+        assert_eq!(wide(Undo).size.w, hint_width(&hint(Undo, "", None)));
+        let commit = hint(Commit, "Ctrl+Enter", None);
+        assert_eq!(wide(Commit).size.w, hint_width(&commit));
+        assert!(hint_width(&commit) > hint_width(&hint(Commit, "", None)));
+        assert_eq!(
+            row_chip_width(&hint(Comment, "Ctrl+Shift+Del", None)),
+            row_chip_width(&hint(Comment, "", None))
+        );
+    }
+
+    #[test]
+    fn a_button_without_its_key_says_it_in_its_tip() {
+        use ReposButton::*;
+        let view = with_keyed_buttons();
+        let layout = repos_layout(&view, repos_panel_rect((1600, 900).into()));
+        let tip = |rect: Rect| {
+            let pos = (
+                rect.loc.x as f64 + rect.size.w as f64 / 2.0,
+                rect.loc.y as f64 + rect.size.h as f64 / 2.0,
+            );
+            crate::repo_batches::button_tip(&view, &layout, pos.into())
+                .map(|t| (t.text, t.key.unwrap_or_default()))
+        };
+        let said = |text: &str, key: &str| Some((text.to_owned(), key.to_owned()));
+        let on_row = |row: usize, button: ReposButton| {
+            let found = (layout.detail_row_buttons.iter())
+                .find(|(i, b, _)| *i == row && *b == button)
+                .unwrap();
+            found.2
+        };
+        let wide = |button| layout.buttons.iter().find(|(b, _)| *b == button).unwrap().1;
+
+        assert_eq!(
+            tip(layout.detail_title_buttons[0].1),
+            said("Approve", "Ctrl+Enter")
+        );
+        assert_eq!(tip(wide(Undo)), said("Undo", "Alt+Z"));
+        assert_eq!(tip(on_row(4, Comment)), said("Comment", "C"));
+        assert_eq!(tip(on_row(4, Restore)), said("Restore", "R"));
+        // No key, nothing to say; the footer's shows its own.
+        assert_eq!(tip(on_row(2, Restore)), None);
+        assert_eq!(tip(wide(Commit)), None);
     }
 
     /// With `GERDR_DUMP_DIR` set, write the panel there as images to look

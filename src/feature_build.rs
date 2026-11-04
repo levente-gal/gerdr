@@ -21,11 +21,15 @@
 //! back to Build (the patch watch), and the loop goes round. A project
 //! without checks keeps Verify a manual mark.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    time::{Duration, Instant},
+};
 
 use crate::{
     Gerdr,
     agents::AgentKey,
+    chrome::{CommandsTab, Dot},
     feature::{
         self, Feature, Stage, Status,
         patch::{self, Reading},
@@ -36,16 +40,33 @@ use crate::{
     feature_agents::{self, Stamp, Watch},
     features::{Busy, Done, Job},
     herdr::AgentStatus,
+    menu::MenuAction,
+    toast::Level,
 };
 
 /// A feature: its project and slug.
 type Key = (String, String);
+
+/// Why a line couldn't reach a stage's agent, its tab closed.
+pub(crate) const TAB_GONE: &str = "its tab is gone";
+/// Why a line couldn't reach a stage's agent, its CLI gone from its tab.
+pub(crate) const AGENT_QUIT: &str = "its agent has quit";
+/// Who gets fixes when the last Build agent can't: it only starts on them
+/// once the user sends its prompt.
+pub(crate) const FRESH_BUILD_AGENT: &str =
+    "a fresh Build agent, which waits for you to send its prompt";
+
+/// How long an agent just sent work counts as running before herdr sees it
+/// at work.
+const FIXING_STARTS: Duration = Duration::from_secs(30);
 
 /// What Build and Verify keep while gerdr runs; not saved.
 #[derive(Debug, Default)]
 pub(crate) struct BuildState {
     /// Features whose Build agent starts once their setup ends.
     pub(crate) pending: BTreeSet<Key>,
+    /// Features whose Verify checks run once their setup ends.
+    pending_verify: BTreeSet<Key>,
     /// Features being set up now.
     setting_up: BTreeSet<Key>,
     /// Features whose Verify checks run now.
@@ -61,6 +82,8 @@ struct Fixing {
     agent: AgentKey,
     /// It was seen working since it was sent the failures.
     worked: bool,
+    /// When it was sent them, or last still waited for its prompt.
+    since: Instant,
 }
 
 /// Whether the Build agent's start waits for the feature's setup.
@@ -196,6 +219,16 @@ fn fixing_next(worked: bool, status: Option<AgentStatus>, alive: bool) -> Fixing
     }
 }
 
+/// The toast's button that opens the checks of feature `slug`.
+fn set_checks(project: &str, slug: &str) -> (String, MenuAction) {
+    let action = MenuAction::EditCommands {
+        project: project.to_owned(),
+        slug: Some(slug.to_owned()),
+        tab: CommandsTab::Checks,
+    };
+    ("Set checks".to_owned(), action)
+}
+
 /// Whether Verify's checks can run on `feature` now (`running`: they run
 /// already, `checks`: how many are set); else why not.
 fn verify_refusal(feature: &Feature, running: bool, checks: usize) -> Result<(), String> {
@@ -216,7 +249,7 @@ fn verify_refusal(feature: &Feature, running: bool, checks: usize) -> Result<(),
     }
     if checks == 0 {
         return Err(format!(
-            "No checks set for \u{201c}{title}\u{201d}: add \"workflow\": {{\"verify\": \u{2026}}} to the project's file, or mark Verify done"
+            "No checks for the repositories of \u{201c}{title}\u{201d}: set some, or mark Verify done"
         ));
     }
     Ok(())
@@ -249,6 +282,16 @@ fn outdated(feature: &Feature, evidence: &Evidence) -> bool {
         && build.is_some_and(|b| b != evidence.patch)
 }
 
+/// What couldn't be copied, in words for a toast: "Setup of “T” couldn't
+/// copy api: .venv (exited with 1) (see setup.log)".
+fn setup_copies_text(title: &str, not_copied: &[String]) -> String {
+    format!(
+        "Setup of \u{201c}{title}\u{201d} couldn't copy {} (see {})",
+        not_copied.join("; "),
+        setup::LOG
+    )
+}
+
 /// The setup failure's words for a toast: "Setup of “T” failed: why (see
 /// setup.log)".
 fn setup_failed_text(title: &str, why: &str) -> String {
@@ -268,8 +311,7 @@ impl Gerdr {
         let Some(feature) = self.feature(project, slug) else {
             return false;
         };
-        let commands = self.projects.workflows(feature, |w| w.setup.clone());
-        let has = setup::has_commands(feature, &commands);
+        let has = setup::has_work(feature);
         let key = (project.to_owned(), slug.to_owned());
         let running = self.features.build.setting_up.contains(&key);
         let first = setup_first(has, feature.setup.as_ref(), running, fresh);
@@ -298,10 +340,28 @@ impl Gerdr {
         true
     }
 
-    /// Set up feature `slug`'s worktrees off the thread, if its project
-    /// gives setup commands and it isn't set up or being set up.
-    pub fn start_setup(&mut self, project: &str, slug: &str) {
-        self.start_setup_of(project, slug, None);
+    /// Set up feature `slug`'s worktrees off the thread, unless it is being
+    /// set up.
+    pub fn start_setup(&mut self, project: &str, slug: &str) -> bool {
+        self.start_setup_of(project, slug, None)
+    }
+
+    /// The user asks to set feature `slug` up again: it fills in what is
+    /// missing. It says so when it can't start.
+    pub(crate) fn set_up_again(&mut self, project: &str, slug: &str) {
+        if self.start_setup(project, slug) {
+            return;
+        }
+        let Some(feature) = self.feature(project, slug) else {
+            return;
+        };
+        let title = feature.title.clone();
+        let key = (project.to_owned(), slug.to_owned());
+        self.show_warning(if self.features.build.setting_up.contains(&key) {
+            format!("\u{201c}{title}\u{201d} is being set up")
+        } else {
+            format!("\u{201c}{title}\u{201d} has no worktree to set up")
+        });
     }
 
     /// `start_setup` of its repositories `only` (`Repo::key`), one that
@@ -316,10 +376,11 @@ impl Gerdr {
         if let Some(only) = only {
             feature.repos.retain(|r| only.contains(&r.key()));
         }
-        let commands = self.projects.workflows(&feature, |w| w.setup.clone());
-        if !setup::has_commands(&feature, &commands) {
+        if !setup::has_work(&feature) {
             return false;
         }
+        let commands = self.projects.workflows(&feature, |w| w.setup.clone());
+        let extras = self.projects.workflows(&feature, |w| w.copy.clone());
         let key = (project.to_owned(), slug.to_owned());
         if !self.features.build.setting_up.insert(key) {
             return false;
@@ -328,8 +389,14 @@ impl Gerdr {
         if let Some(f) = self.feature_mut(project, slug) {
             // A failure an earlier setup put in the problems list goes: this
             // run fixes it or reports its own.
-            if let Some(old) = f.setup.as_ref().and_then(|s| s.failed.as_deref()) {
-                crate::problems::forget("features", &setup_failed_text(&f.title, old));
+            if let Some(old) = f.setup.as_ref() {
+                if let Some(why) = old.failed.as_deref() {
+                    crate::problems::forget("features", &setup_failed_text(&f.title, why));
+                }
+                if !old.not_copied.is_empty() {
+                    let text = setup_copies_text(&f.title, &old.not_copied);
+                    crate::problems::forget("features", &text);
+                }
             }
             f.setup = Some(SetupRun {
                 started: now,
@@ -359,11 +426,11 @@ impl Gerdr {
                     what: format!("Setting up \u{201c}{title}\u{201d}: {what}"),
                 });
             };
-            let result = setup::run(&feature, &commands, &log, &mut progress);
+            let report = setup::run(&feature, &commands, &extras, &log, &mut progress);
             Done::SetUp {
                 project,
                 slug,
-                result,
+                report,
             }
         });
         true
@@ -371,10 +438,11 @@ impl Gerdr {
 
     /// The setup of feature `slug` ended: kept, and a Build agent waiting
     /// on it starts.
-    pub(crate) fn setup_done(&mut self, project: &str, slug: &str, result: Result<(), String>) {
+    pub(crate) fn setup_done(&mut self, project: &str, slug: &str, report: setup::Report) {
         let key = (project.to_owned(), slug.to_owned());
         self.features.build.setting_up.remove(&key);
         let pending = self.features.build.pending.remove(&key);
+        let checks = self.features.build.pending_verify.remove(&key);
         let now = feature::now();
         let Some(feature) = self.feature_mut(project, slug) else {
             return;
@@ -385,15 +453,30 @@ impl Gerdr {
             ..SetupRun::default()
         });
         run.finished = Some(now);
-        run.failed = result.as_ref().err().cloned();
-        match &result {
-            Ok(()) => feature.log(now, "Set up"),
-            Err(why) => feature.log(now, format!("Setup failed: {why}")),
+        run.failed = report.failed.clone();
+        run.copied = report.copied.clone();
+        run.not_copied = report.not_copied.clone();
+        match &report.failed {
+            None => feature.log(now, "Set up"),
+            Some(why) => feature.log(now, format!("Setup failed: {why}")),
         }
         self.save_feature(project, slug);
-        match &result {
-            Ok(()) => self.show_success(format!("\u{201c}{title}\u{201d} is set up")),
-            Err(why) => {
+        if !report.not_copied.is_empty() {
+            let text = setup_copies_text(&title, &report.not_copied);
+            crate::problems::report("features", text.clone());
+            self.show_warning(text);
+        }
+        match &report.failed {
+            None if report.not_copied.is_empty() && report.copied.is_empty() => {
+                self.show_success(format!(
+                    "\u{201c}{title}\u{201d} is set up: nothing was missing"
+                ));
+            }
+            None if report.not_copied.is_empty() => {
+                self.show_success(format!("\u{201c}{title}\u{201d} is set up"));
+            }
+            None => {}
+            Some(why) => {
                 let mut text = setup_failed_text(&title, why);
                 crate::problems::report("features", text.clone());
                 if pending {
@@ -401,6 +484,9 @@ impl Gerdr {
                 }
                 self.show_warning(text);
             }
+        }
+        if checks {
+            self.run_verify(project, slug);
         }
         if !pending {
             return;
@@ -507,6 +593,9 @@ impl Gerdr {
     /// Send `line` to the Build agent's tab of `feature`, if it is there.
     pub(crate) fn tell_build_agent(&mut self, feature: &Feature, line: &str) -> Result<(), String> {
         let run = feature.runs.get(&Stage::Build);
+        if run.is_some_and(|r| r.held) {
+            return Err("its prompt wasn't sent yet".into());
+        }
         if let Some(run) = run.filter(|r| r.t3.is_some()) {
             let id = run
                 .t3_thread()
@@ -519,7 +608,7 @@ impl Gerdr {
         let pane = run
             .and_then(|r| r.pane.clone())
             .filter(|p| self.herdr_pane_place(p).is_some())
-            .ok_or_else(|| String::from("its tab is gone"))?;
+            .ok_or_else(|| String::from(TAB_GONE))?;
         self.tell_agent_pane(&pane, line)
     }
 
@@ -531,7 +620,7 @@ impl Gerdr {
             return Err("herdr isn't connected".into());
         };
         if crate::prepare::step(&herdr.process_info(pane)) != crate::prepare::Step::Busy {
-            return Err("its agent has quit".into());
+            return Err(AGENT_QUIT.into());
         }
         herdr.send_line(pane, line)
     }
@@ -562,9 +651,13 @@ impl Gerdr {
         self.save_feature(project, slug);
         self.feature_cursor_to_current_of(project, slug);
         if checks == 0 {
-            return self.show_warning(format!(
-                "Build of \u{201c}{title}\u{201d} is done; no checks are set: add \"workflow\": {{\"verify\": \u{2026}}} to the project's file, or mark Verify done"
-            ));
+            return self.toast_with(
+                format!(
+                    "Build of \u{201c}{title}\u{201d} is done; no checks for its repositories: set some, or mark Verify done"
+                ),
+                Level::Warning,
+                Some(set_checks(project, slug)),
+            );
         }
         self.show_success(format!(
             "Build of \u{201c}{title}\u{201d} is done; verifying"
@@ -593,7 +686,7 @@ impl Gerdr {
             ));
         };
         let alive = run.agent_key().is_some() && self.stage_run_state(&run).1;
-        let mut sent = Err(String::from("its tab is gone"));
+        let mut sent = Err(String::from(TAB_GONE));
         if alive {
             let data = store::dir(None, project, slug);
             let names = self.projects.names(&feature);
@@ -660,7 +753,27 @@ impl Gerdr {
         let key = (project.to_owned(), slug.to_owned());
         let running = self.features.build.verifying.contains(&key);
         if let Err(why) = verify_refusal(&feature, running, checks.len()) {
-            return self.show_warning(why);
+            // Fine with a check to run: setting some is the way on.
+            let fix = verify_refusal(&feature, running, 1).is_ok();
+            let action = fix.then(|| set_checks(project, slug));
+            return self.toast_with(why, Level::Warning, action);
+        }
+        // The checks need what the setup copies. A feature made before it
+        // copied anything hasn't had one.
+        let setting_up = self.features.build.setting_up.contains(&key);
+        let has = setup::has_work(&feature);
+        let first = setup_first(has, feature.setup.as_ref(), setting_up, false);
+        let waits = match first {
+            SetupFirst::No => false,
+            SetupFirst::Wait => true,
+            SetupFirst::Run => self.start_setup(project, slug),
+        };
+        if waits {
+            self.features.build.pending_verify.insert(key);
+            let title = &feature.title;
+            return self.show_warning(format!(
+                "Setting up \u{201c}{title}\u{201d}; its checks run once it is done"
+            ));
         }
         let timeout = timeout.map_or(verify::TIMEOUT, std::time::Duration::from_secs);
         let now = feature::now();
@@ -800,7 +913,7 @@ impl Gerdr {
         let data = store::dir(None, project, slug);
         let names = self.projects.names(feature);
         let joined = failures.join("\n");
-        let mut sent = Err(String::from("its tab is gone"));
+        let mut sent = Err(String::from(TAB_GONE));
         if into_pane {
             let mut values = feature_agents::vars(feature, &names, &data, Stage::Build);
             values.insert("evidence".into(), joined.clone());
@@ -850,7 +963,7 @@ impl Gerdr {
         }
         let first = failures.first().map_or("see evidence.md", String::as_str);
         let to = if fresh {
-            "a fresh Build agent"
+            FRESH_BUILD_AGENT
         } else {
             "the Build agent"
         };
@@ -878,7 +991,7 @@ impl Gerdr {
             .and_then(|f| f.runs.get(&Stage::AiReview))
             .map_or_else(|| "an agent".to_owned(), |r| r.agent.clone());
         self.show_success(format!(
-            "\u{201c}{title}\u{201d} passed Verify; {agent} reviews it"
+            "\u{201c}{title}\u{201d} passed Verify; {agent} waits for its prompt"
         ));
     }
 
@@ -891,8 +1004,37 @@ impl Gerdr {
             Fixing {
                 agent,
                 worked: false,
+                since: Instant::now(),
             },
         );
+    }
+
+    /// The dot of `feature`'s Build agent while it runs again with Build
+    /// done: just sent work, or seen at work (what was sent isn't known
+    /// after a restart). A line it never acted on stops counting.
+    pub(crate) fn build_agent_fixing(&self, feature: &Feature) -> Option<Dot> {
+        let run = feature.runs.get(&Stage::Build).filter(|r| !r.held)?;
+        if !feature.is_done(Stage::Build) || !run.live() {
+            return None;
+        }
+        let key = (feature.project.clone(), feature.slug.clone());
+        let sent = (self.features.build.fixing.get(&key))
+            .is_some_and(|f| f.worked || f.since.elapsed() < FIXING_STARTS);
+        match self.stage_run_state(run).0 {
+            Some(status @ (AgentStatus::Working | AgentStatus::Blocked)) => {
+                Some(Dot::of_status(status))
+            }
+            _ => sent.then_some(Dot::Working),
+        }
+    }
+
+    /// The Build agent watched as fixing feature `slug`, if any, is now
+    /// `agent`.
+    pub(crate) fn fixing_moved(&mut self, project: &str, slug: &str, agent: AgentKey) {
+        let key = (project.to_owned(), slug.to_owned());
+        if let Some(fixing) = self.features.build.fixing.get_mut(&key) {
+            fixing.agent = agent;
+        }
     }
 
     /// Look at the Build agents of `project` fixing what Verify or a review
@@ -920,6 +1062,18 @@ impl Gerdr {
             let (status, alive) = self.agent_key_state(&fixing.agent);
             if !verifying {
                 self.features.build.fixing.remove(&key);
+                continue;
+            }
+            // Not fixing yet: picking its model isn't work, nor its tab
+            // closing, as Start agent opens one again.
+            let held = (self.feature(project, slug))
+                .and_then(|f| f.runs.get(&Stage::Build))
+                .is_some_and(|r| r.held);
+            if held {
+                // Its work starts once its prompt goes.
+                if let Some(f) = self.features.build.fixing.get_mut(&key) {
+                    f.since = Instant::now();
+                }
                 continue;
             }
             match fixing_next(fixing.worked, status, alive) {
@@ -1068,12 +1222,12 @@ mod tests {
 
     #[test]
     fn verify_runs_only_when_current_with_checks() {
-        let building = feature("a", vec![repo("api", true)], 2);
+        let building = feature("a", vec![repo("api", true)], 3);
         assert_eq!(
             verify_refusal(&building, false, 2),
             Err("Mark Build done first".into())
         );
-        let f = feature("a", vec![repo("api", true)], 3);
+        let f = feature("a", vec![repo("api", true)], 4);
         assert_eq!(verify_refusal(&f, false, 2), Ok(()));
         assert_eq!(
             verify_refusal(&f, true, 2),
@@ -1082,9 +1236,9 @@ mod tests {
         assert!(
             verify_refusal(&f, false, 0)
                 .unwrap_err()
-                .starts_with("No checks set for \u{201c}Feature a\u{201d}")
+                .starts_with("No checks for the repositories of \u{201c}Feature a\u{201d}")
         );
-        let verified = feature("a", vec![repo("api", true)], 4);
+        let verified = feature("a", vec![repo("api", true)], 5);
         assert_eq!(
             verify_refusal(&verified, false, 2),
             Err("Verify of \u{201c}Feature a\u{201d} is done".into())
@@ -1093,7 +1247,7 @@ mod tests {
 
     #[test]
     fn a_pass_holds_on_the_code_build_was_done_on() {
-        let mut f = feature("a", vec![repo("api", true)], 3);
+        let mut f = feature("a", vec![repo("api", true)], 4);
         f.marks.insert(Stage::Build, mark("p1"));
         let pass = Evidence {
             patch: "p1".into(),

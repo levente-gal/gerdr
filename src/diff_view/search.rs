@@ -380,7 +380,10 @@ impl DiffView {
             let DiffRow::Comment { at, c, i } = *row else {
                 if !matches!(
                     row,
-                    DiffRow::Editor { .. } | DiffRow::EditorHint { .. } | DiffRow::Wrap(..)
+                    DiffRow::CommentHead { .. }
+                        | DiffRow::Editor { .. }
+                        | DiffRow::EditorHint { .. }
+                        | DiffRow::Wrap(..)
                 ) {
                     parent = Some(r);
                 }

@@ -642,6 +642,7 @@ pub fn label_tooltip(label: &str, rect: Rect, restart: Option<bool>) -> Tooltip 
 /// What a bar button says when the pointer rests on it at `rect`.
 pub fn button_tooltip(button: BarButton, rect: Rect, help: &Help) -> Tooltip {
     let (text, what) = match button {
+        BarButton::SendPrompt => ("Send the prompt", Some(Action::SendPrompt)),
         BarButton::Scrollback => ("Select and copy", Some(Action::Scrollback)),
         BarButton::Restart => ("Restart", Some(Action::RestartPane)),
         BarButton::Stop => ("Stop", Some(Action::StopPane)),
@@ -734,26 +735,38 @@ pub fn bar_menu(at: Point<f64, Logical>, id: u32, content: &BarContent, help: &H
             ),
             MenuItem::new("Copy URL", MenuAction::CopyPaneUrl(id)),
         ]),
-        _ => items.extend([
-            item(
-                "Select and copy",
-                MenuAction::Scrollback(id),
-                Action::Scrollback,
-                true,
-            ),
-            item(
-                "Restart",
-                MenuAction::RestartPane(id),
-                Action::RestartPane,
-                content.can_restart,
-            ),
-            item(
-                "Stop",
-                MenuAction::StopPane(id),
-                Action::StopPane,
-                content.can_stop,
-            ),
-        ]),
+        buttons => items.extend(
+            (buttons == BarButtons::Waiting)
+                .then(|| {
+                    item(
+                        "Send prompt",
+                        MenuAction::SendPrompt(id),
+                        Action::SendPrompt,
+                        true,
+                    )
+                })
+                .into_iter()
+                .chain([
+                    item(
+                        "Select and copy",
+                        MenuAction::Scrollback(id),
+                        Action::Scrollback,
+                        true,
+                    ),
+                    item(
+                        "Restart",
+                        MenuAction::RestartPane(id),
+                        Action::RestartPane,
+                        content.can_restart,
+                    ),
+                    item(
+                        "Stop",
+                        MenuAction::StopPane(id),
+                        Action::StopPane,
+                        content.can_stop,
+                    ),
+                ]),
+        ),
     }
     items.push(item(
         "Close pane",
@@ -897,7 +910,12 @@ impl Gerdr {
     /// follows (one it doesn't can only have its address copied).
     fn pane_bar_of(&self, pane: &Pane) -> BarContent {
         if let Some(herdr) = &pane.herdr {
-            return self.pane_bar_content(&herdr.pane_id);
+            let mut content = self.pane_bar_content(&herdr.pane_id);
+            if self.waiting_stage(&herdr.pane_id).is_some() {
+                content.buttons = BarButtons::Waiting;
+                content.note = Some("waiting for its prompt");
+            }
+            return content;
         }
         let content = app_bar_content(pane);
         let Some(url) = web_page(pane) else {
@@ -1132,6 +1150,7 @@ impl Gerdr {
             return;
         };
         let step = match button {
+            BarButton::SendPrompt => return self.send_focused_prompt(),
             BarButton::Back => WebStep::Back,
             BarButton::Forward => WebStep::Forward,
             BarButton::Reload => WebStep::Reload,
@@ -1175,6 +1194,17 @@ impl Gerdr {
     fn focused_terminal(&self) -> Option<String> {
         let tab = self.tab()?;
         tab.herdr_pane(tab.focused_id()?).map(|p| p.pane_id.clone())
+    }
+
+    /// Send the prompt of the stage agent waiting in the focused terminal.
+    pub fn send_focused_prompt(&mut self) {
+        let waiting = self.focused_terminal().and_then(|p| self.waiting_stage(&p));
+        match (waiting, self.project.clone()) {
+            (Some((slug, stage)), Some(project)) => {
+                self.send_stage_prompt(&project, &slug, stage);
+            }
+            _ => self.show_notice("No agent in this pane waits for a prompt".into()),
+        }
     }
 
     /// Run the focused terminal's command again, or load the focused web

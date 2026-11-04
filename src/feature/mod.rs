@@ -1,4 +1,4 @@
-//! Features: a unit of work gerdr takes through eight stages, from a chat
+//! Features: a unit of work gerdr takes through nine stages, from a chat
 //! about what to build to shipping it, each in its own git worktrees.
 //!
 //! A feature lives in two places:
@@ -35,10 +35,12 @@ pub mod layout;
 pub mod manual;
 pub mod page;
 pub mod patch;
+pub mod plan_review;
 pub mod review_import;
 pub mod setup;
 pub mod ship;
 pub mod store;
+pub mod suggest;
 pub mod verify;
 pub mod viewed;
 
@@ -50,14 +52,16 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 /// The record's format; bumped when a field changes meaning.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
-/// The stages, in order. Every one is mandatory.
+/// The stages, in order. Every one has to be done; only Plan review can be
+/// done by skipping it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Stage {
     Discover,
     Plan,
+    PlanReview,
     Build,
     Verify,
     AiReview,
@@ -67,9 +71,10 @@ pub enum Stage {
 }
 
 impl Stage {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Discover,
         Self::Plan,
+        Self::PlanReview,
         Self::Build,
         Self::Verify,
         Self::AiReview,
@@ -88,6 +93,7 @@ impl Stage {
         match self {
             Self::Discover => "Discover",
             Self::Plan => "Plan",
+            Self::PlanReview => "Plan review",
             Self::Build => "Build",
             Self::Verify => "Verify",
             Self::AiReview => "AI review",
@@ -102,6 +108,7 @@ impl Stage {
         match self {
             Self::Discover => "Talk it through with an agent; agree on a brief",
             Self::Plan => "An agent plans the change; you approve the plan",
+            Self::PlanReview => "Another agent checks the plan; you pick what goes in",
             Self::Build => "An agent builds it in the feature's worktrees",
             Self::Verify => "Tests and checks pass on the current code",
             Self::AiReview => "Another model reviews the diff",
@@ -354,6 +361,10 @@ pub struct Feature {
     /// `review_import`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review: Option<review_import::AiReview>,
+    /// Plan review's suggestions and what was decided of them (see
+    /// `plan_review`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_review: Option<plan_review::PlanReview>,
     /// Code review's viewed ticks (see `viewed`).
     #[serde(default, skip_serializing_if = "viewed::Viewed::is_empty")]
     pub viewed: viewed::Viewed,
@@ -380,6 +391,33 @@ pub enum Standing {
 }
 
 impl Feature {
+    /// Bring a record of an older format up to this one; whether it was
+    /// older. A feature that went past Plan before Plan review existed has
+    /// that stage marked done, at Plan's time, so it stays where it was.
+    pub fn migrate(&mut self, now: u64) -> bool {
+        if self.version >= VERSION {
+            return false;
+        }
+        let built = self.marks.contains_key(&Stage::Build) || self.runs.contains_key(&Stage::Build);
+        if self.version < 2
+            && built
+            && let Some(at) = self.marks.get(&Stage::Plan).map(|m| m.at)
+        {
+            self.marks.insert(
+                Stage::PlanReview,
+                Mark {
+                    at,
+                    by: "gerdr".to_owned(),
+                    note: "before this stage existed".to_owned(),
+                    patch: None,
+                },
+            );
+            self.log(now, "Plan review marked done: the feature was past it");
+        }
+        self.version = VERSION;
+        true
+    }
+
     /// The first stage not done yet: the one being worked on. `None` once
     /// every stage is done.
     pub fn current(&self) -> Option<Stage> {
@@ -461,6 +499,7 @@ impl Feature {
         wrote(stage)
             || match stage {
                 Stage::Discover | Stage::Plan | Stage::Build => false,
+                Stage::PlanReview => self.plan_review.as_ref().is_some_and(|r| r.stamp.is_some()),
                 Stage::Verify => self.verify.is_some(),
                 Stage::AiReview => self.review.is_some(),
                 Stage::CodeReview => !self.viewed.is_empty(),
@@ -505,7 +544,10 @@ impl Feature {
     /// Forget `stage`'s run, its number kept for the next one.
     pub fn forget_run(&mut self, stage: Stage) {
         if let Some(run) = self.runs.remove(&stage) {
-            self.run_counts.insert(stage, run.n);
+            // Never back: a parked run with a lower number can be forgotten
+            // after a later one (see `feature_plan_review`).
+            let counted = self.run_counts.entry(stage).or_default();
+            *counted = run.n.max(*counted);
         }
     }
 
@@ -519,6 +561,7 @@ impl Feature {
         self.forget_run(stage);
         match stage {
             Stage::Discover | Stage::Plan | Stage::Build => {}
+            Stage::PlanReview => self.plan_review = None,
             Stage::Verify => self.verify = None,
             Stage::AiReview => self.review = None,
             Stage::CodeReview => self.viewed = viewed::Viewed::default(),
@@ -761,8 +804,23 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn starting_over_forgets_only_the_current_stage_and_keeps_counting() {
+    fn a_run_number_is_never_used_twice() {
+        let run = |n| agents::StageRun {
+            n,
+            ..agents::StageRun::default()
+        };
         let mut f = done_up_to(Stage::Plan);
+        // The reviewer, the writer, then the reviewer back and forgotten.
+        f.runs.insert(Stage::PlanReview, run(2));
+        f.forget_run(Stage::PlanReview);
+        f.runs.insert(Stage::PlanReview, run(1));
+        f.forget_run(Stage::PlanReview);
+        assert_eq!(f.next_run(Stage::PlanReview), 3);
+    }
+
+    #[test]
+    fn starting_over_forgets_only_the_current_stage_and_keeps_counting() {
+        let mut f = done_up_to(Stage::PlanReview);
         f.runs.insert(
             Stage::Build,
             agents::StageRun {
@@ -890,6 +948,7 @@ pub(crate) mod tests {
             setup: None,
             verify: None,
             review: None,
+            plan_review: None,
             viewed: Default::default(),
             manual: None,
         }
@@ -964,6 +1023,7 @@ pub(crate) mod tests {
             setup: None,
             verify: None,
             review: None,
+            plan_review: None,
             viewed: Default::default(),
             manual: None,
         }
@@ -976,24 +1036,24 @@ pub(crate) mod tests {
         assert_eq!(f.tick(10, "you", None), Some(Stage::Discover));
         assert_eq!(f.tick(11, "you", None), Some(Stage::Plan));
         assert!(f.is_done(Stage::Plan));
-        assert_eq!(f.current(), Some(Stage::Build));
+        assert_eq!(f.current(), Some(Stage::PlanReview));
         assert_eq!(f.marks[&Stage::Plan].at, 11);
         assert_eq!(f.marks[&Stage::Plan].by, "you");
         assert_eq!(f.history.last().unwrap().what, "Plan ticked");
-        for _ in 2..7 {
+        for _ in 2..8 {
             f.tick(12, "you", None).unwrap();
             assert_eq!(f.status, Status::Open);
         }
         assert_eq!(f.tick(13, "you", None), Some(Stage::Ship));
         assert_eq!(f.status, Status::Done);
         assert_eq!(f.tick(14, "you", None), None);
-        assert_eq!(f.history.len(), 8);
+        assert_eq!(f.history.len(), 9);
     }
 
     #[test]
     fn untick_clears_later_stages_and_reopens() {
         let mut f = feature("a", 1);
-        for _ in 0..8 {
+        for _ in 0..9 {
             f.tick(1, "you", None);
         }
         assert_eq!(f.status, Status::Done);
@@ -1013,7 +1073,8 @@ pub(crate) mod tests {
         let mut f = feature("a", 1);
         f.tick(1, "you", Some("p1"));
         f.tick(1, "you", Some("p1"));
-        // Discover and Plan keep no patch: they hold whatever the code.
+        f.tick(1, "you", Some("p1"));
+        // The stages before Build keep no patch: they hold whatever the code.
         assert!(f.marks[&Stage::Plan].patch.is_none());
         assert_eq!(f.stale("p2"), None);
         f.tick(2, "you", Some("p1"));
@@ -1036,7 +1097,7 @@ pub(crate) mod tests {
     #[test]
     fn a_done_feature_is_not_invalidated() {
         let mut f = feature("a", 1);
-        for _ in 0..8 {
+        for _ in 0..9 {
             f.tick(1, "you", Some("p1"));
         }
         assert_eq!(f.status, Status::Done);

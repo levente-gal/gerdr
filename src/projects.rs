@@ -329,6 +329,10 @@ pub struct Workflow {
     /// folder name (see `feature::setup`).
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub setup: std::collections::BTreeMap<String, Vec<String>>,
+    /// Ignored paths copied into a new feature's worktree besides the ones
+    /// gerdr picks itself, by repository folder name (see `feature::setup`).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub copy: std::collections::BTreeMap<String, Vec<String>>,
     /// The checks Verify runs, by repository folder name or `_feature`
     /// (see `feature::verify`).
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -350,6 +354,7 @@ impl Workflow {
             && self.ship.is_none()
             && self.agents.is_empty()
             && self.setup.is_empty()
+            && self.copy.is_empty()
             && self.verify.is_empty()
             && self.verify_timeout.is_none()
             && !self.allow_same_reviewer
@@ -751,6 +756,40 @@ impl Store {
     /// gone; the other projects save on.
     pub fn save(&mut self) {
         self.write();
+    }
+
+    /// `save`; whether the files of projects `ids` now hold what they do
+    /// here. Trouble with any other file doesn't count: it has its own
+    /// toast.
+    pub fn save_projects(&mut self, ids: &[String]) -> bool {
+        self.write();
+        ids.iter().all(|id| self.on_file(id))
+    }
+
+    /// Whether project `id`'s file holds what it does here.
+    fn on_file(&self, id: &str) -> bool {
+        let Some(project) = self.project(id) else {
+            return false;
+        };
+        let (books, Ok(json)) = (&self.books, serde_json::to_vec_pretty(project)) else {
+            return false;
+        };
+        !books.legacy_frozen
+            && !books.frozen.contains(id)
+            && (books.files.get(id))
+                .is_some_and(|disk| !disk.conflict && disk.written == Some(digest(&json)))
+    }
+
+    /// Whether project `id`'s file can't take a save now: it changed since
+    /// gerdr last read or wrote it, or can't be read. A reload ends that.
+    pub fn file_changed(&self, id: &str) -> bool {
+        let books = &self.books;
+        if books.legacy_frozen || books.frozen.contains(id) {
+            return true;
+        }
+        let path = projects_in(&books.root()).join(format!("{id}.json"));
+        (books.files.get(id))
+            .is_some_and(|disk| disk.conflict || on_disk(&path, disk.written) != disk.written)
     }
 
     /// `save`; whether all of it is on disk.
@@ -2638,6 +2677,39 @@ mod tests {
         store.save();
         assert_eq!(root.join("projects").exists(), root_user);
         assert!(!set_aside(&root.join("nowhere/api.json")));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_save_says_whether_those_projects_files_took_it() {
+        let root = scratch("saved-projects");
+        let api = root.join("projects/api.json");
+        let web = root.join("projects/web.json");
+        let mut store = at(&root, two());
+        store.save();
+        let ids = |id: &str| vec![id.to_owned()];
+        assert!(!store.file_changed("api"));
+
+        store.project_mut("api").unwrap().last_used = 300;
+        assert!(store.save_projects(&ids("api")));
+        assert!(std::fs::read_to_string(&api).unwrap().contains("300"));
+
+        // Edited outside gerdr: that file says so before any save, and
+        // stays as it was through one.
+        let edited = std::fs::read_to_string(&web)
+            .unwrap()
+            .replace("\"last_used\"", "\"last_used\" ");
+        std::fs::write(&web, &edited).unwrap();
+        assert!(store.file_changed("web"));
+        assert!(!store.file_changed("api"));
+        store.project_mut("web").unwrap().last_used = 400;
+        assert!(!store.save_projects(&ids("web")));
+        assert_eq!(std::fs::read_to_string(&web).unwrap(), edited);
+
+        // The other project's save is no worse for it.
+        store.project_mut("api").unwrap().last_used = 500;
+        assert!(store.save_projects(&ids("api")));
+        assert!(!store.save_projects(&ids("nowhere")));
         let _ = std::fs::remove_dir_all(&root);
     }
 

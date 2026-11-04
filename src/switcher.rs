@@ -84,6 +84,8 @@ pub enum Target {
     ProjectFile(String),
     /// The projects file, read again after an edit.
     ReloadProjects,
+    /// The shown project's checks and setup commands, in their dialog.
+    ProjectCommands(String),
     /// A folder, opened as a project unless a workspace has it already.
     Folder(PathBuf),
     /// The command of an app named in the config file or installed, to
@@ -135,6 +137,7 @@ impl Target {
             | Target::Settings
             | Target::ProjectFile(_)
             | Target::ReloadProjects
+            | Target::ProjectCommands(_)
             | Target::Command(_)
             | Target::RepoPage(_)
             | Target::ImportProfile(_) => Section::Commands,
@@ -163,6 +166,7 @@ impl Target {
             | Target::Settings
             | Target::ProjectFile(_)
             | Target::ReloadProjects
+            | Target::ProjectCommands(_)
             | Target::Command(_)
             | Target::RepoPage(_)
             | Target::ImportProfile(_) => "command",
@@ -405,7 +409,10 @@ impl Switcher {
             let item = &self.items[item];
             matches!(
                 item.target,
-                Target::App(_) | Target::ProjectFile(_) | Target::ReloadProjects
+                Target::App(_)
+                    | Target::ProjectFile(_)
+                    | Target::ReloadProjects
+                    | Target::ProjectCommands(_)
             ) && item
                 .label
                 .to_lowercase()
@@ -768,6 +775,7 @@ fn frecency_key(
         | Target::Settings
         | Target::ProjectFile(_)
         | Target::ReloadProjects
+        | Target::ProjectCommands(_)
         | Target::UpdateT3
         | Target::T3Updates
         | Target::Tasks
@@ -840,6 +848,14 @@ fn project_file_items(current: Option<&str>, home: Option<&Path>) -> Vec<Item> {
         "apply what was edited in it",
         Target::ReloadProjects,
     ));
+    items.extend(current.map(|id| {
+        Item::new(
+            ItemIcon::Command,
+            "Project commands\u{2026}",
+            "what Verify checks, what sets up a worktree",
+            Target::ProjectCommands(id.to_owned()),
+        )
+    }));
     items
 }
 
@@ -1317,6 +1333,9 @@ impl Gerdr {
             Target::Settings => self.open_settings(place),
             Target::ProjectFile(id) => self.open_project_file(&id),
             Target::ReloadProjects => self.reload_projects(),
+            Target::ProjectCommands(id) => {
+                self.open_project_commands(&id, None, crate::chrome::CommandsTab::Checks);
+            }
             Target::Folder(dir) => match self.workspaces.iter().position(|ws| ws.dir == dir) {
                 Some(w) => self.switch_workspace(w),
                 None => self.open_project(dir),
@@ -2267,7 +2286,12 @@ mod tests {
         );
         assert_eq!(
             labels(&switcher),
-            ["imv", "Project file", "Reload project file"]
+            [
+                "imv",
+                "Project file",
+                "Reload project file",
+                "Project commands\u{2026}"
+            ]
         );
         // Named, it is what Enter picks, past the typed command.
         type_in(&mut switcher, "proj");

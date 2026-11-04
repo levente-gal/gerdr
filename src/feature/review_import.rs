@@ -23,7 +23,9 @@
 //! out, and a finding on a file or line not in the diff is kept but not
 //! `placed`.
 //!
-//! What the user decides (`Decision`): Fix, or Dismiss with a reason. Once
+//! What the user decides (`Decision`): Fix, or Dismiss with a reason. They
+//! may also reword a finding's fix and comment on it (`edit`), and add an
+//! item of their own (`add`). Once
 //! none is `Open`, the ones to fix go to the Build agent together (state
 //! `Sent`); its fix changes the code, the feature goes back to Build, and
 //! after Verify the reviewer runs again on what changed since it last
@@ -122,11 +124,28 @@ pub struct Finding {
     /// Why it was dismissed.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub reason: String,
+    /// The user's wording of the fix, in place of `fix`, which stays the
+    /// reviewer's: a run raising the finding again rewrites that one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub my_fix: Option<String>,
+    /// The user's comment on it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub note: String,
+    /// The user added it: no reviewer raised it, and it may have no file.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub yours: bool,
     /// The review run that raised it last.
     pub run: u32,
     /// Its file (and line) is in the diff it was read against.
     #[serde(default)]
     pub placed: bool,
+}
+
+impl Finding {
+    /// The fix to make: the user's wording, else the reviewer's.
+    pub fn fix_text(&self) -> &str {
+        self.my_fix.as_deref().unwrap_or(&self.fix)
+    }
 }
 
 /// What the user decides of a finding.
@@ -137,6 +156,38 @@ pub enum Decision {
     Dismiss(String),
     /// Back to undecided (from Fix or Dismissed).
     Reopen,
+}
+
+/// Why a finding sent to be fixed isn't decided again.
+pub const SENT: &str = "That finding went to the Build agent to fix";
+/// Why a fixed finding isn't decided again.
+pub const FIXED: &str = "That finding is fixed";
+/// The reason an item of the user's own is dismissed for: they needn't
+/// tell themselves why.
+pub const DROPPED: &str = "dropped by you";
+
+/// What `f` does to a finding in `state`: to fix (from undecided or
+/// dismissed), or back to undecided (from to fix); else why it does
+/// nothing.
+pub fn fix_key(state: FindingState) -> Result<Decision, &'static str> {
+    match state {
+        FindingState::Open | FindingState::Dismissed => Ok(Decision::Fix),
+        FindingState::Fix => Ok(Decision::Reopen),
+        FindingState::Sent => Err(SENT),
+        FindingState::Fixed => Err(FIXED),
+    }
+}
+
+/// What Del does to a finding in `state`: `None` to ask why and dismiss it
+/// (from undecided or to fix), `Some` back to undecided (from dismissed);
+/// else why it does nothing.
+pub fn dismiss_key(state: FindingState) -> Result<Option<Decision>, &'static str> {
+    match state {
+        FindingState::Open | FindingState::Fix => Ok(None),
+        FindingState::Dismissed => Ok(Some(Decision::Reopen)),
+        FindingState::Sent => Err(SENT),
+        FindingState::Fixed => Err(FIXED),
+    }
 }
 
 /// The feature's AI review, kept in its record.
@@ -324,8 +375,22 @@ fn strip_tags(text: &str) -> String {
 /// out (`lines`: line breaks stay, else they read as spaces), bidi
 /// overrides out, trimmed and cut at `MAX_TEXT` characters.
 pub fn clean(text: &str, lines: bool) -> String {
+    scrub(&strip_tags(text), lines)
+}
+
+/// What the user wrote made safe to keep: as `clean`, but it is their text
+/// and not an agent's, so what looks like a tag stays (a comment about a
+/// `<div>`).
+pub fn own_text(text: &str) -> String {
+    scrub(text, true)
+}
+
+/// `text` without control characters (`lines`: line breaks stay, else they
+/// read as spaces) and bidi overrides, trimmed and cut at `MAX_TEXT`
+/// characters.
+fn scrub(text: &str, lines: bool) -> String {
     let mut out = String::new();
-    for c in strip_tags(text).chars() {
+    for c in text.chars() {
         match c {
             '\n' if lines => out.push('\n'),
             '\n' | '\t' => out.push(' '),
@@ -450,9 +515,9 @@ pub fn import(
             body: raw.body,
             fix: raw.fix,
             state: FindingState::Open,
-            reason: String::new(),
             run,
             placed: at,
+            ..Finding::default()
         });
         out.new += 1;
     }
@@ -502,6 +567,81 @@ pub fn decide(review: &mut AiReview, id: &str, decision: &Decision) -> Result<St
     }
 }
 
+/// Whether `f` can still be edited, undecided or to fix; else why not.
+pub fn editable(f: &Finding) -> Result<(), String> {
+    let id = &f.id;
+    match f.state {
+        FindingState::Open | FindingState::Fix => Ok(()),
+        FindingState::Dismissed => Err(format!("{id} is dismissed: reopen it first")),
+        FindingState::Sent => Err(format!("{id} was sent to Build: the next review checks it")),
+        FindingState::Fixed => Err(format!("{id} is fixed already")),
+    }
+}
+
+/// Reword finding `id`'s fix to `fix` and set the user's comment on it to
+/// `note`: a fix left as the reviewer's, or empty, is theirs again. Saved
+/// on an undecided finding it marks it to fix too, as rewording a fix means
+/// wanting it. What it did, for the log; else why it can't.
+pub fn edit(review: &mut AiReview, id: &str, fix: &str, note: &str) -> Result<String, String> {
+    let Some(f) = review.findings.iter_mut().find(|f| f.id == id) else {
+        return Err(format!("There's no finding {id}"));
+    };
+    editable(f)?;
+    let fix = own_text(fix);
+    f.my_fix = (!fix.is_empty() && fix != f.fix).then_some(fix);
+    f.note = own_text(note);
+    f.state = FindingState::Fix;
+    Ok("edited, to fix".into())
+}
+
+/// `text` as an item's title (its first line) and body (the rest).
+fn title_and_body(text: &str) -> (String, String) {
+    let text = own_text(text);
+    match text.split_once('\n') {
+        Some((title, body)) => (title.trim().to_owned(), body.trim().to_owned()),
+        None => (text, String::new()),
+    }
+}
+
+/// An item of the user's own, saying `text`, added to the review to be
+/// fixed like a finding marked so. Its id, `u<k>`; else why it can't.
+pub fn add(review: &mut AiReview, text: &str) -> Result<String, String> {
+    let (title, body) = title_and_body(text);
+    if title.is_empty() {
+        return Err("Say what to fix".into());
+    }
+    let id = (1..)
+        .map(|k| format!("u{k}"))
+        .find(|id| review.finding(id).is_none())
+        .unwrap_or_default();
+    review.findings.push(Finding {
+        id: id.clone(),
+        title,
+        body,
+        state: FindingState::Fix,
+        run: review.n,
+        yours: true,
+        ..Finding::default()
+    });
+    Ok(id)
+}
+
+/// Rewrite item `id` of the user's own to say `text`. What it did, for the
+/// log; else why it can't.
+pub fn edit_own(review: &mut AiReview, id: &str, text: &str) -> Result<String, String> {
+    let Some(f) = review.findings.iter_mut().find(|f| f.id == id && f.yours) else {
+        return Err(format!("There's no item {id} of yours"));
+    };
+    editable(f)?;
+    let (title, body) = title_and_body(text);
+    if title.is_empty() {
+        return Err("Say what to fix".into());
+    }
+    (f.title, f.body) = (title, body);
+    f.state = FindingState::Fix;
+    Ok("edited, to fix".into())
+}
+
 /// Where `f` is, as text: `api/src/a.rs:12`; the repository left out for
 /// a feature over one (`multi` false).
 pub fn location(f: &Finding, multi: bool) -> String {
@@ -529,13 +669,24 @@ pub fn fixes_markdown(review: &AiReview, title: &str, multi: bool) -> (usize, St
     );
     for f in &fix {
         md.push_str(&format!("\n## {}: {}\n\n", f.id, f.title));
-        md.push_str(&format!("- Severity: {}\n", f.severity.label()));
-        md.push_str(&format!("- Where: {}\n", location(f, multi)));
+        if f.yours {
+            md.push_str("- Added by the user, not by the review\n");
+        } else {
+            md.push_str(&format!("- Severity: {}\n", f.severity.label()));
+            md.push_str(&format!("- Where: {}\n", location(f, multi)));
+        }
         if !f.body.is_empty() {
             md.push_str(&format!("\n{}\n", f.body));
         }
-        if !f.fix.is_empty() {
-            md.push_str(&format!("\nSuggested fix: {}\n", f.fix));
+        match f.my_fix.as_deref() {
+            Some(fix) => md.push_str(&format!("\nThe fix, as the user wants it: {fix}\n")),
+            None if !f.fix.is_empty() => {
+                md.push_str(&format!("\nSuggested fix: {}\n", f.fix));
+            }
+            None => {}
+        }
+        if !f.note.is_empty() {
+            md.push_str(&format!("\nThe user's comment: {}\n", f.note));
         }
     }
     (fix.len(), md)
@@ -862,6 +1013,178 @@ mod tests {
             decide(&mut review, id, &Decision::Reopen),
             Err("r1-1 is fixed already".into())
         );
+    }
+
+    fn one_finding(state: FindingState) -> AiReview {
+        AiReview {
+            n: 1,
+            findings: vec![Finding {
+                id: "r1-1".into(),
+                title: "Off by one".into(),
+                file: "src/a.rs".into(),
+                fix: "Use ..=".into(),
+                state,
+                ..Finding::default()
+            }],
+            ..AiReview::default()
+        }
+    }
+
+    #[test]
+    fn an_edit_rewords_the_fix_keeps_the_reviewers_and_marks_it_to_fix() {
+        let mut review = one_finding(FindingState::Open);
+        edit(&mut review, "r1-1", "Use a range", "Mind the tests").unwrap();
+        let f = &review.findings[0];
+        assert_eq!(f.fix, "Use ..=");
+        assert_eq!(f.fix_text(), "Use a range");
+        assert_eq!(f.note, "Mind the tests");
+        assert_eq!(f.state, FindingState::Fix);
+        // Left as the reviewer's, or empty, it is the reviewer's again.
+        edit(&mut review, "r1-1", "Use ..=", "").unwrap();
+        assert_eq!(review.findings[0].my_fix, None);
+        edit(&mut review, "r1-1", "Mine", "").unwrap();
+        edit(&mut review, "r1-1", "  ", "").unwrap();
+        assert_eq!(review.findings[0].my_fix, None);
+        assert_eq!(review.findings[0].fix_text(), "Use ..=");
+        assert_eq!(review.findings[0].note, "");
+    }
+
+    #[test]
+    fn only_an_undecided_finding_or_one_to_fix_is_edited() {
+        for state in [
+            FindingState::Dismissed,
+            FindingState::Sent,
+            FindingState::Fixed,
+        ] {
+            let mut review = one_finding(state);
+            assert!(edit(&mut review, "r1-1", "x", "y").is_err(), "{state:?}");
+            assert_eq!(review.findings[0].my_fix, None);
+            assert_eq!(review.findings[0].state, state);
+        }
+        let mut review = one_finding(FindingState::Fix);
+        assert!(edit(&mut review, "nope", "x", "y").is_err());
+        assert!(edit(&mut review, "r1-1", "x", "y").is_ok());
+    }
+
+    #[test]
+    fn what_the_user_wrote_stays_as_written_and_is_made_safe() {
+        let mut review = one_finding(FindingState::Open);
+        edit(
+            &mut review,
+            "r1-1",
+            " keep <div> \u{202e}\u{7}here\n2nd ",
+            "",
+        )
+        .unwrap();
+        assert_eq!(
+            review.findings[0].my_fix.as_deref(),
+            Some("keep <div> here\n2nd")
+        );
+        // An agent's isn't.
+        assert_eq!(clean("keep <div>here", false), "keep here");
+    }
+
+    #[test]
+    fn the_users_words_survive_a_finding_raised_again() {
+        let mut review = AiReview::default();
+        let one = raw(None, "src/a.rs", Some(12), "Off by one");
+        import(&mut review, 1, vec![one], &repos(), &diff());
+        edit(&mut review, "r1-1", "Mine", "Careful").unwrap();
+        review.findings[0].state = FindingState::Sent;
+        let mut again = raw(Some("r1-1"), "src/a.rs", Some(12), "Still off by one");
+        again.fix = "Reviewer's new".into();
+        import(&mut review, 2, vec![again], &repos(), &diff());
+        let f = &review.findings[0];
+        assert_eq!(f.state, FindingState::Open);
+        assert_eq!(f.title, "Still off by one");
+        assert_eq!(f.fix, "Reviewer's new");
+        assert_eq!(f.fix_text(), "Mine");
+        assert_eq!(f.note, "Careful");
+    }
+
+    #[test]
+    fn an_item_of_yours_is_to_fix_at_once_and_checked_by_the_next_review() {
+        let mut review = AiReview {
+            n: 1,
+            ..AiReview::default()
+        };
+        assert_eq!(add(&mut review, " \n "), Err("Say what to fix".to_owned()));
+        assert_eq!(
+            add(&mut review, "Rename it\nIt reads badly\n").unwrap(),
+            "u1"
+        );
+        assert_eq!(add(&mut review, "Another").unwrap(), "u2");
+        let f = review.finding("u1").unwrap();
+        assert_eq!(
+            (f.title.as_str(), f.body.as_str()),
+            ("Rename it", "It reads badly")
+        );
+        assert!(f.yours && f.file.is_empty());
+        assert_eq!(f.state, FindingState::Fix);
+        assert_eq!(review.open(), 2);
+        edit_own(&mut review, "u2", "Better\nwords").unwrap();
+        assert_eq!(review.finding("u2").unwrap().title, "Better");
+        assert!(edit_own(&mut review, "u2", " ").is_err());
+        assert!(
+            edit_own(&mut review, "r1-1", "x").is_err(),
+            "not the user's"
+        );
+        // Sent, and not raised again: fixed, like any other.
+        for f in &mut review.findings {
+            f.state = FindingState::Sent;
+        }
+        let got = import(&mut review, 2, Vec::new(), &repos(), &diff());
+        assert_eq!(got.fixed, 2);
+        assert_eq!(review.finding("u1").unwrap().state, FindingState::Fixed);
+    }
+
+    #[test]
+    fn a_record_from_before_edits_reads_as_having_none() {
+        let f: Finding = serde_json::from_str(
+            r#"{"id": "r1-1", "severity": "high", "repo": "api", "file": "a", "title": "t", "run": 1}"#,
+        )
+        .unwrap();
+        assert_eq!((f.my_fix, f.note.as_str(), f.yours), (None, "", false));
+        // And nothing new is written for one with none.
+        let text = serde_json::to_string(&one_finding(FindingState::Open).findings[0]).unwrap();
+        for key in ["my_fix", "note", "yours"] {
+            assert!(!text.contains(key), "{key}: {text}");
+        }
+    }
+
+    #[test]
+    fn the_fixes_carry_the_users_words_and_items() {
+        let mut review = one_finding(FindingState::Open);
+        edit(&mut review, "r1-1", "Use a range", "Mind the tests").unwrap();
+        add(&mut review, "Rename it\nIt reads badly").unwrap();
+        let (n, md) = fixes_markdown(&review, "Bulk edit", false);
+        assert_eq!(n, 2);
+        for words in [
+            "The fix, as the user wants it: Use a range",
+            "The user's comment: Mind the tests",
+            "## u1: Rename it",
+            "Added by the user",
+            "It reads badly",
+        ] {
+            assert!(md.contains(words), "{words}: {md}");
+        }
+        assert!(!md.contains("Suggested fix: Use ..="), "{md}");
+        assert!(!md.contains("Severity: medium\n- Where: \n"), "{md}");
+    }
+
+    #[test]
+    fn f_and_del_on_a_finding_go_by_where_it_stands() {
+        use FindingState as S;
+        assert_eq!(fix_key(S::Open), Ok(Decision::Fix));
+        assert_eq!(fix_key(S::Dismissed), Ok(Decision::Fix));
+        assert_eq!(fix_key(S::Fix), Ok(Decision::Reopen));
+        assert_eq!(fix_key(S::Sent), Err(SENT));
+        assert_eq!(fix_key(S::Fixed), Err(FIXED));
+        assert_eq!(dismiss_key(S::Open), Ok(None));
+        assert_eq!(dismiss_key(S::Fix), Ok(None));
+        assert_eq!(dismiss_key(S::Dismissed), Ok(Some(Decision::Reopen)));
+        assert_eq!(dismiss_key(S::Sent), Err(SENT));
+        assert_eq!(dismiss_key(S::Fixed), Err(FIXED));
     }
 
     #[test]

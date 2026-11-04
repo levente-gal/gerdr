@@ -771,6 +771,7 @@ pub fn gate_item_id(project: &str, slug: &str) -> ItemId {
 fn gate_file(stage: Stage) -> (&'static str, Option<&'static str>) {
     match stage {
         Stage::Discover => ("Brief", crate::feature::artifacts::name(stage)),
+        Stage::PlanReview => ("Final plan", crate::feature::artifacts::name(stage)),
         stage => (stage.label(), crate::feature::artifacts::name(stage)),
     }
 }
@@ -811,6 +812,27 @@ fn gate_words(gate: &Gate) -> (String, String, Option<&'static str>) {
                 None,
             )
         }
+        GateKind::SendPrompt => (
+            format!(
+                "{} of “{title}”: pick a model and send the prompt",
+                gate.stage.label()
+            ),
+            "send prompt".to_owned(),
+            None,
+        ),
+        GateKind::Suggestions { open: 0 } => (
+            format!("Plan review of “{title}”: all decided"),
+            "go on to the final plan".to_owned(),
+            None,
+        ),
+        GateKind::Suggestions { open } => (
+            format!(
+                "Plan review of “{title}”: {} to decide",
+                crate::features::plural(open as usize, "suggestion")
+            ),
+            "decide them".to_owned(),
+            None,
+        ),
         GateKind::CodeReview => (
             format!("Code review of “{title}”: review the diff"),
             "review the diff".to_owned(),
@@ -842,13 +864,14 @@ pub fn gate_items(gates: &[GateItem], now_secs: u64) -> Vec<InboxItem> {
                 section: Section::Gates,
                 // Back from a dismissal when the next stage waits, or
                 // this one again after it was sent back; not when the
-                // user's own manual test results change.
+                // user's own manual test results or decisions change.
                 fingerprint: format!(
                     "{}|{:?}|{}|{}",
                     gate.slug,
                     gate.stage,
                     match gate.kind {
                         GateKind::ManualTest { .. } => "ManualTest".to_owned(),
+                        GateKind::Suggestions { .. } => "Suggestions".to_owned(),
                         kind => format!("{kind:?}"),
                     },
                     gate.since

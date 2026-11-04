@@ -40,6 +40,10 @@ fn start_over_body(stage: Stage, live: bool) -> String {
     let file = artifacts::name(stage).unwrap_or("Its file");
     let mut body = match stage {
         Stage::Discover | Stage::Plan => format!("{file} moves to the archive folder."),
+        Stage::PlanReview => {
+            "Its suggestions and decisions are forgotten and its files move to the archive folder."
+                .to_owned()
+        }
         Stage::Build => format!("{file} moves to the archive folder. Its commits stay."),
         Stage::Verify => format!(
             "Its run is forgotten and {} moves to the archive folder.",
@@ -234,6 +238,9 @@ impl Gerdr {
         if let Some(pane) = self.live_stage_pane(project, slug, stage) {
             self.close_herdr_pane(&pane);
         }
+        if stage == Stage::PlanReview {
+            self.close_parked_reviewer(project, slug);
+        }
         if let Some(left) = self.t3_left_running(project, slug, stage) {
             self.show_warning(left);
         }
@@ -268,7 +275,7 @@ impl Gerdr {
     /// `stage`'s file of feature `slug` went to the archive folder: its
     /// tabs here close, and those of other workspaces, with no comments
     /// left to save, say it is gone when they show.
-    fn forget_doc_tabs(&mut self, project: &str, slug: &str, stage: Stage) {
+    pub(crate) fn forget_doc_tabs(&mut self, project: &str, slug: &str, stage: Stage) {
         let is_it = |d: &DocOf| d.project == project && d.slug == slug && d.file.stage() == stage;
         let tabs = self.workspaces.iter_mut().flat_map(|ws| &mut ws.tabs);
         for wd in tabs.filter_map(|tab| tab.review_mut()).map(|r| &mut r.wd) {
@@ -306,7 +313,7 @@ mod tests {
             "Discover is locked: Plan has plan.md; start Plan over first"
         );
         // Plan done as well: it reopens first.
-        let f = crate::features::tests::feature("login", Vec::new(), 2);
+        let f = crate::features::tests::feature("login", Vec::new(), 3);
         assert_eq!(
             locked_warning(&f, Stage::Discover, Stage::Plan),
             "Discover is locked: Plan is done; reopen Plan first"

@@ -911,7 +911,7 @@ pub fn watch_db(
 }
 
 /// The database at `db`, opened to read only: Cursor writes it meanwhile.
-fn open_read_only(db: &Path) -> rusqlite::Result<rusqlite::Connection> {
+pub(crate) fn open_read_only(db: &Path) -> rusqlite::Result<rusqlite::Connection> {
     use rusqlite::OpenFlags;
     let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
     let conn = rusqlite::Connection::open_with_flags(db, flags)?;

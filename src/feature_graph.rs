@@ -35,6 +35,21 @@ fn excluded_text(excludes: &[PathBuf]) -> Option<String> {
     }
 }
 
+/// What the toast says of the ignore files linked in from the project.
+fn linked_text(linked: &[PathBuf]) -> Option<String> {
+    match linked {
+        [] => None,
+        [one] => Some(format!(
+            "Linked {} to the project's copy, kept out of git",
+            tilde(one)
+        )),
+        many => Some(format!(
+            "Linked {} .graphifyignore files to the project's copies, kept out of git",
+            many.len()
+        )),
+    }
+}
+
 impl Gerdr {
     /// Build the code graphs of open feature `slug` off the thread, if its
     /// projects keep graphs: only those it lacks if `only_missing`. A build
@@ -116,6 +131,9 @@ impl Gerdr {
         if let Some(text) = excluded_text(&built.excludes) {
             self.show_success(text);
         }
+        if let Some(text) = linked_text(&built.linked) {
+            self.show_success(text);
+        }
         if built.missing {
             let text = "graphify isn't on PATH, so features get no code graph";
             crate::problems::report(PROBLEM, text);
@@ -151,6 +169,21 @@ mod tests {
         assert_eq!(
             many,
             "Added /graphify-out/ to the git exclude files of 40 repositories"
+        );
+    }
+
+    #[test]
+    fn the_toast_names_one_linked_file_and_counts_many() {
+        assert_eq!(linked_text(&[]), None);
+        let one = linked_text(&["/r/.graphifyignore".into()]).unwrap();
+        assert_eq!(
+            one,
+            "Linked /r/.graphifyignore to the project's copy, kept out of git"
+        );
+        let many = linked_text(&vec!["/r/x".into(); 3]).unwrap();
+        assert_eq!(
+            many,
+            "Linked 3 .graphifyignore files to the project's copies, kept out of git"
         );
     }
 }
