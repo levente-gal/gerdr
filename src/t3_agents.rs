@@ -1020,6 +1020,46 @@ fn asks_to_pair(path: &str) -> bool {
     page.trim_end_matches('/') == "/pair" && !path.contains("token=")
 }
 
+/// What to do for web pane `pane` of T3 Code's now at `path`, if it is
+/// signed out; `paired` holds when each was last sent a pairing link or seen
+/// taking one, and how many it was sent since it got past the sign-in page.
+/// `busy`: a link is being asked for it already.
+///
+/// A page taking a link drops the token from its address, so it is at the
+/// bare sign-in page for a moment, and then at the app. That isn't asking,
+/// so the time is kept once it is past the page: a link sent for that moment
+/// would bring the page back there, and so on for good.
+fn pair_turn_at(
+    paired: &mut HashMap<u32, (Instant, u32)>,
+    pane: u32,
+    path: &str,
+    busy: bool,
+    now: Instant,
+) -> Option<Pairing> {
+    let page = path.split(['?', '#']).next().unwrap_or_default();
+    if !asks_to_pair(path) {
+        if page.trim_end_matches('/') == "/pair" {
+            paired.entry(pane).or_insert((now, 0)).0 = now;
+        } else if let Some(sent) = paired.get_mut(&pane) {
+            // Signed in: a later sign-out starts counting anew.
+            sent.1 = 0;
+        }
+        return None;
+    }
+    // Signed out (a browser never paired, or the server forgot it): sign
+    // it in, whichever way it got here.
+    let sent = paired.get(&pane).copied();
+    if busy || sent.is_some_and(|(at, _)| now.duration_since(at) < PAIR_AGAIN) {
+        return Some(Pairing::Quiet);
+    }
+    let tries = sent.map_or(0, |(_, tries)| tries);
+    let turn = pairing_turn(tries);
+    if turn != Pairing::Quiet {
+        paired.insert(pane, (now, tries + 1));
+    }
+    Some(turn)
+}
+
 /// Pairing link `link` with its token in the query, not the fragment: a
 /// pane at the sign-in page already would only change its fragment, and
 /// the page reads the token as it loads only. T3 Code's page takes either.
@@ -2360,26 +2400,17 @@ impl crate::Gerdr {
         }
         let origin = origin_of(url).unwrap_or_default();
         let path = &url[origin.len()..];
-        if asks_to_pair(path) {
-            // Signed out (a browser never paired, or the server forgot
-            // it): sign it in, whichever way it got here.
-            let now = Instant::now();
-            let sent = self.t3.paired_panes.get(&pane).copied();
-            let recent = sent.is_some_and(|(at, _)| now.duration_since(at) < PAIR_AGAIN);
-            if recent || self.t3.pairing.contains(&Some(pane)) {
-                return;
-            }
-            let tries = sent.map_or(0, |(_, tries)| tries);
-            match pairing_turn(tries) {
+        let busy = self.t3.pairing.contains(&Some(pane));
+        let paired = &mut self.t3.paired_panes;
+        if let Some(turn) = pair_turn_at(paired, pane, path, busy, Instant::now()) {
+            match turn {
                 Pairing::Send => {
-                    self.t3.paired_panes.insert(pane, (now, tries + 1));
                     let server = server.clone();
                     let origin = origin.to_owned();
                     let marker = self.t3_paired_marker(&origin);
                     self.pair_t3(server, origin, None, marker, Some(pane));
                 }
                 Pairing::GiveUp => {
-                    self.t3.paired_panes.insert(pane, (now, tries + 1));
                     let text = "T3 Code keeps asking this web pane to sign in: \
                                 sign in on its page, or see T3 Code's log";
                     tracing::warn!("{text}");
@@ -2390,9 +2421,7 @@ impl crate::Gerdr {
             }
             return;
         }
-        // Past the sign-in page: signed in, so a later sign-out tries again.
         if !path.starts_with("/pair") {
-            self.t3.paired_panes.remove(&pane);
             self.scope_t3(pane, origin);
             self.t3_start_asked(pane, origin);
         }
@@ -2500,6 +2529,46 @@ mod tests {
             updated: "2026-11-01T10:00:00.000Z".into(),
             ..ThreadRow::default()
         }
+    }
+
+    #[test]
+    fn a_page_taking_its_pairing_link_is_not_sent_another() {
+        let start = Instant::now();
+        let later = |secs| start + Duration::from_secs(secs);
+        let mut paired = HashMap::new();
+        let mut at = |path: &str, when| pair_turn_at(&mut paired, 1, path, false, when);
+        // Opened at a link, as T3 Code 0.1.7 goes on from it.
+        assert_eq!(at("/pair?token=x", start), None);
+        assert_eq!(at("/pair", start), Some(Pairing::Quiet));
+        assert_eq!(at("/", later(1)), None);
+        assert_eq!(at("/draft/d", later(1)), None);
+        // Reports can come late: the moment at the bare page still isn't
+        // asking.
+        assert_eq!(at("/pair", later(2)), Some(Pairing::Quiet));
+        // A sign-out later is, and starts counting anew.
+        assert_eq!(at("/pair", later(40)), Some(Pairing::Send));
+        assert_eq!(at("/pair", later(45)), Some(Pairing::Quiet));
+    }
+
+    #[test]
+    fn a_page_that_keeps_asking_is_given_up_on() {
+        let start = Instant::now();
+        let later = |secs| start + Duration::from_secs(secs);
+        let mut paired = HashMap::new();
+        let mut at = |when| pair_turn_at(&mut paired, 1, "/pair", false, when);
+        for (i, turn) in [Pairing::Send, Pairing::Send, Pairing::Send, Pairing::GiveUp]
+            .into_iter()
+            .enumerate()
+        {
+            assert_eq!(at(later(i as u64 * 31)), Some(turn), "try {i}");
+        }
+        assert_eq!(at(later(200)), Some(Pairing::Quiet));
+        // One being asked for already isn't asked for again.
+        let mut other = HashMap::new();
+        assert_eq!(
+            pair_turn_at(&mut other, 2, "/pair", true, start),
+            Some(Pairing::Quiet)
+        );
     }
 
     #[test]
