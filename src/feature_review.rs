@@ -526,6 +526,23 @@ impl Gerdr {
             }
         }
         self.save_feature(project, slug);
+        self.show_build_agent(project, slug);
+    }
+
+    /// Show feature `slug`'s Build agent, just sent work: its tab is where
+    /// it runs, or waits for a model and its prompt. A T3 Code draft shows
+    /// itself (`t3_stage_drafted`), as does a new tab, its window not up yet.
+    pub(crate) fn show_build_agent(&mut self, project: &str, slug: &str) {
+        let Some(run) = (self.feature(project, slug)).and_then(|f| f.runs.get(&Stage::Build))
+        else {
+            return;
+        };
+        if run.t3_thread().is_some() {
+            return self.show_t3_stage(project, slug, Stage::Build);
+        }
+        if let Some(pane) = (run.pane.clone()).filter(|p| self.herdr_pane_place(p).is_some()) {
+            self.focus_agent(&crate::agents::AgentKey::Herdr(pane));
+        }
     }
 
     /// Send `text` (Markdown) to feature `slug`'s Build agent to act on:

@@ -780,17 +780,12 @@ impl Gerdr {
     }
 
     /// Send the user's comments (`text`, Markdown) to the Build agent:
-    /// once sent, they are deleted and the review closed.
+    /// once sent, they are deleted, the review closed and the agent shown.
     pub(crate) fn feature_send_back(&mut self, text: String) {
         let Some(fe) = self.feature_of() else {
             return;
         };
-        let (project, slug, back, path) = (
-            fe.project.clone(),
-            fe.slug.clone(),
-            fe.back,
-            fe.comments.clone(),
-        );
+        let (project, slug, path) = (fe.project.clone(), fe.slug.clone(), fe.comments.clone());
         let stage = self.feature(&project, &slug).and_then(Feature::current);
         if let Some(why) = stage_refusal(stage) {
             return self.show_warning(why);
@@ -807,7 +802,8 @@ impl Gerdr {
             wd.diff.review_dirty = false;
         }
         self.code_review_counted();
-        self.close_feature_diff(back);
+        self.close_feature_diff(false);
+        self.show_build_agent(&project, &slug);
     }
 
     /// Save the user's comments in the open code review, if they changed:

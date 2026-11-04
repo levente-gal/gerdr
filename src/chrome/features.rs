@@ -364,8 +364,12 @@ pub enum NodeMark {
     /// Done, but the code changed since: a warning ring.
     Stale,
     /// The current stage, with a gate waiting for the user (a file to
-    /// review, a stop to go on from): a warning dot.
+    /// review, a stop to go on from): a warning dot. Or a done stage whose
+    /// agent waits with work sent back to it.
     Waiting,
+    /// Done, its agent running again on work sent back to it: filled in the
+    /// accent and pulsing, over the current stage, where nothing runs then.
+    Fixing,
 }
 
 /// A stage's node on the feature tab's rail.
@@ -2364,7 +2368,8 @@ const PULSE_PEAK: f32 = 0.7;
 /// Where the glow pulsing round the current stage's node goes on the tab
 /// showing `view`, laid out as `l`, if a stage is current.
 pub fn feature_tab_pulse(view: &FeatureTabView, l: &FeatureTabLayout) -> Option<Rect> {
-    let i = view.rail.iter().position(|n| n.mark == NodeMark::Current)?;
+    let at = |mark| view.rail.iter().position(|n| n.mark == mark);
+    let i = at(NodeMark::Fixing).or_else(|| at(NodeMark::Current))?;
     let spot = node_circle(*l.nodes.get(i)?);
     Some(Rectangle::new(
         (spot.loc.x - PULSE_HALO, spot.loc.y - PULSE_HALO).into(),
@@ -3048,10 +3053,10 @@ impl Painter {
             let (a, b) = (circle(pair[0]), circle(pair[1]));
             let from = a.loc.x + NODE + CONNECTOR_GAP;
             let to = b.loc.x - CONNECTOR_GAP;
-            let done = matches!(
-                view.rail.get(i).map(|n| n.mark),
-                Some(NodeMark::Done | NodeMark::Stale)
-            );
+            // A stage with work sent back to it was passed all the same.
+            let past = |i: usize| view.rail.get(i).map(|n| n.mark);
+            let done = matches!(past(i), Some(NodeMark::Done | NodeMark::Stale))
+                || !matches!(past(i + 1), Some(NodeMark::Later) | None);
             let color = if done { p.success } else { p.border };
             if to > from {
                 c.fill(
@@ -3106,7 +3111,7 @@ impl Painter {
                     (label.size.w, NODE_LINE).into(),
                 );
                 let color = match node.mark {
-                    NodeMark::Current => p.accent,
+                    NodeMark::Current | NodeMark::Fixing => p.accent,
                     NodeMark::Waiting | NodeMark::Stale => p.warning,
                     _ => p.muted,
                 };
@@ -3235,11 +3240,11 @@ impl Painter {
                 disc(c, ring, mix(p.background, color, 0.18));
                 icon_sdf(c, spot, scale, color, |x, y| check(x, y, s * 1.1));
             }
-            NodeMark::Current | NodeMark::Waiting => {
-                let color = if mark == NodeMark::Current {
-                    p.accent
-                } else {
+            NodeMark::Current | NodeMark::Waiting | NodeMark::Fixing => {
+                let color = if mark == NodeMark::Waiting {
                     p.warning
+                } else {
+                    p.accent
                 };
                 disc(c, 0.0, color);
                 self.bold_centred(c, &number, spot, scale, p.on_accent);
