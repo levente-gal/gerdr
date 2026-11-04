@@ -872,6 +872,9 @@ impl WorktreeDiff {
         if self.feature.is_some() {
             buttons.extend([B::MarkViewed, B::NextUnviewed]);
         }
+        if self.diff.comments_to_visit().is_some() {
+            buttons.push(B::NextComment);
+        }
         if self.reviewed() {
             buttons.extend([B::Approve, B::SendBack]);
         }
@@ -901,6 +904,10 @@ impl WorktreeDiff {
                     B::Close if self.commit.is_some() || self.doc.is_some() => "back".into(),
                     B::Close if self.feature.as_ref().is_some_and(|f| f.back) => "back".into(),
                     B::Close => "close".into(),
+                    B::NextComment => match self.diff.comments_to_visit() {
+                        Some("finding") => "next, previous finding".into(),
+                        _ => "next, previous comment".into(),
+                    },
                     B::GoOn => match self.doc.as_ref().and_then(|d| d.current) {
                         Some(current) => format!("go to {}", current.label()),
                         None => "go on".into(),
@@ -912,6 +919,7 @@ impl WorktreeDiff {
                     B::SendBack | B::Reopen => SEND_BACK_KEY,
                     B::MarkViewed => "Space",
                     B::NextUnviewed => NEXT_UNVIEWED_KEY,
+                    B::NextComment => "] / [",
                     button => key_name(button),
                 }
                 .into(),
@@ -1813,7 +1821,14 @@ mod tests {
         // the keys and closing.
         let hints: Vec<ReposButton> = wd.hints().iter().map(|h| h.button).collect();
         use ReposButton as B;
-        let all = [B::Comment, B::CopyReview, B::ClearReview, B::Help, B::Close];
+        let all = [
+            B::Comment,
+            B::NextComment,
+            B::CopyReview,
+            B::ClearReview,
+            B::Help,
+            B::Close,
+        ];
         assert_eq!(hints, all);
         assert_eq!(wd.press(ReposButton::Help, ENV), None);
         assert!(wd.sheet(ENV).is_some());
@@ -1970,7 +1985,15 @@ mod tests {
             .iter()
             .map(|h| h.button)
             .collect();
-        assert_eq!(buttons, [ReposButton::CopyReview, ReposButton::ClearReview]);
+        assert_eq!(
+            buttons,
+            [
+                ReposButton::PrevComment,
+                ReposButton::NextComment,
+                ReposButton::CopyReview,
+                ReposButton::ClearReview
+            ]
+        );
         // Asked on a sheet, which takes the keys: Esc keeps it.
         let clear = ReposHit::Button(ReposButton::ClearReview);
         assert_eq!(wd.click(clear, ENV), None);
@@ -2219,7 +2242,7 @@ mod tests {
         assert_eq!(comment.lines[0].number, 2);
         assert!(matches!(
             wd.diff.rows[parts.end],
-            crate::diff_view::DiffRow::Comment { .. }
+            crate::diff_view::DiffRow::CommentHead { .. }
         ));
     }
 

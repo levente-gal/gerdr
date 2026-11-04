@@ -3825,7 +3825,73 @@ fn doc_tab_closed(locked: bool) -> super::ReposView {
 }
 
 /// Each doc tab fixture and the width of content it is seen at.
-fn doc_tabs() -> [(&'static str, super::ReposView, i32); 8] {
+/// A code review with a comment of the user's and an AI review's findings
+/// in each of their looks, the cursor on the first finding.
+fn findings_view() -> super::ReposView {
+    use super::{DetailRow, FindingHead, Hint, ReposButton, RowMark, Tone};
+    let mut view = doc_tab(1, 1.0, Vec::new(), false);
+    let hint = |button: ReposButton, label: &str| Hint {
+        button,
+        label: label.into(),
+        key: String::new(),
+        disabled: None,
+    };
+    let head = |severity: &str, state: Option<&str>, tone, place: &str| DetailRow::CommentHead {
+        finding: Some(FindingHead {
+            severity: severity.into(),
+            state: state.map(Into::into),
+            tone,
+        }),
+        place: place.into(),
+    };
+    let line = |text: &str, last, tone| DetailRow::Comment {
+        text: text.into(),
+        first: false,
+        last,
+        tone,
+    };
+    view.detail.title =
+        "Bulk export \u{b7} 3 files \u{b7} +3 \u{2212}1 \u{b7} 4 findings, 2 open".into();
+    view.detail.title_buttons = vec![
+        hint(ReposButton::PrevComment, "Previous comment"),
+        hint(ReposButton::NextComment, "Next comment"),
+    ];
+    view.detail.rows = vec![
+        DetailRow::CommentHead {
+            finding: None,
+            place: "comment 1 of 1".into(),
+        },
+        line("Why status here? Check the caller.", true, None),
+        head("high", None, Tone::Error, "finding 1 of 4"),
+        line("The parser splits on spaces", false, Some(Tone::Error)),
+        line("Fix: split on NUL", true, Some(Tone::Error)),
+        head("medium", Some("to fix"), Tone::Warning, "finding 2 of 4"),
+        line("No timeout on the status read", true, Some(Tone::Warning)),
+        head("low", None, Tone::Normal, "finding 3 of 4"),
+        line("This name says too little", true, Some(Tone::Normal)),
+        head("low", Some("dismissed"), Tone::Muted, "finding 4 of 4"),
+        line("Dismissed: it reads fine", true, Some(Tone::Muted)),
+    ];
+    view.detail.marks = (0..view.detail.rows.len())
+        .map(|r| RowMark {
+            selected: r == 2,
+            top: r == 2,
+            bottom: r == 2,
+            noted: false,
+        })
+        .collect();
+    view.detail.row_buttons = vec![
+        (2, hint(ReposButton::FixFinding, "Fix")),
+        (2, hint(ReposButton::DismissFinding, "Dismiss")),
+    ];
+    view.detail.ticks = vec![(0.0, false), (0.18, true), (0.45, false), (0.82, false)];
+    view.detail.part = 0.0;
+    view.detail.first = 0;
+    view.detail.total = view.detail.rows.len();
+    view
+}
+
+fn doc_tabs() -> [(&'static str, super::ReposView, i32); 9] {
     [
         ("doc_preview_1180", doc_tab(0, 0.0, Vec::new(), false), 1180),
         ("doc_review_1180", doc_tab(1, 1.0, Vec::new(), false), 1180),
@@ -3839,10 +3905,11 @@ fn doc_tabs() -> [(&'static str, super::ReposView, i32); 8] {
         ("doc_review_850", doc_tab(1, 1.0, Vec::new(), false), 850),
         ("doc_approved_1180", doc_tab_closed(false), 1180),
         ("doc_locked_1180", doc_tab_closed(true), 1180),
+        ("findings_1180", findings_view(), 1180),
     ]
 }
 
-const DOC_TAB: [&str; 8] = [
+const DOC_TAB: [&str; 9] = [
     "doc_preview_1180",
     "doc_review_1180",
     "doc_review_no_browser",
@@ -3851,6 +3918,7 @@ const DOC_TAB: [&str; 8] = [
     "doc_review_850",
     "doc_approved_1180",
     "doc_locked_1180",
+    "findings_1180",
 ];
 
 /// A doc tab's buffer, laid over the whole of a `w` wide content area.
@@ -3872,7 +3940,7 @@ fn paint_doc_tab(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
 }
 
 /// The recorded hashes of `DOC_TAB`, per case in `CASES`.
-const GOLDEN_DOC_TAB: [[u64; 8]; 4] = [
+const GOLDEN_DOC_TAB: [[u64; 9]; 4] = [
     // Dark at 1
     [
         0xe3291f02faaf07c4, // doc_preview_1180
@@ -3883,6 +3951,7 @@ const GOLDEN_DOC_TAB: [[u64; 8]; 4] = [
         0x8dc4abbd4a4453aa, // doc_review_850
         0x991e984d1cf58986, // doc_approved_1180
         0xc795c2ffa685e118, // doc_locked_1180
+        0x1c40aa6b13221217, // findings_1180
     ],
     // Dark at 2
     [
@@ -3894,6 +3963,7 @@ const GOLDEN_DOC_TAB: [[u64; 8]; 4] = [
         0x0d72543f5d6587c5, // doc_review_850
         0xc29bb6d56b5beb67, // doc_approved_1180
         0x8a385f9aa43a43b8, // doc_locked_1180
+        0x4fd4afbf7d726fc6, // findings_1180
     ],
     // Light at 1
     [
@@ -3905,6 +3975,7 @@ const GOLDEN_DOC_TAB: [[u64; 8]; 4] = [
         0x59eff04f58c92d40, // doc_review_850
         0x4d6fa62f8b977f1d, // doc_approved_1180
         0xf1603167ed70f699, // doc_locked_1180
+        0xf1da44a290347a18, // findings_1180
     ],
     // Light at 2
     [
@@ -3916,6 +3987,7 @@ const GOLDEN_DOC_TAB: [[u64; 8]; 4] = [
         0x6d05f471266e78e8, // doc_review_850
         0x84732f985b636d39, // doc_approved_1180
         0x153567080b2689aa, // doc_locked_1180
+        0x6d35418382f8b37b, // findings_1180
     ],
 ];
 

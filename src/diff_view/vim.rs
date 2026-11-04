@@ -210,6 +210,13 @@ impl DiffView {
                 }
                 None
             }
+            // The next comment or finding, or the one before.
+            Keysym::bracketright | Keysym::bracketleft => {
+                self.leave_visual();
+                let by = if typed == Keysym::bracketright { 1 } else { -1 };
+                let went = (0..count).fold(false, |_, _| self.jump_comment(by, ctx));
+                (!went).then_some(Outcome::Notice(super::NO_COMMENTS))
+            }
             Keysym::Y => Op::Yank.of(self.delete_motion(Keysym::y, Keysym::y, Keysym::y, count)),
             Keysym::p | Keysym::P => {
                 self.leave_visual();

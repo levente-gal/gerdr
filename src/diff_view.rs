@@ -24,7 +24,7 @@ use smithay::input::keyboard::{Keysym, ModifiersState};
 use crate::{
     chrome::{
         Check, Density, DetailLine, DetailRow, DetailTab, DetailView, DiffFile, DiffRepo, DiffTone,
-        Hint, ReposButton, ReposHit, RowMark, Tone,
+        FindingHead, Hint, ReposButton, ReposHit, RowMark, Tone,
     },
     diff::{FILE_LINES, FileDiff, LineKind},
     diff_edit::{FileEdit, Put},
@@ -49,6 +49,8 @@ pub const READ_ONLY: &str = "A commit's diff can't be edited";
 pub const NO_FINDING: &str = "Move the cursor to a finding first";
 /// Why a dismissal did nothing.
 pub const NO_REASON: &str = "Not dismissed: say why first";
+/// Why `]` and `[` did nothing.
+pub const NO_COMMENTS: &str = "No findings or comments here";
 
 /// How an AI review finding's card is coloured: by severity, muted once
 /// dismissed.
@@ -59,6 +61,17 @@ fn finding_tone(flag: &review::Flag) -> Tone {
         (_, Severity::High) => Tone::Error,
         (_, Severity::Medium) => Tone::Warning,
         (_, Severity::Low) => Tone::Normal,
+    }
+}
+
+/// What a finding's card says of where it stands; none while undecided.
+fn finding_state_word(state: FindingState) -> Option<&'static str> {
+    match state {
+        FindingState::Open => None,
+        FindingState::Fix => Some("to fix"),
+        FindingState::Sent => Some("sent to fix"),
+        FindingState::Fixed => Some("fixed"),
+        FindingState::Dismissed => Some("dismissed"),
     }
 }
 
@@ -273,6 +286,11 @@ pub struct DiffView {
     /// editor's, as byte ranges into their text, wrapped at `cols`.
     comment_wraps: Vec<Vec<Range<usize>>>,
     editor_wrap: Vec<Range<usize>>,
+    /// Every comment placed in the diff, in the order the diff has them
+    /// (what `]` and `[` go through), each with its first row; one in a
+    /// folded file, or past the lines a long file shows, with the row it
+    /// would come at.
+    comment_order: Vec<(usize, usize)>,
     cols: usize,
     /// The comments whose lines are gone, as the rows were last worked
     /// out; and the lines comments are on, by `DiffRow::Line`'s indices.
@@ -358,6 +376,12 @@ pub(crate) enum DiffRow {
     /// After the first `diff::FILE_LINES` lines of a long file: how many
     /// more there are, Enter or a click showing them.
     More(usize, usize),
+    /// Comment `c`'s heading (by index into `review.comments`): who wrote
+    /// it, over its rows.
+    CommentHead {
+        at: Option<(usize, usize)>,
+        c: usize,
+    },
     /// Row `i` of comment `c` (by index into `review.comments`), in file
     /// `at` (as `file`), or with the comments whose lines are gone.
     Comment {
@@ -391,7 +415,8 @@ impl DiffRow {
             | DiffRow::Wrap(k, f, _, _, _)
             | DiffRow::Note(k, f, _)
             | DiffRow::More(k, f) => Some((k, f)),
-            DiffRow::Comment { at, .. }
+            DiffRow::CommentHead { at, .. }
+            | DiffRow::Comment { at, .. }
             | DiffRow::Editor { at, .. }
             | DiffRow::EditorHint { at } => at,
             DiffRow::Repo(_) | DiffRow::Reading(_) | DiffRow::Outdated(_) | DiffRow::Gap => None,
@@ -606,7 +631,18 @@ impl DiffView {
             true => format!("{} · {}", ctx.lead, repos(dirty.len())),
             false => ctx.lead.to_owned(),
         };
-        format!("{lead} · {files} · +{added} −{removed}")
+        let findings = (self.review.comments.iter()).filter_map(|c| c.flag.as_ref());
+        let (found, open) = findings.fold((0, 0), |(n, open), f| {
+            (n + 1, open + usize::from(f.state == FindingState::Open))
+        });
+        let found = match (found, open) {
+            (0, _) => String::new(),
+            (1, 0) => " · 1 finding".into(),
+            (n, 0) => format!(" · {n} findings"),
+            (1, _) => " · 1 finding, open".into(),
+            (n, open) => format!(" · {n} findings, {open} open"),
+        };
+        format!("{lead} · {files} · +{added} −{removed}{found}")
     }
 
     /// Work the diff's rows out again for `items`, scrolled back to
@@ -633,6 +669,7 @@ impl DiffView {
         let mut placed: HashSet<usize> = HashSet::new();
         let mut noted = HashSet::new();
         let mut rows = Vec::new();
+        let mut order: Vec<(usize, usize)> = Vec::new();
         let mut line_parts = HashMap::new();
         // One less than fits: the caret past a line's end has room.
         let width = crate::chrome::diff_line_room(cols, self.plain_digits(), true)
@@ -667,6 +704,7 @@ impl DiffView {
                 for (c, comment) in comments.iter().enumerate() {
                     if comment.lines.is_empty() && on_file(&comment.root, &comment.path) {
                         placed.insert(c);
+                        order.push((c, rows.len()));
                         self.push_comment(&mut rows, Some((k, f)), c);
                     }
                 }
@@ -696,6 +734,7 @@ impl DiffView {
                     .and_then(|e| review::find(file, e.lines.last()?));
                 let key = (item.root.to_path_buf(), file.path.clone());
                 if self.folded.contains(&key) {
+                    order.extend(under.values().flatten().map(|&c| (c, rows.len())));
                     continue;
                 }
                 let at = Some((k, f));
@@ -725,6 +764,7 @@ impl DiffView {
                             }
                         }
                         for &c in under.get(&(h, l)).into_iter().flatten() {
+                            order.push((c, rows.len()));
                             self.push_comment(&mut rows, at, c);
                         }
                         if new_at == Some((h, l)) {
@@ -733,6 +773,11 @@ impl DiffView {
                     }
                 }
                 if !whole && total > FILE_LINES {
+                    let past = (under.values().flatten())
+                        .filter(|c| !order.iter().any(|(x, _)| x == *c))
+                        .map(|&c| (c, rows.len()))
+                        .collect::<Vec<_>>();
+                    order.extend(past);
                     rows.push(DiffRow::More(k, f));
                 }
                 rows.extend((0..file.notes.len()).map(|n| DiffRow::Note(k, f, n)));
@@ -751,6 +796,7 @@ impl DiffView {
             }
             rows.push(DiffRow::Outdated(None));
             for &c in &gone {
+                order.push((c, rows.len()));
                 rows.push(DiffRow::Outdated(Some(c)));
                 self.push_comment(&mut rows, None, c);
             }
@@ -765,6 +811,7 @@ impl DiffView {
         self.noted = noted;
         self.line_parts = line_parts;
         self.rows = rows;
+        self.comment_order = order;
         self.roots = items.iter().map(|i| i.root.to_path_buf()).collect();
         self.find_hits(false);
         if let Some(anchor) = anchor {
@@ -791,6 +838,7 @@ impl DiffView {
             return self.push_editor(rows, at);
         }
         let n = self.comment_wraps.get(c).map_or(1, Vec::len);
+        rows.push(DiffRow::CommentHead { at, c });
         rows.extend((0..n).map(|i| DiffRow::Comment { at, c, i }));
         // A finding being dismissed: the reason under it.
         if edited.is_some() {
@@ -838,7 +886,9 @@ impl DiffView {
                 let line = file.hunks.get(h)?.lines.get(l)?;
                 RowKey::Line(root.to_path_buf(), file.path.clone(), Quoted::of(line))
             }
-            DiffRow::Comment { c, .. } | DiffRow::Outdated(Some(c)) => RowKey::Comment(c),
+            DiffRow::CommentHead { c, .. }
+            | DiffRow::Comment { c, .. }
+            | DiffRow::Outdated(Some(c)) => RowKey::Comment(c),
             _ => RowKey::At(r),
         })
     }
@@ -865,7 +915,7 @@ impl DiffView {
                 line.or(head).or_else(|| self.header_row(root, None))
             }
             RowKey::Comment(c) => self.rows.iter().position(|r| {
-                matches!(*r, DiffRow::Comment { c: x, i: 0, .. } | DiffRow::Outdated(Some(x)) if x == *c)
+                matches!(*r, DiffRow::CommentHead { c: x, .. } | DiffRow::Outdated(Some(x)) if x == *c)
             }),
             RowKey::At(r) => Some((*r).min(last)),
         }
@@ -1191,9 +1241,17 @@ impl DiffView {
     }
 
     /// The comment diff row `r` is of.
+    #[cfg(test)]
+    pub(crate) fn comment_of_row(&self, r: usize) -> Option<usize> {
+        self.comment_at(r)
+    }
+
+    /// The comment diff row `r` is of.
     fn comment_at(&self, r: usize) -> Option<usize> {
         match *self.rows.get(r)? {
-            DiffRow::Comment { c, .. } | DiffRow::Outdated(Some(c)) => Some(c),
+            DiffRow::CommentHead { c, .. }
+            | DiffRow::Comment { c, .. }
+            | DiffRow::Outdated(Some(c)) => Some(c),
             _ => None,
         }
     }
@@ -1604,14 +1662,98 @@ impl DiffView {
     }
 
     /// Put the cursor on comment `c` (by index into `review.comments`),
-    /// the diff scrolled to show it. Whether it is shown.
+    /// the diff scrolled to show it, a third down the page when it was out
+    /// of view: its file unfolded, and all of a long one. Whether it is
+    /// shown.
     pub fn show_comment(&mut self, c: usize, ctx: &Ctx) -> bool {
+        if self.find_row(&RowKey::Comment(c)).is_none()
+            && let Some(comment) = self.review.comments.get(c)
+        {
+            let key = (comment.root.clone(), comment.path.clone());
+            if self.folded.remove(&key) | self.whole.insert(key) {
+                self.build_rows(ctx.sections, self.diff_anchor());
+            }
+        }
         let Some(r) = self.find_row(&RowKey::Comment(c)) else {
             return false;
         };
         self.set_cursor(r, None);
-        self.follow(r, ctx.page);
+        let page = ctx.page.max(1);
+        // Its whole card in view, or nothing moves.
+        let end = (r..self.rows.len())
+            .take_while(|&x| self.comment_at(x) == Some(c))
+            .last()
+            .unwrap_or(r);
+        let room = (page / 4).min(3) as f64;
+        let shown = |at: Option<f64>| at.is_some_and(|at| at >= 1.0 && at < page as f64 - room);
+        if !(shown(self.shown_at(r, page)) && shown(self.shown_at(end, page))) {
+            let last = self.diff_last(page) as f64;
+            let to = (r as f64 - (page / 3) as f64).clamp(0.0, last);
+            move_to(&mut self.scroll, to);
+        }
+        self.select_diff_row(r, ctx);
         true
+    }
+
+    /// Go to the next comment or finding (`by` 1), or the one before (-1),
+    /// from the cursor, else from the top of the view; past the last, the
+    /// first. Whether there was one.
+    pub fn jump_comment(&mut self, by: i64, ctx: &Ctx) -> bool {
+        let n = self.comment_order.len() as i64;
+        if n == 0 {
+            return false;
+        }
+        let cursor = self.cursor.as_ref().map(|c| c.row);
+        let here = cursor.and_then(|r| self.comment_at(r)).and_then(|c| {
+            let order = &self.comment_order;
+            order.iter().position(|&(x, _)| x == c)
+        });
+        let order = &self.comment_order;
+        let top = self.diff_window(ctx.page.max(1)).1.start;
+        let to = match (here, cursor) {
+            (Some(at), _) => at as i64 + by,
+            // Those after a row aren't the ones it is on.
+            (None, Some(row)) if by > 0 => order.partition_point(|&(_, r)| r <= row) as i64,
+            (None, Some(row)) => order.partition_point(|&(_, r)| r < row) as i64 - 1,
+            (None, None) if by > 0 => order.partition_point(|&(_, r)| r < top) as i64,
+            (None, None) => order.partition_point(|&(_, r)| r < top) as i64 - 1,
+        };
+        let c = order[to.rem_euclid(n) as usize].0;
+        self.show_comment(c, ctx)
+    }
+
+    /// Where comment `c` is among those of its kind, findings or the
+    /// user's own, in the diff's order: 1-based, and how many there are.
+    fn comment_place(&self, c: usize) -> (usize, usize) {
+        let finding = |c: usize| (self.review.comments.get(c)).is_some_and(|c| c.flag.is_some());
+        let kind = finding(c);
+        let like = self.comment_order.iter().map(|&(x, _)| x);
+        let like: Vec<usize> = like.filter(|&x| finding(x) == kind).collect();
+        let at = like.iter().position(|&x| x == c).map_or(0, |at| at + 1);
+        (at, like.len())
+    }
+
+    /// What `]` and `[` go through: findings when all are, else comments.
+    fn comment_noun(&self) -> &'static str {
+        match self.review.own() == 0 {
+            true => "finding",
+            false => "comment",
+        }
+    }
+
+    /// Whether there is a comment or finding to go to, and what they are.
+    pub fn comments_to_visit(&self) -> Option<&'static str> {
+        (!self.comment_order.is_empty()).then(|| self.comment_noun())
+    }
+
+    /// Where the comments are on the diff's scrollbar, as `search_ticks`
+    /// has it, the one the cursor is on marked.
+    fn comment_ticks(&self) -> Vec<(f64, bool)> {
+        let total = self.rows.len().max(1) as f64;
+        let here = (self.cursor.as_ref()).and_then(|cursor| self.comment_at(cursor.row));
+        (self.comment_order.iter())
+            .map(|&(c, r)| (r as f64 / total, here == Some(c)))
+            .collect()
     }
 
     /// Scroll the diff to show the editor's caret, and the line under it
@@ -2094,6 +2236,25 @@ impl DiffView {
                     "… {more} more lines · Enter or a click shows them all"
                 ))
             }
+            (DiffRow::CommentHead { c, .. }, _) => {
+                let Some(comment) = self.review.comments.get(c) else {
+                    return blank();
+                };
+                let (at, of) = self.comment_place(c);
+                let noun = if comment.flag.is_some() {
+                    "finding"
+                } else {
+                    "comment"
+                };
+                DetailRow::CommentHead {
+                    finding: comment.flag.as_ref().map(|flag| FindingHead {
+                        severity: flag.severity.label().into(),
+                        state: finding_state_word(flag.state).map(Into::into),
+                        tone: finding_tone(flag),
+                    }),
+                    place: format!("{noun} {at} of {of}"),
+                }
+            }
             (DiffRow::Comment { c, i, .. }, _) => {
                 let (Some(comment), Some(wrap)) =
                     (self.review.comments.get(c), self.comment_wraps.get(c))
@@ -2103,7 +2264,8 @@ impl DiffView {
                 let range = wrap.get(i).cloned().unwrap_or(0..0);
                 DetailRow::Comment {
                     text: comment.text[range].to_owned(),
-                    first: i == 0,
+                    // Its heading rounds the card's top.
+                    first: false,
                     last: i + 1 >= wrap.len(),
                     tone: comment.flag.as_ref().map(finding_tone),
                 }
@@ -2289,18 +2451,23 @@ impl DiffView {
 
     /// The title row's button copying the review, while there is one.
     fn title_buttons(&self) -> Vec<Hint> {
-        let label = match self.review.own() {
-            0 => return Vec::new(),
-            1 => "Copy 1 comment".to_owned(),
-            n => format!("Copy {n} comments"),
-        };
         let hint = |button: ReposButton, label: String| Hint {
             button,
             label,
             key: String::new(),
             disabled: None,
         };
-        let mut buttons = vec![hint(ReposButton::CopyReview, label)];
+        let mut buttons = Vec::new();
+        if let Some(noun) = self.comments_to_visit() {
+            buttons.push(hint(ReposButton::PrevComment, format!("Previous {noun}")));
+            buttons.push(hint(ReposButton::NextComment, format!("Next {noun}")));
+        }
+        let label = match self.review.own() {
+            0 => return buttons,
+            1 => "Copy 1 comment".to_owned(),
+            n => format!("Copy {n} comments"),
+        };
+        buttons.push(hint(ReposButton::CopyReview, label));
         // Those on lines gone (after a commit, say) dropped on their own.
         if !self.outdated.is_empty() {
             let label = format!("Drop {} outdated", self.outdated.len());
@@ -2493,7 +2660,7 @@ impl DiffView {
                     col,
                 })
             }
-            DiffRow::Comment { c, .. } => {
+            DiffRow::CommentHead { c, .. } | DiffRow::Comment { c, .. } => {
                 let comment = self.review.comments.get(c);
                 let line = comment.and_then(|c| c.lines.last()).map(|q| q.number);
                 line.map(|line| Position { line, col: None })
@@ -2859,7 +3026,10 @@ impl DiffView {
             gutter,
             plain: self.plain,
             skipped,
-            ticks: self.search_ticks(),
+            ticks: match self.search.is_some() {
+                true => self.search_ticks(),
+                false => self.comment_ticks(),
+            },
             rows,
             sticky: sticky.is_some(),
             marks,
@@ -3019,6 +3189,24 @@ impl DiffView {
         });
         if on_editor {
             self.signals.focus = true;
+            return Some(None);
+        }
+        // Going to a comment keeps the one being written, as any click off
+        // it does.
+        if let ReposHit::Button(button @ (ReposButton::NextComment | ReposButton::PrevComment)) =
+            hit
+        {
+            if self.editing.is_some() {
+                self.save_comment(ctx);
+            }
+            self.signals.focus = true;
+            self.leave_visual();
+            let by = if button == ReposButton::NextComment {
+                1
+            } else {
+                -1
+            };
+            self.jump_comment(by, ctx);
             return Some(None);
         }
         // A finding's buttons decide the one the cursor is on; the

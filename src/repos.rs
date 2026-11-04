@@ -1648,6 +1648,10 @@ const FOCUS_KEYS: &[(&str, &str)] = &[
     ("Del", "in the branch menu, delete the branch picked"),
     ("Alt+Up / Down", "in the diff, the file before or after"),
     (
+        "] / [",
+        "in the diff, go to the next or the previous finding or comment",
+    ),
+    (
         "c / Del Del",
         "in the diff, comment on the lines (on a file's header, the file) or edit the comment; delete it",
     ),
@@ -1749,6 +1753,8 @@ pub(crate) fn key_name(button: ReposButton) -> &'static str {
     match button {
         B::Comment => "c",
         B::CommentFile => "Shift+C",
+        B::NextComment => "]",
+        B::PrevComment => "[",
         B::Restore => "Shift+R",
         B::SaveComment => "Enter",
         B::DiscardFile => "Del",
@@ -3553,9 +3559,13 @@ impl Panel {
                 Err(Why::other("No comment is on lines no longer in the diff"))
             }
             B::ClearReview | B::DropOutdated => Err(Why::other("Asked on a sheet")),
-            B::Comment | B::SaveComment | B::DiscardComment | B::DeleteComment | B::Restore => {
-                Err(Why::other("Done on the diff"))
-            }
+            B::Comment
+            | B::SaveComment
+            | B::DiscardComment
+            | B::DeleteComment
+            | B::Restore
+            | B::NextComment
+            | B::PrevComment => Err(Why::other("Done on the diff")),
             // Only a feature stage's file under review has them.
             B::CommentFile
             | B::Approve
@@ -5795,6 +5805,8 @@ mod tests {
         view.detail
             .rows
             .iter()
+            // Its heading says who wrote it, not what.
+            .filter(|row| !matches!(row, DetailRow::CommentHead { .. }))
             .map(|row| match row {
                 DetailRow::Text(line) => line.text.clone(),
                 DetailRow::Repo(repo) => format!("# {}", repo.label),
@@ -5810,6 +5822,7 @@ mod tests {
                 }
                 DetailRow::Note(note) => format!("~ {note}"),
                 DetailRow::Comment { text, .. } => format!("> {text}"),
+                DetailRow::CommentHead { .. } => unreachable!("filtered out above"),
                 DetailRow::Editor { text, .. } => format!("| {text}"),
             })
             .collect()
@@ -8099,7 +8112,16 @@ mod tests {
         let title: Vec<String> = (panel.view("p", &ctx).detail.title_buttons.iter())
             .map(|h| h.label.clone())
             .collect();
-        assert_eq!(title, ["Copy 1 comment", "Drop 1 outdated", "Clear review"]);
+        assert_eq!(
+            title,
+            [
+                "Previous comment",
+                "Next comment",
+                "Copy 1 comment",
+                "Drop 1 outdated",
+                "Clear review"
+            ]
+        );
         assert_eq!(
             panel.click(ReposHit::Button(ReposButton::DropOutdated), &ctx),
             None
@@ -8175,8 +8197,9 @@ mod tests {
         panel.key(&none(), Keysym::slash, Keysym::slash, &ctx);
         type_text(&mut panel, "split", &ctx);
         assert_eq!(search_count(&panel, &ctx), "1 of 1");
-        assert_eq!(cursor_row(&panel), Some(header + 1));
-        assert_eq!(panel.diff.found_on(header + 1), vec![(0..5, true)]);
+        // Under its heading.
+        assert_eq!(cursor_row(&panel), Some(header + 2));
+        assert_eq!(panel.diff.found_on(header + 2), vec![(0..5, true)]);
     }
 
     #[test]
@@ -8227,6 +8250,8 @@ mod tests {
         assert_eq!(
             title,
             [
+                (B::PrevComment, "Previous comment"),
+                (B::NextComment, "Next comment"),
                 (B::CopyReview, "Copy 1 comment"),
                 (B::ClearReview, "Clear review")
             ]
@@ -9687,6 +9712,138 @@ mod tests {
             panel.key(&shift, star, star, &ctx),
             Some(Outcome::Notice("No word at the caret"))
         );
+    }
+
+    /// Comment `text` on the first line of the file the diff row `r` is in.
+    fn comment_on(panel: &mut Panel, r: usize, text: &str, ctx: &Ctx) {
+        panel.focus = Focus::Detail;
+        panel.diff.set_cursor(r, None);
+        press(panel, none(), Keysym::c, ctx);
+        type_text(panel, text, ctx);
+        press(panel, none(), Keysym::Return, ctx);
+    }
+
+    /// The first line of each file of the diff, by row.
+    fn first_lines(panel: &Panel) -> Vec<usize> {
+        use crate::diff_view::DiffRow;
+        let rows = &panel.diff.rows;
+        (0..rows.len())
+            .filter(|&r| {
+                matches!(rows[r], DiffRow::Line(_, _, _, 0))
+                    && !matches!(rows[r - 1], DiffRow::Line(..))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_brackets_go_through_the_comments_and_wrap() {
+        let items = items();
+        let mut ctx = ctx(&items, None);
+        ctx.page = (20, 6);
+        let mut panel = Panel::new(&items);
+        read_diffs(&mut panel, &ctx);
+        panel.focus = Focus::Detail;
+        // None yet: it says so.
+        assert_eq!(
+            press(&mut panel, none(), Keysym::bracketright, &ctx),
+            Some(Outcome::Notice(diff_view::NO_COMMENTS))
+        );
+        let lines = first_lines(&panel);
+        assert!(lines.len() >= 2, "{lines:?}");
+        comment_on(&mut panel, lines[1], "the later one", &ctx);
+        comment_on(&mut panel, lines[0], "the first one", &ctx);
+        let cursor_text = |panel: &Panel| {
+            let r = cursor_row(panel).unwrap();
+            let on = panel.diff.comment_of_row(r).expect("on a comment");
+            panel.diff.review.comments[on].text.clone()
+        };
+        // From above them, the first; on, and past the last back round.
+        panel.diff.set_cursor(0, None);
+        press(&mut panel, none(), Keysym::bracketright, &ctx);
+        assert_eq!(cursor_text(&panel), "the first one");
+        press(&mut panel, none(), Keysym::bracketright, &ctx);
+        assert_eq!(cursor_text(&panel), "the later one");
+        press(&mut panel, none(), Keysym::bracketright, &ctx);
+        assert_eq!(cursor_text(&panel), "the first one");
+        // Back, past the first to the last.
+        press(&mut panel, none(), Keysym::bracketleft, &ctx);
+        assert_eq!(cursor_text(&panel), "the later one");
+        // From a line between them: the ones either side.
+        let between = first_lines(&panel)[1];
+        panel.diff.set_cursor(between, None);
+        press(&mut panel, none(), Keysym::bracketleft, &ctx);
+        assert_eq!(cursor_text(&panel), "the first one");
+        // A count goes as many.
+        panel.diff.set_cursor(0, None);
+        press(&mut panel, none(), Keysym::_2, &ctx);
+        press(&mut panel, none(), Keysym::bracketright, &ctx);
+        assert_eq!(cursor_text(&panel), "the later one");
+        // So do the title's buttons.
+        panel.click(ReposHit::Button(ReposButton::NextComment), &ctx);
+        assert_eq!(cursor_text(&panel), "the first one");
+        panel.click(ReposHit::Button(ReposButton::PrevComment), &ctx);
+        assert_eq!(cursor_text(&panel), "the later one");
+    }
+
+    #[test]
+    fn the_brackets_find_a_comment_in_a_folded_file() {
+        use crate::diff_view::DiffRow;
+        let items = items();
+        let mut ctx = ctx(&items, None);
+        ctx.page = (20, 6);
+        let mut panel = Panel::new(&items);
+        read_diffs(&mut panel, &ctx);
+        let lines = first_lines(&panel);
+        comment_on(&mut panel, lines[0], "folded away", &ctx);
+        let head = (0..panel.diff.rows.len())
+            .find(|&r| matches!(panel.diff.rows[r], DiffRow::File(..)))
+            .unwrap();
+        panel.diff.set_cursor(head, None);
+        press(&mut panel, none(), Keysym::Left, &ctx);
+        assert!(
+            !panel
+                .diff
+                .rows
+                .iter()
+                .any(|r| matches!(r, DiffRow::CommentHead { .. })),
+            "folded with its comment"
+        );
+        press(&mut panel, none(), Keysym::bracketright, &ctx);
+        let r = cursor_row(&panel).unwrap();
+        assert!(
+            matches!(panel.diff.rows[r], DiffRow::CommentHead { .. }),
+            "{:?}",
+            panel.diff.rows[r]
+        );
+    }
+
+    #[test]
+    fn a_comment_says_whose_it_is_and_where_on_its_heading() {
+        let items = items();
+        let mut ctx = ctx(&items, None);
+        ctx.page = (20, 40);
+        let mut panel = Panel::new(&items);
+        read_diffs(&mut panel, &ctx);
+        let lines = first_lines(&panel);
+        comment_on(&mut panel, lines[1], "b", &ctx);
+        comment_on(&mut panel, lines[0], "a", &ctx);
+        let view = panel.view("p", &ctx);
+        let places: Vec<(bool, String)> = (view.detail.rows.iter())
+            .filter_map(|row| match row {
+                DetailRow::CommentHead { finding, place } => {
+                    Some((finding.is_some(), place.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            places,
+            [
+                (false, "comment 1 of 2".to_owned()),
+                (false, "comment 2 of 2".to_owned())
+            ]
+        );
+        assert_eq!(view.detail.ticks.len(), 2);
     }
 
     #[test]
