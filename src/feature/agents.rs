@@ -129,12 +129,10 @@ pub fn needs(stage: Stage) -> Option<Needs> {
     }
 }
 
-/// The shell command that starts `base` (an `[agents]` command such as
-/// `claude`) on the prompt in `prompt`, allowed into `dirs` too.
-/// The prompt goes in as `"$(cat '<prompt>')"`, so a long one with quotes
-/// and newlines arrives whole. A CLI gerdr knows gets `--` before it, so no
-/// flag can take the prompt for its own value, whether gerdr added the flag
-/// or the `[agents]` command ends in one.
+/// The shell command that opens `base` (an `[agents]` command such as
+/// `claude`) for the prompt in `prompt`, allowed into `dirs` too. The prompt
+/// isn't on it: the agent waits, so the user can pick its model in its own
+/// view, until told to read the file (see `Gerdr::send_stage_prompt`).
 ///
 /// The command keeps its chat's id in `session_file(prompt)`, for a CLI that
 /// can go back to it.
@@ -152,13 +150,6 @@ pub fn command_line(base: &str, prompt: &Path, dirs: &[PathBuf]) -> String {
         )),
         Flavor::Codex | Flavor::T3 | Flavor::Other => {}
     }
-    if Flavor::of(base).adds_dirs() {
-        line.push_str(" --");
-    }
-    line.push_str(&format!(
-        " \"$(cat {})\"",
-        shell_quote(&prompt.to_string_lossy())
-    ));
     line
 }
 
@@ -273,12 +264,21 @@ pub struct StageRun {
     /// let it go on (see `Stop`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop: Option<Stop>,
+    /// Its agent waits for the prompt, which the user sends once they
+    /// picked its model. Never for one in T3 Code: that one has its draft.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub held: bool,
 }
 
 impl StageRun {
     /// Whether its agent is still around: a pane, or a place in T3 Code.
     pub fn live(&self) -> bool {
         self.pane.is_some() || self.t3.is_some()
+    }
+
+    /// Whether its agent is there, waiting for the user to send its prompt.
+    pub fn waits_to_send(&self) -> bool {
+        self.held && self.live()
     }
 
     /// Its T3 Code thread's id, once it was sent.
@@ -301,7 +301,8 @@ impl StageRun {
 
     /// Whether its chat can be gone back to once its tab is closed.
     pub fn resumes(&self) -> bool {
-        !self.base.is_empty() && Flavor::of(&self.base).resumes()
+        // A chat its prompt never reached has nothing to go back to.
+        !self.held && !self.base.is_empty() && Flavor::of(&self.base).resumes()
     }
 
     /// Its chat's id, as its command kept it. None until the command ran.
@@ -344,33 +345,29 @@ mod tests {
     fn command_lines_per_flavor() {
         let prompt = Path::new("/d/my feature/prompts/plan-1.md");
         let dirs = [PathBuf::from("/d/my feature")];
-        let cat = "\"$(cat '/d/my feature/prompts/plan-1.md')\"";
         let id = "'/d/my feature/prompts/plan-1.session'";
         assert_eq!(
             command_line("claude", prompt, &dirs),
             format!(
                 "claude --add-dir '/d/my feature' \
-                 --session-id \"$(tee {id} </proc/sys/kernel/random/uuid)\" -- {cat}"
+                 --session-id \"$(tee {id} </proc/sys/kernel/random/uuid)\""
             )
         );
         assert_eq!(
             command_line("cursor-agent", prompt, &dirs),
             format!(
                 "cursor-agent --trust --add-dir '/d/my feature' \
-                 --resume \"$(cursor-agent create-chat | tee {id})\" -- {cat}"
+                 --resume \"$(cursor-agent create-chat | tee {id})\""
             )
         );
         assert_eq!(
             command_line("codex", prompt, &dirs),
-            format!("codex --add-dir '/d/my feature' -- {cat}")
+            "codex --add-dir '/d/my feature'"
         );
-        assert_eq!(
-            command_line("aider --yes", prompt, &dirs),
-            "aider --yes \"$(cat '/d/my feature/prompts/plan-1.md')\""
-        );
+        assert_eq!(command_line("aider --yes", prompt, &dirs), "aider --yes");
         assert_eq!(
             command_line("claude", Path::new("/p.md"), &[]),
-            "claude --session-id \"$(tee /p.session </proc/sys/kernel/random/uuid)\" -- \"$(cat /p.md)\""
+            "claude --session-id \"$(tee /p.session </proc/sys/kernel/random/uuid)\""
         );
     }
 
@@ -444,6 +441,35 @@ mod tests {
         assert!(!run("aider").resumes());
         // A run from before gerdr kept chats.
         assert!(!run("").resumes());
+    }
+
+    #[test]
+    fn a_held_run_has_no_chat_to_go_back_to_and_says_if_it_can_be_sent() {
+        let run = StageRun {
+            base: "claude".into(),
+            pane: Some("p1".into()),
+            held: true,
+            ..StageRun::default()
+        };
+        assert!(!run.resumes());
+        assert!(run.waits_to_send());
+        let closed = StageRun {
+            pane: None,
+            ..run.clone()
+        };
+        assert!(!closed.waits_to_send());
+        let sent = StageRun { held: false, ..run };
+        assert!(sent.resumes());
+        assert!(!sent.waits_to_send());
+    }
+
+    #[test]
+    fn a_run_saved_before_holding_was_already_sent() {
+        let json = r#"{"n":1,"agent":"Claude Code","command":"claude","prompt":"/p.md","template":"builtin:plan@1","started":5}"#;
+        let run: StageRun = serde_json::from_str(json).unwrap();
+        assert!(!run.held);
+        // And one sent saves as it was.
+        assert!(!serde_json::to_string(&run).unwrap().contains("held"));
     }
 
     #[test]

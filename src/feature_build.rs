@@ -41,6 +41,15 @@ use crate::{
 /// A feature: its project and slug.
 type Key = (String, String);
 
+/// Why a line couldn't reach a stage's agent, its tab closed.
+pub(crate) const TAB_GONE: &str = "its tab is gone";
+/// Why a line couldn't reach a stage's agent, its CLI gone from its tab.
+pub(crate) const AGENT_QUIT: &str = "its agent has quit";
+/// Who gets fixes when the last Build agent can't: it only starts on them
+/// once the user sends its prompt.
+pub(crate) const FRESH_BUILD_AGENT: &str =
+    "a fresh Build agent, which waits for you to send its prompt";
+
 /// What Build and Verify keep while gerdr runs; not saved.
 #[derive(Debug, Default)]
 pub(crate) struct BuildState {
@@ -507,6 +516,9 @@ impl Gerdr {
     /// Send `line` to the Build agent's tab of `feature`, if it is there.
     pub(crate) fn tell_build_agent(&mut self, feature: &Feature, line: &str) -> Result<(), String> {
         let run = feature.runs.get(&Stage::Build);
+        if run.is_some_and(|r| r.held) {
+            return Err("its prompt wasn't sent yet".into());
+        }
         if let Some(run) = run.filter(|r| r.t3.is_some()) {
             let id = run
                 .t3_thread()
@@ -519,7 +531,7 @@ impl Gerdr {
         let pane = run
             .and_then(|r| r.pane.clone())
             .filter(|p| self.herdr_pane_place(p).is_some())
-            .ok_or_else(|| String::from("its tab is gone"))?;
+            .ok_or_else(|| String::from(TAB_GONE))?;
         self.tell_agent_pane(&pane, line)
     }
 
@@ -531,7 +543,7 @@ impl Gerdr {
             return Err("herdr isn't connected".into());
         };
         if crate::prepare::step(&herdr.process_info(pane)) != crate::prepare::Step::Busy {
-            return Err("its agent has quit".into());
+            return Err(AGENT_QUIT.into());
         }
         herdr.send_line(pane, line)
     }
@@ -593,7 +605,7 @@ impl Gerdr {
             ));
         };
         let alive = run.agent_key().is_some() && self.stage_run_state(&run).1;
-        let mut sent = Err(String::from("its tab is gone"));
+        let mut sent = Err(String::from(TAB_GONE));
         if alive {
             let data = store::dir(None, project, slug);
             let names = self.projects.names(&feature);
@@ -800,7 +812,7 @@ impl Gerdr {
         let data = store::dir(None, project, slug);
         let names = self.projects.names(feature);
         let joined = failures.join("\n");
-        let mut sent = Err(String::from("its tab is gone"));
+        let mut sent = Err(String::from(TAB_GONE));
         if into_pane {
             let mut values = feature_agents::vars(feature, &names, &data, Stage::Build);
             values.insert("evidence".into(), joined.clone());
@@ -850,7 +862,7 @@ impl Gerdr {
         }
         let first = failures.first().map_or("see evidence.md", String::as_str);
         let to = if fresh {
-            "a fresh Build agent"
+            FRESH_BUILD_AGENT
         } else {
             "the Build agent"
         };
@@ -878,7 +890,7 @@ impl Gerdr {
             .and_then(|f| f.runs.get(&Stage::AiReview))
             .map_or_else(|| "an agent".to_owned(), |r| r.agent.clone());
         self.show_success(format!(
-            "\u{201c}{title}\u{201d} passed Verify; {agent} reviews it"
+            "\u{201c}{title}\u{201d} passed Verify; {agent} waits for its prompt"
         ));
     }
 
@@ -893,6 +905,15 @@ impl Gerdr {
                 worked: false,
             },
         );
+    }
+
+    /// The Build agent watched as fixing feature `slug`, if any, is now
+    /// `agent`.
+    pub(crate) fn fixing_moved(&mut self, project: &str, slug: &str, agent: AgentKey) {
+        let key = (project.to_owned(), slug.to_owned());
+        if let Some(fixing) = self.features.build.fixing.get_mut(&key) {
+            fixing.agent = agent;
+        }
     }
 
     /// Look at the Build agents of `project` fixing what Verify or a review
@@ -920,6 +941,14 @@ impl Gerdr {
             let (status, alive) = self.agent_key_state(&fixing.agent);
             if !verifying {
                 self.features.build.fixing.remove(&key);
+                continue;
+            }
+            // Not fixing yet: picking its model isn't work, nor its tab
+            // closing, as Start agent opens one again.
+            let held = (self.feature(project, slug))
+                .and_then(|f| f.runs.get(&Stage::Build))
+                .is_some_and(|r| r.held);
+            if held {
                 continue;
             }
             match fixing_next(fixing.worked, status, alive) {

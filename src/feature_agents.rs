@@ -80,6 +80,9 @@ pub enum GateKind {
     /// Manual test waits for the user to try the brief's criteria:
     /// `passed` of `total` passed on the code as it is.
     ManualTest { passed: u32, total: u32 },
+    /// The stage's agent is open, waiting for its model to be picked and
+    /// its prompt sent. Started by gerdr, it would sit there unseen.
+    SendPrompt,
 }
 
 /// How long a file must stay good and unchanged to count as done when
@@ -319,6 +322,10 @@ pub(crate) fn gate_of(
 ) -> Option<(Stage, u64, GateKind)> {
     if f.status != Status::Open {
         return None;
+    }
+    // Any stage's: a fresh Build agent for fixes waits on a done Build.
+    if let Some((stage, run)) = f.runs.iter().find(|(_, run)| run.waits_to_send()) {
+        return Some((*stage, run.started, GateKind::SendPrompt));
     }
     let stage = f.current()?;
     match stage {
@@ -814,6 +821,12 @@ pub(crate) fn agent_line(
     if run.t3 == Some(T3Run::Draft) {
         return "draft in T3 Code \u{b7} pick a model and send it".into();
     }
+    if run.waits_to_send() {
+        return "waiting for you \u{b7} pick a model and send the prompt".into();
+    }
+    if run.held {
+        return format!("{} closed \u{b7} its prompt wasn't sent", run.agent);
+    }
     let started = format!("started {}", projects::ago(now, run.started));
     if !run.live() {
         return match run.resumes() {
@@ -954,6 +967,11 @@ impl Gerdr {
         if needs(stage).is_none() {
             return self.show_warning(format!("No agent runs {} yet", stage.label()));
         }
+        // Before `startable`: a fresh Build agent for fixes waits while Build
+        // is done, and what it was to be told is in its prompt.
+        if !fresh && feature.runs.get(&stage).is_some_and(|r| r.held) {
+            return self.reopen_held_agent(project, slug, stage);
+        }
         if let Err(why) = startable(feature, stage) {
             return self.show_warning(why);
         }
@@ -973,6 +991,121 @@ impl Gerdr {
             return;
         }
         self.launch_stage_agent(project, slug, stage, &[]);
+    }
+
+    /// Show the agent waiting for `stage`'s prompt of feature `slug`, in a
+    /// new tab if its tab closed. The run stays, so the prompt it waits for
+    /// isn't lost, whatever it was rendered with. Its chat id is a new one:
+    /// the last never got a message.
+    fn reopen_held_agent(&mut self, project: &str, slug: &str, stage: Stage) {
+        let Some(feature) = self.feature(project, slug).cloned() else {
+            return;
+        };
+        if feature.status != Status::Open {
+            let title = &feature.title;
+            return self.show_warning(format!("\u{201c}{title}\u{201d} isn't open"));
+        }
+        let Some(run) = feature.runs.get(&stage) else {
+            return;
+        };
+        if let Some(pane) = (run.pane.clone()).filter(|p| self.herdr_pane_place(p).is_some()) {
+            return self.focus_agent(&agents::AgentKey::Herdr(pane));
+        }
+        let agent = run.agent.clone();
+        let command = run.command.clone();
+        let opened = self.open_feature_tab(project, slug, &feature.dir, Some(command));
+        let Some(pane) = opened else {
+            tracing::warn!("no tab for {agent}, waiting on {}", stage.label());
+            return self.show_error(format!("Couldn't open a tab for {agent}"));
+        };
+        let Some(f) = self.feature_mut(project, slug) else {
+            return;
+        };
+        let Some(r) = f.runs.get_mut(&stage) else {
+            return;
+        };
+        r.pane = Some(pane.clone());
+        f.log(
+            feature::now(),
+            format!("{} agent's tab opened again: {agent}", stage.label()),
+        );
+        self.save_feature(project, slug);
+        self.features
+            .agents
+            .remove(&(project.to_owned(), slug.to_owned(), stage));
+        if stage == Stage::Build {
+            self.fixing_moved(project, slug, agents::AgentKey::Herdr(pane));
+        }
+        self.show_success(held_text(&agent, stage, &feature.title));
+    }
+
+    /// Tell the agent waiting on `stage` of feature `slug` to read its
+    /// prompt, in one line: a terminal agent would send a pasted line break
+    /// as Enter. From here on its work is watched. Its tab gone, or its CLI
+    /// quit, the run forgets the tab, and Start agent opens one again.
+    pub(crate) fn send_stage_prompt(&mut self, project: &str, slug: &str, stage: Stage) {
+        let Some(feature) = self.feature(project, slug).cloned() else {
+            return;
+        };
+        let Some(run) = feature.runs.get(&stage).filter(|r| r.held).cloned() else {
+            return self.show_warning(format!("{}'s prompt was sent already", stage.label()));
+        };
+        if feature.status != Status::Open {
+            let title = &feature.title;
+            return self.show_warning(format!("\u{201c}{title}\u{201d} isn't open"));
+        }
+        let pane = (run.pane.clone()).filter(|p| self.herdr_pane_place(p).is_some());
+        let sent = match &pane {
+            None => Err(String::from(crate::feature_build::TAB_GONE)),
+            Some(pane) => {
+                let data = store::dir(None, project, slug);
+                let names = self.projects.names(&feature);
+                let mut values = vars(&feature, &names, &data, stage);
+                values.insert("prompt.path".into(), run.prompt.display().to_string());
+                prompts::render_builtin("start", &values)
+                    .map_err(|e| e.to_string())
+                    .and_then(|line| self.tell_agent_pane(pane, line.trim()))
+            }
+        };
+        let agent = run.agent;
+        if let Err(why) = sent {
+            tracing::warn!(
+                "sending {} prompt of {project}/{slug} to {agent}: {why}",
+                stage.label()
+            );
+            let lost = pane.is_none() || why == crate::feature_build::AGENT_QUIT;
+            if lost
+                && let Some(r) = self
+                    .feature_mut(project, slug)
+                    .and_then(|f| f.runs.get_mut(&stage))
+            {
+                r.pane = None;
+                self.save_feature(project, slug);
+            }
+            let then = if lost {
+                "; Start agent opens it again"
+            } else {
+                ""
+            };
+            return self.show_warning(format!("Couldn't send the prompt to {agent}: {why}{then}"));
+        }
+        let now = feature::now();
+        let Some(f) = self.feature_mut(project, slug) else {
+            return;
+        };
+        let Some(r) = f.runs.get_mut(&stage) else {
+            return;
+        };
+        r.held = false;
+        r.nudged = false;
+        // Its work starts now: what it writes is new from here.
+        r.started = now;
+        f.log(now, format!("{} prompt sent to {agent}", stage.label()));
+        self.save_feature(project, slug);
+        self.features
+            .agents
+            .remove(&(project.to_owned(), slug.to_owned(), stage));
+        self.show_success(format!("Sent the prompt to {agent}"));
     }
 
     /// Go back to the chat of `stage`'s last agent of feature `slug`, its
@@ -1040,7 +1173,9 @@ impl Gerdr {
     /// Start a new run of `stage`'s agent, its prompt rendered with `extra`
     /// over the feature's values (`comments` when it is sent back with
     /// them, `evidence` for a Build agent fixing Verify's failures).
-    /// Whether it started.
+    /// Whether it started. It starts waiting: the user picks its model and
+    /// sends the prompt (see `send_stage_prompt`), clicked or not, and in
+    /// T3 Code sends its draft.
     pub(crate) fn launch_stage_agent(
         &mut self,
         project: &str,
@@ -1138,7 +1273,9 @@ impl Gerdr {
             ready: None,
             sent_back: last.map_or(0, |r| r.sent_back),
             stop: None,
+            held: !in_t3,
         };
+        let opened = run.pane.clone();
         let Some(feature) = self.feature_mut(project, slug) else {
             return false;
         };
@@ -1156,10 +1293,12 @@ impl Gerdr {
             self.t3_stage_drafted(project, slug, stage, &title);
             return true;
         }
-        self.show_success(format!(
-            "Started {agent} on {} of \u{201c}{title}\u{201d}",
-            stage.label()
-        ));
+        // No tab: opening it said why.
+        if opened.is_some() {
+            let text = held_text(&agent, stage, &title);
+            self.notify_feature(project, slug, opened, &text);
+            self.show_success(text);
+        }
         true
     }
 
@@ -1191,6 +1330,15 @@ impl Gerdr {
         let now = Instant::now();
         for (feature, stage, run) in runs {
             let key = (project.clone(), feature.slug.clone(), stage);
+            if run.held {
+                // It has no work to judge yet, only a tab to lose.
+                let alive = self.stage_run_state(&run).1;
+                let watch = self.features.agents.entry(key).or_default();
+                if held_tab_gone(watch, alive, now) && run.live() {
+                    self.forget_pane(&project, &feature.slug, stage);
+                }
+                continue;
+            }
             if self.t3_stage_thread_sent(&feature, stage, &run) {
                 continue;
             }
@@ -1662,7 +1810,7 @@ impl Gerdr {
             .pane
             .as_deref()
             .is_some_and(|p| self.herdr_pane_place(p).is_some());
-        let mut sent = Err(String::from("its tab is gone"));
+        let mut sent = Err(String::from(crate::feature_build::TAB_GONE));
         if alive && let Some(pane) = run.pane.clone() {
             sent = std::fs::create_dir_all(data.join("prompts"))
                 .and_then(|()| std::fs::write(&file, &comments))
@@ -1734,6 +1882,24 @@ fn stop_is_new(stop: Option<Stop>, done: u32, total: u32) -> bool {
 }
 
 /// Whether `stage`'s agent can start for `feature`; else why not.
+/// What gerdr says of `agent` opened on `stage` of feature `title`.
+fn held_text(agent: &str, stage: Stage, title: &str) -> String {
+    format!(
+        "{agent} is open on {} of \u{201c}{title}\u{201d}: pick a model, then send the prompt on its page",
+        stage.label()
+    )
+}
+
+/// Whether the tab of an agent waiting for its prompt is gone: not there
+/// for `STABLE`, as herdr may only be coming back.
+fn held_tab_gone(watch: &mut Watch, alive: bool, now: Instant) -> bool {
+    if alive {
+        watch.gone = None;
+        return false;
+    }
+    now.duration_since(*watch.gone.get_or_insert(now)) >= STABLE
+}
+
 fn startable(feature: &Feature, stage: Stage) -> Result<(), String> {
     if feature.status != Status::Open {
         return Err(format!("\u{201c}{}\u{201d} isn't open", feature.title));
@@ -1751,6 +1917,76 @@ fn startable(feature: &Feature, stage: Stage) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_agent_waiting_for_its_prompt_is_a_gate_while_its_tab_is_there() {
+        let mut f = crate::features::tests::feature(
+            "a",
+            vec![crate::features::tests::repo("api", true)],
+            1,
+        );
+        let held = StageRun {
+            pane: Some("p1".into()),
+            held: true,
+            started: 7,
+            ..StageRun::default()
+        };
+        f.runs.insert(Stage::Plan, held.clone());
+        assert_eq!(
+            gate_of(&f, |_| None),
+            Some((Stage::Plan, 7, GateKind::SendPrompt))
+        );
+        // Its tab closed: nothing waits there until it opens again.
+        let closed = StageRun {
+            pane: None,
+            ..held.clone()
+        };
+        f.runs.insert(Stage::Plan, closed);
+        assert_eq!(gate_of(&f, |_| None), None);
+        // Fixes waiting on a done Build, past the current stage.
+        let mut f = crate::features::tests::feature(
+            "a",
+            vec![crate::features::tests::repo("api", true)],
+            3,
+        );
+        f.runs.insert(Stage::Build, held);
+        assert_eq!(
+            gate_of(&f, |_| None),
+            Some((Stage::Build, 7, GateKind::SendPrompt))
+        );
+    }
+
+    #[test]
+    fn a_waiting_agents_tab_is_gone_only_after_it_stayed_gone() {
+        let at = Instant::now();
+        let mut watch = Watch::default();
+        assert!(!held_tab_gone(&mut watch, false, at));
+        assert!(!held_tab_gone(&mut watch, false, at + STABLE / 2));
+        // Back in time: herdr only reconnected.
+        assert!(!held_tab_gone(&mut watch, true, at + STABLE / 2));
+        assert!(!held_tab_gone(&mut watch, false, at + STABLE));
+        assert!(held_tab_gone(&mut watch, false, at + STABLE * 2));
+    }
+
+    #[test]
+    fn a_waiting_agents_line_says_what_the_user_is_to_do() {
+        let held = StageRun {
+            agent: "Claude Code".into(),
+            pane: Some("p1".into()),
+            held: true,
+            ..StageRun::default()
+        };
+        let line = |run: &StageRun| agent_line(run, Stage::Plan, Some(AgentStatus::Idle), None, 9);
+        assert_eq!(
+            line(&held),
+            "waiting for you \u{b7} pick a model and send the prompt"
+        );
+        let closed = StageRun { pane: None, ..held };
+        assert_eq!(
+            line(&closed),
+            "Claude Code closed \u{b7} its prompt wasn't sent"
+        );
+    }
 
     #[test]
     fn a_file_sent_back_after_the_user_edited_it_says_so() {

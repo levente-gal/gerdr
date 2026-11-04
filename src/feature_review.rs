@@ -459,7 +459,7 @@ impl Gerdr {
         };
         let agent = (f.runs.get(&Stage::Build)).and_then(|r| r.agent_key());
         let to = if fresh {
-            "a fresh Build agent"
+            crate::feature_build::FRESH_BUILD_AGENT
         } else {
             "the Build agent"
         };

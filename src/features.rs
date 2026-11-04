@@ -20,8 +20,9 @@
 //! goes at the page's end). Tab moves the keyboard between the rail and
 //! the repositories; the arrows (Ctrl+J/K), Home and End pick a stage's
 //! page or a repository, which scrolls into view. Enter does the page's
-//! next thing (start, show or review the stage's agent, let Build go on
-//! after a milestone, run Verify's checks, mark it done, ship) or the
+//! next thing (start or show the stage's agent, send it its prompt once its
+//! model is picked, review what it wrote, let Build go on after a milestone,
+//! run Verify's checks, mark it done, ship) or the
 //! repository's (unfold the rows, press a row's button); Ctrl+PgUp/Ctrl+PgDn
 //! go to the previous or next feature, Ctrl+O opens a tab in the feature's folder,
 //! Ctrl+Shift+O opens the pull request of the repository picked, or on
@@ -799,6 +800,8 @@ pub enum PanelOutcome {
     Ship,
     /// Start this agent stage's agent (fresh: even if one runs).
     StartAgent(Stage, bool),
+    /// Tell the agent waiting on this stage to read its prompt.
+    SendPrompt(Stage),
     /// Show this agent stage's agent.
     ShowAgent(Stage),
     /// Go back to the chat of this agent stage's agent, its tab closed.
@@ -1117,6 +1120,11 @@ fn agent_button(
     if run.live() {
         return Some(("Show agent", PanelOutcome::ShowAgent(stage)));
     }
+    // Its prompt is still to send, also from a done Build: fixes wait so.
+    if run.held {
+        return (feature.status == Status::Open)
+            .then_some(("Start agent", PanelOutcome::StartAgent(stage, false)));
+    }
     (feature.status == Status::Open && run.resumes() && ctx.locked_by(feature, stage).is_none())
         .then_some(("Resume agent", PanelOutcome::ResumeAgent(stage)))
 }
@@ -1126,6 +1134,7 @@ fn agent_button(
 /// stopped after a milestone, it is let go on.
 fn agent_action(feature: &Feature, stage: Stage) -> PanelOutcome {
     match feature.runs.get(&stage) {
+        Some(run) if run.waits_to_send() => PanelOutcome::SendPrompt(stage),
         Some(run) if run.stop.is_some() => PanelOutcome::Continue(stage),
         Some(run) if run.ready.is_some() && stage != Stage::Build => PanelOutcome::OpenDoc(stage),
         Some(run) if run.live() => PanelOutcome::ShowAgent(stage),
@@ -1147,6 +1156,7 @@ fn review_action(feature: &Feature) -> PanelOutcome {
     match review {
         Some(r) if r.count(FindingState::Open) > 0 => PanelOutcome::Findings,
         Some(r) if r.count(FindingState::Fix) > 0 => PanelOutcome::SendFixes,
+        _ if run.waits_to_send() => PanelOutcome::SendPrompt(stage),
         _ if run.live() => PanelOutcome::ShowAgent(stage),
         _ if run.resumes() => PanelOutcome::ResumeAgent(stage),
         _ => PanelOutcome::StartAgent(stage, false),
@@ -1249,6 +1259,7 @@ fn row_hint(feature: &Feature, row: PanelRow, ctx: RowCtx) -> &'static str {
 fn action_hint(action: &PanelOutcome) -> &'static str {
     match action {
         PanelOutcome::StartAgent(..) => "start agent",
+        PanelOutcome::SendPrompt(_) => "send prompt",
         PanelOutcome::ShowAgent(_) => "show agent",
         PanelOutcome::ResumeAgent(_) => "resume agent",
         PanelOutcome::OpenDoc(Stage::Discover) => "review brief",
@@ -1276,6 +1287,7 @@ fn stage_button(feature: &Feature, stage: Stage, ctx: RowCtx) -> Option<&'static
         PanelOutcome::Ship => Some("Ship\u{2026}"),
         PanelOutcome::Untick(_) => Some("Reopen"),
         PanelOutcome::StartAgent(..) => Some("Start agent"),
+        PanelOutcome::SendPrompt(_) => Some("Send prompt"),
         PanelOutcome::ShowAgent(_) => Some("Show agent"),
         PanelOutcome::ResumeAgent(_) => Some("Resume agent"),
         PanelOutcome::OpenDoc(_) => Some("Review"),
@@ -1900,16 +1912,25 @@ pub fn page_actions(
     };
     let row = PanelRow::Stage(stage);
     let mut out = Vec::new();
+    // First whatever the stage's mark: a fresh Build agent for fixes waits
+    // on a done Build.
+    let send = PanelOutcome::SendPrompt(stage);
+    let waits = feature.status == Status::Open
+        && (feature.runs.get(&stage)).is_some_and(|run| run.waits_to_send());
+    if waits {
+        out.push((button("Send prompt", ButtonStyle::Primary), send.clone()));
+    }
     if let (StageMark::Done, Some(current)) = (mark, feature.current()) {
         let label = format!("Go to {}", current.label());
-        out.push((
-            button(&label, ButtonStyle::Primary),
-            PanelOutcome::GoToCurrent,
-        ));
+        let style = match waits {
+            true => ButtonStyle::Plain,
+            false => ButtonStyle::Primary,
+        };
+        out.push((button(&label, style), PanelOutcome::GoToCurrent));
     }
     if let (Some(label), Some(main)) = (
         stage_button(feature, stage, ctx),
-        row_action(feature, row, ctx),
+        row_action(feature, row, ctx).filter(|main| *main != send),
     ) {
         // Reopen is no default: Enter leaves a done stage be.
         let style = match main {
@@ -3213,7 +3234,14 @@ impl Gerdr {
             let root = match dirs.first() {
                 Some(from) => {
                     let theirs = self.other_projects_dirs(&p.id);
-                    finds.push((p.id.clone(), from.clone(), dirs.clone(), theirs, ignore, bases));
+                    finds.push((
+                        p.id.clone(),
+                        from.clone(),
+                        dirs.clone(),
+                        theirs,
+                        ignore,
+                        bases,
+                    ));
                     Finding::Looking
                 }
                 None => Finding::Failed("it has no workspace with a folder".into()),
@@ -3882,6 +3910,7 @@ impl Gerdr {
             PanelOutcome::StartAgent(stage, fresh) => {
                 self.start_stage_agent(&project, &slug, stage, fresh)
             }
+            PanelOutcome::SendPrompt(stage) => self.send_stage_prompt(&project, &slug, stage),
             PanelOutcome::ShowAgent(stage) => self.show_stage_agent(&project, &slug, stage),
             PanelOutcome::ResumeAgent(stage) => self.resume_stage_agent(&project, &slug, stage),
             PanelOutcome::OpenDoc(stage) => {
@@ -5558,6 +5587,7 @@ fn current_line(feature: &Feature, stage: Stage, state: &PanelState, now: u64) -
     let run = feature.runs.get(&stage);
     let agent = || match run {
         Some(run) if run.t3 == Some(feature::agents::T3Run::Draft) => "draft in T3 Code".to_owned(),
+        Some(run) if run.waits_to_send() => "waiting to send".to_owned(),
         Some(run) if run.live() => running_for(now, run.started),
         Some(_) => "agent closed".to_owned(),
         None => String::new(),
@@ -5663,7 +5693,8 @@ fn lines(label: &str, lines: Vec<CheckLine>) -> PageSection {
 fn agent_buttons(stage: Stage, actions: &[(PageButton, PanelOutcome)]) -> Vec<usize> {
     (actions.iter().enumerate())
         .filter(|(_, (_, outcome))| match outcome {
-            PanelOutcome::ShowAgent(s)
+            PanelOutcome::SendPrompt(s)
+            | PanelOutcome::ShowAgent(s)
             | PanelOutcome::ResumeAgent(s)
             | PanelOutcome::Continue(s)
             | PanelOutcome::StartAgent(s, _) => *s == stage,
@@ -5760,6 +5791,15 @@ fn file_line(feature: &Feature, stage: Stage, ctx: RowCtx) -> CheckLine {
     let written = ctx.wrote(stage);
     match feature.runs.get(&stage) {
         Some(run) if run.ready.is_some() => line("ready for review", CheckTone::Ready),
+        // Its agent hasn't its prompt yet: nothing is being written.
+        Some(run) if run.held => {
+            let what = if written {
+                "written"
+            } else {
+                "not written yet"
+            };
+            line(what, CheckTone::Note)
+        }
         Some(run) if run.sent_back > 0 => {
             let n = run.sent_back;
             line(
@@ -5966,9 +6006,10 @@ fn stage_page(
     }
     // The agent's card says what it does: the status line needn't again.
     let carded = |l: &CheckLine| {
-        (sections.iter())
-            .any(|s| matches!(s, PageSection::Agent { status, .. }
-                if !status.is_empty() && l.text.ends_with(status.as_str())))
+        (sections.iter()).any(|s| {
+            matches!(s, PageSection::Agent { status, .. }
+                if !status.is_empty() && l.text.ends_with(status.as_str()))
+        })
     };
     let status = status.filter(|l| !carded(l));
     // A restart runs the agent picked: the button says so when it's another.
@@ -7624,6 +7665,99 @@ pub(crate) mod tests {
         }
     }
 
+    /// A run of `base` whose agent waits for its prompt, its tab `pane`.
+    fn held_run(pane: Option<&str>) -> feature::agents::StageRun {
+        feature::agents::StageRun {
+            base: "claude".into(),
+            held: true,
+            ..agent_run(pane, None)
+        }
+    }
+
+    #[test]
+    fn enter_sends_the_prompt_of_an_agent_waiting_for_it() {
+        let mut f = feature("b", vec![repo("api", true)], 1);
+        f.runs.insert(Stage::Plan, held_run(Some("p1")));
+        let send = PanelOutcome::SendPrompt(Stage::Plan);
+        let actions = page_actions(&f, Stage::Plan, RowCtx::default());
+        assert_eq!(actions[0].1, send);
+        assert_eq!(actions[0].0.style, ButtonStyle::Primary);
+        assert_eq!(actions[0].0.label, "Send prompt");
+        assert_eq!(
+            page_outcomes(&f, Stage::Plan)
+                .iter()
+                .filter(|o| **o == send)
+                .count(),
+            1
+        );
+        assert!(page_outcomes(&f, Stage::Plan).contains(&PanelOutcome::ShowAgent(Stage::Plan)));
+        assert_eq!(
+            page_enter(&f, Stage::Plan, RowCtx::default()),
+            Some(send.clone())
+        );
+        // Nothing is being written while it waits.
+        assert_eq!(
+            file_line(&f, Stage::Plan, RowCtx::default()),
+            line("not written yet", CheckTone::Note)
+        );
+        assert_eq!(
+            file_line(&f, Stage::Plan, wrote_all()),
+            line("written", CheckTone::Note)
+        );
+        // It sits on the agent's card, with what else acts on the agent.
+        assert!(agent_buttons(Stage::Plan, &actions).contains(&0));
+    }
+
+    #[test]
+    fn a_waiting_agents_closed_tab_opens_again_rather_than_resume() {
+        let mut f = feature("b", vec![repo("api", true)], 1);
+        f.runs.insert(Stage::Plan, held_run(None));
+        let out = page_outcomes(&f, Stage::Plan);
+        assert!(out.contains(&PanelOutcome::StartAgent(Stage::Plan, false)));
+        assert!(!out.contains(&PanelOutcome::SendPrompt(Stage::Plan)));
+        assert!(!out.contains(&PanelOutcome::ResumeAgent(Stage::Plan)));
+        assert_eq!(
+            page_enter(&f, Stage::Plan, RowCtx::default()),
+            Some(PanelOutcome::StartAgent(Stage::Plan, false))
+        );
+    }
+
+    #[test]
+    fn fixes_waiting_on_a_done_build_can_be_sent_from_its_page() {
+        // Build done, a later stage current: a fresh agent for fixes waits.
+        let mut f = feature("b", vec![repo("api", true)], 3);
+        assert!(f.is_done(Stage::Build));
+        f.runs.insert(Stage::Build, held_run(Some("p1")));
+        let send = PanelOutcome::SendPrompt(Stage::Build);
+        let actions = page_actions(&f, Stage::Build, RowCtx::default());
+        assert_eq!(actions[0].1, send);
+        assert_eq!(actions[0].0.style, ButtonStyle::Primary);
+        let primaries = (actions.iter())
+            .filter(|(b, _)| b.style == ButtonStyle::Primary)
+            .count();
+        assert_eq!(primaries, 1);
+        assert_eq!(page_enter(&f, Stage::Build, RowCtx::default()), Some(send));
+        // Its tab closed: it can still open again from there.
+        f.runs.insert(Stage::Build, held_run(None));
+        assert!(
+            page_outcomes(&f, Stage::Build)
+                .contains(&PanelOutcome::StartAgent(Stage::Build, false))
+        );
+    }
+
+    #[test]
+    fn the_reviewer_waits_for_its_prompt_too() {
+        let mut f = feature("b", vec![repo("api", true)], 4);
+        assert_eq!(f.current(), Some(Stage::AiReview));
+        f.runs.insert(Stage::AiReview, held_run(Some("p1")));
+        assert_eq!(review_action(&f), PanelOutcome::SendPrompt(Stage::AiReview));
+        f.runs.insert(Stage::AiReview, held_run(None));
+        assert_eq!(
+            review_action(&f),
+            PanelOutcome::StartAgent(Stage::AiReview, false)
+        );
+    }
+
     fn page_outcomes(f: &Feature, stage: Stage) -> Vec<PanelOutcome> {
         let actions = page_actions(f, stage, RowCtx::default());
         actions.into_iter().map(|(_, o)| o).collect()
@@ -8671,10 +8805,7 @@ pub(crate) mod tests {
             labels(&actions),
             [
                 ("Show agent", PanelOutcome::ShowAgent(Stage::Build)),
-                (
-                    "Restart",
-                    PanelOutcome::StartAgent(Stage::Build, true)
-                ),
+                ("Restart", PanelOutcome::StartAgent(Stage::Build, true)),
                 ("Start over\u{2026}", PanelOutcome::StartOver(Stage::Build)),
             ]
         );

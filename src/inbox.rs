@@ -869,6 +869,7 @@ fn detail_view(item: &InboxItem, actions: &[ItemAction], now: u64) -> InboxDetai
                 K::Findings { .. } => ("Read", "Enter shows the diff at the first finding"),
                 K::CodeReview => ("Waiting", "Enter shows the diff to review"),
                 K::ManualTest { .. } => ("Waiting", "Enter opens the manual test sheet"),
+                K::SendPrompt => ("Waiting", "Enter opens the feature to send the prompt"),
             };
             field(when, crate::projects::ago(now, *since));
             field("Next", next.to_owned());
