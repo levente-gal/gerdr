@@ -2454,7 +2454,7 @@ fn feature_tabs() -> [(&'static str, super::FeatureTabView); 14] {
 }
 
 /// Each fixture at the width it shows best at, and Build at all three.
-const TAB_SURFACES: [(&str, i32); 17] = [
+const TAB_SURFACES: [(&str, i32); 18] = [
     ("tab_build", 860),
     ("tab_build", 1180),
     ("tab_build", 1920),
@@ -2472,9 +2472,10 @@ const TAB_SURFACES: [(&str, i32); 17] = [
     ("tab_picks_later", 1180),
     ("tab_picks_running", 860),
     ("tab_resume", 1180),
+    ("tab_resume", 860),
 ];
 
-const FEATURE_TAB: [&str; 17] = [
+const FEATURE_TAB: [&str; 18] = [
     "tab_build_860",
     "tab_build_1180",
     "tab_build_1920",
@@ -2492,6 +2493,7 @@ const FEATURE_TAB: [&str; 17] = [
     "tab_picks_later_1180",
     "tab_picks_running_860",
     "tab_resume_1180",
+    "tab_resume_860",
 ];
 
 fn paint_feature_tab(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
@@ -2512,7 +2514,7 @@ fn paint_feature_tab(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
 }
 
 /// The recorded hashes of `FEATURE_TAB`, per case in `CASES`.
-const GOLDEN_FEATURE_TAB: [[u64; 17]; 4] = [
+const GOLDEN_FEATURE_TAB: [[u64; 18]; 4] = [
     // Dark at 1
     [
         0xab7c76988146b933, // tab_build_860
@@ -2532,6 +2534,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 17]; 4] = [
         0x3888bbee8cd4d5aa, // tab_picks_later_1180
         0x731f85bf6bf22fd0, // tab_picks_running_860
         0x846d510a1650a771, // tab_resume_1180
+        0x9b13d1415d51938c, // tab_resume_860
     ],
     // Dark at 2
     [
@@ -2552,6 +2555,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 17]; 4] = [
         0x2850b3bb86da68f9, // tab_picks_later_1180
         0x270d22cd53ec1d09, // tab_picks_running_860
         0x589c27cc84b52cd6, // tab_resume_1180
+        0xb7c4fc70a51ea543, // tab_resume_860
     ],
     // Light at 1
     [
@@ -2572,6 +2576,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 17]; 4] = [
         0xc4c01c352f51d2a0, // tab_picks_later_1180
         0xcbb3e52abd56986f, // tab_picks_running_860
         0x184835d662cd8025, // tab_resume_1180
+        0x99c6938e78f9f4e0, // tab_resume_860
     ],
     // Light at 2
     [
@@ -2592,6 +2597,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 17]; 4] = [
         0x82c8db277f4c2a1b, // tab_picks_later_1180
         0xa25af1d0ca559f90, // tab_picks_running_860
         0x642ff83fbcf2a16d, // tab_resume_1180
+        0xd6a7d2d339fb6bc1, // tab_resume_860
     ],
 ];
 
