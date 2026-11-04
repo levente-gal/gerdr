@@ -90,6 +90,24 @@ impl Gerdr {
         self.herdr_pane_place(&pane).map(|_| pane)
     }
 
+    /// What to say when `stage`'s agent of feature `slug` is at work in a
+    /// T3 Code thread that gerdr lets go of: T3 Code's command line has no
+    /// way to stop one.
+    fn t3_left_running(&self, project: &str, slug: &str, stage: Stage) -> Option<String> {
+        let run = self.feature(project, slug)?.runs.get(&stage)?;
+        let (status, _) = self.t3_thread_state(run.t3_thread()?);
+        matches!(
+            status,
+            Some(crate::herdr::AgentStatus::Working | crate::herdr::AgentStatus::Blocked)
+        )
+        .then(|| {
+            format!(
+                "{}'s T3 Code thread keeps running: stop it in T3 Code",
+                stage.label()
+            )
+        })
+    }
+
     /// Reopen done `stage` of feature `slug`, unless a later stage locks
     /// it. The next stage's agent has written nothing then, or it would
     /// lock it, but it stops: that is asked first.
@@ -131,6 +149,7 @@ impl Gerdr {
         if let Some(pane) = next.and_then(|next| self.live_stage_pane(project, slug, next)) {
             self.close_herdr_pane(&pane);
         }
+        let left = next.and_then(|next| self.t3_left_running(project, slug, next));
         let now = feature::now();
         let Some(feature) = self.feature_mut(project, slug) else {
             return;
@@ -146,6 +165,9 @@ impl Gerdr {
         artifacts::forget_approved(&store::dir(None, project, slug), stage);
         self.save_feature(project, slug);
         self.show_success(format!("{} reopened", stage.label()));
+        if let Some(left) = left {
+            self.show_warning(left);
+        }
         self.probe_feature(project, slug);
         self.feature_cursor_to_current_of(project, slug);
     }
@@ -206,6 +228,9 @@ impl Gerdr {
         };
         if let Some(pane) = self.live_stage_pane(project, slug, stage) {
             self.close_herdr_pane(&pane);
+        }
+        if let Some(left) = self.t3_left_running(project, slug, stage) {
+            self.show_warning(left);
         }
         let now = feature::now();
         let Some(feature) = self.feature_mut(project, slug) else {

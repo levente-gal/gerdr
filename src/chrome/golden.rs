@@ -2726,6 +2726,40 @@ fn feature_tab_picks_running() -> super::FeatureTabView {
     view
 }
 
+/// Plan's agent to run in T3 Code, its draft waiting to be sent.
+fn feature_tab_t3_draft() -> super::FeatureTabView {
+    use super::{CheckTone, Dot, PageSection, StagePage};
+    use crate::{agent_icons::AgentIcon, feature::Stage};
+    let mut view = feature_tab();
+    select_node(&mut view, 1);
+    let picks = ["Claude Code", "T3 Code", "Cursor"]
+        .iter()
+        .enumerate()
+        .map(|(i, name)| super::AgentChip {
+            icon: AgentIcon::from_agent(name),
+            name: (*name).into(),
+            lit: i == 1,
+            off: false,
+        })
+        .collect();
+    view.page = StagePage {
+        title: "Plan".into(),
+        about: Stage::Plan.about().into(),
+        status: Some(tab_line("not written yet", CheckTone::Note)),
+        buttons: Vec::new(),
+        sections: vec![PageSection::Agent {
+            icon: AgentIcon::T3,
+            name: "T3 Code".into(),
+            dot: Dot::Unknown,
+            status: "draft in T3 Code \u{b7} pick a model and send it".into(),
+            tail: Vec::new(),
+            button: None,
+            picks,
+        }],
+    };
+    view
+}
+
 /// The keyboard on the repositories, on shared, the pointer on its Touch.
 fn feature_tab_repos() -> super::FeatureTabView {
     let mut view = feature_tab();
@@ -2799,7 +2833,7 @@ fn feature_tab_rail_wrap() -> super::FeatureTabView {
 }
 
 /// The feature tab's fixtures, by name.
-fn feature_tabs() -> [(&'static str, super::FeatureTabView); 19] {
+fn feature_tabs() -> [(&'static str, super::FeatureTabView); 20] {
     [
         ("tab_build", feature_tab()),
         ("tab_plan_review", feature_tab_plan_review()),
@@ -2814,6 +2848,7 @@ fn feature_tabs() -> [(&'static str, super::FeatureTabView); 19] {
         ("tab_rail_wrap", feature_tab_rail_wrap()),
         ("tab_picks_later", feature_tab_picks_later()),
         ("tab_picks_running", feature_tab_picks_running()),
+        ("tab_t3_draft", feature_tab_t3_draft()),
         ("tab_resume", feature_tab_resume()),
         ("tab_approved", feature_tab_approved()),
         ("tab_locked", feature_tab_locked()),
@@ -2824,7 +2859,7 @@ fn feature_tabs() -> [(&'static str, super::FeatureTabView); 19] {
 }
 
 /// Each fixture at the width it shows best at, and Build at all three.
-const TAB_SURFACES: [(&str, i32); 24] = [
+const TAB_SURFACES: [(&str, i32); 25] = [
     ("tab_build", 860),
     ("tab_build", 1180),
     ("tab_build", 1920),
@@ -2841,6 +2876,7 @@ const TAB_SURFACES: [(&str, i32); 24] = [
     ("tab_rail_wrap", 1180),
     ("tab_picks_later", 1180),
     ("tab_picks_running", 860),
+    ("tab_t3_draft", 860),
     ("tab_resume", 1180),
     ("tab_resume", 860),
     ("tab_approved", 1180),
@@ -2851,7 +2887,7 @@ const TAB_SURFACES: [(&str, i32); 24] = [
     ("tab_plan_long", 1180),
 ];
 
-const FEATURE_TAB: [&str; 24] = [
+const FEATURE_TAB: [&str; 25] = [
     "tab_build_860",
     "tab_build_1180",
     "tab_build_1920",
@@ -2868,6 +2904,7 @@ const FEATURE_TAB: [&str; 24] = [
     "tab_rail_wrap_1180",
     "tab_picks_later_1180",
     "tab_picks_running_860",
+    "tab_t3_draft_860",
     "tab_resume_1180",
     "tab_resume_860",
     "tab_approved_1180",
@@ -2879,7 +2916,7 @@ const FEATURE_TAB: [&str; 24] = [
 ];
 
 /// The recorded hashes of `FEATURE_TAB`, per case in `CASES`.
-const GOLDEN_FEATURE_TAB: [[u64; 24]; 4] = [
+const GOLDEN_FEATURE_TAB: [[u64; 25]; 4] = [
     // Dark at 1
     [
         0x86626c3afe0688b7, // tab_build_860
@@ -2898,6 +2935,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 24]; 4] = [
         0x12d58af0596e3987, // tab_rail_wrap_1180
         0x1a22cefe2d3aa4a9, // tab_picks_later_1180
         0xd24d3a4e54f102ea, // tab_picks_running_860
+        0xe44579e77c3f1b0c, // tab_t3_draft_860
         0x7581f0eabe8ef9e5, // tab_resume_1180
         0xbf79f3871b3032c8, // tab_resume_860
         0x25dc9f9b47285a00, // tab_approved_1180
@@ -2925,6 +2963,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 24]; 4] = [
         0xdb49495ca45c7ee0, // tab_rail_wrap_1180
         0x6a20abc5bb85f300, // tab_picks_later_1180
         0xf51a7690357b0ecc, // tab_picks_running_860
+        0xfc719ff2e43beb09, // tab_t3_draft_860
         0x644ed0c69a4a8c2b, // tab_resume_1180
         0x1a6537cc3b5a778d, // tab_resume_860
         0x2f9f20a58c6db864, // tab_approved_1180
@@ -2952,6 +2991,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 24]; 4] = [
         0x0bdb0f58b697f3dd, // tab_rail_wrap_1180
         0x8da49a93ac9a7009, // tab_picks_later_1180
         0x305061aced36a49e, // tab_picks_running_860
+        0xeb9cebe71f0764d9, // tab_t3_draft_860
         0x1a989e064c8e0d26, // tab_resume_1180
         0x59bde3e9307caa20, // tab_resume_860
         0x955a72a8dd3e6af3, // tab_approved_1180
@@ -2979,6 +3019,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 24]; 4] = [
         0x4074a7364f10d8a4, // tab_rail_wrap_1180
         0x42876176bb70af74, // tab_picks_later_1180
         0xe5f4db146997cf97, // tab_picks_running_860
+        0xc91603cd33504c62, // tab_t3_draft_860
         0x5431620bcb9231b2, // tab_resume_1180
         0x1ab830b731ebb86f, // tab_resume_860
         0x412f3bc258c8cbb3, // tab_approved_1180

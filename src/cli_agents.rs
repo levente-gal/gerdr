@@ -34,11 +34,21 @@ impl CliAgent {
             Start::T3 => None,
         }
     }
+
+    /// What a feature stage's agent starts from: the command, or for T3
+    /// Code, which has none, its key (see `feature::agents::Flavor::T3`).
+    pub fn stage_base(&self) -> &str {
+        match &self.start {
+            Start::Command(command) => command,
+            Start::T3 => T3,
+        }
+    }
 }
 
 /// The `[agents]` key of T3 Code, which isn't a command: `""` hides it,
-/// another value is ignored.
-const T3: &str = "t3";
+/// another value is ignored. A stage's run keeps it for its command too
+/// (see `CliAgent::stage_base`).
+pub const T3: &str = "t3";
 
 /// The agents gerdr knows, in the order offered: (the `[agents]` key and,
 /// but for T3 Code, command, the name).

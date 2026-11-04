@@ -175,6 +175,10 @@ enum ToBrowser<'a> {
         pane: String,
         origin: &'a str,
         dirs: Vec<String>,
+        /// What its draft says, for the user to send; it is then in the
+        /// project at one of `dirs` exactly, none around them.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        prompt: Option<&'a str>,
     },
     /// Show a markdown file in the pane's preview page (see
     /// `md_preview`): rendered as `html`, or `error` saying why it isn't.
@@ -660,11 +664,18 @@ impl Gerdr {
     /// Start a new thread in T3 Code's app at `origin` in `pane`'s tab, in
     /// a project under `dirs` (now, or once the tab shows the app), if the
     /// extension follows it; whether it was asked to.
-    pub fn new_thread_in_web_pane(&mut self, pane: u32, origin: &str, dirs: &[PathBuf]) -> bool {
+    pub fn new_thread_in_web_pane(
+        &mut self,
+        pane: u32,
+        origin: &str,
+        dirs: &[PathBuf],
+        prompt: Option<&str>,
+    ) -> bool {
         let message = ToBrowser::NewThread {
             pane: pane_token(pane),
             origin,
             dirs: strings(dirs),
+            prompt,
         };
         self.send_to_browser(pane, &message)
     }
@@ -865,6 +876,7 @@ mod tests {
             pane: "1.2".into(),
             origin: "http://app-1.localhost:3773",
             dirs: vec!["/w/app".into()],
+            prompt: None,
         })
         .unwrap();
         assert_eq!(

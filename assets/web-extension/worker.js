@@ -227,14 +227,18 @@ async function goInApp(tab, url) {
 // buttons call, found in React's tree next to the fields it comes with,
 // given the project: the one the shown thread or draft is of when it is
 // in the folders, else the one at a folder, else the app's default when
-// it is in them, else the first. It opens a draft of that project.
+// it is in them, else the first. It opens a draft of that project. With a
+// `prompt` (a feature stage's) the project is the one at a folder and no
+// other, or the agent would run in another checkout; the draft says the
+// prompt, on the project's own folder, and the user picks the model and
+// sends it. The draft shown already saying it is left as it is.
 //
 // None of that is T3 Code's API: a version that changes it is told of,
 // as `{ ok: true }` where it worked, else `{ reason, detail }` (see
 // gerdr's `t3_unscoped` and `t3_no_thread`). The page loading again ends
 // it unanswered, as does a page asked to scope to the same folders
 // already (undefined).
-function inT3(job, dirs) {
+function inT3(job, dirs, prompt) {
   if (job === "scope") {
     if (window.__gerdrScope === JSON.stringify(dirs)) return undefined;
     window.__gerdrScope = JSON.stringify(dirs);
@@ -336,8 +340,10 @@ function inT3(job, dirs) {
           }
         });
         const all = [...projects.values()];
-        let picks = all.filter((p) => want.some((d) => inside(trim(p.workspaceRoot), d)));
-        if (!picks.length) {
+        let picks = prompt
+          ? all.filter((p) => want.includes(trim(p.workspaceRoot)))
+          : all.filter((p) => want.some((d) => inside(trim(p.workspaceRoot), d)));
+        if (!picks.length && !prompt) {
           // A folder inside a project: the nearest project holding it.
           const holding = all.filter((p) => want.some((d) => inside(d, trim(p.workspaceRoot))));
           const depth = Math.max(-1, ...holding.map((p) => trim(p.workspaceRoot).length));
@@ -357,7 +363,14 @@ function inT3(job, dirs) {
           picks.find((p) => want.includes(trim(p.workspaceRoot))) ||
           picks.find((p) => same(app.defaultProjectRef, p)) ||
           picks[0];
-        Promise.resolve(app.handleNewThread(ref(project))).then(
+        if (prompt) {
+          const first = prompt.trim().split("\n")[0].trim();
+          const shows = !app.activeThread && same(app.activeDraftThread, project);
+          const text = document.querySelector('[contenteditable="true"]')?.textContent || "";
+          if (shows && first && text.trim().startsWith(first)) return done({ ok: true });
+        }
+        const options = prompt ? { prompt, envMode: "local", branch: null, worktreePath: null } : undefined;
+        Promise.resolve(app.handleNewThread(ref(project), options)).then(
           (made) => {
             if (made) return done({ ok: true });
             // The app gives none when the page went elsewhere meanwhile,
@@ -540,7 +553,7 @@ async function startThread(tab) {
     const { url, status } = await chrome.tabs.get(tab);
     // Still loading, or at another page: tried again at its next load.
     if (status !== "complete" || !url || new URL(url).origin !== asked.origin) return;
-    const [frame] = await chrome.scripting.executeScript({ target: { tabId: tab }, world: "MAIN", func: inT3, args: ["thread", asked.dirs] });
+    const [frame] = await chrome.scripting.executeScript({ target: { tabId: tab }, world: "MAIN", func: inT3, args: ["thread", asked.dirs, asked.prompt] });
     result = frame?.result;
   } catch {
     return;
@@ -596,7 +609,7 @@ async function command(message) {
         await chrome.tabs.sendMessage(tab, message);
         break;
       case "newthread":
-        threads[tab] = { origin: message.origin, dirs: message.dirs, at: Date.now() };
+        threads[tab] = { origin: message.origin, dirs: message.dirs, prompt: message.prompt, at: Date.now() };
         await save();
         await startThread(tab);
         break;

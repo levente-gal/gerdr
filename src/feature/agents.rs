@@ -44,6 +44,9 @@ pub enum Flavor {
     Claude,
     Codex,
     Cursor,
+    /// T3 Code, whose threads start in its app rather than in a terminal
+    /// (see `Gerdr::t3_stage_draft`).
+    T3,
     /// Another CLI: given the prompt as its last argument, no other flag.
     Other,
 }
@@ -57,6 +60,7 @@ impl Flavor {
             "claude" => Flavor::Claude,
             "codex" => Flavor::Codex,
             "cursor-agent" => Flavor::Cursor,
+            crate::cli_agents::T3 => Flavor::T3,
             _ => Flavor::Other,
         }
     }
@@ -68,7 +72,7 @@ impl Flavor {
 
     /// Whether it takes `--add-dir`.
     pub fn adds_dirs(self) -> bool {
-        self != Flavor::Other
+        !matches!(self, Flavor::Other | Flavor::T3)
     }
 
     /// Whether gerdr can know its chat's id, to go back to the chat.
@@ -146,7 +150,7 @@ pub fn command_line(base: &str, prompt: &Path, dirs: &[PathBuf]) -> String {
             " --resume \"$({} create-chat | tee {id_file})\"",
             program(base)
         )),
-        Flavor::Codex | Flavor::Other => {}
+        Flavor::Codex | Flavor::T3 | Flavor::Other => {}
     }
     if Flavor::of(base).adds_dirs() {
         line.push_str(" --");
@@ -213,6 +217,22 @@ pub fn allowed_into(base: &str, dirs: &[PathBuf]) -> String {
     line
 }
 
+/// Where a stage's agent runs in T3 Code.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum T3Run {
+    /// Its prompt waits in a draft in T3 Code's app, for the user to pick
+    /// a model and send it.
+    Draft,
+    /// In a thread, sent from that draft.
+    Thread {
+        id: String,
+        /// The agent T3 Code runs it with, as `ThreadRow::agent` names it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<String>,
+    },
+}
+
 /// One run of a stage's agent, kept in the feature record.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StageRun {
@@ -229,6 +249,10 @@ pub struct StageRun {
     /// The herdr pane it runs in, while known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pane: Option<String>,
+    /// Where it runs in T3 Code, for one that runs there: gone with the
+    /// thread.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub t3: Option<T3Run>,
     /// The rendered prompt.
     pub prompt: PathBuf,
     /// The template it was rendered from: `builtin:plan@1`.
@@ -252,6 +276,29 @@ pub struct StageRun {
 }
 
 impl StageRun {
+    /// Whether its agent is still around: a pane, or a place in T3 Code.
+    pub fn live(&self) -> bool {
+        self.pane.is_some() || self.t3.is_some()
+    }
+
+    /// Its T3 Code thread's id, once it was sent.
+    pub fn t3_thread(&self) -> Option<&str> {
+        match &self.t3 {
+            Some(T3Run::Thread { id, .. }) => Some(id),
+            _ => None,
+        }
+    }
+
+    /// How the rest of gerdr knows its agent, once it has one to know.
+    pub fn agent_key(&self) -> Option<crate::agents::AgentKey> {
+        use crate::agents::AgentKey;
+        match (self.t3_thread(), &self.pane) {
+            (Some(id), _) => Some(AgentKey::T3(id.to_owned())),
+            (None, Some(pane)) => Some(AgentKey::Herdr(pane.clone())),
+            (None, None) => None,
+        }
+    }
+
     /// Whether its chat can be gone back to once its tab is closed.
     pub fn resumes(&self) -> bool {
         !self.base.is_empty() && Flavor::of(&self.base).resumes()
@@ -284,6 +331,9 @@ mod tests {
         assert_eq!(Flavor::of("/usr/bin/claude --model opus"), Flavor::Claude);
         assert_eq!(Flavor::of("env FOO=1 codex"), Flavor::Codex);
         assert_eq!(Flavor::of("cursor-agent"), Flavor::Cursor);
+        assert_eq!(Flavor::of("t3"), Flavor::T3);
+        assert!(!Flavor::T3.adds_dirs());
+        assert!(!Flavor::T3.resumes());
         assert_eq!(Flavor::of("aider"), Flavor::Other);
         assert_eq!(Flavor::of(""), Flavor::Other);
         assert!(Flavor::Cursor.adds_dirs());

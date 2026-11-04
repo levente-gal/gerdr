@@ -229,6 +229,11 @@ pub(crate) struct Busy {
 
 /// What the work off the thread came to.
 pub(crate) enum Done {
+    /// `t3 thread send` to `thread` ended.
+    T3Told {
+        thread: String,
+        result: Result<(), String>,
+    },
     Found {
         serial: u64,
         /// The main worktree of the repository it was opened from, if any.
@@ -1077,16 +1082,11 @@ fn agent_button(
         return None;
     }
     let run = feature.runs.get(&stage)?;
-    match run.pane {
-        Some(_) => Some(("Show agent", PanelOutcome::ShowAgent(stage))),
-        None if feature.status == Status::Open
-            && run.resumes()
-            && ctx.locked_by(feature, stage).is_none() =>
-        {
-            Some(("Resume agent", PanelOutcome::ResumeAgent(stage)))
-        }
-        None => None,
+    if run.live() {
+        return Some(("Show agent", PanelOutcome::ShowAgent(stage)));
     }
+    (feature.status == Status::Open && run.resumes() && ctx.locked_by(feature, stage).is_none())
+        .then_some(("Resume agent", PanelOutcome::ResumeAgent(stage)))
 }
 
 /// What an agent stage's row does: start its agent, show it while its
@@ -1096,7 +1096,7 @@ fn agent_action(feature: &Feature, stage: Stage) -> PanelOutcome {
     match feature.runs.get(&stage) {
         Some(run) if run.stop.is_some() => PanelOutcome::Continue(stage),
         Some(run) if run.ready.is_some() && stage != Stage::Build => PanelOutcome::OpenDoc(stage),
-        Some(run) if run.pane.is_some() => PanelOutcome::ShowAgent(stage),
+        Some(run) if run.live() => PanelOutcome::ShowAgent(stage),
         Some(run) if run.resumes() => PanelOutcome::ResumeAgent(stage),
         _ => PanelOutcome::StartAgent(stage, false),
     }
@@ -1115,7 +1115,7 @@ fn review_action(feature: &Feature) -> PanelOutcome {
     match review {
         Some(r) if r.count(FindingState::Open) > 0 => PanelOutcome::Findings,
         Some(r) if r.count(FindingState::Fix) > 0 => PanelOutcome::SendFixes,
-        _ if run.pane.is_some() => PanelOutcome::ShowAgent(stage),
+        _ if run.live() => PanelOutcome::ShowAgent(stage),
         _ if run.resumes() => PanelOutcome::ResumeAgent(stage),
         _ => PanelOutcome::StartAgent(stage, false),
     }
@@ -1178,7 +1178,7 @@ fn fresh_stage(feature: &Feature, row: PanelRow) -> Option<Stage> {
 /// the current one, once there is something to lose. Discover has no stage
 /// before it to free, and Ctrl+R starts its agent afresh.
 fn start_over_stage(feature: &Feature, stage: Stage, ctx: RowCtx) -> Option<Stage> {
-    let live = (feature.runs.get(&stage)).is_some_and(|run| run.pane.is_some());
+    let live = (feature.runs.get(&stage)).is_some_and(|run| run.live());
     (feature.status == Status::Open
         && feature.current() == Some(stage)
         && stage != Stage::Discover
@@ -2130,6 +2130,7 @@ impl Gerdr {
                 probe,
             } => self.feature_probed(&project, &slug, probe),
             Done::Tail { pane, lines } => self.feature_tail_read(&pane, lines),
+            Done::T3Told { thread, result } => self.t3_told(&thread, result),
             Done::Read {
                 project,
                 slug,
@@ -3633,6 +3634,12 @@ impl Gerdr {
     /// Show the tab of `stage`'s agent; one gone is forgotten, and Enter
     /// starts a new one.
     fn show_stage_agent(&mut self, project: &str, slug: &str, stage: Stage) {
+        let in_t3 = (self.feature(project, slug))
+            .and_then(|f| f.runs.get(&stage))
+            .is_some_and(|run| run.t3.is_some());
+        if in_t3 {
+            return self.show_t3_stage(project, slug, stage);
+        }
         let pane = self
             .feature(project, slug)
             .and_then(|f| f.runs.get(&stage)?.pane.clone());
@@ -4217,6 +4224,7 @@ impl Gerdr {
                 feature.title
             ),
         };
+        self.t3_forget_project(&feature.dir);
         let (project, slug) = (project.to_owned(), slug.to_owned());
         // Its workspace closes first, its terminals gone before its
         // worktrees go.
@@ -4543,11 +4551,7 @@ impl Gerdr {
         let now = feature::now();
         let current = feature.current().filter(|s| needs(*s).is_some());
         let run = current.and_then(|stage| Some((stage, feature.runs.get(&stage)?)));
-        let agent_status = run.and_then(|(_, run)| {
-            let pane = run.pane.as_ref()?;
-            let agent = self.agents.iter().find(|a| a.pane_id == *pane)?;
-            Some(agent.agent_status)
-        });
+        let agent_status = run.and_then(|(_, run)| self.stage_run_state(run).0);
         let agent = run.map(|(stage, run)| {
             let watch_key = (panel.project.clone(), panel.slug.clone(), stage);
             let watch = self.features.agents.get(&watch_key);
@@ -5095,7 +5099,8 @@ fn running_for(now: u64, started: u64) -> String {
 fn current_line(feature: &Feature, stage: Stage, state: &PanelState, now: u64) -> String {
     let run = feature.runs.get(&stage);
     let agent = || match run {
-        Some(run) if run.pane.is_some() => running_for(now, run.started),
+        Some(run) if run.t3 == Some(feature::agents::T3Run::Draft) => "draft in T3 Code".to_owned(),
+        Some(run) if run.live() => running_for(now, run.started),
         Some(_) => "agent closed".to_owned(),
         None => String::new(),
     };
@@ -5220,9 +5225,7 @@ fn agent_card(
     let current = mark == StageMark::Current;
     let dot = match mark {
         StageMark::Done => Dot::Done,
-        StageMark::Current if run.pane.is_some() => {
-            state.agent_status.map_or(Dot::Unknown, Dot::of_status)
-        }
+        StageMark::Current if run.live() => state.agent_status.map_or(Dot::Unknown, Dot::of_status),
         _ => Dot::Unknown,
     };
     let status = match (current, &state.agent) {
@@ -5290,7 +5293,7 @@ fn file_line(feature: &Feature, stage: Stage, ctx: RowCtx) -> CheckLine {
                 CheckTone::Note,
             )
         }
-        Some(run) if written && run.pane.is_some() => line(
+        Some(run) if written && run.live() => line(
             "written \u{b7} the agent may still change it",
             CheckTone::Note,
         ),

@@ -31,7 +31,7 @@ use crate::{
     cli_agents::CliAgent,
     feature::{
         self, Feature, PerProject, Stage, Status,
-        agents::{Flavor, StageRun, Stop, command_line, needs, resume_line, session_file},
+        agents::{Flavor, StageRun, Stop, T3Run, command_line, needs, resume_line, session_file},
         artifacts, graph, layout,
         patch::Reading,
         review_import::FindingState,
@@ -396,7 +396,7 @@ fn pick_agent(configured: Option<&str>, installed: &[CliAgent]) -> Option<(Strin
         let named = installed
             .iter()
             .find(|a| a.name.eq_ignore_ascii_case(want))
-            .and_then(|a| Some((a.name.clone(), a.command()?.to_owned())));
+            .map(|a| (a.name.clone(), a.stage_base().to_owned()));
         return named.or_else(|| {
             let program = want.split_whitespace().next().unwrap_or(want);
             let name = program.rsplit('/').next().unwrap_or(program);
@@ -432,6 +432,11 @@ fn program(command: &str) -> &str {
 /// Whether `name`, run by `command`, is `builder` (an agent's name and
 /// command): the same name, or the same program.
 fn same_agent(name: &str, command: &str, builder: Option<(&str, &str)>) -> bool {
+    // T3 Code runs whichever agent the user picks in its draft: told apart
+    // once its thread runs (see `Gerdr::t3_stage_thread_sent`).
+    if Flavor::of(command) == Flavor::T3 {
+        return false;
+    }
     builder.is_some_and(|(b_name, b_command)| {
         let (prog, b_prog) = (program(command), program(b_command));
         b_name.eq_ignore_ascii_case(name) || (!prog.is_empty() && prog.eq_ignore_ascii_case(b_prog))
@@ -487,7 +492,12 @@ fn builder_of(
     installed: &[CliAgent],
 ) -> Option<(String, String)> {
     if let Some(run) = feature.runs.get(&Stage::Build) {
-        return Some((run.agent.clone(), run.command.clone()));
+        return Some(match &run.t3 {
+            Some(T3Run::Thread {
+                agent: Some(agent), ..
+            }) => (agent.clone(), t3_agent_program(agent).to_owned()),
+            _ => (run.agent.clone(), run.command.clone()),
+        });
     }
     if feature.is_done(Stage::Build) {
         return None;
@@ -543,7 +553,7 @@ fn stage_pick(
     let Some(picked) = feature.stage_agents.get(&stage) else {
         return default_pick(feature, stage, workflow, installed);
     };
-    let there = |a: &CliAgent| a.command().is_some() && a.name.eq_ignore_ascii_case(picked);
+    let there = |a: &CliAgent| a.name.eq_ignore_ascii_case(picked);
     if !installed.iter().any(there) {
         return Pick::Refused(format!(
             "{picked}, picked for {}, isn't installed: pick another agent on its page",
@@ -569,9 +579,12 @@ pub(crate) fn stage_chips(
     let mut agents: Vec<(String, String)> = installed
         .iter()
         .filter_map(|a| {
-            let command = a.command()?;
-            matches!(Flavor::of(command), Flavor::Claude | Flavor::Cursor)
-                .then(|| (a.name.clone(), command.to_owned()))
+            let base = a.stage_base();
+            matches!(
+                Flavor::of(base),
+                Flavor::Claude | Flavor::Cursor | Flavor::T3
+            )
+            .then(|| (a.name.clone(), base.to_owned()))
         })
         .collect();
     if let Pick::Agent(name, command) = default_pick(feature, stage, workflow, installed)
@@ -600,6 +613,31 @@ pub(crate) fn stage_chips(
             name,
         })
         .collect()
+}
+
+/// The program of the CLI agent T3 Code names `agent` (`ThreadRow::agent`).
+fn t3_agent_program(agent: &str) -> &str {
+    match agent {
+        "cursor" => "cursor-agent",
+        other => other,
+    }
+}
+
+/// Who built `feature`'s code, when T3 Code reviews it with `agent`
+/// (`ThreadRow::agent`) and that is them: the page can't refuse that, as
+/// the model is picked in T3 Code's draft.
+pub(crate) fn t3_reviews_its_build(
+    feature: &Feature,
+    workflow: Option<&Workflow>,
+    installed: &[CliAgent],
+    agent: &str,
+) -> Option<String> {
+    if workflow.is_some_and(|w| w.allow_same_reviewer) {
+        return None;
+    }
+    let (name, command) = builder_of(feature, workflow, installed)?;
+    let same = same_agent(agent, t3_agent_program(agent), Some((&name, &command)));
+    same.then_some(name)
 }
 
 /// The chip after the one lit among `chips` that can be picked, round the
@@ -766,8 +804,11 @@ pub(crate) fn agent_line(
     if let Some((_, why)) = watch.and_then(|w| w.refused.as_ref()) {
         return format!("not ready: {why}");
     }
+    if run.t3 == Some(T3Run::Draft) {
+        return "draft in T3 Code \u{b7} pick a model and send it".into();
+    }
     let started = format!("started {}", projects::ago(now, run.started));
-    if run.pane.is_none() {
+    if !run.live() {
         return match run.resumes() {
             true => format!("{} closed \u{b7} can be resumed", run.agent),
             false => format!("{} closed \u{b7} {started}", run.agent),
@@ -909,6 +950,9 @@ impl Gerdr {
         if let Err(why) = startable(feature, stage) {
             return self.show_warning(why);
         }
+        if !fresh && feature.runs.get(&stage).is_some_and(|r| r.t3.is_some()) {
+            return self.show_t3_stage(project, slug, stage);
+        }
         let pane = feature.runs.get(&stage).and_then(|r| r.pane.clone());
         // The first agent gets a failed setup run again, like a fresh one.
         let first = !feature.runs.contains_key(&stage);
@@ -1022,6 +1066,11 @@ impl Gerdr {
                 return false;
             }
         };
+        let in_t3 = Flavor::of(&base) == Flavor::T3;
+        if in_t3 && let Err(why) = self.t3_can_draft() {
+            self.log_not_started(project, slug, stage, &why);
+            return false;
+        }
         let data = store::dir(None, project, slug);
         let last = feature.runs.get(&stage);
         let n = feature.next_run(stage);
@@ -1056,9 +1105,17 @@ impl Gerdr {
             self.log_not_started(project, slug, stage, "its prompt couldn't be written");
             return false;
         }
-        let command = command_line(&base, &prompt, &feature.agent_dirs(&data));
-        // The agent runs in a tab of the feature's own workspace.
-        let pane = self.open_feature_tab(project, slug, &feature.dir, Some(command.clone()));
+        let command = if in_t3 {
+            base.clone()
+        } else {
+            command_line(&base, &prompt, &feature.agent_dirs(&data))
+        };
+        // The agent runs in a tab of the feature's own workspace; T3 Code's
+        // once the user sends its draft.
+        let pane = match in_t3 {
+            true => None,
+            false => self.open_feature_tab(project, slug, &feature.dir, Some(command.clone())),
+        };
         let now = feature::now();
         let run = StageRun {
             n,
@@ -1066,6 +1123,7 @@ impl Gerdr {
             command,
             base,
             pane,
+            t3: in_t3.then_some(T3Run::Draft),
             prompt,
             template: format!("builtin:{}@{version}", need.template),
             started: now,
@@ -1087,6 +1145,10 @@ impl Gerdr {
         self.features
             .agents
             .remove(&(project.to_owned(), slug.to_owned(), stage));
+        if in_t3 {
+            self.t3_stage_drafted(project, slug, stage, &title);
+            return true;
+        }
         self.show_success(format!(
             "Started {agent} on {} of \u{201c}{title}\u{201d}",
             stage.label()
@@ -1122,16 +1184,10 @@ impl Gerdr {
         let now = Instant::now();
         for (feature, stage, run) in runs {
             let key = (project.clone(), feature.slug.clone(), stage);
-            let status = run.pane.as_ref().and_then(|pane| {
-                self.agents
-                    .iter()
-                    .find(|a| a.pane_id == *pane)
-                    .map(|a| a.agent_status)
-            });
-            let placed = run
-                .pane
-                .as_ref()
-                .is_some_and(|p| self.herdr_pane_place(p).is_some());
+            if self.t3_stage_thread_sent(&feature, stage, &run) {
+                continue;
+            }
+            let (status, alive) = self.stage_run_state(&run);
             let data = store::dir(None, &project, &feature.slug);
             let Some(path) = artifacts::path(&data, stage) else {
                 continue;
@@ -1158,7 +1214,9 @@ impl Gerdr {
                 *watch = Watch {
                     n: run.n,
                     after: if build { 0 } else { run.started },
-                    worked: stamp(&path).is_some_and(|s| s.0 >= run.started),
+                    // A thread of T3 Code's is there once it was sent.
+                    worked: run.t3_thread().is_some()
+                        || stamp(&path).is_some_and(|s| s.0 >= run.started),
                     ..Watch::default()
                 };
             }
@@ -1172,7 +1230,6 @@ impl Gerdr {
                 watch.refused = None;
             }
             let file = read_file(&feature, stage, &path, watch.after);
-            let alive = placed || status.is_some();
             let verdict = judge(
                 watch,
                 status,
@@ -1210,7 +1267,7 @@ impl Gerdr {
                 Verdict::Ready(_) => self.stage_ready(&project, &feature.slug, stage),
                 Verdict::Stop { done, total } => {
                     self.milestone_stop(&project, &feature.slug, run.n, done, total);
-                    if !alive && run.pane.is_some() {
+                    if !alive && run.live() {
                         self.forget_pane(&project, &feature.slug, stage);
                     }
                 }
@@ -1218,11 +1275,37 @@ impl Gerdr {
                     let missing = watch.missing.join("; ");
                     self.nudge_stage_agent(&feature, stage, &run, absent, missing);
                 }
-                Verdict::Gone if run.pane.is_some() => {
+                Verdict::Gone if run.live() => {
                     self.forget_pane(&project, &feature.slug, stage);
                 }
                 Verdict::Gone => {}
             }
+        }
+    }
+
+    /// What agent `key` does, if known, and whether it is still there.
+    pub(crate) fn agent_key_state(&self, key: &agents::AgentKey) -> (Option<AgentStatus>, bool) {
+        match key {
+            agents::AgentKey::T3(id) => self.t3_thread_state(id),
+            agents::AgentKey::Herdr(pane) => {
+                let status = (self.agents.iter())
+                    .find(|a| a.pane_id == *pane)
+                    .map(|a| a.agent_status);
+                (
+                    status,
+                    status.is_some() || self.herdr_pane_place(pane).is_some(),
+                )
+            }
+            _ => (None, false),
+        }
+    }
+
+    /// What `run`'s agent does, if known, and whether it is still there. A
+    /// draft in T3 Code is, as far as gerdr can tell: it can't see drafts.
+    pub(crate) fn stage_run_state(&self, run: &StageRun) -> (Option<AgentStatus>, bool) {
+        match run.agent_key() {
+            Some(key) => self.agent_key_state(&key),
+            None => (None, run.t3.is_some()),
         }
     }
 
@@ -1233,10 +1316,11 @@ impl Gerdr {
             && let Some(r) = f.runs.get_mut(&stage)
         {
             r.pane = None;
-            f.log(
-                feature::now(),
-                format!("{} agent's tab closed", stage.label()),
-            );
+            let what = match r.t3.take() {
+                Some(_) => "agent's thread is gone from T3 Code",
+                None => "agent's tab closed",
+            };
+            f.log(feature::now(), format!("{} {what}", stage.label()));
             self.save_feature(project, slug);
         }
     }
@@ -1287,7 +1371,7 @@ impl Gerdr {
         absent: bool,
         missing: String,
     ) {
-        let Some(pane) = run.pane.clone() else {
+        let Some(agent) = run.agent_key() else {
             return;
         };
         let project = feature.project.clone();
@@ -1304,9 +1388,13 @@ impl Gerdr {
             Ok(text) => text.trim().to_owned(),
             Err(err) => return tracing::warn!("rendering the nudge: {err}"),
         };
-        let sent = match self.herdr.as_mut() {
-            Some(herdr) => herdr.send_line(&pane, &text),
-            None => Err("herdr isn't connected".into()),
+        let sent = match &agent {
+            agents::AgentKey::T3(id) => self.t3_send(id, &text),
+            agents::AgentKey::Herdr(pane) => match self.herdr.as_mut() {
+                Some(herdr) => herdr.send_line(pane, &text),
+                None => Err("herdr isn't connected".into()),
+            },
+            _ => return,
         };
         let now = feature::now();
         let Some(f) = self.feature_mut(&project, &slug) else {
@@ -2534,11 +2622,84 @@ mod tests {
             |chips: &[AgentChip]| -> Vec<String> { chips.iter().map(|c| c.name.clone()).collect() };
         // Codex comes first of the commands, so it is who would start.
         let chips = stage_chips(&f, Stage::Build, None, &installed);
-        assert_eq!(names(&chips), ["Claude Code", "Cursor", "Codex"]);
+        assert_eq!(names(&chips), ["T3 Code", "Claude Code", "Cursor", "Codex"]);
         assert_eq!(lit(&chips), ["Codex"]);
         f.stage_agents.insert(Stage::Build, "Cursor".into());
         let chips = stage_chips(&f, Stage::Build, None, &installed);
         assert_eq!(lit(&chips), ["Cursor"]);
+    }
+
+    #[test]
+    fn t3_code_starts_only_when_picked_and_no_flag_is_its_command() {
+        let installed = [
+            agent("T3 Code", Start::T3),
+            agent("Claude Code", Start::Command("claude".into())),
+        ];
+        let mut f = feature("a", vec![repo("r", true)], 0);
+        let claude = Pick::Agent("Claude Code".into(), "claude".into());
+        assert_eq!(stage_pick(&f, Stage::Plan, None, &installed), claude);
+        f.stage_agents.insert(Stage::Plan, "T3 Code".into());
+        let t3 = Pick::Agent("T3 Code".into(), "t3".into());
+        assert_eq!(stage_pick(&f, Stage::Plan, None, &installed), t3);
+        // Set by the project's file too, by its name: no shell line "T3 Code".
+        assert_eq!(
+            pick_agent(Some("t3 code"), &installed),
+            Some(("T3 Code".into(), "t3".into()))
+        );
+    }
+
+    #[test]
+    fn t3_code_reviews_what_another_of_its_agents_built() {
+        let installed = [
+            agent("T3 Code", Start::T3),
+            agent("Claude Code", Start::Command("claude".into())),
+            agent("Cursor", Start::Command("cursor-agent".into())),
+        ];
+        let mut f = feature("a", vec![repo("r", true)], 0);
+        let built_in_t3 = |agent: Option<&str>| StageRun {
+            agent: "T3 Code".into(),
+            command: "t3".into(),
+            t3: Some(T3Run::Thread {
+                id: "t".into(),
+                agent: agent.map(str::to_owned),
+            }),
+            ..StageRun::default()
+        };
+        let off = |f: &Feature| -> Vec<String> {
+            let chips = stage_chips(f, Stage::AiReview, None, &installed);
+            chips
+                .into_iter()
+                .filter(|c| c.off)
+                .map(|c| c.name)
+                .collect()
+        };
+        // Which agent it ran isn't known yet: none is told apart.
+        f.runs.insert(Stage::Build, built_in_t3(None));
+        assert!(off(&f).is_empty());
+        // Claude built it through T3 Code: Claude Code may not review it,
+        // but T3 Code may, by another of its agents.
+        f.runs.insert(Stage::Build, built_in_t3(Some("claude")));
+        assert_eq!(off(&f), ["Claude Code"]);
+        f.runs.insert(Stage::Build, built_in_t3(Some("cursor")));
+        assert_eq!(off(&f), ["Cursor"]);
+        // Picked in the draft, the same agent can only be told of after.
+        let builder = t3_reviews_its_build(&f, None, &installed, "cursor");
+        assert_eq!(builder.as_deref(), Some("cursor"));
+        assert_eq!(t3_reviews_its_build(&f, None, &installed, "claude"), None);
+    }
+
+    #[test]
+    fn a_draft_says_so_and_waits_for_its_thread() {
+        let run = StageRun {
+            agent: "T3 Code".into(),
+            t3: Some(T3Run::Draft),
+            ..StageRun::default()
+        };
+        assert!(run.live());
+        assert!(run.t3_thread().is_none());
+        assert!(run.agent_key().is_none());
+        let line = agent_line(&run, Stage::Plan, None, None, 0);
+        assert!(line.contains("pick a model"), "{line}");
     }
 
     #[test]

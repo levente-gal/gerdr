@@ -25,6 +25,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
     Gerdr,
+    agents::AgentKey,
     feature::{
         self, Feature, Stage, Status,
         patch::{self, Reading},
@@ -60,8 +61,8 @@ pub(crate) struct BuildState {
 /// A Build agent fixing Verify's failures.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Fixing {
-    pane: String,
-    /// herdr saw it working since it was sent the failures.
+    agent: AgentKey,
+    /// It was seen working since it was sent the failures.
     worked: bool,
 }
 
@@ -511,9 +512,17 @@ impl Gerdr {
 
     /// Send `line` to the Build agent's tab of `feature`, if it is there.
     pub(crate) fn tell_build_agent(&mut self, feature: &Feature, line: &str) -> Result<(), String> {
-        let pane = feature
-            .runs
-            .get(&Stage::Build)
+        let run = feature.runs.get(&Stage::Build);
+        if let Some(run) = run.filter(|r| r.t3.is_some()) {
+            let id = run
+                .t3_thread()
+                .ok_or_else(|| String::from("its T3 Code draft wasn't sent yet"))?;
+            if !self.t3_thread_state(id).1 {
+                return Err("its T3 Code thread is gone".into());
+            }
+            return self.t3_send(id, line);
+        }
+        let pane = run
             .and_then(|r| r.pane.clone())
             .filter(|p| self.herdr_pane_place(p).is_some())
             .ok_or_else(|| String::from("its tab is gone"))?;
@@ -589,10 +598,7 @@ impl Gerdr {
                 stage.label()
             ));
         };
-        let alive = run
-            .pane
-            .as_deref()
-            .is_some_and(|p| self.herdr_pane_place(p).is_some());
+        let alive = run.agent_key().is_some() && self.stage_run_state(&run).1;
         let mut sent = Err(String::from("its tab is gone"));
         if alive {
             let data = store::dir(None, project, slug);
@@ -776,11 +782,8 @@ impl Gerdr {
         if snapshot.status != Status::Open || snapshot.current() != Some(Stage::Verify) {
             return self.show_warning(format!("Verify of \u{201c}{title}\u{201d} failed: {first}"));
         }
-        let alive = snapshot
-            .runs
-            .get(&Stage::Build)
-            .and_then(|r| r.pane.as_deref())
-            .is_some_and(|p| self.herdr_pane_place(p).is_some());
+        let alive = (snapshot.runs.get(&Stage::Build))
+            .is_some_and(|r| r.agent_key().is_some() && self.stage_run_state(r).1);
         match fix_step(fixes, alive) {
             Fix::Stop => self.show_warning(format!(
                 "Verify of \u{201c}{title}\u{201d} failed again: {first}; gerdr stopped sending it to the Build agent after {fixes} fixes"
@@ -839,7 +842,7 @@ impl Gerdr {
             v.fixes += 1;
             v.fixes
         });
-        let pane = f.runs.get(&Stage::Build).and_then(|r| r.pane.clone());
+        let agent = f.runs.get(&Stage::Build).and_then(|r| r.agent_key());
         f.log(
             now,
             format!(
@@ -848,14 +851,8 @@ impl Gerdr {
             ),
         );
         self.save_feature(project, slug);
-        if let Some(pane) = pane {
-            self.features.build.fixing.insert(
-                (project.to_owned(), slug.to_owned()),
-                Fixing {
-                    pane,
-                    worked: false,
-                },
-            );
+        if let Some(agent) = agent {
+            self.watch_fixing(project, slug, agent);
         }
         let first = failures.first().map_or("see evidence.md", String::as_str);
         let to = if fresh {
@@ -894,11 +891,11 @@ impl Gerdr {
     /// Watch the Build agent in `pane` of feature `slug`, sent findings or
     /// comments to fix: once it worked and rests, its code is probed (see
     /// `fixing_tick`).
-    pub(crate) fn watch_fixing(&mut self, project: &str, slug: &str, pane: String) {
+    pub(crate) fn watch_fixing(&mut self, project: &str, slug: &str, agent: AgentKey) {
         self.features.build.fixing.insert(
             (project.to_owned(), slug.to_owned()),
             Fixing {
-                pane,
+                agent,
                 worked: false,
             },
         );
@@ -926,12 +923,7 @@ impl Gerdr {
             let Some(fixing) = self.features.build.fixing.get(&key).cloned() else {
                 continue;
             };
-            let status = self
-                .agents
-                .iter()
-                .find(|a| a.pane_id == fixing.pane)
-                .map(|a| a.agent_status);
-            let alive = status.is_some() || self.herdr_pane_place(&fixing.pane).is_some();
+            let (status, alive) = self.agent_key_state(&fixing.agent);
             if !verifying {
                 self.features.build.fixing.remove(&key);
                 continue;

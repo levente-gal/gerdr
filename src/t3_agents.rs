@@ -92,6 +92,73 @@ pub fn home() -> Option<PathBuf> {
     home.join("userdata").is_dir().then_some(home)
 }
 
+/// A new thread waiting for its workspace's pane to show T3 Code's app.
+#[derive(Clone, Debug)]
+struct NewThread {
+    /// The workspace's folder.
+    dir: PathBuf,
+    /// What its draft says (see `Page::Draft`).
+    prompt: Option<String>,
+    at: Instant,
+}
+
+/// `secs` since the epoch as T3 Code writes its times (see
+/// `ThreadRow::updated`), down to the second: a time within that second
+/// sorts after it as text.
+fn iso_utc(secs: u64) -> String {
+    // Howard Hinnant's civil_from_days.
+    let days = (secs / 86_400) as i64 + 719_468;
+    let era = days.div_euclid(146_097);
+    let day_of_era = days.rem_euclid(146_097);
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let shifted = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * shifted + 2) / 5 + 1;
+    let month = if shifted < 10 {
+        shifted + 3
+    } else {
+        shifted - 9
+    };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    let rest = secs % 86_400;
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}",
+        rest / 3600,
+        rest / 60 % 60,
+        rest % 60
+    )
+}
+
+/// Whether `a` and `b` are the same folder, however they are written.
+fn same_dir(a: &Path, b: &Path) -> bool {
+    a == b
+        || (a.file_name() == b.file_name()
+            && matches!((a.canonicalize(), b.canonicalize()), (Ok(a), Ok(b)) if a == b))
+}
+
+/// The thread that came of a stage's draft in folder `dir`, opened at `since`
+/// (unix seconds): the first asked to run in that folder's project since,
+/// that isn't in `taken`. Nothing else tells it from a chat the user
+/// started there meanwhile: T3 Code gives a draft's thread no mark of it.
+fn drafted_thread<'a>(
+    rows: &'a [ThreadRow],
+    dir: &Path,
+    since: u64,
+    taken: &[&str],
+) -> Option<&'a ThreadRow> {
+    let since = iso_utc(since);
+    rows.iter()
+        .filter(|r| !r.child && r.parent.is_none() && !taken.contains(&r.id.as_str()))
+        .filter(|r| r.project.as_deref().is_some_and(|p| same_dir(p, dir)))
+        .filter(|r| {
+            r.first_run
+                .as_deref()
+                .is_some_and(|at| at >= since.as_str())
+        })
+        .min_by(|a, b| a.first_run.cmp(&b.first_run))
+}
+
 /// Where in T3 Code's app to show (see `Gerdr::show_t3`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Page<'a> {
@@ -101,6 +168,9 @@ enum Page<'a> {
     Thread(&'a str),
     /// A new thread, in the workspace's project.
     New,
+    /// A draft saying this prompt, in the project at the workspace's folder
+    /// and no other, for the user to pick a model and send.
+    Draft(&'a str),
 }
 
 /// Where T3 Code's server runs, as it says in its home.
@@ -329,6 +399,9 @@ pub struct ThreadRow {
     /// When it was last opened in T3 Code's app, in milliseconds since the
     /// epoch: a pane showing it already doesn't, as it finishes.
     pub opened: Option<i64>,
+    /// When its first run was asked for, as `updated` is written; when it
+    /// was made, from the server's list.
+    pub first_run: Option<String>,
 }
 
 impl ThreadRow {
@@ -582,7 +655,9 @@ pub fn read_rows(conn: &rusqlite::Connection, held: &[String]) -> rusqlite::Resu
             json_extract(t.payload_json, '$.lastVisitedAt'),
             (SELECT count(*) FROM orchestration_v2_projection_runtime_requests q
               WHERE q.thread_id = t.thread_id AND q.status = 'pending'),
-            json_extract(t.payload_json, '$.opens.openedAt')
+            json_extract(t.payload_json, '$.opens.openedAt'),
+            (SELECT min(requested_at) FROM orchestration_v2_projection_runs
+              WHERE thread_id = t.thread_id)
         FROM orchestration_v2_projection_threads t
         LEFT JOIN projection_projects p ON p.project_id = t.project_id
         LEFT JOIN orchestration_v2_projection_runs r ON r.run_id = (
@@ -616,6 +691,7 @@ pub fn read_rows(conn: &rusqlite::Connection, held: &[String]) -> rusqlite::Resu
             visited: r.get(13)?,
             pending: r.get(14)?,
             opened: r.get(15)?,
+            first_run: r.get(16)?,
         })
     })?;
     rows.collect()
@@ -858,6 +934,8 @@ struct Listed {
     relationship_to_parent: Option<String>,
     #[serde(default)]
     updated_at: Option<String>,
+    #[serde(default)]
+    created_at: Option<String>,
 }
 
 /// The threads worth a card in what `t3 thread list --json` printed for
@@ -886,6 +964,7 @@ fn cli_threads(json: &[u8], dir: &Path) -> serde_json::Result<Vec<ThreadRow>> {
             visited: None,
             pending: 0,
             opened: None,
+            first_run: t.created_at,
         })
         .filter(|row| {
             row.status() != AgentStatus::Idle || {
@@ -1119,9 +1198,11 @@ pub struct T3 {
     pub threads: Vec<T3Thread>,
     /// The link to show once a pane's browser is signed in.
     pending: Option<String>,
-    /// The folder of the workspace a new thread was asked of, and when,
-    /// started once a pane of it shows the app (see `new_t3_thread`).
-    new_thread: Option<(PathBuf, Instant)>,
+    /// The new thread asked of a workspace, started once a pane of it
+    /// shows the app (see `new_t3_thread`).
+    new_thread: Option<NewThread>,
+    /// Whether the watcher read the threads yet.
+    read: bool,
     /// The web panes a pairing link is being asked for, by pane (`None`
     /// for a new tab).
     pairing: HashSet<Option<u32>>,
@@ -1232,7 +1313,14 @@ impl crate::Gerdr {
     /// Note the threads held done for the watcher (see `read_rows`).
     fn t3_held(&self) {
         if let Ok(mut shared) = self.t3.held.lock() {
-            *shared = self.projects.t3_finished.keys().cloned().collect();
+            let stages = self.features.all.values().flatten();
+            let stages = stages
+                .flat_map(|f| f.runs.values())
+                .filter_map(|r| r.t3_thread());
+            *shared = (self.projects.t3_finished.keys().map(String::as_str))
+                .chain(stages)
+                .map(str::to_owned)
+                .collect();
         }
     }
 
@@ -1252,6 +1340,7 @@ impl crate::Gerdr {
         crate::problems::set(T3_PROBLEMS, partial_problem(&snapshot.source));
         let was = std::mem::replace(&mut self.t3.source, snapshot.source);
         self.t3.rows = snapshot.rows;
+        self.t3.read = true;
         self.t3.migration = snapshot.migration;
         if partial && was == Source::Database && !self.t3.told_partial {
             self.t3.told_partial = true;
@@ -1589,22 +1678,25 @@ impl crate::Gerdr {
     /// Web pane `pane` shows T3 Code's app at `origin`: start the new
     /// thread asked of its workspace before it had the app open, if any.
     fn t3_start_asked(&mut self, pane: u32, origin: &str) {
-        let Some((dir, at)) = self.t3.new_thread.clone() else {
+        let Some(asked) = self.t3.new_thread.clone() else {
             return;
         };
-        if at.elapsed() > NEW_THREAD_WAIT {
+        if asked.at.elapsed() > NEW_THREAD_WAIT {
             self.t3.new_thread = None;
             return;
         }
         let Some(w) = self.web_pane_workspace(pane) else {
             return;
         };
-        if self.workspaces[w].dir != dir {
+        if self.workspaces[w].dir != asked.dir {
             return;
         }
         self.t3.new_thread = None;
-        let dirs = self.t3_scope(w);
-        if !self.new_thread_in_web_pane(pane, origin, &dirs) {
+        let dirs = match asked.prompt {
+            Some(_) => vec![asked.dir],
+            None => self.t3_scope(w),
+        };
+        if !self.new_thread_in_web_pane(pane, origin, &dirs, asked.prompt.as_deref()) {
             self.t3_unsteered(w);
         }
     }
@@ -1765,13 +1857,21 @@ impl crate::Gerdr {
     /// repository T3 Code doesn't know yet (off the event loop; once per
     /// folder): its app can only show, and start, threads of projects.
     fn add_t3_project(&mut self, w: usize, server: &Server) {
-        let (Some(home), Some(ws)) = (self.t3.home.clone(), self.workspaces.get(w)) else {
+        let Some(ws) = self.workspaces.get(w) else {
             return;
         };
         let dir = ws.dir.clone();
         if !dir.join(".git").exists() || Some(dir.as_path()) == crate::home_dir().as_deref() {
             return;
         }
+        self.ensure_t3_project(dir, server);
+    }
+
+    /// Make folder `dir` a project of T3 Code's, off the event loop.
+    fn ensure_t3_project(&mut self, dir: PathBuf, server: &Server) {
+        let Some(home) = self.t3.home.clone() else {
+            return;
+        };
         // Looked at again until T3 Code has it.
         if self.t3.checked.contains(&dir) || !self.t3.adding.insert(dir.clone()) {
             return;
@@ -1839,6 +1939,232 @@ impl crate::Gerdr {
         });
     }
 
+    /// What T3 Code thread `id` does, if known, and whether it is still
+    /// there. Its row gone means so only when the database was read; the
+    /// server's list leaves out what isn't a workspace's. With the server
+    /// down nothing is known of what it does.
+    pub(crate) fn t3_thread_state(&self, id: &str) -> (Option<AgentStatus>, bool) {
+        let all = threads(&self.t3.rows, self.t3.alive);
+        match all.into_iter().find(|t| t.row.id == id) {
+            Some(thread) => (self.t3.alive.then_some(thread.status), true),
+            None => (None, !self.t3.read || self.t3.source != Source::Database),
+        }
+    }
+
+    /// Whether a draft can be opened in T3 Code's app; offering to start
+    /// its server, and why not, when one can't.
+    pub(crate) fn t3_can_draft(&mut self) -> Result<(), String> {
+        if self.t3.server.is_some() && self.t3.alive {
+            return Ok(());
+        }
+        let action = ("Start".to_owned(), crate::menu::MenuAction::StartT3);
+        let text = "T3 Code's server isn't running".to_owned();
+        self.toast_with(text.clone(), crate::toast::Level::Warning, Some(action));
+        Err(text)
+    }
+
+    /// `stage`'s agent of feature `slug` (`title`) got a run in T3 Code,
+    /// waiting on its draft: shown when the user is at the feature, else
+    /// told. A stage can start by itself, and a web page taking the
+    /// keyboard from whatever the user does elsewhere would swallow it.
+    pub(crate) fn t3_stage_drafted(
+        &mut self,
+        project: &str,
+        slug: &str,
+        stage: crate::feature::Stage,
+        title: &str,
+    ) {
+        let at_feature =
+            (self.features.panel.as_ref()).is_some_and(|p| p.project == project && p.slug == slug);
+        if at_feature {
+            self.show_t3_stage(project, slug, stage);
+            return self.show_success(format!(
+                "{} of \u{201c}{title}\u{201d} waits in T3 Code: pick a model and send it",
+                stage.label()
+            ));
+        }
+        let text = format!(
+            "{} of \u{201c}{title}\u{201d} waits for you: Show agent on its page opens T3 Code",
+            stage.label()
+        );
+        self.notify_feature(project, slug, None, &text);
+        self.show_warning(text);
+    }
+
+    /// Show `stage`'s agent of feature `slug` in T3 Code's app, in the
+    /// feature's workspace: its thread, or its draft until it is sent.
+    pub(crate) fn show_t3_stage(
+        &mut self,
+        project: &str,
+        slug: &str,
+        stage: crate::feature::Stage,
+    ) {
+        use crate::feature::agents::T3Run;
+        let Some(run) = self.feature(project, slug).and_then(|f| f.runs.get(&stage)) else {
+            return;
+        };
+        match run.t3.clone() {
+            Some(T3Run::Thread { id, .. }) => {
+                self.in_feature_workspace(project, slug, |gerdr, w| {
+                    gerdr.open_t3(w, Some(&id));
+                });
+            }
+            Some(T3Run::Draft) => {
+                let path = run.prompt.clone();
+                let prompt = match std::fs::read_to_string(&path) {
+                    Ok(prompt) => prompt,
+                    Err(err) => {
+                        tracing::warn!("reading {}: {err}", path.display());
+                        return self.show_error(format!(
+                            "Couldn't read {}'s prompt: {err}",
+                            stage.label()
+                        ));
+                    }
+                };
+                self.in_feature_workspace(project, slug, |gerdr, w| {
+                    gerdr.show_t3(w, Page::Draft(&prompt));
+                });
+            }
+            None => {}
+        }
+    }
+
+    /// When `run` of `stage` of `feature` waits on its draft and the thread
+    /// sent from it is there now, the run follows that thread. Whether it
+    /// did.
+    pub(crate) fn t3_stage_thread_sent(
+        &mut self,
+        feature: &crate::feature::Feature,
+        stage: crate::feature::Stage,
+        run: &crate::feature::agents::StageRun,
+    ) -> bool {
+        use crate::feature::agents::T3Run;
+        if run.t3 != Some(T3Run::Draft) {
+            return false;
+        }
+        let taken: Vec<&str> = (feature.runs.values())
+            .filter_map(|r| r.t3_thread())
+            .collect();
+        let found = drafted_thread(&self.t3.rows, &feature.dir, run.started, &taken);
+        let Some(row) = found.cloned() else {
+            return false;
+        };
+        let (project, slug) = (feature.project.clone(), feature.slug.clone());
+        let agent = row.agent();
+        let same = (stage == crate::feature::Stage::AiReview)
+            .then(|| self.projects.project(&project).map(|p| &p.workflow))
+            .and_then(|workflow| {
+                crate::feature_agents::t3_reviews_its_build(
+                    feature,
+                    workflow,
+                    &self.cli_agents,
+                    &agent,
+                )
+            });
+        let Some(f) = self.feature_mut(&project, &slug) else {
+            return false;
+        };
+        let Some(r) = f.runs.get_mut(&stage) else {
+            return false;
+        };
+        r.t3 = Some(T3Run::Thread {
+            id: row.id,
+            agent: Some(agent),
+        });
+        let model = row.model.unwrap_or_else(|| "its model".to_owned());
+        f.log(
+            crate::feature::now(),
+            format!("{} agent runs in T3 Code: {model}", stage.label()),
+        );
+        self.save_feature(&project, &slug);
+        self.t3_held();
+        let key = (project, slug, stage);
+        if let Some(watch) = self.features.agents.get_mut(&key) {
+            watch.worked = true;
+        }
+        if let Some(builder) = same {
+            self.show_warning(format!(
+                "T3 Code reviews with {builder}, which built this code: a model misses what it missed"
+            ));
+        }
+        true
+    }
+
+    /// Send T3 Code thread `id` a message, as its next turn when it is
+    /// busy, off the event loop. Why not, when it can't be tried.
+    pub(crate) fn t3_send(&mut self, id: &str, text: &str) -> Result<(), String> {
+        let home = self.t3.home.clone();
+        let server = self.t3.server.clone().filter(|_| self.t3.alive);
+        let (Some(home), Some(server)) = (home, server) else {
+            return Err("T3 Code's server isn't running".into());
+        };
+        let binary = t3_binary(&home, &server).ok_or_else(|| "no t3 command found".to_owned())?;
+        let (thread, text) = (id.to_owned(), text.to_owned());
+        self.feature_work(None, move |_| {
+            let mut send = std::process::Command::new(&binary);
+            send.args(["thread", "send", "--base-dir"])
+                .arg(&home)
+                .arg(&thread)
+                .arg(&text);
+            let result = crate::t3_update::output_within(send, CLI_TIME).and_then(|out| {
+                if out.status.success() {
+                    Ok(())
+                } else {
+                    Err(String::from_utf8_lossy(&out.stderr).trim().to_owned())
+                }
+            });
+            crate::features::Done::T3Told { thread, result }
+        });
+        Ok(())
+    }
+
+    /// `t3 thread send` to `thread` ended.
+    pub(crate) fn t3_told(&mut self, thread: &str, result: Result<(), String>) {
+        if let Err(why) = result {
+            tracing::warn!("t3 code: sending thread {thread} a message: {why}");
+            self.show_error(format!("Couldn't message T3 Code's thread: {why}"));
+        }
+    }
+
+    /// A feature's folder at `dir` goes: so does its project in T3 Code,
+    /// if T3 Code has no thread there. Those threads are the user's to
+    /// keep, so `t3 project remove` refusing is only logged, as is what
+    /// can't be tried with the server down: the project then stays, a
+    /// folder T3 Code can't open, for the user to remove there.
+    pub(crate) fn t3_forget_project(&mut self, dir: &Path) {
+        let home = self.t3.home.clone();
+        let server = self.t3.server.clone().filter(|_| self.t3.alive);
+        self.t3.checked.remove(dir);
+        let (Some(home), Some(server)) = (home, server) else {
+            return tracing::info!("t3 code: left project {} as it is", dir.display());
+        };
+        let dir = dir.to_owned();
+        std::thread::spawn(move || {
+            if !matches!(has_project(&home, &dir), Ok(true)) {
+                return;
+            }
+            let Some(binary) = t3_binary(&home, &server) else {
+                return tracing::warn!("t3 code: no t3 command to remove {}", dir.display());
+            };
+            let mut remove = std::process::Command::new(binary);
+            remove
+                .args(["project", "remove", "--base-dir"])
+                .arg(&home)
+                .arg(&dir);
+            match crate::t3_update::output_within(remove, CLI_TIME) {
+                Ok(out) if out.status.success() => {
+                    tracing::info!("t3 code: removed project {}", dir.display());
+                }
+                Ok(out) => tracing::info!(
+                    "t3 code: kept project {}: {}",
+                    dir.display(),
+                    String::from_utf8_lossy(&out.stderr).trim()
+                ),
+                Err(err) => tracing::warn!("t3 code: removing {}: {err}", dir.display()),
+            }
+        });
+    }
+
     /// Show T3 Code thread `id` in the app's pane.
     pub fn focus_t3_thread(&mut self, id: &str) {
         let w = self
@@ -1877,10 +2203,13 @@ impl crate::Gerdr {
         };
         let link = |origin: &str| match page {
             Page::Thread(id) => server.thread_link(origin, id),
-            Page::App | Page::New => format!("{origin}/"),
+            Page::App | Page::New | Page::Draft(_) => format!("{origin}/"),
         };
         let w = w.min(self.workspaces.len().saturating_sub(1));
-        self.add_t3_project(w, &server);
+        match (page, self.workspaces.get(w)) {
+            (Page::Draft(_), Some(ws)) => self.ensure_t3_project(ws.dir.clone(), &server),
+            _ => self.add_t3_project(w, &server),
+        }
         let own = self.t3_origin(w, &server);
         if let Some((t, pane, url)) = self.t3_pane_in(w) {
             self.show_leaf(w, t, pane);
@@ -1892,11 +2221,18 @@ impl crate::Gerdr {
             self.scope_t3(pane, &here);
             if page == Page::New {
                 let dirs = self.t3_scope(w);
-                if !self.new_thread_in_web_pane(pane, &here, &dirs) {
+                if !self.new_thread_in_web_pane(pane, &here, &dirs, None) {
                     // Without gerdr's extension in its browser it can't be
                     // told to: a tab of its own at the app's home page,
                     // which opens a draft where the app likes.
                     self.launch(&link(&own), crate::launch::Place::Tab);
+                    self.t3_unsteered(w);
+                }
+                return;
+            }
+            if let Page::Draft(prompt) = page {
+                let dirs = vec![self.workspaces[w].dir.clone()];
+                if !self.new_thread_in_web_pane(pane, &here, &dirs, Some(prompt)) {
                     self.t3_unsteered(w);
                 }
                 return;
@@ -1909,10 +2245,18 @@ impl crate::Gerdr {
             }
             return;
         }
-        if page == Page::New
+        let prompt = match page {
+            Page::Draft(prompt) => Some(prompt),
+            _ => None,
+        };
+        if (page == Page::New || prompt.is_some())
             && let Some(ws) = self.workspaces.get(w)
         {
-            self.t3.new_thread = Some((ws.dir.clone(), Instant::now()));
+            self.t3.new_thread = Some(NewThread {
+                dir: ws.dir.clone(),
+                prompt: prompt.map(str::to_owned),
+                at: Instant::now(),
+            });
         }
         if w != self.active_workspace && w < self.workspaces.len() {
             self.switch_workspace(w);
@@ -2156,6 +2500,45 @@ mod tests {
             updated: "2026-11-01T10:00:00.000Z".into(),
             ..ThreadRow::default()
         }
+    }
+
+    #[test]
+    fn times_are_written_as_t3_code_writes_them() {
+        assert_eq!(iso_utc(0), "1970-01-01T00:00:00");
+        // 2026-11-04T11:24:57.489Z, of a run in T3 Code 0.1.7.
+        assert_eq!(iso_utc(1_793_791_497), "2026-11-04T11:24:57");
+        assert_eq!(iso_utc(951_782_400), "2000-02-29T00:00:00");
+        assert!("2026-11-04T11:24:57.489Z" > iso_utc(1_793_791_497).as_str());
+    }
+
+    #[test]
+    fn a_drafts_thread_is_the_first_sent_in_its_folder_since() {
+        const SINCE: u64 = 1_793_791_497;
+        let at = |id: &str, dir: &str, when: &str| ThreadRow {
+            project: Some(PathBuf::from(dir)),
+            first_run: Some(when.to_owned()),
+            ..row(id)
+        };
+        let dir = Path::new("/r/.features/x");
+        let rows = [
+            at("older", "/r/.features/x", "2026-11-04T11:24:56.900Z"),
+            at("around", "/r", "2026-11-04T11:24:58.000Z"),
+            at("later", "/r/.features/x", "2026-11-04T11:25:30.000Z"),
+            at("first", "/r/.features/x", "2026-11-04T11:24:59.000Z"),
+            ThreadRow {
+                child: true,
+                ..at("side", "/r/.features/x", "2026-11-04T11:24:58.000Z")
+            },
+            ThreadRow {
+                first_run: None,
+                ..at("unsent", "/r/.features/x", "")
+            },
+        ];
+        let found = |taken: &[&str]| drafted_thread(&rows, dir, SINCE, taken).map(|r| r.id.clone());
+        assert_eq!(found(&[]).as_deref(), Some("first"));
+        // Another stage's thread stays that stage's.
+        assert_eq!(found(&["first"]).as_deref(), Some("later"));
+        assert_eq!(found(&["first", "later"]), None);
     }
 
     #[test]

@@ -457,7 +457,7 @@ impl Gerdr {
         let Some(f) = self.feature_mut(project, slug) else {
             return false;
         };
-        let pane = f.runs.get(&Stage::Build).and_then(|r| r.pane.clone());
+        let agent = (f.runs.get(&Stage::Build)).and_then(|r| r.agent_key());
         let to = if fresh {
             "a fresh Build agent"
         } else {
@@ -465,8 +465,8 @@ impl Gerdr {
         };
         f.log(feature::now(), format!("Sent {what} to {to}"));
         self.save_feature(project, slug);
-        if let Some(pane) = pane {
-            self.watch_fixing(project, slug, pane);
+        if let Some(agent) = agent {
+            self.watch_fixing(project, slug, agent);
         }
         self.show_success(format!("Sent {what} of \u{201c}{title}\u{201d} to {to}"));
         true
