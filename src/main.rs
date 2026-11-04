@@ -5500,9 +5500,7 @@ impl Gerdr {
                 // marks on its header.
                 if let Some(feature) = self.workspace_feature(w) {
                     view.name = feature_workspace::feature_label(&ws.name, &ws.dir, &feature.title);
-                    view.stages = (feature::Stage::ALL.iter())
-                        .map(|s| features::stage_mark(feature, *s))
-                        .collect();
+                    view.feature = Some(self.feature_card(feature));
                 }
                 // Folded by hand, else while quiet and not the active one.
                 view.folded = self

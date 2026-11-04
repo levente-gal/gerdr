@@ -16,9 +16,11 @@ use super::{
     hint_strs, icon_sdf, measure, measure_bold, measured_footer_height, mix, phys, physical, plus,
     rect_px, segment_tint, status_dot, tab, trash,
 };
+use super::{code_mark, eye, flask, magnifier, ship_arrow, sparkle, text_lines};
 use crate::text_field::Line;
 use crate::{
     agent_icons::AgentIcon,
+    feature::Stage,
     md_blocks::{DocBlock, ItemMark},
 };
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
@@ -3481,8 +3483,7 @@ impl Painter {
         );
     }
 
-    /// A feature's stages as a row of `marks` in `rect`, from the right:
-    /// what the sidebar's feature rows end with.
+    /// A feature's stages as a row of `marks` in `rect`, from its left.
     pub(super) fn stage_marks(
         &self,
         c: &mut Canvas,
@@ -3494,11 +3495,11 @@ impl Painter {
         let s = scale as f32;
         let n = marks.len() as i32;
         let pitch = STAGE_DOT + STAGE_DOT_GAP;
-        let x0 = rect.loc.x + rect.size.w - n * pitch + STAGE_DOT_GAP;
+        debug_assert!(n * pitch - STAGE_DOT_GAP <= rect.size.w || rect.size.w == 0);
         let y = rect.loc.y + (rect.size.h - STAGE_DOT) / 2;
         for (i, mark) in marks.iter().enumerate() {
             let spot = Rectangle::new(
-                (x0 + i as i32 * pitch, y).into(),
+                (rect.loc.x + i as i32 * pitch, y).into(),
                 (STAGE_DOT, STAGE_DOT).into(),
             );
             icon_sdf(c, spot, scale, mark.color(p), |x, y| {
@@ -3508,21 +3509,84 @@ impl Painter {
     }
 }
 
-/// A sidebar row for an open feature: its title and its stages' marks.
+/// How a feature's current stage stands, for its card's mark and line.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum CardTone {
+    /// Nothing runs and nothing waits.
+    #[default]
+    Idle,
+    /// An agent or a job of it runs.
+    Working,
+    /// It waits for the user.
+    Waits,
+    /// It failed or is blocked.
+    Failed,
+}
+
+impl CardTone {
+    /// The colour of the card's stage mark.
+    pub(super) fn mark_color(self, p: &Palette) -> Rgb {
+        match self {
+            Self::Idle => p.placeholder,
+            Self::Working => p.accent,
+            Self::Waits => p.warning,
+            Self::Failed => p.error,
+        }
+    }
+
+    /// The colour of the card's line.
+    pub(super) fn text_color(self, p: &Palette) -> Rgb {
+        match self {
+            Self::Idle | Self::Working => p.muted,
+            Self::Waits => p.warning,
+            // The error colour alone is short of 4.5:1 on a hovered row.
+            Self::Failed => mix(p.error, p.text, 0.3),
+        }
+    }
+}
+
+/// What a feature's card says of it, on its row in the Features section or
+/// on the header of its own workspace.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct FeatureCard {
+    pub marks: Vec<StageMark>,
+    /// The stage it is at; none once every stage is done.
+    pub stage: Option<Stage>,
+    /// How that stage stands, in words: "Build · milestone 2/5".
+    pub line: String,
+    pub tone: CardTone,
+    /// Whether a gate holds it for the user, as the inbox counts them.
+    pub gate: bool,
+    /// How many repositories it holds.
+    pub repos: usize,
+}
+
+impl FeatureCard {
+    /// Whether it shows how many repositories it holds: only with several.
+    pub(super) fn shows_repos(&self) -> bool {
+        self.repos > 1
+    }
+}
+
+/// A sidebar row for an open feature that has no workspace.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct FeatureRowView {
     pub title: String,
-    pub marks: Vec<StageMark>,
+    pub card: FeatureCard,
 }
 
-impl FeatureRowView {
-    /// The mark the row starts with: the current stage's, else done.
-    pub(super) fn mark(&self) -> StageMark {
-        if self.marks.contains(&StageMark::Current) {
-            StageMark::Current
-        } else {
-            StageMark::Done
-        }
+/// Signed distance to the mark of `stage` (none: every stage is done),
+/// centred on the origin.
+pub(super) fn stage_glyph(stage: Option<Stage>, x: f32, y: f32, s: f32) -> f32 {
+    match stage {
+        Some(Stage::Discover) => magnifier(x, y, s),
+        Some(Stage::Plan) => text_lines(x, y, s),
+        Some(Stage::Build) => code_mark(x, y, s),
+        Some(Stage::Verify) | None => check(x, y, s),
+        Some(Stage::AiReview) => sparkle(x, y, s),
+        Some(Stage::CodeReview) => eye(x, y, s),
+        Some(Stage::ManualTest) => flask(x, y, s),
+        Some(Stage::Ship) => ship_arrow(x, y, s),
     }
 }
 
@@ -3595,7 +3659,10 @@ mod tests {
         let ws = |name: &str, feature: bool| {
             let mut ws = WorkspaceView::new(name.into(), WorkspaceKind::Terminal, &[]);
             if feature {
-                ws.stages = vec![StageMark::Done, StageMark::Current];
+                ws.feature = Some(FeatureCard {
+                    marks: vec![StageMark::Done, StageMark::Current],
+                    ..FeatureCard::default()
+                });
             }
             ws
         };
@@ -3612,6 +3679,68 @@ mod tests {
         let mixed = [ws("b", true), ws("a", false)];
         let layout = sidebar_layout_at(&mixed, &[], 260, d);
         assert!(layout.features_title.is_none());
+    }
+
+    #[test]
+    fn a_feature_card_keeps_its_dots_where_its_name_starts() {
+        use crate::WorkspaceKind;
+        use crate::chrome::{Density, SIDEBAR_MIN_WIDTH, WorkspaceView, sidebar_layout_at};
+        let d = Density::Comfortable;
+        let mut ws = WorkspaceView::new("Bulk".into(), WorkspaceKind::Terminal, &[]);
+        ws.branch = Some("feature/bulk".into());
+        ws.feature = Some(FeatureCard {
+            marks: vec![StageMark::Later; Stage::ALL.len()],
+            repos: 3,
+            ..FeatureCard::default()
+        });
+        let layout = sidebar_layout_at(std::slice::from_ref(&ws), &[], 200, d);
+        let row = &layout.rows[0];
+        let (name, dots) = (row.name, row.stages.expect("its dots"));
+        assert_eq!(dots.loc.x, name.loc.x);
+        // Its branch comes from its name, so its line holds only the rest.
+        assert_eq!(row.branch, None);
+        let count = row.repos.expect("its count of repositories");
+        assert!(count.loc.x >= dots.loc.x + dots.size.w);
+        // The line under the dots, within the header.
+        let info = row.info.expect("its line");
+        assert_eq!(info.loc.y, dots.loc.y + dots.size.h);
+        assert_eq!(info.loc.y + info.size.h, row.rect.loc.y + row.rect.size.h);
+        // Too narrow for the count, the dots stay and the count goes.
+        let narrow = sidebar_layout_at(std::slice::from_ref(&ws), &[], SIDEBAR_MIN_WIDTH, d);
+        assert_eq!(narrow.rows[0].stages.map(|r| r.loc.x), Some(dots.loc.x));
+        assert_eq!(narrow.rows[0].repos, None);
+    }
+
+    #[test]
+    fn a_feature_card_only_counts_several_repositories() {
+        let card = |repos| FeatureCard {
+            repos,
+            ..FeatureCard::default()
+        };
+        assert!(!card(1).shows_repos());
+        assert!(card(2).shows_repos());
+    }
+
+    #[test]
+    fn a_feature_card_reads_on_the_panels_in_both_themes() {
+        use crate::chrome::{mix, sidebar::ACTIVE_TINT};
+        let tones = [
+            CardTone::Idle,
+            CardTone::Working,
+            CardTone::Waits,
+            CardTone::Failed,
+        ];
+        for p in [&ONE_DARK, &ONE_LIGHT] {
+            let active = mix(p.panel, p.selected, ACTIVE_TINT);
+            for tone in tones {
+                for ground in [p.panel, p.element, active] {
+                    let mark = contrast(tone.mark_color(p), ground);
+                    assert!(mark >= 3.0, "{tone:?} mark at {mark:.2}:1");
+                    let text = contrast(tone.text_color(p), ground);
+                    assert!(text >= 4.5, "{tone:?} text at {text:.2}:1");
+                }
+            }
+        }
     }
 
     #[test]

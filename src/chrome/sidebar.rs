@@ -32,10 +32,10 @@ use super::{
     Canvas, DETAIL_FONT_SIZE, Density, Dot, FONT_SIZE, FieldSpot, GAP, HEADER_BUTTON,
     HEADER_MARGIN, HEADER_NAME_END, HEADER_NAME_GAP, PADDING, PILL_HEIGHT, PILL_PADDING,
     POPUP_RADIUS, Painter, Palette, ROW_ICON_WIDTH, ROW_INSET, ROW_PICTURE_SIZE, ROW_RADIUS,
-    ROWS_TOP, Rect, Rgb, SHADOW, SMALL_FONT_SIZE, STATUS_GAP, STATUS_WIDTH, StageMark, TAB_LINE,
+    ROWS_TOP, Rect, Rgb, SHADOW, SMALL_FONT_SIZE, STATUS_GAP, STATUS_WIDTH, TAB_LINE,
     TINY_FONT_SIZE, TabView, agent_icon, app, arrow, band, centred_dot, chevron_down, ci_mark,
     cross, distinct, ellipsis, folder, git_branch, icon_sdf, measure, mix, new_tab, physical,
-    rect_px, restart_arrow, sparkle, status_dot, status_mark, terminal, tray,
+    rect_px, restart_arrow, sparkle, stages_mark, status_dot, status_mark, terminal, tray,
 };
 use crate::WorkspaceKind;
 use crate::agent_icons::AgentIcon;
@@ -140,7 +140,7 @@ const BLOCKED_TINT: f32 = 0.15;
 /// breathing; the rest comes and goes with the pulse.
 const BLOCKED_REST: f32 = 0.4;
 /// How much of the selection colour tints the active workspace's block.
-const ACTIVE_TINT: f32 = 0.45;
+pub(super) const ACTIVE_TINT: f32 = 0.45;
 /// How strongly the active workspace's header buttons show at rest, as
 /// a fraction of their hovered look.
 const ACTIVE_BUTTONS: f32 = 0.45;
@@ -164,6 +164,12 @@ const SECTION_TOP: i32 = 12;
 const SECTION_TITLE: i32 = 26;
 /// The line under a feature row's title holding its stage dots.
 const STAGE_LINE: i32 = 12;
+/// The line under a feature's stage dots saying how its stage stands.
+const FEATURE_INFO_LINE: i32 = 15;
+/// How far a feature row's lines tuck up under its title.
+const FEATURE_TUCK: i32 = 3;
+/// How wide a feature's count of repositories is.
+const REPO_COUNT_WIDTH: i32 = 26;
 /// The most of an inbox row its workspace's name takes, as a part of it.
 const INBOX_PLACE: f32 = 0.4;
 /// The gap between an agent row's name and what it is on.
@@ -746,10 +752,9 @@ pub struct WorkspaceView {
     /// How many errors its services printed that weren't looked at: a
     /// pill counting them on its header, left of its status.
     pub errors: usize,
-    /// The stage marks of the feature it is the workspace of, as the
-    /// Features section shows them (see `FeatureRowView`): at the right
-    /// end of the line under its name. Empty when it is no feature's.
-    pub stages: Vec<StageMark>,
+    /// The card of the feature it is the workspace of: its stage marks
+    /// on the line under its name, and how its stage stands on one more.
+    pub feature: Option<super::FeatureCard>,
 }
 
 /// What a GitHub section shows: a chip per branch or pull request, a line
@@ -896,7 +901,7 @@ impl WorkspaceView {
             restart: false,
             picks: Vec::new(),
             errors: 0,
-            stages: Vec::new(),
+            feature: None,
         }
     }
 
@@ -915,18 +920,27 @@ impl WorkspaceView {
         let lines = self.attention_lines(density) as i32;
         let bottom = if lines > 0 { ATTENTION_BOTTOM } else { 0 };
         let (name, branch) = self.header_lines(density);
-        name + branch + lines * TAB_LINE + bottom
+        name + branch + self.info_line() + lines * TAB_LINE + bottom
     }
 
     /// The heights of its header's name band and of the line under it
     /// holding its branch: with a branch, it has both, so a long name
     /// keeps the width and the branch always shows.
     fn header_lines(&self, density: Density) -> (i32, i32) {
-        let under = self.branch.is_some() || !self.stages.is_empty();
+        let under = self.branch.is_some() || self.feature.is_some();
         match (under, density) {
             (false, _) => (header_height(density), 0),
             (true, Density::Comfortable) => (NAME_LINE, BRANCH_LINE),
             (true, Density::Compact) => (NAME_LINE_COMPACT, BRANCH_LINE_COMPACT),
+        }
+    }
+
+    /// The height of the line under its feature's stage marks.
+    fn info_line(&self) -> i32 {
+        if self.feature.is_some() {
+            FEATURE_INFO_LINE
+        } else {
+            0
         }
     }
 
@@ -1222,9 +1236,15 @@ pub struct RowLayout {
     pub picks: Option<Rect>,
     /// The count of its other worktrees, when it has any.
     pub worktrees: Option<Rect>,
-    /// Its feature's stage marks, when it is a feature's workspace: at the
-    /// right end of the line under its name, right of the CI mark.
+    /// Its feature's stage marks, when it is a feature's workspace: where
+    /// the line under its name starts.
     pub stages: Option<Rect>,
+    /// What of that line is free for its git marks, past the stage marks.
+    pub git: Option<Rect>,
+    /// Its feature's count of repositories, when it holds several.
+    pub repos: Option<Rect>,
+    /// The line under the stage marks saying how its stage stands.
+    pub info: Option<Rect>,
     /// The lines under the header of the worktrees needing a look, when
     /// it shows any.
     pub attention: Option<Rect>,
@@ -1671,6 +1691,9 @@ impl SidebarLayout {
                 &mut row.ci,
                 &mut row.worktrees,
                 &mut row.stages,
+                &mut row.git,
+                &mut row.repos,
+                &mut row.info,
                 &mut row.attention,
             ]
             .into_iter()
@@ -1792,19 +1815,57 @@ fn features_rects(
         return (None, Vec::new(), y);
     }
     let title = heading.then(|| features_title_rect(y, width));
-    // A row per feature, as an agent row with a line under its first
-    // for the stage dots.
+    // A row per feature, as an agent row with lines under its first for
+    // the stage dots and how the stage stands.
     let child_w = (width - GAP - ROW_INSET - CHILD_X).max(0);
     let mut y = title.map_or(y, |t| t.loc.y + SECTION_TITLE);
     let rows = (0..n)
         .map(|_| {
-            let h = agent_row(density) + STAGE_LINE;
+            let h = agent_row(density) + STAGE_LINE + FEATURE_INFO_LINE - FEATURE_TUCK;
             let rect = Rectangle::new((CHILD_X, y).into(), (child_w, h).into());
             y += h + CHILD_GAP;
             rect
         })
         .collect();
     (title, rows, y + INBOX_GAP)
+}
+
+/// The part of `r` from `x`, `w` wide.
+fn within_x(r: Rect, x: i32, w: i32) -> Rect {
+    Rectangle::new((x, r.loc.y).into(), (w, r.size.h).into())
+}
+
+/// Where a feature row at `row` has its stage dots: where its title
+/// starts, on the line above the last.
+fn feature_dots_rect(row: Rect) -> Rect {
+    Rectangle::new(
+        (
+            row.loc.x - CHILD_X + NAME_X,
+            row.loc.y + row.size.h - FEATURE_INFO_LINE - STAGE_LINE,
+        )
+            .into(),
+        (
+            super::stage_marks_width(crate::feature::Stage::ALL.len()),
+            STAGE_LINE,
+        )
+            .into(),
+    )
+}
+
+/// Where a feature row at `row` says how its stage stands: its last line.
+fn feature_info_rect(row: Rect) -> Rect {
+    Rectangle::new(
+        (
+            row.loc.x - CHILD_X + NAME_X,
+            row.loc.y + row.size.h - FEATURE_INFO_LINE,
+        )
+            .into(),
+        (
+            row.size.w - (NAME_X - CHILD_X) - CHILD_PAD,
+            FEATURE_INFO_LINE,
+        )
+            .into(),
+    )
 }
 
 /// The "Features" heading of a section starting at `y`, under its rule,
@@ -1837,7 +1898,7 @@ fn features_part_rects(
 /// feature workspace at the end.
 fn features_from(workspaces: &[WorkspaceView]) -> Option<usize> {
     let n = (workspaces.iter().rev())
-        .take_while(|ws| !ws.stages.is_empty())
+        .take_while(|ws| ws.feature.is_some())
         .count();
     (n > 0).then(|| workspaces.len() - n)
 }
@@ -1891,6 +1952,7 @@ pub fn sidebar_layout_at(
         // count at that line's right end.
         let h = ws.height(density);
         let (title_h, branch_h) = ws.header_lines(density);
+        let info_h = ws.info_line();
         let rect = Rectangle::new((0, y).into(), (width - GAP, h).into());
         let title = Rectangle::new((0, y).into(), (width - GAP, title_h).into());
         let slot = |x: i32, w: i32| Rectangle::new((x, y).into(), (w, title_h).into());
@@ -1909,7 +1971,7 @@ pub fn sidebar_layout_at(
         let picks = (!ws.picks.is_empty()).then(|| {
             let w = ws.picks.len().min(room) as i32 * AGENT_SLOT;
             Rectangle::new(
-                (strip_end - w, y + title_h + branch_h).into(),
+                (strip_end - w, y + title_h + branch_h + info_h).into(),
                 (w, STRIP_HEIGHT).into(),
             )
         });
@@ -1926,36 +1988,57 @@ pub fn sidebar_layout_at(
             end -= w;
             slot(end, w)
         });
+        // A feature's stage marks where its name starts; they stay, what
+        // follows on the line goes when it doesn't fit.
+        let stages = ws
+            .feature
+            .as_ref()
+            .map(|card| below(NAME_X, super::stage_marks_width(card.marks.len())));
+        let floor = stages.map_or(i32::MIN, |s| s.loc.x + s.size.w + NAME_GAP);
         // The CI mark and the count: at the right end of the branch's
         // line, else of the header.
         let mut branch_end = right;
         let mut take = |w: i32| {
-            if branch_h > 0 {
-                branch_end -= w;
-                below(branch_end, w)
-            } else {
+            if branch_h == 0 {
                 end -= w;
-                slot(end, w)
+                Some(slot(end, w))
+            } else if branch_end - w >= floor {
+                branch_end -= w;
+                Some(below(branch_end, w))
+            } else {
+                None
             }
         };
-        // A feature's stage marks first, rightmost of the line, their
-        // right end at a feature row's.
-        let stages = (!ws.stages.is_empty())
-            .then(|| take(super::stage_marks_width(ws.stages.len()) + NAME_GAP + CHILD_PAD));
-        let ci_mark = ws.ci_mark().then(|| take(CI_SLOT));
-        let worktrees = (!ws.worktrees().is_empty()).then(|| take(WORKTREE_COUNT_WIDTH));
+        let ci_mark = ws.ci_mark().then(|| take(CI_SLOT)).flatten();
+        let worktrees = (!ws.worktrees().is_empty())
+            .then(|| take(WORKTREE_COUNT_WIDTH))
+            .flatten();
+        let card = ws.feature.as_ref();
+        let repos = card
+            .filter(|card| card.shows_repos())
+            .and_then(|_| take(REPO_COUNT_WIDTH + CHILD_PAD))
+            .map(|r| Rectangle::new(r.loc, (REPO_COUNT_WIDTH, r.size.h).into()));
+        let git = card.map(|_| below(floor, (branch_end - floor).max(0)));
+        let info = card.map(|_| {
+            Rectangle::new(
+                (NAME_X, y + title_h + branch_h).into(),
+                ((right - CHILD_PAD - NAME_X).max(0), info_h).into(),
+            )
+        });
         // The name may reach under the "×", the restart button and the
         // agent button, which show only under the pointer, while nothing else is right of them.
         let name_end = if end == buttons { right } else { end };
         let name = slot(NAME_X, (name_end - NAME_GAP - NAME_X).max(0));
         let branch = ws
             .branch
-            .is_some()
-            .then(|| below(NAME_X, (branch_end - NAME_GAP - NAME_X).max(0)));
+            .as_ref()
+            // A feature's branch comes from its name: its tooltip says it.
+            .filter(|_| ws.feature.is_none())
+            .map(|_| below(NAME_X, (branch_end - NAME_GAP - NAME_X).max(0)));
         let fold = foldable.then(|| slot(ROW_INSET, ICON_X - ROW_INSET));
         let attention = (attention_lines > 0).then(|| {
             Rectangle::new(
-                (ROW_INSET, y + title_h + branch_h).into(),
+                (ROW_INSET, y + title_h + branch_h + info_h).into(),
                 (width - GAP - 2 * ROW_INSET, attention_lines * TAB_LINE).into(),
             )
         });
@@ -1974,6 +2057,9 @@ pub fn sidebar_layout_at(
             picks,
             worktrees,
             stages,
+            git,
+            repos,
+            info,
             attention,
         });
         y += h;
@@ -2401,14 +2487,14 @@ impl Painter {
         let rule_x = px(ROW_INSET);
         let rule_w = px(title.loc.x + title.size.w - ROW_INSET) - rule_x;
         c.fill(rule_x, rule_y, rule_w, rule_h, p.border);
-        self.section_heading(c, title, git_branch, "Features", Some(count), scale, p);
+        self.section_heading(c, title, stages_mark, "Features", Some(count), scale, p);
     }
 
     /// The features section's rows of features with no workspace: each a
     /// feature, its hover alpha and where it goes. A row has the mark of
     /// the stage the feature is at under the heading's icon, the feature's
-    /// title under its label, and a dot per stage on a line under the
-    /// title.
+    /// title under its label, a dot per stage on a line under the title,
+    /// and how that stage stands on a line under them.
     fn feature_rows(
         &self,
         c: &mut Canvas,
@@ -2425,30 +2511,28 @@ impl Painter {
                 let (x, y, w, h) = rect_px(*rect, scale);
                 c.rounded(x, y, w, h, ROW_RADIUS * s, mix(p.panel, p.element, hover));
             }
-            // The dot in the column of the heading's icon and of the
-            // agent rows' status dots.
+            // The stage's mark in the column of the heading's icon and of
+            // the workspaces' kind icons.
             let first = blocked_band(*rect, density);
             let spot = Rectangle::new(
-                (
-                    rect.loc.x - CHILD_X + ICON_X + (ROW_ICON_WIDTH - super::STAGE_DOT) / 2,
-                    first.loc.y + (first.size.h - super::STAGE_DOT) / 2,
-                )
-                    .into(),
-                (super::STAGE_DOT, super::STAGE_DOT).into(),
+                (rect.loc.x - CHILD_X + ICON_X, first.loc.y).into(),
+                (ROW_ICON_WIDTH, first.size.h).into(),
             );
-            let mark = row.mark();
-            icon_sdf(c, spot, scale, mark.color(p), |x, y| {
-                super::stage_dot(mark, x, y, 7.0 * s)
-            });
+            self.stage_mark(c, &row.card, spot, scale, p);
             // The title where the heading's label starts, across the
-            // row; the stages' dots on the line under it.
+            // row; the lines the workspaces' cards have under it.
             let text_x = px(rect.loc.x - CHILD_X + NAME_X);
-            let dots = super::stage_marks_width(row.marks.len());
-            let marks = Rectangle::new(
-                (rect.loc.x - CHILD_X + NAME_X, first.loc.y + first.size.h).into(),
-                (dots, STAGE_LINE - CHILD_PAD / 2).into(),
-            );
-            self.stage_marks(c, &row.marks, marks, scale, p);
+            let dots = feature_dots_rect(*rect);
+            self.stage_marks(c, &row.card.marks, dots, scale, p);
+            if row.card.shows_repos() {
+                let end = rect.loc.x + rect.size.w - CHILD_PAD;
+                let count = within_x(dots, end - REPO_COUNT_WIDTH, REPO_COUNT_WIDTH);
+                if count.loc.x >= dots.loc.x + dots.size.w + NAME_GAP {
+                    self.repo_count(c, row.card.repos, count, scale, p);
+                }
+            }
+            let end = px(rect.loc.x + rect.size.w - CHILD_PAD) as f32;
+            self.card_line(c, &row.card, feature_info_rect(*rect), end, scale, p);
             self.text(
                 c,
                 &row.title,
@@ -2460,6 +2544,65 @@ impl Painter {
                 p.text,
             );
         }
+    }
+
+    /// The mark of the stage `card`'s feature is at, in `spot`.
+    fn stage_mark(
+        &self,
+        c: &mut Canvas,
+        card: &super::FeatureCard,
+        spot: Rect,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let small = 0.8 * scale as f32;
+        icon_sdf(c, spot, scale, card.tone.mark_color(p), |x, y| {
+            super::stage_glyph(card.stage, x, y, small)
+        });
+    }
+
+    /// The line of `card` saying how its stage stands, in `rect` up to
+    /// `end`.
+    fn card_line(
+        &self,
+        c: &mut Canvas,
+        card: &super::FeatureCard,
+        rect: Rect,
+        end: f32,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let x = (rect.loc.x as f64 * scale).round() as f32;
+        let color = card.tone.text_color(p);
+        let band = band(rect, scale);
+        self.text(c, &card.line, DETAIL_FONT_SIZE, x, end, band, scale, color);
+    }
+
+    /// The count of a feature's `repos` at the right end of `rect`.
+    fn repo_count(&self, c: &mut Canvas, repos: usize, rect: Rect, scale: f64, p: &Palette) {
+        let px = |v: i32| (v as f64 * scale).round() as i32;
+        let s = scale as f32;
+        let n = repos.to_string();
+        let n_w = (self.text_width(&n, DETAIL_FONT_SIZE, scale) / s).ceil() as i32;
+        let end = rect.loc.x + rect.size.w;
+        let icon = within_x(
+            rect,
+            end - n_w - BRANCH_ICON_GAP - BRANCH_ICON_WIDTH,
+            BRANCH_ICON_WIDTH,
+        );
+        icon_sdf(c, icon, scale, p.placeholder, |x, y| {
+            git_branch(x, y, 0.75 * s)
+        });
+        self.text(
+            c,
+            &n,
+            DETAIL_FONT_SIZE,
+            px(end - n_w) as f32,
+            px(end) as f32,
+            band(rect, scale),
+            scale,
+            p.muted,
+        );
     }
 
     /// Workspace `i`'s header and what is under it, where `layout` has
@@ -2593,6 +2736,12 @@ impl Painter {
         let icon = at(ICON_X, ROW_ICON_WIDTH);
         let small = 0.8 * s;
         match ws.kind {
+            // A feature's workspace says where the feature is instead.
+            _ if ws.feature.is_some() => {
+                if let Some(card) = &ws.feature {
+                    self.stage_mark(c, card, icon, scale, p);
+                }
+            }
             WorkspaceKind::Project => {
                 icon_sdf(c, icon, scale, p.placeholder, |x, y| folder(x, y, small))
             }
@@ -2685,22 +2834,30 @@ impl Painter {
             );
         }
 
-        // Its feature's stage marks, on a pill within their line under
-        // the pointer, as they open the feature panel.
-        if let Some(marks) = row.stages {
-            let dots = Rectangle::new(
-                (marks.loc.x + NAME_GAP, marks.loc.y).into(),
-                (marks.size.w - NAME_GAP - CHILD_PAD, marks.size.h).into(),
-            );
+        // Its feature's card: the stage marks, on a pill under the pointer
+        // as they open the feature panel, what else its line has, and how
+        // its stage stands.
+        if let (Some(card), Some(marks)) = (&ws.feature, row.stages) {
             if row_state.stages {
                 let pill = Rectangle::new(
-                    (dots.loc.x - COUNT_PILL_PAD, dots.loc.y + 1).into(),
-                    (dots.size.w + 2 * COUNT_PILL_PAD, dots.size.h - 2).into(),
+                    (marks.loc.x - COUNT_PILL_PAD, marks.loc.y + 1).into(),
+                    (marks.size.w + 2 * COUNT_PILL_PAD, marks.size.h - 2).into(),
                 );
                 let (x, y, w, h) = rect_px(pill, scale);
                 c.rounded(x, y, w, h, 4.0 * s, mix(surface, p.text, 0.1));
             }
-            self.stage_marks(c, &ws.stages, dots, scale, p);
+            self.stage_marks(c, &card.marks, marks, scale, p);
+            if let Some(count) = row.repos {
+                self.repo_count(c, card.repos, count, scale, p);
+            }
+            if let (Some(line), Some(git)) = (row.git, &ws.git) {
+                let (x, end) = (px(line.loc.x) as f32, px(line.loc.x + line.size.w) as f32);
+                self.git_marks(c, git, x, end, band(line, scale), scale, p);
+            }
+            if let Some(info) = row.info {
+                let end = px(info.loc.x + info.size.w) as f32;
+                self.card_line(c, card, info, end, scale, p);
+            }
         }
 
         // The mark of its CI, while that needs no look or it is folded.
@@ -4038,7 +4195,7 @@ mod tests {
             restart: false,
             picks: Vec::new(),
             errors: 0,
-            stages: Vec::new(),
+            feature: None,
         }
     }
 

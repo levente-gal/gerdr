@@ -5039,10 +5039,7 @@ impl Gerdr {
             code_review: self.code_review_line(&panel.project, &panel.slug),
             picks: self.chips_of(&panel.project, &panel.slug, panel.page_stage(feature)),
             manual: manual_counts.map(crate::manual_test::counts_text),
-            manual_gate: manual_counts.map(|n| {
-                let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
-                (count(n.passed), count(n.total()))
-            }),
+            manual_gate: manual_counts.map(manual_gate),
         };
         Some(tab_view(panel, feature, &slugs, &state, now))
     }
@@ -5053,9 +5050,39 @@ impl Gerdr {
             .into_iter()
             .map(|f| chrome::FeatureRowView {
                 title: self.row_title(f),
-                marks: Stage::ALL.iter().map(|s| stage_mark(f, *s)).collect(),
+                card: self.feature_card(f),
             })
             .collect()
+    }
+
+    /// What `f`'s card says, on its row or its workspace's header.
+    pub(crate) fn feature_card(&self, f: &Feature) -> chrome::FeatureCard {
+        let mine = || {
+            let busy = self.features.busy.iter();
+            busy.filter(|b| b.project == f.project && b.slug == f.slug)
+        };
+        let doing = |job: Job| mine().find(|b| b.job == job).map(|b| b.what.as_str());
+        let key = (f.project.clone(), f.slug.clone());
+        let manual = self.manual_counts(f).map(manual_gate);
+        let line = LineState {
+            probe: (self.features.probes.get(&key)).and_then(|p| p.last.as_ref()),
+            shipping: mine().any(|b| b.job == Job::Ship),
+            checks: self.row_ctx(f).checks,
+            setup: doing(Job::Setup),
+            verify: doing(Job::Verify),
+            manual_gate: manual,
+        };
+        let stage = f.current();
+        let gate = crate::feature_agents::gate_of(f, |_| manual).is_some();
+        let busy = mine().next().is_some();
+        chrome::FeatureCard {
+            marks: Stage::ALL.iter().map(|s| stage_mark(f, *s)).collect(),
+            stage,
+            line: card_line(f, stage, &line, feature::now()),
+            tone: card_tone(f, stage, &line, gate, busy),
+            gate,
+            repos: f.repos.len(),
+        }
     }
 
     /// A sidebar row's title for `f`: another project's feature (one
@@ -5572,6 +5599,83 @@ fn is_stale(feature: &Feature, stage: Stage, probe: Option<&Probe>) -> bool {
         && stale_from(feature, probe).is_some_and(|from| stage_index(stage) >= stage_index(from))
 }
 
+/// How many of Manual test's criteria passed, of how many (see
+/// `feature_agents::gate_of`).
+fn manual_gate(n: crate::feature::manual::Counts) -> (u32, u32) {
+    let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+    (count(n.passed), count(n.total()))
+}
+
+/// What a current stage's short line reads besides its feature (see
+/// `current_line`), on the rail and on the sidebar's cards.
+struct LineState<'a> {
+    probe: Option<&'a Probe>,
+    shipping: bool,
+    checks: bool,
+    setup: Option<&'a str>,
+    verify: Option<&'a str>,
+    manual_gate: Option<(u32, u32)>,
+}
+
+impl<'a> From<&PanelState<'a>> for LineState<'a> {
+    fn from(state: &PanelState<'a>) -> Self {
+        Self {
+            probe: state.probe,
+            shipping: state.shipping,
+            checks: state.ctx.checks,
+            setup: state.setup,
+            verify: state.verify,
+            manual_gate: state.manual_gate,
+        }
+    }
+}
+
+/// A card's line for `feature` at `stage`: the stage and how it stands,
+/// else how long nothing happened to it.
+fn card_line(feature: &Feature, stage: Option<Stage>, state: &LineState, now: u64) -> String {
+    let Some(stage) = stage else {
+        return "Every stage done".to_owned();
+    };
+    let mut what = current_line(feature, stage, state, now);
+    if what.is_empty() {
+        let last = feature.history.iter().map(|e| e.at).max();
+        what = projects::ago(now, last.unwrap_or(feature.created));
+    }
+    format!("{} \u{b7} {what}", stage.label())
+}
+
+/// How `feature` at `stage` stands, for its card; `gate`: a gate holds it,
+/// `busy`: a job of it runs.
+fn card_tone(
+    feature: &Feature,
+    stage: Option<Stage>,
+    state: &LineState,
+    gate: bool,
+    busy: bool,
+) -> chrome::CardTone {
+    let run = stage.and_then(|stage| feature.runs.get(&stage));
+    let failed = match stage {
+        Some(Stage::Build) => {
+            run.is_none() && (feature.setup.as_ref()).is_some_and(|s| s.failed.is_some())
+        }
+        Some(Stage::Verify) => (feature.verify.as_ref()).is_some_and(|v| v.passed == Some(false)),
+        Some(Stage::Ship) => {
+            let check = state.probe.and_then(|p| p.ship.as_ref());
+            check.is_some_and(|c| !c.blockers.is_empty())
+        }
+        _ => false,
+    };
+    if failed {
+        chrome::CardTone::Failed
+    } else if gate {
+        chrome::CardTone::Waits
+    } else if busy || run.is_some_and(feature::agents::StageRun::live) {
+        chrome::CardTone::Working
+    } else {
+        chrome::CardTone::Idle
+    }
+}
+
 /// Whether the current `stage` of `feature` waits for the user: a file to
 /// review, a stop to go on from, findings to decide (see
 /// `feature_agents::gate_of`).
@@ -5588,7 +5692,7 @@ fn running_for(now: u64, started: u64) -> String {
 }
 
 /// The short line under current `stage`'s node on the rail.
-fn current_line(feature: &Feature, stage: Stage, state: &PanelState, now: u64) -> String {
+fn current_line(feature: &Feature, stage: Stage, state: &LineState, now: u64) -> String {
     let run = feature.runs.get(&stage);
     let agent = || match run {
         Some(run) if run.t3 == Some(feature::agents::T3Run::Draft) => "draft in T3 Code".to_owned(),
@@ -5610,7 +5714,7 @@ fn current_line(feature: &Feature, stage: Stage, state: &PanelState, now: u64) -
         Stage::Verify if state.verify.is_some() => "running".into(),
         Stage::Verify => match &feature.verify {
             Some(v) if v.passed == Some(false) => "failed".into(),
-            _ if !state.ctx.checks => "mark by hand".into(),
+            _ if !state.checks => "mark by hand".into(),
             _ => String::new(),
         },
         Stage::AiReview => {
@@ -5664,7 +5768,7 @@ fn rail_node(feature: &Feature, stage: Stage, state: &PanelState, now: u64) -> R
                 true => NodeMark::Waiting,
                 false => NodeMark::Current,
             };
-            (mark, current_line(feature, stage, state, now))
+            (mark, current_line(feature, stage, &state.into(), now))
         }
         StageMark::Later => (NodeMark::Later, String::new()),
     };
@@ -9088,6 +9192,51 @@ pub(crate) mod tests {
         assert_eq!(
             rail_node(&f, Stage::Ship, &state, 2_000).line,
             "ready to ship"
+        );
+    }
+
+    #[test]
+    fn a_cards_line_says_the_stage_and_how_it_stands_else_how_long_it_sat() {
+        let state = LineState::from(&PanelState::default());
+        let now = 10 * 86_400;
+        let mut f = feature("d", vec![repo("api", true)], 2);
+        f.created = 0;
+        f.history = vec![feature::Event {
+            at: now - 3 * 86_400,
+            what: "Plan ticked".into(),
+        }];
+        assert_eq!(
+            card_line(&f, Some(Stage::Build), &state, now),
+            format!("Build \u{b7} {}", projects::ago(now, now - 3 * 86_400)),
+        );
+        let setting_up = LineState {
+            setup: Some("npm ci"),
+            ..LineState::from(&PanelState::default())
+        };
+        assert_eq!(
+            card_line(&f, Some(Stage::Build), &setting_up, now),
+            "Build \u{b7} setting up",
+        );
+        assert_eq!(card_line(&f, None, &state, now), "Every stage done");
+    }
+
+    #[test]
+    fn a_cards_tone_puts_a_failure_over_a_gate_over_work() {
+        use chrome::CardTone::{Failed, Idle, Waits, Working};
+        let state = LineState::from(&PanelState::default());
+        let f = feature("d", vec![repo("api", true)], 2);
+        let tone = |gate, busy| card_tone(&f, Some(Stage::Build), &state, gate, busy);
+        assert_eq!(tone(false, false), Idle);
+        assert_eq!(tone(false, true), Working);
+        assert_eq!(tone(true, true), Waits);
+        let mut verify = feature("d", vec![repo("api", true)], 3);
+        verify.verify = Some(feature::verify::VerifyRun {
+            passed: Some(false),
+            ..Default::default()
+        });
+        assert_eq!(
+            card_tone(&verify, Some(Stage::Verify), &state, true, true),
+            Failed
         );
     }
 

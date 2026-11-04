@@ -14,6 +14,7 @@ use super::{
     SidebarState, SidebarView, SwitcherRow, SwitcherView, TabStripView, TabView, Theme, ThemeMode,
     ToastView, TooltipView, WelcomeHit, WelcomeView, WorkspaceView,
 };
+use super::{CardTone, FeatureCard};
 use crate::{
     Action, WorkspaceKind, git::GitStatus, herdr::AgentStatus, text_field::Line, toast::Level,
 };
@@ -58,7 +59,7 @@ fn workspaces() -> Vec<WorkspaceView> {
             restart: false,
             picks: Vec::new(),
             errors: 0,
-            stages: Vec::new(),
+            feature: None,
         },
         WorkspaceView {
             name: "~".into(),
@@ -75,7 +76,7 @@ fn workspaces() -> Vec<WorkspaceView> {
             restart: false,
             picks: Vec::new(),
             errors: 0,
-            stages: Vec::new(),
+            feature: None,
         },
     ]
 }
@@ -1605,6 +1606,18 @@ fn stage_marks(done: usize) -> Vec<super::StageMark> {
         .collect()
 }
 
+/// A feature's card with the first `done` of its stages done.
+fn card(done: usize, line: &str, tone: CardTone) -> FeatureCard {
+    FeatureCard {
+        marks: stage_marks(done),
+        stage: crate::feature::Stage::ALL.get(done).copied(),
+        line: line.into(),
+        tone,
+        gate: tone == CardTone::Waits,
+        repos: 1,
+    }
+}
+
 /// The sidebar with a feature's own workspace, its header showing the
 /// feature's title and stage marks (the pointer on them), and another
 /// feature with none open under the workspaces.
@@ -1613,7 +1626,10 @@ fn feature_workspace_sidebar() -> SidebarView {
     let mut workspaces = workspaces();
     let feature = &mut workspaces[1];
     feature.name = "Bulk export of invoices".into();
-    feature.stages = stage_marks(3);
+    feature.feature = Some(FeatureCard {
+        repos: 3,
+        ..card(3, "Verify \u{b7} running", CardTone::Working)
+    });
     SidebarView {
         workspaces,
         agents: agents(),
@@ -1622,7 +1638,7 @@ fn feature_workspace_sidebar() -> SidebarView {
         header_lit: false,
         features: vec![FeatureRowView {
             title: "Faster search".into(),
-            marks: stage_marks(1),
+            card: card(1, "Plan \u{b7} 3d ago", CardTone::Idle),
         }],
         state: SidebarState {
             rows: vec![
@@ -1642,7 +1658,6 @@ fn feature_workspace_sidebar() -> SidebarView {
 /// under the pointer.
 fn features_sidebar() -> SidebarView {
     use super::FeatureRowView;
-    let marks = stage_marks;
     SidebarView {
         workspaces: workspaces(),
         agents: agents(),
@@ -1652,11 +1667,18 @@ fn features_sidebar() -> SidebarView {
         features: vec![
             FeatureRowView {
                 title: "Bulk export of invoices".into(),
-                marks: marks(2),
+                card: FeatureCard {
+                    repos: 3,
+                    ..card(2, "Build \u{b7} milestone 2/5", CardTone::Waits)
+                },
             },
             FeatureRowView {
                 title: "A feature with a title far too long to fit".into(),
-                marks: marks(6),
+                card: card(
+                    6,
+                    "Manual test \u{b7} 1 of 12 passed, far too long",
+                    CardTone::Failed,
+                ),
             },
         ],
         state: SidebarState {
@@ -1678,17 +1700,25 @@ fn needs_you_sidebar() -> SidebarView {
 }
 
 const FEATURE_OUTPUT: (i32, i32) = (870, 720);
+/// The sidebars' width: gerdr's default, the tightest fit a card has to
+/// read in.
+const SIDEBAR_W: i32 = super::SIDEBAR_WIDTH;
 
 fn paint_features(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
     let p = theme.palette();
     let size = FEATURE_OUTPUT.into();
     vec![
         hash(painter.new_feature_dialog(&new_feature(), size, scale, p)),
-        hash(painter.sidebar_view(&features_sidebar(), (260, 520).into(), scale, p)),
+        hash(painter.sidebar_view(&features_sidebar(), (SIDEBAR_W, 520).into(), scale, p)),
         hash(painter.manual_test_sheet(&manual_test(false), size, scale, p)),
         hash(painter.manual_test_sheet(&manual_test(true), size, scale, p)),
-        hash(painter.sidebar_view(&feature_workspace_sidebar(), (260, 520).into(), scale, p)),
-        hash(painter.sidebar_view(&needs_you_sidebar(), (260, 520).into(), scale, p)),
+        hash(painter.sidebar_view(
+            &feature_workspace_sidebar(),
+            (SIDEBAR_W, 520).into(),
+            scale,
+            p,
+        )),
+        hash(painter.sidebar_view(&needs_you_sidebar(), (SIDEBAR_W, 520).into(), scale, p)),
     ]
 }
 
@@ -1777,38 +1807,38 @@ const GOLDEN_FEATURES: [[u64; 6]; 4] = [
     // Dark at 1
     [
         0x73e88729cb0c3112, // new_feature
-        0x5e017fbffabde99b, // sidebar_features
+        0x83d9403746116b76, // sidebar_features
         0xab580425d0a50879, // manual_test
         0x8e4d20f7c6316567, // manual_test_note
-        0x41c27deb8d74ba1a, // sidebar_feature_workspace
-        0x818d05fb2ec3d9a9, // sidebar_needs_you
+        0x0253f4324cdb1fb7, // sidebar_feature_workspace
+        0x07890d5e92d3ce88, // sidebar_needs_you
     ],
     // Dark at 2
     [
         0xbc9770d9310bd319, // new_feature
-        0x095e2dfbb584cb35, // sidebar_features
+        0xac32f1b3b8808d58, // sidebar_features
         0xc14927ebcde55bf1, // manual_test
         0xb520dd662440b737, // manual_test_note
-        0x343ff92f09e0e5b8, // sidebar_feature_workspace
-        0x445f579930bc139c, // sidebar_needs_you
+        0xfc964ba229a36886, // sidebar_feature_workspace
+        0x4871b255f5b34609, // sidebar_needs_you
     ],
     // Light at 1
     [
         0xb1780dfd60b1e9a8, // new_feature
-        0xd22590056de00ae5, // sidebar_features
+        0x678e39208e60b76e, // sidebar_features
         0x093b890ce5537eef, // manual_test
         0xa74e12b563efbdaf, // manual_test_note
-        0x1ac111419d6a09d2, // sidebar_feature_workspace
-        0x0884214637ba9738, // sidebar_needs_you
+        0x3633a01211c97a14, // sidebar_feature_workspace
+        0xadb6dd9160f82905, // sidebar_needs_you
     ],
     // Light at 2
     [
         0x757537a93b40f9fa, // new_feature
-        0x5e1381a968fcc82e, // sidebar_features
+        0x0d5567b2624a2ab2, // sidebar_features
         0xed40d3ad66f63314, // manual_test
         0x1239c6f64e145f2f, // manual_test_note
-        0x5763cc404205b495, // sidebar_feature_workspace
-        0x94e9eab9390bd4db, // sidebar_needs_you
+        0x2a84d65d3314123b, // sidebar_feature_workspace
+        0xf03e3effac553bc5, // sidebar_needs_you
     ],
 ];
 
@@ -1853,20 +1883,25 @@ fn dump_features() {
         dump(
             &dir,
             &format!("sidebar_features_{tag}"),
-            painter.sidebar_view(&features_sidebar(), (260, 520).into(), scale, p),
-            px(260),
+            painter.sidebar_view(&features_sidebar(), (SIDEBAR_W, 520).into(), scale, p),
+            px(SIDEBAR_W),
         );
         dump(
             &dir,
             &format!("sidebar_feature_workspace_{tag}"),
-            painter.sidebar_view(&feature_workspace_sidebar(), (260, 520).into(), scale, p),
-            px(260),
+            painter.sidebar_view(
+                &feature_workspace_sidebar(),
+                (SIDEBAR_W, 520).into(),
+                scale,
+                p,
+            ),
+            px(SIDEBAR_W),
         );
         dump(
             &dir,
             &format!("sidebar_needs_you_{tag}"),
-            painter.sidebar_view(&needs_you_sidebar(), (260, 520).into(), scale, p),
-            px(260),
+            painter.sidebar_view(&needs_you_sidebar(), (SIDEBAR_W, 520).into(), scale, p),
+            px(SIDEBAR_W),
         );
     }
 }
