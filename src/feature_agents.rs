@@ -2197,6 +2197,41 @@ mod tests {
     }
 
     #[test]
+    fn prompts_name_the_repositories_left_out_and_that_the_graph_lacks_them() {
+        let dir = std::env::temp_dir().join(format!("gerdr-prompt-others-{}", std::process::id()));
+        let (api, web) = (dir.join("api"), dir.join("web"));
+        std::fs::create_dir_all(api.join(".git")).unwrap();
+        std::fs::create_dir_all(web.join(".git")).unwrap();
+        let mut f = feature("a", vec![repo("api", true)], 0);
+        f.root = dir.clone();
+        f.multi = true;
+        let names = PerProject::all("Acme".to_owned());
+        let v = vars(&f, &names, Path::new("/data/a"), Stage::Plan);
+        assert_eq!(v["other_repos"], format!("- web: {}", web.display()));
+        let text = prompts::render_builtin("plan", &v).unwrap();
+        assert!(text.contains(&v["other_repos"]));
+        assert!(text.contains("Ctrl+Shift+L"));
+        assert!(!text.contains("The graph doesn't hold them"));
+        // With a graph: it says the graph doesn't hold them.
+        std::fs::create_dir_all(api.join(graph::OUT_DIR)).unwrap();
+        std::fs::write(graph::file(&api), "{}").unwrap();
+        f.repos[0].main = api;
+        let v = vars(&f, &names, Path::new("/data/a"), Stage::Plan);
+        let text = prompts::render_builtin("plan", &v).unwrap();
+        assert!(text.contains("The graph doesn't hold them"));
+        assert!(text.contains("still being built"));
+        // Every repository in: nothing to say.
+        let web_repo = feature::Repo {
+            main: web,
+            ..repo("web", true)
+        };
+        f.repos.push(web_repo);
+        let v = vars(&f, &names, Path::new("/data/a"), Stage::Plan);
+        assert_eq!(v["other_repos"], "");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn prompts_name_the_code_graphs_of_projects_that_keep_them() {
         let dir = std::env::temp_dir().join(format!("gerdr-prompt-graph-{}", std::process::id()));
         let main = dir.join("api");

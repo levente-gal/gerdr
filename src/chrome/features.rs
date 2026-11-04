@@ -11,9 +11,9 @@ use super::{
     Dot, FONT_SIZE, FieldSpot, LABEL_FONT_SIZE, ListBar, POPUP_RADIUS, Painter, Palette, QUIT_BODY,
     QUIT_BUTTON, QUIT_BUTTON_GAP, QUIT_LINE_GAP, QUIT_PADDING, QUIT_TITLE, Rect, Rgb, SHADOW,
     SMALL_FONT_SIZE, Thumb, agent_icon, band, button_width, check, chevron_side, copy, cross,
-    dialog_buttons, field_text, focus_ring, footer_hint_spots, gutter_track, hint_strs, icon_sdf,
-    measure, measure_bold, measured_footer_height, mix, phys, physical, plus, rect_px,
-    segment_tint, status_dot, tab, trash,
+    dialog_buttons, field_text, focus_ring, folder_plus, footer_hint_spots, gutter_track,
+    hint_strs, icon_sdf, measure, measure_bold, measured_footer_height, mix, phys, physical, plus,
+    rect_px, segment_tint, status_dot, tab, trash,
 };
 use crate::text_field::Line;
 use crate::{
@@ -1609,9 +1609,13 @@ pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayou
         // them; the selected one's button at the strip's end.
         let y = strip.loc.y + (CHIP_ROW - ROW_BUTTON) / 2;
         let remove = (view.repos.get(view.repo))
-            .filter(|r| r.remove && !r.busy)
+            // Only with the keyboard on the chips: the chip it acts on then shows.
+            .filter(|r| view.focus == TabArea::Repos && r.remove && !r.busy)
             .map(|_| {
-                Rectangle::new((right - ROW_BUTTON, y).into(), (ROW_BUTTON, ROW_BUTTON).into())
+                Rectangle::new(
+                    (right - ROW_BUTTON, y).into(),
+                    (ROW_BUTTON, ROW_BUTTON).into(),
+                )
             });
         let button_end = remove.map_or(right, |r| r.loc.x - 2);
         let button = view
@@ -2575,6 +2579,7 @@ impl Painter {
                 0 => tab(x, y, s * 0.8),
                 1 => copy(x, y, s * 1.2),
                 2 => plus(x, y, 0.0, 0.0, 4.5 * s, s),
+                3 => folder_plus(x, y, s),
                 _ => trash(x, y, s),
             });
         }

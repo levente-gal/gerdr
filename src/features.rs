@@ -558,7 +558,8 @@ impl NewFeatureDialog {
         other.root = match result {
             Ok(root) if root.repos.is_empty() => Finding::Failed("no repositories in it".into()),
             Ok(root) => {
-                other.touched = held.unwrap_or_else(|| vec![root.repos.len() == 1; root.repos.len()]);
+                other.touched =
+                    held.unwrap_or_else(|| vec![root.repos.len() == 1; root.repos.len()]);
                 Finding::Found(root)
             }
             Err(why) => Finding::Failed(why),
@@ -3829,21 +3830,20 @@ impl Gerdr {
         let Some(feature) = self.feature(&project, &slug) else {
             return;
         };
-        let named: Vec<String> = (keys.iter())
-            .map(|k| self.repo_label(feature, k))
-            .collect();
+        let named: Vec<String> = (keys.iter()).map(|k| self.repo_label(feature, k)).collect();
         let question = format!(
             "Remove {} from \u{201c}{}\u{201d}?",
             named.join(", "),
             feature.title
         );
+        let repos = keys.len();
         let then = crate::confirm::Then::RemoveRepos {
             project,
             slug,
             keys,
             force: true,
         };
-        self.ask_remove_worktrees(question, remove_repos_body(&losses), "Remove", then);
+        self.ask_remove_worktrees(question, remove_repos_body(repos, &losses), "Remove", then);
     }
 
     /// Take repositories `keys` out of feature `slug` off the thread: their
@@ -4689,10 +4689,7 @@ fn created_text(title: &str, root: &Path, ignores: &[PathBuf]) -> String {
 /// What the toast says once `names` were linked to feature `title`, and
 /// the ignore files that took it (checklist D1).
 fn linked_text(title: &str, names: &[String], root: &Path, ignores: &[PathBuf]) -> String {
-    let text = format!(
-        "\u{201c}{title}\u{201d} holds {} now",
-        names.join(", ")
-    );
+    let text = format!("\u{201c}{title}\u{201d} holds {} now", names.join(", "));
     if ignores.is_empty() {
         return text;
     }
@@ -4738,11 +4735,13 @@ fn drop_repo(feature: &mut Feature, key: &str) {
 
 /// What a confirm dialog about taking repositories out says of `losses`,
 /// what goes with their worktrees.
-fn remove_repos_body(losses: &[String]) -> String {
-    format!(
-        "Their worktrees and branches go, and with them {}",
-        losses.join(", ")
-    )
+fn remove_repos_body(repos: usize, losses: &[String]) -> String {
+    let what = if repos == 1 {
+        "Its worktree and branch go"
+    } else {
+        "Their worktrees and branches go"
+    };
+    format!("{what}, and with them {}", losses.join(", "))
 }
 
 /// What a confirm dialog about removing a feature's worktrees says of
@@ -6213,10 +6212,7 @@ pub(crate) mod tests {
         d.toggle(3); // Admin's panel leaves
         let view = new_feature_view(&d, "Acme".into());
         assert_eq!(view.repos[2].place, "from main \u{b7} joins once applied");
-        assert_eq!(
-            view.repos[3].place,
-            "from main \u{b7} leaves once applied"
-        );
+        assert_eq!(view.repos[3].place, "from main \u{b7} leaves once applied");
         assert_eq!(view.go, "Apply");
         let Ok(DialogOutcome::Link {
             slug,
@@ -6336,7 +6332,11 @@ pub(crate) mod tests {
             project: Some("admin".into()),
             ..repo(name, true)
         };
-        let mut f = feature("b", vec![repo("api", true), linked("panel"), linked("x")], 1);
+        let mut f = feature(
+            "b",
+            vec![repo("api", true), linked("panel"), linked("x")],
+            1,
+        );
         f.links = vec![feature::Link {
             project: "admin".into(),
             root: "/admin".into(),
@@ -6350,8 +6350,8 @@ pub(crate) mod tests {
         let keys: Vec<String> = f.repos.iter().map(|r| r.key()).collect();
         assert_eq!(keys, ["api"]);
         assert_eq!(
-            remove_repos_body(&["admin:panel: 2 changed files".into()]),
-            "Their worktrees and branches go, and with them admin:panel: 2 changed files"
+            remove_repos_body(1, &["admin:panel: 2 changed files".into()]),
+            "Its worktree and branch go, and with them admin:panel: 2 changed files"
         );
     }
 
@@ -6509,10 +6509,12 @@ pub(crate) mod tests {
             None,
             "a shipped feature spans no more projects"
         );
+        let focus = std::mem::replace(&mut panel.focus, TabArea::Stages);
         assert_eq!(
             press(&mut panel, &f, key(Keysym::Delete)),
             Some(PanelOutcome::Remove)
         );
+        panel.focus = focus;
         // Ctrl+PgUp and Ctrl+PgDn go to the other features, from either.
         assert_eq!(
             press(&mut panel, &f, ctrl(Keysym::Prior)),
@@ -6651,7 +6653,10 @@ pub(crate) mod tests {
     fn header_buttons_and_the_strip_wheel() {
         assert_eq!(header_label("Abandon", 0), Some("Open tab"));
         assert_eq!(header_label("Abandon", 2), Some("New feature\u{2026}"));
-        assert_eq!(header_label("Abandon", 3), Some("Link repositories\u{2026}"));
+        assert_eq!(
+            header_label("Abandon", 3),
+            Some("Link repositories\u{2026}")
+        );
         assert_eq!(header_label("Abandon", 4), Some("Abandon"));
         assert_eq!(header_label("Abandon", 5), None);
         // The wheel over the chips steps the repositories, stopping at

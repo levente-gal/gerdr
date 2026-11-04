@@ -1562,7 +1562,7 @@ fn new_feature() -> super::NewFeatureView {
         name: name.into(),
         place: format!(
             "from {base} \u{b7} {}",
-            if touched { "changed" } else { "context" }
+            if touched { "linked" } else { "left out" }
         ),
         touched,
         fixed: false,
@@ -1590,6 +1590,44 @@ fn new_feature() -> super::NewFeatureView {
             ("Space", "tick"),
             ("Ctrl+Shift+L", "link project"),
             ("Esc", "clear"),
+        ],
+    }
+}
+
+/// The dialog linking repositories to an open feature: one held, one read-only
+/// from before, one to join, one to leave and one left out, the keyboard on
+/// a row.
+fn link_repositories() -> super::NewFeatureView {
+    let repo = |name: &str, word: &str, touched| super::NewFeatureRepo {
+        name: name.into(),
+        place: format!("from main \u{b7} {word}"),
+        touched,
+        fixed: false,
+    };
+    super::NewFeatureView {
+        heading: "Link repositories to \u{201c}Bulk export of invoices\u{201d}".into(),
+        title: Line::from("Bulk export of invoices"),
+        focus: Some(2),
+        root: "~/Work/aft".into(),
+        root_failed: false,
+        projects: "Projects: aft (home) \u{b7} billing".into(),
+        link: Some(super::LINK_BUTTON[0]),
+        repos: vec![
+            repo("api", "linked", true),
+            repo("shared", "read-only", true),
+            repo("web", "joins once applied", true),
+            repo("billing: ledger", "leaves once applied", false),
+            repo("billing: tools", "left out", false),
+        ],
+        go: "Apply",
+        top: 0,
+        error: None,
+        hover: None,
+        keys: vec![
+            ("Tab", "next"),
+            ("Space", "tick"),
+            ("Ctrl+Shift+L", "link project"),
+            ("Esc", "close"),
         ],
     }
 }
@@ -1685,6 +1723,7 @@ fn paint_features(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
     let size = FEATURE_OUTPUT.into();
     vec![
         hash(painter.new_feature_dialog(&new_feature(), size, scale, p)),
+        hash(painter.new_feature_dialog(&link_repositories(), size, scale, p)),
         hash(painter.sidebar_view(&features_sidebar(), (260, 520).into(), scale, p)),
         hash(painter.manual_test_sheet(&manual_test(false), size, scale, p)),
         hash(painter.manual_test_sheet(&manual_test(true), size, scale, p)),
@@ -1764,8 +1803,9 @@ fn manual_test(note: bool) -> super::ManualTestView {
     }
 }
 
-const FEATURES: [&str; 6] = [
+const FEATURES: [&str; 7] = [
     "new_feature",
+    "link_repositories",
     "sidebar_features",
     "manual_test",
     "manual_test_note",
@@ -1774,10 +1814,11 @@ const FEATURES: [&str; 6] = [
 ];
 
 /// The recorded hashes of `FEATURES`, per case in `CASES`.
-const GOLDEN_FEATURES: [[u64; 6]; 4] = [
+const GOLDEN_FEATURES: [[u64; 7]; 4] = [
     // Dark at 1
     [
-        0xaf6537e36661773b, // new_feature
+        0x73e88729cb0c3112, // new_feature
+        0x4ddd08db7595a51f, // link_repositories
         0x5e017fbffabde99b, // sidebar_features
         0xab580425d0a50879, // manual_test
         0x8e4d20f7c6316567, // manual_test_note
@@ -1786,7 +1827,8 @@ const GOLDEN_FEATURES: [[u64; 6]; 4] = [
     ],
     // Dark at 2
     [
-        0x9a3eb907776fe145, // new_feature
+        0xbc9770d9310bd319, // new_feature
+        0xb66988f58867d0dc, // link_repositories
         0x095e2dfbb584cb35, // sidebar_features
         0xc14927ebcde55bf1, // manual_test
         0xb520dd662440b737, // manual_test_note
@@ -1795,7 +1837,8 @@ const GOLDEN_FEATURES: [[u64; 6]; 4] = [
     ],
     // Light at 1
     [
-        0x0e77512e4815b092, // new_feature
+        0xb1780dfd60b1e9a8, // new_feature
+        0xbcdb4d7bf0d05f81, // link_repositories
         0xd22590056de00ae5, // sidebar_features
         0x093b890ce5537eef, // manual_test
         0xa74e12b563efbdaf, // manual_test_note
@@ -1804,7 +1847,8 @@ const GOLDEN_FEATURES: [[u64; 6]; 4] = [
     ],
     // Light at 2
     [
-        0x9e8eaff9dfeac632, // new_feature
+        0x757537a93b40f9fa, // new_feature
+        0xcce2bb81c277d994, // link_repositories
         0x5e1381a968fcc82e, // sidebar_features
         0xed40d3ad66f63314, // manual_test
         0x1239c6f64e145f2f, // manual_test_note
@@ -1839,6 +1883,12 @@ fn dump_features() {
             &dir,
             &format!("new_feature_{tag}"),
             painter.new_feature_dialog(&new_feature(), size, scale, p),
+            px(dialog.size.w + shadow),
+        );
+        dump(
+            &dir,
+            &format!("link_repositories_{tag}"),
+            painter.new_feature_dialog(&link_repositories(), size, scale, p),
             px(dialog.size.w + shadow),
         );
         for (name, note) in [("manual_test", false), ("manual_test_note", true)] {
@@ -2832,111 +2882,111 @@ const FEATURE_TAB: [&str; 24] = [
 const GOLDEN_FEATURE_TAB: [[u64; 24]; 4] = [
     // Dark at 1
     [
-        0xab7c76988146b933, // tab_build_860
-        0xafa33d7bf6b96f95, // tab_build_1180
-        0x2edd90f8815151bc, // tab_build_1920
-        0xef9c0e6657c788bc, // tab_plan_review_1180
-        0xcd847a6568a005e8, // tab_verify_failed_1920
-        0x98e69e2db7da2b19, // tab_ship_blocked_1180
-        0xdb3b8f1e1f9e17eb, // tab_done_1920
-        0x2bc6d20d28e2d26d, // tab_later_860
-        0xd6280b5a4cf75d65, // tab_repos_1180
-        0x18c2523cc89947b1, // tab_repos_error_860
-        0xb2843590391a6e56, // tab_more_repos_850
-        0xbc318450690884c4, // tab_more_repos_mid_850
-        0x5e323e7803fe1623, // tab_rail_wrap_500
-        0xac45aa4c271428ee, // tab_rail_wrap_1180
-        0xed9c9361bca1d1d9, // tab_picks_later_1180
-        0x99738de657365076, // tab_picks_running_860
-        0x846d510a1650a771, // tab_resume_1180
-        0x9b13d1415d51938c, // tab_resume_860
-        0x39eadd7fa410d650, // tab_approved_1180
-        0xad81eaf7cac76fa5, // tab_locked_1180
-        0x74b4ad6475d74c77, // tab_start_over_1180
-        0x34decd0d4673fff6, // tab_discover_brief_1180
-        0x7dc37ebc897ad332, // tab_discover_brief_860
-        0xc8741c1c5dff5c5d, // tab_plan_long_1180
+        0x86626c3afe0688b7, // tab_build_860
+        0x436714945e5a3ddd, // tab_build_1180
+        0x95954a2bac4e647a, // tab_build_1920
+        0xf5a93cae289b07e4, // tab_plan_review_1180
+        0xe62bb0be16f87006, // tab_verify_failed_1920
+        0x445e22fbf2b06aec, // tab_ship_blocked_1180
+        0x14297d6056df7496, // tab_done_1920
+        0x4556c4c0c0924879, // tab_later_860
+        0xe2510d9ad374c18c, // tab_repos_1180
+        0x2d00eeb67b98052d, // tab_repos_error_860
+        0xbbb90033cd166442, // tab_more_repos_850
+        0x0d125018c96f1690, // tab_more_repos_mid_850
+        0x45fe98420eec0378, // tab_rail_wrap_500
+        0x12d58af0596e3987, // tab_rail_wrap_1180
+        0x1a22cefe2d3aa4a9, // tab_picks_later_1180
+        0xd24d3a4e54f102ea, // tab_picks_running_860
+        0x7581f0eabe8ef9e5, // tab_resume_1180
+        0xbf79f3871b3032c8, // tab_resume_860
+        0x25dc9f9b47285a00, // tab_approved_1180
+        0x9073f946a540e999, // tab_locked_1180
+        0x2fb25475c231938b, // tab_start_over_1180
+        0x375e798c73802b16, // tab_discover_brief_1180
+        0x961b47a2574d5cc6, // tab_discover_brief_860
+        0x81bd14e29c724205, // tab_plan_long_1180
     ],
     // Dark at 2
     [
-        0x11e5857e9e9a3fbf, // tab_build_860
-        0x97a9accaf3019f10, // tab_build_1180
-        0xff16eab90c483c31, // tab_build_1920
-        0x6ba5c53a2d63f01d, // tab_plan_review_1180
-        0x454ba84afa7d9d09, // tab_verify_failed_1920
-        0x37aa3a0a4560a891, // tab_ship_blocked_1180
-        0x97b1fc7842bbbf06, // tab_done_1920
-        0xcd69d2b2e474eab5, // tab_later_860
-        0xbaffaf5e0430b85e, // tab_repos_1180
-        0xc86f375ebc848158, // tab_repos_error_860
-        0xa4bc035dc293e3d5, // tab_more_repos_850
-        0x16000a6216c9d8e0, // tab_more_repos_mid_850
-        0x67776fb07872293c, // tab_rail_wrap_500
-        0x0b835aa2820daa32, // tab_rail_wrap_1180
-        0x28d04b8a0a9cbf49, // tab_picks_later_1180
-        0xe73d2375a828a0be, // tab_picks_running_860
-        0x589c27cc84b52cd6, // tab_resume_1180
-        0xb7c4fc70a51ea543, // tab_resume_860
-        0x76569004d8b06b59, // tab_approved_1180
-        0xf81473720c24b0bc, // tab_locked_1180
-        0xed85a4cc1c5b6b40, // tab_start_over_1180
-        0x53b7af7220a44448, // tab_discover_brief_1180
-        0xa155d202ba43ab69, // tab_discover_brief_860
-        0xfd9ff94dad490698, // tab_plan_long_1180
+        0x96eb0d5c0e9621e5, // tab_build_860
+        0xfb7f982703841535, // tab_build_1180
+        0x72771f6ab0810a29, // tab_build_1920
+        0x671834708d1fa8a4, // tab_plan_review_1180
+        0xaf5abe8bf6aa884d, // tab_verify_failed_1920
+        0xdb86a2cae8eb9945, // tab_ship_blocked_1180
+        0x7e09703b76389409, // tab_done_1920
+        0x1a5e5d589da6625b, // tab_later_860
+        0xf7447460e181312f, // tab_repos_1180
+        0x6bb72914bc724ec6, // tab_repos_error_860
+        0x4c173b09103b6a17, // tab_more_repos_850
+        0x1b97007cace933a6, // tab_more_repos_mid_850
+        0xe1d21f9e18ad6bbf, // tab_rail_wrap_500
+        0xdb49495ca45c7ee0, // tab_rail_wrap_1180
+        0x6a20abc5bb85f300, // tab_picks_later_1180
+        0xf51a7690357b0ecc, // tab_picks_running_860
+        0x644ed0c69a4a8c2b, // tab_resume_1180
+        0x1a6537cc3b5a778d, // tab_resume_860
+        0x2f9f20a58c6db864, // tab_approved_1180
+        0xd254391756d57541, // tab_locked_1180
+        0x74bfd6ab043c7261, // tab_start_over_1180
+        0xe04756607cd95fd5, // tab_discover_brief_1180
+        0x6ee7540fdf252e37, // tab_discover_brief_860
+        0xd370f2ff2cbd3035, // tab_plan_long_1180
     ],
     // Light at 1
     [
-        0x28854bd740fef650, // tab_build_860
-        0x30ff0cca15357e75, // tab_build_1180
-        0x5f34c051cf5a2803, // tab_build_1920
-        0x1d23fcb8663d606d, // tab_plan_review_1180
-        0xf9491c38484fe292, // tab_verify_failed_1920
-        0xd4382c14f1fdc6da, // tab_ship_blocked_1180
-        0xd651e461bab3c526, // tab_done_1920
-        0x121e49e11876fdfe, // tab_later_860
-        0xb8d2b6dd642ffcf7, // tab_repos_1180
-        0x95a537cbbf1156fb, // tab_repos_error_860
-        0xacc70766a1a69f6b, // tab_more_repos_850
-        0x03738b19c20cd82d, // tab_more_repos_mid_850
-        0xe7e99fdaf13c744a, // tab_rail_wrap_500
-        0xae0e84b880f07569, // tab_rail_wrap_1180
-        0x73e4a9d86a9829e6, // tab_picks_later_1180
-        0x2c6aa6f30c1af15e, // tab_picks_running_860
-        0x184835d662cd8025, // tab_resume_1180
-        0x99c6938e78f9f4e0, // tab_resume_860
-        0xf045c72f789d9f28, // tab_approved_1180
-        0xb54cf9c6c0040d2d, // tab_locked_1180
-        0xaed9f7608e45c53c, // tab_start_over_1180
-        0x06cee71d0b39fd32, // tab_discover_brief_1180
-        0xee47b5147d19820e, // tab_discover_brief_860
-        0xbb07bf48aa661251, // tab_plan_long_1180
+        0xc47b0800098f1990, // tab_build_860
+        0xf8323a4e57cb863e, // tab_build_1180
+        0xe46b142ab9dd23de, // tab_build_1920
+        0xd2cfd7155c8cf276, // tab_plan_review_1180
+        0xa106245aabc523db, // tab_verify_failed_1920
+        0x8b03166d25197031, // tab_ship_blocked_1180
+        0x6ac02a7725d44265, // tab_done_1920
+        0xa5d56eaa7393d23e, // tab_later_860
+        0x4552246fb8779558, // tab_repos_1180
+        0x586d9d8bea1588bb, // tab_repos_error_860
+        0x73b9556a6f5bce7b, // tab_more_repos_850
+        0x7ac496be40380b4d, // tab_more_repos_mid_850
+        0xfe50f7590a5f2838, // tab_rail_wrap_500
+        0x0bdb0f58b697f3dd, // tab_rail_wrap_1180
+        0x8da49a93ac9a7009, // tab_picks_later_1180
+        0x305061aced36a49e, // tab_picks_running_860
+        0x1a989e064c8e0d26, // tab_resume_1180
+        0x59bde3e9307caa20, // tab_resume_860
+        0x955a72a8dd3e6af3, // tab_approved_1180
+        0x797c2fd13725c662, // tab_locked_1180
+        0xc9b7ac524ff04d57, // tab_start_over_1180
+        0x19e17752db3d3c31, // tab_discover_brief_1180
+        0x69558fb1849e31ce, // tab_discover_brief_860
+        0x97485739423af87a, // tab_plan_long_1180
     ],
     // Light at 2
     [
-        0x6d78d2aba22ec9b1, // tab_build_860
-        0x6f9ed9768b863931, // tab_build_1180
-        0xa499ed71e1f32c81, // tab_build_1920
-        0x0a9c42f145462e7b, // tab_plan_review_1180
-        0xfdf6b29d1c7e227a, // tab_verify_failed_1920
-        0x73b9c08e76158874, // tab_ship_blocked_1180
-        0x56f50cc615e71d21, // tab_done_1920
-        0xbf94e8e71e2e5a0b, // tab_later_860
-        0x17d3554af01f5974, // tab_repos_1180
-        0xd63eca782d6b35b7, // tab_repos_error_860
-        0x6ddbcf4deaa64ac6, // tab_more_repos_850
-        0xb2e4c16e9dab739d, // tab_more_repos_mid_850
-        0xa53326434579f1eb, // tab_rail_wrap_500
-        0x4b7f9187b711ad7b, // tab_rail_wrap_1180
-        0x119db65f0e32fecb, // tab_picks_later_1180
-        0x9a50304d4c453b9d, // tab_picks_running_860
-        0x642ff83fbcf2a16d, // tab_resume_1180
-        0xd6a7d2d339fb6bc1, // tab_resume_860
-        0x319f4ad9102f34cc, // tab_approved_1180
-        0x7aed49b71835a4c5, // tab_locked_1180
-        0x15e01ab6d2217ec6, // tab_start_over_1180
-        0x0d3b6d60fae657e4, // tab_discover_brief_1180
-        0x329a2617d9cc8297, // tab_discover_brief_860
-        0xe6491a1a5c28d0d6, // tab_plan_long_1180
+        0x0e9c0b1edfa3d30b, // tab_build_860
+        0xccfa373474fa8a62, // tab_build_1180
+        0x3d43b06b60527970, // tab_build_1920
+        0x4ff3a82a63c461d4, // tab_plan_review_1180
+        0x3bc58b402294f0bb, // tab_verify_failed_1920
+        0x6b688c7051bdb494, // tab_ship_blocked_1180
+        0xc6f7e437c6c208df, // tab_done_1920
+        0x6774ecdf4a3cd435, // tab_later_860
+        0xa86d6c08fd0105bd, // tab_repos_1180
+        0x225ee1d532426c69, // tab_repos_error_860
+        0xa790e44192435058, // tab_more_repos_850
+        0xe6ce5bb519d732e7, // tab_more_repos_mid_850
+        0xa92b70b171b47cfd, // tab_rail_wrap_500
+        0x4074a7364f10d8a4, // tab_rail_wrap_1180
+        0x42876176bb70af74, // tab_picks_later_1180
+        0xe5f4db146997cf97, // tab_picks_running_860
+        0x5431620bcb9231b2, // tab_resume_1180
+        0x1ab830b731ebb86f, // tab_resume_860
+        0x412f3bc258c8cbb3, // tab_approved_1180
+        0x68d8e1766f407a6a, // tab_locked_1180
+        0x34108f43f2624701, // tab_start_over_1180
+        0x1bda047e1afe8f73, // tab_discover_brief_1180
+        0x01ac6b05f7ec84cd, // tab_discover_brief_860
+        0x1f606aeeece9a365, // tab_plan_long_1180
     ],
 ];
 

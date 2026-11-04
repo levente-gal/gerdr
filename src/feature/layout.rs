@@ -1078,11 +1078,7 @@ pub fn remove_repos(
         clear_folder(&link.dir, force, &mut failed);
         if !failed.is_empty() {
             // The repositories are gone either way: what stays is a folder.
-            tracing::warn!(
-                "taking {} down: {}",
-                shown(&link.dir),
-                failed.join("; ")
-            );
+            tracing::warn!("taking {} down: {}", shown(&link.dir), failed.join("; "));
         }
     }
     results
@@ -2292,6 +2288,52 @@ mod tests {
         let err = add_repos(&f, None, &root, &["api".into(), "zed".into()]).unwrap_err();
         assert_eq!(err, "zed already has a branch feature/x");
         assert!(!branch_exists(&api, "feature/x"));
+    }
+
+    #[test]
+    fn a_failed_link_takes_down_all_it_made() {
+        let t = Temp::new();
+        let home = t.repo("app", "main");
+        let (one, two) = (t.0.join("one"), t.0.join("two"));
+        std::fs::create_dir(&one).unwrap();
+        std::fs::create_dir(&two).unwrap();
+        for dir in [one.join("lib"), two.join("a"), two.join("b"), two.join("c")] {
+            std::fs::create_dir(&dir).unwrap();
+            run(&dir, &["init", "-q", "-b", "main"]);
+            commit(&dir, "a", "first");
+        }
+        let root = find_root(&home, &[], &[], &[]).unwrap();
+        let mut f = feature_of(&root, create(&root, "x", &[]).unwrap(), "x");
+        let bases = [("c".to_owned(), "nope".to_owned())];
+        let linked = find_root(&two, &[], &[], &bases).unwrap();
+        let created = create_linked(&linked, "x", &["a".into()], "two").unwrap();
+        f.links.push(link_of("two", &linked, &created));
+        f.insert_repos(created.repos);
+        let new = LinkSpec {
+            project: "one".into(),
+            name: "One".into(),
+            root: find_root(&one.join("lib"), &[], &[], &[]).unwrap(),
+            touched: vec!["lib".into()],
+        };
+        let add = |names: &[&str]| AddSpec {
+            project: Some("two".into()),
+            name: "Two".into(),
+            root: linked.clone(),
+            names: names.iter().map(|n| (*n).to_owned()).collect(),
+        };
+        // c's base isn't there: the new link and b's worktree go again.
+        let err =
+            link_more(&f, std::slice::from_ref(&new), &[add(&["b"]), add(&["c"])]).unwrap_err();
+        assert!(err.starts_with("Two: "), "{err}");
+        assert!(!one.join("lib/.features").exists());
+        assert!(!branch_exists(&one.join("lib"), "feature/x"));
+        assert!(!branch_exists(&two.join("b"), "feature/x"));
+        assert!(!two.join(".features/x/b").exists());
+        assert!(two.join(".features/x/a").is_dir(), "what it held stays");
+
+        let (links, repos) = link_more(&f, &[new], &[add(&["b"])]).unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(repos[0].key(), "two:b");
     }
 
     #[test]

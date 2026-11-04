@@ -87,7 +87,10 @@ pub fn folders(feature: &Feature) -> Vec<Folder> {
         .filter(|(project, root, _, multi)| {
             file(root).exists()
                 || feature.repos_of(*project).any(|r| file(&r.main).exists())
-                || (*multi && child_repos(root).iter().any(|(_, main)| file(main).exists()))
+                || (*multi
+                    && child_repos(root)
+                        .iter()
+                        .any(|(_, main)| file(main).exists()))
         })
         .map(|(project, _, dir, multi)| Folder {
             dir: dir.to_path_buf(),
@@ -444,6 +447,16 @@ mod tests {
             dir: other_dir.clone(),
             multi: true,
         });
+        feature.repos.push(Repo {
+            name: "lib".into(),
+            main: other.join("lib"),
+            base: "main".into(),
+            base_commit: String::new(),
+            worktree: other_dir.join("lib"),
+            touched: true,
+            branch: None,
+            project: Some("o".into()),
+        });
         assert_eq!(folders(&feature).len(), 1);
         std::fs::create_dir_all(other.join(OUT_DIR)).unwrap();
         std::fs::write(file(&other), "{}").unwrap();
@@ -453,5 +466,39 @@ mod tests {
             (found[1].dir.as_path(), found[1].multi),
             (other_dir.as_path(), true)
         );
+    }
+
+    #[test]
+    fn a_graph_in_a_repository_left_out_still_counts_for_the_project() {
+        let t = Temp::new("left-out");
+        let root = t.0.join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        let web = root.join("web");
+        std::fs::create_dir_all(&web).unwrap();
+        git(&web, &["init", "-q", "-b", "main"]).unwrap();
+        let api = root.join("api");
+        std::fs::create_dir_all(&api).unwrap();
+        git(&api, &["init", "-q", "-b", "main"]).unwrap();
+        let dir = root.join(".features/a");
+        let tree = dir.join("web");
+        let mut feature = feature_of(&root, &dir, &[("web", &web, &tree)]);
+        feature.multi = true;
+        assert!(folders(&feature).is_empty());
+        std::fs::create_dir_all(api.join(OUT_DIR)).unwrap();
+        std::fs::write(file(&api), "{}").unwrap();
+        let found = folders(&feature);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].worktrees, [tree]);
+    }
+
+    #[test]
+    fn a_folder_without_a_repository_has_no_graph_to_name() {
+        let t = Temp::new("no-repos");
+        let root = t.0.join("root");
+        std::fs::create_dir_all(root.join(OUT_DIR)).unwrap();
+        std::fs::write(file(&root), "{}").unwrap();
+        let mut feature = feature_of(&root, &root.join(".features/a"), &[]);
+        feature.multi = true;
+        assert!(folders(&feature).is_empty());
     }
 }
