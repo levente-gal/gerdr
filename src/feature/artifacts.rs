@@ -157,6 +157,9 @@ fn stage_files(stage: Stage) -> Vec<&'static str> {
     if stage == Stage::Verify {
         files.push(super::verify::EVIDENCE);
     }
+    if stage == Stage::PlanReview {
+        files.push(super::plan_review::FILE);
+    }
     files
 }
 

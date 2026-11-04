@@ -35,6 +35,7 @@ pub mod layout;
 pub mod manual;
 pub mod page;
 pub mod patch;
+pub mod plan_review;
 pub mod review_import;
 pub mod setup;
 pub mod ship;
@@ -359,6 +360,10 @@ pub struct Feature {
     /// `review_import`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review: Option<review_import::AiReview>,
+    /// Plan review's suggestions and what was decided of them (see
+    /// `plan_review`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_review: Option<plan_review::PlanReview>,
     /// Code review's viewed ticks (see `viewed`).
     #[serde(default, skip_serializing_if = "viewed::Viewed::is_empty")]
     pub viewed: viewed::Viewed,
@@ -492,7 +497,8 @@ impl Feature {
     pub fn has_output(&self, stage: Stage, wrote: impl Fn(Stage) -> bool) -> bool {
         wrote(stage)
             || match stage {
-                Stage::Discover | Stage::Plan | Stage::PlanReview | Stage::Build => false,
+                Stage::Discover | Stage::Plan | Stage::Build => false,
+                Stage::PlanReview => self.plan_review.is_some(),
                 Stage::Verify => self.verify.is_some(),
                 Stage::AiReview => self.review.is_some(),
                 Stage::CodeReview => !self.viewed.is_empty(),
@@ -550,7 +556,8 @@ impl Feature {
         }
         self.forget_run(stage);
         match stage {
-            Stage::Discover | Stage::Plan | Stage::PlanReview | Stage::Build => {}
+            Stage::Discover | Stage::Plan | Stage::Build => {}
+            Stage::PlanReview => self.plan_review = None,
             Stage::Verify => self.verify = None,
             Stage::AiReview => self.review = None,
             Stage::CodeReview => self.viewed = viewed::Viewed::default(),
@@ -922,6 +929,7 @@ pub(crate) mod tests {
             setup: None,
             verify: None,
             review: None,
+            plan_review: None,
             viewed: Default::default(),
             manual: None,
         }
@@ -996,6 +1004,7 @@ pub(crate) mod tests {
             setup: None,
             verify: None,
             review: None,
+            plan_review: None,
             viewed: Default::default(),
             manual: None,
         }

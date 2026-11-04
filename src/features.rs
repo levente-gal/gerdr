@@ -3436,6 +3436,7 @@ impl Gerdr {
             setup: None,
             verify: None,
             review: None,
+            plan_review: None,
             viewed: Default::default(),
             manual: None,
         };
@@ -6653,6 +6654,7 @@ pub(crate) mod tests {
             setup: None,
             verify: None,
             review: None,
+            plan_review: None,
             viewed: Default::default(),
             manual: None,
         }

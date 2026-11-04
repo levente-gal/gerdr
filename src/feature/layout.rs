@@ -1398,6 +1398,7 @@ mod tests {
             setup: None,
             verify: None,
             review: None,
+            plan_review: None,
             viewed: Default::default(),
             manual: None,
             history: Vec::new(),
