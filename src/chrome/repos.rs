@@ -5193,7 +5193,7 @@ impl ReposLayers {
             #[cfg(test)]
             cards,
         } = self;
-        let p = theme.palette();
+        let p = view.as_ref().map_or(theme.palette(), |v| look(v, theme));
         let draw = |(view, panel, ..): &FrameKey| {
             #[cfg(test)]
             {
@@ -5297,6 +5297,15 @@ impl ReposLayers {
     }
 }
 
+/// The colours `view` is drawn in: laid flat into a tab it is a page.
+fn look(view: &ReposView, theme: super::Theme) -> &'static Palette {
+    if view.flat {
+        theme.page_palette()
+    } else {
+        theme.palette()
+    }
+}
+
 /// The detail's parts over the frame, front to back: the search's ticks
 /// on its scrollbar, its thumb, the pinned header's shadow and the
 /// header, and its rows, each of its own buffer from `caches` (the
@@ -5314,7 +5323,7 @@ fn detail_parts(
     painter: &Painter,
 ) -> Vec<super::Part> {
     use super::Part;
-    let p = theme.palette();
+    let p = look(view, theme);
     let mut parts = Vec::new();
     let detail = &view.detail;
     let (track, shown) = detail_bar(view, layout);

@@ -21,7 +21,7 @@ use smithay::{
 use crate::{
     Gerdr,
     agents::AgentKey,
-    chrome::{self, AgentView, BarStatus, ConfirmView},
+    chrome::{self, AgentView, ConfirmView},
     herdr::{self, AgentStatus},
     keep,
     profile_import::Source,
@@ -409,10 +409,7 @@ impl Gerdr {
     /// Whether herdr pane `pane_id` runs a command (an agent, say), as its
     /// bar says.
     fn herdr_pane_runs(&self, pane_id: &str) -> bool {
-        matches!(
-            self.pane_bar_content(pane_id).status,
-            BarStatus::Running | BarStatus::Working
-        )
+        self.pane_bar_content(pane_id).status.runs()
     }
 
     /// Ask before restarting T3 Code's server at `version` while `busy`

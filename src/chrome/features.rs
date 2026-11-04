@@ -2104,7 +2104,7 @@ impl FeatureTabLayers {
         blink: super::layers::Blink,
     ) -> Vec<super::layers::Part> {
         use super::layers::Part;
-        let p = theme.palette();
+        let p = theme.page_palette();
         let output = area.size;
         let layout = view
             .as_ref()
@@ -2221,7 +2221,7 @@ pub(super) fn feature_tab_composed(
     let now = std::time::Instant::now();
     let area = Rectangle::from_size(output);
     // The glow half-way, the dots bright.
-    let dot = super::blink_dot(Dot::Working, scale, theme.palette());
+    let dot = super::blink_dot(Dot::Working, scale, theme.page_palette());
     let blink = Some((&dot, 1.0));
     let part = |layers: &mut FeatureTabLayers, now| {
         layers.parts(
@@ -3370,7 +3370,7 @@ pub(super) fn stage_marks_width(marks: usize) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chrome::{ONE_DARK, ONE_LIGHT, contrast, inside};
+    use crate::chrome::{ONE_DARK, ONE_LIGHT, ONE_LIGHT_PAGE, contrast, inside};
 
     #[test]
     fn the_dialog_stacks_its_parts_inside_it() {
@@ -3448,7 +3448,7 @@ mod tests {
 
     #[test]
     fn stage_marks_read_on_the_panels_in_both_themes() {
-        for p in [&ONE_DARK, &ONE_LIGHT] {
+        for p in [&ONE_DARK, &ONE_LIGHT, &ONE_LIGHT_PAGE] {
             for mark in [StageMark::Done, StageMark::Current, StageMark::Later] {
                 for ground in [p.panel, p.elevated, p.selected] {
                     let ratio = contrast(mark.color(p), ground);
@@ -3460,7 +3460,7 @@ mod tests {
 
     #[test]
     fn the_ship_check_reads_on_the_panels_in_both_themes() {
-        for p in [&ONE_DARK, &ONE_LIGHT] {
+        for p in [&ONE_DARK, &ONE_LIGHT, &ONE_LIGHT_PAGE] {
             for tone in [CheckTone::Blocker, CheckTone::Ready, CheckTone::Note] {
                 for ground in [p.panel, p.elevated] {
                     let ratio = contrast(tone.color(p), ground);
@@ -4182,7 +4182,7 @@ mod tests {
     /// row at rest, hovered and selected.
     #[test]
     fn the_line_stat_reads_on_the_rows_in_both_themes() {
-        for p in [&ONE_DARK, &ONE_LIGHT] {
+        for p in [&ONE_DARK, &ONE_LIGHT_PAGE] {
             for color in [p.success, p.error] {
                 for ground in [p.panel, p.element, p.selected] {
                     let ratio = contrast(color, ground);

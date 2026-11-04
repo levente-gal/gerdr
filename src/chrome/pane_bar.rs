@@ -13,12 +13,14 @@
 //! A terminal running a command keeps its pill out, floating over the
 //! top of the window like any other, so what runs, and its stop and
 //! restart, are always in sight without the window giving up any room.
+//! An agent runs as such a command, but it only blinks while it works: at
+//! rest, its mark says where it stands, as its card's dot does.
 
 use super::{
-    BAR_BUTTON, BAR_BUTTON_GAP, BAR_INSET, BAR_NOTE_GAP, Canvas, DETAIL_FONT_SIZE, PANE_BAR_HEIGHT,
-    Painter, Palette, Rect, Rgb, SHADOW, STATUS_GAP, STATUS_WIDTH, band, centred_dot, chevron_side,
-    copy, cross, icon_sdf, mix, physical, rect_px, restart_arrow, status_mark, stop, text_lines,
-    zoom_corners,
+    BAR_BUTTON, BAR_BUTTON_GAP, BAR_INSET, BAR_NOTE_GAP, Canvas, DETAIL_FONT_SIZE, Dot,
+    PANE_BAR_HEIGHT, Painter, Palette, Rect, Rgb, SHADOW, STATUS_GAP, STATUS_WIDTH, band,
+    centred_dot, chevron_side, copy, cross, icon_sdf, mix, physical, rect_px, restart_arrow,
+    status_dot, status_mark, stop, text_lines, zoom_corners,
 };
 use crate::herdr::AgentStatus;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
@@ -355,10 +357,20 @@ pub enum BarStatus {
     /// The shell waits at its prompt, and nothing ran in it to run again.
     Idle,
     Running,
+    /// What runs is an agent, and this is where it stands, other than at
+    /// work (that is `Running`): waiting for a prompt, say.
+    Agent(AgentStatus),
     /// The command ran and is done: it can run again.
     Exited,
     /// Being stopped or restarted.
     Working,
+}
+
+impl BarStatus {
+    /// Whether something runs in the pane, or is still being stopped.
+    pub fn runs(self) -> bool {
+        matches!(self, Self::Running | Self::Agent(_) | Self::Working)
+    }
 }
 
 /// The bar over a pane: what runs in it or what it shows, its buttons, and
@@ -588,6 +600,10 @@ impl Painter {
             match view.status {
                 _ if !view.has_mark() => {}
                 BarStatus::Idle | BarStatus::Running => {}
+                BarStatus::Agent(status) => {
+                    let dot = Dot::of_status(status);
+                    status_dot(&mut c, centred_dot(mark), dot, scale, p);
+                }
                 BarStatus::Exited => icon_sdf(&mut c, mark, scale, p.placeholder, |x, y| {
                     status_mark(AgentStatus::Idle, x, y, s)
                 }),
@@ -774,6 +790,7 @@ mod tests {
         pointer_reveals, split_address, unzoom_button_rect,
     };
     use crate::chrome::{BAR_BUTTON, BAR_INSET, PANE_BAR_HEIGHT, Painter, Rect, Theme};
+    use crate::herdr::AgentStatus;
     use smithay::utils::{Point, Size};
 
     fn view(w: i32) -> PaneBarView {
@@ -1222,10 +1239,43 @@ mod tests {
         v.slide = 0;
         v.status = BarStatus::Exited;
         assert_eq!(v.blinker(), None);
+        // An agent blinks only at work, which is `Running`.
+        for status in [
+            AgentStatus::Idle,
+            AgentStatus::Blocked,
+            AgentStatus::Done,
+            AgentStatus::Unknown,
+        ] {
+            v.status = BarStatus::Agent(status);
+            assert_eq!(v.blinker(), None);
+        }
         // Only a terminal's runs a command.
         v.status = BarStatus::Running;
         v.buttons = BarButtons::None;
         assert_eq!(v.blinker(), None);
+    }
+
+    #[test]
+    fn an_agent_at_rest_paints_its_dot_where_the_blink_goes() {
+        let painter = Painter::new();
+        let p = Theme::Dark.palette();
+        let drawn = |status| {
+            let view = PaneBarView {
+                status,
+                ..view(600)
+            };
+            let mut buffer = painter.pane_bar(&view, 1.0, p);
+            let mut bytes = Vec::new();
+            let _ = buffer.render().draw(|mem| {
+                bytes.extend_from_slice(mem);
+                Ok::<_, ()>(Vec::new())
+            });
+            bytes
+        };
+        // A blink is composed over the bar, so a running bar's mark is empty.
+        let idle = drawn(BarStatus::Agent(AgentStatus::Idle));
+        assert_ne!(idle, drawn(BarStatus::Running));
+        assert_ne!(idle, drawn(BarStatus::Agent(AgentStatus::Blocked)));
     }
 
     #[test]
