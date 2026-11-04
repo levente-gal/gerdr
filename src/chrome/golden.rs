@@ -838,7 +838,7 @@ const CASES: [(Theme, f64); 4] = [
 const GOLDEN: [[u64; 12]; 4] = [
     // Dark at 1
     [
-        0x0862dbf6fad20a20, // sidebar
+        0xea617f04672206a4, // sidebar
         0xed1972252f36590d, // tab_strip
         0x666fd35c1955aaa6, // pane_bar
         0x866d59a70ebe252d, // help
@@ -853,7 +853,7 @@ const GOLDEN: [[u64; 12]; 4] = [
     ],
     // Dark at 2
     [
-        0x8bbf6c3a7d553224, // sidebar
+        0x017152f1d8605ca8, // sidebar
         0x75280e3af24f953f, // tab_strip
         0x0dc4d7db9b5967cd, // pane_bar
         0x56045b72862ed173, // help
@@ -868,7 +868,7 @@ const GOLDEN: [[u64; 12]; 4] = [
     ],
     // Light at 1
     [
-        0x0689b1e56874ec15, // sidebar
+        0xbd043f5a886c0db4, // sidebar
         0xf5c707c6dab41293, // tab_strip
         0xa514c9cbf0c81198, // pane_bar
         0x8c0302567b35f0c3, // help
@@ -883,7 +883,7 @@ const GOLDEN: [[u64; 12]; 4] = [
     ],
     // Light at 2
     [
-        0x15171197a99d5a9d, // sidebar
+        0xd949d7e1c0297a42, // sidebar
         0x65c73e85a9732c79, // tab_strip
         0x887475a089d81641, // pane_bar
         0x22f444d49649f855, // help
@@ -1699,6 +1699,19 @@ fn needs_you_sidebar() -> SidebarView {
     view
 }
 
+/// The sidebar of a project with no feature yet: the Features heading
+/// offers to start one, the pointer on its "+".
+fn no_features_sidebar() -> SidebarView {
+    SidebarView {
+        features: Vec::new(),
+        state: SidebarState {
+            features_plus: 16,
+            ..SidebarState::default()
+        },
+        ..features_sidebar()
+    }
+}
+
 const FEATURE_OUTPUT: (i32, i32) = (870, 720);
 /// The sidebars' width: gerdr's default, the tightest fit a card has to
 /// read in.
@@ -1719,6 +1732,7 @@ fn paint_features(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
             p,
         )),
         hash(painter.sidebar_view(&needs_you_sidebar(), (SIDEBAR_W, 520).into(), scale, p)),
+        hash(painter.sidebar_view(&no_features_sidebar(), (SIDEBAR_W, 520).into(), scale, p)),
     ]
 }
 
@@ -1793,52 +1807,57 @@ fn manual_test(note: bool) -> super::ManualTestView {
     }
 }
 
-const FEATURES: [&str; 6] = [
+const FEATURES: [&str; 7] = [
     "new_feature",
     "sidebar_features",
     "manual_test",
     "manual_test_note",
     "sidebar_feature_workspace",
     "sidebar_needs_you",
+    "sidebar_no_features",
 ];
 
 /// The recorded hashes of `FEATURES`, per case in `CASES`.
-const GOLDEN_FEATURES: [[u64; 6]; 4] = [
+const GOLDEN_FEATURES: [[u64; 7]; 4] = [
     // Dark at 1
     [
         0x73e88729cb0c3112, // new_feature
-        0x83d9403746116b76, // sidebar_features
+        0xbc9a27bc5d0444d7, // sidebar_features
         0xab580425d0a50879, // manual_test
         0x8e4d20f7c6316567, // manual_test_note
-        0x0253f4324cdb1fb7, // sidebar_feature_workspace
-        0x07890d5e92d3ce88, // sidebar_needs_you
+        0xd3a95a045bf9d74a, // sidebar_feature_workspace
+        0xcda66ae37d2eb8f9, // sidebar_needs_you
+        0x0cbbecc8e276c3fc, // sidebar_no_features
     ],
     // Dark at 2
     [
         0xbc9770d9310bd319, // new_feature
-        0xac32f1b3b8808d58, // sidebar_features
+        0x54a35acd45115829, // sidebar_features
         0xc14927ebcde55bf1, // manual_test
         0xb520dd662440b737, // manual_test_note
-        0xfc964ba229a36886, // sidebar_feature_workspace
-        0x4871b255f5b34609, // sidebar_needs_you
+        0x4249641392673996, // sidebar_feature_workspace
+        0x8c98269f717d8ffc, // sidebar_needs_you
+        0xf97a94d1cbc468b6, // sidebar_no_features
     ],
     // Light at 1
     [
         0xb1780dfd60b1e9a8, // new_feature
-        0x678e39208e60b76e, // sidebar_features
+        0xd96f507e20a06de8, // sidebar_features
         0x093b890ce5537eef, // manual_test
         0xa74e12b563efbdaf, // manual_test_note
-        0x3633a01211c97a14, // sidebar_feature_workspace
-        0xadb6dd9160f82905, // sidebar_needs_you
+        0xe9088eeaa5bf78be, // sidebar_feature_workspace
+        0x7bb6f18e8ef52647, // sidebar_needs_you
+        0xb97e2bad7455858d, // sidebar_no_features
     ],
     // Light at 2
     [
         0x757537a93b40f9fa, // new_feature
-        0x0d5567b2624a2ab2, // sidebar_features
+        0xe3c348529d7cc6d0, // sidebar_features
         0xed40d3ad66f63314, // manual_test
         0x1239c6f64e145f2f, // manual_test_note
-        0x2a84d65d3314123b, // sidebar_feature_workspace
-        0xf03e3effac553bc5, // sidebar_needs_you
+        0xbdf3371a2667d7db, // sidebar_feature_workspace
+        0x5e7809e8d036bcb3, // sidebar_needs_you
+        0x7ae57ba63db05473, // sidebar_no_features
     ],
 ];
 
@@ -1884,6 +1903,12 @@ fn dump_features() {
             &dir,
             &format!("sidebar_features_{tag}"),
             painter.sidebar_view(&features_sidebar(), (SIDEBAR_W, 520).into(), scale, p),
+            px(SIDEBAR_W),
+        );
+        dump(
+            &dir,
+            &format!("sidebar_no_features_{tag}"),
+            painter.sidebar_view(&no_features_sidebar(), (SIDEBAR_W, 520).into(), scale, p),
             px(SIDEBAR_W),
         );
         dump(

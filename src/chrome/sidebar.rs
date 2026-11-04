@@ -160,8 +160,14 @@ const INBOX_GAP: i32 = 6;
 /// The features section under the workspaces: the room from the last
 /// block to its heading, with a rule across the sidebar halfway, and its
 /// heading's height (a header's, as it heads a list of its own).
-const SECTION_TOP: i32 = 12;
+const SECTION_TOP: i32 = 16;
 const SECTION_TITLE: i32 = 26;
+const FEATURES_LABEL: &str = "Features";
+/// How big the "+" on the rule is, the room the rule leaves it each side,
+/// and how far past it each way a click still lands on it.
+const FEATURES_PLUS: i32 = 16;
+const FEATURES_PLUS_GAP: i32 = 2;
+const FEATURES_PLUS_REACH: (i32, i32) = (4, 2);
 /// The line under a feature row's title holding its stage dots.
 const STAGE_LINE: i32 = 12;
 /// The line under a feature's stage dots saying how its stage stands.
@@ -1103,6 +1109,8 @@ pub struct SidebarState {
     /// The hover alpha of each feature row, as `SidebarView::features`
     /// lists them.
     pub features: Vec<u8>,
+    /// The hover alpha of the "+" on the Features section's rule.
+    pub features_plus: u8,
     /// The "+" button's hover alpha, and whether its menu is open.
     pub plus: u8,
     pub plus_open: bool,
@@ -1326,6 +1334,13 @@ pub struct SidebarLayout {
     /// open features, and a row per feature (see `with_features`).
     pub features_title: Option<Rect>,
     pub features: Vec<Rect>,
+    /// The "+" on the rule over the heading, starting a feature; and the
+    /// pill on the heading counting the features that wait for the user
+    /// (see `with_feature_head`).
+    pub features_plus: Option<Rect>,
+    pub features_waiting: Option<Rect>,
+    /// How many of the workspaces are features'.
+    pub feature_workspaces: usize,
     /// One per workspace.
     pub rows: Vec<RowLayout>,
     /// Per workspace, its agent rows as drawn (the most pressing first):
@@ -1416,6 +1431,11 @@ pub enum SidebarHit {
     More(usize),
     /// The "Features" heading: it opens the feature panel.
     FeaturesTitle,
+    /// The "+" on the Features section's rule: it starts a feature.
+    NewFeature,
+    /// The heading's count of features waiting for the user: it opens the
+    /// inbox on their gates.
+    FeaturesWaiting,
     /// Feature `n` of `SidebarView::features`.
     Feature(usize),
     /// Workspace `i`'s GitHub section off its chips and count (its mark,
@@ -1492,6 +1512,15 @@ impl SidebarLayout {
         }
         if let Some((i, k, _)) = self.inbox.iter().find(|(_, _, rect)| inside(*rect)) {
             return Some(SidebarHit::Inbox(*i, *k));
+        }
+        if self
+            .features_plus
+            .is_some_and(|r| inside(features_plus_reach(r)))
+        {
+            return Some(SidebarHit::NewFeature);
+        }
+        if self.features_waiting.is_some_and(inside) {
+            return Some(SidebarHit::FeaturesWaiting);
         }
         if self.features_title.is_some_and(inside) {
             return Some(SidebarHit::FeaturesTitle);
@@ -1572,7 +1601,11 @@ impl SidebarLayout {
         if let Some(last) = self.features.last() {
             return last.loc.y + last.size.h + CHILD_GAP + INBOX_GAP;
         }
-        self.blocks_end()
+        // The heading alone, offering to start a feature, ends it too.
+        let heading = self
+            .features_title
+            .map_or(i32::MIN, |t| t.loc.y + t.size.h + INBOX_GAP);
+        self.blocks_end().max(heading)
     }
 
     /// Where the workspaces' blocks end (the "Needs you" list's end, or
@@ -1597,6 +1630,22 @@ impl SidebarLayout {
             self.features_title = title;
         }
         self.features = rows;
+        self
+    }
+
+    /// This layout with the Features heading's own buttons, in a sidebar
+    /// `width` wide, once `with_features` placed the rows: `offer` shows the
+    /// heading with no feature yet, so the first one can be started, and
+    /// `waiting` features wait for the user.
+    pub fn with_feature_head(mut self, offer: bool, waiting: usize, width: i32) -> Self {
+        if offer && self.features_title.is_none() {
+            self.features_title = Some(features_title_rect(self.blocks_end(), width));
+        }
+        let count = self.feature_workspaces + self.features.len();
+        self.features_plus = self.features_title.map(features_plus_rect);
+        self.features_waiting = self
+            .features_title
+            .and_then(|title| features_waiting_rect(title, count, waiting));
         self
     }
 
@@ -1667,6 +1716,8 @@ impl SidebarLayout {
         let up = |r: &mut Rect| r.loc.y -= by;
         self.inbox_title.iter_mut().for_each(up);
         self.features_title.iter_mut().for_each(up);
+        self.features_plus.iter_mut().for_each(up);
+        self.features_waiting.iter_mut().for_each(up);
         self.features.iter_mut().for_each(up);
         for (_, _, r) in &mut self.inbox {
             up(r);
@@ -1875,6 +1926,49 @@ fn features_title_rect(y: i32, width: i32) -> Rect {
         (0, y + SECTION_TOP).into(),
         (width - GAP, SECTION_TITLE).into(),
     )
+}
+
+/// The "+" of the heading at `title`: on the rule over it, in the column
+/// of the workspaces' "×".
+fn features_plus_rect(title: Rect) -> Rect {
+    let right = title.loc.x + title.size.w - ROW_INSET;
+    Rectangle::new(
+        (
+            right - (CLOSE_SLOT + FEATURES_PLUS) / 2,
+            title.loc.y - SECTION_TOP,
+        )
+            .into(),
+        (FEATURES_PLUS, SECTION_TOP).into(),
+    )
+}
+
+/// How far a click lands on the "+" at `plus`.
+fn features_plus_reach(plus: Rect) -> Rect {
+    let (x, y) = FEATURES_PLUS_REACH;
+    Rectangle::new(
+        (plus.loc.x - x, plus.loc.y - y).into(),
+        (plus.size.w + 2 * x, plus.size.h + 2 * y).into(),
+    )
+}
+
+/// The pill of `waiting` features on the heading at `title` that counts
+/// `count`: left of the count, while it fits beside the label.
+fn features_waiting_rect(title: Rect, count: usize, waiting: usize) -> Option<Rect> {
+    if waiting == 0 {
+        return None;
+    }
+    let right = title.loc.x + title.size.w - ROW_INSET - CHILD_PAD;
+    let w = pill_extent(waiting);
+    let x = right - text_extent(&count.to_string(), DETAIL_FONT_SIZE) - TITLE_GAP - w;
+    let label_end = NAME_X + text_extent(FEATURES_LABEL, SMALL_FONT_SIZE) + TITLE_GAP;
+    (x >= label_end).then(|| Rectangle::new((x, title.loc.y).into(), (w, title.size.h).into()))
+}
+
+/// How many features of `workspaces` and `rows` wait for the user.
+pub fn features_waiting(workspaces: &[WorkspaceView], rows: &[super::FeatureRowView]) -> usize {
+    let on_workspaces = workspaces.iter().filter_map(|ws| ws.feature.as_ref());
+    let cards = on_workspaces.chain(rows.iter().map(|row| &row.card));
+    cards.filter(|card| card.gate).count()
 }
 
 /// Where a part of the features section with `n` rows, from its top,
@@ -2129,6 +2223,9 @@ pub fn sidebar_layout_at(
         inbox,
         features_title,
         features: Vec::new(),
+        features_plus: None,
+        features_waiting: None,
+        feature_workspaces: first_feature.map_or(0, |f| workspaces.len() - f),
         rows,
         cards: card_rects,
         card_closes,
@@ -2251,12 +2348,22 @@ impl Painter {
         let density = state.density;
         let layout = sidebar_layout_at(&view.workspaces, &view.agents, size.w, density)
             .with_features(view.features.len(), size.w, density)
+            .with_feature_head(
+                !view.workspaces.is_empty(),
+                features_waiting(&view.workspaces, &view.features),
+                size.w,
+            )
             .scrolled_over(state.scroll, state.over, size.h);
         self.sidebar_inbox(&mut c, view, &layout, scale, p);
         if let Some(title) = layout.features_title {
             let workspaces =
                 features_from(&view.workspaces).map_or(0, |f| view.workspaces.len() - f);
-            self.features_heading(&mut c, title, workspaces + view.features.len(), scale, p);
+            let heading = FeaturesHeading {
+                count: workspaces + view.features.len(),
+                waiting: features_waiting(&view.workspaces, &view.features),
+                plus: state.features_plus,
+            };
+            self.features_heading(&mut c, title, &heading, scale, p);
             let rows: Vec<_> = (view.features.iter().zip(&layout.features).enumerate())
                 .map(|(n, (row, rect))| (row, state.feature(n), *rect))
                 .collect();
@@ -2478,16 +2585,38 @@ impl Painter {
         );
     }
 
-    /// The features section's heading at `title`, counting `count`
-    /// features, under a rule across the sidebar.
-    fn features_heading(&self, c: &mut Canvas, title: Rect, count: usize, scale: f64, p: &Palette) {
+    /// The features section's heading at `title`, under a rule across the
+    /// sidebar with a "+" on it to start a feature.
+    fn features_heading(
+        &self,
+        c: &mut Canvas,
+        title: Rect,
+        heading: &FeaturesHeading,
+        scale: f64,
+        p: &Palette,
+    ) {
         let px = |v: i32| (v as f64 * scale).round() as i32;
+        let s = scale as f32;
+        let plus = features_plus_rect(title);
         let rule_y = px(title.loc.y - SECTION_TOP / 2);
         let rule_h = px(GAP).max(1);
         let rule_x = px(ROW_INSET);
-        let rule_w = px(title.loc.x + title.size.w - ROW_INSET) - rule_x;
-        c.fill(rule_x, rule_y, rule_w, rule_h, p.border);
-        self.section_heading(c, title, stages_mark, "Features", Some(count), scale, p);
+        let rule_end = px(plus.loc.x - FEATURES_PLUS_GAP);
+        c.fill(rule_x, rule_y, rule_end - rule_x, rule_h, p.border);
+        let hover = alpha(heading.plus);
+        if hover > 0.0 {
+            let (x, y, w, h) = rect_px(plus, scale);
+            c.rounded(x, y, w, h, ROW_RADIUS * s, mix(p.panel, p.element, hover));
+        }
+        icon_sdf(c, plus, scale, mix(p.placeholder, p.text, hover), |x, y| {
+            super::plus(x, y, 0.0, 0.0, 4.0 * s, s)
+        });
+        let count = (heading.count > 0).then_some(heading.count);
+        self.section_heading(c, title, stages_mark, FEATURES_LABEL, count, scale, p);
+        let pill = features_waiting_rect(title, heading.count, heading.waiting);
+        if let Some(pill) = pill {
+            self.header_pill(c, heading.waiting, pill, p.warning, scale, p);
+        }
     }
 
     /// The features section's rows of features with no workspace: each a
@@ -3754,12 +3883,21 @@ struct InboxKey {
     scale: f64,
 }
 
+/// What the Features heading says: how many features there are and how
+/// many wait for the user, and its "+" button's hover alpha.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FeaturesHeading {
+    count: usize,
+    waiting: usize,
+    plus: u8,
+}
+
 /// What the feature rows are drawn from: each row and its hover alpha;
 /// then as `BlockKey`.
 #[derive(Clone, Debug, PartialEq)]
 struct FeaturesKey {
-    /// The heading's count, when the part starts with the heading.
-    heading: Option<usize>,
+    /// The heading, when the part starts with it.
+    heading: Option<FeaturesHeading>,
     rows: Vec<(super::FeatureRowView, u8)>,
     density: Density,
     width: i32,
@@ -3838,8 +3976,8 @@ impl Painter {
         let mut c = Canvas::new(physical((key.width, end).into(), scale));
         c.fill(0, 0, c.w, c.h, p.panel);
         sidebar_edge(&mut c, scale, p);
-        if let (Some(title), Some(count)) = (title, key.heading) {
-            self.features_heading(&mut c, title, count, scale, p);
+        if let (Some(title), Some(heading)) = (title, &key.heading) {
+            self.features_heading(&mut c, title, heading, scale, p);
         }
         let rows: Vec<_> = (key.rows.iter().zip(rects))
             .map(|((row, hover), rect)| (row, *hover, rect))
@@ -3889,7 +4027,12 @@ impl SidebarLayers {
         let size: Size<i32, Logical> = (width, output.h).into();
         let state = &sidebar.state;
         let mut layout = sidebar_layout_at(&sidebar.workspaces, &sidebar.agents, width, density)
-            .with_features(sidebar.features.len(), width, density);
+            .with_features(sidebar.features.len(), width, density)
+            .with_feature_head(
+                !sidebar.workspaces.is_empty(),
+                features_waiting(&sidebar.workspaces, &sidebar.features),
+                width,
+            );
         let max = layout.max_scroll(output.h);
         let scroll = state.scroll.clamp(0.0, max as f64);
         // How far the rows go down from where the layout has them.
@@ -3996,13 +4139,17 @@ impl SidebarLayers {
         let workspaces =
             features_from(&sidebar.workspaces).map_or(0, |f| sidebar.workspaces.len() - f);
         let heading = layout.features_title.map(|title| title.loc.y - SECTION_TOP);
-        let count = workspaces + layout.features.len();
+        let head = FeaturesHeading {
+            count: workspaces + layout.features.len(),
+            waiting: features_waiting(&sidebar.workspaces, &sidebar.features),
+            plus: state.features_plus,
+        };
         let all: Vec<usize> = (0..sidebar.features.len()).collect();
         let pieces = if workspaces > 0 {
             let rows = layout.features.first().map(|r| (r.loc.y, None, &all[..]));
-            [heading.map(|top| (top, Some(count), &[][..])), rows]
+            [heading.map(|top| (top, Some(head), &[][..])), rows]
         } else {
-            [heading.map(|top| (top, Some(count), &all[..])), None]
+            [heading.map(|top| (top, Some(head), &all[..])), None]
         };
         for (top, heading, rows) in pieces.into_iter().flatten() {
             let (.., h) = features_part_rects(heading.is_some(), rows.len(), width, density);
@@ -5691,16 +5838,24 @@ mod tests {
                 rows_of(parts[n].buffer.clone(), scale, 0, BAR_HEIGHT),
                 rows_of(whole.clone(), scale, 0, BAR_HEIGHT)
             );
+            // The Features heading, offering to start a feature: nothing
+            // else is drawn at its height.
+            let heading = &parts[0];
+            assert_eq!(heading.loc.y, (layout.blocks_end()) as f64);
+            assert_eq!(
+                rows_of(heading.buffer.clone(), scale, 0, heading.size.h),
+                rows_of(whole.clone(), scale, heading.loc.y as i32, heading.size.h)
+            );
             // The "Needs you" list, then the blocks from the last.
             let title = layout.inbox_title.unwrap();
-            let inbox = &parts[0];
+            let inbox = &parts[1];
             assert_eq!(inbox.loc.y, title.loc.y as f64);
             assert_eq!(
                 rows_of(inbox.buffer.clone(), scale, 0, inbox.size.h),
                 rows_of(whole.clone(), scale, title.loc.y, inbox.size.h)
             );
-            assert_eq!(n, 1 + layout.blocks.len());
-            for (part, block) in parts[1..n].iter().zip(layout.blocks.iter().rev()) {
+            assert_eq!(n, 2 + layout.blocks.len());
+            for (part, block) in parts[2..n].iter().zip(layout.blocks.iter().rev()) {
                 let over = super::BLOCK_OVER;
                 assert_eq!(part.loc.y, (block.loc.y - over) as f64);
                 assert_eq!(
@@ -5744,15 +5899,17 @@ mod tests {
             view
         };
         // Mid-list, scrolled by a fraction and stretched past the top:
-        // under its header. The last, with no cards and scrolled to the
-        // end: over its header, so it is not cut off.
-        for (w, scroll, over, flips) in [(2, 40.4, 3.6, false), (11, 1e6, 0.0, true)] {
+        // under its header. The last, scrolled to the end: under its header
+        // too, as the Features heading leaves it the room. (Where that room
+        // is missing it goes over: see the layout's own tests.)
+        for (w, scroll, over, flips) in [(2, 40.4, 3.6, false), (11, 1e6, 0.0, false)] {
             let mut view = open(w, scroll, over);
             if flips {
                 view.agents[w].clear();
             }
             let parts = sidebar_parts(&mut super::SidebarLayers::default(), view.clone(), 0.0);
             let hit = sidebar_layout(&view.workspaces, &view.agents, 240)
+                .with_feature_head(true, 0, 240)
                 .scrolled_over(scroll, over, 400);
             let row = hit.rows[w];
             let strip = row.picks.unwrap();

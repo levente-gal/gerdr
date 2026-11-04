@@ -1083,6 +1083,11 @@ fn hit_rects(
         view.sidebar_width,
         view.density,
     )
+    .with_feature_head(
+        !view.sidebar.workspaces.is_empty(),
+        features_waiting(&view.sidebar.workspaces, &view.sidebar.features),
+        view.sidebar_width,
+    )
     .scrolled_over(
         view.sidebar.state.scroll,
         view.sidebar.state.over,
@@ -1101,6 +1106,8 @@ fn hit_rects(
     rects.extend(sidebar.inbox_title);
     rects.extend(sidebar.inbox.iter().map(|(_, _, rect)| *rect));
     rects.extend(sidebar.features_title);
+    rects.extend(sidebar.features_plus);
+    rects.extend(sidebar.features_waiting);
     rects.extend(sidebar.features.iter().copied());
     let strip_w = output.w - view.sidebar_width;
     let shift = |rect: Rect| {

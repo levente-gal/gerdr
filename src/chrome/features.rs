@@ -3596,7 +3596,7 @@ pub(super) const STAGE_DOT_GAP: i32 = 3;
 
 /// How wide `marks` stage dots are in a sidebar row.
 pub(super) fn stage_marks_width(marks: usize) -> i32 {
-    marks as i32 * (STAGE_DOT + STAGE_DOT_GAP) - STAGE_DOT_GAP
+    (marks as i32 * (STAGE_DOT + STAGE_DOT_GAP) - STAGE_DOT_GAP).max(0)
 }
 
 #[cfg(test)]
@@ -3709,6 +3709,84 @@ mod tests {
         let narrow = sidebar_layout_at(std::slice::from_ref(&ws), &[], SIDEBAR_MIN_WIDTH, d);
         assert_eq!(narrow.rows[0].stages.map(|r| r.loc.x), Some(dots.loc.x));
         assert_eq!(narrow.rows[0].repos, None);
+    }
+
+    #[test]
+    fn the_features_rule_offers_to_start_a_feature() {
+        use crate::WorkspaceKind;
+        use crate::chrome::{Density, SidebarHit, WorkspaceView, sidebar_layout_at};
+        let d = Density::Comfortable;
+        let ws = WorkspaceView::new("api".into(), WorkspaceKind::Terminal, &[]);
+        let plain = || sidebar_layout_at(std::slice::from_ref(&ws), &[], 200, d);
+        let end = plain().max_scroll(0);
+        let mid = |r: Rect| (r.loc.x as f64 + 8.0, r.loc.y as f64 + 8.0).into();
+        // No feature yet: the heading shows, and counts toward scrolling.
+        let empty = || {
+            plain()
+                .with_features(0, 200, d)
+                .with_feature_head(true, 0, 200)
+        };
+        let scrolled = empty().scrolled(4, 0);
+        let empty = empty();
+        assert!(empty.features.is_empty());
+        let title = empty.features_title.expect("a heading");
+        let plus = empty.features_plus.expect("a plus");
+        assert_eq!(empty.hit(mid(plus)), Some(SidebarHit::NewFeature));
+        assert_eq!(empty.hit(mid(title)), Some(SidebarHit::FeaturesTitle));
+        assert!(empty.max_scroll(0) > end);
+        // On the rule: just over the heading, and inside the sidebar.
+        assert_eq!(plus.loc.y + plus.size.h, title.loc.y);
+        assert!(plus.loc.x + plus.size.w <= 200);
+        // The empty sidebar has only its hint: no project to start one in.
+        let none = sidebar_layout_at(&[], &[], 200, d)
+            .with_features(0, 200, d)
+            .with_feature_head(false, 0, 200);
+        assert!(none.features_title.is_none() && none.features_plus.is_none());
+        // It moves with the rows.
+        let moved = scrolled.features_plus.expect("a plus");
+        assert_eq!(moved.loc.y, plus.loc.y - 4);
+    }
+
+    #[test]
+    fn the_features_heading_counts_what_waits_beside_the_label_only() {
+        use crate::WorkspaceKind;
+        use crate::chrome::{
+            Density, SIDEBAR_MIN_WIDTH, SidebarHit, WorkspaceView, features_waiting,
+            sidebar_layout_at,
+        };
+        let d = Density::Comfortable;
+        let waits = FeatureCard {
+            gate: true,
+            ..FeatureCard::default()
+        };
+        let mut on_workspace = WorkspaceView::new("api".into(), WorkspaceKind::Terminal, &[]);
+        on_workspace.feature = Some(waits.clone());
+        let rows = [
+            FeatureRowView {
+                title: "a".into(),
+                card: waits,
+            },
+            FeatureRowView {
+                title: "b".into(),
+                card: FeatureCard::default(),
+            },
+        ];
+        let workspaces = [on_workspace];
+        assert_eq!(features_waiting(&workspaces, &rows), 2);
+        let layout = sidebar_layout_at(&workspaces, &[], 200, d)
+            .with_features(2, 200, d)
+            .with_feature_head(true, 2, 200);
+        let pill = layout.features_waiting.expect("a pill");
+        let mid = (pill.loc.x as f64 + 2.0, pill.loc.y as f64 + 8.0).into();
+        assert_eq!(layout.hit(mid), Some(SidebarHit::FeaturesWaiting));
+        let quiet = sidebar_layout_at(&workspaces, &[], 200, d)
+            .with_features(2, 200, d)
+            .with_feature_head(true, 0, 200);
+        assert_eq!(quiet.features_waiting, None);
+        let narrow = sidebar_layout_at(&workspaces, &[], SIDEBAR_MIN_WIDTH, d)
+            .with_features(2, SIDEBAR_MIN_WIDTH, d)
+            .with_feature_head(true, 2, SIDEBAR_MIN_WIDTH);
+        assert_eq!(narrow.features_waiting, None, "it never covers the label");
     }
 
     #[test]

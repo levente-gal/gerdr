@@ -158,6 +158,11 @@ impl Gerdr {
                 self.sidebar_width,
                 self.density,
             )
+            .with_feature_head(
+                !workspaces.is_empty(),
+                chrome::features_waiting(&workspaces, &self.feature_rows()),
+                self.sidebar_width,
+            )
             .scrolled_over(
                 self.sidebar_scroll.pos(),
                 self.sidebar_scroll.overscroll(),
@@ -336,6 +341,11 @@ impl Gerdr {
                     self.sidebar_feature_count(),
                     self.sidebar_width,
                     self.density,
+                )
+                .with_feature_head(
+                    !workspaces.is_empty(),
+                    chrome::features_waiting(workspaces, &self.feature_rows()),
+                    self.sidebar_width,
                 );
         // Held to what the rows now take, and moved to show the active
         // workspace when another becomes it: gliding there, or at once
@@ -416,6 +426,7 @@ impl Gerdr {
                 others: quantize(hover.alpha(SidebarHit::CiPrs(i), now)),
             })
             .collect();
+        let features_plus = quantize(hover.alpha(SidebarHit::NewFeature, now));
         let plus = quantize(hover.alpha(SidebarHit::Plus, now));
         let plus_open = self
             .context_menu
@@ -435,6 +446,7 @@ impl Gerdr {
             ci,
             inbox,
             features,
+            features_plus,
             plus,
             plus_open,
             repos,
@@ -624,6 +636,8 @@ impl Gerdr {
             }
             (SidebarHit::InboxTitle, BTN_LEFT) => self.open_inbox(Some(Section::Agents)),
             (SidebarHit::FeaturesTitle, BTN_LEFT) => self.open_features(),
+            (SidebarHit::NewFeature, BTN_LEFT) => self.open_new_feature(None),
+            (SidebarHit::FeaturesWaiting, BTN_LEFT) => self.open_inbox(Some(Section::Gates)),
             (SidebarHit::Feature(n), BTN_LEFT) => {
                 if let Some(f) = self.sidebar_feature(n) {
                     let (project, slug) = (f.project.clone(), f.slug.clone());
@@ -951,6 +965,19 @@ impl Gerdr {
                     None => tip,
                 })
             }
+            SidebarHit::NewFeature => {
+                Some(Tooltip::new("New feature\u{2026}", layout.features_plus?))
+            }
+            SidebarHit::FeaturesWaiting => {
+                let views: Vec<_> = workspaces.iter().map(|w| w.0.clone()).collect();
+                let n = chrome::features_waiting(&views, &self.feature_rows());
+                let text = match n {
+                    1 => "1 feature waits for you".to_owned(),
+                    n => format!("{n} features wait for you"),
+                };
+                let tip = Tooltip::new(&text, layout.features_waiting?);
+                Some(tip.key("click to see them in the inbox"))
+            }
             SidebarHit::Feature(n) => {
                 let f = self.sidebar_feature(n)?;
                 let rect = *layout.features.get(n)?;
@@ -1148,13 +1175,15 @@ impl Gerdr {
                 }
                 Some(MenuSpec { anchor: at, items })
             }
-            SidebarHit::FeaturesTitle => Some(MenuSpec {
-                anchor: at,
-                items: vec![
-                    MenuItem::new("Open features", MenuAction::Features),
-                    MenuItem::new("New feature\u{2026}", MenuAction::NewFeature(None)),
-                ],
-            }),
+            SidebarHit::FeaturesTitle | SidebarHit::NewFeature | SidebarHit::FeaturesWaiting => {
+                Some(MenuSpec {
+                    anchor: at,
+                    items: vec![
+                        MenuItem::new("Open features", MenuAction::Features),
+                        MenuItem::new("New feature\u{2026}", MenuAction::NewFeature(None)),
+                    ],
+                })
+            }
             SidebarHit::Feature(n) => {
                 let f = self.sidebar_feature(n)?;
                 let open = MenuAction::OpenFeature(f.project.clone(), f.slug.clone());
