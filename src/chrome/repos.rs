@@ -7055,7 +7055,6 @@ mod tests {
 
     #[test]
     fn it_paints() {
-        let painter = Painter::new();
         let disabled_hover = ReposView {
             hover: Some(ReposHit::Button(ReposButton::ForcePush)),
             field_focused: false,
@@ -7094,18 +7093,22 @@ mod tests {
             },
             diff_only(),
         ];
-        for view in views {
-            for (w, h) in SIZES {
-                for (theme, scale) in [(Theme::Dark, 1.0), (Theme::Light, 2.0)] {
-                    let _ = painter.repos(
-                        &view,
-                        repos_panel_rect((w, h).into()),
-                        scale,
-                        theme.palette(),
-                    );
-                }
-            }
-        }
+        let jobs: Vec<_> = views
+            .iter()
+            .flat_map(|view| SIZES.map(|size| (view, size)))
+            .flat_map(|(view, size)| {
+                [(Theme::Dark, 1.0), (Theme::Light, 2.0)].map(|case| (view, size, case))
+            })
+            .collect();
+        crate::chrome::golden::fan_out(jobs.len(), |painter, job| {
+            let (view, (w, h), (theme, scale)) = jobs[job];
+            let _ = painter.repos(
+                view,
+                repos_panel_rect((w, h).into()),
+                scale,
+                theme.palette(),
+            );
+        });
     }
 
     /// The full panel with Restore buttons on the hunk's header and at the

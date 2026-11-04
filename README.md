@@ -135,6 +135,10 @@ Other files:
 cargo test
 ```
 
+To try a change at near-release speed, `cargo build --profile fast` builds
+`target/fast/gerdr` in about a quarter of the time. Its painting is about
+twice as slow as release, so install with `install.sh`.
+
 `docs/ux-conventions.md` gives the UX rules gerdr follows.
 `docs/feature-checklist.md` turns them into a checklist for each new feature.
 

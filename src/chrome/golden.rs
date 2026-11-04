@@ -3,6 +3,7 @@
 //! the drawing does; a change made on purpose records the new ones (run
 //! the test and copy the table it prints).
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use super::{
@@ -952,17 +953,79 @@ const GOLDEN_OVERLAYS: [[u64; 10]; 4] = [
     ],
 ];
 
-/// Check `paint` of every case against `golden`, printing the table to
+/// Run `job` for every index below `count`, on every core, and give the
+/// results in index order. A `Painter` is not `Sync`, so each thread makes
+/// its own; the slow surfaces take most of the test run in a dev build.
+pub(super) fn fan_out<T: Send>(count: usize, job: impl Fn(&Painter, usize) -> T + Sync) -> Vec<T> {
+    let next = AtomicUsize::new(0);
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let mut done: Vec<(usize, T)> = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..cores.min(count))
+            .map(|_| {
+                scope.spawn(|| {
+                    let painter = Painter::new();
+                    let mut done = Vec::new();
+                    loop {
+                        let i = next.fetch_add(1, Ordering::Relaxed);
+                        if i >= count {
+                            return done;
+                        }
+                        done.push((i, job(&painter, i)));
+                    }
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .flat_map(|worker| {
+                worker
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            })
+            .collect()
+    });
+    done.sort_by_key(|(i, _)| *i);
+    done.into_iter().map(|(_, result)| result).collect()
+}
+
+/// Check `paint` of every case against `golden`, a thread per case.
+fn check(
+    surfaces: &[&str],
+    golden: &[&[u64]],
+    paint: impl Fn(&Painter, Theme, f64) -> Vec<u64> + Sync,
+) {
+    let got = fan_out(CASES.len(), |painter, case| {
+        assert!(painter.font.is_some(), "the golden hashes need a font");
+        let (theme, scale) = CASES[case];
+        paint(painter, theme, scale)
+    });
+    compare(surfaces, golden, &got);
+}
+
+/// Check `paint` of every surface of every case against `golden`, for
+/// surfaces slow enough that a thread per case is not enough.
+fn check_each(
+    surfaces: &[&str],
+    golden: &[&[u64]],
+    paint: impl Fn(&Painter, Theme, f64, usize) -> u64 + Sync,
+) {
+    let hashes = fan_out(CASES.len() * surfaces.len(), |painter, i| {
+        assert!(painter.font.is_some(), "the golden hashes need a font");
+        let (theme, scale) = CASES[i / surfaces.len()];
+        paint(painter, theme, scale, i % surfaces.len())
+    });
+    let got: Vec<Vec<u64>> = hashes.chunks(surfaces.len()).map(<[u64]>::to_vec).collect();
+    compare(surfaces, golden, &got);
+}
+
+/// Compare `got` with `golden`, per case in `CASES`, printing the table to
 /// record when any surface paints differently.
-fn check(surfaces: &[&str], golden: &[&[u64]], paint: impl Fn(&Painter, Theme, f64) -> Vec<u64>) {
-    let painter = Painter::new();
-    assert!(painter.font.is_some(), "the golden hashes need a font");
+fn compare(surfaces: &[&str], golden: &[&[u64]], got: &[Vec<u64>]) {
     let mut table = String::new();
     let mut same = true;
-    for ((theme, scale), want) in CASES.into_iter().zip(golden) {
-        let got = paint(&painter, theme, scale);
+    for (((theme, scale), want), got) in CASES.into_iter().zip(golden).zip(got) {
         table += &format!("    // {theme:?} at {scale}\n    [\n");
-        for (i, (surface, hash)) in surfaces.iter().zip(&got).enumerate() {
+        for (i, (surface, hash)) in surfaces.iter().zip(got).enumerate() {
             if *hash != want[i] {
                 same = false;
                 eprintln!(
@@ -2497,23 +2560,6 @@ const FEATURE_TAB: [&str; 18] = [
     "tab_resume_860",
 ];
 
-fn paint_feature_tab(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
-    let views = feature_tabs();
-    TAB_SURFACES
-        .iter()
-        .map(|(name, w)| {
-            let view = &views.iter().find(|(n, _)| n == name).expect("a fixture").1;
-            hash(super::feature_tab_composed(
-                painter,
-                view,
-                (*w, TAB_HEIGHT).into(),
-                theme,
-                scale,
-            ))
-        })
-        .collect()
-}
-
 /// The recorded hashes of `FEATURE_TAB`, per case in `CASES`.
 const GOLDEN_FEATURE_TAB: [[u64; 18]; 4] = [
     // Dark at 1
@@ -2608,7 +2654,18 @@ fn the_feature_tab_paints_the_same_pixels() {
         .iter()
         .map(|row| row.as_slice())
         .collect();
-    check(&FEATURE_TAB, &golden, paint_feature_tab);
+    let views = feature_tabs();
+    check_each(&FEATURE_TAB, &golden, |painter, theme, scale, surface| {
+        let (name, w) = TAB_SURFACES[surface];
+        let view = &views.iter().find(|(n, _)| *n == name).expect("a fixture").1;
+        hash(super::feature_tab_composed(
+            painter,
+            view,
+            (w, TAB_HEIGHT).into(),
+            theme,
+            scale,
+        ))
+    });
 }
 
 /// With `GERDR_DUMP_DIR` set, write every feature tab fixture there at
