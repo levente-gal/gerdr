@@ -249,6 +249,7 @@ impl WorktreeDiff {
     pub fn of_doc(doc: DocOf, workspace: usize, review: Review) -> Self {
         let mut diff = DiffView::default();
         diff.review = review;
+        diff.plain = true;
         let root = doc.path.parent().map(Path::to_path_buf).unwrap_or_default();
         WorktreeDiff {
             root,
@@ -273,9 +274,9 @@ impl WorktreeDiff {
         )
     }
 
-    /// The file under review read again (`Err`: why it couldn't be): shown
-    /// as all added lines, where it stood; the same text as before left
-    /// as it is.
+    /// The file under review read again (`Err`: why it couldn't be): held
+    /// as all added lines (saved comments quote them so) and shown as a
+    /// page, where it stood; the same text as before left as it is.
     pub fn set_doc(&mut self, read: Result<String, String>, env: Env) {
         let Some(doc) = self.doc.as_mut() else {
             return;
@@ -416,11 +417,30 @@ impl WorktreeDiff {
         let read_only =
             self.commit.is_some() || self.feature.is_some() || self.evidence() || locked;
         let evidence = self.evidence();
-        let diff = diff_help_lines().into_iter().filter(|(_, what, _)| {
-            !(read_only && edits(what))
-                && !(self.doc.is_some() && restore(what))
-                && !(evidence && comments(what))
-        });
+        // A file under review is a page: no other file to go to, no header.
+        let other_file = |what: &str| what.contains("the file before or after");
+        let on_page = self.doc.is_some();
+        let diff = (diff_help_lines().into_iter())
+            .filter(|(_, what, _)| {
+                !(read_only && edits(what))
+                    && !(on_page && (restore(what) || other_file(what)))
+                    && !(evidence && comments(what))
+            })
+            .map(|(key, what, tone)| match on_page {
+                true => (
+                    key.replace(" { }", ""),
+                    (what.replace(" (on a file's header, the file)", ""))
+                        .replace("; on a file's name, the file", "")
+                        .replace("find its lines, paths, hunks", "find in the file")
+                        .replace(
+                            "the top, the end, the hunk before or after,",
+                            "go to the top, the end,",
+                        )
+                        .replace("in the diff, ", "in the review, "),
+                    tone,
+                ),
+                false => (key, what, tone),
+            });
         if self.doc.is_none() && self.feature.is_none() {
             return diff.collect();
         }
@@ -437,6 +457,7 @@ impl WorktreeDiff {
                 (PREVIEW_KEY, "go to the next of Preview, Review and Split"),
                 (APPROVE_KEY, "approve the file as it is"),
                 (SEND_BACK_KEY, "send it back to its agent with the comments"),
+                ("Shift+C", "in the review, comment on the whole file"),
             ],
         };
         let own = own.iter().map(|(key, what)| {
@@ -628,6 +649,7 @@ impl WorktreeDiff {
             return;
         }
         view.title_buttons.extend([
+            hint(ReposButton::CommentFile, "Shift+C"),
             hint(ReposButton::SendBack, SEND_BACK_KEY),
             hint(ReposButton::Approve, APPROVE_KEY),
         ]);
@@ -762,6 +784,10 @@ impl WorktreeDiff {
             .map(|button| Hint {
                 button,
                 label: match button {
+                    // With no cursor on a page, the key takes the whole file.
+                    B::Comment if self.diff.plain && self.diff.cursor.is_none() => {
+                        "comment on the file".into()
+                    }
                     B::Comment => "comment on the lines".into(),
                     B::Close if self.commit.is_some() || self.doc.is_some() => "back".into(),
                     B::Close if self.feature.as_ref().is_some_and(|f| f.back) => "back".into(),
@@ -1847,25 +1873,30 @@ mod tests {
     }
 
     #[test]
-    fn a_stage_file_shows_as_added_lines_to_review() {
+    fn a_stage_file_shows_as_a_page_to_review() {
         let mut wd = doc();
         assert_eq!(wd.heading(), "Discover · brief.md");
         assert_eq!(wd.summary(), "\u{201c}Log in\u{201d} · ready for review");
         assert_eq!(wd.root, PathBuf::from("/data/features/p/login"));
-        let rows = texts(&wd);
-        assert!(rows.contains(&"file brief.md None".to_owned()), "{rows:?}");
-        assert!(rows.ends_with(&[
-            "# Brief".into(),
-            "Users log in.".into(),
-            "With a password.".into()
-        ]));
+        // Only its lines, in one column of numbers.
+        assert_eq!(texts(&wd), ["# Brief", "Users log in.", "With a password."]);
+        let view = wd.view(ENV);
+        assert!(view.plain);
+        assert_eq!(view.gutter, 2);
         let buttons: Vec<ReposButton> = wd
             .view(ENV)
             .title_buttons
             .iter()
             .map(|h| h.button)
             .collect();
-        assert_eq!(buttons, [ReposButton::SendBack, ReposButton::Approve]);
+        assert_eq!(
+            buttons,
+            [
+                ReposButton::CommentFile,
+                ReposButton::SendBack,
+                ReposButton::Approve
+            ]
+        );
         assert!(wd.view(ENV).row_buttons.is_empty());
         let hints: Vec<(ReposButton, String)> =
             wd.hints().into_iter().map(|h| (h.button, h.key)).collect();
@@ -1896,6 +1927,340 @@ mod tests {
             assert!(keys.contains(&edit), "{edit} not in {keys:?}");
         }
         assert!(!keys.contains(&"Shift+R"), "Shift+R in {keys:?}");
+        assert!(keys.contains(&"Shift+C"), "{keys:?}");
+        // No header, no other file, no hunks to go to.
+        assert!(!keys.contains(&"Alt+Up / Down"), "{keys:?}");
+        assert!(keys.contains(&"gg G Ctrl+U Ctrl+D"), "{keys:?}");
+        let says = |text: &str| help.iter().any(|(_, what, _)| what.contains(text));
+        assert!(!says("header") && !says("hunk") && !says("a file's name"));
+    }
+
+    /// `n` words, each its number: a line over many rows of `ENV`'s.
+    fn long(n: usize) -> String {
+        let words: Vec<String> = (0..n).map(|i| format!("word{i}")).collect();
+        words.join(" ")
+    }
+
+    /// A file of a short line, a line over many rows, and a short line.
+    fn wrapped() -> WorktreeDiff {
+        let mut wd = doc();
+        let text = format!("Short.\n{}\nLast.\n", long(40));
+        wd.set_doc(Ok(text), ENV);
+        wd
+    }
+
+    /// The rows shown of the line `n`'s, by index into the view.
+    fn parts_of(wd: &WorktreeDiff, n: usize) -> std::ops::Range<usize> {
+        let first = wd.diff.row_of_line(n).unwrap();
+        let next = wd.diff.row_of_line(n + 1).unwrap();
+        first..next
+    }
+
+    #[test]
+    fn a_long_line_goes_on_over_more_rows() {
+        let wd = wrapped();
+        let rows = texts(&wd);
+        let parts = parts_of(&wd, 2);
+        assert!(parts.len() > 1, "{rows:?}");
+        // Every char of it, once; the number only on the first.
+        assert_eq!(rows[parts.clone()].concat(), long(40));
+        let view = wd.view(ENV);
+        let numbers: Vec<usize> = (view.rows[parts.clone()].iter())
+            .map(|row| match row {
+                DetailRow::Line(line) => line.number,
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(numbers[0], 2);
+        assert!(numbers[1..].iter().all(|&n| n == 0), "{numbers:?}");
+        // None is wider than a row holds, the caret past its end included.
+        let room = crate::chrome::diff_line_room(ENV.cols, view.gutter, true);
+        assert!(rows.iter().all(|t| t.chars().count() < room), "{rows:?}");
+    }
+
+    #[test]
+    fn a_line_wraps_whatever_its_chars() {
+        let mut wd = doc();
+        let word = "é→日本語".repeat(40);
+        for text in [word.clone(), format!("a {word} b"), format!("  {word}  ")] {
+            wd.set_doc(Ok(format!("{text}\nEnd.\n")), ENV);
+            let rows = texts(&wd);
+            let n = rows.len() - 1;
+            assert!(n > 1, "{rows:?}");
+            assert_eq!(rows[..n].concat(), text);
+        }
+    }
+
+    #[test]
+    fn the_caret_shows_on_the_part_it_is_in() {
+        let mut wd = wrapped();
+        let parts = parts_of(&wd, 2);
+        let rows = texts(&wd);
+        let first = rows[parts.start].chars().count();
+        // Three chars into the second part.
+        wd.with_diff(ENV, |diff, ctx| diff.caret_to(parts.start, first + 3, ctx));
+        assert_eq!(wd.diff.cursor_line(), Some(2));
+        assert_eq!(wd.view(ENV).caret, Some((parts.start + 1, 3)));
+        // Moving on, it stays on its line; j goes to the next line whole.
+        let key = |wd: &mut WorktreeDiff, sym: Keysym| wd.key(&none(), sym, sym, ENV);
+        key(&mut wd, Keysym::j);
+        assert_eq!(wd.diff.cursor_line(), Some(3));
+        key(&mut wd, Keysym::k);
+        assert_eq!(wd.diff.cursor_line(), Some(2));
+        assert_eq!(wd.diff.cursor.as_ref().map(|c| c.row), Some(parts.start));
+    }
+
+    #[test]
+    fn a_click_on_a_later_part_lands_on_the_char_under_it() {
+        let mut wd = wrapped();
+        let parts = parts_of(&wd, 2);
+        let rows = texts(&wd);
+        let first = rows[parts.start].chars().count();
+        let row = parts.start + 1;
+        wd.diff.pointer_char = Some((row, 3));
+        wd.click(ReposHit::DiffRow(row), ENV);
+        assert_eq!(wd.diff.caret(), Some((parts.start, first + 3)));
+        // Past the part's end, its last char: not the next part's first.
+        let len = rows[row].chars().count();
+        wd.diff.pointer_char = Some((row, len + 50));
+        wd.click(ReposHit::DiffRow(row), ENV);
+        assert_eq!(wd.diff.caret(), Some((parts.start, first + len - 1)));
+    }
+
+    #[test]
+    fn a_selection_covers_the_parts_of_its_lines() {
+        let mut wd = wrapped();
+        let key = |wd: &mut WorktreeDiff, sym: Keysym| wd.key(&none(), sym, sym, ENV);
+        let parts = parts_of(&wd, 2);
+        // By lines, the band reaches its last row.
+        wd.click(ReposHit::DiffRow(parts.start), ENV);
+        key(&mut wd, Keysym::V);
+        let marks = wd.view(ENV).marks;
+        assert!(parts.clone().all(|r| marks[r].selected), "{marks:?}");
+        assert!(!marks[parts.end].selected);
+        key(&mut wd, Keysym::Escape);
+        // By chars, each row what falls on it.
+        wd.with_diff(ENV, |diff, ctx| diff.caret_to(parts.start, 2, ctx));
+        key(&mut wd, Keysym::v);
+        let first = texts(&wd)[parts.start].chars().count();
+        wd.with_diff(ENV, |diff, ctx| diff.caret_to(parts.start, first + 2, ctx));
+        assert_eq!(
+            wd.view(ENV).chosen,
+            [(parts.start, 2..first), (parts.start + 1, 0..3)]
+        );
+    }
+
+    #[test]
+    fn deleting_a_wrapped_line_cuts_the_whole_of_it() {
+        let mut wd = wrapped();
+        let key = |wd: &mut WorktreeDiff, sym: Keysym| wd.key(&none(), sym, sym, ENV);
+        let parts = parts_of(&wd, 2);
+        wd.click(ReposHit::DiffRow(parts.end - 1), ENV);
+        key(&mut wd, Keysym::d);
+        let Some(Done::Diff(Outcome::Cut(edit))) = key(&mut wd, Keysym::d) else {
+            panic!("no cut");
+        };
+        assert_eq!(edit.path, "brief.md");
+        assert_eq!(edit.cut, crate::diff_edit::Cut::Lines(vec![2]));
+    }
+
+    #[test]
+    fn a_comment_on_a_wrapped_line_quotes_it_whole_under_its_last_part() {
+        let mut wd = wrapped();
+        let key = |wd: &mut WorktreeDiff, sym: Keysym| wd.key(&none(), sym, sym, ENV);
+        let parts = parts_of(&wd, 2);
+        wd.click(ReposHit::DiffRow(parts.start + 1), ENV);
+        key(&mut wd, Keysym::c);
+        key(&mut wd, Keysym::o);
+        key(&mut wd, Keysym::Return);
+        let comment = &wd.diff.review.comments[0];
+        assert_eq!(comment.lines.len(), 1);
+        assert_eq!(comment.lines[0].text, long(40));
+        assert_eq!(comment.lines[0].number, 2);
+        assert!(matches!(
+            wd.diff.rows[parts.end],
+            crate::diff_view::DiffRow::Comment { .. }
+        ));
+    }
+
+    #[test]
+    fn a_narrower_page_keeps_its_top_line() {
+        let mut wd = doc();
+        let lines = (1..=60).map(|n| format!("{n} {}\n", long(30)));
+        wd.set_doc(Ok(lines.collect()), ENV);
+        wd.with_diff(ENV, |diff, ctx| diff.stand_at_line(30.5, ctx));
+        let top = wd.diff.top_line().unwrap();
+        assert!((top - 30.5).abs() < 1e-9, "{top}");
+        // Into a line's parts and back, to the fraction.
+        let row = wd.diff.row_of_line(30).unwrap();
+        assert!(wd.diff.scroll.first() > row);
+        let before = wd.diff.rows.len();
+        let narrow = Env { cols: 30, ..ENV };
+        wd.with_diff(narrow, |diff, ctx| diff.rewrap(ctx));
+        assert!(wd.diff.rows.len() > before);
+        let top = wd.diff.top_line().unwrap();
+        assert!((top - 30.5).abs() < 0.2, "{top}");
+    }
+
+    #[test]
+    fn the_review_comes_back_where_it_was_when_read_again() {
+        let mut wd = doc();
+        let text = |first: &str| {
+            let rest: String = (2..=80).map(|n| format!("Line {n}.\n")).collect();
+            format!("{first}\n{rest}")
+        };
+        wd.set_doc(Ok(text("One")), ENV);
+        wd.with_diff(ENV, |diff, ctx| diff.stand_at_line(30.0, ctx));
+        wd.click(ReposHit::DiffRow(3), ENV);
+        assert_eq!(wd.diff.cursor_line(), Some(33));
+        let scrolled = wd.diff.scroll.pos();
+        wd.set_doc(Ok(text("Two")), ENV);
+        assert_eq!(wd.diff.scroll.pos(), scrolled);
+        assert_eq!(wd.diff.cursor_line(), Some(33));
+    }
+
+    #[test]
+    fn a_page_has_nothing_to_fold_or_go_on_to() {
+        let mut wd = doc();
+        let before = wd.diff.rows.clone();
+        let alt = ModifiersState {
+            alt: true,
+            ..ModifiersState::default()
+        };
+        for sym in [Keysym::Left, Keysym::Right] {
+            wd.key(&none(), sym, sym, ENV);
+            assert_eq!(wd.diff.rows, before);
+        }
+        wd.key(&alt, Keysym::Down, Keysym::Down, ENV);
+        assert_eq!(wd.diff.rows, before);
+    }
+
+    #[test]
+    fn enter_opens_a_page_at_the_line_with_no_caret() {
+        let mut wd = doc();
+        let enter = Keysym::Return;
+        let Some(Done::Diff(Outcome::OpenInZed { paths, .. })) = wd.key(&none(), enter, enter, ENV)
+        else {
+            panic!("not opened");
+        };
+        assert_eq!(paths, ["brief.md"]);
+    }
+
+    #[test]
+    fn a_file_under_review_is_not_called_a_diff() {
+        let wd = doc();
+        let lines = wd.help_lines();
+        assert!(!lines.is_empty());
+        for (key, what, _) in &lines {
+            assert!(!what.contains("diff"), "{key}: {what}");
+        }
+        assert!(
+            lines
+                .iter()
+                .any(|(_, what, _)| what == "in the review, go to the top, the end, half a page")
+        );
+    }
+
+    #[test]
+    fn the_comment_hint_says_what_the_key_will_take() {
+        let label = |wd: &WorktreeDiff| {
+            let hints = wd.hints();
+            let comment = hints.iter().find(|h| h.button == ReposButton::Comment);
+            comment.map(|h| h.label.clone()).unwrap_or_default()
+        };
+        let mut wd = doc();
+        assert_eq!(label(&wd), "comment on the file");
+        wd.click(ReposHit::DiffRow(1), ENV);
+        assert_eq!(label(&wd), "comment on the lines");
+    }
+
+    #[test]
+    fn a_whole_file_comment_goes_first() {
+        let shift = ModifiersState {
+            shift: true,
+            ..ModifiersState::default()
+        };
+        // By c with no cursor; Shift+C with one; the title row's button.
+        for route in 0..3 {
+            let mut wd = doc();
+            match route {
+                0 => {
+                    wd.key(&none(), Keysym::c, Keysym::c, ENV);
+                }
+                1 => {
+                    wd.click(ReposHit::DiffRow(1), ENV);
+                    wd.key(&shift, Keysym::C, Keysym::C, ENV);
+                }
+                _ => {
+                    wd.click(ReposHit::Button(ReposButton::CommentFile), ENV);
+                }
+            }
+            assert!(wd.diff.editing.is_some());
+            wd.key(&none(), Keysym::o, Keysym::o, ENV);
+            wd.key(&none(), Keysym::Return, Keysym::Return, ENV);
+            let comments = &wd.diff.review.comments;
+            assert_eq!(comments.len(), 1);
+            assert!(comments[0].lines.is_empty());
+            assert_eq!(comments[0].path, "brief.md");
+            let rows = texts(&wd);
+            let line = rows.iter().position(|t| t == "# Brief").unwrap();
+            assert!(line > 0, "{rows:?}");
+            assert_eq!(wd.diff.row_of_line(1), Some(line));
+        }
+    }
+
+    #[test]
+    fn an_empty_file_says_it_is_empty() {
+        let mut wd = doc();
+        wd.set_doc(Ok(String::new()), ENV);
+        assert_eq!(texts(&wd), ["The file is empty"]);
+    }
+
+    #[test]
+    fn a_long_file_shows_whole() {
+        let mut wd = doc();
+        let text: String = (1..=2500).map(|n| format!("Line {n}.\n")).collect();
+        wd.set_doc(Ok(text), ENV);
+        assert_eq!(wd.diff.rows.len(), 2500);
+        assert_eq!(wd.diff.row_of_line(2500), Some(2499));
+    }
+
+    /// What the search finds of `what`, typed in.
+    fn find(wd: &mut WorktreeDiff, what: &str) {
+        let key = |wd: &mut WorktreeDiff, sym: Keysym| wd.key(&none(), sym, sym, ENV);
+        key(wd, Keysym::slash);
+        for c in what.chars() {
+            let sym = Keysym::from_char(c);
+            wd.key(&none(), sym, sym, ENV);
+        }
+    }
+
+    #[test]
+    fn search_finds_on_the_part_a_word_is_in_and_once_in_a_comment() {
+        let mut wd = wrapped();
+        let parts = parts_of(&wd, 2);
+        let rows = texts(&wd);
+        // A word on the second part.
+        let word = rows[parts.start + 1].split(' ').nth(1).unwrap().to_owned();
+        let at = rows[parts.start + 1].find(&word).unwrap();
+        find(&mut wd, &word);
+        let found = wd.view(ENV).found;
+        assert!(found[parts.start].is_empty(), "{found:?}");
+        let start = found[parts.start + 1][0].0.start;
+        assert_eq!(start, at);
+        assert_eq!(wd.view(ENV).ticks.len(), 1);
+        // A comment on the first line, and on the whole file, count once.
+        let mut wd = doc();
+        let key = |wd: &mut WorktreeDiff, sym: Keysym| wd.key(&none(), sym, sym, ENV);
+        wd.click(ReposHit::DiffRow(0), ENV);
+        key(&mut wd, Keysym::c);
+        key(&mut wd, Keysym::z);
+        key(&mut wd, Keysym::Return);
+        wd.click(ReposHit::Button(ReposButton::CommentFile), ENV);
+        key(&mut wd, Keysym::z);
+        key(&mut wd, Keysym::Return);
+        find(&mut wd, "z");
+        assert_eq!(wd.view(ENV).ticks.len(), 2);
     }
 
     #[test]
@@ -1934,10 +2299,18 @@ mod tests {
         let text: String = (1..=80).map(|n| format!("Line {n}.\n")).collect();
         wd.set_doc(Ok(text), ENV);
         let top = |wd: &WorktreeDiff| wd.diff.top_line().unwrap();
-        // At the start, the rows above the first line stand for the
-        // line before it.
+        // At the start, the line before its first: the preview's top.
         assert_eq!(top(&wd), 0.0);
+        wd.with_diff(ENV, |diff, ctx| diff.stand_at_line(0.5, ctx));
+        assert_eq!(wd.diff.scroll.pos(), 0.0);
+        // A comment on the whole file is rows above the first line: they
+        // stand for the line before it.
+        wd.click(ReposHit::Button(ReposButton::CommentFile), ENV);
+        for sym in [Keysym::o, Keysym::Return] {
+            wd.key(&none(), sym, sym, ENV);
+        }
         let first = wd.diff.row_of_line(1).unwrap();
+        assert!(first > 0);
         wd.with_diff(ENV, |diff, ctx| diff.stand_at_line(0.5, ctx));
         assert_eq!(wd.diff.scroll.pos(), first as f64 / 2.0);
         assert!((top(&wd) - 0.5).abs() < 1e-9, "{}", top(&wd));

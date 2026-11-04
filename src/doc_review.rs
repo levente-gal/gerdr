@@ -1,5 +1,6 @@
 //! Reviewing a stage's file (`brief.md`, `plan.md`) in the diff view: the
-//! file shown as all added lines, so line comments work as on code, with
+//! file held as all added lines and shown as a plain page (the view's
+//! `plain`), so line comments work as on code, with
 //! Approve and Send back on its header (see `feature_agents`).
 //!
 //! It shows in the file's tab (see `doc_tab`), with the same diff a worktree

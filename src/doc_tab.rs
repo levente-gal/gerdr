@@ -254,8 +254,11 @@ impl Gerdr {
         shown?;
         let (w, t) = (self.active_workspace, self.workspace()?.active_tab);
         let workspace = self.active_workspace;
+        let env = self.doc_env(self.review_tab()?.mode);
         let review = self.review_tab_mut()?;
         review.wd.workspace = workspace;
+        // Its lines wrap at the width it shows in, as the gap is dragged too.
+        review.wd.with_diff(env, |diff, ctx| diff.rewrap(ctx));
         self.open_wanted_page(w, t);
         let view = self.doc_tab_view()?;
         let page = chrome::repos_layout(&view, self.content_rect()).page;

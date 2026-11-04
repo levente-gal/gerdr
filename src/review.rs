@@ -234,7 +234,7 @@ pub fn markdown(
 }
 
 /// `review`'s comments on document `name` (a feature stage's `brief.md`
-/// or `plan.md`, shown as all added lines) as Markdown for the agent that
+/// or `plan.md`, held as all added lines) as Markdown for the agent that
 /// wrote it: each quotes its lines as they are in the file, in a fence
 /// longer than any run of backticks in them. Those whose lines `outdated`
 /// says are gone say so. By line.

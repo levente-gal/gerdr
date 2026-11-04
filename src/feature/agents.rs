@@ -116,21 +116,32 @@ pub fn needs(stage: Stage) -> Option<Needs> {
 /// or the `[agents]` command ends in one.
 pub fn command_line(base: &str, prompt: &Path, dirs: &[PathBuf]) -> String {
     use crate::desktop::shell_quote;
-    let mut line = base.trim().to_owned();
-    if Flavor::of(base).asks_trust() {
-        line.push_str(" --trust");
-    }
+    let mut line = if Flavor::of(base).asks_trust() {
+        allowed_into(&format!("{} --trust", base.trim()), dirs)
+    } else {
+        allowed_into(base, dirs)
+    };
     if Flavor::of(base).adds_dirs() {
-        for dir in dirs {
-            line.push_str(" --add-dir ");
-            line.push_str(&shell_quote(&dir.to_string_lossy()));
-        }
         line.push_str(" --");
     }
     line.push_str(&format!(
         " \"$(cat {})\"",
         shell_quote(&prompt.to_string_lossy())
     ));
+    line
+}
+
+/// The shell command that starts `base` allowed into `dirs` too, for a CLI
+/// gerdr knows the flag of: the others reach the feature's files through
+/// `layout::DOCS_LINK`.
+pub fn allowed_into(base: &str, dirs: &[PathBuf]) -> String {
+    let mut line = base.trim().to_owned();
+    if Flavor::of(base).adds_dirs() {
+        for dir in dirs {
+            line.push_str(" --add-dir ");
+            line.push_str(&crate::desktop::shell_quote(&dir.to_string_lossy()));
+        }
+    }
     line
 }
 
@@ -215,6 +226,21 @@ mod tests {
             command_line("claude", Path::new("/p.md"), &[]),
             "claude -- \"$(cat /p.md)\""
         );
+    }
+
+    #[test]
+    fn an_agent_started_by_hand_is_allowed_into_the_dirs() {
+        let dirs = [PathBuf::from("/d/my feature"), PathBuf::from("/e")];
+        for base in ["claude", "codex", "cursor-agent"] {
+            assert_eq!(
+                allowed_into(base, &dirs),
+                format!("{base} --add-dir '/d/my feature' --add-dir /e")
+            );
+        }
+        for base in ["opencode", "aider --yes", "gemini"] {
+            assert_eq!(allowed_into(base, &dirs), base);
+        }
+        assert_eq!(allowed_into(" claude ", &[]), "claude");
     }
 
     #[test]

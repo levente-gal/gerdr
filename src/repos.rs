@@ -1747,6 +1747,7 @@ pub(crate) fn key_name(button: ReposButton) -> &'static str {
     }
     match button {
         B::Comment => "c",
+        B::CommentFile => "Shift+C",
         B::Restore => "Shift+R",
         B::SaveComment => "Enter",
         B::DiscardFile => "Del",
@@ -3555,7 +3556,8 @@ impl Panel {
                 Err(Why::other("Done on the diff"))
             }
             // Only a feature stage's file under review has them.
-            B::Approve
+            B::CommentFile
+            | B::Approve
             | B::SendBack
             | B::FixFinding
             | B::DismissFinding
@@ -9894,7 +9896,7 @@ mod tests {
         press(&mut panel, none(), Keysym::dollar, &ctx);
         let view = panel.view("p", &ctx);
         let (i, skip) = view.detail.skipped.expect("shown from a char on");
-        let room = crate::chrome::diff_line_room(ctx.cols, 2);
+        let room = crate::chrome::diff_line_room(ctx.cols, 2, false);
         assert_eq!(view.detail.caret, Some((i, 299 - skip)));
         assert!(299 - skip < room);
         let DetailRow::Line(line) = &view.detail.rows[i] else {

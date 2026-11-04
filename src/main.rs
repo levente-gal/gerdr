@@ -4689,6 +4689,7 @@ impl Gerdr {
     /// workspaces with no tabs left.
     fn prune(&mut self) {
         let mut changed = self.pin_feature_tabs();
+        self.link_feature_docs();
         changed |= self.features_last();
         for ws in &mut self.workspaces {
             changed |= retain_active(&mut ws.tabs, &mut ws.active_tab, |t| {

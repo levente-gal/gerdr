@@ -2606,15 +2606,17 @@ fn doc_tab(on: usize, share: f64, off: Vec<usize>, wide: bool) -> super::ReposVi
         "# Log in with a password",
         "",
         "People sign in with an email and a password, and stay signed in.",
-        "A wrong password says so, without saying which of the two it was.",
+        "A wrong password says so, without saying which of the two it was. After",
+        "five tries the account waits a minute, and says for how long.",
     ];
+    // The last line goes on over two rows, the later with no number.
     let rows: Vec<DetailRow> = (text.iter().enumerate())
         .map(|(i, line)| {
             DetailRow::Line(crate::diff::Line {
                 kind: Added,
                 text: (*line).into(),
                 raw: None,
-                number: i + 1,
+                number: if i == 4 { 0 } else { i + 1 },
                 old: 0,
                 words: Vec::new(),
                 syntax: Vec::new(),
@@ -2637,7 +2639,13 @@ fn doc_tab(on: usize, share: f64, off: Vec<usize>, wide: bool) -> super::ReposVi
         _ => DetailView {
             title: "brief.md \u{b7} 4 lines".into(),
             total: rows.len(),
-            gutter: 1,
+            gutter: 2,
+            plain: true,
+            title_buttons: vec![
+                hint(ReposButton::CommentFile, "Shift+C"),
+                hint(ReposButton::SendBack, "Ctrl+Shift+Enter"),
+                hint(ReposButton::Approve, "Ctrl+Enter"),
+            ],
             caret: Some((0, 0)),
             focused: true,
             rows,
@@ -2707,38 +2715,38 @@ const GOLDEN_DOC_TAB: [[u64; 6]; 4] = [
     // Dark at 1
     [
         0xe3291f02faaf07c4, // doc_preview_1180
-        0xde22f442be52b472, // doc_review_1180
-        0xb73464599f8218d6, // doc_review_no_browser
+        0xa37bfebfb8a116a9, // doc_review_1180
+        0x64027be631e6f797, // doc_review_no_browser
         0x163df7c54996fb12, // doc_preview_1920
-        0x373ed0b2cd218868, // doc_split_1920
-        0xa1352c67a4169eb4, // doc_review_850
+        0xe84bd20b374af24e, // doc_split_1920
+        0xf0ee57f894f597ee, // doc_review_850
     ],
     // Dark at 2
     [
         0xb80f9bdca4ec1495, // doc_preview_1180
-        0xc84f804c05d71e4c, // doc_review_1180
-        0x9351a19e349480a5, // doc_review_no_browser
+        0x23d306dcac83db03, // doc_review_1180
+        0x19443f75f4e57da8, // doc_review_no_browser
         0xe1f51d6886965409, // doc_preview_1920
-        0x6f945c0c725c0449, // doc_split_1920
-        0xcb771e9177905474, // doc_review_850
+        0xd7989b82d2317fa0, // doc_split_1920
+        0x6a43d0181fc8f5d0, // doc_review_850
     ],
     // Light at 1
     [
         0xe4e0f55663b52bf6, // doc_preview_1180
-        0x1e54fc78120f55ab, // doc_review_1180
-        0x21f8a2bc3b0dea41, // doc_review_no_browser
+        0xbb4ab41188424904, // doc_review_1180
+        0x63af7b57b49e8dcb, // doc_review_no_browser
         0x50dcf4fa733c2761, // doc_preview_1920
-        0x9521aff0ecf5f4b9, // doc_split_1920
-        0x528cc488fb03a5f7, // doc_review_850
+        0xf8b91e043addce35, // doc_split_1920
+        0xc0b7a7bdb73caf1b, // doc_review_850
     ],
     // Light at 2
     [
         0x0ee8bb97e0ae3be2, // doc_preview_1180
-        0x38f07b73fb5e396d, // doc_review_1180
-        0xb8ed0d1d947ed6f7, // doc_review_no_browser
+        0x61302e165ee90366, // doc_review_1180
+        0x917b364ae6a116ec, // doc_review_no_browser
         0xad043f4a3dce9b22, // doc_preview_1920
-        0x1ce40fe3eeb60d1c, // doc_split_1920
-        0xf41af3965e387d33, // doc_review_850
+        0xa46109d5bb9516f7, // doc_split_1920
+        0x004dd9cbf09f97ac, // doc_review_850
     ],
 ];
 

@@ -10,7 +10,9 @@
 // with comments (`marks`, `[line, text]`); a click on a block puts the
 // review's caret on its first line. The two scroll together: gerdr sends
 // the line at the review's top (`{ type: "scroll", line }`, to the
-// fraction), and the page tells it the line at its own.
+// fraction), and the page tells it the line at its own. The two fit
+// different numbers of lines, so when the caret moves the page also moves
+// as far as it takes to show the caret's block.
 
 const body = document.getElementById("body");
 const error = document.getElementById("error");
@@ -19,10 +21,14 @@ const dark = document.getElementById("dark");
 
 // How long the page waits for its file before saying it hasn't come.
 const WAIT = 4000;
+// How long, in ms, a review may still be gliding to show a caret that moved.
+const CARET_GLIDE = 300;
 let shown = false;
 // The line the review's caret is on, and the block marked for it.
 let caret = null;
 let caretBlock = null;
+// When the caret last moved.
+let caretMoved = -Infinity;
 // The lines with comments, and what each says.
 let marks = [];
 // The line at the top of the page and its review, once they scroll
@@ -58,6 +64,21 @@ function spans() {
 function standAt(line) {
   topLine = line;
   scrollTo(scrollX, lineY(spans(), line));
+  if (performance.now() - caretMoved < CARET_GLIDE) showCaret();
+  ownY = scrollY;
+}
+
+// Whether any of `block` is in view.
+function onPage(block) {
+  const rect = block.getBoundingClientRect();
+  return rect.bottom > 0 && rect.top < innerHeight;
+}
+
+// Move the page as little as shows the caret's block; not told back to
+// the review, which stays where it is.
+function showCaret() {
+  if (!caretBlock) return;
+  caretBlock.scrollIntoView({ block: "nearest" });
   ownY = scrollY;
 }
 
@@ -75,9 +96,8 @@ addEventListener("scroll", () => {
   });
 });
 
-// The review's caret on `line`, none for no line; the page scrolls to its
-// block only when the block changes, and never while it scrolls with the
-// review, which shows the caret itself.
+// The review's caret on `line`, none for no line; with `scroll`, the page
+// shows its block if the block changed or is out of view.
 function markCaret(line, scroll) {
   caret = Number.isInteger(line) ? line : null;
   const block = caret === null ? null : pickBlock(blocks(), caret);
@@ -87,8 +107,11 @@ function markCaret(line, scroll) {
     return;
   }
   block.classList.add("gerdr-caret");
-  if (scroll && topLine === null && block !== caretBlock) block.scrollIntoView({ block: "nearest" });
+  const moved = block !== caretBlock;
   caretBlock = block;
+  if (!scroll) return;
+  caretMoved = performance.now();
+  if (moved || !onPage(block)) showCaret();
 }
 
 // A dot by each block with comments, which shows them when pointed at.
@@ -121,6 +144,7 @@ function show(message) {
   error.hidden = true;
   // Where it was, after an edit as before it: at its line beside the review.
   const [x, y] = [scrollX, scrollY];
+  const keepCaret = caretBlock && onPage(caretBlock);
   body.innerHTML = typeof message.html === "string" ? message.html : "";
   marks = Array.isArray(message.marks) ? message.marks : [];
   markComments();
@@ -129,6 +153,7 @@ function show(message) {
   markCaret(caret, false);
   if (topLine === null) scrollTo(x, y);
   else standAt(topLine);
+  if (keepCaret) showCaret();
 }
 
 chrome.runtime.onMessage.addListener((message) => {

@@ -528,6 +528,10 @@ pub(super) fn base_ref(repo: &Repo) -> String {
 /// repositories or their worktrees, and not these.
 const UNLINKED: [&str; 4] = [FEATURES_DIR, ".git", "graphify-out", "node_modules"];
 
+/// The link at the top of a feature folder to the feature's data folder and
+/// its stage files (see `link_docs`).
+pub const DOCS_LINK: &str = "feature-docs";
+
 /// Link the root's files and folders other than repositories into `dir`.
 fn link_root(root: &Path, dir: &Path) -> Result<Vec<PathBuf>, String> {
     let entries =
@@ -559,25 +563,7 @@ fn link_root(root: &Path, dir: &Path) -> Result<Vec<PathBuf>, String> {
 fn keep_out(root: &Root) -> Result<Vec<PathBuf>, String> {
     let mut changed = Vec::new();
     if !root.multi {
-        let common = git(
-            &root.path,
-            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-        )?;
-        let exclude = PathBuf::from(common.trim()).join("info").join("exclude");
-        let text = match std::fs::read_to_string(&exclude) {
-            Ok(text) => text,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
-            Err(err) => return Err(format!("couldn't read {}: {err}", shown(&exclude))),
-        };
-        if let Some(text) = add_line(&text, "/.features/") {
-            if let Some(info) = exclude.parent() {
-                std::fs::create_dir_all(info)
-                    .map_err(|err| format!("couldn't make {}: {err}", shown(info)))?;
-            }
-            std::fs::write(&exclude, text)
-                .map_err(|err| format!("couldn't write {}: {err}", shown(&exclude)))?;
-            changed.push(exclude);
-        }
+        changed.extend(exclude_line(&root.path, "/.features/")?);
     }
     // The tools' files are only edited when there; one that can't be is
     // logged and left, as a feature can do without it.
@@ -606,19 +592,80 @@ fn keep_out(root: &Root) -> Result<Vec<PathBuf>, String> {
     Ok(changed)
 }
 
-/// `text` with `line` added, unless a line already ignores `.features`.
+/// `line` in the git exclude file of the repository at `repo`, shared by
+/// its worktrees: nothing tracked changes, so nothing of it can be
+/// committed. The file, when it changed.
+fn exclude_line(repo: &Path, line: &str) -> Result<Option<PathBuf>, String> {
+    let common = git(
+        repo,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )?;
+    let exclude = PathBuf::from(common.trim()).join("info").join("exclude");
+    let text = match std::fs::read_to_string(&exclude) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(err) => return Err(format!("couldn't read {}: {err}", shown(&exclude))),
+    };
+    let Some(text) = add_line(&text, line) else {
+        return Ok(None);
+    };
+    if let Some(info) = exclude.parent() {
+        std::fs::create_dir_all(info)
+            .map_err(|err| format!("couldn't make {}: {err}", shown(info)))?;
+    }
+    std::fs::write(&exclude, text)
+        .map_err(|err| format!("couldn't write {}: {err}", shown(&exclude)))?;
+    Ok(Some(exclude))
+}
+
+/// Link feature folder `dir` to the feature's data folder `data` as
+/// `DOCS_LINK`, so any agent started in it can name the stage files. It is
+/// kept out of git for a single repository, where the folder is a worktree;
+/// a multi-repository folder is no repository. The exclude file, when it
+/// changed. Runs git: off the UI thread.
+pub fn link_docs(dir: &Path, multi: bool, data: &Path) -> Result<Option<PathBuf>, String> {
+    let link = dir.join(DOCS_LINK);
+    let there = link.symlink_metadata().is_ok();
+    if there && std::fs::read_link(&link).ok().as_deref() != Some(data) {
+        return Err(format!("{} is already something else", shown(&link)));
+    }
+    // Its workspace outlived the folder: nothing to link.
+    if !dir.is_dir() {
+        return Ok(None);
+    }
+    // In this order: a link git could see is never made.
+    let exclude = if multi {
+        None
+    } else {
+        exclude_line(dir, &format!("/{DOCS_LINK}"))?
+    };
+    if !there {
+        // A link to nothing makes the tools that list files complain.
+        std::fs::create_dir_all(data)
+            .map_err(|err| format!("couldn't make {}: {err}", shown(data)))?;
+        std::os::unix::fs::symlink(data, &link)
+            .map_err(|err| format!("couldn't link {}: {err}", shown(&link)))?;
+    }
+    Ok(exclude)
+}
+
+/// `pattern`, an ignore file's line, without what anchors it.
+fn unanchored(pattern: &str) -> &str {
+    let pattern = pattern.trim();
+    let pattern = pattern.strip_prefix("**/").unwrap_or(pattern);
+    pattern.strip_prefix('/').unwrap_or(pattern)
+}
+
+/// `text` with ignore pattern `line` added, unless a line already covers
+/// it. A pattern ending in `/` covers folders only, and git takes a symlink
+/// for a file: only a `line` for a folder is covered by one.
 fn add_line(text: &str, line: &str) -> Option<String> {
-    let has = text.lines().any(|l| {
-        matches!(
-            l.trim(),
-            ".features"
-                | ".features/"
-                | "/.features"
-                | "/.features/"
-                | "**/.features"
-                | "**/.features/"
-        )
-    });
+    let name = unanchored(line).trim_end_matches('/');
+    let folder = line.ends_with('/');
+    let has = text
+        .lines()
+        .map(unanchored)
+        .any(|l| l == name || (folder && l.strip_suffix('/') == Some(name)));
     if has {
         return None;
     }
@@ -1077,6 +1124,160 @@ mod tests {
 
     fn names(root: &Root) -> Vec<&str> {
         root.repos.iter().map(|r| r.name.as_str()).collect()
+    }
+
+    /// A feature of a single repository with its docs linked to `data`.
+    fn with_docs(t: &Temp) -> (PathBuf, Created, PathBuf, Root) {
+        let repo = t.repo("app", "main");
+        let root = find_root(&repo, std::slice::from_ref(&repo), &[], &[]).unwrap();
+        let created = create(&root, "login", &[]).unwrap();
+        let data = t.0.join("data");
+        link_docs(&created.dir, false, &data).unwrap();
+        std::fs::write(data.join("brief.md"), "the brief").unwrap();
+        (repo, created, data, root)
+    }
+
+    #[test]
+    fn git_never_sees_the_docs_link_of_a_single_repository() {
+        let t = Temp::new();
+        let (repo, created, data, root) = with_docs(&t);
+        let dir = &created.dir;
+        assert_eq!(
+            std::fs::read_to_string(dir.join(DOCS_LINK).join("brief.md")).unwrap(),
+            "the brief"
+        );
+        assert_eq!(run(dir, &["status", "--porcelain"]), "");
+        run(dir, &["add", "-A"]);
+        assert_eq!(run(dir, &["diff", "--cached", "--name-only"]), "");
+        let others = ["ls-files", "--others", "--exclude-standard"];
+        assert_eq!(run(dir, &others), "");
+        // Nor does the main worktree, and removing the feature loses nothing.
+        assert_eq!(run(&repo, &["status", "--porcelain"]), "");
+        let feature = feature_of(&root, created.clone(), "login");
+        assert!(losses(&feature).is_empty());
+        // No trailing `/`: git takes a symlink for a file.
+        let exclude = repo.join(".git/info/exclude");
+        let text = std::fs::read_to_string(exclude).unwrap();
+        assert!(text.lines().any(|l| l == "/feature-docs"), "{text}");
+        assert!(data.join("brief.md").is_file());
+    }
+
+    #[test]
+    fn the_docs_link_is_no_part_of_a_features_patch() {
+        let t = Temp::new();
+        let (_repo, created, data, root) = with_docs(&t);
+        let dir = created.dir.clone();
+        commit(&dir, "b", "second");
+        let feature = feature_of(&root, created, "login");
+        let with_link = crate::feature::patch::read(&feature).unwrap();
+        std::fs::remove_file(dir.join(DOCS_LINK)).unwrap();
+        assert_eq!(crate::feature::patch::read(&feature).unwrap(), with_link);
+        assert!(data.join("brief.md").is_file());
+    }
+
+    #[test]
+    fn taking_down_a_feature_leaves_its_docs() {
+        let t = Temp::new();
+        let (_repo, created, data, root) = with_docs(&t);
+        let dir = created.dir.clone();
+        let feature = feature_of(&root, created, "login");
+        let result = remove(&feature, false);
+        assert!(result.is_ok(), "{result:?}");
+        assert!(dir.symlink_metadata().is_err());
+        assert_eq!(
+            std::fs::read_to_string(data.join("brief.md")).unwrap(),
+            "the brief"
+        );
+    }
+
+    #[test]
+    fn a_docs_link_in_a_multi_repository_folder_goes_with_it() {
+        let t = Temp::new();
+        let (a, b) = (t.repo("a", "main"), t.repo("b", "main"));
+        let root = find_root(&t.0, &[a.clone(), b], &[], &[]).unwrap();
+        assert!(root.multi);
+        let created = create(&root, "login", &["a".to_owned()]).unwrap();
+        let dir = created.dir.clone();
+        let data = t.0.join("data");
+        assert_eq!(link_docs(&dir, true, &data).unwrap(), None);
+        std::fs::write(data.join("brief.md"), "the brief").unwrap();
+        assert!(dir.join(DOCS_LINK).join("brief.md").is_file());
+        // Not taken for a repository, wherever repositories are looked for.
+        assert_eq!(child_repos(&dir), []);
+        assert_eq!(names(&find_root(&dir, &[], &[], &[]).unwrap()), ["a", "b"]);
+        // Nothing of a repository was written to.
+        assert_eq!(run(&a, &["status", "--porcelain"]), "");
+        let text = std::fs::read_to_string(a.join(".git/info/exclude")).unwrap_or_default();
+        assert!(!text.contains(DOCS_LINK), "{text}");
+
+        let feature = feature_of(&root, created, "login");
+        let result = remove(&feature, false);
+        assert!(result.is_ok(), "{result:?}");
+        assert!(dir.symlink_metadata().is_err());
+        assert!(data.join("brief.md").is_file());
+    }
+
+    #[test]
+    fn linking_docs_twice_changes_nothing() {
+        let t = Temp::new();
+        let (repo, created, data, _) = with_docs(&t);
+        let exclude = repo.join(".git/info/exclude");
+        let before = std::fs::read_to_string(&exclude).unwrap();
+        assert_eq!(link_docs(&created.dir, false, &data).unwrap(), None);
+        assert_eq!(std::fs::read_to_string(&exclude).unwrap(), before);
+        assert_eq!(
+            std::fs::read_link(created.dir.join(DOCS_LINK)).unwrap(),
+            data
+        );
+    }
+
+    #[test]
+    fn linking_docs_says_the_exclude_it_changed_and_makes_their_folder() {
+        let t = Temp::new();
+        let repo = t.repo("app", "main");
+        let root = find_root(&repo, std::slice::from_ref(&repo), &[], &[]).unwrap();
+        let created = create(&root, "login", &[]).unwrap();
+        let data = t.0.join("not/yet");
+        let changed = link_docs(&created.dir, false, &data).unwrap();
+        assert_eq!(changed, Some(repo.join(".git/info/exclude")));
+        assert!(data.is_dir());
+    }
+
+    #[test]
+    fn something_else_of_the_docs_links_name_is_left_alone() {
+        let t = Temp::new();
+        let repo = t.repo("app", "main");
+        std::fs::create_dir(repo.join(DOCS_LINK)).unwrap();
+        commit(&repo, "feature-docs/own.md", "own");
+        let root = find_root(&repo, std::slice::from_ref(&repo), &[], &[]).unwrap();
+        let created = create(&root, "login", &[]).unwrap();
+        let err = link_docs(&created.dir, false, &t.0.join("data")).unwrap_err();
+        assert!(err.contains("feature-docs"), "{err}");
+        assert!(created.dir.join("feature-docs/own.md").is_file());
+        // Refused before git was told to look away.
+        let text = std::fs::read_to_string(repo.join(".git/info/exclude")).unwrap();
+        assert!(!text.contains(DOCS_LINK), "{text}");
+    }
+
+    #[test]
+    fn a_folder_gone_has_no_docs_link() {
+        let t = Temp::new();
+        let data = t.0.join("data");
+        let gone = t.0.join("gone");
+        assert_eq!(link_docs(&gone, false, &data).unwrap(), None);
+        assert!(!data.exists());
+    }
+
+    #[test]
+    fn a_line_for_a_link_is_not_covered_by_one_for_folders() {
+        let added = add_line("feature-docs/\n", "/feature-docs").unwrap();
+        assert_eq!(added, "feature-docs/\n/feature-docs\n");
+        for has in ["feature-docs", "/feature-docs", "**/feature-docs"] {
+            assert_eq!(add_line(has, "/feature-docs"), None, "{has}");
+        }
+        for has in [".features", ".features/", "/.features/", "**/.features"] {
+            assert_eq!(add_line(has, "/.features/"), None, "{has}");
+        }
     }
 
     #[test]
