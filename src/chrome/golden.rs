@@ -1712,6 +1712,12 @@ fn paint_features(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
         hash(painter.sidebar_view(&features_sidebar(), (260, 520).into(), scale, p)),
         hash(painter.manual_test_sheet(&manual_test(false), size, scale, p)),
         hash(painter.manual_test_sheet(&manual_test(true), size, scale, p)),
+        hash(painter.plan_sheet(&plan_sheet(false), size, scale, p)),
+        hash(painter.plan_sheet(&plan_sheet(true), size, scale, p)),
+        hash(painter.plan_sheet(&plan_sheet_narrow(), PLAN_NARROW.into(), scale, p)),
+        hash(painter.plan_sheet(&plan_sheet_own(), size, scale, p)),
+        hash(painter.plan_sheet(&plan_sheet_keys(), PLAN_NARROW.into(), scale, p)),
+        hash(painter.plan_sheet(&plan_sheet_empty(), size, scale, p)),
         hash(painter.sidebar_view(&feature_workspace_sidebar(), (260, 520).into(), scale, p)),
         hash(painter.sidebar_view(&needs_you_sidebar(), (260, 520).into(), scale, p)),
     ]
@@ -1788,23 +1794,282 @@ fn manual_test(note: bool) -> super::ManualTestView {
     }
 }
 
-const FEATURES: [&str; 6] = [
+/// A small output, for the plan review's sheet to fit.
+const PLAN_NARROW: (i32, i32) = (480, 420);
+
+/// The plan review's sheet: a suggestion of each state and kind, one of the
+/// user's own, one left out, long text, a citation not found; `note`: a note
+/// being written, else the last refusal said.
+fn plan_sheet(note: bool) -> super::PlanSheetView {
+    use super::{PlanCitation, PlanDetail, PlanField, PlanMark, PlanRow};
+    use crate::feature::{plan_review::Kind, review_import::Severity};
+    let row = |id: &str, mark, severity, kind, title: &str, plan: &str| PlanRow {
+        id: id.into(),
+        mark,
+        severity,
+        kind,
+        title: title.into(),
+        plan: plan.into(),
+        yours: false,
+        dropped: false,
+        note: String::new(),
+    };
+    let rows = vec![
+        row(
+            "r1-1",
+            PlanMark::Accepted,
+            Severity::High,
+            Kind::Gap,
+            "Exports aren't limited per user",
+            "Milestone 2",
+        ),
+        row(
+            "r1-2",
+            PlanMark::Open,
+            Severity::High,
+            Kind::Risk,
+            "The retry loop has no cap, so a server that stays down keeps a worker busy for ever",
+            "Milestone 3: the export worker and its queue",
+        ),
+        row(
+            "r1-3",
+            PlanMark::Rejected,
+            Severity::Low,
+            Kind::Simplify,
+            "The CSV writer could be the one reports use",
+            "Milestone 1",
+        ),
+        row(
+            "r1-4",
+            PlanMark::Open,
+            Severity::Medium,
+            Kind::EdgeCase,
+            "An invoice cancelled during the export",
+            "Milestone 3",
+        ),
+        row(
+            "r1-5",
+            PlanMark::Open,
+            Severity::Medium,
+            Kind::Question,
+            "Should a cancelled invoice count in the total?",
+            "Milestone 4",
+        ),
+        PlanRow {
+            dropped: true,
+            ..row(
+                "r1-6",
+                PlanMark::Accepted,
+                Severity::Low,
+                Kind::Gap,
+                "The empty state has no words",
+                "Milestone 5",
+            )
+        },
+        PlanRow {
+            yours: true,
+            ..row(
+                "u1",
+                PlanMark::Accepted,
+                Severity::Medium,
+                Kind::Gap,
+                "Keep the old export for a release",
+                "",
+            )
+        },
+        row(
+            "r1-7",
+            PlanMark::Open,
+            Severity::Low,
+            Kind::Gap,
+            "Past the fold",
+            "Milestone 6",
+        ),
+    ];
+    let hints: &[(&str, &str)] = if note {
+        &[("Enter", "save"), ("Esc", "save")]
+    } else {
+        &[
+            ("Space", "accept"),
+            ("r", "reject"),
+            ("n", "note\u{2026}"),
+            ("a", "add\u{2026}"),
+            ("Del", "clear"),
+            ("Ctrl+Enter", "final plan"),
+            ("Ctrl+Shift+Enter", "ask"),
+            ("F1", "keys"),
+            ("Esc", "close"),
+        ]
+    };
+    super::PlanSheetView {
+        title: "Plan review of \u{201c}Bulk export of invoices\u{201d}".into(),
+        sub: "4 to decide \u{b7} 3 accepted \u{b7} 1 rejected".into(),
+        missing: Some("1 citation not found".into()),
+        rows,
+        cursor: 1,
+        top: 0,
+        detail: Some(PlanDetail {
+            title: "The retry loop has no cap, so a server that stays down keeps a worker busy for ever".into(),
+            plan: "Milestone 3: the export worker and its queue".into(),
+            dropped: false,
+            question: false,
+            why: "When the mail server is down, every export retries at once and goes on doing so: \
+                  the queue fills, and nobody else's export starts until the server is back. \
+                  With 500 invoices that is hours of a busy worker for nothing."
+                .into(),
+            change: "Say in Milestone 3 that a send is tried at most five times, with a pause that doubles, and that it then fails with a message the user sees."
+                .into(),
+            evidence: vec![
+                PlanCitation {
+                    place: "api: src/export/worker.rs:88".into(),
+                    quote: "loop { if send(&mail).is_ok() { break; } }".into(),
+                    not_found: false,
+                },
+                PlanCitation {
+                    place: "api: src/export/queue.rs:12".into(),
+                    quote: "const MAX_RETRIES: u32 = 5;".into(),
+                    not_found: true,
+                },
+            ],
+            note: "Five is fine, but not for the nightly run".into(),
+        }),
+        // Down to the citations, the note's sheet from the start.
+        detail_top: if note { 0 } else { 6 },
+        editing: note.then(|| PlanField {
+            label: "Your note on this suggestion",
+            placeholder: "What you say of it",
+            line: Line::from("Five is fine, but not for the nightly run"),
+        }),
+        armed: None,
+        notice: (!note).then(|| "4 suggestions still to decide".into()),
+        hover: (!note).then_some(super::PlanHit::Row(3)),
+        finish: "Write final plan",
+        primary: None,
+        keys: None,
+        keys_top: 0,
+        hints: hints
+            .iter()
+            .map(|(k, w)| ((*k).to_owned(), (*w).to_owned()))
+            .collect(),
+    }
+}
+
+/// The sheet on a small output, the cursor's row scrolled into view.
+fn plan_sheet_narrow() -> super::PlanSheetView {
+    let mut view = plan_sheet(false);
+    view.top = super::plan_sheet_reveal(&view, PLAN_NARROW.into());
+    view
+}
+
+/// The sheet on one of the user's own, Del pressed on it once, down where
+/// the one left out by the reviewer shows too.
+fn plan_sheet_own() -> super::PlanSheetView {
+    let mut view = plan_sheet(false);
+    view.cursor = 6;
+    view.top = super::plan_sheet_reveal(&view, FEATURE_OUTPUT.into());
+    view.armed = Some(6);
+    view.notice = None;
+    view.hover = None;
+    view.detail = Some(super::PlanDetail {
+        title: "Keep the old export for a release".into(),
+        plan: String::new(),
+        dropped: false,
+        question: false,
+        why: String::new(),
+        change: String::new(),
+        evidence: Vec::new(),
+        note: String::new(),
+    });
+    view.detail_top = 0;
+    view.primary = Some(super::PLAN_FINISH);
+    view.hints = vec![
+        ("Del".to_owned(), "remove".to_owned()),
+        ("Esc".to_owned(), "keep it".to_owned()),
+    ];
+    view
+}
+
+/// The keys list on a small output, past what fits.
+fn plan_sheet_keys() -> super::PlanSheetView {
+    let keys = [
+        ("Up / Down", "move between the suggestions"),
+        ("Ctrl+J / Ctrl+K", "move between the suggestions"),
+        ("Home / End", "go to the first or last suggestion"),
+        ("PgUp / PgDn", "scroll what the suggestion says"),
+        (
+            "Space",
+            "accept it, or clear that; a question wants its answer",
+        ),
+        ("r", "reject it, or clear that"),
+        ("n", "write a note on it"),
+        ("a", "add a suggestion of your own"),
+        ("Del", "clear its decision, or remove one of your own"),
+    ];
+    let mut view = plan_sheet(false);
+    view.notice = None;
+    view.hover = None;
+    view.keys = Some(
+        keys.iter()
+            .map(|(k, w)| ((*k).to_owned(), (*w).to_owned()))
+            .collect(),
+    );
+    view.hints = vec![("Esc".to_owned(), "back".to_owned())];
+    view
+}
+
+/// The sheet of a review that found nothing.
+fn plan_sheet_empty() -> super::PlanSheetView {
+    let mut view = plan_sheet(false);
+    view.sub = "no suggestions".into();
+    view.missing = None;
+    view.rows = Vec::new();
+    view.cursor = 0;
+    view.detail = None;
+    view.notice = None;
+    view.hover = None;
+    view.finish = "Use the plan as it is";
+    view.primary = Some(super::PLAN_FINISH);
+    view.hints = [
+        ("a", "add\u{2026}"),
+        ("Ctrl+Enter", "use the plan"),
+        ("F1", "keys"),
+        ("Esc", "close"),
+    ]
+    .iter()
+    .map(|(k, w)| ((*k).to_owned(), (*w).to_owned()))
+    .collect();
+    view
+}
+
+const FEATURES: [&str; 12] = [
     "new_feature",
     "sidebar_features",
     "manual_test",
     "manual_test_note",
+    "plan_sheet",
+    "plan_sheet_note",
+    "plan_sheet_narrow",
+    "plan_sheet_own",
+    "plan_sheet_keys",
+    "plan_sheet_empty",
     "sidebar_feature_workspace",
     "sidebar_needs_you",
 ];
 
 /// The recorded hashes of `FEATURES`, per case in `CASES`.
-const GOLDEN_FEATURES: [[u64; 6]; 4] = [
+const GOLDEN_FEATURES: [[u64; 12]; 4] = [
     // Dark at 1
     [
         0x73e88729cb0c3112, // new_feature
         0x5e028d7446039273, // sidebar_features
         0xab580425d0a50879, // manual_test
         0x8e4d20f7c6316567, // manual_test_note
+        0xce73d235eada39de, // plan_sheet
+        0xf0ef6e28af47b05c, // plan_sheet_note
+        0x444a60ab9e0f4abf, // plan_sheet_narrow
+        0x86b4df03a4af9916, // plan_sheet_own
+        0xe472df71a44ddf16, // plan_sheet_keys
+        0x93dd44d0af75ae63, // plan_sheet_empty
         0xae5302d4f2a0264e, // sidebar_feature_workspace
         0x46476bd6c29b83a1, // sidebar_needs_you
     ],
@@ -1814,6 +2079,12 @@ const GOLDEN_FEATURES: [[u64; 6]; 4] = [
         0xc54456a2ef83edd5, // sidebar_features
         0xc14927ebcde55bf1, // manual_test
         0xb520dd662440b737, // manual_test_note
+        0x354b777d647b74ae, // plan_sheet
+        0x49003f081deb3c2e, // plan_sheet_note
+        0x77de8b18241bb4b7, // plan_sheet_narrow
+        0x645f1307207f69db, // plan_sheet_own
+        0x6ad99a47f32750f1, // plan_sheet_keys
+        0xf4f48a436676b8ed, // plan_sheet_empty
         0xf8b650817e7046a8, // sidebar_feature_workspace
         0x89602fb32f370eac, // sidebar_needs_you
     ],
@@ -1823,6 +2094,12 @@ const GOLDEN_FEATURES: [[u64; 6]; 4] = [
         0xd912c1a1dd19329d, // sidebar_features
         0x093b890ce5537eef, // manual_test
         0xa74e12b563efbdaf, // manual_test_note
+        0x6da7e766b94ea319, // plan_sheet
+        0x6900962e338f6172, // plan_sheet_note
+        0x5d1256e75161f348, // plan_sheet_narrow
+        0xa3d45cd4852074e7, // plan_sheet_own
+        0x60c2fae25b1a30c4, // plan_sheet_keys
+        0x6b284b7ef20e69aa, // plan_sheet_empty
         0xac18e696a2fa699a, // sidebar_feature_workspace
         0xd9115d61c7483020, // sidebar_needs_you
     ],
@@ -1832,6 +2109,12 @@ const GOLDEN_FEATURES: [[u64; 6]; 4] = [
         0x3c6a9bce68178d76, // sidebar_features
         0xed40d3ad66f63314, // manual_test
         0x1239c6f64e145f2f, // manual_test_note
+        0x5a9fa2f0a7a81443, // plan_sheet
+        0x8bc60f688ce6245b, // plan_sheet_note
+        0xf99dc433f41c1492, // plan_sheet_narrow
+        0x676f86f8aa7b2284, // plan_sheet_own
+        0x64823c62e6db84ec, // plan_sheet_keys
+        0x13fb250de721df9f, // plan_sheet_empty
         0xd447a917e01b7105, // sidebar_feature_workspace
         0x4d7a4433eca1a513, // sidebar_needs_you
     ],
@@ -1872,6 +2155,22 @@ fn dump_features() {
                 &dir,
                 &format!("{name}_{tag}"),
                 painter.manual_test_sheet(&view, size, scale, p),
+                px(panel.size.w + shadow),
+            );
+        }
+        for (name, view, output) in [
+            ("plan_sheet", plan_sheet(false), FEATURE_OUTPUT),
+            ("plan_sheet_note", plan_sheet(true), FEATURE_OUTPUT),
+            ("plan_sheet_narrow", plan_sheet_narrow(), PLAN_NARROW),
+            ("plan_sheet_own", plan_sheet_own(), FEATURE_OUTPUT),
+            ("plan_sheet_keys", plan_sheet_keys(), PLAN_NARROW),
+            ("plan_sheet_empty", plan_sheet_empty(), FEATURE_OUTPUT),
+        ] {
+            let panel = super::plan_sheet_layout(&view, output.into()).panel;
+            dump(
+                &dir,
+                &format!("{name}_{tag}"),
+                painter.plan_sheet(&view, output.into(), scale, p),
                 px(panel.size.w + shadow),
             );
         }

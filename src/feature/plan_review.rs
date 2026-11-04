@@ -187,6 +187,9 @@ pub struct PlanReview {
     /// run: Change decisions brings it back.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reviewer: Option<StageRun>,
+    /// The user's own suggestion as far as it was written, not added yet.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub draft: String,
 }
 
 impl PlanReview {
@@ -462,6 +465,17 @@ pub fn decide(review: &mut PlanReview, id: &str, decision: Decision) -> Result<(
     Ok(())
 }
 
+/// Put `suggestion`, taken out of index `at`, back; whether it went back
+/// (its id isn't taken since).
+pub fn restore(review: &mut PlanReview, at: usize, suggestion: Suggestion) -> bool {
+    if review.suggestion(&suggestion.id).is_some() {
+        return false;
+    }
+    let at = at.min(review.suggestions.len());
+    review.suggestions.insert(at, suggestion);
+    true
+}
+
 /// Set suggestion `id`'s note; whether it is there.
 pub fn set_note(review: &mut PlanReview, id: &str, note: &str) -> bool {
     let Some(s) = review.suggestions.iter_mut().find(|s| s.id == id) else {
@@ -500,7 +514,7 @@ fn normal(text: &str) -> String {
 /// Which of `repos` (keys and worktrees) `evidence` names, and its file
 /// inside it: by key, by plain name when only one has it, or the only one
 /// there is. An absolute path names the repository it is under.
-fn locate<'a>(evidence: &Evidence, repos: &'a [(String, PathBuf)]) -> Option<&'a Path> {
+pub fn locate<'a>(evidence: &Evidence, repos: &'a [(String, PathBuf)]) -> Option<&'a Path> {
     let file = Path::new(&evidence.file);
     if file.is_absolute() {
         return (repos.iter())

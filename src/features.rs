@@ -139,6 +139,8 @@ pub struct Features {
     pub(crate) build: crate::feature_build::BuildState,
     /// The manual test sheet, while it is open (see `manual_test`).
     pub(crate) manual: Option<crate::manual_test::ManualSheet>,
+    /// The plan review's sheet, while it is open (see `plan_sheet`).
+    pub(crate) plan_sheet: Option<crate::plan_sheet::PlanSheet>,
     /// The acceptance criteria of each open feature's brief, by project
     /// and slug, as last read: none kept for a brief without.
     pub(crate) criteria: BTreeMap<(String, String), Vec<feature::manual::Criterion>>,
@@ -2215,6 +2217,7 @@ impl Gerdr {
             self.show_error(format!("Couldn't save \u{201c}{title}\u{201d}: {err}"));
         }
         self.manual_sheet_follows();
+        self.plan_sheet_follows();
     }
 
     /// The slugs of the features the panel lists for `project`.
@@ -2688,6 +2691,7 @@ impl Gerdr {
     /// Probe what is due.
     fn feature_watch_tick(&mut self) {
         self.manual_sheet_follows();
+        self.plan_sheet_follows();
         let mut due = Vec::new();
         if let Some(panel) = &self.features.panel {
             due.push((panel.project.clone(), panel.slug.clone(), PANEL_EVERY));

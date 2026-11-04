@@ -1014,6 +1014,42 @@ fn wrap_to(text: &str, size: f32, width: i32, max: usize) -> Vec<String> {
     lines
 }
 
+/// `text` in full, in lines no wider than `width` at `size`: its own line
+/// breaks kept, and what is too long for a line (a long word, a bracket
+/// group that never closes) broken where it must be, so that no part of it
+/// is cut when painted.
+pub(super) fn wrap_all(text: &str, size: f32, width: i32) -> Vec<String> {
+    (text.lines())
+        .filter(|para| !para.trim().is_empty())
+        .flat_map(|para| wrap_to(para, size, width, usize::MAX))
+        .flat_map(|line| break_long(line, size, width))
+        .collect()
+}
+
+/// `line` broken to fit `width` at `size`: at its last space that fits,
+/// else inside its word.
+fn break_long(line: String, size: f32, width: i32) -> Vec<String> {
+    let mut lines = Vec::new();
+    if width_of(&line, size) <= width as f32 {
+        lines.push(line);
+        return lines;
+    }
+    let mut now = String::new();
+    for ch in line.chars() {
+        now.push(ch);
+        if now.chars().count() > 1 && width_of(&now, size) > width as f32 {
+            let at = now.trim_end().rfind(' ').filter(|at| *at > 0);
+            let cut = at.unwrap_or(now.len() - ch.len_utf8());
+            let rest = now.split_off(cut);
+            lines.push(std::mem::replace(&mut now, rest.trim_start().to_owned()));
+        }
+    }
+    if !now.trim().is_empty() {
+        lines.push(now);
+    }
+    lines
+}
+
 /// The room left between a repository row's name and its line stat,
 /// between the stat's two counts, and the least of the name the stat
 /// leaves showing.

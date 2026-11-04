@@ -3,7 +3,7 @@
 //! paints in the same order, so what takes a click is always what shows.
 //!
 //! From the top: the tooltip, the modal dialogs (quit, restart, checkout,
-//! new feature, the manual test sheet, confirm), the context menu, the toasts, the welcome screen,
+//! new feature, the manual test sheet, the plan review's sheet, confirm), the context menu, the toasts, the welcome screen,
 //! the help panel, then the panels (the tasks, the project menu, the
 //! worktrees popup, the repositories and inbox panels, the scrollback
 //! viewer, the switcher), and last the feature panel and the file's tab,
@@ -41,6 +41,9 @@ pub enum Overlay {
     /// The manual test sheet: a feature's acceptance criteria to try
     /// (see `manual_test`).
     ManualTest,
+    /// The plan review's sheet: a feature's suggestions to decide (see
+    /// `plan_sheet`).
+    PlanSheet,
     Confirm,
     ContextMenu,
     Toasts,
@@ -65,7 +68,7 @@ pub enum Overlay {
 
 impl Overlay {
     /// Every overlay, top first.
-    pub const ORDER: [Self; 21] = [
+    pub const ORDER: [Self; 22] = [
         Self::Tooltip,
         Self::Quit,
         Self::Restart,
@@ -78,6 +81,7 @@ impl Overlay {
         // A sheet worked in for a while: the toasts of what it does (and
         // of all else going on) show over it.
         Self::ManualTest,
+        Self::PlanSheet,
         Self::Welcome,
         Self::Help,
         Self::Tasks,
@@ -103,6 +107,7 @@ impl Overlay {
                 | Self::NewFeature
                 | Self::GitIdentity
                 | Self::ManualTest
+                | Self::PlanSheet
                 | Self::Confirm
         )
     }
@@ -165,6 +170,7 @@ impl Overlay {
             Self::NewFeature => "the new feature dialog",
             Self::GitIdentity => "the name and email dialog",
             Self::ManualTest => "the manual test sheet",
+            Self::PlanSheet => "the plan review's sheet",
             Self::Confirm => "the dialog",
             Self::ContextMenu => "the menu",
             Self::Toasts => "the notices",
@@ -195,6 +201,7 @@ impl Gerdr {
             Overlay::NewFeature => self.features.dialog.is_some(),
             Overlay::GitIdentity => self.repos.identity.is_some(),
             Overlay::ManualTest => self.features.manual.is_some(),
+            Overlay::PlanSheet => self.features.plan_sheet.is_some(),
             Overlay::Confirm => self.confirm.is_some(),
             Overlay::ContextMenu => self.context_menu.is_some(),
             Overlay::Toasts => {
@@ -277,6 +284,7 @@ impl Gerdr {
             Overlay::NewFeature => self.new_feature_hover(pos),
             Overlay::GitIdentity => self.identity_hover(pos),
             Overlay::ManualTest => return self.manual_test_hover(pos),
+            Overlay::PlanSheet => return self.plan_sheet_hover(pos),
             Overlay::Features => return self.feature_panel_hover(pos),
             Overlay::Doc => return self.repos_hover(pos),
             Overlay::ContextMenu => self.menu_motion(pos),
@@ -330,6 +338,7 @@ impl Gerdr {
                     self.manual_test_scroll(rows);
                 }
             }
+            Overlay::PlanSheet => self.plan_sheet_scroll(motion),
             Overlay::Features => self.feature_panel_scroll(motion),
             Overlay::Doc => self.repos_scroll(motion),
             Overlay::Tasks => {
@@ -380,6 +389,8 @@ mod tests {
         assert!(Overlay::Toasts.is_above(Overlay::Help));
         assert!(Overlay::Toasts.is_above(Overlay::ManualTest));
         assert!(Overlay::ManualTest.is_above(Overlay::Welcome));
+        assert!(Overlay::Toasts.is_above(Overlay::PlanSheet));
+        assert!(Overlay::PlanSheet.is_above(Overlay::Welcome));
         for panel in Overlay::ORDER.into_iter().filter(|o| o.is_panel()) {
             assert!(Overlay::Toasts.is_above(panel));
             assert!(Overlay::Help.is_above(panel));

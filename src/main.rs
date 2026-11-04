@@ -69,6 +69,7 @@ mod pane_control;
 mod pane_drag;
 mod pane_moves;
 mod paths;
+mod plan_sheet;
 mod prepare;
 mod problems;
 mod profile_import;
@@ -6486,6 +6487,7 @@ impl Gerdr {
             new_feature: self.new_feature_view(),
             identity: self.identity_view(),
             manual_test: self.manual_test_view(),
+            plan_sheet: self.plan_sheet_view(),
             features: self.feature_tab_view(),
             project_menu: self.project_menu_view(),
             worktrees: self.worktrees_view(),

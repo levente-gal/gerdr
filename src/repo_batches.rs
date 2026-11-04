@@ -2535,6 +2535,13 @@ impl Gerdr {
         self.zed_open_existing(root, files);
     }
 
+    /// Open `file` of the checkout at `root`, at `line`, in the Zed on that
+    /// checkout: whichever has it, else a new tab with one in workspace `w`.
+    pub(crate) fn open_line_in_zed(&mut self, w: usize, root: &Path, file: &Path, line: usize) {
+        let place = zed_place(file, Position { line, col: None });
+        self.open_in_worktree_zed(w, root, &[place]);
+    }
+
     /// Hand `files` (`root` with none) to the Zed window used last, the
     /// one just focused.
     fn zed_open_existing(&mut self, root: &Path, files: &[PathBuf]) {

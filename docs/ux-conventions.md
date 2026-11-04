@@ -16,12 +16,12 @@ rules, for reviewing a branch before it merges.
 | Left / Right | Move along a row of choices laid out across: the feature tab's stage rail (previous / next stage's page; Up / Down step it too), its repository strip, and the buttons of an unfolded repository row. |
 | Ctrl+PgUp / Ctrl+PgDn | Previous / next item of a set shown one at a time: the feature tab's previous / next feature (its ‹ › buttons). |
 | Ctrl+N | New / create (project, branch, todo). |
-| Ctrl+O | Open (in a tab, in the browser, the file). |
+| Ctrl+O | Open (in a tab, in the browser, the file; in a plan review's sheet, the suggestion's first citation in Zed). |
 | Ctrl+Shift+O | Open the selected row's page where Ctrl+O already opens a tab (feature tab: a repository's pull request, or Verify's evidence once a run of its checks wrote it). |
 | Ctrl+E | Edit (settings, a todo, open the file in the editor). |
 | Ctrl+R | Refresh / reload (feature tab: start the selected stage's agent afresh, Build's too). |
 | Ctrl+Shift+R | On the feature tab: show the selected stage's agent, done stage or not, or go back to its chat in a new tab once its tab is closed (Claude Code and Cursor; Ctrl+R starts afresh). |
-| Ctrl+Enter / Ctrl+Shift+Enter | The panel's finishing action: commit / commit and push (repos), create (branch menu), approve / send back (a file under review, a feature's code review; Verify's evidence is only read, so there it says so and does nothing); mark passed / send the failures to Build (a feature's manual test sheet). On the file of a done stage, which is only read: go to the current stage / reopen the stage, as on its page in the feature tab (Ctrl+Shift+Enter there), until the stage after it has made something. |
+| Ctrl+Enter / Ctrl+Shift+Enter | The panel's finishing action: commit / commit and push (repos), create (branch menu), approve / send back (a file under review, a feature's code review; Verify's evidence is only read, so there it says so and does nothing); mark passed / send the failures to Build (a feature's manual test sheet); write the final plan, or use the plan as it is / ask the reviewer (a plan review's sheet: while suggestions are still to decide, Ctrl+Enter stays and says how many). On the file of a done stage, which is only read: go to the current stage / reopen the stage, as on its page in the feature tab (Ctrl+Shift+Enter there), until the stage after it has made something. |
 | Ctrl+Shift+V | In a feature's file's tab: go between Review and Split (its brief or plan, read on the stage's page), or to the next of Preview, Review and Split (Verify's evidence). Split, the two side by side, following its edits and caret and scrolling together, is there only on an output 1400 px wide or more. A new tab of a brief or plan opens on Split there, on Review on a narrower one; pressing its button again only switches to the open tab, keeping what it shows. Esc goes back to the feature tab. |
 | F2 | Rename. |
 | Ctrl+S | Switch to / check out a branch (repos, worktrees). |
@@ -29,15 +29,17 @@ rules, for reviewing a branch before it merges.
 | Prefix, then Enter | Send the prompt of the stage agent waiting in the focused pane (also the arrow on its pane's bar, and Send prompt on the stage's page). A stage's agent opens waiting, so its model can be picked first. |
 | Ctrl+Shift+U | Set a feature's worktrees up (feature tab, Build and Verify): copy the ignored files and environments they lack from main, then run the project's setup commands. Nothing there is overwritten. |
 | Ctrl+Shift+A | Pick the next agent on the feature tab's selected stage (the chips on its agent card). It applies from the agent's next start; one running goes on. |
+| Ctrl+Shift+K | Skip Plan review on the feature tab, asking only when something would be lost. |
+| Ctrl+Shift+D | On the feature tab: from a final plan back to the decisions. |
 | Ctrl+Shift+L | In the new feature dialog, the project picker (again: back to the repositories; also its "Link project…" button). On the feature tab, show or hide all repositories: the strip unfolds into rows of what the feature holds, its context, those removed and those not added, each with the buttons of what it can become (also the strip's end button). |
 | Ctrl+Q | Stop a project's session (project menu). |
 | Ctrl+H / Ctrl+Shift+H | Snooze / snooze until tomorrow; Alt+H shows the hidden items (inbox). |
 | Ctrl+F or / | Search within what has focus. |
-| Del | Delete the selected row: the first press arms it (row shows "Press Del again"), the second deletes; an Undo toast follows when it can be undone. On a repository of a feature with several, Del takes it out of the feature: one on the feature's branch asks at once (no arming, see "Destructive actions"), and is refused with commits; one kept only as context arms, and offers Undo. Elsewhere on the feature tab, Del abandons the feature. On an AI review finding in a feature's code review, Del dismisses it and asks why first (no arming), or reopens a dismissed one; `f` marks it to fix. In a feature's manual test sheet, Del clears a criterion's result at once (no arming: Space or `f` gives it again). |
+| Del | Delete the selected row: the first press arms it (row shows "Press Del again"), the second deletes; an Undo toast follows when it can be undone. On a repository of a feature with several, Del takes it out of the feature: one on the feature's branch asks at once (no arming, see "Destructive actions"), and is refused with commits; one kept only as context arms, and offers Undo. Elsewhere on the feature tab, Del abandons the feature. On an AI review finding in a feature's code review, Del dismisses it and asks why first (no arming), or reopens a dismissed one; `f` marks it to fix. In a feature's manual test sheet, Del clears a criterion's result at once (no arming: Space or `f` gives it again). In a plan review's sheet, Del clears a suggestion's decision at once (no arming: Space or `r` gives it again); one of your own it removes, so that arms first, and offers Undo. |
 | Ctrl+Shift+Del | Abandon what is in progress, asking first: abort a merge or rebase (repos), start the feature tab's current stage over. Starting over closes its agent, moves what it made to the feature's archive and frees the stage before it. |
 | Ctrl+Del | Dismiss every listed row of the selected row's group (inbox Services; also its label's "Dismiss all" button). One Undo toast brings them all back. |
 | Ctrl+I | Ignore the selected service error, or stop ignoring it (inbox). An ignored error goes under "Ignored errors", folded to its count; Alt+I (or the label's Show button, or a click on the label) lists them, dim. It sends no notifications or counts. Del there forgets it (armed first). Undo toast. |
-| Space / Alt+Shift+Down | A feature's code review: mark the file viewed, or not (as Space checks a file in the repos panel); go to the next file not viewed (Alt+Shift+Up: the one before). A feature's manual test sheet: mark the criterion passed, or not; `f` marks it failed, with a note saying what went wrong. |
+| Space / Alt+Shift+Down | A feature's code review: mark the file viewed, or not (as Space checks a file in the repos panel); go to the next file not viewed (Alt+Shift+Up: the one before). A feature's manual test sheet: mark the criterion passed, or not; `f` marks it failed, with a note saying what went wrong. A plan review's sheet: accept the suggestion, or clear that (a question not answered asks for its answer first, then is accepted); `r` rejects it, or clears that; `n` writes a note; `a` adds one of your own, Esc keeping what was written as a draft. |
 | F1 | Every key of the focused panel, when its footer can't show them all. |
 | Ctrl+C | Copy. Never closes anything. |
 
@@ -73,7 +75,8 @@ A key is written in one place, not on the button that does the same thing:
   look, Error for what failed. Never report a failure with Info.
 - Errors and warnings stay longer than info and pause while hovered; every
   toast can be dismissed. Toasts are painted above every non-modal popup,
-  and above the manual test sheet, which is worked in for a while.
+  and above the manual test and plan review sheets, which are worked in for a
+  while.
 - What the user must fix (config, missing tool, unreachable source) goes to
   `problems::report` as well, so it can be seen after the toast is gone. It
   also lands in the log file.

@@ -170,6 +170,8 @@ enum Intercepted {
     Identity(crate::git_identity::IdentityOutcome),
     /// The manual test sheet asked for this.
     ManualTest(crate::manual_test::Outcome),
+    /// The plan review's sheet asked for this.
+    PlanSheet(crate::plan_sheet::Outcome),
     /// The feature panel asked for this.
     Features(crate::features::PanelOutcome),
 }
@@ -195,6 +197,8 @@ pub enum Overlay {
     Identity,
     /// The manual test sheet, with a failure's note field.
     ManualTest,
+    /// The plan review's sheet, with its note field.
+    PlanSheet,
     /// The feature panel, which has no field: only its key hints come
     /// this way.
     Features,
@@ -264,6 +268,7 @@ fn closing(over: overlay::Overlay) -> Option<Intercepted> {
         O::Switcher => Intercepted::CloseSwitcher,
         O::Tasks => Intercepted::Tasks(crate::tasks::Outcome::Close),
         O::ManualTest => Intercepted::ManualTest(crate::manual_test::Outcome::Close),
+        O::PlanSheet => Intercepted::PlanSheet(crate::plan_sheet::Outcome::Close),
         _ => return None,
     })
 }
@@ -332,13 +337,14 @@ impl Gerdr {
                         // A dialog takes every key.
                         if let Some(dialog) = top.filter(|o| o.is_dialog()) {
                             state.suppressed_keys.push(code);
-                            // The new feature dialog's title and the manual
-                            // test sheet's note take pastes, and repeat
-                            // what they take while held.
+                            // The new feature dialog's title and the notes of
+                            // the manual test and plan review sheets take
+                            // pastes, and repeat what they take while held.
                             let fielded = match dialog {
                                 overlay::Overlay::NewFeature => Some(Overlay::NewFeature),
                                 overlay::Overlay::GitIdentity => Some(Overlay::Identity),
                                 overlay::Overlay::ManualTest => Some(Overlay::ManualTest),
+                                overlay::Overlay::PlanSheet => Some(Overlay::PlanSheet),
                                 _ => None,
                             };
                             if let Some(into) = fielded {
@@ -806,6 +812,7 @@ impl Gerdr {
             O::NewFeature => self.new_feature_click(pos),
             O::GitIdentity => self.identity_click(pos),
             O::ManualTest => self.manual_test_click(pos),
+            O::PlanSheet => self.plan_sheet_click(pos),
             O::Features => self.feature_panel_click(pos),
             // A click on a toast dismisses it, on its button does what the
             // button says.
@@ -836,7 +843,10 @@ impl Gerdr {
         // A click on a field focuses it, and puts the caret there.
         if overlay.grabs()
             && (!overlay.is_dialog()
-                || matches!(overlay, O::NewFeature | O::GitIdentity | O::ManualTest))
+                || matches!(
+                    overlay,
+                    O::NewFeature | O::GitIdentity | O::ManualTest | O::PlanSheet
+                ))
         {
             self.press_field(pos);
         }
@@ -860,6 +870,7 @@ impl Gerdr {
             O::NewFeature => self.new_feature_controls().iter().any(on),
             O::GitIdentity => self.identity_controls().iter().any(on),
             O::ManualTest => self.manual_test_controls().iter().any(on),
+            O::PlanSheet => self.plan_sheet_controls().iter().any(on),
             O::Features => self.feature_tab_control_at(pos),
             O::ContextMenu => self
                 .context_menu
@@ -1254,6 +1265,7 @@ impl Gerdr {
             Intercepted::NewFeature(outcome) => self.apply_new_feature(outcome),
             Intercepted::Identity(outcome) => self.apply_identity(outcome),
             Intercepted::ManualTest(outcome) => self.apply_manual_test(outcome),
+            Intercepted::PlanSheet(outcome) => self.apply_plan_sheet(outcome),
             Intercepted::Features(outcome) => self.apply_feature_panel(outcome),
         }
     }
@@ -1281,6 +1293,7 @@ impl Gerdr {
             O::NewFeature => Some(Overlay::NewFeature),
             O::GitIdentity => Some(Overlay::Identity),
             O::ManualTest => Some(Overlay::ManualTest),
+            O::PlanSheet => Some(Overlay::PlanSheet),
             _ => None,
         }
     }
@@ -1334,6 +1347,9 @@ impl Gerdr {
             Overlay::ManualTest => self
                 .manual_test_key(mods, sym, typed)
                 .map(Intercepted::ManualTest),
+            Overlay::PlanSheet => self
+                .plan_sheet_key(mods, sym, typed)
+                .map(Intercepted::PlanSheet),
         }
     }
 
@@ -1390,6 +1406,7 @@ impl Gerdr {
             Overlay::ManualTest => {
                 chrome::manual_test_field(&self.manual_test_view()?, size, scale)
             }
+            Overlay::PlanSheet => chrome::plan_sheet_field(&self.plan_sheet_view()?, size, scale),
         }
     }
 
@@ -1411,6 +1428,13 @@ impl Gerdr {
             Overlay::ManualTest => self
                 .features
                 .manual
+                .as_mut()?
+                .editing
+                .as_mut()
+                .map(|(_, field)| field),
+            Overlay::PlanSheet => self
+                .features
+                .plan_sheet
                 .as_mut()?
                 .editing
                 .as_mut()

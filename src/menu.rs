@@ -157,6 +157,14 @@ pub enum MenuAction {
         slug: String,
         repo: Box<crate::feature::ContextRepo>,
     },
+    /// Undo removing one of the user's own suggestions of a plan review:
+    /// put it back at index `at`.
+    RestoreSuggestion {
+        project: String,
+        slug: String,
+        at: usize,
+        suggestion: Box<crate::feature::plan_review::Suggestion>,
+    },
     /// Read the project files again, after one was edited by hand.
     ReloadProjects,
     /// Join project `id`, open in another gerdr, here (see
@@ -478,6 +486,12 @@ impl Gerdr {
                 slug,
                 repo,
             } => self.restore_context_repo(&project, &slug, *repo),
+            MenuAction::RestoreSuggestion {
+                project,
+                slug,
+                at,
+                suggestion,
+            } => self.restore_suggestion(&project, &slug, at, *suggestion),
             MenuAction::ReloadProjects => self.reload_projects(),
         }
     }

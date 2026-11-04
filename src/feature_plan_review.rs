@@ -40,7 +40,7 @@ pub struct PlanRead {
 
 /// The repositories a citation may name: those of the feature, and those
 /// it keeps as context, by key and folder.
-fn citable(feature: &Feature) -> Vec<(String, PathBuf)> {
+pub(crate) fn citable(feature: &Feature) -> Vec<(String, PathBuf)> {
     let repos = (feature.repos.iter()).map(|r| (r.key(), r.worktree.clone()));
     let context = (feature.context.iter()).map(|c| (c.key(), c.main.clone()));
     repos.chain(context).collect()
@@ -87,9 +87,6 @@ pub(crate) fn deciding(feature: &Feature) -> Option<&PlanReview> {
 }
 
 impl Gerdr {
-    /// Stands in until the sheet is built.
-    pub(crate) fn open_plan_sheet(&mut self, _project: &str, _slug: &str) {}
-
     /// A plan review's agent is starting: remember what the code is now, so
     /// that what it changes shows. Its prompt isn't sent yet, so nothing it
     /// does can be taken for the code it started from.
