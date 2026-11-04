@@ -68,6 +68,9 @@ pub enum GateKind {
     /// The Build agent ticked `done` of `total` milestones and waits:
     /// Continue.
     Milestone { done: u32, total: u32 },
+    /// The Build agent stopped because the plan doesn't hold, and says what
+    /// it needs: the user settles it with the agent.
+    Blocked,
     /// Verify failed `fixes` times in a row; gerdr stopped sending the
     /// failures to the Build agent (stage: Verify).
     VerifyFailed { fixes: u32 },
@@ -149,6 +152,8 @@ enum File {
     /// A build log with `done` of `total` milestones ticked, some but not
     /// all: the Build agent stops there.
     Partial(Stamp, u32, u32),
+    /// A build log whose agent stops because the plan doesn't hold: why.
+    Blocked(Stamp, String),
     Good(Stamp),
 }
 
@@ -156,7 +161,7 @@ impl File {
     /// Its stamp, when it counts as the run's work so far.
     fn finished(&self) -> Option<Stamp> {
         match self {
-            Self::Good(stamp) | Self::Partial(stamp, ..) => Some(*stamp),
+            Self::Good(stamp) | Self::Partial(stamp, ..) | Self::Blocked(stamp, _) => Some(*stamp),
             _ => None,
         }
     }
@@ -169,6 +174,7 @@ impl File {
                 done: *done,
                 total: *total,
             }),
+            Self::Blocked(_, why) => Some(Verdict::Blocked(why.clone())),
             _ => None,
         }
     }
@@ -191,6 +197,8 @@ enum Verdict {
         done: u32,
         total: u32,
     },
+    /// A Build agent stopped because the plan doesn't hold: why.
+    Blocked(String),
 }
 
 /// Judge a run: `status` is herdr's for its pane (`None`: herdr doesn't
@@ -231,7 +239,7 @@ fn judge(
             return verdict;
         }
         return match file {
-            File::Good(_) | File::Partial(..) => Verdict::Wait,
+            File::Good(_) | File::Partial(..) | File::Blocked(..) => Verdict::Wait,
             // A chat: the brief comes when the user and it agree.
             File::Absent | File::Old if discover => Verdict::Wait,
             _ if nudged => Verdict::Wait,
@@ -327,6 +335,9 @@ pub(crate) fn gate_of(
             Some((stage, since, GateKind::Review))
         }
         Stage::Build => {
+            if let Some(blocked) = &f.runs.get(&stage)?.blocked {
+                return Some((stage, blocked.at, GateKind::Blocked));
+            }
             let stop = f.runs.get(&stage)?.stop?;
             let kind = GateKind::Milestone {
                 done: stop.done,
@@ -760,6 +771,11 @@ pub(crate) fn vars(
         ("repos", repos),
         ("projects", projects),
         ("graphs", graphs),
+        (
+            "changes_code",
+            if stage == Stage::Build { "yes" } else { "" }.to_owned(),
+        ),
+        ("checks", String::new()),
         ("comments", String::new()),
         ("comments.path", String::new()),
         ("missing", String::new()),
@@ -849,6 +865,14 @@ fn stamp(path: &Path) -> Option<Stamp> {
     Some((at, meta.len()))
 }
 
+/// `checks`, as a prompt lists them: where each runs and its command.
+fn checks_list(checks: &[verify::Check]) -> String {
+    (checks.iter())
+        .map(|c| format!("- in {}: `{}`", c.dir.display(), c.command))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// How the watch finds `feature`'s `stage` file at `path`, written at or
 /// after `after` to count. A build log with some milestones ticked but not
 /// all is `Partial`.
@@ -860,6 +884,9 @@ fn read_file(feature: &Feature, stage: Stage, path: &Path, after: u64) -> File {
         return File::Old;
     }
     match std::fs::read_to_string(path) {
+        Ok(text) if stage == Stage::Build && artifacts::blocked(&text).is_some() => {
+            File::Blocked(stamp, artifacts::blocked(&text).unwrap_or_default())
+        }
         Ok(text) => match validate(feature, stage, &text) {
             Ok(()) => File::Good(stamp),
             Err(lacks) => match partial(stage, &text) {
@@ -935,6 +962,18 @@ impl Gerdr {
             feature.stage_agents.insert(stage, name.to_owned());
         }
         self.save_feature(project, slug);
+    }
+
+    /// Whether Build of feature `slug` starts a fresh agent per milestone.
+    /// It applies from the next milestone on: an agent at work goes on.
+    pub(crate) fn set_fresh_milestones(&mut self, project: &str, slug: &str, fresh: bool) {
+        let Some(feature) = self.feature_mut(project, slug) else {
+            return;
+        };
+        if feature.fresh_milestones != fresh {
+            feature.fresh_milestones = fresh;
+            self.save_feature(project, slug);
+        }
     }
 
     /// Pick the next agent `stage`'s chips offer (Ctrl+Shift+A).
@@ -1088,6 +1127,11 @@ impl Gerdr {
         if stage == Stage::AiReview {
             values.extend(crate::feature_review::review_vars(&feature));
         }
+        let config = self.projects.workflows(&feature, |w| w.verify.clone());
+        values.insert(
+            "checks".into(),
+            checks_list(&verify::checks(&feature, &config)),
+        );
         for (key, value) in extra {
             values.insert((*key).to_owned(), value.clone());
         }
@@ -1138,6 +1182,7 @@ impl Gerdr {
             ready: None,
             sent_back: last.map_or(0, |r| r.sent_back),
             stop: None,
+            blocked: None,
         };
         let Some(feature) = self.feature_mut(project, slug) else {
             return false;
@@ -1202,7 +1247,7 @@ impl Gerdr {
             let build = stage == Stage::Build;
             let back = build && run.ready.is_some();
             let working = matches!(status, Some(AgentStatus::Working | AgentStatus::Blocked));
-            if back || (build && working && run.stop.is_some()) {
+            if back || (build && working && (run.stop.is_some() || run.blocked.is_some())) {
                 // Back at Build, or going on past its stop: nothing waits.
                 if let Some(r) = self
                     .feature_mut(&project, &feature.slug)
@@ -1210,6 +1255,7 @@ impl Gerdr {
                 {
                     r.ready = None;
                     r.stop = None;
+                    r.blocked = None;
                     self.save_feature(&project, &feature.slug);
                 }
             }
@@ -1237,6 +1283,8 @@ impl Gerdr {
                 watch.refused = None;
             }
             let file = read_file(&feature, stage, &path, watch.after);
+            // The `Blocked:` line is gone, by the agent's hand or the user's.
+            let unblocked = run.blocked.is_some() && !matches!(file, File::Blocked(..));
             let verdict = judge(
                 watch,
                 status,
@@ -1278,6 +1326,12 @@ impl Gerdr {
                         self.forget_pane(&project, &feature.slug, stage);
                     }
                 }
+                Verdict::Blocked(why) => {
+                    self.milestone_blocked(&project, &feature.slug, run.n, why);
+                    if !alive && run.pane.is_some() {
+                        self.forget_pane(&project, &feature.slug, stage);
+                    }
+                }
                 Verdict::Nudge { absent } => {
                     let missing = watch.missing.join("; ");
                     self.nudge_stage_agent(&feature, stage, &run, absent, missing);
@@ -1286,6 +1340,14 @@ impl Gerdr {
                     self.forget_pane(&project, &feature.slug, stage);
                 }
                 Verdict::Gone => {}
+            }
+            if unblocked
+                && let Some(r) = self
+                    .feature_mut(&project, &feature.slug)
+                    .and_then(|f| f.runs.get_mut(&stage))
+            {
+                r.blocked = None;
+                self.save_feature(&project, &feature.slug);
             }
         }
     }
@@ -1366,6 +1428,38 @@ impl Gerdr {
         let summary = format!("Build of \u{201c}{title}\u{201d}: milestone {done} of {total} done");
         self.notify_feature(project, slug, pane, &summary);
         self.show_success(summary);
+    }
+
+    /// The Build agent of feature `slug` (run `n`) stopped because the plan
+    /// doesn't hold: the gate waits, and the user is told why. The same
+    /// reason again is nothing new.
+    fn milestone_blocked(&mut self, project: &str, slug: &str, n: u32, why: String) {
+        let at = feature::now();
+        let Some(feature) = self.feature_mut(project, slug) else {
+            return;
+        };
+        if feature.current() != Some(Stage::Build) {
+            return;
+        }
+        let Some(run) = feature.runs.get_mut(&Stage::Build).filter(|r| r.n == n) else {
+            return;
+        };
+        if run.blocked.as_ref().is_some_and(|b| b.why == why) {
+            return;
+        }
+        run.stop = None;
+        run.blocked = Some(feature::agents::Blocked {
+            why: why.clone(),
+            at,
+        });
+        let pane = run.pane.clone();
+        feature.log(at, format!("Build blocked: {why}"));
+        let title = feature.title.clone();
+        self.save_feature(project, slug);
+        let why = why.trim_end_matches('.');
+        let summary = format!("Build of \u{201c}{title}\u{201d} is blocked: {why}");
+        self.notify_feature(project, slug, pane, &summary);
+        self.show_warning(summary);
     }
 
     /// Tell `run`'s agent once that its file isn't there (`absent`) or
@@ -2368,8 +2462,109 @@ mod tests {
         assert_eq!(with["graphs"], format!("- {}", file.display()));
         let text = prompts::render_builtin("plan", &with).unwrap();
         assert!(text.contains("graphify query"));
-        assert!(text.contains(&format!("from:\n\n{}\n\nAfter", with["graphs"])));
+        assert!(text.contains(&format!("The graphs:\n\n{}\n", with["graphs"])));
+        // Only Build changes code, so only Build keeps the graph up to date.
+        assert!(!text.contains("graphify update"));
+        let build = vars(&f, &names, Path::new("/data/a"), Stage::Build);
+        let text = prompts::render_builtin("build", &build).unwrap();
+        assert!(text.contains("Before each commit, run `graphify update .` once"));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn build_and_plan_are_told_the_checks_and_others_are_not() {
+        let f = feature("a", vec![repo("api", true)], 0);
+        let names = PerProject::all("Acme".to_owned());
+        let checks = [verify::Check {
+            repo: "api".into(),
+            dir: "/w/api".into(),
+            command: "npm test".into(),
+        }];
+        let list = checks_list(&checks);
+        assert_eq!(list, "- in /w/api: `npm test`");
+        for (template, stage) in [("build", Stage::Build), ("plan", Stage::Plan)] {
+            let mut v = vars(&f, &names, Path::new("/data/a"), stage);
+            assert!(
+                !prompts::render_builtin(template, &v)
+                    .unwrap()
+                    .contains("npm test")
+            );
+            v.insert("checks".into(), list.clone());
+            assert!(
+                prompts::render_builtin(template, &v)
+                    .unwrap()
+                    .contains(&list)
+            );
+        }
+        let mut v = vars(&f, &names, Path::new("/data/a"), Stage::AiReview);
+        v.insert("checks".into(), list);
+        assert!(
+            !prompts::render_builtin("ai-review", &v)
+                .unwrap()
+                .contains("npm test")
+        );
+    }
+
+    #[test]
+    fn a_stage_set_to_a_command_keeps_its_model_flag() {
+        let command = "/usr/bin/claude --model sonnet";
+        assert_eq!(
+            pick_agent(Some(command), &[]),
+            Some(("claude".to_owned(), command.to_owned()))
+        );
+        let line = feature::agents::command_line(command, Path::new("/d/p.md"), &[]);
+        assert!(
+            line.starts_with("/usr/bin/claude --model sonnet "),
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn a_build_agent_at_rest_with_a_blocked_line_is_blocked() {
+        let t = Instant::now();
+        let stamp = (1, 1);
+        let blocked = File::Blocked(stamp, "no such table".into());
+        let mut w = Watch::of(1);
+        let idle = Some(AgentStatus::Idle);
+        // Not worked yet: nothing is decided.
+        assert_eq!(
+            judge(&mut w, idle, true, &blocked, false, false, t),
+            Verdict::Wait
+        );
+        let working = Some(AgentStatus::Working);
+        assert_eq!(
+            judge(&mut w, working, true, &blocked, false, false, t),
+            Verdict::Wait
+        );
+        assert_eq!(
+            judge(&mut w, idle, true, &blocked, false, false, t),
+            Verdict::Blocked("no such table".into())
+        );
+    }
+
+    #[test]
+    fn a_blocked_build_waits_at_its_own_gate_not_the_milestone_one() {
+        let mut f = feature("a", vec![repo("api", true)], 2);
+        let mut run = self::run(None);
+        run.stop = Some(Stop {
+            done: 1,
+            total: 3,
+            at: 5,
+        });
+        f.runs.insert(Stage::Build, run.clone());
+        assert!(matches!(
+            gate_of(&f, |_| None),
+            Some((Stage::Build, 5, GateKind::Milestone { .. }))
+        ));
+        run.blocked = Some(feature::agents::Blocked {
+            why: "no such table".into(),
+            at: 9,
+        });
+        f.runs.insert(Stage::Build, run);
+        assert_eq!(
+            gate_of(&f, |_| None),
+            Some((Stage::Build, 9, GateKind::Blocked))
+        );
     }
 
     #[test]

@@ -458,6 +458,9 @@ pub enum PageSection {
         name: String,
         blocks: Arc<Vec<DocBlock>>,
     },
+    /// Build's choice: one agent through all milestones, or a fresh one
+    /// per milestone (`fresh`).
+    MilestoneMode { fresh: bool },
     /// The milestones, "done of total", with a bar, and each by name when
     /// known (`true` = done; empty until Inc 2 reads them).
     Milestones {
@@ -569,6 +572,9 @@ pub enum FeatureTabHit {
     AgentPick(usize),
     /// One of those that can't be picked: it only says why.
     AgentPickOff(usize),
+    /// A segment of Build's milestone choice: 0 one agent, 1 one per
+    /// milestone.
+    MilestoneMode(usize),
     Hint(usize),
 }
 
@@ -620,6 +626,8 @@ pub struct FeatureTabLayout {
     /// The agent card's chips: their outline, and each chip as its `picks`
     /// has them.
     pub agent_picks: Option<(Rect, Vec<Rect>)>,
+    /// Build's milestone choice: its outline and two segments, unscrolled.
+    pub milestone_mode: Option<(Rect, [Rect; 2])>,
     /// The footer, and where each hint goes in it.
     pub hints: Rect,
     pub hint_spots: Vec<(usize, Rect)>,
@@ -677,7 +685,12 @@ impl FeatureTabLayout {
                     .iter()
                     .position(|b| b.is_some_and(|b| b.contains(at)))
                     .map(FeatureTabHit::PageButton)
-                    .or_else(|| self.agent_pick_at(view, at)),
+                    .or_else(|| self.agent_pick_at(view, at))
+                    .or_else(|| {
+                        let (_, segments) = self.milestone_mode.as_ref()?;
+                        let i = segments.iter().position(|r| r.contains(at))?;
+                        Some(FeatureTabHit::MilestoneMode(i))
+                    }),
                 TabColumn::Activity => None,
             };
             return found.or(Some(FeatureTabHit::Column(column)));
@@ -861,6 +874,8 @@ const PICK_ICON: i32 = 14;
 /// `placeholder`: a logo plainly dimmer than one that can be.
 const PICK_OFF: f32 = 0.5;
 const PICK_LABEL: i32 = 48;
+/// Build's milestone choice: its segments' words.
+const MODE_SEGMENTS: [&str; 2] = ["One agent", "Agent per milestone"];
 const AGENT_RADIUS: f32 = 6.0;
 /// A milestone's row, and the progress bar's height.
 const MILESTONE_ROW: i32 = 22;
@@ -929,6 +944,8 @@ pub(super) enum Piece {
     },
     /// The agent card of `StagePage::sections[i]`.
     Agent(usize),
+    /// Build's milestone choice, its label at the row's left.
+    MilestoneMode { fresh: bool },
     /// The file card of `StagePage::sections[i]`.
     File(usize),
     /// `FeatureTabView::repos[i]`.
@@ -1454,11 +1471,34 @@ fn agent_pick_rects(n: usize, x: i32, y: i32, room: i32) -> (Rect, Vec<Rect>) {
     (track, chips)
 }
 
+/// Build's milestone choice in `row`: after its label, each segment as wide
+/// as its words, the two squeezed alike on a narrow column.
+fn milestone_mode_rects(row: Rect) -> (Rect, [Rect; 2]) {
+    let x = row.loc.x + PICK_LABEL;
+    let room = (row.size.w - PICK_LABEL - 2 * PICK_TRACK_PAD).max(2);
+    let [one, each] = MODE_SEGMENTS.map(button_width);
+    let scaled = |w: i32| match one + each > room {
+        true => w * room / (one + each),
+        false => w,
+    };
+    let (one, each) = (scaled(one), scaled(each));
+    let y = row.loc.y + PICK_TRACK_PAD;
+    let h = PICK_TRACK - 2 * PICK_TRACK_PAD;
+    let left = Rectangle::new((x + PICK_TRACK_PAD, y).into(), (one, h).into());
+    let right = Rectangle::new((x + PICK_TRACK_PAD + one, y).into(), (each, h).into());
+    let track = Rectangle::new(
+        (x, row.loc.y).into(),
+        (one + each + 2 * PICK_TRACK_PAD, PICK_TRACK).into(),
+    );
+    (track, [left, right])
+}
+
 fn page_stack(
     view: &FeatureTabView,
     s: &mut Stack,
     buttons: &mut [Option<Rect>],
     agent_picks: &mut Option<(Rect, Vec<Rect>)>,
+    milestone_mode: &mut Option<(Rect, [Rect; 2])>,
     activity: bool,
 ) {
     let page = &view.page;
@@ -1547,6 +1587,10 @@ fn page_stack(
                     };
                     *agent_picks = Some(agent_pick_rects(picks.len(), x, row, room));
                 }
+            }
+            PageSection::MilestoneMode { fresh } => {
+                let row = s.put(PICK_TRACK, Piece::MilestoneMode { fresh: *fresh });
+                *milestone_mode = Some(milestone_mode_rects(row));
             }
             PageSection::File { buttons: held, .. } => {
                 let card = s.put(AGENT_PAD * 2 + AGENT_HEAD, Piece::File(k));
@@ -1820,6 +1864,7 @@ pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayou
     let mut content = [0; 3];
     let mut page_buttons = vec![None; view.page.buttons.len()];
     let mut agent_picks = None;
+    let mut milestone_mode = None;
     for column in TabColumn::ALL {
         let Some(place) = columns[column as usize] else {
             continue;
@@ -1843,6 +1888,7 @@ pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayou
                 &mut s,
                 &mut page_buttons,
                 &mut agent_picks,
+                &mut milestone_mode,
                 columns[TabColumn::Activity as usize].is_none(),
             ),
             TabColumn::Activity => {
@@ -1873,6 +1919,7 @@ pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayou
         more_repos,
         page_buttons,
         agent_picks,
+        milestone_mode,
         hints,
         hint_spots,
         pieces,
@@ -2147,7 +2194,12 @@ fn slice_view(view: &FeatureTabView, slice: TabSlice) -> FeatureTabView {
         TabSlice::Column(TabColumn::Repos) => {
             matches!(hit, H::Repo(_) | H::RepoButton(..) | H::RepoRemove(_))
         }
-        TabSlice::Column(TabColumn::Page) => matches!(hit, H::PageButton(_) | H::AgentPick(_)),
+        TabSlice::Column(TabColumn::Page) => {
+            matches!(
+                hit,
+                H::PageButton(_) | H::AgentPick(_) | H::MilestoneMode(_)
+            )
+        }
         TabSlice::Column(TabColumn::Activity) => false,
         TabSlice::Hints => matches!(hit, H::Hint(_)),
     });
@@ -3171,6 +3223,24 @@ impl Painter {
                 );
                 let color = if *done || *next { p.text } else { p.muted };
                 line(c, text, text_rect, SMALL_FONT_SIZE, color);
+            }
+            Piece::MilestoneMode { fresh } => {
+                let Some((track, segments)) = l.milestone_mode.as_ref() else {
+                    return;
+                };
+                let track = at(*track);
+                let label = Rectangle::new(
+                    (rect.loc.x, track.loc.y).into(),
+                    (PICK_LABEL, track.size.h).into(),
+                );
+                line(c, "Agents", label, SMALL_FONT_SIZE, p.muted);
+                let [one, each] = MODE_SEGMENTS;
+                let hover = match view.hover {
+                    Some(FeatureTabHit::MilestoneMode(i)) => Some(i),
+                    _ => None,
+                };
+                let labelled = [(one, at(segments[0])), (each, at(segments[1]))];
+                self.segmented(c, track, &labelled, usize::from(*fresh), hover, scale, p);
             }
             Piece::Agent(k) => {
                 let Some(PageSection::Agent {
@@ -4451,6 +4521,37 @@ mod tests {
     }
 
     /// The fixture's agent card, with chips.
+    #[test]
+    fn the_milestone_choice_is_hit_by_segment_and_scrolls_with_the_page() {
+        let mut view = tab_with_picks(false);
+        view.page.sections = vec![PageSection::MilestoneMode { fresh: false }];
+        let l = tab_at(&view, 1180);
+        let (track, [one, each]) = l.milestone_mode.expect("placed");
+        assert!(track.size.w >= one.size.w + each.size.w);
+        assert_eq!(one.loc.x + one.size.w, each.loc.x);
+        let mid = |r: Rect| Point::from((r.loc.x + r.size.w / 2, r.loc.y + r.size.h / 2));
+        assert_eq!(
+            l.hit(&view, mid(one)),
+            Some(FeatureTabHit::MilestoneMode(0))
+        );
+        assert_eq!(
+            l.hit(&view, mid(each)),
+            Some(FeatureTabHit::MilestoneMode(1))
+        );
+        view.scroll[TabColumn::Page as usize] = 10.0;
+        let mut lifted = mid(each);
+        lifted.y -= 10;
+        assert_eq!(l.hit(&view, lifted), Some(FeatureTabHit::MilestoneMode(1)));
+    }
+
+    #[test]
+    fn the_milestone_choice_fits_a_narrow_column() {
+        let row = Rectangle::new((0, 0).into(), (200, PICK_TRACK).into());
+        let (track, [_, each]) = milestone_mode_rects(row);
+        assert!(track.loc.x + track.size.w <= 200);
+        assert!(each.loc.x + each.size.w <= 200);
+    }
+
     fn tab_with_picks(off: bool) -> FeatureTabView {
         let mut view = tab_view();
         let chips = vec![

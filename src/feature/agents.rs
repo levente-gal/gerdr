@@ -273,6 +273,10 @@ pub struct StageRun {
     /// let it go on (see `Stop`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop: Option<Stop>,
+    /// A Build agent stopped because the plan doesn't hold: it wrote a
+    /// `Blocked:` line in its build log (see `artifacts::blocked`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked: Option<Blocked>,
 }
 
 impl StageRun {
@@ -309,6 +313,13 @@ impl StageRun {
         let id = std::fs::read_to_string(session_file(&self.prompt)).ok()?;
         Some(id.trim().to_owned()).filter(|id| !id.is_empty())
     }
+}
+
+/// Why a Build agent stopped short of its milestone, and since when.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Blocked {
+    pub why: String,
+    pub at: u64,
 }
 
 /// A Build agent's stop after a milestone: `build.md` ticks `done` of

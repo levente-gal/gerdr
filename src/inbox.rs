@@ -860,6 +860,10 @@ fn detail_view(item: &InboxItem, actions: &[ItemAction], now: u64) -> InboxDetai
             let (when, next) = match kind {
                 K::Review => ("Ready", "Enter opens it to approve or send back"),
                 K::Milestone { .. } => ("Stopped", "Enter opens the feature to continue"),
+                K::Blocked => (
+                    "Stopped",
+                    "Enter opens the feature: settle it with its agent",
+                ),
                 K::VerifyFailed { .. } => {
                     ("Failed", "Enter opens the feature: fix it, then run checks")
                 }
