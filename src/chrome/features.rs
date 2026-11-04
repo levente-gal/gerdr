@@ -4426,7 +4426,7 @@ mod tests {
     /// Each kind of dot reads on a row at rest, hovered and selected.
     #[test]
     fn the_repository_dots_read_on_the_rows_in_both_themes() {
-        for p in [&ONE_DARK, &ONE_LIGHT] {
+        for p in [&ONE_DARK, &ONE_LIGHT_PAGE] {
             for kind in [RepoKind::Active, RepoKind::Context, RepoKind::Other] {
                 for ground in [p.panel, p.element, p.selected] {
                     let ratio = contrast(kind.color(p), ground);
