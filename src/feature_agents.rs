@@ -24,8 +24,9 @@ use std::{
 };
 
 use crate::{
-    Gerdr, agents,
+    Gerdr,
     agent_icons::AgentIcon,
+    agents,
     chrome::AgentChip,
     cli_agents::CliAgent,
     feature::{
@@ -924,6 +925,12 @@ impl Gerdr {
         let Some(run) = feature.runs.get(&stage).filter(|r| r.resumes()) else {
             return self.show_warning(format!("{} has no chat to resume", stage.label()));
         };
+        // Its tab back since the page was drawn only shows it: that changes
+        // nothing. A chat to go on with would.
+        let live = (run.pane.as_deref()).is_some_and(|p| self.herdr_pane_place(p).is_some());
+        if !live && let Some(why) = self.stage_lock_warning(project, slug, stage) {
+            return self.show_warning(why);
+        }
         // Its tab came back since the page was drawn: one chat, one tab.
         if let Some(pane) = (run.pane.clone()).filter(|p| self.herdr_pane_place(p).is_some()) {
             return self.focus_agent(&agents::AgentKey::Herdr(pane));
@@ -1003,7 +1010,7 @@ impl Gerdr {
         };
         let data = store::dir(None, project, slug);
         let last = feature.runs.get(&stage);
-        let n = last.map_or(1, |r| r.n + 1);
+        let n = feature.next_run(stage);
         let prompt = data
             .join("prompts")
             .join(format!("{}-{n}.md", stage_key(stage)));
@@ -1496,6 +1503,10 @@ impl Gerdr {
             watch.checking = Some(stamp);
             self.check_build_code(project, slug, n, stamp);
             return false;
+        }
+        // A copy that can't be kept only costs saying it changed later.
+        if let Err(why) = artifacts::keep_approved(&data, stage) {
+            tracing::warn!("keeping {project}/{slug}'s file as approved: {why}");
         }
         let now = feature::now();
         let Some(feature) = self.feature_mut(project, slug) else {

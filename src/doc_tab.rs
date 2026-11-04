@@ -249,9 +249,17 @@ impl Gerdr {
         if shown != self.doc_tab_shown {
             self.doc_tab_shown = shown;
             self.doc_review_read();
+            // What it says it is locked by is the latest there is.
+            if let Some((project, slug)) = (self.review_tab())
+                .and_then(|r| r.wd.doc.as_ref())
+                .map(|d| (d.project.clone(), d.slug.clone()))
+            {
+                self.probe_feature(&project, &slug);
+            }
         }
         self.sync_preview_marks();
         shown?;
+        self.doc_stand();
         let (w, t) = (self.active_workspace, self.workspace()?.active_tab);
         let workspace = self.active_workspace;
         let env = self.doc_env(self.review_tab()?.mode);

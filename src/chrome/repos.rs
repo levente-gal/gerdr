@@ -191,6 +191,8 @@ pub struct ReposView {
     /// After the title: `feat/x · 3 of 4 on it · 2 dirty · 1 conflict ·
     /// fetched 2m ago`.
     pub summary: String,
+    /// The colour of `summary`: muted, unless it says something settled.
+    pub summary_tone: Tone,
     /// The tree's lines in view, scrolled.
     pub lines: Vec<TreeLine>,
     /// The part of the first line scrolled past, 0 to 1; with some,
@@ -270,6 +272,7 @@ impl ReposView {
         ReposView {
             title,
             summary,
+            summary_tone: Tone::Muted,
             lines: Vec::new(),
             part: 0.0,
             over: 0.0,
@@ -782,6 +785,9 @@ pub enum ReposButton {
     /// approved as it is, or sent back to its agent with the comments.
     Approve,
     SendBack,
+    /// That file approved: reopened, or on to the stage the feature is at.
+    Reopen,
+    GoOn,
     /// An AI review finding in a feature's code review
     /// (`feature_diff`): to fix, dismissed (a reason asked first), or
     /// back to undecided.
@@ -850,6 +856,8 @@ impl ReposButton {
             ReposButton::DropOutdated => "Drop outdated",
             ReposButton::Approve => "Approve",
             ReposButton::SendBack => "Send back",
+            ReposButton::Reopen => "Reopen",
+            ReposButton::GoOn => "Go to current stage",
             ReposButton::FixFinding => "Fix",
             ReposButton::DismissFinding => "Dismiss…",
             ReposButton::ReopenFinding => "Reopen",
@@ -2881,7 +2889,7 @@ impl Painter {
             hend,
             header_band,
             scale,
-            p.muted,
+            tone_color(view.summary_tone, p),
         );
         if !only {
             self.branch_button(&mut c, view, picker, scale, p);
@@ -5047,6 +5055,7 @@ fn frame_view(view: &ReposView) -> ReposView {
     ReposView {
         title: view.title.clone(),
         summary: view.summary.clone(),
+        summary_tone: view.summary_tone,
         lines: Vec::new(),
         part: 0.0,
         over: 0.0,
@@ -5515,6 +5524,7 @@ mod tests {
             grouping: Grouping::List,
             title: "gerdr".into(),
             summary: "2 dirty · 1 conflict · fetched 2m ago".into(),
+            summary_tone: Tone::Muted,
             lines,
             part: 0.0,
             over: 0.0,

@@ -27,8 +27,11 @@ const READ_LINES: usize = 40;
 /// The stage files of a feature's data dir, as last read.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Docs {
-    /// The stages whose file is there (`brief.md`, `plan.md`, `build.md`).
+    /// The stages whose file is there (`artifacts::outputs`).
     pub written: BTreeSet<Stage>,
+    /// The approved stages whose file changed since, with no way to tell
+    /// by whom: an agent's tab left open, or a hand.
+    pub changed: BTreeSet<Stage>,
     /// Plan's and Build's milestones by name, `true` = ticked (see
     /// `artifacts::milestone_items`); none for a file not there.
     pub milestones: BTreeMap<Stage, Vec<(bool, String)>>,
@@ -38,18 +41,18 @@ pub struct Docs {
 /// read counts as not there: its stage's page says it isn't written, and
 /// Review says why when pressed.
 pub fn read_docs(data: &Path) -> Docs {
-    let mut docs = Docs::default();
-    for stage in [Stage::Discover, Stage::Plan, Stage::Build] {
-        let Some(path) = artifacts::path(data, stage) else {
+    let mut docs = Docs {
+        written: artifacts::outputs(data),
+        ..Docs::default()
+    };
+    docs.changed = (docs.written.iter().copied())
+        .filter(|stage| artifacts::changed_since_approved(data, *stage))
+        .collect();
+    for stage in [Stage::Plan, Stage::Build] {
+        let Some(path) = artifacts::path(data, stage).filter(|_| docs.written.contains(&stage))
+        else {
             continue;
         };
-        if !path.is_file() {
-            continue;
-        }
-        docs.written.insert(stage);
-        if stage == Stage::Discover {
-            continue;
-        }
         match std::fs::read_to_string(&path) {
             Ok(text) => {
                 docs.milestones

@@ -2311,6 +2311,111 @@ fn feature_tab_ship_blocked() -> super::FeatureTabView {
 }
 
 /// A done feature, Ship's page shown read-only, with its pull requests.
+fn feature_tab_approved() -> super::FeatureTabView {
+    feature_tab_brief(false)
+}
+
+/// The same brief once the plan is written: it only goes on.
+fn feature_tab_locked() -> super::FeatureTabView {
+    feature_tab_brief(true)
+}
+
+/// Discover's page with the brief approved, `locked` by the plan or not.
+fn feature_tab_brief(locked: bool) -> super::FeatureTabView {
+    use super::{ButtonStyle, CheckTone, NodeMark, PageButton, PageSection, StagePage};
+    use crate::feature::Stage;
+    let mut view = feature_tab();
+    at_stage(&mut view, 1, NodeMark::Current, "not started");
+    select_node(&mut view, 0);
+    let button = |label: &str, style, key| PageButton {
+        label: label.into(),
+        style,
+        key,
+    };
+    let mut buttons = vec![button("Go to Plan", ButtonStyle::Primary, Some("\u{23ce}"))];
+    if !locked {
+        buttons.push(button(
+            "Reopen",
+            ButtonStyle::Plain,
+            Some("Ctrl+Shift+Enter"),
+        ));
+    }
+    buttons.push(button("Open brief", ButtonStyle::Plain, None));
+    buttons.push(button("Preview", ButtonStyle::Plain, None));
+    let (status, state) = match locked {
+        true => (
+            "Done 1h ago by you \u{b7} locked: Plan has plan.md",
+            "approved \u{b7} locked",
+        ),
+        false => ("Done 1h ago by you", "approved"),
+    };
+    view.page = StagePage {
+        title: "Discover".into(),
+        about: Stage::Discover.about().into(),
+        status: Some(tab_line(status, CheckTone::Ready)),
+        buttons,
+        sections: vec![PageSection::File {
+            name: "brief.md".into(),
+            state: tab_line(state, CheckTone::Ready),
+            buttons: match locked {
+                true => vec![1, 2],
+                false => vec![2, 3],
+            },
+        }],
+    };
+    let mut hints = vec![
+        ("Left / Right", "stage"),
+        ("Enter", "go to the current stage"),
+    ];
+    if !locked {
+        hints.push(("Ctrl+Shift+Enter", "reopen"));
+    }
+    hints.extend([
+        ("Tab", "repositories"),
+        ("Ctrl+O", "open tab"),
+        ("Ctrl+C", "copy path"),
+        ("F1", "all keys"),
+    ]);
+    view.hints = (hints.iter())
+        .map(|(k, a)| ((*k).to_owned(), (*a).to_owned()))
+        .collect();
+    view
+}
+
+/// Plan at work with its file written: starting it over frees the brief.
+fn feature_tab_start_over() -> super::FeatureTabView {
+    use super::{ButtonStyle, CheckTone, NodeMark, PageButton, PageSection, StagePage};
+    use crate::feature::Stage;
+    let mut view = feature_tab();
+    at_stage(&mut view, 1, NodeMark::Waiting, "ready for review");
+    let button = |label: &str, style, key| PageButton {
+        label: label.into(),
+        style,
+        key,
+    };
+    view.page = StagePage {
+        title: "Plan".into(),
+        about: Stage::Plan.about().into(),
+        status: Some(tab_line("plan.md is ready for review", CheckTone::Blocker)),
+        buttons: vec![
+            button("Review", ButtonStyle::Primary, Some("\u{23ce}")),
+            button("Preview", ButtonStyle::Plain, None),
+            button("Restart agent", ButtonStyle::Plain, Some("Ctrl+R")),
+            button(
+                "Start over\u{2026}",
+                ButtonStyle::Destructive,
+                Some("Ctrl+Shift+Del"),
+            ),
+        ],
+        sections: vec![PageSection::File {
+            name: "plan.md".into(),
+            state: tab_line("ready for review", CheckTone::Ready),
+            buttons: vec![1],
+        }],
+    };
+    view
+}
+
 fn feature_tab_done() -> super::FeatureTabView {
     use super::{ButtonStyle, CheckTone, NodeMark, PageButton, PageSection, StagePage};
     use crate::feature::Stage;
@@ -2498,7 +2603,7 @@ fn feature_tab_rail_wrap() -> super::FeatureTabView {
 }
 
 /// The feature tab's fixtures, by name.
-fn feature_tabs() -> [(&'static str, super::FeatureTabView); 14] {
+fn feature_tabs() -> [(&'static str, super::FeatureTabView); 17] {
     [
         ("tab_build", feature_tab()),
         ("tab_plan_review", feature_tab_plan_review()),
@@ -2514,11 +2619,14 @@ fn feature_tabs() -> [(&'static str, super::FeatureTabView); 14] {
         ("tab_picks_later", feature_tab_picks_later()),
         ("tab_picks_running", feature_tab_picks_running()),
         ("tab_resume", feature_tab_resume()),
+        ("tab_approved", feature_tab_approved()),
+        ("tab_locked", feature_tab_locked()),
+        ("tab_start_over", feature_tab_start_over()),
     ]
 }
 
 /// Each fixture at the width it shows best at, and Build at all three.
-const TAB_SURFACES: [(&str, i32); 18] = [
+const TAB_SURFACES: [(&str, i32); 21] = [
     ("tab_build", 860),
     ("tab_build", 1180),
     ("tab_build", 1920),
@@ -2537,9 +2645,12 @@ const TAB_SURFACES: [(&str, i32); 18] = [
     ("tab_picks_running", 860),
     ("tab_resume", 1180),
     ("tab_resume", 860),
+    ("tab_approved", 1180),
+    ("tab_locked", 1180),
+    ("tab_start_over", 1180),
 ];
 
-const FEATURE_TAB: [&str; 18] = [
+const FEATURE_TAB: [&str; 21] = [
     "tab_build_860",
     "tab_build_1180",
     "tab_build_1920",
@@ -2558,10 +2669,13 @@ const FEATURE_TAB: [&str; 18] = [
     "tab_picks_running_860",
     "tab_resume_1180",
     "tab_resume_860",
+    "tab_approved_1180",
+    "tab_locked_1180",
+    "tab_start_over_1180",
 ];
 
 /// The recorded hashes of `FEATURE_TAB`, per case in `CASES`.
-const GOLDEN_FEATURE_TAB: [[u64; 18]; 4] = [
+const GOLDEN_FEATURE_TAB: [[u64; 21]; 4] = [
     // Dark at 1
     [
         0xab7c76988146b933, // tab_build_860
@@ -2582,6 +2696,9 @@ const GOLDEN_FEATURE_TAB: [[u64; 18]; 4] = [
         0x99738de657365076, // tab_picks_running_860
         0x846d510a1650a771, // tab_resume_1180
         0x9b13d1415d51938c, // tab_resume_860
+        0x0d89b260275ae8b1, // tab_approved_1180
+        0x80f682e509119784, // tab_locked_1180
+        0x3503ea767a1bee85, // tab_start_over_1180
     ],
     // Dark at 2
     [
@@ -2603,6 +2720,9 @@ const GOLDEN_FEATURE_TAB: [[u64; 18]; 4] = [
         0xe73d2375a828a0be, // tab_picks_running_860
         0x589c27cc84b52cd6, // tab_resume_1180
         0xb7c4fc70a51ea543, // tab_resume_860
+        0x5939f251bc673eb6, // tab_approved_1180
+        0x37a2122b18bc2ee3, // tab_locked_1180
+        0xe4c6c7186494487e, // tab_start_over_1180
     ],
     // Light at 1
     [
@@ -2624,6 +2744,9 @@ const GOLDEN_FEATURE_TAB: [[u64; 18]; 4] = [
         0x2c6aa6f30c1af15e, // tab_picks_running_860
         0x184835d662cd8025, // tab_resume_1180
         0x99c6938e78f9f4e0, // tab_resume_860
+        0xb07709310121e218, // tab_approved_1180
+        0x8a56e9eae58dae15, // tab_locked_1180
+        0x6886bc958f2de166, // tab_start_over_1180
     ],
     // Light at 2
     [
@@ -2645,6 +2768,9 @@ const GOLDEN_FEATURE_TAB: [[u64; 18]; 4] = [
         0x9a50304d4c453b9d, // tab_picks_running_860
         0x642ff83fbcf2a16d, // tab_resume_1180
         0xd6a7d2d339fb6bc1, // tab_resume_860
+        0xf3c8cb09ab23ff2f, // tab_approved_1180
+        0x0db756665c25d62a, // tab_locked_1180
+        0x5ee5174d47d01643, // tab_start_over_1180
     ],
 ];
 
@@ -2774,8 +2900,38 @@ fn doc_tab(on: usize, share: f64, off: Vec<usize>, wide: bool) -> super::ReposVi
     }
 }
 
+/// The brief, approved: only read, it reopens until the plan is written
+/// (`locked`), and goes on to Plan either way.
+fn doc_tab_closed(locked: bool) -> super::ReposView {
+    use super::{Hint, ReposButton};
+    let mut view = doc_tab(1, 1.0, Vec::new(), false);
+    let hint = |button: ReposButton, key: &str, label: &str| Hint {
+        button,
+        label: label.into(),
+        key: key.into(),
+        disabled: None,
+    };
+    let go_on = hint(ReposButton::GoOn, "Ctrl+Enter", "Go to Plan");
+    let reopen = hint(ReposButton::Reopen, "Ctrl+Shift+Enter", "Reopen");
+    let (mut buttons, mut hints) = (vec![go_on.clone()], vec![go_on]);
+    if !locked {
+        buttons.insert(0, reopen.clone());
+        hints.insert(0, reopen);
+    }
+    hints.push(hint(ReposButton::Help, "F1", ReposButton::Help.label()));
+    hints.push(hint(ReposButton::Close, "Esc", ReposButton::Close.label()));
+    view.hints = hints;
+    view.detail.title_buttons = buttons;
+    view.summary = match locked {
+        true => "approved \u{b7} locked: Plan has plan.md".into(),
+        false => "approved 1h ago by you".into(),
+    };
+    view.summary_tone = crate::chrome::Tone::Success;
+    view
+}
+
 /// Each doc tab fixture and the width of content it is seen at.
-fn doc_tabs() -> [(&'static str, super::ReposView, i32); 6] {
+fn doc_tabs() -> [(&'static str, super::ReposView, i32); 8] {
     [
         ("doc_preview_1180", doc_tab(0, 0.0, Vec::new(), false), 1180),
         ("doc_review_1180", doc_tab(1, 1.0, Vec::new(), false), 1180),
@@ -2787,16 +2943,20 @@ fn doc_tabs() -> [(&'static str, super::ReposView, i32); 6] {
         ("doc_preview_1920", doc_tab(0, 0.0, Vec::new(), true), 1920),
         ("doc_split_1920", doc_tab(2, 0.45, Vec::new(), true), 1920),
         ("doc_review_850", doc_tab(1, 1.0, Vec::new(), false), 850),
+        ("doc_approved_1180", doc_tab_closed(false), 1180),
+        ("doc_locked_1180", doc_tab_closed(true), 1180),
     ]
 }
 
-const DOC_TAB: [&str; 6] = [
+const DOC_TAB: [&str; 8] = [
     "doc_preview_1180",
     "doc_review_1180",
     "doc_review_no_browser",
     "doc_preview_1920",
     "doc_split_1920",
     "doc_review_850",
+    "doc_approved_1180",
+    "doc_locked_1180",
 ];
 
 /// A doc tab's buffer, laid over the whole of a `w` wide content area.
@@ -2818,7 +2978,7 @@ fn paint_doc_tab(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
 }
 
 /// The recorded hashes of `DOC_TAB`, per case in `CASES`.
-const GOLDEN_DOC_TAB: [[u64; 6]; 4] = [
+const GOLDEN_DOC_TAB: [[u64; 8]; 4] = [
     // Dark at 1
     [
         0xe3291f02faaf07c4, // doc_preview_1180
@@ -2827,6 +2987,8 @@ const GOLDEN_DOC_TAB: [[u64; 6]; 4] = [
         0x163df7c54996fb12, // doc_preview_1920
         0xe84bd20b374af24e, // doc_split_1920
         0xf0ee57f894f597ee, // doc_review_850
+        0x14ff1db1033ebab8, // doc_approved_1180
+        0x1098438e0809b7ac, // doc_locked_1180
     ],
     // Dark at 2
     [
@@ -2836,6 +2998,8 @@ const GOLDEN_DOC_TAB: [[u64; 6]; 4] = [
         0xe1f51d6886965409, // doc_preview_1920
         0xd7989b82d2317fa0, // doc_split_1920
         0x6a43d0181fc8f5d0, // doc_review_850
+        0xf61bf3d43c28e4e0, // doc_approved_1180
+        0xab55207336f0f88c, // doc_locked_1180
     ],
     // Light at 1
     [
@@ -2845,6 +3009,8 @@ const GOLDEN_DOC_TAB: [[u64; 6]; 4] = [
         0x50dcf4fa733c2761, // doc_preview_1920
         0xf8b91e043addce35, // doc_split_1920
         0xc0b7a7bdb73caf1b, // doc_review_850
+        0x1106fd610dbd0790, // doc_approved_1180
+        0xc1131c10e75a8fc5, // doc_locked_1180
     ],
     // Light at 2
     [
@@ -2854,6 +3020,8 @@ const GOLDEN_DOC_TAB: [[u64; 6]; 4] = [
         0xad043f4a3dce9b22, // doc_preview_1920
         0xa46109d5bb9516f7, // doc_split_1920
         0x004dd9cbf09f97ac, // doc_review_850
+        0xe2353e81d3719bff, // doc_approved_1180
+        0x91f0272ec014d39a, // doc_locked_1180
     ],
 ];
 

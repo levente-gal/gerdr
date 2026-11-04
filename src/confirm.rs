@@ -90,6 +90,20 @@ pub enum Then {
         slug: String,
         stage: crate::feature::Stage,
     },
+    /// Reopen this stage of this project's feature, the next stage's agent
+    /// stopped (see `Gerdr::reopen_stage_now`).
+    ReopenStage {
+        project: String,
+        slug: String,
+        stage: crate::feature::Stage,
+    },
+    /// Start this current stage of this project's feature over (see
+    /// `Gerdr::start_over_now`).
+    StartOverStage {
+        project: String,
+        slug: String,
+        stage: crate::feature::Stage,
+    },
 }
 
 /// The confirm dialog's state, while it is open.
@@ -507,7 +521,7 @@ impl Gerdr {
 
     /// Open the confirm dialog: `title`, `body` under it, and the `go`
     /// button doing `then`. Cancel is selected.
-    fn ask(&mut self, title: String, body: String, go: &'static str, then: Then) {
+    pub(crate) fn ask(&mut self, title: String, body: String, go: &'static str, then: Then) {
         self.context_menu = None;
         self.confirm = Some(ConfirmDialog {
             title,
@@ -597,6 +611,16 @@ impl Gerdr {
                 slug,
                 stage,
             } => self.approve_doc_now(&project, &slug, stage),
+            Then::ReopenStage {
+                project,
+                slug,
+                stage,
+            } => self.reopen_stage_now(&project, &slug, stage),
+            Then::StartOverStage {
+                project,
+                slug,
+                stage,
+            } => self.start_over_now(&project, &slug, stage),
             Then::CloseTab(panes) => {
                 let tab = self.workspace().and_then(|ws| {
                     ws.tabs

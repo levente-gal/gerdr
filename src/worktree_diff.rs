@@ -17,6 +17,8 @@
 //! flat in a tab of its own (see `doc_tab`): its comments work as on code,
 //! and vim's edits change the file. Approve and Send back sit on its header
 //! and footer.
+//! Once its stage is done the file is only read: Reopen and going on to the
+//! current stage take their place, or only going on once it is locked.
 //!
 //! A feature's code review (see `feature_diff`) shows the same way too:
 //! the feature's changes over every repository it touched, one section
@@ -37,8 +39,8 @@ use crate::{
     diff_view::{self, CheckOf, DiffView, Keys, NoteOf, Outcome, Section},
     doc_review::DocFile,
     doc_tab::DocMode,
-    feature::Stage,
     feature::review_import::Decision,
+    feature::{Stage, Standing},
     feature_diff::FeatureOf,
     git::Change,
     git_ops::Since,
@@ -114,6 +116,10 @@ pub struct DocOf {
     /// Why it can't be edited now (`doc_review::locked`): its agent is
     /// writing it, it's approved. None: the diff's edits change it.
     pub locked: Option<&'static str>,
+    /// Whether its stage is done, and can still be reopened.
+    pub standing: Standing,
+    /// The stage the feature is at.
+    pub current: Option<Stage>,
 }
 
 impl DocOf {
@@ -132,6 +138,12 @@ impl DocOf {
         self.file == DocFile::Evidence
     }
 
+    /// Whether its stage is done: the file is only read, and has its own
+    /// actions.
+    pub fn closed(&self) -> bool {
+        self.standing != Standing::Open
+    }
+
     /// The file's name: `brief.md`.
     pub fn name(&self) -> String {
         let name = self.path.file_name().unwrap_or(self.path.as_os_str());
@@ -145,6 +157,8 @@ pub const DOC_NO_RESTORE: &str = "There's nothing to restore in a file under rev
 /// Why a comment, an edit, Approve or Send back do nothing on Verify's
 /// evidence.
 pub const EVIDENCE_READ_ONLY: &str = "The evidence is only read";
+/// Why going to the current stage does nothing.
+pub const ALL_DONE: &str = "Every stage is done";
 /// Why Alt+Shift+Down did nothing.
 pub const ALL_VIEWED: &str = "Every file is viewed";
 /// Why Send back does nothing yet.
@@ -202,6 +216,10 @@ pub enum Done {
     SendBack(String),
     /// Show the next mode of the file's tab (see `doc_tab`).
     CycleMode,
+    /// Reopen the approved file's stage.
+    Reopen,
+    /// Show the stage the feature is at, from an approved file.
+    GoOn,
 }
 
 impl WorktreeDiff {
@@ -263,7 +281,7 @@ impl WorktreeDiff {
 
     /// The panel showing this diff alone across it.
     pub fn repos_view(&self, env: Env) -> crate::chrome::ReposView {
-        crate::chrome::ReposView::diff_only(
+        let mut view = crate::chrome::ReposView::diff_only(
             self.heading(),
             self.summary(),
             self.hover,
@@ -271,7 +289,12 @@ impl WorktreeDiff {
             self.view(env),
             self.sheet(env),
             env.density,
-        )
+        );
+        // An approved file says so at a look, wherever it is scrolled to.
+        if self.closed() {
+            view.summary_tone = crate::chrome::Tone::Success;
+        }
+        view
     }
 
     /// The file under review read again (`Err`: why it couldn't be): held
@@ -327,9 +350,39 @@ impl WorktreeDiff {
         self.doc.as_ref().is_some_and(|d| d.evidence())
     }
 
-    /// Whether its lines take no comments: a commit's, the evidence.
+    /// Whether it shows a file whose stage is done.
+    fn closed(&self) -> bool {
+        self.doc.as_ref().is_some_and(DocOf::closed)
+    }
+
+    /// Why a file whose stage is done changes nothing.
+    fn closed_notice(&self) -> Option<Done> {
+        let doc = self.doc.as_ref().filter(|d| d.closed())?;
+        let why = doc.locked.unwrap_or(crate::doc_review::APPROVED_FILE);
+        Some(Done::Diff(Outcome::Notice(why)))
+    }
+
+    /// Whether its lines take no comments: a commit's, the evidence, a
+    /// file whose stage is done.
     fn read_only(&self) -> bool {
-        self.commit.is_some() || self.evidence()
+        self.commit.is_some() || self.evidence() || self.closed()
+    }
+
+    /// Reopen the file's stage, unless it is locked.
+    fn reopen(&self) -> Option<Done> {
+        let doc = self.doc.as_ref()?;
+        match doc.standing {
+            Standing::Approved => Some(Done::Reopen),
+            _ => self.closed_notice(),
+        }
+    }
+
+    /// Go to the stage the feature is at, from a file whose stage is done.
+    fn go_on(&self) -> Option<Done> {
+        match self.doc.as_ref()?.current {
+            Some(_) => Some(Done::GoOn),
+            None => Some(Done::Diff(Outcome::Notice(ALL_DONE))),
+        }
     }
 
     /// Approve the file under review, unless a comment is being written.
@@ -337,6 +390,9 @@ impl WorktreeDiff {
     fn approve(&self) -> Option<Done> {
         if self.evidence() {
             return Some(Done::Diff(Outcome::Notice(EVIDENCE_READ_ONLY)));
+        }
+        if let Some(closed) = self.closed_notice() {
+            return Some(closed);
         }
         if self.diff.editing.is_some() {
             return Some(Done::Diff(Outcome::Notice(DRAFT_OPEN)));
@@ -349,6 +405,9 @@ impl WorktreeDiff {
     fn send_back(&self, env: Env) -> Option<Done> {
         if self.evidence() {
             return Some(Done::Diff(Outcome::Notice(EVIDENCE_READ_ONLY)));
+        }
+        if let Some(closed) = self.closed_notice() {
+            return Some(closed);
         }
         if self.diff.editing.is_some() {
             return Some(Done::Diff(Outcome::Notice(DRAFT_OPEN)));
@@ -365,10 +424,10 @@ impl WorktreeDiff {
         Some(Done::SendBack(self.doc_markdown()))
     }
 
-    /// Whether it is reviewed: a file under review, not the evidence, or
-    /// a feature's code.
+    /// Whether it is reviewed: a file under review, not the evidence nor
+    /// one whose stage is done, or a feature's code.
     fn reviewed(&self) -> bool {
-        (self.doc.is_some() && !self.evidence()) || self.feature.is_some()
+        (self.doc.is_some() && !self.evidence() && !self.closed()) || self.feature.is_some()
     }
 
     /// What the diff asked for, on a file under review: edits only while
@@ -391,6 +450,10 @@ impl WorktreeDiff {
         let locked = self.doc.as_ref().and_then(|d| d.locked);
         match outcome {
             Some(o) if self.evidence() && refused(&o) => Some(Outcome::Notice(EVIDENCE_READ_ONLY)),
+            // Its comments and edits are refused as read-only: it says why.
+            Some(Outcome::Notice(diff_view::READ_ONLY)) if self.closed() => {
+                locked.map(Outcome::Notice)
+            }
             Some(o) if restores(&o) => Some(Outcome::Notice(DOC_NO_RESTORE)),
             Some(o) if changes(&o) && locked.is_some() => locked.map(Outcome::Notice),
             Some(Outcome::Copy { count, .. }) => Some(Outcome::Copy {
@@ -409,22 +472,29 @@ impl WorktreeDiff {
                 || what.contains("yank")
                 || what.contains("restore the change")
         };
+        let yank = |what: &str| what.contains("yank");
         // Evidence takes no comments either.
         let comments = |what: &str| what.contains("comment");
         // A file under review is edited while unlocked, never restored.
         let restore = |what: &str| what.contains("restore the change");
         let locked = self.doc.as_ref().is_some_and(|d| d.locked.is_some());
-        let read_only =
-            self.commit.is_some() || self.feature.is_some() || self.evidence() || locked;
+        let read_only = self.commit.is_some() || self.feature.is_some() || self.evidence();
         let evidence = self.evidence();
+        let closed = self.closed();
         // A file under review is a page: no other file to go to, no header.
         let other_file = |what: &str| what.contains("the file before or after");
         let on_page = self.doc.is_some();
         let diff = (diff_help_lines().into_iter())
             .filter(|(_, what, _)| {
                 !(read_only && edits(what))
+                    // Its yanks take nothing from a locked file.
+                    && !(locked && edits(what) && !yank(what))
                     && !(on_page && (restore(what) || other_file(what)))
-                    && !(evidence && comments(what))
+                    && !((evidence || closed) && comments(what))
+            })
+            .map(|(key, what, tone)| match locked && yank(&what) {
+                true => (key, what.replace("; paste after, before", ""), tone),
+                false => (key, what, tone),
             })
             .map(|(key, what, tone)| match on_page {
                 true => (
@@ -446,6 +516,13 @@ impl WorktreeDiff {
         }
         let own: &[(&str, &str)] = match (evidence, &self.feature) {
             (_, Some(_)) => &crate::feature_diff::KEYS,
+            (false, _) if closed => &[
+                ("Esc", "back to the feature"),
+                ("F1", "list the keys"),
+                (PREVIEW_KEY, "go to the next of Preview, Review and Split"),
+                (APPROVE_KEY, "go to the stage the feature is at"),
+                (SEND_BACK_KEY, "reopen the file, unless it is locked"),
+            ],
             (true, _) => &[
                 ("Esc", "back to the feature"),
                 ("F1", "list the keys"),
@@ -480,6 +557,7 @@ impl WorktreeDiff {
         let lead = self.lead();
         let empty = self.empty();
         let read_only = self.read_only();
+        let yanks = self.closed();
         let WorktreeDiff {
             root,
             label,
@@ -499,6 +577,7 @@ impl WorktreeDiff {
             None => (None, None),
         };
         let mut ctx = ctx(&sections, env, &lead, empty, read_only);
+        ctx.yanks = yanks;
         (ctx.check, ctx.note) = marks;
         ctx.count_sections = feature.is_some_and(|f| f.repos.len() > 1);
         f(diff, &ctx)
@@ -517,6 +596,7 @@ impl WorktreeDiff {
             None => (None, None),
         };
         let mut ctx = ctx(&sections, env, &lead, self.empty(), self.read_only());
+        ctx.yanks = self.closed();
         (ctx.check, ctx.note) = marks;
         ctx.count_sections = feature.is_some_and(|f| f.repos.len() > 1);
         f(&ctx)
@@ -648,6 +728,19 @@ impl WorktreeDiff {
         if self.evidence() {
             return;
         }
+        if let Some(doc) = self.doc.as_ref().filter(|d| d.closed()) {
+            if doc.standing == Standing::Approved {
+                view.title_buttons
+                    .push(hint(ReposButton::Reopen, SEND_BACK_KEY));
+            }
+            if let Some(current) = doc.current {
+                view.title_buttons.push(Hint {
+                    label: format!("Go to {}", current.label()),
+                    ..hint(ReposButton::GoOn, APPROVE_KEY)
+                });
+            }
+            return;
+        }
         view.title_buttons.extend([
             hint(ReposButton::CommentFile, "Shift+C"),
             hint(ReposButton::SendBack, SEND_BACK_KEY),
@@ -710,6 +803,12 @@ impl WorktreeDiff {
         let enter = matches!(sym, Keysym::Return | Keysym::KP_Enter);
         let typing = self.diff.editing.is_some() || self.diff.search_focused();
         let keyed = self.doc.is_some() || self.feature.is_some();
+        if self.closed() && enter && mods.ctrl && !mods.alt && !mods.logo && !typing {
+            return match mods.shift {
+                false => self.go_on(),
+                true => self.reopen(),
+            };
+        }
         if keyed && enter && mods.ctrl && !mods.alt && !mods.logo && !typing {
             return match mods.shift {
                 false => self.approve(),
@@ -775,6 +874,14 @@ impl WorktreeDiff {
         if self.reviewed() {
             buttons.extend([B::Approve, B::SendBack]);
         }
+        if let Some(doc) = self.doc.as_ref().filter(|d| d.closed()) {
+            if doc.standing == Standing::Approved {
+                buttons.push(B::Reopen);
+            }
+            if doc.current.is_some() {
+                buttons.push(B::GoOn);
+            }
+        }
         if self.diff.review.own() > 0 {
             buttons.extend([B::CopyReview, B::ClearReview]);
         }
@@ -792,11 +899,15 @@ impl WorktreeDiff {
                     B::Close if self.commit.is_some() || self.doc.is_some() => "back".into(),
                     B::Close if self.feature.as_ref().is_some_and(|f| f.back) => "back".into(),
                     B::Close => "close".into(),
+                    B::GoOn => match self.doc.as_ref().and_then(|d| d.current) {
+                        Some(current) => format!("go to {}", current.label()),
+                        None => "go on".into(),
+                    },
                     button => button.label().to_lowercase(),
                 },
                 key: match button {
-                    B::Approve => APPROVE_KEY,
-                    B::SendBack => SEND_BACK_KEY,
+                    B::Approve | B::GoOn => APPROVE_KEY,
+                    B::SendBack | B::Reopen => SEND_BACK_KEY,
                     B::MarkViewed => "Space",
                     B::NextUnviewed => NEXT_UNVIEWED_KEY,
                     button => key_name(button),
@@ -844,6 +955,8 @@ impl WorktreeDiff {
             match hit {
                 ReposHit::Button(ReposButton::Approve) => return self.approve(),
                 ReposHit::Button(ReposButton::SendBack) => return self.send_back(env),
+                ReposHit::Button(ReposButton::Reopen) => return self.reopen(),
+                ReposHit::Button(ReposButton::GoOn) => return self.go_on(),
                 ReposHit::DiffRestore(_) if self.evidence() => {
                     return Some(Done::Diff(Outcome::Notice(EVIDENCE_READ_ONLY)));
                 }
@@ -1035,6 +1148,7 @@ fn ctx<'a>(
         note: None,
         selected: None,
         read_only,
+        yanks: false,
     }
 }
 
@@ -1384,6 +1498,21 @@ impl crate::Gerdr {
             }
             Done::CycleMode => {
                 self.cycle_doc_mode();
+                None
+            }
+            Done::Reopen => {
+                let of = self.wd().and_then(|wd| wd.doc.clone());
+                if let Some(of) = of {
+                    self.reopen_stage(&of.project, &of.slug, of.file.stage());
+                }
+                None
+            }
+            Done::GoOn => {
+                let of = self.wd().and_then(|wd| wd.doc.clone());
+                if let Some(of) = of {
+                    self.show_feature_tab(&of.project, &of.slug);
+                    self.feature_cursor_to_current_of(&of.project, &of.slug);
+                }
                 None
             }
         }
@@ -1866,6 +1995,8 @@ mod tests {
             state: "ready for review".into(),
             text: None,
             locked: None,
+            standing: Standing::Open,
+            current: Some(Stage::Discover),
         };
         let mut wd = WorktreeDiff::of_doc(doc, 2, Review::default());
         wd.set_doc(Ok("# Brief\nUsers log in.\nWith a password.\n".into()), ENV);
@@ -2455,6 +2586,135 @@ mod tests {
         );
     }
 
+    /// The review of the brief with its stage done, the feature at Plan.
+    fn closed_doc(standing: Standing) -> WorktreeDiff {
+        let mut wd = doc();
+        let it = wd.doc.as_mut().unwrap();
+        (it.standing, it.current) = (standing, Some(Stage::Plan));
+        it.state = "approved 1m ago by you".into();
+        it.locked = Some(match standing {
+            Standing::Locked(_) => crate::doc_review::LOCKED_FILE,
+            _ => crate::doc_review::APPROVED_FILE,
+        });
+        wd
+    }
+
+    #[test]
+    fn an_approved_file_can_be_read_reopened_and_left() {
+        let mut wd = closed_doc(Standing::Approved);
+        let ctrl = ModifiersState {
+            ctrl: true,
+            ..ModifiersState::default()
+        };
+        let ctrl_shift = ModifiersState {
+            shift: true,
+            ..ctrl
+        };
+        let enter = Keysym::Return;
+        let why = crate::doc_review::APPROVED_FILE;
+        let refused = Some(Done::Diff(Outcome::Notice(why)));
+        // Its own buttons, not those of a file under review.
+        let shown = |wd: &WorktreeDiff| -> Vec<(ReposButton, String)> {
+            let view = wd.view(ENV);
+            (view.title_buttons.iter())
+                .map(|h| (h.button, h.label.clone()))
+                .collect()
+        };
+        assert_eq!(
+            shown(&wd),
+            [
+                (ReposButton::Reopen, "Reopen".to_owned()),
+                (ReposButton::GoOn, "Go to Plan".to_owned()),
+            ]
+        );
+        let hints: Vec<ReposButton> = wd.hints().iter().map(|h| h.button).collect();
+        assert!(hints.contains(&ReposButton::Reopen) && hints.contains(&ReposButton::GoOn));
+        assert!(!hints.contains(&ReposButton::Approve) && !hints.contains(&ReposButton::SendBack));
+        // The keys and buttons agree.
+        assert_eq!(wd.key(&ctrl, enter, enter, ENV), Some(Done::GoOn));
+        assert_eq!(wd.key(&ctrl_shift, enter, enter, ENV), Some(Done::Reopen));
+        let press = |b| ReposHit::Button(b);
+        assert_eq!(
+            wd.click(press(ReposButton::Reopen), ENV),
+            Some(Done::Reopen)
+        );
+        assert_eq!(wd.click(press(ReposButton::GoOn), ENV), Some(Done::GoOn));
+        // Nothing that would change it, each saying why.
+        assert_eq!(wd.click(press(ReposButton::Approve), ENV), refused);
+        assert_eq!(wd.click(press(ReposButton::SendBack), ENV), refused);
+        let key = |wd: &mut WorktreeDiff, sym: Keysym| wd.key(&none(), sym, sym, ENV);
+        wd.click(ReposHit::DiffRow(1), ENV);
+        assert_eq!(key(&mut wd, Keysym::c), refused);
+        assert!(wd.diff.editing.is_none());
+        key(&mut wd, Keysym::d);
+        assert_eq!(key(&mut wd, Keysym::d), refused);
+        // A yank takes nothing from it.
+        key(&mut wd, Keysym::y);
+        let yanked = key(&mut wd, Keysym::y);
+        assert!(
+            matches!(yanked, Some(Done::Diff(Outcome::Yank(_)))),
+            "{yanked:?}"
+        );
+        assert_eq!(key(&mut wd, Keysym::p), refused);
+        // The keys sheet says the same.
+        let lines = wd.help_lines();
+        let says = |what: &str| lines.iter().any(|(_, w, _)| w.contains(what));
+        assert!(says("go to the stage the feature is at"));
+        assert!(says("reopen the file"));
+        assert!(says("yank"));
+        assert!(!says("paste"));
+        assert!(!says("comment"));
+        assert!(!says("approve"));
+        assert!(!says("delete from the file"));
+        assert_eq!(key(&mut wd, Keysym::Escape), Some(Done::Close));
+    }
+
+    #[test]
+    fn a_locked_file_only_goes_on_and_says_what_frees_it() {
+        let mut wd = closed_doc(Standing::Locked(Stage::Plan));
+        let ctrl = ModifiersState {
+            ctrl: true,
+            ..ModifiersState::default()
+        };
+        let ctrl_shift = ModifiersState {
+            shift: true,
+            ..ctrl
+        };
+        let enter = Keysym::Return;
+        let why = crate::doc_review::LOCKED_FILE;
+        let refused = Some(Done::Diff(Outcome::Notice(why)));
+        let view = wd.view(ENV);
+        let buttons: Vec<ReposButton> = view.title_buttons.iter().map(|h| h.button).collect();
+        assert_eq!(buttons, [ReposButton::GoOn]);
+        let hints: Vec<ReposButton> = wd.hints().iter().map(|h| h.button).collect();
+        assert!(!hints.contains(&ReposButton::Reopen));
+        assert_eq!(wd.key(&ctrl, enter, enter, ENV), Some(Done::GoOn));
+        assert_eq!(wd.key(&ctrl_shift, enter, enter, ENV), refused);
+        let reopen = ReposHit::Button(ReposButton::Reopen);
+        assert_eq!(wd.click(reopen, ENV), refused);
+        // Every stage done: nowhere to go on to, and it says so.
+        wd.doc.as_mut().unwrap().current = None;
+        let view = wd.view(ENV);
+        assert!(view.title_buttons.is_empty());
+        let all_done = Some(Done::Diff(Outcome::Notice(ALL_DONE)));
+        assert_eq!(wd.key(&ctrl, enter, enter, ENV), all_done);
+    }
+
+    #[test]
+    fn a_closed_file_says_so_in_the_success_colour() {
+        let open = doc();
+        let view = open.repos_view(ENV);
+        assert_eq!(view.summary_tone, crate::chrome::Tone::Muted);
+        let closed = closed_doc(Standing::Approved);
+        let view = closed.repos_view(ENV);
+        assert_eq!(view.summary_tone, crate::chrome::Tone::Success);
+        assert!(
+            view.summary.contains("approved 1m ago by you"),
+            "{}",
+            view.summary
+        );
+    }
+
     fn evidence() -> WorktreeDiff {
         let doc = DocOf {
             project: "p".into(),
@@ -2466,6 +2726,8 @@ mod tests {
             state: "run 2 failed".into(),
             text: None,
             locked: None,
+            standing: Standing::Open,
+            current: Some(Stage::Verify),
         };
         let mut wd = WorktreeDiff::of_doc(doc, 2, Review::default());
         wd.set_doc(Ok("# Evidence\napi: npm test failed\n".into()), ENV);

@@ -1110,6 +1110,7 @@ mod tests {
             links: Vec::new(),
             status: Status::Open,
             marks: Default::default(),
+            run_counts: Default::default(),
             shipping: Default::default(),
             runs: Default::default(),
             stage_agents: Default::default(),

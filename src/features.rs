@@ -807,8 +807,14 @@ pub enum PanelOutcome {
     Evidence,
     /// Open this pull request's page.
     OpenPr(String),
-    /// Clear this stage's mark and the later ones'.
+    /// Reopen this done stage, once it isn't locked (see
+    /// `Gerdr::reopen_stage`).
     Untick(Stage),
+    /// Show the stage the feature is at, from a done one's page.
+    GoToCurrent,
+    /// Start this current stage over, after asking (see
+    /// `Gerdr::ask_start_over`).
+    StartOver(Stage),
     /// A later stage can't be marked yet: this one comes first.
     NotYet(Stage),
     /// Run this agent stage with this agent, from its next start on.
@@ -859,19 +865,47 @@ pub struct RowCtx {
     /// How many acceptance criteria the brief has: with some, Manual test
     /// is marked from its sheet.
     pub criteria: usize,
-    /// Whether `brief.md` and `plan.md` are there, as the latest probe
-    /// found them (see `page::Docs`): their pages offer Review and
-    /// Preview then.
-    pub written: [bool; 2],
+    /// Which stages' files are there, by `stage_index`, as the latest
+    /// probe found them (see `page::Docs`): an earlier stage locks by
+    /// them, and the brief's and the plan's pages offer Review and Preview.
+    pub written: [bool; Stage::ALL.len()],
 }
 
 impl RowCtx {
-    /// Whether `stage`'s file is there: Discover's and Plan's only.
+    /// Whether `stage` has a file of its own, as the latest probe found.
+    pub(crate) fn has_file(self, stage: Stage) -> bool {
+        self.written[stage_index(stage)]
+    }
+
+    /// Whether `stage`'s file is there to read on its page: Discover's
+    /// and Plan's only.
     fn wrote(self, stage: Stage) -> bool {
-        match stage {
-            Stage::Discover => self.written[0],
-            Stage::Plan => self.written[1],
-            _ => false,
+        matches!(stage, Stage::Discover | Stage::Plan) && self.has_file(stage)
+    }
+
+    /// The stage that locks done `stage` of `feature`: see
+    /// `Feature::locked_by`.
+    fn locked_by(self, feature: &Feature, stage: Stage) -> Option<Stage> {
+        feature.locked_by(stage, |s| self.has_file(s))
+    }
+}
+
+/// Why `by` locks the stage before it in `feature`, as a page or a tab
+/// says it: "Plan has plan.md".
+pub(crate) fn lock_why(feature: &Feature, by: Stage) -> String {
+    let label = by.label();
+    if feature.is_done(by) {
+        return format!("{label} is done");
+    }
+    match by {
+        Stage::Verify => format!("{label} has a run"),
+        Stage::AiReview => format!("{label} has its review"),
+        Stage::CodeReview => format!("{label} has viewed files or comments"),
+        Stage::ManualTest => format!("{label} has results"),
+        Stage::Ship => format!("{label} has pull requests"),
+        _ => {
+            let name = crate::feature::artifacts::name(by).unwrap_or("its file");
+            format!("{label} has {name}")
         }
     }
 }
@@ -888,6 +922,10 @@ pub fn row_action(feature: &Feature, row: PanelRow, ctx: RowCtx) -> Option<Panel
             })
         }
         PanelRow::Stage(stage) => Some(match stage_mark(feature, stage) {
+            StageMark::Done if ctx.locked_by(feature, stage).is_some() => {
+                feature.current()?;
+                PanelOutcome::GoToCurrent
+            }
             StageMark::Done => PanelOutcome::Untick(stage),
             StageMark::Current if stage == Stage::Ship => PanelOutcome::Ship,
             StageMark::Current if stage == Stage::Verify && ctx.checks => PanelOutcome::RunChecks,
@@ -905,15 +943,23 @@ pub fn row_action(feature: &Feature, row: PanelRow, ctx: RowCtx) -> Option<Panel
 
 /// The button to `stage`'s last agent, done stage or not: its tab, or its
 /// chat once its tab is closed. A chat of a feature no longer open has no
-/// folder to go back to, or none to work in.
-fn agent_button(feature: &Feature, stage: Stage) -> Option<(&'static str, PanelOutcome)> {
+/// folder to go back to, or none to work in; that of a locked stage would
+/// change what the next stage is built on.
+fn agent_button(
+    feature: &Feature,
+    stage: Stage,
+    ctx: RowCtx,
+) -> Option<(&'static str, PanelOutcome)> {
     if needs(stage).is_none() || stage_mark(feature, stage) == StageMark::Later {
         return None;
     }
     let run = feature.runs.get(&stage)?;
     match run.pane {
         Some(_) => Some(("Show agent", PanelOutcome::ShowAgent(stage))),
-        None if feature.status == Status::Open && run.resumes() => {
+        None if feature.status == Status::Open
+            && run.resumes()
+            && ctx.locked_by(feature, stage).is_none() =>
+        {
             Some(("Resume agent", PanelOutcome::ResumeAgent(stage)))
         }
         None => None,
@@ -1005,6 +1051,18 @@ fn fresh_stage(feature: &Feature, row: PanelRow) -> Option<Stage> {
     .then_some(stage)
 }
 
+/// The stage Ctrl+Shift+Del starts over on `stage`'s page of `feature`:
+/// the current one, once there is something to lose. Discover has no stage
+/// before it to free, and Ctrl+R starts its agent afresh.
+fn start_over_stage(feature: &Feature, stage: Stage, ctx: RowCtx) -> Option<Stage> {
+    let live = (feature.runs.get(&stage)).is_some_and(|run| run.pane.is_some());
+    (feature.status == Status::Open
+        && feature.current() == Some(stage)
+        && stage != Stage::Discover
+        && (live || feature.has_output(stage, |s| ctx.has_file(s))))
+    .then_some(stage)
+}
+
 /// Whether Verify of `feature` wrote `evidence.md`: a run of it ended, or
 /// one before the one running.
 fn has_evidence(feature: &Feature) -> bool {
@@ -1028,23 +1086,29 @@ fn row_page(feature: &Feature, row: PanelRow) -> Option<PanelOutcome> {
 
 /// What Enter does on `row`, in words for its hint.
 fn row_hint(feature: &Feature, row: PanelRow, ctx: RowCtx) -> &'static str {
-    match row_action(feature, row, ctx) {
-        Some(PanelOutcome::StartAgent(..)) => "start agent",
-        Some(PanelOutcome::ShowAgent(_)) => "show agent",
-        Some(PanelOutcome::ResumeAgent(_)) => "resume agent",
-        Some(PanelOutcome::OpenDoc(Stage::Discover)) => "open brief",
-        Some(PanelOutcome::OpenDoc(_) | PanelOutcome::ReviewDoc(_)) => "review plan",
-        Some(PanelOutcome::Continue(_)) => "continue",
-        Some(PanelOutcome::RunChecks) => "run checks",
-        Some(PanelOutcome::Findings) => "review findings",
-        Some(PanelOutcome::SendFixes) => "send fixes",
-        Some(PanelOutcome::CodeReview) => "review code",
-        Some(PanelOutcome::ManualTest) => "test",
-        Some(PanelOutcome::Tick) => "mark done",
-        Some(PanelOutcome::Ship) => "ship\u{2026}",
-        Some(PanelOutcome::Untick(_)) => "reopen",
-        Some(PanelOutcome::Touch(_)) => "touch",
-        Some(PanelOutcome::Open(_)) => "open tab",
+    row_action(feature, row, ctx).map_or("", |action| action_hint(&action))
+}
+
+/// What a key doing `action` is called in the hints.
+fn action_hint(action: &PanelOutcome) -> &'static str {
+    match action {
+        PanelOutcome::StartAgent(..) => "start agent",
+        PanelOutcome::ShowAgent(_) => "show agent",
+        PanelOutcome::ResumeAgent(_) => "resume agent",
+        PanelOutcome::OpenDoc(Stage::Discover) => "open brief",
+        PanelOutcome::OpenDoc(_) | PanelOutcome::ReviewDoc(_) => "review plan",
+        PanelOutcome::Continue(_) => "continue",
+        PanelOutcome::RunChecks => "run checks",
+        PanelOutcome::Findings => "review findings",
+        PanelOutcome::SendFixes => "send fixes",
+        PanelOutcome::CodeReview => "review code",
+        PanelOutcome::ManualTest => "test",
+        PanelOutcome::Tick => "mark done",
+        PanelOutcome::Ship => "ship\u{2026}",
+        PanelOutcome::Untick(_) => "reopen",
+        PanelOutcome::GoToCurrent => "go to the current stage",
+        PanelOutcome::Touch(_) => "touch",
+        PanelOutcome::Open(_) => "open tab",
         _ => "",
     }
 }
@@ -1411,6 +1475,14 @@ impl FeaturePanel {
                     _ => TabArea::Stages,
                 };
             }
+            // A locked stage's is refused when done, saying why; any other
+            // stage has nothing to reopen.
+            Keysym::Return | Keysym::KP_Enter
+                if ctrl && mods.shift && self.focus == TabArea::Stages =>
+            {
+                return (stage_mark(feature, stage) == StageMark::Done)
+                    .then_some(PanelOutcome::Untick(stage));
+            }
             Keysym::Return | Keysym::KP_Enter => {
                 return match self.focus {
                     TabArea::Stages => page_enter(feature, stage, ctx),
@@ -1427,7 +1499,7 @@ impl FeaturePanel {
             Keysym::o | Keysym::O if ctrl => return Some(PanelOutcome::Open(feature.dir.clone())),
             Keysym::c | Keysym::C if ctrl => return Some(PanelOutcome::CopyPath),
             Keysym::r | Keysym::R if ctrl && mods.shift => {
-                return agent_button(feature, stage).map(|(_, outcome)| outcome);
+                return agent_button(feature, stage, ctx).map(|(_, outcome)| outcome);
             }
             Keysym::r | Keysym::R if ctrl => {
                 return fresh_stage(feature, row)
@@ -1439,6 +1511,9 @@ impl FeaturePanel {
             }
             Keysym::l | Keysym::L if ctrl && mods.shift && linkable(feature) => {
                 return Some(PanelOutcome::LinkProject);
+            }
+            Keysym::Delete | Keysym::KP_Delete if ctrl && mods.shift => {
+                return start_over_stage(feature, stage, ctx).map(PanelOutcome::StartOver);
             }
             Keysym::Delete | Keysym::KP_Delete if plain => return Some(PanelOutcome::Remove),
             _ => {}
@@ -1475,8 +1550,8 @@ fn stage_index(stage: Stage) -> usize {
 }
 
 /// What Enter does on `stage`'s page of `feature`: its button marked
-/// with Enter, else, on a later stage, says which comes first. A done
-/// stage's has none: Reopen is only clicked.
+/// with Enter, else, on a later stage, says which comes first. On a done
+/// stage it goes to the current one: Reopen has its own key.
 fn page_enter(feature: &Feature, stage: Stage, ctx: RowCtx) -> Option<PanelOutcome> {
     page_actions(feature, stage, ctx)
         .into_iter()
@@ -1488,12 +1563,16 @@ fn page_enter(feature: &Feature, stage: Stage, ctx: RowCtx) -> Option<PanelOutco
 
 /// The key mark of the page button Enter presses.
 const ENTER_MARK: &str = "\u{23ce}";
+/// The key of a done stage's Reopen.
+const REOPEN_KEY: &str = "Ctrl+Shift+Enter";
+/// The key of the current stage's Start over.
+const START_OVER_KEY: &str = "Ctrl+Shift+Del";
 
 /// The buttons on `stage`'s page of `feature`, each with what it does:
-/// what Enter does first (the primary, or Reopen on a done stage, which
-/// Enter doesn't press),
-/// then its agent's tab, a fresh agent, Verify's evidence, AI review's
-/// fixes to send, and Ship's pull requests. A later stage has none.
+/// what Enter does first (the primary; on a done stage, going to the
+/// current one, then Reopen unless it is locked), then its agent's tab, a
+/// fresh agent, starting over, Verify's evidence, AI review's fixes to
+/// send, and Ship's pull requests. A later stage has none.
 /// The page's clicks and Enter both go by this list.
 pub fn page_actions(
     feature: &Feature,
@@ -1511,13 +1590,20 @@ pub fn page_actions(
     };
     let row = PanelRow::Stage(stage);
     let mut out = Vec::new();
+    if let (StageMark::Done, Some(current)) = (mark, feature.current()) {
+        let label = format!("Go to {}", current.label());
+        out.push((
+            button(&label, ButtonStyle::Primary, Some(ENTER_MARK)),
+            PanelOutcome::GoToCurrent,
+        ));
+    }
     if let (Some(label), Some(main)) = (
         stage_button(feature, stage, ctx),
         row_action(feature, row, ctx),
     ) {
         // Reopen is no default: Enter leaves a done stage be.
         let (style, key) = match main {
-            PanelOutcome::Untick(_) => (ButtonStyle::Plain, None),
+            PanelOutcome::Untick(_) => (ButtonStyle::Plain, Some(REOPEN_KEY)),
             _ => (ButtonStyle::Primary, Some(ENTER_MARK)),
         };
         out.push((button(label, style, key), main));
@@ -1525,7 +1611,8 @@ pub fn page_actions(
     let has =
         |out: &[(PageButton, PanelOutcome)], o: &PanelOutcome| out.iter().any(|(_, x)| x == o);
     // Also on a done stage: its agent's chat is still worth reading.
-    if let Some((label, outcome)) = agent_button(feature, stage).filter(|(_, o)| !has(&out, o)) {
+    if let Some((label, outcome)) = agent_button(feature, stage, ctx).filter(|(_, o)| !has(&out, o))
+    {
         let key = Some("Ctrl+Shift+R");
         out.push((button(label, ButtonStyle::Plain, key), outcome));
     }
@@ -1535,7 +1622,17 @@ pub fn page_actions(
         // What opens on its review already is that button.
         let reviews = has(&out, &PanelOutcome::OpenDoc(stage))
             && DocMode::default_for(DocFile::Stage(stage)) == DocMode::Review;
-        if !has(&out, &review) && !reviews {
+        if mark == StageMark::Done {
+            // Nothing to review on a done stage: it is only read.
+            let label = match stage {
+                Stage::Discover => "Open brief",
+                _ => "Open plan",
+            };
+            out.push((
+                button(label, ButtonStyle::Plain, None),
+                PanelOutcome::OpenDoc(stage),
+            ));
+        } else if !has(&out, &review) && !reviews {
             out.push((button("Review", ButtonStyle::Plain, None), review));
         }
         out.push((
@@ -1548,6 +1645,16 @@ pub fn page_actions(
         out.push((
             button("Restart agent", ButtonStyle::Plain, Some("Ctrl+R")),
             fresh,
+        ));
+    }
+    if let Some(stage) = start_over_stage(feature, stage, ctx) {
+        out.push((
+            button(
+                "Start over\u{2026}",
+                ButtonStyle::Destructive,
+                Some(START_OVER_KEY),
+            ),
+            PanelOutcome::StartOver(stage),
         ));
     }
     if let Some(page) = row_page(feature, row) {
@@ -1982,6 +2089,13 @@ impl Gerdr {
         probe.reading.as_ref().ok()
     }
 
+    /// What the latest probe of feature `slug` of `project` found of its
+    /// files, if one is back.
+    pub(crate) fn feature_docs(&self, project: &str, slug: &str) -> Option<&feature::page::Docs> {
+        let key = (project.to_owned(), slug.to_owned());
+        Some(&self.features.probes.get(&key)?.last.as_ref()?.docs)
+    }
+
     /// What the panel's rows need of `feature` besides it.
     fn row_ctx(&self, feature: &Feature) -> RowCtx {
         let config = self.projects.workflows(feature, |w| w.verify.clone());
@@ -1991,8 +2105,7 @@ impl Gerdr {
         let docs = (self.features.probes.get(&key))
             .and_then(|p| p.last.as_ref())
             .map(|p| &p.docs);
-        let written = [Stage::Discover, Stage::Plan]
-            .map(|stage| docs.is_some_and(|d| d.written.contains(&stage)));
+        let written = Stage::ALL.map(|stage| docs.is_some_and(|d| d.written.contains(&stage)));
         RowCtx {
             checks,
             criteria,
@@ -2116,6 +2229,10 @@ impl Gerdr {
         let mut due = Vec::new();
         if let Some(panel) = &self.features.panel {
             due.push((panel.project.clone(), panel.slug.clone(), PANEL_EVERY));
+        }
+        // A file's tab says whether its stage is locked by now.
+        if let Some(doc) = (self.tab().and_then(|t| t.review())).and_then(|r| r.wd.doc.as_ref()) {
+            due.push((doc.project.clone(), doc.slug.clone(), PANEL_EVERY));
         }
         // The sheet's results count on the code as it is now.
         if let Some(sheet) = &self.features.manual {
@@ -2750,6 +2867,7 @@ impl Gerdr {
             links,
             status: Status::Open,
             marks: BTreeMap::new(),
+            run_counts: BTreeMap::new(),
             history: vec![Event {
                 at: now,
                 what: "created".into(),
@@ -3235,7 +3353,6 @@ impl Gerdr {
         else {
             return;
         };
-        let now = feature::now();
         match outcome {
             PanelOutcome::Tick => match self.feature(&project, &slug).and_then(Feature::current) {
                 Some(stage) if needs(stage).is_some() => {
@@ -3289,18 +3406,9 @@ impl Gerdr {
                 self.pick_stage_agent(&project, &slug, stage, &name);
             }
             PanelOutcome::CycleAgent(stage) => self.cycle_stage_agent(&project, &slug, stage),
-            PanelOutcome::Untick(stage) => {
-                let Some(feature) = self.feature_mut(&project, &slug) else {
-                    return;
-                };
-                if feature.untick(stage, now) {
-                    self.save_feature(&project, &slug);
-                    self.show_success(format!("{} reopened", stage.label()));
-                    self.probe_feature(&project, &slug);
-                } else {
-                    self.show_warning(format!("{} isn't done", stage.label()));
-                }
-            }
+            PanelOutcome::Untick(stage) => self.reopen_stage(&project, &slug, stage),
+            PanelOutcome::GoToCurrent => self.feature_cursor_to_current_of(&project, &slug),
+            PanelOutcome::StartOver(stage) => self.ask_start_over(&project, &slug, stage),
             PanelOutcome::NotYet(first) => {
                 self.show_warning(format!("Mark {} done first", first.label()));
             }
@@ -4912,7 +5020,7 @@ fn agent_card(
 fn file_card(
     feature: &Feature,
     stage: Stage,
-    written: bool,
+    ctx: RowCtx,
     actions: &[(PageButton, PanelOutcome)],
 ) -> PageSection {
     let own = [
@@ -4924,7 +5032,7 @@ fn file_card(
         name: crate::feature::artifacts::name(stage)
             .unwrap_or("file")
             .to_owned(),
-        state: file_line(feature, stage, written),
+        state: file_line(feature, stage, ctx),
         buttons: (actions.iter().enumerate())
             .filter(|(_, (b, o))| b.style == ButtonStyle::Plain && own.contains(o))
             .map(|(i, _)| i)
@@ -4932,13 +5040,18 @@ fn file_card(
     }
 }
 
-/// How Discover's or Plan's file stands in `feature`, `written`: it is
-/// there. A restarted agent leaves the last run's file be until it writes
-/// its own, so the card doesn't say it is gone.
-fn file_line(feature: &Feature, stage: Stage, written: bool) -> CheckLine {
+/// How Discover's or Plan's file stands in `feature`, as `ctx` found it.
+/// A restarted agent leaves the last run's file be until it writes its
+/// own, so the card doesn't say it is gone.
+fn file_line(feature: &Feature, stage: Stage, ctx: RowCtx) -> CheckLine {
     if feature.is_done(stage) {
-        return line("approved", CheckTone::Ready);
+        let text = match ctx.locked_by(feature, stage) {
+            Some(_) => "approved \u{b7} locked",
+            None => "approved",
+        };
+        return line(text, CheckTone::Ready);
     }
+    let written = ctx.wrote(stage);
     match feature.runs.get(&stage) {
         Some(run) if run.ready.is_some() => line("ready for review", CheckTone::Ready),
         Some(run) if run.sent_back > 0 => {
@@ -5043,7 +5156,10 @@ fn stage_page(
             ))
         }
         StageMark::Done => feature.marks.get(&stage).map(|m| {
-            let text = format!("Done {} by {}", projects::ago(now, m.at), m.by);
+            let mut text = format!("Done {} by {}", projects::ago(now, m.at), m.by);
+            if let Some(by) = state.ctx.locked_by(feature, stage) {
+                text.push_str(&format!(" \u{b7} locked: {}", lock_why(feature, by)));
+            }
             line(text, CheckTone::Ready)
         }),
         StageMark::Current => stage_line(feature, stage, state).map(|text| {
@@ -5070,12 +5186,17 @@ fn stage_page(
             let text = "The code changed since it was marked";
             sections.push(lines("Stale", vec![line(text, CheckTone::Blocker)]));
         }
+        let changed = state.probe.is_some_and(|p| p.docs.changed.contains(&stage));
+        if changed && mark == StageMark::Done {
+            let name = crate::feature::artifacts::name(stage).unwrap_or("Its file");
+            let text = format!("{name} changed after it was approved");
+            sections.push(lines("Changed", vec![line(text, CheckTone::Blocker)]));
+        }
         let card = || agent_card(feature, stage, state, actions, now);
         match stage {
             Stage::Discover | Stage::Plan => {
                 sections.extend(card());
-                let written = state.ctx.wrote(stage);
-                sections.push(file_card(feature, stage, written, actions));
+                sections.push(file_card(feature, stage, state.ctx, actions));
                 sections.extend(milestones_of(state.probe, stage));
             }
             Stage::Build => {
@@ -5211,7 +5332,18 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 3] = [
             ("Up / Down", "previous or next stage"),
             ("Ctrl+K / Ctrl+J", "previous or next stage"),
             ("Home / End", "first or last stage"),
-            ("Enter", "the page's main button (not Reopen)"),
+            (
+                "Enter",
+                "the page's main button; on a done stage, go to the current one",
+            ),
+            (
+                "Ctrl+Shift+Enter",
+                "reopen a done stage, unless it is locked",
+            ),
+            (
+                "Ctrl+Shift+Del",
+                "start the current stage over, after asking",
+            ),
             ("Ctrl+Shift+O", "Verify's evidence"),
             ("Ctrl+R", "start the stage's agent afresh"),
             ("Ctrl+Shift+R", "show the stage's agent, or resume its chat"),
@@ -5299,10 +5431,13 @@ fn tab_hints(
             hints.push(hint("Left / Right", "stage"));
             let enter = match page_enter(feature, stage, ctx) {
                 Some(PanelOutcome::NotYet(_)) | None => "",
-                Some(_) => row_hint(feature, row, ctx),
+                Some(action) => action_hint(&action),
             };
             if !enter.is_empty() {
                 hints.push(hint("Enter", enter));
+            }
+            if matches!(row_action(feature, row, ctx), Some(PanelOutcome::Untick(_))) {
+                hints.push(hint(REOPEN_KEY, "reopen"));
             }
             if repos {
                 hints.push(hint("Tab", "repositories"));
@@ -5313,7 +5448,10 @@ fn tab_hints(
             if fresh_stage(feature, row).is_some() {
                 hints.push(hint("Ctrl+R", "fresh agent"));
             }
-            if let Some((label, outcome)) = agent_button(feature, stage)
+            if start_over_stage(feature, stage, ctx).is_some() {
+                hints.push(hint(START_OVER_KEY, "start over\u{2026}"));
+            }
+            if let Some((label, outcome)) = agent_button(feature, stage, ctx)
                 && page_enter(feature, stage, ctx).as_ref() != Some(&outcome)
             {
                 hints.push(hint("Ctrl+Shift+R", &label.to_lowercase()));
@@ -5476,6 +5614,7 @@ pub(crate) mod tests {
             repos,
             links: Vec::new(),
             status: Status::Open,
+            run_counts: BTreeMap::new(),
             marks: Stage::ALL
                 .iter()
                 .take(done)
@@ -5883,13 +6022,17 @@ pub(crate) mod tests {
         // Left and Right (Up, Down, Ctrl+J/K) pick another stage's page.
         assert_eq!(press(&mut panel, &f, key(Keysym::Left)), None);
         assert_eq!(panel.page_stage(&f), Stage::Plan);
-        // A done stage's Enter does nothing: Reopen is only clicked.
-        assert_eq!(press(&mut panel, &f, key(Keysym::Return)), None);
-        let actions = page_actions(&f, Stage::Plan, RowCtx::default());
-        assert_eq!(actions[0].1, PanelOutcome::Untick(Stage::Plan));
+        // A done stage's Enter goes on to the current one; only its own
+        // key reopens it.
         assert_eq!(
-            (actions[0].0.style, actions[0].0.key),
-            (ButtonStyle::Plain, None)
+            press(&mut panel, &f, key(Keysym::Return)),
+            Some(PanelOutcome::GoToCurrent)
+        );
+        let actions = page_actions(&f, Stage::Plan, RowCtx::default());
+        assert_eq!(actions[1].1, PanelOutcome::Untick(Stage::Plan));
+        assert_eq!(
+            (actions[1].0.style, actions[1].0.key),
+            (ButtonStyle::Plain, Some(REOPEN_KEY))
         );
         press(&mut panel, &f, ctrl(Keysym::j));
         press(&mut panel, &f, key(Keysym::Right));
@@ -6969,8 +7112,13 @@ pub(crate) mod tests {
             Some("Ship\u{2026}")
         );
         assert_eq!(
-            stage_button(&shipping, Stage::Build, RowCtx::default()),
+            stage_button(&shipping, Stage::ManualTest, RowCtx::default()),
             Some("Reopen")
+        );
+        // Build has Verify done after it: locked, it doesn't reopen.
+        assert_eq!(
+            stage_button(&shipping, Stage::Build, RowCtx::default()),
+            None
         );
         let verifying = feature("v", vec![repo("api", true)], 3);
         let verify = PanelRow::Stage(Stage::Verify);
@@ -7302,6 +7450,7 @@ pub(crate) mod tests {
                     "Restart agent",
                     PanelOutcome::StartAgent(Stage::Build, true)
                 ),
+                ("Start over\u{2026}", PanelOutcome::StartOver(Stage::Build)),
             ]
         );
         assert_eq!(actions[0].0.style, ButtonStyle::Primary);
@@ -7402,6 +7551,7 @@ pub(crate) mod tests {
                 ("Review plan", PanelOutcome::OpenDoc(Stage::Plan)),
                 ("Show agent", PanelOutcome::ShowAgent(Stage::Plan)),
                 ("Restart agent", PanelOutcome::StartAgent(Stage::Plan, true)),
+                ("Start over\u{2026}", PanelOutcome::StartOver(Stage::Plan)),
             ]
         );
         let page = stage_page(&f, Stage::Plan, &state, &actions, 2_000);
@@ -7432,9 +7582,141 @@ pub(crate) mod tests {
         let run = f.runs.get_mut(&Stage::Plan).unwrap();
         (run.ready, run.sent_back) = (None, 2);
         assert_eq!(
-            file_line(&f, Stage::Plan, true),
+            file_line(&f, Stage::Plan, wrote_all()),
             line("sent back \u{d7}2, being written again", CheckTone::Note)
         );
+    }
+
+    /// `stages`' files are there.
+    fn wrote(stages: &[Stage]) -> RowCtx {
+        RowCtx {
+            written: Stage::ALL.map(|s| stages.contains(&s)),
+            ..RowCtx::default()
+        }
+    }
+
+    #[test]
+    fn an_approved_brief_reopens_until_the_plan_is_written() {
+        let f = feature("a", vec![repo("api", true)], 1);
+        // The plan isn't written: the brief reopens.
+        let approved = wrote(&[Stage::Discover]);
+        assert_eq!(
+            labels(&page_actions(&f, Stage::Discover, approved)),
+            [
+                ("Go to Plan", PanelOutcome::GoToCurrent),
+                ("Reopen", PanelOutcome::Untick(Stage::Discover)),
+                ("Open brief", PanelOutcome::OpenDoc(Stage::Discover)),
+                ("Preview", PanelOutcome::Preview(Stage::Discover)),
+            ]
+        );
+        assert_eq!(
+            file_line(&f, Stage::Discover, approved),
+            line("approved", CheckTone::Ready)
+        );
+        // The plan is written: nothing changes the brief any more.
+        let locked = wrote(&[Stage::Discover, Stage::Plan]);
+        assert_eq!(
+            labels(&page_actions(&f, Stage::Discover, locked)),
+            [
+                ("Go to Plan", PanelOutcome::GoToCurrent),
+                ("Open brief", PanelOutcome::OpenDoc(Stage::Discover)),
+                ("Preview", PanelOutcome::Preview(Stage::Discover)),
+            ]
+        );
+        assert_eq!(
+            file_line(&f, Stage::Discover, locked),
+            line("approved \u{b7} locked", CheckTone::Ready)
+        );
+        let state = PanelState {
+            ctx: locked,
+            ..PanelState::default()
+        };
+        let actions = page_actions(&f, Stage::Discover, locked);
+        let page = stage_page(&f, Stage::Discover, &state, &actions, 2_000);
+        let status = page.status.unwrap();
+        assert!(
+            status.text.ends_with("locked: Plan has plan.md"),
+            "{status:?}"
+        );
+        // Enter is called what it does, on both.
+        let panel = FeaturePanel::default();
+        let hints = |ctx| tab_hints(&panel, &f, Stage::Discover, &[], ctx, &[]);
+        let enter = ("Enter".to_owned(), "go to the current stage".to_owned());
+        let reopen = (REOPEN_KEY.to_owned(), "reopen".to_owned());
+        assert!(hints(approved).contains(&enter));
+        assert!(hints(approved).contains(&reopen));
+        assert!(hints(locked).contains(&enter));
+        assert!(!hints(locked).contains(&reopen));
+        // The plan's page offers what frees it.
+        let plan = page_actions(&f, Stage::Plan, locked);
+        assert!(
+            labels(&plan).contains(&("Start over\u{2026}", PanelOutcome::StartOver(Stage::Plan)))
+        );
+        // Plan's Restart agent doesn't reopen the brief: it stays locked.
+        assert!(
+            labels(&plan)
+                .iter()
+                .all(|(_, o)| *o != PanelOutcome::Untick(Stage::Discover))
+        );
+    }
+
+    #[test]
+    fn a_changed_approved_file_is_told_on_its_page() {
+        let f = feature("c", vec![repo("api", true)], 1);
+        let ctx = wrote(&[Stage::Discover]);
+        let mut p = probe(None);
+        p.docs.changed.insert(Stage::Discover);
+        let state = PanelState {
+            ctx,
+            probe: Some(&p),
+            ..PanelState::default()
+        };
+        let page = stage_page(&f, Stage::Discover, &state, &[], 2_000);
+        assert!(page.sections.contains(&lines(
+            "Changed",
+            vec![line(
+                "brief.md changed after it was approved",
+                CheckTone::Blocker
+            )]
+        )));
+    }
+
+    #[test]
+    fn panel_keys_reopen_and_start_over_a_stage() {
+        let mut panel = FeaturePanel::default();
+        let f = feature("k", vec![repo("api", true)], 2);
+        let ctrl_shift = ModifiersState {
+            ctrl: true,
+            shift: true,
+            ..ModifiersState::default()
+        };
+        // Their hints are clicked by the key they name.
+        assert_eq!(crate::keys::hint_key(REOPEN_KEY).unwrap().1, Keysym::Return);
+        assert_eq!(
+            crate::keys::hint_key(START_OVER_KEY).unwrap().1,
+            Keysym::Delete
+        );
+        let reopen = (ctrl_shift, Keysym::Return);
+        let start_over = (ctrl_shift, Keysym::Delete);
+        // On Build, current with nothing made: nothing to start over or reopen.
+        assert_eq!(press(&mut panel, &f, reopen), None);
+        assert_eq!(press(&mut panel, &f, start_over), None);
+        // On Plan, done: it reopens.
+        press(&mut panel, &f, key(Keysym::Left));
+        assert_eq!(panel.page_stage(&f), Stage::Plan);
+        assert_eq!(
+            press(&mut panel, &f, reopen),
+            Some(PanelOutcome::Untick(Stage::Plan))
+        );
+        assert_eq!(press(&mut panel, &f, start_over), None);
+    }
+
+    /// Every stage's file is there.
+    fn wrote_all() -> RowCtx {
+        RowCtx {
+            written: [true; Stage::ALL.len()],
+            ..RowCtx::default()
+        }
     }
 
     #[test]
@@ -7442,7 +7724,7 @@ pub(crate) mod tests {
         let mut f = feature("r", vec![repo("api", true)], 0);
         // The file card and its Review button read the same probe.
         let written = RowCtx {
-            written: [true, true],
+            written: [true; Stage::ALL.len()],
             ..RowCtx::default()
         };
         // Restarted: the new run isn't ready, the last run's brief is there.
@@ -7466,23 +7748,23 @@ pub(crate) mod tests {
         assert_eq!(card, Some(kept));
         // Nothing there yet: it is being written, as before.
         assert_eq!(
-            file_line(&f, Stage::Discover, false),
+            file_line(&f, Stage::Discover, RowCtx::default()),
             line("being written", CheckTone::Note)
         );
         // That agent's tab closed: nothing is changing the file.
         f.runs.get_mut(&Stage::Discover).unwrap().pane = None;
         assert_eq!(
-            file_line(&f, Stage::Discover, true),
+            file_line(&f, Stage::Discover, wrote_all()),
             line("written", CheckTone::Note)
         );
         // Never had an agent, the file put there by hand.
         f.runs.remove(&Stage::Discover);
         assert_eq!(
-            file_line(&f, Stage::Discover, true),
+            file_line(&f, Stage::Discover, wrote_all()),
             line("written", CheckTone::Note)
         );
         assert_eq!(
-            file_line(&f, Stage::Discover, false),
+            file_line(&f, Stage::Discover, RowCtx::default()),
             line("not written yet", CheckTone::Note)
         );
     }
@@ -7516,6 +7798,7 @@ pub(crate) mod tests {
             labels(&actions),
             [
                 ("Run checks", PanelOutcome::RunChecks),
+                ("Start over\u{2026}", PanelOutcome::StartOver(Stage::Verify)),
                 ("Evidence", PanelOutcome::Evidence),
             ]
         );
@@ -7591,15 +7874,24 @@ pub(crate) mod tests {
 
     #[test]
     fn a_done_stage_says_when_and_reopens_and_a_later_one_waits() {
-        let mut f = feature("d", vec![repo("api", true)], 3);
+        let mut f = feature("d", vec![repo("api", true)], 2);
         f.marks.get_mut(&Stage::Plan).unwrap().note = "looks good".into();
+        let mut built = feature("d", vec![repo("api", true)], 3);
+        built.marks.get_mut(&Stage::Plan).unwrap().note = "looks good".into();
         let state = PanelState::default();
         let actions = page_actions(&f, Stage::Plan, RowCtx::default());
         assert_eq!(
             labels(&actions),
-            [("Reopen", PanelOutcome::Untick(Stage::Plan))]
+            [
+                ("Go to Build", PanelOutcome::GoToCurrent),
+                ("Reopen", PanelOutcome::Untick(Stage::Plan)),
+            ]
         );
-        assert_eq!(actions[0].0.style, ButtonStyle::Plain);
+        assert_eq!(actions[0].0.style, ButtonStyle::Primary);
+        assert_eq!(
+            (actions[1].0.style, actions[1].0.key),
+            (ButtonStyle::Plain, Some(REOPEN_KEY))
+        );
         let page = stage_page(&f, Stage::Plan, &state, &actions, 2_060);
         assert_eq!(
             page.status,
@@ -7610,6 +7902,7 @@ pub(crate) mod tests {
             lines("Note", vec![line("looks good", CheckTone::Note)])
         );
         // Code changed since Build was marked: stale, Discover not.
+        let f = built;
         let p = probe(None);
         let state = PanelState {
             probe: Some(&p),
@@ -7765,7 +8058,7 @@ pub(crate) mod tests {
                 .any(|(_, o)| *o == PanelOutcome::Preview(Stage::Plan))
         );
         let written = RowCtx {
-            written: [true, true],
+            written: [true; Stage::ALL.len()],
             ..RowCtx::default()
         };
         let actions = page_actions(&f, Stage::Plan, written);

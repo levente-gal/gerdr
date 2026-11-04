@@ -77,6 +77,11 @@ impl Stage {
         Self::Ship,
     ];
 
+    /// The stage after it.
+    pub fn next(self) -> Option<Self> {
+        Self::ALL.into_iter().find(|s| *s > self)
+    }
+
     /// Its name in the panel: "AI review".
     pub fn label(self) -> &'static str {
         match self {
@@ -298,6 +303,23 @@ pub struct Feature {
     /// Manual test's results (see `manual`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manual: Option<manual::ManualTest>,
+    /// The last run number of each stage whose run was forgotten: a later
+    /// run goes on from it, so its prompt doesn't overwrite an old one.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub run_counts: BTreeMap<Stage, u32>,
+}
+
+/// How a stage stands once it comes to changing it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Standing {
+    /// Not done: being worked on, or not reached yet.
+    #[default]
+    Open,
+    /// Done, and it can still be reopened.
+    Approved,
+    /// Done, and this later stage holds it: that one is done, or it has
+    /// made something from this one's work.
+    Locked(Stage),
 }
 
 impl Feature {
@@ -372,6 +394,82 @@ impl Feature {
         self.marks.retain(|s, _| *s < stage);
         self.log(now, format!("Code changed: {} to do again", stage.label()));
         Some(stage)
+    }
+
+    /// Whether `stage` has made something that its starting over would
+    /// lose. `wrote` says whether its file is there (see
+    /// `artifacts::outputs`): a stage's own file, or the code review's
+    /// comments.
+    pub fn has_output(&self, stage: Stage, wrote: impl Fn(Stage) -> bool) -> bool {
+        wrote(stage)
+            || match stage {
+                Stage::Discover | Stage::Plan | Stage::Build => false,
+                Stage::Verify => self.verify.is_some(),
+                Stage::AiReview => self.review.is_some(),
+                Stage::CodeReview => !self.viewed.is_empty(),
+                Stage::ManualTest => self.manual.is_some(),
+                Stage::Ship => !self.shipping.is_empty(),
+            }
+    }
+
+    /// The later stage that keeps done `stage` from being reopened: the
+    /// next one once it is done too, else the current one once it has made
+    /// something. Only those count: what a stage left behind before the
+    /// code changed and sent the feature back doesn't hold an earlier one.
+    pub fn locked_by(&self, stage: Stage, wrote: impl Fn(Stage) -> bool) -> Option<Stage> {
+        if !self.is_done(stage) {
+            return None;
+        }
+        let next = stage.next()?;
+        if self.is_done(next) {
+            return Some(next);
+        }
+        self.has_output(next, wrote).then_some(next)
+    }
+
+    /// How `stage` stands (see `Standing`).
+    pub fn standing(&self, stage: Stage, wrote: impl Fn(Stage) -> bool) -> Standing {
+        if !self.is_done(stage) {
+            return Standing::Open;
+        }
+        match self.locked_by(stage, wrote) {
+            Some(by) => Standing::Locked(by),
+            None => Standing::Approved,
+        }
+    }
+
+    /// The number the next run of `stage`'s agent takes.
+    pub fn next_run(&self, stage: Stage) -> u32 {
+        let last = self.runs.get(&stage).map(|r| r.n);
+        let counted = self.run_counts.get(&stage).copied();
+        last.max(counted).unwrap_or(0) + 1
+    }
+
+    /// Forget `stage`'s run, its number kept for the next one.
+    pub fn forget_run(&mut self, stage: Stage) {
+        if let Some(run) = self.runs.remove(&stage) {
+            self.run_counts.insert(stage, run.n);
+        }
+    }
+
+    /// Forget what current `stage` has made, as if it had just been
+    /// reached: its run, and what it recorded. The files are its host's.
+    /// Returns false for any other stage.
+    pub fn start_over(&mut self, stage: Stage, now: u64) -> bool {
+        if self.current() != Some(stage) {
+            return false;
+        }
+        self.forget_run(stage);
+        match stage {
+            Stage::Discover | Stage::Plan | Stage::Build => {}
+            Stage::Verify => self.verify = None,
+            Stage::AiReview => self.review = None,
+            Stage::CodeReview => self.viewed = viewed::Viewed::default(),
+            Stage::ManualTest => self.manual = None,
+            Stage::Ship => self.shipping = Shipping::default(),
+        }
+        self.log(now, format!("{} started over", stage.label()));
+        true
     }
 
     /// Add `what` to its history at `now`.
@@ -505,6 +603,89 @@ pub(crate) mod tests {
 
     use super::*;
 
+    /// `feature`, its stages up to `done` marked.
+    fn done_up_to(done: Stage) -> Feature {
+        let mut f = feature("x", 0);
+        for stage in Stage::ALL.into_iter().filter(|s| *s <= done) {
+            f.marks.insert(
+                stage,
+                Mark {
+                    at: 1,
+                    by: "you".into(),
+                    note: String::new(),
+                    patch: None,
+                },
+            );
+        }
+        f
+    }
+
+    #[test]
+    fn a_done_stage_locks_once_the_next_has_made_something() {
+        let f = done_up_to(Stage::Discover);
+        let nothing = |_: Stage| false;
+        let plan = |s: Stage| s == Stage::Plan;
+        assert_eq!(f.standing(Stage::Plan, nothing), Standing::Open);
+        assert_eq!(f.standing(Stage::Discover, nothing), Standing::Approved);
+        assert_eq!(f.standing(Stage::Discover, plan), Standing::Locked(Stage::Plan));
+        // The next one done locks it, file or not.
+        let f = done_up_to(Stage::Plan);
+        assert_eq!(f.locked_by(Stage::Discover, nothing), Some(Stage::Plan));
+        // Plan itself is still free while Build has made nothing: Build
+        // writes no file, its run isn't output.
+        assert_eq!(f.locked_by(Stage::Plan, nothing), None);
+        // A record counts as much as a file.
+        let mut f = done_up_to(Stage::ManualTest);
+        assert_eq!(f.locked_by(Stage::ManualTest, nothing), None);
+        f.shipping.prs.push(Pr {
+            repo: "api".into(),
+            url: "https://example.test/1".into(),
+        });
+        assert_eq!(f.locked_by(Stage::ManualTest, nothing), Some(Stage::Ship));
+        // The last stage has none after it.
+        let f = done_up_to(Stage::Ship);
+        assert_eq!(f.standing(Stage::Ship, nothing), Standing::Approved);
+    }
+
+    #[test]
+    fn what_a_stage_left_before_going_back_holds_nothing() {
+        // Stale marks removed: Plan's file is there, Discover the current.
+        let f = feature("x", 0);
+        let plan = |s: Stage| s == Stage::Plan;
+        assert_eq!(f.current(), Some(Stage::Discover));
+        assert_eq!(f.standing(Stage::Discover, plan), Standing::Open);
+    }
+
+    #[test]
+    fn starting_over_forgets_only_the_current_stage_and_keeps_counting() {
+        let mut f = done_up_to(Stage::Plan);
+        f.runs.insert(
+            Stage::Build,
+            agents::StageRun {
+                n: 2,
+                ..agents::StageRun::default()
+            },
+        );
+        assert_eq!(f.next_run(Stage::Build), 3);
+        // Only the current stage starts over.
+        assert!(!f.start_over(Stage::Plan, 5));
+        assert!(f.is_done(Stage::Plan));
+        assert!(f.start_over(Stage::Build, 5));
+        assert!(!f.runs.contains_key(&Stage::Build));
+        // Its next run takes the next number, for chats kept apart.
+        assert_eq!(f.next_run(Stage::Build), 3);
+        assert_eq!(f.history.last().unwrap().what, "Build started over");
+        // What it recorded goes.
+        let mut f = done_up_to(Stage::ManualTest);
+        f.shipping.prs.push(Pr {
+            repo: "api".into(),
+            url: "https://example.test/1".into(),
+        });
+        assert!(f.start_over(Stage::Ship, 5));
+        assert!(f.shipping.is_empty());
+        assert_eq!(f.standing(Stage::ManualTest, |_| false), Standing::Approved);
+    }
+
     /// A folder of its own under the system's temporary folder, removed
     /// when dropped.
     pub(crate) struct Temp(pub(crate) PathBuf);
@@ -595,6 +776,7 @@ pub(crate) mod tests {
             links: Vec::new(),
             status: Status::Open,
             marks: Default::default(),
+            run_counts: Default::default(),
             history: Vec::new(),
             shipping: Default::default(),
             runs: Default::default(),
@@ -668,6 +850,7 @@ pub(crate) mod tests {
             marks: BTreeMap::new(),
             history: Vec::new(),
             shipping: Shipping::default(),
+            run_counts: BTreeMap::new(),
             runs: BTreeMap::new(),
             stage_agents: BTreeMap::new(),
             setup: None,

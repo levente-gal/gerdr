@@ -90,6 +90,7 @@ mod service_errors;
 mod service_watch;
 mod services;
 mod sidebar;
+mod stage_lock;
 mod switcher;
 mod syntax;
 mod system_theme;

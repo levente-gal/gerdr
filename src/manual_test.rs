@@ -466,6 +466,7 @@ impl Gerdr {
             return self.show_warning("That feature is gone".into());
         };
         let title = feature.title.clone();
+        let done = feature.is_done(Stage::ManualTest);
         let criteria = self.criteria(&project, &slug).to_vec();
         let reading = self.feature_reading(&project, &slug).cloned();
         let patch = reading.as_ref().map(|r| r.patch.clone());
@@ -477,6 +478,12 @@ impl Gerdr {
                 let Some(c) = criteria.get(i) else {
                     return;
                 };
+                if done {
+                    return self.manual_refuse(format!(
+                        "{} is done: reopen it to change what it found",
+                        Stage::ManualTest.label()
+                    ));
+                }
                 let Some(patch) = patch else {
                     // The note goes back in its field, not thrown away.
                     if let (Outcome::Fail(_, note), Some(sheet)) =

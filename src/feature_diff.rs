@@ -585,7 +585,7 @@ impl Gerdr {
     }
 
     /// The feature code review open, if one is.
-    fn feature_of(&self) -> Option<&FeatureOf> {
+    pub(crate) fn feature_of(&self) -> Option<&FeatureOf> {
         self.wd()?.feature.as_ref()
     }
 
@@ -688,6 +688,9 @@ impl Gerdr {
         let Some(feature) = self.feature_mut(&project, &slug) else {
             return self.show_warning("That feature is gone".into());
         };
+        if feature.is_done(Stage::CodeReview) {
+            return self.show_warning("Code review is done: reopen it first".into());
+        }
         if let Err(why) = feature.viewed.toggle(&key, blob.as_deref(), dirty) {
             return self.show_warning(why.into());
         }

@@ -15,7 +15,11 @@
 //! `milestones` counts them, for the stops between milestones. A
 //! checkbox item may be a numbered one too (`1. [ ] …`).
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::BTreeSet,
+    io::ErrorKind,
+    path::{Path, PathBuf},
+};
 
 use super::Stage;
 
@@ -56,6 +60,163 @@ pub fn edited_since_written(dir: &Path, stage: Stage) -> bool {
     match (read(path(dir, stage)), read(written_path(dir, stage))) {
         (Some(now), Some(written)) => now != written,
         _ => false,
+    }
+}
+
+/// Where `stage`'s file is kept as it was approved, under feature data
+/// dir `dir`: `brief-approved.md`. Compared with the file, it tells whether
+/// something changed it since: an agent still open, or a hand.
+pub fn approved_path(dir: &Path, stage: Stage) -> Option<PathBuf> {
+    let name = name(stage)?;
+    let stem = name.strip_suffix(".md").unwrap_or(name);
+    Some(dir.join(format!("{stem}-approved.md")))
+}
+
+/// Keep `stage`'s file as it is approved (`approved_path`); why it
+/// couldn't be.
+pub fn keep_approved(dir: &Path, stage: Stage) -> Result<(), String> {
+    let (Some(from), Some(to)) = (path(dir, stage), approved_path(dir, stage)) else {
+        return Ok(());
+    };
+    std::fs::copy(&from, &to)
+        .map(drop)
+        .map_err(|e| format!("copying {} to {}: {e}", from.display(), to.display()))
+}
+
+/// Forget `stage`'s file as it was approved: it isn't approved now. One
+/// that won't go is only logged: a copy no longer used changes nothing
+/// until the stage is approved again, which writes it anew.
+pub fn forget_approved(dir: &Path, stage: Stage) {
+    let Some(path) = approved_path(dir, stage) else {
+        return;
+    };
+    match std::fs::remove_file(&path) {
+        Err(err) if err.kind() != ErrorKind::NotFound => {
+            tracing::warn!("removing {}: {err}", path.display());
+        }
+        _ => {}
+    }
+}
+
+/// Whether `stage`'s file differs from how it was approved: false with
+/// no copy to compare, or a file that can't be read.
+pub fn changed_since_approved(dir: &Path, stage: Stage) -> bool {
+    let read = |p: Option<PathBuf>| p.and_then(|p| std::fs::read(p).ok());
+    match (read(approved_path(dir, stage)), read(path(dir, stage))) {
+        (Some(approved), Some(now)) => approved != now,
+        _ => false,
+    }
+}
+
+/// Where the review comments on `stage`'s file are kept, in feature data
+/// dir `dir`: `discover-comments.json`.
+pub fn comments_path(dir: &Path, stage: Stage) -> PathBuf {
+    let stage = stage.label().to_lowercase().replace(' ', "-");
+    dir.join(format!("{stage}-comments.json"))
+}
+
+/// The stages with a file of their own in feature data dir `dir`, as
+/// `Feature::has_output` takes them: what its agent wrote, the code
+/// review's comments. Only looks at the folder: cheap enough for a key
+/// press, not for a frame.
+pub fn outputs(dir: &Path) -> BTreeSet<Stage> {
+    let there = |stage: Stage| {
+        let code_review = (stage == Stage::CodeReview).then(|| comments_path(dir, stage));
+        path(dir, stage)
+            .or(code_review)
+            .is_some_and(|path| path.is_file())
+    };
+    Stage::ALL.into_iter().filter(|s| there(*s)).collect()
+}
+
+/// The folder a stage started over leaves its files in, under feature
+/// data dir `dir`. Apart from the live files, so an agent reading the
+/// feature's files doesn't take an old one for the current one.
+pub const ARCHIVE: &str = "archive";
+
+/// The first free name for `name` in the archive, numbered from 1:
+/// `plan-1.md`, `plan-2.md`.
+fn archive_slot(archive: &Path, name: &str) -> PathBuf {
+    let path = Path::new(name);
+    let stem = path.file_stem().unwrap_or(path.as_os_str());
+    let stem = stem.to_string_lossy();
+    let ext = path.extension().map(|e| e.to_string_lossy());
+    (1u32..)
+        .map(|n| match &ext {
+            Some(ext) => archive.join(format!("{stem}-{n}.{ext}")),
+            None => archive.join(format!("{stem}-{n}")),
+        })
+        .find(|slot| !slot.exists())
+        .unwrap_or_else(|| archive.join(name))
+}
+
+/// The files of `stage` a start over moves away, by name, under feature
+/// data dir `dir`: its own, Verify's evidence, its review comments.
+fn stage_files(stage: Stage) -> Vec<&'static str> {
+    let mut files: Vec<&'static str> = name(stage).into_iter().collect();
+    if stage == Stage::Verify {
+        files.push(super::verify::EVIDENCE);
+    }
+    files
+}
+
+/// Move what `stage` made into the archive of feature data dir `dir`, and
+/// drop the copies kept of it. Returns the live files moved and where to,
+/// relative to `dir`, its own file first. A failure says why, and puts back
+/// what was moved: the stage is then as it was.
+pub fn archive_stage(dir: &Path, stage: Stage) -> Result<Vec<(String, String)>, String> {
+    let archive = dir.join(ARCHIVE);
+    let comments = comments_path(dir, stage);
+    let comments = comments
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned());
+    let files = (stage_files(stage).into_iter().map(str::to_owned)).chain(comments);
+    let there: Vec<String> = files.filter(|name| dir.join(name).is_file()).collect();
+    if there.is_empty() {
+        drop_kept(dir, stage);
+        return Ok(Vec::new());
+    }
+    std::fs::create_dir_all(&archive).map_err(|e| format!("making {}: {e}", archive.display()))?;
+    let mut moved: Vec<(String, PathBuf)> = Vec::new();
+    for name in there {
+        let slot = archive_slot(&archive, &name);
+        if let Err(err) = std::fs::rename(dir.join(&name), &slot) {
+            for (name, slot) in &moved {
+                if let Err(err) = std::fs::rename(slot, dir.join(name)) {
+                    tracing::warn!("putting {name} back from {}: {err}", slot.display());
+                }
+            }
+            return Err(format!("moving {name} to {}: {err}", slot.display()));
+        }
+        moved.push((name, slot));
+    }
+    drop_kept(dir, stage);
+    let relative = |slot: &Path| {
+        let slot = slot.strip_prefix(dir).unwrap_or(slot);
+        slot.to_string_lossy().into_owned()
+    };
+    Ok(moved
+        .into_iter()
+        .map(|(name, slot)| {
+            let to = relative(&slot);
+            (name, to)
+        })
+        .collect())
+}
+
+/// Drop the copies kept of `stage`'s file: they compare with a file now
+/// gone. One that won't go is only logged: each is written anew before it
+/// is next compared.
+fn drop_kept(dir: &Path, stage: Stage) {
+    forget_approved(dir, stage);
+    let Some(path) = written_path(dir, stage) else {
+        return;
+    };
+    match std::fs::remove_file(&path) {
+        Err(err) if err.kind() != ErrorKind::NotFound => {
+            tracing::warn!("removing {}: {err}", path.display());
+        }
+        _ => {}
     }
 }
 
@@ -285,6 +446,86 @@ fn migrations_line(line: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A folder of its own, as `name`.
+    fn folder(name: &str) -> Dir {
+        let dir = std::env::temp_dir().join(format!("gerdr-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        Dir(dir)
+    }
+
+    #[test]
+    fn an_approved_file_changed_later_is_told() {
+        let dir = folder("approved");
+        let plan = dir.path().join("plan.md");
+        std::fs::write(&plan, "plan").unwrap();
+        // Nothing kept: nothing to tell.
+        assert!(!changed_since_approved(dir.path(), Stage::Plan));
+        keep_approved(dir.path(), Stage::Plan).unwrap();
+        assert!(!changed_since_approved(dir.path(), Stage::Plan));
+        std::fs::write(&plan, "plan, changed").unwrap();
+        assert!(changed_since_approved(dir.path(), Stage::Plan));
+        forget_approved(dir.path(), Stage::Plan);
+        assert!(!changed_since_approved(dir.path(), Stage::Plan));
+        // Forgetting what isn't there is fine.
+        forget_approved(dir.path(), Stage::Plan);
+    }
+
+    #[test]
+    fn outputs_are_the_files_stages_made() {
+        let dir = folder("outputs");
+        assert!(outputs(dir.path()).is_empty());
+        std::fs::write(dir.path().join("plan.md"), "plan").unwrap();
+        std::fs::write(comments_path(dir.path(), Stage::CodeReview), "[]").unwrap();
+        // Comments on the brief are the brief's review's, not its output.
+        std::fs::write(comments_path(dir.path(), Stage::Discover), "[]").unwrap();
+        assert_eq!(
+            outputs(dir.path()).into_iter().collect::<Vec<_>>(),
+            [Stage::Plan, Stage::CodeReview]
+        );
+    }
+
+    #[test]
+    fn starting_over_moves_a_stages_files_to_the_archive() {
+        let dir = folder("archive");
+        let d = dir.path();
+        // Nothing there: nothing moved, no folder made.
+        assert_eq!(archive_stage(d, Stage::Plan), Ok(Vec::new()));
+        assert!(!d.join(ARCHIVE).exists());
+        let write = || {
+            std::fs::write(d.join("plan.md"), "plan").unwrap();
+            std::fs::write(comments_path(d, Stage::Plan), "[]").unwrap();
+        };
+        write();
+        keep_approved(d, Stage::Plan).unwrap();
+        let moved = archive_stage(d, Stage::Plan).unwrap();
+        let there = |to: &str| Path::new(ARCHIVE).join(to).display().to_string();
+        assert_eq!(
+            moved,
+            [
+                ("plan.md".to_owned(), there("plan-1.md")),
+                (
+                    "plan-comments.json".to_owned(),
+                    there("plan-comments-1.json")
+                ),
+            ]
+        );
+        assert!(!d.join("plan.md").exists());
+        assert!(!comments_path(d, Stage::Plan).exists());
+        assert!(!approved_path(d, Stage::Plan).unwrap().exists());
+        assert_eq!(
+            std::fs::read_to_string(d.join(there("plan-1.md"))).unwrap(),
+            "plan"
+        );
+        // A second time doesn't overwrite the first, and the live files of
+        // other stages stay.
+        std::fs::write(d.join("brief.md"), "brief").unwrap();
+        write();
+        let moved = archive_stage(d, Stage::Plan).unwrap();
+        assert_eq!(moved[0].1, there("plan-2.md"));
+        assert!(d.join(there("plan-1.md")).exists());
+        assert!(d.join("brief.md").exists());
+    }
 
     #[test]
     fn a_file_edited_since_its_agent_wrote_it_is_told() {

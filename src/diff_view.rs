@@ -126,6 +126,9 @@ pub struct Ctx<'a> {
     /// What it shows isn't the files as they are (a commit's diff): no
     /// edits, restores or review comments from it.
     pub read_only: bool,
+    /// Read-only, it still yanks: it shows the file as it is, which a yank
+    /// takes nothing from.
+    pub yanks: bool,
 }
 
 impl std::fmt::Debug for Ctx<'_> {
@@ -2898,6 +2901,7 @@ impl DiffView {
     ) -> Option<Option<Outcome>> {
         let outcome = self.any_key(mods, sym, typed, ctx);
         match outcome {
+            Some(Some(Outcome::Yank(edit))) if ctx.yanks => Some(Some(Outcome::Yank(edit))),
             Some(Some(o)) if ctx.read_only && o.edits() => Some(Some(Outcome::Notice(READ_ONLY))),
             outcome => outcome,
         }

@@ -10,7 +10,7 @@ rules, for reviewing a branch before it merges.
 | Key | Meaning everywhere |
 | --- | --- |
 | Esc | Step back one level: clear the query, then leave a sub-mode (search, comment, rename), then close. The footer hint reads "clear" while there is something to clear, "close" otherwise. A comment or commit draft is kept, never thrown away by Esc. |
-| Enter | Do the selected row's main action. |
+| Enter | Do the selected row's main action. On the feature tab's page of a done stage it goes to the current stage: it never undoes a done stage. |
 | Up / Down, PgUp / PgDn, Home / End | Move the selection. Ctrl+J / Ctrl+K also move it. Ctrl+N / Ctrl+P never move it. Where there is no list to page through, PgUp / PgDn scroll a page (the feature tab's stage page). |
 | Tab / Shift+Tab | Next / previous focus area or form field. Shift+Tab always goes the other way. |
 | Left / Right | Move along a row of choices laid out across: the feature tab's stage rail (previous / next stage's page; Up / Down step it too). |
@@ -21,7 +21,7 @@ rules, for reviewing a branch before it merges.
 | Ctrl+E | Edit (settings, a todo, open the file in the editor). |
 | Ctrl+R | Refresh / reload (feature tab: start the selected stage's agent afresh, Build's too). |
 | Ctrl+Shift+R | On the feature tab: show the selected stage's agent, done stage or not, or go back to its chat in a new tab once its tab is closed (Claude Code and Cursor; Ctrl+R starts afresh). |
-| Ctrl+Enter / Ctrl+Shift+Enter | The panel's finishing action: commit / commit and push (repos), create (branch menu), approve / send back (a file under review, a feature's code review; Verify's evidence is only read, so there it says so and does nothing); mark passed / send the failures to Build (a feature's manual test sheet). |
+| Ctrl+Enter / Ctrl+Shift+Enter | The panel's finishing action: commit / commit and push (repos), create (branch menu), approve / send back (a file under review, a feature's code review; Verify's evidence is only read, so there it says so and does nothing); mark passed / send the failures to Build (a feature's manual test sheet). On the file of a done stage, which is only read: go to the current stage / reopen the stage, as on its page in the feature tab (Ctrl+Shift+Enter there), until the stage after it has made something. |
 | Ctrl+Shift+V | In a feature's file's tab (its brief, plan or other stage file; Verify's evidence): go to the next of Preview, Review and Split. Split, the two side by side, following its edits and caret and scrolling together, is there only on an output 1400 px wide or more. Esc goes back to the feature tab. |
 | F2 | Rename. |
 | Ctrl+S | Switch to / check out a branch (repos, worktrees). |
@@ -32,6 +32,7 @@ rules, for reviewing a branch before it merges.
 | Ctrl+H / Ctrl+Shift+H | Snooze / snooze until tomorrow; Alt+H shows the hidden items (inbox). |
 | Ctrl+F or / | Search within what has focus. |
 | Del | Delete the selected row: the first press arms it (row shows "Press Del again"), the second deletes; an Undo toast follows when it can be undone. On an AI review finding in a feature's code review, Del dismisses it and asks why first (no arming), or reopens a dismissed one; `f` marks it to fix. In a feature's manual test sheet, Del clears a criterion's result at once (no arming: Space or `f` gives it again). |
+| Ctrl+Shift+Del | Abandon what is in progress, asking first: abort a merge or rebase (repos), start the feature tab's current stage over. Starting over closes its agent, moves what it made to the feature's archive and frees the stage before it. |
 | Ctrl+Del | Dismiss every listed row of the selected row's group (inbox Services; also its label's "Dismiss all" button). One Undo toast brings them all back. |
 | Ctrl+I | Ignore the selected service error, or stop ignoring it (inbox). An ignored error goes under "Ignored errors", folded to its count; Alt+I (or the label's Show button, or a click on the label) lists them, dim. It sends no notifications or counts. Del there forgets it (armed first). Undo toast. |
 | Space / Alt+Shift+Down | A feature's code review: mark the file viewed, or not (as Space checks a file in the repos panel); go to the next file not viewed (Alt+Shift+Up: the one before). A feature's manual test sheet: mark the criterion passed, or not; `f` marks it failed, with a note saying what went wrong. |

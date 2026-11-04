@@ -1278,6 +1278,7 @@ macro_rules! diff_ctx {
             note: None,
             selected: selected_file(&$panel.selected),
             read_only: false,
+            yanks: false,
         };
     };
 }
@@ -3559,6 +3560,8 @@ impl Panel {
             B::CommentFile
             | B::Approve
             | B::SendBack
+            | B::Reopen
+            | B::GoOn
             | B::FixFinding
             | B::DismissFinding
             | B::ReopenFinding
@@ -5362,6 +5365,7 @@ impl Panel {
         ReposView {
             title: title.into(),
             summary: self.summary(ctx),
+            summary_tone: Tone::Muted,
             branch: self.branch_picker(ctx),
             lines: shown.iter().map(|&row| self.tree_line(row, ctx)).collect(),
             part,
