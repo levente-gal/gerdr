@@ -150,6 +150,12 @@ const ACTIONS: &[(&str, Action, &str, &str)] = &[
         "s",
     ),
     (
+        "send-prompt",
+        Action::SendPrompt,
+        "Send the waiting agent its stage's prompt",
+        "Enter",
+    ),
+    (
         "focus-left",
         Action::FocusSide(Side::Left),
         "Focus pane left",
@@ -1529,6 +1535,10 @@ mod tests {
         assert_eq!(
             keymap.action(&mods(false, false), Keysym::z),
             Some(Action::ZoomPane)
+        );
+        assert_eq!(
+            keymap.action(&mods(false, false), Keysym::Return),
+            Some(Action::SendPrompt)
         );
         // "!" is Shift and the 1 key, which alone still goes to tab 1.
         assert_eq!(

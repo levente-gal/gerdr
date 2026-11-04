@@ -86,6 +86,15 @@ pub(super) fn app(x: f32, y: f32, s: f32) -> f32 {
     frame.min(play)
 }
 
+/// Signed distance to an arrow going right, centred on the origin: sending
+/// an agent its prompt.
+pub(super) fn send(x: f32, y: f32, s: f32) -> f32 {
+    let shaft = segment(x, y, -5.0 * s, 0.0, 4.5 * s, 0.0);
+    let up = segment(x, y, 0.5 * s, -4.0 * s, 4.5 * s, 0.0);
+    let down = segment(x, y, 0.5 * s, 4.0 * s, 4.5 * s, 0.0);
+    shaft.min(up).min(down) - STROKE * s
+}
+
 /// The ">" prompt of the terminal icons.
 pub(super) fn prompt(x: f32, y: f32, s: f32) -> f32 {
     segment(x, y, -4.5 * s, -2.5 * s, -1.5 * s, 0.0).min(segment(

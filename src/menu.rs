@@ -93,6 +93,7 @@ pub enum MenuAction {
     Scrollback(u32),
     RestartPane(u32),
     StopPane(u32),
+    SendPrompt(u32),
     /// Take the web page in pane `id` of the active tab back, forward, or
     /// load it again.
     WebStep(u32, crate::web_control::WebStep),
@@ -422,6 +423,10 @@ impl Gerdr {
             MenuAction::StopPane(id) => {
                 self.focus_pane(|_| Some(id));
                 self.stop_focused_pane();
+            }
+            MenuAction::SendPrompt(id) => {
+                self.focus_pane(|_| Some(id));
+                self.send_focused_prompt();
             }
             MenuAction::WebStep(id, step) => {
                 self.web_pane_step(id, step);

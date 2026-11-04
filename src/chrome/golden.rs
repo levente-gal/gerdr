@@ -774,7 +774,7 @@ fn paint(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
 /// The surfaces the motion work added, apart so the table above keeps
 /// its shape: a menu with hints, a pinned help panel, a toast with a
 /// button, a tooltip, the placeholder waiting and timed out, the spinner.
-const OVERLAYS: [&str; 10] = [
+const OVERLAYS: [&str; 11] = [
     "full_menu",
     "help_pinned",
     "toast_action",
@@ -784,6 +784,7 @@ const OVERLAYS: [&str; 10] = [
     "spinner",
     "blink_dot",
     "pane_pill",
+    "pane_pill_waiting",
     "pane_handle",
 ];
 
@@ -803,6 +804,7 @@ fn paint_overlays(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
         hash(painter.spinner(5, scale, p)),
         hash(super::blink_dot(super::Dot::Working, scale, p)),
         hash(painter.pane_bar(&pane_pill(), scale, p)),
+        hash(painter.pane_bar(&pane_pill_waiting(), scale, p)),
         hash(painter.pane_handle((600, super::PANE_GRIP).into(), true, scale, p)),
     ]
 }
@@ -822,6 +824,25 @@ fn pane_pill() -> PaneBarView {
         buttons,
         zoom: Some(false),
         hover: Some(BarButton::CopyUrl),
+        ..pane_bar()
+    }
+}
+
+/// A stage agent's terminal, waiting for its prompt.
+fn pane_pill_waiting() -> PaneBarView {
+    let pane = Rect::new((0, 0).into(), (900, 400).into());
+    let buttons = BarButtons::Waiting;
+    PaneBarView {
+        rect: super::pane_bar_rect(pane, buttons),
+        grip: super::pane_grip_rect(pane),
+        label: "claude --add-dir /d/my-feature".into(),
+        note: Some("waiting for its prompt"),
+        status: BarStatus::Running,
+        can_restart: false,
+        can_stop: true,
+        buttons,
+        zoom: Some(false),
+        hover: None,
         ..pane_bar()
     }
 }
@@ -898,7 +919,7 @@ const GOLDEN: [[u64; 12]; 4] = [
 ];
 
 /// The recorded hashes of `OVERLAYS`, per case in `CASES`.
-const GOLDEN_OVERLAYS: [[u64; 10]; 4] = [
+const GOLDEN_OVERLAYS: [[u64; 11]; 4] = [
     // Dark at 1
     [
         0x639ee0c7e0afc916, // full_menu
@@ -910,6 +931,7 @@ const GOLDEN_OVERLAYS: [[u64; 10]; 4] = [
         0x7a426c6be23d66a6, // spinner
         0x5f7da883de161583, // blink_dot
         0x693a761f12f44c57, // pane_pill
+        0xa43d0c0dae9f2d24, // pane_pill_waiting
         0x14c1b5fef3447fe5, // pane_handle
     ],
     // Dark at 2
@@ -923,6 +945,7 @@ const GOLDEN_OVERLAYS: [[u64; 10]; 4] = [
         0x2f28c94a7002e520, // spinner
         0x3938d7cb530659b5, // blink_dot
         0xeb8497a128455a3a, // pane_pill
+        0xf8b494e5a75d5fcc, // pane_pill_waiting
         0x190a245af3371715, // pane_handle
     ],
     // Light at 1
@@ -936,6 +959,7 @@ const GOLDEN_OVERLAYS: [[u64; 10]; 4] = [
         0x6cb91debc8d3c473, // spinner
         0x55c89cc3e0120adb, // blink_dot
         0x384a5c439f6867e7, // pane_pill
+        0x17fed7d408d378a4, // pane_pill_waiting
         0x64ee76af43172b3d, // pane_handle
     ],
     // Light at 2
@@ -949,6 +973,7 @@ const GOLDEN_OVERLAYS: [[u64; 10]; 4] = [
         0x5ad35f5c0797002e, // spinner
         0x349f0f6edf45454d, // blink_dot
         0x9f76f3470b72f011, // pane_pill
+        0x48c010ad41a8a934, // pane_pill_waiting
         0x3973c1a54dd3decd, // pane_handle
     ],
 ];

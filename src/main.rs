@@ -1210,6 +1210,8 @@ pub enum Action {
     Split(Dir),
     /// Close the focused pane.
     ClosePane,
+    /// Send the prompt of the stage agent waiting in the focused pane.
+    SendPrompt,
     /// Focus the pane next to the focused one.
     FocusSide(Side),
     /// Move focus to the next (1) or previous (-1) pane of the tab.
@@ -4347,6 +4349,7 @@ impl Gerdr {
             Action::PaneMenu => self.open_pane_menu(),
             Action::Split(dir) => self.split_pane(dir),
             Action::ClosePane => self.close_pane(),
+            Action::SendPrompt => self.send_focused_prompt(),
             Action::FocusSide(side) => {
                 let area = self.content_rect();
                 self.focus_pane(|tab| {

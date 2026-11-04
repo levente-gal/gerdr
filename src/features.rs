@@ -5776,6 +5776,10 @@ fn agent_card(
     };
     // The card's head names the agent already.
     let status = match (current, &state.agent) {
+        // On a done Build too, where fixes wait: `started` would hide that.
+        _ if run.waits_to_send() => {
+            "waiting for you \u{b7} pick a model and send the prompt".to_owned()
+        }
         (true, Some(line)) => (line.strip_prefix(run.agent.as_str()))
             .map_or(line.as_str(), str::trim_start)
             .to_owned(),
@@ -7786,6 +7790,11 @@ pub(crate) mod tests {
             .count();
         assert_eq!(primaries, 1);
         assert_eq!(page_enter(&f, Stage::Build, RowCtx::default()), Some(send));
+        let page = stage_page(&f, Stage::Build, &PanelState::default(), &actions, 2_000);
+        assert!(page.sections.iter().any(|s| matches!(
+            s,
+            PageSection::Agent { status, .. } if status.starts_with("waiting for you")
+        )));
         // Its tab closed: it can still open again from there.
         f.runs.insert(Stage::Build, held_run(None));
         assert!(
