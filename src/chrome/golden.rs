@@ -2532,7 +2532,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 18]; 4] = [
         0xbc318450690884c4, // tab_more_repos_mid_850
         0x5e323e7803fe1623, // tab_rail_wrap_500
         0xac45aa4c271428ee, // tab_rail_wrap_1180
-        0xc5d81745aa8344fa, // tab_picks_later_1180
+        0xed9c9361bca1d1d9, // tab_picks_later_1180
         0x99738de657365076, // tab_picks_running_860
         0x846d510a1650a771, // tab_resume_1180
         0x9b13d1415d51938c, // tab_resume_860
@@ -2553,7 +2553,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 18]; 4] = [
         0x16000a6216c9d8e0, // tab_more_repos_mid_850
         0x67776fb07872293c, // tab_rail_wrap_500
         0x0b835aa2820daa32, // tab_rail_wrap_1180
-        0x76bbcb0909ed87c3, // tab_picks_later_1180
+        0x28d04b8a0a9cbf49, // tab_picks_later_1180
         0xe73d2375a828a0be, // tab_picks_running_860
         0x589c27cc84b52cd6, // tab_resume_1180
         0xb7c4fc70a51ea543, // tab_resume_860
@@ -2574,7 +2574,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 18]; 4] = [
         0x03738b19c20cd82d, // tab_more_repos_mid_850
         0xe7e99fdaf13c744a, // tab_rail_wrap_500
         0xae0e84b880f07569, // tab_rail_wrap_1180
-        0xd1a780b2fa4aecf4, // tab_picks_later_1180
+        0x73e4a9d86a9829e6, // tab_picks_later_1180
         0x2c6aa6f30c1af15e, // tab_picks_running_860
         0x184835d662cd8025, // tab_resume_1180
         0x99c6938e78f9f4e0, // tab_resume_860
@@ -2595,7 +2595,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 18]; 4] = [
         0xb2e4c16e9dab739d, // tab_more_repos_mid_850
         0xa53326434579f1eb, // tab_rail_wrap_500
         0x4b7f9187b711ad7b, // tab_rail_wrap_1180
-        0xa44b255d481a949e, // tab_picks_later_1180
+        0x119db65f0e32fecb, // tab_picks_later_1180
         0x9a50304d4c453b9d, // tab_picks_running_860
         0x642ff83fbcf2a16d, // tab_resume_1180
         0xd6a7d2d339fb6bc1, // tab_resume_860

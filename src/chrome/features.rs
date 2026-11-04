@@ -775,6 +775,9 @@ const PICK_TRACK: i32 = ROW_BUTTON;
 const PICK_TRACK_PAD: i32 = 2;
 const PICK_CHIP: i32 = 28;
 const PICK_ICON: i32 = 14;
+/// How far a chip that can't be picked is from the outline's ground to
+/// `placeholder`: a logo plainly dimmer than one that can be.
+const PICK_OFF: f32 = 0.5;
 const PICK_LABEL: i32 = 48;
 const AGENT_RADIUS: f32 = 6.0;
 /// A milestone's row, and the progress bar's height.
@@ -2676,7 +2679,11 @@ impl Painter {
                         .collect();
                     self.segment_grounds(c, track, &rects, (on, hover, &off), scale, p);
                     for (i, (chip, rect)) in picks.iter().zip(&rects).enumerate() {
-                        let tint = segment_tint(i, on, &off, p);
+                        // One that can't be picked stands well back.
+                        let tint = match chip.off && !chip.lit {
+                            true => mix(p.element, p.placeholder, PICK_OFF),
+                            false => segment_tint(i, on, &off, p),
+                        };
                         agent_icon(c, *rect, PICK_ICON, chip.icon, tint, scale);
                     }
                 }
