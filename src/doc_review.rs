@@ -347,7 +347,7 @@ impl Gerdr {
     /// Show feature `slug`'s `evidence.md` (see `feature::verify`) in the
     /// same view, read-only, without Approve or Send back.
     pub fn open_evidence(&mut self, project: &str, slug: &str) {
-        self.open_doc_tab(project, slug, DocFile::Evidence, None);
+        self.open_doc_tab(project, slug, DocFile::Evidence);
     }
 
     /// The file under review, if one is open.

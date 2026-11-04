@@ -105,6 +105,16 @@ impl DocMode {
         }
     }
 
+    /// What a new tab of `file` opens on, on an output `wide` enough for
+    /// Split or not: a stage's file beside its page, so it is read as it is
+    /// reviewed. Too narrow, no page starts unseen.
+    pub fn opens_on(file: DocFile, wide: bool) -> DocMode {
+        match file {
+            DocFile::Stage(_) if wide => DocMode::Split,
+            _ => Self::default_for(file),
+        }
+    }
+
     /// This one as `file`'s tab can show it: a tab saved on a mode it no
     /// longer has comes back on what it opens on.
     pub fn of(self, file: DocFile) -> DocMode {
@@ -427,15 +437,9 @@ impl Gerdr {
         !on_page || tab.wd.sheet(self.doc_env(tab.mode)).is_some()
     }
 
-    /// Show `file` of feature `slug` in its tab, opened if there is none:
-    /// in `mode`, or as it stands (a new one as `DocMode::default_for` it).
-    pub fn open_doc_tab(
-        &mut self,
-        project: &str,
-        slug: &str,
-        file: DocFile,
-        mode: Option<DocMode>,
-    ) {
+    /// Show `file` of feature `slug` in its tab: one already open as it
+    /// stands, a new one as `DocMode::opens_on` it.
+    pub fn open_doc_tab(&mut self, project: &str, slug: &str, file: DocFile) {
         let (doc, text) = match self.read_doc(project, slug, file) {
             Ok(read) => read,
             Err(failed) => return self.show_failed(failed),
@@ -443,14 +447,11 @@ impl Gerdr {
         self.close_panels_for_tab();
         self.in_feature_workspace(project, slug, |gerdr, w| {
             let t = gerdr.doc_tab_in(w, file).unwrap_or_else(|| {
-                let shown = mode.unwrap_or_else(|| DocMode::default_for(file));
+                let shown = DocMode::opens_on(file, gerdr.doc_wide());
                 gerdr.insert_doc_tab(w, doc, text, shown)
             });
             gerdr.switch_workspace(w);
             gerdr.switch_tab(t);
-            if let Some(mode) = mode {
-                gerdr.set_doc_mode(mode);
-            }
         });
         self.refresh_pointer_focus();
     }
@@ -702,6 +703,17 @@ mod tests {
         assert_eq!(DocMode::Preview.of(brief), DocMode::Review);
         assert_eq!(DocMode::Split.of(brief), DocMode::Split);
         assert_eq!(DocMode::Preview.of(DocFile::Evidence), DocMode::Preview);
+    }
+
+    #[test]
+    fn a_new_stage_file_tab_opens_split_when_wide_enough() {
+        for stage in [Stage::Discover, Stage::Plan] {
+            let file = DocFile::Stage(stage);
+            assert_eq!(DocMode::opens_on(file, true), DocMode::Split);
+            assert_eq!(DocMode::opens_on(file, false), DocMode::Review);
+        }
+        assert_eq!(DocMode::opens_on(DocFile::Evidence, true), DocMode::Preview);
+        assert_eq!(DocMode::opens_on(DocFile::Evidence, false), DocMode::Preview);
     }
 
     #[test]

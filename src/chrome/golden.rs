@@ -2192,7 +2192,7 @@ fn feature_tab_plan_review() -> super::FeatureTabView {
             PageSection::File {
                 name: "plan.md".into(),
                 state: tab_line("ready for review", CheckTone::Ready),
-                buttons: Vec::new(),
+                buttons: vec![0],
             },
         ],
     };
@@ -2269,7 +2269,7 @@ fn feature_tab_discover_brief() -> super::FeatureTabView {
         status: Some(tab_line("brief.md is ready for review", CheckTone::Blocker)),
         buttons: vec![
             PageButton {
-                label: "Review brief".into(),
+                label: "Review".into(),
                 style: ButtonStyle::Primary,
                 key: Some("\u{23ce}"),
             },
@@ -2292,7 +2292,7 @@ fn feature_tab_discover_brief() -> super::FeatureTabView {
             PageSection::File {
                 name: "brief.md".into(),
                 state: tab_line("ready for review", CheckTone::Ready),
-                buttons: Vec::new(),
+                buttons: vec![0],
             },
             PageSection::Doc {
                 name: "brief.md".into(),
@@ -2472,7 +2472,7 @@ fn feature_tab_brief(locked: bool) -> super::FeatureTabView {
             Some("Ctrl+Shift+Enter"),
         ));
     }
-    buttons.push(button("Open brief", ButtonStyle::Plain, None));
+    buttons.push(button("Open", ButtonStyle::Plain, None));
     let (status, state) = match locked {
         true => (
             "Done 1h ago by you \u{b7} locked: Plan has plan.md",
@@ -2547,7 +2547,7 @@ fn feature_tab_start_over() -> super::FeatureTabView {
             PageSection::File {
                 name: "plan.md".into(),
                 state: tab_line("ready for review", CheckTone::Ready),
-                buttons: Vec::new(),
+                buttons: vec![0],
             },
             PageSection::Doc {
                 name: "plan.md".into(),
@@ -2962,7 +2962,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 29]; 4] = [
         0x51c3e0035bcf9fe2, // tab_build_860
         0x320fb50ba25ef2e2, // tab_build_1180
         0x5ab133b099346377, // tab_build_1920
-        0x774557a9cdf1493b, // tab_plan_review_1180
+        0x5d774fd21073bf43, // tab_plan_review_1180
         0x0d6bb837b17ed6bb, // tab_verify_failed_1920
         0x4897ec8b239d629f, // tab_ship_blocked_1180
         0x0be1db5217ee5626, // tab_done_1920
@@ -2982,19 +2982,19 @@ const GOLDEN_FEATURE_TAB: [[u64; 29]; 4] = [
         0x137fae25633f9dd9, // tab_t3_draft_860
         0x5c0e8d2ccd863ca5, // tab_resume_1180
         0x01310b4f217cddcd, // tab_resume_860
-        0x8f947cdbdd031b15, // tab_approved_1180
-        0x7f35584b9b383790, // tab_locked_1180
-        0x2e46b75ebbf79e72, // tab_start_over_1180
-        0x3bca40e706354a5b, // tab_discover_brief_1180
-        0x8b75ed6f2d27c187, // tab_discover_brief_860
-        0xa1f3016c83f493b4, // tab_plan_long_1180
+        0xd5fe228699477de1, // tab_approved_1180
+        0x3c107a8d171b7d20, // tab_locked_1180
+        0xcfeff77ed7f2eb73, // tab_start_over_1180
+        0xab397035b2c4ca2f, // tab_discover_brief_1180
+        0x09d108de17bf2818, // tab_discover_brief_860
+        0x721fc06992fba956, // tab_plan_long_1180
     ],
     // Dark at 2
     [
         0x4848d562cb2d4306, // tab_build_860
         0xfcbf5768d8d8154e, // tab_build_1180
         0x182ae2fb973a2a6b, // tab_build_1920
-        0xe8ff5319c79b778f, // tab_plan_review_1180
+        0x220d46376a3de935, // tab_plan_review_1180
         0x93a6d859bd9bbaab, // tab_verify_failed_1920
         0xc9e5fd2b841aceeb, // tab_ship_blocked_1180
         0x056961c80f97ba7c, // tab_done_1920
@@ -3014,19 +3014,19 @@ const GOLDEN_FEATURE_TAB: [[u64; 29]; 4] = [
         0xd27413801fa843be, // tab_t3_draft_860
         0x99d043bc4b15d296, // tab_resume_1180
         0xea8750007b7465ba, // tab_resume_860
-        0xdf67b199c8b68dd0, // tab_approved_1180
-        0x0f64daef9f6a51a9, // tab_locked_1180
-        0xb9f5d37fe336ded5, // tab_start_over_1180
-        0x14e02a66c244b821, // tab_discover_brief_1180
-        0xb79b083cd05bb9e0, // tab_discover_brief_860
-        0xdfccabc482eec810, // tab_plan_long_1180
+        0xd9f2382ce90dbcc4, // tab_approved_1180
+        0xe6e60bdf61f0e4f9, // tab_locked_1180
+        0xf58f2ffa11c7158f, // tab_start_over_1180
+        0x80a548047dce36cf, // tab_discover_brief_1180
+        0x05c7923a09ae3b3a, // tab_discover_brief_860
+        0x092173048567e6b3, // tab_plan_long_1180
     ],
     // Light at 1
     [
         0xec6e32524c7f99dc, // tab_build_860
         0x70ae8ae711145702, // tab_build_1180
         0xdfaf728967445f29, // tab_build_1920
-        0xba724da3fd259c13, // tab_plan_review_1180
+        0xe732711f207f0a94, // tab_plan_review_1180
         0xb467b5a245428713, // tab_verify_failed_1920
         0xf06794be52aa9746, // tab_ship_blocked_1180
         0x81c09fa9946dcead, // tab_done_1920
@@ -3046,19 +3046,19 @@ const GOLDEN_FEATURE_TAB: [[u64; 29]; 4] = [
         0x23936eeea3720a69, // tab_t3_draft_860
         0xdfe7f32db728436b, // tab_resume_1180
         0x01d2f52a2fb00f85, // tab_resume_860
-        0xb64fffb1043eda4b, // tab_approved_1180
-        0x14c929f8980f700d, // tab_locked_1180
-        0xff8b9bce80df3d77, // tab_start_over_1180
-        0x2f55e6b37b9d798e, // tab_discover_brief_1180
-        0xfa7b42d05156b5dd, // tab_discover_brief_860
-        0x248f4476713a435a, // tab_plan_long_1180
+        0xe7ca85c4249c1295, // tab_approved_1180
+        0x2148f46a34df44bf, // tab_locked_1180
+        0x1c5fd9ea2ac67cc2, // tab_start_over_1180
+        0x5d4d7b63616843af, // tab_discover_brief_1180
+        0x75621841661699d4, // tab_discover_brief_860
+        0xe900ec3ac2427d70, // tab_plan_long_1180
     ],
     // Light at 2
     [
         0x7169222685fb8386, // tab_build_860
         0xd342077714e61476, // tab_build_1180
         0x6c6b1656ce74baa8, // tab_build_1920
-        0x9d6243724c888ab2, // tab_plan_review_1180
+        0x01f5bb93ec2b2c82, // tab_plan_review_1180
         0x5adbfa8c36462c52, // tab_verify_failed_1920
         0xd2e9d01192ca9477, // tab_ship_blocked_1180
         0x366f9044b55eef1a, // tab_done_1920
@@ -3078,12 +3078,12 @@ const GOLDEN_FEATURE_TAB: [[u64; 29]; 4] = [
         0xd3045993793b2355, // tab_t3_draft_860
         0xaac43824887c72c0, // tab_resume_1180
         0xf420e7acd8152fec, // tab_resume_860
-        0x677ba516bde49952, // tab_approved_1180
-        0x05d33b620c237807, // tab_locked_1180
-        0x850fc197d3d79e5c, // tab_start_over_1180
-        0xe6be1577254f384d, // tab_discover_brief_1180
-        0x18a9dd4550ee6cf5, // tab_discover_brief_860
-        0x5fffa04b01fb5f8f, // tab_plan_long_1180
+        0x723f3af9a4818b09, // tab_approved_1180
+        0x80ade4e85b0d44a4, // tab_locked_1180
+        0x356b3710fc0dc994, // tab_start_over_1180
+        0xd8b6d1671f1b4b03, // tab_discover_brief_1180
+        0x01feaa1d2faa7260, // tab_discover_brief_860
+        0xff19b0251304a6c9, // tab_plan_long_1180
     ],
 ];
 

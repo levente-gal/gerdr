@@ -731,7 +731,7 @@ impl Gerdr {
                 slug,
                 stage,
                 kind: crate::feature_agents::GateKind::Review,
-            } => self.open_doc_tab(&project, &slug, DocFile::Stage(stage), None),
+            } => self.open_doc_tab(&project, &slug, DocFile::Stage(stage)),
             Target::Gate {
                 project,
                 slug,

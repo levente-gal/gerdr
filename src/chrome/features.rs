@@ -440,7 +440,7 @@ pub enum PageSection {
     },
     /// A stage's file (`brief.md`, `plan.md`): its name, how it stands,
     /// and the indices in `StagePage::buttons` of the buttons it holds
-    /// (Review), drawn at the card's right.
+    /// (Review or Open, plain or primary), drawn at the card's right.
     File {
         name: String,
         state: CheckLine,
