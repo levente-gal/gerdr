@@ -2129,6 +2129,42 @@ fn feature_tab_plan_review() -> super::FeatureTabView {
     view
 }
 
+/// Plan done, its agent's tab closed: its chat a button away.
+fn feature_tab_resume() -> super::FeatureTabView {
+    use super::{ButtonStyle, CheckTone, Dot, NodeMark, PageButton, PageSection, StagePage};
+    use crate::{agent_icons::AgentIcon, feature::Stage};
+    let mut view = feature_tab();
+    select_node(&mut view, 1);
+    view.rail[1].mark = NodeMark::Done;
+    view.page = StagePage {
+        title: "Plan".into(),
+        about: Stage::Plan.about().into(),
+        status: Some(tab_line("Done 2h ago by you", CheckTone::Ready)),
+        buttons: vec![
+            PageButton {
+                label: "Reopen".into(),
+                style: ButtonStyle::Plain,
+                key: None,
+            },
+            PageButton {
+                label: "Resume agent".into(),
+                style: ButtonStyle::Plain,
+                key: Some("Ctrl+Shift+R"),
+            },
+        ],
+        sections: vec![PageSection::Agent {
+            icon: AgentIcon::Claude,
+            name: "claude".into(),
+            dot: Dot::Done,
+            status: "started 2h ago".into(),
+            tail: Vec::new(),
+            button: Some(1),
+            picks: Vec::new(),
+        }],
+    };
+    view
+}
+
 /// Verify failed: two checks fail, a fix sent.
 fn feature_tab_verify_failed() -> super::FeatureTabView {
     use super::{ButtonStyle, CheckTone, NodeMark, PageButton, PageSection, StagePage};
@@ -2398,7 +2434,7 @@ fn feature_tab_rail_wrap() -> super::FeatureTabView {
 }
 
 /// The feature tab's fixtures, by name.
-fn feature_tabs() -> [(&'static str, super::FeatureTabView); 13] {
+fn feature_tabs() -> [(&'static str, super::FeatureTabView); 14] {
     [
         ("tab_build", feature_tab()),
         ("tab_plan_review", feature_tab_plan_review()),
@@ -2413,11 +2449,12 @@ fn feature_tabs() -> [(&'static str, super::FeatureTabView); 13] {
         ("tab_rail_wrap", feature_tab_rail_wrap()),
         ("tab_picks_later", feature_tab_picks_later()),
         ("tab_picks_running", feature_tab_picks_running()),
+        ("tab_resume", feature_tab_resume()),
     ]
 }
 
 /// Each fixture at the width it shows best at, and Build at all three.
-const TAB_SURFACES: [(&str, i32); 16] = [
+const TAB_SURFACES: [(&str, i32); 18] = [
     ("tab_build", 860),
     ("tab_build", 1180),
     ("tab_build", 1920),
@@ -2434,9 +2471,11 @@ const TAB_SURFACES: [(&str, i32); 16] = [
     ("tab_rail_wrap", 1180),
     ("tab_picks_later", 1180),
     ("tab_picks_running", 860),
+    ("tab_resume", 1180),
+    ("tab_resume", 860),
 ];
 
-const FEATURE_TAB: [&str; 16] = [
+const FEATURE_TAB: [&str; 18] = [
     "tab_build_860",
     "tab_build_1180",
     "tab_build_1920",
@@ -2453,6 +2492,8 @@ const FEATURE_TAB: [&str; 16] = [
     "tab_rail_wrap_1180",
     "tab_picks_later_1180",
     "tab_picks_running_860",
+    "tab_resume_1180",
+    "tab_resume_860",
 ];
 
 fn paint_feature_tab(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
@@ -2473,7 +2514,7 @@ fn paint_feature_tab(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
 }
 
 /// The recorded hashes of `FEATURE_TAB`, per case in `CASES`.
-const GOLDEN_FEATURE_TAB: [[u64; 16]; 4] = [
+const GOLDEN_FEATURE_TAB: [[u64; 18]; 4] = [
     // Dark at 1
     [
         0xab7c76988146b933, // tab_build_860
@@ -2492,6 +2533,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 16]; 4] = [
         0xac45aa4c271428ee, // tab_rail_wrap_1180
         0x3888bbee8cd4d5aa, // tab_picks_later_1180
         0x731f85bf6bf22fd0, // tab_picks_running_860
+        0x846d510a1650a771, // tab_resume_1180
+        0x9b13d1415d51938c, // tab_resume_860
     ],
     // Dark at 2
     [
@@ -2511,6 +2554,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 16]; 4] = [
         0x0b835aa2820daa32, // tab_rail_wrap_1180
         0x2850b3bb86da68f9, // tab_picks_later_1180
         0x270d22cd53ec1d09, // tab_picks_running_860
+        0x589c27cc84b52cd6, // tab_resume_1180
+        0xb7c4fc70a51ea543, // tab_resume_860
     ],
     // Light at 1
     [
@@ -2530,6 +2575,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 16]; 4] = [
         0xae0e84b880f07569, // tab_rail_wrap_1180
         0xc4c01c352f51d2a0, // tab_picks_later_1180
         0xcbb3e52abd56986f, // tab_picks_running_860
+        0x184835d662cd8025, // tab_resume_1180
+        0x99c6938e78f9f4e0, // tab_resume_860
     ],
     // Light at 2
     [
@@ -2549,6 +2596,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 16]; 4] = [
         0x4b7f9187b711ad7b, // tab_rail_wrap_1180
         0x82c8db277f4c2a1b, // tab_picks_later_1180
         0xa25af1d0ca559f90, // tab_picks_running_860
+        0x642ff83fbcf2a16d, // tab_resume_1180
+        0xd6a7d2d339fb6bc1, // tab_resume_860
     ],
 ];
 

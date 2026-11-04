@@ -1446,6 +1446,7 @@ pub fn foreground_command(
     if !argv.first().is_some_and(|argv0| usable_argv0(argv0)) {
         return untracked(false);
     }
+    let argv = crate::feature::agents::rerun_argv(&argv);
     let words: Vec<_> = argv.iter().map(|arg| shell_quote(arg)).collect();
     let cwd = leader
         .cwd
