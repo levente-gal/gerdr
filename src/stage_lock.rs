@@ -40,6 +40,10 @@ fn start_over_body(stage: Stage, live: bool) -> String {
     let file = artifacts::name(stage).unwrap_or("Its file");
     let mut body = match stage {
         Stage::Discover | Stage::Plan => format!("{file} moves to the archive folder."),
+        Stage::PlanReview => {
+            "Its suggestions and decisions are forgotten and its files move to the archive folder."
+                .to_owned()
+        }
         Stage::Build => format!("{file} moves to the archive folder. Its commits stay."),
         Stage::Verify => format!(
             "Its run is forgotten and {} moves to the archive folder.",
@@ -306,7 +310,7 @@ mod tests {
             "Discover is locked: Plan has plan.md; start Plan over first"
         );
         // Plan done as well: it reopens first.
-        let f = crate::features::tests::feature("login", Vec::new(), 2);
+        let f = crate::features::tests::feature("login", Vec::new(), 3);
         assert_eq!(
             locked_warning(&f, Stage::Discover, Stage::Plan),
             "Discover is locked: Plan is done; reopen Plan first"

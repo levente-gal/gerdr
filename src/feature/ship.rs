@@ -868,7 +868,7 @@ esac
     #[test]
     fn open_findings_stop_shipping() {
         use crate::feature::review_import::{AiReview, Finding, FindingState};
-        let mut f = crate::features::tests::feature("a", vec![], 6);
+        let mut f = crate::features::tests::feature("a", vec![], 7);
         let finding = |state| Finding {
             state,
             ..Finding::default()

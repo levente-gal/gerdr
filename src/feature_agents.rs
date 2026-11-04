@@ -900,6 +900,7 @@ fn doc_word(stage: Stage) -> &'static str {
     match stage {
         Stage::Discover => "Brief",
         Stage::Plan => "Plan",
+        Stage::PlanReview => "Final plan",
         _ => stage.label(),
     }
 }
@@ -1948,7 +1949,7 @@ mod tests {
         let mut f = crate::features::tests::feature(
             "a",
             vec![crate::features::tests::repo("api", true)],
-            3,
+            4,
         );
         f.runs.insert(Stage::Build, held);
         assert_eq!(
@@ -2089,14 +2090,14 @@ mod tests {
         gone.status = Status::Abandoned;
         assert!(approval(&gone, Stage::Plan, Some(PLAN)).is_err());
         // AI review and Code review pass by their own checks only.
-        let reviewing = feature("a", vec![repo("api", true)], 4);
+        let reviewing = feature("a", vec![repo("api", true)], 5);
         assert_eq!(reviewing.current(), Some(Stage::AiReview));
         let review = "{\"findings\": []}";
         assert_eq!(
             approval(&reviewing, Stage::AiReview, Some(review)),
             Err("AI review is done once its findings are decided".into())
         );
-        let coding = feature("a", vec![repo("api", true)], 5);
+        let coding = feature("a", vec![repo("api", true)], 6);
         assert_eq!(coding.current(), Some(Stage::CodeReview));
         assert_eq!(
             approval(&coding, Stage::CodeReview, None),
@@ -2213,7 +2214,7 @@ mod tests {
             state,
             ..Finding::default()
         };
-        let mut f = feature("a", vec![repo("api", true)], 4);
+        let mut f = feature("a", vec![repo("api", true)], 5);
         f.runs.insert(Stage::AiReview, run(None));
         f.review = Some(AiReview {
             findings: vec![
@@ -2240,7 +2241,7 @@ mod tests {
         );
         f.review.as_mut().unwrap().findings[2].state = FindingState::Sent;
         assert_eq!(gate_of(&f, |_| None), None);
-        let mut code = feature("b", vec![repo("api", true)], 5);
+        let mut code = feature("b", vec![repo("api", true)], 6);
         assert_eq!(
             gate_of(&code, |_| None),
             Some((Stage::CodeReview, 2_000, GateKind::CodeReview))
@@ -2248,7 +2249,7 @@ mod tests {
         code.marks.get_mut(&Stage::AiReview).unwrap().at = 3_000;
         assert_eq!(gate_of(&code, |_| None).map(|g| g.1), Some(3_000));
         // Manual test waits only while the brief has criteria.
-        let testing = feature("c", vec![repo("api", true)], 6);
+        let testing = feature("c", vec![repo("api", true)], 7);
         assert_eq!(gate_of(&testing, |_| None), None);
         assert_eq!(gate_of(&testing, |_| Some((0, 0))), None);
         assert_eq!(
@@ -2294,7 +2295,7 @@ mod tests {
 
     #[test]
     fn the_review_prompt_gets_its_file_and_the_diffs() {
-        let f = feature("a", vec![repo("api", true)], 4);
+        let f = feature("a", vec![repo("api", true)], 5);
         let mut v = vars(
             &f,
             &PerProject::all("Acme".to_owned()),
@@ -2721,9 +2722,9 @@ mod tests {
         let mut review = feature("a", vec![repo("api", true)], 1);
         review.runs.insert(Stage::Plan, run(Some(400)));
         // Build's ready says it was marked done: no review.
-        let mut built = feature("b", vec![repo("api", true)], 2);
+        let mut built = feature("b", vec![repo("api", true)], 3);
         built.runs.insert(Stage::Build, run(Some(100)));
-        let mut stopped = feature("c", vec![repo("api", true)], 2);
+        let mut stopped = feature("c", vec![repo("api", true)], 3);
         let mut r = run(None);
         r.stop = Some(Stop {
             done: 2,
@@ -2732,7 +2733,7 @@ mod tests {
         });
         stopped.runs.insert(Stage::Build, r);
         let failed = |slug: &str, fixes: u32| {
-            let mut f = feature(slug, vec![repo("api", true)], 3);
+            let mut f = feature(slug, vec![repo("api", true)], 4);
             f.verify = Some(verify::VerifyRun {
                 n: 4,
                 started: 150,
@@ -2806,7 +2807,7 @@ mod tests {
 
     #[test]
     fn the_build_prompt_gets_the_plan_evidence_and_branch() {
-        let f = feature("a", vec![repo("api", true)], 2);
+        let f = feature("a", vec![repo("api", true)], 3);
         let v = vars(
             &f,
             &PerProject::all("Acme".to_owned()),
@@ -2988,7 +2989,7 @@ mod tests {
     #[test]
     fn only_stages_still_ahead_with_an_agent_have_chips() {
         let installed = claude_and_cursor();
-        let mut f = feature("a", vec![repo("r", true)], 2);
+        let mut f = feature("a", vec![repo("r", true)], 3);
         assert!(stage_chips(&f, Stage::Discover, None, &installed).is_empty());
         assert_eq!(stage_chips(&f, Stage::Build, None, &installed).len(), 2);
         assert_eq!(stage_chips(&f, Stage::AiReview, None, &installed).len(), 2);

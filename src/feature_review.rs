@@ -482,7 +482,7 @@ mod tests {
     };
 
     fn reviewed() -> Feature {
-        let mut f = feature("a", vec![repo("api", true), repo("web", true)], 4);
+        let mut f = feature("a", vec![repo("api", true), repo("web", true)], 5);
         let mut review = AiReview::default();
         let raw = |title: &str| Raw {
             file: "src/a.rs".into(),
@@ -509,7 +509,7 @@ mod tests {
 
     #[test]
     fn the_first_review_reads_the_whole_change() {
-        let f = feature("a", vec![repo("api", true), repo("web", false)], 4);
+        let f = feature("a", vec![repo("api", true), repo("web", false)], 5);
         let v: prompts::render::Vars = review_vars(&f).into_iter().collect();
         assert_eq!(
             v["review.diffs"],

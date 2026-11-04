@@ -1097,12 +1097,12 @@ mod tests {
 
     #[test]
     fn verify_runs_only_when_current_with_checks() {
-        let building = feature("a", vec![repo("api", true)], 2);
+        let building = feature("a", vec![repo("api", true)], 3);
         assert_eq!(
             verify_refusal(&building, false, 2),
             Err("Mark Build done first".into())
         );
-        let f = feature("a", vec![repo("api", true)], 3);
+        let f = feature("a", vec![repo("api", true)], 4);
         assert_eq!(verify_refusal(&f, false, 2), Ok(()));
         assert_eq!(
             verify_refusal(&f, true, 2),
@@ -1113,7 +1113,7 @@ mod tests {
                 .unwrap_err()
                 .starts_with("No checks set for \u{201c}Feature a\u{201d}")
         );
-        let verified = feature("a", vec![repo("api", true)], 4);
+        let verified = feature("a", vec![repo("api", true)], 5);
         assert_eq!(
             verify_refusal(&verified, false, 2),
             Err("Verify of \u{201c}Feature a\u{201d} is done".into())
@@ -1122,7 +1122,7 @@ mod tests {
 
     #[test]
     fn a_pass_holds_on_the_code_build_was_done_on() {
-        let mut f = feature("a", vec![repo("api", true)], 3);
+        let mut f = feature("a", vec![repo("api", true)], 4);
         f.marks.insert(Stage::Build, mark("p1"));
         let pass = Evidence {
             patch: "p1".into(),

@@ -504,7 +504,7 @@ pub struct FeatureTabView {
     /// The label of the header's last button, removing its worktrees
     /// (Abandon…, Remove worktrees…), after `FEATURE_BUTTONS`.
     pub remove: &'static str,
-    /// The eight stages, in order.
+    /// The nine stages, in order.
     pub rail: Vec<RailNode>,
     /// The strip's chips, or with `expanded` the rows, all it could hold.
     pub repos: Vec<FeatureRepoRow>,
@@ -4527,7 +4527,7 @@ mod tests {
         let _ = step(&view, 1, 0.0, 1.0);
         let l = tab_at(&view, 1920);
         let halo = feature_tab_pulse(&view, &l).unwrap();
-        assert!(halo.contains_rect(node_circle(l.nodes[2])));
+        assert!(halo.contains_rect(node_circle(l.nodes[3])));
         let (drawn, parts) = step(&view, 2, 0.8, 0.4);
         assert_eq!(drawn, 0);
         let glow = (parts.iter())

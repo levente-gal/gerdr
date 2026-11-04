@@ -1593,10 +1593,10 @@ fn new_feature() -> super::NewFeatureView {
     }
 }
 
-/// Eight stage marks, the first `done` of them done.
+/// A mark per stage, the first `done` of them done.
 fn stage_marks(done: usize) -> Vec<super::StageMark> {
     use super::StageMark;
-    (0..8)
+    (0..crate::feature::Stage::ALL.len())
         .map(|i| match i {
             i if i < done => StageMark::Done,
             i if i == done => StageMark::Current,
@@ -1777,38 +1777,38 @@ const GOLDEN_FEATURES: [[u64; 6]; 4] = [
     // Dark at 1
     [
         0x73e88729cb0c3112, // new_feature
-        0x5e017fbffabde99b, // sidebar_features
+        0x5e028d7446039273, // sidebar_features
         0xab580425d0a50879, // manual_test
         0x8e4d20f7c6316567, // manual_test_note
-        0x41c27deb8d74ba1a, // sidebar_feature_workspace
-        0x818d05fb2ec3d9a9, // sidebar_needs_you
+        0xae5302d4f2a0264e, // sidebar_feature_workspace
+        0x46476bd6c29b83a1, // sidebar_needs_you
     ],
     // Dark at 2
     [
         0xbc9770d9310bd319, // new_feature
-        0x095e2dfbb584cb35, // sidebar_features
+        0xc54456a2ef83edd5, // sidebar_features
         0xc14927ebcde55bf1, // manual_test
         0xb520dd662440b737, // manual_test_note
-        0x343ff92f09e0e5b8, // sidebar_feature_workspace
-        0x445f579930bc139c, // sidebar_needs_you
+        0xf8b650817e7046a8, // sidebar_feature_workspace
+        0x89602fb32f370eac, // sidebar_needs_you
     ],
     // Light at 1
     [
         0xb1780dfd60b1e9a8, // new_feature
-        0xd22590056de00ae5, // sidebar_features
+        0xd912c1a1dd19329d, // sidebar_features
         0x093b890ce5537eef, // manual_test
         0xa74e12b563efbdaf, // manual_test_note
-        0x1ac111419d6a09d2, // sidebar_feature_workspace
-        0x0884214637ba9738, // sidebar_needs_you
+        0xac18e696a2fa699a, // sidebar_feature_workspace
+        0xd9115d61c7483020, // sidebar_needs_you
     ],
     // Light at 2
     [
         0x757537a93b40f9fa, // new_feature
-        0x5e1381a968fcc82e, // sidebar_features
+        0x3c6a9bce68178d76, // sidebar_features
         0xed40d3ad66f63314, // manual_test
         0x1239c6f64e145f2f, // manual_test_note
-        0x5763cc404205b495, // sidebar_feature_workspace
-        0x94e9eab9390bd4db, // sidebar_needs_you
+        0xd447a917e01b7105, // sidebar_feature_workspace
+        0x4d7a4433eca1a513, // sidebar_needs_you
     ],
 ];
 
@@ -2002,15 +2002,16 @@ pub(super) fn feature_tab() -> super::FeatureTabView {
             line: match i {
                 0 => "2h ago".into(),
                 1 => "1h ago".into(),
-                2 => "running 14m".into(),
+                2 => "skipped".into(),
+                3 => "running 14m".into(),
                 _ => String::new(),
             },
             mark: match i {
-                0 | 1 => NodeMark::Done,
-                2 => NodeMark::Current,
+                0..=2 => NodeMark::Done,
+                3 => NodeMark::Current,
                 _ => NodeMark::Later,
             },
-            selected: i == 2,
+            selected: i == 3,
             agent: match i {
                 0 => Some((AgentIcon::Cursor, "grok-4.7".into())),
                 1 => Some((
@@ -2166,7 +2167,7 @@ fn at_stage(view: &mut super::FeatureTabView, current: usize, mark: super::NodeM
 }
 
 /// Plan written and waiting for review: the planner idle.
-fn feature_tab_plan_review() -> super::FeatureTabView {
+fn feature_tab_plan_ready() -> super::FeatureTabView {
     use super::{ButtonStyle, CheckTone, Dot, NodeMark, PageButton, PageSection, StagePage};
     use crate::{agent_icons::AgentIcon, feature::Stage};
     let mut view = feature_tab();
@@ -2308,7 +2309,7 @@ fn feature_tab_discover_brief() -> super::FeatureTabView {
 /// A plan too long for its column, its milestones over it, scrolled.
 fn feature_tab_plan_long() -> super::FeatureTabView {
     use super::{CheckTone, NodeMark, PageSection, TabColumn};
-    let mut view = feature_tab_plan_review();
+    let mut view = feature_tab_plan_ready();
     at_stage(&mut view, 1, NodeMark::Waiting, "ready for review");
     let blocks = (0..12).flat_map(|_| doc_blocks()).collect();
     let items = vec![(true, "API".to_owned()), (false, "UI".to_owned())];
@@ -2365,7 +2366,7 @@ fn feature_tab_verify_failed() -> super::FeatureTabView {
     use super::{ButtonStyle, CheckTone, NodeMark, PageButton, PageSection, StagePage};
     use crate::feature::Stage;
     let mut view = feature_tab();
-    at_stage(&mut view, 3, NodeMark::Current, "failed");
+    at_stage(&mut view, 4, NodeMark::Current, "failed");
     view.page = StagePage {
         title: "Verify".into(),
         about: Stage::Verify.about().into(),
@@ -2409,7 +2410,7 @@ fn feature_tab_ship_blocked() -> super::FeatureTabView {
     use super::{ButtonStyle, CheckTone, NodeMark, PageButton, PageSection, StagePage};
     use crate::feature::Stage;
     let mut view = feature_tab();
-    at_stage(&mut view, 7, NodeMark::Current, "blocked");
+    at_stage(&mut view, 8, NodeMark::Current, "blocked");
     view.repos[1].line = "feature/bulk-export \u{b7} push not guarded: hooks path is set".into();
     view.page = StagePage {
         title: "Ship".into(),
@@ -2573,9 +2574,9 @@ fn feature_tab_done() -> super::FeatureTabView {
         node.mark = NodeMark::Done;
         node.line = "2h ago".into();
     }
-    view.rail[3].mark = NodeMark::Stale;
-    view.rail[3].line = "code changed".into();
-    select_node(&mut view, 7);
+    view.rail[4].mark = NodeMark::Stale;
+    view.rail[4].line = "code changed".into();
+    select_node(&mut view, 8);
     for (i, repo) in ["api", "web"].into_iter().enumerate() {
         let row = &mut view.repos[i];
         row.line = format!("PR {repo}/pull/1{i}");
@@ -2607,8 +2608,8 @@ fn feature_tab_later() -> super::FeatureTabView {
     use super::{CheckTone, PageSection, StagePage};
     use crate::feature::Stage;
     let mut view = feature_tab();
-    select_node(&mut view, 5);
-    view.hover = Some(super::FeatureTabHit::Node(6));
+    select_node(&mut view, 6);
+    view.hover = Some(super::FeatureTabHit::Node(7));
     view.page = StagePage {
         title: "Code review".into(),
         about: Stage::CodeReview.about().into(),
@@ -2642,7 +2643,7 @@ fn feature_tab_picks_later() -> super::FeatureTabView {
     use super::{CheckTone, Dot, PageSection, StagePage};
     use crate::{agent_icons::AgentIcon, feature::Stage};
     let mut view = feature_tab();
-    select_node(&mut view, 4);
+    select_node(&mut view, 5);
     view.page = StagePage {
         title: "AI review".into(),
         about: Stage::AiReview.about().into(),
@@ -2894,7 +2895,7 @@ fn feature_tab_rail_wrap() -> super::FeatureTabView {
     let mut view = feature_tab();
     view.repos[1].busy = true;
     view.repos[2].stat = Some((7, 0));
-    at_stage(&mut view, 5, super::NodeMark::Current, "3 of 9 viewed");
+    at_stage(&mut view, 6, super::NodeMark::Current, "3 of 9 viewed");
     view
 }
 
@@ -2902,7 +2903,7 @@ fn feature_tab_rail_wrap() -> super::FeatureTabView {
 fn feature_tabs() -> [(&'static str, super::FeatureTabView); 24] {
     [
         ("tab_build", feature_tab()),
-        ("tab_plan_review", feature_tab_plan_review()),
+        ("tab_plan_ready", feature_tab_plan_ready()),
         ("tab_verify_failed", feature_tab_verify_failed()),
         ("tab_ship_blocked", feature_tab_ship_blocked()),
         ("tab_done", feature_tab_done()),
@@ -2933,7 +2934,7 @@ const TAB_SURFACES: [(&str, i32); 30] = [
     ("tab_build", 860),
     ("tab_build", 1180),
     ("tab_build", 1920),
-    ("tab_plan_review", 1180),
+    ("tab_plan_ready", 1180),
     ("tab_verify_failed", 1920),
     ("tab_ship_blocked", 1180),
     ("tab_done", 1920),
@@ -2966,7 +2967,7 @@ const FEATURE_TAB: [&str; 30] = [
     "tab_build_860",
     "tab_build_1180",
     "tab_build_1920",
-    "tab_plan_review_1180",
+    "tab_plan_ready_1180",
     "tab_verify_failed_1920",
     "tab_ship_blocked_1180",
     "tab_done_1920",
@@ -2999,135 +3000,135 @@ const FEATURE_TAB: [&str; 30] = [
 const GOLDEN_FEATURE_TAB: [[u64; 30]; 4] = [
     // Dark at 1
     [
-        0xa3f46cc9e96fa351, // tab_build_860
-        0xb6b4db0dadd7fdfc, // tab_build_1180
-        0x5ce5089b7ec3ab9f, // tab_build_1920
-        0xeff4bd04a7939d9c, // tab_plan_review_1180
-        0xbf0856a1a0c6077c, // tab_verify_failed_1920
-        0xd75f3dca81031cf9, // tab_ship_blocked_1180
-        0x5ee6d078a8b87ba3, // tab_done_1920
-        0xbe0f6059062870f8, // tab_later_860
-        0x16f086f60b8a5df5, // tab_repos_1180
-        0xb8529049853cd9fe, // tab_unfolded_860
-        0xdc52bee033e1fad6, // tab_unfolded_1920
-        0x775fd8ff2588ff2b, // tab_shipped_1180
-        0xd0344710b95817d9, // tab_repos_failed_1180
-        0x5425ab4853720b68, // tab_repos_error_860
-        0x2a9628be4d2a51aa, // tab_more_repos_850
-        0x1df6223e99dfe7f1, // tab_more_repos_mid_850
-        0x7134a3e5228bb6aa, // tab_rail_wrap_500
-        0x6397f9c512f2a8e1, // tab_rail_wrap_1180
-        0xa6abf1bc101abcef, // tab_picks_later_1180
-        0xefc750f04fe5cb21, // tab_picks_running_860
-        0xaa73baa0fa3f6b51, // tab_t3_draft_860
-        0x8df3b38540d70ed0, // tab_held_860
-        0x1351435ee45a3fc0, // tab_resume_1180
-        0xa25e7856938a51c9, // tab_resume_860
-        0x5c35436d59a682dd, // tab_approved_1180
-        0x28bbc7a9e16fc0f8, // tab_locked_1180
-        0x1d7fc1d324d93bc6, // tab_start_over_1180
-        0x87d769cf9ee300ee, // tab_discover_brief_1180
-        0x3221957482f6a7b1, // tab_discover_brief_860
-        0x372f6dba86a3efcd, // tab_plan_long_1180
+        0x332b7228d6306b6d, // tab_build_860
+        0x4a560a01809ab615, // tab_build_1180
+        0x0ca3ff81897b4192, // tab_build_1920
+        0x3e5ff22621165ca2, // tab_plan_ready_1180
+        0xee1e00a16b9f1798, // tab_verify_failed_1920
+        0x7d621f80e1bd26b5, // tab_ship_blocked_1180
+        0x520019d1eac6a259, // tab_done_1920
+        0xa5b16c0194b40754, // tab_later_860
+        0x10939923e98bbb10, // tab_repos_1180
+        0xf3923edf9fc086ca, // tab_unfolded_860
+        0xa2e3c3236d9a4c23, // tab_unfolded_1920
+        0x6bb08de3009489e4, // tab_shipped_1180
+        0xd7eb8b85f0f59ecc, // tab_repos_failed_1180
+        0x0df3c66a740956ec, // tab_repos_error_860
+        0x2deb63ac903f943d, // tab_more_repos_850
+        0x858f0cb5124dbd52, // tab_more_repos_mid_850
+        0x808bb47e4207e420, // tab_rail_wrap_500
+        0x9e1ed44325e0fa16, // tab_rail_wrap_1180
+        0x3c252aa283117b96, // tab_picks_later_1180
+        0xd88a505544d5cf95, // tab_picks_running_860
+        0x4dbc062367ae4fc1, // tab_t3_draft_860
+        0x959063741091a5e0, // tab_held_860
+        0x32dfb9ea19dc6ce5, // tab_resume_1180
+        0x3dc610bcf46145d9, // tab_resume_860
+        0x1ca019021d57d8c7, // tab_approved_1180
+        0xc6318e4fe0bc1706, // tab_locked_1180
+        0xd35d28e964e71244, // tab_start_over_1180
+        0x486c632f11ebc34c, // tab_discover_brief_1180
+        0xc0d13e4c733a24fd, // tab_discover_brief_860
+        0x4729577634bc83f7, // tab_plan_long_1180
     ],
     // Dark at 2
     [
-        0x2f04d68e1c3718ce, // tab_build_860
-        0x86dd7ebf94bc92aa, // tab_build_1180
-        0xfce775fa3f747cad, // tab_build_1920
-        0xb28938d9ea5d0333, // tab_plan_review_1180
-        0x6f42cf11b5b02630, // tab_verify_failed_1920
-        0x52911841637c825b, // tab_ship_blocked_1180
-        0xad9ebd6efda5b783, // tab_done_1920
-        0x8c1bb0b0ae4dc26b, // tab_later_860
-        0xebd2a4bf7339c523, // tab_repos_1180
-        0xa9de6da1bc74a9e2, // tab_unfolded_860
-        0xe9aafec3c5e8b499, // tab_unfolded_1920
-        0x8fe81cbf7550b2d2, // tab_shipped_1180
-        0x8b25e78ddfc70325, // tab_repos_failed_1180
-        0x67a55d2258003c33, // tab_repos_error_860
-        0xcc0cba114eca942e, // tab_more_repos_850
-        0x1683d786d1876f11, // tab_more_repos_mid_850
-        0x13e16712c6da3997, // tab_rail_wrap_500
-        0xe30956a9281ead47, // tab_rail_wrap_1180
-        0x0ca2d67e2d6bc9d8, // tab_picks_later_1180
-        0x50490bdc897b6fca, // tab_picks_running_860
-        0xeb292c740cee39e5, // tab_t3_draft_860
-        0x5535f1a1b89448f0, // tab_held_860
-        0xcca094f3ce38c307, // tab_resume_1180
-        0xdb2e88dd69487fa3, // tab_resume_860
-        0x18b58ce3360972f5, // tab_approved_1180
-        0x66f771accf14930d, // tab_locked_1180
-        0x3b42108edd95261a, // tab_start_over_1180
-        0x5c9b419dce8adc2e, // tab_discover_brief_1180
-        0xa3437816fe1dbc24, // tab_discover_brief_860
-        0xf4239fd9c652cab0, // tab_plan_long_1180
+        0xb633cfa4474a78dd, // tab_build_860
+        0x2d2c69e8032089db, // tab_build_1180
+        0x0b04f4e61d9547a4, // tab_build_1920
+        0x4d3c1f8e05267489, // tab_plan_ready_1180
+        0x250880235a0dd11e, // tab_verify_failed_1920
+        0x149dd2e36ff9d918, // tab_ship_blocked_1180
+        0xe9ee9745a52c6e9c, // tab_done_1920
+        0x124488a8df67ef48, // tab_later_860
+        0xd0afc08ad8ccaba6, // tab_repos_1180
+        0x1ff0d27552536645, // tab_unfolded_860
+        0x428049c59a1b4410, // tab_unfolded_1920
+        0x02dee3f6e8043ccc, // tab_shipped_1180
+        0x04d99be59a1d9af8, // tab_repos_failed_1180
+        0x7cca6a3eeb926d7c, // tab_repos_error_860
+        0x92ccc566c9eef4bb, // tab_more_repos_850
+        0xbe8296ed381d2b08, // tab_more_repos_mid_850
+        0xa3df6c15988986e8, // tab_rail_wrap_500
+        0x82c451aa75cff50c, // tab_rail_wrap_1180
+        0x7aed0177026b8fc5, // tab_picks_later_1180
+        0x8ca2ad134f56fc71, // tab_picks_running_860
+        0x3e55166b5b1aaeba, // tab_t3_draft_860
+        0x0f4db73107d01bbf, // tab_held_860
+        0x390926dd9747f056, // tab_resume_1180
+        0x64fddb303f071664, // tab_resume_860
+        0x81dcfe933b50d1c7, // tab_approved_1180
+        0x9eb70b3d664962c7, // tab_locked_1180
+        0x9553d8c366a08944, // tab_start_over_1180
+        0x9c01218e31710f3c, // tab_discover_brief_1180
+        0xa6e5fd80ec31258c, // tab_discover_brief_860
+        0x3f8ffcb4947909c2, // tab_plan_long_1180
     ],
     // Light at 1
     [
-        0x02b7a74b7e1bcc08, // tab_build_860
-        0x93ab2a7d272aebc8, // tab_build_1180
-        0xf082e11d72dc6632, // tab_build_1920
-        0xcd67121232899b28, // tab_plan_review_1180
-        0x72a59b447b0a48eb, // tab_verify_failed_1920
-        0xd07fd05419489e63, // tab_ship_blocked_1180
-        0x59a8771d7dfa5334, // tab_done_1920
-        0xd6d94ff2e58207d3, // tab_later_860
-        0xbfdc7c383c60fa93, // tab_repos_1180
-        0xff8f1f5c0b47c6c4, // tab_unfolded_860
-        0xcc86355a4b951930, // tab_unfolded_1920
-        0xc88d5a7245c92c0b, // tab_shipped_1180
-        0xdac6a8bbaea5d580, // tab_repos_failed_1180
-        0x2d1efb640707c455, // tab_repos_error_860
-        0x21f6f987ddc4ac59, // tab_more_repos_850
-        0x0d83b77cf0998ad7, // tab_more_repos_mid_850
-        0xe547279857952737, // tab_rail_wrap_500
-        0xbdd78d975301d86d, // tab_rail_wrap_1180
-        0xa94325b76eef56c8, // tab_picks_later_1180
-        0xd778b64e794958bc, // tab_picks_running_860
-        0xa54edcf5a0011d9a, // tab_t3_draft_860
-        0x8eb60fdb87bbbedf, // tab_held_860
-        0x29239235ec44e357, // tab_resume_1180
-        0xbe6cb242dbfed8a7, // tab_resume_860
-        0x3ffb948195581b30, // tab_approved_1180
-        0x2c794e82f40b29d9, // tab_locked_1180
-        0xd0b7b9e05d4d066d, // tab_start_over_1180
-        0x0a6ec954dd841c39, // tab_discover_brief_1180
-        0x93b51602bc592a58, // tab_discover_brief_860
-        0xbab7a74263454e1b, // tab_plan_long_1180
+        0xf25c14ce23c8189e, // tab_build_860
+        0x2106005dfecb09fc, // tab_build_1180
+        0x1ba3f2e720cededb, // tab_build_1920
+        0xf9924bda9bfd9238, // tab_plan_ready_1180
+        0xc153f6c583b96640, // tab_verify_failed_1920
+        0x5cdf73e777f176e5, // tab_ship_blocked_1180
+        0x78472c2acf57882a, // tab_done_1920
+        0xb09242356bf70e71, // tab_later_860
+        0x70febdf653f39fa7, // tab_repos_1180
+        0x98948b071a2d848e, // tab_unfolded_860
+        0x76bd5c3092b4e8b9, // tab_unfolded_1920
+        0x896a599b570059f8, // tab_shipped_1180
+        0x8ec3d2f39f095d4c, // tab_repos_failed_1180
+        0xaef1d3ff8a3537cb, // tab_repos_error_860
+        0xda13308acbc923f6, // tab_more_repos_850
+        0x218169350d798d58, // tab_more_repos_mid_850
+        0xeed70e469ce1486d, // tab_rail_wrap_500
+        0xa7a01c7d9cafdf8f, // tab_rail_wrap_1180
+        0x9d2fdb8947ae4a34, // tab_picks_later_1180
+        0xa8aec2f4826ac6de, // tab_picks_running_860
+        0xdaae95dcf08288a0, // tab_t3_draft_860
+        0x31ab23617fe6347d, // tab_held_860
+        0x159317f24b4657ab, // tab_resume_1180
+        0x4320eabc301a6ee1, // tab_resume_860
+        0xf6951ad2aa678c10, // tab_approved_1180
+        0xc603896aa3e8ed79, // tab_locked_1180
+        0x080148cb08d206bd, // tab_start_over_1180
+        0x35987d557948e1c9, // tab_discover_brief_1180
+        0x0cdbbd85ba57047c, // tab_discover_brief_860
+        0x6ddd399d19c87feb, // tab_plan_long_1180
     ],
     // Light at 2
     [
-        0x11803665b052bf7f, // tab_build_860
-        0x38f925dbdb1b80fa, // tab_build_1180
-        0xbb1b64498164c512, // tab_build_1920
-        0x07854f1a4f4dce27, // tab_plan_review_1180
-        0x5bafa16698ea798d, // tab_verify_failed_1920
-        0xd99db2d62735fcd0, // tab_ship_blocked_1180
-        0x595323f7bf2ac81c, // tab_done_1920
-        0x08e4f7c0b8c03e94, // tab_later_860
-        0x319cc57c786a7ce4, // tab_repos_1180
-        0xdfe0b4aebfa05733, // tab_unfolded_860
-        0x1c72ce0d0bbf12d9, // tab_unfolded_1920
-        0x7ae43e867d854736, // tab_shipped_1180
-        0xff9e3544389db386, // tab_repos_failed_1180
-        0x0472145e4934beea, // tab_repos_error_860
-        0x49a8a4691e87c30a, // tab_more_repos_850
-        0x3705a22a12ebb448, // tab_more_repos_mid_850
-        0x21dbed80a656cf91, // tab_rail_wrap_500
-        0xc3a29cd391815d20, // tab_rail_wrap_1180
-        0x5977223620840705, // tab_picks_later_1180
-        0x79541dccbee8a31f, // tab_picks_running_860
-        0x7f9b115ce7663397, // tab_t3_draft_860
-        0x01114294cc791227, // tab_held_860
-        0x6790e5a6bbeb736f, // tab_resume_1180
-        0x7d97d3acf191d452, // tab_resume_860
-        0x57267c3c68e10cde, // tab_approved_1180
-        0xae598690456cf8f3, // tab_locked_1180
-        0x698aa30a7d8162cf, // tab_start_over_1180
-        0xd7e2caac527a0f54, // tab_discover_brief_1180
-        0xda8dc6007b76c9f8, // tab_discover_brief_860
-        0x79774deb896fb36d, // tab_plan_long_1180
+        0xf19be9907f9ce371, // tab_build_860
+        0x44899eb35f2aec7b, // tab_build_1180
+        0x13d5e838f53d5524, // tab_build_1920
+        0x37c9808a13a03d1d, // tab_plan_ready_1180
+        0x8260f8d6a54e9fe0, // tab_verify_failed_1920
+        0x51737a248f38f325, // tab_ship_blocked_1180
+        0x20cb3b0d79c16be8, // tab_done_1920
+        0xb84b5c9831ec1f86, // tab_later_860
+        0x6a17727dd6dbbb2d, // tab_repos_1180
+        0xaf24250a819d1b09, // tab_unfolded_860
+        0x76eb84f7659ddc77, // tab_unfolded_1920
+        0x4224215c1b0e75fe, // tab_shipped_1180
+        0xb4371928c174ba57, // tab_repos_failed_1180
+        0xe779d128199f6f30, // tab_repos_error_860
+        0x719572628e89d542, // tab_more_repos_850
+        0x342e55c1e1946d34, // tab_more_repos_mid_850
+        0x4ddd164a165d3caf, // tab_rail_wrap_500
+        0xe368f7609b20caab, // tab_rail_wrap_1180
+        0x4bdc8bb587ed3818, // tab_picks_later_1180
+        0x5b14b0a0029e76e5, // tab_picks_running_860
+        0x9e296d650b865925, // tab_t3_draft_860
+        0x67bfd4b0c407cbf1, // tab_held_860
+        0xc659c9318b078c0e, // tab_resume_1180
+        0x4036574b8badfc88, // tab_resume_860
+        0x90004c75fcd97c6c, // tab_approved_1180
+        0x214715da487d7e6d, // tab_locked_1180
+        0x88932cd5b3fffe7d, // tab_start_over_1180
+        0xfa9156bb407b2d46, // tab_discover_brief_1180
+        0xb9cde853b7dca0c2, // tab_discover_brief_860
+        0xcc98539950d5ff17, // tab_plan_long_1180
     ],
 ];
 

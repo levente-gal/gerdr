@@ -48,7 +48,15 @@ pub fn load_all(root: Option<&Path>, project: &str) -> Result<Vec<Feature>, Stri
             }
         };
         match serde_json::from_slice::<Feature>(&raw) {
-            Ok(feature) => features.push(feature),
+            Ok(mut feature) => {
+                // Unsaved, it is only brought up to date again next time.
+                if feature.migrate(super::now())
+                    && let Err(err) = save(root, &feature)
+                {
+                    tracing::warn!("saving {} in its new format: {err}", path.display());
+                }
+                features.push(feature);
+            }
             Err(err) => {
                 tracing::warn!("reading {}: {err}", path.display());
                 crate::projects::set_aside(&path);
@@ -122,6 +130,53 @@ mod tests {
         assert!(all[2].is_done(Stage::Discover));
         assert_eq!(all[2].history, b.history);
         assert!(t.0.join("features/p/b/feature.json").is_file());
+    }
+
+    #[test]
+    fn a_feature_past_plan_keeps_its_place_once_and_for_all() {
+        let t = Temp::new();
+        let old = |slug: &str, done: Stage| {
+            let mut f = feature(slug, 5);
+            for stage in Stage::ALL.into_iter().filter(|s| *s <= done) {
+                if stage != Stage::PlanReview {
+                    f.marks.insert(
+                        stage,
+                        crate::feature::Mark {
+                            at: 7,
+                            by: "you".into(),
+                            note: String::new(),
+                            patch: None,
+                        },
+                    );
+                }
+            }
+            f
+        };
+        let write_old = |f: &Feature| {
+            let path = dir(Some(&t.0), "p", &f.slug).join(FILE);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let mut f = f.clone();
+            f.version = 1;
+            std::fs::write(path, serde_json::to_vec(&f).unwrap()).unwrap();
+        };
+        write_old(&old("built", Stage::Build));
+        write_old(&old("planned", Stage::Plan));
+        let mut started = old("started", Stage::Plan);
+        started.runs.insert(Stage::Build, Default::default());
+        write_old(&started);
+        let all = load_all(Some(&t.0), "p").unwrap();
+        let of = |slug: &str| all.iter().find(|f| f.slug == slug).unwrap();
+        // Past Plan: not sent back to a stage it never had.
+        assert_eq!(of("built").current(), Some(Stage::Verify));
+        let mark = &of("built").marks[&Stage::PlanReview];
+        assert_eq!((mark.at, mark.by.as_str()), (7, "gerdr"));
+        // A Build agent had started, not marked done yet.
+        assert_eq!(of("started").current(), Some(Stage::Build));
+        // Plan approved, Build not started: it gets the review.
+        assert_eq!(of("planned").current(), Some(Stage::PlanReview));
+        // Saved: reading it again finds nothing to do.
+        let again = load_all(Some(&t.0), "p").unwrap();
+        assert_eq!(again, all);
     }
 
     #[test]

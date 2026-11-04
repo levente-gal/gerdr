@@ -128,6 +128,7 @@ impl DocOf {
         match self.file {
             DocFile::Evidence => "Evidence",
             DocFile::Stage(Stage::Plan) => "Plan",
+            DocFile::Stage(Stage::PlanReview) => "Final plan",
             DocFile::Stage(_) => "Brief",
         }
     }

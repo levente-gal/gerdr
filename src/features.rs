@@ -14,7 +14,7 @@
 //! `feature_workspace`), full size, painted from `feature_tab_view` (its
 //! state is `FeaturePanel`). It can't be closed, moved or renamed; closing
 //! the workspace takes it along. A header with the feature's buttons, the
-//! eight stages as a rail, and under it the repositories', the picked
+//! nine stages as a rail, and under it the repositories', the picked
 //! stage's page's and the activity's columns, each scrolled on its own
 //! (on a narrow tab the repositories are a row of chips and the activity
 //! goes at the page's end). Tab moves the keyboard between the rail and
@@ -5625,6 +5625,7 @@ fn current_line(feature: &Feature, stage: Stage, state: &PanelState, now: u64) -
         Stage::Discover | Stage::Plan if run.is_some_and(|r| r.ready.is_some()) => {
             "ready for review".into()
         }
+        Stage::PlanReview => agent(),
         Stage::Build if state.setup.is_some() => "setting up".into(),
         Stage::Build if failed_setup && run.is_none() => "setup failed".into(),
         Stage::Build => match run.and_then(|r| r.stop) {
@@ -5996,6 +5997,7 @@ fn stage_page(
         }
         let card = || agent_card(feature, stage, state, actions, now);
         match stage {
+            Stage::PlanReview => sections.extend(card()),
             Stage::Discover | Stage::Plan => {
                 sections.extend(card());
                 sections.push(file_card(feature, stage, state.ctx, actions));
@@ -6902,7 +6904,7 @@ pub(crate) mod tests {
 
     #[test]
     fn del_on_a_repository_of_several_asks_or_arms_by_what_it_holds() {
-        let f = feature("b", vec![repo("api", true), repo("web", true)], 2);
+        let f = feature("b", vec![repo("api", true), repo("web", true)], 3);
         let mut panel = FeaturePanel {
             project: "acme".into(),
             slug: "b".into(),
@@ -6917,7 +6919,7 @@ pub(crate) mod tests {
         );
         assert_eq!(panel.armed, None);
         // One the feature doesn't change arms first.
-        let old = feature("c", vec![repo("api", true), repo("ui", false)], 2);
+        let old = feature("c", vec![repo("api", true), repo("ui", false)], 3);
         assert_eq!(press(&mut panel, &old, key(Keysym::Delete)), None);
         assert_eq!(panel.armed.as_deref(), Some("ui"));
         assert_eq!(
@@ -6935,7 +6937,7 @@ pub(crate) mod tests {
             Some(PanelOutcome::Remove)
         );
         // So on a feature's only repository.
-        let mut one = feature("c", vec![repo("api", true)], 2);
+        let mut one = feature("c", vec![repo("api", true)], 3);
         one.multi = false;
         panel.focus = TabArea::Repos;
         panel.repo = 0;
@@ -6947,7 +6949,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_repository_that_can_leave_shows_its_button() {
-        let mut f = feature("b", vec![repo("api", true), repo("web", true)], 2);
+        let mut f = feature("b", vec![repo("api", true), repo("web", true)], 3);
         assert!(repo_removable(&f, 0) && repo_removable(&f, 1));
         f.repos[1].touched = false;
         assert!(!repo_removable(&f, 0), "the last one to change stays");
@@ -6964,13 +6966,13 @@ pub(crate) mod tests {
 
     #[test]
     fn panel_keys_move_through_stages_and_repositories_and_ask_for_actions() {
-        let f = feature("b", vec![repo("api", true), repo("web", false)], 2);
+        let f = feature("b", vec![repo("api", true), repo("web", false)], 3);
         let mut panel = FeaturePanel {
             project: "acme".into(),
             slug: "b".into(),
             ..FeaturePanel::default()
         };
-        // It starts on the current stage's page: Plan done, Build next,
+        // It starts on the current stage's page: Plan review done, Build next,
         // its agent to start.
         assert_eq!(panel.focus, TabArea::Stages);
         assert_eq!(panel.page_stage(&f), Stage::Build);
@@ -6980,15 +6982,15 @@ pub(crate) mod tests {
         );
         // Left and Right (Up, Down, Ctrl+J/K) pick another stage's page.
         assert_eq!(press(&mut panel, &f, key(Keysym::Left)), None);
-        assert_eq!(panel.page_stage(&f), Stage::Plan);
+        assert_eq!(panel.page_stage(&f), Stage::PlanReview);
         // A done stage's Enter goes on to the current one; only its own
         // key reopens it.
         assert_eq!(
             press(&mut panel, &f, key(Keysym::Return)),
             Some(PanelOutcome::GoToCurrent)
         );
-        let actions = page_actions(&f, Stage::Plan, RowCtx::default());
-        assert_eq!(actions[1].1, PanelOutcome::Untick(Stage::Plan));
+        let actions = page_actions(&f, Stage::PlanReview, RowCtx::default());
+        assert_eq!(actions[1].1, PanelOutcome::Untick(Stage::PlanReview));
         assert_eq!(actions[1].0.style, ButtonStyle::Plain);
         press(&mut panel, &f, ctrl(Keysym::j));
         press(&mut panel, &f, key(Keysym::Right));
@@ -6999,7 +7001,7 @@ pub(crate) mod tests {
         );
         press(&mut panel, &f, ctrl(Keysym::k));
         press(&mut panel, &f, key(Keysym::Up));
-        assert_eq!(panel.page_stage(&f), Stage::Plan);
+        assert_eq!(panel.page_stage(&f), Stage::PlanReview);
         press(&mut panel, &f, key(Keysym::Home));
         assert_eq!(panel.page_stage(&f), Stage::Discover);
         press(&mut panel, &f, key(Keysym::Left));
@@ -7087,7 +7089,7 @@ pub(crate) mod tests {
 
     #[test]
     fn without_repositories_tab_stays_on_the_stages() {
-        let f = feature("b", Vec::new(), 2);
+        let f = feature("b", Vec::new(), 3);
         let mut panel = FeaturePanel::default();
         press(&mut panel, &f, key(Keysym::Tab));
         assert_eq!(panel.focus, TabArea::Stages);
@@ -7097,7 +7099,7 @@ pub(crate) mod tests {
 
     #[test]
     fn another_page_starts_at_its_top() {
-        let f = feature("b", vec![repo("api", true)], 2);
+        let f = feature("b", vec![repo("api", true)], 3);
         let mut panel = FeaturePanel {
             project: "acme".into(),
             slug: "b".into(),
@@ -7130,7 +7132,7 @@ pub(crate) mod tests {
         panel.hold_page(panel.page_key(&f));
         assert_eq!(panel.page_stage(&f), Stage::Discover);
         panel.scroll[page].jump(120.0);
-        let moved_on = feature("b", vec![repo("api", true)], 3);
+        let moved_on = feature("b", vec![repo("api", true)], 4);
         assert_eq!(panel.page_stage(&moved_on), Stage::Verify);
         assert_eq!(
             tab_view(&panel, &moved_on, &slugs, &state, 2_060).scroll[page],
@@ -7145,7 +7147,7 @@ pub(crate) mod tests {
 
     #[test]
     fn f1_lists_every_key_in_place_of_the_page() {
-        let f = feature("b", vec![repo("api", true), repo("web", false)], 2);
+        let f = feature("b", vec![repo("api", true), repo("web", false)], 3);
         let mut panel = FeaturePanel {
             project: "acme".into(),
             slug: "b".into(),
@@ -7220,7 +7222,7 @@ pub(crate) mod tests {
     /// A multi-repository feature with `api` and `web` on its branch,
     /// `docs` as context and `auth` taken out.
     fn every_kind_of_row() -> Feature {
-        let mut f = feature("b", vec![repo("api", true), repo("web", true)], 2);
+        let mut f = feature("b", vec![repo("api", true), repo("web", true)], 3);
         f.add_context(context_of("docs"));
         f.note_removed(None, "auth".into(), 5);
         f
@@ -7228,7 +7230,7 @@ pub(crate) mod tests {
 
     #[test]
     fn leaving_an_active_repository_always_asks() {
-        let mut f = feature("b", vec![repo("api", true), repo("ui", false)], 2);
+        let mut f = feature("b", vec![repo("api", true), repo("ui", false)], 3);
         let keys = |k: &str| vec![k.to_owned()];
         assert!(
             removal_asks(&f, &keys("api"), &[]),
@@ -7451,14 +7453,14 @@ pub(crate) mod tests {
                 .find(|(key, _)| key == "Del")
                 .map(|(_, what)| what.clone())
         };
-        let two = feature("b", vec![repo("api", true), repo("web", true)], 2);
+        let two = feature("b", vec![repo("api", true), repo("web", true)], 3);
         assert_eq!(del(&two, 0).as_deref(), Some("remove repository"));
         // The last one of several left: Del would only be refused.
         let mut last = two.clone();
         last.repos.pop();
         assert_eq!(del(&last, 0), None);
         // The only one a feature has: Del abandons it, and says so.
-        let one = feature("b", vec![repo("api", true)], 2);
+        let one = feature("b", vec![repo("api", true)], 3);
         assert_eq!(del(&one, 0).as_deref(), Some("abandon"));
     }
 
@@ -7545,10 +7547,10 @@ pub(crate) mod tests {
 
     #[test]
     fn a_picked_page_holds_until_the_feature_moves_on() {
-        let mut f = feature("b", vec![repo("api", true)], 2);
+        let mut f = feature("b", vec![repo("api", true)], 3);
         let mut panel = FeaturePanel::default();
         press(&mut panel, &f, key(Keysym::Left));
-        assert_eq!(panel.page_stage(&f), Stage::Plan);
+        assert_eq!(panel.page_stage(&f), Stage::PlanReview);
         // Build ticked: the pick is dropped, the new current shows.
         let mark = f.marks[&Stage::Plan].clone();
         f.marks.insert(Stage::Build, mark);
@@ -7571,13 +7573,13 @@ pub(crate) mod tests {
         panel.unpick();
         assert_eq!(panel.page_stage(&f), Stage::Build);
         // A feature with every stage done shows Ship.
-        let done = feature("d", vec![repo("api", true)], 8);
+        let done = feature("d", vec![repo("api", true)], 9);
         assert_eq!(FeaturePanel::default().page_stage(&done), Stage::Ship);
     }
 
     #[test]
     fn the_tab_shows_repositories_the_rail_and_the_right_hints() {
-        let f = feature("b", vec![repo("api", true), repo("web", false)], 3);
+        let f = feature("b", vec![repo("api", true), repo("web", false)], 4);
         let panel = FeaturePanel {
             project: "acme".into(),
             slug: "b".into(),
@@ -7595,8 +7597,9 @@ pub(crate) mod tests {
         assert_eq!(view.repos_error, None);
         let marks: Vec<NodeMark> = view.rail.iter().map(|s| s.mark).collect();
         assert_eq!(
-            &marks[..5],
+            &marks[..6],
             [
+                NodeMark::Done,
                 NodeMark::Done,
                 NodeMark::Done,
                 NodeMark::Done,
@@ -7604,13 +7607,13 @@ pub(crate) mod tests {
                 NodeMark::Later
             ]
         );
-        assert_eq!(view.rail.len(), 8);
+        assert_eq!(view.rail.len(), 9);
         assert_eq!(view.rail[0].line, "1m ago");
-        assert_eq!(view.rail[3].line, "mark by hand");
-        assert_eq!(view.rail[4].line, "");
+        assert_eq!(view.rail[4].line, "mark by hand");
+        assert_eq!(view.rail[5].line, "");
         let selected: Vec<bool> = view.rail.iter().map(|n| n.selected).collect();
         assert_eq!(selected.iter().filter(|s| **s).count(), 1);
-        assert!(selected[3]);
+        assert!(selected[4]);
         assert_eq!(view.page.title, "Verify");
         assert_eq!(
             stage_detail(&f, Stage::Discover, &state, 2_060),
@@ -7771,7 +7774,7 @@ pub(crate) mod tests {
     #[test]
     fn fixes_waiting_on_a_done_build_can_be_sent_from_its_page() {
         // Build done, a later stage current: a fresh agent for fixes waits.
-        let mut f = feature("b", vec![repo("api", true)], 3);
+        let mut f = feature("b", vec![repo("api", true)], 4);
         assert!(f.is_done(Stage::Build));
         f.runs.insert(Stage::Build, held_run(Some("p1")));
         let send = PanelOutcome::SendPrompt(Stage::Build);
@@ -7793,7 +7796,7 @@ pub(crate) mod tests {
 
     #[test]
     fn the_reviewer_waits_for_its_prompt_too() {
-        let mut f = feature("b", vec![repo("api", true)], 4);
+        let mut f = feature("b", vec![repo("api", true)], 5);
         assert_eq!(f.current(), Some(Stage::AiReview));
         f.runs.insert(Stage::AiReview, held_run(Some("p1")));
         assert_eq!(review_action(&f), PanelOutcome::SendPrompt(Stage::AiReview));
@@ -7836,7 +7839,7 @@ pub(crate) mod tests {
     #[test]
     fn only_a_kept_chat_of_an_open_feature_resumes() {
         let resume = PanelOutcome::ResumeAgent(Stage::Plan);
-        let mut f = feature("b", vec![repo("api", true)], 2);
+        let mut f = feature("b", vec![repo("api", true)], 3);
         f.status = Status::Abandoned;
         f.runs.insert(Stage::Plan, kept_run("claude"));
         assert!(!page_outcomes(&f, Stage::Plan).contains(&resume));
@@ -7849,7 +7852,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_tab_still_there_is_shown_not_resumed() {
-        let mut f = feature("b", vec![repo("api", true)], 2);
+        let mut f = feature("b", vec![repo("api", true)], 3);
         f.runs.insert(
             Stage::Plan,
             feature::agents::StageRun {
@@ -8004,7 +8007,7 @@ pub(crate) mod tests {
 
     #[test]
     fn build_continues_after_a_milestone_and_offers_no_mark() {
-        let mut f = feature("b", vec![repo("api", true)], 2);
+        let mut f = feature("b", vec![repo("api", true)], 3);
         let build = PanelRow::Stage(Stage::Build);
         let none = RowCtx::default();
         // No agent yet: Enter starts one; never a mark.
@@ -8047,7 +8050,7 @@ pub(crate) mod tests {
 
     #[test]
     fn verify_runs_its_checks_when_it_has_some_else_is_marked() {
-        let f = feature("v", vec![repo("api", true)], 3);
+        let f = feature("v", vec![repo("api", true)], 4);
         let verify = PanelRow::Stage(Stage::Verify);
         let checks = RowCtx {
             checks: true,
@@ -8074,7 +8077,7 @@ pub(crate) mod tests {
             Some(PanelOutcome::Tick)
         );
         // Later stages aren't run early.
-        let early = feature("e", vec![repo("api", true)], 2);
+        let early = feature("e", vec![repo("api", true)], 3);
         assert_eq!(
             row_action(&early, verify, checks),
             Some(PanelOutcome::NotYet(Stage::Build))
@@ -8083,7 +8086,7 @@ pub(crate) mod tests {
 
     #[test]
     fn evidence_opens_from_the_verify_row_once_a_run_wrote_it() {
-        let mut f = feature("v", vec![repo("api", true)], 3);
+        let mut f = feature("v", vec![repo("api", true)], 4);
         let mut panel = FeaturePanel {
             ..FeaturePanel::default()
         };
@@ -8124,7 +8127,7 @@ pub(crate) mod tests {
 
     #[test]
     fn builds_row_says_setup_first_then_its_agent() {
-        let mut f = feature("b", vec![repo("api", true)], 2);
+        let mut f = feature("b", vec![repo("api", true)], 3);
         let agent = Some("Claude Code working");
         assert_eq!(build_line(&f, None, agent).as_deref(), agent);
         assert_eq!(build_line(&f, None, None), None);
@@ -8163,7 +8166,7 @@ pub(crate) mod tests {
             stage_detail(&f, Stage::Build, &state, 2_000),
             "setup failed: api: `npm ci` exited with 1"
         );
-        let done = feature("d", vec![repo("api", true)], 3);
+        let done = feature("d", vec![repo("api", true)], 4);
         assert_eq!(
             stage_detail(&done, Stage::Build, &state, 2_060),
             "done 1m ago by you"
@@ -8172,7 +8175,7 @@ pub(crate) mod tests {
 
     #[test]
     fn verifys_row_says_what_runs_failed_or_that_it_has_no_checks() {
-        let mut f = feature("v", vec![repo("api", true)], 3);
+        let mut f = feature("v", vec![repo("api", true)], 4);
         let checks = RowCtx {
             checks: true,
             ..RowCtx::default()
@@ -8309,7 +8312,7 @@ pub(crate) mod tests {
             agents::StageRun,
             review_import::{AiReview, Finding},
         };
-        let mut f = feature("r", vec![repo("api", true)], 4);
+        let mut f = feature("r", vec![repo("api", true)], 5);
         f.runs.insert(
             Stage::AiReview,
             StageRun {
@@ -8343,7 +8346,7 @@ pub(crate) mod tests {
         use FindingState as S;
         let row = PanelRow::Stage(Stage::AiReview);
         let none = RowCtx::default();
-        let fresh = feature("r", vec![repo("api", true)], 4);
+        let fresh = feature("r", vec![repo("api", true)], 5);
         assert_eq!(
             row_action(&fresh, row, none),
             Some(PanelOutcome::StartAgent(Stage::AiReview, false))
@@ -8414,8 +8417,8 @@ pub(crate) mod tests {
             "2 findings to decide \u{b7} Enter to review"
         );
         assert_eq!(view.page.buttons[0].label, "Review findings");
-        assert_eq!(view.rail[4].mark, NodeMark::Waiting);
-        assert_eq!(view.rail[4].line, "2 to decide");
+        assert_eq!(view.rail[5].mark, NodeMark::Waiting);
+        assert_eq!(view.rail[5].line, "2 to decide");
         assert!(
             view.hints
                 .contains(&("Ctrl+R".into(), "fresh agent".into()))
@@ -8428,7 +8431,7 @@ pub(crate) mod tests {
 
     #[test]
     fn code_review_shows_the_diff() {
-        let f = feature("c", vec![repo("api", true)], 5);
+        let f = feature("c", vec![repo("api", true)], 6);
         let row = PanelRow::Stage(Stage::CodeReview);
         let none = RowCtx::default();
         assert_eq!(row_action(&f, row, none), Some(PanelOutcome::CodeReview));
@@ -8468,7 +8471,7 @@ pub(crate) mod tests {
 
     #[test]
     fn manual_test_opens_its_sheet_when_the_brief_has_criteria() {
-        let f = feature("m", vec![repo("api", true)], 6);
+        let f = feature("m", vec![repo("api", true)], 7);
         assert_eq!(f.current(), Some(Stage::ManualTest));
         let row = PanelRow::Stage(Stage::ManualTest);
         // Without criteria it is marked done by hand, as before.
@@ -8506,7 +8509,7 @@ pub(crate) mod tests {
 
     #[test]
     fn ship_is_asked_for_not_ticked_and_bound_stages_tick_as_before() {
-        let shipping = feature("s", vec![repo("api", true)], 7);
+        let shipping = feature("s", vec![repo("api", true)], 8);
         let ship = PanelRow::Stage(Stage::Ship);
         assert_eq!(
             row_action(&shipping, ship, RowCtx::default()),
@@ -8526,7 +8529,7 @@ pub(crate) mod tests {
             stage_button(&shipping, Stage::Build, RowCtx::default()),
             None
         );
-        let verifying = feature("v", vec![repo("api", true)], 3);
+        let verifying = feature("v", vec![repo("api", true)], 4);
         let verify = PanelRow::Stage(Stage::Verify);
         let none = RowCtx::default();
         assert_eq!(
@@ -8554,7 +8557,7 @@ pub(crate) mod tests {
         let mut f = feature(
             "d",
             vec![repo("api", true), repo("web", true), repo("ui", false)],
-            8,
+            9,
         );
         f.status = Status::Done;
         let url = "https://github.com/acme/api/pull/12";
@@ -8618,7 +8621,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_push_not_guarded_shows_on_its_repository() {
-        let f = feature("g", vec![repo("api", true), repo("web", true)], 3);
+        let f = feature("g", vec![repo("api", true), repo("web", true)], 4);
         let mut p = probe(None);
         p.guards.insert("api".into(), Guard::On);
         p.guards
@@ -8632,7 +8635,7 @@ pub(crate) mod tests {
 
     #[test]
     fn the_ship_check_shows_what_stops_it_or_that_it_is_ready() {
-        let f = feature("s", vec![repo("api", true)], 7);
+        let f = feature("s", vec![repo("api", true)], 8);
         let none = check_lines(&f, None, false, 2_060);
         assert_eq!(texts(&none), [("checking\u{2026}", CheckTone::Note)]);
         let blocked = probe(check(&["api is dirty", "web is behind"], Vec::new(), &[]));
@@ -8674,7 +8677,7 @@ pub(crate) mod tests {
         assert_eq!(lines.len(), 1);
         assert!(lines[0].text.starts_with("Squash started"));
         // Only while Ship is the current stage.
-        let building = feature("b", vec![repo("api", true)], 2);
+        let building = feature("b", vec![repo("api", true)], 3);
         assert!(check_lines(&building, Some(&ready), false, 2_060).is_empty());
     }
 
@@ -8737,17 +8740,17 @@ pub(crate) mod tests {
 
     #[test]
     fn the_watch_looks_at_open_features_bound_to_their_code() {
-        assert!(!watched(&feature("a", vec![repo("api", true)], 2)));
-        assert!(watched(&feature("b", vec![repo("api", true)], 3)));
+        assert!(!watched(&feature("a", vec![repo("api", true)], 3)));
+        assert!(watched(&feature("b", vec![repo("api", true)], 4)));
         let mut squashing = feature("c", vec![repo("api", true)], 1);
         squashing.shipping.squash_at = Some(1);
         assert!(watched(&squashing));
         assert_eq!(watch_every(&squashing), PANEL_EVERY);
         assert_eq!(
-            watch_every(&feature("b", vec![repo("api", true)], 3)),
+            watch_every(&feature("b", vec![repo("api", true)], 4)),
             WATCH_EVERY
         );
-        let mut done = feature("d", vec![repo("api", true)], 8);
+        let mut done = feature("d", vec![repo("api", true)], 9);
         done.status = Status::Done;
         assert!(!watched(&done));
     }
@@ -8758,7 +8761,7 @@ pub(crate) mod tests {
         open.title = "Open".into();
         let mut abandoned = feature("b", vec![repo("api", true)], 1);
         abandoned.status = Status::Abandoned;
-        let mut done = feature("c", vec![repo("api", true)], 8);
+        let mut done = feature("c", vec![repo("api", true)], 9);
         done.status = Status::Done;
         let all = vec![open, abandoned, done];
         let shown: Vec<&str> = sidebar_features(&all)
@@ -8837,7 +8840,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_running_build_shows_its_agent_then_its_milestones() {
-        let mut f = feature("b", vec![repo("api", true)], 2);
+        let mut f = feature("b", vec![repo("api", true)], 3);
         let mut run = agent_run(Some("p1"), None);
         run.started = 1_000;
         f.runs.insert(Stage::Build, run);
@@ -9087,7 +9090,7 @@ pub(crate) mod tests {
     #[test]
     fn panel_keys_reopen_and_start_over_a_stage() {
         let mut panel = FeaturePanel::default();
-        let f = feature("k", vec![repo("api", true)], 2);
+        let f = feature("k", vec![repo("api", true)], 3);
         let ctrl_shift = ModifiersState {
             ctrl: true,
             shift: true,
@@ -9104,12 +9107,12 @@ pub(crate) mod tests {
         // On Build, current with nothing made: nothing to start over or reopen.
         assert_eq!(press(&mut panel, &f, reopen), None);
         assert_eq!(press(&mut panel, &f, start_over), None);
-        // On Plan, done: it reopens.
+        // On Plan review, done: it reopens.
         press(&mut panel, &f, key(Keysym::Left));
-        assert_eq!(panel.page_stage(&f), Stage::Plan);
+        assert_eq!(panel.page_stage(&f), Stage::PlanReview);
         assert_eq!(
             press(&mut panel, &f, reopen),
-            Some(PanelOutcome::Untick(Stage::Plan))
+            Some(PanelOutcome::Untick(Stage::PlanReview))
         );
         assert_eq!(press(&mut panel, &f, start_over), None);
     }
@@ -9174,7 +9177,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_failed_verify_lists_its_failures_and_who_fixes_them() {
-        let mut f = feature("v", vec![repo("api", true)], 3);
+        let mut f = feature("v", vec![repo("api", true)], 4);
         let fails = vec![
             "api: `npm test` exited with 1".to_owned(),
             "web: lint".into(),
@@ -9243,7 +9246,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_blocked_ship_says_what_stops_it() {
-        let f = feature("s", vec![repo("api", true)], 7);
+        let f = feature("s", vec![repo("api", true)], 8);
         let p = probe(check(&["api has uncommitted changes"], Vec::new(), &[]));
         let state = PanelState {
             probe: Some(&p),
@@ -9279,14 +9282,14 @@ pub(crate) mod tests {
     fn a_done_stage_says_when_and_reopens_and_a_later_one_waits() {
         let mut f = feature("d", vec![repo("api", true)], 2);
         f.marks.get_mut(&Stage::Plan).unwrap().note = "looks good".into();
-        let mut built = feature("d", vec![repo("api", true)], 3);
+        let mut built = feature("d", vec![repo("api", true)], 4);
         built.marks.get_mut(&Stage::Plan).unwrap().note = "looks good".into();
         let state = PanelState::default();
         let actions = page_actions(&f, Stage::Plan, RowCtx::default());
         assert_eq!(
             labels(&actions),
             [
-                ("Go to Build", PanelOutcome::GoToCurrent),
+                ("Go to Plan review", PanelOutcome::GoToCurrent),
                 ("Reopen", PanelOutcome::Untick(Stage::Plan)),
             ]
         );
@@ -9428,7 +9431,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_finished_features_tab_shows_no_code_error_nor_stale_marks() {
-        let mut f = feature("d", vec![repo("api", true)], 8);
+        let mut f = feature("d", vec![repo("api", true)], 9);
         f.status = Status::Done;
         let p = Probe {
             stats: BTreeMap::from([("api".to_owned(), (4, 1))]),
@@ -9564,7 +9567,7 @@ pub(crate) mod tests {
             probe: Some(&p),
             ..PanelState::default()
         };
-        let f = feature("b", vec![repo("api", true)], 2);
+        let f = feature("b", vec![repo("api", true)], 3);
         assert!(!has_doc(&stage_page(&f, Stage::Build, &state, &[], 2_000)));
     }
 
@@ -9591,7 +9594,7 @@ pub(crate) mod tests {
 
     #[test]
     fn the_build_page_shows_its_log_by_name_and_its_agent_tail() {
-        let mut f = feature("b", vec![repo("api", true)], 2);
+        let mut f = feature("b", vec![repo("api", true)], 3);
         f.runs.insert(Stage::Build, agent_run(Some("p1"), None));
         f.runs.get_mut(&Stage::Build).unwrap().stop = Some(feature::agents::Stop {
             done: 1,
@@ -9693,7 +9696,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_repository_row_shows_its_line_stat_once_read() {
-        let f = feature("b", vec![repo("api", true), repo("web", true)], 2);
+        let f = feature("b", vec![repo("api", true), repo("web", true)], 3);
         let panel = FeaturePanel {
             project: "acme".into(),
             slug: "b".into(),
@@ -9741,7 +9744,7 @@ pub(crate) mod tests {
         assert!(name.is_empty());
         assert_eq!(picks, &chips);
         // Run by another: the restart says who comes next.
-        let mut f2 = feature("b", vec![repo("r", true)], 2);
+        let mut f2 = feature("b", vec![repo("r", true)], 3);
         f2.runs.insert(
             Stage::Build,
             feature::agents::StageRun {
