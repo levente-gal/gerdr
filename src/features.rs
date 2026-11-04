@@ -4225,6 +4225,11 @@ impl Gerdr {
             ),
         };
         self.t3_forget_project(&feature.dir);
+        for stage in feature.runs.keys() {
+            if let Some(left) = self.t3_left_running(project, slug, *stage) {
+                self.show_warning(left);
+            }
+        }
         let (project, slug) = (project.to_owned(), slug.to_owned());
         // Its workspace closes first, its terminals gone before its
         // worktrees go.

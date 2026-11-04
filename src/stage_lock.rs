@@ -93,7 +93,12 @@ impl Gerdr {
     /// What to say when `stage`'s agent of feature `slug` is at work in a
     /// T3 Code thread that gerdr lets go of: T3 Code's command line has no
     /// way to stop one.
-    fn t3_left_running(&self, project: &str, slug: &str, stage: Stage) -> Option<String> {
+    pub(crate) fn t3_left_running(
+        &self,
+        project: &str,
+        slug: &str,
+        stage: Stage,
+    ) -> Option<String> {
         let run = self.feature(project, slug)?.runs.get(&stage)?;
         let (status, _) = self.t3_thread_state(run.t3_thread()?);
         matches!(

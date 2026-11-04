@@ -29,7 +29,9 @@ they come back when it starts again.
   to push or pull, pull requests, CI runs, tickets (GitHub, Linear) and
   errors from your services.
 - **Features** (prefix `Shift+F`). Take a feature from discovery to a merged
-  branch in eight stages, with agents doing the work.
+  branch in eight stages, with agents doing the work. A stage's agent is Claude
+  Code, Cursor or T3 Code, picked on its page. T3 Code opens its prompt as a
+  draft in its app, where you pick the model and send it.
 - **Web panes.** A Chromium extension lets gerdr steer browser panes: back,
   forward, reload and copy the URL.
 - **Kept apps.** Apps such as Cursor can keep running across gerdr restarts
