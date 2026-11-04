@@ -498,7 +498,7 @@ impl Feature {
         wrote(stage)
             || match stage {
                 Stage::Discover | Stage::Plan | Stage::Build => false,
-                Stage::PlanReview => self.plan_review.is_some(),
+                Stage::PlanReview => self.plan_review.as_ref().is_some_and(|r| r.stamp.is_some()),
                 Stage::Verify => self.verify.is_some(),
                 Stage::AiReview => self.review.is_some(),
                 Stage::CodeReview => !self.viewed.is_empty(),

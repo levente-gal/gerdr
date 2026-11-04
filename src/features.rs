@@ -349,6 +349,21 @@ pub(crate) enum Done {
     },
     /// The code and `review.json` read once run `n` of the AI review
     /// agent was done, its file at `stamp` (see `feature_review`).
+    PlanReviewBaseline {
+        project: String,
+        slug: String,
+        /// The code's patch-id as a plan review's agent starts.
+        result: Result<String, String>,
+    },
+    /// The code and what the agent wrote, once run `n` of Plan review's
+    /// agent rested, its file at `stamp` (see `feature_plan_review`).
+    PlanReviewRead {
+        project: String,
+        slug: String,
+        n: u32,
+        stamp: crate::feature_agents::Stamp,
+        result: Result<Box<crate::feature_plan_review::PlanRead>, String>,
+    },
     ReviewRead {
         project: String,
         slug: String,
@@ -824,6 +839,15 @@ pub enum PanelOutcome {
     CodeReview,
     /// Open the manual test sheet (Manual test, with criteria).
     ManualTest,
+    /// Open Plan review's suggestions, to decide them.
+    PlanSuggestions,
+    /// The suggestions are decided: start the final plan, or with nothing
+    /// accepted, go on with the plan as it is.
+    WriteFinalPlan,
+    /// Skip Plan review, asking first when something would be lost.
+    SkipPlanReview,
+    /// Back from the final plan to the decisions on the suggestions.
+    ChangeDecisions,
     /// Show Verify's `evidence.md`.
     Evidence,
     /// Open this pull request's page.
@@ -1045,7 +1069,7 @@ impl RowCtx {
     /// Whether `stage`'s file is there to read on its page: Discover's
     /// and Plan's only.
     fn wrote(self, stage: Stage) -> bool {
-        matches!(stage, Stage::Discover | Stage::Plan) && self.has_file(stage)
+        matches!(stage, Stage::Discover | Stage::Plan | Stage::PlanReview) && self.has_file(stage)
     }
 
     /// The stage that locks done `stage` of `feature`: see
@@ -1095,6 +1119,7 @@ pub fn row_action(feature: &Feature, row: PanelRow, ctx: RowCtx) -> Option<Panel
             StageMark::Done => PanelOutcome::Untick(stage),
             StageMark::Current if stage == Stage::Ship => PanelOutcome::Ship,
             StageMark::Current if stage == Stage::Verify && ctx.checks => PanelOutcome::RunChecks,
+            StageMark::Current if stage == Stage::PlanReview => plan_review_action(feature),
             StageMark::Current if stage == Stage::AiReview => review_action(feature),
             StageMark::Current if stage == Stage::CodeReview => PanelOutcome::CodeReview,
             StageMark::Current if stage == Stage::ManualTest && ctx.criteria > 0 => {
@@ -1143,6 +1168,21 @@ fn agent_action(feature: &Feature, stage: Stage) -> PanelOutcome {
         Some(run) if run.live() => PanelOutcome::ShowAgent(stage),
         Some(run) if run.resumes() => PanelOutcome::ResumeAgent(stage),
         _ => PanelOutcome::StartAgent(stage, false),
+    }
+}
+
+/// What Plan review's row does: as any agent stage's while its agent
+/// reviews or writes the final plan; in between, the suggestions to decide,
+/// then what comes of them.
+fn plan_review_action(feature: &Feature) -> PanelOutcome {
+    let stage = Stage::PlanReview;
+    if feature.runs.get(&stage).is_some_and(|r| r.waits_to_send()) {
+        return PanelOutcome::SendPrompt(stage);
+    }
+    match crate::feature_plan_review::deciding(feature) {
+        Some(review) if review.open() > 0 => PanelOutcome::PlanSuggestions,
+        Some(_) => PanelOutcome::WriteFinalPlan,
+        None => agent_action(feature, stage),
     }
 }
 
@@ -1274,6 +1314,8 @@ fn action_hint(action: &PanelOutcome) -> &'static str {
         PanelOutcome::SendFixes => "send fixes",
         PanelOutcome::CodeReview => "review code",
         PanelOutcome::ManualTest => "test",
+        PanelOutcome::PlanSuggestions => "decide",
+        PanelOutcome::WriteFinalPlan => "go on",
         PanelOutcome::Tick => "mark done",
         PanelOutcome::Ship => "ship\u{2026}",
         PanelOutcome::Untick(_) => "reopen",
@@ -1301,6 +1343,11 @@ fn stage_button(feature: &Feature, stage: Stage, ctx: RowCtx) -> Option<&'static
         PanelOutcome::SendFixes => Some("Send fixes"),
         PanelOutcome::CodeReview => Some("Review code"),
         PanelOutcome::ManualTest => Some("Test\u{2026}"),
+        PanelOutcome::PlanSuggestions => Some("Decide\u{2026}"),
+        PanelOutcome::WriteFinalPlan => {
+            let accepted = (feature.plan_review.as_ref()).is_some_and(|r| r.any_accepted());
+            Some(if accepted { "Write final plan" } else { "Use the plan as it is" })
+        }
         _ => None,
     }
 }
@@ -1840,6 +1887,17 @@ impl FeaturePanel {
             Keysym::u | Keysym::U if ctrl && mods.shift && offers_setup(feature, stage) => {
                 return Some(PanelOutcome::SetUp);
             }
+            Keysym::k | Keysym::K if ctrl && mods.shift && plan_review_open(feature, stage) => {
+                return Some(PanelOutcome::SkipPlanReview);
+            }
+            Keysym::d | Keysym::D
+                if ctrl
+                    && mods.shift
+                    && plan_review_open(feature, stage)
+                    && feature.plan_review.as_ref().is_some_and(|r| r.writing) =>
+            {
+                return Some(PanelOutcome::ChangeDecisions);
+            }
             Keysym::Delete | Keysym::KP_Delete if ctrl && mods.shift => {
                 return start_over_stage(feature, stage, ctx).map(PanelOutcome::StartOver);
             }
@@ -1890,6 +1948,13 @@ fn page_enter(feature: &Feature, stage: Stage, ctx: RowCtx) -> Option<PanelOutco
         .map(|(_, outcome)| outcome)
         .or_else(|| row_action(feature, PanelRow::Stage(stage), ctx))
         .filter(|outcome| !matches!(outcome, PanelOutcome::Untick(_)))
+}
+
+/// Whether `stage` is the Plan review `feature` is at: what can be skipped.
+fn plan_review_open(feature: &Feature, stage: Stage) -> bool {
+    stage == Stage::PlanReview
+        && feature.status == Status::Open
+        && feature.current() == Some(stage)
 }
 
 /// The key of a done stage's Reopen.
@@ -1963,6 +2028,19 @@ pub fn page_actions(
             _ => "Review",
         };
         out.push((button(label, ButtonStyle::Plain), open));
+    }
+    if plan_review_open(feature, stage) {
+        let suggestions = PanelOutcome::PlanSuggestions;
+        let decided = crate::feature_plan_review::deciding(feature).is_some();
+        if decided && !has(&out, &suggestions) {
+            out.push((button("Decide\u{2026}", ButtonStyle::Plain), suggestions));
+        }
+        if feature.plan_review.as_ref().is_some_and(|r| r.writing) {
+            let label = "Change decisions\u{2026}";
+            out.push((button(label, ButtonStyle::Plain), PanelOutcome::ChangeDecisions));
+        }
+        let skip = PanelOutcome::SkipPlanReview;
+        out.push((button("Skip review", ButtonStyle::Plain), skip));
     }
     if let Some(stage) = fresh_stage(feature, row) {
         let fresh = PanelOutcome::StartAgent(stage, true);
@@ -2377,6 +2455,18 @@ impl Gerdr {
                 stamp,
                 result,
             } => self.review_read(&project, &slug, n, stamp, result),
+            Done::PlanReviewBaseline {
+                project,
+                slug,
+                result,
+            } => self.plan_review_baseline(&project, &slug, result),
+            Done::PlanReviewRead {
+                project,
+                slug,
+                n,
+                stamp,
+                result,
+            } => self.plan_review_read(&project, &slug, n, stamp, result),
             Done::Shipped {
                 project,
                 slug,
@@ -3783,6 +3873,15 @@ impl Gerdr {
             }
         }
         self.open_feature(project, slug);
+        // Suggestions to decide open over the panel.
+        let deciding = stage == Stage::PlanReview
+            && (self.feature(project, slug))
+                .filter(|f| f.status == Status::Open && f.current() == Some(stage))
+                .and_then(crate::feature_plan_review::deciding)
+                .is_some_and(|r| r.open() > 0);
+        if deciding {
+            self.open_plan_sheet(project, slug);
+        }
         // Manual test with criteria opens its sheet over the panel.
         let testing = stage == Stage::ManualTest
             && self
@@ -3986,6 +4085,10 @@ impl Gerdr {
             PanelOutcome::SendFixes => self.send_findings(&project, &slug),
             PanelOutcome::CodeReview => self.open_feature_diff(&project, &slug, None),
             PanelOutcome::ManualTest => self.open_manual_test(&project, &slug),
+            PanelOutcome::PlanSuggestions => self.open_plan_sheet(&project, &slug),
+            PanelOutcome::WriteFinalPlan => self.write_final_plan(&project, &slug),
+            PanelOutcome::SkipPlanReview => self.ask_skip_plan_review(&project, &slug),
+            PanelOutcome::ChangeDecisions => self.ask_change_decisions(&project, &slug),
             PanelOutcome::OpenPr(url) => self.open_feature_page(&project, &slug, url),
             PanelOutcome::PickAgent(stage, name) => {
                 self.pick_stage_agent(&project, &slug, stage, &name);
@@ -5648,7 +5751,12 @@ fn current_line(feature: &Feature, stage: Stage, state: &PanelState, now: u64) -
         Stage::Discover | Stage::Plan if run.is_some_and(|r| r.ready.is_some()) => {
             "ready for review".into()
         }
-        Stage::PlanReview => agent(),
+        Stage::PlanReview => match crate::feature_plan_review::deciding(feature) {
+            Some(review) if review.open() > 0 => format!("{} to decide", review.open()),
+            Some(_) => "all decided".into(),
+            None if run.is_some_and(|r| r.ready.is_some()) => "ready for review".into(),
+            None => agent(),
+        },
         Stage::Build if state.setup.is_some() => "setting up".into(),
         Stage::Build if failed_setup && run.is_none() => "setup failed".into(),
         Stage::Build => match run.and_then(|r| r.stop) {
@@ -5943,6 +6051,34 @@ fn setup_section(feature: &Feature, state: &PanelState) -> Option<PageSection> {
 }
 
 /// AI review's findings in `feature`, by state, once read.
+fn suggestions_section(feature: &Feature) -> Option<PageSection> {
+    use crate::feature::plan_review::State;
+    let review = feature.plan_review.as_ref().filter(|r| r.stamp.is_some())?;
+    if review.suggestions.is_empty() {
+        return Some(lines(
+            "Suggestions",
+            vec![line("nothing to change", CheckTone::Ready)],
+        ));
+    }
+    let states = [
+        (State::Open, "to decide", CheckTone::Blocker),
+        (State::Accepted, "accepted", CheckTone::Ready),
+        (State::Rejected, "rejected", CheckTone::Note),
+    ];
+    let mut rows: Vec<CheckLine> = (states.into_iter())
+        .filter_map(|(state, what, tone)| match review.count(state) {
+            0 => None,
+            n => Some(line(format!("{n} {what}"), tone)),
+        })
+        .collect();
+    let not_found = review.not_found();
+    if not_found > 0 {
+        let text = format!("{} not found in the code", plural(not_found, "citation"));
+        rows.push(line(text, CheckTone::Blocker));
+    }
+    Some(lines("Suggestions", rows))
+}
+
 fn findings_lines(feature: &Feature) -> Vec<CheckLine> {
     let ready = (feature.runs.get(&Stage::AiReview)).is_some_and(|r| r.ready.is_some());
     let Some(review) = feature.review.as_ref().filter(|_| ready) else {
@@ -6045,7 +6181,16 @@ fn stage_page(
         }
         let card = || agent_card(feature, stage, state, actions, now);
         match stage {
-            Stage::PlanReview => sections.extend(card()),
+            Stage::PlanReview => {
+                sections.extend(card());
+                if let Some(section) = suggestions_section(feature) {
+                    sections.push(section);
+                }
+                if state.ctx.wrote(stage) {
+                    sections.push(file_card(feature, stage, state.ctx, actions));
+                    sections.extend(doc_of(state.probe, stage));
+                }
+            }
             Stage::Discover | Stage::Plan => {
                 sections.extend(card());
                 sections.push(file_card(feature, stage, state.ctx, actions));
@@ -6205,6 +6350,8 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 3] = [
             ("Ctrl+R", "start the stage's agent afresh"),
             ("Ctrl+Shift+R", "show the stage's agent, or resume its chat"),
             ("Ctrl+Shift+A", "pick the stage's next agent"),
+            ("Ctrl+Shift+K", "skip Plan review"),
+            ("Ctrl+Shift+D", "change the decisions on a final plan"),
         ],
     ),
     (
@@ -7870,6 +8017,102 @@ pub(crate) mod tests {
     fn page_outcomes(f: &Feature, stage: Stage) -> Vec<PanelOutcome> {
         let actions = page_actions(f, stage, RowCtx::default());
         actions.into_iter().map(|(_, o)| o).collect()
+    }
+
+    #[test]
+    fn plan_review_goes_from_its_agent_to_the_decisions_to_the_final_plan() {
+        use crate::feature::plan_review::{self, Decision, PlanReview};
+        let mut f = feature("p", vec![repo("api", true)], 2);
+        let stage = Stage::PlanReview;
+        let ctx = RowCtx::default();
+        assert_eq!(f.current(), Some(stage));
+        let names = |f: &Feature| -> Vec<String> {
+            let actions = page_actions(f, stage, RowCtx::default());
+            actions.iter().map(|(b, _)| b.label.clone()).collect()
+        };
+        // Nothing runs until asked for, and it can be skipped at once.
+        assert_eq!(names(&f), ["Start agent", "Skip review"]);
+        assert_eq!(
+            page_enter(&f, stage, ctx),
+            Some(PanelOutcome::StartAgent(stage, false))
+        );
+        let state = PanelState::default();
+        assert_eq!(stage_page(&f, stage, &state, &[], 2_000).sections.len(), 0);
+        // Read in with one to decide: the sheet is the way on.
+        let text = r#"{"suggestions": [{"kind": "question", "plan": "M1", "title": "Which?",
+            "why": "w"}, {"kind": "question", "plan": "M1", "title": "How?", "why": "w"}]}"#;
+        let mut review = PlanReview {
+            stamp: Some((1, 1)),
+            ..PlanReview::default()
+        };
+        plan_review::import(&mut review, 1, plan_review::parse(text).unwrap());
+        f.plan_review = Some(review);
+        assert_eq!(page_enter(&f, stage, ctx), Some(PanelOutcome::PlanSuggestions));
+        assert_eq!(names(&f), ["Decide\u{2026}", "Skip review", "Start over\u{2026}"]);
+        assert_eq!(rail_node(&f, stage, &state, 2_000).line, "2 to decide");
+        let page = stage_page(&f, stage, &state, &[], 2_000);
+        assert_eq!(
+            page.sections,
+            [lines("Suggestions", vec![line("2 to decide", CheckTone::Blocker)])]
+        );
+        assert_eq!(
+            crate::feature_agents::gate_of(&f, |_| None).map(|g| g.2),
+            Some(crate::feature_agents::GateKind::Suggestions { open: 2 })
+        );
+        // All rejected: nothing for a final plan to add.
+        let review = f.plan_review.as_mut().unwrap();
+        plan_review::decide(review, "r1-1", Decision::Reject).unwrap();
+        plan_review::decide(review, "r1-2", Decision::Reject).unwrap();
+        assert_eq!(page_enter(&f, stage, ctx), Some(PanelOutcome::WriteFinalPlan));
+        assert_eq!(
+            names(&f),
+            [
+                "Use the plan as it is",
+                "Decide\u{2026}",
+                "Skip review",
+                "Start over\u{2026}"
+            ]
+        );
+        assert_eq!(rail_node(&f, stage, &state, 2_000).line, "all decided");
+        // One accepted: a final plan.
+        let review = f.plan_review.as_mut().unwrap();
+        plan_review::set_note(review, "r1-1", "This one");
+        plan_review::decide(review, "r1-1", Decision::Accept).unwrap();
+        assert_eq!(names(&f)[0], "Write final plan");
+        // Being written: its agent's page, and a way back.
+        f.plan_review.as_mut().unwrap().writing = true;
+        f.runs.insert(
+            stage,
+            crate::feature::agents::StageRun {
+                n: 2,
+                ready: Some(50),
+                ..Default::default()
+            },
+        );
+        assert_eq!(page_enter(&f, stage, ctx), Some(PanelOutcome::OpenDoc(stage)));
+        assert!(names(&f).contains(&"Change decisions\u{2026}".to_owned()));
+        assert_eq!(
+            crate::feature_agents::gate_of(&f, |_| None).map(|g| g.2),
+            Some(crate::feature_agents::GateKind::Review)
+        );
+        // Its keys, only there.
+        let mut panel = FeaturePanel::default();
+        let shift = ModifiersState {
+            ctrl: true,
+            shift: true,
+            ..ModifiersState::default()
+        };
+        assert_eq!(
+            press(&mut panel, &f, (shift, Keysym::K)),
+            Some(PanelOutcome::SkipPlanReview)
+        );
+        assert_eq!(
+            press(&mut panel, &f, (shift, Keysym::D)),
+            Some(PanelOutcome::ChangeDecisions)
+        );
+        let later = feature("q", vec![repo("api", true)], 3);
+        assert_eq!(press(&mut panel, &later, (shift, Keysym::K)), None);
+        assert_eq!(press(&mut panel, &later, (shift, Keysym::D)), None);
     }
 
     #[test]

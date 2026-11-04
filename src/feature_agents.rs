@@ -31,9 +31,12 @@ use crate::{
     cli_agents::CliAgent,
     feature::{
         self, Feature, PerProject, Stage, Status,
-        agents::{Flavor, StageRun, Stop, T3Run, command_line, needs, resume_line, session_file},
+        agents::{
+            Flavor, StageRun, Stop, T3Run, command_line, needs, resume_line, run_needs, session_file,
+        },
         artifacts, graph, layout,
         patch::Reading,
+        plan_review,
         review_import::FindingState,
         store, verify,
     },
@@ -75,6 +78,9 @@ pub enum GateKind {
     /// `fix` the user wants fixed, not sent to Build yet (stage: AI
     /// review).
     Findings { open: u32, fix: u32 },
+    /// Plan review's suggestions wait: `open` of them to decide, then the
+    /// final plan to start (stage: Plan review).
+    Suggestions { open: u32 },
     /// Code review waits for the user to review the diff.
     CodeReview,
     /// Manual test waits for the user to try the brief's criteria:
@@ -265,8 +271,17 @@ fn judge(
 /// Whether `text` is a good `stage` file for `feature`; else what it
 /// lacks. A multi-repository plan must name the touched repositories.
 pub(crate) fn validate(feature: &Feature, stage: Stage, text: &str) -> Result<(), Vec<String>> {
+    let review = feature.plan_review.as_ref().filter(|_| stage == Stage::PlanReview);
+    if stage == Stage::PlanReview && !review.is_some_and(|r| r.writing) {
+        return plan_review::parse(text).map(drop);
+    }
     let mut lacks = artifacts::check(stage, text).err().unwrap_or_default();
-    if stage == Stage::Plan && feature.many_repos() {
+    if let Some(review) = review {
+        for id in plan_review::unmapped(review, text) {
+            lacks.push(format!("Review changes doesn't name {id}"));
+        }
+    }
+    if matches!(stage, Stage::Plan | Stage::PlanReview) && feature.many_repos() {
         // By plain name: a plan's `web:api` names `api` too.
         let mut touched: Vec<&str> = feature.touched().map(|r| r.name.as_str()).collect();
         touched.sort_unstable();
@@ -330,6 +345,15 @@ pub(crate) fn gate_of(
     let stage = f.current()?;
     match stage {
         Stage::Discover | Stage::Plan => {
+            let since = f.runs.get(&stage)?.ready?;
+            Some((stage, since, GateKind::Review))
+        }
+        Stage::PlanReview => {
+            if let Some(review) = crate::feature_plan_review::deciding(f) {
+                let open = u32::try_from(review.open()).unwrap_or(u32::MAX);
+                let since = review.stamp.map_or(f.created, |s| s.0);
+                return Some((stage, since, GateKind::Suggestions { open }));
+            }
             let since = f.runs.get(&stage)?.ready?;
             Some((stage, since, GateKind::Review))
         }
@@ -537,6 +561,13 @@ fn resolve_pick(
     workflow: Option<&Workflow>,
     installed: &[CliAgent],
 ) -> Pick {
+    if stage == Stage::PlanReview {
+        // Better another agent than the one that planned, but a fresh chat
+        // of the same one still reads with fresh eyes.
+        let planner = feature.runs.get(&Stage::Plan);
+        let planner = planner.map(|r| (r.agent.as_str(), r.command.as_str()));
+        return pick_reviewer(configured, planner, installed, true);
+    }
     if stage == Stage::AiReview {
         let builder = builder_of(feature, workflow, installed);
         let builder = builder.as_ref().map(|(n, c)| (n.as_str(), c.as_str()));
@@ -736,9 +767,16 @@ pub(crate) fn vars(
         ("feature.dir", feature.dir.display().to_string()),
         ("feature.data", data.display().to_string()),
         ("project.name", names.home.clone()),
-        ("artifact.path", path(artifacts::path(data, stage))),
+        (
+            "artifact.path",
+            path(
+                run_needs(feature, stage)
+                    .and_then(|need| need.artifact)
+                    .map(|name| data.join(name)),
+            ),
+        ),
         ("brief.path", path(artifacts::path(data, Stage::Discover))),
-        ("plan.path", path(artifacts::path(data, Stage::Plan))),
+        ("plan.path", path(artifacts::plan_for(data, stage))),
         (
             "evidence.path",
             data.join(verify::EVIDENCE).display().to_string(),
@@ -780,6 +818,7 @@ pub(crate) fn vars(
         ("review.open", String::new()),
     ]
     .into_iter()
+    .chain(plan_review::prompt_vars(feature.plan_review.as_ref()))
     .map(|(k, v)| (k.to_owned(), v))
     .collect()
 }
@@ -1207,7 +1246,7 @@ impl Gerdr {
         let Some(feature) = self.feature(project, slug).cloned() else {
             return false;
         };
-        let Some(need) = needs(stage) else {
+        let Some(need) = run_needs(&feature, stage) else {
             return false;
         };
         self.refresh_feature_graphs(project, slug, false);
@@ -1246,6 +1285,9 @@ impl Gerdr {
         }
         for (key, value) in extra {
             values.insert((*key).to_owned(), value.clone());
+        }
+        if stage == Stage::PlanReview {
+            self.plan_review_starts(project, slug);
         }
         let version = prompts::builtin(need.template).map_or(0, |(_, v)| v);
         let waiting = takes_new_work(last, &base, extra)
@@ -1392,10 +1434,12 @@ impl Gerdr {
             }
             let (status, alive) = self.stage_run_state(&run);
             let data = store::dir(None, &project, &feature.slug);
-            let Some(path) = artifacts::path(&data, stage) else {
+            let need = run_needs(&feature, stage);
+            let Some(path) = need.and_then(|n| n.artifact).map(|name| data.join(name)) else {
                 continue;
             };
             let build = stage == Stage::Build;
+            let deciding = crate::feature_plan_review::deciding(&feature);
             let back = build && run.ready.is_some();
             let working = matches!(status, Some(AgentStatus::Working | AgentStatus::Blocked));
             if back || (build && working && run.stop.is_some()) {
@@ -1438,14 +1482,24 @@ impl Gerdr {
                 status,
                 alive,
                 &file,
-                stage == Stage::Discover,
+                // Asked about its suggestions, it may only answer: a chat.
+                stage == Stage::Discover || deciding.is_some(),
                 run.nudged,
                 now,
             );
             match verdict {
                 Verdict::Wait => {}
+                // Read in already: only a rewrite is news.
+                Verdict::Ready(stamp) if deciding.is_some_and(|r| r.stamp == Some(stamp)) => {
+                    if !alive && run.live() {
+                        self.forget_pane(&project, &feature.slug, stage);
+                    }
+                }
                 Verdict::Ready(stamp)
-                    if matches!(stage, Stage::Plan | Stage::Build | Stage::AiReview) =>
+                    if matches!(
+                        stage,
+                        Stage::Plan | Stage::PlanReview | Stage::Build | Stage::AiReview
+                    ) =>
                 {
                     // A refused file is read again now and then: the
                     // user may have undone the agent's changes, or
@@ -1462,6 +1516,9 @@ impl Gerdr {
                             }
                             Stage::Plan => {
                                 self.check_plan_code(&project, &feature.slug, run.n, stamp);
+                            }
+                            Stage::PlanReview => {
+                                self.check_plan_review_code(&project, &feature.slug, run.n, stamp);
                             }
                             _ => self.check_review_code(&project, &feature.slug, run.n, stamp),
                         }
@@ -1655,7 +1712,7 @@ impl Gerdr {
     }
 
     /// `stage` of feature `slug` is done with a good file: its gate waits.
-    fn stage_ready(&mut self, project: &str, slug: &str, stage: Stage) {
+    pub(crate) fn stage_ready(&mut self, project: &str, slug: &str, stage: Stage) {
         let now = feature::now();
         let Some(feature) = self.feature_mut(project, slug) else {
             return;
@@ -2157,6 +2214,67 @@ mod tests {
             ready,
             ..StageRun::default()
         }
+    }
+
+    #[test]
+    fn plan_reviews_two_files_are_checked_for_what_each_must_say() {
+        use crate::feature::plan_review::{self, PlanReview};
+        let mut f = crate::features::tests::feature(
+            "a",
+            vec![crate::features::tests::repo("api", true)],
+            2,
+        );
+        let stage = Stage::PlanReview;
+        // The reviewer's, until the final plan is due.
+        assert_eq!(validate(&f, stage, r#"{"suggestions": []}"#), Ok(()));
+        assert!(validate(&f, stage, PLAN).is_err());
+        let names = |f: &Feature| run_needs(f, stage).map(|n| (n.artifact, n.template));
+        assert_eq!(names(&f), Some((Some("plan-review.json"), "plan-review")));
+        let mut review = PlanReview::default();
+        plan_review::add_own(&mut review, "Add a metric");
+        review.writing = true;
+        f.plan_review = Some(review);
+        assert_eq!(names(&f), Some((Some("plan-final.md"), "plan-final")));
+        // A plan, saying where each accepted one went.
+        let lacks = validate(&f, stage, PLAN).unwrap_err();
+        assert!(lacks.iter().any(|l| l.contains("Review changes")), "{lacks:?}");
+        assert!(lacks.iter().any(|l| l.contains("doesn't name u1")), "{lacks:?}");
+        let good = format!("{PLAN}\n## Review changes\n- u1: Milestones\n");
+        assert_eq!(validate(&f, stage, &good), Ok(()));
+        assert_eq!(validate(&f, Stage::Plan, PLAN), Ok(()));
+    }
+
+    #[test]
+    fn past_plan_review_the_final_plan_is_the_plan() {
+        let names = PerProject::all("Acme".to_owned());
+        let f = crate::features::tests::feature(
+            "a",
+            vec![crate::features::tests::repo("api", true)],
+            3,
+        );
+        let data = std::env::temp_dir().join(format!("gerdr-final-{}", std::process::id()));
+        std::fs::create_dir_all(&data).unwrap();
+        let plan_of = |stage| vars(&f, &names, &data, stage)["plan.path"].clone();
+        let plan = data.join("plan.md").display().to_string();
+        let last = data.join("plan-final.md");
+        assert_eq!(plan_of(Stage::Build), plan);
+        std::fs::write(&last, "final").unwrap();
+        // Its own agent works from the plan it reviewed, whatever is there.
+        assert_eq!(plan_of(Stage::PlanReview), plan);
+        let final_path = last.display().to_string();
+        assert_eq!(plan_of(Stage::Build), final_path);
+        assert_eq!(plan_of(Stage::AiReview), final_path);
+        // Set aside, the suggestions stay and the plan is the plan again.
+        std::fs::write(data.join(plan_review::FILE), "{}").unwrap();
+        artifacts::archive_final_plan(&data).unwrap();
+        assert!(!last.exists());
+        assert!(data.join(plan_review::FILE).is_file());
+        assert!(data.join("archive/plan-final-1.md").is_file());
+        assert_eq!(plan_of(Stage::Build), plan);
+        // Starting over takes both.
+        artifacts::archive_stage(&data, Stage::PlanReview).unwrap();
+        assert!(!data.join(plan_review::FILE).exists());
+        let _ = std::fs::remove_dir_all(&data);
     }
 
     #[test]

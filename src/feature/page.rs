@@ -86,7 +86,7 @@ pub fn read_docs(data: &Path) -> Docs {
     docs.changed = (docs.written.iter().copied())
         .filter(|stage| artifacts::changed_since_approved(data, *stage))
         .collect();
-    for stage in [Stage::Discover, Stage::Plan, Stage::Build] {
+    for stage in [Stage::Discover, Stage::Plan, Stage::PlanReview, Stage::Build] {
         let Some(path) = artifacts::path(data, stage).filter(|_| docs.written.contains(&stage))
         else {
             continue;

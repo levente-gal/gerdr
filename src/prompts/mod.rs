@@ -13,6 +13,9 @@ pub fn builtin(name: &str) -> Option<(&'static str, u32)> {
     Some(match name {
         "discover" => (include_str!("../../assets/prompts/discover.md"), 3),
         "plan" => (include_str!("../../assets/prompts/plan.md"), 2),
+        "plan-review" => (include_str!("../../assets/prompts/plan-review.md"), 1),
+        "plan-review-back" => (include_str!("../../assets/prompts/plan-review-back.md"), 1),
+        "plan-final" => (include_str!("../../assets/prompts/plan-final.md"), 1),
         "build" => (include_str!("../../assets/prompts/build.md"), 3),
         "ai-review" => (include_str!("../../assets/prompts/ai-review.md"), 2),
         "send-fixes" => (include_str!("../../assets/prompts/send-fixes.md"), 1),
@@ -78,6 +81,10 @@ mod tests {
             ("review.sent", ""),
             ("review.dismissed", ""),
             ("review.open", ""),
+            ("plan_review.accepted", "- r1-1: Add a rollback"),
+            ("plan_review.rejected", ""),
+            ("plan_review.open", ""),
+            ("plan_review.accepted_ids", "r1-1"),
         ]
         .into_iter()
         .map(|(k, v)| (k.to_owned(), v.to_owned()))
@@ -89,6 +96,9 @@ mod tests {
         for name in [
             "discover",
             "plan",
+            "plan-review",
+            "plan-review-back",
+            "plan-final",
             "build",
             "fix",
             "continue",

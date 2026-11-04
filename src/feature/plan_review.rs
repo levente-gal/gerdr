@@ -29,7 +29,7 @@
 //! isn't lost to a rewrite. The user's own suggestions are never touched.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeSet,
     path::{Path, PathBuf},
 };
 
@@ -553,32 +553,21 @@ fn citation_holds(evidence: &Evidence, repos: &[(String, PathBuf)]) -> bool {
     !quote.is_empty() && window.contains(&quote)
 }
 
-/// Whether each citation of `suggestions` holds, by suggestion id, in the
-/// order they cite. Reads files: not for the UI thread.
-pub fn check_citations(
-    suggestions: &[Suggestion],
-    repos: &[(String, PathBuf)],
-) -> BTreeMap<String, Vec<bool>> {
-    (suggestions.iter())
-        .filter(|s| !s.evidence.is_empty())
-        .map(|s| {
-            let held = (s.evidence.iter()).map(|e| citation_holds(e, repos));
-            (s.id.clone(), held.collect())
-        })
-        .collect()
+/// Mark whether each citation of `raws` holds, before they are read in.
+/// Reads files: not for the UI thread.
+pub fn check_citations(raws: &mut [Raw], repos: &[(String, PathBuf)]) {
+    for evidence in raws.iter_mut().flat_map(|raw| &mut raw.evidence) {
+        evidence.found = Some(citation_holds(evidence, repos));
+    }
 }
 
-/// Mark what `check_citations` found on `review`. A suggestion rewritten
-/// since keeps what it has: it gets its own check.
-pub fn apply_citations(review: &mut PlanReview, found: &BTreeMap<String, Vec<bool>>) {
-    for s in &mut review.suggestions {
-        let Some(held) = found.get(&s.id).filter(|h| h.len() == s.evidence.len()) else {
-            continue;
-        };
-        for (evidence, held) in s.evidence.iter_mut().zip(held) {
-            evidence.found = Some(*held);
-        }
-    }
+/// The user's notes on the suggestions, as a list for the reviewer.
+pub fn notes(review: &PlanReview) -> String {
+    (review.suggestions.iter())
+        .filter(|s| !s.note.is_empty() && s.source == Source::Reviewer)
+        .map(|s| format!("- {}: {}: {}", s.id, s.title, s.note.replace('\n', " ")))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// The suggestions with state `state` as a list for an agent: id, title,
@@ -887,19 +876,18 @@ mod tests {
     #[test]
     fn what_the_check_found_is_marked_and_counted() {
         let t = Temp::new();
-        let mut review = PlanReview::default();
-        import(&mut review, 1, raws(GOOD));
+        let mut all = raws(GOOD);
         // Only the first has citations, and "fn a()" isn't what's there.
-        let found = check_citations(&review.suggestions, &t.repos());
-        assert_eq!(found.len(), 1);
-        apply_citations(&mut review, &found);
+        check_citations(&mut all, &t.repos());
+        let mut review = PlanReview::default();
+        import(&mut review, 1, all);
         assert_eq!(review.not_found(), 1);
         let evidence = &review.suggestion("r1-1").unwrap().evidence[0];
         assert_eq!(evidence.found, Some(false));
-        // A result for other citations than it now has is left out.
-        let stale = BTreeMap::from([("r1-1".to_owned(), vec![true, true])]);
-        apply_citations(&mut review, &stale);
-        assert_eq!(review.not_found(), 1);
+        set_note(&mut review, "r1-1", "Which rows?");
+        add_own(&mut review, "Mine, with no note");
+        set_note(&mut review, "u1", "Not for the reviewer");
+        assert_eq!(notes(&review), "- r1-1: No rollback: Which rows?");
     }
 
     #[test]

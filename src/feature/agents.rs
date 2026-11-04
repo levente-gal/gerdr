@@ -103,6 +103,24 @@ pub struct Needs {
     pub template: &'static str,
 }
 
+/// The final plan, Plan review's own file.
+pub const FINAL_PLAN: &str = "plan-final.md";
+
+/// What the agent of `feature`'s `stage` needs now: `needs`, but Plan
+/// review's reviewer writes its suggestions until the final plan is due.
+pub fn run_needs(feature: &super::Feature, stage: Stage) -> Option<Needs> {
+    let need = needs(stage)?;
+    let writing = feature.plan_review.as_ref().is_some_and(|r| r.writing);
+    if stage == Stage::PlanReview && !writing {
+        return Some(Needs {
+            artifact: Some(super::plan_review::FILE),
+            template: "plan-review",
+            ..need
+        });
+    }
+    Some(need)
+}
+
 /// What `stage` needs of its agent; `None` for a stage no agent runs.
 pub fn needs(stage: Stage) -> Option<Needs> {
     match stage {
@@ -115,6 +133,13 @@ pub fn needs(stage: Stage) -> Option<Needs> {
             read_only: true,
             artifact: Some("plan.md"),
             template: "plan",
+        }),
+        // Its own file is the final plan: what is reviewed, approved and
+        // read by Build. `run_needs` says what its reviewer writes first.
+        Stage::PlanReview => Some(Needs {
+            read_only: true,
+            artifact: Some(FINAL_PLAN),
+            template: "plan-final",
         }),
         Stage::Build => Some(Needs {
             read_only: false,

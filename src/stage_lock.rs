@@ -238,6 +238,9 @@ impl Gerdr {
         if let Some(pane) = self.live_stage_pane(project, slug, stage) {
             self.close_herdr_pane(&pane);
         }
+        if stage == Stage::PlanReview {
+            self.close_parked_reviewer(project, slug);
+        }
         if let Some(left) = self.t3_left_running(project, slug, stage) {
             self.show_warning(left);
         }
@@ -272,7 +275,7 @@ impl Gerdr {
     /// `stage`'s file of feature `slug` went to the archive folder: its
     /// tabs here close, and those of other workspaces, with no comments
     /// left to save, say it is gone when they show.
-    fn forget_doc_tabs(&mut self, project: &str, slug: &str, stage: Stage) {
+    pub(crate) fn forget_doc_tabs(&mut self, project: &str, slug: &str, stage: Stage) {
         let is_it = |d: &DocOf| d.project == project && d.slug == slug && d.file.stage() == stage;
         let tabs = self.workspaces.iter_mut().flat_map(|ws| &mut ws.tabs);
         for wd in tabs.filter_map(|tab| tab.review_mut()).map(|r| &mut r.wd) {
