@@ -747,6 +747,13 @@ pub(crate) fn vars(
                 .join("\n"),
         ),
         (
+            "context_repos",
+            (feature.context.iter())
+                .map(|c| format!("- {}: {}", c.key(), c.main.display()))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
+        (
             "multi_repo",
             if feature.many_repos() { "yes" } else { "" }.to_owned(),
         ),
@@ -2316,6 +2323,29 @@ mod tests {
         f.repos.push(web_repo);
         let v = vars(&f, &names, Path::new("/data/a"), Stage::Plan);
         assert_eq!(v["other_repos"], "");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn prompts_name_context_repositories_and_no_longer_as_left_out() {
+        let dir = std::env::temp_dir().join(format!("gerdr-prompt-context-{}", std::process::id()));
+        let docs = dir.join("docs");
+        std::fs::create_dir_all(docs.join(".git")).unwrap();
+        let mut f = feature("a", vec![repo("api", true)], 0);
+        f.root = dir.clone();
+        f.multi = true;
+        f.context.push(feature::ContextRepo {
+            name: "docs".into(),
+            main: docs.clone(),
+            project: None,
+        });
+        let names = PerProject::all("Acme".to_owned());
+        let v = vars(&f, &names, Path::new("/data/a"), Stage::Plan);
+        assert_eq!(v["context_repos"], format!("- docs: {}", docs.display()));
+        assert_eq!(v["other_repos"], "");
+        let text = prompts::render_builtin("plan", &v).unwrap();
+        assert!(text.contains(&v["context_repos"]));
+        assert!(text.contains("Don't edit them"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

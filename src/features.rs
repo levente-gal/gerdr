@@ -3029,6 +3029,8 @@ impl Gerdr {
             status: Status::Open,
             marks: BTreeMap::new(),
             run_counts: BTreeMap::new(),
+            context: Vec::new(),
+            removed: Vec::new(),
             history: vec![Event {
                 at: now,
                 what: "created".into(),
@@ -3921,7 +3923,7 @@ impl Gerdr {
         let now = feature::now();
         let title = feature.title.clone();
         for key in &gone {
-            drop_repo(feature, key);
+            drop_repo(feature, key, now);
             feature.log(now, format!("removed {key}"));
         }
         if !gone.is_empty() {
@@ -4734,7 +4736,10 @@ fn still_checked(feature: &Feature, patch: Option<&str>) -> Result<(), String> {
 }
 
 /// Drop repository `key` from `feature`, and the link it was the last of.
-fn drop_repo(feature: &mut Feature, key: &str) {
+fn drop_repo(feature: &mut Feature, key: &str, now: u64) {
+    if let Some(repo) = feature.repo(key).cloned() {
+        feature.note_removed(repo.project, repo.name, now);
+    }
     feature.repos.retain(|r| r.key() != key);
     let repos = &feature.repos;
     feature
@@ -5881,6 +5886,8 @@ pub(crate) mod tests {
             links: Vec::new(),
             status: Status::Open,
             run_counts: BTreeMap::new(),
+            context: Vec::new(),
+            removed: Vec::new(),
             marks: Stage::ALL
                 .iter()
                 .take(done)
@@ -6351,9 +6358,9 @@ pub(crate) mod tests {
             dir: "/admin/.features/b".into(),
             multi: true,
         }];
-        drop_repo(&mut f, "admin:panel");
+        drop_repo(&mut f, "admin:panel", 7);
         assert_eq!(f.links.len(), 1);
-        drop_repo(&mut f, "admin:x");
+        drop_repo(&mut f, "admin:x", 8);
         assert!(f.links.is_empty());
         let keys: Vec<String> = f.repos.iter().map(|r| r.key()).collect();
         assert_eq!(keys, ["api"]);

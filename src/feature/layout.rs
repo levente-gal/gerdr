@@ -695,8 +695,8 @@ fn link_root(root: &Path, dir: &Path) -> Result<Vec<PathBuf>, String> {
     Ok(links)
 }
 
-/// The repositories in `feature`'s root it doesn't hold, by name, with their
-/// main worktrees. No git, only the folder's listing.
+/// The repositories in `feature`'s root it neither holds nor has as context,
+/// by name, with their main worktrees. No git, only the folder's listing.
 pub fn others_in_root(feature: &Feature) -> Vec<(String, PathBuf)> {
     if !feature.multi {
         return Vec::new();
@@ -704,6 +704,7 @@ pub fn others_in_root(feature: &Feature) -> Vec<(String, PathBuf)> {
     child_repos(&feature.root)
         .into_iter()
         .filter(|(name, _)| !feature.repos_of(None).any(|r| r.name == *name))
+        .filter(|(name, _)| !feature.context.iter().any(|c| c.key() == *name))
         .collect()
 }
 
@@ -1351,6 +1352,8 @@ mod tests {
             status: Status::Open,
             marks: Default::default(),
             run_counts: Default::default(),
+            context: Vec::new(),
+            removed: Vec::new(),
             shipping: Default::default(),
             runs: Default::default(),
             stage_agents: Default::default(),
@@ -1600,6 +1603,25 @@ mod tests {
         assert!(!repo.join(".features").exists());
         assert!(!branch_exists(&repo, "feature/login"));
         assert!(losses(&f).is_empty());
+    }
+
+    #[test]
+    fn taking_a_feature_down_leaves_its_context_repositories_alone() {
+        let t = Temp::new();
+        let repo = t.repo("app", "main");
+        let docs = t.repo("docs", "main");
+        std::fs::write(docs.join("draft"), "kept").unwrap();
+        let root = find_root(&repo, &[], &[], &[]).unwrap();
+        let created = create(&root, "x", &[]).unwrap();
+        let mut f = feature_of(&root, created, "x");
+        f.add_context(super::super::ContextRepo {
+            name: "docs".into(),
+            main: docs.clone(),
+            project: None,
+        });
+        remove(&f, true).unwrap();
+        assert_eq!(std::fs::read_to_string(docs.join("draft")).unwrap(), "kept");
+        assert!(docs.join(".git").exists());
     }
 
     #[test]

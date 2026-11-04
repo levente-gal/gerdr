@@ -185,6 +185,56 @@ impl Shipping {
     }
 }
 
+/// What names a repository among all a feature's: its `name` for a home
+/// repository, `<project>:<name>` for a linked project's.
+pub fn repo_key(project: Option<&str>, name: &str) -> String {
+    match project {
+        Some(project) => format!("{project}:{name}"),
+        None => name.to_owned(),
+    }
+}
+
+/// A repository the feature's agents may read but don't change: its main
+/// checkout, with no worktree. Apart from `Feature::repos` so nothing that
+/// walks those (setup, Verify, Ship, taking worktrees down) can ever act on
+/// a main checkout.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextRepo {
+    pub name: String,
+    /// Its main checkout.
+    pub main: PathBuf,
+    /// The id of the project it belongs to when that isn't the home one.
+    /// That project needs no link: nothing of the feature is in it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+}
+
+impl ContextRepo {
+    /// See `repo_key`.
+    pub fn key(&self) -> String {
+        repo_key(self.project.as_deref(), &self.name)
+    }
+}
+
+/// A repository taken out of the feature, kept so it can be added back.
+/// Its worktree and branch are gone: adding it back makes new ones.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemovedRepo {
+    pub name: String,
+    /// The id of the project it belongs to when that isn't the home one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    /// When it was taken out: Unix seconds.
+    pub at: u64,
+}
+
+impl RemovedRepo {
+    /// See `repo_key`.
+    pub fn key(&self) -> String {
+        repo_key(self.project.as_deref(), &self.name)
+    }
+}
+
 /// One of the project's repositories, as the feature has it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Repo {
@@ -217,10 +267,7 @@ impl Repo {
     /// home repository, `<project>:<name>` for a linked project's. Maps and
     /// lists keyed by repository use it.
     pub fn key(&self) -> String {
-        match &self.project {
-            Some(project) => format!("{project}:{}", self.name),
-            None => self.name.clone(),
-        }
+        repo_key(self.project.as_deref(), &self.name)
     }
 }
 
@@ -273,6 +320,13 @@ pub struct Feature {
     /// The other projects it spans, in the order they were linked.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub links: Vec<Link>,
+    /// The repositories its agents may read but don't change, in the order
+    /// they were added.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context: Vec<ContextRepo>,
+    /// The repositories taken out of it and not added back, latest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub removed: Vec<RemovedRepo>,
     #[serde(default)]
     pub status: Status,
     /// The stages marked done.
@@ -494,12 +548,29 @@ impl Feature {
     }
 
     /// The folders its agents are let into besides their working folder
-    /// (`dir`): the feature data dir `data`, then each linked project's
-    /// feature folder.
+    /// (`dir`): the feature data dir `data`, each linked project's feature
+    /// folder, then each context repository's main checkout.
     pub fn agent_dirs(&self, data: &Path) -> Vec<PathBuf> {
         std::iter::once(data.to_path_buf())
             .chain(self.links.iter().map(|l| l.dir.clone()))
+            .chain(self.context.iter().map(|c| c.main.clone()))
             .collect()
+    }
+
+    /// Keep `repo` as context: it is no longer one taken out.
+    pub fn add_context(&mut self, repo: ContextRepo) {
+        let key = repo.key();
+        self.removed.retain(|r| r.key() != key);
+        self.context.retain(|c| c.key() != key);
+        self.context.push(repo);
+    }
+
+    /// Note that the repository `name` of `project` was taken out at `at`.
+    pub fn note_removed(&mut self, project: Option<String>, name: String, at: u64) {
+        let gone = RemovedRepo { name, project, at };
+        let key = gone.key();
+        self.removed.retain(|r| r.key() != key);
+        self.removed.insert(0, gone);
     }
 
     /// Whether it has more than one repository, over all its projects.
@@ -545,7 +616,11 @@ impl Feature {
     }
 
     /// Keep `new` among its repositories, in the order `repos` has them.
+    /// They are no longer context or taken out.
     pub fn insert_repos(&mut self, new: Vec<Repo>) {
+        let keys: Vec<String> = new.iter().map(Repo::key).collect();
+        self.context.retain(|c| !keys.contains(&c.key()));
+        self.removed.retain(|r| !keys.contains(&r.key()));
         let mut repos = std::mem::take(&mut self.repos);
         repos.extend(new);
         let rank = |r: &Repo| {
@@ -794,6 +869,8 @@ pub(crate) mod tests {
             status: Status::Open,
             marks: Default::default(),
             run_counts: Default::default(),
+            context: Vec::new(),
+            removed: Vec::new(),
             history: Vec::new(),
             shipping: Default::default(),
             runs: Default::default(),
@@ -868,6 +945,8 @@ pub(crate) mod tests {
             history: Vec::new(),
             shipping: Shipping::default(),
             run_counts: BTreeMap::new(),
+            context: Vec::new(),
+            removed: Vec::new(),
             runs: BTreeMap::new(),
             stage_agents: BTreeMap::new(),
             setup: None,
@@ -987,6 +1066,7 @@ pub(crate) mod tests {
             "base":"main","base_commit":"c","worktree":"/r/.features/a","touched":true}]}"#;
         let old: Feature = serde_json::from_str(old).unwrap();
         assert!(old.links.is_empty() && old.repos[0].project.is_none());
+        assert!(old.context.is_empty() && old.removed.is_empty());
         assert_eq!(old.repos[0].key(), "r");
         let json = serde_json::to_string(&f).unwrap();
         assert_eq!(serde_json::from_str::<Feature>(&json).unwrap(), f);
@@ -1003,5 +1083,55 @@ pub(crate) mod tests {
                 what: "touched x".into()
             }]
         );
+    }
+
+    #[test]
+    fn context_and_removed_stay_apart_and_an_added_repository_leaves_both() {
+        let mut f = feature("a", 1);
+        let docs = ContextRepo {
+            name: "docs".into(),
+            main: "/r/docs".into(),
+            project: None,
+        };
+        f.note_removed(None, "auth".into(), 5);
+        f.note_removed(Some("ops".into()), "infra".into(), 6);
+        assert_eq!(f.removed[0].key(), "ops:infra", "latest first");
+        f.add_context(docs.clone());
+        f.add_context(docs.clone());
+        assert_eq!(f.context.len(), 1);
+        let data = Path::new("/data/a");
+        assert_eq!(
+            f.agent_dirs(data),
+            [PathBuf::from("/data/a"), PathBuf::from("/r/docs")]
+        );
+        // A removed one added as context is no longer removed.
+        f.add_context(ContextRepo {
+            name: "auth".into(),
+            main: "/r/auth".into(),
+            project: None,
+        });
+        assert_eq!(f.removed.len(), 1);
+        // One added to the feature is neither.
+        let repo = |name: &str| Repo {
+            name: name.into(),
+            main: PathBuf::new(),
+            base: "main".into(),
+            base_commit: String::new(),
+            worktree: PathBuf::new(),
+            touched: true,
+            branch: None,
+            project: None,
+        };
+        f.note_removed(None, "web".into(), 7);
+        f.insert_repos(vec![repo("web"), repo("docs")]);
+        assert!(!f.removed.iter().any(|r| r.key() == "web"));
+        assert!(!f.context.iter().any(|c| c.key() == "docs"));
+        // It survives the record, and a record without them reads as empty.
+        let json = serde_json::to_string(&f).unwrap();
+        assert_eq!(serde_json::from_str::<Feature>(&json).unwrap(), f);
+        let mut bare = feature("a", 1);
+        bare.context.clear();
+        let json = serde_json::to_string(&bare).unwrap();
+        assert!(!json.contains("context") && !json.contains("removed"));
     }
 }
