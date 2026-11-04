@@ -35,7 +35,7 @@ use smithay::reexports::calloop::{
 };
 
 use crate::{
-    Gerdr, Tab, chrome,
+    Gerdr, Tab, chrome, cli_agents,
     config::Services,
     herdr,
     inbox::Section,
@@ -256,8 +256,16 @@ impl Gerdr {
         }
     }
 
+    /// Whether `command` can be a service. A test run isn't, however long it
+    /// runs: it ends by itself, and its card tells how it went. Nor is an
+    /// agent: its card tells of it too, and what it prints isn't a service's
+    /// log (the commands it runs, its talk of errors).
+    fn may_be_service(&self, command: &str) -> bool {
+        !test_runs::runs_tests(command) && !cli_agents::runs_agent(command, &self.agent_config)
+    }
+
     /// The services project `project`'s records keep: the commands its
-    /// panes run again after a reboot, test runs aside (see `feed_services`).
+    /// panes run again after a reboot, those that can be one.
     fn recorded_services(&self, project: &str) -> Vec<Service> {
         let Some(p) = self.projects.project(project) else {
             return Vec::new();
@@ -268,7 +276,7 @@ impl Gerdr {
             .flat_map(|r| &r.panes)
             .filter_map(|pane| {
                 let command = pane.restart_command()?;
-                (!test_runs::runs_tests(command)).then(|| Service {
+                self.may_be_service(command).then(|| Service {
                     pane_id: pane.pane_id.clone(),
                     command: command.to_owned(),
                 })
@@ -305,9 +313,9 @@ impl Gerdr {
 
     /// Tell the watcher of the project shown which panes run services now:
     /// those that ran long enough or that gerdr runs again (see
-    /// `Remembered::long`), and those its records keep. A test run is no
-    /// service, however long it runs: it ends by itself, and its card tells
-    /// how it went. Show an error asked for in another project once it does.
+    /// `Remembered::long`), and those its records keep, if it can be a
+    /// service and herdr sees no agent in the pane. Show an error asked for in
+    /// another project once it does.
     pub fn feed_services(&mut self) {
         let Some(project) = self.project.clone() else {
             return;
@@ -326,16 +334,16 @@ impl Gerdr {
                 list.push(service);
             }
         }
-        list.retain(|s| !test_runs::runs_tests(&s.command));
+        list.retain(|s| self.may_be_service(&s.command));
         // Only the panes there: a record may outlive its pane a while.
-        let live: Vec<&str> = self
-            .herdr_tabs
-            .values()
-            .flat_map(|d| &d.panes)
-            .map(|p| p.pane_id.as_str())
-            .collect();
-        if !live.is_empty() {
-            list.retain(|s| live.contains(&s.pane_id.as_str()));
+        let panes: Vec<&herdr::PaneState> =
+            self.herdr_tabs.values().flat_map(|d| &d.panes).collect();
+        if !panes.is_empty() {
+            list.retain(|s| {
+                panes
+                    .iter()
+                    .any(|p| p.pane_id == s.pane_id && p.agent.is_none())
+            });
         }
         self.feed_watcher(&project, list);
         self.show_pending_service_error();

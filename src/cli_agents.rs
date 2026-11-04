@@ -100,6 +100,19 @@ fn offered(
     known.chain(added).collect()
 }
 
+/// Whether the saved `command` runs an agent CLI: one gerdr knows, installed
+/// or not, or one `config` starts.
+pub fn runs_agent(command: &str, config: &BTreeMap<String, String>) -> bool {
+    use crate::projects::command_program;
+    let Some(program) = command_program(command) else {
+        return false;
+    };
+    KNOWN.iter().any(|(key, _)| *key == program)
+        || config
+            .values()
+            .any(|c| command_program(c).as_ref() == Some(&program))
+}
+
 /// The agent `[agents]` calls `key`, named `name`, started by `start`.
 fn agent(key: &str, name: String, start: Start) -> CliAgent {
     CliAgent {
@@ -127,6 +140,36 @@ mod tests {
             .iter()
             .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
             .collect()
+    }
+
+    #[test]
+    fn a_saved_command_line_tells_agents() {
+        let config = config(&[
+            ("mine", "bash ./my-agent.sh --fast"),
+            ("codex", ""),
+            ("wrapped", "env FOO=1 /opt/bot"),
+        ]);
+        for agent in [
+            "claude",
+            "claude --resume 062f528e",
+            "/home/me/.local/bin/cursor-agent --trust",
+            "node /usr/lib/node_modules/.bin/codex",
+            "python /venv/bin/aider",
+            "bash ./my-agent.sh",
+            "/opt/bot --x",
+        ] {
+            assert!(runs_agent(agent, &config), "{agent}");
+        }
+        for service in [
+            "bash ./runlocal.sh",
+            "bash ./run_celery.sh",
+            "python /venv/bin/celery -A app worker",
+            "npm run dev",
+            "python3",
+            "",
+        ] {
+            assert!(!runs_agent(service, &config), "{service}");
+        }
     }
 
     fn commands(agents: &[CliAgent]) -> Vec<&str> {

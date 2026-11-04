@@ -1392,6 +1392,24 @@ fn denied_command(command: &str) -> bool {
     words.first().is_some_and(|program| denied(program, &words))
 }
 
+/// The name of the program the saved `command` comes down to: past `env`,
+/// `exec` and the variables it sets, and the script or module a shell or an
+/// interpreter runs (`python3 /venv/bin/aider` is `aider`); `None` for a
+/// bare shell or interpreter.
+pub(crate) fn command_program(command: &str) -> Option<String> {
+    let words = split_command(command);
+    let mut words = words
+        .iter()
+        .map(String::as_str)
+        .skip_while(|w| matches!(*w, "env" | "exec") || w.contains('='));
+    let program = program_name(words.next()?);
+    if !INTERPRETERS.contains(&program) && !SHELLS.contains(&program) {
+        return Some(program.to_owned());
+    }
+    let script = words.find(|w| !w.starts_with('-'))?;
+    Some(program_name(script).to_owned())
+}
+
 /// What runs in the foreground of a pane: its idle shell, or the process
 /// group leader's command line, where it runs (if not in `pane_cwd`), and
 /// its environment worth restoring (from `/proc`). `None` if herdr can't
@@ -1959,6 +1977,25 @@ mod tests {
         assert_eq!(slugify("api", &["api", "api-2"]), "api-3");
         assert_eq!(slugify("api", &["api-2"]), "api");
         assert_eq!(session_name("api"), "gerdr-api");
+    }
+
+    #[test]
+    fn a_command_comes_down_to_its_program() {
+        let program = |command| command_program(command);
+        assert_eq!(program("claude --resume x").as_deref(), Some("claude"));
+        assert_eq!(program("/usr/bin/claude").as_deref(), Some("claude"));
+        assert_eq!(program("FOO=1 env exec codex").as_deref(), Some("codex"));
+        assert_eq!(
+            program("python3.12 /venv/bin/aider --yes").as_deref(),
+            Some("aider")
+        );
+        assert_eq!(program("python -m aider").as_deref(), Some("aider"));
+        assert_eq!(
+            program("bash ./runlocal.sh").as_deref(),
+            Some("runlocal.sh")
+        );
+        assert_eq!(program("python3"), None);
+        assert_eq!(program(""), None);
     }
 
     #[test]
