@@ -803,10 +803,8 @@ pub enum PanelOutcome {
     /// Review this agent stage's file.
     ReviewDoc(Stage),
     /// Show the stage's file in its tab, as it stands (a new tab as
-    /// `DocMode::default_for` it): a brief is read first, a plan reviewed.
+    /// `DocMode::default_for` it).
     OpenDoc(Stage),
-    /// Show this agent stage's file's preview (see `md_preview`).
-    Preview(Stage),
     /// Let this agent stage's agent go on after a milestone stop.
     Continue(Stage),
     /// Run Verify's checks (again).
@@ -876,8 +874,7 @@ pub struct RowCtx {
     /// is marked from its sheet.
     pub criteria: usize,
     /// Whether `brief.md` and `plan.md` are there, as the latest probe
-    /// found them (see `page::Docs`): their pages offer Review and
-    /// Preview then.
+    /// found them (see `page::Docs`): their pages offer Review then.
     pub written: [bool; 2],
 }
 
@@ -1048,7 +1045,7 @@ fn row_hint(feature: &Feature, row: PanelRow, ctx: RowCtx) -> &'static str {
         Some(PanelOutcome::StartAgent(..)) => "start agent",
         Some(PanelOutcome::ShowAgent(_)) => "show agent",
         Some(PanelOutcome::ResumeAgent(_)) => "resume agent",
-        Some(PanelOutcome::OpenDoc(Stage::Discover)) => "open brief",
+        Some(PanelOutcome::OpenDoc(Stage::Discover)) => "review brief",
         Some(PanelOutcome::OpenDoc(_) | PanelOutcome::ReviewDoc(_)) => "review plan",
         Some(PanelOutcome::Continue(_)) => "continue",
         Some(PanelOutcome::RunChecks) => "run checks",
@@ -1074,7 +1071,7 @@ fn stage_button(feature: &Feature, stage: Stage, ctx: RowCtx) -> Option<&'static
         PanelOutcome::StartAgent(..) => Some("Start agent"),
         PanelOutcome::ShowAgent(_) => Some("Show agent"),
         PanelOutcome::ResumeAgent(_) => Some("Resume agent"),
-        PanelOutcome::OpenDoc(Stage::Discover) => Some("Open brief"),
+        PanelOutcome::OpenDoc(Stage::Discover) => Some("Review brief"),
         PanelOutcome::OpenDoc(_) | PanelOutcome::ReviewDoc(_) => Some("Review plan"),
         PanelOutcome::Continue(_) => Some("Continue"),
         PanelOutcome::RunChecks => Some("Run checks"),
@@ -1545,19 +1542,13 @@ pub fn page_actions(
         let key = Some("Ctrl+Shift+R");
         out.push((button(label, ButtonStyle::Plain, key), outcome));
     }
-    // The brief's or the plan's file, once there: read it as it is.
+    // The brief's or the plan's file, once there: the page shows it, its tab
+    // works on it. What opens that tab already is that button.
     if ctx.wrote(stage) {
         let review = PanelOutcome::ReviewDoc(stage);
-        // What opens on its review already is that button.
-        let reviews = has(&out, &PanelOutcome::OpenDoc(stage))
-            && DocMode::default_for(DocFile::Stage(stage)) == DocMode::Review;
-        if !has(&out, &review) && !reviews {
+        if !has(&out, &review) && !has(&out, &PanelOutcome::OpenDoc(stage)) {
             out.push((button("Review", ButtonStyle::Plain, None), review));
         }
-        out.push((
-            button("Preview", ButtonStyle::Plain, None),
-            PanelOutcome::Preview(stage),
-        ));
     }
     if let Some(stage) = fresh_stage(feature, row) {
         let fresh = PanelOutcome::StartAgent(stage, true);
@@ -2233,11 +2224,13 @@ impl Gerdr {
 
     /// A probe of feature `slug` of `project` is back: its code changed
     /// sends it back, its squash merged makes it done.
-    fn feature_probed(&mut self, project: &str, slug: &str, probe: Probe) {
+    fn feature_probed(&mut self, project: &str, slug: &str, mut probe: Probe) {
         let key = (project.to_owned(), slug.to_owned());
         let open = (self.feature(project, slug)).is_some_and(|f| f.status == Status::Open);
         let probed = self.features.probes.entry(key).or_default();
         probed.running = false;
+        let docs = std::mem::take(&mut probe.docs);
+        probe.docs = docs.keeping(probed.last.as_ref().map(|last| &last.docs));
         // A finished feature's read is for its tab only.
         if !open {
             probed.again = false;
@@ -3282,10 +3275,6 @@ impl Gerdr {
             PanelOutcome::ReviewDoc(stage) => {
                 let file = DocFile::Stage(stage);
                 self.open_doc_tab(&project, &slug, file, Some(DocMode::Review));
-            }
-            PanelOutcome::Preview(stage) => {
-                let file = DocFile::Stage(stage);
-                self.open_doc_tab(&project, &slug, file, Some(DocMode::Preview));
             }
             PanelOutcome::OpenDoc(stage) => {
                 self.open_doc_tab(&project, &slug, DocFile::Stage(stage), None);
@@ -4941,19 +4930,15 @@ fn agent_card(
 }
 
 /// The card of Discover's or Plan's file in `feature`: how it stands,
-/// with the page's plain Review and Preview of it in `actions` (a primary
-/// Review stays in the page's row, as the button to press next).
+/// with the page's plain Review of it in `actions` (a primary Review stays
+/// in the page's row, as the button to press next).
 fn file_card(
     feature: &Feature,
     stage: Stage,
     written: bool,
     actions: &[(PageButton, PanelOutcome)],
 ) -> PageSection {
-    let own = [
-        PanelOutcome::ReviewDoc(stage),
-        PanelOutcome::Preview(stage),
-        PanelOutcome::OpenDoc(stage),
-    ];
+    let own = [PanelOutcome::ReviewDoc(stage), PanelOutcome::OpenDoc(stage)];
     PageSection::File {
         name: crate::feature::artifacts::name(stage)
             .unwrap_or("file")
@@ -5058,6 +5043,16 @@ fn milestones_of(probe: Option<&Probe>, stage: Stage) -> Option<PageSection> {
     })
 }
 
+/// `stage`'s file to read on its page, as `probe` last read it; none while
+/// it has none.
+fn doc_of(probe: Option<&Probe>, stage: Stage) -> Option<PageSection> {
+    let blocks = probe?.docs.previews.get(&stage)?;
+    Some(PageSection::Doc {
+        name: crate::feature::artifacts::name(stage)?.to_owned(),
+        blocks: blocks.clone(),
+    })
+}
+
 /// `stage`'s page of `feature`, its buttons `actions`.
 fn stage_page(
     feature: &Feature,
@@ -5111,6 +5106,7 @@ fn stage_page(
                 let written = state.ctx.wrote(stage);
                 sections.push(file_card(feature, stage, written, actions));
                 sections.extend(milestones_of(state.probe, stage));
+                sections.extend(doc_of(state.probe, stage));
             }
             Stage::Build => {
                 if let Some(what) = state.setup {
@@ -7798,15 +7794,15 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_written_plan_offers_review_and_preview_and_lists_its_milestones() {
+    fn a_written_plan_offers_review_and_lists_its_milestones() {
         let mut f = feature("b", vec![repo("api", true)], 1);
         f.runs.insert(Stage::Plan, agent_run(None, None));
-        // Not there yet: neither button.
+        // Not there yet: no button.
         let none = page_actions(&f, Stage::Plan, RowCtx::default());
         assert!(
             !none
                 .iter()
-                .any(|(_, o)| *o == PanelOutcome::Preview(Stage::Plan))
+                .any(|(_, o)| *o == PanelOutcome::ReviewDoc(Stage::Plan))
         );
         let written = RowCtx {
             written: [true, true],
@@ -7815,7 +7811,7 @@ pub(crate) mod tests {
         let actions = page_actions(&f, Stage::Plan, written);
         let got = labels(&actions);
         assert!(got.contains(&("Review", PanelOutcome::ReviewDoc(Stage::Plan))));
-        assert!(got.contains(&("Preview", PanelOutcome::Preview(Stage::Plan))));
+        assert!(!got.iter().any(|(label, _)| *label == "Preview"));
         // Ready for review: the primary reviews, no second Review.
         f.runs.get_mut(&Stage::Plan).unwrap().ready = Some(1_500);
         let actions = page_actions(&f, Stage::Plan, written);
@@ -7828,11 +7824,8 @@ pub(crate) mod tests {
             })
             .count();
         assert_eq!(reviews, 1);
-        // The file's card holds Preview; the primary Review stays in the
-        // page's row.
-        let preview = (actions.iter())
-            .position(|(_, o)| *o == PanelOutcome::Preview(Stage::Plan))
-            .unwrap();
+        // The primary Review stays in the page's row, the file's card
+        // holding nothing.
         let page = stage_page(&f, Stage::Plan, &PanelState::default(), &actions, 2_000);
         let card = page
             .sections
@@ -7843,7 +7836,7 @@ pub(crate) mod tests {
             Some(&file(
                 "plan.md",
                 line("ready for review", CheckTone::Ready),
-                &[preview]
+                &[]
             ))
         );
         // Its milestones by name, as the probe read them.
@@ -7863,6 +7856,91 @@ pub(crate) mod tests {
                 items
             })
         );
+    }
+
+    /// A file reads on its stage's page, under all else, once there is one
+    /// to read; a stage not reached shows none of it.
+    #[test]
+    fn a_stage_page_reads_its_file_last() {
+        use crate::md_blocks::DocBlock;
+        use std::sync::Arc;
+        let blocks = Arc::new(vec![DocBlock::Para("why".to_owned())]);
+        let mut p = probe(None);
+        p.docs.previews.insert(Stage::Plan, blocks.clone());
+        let milestones = vec![(false, "API".to_owned())];
+        p.docs.milestones.insert(Stage::Plan, milestones);
+        let state = PanelState {
+            probe: Some(&p),
+            ..PanelState::default()
+        };
+        let doc = PageSection::Doc {
+            name: "plan.md".to_owned(),
+            blocks,
+        };
+        let has_doc =
+            |page: &StagePage| (page.sections.iter()).any(|s| matches!(s, PageSection::Doc { .. }));
+        // Not reached yet.
+        let later = feature("b", vec![repo("api", true)], 0);
+        assert!(!has_doc(&stage_page(
+            &later,
+            Stage::Plan,
+            &state,
+            &[],
+            2_000
+        )));
+        // The stage it is at, and one it is past.
+        for at in [1, 2] {
+            let mut f = feature("b", vec![repo("api", true)], at);
+            f.runs.insert(Stage::Plan, agent_run(None, None));
+            let page = stage_page(&f, Stage::Plan, &state, &[], 2_000);
+            assert_eq!(page.sections.last(), Some(&doc), "at stage {at}");
+            let milestones = (page.sections.iter())
+                .position(|s| matches!(s, PageSection::Milestones { .. }))
+                .expect("its milestones");
+            assert_eq!(milestones, page.sections.len() - 2);
+        }
+        // Nothing read: nothing to show.
+        let mut f = feature("b", vec![repo("api", true)], 1);
+        f.runs.insert(Stage::Plan, agent_run(None, None));
+        let none = stage_page(&f, Stage::Plan, &PanelState::default(), &[], 2_000);
+        assert!(!has_doc(&none));
+        // A stage with no file of its own reads none, whatever was read.
+        let mut p = probe(None);
+        let read = Arc::new(vec![DocBlock::Para("why".to_owned())]);
+        p.docs.previews.insert(Stage::Build, read);
+        let state = PanelState {
+            probe: Some(&p),
+            ..PanelState::default()
+        };
+        let f = feature("b", vec![repo("api", true)], 2);
+        assert!(!has_doc(&stage_page(&f, Stage::Build, &state, &[], 2_000)));
+    }
+
+    /// A brief ready for review: its page's one review is "Review brief",
+    /// and nothing offers a preview of what the page shows.
+    #[test]
+    fn a_ready_brief_has_one_review_and_no_preview() {
+        let mut f = feature("b", vec![repo("api", true)], 0);
+        f.runs.insert(Stage::Discover, agent_run(None, None));
+        f.runs.get_mut(&Stage::Discover).unwrap().ready = Some(1_500);
+        let written = RowCtx {
+            written: [true, true],
+            ..RowCtx::default()
+        };
+        let actions = page_actions(&f, Stage::Discover, written);
+        let got = labels(&actions);
+        assert!(got.iter().any(|(label, _)| *label == "Review brief"));
+        assert!(!got.iter().any(|(label, _)| label.contains("Preview")));
+        let reviews = (actions.iter())
+            .filter(|(_, o)| {
+                matches!(
+                    o,
+                    PanelOutcome::ReviewDoc(Stage::Discover)
+                        | PanelOutcome::OpenDoc(Stage::Discover)
+                )
+            })
+            .count();
+        assert_eq!(reviews, 1);
     }
 
     #[test]

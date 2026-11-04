@@ -1,6 +1,8 @@
 //! A feature stage's file in a tab of its own: flat across the tab, not a
-//! popup. The tab (`TabKind::Review`) shows the file rendered, its review,
-//! or both side by side (`DocMode`); the switch in its header and
+//! popup. The tab (`TabKind::Review`) shows its review, or that and the file
+//! rendered side by side; Verify's evidence, only read, the file rendered
+//! too on its own (`DocMode::choices`). A stage's own page shows its file to
+//! read, so its tab is for working on it. The switch in the header and
 //! Ctrl+Shift+V move between them. It is the same review as ever
 //! (`WorktreeDiff`, painted by the repositories panel's own `ReposLayers`),
 //! and the same page (`md_preview`) in the tab's one pane, a web window
@@ -13,9 +15,9 @@
 //! other the line of the file at its top (`DiffView::top_line`). The gap
 //! between them drags their split, kept in `state.json`.
 //!
-//! The page opens when first wanted, on the frame its tab shows, so a tab
-//! opened behind another or restored starts no browser and takes no focus
-//! until it is looked at. Without gerdr's extension the review still works:
+//! The page opens when first wanted, on the frame its tab shows, so a
+//! restored tab starts no browser and takes no focus until it is looked
+//! at. Without gerdr's extension the review still works:
 //! the switch's other choices are off, with a tooltip saying why. The tab
 //! is saved and comes back on its file and mode; one whose feature is gone
 //! doesn't. Esc goes back to the feature's tab; the file's tab stays, for
@@ -36,7 +38,6 @@ use crate::{
         ReposButton, ReposView,
     },
     doc_review::DocFile,
-    feature::Stage,
     md_preview::{self, NO_EXTENSION},
     review::{self, Review},
     worktree_diff::{DRAFT_OPEN, DocOf, Env, WorktreeDiff},
@@ -75,21 +76,41 @@ impl DocMode {
         }
     }
 
-    /// The next one round, on an output `wide` enough for Split or not.
-    pub fn next(self, wide: bool) -> DocMode {
-        match self {
-            DocMode::Preview => DocMode::Review,
-            DocMode::Review if wide => DocMode::Split,
-            DocMode::Review | DocMode::Split => DocMode::Preview,
+    /// What `file`'s tab can show, in the order the switch shows them. A
+    /// stage's file is read on its page, so its tab has no Preview; the
+    /// evidence has no page but this.
+    pub fn choices(file: DocFile) -> &'static [DocMode] {
+        match file {
+            DocFile::Stage(_) => &[DocMode::Review, DocMode::Split],
+            DocFile::Evidence => &DocMode::ALL,
         }
     }
 
-    /// What a file's tab opens on when nothing asked for more: a brief and
-    /// the evidence are read, a plan is reviewed.
+    /// The next one round of `file`'s, on an output `wide` enough for Split
+    /// or not.
+    pub fn next(self, file: DocFile, wide: bool) -> DocMode {
+        let round: Vec<DocMode> = (Self::choices(file).iter().copied())
+            .filter(|m| wide || *m != DocMode::Split)
+            .collect();
+        let at = round.iter().position(|m| *m == self);
+        at.map_or(round[0], |at| round[(at + 1) % round.len()])
+    }
+
+    /// What a file's tab opens on when nothing asked for more: a stage's
+    /// file is reviewed, the evidence is read.
     pub fn default_for(file: DocFile) -> DocMode {
         match file {
-            DocFile::Stage(Stage::Plan) => DocMode::Review,
-            DocFile::Stage(_) | DocFile::Evidence => DocMode::Preview,
+            DocFile::Stage(_) => DocMode::Review,
+            DocFile::Evidence => DocMode::Preview,
+        }
+    }
+
+    /// This one as `file`'s tab can show it: a tab saved on a mode it no
+    /// longer has comes back on what it opens on.
+    pub fn of(self, file: DocFile) -> DocMode {
+        match Self::choices(file).contains(&self) {
+            true => self,
+            false => Self::default_for(file),
         }
     }
 }
@@ -164,14 +185,18 @@ pub fn detail_share(mode: DocMode, wide: bool, split: f64) -> f64 {
     }
 }
 
-/// The switch of a file's tab: Split only on an output `wide` enough, and
-/// what needs the page off `without_page`.
-pub fn mode_switch(mode: DocMode, wide: bool, without_page: bool) -> ModeSwitch {
-    let shown = DocMode::ALL
-        .into_iter()
+/// The switch of `file`'s tab: Split only on an output `wide` enough, and
+/// what needs the page off `without_page`. None with nothing to go to.
+pub fn mode_switch(
+    file: DocFile,
+    mode: DocMode,
+    wide: bool,
+    without_page: bool,
+) -> Option<ModeSwitch> {
+    let shown = (DocMode::choices(file).iter().copied())
         .filter(|m| wide || *m != DocMode::Split || mode == DocMode::Split);
     let shown: Vec<DocMode> = shown.collect();
-    ModeSwitch {
+    (shown.len() > 1).then(|| ModeSwitch {
         labels: shown.iter().map(|m| m.label().to_owned()).collect(),
         on: shown.iter().position(|m| *m == mode).unwrap_or(0),
         off: match without_page {
@@ -181,7 +206,7 @@ pub fn mode_switch(mode: DocMode, wide: bool, without_page: bool) -> ModeSwitch 
                 .collect(),
             false => Vec::new(),
         },
-    }
+    })
 }
 
 impl Gerdr {
@@ -228,11 +253,12 @@ impl Gerdr {
     /// What the shown file's tab paints, whatever is over it.
     pub(crate) fn doc_tab_view(&self) -> Option<ReposView> {
         let tab = self.review_tab()?;
+        let file = tab.wd.doc.as_ref()?.file;
         let mut view = tab.wd.repos_view(self.doc_env(tab.mode));
         let wide = self.doc_wide();
         view.flat = true;
         view.detail_share = detail_share(tab.mode, wide, self.previews.share);
-        view.modes = Some(mode_switch(tab.mode, wide, tab.no_browser));
+        view.modes = mode_switch(file, tab.mode, wide, tab.no_browser);
         if tab.mode == DocMode::Preview {
             view.detail = DetailView::default();
             view.hints.retain(|h| h.button != ReposButton::Comment);
@@ -364,8 +390,11 @@ impl Gerdr {
 
     /// Ctrl+Shift+V in a file's tab: the next mode round.
     pub(crate) fn cycle_doc_mode(&mut self) {
-        if let Some(mode) = self.review_tab().map(|r| r.mode) {
-            self.set_doc_mode(mode.next(self.doc_wide()));
+        let Some(tab) = self.review_tab() else {
+            return;
+        };
+        if let Some(doc) = &tab.wd.doc {
+            self.set_doc_mode(tab.mode.next(doc.file, self.doc_wide()));
         }
     }
 
@@ -442,27 +471,6 @@ impl Gerdr {
         }
     }
 
-    /// Open `stage`'s file of feature `slug` in a tab behind the one shown,
-    /// its agent having just finished it, if its workspace is open in the
-    /// project shown and no tab shows it yet.
-    pub(crate) fn open_doc_tab_behind(&mut self, project: &str, slug: &str, stage: Stage) {
-        if self.project.as_deref() != Some(project) {
-            return;
-        }
-        let Some(w) = self.feature_workspace(project, slug) else {
-            return;
-        };
-        let file = DocFile::Stage(stage);
-        if self.doc_tab_in(w, file).is_some() {
-            return;
-        }
-        // Nobody asked for it: a file that can't be read says so when asked
-        // for, from the feature's tab, not now over what they are doing.
-        if let Ok((doc, text)) = self.read_doc(project, slug, file) {
-            self.insert_doc_tab(w, doc, text, DocMode::default_for(file));
-        }
-    }
-
     /// The tab of workspace `w` showing `file`, if any.
     fn doc_tab_in(&self, w: usize, file: DocFile) -> Option<usize> {
         let tabs = &self.workspaces.get(w)?.tabs;
@@ -509,7 +517,7 @@ impl Gerdr {
         let Ok((doc, text)) = self.read_doc(&project, &slug, saved.file) else {
             return false;
         };
-        let at = self.insert_doc_tab(w, doc, text, saved.mode);
+        let at = self.insert_doc_tab(w, doc, text, saved.mode.of(saved.file));
         // In the place it was saved at, among the others.
         let ws = &mut self.workspaces[w];
         let t = t.min(ws.tabs.len() - 1);
@@ -650,6 +658,7 @@ impl Gerdr {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::feature::Stage;
 
     fn mods(ctrl: bool, shift: bool) -> ModifiersState {
         ModifiersState {
@@ -661,18 +670,37 @@ mod tests {
 
     #[test]
     fn the_modes_go_round_split_only_on_a_wide_output() {
-        assert_eq!(DocMode::Preview.next(true), DocMode::Review);
-        assert_eq!(DocMode::Review.next(true), DocMode::Split);
-        assert_eq!(DocMode::Split.next(true), DocMode::Preview);
-        assert_eq!(DocMode::Review.next(false), DocMode::Preview);
-        assert_eq!(DocMode::Split.next(false), DocMode::Preview);
+        let evidence = DocFile::Evidence;
+        assert_eq!(DocMode::Preview.next(evidence, true), DocMode::Review);
+        assert_eq!(DocMode::Review.next(evidence, true), DocMode::Split);
+        assert_eq!(DocMode::Split.next(evidence, true), DocMode::Preview);
+        assert_eq!(DocMode::Review.next(evidence, false), DocMode::Preview);
+        assert_eq!(DocMode::Split.next(evidence, false), DocMode::Preview);
     }
 
     #[test]
-    fn a_brief_opens_on_its_preview_and_a_plan_on_its_review() {
+    fn a_stage_files_modes_go_round_with_no_preview() {
+        let plan = DocFile::Stage(Stage::Plan);
+        assert_eq!(DocMode::Review.next(plan, true), DocMode::Split);
+        assert_eq!(DocMode::Split.next(plan, true), DocMode::Review);
+        // Too narrow for Split: nowhere else to go.
+        assert_eq!(DocMode::Review.next(plan, false), DocMode::Review);
+        assert_eq!(DocMode::Split.next(plan, false), DocMode::Review);
+    }
+
+    #[test]
+    fn a_tab_saved_on_preview_of_a_stage_file_comes_back_on_its_review() {
+        let brief = DocFile::Stage(Stage::Discover);
+        assert_eq!(DocMode::Preview.of(brief), DocMode::Review);
+        assert_eq!(DocMode::Split.of(brief), DocMode::Split);
+        assert_eq!(DocMode::Preview.of(DocFile::Evidence), DocMode::Preview);
+    }
+
+    #[test]
+    fn a_stage_file_opens_on_its_review_and_the_evidence_on_its_preview() {
         assert_eq!(
             DocMode::default_for(DocFile::Stage(Stage::Discover)),
-            DocMode::Preview
+            DocMode::Review
         );
         assert_eq!(
             DocMode::default_for(DocFile::Stage(Stage::Plan)),
@@ -710,18 +738,34 @@ mod tests {
 
     #[test]
     fn the_switch_says_what_can_be_had() {
-        let wide = mode_switch(DocMode::Review, true, false);
+        let evidence = DocFile::Evidence;
+        let wide = mode_switch(evidence, DocMode::Review, true, false).unwrap();
         assert_eq!(wide.labels, ["Preview", "Review", "Split"]);
         assert_eq!(wide.on, 1);
         assert!(wide.off.is_empty());
         // No room for Split, unless it is what shows.
-        let narrow = mode_switch(DocMode::Preview, false, false);
+        let narrow = mode_switch(evidence, DocMode::Preview, false, false).unwrap();
         assert_eq!(narrow.labels, ["Preview", "Review"]);
-        let still = mode_switch(DocMode::Split, false, false);
+        let still = mode_switch(evidence, DocMode::Split, false, false).unwrap();
         assert_eq!(still.on, 2);
         // Without the extension only the review is there.
-        let off = mode_switch(DocMode::Review, true, true);
+        let off = mode_switch(evidence, DocMode::Review, true, true).unwrap();
         assert_eq!(off.off, [0, 2]);
+    }
+
+    #[test]
+    fn a_stage_files_switch_has_only_review_and_split() {
+        let brief = DocFile::Stage(Stage::Discover);
+        let wide = mode_switch(brief, DocMode::Review, true, false).unwrap();
+        assert_eq!(wide.labels, ["Review", "Split"]);
+        assert_eq!(wide.on, 0);
+        let off = mode_switch(brief, DocMode::Review, true, true).unwrap();
+        assert_eq!(off.off, [1]);
+        // Nothing to go to, so no switch.
+        assert_eq!(mode_switch(brief, DocMode::Review, false, false), None);
+        // Split showing when the output narrowed: the way back stays.
+        let still = mode_switch(brief, DocMode::Split, false, false).unwrap();
+        assert_eq!(still.labels, ["Review", "Split"]);
     }
 
     #[test]

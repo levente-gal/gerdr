@@ -1,6 +1,7 @@
 //! What the feature tab's stage pages show beyond the feature's own
-//! record, read off the UI thread: the stage files there and their
-//! milestones by name (with the probe, `ship::probe`), each touched
+//! record, read off the UI thread: the stage files there, the blocks of
+//! those shown on their pages, and their milestones by name (with the
+//! probe, `ship::probe`), each touched
 //! repository's line stat (`git diff --numstat`, with the probe too), and
 //! the last lines of the current stage agent's pane (`tail`, every
 //! `TAIL_EVERY` while the tab shows).
@@ -8,6 +9,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
+    sync::Arc,
     time::Duration,
 };
 
@@ -15,7 +17,11 @@ use super::{
     Repo, Stage, artifacts,
     layout::{base_ref, git},
 };
-use crate::herdr::Herdr;
+use crate::{
+    herdr::Herdr,
+    md_blocks::{self, DocBlock},
+    md_preview,
+};
 
 /// How often the agent's tail is read while the feature tab shows.
 pub const TAIL_EVERY: Duration = Duration::from_secs(2);
@@ -32,11 +38,43 @@ pub struct Docs {
     /// Plan's and Build's milestones by name, `true` = ticked (see
     /// `artifacts::milestone_items`); none for a file not there.
     pub milestones: BTreeMap<Stage, Vec<(bool, String)>>,
+    /// The brief and the plan as their pages show them; none for a file
+    /// not there, and a note for one that can't be read.
+    pub previews: BTreeMap<Stage, Arc<Vec<DocBlock>>>,
+}
+
+impl Docs {
+    /// These docs with the previews of `old` that are the same: what they
+    /// painted is kept by what it was drawn from, and needn't be compared
+    /// word by word every frame after every read.
+    pub fn keeping(mut self, old: Option<&Docs>) -> Docs {
+        for (stage, blocks) in &mut self.previews {
+            if let Some(same) = old
+                .and_then(|o| o.previews.get(stage))
+                .filter(|o| *o == blocks)
+            {
+                *blocks = same.clone();
+            }
+        }
+        self
+    }
+}
+
+/// What a stage's page shows of a file too big to read through there.
+const TOO_BIG: &str = "Too big to show here: use Review";
+
+/// The blocks of stage file `path` for its page, if it can be read. One
+/// `md_preview` wouldn't render either gets a note instead.
+fn preview_of(path: &Path) -> Result<Vec<DocBlock>, std::io::Error> {
+    if std::fs::metadata(path)?.len() > md_preview::FILE_MAX {
+        return Ok(vec![DocBlock::Note(TOO_BIG.to_owned())]);
+    }
+    Ok(md_blocks::blocks(&std::fs::read_to_string(path)?))
 }
 
 /// Read the stage files in feature data dir `data`. A file that can't be
-/// read counts as not there: its stage's page says it isn't written, and
-/// Review says why when pressed.
+/// read is still there: its stage's page shows why in its place, and Review
+/// says so too when pressed.
 pub fn read_docs(data: &Path) -> Docs {
     let mut docs = Docs::default();
     for stage in [Stage::Discover, Stage::Plan, Stage::Build] {
@@ -47,6 +85,18 @@ pub fn read_docs(data: &Path) -> Docs {
             continue;
         }
         docs.written.insert(stage);
+        if stage != Stage::Build {
+            match preview_of(&path) {
+                Ok(blocks) => {
+                    docs.previews.insert(stage, Arc::new(blocks));
+                }
+                Err(err) => {
+                    tracing::warn!("reading {}: {err}", path.display());
+                    let note = DocBlock::Note(format!("Couldn't read this file: {err}"));
+                    docs.previews.insert(stage, Arc::new(vec![note]));
+                }
+            }
+        }
         if stage == Stage::Discover {
             continue;
         }
@@ -186,6 +236,15 @@ mod tests {
         let docs = read_docs(&dir);
         std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(docs.written, BTreeSet::from([Stage::Discover, Stage::Plan]));
+        let heading = |text: &str| DocBlock::Heading {
+            level: 1,
+            text: text.to_owned(),
+        };
+        assert_eq!(
+            docs.previews.get(&Stage::Discover).map(|b| b.as_slice()),
+            Some([heading("Brief")].as_slice())
+        );
+        assert!(docs.previews.contains_key(&Stage::Plan));
         assert_eq!(
             docs.milestones,
             BTreeMap::from([(
@@ -193,5 +252,54 @@ mod tests {
                 vec![(true, "API".to_owned()), (false, "UI".to_owned())]
             )])
         );
+    }
+
+    #[test]
+    fn a_file_too_big_to_show_says_so_and_one_not_there_shows_nothing() {
+        let dir = std::env::temp_dir().join(format!("gerdr-page-big-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let big = "word ".repeat(md_preview::FILE_MAX as usize / 5 + 1);
+        std::fs::write(dir.join("brief.md"), big).unwrap();
+        let docs = read_docs(&dir);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(
+            docs.previews.get(&Stage::Discover).map(|b| b.as_slice()),
+            Some([DocBlock::Note(TOO_BIG.to_owned())].as_slice())
+        );
+        assert!(!docs.previews.contains_key(&Stage::Plan));
+    }
+
+    #[test]
+    fn a_file_that_cant_be_read_says_so_on_its_page() {
+        let dir = std::env::temp_dir().join(format!("gerdr-page-bad-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("brief.md"), [0xff, 0xfe]).unwrap();
+        let docs = read_docs(&dir);
+        std::fs::remove_dir_all(&dir).unwrap();
+        let blocks = docs.previews.get(&Stage::Discover).unwrap();
+        assert!(matches!(
+            blocks.as_slice(),
+            [DocBlock::Note(note)] if note.starts_with("Couldn't read this file: ")
+        ));
+    }
+
+    #[test]
+    fn a_read_keeps_the_previews_that_are_the_same() {
+        let docs = |text: &str| Docs {
+            previews: BTreeMap::from([(Stage::Plan, Arc::new(md_blocks::blocks(text)))]),
+            ..Docs::default()
+        };
+        let old = docs("# Plan");
+        let same = docs("# Plan").keeping(Some(&old));
+        assert!(Arc::ptr_eq(
+            &old.previews[&Stage::Plan],
+            &same.previews[&Stage::Plan]
+        ));
+        let changed = docs("# Other").keeping(Some(&old));
+        assert!(!Arc::ptr_eq(
+            &old.previews[&Stage::Plan],
+            &changed.previews[&Stage::Plan]
+        ));
+        assert_eq!(docs("# Plan").keeping(None), old);
     }
 }

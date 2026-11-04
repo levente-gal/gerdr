@@ -57,6 +57,7 @@ mod keys;
 mod launch;
 mod layout;
 mod manual_test;
+mod md_blocks;
 mod md_preview;
 mod menu;
 mod nav;

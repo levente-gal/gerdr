@@ -1350,7 +1350,6 @@ impl Gerdr {
         }
         let title = feature.title.clone();
         self.save_feature(project, slug);
-        self.open_doc_tab_behind(project, slug, stage);
         let summary = format!(
             "{} of \u{201c}{title}\u{201d} is ready for review",
             doc_word(stage)
