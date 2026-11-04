@@ -2755,7 +2755,8 @@ impl Painter {
         self.text(c, &card.line, DETAIL_FONT_SIZE, x, end, band, scale, color);
     }
 
-    /// The count of a feature's `repos` at the right end of `rect`.
+    /// The count of a feature's `repos` at the right end of `rect`: with a
+    /// folder, as the branch mark beside a number counts worktrees.
     fn repo_count(&self, c: &mut Canvas, repos: usize, rect: Rect, scale: f64, p: &Palette) {
         let px = |v: i32| (v as f64 * scale).round() as i32;
         let s = scale as f32;
@@ -2767,9 +2768,7 @@ impl Painter {
             end - n_w - BRANCH_ICON_GAP - BRANCH_ICON_WIDTH,
             BRANCH_ICON_WIDTH,
         );
-        icon_sdf(c, icon, scale, p.placeholder, |x, y| {
-            git_branch(x, y, 0.75 * s)
-        });
+        icon_sdf(c, icon, scale, p.placeholder, |x, y| folder(x, y, 0.75 * s));
         self.text(
             c,
             &n,

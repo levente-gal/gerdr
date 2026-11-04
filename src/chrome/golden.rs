@@ -1823,41 +1823,41 @@ const GOLDEN_FEATURES: [[u64; 7]; 4] = [
     // Dark at 1
     [
         0x73e88729cb0c3112, // new_feature
-        0xd0e56cacb8c258c7, // sidebar_features
+        0xad18d33535d11519, // sidebar_features
         0xab580425d0a50879, // manual_test
         0x8e4d20f7c6316567, // manual_test_note
-        0x23890712b97b425a, // sidebar_feature_workspace
-        0xd6a388f7237421b9, // sidebar_needs_you
+        0x3c045cee68a64071, // sidebar_feature_workspace
+        0xc1dbdecaa0670a77, // sidebar_needs_you
         0x0cbbecc8e276c3fc, // sidebar_no_features
     ],
     // Dark at 2
     [
         0xbc9770d9310bd319, // new_feature
-        0x53c543082da45049, // sidebar_features
+        0x83634d4415a8e08e, // sidebar_features
         0xc14927ebcde55bf1, // manual_test
         0xb520dd662440b737, // manual_test_note
-        0xe0710e77b61d3b26, // sidebar_feature_workspace
-        0x5faed7d5e02521fc, // sidebar_needs_you
+        0xb00f48eb61890fb8, // sidebar_feature_workspace
+        0xe0ae8715745efdff, // sidebar_needs_you
         0xf97a94d1cbc468b6, // sidebar_no_features
     ],
     // Light at 1
     [
         0xb1780dfd60b1e9a8, // new_feature
-        0xd1c8b6c9f5857340, // sidebar_features
+        0xcec6d2bba7ac5486, // sidebar_features
         0x093b890ce5537eef, // manual_test
         0xa74e12b563efbdaf, // manual_test_note
-        0x677808d0001c062a, // sidebar_feature_workspace
-        0xf3ad198b44bfc63f, // sidebar_needs_you
+        0x548656a837c60128, // sidebar_feature_workspace
+        0x964f00e65632b301, // sidebar_needs_you
         0xb97e2bad7455858d, // sidebar_no_features
     ],
     // Light at 2
     [
         0x757537a93b40f9fa, // new_feature
-        0xf343c28fc7a4fe50, // sidebar_features
+        0x362b7342ea1a3672, // sidebar_features
         0xed40d3ad66f63314, // manual_test
         0x1239c6f64e145f2f, // manual_test_note
-        0x612743da0781f55b, // sidebar_feature_workspace
-        0xec2f2a25df12f5a3, // sidebar_needs_you
+        0xa2b4aba227ee8850, // sidebar_feature_workspace
+        0xec06df357e0562b9, // sidebar_needs_you
         0x7ae57ba63db05473, // sidebar_no_features
     ],
 ];
