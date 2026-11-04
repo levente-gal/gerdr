@@ -55,6 +55,8 @@ pub(crate) const FRESH_BUILD_AGENT: &str =
 pub(crate) struct BuildState {
     /// Features whose Build agent starts once their setup ends.
     pub(crate) pending: BTreeSet<Key>,
+    /// Features whose Verify checks run once their setup ends.
+    pending_verify: BTreeSet<Key>,
     /// Features being set up now.
     setting_up: BTreeSet<Key>,
     /// Features whose Verify checks run now.
@@ -258,6 +260,16 @@ fn outdated(feature: &Feature, evidence: &Evidence) -> bool {
         && build.is_some_and(|b| b != evidence.patch)
 }
 
+/// What couldn't be copied, in words for a toast: "Setup of “T” couldn't
+/// copy api: .venv (exited with 1) (see setup.log)".
+fn setup_copies_text(title: &str, not_copied: &[String]) -> String {
+    format!(
+        "Setup of \u{201c}{title}\u{201d} couldn't copy {} (see {})",
+        not_copied.join("; "),
+        setup::LOG
+    )
+}
+
 /// The setup failure's words for a toast: "Setup of “T” failed: why (see
 /// setup.log)".
 fn setup_failed_text(title: &str, why: &str) -> String {
@@ -277,8 +289,7 @@ impl Gerdr {
         let Some(feature) = self.feature(project, slug) else {
             return false;
         };
-        let commands = self.projects.workflows(feature, |w| w.setup.clone());
-        let has = setup::has_commands(feature, &commands);
+        let has = setup::has_work(feature);
         let key = (project.to_owned(), slug.to_owned());
         let running = self.features.build.setting_up.contains(&key);
         let first = setup_first(has, feature.setup.as_ref(), running, fresh);
@@ -307,10 +318,28 @@ impl Gerdr {
         true
     }
 
-    /// Set up feature `slug`'s worktrees off the thread, if its project
-    /// gives setup commands and it isn't set up or being set up.
-    pub fn start_setup(&mut self, project: &str, slug: &str) {
-        self.start_setup_of(project, slug, None);
+    /// Set up feature `slug`'s worktrees off the thread, unless it is being
+    /// set up.
+    pub fn start_setup(&mut self, project: &str, slug: &str) -> bool {
+        self.start_setup_of(project, slug, None)
+    }
+
+    /// The user asks to set feature `slug` up again: it fills in what is
+    /// missing. It says so when it can't start.
+    pub(crate) fn set_up_again(&mut self, project: &str, slug: &str) {
+        if self.start_setup(project, slug) {
+            return;
+        }
+        let Some(feature) = self.feature(project, slug) else {
+            return;
+        };
+        let title = feature.title.clone();
+        let key = (project.to_owned(), slug.to_owned());
+        self.show_warning(if self.features.build.setting_up.contains(&key) {
+            format!("\u{201c}{title}\u{201d} is being set up")
+        } else {
+            format!("\u{201c}{title}\u{201d} has no worktree to set up")
+        });
     }
 
     /// `start_setup` of its repositories `only` (`Repo::key`), one that
@@ -325,10 +354,11 @@ impl Gerdr {
         if let Some(only) = only {
             feature.repos.retain(|r| only.contains(&r.key()));
         }
-        let commands = self.projects.workflows(&feature, |w| w.setup.clone());
-        if !setup::has_commands(&feature, &commands) {
+        if !setup::has_work(&feature) {
             return false;
         }
+        let commands = self.projects.workflows(&feature, |w| w.setup.clone());
+        let extras = self.projects.workflows(&feature, |w| w.copy.clone());
         let key = (project.to_owned(), slug.to_owned());
         if !self.features.build.setting_up.insert(key) {
             return false;
@@ -337,8 +367,14 @@ impl Gerdr {
         if let Some(f) = self.feature_mut(project, slug) {
             // A failure an earlier setup put in the problems list goes: this
             // run fixes it or reports its own.
-            if let Some(old) = f.setup.as_ref().and_then(|s| s.failed.as_deref()) {
-                crate::problems::forget("features", &setup_failed_text(&f.title, old));
+            if let Some(old) = f.setup.as_ref() {
+                if let Some(why) = old.failed.as_deref() {
+                    crate::problems::forget("features", &setup_failed_text(&f.title, why));
+                }
+                if !old.not_copied.is_empty() {
+                    let text = setup_copies_text(&f.title, &old.not_copied);
+                    crate::problems::forget("features", &text);
+                }
             }
             f.setup = Some(SetupRun {
                 started: now,
@@ -368,11 +404,11 @@ impl Gerdr {
                     what: format!("Setting up \u{201c}{title}\u{201d}: {what}"),
                 });
             };
-            let result = setup::run(&feature, &commands, &log, &mut progress);
+            let report = setup::run(&feature, &commands, &extras, &log, &mut progress);
             Done::SetUp {
                 project,
                 slug,
-                result,
+                report,
             }
         });
         true
@@ -380,10 +416,11 @@ impl Gerdr {
 
     /// The setup of feature `slug` ended: kept, and a Build agent waiting
     /// on it starts.
-    pub(crate) fn setup_done(&mut self, project: &str, slug: &str, result: Result<(), String>) {
+    pub(crate) fn setup_done(&mut self, project: &str, slug: &str, report: setup::Report) {
         let key = (project.to_owned(), slug.to_owned());
         self.features.build.setting_up.remove(&key);
         let pending = self.features.build.pending.remove(&key);
+        let checks = self.features.build.pending_verify.remove(&key);
         let now = feature::now();
         let Some(feature) = self.feature_mut(project, slug) else {
             return;
@@ -394,15 +431,30 @@ impl Gerdr {
             ..SetupRun::default()
         });
         run.finished = Some(now);
-        run.failed = result.as_ref().err().cloned();
-        match &result {
-            Ok(()) => feature.log(now, "Set up"),
-            Err(why) => feature.log(now, format!("Setup failed: {why}")),
+        run.failed = report.failed.clone();
+        run.copied = report.copied.clone();
+        run.not_copied = report.not_copied.clone();
+        match &report.failed {
+            None => feature.log(now, "Set up"),
+            Some(why) => feature.log(now, format!("Setup failed: {why}")),
         }
         self.save_feature(project, slug);
-        match &result {
-            Ok(()) => self.show_success(format!("\u{201c}{title}\u{201d} is set up")),
-            Err(why) => {
+        if !report.not_copied.is_empty() {
+            let text = setup_copies_text(&title, &report.not_copied);
+            crate::problems::report("features", text.clone());
+            self.show_warning(text);
+        }
+        match &report.failed {
+            None if report.not_copied.is_empty() && report.copied.is_empty() => {
+                self.show_success(format!(
+                    "\u{201c}{title}\u{201d} is set up: nothing was missing"
+                ));
+            }
+            None if report.not_copied.is_empty() => {
+                self.show_success(format!("\u{201c}{title}\u{201d} is set up"));
+            }
+            None => {}
+            Some(why) => {
                 let mut text = setup_failed_text(&title, why);
                 crate::problems::report("features", text.clone());
                 if pending {
@@ -410,6 +462,9 @@ impl Gerdr {
                 }
                 self.show_warning(text);
             }
+        }
+        if checks {
+            self.run_verify(project, slug);
         }
         if !pending {
             return;
@@ -673,6 +728,23 @@ impl Gerdr {
         let running = self.features.build.verifying.contains(&key);
         if let Err(why) = verify_refusal(&feature, running, checks.len()) {
             return self.show_warning(why);
+        }
+        // The checks need what the setup copies. A feature made before it
+        // copied anything hasn't had one.
+        let setting_up = self.features.build.setting_up.contains(&key);
+        let has = setup::has_work(&feature);
+        let first = setup_first(has, feature.setup.as_ref(), setting_up, false);
+        let waits = match first {
+            SetupFirst::No => false,
+            SetupFirst::Wait => true,
+            SetupFirst::Run => self.start_setup(project, slug),
+        };
+        if waits {
+            self.features.build.pending_verify.insert(key);
+            let title = &feature.title;
+            return self.show_warning(format!(
+                "Setting up \u{201c}{title}\u{201d}; its checks run once it is done"
+            ));
         }
         let timeout = timeout.map_or(verify::TIMEOUT, std::time::Duration::from_secs);
         let now = feature::now();

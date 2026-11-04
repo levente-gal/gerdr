@@ -28,6 +28,7 @@
 //! Ctrl+Shift+O opens the pull request of the repository picked, or on
 //! Verify's page its evidence, Ctrl+R starts the stage's agent afresh,
 //! Ctrl+Shift+R shows its agent, or goes back to its chat if its tab closed,
+//! Ctrl+Shift+U sets its worktrees up (Build and Verify: copies what they lack),
 //! Ctrl+C copies its path, Ctrl+N starts a new one, Ctrl+Shift+L unfolds the
 //! repository strip into rows of every repository it can hold (Esc folds them
 //! first), Del on a repository of several takes it out (asking when it is on
@@ -388,7 +389,7 @@ pub(crate) enum Done {
     SetUp {
         project: String,
         slug: String,
-        result: Result<(), String>,
+        report: feature::setup::Report,
     },
     /// Verify's checks of feature `slug` ran: run `n`.
     #[allow(dead_code)] // sent from `feature_build` (inc 4 contract)
@@ -813,6 +814,8 @@ pub enum PanelOutcome {
     Continue(Stage),
     /// Run Verify's checks (again).
     RunChecks,
+    /// Set the feature's worktrees up (again): copy what they lack.
+    SetUp,
     /// Show the diff at AI review's first finding to decide.
     Findings,
     /// Send AI review's findings to fix to the Build agent.
@@ -1266,6 +1269,7 @@ fn action_hint(action: &PanelOutcome) -> &'static str {
         PanelOutcome::OpenDoc(_) => "review plan",
         PanelOutcome::Continue(_) => "continue",
         PanelOutcome::RunChecks => "run checks",
+        PanelOutcome::SetUp => "set up",
         PanelOutcome::Findings => "review findings",
         PanelOutcome::SendFixes => "send fixes",
         PanelOutcome::CodeReview => "review code",
@@ -1833,6 +1837,9 @@ impl FeaturePanel {
                 return Some(PanelOutcome::CycleAgent(stage));
             }
             Keysym::l | Keysym::L if ctrl && mods.shift => self.toggle_repos(),
+            Keysym::u | Keysym::U if ctrl && mods.shift && offers_setup(feature, stage) => {
+                return Some(PanelOutcome::SetUp);
+            }
             Keysym::Delete | Keysym::KP_Delete if ctrl && mods.shift => {
                 return start_over_stage(feature, stage, ctx).map(PanelOutcome::StartOver);
             }
@@ -1970,6 +1977,11 @@ pub fn page_actions(
     if let Some(page) = row_page(feature, row) {
         out.push((button("Evidence", ButtonStyle::Plain), page));
     }
+    if offers_setup(feature, stage) {
+        let ran = (feature.setup.as_ref()).is_some_and(|run| run.finished.is_some());
+        let label = if ran { "Set up again" } else { "Set up" };
+        out.push((button(label, ButtonStyle::Quiet), PanelOutcome::SetUp));
+    }
     let fixes = (feature.review.as_ref()).is_some_and(|r| r.count(FindingState::Fix) > 0);
     if mark == StageMark::Current && fixes && has(&out, &PanelOutcome::Findings) {
         out.push((
@@ -1989,6 +2001,15 @@ pub fn page_actions(
         }
     }
     out
+}
+
+/// Whether `stage`'s page offers to set `feature`'s worktrees up: those
+/// where tests and builds run, once reached.
+fn offers_setup(feature: &Feature, stage: Stage) -> bool {
+    matches!(stage, Stage::Build | Stage::Verify)
+        && feature.status == Status::Open
+        && !feature.repos.is_empty()
+        && stage_mark(feature, stage) != StageMark::Later
 }
 
 /// The name of the feature tab's header button `i`: `FEATURE_BUTTONS`,
@@ -2391,10 +2412,10 @@ impl Gerdr {
             Done::SetUp {
                 project,
                 slug,
-                result,
+                report,
             } => {
                 self.unbusy(&project, &slug, Job::Setup);
-                self.setup_done(&project, &slug, result);
+                self.setup_done(&project, &slug, report);
             }
             Done::Verified {
                 project,
@@ -3935,6 +3956,7 @@ impl Gerdr {
                 None => self.show_warning("Nothing left to mark done".into()),
             },
             PanelOutcome::Ship => self.ask_ship_feature(&project, &slug),
+            PanelOutcome::SetUp => self.set_up_again(&project, &slug),
             PanelOutcome::StartAgent(stage, fresh) => {
                 self.start_stage_agent(&project, &slug, stage, fresh)
             }
@@ -5898,6 +5920,27 @@ fn checks_lines(feature: &Feature, state: &PanelState) -> Vec<CheckLine> {
     }
 }
 
+/// The setup's section of `feature`'s page, as `state` has it: what runs,
+/// or once it ended what went wrong and what it copied.
+fn setup_section(feature: &Feature, state: &PanelState) -> Option<PageSection> {
+    if let Some(what) = state.setup {
+        return Some(lines("Setup", vec![line(inline(what), CheckTone::Note)]));
+    }
+    let run = feature
+        .setup
+        .as_ref()
+        .filter(|run| run.finished.is_some())?;
+    let failed = (run.failed.iter()).map(|why| line(format!("failed: {why}"), CheckTone::Blocker));
+    let missed = (run.not_copied.iter())
+        .map(|what| line(format!("couldn't copy {what}"), CheckTone::Blocker));
+    let copied = (run.copied.iter()).map(|what| line(format!("copied {what}"), CheckTone::Note));
+    let mut out: Vec<_> = failed.chain(missed).chain(copied).collect();
+    if out.is_empty() {
+        out.push(line("nothing was missing", CheckTone::Note));
+    }
+    Some(lines("Setup", capped(out, CheckTone::Note)))
+}
+
 /// AI review's findings in `feature`, by state, once read.
 fn findings_lines(feature: &Feature) -> Vec<CheckLine> {
     let ready = (feature.runs.get(&Stage::AiReview)).is_some_and(|r| r.ready.is_some());
@@ -6009,12 +6052,7 @@ fn stage_page(
                 sections.extend(doc_of(state.probe, stage));
             }
             Stage::Build => {
-                if let Some(what) = state.setup {
-                    sections.push(lines("Setup", vec![line(inline(what), CheckTone::Note)]));
-                } else if let Some(why) = feature.setup.as_ref().and_then(|s| s.failed.as_deref()) {
-                    let text = format!("failed: {why}");
-                    sections.push(lines("Setup", vec![line(text, CheckTone::Blocker)]));
-                }
+                sections.extend(setup_section(feature, state));
                 sections.extend(card());
                 // The build log by name once read, else the counts of its
                 // last stop.
@@ -6026,7 +6064,10 @@ fn stage_page(
                 });
                 sections.extend(milestones_of(state.probe, stage).or(counted));
             }
-            Stage::Verify => sections.push(lines("Checks", checks_lines(feature, state))),
+            Stage::Verify => {
+                sections.push(lines("Checks", checks_lines(feature, state)));
+                sections.extend(setup_section(feature, state));
+            }
             Stage::AiReview => {
                 sections.extend(card());
                 sections.push(lines("Findings", findings_lines(feature)));
@@ -6156,6 +6197,10 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 3] = [
                 "start the current stage over, after asking",
             ),
             ("Ctrl+Shift+O", "Verify's evidence"),
+            (
+                "Ctrl+Shift+U",
+                "copy what the worktrees lack: Build and Verify",
+            ),
             ("Ctrl+R", "start the stage's agent afresh"),
             ("Ctrl+Shift+R", "show the stage's agent, or resume its chat"),
             ("Ctrl+Shift+A", "pick the stage's next agent"),
@@ -6300,6 +6345,9 @@ fn tab_hints(
             }
             if row_page(feature, row).is_some() {
                 hints.push(hint("Ctrl+Shift+O", "evidence"));
+            }
+            if offers_setup(feature, stage) {
+                hints.push(hint("Ctrl+Shift+U", "set up"));
             }
             if fresh_stage(feature, row).is_some() {
                 hints.push(hint("Ctrl+R", "fresh agent"));
@@ -7639,6 +7687,7 @@ pub(crate) mod tests {
                 "Left / Right",
                 "Enter",
                 "Tab",
+                "Ctrl+Shift+U",
                 "Ctrl+O",
                 "Ctrl+C",
                 "Ctrl+N",
@@ -8158,6 +8207,7 @@ pub(crate) mod tests {
             started: 1_000,
             finished: Some(1_100),
             failed: Some("api: `npm ci` exited with 1".into()),
+            ..Default::default()
         });
         assert_eq!(
             build_line(&f, None, None).as_deref(),
@@ -8848,6 +8898,85 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn setup_is_offered_where_tests_run_once_they_are_reached() {
+        let at_build = feature("b", vec![repo("api", true)], 3);
+        assert!(offers_setup(&at_build, Stage::Build));
+        assert!(!offers_setup(&at_build, Stage::Verify));
+        assert!(!offers_setup(&at_build, Stage::Plan));
+        let mut f = feature("b", vec![repo("api", true)], 4);
+        assert!(offers_setup(&f, Stage::Build));
+        assert!(offers_setup(&f, Stage::Verify));
+        assert!(!offers_setup(&f, Stage::AiReview));
+        let setup = |f: &Feature| {
+            let actions = page_actions(f, Stage::Verify, RowCtx::default());
+            let on = actions.iter().find(|(_, o)| *o == PanelOutcome::SetUp);
+            on.map(|(b, _)| (b.label.clone(), b.style))
+        };
+        assert_eq!(setup(&f), Some(("Set up".into(), ButtonStyle::Quiet)));
+        // Cut short by gerdr quitting: not run, as far as the button goes.
+        f.setup = Some(feature::setup::SetupRun::default());
+        assert_eq!(setup(&f).unwrap().0, "Set up");
+        f.setup = Some(feature::setup::SetupRun {
+            finished: Some(2),
+            ..Default::default()
+        });
+        assert_eq!(setup(&f).unwrap().0, "Set up again");
+        f.status = Status::Abandoned;
+        assert_eq!(setup(&f), None);
+    }
+
+    #[test]
+    fn the_setup_section_says_what_went_wrong_then_what_it_copied() {
+        let mut f = feature("b", vec![repo("api", true)], 3);
+        let state = PanelState::default();
+        assert_eq!(setup_section(&f, &state), None);
+        // Under way, and cut short by gerdr quitting.
+        f.setup = Some(feature::setup::SetupRun::default());
+        assert_eq!(setup_section(&f, &state), None);
+        let step = "Setting up \u{201c}B\u{201d}: api: copying .venv".to_owned();
+        let running = PanelState {
+            setup: Some(&step),
+            ..PanelState::default()
+        };
+        let PageSection::Lines { lines: said, .. } = setup_section(&f, &running).unwrap() else {
+            panic!("not lines");
+        };
+        assert_eq!(said[0].tone, CheckTone::Note);
+        f.setup = Some(feature::setup::SetupRun {
+            finished: Some(2),
+            ..Default::default()
+        });
+        assert_eq!(
+            setup_section(&f, &state),
+            Some(lines(
+                "Setup",
+                vec![line("nothing was missing", CheckTone::Note)]
+            ))
+        );
+        f.setup = Some(feature::setup::SetupRun {
+            finished: Some(2),
+            failed: Some("api: `npm ci` exited with 1".into()),
+            copied: vec!["api: .env".into()],
+            not_copied: vec!["api: .venv (exited with 1)".into()],
+            ..Default::default()
+        });
+        assert_eq!(
+            setup_section(&f, &state),
+            Some(lines(
+                "Setup",
+                vec![
+                    line("failed: api: `npm ci` exited with 1", CheckTone::Blocker),
+                    line(
+                        "couldn't copy api: .venv (exited with 1)",
+                        CheckTone::Blocker
+                    ),
+                    line("copied api: .env", CheckTone::Note),
+                ]
+            ))
+        );
+    }
+
+    #[test]
     fn a_running_build_shows_its_agent_then_its_milestones() {
         let mut f = feature("b", vec![repo("api", true)], 3);
         let mut run = agent_run(Some("p1"), None);
@@ -8866,6 +8995,7 @@ pub(crate) mod tests {
                 ("Show agent", PanelOutcome::ShowAgent(Stage::Build)),
                 ("Restart", PanelOutcome::StartAgent(Stage::Build, true)),
                 ("Start over\u{2026}", PanelOutcome::StartOver(Stage::Build)),
+                ("Set up", PanelOutcome::SetUp),
             ]
         );
         assert_eq!(actions[0].0.style, ButtonStyle::Primary);
@@ -8922,6 +9052,7 @@ pub(crate) mod tests {
             started: 1_000,
             finished: Some(1_100),
             failed: Some("api: `npm ci` exited with 1".into()),
+            ..Default::default()
         });
         let page = stage_page(&f, Stage::Build, &state, &actions, 2_000);
         assert_eq!(
@@ -9215,6 +9346,7 @@ pub(crate) mod tests {
                 ("Run checks", PanelOutcome::RunChecks),
                 ("Start over\u{2026}", PanelOutcome::StartOver(Stage::Verify)),
                 ("Evidence", PanelOutcome::Evidence),
+                ("Set up", PanelOutcome::SetUp),
             ]
         );
         let page = stage_page(&f, Stage::Verify, &state, &actions, 2_000);

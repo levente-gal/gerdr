@@ -329,6 +329,10 @@ pub struct Workflow {
     /// folder name (see `feature::setup`).
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub setup: std::collections::BTreeMap<String, Vec<String>>,
+    /// Ignored paths copied into a new feature's worktree besides the ones
+    /// gerdr picks itself, by repository folder name (see `feature::setup`).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub copy: std::collections::BTreeMap<String, Vec<String>>,
     /// The checks Verify runs, by repository folder name or `_feature`
     /// (see `feature::verify`).
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -350,6 +354,7 @@ impl Workflow {
             && self.ship.is_none()
             && self.agents.is_empty()
             && self.setup.is_empty()
+            && self.copy.is_empty()
             && self.verify.is_empty()
             && self.verify_timeout.is_none()
             && !self.allow_same_reviewer
