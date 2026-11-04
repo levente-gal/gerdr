@@ -417,8 +417,8 @@ pub enum Finding {
     Failed(String),
 }
 
-/// A project of the store the feature panel offers repositories of, as far
-/// as it is known.
+/// A project the feature panel looks for repositories in, as far as it is
+/// known.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RepoSource {
     /// The project's id; `None`: the feature's home project.
@@ -776,8 +776,10 @@ pub struct FeaturePanel {
     /// Every key of the tab is listed in place of the page (F1).
     pub keys: bool,
     pub tab_hover: Option<FeatureTabHit>,
-    /// The projects' repositories to offer on the expanded repositories
-    /// (home first), read off the thread when it opens and on each expand.
+    /// Where the expanded repositories look (home first): the feature's
+    /// project, which they offer the rest of, and those it already links,
+    /// for what it holds or held of them. Read off the thread when it opens
+    /// and on each expand.
     pub sources: Vec<RepoSource>,
     /// The repositories show as rows, with all they could be, over the page.
     pub expanded: bool,
@@ -877,8 +879,8 @@ pub enum RepoEntry {
     Context(usize),
     /// `Feature::removed` at this index.
     Removed(usize),
-    /// A repository of `FeaturePanel::sources` the feature has nothing to
-    /// do with yet: `repo` in the root of `source`.
+    /// A repository of the feature's project it has nothing to do with
+    /// yet: `repo` in the root of `FeaturePanel::sources[source]`.
     Offered { source: usize, repo: usize },
 }
 
@@ -902,13 +904,19 @@ pub fn repo_entries(feature: &Feature, sources: &[RepoSource], expanded: bool) -
 }
 
 /// The rows only the expanded repositories show: those taken out, those
-/// not added. A shipped feature's repositories can't change: none.
+/// of its project not added. Other projects stay out, unless the feature
+/// still links the one a repository was taken out of. A shipped feature's
+/// repositories can't change: none.
 pub fn repos_offered(feature: &Feature, sources: &[RepoSource]) -> Vec<RepoEntry> {
     if !linkable(feature) {
         return Vec::new();
     }
-    let mut entries: Vec<RepoEntry> = (0..feature.removed.len()).map(RepoEntry::Removed).collect();
-    for (at, source) in sources.iter().enumerate() {
+    let mut entries: Vec<RepoEntry> = (feature.removed.iter().enumerate())
+        .filter(|(_, gone)| (gone.project.as_deref()).is_none_or(|id| feature.link(id).is_some()))
+        .map(|(i, _)| RepoEntry::Removed(i))
+        .collect();
+    let home = (sources.iter().enumerate()).filter(|(_, source)| source.project.is_none());
+    for (at, source) in home {
         let Finding::Found(root) = &source.finding else {
             continue;
         };
@@ -2981,9 +2989,10 @@ impl Gerdr {
     }
 
     /// Read off the thread (checklist D3) which repositories the feature
-    /// panel can offer: those of its project and of the store's others.
-    /// What was found before stays until the new read is in. A project
-    /// with no workspace folder has none to offer. A shipped feature's
+    /// panel can offer: those of its project, and of the projects it links
+    /// for what it holds or held of them. What was found before stays until
+    /// the new read is in. A linked project with no workspace folder has
+    /// none to find. A shipped feature's
     /// repositories can't change: it looks nowhere.
     pub(crate) fn find_repo_sources(&mut self) {
         let Some(panel) = self.features.panel.as_ref() else {
@@ -3002,8 +3011,9 @@ impl Gerdr {
         let mut sources = Vec::new();
         let mut finds = Vec::new();
         // The home project first, whatever its place in the store.
-        let (home, others): (Vec<_>, Vec<_>) =
-            (self.projects.projects.iter()).partition(|p| p.id == project);
+        let (home, others): (Vec<_>, Vec<_>) = (self.projects.projects.iter())
+            .filter(|p| p.id == project || feature.link(&p.id).is_some())
+            .partition(|p| p.id == project);
         for p in home.into_iter().chain(others) {
             let is_home = p.id == project;
             let search = root_search(p);
@@ -3072,7 +3082,7 @@ impl Gerdr {
     }
 
     /// Make feature `slug` hold repository `key` on its branch: a new
-    /// worktree from its base, its project linked if it wasn't. Taken
+    /// worktree from its base. Taken
     /// out before, it gets a new branch.
     fn add_repo_to_feature(&mut self, project: &str, slug: &str, key: &str) {
         if self.repos_locked(project, slug) {
@@ -3086,31 +3096,13 @@ impl Gerdr {
         let Finding::Found(root) = source.finding else {
             return;
         };
-        let linked = |id: &str| {
-            self.feature(project, slug)
-                .is_some_and(|f| f.link(id).is_some())
+        let add = AddSpec {
+            project: source.project,
+            name: source.name,
+            root,
+            names: vec![found.name],
         };
-        let (links, adds) = match source.project {
-            Some(id) if !linked(&id) => (
-                vec![LinkSpec {
-                    project: id,
-                    name: source.name,
-                    root,
-                    touched: vec![found.name],
-                }],
-                Vec::new(),
-            ),
-            at => (
-                Vec::new(),
-                vec![AddSpec {
-                    project: at,
-                    name: source.name,
-                    root,
-                    names: vec![found.name],
-                }],
-            ),
-        };
-        self.link_repos(project.to_owned(), slug.to_owned(), links, adds);
+        self.link_repos(project.to_owned(), slug.to_owned(), vec![add]);
     }
 
     /// Let agents of feature `slug` read repository `key`'s main checkout:
@@ -3386,17 +3378,10 @@ impl Gerdr {
         self.refresh_feature_graphs(&project, &slug, true);
     }
 
-    /// Link `links` to open feature `slug` and bring `adds` into its folders
-    /// off the thread, shown in the tasks panel meanwhile. A setup or check
+    /// Bring `adds` into the folders of open feature `slug` off the thread, shown in the tasks panel meanwhile. A setup or check
     /// under way has a copy of the feature that wouldn't see them: refused
     /// meanwhile.
-    fn link_repos(
-        &mut self,
-        project: String,
-        slug: String,
-        links: Vec<LinkSpec>,
-        adds: Vec<AddSpec>,
-    ) {
+    fn link_repos(&mut self, project: String, slug: String, adds: Vec<AddSpec>) {
         let Some(feature) = self.feature(&project, &slug).cloned() else {
             return self.show_warning("That feature is gone".into());
         };
@@ -3406,9 +3391,7 @@ impl Gerdr {
                 feature.title
             ));
         }
-        let names: Vec<String> = (links.iter().map(|l| l.name.clone()))
-            .chain(adds.iter().flat_map(|a| a.names.iter().cloned()))
-            .collect();
+        let names: Vec<String> = adds.iter().flat_map(|a| a.names.iter().cloned()).collect();
         let busy = Busy {
             project: project.clone(),
             slug: slug.clone(),
@@ -3421,7 +3404,7 @@ impl Gerdr {
             ),
         };
         self.feature_work(Some(busy), move |_| {
-            let result = layout::link_more(&feature, &links, &adds);
+            let result = layout::link_more(&feature, &[], &adds);
             Done::Linked {
                 project,
                 slug,
@@ -6257,19 +6240,12 @@ fn tab_hints(
 const NOT_ADDED: &str = "Not added";
 
 /// The group of rows `entry` belongs in, by its heading.
-fn entry_group<'a>(feature: &Feature, sources: &'a [RepoSource], entry: RepoEntry) -> &'a str {
+fn entry_group(feature: &Feature, entry: RepoEntry) -> &'static str {
     match entry {
         RepoEntry::Held(i) if feature.repos.get(i).is_some_and(|r| r.touched) => "In feature",
         RepoEntry::Held(_) | RepoEntry::Context(_) => "Context, read only",
         RepoEntry::Removed(_) => "Removed",
-        RepoEntry::Offered { source, .. } => match sources.get(source) {
-            Some(RepoSource {
-                project: Some(_),
-                name,
-                ..
-            }) => name,
-            _ => NOT_ADDED,
-        },
+        RepoEntry::Offered { .. } => NOT_ADDED,
     }
 }
 
@@ -6352,7 +6328,7 @@ fn tab_view(
     let repos: Vec<FeatureRepoRow> = (entries.iter())
         .map(|entry| {
             let mut row = repo_row(panel, feature, *entry, state, now);
-            let caption = entry_group(feature, &panel.sources, *entry);
+            let caption = entry_group(feature, *entry);
             if group != Some(caption) {
                 group = Some(caption);
                 row.group = Some(caption.to_owned());
@@ -7384,6 +7360,37 @@ pub(crate) mod tests {
         // The only one a feature has: Del abandons it, and says so.
         let one = feature("b", vec![repo("api", true)], 2);
         assert_eq!(del(&one, 0).as_deref(), Some("abandon"));
+    }
+
+    #[test]
+    fn only_the_project_of_the_feature_is_offered() {
+        let mut f = every_kind_of_row();
+        f.note_removed(Some("admin".into()), "panel".into(), 6);
+        f.note_removed(Some("tools".into()), "cli".into(), 7);
+        f.links.push(feature::Link {
+            project: "admin".into(),
+            root: "/admin".into(),
+            dir: "/admin/.features/b".into(),
+            multi: true,
+        });
+        let mut sources = sources_with(&["api", "auth", "docs", "infra", "web"]);
+        sources.push(RepoSource {
+            project: Some("admin".into()),
+            name: "Admin".into(),
+            finding: sources_with(&["panel", "users"]).remove(0).finding,
+        });
+        let keys: Vec<String> = (repos_offered(&f, &sources).into_iter())
+            .filter_map(|e| entry_key(&f, &sources, e))
+            .collect();
+        // Not a project it doesn't link, nor the rest of one it does; taken
+        // out of one it links, it can come back.
+        assert_eq!(keys, ["admin:panel", "auth", "infra"]);
+        let back = RepoEntry::Removed(1);
+        assert_eq!(
+            entry_key(&f, &sources, back).as_deref(),
+            Some("admin:panel")
+        );
+        assert_eq!(entry_buttons(&f, &sources, back).len(), 2);
     }
 
     #[test]

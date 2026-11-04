@@ -2741,7 +2741,7 @@ fn feature_tab_unfolded() -> super::FeatureTabView {
     view.repos.extend([
         offered("auth", "removed 2h ago", Some("Removed")),
         offered("infra", "main", Some("Not added")),
-        offered("admin:panel", "develop", Some("admin")),
+        offered("billing", "develop", None),
     ]);
     view.repo_notes = vec![RepoNote {
         caption: "tools".into(),
@@ -2967,9 +2967,9 @@ const GOLDEN_FEATURE_TAB: [[u64; 29]; 4] = [
         0x4897ec8b239d629f, // tab_ship_blocked_1180
         0x0be1db5217ee5626, // tab_done_1920
         0x65963575aed58140, // tab_later_860
-        0x9cac4c2e571e8de0, // tab_repos_1180
-        0x6b7e8427a7a1786e, // tab_unfolded_860
-        0x35bc016feaa7f30b, // tab_unfolded_1920
+        0xa37c06d3bfef3e18, // tab_repos_1180
+        0x42b3d85b8e117cf6, // tab_unfolded_860
+        0xc861ba9f871ce5b3, // tab_unfolded_1920
         0x405031557bbdcb4e, // tab_shipped_1180
         0xef8f016cb2b53253, // tab_repos_failed_1180
         0x1dbca218f093b7cb, // tab_repos_error_860
@@ -2999,9 +2999,9 @@ const GOLDEN_FEATURE_TAB: [[u64; 29]; 4] = [
         0xc9e5fd2b841aceeb, // tab_ship_blocked_1180
         0x056961c80f97ba7c, // tab_done_1920
         0xf00b3eff6fa99430, // tab_later_860
-        0x4b9c66512888a979, // tab_repos_1180
-        0x9983f0a25af5a860, // tab_unfolded_860
-        0x8cae0b65486fa171, // tab_unfolded_1920
+        0x8887740a7dc670f9, // tab_repos_1180
+        0xfbbc9ba6a1865050, // tab_unfolded_860
+        0xd43e663d8bc14d31, // tab_unfolded_1920
         0xd2652ecdfdb4bf24, // tab_shipped_1180
         0xe33618b6005fdbe9, // tab_repos_failed_1180
         0xbda5163db77e627f, // tab_repos_error_860
@@ -3031,9 +3031,9 @@ const GOLDEN_FEATURE_TAB: [[u64; 29]; 4] = [
         0xf06794be52aa9746, // tab_ship_blocked_1180
         0x81c09fa9946dcead, // tab_done_1920
         0x9afae3c333859754, // tab_later_860
-        0xd13362588ca6c1bb, // tab_repos_1180
-        0x6150f5dab8e39c66, // tab_unfolded_860
-        0xb2a653ab362630f8, // tab_unfolded_1920
+        0x2d39aa6f79bfe53b, // tab_repos_1180
+        0x325146ebda9196b6, // tab_unfolded_860
+        0xc1f88740828fc7e8, // tab_unfolded_1920
         0x75ebe36c69c56be2, // tab_shipped_1180
         0x03daaa012f70732b, // tab_repos_failed_1180
         0xf42dc42f01ae5ff9, // tab_repos_error_860
@@ -3063,9 +3063,9 @@ const GOLDEN_FEATURE_TAB: [[u64; 29]; 4] = [
         0xd2e9d01192ca9477, // tab_ship_blocked_1180
         0x366f9044b55eef1a, // tab_done_1920
         0xe691d8281a18f49e, // tab_later_860
-        0x7fd1722ebf456716, // tab_repos_1180
-        0x3e7b2dfdbb2758bf, // tab_unfolded_860
-        0x66e6aa6b8eb682ce, // tab_unfolded_1920
+        0xcf719b669659ef86, // tab_repos_1180
+        0xc1db07dc30728f1f, // tab_unfolded_860
+        0xe399306b3da83f9e, // tab_unfolded_1920
         0x44104855b8da5961, // tab_shipped_1180
         0x665943cd941ae0f4, // tab_repos_failed_1180
         0x5aefcb0c7d738f37, // tab_repos_error_860
