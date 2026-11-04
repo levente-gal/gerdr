@@ -51,7 +51,7 @@ use crate::{
     Action, Gerdr, Pane, Tab,
     anim::{self, Fade},
     chrome::{self, BarButton, BarButtons, BarHit, BarStatus, Help, PaneBarView, Rect},
-    herdr::{Herdr, PaneState, Process, ProcessInfo},
+    herdr::{AgentStatus, Herdr, PaneState, Process, ProcessInfo},
     layout::Dir,
     menu::{MenuAction, MenuItem, MenuSpec},
     prepare::{self, Plan, Prep, Shell, Step, Tools},
@@ -295,6 +295,17 @@ pub struct BarContent {
     pub zoomed: bool,
 }
 
+/// How a bar stands with `agent`, where herdr sees one, in its pane: the
+/// agent's process runs between prompts too, so it is only `Running` at work.
+fn status_with_agent(status: BarStatus, agent: Option<AgentStatus>) -> BarStatus {
+    match (status, agent) {
+        (BarStatus::Running, Some(agent)) if agent != AgentStatus::Working => {
+            BarStatus::Agent(agent)
+        }
+        _ => status,
+    }
+}
+
 /// The process leading what runs in a pane, if not its shell.
 fn running_leader(info: &ProcessInfo) -> Option<&Process> {
     let group = info.foreground_process_group_id?;
@@ -436,7 +447,7 @@ fn bar_key(pane: &Pane) -> String {
 /// for it (`pointer`, see `chrome::pointer_reveals`). Either way it floats
 /// over the window, so it never resizes or moves one.
 pub fn bar_wanted(status: BarStatus, pointer: bool) -> bool {
-    pointer || matches!(status, BarStatus::Running | BarStatus::Working)
+    pointer || status.runs()
 }
 
 /// Where one pane's bar stands between hidden and shown.
@@ -591,7 +602,9 @@ pub fn button_unavailable(button: BarButton, content: &BarContent) -> Option<&'s
         BarButton::Forward if !content.can_forward => Some("nothing to go forward to"),
         BarButton::Restart if !content.can_restart => Some(match content.status {
             BarStatus::Working => "it is being stopped",
-            BarStatus::Running => "it wasn't started in this pane since gerdr started",
+            BarStatus::Running | BarStatus::Agent(_) => {
+                "it wasn't started in this pane since gerdr started"
+            }
             BarStatus::Idle | BarStatus::Exited => "nothing has run here to run again",
         }),
         BarButton::Stop if !content.can_stop => Some(match content.status {
@@ -854,11 +867,15 @@ impl Gerdr {
 
     /// What the bar of herdr pane `pane_id` shows.
     pub(crate) fn pane_bar_content(&self, pane_id: &str) -> BarContent {
-        bar_content(
-            self.pane_state(pane_id).and_then(|p| p.process.as_ref()),
+        let pane = self.pane_state(pane_id);
+        let mut content = bar_content(
+            pane.and_then(|p| p.process.as_ref()),
             self.last_commands.get(pane_id),
             self.pane_jobs.get(pane_id),
-        )
+        );
+        let agent = pane.filter(|p| p.agent.is_some()).map(|p| p.agent_status);
+        content.status = status_with_agent(content.status, agent);
+        content
     }
 
     /// What runs in pane `id` of the active tab, as its bar says it, if
@@ -872,7 +889,7 @@ impl Gerdr {
     /// or is being stopped.
     pub fn running_in(&self, pane: &Pane) -> Option<String> {
         let content = self.pane_bar_of(pane);
-        matches!(content.status, BarStatus::Running | BarStatus::Working).then_some(content.label)
+        content.status.runs().then_some(content.label)
     }
 
     /// What the bar of `pane` shows: what runs in it, for a terminal;
@@ -1220,7 +1237,9 @@ impl Gerdr {
             .flat_map(Tab::herdr_panes)
             .filter_map(|pane| {
                 let content = self.pane_bar_content(&pane.pane_id);
-                if content.status == BarStatus::Running && !content.can_restart {
+                if matches!(content.status, BarStatus::Running | BarStatus::Agent(_))
+                    && !content.can_restart
+                {
                     return None;
                 }
                 let record = self.pane_record(pane);
@@ -1724,6 +1743,25 @@ mod tests {
         assert_eq!(content.label, "npm run dev");
         assert_eq!(content.status, BarStatus::Running);
         assert!(content.can_restart && content.can_stop);
+    }
+
+    #[test]
+    fn an_agent_runs_only_at_work_as_its_bar_says() {
+        use AgentStatus::{Blocked, Done, Idle, Unknown, Working};
+        let running = BarStatus::Running;
+        assert_eq!(status_with_agent(running, None), running);
+        assert_eq!(status_with_agent(running, Some(Working)), running);
+        for agent in [Idle, Blocked, Done, Unknown] {
+            let status = status_with_agent(running, Some(agent));
+            assert_eq!(status, BarStatus::Agent(agent));
+            // Still something to ask about before closing, in sight.
+            assert!(status.runs());
+            assert!(bar_wanted(status, false));
+        }
+        // Gone or being stopped, the agent's word doesn't count.
+        for other in [BarStatus::Idle, BarStatus::Exited, BarStatus::Working] {
+            assert_eq!(status_with_agent(other, Some(Idle)), other);
+        }
     }
 
     #[test]
