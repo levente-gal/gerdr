@@ -173,7 +173,7 @@ fn pyenv_venv(dir: &Path, root: &Path) -> Option<PathBuf> {
 }
 
 /// Whether `dir` holds a project poetry manages.
-fn is_poetry_project(dir: &Path) -> bool {
+pub(crate) fn is_poetry_project(dir: &Path) -> bool {
     dir.join("poetry.lock").is_file()
         || std::fs::read_to_string(dir.join("pyproject.toml"))
             .is_ok_and(|pyproject| pyproject.contains("[tool.poetry"))

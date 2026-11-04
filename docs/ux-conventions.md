@@ -14,11 +14,11 @@ rules, for reviewing a branch before it merges.
 | Up / Down, PgUp / PgDn, Home / End | Move the selection. Ctrl+J / Ctrl+K also move it. Ctrl+N / Ctrl+P never move it. Where there is no list to page through, PgUp / PgDn scroll a page (the feature tab's stage page). |
 | Tab / Shift+Tab | Next / previous focus area or form field. Shift+Tab always goes the other way. |
 | Left / Right | Move along a row of choices laid out across: the feature tab's stage rail (previous / next stage's page; Up / Down step it too), its repository strip, and the buttons of an unfolded repository row. |
-| Ctrl+PgUp / Ctrl+PgDn | Previous / next item of a set shown one at a time: the feature tab's previous / next feature (its ‹ › buttons). |
+| Ctrl+PgUp / Ctrl+PgDn | Previous / next item of a set shown one at a time: the feature tab's previous / next feature (its ‹ › buttons), the project commands dialog's other tab. |
 | Ctrl+N | New / create (project, branch, todo). |
 | Ctrl+O | Open (in a tab, in the browser, the file; in a plan review's sheet, the suggestion's first citation in Zed). |
 | Ctrl+Shift+O | Open the selected row's page where Ctrl+O already opens a tab (feature tab: a repository's pull request, or Verify's evidence once a run of its checks wrote it). |
-| Ctrl+E | Edit (settings, a todo, open the file in the editor). |
+| Ctrl+E | Edit (settings, a todo, open the file in the editor; on the feature tab's Build and Verify, the project's commands: Setup and Checks). |
 | Ctrl+R | Refresh / reload (feature tab: start the selected stage's agent afresh, Build's too). |
 | Ctrl+Shift+R | On the feature tab: show the selected stage's agent, done stage or not, or go back to its chat in a new tab once its tab is closed (Claude Code and Cursor; Ctrl+R starts afresh). |
 | Ctrl+Enter / Ctrl+Shift+Enter | The panel's finishing action: commit / commit and push (repos), create (branch menu), approve / send back (a file under review, a feature's code review; Verify's evidence is only read, so there it says so and does nothing); mark passed / send the failures to Build (a feature's manual test sheet); write the final plan, or use the plan as it is / ask the reviewer (a plan review's sheet: while suggestions are still to decide, Ctrl+Enter stays and says how many). On the file of a done stage, which is only read: go to the current stage / reopen the stage, as on its page in the feature tab (Ctrl+Shift+Enter there), until the stage after it has made something. |
@@ -28,6 +28,8 @@ rules, for reviewing a branch before it merges.
 | Ctrl+Shift+S | Squash a worktree into main. |
 | Prefix, then Enter | Send the prompt of the stage agent waiting in the focused pane (also the arrow on its pane's bar, and Send prompt on the stage's page). A stage's agent opens waiting, so its model can be picked first. |
 | Ctrl+Shift+U | Set a feature's worktrees up (feature tab, Build and Verify): copy the ignored files and environments they lack from main, then run the project's setup commands. Nothing there is overwritten. |
+| Shift+Enter | In a field of several lines: a new line, Enter being the panel's action (a diff's review comment, the project commands dialog). |
+| Alt+U | In the project commands dialog: fill the focused empty field with what is suggested for it (also its Use button). Nothing is saved until Save. |
 | Ctrl+Shift+A | Pick the next agent on the feature tab's selected stage (the chips on its agent card). It applies from the agent's next start; one running goes on. |
 | Ctrl+Shift+K | Skip Plan review on the feature tab, asking only when something would be lost. |
 | Ctrl+Shift+D | On the feature tab: from a final plan back to the decisions. |

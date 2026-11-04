@@ -40,6 +40,7 @@ pub mod review_import;
 pub mod setup;
 pub mod ship;
 pub mod store;
+pub mod suggest;
 pub mod verify;
 pub mod viewed;
 

@@ -26,6 +26,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::{
     Gerdr,
     agents::AgentKey,
+    chrome::CommandsTab,
     feature::{
         self, Feature, Stage, Status,
         patch::{self, Reading},
@@ -36,6 +37,8 @@ use crate::{
     feature_agents::{self, Stamp, Watch},
     features::{Busy, Done, Job},
     herdr::AgentStatus,
+    menu::MenuAction,
+    toast::Level,
 };
 
 /// A feature: its project and slug.
@@ -207,6 +210,16 @@ fn fixing_next(worked: bool, status: Option<AgentStatus>, alive: bool) -> Fixing
     }
 }
 
+/// The toast's button that opens the checks of feature `slug`.
+fn set_checks(project: &str, slug: &str) -> (String, MenuAction) {
+    let action = MenuAction::EditCommands {
+        project: project.to_owned(),
+        slug: Some(slug.to_owned()),
+        tab: CommandsTab::Checks,
+    };
+    ("Set checks".to_owned(), action)
+}
+
 /// Whether Verify's checks can run on `feature` now (`running`: they run
 /// already, `checks`: how many are set); else why not.
 fn verify_refusal(feature: &Feature, running: bool, checks: usize) -> Result<(), String> {
@@ -227,7 +240,7 @@ fn verify_refusal(feature: &Feature, running: bool, checks: usize) -> Result<(),
     }
     if checks == 0 {
         return Err(format!(
-            "No checks set for \u{201c}{title}\u{201d}: add \"workflow\": {{\"verify\": \u{2026}}} to the project's file, or mark Verify done"
+            "No checks for the repositories of \u{201c}{title}\u{201d}: set some, or mark Verify done"
         ));
     }
     Ok(())
@@ -629,9 +642,13 @@ impl Gerdr {
         self.save_feature(project, slug);
         self.feature_cursor_to_current_of(project, slug);
         if checks == 0 {
-            return self.show_warning(format!(
-                "Build of \u{201c}{title}\u{201d} is done; no checks are set: add \"workflow\": {{\"verify\": \u{2026}}} to the project's file, or mark Verify done"
-            ));
+            return self.toast_with(
+                format!(
+                    "Build of \u{201c}{title}\u{201d} is done; no checks for its repositories: set some, or mark Verify done"
+                ),
+                Level::Warning,
+                Some(set_checks(project, slug)),
+            );
         }
         self.show_success(format!(
             "Build of \u{201c}{title}\u{201d} is done; verifying"
@@ -727,7 +744,10 @@ impl Gerdr {
         let key = (project.to_owned(), slug.to_owned());
         let running = self.features.build.verifying.contains(&key);
         if let Err(why) = verify_refusal(&feature, running, checks.len()) {
-            return self.show_warning(why);
+            // Fine with a check to run: setting some is the way on.
+            let fix = verify_refusal(&feature, running, 1).is_ok();
+            let action = fix.then(|| set_checks(project, slug));
+            return self.toast_with(why, Level::Warning, action);
         }
         // The checks need what the setup copies. A feature made before it
         // copied anything hasn't had one.
@@ -1183,7 +1203,7 @@ mod tests {
         assert!(
             verify_refusal(&f, false, 0)
                 .unwrap_err()
-                .starts_with("No checks set for \u{201c}Feature a\u{201d}")
+                .starts_with("No checks for the repositories of \u{201c}Feature a\u{201d}")
         );
         let verified = feature("a", vec![repo("api", true)], 5);
         assert_eq!(

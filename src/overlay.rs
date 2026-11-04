@@ -38,6 +38,9 @@ pub enum Overlay {
     NewFeature,
     /// The name and email git wants to commit (see `git_identity`).
     GitIdentity,
+    /// A project's Verify checks and setup commands (see
+    /// `project_commands`).
+    ProjectCommands,
     /// The manual test sheet: a feature's acceptance criteria to try
     /// (see `manual_test`).
     ManualTest,
@@ -68,13 +71,14 @@ pub enum Overlay {
 
 impl Overlay {
     /// Every overlay, top first.
-    pub const ORDER: [Self; 22] = [
+    pub const ORDER: [Self; 23] = [
         Self::Tooltip,
         Self::Quit,
         Self::Restart,
         Self::Checkout,
         Self::NewFeature,
         Self::GitIdentity,
+        Self::ProjectCommands,
         Self::Confirm,
         Self::ContextMenu,
         Self::Toasts,
@@ -106,6 +110,7 @@ impl Overlay {
                 | Self::Checkout
                 | Self::NewFeature
                 | Self::GitIdentity
+                | Self::ProjectCommands
                 | Self::ManualTest
                 | Self::PlanSheet
                 | Self::Confirm
@@ -169,6 +174,7 @@ impl Overlay {
             Self::Checkout => "the checkout dialog",
             Self::NewFeature => "the new feature dialog",
             Self::GitIdentity => "the name and email dialog",
+            Self::ProjectCommands => "the project commands dialog",
             Self::ManualTest => "the manual test sheet",
             Self::PlanSheet => "the plan review's sheet",
             Self::Confirm => "the dialog",
@@ -200,6 +206,7 @@ impl Gerdr {
             Overlay::Checkout => self.checkout.is_some(),
             Overlay::NewFeature => self.features.dialog.is_some(),
             Overlay::GitIdentity => self.repos.identity.is_some(),
+            Overlay::ProjectCommands => self.features.commands.is_some(),
             Overlay::ManualTest => self.features.manual.is_some(),
             Overlay::PlanSheet => self.features.plan_sheet.is_some(),
             Overlay::Confirm => self.confirm.is_some(),
@@ -283,6 +290,7 @@ impl Gerdr {
             Overlay::Tasks => self.tasks_hover(pos),
             Overlay::NewFeature => self.new_feature_hover(pos),
             Overlay::GitIdentity => self.identity_hover(pos),
+            Overlay::ProjectCommands => self.commands_hover(pos),
             Overlay::ManualTest => return self.manual_test_hover(pos),
             Overlay::PlanSheet => return self.plan_sheet_hover(pos),
             Overlay::Features => return self.feature_panel_hover(pos),
@@ -339,6 +347,7 @@ impl Gerdr {
                 }
             }
             Overlay::PlanSheet => self.plan_sheet_scroll(motion),
+            Overlay::ProjectCommands => self.commands_scroll(motion),
             Overlay::Features => self.feature_panel_scroll(motion),
             Overlay::Doc => self.repos_scroll(motion),
             Overlay::Tasks => {

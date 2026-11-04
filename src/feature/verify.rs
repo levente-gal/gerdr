@@ -1,7 +1,8 @@
 //! Verify: gerdr runs the project's checks on a feature's code and writes
 //! what they said to `evidence.md` in the feature data dir.
 //!
-//! The checks come from the project's store file, by repository name or
+//! The checks come from the project's store file (the project commands
+//! dialog edits them, see `project_commands`), by repository name or
 //! `_feature` (`"workflow": {"verify": {"services-api": ["npm test"],
 //! "_feature": ["./e2e.sh"]}}`): each touched repository's run in its
 //! worktree, in `Repo::key` order, then `_feature`'s in the feature folder.

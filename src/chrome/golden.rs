@@ -2293,6 +2293,170 @@ fn dump_identity() {
     }
 }
 
+// ------------------------------------------------------- project commands
+
+/// The project commands dialog, as `case` says: its Checks with a
+/// suggestion and several lines, Setup with two projects, a form error with
+/// the file edited outside gerdr, and on a low output scrolled.
+fn commands(case: usize) -> super::CommandsView {
+    let row =
+        |label: &str, tag: Option<&str>, suggestion: Option<&str>, text: &str| super::CommandsRow {
+            heading: None,
+            label: label.into(),
+            tag: tag.map(str::to_owned),
+            suggestion: suggestion.map(str::to_owned),
+            line: text.into(),
+        };
+    let mut view = super::CommandsView {
+        tab: super::CommandsTab::Checks,
+        body: "One command per line. A check that changes the code fails Verify.",
+        note: None,
+        rows: vec![
+            row(
+                "api",
+                Some("in this feature"),
+                None,
+                "cargo test\ncargo clippy -- -D warnings",
+            ),
+            row("web", None, Some("npm test"), ""),
+            row("old", Some("not found"), None, "make check"),
+            row(
+                "Whole feature",
+                Some("runs last, in the feature folder"),
+                None,
+                "",
+            ),
+        ],
+        limit: Some("1200".into()),
+        focus: super::CommandsFocus::Row(0),
+        down: 0,
+        error: None,
+        stale: false,
+        hover: None,
+        keys: vec![
+            ("Shift+Enter", "new line"),
+            ("Esc", "close"),
+            ("Tab", "next"),
+        ],
+    };
+    match case {
+        1 => {
+            view.tab = super::CommandsTab::Setup;
+            view.body = "One command per line. They run in a new worktree, once it has its files.";
+            view.note = Some(("finding repositories\u{2026}".into(), false));
+            view.rows = vec![
+                row("api", None, None, ""),
+                row("site", None, Some("npm ci"), ""),
+            ];
+            view.rows[0].heading = Some("Home".into());
+            view.rows[1].heading = Some("Linked".into());
+            view.limit = None;
+            view.hover = Some(super::CommandsHit::Use(1));
+        }
+        2 => {
+            view.note = Some(("Couldn't look for repositories: no git".into(), true));
+            view.error =
+                Some("The project file was edited outside gerdr. Reload it to save here.".into());
+            view.stale = true;
+            view.focus = super::CommandsFocus::Limit;
+            view.hover = Some(super::CommandsHit::Button(1));
+        }
+        3 => view.down = 60,
+        _ => {}
+    }
+    view
+}
+
+/// The output each of `COMMANDS` is painted on.
+fn commands_output(case: usize) -> (i32, i32) {
+    match case {
+        3 => (640, 420),
+        _ => (870, 720),
+    }
+}
+
+fn paint_commands(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
+    let p = theme.palette();
+    (0..COMMANDS.len())
+        .map(|case| {
+            let size = commands_output(case).into();
+            hash(painter.commands_dialog(&commands(case), size, scale, p))
+        })
+        .collect()
+}
+
+const COMMANDS: [&str; 4] = [
+    "commands",
+    "commands_setup",
+    "commands_stale",
+    "commands_low",
+];
+
+/// The recorded hashes of `COMMANDS`, per case in `CASES`.
+const GOLDEN_COMMANDS: [[u64; 4]; 4] = [
+    // Dark at 1
+    [
+        0xd6bf5af610f0bd06, // commands
+        0x8b5544100aae6646, // commands_setup
+        0xd81c40d1dd654852, // commands_stale
+        0x657246e86cdf7372, // commands_low
+    ],
+    // Dark at 2
+    [
+        0x5775f007fed8b1cc, // commands
+        0x863ddf0b9049bd4f, // commands_setup
+        0x05101c4675da91ff, // commands_stale
+        0xb7cea580a9433698, // commands_low
+    ],
+    // Light at 1
+    [
+        0xe0956360ba5ba9c3, // commands
+        0x8b7dff0bbc21e4b4, // commands_setup
+        0xbdaf70c200a4a05b, // commands_stale
+        0x7b406309e623b194, // commands_low
+    ],
+    // Light at 2
+    [
+        0xbba92d23fdb687c3, // commands
+        0xff37bc0fc6539ba8, // commands_setup
+        0xb5105bc40bdca039, // commands_stale
+        0x08a0e3bc2186d289, // commands_low
+    ],
+];
+
+#[test]
+fn the_commands_dialog_paints_the_same_pixels() {
+    let golden: Vec<&[u64]> = GOLDEN_COMMANDS.iter().map(|row| row.as_slice()).collect();
+    check(&COMMANDS, &golden, paint_commands);
+}
+
+/// With `GERDR_DUMP_DIR` set, write the project commands dialog there.
+#[test]
+fn dump_commands() {
+    let Some(dir) = std::env::var_os("GERDR_DUMP_DIR") else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    let _ = std::fs::create_dir_all(&dir);
+    let painter = Painter::new();
+    for (theme, scale) in CASES {
+        let p = theme.palette();
+        let px = |v: i32| (v as f64 * scale).round() as usize;
+        let tag = format!("{}_{}", theme.name(), scale);
+        for (case, name) in COMMANDS.iter().enumerate() {
+            let size = commands_output(case).into();
+            let view = commands(case);
+            let panel = super::commands_layout(&view, size).panel;
+            dump(
+                &dir,
+                &format!("{name}_{tag}"),
+                painter.commands_dialog(&view, size, scale, p),
+                px(panel.size.w + 2 * super::SHADOW),
+            );
+        }
+    }
+}
+
 // ------------------------------------------------------------ feature tab
 
 /// How high the feature tab is painted, and the widths it is painted at:

@@ -168,6 +168,8 @@ enum Intercepted {
     NewFeature(crate::features::DialogOutcome),
     /// The name and email dialog asked for this.
     Identity(crate::git_identity::IdentityOutcome),
+    /// The project commands dialog asked for this.
+    Commands(crate::project_commands::CommandsOutcome),
     /// The manual test sheet asked for this.
     ManualTest(crate::manual_test::Outcome),
     /// The plan review's sheet asked for this.
@@ -195,6 +197,8 @@ pub enum Overlay {
     NewFeature,
     /// The name and email dialog, with its two fields.
     Identity,
+    /// The project commands dialog, with a field per repository.
+    Commands,
     /// The manual test sheet, with a failure's note field.
     ManualTest,
     /// The plan review's sheet, with its note field.
@@ -343,6 +347,7 @@ impl Gerdr {
                             let fielded = match dialog {
                                 overlay::Overlay::NewFeature => Some(Overlay::NewFeature),
                                 overlay::Overlay::GitIdentity => Some(Overlay::Identity),
+                                overlay::Overlay::ProjectCommands => Some(Overlay::Commands),
                                 overlay::Overlay::ManualTest => Some(Overlay::ManualTest),
                                 overlay::Overlay::PlanSheet => Some(Overlay::PlanSheet),
                                 _ => None,
@@ -811,6 +816,7 @@ impl Gerdr {
             O::Tasks => self.tasks_click(pos),
             O::NewFeature => self.new_feature_click(pos),
             O::GitIdentity => self.identity_click(pos),
+            O::ProjectCommands => self.commands_click(pos),
             O::ManualTest => self.manual_test_click(pos),
             O::PlanSheet => self.plan_sheet_click(pos),
             O::Features => self.feature_panel_click(pos),
@@ -845,7 +851,11 @@ impl Gerdr {
             && (!overlay.is_dialog()
                 || matches!(
                     overlay,
-                    O::NewFeature | O::GitIdentity | O::ManualTest | O::PlanSheet
+                    O::NewFeature
+                        | O::GitIdentity
+                        | O::ProjectCommands
+                        | O::ManualTest
+                        | O::PlanSheet
                 ))
         {
             self.press_field(pos);
@@ -869,6 +879,7 @@ impl Gerdr {
             O::Tasks => self.tasks_controls().iter().any(on),
             O::NewFeature => self.new_feature_controls().iter().any(on),
             O::GitIdentity => self.identity_controls().iter().any(on),
+            O::ProjectCommands => self.commands_controls().iter().any(on),
             O::ManualTest => self.manual_test_controls().iter().any(on),
             O::PlanSheet => self.plan_sheet_controls().iter().any(on),
             O::Features => self.feature_tab_control_at(pos),
@@ -1264,6 +1275,7 @@ impl Gerdr {
             Intercepted::Tasks(outcome) => self.apply_tasks(outcome),
             Intercepted::NewFeature(outcome) => self.apply_new_feature(outcome),
             Intercepted::Identity(outcome) => self.apply_identity(outcome),
+            Intercepted::Commands(outcome) => self.apply_commands(outcome),
             Intercepted::ManualTest(outcome) => self.apply_manual_test(outcome),
             Intercepted::PlanSheet(outcome) => self.apply_plan_sheet(outcome),
             Intercepted::Features(outcome) => self.apply_feature_panel(outcome),
@@ -1292,6 +1304,7 @@ impl Gerdr {
             O::Tasks => Some(Overlay::Tasks),
             O::NewFeature => Some(Overlay::NewFeature),
             O::GitIdentity => Some(Overlay::Identity),
+            O::ProjectCommands => Some(Overlay::Commands),
             O::ManualTest => Some(Overlay::ManualTest),
             O::PlanSheet => Some(Overlay::PlanSheet),
             _ => None,
@@ -1343,6 +1356,9 @@ impl Gerdr {
             Overlay::Identity => self
                 .identity_key(mods, sym, typed)
                 .map(Intercepted::Identity),
+            Overlay::Commands => self
+                .commands_key(mods, sym, typed)
+                .map(Intercepted::Commands),
             Overlay::Features => self.feature_panel_key(mods, sym).map(Intercepted::Features),
             Overlay::ManualTest => self
                 .manual_test_key(mods, sym, typed)
@@ -1403,11 +1419,23 @@ impl Gerdr {
                 scale,
             )),
             Overlay::Identity => chrome::identity_field(&self.identity_view()?, size, scale),
+            Overlay::Commands => chrome::commands_field(&self.commands_view()?, size, scale),
             Overlay::ManualTest => {
                 chrome::manual_test_field(&self.manual_test_view()?, size, scale)
             }
             Overlay::PlanSheet => chrome::plan_sheet_field(&self.plan_sheet_view()?, size, scale),
         }
+    }
+
+    /// The text field with the keyboard as the pointer at `pos` finds it,
+    /// and the byte of its text that starts at: a field of lines is the
+    /// line there (`held`: a press from it is being dragged out of it).
+    fn field_line_at(&self, pos: Point<f64, Logical>, held: bool) -> Option<(FieldSpot, usize)> {
+        if self.text_overlay() == Some(Overlay::Commands) {
+            let (size, scale) = (self.output_size(), self.scale());
+            return chrome::commands_field_at(&self.commands_view()?, size, scale, pos, held);
+        }
+        Some((self.field_spot()?, 0))
     }
 
     /// The text field with the keyboard, in the overlay that has it.
@@ -1425,6 +1453,7 @@ impl Gerdr {
             Overlay::Tasks | Overlay::Features => None,
             Overlay::NewFeature => Some(&mut self.features.dialog.as_mut()?.title),
             Overlay::Identity => self.identity_field_mut(),
+            Overlay::Commands => self.commands_field_mut(),
             Overlay::ManualTest => self
                 .features
                 .manual
@@ -1448,14 +1477,14 @@ impl Gerdr {
     /// holding it drags a selection; a second press in a row selects a
     /// word, a third all of it.
     fn press_field(&mut self, pos: Point<f64, Logical>) {
-        let Some(field) = self
-            .field_spot()
-            .filter(|field| field.area.to_f64().contains(pos))
+        let Some((field, base)) = self
+            .field_line_at(pos, false)
+            .filter(|(field, _)| field.area.to_f64().contains(pos))
         else {
             self.field_clicks = None;
             return;
         };
-        let at = self.chrome.caret_at(&field, pos.x, self.scale());
+        let at = base + self.chrome.caret_at(&field, pos.x, self.scale());
         let now = Instant::now();
         let count = match self.field_clicks {
             Some((when, from, count))
@@ -1478,11 +1507,11 @@ impl Gerdr {
     /// The pointer moved to `pos` holding a press in a text field: the
     /// selection reaches the character there.
     fn drag_field(&mut self, pos: Point<f64, Logical>) {
-        let Some(field) = self.field_spot() else {
+        let Some((field, base)) = self.field_line_at(pos, true) else {
             self.field_drag = false;
             return;
         };
-        let at = self.chrome.caret_at(&field, pos.x, self.scale());
+        let at = base + self.chrome.caret_at(&field, pos.x, self.scale());
         if let Some(field) = self.field_mut() {
             field.drag_to(at);
         }

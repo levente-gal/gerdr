@@ -36,6 +36,7 @@ mod painter;
 mod pane_bar;
 mod placeholder;
 mod plan_sheet;
+mod project_commands;
 mod project_menu;
 mod quit;
 mod repos;
@@ -87,6 +88,7 @@ pub use painter::*;
 pub use pane_bar::*;
 pub use placeholder::*;
 pub use plan_sheet::*;
+pub use project_commands::*;
 pub use project_menu::*;
 pub use quit::*;
 pub use repos::*;
@@ -166,6 +168,8 @@ pub struct ChromeView {
     pub new_feature: Option<NewFeatureView>,
     /// Set while the name and email dialog is open.
     pub identity: Option<IdentityView>,
+    /// Set while the project commands dialog is open.
+    pub commands: Option<CommandsView>,
     /// Set while the manual test sheet is open.
     pub manual_test: Option<ManualTestView>,
     /// Set while the plan review's sheet is open.
@@ -227,6 +231,7 @@ pub struct Chrome {
     confirm: Overlay<(ConfirmView, Size<i32, Logical>, Theme, f64)>,
     new_feature: Overlay<(NewFeatureView, Size<i32, Logical>, Theme, f64)>,
     identity: Overlay<(IdentityView, Size<i32, Logical>, Theme, f64)>,
+    commands: Overlay<(CommandsView, Size<i32, Logical>, Theme, f64)>,
     manual_test: Overlay<(ManualTestView, Size<i32, Logical>, Theme, f64)>,
     plan_sheet: Overlay<(PlanSheetView, Size<i32, Logical>, Theme, f64)>,
     features: FeatureTabLayers,
@@ -293,6 +298,7 @@ impl Chrome {
             confirm: Overlay::default(),
             new_feature: Overlay::default(),
             identity: Overlay::default(),
+            commands: Overlay::default(),
             manual_test: Overlay::default(),
             plan_sheet: Overlay::default(),
             features: FeatureTabLayers::default(),
@@ -481,6 +487,16 @@ impl Chrome {
                     });
                     let part = self.identity.part(dialog, now, true, |(v, output, ..)| {
                         painter.identity_dialog(v, *output, scale, theme.palette())
+                    });
+                    parts.extend(scrimmed(part, output, theme.palette()));
+                }
+                Kind::ProjectCommands => {
+                    let dialog = view.commands.take().map(|v| {
+                        let (loc, size) = shadowed(commands_layout(&v, output).panel);
+                        ((v, output, theme, scale), loc, size)
+                    });
+                    let part = self.commands.part(dialog, now, true, |(v, output, ..)| {
+                        painter.commands_dialog(v, *output, scale, theme.palette())
                     });
                     parts.extend(scrimmed(part, output, theme.palette()));
                 }

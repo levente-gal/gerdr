@@ -64,10 +64,10 @@ use crate::{
     Gerdr,
     agent_icons::AgentIcon,
     chrome::{
-        self, ActivityRow, AgentChip, ButtonStyle, CheckLine, CheckTone, Dot, FeatureRepoRow,
-        FeatureTabHit, FeatureTabView, MAX_CHECK_LINES, NewFeatureHit, NewFeatureRepo,
-        NewFeatureView, NodeMark, PageButton, PageSection, RailNode, RepoKind, RepoNote, StageMark,
-        StagePage, TabArea, TabColumn,
+        self, ActivityRow, AgentChip, ButtonStyle, CheckLine, CheckTone, CommandsTab, Dot,
+        FeatureRepoRow, FeatureTabHit, FeatureTabView, MAX_CHECK_LINES, NewFeatureHit,
+        NewFeatureRepo, NewFeatureView, NodeMark, PageButton, PageSection, RailNode, RepoKind,
+        RepoNote, StageMark, StagePage, TabArea, TabColumn,
     },
     doc_review::DocFile,
     feature::{
@@ -99,6 +99,11 @@ pub struct Features {
     /// By project id, oldest first.
     pub all: BTreeMap<String, Vec<Feature>>,
     pub dialog: Option<NewFeatureDialog>,
+    /// The project commands dialog, while it is open.
+    pub commands: Option<crate::project_commands::CommandsDialog>,
+    /// What was typed in it and not saved, for its next opening.
+    pub commands_drafts:
+        BTreeMap<crate::project_commands::CommandsScope, crate::project_commands::CommandsDraft>,
     pub panel: Option<FeaturePanel>,
     /// The feature last shown in the panel, by project: the features key
     /// opens it again.
@@ -127,7 +132,7 @@ pub struct Features {
     watching: bool,
     /// The serial of the last dialog opened: a root found for an older one
     /// is dropped.
-    serial: u64,
+    pub(crate) serial: u64,
     /// A feature of another project to show in the panel once that
     /// project is entered, by project and slug (see `open_linked_feature`).
     pending: Option<(String, String)>,
@@ -240,6 +245,13 @@ pub(crate) enum Done {
     T3Told {
         thread: String,
         result: Result<(), String>,
+    },
+    /// The repositories of `project` for the commands dialog of `serial`,
+    /// with what their files suggest.
+    CommandsFound {
+        serial: u64,
+        project: String,
+        result: Result<Vec<(String, feature::suggest::Suggested)>, String>,
     },
     Found {
         serial: u64,
@@ -837,6 +849,8 @@ pub enum PanelOutcome {
     Findings,
     /// Send AI review's findings to fix to the Build agent.
     SendFixes,
+    /// Open the project commands dialog on this tab.
+    EditCommands(CommandsTab),
     /// Review the feature's diff (Code review).
     CodeReview,
     /// Open the manual test sheet (Manual test, with criteria).
@@ -1314,6 +1328,7 @@ fn action_hint(action: &PanelOutcome) -> &'static str {
         PanelOutcome::SetUp => "set up",
         PanelOutcome::Findings => "review findings",
         PanelOutcome::SendFixes => "send fixes",
+        PanelOutcome::EditCommands(_) => "edit commands",
         PanelOutcome::CodeReview => "review code",
         PanelOutcome::ManualTest => "test",
         PanelOutcome::PlanSuggestions => "decide",
@@ -1893,6 +1908,9 @@ impl FeaturePanel {
             Keysym::u | Keysym::U if ctrl && mods.shift && offers_setup(feature, stage) => {
                 return Some(PanelOutcome::SetUp);
             }
+            Keysym::e | Keysym::E if ctrl && !mods.shift && offers_setup(feature, stage) => {
+                return Some(PanelOutcome::EditCommands(commands_tab(stage)));
+            }
             Keysym::k | Keysym::K if ctrl && mods.shift && plan_review_open(feature, stage) => {
                 return Some(PanelOutcome::SkipPlanReview);
             }
@@ -2066,6 +2084,14 @@ pub fn page_actions(
         let ran = (feature.setup.as_ref()).is_some_and(|run| run.finished.is_some());
         let label = if ran { "Set up again" } else { "Set up" };
         out.push((button(label, ButtonStyle::Quiet), PanelOutcome::SetUp));
+        // It matters once Verify has nothing to run.
+        let wanted = stage == Stage::Verify && mark == StageMark::Current && !ctx.checks;
+        let style = match wanted {
+            true => ButtonStyle::Plain,
+            false => ButtonStyle::Quiet,
+        };
+        let edit = PanelOutcome::EditCommands(commands_tab(stage));
+        out.push((button("Commands\u{2026}", style), edit));
     }
     let fixes = (feature.review.as_ref()).is_some_and(|r| r.count(FindingState::Fix) > 0);
     if mark == StageMark::Current && fixes && has(&out, &PanelOutcome::Findings) {
@@ -2090,6 +2116,15 @@ pub fn page_actions(
 
 /// Whether `stage`'s page offers to set `feature`'s worktrees up: those
 /// where tests and builds run, once reached.
+fn commands_tab(stage: Stage) -> CommandsTab {
+    match stage {
+        Stage::Build => CommandsTab::Setup,
+        _ => CommandsTab::Checks,
+    }
+}
+
+/// Whether `stage`'s page of `feature` offers to set its worktrees up, and
+/// so to edit the project's commands.
 fn offers_setup(feature: &Feature, stage: Stage) -> bool {
     matches!(stage, Stage::Build | Stage::Verify)
         && feature.status == Status::Open
@@ -2279,6 +2314,11 @@ impl Gerdr {
     /// to is kept and said.
     fn feature_done(&mut self, done: Done) {
         match done {
+            Done::CommandsFound {
+                serial,
+                project,
+                result,
+            } => self.commands_found(serial, &project, result),
             Done::Found {
                 serial,
                 from,
@@ -3203,7 +3243,7 @@ impl Gerdr {
 
     /// The workspace folders of every project but `id`, whose repositories
     /// are theirs.
-    fn other_projects_dirs(&self, id: &str) -> Vec<PathBuf> {
+    pub(crate) fn other_projects_dirs(&self, id: &str) -> Vec<PathBuf> {
         (self.projects.projects.iter())
             .filter(|p| p.id != id)
             .flat_map(|p| p.workspaces.iter().map(|w| w.dir.clone()))
@@ -4092,6 +4132,9 @@ impl Gerdr {
                 self.open_feature_diff(&project, &slug, first.as_deref());
             }
             PanelOutcome::SendFixes => self.send_findings(&project, &slug),
+            PanelOutcome::EditCommands(tab) => {
+                self.open_project_commands(&project, Some(&slug), tab);
+            }
             PanelOutcome::CodeReview => self.open_feature_diff(&project, &slug, None),
             PanelOutcome::ManualTest => self.open_manual_test(&project, &slug),
             PanelOutcome::PlanSuggestions => self.open_plan_sheet(&project, &slug),
@@ -5403,7 +5446,7 @@ fn removal_body(losses: &[String]) -> String {
 
 /// What `layout::find_root` goes by in project `project`: its workspaces'
 /// folders, the repositories it ignores, and their base branches.
-fn root_search(
+pub(crate) fn root_search(
     project: &crate::projects::Project,
 ) -> (Vec<PathBuf>, Vec<String>, Vec<(String, String)>) {
     let dirs = project.workspaces.iter().map(|w| w.dir.clone()).collect();
@@ -5641,7 +5684,7 @@ fn verify_line(feature: &Feature, ctx: RowCtx, running: Option<&str>) -> Option<
     }
     let current = feature.status == Status::Open && feature.current() == Some(Stage::Verify);
     if current && !ctx.checks {
-        return Some("no checks set: Mark done by hand".into());
+        return Some("no checks for its repositories: set some, or Mark done by hand".into());
     }
     let run = feature
         .verify
@@ -6032,7 +6075,10 @@ fn checks_lines(feature: &Feature, state: &PanelState) -> Vec<CheckLine> {
         }
         Some(run) => vec![line(format!("run {} running", run.n), CheckTone::Note)],
         None if !state.ctx.checks => {
-            vec![line("no checks set: Mark done by hand", CheckTone::Note)]
+            vec![line(
+                "no checks for its repositories: set some, or Mark done by hand",
+                CheckTone::Note,
+            )]
         }
         None => vec![line("not run yet", CheckTone::Note)],
     }
@@ -6356,6 +6402,7 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 3] = [
                 "Ctrl+Shift+U",
                 "copy what the worktrees lack: Build and Verify",
             ),
+            ("Ctrl+E", "edit the project's commands: Build and Verify"),
             ("Ctrl+R", "start the stage's agent afresh"),
             ("Ctrl+Shift+R", "show the stage's agent, or resume its chat"),
             ("Ctrl+Shift+A", "pick the stage's next agent"),
@@ -6505,6 +6552,7 @@ fn tab_hints(
             }
             if offers_setup(feature, stage) {
                 hints.push(hint("Ctrl+Shift+U", "set up"));
+                hints.push(hint("Ctrl+E", "edit commands"));
             }
             if fresh_stage(feature, row).is_some() {
                 hints.push(hint("Ctrl+R", "fresh agent"));
@@ -7831,7 +7879,7 @@ pub(crate) mod tests {
         );
         assert_eq!(
             stage_detail(&f, Stage::Verify, &state, 2_060),
-            "no checks set: Mark done by hand"
+            "no checks for its repositories: set some, or Mark done by hand"
         );
         assert_eq!(view.which, Some((0, 1)));
         assert_eq!(
@@ -7846,6 +7894,7 @@ pub(crate) mod tests {
                 "Enter",
                 "Tab",
                 "Ctrl+Shift+U",
+                "Ctrl+E",
                 "Ctrl+O",
                 "Ctrl+C",
                 "Ctrl+N",
@@ -7979,6 +8028,36 @@ pub(crate) mod tests {
         assert_eq!(
             page_enter(&f, Stage::Plan, RowCtx::default()),
             Some(PanelOutcome::StartAgent(Stage::Plan, false))
+        );
+    }
+
+    #[test]
+    fn a_verify_with_nothing_to_run_points_to_its_commands() {
+        let f = feature("v", vec![repo("api", true)], 4);
+        assert_eq!(f.current(), Some(Stage::Verify));
+        let edit = PanelOutcome::EditCommands(CommandsTab::Checks);
+        let style = |ctx: RowCtx| {
+            let actions = page_actions(&f, Stage::Verify, ctx);
+            let found = actions.into_iter().find(|(_, o)| *o == edit);
+            found.map(|(button, _)| button.style)
+        };
+        assert_eq!(style(RowCtx::default()), Some(ButtonStyle::Plain));
+        let checks = RowCtx {
+            checks: true,
+            ..RowCtx::default()
+        };
+        assert_eq!(style(checks), Some(ButtonStyle::Quiet));
+        // Enter still does what it did: the button doesn't take over.
+        assert_eq!(
+            page_enter(&f, Stage::Verify, RowCtx::default()),
+            Some(PanelOutcome::Tick)
+        );
+        // Not offered on stages that have no commands.
+        let actions = page_actions(&f, Stage::AiReview, RowCtx::default());
+        assert!(
+            !actions
+                .iter()
+                .any(|(_, o)| matches!(o, PanelOutcome::EditCommands(_)))
         );
     }
 
@@ -8511,7 +8590,7 @@ pub(crate) mod tests {
         let none = RowCtx::default();
         assert_eq!(
             verify_line(&f, none, None).as_deref(),
-            Some("no checks set: Mark done by hand")
+            Some("no checks for its repositories: set some, or Mark done by hand")
         );
         assert_eq!(verify_line(&f, checks, None), None);
         assert_eq!(
@@ -9265,6 +9344,10 @@ pub(crate) mod tests {
                 ("Restart", PanelOutcome::StartAgent(Stage::Build, true)),
                 ("Start over\u{2026}", PanelOutcome::StartOver(Stage::Build)),
                 ("Set up", PanelOutcome::SetUp),
+                (
+                    "Commands\u{2026}",
+                    PanelOutcome::EditCommands(CommandsTab::Setup)
+                ),
             ]
         );
         assert_eq!(actions[0].0.style, ButtonStyle::Primary);
@@ -9616,6 +9699,10 @@ pub(crate) mod tests {
                 ("Start over\u{2026}", PanelOutcome::StartOver(Stage::Verify)),
                 ("Evidence", PanelOutcome::Evidence),
                 ("Set up", PanelOutcome::SetUp),
+                (
+                    "Commands\u{2026}",
+                    PanelOutcome::EditCommands(CommandsTab::Checks)
+                ),
             ]
         );
         let page = stage_page(&f, Stage::Verify, &state, &actions, 2_000);

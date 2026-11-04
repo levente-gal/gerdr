@@ -165,6 +165,14 @@ pub enum MenuAction {
         at: usize,
         suggestion: Box<crate::feature::plan_review::Suggestion>,
     },
+    /// Undo a save of the project commands dialog.
+    RestoreProjectCommands(Vec<crate::project_commands::CommandsBefore>),
+    /// Open the project commands dialog, for feature `slug` if one is given.
+    EditCommands {
+        project: String,
+        slug: Option<String>,
+        tab: crate::chrome::CommandsTab,
+    },
     /// Read the project files again, after one was edited by hand.
     ReloadProjects,
     /// Join project `id`, open in another gerdr, here (see
@@ -481,6 +489,10 @@ impl Gerdr {
                 triage,
             } => self.inbox_undelete(&project, todo, at, triage),
             MenuAction::ServiceErrorsRestore(before) => self.restore_service_errors(*before),
+            MenuAction::RestoreProjectCommands(before) => self.restore_project_commands(before),
+            MenuAction::EditCommands { project, slug, tab } => {
+                self.open_project_commands(&project, slug.as_deref(), tab);
+            }
             MenuAction::RestoreContextRepo {
                 project,
                 slug,
