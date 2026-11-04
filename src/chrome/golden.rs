@@ -2086,17 +2086,14 @@ pub(super) fn feature_tab() -> super::FeatureTabView {
                 PageButton {
                     label: "Mark done".into(),
                     style: ButtonStyle::Primary,
-                    key: Some("\u{23ce}"),
                 },
                 PageButton {
                     label: "Restart agent".into(),
                     style: ButtonStyle::Plain,
-                    key: None,
                 },
                 PageButton {
                     label: "Show agent".into(),
                     style: ButtonStyle::Plain,
-                    key: None,
                 },
             ],
             sections: vec![
@@ -2166,18 +2163,17 @@ fn feature_tab_plan_review() -> super::FeatureTabView {
     use crate::{agent_icons::AgentIcon, feature::Stage};
     let mut view = feature_tab();
     at_stage(&mut view, 1, NodeMark::Waiting, "ready for review");
-    let button = |label: &str, style, key| PageButton {
+    let button = |label: &str, style| PageButton {
         label: label.into(),
         style,
-        key,
     };
     view.page = StagePage {
         title: "Plan".into(),
         about: Stage::Plan.about().into(),
         status: Some(tab_line("plan.md is ready for review", CheckTone::Blocker)),
         buttons: vec![
-            button("Review", ButtonStyle::Primary, Some("\u{23ce}")),
-            button("Show agent", ButtonStyle::Plain, None),
+            button("Review", ButtonStyle::Primary),
+            button("Show agent", ButtonStyle::Plain),
         ],
         sections: vec![
             PageSection::Agent {
@@ -2271,12 +2267,10 @@ fn feature_tab_discover_brief() -> super::FeatureTabView {
             PageButton {
                 label: "Review".into(),
                 style: ButtonStyle::Primary,
-                key: Some("\u{23ce}"),
             },
             PageButton {
                 label: "Show agent".into(),
                 style: ButtonStyle::Plain,
-                key: None,
             },
         ],
         sections: vec![
@@ -2339,12 +2333,10 @@ fn feature_tab_resume() -> super::FeatureTabView {
             PageButton {
                 label: "Reopen".into(),
                 style: ButtonStyle::Plain,
-                key: None,
             },
             PageButton {
                 label: "Resume agent".into(),
                 style: ButtonStyle::Plain,
-                key: Some("Ctrl+Shift+R"),
             },
         ],
         sections: vec![PageSection::Agent {
@@ -2377,12 +2369,10 @@ fn feature_tab_verify_failed() -> super::FeatureTabView {
             PageButton {
                 label: "Run again".into(),
                 style: ButtonStyle::Primary,
-                key: Some("\u{23ce}"),
             },
             PageButton {
                 label: "Evidence".into(),
                 style: ButtonStyle::Plain,
-                key: None,
             },
         ],
         sections: vec![PageSection::Lines {
@@ -2420,7 +2410,6 @@ fn feature_tab_ship_blocked() -> super::FeatureTabView {
         buttons: vec![PageButton {
             label: "Ship\u{2026}".into(),
             style: ButtonStyle::Off,
-            key: Some("\u{23ce}"),
         }],
         sections: vec![
             PageSection::Lines {
@@ -2459,20 +2448,15 @@ fn feature_tab_brief(locked: bool) -> super::FeatureTabView {
     let mut view = feature_tab();
     at_stage(&mut view, 1, NodeMark::Current, "not started");
     select_node(&mut view, 0);
-    let button = |label: &str, style, key| PageButton {
+    let button = |label: &str, style| PageButton {
         label: label.into(),
         style,
-        key,
     };
-    let mut buttons = vec![button("Go to Plan", ButtonStyle::Primary, Some("\u{23ce}"))];
+    let mut buttons = vec![button("Go to Plan", ButtonStyle::Primary)];
     if !locked {
-        buttons.push(button(
-            "Reopen",
-            ButtonStyle::Plain,
-            Some("Ctrl+Shift+Enter"),
-        ));
+        buttons.push(button("Reopen", ButtonStyle::Plain));
     }
-    buttons.push(button("Open", ButtonStyle::Plain, None));
+    buttons.push(button("Open", ButtonStyle::Plain));
     let (status, state) = match locked {
         true => (
             "Done 1h ago by you \u{b7} locked: Plan has plan.md",
@@ -2525,23 +2509,18 @@ fn feature_tab_start_over() -> super::FeatureTabView {
     use crate::feature::Stage;
     let mut view = feature_tab();
     at_stage(&mut view, 1, NodeMark::Waiting, "ready for review");
-    let button = |label: &str, style, key| PageButton {
+    let button = |label: &str, style| PageButton {
         label: label.into(),
         style,
-        key,
     };
     view.page = StagePage {
         title: "Plan".into(),
         about: Stage::Plan.about().into(),
         status: Some(tab_line("plan.md is ready for review", CheckTone::Blocker)),
         buttons: vec![
-            button("Review", ButtonStyle::Primary, Some("\u{23ce}")),
-            button("Restart agent", ButtonStyle::Plain, Some("Ctrl+R")),
-            button(
-                "Start over\u{2026}",
-                ButtonStyle::Destructive,
-                Some("Ctrl+Shift+Del"),
-            ),
+            button("Review", ButtonStyle::Primary),
+            button("Restart agent", ButtonStyle::Plain),
+            button("Start over\u{2026}", ButtonStyle::Destructive),
         ],
         sections: vec![
             PageSection::File {
@@ -2594,7 +2573,6 @@ fn feature_tab_done() -> super::FeatureTabView {
         buttons: vec![PageButton {
             label: "Reopen".into(),
             style: ButtonStyle::Plain,
-            key: None,
         }],
         sections: vec![PageSection::Lines {
             label: "Pull requests".into(),
@@ -2959,130 +2937,130 @@ const FEATURE_TAB: [&str; 29] = [
 const GOLDEN_FEATURE_TAB: [[u64; 29]; 4] = [
     // Dark at 1
     [
-        0x51c3e0035bcf9fe2, // tab_build_860
-        0x320fb50ba25ef2e2, // tab_build_1180
-        0x5ab133b099346377, // tab_build_1920
-        0x5d774fd21073bf43, // tab_plan_review_1180
-        0x0d6bb837b17ed6bb, // tab_verify_failed_1920
-        0x4897ec8b239d629f, // tab_ship_blocked_1180
+        0x1ee587fa384251ee, // tab_build_860
+        0x4028247b0d2546ae, // tab_build_1180
+        0x2febd9bf01f6095b, // tab_build_1920
+        0xae4bcb0c91142351, // tab_plan_review_1180
+        0x359c3d691e2d33a9, // tab_verify_failed_1920
+        0xfa7326c77fbf9978, // tab_ship_blocked_1180
         0x0be1db5217ee5626, // tab_done_1920
         0x65963575aed58140, // tab_later_860
-        0xa37c06d3bfef3e18, // tab_repos_1180
-        0x42b3d85b8e117cf6, // tab_unfolded_860
-        0xc861ba9f871ce5b3, // tab_unfolded_1920
+        0xbb2f33d755942e58, // tab_repos_1180
+        0x9477d7df89386086, // tab_unfolded_860
+        0x1f655d6531b88a67, // tab_unfolded_1920
         0x405031557bbdcb4e, // tab_shipped_1180
-        0xef8f016cb2b53253, // tab_repos_failed_1180
-        0x1dbca218f093b7cb, // tab_repos_error_860
-        0xc796316dcb23f725, // tab_more_repos_850
-        0xeb5751ae4053334e, // tab_more_repos_mid_850
-        0x84a5a0247d8d22fe, // tab_rail_wrap_500
-        0xbae3ba46adbd725b, // tab_rail_wrap_1180
+        0xf0f9f0c51c7b2b53, // tab_repos_failed_1180
+        0xe577deb15d2e871b, // tab_repos_error_860
+        0xb469a4959bfb0ac9, // tab_more_repos_850
+        0x27f8527409cb4fd2, // tab_more_repos_mid_850
+        0x8e25c1a535ee3962, // tab_rail_wrap_500
+        0xc02bea47075cd67b, // tab_rail_wrap_1180
         0x2a116777cae7f5a6, // tab_picks_later_1180
-        0x9597c63331fdac27, // tab_picks_running_860
+        0x09222b0c8ce9fefb, // tab_picks_running_860
         0x137fae25633f9dd9, // tab_t3_draft_860
-        0x5c0e8d2ccd863ca5, // tab_resume_1180
-        0x01310b4f217cddcd, // tab_resume_860
-        0xd5fe228699477de1, // tab_approved_1180
-        0x3c107a8d171b7d20, // tab_locked_1180
-        0xcfeff77ed7f2eb73, // tab_start_over_1180
-        0xab397035b2c4ca2f, // tab_discover_brief_1180
-        0x09d108de17bf2818, // tab_discover_brief_860
+        0x4601c85bf5d1263d, // tab_resume_1180
+        0xef4231a52bf68dc5, // tab_resume_860
+        0xce126d18b711db62, // tab_approved_1180
+        0x9c61ad6f60ea8847, // tab_locked_1180
+        0x7c4e0242e3c58e3f, // tab_start_over_1180
+        0x6f78c7e26f4ecd1d, // tab_discover_brief_1180
+        0x3ab14cebc38c7e76, // tab_discover_brief_860
         0x721fc06992fba956, // tab_plan_long_1180
     ],
     // Dark at 2
     [
-        0x4848d562cb2d4306, // tab_build_860
-        0xfcbf5768d8d8154e, // tab_build_1180
-        0x182ae2fb973a2a6b, // tab_build_1920
-        0x220d46376a3de935, // tab_plan_review_1180
-        0x93a6d859bd9bbaab, // tab_verify_failed_1920
-        0xc9e5fd2b841aceeb, // tab_ship_blocked_1180
+        0x766b6877ab082969, // tab_build_860
+        0xe6cfe1f00f74a0a9, // tab_build_1180
+        0x954c3073d001d26c, // tab_build_1920
+        0xa3a8366c439ea290, // tab_plan_review_1180
+        0x6ed0bf96f9a8be2b, // tab_verify_failed_1920
+        0x02ea8228740cc0dc, // tab_ship_blocked_1180
         0x056961c80f97ba7c, // tab_done_1920
         0xf00b3eff6fa99430, // tab_later_860
-        0x8887740a7dc670f9, // tab_repos_1180
-        0xfbbc9ba6a1865050, // tab_unfolded_860
-        0xd43e663d8bc14d31, // tab_unfolded_1920
+        0xfd928cd6f5eec52e, // tab_repos_1180
+        0x8f56d6cff45a9eeb, // tab_unfolded_860
+        0x1bd24a981df53b0e, // tab_unfolded_1920
         0xd2652ecdfdb4bf24, // tab_shipped_1180
-        0xe33618b6005fdbe9, // tab_repos_failed_1180
-        0xbda5163db77e627f, // tab_repos_error_860
-        0xde733169e5a26cde, // tab_more_repos_850
-        0x2affba3618889b31, // tab_more_repos_mid_850
-        0xda66ce8586195ce4, // tab_rail_wrap_500
-        0x00a04507e524d60b, // tab_rail_wrap_1180
+        0x9490182f1874944e, // tab_repos_failed_1180
+        0xe3172980897b1eb0, // tab_repos_error_860
+        0xbd223e345f7e6c11, // tab_more_repos_850
+        0xd8b2935382ee83a6, // tab_more_repos_mid_850
+        0x44f9814aa6d9f26b, // tab_rail_wrap_500
+        0x7e3d63598654b6d4, // tab_rail_wrap_1180
         0x59021b39fd3bc8eb, // tab_picks_later_1180
-        0xe1dc61b656047d4b, // tab_picks_running_860
+        0xe47beab6f447925e, // tab_picks_running_860
         0xd27413801fa843be, // tab_t3_draft_860
-        0x99d043bc4b15d296, // tab_resume_1180
-        0xea8750007b7465ba, // tab_resume_860
-        0xd9f2382ce90dbcc4, // tab_approved_1180
-        0xe6e60bdf61f0e4f9, // tab_locked_1180
-        0xf58f2ffa11c7158f, // tab_start_over_1180
-        0x80a548047dce36cf, // tab_discover_brief_1180
-        0x05c7923a09ae3b3a, // tab_discover_brief_860
+        0xfe61ba816400a3c5, // tab_resume_1180
+        0xe3665e5c4b750f2d, // tab_resume_860
+        0xe66a1d48c74708de, // tab_approved_1180
+        0x08ad8b2d1d49c026, // tab_locked_1180
+        0x965e4052c6c90d92, // tab_start_over_1180
+        0x1cb0404295c25e0e, // tab_discover_brief_1180
+        0xf01d5434b74a0e6b, // tab_discover_brief_860
         0x092173048567e6b3, // tab_plan_long_1180
     ],
     // Light at 1
     [
-        0xec6e32524c7f99dc, // tab_build_860
-        0x70ae8ae711145702, // tab_build_1180
-        0xdfaf728967445f29, // tab_build_1920
-        0xe732711f207f0a94, // tab_plan_review_1180
-        0xb467b5a245428713, // tab_verify_failed_1920
-        0xf06794be52aa9746, // tab_ship_blocked_1180
+        0x70fb82a79e3e4867, // tab_build_860
+        0xb63c489bca901c11, // tab_build_1180
+        0x2d8f93d190e3351a, // tab_build_1920
+        0x1310d434b5beb83d, // tab_plan_review_1180
+        0x320e0e657cebc9b3, // tab_verify_failed_1920
+        0x16bf6b2830d86f0e, // tab_ship_blocked_1180
         0x81c09fa9946dcead, // tab_done_1920
         0x9afae3c333859754, // tab_later_860
-        0x2d39aa6f79bfe53b, // tab_repos_1180
-        0x325146ebda9196b6, // tab_unfolded_860
-        0xc1f88740828fc7e8, // tab_unfolded_1920
+        0x0ce502a516992be8, // tab_repos_1180
+        0xc6ce583b0a6905f1, // tab_unfolded_860
+        0xdcbcb3728bb618f3, // tab_unfolded_1920
         0x75ebe36c69c56be2, // tab_shipped_1180
-        0x03daaa012f70732b, // tab_repos_failed_1180
-        0xf42dc42f01ae5ff9, // tab_repos_error_860
-        0x34260a4cb46f0145, // tab_more_repos_850
-        0x481e5307ac7fead7, // tab_more_repos_mid_850
-        0x2331bfc7a315a048, // tab_rail_wrap_500
-        0x6d167ab4ad26dfd7, // tab_rail_wrap_1180
+        0xa3924b320a9be0c0, // tab_repos_failed_1180
+        0x3dc2ba8b9fff873a, // tab_repos_error_860
+        0x54fb19712b246b1e, // tab_more_repos_850
+        0xdc7e22df8767bc6c, // tab_more_repos_mid_850
+        0xb7bb366ef13e8daf, // tab_rail_wrap_500
+        0x13d407737a63e0ac, // tab_rail_wrap_1180
         0x15ab6ce8635a36d9, // tab_picks_later_1180
-        0x66b8ef680b3f2110, // tab_picks_running_860
+        0xe6396228c8deaea4, // tab_picks_running_860
         0x23936eeea3720a69, // tab_t3_draft_860
-        0xdfe7f32db728436b, // tab_resume_1180
-        0x01d2f52a2fb00f85, // tab_resume_860
-        0xe7ca85c4249c1295, // tab_approved_1180
-        0x2148f46a34df44bf, // tab_locked_1180
-        0x1c5fd9ea2ac67cc2, // tab_start_over_1180
-        0x5d4d7b63616843af, // tab_discover_brief_1180
-        0x75621841661699d4, // tab_discover_brief_860
+        0x52ad51286f005106, // tab_resume_1180
+        0x77aa33e5bec38c08, // tab_resume_860
+        0xe0436d130991fbe4, // tab_approved_1180
+        0xb35ffa97a4aa8b29, // tab_locked_1180
+        0xf668de6e29faf159, // tab_start_over_1180
+        0xbed03bd4c55b30fe, // tab_discover_brief_1180
+        0x8ae44931a4d0e765, // tab_discover_brief_860
         0xe900ec3ac2427d70, // tab_plan_long_1180
     ],
     // Light at 2
     [
-        0x7169222685fb8386, // tab_build_860
-        0xd342077714e61476, // tab_build_1180
-        0x6c6b1656ce74baa8, // tab_build_1920
-        0x01f5bb93ec2b2c82, // tab_plan_review_1180
-        0x5adbfa8c36462c52, // tab_verify_failed_1920
-        0xd2e9d01192ca9477, // tab_ship_blocked_1180
+        0xd99b7270564d2973, // tab_build_860
+        0xa7ae9dcf1985f65f, // tab_build_1180
+        0x7733df89f505e57d, // tab_build_1920
+        0x26e0c9f3e0f6d70c, // tab_plan_review_1180
+        0x35d393f49968c19c, // tab_verify_failed_1920
+        0xb1df8efc90b99abf, // tab_ship_blocked_1180
         0x366f9044b55eef1a, // tab_done_1920
         0xe691d8281a18f49e, // tab_later_860
-        0xcf719b669659ef86, // tab_repos_1180
-        0xc1db07dc30728f1f, // tab_unfolded_860
-        0xe399306b3da83f9e, // tab_unfolded_1920
+        0x0a07d86c3ed08503, // tab_repos_1180
+        0xf2a590ca916dbcc2, // tab_unfolded_860
+        0xd8d716b6cdd6c86f, // tab_unfolded_1920
         0x44104855b8da5961, // tab_shipped_1180
-        0x665943cd941ae0f4, // tab_repos_failed_1180
-        0x5aefcb0c7d738f37, // tab_repos_error_860
-        0x1ff821fa98843b77, // tab_more_repos_850
-        0xe13bde2c23c6e6a9, // tab_more_repos_mid_850
-        0x1abc2d465f846f51, // tab_rail_wrap_500
-        0xeb508ec5dd8b9f00, // tab_rail_wrap_1180
+        0x78d7f6b4d279f4e9, // tab_repos_failed_1180
+        0xacd2f4e4488e7bf6, // tab_repos_error_860
+        0x76d75f4e96cacdd6, // tab_more_repos_850
+        0x8cae013ae92a3908, // tab_more_repos_mid_850
+        0x1bc1a371f01284bc, // tab_rail_wrap_500
+        0x59649a854b462e01, // tab_rail_wrap_1180
         0xad8883d186c4dc92, // tab_picks_later_1180
-        0x9dd944f7f04f7a42, // tab_picks_running_860
+        0x27a827927a9825fc, // tab_picks_running_860
         0xd3045993793b2355, // tab_t3_draft_860
-        0xaac43824887c72c0, // tab_resume_1180
-        0xf420e7acd8152fec, // tab_resume_860
-        0x723f3af9a4818b09, // tab_approved_1180
-        0x80ade4e85b0d44a4, // tab_locked_1180
-        0x356b3710fc0dc994, // tab_start_over_1180
-        0xd8b6d1671f1b4b03, // tab_discover_brief_1180
-        0x01feaa1d2faa7260, // tab_discover_brief_860
+        0xc6da6ce78a0b1da8, // tab_resume_1180
+        0x00a299f73de5dfd4, // tab_resume_860
+        0x9635671f7a649ba3, // tab_approved_1180
+        0xfb9617b881c6cf61, // tab_locked_1180
+        0x7bd82b779c097ba1, // tab_start_over_1180
+        0x394342c0a00a7149, // tab_discover_brief_1180
+        0xdd7140092286c5c2, // tab_discover_brief_860
         0xff19b0251304a6c9, // tab_plan_long_1180
     ],
 ];

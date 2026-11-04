@@ -1861,20 +1861,18 @@ fn stage_index(stage: Stage) -> usize {
     Stage::ALL.iter().position(|s| *s == stage).unwrap_or(0)
 }
 
-/// What Enter does on `stage`'s page of `feature`: its button marked
-/// with Enter, else, on a later stage, says which comes first. On a done
+/// What Enter does on `stage`'s page of `feature`: its primary button,
+/// else, on a later stage, says which comes first. On a done
 /// stage it goes to the current one: Reopen has its own key.
 fn page_enter(feature: &Feature, stage: Stage, ctx: RowCtx) -> Option<PanelOutcome> {
     page_actions(feature, stage, ctx)
         .into_iter()
-        .find(|(b, _)| b.key == Some(ENTER_MARK))
+        .find(|(b, _)| b.style == ButtonStyle::Primary)
         .map(|(_, outcome)| outcome)
         .or_else(|| row_action(feature, PanelRow::Stage(stage), ctx))
         .filter(|outcome| !matches!(outcome, PanelOutcome::Untick(_)))
 }
 
-/// The key mark of the page button Enter presses.
-const ENTER_MARK: &str = "\u{23ce}";
 /// The key of a done stage's Reopen.
 const REOPEN_KEY: &str = "Ctrl+Shift+Enter";
 /// The key of the current stage's Start over.
@@ -1895,17 +1893,16 @@ pub fn page_actions(
     if mark == StageMark::Later {
         return Vec::new();
     }
-    let button = |label: &str, style, key| PageButton {
+    let button = |label: &str, style| PageButton {
         label: label.to_owned(),
         style,
-        key,
     };
     let row = PanelRow::Stage(stage);
     let mut out = Vec::new();
     if let (StageMark::Done, Some(current)) = (mark, feature.current()) {
         let label = format!("Go to {}", current.label());
         out.push((
-            button(&label, ButtonStyle::Primary, Some(ENTER_MARK)),
+            button(&label, ButtonStyle::Primary),
             PanelOutcome::GoToCurrent,
         ));
     }
@@ -1914,19 +1911,18 @@ pub fn page_actions(
         row_action(feature, row, ctx),
     ) {
         // Reopen is no default: Enter leaves a done stage be.
-        let (style, key) = match main {
-            PanelOutcome::Untick(_) => (ButtonStyle::Plain, Some(REOPEN_KEY)),
-            _ => (ButtonStyle::Primary, Some(ENTER_MARK)),
+        let style = match main {
+            PanelOutcome::Untick(_) => ButtonStyle::Plain,
+            _ => ButtonStyle::Primary,
         };
-        out.push((button(label, style, key), main));
+        out.push((button(label, style), main));
     }
     let has =
         |out: &[(PageButton, PanelOutcome)], o: &PanelOutcome| out.iter().any(|(_, x)| x == o);
     // Also on a done stage: its agent's chat is still worth reading.
     if let Some((label, outcome)) = agent_button(feature, stage, ctx).filter(|(_, o)| !has(&out, o))
     {
-        let key = Some("Ctrl+Shift+R");
-        out.push((button(label, ButtonStyle::Plain, key), outcome));
+        out.push((button(label, ButtonStyle::Plain), outcome));
     }
     // The brief's or the plan's file, once there: the page shows it, its tab
     // works on it. What opens that tab already is that button.
@@ -1937,35 +1933,25 @@ pub fn page_actions(
             StageMark::Done => "Open",
             _ => "Review",
         };
-        out.push((button(label, ButtonStyle::Plain, None), open));
+        out.push((button(label, ButtonStyle::Plain), open));
     }
     if let Some(stage) = fresh_stage(feature, row) {
         let fresh = PanelOutcome::StartAgent(stage, true);
-        out.push((
-            button("Restart agent", ButtonStyle::Plain, Some("Ctrl+R")),
-            fresh,
-        ));
+        out.push((button("Restart agent", ButtonStyle::Plain), fresh));
     }
     if let Some(stage) = start_over_stage(feature, stage, ctx) {
         out.push((
-            button(
-                "Start over\u{2026}",
-                ButtonStyle::Destructive,
-                Some(START_OVER_KEY),
-            ),
+            button("Start over\u{2026}", ButtonStyle::Destructive),
             PanelOutcome::StartOver(stage),
         ));
     }
     if let Some(page) = row_page(feature, row) {
-        out.push((
-            button("Evidence", ButtonStyle::Plain, Some("Ctrl+Shift+O")),
-            page,
-        ));
+        out.push((button("Evidence", ButtonStyle::Plain), page));
     }
     let fixes = (feature.review.as_ref()).is_some_and(|r| r.count(FindingState::Fix) > 0);
     if mark == StageMark::Current && fixes && has(&out, &PanelOutcome::Findings) {
         out.push((
-            button("Send fixes", ButtonStyle::Plain, None),
+            button("Send fixes", ButtonStyle::Plain),
             PanelOutcome::SendFixes,
         ));
     }
@@ -1977,7 +1963,7 @@ pub fn page_actions(
                 false => format!("Open {}", pr_tail(&pr.url)),
             };
             let open = PanelOutcome::OpenPr(pr.url.clone());
-            out.push((button(&label, ButtonStyle::Plain, None), open));
+            out.push((button(&label, ButtonStyle::Plain), open));
         }
     }
     out
@@ -6886,10 +6872,7 @@ pub(crate) mod tests {
         );
         let actions = page_actions(&f, Stage::Plan, RowCtx::default());
         assert_eq!(actions[1].1, PanelOutcome::Untick(Stage::Plan));
-        assert_eq!(
-            (actions[1].0.style, actions[1].0.key),
-            (ButtonStyle::Plain, Some(REOPEN_KEY))
-        );
+        assert_eq!(actions[1].0.style, ButtonStyle::Plain);
         press(&mut panel, &f, ctrl(Keysym::j));
         press(&mut panel, &f, key(Keysym::Right));
         assert_eq!(panel.page_stage(&f), Stage::Verify);
@@ -8666,8 +8649,6 @@ pub(crate) mod tests {
             ]
         );
         assert_eq!(actions[0].0.style, ButtonStyle::Primary);
-        assert_eq!(actions[0].0.key, Some("\u{23ce}"));
-        assert_eq!(actions[1].0.key, Some("Ctrl+R"));
         let page = stage_page(&f, Stage::Build, &state, &actions, 2_000);
         assert_eq!(page.title, "Build");
         // The agent's card below says what it does.
@@ -9098,10 +9079,7 @@ pub(crate) mod tests {
             ]
         );
         assert_eq!(actions[0].0.style, ButtonStyle::Primary);
-        assert_eq!(
-            (actions[1].0.style, actions[1].0.key),
-            (ButtonStyle::Plain, Some(REOPEN_KEY))
-        );
+        assert_eq!(actions[1].0.style, ButtonStyle::Plain);
         let page = stage_page(&f, Stage::Plan, &state, &actions, 2_060);
         assert_eq!(
             page.status,
