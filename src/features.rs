@@ -65,9 +65,9 @@ use crate::{
     agent_icons::AgentIcon,
     chrome::{
         self, ActivityRow, AgentChip, ButtonStyle, CheckLine, CheckTone, Dot, FeatureRepoRow,
-        FeatureTabHit, FeatureTabView, MAX_CHECK_LINES, NewFeatureHit, NewFeatureRepo,
-        NewFeatureView, NodeMark, PageButton, PageSection, RailNode, RepoKind, RepoNote, StageMark,
-        StagePage, TabArea, TabColumn,
+        FeatureTabHit, FeatureTabView, FindingCard, FindingTag, MAX_CHECK_LINES, NewFeatureHit,
+        NewFeatureRepo, NewFeatureView, NodeMark, PageButton, PageSection, RailNode, RepoKind,
+        RepoNote, StageMark, StagePage, TabArea, TabColumn,
     },
     doc_review::DocFile,
     feature::{
@@ -77,7 +77,9 @@ use crate::{
         hook::Guard,
         layout::{self, AddSpec, Created, Found, LinkSpec, Root},
         patch::{self, Reading},
-        review_import::{CodeRead, FindingState},
+        review_import::{
+            self, CodeRead, Decision, Finding as ReviewFinding, FindingState, Severity,
+        },
         ship::{self, Action, Probe},
         store,
     },
@@ -99,6 +101,10 @@ pub struct Features {
     /// By project id, oldest first.
     pub all: BTreeMap<String, Vec<Feature>>,
     pub dialog: Option<NewFeatureDialog>,
+    /// The dialog asking for a finding's text (see `finding_dialog`).
+    pub finding_dialog: Option<crate::finding_dialog::FindingDialog>,
+    /// What was typed in it and left, for its next opening on the same.
+    pub finding_drafts: crate::finding_dialog::Drafts,
     pub panel: Option<FeaturePanel>,
     /// The feature last shown in the panel, by project: the features key
     /// opens it again.
@@ -784,6 +790,9 @@ pub struct FeaturePanel {
     pub picked_at: Option<Stage>,
     /// The repository with the keyboard while `focus` is `Repos`.
     pub repo: usize,
+    /// The card with the keyboard while `focus` is `Findings`, as
+    /// `finding_cards` has them.
+    pub finding: usize,
     /// The repository (`Repo::key`) a first Del was on: a second takes it
     /// out, any other key lets it go.
     pub armed: Option<String>,
@@ -837,6 +846,18 @@ pub enum PanelOutcome {
     Findings,
     /// Send AI review's findings to fix to the Build agent.
     SendFixes,
+    /// Decide this finding of AI review.
+    DecideFinding(String, Decision),
+    /// Ask why, then dismiss this finding.
+    AskDismiss(String),
+    /// Ask for this finding's fix and comment.
+    EditFinding(String),
+    /// Ask for a comment of the user's own, to go with the fixes.
+    AddComment,
+    /// Show this finding in the diff.
+    ShowFinding(String),
+    /// Say why a key did nothing to a finding.
+    FindingRefused(&'static str),
     /// Review the feature's diff (Code review).
     CodeReview,
     /// Open the manual test sheet (Manual test, with criteria).
@@ -1188,6 +1209,157 @@ fn plan_review_action(feature: &Feature) -> PanelOutcome {
     }
 }
 
+/// AI review's findings on `stage`'s page of `feature`, once read: those
+/// to decide first, those gone to the end, each group in the order raised.
+pub(crate) fn finding_cards(feature: &Feature, stage: Stage) -> Vec<&ReviewFinding> {
+    if stage != Stage::AiReview {
+        return Vec::new();
+    }
+    let ready = (feature.runs.get(&stage)).is_some_and(|r| r.ready.is_some());
+    let Some(review) = feature.review.as_ref().filter(|_| ready) else {
+        return Vec::new();
+    };
+    let rank = |state: FindingState| match state {
+        FindingState::Open => 0,
+        FindingState::Fix => 1,
+        FindingState::Sent => 2,
+        FindingState::Fixed => 3,
+        FindingState::Dismissed => 4,
+    };
+    let mut cards: Vec<&ReviewFinding> = review.findings.iter().collect();
+    cards.sort_by_key(|f| rank(f.state));
+    cards
+}
+
+/// Whether a comment of the user's can be added on `stage`'s page of
+/// `feature`: AI review, current, its findings read.
+fn can_comment(feature: &Feature, stage: Stage) -> bool {
+    stage == Stage::AiReview
+        && feature.status == Status::Open
+        && feature.current() == Some(stage)
+        && (feature.runs.get(&stage)).is_some_and(|r| r.ready.is_some())
+        && feature.review.is_some()
+}
+
+/// What dismissing `f` does: an item of the user's own goes at once, with
+/// nothing to tell themselves; a finding asks why.
+fn dismiss_outcome(f: &ReviewFinding) -> PanelOutcome {
+    match f.yours {
+        true => PanelOutcome::DecideFinding(
+            f.id.clone(),
+            Decision::Dismiss(review_import::DROPPED.to_owned()),
+        ),
+        false => PanelOutcome::AskDismiss(f.id.clone()),
+    }
+}
+
+/// The buttons on `f`'s card: what can be decided of it while AI review is
+/// `current`, and showing it in the diff when it has a file.
+fn finding_buttons(f: &ReviewFinding, current: bool) -> Vec<(PageButton, PanelOutcome)> {
+    let button = |label: &str, style| PageButton {
+        label: label.to_owned(),
+        style,
+    };
+    let plain = |label: &str| button(label, ButtonStyle::Plain);
+    let id = || f.id.clone();
+    let mut out = Vec::new();
+    let undecided = matches!(f.state, FindingState::Open | FindingState::Fix);
+    if current {
+        match f.state {
+            FindingState::Open => {
+                out.push((
+                    plain("Fix"),
+                    PanelOutcome::DecideFinding(id(), Decision::Fix),
+                ));
+            }
+            FindingState::Fix if !f.yours => {
+                let back = PanelOutcome::DecideFinding(id(), Decision::Reopen);
+                out.push((plain("Don't fix"), back));
+            }
+            FindingState::Dismissed => {
+                let back = PanelOutcome::DecideFinding(id(), Decision::Reopen);
+                out.push((plain("Reopen"), back));
+            }
+            _ => {}
+        }
+        if undecided {
+            out.push((plain("Edit\u{2026}"), PanelOutcome::EditFinding(id())));
+            let label = if f.yours { "Drop" } else { "Dismiss\u{2026}" };
+            out.push((plain(label), dismiss_outcome(f)));
+        }
+    }
+    if !f.file.is_empty() {
+        out.push((
+            button("Show in diff", ButtonStyle::Quiet),
+            PanelOutcome::ShowFinding(id()),
+        ));
+    }
+    out
+}
+
+/// The finding a card's button acts on.
+fn outcome_finding(outcome: &PanelOutcome) -> Option<&str> {
+    match outcome {
+        PanelOutcome::DecideFinding(id, _)
+        | PanelOutcome::AskDismiss(id)
+        | PanelOutcome::EditFinding(id)
+        | PanelOutcome::ShowFinding(id) => Some(id),
+        _ => None,
+    }
+}
+
+/// `f`'s card on AI review's page, its buttons those in `actions`.
+fn finding_card(
+    f: &ReviewFinding,
+    multi: bool,
+    actions: &[(PageButton, PanelOutcome)],
+) -> FindingCard {
+    let tag = match (f.yours, f.severity) {
+        (true, _) => FindingTag::Yours,
+        (_, Severity::High) => FindingTag::High,
+        (_, Severity::Medium) => FindingTag::Medium,
+        (_, Severity::Low) => FindingTag::Low,
+    };
+    let state = match f.state {
+        FindingState::Open => String::new(),
+        FindingState::Fix => "to fix".to_owned(),
+        FindingState::Sent => "sent to Build".to_owned(),
+        FindingState::Fixed => "fixed".to_owned(),
+        FindingState::Dismissed => format!("dismissed: {}", f.reason),
+    };
+    let mut place = vec![f.id.clone()];
+    if !f.file.is_empty() {
+        place.push(review_import::location(f, multi));
+        if !f.placed {
+            place.push("not in the diff".to_owned());
+        }
+    }
+    let fix = match &f.my_fix {
+        Some(fix) => format!("Your fix: {fix}"),
+        None if f.fix.is_empty() => String::new(),
+        None => format!("Fix: {}", f.fix),
+    };
+    let note = match f.note.is_empty() {
+        true => String::new(),
+        false => format!("Your comment: {}", f.note),
+    };
+    FindingCard {
+        tag,
+        title: f.title.clone(),
+        state,
+        place: place.join(" \u{b7} "),
+        body: f.body.clone(),
+        fix,
+        note,
+        faded: matches!(f.state, FindingState::Fixed | FindingState::Dismissed),
+        selected: false,
+        buttons: (actions.iter().enumerate())
+            .filter(|(_, (_, o))| outcome_finding(o) == Some(f.id.as_str()))
+            .map(|(i, _)| i)
+            .collect(),
+    }
+}
+
 /// What AI review's row does: show its agent while it runs (start one
 /// when there is none), then once its findings are read, show the first
 /// to decide, or send those to fix to the Build agent. Never marked done
@@ -1230,15 +1402,9 @@ fn review_line(feature: &Feature, agent: Option<&str>) -> Option<String> {
     let fix = review.count(FindingState::Fix);
     let sent = review.count(FindingState::Sent);
     Some(if open > 0 {
-        format!(
-            "{} to decide \u{b7} Enter to review",
-            plural(open, "finding")
-        )
+        format!("{} to decide", plural(open, "finding"))
     } else if fix > 0 {
-        format!(
-            "{} to fix \u{b7} Enter to send to Build",
-            plural(fix, "finding")
-        )
+        format!("{} to fix", plural(fix, "finding"))
     } else if sent > 0 {
         format!("{} sent to Build", plural(sent, "finding"))
     } else if review.findings.is_empty() {
@@ -1312,7 +1478,7 @@ fn action_hint(action: &PanelOutcome) -> &'static str {
         PanelOutcome::Continue(_) => "continue",
         PanelOutcome::RunChecks => "run checks",
         PanelOutcome::SetUp => "set up",
-        PanelOutcome::Findings => "review findings",
+        PanelOutcome::Findings => "review in diff",
         PanelOutcome::SendFixes => "send fixes",
         PanelOutcome::CodeReview => "review code",
         PanelOutcome::ManualTest => "test",
@@ -1341,7 +1507,7 @@ fn stage_button(feature: &Feature, stage: Stage, ctx: RowCtx) -> Option<&'static
         PanelOutcome::OpenDoc(_) => Some("Review"),
         PanelOutcome::Continue(_) => Some("Continue"),
         PanelOutcome::RunChecks => Some("Run checks"),
-        PanelOutcome::Findings => Some("Review findings"),
+        PanelOutcome::Findings => Some("Review in diff"),
         PanelOutcome::SendFixes => Some("Send fixes"),
         PanelOutcome::CodeReview => Some("Review code"),
         PanelOutcome::ManualTest => Some("Test\u{2026}"),
@@ -1764,7 +1930,7 @@ impl FeaturePanel {
         let entries = repo_entries(feature, &self.sources, self.expanded);
         let repos = entries.len();
         self.repo = self.repo.min(repos.saturating_sub(1));
-        if repos == 0 {
+        if repos == 0 && self.focus == TabArea::Repos {
             self.focus = TabArea::Stages;
         }
         let entry = entries.get(self.repo).copied();
@@ -1774,6 +1940,12 @@ impl FeaturePanel {
             self.unpick();
         }
         let stage = self.page_stage(feature);
+        let cards = finding_cards(feature, stage);
+        self.finding = self.finding.min(cards.len().saturating_sub(1));
+        if self.focus == TabArea::Findings && (cards.is_empty() || self.expanded) {
+            self.focus = TabArea::Stages;
+        }
+        let card = cards.get(self.finding).copied();
         let ctrl = mods.ctrl && !mods.alt && !mods.logo;
         let plain = !(mods.ctrl || mods.alt || mods.logo);
         let bare = plain && !mods.shift;
@@ -1831,20 +2003,59 @@ impl FeaturePanel {
                         self.repo_pick = None;
                     }
                 }
+                TabArea::Findings => {
+                    self.finding = step.from(self.finding, cards.len().saturating_sub(1));
+                }
             }
             return None;
         }
         let row = match (self.focus, entry) {
-            (TabArea::Stages, _) => PanelRow::Stage(stage),
+            (TabArea::Stages | TabArea::Findings, _) => PanelRow::Stage(stage),
             (TabArea::Repos, Some(RepoEntry::Held(i))) => PanelRow::Repo(i),
             (TabArea::Repos, _) => PanelRow::Other,
         };
         match sym {
             Keysym::Tab | Keysym::ISO_Left_Tab if plain => {
-                self.focus = match self.focus {
-                    TabArea::Stages if repos > 0 => TabArea::Repos,
-                    _ => TabArea::Stages,
-                };
+                let mut stops = vec![TabArea::Stages];
+                if !cards.is_empty() && !self.expanded {
+                    stops.push(TabArea::Findings);
+                }
+                if repos > 0 {
+                    stops.push(TabArea::Repos);
+                }
+                let at = stops.iter().position(|s| *s == self.focus).unwrap_or(0);
+                let back = mods.shift || sym == Keysym::ISO_Left_Tab;
+                let by = if back { stops.len() - 1 } else { 1 };
+                self.focus = stops[(at + by) % stops.len()];
+            }
+            // The card with the keyboard: the diff's keys for a finding.
+            Keysym::f | Keysym::F if bare && self.focus == TabArea::Findings => {
+                let f = card?;
+                return Some(match review_import::fix_key(f.state) {
+                    Ok(decision) => PanelOutcome::DecideFinding(f.id.clone(), decision),
+                    Err(why) => PanelOutcome::FindingRefused(why),
+                });
+            }
+            Keysym::e | Keysym::E if ctrl && !mods.shift && self.focus == TabArea::Findings => {
+                return Some(PanelOutcome::EditFinding(card?.id.clone()));
+            }
+            Keysym::Delete | Keysym::KP_Delete if bare && self.focus == TabArea::Findings => {
+                let f = card?;
+                return Some(match review_import::dismiss_key(f.state) {
+                    Ok(None) => dismiss_outcome(f),
+                    Ok(Some(decision)) => PanelOutcome::DecideFinding(f.id.clone(), decision),
+                    Err(why) => PanelOutcome::FindingRefused(why),
+                });
+            }
+            Keysym::Return | Keysym::KP_Enter if plain && self.focus == TabArea::Findings => {
+                let f = card?;
+                return Some(match f.file.is_empty() {
+                    true => PanelOutcome::EditFinding(f.id.clone()),
+                    false => PanelOutcome::ShowFinding(f.id.clone()),
+                });
+            }
+            Keysym::c | Keysym::C if bare && can_comment(feature, stage) => {
+                return Some(PanelOutcome::AddComment);
             }
             // A locked stage's is refused when done, saying why; any other
             // stage has nothing to reopen.
@@ -2073,6 +2284,16 @@ pub fn page_actions(
             button("Send fixes", ButtonStyle::Plain),
             PanelOutcome::SendFixes,
         ));
+    }
+    if can_comment(feature, stage) {
+        out.push((
+            button("Add comment\u{2026}", ButtonStyle::Plain),
+            PanelOutcome::AddComment,
+        ));
+    }
+    let current = mark == StageMark::Current;
+    for f in finding_cards(feature, stage) {
+        out.extend(finding_buttons(f, current));
     }
     if stage == Stage::Ship {
         let one = feature.shipping.prs.len() == 1;
@@ -3966,12 +4187,20 @@ impl Gerdr {
         let ctx = self.row_ctx(&feature);
         let panel = self.features.panel.as_mut()?;
         let before = (panel.focus, panel.repo, panel.expanded);
+        let card_before = panel.finding;
         let outcome = panel.key(mods, sym, &feature, &slugs, ctx);
         let now = (self.features.panel.as_ref()).map(|p| (p.focus, p.repo, p.expanded));
         if now.is_some_and(|(focus, repo, expanded)| {
             focus == TabArea::Repos && (focus, repo, expanded) != before
         }) {
             self.reveal_feature_repo();
+        }
+        let card_now = (self.features.panel.as_ref()).map(|p| (p.focus, p.finding));
+        if card_now.is_some_and(|(focus, card)| {
+            focus == TabArea::Findings && (focus != before.0 || card != card_before)
+        }) {
+            self.sync_feature_page();
+            self.reveal_feature_finding();
         }
         if now.is_some_and(|(_, _, expanded)| expanded && !before.2) {
             self.find_repo_sources();
@@ -4024,6 +4253,23 @@ impl Gerdr {
         };
         let scroll = &mut panel.scroll[TabColumn::Repos as usize];
         if let Some(to) = layout.reveal_repo(view.repo, scroll.pos())
+            && to != scroll.pos()
+        {
+            scroll.jump(to);
+        }
+    }
+
+    /// Scroll the feature tab's page to show the finding with the keyboard,
+    /// as laid out now.
+    fn reveal_feature_finding(&mut self) {
+        let Some((_, layout)) = self.feature_tab_parts() else {
+            return;
+        };
+        let Some(panel) = self.features.panel.as_mut() else {
+            return;
+        };
+        let scroll = &mut panel.scroll[TabColumn::Page as usize];
+        if let Some(to) = layout.reveal_finding(panel.finding, scroll.pos())
             && to != scroll.pos()
         {
             scroll.jump(to);
@@ -4092,6 +4338,16 @@ impl Gerdr {
                 self.open_feature_diff(&project, &slug, first.as_deref());
             }
             PanelOutcome::SendFixes => self.send_findings(&project, &slug),
+            PanelOutcome::DecideFinding(id, decision) => {
+                self.decide_finding(&project, &slug, &id, decision);
+            }
+            PanelOutcome::AskDismiss(id) => self.ask_dismiss_finding(&project, &slug, &id),
+            PanelOutcome::EditFinding(id) => self.ask_edit_finding(&project, &slug, &id),
+            PanelOutcome::AddComment => self.ask_add_comment(&project, &slug),
+            PanelOutcome::ShowFinding(id) => {
+                self.open_feature_diff(&project, &slug, Some(&id));
+            }
+            PanelOutcome::FindingRefused(why) => self.show_warning(why.to_owned()),
             PanelOutcome::CodeReview => self.open_feature_diff(&project, &slug, None),
             PanelOutcome::ManualTest => self.open_manual_test(&project, &slug),
             PanelOutcome::PlanSuggestions => self.open_plan_sheet(&project, &slug),
@@ -4886,6 +5142,13 @@ impl Gerdr {
         };
         let outcome = match hit {
             FeatureTabHit::Tab | FeatureTabHit::Column(_) | FeatureTabHit::AgentPickOff(_) => None,
+            FeatureTabHit::Finding(i) => {
+                if let Some(panel) = self.features.panel.as_mut() {
+                    panel.focus = TabArea::Findings;
+                    panel.finding = i;
+                }
+                None
+            }
             FeatureTabHit::AgentPick(i) => {
                 let stage = (self.features.panel.as_ref())
                     .filter(|p| !p.keys)
@@ -6112,6 +6375,28 @@ fn findings_lines(feature: &Feature) -> Vec<CheckLine> {
         .collect()
 }
 
+/// How AI review's findings in `feature` stand, in a few words: "4 to
+/// decide · 1 to fix".
+fn findings_count(feature: &Feature) -> String {
+    let Some(review) = feature.review.as_ref() else {
+        return String::new();
+    };
+    [
+        (FindingState::Open, "to decide"),
+        (FindingState::Fix, "to fix"),
+        (FindingState::Sent, "sent to Build"),
+        (FindingState::Fixed, "fixed"),
+        (FindingState::Dismissed, "dismissed"),
+    ]
+    .into_iter()
+    .filter_map(|(state, what)| match review.count(state) {
+        0 => None,
+        n => Some(format!("{n} {what}")),
+    })
+    .collect::<Vec<_>>()
+    .join(" \u{b7} ")
+}
+
 /// The milestones of `stage`'s file (Plan's, Build's) by name, as `probe`
 /// last read them; none while it has none.
 fn milestones_of(probe: Option<&Probe>, stage: Stage) -> Option<PageSection> {
@@ -6225,7 +6510,28 @@ fn stage_page(
             }
             Stage::AiReview => {
                 sections.extend(card());
-                sections.push(lines("Findings", findings_lines(feature)));
+                let cards = finding_cards(feature, stage);
+                if cards.is_empty() {
+                    sections.push(lines("Findings", findings_lines(feature)));
+                } else {
+                    let label = format!("Findings \u{b7} {}", findings_count(feature));
+                    let comments = state.probe.map_or(0, |p| p.docs.comments);
+                    let mut notes = Vec::new();
+                    if comments > 0 && mark == StageMark::Current {
+                        let text = format!(
+                            "{} from the diff go with the fixes",
+                            plural(comments, "comment")
+                        );
+                        notes.push(line(text, CheckTone::Note));
+                    }
+                    sections.push(lines(&label, notes));
+                    let multi = feature.many_repos();
+                    sections.extend(
+                        cards
+                            .into_iter()
+                            .map(|f| PageSection::Finding(finding_card(f, multi, actions))),
+                    );
+                }
             }
             Stage::CodeReview if mark == StageMark::Current => {
                 let text = (state.code_review.clone())
@@ -6331,7 +6637,7 @@ fn activity(feature: &Feature, now: u64) -> Vec<ActivityRow> {
 
 /// Every key the feature tab takes, by where it works, as F1 lists them:
 /// (heading, [(keys, what they do)]).
-const TAB_KEYS: [(&str, &[(&str, &str)]); 3] = [
+const TAB_KEYS: [(&str, &[(&str, &str)]); 4] = [
     (
         "Stages",
         &[
@@ -6364,6 +6670,18 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 3] = [
         ],
     ),
     (
+        "AI review's findings",
+        &[
+            ("Up / Down", "previous or next finding"),
+            ("Home / End", "first or last finding"),
+            ("f", "fix the finding, or take that back"),
+            ("Ctrl+E", "edit its fix, or comment on it"),
+            ("Del", "dismiss it, saying why, or reopen it"),
+            ("Enter", "show it in the diff"),
+            ("c", "add a comment of your own, to go with the fixes"),
+        ],
+    ),
+    (
         "Repositories",
         &[
             ("Up / Down", "previous or next repository"),
@@ -6384,7 +6702,7 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 3] = [
     (
         "Anywhere on the tab",
         &[
-            ("Tab / Shift+Tab", "stages or repositories"),
+            ("Tab / Shift+Tab", "stages, findings or repositories"),
             ("PgUp / PgDn", "scroll the page"),
             ("Ctrl+PgUp / Ctrl+PgDn", "previous or next feature"),
             ("Ctrl+O", "open a tab in the feature's folder"),
@@ -6484,6 +6802,34 @@ fn tab_hints(
                 });
             }
         }
+        TabArea::Findings => {
+            let card = (finding_cards(feature, stage).get(panel.finding)).copied();
+            hints.push(hint("Up / Down", "finding"));
+            if let Some(f) = card {
+                match f.state {
+                    FindingState::Open | FindingState::Dismissed => hints.push(hint("f", "fix")),
+                    FindingState::Fix => hints.push(hint("f", "don't fix")),
+                    _ => {}
+                }
+                if matches!(f.state, FindingState::Open | FindingState::Fix) {
+                    hints.push(hint("Ctrl+E", "edit\u{2026}"));
+                    hints.push(match f.yours {
+                        true => hint("Del", "drop"),
+                        false => hint("Del", "dismiss\u{2026}"),
+                    });
+                } else if f.state == FindingState::Dismissed {
+                    hints.push(hint("Del", "reopen"));
+                }
+                hints.push(match f.file.is_empty() {
+                    true => hint("Enter", "edit\u{2026}"),
+                    false => hint("Enter", "show in diff"),
+                });
+            }
+            if can_comment(feature, stage) {
+                hints.push(hint("c", "add comment\u{2026}"));
+            }
+            hints.push(hint("Tab", if repos { "repositories" } else { "stages" }));
+        }
         _ => {
             let row = PanelRow::Stage(stage);
             hints.push(hint("Left / Right", "stage"));
@@ -6497,7 +6843,12 @@ fn tab_hints(
             if matches!(row_action(feature, row, ctx), Some(PanelOutcome::Untick(_))) {
                 hints.push(hint(REOPEN_KEY, "reopen"));
             }
-            if repos {
+            if can_comment(feature, stage) {
+                hints.push(hint("c", "add comment\u{2026}"));
+            }
+            if !finding_cards(feature, stage).is_empty() && !panel.expanded {
+                hints.push(hint("Tab", "findings"));
+            } else if repos {
                 hints.push(hint("Tab", "repositories"));
             }
             if row_page(feature, row).is_some() {
@@ -6677,7 +7028,7 @@ fn tab_view(
             ..rail_node(feature, *s, state, now)
         })
         .collect();
-    let page = match panel.keys {
+    let mut page = match panel.keys {
         true => keys_page(),
         false => stage_page(
             feature,
@@ -6687,6 +7038,15 @@ fn tab_view(
             now,
         ),
     };
+    if panel.focus == TabArea::Findings && !panel.expanded {
+        let cards = (page.sections.iter_mut()).filter_map(|s| match s {
+            PageSection::Finding(card) => Some(card),
+            _ => None,
+        });
+        if let Some(card) = cards.into_iter().nth(panel.finding) {
+            card.selected = true;
+        }
+    }
     // A finished feature's code isn't read (`ship::probe_finished`).
     let read = state.probe.filter(|_| feature.status == Status::Open);
     let repos_error = match read.map(|p| &p.reading) {
@@ -6705,9 +7065,11 @@ fn tab_view(
     if feature.status == Status::Done {
         sub = format!("done \u{b7} {sub}");
     }
-    let focus = match repos.is_empty() {
-        true => TabArea::Stages,
-        false => panel.focus,
+    let carded = !panel.expanded && !finding_cards(feature, stage).is_empty();
+    let focus = match panel.focus {
+        TabArea::Repos if repos.is_empty() => TabArea::Stages,
+        TabArea::Findings if !carded => TabArea::Stages,
+        focus => focus,
     };
     let at = panel.repo.min(repos.len().saturating_sub(1));
     let picked = (entries.get(at))
@@ -8695,22 +9057,19 @@ pub(crate) mod tests {
         );
         let open = reviewing(&[S::Open, S::Open, S::Fix, S::Dismissed], true);
         assert_eq!(row_action(&open, row, none), Some(PanelOutcome::Findings));
-        assert_eq!(row_hint(&open, row, none), "review findings");
+        assert_eq!(row_hint(&open, row, none), "review in diff");
         assert_eq!(
             stage_button(&open, Stage::AiReview, none),
-            Some("Review findings")
+            Some("Review in diff")
         );
         assert_eq!(
             review_line(&open, None).as_deref(),
-            Some("2 findings to decide \u{b7} Enter to review")
+            Some("2 findings to decide")
         );
         let fix = reviewing(&[S::Fix, S::Dismissed], true);
         assert_eq!(row_action(&fix, row, none), Some(PanelOutcome::SendFixes));
         assert_eq!(row_hint(&fix, row, none), "send fixes");
-        assert_eq!(
-            review_line(&fix, None).as_deref(),
-            Some("1 finding to fix \u{b7} Enter to send to Build")
-        );
+        assert_eq!(review_line(&fix, None).as_deref(), Some("1 finding to fix"));
         let sent = reviewing(&[S::Sent, S::Sent], true);
         assert_eq!(
             review_line(&sent, None).as_deref(),
@@ -8742,9 +9101,9 @@ pub(crate) mod tests {
         let view = tab_view(&panel, &open, &slugs, &state, 2_060);
         assert_eq!(
             stage_detail(&open, Stage::AiReview, &state, 2_060),
-            "2 findings to decide \u{b7} Enter to review"
+            "2 findings to decide"
         );
-        assert_eq!(view.page.buttons[0].label, "Review findings");
+        assert_eq!(view.page.buttons[0].label, "Review in diff");
         assert_eq!(view.rail[5].mark, NodeMark::Waiting);
         assert_eq!(view.rail[5].line, "2 to decide");
         assert!(
@@ -8753,8 +9112,281 @@ pub(crate) mod tests {
         );
         assert!(
             view.hints
-                .contains(&("Enter".into(), "review findings".into()))
+                .contains(&("Enter".into(), "review in diff".into()))
         );
+    }
+
+    fn cards_of(view: &FeatureTabView) -> Vec<&FindingCard> {
+        (view.page.sections.iter())
+            .filter_map(|s| match s {
+                PageSection::Finding(card) => Some(card),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The labels of `card`'s buttons on `page`.
+    fn card_labels<'a>(page: &'a StagePage, card: &FindingCard) -> Vec<&'a str> {
+        (card.buttons.iter())
+            .map(|b| page.buttons[*b].label.as_str())
+            .collect()
+    }
+
+    /// `f` with its AI review on its page and its findings placed in a file.
+    fn carded(states: &[FindingState]) -> Feature {
+        let mut f = reviewing(states, true);
+        for (i, finding) in (f.review.as_mut().unwrap().findings.iter_mut()).enumerate() {
+            finding.file = format!("src/{i}.rs");
+            finding.title = format!("Title {i}");
+            finding.placed = true;
+        }
+        f
+    }
+
+    #[test]
+    fn findings_show_as_cards_to_decide_first_each_with_what_it_can_do() {
+        use FindingState as S;
+        let mut f = carded(&[S::Dismissed, S::Fix, S::Open, S::Sent, S::Fixed]);
+        (f.review.as_mut().unwrap().findings[0]).reason = "by design".into();
+        let panel = FeaturePanel::default();
+        let slugs = vec!["r".to_owned()];
+        let view = tab_view(&panel, &f, &slugs, &PanelState::default(), 2_060);
+        let cards = cards_of(&view);
+        let titles: Vec<&str> = cards.iter().map(|c| c.title.as_str()).collect();
+        assert_eq!(
+            titles,
+            ["Title 2", "Title 1", "Title 3", "Title 4", "Title 0"]
+        );
+        let labels: Vec<Vec<&str>> = cards.iter().map(|c| card_labels(&view.page, c)).collect();
+        assert_eq!(
+            labels[0],
+            ["Fix", "Edit\u{2026}", "Dismiss\u{2026}", "Show in diff"]
+        );
+        assert_eq!(
+            labels[1],
+            [
+                "Don't fix",
+                "Edit\u{2026}",
+                "Dismiss\u{2026}",
+                "Show in diff"
+            ]
+        );
+        assert_eq!(labels[2], ["Show in diff"]);
+        assert_eq!(labels[3], ["Show in diff"]);
+        assert_eq!(labels[4], ["Reopen", "Show in diff"]);
+        assert_eq!(cards[1].state, "to fix");
+        assert_eq!(cards[4].state, "dismissed: by design");
+        assert!(cards[4].faded && !cards[0].faded);
+        assert!(cards[0].place.contains("src/2.rs"));
+        // No button of a card is the page's own, and the count says it all.
+        let on_cards: Vec<usize> = cards.iter().flat_map(|c| c.buttons.clone()).collect();
+        let own: Vec<&str> = (0..view.page.buttons.len())
+            .filter(|b| !on_cards.contains(b))
+            .map(|b| view.page.buttons[b].label.as_str())
+            .collect();
+        assert!(
+            own.contains(&"Review in diff") && own.contains(&"Add comment\u{2026}"),
+            "{own:?}"
+        );
+        assert!(view.page.sections.iter().any(|s| matches!(s,
+            PageSection::Lines { label, .. }
+                if label == "Findings \u{b7} 1 to decide \u{b7} 1 to fix \u{b7} 1 sent to Build \u{b7} 1 fixed \u{b7} 1 dismissed")));
+    }
+
+    #[test]
+    fn a_finding_says_whose_fix_it_is_and_an_item_of_yours_has_no_place() {
+        use FindingState as S;
+        let mut f = carded(&[S::Open, S::Fix]);
+        let findings = &mut f.review.as_mut().unwrap().findings;
+        findings[0].fix = "Reviewer's".into();
+        findings[1].fix = "Reviewer's".into();
+        findings[1].my_fix = Some("Mine".into());
+        findings[1].note = "Careful".into();
+        review_import::add(f.review.as_mut().unwrap(), "Also rename it\nIt reads badly").unwrap();
+        let panel = FeaturePanel::default();
+        let slugs = vec!["r".to_owned()];
+        let view = tab_view(&panel, &f, &slugs, &PanelState::default(), 2_060);
+        let cards = cards_of(&view);
+        assert_eq!(cards[0].fix, "Fix: Reviewer's");
+        assert_eq!(cards[1].fix, "Your fix: Mine");
+        assert_eq!(cards[1].note, "Your comment: Careful");
+        let yours = cards[2];
+        assert_eq!(yours.tag, FindingTag::Yours);
+        assert_eq!(yours.title, "Also rename it");
+        assert_eq!(yours.body, "It reads badly");
+        assert_eq!(yours.place, "u1");
+        assert_eq!(card_labels(&view.page, yours), ["Edit\u{2026}", "Drop"]);
+    }
+
+    #[test]
+    fn a_done_ai_review_only_shows_its_findings() {
+        use FindingState as S;
+        let mut f = carded(&[S::Fixed, S::Dismissed]);
+        f.tick(2_070, "gerdr", None);
+        assert_ne!(f.current(), Some(Stage::AiReview));
+        let mut panel = FeaturePanel::default();
+        panel.pick(&f, Stage::AiReview);
+        let slugs = vec!["r".to_owned()];
+        let view = tab_view(&panel, &f, &slugs, &PanelState::default(), 2_080);
+        let cards = cards_of(&view);
+        assert_eq!(cards.len(), 2);
+        for card in cards {
+            assert_eq!(card_labels(&view.page, card), ["Show in diff"]);
+        }
+        assert!(
+            !view
+                .page
+                .buttons
+                .iter()
+                .any(|b| b.label.starts_with("Add comment"))
+        );
+        assert_eq!(press(&mut panel, &f, key(Keysym::c)), None);
+    }
+
+    #[test]
+    fn tab_goes_through_the_findings_and_shift_tab_comes_back() {
+        use FindingState as S;
+        let f = carded(&[S::Open]);
+        let mut panel = FeaturePanel::default();
+        assert_eq!(panel.focus, TabArea::Stages);
+        press(&mut panel, &f, key(Keysym::Tab));
+        assert_eq!(panel.focus, TabArea::Findings);
+        press(&mut panel, &f, key(Keysym::Tab));
+        assert_eq!(panel.focus, TabArea::Repos);
+        press(&mut panel, &f, key(Keysym::Tab));
+        assert_eq!(panel.focus, TabArea::Stages);
+        let shift = ModifiersState {
+            shift: true,
+            ..ModifiersState::default()
+        };
+        press(&mut panel, &f, (shift, Keysym::ISO_Left_Tab));
+        assert_eq!(panel.focus, TabArea::Repos);
+        press(&mut panel, &f, (shift, Keysym::ISO_Left_Tab));
+        assert_eq!(panel.focus, TabArea::Findings);
+        press(&mut panel, &f, (shift, Keysym::ISO_Left_Tab));
+        assert_eq!(panel.focus, TabArea::Stages);
+        // With no cards the findings are no stop, and lose the keyboard.
+        let none = reviewing(&[S::Open], false);
+        press(&mut panel, &none, key(Keysym::Tab));
+        assert_eq!(panel.focus, TabArea::Repos);
+        panel.focus = TabArea::Findings;
+        press(&mut panel, &none, key(Keysym::F2));
+        assert_eq!(panel.focus, TabArea::Stages);
+    }
+
+    #[test]
+    fn the_keys_pick_a_card_and_decide_it_as_in_the_diff() {
+        use FindingState as S;
+        let mut f = carded(&[S::Open, S::Fix, S::Dismissed, S::Sent]);
+        let mut panel = FeaturePanel {
+            focus: TabArea::Findings,
+            ..FeaturePanel::default()
+        };
+        let id = |n: &str| n.to_owned();
+        // r1-1, undecided.
+        assert_eq!(
+            press(&mut panel, &f, key(Keysym::f)),
+            Some(PanelOutcome::DecideFinding(id("r1-1"), Decision::Fix))
+        );
+        assert_eq!(
+            press(&mut panel, &f, key(Keysym::Delete)),
+            Some(PanelOutcome::AskDismiss(id("r1-1")))
+        );
+        assert_eq!(
+            press(&mut panel, &f, ctrl(Keysym::e)),
+            Some(PanelOutcome::EditFinding(id("r1-1")))
+        );
+        assert_eq!(
+            press(&mut panel, &f, key(Keysym::Return)),
+            Some(PanelOutcome::ShowFinding(id("r1-1")))
+        );
+        // r1-2, to fix: Down is the next card, as ordered.
+        assert_eq!(press(&mut panel, &f, key(Keysym::Down)), None);
+        assert_eq!(panel.finding, 1);
+        assert_eq!(
+            press(&mut panel, &f, key(Keysym::f)),
+            Some(PanelOutcome::DecideFinding(id("r1-2"), Decision::Reopen))
+        );
+        // r1-4, sent: nothing to decide, and it says why.
+        assert_eq!(press(&mut panel, &f, key(Keysym::Down)), None);
+        assert_eq!(
+            press(&mut panel, &f, key(Keysym::f)),
+            Some(PanelOutcome::FindingRefused(review_import::SENT))
+        );
+        // r1-3, dismissed, last: both of its keys bring it back or fix it.
+        assert_eq!(press(&mut panel, &f, key(Keysym::End)), None);
+        assert_eq!(
+            press(&mut panel, &f, key(Keysym::f)),
+            Some(PanelOutcome::DecideFinding(id("r1-3"), Decision::Fix))
+        );
+        assert_eq!(
+            press(&mut panel, &f, key(Keysym::Delete)),
+            Some(PanelOutcome::DecideFinding(id("r1-3"), Decision::Reopen))
+        );
+        // A comment from anywhere on the page.
+        assert_eq!(
+            press(&mut panel, &f, key(Keysym::c)),
+            Some(PanelOutcome::AddComment)
+        );
+        panel.focus = TabArea::Stages;
+        assert_eq!(
+            press(&mut panel, &f, key(Keysym::c)),
+            Some(PanelOutcome::AddComment)
+        );
+        // Off the cards Del is the tab's, and f nothing.
+        assert_eq!(
+            press(&mut panel, &f, key(Keysym::Delete)),
+            Some(PanelOutcome::Remove)
+        );
+        assert_eq!(press(&mut panel, &f, key(Keysym::f)), None);
+        // An item of the user's: dropped at once, Enter edits it.
+        let added = review_import::add(f.review.as_mut().unwrap(), "Rename it").unwrap();
+        (f.review.as_mut().unwrap().findings).retain(|finding| finding.id == added);
+        panel.focus = TabArea::Findings;
+        panel.finding = 0;
+        assert_eq!(
+            press(&mut panel, &f, key(Keysym::Delete)),
+            Some(PanelOutcome::DecideFinding(
+                added.clone(),
+                Decision::Dismiss(review_import::DROPPED.to_owned())
+            ))
+        );
+        assert_eq!(
+            press(&mut panel, &f, key(Keysym::Return)),
+            Some(PanelOutcome::EditFinding(added))
+        );
+    }
+
+    #[test]
+    fn the_card_with_the_keyboard_shows_it_and_the_hints_say_what_it_takes() {
+        use FindingState as S;
+        let f = carded(&[S::Open, S::Fix]);
+        let panel = FeaturePanel {
+            focus: TabArea::Findings,
+            finding: 1,
+            ..FeaturePanel::default()
+        };
+        let slugs = vec!["r".to_owned()];
+        let view = tab_view(&panel, &f, &slugs, &PanelState::default(), 2_060);
+        assert_eq!(view.focus, TabArea::Findings);
+        let selected: Vec<bool> = cards_of(&view).iter().map(|c| c.selected).collect();
+        assert_eq!(selected, [false, true]);
+        for hint in [
+            ("Up / Down", "finding"),
+            ("f", "don't fix"),
+            ("Ctrl+E", "edit\u{2026}"),
+            ("Del", "dismiss\u{2026}"),
+            ("Enter", "show in diff"),
+            ("c", "add comment\u{2026}"),
+            ("Tab", "repositories"),
+        ] {
+            let hint = (hint.0.to_owned(), hint.1.to_owned());
+            assert!(view.hints.contains(&hint), "{hint:?}: {:?}", view.hints);
+        }
+        let stages = FeaturePanel::default();
+        let view = tab_view(&stages, &f, &slugs, &PanelState::default(), 2_060);
+        assert!(view.hints.contains(&("Tab".into(), "findings".into())));
+        assert!(cards_of(&view).iter().all(|c| !c.selected));
     }
 
     #[test]

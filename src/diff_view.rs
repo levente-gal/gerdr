@@ -28,7 +28,7 @@ use crate::{
     },
     diff::{FILE_LINES, FileDiff, LineKind},
     diff_edit::{FileEdit, Put},
-    feature::review_import::{Decision, FindingState},
+    feature::review_import::{self, Decision, FindingState},
     find,
     git::Change,
     review::{self, Comment, Quoted, Review},
@@ -45,14 +45,10 @@ use search::DiffSearch;
 pub const NO_REVIEW: &str = "No review comments: in the diff, press c on a line";
 /// Why an edit, restore or comment does nothing in a read-only diff.
 pub const READ_ONLY: &str = "A commit's diff can't be edited";
-/// Why an AI review finding isn't edited as a comment is.
-pub const FINDING_KEYS: &str = "A finding takes f to fix it or Del to dismiss it";
 /// Why `f` did nothing off a finding.
 pub const NO_FINDING: &str = "Move the cursor to a finding first";
 /// Why a dismissal did nothing.
 pub const NO_REASON: &str = "Not dismissed: say why first";
-/// Why a finding sent to be fixed isn't decided again.
-pub const SENT: &str = "That finding went to the Build agent to fix";
 
 /// How an AI review finding's card is coloured: by severity, muted once
 /// dismissed.
@@ -225,6 +221,9 @@ pub struct Signals {
     /// What the user decided of an AI review finding shown as a comment,
     /// by its id (see `review::Flag`).
     pub decided: Option<(String, Decision)>,
+    /// The AI review finding to edit, by its id: its fix and the user's
+    /// comment on it are asked for in a dialog.
+    pub edit_finding: Option<String>,
 }
 
 /// What the diff scrolls to: a checkout's header, a file's, or the first
@@ -1372,8 +1371,8 @@ impl DiffView {
         let Some(comment) = self.review.comments.get(c) else {
             return;
         };
-        if comment.flag.is_some() {
-            self.signals.error = Some(Some(FINDING_KEYS.into()));
+        if let Some(flag) = &comment.flag {
+            self.signals.edit_finding = Some(flag.id.clone());
             return;
         }
         self.signals.error = Some(None);
@@ -1522,19 +1521,10 @@ impl DiffView {
             }
             return any;
         };
-        let decision = match flag.state {
-            FindingState::Open | FindingState::Dismissed => Decision::Fix,
-            FindingState::Fix => Decision::Reopen,
-            FindingState::Sent => {
-                self.signals.error = Some(Some(SENT.into()));
-                return true;
-            }
-            FindingState::Fixed => {
-                self.signals.error = Some(Some("That finding is fixed".into()));
-                return true;
-            }
-        };
-        self.signals.decided = Some((flag.id.clone(), decision));
+        match review_import::fix_key(flag.state) {
+            Ok(decision) => self.signals.decided = Some((flag.id.clone(), decision)),
+            Err(why) => self.signals.error = Some(Some(why.into())),
+        }
         true
     }
 
@@ -1545,8 +1535,8 @@ impl DiffView {
         let Some((c, flag)) = self.finding_here() else {
             return false;
         };
-        match flag.state {
-            FindingState::Open | FindingState::Fix => {
+        match review_import::dismiss_key(flag.state) {
+            Ok(None) => {
                 let (id, comment) = (flag.id.clone(), &self.review.comments[c]);
                 self.signals.error = Some(None);
                 self.signals.focus = true;
@@ -1561,13 +1551,8 @@ impl DiffView {
                 self.build_rows(ctx.sections, self.diff_anchor());
                 self.follow_editor(ctx);
             }
-            FindingState::Dismissed => {
-                self.signals.decided = Some((flag.id.clone(), Decision::Reopen));
-            }
-            FindingState::Sent => self.signals.error = Some(Some(SENT.into())),
-            FindingState::Fixed => {
-                self.signals.error = Some(Some("That finding is fixed".into()));
-            }
+            Ok(Some(decision)) => self.signals.decided = Some((flag.id.clone(), decision)),
+            Err(why) => self.signals.error = Some(Some(why.into())),
         }
         true
     }

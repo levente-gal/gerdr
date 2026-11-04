@@ -22,6 +22,7 @@ mod confirm;
 mod consts;
 mod drop;
 mod features;
+mod finding_dialog;
 mod footer;
 #[cfg(test)]
 mod golden;
@@ -74,6 +75,7 @@ pub use confirm::*;
 pub use consts::*;
 pub use drop::*;
 pub use features::*;
+pub use finding_dialog::*;
 pub use footer::*;
 pub use help::*;
 pub use hints::*;
@@ -164,6 +166,7 @@ pub struct ChromeView {
     pub confirm: Option<ConfirmView>,
     /// Set while the new feature dialog is open.
     pub new_feature: Option<NewFeatureView>,
+    pub finding_dialog: Option<FindingDialogView>,
     /// Set while the name and email dialog is open.
     pub identity: Option<IdentityView>,
     /// Set while the manual test sheet is open.
@@ -226,6 +229,7 @@ pub struct Chrome {
     checkout: Overlay<(CheckoutView, Size<i32, Logical>, Theme, f64)>,
     confirm: Overlay<(ConfirmView, Size<i32, Logical>, Theme, f64)>,
     new_feature: Overlay<(NewFeatureView, Size<i32, Logical>, Theme, f64)>,
+    finding_dialog: Overlay<(FindingDialogView, Size<i32, Logical>, Theme, f64)>,
     identity: Overlay<(IdentityView, Size<i32, Logical>, Theme, f64)>,
     manual_test: Overlay<(ManualTestView, Size<i32, Logical>, Theme, f64)>,
     plan_sheet: Overlay<(PlanSheetView, Size<i32, Logical>, Theme, f64)>,
@@ -292,6 +296,7 @@ impl Chrome {
             checkout: Overlay::default(),
             confirm: Overlay::default(),
             new_feature: Overlay::default(),
+            finding_dialog: Overlay::default(),
             identity: Overlay::default(),
             manual_test: Overlay::default(),
             plan_sheet: Overlay::default(),
@@ -471,6 +476,18 @@ impl Chrome {
                     let part = self.new_feature.part(dialog, now, true, |(v, output, ..)| {
                         painter.new_feature_dialog(v, *output, scale, theme.palette())
                     });
+                    parts.extend(scrimmed(part, output, theme.palette()));
+                }
+                Kind::FindingDialog => {
+                    let dialog = view.finding_dialog.take().map(|v| {
+                        let (loc, size) = shadowed(finding_dialog_layout(&v, output).panel);
+                        ((v, output, theme, scale), loc, size)
+                    });
+                    let part = self
+                        .finding_dialog
+                        .part(dialog, now, true, |(v, output, ..)| {
+                            painter.finding_dialog(v, *output, scale, theme.palette())
+                        });
                     parts.extend(scrimmed(part, output, theme.palette()));
                 }
                 Kind::GitIdentity => {

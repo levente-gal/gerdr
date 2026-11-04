@@ -36,6 +36,8 @@ pub enum Overlay {
     Checkout,
     /// The new feature dialog (see `features`).
     NewFeature,
+    /// The dialog asking for a finding's text (see `finding_dialog`).
+    FindingDialog,
     /// The name and email git wants to commit (see `git_identity`).
     GitIdentity,
     /// The manual test sheet: a feature's acceptance criteria to try
@@ -74,6 +76,7 @@ impl Overlay {
         Self::Restart,
         Self::Checkout,
         Self::NewFeature,
+        Self::FindingDialog,
         Self::GitIdentity,
         Self::Confirm,
         Self::ContextMenu,
@@ -105,6 +108,7 @@ impl Overlay {
                 | Self::Restart
                 | Self::Checkout
                 | Self::NewFeature
+                | Self::FindingDialog
                 | Self::GitIdentity
                 | Self::ManualTest
                 | Self::PlanSheet
@@ -168,6 +172,7 @@ impl Overlay {
             Self::Restart => "the restart dialog",
             Self::Checkout => "the checkout dialog",
             Self::NewFeature => "the new feature dialog",
+            Self::FindingDialog => "the finding dialog",
             Self::GitIdentity => "the name and email dialog",
             Self::ManualTest => "the manual test sheet",
             Self::PlanSheet => "the plan review's sheet",
@@ -199,6 +204,7 @@ impl Gerdr {
             Overlay::Restart => self.restart.is_some(),
             Overlay::Checkout => self.checkout.is_some(),
             Overlay::NewFeature => self.features.dialog.is_some(),
+            Overlay::FindingDialog => self.features.finding_dialog.is_some(),
             Overlay::GitIdentity => self.repos.identity.is_some(),
             Overlay::ManualTest => self.features.manual.is_some(),
             Overlay::PlanSheet => self.features.plan_sheet.is_some(),
@@ -282,6 +288,7 @@ impl Gerdr {
             Overlay::Confirm => self.confirm_hover(pos),
             Overlay::Tasks => self.tasks_hover(pos),
             Overlay::NewFeature => self.new_feature_hover(pos),
+            Overlay::FindingDialog => self.finding_dialog_hover(pos),
             Overlay::GitIdentity => self.identity_hover(pos),
             Overlay::ManualTest => return self.manual_test_hover(pos),
             Overlay::PlanSheet => return self.plan_sheet_hover(pos),

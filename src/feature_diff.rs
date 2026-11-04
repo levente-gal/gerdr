@@ -43,7 +43,7 @@ pub const STILL_READING: &str = "Still reading the diff";
 pub const NO_OWN_COMMENT: &str = "Add a comment first: press c on a line";
 
 /// The keys of a feature's code review, before the diff's own (F1).
-pub const KEYS: [(&str, &str); 8] = [
+pub const KEYS: [(&str, &str); 9] = [
     ("Esc", "close the code review"),
     ("F1", "list the keys"),
     ("Ctrl+Enter", "approve Code review"),
@@ -57,6 +57,7 @@ pub const KEYS: [(&str, &str); 8] = [
         "go to the next or the previous file not viewed",
     ),
     ("f", "fix the finding, or take that back"),
+    ("c", "on a finding, edit its fix or comment on it"),
     ("Del", "dismiss the finding, saying why, or reopen it"),
 ];
 
@@ -244,6 +245,8 @@ impl FeatureOf {
         let single = (self.repos.len() == 1).then(|| &self.repos[0]);
         self.findings
             .iter()
+            // An item the user added with no file has no place here.
+            .filter(|f| !f.file.is_empty())
             .map(|f| {
                 let repo = (self.repos.iter().find(|r| r.name == f.repo)).or(single);
                 let root = repo.map(|r| r.root.clone()).unwrap_or_default();
@@ -280,9 +283,16 @@ pub fn finding_comment(f: &Finding, root: PathBuf, file: Option<&FileDiff>) -> C
         text.push('\n');
         text.push_str(&f.body);
     }
-    if !f.fix.is_empty() {
+    if let Some(fix) = &f.my_fix {
+        text.push_str("\nYour fix: ");
+        text.push_str(fix);
+    } else if !f.fix.is_empty() {
         text.push_str("\nFix: ");
         text.push_str(&f.fix);
+    }
+    if !f.note.is_empty() {
+        text.push_str("\nYour comment: ");
+        text.push_str(&f.note);
     }
     Comment {
         root,
@@ -710,17 +720,33 @@ impl Gerdr {
         };
         let (project, slug) = (fe.project.clone(), fe.slug.clone());
         self.decide_finding(&project, &slug, &id, decision);
-        let findings = (self.feature(&project, &slug))
+        self.feature_findings_changed(&project, &slug);
+    }
+
+    /// The findings of `project`'s `slug` changed: the open code review, if
+    /// it is of that feature, shows them as the record has them.
+    pub(crate) fn feature_findings_changed(&mut self, project: &str, slug: &str) {
+        let findings = (self.feature(project, slug))
             .and_then(|f| f.review.as_ref())
             .map(|r| r.findings.clone())
             .unwrap_or_default();
         let env = self.worktree_env();
         if let Some(wd) = self.wd_mut()
-            && let Some(fe) = wd.feature.as_mut()
+            && let Some(fe) =
+                (wd.feature.as_mut()).filter(|fe| fe.project == project && fe.slug == slug)
         {
             fe.findings = findings;
             wd.place_findings(env);
         }
+    }
+
+    /// Edit finding `id` of the open code review, in the finding dialog.
+    pub(crate) fn feature_edit_finding(&mut self, id: &str) {
+        let Some(fe) = self.feature_of() else {
+            return;
+        };
+        let (project, slug) = (fe.project.clone(), fe.slug.clone());
+        self.ask_edit_finding(&project, &slug, id);
     }
 
     /// Approve Code review, unless something holds it up (said why).
@@ -969,6 +995,42 @@ mod tests {
             ..ok
         };
         assert_eq!(approve_refusal(&reading).as_deref(), Some(STILL_READING));
+    }
+
+    #[test]
+    fn a_findings_card_shows_the_users_words_and_an_item_with_no_file_stays_off_the_diff() {
+        let f = Finding {
+            id: "r1-1".into(),
+            file: "src/a.rs".into(),
+            title: "Off".into(),
+            fix: "Reviewer's".into(),
+            my_fix: Some("Mine".into()),
+            note: "Careful".into(),
+            ..Finding::default()
+        };
+        let c = finding_comment(&f, "/w/api".into(), None);
+        assert!(c.text.contains("Your fix: Mine"), "{}", c.text);
+        assert!(c.text.contains("Your comment: Careful"), "{}", c.text);
+        assert!(!c.text.contains("Reviewer's"), "{}", c.text);
+        let fe = FeatureOf {
+            repos: vec![RepoOf {
+                name: "api".into(),
+                root: "/w/api".into(),
+                ..RepoOf::default()
+            }],
+            findings: vec![
+                f,
+                Finding {
+                    id: "u1".into(),
+                    yours: true,
+                    ..Finding::default()
+                },
+            ],
+            ..FeatureOf::default()
+        };
+        let comments = fe.finding_comments(&HashMap::new());
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0].flag.as_ref().unwrap().id, "r1-1");
     }
 
     #[test]

@@ -11,7 +11,10 @@
 //! those to fix to the Build agent. Fixed code goes through Build and
 //! Verify again, and a new review checks the fixes.
 
-use std::{path::PathBuf, time::Instant};
+use std::{
+    path::{Path, PathBuf},
+    time::Instant,
+};
 
 use crate::{
     Gerdr,
@@ -21,8 +24,9 @@ use crate::{
         store,
     },
     feature_agents::{Stamp, vars},
+    feature_diff::COMMENTS,
     features::{Done, plural},
-    prompts,
+    prompts, review,
 };
 
 /// The values the AI review prompt gets of `feature` besides the stage's
@@ -69,16 +73,45 @@ pub(crate) fn review_vars(feature: &Feature) -> Vec<(String, String)> {
     ]
 }
 
+/// The user's comments in `own` to follow the fixes sent to Build, on
+/// repositories `roots` (their top folders and labels). At AI review the
+/// code is as they read it, so none is marked outdated.
+fn own_comments_markdown(own: &review::Review, roots: &[(PathBuf, String)]) -> String {
+    let order: Vec<PathBuf> = roots.iter().map(|(root, _)| root.clone()).collect();
+    let label = |root: &Path| {
+        (roots.iter().find(|(r, _)| r == root))
+            .map_or_else(|| root.display().to_string(), |(_, label)| label.clone())
+    };
+    format!(
+        "\n---\n\n{}",
+        review::markdown(own, &order, label, |_| false)
+    )
+}
+
 /// A finding as the reviewer's prompt lists it: "- r1-2 (high,
 /// src/a.rs:12): Off by one", with the reason a dismissed one has.
 fn finding_line(f: &Finding, multi: bool) -> String {
-    let mut line = format!(
-        "- {} ({}, {}): {}",
-        f.id,
-        f.severity.label(),
-        review_import::location(f, multi),
-        f.title
-    );
+    let mut line = if f.yours {
+        format!("- {} (added by the user): {}", f.id, f.title)
+    } else {
+        format!(
+            "- {} ({}, {}): {}",
+            f.id,
+            f.severity.label(),
+            review_import::location(f, multi),
+            f.title
+        )
+    };
+    let one_line = |text: &str| text.replace('\n', " ");
+    if f.yours && !f.body.is_empty() {
+        line.push_str(&format!(". {}", one_line(&f.body)));
+    }
+    if let Some(fix) = &f.my_fix {
+        line.push_str(&format!(". The user wants this fix: {}", one_line(fix)));
+    }
+    if !f.note.is_empty() {
+        line.push_str(&format!(". The user's comment: {}", one_line(&f.note)));
+    }
     if f.state == FindingState::Dismissed && !f.reason.is_empty() {
         line.push_str(&format!(". Dismissed because: {}", f.reason));
     }
@@ -346,9 +379,90 @@ impl Gerdr {
         self.show_success(format!("Finding {id} {word}"));
     }
 
+    /// Change feature `slug`'s AI review by `what` and keep it: `change`
+    /// says what it did, for the log, else why it can't, and so does the
+    /// toast. Whether it did.
+    fn change_review(
+        &mut self,
+        project: &str,
+        slug: &str,
+        change: impl FnOnce(&mut AiReview) -> Result<String, String>,
+    ) -> bool {
+        let Some(f) = self.feature_mut(project, slug) else {
+            return false;
+        };
+        let title = f.title.clone();
+        if f.status != Status::Open || f.current() != Some(Stage::AiReview) {
+            self.show_warning(format!("\u{201c}{title}\u{201d} isn't at AI review"));
+            return false;
+        }
+        let Some(review) = f.review.as_mut() else {
+            self.show_warning(format!(
+                "\u{201c}{title}\u{201d} has no findings read in yet"
+            ));
+            return false;
+        };
+        let what = match change(review) {
+            Ok(what) => what,
+            Err(why) => {
+                self.show_warning(why);
+                return false;
+            }
+        };
+        f.log(feature::now(), what);
+        self.save_feature(project, slug);
+        self.feature_findings_changed(project, slug);
+        true
+    }
+
+    /// Reword finding `id`'s fix and set the user's comment on it.
+    pub(crate) fn edit_finding(
+        &mut self,
+        project: &str,
+        slug: &str,
+        id: &str,
+        fix: &str,
+        note: &str,
+    ) {
+        let done = self.change_review(project, slug, |review| {
+            let what = review_import::edit(review, id, fix, note)?;
+            Ok(format!("Finding {id}: {what}"))
+        });
+        if done {
+            self.show_success(format!("Finding {id} edited and marked to fix"));
+        }
+    }
+
+    /// Rewrite item `id` of the user's own.
+    pub(crate) fn edit_own_finding(&mut self, project: &str, slug: &str, id: &str, text: &str) {
+        let done = self.change_review(project, slug, |review| {
+            let what = review_import::edit_own(review, id, text)?;
+            Ok(format!("Your comment {id}: {what}"))
+        });
+        if done {
+            self.show_success(format!("Comment {id} edited"));
+        }
+    }
+
+    /// Add an item of the user's own to feature `slug`'s AI review, to go
+    /// to Build with the findings to fix.
+    pub(crate) fn add_finding_comment(&mut self, project: &str, slug: &str, text: &str) {
+        let mut added = String::new();
+        let done = self.change_review(project, slug, |review| {
+            added = review_import::add(review, text)?;
+            Ok(format!("You added comment {added}"))
+        });
+        if done {
+            self.show_success(format!(
+                "Comment {added} added, to go to Build with the fixes"
+            ));
+        }
+    }
+
     /// Send feature `slug`'s AI review findings the user wants fixed to
-    /// its Build agent, once none waits to be decided; they are sent then,
-    /// and the next review checks them.
+    /// its Build agent, once none waits to be decided, with the comments
+    /// they left in its diff; they are sent then, and the next review
+    /// checks them.
     pub fn send_findings(&mut self, project: &str, slug: &str) {
         let Some(f) = self.feature(project, slug) else {
             return;
@@ -367,13 +481,36 @@ impl Gerdr {
                 plural(undecided, "finding")
             ));
         }
-        let (n, text) = review_import::fixes_markdown(review, &title, f.many_repos());
+        let (n, mut text) = review_import::fixes_markdown(review, &title, f.many_repos());
         if n == 0 {
             return self.show_warning(format!("\u{201c}{title}\u{201d} has no findings to fix"));
         }
-        let what = plural(n, "finding");
+        let path = store::dir(None, project, slug).join(COMMENTS);
+        let own = review::load_file(&path);
+        let comments = own.own();
+        let mut what = plural(n, "finding");
+        if comments > 0 {
+            let names = self.projects.names(f);
+            let roots: Vec<(PathBuf, String)> = f
+                .touched()
+                .map(|r| (r.worktree.clone(), names.label(r)))
+                .collect();
+            text.push_str(&own_comments_markdown(&own, &roots));
+            what.push_str(&format!(" and {}", plural(comments, "comment")));
+        }
         if !self.send_to_build(project, slug, &what, text) {
             return;
+        }
+        // Sent, so they don't wait for Code review as well.
+        if comments > 0 {
+            if let Err(err) = review::save_file(&path, &review::Review::default()) {
+                tracing::warn!("deleting {}: {err}", path.display());
+                self.show_error(format!("Couldn't delete the sent comments: {err}"));
+            }
+            let key = (project.to_owned(), slug.to_owned());
+            if let Some(counts) = self.code_reviews.get_mut(&key) {
+                counts.comments = 0;
+            }
         }
         let Some(f) = self.feature_mut(project, slug) else {
             return;
@@ -517,6 +654,56 @@ mod tests {
         );
         assert_eq!(v["review.sent"], "");
         assert_eq!(v["review.open"], "");
+    }
+
+    #[test]
+    fn the_diffs_comments_follow_the_fixes() {
+        let own = review::Review {
+            comments: vec![review::Comment {
+                root: "/w/api".into(),
+                path: "src/a.rs".into(),
+                text: "This name is wrong".into(),
+                ..review::Comment::default()
+            }],
+            ..review::Review::default()
+        };
+        let md = own_comments_markdown(&own, &[("/w/api".into(), "api".to_owned())]);
+        assert!(md.starts_with("\n---\n\n"), "{md}");
+        for words in ["## api (/w/api)", "src/a.rs", "This name is wrong"] {
+            assert!(md.contains(words), "{words}: {md}");
+        }
+        assert!(!md.contains("code changed since"), "{md}");
+    }
+
+    #[test]
+    fn the_next_review_reads_the_users_words() {
+        let f = Finding {
+            id: "r1-2".into(),
+            file: "src/a.rs".into(),
+            title: "Off by one".into(),
+            fix: "Reviewer's".into(),
+            my_fix: Some("Mine\ntoo".into()),
+            note: "Careful".into(),
+            ..Finding::default()
+        };
+        let line = finding_line(&f, false);
+        assert!(line.contains("The user wants this fix: Mine too"), "{line}");
+        assert!(line.contains("The user's comment: Careful"), "{line}");
+        assert!(
+            !line.contains('\n') && !line.contains("Reviewer's"),
+            "{line}"
+        );
+        let yours = Finding {
+            id: "u1".into(),
+            title: "Rename it".into(),
+            body: "It reads badly".into(),
+            yours: true,
+            ..Finding::default()
+        };
+        assert_eq!(
+            finding_line(&yours, false),
+            "- u1 (added by the user): Rename it. It reads badly"
+        );
     }
 
     #[test]

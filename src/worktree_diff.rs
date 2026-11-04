@@ -1094,10 +1094,14 @@ impl WorktreeDiff {
     }
 
     /// Why the last key or click did nothing, if it says; and what was
-    /// decided of an AI review finding.
-    pub fn take_error(&mut self) -> (Option<String>, Option<(String, Decision)>) {
+    /// decided of an AI review finding, and the finding to edit.
+    pub fn take_error(&mut self) -> (Option<String>, Option<(String, Decision)>, Option<String>) {
         let signals = self.diff.take_signals();
-        (signals.error.flatten(), signals.decided)
+        (
+            signals.error.flatten(),
+            signals.decided,
+            signals.edit_finding,
+        )
     }
 
     /// Whether `path` is this worktree's.
@@ -1434,7 +1438,7 @@ impl crate::Gerdr {
     /// panel asks it; why it did nothing said briefly.
     fn worktree_done(&mut self, done: Option<Done>) -> Option<crate::repos::Outcome> {
         self.worktree_save_review();
-        let (error, decided) = self
+        let (error, decided, edit_finding) = self
             .wd_mut()
             .map(WorktreeDiff::take_error)
             .unwrap_or_default();
@@ -1443,6 +1447,9 @@ impl crate::Gerdr {
         }
         if let Some((id, decision)) = decided {
             self.feature_decide(id, decision);
+        }
+        if let Some(id) = edit_finding {
+            self.feature_edit_finding(&id);
         }
         let commit = self.wd().is_some_and(|wd| wd.commit.is_some());
         let doc = self.wd().is_some_and(|wd| wd.doc.is_some());

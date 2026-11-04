@@ -38,6 +38,7 @@ mod feature_review;
 mod feature_workspace;
 mod features;
 mod find;
+mod finding_dialog;
 mod frecency;
 mod fuzzy;
 mod git;
@@ -6485,6 +6486,7 @@ impl Gerdr {
             checkout: self.checkout_view(),
             confirm: self.confirm_view(),
             new_feature: self.new_feature_view(),
+            finding_dialog: self.finding_dialog_view(),
             identity: self.identity_view(),
             manual_test: self.manual_test_view(),
             plan_sheet: self.plan_sheet_view(),
