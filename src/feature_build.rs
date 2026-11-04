@@ -709,8 +709,11 @@ impl Gerdr {
             ));
         };
         let alive = run.agent_key().is_some() && self.stage_run_state(&run).1;
+        let fresh = feature.fresh_milestones;
         let mut sent = Err(String::from(TAB_GONE));
-        if alive {
+        if fresh {
+            sent = Err(String::from("each milestone gets a fresh agent"));
+        } else if alive {
             let data = store::dir(None, project, slug);
             let names = self.projects.names(&feature);
             let values = feature_agents::vars(&feature, &names, &data, stage);
@@ -719,11 +722,35 @@ impl Gerdr {
                 .and_then(|line| self.tell_build_agent(&feature, line.trim()));
         }
         if let Err(why) = sent {
-            if alive {
+            if alive && !fresh {
                 tracing::warn!("letting the Build agent of {project}/{slug} go on: {why}");
             }
             // A fresh agent goes on from build.md.
-            self.launch_stage_agent(project, slug, stage, &[]);
+            if !self.launch_stage_agent(project, slug, stage, &[]) {
+                return;
+            }
+            // Until it ticks more, the log still says the stop it went on from.
+            let n = self
+                .feature(project, slug)
+                .and_then(|f| f.runs.get(&stage))
+                .map_or(0, |r| r.n);
+            let mut watch = Watch::of(n);
+            watch.went_on = Some(stop.done);
+            let key = (project.to_owned(), slug.to_owned(), stage);
+            self.features.agents.insert(key, watch);
+            // The one before has done its milestone: its idle chat goes,
+            // or a tab would pile up per milestone. One at work stays.
+            let working = matches!(
+                self.stage_run_state(&run).0,
+                Some(AgentStatus::Working | AgentStatus::Blocked)
+            );
+            if fresh
+                && alive
+                && !working
+                && let Some(pane) = run.pane.as_deref()
+            {
+                self.close_herdr_pane(pane);
+            }
             return;
         }
         let now = feature::now();

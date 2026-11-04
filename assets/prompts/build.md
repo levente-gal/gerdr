@@ -17,6 +17,17 @@ How to work, every time:
 - Commit what you change in every repository you changed, with a message
   that says what it is. Leave nothing uncommitted and no untracked files:
   gerdr checks the code by its commits.
+- Add or update tests for the behaviour you change, and follow the
+  repositories' guidance files (CLAUDE.md, AGENTS.md) where they exist.
+{{#if checks}}
+- Before you commit, run the ones of these checks that cover what you
+  changed. gerdr runs them all at Verify:
+
+{{checks}}
+{{/if}}
+- If the plan is wrong, or the work needs a change it doesn't name, do not
+  work round it. Write a line `Blocked: …` under `## Milestones` in the build
+  log saying what you need, and stop. Once it is settled, remove the line.
 
 1. Read the brief at {{brief.path}} and the plan at {{plan.path}}.
 2. Keep a build log at exactly this path:
@@ -24,7 +35,7 @@ How to work, every time:
    {{artifact.path}}
 
    If it isn't there yet, write it first: a `## Milestones` section with
-   the plan's milestones copied as unticked checkboxes (`- [ ] …`), in the
+   the checkbox lines of the plan's milestones, unticked (`- [ ] …`), in the
    plan's order. If it is there already, keep it and go on from it: an
    earlier agent, or you in an earlier round, started the build.
 {{#if evidence}}
@@ -33,19 +44,25 @@ How to work, every time:
 {{evidence}}
 
    The checks and their output are in {{evidence.path}}. Read it, fix the
-   failures, commit the fixes, and stop. Do not start a new milestone.
+   cause of each failure, commit the fixes, and stop. Do not start a new
+   milestone. Do not skip, delete or weaken a check: if a check itself is
+   wrong, say so and stop.
 {{else}}
 {{#if fixes}}
 3. The build is done, and the user wants these {{fixes.what}} fixed:
 
 {{fixes}}
 
-   They are in {{fixes.path}} too. Fix each one, commit the fixes, and
-   stop. Do not start a new milestone.
+   They are in {{fixes.path}} too. Fix the cause of each one, commit the
+   fixes, and stop. Do not start a new milestone. Do not skip, delete or
+   weaken a check to do it.
 {{else}}
 3. Build the first unticked milestone, and only that one. Commit it.
 4. Tick the milestone in {{artifact.path}} (`- [x] …`), and add a short
-   note under it: what changed, and anything the user should know.
+   note under it: what changed, how you checked it and with what result,
+   anything the user should know, and anything the next milestone needs.
+   The next one may be built by an agent that has only this log, the plan
+   and the code.
 5. Then STOP. Say in one line that the milestone is done. gerdr waits for
    the user to tell you to continue; do not start the next milestone on
    your own. After the last milestone, stop the same way: gerdr then runs

@@ -22,7 +22,10 @@ Your job: find out with the user what this feature is, then write its brief.
    - `## In scope`: a list of what this feature does.
    - `## Out of scope`: a list of what it does not do.
    - `## Acceptance criteria`: a list of checks, each in the form
-     “Given …, when …, then …”.
+     “Given …, when …, then …”. Cover what happens on failure and when
+     there is nothing to show, not only the usual path.
+   - `## Open questions`: what is still undecided. Leave the section out
+     when nothing is.
 
 {{#if comments}}
 The user sent an earlier brief back with these comments. Skip step 1: read

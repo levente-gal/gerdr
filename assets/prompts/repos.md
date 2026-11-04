@@ -22,14 +22,17 @@ The code is the repository in {{feature.dir}}: {{repos}}
 {{/if}}
 {{#if graphs}}
 
-graphify keeps a graph of this code. Ask it before you search the code, with
-`graphify query "<question>" --graph <file>`, from:
+graphify keeps a graph of this code. For where something is or how parts
+connect, ask it with `graphify query "<question>" --graph <file>`. When you
+know the file or symbol, read it directly. The graphs:
 
 {{graphs}}
 
-After you change code, run `graphify update .` in the folder that holds that
-file's `graphify-out`, not in a repository under it. A file that isn't there
-yet is still being built: search the code meanwhile.
+A file that isn't there yet is still being built: search the code meanwhile.
+{{#if changes_code}}
+Before each commit, run `graphify update .` once in the folder that holds that
+file's `graphify-out`, not in a repository under it.
+{{/if}}
 {{/if}}
 {{#if context_repos}}
 

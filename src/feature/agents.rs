@@ -294,6 +294,10 @@ pub struct StageRun {
     /// let it go on (see `Stop`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop: Option<Stop>,
+    /// A Build agent stopped because the plan doesn't hold: it wrote a
+    /// `Blocked:` line in its build log (see `artifacts::blocked`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked: Option<Blocked>,
     /// Its agent waits for the prompt, which the user sends once they
     /// picked its model. Never for one in T3 Code: that one has its draft.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -340,6 +344,13 @@ impl StageRun {
         let id = std::fs::read_to_string(session_file(&self.prompt)).ok()?;
         Some(id.trim().to_owned()).filter(|id| !id.is_empty())
     }
+}
+
+/// Why a Build agent stopped short of its milestone, and since when.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Blocked {
+    pub why: String,
+    pub at: u64,
 }
 
 /// How much of a transcript's end is read first for its model: most of a

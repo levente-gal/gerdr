@@ -351,6 +351,10 @@ pub struct Feature {
     /// from what that gives.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub stage_agents: BTreeMap<Stage, String>,
+    /// Build starts a fresh agent for each milestone, instead of one agent
+    /// going on through them all.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fresh_milestones: bool,
     /// Its worktrees' setup, once started (see `setup`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub setup: Option<setup::SetupRun>,
@@ -945,6 +949,7 @@ pub(crate) mod tests {
             shipping: Default::default(),
             runs: Default::default(),
             stage_agents: Default::default(),
+            fresh_milestones: false,
             setup: None,
             verify: None,
             review: None,
@@ -1020,6 +1025,7 @@ pub(crate) mod tests {
             removed: Vec::new(),
             runs: BTreeMap::new(),
             stage_agents: BTreeMap::new(),
+            fresh_milestones: false,
             setup: None,
             verify: None,
             review: None,

@@ -3229,6 +3229,20 @@ fn feature_tab_picks_running() -> super::FeatureTabView {
     view
 }
 
+/// Build set to a fresh agent per milestone, the pointer on the other choice.
+fn feature_tab_milestone_mode() -> super::FeatureTabView {
+    use super::PageSection;
+    let mut view = feature_tab();
+    let after = (view.page.sections.iter())
+        .position(|s| matches!(s, PageSection::Agent { .. }))
+        .map_or(0, |i| i + 1);
+    view.page
+        .sections
+        .insert(after, PageSection::MilestoneMode { fresh: true });
+    view.hover = Some(super::FeatureTabHit::MilestoneMode(0));
+    view
+}
+
 /// Plan's agent to run in T3 Code, its draft waiting to be sent.
 /// An agent open on Plan, waiting for its model to be picked and its prompt
 /// sent.
@@ -3485,7 +3499,7 @@ fn feature_tab_rail_wrap() -> super::FeatureTabView {
 }
 
 /// The feature tab's fixtures, by name.
-fn feature_tabs() -> [(&'static str, super::FeatureTabView); 25] {
+fn feature_tabs() -> [(&'static str, super::FeatureTabView); 26] {
     [
         ("tab_build", feature_tab()),
         ("tab_plan_ready", feature_tab_plan_ready()),
@@ -3504,6 +3518,7 @@ fn feature_tabs() -> [(&'static str, super::FeatureTabView); 25] {
         ("tab_picks_later", feature_tab_picks_later()),
         ("tab_picks_running", feature_tab_picks_running()),
         ("tab_t3_draft", feature_tab_t3_draft()),
+        ("tab_milestone_mode", feature_tab_milestone_mode()),
         ("tab_held", feature_tab_held()),
         ("tab_resume", feature_tab_resume()),
         ("tab_fixing", feature_tab_fixing()),
@@ -3516,7 +3531,7 @@ fn feature_tabs() -> [(&'static str, super::FeatureTabView); 25] {
 }
 
 /// Each fixture at the width it shows best at, and Build at all three.
-const TAB_SURFACES: [(&str, i32); 31] = [
+const TAB_SURFACES: [(&str, i32); 33] = [
     ("tab_build", 860),
     ("tab_build", 1180),
     ("tab_build", 1920),
@@ -3538,6 +3553,8 @@ const TAB_SURFACES: [(&str, i32); 31] = [
     ("tab_picks_later", 1180),
     ("tab_picks_running", 860),
     ("tab_t3_draft", 860),
+    ("tab_milestone_mode", 1180),
+    ("tab_milestone_mode", 860),
     ("tab_held", 860),
     ("tab_resume", 1180),
     ("tab_resume", 860),
@@ -3550,7 +3567,7 @@ const TAB_SURFACES: [(&str, i32); 31] = [
     ("tab_plan_long", 1180),
 ];
 
-const FEATURE_TAB: [&str; 31] = [
+const FEATURE_TAB: [&str; 33] = [
     "tab_build_860",
     "tab_build_1180",
     "tab_build_1920",
@@ -3572,6 +3589,8 @@ const FEATURE_TAB: [&str; 31] = [
     "tab_picks_later_1180",
     "tab_picks_running_860",
     "tab_t3_draft_860",
+    "tab_milestone_mode_1180",
+    "tab_milestone_mode_860",
     "tab_held_860",
     "tab_resume_1180",
     "tab_resume_860",
@@ -3585,7 +3604,7 @@ const FEATURE_TAB: [&str; 31] = [
 ];
 
 /// The recorded hashes of `FEATURE_TAB`, per case in `CASES`.
-const GOLDEN_FEATURE_TAB: [[u64; 31]; 4] = [
+const GOLDEN_FEATURE_TAB: [[u64; 33]; 4] = [
     // Dark at 1
     [
         0x332b7228d6306b6d, // tab_build_860
@@ -3609,6 +3628,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 31]; 4] = [
         0x3c252aa283117b96, // tab_picks_later_1180
         0xd88a505544d5cf95, // tab_picks_running_860
         0x4dbc062367ae4fc1, // tab_t3_draft_860
+        0x57745578929692cf, // tab_milestone_mode_1180
+        0x86ae2bd76b9aac67, // tab_milestone_mode_860
         0x959063741091a5e0, // tab_held_860
         0x32dfb9ea19dc6ce5, // tab_resume_1180
         0x3dc610bcf46145d9, // tab_resume_860
@@ -3643,6 +3664,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 31]; 4] = [
         0x7aed0177026b8fc5, // tab_picks_later_1180
         0x8ca2ad134f56fc71, // tab_picks_running_860
         0x3e55166b5b1aaeba, // tab_t3_draft_860
+        0x10fd56555c59a8ed, // tab_milestone_mode_1180
+        0x0fda7fb893110047, // tab_milestone_mode_860
         0x0f4db73107d01bbf, // tab_held_860
         0x390926dd9747f056, // tab_resume_1180
         0x64fddb303f071664, // tab_resume_860
@@ -3677,6 +3700,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 31]; 4] = [
         0x9d2fdb8947ae4a34, // tab_picks_later_1180
         0xa8aec2f4826ac6de, // tab_picks_running_860
         0xdaae95dcf08288a0, // tab_t3_draft_860
+        0x692f5c5da435e744, // tab_milestone_mode_1180
+        0xeec716e4f88f3cfa, // tab_milestone_mode_860
         0x31ab23617fe6347d, // tab_held_860
         0x159317f24b4657ab, // tab_resume_1180
         0x4320eabc301a6ee1, // tab_resume_860
@@ -3711,6 +3736,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 31]; 4] = [
         0x4bdc8bb587ed3818, // tab_picks_later_1180
         0x5b14b0a0029e76e5, // tab_picks_running_860
         0x9e296d650b865925, // tab_t3_draft_860
+        0xf94e6032ecaf5cb5, // tab_milestone_mode_1180
+        0x22524a82dd135edf, // tab_milestone_mode_860
         0x67bfd4b0c407cbf1, // tab_held_860
         0xc659c9318b078c0e, // tab_resume_1180
         0x4036574b8badfc88, // tab_resume_860

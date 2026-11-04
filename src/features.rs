@@ -929,6 +929,8 @@ pub enum PanelOutcome {
     PickAgent(Stage, String),
     /// Pick the next agent this agent stage's chips offer.
     CycleAgent(Stage),
+    /// Build with a fresh agent per milestone, or one through them all.
+    FreshMilestones(bool),
     /// Make this repository one the feature changes.
     Touch(String),
     /// Take this repository (`Repo::key`) out of the feature.
@@ -2367,6 +2369,9 @@ impl FeaturePanel {
             Keysym::n | Keysym::N if ctrl => return Some(PanelOutcome::New),
             Keysym::a | Keysym::A if ctrl && mods.shift && needs(stage).is_some() => {
                 return Some(PanelOutcome::CycleAgent(stage));
+            }
+            Keysym::b | Keysym::B if ctrl && mods.shift && milestone_switch(feature, stage) => {
+                return Some(PanelOutcome::FreshMilestones(!feature.fresh_milestones));
             }
             Keysym::l | Keysym::L if ctrl && mods.shift => self.toggle_repos(),
             Keysym::u | Keysym::U if ctrl && mods.shift && offers_setup(feature, stage) => {
@@ -4090,6 +4095,7 @@ impl Gerdr {
             shipping: Default::default(),
             runs: Default::default(),
             stage_agents: Default::default(),
+            fresh_milestones: false,
             setup: None,
             verify: None,
             review: None,
@@ -4704,6 +4710,9 @@ impl Gerdr {
                 self.pick_stage_agent(&project, &slug, stage, &name);
             }
             PanelOutcome::CycleAgent(stage) => self.cycle_stage_agent(&project, &slug, stage),
+            PanelOutcome::FreshMilestones(fresh) => {
+                self.set_fresh_milestones(&project, &slug, fresh);
+            }
             PanelOutcome::Untick(stage) => self.reopen_stage(&project, &slug, stage),
             PanelOutcome::GoToCurrent => self.feature_cursor_to_current_of(&project, &slug),
             PanelOutcome::StartOver(stage) => self.ask_start_over(&project, &slug, stage),
@@ -5487,6 +5496,7 @@ impl Gerdr {
         };
         let outcome = match hit {
             FeatureTabHit::Tab | FeatureTabHit::Column(_) | FeatureTabHit::AgentPickOff(_) => None,
+            FeatureTabHit::MilestoneMode(i) => Some(PanelOutcome::FreshMilestones(i == 1)),
             FeatureTabHit::Finding(i) => {
                 if let Some(panel) = self.features.panel.as_mut() {
                     panel.focus = TabArea::Findings;
@@ -5647,6 +5657,16 @@ impl Gerdr {
                     false => chip.name.clone(),
                 };
                 Some(Tooltip::new(&text, spot))
+            }
+            FeatureTabHit::MilestoneMode(i) => {
+                let (_, segments) = layout.milestone_mode.as_ref()?;
+                let mut spot = *segments.get(i)?;
+                spot.loc.y -= view.scroll[TabColumn::Page as usize].round() as i32;
+                let text = match i {
+                    0 => "One agent keeps its chat through all milestones",
+                    _ => "A fresh agent builds each milestone, reading the build log and plan",
+                };
+                Some(Tooltip::new(text, spot))
             }
             FeatureTabHit::Prev | FeatureTabHit::Next => {
                 let (_, prev, next) = layout.switch?;
@@ -6504,6 +6524,7 @@ fn current_line(feature: &Feature, stage: Stage, state: &LineState, now: u64) ->
         },
         Stage::Build if state.setup.is_some() => "setting up".into(),
         Stage::Build if failed_setup && run.is_none() => "setup failed".into(),
+        Stage::Build if run.is_some_and(|r| r.blocked.is_some()) => "blocked".into(),
         Stage::Build => match run.and_then(|r| r.stop) {
             Some(stop) => format!("milestone {}/{}", stop.done, stop.total),
             None => agent(),
@@ -6933,6 +6954,12 @@ fn doc_of(probe: Option<&Probe>, stage: Stage) -> Option<PageSection> {
     })
 }
 
+/// Whether `stage`'s page of `feature` offers the choice of one agent or a
+/// fresh one per milestone: Build's, until it is done.
+fn milestone_switch(feature: &Feature, stage: Stage) -> bool {
+    stage == Stage::Build && feature.status == Status::Open && !feature.is_done(stage)
+}
+
 /// `stage`'s page of `feature`, its buttons `actions`.
 fn stage_page(
     feature: &Feature,
@@ -7008,8 +7035,18 @@ fn stage_page(
                 sections.extend(doc_of(state.probe, stage));
             }
             Stage::Build => {
+                let blocked = feature.runs.get(&stage).and_then(|r| r.blocked.as_ref());
+                if let Some(blocked) = blocked {
+                    let why = line(blocked.why.clone(), CheckTone::Blocker);
+                    sections.push(lines("Blocked", vec![why]));
+                }
                 sections.extend(setup_section(feature, state));
                 sections.extend(card());
+                if milestone_switch(feature, stage) {
+                    sections.push(PageSection::MilestoneMode {
+                        fresh: feature.fresh_milestones,
+                    });
+                }
                 // The build log by name once read, else the counts of its
                 // last stop.
                 let stop = feature.runs.get(&stage).and_then(|r| r.stop);
@@ -7200,6 +7237,10 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 4] = [
             ("Ctrl+R", "start the stage's agent afresh"),
             ("Ctrl+Shift+R", "show the stage's agent, or resume its chat"),
             ("Ctrl+Shift+A", "pick the stage's next agent"),
+            (
+                "Ctrl+Shift+B",
+                "Build: one agent, or a fresh agent per milestone",
+            ),
             ("Ctrl+Shift+K", "skip Plan review"),
             ("Ctrl+Shift+D", "change the decisions on a final plan"),
         ],
@@ -7436,6 +7477,13 @@ fn tab_hints(
             }
             if picks.iter().filter(|c| !c.off).count() > 1 {
                 hints.push(hint("Ctrl+Shift+A", "pick agent"));
+            }
+            if milestone_switch(feature, stage) {
+                let what = match feature.fresh_milestones {
+                    true => "one agent",
+                    false => "agent per milestone",
+                };
+                hints.push(hint("Ctrl+Shift+B", what));
             }
         }
     }
@@ -7737,6 +7785,7 @@ pub(crate) mod tests {
             shipping: Default::default(),
             runs: Default::default(),
             stage_agents: Default::default(),
+            fresh_milestones: false,
             setup: None,
             verify: None,
             review: None,
@@ -10728,15 +10777,18 @@ pub(crate) mod tests {
         assert_eq!(page.status, None);
         assert_eq!(
             page.sections,
-            [PageSection::Agent {
-                icon: AgentIcon::Claude,
-                name: "Claude Code".into(),
-                dot: Dot::Working,
-                status: "working \u{b7} started 16m ago".into(),
-                tail: Vec::new(),
-                buttons: vec![0, 1],
-                picks: Vec::new(),
-            }]
+            [
+                PageSection::Agent {
+                    icon: AgentIcon::Claude,
+                    name: "Claude Code".into(),
+                    dot: Dot::Working,
+                    status: "working \u{b7} started 16m ago".into(),
+                    tail: Vec::new(),
+                    buttons: vec![0, 1],
+                    picks: Vec::new(),
+                },
+                PageSection::MilestoneMode { fresh: false }
+            ]
         );
         let node = rail_node(&f, Stage::Build, &state, 2_000);
         assert_eq!(
@@ -11646,6 +11698,76 @@ pub(crate) mod tests {
         let stats: Vec<_> = view.repos.iter().map(|r| r.stat).collect();
         // The one not read shows none, not a zero.
         assert_eq!(stats, [Some((12, 3)), None]);
+    }
+
+    #[test]
+    fn ctrl_shift_b_flips_the_milestone_choice_on_builds_page_only() {
+        let mut f = feature("b", vec![repo("api", true)], 3);
+        let mods = ModifiersState {
+            ctrl: true,
+            shift: true,
+            ..ModifiersState::default()
+        };
+        let ctx = RowCtx::default();
+        let mut panel = FeaturePanel {
+            slug: "b".into(),
+            ..FeaturePanel::default()
+        };
+        let press = |p: &mut FeaturePanel, f: &Feature| p.key(&mods, Keysym::B, f, &[], ctx);
+        assert_eq!(
+            press(&mut panel, &f),
+            Some(PanelOutcome::FreshMilestones(true))
+        );
+        f.fresh_milestones = true;
+        assert_eq!(
+            press(&mut panel, &f),
+            Some(PanelOutcome::FreshMilestones(false))
+        );
+        panel.pick(&f, Stage::Plan);
+        assert_eq!(press(&mut panel, &f), None);
+    }
+
+    #[test]
+    fn only_an_open_build_offers_the_milestone_choice() {
+        let mut f = feature("b", vec![repo("api", true)], 3);
+        assert!(milestone_switch(&f, Stage::Build));
+        assert!(!milestone_switch(&f, Stage::Plan));
+        let state = PanelState::default();
+        let mode = |f: &Feature| {
+            let page = stage_page(f, Stage::Build, &state, &[], 2_000);
+            page.sections.into_iter().find_map(|s| match s {
+                PageSection::MilestoneMode { fresh } => Some(fresh),
+                _ => None,
+            })
+        };
+        assert_eq!(mode(&f), Some(false));
+        f.fresh_milestones = true;
+        assert_eq!(mode(&f), Some(true));
+        f.status = Status::Abandoned;
+        assert!(!milestone_switch(&f, Stage::Build));
+        assert_eq!(mode(&f), None);
+    }
+
+    #[test]
+    fn a_blocked_build_says_why_on_its_page_and_rail() {
+        let mut f = feature("b", vec![repo("api", true)], 3);
+        let mut run = agent_run(Some("p1"), None);
+        run.blocked = Some(feature::agents::Blocked {
+            why: "the plan names no such table".into(),
+            at: 1_000,
+        });
+        f.runs.insert(Stage::Build, run);
+        let state = PanelState::default();
+        let page = stage_page(&f, Stage::Build, &state, &[], 2_000);
+        assert_eq!(
+            page.sections.first(),
+            Some(&lines(
+                "Blocked",
+                vec![line("the plan names no such table", CheckTone::Blocker)]
+            ))
+        );
+        let node = rail_node(&f, Stage::Build, &state, 2_000);
+        assert_eq!(node.line, "blocked");
     }
 
     #[test]

@@ -791,6 +791,11 @@ fn gate_words(gate: &Gate) -> (String, String, Option<&'static str>) {
             "continue".to_owned(),
             crate::feature::artifacts::name(Stage::Build),
         ),
+        GateKind::Blocked => (
+            format!("Build of “{title}” is blocked"),
+            "settle it with its agent".to_owned(),
+            crate::feature::artifacts::name(Stage::Build),
+        ),
         GateKind::VerifyFailed { fixes } => (
             match fixes {
                 1 => format!("Verify of “{title}” failed once"),

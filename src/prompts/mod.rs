@@ -11,21 +11,21 @@ pub mod render;
 /// version: bumped when its text changes meaning.
 pub fn builtin(name: &str) -> Option<(&'static str, u32)> {
     Some(match name {
-        "discover" => (include_str!("../../assets/prompts/discover.md"), 3),
-        "plan" => (include_str!("../../assets/prompts/plan.md"), 2),
+        "discover" => (include_str!("../../assets/prompts/discover.md"), 4),
+        "plan" => (include_str!("../../assets/prompts/plan.md"), 3),
         "plan-review" => (include_str!("../../assets/prompts/plan-review.md"), 1),
         "plan-review-back" => (include_str!("../../assets/prompts/plan-review-back.md"), 1),
         "plan-final" => (include_str!("../../assets/prompts/plan-final.md"), 1),
-        "build" => (include_str!("../../assets/prompts/build.md"), 3),
-        "ai-review" => (include_str!("../../assets/prompts/ai-review.md"), 2),
-        "send-fixes" => (include_str!("../../assets/prompts/send-fixes.md"), 1),
-        "fix" => (include_str!("../../assets/prompts/fix.md"), 1),
-        "continue" => (include_str!("../../assets/prompts/continue.md"), 1),
+        "build" => (include_str!("../../assets/prompts/build.md"), 4),
+        "ai-review" => (include_str!("../../assets/prompts/ai-review.md"), 3),
+        "send-fixes" => (include_str!("../../assets/prompts/send-fixes.md"), 2),
+        "fix" => (include_str!("../../assets/prompts/fix.md"), 2),
+        "continue" => (include_str!("../../assets/prompts/continue.md"), 2),
         "nudge" => (include_str!("../../assets/prompts/nudge.md"), 1),
         "send-back" => (include_str!("../../assets/prompts/send-back.md"), 1),
         "start" => (include_str!("../../assets/prompts/start.md"), 1),
         "rules" => (include_str!("../../assets/prompts/rules.md"), 1),
-        "repos" => (include_str!("../../assets/prompts/repos.md"), 4),
+        "repos" => (include_str!("../../assets/prompts/repos.md"), 5),
         _ => return None,
     })
 }
@@ -64,6 +64,8 @@ mod tests {
             ("plan.path", "/d/bulk-edit/plan.md"),
             ("evidence.path", "/d/bulk-edit/evidence.md"),
             ("graphs", ""),
+            ("changes_code", ""),
+            ("checks", ""),
             ("evidence", evidence),
             ("branch", "feature/bulk-edit"),
             ("multi_repo", if multi { "yes" } else { "" }),
@@ -211,7 +213,8 @@ mod tests {
         assert!(many.contains("Verify failed on the code"));
         assert!(many.contains("api: `npm test` exited with 1"));
         assert!(many.contains("/d/bulk-edit/evidence.md"));
-        assert!(many.contains("fix the\n   failures, commit the fixes, and stop"));
+        assert!(many.contains("fix the\n   cause of each failure, commit the fixes, and stop"));
+        assert!(many.contains("Do not skip, delete or weaken a check"));
         // A fix round builds no milestone.
         assert!(!many.contains("Build the first unticked milestone"));
         assert!(many.contains("Name the endpoint bulk."));

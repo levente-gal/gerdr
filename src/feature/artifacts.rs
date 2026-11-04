@@ -315,6 +315,19 @@ pub fn milestones(text: &str) -> (usize, usize) {
     (ticked, boxes.len())
 }
 
+/// What a build log's `Blocked: …` line under its Milestones section says:
+/// the Build agent stopped because the plan doesn't hold. As a list item or
+/// in bold too; one saying nothing doesn't count.
+pub fn blocked(text: &str) -> Option<String> {
+    let body = Sections::of(text).get("Milestones")?;
+    body.iter().find_map(|line| {
+        let line = list_item(line).unwrap_or(line);
+        let rest = line.trim_start_matches('*').strip_prefix("Blocked:")?;
+        let why = rest.trim_start_matches('*').trim().trim_end_matches('*');
+        (!why.trim().is_empty()).then(|| why.trim().to_owned())
+    })
+}
+
 /// Each checkbox item of `text`'s Milestones section, in order: whether
 /// it is ticked, and its text after the box ("API endpoint").
 pub fn milestone_items(text: &str) -> Vec<(bool, String)> {
@@ -601,6 +614,32 @@ mod tests {
     }
 
     const BRIEF: &str = "# Bulk edit\n\n## Outcome\nEdit many rows at once.\n\n## In scope\n- price\n\n## Out of Scope:\n- stock\n\n## Acceptance criteria\n- Given two rows, when I edit both, then both change.\n";
+
+    #[test]
+    fn a_blocked_line_in_the_milestones_says_why() {
+        let log = |line: &str| {
+            format!("## Milestones\n- [x] API\n{line}\n- [ ] UI\n\n## Notes\nBlocked: not here\n")
+        };
+        assert_eq!(
+            blocked(&log("Blocked: no such table")).as_deref(),
+            Some("no such table")
+        );
+        assert_eq!(
+            blocked(&log("- Blocked: no such table")).as_deref(),
+            Some("no such table")
+        );
+        assert_eq!(
+            blocked(&log("**Blocked:** no such table")).as_deref(),
+            Some("no such table")
+        );
+        assert_eq!(blocked(&log("  Endpoint added.")), None);
+        assert_eq!(blocked(&log("Blocked:")), None);
+        assert_eq!(blocked("## Notes\nBlocked: elsewhere\n"), None);
+        assert_eq!(
+            blocked("## Milestones\n```\nBlocked: a sample\n```\n- [ ] a\n"),
+            None
+        );
+    }
 
     const PLAN: &str = "## Milestones\n- [ ] API\n- [x] UI\n\n## Repositories\n- api: endpoint\n- web: form\n\n## Merge order\napi then web\n\n**Migrations:** none\n";
 
