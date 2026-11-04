@@ -10,7 +10,7 @@ use super::{
     ButtonStyle, CHECKBOX_GAP, CHECKBOX_ROW, Canvas, Check, DETAIL_FONT_SIZE, DIALOG_WIDTH, DOT,
     Dot, FONT_SIZE, FieldSpot, LABEL_FONT_SIZE, ListBar, POPUP_RADIUS, Painter, Palette, QUIT_BODY,
     QUIT_BUTTON, QUIT_BUTTON_GAP, QUIT_LINE_GAP, QUIT_PADDING, QUIT_TITLE, Rect, Rgb, SHADOW,
-    SMALL_FONT_SIZE, Thumb, agent_icon, band, button_width, check, chevron_side, copy,
+    SMALL_FONT_SIZE, Thumb, agent_icon, band, button_width, check, chevron_side, copy, cross,
     dialog_buttons, field_text, focus_ring, footer_hint_spots, gutter_track, hint_strs, icon_sdf,
     measure, measure_bold, measured_footer_height, mix, phys, physical, plus, rect_px,
     segment_tint, status_dot, tab, trash,
@@ -47,7 +47,12 @@ const SWITCH_W: i32 = 28;
 /// check, Verify's failures): past it, the last says how many more.
 pub const MAX_CHECK_LINES: usize = 4;
 /// The feature tab's header buttons, before the one removing worktrees.
-pub const FEATURE_BUTTONS: [&str; 3] = ["Open tab", "Copy path", "New feature\u{2026}"];
+pub const FEATURE_BUTTONS: [&str; 4] = [
+    "Open tab",
+    "Copy path",
+    "New feature\u{2026}",
+    "Link repositories\u{2026}",
+];
 
 /// Where a stage stands in a feature, for its mark.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -279,6 +284,8 @@ pub struct FeatureRepoRow {
     /// The label of its button: Touch for one the feature doesn't change,
     /// Open PR for one with a pull request; none else.
     pub button: Option<&'static str>,
+    /// Whether it shows the button taking it out of the feature.
+    pub remove: bool,
     /// Lines added and removed since its base, uncommitted changes
     /// included, once read (`git diff --numstat`).
     pub stat: Option<(usize, usize)>,
@@ -512,6 +519,8 @@ pub enum FeatureTabHit {
     /// Index as in `FeatureTabView::repos`.
     Repo(usize),
     RepoButton(usize),
+    /// The × on a repository's row, as in `FeatureTabView::repos`.
+    RepoRemove(usize),
     /// The narrow tab's "+N" / "N+" chip at an end of the repositories'
     /// strip, standing for the ones that don't fit: the repository a click
     /// selects (the first hidden one that way), as in `repos`.
@@ -556,6 +565,8 @@ pub struct FeatureTabLayout {
     /// Each repository's row (or chip, in `strip`, not scrolled) and its
     /// button, indexed as `FeatureTabView::repos`.
     pub repos: Vec<(Rect, Option<Rect>)>,
+    /// Each repository's × (`FeatureRepoRow::remove`), as in `repos`.
+    pub repo_removes: Vec<Option<Rect>>,
     /// On the strip, the chips standing for the repositories that don't
     /// fit, before the shown ones and after them: each chip, the
     /// repository a click selects (the nearest hidden one), and its label.
@@ -643,6 +654,9 @@ impl FeatureTabLayout {
     /// The repository row, chip or button at `at` (unscrolled).
     fn repo_at(&self, at: Point<i32, Logical>) -> Option<FeatureTabHit> {
         for (i, (row, button)) in self.repos.iter().enumerate() {
+            if (self.repo_removes.get(i).copied().flatten()).is_some_and(|b| b.contains(at)) {
+                return Some(FeatureTabHit::RepoRemove(i));
+            }
             if button.is_some_and(|b| b.contains(at)) {
                 return Some(FeatureTabHit::RepoButton(i));
             }
@@ -1277,7 +1291,12 @@ impl Stack {
 }
 
 /// The repositories' column, from its caption.
-fn repo_stack(view: &FeatureTabView, s: &mut Stack, repos: &mut Vec<(Rect, Option<Rect>)>) {
+fn repo_stack(
+    view: &FeatureTabView,
+    s: &mut Stack,
+    repos: &mut Vec<(Rect, Option<Rect>)>,
+    removes: &mut Vec<Option<Rect>>,
+) {
     s.caption("Repositories");
     if let Some(why) = &view.repos_error {
         s.text(
@@ -1291,18 +1310,20 @@ fn repo_stack(view: &FeatureTabView, s: &mut Stack, repos: &mut Vec<(Rect, Optio
     for (i, repo) in view.repos.iter().enumerate() {
         let row = s.put(REPO_ROW, Piece::Repo(i));
         s.y += REPO_GAP;
-        let button = repo.button.filter(|_| !repo.busy).map(|label| {
-            let w = button_width(label);
+        let y = row.loc.y + (REPO_ROW - ROW_BUTTON) / 2;
+        let remove = (repo.remove && !repo.busy).then(|| {
             Rectangle::new(
-                (
-                    row.loc.x + row.size.w - w - 4,
-                    row.loc.y + (REPO_ROW - ROW_BUTTON) / 2,
-                )
-                    .into(),
-                (w, ROW_BUTTON).into(),
+                (row.loc.x + row.size.w - ROW_BUTTON - 4, y).into(),
+                (ROW_BUTTON, ROW_BUTTON).into(),
             )
         });
+        let end = remove.map_or(row.loc.x + row.size.w - 4, |r| r.loc.x - 2);
+        let button = repo.button.filter(|_| !repo.busy).map(|label| {
+            let w = button_width(label);
+            Rectangle::new((end - w, y).into(), (w, ROW_BUTTON).into())
+        });
         repos.push((row, button));
+        removes.push(remove);
     }
 }
 
@@ -1574,6 +1595,7 @@ pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayou
     let hint_spots = footer_hint_spots(&hint_strs(&view.hints), hints);
 
     let mut repos = Vec::new();
+    let mut repo_removes = Vec::new();
     let mut more_repos = Vec::new();
     let strip = (width < REPOS_BELOW).then(|| {
         let strip = Rectangle::new((x, body_top).into(), (inner, CHIP_ROW).into());
@@ -1585,18 +1607,22 @@ pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayou
     {
         // The chips that fit, from the selected one if it would be past
         // them; the selected one's button at the strip's end.
+        let y = strip.loc.y + (CHIP_ROW - ROW_BUTTON) / 2;
+        let remove = (view.repos.get(view.repo))
+            .filter(|r| r.remove && !r.busy)
+            .map(|_| {
+                Rectangle::new((right - ROW_BUTTON, y).into(), (ROW_BUTTON, ROW_BUTTON).into())
+            });
+        let button_end = remove.map_or(right, |r| r.loc.x - 2);
         let button = view
             .repos
             .get(view.repo)
             .and_then(|r| r.button.filter(|_| !r.busy))
             .map(|label| {
                 let w = button_width(label);
-                Rectangle::new(
-                    (right - w, strip.loc.y + (CHIP_ROW - ROW_BUTTON) / 2).into(),
-                    (w, ROW_BUTTON).into(),
-                )
+                Rectangle::new((button_end - w, y).into(), (w, ROW_BUTTON).into())
             });
-        let end = button.map_or(right, |b| b.loc.x - QUIT_BUTTON_GAP);
+        let end = button.map_or(button_end, |b| b.loc.x) - QUIT_BUTTON_GAP;
         let chip_w = |r: &FeatureRepoRow| {
             width_of(&r.name, SMALL_FONT_SIZE).ceil() as i32 + DOT_ROOM + 2 * CHIP_PAD
         };
@@ -1658,6 +1684,10 @@ pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayou
         if let Some(slot) = repos.get_mut(view.repo) {
             slot.1 = button;
         }
+        repo_removes = vec![None; repos.len()];
+        if let Some(slot) = repo_removes.get_mut(view.repo) {
+            *slot = remove;
+        }
     }
 
     let bottom = hints.loc.y - 4;
@@ -1692,7 +1722,7 @@ pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayou
             pieces: Vec::new(),
         };
         match column {
-            TabColumn::Repos => repo_stack(view, &mut s, &mut repos),
+            TabColumn::Repos => repo_stack(view, &mut s, &mut repos, &mut repo_removes),
             TabColumn::Page => page_stack(
                 view,
                 &mut s,
@@ -1721,6 +1751,7 @@ pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayou
         content,
         strip,
         repos,
+        repo_removes,
         more_repos,
         page_buttons,
         agent_picks,
@@ -1986,9 +2017,15 @@ fn slice_view(view: &FeatureTabView, slice: TabSlice, strip: bool) -> FeatureTab
     v.hover = view.hover.filter(|hit| match slice {
         TabSlice::Head => {
             matches!(hit, H::Prev | H::Next | H::Button(_) | H::Node(_))
-                || strip && matches!(hit, H::Repo(_) | H::RepoButton(_) | H::MoreRepos(_))
+                || strip
+                    && matches!(
+                        hit,
+                        H::Repo(_) | H::RepoButton(_) | H::RepoRemove(_) | H::MoreRepos(_)
+                    )
         }
-        TabSlice::Column(TabColumn::Repos) => matches!(hit, H::Repo(_) | H::RepoButton(_)),
+        TabSlice::Column(TabColumn::Repos) => {
+            matches!(hit, H::Repo(_) | H::RepoButton(_) | H::RepoRemove(_))
+        }
         TabSlice::Column(TabColumn::Page) => matches!(hit, H::PageButton(_) | H::AgentPick(_)),
         TabSlice::Column(TabColumn::Activity) => false,
         TabSlice::Hints => matches!(hit, H::Hint(_)),
@@ -2819,6 +2856,9 @@ impl Painter {
                 let hovered = view.hover == Some(FeatureTabHit::RepoButton(i));
                 self.button(c, label, *b, (hovered, false), ButtonStyle::Plain, scale, p);
             }
+            if let Some(b) = l.repo_removes.get(i).copied().flatten() {
+                self.repo_remove(c, view, i, b, scale, p);
+            }
         }
         // The chips standing for those that don't fit.
         for (chip, i, label) in &l.more_repos {
@@ -2831,6 +2871,25 @@ impl Painter {
             let color = if lit { p.text } else { p.muted };
             self.centered(c, label, SMALL_FONT_SIZE, *chip, scale, color);
         }
+    }
+
+    /// The × taking repository `i` out of the feature, in `rect`.
+    fn repo_remove(
+        &self,
+        c: &mut Canvas,
+        view: &FeatureTabView,
+        i: usize,
+        rect: Rect,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let color = if view.hover == Some(FeatureTabHit::RepoRemove(i)) {
+            p.text
+        } else {
+            p.muted
+        };
+        let s = scale as f32;
+        icon_sdf(c, rect, scale, color, |x, y| cross(x, y, 0.8 * s));
     }
 
     /// A repository's dot in `spot`: touched in the success colour, else
@@ -3065,11 +3124,17 @@ impl Painter {
                     return;
                 };
                 let selected = view.focus == TabArea::Repos && view.repo == *i;
-                let lit = matches!(view.hover, Some(FeatureTabHit::Repo(r) | FeatureTabHit::RepoButton(r)) if r == *i);
+                let lit = matches!(
+                    view.hover,
+                    Some(FeatureTabHit::Repo(r) | FeatureTabHit::RepoButton(r) | FeatureTabHit::RepoRemove(r))
+                        if r == *i
+                );
                 self.row_highlight(c, rect, (selected, if lit { 1.0 } else { 0.0 }), scale, p);
                 let button = l.repos.get(*i).and_then(|(_, b)| *b).map(at);
-                let end =
-                    button.map_or(rect.loc.x + rect.size.w - 4, |b| b.loc.x - QUIT_BUTTON_GAP);
+                let remove = l.repo_removes.get(*i).copied().flatten().map(at);
+                let end = button
+                    .or(remove)
+                    .map_or(rect.loc.x + rect.size.w - 4, |b| b.loc.x - QUIT_BUTTON_GAP);
                 let left = rect.loc.x + DOT_ROOM + 4;
                 // The lines it changes, at the end of its name's line,
                 // when they leave the name room.
@@ -3101,6 +3166,9 @@ impl Painter {
                 if let (Some(b), Some(label)) = (button, repo.button) {
                     let hovered = view.hover == Some(FeatureTabHit::RepoButton(*i));
                     self.button(c, label, b, (hovered, false), ButtonStyle::Plain, scale, p);
+                }
+                if let Some(b) = remove {
+                    self.repo_remove(c, view, *i, b, scale, p);
                 }
             }
             Piece::File(k) => {

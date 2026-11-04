@@ -168,7 +168,7 @@ fn root_of(
 
 /// The repositories right under `dir`, by name: folders whose `.git` is a
 /// folder (main worktrees; a `.git` file is a linked worktree's).
-fn child_repos(dir: &Path) -> Vec<(String, PathBuf)> {
+pub(super) fn child_repos(dir: &Path) -> Vec<(String, PathBuf)> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
@@ -244,20 +244,20 @@ pub struct Created {
     pub links: Vec<PathBuf>,
 }
 
-/// Make feature `slug`'s folder under `root`: a worktree per repository,
-/// on branch `feature/<slug>` from its base for those named in `touched`,
-/// detached at its base for the rest. For a single repository the
-/// worktree is the folder itself. Keeps `.features/` out of git and the
-/// tools that index the root. On a failure, what was made is taken down
-/// again before the error returns.
+/// Make feature `slug`'s folder under `root`: a worktree on branch
+/// `feature/<slug>` from its base for each repository named in `touched`,
+/// and none for the rest (`add_repos` brings one in later). A single
+/// repository is always in, and its worktree is the folder itself. Keeps
+/// `.features/` out of git and the tools that index the root. On a failure,
+/// what was made is taken down again before the error returns.
 pub fn create(root: &Root, slug: &str, touched: &[String]) -> Result<Created, String> {
     create_in(root, slug, touched, None)
 }
 
 /// `create` for linked project `project` of a feature: its repositories
 /// are `project`'s (`Repo::project`), and only those named in `touched`
-/// are on the branch, a single one too (the home project's single
-/// repository always is: it is what the feature is about).
+/// are in it, a single one too (the home project's single repository
+/// always is: it is what the feature is about). At least one must be.
 pub fn create_linked(
     root: &Root,
     slug: &str,
@@ -285,29 +285,43 @@ fn create_in(
     {
         return Err(format!("{} has no repository {name}", shown(&root.path)));
     }
+    let chosen = chosen(root, touched, project);
+    if chosen.is_empty() && project.is_some() {
+        return Err(format!("no repository of {} was picked", shown(&root.path)));
+    }
     let features = root.path.join(FEATURES_DIR);
     let dir = features.join(slug);
     if dir.symlink_metadata().is_ok() {
         return Err(format!("{} already exists", shown(&dir)));
     }
     let branch = format!("feature/{slug}");
-    for repo in &root.repos {
+    for repo in &chosen {
         if branch_exists(&repo.main, &branch) {
             return Err(format!("{} already has a branch {branch}", repo.name));
         }
     }
     let mut made = Made {
         features: (!features.exists()).then(|| features.clone()),
-        dir: dir.clone(),
+        dir: Some(dir.clone()),
+        branch: branch.clone(),
         worktrees: Vec::new(),
     };
-    match build(root, &dir, &branch, touched, project, &mut made) {
+    match build(root, &dir, &branch, &chosen, project, &mut made) {
         Ok(created) => Ok(created),
         Err(err) => {
             made.undo();
             Err(err)
         }
     }
+}
+
+/// The repositories of `root` a new feature folder holds: those named in
+/// `touched`, and the home project's single one whatever it says.
+fn chosen<'a>(root: &'a Root, touched: &[String], project: Option<&str>) -> Vec<&'a Found> {
+    let all = !root.multi && project.is_none();
+    (root.repos.iter())
+        .filter(|r| all || touched.contains(&r.name))
+        .collect()
 }
 
 /// A linked project to make a feature's folder in.
@@ -318,8 +332,53 @@ pub struct LinkSpec {
     /// Its name, for errors.
     pub name: String,
     pub root: Root,
-    /// Its repositories the feature changes.
+    /// Its repositories the feature holds, on the feature's branch.
     pub touched: Vec<String>,
+}
+
+/// Repositories to bring into a feature folder that is there already.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AddSpec {
+    /// The linked project's id; `None`: the home project.
+    pub project: Option<String>,
+    /// The project's name, for errors.
+    pub name: String,
+    pub root: Root,
+    pub names: Vec<String>,
+}
+
+/// What `link_more` made: new links with their folders, and repositories
+/// that joined folders there already.
+pub type MoreLinked = (Vec<(Link, Created)>, Vec<Repo>);
+
+/// `create_links` for `links`, then `add_repos` for `adds`: on a failure,
+/// everything made so far is taken down again.
+pub fn link_more(
+    feature: &Feature,
+    links: &[LinkSpec],
+    adds: &[AddSpec],
+) -> Result<MoreLinked, String> {
+    let made = create_links(&feature.slug, links)?;
+    let mut repos: Vec<Repo> = Vec::new();
+    for add in adds {
+        match add_repos(feature, add.project.as_deref(), &add.root, &add.names) {
+            Ok(added) => repos.extend(added),
+            Err(err) => {
+                let mut failed = Vec::new();
+                for repo in &repos {
+                    take_down_repo(&feature.branch(), repo, true, &mut failed);
+                }
+                if !failed.is_empty() {
+                    tracing::warn!("taking repositories out again: {}", failed.join("; "));
+                }
+                for (_, created) in &made {
+                    undo_created(&feature.slug, created);
+                }
+                return Err(format!("{}: {err}", add.name));
+            }
+        }
+    }
+    Ok((made, repos))
 }
 
 /// `create` in the home `root`, then `create_links`: on a failure, every
@@ -389,34 +448,36 @@ pub fn link_of(project: &str, root: &Root, created: &Created) -> Link {
     }
 }
 
-/// What `create` has made so far, to take down on a failure.
+/// What `create` or `add_repos` has made so far, to take down on a failure.
 struct Made {
     /// `.features`, when `create` made it.
     features: Option<PathBuf>,
-    dir: PathBuf,
-    /// Each worktree's main worktree, folder, and branch made for it.
-    worktrees: Vec<(PathBuf, PathBuf, Option<String>)>,
+    /// The feature folder, when `create` made it.
+    dir: Option<PathBuf>,
+    /// The branch each worktree was made on.
+    branch: String,
+    /// Each worktree's main worktree and folder.
+    worktrees: Vec<(PathBuf, PathBuf)>,
 }
 
 impl Made {
     fn undo(self) {
-        for (main, path, branch) in self.worktrees.iter().rev() {
+        for (main, path) in self.worktrees.iter().rev() {
             let p = path.to_string_lossy();
             if let Err(err) = git(main, &["worktree", "remove", "--force", &p]) {
                 tracing::warn!("taking down {}: {err}", path.display());
             }
-            if let Some(branch) = branch
-                && let Err(err) = git(main, &["branch", "-D", branch])
-            {
-                tracing::warn!("deleting {branch} in {}: {err}", main.display());
+            if let Err(err) = git(main, &["branch", "-D", &self.branch]) {
+                tracing::warn!("deleting {} in {}: {err}", self.branch, main.display());
             }
         }
-        if let Err(err) = std::fs::remove_dir_all(&self.dir)
+        if let Some(dir) = &self.dir
+            && let Err(err) = std::fs::remove_dir_all(dir)
             && err.kind() != std::io::ErrorKind::NotFound
         {
-            tracing::warn!("removing {}: {err}", self.dir.display());
+            tracing::warn!("removing {}: {err}", dir.display());
         }
-        for (main, _, _) in &self.worktrees {
+        for (main, _) in &self.worktrees {
             if let Err(err) = git(main, &["worktree", "prune"]) {
                 tracing::warn!("pruning worktrees of {}: {err}", main.display());
             }
@@ -433,7 +494,7 @@ fn build(
     root: &Root,
     dir: &Path,
     branch: &str,
-    touched: &[String],
+    chosen: &[&Found],
     project: Option<&str>,
     made: &mut Made,
 ) -> Result<Created, String> {
@@ -445,37 +506,13 @@ fn build(
             .map_err(|err| format!("couldn't make {}: {err}", shown(parent)))?;
     }
     let mut repos = Vec::new();
-    for found in &root.repos {
-        let is_touched = (!root.multi && project.is_none()) || touched.contains(&found.name);
+    for found in chosen {
         let path = if root.multi {
             dir.join(&found.name)
         } else {
             dir.to_path_buf()
         };
-        let commit =
-            commit_of(&found.main, &found.base).map_err(|err| format!("{}: {err}", found.name))?;
-        let p = path.to_string_lossy();
-        let args: Vec<&str> = if is_touched {
-            vec!["worktree", "add", "-q", "-b", branch, &p, &commit]
-        } else {
-            vec!["worktree", "add", "-q", "--detach", &p, &commit]
-        };
-        git(&found.main, &args).map_err(|err| format!("{}: {err}", found.name))?;
-        made.worktrees.push((
-            found.main.clone(),
-            path.clone(),
-            is_touched.then(|| branch.to_owned()),
-        ));
-        repos.push(Repo {
-            name: found.name.clone(),
-            main: found.main.clone(),
-            base: found.base.clone(),
-            base_commit: commit,
-            worktree: path,
-            touched: is_touched,
-            branch: is_touched.then(|| branch.to_owned()),
-            project: project.map(str::to_owned),
-        });
+        repos.push(add_worktree(found, path, project, made)?);
     }
     let links = if root.multi {
         link_root(&root.path, dir)?
@@ -483,7 +520,7 @@ fn build(
         Vec::new()
     };
     let ignores = keep_out(root)?;
-    for repo in repos.iter().filter(|r| r.touched) {
+    for repo in &repos {
         guard_worktree(repo, branch);
     }
     Ok(Created {
@@ -492,6 +529,106 @@ fn build(
         ignores,
         links,
     })
+}
+
+/// A worktree at `path` of repository `found` on `made`'s branch, from its
+/// base; noted in `made`.
+fn add_worktree(
+    found: &Found,
+    path: PathBuf,
+    project: Option<&str>,
+    made: &mut Made,
+) -> Result<Repo, String> {
+    let commit =
+        commit_of(&found.main, &found.base).map_err(|err| format!("{}: {err}", found.name))?;
+    let branch = made.branch.clone();
+    let p = path.to_string_lossy();
+    git(
+        &found.main,
+        &["worktree", "add", "-q", "-b", &branch, &p, &commit],
+    )
+    .map_err(|err| format!("{}: {err}", found.name))?;
+    made.worktrees.push((found.main.clone(), path.clone()));
+    Ok(Repo {
+        name: found.name.clone(),
+        main: found.main.clone(),
+        base: found.base.clone(),
+        base_commit: commit,
+        worktree: path,
+        touched: true,
+        branch: Some(branch),
+        project: project.map(str::to_owned),
+    })
+}
+
+/// Bring repositories `names` of `root` into `feature`'s existing folder of
+/// `project` (`None`: the home one), each on the feature's branch from its
+/// base. Returns them, for the caller to keep (`Feature::insert_repos`). On
+/// a failure, those made are taken down again before the error returns.
+pub fn add_repos(
+    feature: &Feature,
+    project: Option<&str>,
+    root: &Root,
+    names: &[String],
+) -> Result<Vec<Repo>, String> {
+    let (dir, multi, at) = match project {
+        None => (&feature.dir, feature.multi, &feature.root),
+        Some(id) => {
+            let Some(link) = feature.link(id) else {
+                return Err(format!("{} doesn't span {id}", feature.title));
+            };
+            (&link.dir, link.multi, &link.root)
+        }
+    };
+    if !multi {
+        return Err(format!("{} holds one repository only", shown(dir)));
+    }
+    if root.path != *at {
+        return Err(format!(
+            "its repositories moved from {} to {}",
+            shown(at),
+            shown(&root.path)
+        ));
+    }
+    let branch = feature.branch();
+    let mut chosen = Vec::new();
+    for name in names {
+        let Some(found) = root.repos.iter().find(|r| r.name == *name) else {
+            return Err(format!("{} has no repository {name}", shown(&root.path)));
+        };
+        if feature.repos_of(project).any(|r| r.name == *name) {
+            return Err(format!("{} already has {name}", feature.title));
+        }
+        // A root file of that name, linked in when the folder was made.
+        let path = dir.join(name);
+        if path.symlink_metadata().is_ok() {
+            return Err(format!("{} already exists", shown(&path)));
+        }
+        if branch_exists(&found.main, &branch) {
+            return Err(format!("{name} already has a branch {branch}"));
+        }
+        chosen.push((found, path));
+    }
+    let mut made = Made {
+        features: None,
+        dir: None,
+        branch: branch.clone(),
+        worktrees: Vec::new(),
+    };
+    let mut repos = Vec::new();
+    for (found, path) in chosen {
+        match add_worktree(found, path, project, &mut made) {
+            Ok(repo) => repos.push(repo),
+            Err(err) => {
+                made.undo();
+                return Err(err);
+            }
+        }
+    }
+    for repo in &repos {
+        guard_worktree(repo, &branch);
+    }
+    Ok(repos)
 }
 
 /// Whether `main`'s repository has a local branch `branch`.
@@ -556,6 +693,18 @@ fn link_root(root: &Path, dir: &Path) -> Result<Vec<PathBuf>, String> {
         links.push(link);
     }
     Ok(links)
+}
+
+/// The repositories in `feature`'s root it doesn't hold, by name, with their
+/// main worktrees. No git, only the folder's listing.
+pub fn others_in_root(feature: &Feature) -> Vec<(String, PathBuf)> {
+    if !feature.multi {
+        return Vec::new();
+    }
+    child_repos(&feature.root)
+        .into_iter()
+        .filter(|(name, _)| !feature.repos_of(None).any(|r| r.name == *name))
+        .collect()
 }
 
 /// Keep `.features/` out of git (single repository) and the tools that
@@ -771,12 +920,6 @@ pub fn losses(feature: &Feature) -> Vec<String> {
     feature.repos.iter().filter_map(loss).collect()
 }
 
-/// `losses` of `feature`'s repositories of linked project `project` alone,
-/// as unlinking it would lose.
-pub fn losses_of(feature: &Feature, project: &str) -> Vec<String> {
-    feature.repos_of(Some(project)).filter_map(loss).collect()
-}
-
 /// What taking `repo`'s worktree down would lose, as `losses` says it.
 fn loss(repo: &Repo) -> Option<String> {
     if !repo.worktree.is_dir() {
@@ -795,18 +938,23 @@ fn loss(repo: &Repo) -> Option<String> {
         parts.push(format!("{changed} changed {}", plural(changed, "file")));
     }
     if repo.touched {
-        let range = format!("{}..HEAD", base_ref(repo));
-        match git(&repo.worktree, &["rev-list", "--count", &range]) {
-            Ok(count) => {
-                let n: usize = count.trim().parse().unwrap_or(0);
-                if n > 0 {
-                    parts.push(format!("{n} {} not in {}", plural(n, "commit"), repo.base));
-                }
-            }
+        match commits_of(repo) {
+            Ok(0) => {}
+            Ok(n) => parts.push(format!("{n} {} not in {}", plural(n, "commit"), repo.base)),
             Err(err) => parts.push(format!("couldn't count its commits ({err})")),
         }
     }
     (!parts.is_empty()).then(|| format!("{}: {}", repo.key(), parts.join(", ")))
+}
+
+/// How many commits `repo`'s worktree has that its base doesn't.
+fn commits_of(repo: &Repo) -> Result<usize, String> {
+    let range = format!("{}..HEAD", base_ref(repo));
+    let count = git(&repo.worktree, &["rev-list", "--count", &range])?;
+    count
+        .trim()
+        .parse()
+        .map_err(|err| format!("couldn't read a commit count: {err}"))
 }
 
 fn plural(n: usize, word: &str) -> String {
@@ -845,30 +993,99 @@ pub fn remove(feature: &Feature, force: bool) -> Result<(), String> {
     }
 }
 
-/// Take down `feature`'s worktrees and folder in linked project `project`,
-/// as `remove` does for all of them; the feature itself stays, without
-/// that project's repositories once the caller drops them.
-pub fn unlink(feature: &Feature, project: &str, force: bool) -> Result<(), String> {
-    let Some(link) = feature.link(project) else {
-        return Err(format!("{} doesn't span {project}", feature.title));
-    };
-    if !force {
-        let lost = losses_of(feature, project);
-        if !lost.is_empty() {
+/// Why repositories `keys` can't leave `feature`, whatever they hold: the
+/// home project's single repository is the feature's folder, and a feature
+/// has to change one.
+pub fn removal_refusal(feature: &Feature, keys: &[String]) -> Option<String> {
+    let goes = |r: &Repo| keys.contains(&r.key());
+    if !feature.multi
+        && let Some(home) = feature.repos_of(None).find(|r| goes(r))
+    {
+        return Some(format!("{} is the feature's own folder", home.name));
+    }
+    let left = feature.touched().any(|r| !goes(r));
+    let any = feature.touched().any(goes);
+    (any && !left).then(|| "a feature needs a repository to change".to_owned())
+}
+
+/// What taking repositories `keys` out of `feature` would lose, as `losses`
+/// says it; an error when one has commits not in its base, which stop it:
+/// they are the feature's work, and shipping them is the way out.
+pub fn removal_losses(feature: &Feature, keys: &[String]) -> Result<Vec<String>, String> {
+    let repos: Vec<&Repo> = (feature.repos.iter())
+        .filter(|r| keys.contains(&r.key()))
+        .collect();
+    for repo in &repos {
+        if !repo.touched || !repo.worktree.is_dir() {
+            continue;
+        }
+        let n = commits_of(repo).map_err(|err| format!("{}: {err}", repo.key()))?;
+        if n > 0 {
             return Err(format!(
-                "{project} would lose work, so it was left: {}",
-                lost.join("; ")
+                "{} has {n} {} not in {}",
+                repo.key(),
+                plural(n, "commit"),
+                repo.base
             ));
         }
     }
-    let mut failed = Vec::new();
-    let repos: Vec<&Repo> = feature.repos_of(Some(project)).collect();
-    take_down(&feature.branch(), &repos, &link.dir, force, &mut failed);
-    if failed.is_empty() {
-        Ok(())
-    } else {
-        Err(failed.join("; "))
+    Ok(repos.into_iter().filter_map(loss).collect())
+}
+
+/// Take repositories `keys` out of `feature`: their worktrees and branches
+/// go, and a linked project's folder once none of its repositories are
+/// left. The home folder stays. Without `force`, one that would lose work
+/// is left and says so. Says for each key how it went; the caller drops
+/// those gone from the record, and a link with none left.
+pub fn remove_repos(
+    feature: &Feature,
+    keys: &[String],
+    force: bool,
+) -> Vec<(String, Result<(), String>)> {
+    let branch = feature.branch();
+    let mut results: Vec<(String, Result<(), String>)> = Vec::new();
+    for key in keys {
+        let result = match feature.repo(key) {
+            None => Err(format!("{} has no repository {key}", feature.title)),
+            Some(repo) => match loss(repo).filter(|_| !force) {
+                Some(lost) => Err(format!("it would lose work, so it was left: {lost}")),
+                None => {
+                    let mut failed = Vec::new();
+                    take_down_repo(&branch, repo, force, &mut failed);
+                    if failed.is_empty() {
+                        Ok(())
+                    } else {
+                        Err(failed.join("; "))
+                    }
+                }
+            },
+        };
+        results.push((key.clone(), result));
     }
+    for link in &feature.links {
+        let id = Some(link.project.as_str());
+        let gone = |r: &Repo| {
+            let key = r.key();
+            results
+                .iter()
+                .any(|(k, result)| *k == key && result.is_ok())
+        };
+        // One without any was never this call's to take down.
+        if !feature.repos_of(id).any(gone) || !feature.repos_of(id).all(gone) {
+            continue;
+        }
+        let mut failed = Vec::new();
+        clear_folder(&link.dir, force, &mut failed);
+        if !failed.is_empty() {
+            // The repositories are gone either way: what stays is a folder.
+            tracing::warn!(
+                "taking {} down: {}",
+                shown(&link.dir),
+                failed.join("; ")
+            );
+        }
+    }
+    results
 }
 
 /// Take down `repos`' worktrees of a feature on `branch`, all in feature
@@ -877,54 +1094,74 @@ pub fn unlink(feature: &Feature, project: &str, force: bool) -> Result<(), Strin
 fn take_down(branch: &str, repos: &[&Repo], dir: &Path, force: bool, failed: &mut Vec<String>) {
     let mut left = false;
     for repo in repos {
-        let name = repo.key();
-        if repo.worktree.symlink_metadata().is_ok() {
-            let p = repo.worktree.to_string_lossy();
-            let mut args = vec!["worktree", "remove"];
-            if force {
-                args.push("--force");
-            }
-            args.push(&p);
-            if let Err(err) = git(&repo.main, &args) {
-                failed.push(format!("{name}: {err}"));
-                left = true;
-                continue;
-            }
-        } else if let Err(err) = git(&repo.main, &["worktree", "prune"]) {
+        left |= !take_down_repo(branch, repo, force, failed);
+    }
+    if !left {
+        clear_folder(dir, force, failed);
+    } else {
+        clear_features(dir);
+    }
+}
+
+/// Take down `repo`'s worktree of a feature on `branch` and that branch,
+/// noting what failed in `failed`. Whether the worktree went.
+fn take_down_repo(branch: &str, repo: &Repo, force: bool, failed: &mut Vec<String>) -> bool {
+    let name = repo.key();
+    if repo.worktree.symlink_metadata().is_ok() {
+        let p = repo.worktree.to_string_lossy();
+        let mut args = vec!["worktree", "remove"];
+        if force {
+            args.push("--force");
+        }
+        args.push(&p);
+        if let Err(err) = git(&repo.main, &args) {
             failed.push(format!("{name}: {err}"));
+            return false;
         }
-        if !repo.touched {
-            continue;
-        }
-        if let Err(err) = hook::unguard(&repo.main, branch) {
-            tracing::warn!("unguarding {branch} of {name}: {err}");
-        }
-        if !branch_exists(&repo.main, branch) {
-            continue;
-        }
-        if !force {
-            let range = format!("{}..{branch}", base_ref(repo));
-            let ahead = git(&repo.main, &["rev-list", "--count", &range])
-                .ok()
-                .and_then(|n| n.trim().parse::<usize>().ok());
-            if ahead != Some(0) {
-                failed.push(format!(
-                    "{name}: kept branch {branch}, it has commits not in {}",
-                    repo.base
-                ));
-                continue;
-            }
-        }
-        if let Err(err) = git(&repo.main, &["branch", "-D", branch]) {
-            failed.push(format!("{name}: {err}"));
+    } else if let Err(err) = git(&repo.main, &["worktree", "prune"]) {
+        failed.push(format!("{name}: {err}"));
+    }
+    if !repo.touched {
+        return true;
+    }
+    if let Err(err) = hook::unguard(&repo.main, branch) {
+        tracing::warn!("unguarding {branch} of {name}: {err}");
+    }
+    if !branch_exists(&repo.main, branch) {
+        return true;
+    }
+    if !force {
+        let range = format!("{}..{branch}", base_ref(repo));
+        let ahead = git(&repo.main, &["rev-list", "--count", &range])
+            .ok()
+            .and_then(|n| n.trim().parse::<usize>().ok());
+        if ahead != Some(0) {
+            failed.push(format!(
+                "{name}: kept branch {branch}, it has commits not in {}",
+                repo.base
+            ));
+            return true;
         }
     }
-    if !left
-        && dir.symlink_metadata().is_ok()
+    if let Err(err) = git(&repo.main, &["branch", "-D", branch]) {
+        failed.push(format!("{name}: {err}"));
+    }
+    true
+}
+
+/// Remove feature folder `dir`, its worktrees gone, noting a failure in
+/// `failed`; then `.features` if that leaves it empty.
+fn clear_folder(dir: &Path, force: bool, failed: &mut Vec<String>) {
+    if dir.symlink_metadata().is_ok()
         && let Err(err) = clear_dir(dir, force)
     {
         failed.push(err);
     }
+    clear_features(dir);
+}
+
+/// Remove the `.features` folder holding `dir`, if it is empty.
+fn clear_features(dir: &Path) {
     if let Some(features) = dir.parent()
         && features.file_name().is_some_and(|n| n == FEATURES_DIR)
     {
@@ -1127,6 +1364,25 @@ mod tests {
             viewed: Default::default(),
             manual: None,
             history: Vec::new(),
+        }
+    }
+
+    /// `main`'s repository as a feature made before linking holds one left
+    /// out of it: detached at its base in worktree `path`.
+    fn context_repo(main: &Path, path: &Path) -> Repo {
+        run(
+            main,
+            &["worktree", "add", "-q", "--detach", path.to_str().unwrap()],
+        );
+        Repo {
+            name: folder_name(main),
+            main: main.to_path_buf(),
+            base: "main".into(),
+            base_commit: run(main, &["rev-parse", "main"]).trim().into(),
+            worktree: path.to_path_buf(),
+            touched: false,
+            branch: None,
+            project: None,
         }
     }
 
@@ -1383,35 +1639,41 @@ mod tests {
         let linked = find_root(&lib, &[], &[], &[]).unwrap();
         assert!(!linked.multi);
 
-        // Untouched, a single repository of a linked project is detached.
-        let created = create_linked(&linked, "x", &[], "other").unwrap();
+        // Not picked, a linked project has nothing to make a folder of.
+        let err = create_linked(&linked, "x", &[], "other").unwrap_err();
+        assert!(err.contains("no repository"), "{err}");
+        assert!(!lib.join(".features").exists());
+
+        // Its single repository, on the branch.
+        let created = create_linked(&linked, "x", &["lib".into()], "other").unwrap();
         let dir = lib.join(".features/x");
         assert_eq!(created.dir, dir);
         assert_eq!(created.repos[0].project.as_deref(), Some("other"));
-        assert!(!created.repos[0].touched);
-        assert!(!branch_exists(&lib, "feature/x"));
+        assert!(created.repos[0].touched);
+        assert!(branch_exists(&lib, "feature/x"));
         let exclude = std::fs::read_to_string(lib.join(".git/info/exclude")).unwrap();
         assert!(exclude.contains("/.features/"));
         f.links.push(link_of("other", &linked, &created));
         f.repos.extend(created.repos);
         assert_eq!(f.repos[1].key(), "other:lib");
 
-        // Touched later, by its key.
-        let touched = touch(&f, "other:lib").unwrap();
-        assert!(touched.touched);
-        assert!(branch_exists(&lib, "feature/x"));
-        f.repos[1] = touched;
         std::fs::write(dir.join("new"), "x").unwrap();
+        let keys = ["other:lib".to_owned()];
         assert_eq!(losses(&f), ["other:lib: 1 changed file"]);
-        assert_eq!(losses_of(&f, "other"), ["other:lib: 1 changed file"]);
-        let err = unlink(&f, "other", false).unwrap_err();
+        assert_eq!(
+            removal_losses(&f, &keys).unwrap(),
+            ["other:lib: 1 changed file"]
+        );
+        let results = remove_repos(&f, &keys, false);
+        let err = results[0].1.as_ref().unwrap_err();
         assert!(err.contains("would lose work"), "{err}");
+        assert!(dir.is_dir());
         let err = remove(&f, false).unwrap_err();
         assert!(err.contains("other:lib"), "{err}");
         std::fs::remove_file(dir.join("new")).unwrap();
 
-        // Unlinked: its folder goes, the home one stays.
-        unlink(&f, "other", false).unwrap();
+        // Taken out: its folder goes, the home one stays.
+        assert_eq!(remove_repos(&f, &keys, false), [(keys[0].clone(), Ok(()))]);
         assert!(!lib.join(".features").exists());
         assert!(!branch_exists(&lib, "feature/x"));
         assert!(f.dir.is_dir());
@@ -1449,7 +1711,8 @@ mod tests {
         };
         // The second link can't be made: neither folder stays.
         std::fs::create_dir_all(libs[1].join(".features/x")).unwrap();
-        let err = create_spanning(&root, "x", &[], &[spec(0, &["lib"]), spec(1, &[])]).unwrap_err();
+        let err =
+            create_spanning(&root, "x", &[], &[spec(0, &["lib"]), spec(1, &["lib"])]).unwrap_err();
         assert!(err.starts_with("Project 1: "), "{err}");
         assert!(!home.join(".features/x").exists());
         assert!(!libs[0].join(".features").exists());
@@ -1458,12 +1721,12 @@ mod tests {
         std::fs::remove_dir_all(libs[1].join(".features")).unwrap();
 
         let (made, links) =
-            create_spanning(&root, "x", &[], &[spec(0, &["lib"]), spec(1, &[])]).unwrap();
+            create_spanning(&root, "x", &[], &[spec(0, &["lib"]), spec(1, &["lib"])]).unwrap();
         assert_eq!(made.dir, home.join(".features/x"));
         assert_eq!(links.len(), 2);
         assert_eq!(links[0].0.project, "p0");
         assert_eq!(links[0].0.dir, libs[0].join(".features/x"));
-        assert!(links[0].1.repos[0].touched && !links[1].1.repos[0].touched);
+        assert!(links[0].1.repos[0].touched && links[1].1.repos[0].touched);
         assert_eq!(links[1].1.repos[0].key(), "p1:lib");
         let mut f = feature_of(&root, made, "x");
         for (link, created) in links {
@@ -1515,7 +1778,7 @@ mod tests {
         t.repo("api", "main");
         t.repo("web", "main");
         let root = find_root(&t.0, &[], &[], &[]).unwrap();
-        let created = create(&root, "x", &[]).unwrap();
+        let created = create(&root, "x", &["api".into()]).unwrap();
         let again = find_root(&created.dir, std::slice::from_ref(&created.dir), &[], &[]).unwrap();
         assert_eq!(again, root);
         let again = find_root(&created.dir.join("api"), &[], &[], &[]).unwrap();
@@ -1535,7 +1798,7 @@ mod tests {
         let api = t.repo("api", "main");
         t.repo("web", "main");
         let root = find_root(&t.0, &[], &[], &[]).unwrap();
-        let created = create(&root, "x", &[]).unwrap();
+        let created = create(&root, "x", &["api".into()]).unwrap();
         assert_eq!(main_top(&created.dir.join("api")), Some(api));
         assert_eq!(main_top(&created.dir), None);
     }
@@ -1576,8 +1839,8 @@ mod tests {
         // A feature gets a worktree of the one from elsewhere too.
         let root = find_root(&api, &dirs, &[], &[]).unwrap();
         let created = create(&root, "x", &["tool".into()]).unwrap();
-        assert_eq!(created.repos[1].worktree, app.join(".features/x/tool"));
-        assert!(created.repos[1].touched);
+        assert_eq!(created.repos[0].worktree, app.join(".features/x/tool"));
+        assert!(created.repos[0].touched);
 
         // Ignored ones stay out, wherever they are.
         let root = find_root(&api, &dirs, &["tool".into()], &[]).unwrap();
@@ -1646,8 +1909,8 @@ mod tests {
         std::fs::write(app.join("tool"), "x").unwrap();
         let dirs = [app.join("api"), app.join("web"), b.join("tool")];
         let root = find_root(&app.join("api"), &dirs, &[], &[]).unwrap();
-        let created = create(&root, "x", &[]).unwrap();
-        assert!(created.repos[1].worktree.join(".git").is_file());
+        let created = create(&root, "x", &["tool".into()]).unwrap();
+        assert!(created.repos[0].worktree.join(".git").is_file());
     }
 
     #[test]
@@ -1695,7 +1958,7 @@ mod tests {
     }
 
     #[test]
-    fn multi_creates_touched_and_detached_worktrees_with_links() {
+    fn multi_creates_worktrees_of_the_ticked_repositories_with_links() {
         let t = Temp::new();
         let api = t.repo("api", "main");
         let web = t.repo("web", "main");
@@ -1721,14 +1984,8 @@ mod tests {
         let root = find_root(&t.0, &[], &[], &[]).unwrap();
         let created = create(&root, "auth", &["web".into()]).unwrap();
         let dir = t.0.join(".features/auth");
-        let (a, w) = (&created.repos[0], &created.repos[1]);
-        assert!(!a.touched && a.branch.is_none());
-        assert_eq!(a.worktree, dir.join("api"));
-        assert_eq!(run(&a.worktree, &["branch", "--show-current"]).trim(), "");
-        assert_eq!(
-            run(&a.worktree, &["rev-parse", "HEAD"]).trim(),
-            a.base_commit
-        );
+        assert_eq!(created.repos.len(), 1);
+        let w = &created.repos[0];
         assert!(w.touched);
         assert_eq!(
             run(&w.worktree, &["branch", "--show-current"]).trim(),
@@ -1736,6 +1993,15 @@ mod tests {
         );
         assert!(!branch_exists(&api, "feature/auth"));
         assert!(branch_exists(&web, "feature/auth"));
+        // The one left out has no folder, no link and no worktree.
+        assert!(dir.join("api").symlink_metadata().is_err());
+        assert_eq!(
+            run(&api, &["worktree", "list", "--porcelain"])
+                .matches("worktree ")
+                .count(),
+            2,
+            "the main one and api-perf only"
+        );
 
         let linked: Vec<_> = created
             .links
@@ -1771,8 +2037,15 @@ mod tests {
         let second = create(&root, "other", &[]).unwrap();
         assert!(second.ignores.is_empty());
 
-        // touch puts the detached one on the branch.
-        let f = feature_of(&root, created, "auth");
+        // A feature made before holds a detached one: touch puts it on the
+        // branch.
+        let mut f = feature_of(&root, created, "auth");
+        f.insert_repos(vec![context_repo(&api, &dir.join("api"))]);
+        assert_eq!(f.repos[0].name, "api");
+        assert_eq!(
+            run(&f.repos[0].worktree, &["branch", "--show-current"]).trim(),
+            ""
+        );
         assert!(touch(&f, "web").unwrap_err().contains("already"));
         assert!(
             touch(&f, "nope")
@@ -1788,10 +2061,9 @@ mod tests {
             run(&touched.worktree, &["branch", "--show-current"]).trim(),
             "feature/auth"
         );
-        let mut f = f;
         f.repos[0] = touched;
 
-        // Untracked in the detached... now touched api: a loss.
+        // Untracked in the now touched api: a loss.
         std::fs::write(f.repos[0].worktree.join("n"), "x").unwrap();
         assert_eq!(losses(&f), vec!["api: 1 changed file".to_owned()]);
         assert!(remove(&f, false).is_err());
@@ -1937,6 +2209,242 @@ mod tests {
     }
 
     #[test]
+    fn a_branch_clash_counts_only_for_the_repositories_picked() {
+        let t = Temp::new();
+        let api = t.repo("api", "main");
+        t.repo("web", "main");
+        run(&api, &["branch", "feature/x"]);
+        let root = find_root(&t.0, &[], &[], &[]).unwrap();
+        let err = create(&root, "x", &["api".into()]).unwrap_err();
+        assert_eq!(err, "api already has a branch feature/x");
+        assert!(create(&root, "x", &["web".into()]).is_ok());
+    }
+
+    #[test]
+    fn repositories_join_a_feature_folder_later() {
+        let t = Temp::new();
+        let (api, web, zed) = (
+            t.repo("api", "main"),
+            t.repo("web", "main"),
+            t.repo("zed", "main"),
+        );
+        std::fs::write(t.0.join("tool"), "a root file").unwrap();
+        let root = find_root(&t.0, &[], &[], &[]).unwrap();
+        let created = create(&root, "x", &["web".into()]).unwrap();
+        let mut f = feature_of(&root, created, "x");
+
+        let added = add_repos(&f, None, &root, &["zed".into(), "api".into()]).unwrap();
+        assert!(added.iter().all(|r| r.touched));
+        f.insert_repos(added);
+        let keys: Vec<String> = f.repos.iter().map(Repo::key).collect();
+        assert_eq!(keys, ["api", "web", "zed"]);
+        assert_eq!(f.repos[0].worktree, f.dir.join("api"));
+        assert_eq!(
+            run(&f.repos[0].worktree, &["branch", "--show-current"]).trim(),
+            "feature/x"
+        );
+        assert!(hook::guarded(&api, "feature/x"));
+
+        // There already, and names it doesn't have.
+        let err = add_repos(&f, None, &root, &["web".into()]).unwrap_err();
+        assert!(err.contains("already has web"), "{err}");
+        let err = add_repos(&f, None, &root, &["nope".into()]).unwrap_err();
+        assert!(err.contains("no repository nope"), "{err}");
+
+        // Another project's folder can't take them, nor one of one repository.
+        let err = add_repos(&f, Some("gone"), &root, &["api".into()]).unwrap_err();
+        assert!(err.contains("doesn't span gone"), "{err}");
+        let mut moved = root.clone();
+        moved.path = t.0.join("elsewhere");
+        let (mut one, _) = (f.clone(), &web);
+        one.repos.truncate(1);
+        let err = add_repos(&one, None, &moved, &["web".into()]).unwrap_err();
+        assert!(err.contains("moved"), "{err}");
+        one.multi = false;
+        let err = add_repos(&one, None, &root, &["web".into()]).unwrap_err();
+        assert!(err.contains("one repository"), "{err}");
+        assert!(zed.is_dir());
+    }
+
+    #[test]
+    fn a_failed_add_takes_down_only_what_it_made() {
+        let t = Temp::new();
+        let (api, web, zed) = (
+            t.repo("api", "main"),
+            t.repo("web", "main"),
+            t.repo("zed", "main"),
+        );
+        let bases = [("zed".to_owned(), "nope".to_owned())];
+        let root = find_root(&t.0, &[], &[], &bases).unwrap();
+        let created = create(&root, "x", &["web".into()]).unwrap();
+        let f = feature_of(&root, created, "x");
+        let err = add_repos(&f, None, &root, &["api".into(), "zed".into()]).unwrap_err();
+        assert!(err.contains("nope"), "{err}");
+        assert!(!branch_exists(&api, "feature/x"));
+        assert!(!f.dir.join("api").exists());
+        assert!(f.dir.join("web").is_dir());
+        assert!(branch_exists(&web, "feature/x"));
+        assert!(!branch_exists(&zed, "feature/x"));
+
+        // A branch left behind stops it before anything is made.
+        run(&zed, &["branch", "feature/x"]);
+        let root = find_root(&t.0, &[], &[], &[]).unwrap();
+        let err = add_repos(&f, None, &root, &["api".into(), "zed".into()]).unwrap_err();
+        assert_eq!(err, "zed already has a branch feature/x");
+        assert!(!branch_exists(&api, "feature/x"));
+    }
+
+    #[test]
+    fn a_root_file_of_its_name_stops_a_repository_joining() {
+        let t = Temp::new();
+        let (app, b) = (t.0.join("app"), t.0.join("b"));
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        for (folder, name) in [(&app, "api"), (&app, "web"), (&b, "tool")] {
+            let repo = folder.join(name);
+            std::fs::create_dir(&repo).unwrap();
+            run(&repo, &["init", "-q", "-b", "main"]);
+            commit(&repo, "a", "first");
+        }
+        std::fs::write(app.join("tool"), "x").unwrap();
+        let dirs = [app.join("api"), app.join("web"), b.join("tool")];
+        let root = find_root(&app.join("api"), &dirs, &[], &[]).unwrap();
+        let created = create(&root, "x", &["api".into()]).unwrap();
+        let f = feature_of(&root, created, "x");
+        let err = add_repos(&f, None, &root, &["tool".into()]).unwrap_err();
+        assert!(err.contains("already exists"), "{err}");
+    }
+
+    #[test]
+    fn one_repository_leaves_and_the_folder_stays() {
+        let t = Temp::new();
+        let (api, web) = (t.repo("api", "main"), t.repo("web", "main"));
+        std::fs::write(t.0.join("AGENTS.md"), "x").unwrap();
+        let root = find_root(&t.0, &[], &[], &[]).unwrap();
+        let created = create(&root, "x", &["api".into(), "web".into()]).unwrap();
+        let mut f = feature_of(&root, created, "x");
+        let keys = ["web".to_owned()];
+
+        // Uncommitted work is said, and left without force.
+        std::fs::write(f.repos[1].worktree.join("n"), "x").unwrap();
+        assert_eq!(removal_losses(&f, &keys).unwrap(), ["web: 1 changed file"]);
+        let results = remove_repos(&f, &keys, false);
+        assert!(results[0].1.as_ref().unwrap_err().contains("lose work"));
+        assert!(f.repos[1].worktree.is_dir());
+        // Commits refuse it, however it is asked.
+        commit(&f.repos[1].worktree, "n", "work");
+        assert_eq!(
+            removal_losses(&f, &keys).unwrap_err(),
+            "web has 1 commit not in main"
+        );
+        run(&f.repos[1].worktree, &["reset", "-q", "--hard", "main"]);
+
+        // Force takes uncommitted work, and the rest is as it was.
+        std::fs::write(f.repos[1].worktree.join("n"), "x").unwrap();
+        assert_eq!(remove_repos(&f, &keys, true), [(keys[0].clone(), Ok(()))]);
+        assert!(!f.dir.join("web").exists());
+        assert!(!branch_exists(&web, "feature/x"));
+        assert!(!hook::guarded(&web, "feature/x"));
+        assert!(f.dir.join("api").is_dir());
+        assert!(f.dir.join("AGENTS.md").is_file());
+        assert!(branch_exists(&api, "feature/x"));
+        f.repos.retain(|r| r.name != "web");
+        remove(&f, false).unwrap();
+        assert!(!t.0.join(".features").exists());
+    }
+
+    #[test]
+    fn a_read_only_repository_of_an_old_feature_can_leave() {
+        let t = Temp::new();
+        let (api, web) = (t.repo("api", "main"), t.repo("web", "main"));
+        let root = find_root(&t.0, &[], &[], &[]).unwrap();
+        let created = create(&root, "x", &["web".into()]).unwrap();
+        let mut f = feature_of(&root, created, "x");
+        f.insert_repos(vec![context_repo(&api, &f.dir.join("api"))]);
+        let keys = ["api".to_owned()];
+        assert_eq!(removal_refusal(&f, &keys), None);
+        assert_eq!(removal_losses(&f, &keys).unwrap(), Vec::<String>::new());
+        assert_eq!(remove_repos(&f, &keys, false), [(keys[0].clone(), Ok(()))]);
+        assert!(!f.dir.join("api").exists());
+        assert!(branch_exists(&web, "feature/x"));
+    }
+
+    #[test]
+    fn a_feature_keeps_a_repository_to_change_and_its_own_folder() {
+        let t = Temp::new();
+        let (api, web) = (t.repo("api", "main"), t.repo("web", "main"));
+        let root = find_root(&t.0, &[], &[], &[]).unwrap();
+        let created = create(&root, "x", &["web".into()]).unwrap();
+        let mut f = feature_of(&root, created, "x");
+        let web_key = ["web".to_owned()];
+        assert_eq!(
+            removal_refusal(&f, &web_key).as_deref(),
+            Some("a feature needs a repository to change")
+        );
+        // A read-only one left doesn't count.
+        f.insert_repos(vec![context_repo(&api, &f.dir.join("api"))]);
+        assert!(removal_refusal(&f, &web_key).is_some());
+        assert!(web.is_dir());
+
+        // A single repository is the feature's folder, with links or not.
+        let t = Temp::new();
+        let repo = t.repo("app", "main");
+        let root = find_root(&repo, &[], &[], &[]).unwrap();
+        let f = feature_of(&root, create(&root, "x", &[]).unwrap(), "x");
+        let err = removal_refusal(&f, &["app".to_owned()]).unwrap();
+        assert!(err.contains("own folder"), "{err}");
+    }
+
+    #[test]
+    fn a_link_goes_with_its_last_repository() {
+        let t = Temp::new();
+        let home = t.repo("app", "main");
+        let other = t.0.join("other");
+        std::fs::create_dir(&other).unwrap();
+        for name in ["lib", "docs"] {
+            let repo = other.join(name);
+            std::fs::create_dir(&repo).unwrap();
+            run(&repo, &["init", "-q", "-b", "main"]);
+            commit(&repo, "a", "first");
+        }
+        let root = find_root(&home, &[], &[], &[]).unwrap();
+        let mut f = feature_of(&root, create(&root, "x", &[]).unwrap(), "x");
+        let linked = find_root(&other, &[], &[], &[]).unwrap();
+        let created = create_linked(&linked, "x", &["lib".into()], "other").unwrap();
+        let dir = created.dir.clone();
+        f.links.push(link_of("other", &linked, &created));
+        f.insert_repos(created.repos);
+        let added = add_repos(&f, Some("other"), &linked, &["docs".into()]).unwrap();
+        f.insert_repos(added);
+        let keys: Vec<String> = f.repos.iter().map(Repo::key).collect();
+        assert_eq!(keys, ["app", "other:docs", "other:lib"]);
+
+        // One goes: the folder stays for the other.
+        let one = ["other:docs".to_owned()];
+        assert_eq!(remove_repos(&f, &one, false), [(one[0].clone(), Ok(()))]);
+        assert!(dir.join("lib").is_dir());
+        f.repos.retain(|r| r.key() != one[0]);
+
+        // The last one goes: so does the folder.
+        let last = ["other:lib".to_owned()];
+        assert_eq!(remove_repos(&f, &last, false), [(last[0].clone(), Ok(()))]);
+        assert!(!dir.exists());
+        assert!(!other.join(".features").exists());
+    }
+
+    #[test]
+    fn a_home_folder_can_hold_no_repository() {
+        let t = Temp::new();
+        let (api, web) = (t.repo("api", "main"), t.repo("web", "main"));
+        std::fs::write(t.0.join("AGENTS.md"), "x").unwrap();
+        let root = find_root(&t.0, &[], &[], &[]).unwrap();
+        let created = create(&root, "x", &[]).unwrap();
+        assert!(created.repos.is_empty());
+        assert!(created.dir.join("AGENTS.md").is_file());
+        assert!(!branch_exists(&api, "feature/x") && !branch_exists(&web, "feature/x"));
+    }
+
+    #[test]
     fn remove_keeps_going_when_a_worktree_is_gone() {
         let t = Temp::new();
         t.repo("api", "main");
@@ -1944,7 +2452,7 @@ mod tests {
         let root = find_root(&t.0, &[], &[], &[]).unwrap();
         let created = create(&root, "g", &["web".into()]).unwrap();
         let f = feature_of(&root, created, "g");
-        std::fs::remove_dir_all(&f.repos[1].worktree).unwrap();
+        std::fs::remove_dir_all(&f.repos[0].worktree).unwrap();
         assert!(losses(&f).is_empty());
         remove(&f, false).unwrap();
         assert!(!t.0.join(".features").exists());

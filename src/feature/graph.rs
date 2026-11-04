@@ -23,7 +23,7 @@ use std::{
 
 use super::{
     Feature,
-    layout::{exclude_line, git, shown},
+    layout::{child_repos, exclude_line, git, shown},
     setup::{Exit, shell_until},
 };
 
@@ -62,8 +62,10 @@ pub struct Folder {
     pub worktrees: Vec<PathBuf>,
 }
 
-/// The folders of `feature` whose project keeps a graph, at its root or in
-/// one of its repositories' main worktrees.
+/// The folders of `feature` holding code whose project keeps a graph, at its
+/// root or in the main worktree of one of its repositories, linked to the
+/// feature or not. A folder with no repository in it has no code to graph,
+/// and naming its graph would send agents to a file that never comes.
 pub fn folders(feature: &Feature) -> Vec<Folder> {
     let home = (
         None,
@@ -81,8 +83,11 @@ pub fn folders(feature: &Feature) -> Vec<Folder> {
     });
     std::iter::once(home)
         .chain(links)
-        .filter(|(project, root, ..)| {
-            file(root).exists() || feature.repos_of(*project).any(|r| file(&r.main).exists())
+        .filter(|(project, ..)| feature.repos_of(*project).next().is_some())
+        .filter(|(project, root, _, multi)| {
+            file(root).exists()
+                || feature.repos_of(*project).any(|r| file(&r.main).exists())
+                || (*multi && child_repos(root).iter().any(|(_, main)| file(main).exists()))
         })
         .map(|(project, _, dir, multi)| Folder {
             dir: dir.to_path_buf(),

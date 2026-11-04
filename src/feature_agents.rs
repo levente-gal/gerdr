@@ -32,7 +32,7 @@ use crate::{
     feature::{
         self, Feature, PerProject, Stage, Status,
         agents::{Flavor, StageRun, Stop, command_line, needs, resume_line, session_file},
-        artifacts, graph,
+        artifacts, graph, layout,
         patch::Reading,
         review_import::FindingState,
         store, verify,
@@ -700,6 +700,14 @@ pub(crate) fn vars(
         ),
         ("evidence", String::new()),
         ("branch", feature.branch()),
+        (
+            "other_repos",
+            layout::others_in_root(feature)
+                .into_iter()
+                .map(|(name, main)| format!("- {name}: {}", main.display()))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
         (
             "multi_repo",
             if feature.many_repos() { "yes" } else { "" }.to_owned(),

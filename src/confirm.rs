@@ -71,13 +71,13 @@ pub enum Then {
         abandon: bool,
         force: bool,
     },
-    /// Unlink these linked projects (ids) from this project's feature,
+    /// Take these repositories (`Repo::key`) out of this project's feature,
     /// `force`: with the work their worktrees hold (see
-    /// `Gerdr::unlink_projects`).
-    UnlinkProjects {
+    /// `Gerdr::remove_repos`).
+    RemoveRepos {
         project: String,
         slug: String,
-        projects: Vec<String>,
+        keys: Vec<String>,
         force: bool,
     },
     /// Ship this project's feature as its Ship check said (see
@@ -599,12 +599,12 @@ impl Gerdr {
                 abandon,
                 force,
             } => self.remove_feature(&project, &slug, abandon, force),
-            Then::UnlinkProjects {
+            Then::RemoveRepos {
                 project,
                 slug,
-                projects,
+                keys,
                 force,
-            } => self.unlink_projects(&project, &slug, &projects, force),
+            } => self.remove_repos(&project, &slug, &keys, force),
             Then::ShipFeature { project, slug } => self.ship_feature(&project, &slug),
             Then::ApproveStage {
                 project,

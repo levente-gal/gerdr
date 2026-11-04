@@ -47,6 +47,9 @@ pub(crate) struct BuildState {
     pub(crate) pending: BTreeSet<Key>,
     /// Features being set up now.
     setting_up: BTreeSet<Key>,
+    /// Repositories (`Repo::key`) to take out of a feature once its setup
+    /// is done: a setup works on a copy of the feature.
+    pub after_setup: BTreeMap<Key, Vec<String>>,
     /// Features whose Verify checks run now.
     verifying: BTreeSet<Key>,
     /// Features whose Build agent was sent Verify's failures to fix: the
@@ -300,19 +303,28 @@ impl Gerdr {
     /// Set up feature `slug`'s worktrees off the thread, if its project
     /// gives setup commands and it isn't set up or being set up.
     pub fn start_setup(&mut self, project: &str, slug: &str) {
+        self.start_setup_of(project, slug, None);
+    }
+
+    /// `start_setup` of its repositories `only` (`Repo::key`), one that
+    /// joined later, or all. Whether a setup started.
+    pub fn start_setup_of(&mut self, project: &str, slug: &str, only: Option<Vec<String>>) -> bool {
         if self.projects.project(project).is_none() {
-            return;
+            return false;
         }
-        let Some(feature) = self.feature(project, slug).cloned() else {
-            return;
+        let Some(mut feature) = self.feature(project, slug).cloned() else {
+            return false;
         };
+        if let Some(only) = only {
+            feature.repos.retain(|r| only.contains(&r.key()));
+        }
         let commands = self.projects.workflows(&feature, |w| w.setup.clone());
         if !setup::has_commands(&feature, &commands) {
-            return;
+            return false;
         }
         let key = (project.to_owned(), slug.to_owned());
         if !self.features.build.setting_up.insert(key) {
-            return;
+            return false;
         }
         let now = feature::now();
         if let Some(f) = self.feature_mut(project, slug) {
@@ -356,6 +368,7 @@ impl Gerdr {
                 result,
             }
         });
+        true
     }
 
     /// The setup of feature `slug` ended: kept, and a Build agent waiting
@@ -364,6 +377,9 @@ impl Gerdr {
         let key = (project.to_owned(), slug.to_owned());
         self.features.build.setting_up.remove(&key);
         let pending = self.features.build.pending.remove(&key);
+        if let Some(keys) = self.features.build.after_setup.remove(&key) {
+            self.check_remove_repos(project.to_owned(), slug.to_owned(), keys);
+        }
         let now = feature::now();
         let Some(feature) = self.feature_mut(project, slug) else {
             return;

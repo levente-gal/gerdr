@@ -2024,6 +2024,7 @@ pub(super) fn feature_tab() -> super::FeatureTabView {
         touched,
         busy: false,
         button,
+        remove: true,
         stat,
     };
     let activity = [

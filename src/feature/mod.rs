@@ -199,8 +199,9 @@ pub struct Repo {
     pub base_commit: String,
     /// Its worktree for the feature.
     pub worktree: PathBuf,
-    /// Whether the feature changes it: then its worktree is on `branch`,
-    /// else detached at `base_commit`.
+    /// Whether the feature changes it: then its worktree is on `branch`.
+    /// Every repository linked to a feature is; a feature made before that
+    /// can hold others, read-only and detached at `base_commit`.
     pub touched: bool,
     /// `feature/<slug>` once touched.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -265,8 +266,9 @@ pub struct Feature {
     pub dir: PathBuf,
     /// Whether `root` holds several repositories.
     pub multi: bool,
-    /// Every repository, touched or not: the home project's in name
-    /// order, then each link's in link order, by name within it.
+    /// The repositories it holds: the home project's in name order, then
+    /// each link's in link order, by name within it. Not every repository
+    /// of a project: one comes in when it is linked to the feature.
     pub repos: Vec<Repo>,
     /// The other projects it spans, in the order they were linked.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -540,6 +542,20 @@ impl Feature {
         self.repos
             .iter()
             .filter(move |r| r.project.as_deref() == project)
+    }
+
+    /// Keep `new` among its repositories, in the order `repos` has them.
+    pub fn insert_repos(&mut self, new: Vec<Repo>) {
+        let mut repos = std::mem::take(&mut self.repos);
+        repos.extend(new);
+        let rank = |r: &Repo| {
+            r.project.as_deref().map_or(0, |id| {
+                let at = self.links.iter().position(|l| l.project == id);
+                at.map_or(self.links.len() + 1, |i| i + 1)
+            })
+        };
+        repos.sort_by_cached_key(|r| (rank(r), r.name.clone()));
+        self.repos = repos;
     }
 
     /// Its repositories in key order: the order patch-ids, setup and

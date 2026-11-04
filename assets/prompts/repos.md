@@ -28,5 +28,20 @@ graphify keeps a graph of this code. Ask it before you search the code, with
 {{graphs}}
 
 After you change code, run `graphify update .` in the folder that holds that
-file's `graphify-out`, not in a repository under it.
+file's `graphify-out`, not in a repository under it. A file that isn't there
+yet is still being built: search the code meanwhile.
+{{/if}}
+{{#if other_repos}}
+
+The project has other repositories that aren't in this feature. Their main
+checkouts are here to read only, and may not be on the base branch:
+
+{{other_repos}}
+
+{{#if graphs}}
+The graph doesn't hold them: search them directly.
+
+{{/if}}
+If the feature has to change one of them, say so: the user links it to the
+feature with Ctrl+Shift+L.
 {{/if}}

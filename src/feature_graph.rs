@@ -77,6 +77,19 @@ impl Gerdr {
         });
     }
 
+    /// Build feature `slug`'s code graphs again, its repositories having
+    /// changed: agents would otherwise miss the code of one that joined, and
+    /// be sent to files of one that left. A build running now read the old
+    /// ones, so this one follows it.
+    pub(crate) fn rebuild_feature_graphs(&mut self, project: &str, slug: &str) {
+        if self.busy_with(project, slug, Job::Graph).is_some() {
+            let key = (project.to_owned(), slug.to_owned());
+            self.features.graphs_again.insert(key);
+            return;
+        }
+        self.refresh_feature_graphs(project, slug, false);
+    }
+
     /// The code graph build of feature `slug` running now, to stop.
     pub(crate) fn running_feature_graphs(
         &self,
@@ -99,6 +112,7 @@ impl Gerdr {
         self.unbusy(project, slug, Job::Graph);
         let key = (project.to_owned(), slug.to_owned());
         self.features.graphs.remove(&key);
+        let again = self.features.graphs_again.remove(&key);
         if let Some(text) = excluded_text(&built.excludes) {
             self.show_success(text);
         }
@@ -117,6 +131,9 @@ impl Gerdr {
             self.show_warning(format!(
                 "Couldn't build the code graph of \u{201c}{title}\u{201d}: {why}"
             ));
+        }
+        if again {
+            self.refresh_feature_graphs(project, slug, false);
         }
     }
 }
