@@ -2967,10 +2967,11 @@ impl Gerdr {
             return;
         };
         let (workspace_dirs, ignore, bases) = root_search(project);
+        let others = self.other_projects_dirs(id);
         self.feature_work(None, move |_| Done::Found {
             serial,
             from: layout::main_top(&from),
-            result: layout::find_root(&from, &workspace_dirs, &ignore, &bases),
+            result: layout::find_project_root(&from, &workspace_dirs, &others, &ignore, &bases),
         });
     }
 
@@ -3014,20 +3015,29 @@ impl Gerdr {
                 project: source.clone(),
                 name: p.name.clone(),
             });
-            finds.push((source, from, search));
+            finds.push((source, from, search, self.other_projects_dirs(&p.id)));
         }
         if let Some(panel) = self.features.panel.as_mut() {
             panel.sources = sources;
         }
-        for (source, from, (dirs, ignore, bases)) in finds {
+        for (source, from, (dirs, ignore, bases), others) in finds {
             let (project, slug) = (project.clone(), slug.clone());
             self.feature_work(None, move |_| Done::FoundRepos {
                 project,
                 slug,
                 source,
-                result: layout::find_root(&from, &dirs, &ignore, &bases),
+                result: layout::find_project_root(&from, &dirs, &others, &ignore, &bases),
             });
         }
+    }
+
+    /// The workspace folders of every project but `id`, whose repositories
+    /// are theirs.
+    fn other_projects_dirs(&self, id: &str) -> Vec<PathBuf> {
+        (self.projects.projects.iter())
+            .filter(|p| p.id != id)
+            .flat_map(|p| p.workspaces.iter().map(|w| w.dir.clone()))
+            .collect()
     }
 
     /// The repository `key` as the feature panel's sources found it: its
@@ -3201,7 +3211,8 @@ impl Gerdr {
             let (dirs, ignore, bases) = root_search(p);
             let root = match dirs.first() {
                 Some(from) => {
-                    finds.push((p.id.clone(), from.clone(), dirs.clone(), ignore, bases));
+                    let theirs = self.other_projects_dirs(&p.id);
+                    finds.push((p.id.clone(), from.clone(), dirs.clone(), theirs, ignore, bases));
                     Finding::Looking
                 }
                 None => Finding::Failed("it has no workspace with a folder".into()),
@@ -3217,11 +3228,11 @@ impl Gerdr {
         if let Some(dialog) = self.features.dialog.as_mut() {
             dialog.others = others;
         }
-        for (project, from, dirs, ignore, bases) in finds {
+        for (project, from, dirs, theirs, ignore, bases) in finds {
             self.feature_work(None, move |_| Done::FoundOther {
                 serial,
                 project,
-                result: layout::find_root(&from, &dirs, &ignore, &bases),
+                result: layout::find_project_root(&from, &dirs, &theirs, &ignore, &bases),
             });
         }
     }
