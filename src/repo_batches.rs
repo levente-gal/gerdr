@@ -699,7 +699,7 @@ impl Gerdr {
         let Some(herdr) = self.herdr.as_mut() else {
             return self.show_error("herdr isn't running: copy the review instead".into());
         };
-        match herdr.send_line(&pane, text.trim_end()) {
+        match herdr.send_agent_line(&pane, text.trim_end()) {
             Ok(()) => self.show_success(format!("Sent {what} to {label}")),
             Err(err) => self.show_error(format!("Couldn't send the review to {label}: {err}")),
         }

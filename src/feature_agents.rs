@@ -2016,7 +2016,7 @@ impl Gerdr {
         let sent = match &agent {
             agents::AgentKey::T3(id) => self.t3_send(id, &text),
             agents::AgentKey::Herdr(pane) => match self.herdr.as_mut() {
-                Some(herdr) => herdr.send_line(pane, &text),
+                Some(herdr) => herdr.send_agent_line(pane, &text),
                 None => Err("herdr isn't connected".into()),
             },
             _ => return,

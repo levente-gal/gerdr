@@ -653,7 +653,7 @@ impl Gerdr {
         if crate::prepare::step(&herdr.process_info(pane)) != crate::prepare::Step::Busy {
             return Err(AGENT_QUIT.into());
         }
-        herdr.send_line(pane, line)
+        herdr.send_agent_line(pane, line)
     }
 
     /// The Build of feature `slug` holds on the code `patch`: marked done
