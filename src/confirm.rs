@@ -935,7 +935,7 @@ mod tests {
         assert!(body.ends_with("2 repositories have uncommitted changes"));
         let (_, body) = finish_question("Bulk export", "feature/bulk", (1, true), &[]);
         assert!(body.ends_with("feature/bulk and its worktree go"), "{body}");
-        assert_eq!(chrome::confirm_body_lines(&body), 3);
+        assert_eq!(chrome::confirm_body_lines(&body), 2);
     }
 
     #[test]

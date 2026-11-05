@@ -512,6 +512,9 @@ impl Gerdr {
     /// comments are deleted, its review closed and the agent shown. A
     /// refusal keeps them all.
     pub(crate) fn make_fixes_now(&mut self, project: &str, slug: &str) {
+        if let Some(why) = self.checks_refusal(project, slug) {
+            return self.show_warning(why);
+        }
         if self.make_fixes(project, slug) {
             self.doc_done(project, slug, DocFile::FixPlan);
             self.show_build_agent(project, slug);
