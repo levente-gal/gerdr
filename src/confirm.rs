@@ -94,6 +94,11 @@ pub enum Then {
     ShipFeature { project: String, slug: String },
     /// Approve this stage of this project's feature, its review comments
     /// deleted unsent (see `Gerdr::approve_doc_now`).
+    /// Make the fixes of this feature's plan, its comments unsent (see
+    /// `Gerdr::make_fixes_now`).
+    MakeFixes { project: String, slug: String },
+    /// Drop this feature's open fix plan (see `Gerdr::drop_fix_plan`).
+    DropFixPlan { project: String, slug: String },
     ApproveStage {
         project: String,
         slug: String,
@@ -529,6 +534,21 @@ impl Gerdr {
         self.ask(title, body, "Approve", then);
     }
 
+    /// Ask before making the fixes of feature `slug`'s plan while `count`
+    /// review comments on it are unsent (see `Gerdr::doc_approve`).
+    pub fn ask_make_fixes_unsent(&mut self, project: String, slug: String, count: usize) {
+        let title = match count {
+            1 => "Make the fixes with 1 comment unsent?".to_owned(),
+            n => format!("Make the fixes with {n} comments unsent?"),
+        };
+        let body = format!(
+            "The comments on {} are deleted, not sent to its agent. \
+             Send back sends them.",
+            crate::feature::fix_round::FILE
+        );
+        self.ask(title, body, "Make fixes", Then::MakeFixes { project, slug });
+    }
+
     /// Open the confirm dialog: `title`, `body` under it, and the `go`
     /// button doing `then`. Cancel is selected.
     pub(crate) fn ask(&mut self, title: String, body: String, go: &'static str, then: Then) {
@@ -623,6 +643,8 @@ impl Gerdr {
                 to_context,
             } => self.remove_repos(&project, &slug, &keys, force, to_context),
             Then::ShipFeature { project, slug } => self.ship_feature(&project, &slug),
+            Then::MakeFixes { project, slug } => self.make_fixes_now(&project, &slug),
+            Then::DropFixPlan { project, slug } => self.drop_fix_plan(&project, &slug),
             Then::ApproveStage {
                 project,
                 slug,

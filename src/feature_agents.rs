@@ -35,7 +35,9 @@ use crate::{
             Flavor, StageRun, Stop, T3Run, command_line, needs, resume_line, run_needs,
             session_file,
         },
-        artifacts, graph, layout,
+        artifacts,
+        fix_round::FixPhase,
+        graph, layout,
         patch::Reading,
         plan_review,
         review_import::FindingState,
@@ -75,9 +77,11 @@ pub enum GateKind {
     /// The Build agent stopped because the plan doesn't hold, and says what
     /// it needs: the user settles it with the agent.
     Blocked,
-    /// Verify failed `fixes` times in a row; gerdr stopped sending the
-    /// failures to the Build agent (stage: Verify).
-    VerifyFailed { fixes: u32 },
+    /// Verify failed: the user runs the checks again or plans the fixes
+    /// (stage: Verify).
+    VerifyFailed,
+    /// A fix plan waits to be read (any stage: the one that asked).
+    FixPlan,
     /// AI review found `open` findings to decide (Fix or Dismiss), and
     /// `fix` the user wants fixed, not sent to Build yet (stage: AI
     /// review).
@@ -364,6 +368,11 @@ pub(crate) fn gate_of(
     if let Some((stage, run)) = f.runs.iter().find(|(_, run)| run.waits_to_send()) {
         return Some((*stage, run.started, GateKind::SendPrompt));
     }
+    // A round open holds what its stage waited for.
+    if let Some(round) = &f.fix_round {
+        let since = round.ready.filter(|_| round.phase == FixPhase::Ready)?;
+        return Some((round.stage, since, GateKind::FixPlan));
+    }
     let stage = f.current()?;
     match stage {
         Stage::Discover | Stage::Plan => {
@@ -392,9 +401,8 @@ pub(crate) fn gate_of(
         }
         Stage::Verify => {
             let run = f.verify.as_ref()?;
-            let failed = run.passed == Some(false) && run.fixes >= verify::MAX_FIXES;
-            let since = run.finished.filter(|_| failed)?;
-            Some((stage, since, GateKind::VerifyFailed { fixes: run.fixes }))
+            let since = run.finished.filter(|_| run.passed == Some(false))?;
+            Some((stage, since, GateKind::VerifyFailed))
         }
         Stage::AiReview => {
             let since = f.runs.get(&stage)?.ready?;
@@ -806,7 +814,6 @@ pub(crate) fn vars(
             "evidence.path",
             data.join(verify::EVIDENCE).display().to_string(),
         ),
-        ("evidence", String::new()),
         ("branch", feature.branch()),
         (
             "other_repos",
@@ -842,6 +849,7 @@ pub(crate) fn vars(
         ("fixes", String::new()),
         ("fixes.path", String::new()),
         ("fixes.what", String::new()),
+        ("fix_plan.path", String::new()),
         ("review.diffs", String::new()),
         ("review.sent", String::new()),
         ("review.dismissed", String::new()),
@@ -925,7 +933,7 @@ pub(crate) fn agent_line(
 }
 
 /// The stamp of the file at `path`, if it is there.
-fn stamp(path: &Path) -> Option<Stamp> {
+pub(crate) fn stamp(path: &Path) -> Option<Stamp> {
     let meta = std::fs::metadata(path).ok()?;
     let at = meta
         .modified()
@@ -1451,6 +1459,7 @@ impl Gerdr {
             return;
         };
         self.fixing_tick(&project);
+        self.fix_rounds_tick(&project);
         self.adopt_checks(&project);
         let Some(all) = self.features.all.get(&project) else {
             return;
@@ -2180,6 +2189,7 @@ fn startable(feature: &Feature, stage: Stage) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::feature::fix_round::FixRound;
 
     #[test]
     fn an_agent_waiting_for_its_prompt_is_a_gate_while_its_tab_is_there() {
@@ -3198,7 +3208,7 @@ mod tests {
     }
 
     #[test]
-    fn gates_wait_for_reviews_milestones_and_verify_failing_too_often() {
+    fn gates_wait_for_reviews_milestones_failed_checks_and_fix_plans() {
         let mut review = feature("a", vec![repo("api", true)], 1);
         review.runs.insert(Stage::Plan, run(Some(400)));
         // Build's ready says it was marked done: no review.
@@ -3212,21 +3222,40 @@ mod tests {
             at: 300,
         });
         stopped.runs.insert(Stage::Build, r);
-        let failed = |slug: &str, fixes: u32| {
+        let failed = |slug: &str| {
             let mut f = feature(slug, vec![repo("api", true)], 4);
             f.verify = Some(verify::VerifyRun {
                 n: 4,
                 started: 150,
                 finished: Some(200),
                 passed: Some(false),
-                fixes,
                 ..verify::VerifyRun::default()
             });
             f
         };
+        // A fix plan holds Verify's gate until it can be read.
+        let round = |phase, ready| FixRound {
+            n: 1,
+            what: "Verify failures".into(),
+            input: "/d/a.md".into(),
+            stage: Stage::Verify,
+            phase,
+            sent_back: 0,
+            asked: 150,
+            ready,
+            stalled: None,
+            give_back: Default::default(),
+        };
+        let mut planning = failed("f");
+        planning.fix_round = Some(round(FixPhase::Planning, None));
+        let mut ready = failed("g");
+        ready.fix_round = Some(round(FixPhase::Ready, Some(400)));
+        // Approved: its agent is at it, nothing waits for the user.
+        let mut fixing = failed("h");
+        fixing.fix_round = Some(round(FixPhase::Fixing, Some(400)));
         let all = BTreeMap::from([(
             "one".to_owned(),
-            vec![review, built, stopped, failed("d", 3), failed("e", 2)],
+            vec![review, built, stopped, failed("d"), planning, ready, fixing],
         )]);
         let gates = gates(&all, |_| None);
         let got: Vec<(&str, Stage, u64, GateKind)> = gates
@@ -3236,7 +3265,7 @@ mod tests {
         assert_eq!(
             got,
             vec![
-                ("d", Stage::Verify, 200, GateKind::VerifyFailed { fixes: 3 }),
+                ("d", Stage::Verify, 200, GateKind::VerifyFailed),
                 (
                     "c",
                     Stage::Build,
@@ -3244,6 +3273,7 @@ mod tests {
                     GateKind::Milestone { done: 2, total: 4 }
                 ),
                 ("a", Stage::Plan, 400, GateKind::Review),
+                ("g", Stage::Verify, 400, GateKind::FixPlan),
             ]
         );
     }
@@ -3297,16 +3327,9 @@ mod tests {
         assert_eq!(v["artifact.path"], "/data/a/build.md");
         assert_eq!(v["plan.path"], "/data/a/plan.md");
         assert_eq!(v["evidence.path"], "/data/a/evidence.md");
-        assert_eq!(v["evidence"], "");
         assert_eq!(v["branch"], "feature/a");
         let text = prompts::render_builtin("build", &v).unwrap();
         assert!(text.contains("Feature a") && !text.contains("npm test"));
-        let mut fix = v.clone();
-        fix.insert("evidence".into(), "api: `npm test` exited with 1".into());
-        let text = prompts::render_builtin("build", &fix).unwrap();
-        assert!(text.contains("npm test"));
-        let line = prompts::render_builtin("fix", &v).unwrap();
-        assert!(line.contains("/data/a/evidence.md") && !line.trim().contains('\n'));
         let line = prompts::render_builtin("continue", &v).unwrap();
         assert!(line.contains("/data/a/build.md") && !line.trim().contains('\n'));
     }

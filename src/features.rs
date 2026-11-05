@@ -76,6 +76,7 @@ use crate::{
     feature::{
         self, Event, Feature, Pr, Repo, Stage, Status,
         agents::needs,
+        fix_round::{FixPhase, FixRound},
         graph,
         hook::Guard,
         layout::{self, AddSpec, Created, Found, LinkSpec, Root},
@@ -954,6 +955,16 @@ pub enum PanelOutcome {
     Findings,
     /// Send AI review's findings to fix to the Build agent.
     SendFixes,
+    /// Start a fix round on Verify's failures.
+    PlanFixes,
+    /// Open the fix plan under review.
+    ReviewFixPlan,
+    /// The user approved the fix plan: the agent makes the fixes.
+    MakeFixes,
+    /// Tell the agent again to write the fix plan: it stopped without one.
+    AskFixPlan,
+    /// Drop the open fix plan, after asking.
+    DropFixPlan,
     /// Open the project commands dialog on this tab.
     EditCommands(CommandsTab),
     /// Decide this finding of AI review.
@@ -1905,12 +1916,14 @@ fn fresh_stage(feature: &Feature, row: PanelRow) -> Option<Stage> {
 
 /// The stage Ctrl+Shift+Del starts over on `stage`'s page of `feature`:
 /// the current one, once there is something to lose. Discover has no stage
-/// before it to free, and Ctrl+R starts its agent afresh.
+/// before it to free, and Ctrl+R starts its agent afresh. A fix plan open
+/// on the page goes first: that key drops it.
 fn start_over_stage(feature: &Feature, stage: Stage, ctx: RowCtx) -> Option<Stage> {
     let live = (feature.runs.get(&stage)).is_some_and(|run| run.live());
     (feature.status == Status::Open
         && feature.current() == Some(stage)
         && stage != Stage::Discover
+        && fix_round_on(feature, stage).is_none()
         && (live || feature.has_output(stage, |s| ctx.has_file(s))))
     .then_some(stage)
 }
@@ -1961,7 +1974,10 @@ fn action_hint(action: &PanelOutcome) -> &'static str {
         PanelOutcome::StopSandbox => "stop sandbox\u{2026}",
         PanelOutcome::RemoveSandbox => "remove sandbox\u{2026}",
         PanelOutcome::Findings => "review in diff",
-        PanelOutcome::SendFixes => "send fixes",
+        PanelOutcome::SendFixes | PanelOutcome::PlanFixes => "plan fixes",
+        PanelOutcome::ReviewFixPlan => "review fix plan",
+        PanelOutcome::MakeFixes => "make fixes",
+        PanelOutcome::AskFixPlan => "ask again",
         PanelOutcome::EditCommands(_) => "edit commands",
         PanelOutcome::CodeReview => "review code",
         PanelOutcome::ManualTest => "test",
@@ -1991,7 +2007,7 @@ fn stage_button(feature: &Feature, stage: Stage, ctx: RowCtx) -> Option<&'static
         PanelOutcome::Continue(_) => Some("Continue"),
         PanelOutcome::RunChecks => Some("Run checks"),
         PanelOutcome::Findings => Some("Review in diff"),
-        PanelOutcome::SendFixes => Some("Send fixes"),
+        PanelOutcome::SendFixes => Some("Plan fixes"),
         PanelOutcome::CodeReview => Some("Review code"),
         PanelOutcome::ManualTest => Some("Test\u{2026}"),
         PanelOutcome::PlanSuggestions => Some("Decide\u{2026}"),
@@ -2590,6 +2606,14 @@ impl FeaturePanel {
                 return (stage_mark(feature, stage) == StageMark::Done)
                     .then_some(PanelOutcome::Untick(stage));
             }
+            // The file's review has it too.
+            Keysym::Return | Keysym::KP_Enter
+                if ctrl
+                    && self.focus == TabArea::Stages
+                    && fix_round_on(feature, stage).is_some_and(|r| r.phase == FixPhase::Ready) =>
+            {
+                return Some(PanelOutcome::MakeFixes);
+            }
             Keysym::Return | Keysym::KP_Enter => {
                 if self.focus == TabArea::Stages {
                     return page_enter(feature, stage, ctx);
@@ -2683,6 +2707,9 @@ impl FeaturePanel {
                 return Some(PanelOutcome::ChangeDecisions);
             }
             Keysym::Delete | Keysym::KP_Delete if ctrl && mods.shift => {
+                if fix_round_on(feature, stage).is_some_and(FixRound::before_fixing) {
+                    return Some(PanelOutcome::DropFixPlan);
+                }
                 return start_over_stage(feature, stage, ctx).map(PanelOutcome::StartOver);
             }
             Keysym::Delete | Keysym::KP_Delete if plain && self.focus == TabArea::Repos => {
@@ -2744,6 +2771,67 @@ const REOPEN_KEY: &str = "Ctrl+Shift+Enter";
 /// The key of the current stage's Start over.
 const START_OVER_KEY: &str = "Ctrl+Shift+Del";
 
+/// The open fix round of `feature`, on the page of the stage that asked.
+fn fix_round_on(feature: &Feature, stage: Stage) -> Option<&FixRound> {
+    (feature.status == Status::Open)
+        .then_some(feature.fix_round.as_ref())
+        .flatten()
+        .filter(|r| r.stage == stage)
+}
+
+/// The buttons of `round`, what Enter does first: what it waits for.
+fn fix_round_buttons(
+    feature: &Feature,
+    round: &FixRound,
+    ctx: RowCtx,
+) -> Vec<(PageButton, PanelOutcome)> {
+    let button = |label: &str, style| PageButton {
+        label: label.to_owned(),
+        style,
+    };
+    let mut out = Vec::new();
+    // A fresh agent has its prompt to go first: nothing is planned before.
+    let waits = (feature.runs.get(&Stage::Build)).is_some_and(|run| run.waits_to_send());
+    if waits {
+        out.push((
+            button("Send prompt", ButtonStyle::Primary),
+            PanelOutcome::SendPrompt(Stage::Build),
+        ));
+    }
+    match round.phase {
+        _ if waits => {}
+        FixPhase::Ready => {
+            out.push((
+                button("Review", ButtonStyle::Primary),
+                PanelOutcome::ReviewFixPlan,
+            ));
+            out.push((
+                button("Make fixes", ButtonStyle::Plain),
+                PanelOutcome::MakeFixes,
+            ));
+        }
+        FixPhase::Planning if round.stalled.is_some() => out.push((
+            button("Ask again", ButtonStyle::Primary),
+            PanelOutcome::AskFixPlan,
+        )),
+        _ => {}
+    }
+    if let Some((label, outcome)) = agent_button(feature, Stage::Build, ctx) {
+        let style = match out.is_empty() {
+            true => ButtonStyle::Primary,
+            false => ButtonStyle::Plain,
+        };
+        out.push((button(label, style), outcome));
+    }
+    if round.before_fixing() {
+        out.push((
+            button("Drop plan\u{2026}", ButtonStyle::Quiet),
+            PanelOutcome::DropFixPlan,
+        ));
+    }
+    out
+}
+
 /// The buttons on `stage`'s page of `feature`, each with what it does:
 /// what Enter does first (the primary; on a done stage, going to the
 /// current one, then Reopen unless it is locked), then its agent's tab, a
@@ -2769,6 +2857,23 @@ pub fn page_actions(
     // First whatever the stage's mark: a fresh Build agent for fixes waits
     // on a done Build.
     let send = PanelOutcome::SendPrompt(stage);
+    // The open fix plan, on the page of the stage that asked, comes before
+    // all else: its stage waits for it.
+    let round = fix_round_on(feature, stage);
+    if let Some(round) = round {
+        out.extend(fix_round_buttons(feature, round, ctx));
+    }
+    let plan_fixes = stage == Stage::Verify
+        && mark == StageMark::Current
+        && feature.fix_round.is_none()
+        && !checks_running(feature)
+        && (feature.verify.as_ref()).is_some_and(|v| feature::verify::to_fix(v).is_some());
+    if plan_fixes {
+        out.push((
+            button("Plan fixes", ButtonStyle::Primary),
+            PanelOutcome::PlanFixes,
+        ));
+    }
     let waits = feature.status == Status::Open
         && (feature.runs.get(&stage)).is_some_and(|run| run.waits_to_send());
     if waits {
@@ -2777,7 +2882,7 @@ pub fn page_actions(
     // Work sent back to the Build agent, seen from the stage the feature is
     // at: what it waits for comes first.
     let back = rework_on(feature, stage, ctx);
-    if back == Some(Rework::Waits) {
+    if back == Some(Rework::Waits) && round.is_none() {
         out.push((
             button("Send prompt", ButtonStyle::Primary),
             PanelOutcome::SendPrompt(Stage::Build),
@@ -2798,7 +2903,7 @@ pub fn page_actions(
         // Reopen is no default: Enter leaves a done stage be.
         let style = match main {
             PanelOutcome::Untick(_) => ButtonStyle::Plain,
-            _ if back == Some(Rework::Waits) => ButtonStyle::Plain,
+            _ if back == Some(Rework::Waits) || round.is_some() || plan_fixes => ButtonStyle::Plain,
             _ => ButtonStyle::Primary,
         };
         out.push((button(label, style), main));
@@ -2811,7 +2916,8 @@ pub fn page_actions(
         out.push((button(label, ButtonStyle::Plain), outcome));
     }
     if back.is_some()
-        && let Some((label, outcome)) = agent_button(feature, Stage::Build, ctx)
+        && let Some((label, outcome)) =
+            agent_button(feature, Stage::Build, ctx).filter(|(_, o)| !has(&out, o))
     {
         out.push((button(label, ButtonStyle::Plain), outcome));
     }
@@ -2911,9 +3017,10 @@ pub fn page_actions(
         ));
     }
     let fixes = (feature.review.as_ref()).is_some_and(|r| r.count(FindingState::Fix) > 0);
-    if mark == StageMark::Current && fixes && has(&out, &PanelOutcome::Findings) {
+    if mark == StageMark::Current && round.is_none() && fixes && has(&out, &PanelOutcome::Findings)
+    {
         out.push((
-            button("Send fixes", ButtonStyle::Plain),
+            button("Plan fixes", ButtonStyle::Plain),
             PanelOutcome::SendFixes,
         ));
     }
@@ -4514,6 +4621,8 @@ impl Gerdr {
             plan_review: None,
             viewed: Default::default(),
             manual: None,
+            fix_round: None,
+            fix_rounds: 0,
         };
         self.features
             .all
@@ -5113,6 +5222,11 @@ impl Gerdr {
                 self.open_feature_diff(&project, &slug, first.as_deref());
             }
             PanelOutcome::SendFixes => self.send_findings(&project, &slug),
+            PanelOutcome::PlanFixes => self.plan_verify_fixes(&project, &slug),
+            PanelOutcome::ReviewFixPlan => self.open_doc_tab(&project, &slug, DocFile::FixPlan),
+            PanelOutcome::MakeFixes => self.make_fixes_now(&project, &slug),
+            PanelOutcome::AskFixPlan => self.ask_fix_plan(&project, &slug),
+            PanelOutcome::DropFixPlan => self.ask_drop_fix_plan(project.clone(), slug.clone()),
             PanelOutcome::EditCommands(tab) => {
                 // With nothing to run yet, what a repository always checks
                 // comes first.
@@ -5213,6 +5327,15 @@ impl Gerdr {
             run.pane = None;
             resumes = run.resumes();
             self.save_feature(project, slug);
+        }
+        // Build is locked by the stage that asked for the fix plan, and what
+        // comes of its chat is the round's to say.
+        let round = stage == Stage::Build
+            && (self.feature(project, slug)).is_some_and(|f| f.fix_round.is_some());
+        if round {
+            return self.show_warning(
+                "The Build agent's tab is gone: a fresh agent takes the fix plan on".to_owned(),
+            );
         }
         if resumes {
             return self.resume_stage_agent(project, slug, stage);
@@ -6781,19 +6904,10 @@ fn verify_line(feature: &Feature, ctx: RowCtx, running: Option<&str>) -> Option<
         .verify
         .as_ref()
         .filter(|v| v.passed == Some(false))?;
-    let mut line = match run.failures.first() {
+    let line = match run.failures.first() {
         Some(first) => format!("failed: {first}"),
         None => "failed".to_owned(),
     };
-    let most = feature::verify::MAX_FIXES;
-    if run.fixes >= most {
-        line.push_str(" \u{b7} fix it, then Run checks");
-    } else if run.fixes > 0 {
-        line.push_str(&format!(
-            " \u{b7} fix sent to the Build agent ({} of {most})",
-            run.fixes
-        ));
-    }
     Some(line)
 }
 
@@ -6905,9 +7019,21 @@ fn card_status(
     back: Option<Rework>,
     now: u64,
 ) -> (Option<Stage>, String, chrome::CardTone) {
-    if let Some(back) = back {
+    // A round's agent at work says what it does; one waiting for its prompt
+    // has the user to act.
+    let round = feature.fix_round.as_ref();
+    if let Some(back) = back.filter(|b| round.is_none() || !matches!(b, Rework::Runs(_))) {
         let line = format!("{} \u{b7} {}", Stage::Build.label(), back.node().1);
         return (Some(Stage::Build), line, back.tone());
+    }
+    if let Some(round) = round {
+        let tone = match (round.phase, round.stalled.is_some()) {
+            (FixPhase::Ready, _) => chrome::CardTone::Waits,
+            (_, true) => chrome::CardTone::Failed,
+            _ => chrome::CardTone::Working,
+        };
+        let line = format!("{} \u{b7} {}", round.stage.label(), round.line());
+        return (Some(round.stage), line, tone);
     }
     let stage = feature.current();
     let line = card_line(feature, stage, state, now);
@@ -6977,6 +7103,13 @@ fn running_for(now: u64, started: u64) -> String {
 
 /// The short line under current `stage`'s node on the rail.
 fn current_line(feature: &Feature, stage: Stage, state: &LineState, now: u64) -> String {
+    if let Some(round) = fix_round_on(feature, stage) {
+        let waits = (feature.runs.get(&Stage::Build)).is_some_and(|run| run.waits_to_send());
+        return match waits {
+            true => "waiting to send".to_owned(),
+            false => round.line().to_owned(),
+        };
+    }
     let run = feature.runs.get(&stage);
     let agent = || match run {
         Some(run) if run.t3 == Some(feature::agents::T3Run::Draft) => "draft in T3 Code".to_owned(),
@@ -7231,6 +7364,42 @@ fn file_card(
     }
 }
 
+/// The open fix round's card: what it fixes and how it stands, with the
+/// page's buttons in `actions` that act on the plan.
+fn fix_round_card(
+    feature: &Feature,
+    round: &FixRound,
+    actions: &[(PageButton, PanelOutcome)],
+) -> PageSection {
+    let waits = (feature.runs.get(&Stage::Build)).is_some_and(|run| run.waits_to_send());
+    let tone = match (round.phase, round.stalled.is_some()) {
+        _ if waits => CheckTone::Note,
+        (FixPhase::Ready, _) => CheckTone::Ready,
+        (_, true) => CheckTone::Blocker,
+        _ => CheckTone::Note,
+    };
+    let said = match waits {
+        true => "waiting for you \u{b7} pick a model and send the prompt",
+        false => round.stalled.as_deref().unwrap_or(round.line()),
+    };
+    PageSection::File {
+        name: "Fix plan".to_owned(),
+        state: line(format!("{} \u{b7} {said}", round.what), tone),
+        buttons: (actions.iter().enumerate())
+            .filter(|(_, (_, o))| {
+                matches!(
+                    o,
+                    PanelOutcome::ReviewFixPlan
+                        | PanelOutcome::MakeFixes
+                        | PanelOutcome::AskFixPlan
+                        | PanelOutcome::DropFixPlan
+                )
+            })
+            .map(|(i, _)| i)
+            .collect(),
+    }
+}
+
 /// How Discover's or Plan's file stands in `feature`, as `ctx` found it.
 /// A restarted agent leaves the last run's file be until it writes its
 /// own, so the card doesn't say it is gone.
@@ -7320,13 +7489,6 @@ fn last_checks(feature: &Feature, state: &PanelState) -> Vec<CheckLine> {
                 .filter(|f| !on_card(f))
                 .map(|f| line(f.clone(), CheckTone::Blocker));
             out.extend(capped(failures.collect(), CheckTone::Blocker));
-            let most = feature::verify::MAX_FIXES;
-            if run.fixes >= most {
-                out.push(line("fix it, then Run checks", CheckTone::Note));
-            } else if run.fixes > 0 {
-                let text = format!("fixes sent to the Build agent: {} of {most}", run.fixes);
-                out.push(line(text, CheckTone::Note));
-            }
             out
         }
         Some(run) => vec![line(format!("run {} running", run.n), CheckTone::Note)],
@@ -7576,6 +7738,7 @@ fn stage_page(
         }
     }
     if mark != StageMark::Later {
+        sections.extend(fix_round_on(feature, stage).map(|r| fix_round_card(feature, r, actions)));
         sections.extend(rework_card(feature, stage, state, actions));
         if let Some(m) = feature.marks.get(&stage).filter(|m| !m.note.is_empty()) {
             sections.push(lines("Note", vec![line(m.note.clone(), CheckTone::Note)]));
@@ -7784,7 +7947,11 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 4] = [
             ),
             (
                 "Ctrl+Shift+Del",
-                "start the current stage over, after asking",
+                "start the current stage over, or drop its fix plan, after asking",
+            ),
+            (
+                "Ctrl+Enter",
+                "make the fixes of a fix plan ready for review",
             ),
             ("Ctrl+Shift+O", "Verify's evidence"),
             ("Tab", "Verify: to the checks, then Up / Down through them"),
@@ -8018,6 +8185,14 @@ fn tab_hints(
             }
             if matches!(row_action(feature, row, ctx), Some(PanelOutcome::Untick(_))) {
                 hints.push(hint(REOPEN_KEY, "reopen"));
+            }
+            if let Some(round) = fix_round_on(feature, stage) {
+                if round.phase == FixPhase::Ready {
+                    hints.push(hint("Ctrl+Enter", "make fixes"));
+                }
+                if round.before_fixing() {
+                    hints.push(hint(START_OVER_KEY, "drop plan\u{2026}"));
+                }
             }
             if can_comment(feature, stage) {
                 hints.push(hint("c", "add comment\u{2026}"));
@@ -8398,6 +8573,8 @@ pub(crate) mod tests {
             plan_review: None,
             viewed: Default::default(),
             manual: None,
+            fix_round: None,
+            fix_rounds: 0,
         }
     }
 
@@ -10162,6 +10339,148 @@ pub(crate) mod tests {
         assert_eq!(press(&mut panel, &f, key(Keysym::f)), None);
     }
 
+    /// `f`, with a fix round asked by `stage`, in `phase`.
+    fn in_round(mut f: Feature, stage: Stage, phase: FixPhase) -> Feature {
+        f.fix_round = Some(FixRound {
+            n: 1,
+            what: "Verify failures".into(),
+            input: "/d/a.md".into(),
+            stage,
+            phase,
+            sent_back: 0,
+            asked: 1_000,
+            ready: (phase == FixPhase::Ready).then_some(1_100),
+            stalled: None,
+            give_back: Default::default(),
+        });
+        f
+    }
+
+    #[test]
+    fn a_failed_verify_waits_for_plan_fixes_on_enter() {
+        let mut f = verified(false);
+        // `verified` ran to its end, a check failing.
+        f.verify.as_mut().unwrap().finished = Some(1_100);
+        f.verify.as_mut().unwrap().passed = Some(false);
+        let ctx = RowCtx {
+            checks: true,
+            ..RowCtx::default()
+        };
+        assert_eq!(
+            page_enter(&f, Stage::Verify, ctx),
+            Some(PanelOutcome::PlanFixes)
+        );
+        let plain = page_actions(&f, Stage::Verify, ctx);
+        let run = plain.iter().find(|(_, o)| *o == PanelOutcome::RunChecks);
+        assert_eq!(run.map(|(b, _)| b.style), Some(ButtonStyle::Plain));
+        // A check cut short says nothing of the code: run them again first.
+        let cut = (f.verify.as_mut().unwrap().checks.iter_mut())
+            .find_map(|c| c.outcome.as_mut())
+            .unwrap();
+        cut.interrupted = true;
+        assert_eq!(
+            page_enter(&f, Stage::Verify, ctx),
+            Some(PanelOutcome::RunChecks)
+        );
+    }
+
+    #[test]
+    fn a_fix_round_shows_on_the_page_that_asked_and_takes_enter() {
+        let mut f = verified(false);
+        f.verify.as_mut().unwrap().finished = Some(1_100);
+        f.verify.as_mut().unwrap().passed = Some(false);
+        let labels_of = |f: &Feature| -> Vec<String> {
+            (page_actions(f, Stage::Verify, RowCtx::default()).into_iter())
+                .map(|(b, _)| b.label)
+                .collect()
+        };
+        let ready = in_round(f.clone(), Stage::Verify, FixPhase::Ready);
+        assert_eq!(
+            page_enter(&ready, Stage::Verify, RowCtx::default()),
+            Some(PanelOutcome::ReviewFixPlan)
+        );
+        let shown = labels_of(&ready);
+        for label in ["Review", "Make fixes", "Drop plan\u{2026}"] {
+            assert!(shown.contains(&label.to_owned()), "{label}: {shown:?}");
+        }
+        // Finish or drop it before starting the stage over.
+        assert!(
+            !shown.contains(&"Start over\u{2026}".to_owned()),
+            "{shown:?}"
+        );
+        assert_eq!(
+            start_over_stage(&ready, Stage::Verify, RowCtx::default()),
+            None
+        );
+        assert!(!shown.contains(&"Plan fixes".to_owned()), "{shown:?}");
+        let actions = page_actions(&ready, Stage::Verify, RowCtx::default());
+        let state = PanelState::default();
+        let page = stage_page(&ready, Stage::Verify, &state, &actions, 2_000);
+        let Some(PageSection::File {
+            name,
+            state,
+            buttons,
+        }) = page.sections.first()
+        else {
+            panic!("the fix plan's card first: {:?}", page.sections);
+        };
+        assert_eq!(name, "Fix plan");
+        assert_eq!(state.text, "Verify failures \u{b7} fix plan ready");
+        assert_eq!(state.tone, CheckTone::Ready);
+        let held: Vec<&str> = buttons
+            .iter()
+            .map(|i| actions[*i].0.label.as_str())
+            .collect();
+        assert_eq!(held, ["Review", "Make fixes", "Drop plan\u{2026}"]);
+
+        let planning = in_round(f.clone(), Stage::Verify, FixPhase::Planning);
+        let shown = labels_of(&planning);
+        assert!(!shown.contains(&"Make fixes".to_owned()), "{shown:?}");
+        assert!(shown.contains(&"Drop plan\u{2026}".to_owned()), "{shown:?}");
+        // A fresh agent held: its prompt goes first, and only one is primary.
+        let mut held = in_round(f.clone(), Stage::Verify, FixPhase::Planning);
+        held.runs.insert(
+            Stage::Build,
+            feature::agents::StageRun {
+                pane: Some("p1".into()),
+                held: true,
+                ..Default::default()
+            },
+        );
+        let actions = page_actions(&held, Stage::Verify, RowCtx::default());
+        let primary: Vec<&str> = (actions.iter())
+            .filter(|(b, _)| b.style == ButtonStyle::Primary)
+            .map(|(b, _)| b.label.as_str())
+            .collect();
+        assert_eq!(primary, ["Send prompt"]);
+        assert_eq!(
+            page_enter(&held, Stage::Verify, RowCtx::default()),
+            Some(PanelOutcome::SendPrompt(Stage::Build))
+        );
+        let sends = (actions.iter())
+            .filter(|(_, o)| *o == PanelOutcome::SendPrompt(Stage::Build))
+            .count();
+        assert_eq!(sends, 1);
+        // Stopped without a plan: ask again, or drop it.
+        let mut stalled = planning.clone();
+        stalled.fix_round.as_mut().unwrap().stalled = Some("it stopped".into());
+        assert_eq!(
+            page_enter(&stalled, Stage::Verify, RowCtx::default()),
+            Some(PanelOutcome::AskFixPlan)
+        );
+        // Making the fixes: nothing left to drop.
+        let fixing = in_round(f.clone(), Stage::Verify, FixPhase::Fixing);
+        let shown = labels_of(&fixing);
+        assert!(
+            !shown.contains(&"Drop plan\u{2026}".to_owned()),
+            "{shown:?}"
+        );
+        assert!(!shown.contains(&"Make fixes".to_owned()), "{shown:?}");
+        // No other stage's page has it.
+        let other = page_actions(&ready, Stage::Build, RowCtx::default());
+        assert!(!other.iter().any(|(_, o)| *o == PanelOutcome::MakeFixes));
+    }
+
     #[test]
     fn verifys_page_holds_a_card_per_check() {
         let labels = |f: &Feature| -> Vec<String> {
@@ -10357,36 +10676,23 @@ pub(crate) mod tests {
             verify_line(&f, checks, Some("api: npm test (2 of 5)")).as_deref(),
             Some("api: npm test (2 of 5)")
         );
-        let failed = |fixes: u32| feature::verify::VerifyRun {
+        let failed = || feature::verify::VerifyRun {
             n: 2,
             started: 1_000,
             finished: Some(1_100),
             passed: Some(false),
             failures: vec!["api: `npm test` exited with 1".into(), "web: lint".into()],
-            fixes,
             ..Default::default()
         };
-        f.verify = Some(failed(0));
+        f.verify = Some(failed());
         assert_eq!(
             verify_line(&f, checks, None).as_deref(),
             Some("failed: api: `npm test` exited with 1")
         );
-        f.verify = Some(failed(1));
-        assert_eq!(
-            verify_line(&f, checks, None).as_deref(),
-            Some(
-                "failed: api: `npm test` exited with 1 \u{b7} fix sent to the Build agent (1 of 3)"
-            )
-        );
-        f.verify = Some(failed(feature::verify::MAX_FIXES));
-        assert_eq!(
-            verify_line(&f, checks, None).as_deref(),
-            Some("failed: api: `npm test` exited with 1 \u{b7} fix it, then Run checks")
-        );
         // Passed: the stage's own words.
         f.verify = Some(feature::verify::VerifyRun {
             passed: Some(true),
-            ..failed(0)
+            ..failed()
         });
         assert_eq!(verify_line(&f, checks, None), None);
         let state = PanelState {
@@ -10545,7 +10851,7 @@ pub(crate) mod tests {
         );
         let fix = reviewing(&[S::Fix, S::Dismissed], true);
         assert_eq!(row_action(&fix, row, none), Some(PanelOutcome::SendFixes));
-        assert_eq!(row_hint(&fix, row, none), "send fixes");
+        assert_eq!(row_hint(&fix, row, none), "plan fixes");
         assert_eq!(review_line(&fix, None).as_deref(), Some("1 finding to fix"));
         let sent = reviewing(&[S::Sent, S::Sent], true);
         assert_eq!(
@@ -11853,7 +12159,6 @@ pub(crate) mod tests {
             finished: Some(1_100),
             passed: Some(false),
             failures: fails,
-            fixes: feature::verify::MAX_FIXES,
             ..Default::default()
         });
         let checks = RowCtx {
@@ -11868,6 +12173,7 @@ pub(crate) mod tests {
         assert_eq!(
             labels(&actions),
             [
+                ("Plan fixes", PanelOutcome::PlanFixes),
                 ("Run checks", PanelOutcome::RunChecks),
                 ("Start over\u{2026}", PanelOutcome::StartOver(Stage::Verify)),
                 ("Evidence", PanelOutcome::Evidence),
@@ -11893,7 +12199,6 @@ pub(crate) mod tests {
                 ("run 2 failed", CheckTone::Blocker),
                 ("api: `npm test` exited with 1", CheckTone::Blocker),
                 ("web: lint", CheckTone::Blocker),
-                ("fix it, then Run checks", CheckTone::Note),
             ]
         );
         let node = rail_node(&f, Stage::Verify, &state, 2_000);

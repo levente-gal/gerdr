@@ -81,7 +81,7 @@ impl DocMode {
     /// evidence has no page but this.
     pub fn choices(file: DocFile) -> &'static [DocMode] {
         match file {
-            DocFile::Stage(_) => &[DocMode::Review, DocMode::Split],
+            DocFile::Stage(_) | DocFile::FixPlan => &[DocMode::Review, DocMode::Split],
             DocFile::Evidence => &DocMode::ALL,
         }
     }
@@ -100,7 +100,7 @@ impl DocMode {
     /// file is reviewed, the evidence is read.
     pub fn default_for(file: DocFile) -> DocMode {
         match file {
-            DocFile::Stage(_) => DocMode::Review,
+            DocFile::Stage(_) | DocFile::FixPlan => DocMode::Review,
             DocFile::Evidence => DocMode::Preview,
         }
     }
@@ -110,7 +110,7 @@ impl DocMode {
     /// reviewed. Too narrow, no page starts unseen.
     pub fn opens_on(file: DocFile, wide: bool) -> DocMode {
         match file {
-            DocFile::Stage(_) if wide => DocMode::Split,
+            DocFile::Stage(_) | DocFile::FixPlan if wide => DocMode::Split,
             _ => Self::default_for(file),
         }
     }
@@ -494,7 +494,7 @@ impl Gerdr {
     /// after the feature's tab, what is shown kept shown. Where it went.
     fn insert_doc_tab(&mut self, w: usize, doc: DocOf, text: String, mode: DocMode) -> usize {
         let review = match doc.file {
-            DocFile::Stage(_) => review::load_file(&doc.comments),
+            DocFile::Stage(_) | DocFile::FixPlan => review::load_file(&doc.comments),
             DocFile::Evidence => Review::default(),
         };
         let mut wd = WorktreeDiff::of_doc(doc, w, review);

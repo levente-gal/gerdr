@@ -1793,7 +1793,7 @@ fn manual_test(note: bool) -> super::ManualTestView {
             ("f", "fail\u{2026}"),
             ("Del", "clear"),
             ("Ctrl+Enter", "mark passed"),
-            ("Ctrl+Shift+Enter", "send failures"),
+            ("Ctrl+Shift+Enter", "plan fixes"),
             ("F1", "keys"),
             ("Esc", "close"),
         ]
@@ -2114,8 +2114,8 @@ const GOLDEN_FEATURES: [[u64; 13]; 4] = [
     [
         0x73e88729cb0c3112, // new_feature
         0x6e2de5679125e8f8, // sidebar_features
-        0xab580425d0a50879, // manual_test
-        0x8e4d20f7c6316567, // manual_test_note
+        0x48cd29190d92c364, // manual_test
+        0x30f2dee311b15b1a, // manual_test_note
         0xce73d235eada39de, // plan_sheet
         0xf0ef6e28af47b05c, // plan_sheet_note
         0x444a60ab9e0f4abf, // plan_sheet_narrow
@@ -2130,8 +2130,8 @@ const GOLDEN_FEATURES: [[u64; 13]; 4] = [
     [
         0xbc9770d9310bd319, // new_feature
         0x663ede1e025ab3c8, // sidebar_features
-        0xc14927ebcde55bf1, // manual_test
-        0xb520dd662440b737, // manual_test_note
+        0xc69bc1300217b172, // manual_test
+        0x68136ae2af04111c, // manual_test_note
         0x354b777d647b74ae, // plan_sheet
         0x49003f081deb3c2e, // plan_sheet_note
         0x77de8b18241bb4b7, // plan_sheet_narrow
@@ -2146,8 +2146,8 @@ const GOLDEN_FEATURES: [[u64; 13]; 4] = [
     [
         0xb1780dfd60b1e9a8, // new_feature
         0x56baef2f92e48ad0, // sidebar_features
-        0x093b890ce5537eef, // manual_test
-        0xa74e12b563efbdaf, // manual_test_note
+        0x3153785246d452e4, // manual_test
+        0x02874c0ce90615f3, // manual_test_note
         0x6da7e766b94ea319, // plan_sheet
         0x6900962e338f6172, // plan_sheet_note
         0x5d1256e75161f348, // plan_sheet_narrow
@@ -2162,8 +2162,8 @@ const GOLDEN_FEATURES: [[u64; 13]; 4] = [
     [
         0x757537a93b40f9fa, // new_feature
         0x240f9f1a7f860b5c, // sidebar_features
-        0xed40d3ad66f63314, // manual_test
-        0x1239c6f64e145f2f, // manual_test_note
+        0x8f9a1607bd3adf41, // manual_test
+        0x877356d1e45a0964, // manual_test_note
         0x5a9fa2f0a7a81443, // plan_sheet
         0x8bc60f688ce6245b, // plan_sheet_note
         0xf99dc433f41c1492, // plan_sheet_narrow
@@ -3076,7 +3076,7 @@ fn feature_tab_resume() -> super::FeatureTabView {
     view
 }
 
-/// Verify failed: two checks fail, a fix sent.
+/// Verify failed: two checks fail, fixes to plan.
 fn feature_tab_verify_failed() -> super::FeatureTabView {
     use super::{ButtonStyle, CheckTone, NodeMark, PageButton, PageSection, StagePage};
     use crate::feature::Stage;
@@ -3085,14 +3085,15 @@ fn feature_tab_verify_failed() -> super::FeatureTabView {
     view.page = StagePage {
         title: "Verify".into(),
         about: Stage::Verify.about().into(),
-        status: Some(tab_line(
-            "2 of 5 checks failed \u{b7} fixes sent 1 of 3",
-            CheckTone::Blocker,
-        )),
+        status: Some(tab_line("2 of 5 checks failed", CheckTone::Blocker)),
         buttons: vec![
             PageButton {
-                label: "Run again".into(),
+                label: "Plan fixes".into(),
                 style: ButtonStyle::Primary,
+            },
+            PageButton {
+                label: "Run again".into(),
+                style: ButtonStyle::Plain,
             },
             PageButton {
                 label: "Evidence".into(),
@@ -3117,6 +3118,40 @@ fn feature_tab_verify_failed() -> super::FeatureTabView {
             ],
         }],
     };
+    view
+}
+
+/// A fix plan from Verify's failures, ready to review.
+fn feature_tab_fix_plan() -> super::FeatureTabView {
+    use super::{ButtonStyle, CheckTone, NodeMark, PageButton, PageSection};
+    let mut view = feature_tab_verify_failed();
+    at_stage(&mut view, 4, NodeMark::Waiting, "fix plan ready");
+    view.page.buttons = vec![
+        PageButton {
+            label: "Review".into(),
+            style: ButtonStyle::Primary,
+        },
+        PageButton {
+            label: "Make fixes".into(),
+            style: ButtonStyle::Plain,
+        },
+        PageButton {
+            label: "Drop plan\u{2026}".into(),
+            style: ButtonStyle::Quiet,
+        },
+        PageButton {
+            label: "Run again".into(),
+            style: ButtonStyle::Plain,
+        },
+    ];
+    view.page.sections.insert(
+        0,
+        PageSection::File {
+            name: "Fix plan".into(),
+            state: tab_line("Verify failures \u{b7} fix plan ready", CheckTone::Ready),
+            buttons: vec![0, 1, 2],
+        },
+    );
     view
 }
 
@@ -3664,11 +3699,12 @@ fn feature_tab_rail_wrap() -> super::FeatureTabView {
 }
 
 /// The feature tab's fixtures, by name.
-fn feature_tabs() -> [(&'static str, super::FeatureTabView); 26] {
+fn feature_tabs() -> [(&'static str, super::FeatureTabView); 27] {
     [
         ("tab_build", feature_tab()),
         ("tab_plan_ready", feature_tab_plan_ready()),
         ("tab_verify_failed", feature_tab_verify_failed()),
+        ("tab_fix_plan", feature_tab_fix_plan()),
         ("tab_ship_blocked", feature_tab_ship_blocked()),
         ("tab_done", feature_tab_done()),
         ("tab_later", feature_tab_later()),
@@ -3696,12 +3732,13 @@ fn feature_tabs() -> [(&'static str, super::FeatureTabView); 26] {
 }
 
 /// Each fixture at the width it shows best at, and Build at all three.
-const TAB_SURFACES: [(&str, i32); 33] = [
+const TAB_SURFACES: [(&str, i32); 34] = [
     ("tab_build", 860),
     ("tab_build", 1180),
     ("tab_build", 1920),
     ("tab_plan_ready", 1180),
     ("tab_verify_failed", 1920),
+    ("tab_fix_plan", 860),
     ("tab_ship_blocked", 1180),
     ("tab_done", 1920),
     ("tab_later", 860),
@@ -3732,12 +3769,13 @@ const TAB_SURFACES: [(&str, i32); 33] = [
     ("tab_plan_long", 1180),
 ];
 
-const FEATURE_TAB: [&str; 33] = [
+const FEATURE_TAB: [&str; 34] = [
     "tab_build_860",
     "tab_build_1180",
     "tab_build_1920",
     "tab_plan_ready_1180",
     "tab_verify_failed_1920",
+    "tab_fix_plan_860",
     "tab_ship_blocked_1180",
     "tab_done_1920",
     "tab_later_860",
@@ -3769,14 +3807,15 @@ const FEATURE_TAB: [&str; 33] = [
 ];
 
 /// The recorded hashes of `FEATURE_TAB`, per case in `CASES`.
-const GOLDEN_FEATURE_TAB: [[u64; 33]; 4] = [
+const GOLDEN_FEATURE_TAB: [[u64; 34]; 4] = [
     // Dark at 1
     [
         0x332b7228d6306b6d, // tab_build_860
         0x4a560a01809ab615, // tab_build_1180
         0x0ca3ff81897b4192, // tab_build_1920
         0x3e5ff22621165ca2, // tab_plan_ready_1180
-        0xee1e00a16b9f1798, // tab_verify_failed_1920
+        0xa2de827c5de38170, // tab_verify_failed_1920
+        0x886596dd8044d497, // tab_fix_plan_860
         0x7d621f80e1bd26b5, // tab_ship_blocked_1180
         0x520019d1eac6a259, // tab_done_1920
         0xa5b16c0194b40754, // tab_later_860
@@ -3812,7 +3851,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 33]; 4] = [
         0x2d2c69e8032089db, // tab_build_1180
         0x0b04f4e61d9547a4, // tab_build_1920
         0x4d3c1f8e05267489, // tab_plan_ready_1180
-        0x250880235a0dd11e, // tab_verify_failed_1920
+        0x7662f681d1008034, // tab_verify_failed_1920
+        0x8c09bbc7c0ad3977, // tab_fix_plan_860
         0x149dd2e36ff9d918, // tab_ship_blocked_1180
         0xe9ee9745a52c6e9c, // tab_done_1920
         0x124488a8df67ef48, // tab_later_860
@@ -3848,7 +3888,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 33]; 4] = [
         0x2106005dfecb09fc, // tab_build_1180
         0x1ba3f2e720cededb, // tab_build_1920
         0xf9924bda9bfd9238, // tab_plan_ready_1180
-        0xc153f6c583b96640, // tab_verify_failed_1920
+        0x6090828d836d1594, // tab_verify_failed_1920
+        0x627de956e6331a79, // tab_fix_plan_860
         0x5cdf73e777f176e5, // tab_ship_blocked_1180
         0x78472c2acf57882a, // tab_done_1920
         0xb09242356bf70e71, // tab_later_860
@@ -3884,7 +3925,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 33]; 4] = [
         0x44899eb35f2aec7b, // tab_build_1180
         0x13d5e838f53d5524, // tab_build_1920
         0x37c9808a13a03d1d, // tab_plan_ready_1180
-        0x8260f8d6a54e9fe0, // tab_verify_failed_1920
+        0xe64b80b331419051, // tab_verify_failed_1920
+        0xeda8429456482cbd, // tab_fix_plan_860
         0x51737a248f38f325, // tab_ship_blocked_1180
         0x20cb3b0d79c16be8, // tab_done_1920
         0xb84b5c9831ec1f86, // tab_later_860

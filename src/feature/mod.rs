@@ -29,6 +29,7 @@
 
 pub mod agents;
 pub mod artifacts;
+pub mod fix_round;
 pub mod graph;
 pub mod hook;
 pub mod layout;
@@ -393,6 +394,12 @@ pub struct Feature {
     /// Manual test's results (see `manual`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manual: Option<manual::ManualTest>,
+    /// The fix round open, if any (see `fix_round`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fix_round: Option<fix_round::FixRound>,
+    /// How many fix rounds it had: the next one's number goes on from it.
+    #[serde(default)]
+    pub fix_rounds: u32,
     /// The last run number of each stage whose run was forgotten: a later
     /// run goes on from it, so its prompt doesn't overwrite an old one.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -978,6 +985,8 @@ pub(crate) mod tests {
             plan_review: None,
             viewed: Default::default(),
             manual: None,
+            fix_round: None,
+            fix_rounds: 0,
         }
     }
 
@@ -1058,6 +1067,8 @@ pub(crate) mod tests {
             plan_review: None,
             viewed: Default::default(),
             manual: None,
+            fix_round: None,
+            fix_rounds: 0,
         }
     }
 

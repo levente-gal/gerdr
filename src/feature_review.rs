@@ -22,13 +22,14 @@ use crate::{
     Gerdr,
     feature::{
         self, Feature, Stage, Status, artifacts,
+        fix_round::GiveBack,
         review_import::{self, AiReview, CodeRead, Decision, Finding, FindingState},
         store,
     },
-    feature_agents::{Stamp, vars},
+    feature_agents::Stamp,
     feature_diff::COMMENTS,
     features::{Done, plural},
-    prompts, review,
+    review,
 };
 
 /// The values the AI review prompt gets of `feature` besides the stage's
@@ -143,7 +144,7 @@ fn waiting_text(title: &str, review: &AiReview) -> Option<String> {
     let what = if open > 0 {
         format!("{} to decide", plural(open, "finding"))
     } else if fix > 0 {
-        format!("{} to send to Build", plural(fix, "finding"))
+        format!("{} to fix", plural(fix, "finding"))
     } else {
         return None;
     };
@@ -374,7 +375,7 @@ impl Gerdr {
         }
         if undecided == 0 && fix > 0 {
             return self.show_success(format!(
-                "Finding {id} {word}; {} to send to Build",
+                "Finding {id} {word}; {} to fix",
                 plural(fix, "finding")
             ));
         }
@@ -483,6 +484,10 @@ impl Gerdr {
                 plural(undecided, "finding")
             ));
         }
+        let ids: Vec<String> = (review.findings.iter())
+            .filter(|f| f.state == FindingState::Fix)
+            .map(|f| f.id.clone())
+            .collect();
         let (n, mut text) = review_import::fixes_markdown(review, &title, f.many_repos());
         if n == 0 {
             return self.show_warning(format!("\u{201c}{title}\u{201d} has no findings to fix"));
@@ -504,6 +509,17 @@ impl Gerdr {
             return;
         }
         // Sent, so they don't wait for Code review as well.
+        let kept = (comments > 0)
+            .then(|| self.keep_comments(project, slug))
+            .flatten();
+        self.fix_round_gives_back(
+            project,
+            slug,
+            GiveBack::Findings {
+                ids,
+                comments: kept,
+            },
+        );
         if comments > 0 {
             if let Err(err) = review::save_file(&path, &review::Review::default()) {
                 tracing::warn!("deleting {}: {err}", path.display());
@@ -529,6 +545,26 @@ impl Gerdr {
         self.show_build_agent(project, slug);
     }
 
+    /// Keep a copy of feature `slug`'s Code review comments, for its fix
+    /// round to give back: where, if it could be made. A failure says so.
+    pub(crate) fn keep_comments(&mut self, project: &str, slug: &str) -> Option<PathBuf> {
+        let data = store::dir(None, project, slug);
+        let n = self.feature(project, slug)?.fix_rounds;
+        let copy = data
+            .join("prompts")
+            .join(format!("fix-plan-{n}-comments.json"));
+        match std::fs::copy(data.join(COMMENTS), &copy) {
+            Ok(_) => Some(copy),
+            Err(err) => {
+                tracing::warn!("keeping the comments of {project}/{slug}: {err}");
+                self.show_warning(format!(
+                    "Couldn't keep a copy of the comments: dropping the plan won't bring them back ({err})"
+                ));
+                None
+            }
+        }
+    }
+
     /// Show feature `slug`'s Build agent, just sent work: its tab is where
     /// it runs, or waits for a model and its prompt. A T3 Code draft shows
     /// itself (`t3_stage_drafted`), as does a new tab, its window not up yet.
@@ -545,14 +581,14 @@ impl Gerdr {
         }
     }
 
-    /// Send `text` (Markdown) to feature `slug`'s Build agent to act on:
-    /// into its tab while it lives, else to a fresh Build agent with it.
-    /// `what` names it for the log and the toast: "review comments",
-    /// "2 findings". Whether it went.
+    /// Start a fix round on `text` (Markdown) of feature `slug`, for its
+    /// Build agent: see `feature_fix`. `what` names it for the log, the
+    /// toasts and the prompts: "review comments", "2 findings". Whether it
+    /// started: a refusal says why, and nothing is taken.
     ///
-    /// It goes to `prompts/build-<n>-<what>-<k>.md`, and the tab is told
-    /// where in one line. Build stays done: the fixes' commits send the
-    /// feature back to it, and gerdr reads the code once the agent rests.
+    /// It goes to `prompts/build-<n>-<what>-<k>.md`, and the agent is told
+    /// where. Build stays done: the fixes' commits send the feature back to
+    /// it, and gerdr reads the code once the agent rests.
     pub(crate) fn send_to_build(
         &mut self,
         project: &str,
@@ -570,6 +606,10 @@ impl Gerdr {
             ));
             return false;
         }
+        if let Some(why) = self.fix_round_refusal(&feature) {
+            self.show_warning(why);
+            return false;
+        }
         let data = store::dir(None, project, slug);
         let dir = data.join("prompts");
         let n = feature.runs.get(&Stage::Build).map_or(0, |r| r.n);
@@ -584,48 +624,32 @@ impl Gerdr {
             self.show_error(format!("Couldn't write {}: {err}", path.display()));
             return false;
         }
-        let shown = path.display().to_string();
-        let names = self.projects.names(&feature);
-        let mut values = vars(&feature, &names, &data, Stage::Build);
-        values.insert("fixes.what".into(), what.to_owned());
-        values.insert("fixes.path".into(), shown.clone());
-        let sent = prompts::render_builtin("send-fixes", &values)
-            .map_err(|e| e.to_string())
-            .and_then(|line| self.tell_build_agent(&feature, line.trim()));
-        let fresh = sent.is_err();
-        if let Err(why) = &sent {
-            tracing::info!("sending {what} of {project}/{slug} to its Build agent: {why}");
-            let build_at = feature.marks.get(&Stage::Build).map(|m| m.at);
-            let extra = [
-                ("fixes", text),
-                ("fixes.path", shown),
-                ("fixes.what", what.to_owned()),
-            ];
-            if !self.launch_stage_agent(project, slug, Stage::Build, &extra) {
-                return false;
-            }
-            if let Some(r) = self
-                .feature_mut(project, slug)
-                .and_then(|f| f.runs.get_mut(&Stage::Build))
-            {
-                r.ready = build_at;
-            }
-        }
-        let Some(f) = self.feature_mut(project, slug) else {
+        self.start_fix_round(project, slug, what, path)
+    }
+
+    /// Start a fresh Build agent with `extra` on feature `slug`, whose Build
+    /// stays done: what it fixes sends the feature back to Build by its
+    /// commits, and its run is seen as back there. Whether it started; if
+    /// not it said why.
+    pub(crate) fn launch_fresh_build(
+        &mut self,
+        project: &str,
+        slug: &str,
+        extra: &[(&str, String)],
+    ) -> bool {
+        let build_at = (self.feature(project, slug))
+            .and_then(|f| f.marks.get(&Stage::Build))
+            .map(|m| m.at);
+        if !self.launch_stage_agent(project, slug, Stage::Build, extra) {
             return false;
-        };
-        let agent = (f.runs.get(&Stage::Build)).and_then(|r| r.agent_key());
-        let to = if fresh {
-            crate::feature_build::FRESH_BUILD_AGENT
-        } else {
-            "the Build agent"
-        };
-        f.log(feature::now(), format!("Sent {what} to {to}"));
-        self.save_feature(project, slug);
-        if let Some(agent) = agent {
-            self.watch_fixing(project, slug, agent);
         }
-        self.show_success(format!("Sent {what} of \u{201c}{title}\u{201d} to {to}"));
+        if let Some(r) = self
+            .feature_mut(project, slug)
+            .and_then(|f| f.runs.get_mut(&Stage::Build))
+        {
+            r.ready = build_at;
+        }
+        self.save_feature(project, slug);
         true
     }
 }
@@ -633,6 +657,7 @@ impl Gerdr {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::prompts;
     use crate::{
         feature::review_import::{Raw, Severity},
         features::tests::{feature, repo},
@@ -771,7 +796,7 @@ mod tests {
         review.findings[2].state = FindingState::Fix;
         assert_eq!(
             waiting_text("T", &review).as_deref(),
-            Some("AI review of \u{201c}T\u{201d}: 1 finding to send to Build")
+            Some("AI review of \u{201c}T\u{201d}: 1 finding to fix")
         );
         review.findings[2].state = FindingState::Dismissed;
         assert_eq!(waiting_text("T", &review), None);

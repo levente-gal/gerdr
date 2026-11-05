@@ -33,6 +33,7 @@ mod feature_agents;
 mod feature_build;
 mod feature_checks;
 mod feature_diff;
+mod feature_fix;
 mod feature_graph;
 mod feature_plan_review;
 mod feature_review;

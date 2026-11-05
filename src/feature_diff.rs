@@ -668,6 +668,28 @@ impl Gerdr {
     }
 
     /// Keep the open code review's counts for the feature panel.
+    /// Comments of feature `slug`'s Code review are back from a dropped fix
+    /// plan, `own` the user's own now: in its review if it is open, and in
+    /// its count.
+    pub(crate) fn code_review_comments_back(
+        &mut self,
+        project: &str,
+        slug: &str,
+        back: Vec<review::Comment>,
+        own: usize,
+    ) {
+        let open = self.repos.worktree.as_mut().filter(|wd| {
+            (wd.feature.as_ref()).is_some_and(|fe| fe.project == project && fe.slug == slug)
+        });
+        if let Some(wd) = open {
+            wd.diff.review.comments.extend(back);
+        }
+        let key = (project.to_owned(), slug.to_owned());
+        if let Some(counts) = self.code_reviews.get_mut(&key) {
+            counts.comments = own;
+        }
+    }
+
     fn code_review_counted(&mut self) {
         let Some(wd) = self.wd().filter(|wd| wd.read) else {
             return;
@@ -792,6 +814,12 @@ impl Gerdr {
         }
         if !self.send_to_build(&project, &slug, "review comments", text) {
             return;
+        }
+        // What is kept to give back must be all that was sent.
+        self.feature_save_review();
+        if let Some(copy) = self.keep_comments(&project, &slug) {
+            let back = crate::feature::fix_round::GiveBack::Comments { copy };
+            self.fix_round_gives_back(&project, &slug, back);
         }
         if let Err(err) = review::save_file(&path, &Review::default()) {
             tracing::warn!("deleting {}: {err}", path.display());

@@ -32,7 +32,13 @@ use serde::{Deserialize, Serialize};
 use crate::{
     Gerdr,
     diff::{self, FileDiff, Hunk, Line, LineKind},
-    feature::{Feature, Stage, Standing, Status, artifacts, page::Docs, store, verify::EVIDENCE},
+    feature::{
+        Feature, Stage, Standing, Status, artifacts,
+        fix_round::{self, FixPhase},
+        page::Docs,
+        store,
+        verify::EVIDENCE,
+    },
     features::{Job, lock_why},
     projects,
     review::{self, Review},
@@ -49,6 +55,9 @@ pub enum DocFile {
     /// Verify's `evidence.md`, only read: no comments, no Approve or Send
     /// back.
     Evidence,
+    /// The open fix round's plan: reviewed as a stage's file is, and Make
+    /// fixes where that has Approve.
+    FixPlan,
 }
 
 impl DocFile {
@@ -57,6 +66,15 @@ impl DocFile {
         match self {
             DocFile::Stage(stage) => stage,
             DocFile::Evidence => Stage::Verify,
+            DocFile::FixPlan => Stage::Build,
+        }
+    }
+
+    /// Where its review comments are, under feature data dir `dir`.
+    pub fn comments(self, dir: &Path) -> PathBuf {
+        match self {
+            DocFile::FixPlan => fix_round::comments_path(dir),
+            _ => comments_path(dir, self.stage()),
         }
     }
 
@@ -65,6 +83,7 @@ impl DocFile {
         match self {
             DocFile::Stage(stage) => artifacts::name(stage),
             DocFile::Evidence => Some(EVIDENCE),
+            DocFile::FixPlan => Some(fix_round::FILE),
         }
     }
 
@@ -74,6 +93,7 @@ impl DocFile {
         match self {
             DocFile::Stage(stage) => state(feature, stage, docs, now),
             DocFile::Evidence => evidence_state(feature, running),
+            DocFile::FixPlan => fix_plan_state(feature),
         }
     }
 
@@ -82,6 +102,7 @@ impl DocFile {
         match self {
             DocFile::Stage(stage) => locked(feature, stage, docs),
             DocFile::Evidence => Some(EVIDENCE_READ_ONLY),
+            DocFile::FixPlan => fix_plan_locked(feature),
         }
     }
 
@@ -215,6 +236,41 @@ pub fn locked(feature: Option<&Feature>, stage: Stage, docs: &Docs) -> Option<&'
     }
 }
 
+/// Where the fix plan of `feature` stands, as its review's header says it.
+pub fn fix_plan_state(feature: Option<&Feature>) -> String {
+    let Some(feature) = feature else {
+        return "feature gone".into();
+    };
+    let Some(round) = &feature.fix_round else {
+        return "no fix plan open".into();
+    };
+    let state = match round.phase {
+        FixPhase::Ready => "ready for review",
+        FixPhase::Fixing => "agent making the fixes",
+        FixPhase::Compacting | FixPhase::Planning => "agent still working",
+    };
+    match round.sent_back {
+        0 => state.into(),
+        1 => format!("{state} · sent back once"),
+        n => format!("{state} · sent back {n} times"),
+    }
+}
+
+/// Why the fix plan of `feature` can't be edited in its review now.
+fn fix_plan_locked(feature: Option<&Feature>) -> Option<&'static str> {
+    let Some(feature) = feature else {
+        return Some("That feature is gone");
+    };
+    match feature.fix_round.as_ref().map(|r| r.phase) {
+        Some(FixPhase::Ready) => None,
+        Some(FixPhase::Compacting | FixPhase::Planning) => {
+            Some("The agent is still writing the file")
+        }
+        Some(FixPhase::Fixing) => Some("The agent is making these fixes"),
+        None => Some("No fix plan is open"),
+    }
+}
+
 /// Where Verify of `feature` stands, as its evidence's header says it;
 /// `running` while its checks run again.
 pub fn evidence_state(feature: Option<&Feature>, running: bool) -> String {
@@ -309,7 +365,7 @@ impl Gerdr {
                     DocFile::Evidence => {
                         Failed::Warning("No evidence yet: Run checks first".into())
                     }
-                    DocFile::Stage(_) => {
+                    DocFile::Stage(_) | DocFile::FixPlan => {
                         Failed::Error(format!("No {name} yet for \u{201c}{title}\u{201d}"))
                     }
                 });
@@ -325,7 +381,7 @@ impl Gerdr {
             slug: slug.to_owned(),
             file,
             path,
-            comments: comments_path(&dir, file.stage()),
+            comments: file.comments(&dir),
             title,
             state: stands.state,
             text: None,
@@ -412,6 +468,12 @@ impl Gerdr {
             return;
         };
         let count = wd.diff.review.comments.len();
+        if doc.file == DocFile::FixPlan {
+            if count > 0 {
+                return self.ask_make_fixes_unsent(doc.project, doc.slug, count);
+            }
+            return self.make_fixes_now(&doc.project, &doc.slug);
+        }
         if count > 0 {
             let name = doc.name();
             let stage = doc.file.stage();
@@ -425,7 +487,17 @@ impl Gerdr {
     /// approval keeps both.
     pub(crate) fn approve_doc_now(&mut self, project: &str, slug: &str, stage: Stage) {
         if self.approve_stage(project, slug, stage) {
-            self.doc_done(project, slug, stage);
+            self.doc_done(project, slug, DocFile::Stage(stage));
+        }
+    }
+
+    /// The fix plan of feature `slug` is approved: the fixes go, then its
+    /// comments are deleted, its review closed and the agent shown. A
+    /// refusal keeps them all.
+    pub(crate) fn make_fixes_now(&mut self, project: &str, slug: &str) {
+        if self.make_fixes(project, slug) {
+            self.doc_done(project, slug, DocFile::FixPlan);
+            self.show_build_agent(project, slug);
         }
     }
 
@@ -435,24 +507,26 @@ impl Gerdr {
         let Some(doc) = self.doc_of().cloned() else {
             return;
         };
+        if doc.file == DocFile::FixPlan {
+            return self.fix_plan_send_back(&doc.project, &doc.slug, comments);
+        }
         // One no longer waiting is refused there: the comments stay.
         let waiting = self
             .feature(&doc.project, &doc.slug)
             .is_some_and(|f| f.status == Status::Open && f.current() == Some(doc.file.stage()));
         if waiting {
-            self.doc_done(&doc.project, &doc.slug, doc.file.stage());
+            self.doc_done(&doc.project, &doc.slug, doc.file);
         }
         self.send_back_stage(&doc.project, &doc.slug, doc.file.stage(), comments);
     }
 
-    /// `stage` of feature `slug` is approved or sent back: its comments
+    /// `file` of feature `slug` is approved or sent back: its comments
     /// deleted, in the file and in its tab if it has one, and that tab, if
     /// it shows, gives way to the feature's. The tab stays, for the next
     /// look at the file.
-    fn doc_done(&mut self, project: &str, slug: &str, stage: Stage) {
+    pub(crate) fn doc_done(&mut self, project: &str, slug: &str, file: DocFile) {
         let dir = store::dir(None, project, slug);
-        self.doc_write_review(&comments_path(&dir, stage), &Review::default());
-        let file = DocFile::Stage(stage);
+        self.doc_write_review(&file.comments(&dir), &Review::default());
         let is_it = |d: &DocOf| d.project == project && d.slug == slug && d.file == file;
         let tabs = self.workspaces.iter_mut().flat_map(|ws| &mut ws.tabs);
         for wd in tabs.filter_map(|tab| tab.review_mut()).map(|r| &mut r.wd) {
@@ -464,6 +538,14 @@ impl Gerdr {
         if self.doc_of().is_some_and(is_it) {
             self.doc_review_read();
             self.show_feature_tab(project, slug);
+        }
+    }
+
+    /// Read `file` of feature `slug` again if its tab shows.
+    pub(crate) fn doc_reread_shown(&mut self, project: &str, slug: &str, file: DocFile) {
+        let is_it = |d: &DocOf| d.project == project && d.slug == slug && d.file == file;
+        if self.doc_of().is_some_and(is_it) {
+            self.doc_review_read();
         }
     }
 }

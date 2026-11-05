@@ -80,6 +80,20 @@ impl Flavor {
     pub fn resumes(self) -> bool {
         matches!(self, Flavor::Claude | Flavor::Cursor)
     }
+
+    /// The line that compacts its chat, if gerdr knows one. Cursor calls it
+    /// `/summarize` (read from its command list on 2026-11-05); a T3 Code
+    /// thread takes none from outside.
+    pub fn compact(self) -> Option<&'static str> {
+        match self {
+            Flavor::Claude => Some(
+                "/compact Keep what the feature is, its plan, the decisions made and the code's state; drop tool output",
+            ),
+            Flavor::Codex => Some("/compact"),
+            Flavor::Cursor => Some("/summarize"),
+            Flavor::T3 | Flavor::Other => None,
+        }
+    }
 }
 
 /// The program `command` runs: past `env`, `exec` and the variables it sets.
@@ -626,6 +640,16 @@ mod tests {
         )
         .unwrap();
         assert_eq!(run.model, None);
+    }
+
+    #[test]
+    fn a_chat_is_compacted_by_its_own_clis_line() {
+        let compact = |command: &str| Flavor::of(command).compact().map(|l| l.split(' ').next());
+        assert_eq!(compact("claude"), Some(Some("/compact")));
+        assert_eq!(compact("codex"), Some(Some("/compact")));
+        assert_eq!(compact("cursor-agent"), Some(Some("/summarize")));
+        assert_eq!(compact("t3"), None);
+        assert_eq!(compact("aider"), None);
     }
 
     #[test]
