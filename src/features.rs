@@ -7705,6 +7705,13 @@ fn sandbox_sections(feature: &Feature, state: &PanelState) -> Vec<PageSection> {
         let text = format!("can reach real services: {}", run.outward.join(", "));
         out.push(line(text, CheckTone::Blocker));
     }
+    if !run.out_of_reach.is_empty() {
+        let text = format!(
+            "can't reach what runs outside its project: {}",
+            run.out_of_reach.join(", ")
+        );
+        out.push(line(text, CheckTone::Blocker));
+    }
     for name in &run.not_copied {
         let text = format!("not copied: {name}, which compose didn't start");
         out.push(line(text, CheckTone::Blocker));
@@ -12105,6 +12112,7 @@ pub(crate) mod tests {
             copied: vec!["docker_pgdata".into()],
             fresh: vec!["redis".into()],
             outward: vec!["EMAIL_HOST".into()],
+            out_of_reach: vec!["DATABASE_URL (docker-db-1, port 5433)".into()],
             forwards: vec![feature::sandbox::Forward {
                 service: "db".into(),
                 main_port: 5433,
@@ -12121,6 +12129,7 @@ pub(crate) mod tests {
             "copied docker_pgdata",
             "redis started empty",
             "can reach real services: EMAIL_HOST",
+            "can't reach what runs outside its project: DATABASE_URL (docker-db-1, port 5433)",
             "shared with main",
         ] {
             assert!(said.contains(part), "{part} not in {said}");

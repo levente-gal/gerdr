@@ -301,6 +301,7 @@ impl Gerdr {
         if let Some(why) = feature.sandbox.as_ref().and_then(|r| r.failed.as_deref()) {
             crate::problems::forget(PROBLEMS, &failed_text(&title, why));
         }
+        forget_out_of_reach(&feature);
         if let Some(f) = self.feature_mut(project, slug) {
             let now = feature::now();
             // Its panes go with the run they belonged to: none outlive a stop.
@@ -321,13 +322,13 @@ impl Gerdr {
         let (project, slug) = (project.to_owned(), slug.to_owned());
         self.feature_work(Some(busy), move |tx| {
             let tools = Tools::detect();
-            let prepare: Vec<(PathBuf, String)> = lines_of(&feature, &prepares, true)
+            let prepare: Vec<sandbox_run::PrepareStep> = lines_of(&feature, &prepares, true)
                 .into_iter()
                 .filter(|line| line.on)
-                .map(|line| {
-                    let command =
-                        background_command(&line.command, &line.dir, &feature.dir, &venv, &tools);
-                    (line.dir, command)
+                .map(|line| sandbox_run::PrepareStep {
+                    line: background_command(&line.command, &line.dir, &feature.dir, &venv, &tools),
+                    dir: line.dir,
+                    shown: line.command,
                 })
                 .collect();
             let mut roots = vec![feature.root.clone()];
@@ -407,6 +408,11 @@ impl Gerdr {
                 "This sandbox can reach real services: {}. Set workflow.sandbox_env in the project file to change that",
                 run.outward.join(", ")
             ));
+        }
+        if !run.out_of_reach.is_empty() {
+            let text = out_of_reach_problem(&title, &run.out_of_reach);
+            crate::problems::report(PROBLEMS, text.clone());
+            self.show_warning(text);
         }
         let holder = run.holder.as_ref().map(|h| h.pid);
         if let Some(f) = self.feature_mut(project, slug) {
@@ -604,6 +610,9 @@ impl Gerdr {
             tracing::warn!("stopping the sandbox of {slug}: {why}");
             return self.show_error(format!("The sandbox didn't stop cleanly: {why}"));
         }
+        if let Some(feature) = self.feature(project, slug) {
+            forget_out_of_reach(feature);
+        }
         if let Some(f) = self.feature_mut(project, slug) {
             if what.removes() {
                 f.sandbox = None;
@@ -698,6 +707,23 @@ pub(crate) const PROBLEMS: &str = "sandbox";
 /// What the problems list says of a sandbox that didn't start.
 fn failed_text(title: &str, why: &str) -> String {
     format!("The sandbox of \u{201c}{title}\u{201d} didn't start: {why}")
+}
+
+/// What the problems list says of a running sandbox with `found` out of reach.
+fn out_of_reach_problem(title: &str, found: &[String]) -> String {
+    format!(
+        "The sandbox of \u{201c}{title}\u{201d} {}",
+        sandbox_run::out_of_reach_text(found)
+    )
+}
+
+/// `feature`'s sandbox stopped or starts again: what it couldn't reach goes
+/// from the problems list. A new run reports its own.
+fn forget_out_of_reach(feature: &Feature) {
+    if let Some(run) = (feature.sandbox.as_ref()).filter(|r| !r.out_of_reach.is_empty()) {
+        let text = out_of_reach_problem(&feature.title, &run.out_of_reach);
+        crate::problems::forget(PROBLEMS, &text);
+    }
 }
 
 #[cfg(test)]

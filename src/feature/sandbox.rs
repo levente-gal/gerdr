@@ -41,6 +41,8 @@ const BROKERS: &[&str] = &["redis", "valkey", "keydb", "rabbitmq", "nats"];
 
 /// How many times `free_port` tries to find a port free on both addresses.
 const PORT_TRIES: usize = 32;
+/// The names of this machine a `.env` value can connect to.
+const LOOPBACK: &[&str] = &["127.0.0.1", "localhost", "[::1]"];
 
 /// A running container, as `docker inspect` tells of it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -48,6 +50,8 @@ pub struct Container {
     pub name: String,
     pub image: String,
     pub compose: Option<ComposeLabels>,
+    /// The ports it publishes on this machine.
+    pub ports: Vec<u16>,
 }
 
 /// What compose wrote on a container it started.
@@ -58,6 +62,12 @@ pub struct ComposeLabels {
     pub working_dir: PathBuf,
     pub config_files: Vec<PathBuf>,
     pub env_file: Option<PathBuf>,
+}
+
+impl ComposeLabels {
+    fn is_under(&self, roots: &[PathBuf]) -> bool {
+        roots.iter().any(|root| self.working_dir.starts_with(root))
+    }
 }
 
 /// Read the output of `docker inspect <containers>`.
@@ -85,6 +95,16 @@ fn container_of(item: &Value) -> Container {
                 .map(PathBuf::from),
         })
     })();
+    let mut ports: Vec<u16> = item["NetworkSettings"]["Ports"]
+        .as_object()
+        .into_iter()
+        .flat_map(|ports| ports.values())
+        .filter_map(Value::as_array)
+        .flatten()
+        .filter_map(|bound| bound["HostPort"].as_str()?.parse().ok())
+        .collect();
+    ports.sort_unstable();
+    ports.dedup();
     Container {
         name: item["Name"]
             .as_str()
@@ -96,6 +116,7 @@ fn container_of(item: &Value) -> Container {
             .unwrap_or_default()
             .to_owned(),
         compose,
+        ports,
     }
 }
 
@@ -119,10 +140,7 @@ pub fn stacks_under(containers: &[Container], roots: &[PathBuf]) -> Vec<Stack> {
         let Some(compose) = &container.compose else {
             continue;
         };
-        if !roots
-            .iter()
-            .any(|root| compose.working_dir.starts_with(root))
-        {
+        if !compose.is_under(roots) {
             continue;
         }
         stacks
@@ -144,6 +162,84 @@ pub fn stacks_under(containers: &[Container], roots: &[PathBuf]) -> Vec<Stack> {
 /// project they belong to or how to start them again, so they aren't copied.
 pub fn loose(containers: &[Container]) -> Vec<&Container> {
     containers.iter().filter(|c| c.compose.is_none()).collect()
+}
+
+/// The variables a `.env` file sets to something, quotes off their values.
+pub fn env_pairs(env: &str) -> Vec<(String, String)> {
+    env.lines()
+        .filter_map(|line| {
+            let line = line.trim_start().trim_start_matches("export ");
+            let (key, value) = line.split_once('=')?;
+            let (key, value) = (key.trim(), value.trim());
+            (!key.starts_with('#') && !value.is_empty())
+                .then(|| (key.to_owned(), value.trim_matches(['"', '\'']).to_owned()))
+        })
+        .collect()
+}
+
+/// The ports `value` names on this machine, as in a URL. `0.0.0.0` isn't one
+/// of the hosts: it says where a server listens, not what it connects to.
+fn local_ports(value: &str) -> Vec<u16> {
+    let mut ports = Vec::new();
+    for host in LOOPBACK {
+        for (at, _) in value.match_indices(host) {
+            let before = value[..at].chars().next_back();
+            if before.is_some_and(|c| c.is_alphanumeric() || matches!(c, '.' | '-')) {
+                continue;
+            }
+            let Some(rest) = value[at + host.len()..].strip_prefix(':') else {
+                continue;
+            };
+            let end = rest
+                .find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(rest.len());
+            ports.extend(rest[..end].parse::<u16>());
+        }
+    }
+    ports
+}
+
+/// What the variables `pairs` of a `.env` file point at that a sandbox won't
+/// have: a port on this machine published by a container outside `roots`,
+/// which isn't copied, while the sandbox has its own localhost. In words,
+/// variable names and never their values, which can hold passwords.
+///
+/// A port alone counts only beside a local `<NAME>_HOST`: a `PORT=9001` is
+/// mostly the app's own, which the sandbox runs itself.
+pub fn out_of_reach(
+    pairs: &[(String, String)],
+    containers: &[Container],
+    roots: &[PathBuf],
+) -> Vec<String> {
+    let copied = |c: &Container| c.compose.as_ref().is_some_and(|l| l.is_under(roots));
+    let serving = |port: u16| {
+        let mut with_port = containers.iter().filter(|c| c.ports.contains(&port));
+        let outside = with_port.clone().find(|c| !copied(c))?;
+        // On another address, one of the project's own has it too: copied.
+        (!with_port.any(copied)).then_some(outside)
+    };
+    let is_local = |host: &str| host == "::1" || LOOPBACK.contains(&host);
+    let host_of = |prefix: &str| {
+        let key = format!("{prefix}_HOST");
+        pairs.iter().find(|(k, _)| *k == key).map(|(_, v)| v)
+    };
+    let mut found = Vec::new();
+    for (key, value) in pairs {
+        let mut ports = local_ports(value);
+        if key
+            .strip_suffix("_PORT")
+            .and_then(host_of)
+            .is_some_and(|h| is_local(h))
+        {
+            ports.extend(value.parse::<u16>());
+        }
+        for port in ports {
+            if let Some(container) = serving(port) {
+                found.push(format!("{key} ({}, port {port})", container.name));
+            }
+        }
+    }
+    found
 }
 
 /// Where `path` is in the feature: the same place in the worktree of the
@@ -1043,6 +1139,98 @@ mod tests {
         assert_eq!(names, ["db", "redis"]);
         let loose: Vec<&str> = loose(&containers).iter().map(|c| c.name.as_str()).collect();
         assert_eq!(loose, ["plain"]);
+    }
+
+    fn pairs(env: &str) -> Vec<(String, String)> {
+        env_pairs(env)
+    }
+
+    fn publishing(name: &str, dir: Option<&str>, ports: &[u16]) -> Container {
+        Container {
+            name: name.to_owned(),
+            image: "postgres:15".to_owned(),
+            compose: dir.map(|dir| ComposeLabels {
+                project: "p".to_owned(),
+                service: "db".to_owned(),
+                working_dir: PathBuf::from(dir),
+                config_files: Vec::new(),
+                env_file: None,
+            }),
+            ports: ports.to_vec(),
+        }
+    }
+
+    #[test]
+    fn published_ports_are_read_once_each() {
+        let inspect = json!([{
+            "Name": "/db",
+            "Config": {"Image": "postgres:15", "Labels": {}},
+            "NetworkSettings": {"Ports": {
+                "5432/tcp": [
+                    {"HostIp": "0.0.0.0", "HostPort": "5433"},
+                    {"HostIp": "::", "HostPort": "5433"},
+                ],
+                "443/tcp": null,
+            }},
+        }])
+        .to_string();
+        assert_eq!(containers_of(&inspect).unwrap()[0].ports, [5433]);
+    }
+
+    #[test]
+    fn a_url_to_a_port_of_another_project_is_out_of_reach() {
+        let env = "\
+# DATABASE_URL=postgres://old@127.0.0.1:5433/off
+export DATABASE_URL=\"postgres://me:hunter2@127.0.0.1:5433/app\"
+CACHE=redis://localhost:6379/0
+OTHER=http://mylocalhost:5433
+BIND=0.0.0.0:5433
+";
+        let other = publishing("docker-db-1", Some("/other/docker"), &[5433, 6379]);
+        let found = out_of_reach(&pairs(env), &[other], &[PathBuf::from("/app")]);
+        assert_eq!(
+            found,
+            [
+                "DATABASE_URL (docker-db-1, port 5433)",
+                "CACHE (docker-db-1, port 6379)"
+            ]
+        );
+        assert!(!found.join(" ").contains("hunter2"));
+    }
+
+    #[test]
+    fn a_container_compose_did_not_start_is_out_of_reach_too() {
+        let plain = publishing("plain", None, &[5433]);
+        let found = out_of_reach(
+            &pairs("DB=postgres://127.0.0.1:5433/app"),
+            &[plain],
+            &[PathBuf::from("/app")],
+        );
+        assert_eq!(found, ["DB (plain, port 5433)"]);
+    }
+
+    #[test]
+    fn what_the_project_runs_itself_is_copied_so_in_reach() {
+        let env = "DB=postgres://127.0.0.1:5433/app";
+        let roots = [PathBuf::from("/app")];
+        let own = publishing("own", Some("/app/docker"), &[5433]);
+        assert!(out_of_reach(&pairs(env), std::slice::from_ref(&own), &roots).is_empty());
+        let other = publishing("other", Some("/other"), &[5433]);
+        assert!(out_of_reach(&pairs(env), &[other, own], &roots).is_empty());
+    }
+
+    #[test]
+    fn a_port_alone_counts_beside_a_local_host_only() {
+        let other = publishing("db", Some("/other"), &[5433]);
+        let roots = [PathBuf::from("/app")];
+        let found = |env: &str| out_of_reach(&pairs(env), std::slice::from_ref(&other), &roots);
+        assert_eq!(
+            found("DB_HOST=localhost\nDB_PORT=5433"),
+            ["DB_PORT (db, port 5433)"]
+        );
+        assert!(found("DB_HOST=db.example.com\nDB_PORT=5433").is_empty());
+        assert!(found("APP_PORT=5433").is_empty());
+        assert!(found("PORT=5433").is_empty());
     }
 
     fn repo(name: &str, main: &str, worktree: &str) -> Repo {

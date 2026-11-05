@@ -40,6 +40,8 @@ const READY_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const COPY_TIMEOUT: Duration = setup::TIMEOUT;
 /// How long a stop waits for what it stops.
 const STOP_TIMEOUT: Duration = Duration::from_secs(60);
+/// How much of a failed command's error goes in the message about it.
+const ERROR_CHARS: usize = 200;
 /// How long what runs in a sandbox gets to end.
 const END_WAIT: Duration = Duration::from_secs(3);
 /// Folders of the system a bind mount shares on purpose: not data to copy.
@@ -91,6 +93,10 @@ pub struct SandboxRun {
     /// their values (see `outward_keys`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub outward: Vec<String>,
+    /// What its copied files point at that it can't reach (see
+    /// `sandbox::out_of_reach`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub out_of_reach: Vec<String>,
 }
 
 impl SandboxRun {
@@ -203,15 +209,10 @@ pub fn outward_keys(env: &str) -> Vec<String> {
         "WEBHOOK",
         "STRIPE",
     ];
-    env.lines()
-        .filter_map(|line| {
-            let line = line.trim_start().trim_start_matches("export ");
-            let (key, value) = line.split_once('=')?;
-            let key = key.trim();
-            let set = !value.trim().is_empty();
-            (set && !key.starts_with('#') && WORDS.iter().any(|word| key.contains(word)))
-                .then(|| key.to_owned())
-        })
+    sandbox::env_pairs(env)
+        .into_iter()
+        .map(|(key, _)| key)
+        .filter(|key| WORDS.iter().any(|word| key.contains(word)))
         .collect()
 }
 
@@ -422,13 +423,21 @@ pub struct Job<'a> {
     pub roots: &'a [PathBuf],
     /// The sandbox's own folder.
     pub dir: &'a Path,
-    /// What to run once in the namespace before its services: folder and
-    /// shell line.
-    pub prepare: &'a [(PathBuf, String)],
+    /// What to run once in the namespace before its services.
+    pub prepare: &'a [PrepareStep],
     pub env: &'a [(String, String)],
     /// Ports other sandboxes hold, though stopped.
     pub taken: &'a [u16],
     pub stop: &'a AtomicBool,
+}
+
+/// A command to run once in the namespace before its services.
+pub struct PrepareStep {
+    pub dir: PathBuf,
+    /// The shell line that runs it.
+    pub line: String,
+    /// The command as the project wrote it: what the user is told of.
+    pub shown: String,
 }
 
 /// Start a sandbox. Everything a failed start did stays for the next start or
@@ -462,6 +471,7 @@ fn start_into(
         .map(|c| c.name.clone())
         .collect();
     run.outward = outward_of(job);
+    run.out_of_reach = out_of_reach_of(job, &containers);
     let mut taken: std::collections::BTreeSet<u16> = job.taken.iter().copied().collect();
     for stack in &stacks {
         progress(format!("Reading {}", stack.project));
@@ -518,12 +528,24 @@ fn start_into(
     let pasta = start_pasta(&holder, &run.forwards, job.dir)?;
     run.pasta = Some(pasta);
     wait_loopback(&holder);
-    for (i, (dir, line)) in job.prepare.iter().enumerate() {
+    for (i, step) in job.prepare.iter().enumerate() {
         if job.stop.load(Ordering::Relaxed) {
             return Err("Stopped".to_owned());
         }
-        progress(format!("{line} ({} of {})", i + 1, job.prepare.len()));
-        run_inside(&holder, job, dir, line)?;
+        progress(format!(
+            "{} ({} of {})",
+            step.shown,
+            i + 1,
+            job.prepare.len()
+        ));
+        run_inside(&holder, job, step).map_err(|why| {
+            // The likely reason it failed, which its own error can't tell.
+            if run.out_of_reach.is_empty() {
+                why
+            } else {
+                format!("{why}. It {}", out_of_reach_text(&run.out_of_reach))
+            }
+        })?;
     }
     Ok(())
 }
@@ -541,6 +563,40 @@ fn outward_of(job: &Job) -> Vec<String> {
     keys.sort();
     keys.dedup();
     keys
+}
+
+/// What the `.env` files of the feature's repositories point at that the
+/// sandbox won't have, going by what the project set for sandboxes.
+fn out_of_reach_of(job: &Job, containers: &[sandbox::Container]) -> Vec<String> {
+    let mut found: Vec<String> = job
+        .repos
+        .iter()
+        .filter_map(|repo| fs::read_to_string(repo.worktree.join(".env")).ok())
+        .flat_map(|text| {
+            sandbox::out_of_reach(&sandbox_pairs(&text, job.env), containers, job.roots)
+        })
+        .collect();
+    found.sort();
+    found.dedup();
+    found
+}
+
+/// The variables a sandbox runs with: the `.env` file's in `text`, with `env`
+/// going over them.
+fn sandbox_pairs(text: &str, env: &[(String, String)]) -> Vec<(String, String)> {
+    let mut pairs = sandbox::env_pairs(text);
+    pairs.retain(|(key, _)| !overridden(key, env));
+    pairs.extend_from_slice(env);
+    pairs
+}
+
+/// What's wrong with a sandbox that has `found` out of reach, and what to do
+/// about it, to follow its name.
+pub fn out_of_reach_text(found: &[String]) -> String {
+    format!(
+        "can't reach what runs outside its project: {}. Give the project its own compose stack, or set workflow.sandbox_env in the project file",
+        found.join(", ")
+    )
 }
 
 /// Whether the project set `key` for sandboxes. Setting `EMAIL_HOST` also
@@ -956,7 +1012,8 @@ fn wait_loopback(holder: &Proc) {
 }
 
 /// Run shell `line` inside the sandbox, in `dir`, its output logged.
-fn run_inside(holder: &Proc, job: &Job, dir: &Path, line: &str) -> Result<(), String> {
+fn run_inside(holder: &Proc, job: &Job, step: &PrepareStep) -> Result<(), String> {
+    let PrepareStep { dir, line, shown } = step;
     use std::io::Write;
     let log = job.dir.join("prepare.log");
     let mut file = fs::OpenOptions::new()
@@ -966,6 +1023,8 @@ fn run_inside(holder: &Proc, job: &Job, dir: &Path, line: &str) -> Result<(), St
         .map_err(|e| format!("couldn't write {}: {e}", log.display()))?;
     // A log line lost doesn't stop the sandbox.
     let _ = writeln!(file, "== {line}");
+    // Where this run's output starts: the log keeps the earlier runs'.
+    let from = file.metadata().map_or(0, |m| m.len() as usize);
     let out = file.try_clone().map_err(|e| e.to_string())?;
     let mut command = format!(
         "exec nsenter --user --net --preserve-credentials -t {} -- env {SANDBOX_VAR}={}",
@@ -988,12 +1047,34 @@ fn run_inside(holder: &Proc, job: &Job, dir: &Path, line: &str) -> Result<(), St
     if exit.passed() {
         Ok(())
     } else {
+        // Unreadable, the log it points at says as much as this would.
+        let said = fs::read(&log).unwrap_or_default();
+        let error = last_error(said.get(from..).unwrap_or_default())
+            .map_or_else(String::new, |error| format!(": {error}"));
         Err(format!(
-            "`{line}` {} (see {})",
+            "`{shown}` {}{error} (see {})",
             exit.describe(),
             log.display()
         ))
     }
+}
+
+/// The line of output `raw` that best says why a command failed: the last one
+/// not indented. What's indented continues it: a traceback's error comes last
+/// but for its hints.
+fn last_error(raw: &[u8]) -> Option<String> {
+    let lines = super::verify::clean_lines(raw, false);
+    let said: Vec<&String> = lines.iter().filter(|l| !l.trim().is_empty()).collect();
+    let line = said
+        .iter()
+        .rev()
+        .find(|line| !line.starts_with(char::is_whitespace))
+        .or(said.last())?
+        .trim();
+    Some(match line.char_indices().nth(ERROR_CHARS) {
+        Some((end, _)) => format!("{}\u{2026}", &line[..end]),
+        None => line.to_owned(),
+    })
 }
 
 /// Stop `run`: its network, then its containers. With `remove`, its containers,
@@ -1264,6 +1345,39 @@ WEBHOOK_URL=https://x
         let keys = outward_keys(env);
         assert_eq!(keys, ["EMAIL_HOST", "SMTP_PASSWORD", "WEBHOOK_URL"]);
         assert!(!keys.join(" ").contains("hunter2"));
+    }
+
+    #[test]
+    fn what_a_sandbox_sets_goes_over_the_env_file() {
+        let env = [("DATABASE_URL".to_owned(), "sqlite:///x".to_owned())];
+        let text = "DATABASE_URL=postgres://127.0.0.1:5433/app\nCACHE=redis://localhost:6379\n";
+        let pairs = sandbox_pairs(text, &env);
+        let urls: Vec<&str> = pairs.iter().map(|(_, value)| value.as_str()).collect();
+        assert_eq!(urls, ["redis://localhost:6379", "sqlite:///x"]);
+    }
+
+    #[test]
+    fn a_traceback_tells_its_error_not_its_hint() {
+        let log = b"Traceback (most recent call last):\n  File \"x.py\", line 1\n\
+django.db.utils.OperationalError: connection refused\n\
+\tIs the server running?\n\n";
+        assert_eq!(
+            last_error(log).as_deref(),
+            Some("django.db.utils.OperationalError: connection refused")
+        );
+    }
+
+    #[test]
+    fn an_error_is_cut_and_nothing_said_is_none() {
+        assert_eq!(last_error(b"\n  \n"), None);
+        assert_eq!(
+            last_error(b"  only indented\n").as_deref(),
+            Some("only indented")
+        );
+        let long = "\u{e9}".repeat(ERROR_CHARS + 1);
+        let cut = last_error(long.as_bytes()).unwrap();
+        assert_eq!(cut.chars().count(), ERROR_CHARS + 1);
+        assert!(cut.ends_with('\u{2026}'));
     }
 
     #[test]
