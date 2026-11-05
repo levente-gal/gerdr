@@ -2912,8 +2912,7 @@ impl FeaturePanel {
                 if ctrl
                     && (self.focus == TabArea::Stages
                         || self.focus == TabArea::Findings && criteria > 0)
-                    && (fix_round_on(feature, stage)
-                        .is_some_and(|r| r.phase == FixPhase::Ready)
+                    && (fix_round_on(feature, stage).is_some_and(FixRound::can_make_fixes)
                         || makes_fixes_again(feature, stage)) =>
             {
                 return Some(PanelOutcome::MakeFixes);
@@ -3027,7 +3026,7 @@ impl FeaturePanel {
                 return Some(PanelOutcome::ChangeDecisions);
             }
             Keysym::Delete | Keysym::KP_Delete if ctrl && mods.shift => {
-                if fix_round_on(feature, stage).is_some_and(FixRound::before_fixing) {
+                if fix_round_on(feature, stage).is_some_and(FixRound::can_drop) {
                     return Some(PanelOutcome::DropFixPlan);
                 }
                 return start_over_stage(feature, stage, ctx).map(PanelOutcome::StartOver);
@@ -3096,7 +3095,12 @@ fn fix_round_on(feature: &Feature, stage: Stage) -> Option<&FixRound> {
     (feature.status == Status::Open)
         .then_some(feature.fix_round.as_ref())
         .flatten()
-        .filter(|r| r.stage == stage)
+        .filter(|r| {
+            // Its first commit sends the feature back to an earlier stage,
+            // and the round goes on there.
+            r.stage == stage
+                || (!r.before_fixing() && feature.current() == Some(stage) && stage < r.stage)
+        })
 }
 
 /// The last fix round of `feature`, its fixes sent, on the page of the stage
@@ -3156,6 +3160,10 @@ fn fix_round_buttons(
             button("Ask again", ButtonStyle::Primary),
             PanelOutcome::AskFixPlan,
         )),
+        FixPhase::Fixing if round.stalled.is_some() => out.push((
+            button("Make fixes again", ButtonStyle::Primary),
+            PanelOutcome::MakeFixes,
+        )),
         _ => {}
     }
     if let Some((label, outcome)) = agent_button(feature, Stage::Build, ctx) {
@@ -3171,7 +3179,7 @@ fn fix_round_buttons(
             PanelOutcome::ReviewFixPlan,
         ));
     }
-    if round.before_fixing() {
+    if round.can_drop() {
         out.push((
             button("Drop plan\u{2026}", ButtonStyle::Quiet),
             PanelOutcome::DropFixPlan,
@@ -7590,7 +7598,7 @@ fn current_line(feature: &Feature, stage: Stage, state: &LineState, now: u64) ->
         let waits = (feature.runs.get(&Stage::Build)).is_some_and(|run| run.waits_to_send());
         return match waits {
             true => "waiting to send".to_owned(),
-            false => round.line().to_owned(),
+            false => round.line(),
         };
     }
     let run = feature.runs.get(&stage);
@@ -7864,9 +7872,10 @@ fn fix_round_card(
         (_, true) => CheckTone::Blocker,
         _ => CheckTone::Note,
     };
-    let said = match waits {
-        true => "waiting for you \u{b7} pick a model and send the prompt",
-        false => round.stalled.as_deref().unwrap_or(round.line()),
+    let said = match (waits, &round.stalled) {
+        (true, _) => "waiting for you \u{b7} pick a model and send the prompt".to_owned(),
+        (false, Some(why)) => why.clone(),
+        (false, None) => round.line(),
     };
     PageSection::File {
         name: "Fix plan".to_owned(),
@@ -8856,7 +8865,10 @@ fn tab_hints(
                 if round.phase == FixPhase::Ready {
                     hints.push(hint("Ctrl+Enter", "make fixes"));
                 }
-                if round.before_fixing() {
+                if round.fixes_stopped() {
+                    hints.push(hint("Ctrl+Enter", "make fixes again"));
+                }
+                if round.can_drop() {
                     hints.push(hint(START_OVER_KEY, "drop plan\u{2026}"));
                 }
             }
@@ -11054,6 +11066,8 @@ pub(crate) mod tests {
             ready: (phase == FixPhase::Ready).then_some(1_100),
             stalled: None,
             give_back: Default::default(),
+            items: Vec::new(),
+            done: 0,
         });
         f
     }
@@ -11178,6 +11192,19 @@ pub(crate) mod tests {
             "{shown:?}"
         );
         assert!(!shown.contains(&"Make fixes".to_owned()), "{shown:?}");
+        // Its agent stopped with fixes left: the user can send it again, or
+        // drop the plan, also on the stage its commits sent the feature to.
+        let mut stopped = fixing.clone();
+        let round = stopped.fix_round.as_mut().unwrap();
+        round.stalled = Some("it stopped".into());
+        let shown = labels_of(&stopped);
+        for label in ["Make fixes again", "Drop plan\u{2026}"] {
+            assert!(shown.contains(&label.to_owned()), "{label}: {shown:?}");
+        }
+        let mut back = stopped.clone();
+        back.fix_round.as_mut().unwrap().stage = Stage::Ship;
+        let at = back.current().unwrap();
+        assert!(fix_round_on(&back, at).is_some());
         // No other stage's page has it.
         let other = page_actions(&ready, Stage::Build, RowCtx::default());
         assert!(!other.iter().any(|(_, o)| *o == PanelOutcome::MakeFixes));
@@ -11225,15 +11252,14 @@ pub(crate) mod tests {
                 vec!["Open".to_owned()]
             ))
         );
-        // Its agent rested: read, or sent again as a rest doesn't tell the
-        // fixes were made.
+        // Every fix ticked: read, or sent again if one turned out not made.
         let before = page_enter(&f, Stage::Verify, RowCtx::default());
         let mut over = f.clone();
         over.last_fix_round = fixing.fix_round.clone();
         assert_eq!(
             held(&over, Stage::Verify),
             Some((
-                "Verify failures \u{b7} fixes sent".to_owned(),
+                "Verify failures \u{b7} fixes made".to_owned(),
                 vec!["Open".to_owned(), "Make fixes again".to_owned()]
             ))
         );
@@ -11264,7 +11290,7 @@ pub(crate) mod tests {
         assert_eq!(
             held(&past, Stage::Build),
             Some((
-                "Verify failures \u{b7} fixes sent".to_owned(),
+                "Verify failures \u{b7} fixes made".to_owned(),
                 vec!["Open".to_owned()]
             ))
         );

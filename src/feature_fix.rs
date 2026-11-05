@@ -18,7 +18,7 @@ use crate::{
     feature::{
         self, Feature, Stage, Status,
         agents::Flavor,
-        fix_round::{self, Compact, FixPhase, FixRound, GiveBack, Plan},
+        fix_round::{self, Compact, FixPhase, FixRound, Fixes, GiveBack, Plan},
         store,
     },
     feature_agents::{stamp, vars},
@@ -37,6 +37,15 @@ pub(crate) struct FixWatch {
     since: Instant,
     /// The plan's stamp when its check last refused it.
     refused: Option<crate::feature_agents::Stamp>,
+    /// Since when an agent making fixes showed no work and left the build
+    /// log alone.
+    rest: Instant,
+    /// The build log's stamp when last read.
+    log: Option<crate::feature_agents::Stamp>,
+    /// The fixes left when it was last told, or first seen.
+    left: Option<usize>,
+    /// How many times it was told to go on with no more ticked since.
+    told: u32,
 }
 
 impl Default for FixWatch {
@@ -45,6 +54,10 @@ impl Default for FixWatch {
             worked: false,
             since: Instant::now(),
             refused: None,
+            rest: Instant::now(),
+            log: None,
+            left: None,
+            told: 0,
         }
     }
 }
@@ -133,6 +146,8 @@ impl Gerdr {
             ready: None,
             stalled: None,
             give_back: GiveBack::Nothing,
+            items: Vec::new(),
+            done: 0,
         });
         f.log(now, format!("Fix round {n} started: {what}"));
         self.save_feature(project, slug);
@@ -297,15 +312,7 @@ impl Gerdr {
         let key = fix_key(project, slug);
         match round.phase {
             FixPhase::Ready => {}
-            FixPhase::Fixing => {
-                if !self.fixing_watched(project, slug) {
-                    match run.and_then(|r| r.agent_key()) {
-                        // Seen first after a restart.
-                        Some(agent) => self.watch_fixing_found(project, slug, agent),
-                        None => self.end_fix_round(project, slug, false),
-                    }
-                }
-            }
+            FixPhase::Fixing => self.fixes_tick(feature, round),
             FixPhase::Compacting | FixPhase::CompactingToFix => {
                 let state = run.and_then(|r| r.agent_key());
                 let (status, alive) = match &state {
@@ -384,6 +391,172 @@ impl Gerdr {
         }
     }
 
+    /// Look at the agent making the fixes of `round`: it goes on until
+    /// every one is ticked in the build log, whatever it stops for on the
+    /// way, and the round ends then. One that won't is the user's to settle.
+    fn fixes_tick(&mut self, feature: &Feature, round: &FixRound) {
+        let (project, slug) = (feature.project.as_str(), feature.slug.as_str());
+        let run = feature.runs.get(&Stage::Build);
+        let key = fix_key(project, slug);
+        // A fresh agent's work starts once its prompt goes.
+        if run.is_some_and(|r| r.held) {
+            let watch = self.features.build.fix_watches.entry(key).or_default();
+            watch.rest = Instant::now();
+            return;
+        }
+        let path = build_log(&store::dir(None, project, slug));
+        let log = match std::fs::read_to_string(&path) {
+            Ok(log) => log,
+            Err(err) => {
+                tracing::warn!("reading {}: {err}", path.display());
+                String::new()
+            }
+        };
+        let left = fix_round::left(&log, round.n, &round.items);
+        let blocked = feature::artifacts::blocked(&log);
+        let at = stamp(&path);
+        let (status, alive) = match run.and_then(|r| r.agent_key()) {
+            Some(agent) => self.agent_key_state(&agent),
+            None => (None, false),
+        };
+        let watch = self.features.build.fix_watches.entry(key).or_default();
+        if watch.log != at {
+            watch.log = at;
+            watch.rest = Instant::now();
+        }
+        if watch.left.is_none_or(|was| left.len() < was) {
+            watch.left = Some(left.len());
+            watch.told = 0;
+        }
+        let (rested, told) = (watch.rest.elapsed(), watch.told);
+        let done = u32::try_from(round.items.len() - left.len()).unwrap_or(u32::MAX);
+        if done != round.done {
+            if let Some(round) =
+                (self.feature_mut(project, slug)).and_then(|f| f.fix_round.as_mut())
+            {
+                round.done = done;
+            }
+            self.save_feature(project, slug);
+        }
+        let title = &feature.title;
+        let open = left.join("; ");
+        let n = match left.len() {
+            1 => "1 fix".to_owned(),
+            n => format!("{n} fixes"),
+        };
+        match fix_round::fixes_next(status, alive, rested, left.len(), blocked.is_some(), told) {
+            Fixes::Wait => {}
+            Fixes::Worked => {
+                let watch = (self.features.build.fix_watches)
+                    .entry(fix_key(project, slug))
+                    .or_default();
+                watch.rest = Instant::now();
+                if round.stalled.is_some() {
+                    self.fix_round_going(project, slug);
+                }
+            }
+            Fixes::Done => self.fixes_made(feature),
+            Fixes::GoOn => self.fixes_go_on(feature, round, &open),
+            _ if round.stalled.is_some() => {}
+            Fixes::Blocked => self.fixes_stopped(
+                feature,
+                format!(
+                    "The Build agent of \u{201c}{title}\u{201d} is blocked with {n} left: {}",
+                    blocked.unwrap_or_default()
+                ),
+            ),
+            Fixes::Stopped => self.fixes_stopped(
+                feature,
+                format!("The Build agent of \u{201c}{title}\u{201d} stopped with {n} left: {open}"),
+            ),
+            Fixes::Gone => self.fixes_stopped(
+                feature,
+                format!("The Build agent of \u{201c}{title}\u{201d} is gone with {n} left: {open}"),
+            ),
+        }
+    }
+
+    /// Tell the agent resting with fixes `open` to go on.
+    fn fixes_go_on(&mut self, feature: &Feature, round: &FixRound, open: &str) {
+        let (project, slug) = (feature.project.as_str(), feature.slug.as_str());
+        let title = &feature.title;
+        let data = store::dir(None, project, slug);
+        let names = self.projects.names(feature);
+        let mut values = vars(feature, &names, &data, Stage::Build);
+        let plan = fix_round::path(&data).display().to_string();
+        values.insert("fix_plan.path".into(), plan);
+        values.insert("fixes.section".into(), fix_round::heading(round.n));
+        values.insert("fixes.left".into(), open.to_owned());
+        let sent = prompts::render_builtin("fix-on", &values)
+            .map_err(|e| e.to_string())
+            .and_then(|line| self.tell_build_agent(feature, line.trim()));
+        if let Err(why) = sent {
+            tracing::info!("telling {project}/{slug}'s Build agent to go on with fixes: {why}");
+            return self.fixes_stopped(
+                feature,
+                format!(
+                    "Couldn't tell the Build agent of \u{201c}{title}\u{201d} to go on with its fixes: {why}"
+                ),
+            );
+        }
+        let watch = (self.features.build.fix_watches)
+            .entry(fix_key(project, slug))
+            .or_default();
+        watch.told += 1;
+        watch.rest = Instant::now();
+        if let Some(f) = self.feature_mut(project, slug) {
+            f.log(
+                feature::now(),
+                format!("Fixes not all made: told to go on with {open}"),
+            );
+        }
+        self.save_feature(project, slug);
+    }
+
+    /// The agent won't get on with the round's fixes, as `why` says: the
+    /// user is told, once, and can send it again or drop the plan.
+    fn fixes_stopped(&mut self, feature: &Feature, why: String) {
+        let (project, slug) = (feature.project.as_str(), feature.slug.as_str());
+        let pane = feature.runs.get(&Stage::Build).and_then(|r| r.pane.clone());
+        let Some(f) = self.feature_mut(project, slug) else {
+            return;
+        };
+        f.log(feature::now(), format!("Fixes stopped: {why}"));
+        if let Some(round) = f.fix_round.as_mut() {
+            round.stalled = Some(why.clone());
+        }
+        self.save_feature(project, slug);
+        self.notify_feature(project, slug, pane, &why);
+        self.show_warning(why);
+    }
+
+    /// Every fix of the round is ticked and its agent rests: the round is
+    /// over, boxes its agent added as milestones are gone from the log, and
+    /// its code is read.
+    fn fixes_made(&mut self, feature: &Feature) {
+        let (project, slug) = (feature.project.as_str(), feature.slug.as_str());
+        let data = store::dir(None, project, slug);
+        let names = self.projects.names(feature);
+        let values = vars(feature, &names, &data, Stage::Build);
+        let path = build_log(&data);
+        if let (Some(planned), Ok(log)) = (
+            crate::feature_build::planned_milestones(&values),
+            std::fs::read_to_string(&path),
+        ) {
+            let tidy = fix_round::without_added_milestones(&log, planned);
+            if tidy != log
+                && let Err(err) = std::fs::write(&path, tidy)
+            {
+                tracing::warn!("writing {}: {err}", path.display());
+                self.show_error(format!("Couldn't tidy {}: {err}", path.display()));
+            }
+        }
+        self.end_fix_round(project, slug, false);
+        self.probe_feature(project, slug);
+        let title = &feature.title;
+        self.show_success(format!("Every fix of \u{201c}{title}\u{201d} is made"));
+    }
+
     /// The agent works on a plan again.
     fn fix_round_going(&mut self, project: &str, slug: &str) {
         if let Some(round) = self
@@ -407,8 +580,13 @@ impl Gerdr {
             feature.slug.as_str(),
             &feature.title,
         );
+        let ids = feature
+            .fix_round
+            .as_ref()
+            .map(FixRound::ids)
+            .unwrap_or_default();
         let missing = match std::fs::read_to_string(path) {
-            Ok(text) => fix_round::missing(&text),
+            Ok(text) => fix_round::missing(&text, &ids),
             Err(err) => {
                 tracing::warn!("reading {}: {err}", path.display());
                 vec![format!("to be readable: {err}")]
@@ -548,7 +726,7 @@ impl Gerdr {
         let again = feature.fix_round.is_none()
             && feature.status == Status::Open
             && feature.last_fix_round.is_some();
-        let waiting = (feature.fix_round.as_ref()).is_some_and(|r| r.phase == FixPhase::Ready);
+        let waiting = (feature.fix_round.as_ref()).is_some_and(FixRound::can_make_fixes);
         if !waiting && !again {
             self.show_warning(format!(
                 "\u{201c}{title}\u{201d} has no fix plan waiting for review"
@@ -571,7 +749,11 @@ impl Gerdr {
                 return false;
             }
         };
-        let lacks = fix_round::missing(&plan);
+        let ids = (feature.fix_round.as_ref())
+            .or(feature.last_fix_round.as_ref())
+            .map(FixRound::ids)
+            .unwrap_or_default();
+        let lacks = fix_round::missing(&plan, &ids);
         if !lacks.is_empty() {
             let lacks = lacks.join(", ");
             self.show_warning(format!("The fix plan needs {lacks}"));
@@ -612,6 +794,10 @@ impl Gerdr {
         f.reopen_fix_round();
         if let Some(round) = f.fix_round.as_mut() {
             round.phase = FixPhase::CompactingToFix;
+            round.stalled = None;
+        }
+        if let Some(run) = f.runs.get_mut(&Stage::Build) {
+            run.stop = None;
         }
         f.log(now, said);
         self.save_feature(project, slug);
@@ -652,9 +838,24 @@ impl Gerdr {
             }
         };
         let shown = path.display().to_string();
+        // What it must tick goes in the build log first: the round isn't
+        // over until it does, whatever the agent makes of the plan.
+        let round = (feature.fix_round.as_ref()).or(feature.last_fix_round.as_ref());
+        let Some(n) = round.map(|r| r.n) else {
+            return false;
+        };
+        let ids = round.map(FixRound::ids).unwrap_or_default();
+        let items = fix_round::items(&plan, &ids);
+        if let Err(why) = write_items(&data, n, &items) {
+            tracing::warn!("listing the fixes of {project}/{slug}: {why}");
+            self.show_error(format!("Couldn't list the fixes in the build log: {why}"));
+            return false;
+        }
+        let section = fix_round::heading(n);
         let names = self.projects.names(&feature);
         let mut values = vars(&feature, &names, &data, Stage::Build);
         values.insert("fix_plan.path".into(), shown.clone());
+        values.insert("fixes.section".into(), section.clone());
         let sent = prompts::render_builtin("fix-go", &values)
             .map_err(|e| e.to_string())
             .and_then(|line| self.tell_build_agent(&feature, line.trim()));
@@ -665,6 +866,7 @@ impl Gerdr {
                 ("fixes", plan),
                 ("fixes.path", shown),
                 ("fixes.what", "fixes of the approved plan".to_owned()),
+                ("fixes.section", section),
             ];
             if !self.launch_fresh_build(project, slug, &extra) {
                 return false;
@@ -678,6 +880,12 @@ impl Gerdr {
         f.reopen_fix_round();
         if let Some(round) = f.fix_round.as_mut() {
             round.phase = FixPhase::Fixing;
+            round.stalled = None;
+            round.items = items;
+            round.done = 0;
+        }
+        if let Some(run) = f.runs.get_mut(&Stage::Build) {
+            run.stop = None;
         }
         f.log(now, said);
         let agent = f.runs.get(&Stage::Build).and_then(|r| r.agent_key());
@@ -688,18 +896,6 @@ impl Gerdr {
         }
         self.show_success(format!("Sent the fixes of \u{201c}{title}\u{201d} to {to}"));
         true
-    }
-
-    /// Fixing is over on feature `slug`: its round, if it was making them,
-    /// ends.
-    pub(crate) fn fix_round_fixed(&mut self, project: &str, slug: &str) {
-        let fixing = self
-            .feature(project, slug)
-            .and_then(|f| f.fix_round.as_ref())
-            .is_some_and(|r| r.phase == FixPhase::Fixing);
-        if fixing {
-            self.end_fix_round(project, slug, false);
-        }
     }
 
     /// Ask before dropping the open round of feature `slug`.
@@ -834,6 +1030,26 @@ impl Gerdr {
             self.show_build_agent(project, slug);
         }
     }
+}
+
+/// Where feature data dir `data` has its build log.
+fn build_log(data: &Path) -> PathBuf {
+    data.join(feature::artifacts::name(Stage::Build).unwrap_or("build.md"))
+}
+
+/// Put round `n`'s `items` in the build log under `data`.
+fn write_items(data: &Path, n: u32, items: &[String]) -> Result<(), String> {
+    let path = build_log(data);
+    let log = match std::fs::read_to_string(&path) {
+        Ok(log) => log,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(err) => return Err(err.to_string()),
+    };
+    let with = fix_round::with_items(&log, n, items);
+    if with == log {
+        return Ok(());
+    }
+    std::fs::write(&path, with).map_err(|err| err.to_string())
 }
 
 /// A feature's key among the watches.

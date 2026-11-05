@@ -370,6 +370,10 @@ pub(crate) fn gate_of(
     }
     // A round open holds what its stage waited for.
     if let Some(round) = &f.fix_round {
+        if round.fixes_stopped() {
+            let since = round.ready.unwrap_or(round.asked);
+            return Some((round.stage, since, GateKind::Blocked));
+        }
         let since = round.ready.filter(|_| round.phase == FixPhase::Ready)?;
         return Some((round.stage, since, GateKind::FixPlan));
     }
@@ -889,6 +893,8 @@ pub(crate) fn vars(
         ("fixes", String::new()),
         ("fixes.path", String::new()),
         ("fixes.what", String::new()),
+        ("fixes.section", String::new()),
+        ("fixes.left", String::new()),
         ("fix_plan.path", String::new()),
         ("review.diffs", String::new()),
         ("review.sent", String::new()),
@@ -1688,7 +1694,11 @@ impl Gerdr {
                 let data = store::dir(None, &project, &feature.slug);
                 let wrote = artifacts::path(&data, stage)
                     .map(|path| read_file(&feature, stage, &path, run.started));
-                if alive && wrote.is_some_and(|file| file.finished().is_some()) {
+                // A round's fixes are listed in the build log as this agent
+                // starts: that's gerdr's writing, not its.
+                let listed = stage == Stage::Build
+                    && (feature.fix_round.as_ref()).is_some_and(|r| !r.before_fixing());
+                if alive && !listed && wrote.is_some_and(|file| file.finished().is_some()) {
                     self.held_agent_wrote(&project, &feature.slug, stage);
                 }
                 continue;
@@ -1740,6 +1750,17 @@ impl Gerdr {
             if build && working {
                 // What it was told it lacked is its to mend: read anew.
                 watch.refused = None;
+            }
+            // Making a round's fixes it is no milestone's agent, however
+            // its log reads: the round says when it is over (`fixes_tick`).
+            if build
+                && feature
+                    .fix_round
+                    .as_ref()
+                    .is_some_and(|r| !r.before_fixing())
+            {
+                watch.worked |= working;
+                continue;
             }
             let file = read_file(&feature, stage, &path, watch.after);
             // The `Blocked:` line is gone, by the agent's hand or the user's.
@@ -3465,6 +3486,8 @@ mod tests {
             ready,
             stalled: None,
             give_back: Default::default(),
+            items: Vec::new(),
+            done: 0,
         };
         let mut planning = failed("f");
         planning.fix_round = Some(round(FixPhase::Planning, None));
@@ -3473,6 +3496,13 @@ mod tests {
         // Approved: its agent is at it, nothing waits for the user.
         let mut fixing = failed("h");
         fixing.fix_round = Some(round(FixPhase::Fixing, Some(400)));
+        // Stopped with fixes left it waits for the user, as a blocked Build.
+        let mut halted = fixing.clone();
+        halted.fix_round.as_mut().unwrap().stalled = Some("it stopped".into());
+        assert_eq!(
+            gate_of(&halted, |_| None),
+            Some((Stage::Verify, 400, GateKind::Blocked))
+        );
         let all = BTreeMap::from([(
             "one".to_owned(),
             vec![review, built, stopped, failed("d"), planning, ready, fixing],

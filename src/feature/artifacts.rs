@@ -331,7 +331,13 @@ pub fn blocked(text: &str) -> Option<String> {
 /// Each checkbox item of `text`'s Milestones section, in order: whether
 /// it is ticked, and its text after the box ("API endpoint").
 pub fn milestone_items(text: &str) -> Vec<(bool, String)> {
-    let body = Sections::of(text).get("Milestones").unwrap_or_default();
+    items_under(text, "Milestones")
+}
+
+/// Each checkbox item of `text`'s section headed `heading`, in order:
+/// whether it is ticked, and its text after the box.
+pub fn items_under(text: &str, heading: &str) -> Vec<(bool, String)> {
+    let body = Sections::of(text).get(heading).unwrap_or_default();
     body.iter()
         .filter_map(|line| {
             let mark = checkbox(line)?;

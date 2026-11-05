@@ -22,7 +22,8 @@ Your job: turn the approved brief into a plan the Build stage can follow.
      Under each, as indented lines:
      `Files:` the files it changes, so Build need not search for them;
      `Covers:` the brief's acceptance criteria it meets;
-     `Check:` how to tell it works.
+     `Check:` how to tell it works: the one test file or test name to run,
+     never a whole test suite.
      Every acceptance criterion is covered by some milestone.
 {{#if multi_repo}}
    - `## Repositories`: the repositories the feature touches, by the
@@ -39,7 +40,8 @@ Your job: turn the approved brief into a plan the Build stage can follow.
      brief. Leave the section out when nothing is.
 {{#if checks}}
 
-The project's checks, which gerdr runs at Verify, for `Check:` to build on:
+The project's checks, which gerdr runs whole at Verify, once. They show the
+tools for `Check:`, which runs only a small part of them:
 
 {{checks}}
 {{/if}}

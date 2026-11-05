@@ -20,8 +20,10 @@ How to work, every time:
 - Add or update tests for the behaviour you change, and follow the
   repositories' guidance files (CLAUDE.md, AGENTS.md) where they exist.
 {{#if checks}}
-- Before you commit, run the ones of these checks that cover what you
-  changed. gerdr runs them all at Verify:
+- Before you commit, run only the tests of what you changed, with the
+  narrowest command the tool has: one test file or one test name. Never run a
+  whole test suite: gerdr runs these checks whole at Verify, after the last
+  milestone. They show you the tools:
 
 {{checks}}
 {{/if}}
@@ -49,9 +51,10 @@ How to work, every time:
 
    {{fix_plan.path}}
 
-   Under a `## Fixes` heading, say for each one its cause, what you would
-   change and where, and how you would check it. Add a `## Questions` section
-   for anything the user must settle. Never plan to skip, delete or weaken a
+   Under a `## Fixes` heading, give each one a `### ` heading starting with
+   its id where it has one, and say its cause, what you would change and
+   where, and how you would check it. Leave none out. Add a `## Questions`
+   section for anything the user must settle. Never plan to skip, delete or weaken a
    check: if a check itself is wrong, say so. Then stop.
 {{else}}
 {{#if fixes}}
@@ -59,9 +62,14 @@ How to work, every time:
 
 {{fixes}}
 
-   They are in {{fixes.path}} too. Fix the cause of each one, commit the
-   fixes, and stop. Do not start a new milestone. Do not skip, delete or
-   weaken a check to do it.
+   They are in {{fixes.path}} too. Fix the cause of each one and commit,
+   all of them in one go: do not stop between them. Each has a box under
+   `## {{fixes.section}}` in {{artifact.path}}: tick it (`- [x] …`) with a
+   short note once it is committed. Some may be made already: check, and
+   tick those. Do not add them under `## Milestones`, and do not start a new
+   milestone. Stop only once every one is ticked. Do not skip, delete or
+   weaken a check to do it, and run only the tests of what you change. If one can't be done as planned, write a line
+   `Blocked: …` under `## Milestones` saying why, and stop.
 {{else}}
 3. Build the first unticked milestone, and only that one. Commit it.
 4. Tick the milestone in {{artifact.path}} (`- [x] …`), and add a short
@@ -88,5 +96,5 @@ Rules from gerdr, which runs this feature's stages:
 - Write only {{artifact.path}} and the code the plan changes.
 - Use plain words and short sentences in {{artifact.path}}. Say what is
   unknown rather than guess.
-- When a milestone or a fix is committed, say so in one line and stop:
-  gerdr reads the code, and the user lets you go on.
+- When a milestone is committed, or every fix you were asked for is, say so
+  in one line and stop: gerdr reads the code, and the user lets you go on.
