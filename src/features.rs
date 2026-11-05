@@ -1026,8 +1026,10 @@ pub enum PanelOutcome {
     SetupLog,
     /// Show the diff at AI review's first finding to decide.
     Findings,
-    /// Send AI review's findings to fix to the Build agent.
+    /// Send AI review's findings to fix to the Build agent, through a plan.
     SendFixes,
+    /// The same with no plan: nothing of the user's asks for one.
+    MakeFindingFixes,
     /// Mark every undecided finding of its AI review to fix.
     FixAllFindings,
     /// Start a fix round on Verify's failures.
@@ -1307,6 +1309,9 @@ pub struct RowCtx {
     pub setting_up: bool,
     /// Work of its runs off the thread (see `Gerdr::feature_busy`).
     pub feature_busy: bool,
+    /// The comments the user left in its diff, as last read, or as its open
+    /// diff has them: with any, AI review's fixes need a plan.
+    pub comments: usize,
 }
 
 impl RowCtx {
@@ -1370,7 +1375,7 @@ pub fn row_action(feature: &Feature, row: PanelRow, ctx: RowCtx) -> Option<Panel
             StageMark::Current if stage == Stage::Ship => PanelOutcome::Ship,
             StageMark::Current if stage == Stage::Verify && ctx.checks => PanelOutcome::RunChecks,
             StageMark::Current if stage == Stage::PlanReview => plan_review_action(feature),
-            StageMark::Current if stage == Stage::AiReview => review_action(feature),
+            StageMark::Current if stage == Stage::AiReview => review_action(feature, ctx),
             StageMark::Current if stage == Stage::CodeReview => PanelOutcome::CodeReview,
             StageMark::Current if stage == Stage::ManualTest && ctx.criteria > 0 => {
                 PanelOutcome::ManualTest
@@ -1608,6 +1613,14 @@ fn offers_fix_all(feature: &Feature, stage: Stage) -> bool {
     can_decide(feature, stage)
         && feature.fix_round.is_none()
         && (feature.review.as_ref()).is_some_and(|r| r.count(FindingState::Open) > 0)
+}
+
+/// What sending AI review's findings on `stage`'s page is now, if it can
+/// be: with a fix plan open, the keys are the plan's.
+fn sends_findings(feature: &Feature, stage: Stage, ctx: RowCtx) -> Option<PanelOutcome> {
+    row_action(feature, PanelRow::Stage(stage), ctx)
+        .filter(|_| fix_round_on(feature, stage).is_none())
+        .filter(|o| matches!(o, PanelOutcome::SendFixes | PanelOutcome::MakeFindingFixes))
 }
 
 /// What dismissing `f` does: an item of the user's own goes at once, with
@@ -2249,9 +2262,10 @@ fn round_card(f: &ReviewFinding, multi: bool) -> FindingCard {
 
 /// What AI review's row does: show its agent while it runs (start one
 /// when there is none), then once its findings are read, show the first
-/// to decide, or send those to fix to the Build agent. Never marked done
-/// by hand: gerdr marks it once no finding holds up.
-fn review_action(feature: &Feature) -> PanelOutcome {
+/// to decide, or send those to fix to the Build agent, through a plan if
+/// the user wrote anything of their own. Never marked done by hand: gerdr
+/// marks it once no finding holds up.
+fn review_action(feature: &Feature, ctx: RowCtx) -> PanelOutcome {
     let stage = Stage::AiReview;
     let Some(run) = feature.runs.get(&stage) else {
         return PanelOutcome::StartAgent(stage, false);
@@ -2259,7 +2273,12 @@ fn review_action(feature: &Feature) -> PanelOutcome {
     let review = feature.review.as_ref().filter(|_| run.ready.is_some());
     match review {
         Some(r) if r.count(FindingState::Open) > 0 => PanelOutcome::Findings,
-        Some(r) if r.count(FindingState::Fix) > 0 => PanelOutcome::SendFixes,
+        Some(r) if r.count(FindingState::Fix) > 0 => {
+            match review_import::needs_plan(&r.findings, ctx.comments) {
+                true => PanelOutcome::SendFixes,
+                false => PanelOutcome::MakeFindingFixes,
+            }
+        }
         _ if run.waits_to_send() => PanelOutcome::SendPrompt(stage),
         _ if run.live() => PanelOutcome::ShowAgent(stage),
         _ if run.resumes() => PanelOutcome::ResumeAgent(stage),
@@ -2378,6 +2397,7 @@ fn action_hint(action: &PanelOutcome) -> &'static str {
         PanelOutcome::RemoveSandbox => "remove sandbox\u{2026}",
         PanelOutcome::Findings => "review in diff",
         PanelOutcome::SendFixes | PanelOutcome::PlanFixes => "plan fixes",
+        PanelOutcome::MakeFindingFixes => "make fixes",
         PanelOutcome::FixAllFindings => "fix all open",
         PanelOutcome::ReviewFixPlan => "review fix plan",
         PanelOutcome::MakeFixes => "make fixes",
@@ -2416,6 +2436,7 @@ fn stage_button(feature: &Feature, stage: Stage, ctx: RowCtx) -> Option<&'static
         PanelOutcome::RunChecks => Some("Run checks"),
         PanelOutcome::Findings => Some("Review in diff"),
         PanelOutcome::SendFixes => Some("Plan fixes"),
+        PanelOutcome::MakeFindingFixes => Some("Make fixes"),
         PanelOutcome::CodeReview => Some("Review code"),
         PanelOutcome::PlanSuggestions => Some("Decide\u{2026}"),
         PanelOutcome::WriteFinalPlan => {
@@ -3339,6 +3360,18 @@ impl FeaturePanel {
             {
                 return Some(PanelOutcome::AddComment);
             }
+            // AI review's fixes, off the repositories as well: Ctrl+Shift+Enter
+            // always through a plan.
+            Keysym::Return | Keysym::KP_Enter
+                if ctrl
+                    && self.focus != TabArea::Repos
+                    && sends_findings(feature, stage, ctx).is_some() =>
+            {
+                return match mods.shift {
+                    true => Some(PanelOutcome::SendFixes),
+                    false => sends_findings(feature, stage, ctx),
+                };
+            }
             // A locked stage's is refused when done, saying why; any other
             // stage has nothing to reopen.
             Keysym::Return | Keysym::KP_Enter
@@ -3721,7 +3754,15 @@ pub fn page_actions(
             _ if back == Some(Rework::Waits) || round.is_some() || plan_fixes => ButtonStyle::Plain,
             _ => ButtonStyle::Primary,
         };
+        let direct = main == PanelOutcome::MakeFindingFixes;
         out.push((button(label, style), main));
+        // Nothing asks for a plan, but one can still be wanted.
+        if direct {
+            out.push((
+                button("Plan fixes", ButtonStyle::Plain),
+                PanelOutcome::SendFixes,
+            ));
+        }
     }
     if tries_criteria(feature, stage) && ctx.criteria > 0 {
         use crate::manual_test::Outcome;
@@ -4503,7 +4544,7 @@ impl Gerdr {
     }
 
     /// What the panel's rows need of `feature` besides it.
-    fn row_ctx(&self, feature: &Feature) -> RowCtx {
+    pub(crate) fn row_ctx(&self, feature: &Feature) -> RowCtx {
         let config = self.projects.workflows(feature, |w| w.verify.clone());
         let checks = !feature::verify::checks(feature, &config).is_empty();
         let all_skipped = !checks && !feature::verify::skipped(feature, &config).is_empty();
@@ -4513,6 +4554,9 @@ impl Gerdr {
         let last = (self.features.probes.get(&key)).and_then(|p| p.last.as_ref());
         let docs = last.map(|p| &p.docs);
         let written = Stage::ALL.map(|stage| docs.is_some_and(|d| d.written.contains(&stage)));
+        // The open diff's may not be saved yet, and is gone after a restart.
+        let comments = (docs.map_or(0, |d| d.comments))
+            .max(self.code_reviews.get(&key).map_or(0, |c| c.comments));
         RowCtx {
             checks,
             criteria,
@@ -4526,6 +4570,7 @@ impl Gerdr {
             checks_busy: self.checks_busy(&feature.project, &feature.slug),
             setting_up: self.setting_up(&feature.project, &feature.slug),
             feature_busy: self.feature_busy(&feature.project, &feature.slug),
+            comments,
         }
     }
 
@@ -6206,6 +6251,7 @@ impl Gerdr {
                 self.open_feature_diff(&project, &slug, first.as_deref());
             }
             PanelOutcome::SendFixes => self.send_findings(&project, &slug),
+            PanelOutcome::MakeFindingFixes => self.make_finding_fixes(&project, &slug),
             PanelOutcome::FixAllFindings => self.fix_all_findings(&project, &slug),
             PanelOutcome::PlanFixes => self.plan_verify_fixes(&project, &slug),
             PanelOutcome::ReviewFixPlan => self.open_doc_tab(&project, &slug, DocFile::FixPlan),
@@ -9043,11 +9089,25 @@ fn findings_count(feature: &Feature) -> String {
 /// name, as `probe` last read them; none while it has none.
 fn milestones_of(probe: Option<&Probe>, stage: Stage) -> Option<PageSection> {
     let items = probe?.docs.milestones.get(&stage)?;
-    (!items.is_empty()).then(|| PageSection::Milestones {
+    (!items.is_empty()).then(|| milestones_section(stage.label().to_owned(), items))
+}
+
+/// `items` as a group of Build's list, called `label`.
+fn milestones_section(label: String, items: &[(bool, String)]) -> PageSection {
+    PageSection::Milestones {
+        label,
         done: items.iter().filter(|(done, _)| *done).count(),
         total: items.len(),
-        items: items.clone(),
-    })
+        items: items.to_vec(),
+    }
+}
+
+/// What each fix round listed in the build log, oldest first, as `probe`
+/// last read it.
+fn fix_rounds_of(probe: Option<&Probe>) -> Vec<PageSection> {
+    (probe.iter().flat_map(|p| &p.docs.fix_rounds))
+        .map(|(n, items)| milestones_section(feature::fix_round::label(*n), items))
+        .collect()
 }
 
 /// `stage`'s file to read on its page, as `probe` last read it; none while
@@ -9166,11 +9226,13 @@ fn stage_page(
                 // last stop.
                 let stop = feature.runs.get(&stage).and_then(|r| r.stop);
                 let counted = stop.map(|stop| PageSection::Milestones {
+                    label: stage.label().to_owned(),
                     done: stop.done as usize,
                     total: stop.total as usize,
                     items: Vec::new(),
                 });
                 sections.extend(milestones_of(state.probe, stage).or(counted));
+                sections.extend(fix_rounds_of(state.probe));
             }
             Stage::Verify => {
                 sections.extend(verify_sections(feature, state, actions, now));
@@ -9406,7 +9468,7 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 5] = [
             ),
             (
                 "Ctrl+Enter",
-                "make the fixes of a fix plan ready for review, or send them again",
+                "make the fixes of a fix plan ready for review, or send them again; at AI review, send the findings to fix, with no plan unless you commented",
             ),
             (
                 "Ctrl+Shift+O",
@@ -9469,6 +9531,7 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 5] = [
         &[
             ("Up / Down", "previous or next finding"),
             ("Home / End", "first or last finding"),
+            ("Ctrl+Shift+Enter", "plan the fixes of the findings first"),
             ("f", "fix the finding, or take that back"),
             (
                 "c",
@@ -9731,6 +9794,12 @@ fn tab_hints(
             if offers_fix_all(feature, stage) {
                 hints.push(hint("Shift+F", "fix all open"));
             }
+            if let Some(send) = sends_findings(feature, stage, ctx) {
+                hints.push(hint("Ctrl+Enter", action_hint(&send)));
+                if send == PanelOutcome::MakeFindingFixes {
+                    hints.push(hint("Ctrl+Shift+Enter", "plan fixes"));
+                }
+            }
             if earlier_reviews(feature, stage).next().is_some() {
                 hints.push(hint("Alt+E", "earlier reviews"));
             }
@@ -9751,6 +9820,9 @@ fn tab_hints(
             }
             if offers_fix_all(feature, stage) {
                 hints.push(hint("Shift+F", "fix all open"));
+            }
+            if sends_findings(feature, stage, ctx) == Some(PanelOutcome::MakeFindingFixes) {
+                hints.push(hint("Ctrl+Shift+Enter", "plan fixes"));
             }
             if earlier_reviews(feature, stage).next().is_some() {
                 hints.push(hint("Alt+E", "earlier reviews"));
@@ -11551,10 +11623,14 @@ pub(crate) mod tests {
         let mut f = feature("b", vec![repo("api", true)], 5);
         assert_eq!(f.current(), Some(Stage::AiReview));
         f.runs.insert(Stage::AiReview, held_run(Some("p1")));
-        assert_eq!(review_action(&f), PanelOutcome::SendPrompt(Stage::AiReview));
+        let none = RowCtx::default();
+        assert_eq!(
+            review_action(&f, none),
+            PanelOutcome::SendPrompt(Stage::AiReview)
+        );
         f.runs.insert(Stage::AiReview, held_run(None));
         assert_eq!(
-            review_action(&f),
+            review_action(&f, none),
             PanelOutcome::StartAgent(Stage::AiReview, false)
         );
     }
@@ -13028,11 +13104,63 @@ pub(crate) mod tests {
         };
         assert!(labels(&open).contains(&"Fix all open".to_owned()));
         assert!(!labels(&open).contains(&"Plan fixes".to_owned()));
+        assert!(!labels(&open).contains(&"Make fixes".to_owned()));
+        // Taken as they are, the fixes go with no plan; one can be asked for.
         let fix = reviewing(&[S::Fix, S::Dismissed], true);
-        assert!(labels(&fix).contains(&"Plan fixes".to_owned()));
+        let primary = |f: &Feature, ctx| page_enter(f, Stage::AiReview, ctx);
+        let plain = (page_actions(&fix, Stage::AiReview, none).into_iter())
+            .find(|(b, _)| b.label == "Plan fixes");
+        assert_eq!(
+            plain.map(|(b, o)| (b.style, o)),
+            Some((ButtonStyle::Plain, PanelOutcome::SendFixes))
+        );
         assert!(!labels(&fix).contains(&"Fix all open".to_owned()));
-        assert_eq!(row_action(&fix, row, none), Some(PanelOutcome::SendFixes));
-        assert_eq!(row_hint(&fix, row, none), "plan fixes");
+        assert_eq!(
+            row_action(&fix, row, none),
+            Some(PanelOutcome::MakeFindingFixes)
+        );
+        assert_eq!(primary(&fix, none), Some(PanelOutcome::MakeFindingFixes));
+        assert_eq!(row_hint(&fix, row, none), "make fixes");
+        // Ctrl+Enter sends them from the cards too, Ctrl+Shift+Enter plans.
+        let mut panel = FeaturePanel {
+            slug: fix.slug.clone(),
+            stage: Some(Stage::AiReview),
+            ..FeaturePanel::default()
+        };
+        for focus in [TabArea::Stages, TabArea::Findings] {
+            panel.focus = focus;
+            let ctrl = |shift| ModifiersState {
+                ctrl: true,
+                shift,
+                ..ModifiersState::default()
+            };
+            assert_eq!(
+                press(&mut panel, &fix, (ctrl(false), Keysym::Return)),
+                Some(PanelOutcome::MakeFindingFixes)
+            );
+            assert_eq!(
+                press(&mut panel, &fix, (ctrl(true), Keysym::Return)),
+                Some(PanelOutcome::SendFixes)
+            );
+        }
+        // A word of the user's asks for the plan: Make fixes is gone.
+        let commented = RowCtx {
+            comments: 1,
+            ..none
+        };
+        let mut noted = fix.clone();
+        let finding = &mut noted.review.as_mut().unwrap().findings[0];
+        finding.note = "Careful".into();
+        for (f, ctx) in [(&fix, commented), (&noted, none)] {
+            assert_eq!(row_action(f, row, ctx), Some(PanelOutcome::SendFixes));
+            assert_eq!(primary(f, ctx), Some(PanelOutcome::SendFixes));
+            assert_eq!(row_hint(f, row, ctx), "plan fixes");
+            let shown: Vec<String> = (page_actions(f, Stage::AiReview, ctx).into_iter())
+                .map(|(b, _)| b.label)
+                .collect();
+            assert!(!shown.contains(&"Make fixes".to_owned()), "{shown:?}");
+            assert!(shown.contains(&"Plan fixes".to_owned()), "{shown:?}");
+        }
         assert_eq!(review_line(&fix, None).as_deref(), Some("1 finding to fix"));
         let sent = reviewing(&[S::Sent, S::Sent], true);
         assert_eq!(
@@ -14724,6 +14852,7 @@ pub(crate) mod tests {
         assert_eq!(
             page.sections.last(),
             Some(&PageSection::Milestones {
+                label: "Build".to_owned(),
                 done: 1,
                 total: 3,
                 items: Vec::new()
@@ -15809,6 +15938,7 @@ pub(crate) mod tests {
         assert_eq!(
             page.sections.last(),
             Some(&PageSection::Milestones {
+                label: "Build".to_owned(),
                 done: 2,
                 total: 3,
                 items
@@ -15824,6 +15954,32 @@ pub(crate) mod tests {
             s,
             PageSection::Agent { tail, .. } if !tail.is_empty()
         )));
+        // Each fix round's list comes after, under its own label.
+        let round = |n, items: &[(bool, &str)]| {
+            (n, items.iter().map(|(d, t)| (*d, (*t).to_owned())).collect())
+        };
+        let mut read = p.clone();
+        read.docs.fix_rounds = vec![
+            round(1, &[(true, "r1-1"), (true, "r1-2")]),
+            round(3, &[(false, "r3-1")]),
+        ];
+        let state = PanelState {
+            probe: Some(&read),
+            ..PanelState::default()
+        };
+        let page = stage_page(&f, Stage::Build, &state, &actions, 2_000);
+        let groups: Vec<(&str, usize, usize)> = (page.sections.iter())
+            .filter_map(|section| match section {
+                PageSection::Milestones {
+                    label, done, total, ..
+                } => Some((label.as_str(), *done, *total)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            groups,
+            [("Build", 2, 3), ("Review 1", 2, 2), ("Review 3", 0, 1)]
+        );
     }
 
     #[test]

@@ -40,6 +40,8 @@ pub enum MenuAction {
     /// The fixes of AI review of a project's feature, planned (see
     /// `Gerdr::send_findings`).
     PlanFixes(String, String),
+    /// The same with no fix plan (see `Gerdr::make_finding_fixes`).
+    MakeFindingFixes(String, String),
     /// T3 Code's server, started in the background (see
     /// `Gerdr::spawn_t3`).
     StartT3,
@@ -493,6 +495,9 @@ impl Gerdr {
             MenuAction::NewFeature(at) => self.open_new_feature(at),
             MenuAction::OpenFeature(project, slug) => self.open_linked_feature(&project, &slug),
             MenuAction::PlanFixes(project, slug) => self.send_findings(&project, &slug),
+            MenuAction::MakeFindingFixes(project, slug) => {
+                self.make_finding_fixes(&project, &slug);
+            }
             MenuAction::InboxRestore {
                 project,
                 ids,

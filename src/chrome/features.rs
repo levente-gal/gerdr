@@ -544,9 +544,11 @@ pub enum PageSection {
     MilestoneMode { fresh: bool },
     /// Ship's choice and tick boxes for a repository, or what follows.
     ShipGroup(ShipGroup),
-    /// The milestones, "done of total", with a bar, and each by name when
-    /// known (`true` = done; empty until Inc 2 reads them).
+    /// A group of Build's list, its `label` ("Build", "Review 1") with "done
+    /// of total" and a bar, and each by name when known (`true` = done; empty
+    /// until the build log is read).
     Milestones {
+        label: String,
         done: usize,
         total: usize,
         items: Vec<(bool, String)>,
@@ -2301,8 +2303,13 @@ fn page_stack(
                     s.text(&line.text, Font::Body, Ink::Tone(line.tone), BODY_LINE);
                 }
             }
-            PageSection::Milestones { done, total, items } => {
-                s.caption(&format!("Milestones \u{b7} {done} of {total}"));
+            PageSection::Milestones {
+                label,
+                done,
+                total,
+                items,
+            } => {
+                s.caption(&format!("{label} \u{b7} {done} of {total}"));
                 s.y += 2;
                 s.put(
                     PROGRESS,

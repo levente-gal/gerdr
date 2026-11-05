@@ -8,6 +8,10 @@
 //! takes, and then makes the fixes, the chat compacted again first as the
 //! plan is in its file. A feature has one round open at a time.
 //!
+//! AI review's findings taken as they are, with no word of the user's, skip
+//! the planning: gerdr writes the plan from them and the fixes go at once
+//! (`review_import::needs_plan`). The rest of the round is the same.
+//!
 //! The plan must speak of everything the round was sent. gerdr lists its
 //! fixes in the build log, apart from the milestones, and the round is over
 //! once every one is ticked: an agent resting before that is told to go on,
@@ -56,6 +60,8 @@ pub const QUIET: Duration = Duration::from_secs(180);
 pub const GO_ONS: u32 = 1;
 /// What stands for a plan's fixes that it doesn't list one by one.
 pub const ALL_FIXES: &str = "All the fixes of the plan";
+/// What a round's heading in the build log says before its number.
+const ROUND: &str = "Fix round";
 
 /// Where a round stands.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -253,7 +259,31 @@ pub fn items(text: &str, ids: &[String]) -> Vec<String> {
 
 /// The build log's heading for round `n`'s fixes.
 pub fn heading(n: u32) -> String {
-    format!("Fix round {n}")
+    format!("{ROUND} {n}")
+}
+
+/// What round `n`'s list is called on Build's page, under the plan's own.
+pub fn label(n: u32) -> String {
+    format!("Review {n}")
+}
+
+/// The number of round whose section `line` of a build log heads.
+fn round_of(line: &str) -> Option<u32> {
+    let rest = line.trim().strip_prefix("## ")?.strip_prefix(ROUND)?;
+    rest.trim().parse().ok()
+}
+
+/// What each round listed in build log `log`, oldest first: its number, and
+/// each box's text and whether it is ticked. A section with no box is left
+/// out.
+pub fn rounds(log: &str) -> Vec<(u32, Vec<(bool, String)>)> {
+    let mut found: Vec<u32> = log.lines().filter_map(round_of).collect();
+    found.sort_unstable();
+    found.dedup();
+    (found.into_iter())
+        .map(|n| (n, artifacts::items_under(log, &heading(n))))
+        .filter(|(_, items)| !items.is_empty())
+        .collect()
 }
 
 /// Whether `line`, what a box in the log says, is `item`: an agent may add
@@ -335,6 +365,37 @@ pub fn without_added_milestones(log: &str, planned: usize) -> String {
         }
         out.push(line);
     }
+    format!("{}\n", out.join("\n"))
+}
+
+/// Build log `log` without the unticked boxes of round `n`, dropped: what
+/// was made of it stays, as its commits do, and with nothing made its section
+/// goes too.
+pub fn without_unticked(log: &str, n: u32) -> String {
+    let own = format!("## {}", heading(n));
+    let lines: Vec<&str> = log.lines().collect();
+    let Some(start) = lines.iter().position(|line| line.trim() == own) else {
+        return log.to_owned();
+    };
+    let next = (lines[start + 1..].iter())
+        .position(|line| line.starts_with("# ") || line.starts_with("## "))
+        .map_or(lines.len(), |i| start + 1 + i);
+    let body: Vec<&str> = (lines[start + 1..next].iter().copied())
+        .filter(|line| artifacts::checkbox(line.trim_start()) != Some("[ ]"))
+        .collect();
+    let mut out: Vec<&str> = lines[..start].to_vec();
+    if body.iter().all(|line| line.trim().is_empty()) {
+        // The blank line before it goes with it.
+        if next == lines.len() {
+            while out.last().is_some_and(|line| line.trim().is_empty()) {
+                out.pop();
+            }
+        }
+    } else {
+        out.push(lines[start]);
+        out.extend(body);
+    }
+    out.extend_from_slice(&lines[next..]);
     format!("{}\n", out.join("\n"))
 }
 
@@ -584,6 +645,41 @@ mod tests {
             (2, 3)
         );
         assert_eq!(without_added_milestones(log, 0), log);
+    }
+
+    #[test]
+    fn each_rounds_list_is_read_oldest_first() {
+        let ticked = |text: &str| (true, text.to_owned());
+        let open = |text: &str| (false, text.to_owned());
+        let log = "## Milestones\n\n- [x] One\n\n## Fix round 10\n\n- [ ] r10-1\n\n## Fix round 2\n\n- [x] r2-1: a, commit abc\n\n  Note.\n\n- [ ] r2-2\n\n## Fix round 3\n\nNo box.\n\n## Fix round x\n\n- [ ] no\n";
+        assert_eq!(
+            rounds(log),
+            [
+                (2, vec![ticked("r2-1: a, commit abc"), open("r2-2")]),
+                (10, vec![open("r10-1")]),
+            ]
+        );
+        assert!(rounds("## Milestones\n- [ ] One\n").is_empty());
+        assert_eq!(label(2), "Review 2");
+    }
+
+    #[test]
+    fn a_dropped_round_keeps_only_what_was_made() {
+        let log = "## Milestones\n\n- [ ] One\n\n## Fix round 1\n\n- [x] r1-1, abc\n\n  Note.\n\n- [ ] r1-2\n\n## Fix round 2\n\n- [ ] r2-1\n";
+        let tidy = without_unticked(log, 1);
+        assert_eq!(
+            tidy,
+            "## Milestones\n\n- [ ] One\n\n## Fix round 1\n\n- [x] r1-1, abc\n\n  Note.\n\n\n## Fix round 2\n\n- [ ] r2-1\n"
+        );
+        // Nothing made: the section goes, and the rest is as it was.
+        assert_eq!(
+            without_unticked(&tidy, 2),
+            "## Milestones\n\n- [ ] One\n\n## Fix round 1\n\n- [x] r1-1, abc\n\n  Note.\n"
+        );
+        let between = without_unticked("## Fix round 1\n\n- [ ] a\n\n## Notes\n\nHi\n", 1);
+        assert_eq!(between, "## Notes\n\nHi\n");
+        // No such round: as it was.
+        assert_eq!(without_unticked(log, 9), log);
     }
 
     #[test]

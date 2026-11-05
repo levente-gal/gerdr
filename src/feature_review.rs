@@ -10,8 +10,10 @@
 //! in against the code Verify passed: code that changed since sends the
 //! feature back. A review with no finding that holds up marks AI review
 //! done; else its gate waits for the user to decide each one, then to send
-//! those to fix to the Build agent. Fixed code goes through Build and
-//! Verify again, and a new review checks the fixes.
+//! those to fix to the Build agent: straight away when the user only took
+//! them as they are, through a fix plan they read first when they wrote
+//! anything of their own. Fixed code goes through Build and Verify again, and
+//! a new review checks the fixes.
 
 use std::{
     path::{Path, PathBuf},
@@ -377,7 +379,7 @@ impl Gerdr {
             return self.read_and_tick(project, slug, Stage::AiReview);
         }
         if undecided == 0 && fix > 0 {
-            return self.offer_plan(
+            return self.offer_fixes(
                 project,
                 slug,
                 format!("All findings decided: {} to fix", plural(fix, "finding")),
@@ -388,9 +390,29 @@ impl Gerdr {
 
     /// Say `text`, with a button for what comes next: nothing is left to
     /// decide of feature `slug`'s AI review. Nothing starts by itself.
-    fn offer_plan(&mut self, project: &str, slug: &str, text: String) {
-        let plan = MenuAction::PlanFixes(project.to_owned(), slug.to_owned());
-        self.toast_with(text, Level::Success, Some(("Plan fixes".to_owned(), plan)));
+    fn offer_fixes(&mut self, project: &str, slug: &str, text: String) {
+        let (project, slug) = (project.to_owned(), slug.to_owned());
+        let button = match self.findings_need_plan(&project, &slug) {
+            true => (
+                "Plan fixes".to_owned(),
+                MenuAction::PlanFixes(project, slug),
+            ),
+            false => (
+                "Make fixes".to_owned(),
+                MenuAction::MakeFindingFixes(project, slug),
+            ),
+        };
+        self.toast_with(text, Level::Success, Some(button));
+    }
+
+    /// Whether the findings to fix of feature `slug` need a fix plan, as far
+    /// as is known without reading a file.
+    fn findings_need_plan(&self, project: &str, slug: &str) -> bool {
+        let Some(feature) = self.feature(project, slug) else {
+            return false;
+        };
+        let findings = feature.review.iter().flat_map(|r| &r.findings);
+        review_import::needs_plan(findings, self.row_ctx(feature).comments)
     }
 
     /// Mark every undecided finding of feature `slug`'s AI review to fix.
@@ -412,7 +434,7 @@ impl Gerdr {
         });
         if done {
             let text = format!("{} marked to fix", plural(marked, "finding"));
-            self.offer_plan(project, slug, text);
+            self.offer_fixes(project, slug, text);
         }
     }
 
@@ -525,7 +547,7 @@ impl Gerdr {
         let left = review.map_or(1, |r| r.count(FindingState::Open));
         let text = format!("Finding {id} edited and marked to fix");
         match left {
-            0 => self.offer_plan(project, slug, text),
+            0 => self.offer_fixes(project, slug, text),
             _ => self.show_success(text),
         }
     }
@@ -568,10 +590,21 @@ impl Gerdr {
     }
 
     /// Send feature `slug`'s AI review findings the user wants fixed to
-    /// its Build agent, once none waits to be decided, with the comments
-    /// they left in its diff; they are sent then, and the next review
-    /// checks them.
+    /// its Build agent, through a fix plan, once none waits to be decided,
+    /// with the comments they left in its diff; they are sent then, and the
+    /// next review checks them.
     pub fn send_findings(&mut self, project: &str, slug: &str) {
+        self.findings_go(project, slug, false);
+    }
+
+    /// The same with no fix plan: the Build agent makes the fixes at once.
+    /// What the user wrote always goes through a plan, even if it came since
+    /// the button was shown (`review_import::needs_plan`).
+    pub fn make_finding_fixes(&mut self, project: &str, slug: &str) {
+        self.findings_go(project, slug, true);
+    }
+
+    fn findings_go(&mut self, project: &str, slug: &str, unplanned: bool) {
         // A toast's button can come while the open diff has comments unsaved.
         self.feature_save_review();
         let Some(f) = self.feature(project, slug) else {
@@ -609,7 +642,18 @@ impl Gerdr {
             text.push_str(&own_comments_markdown(&own, &roots));
             what.push_str(&format!(" and {}", plural(comments, "comment")));
         }
-        if !self.send_to_build(project, slug, &what, text) {
+        let plan = (unplanned && !review_import::needs_plan(&review.findings, comments))
+            .then(|| review_import::fixes_plan(review, &title, f.many_repos()));
+        let unplanned = plan.is_some();
+        let started = match plan {
+            Some(plan) => self
+                .fix_input(project, slug, &what, &text)
+                .is_some_and(|input| {
+                    self.start_unplanned_fix_round(project, slug, &what, input, &plan)
+                }),
+            None => self.send_to_build(project, slug, &what, text),
+        };
+        if !started {
             return;
         }
         // Sent, so they don't wait for Code review as well.
@@ -656,7 +700,10 @@ impl Gerdr {
             }
             self.close_feature_diff(false);
         }
-        self.show_build_agent(project, slug);
+        // Not sent: its plan waits on the page, with what was said of why.
+        if !unplanned || self.make_unplanned_fixes(project, slug) {
+            self.show_build_agent(project, slug);
+        }
     }
 
     /// Keep a copy of feature `slug`'s Code review comments, for its fix
@@ -710,19 +757,24 @@ impl Gerdr {
         what: &str,
         text: String,
     ) -> bool {
-        let Some(feature) = self.feature(project, slug).cloned() else {
-            return false;
-        };
+        self.fix_input(project, slug, what, &text)
+            .is_some_and(|input| self.start_fix_round(project, slug, what, input))
+    }
+
+    /// Where `text` went for a new fix round of feature `slug`: none if a
+    /// round can't start now, as is said.
+    fn fix_input(&mut self, project: &str, slug: &str, what: &str, text: &str) -> Option<PathBuf> {
+        let feature = self.feature(project, slug)?.clone();
         let title = &feature.title;
         if feature.status != Status::Open || !feature.is_done(Stage::Build) {
             self.show_warning(format!(
                 "\u{201c}{title}\u{201d} isn't built yet; nothing to send {what} to"
             ));
-            return false;
+            return None;
         }
         if let Some(why) = self.fix_round_refusal(&feature) {
             self.show_warning(why);
-            return false;
+            return None;
         }
         let data = store::dir(None, project, slug);
         let dir = data.join("prompts");
@@ -732,13 +784,13 @@ impl Gerdr {
             .map(|k| dir.join(format!("build-{n}-{key}-{k}.md")))
             .find(|p| !p.exists())
             .unwrap_or_default();
-        let written = std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&path, &text));
+        let written = std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&path, text));
         if let Err(err) = written {
             tracing::warn!("writing {}: {err}", path.display());
             self.show_error(format!("Couldn't write {}: {err}", path.display()));
-            return false;
+            return None;
         }
-        self.start_fix_round(project, slug, what, path)
+        Some(path)
     }
 
     /// Start a fresh Build agent with `extra` on feature `slug`, whose Build

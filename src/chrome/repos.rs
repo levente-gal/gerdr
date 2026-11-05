@@ -839,6 +839,7 @@ pub enum ReposButton {
     AddComment,
     FixAllFindings,
     PlanFixes,
+    MakeFixes,
     ReviewFixPlan,
     /// Go to the next review comment or finding in the diff, or the one
     /// before.
@@ -914,6 +915,7 @@ impl ReposButton {
             ReposButton::AddComment => "Add comment\u{2026}",
             ReposButton::FixAllFindings => "Fix all open",
             ReposButton::PlanFixes => "Plan fixes",
+            ReposButton::MakeFixes => "Make fixes",
             ReposButton::ReviewFixPlan => "Review fix plan",
             ReposButton::NextComment => "Next comment",
             ReposButton::PrevComment => "Previous comment",
@@ -4854,7 +4856,13 @@ impl Painter {
             let (bx, bw) = (cap_x, w - 2.0 * (HINT_PAD as f32 * s).round());
             let cr = CAP_RADIUS * s;
             // What a feature's diff waits for, once it can be pressed.
-            let primary = hint.button == ReposButton::PlanFixes && !disabled;
+            let direct =
+                (view.detail.title_buttons.iter()).any(|h| h.button == ReposButton::MakeFixes);
+            let main = match direct {
+                true => ReposButton::MakeFixes,
+                false => ReposButton::PlanFixes,
+            };
+            let primary = hint.button == main && !disabled;
             let (edge, inner, label_color) = match (primary, view.hover == Some(hit)) {
                 (true, true) => {
                     let fill = mix(p.accent, p.text, 0.12);
