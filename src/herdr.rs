@@ -553,13 +553,16 @@ impl Herdr {
         }
     }
 
-    /// The environment of a new pane's shell: gerdr's display, and the
+    /// The environment of a new pane's shell: gerdr's displays, and the
     /// user's config folder in place of the short one the server runs
     /// with, which lives in the runtime folder and only stands in for the
     /// socket's sake. Shells the server starts on its own (restoring its
     /// layout) still get the short one: a link to the same folder.
-    pub fn pane_env(&self, wayland_display: &OsStr) -> Value {
+    pub fn pane_env(&self, wayland_display: &OsStr, x_display: Option<&OsStr>) -> Value {
         let mut env = json!({"WAYLAND_DISPLAY": wayland_display.to_string_lossy()});
+        if let Some(x_display) = x_display {
+            env["DISPLAY"] = x_display.to_string_lossy().into();
+        }
         if let Some(config) = &self.shell_config_home {
             env["XDG_CONFIG_HOME"] = config.to_string_lossy().into();
         }
@@ -583,11 +586,18 @@ impl Herdr {
     pub fn connect_or_start(
         session: &str,
         wayland_display: &OsStr,
+        x_display: Option<&OsStr>,
     ) -> Result<(Self, Start), String> {
         let (config, short) = config_home_for(session);
         let socket = socket_path(session);
-        let (herdr, start) =
-            Self::connect_or_start_server(session, wayland_display, &config, short, &socket)?;
+        let (herdr, start) = Self::connect_or_start_server(
+            session,
+            wayland_display,
+            x_display,
+            &config,
+            short,
+            &socket,
+        )?;
         let shell_config_home = short.then(config_home);
         Ok((
             Self {
@@ -602,6 +612,7 @@ impl Herdr {
     fn connect_or_start_server(
         session: &str,
         wayland_display: &OsStr,
+        x_display: Option<&OsStr>,
         config: &Path,
         short: bool,
         socket: &Path,
@@ -615,9 +626,12 @@ impl Herdr {
         let mut server = Command::new("herdr");
         server.args(["--session", session, "server"]);
         strip_inherited(&mut server);
+        match x_display {
+            Some(x_display) => server.env("DISPLAY", x_display),
+            None => server.env_remove("DISPLAY"),
+        };
         server
             .env("WAYLAND_DISPLAY", wayland_display)
-            .env_remove("DISPLAY")
             .stdin(Stdio::null())
             .stdout(Stdio::null());
         // The server puts its socket under its config folder (see

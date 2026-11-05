@@ -118,10 +118,11 @@ mod web_pages;
 mod welcome;
 mod worktree_diff;
 mod worktrees;
+mod x11;
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     io::Read,
     os::unix::process::CommandExt,
     path::{Path, PathBuf},
@@ -181,7 +182,10 @@ use smithay::{
             ext_data_control::DataControlState as ExtDataControlState,
             primary_selection::PrimarySelectionState, wlr_data_control::DataControlState,
         },
-        shell::xdg::{XdgShellState, XdgToplevelSurfaceData, decoration::XdgDecorationState},
+        shell::xdg::{
+            SurfaceCachedState, XdgShellState, XdgToplevelSurfaceData,
+            decoration::XdgDecorationState,
+        },
         shm::ShmState,
         socket::ListeningSocketSource,
         viewporter::ViewporterState,
@@ -350,6 +354,18 @@ impl Expected {
         self.pid.is_some()
             && self.exited.is_none()
             && now.duration_since(self.started) > EXPECT_TIMEOUT
+    }
+
+    /// Whether it is a launched app still waiting for its window, which may
+    /// come through the X11 bridge (see `x11`).
+    fn waits_for_x11_window(&self) -> bool {
+        self.pid.is_some()
+            && self.exited.is_none()
+            && self.app_id.is_empty()
+            && self.app_command.is_some()
+            && self.herdr.is_none()
+            && !self.kept
+            && self.window_of.is_none()
     }
 
     /// What the placeholder for its window says is starting.
@@ -815,6 +831,18 @@ fn window_app_id(window: &Window) -> String {
         data.lock().unwrap().app_id.clone()
     })
     .unwrap_or_default()
+}
+
+/// Whether `window` keeps one size whatever it is offered.
+fn is_fixed_size(window: &Window) -> bool {
+    let Some(toplevel) = window.toplevel() else {
+        return false;
+    };
+    with_states(toplevel.wl_surface(), |states| {
+        let mut cached = states.cached_state.get::<SurfaceCachedState>();
+        let state = cached.current();
+        state.min_size.w > 0 && state.min_size == state.max_size
+    })
 }
 
 /// Whether `window` is a Zed window.
@@ -1430,6 +1458,8 @@ pub struct Gerdr {
     pub pending_place: HashMap<ObjectId, PendingPlace>,
 
     pub socket_name: OsString,
+    /// The X display for apps that speak only X11.
+    pub x11: x11::Bridge,
     /// The folder of the project's Zed and VS Code data (see
     /// `launch::instance_dir`).
     pub instance_dir: PathBuf,
@@ -1936,7 +1966,9 @@ impl Gerdr {
     /// writes to its stderr goes to `app`'s log (see `launch::log_file`).
     fn spawn(&mut self, cmd: Command, dir: &Path, app: &str) -> Option<u32> {
         let display = self.socket_name.clone();
-        let pid = self.spawn_on(cmd, dir, app, &display)?;
+        self.x11.ensure(&display);
+        let x_display = self.x11.display().map(OsStr::to_owned);
+        let pid = self.spawn_on(cmd, dir, app, &display, x_display.as_deref())?;
         self.process_groups.push(pid as i32);
         Some(pid)
     }
@@ -1951,22 +1983,28 @@ impl Gerdr {
         app: &str,
         display: &str,
     ) -> Option<u32> {
-        self.spawn_on(cmd, dir, app, std::ffi::OsStr::new(display))
+        // No X display: its windows would go when gerdr does.
+        self.spawn_on(cmd, dir, app, std::ffi::OsStr::new(display), None)
     }
 
-    /// Start a child on Wayland display `display`, in its own process
-    /// group; reaped, but not ended by gerdr.
+    /// Start a child on Wayland display `display`, and X display `x_display`
+    /// if any, in its own process group; reaped, but not ended by gerdr. The
+    /// host's X display it never gets: its windows would open outside gerdr.
     fn spawn_on(
         &mut self,
         mut cmd: Command,
         dir: &Path,
         app: &str,
         display: &std::ffi::OsStr,
+        x_display: Option<&std::ffi::OsStr>,
     ) -> Option<u32> {
         let socket = self.herdr.as_ref().map(|h| h.socket().to_path_buf());
         herdr::scrub_env(&mut cmd, socket.as_deref());
+        match x_display {
+            Some(x_display) => cmd.env("DISPLAY", x_display),
+            None => cmd.env_remove("DISPLAY"),
+        };
         cmd.env("WAYLAND_DISPLAY", display)
-            .env_remove("DISPLAY") // no XWayland escape to the host
             .current_dir(dir)
             .process_group(0);
         if let Some(log) = launch::log_file(app) {
@@ -2050,7 +2088,10 @@ impl Gerdr {
         split: Dir,
         cwd: &Path,
     ) -> Option<Result<herdr::PaneInfo, String>> {
-        let env = self.herdr.as_ref()?.pane_env(&self.socket_name);
+        let env = self
+            .herdr
+            .as_ref()?
+            .pane_env(&self.socket_name, self.x11.display());
         let ws = &self.workspaces[w];
         let workspace_id = ws.herdr_id().map(str::to_owned);
         let (dir, name, kind) = (ws.dir.clone(), ws.name.clone(), ws.kind);
@@ -2217,12 +2258,13 @@ impl Gerdr {
     fn connect_herdr(&mut self, session: &str) {
         // Read before a server starting may save over it.
         let saved = herdr::saved_workspace_count(session);
-        let (mut herdr, start) = match herdr::Herdr::connect_or_start(session, &self.socket_name) {
-            Ok(connected) => connected,
-            Err(err) => {
-                return self.report_problem("herdr", format!("{err}: terminals won't persist"));
-            }
-        };
+        let (mut herdr, start) =
+            match herdr::Herdr::connect_or_start(session, &self.socket_name, self.x11.display()) {
+                Ok(connected) => connected,
+                Err(err) => {
+                    return self.report_problem("herdr", format!("{err}: terminals won't persist"));
+                }
+            };
         problems::clear("herdr");
         let mut workspaces = herdr.workspace_list().unwrap_or_default();
         // A restarted server answers before it has brought back all it
@@ -4735,11 +4777,24 @@ impl Gerdr {
 
     /// Forget children that exited, and windows that never showed up for them.
     fn reap_children(&mut self) {
+        if self.x11.reap(&self.socket_name) {
+            let open_log = ("Open log".to_owned(), MenuAction::OpenLog);
+            self.toast_with(
+                "The X11 bridge stopped, and X11 apps closed with it".to_owned(),
+                Level::Warning,
+                Some(open_log),
+            );
+        }
         let mut exited = Vec::new();
+        // Of those, the ones that went wrong.
+        let mut failed = Vec::new();
         self.children.retain_mut(|child| match child.try_wait() {
             Ok(None) => true,
-            _ => {
+            status => {
                 exited.push(child.id());
+                if !status.is_ok_and(|status| status.is_some_and(|s| s.success())) {
+                    failed.push(child.id());
+                }
                 false
             }
         });
@@ -4751,9 +4806,30 @@ impl Gerdr {
         let mut stopped = false;
         // What took too long to show a window: its pane and what it is.
         let mut overdue = Vec::new();
+        // Apps that went wrong before they showed a window.
+        let mut no_window = Vec::new();
+        // Tabs showing a window of an X11 app.
+        let x11_tabs: Vec<u64> = self
+            .workspaces
+            .iter()
+            .flat_map(|ws| &ws.tabs)
+            .filter(|tab| {
+                let window_pid = |p: &Pane| self.window_pid(&p.window);
+                !tab.expected.is_empty()
+                    && tab.panes.iter().any(|p| self.x11.is_client(window_pid(p)))
+            })
+            .map(|tab| tab.id)
+            .collect();
         for tab in self.workspaces.iter_mut().flat_map(|ws| &mut ws.tabs) {
             let mut gone = Vec::new();
+            let shows_x11 = x11_tabs.contains(&tab.id);
             tab.expected.retain_mut(|e| {
+                // No other window is coming: the app's only one has a fixed
+                // size, and took the place of a splash screen (see `place`).
+                if shows_x11 && e.waits_for_x11_window() && e.is_overdue(now) {
+                    gone.push(e.pane);
+                    return false;
+                }
                 // Another window of a kept app that didn't come back: the
                 // app closed it meanwhile, nothing to retry.
                 if e.window_of.is_some() && e.is_overdue(now) {
@@ -4790,6 +4866,11 @@ impl Gerdr {
                     stopped = true;
                     return true;
                 }
+                if e.pid.is_some_and(|pid| failed.contains(&pid))
+                    && let Some(app) = e.app_command.as_deref().and_then(launch::program_name)
+                {
+                    no_window.push(app);
+                }
                 gone.push(e.pane);
                 false
             });
@@ -4814,6 +4895,19 @@ impl Gerdr {
         for (pane, label) in overdue {
             tracing::warn!("{label} didn't show a window");
             self.toast_not_started(pane, &label);
+        }
+        for app in no_window {
+            tracing::warn!(
+                "{app} closed without a window, see {}",
+                launch::log_path(&app).display()
+            );
+            if self.x11.display().is_some() {
+                let open_log = ("Open log".to_owned(), MenuAction::OpenLog);
+                let text = format!("{app} closed without a window");
+                self.toast_with(text, Level::Error, Some(open_log));
+            } else {
+                self.report_problem(x11::PROBLEM, x11::no_bridge_text(&app));
+            }
         }
         self.retired_groups.retain(|g| group_alive(*g));
         self.poll_picker();
@@ -5014,7 +5108,25 @@ impl Gerdr {
         // A Zed window the shown project waits for: Zed hands windows from
         // one process to another, so it may come from an old one.
         let zed = || find(&|e| e.pid.is_some() && e.app_id == "zed" && app_id.contains(&e.app_id));
-        let claimed = kept().or_else(ours).or_else(zed);
+        // An X11 app's window comes through the bridge, which doesn't say
+        // whose it is: it goes to a launched app waiting for its window, one
+        // of its program first. Not a window of a fixed size: that is a splash
+        // screen or the like, which goes away before the app's window comes.
+        let from_bridge = self.x11.is_client(pid);
+        let x11 = || {
+            if !from_bridge || is_fixed_size(&window) {
+                return None;
+            }
+            let of_program = |e: &Expected| {
+                e.app_command
+                    .as_deref()
+                    .and_then(launch::program_name)
+                    .is_some_and(|program| app_id.contains(&program.to_ascii_lowercase()))
+            };
+            find(&|e| e.waits_for_x11_window() && of_program(e))
+                .or_else(|| find(&Expected::waits_for_x11_window))
+        };
+        let claimed = kept().or_else(ours).or_else(zed).or_else(x11);
         // A late window of a project switched away from: its processes are
         // on their way out.
         let in_groups = |groups: &[i32]| {
@@ -5045,7 +5157,17 @@ impl Gerdr {
                 .from_keeper(&lineage)
                 .then(|| self.kept_command(&app_id))
                 .flatten();
-            return self.place_stray(window, stray, window_of);
+            // Maybe the splash screen of a launched app (see `x11` above): it
+            // shows where the app's window will, and the app is alive, so the
+            // wait for that window starts over.
+            let waiting = from_bridge
+                .then(|| find(&Expected::waits_for_x11_window))
+                .flatten();
+            if let Some((w, t, e)) = waiting {
+                self.workspaces[w].tabs[t].expected[e].started = Instant::now();
+            }
+            let place = waiting.map(|(w, t, _)| (w, t));
+            return self.place_stray(window, stray, window_of, place);
         };
         let expected = &self.workspaces[w].tabs[t].expected[e];
         let since = booting.unwrap_or_else(Instant::now);
@@ -5089,12 +5211,19 @@ impl Gerdr {
     /// Show `window`, not one gerdr started, in the shown project: split
     /// the focused pane of the current tab along its longer side. Another
     /// window of an app kept running (see `Pane::window_of`) goes where the
-    /// app is instead (see `kept_window_place`).
-    fn place_stray(&mut self, window: Window, stray: bool, window_of: Option<String>) {
+    /// app is instead (see `kept_window_place`), and one with a `place`, a
+    /// workspace and tab, there.
+    fn place_stray(
+        &mut self,
+        window: Window,
+        stray: bool,
+        window_of: Option<String>,
+        place: Option<(usize, usize)>,
+    ) {
         let kept = window_of
             .as_deref()
             .and_then(|command| self.kept_window_place(command));
-        let (w, t) = match kept {
+        let (w, t) = match kept.or(place) {
             Some(place) => place,
             None => {
                 if self.workspaces.is_empty() {
@@ -5175,7 +5304,7 @@ impl Gerdr {
         let mut windows = self.held.remove(id).unwrap_or_default();
         windows.extend(self.held.remove("").unwrap_or_default());
         for window in windows {
-            self.place_stray(window, true, None);
+            self.place_stray(window, true, None, None);
         }
     }
 
@@ -7013,7 +7142,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         fractional_scale_state: FractionalScaleManagerState::new::<Gerdr>(&dh),
         cursor_shape_state: CursorShapeManagerState::new::<Gerdr>(&dh),
         seat,
+        x11: x11::Bridge::default(),
     };
+    state.x11.ensure(&socket_name);
     state.t3.auto_update = t3_settings.updates;
 
     event_loop
@@ -7179,6 +7310,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     state.close_windows(&mut event_loop);
     state.detach_keeper();
     state.kill_children();
+    state.x11.stop();
     if let Some((mut picker, _)) = state.picker.take() {
         let _ = picker.kill();
     }
@@ -7188,6 +7320,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_launched_app_waits_for_a_window_from_the_x11_bridge() {
+        let launched = || {
+            let mut e = Expected::new(Some(1), "", 1, true);
+            e.app_command = Some("xeyes".to_owned());
+            e
+        };
+        assert!(launched().waits_for_x11_window());
+        let mut queued = launched();
+        queued.pid = None;
+        assert!(!queued.waits_for_x11_window());
+        let mut gone = launched();
+        gone.exited = Some(Instant::now());
+        assert!(!gone.waits_for_x11_window());
+        let mut shared = launched();
+        shared.app_id = "zed".to_owned();
+        assert!(!shared.waits_for_x11_window());
+        let mut kept = launched();
+        kept.kept = true;
+        assert!(!kept.waits_for_x11_window());
+        let mut other = launched();
+        other.window_of = Some(("xeyes".to_owned(), "eyes".to_owned()));
+        assert!(!other.waits_for_x11_window());
+    }
 
     #[test]
     fn the_prefix_works_over_a_panel_as_input_has_it() {

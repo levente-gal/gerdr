@@ -44,7 +44,8 @@ they come back when it starts again.
 - `herdr` and `alacritty` on your `PATH`, for terminals.
 - `zed` on your `PATH`, for project workspaces.
 - Optional: `git` (repositories panel), `gh` (pull requests, CI and tickets),
-  `wprsd` and `wprsc` (kept apps), and the agent CLIs you use.
+  `wprsd` and `wprsc` (kept apps), `xwayland-satellite` (apps that speak only
+  X11, such as FreeCAD), and the agent CLIs you use.
 
 ## Install
 

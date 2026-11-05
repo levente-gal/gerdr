@@ -720,8 +720,9 @@ impl Gerdr {
             None => prepared.command.clone(),
         };
         let mut cmd = Command::new("sh");
-        // Electron apps would look for an X server, and there is none: nor
-        // for what runs in a terminal started here.
+        // Electron apps would go for the X server, where gerdr can't tell
+        // their window from others': nor for what runs in a terminal started
+        // here.
         cmd.arg("-c")
             .arg(&line)
             .env("ELECTRON_OZONE_PLATFORM_HINT", "auto");
