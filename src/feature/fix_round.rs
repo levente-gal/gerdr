@@ -259,6 +259,8 @@ mod tests {
     #[test]
     fn a_plan_needs_its_fixes_section_filled() {
         assert!(missing("## Fixes\n- Stop at n in src/a.rs\n").is_empty());
+        // One subheading a fix, with no line of its own above them.
+        assert!(missing("## Fixes\n\n### r1-1: Drops it\n\nCause.\n").is_empty());
         assert_eq!(missing("# Plan\n\nNothing.\n").len(), 1);
         assert_eq!(missing("## Fixes\n\n## Questions\n- Why?\n").len(), 1);
     }
