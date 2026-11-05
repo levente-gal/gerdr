@@ -30,7 +30,7 @@
 //! `pane_drag`), for its menu, and to zoom and close the pane.
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -51,6 +51,7 @@ use crate::{
     Action, Gerdr, Pane, Tab,
     anim::{self, Fade},
     chrome::{self, BarButton, BarButtons, BarHit, BarStatus, Help, PaneBarView, Rect},
+    cli_agents,
     herdr::{AgentStatus, Herdr, PaneState, Process, ProcessInfo},
     layout::Dir,
     menu::{MenuAction, MenuItem, MenuSpec},
@@ -293,6 +294,12 @@ pub struct BarContent {
     pub pane_count: usize,
     /// The pane fills its tab, zoomed. Only the menu fills it in.
     pub zoomed: bool,
+}
+
+/// Whether a pane holds an agent: herdr `seen` one in it, or its saved
+/// `command` starts one, which also tells of an agent that has exited.
+fn holds_agent(seen: bool, command: &str, config: &BTreeMap<String, String>) -> bool {
+    seen || cli_agents::runs_agent(command, config)
 }
 
 /// How a bar stands with `agent`, where herdr sees one, in its pane: the
@@ -1257,7 +1264,9 @@ impl Gerdr {
     /// again after a reboot (see `PaneRecord::restart_command`), and the
     /// services that exited since (see `Remembered::long`) unless the
     /// user said not to run them again. A pane where something else runs
-    /// in front of its command (an editor, a pager) is left alone.
+    /// in front of its command (an editor, a pager) is left alone, and so
+    /// is an agent: it has nothing to reload, and restarting would interrupt
+    /// its work. A reboot still brings it back, and its pane bar restarts it.
     pub fn workspace_restarts(&self, w: usize) -> Vec<(String, Captured)> {
         let Some(ws) = self.workspaces.get(w) else {
             return Vec::new();
@@ -1291,6 +1300,10 @@ impl Gerdr {
                 let skipped = record.is_some_and(|r| r.skip.contains(&service.captured.command));
                 (content.status == BarStatus::Exited && !skipped)
                     .then(|| (pane.pane_id.clone(), service.captured.clone()))
+            })
+            .filter(|(pane_id, captured)| {
+                let seen = self.pane_state(pane_id).is_some_and(|p| p.agent.is_some());
+                !holds_agent(seen, &captured.command, &self.agent_config)
             })
             .collect()
     }
@@ -1773,6 +1786,16 @@ mod tests {
         assert_eq!(content.label, "npm run dev");
         assert_eq!(content.status, BarStatus::Running);
         assert!(content.can_restart && content.can_stop);
+    }
+
+    #[test]
+    fn a_workspace_restart_leaves_agents_out() {
+        let config = BTreeMap::new();
+        // By its command, also once it has exited and herdr sees nothing.
+        assert!(holds_agent(false, "claude --resume 062f528e", &config));
+        // An agent herdr sees, whatever its command line says.
+        assert!(holds_agent(true, "./run-bot.sh", &config));
+        assert!(!holds_agent(false, "npm run dev", &config));
     }
 
     #[test]

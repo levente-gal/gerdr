@@ -768,8 +768,8 @@ pub struct WorkspaceView {
     pub ci: Option<CiView>,
     /// Whether it shows just its header: folded by hand, or quiet.
     pub folded: bool,
-    /// Whether it has commands that run again after a reboot: its header
-    /// then has a button restarting them all.
+    /// Whether it has commands to restart, agents aside (see
+    /// `Gerdr::workspace_restarts`): its header then has a button for them.
     pub restart: bool,
     /// The agents its header's strip offers to start, while it is open
     /// (the pointer on its AI button or the strip); else none.

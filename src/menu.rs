@@ -67,8 +67,8 @@ pub enum MenuAction {
     NewProject,
     CloseWorkspace(usize),
     RenameWorkspace(usize),
-    /// Restart the commands of workspace `w` that run again after a
-    /// reboot.
+    /// Restart workspace `w`'s commands, agents aside (see
+    /// `Gerdr::workspace_restarts`).
     RestartWorkspace(usize),
     /// Choose which of workspace `w`'s commands restarting it runs again.
     ChooseRestarts(usize),
