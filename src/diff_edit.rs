@@ -170,6 +170,13 @@ fn byte_at(line: &str, col: usize) -> usize {
     line.len()
 }
 
+/// The part of `line` shown at the chars `cols` (tabs shown as four), tabs
+/// and all: what a yank of them takes.
+pub fn shown_span(line: &str, cols: std::ops::Range<usize>) -> &str {
+    let (start, end) = (byte_at(line, cols.start), end_at(line, cols.end));
+    line.get(start..end).unwrap_or("")
+}
+
 /// The column Zed opens `line` at for its char shown at `col` (tabs shown
 /// as four): from 1, a tab one char.
 pub fn zed_column(line: &str, col: usize) -> usize {
@@ -367,13 +374,17 @@ pub fn put_in(text: &str, put: &Put, register: &Register) -> Result<(String, Spo
     if n < 1 || n > all.len().max(1) {
         return Err("That line isn't in the file");
     }
-    let more = register.text.repeat(put.count.max(1));
+    // In the file's own line breaks: a yank comes from a diff, which has
+    // none of its own, or from a file that may differ.
+    let crlf = all.first().is_some_and(|l| l.ends_with("\r\n"));
+    let brk = if crlf { "\r\n" } else { "\n" };
+    let more = (register.text.replace("\r\n", "\n").replace('\n', brk)).repeat(put.count.max(1));
     if register.lines {
         let at = if put.before { n - 1 } else { n.min(all.len()) };
         let byte = line_start(&all, at + 1);
         // After a last line without a break: the break goes first.
         let (gap, more) = match at == all.len() && !text.is_empty() && !text.ends_with('\n') {
-            true => ("\n", more.strip_suffix('\n').unwrap_or(&more)),
+            true => (brk, more.strip_suffix(brk).unwrap_or(&more)),
             false => ("", more.as_str()),
         };
         let after = [&text[..byte], gap, more, &text[byte..]].concat();
@@ -423,13 +434,6 @@ pub fn apply(edit: &FileEdit) -> Result<(Done, Register), String> {
         then,
     };
     Ok((done, register))
-}
-
-/// What `edit` would cut out of its file, unless it no longer holds what
-/// the diff showed of it.
-pub fn yank(edit: &FileEdit) -> Result<Register, String> {
-    let text = read_shown(&edit.root.join(&edit.path), &edit.path, &edit.shown)?;
-    taken(&text, &edit.cut).map_err(String::from)
 }
 
 /// Put `register` in the file `put` is in, unless it no longer holds what
@@ -557,6 +561,38 @@ mod tests {
             taken("a\n", &restore(vec![1], vec![])),
             Ok(Register::default())
         );
+    }
+
+    #[test]
+    fn a_span_goes_by_where_the_diff_shows_it_and_keeps_tabs() {
+        assert_eq!(shown_span("\tif y", 0..4), "\t");
+        assert_eq!(shown_span("\tif y", 2..5), "\ti");
+        assert_eq!(shown_span("\tif y", 4..99), "if y");
+        assert_eq!(shown_span("é = 1", 0..1), "é");
+        assert_eq!(shown_span("ab", 5..9), "");
+    }
+
+    #[test]
+    fn a_paste_takes_the_files_line_breaks() {
+        let put = |line: usize| Put {
+            root: "/r".into(),
+            path: "f".into(),
+            shown: Vec::new(),
+            at: spot(line, 0),
+            before: false,
+            count: 1,
+        };
+        let register = |text: &str| Register {
+            text: text.into(),
+            lines: true,
+        };
+        let (after, _) = put_in("a\r\nb\r\n", &put(1), &register("x\ny\n")).unwrap();
+        assert_eq!(after, "a\r\nx\r\ny\r\nb\r\n");
+        let (after, _) = put_in("a\nb\n", &put(1), &register("x\r\n")).unwrap();
+        assert_eq!(after, "a\nx\nb\n");
+        // After a last line without one.
+        let (after, _) = put_in("a\r\nb", &put(2), &register("x\n")).unwrap();
+        assert_eq!(after, "a\r\nb\r\nx");
     }
 
     #[test]

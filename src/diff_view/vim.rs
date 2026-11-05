@@ -20,10 +20,10 @@ use std::{
 
 use smithay::input::keyboard::{Keysym, ModifiersState};
 
-use super::{Ctx, DiffRow, DiffView, Outcome, RowKey};
+use super::{Ctx, DiffRow, DiffView, NOWHERE, Outcome, RowKey};
 use crate::{
     diff::LineKind,
-    diff_edit::{self, Cut, FileEdit, Put, Spot},
+    diff_edit::{self, Cut, FileEdit, Put, Register, Spot},
 };
 
 /// The most a count goes to.
@@ -57,22 +57,11 @@ pub(super) enum Op {
     Yank,
 }
 
-impl Op {
-    /// Its key, typed twice for whole lines.
-    fn key(self) -> Keysym {
-        match self {
-            Op::Delete => Keysym::d,
-            Op::Yank => Keysym::y,
-        }
-    }
-
-    /// `outcome` (a cut) as this does it.
-    fn of(self, outcome: Option<Outcome>) -> Option<Outcome> {
-        match (self, outcome) {
-            (Op::Yank, Some(Outcome::Cut(edit))) => Some(Outcome::Yank(edit)),
-            (_, outcome) => outcome,
-        }
-    }
+/// How far a `d` or `y` goes: lines around the caret's (by how many, up
+/// and down), or chars along it.
+enum Reach {
+    Lines(i64, i64),
+    Chars(Range<usize>),
 }
 
 /// Where the caret goes once a file is read again after a cut: its line
@@ -114,6 +103,10 @@ impl DiffView {
                 Keysym::r | Keysym::R => {
                     self.pending = Pending::default();
                     return Some(Some(Outcome::RedoCut(self.cursor_file())));
+                }
+                Keysym::c | Keysym::C => {
+                    self.pending = Pending::default();
+                    return Some(Some(self.copy_here()));
                 }
                 Keysym::d | Keysym::D => half,
                 Keysym::u | Keysym::U => -half,
@@ -163,10 +156,12 @@ impl DiffView {
         }
         let count = pending.count.max(1);
         if let Some(op) = pending.op {
-            return Some(op.of(self.delete_motion(op.key(), sym, typed, count)));
+            return Some(match op {
+                Op::Delete => self.delete_motion(sym, typed, count),
+                Op::Yank => self.yank_motion(sym, typed, count),
+            });
         }
-        let selecting =
-            self.visual.is_some() || self.cursor.as_ref().is_some_and(|c| c.from != c.row);
+        let selecting = self.selecting();
         let outcome = match typed {
             Keysym::v => {
                 self.toggle_visual(false, ctx);
@@ -177,7 +172,7 @@ impl DiffView {
                 None
             }
             Keysym::d | Keysym::x | Keysym::X | Keysym::D if selecting => self.delete_selection(),
-            Keysym::y | Keysym::Y if selecting => Op::Yank.of(self.delete_selection()),
+            Keysym::y | Keysym::Y if selecting => self.yank_selection(),
             Keysym::d | Keysym::y => {
                 let op = if typed == Keysym::d {
                     Op::Delete
@@ -217,7 +212,7 @@ impl DiffView {
                 let went = (0..count).fold(false, |_, _| self.jump_comment(by, ctx));
                 (!went).then_some(Outcome::Notice(super::NO_COMMENTS))
             }
-            Keysym::Y => Op::Yank.of(self.delete_motion(Keysym::y, Keysym::y, Keysym::y, count)),
+            Keysym::Y => self.yank_motion(Keysym::y, Keysym::y, count),
             Keysym::p | Keysym::P => {
                 self.leave_visual();
                 self.paste(typed == Keysym::P, count)
@@ -425,24 +420,141 @@ impl DiffView {
 
     /// `d` and then `sym` (`typed`), `count` times: lines, or chars along
     /// the caret's line, never past it.
-    fn delete_motion(
-        &mut self,
-        twice: Keysym,
-        sym: Keysym,
-        typed: Keysym,
-        count: usize,
-    ) -> Option<Outcome> {
-        let lines = |from: i64, to: i64| {
-            move |at: Spot| {
+    fn delete_motion(&mut self, sym: Keysym, typed: Keysym, count: usize) -> Option<Outcome> {
+        match self.reach(Keysym::d, sym, typed, count)? {
+            Reach::Lines(from, to) => self.cut_here(|at| {
                 let n = at.line as i64;
                 Cut::Lines(((n + from).max(1)..=n + to).map(|n| n as usize).collect())
-            }
+            }),
+            Reach::Chars(cols) => self.cut_along(|_, _| cols),
+        }
+    }
+
+    /// `y` and then `sym` (`typed`), `count` times: as `d` would go, among
+    /// the lines the diff shows, with a removed line as good as any. What
+    /// isn't on a line, what the cursor is on (`yank_row`).
+    fn yank_motion(&mut self, sym: Keysym, typed: Keysym, count: usize) -> Option<Outcome> {
+        let reach = self.reach(Keysym::y, sym, typed, count)?;
+        let Some((row, _)) = self.caret() else {
+            return Some(self.yank_row());
         };
+        Some(match reach {
+            Reach::Lines(from, to) => {
+                let shown: Vec<usize> = (0..self.rows.len())
+                    .filter(|&r| self.line_at(r).is_some())
+                    .collect();
+                let at = shown.iter().position(|&r| r == row).unwrap_or(0) as i64;
+                let first = (at + from).max(0) as usize;
+                let last = (at + to).max(0) as usize;
+                self.yank_rows(shown.iter().skip(first).take(last + 1 - first).copied())
+            }
+            Reach::Chars(cols) => {
+                let line = self.line_at(row)?;
+                let len = line.text.chars().count();
+                match cols.start < cols.end.min(len) {
+                    true => yank_of(diff_edit::shown_span(line.raw(), cols).to_owned(), false),
+                    false => Outcome::Notice("Nothing there"),
+                }
+            }
+        })
+    }
+
+    /// Whether lines or chars are selected.
+    fn selecting(&self) -> bool {
+        self.visual.is_some() || self.cursor.as_ref().is_some_and(|c| c.from != c.row)
+    }
+
+    /// Ctrl+C: what is selected, else the line or other row the cursor is
+    /// on.
+    pub(super) fn copy_here(&mut self) -> Outcome {
+        if self.selecting() {
+            return self.yank_selection().unwrap_or(Outcome::Notice(NOWHERE));
+        }
+        match self.caret() {
+            Some((row, _)) => self.yank_rows(row..=row),
+            None => self.yank_row(),
+        }
+    }
+
+    /// Keep what is selected, to paste, and copy it: as the diff shows it,
+    /// across hunks and files, with its removed lines.
+    fn yank_selection(&mut self) -> Option<Outcome> {
+        let visual = self.visual.take();
+        let cursor = self.cursor.as_ref()?;
+        let rows = cursor.from.min(cursor.row)..=cursor.from.max(cursor.row);
+        let outcome = match (visual, self.caret()) {
+            (Some(Visual::Chars { row, col, .. }), Some(at)) => self.yank_chars((row, col), at),
+            _ => self.yank_rows(rows),
+        };
+        self.collapse_cursor();
+        Some(outcome)
+    }
+
+    /// The lines among diff rows `rows`, whole.
+    fn yank_rows(&self, rows: impl Iterator<Item = usize>) -> Outcome {
+        let mut text = String::new();
+        for line in rows.filter_map(|r| self.line_at(r)) {
+            text.push_str(line.raw());
+            text.push('\n');
+        }
+        match text.is_empty() {
+            true => Outcome::Notice("No lines there"),
+            false => yank_of(text, true),
+        }
+    }
+
+    /// From char `a` of a row to char `b` of another, with both.
+    fn yank_chars(&self, a: (usize, usize), b: (usize, usize)) -> Outcome {
+        let ((r0, c0), (r1, c1)) = ordered(a, b);
+        let parts: Vec<&str> = (r0..=r1)
+            .filter_map(|r| {
+                let line = self.line_at(r)?;
+                let from = if r == r0 { c0 } else { 0 };
+                let to = if r == r1 {
+                    c1 + 1
+                } else {
+                    line.text.chars().count()
+                };
+                Some(diff_edit::shown_span(line.raw(), from..to))
+            })
+            .collect();
+        let text = parts.join("\n");
+        match text.is_empty() {
+            true => Outcome::Notice("Nothing there"),
+            false => yank_of(text, false),
+        }
+    }
+
+    /// What the cursor's row off any line holds: a comment's or finding's
+    /// text, a file's path, a hunk's lines.
+    fn yank_row(&self) -> Outcome {
+        let Some(row) = self.cursor.as_ref().map(|c| c.row) else {
+            return Outcome::Notice(NOWHERE);
+        };
+        if let Some(comment) = (self.comment_at(row)).and_then(|c| self.review.comments.get(c)) {
+            return yank_of(comment.text.clone(), false);
+        }
+        match self.rows.get(row) {
+            Some(DiffRow::File(..)) => match self.diff_path(row) {
+                Some((_, path)) => yank_of(path, false),
+                None => Outcome::Notice("Nothing to copy there"),
+            },
+            Some(&DiffRow::Hunk(k, f, h)) => {
+                let of_hunk = |&r: &usize| matches!(self.rows[r], DiffRow::Line(a, b, c, _) if (a, b, c) == (k, f, h));
+                self.yank_rows((0..self.rows.len()).filter(of_hunk))
+            }
+            _ => Outcome::Notice("Nothing to copy there"),
+        }
+    }
+
+    /// How far `twice` (`d` or `y`) and then `sym` (`typed`) goes, `count`
+    /// times.
+    fn reach(&self, twice: Keysym, sym: Keysym, typed: Keysym, count: usize) -> Option<Reach> {
         let count = count as i64;
         match sym {
-            _ if sym == twice => return self.cut_here(lines(0, count - 1)),
-            Keysym::j | Keysym::Down | Keysym::KP_Down => return self.cut_here(lines(0, count)),
-            Keysym::k | Keysym::Up | Keysym::KP_Up => return self.cut_here(lines(-count, 0)),
+            _ if sym == twice => return Some(Reach::Lines(0, count - 1)),
+            Keysym::j | Keysym::Down | Keysym::KP_Down => return Some(Reach::Lines(0, count)),
+            Keysym::k | Keysym::Up | Keysym::KP_Up => return Some(Reach::Lines(-count, 0)),
             _ => {}
         }
         let (row, col) = self.caret()?;
@@ -475,7 +587,7 @@ impl DiffView {
             Keysym::w if to.0 != row || to == (row, col) => col..len,
             _ => cols,
         };
-        self.cut_along(|_, _| cols)
+        Some(Reach::Chars(cols))
     }
 
     /// Cut what is selected: by chars, or the lines of the cursor's range.
@@ -486,11 +598,16 @@ impl DiffView {
             (Some(Visual::Chars { row, col, .. }), Some(at)) => self.cut_chars((row, col), at),
             _ => self.cut_lines(cursor.from.min(cursor.row)..=cursor.from.max(cursor.row)),
         };
+        self.collapse_cursor();
+        outcome
+    }
+
+    /// The cursor's range back to its row alone.
+    fn collapse_cursor(&mut self) {
         if let Some(cursor) = &mut self.cursor {
             cursor.from = cursor.row;
             cursor.keys.1 = cursor.keys.0.clone();
         }
-        outcome
     }
 
     /// Cut from char `a` of a row to char `b` of another, with both:
@@ -677,16 +794,19 @@ impl DiffView {
         }
     }
 
-    /// What the title says while a command is typed or visual mode is on.
-    pub(crate) fn mode_title(&self) -> Option<String> {
-        let mode = match self.visual {
-            Some(Visual::Chars { .. }) => {
+    /// What the title says while a command is typed or visual mode is on;
+    /// `edits` when the keys that change the files work here.
+    pub(crate) fn mode_title(&self, edits: bool) -> Option<String> {
+        let mode = match (&self.visual, edits) {
+            (Some(Visual::Chars { .. }), true) => {
                 "-- VISUAL -- d delete · y yank · Shift+R restore · Esc stop"
             }
-            Some(Visual::Lines) => {
+            (Some(Visual::Lines), true) => {
                 "-- VISUAL LINE -- d delete · y yank · Shift+R restore · Esc stop"
             }
-            None => "",
+            (Some(Visual::Chars { .. }), false) => "-- VISUAL -- y yank · Esc stop",
+            (Some(Visual::Lines), false) => "-- VISUAL LINE -- y yank · Esc stop",
+            (None, _) => "",
         };
         let Pending { count, op, go } = self.pending;
         let count = if count > 0 {
@@ -721,6 +841,11 @@ fn motion(mods: &ModifiersState, sym: Keysym) -> bool {
         Keysym::Down | Keysym::Up | Keysym::KP_Down | Keysym::KP_Up
     );
     letter && !mods.shift || arrow
+}
+
+/// Keep `text` to paste, and copy it.
+fn yank_of(text: String, lines: bool) -> Outcome {
+    Outcome::Yank(Register { text, lines })
 }
 
 /// Two places in order.

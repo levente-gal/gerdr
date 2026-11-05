@@ -1208,10 +1208,16 @@ mod tests {
             matches!(on, Some(crate::diff_view::DiffRow::CommentHead { .. })),
             "{on:?}"
         );
-        // Its code isn't edited.
+        // Its code isn't edited, but a yank takes what it shows.
         let refused = Some(Done::Diff(Outcome::Notice(
             crate::worktree_diff::FEATURE_READ_ONLY,
         )));
+        let none = ModifiersState::default();
+        wd.key(&none, Keysym::y, Keysym::y, ENV);
+        assert!(matches!(
+            wd.key(&none, Keysym::y, Keysym::y, ENV),
+            Some(Done::Diff(Outcome::Yank(_)))
+        ));
         assert_eq!(wd.click(ReposHit::DiffRestore(0), ENV), refused);
         assert!(
             wd.view(ENV)

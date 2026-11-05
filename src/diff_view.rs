@@ -27,7 +27,7 @@ use crate::{
         FindingHead, Hint, ReposButton, ReposHit, RowMark, Tone,
     },
     diff::{FILE_LINES, FileDiff, LineKind},
-    diff_edit::{FileEdit, Put},
+    diff_edit::{FileEdit, Put, Register},
     feature::review_import::{self, Decision, FindingState},
     find,
     git::Change,
@@ -45,6 +45,8 @@ use search::DiffSearch;
 pub const NO_REVIEW: &str = "No review comments: in the diff, press c on a line";
 /// Why an edit, restore or comment does nothing in a read-only diff.
 pub const READ_ONLY: &str = "A commit's diff can't be edited";
+/// Why a copy did nothing with no cursor.
+pub(crate) const NOWHERE: &str = "Move the cursor to a line first";
 /// Why `f` did nothing off a finding.
 pub const NO_FINDING: &str = "Move the cursor to a finding first";
 /// Why a dismissal did nothing.
@@ -135,9 +137,10 @@ pub struct Ctx<'a> {
     /// What it shows isn't the files as they are (a commit's diff): no
     /// edits, restores or review comments from it.
     pub read_only: bool,
-    /// Read-only, it still yanks: it shows the file as it is, which a yank
-    /// takes nothing from.
-    pub yanks: bool,
+    /// Comments work but the keys changing the files don't, or are refused
+    /// by the host (a feature's code review, a locked file): the title
+    /// doesn't offer them. `read_only` says as much.
+    pub no_edits: bool,
 }
 
 impl std::fmt::Debug for Ctx<'_> {
@@ -174,8 +177,8 @@ pub enum Outcome {
     Notice(&'static str),
     /// Cut this out of a file, as a delete in the diff asks.
     Cut(FileEdit),
-    /// Keep what this would cut, to paste, and copy it.
-    Yank(FileEdit),
+    /// Keep this, to paste, and copy it.
+    Yank(Register),
     /// Put what was yanked or deleted last in a file.
     Paste(Put),
     /// Undo the last cut in the file at the caret (by root and path;
@@ -191,16 +194,12 @@ pub enum Outcome {
 }
 
 impl Outcome {
-    /// Whether it changes a file, or takes from one as it is (a yank):
-    /// neither fits a diff that isn't the files as they are.
+    /// Whether it changes a file: that doesn't fit a diff that isn't the
+    /// files as they are. A yank takes what the diff shows: it fits any.
     pub(crate) fn edits(&self) -> bool {
         matches!(
             self,
-            Outcome::Cut(_)
-                | Outcome::Yank(_)
-                | Outcome::Paste(_)
-                | Outcome::UndoCut(_)
-                | Outcome::RedoCut(_)
+            Outcome::Cut(_) | Outcome::Paste(_) | Outcome::UndoCut(_) | Outcome::RedoCut(_)
         )
     }
 }
@@ -605,7 +604,7 @@ pub fn in_dir(path: &str, dir: &str) -> bool {
 impl DiffView {
     /// Over the diff: `All changes · 2 repositories · 5 files · +12 −3`.
     fn title(&self, ctx: &Ctx) -> String {
-        if let Some(mode) = self.mode_title() {
+        if let Some(mode) = self.mode_title(!(ctx.read_only || ctx.no_edits)) {
             return mode;
         }
         let dirty: Vec<&Section> = ctx
@@ -999,11 +998,16 @@ impl DiffView {
 
     /// The text of diff row `r`, while it is a line.
     pub(crate) fn line_text(&self, r: usize) -> Option<&str> {
+        Some(&self.line_at(r)?.text)
+    }
+
+    /// The line at diff row `r`, while it is one.
+    pub(super) fn line_at(&self, r: usize) -> Option<&crate::diff::Line> {
         let DiffRow::Line(k, f, h, l) = *self.rows.get(r)? else {
             return None;
         };
         let (_, file) = self.diff_file(k, f)?;
-        Some(&file.hunks.get(h)?.lines.get(l)?.text)
+        file.hunks.get(h)?.lines.get(l)
     }
 
     /// The root and path of the file the cursor is in, if any: what `u`
@@ -2350,7 +2354,7 @@ impl DiffView {
     /// The buttons on the diff rows in view, `shown` (by index among
     /// them): writing a comment on the cursor's lines, at the cursor; the
     /// comment being written kept, dropped or deleted, under it.
-    fn row_buttons(&self, shown: &[usize]) -> Vec<(usize, Hint)> {
+    fn row_buttons(&self, shown: &[usize], read_only: bool) -> Vec<(usize, Hint)> {
         use ReposButton as B;
         let at = |r: usize| shown.iter().position(|&x| x == r);
         let hint = |button: B| Hint {
@@ -2359,6 +2363,20 @@ impl DiffView {
             key: key_name(button).into(),
             disabled: None,
         };
+        // Copying is all a read-only diff offers, on the cursor's line.
+        if read_only {
+            let Some(cursor) = self
+                .cursor
+                .as_ref()
+                .filter(|c| self.line_at(c.row).is_some())
+            else {
+                return Vec::new();
+            };
+            let last = cursor.row + self.part_count(cursor.row) - 1;
+            return (at(last).or_else(|| at(cursor.row)).into_iter())
+                .map(|i| (i, hint(B::CopyLines)))
+                .collect();
+        }
         if let Some(editing) = &self.editing {
             let Some(i) = self
                 .rows
@@ -2433,6 +2451,7 @@ impl DiffView {
             && self.comment_at(cursor.row).is_none()
         {
             buttons.push((i, hint(B::Comment)));
+            buttons.push((i, hint(B::CopyLines)));
             if self.changed_row(cursor.row) {
                 buttons.push((i, hint(B::Restore)));
             }
@@ -2941,10 +2960,7 @@ impl DiffView {
             None => self.found_on(r),
         };
         let mut found: Vec<_> = shown.iter().map(|&r| found_on(r)).collect();
-        let mut row_buttons = match ctx.read_only {
-            true => Vec::new(),
-            false => self.row_buttons(&shown),
-        };
+        let mut row_buttons = self.row_buttons(&shown, ctx.read_only);
         let line_h = crate::chrome::repos_detail_line(ctx.density);
         let pin = |h| self.diff_pin(h, page, line_h);
         let (pin, stuck) = sticky.map_or((0.0, false), pin);
@@ -3061,7 +3077,6 @@ impl DiffView {
     ) -> Option<Option<Outcome>> {
         let outcome = self.any_key(mods, sym, typed, ctx);
         match outcome {
-            Some(Some(Outcome::Yank(edit))) if ctx.yanks => Some(Some(Outcome::Yank(edit))),
             Some(Some(o)) if ctx.read_only && o.edits() => Some(Some(Outcome::Notice(READ_ONLY))),
             outcome => outcome,
         }
@@ -3154,6 +3169,9 @@ impl DiffView {
         }
         if hit == ReposHit::Button(ReposButton::CopyReview) {
             return Some(self.copy(ctx));
+        }
+        if hit == ReposHit::Button(ReposButton::CopyLines) {
+            return Some(Some(self.copy_here()));
         }
         if hit == ReposHit::Button(ReposButton::ClearReview) {
             return Some(Some(Outcome::Clear));

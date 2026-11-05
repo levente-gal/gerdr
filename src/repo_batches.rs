@@ -29,7 +29,7 @@ use crate::{
         Tone, TreeLine, TreeTool,
     },
     desktop,
-    diff_edit::{self, Cut, Done, FileEdit, Put},
+    diff_edit::{self, Cut, Done, FileEdit, Put, Register},
     diff_view::Position,
     git::{Change, GitStatus, InProgress},
     git_ops::{self, Failed, Failure, Head, Integrate, OpResult, Pull, Ran, Turn, Verdict},
@@ -1725,22 +1725,17 @@ impl Gerdr {
         }
     }
 
-    /// Keep what `edit` would cut, to paste, and put it on the clipboard.
-    fn repos_yank(&mut self, edit: FileEdit) {
-        match diff_edit::yank(&edit) {
-            Ok(taken) => {
-                let n = taken.text.lines().count();
-                let what = match (taken.lines, n) {
-                    (true, 1) => "Yanked 1 line".to_owned(),
-                    (true, n) => format!("Yanked {n} lines"),
-                    (false, _) => format!("Yanked {} chars", taken.text.chars().count()),
-                };
-                self.copy_text(taken.text.clone());
-                self.repos.register = taken;
-                self.show_notice(what);
-            }
-            Err(why) => self.show_error(why),
-        }
+    /// Keep what was yanked, to paste, and put it on the clipboard.
+    fn repos_yank(&mut self, taken: Register) {
+        let n = taken.text.lines().count();
+        let what = match (taken.lines, n) {
+            (true, 1) => "Yanked 1 line".to_owned(),
+            (true, n) => format!("Yanked {n} lines"),
+            (false, _) => format!("Yanked {} chars", taken.text.chars().count()),
+        };
+        self.copy_text(taken.text.clone());
+        self.repos.register = taken;
+        self.show_success(what);
     }
 
     /// Put what was yanked or deleted last in as `put` says; said, with
@@ -2691,7 +2686,7 @@ mod tests {
 
     #[test]
     fn edits_from_the_diff_say_what_they_did_and_where() {
-        use crate::diff_edit::{Register, Spot};
+        use crate::diff_edit::Spot;
         let spot = |line, col| Spot { line, col };
         let edit = |cut| FileEdit {
             root: PathBuf::from("/r"),
