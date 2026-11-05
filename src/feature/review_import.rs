@@ -190,6 +190,18 @@ pub fn dismiss_key(state: FindingState) -> Result<Option<Decision>, &'static str
     }
 }
 
+/// A review as the user last saw it, kept when the next one is read: the
+/// findings of the record change as later runs raise them again.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewRound {
+    /// The run it came from: 1, 2…
+    pub n: u32,
+    /// What its page listed, each with the words and the decision it had.
+    /// One sent to Build says how that went: fixed, or still sent when the
+    /// next run raised it again.
+    pub findings: Vec<Finding>,
+}
+
 /// The feature's AI review, kept in its record.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AiReview {
@@ -205,9 +217,25 @@ pub struct AiReview {
     /// The feature's patch-id the last run was read on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub patch: Option<String>,
+    /// The reviews before the latest, oldest first; none with nothing to
+    /// show.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rounds: Vec<ReviewRound>,
 }
 
 impl AiReview {
+    /// What the latest review lists: every finding but those fixed that an
+    /// earlier review in `rounds` shows. Those still to decide, still with
+    /// Build and dismissed carry on from earlier runs, as they can be acted
+    /// on only here.
+    pub fn shown(&self) -> Vec<&Finding> {
+        let kept =
+            |id: &str| (self.rounds.iter()).any(|round| round.findings.iter().any(|f| f.id == id));
+        (self.findings.iter())
+            .filter(|f| f.state != FindingState::Fixed || !kept(&f.id))
+            .collect()
+    }
+
     /// How many findings AI review still waits on.
     pub fn open(&self) -> usize {
         self.findings.iter().filter(|f| f.state.holds_up()).count()
@@ -472,6 +500,11 @@ pub fn import(
     diff: &Diff,
 ) -> Imported {
     let mut out = Imported::default();
+    // Before this run rewrites them: what the user saw.
+    let mut kept: Vec<Finding> = match run > review.n {
+        true => review.shown().into_iter().cloned().collect(),
+        false => Vec::new(),
+    };
     let before = review.findings.len();
     let mut raised: BTreeSet<String> = BTreeSet::new();
     let mut k = 0;
@@ -526,6 +559,17 @@ pub fn import(
             f.state = FindingState::Fixed;
             out.fixed += 1;
         }
+    }
+    for f in &mut kept {
+        if f.state == FindingState::Sent && !raised.contains(&f.id) {
+            f.state = FindingState::Fixed;
+        }
+    }
+    if !kept.is_empty() {
+        review.rounds.push(ReviewRound {
+            n: review.n,
+            findings: kept,
+        });
     }
     review.n = run;
     out
@@ -918,6 +962,93 @@ mod tests {
         assert_eq!(review.findings[1].file, "src/a.rs");
         assert_eq!(review.n, 1);
         assert_eq!(review.open(), 4);
+    }
+
+    #[test]
+    fn the_next_run_keeps_the_review_as_the_user_saw_it() {
+        let mut review = AiReview::default();
+        let three = vec![
+            raw(None, "src/a.rs", None, "one"),
+            raw(None, "src/a.rs", None, "two"),
+            raw(None, "src/a.rs", None, "three"),
+        ];
+        import(&mut review, 1, three, &repos(), &diff());
+        assert!(review.rounds.is_empty());
+        for id in ["r1-1", "r1-2"] {
+            let f = review.findings.iter_mut().find(|f| f.id == id).unwrap();
+            f.state = FindingState::Sent;
+            f.my_fix = Some(format!("my fix of {id}"));
+            f.note = format!("about {id}");
+        }
+        decide(&mut review, "r1-3", &Decision::Dismiss("by design".into())).unwrap();
+
+        let again = vec![raw(Some("r1-2"), "src/a.rs", Some(11), "two, still")];
+        import(&mut review, 2, again, &repos(), &diff());
+        let [round] = review.rounds.as_slice() else {
+            panic!("one round: {:?}", review.rounds);
+        };
+        assert_eq!(round.n, 1);
+        let kept = |id: &str| round.findings.iter().find(|f| f.id == id).unwrap();
+        // How it went, with what the user said of it.
+        assert_eq!(kept("r1-1").state, FindingState::Fixed);
+        assert_eq!(kept("r1-1").my_fix.as_deref(), Some("my fix of r1-1"));
+        assert_eq!(kept("r1-1").note, "about r1-1");
+        assert_eq!(kept("r1-3").reason, "by design");
+        // Raised again: the words it had then, and still sent.
+        assert_eq!(kept("r1-2").state, FindingState::Sent);
+        assert_eq!(kept("r1-2").title, "two");
+        assert_eq!(kept("r1-2").run, 1);
+        assert_eq!(review.finding("r1-2").unwrap().title, "two, still");
+
+        // The same run read again isn't another round; nor is a review
+        // with nothing to show.
+        import(&mut review, 2, Vec::new(), &repos(), &diff());
+        assert_eq!(review.rounds.len(), 1);
+        let mut empty = AiReview::default();
+        import(&mut empty, 1, Vec::new(), &repos(), &diff());
+        import(&mut empty, 2, Vec::new(), &repos(), &diff());
+        assert!(empty.rounds.is_empty());
+    }
+
+    #[test]
+    fn only_a_fixed_finding_an_earlier_review_shows_leaves_the_list() {
+        let state = |id: &str, state| Finding {
+            id: id.into(),
+            state,
+            ..Finding::default()
+        };
+        let mut review = AiReview {
+            n: 2,
+            findings: vec![
+                state("r1-1", FindingState::Fixed),
+                state("r1-2", FindingState::Fixed),
+                state("r1-3", FindingState::Open),
+                state("r1-4", FindingState::Dismissed),
+                state("r2-1", FindingState::Sent),
+            ],
+            ..AiReview::default()
+        };
+        let ids = |review: &AiReview| -> Vec<String> {
+            review.shown().iter().map(|f| f.id.clone()).collect()
+        };
+        // From before rounds were kept: nowhere else to see it.
+        assert_eq!(ids(&review).len(), 5);
+        review.rounds.push(ReviewRound {
+            n: 1,
+            findings: vec![
+                state("r1-1", FindingState::Fixed),
+                state("r1-3", FindingState::Open),
+                state("r1-4", FindingState::Dismissed),
+            ],
+        });
+        assert_eq!(ids(&review), ["r1-2", "r1-3", "r1-4", "r2-1"]);
+    }
+
+    #[test]
+    fn a_record_with_no_rounds_loads_and_none_are_written() {
+        let review: AiReview = serde_json::from_str(r#"{"n": 1}"#).unwrap();
+        assert!(review.rounds.is_empty());
+        assert!(!serde_json::to_string(&review).unwrap().contains("rounds"));
     }
 
     #[test]

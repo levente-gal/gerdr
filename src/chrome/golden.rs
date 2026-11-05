@@ -3405,6 +3405,96 @@ fn feature_tab_held() -> super::FeatureTabView {
     view
 }
 
+/// On AI review with the code changed since: the last review to look at,
+/// and the earlier ones under it, the oldest shown.
+fn feature_tab_review_rounds() -> super::FeatureTabView {
+    use super::{
+        ButtonStyle, CheckTone, FindingCard, FindingTag, NodeMark, PageButton, PageSection,
+        StagePage,
+    };
+    use crate::feature::Stage;
+    let mut view = feature_tab();
+    at_stage(&mut view, 5, NodeMark::Later, "");
+    let button = |label: &str, style| PageButton {
+        label: label.into(),
+        style,
+    };
+    let card = |tag, title: &str, state: &str, place: &str, fix: &str, faded, buttons| {
+        PageSection::Finding(FindingCard {
+            tag,
+            title: title.into(),
+            state: state.into(),
+            place: place.into(),
+            body: String::new(),
+            preview: Vec::new(),
+            fix: fix.into(),
+            note: String::new(),
+            faded,
+            field: None,
+            selected: false,
+            buttons,
+        })
+    };
+    let round = |name: &str, said: &str, button: usize| PageSection::File {
+        name: name.into(),
+        state: tab_line(said, CheckTone::Note),
+        buttons: vec![button],
+    };
+    view.page = StagePage {
+        title: "AI review".into(),
+        about: Stage::AiReview.about().into(),
+        status: Some(tab_line("Comes after Verify", CheckTone::Note)),
+        buttons: vec![
+            button("Show in diff", ButtonStyle::Quiet),
+            button("Show", ButtonStyle::Plain),
+            button("Hide", ButtonStyle::Plain),
+        ],
+        sections: vec![
+            PageSection::Lines {
+                label: "Findings \u{b7} 1 sent to Build".into(),
+                lines: vec![tab_line(
+                    "From the last review. The code has changed since.",
+                    CheckTone::Note,
+                )],
+            },
+            card(
+                FindingTag::High,
+                "Retry stops one short",
+                "sent to Build",
+                "r2-1 \u{b7} login.py:6",
+                "Fix: Stop at n.",
+                false,
+                vec![0],
+            ),
+            round("Review 2", "2 fixed", 1),
+            round(
+                "Review 1",
+                "1 fixed \u{b7} 1 raised again \u{b7} 1 dismissed",
+                2,
+            ),
+            card(
+                FindingTag::Medium,
+                "Title breaks with no name",
+                "raised again",
+                "r1-2 \u{b7} login.py:2",
+                "Your fix: Fall back to the plain title",
+                true,
+                Vec::new(),
+            ),
+            card(
+                FindingTag::Low,
+                "Unused import",
+                "fixed",
+                "r1-1 \u{b7} login.py:1",
+                "",
+                true,
+                Vec::new(),
+            ),
+        ],
+    };
+    view
+}
+
 /// At AI review, its findings sent to the Build agent, which runs again.
 fn feature_tab_fixing() -> super::FeatureTabView {
     use super::{ButtonStyle, CheckTone, Dot, NodeMark, PageButton, PageSection, StagePage};
@@ -3725,7 +3815,7 @@ fn feature_tab_manual_test(note: bool) -> super::FeatureTabView {
 }
 
 /// The feature tab's fixtures, by name.
-fn feature_tabs() -> [(&'static str, super::FeatureTabView); 31] {
+fn feature_tabs() -> [(&'static str, super::FeatureTabView); 32] {
     [
         ("tab_build", feature_tab()),
         ("tab_plan_ready", feature_tab_plan_ready()),
@@ -3767,11 +3857,12 @@ fn feature_tabs() -> [(&'static str, super::FeatureTabView); 31] {
         ("tab_plan_long", feature_tab_plan_long()),
         ("tab_manual_test", feature_tab_manual_test(false)),
         ("tab_manual_note", feature_tab_manual_test(true)),
+        ("tab_review_rounds", feature_tab_review_rounds()),
     ]
 }
 
 /// Each fixture at the width it shows best at, and Build at all three.
-const TAB_SURFACES: [(&str, i32); 38] = [
+const TAB_SURFACES: [(&str, i32); 39] = [
     ("tab_build", 860),
     ("tab_build", 1180),
     ("tab_build", 1920),
@@ -3810,9 +3901,10 @@ const TAB_SURFACES: [(&str, i32); 38] = [
     ("tab_plan_long", 1180),
     ("tab_manual_test", 1180),
     ("tab_manual_note", 860),
+    ("tab_review_rounds", 1180),
 ];
 
-const FEATURE_TAB: [&str; 38] = [
+const FEATURE_TAB: [&str; 39] = [
     "tab_build_860",
     "tab_build_1180",
     "tab_build_1920",
@@ -3851,10 +3943,11 @@ const FEATURE_TAB: [&str; 38] = [
     "tab_plan_long_1180",
     "tab_manual_test_1180",
     "tab_manual_note_860",
+    "tab_review_rounds_1180",
 ];
 
 /// The recorded hashes of `FEATURE_TAB`, per case in `CASES`.
-const GOLDEN_FEATURE_TAB: [[u64; 38]; 4] = [
+const GOLDEN_FEATURE_TAB: [[u64; 39]; 4] = [
     // Dark at 1
     [
         0x332b7228d6306b6d, // tab_build_860
@@ -3895,6 +3988,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 38]; 4] = [
         0x5f23ff6fe2c78117, // tab_plan_long_1180
         0x098d46261a41d41a, // tab_manual_test_1180
         0x449dde71dc52f456, // tab_manual_note_860
+        0xbef5f416843d042e, // tab_review_rounds_1180
     ],
     // Dark at 2
     [
@@ -3936,6 +4030,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 38]; 4] = [
         0x52af07e71ae3aa23, // tab_plan_long_1180
         0x59fbafdaf0af0298, // tab_manual_test_1180
         0x5c67226e281ec032, // tab_manual_note_860
+        0xdc96765aa6a1ca72, // tab_review_rounds_1180
     ],
     // Light at 1
     [
@@ -3977,6 +4072,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 38]; 4] = [
         0xb843eb7e1f0afe17, // tab_plan_long_1180
         0x015462a67373d01d, // tab_manual_test_1180
         0x82d62db81cb6795f, // tab_manual_note_860
+        0x7781934af42b9dad, // tab_review_rounds_1180
     ],
     // Light at 2
     [
@@ -4018,6 +4114,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 38]; 4] = [
         0x364c80c96fc60b3e, // tab_plan_long_1180
         0x8b786b8d2d0b74d9, // tab_manual_test_1180
         0x35b6488ccbb08f83, // tab_manual_note_860
+        0x1faab5e666087583, // tab_review_rounds_1180
     ],
 ];
 
