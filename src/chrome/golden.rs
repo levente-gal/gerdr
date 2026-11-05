@@ -2038,57 +2038,57 @@ const GOLDEN_FEATURES: [[u64; 11]; 4] = [
     // Dark at 1
     [
         0x73e88729cb0c3112, // new_feature
-        0x6e2de5679125e8f8, // sidebar_features
+        0xc1a69256781c03f4, // sidebar_features
         0xce73d235eada39de, // plan_sheet
         0xf0ef6e28af47b05c, // plan_sheet_note
         0x444a60ab9e0f4abf, // plan_sheet_narrow
         0x86b4df03a4af9916, // plan_sheet_own
         0xe472df71a44ddf16, // plan_sheet_keys
         0x93dd44d0af75ae63, // plan_sheet_empty
-        0x58ccfa3494ee0c49, // sidebar_feature_workspace
-        0x7efdaf3402cd1d6a, // sidebar_needs_you
+        0x4f489a294fd6cfe9, // sidebar_feature_workspace
+        0x0aa59d316e41ff3e, // sidebar_needs_you
         0x0cbbecc8e276c3fc, // sidebar_no_features
     ],
     // Dark at 2
     [
         0xbc9770d9310bd319, // new_feature
-        0x663ede1e025ab3c8, // sidebar_features
+        0xf5cc8a7d8aa86100, // sidebar_features
         0x354b777d647b74ae, // plan_sheet
         0x49003f081deb3c2e, // plan_sheet_note
         0x77de8b18241bb4b7, // plan_sheet_narrow
         0x645f1307207f69db, // plan_sheet_own
         0x6ad99a47f32750f1, // plan_sheet_keys
         0xf4f48a436676b8ed, // plan_sheet_empty
-        0x30fa9a303ee6097f, // sidebar_feature_workspace
-        0x7962b34cde9ba60d, // sidebar_needs_you
+        0x25a6c3532952ab77, // sidebar_feature_workspace
+        0x6971db10970b7155, // sidebar_needs_you
         0xf97a94d1cbc468b6, // sidebar_no_features
     ],
     // Light at 1
     [
         0xb1780dfd60b1e9a8, // new_feature
-        0x56baef2f92e48ad0, // sidebar_features
+        0xcc1a94bf5db9bbcc, // sidebar_features
         0x6da7e766b94ea319, // plan_sheet
         0x6900962e338f6172, // plan_sheet_note
         0x5d1256e75161f348, // plan_sheet_narrow
         0xa3d45cd4852074e7, // plan_sheet_own
         0x60c2fae25b1a30c4, // plan_sheet_keys
         0x6b284b7ef20e69aa, // plan_sheet_empty
-        0xe3de722503bc6e0a, // sidebar_feature_workspace
-        0xfc2a91fbf120d7cb, // sidebar_needs_you
+        0x8c099eb3525e36fa, // sidebar_feature_workspace
+        0x44d7612e414d3bf7, // sidebar_needs_you
         0xb97e2bad7455858d, // sidebar_no_features
     ],
     // Light at 2
     [
         0x757537a93b40f9fa, // new_feature
-        0x240f9f1a7f860b5c, // sidebar_features
+        0x950ac124a2800264, // sidebar_features
         0x5a9fa2f0a7a81443, // plan_sheet
         0x8bc60f688ce6245b, // plan_sheet_note
         0xf99dc433f41c1492, // plan_sheet_narrow
         0x676f86f8aa7b2284, // plan_sheet_own
         0x64823c62e6db84ec, // plan_sheet_keys
         0x13fb250de721df9f, // plan_sheet_empty
-        0x0beb48d130086c82, // sidebar_feature_workspace
-        0xb2156329e826b25b, // sidebar_needs_you
+        0x3653c34b3b5ea64a, // sidebar_feature_workspace
+        0xf4d5feb9684493d3, // sidebar_needs_you
         0x7ae57ba63db05473, // sidebar_no_features
     ],
 ];

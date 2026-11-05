@@ -168,8 +168,9 @@ const FEATURES_LABEL: &str = "Features";
 const FEATURES_PLUS: i32 = 16;
 const FEATURES_PLUS_GAP: i32 = 2;
 const FEATURES_PLUS_REACH: (i32, i32) = (4, 2);
-/// The line under a feature row's title holding its stage dots.
-const STAGE_LINE: i32 = 12;
+/// The line under a feature row's title holding its stage dots, as high as
+/// the biggest of them.
+const STAGE_LINE: i32 = super::STAGE_DOT_BIG;
 /// The line under a feature's stage dots saying how its stage stands.
 const FEATURE_INFO_LINE: i32 = 15;
 /// How far a feature row's lines tuck up under its title.
@@ -331,6 +332,24 @@ pub fn sidebar_blinkers(view: &SidebarView, layout: &SidebarLayout, height: i32)
     }
     dots.retain(|dot| dot.loc.y >= BAR_HEIGHT && dot.loc.y + dot.size.h <= height);
     dots
+}
+
+/// Where the blinking dots of the stages that run go, laid out as `layout`:
+/// on a feature's row or on the header of its workspace. Their dots are
+/// bigger than the rest of `sidebar_blinkers`, so they have a buffer of
+/// their own.
+pub fn sidebar_stage_blinkers(view: &SidebarView, layout: &SidebarLayout) -> Vec<Rect> {
+    let headers = (view.workspaces.iter().zip(&layout.rows))
+        .filter_map(|(ws, row)| Some((ws.feature.as_ref()?, row.stages?)));
+    let rows = (view.features.iter().zip(&layout.features))
+        .map(|(row, rect)| (&row.card, feature_dots_rect(*rect)));
+    headers
+        .chain(rows)
+        .filter_map(|(card, dots)| {
+            let k = card.running_dot()?;
+            Some(super::stage_dot_rect(dots, card.big_dot(), k))
+        })
+        .collect()
 }
 
 /// How opaque the pulse band over a blocked agent's row is drawn when the
@@ -1199,13 +1218,16 @@ impl SidebarView {
             .iter()
             .flatten()
             .any(|card| card.status == AgentStatus::Blocked || card.badge().dot.blinks());
+        let runs = |card: &super::FeatureCard| card.running_dot().is_some();
         cards
             || self.workspaces.iter().any(|ws| {
                 ws.status == Some(AgentStatus::Working)
                     || ws.ci.as_ref().is_some_and(|ci| {
                         ci.chips.iter().any(|chip| chip.state == CiState::Running)
                     })
+                    || ws.feature.as_ref().is_some_and(runs)
             })
+            || self.features.iter().any(|row| runs(&row.card))
     }
 }
 
@@ -1257,6 +1279,8 @@ pub struct RowLayout {
     /// Its feature's stage marks, when it is a feature's workspace: where
     /// the line under its name starts.
     pub stages: Option<Rect>,
+    /// Which of those marks is the big one.
+    pub stage_big: Option<usize>,
     /// What of that line is free for its git marks, past the stage marks.
     pub git: Option<Rect>,
     /// Its feature's count of repositories, when it holds several.
@@ -1346,6 +1370,8 @@ pub struct SidebarLayout {
     /// open features, and a row per feature (see `with_features`).
     pub features_title: Option<Rect>,
     pub features: Vec<Rect>,
+    /// Which stage dot of each of those rows is the big one.
+    pub feature_big: Vec<Option<usize>>,
     /// The "+" on the rule over the heading, starting a feature; and the
     /// pill on the heading counting the features that wait for the user
     /// (see `with_feature_head`).
@@ -1542,7 +1568,8 @@ impl SidebarLayout {
         if let Some(n) = self.features.iter().position(|r| inside(*r)) {
             let dots = feature_dots_rect(self.features[n]);
             return Some(if inside(dots) {
-                SidebarHit::FeatureDot(n, super::stage_dot_at(dots, pos.x))
+                let big = self.feature_big.get(n).copied().flatten();
+                SidebarHit::FeatureDot(n, super::stage_dot_at(dots, big, pos.x))
             } else {
                 SidebarHit::Feature(n)
             });
@@ -1591,7 +1618,7 @@ impl SidebarLayout {
         } else if row.ci.is_some_and(inside) {
             SidebarHit::CiMark(i)
         } else if let Some(dots) = row.stages.filter(|r| inside(*r)) {
-            SidebarHit::Stage(i, super::stage_dot_at(dots, pos.x))
+            SidebarHit::Stage(i, super::stage_dot_at(dots, row.stage_big, pos.x))
         } else if let Some(lines) = row.attention.filter(|r| inside(*r)) {
             SidebarHit::Attention(i, ((pos.y - lines.loc.y as f64) / TAB_LINE as f64) as usize)
         } else if row.chip.is_some_and(inside) {
@@ -1639,16 +1666,23 @@ impl SidebarLayout {
         }
     }
 
-    /// This layout with `n` feature rows under the workspaces, in a
+    /// This layout with the feature `rows` under the workspaces, in a
     /// sidebar `width` wide: under the feature workspaces' heading when
     /// there are any (see `sidebar_layout_at`), else under one of their own.
-    pub fn with_features(mut self, n: usize, width: i32, density: Density) -> Self {
+    pub fn with_features(
+        mut self,
+        rows: &[super::FeatureRowView],
+        width: i32,
+        density: Density,
+    ) -> Self {
         let heading = self.features_title.is_none();
-        let (title, rows, _) = features_rects(n, self.blocks_end(), heading, width, density);
+        let n = rows.len();
+        let (title, rects, _) = features_rects(n, self.blocks_end(), heading, width, density);
         if heading {
             self.features_title = title;
         }
-        self.features = rows;
+        self.features = rects;
+        self.feature_big = rows.iter().map(|row| row.card.big_dot()).collect();
         self
     }
 
@@ -2170,6 +2204,7 @@ pub fn sidebar_layout_at(
             picks,
             worktrees,
             stages,
+            stage_big: ws.feature.as_ref().and_then(|card| card.big_dot()),
             git,
             repos,
             info,
@@ -2242,6 +2277,7 @@ pub fn sidebar_layout_at(
         inbox,
         features_title,
         features: Vec::new(),
+        feature_big: Vec::new(),
         features_plus: None,
         features_waiting: None,
         feature_workspaces: first_feature.map_or(0, |f| workspaces.len() - f),
@@ -2366,7 +2402,7 @@ impl Painter {
         let state = &view.state;
         let density = state.density;
         let layout = sidebar_layout_at(&view.workspaces, &view.agents, size.w, density)
-            .with_features(view.features.len(), size.w, density)
+            .with_features(&view.features, size.w, density)
             .with_feature_head(
                 !view.workspaces.is_empty(),
                 features_waiting(&view.workspaces, &view.features),
@@ -2673,9 +2709,15 @@ impl Painter {
             let dots = feature_dots_rect(*rect);
             if let Some(k) = dot {
                 let under = mix(p.panel, p.element, hover);
-                self.lit_stage_dot(c, dots, *k, under, scale, p);
+                self.lit_stage_dot(
+                    c,
+                    super::stage_dot_rect(dots, row.card.big_dot(), *k),
+                    under,
+                    scale,
+                    p,
+                );
             }
-            self.stage_marks(c, &row.card.marks, dots, scale, p);
+            self.stage_marks(c, &row.card, dots, scale, p);
             if row.card.shows_repos() {
                 let end = rect.loc.x + rect.size.w - CHILD_PAD;
                 let count = within_x(dots, end - REPO_COUNT_WIDTH, REPO_COUNT_WIDTH);
@@ -2698,26 +2740,13 @@ impl Painter {
         }
     }
 
-    /// The pill lighting stage dot `k` of the dots at `dots`, on `under`,
-    /// as it opens that stage.
-    fn lit_stage_dot(
-        &self,
-        c: &mut Canvas,
-        dots: Rect,
-        k: usize,
-        under: Rgb,
-        scale: f64,
-        p: &Palette,
-    ) {
+    /// The pill lighting the stage dot at `dot`, on `under`, as it opens
+    /// that stage.
+    fn lit_stage_dot(&self, c: &mut Canvas, dot: Rect, under: Rgb, scale: f64, p: &Palette) {
         let pad = 2;
-        let (d, gap) = (super::STAGE_DOT, super::STAGE_DOT_GAP);
         let pill = Rectangle::new(
-            (
-                dots.loc.x + k as i32 * (d + gap) - pad,
-                dots.loc.y + (dots.size.h - d) / 2 - pad,
-            )
-                .into(),
-            (d + 2 * pad, d + 2 * pad).into(),
+            (dot.loc.x - pad, dot.loc.y - pad).into(),
+            (dot.size.w + 2 * pad, dot.size.h + 2 * pad).into(),
         );
         let (x, y, w, h) = rect_px(pill, scale);
         c.rounded(x, y, w, h, h / 2.0, mix(under, p.text, 0.18));
@@ -3009,9 +3038,10 @@ impl Painter {
         // stage stands.
         if let (Some(card), Some(marks)) = (&ws.feature, row.stages) {
             if let Some(k) = row_state.stage {
-                self.lit_stage_dot(c, marks, k, surface, scale, p);
+                let dot = super::stage_dot_rect(marks, card.big_dot(), k);
+                self.lit_stage_dot(c, dot, surface, scale, p);
             }
-            self.stage_marks(c, &card.marks, marks, scale, p);
+            self.stage_marks(c, card, marks, scale, p);
             if let Some(count) = row.repos {
                 self.repo_count(c, card.repos, count, scale, p);
             }
@@ -4037,6 +4067,8 @@ pub(super) struct SidebarLayers {
     /// The open strip of agents, in front of the rows.
     strip: super::Cached<StripKey>,
     thumb: super::Cached<(Size<i32, Logical>, super::Theme, f64)>,
+    /// The blinking dot of a stage that runs.
+    stage_dot: super::Cached<(super::Theme, f64)>,
     /// The band (one size fits all the cards).
     pulse: super::Cached<(Size<i32, Logical>, super::Theme, f64)>,
     /// How many times the frame was drawn, for tests.
@@ -4063,7 +4095,7 @@ impl SidebarLayers {
         let size: Size<i32, Logical> = (width, output.h).into();
         let state = &sidebar.state;
         let mut layout = sidebar_layout_at(&sidebar.workspaces, &sidebar.agents, width, density)
-            .with_features(sidebar.features.len(), width, density)
+            .with_features(&sidebar.features, width, density)
             .with_feature_head(
                 !sidebar.workspaces.is_empty(),
                 features_waiting(&sidebar.workspaces, &sidebar.features),
@@ -4116,6 +4148,15 @@ impl SidebarLayers {
             for rect in sidebar_blinkers(&sidebar, &layout, i32::MAX) {
                 if rect.size.w > 0 && rect.size.h > 0 && shows(rect.loc.y, rect.size.h) {
                     let part = moved(dot, rect.loc.into(), rect.size);
+                    parts.push(Part { alpha, ..part });
+                }
+            }
+            let stage_dot = self.stage_dot.get((theme, scale), |_| {
+                super::stage_blink_dot(scale, theme.palette())
+            });
+            for rect in sidebar_stage_blinkers(&sidebar, &layout) {
+                if shows(rect.loc.y, rect.size.h) {
+                    let part = moved(stage_dot, rect.loc.into(), rect.size);
                     parts.push(Part { alpha, ..part });
                 }
             }

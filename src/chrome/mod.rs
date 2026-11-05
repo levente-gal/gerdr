@@ -1112,7 +1112,7 @@ fn hit_rects(
         view.density,
     )
     .with_features(
-        view.sidebar.features.len(),
+        &view.sidebar.features,
         view.sidebar_width,
         view.density,
     )

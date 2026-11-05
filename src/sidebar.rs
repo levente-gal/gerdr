@@ -165,15 +165,12 @@ impl Gerdr {
             .into_iter()
             .map(|(ws, _)| ws)
             .collect();
+        let rows = self.feature_rows();
         chrome::sidebar_layout_at(&workspaces, &agents, self.sidebar_width, self.density)
-            .with_features(
-                self.sidebar_feature_count(),
-                self.sidebar_width,
-                self.density,
-            )
+            .with_features(&rows, self.sidebar_width, self.density)
             .with_feature_head(
                 !workspaces.is_empty(),
-                chrome::features_waiting(&workspaces, &self.feature_rows()),
+                chrome::features_waiting(&workspaces, &rows),
                 self.sidebar_width,
             )
             .scrolled_over(
@@ -348,16 +345,13 @@ impl Gerdr {
         agents: &[Vec<AgentView>],
     ) -> SidebarState {
         let height = self.sidebar_height();
+        let rows = self.feature_rows();
         let layout =
             chrome::sidebar_layout_at(workspaces, agents, self.sidebar_width, self.density)
-                .with_features(
-                    self.sidebar_feature_count(),
-                    self.sidebar_width,
-                    self.density,
-                )
+                .with_features(&rows, self.sidebar_width, self.density)
                 .with_feature_head(
                     !workspaces.is_empty(),
-                    chrome::features_waiting(workspaces, &self.feature_rows()),
+                    chrome::features_waiting(workspaces, &rows),
                     self.sidebar_width,
                 );
         // Held to what the rows now take, and moved to show the active

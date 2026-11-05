@@ -6682,11 +6682,6 @@ impl Gerdr {
         (self.projects.project(&f.project)).map_or(f.project.as_str(), |p| &p.name)
     }
 
-    /// How many feature rows the sidebar shows.
-    pub fn sidebar_feature_count(&self) -> usize {
-        self.sidebar_listed().len()
-    }
-
     /// Feature `i` of the sidebar's rows.
     pub fn sidebar_feature(&self, i: usize) -> Option<&Feature> {
         self.sidebar_listed().get(i).copied()

@@ -4171,27 +4171,27 @@ impl Painter {
         );
     }
 
-    /// A feature's stages as a row of `marks` in `rect`, from its left.
+    /// `card`'s stages as a row of marks in `rect`, from its left, the one
+    /// it is at bigger. The one that runs is left out: it blinks over this
+    /// (see `sidebar_stage_blinkers`).
     pub(super) fn stage_marks(
         &self,
         c: &mut Canvas,
-        marks: &[StageMark],
+        card: &FeatureCard,
         rect: Rect,
         scale: f64,
         p: &Palette,
     ) {
-        let s = scale as f32;
-        let n = marks.len() as i32;
-        let pitch = STAGE_DOT + STAGE_DOT_GAP;
-        debug_assert!(n * pitch - STAGE_DOT_GAP <= rect.size.w || rect.size.w == 0);
-        let y = rect.loc.y + (rect.size.h - STAGE_DOT) / 2;
-        for (i, mark) in marks.iter().enumerate() {
-            let spot = Rectangle::new(
-                (rect.loc.x + i as i32 * pitch, y).into(),
-                (STAGE_DOT, STAGE_DOT).into(),
-            );
+        let n = card.marks.len() as i32;
+        debug_assert!(stage_marks_width(n as usize) <= rect.size.w || rect.size.w == 0);
+        let big = card.big_dot();
+        for (i, mark) in card.marks.iter().enumerate() {
+            if card.running_dot() == Some(i) {
+                continue;
+            }
+            let spot = stage_dot_rect(rect, big, i);
             icon_sdf(c, spot, scale, mark.color(p), |x, y| {
-                stage_dot(*mark, x, y, 7.0 * s)
+                stage_dot(*mark, x, y, stage_dot_across(spot, scale))
             });
         }
     }
@@ -4250,6 +4250,17 @@ pub struct FeatureCard {
 }
 
 impl FeatureCard {
+    /// The stage dot that is big: the stage its icon and line are about.
+    pub(super) fn big_dot(&self) -> Option<usize> {
+        let stage = self.stage?;
+        Stage::ALL.iter().position(|s| *s == stage)
+    }
+
+    /// The stage dot that blinks: the big one, while that stage runs.
+    pub(super) fn running_dot(&self) -> Option<usize> {
+        self.big_dot().filter(|_| self.tone == CardTone::Working)
+    }
+
     /// Whether it shows how many repositories it holds: only with several.
     pub(super) fn shows_repos(&self) -> bool {
         self.repos > 1
@@ -4281,19 +4292,62 @@ pub(super) fn stage_glyph(stage: Option<Stage>, x: f32, y: f32, s: f32) -> f32 {
 
 /// How big a stage dot of a sidebar row is, and the gap between two.
 pub(super) const STAGE_DOT: i32 = 8;
-pub(super) const STAGE_DOT_GAP: i32 = 3;
+pub(super) const STAGE_DOT_GAP: i32 = 2;
+/// How big the dot of the stage a feature is at is: it is the one to click.
+pub(super) const STAGE_DOT_BIG: i32 = 14;
 
-/// Which of the stage dots starting at `dots` is at `x`: the nearest, as
-/// the gaps between them belong to them.
-pub(super) fn stage_dot_at(dots: Rect, x: f64) -> usize {
-    let pitch = (STAGE_DOT + STAGE_DOT_GAP) as f64;
-    let at = ((x - dots.loc.x as f64 + STAGE_DOT_GAP as f64 / 2.0) / pitch).max(0.0) as usize;
-    at.min(Stage::ALL.len() - 1)
+/// Where stage dot `k` of the dots starting at `dots` goes, with dot `big`
+/// the big one.
+pub(super) fn stage_dot_rect(dots: Rect, big: Option<usize>, k: usize) -> Rect {
+    let across = |i: usize| {
+        if big == Some(i) {
+            STAGE_DOT_BIG
+        } else {
+            STAGE_DOT
+        }
+    };
+    let x = (0..k).map(|i| across(i) + STAGE_DOT_GAP).sum::<i32>();
+    let d = across(k);
+    Rectangle::new(
+        (dots.loc.x + x, dots.loc.y + (dots.size.h - d) / 2).into(),
+        (d, d).into(),
+    )
 }
 
-/// How wide `marks` stage dots are in a sidebar row.
+/// How far across a stage dot is drawn in its `spot`, in pixels: a pixel
+/// short of it, so its edge stays smooth.
+fn stage_dot_across(spot: Rect, scale: f64) -> f32 {
+    (spot.size.w - 1) as f32 * scale as f32
+}
+
+/// Which of the stage dots starting at `dots`, with dot `big` the big one,
+/// is at `x`: the nearest, as the gaps between them belong to them.
+pub(super) fn stage_dot_at(dots: Rect, big: Option<usize>, x: f64) -> usize {
+    (0..Stage::ALL.len() - 1)
+        .find(|k| {
+            let r = stage_dot_rect(dots, big, *k);
+            x < (r.loc.x + r.size.w) as f64 + STAGE_DOT_GAP as f64 / 2.0
+        })
+        .unwrap_or(Stage::ALL.len() - 1)
+}
+
+/// How wide `marks` stage dots are in a sidebar row, one of them big.
 pub(super) fn stage_marks_width(marks: usize) -> i32 {
-    (marks as i32 * (STAGE_DOT + STAGE_DOT_GAP) - STAGE_DOT_GAP).max(0)
+    if marks == 0 {
+        return 0;
+    }
+    marks as i32 * (STAGE_DOT + STAGE_DOT_GAP) - STAGE_DOT_GAP + STAGE_DOT_BIG - STAGE_DOT
+}
+
+/// A running stage's dot on its own, big, on a clear buffer: composed over
+/// a sidebar painted without it.
+pub(super) fn stage_blink_dot(scale: f64, p: &Palette) -> MemoryRenderBuffer {
+    let spot: Rect = Rectangle::from_size((STAGE_DOT_BIG, STAGE_DOT_BIG).into());
+    let mut c = Canvas::new(super::physical(spot.size, scale));
+    icon_sdf(&mut c, spot, scale, StageMark::Current.color(p), |x, y| {
+        stage_dot(StageMark::Current, x, y, stage_dot_across(spot, scale))
+    });
+    c.into_buffer(false)
 }
 
 #[cfg(test)]
@@ -4323,13 +4377,24 @@ mod tests {
         assert!(short.panel.size.h <= 360);
     }
 
+    /// `n` feature rows with nothing on their cards.
+    fn plain_rows(n: usize) -> Vec<FeatureRowView> {
+        vec![
+            FeatureRowView {
+                title: "A feature".into(),
+                card: FeatureCard::default(),
+            };
+            n
+        ]
+    }
+
     #[test]
     fn feature_rows_sit_under_the_workspaces_and_scroll_with_them() {
         use crate::chrome::{Density, SidebarHit, sidebar_layout_at};
         let base = sidebar_layout_at(&[], &[], 260, Density::Comfortable);
         assert!(base.features_title.is_none() && base.features.is_empty());
         let layout = sidebar_layout_at(&[], &[], 260, Density::Comfortable).with_features(
-            2,
+            &plain_rows(2),
             260,
             Density::Comfortable,
         );
@@ -4366,7 +4431,8 @@ mod tests {
         };
         let d = Density::Comfortable;
         let workspaces = [ws("a", false), ws("b", true), ws("c", true)];
-        let layout = sidebar_layout_at(&workspaces, &[], 260, d).with_features(1, 260, d);
+        let layout =
+            sidebar_layout_at(&workspaces, &[], 260, d).with_features(&plain_rows(1), 260, d);
         let title = layout.features_title.expect("a heading");
         let blocks = &layout.blocks;
         assert!(title.loc.y >= blocks[0].loc.y + blocks[0].size.h);
@@ -4421,7 +4487,7 @@ mod tests {
         // No feature yet: the heading shows, and counts toward scrolling.
         let empty = || {
             plain()
-                .with_features(0, 200, d)
+                .with_features(&[], 200, d)
                 .with_feature_head(true, 0, 200)
         };
         let scrolled = empty().scrolled(4, 0);
@@ -4437,7 +4503,7 @@ mod tests {
         assert!(plus.loc.x + plus.size.w <= 200);
         // The empty sidebar has only its hint: no project to start one in.
         let none = sidebar_layout_at(&[], &[], 200, d)
-            .with_features(0, 200, d)
+            .with_features(&[], 200, d)
             .with_feature_head(false, 0, 200);
         assert!(none.features_title.is_none() && none.features_plus.is_none());
         // It moves with the rows.
@@ -4472,17 +4538,17 @@ mod tests {
         let workspaces = [on_workspace];
         assert_eq!(features_waiting(&workspaces, &rows), 2);
         let layout = sidebar_layout_at(&workspaces, &[], 200, d)
-            .with_features(2, 200, d)
+            .with_features(&plain_rows(2), 200, d)
             .with_feature_head(true, 2, 200);
         let pill = layout.features_waiting.expect("a pill");
         let mid = (pill.loc.x as f64 + 2.0, pill.loc.y as f64 + 8.0).into();
         assert_eq!(layout.hit(mid), Some(SidebarHit::FeaturesWaiting));
         let quiet = sidebar_layout_at(&workspaces, &[], 200, d)
-            .with_features(2, 200, d)
+            .with_features(&plain_rows(2), 200, d)
             .with_feature_head(true, 0, 200);
         assert_eq!(quiet.features_waiting, None);
         let narrow = sidebar_layout_at(&workspaces, &[], SIDEBAR_MIN_WIDTH, d)
-            .with_features(2, SIDEBAR_MIN_WIDTH, d)
+            .with_features(&plain_rows(2), SIDEBAR_MIN_WIDTH, d)
             .with_feature_head(true, 2, SIDEBAR_MIN_WIDTH);
         assert_eq!(narrow.features_waiting, None, "it never covers the label");
     }
@@ -4518,7 +4584,7 @@ mod tests {
             ..FeatureCard::default()
         });
         let layout = sidebar_layout_at(std::slice::from_ref(&ws), &[], 200, d)
-            .with_features(1, 200, d)
+            .with_features(&plain_rows(1), 200, d)
             .with_feature_head(true, 0, 200);
         let pitch = STAGE_DOT + STAGE_DOT_GAP;
         let on = |dots: Rect, k: i32| {
@@ -4573,6 +4639,97 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn the_dot_of_the_stage_a_feature_is_at_is_the_big_target() {
+        use crate::chrome::{Density, SidebarHit, sidebar_layout_at};
+        let d = Density::Comfortable;
+        let rows = [FeatureRowView {
+            title: "A feature".into(),
+            card: FeatureCard {
+                marks: vec![StageMark::Later; Stage::ALL.len()],
+                stage: Some(Stage::Build),
+                ..FeatureCard::default()
+            },
+        }];
+        let big = rows[0].card.big_dot().expect("a stage");
+        let layout = sidebar_layout_at(&[], &[], 200, d).with_features(&rows, 200, d);
+        let dots = feature_row_dots(layout.features[0]);
+        // Every dot takes a click anywhere on it, past the big one too.
+        for k in 0..Stage::ALL.len() {
+            let r = stage_dot_rect(dots, Some(big), k);
+            for x in [r.loc.x, r.loc.x + r.size.w - 1] {
+                let at = (x as f64, (dots.loc.y + dots.size.h / 2) as f64).into();
+                assert_eq!(layout.hit(at), Some(SidebarHit::FeatureDot(0, k)));
+            }
+        }
+        // It fits its line, and is much wider than the others.
+        let r = stage_dot_rect(dots, Some(big), big);
+        assert_eq!((r.size.w, r.size.h), (STAGE_DOT_BIG, STAGE_DOT_BIG));
+        assert!(r.loc.y >= dots.loc.y && r.loc.y + r.size.h <= dots.loc.y + dots.size.h);
+        let last = stage_dot_rect(dots, Some(big), Stage::ALL.len() - 1);
+        assert_eq!(last.loc.x + last.size.w, dots.loc.x + dots.size.w);
+    }
+
+    #[test]
+    fn only_the_dot_of_a_stage_that_runs_blinks() {
+        use crate::chrome::{Density, SidebarView, WorkspaceView, sidebar_layout_at};
+        let d = Density::Comfortable;
+        let card = |tone| FeatureCard {
+            marks: vec![StageMark::Later; Stage::ALL.len()],
+            stage: Some(Stage::Verify),
+            tone,
+            ..FeatureCard::default()
+        };
+        // On a row and on a feature workspace's header alike.
+        let view = |tone: CardTone| {
+            let mut ws = WorkspaceView::new("Bulk".into(), crate::WorkspaceKind::Terminal, &[]);
+            ws.feature = Some(card(tone));
+            SidebarView {
+                workspaces: vec![ws],
+                agents: Vec::new(),
+                active: None,
+                project: None,
+                header_lit: false,
+                features: vec![FeatureRowView {
+                    title: "Row".into(),
+                    card: card(tone),
+                }],
+                state: Default::default(),
+            }
+        };
+        let blinkers =
+            |view: &SidebarView| {
+                let layout = sidebar_layout_at(&view.workspaces, &view.agents, 200, d)
+                    .with_features(&view.features, 200, d);
+                let rects = crate::chrome::sidebar_stage_blinkers(view, &layout);
+                (layout, rects)
+            };
+        for tone in [CardTone::Idle, CardTone::Waits, CardTone::Failed] {
+            let view = view(tone);
+            assert!(blinkers(&view).1.is_empty(), "{tone:?}");
+            assert!(!view.moves(), "{tone:?}");
+        }
+        let view = view(CardTone::Working);
+        assert!(view.moves(), "the frames keep coming for the blink");
+        let (layout, rects) = blinkers(&view);
+        let k = Stage::ALL.iter().position(|s| *s == Stage::Verify);
+        let header = layout.rows[0].stages.expect("its dots");
+        assert_eq!(
+            rects,
+            vec![
+                stage_dot_rect(header, k, k.unwrap()),
+                stage_dot_rect(feature_row_dots(layout.features[0]), k, k.unwrap()),
+            ]
+        );
+        // Every stage done: no stage to be big or to blink.
+        let done = FeatureCard {
+            marks: vec![StageMark::Done; Stage::ALL.len()],
+            tone: CardTone::Working,
+            ..FeatureCard::default()
+        };
+        assert_eq!((done.big_dot(), done.running_dot()), (None, None));
     }
 
     #[test]
