@@ -2,10 +2,10 @@
 //! repository pins, activate its Python venv, bring back `mise` version
 //! overrides, and (when the pane comes back after its server restarted) run
 //! again what ran in it. Each pane gets one line, typed in as soon as its
-//! shell exists: the pane is brand new, so nobody typed in it yet, and the
-//! shell keeps the line as type-ahead until its first prompt. It runs after
-//! the shell's rc files (and `mise activate`), so the venv's `bin` comes
-//! first in PATH. The line is written for the shell that gets it: POSIX
+//! shell exists: the shell keeps it as type-ahead until its first prompt, and
+//! what was on its input line goes first (see `Herdr::send_shell_line`). It
+//! runs after the shell's rc files (and `mise activate`), so the venv's `bin`
+//! comes first in PATH. The line is written for the shell that gets it: POSIX
 //! shells, fish, csh, nu and PowerShell each get their own syntax and their
 //! own venv activation script; other shells get nothing.
 
@@ -713,7 +713,7 @@ pub fn spawn_prepare(socket: PathBuf, preps: Vec<Prep>) {
                                 return false;
                             };
                             tracing::debug!("preparing pane {pane}:{line}");
-                            if let Err(err) = herdr.send_line(pane, &line) {
+                            if let Err(err) = herdr.send_shell_line(pane, &line) {
                                 tracing::warn!("pane {pane} couldn't be prepared: {err}");
                             }
                             false

@@ -834,7 +834,7 @@ fn run_job(
                     tracing::debug!("pane {pane_id}: no line for {shell:?}, left stopped");
                     return Outcome::Stopped;
                 };
-                return match herdr.send_line(pane_id, &line) {
+                return match herdr.send_shell_line(pane_id, &line) {
                     Ok(()) => Outcome::Restarted,
                     Err(err) => {
                         tracing::warn!("restarting pane {pane_id}: {err}");

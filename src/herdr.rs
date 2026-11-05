@@ -951,6 +951,20 @@ impl Herdr {
         self.send_keys(pane_id, &["Enter"])
     }
 
+    /// Run `line` in the shell of pane `pane_id`, which is at its prompt or
+    /// still starting. What is on its input line goes first, or `line` would
+    /// land behind it and run mangled: a `herdr terminal attach` client asks
+    /// its terminal about itself as it starts, and a reply coming late is
+    /// passed on to the pane as if typed (`1016;0$y6c`). As a key: `text` is
+    /// pasted, so a control character in it stays literal.
+    pub fn send_shell_line(&mut self, pane_id: &str, line: &str) -> Result<(), String> {
+        if let Err(err) = self.send_keys(pane_id, &["ctrl+u"]) {
+            // An empty line needs nothing, and the line itself tells.
+            tracing::warn!("clearing the input line of pane {pane_id}: {err}");
+        }
+        self.send_line(pane_id, line)
+    }
+
     /// Press `keys` in pane `pane_id`, as typed on its terminal: `ctrl+c`
     /// interrupts what runs in it. herdr checks every key before sending
     /// any, and refuses one it doesn't know (`invalid_key`).
@@ -1388,6 +1402,38 @@ fn moved_pane(mut result: Value) -> Result<PaneInfo, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_shell_line_clears_the_input_line_first() {
+        use std::os::unix::net::UnixListener;
+        let socket = std::env::temp_dir().join(format!("gerdr-clear-{}", std::process::id()));
+        let _ = std::fs::remove_file(&socket);
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = std::thread::spawn(move || {
+            let mut asked = Vec::new();
+            let refused = &b"{\"error\":{\"message\":\"no\"}}\n"[..];
+            for reply in [refused, b"{\"result\":{}}\n"] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut line = String::new();
+                BufReader::new(&stream).read_line(&mut line).unwrap();
+                stream.write_all(reply).unwrap();
+                asked.push(serde_json::from_str::<Value>(&line).unwrap());
+            }
+            asked
+        });
+
+        // Not clearing it doesn't lose the line.
+        let sent = Herdr::on_socket(socket.clone()).send_shell_line("p1", "sh check");
+        let _ = std::fs::remove_file(&socket);
+        sent.unwrap();
+
+        let asked = server.join().unwrap();
+        assert_eq!(asked[0]["method"], "pane.send_keys");
+        assert_eq!(asked[0]["params"]["keys"], json!(["ctrl+u"]));
+        assert_eq!(asked[1]["method"], "pane.send_input");
+        assert_eq!(asked[1]["params"]["text"], "sh check");
+        assert_eq!(asked[1]["params"]["keys"], json!(["Enter"]));
+    }
 
     #[test]
     fn an_agents_line_gets_its_enter_apart() {
