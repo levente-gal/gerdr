@@ -858,7 +858,7 @@ fn tail(raw: &[u8], cut: bool) -> String {
 /// escapes off, of a line redrawn with `\r` only its last drawing, long lines
 /// cut. `cut` says `raw` starts mid-output, so its first line is partial and
 /// goes.
-fn clean_lines(raw: &[u8], cut: bool) -> Vec<String> {
+pub(super) fn clean_lines(raw: &[u8], cut: bool) -> Vec<String> {
     let text = strip_escapes(&String::from_utf8_lossy(raw));
     let mut lines: Vec<&str> = text.split('\n').collect();
     if cut && lines.len() > 1 {
@@ -890,7 +890,7 @@ fn clean_lines(raw: &[u8], cut: bool) -> Vec<String> {
 /// `text` without terminal escapes (CSI such as colours, OSC such as
 /// titles and links, two-character ones) or other control characters
 /// than newline, carriage return and tab.
-fn strip_escapes(text: &str) -> String {
+pub(super) fn strip_escapes(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {

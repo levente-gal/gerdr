@@ -321,7 +321,7 @@ impl ItemAction {
     }
 
     /// Its button on `item`: a gate's Enter opens what it waits on (a
-    /// document, the diff, the manual test sheet), so it says Open.
+    /// document, the diff, the criteria to try), so it says Open.
     pub fn button_on(self, item: &InboxItem) -> chrome::InboxButton {
         let mut button = self.button();
         if self == ItemAction::GoTo && matches!(item.detail, Detail::Gate { .. }) {
@@ -878,7 +878,7 @@ fn detail_view(item: &InboxItem, actions: &[ItemAction], now: u64) -> InboxDetai
                 }
                 K::Suggestions { .. } => ("Read", "Enter opens the suggestions to decide"),
                 K::CodeReview => ("Waiting", "Enter shows the diff to review"),
-                K::ManualTest { .. } => ("Waiting", "Enter opens the manual test sheet"),
+                K::ManualTest { .. } => ("Waiting", "Enter opens its criteria to try"),
                 K::SendPrompt => ("Waiting", "Enter opens the feature to send the prompt"),
             };
             field(when, crate::projects::ago(now, *since));
@@ -2186,7 +2186,7 @@ mod tests {
                 passed: 1,
                 total: 2
             })
-            .contains(&field("Next", "Enter opens the manual test sheet"))
+            .contains(&field("Next", "Enter opens its criteria to try"))
         );
     }
 

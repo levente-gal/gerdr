@@ -6512,7 +6512,6 @@ impl Gerdr {
             finding_dialog: self.finding_dialog_view(),
             identity: self.identity_view(),
             commands: self.commands_view(),
-            manual_test: self.manual_test_view(),
             plan_sheet: self.plan_sheet_view(),
             features: self.feature_tab_view(),
             project_menu: self.project_menu_view(),

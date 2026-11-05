@@ -31,7 +31,6 @@ mod hints;
 mod identity;
 mod inbox;
 mod layers;
-mod manual_test;
 mod menu;
 mod painter;
 mod pane_bar;
@@ -84,7 +83,6 @@ pub use identity::*;
 pub use inbox::*;
 pub use layers::ChromeElement;
 use layers::*;
-pub use manual_test::*;
 pub use menu::*;
 pub use painter::*;
 pub use pane_bar::*;
@@ -173,8 +171,6 @@ pub struct ChromeView {
     pub identity: Option<IdentityView>,
     /// Set while the project commands dialog is open.
     pub commands: Option<CommandsView>,
-    /// Set while the manual test sheet is open.
-    pub manual_test: Option<ManualTestView>,
     /// Set while the plan review's sheet is open.
     pub plan_sheet: Option<PlanSheetView>,
     /// Set while the feature panel is open.
@@ -236,7 +232,6 @@ pub struct Chrome {
     finding_dialog: Overlay<(FindingDialogView, Size<i32, Logical>, Theme, f64)>,
     identity: Overlay<(IdentityView, Size<i32, Logical>, Theme, f64)>,
     commands: Overlay<(CommandsView, Size<i32, Logical>, Theme, f64)>,
-    manual_test: Overlay<(ManualTestView, Size<i32, Logical>, Theme, f64)>,
     plan_sheet: Overlay<(PlanSheetView, Size<i32, Logical>, Theme, f64)>,
     features: FeatureTabLayers,
     project_menu: ProjectMenuLayers,
@@ -304,7 +299,6 @@ impl Chrome {
             finding_dialog: Overlay::default(),
             identity: Overlay::default(),
             commands: Overlay::default(),
-            manual_test: Overlay::default(),
             plan_sheet: Overlay::default(),
             features: FeatureTabLayers::default(),
             project_menu: ProjectMenuLayers::default(),
@@ -517,16 +511,6 @@ impl Chrome {
                     });
                     parts.extend(scrimmed(part, output, theme.palette()));
                 }
-                Kind::ManualTest => {
-                    let sheet = view.manual_test.take().map(|v| {
-                        let (loc, size) = shadowed(manual_test_layout(&v, output).panel);
-                        ((v, output, theme, scale), loc, size)
-                    });
-                    let part = self.manual_test.part(sheet, now, true, |(v, output, ..)| {
-                        painter.manual_test_sheet(v, *output, scale, theme.palette())
-                    });
-                    parts.extend(scrimmed(part, output, theme.palette()));
-                }
                 Kind::PlanSheet => {
                     let sheet = view.plan_sheet.take().map(|v| {
                         let (loc, size) = shadowed(plan_sheet_layout(&v, output).panel);
@@ -564,7 +548,7 @@ impl Chrome {
                 }
                 // The toasts, stacked at the bottom right of the app area,
                 // each fading on its own, over every popup but the menu and
-                // the dialogs (the manual test sheet is under them). One leaving fades where the stack has it,
+                // the dialogs (the plan review's sheet is under them). One leaving fades where the stack has it,
                 // which holds its place until it is gone.
                 Kind::Toasts => {
                     let layouts = toast_layout(&view.toasts, toast_area(area, view.unzoom));

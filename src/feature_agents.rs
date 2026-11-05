@@ -337,7 +337,7 @@ pub(crate) fn approval(feature: &Feature, stage: Stage, text: Option<&str>) -> R
     match stage {
         Stage::AiReview => return Err("AI review is done once its findings are decided".into()),
         Stage::CodeReview => return Err("Approve Code review from the feature's diff".into()),
-        Stage::ManualTest => return Err("Mark Manual test passed from its sheet".into()),
+        Stage::ManualTest => return Err("Mark Manual test passed from its page".into()),
         _ => {}
     }
     let name = artifacts::name(stage).unwrap_or("its file");
@@ -2795,7 +2795,7 @@ mod tests {
         );
         assert_eq!(
             approval(&testing, Stage::ManualTest, None),
-            Err("Mark Manual test passed from its sheet".into())
+            Err("Mark Manual test passed from its page".into())
         );
     }
 

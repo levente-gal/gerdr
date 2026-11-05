@@ -25,7 +25,7 @@
 //! found take it. Shift with the arrows, or `v` (`V` by lines), select
 //! from it as it goes.
 
-use std::{ops::Range, time::Instant};
+use std::{ops::Range, path::PathBuf, time::Instant};
 
 use smithay::{
     input::keyboard::{Keysym, ModifiersState},
@@ -177,12 +177,25 @@ pub enum Outcome {
     Reload,
 }
 
+/// What the viewer shows the text of.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Source {
+    /// A terminal: the gerdr pane it is over, and its herdr pane.
+    Pane { pane: u32, pane_id: String },
+    /// The setup log of a feature, followed as it grows.
+    SetupLog {
+        project: String,
+        slug: String,
+        path: PathBuf,
+        /// How long the file was when last read.
+        read: u64,
+    },
+}
+
 /// The viewer as it stands.
 pub struct Scrollback {
-    /// The gerdr pane it is over, and its herdr pane.
-    pub pane: u32,
-    pub pane_id: String,
-    /// What the pane's bar calls it.
+    pub source: Source,
+    /// What the pane's bar calls it, or the log's feature's title.
     pub label: String,
     lines: Vec<String>,
     /// How each line was drawn, by index into `lines`: none, drawn
@@ -222,9 +235,14 @@ impl Scrollback {
     /// The viewer over gerdr pane `pane` (herdr's `pane_id`), showing
     /// `text`, the pane's view `from_bottom` rows up from its bottom.
     pub fn new(pane: u32, pane_id: String, label: String, text: &str, from_bottom: u64) -> Self {
+        Self::of(Source::Pane { pane, pane_id }, label, text, from_bottom)
+    }
+
+    /// The viewer over `source`, showing `text`, standing `from_bottom`
+    /// rows up from its bottom.
+    pub fn of(source: Source, label: String, text: &str, from_bottom: u64) -> Self {
         Self {
-            pane,
-            pane_id,
+            source,
             label,
             lines: split(text),
             styles: Vec::new(),
@@ -242,6 +260,14 @@ impl Scrollback {
             visual: None,
             keys: false,
             clicks: None,
+        }
+    }
+
+    /// The pane it is over; none over a log.
+    pub fn pane(&self) -> Option<u32> {
+        match self.source {
+            Source::Pane { pane, .. } => Some(pane),
+            Source::SetupLog { .. } => None,
         }
     }
 

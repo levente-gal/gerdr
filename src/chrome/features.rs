@@ -525,7 +525,8 @@ impl FindingTag {
     }
 }
 
-/// An AI review finding as its stage's page shows it.
+/// An AI review finding, a Verify check or a Manual test criterion, as its
+/// stage's page shows it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FindingCard {
     pub tag: FindingTag,
@@ -543,6 +544,8 @@ pub struct FindingCard {
     pub note: String,
     /// It no longer asks for anything: fixed or dismissed.
     pub faded: bool,
+    /// The note being written on it, a criterion's.
+    pub field: Option<Line>,
     /// It has the keyboard.
     pub selected: bool,
     /// The indices in `StagePage::buttons` of the buttons it holds.
@@ -720,6 +723,37 @@ pub struct FeatureTabLayout {
     pub hint_spots: Vec<(usize, Rect)>,
     /// What each column paints, indexed by `TabColumn`.
     pub(super) pieces: [Vec<(Rect, Piece)>; 3],
+}
+
+/// The note being written on a card of the tab in `frame`, where it shows,
+/// as the pointer and the selection care: `None` while it is scrolled away.
+pub fn feature_tab_field(view: &FeatureTabView, frame: Rect, scale: f64) -> Option<FieldSpot> {
+    let layout = feature_tab_layout(view, frame);
+    let col = TabColumn::Page as usize;
+    let (rect, k) = layout.pieces[col]
+        .iter()
+        .find_map(|(rect, piece)| match piece {
+            Piece::CardField(k) => Some((*rect, *k)),
+            _ => None,
+        })?;
+    let Some(PageSection::Finding(FindingCard {
+        field: Some(line), ..
+    })) = view.page.sections.get(k)
+    else {
+        return None;
+    };
+    let down = view.scroll[col].round() as i32;
+    let area = Rectangle::new((rect.loc.x, rect.loc.y - down).into(), rect.size);
+    let place = layout.columns[col]?;
+    if area.loc.y < place.loc.y || area.loc.y + area.size.h > place.loc.y + place.size.h {
+        return None;
+    }
+    Some(FieldSpot {
+        area,
+        text: field_text(area, scale),
+        size: FONT_SIZE,
+        line: line.clone(),
+    })
 }
 
 impl FeatureTabLayout {
@@ -1087,6 +1121,8 @@ pub(super) enum Piece {
     /// The frame of the finding card of `StagePage::sections[i]`, with its
     /// buttons; its text goes in pieces of its own.
     FindingCard(usize),
+    /// The note being written on the card of `StagePage::sections[i]`.
+    CardField(usize),
     /// How a check stands, on its card. It blinks when at work: see
     /// `feature_tab_blinkers`.
     CheckDot(Dot),
@@ -1534,6 +1570,12 @@ impl Stack {
                 self.y += FINDING_GAP;
                 self.all_text(text, Font::Body, body, false, BODY_LINE);
             }
+        }
+        if card.field.is_some() {
+            self.y += FINDING_GAP;
+            let rect = Rectangle::new((self.x, self.y).into(), (self.w, QUIT_BUTTON).into());
+            self.pieces.push((rect, Piece::CardField(k)));
+            self.y += QUIT_BUTTON;
         }
         let held: Vec<usize> = (card.buttons.iter().copied())
             .filter(|b| *b < page.buttons.len())
@@ -3960,6 +4002,15 @@ impl Painter {
                     }
                 }
             }
+            Piece::CardField(k) => {
+                let Some(PageSection::Finding(FindingCard {
+                    field: Some(text), ..
+                })) = view.page.sections.get(*k)
+                else {
+                    return;
+                };
+                self.field(c, text, "What went wrong", rect, true, scale, p);
+            }
             // A dot at work blinks: it is composed over the tab.
             Piece::CheckDot(dot) => status_dot(c, rect, *dot, scale, p),
             Piece::Button(i) => self.page_button(c, view, *i, rect, scale, p),
@@ -5582,6 +5633,7 @@ mod tests {
                 fix: format!("Fix: {text}"),
                 note: String::new(),
                 faded: false,
+                field: None,
                 selected: false,
                 buttons: (at..at + 4).collect(),
             }));

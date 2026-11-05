@@ -29,6 +29,7 @@
 //! Verify's page its evidence, Ctrl+R starts the stage's agent afresh,
 //! Ctrl+Shift+R shows its agent, or goes back to its chat if its tab closed,
 //! Ctrl+Shift+U sets its worktrees up (Build and Verify: copies what they lack),
+//! Ctrl+Shift+I shows what the setup runs and printed,
 //! on Manual test Ctrl+Shift+T asks which commands its sandbox runs and starts
 //! it, or stops it (see `feature_sandbox`), Ctrl+Shift+Y opens its app, Ctrl+Shift+G restarts it and
 //! Ctrl+Shift+X resets its data or removes it,
@@ -63,6 +64,8 @@ use smithay::{
     utils::{Logical, Point},
 };
 
+use crate::feature::manual::Verdict;
+use crate::manual_test::Row;
 use crate::{
     Gerdr,
     agent_icons::AgentIcon,
@@ -156,8 +159,6 @@ pub struct Features {
     /// What Build and Verify keep while gerdr runs (see `feature_build`).
     #[allow(dead_code)] // read by `feature_build` (inc 4 contract)
     pub(crate) build: crate::feature_build::BuildState,
-    /// The manual test sheet, while it is open (see `manual_test`).
-    pub(crate) manual: Option<crate::manual_test::ManualSheet>,
     /// The plan review's sheet, while it is open (see `plan_sheet`).
     pub(crate) plan_sheet: Option<crate::plan_sheet::PlanSheet>,
     /// The acceptance criteria of each open feature's brief, by project
@@ -873,12 +874,16 @@ pub struct FeaturePanel {
     pub picked_at: Option<Stage>,
     /// The repository with the keyboard while `focus` is `Repos`.
     pub repo: usize,
-    /// The card with the keyboard while `focus` is `Findings`, as
-    /// `finding_cards` has them.
+    /// The card with the keyboard while `focus` is `Findings`: a finding, a
+    /// check or a criterion, in the page's order.
     pub finding: usize,
     /// The repository (`Repo::key`) a first Del was on: a second takes it
     /// out, any other key lets it go.
     pub armed: Option<String>,
+    /// The criterion (as `FeaturePanel::finding` counts them) whose note is
+    /// being written on its card, and the note. It stays with the panel when
+    /// another tab shows.
+    pub note: Option<(usize, TextField)>,
     /// Each column's scroll, indexed by `TabColumn` (logical pixels).
     pub scroll: [Scroll; 3],
     /// The page the Page column's scroll is for: the stage, and whether
@@ -953,6 +958,8 @@ pub enum PanelOutcome {
     },
     /// Set the feature's worktrees up (again): copy what they lack.
     SetUp,
+    /// Show what the setup runs and printed.
+    SetupLog,
     /// Show the diff at AI review's first finding to decide.
     Findings,
     /// Send AI review's findings to fix to the Build agent.
@@ -983,8 +990,10 @@ pub enum PanelOutcome {
     FindingRefused(&'static str),
     /// Review the feature's diff (Code review).
     CodeReview,
-    /// Open the manual test sheet (Manual test, with criteria).
+    /// Give the keyboard to Manual test's criteria.
     ManualTest,
+    /// What a Manual test page's criteria ask.
+    Manual(crate::manual_test::Outcome),
     /// Open Plan review's suggestions, to decide them.
     PlanSuggestions,
     /// The suggestions are decided: start the final plan, or with nothing
@@ -1202,8 +1211,10 @@ pub struct RowCtx {
     /// Verify stays a mark set by hand.
     pub checks: bool,
     /// How many acceptance criteria the brief has: with some, Manual test
-    /// is marked from its sheet.
+    /// is marked from its page, by them.
     pub criteria: usize,
+    /// How far they went, on the code as last read.
+    pub manual: feature::manual::Counts,
     /// Which stages' files are there, by `stage_index`, as the latest
     /// probe found them (see `page::Docs`): an earlier stage locks by
     /// them, and the brief's and the plan's pages offer Review.
@@ -1608,12 +1619,13 @@ fn skip_action(
 }
 
 /// The buttons on `stage`'s page of `feature`, as `page_actions` has them,
-/// and what its cards of `plan`'s checks offer.
+/// and what its cards of `plan`'s checks and of `criteria` offer.
 fn stage_actions(
     feature: &Feature,
     stage: Stage,
     ctx: RowCtx,
     plan: &[PlannedCheck],
+    criteria: &[Row],
 ) -> Vec<(PageButton, PanelOutcome)> {
     let mut out = page_actions(feature, stage, ctx);
     let entries = check_entries(feature, stage, plan);
@@ -1634,7 +1646,74 @@ fn stage_actions(
                 (PageButton { label, style }, outcome)
             }),
     );
+    if tries_criteria(feature, stage) {
+        out.extend((criteria.iter().enumerate()).flat_map(|(i, row)| criterion_buttons(i, row)));
+    }
     out
+}
+
+/// Whether `stage`'s page of `feature` is where its criteria are tried:
+/// Manual test's, while the feature is at it.
+fn tries_criteria(feature: &Feature, stage: Stage) -> bool {
+    stage == Stage::ManualTest && stage_mark(feature, stage) == StageMark::Current
+}
+
+/// The buttons on criterion `i`'s card, as it stands.
+fn criterion_buttons(i: usize, row: &Row) -> Vec<(PageButton, PanelOutcome)> {
+    use crate::manual_test::Outcome;
+    let plain = |label: &str, outcome| {
+        let button = PageButton {
+            label: label.to_owned(),
+            style: ButtonStyle::Plain,
+        };
+        (button, PanelOutcome::Manual(outcome))
+    };
+    let (pass, fail, clear) = (
+        plain("Pass", Outcome::Toggle(i)),
+        plain("Fail\u{2026}", Outcome::Write(i)),
+        plain("Clear", Outcome::Clear(i)),
+    );
+    match row.found {
+        None => vec![pass, fail],
+        Some(Verdict::Pass) => vec![clear, fail],
+        Some(Verdict::Fail) => vec![clear, plain("Edit note\u{2026}", Outcome::Write(i)), pass],
+    }
+}
+
+/// Criterion `i`'s card on Manual test's page, its buttons those in
+/// `actions`: its dot tells how it went, the note what went wrong.
+fn criterion_card(i: usize, row: &Row, actions: &[(PageButton, PanelOutcome)]) -> FindingCard {
+    let tag = match row.found {
+        None => FindingTag::NotRun,
+        Some(Verdict::Pass) => FindingTag::Passed,
+        Some(Verdict::Fail) => FindingTag::Failed,
+    };
+    let state = match row.sent {
+        true => "sent to Build",
+        false => "",
+    };
+    FindingCard {
+        tag,
+        title: row.text.clone(),
+        state: state.to_owned(),
+        place: row.id.clone(),
+        body: String::new(),
+        preview: Vec::new(),
+        fix: String::new(),
+        note: match row.note.is_empty() {
+            true => String::new(),
+            false => format!("What went wrong: {}", row.note),
+        },
+        faded: tag == FindingTag::Passed,
+        field: None,
+        selected: false,
+        buttons: (actions.iter().enumerate())
+            .filter(|(_, (_, o))| {
+                matches!(o, PanelOutcome::Manual(outcome) if outcome.criterion() == Some(i))
+            })
+            .map(|(at, _)| at)
+            .collect(),
+    }
 }
 
 /// The buttons on check `i`'s card: its terminal, then stopping it while it
@@ -1746,6 +1825,7 @@ fn check_card(
         fix: String::new(),
         note: String::new(),
         faded: tag == FindingTag::Skipped,
+        field: None,
         selected: false,
         buttons: (actions.iter().enumerate())
             .filter(|(_, (_, o))| {
@@ -1843,6 +1923,7 @@ fn finding_card(
         fix,
         note,
         faded: matches!(f.state, FindingState::Fixed | FindingState::Dismissed),
+        field: None,
         selected: false,
         buttons: (actions.iter().enumerate())
             .filter(|(_, (_, o))| outcome_finding(o) == Some(f.id.as_str()))
@@ -1971,6 +2052,7 @@ fn action_hint(action: &PanelOutcome) -> &'static str {
         PanelOutcome::Continue(_) => "continue",
         PanelOutcome::RunChecks => "run checks",
         PanelOutcome::SetUp => "set up",
+        PanelOutcome::SetupLog => "show setup log",
         PanelOutcome::StartSandbox => "start sandbox\u{2026}",
         PanelOutcome::OpenSandbox => "open app",
         PanelOutcome::RestartSandbox => "restart sandbox",
@@ -1984,7 +2066,9 @@ fn action_hint(action: &PanelOutcome) -> &'static str {
         PanelOutcome::AskFixPlan => "ask again",
         PanelOutcome::EditCommands(_) => "edit commands",
         PanelOutcome::CodeReview => "review code",
-        PanelOutcome::ManualTest => "test",
+        PanelOutcome::ManualTest => "try the criteria",
+        PanelOutcome::Manual(crate::manual_test::Outcome::MarkPassed) => "mark passed",
+        PanelOutcome::Manual(crate::manual_test::Outcome::SendFailures) => "plan fixes",
         PanelOutcome::PlanSuggestions => "decide",
         PanelOutcome::WriteFinalPlan => "go on",
         PanelOutcome::Tick => "mark done",
@@ -2013,7 +2097,6 @@ fn stage_button(feature: &Feature, stage: Stage, ctx: RowCtx) -> Option<&'static
         PanelOutcome::Findings => Some("Review in diff"),
         PanelOutcome::SendFixes => Some("Plan fixes"),
         PanelOutcome::CodeReview => Some("Review code"),
-        PanelOutcome::ManualTest => Some("Test\u{2026}"),
         PanelOutcome::PlanSuggestions => Some("Decide\u{2026}"),
         PanelOutcome::WriteFinalPlan => {
             let accepted = (feature.plan_review.as_ref()).is_some_and(|r| r.any_accepted());
@@ -2439,6 +2522,7 @@ impl FeaturePanel {
         }
         let entry = entries.get(self.repo).copied();
         let armed = self.armed.take();
+        use crate::manual_test::Outcome;
         // The pick no longer holds once the feature moved on.
         if self.stage.is_some() && self.picked_at != feature.current() {
             self.unpick();
@@ -2446,7 +2530,11 @@ impl FeaturePanel {
         let stage = self.page_stage(feature);
         let cards = finding_cards(feature, stage);
         let checks = check_entries(feature, stage, plan);
-        let carded = cards.len() + checks.len();
+        let criteria = match tries_criteria(feature, stage) {
+            true => ctx.criteria,
+            false => 0,
+        };
+        let carded = cards.len() + checks.len() + criteria;
         self.finding = self.finding.min(carded.saturating_sub(1));
         if self.focus == TabArea::Findings && (carded == 0 || self.expanded) {
             self.focus = TabArea::Stages;
@@ -2534,6 +2622,33 @@ impl FeaturePanel {
                 let by = if back { stops.len() - 1 } else { 1 };
                 self.focus = stops[(at + by) % stops.len()];
             }
+            // A criterion's card with the keyboard.
+            Keysym::space | Keysym::Return | Keysym::KP_Enter
+                if bare && self.focus == TabArea::Findings && criteria > 0 =>
+            {
+                return Some(PanelOutcome::Manual(Outcome::Toggle(self.finding)));
+            }
+            Keysym::f if bare && self.focus == TabArea::Findings && criteria > 0 => {
+                return Some(PanelOutcome::Manual(Outcome::Write(self.finding)));
+            }
+            Keysym::Delete | Keysym::KP_Delete
+                if bare && self.focus == TabArea::Findings && criteria > 0 =>
+            {
+                return Some(PanelOutcome::Manual(Outcome::Clear(self.finding)));
+            }
+            // From anywhere on the page. Reopen and a fix plan's keys are
+            // for when it has one: then these are not its keys.
+            Keysym::Return | Keysym::KP_Enter
+                if ctrl
+                    && criteria > 0
+                    && self.focus != TabArea::Repos
+                    && fix_round_on(feature, stage).is_none() =>
+            {
+                return Some(PanelOutcome::Manual(match mods.shift {
+                    true => Outcome::SendFailures,
+                    false => Outcome::MarkPassed,
+                }));
+            }
             // A check's card with the keyboard.
             Keysym::Return | Keysym::KP_Enter
                 if plain && self.focus == TabArea::Findings && !checks.is_empty() =>
@@ -2613,10 +2728,17 @@ impl FeaturePanel {
             // The file's review has it too.
             Keysym::Return | Keysym::KP_Enter
                 if ctrl
-                    && self.focus == TabArea::Stages
+                    && (self.focus == TabArea::Stages
+                        || self.focus == TabArea::Findings && criteria > 0)
                     && fix_round_on(feature, stage).is_some_and(|r| r.phase == FixPhase::Ready) =>
             {
                 return Some(PanelOutcome::MakeFixes);
+            }
+            // With a fix plan under way a criterion's card has no use for it.
+            Keysym::Return | Keysym::KP_Enter
+                if ctrl && self.focus == TabArea::Findings && criteria > 0 =>
+            {
+                return None;
             }
             Keysym::Return | Keysym::KP_Enter => {
                 if self.focus == TabArea::Stages {
@@ -2662,6 +2784,9 @@ impl FeaturePanel {
             Keysym::l | Keysym::L if ctrl && mods.shift => self.toggle_repos(),
             Keysym::u | Keysym::U if ctrl && mods.shift && offers_setup(feature, stage) => {
                 return Some(PanelOutcome::SetUp);
+            }
+            Keysym::i | Keysym::I if ctrl && mods.shift && offers_setup_log(feature, stage) => {
+                return Some(PanelOutcome::SetupLog);
             }
             Keysym::e | Keysym::E
                 if ctrl
@@ -2915,6 +3040,25 @@ pub fn page_actions(
         };
         out.push((button(label, style), main));
     }
+    if tries_criteria(feature, stage) && ctx.criteria > 0 {
+        use crate::manual_test::Outcome;
+        // What the fix plan or Build waits for comes first.
+        let free = back != Some(Rework::Waits) && round.is_none();
+        let style = |next: bool| match free && next {
+            true => ButtonStyle::Primary,
+            false => ButtonStyle::Plain,
+        };
+        if ctx.manual.failed > ctx.manual.sent {
+            out.push((
+                button("Plan fixes", style(true)),
+                PanelOutcome::Manual(Outcome::SendFailures),
+            ));
+        }
+        out.push((
+            button("Mark passed", style(ctx.manual.passed == ctx.criteria)),
+            PanelOutcome::Manual(Outcome::MarkPassed),
+        ));
+    }
     let has =
         |out: &[(PageButton, PanelOutcome)], o: &PanelOutcome| out.iter().any(|(_, x)| x == o);
     // Also on a done stage: its agent's chat is still worth reading.
@@ -2972,6 +3116,12 @@ pub fn page_actions(
         let ran = (feature.setup.as_ref()).is_some_and(|run| run.finished.is_some());
         let label = if ran { "Set up again" } else { "Set up" };
         out.push((button(label, ButtonStyle::Quiet), PanelOutcome::SetUp));
+        if offers_setup_log(feature, stage) {
+            out.push((
+                button("Setup log", ButtonStyle::Quiet),
+                PanelOutcome::SetupLog,
+            ));
+        }
         // It matters once Verify has nothing to run.
         let wanted = stage == Stage::Verify && mark == StageMark::Current && !ctx.checks;
         let style = match wanted {
@@ -3104,6 +3254,12 @@ fn offers_setup(feature: &Feature, stage: Stage) -> bool {
         && stage_mark(feature, stage) != StageMark::Later
 }
 
+/// Whether `stage`'s page of `feature` offers what its setup runs and printed:
+/// once one started.
+fn offers_setup_log(feature: &Feature, stage: Stage) -> bool {
+    offers_setup(feature, stage) && feature.setup.is_some()
+}
+
 /// The name of the feature tab's header button `i`: `FEATURE_BUTTONS`,
 /// then `remove`.
 fn header_label(remove: &'static str, i: usize) -> Option<&'static str> {
@@ -3228,7 +3384,6 @@ impl Gerdr {
             let title = feature.title.clone();
             self.show_error(format!("Couldn't save \u{201c}{title}\u{201d}: {err}"));
         }
-        self.manual_sheet_follows();
         self.plan_sheet_follows();
     }
 
@@ -3630,6 +3785,7 @@ impl Gerdr {
         let checks = !feature::verify::checks(feature, &config).is_empty();
         let all_skipped = !checks && !feature::verify::skipped(feature, &config).is_empty();
         let criteria = self.criteria(&feature.project, &feature.slug).len();
+        let manual = self.manual_counts(feature).unwrap_or_default();
         let key = (feature.project.clone(), feature.slug.clone());
         let docs = (self.features.probes.get(&key))
             .and_then(|p| p.last.as_ref())
@@ -3638,6 +3794,7 @@ impl Gerdr {
         RowCtx {
             checks,
             criteria,
+            manual,
             written,
             fixing: self.build_agent_fixing(feature),
             sandbox_busy: (self.features.build.sandbox_stops)
@@ -3780,7 +3937,6 @@ impl Gerdr {
 
     /// Probe what is due.
     fn feature_watch_tick(&mut self) {
-        self.manual_sheet_follows();
         self.plan_sheet_follows();
         let mut due = Vec::new();
         if let Some(panel) = &self.features.panel {
@@ -3789,10 +3945,6 @@ impl Gerdr {
         // A file's tab says whether its stage is locked by now.
         if let Some(doc) = (self.tab().and_then(|t| t.review())).and_then(|r| r.wd.doc.as_ref()) {
             due.push((doc.project.clone(), doc.slug.clone(), PANEL_EVERY));
-        }
-        // The sheet's results count on the code as it is now.
-        if let Some(sheet) = &self.features.manual {
-            due.push((sheet.project.clone(), sheet.slug.clone(), PANEL_EVERY));
         }
         for (project, all) in &self.features.all {
             for feature in all.iter().filter(|f| watched(f)) {
@@ -3949,7 +4101,7 @@ impl Gerdr {
     }
 
     /// The criteria of feature `slug` are as last read from its brief, on
-    /// its code (`patch`'s): Manual test, passed on its sheet, is to do
+    /// its code (`patch`'s): Manual test, passed on its page, is to do
     /// again when one of them was added or reworded since, and the toast
     /// says so. A Manual test ticked plainly (no results kept) stays.
     fn feature_criteria_are(&mut self, project: &str, slug: &str, patch: &str) {
@@ -4955,7 +5107,7 @@ impl Gerdr {
     /// Open the feature panel on feature `slug` of `project` on `stage`'s
     /// page. AI review with findings to decide shows
     /// the diff at the first instead, and Code review the diff, as their
-    /// rows' Enter does; Manual test with criteria opens its sheet over it.
+    /// rows' Enter does; Manual test with criteria has the keyboard on them.
     pub fn open_feature_at(&mut self, project: &str, slug: &str, stage: Stage) {
         let current = self
             .feature(project, slug)
@@ -4984,15 +5136,11 @@ impl Gerdr {
         if deciding {
             self.open_plan_sheet(project, slug);
         }
-        // Manual test with criteria opens its sheet over the panel.
         let testing = stage == Stage::ManualTest
             && self
                 .feature(project, slug)
                 .is_some_and(|f| f.status == Status::Open && f.current() == Some(stage))
             && !self.criteria(project, slug).is_empty();
-        if testing {
-            self.open_manual_test(project, slug);
-        }
         let Some(feature) = self.panel_feature().cloned() else {
             return;
         };
@@ -5003,11 +5151,14 @@ impl Gerdr {
             panel.pick(&feature, stage);
         }
         self.sync_feature_page();
+        if testing {
+            self.focus_criteria(project, slug);
+        }
     }
 
     /// Hold the feature tab's Page scroll for the page it shows now (see
     /// `FeaturePanel::sync_page`).
-    fn sync_feature_page(&mut self) {
+    pub(crate) fn sync_feature_page(&mut self) {
         let Some(panel) = self.features.panel.as_ref() else {
             return;
         };
@@ -5031,7 +5182,11 @@ impl Gerdr {
         &mut self,
         mods: &ModifiersState,
         sym: Keysym,
+        typed: Keysym,
     ) -> Option<PanelOutcome> {
+        if self.criterion_note_key(mods, sym, typed) {
+            return None;
+        }
         let plain = !(mods.ctrl || mods.shift || mods.alt || mods.logo);
         let page = match sym {
             Keysym::Page_Up | Keysym::KP_Page_Up if plain => Some(-1.0),
@@ -5134,7 +5289,7 @@ impl Gerdr {
 
     /// Scroll the feature tab's page to show the finding with the keyboard,
     /// as laid out now.
-    fn reveal_feature_finding(&mut self) {
+    pub(crate) fn reveal_feature_finding(&mut self) {
         let Some((_, layout)) = self.feature_tab_parts() else {
             return;
         };
@@ -5185,6 +5340,7 @@ impl Gerdr {
             },
             PanelOutcome::Ship => self.ask_ship_feature(&project, &slug),
             PanelOutcome::SetUp => self.set_up_again(&project, &slug),
+            PanelOutcome::SetupLog => self.open_setup_log(&project, &slug),
             PanelOutcome::StartSandbox => self.ask_start_sandbox(&project, &slug),
             PanelOutcome::OpenSandbox => self.open_sandbox_app(&project, &slug),
             PanelOutcome::RestartSandbox => {
@@ -5258,7 +5414,8 @@ impl Gerdr {
             }
             PanelOutcome::FindingRefused(why) => self.show_warning(why.to_owned()),
             PanelOutcome::CodeReview => self.open_feature_diff(&project, &slug, None),
-            PanelOutcome::ManualTest => self.open_manual_test(&project, &slug),
+            PanelOutcome::ManualTest => self.focus_criteria(&project, &slug),
+            PanelOutcome::Manual(outcome) => self.apply_manual_test(outcome),
             PanelOutcome::PlanSuggestions => self.open_plan_sheet(&project, &slug),
             PanelOutcome::WriteFinalPlan => self.write_final_plan(&project, &slug),
             PanelOutcome::SkipPlanReview => self.ask_skip_plan_review(&project, &slug),
@@ -6079,6 +6236,7 @@ impl Gerdr {
     /// A left click in the feature tab: a stage's node shows its page, a
     /// repository takes the keyboard, a button does what it says.
     pub fn feature_panel_click(&mut self, pos: Point<f64, Logical>) {
+        use crate::manual_test::Outcome;
         let Some(feature) = self.panel_feature().cloned() else {
             return;
         };
@@ -6186,7 +6344,8 @@ impl Gerdr {
                     .map(|p| p.page_stage(&feature));
                 stage.and_then(|stage| {
                     let plan = self.planned_checks(&feature);
-                    let mut actions = stage_actions(&feature, stage, ctx, &plan);
+                    let rows = self.criterion_rows(&feature);
+                    let mut actions = stage_actions(&feature, stage, ctx, &plan, &rows);
                     (i < actions.len()).then(|| actions.swap_remove(i).1)
                 })
             }
@@ -6196,6 +6355,28 @@ impl Gerdr {
             FeatureTabHit::Button(_) => Some(PanelOutcome::Remove),
         };
         self.sync_feature_page();
+        // A note being written: a click in it goes on writing, as does its own
+        // card's button; one anywhere else keeps it first, and if it can't be
+        // kept yet it waits.
+        if self.writing_criterion_note() {
+            let spot = self.feature_tab_view().and_then(|view| {
+                chrome::feature_tab_field(&view, self.content_rect(), self.scale())
+            });
+            let in_it = spot.is_some_and(|field| field.area.to_f64().contains(pos));
+            let at = (self.features.panel.as_ref()).and_then(|p| p.note.as_ref().map(|n| n.0));
+            let own = matches!((&outcome, at),
+                (Some(PanelOutcome::Manual(Outcome::Write(i))), Some(at)) if *i == at);
+            let picked = (self.features.panel.as_ref()).map(|p| p.finding);
+            if in_it || own || !self.keep_criterion_note() {
+                return;
+            }
+            // Keeping it selects its card: the click was for another.
+            if let Some(panel) = self.features.panel.as_mut()
+                && matches!(hit, FeatureTabHit::Finding(_))
+            {
+                panel.finding = picked.unwrap_or(panel.finding);
+            }
+        }
         if let Some(outcome) = outcome {
             self.apply_feature_panel(outcome);
         }
@@ -6438,6 +6619,7 @@ impl Gerdr {
                 .model_slot_of(&panel.project, &panel.slug, panel.page_stage(feature))
                 .map(|slot| model_label(slot.picked.as_deref())),
             manual: manual_counts.map(crate::manual_test::counts_text),
+            criteria: self.criterion_rows(feature),
             manual_gate: manual_counts.map(manual_gate),
         };
         Some(tab_view(panel, feature, &slugs, &state, now))
@@ -6552,12 +6734,19 @@ fn task_of(busy: &Busy, title: Option<&str>, project: &str) -> Task {
         }
         _ => project.to_owned(),
     };
+    let actions = match busy.job {
+        Job::Setup => vec![(
+            "Log",
+            MenuAction::SetupLog(busy.project.clone(), busy.slug.clone()),
+        )],
+        _ => Vec::new(),
+    };
     Task {
         title: busy.what.clone(),
         chip: chip.into(),
         detail,
         dot: Dot::Working,
-        actions: Vec::new(),
+        actions,
     }
 }
 
@@ -6866,6 +7055,8 @@ struct PanelState<'a> {
     /// How many of Manual test's criteria passed, of how many (see
     /// `feature_agents::gate_of`).
     manual_gate: Option<(u32, u32)>,
+    /// Manual test's criteria, as their cards show them.
+    criteria: Vec<Row>,
     /// The chips to pick the agent of the stage on the page with (see
     /// `feature_agents::stage_chips`).
     picks: Vec<AgentChip>,
@@ -7578,6 +7769,13 @@ fn sandbox_sections(feature: &Feature, state: &PanelState) -> Vec<PageSection> {
         let text = format!("can reach real services: {}", run.outward.join(", "));
         out.push(line(text, CheckTone::Blocker));
     }
+    if !run.out_of_reach.is_empty() {
+        let text = format!(
+            "can't reach what runs outside its project: {}",
+            run.out_of_reach.join(", ")
+        );
+        out.push(line(text, CheckTone::Blocker));
+    }
     for name in &run.not_copied {
         let text = format!("not copied: {name}, which compose didn't start");
         out.push(line(text, CheckTone::Blocker));
@@ -7868,9 +8066,27 @@ fn stage_page(
                 sections.push(lines("Files", vec![line(text, CheckTone::Note)]));
             }
             Stage::ManualTest if mark == StageMark::Current => {
-                let text = (state.manual.clone())
-                    .unwrap_or_else(|| "no criteria in the brief: Mark done by hand".into());
-                sections.push(lines("Criteria", vec![line(text, CheckTone::Note)]));
+                if state.criteria.is_empty() {
+                    let text = "no criteria in the brief: Mark done by hand";
+                    sections.push(lines("Criteria", vec![line(text, CheckTone::Note)]));
+                } else {
+                    // Its status says how far they went; this, what holds it up.
+                    let said = match state.probe.map(|p| &p.reading) {
+                        None => Some("reading the code".to_owned()),
+                        Some(Ok(reading)) if !reading.dirty.is_empty() => Some(format!(
+                            "uncommitted changes in {}",
+                            reading.dirty.join(", ")
+                        )),
+                        Some(_) => None,
+                    };
+                    let said = said.map(|text| line(text, CheckTone::Note));
+                    sections.push(lines("Criteria", said.into_iter().collect()));
+                    sections.extend(
+                        (state.criteria.iter().enumerate())
+                            .map(|(i, row)| criterion_card(i, row, actions))
+                            .map(PageSection::Finding),
+                    );
+                }
                 sections.extend(sandbox_sections(feature, state));
             }
             Stage::Ship => {
@@ -7967,7 +8183,7 @@ fn activity(feature: &Feature, now: u64) -> Vec<ActivityRow> {
 
 /// Every key the feature tab takes, by where it works, as F1 lists them:
 /// (heading, [(keys, what they do)]).
-const TAB_KEYS: [(&str, &[(&str, &str)]); 4] = [
+const TAB_KEYS: [(&str, &[(&str, &str)]); 5] = [
     (
         "Stages",
         &[
@@ -8002,6 +8218,10 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 4] = [
                 "copy what the worktrees lack: Build and Verify",
             ),
             (
+                "Ctrl+Shift+I",
+                "what the setup runs and printed: Build and Verify",
+            ),
+            (
                 "Ctrl+E",
                 "edit the project's commands: Build, Verify, Manual test",
             ),
@@ -8022,6 +8242,22 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 4] = [
             ),
             ("Ctrl+Shift+K", "skip Plan review"),
             ("Ctrl+Shift+D", "change the decisions on a final plan"),
+        ],
+    ),
+    (
+        "Manual test's criteria",
+        &[
+            (
+                "Tab",
+                "to the criteria; Enter on the page goes to the first not tried",
+            ),
+            ("Up / Down", "previous or next criterion"),
+            ("Home / End", "first or last criterion"),
+            ("Space / Enter", "mark it passed, or not"),
+            ("f", "mark it failed, saying what went wrong"),
+            ("Del", "clear its result"),
+            ("Ctrl+Enter", "mark Manual test passed"),
+            ("Ctrl+Shift+Enter", "plan the fixes of the failures"),
         ],
     ),
     (
@@ -8057,7 +8293,10 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 4] = [
     (
         "Anywhere on the tab",
         &[
-            ("Tab / Shift+Tab", "stages, findings or repositories"),
+            (
+                "Tab / Shift+Tab",
+                "stages, findings, checks, criteria or repositories",
+            ),
             ("PgUp / PgDn", "scroll the page"),
             ("Ctrl+PgUp / Ctrl+PgDn", "previous or next feature"),
             ("Ctrl+O", "open a tab in the feature's folder"),
@@ -8117,6 +8356,13 @@ fn tab_hints(
     if panel.keys {
         return vec![hint("Esc", "back to the page"), hint("F1", "hide the keys")];
     }
+    if let Some((_, field)) = &panel.note {
+        let esc = match field.trim().is_empty() {
+            true => "cancel",
+            false => "save",
+        };
+        return vec![hint("Enter", "save"), hint("Esc", esc)];
+    }
     let mut hints = Vec::new();
     let entries = repo_entries(feature, &panel.sources, panel.expanded);
     let repos = !entries.is_empty();
@@ -8165,6 +8411,17 @@ fn tab_hints(
                     hint("Del", "remove repository")
                 });
             }
+        }
+        TabArea::Findings if tries_criteria(feature, stage) && ctx.criteria > 0 => {
+            hints.push(hint("Up / Down", "criterion"));
+            hints.push(hint("Space", "pass"));
+            hints.push(hint("f", "fail\u{2026}"));
+            hints.push(hint("Del", "clear"));
+            if fix_round_on(feature, stage).is_none() {
+                hints.push(hint("Ctrl+Enter", "mark passed"));
+                hints.push(hint("Ctrl+Shift+Enter", "plan fixes"));
+            }
+            hints.push(hint("Tab", if repos { "repositories" } else { "stages" }));
         }
         TabArea::Findings if !check_entries(feature, stage, plan).is_empty() => {
             let entries = check_entries(feature, stage, plan);
@@ -8254,6 +8511,8 @@ fn tab_hints(
                 hints.push(hint("Tab", "findings"));
             } else if !check_entries(feature, stage, plan).is_empty() && !panel.expanded {
                 hints.push(hint("Tab", "checks"));
+            } else if tries_criteria(feature, stage) && ctx.criteria > 0 && !panel.expanded {
+                hints.push(hint("Tab", "criteria"));
             } else if repos {
                 hints.push(hint("Tab", "repositories"));
             }
@@ -8262,6 +8521,9 @@ fn tab_hints(
             }
             if offers_setup(feature, stage) {
                 hints.push(hint("Ctrl+Shift+U", "set up"));
+                if offers_setup_log(feature, stage) {
+                    hints.push(hint("Ctrl+Shift+I", "setup log"));
+                }
                 hints.push(hint("Ctrl+E", "edit commands"));
             }
             if offers_sandbox(feature, stage) {
@@ -8468,7 +8730,7 @@ fn tab_view(
             feature,
             stage,
             state,
-            &stage_actions(feature, stage, state.ctx, &state.plan),
+            &stage_actions(feature, stage, state.ctx, &state.plan, &state.criteria),
             now,
         ),
     };
@@ -8479,6 +8741,23 @@ fn tab_view(
         });
         if let Some(card) = cards.into_iter().nth(panel.finding) {
             card.selected = true;
+        }
+    }
+    // The note being written, on its card in place of the one saved.
+    if let Some((i, field)) = panel
+        .note
+        .as_ref()
+        .filter(|_| !panel.keys && !panel.expanded)
+    {
+        let card = (page.sections.iter_mut())
+            .filter_map(|s| match s {
+                PageSection::Finding(card) => Some(card),
+                _ => None,
+            })
+            .nth(*i);
+        if let Some(card) = card.filter(|_| tries_criteria(feature, stage)) {
+            card.field = Some(field.line());
+            card.note = String::new();
         }
     }
     // A finished feature's code isn't read (`ship::probe_finished`).
@@ -11273,7 +11552,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn manual_test_opens_its_sheet_when_the_brief_has_criteria() {
+    fn manual_test_goes_by_its_criteria_when_the_brief_has_some() {
         let f = feature("m", vec![repo("api", true)], 7);
         assert_eq!(f.current(), Some(Stage::ManualTest));
         let row = PanelRow::Stage(Stage::ManualTest);
@@ -11286,11 +11565,9 @@ pub(crate) mod tests {
             ..RowCtx::default()
         };
         assert_eq!(row_action(&f, row, some), Some(PanelOutcome::ManualTest));
-        assert_eq!(row_hint(&f, row, some), "test");
-        assert_eq!(
-            stage_button(&f, Stage::ManualTest, some),
-            Some("Test\u{2026}")
-        );
+        assert_eq!(row_hint(&f, row, some), "try the criteria");
+        // Their cards are the way in: no button leads there.
+        assert_eq!(stage_button(&f, Stage::ManualTest, some), None);
         let state = PanelState {
             ctx: some,
             manual: Some("2 of 3 criteria passed \u{b7} 1 failed".into()),
@@ -11307,7 +11584,150 @@ pub(crate) mod tests {
             (NodeMark::Waiting, "2 of 3 passed")
         );
         let actions = page_actions(&f, Stage::ManualTest, some);
-        assert_eq!(actions[0].0.label, "Test\u{2026}");
+        assert_eq!(actions[0].0.label, "Mark passed");
+        assert_eq!(actions[0].0.style, ButtonStyle::Plain);
+    }
+
+    #[test]
+    fn manual_tests_buttons_press_what_comes_next() {
+        use crate::{feature::manual::Counts, manual_test::Outcome};
+        let f = feature("m", vec![repo("api", true)], 7);
+        let ctx = |passed, failed, sent, untested| RowCtx {
+            criteria: 3,
+            manual: Counts {
+                passed,
+                failed,
+                sent,
+                untested,
+            },
+            ..RowCtx::default()
+        };
+        let enter = |ctx| page_enter(&f, Stage::ManualTest, ctx);
+        // Nothing tried: Enter goes to the criteria.
+        assert_eq!(enter(ctx(0, 0, 0, 3)), Some(PanelOutcome::ManualTest));
+        // A failure not sent: its fixes come next.
+        assert_eq!(
+            enter(ctx(2, 1, 0, 0)),
+            Some(PanelOutcome::Manual(Outcome::SendFailures))
+        );
+        // All sent: nothing to send, back to the criteria.
+        let labels = |ctx| -> Vec<String> {
+            (page_actions(&f, Stage::ManualTest, ctx).into_iter())
+                .map(|(b, _)| b.label)
+                .collect()
+        };
+        assert!(!labels(ctx(2, 1, 1, 0)).contains(&"Plan fixes".to_owned()));
+        assert_eq!(enter(ctx(2, 1, 1, 0)), Some(PanelOutcome::ManualTest));
+        // All passed: it can be marked.
+        assert_eq!(
+            enter(ctx(3, 0, 0, 0)),
+            Some(PanelOutcome::Manual(Outcome::MarkPassed))
+        );
+    }
+
+    #[test]
+    fn a_criterions_card_holds_its_keys_and_buttons() {
+        use crate::{chrome::FindingTag, manual_test::Outcome};
+        let f = feature("m", vec![repo("api", true)], 7);
+        let row = |found, note: &str| Row {
+            id: "AC-1".into(),
+            text: "Given a, when b, then c".into(),
+            found,
+            note: note.into(),
+            sent: false,
+        };
+        let rows = vec![
+            row(None, ""),
+            row(Some(Verdict::Pass), ""),
+            row(Some(Verdict::Fail), "it broke"),
+        ];
+        let ctx = RowCtx {
+            criteria: 3,
+            ..RowCtx::default()
+        };
+        let state = PanelState {
+            ctx,
+            criteria: rows.clone(),
+            ..PanelState::default()
+        };
+        let actions = stage_actions(&f, Stage::ManualTest, ctx, &[], &rows);
+        let page = stage_page(&f, Stage::ManualTest, &state, &actions, 2_060);
+        // Under the label, in their order.
+        assert!(matches!(
+            &page.sections[0],
+            PageSection::Lines { label, .. } if label == "Criteria"
+        ));
+        let cards: Vec<&FindingCard> = (page.sections.iter())
+            .filter_map(|s| match s {
+                PageSection::Finding(card) => Some(card),
+                _ => None,
+            })
+            .collect();
+        let tags: Vec<FindingTag> = cards.iter().map(|c| c.tag).collect();
+        assert_eq!(
+            tags,
+            [FindingTag::NotRun, FindingTag::Passed, FindingTag::Failed]
+        );
+        assert_eq!(cards[2].note, "What went wrong: it broke");
+        let labels = |card: &FindingCard| -> Vec<String> {
+            let labels = card.buttons.iter();
+            labels.map(|b| page.buttons[*b].label.clone()).collect()
+        };
+        assert_eq!(labels(cards[0]), ["Pass", "Fail\u{2026}"]);
+        assert_eq!(labels(cards[1]), ["Clear", "Fail\u{2026}"]);
+        assert_eq!(labels(cards[2]), ["Clear", "Edit note\u{2026}", "Pass"]);
+        // Not on another stage's page, nor once done.
+        assert!(
+            stage_actions(&f, Stage::Build, ctx, &[], &rows)
+                .iter()
+                .all(|(_, o)| !matches!(o, PanelOutcome::Manual(Outcome::Toggle(_))))
+        );
+        // The keys, with Tab to get there.
+        let mut panel = FeaturePanel {
+            project: "acme".into(),
+            slug: "m".into(),
+            ..FeaturePanel::default()
+        };
+        let slugs = vec!["m".to_owned()];
+        let go = |panel: &mut FeaturePanel, (mods, sym): (ModifiersState, Keysym)| {
+            panel.key(&mods, sym, &f, &slugs, ctx, &[])
+        };
+        assert_eq!(go(&mut panel, key(Keysym::space)), None);
+        assert_eq!(go(&mut panel, key(Keysym::Tab)), None);
+        assert_eq!(panel.focus, TabArea::Findings);
+        assert_eq!(go(&mut panel, key(Keysym::Down)), None);
+        assert_eq!(panel.finding, 1);
+        let on = |o| Some(PanelOutcome::Manual(o));
+        assert_eq!(go(&mut panel, key(Keysym::space)), on(Outcome::Toggle(1)));
+        assert_eq!(go(&mut panel, key(Keysym::Return)), on(Outcome::Toggle(1)));
+        assert_eq!(go(&mut panel, key(Keysym::f)), on(Outcome::Write(1)));
+        assert_eq!(go(&mut panel, key(Keysym::Delete)), on(Outcome::Clear(1)));
+        let ctrl = ModifiersState {
+            ctrl: true,
+            ..ModifiersState::default()
+        };
+        let both = ModifiersState {
+            shift: true,
+            ..ctrl
+        };
+        assert_eq!(
+            go(&mut panel, (ctrl, Keysym::Return)),
+            on(Outcome::MarkPassed)
+        );
+        assert_eq!(
+            go(&mut panel, (both, Keysym::Return)),
+            on(Outcome::SendFailures)
+        );
+        // Writing a note, the footer has only its keys.
+        panel.note = Some((1, TextField::default()));
+        let hints = tab_hints(&panel, &f, Stage::ManualTest, &slugs, ctx, &[], &[]);
+        assert_eq!(
+            hints,
+            [
+                ("Enter".to_owned(), "save".to_owned()),
+                ("Esc".to_owned(), "cancel".to_owned())
+            ]
+        );
     }
 
     #[test]
@@ -11657,9 +12077,13 @@ pub(crate) mod tests {
             on.map(|(b, _)| (b.label.clone(), b.style))
         };
         assert_eq!(setup(&f), Some(("Set up".into(), ButtonStyle::Quiet)));
+        // Its log, once one started.
+        assert!(!offers_setup_log(&f, Stage::Verify));
         // Cut short by gerdr quitting: not run, as far as the button goes.
         f.setup = Some(feature::setup::SetupRun::default());
         assert_eq!(setup(&f).unwrap().0, "Set up");
+        assert!(offers_setup_log(&f, Stage::Verify));
+        assert!(!offers_setup_log(&f, Stage::AiReview));
         f.setup = Some(feature::setup::SetupRun {
             finished: Some(2),
             ..Default::default()
@@ -11779,6 +12203,7 @@ pub(crate) mod tests {
             copied: vec!["docker_pgdata".into()],
             fresh: vec!["redis".into()],
             outward: vec!["EMAIL_HOST".into()],
+            out_of_reach: vec!["DATABASE_URL (docker-db-1, port 5433)".into()],
             forwards: vec![feature::sandbox::Forward {
                 service: "db".into(),
                 main_port: 5433,
@@ -11795,6 +12220,7 @@ pub(crate) mod tests {
             "copied docker_pgdata",
             "redis started empty",
             "can reach real services: EMAIL_HOST",
+            "can't reach what runs outside its project: DATABASE_URL (docker-db-1, port 5433)",
             "shared with main",
         ] {
             assert!(said.contains(part), "{part} not in {said}");
@@ -12319,7 +12745,7 @@ pub(crate) mod tests {
             plan,
             ..PanelState::default()
         };
-        let actions = stage_actions(f, Stage::Verify, state.ctx, &state.plan);
+        let actions = stage_actions(f, Stage::Verify, state.ctx, &state.plan, &[]);
         let sections = verify_sections(f, &state, &actions, 2_000);
         let mut heading = String::new();
         let mut cards = Vec::new();
@@ -12374,7 +12800,7 @@ pub(crate) mod tests {
             plan,
             ..PanelState::default()
         };
-        let actions = stage_actions(&early, Stage::Verify, state.ctx, &state.plan);
+        let actions = stage_actions(&early, Stage::Verify, state.ctx, &state.plan, &[]);
         assert!(actions.is_empty());
         let page = stage_page(&early, Stage::Verify, &state, &actions, 2_000);
         let shown = (page.sections.iter())
@@ -12419,7 +12845,7 @@ pub(crate) mod tests {
         let plan = vec![planned("lint", true, false), planned("test", false, true)];
         let (heading, cards) = verify_page(&f, plan.clone());
         assert_eq!(heading, "Checks \u{b7} 1 failed \u{b7} 1 skipped");
-        let actions = stage_actions(&f, Stage::Verify, RowCtx::default(), &plan);
+        let actions = stage_actions(&f, Stage::Verify, RowCtx::default(), &plan, &[]);
         let held = |card: &FindingCard| -> Vec<String> {
             (card.buttons.iter())
                 .map(|i| actions[*i].0.label.clone())
