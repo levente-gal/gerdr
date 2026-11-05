@@ -2097,15 +2097,8 @@ impl Gerdr {
             .herdr_record(&pane.workspace_id)
             .map(|r| r.venv.clone())
             .unwrap_or_default();
-        let prep = prepare::Prep {
-            pane_id: pane.pane_id.clone(),
-            pane_cwd: pane.cwd.clone().unwrap_or_else(|| dir.clone()),
-            ws_dir: dir,
-            venv,
-            captured_env: Vec::new(),
-            cd: run.as_ref().map(|(cd, _)| cd.clone()),
-            command: run.and_then(|(_, command)| command),
-        };
+        let opened_in = pane.cwd.clone().unwrap_or_else(|| dir.clone());
+        let prep = prepare::Prep::new_pane(pane.pane_id.clone(), opened_in, dir, venv, run);
         prepare::spawn_prepare(socket, vec![prep]);
         Some(pane)
     }
