@@ -305,6 +305,18 @@ fn setup_failed_text(title: &str, why: &str) -> String {
     )
 }
 
+/// What a setup that ended well says it did, in words for a toast: a command
+/// that ran counts even when it changed nothing.
+fn setup_done_text(title: &str, report: &setup::Report) -> String {
+    let what = match report.ran.len() {
+        0 if report.copied.is_empty() => ": nothing was missing".to_owned(),
+        0 => String::new(),
+        1 => ": ran 1 command".to_owned(),
+        n => format!(": ran {n} commands"),
+    };
+    format!("\u{201c}{title}\u{201d} is set up{what}")
+}
+
 impl Gerdr {
     // ------------------------------------------------------------ setup
 
@@ -350,8 +362,8 @@ impl Gerdr {
         self.start_setup_of(project, slug, None)
     }
 
-    /// The user asks to set feature `slug` up again: it fills in what is
-    /// missing. It says so when it can't start.
+    /// The user asks to set feature `slug` up again: it copies what is
+    /// missing and runs the commands. It says so when it can't start.
     pub(crate) fn set_up_again(&mut self, project: &str, slug: &str) {
         if self.start_setup(project, slug) {
             return;
@@ -461,6 +473,7 @@ impl Gerdr {
         run.failed = report.failed.clone();
         run.copied = report.copied.clone();
         run.not_copied = report.not_copied.clone();
+        run.ran = report.ran.clone();
         match &report.failed {
             None => feature.log(now, "Set up"),
             Some(why) => feature.log(now, format!("Setup failed: {why}")),
@@ -472,13 +485,8 @@ impl Gerdr {
             self.show_warning(text);
         }
         match &report.failed {
-            None if report.not_copied.is_empty() && report.copied.is_empty() => {
-                self.show_success(format!(
-                    "\u{201c}{title}\u{201d} is set up: nothing was missing"
-                ));
-            }
             None if report.not_copied.is_empty() => {
-                self.show_success(format!("\u{201c}{title}\u{201d} is set up"));
+                self.show_success(setup_done_text(&title, &report));
             }
             None => {}
             Some(why) => {
@@ -1105,6 +1113,27 @@ mod tests {
         feature::Mark,
         features::tests::{feature, repo},
     };
+
+    #[test]
+    fn a_setup_says_it_ran_its_commands_even_when_nothing_was_copied() {
+        let text = |copied: &[&str], ran: &[&str]| {
+            let list = |l: &[&str]| l.iter().map(|s| s.to_string()).collect();
+            let report = setup::Report {
+                copied: list(copied),
+                ran: list(ran),
+                ..setup::Report::default()
+            };
+            setup_done_text("T", &report)
+        };
+        let t = "\u{201c}T\u{201d} is set up";
+        assert_eq!(text(&[], &[]), format!("{t}: nothing was missing"));
+        assert_eq!(text(&["api: .env"], &[]), t);
+        assert_eq!(text(&[], &["api: true"]), format!("{t}: ran 1 command"));
+        assert_eq!(
+            text(&["api: .env"], &["api: true", "api: false"]),
+            format!("{t}: ran 2 commands")
+        );
+    }
 
     #[test]
     fn the_setup_runs_first_when_it_never_ended_or_failed_on_a_fresh_start() {

@@ -12,7 +12,7 @@
 //! - the paths the project's store file adds (`"workflow": {"copy":
 //!   {"aft-backend": [".elasticbeanstalk"]}}`), however large.
 //!
-//! Nothing there already is overwritten, so a setup run again fills in only
+//! Nothing there already is overwritten, so a setup run again copies only
 //! what is missing, and a copy doesn't follow later edits in main. A copy
 //! that would show as a change in the worktree goes again (`git status`): a
 //! file the feature's branch doesn't ignore must not fail Verify.
@@ -22,7 +22,7 @@
 //! main's code, so tests would pass on the wrong code. `repoint` makes the
 //! copy name the worktree instead.
 //!
-//! Then the repository's commands from the store file run
+//! Then the repository's commands from the store file run, every time
 //! (`"workflow": {"setup": {"services-api": ["npm ci"]}}`), in its worktree.
 //! Every command runs with `sh -c`, on the Node and venv a new terminal
 //! there gets (`prepare::background_command`), stdin closed, its output
@@ -93,6 +93,9 @@ pub struct SetupRun {
     /// What it couldn't copy, a line each: "api: .venv (exited with 1)".
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub not_copied: Vec<String>,
+    /// The commands that passed, a line each: "api: npm ci".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ran: Vec<String>,
 }
 
 /// What a setup did.
@@ -104,6 +107,8 @@ pub struct Report {
     pub not_copied: Vec<String>,
     /// As in `SetupRun::failed`.
     pub failed: Option<String>,
+    /// As in `SetupRun::ran`.
+    pub ran: Vec<String>,
 }
 
 /// Lines each project's store file gives, by repository name: the
@@ -458,6 +463,7 @@ fn run_into(
             if !exit.passed() {
                 return Err(format!("{name}: `{command}` {}", exit.describe()));
             }
+            report.ran.push(format!("{name}: {command}"));
         }
     }
     Ok(())
@@ -713,6 +719,13 @@ mod tests {
         assert_eq!(
             report.failed.as_deref(),
             Some("web: `exit 3` exited with 3")
+        );
+        assert_eq!(
+            report.ran,
+            [
+                "api: echo $GERDR_FEATURE > slug",
+                "api: echo out; echo err >&2",
+            ]
         );
         assert_eq!(
             said,
