@@ -59,6 +59,30 @@ pub struct Prep {
     pub command: Option<String>,
 }
 
+impl Prep {
+    /// What to do in the brand new pane `pane_id`, opened in `opened_in`.
+    /// `run` is the folder its line moves to and what it runs there: its venv
+    /// and Node are that folder's, as a repository can be below the workspace's.
+    pub fn new_pane(
+        pane_id: String,
+        opened_in: PathBuf,
+        ws_dir: PathBuf,
+        venv: VenvSetting,
+        run: Option<(PathBuf, Option<String>)>,
+    ) -> Self {
+        let (cd, command) = run.unzip();
+        Self {
+            pane_id,
+            pane_cwd: cd.clone().unwrap_or(opened_in),
+            ws_dir,
+            venv,
+            captured_env: Vec::new(),
+            cd,
+            command: command.flatten(),
+        }
+    }
+}
+
 /// The version managers and venv tools installed, as far as gerdr can tell
 /// from its own `PATH` and the usual places.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -790,6 +814,44 @@ mod tests {
             cd: None,
             command: None,
         }
+    }
+
+    #[test]
+    fn a_new_pane_gets_the_venv_of_the_folder_it_moves_to() {
+        let tmp = TempDir::new();
+        let ws = tmp.dir("ws");
+        let app = tmp.dir("ws/app");
+        let venv = tmp.venv("ws/app/.venv");
+        let new_pane = |run| {
+            Prep::new_pane(
+                "w1:p1".into(),
+                ws.clone(),
+                ws.clone(),
+                VenvSetting::Auto,
+                run,
+            )
+        };
+        // Opened in the workspace's folder, it runs in the repository below.
+        let run = (app.clone(), Some("python manage.py".to_owned()));
+        assert_eq!(
+            posix_line(&new_pane(Some(run))),
+            Some(format!(
+                " . {}/bin/activate && cd {} && python manage.py",
+                venv.display(),
+                app.display()
+            ))
+        );
+        // Told nowhere to go, it has only the workspace's own, which is none.
+        assert_eq!(posix_line(&new_pane(None)), None);
+        // A worktree outside the workspace doesn't get the workspace's venv.
+        let main = tmp.venv("ws/.venv");
+        let outside = tmp.dir("worktree");
+        let line = posix_line(&new_pane(Some((outside.clone(), None))));
+        assert_eq!(line, Some(format!(" cd {}", outside.display())));
+        assert_eq!(
+            posix_line(&new_pane(None)),
+            Some(format!(" . {}/bin/activate", main.display()))
+        );
     }
 
     #[test]
