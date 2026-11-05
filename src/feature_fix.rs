@@ -306,7 +306,7 @@ impl Gerdr {
                     }
                 }
             }
-            FixPhase::Compacting => {
+            FixPhase::Compacting | FixPhase::CompactingToFix => {
                 let state = run.and_then(|r| r.agent_key());
                 let (status, alive) = match &state {
                     Some(agent) => self.agent_key_state(agent),
@@ -317,7 +317,16 @@ impl Gerdr {
                 match fix_round::compact_next(watch.worked, status, alive, since) {
                     Compact::Wait => {}
                     Compact::Worked => watch.worked = true,
-                    Compact::Go => self.ask_fix_plan(project, slug),
+                    Compact::Go if round.phase == FixPhase::Compacting => {
+                        self.ask_fix_plan(project, slug);
+                    }
+                    Compact::Go => {
+                        let said = "Chat compacted: fixes sent to the Build agent";
+                        if !self.send_fixes(project, slug, said) {
+                            // It said why: they can go again from the plan.
+                            self.fix_plan_waits_again(project, slug);
+                        }
+                    }
                 }
             }
             FixPhase::Planning => {
@@ -528,7 +537,8 @@ impl Gerdr {
     }
 
     /// The user approved the plan of feature `slug`, or asks for the fixes
-    /// of its last round again: the agent makes them. Whether it went; a
+    /// of its last round again: the agent compacts its chat if it can, as
+    /// the plan is in its file, and then makes them. Whether it went; a
     /// refusal says why and changes nothing.
     pub(crate) fn make_fixes(&mut self, project: &str, slug: &str) -> bool {
         let Some(feature) = self.feature(project, slug).cloned() else {
@@ -567,6 +577,80 @@ impl Gerdr {
             self.show_warning(format!("The fix plan needs {lacks}"));
             return false;
         }
+        if let Some(line) = self.compact_line(&feature) {
+            match self.tell_build_agent(&feature, line) {
+                Ok(()) => {
+                    let said = match again {
+                        true => "Fixes asked for again: the Build agent compacts its chat first",
+                        false => "Fix plan approved: the Build agent compacts its chat first",
+                    };
+                    self.fixes_compact(project, slug, said);
+                    self.show_success(format!(
+                        "The Build agent of \u{201c}{title}\u{201d} compacts its chat, then makes the fixes"
+                    ));
+                    return true;
+                }
+                Err(why) => {
+                    tracing::info!("compacting the Build agent of {project}/{slug}: {why}");
+                }
+            }
+        }
+        let said = match again {
+            true => "Fix plan's fixes sent to the Build agent again",
+            false => "Fix plan approved: fixes sent to the Build agent",
+        };
+        self.send_fixes(project, slug, said)
+    }
+
+    /// The Build agent of feature `slug` was told to compact before the
+    /// fixes: `said` goes in the log.
+    fn fixes_compact(&mut self, project: &str, slug: &str, said: &str) {
+        let now = feature::now();
+        let Some(f) = self.feature_mut(project, slug) else {
+            return;
+        };
+        f.reopen_fix_round();
+        if let Some(round) = f.fix_round.as_mut() {
+            round.phase = FixPhase::CompactingToFix;
+        }
+        f.log(now, said);
+        self.save_feature(project, slug);
+        (self.features.build.fix_watches).insert(fix_key(project, slug), FixWatch::default());
+    }
+
+    /// Fixes that couldn't go after the compact: the plan waits again.
+    fn fix_plan_waits_again(&mut self, project: &str, slug: &str) {
+        let now = feature::now();
+        let Some(f) = self.feature_mut(project, slug) else {
+            return;
+        };
+        if let Some(round) = f.fix_round.as_mut() {
+            round.phase = FixPhase::Ready;
+            round.ready = Some(now);
+        }
+        f.log(now, "Fixes not sent: the fix plan waits again");
+        self.save_feature(project, slug);
+        (self.features.build.fix_watches).remove(&fix_key(project, slug));
+    }
+
+    /// Tell the Build agent of feature `slug`, or a fresh one, to make the
+    /// fixes of its plan: `said` goes in the log. Whether it went; if not it
+    /// said why and changed nothing.
+    fn send_fixes(&mut self, project: &str, slug: &str, said: &str) -> bool {
+        let Some(feature) = self.feature(project, slug).cloned() else {
+            return false;
+        };
+        let title = &feature.title;
+        let data = store::dir(None, project, slug);
+        let path = fix_round::path(&data);
+        let plan = match std::fs::read_to_string(&path) {
+            Ok(plan) => plan,
+            Err(err) => {
+                tracing::warn!("reading {}: {err}", path.display());
+                self.show_error(format!("Couldn't read {}: {err}", fix_round::FILE));
+                return false;
+            }
+        };
         let shown = path.display().to_string();
         let names = self.projects.names(&feature);
         let mut values = vars(&feature, &names, &data, Stage::Build);
@@ -595,15 +679,10 @@ impl Gerdr {
         if let Some(round) = f.fix_round.as_mut() {
             round.phase = FixPhase::Fixing;
         }
-        f.log(
-            now,
-            match again {
-                true => "Fix plan's fixes sent to the Build agent again",
-                false => "Fix plan approved: fixes sent to the Build agent",
-            },
-        );
+        f.log(now, said);
         let agent = f.runs.get(&Stage::Build).and_then(|r| r.agent_key());
         self.save_feature(project, slug);
+        (self.features.build.fix_watches).remove(&fix_key(project, slug));
         if let Some(agent) = agent {
             self.watch_fixing(project, slug, agent);
         }

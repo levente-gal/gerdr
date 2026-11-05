@@ -249,6 +249,7 @@ pub fn fix_plan_state(feature: Option<&Feature>) -> String {
     };
     let state = match round.phase {
         FixPhase::Ready => "ready for review",
+        FixPhase::CompactingToFix => "agent compacting its chat before the fixes",
         FixPhase::Fixing => "agent making the fixes",
         FixPhase::Compacting | FixPhase::Planning => "agent still working",
     };
@@ -272,7 +273,7 @@ fn fix_plan_locked(feature: Option<&Feature>) -> Option<&'static str> {
         Some(FixPhase::Compacting | FixPhase::Planning) => {
             Some("The agent is still writing the file")
         }
-        Some(FixPhase::Fixing) => Some(FIXING_THEM),
+        Some(FixPhase::CompactingToFix | FixPhase::Fixing) => Some(FIXING_THEM),
         None if feature.last_fix_round.is_some() => None,
         None => Some("No fix plan is open"),
     }

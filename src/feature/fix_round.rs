@@ -5,7 +5,8 @@
 //! review's comments, Manual test's failures), the round goes the same way:
 //! the agent's chat is compacted, the agent writes `fix-plan.md` and changes
 //! no code, the user reads it, comments and sends it back as often as it
-//! takes, and then makes the fixes. A feature has one round open at a time.
+//! takes, and then makes the fixes, the chat compacted again first as the
+//! plan is in its file. A feature has one round open at a time.
 //!
 //! This is the round's record and what decides its next step. Gerdr's side
 //! is `crate::feature_fix`.
@@ -51,6 +52,8 @@ pub enum FixPhase {
     Planning,
     /// The plan waits for the user.
     Ready,
+    /// The user said to make the fixes: the agent compacts its chat first.
+    CompactingToFix,
     /// The agent makes the fixes.
     Fixing,
 }
@@ -111,7 +114,7 @@ impl FixRound {
     /// How the round stands, as a stage's card and rail say it: lowercase.
     pub fn line(&self) -> &'static str {
         match (self.phase, self.stalled.is_some()) {
-            (FixPhase::Compacting, _) => "compacting the agent's chat",
+            (FixPhase::Compacting | FixPhase::CompactingToFix, _) => "compacting the agent's chat",
             (FixPhase::Planning, true) => "no fix plan yet",
             (FixPhase::Planning, false) => "planning fixes",
             (FixPhase::Ready, _) => "fix plan ready",
@@ -122,7 +125,7 @@ impl FixRound {
     /// Whether it still waits for the agent's plan or the user's word: the
     /// code isn't being changed for it yet.
     pub fn before_fixing(&self) -> bool {
-        self.phase != FixPhase::Fixing
+        !matches!(self.phase, FixPhase::CompactingToFix | FixPhase::Fixing)
     }
 }
 
@@ -222,6 +225,30 @@ pub fn plan_next(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_compact_before_the_fixes_is_past_the_users_word() {
+        let round = |phase| FixRound {
+            n: 1,
+            what: "1 finding".into(),
+            input: "/d/a.md".into(),
+            stage: Stage::Verify,
+            phase,
+            sent_back: 0,
+            asked: 1,
+            ready: None,
+            stalled: None,
+            give_back: GiveBack::Nothing,
+        };
+        let compacting = round(FixPhase::CompactingToFix);
+        assert!(!compacting.before_fixing());
+        assert_eq!(compacting.line(), "compacting the agent's chat");
+        assert!(round(FixPhase::Compacting).before_fixing());
+        // Kept in `feature.json`: a restart goes on from it.
+        let kept = serde_json::to_string(&compacting).unwrap();
+        let back: FixRound = serde_json::from_str(&kept).unwrap();
+        assert_eq!(back.phase, FixPhase::CompactingToFix);
+    }
 
     const SOON: Duration = Duration::from_secs(1);
     const LATE: Duration = Duration::from_secs(60);

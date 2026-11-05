@@ -2997,7 +2997,7 @@ fn makes_fixes_again(feature: &Feature, stage: Stage) -> bool {
 /// other things.
 fn opens_fix_plan(feature: &Feature, stage: Stage) -> bool {
     last_round_on(feature, stage).is_some()
-        || fix_round_on(feature, stage).is_some_and(|r| r.phase == FixPhase::Fixing)
+        || fix_round_on(feature, stage).is_some_and(|r| !r.before_fixing())
 }
 
 /// The buttons of `round`, what Enter does first: what it waits for.
@@ -3044,7 +3044,7 @@ fn fix_round_buttons(
         };
         out.push((button(label, style), outcome));
     }
-    if round.phase == FixPhase::Fixing {
+    if !round.before_fixing() {
         out.push((
             button("Open", ButtonStyle::Plain),
             PanelOutcome::ReviewFixPlan,
@@ -10993,6 +10993,15 @@ pub(crate) mod tests {
                 (said, labels)
             })
         };
+        // About to make them: the plan can be read, not dropped any more.
+        let compacting = in_round(f.clone(), Stage::Verify, FixPhase::CompactingToFix);
+        assert_eq!(
+            held(&compacting, Stage::Verify),
+            Some((
+                "Verify failures \u{b7} compacting the agent's chat".to_owned(),
+                vec!["Open".to_owned()]
+            ))
+        );
         // Making them: the plan can be read.
         let fixing = in_round(f.clone(), Stage::Verify, FixPhase::Fixing);
         assert_eq!(
