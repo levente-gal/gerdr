@@ -28,7 +28,7 @@ rules, for reviewing a branch before it merges.
 | F2 | Rename. |
 | Ctrl+S | Switch to / check out a branch (repos, worktrees). |
 | Ctrl+Shift+S | Squash a worktree into main. |
-| Prefix, then Enter | Send the prompt of the stage agent waiting in the focused pane (also the arrow on its pane's bar, and Send prompt on the stage's page). A stage's agent opens waiting, so its model can be picked first. |
+| Prefix, then Enter | Send the prompt of the stage agent waiting in the focused pane (also the arrow on its pane's bar, and Send prompt on the stage's page). A stage's agent starts on its prompt; one waits only when checks ran on the code as it opened, or its line couldn't be typed. |
 | Ctrl+Shift+U | Set a feature's worktrees up (feature tab, Build and Verify): copy the ignored files and environments they lack from main, then run the project's setup commands. Nothing there is overwritten. |
 | Ctrl+Shift+I | Show a feature's setup log (feature tab, Build and Verify, once a setup started; also the "Setup log" button, the setup's row in the tasks panel and a failure's toast): its last run in the select and copy viewer, followed live while it runs. Selecting holds the following until the selection goes. |
 | Shift+Enter | In a field of several lines: a new line, Enter being the panel's action (a diff's review comment, the project commands dialog). |
@@ -39,7 +39,7 @@ rules, for reviewing a branch before it merges.
 | Ctrl+Shift+G | Start the sandbox again on the same data (feature tab, Manual test). |
 | Ctrl+Shift+X | Reset the sandbox's data from main's, or remove a stopped sandbox with its data, asking first (feature tab, Manual test). |
 | Ctrl+Shift+A | Pick the next agent on the feature tab's selected stage (the chips on its agent card). It applies from the agent's next start; one running goes on. |
-| Ctrl+Shift+I | Pick the model of the selected stage's agent on the feature tab (the "Model:" button on its agent card), for Claude Code and Cursor. It applies from the agent's next start; one already open keeps its own. With a model picked, the agent starts on its prompt at once, with no Send prompt; on Default it opens and waits for you to pick one in its tab and send it. Cursor also keeps a picked model as its default for all its chats, as its own `/model` does, and its picker says so. |
+| Ctrl+Shift+I | Pick the model of the selected stage's agent on the feature tab (the "Model:" button on its agent card), for Claude Code and Cursor. It applies from the agent's next start; one already open keeps its own. Default leaves it to the CLI. Cursor also keeps a picked model as its default for all its chats, as its own `/model` does, and its picker says so. |
 | Ctrl+Shift+B | On the feature tab's Build page: go between one agent through all milestones and a fresh agent per milestone (also the "Agents" choice on the page). It applies from the next milestone; an agent at work goes on. |
 | Ctrl+Shift+K | Skip Plan review on the feature tab, asking only when something would be lost. |
 | Ctrl+Shift+D | On the feature tab: from a final plan back to the decisions. |
@@ -96,6 +96,12 @@ A key is written in one place, not on the button that does the same thing:
   `problems::report` as well, so it can be seen after the toast is gone. It
   also lands in the log file.
 - Every edit to files on disk (diff view cuts, restores) says what it did.
+- A stage's agent starts on its prompt in a tab behind the stage's page,
+  clicked or not, and the page's Show agent goes to it. When Verify passes,
+  the AI review page comes to the front of the feature's workspace; another
+  workspace keeps the screen.
+- A line gerdr types to an agent and finds still in its input box gets Enter
+  again, up to six times over about four minutes. Only then is the user told.
 - Work the user sends to an agent (findings, review comments, failed tests)
   shows that agent's tab, where it runs or waits for its prompt. Work gerdr
   sends by itself doesn't take the screen. Either way the stage's node on the

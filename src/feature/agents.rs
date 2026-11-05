@@ -212,9 +212,15 @@ pub fn with_model(base: &str, model: Option<&str>) -> String {
 }
 
 /// The command `line` told `text` as it starts: it is its first message, with
-/// no waiting for the CLI to be ready. Both CLIs that take a model take this.
+/// no waiting for the CLI to be ready. A CLI gerdr knows gets `--` before it,
+/// so `--add-dir` can't take it for a folder; another gets it as its last
+/// argument and nothing else.
 pub fn with_prompt(line: &str, text: &str) -> String {
-    format!("{line} -- {}", crate::desktop::shell_quote(text))
+    let text = crate::desktop::shell_quote(text);
+    match Flavor::of(line).adds_dirs() {
+        true => format!("{line} -- {text}"),
+        false => format!("{line} {text}"),
+    }
 }
 
 /// What `run`'s chat is resumed with. Claude's chat keeps its model (tried on
@@ -801,6 +807,20 @@ mod tests {
         assert_eq!(
             resume_base(&run("cursor-agent")),
             "cursor-agent --model opus"
+        );
+    }
+
+    #[test]
+    fn a_prompt_on_the_command_follows_dashes_only_for_a_cli_gerdr_knows() {
+        let text = "Read /p.md and follow it.";
+        let quoted = "'Read /p.md and follow it.'";
+        assert_eq!(
+            with_prompt("codex --add-dir /d", text),
+            format!("codex --add-dir /d -- {quoted}")
+        );
+        assert_eq!(
+            with_prompt("aider --yes", text),
+            format!("aider --yes {quoted}")
         );
     }
 

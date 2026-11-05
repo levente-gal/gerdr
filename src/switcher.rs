@@ -111,6 +111,10 @@ pub enum Target {
     UpdateT3,
     /// Taking newer versions of T3 Code without asking, turned on or off.
     T3Updates,
+    /// New terminals reloading their config file, turned on or off.
+    TerminalReload,
+    /// The dialog raising the inotify limit (see `inotify_limit`).
+    RaiseInotifyLimit,
     /// The tasks running in the background (see `tasks`).
     Tasks,
     /// The new feature dialog (see `features`).
@@ -151,6 +155,8 @@ impl Target {
             | Target::T3(_)
             | Target::UpdateT3
             | Target::T3Updates
+            | Target::TerminalReload
+            | Target::RaiseInotifyLimit
             | Target::Tasks
             | Target::NewFeature
             | Target::Features
@@ -181,6 +187,8 @@ impl Target {
             | Target::T3(_)
             | Target::UpdateT3
             | Target::T3Updates
+            | Target::TerminalReload
+            | Target::RaiseInotifyLimit
             | Target::Tasks
             | Target::NewFeature
             | Target::Features
@@ -857,6 +865,8 @@ fn frecency_key(
         | Target::ProjectCommands(_)
         | Target::UpdateT3
         | Target::T3Updates
+        | Target::TerminalReload
+        | Target::RaiseInotifyLimit
         | Target::Tasks
         | Target::NewFeature
         | Target::Features
@@ -1086,10 +1096,7 @@ impl Gerdr {
                 }),
             )
         };
-        let own = format!(
-            "{}'s own choice: it opens and waits for you to send the prompt",
-            slot.agent
-        );
+        let own = format!("{}'s own choice", slot.agent);
         let mut items = vec![row("Default".to_owned(), own, None)];
         items.extend((offers.into_iter()).map(|o| row(o.name, o.id.clone(), Some(o.id))));
         self.weighed(items)
@@ -1524,6 +1531,8 @@ impl Gerdr {
             Target::T3(w) => self.new_t3_thread(w),
             Target::UpdateT3 => self.update_t3(None),
             Target::T3Updates => self.toggle_t3_updates(),
+            Target::TerminalReload => self.toggle_terminal_reload(),
+            Target::RaiseInotifyLimit => self.ask_raise_inotify(),
             Target::Tasks => self.open_tasks(0),
             Target::NewFeature => self.open_new_feature(None),
             Target::Features => self.open_features(),
@@ -1722,6 +1731,30 @@ impl Gerdr {
             tilde(&crate::config::config_file(), home.as_deref()),
             Target::Settings,
         ));
+        // Settings' `[terminal] live_config_reload`, written there.
+        items.push(if self.live_config_reload {
+            Item::new(
+                ItemIcon::Command,
+                "Turn off terminal config reload in Settings",
+                "saves an inotify instance per terminal \u{b7} [terminal] live_config_reload = false",
+                Target::TerminalReload,
+            )
+        } else {
+            Item::new(
+                ItemIcon::Command,
+                "Turn on terminal config reload in Settings",
+                "new terminals follow changes to their config \u{b7} [terminal] live_config_reload",
+                Target::TerminalReload,
+            )
+        });
+        if self.inotify.is_low() {
+            items.push(Item::new(
+                ItemIcon::Command,
+                "Raise inotify limit…",
+                "running low: Zed and terminals need them to start",
+                Target::RaiseInotifyLimit,
+            ));
+        }
         items.extend(project_file_items(self.project.as_deref(), home.as_deref()));
         self.weighed(items)
     }

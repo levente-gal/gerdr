@@ -204,7 +204,7 @@ impl Gerdr {
     }
 
     /// Run `open` on feature `slug` of `project`'s workspace, which adds a
-    /// tab to it and shows it. With none open, one opens first with only
+    /// tab to it. With none open, one opens first with only
     /// its panel tab (see `ensure_feature_workspace`); it goes again if
     /// `open` added none. `None` (with a toast) when it couldn't.
     pub(crate) fn in_feature_workspace<R>(
@@ -379,6 +379,37 @@ impl Gerdr {
     ) -> Option<String> {
         self.in_feature_workspace(project, slug, |gerdr, w| gerdr.new_tab_pane(w, cd, command))
             .flatten()
+    }
+
+    /// Open a tab running `command` in feature `slug` of `project`'s
+    /// workspace, as `open_feature_tab` does, and leave what shows as it is.
+    pub(crate) fn open_feature_tab_behind(
+        &mut self,
+        project: &str,
+        slug: &str,
+        cd: &Path,
+        command: String,
+    ) -> Option<String> {
+        self.in_feature_workspace(project, slug, |gerdr, w| {
+            gerdr.new_tab_pane_behind(w, cd, command)
+        })
+        .flatten()
+    }
+
+    /// Bring feature `slug` of `project`'s stage page to the front of its
+    /// workspace, on the stage it is at. Only there does it take the screen:
+    /// in another workspace it shows once the user comes back.
+    pub(crate) fn show_stage_page(&mut self, project: &str, slug: &str) {
+        let Some(w) = self.feature_workspace(project, slug) else {
+            return;
+        };
+        if w != self.active_workspace {
+            self.workspaces[w].active_tab = 0;
+            return;
+        }
+        self.switch_tab(0);
+        self.feature_cursor_to_current_of(project, slug);
+        self.sync_feature_page();
     }
 
     /// Open a tab laid out like a project's first (Zed over a terminal,

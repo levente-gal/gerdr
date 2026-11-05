@@ -27,6 +27,8 @@ pub enum MenuAction {
     NewTerminal,
     /// An action of the repositories panel, as its footer offers it.
     ReposAction(ReposButton),
+    /// The dialog raising the inotify limit (see `inotify_limit`).
+    RaiseInotifyLimit,
     /// The name and email git wants, asked for the panel's batch that
     /// failed for want of them (see `Gerdr::open_identity`).
     SetGitIdentity,
@@ -477,6 +479,7 @@ impl Gerdr {
             MenuAction::GoToVisited(id, back) => self.go_to_visited(id, back),
             MenuAction::ReposAction(button) => self.repos_press(button),
             MenuAction::SetGitIdentity => self.open_identity(),
+            MenuAction::RaiseInotifyLimit => self.ask_raise_inotify(),
             MenuAction::Theme(mode) => self.set_theme_mode(mode),
             MenuAction::RetryExpected(pane) => self.retry_expected(pane),
             MenuAction::UnlockKeyring => crate::keyring::ask(),

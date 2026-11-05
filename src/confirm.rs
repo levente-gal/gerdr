@@ -57,6 +57,8 @@ pub enum Then {
     RestartT3,
     /// Stop T3 Code's server (see `Gerdr::stop_t3`).
     StopT3,
+    /// Raise the inotify limit (see `Gerdr::raise_inotify_limit`).
+    RaiseInotifyLimit,
     /// Stop the apps this project keeps running (see `Gerdr::stop_kept`).
     StopKept(String),
     /// Close this profile's app, import it, start the app again (see
@@ -665,6 +667,7 @@ impl Gerdr {
             Then::ClosePane(id) => self.close_pane_now(id),
             Then::RestartT3 => self.restart_t3(),
             Then::StopT3 => self.stop_t3(|_| {}),
+            Then::RaiseInotifyLimit => self.raise_inotify_limit(),
             Then::StopKept(id) => {
                 let apps = keep::app_names(&id).join(", ");
                 let name = self.projects.project(&id).map(|p| p.name.clone());

@@ -479,10 +479,16 @@ impl Gerdr {
                 .map_or_else(String::new, |n| n.to_string_lossy().into_owned())
         };
         let (settings, log) = (name(crate::config::config_file()), name(crate::log_path()));
-        MenuSpec {
-            anchor,
-            items: problems_menu_items(&texts, &settings, &log),
+        let mut items = problems_menu_items(&texts, &settings, &log);
+        if problems
+            .iter()
+            .any(|p| p.source == crate::inotify_limit::PROBLEM)
+        {
+            // Where to fix it, with the other places: before settings and log.
+            let raise = MenuItem::new("Raise inotify limit…", MenuAction::RaiseInotifyLimit);
+            items.insert(items.len().saturating_sub(2), raise);
         }
+        MenuSpec { anchor, items }
     }
 
     /// The names of the workspaces not shown whose agent is blocked.

@@ -54,6 +54,7 @@ mod inbox;
 mod inbox_panel;
 mod inbox_sources;
 mod inbox_store;
+mod inotify_limit;
 mod input;
 mod issues;
 mod keep;
@@ -1386,6 +1387,10 @@ pub struct Gerdr {
     /// Whether agents that need the user say so with a desktop
     /// notification, from the config file.
     pub notify: bool,
+    /// Whether new Alacrittys reload their config file (`[terminal]`).
+    pub live_config_reload: bool,
+    /// How close the user is to the inotify limit (see `inotify_limit`).
+    pub inotify: inotify_limit::Watch,
     /// When the config file was last read as written (see
     /// `Gerdr::watch_settings`).
     pub settings_modified: Option<std::time::SystemTime>,
@@ -2063,7 +2068,7 @@ impl Gerdr {
                 let mut term = Command::new("alacritty");
                 term.arg("--working-directory")
                     .arg(&dir)
-                    .args(self.theme().palette().alacritty_options());
+                    .args(self.terminal_options());
                 if let Some((_, Some(command))) = &run {
                     term.args(["-e", "sh", "-c", command]);
                 }
@@ -2245,7 +2250,7 @@ impl Gerdr {
             .filter(|d| d.is_dir())
             .unwrap_or(dir)
             .to_path_buf();
-        let options = self.theme().palette().alacritty_options();
+        let options = self.terminal_options();
         let term = herdr::attach_command(&pane.terminal_id, &dir, &options);
         self.spawn(term, &dir, "alacritty")
     }
@@ -3236,7 +3241,14 @@ impl Gerdr {
             })
         });
         let Some((w, t, window)) = found else {
-            return false;
+            // Its window isn't up yet: it takes focus in its tab as it maps.
+            let Some((w, t)) = self.herdr_pane_place(pane_id) else {
+                return false;
+            };
+            self.active_workspace = w;
+            self.workspaces[w].active_tab = t;
+            self.show_active();
+            return true;
         };
         self.active_workspace = w;
         let ws = &mut self.workspaces[w];
@@ -4154,6 +4166,22 @@ impl Gerdr {
         ws.tabs.push(Tab::terminal(pid, id, herdr));
         ws.active_tab = ws.tabs.len() - 1;
         self.show_active();
+        pane
+    }
+
+    /// Open a tab at the end of workspace `w` whose shell starts in `cd`
+    /// running `command`, and leave what shows as it is. Its herdr pane, when
+    /// herdr says.
+    pub fn new_tab_pane_behind(&mut self, w: usize, cd: &Path, command: String) -> Option<String> {
+        if w >= self.workspaces.len() {
+            return None;
+        }
+        let run = Some((cd.to_path_buf(), Some(command)));
+        let (pid, herdr) = self.start_terminal_running(w, None, Dir::Right, run)?;
+        let pane = herdr.as_ref().map(|h| h.pane_id.clone());
+        let id = self.new_pane_id();
+        self.workspaces[w].tabs.push(Tab::terminal(pid, id, herdr));
+        self.arrange();
         pane
     }
 
@@ -6945,6 +6973,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         agents: agent_config,
         services: service_settings,
         t3: t3_settings,
+        terminal,
         notifications,
         problems: settings_problems,
     } = settings;
@@ -6967,6 +6996,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         density: ui.density,
         needs_you: ui.needs_you,
         notify: notifications.enabled,
+        live_config_reload: terminal.live_config_reload,
+        inotify: inotify_limit::Watch::default(),
         settings_modified: config::modified(),
         sidebar_width: store
             .sidebar_width
@@ -7274,6 +7305,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         Some(system_theme)
     };
+    state.watch_inotify();
     state.watch_git();
     state.watch_records();
     state.watch_cursor_agents();

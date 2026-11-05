@@ -3637,7 +3637,7 @@ fn feature_tab_held() -> super::FeatureTabView {
             icon: AgentIcon::from_agent("Claude Code"),
             name: "Claude Code".into(),
             dot: Dot::Unknown,
-            status: "waiting for you \u{b7} pick a model and send the prompt".into(),
+            status: "waiting for you \u{b7} send the prompt".into(),
             tail: Vec::new(),
             buttons: vec![0, 1],
             picks,
@@ -4258,7 +4258,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 45]; 4] = [
         0x3836b05b3315ee81, // tab_t3_draft_860
         0x3f362c130b5f3f4f, // tab_milestone_mode_1180
         0x70a830e1e6daf5e7, // tab_milestone_mode_860
-        0xb2cc155d9a72e120, // tab_held_860
+        0x5ce4ec148de5244e, // tab_held_860
         0xb769e6bd04ceafe5, // tab_resume_1180
         0x3f752b44da659f99, // tab_resume_860
         0xf41450c01f4d3adf, // tab_fixing_1180
@@ -4306,7 +4306,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 45]; 4] = [
         0x768057f7dca79eba, // tab_t3_draft_860
         0x3844e9a4d017f4ed, // tab_milestone_mode_1180
         0x4f45010309ce5447, // tab_milestone_mode_860
-        0x677934c25f6783bf, // tab_held_860
+        0xd6daee894876f1e5, // tab_held_860
         0xa614cc43a9952056, // tab_resume_1180
         0xf054db57d3898f64, // tab_resume_860
         0x033bf3af70bdcf58, // tab_fixing_1180
@@ -4354,7 +4354,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 45]; 4] = [
         0x51bfb58b32dc5fe0, // tab_t3_draft_860
         0x463ad372d2d29c44, // tab_milestone_mode_1180
         0x51a0107161d7b6ba, // tab_milestone_mode_860
-        0x30aeff9ca125f77d, // tab_held_860
+        0x5d758a3375ad59b4, // tab_held_860
         0xa79bf4b0e5c7222b, // tab_resume_1180
         0x823ad24610c8d561, // tab_resume_860
         0x641f699132903dae, // tab_fixing_1180
@@ -4402,7 +4402,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 45]; 4] = [
         0x0e9955036c1a7725, // tab_t3_draft_860
         0xc40a230cf0b112b5, // tab_milestone_mode_1180
         0x44519de19defecdf, // tab_milestone_mode_860
-        0x274ca4955f6f73f1, // tab_held_860
+        0x9cce9a5aa8d18670, // tab_held_860
         0xc5c23bc0a12c240e, // tab_resume_1180
         0xba0f501e1d90ab88, // tab_resume_860
         0x7867b61f7675ee02, // tab_fixing_1180
