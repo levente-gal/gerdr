@@ -652,15 +652,22 @@ impl Gerdr {
         self.previews.set_top(pane, top.unwrap_or(line));
     }
 
-    /// A block clicked in `pane`'s page, from `line` of its file: its
+    /// A block clicked in `pane`'s page, at `line` of its file: its
     /// review's caret goes there.
     pub(crate) fn preview_line(&mut self, pane: u32, line: usize) {
-        if let Some((review, env)) = self.review_of_page(pane) {
-            review.wd.with_diff(env, |diff, ctx| {
-                if let Some(row) = diff.row_of_line(line) {
-                    diff.caret_to(row, 0, ctx);
-                }
-            });
+        let Some((review, env)) = self.review_of_page(pane) else {
+            return;
+        };
+        let top = review.wd.with_diff(env, |diff, ctx| {
+            if let Some(row) = diff.row_of_line(line) {
+                diff.caret_to(row, 0, ctx);
+            }
+            diff.top_line()
+        });
+        // The review moved to show its caret; the page, clicked, stays where
+        // it is, with text being chosen in it: this isn't sent to it.
+        if let Some(top) = top {
+            self.previews.set_top(pane, top);
         }
     }
 }

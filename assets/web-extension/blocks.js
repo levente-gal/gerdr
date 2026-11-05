@@ -77,4 +77,11 @@ function yLine(spans, y) {
   return from + ((y - fromY) / (toY - fromY)) * (to - from);
 }
 
-if (typeof module !== "undefined") module.exports = { sourceLines, pickBlock, lineY, yLine };
+// The line a click at place `y` down the page landed on, in a block of lines
+// `first` to `last` at `top` and `height`.
+function clickedLine(first, last, top, height, y) {
+  const line = Math.floor(yLine([[first, last, top, height]], y));
+  return Math.min(Math.max(line, first), last);
+}
+
+if (typeof module !== "undefined") module.exports = { sourceLines, pickBlock, lineY, yLine, clickedLine };

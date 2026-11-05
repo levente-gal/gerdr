@@ -8,7 +8,9 @@
 // In the file's tab (gerdr's `doc_tab`), the page marks the block
 // the review's caret is in (`{ type: "caret", line }`) and the blocks
 // with comments (`marks`, `[line, text]`); a click on a block puts the
-// review's caret on its first line. The two scroll together: gerdr sends
+// review's caret on the line clicked, and the page stays where it is, or a
+// double click or a drag would land on what moved under it. The two scroll
+// together: gerdr sends
 // the line at the review's top (`{ type: "scroll", line }`, to the
 // fraction), and the page tells it the line at its own. The two fit
 // different numbers of lines, so when the caret moves the page also moves
@@ -29,6 +31,8 @@ let caret = null;
 let caretBlock = null;
 // When the caret last moved.
 let caretMoved = -Infinity;
+// The line a click here sent the caret to: the page doesn't move for it.
+let clicked = null;
 // The lines with comments, and what each says.
 let marks = [];
 // The line at the top of the page and its review, once they scroll
@@ -158,7 +162,10 @@ function show(message) {
 
 chrome.runtime.onMessage.addListener((message) => {
   if (message && message.type === "preview") show(message);
-  if (message && message.type === "caret") markCaret(message.line, true);
+  if (message && message.type === "caret") {
+    markCaret(message.line, message.line !== clicked);
+    clicked = null;
+  }
   if (message && message.type === "scroll" && Number.isFinite(message.line)) standAt(message.line);
   return false;
 });
@@ -178,7 +185,7 @@ document.addEventListener("click", follow);
 document.addEventListener("auxclick", follow);
 
 // A click on a block, not on a link nor while choosing text, puts the
-// review's caret on its first line.
+// review's caret on the line clicked.
 body.addEventListener("click", (event) => {
   if (event.button !== 0 || (event.target.closest && event.target.closest("a[href]"))) return;
   if (String(getSelection()).length > 0) return;
@@ -189,7 +196,11 @@ body.addEventListener("click", (event) => {
   }
   if (!element || element === body) return;
   const lines = sourceLines(element.getAttribute("data-sourcepos"));
-  if (lines) chrome.runtime.sendMessage({ type: "preview-line", line: lines[0] }).catch(() => {});
+  if (!lines) return;
+  const rect = element.getBoundingClientRect();
+  const line = clickedLine(lines[0], lines[1], rect.top + scrollY, rect.height, event.clientY + scrollY);
+  clicked = line === caret ? null : line;
+  chrome.runtime.sendMessage({ type: "preview-line", line }).catch(() => {});
 });
 
 chrome.runtime.sendMessage({ type: "preview-ready" }).catch(() => {});
