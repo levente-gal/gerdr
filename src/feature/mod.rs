@@ -342,6 +342,10 @@ pub struct Feature {
     /// The stages marked done.
     #[serde(default)]
     pub marks: BTreeMap<Stage, Mark>,
+    /// When the stages whose marks went were last marked done, until they
+    /// are again: they ran once, and the rail says so.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub ran_once: BTreeMap<Stage, u64>,
     #[serde(default)]
     pub history: Vec<Event>,
     #[serde(default, skip_serializing_if = "Shipping::is_empty")]
@@ -474,6 +478,7 @@ impl Feature {
     /// go in order. Returns the stage ticked, or `None` when there is none.
     pub fn tick(&mut self, now: u64, by: &str, patch: Option<&str>) -> Option<Stage> {
         let stage = self.current()?;
+        self.ran_once.remove(&stage);
         self.marks.insert(
             stage,
             Mark {
@@ -495,7 +500,7 @@ impl Feature {
     /// was cleared.
     pub fn untick(&mut self, stage: Stage, now: u64) -> bool {
         let before = self.marks.len();
-        self.marks.retain(|s, _| *s < stage);
+        self.clear_marks_from(stage, now);
         if self.marks.len() == before {
             return false;
         }
@@ -504,6 +509,22 @@ impl Feature {
         }
         self.log(now, format!("{} to do again", stage.label()));
         true
+    }
+
+    /// Take away `stage`'s mark and every later one's, keeping when they were
+    /// made in `ran_once`. The stage it was at ran too if it got anywhere, a
+    /// mark or not: as of `now`.
+    fn clear_marks_from(&mut self, stage: Stage, now: u64) {
+        let was_at = self.current().filter(|at| {
+            *at > stage
+                && (self.runs.contains_key(at)
+                    || self.has_output(*at, |_| false)
+                    || self.fix_round.as_ref().is_some_and(|r| r.stage == *at))
+        });
+        let cleared = self.marks.split_off(&stage);
+        self.ran_once
+            .extend(cleared.into_iter().map(|(s, mark)| (s, mark.at)));
+        self.ran_once.extend(was_at.map(|at| (at, now)));
     }
 
     /// The first bound stage marked on other code than `patch`'s: from it
@@ -525,7 +546,7 @@ impl Feature {
             return None;
         }
         let stage = self.stale(patch)?;
-        self.marks.retain(|s, _| *s < stage);
+        self.clear_marks_from(stage, now);
         self.log(now, format!("Code changed: {} to do again", stage.label()));
         Some(stage)
     }
@@ -598,6 +619,8 @@ impl Feature {
             return false;
         }
         self.forget_run(stage);
+        // As if it had just been reached, nothing after it having run.
+        self.ran_once.retain(|s, _| *s < stage);
         // What it fixed is gone with the stage that asked.
         if self
             .last_fix_round
@@ -1061,6 +1084,7 @@ pub(crate) mod tests {
             manual: None,
             fix_round: None,
             last_fix_round: None,
+            ran_once: Default::default(),
             fix_rounds: 0,
         }
     }
@@ -1145,6 +1169,7 @@ pub(crate) mod tests {
             manual: None,
             fix_round: None,
             last_fix_round: None,
+            ran_once: Default::default(),
             fix_rounds: 0,
         }
     }
@@ -1212,6 +1237,40 @@ pub(crate) mod tests {
         // A mark without a patch never held for any code.
         f.marks.get_mut(&Stage::Build).unwrap().patch = None;
         assert_eq!(f.stale("p1"), Some(Stage::Build));
+    }
+
+    #[test]
+    fn a_mark_that_goes_leaves_that_its_stage_ran_once() {
+        let mut f = feature("a", 1);
+        for at in 0..6 {
+            f.tick(at, "you", Some("p1"));
+        }
+        assert!(f.ran_once.is_empty());
+        // The code changes: Build on go, and when they were marked stays.
+        assert_eq!(f.invalidate("p2", 9), Some(Stage::Build));
+        assert_eq!(f.current(), Some(Stage::Build));
+        let ran: Vec<_> = f.ran_once.iter().map(|(s, at)| (*s, *at)).collect();
+        assert_eq!(
+            ran,
+            [(Stage::Build, 3), (Stage::Verify, 4), (Stage::AiReview, 5)]
+        );
+        // Marked again, it has its mark instead.
+        f.tick(10, "you", Some("p2"));
+        // The stage it was at had got somewhere, with no mark to go.
+        f.tick(10, "you", Some("p2"));
+        f.tick(10, "you", Some("p2"));
+        assert_eq!(f.current(), Some(Stage::CodeReview));
+        f.viewed.0.insert("api/a.rs".into(), "blob".into());
+        assert_eq!(f.invalidate("p3", 10), Some(Stage::Build));
+        assert_eq!(f.ran_once[&Stage::CodeReview], 10);
+        f.tick(10, "you", Some("p3"));
+        assert!(!f.ran_once.contains_key(&Stage::Build));
+        assert!(f.ran_once.contains_key(&Stage::Verify));
+        // Reopening leaves the same, and starting over forgets from there on.
+        assert!(f.untick(Stage::Build, 11));
+        assert_eq!(f.ran_once[&Stage::Build], 10);
+        assert!(f.start_over(Stage::Build, 12));
+        assert!(f.ran_once.is_empty());
     }
 
     #[test]

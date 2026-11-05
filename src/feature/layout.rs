@@ -1409,6 +1409,7 @@ mod tests {
             manual: None,
             fix_round: None,
             last_fix_round: None,
+            ran_once: Default::default(),
             fix_rounds: 0,
             history: Vec::new(),
         }
