@@ -33,7 +33,7 @@ use crate::{
         self, Feature, PerProject, Stage, Status,
         agents::{
             Flavor, StageRun, Stop, T3Run, command_line, needs, resume_line, run_needs,
-            session_file,
+            session_file, with_model,
         },
         artifacts,
         fix_round::FixPhase,
@@ -634,6 +634,46 @@ fn stage_pick(
     resolve_pick(Some(picked), feature, stage, workflow, installed)
 }
 
+/// The agent whose model can be picked on `stage`'s page: the one its next
+/// start runs, once gerdr can tell that CLI a model.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ModelSlot {
+    /// Its name, as the picker gives it.
+    pub agent: String,
+    /// The `[agents]` command behind it.
+    pub base: String,
+    /// The model picked for it; none for its own default.
+    pub picked: Option<String>,
+}
+
+/// The model picked for `agent` on `stage`, if any.
+fn picked_model(feature: &Feature, stage: Stage, agent: &str) -> Option<String> {
+    let models = feature.stage_models.get(&stage)?;
+    let (_, model) = models.iter().find(|(a, _)| a.eq_ignore_ascii_case(agent))?;
+    Some(model.clone())
+}
+
+/// `stage`'s `ModelSlot`, where its chips show: none on a stage no agent
+/// runs, one that is done, a closed feature, or an agent gerdr can't tell.
+pub(crate) fn stage_model_slot(
+    feature: &Feature,
+    stage: Stage,
+    workflow: Option<&Workflow>,
+    installed: &[CliAgent],
+) -> Option<ModelSlot> {
+    if feature.status != Status::Open || needs(stage).is_none() || feature.is_done(stage) {
+        return None;
+    }
+    let Pick::Agent(agent, base) = stage_pick(feature, stage, workflow, installed) else {
+        return None;
+    };
+    Flavor::of(&base).takes_model().then(|| ModelSlot {
+        picked: picked_model(feature, stage, &agent),
+        agent,
+        base,
+    })
+}
+
 /// The chips on `stage`'s page to pick its agent with: the installed
 /// agents stages are offered, and whatever the project's file gives it
 /// besides. None on a stage no agent runs, one that is done, or a feature
@@ -903,7 +943,7 @@ pub(crate) fn agent_line(
         if status == Some(AgentStatus::Working) {
             return "working \u{b7} its prompt wasn't sent".into();
         }
-        return "waiting for you \u{b7} pick a model and send the prompt".into();
+        return run.waiting_words().into();
     }
     if run.held {
         return format!("{} closed \u{b7} its prompt wasn't sent", run.agent);
@@ -1043,6 +1083,71 @@ impl Gerdr {
         self.save_feature(project, slug);
     }
 
+    /// `stage`'s `ModelSlot` for feature `slug`.
+    pub(crate) fn model_slot_of(
+        &self,
+        project: &str,
+        slug: &str,
+        stage: Stage,
+    ) -> Option<ModelSlot> {
+        let workflow = self.projects.project(project).map(|p| &p.workflow);
+        let feature = self.feature(project, slug)?;
+        stage_model_slot(feature, stage, workflow, &self.cli_agents)
+    }
+
+    /// Open the picker of `stage`'s model (its card's button, Ctrl+Shift+I).
+    /// An agent gerdr can't tell a model is said so: the key does nothing
+    /// else there.
+    pub(crate) fn pick_stage_model(&mut self, project: &str, slug: &str, stage: Stage) {
+        if let Some(slot) = self.model_slot_of(project, slug, stage) {
+            return self.open_model_picker(project, slug, stage, slot);
+        }
+        let chips = self.chips_of(project, slug, stage);
+        if let Some(chip) = chips.iter().find(|c| c.lit) {
+            self.show_warning(format!(
+                "gerdr can't start {} on a model: pick it in {}",
+                chip.name,
+                match chip.name.as_str() {
+                    "T3 Code" => "its draft",
+                    _ => "its tab",
+                }
+            ));
+        }
+    }
+
+    /// Start `stage`'s `agent` on `model` (none: its own default), from its
+    /// next start on: one that runs now goes on, and is said to.
+    pub(crate) fn set_stage_model(
+        &mut self,
+        project: &str,
+        slug: &str,
+        stage: Stage,
+        agent: &str,
+        model: Option<String>,
+    ) {
+        let Some(feature) = self.feature_mut(project, slug) else {
+            return;
+        };
+        let models = feature.stage_models.entry(stage).or_default();
+        models.retain(|a, _| !a.eq_ignore_ascii_case(agent));
+        if let Some(model) = &model {
+            models.insert(agent.to_owned(), model.clone());
+        }
+        if models.is_empty() {
+            feature.stage_models.remove(&stage);
+        }
+        let stays = (feature.runs.get(&stage)).is_some_and(|r| {
+            r.live() && r.agent.eq_ignore_ascii_case(agent) && r.asked_model != model
+        });
+        self.save_feature(project, slug);
+        if stays {
+            let model = model.as_deref().unwrap_or("its default");
+            self.show_warning(format!(
+                "The agent already open keeps its model: restart it to use {model}"
+            ));
+        }
+    }
+
     /// Whether Build of feature `slug` starts a fresh agent per milestone.
     /// It applies from the next milestone on: an agent at work goes on.
     pub(crate) fn set_fresh_milestones(&mut self, project: &str, slug: &str, fresh: bool) {
@@ -1117,8 +1222,18 @@ impl Gerdr {
             return self.focus_agent(&agents::AgentKey::Herdr(pane));
         }
         let agent = run.agent.clone();
-        let command = run.command.clone();
-        let opened = self.open_feature_tab(project, slug, &feature.dir, Some(command));
+        // Its model may have been picked since: nothing has run on the old.
+        let model = picked_model(&feature, stage, &agent);
+        let picked = model.is_some();
+        let command = match model == run.asked_model {
+            true => run.command.clone(),
+            false => command_line(
+                &with_model(&run.base, model.as_deref()),
+                &run.prompt,
+                &feature.agent_dirs(&store::dir(None, project, slug)),
+            ),
+        };
+        let opened = self.open_feature_tab(project, slug, &feature.dir, Some(command.clone()));
         let Some(pane) = opened else {
             tracing::warn!("no tab for {agent}, waiting on {}", stage.label());
             return self.show_error(format!("Couldn't open a tab for {agent}"));
@@ -1130,6 +1245,11 @@ impl Gerdr {
             return;
         };
         r.pane = Some(pane.clone());
+        if r.asked_model != model {
+            r.command = command;
+            r.model.clone_from(&model);
+            r.asked_model = model;
+        }
         f.log(
             feature::now(),
             format!("{} agent's tab opened again: {agent}", stage.label()),
@@ -1141,7 +1261,7 @@ impl Gerdr {
         if stage == Stage::Build {
             self.fixing_moved(project, slug, agents::AgentKey::Herdr(pane));
         }
-        self.show_success(held_text(&agent, stage, &feature.title));
+        self.show_success(held_text(&agent, picked, stage, &feature.title));
     }
 
     /// The feature and stage of the active project whose agent waits for
@@ -1262,7 +1382,11 @@ impl Gerdr {
             ));
         };
         let data = store::dir(None, project, slug);
-        let command = resume_line(&run.base, &session, &feature.agent_dirs(&data));
+        let command = resume_line(
+            &feature::agents::resume_base(run),
+            &session,
+            &feature.agent_dirs(&data),
+        );
         let agent = run.agent.clone();
         let opened = self.open_feature_tab(project, slug, &feature.dir, Some(command));
         let Some(pane) = opened else {
@@ -1354,7 +1478,10 @@ impl Gerdr {
             self.plan_review_starts(project, slug);
         }
         let version = prompts::builtin(need.template).map_or(0, |(_, v)| v);
-        let waiting = takes_new_work(last, &base, extra)
+        let asked_model = (Flavor::of(&base).takes_model())
+            .then(|| picked_model(&feature, stage, &agent))
+            .flatten();
+        let waiting = takes_new_work(last, &base, asked_model.as_deref(), extra)
             .filter(|r| (r.pane.as_deref()).is_some_and(|p| self.herdr_pane_place(p).is_some()));
         let text = match prompts::render_builtin(need.template, &values) {
             Ok(text) => {
@@ -1381,7 +1508,8 @@ impl Gerdr {
         let command = if in_t3 {
             base.clone()
         } else {
-            command_line(&base, &prompt, &feature.agent_dirs(&data))
+            let started = with_model(&base, asked_model.as_deref());
+            command_line(&started, &prompt, &feature.agent_dirs(&data))
         };
         // Its chat goes on under the new prompt: `resume` looks beside that.
         if let Some(r) = waiting
@@ -1400,8 +1528,11 @@ impl Gerdr {
         };
         let told = waiting.is_some();
         let now = feature::now();
+        let picked = asked_model.is_some();
         let run = StageRun {
-            model: None,
+            // What it was asked for, until its chat says what it used.
+            model: asked_model.clone(),
+            asked_model,
             n,
             agent: agent.clone(),
             command,
@@ -1442,7 +1573,7 @@ impl Gerdr {
         }
         // No tab: opening it said why.
         if opened.is_some() {
-            let text = held_text(&agent, stage, &title);
+            let text = held_text(&agent, picked, stage, &title);
             self.notify_feature(project, slug, opened, &text);
             self.show_success(text);
         }
@@ -2140,9 +2271,15 @@ fn stop_is_new(stop: Option<Stop>, done: u32, total: u32) -> bool {
 fn takes_new_work<'a>(
     last: Option<&'a StageRun>,
     base: &str,
+    model: Option<&str>,
     extra: &[(&str, String)],
 ) -> Option<&'a StageRun> {
-    last.filter(|r| !extra.is_empty() && r.waits_to_send() && r.base == base)
+    last.filter(|r| {
+        !extra.is_empty()
+            && r.waits_to_send()
+            && r.base == base
+            && r.asked_model.as_deref() == model
+    })
 }
 
 /// Prompt `text`, naming the one at `earlier` its agent never got.
@@ -2154,10 +2291,15 @@ fn with_earlier_prompt(text: &str, earlier: &Path) -> String {
     )
 }
 
-/// What gerdr says of `agent` opened on `stage` of feature `title`.
-fn held_text(agent: &str, stage: Stage, title: &str) -> String {
+/// What gerdr says of `agent` opened on `stage` of feature `title`, with
+/// its model `picked` already or not.
+fn held_text(agent: &str, picked: bool, stage: Stage, title: &str) -> String {
+    let due = match picked {
+        true => "send the prompt",
+        false => "pick a model, then send the prompt",
+    };
     format!(
-        "{agent} is open on {} of \u{201c}{title}\u{201d}: pick a model, then send the prompt",
+        "{agent} is open on {} of \u{201c}{title}\u{201d}: {due}",
         stage.label()
     )
 }
@@ -2250,21 +2392,32 @@ mod tests {
             ..StageRun::default()
         };
         let fixes = [("fixes", String::from("x"))];
-        assert_eq!(takes_new_work(Some(&held), "claude", &fixes), Some(&held));
+        assert_eq!(
+            takes_new_work(Some(&held), "claude", None, &fixes),
+            Some(&held)
+        );
         // A restart asks for a new agent, another command is another agent.
-        assert_eq!(takes_new_work(Some(&held), "claude", &[]), None);
-        assert_eq!(takes_new_work(Some(&held), "cursor-agent", &fixes), None);
+        assert_eq!(takes_new_work(Some(&held), "claude", None, &[]), None);
+        assert_eq!(
+            takes_new_work(Some(&held), "cursor-agent", None, &fixes),
+            None
+        );
+        // Another model was picked since: a tab can't change it, so a new one.
+        assert_eq!(
+            takes_new_work(Some(&held), "claude", Some("opus"), &fixes),
+            None
+        );
         let closed = StageRun {
             pane: None,
             ..held.clone()
         };
-        assert_eq!(takes_new_work(Some(&closed), "claude", &fixes), None);
+        assert_eq!(takes_new_work(Some(&closed), "claude", None, &fixes), None);
         let sent = StageRun {
             held: false,
             ..held
         };
-        assert_eq!(takes_new_work(Some(&sent), "claude", &fixes), None);
-        assert_eq!(takes_new_work(None, "claude", &fixes), None);
+        assert_eq!(takes_new_work(Some(&sent), "claude", None, &fixes), None);
+        assert_eq!(takes_new_work(None, "claude", None, &fixes), None);
     }
 
     #[test]
@@ -3487,6 +3640,47 @@ mod tests {
         let chips = stage_chips(&f, Stage::Plan, Some(&set), &installed);
         assert_eq!(chips.len(), 3);
         assert_eq!(lit(&chips), ["opencode"]);
+    }
+
+    #[test]
+    fn a_stages_model_is_offered_for_an_agent_gerdr_can_tell_and_kept_per_agent() {
+        let installed = claude_and_cursor();
+        let mut f = feature("a", vec![repo("r", true)], 0);
+        let slot = |f: &Feature| stage_model_slot(f, Stage::Plan, None, &installed);
+        let lit = |f: &Feature| who(stage_pick(f, Stage::Plan, None, &installed));
+        assert_eq!(slot(&f).expect("a slot").picked, None);
+        let agent = lit(&f);
+        (f.stage_models.entry(Stage::Plan).or_default()).insert(agent.clone(), "opus".into());
+        assert_eq!(slot(&f).expect("a slot").picked.as_deref(), Some("opus"));
+        // Another agent has none of its own yet, and the first keeps its own.
+        let other = match agent.as_str() {
+            "Cursor" => "Claude Code",
+            _ => "Cursor",
+        };
+        f.stage_agents.insert(Stage::Plan, other.into());
+        assert_eq!(lit(&f), other);
+        assert_eq!(slot(&f).expect("a slot").picked, None);
+        f.stage_agents.insert(Stage::Plan, agent);
+        assert_eq!(slot(&f).expect("a slot").picked.as_deref(), Some("opus"));
+        // A picked model is no model of another stage.
+        assert_eq!(
+            stage_model_slot(&f, Stage::Build, None, &installed).map(|s| s.picked),
+            Some(None)
+        );
+        // A CLI gerdr knows no flag of, or a stage no agent runs: no button.
+        let set = with_agents(&[(Stage::Plan, "opencode --prompt")]);
+        f.stage_agents.clear();
+        assert_eq!(
+            stage_model_slot(&f, Stage::Plan, Some(&set), &installed),
+            None
+        );
+        assert_eq!(stage_model_slot(&f, Stage::Verify, None, &installed), None);
+        // Nor on a stage that is done.
+        let f = feature("b", vec![repo("r", true)], 3);
+        assert_eq!(
+            stage_model_slot(&f, Stage::Discover, None, &installed),
+            None
+        );
     }
 
     #[test]

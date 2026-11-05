@@ -76,6 +76,12 @@ impl Flavor {
         !matches!(self, Flavor::Other | Flavor::T3)
     }
 
+    /// Whether gerdr can start it on a model: `--model`, checked for these
+    /// two (a second one wins over one in the `[agents]` command).
+    pub fn takes_model(self) -> bool {
+        matches!(self, Flavor::Claude | Flavor::Cursor)
+    }
+
     /// Whether gerdr can know its chat's id, to go back to the chat.
     pub fn resumes(self) -> bool {
         matches!(self, Flavor::Claude | Flavor::Cursor)
@@ -97,7 +103,7 @@ impl Flavor {
 }
 
 /// The program `command` runs: past `env`, `exec` and the variables it sets.
-fn program(command: &str) -> &str {
+pub(crate) fn program(command: &str) -> &str {
     command
         .split_whitespace()
         .find(|word| !matches!(*word, "env" | "exec") && !word.contains('='))
@@ -193,6 +199,28 @@ pub fn command_line(base: &str, prompt: &Path, dirs: &[PathBuf]) -> String {
     line
 }
 
+/// `base` started on `model`, for a CLI that can be told one.
+pub fn with_model(base: &str, model: Option<&str>) -> String {
+    match model.filter(|_| Flavor::of(base).takes_model()) {
+        Some(model) => format!(
+            "{} --model {}",
+            base.trim(),
+            crate::desktop::shell_quote(model)
+        ),
+        None => base.trim().to_owned(),
+    }
+}
+
+/// What `run`'s chat is resumed with. Claude's chat keeps its model (tried on
+/// 2.1.318), and one changed there with `/model` must stay. Whether Cursor's
+/// does couldn't be told from its chat, so it is told again.
+pub fn resume_base(run: &StageRun) -> String {
+    match Flavor::of(&run.base) {
+        Flavor::Cursor => with_model(&run.base, run.asked_model.as_deref()),
+        _ => run.base.clone(),
+    }
+}
+
 /// The shell command that goes back to chat `session` of `base`, in the
 /// folder it ran in, allowed into `dirs` too.
 pub fn resume_line(base: &str, session: &str, dirs: &[PathBuf]) -> String {
@@ -281,6 +309,10 @@ pub struct StageRun {
     /// (`read_models`). Kept here as the chat may be cleaned up later.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// The model it was picked to start on, if one was: `model` says what
+    /// it went on to use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asked_model: Option<String>,
     /// The herdr pane it runs in, while known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pane: Option<String>,
@@ -327,6 +359,15 @@ impl StageRun {
     /// Whether its agent is there, waiting for the user to send its prompt.
     pub fn waits_to_send(&self) -> bool {
         self.held && self.live()
+    }
+
+    /// What is said of it while it waits for its prompt: its model was
+    /// picked already, or that is still to do, in its tab.
+    pub fn waiting_words(&self) -> &'static str {
+        match self.asked_model {
+            Some(_) => "waiting for you \u{b7} send the prompt",
+            None => "waiting for you \u{b7} pick a model and send the prompt",
+        }
     }
 
     /// Its T3 Code thread's id, once it was sent.
@@ -695,6 +736,51 @@ mod tests {
             command_line("claude", Path::new("/p.md"), &[]),
             "claude --session-id \"$(tee /p.session </proc/sys/kernel/random/uuid)\""
         );
+    }
+
+    #[test]
+    fn a_picked_model_goes_on_the_command_of_a_cli_that_takes_one() {
+        assert_eq!(with_model("claude", Some("opus")), "claude --model opus");
+        assert_eq!(
+            with_model(" env A=1 cursor-agent ", Some("x[context=1m, fast=false]")),
+            "env A=1 cursor-agent --model 'x[context=1m, fast=false]'"
+        );
+        assert_eq!(with_model("claude", None), "claude");
+        assert_eq!(with_model("codex", Some("o3")), "codex");
+        assert_eq!(with_model("aider --yes", Some("o3")), "aider --yes");
+        // One in the `[agents]` command comes first, so the pick wins.
+        assert_eq!(
+            with_model("claude --model haiku", Some("opus")),
+            "claude --model haiku --model opus"
+        );
+        // Who reads the command still knows the agent, and its chat's id
+        // comes after the model, which a rerun keeps.
+        let line = command_line(&with_model("claude", Some("opus")), Path::new("/p.md"), &[]);
+        assert_eq!(Flavor::of(&line), Flavor::Claude);
+        let argv: Vec<&str> = line.split_whitespace().collect();
+        assert_eq!(rerun_argv(&argv)[..3], ["claude", "--model", "opus"]);
+    }
+
+    #[test]
+    fn a_resumed_chat_is_told_its_model_only_where_it_may_lose_it() {
+        let run = |base: &str| StageRun {
+            base: base.to_owned(),
+            asked_model: Some("opus".into()),
+            ..StageRun::default()
+        };
+        assert_eq!(resume_base(&run("claude")), "claude");
+        assert_eq!(
+            resume_base(&run("cursor-agent")),
+            "cursor-agent --model opus"
+        );
+    }
+
+    #[test]
+    fn waiting_says_a_model_is_to_pick_only_when_none_was() {
+        let mut run = StageRun::default();
+        assert!(run.waiting_words().contains("pick a model"));
+        run.asked_model = Some("opus".into());
+        assert!(!run.waiting_words().contains("pick a model"));
     }
 
     #[test]

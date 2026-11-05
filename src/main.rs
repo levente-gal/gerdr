@@ -100,6 +100,7 @@ mod service_watch;
 mod services;
 mod sidebar;
 mod stage_lock;
+mod stage_models;
 mod switcher;
 mod syntax;
 mod system_theme;
@@ -7166,6 +7167,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     state.start_services();
     state.watch_system_theme(system_theme);
     state.watch_zoxide();
+    state.watch_cursor_models();
     state.watch_profile_imports();
     state.watch_keyring();
     state.watch_installed_apps();

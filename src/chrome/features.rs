@@ -14,13 +14,14 @@ use std::{
 };
 
 use super::{
-    AGENT_ICON, ButtonStyle, CHECKBOX_GAP, CHECKBOX_ROW, Canvas, Check, DETAIL_FONT_SIZE,
-    DIALOG_WIDTH, DOT, Dot, FONT_SIZE, FieldSpot, LABEL_FONT_SIZE, ListBar, POPUP_RADIUS, Painter,
-    Palette, QUIT_BODY, QUIT_BUTTON, QUIT_BUTTON_GAP, QUIT_LINE_GAP, QUIT_PADDING, QUIT_TITLE,
-    Rect, Rgb, SHADOW, SMALL_FONT_SIZE, Thumb, agent_icon, band, button_width, check, chevron_down,
-    chevron_side, copy, cross, dialog_buttons, field_text, focus_ring, footer_hint_spots,
-    gutter_track, hint_strs, icon_sdf, measure, measure_bold, measured_footer_height, mix, phys,
-    physical, plus, rect_px, segment_tint, status_dot, tab, trash,
+    AGENT_ICON, BUTTON_PADDING, ButtonStyle, CHECKBOX_GAP, CHECKBOX_ROW, Canvas, Check,
+    DETAIL_FONT_SIZE, DIALOG_WIDTH, DOT, Dot, FONT_SIZE, FieldSpot, LABEL_FONT_SIZE, ListBar,
+    POPUP_RADIUS, Painter, Palette, QUIT_BODY, QUIT_BUTTON, QUIT_BUTTON_GAP, QUIT_LINE_GAP,
+    QUIT_PADDING, QUIT_TITLE, Rect, Rgb, SHADOW, SMALL_FONT_SIZE, Thumb, agent_icon, band,
+    button_width, check, chevron_down, chevron_side, copy, cross, dialog_buttons, field_text,
+    focus_ring, footer_hint_spots, gutter_track, hint_strs, icon_sdf, measure, measure_bold,
+    measured_footer_height, mix, phys, physical, plus, rect_px, segment_tint, status_dot, tab,
+    trash,
 };
 use super::{code_mark, eye, flask, magnifier, plan_review_mark, ship_arrow, sparkle, text_lines};
 use crate::text_field::Line;
@@ -453,6 +454,9 @@ pub enum PageSection {
         buttons: Vec<usize>,
         /// The agents to pick for the stage's next start, if it offers any.
         picks: Vec<AgentChip>,
+        /// What the button picking its model says, after `picks`, where
+        /// gerdr can start that agent on a model.
+        model: Option<String>,
     },
     /// A stage's file (`brief.md`, `plan.md`): its name, how it stands,
     /// and the indices in `StagePage::buttons` of the buttons it holds
@@ -647,6 +651,8 @@ pub enum FeatureTabHit {
     AgentPick(usize),
     /// One of those that can't be picked: it only says why.
     AgentPickOff(usize),
+    /// The button picking the agent's model.
+    AgentModel,
     /// A segment of Build's milestone choice: 0 one agent, 1 one per
     /// milestone.
     MilestoneMode(usize),
@@ -703,6 +709,8 @@ pub struct FeatureTabLayout {
     /// The agent card's chips: their outline, and each chip as its `picks`
     /// has them.
     pub agent_picks: Option<(Rect, Vec<Rect>)>,
+    /// The agent card's button picking its model.
+    pub agent_model: Option<Rect>,
     /// Build's milestone choice: its outline and two segments, unscrolled.
     pub milestone_mode: Option<(Rect, [Rect; 2])>,
     /// Each finding's card, in the page's order.
@@ -765,6 +773,9 @@ impl FeatureTabLayout {
                     .position(|b| b.is_some_and(|b| b.contains(at)))
                     .map(FeatureTabHit::PageButton)
                     .or_else(|| self.agent_pick_at(view, at))
+                    .or_else(|| {
+                        (self.agent_model?.contains(at)).then_some(FeatureTabHit::AgentModel)
+                    })
                     .or_else(|| {
                         let (_, segments) = self.milestone_mode.as_ref()?;
                         let i = segments.iter().position(|r| r.contains(at))?;
@@ -993,6 +1004,8 @@ const PICK_ICON: i32 = 14;
 /// `placeholder`: a logo plainly dimmer than one that can be.
 const PICK_OFF: f32 = 0.5;
 const PICK_LABEL: i32 = 48;
+/// The widest the button picking an agent's model gets.
+const AGENT_MODEL_MAX: i32 = 220;
 /// Build's milestone choice: its segments' words.
 const MODE_SEGMENTS: [&str; 2] = ["One agent", "Agent per milestone"];
 const AGENT_RADIUS: f32 = 6.0;
@@ -1790,6 +1803,12 @@ fn agent_picks_width(n: usize) -> i32 {
     n as i32 * PICK_CHIP + 2 * PICK_TRACK_PAD
 }
 
+/// How wide the button picking an agent's model is, its label ending in an
+/// ellipsis past that: a model's id can be long.
+fn agent_model_width(label: &str) -> i32 {
+    button_width(label).min(AGENT_MODEL_MAX)
+}
+
 /// Where `n` agent chips go on a row at `(x, y)`, `room` wide: their
 /// outline and each chip, narrower alike when they don't fit.
 fn agent_pick_rects(n: usize, x: i32, y: i32, room: i32) -> (Rect, Vec<Rect>) {
@@ -1832,11 +1851,19 @@ fn milestone_mode_rects(row: Rect) -> (Rect, [Rect; 2]) {
     (track, [left, right])
 }
 
+/// Where the agent card's choices go: its chips (their outline, then each)
+/// and the button picking its model.
+#[derive(Default)]
+struct AgentChoiceSpots {
+    picks: Option<(Rect, Vec<Rect>)>,
+    model: Option<Rect>,
+}
+
 fn page_stack(
     view: &FeatureTabView,
     s: &mut Stack,
     buttons: &mut [Option<Rect>],
-    agent_picks: &mut Option<(Rect, Vec<Rect>)>,
+    choices: &mut AgentChoiceSpots,
     milestone_mode: &mut Option<(Rect, [Rect; 2])>,
     finding_cards: &mut Vec<Rect>,
     activity: bool,
@@ -1912,8 +1939,10 @@ fn page_stack(
                 tail,
                 buttons: held,
                 picks,
+                model,
                 ..
             } => {
+                let model_w = model.as_deref().map(agent_model_width);
                 let held: Vec<usize> = (held.iter().copied())
                     .filter(|b| *b < page.buttons.len())
                     .collect();
@@ -1941,14 +1970,25 @@ fn page_stack(
                         let end = placed
                             .first()
                             .map_or(inner_right, |(x, _)| x - QUIT_BUTTON_GAP);
-                        *agent_picks = Some(agent_pick_rects(picks.len(), from, row, end - from));
+                        // The model after the chips, who give way to it.
+                        let taken = model_w.map_or(0, |w| w + QUIT_BUTTON_GAP);
+                        let room = (end - from - taken).max(1);
+                        let (track, chips) = agent_pick_rects(picks.len(), from, row, room);
+                        if let Some(w) = model_w {
+                            let x = track.loc.x + track.size.w + QUIT_BUTTON_GAP;
+                            let w = w.min((end - x).max(1));
+                            choices.model =
+                                Some(Rectangle::new((x, row).into(), (w, ROW_BUTTON).into()));
+                        }
+                        choices.picks = Some((track, chips));
                     }
                     continue;
                 }
-                // A run: buttons, then chips, at the head's end while its
-                // name and some of its status keep room, else in rows below.
+                // A run: buttons, chips, then its model, at the head's end
+                // while its name and some of its status keep room, else in
+                // rows below.
                 let chips = (!picks.is_empty()).then(|| agent_picks_width(picks.len()));
-                let widths: Vec<i32> = widths.chain(chips).collect();
+                let widths: Vec<i32> = widths.chain(chips).chain(model_w).collect();
                 let name_w = measure_bold(name, FONT_SIZE)
                     .unwrap_or_else(|| width_of(name, FONT_SIZE))
                     .ceil() as i32;
@@ -1968,9 +2008,13 @@ fn page_stack(
                 for ((b, place), w) in held.iter().zip(&placed).zip(&widths) {
                     buttons[*b] = Some(Rectangle::new(spot(place).into(), (*w, ROW_BUTTON).into()));
                 }
-                if let (Some(w), Some(place)) = (chips, placed.last()) {
+                if let (Some(w), Some(place)) = (chips, placed.get(held.len())) {
                     let (x, y) = spot(place);
-                    *agent_picks = Some(agent_pick_rects(picks.len(), x, y, w));
+                    choices.picks = Some(agent_pick_rects(picks.len(), x, y, w));
+                }
+                if let (Some(w), Some(place)) = (model_w, placed.last()) {
+                    choices.model =
+                        Some(Rectangle::new(spot(place).into(), (w, ROW_BUTTON).into()));
                 }
             }
             PageSection::MilestoneMode { fresh } => {
@@ -2259,7 +2303,7 @@ pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayou
     let mut pieces: [Vec<(Rect, Piece)>; 3] = Default::default();
     let mut content = [0; 3];
     let mut page_buttons = vec![None; view.page.buttons.len()];
-    let mut agent_picks = None;
+    let mut choices = AgentChoiceSpots::default();
     let mut milestone_mode = None;
     let mut finding_cards = Vec::new();
     for column in TabColumn::ALL {
@@ -2284,7 +2328,7 @@ pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayou
                 view,
                 &mut s,
                 &mut page_buttons,
-                &mut agent_picks,
+                &mut choices,
                 &mut milestone_mode,
                 &mut finding_cards,
                 columns[TabColumn::Activity as usize].is_none(),
@@ -2316,7 +2360,8 @@ pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayou
         repo_removes,
         more_repos,
         page_buttons,
-        agent_picks,
+        agent_picks: choices.picks,
+        agent_model: choices.model,
         milestone_mode,
         finding_cards,
         hints,
@@ -2602,7 +2647,7 @@ fn slice_view(view: &FeatureTabView, slice: TabSlice) -> FeatureTabView {
         TabSlice::Column(TabColumn::Page) => {
             matches!(
                 hit,
-                H::PageButton(_) | H::AgentPick(_) | H::MilestoneMode(_)
+                H::PageButton(_) | H::AgentPick(_) | H::AgentModel | H::MilestoneMode(_)
             )
         }
         TabSlice::Column(TabColumn::Activity) => false,
@@ -3693,6 +3738,7 @@ impl Painter {
                     tail,
                     buttons,
                     picks,
+                    model,
                 }) = view.page.sections.get(*k)
                 else {
                     return;
@@ -3730,9 +3776,14 @@ impl Painter {
                         agent_icon(c, *rect, PICK_ICON, chip.icon, tint, scale);
                     }
                 }
+                let model_spot = l.agent_model.filter(|_| model.is_some()).map(at);
+                if let (Some(label), Some(r)) = (model, model_spot) {
+                    self.agent_model_button(c, view, label, r, scale, p);
+                }
                 let held: Vec<Rect> = (buttons.iter())
                     .filter_map(|i| l.page_buttons.get(*i).copied().flatten())
                     .map(at)
+                    .chain(model_spot)
                     .collect();
                 for (i, r) in (buttons.iter())
                     .filter_map(|i| Some((*i, l.page_buttons.get(*i).copied().flatten()?)))
@@ -4036,6 +4087,36 @@ impl Painter {
             button.style,
             scale,
             p,
+        );
+    }
+
+    /// The button picking an agent's model: its label from the left, as it
+    /// may not fit whole.
+    fn agent_model_button(
+        &self,
+        c: &mut Canvas,
+        view: &FeatureTabView,
+        label: &str,
+        rect: Rect,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let hovered = view.hover == Some(FeatureTabHit::AgentModel);
+        self.button(c, "", rect, (hovered, false), ButtonStyle::Plain, scale, p);
+        let text = Rectangle::new(
+            (rect.loc.x + BUTTON_PADDING, rect.loc.y).into(),
+            ((rect.size.w - 2 * BUTTON_PADDING).max(1), rect.size.h).into(),
+        );
+        let (x, end) = phys(text, scale);
+        self.text(
+            c,
+            label,
+            FONT_SIZE,
+            x,
+            end,
+            band(text, scale),
+            scale,
+            p.text,
         );
     }
 
@@ -5399,6 +5480,57 @@ mod tests {
             node.agent = None;
         }
         assert_eq!(with, height(&view) + NODE_LINE);
+    }
+
+    /// `view` with its agent card's model button saying `label`.
+    fn with_model(mut view: FeatureTabView, label: &str) -> FeatureTabView {
+        for section in &mut view.page.sections {
+            if let PageSection::Agent { model, .. } = section {
+                *model = Some(label.to_owned());
+            }
+        }
+        view
+    }
+
+    #[test]
+    fn the_model_button_follows_the_chips_and_is_hit_where_it_shows() {
+        let mut view = with_model(tab_with_picks(false), "Model: opus");
+        let l = feature_tab_layout(&view, Rectangle::from_size((1180, 800).into()));
+        let (track, _) = l.agent_picks.clone().expect("chips placed");
+        let button = l.agent_model.expect("placed");
+        assert_eq!(button.loc.y, track.loc.y);
+        assert!(button.loc.x >= track.loc.x + track.size.w);
+        let at = |r: Rect| (r.loc.x + r.size.w / 2, r.loc.y + r.size.h / 2).into();
+        assert_eq!(l.hit(&view, at(button)), Some(FeatureTabHit::AgentModel));
+        view.scroll[TabColumn::Page as usize] = 40.0;
+        let lifted = Rectangle::new(button.loc - Point::from((0, 40)), button.size);
+        let l = feature_tab_layout(&view, Rectangle::from_size((1180, 800).into()));
+        assert_eq!(l.hit(&view, at(lifted)), Some(FeatureTabHit::AgentModel));
+    }
+
+    #[test]
+    fn no_label_no_model_button() {
+        let view = tab_with_picks(false);
+        assert_eq!(
+            feature_tab_layout(&view, Rectangle::from_size((1180, 800).into())).agent_model,
+            None
+        );
+    }
+
+    #[test]
+    fn a_long_model_stays_on_the_card_of_a_narrow_tab() {
+        let long = "Model: claude-opus-4-8[context=1m,effort=high,fast=false]";
+        let view = with_model(tab_with_picks(false), long);
+        for w in [500, 860, 1180] {
+            let l = feature_tab_layout(&view, Rectangle::from_size((w, 800).into()));
+            let button = l.agent_model.expect("placed");
+            assert!(button.size.w <= AGENT_MODEL_MAX, "{button:?}");
+            assert!(button.loc.x + button.size.w <= w, "{w}: {button:?}");
+            let (track, _) = l.agent_picks.clone().expect("chips placed");
+            let (a, b) = (button, track);
+            let apart = a.loc.x >= b.loc.x + b.size.w || a.loc.y >= b.loc.y + b.size.h;
+            assert!(apart, "{w}: {a:?} on {b:?}");
+        }
     }
 
     #[test]

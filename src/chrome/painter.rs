@@ -139,7 +139,7 @@ pub(super) fn keycap_text(key: &str) -> std::borrow::Cow<'_, str> {
 }
 
 /// Room either side of a button's label, and the narrowest a button is.
-const BUTTON_PADDING: i32 = 20;
+pub(super) const BUTTON_PADDING: i32 = 20;
 const BUTTON_MIN_WIDTH: i32 = 84;
 
 /// How a button looks (see `Painter::button`).

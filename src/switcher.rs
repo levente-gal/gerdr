@@ -41,11 +41,15 @@ use smithay::{
 
 use crate::{
     Gerdr, WorkspaceKind,
+    agent_icons::AgentIcon,
     agents::AgentKey,
     app_icons::AppIcon,
     chrome::{self, ItemIcon, SwitcherRow, SwitcherView, status_label},
     cli_agents::Start,
-    desktop, fuzzy, git, home_dir,
+    desktop,
+    feature::{Stage, agents::Flavor},
+    feature_agents::ModelSlot,
+    fuzzy, git, home_dir,
     input::Overlay,
     launch::{self, Place},
     paths::tilde,
@@ -53,6 +57,7 @@ use crate::{
     project_list::RowTops,
     projects::Project,
     scroll::{Bounds, Motion, Scroll},
+    stage_models::{self, Offer, Reading},
     text_field::{Edit, TextField},
     toast::{Level, ToastHit},
     tooltip::Tooltip,
@@ -112,6 +117,20 @@ pub enum Target {
     NewFeature,
     /// The feature panel on the project's features.
     Features,
+    /// A model for a feature stage's agent, picked (see
+    /// `Gerdr::open_model_picker`).
+    StageModel(ModelPick),
+}
+
+/// A model picked for `agent` on `stage` of feature `slug`; none for what it
+/// uses on its own.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelPick {
+    pub project: String,
+    pub slug: String,
+    pub stage: Stage,
+    pub agent: String,
+    pub model: Option<String>,
 }
 
 impl Target {
@@ -124,6 +143,7 @@ impl Target {
             Target::Project(_) => Section::Projects,
             Target::App(_) => Section::Apps,
             Target::Folder(_) => Section::Folders,
+            Target::StageModel(_) => Section::Models,
             Target::Welcome
             | Target::Shortcuts
             | Target::Inbox
@@ -153,6 +173,7 @@ impl Target {
             Target::Project(_) => "project",
             Target::App(_) => "app",
             Target::Folder(_) => "folder",
+            Target::StageModel(_) => "model",
             Target::Welcome
             | Target::Shortcuts
             | Target::Inbox
@@ -186,6 +207,7 @@ pub enum Section {
     Apps,
     Folders,
     Commands,
+    Models,
 }
 
 impl Section {
@@ -200,6 +222,7 @@ impl Section {
             Section::Apps => "Apps",
             Section::Folders => "Recent folders",
             Section::Commands => "Commands",
+            Section::Models => "Models",
         }
     }
 
@@ -293,6 +316,11 @@ pub struct Switcher {
     hint_hover: Option<usize>,
     /// The installed apps' icons by program, for the typed command.
     icons: HashMap<String, AppIcon>,
+    /// Picking a stage's model: what a pick is for, its model left out. The
+    /// first item is the query, as a model no row offers.
+    model_slot: Option<ModelPick>,
+    /// What the query field says while empty, picking a stage's model.
+    model_hint: &'static str,
 }
 
 impl Switcher {
@@ -320,6 +348,8 @@ impl Switcher {
             chip_hover: None,
             hint_hover: None,
             icons: HashMap::new(),
+            model_slot: None,
+            model_hint: "",
         };
         switcher.set_items(items);
         switcher
@@ -332,6 +362,9 @@ impl Switcher {
         if self.run {
             // The typed command's place; `refilter` fills it in.
             items.insert(0, typed_command("", &self.icons, self.place));
+        }
+        if let Some(slot) = &self.model_slot {
+            items.insert(0, typed_model(slot, ""));
         }
         let mut categories: Vec<Section> = items
             .iter()
@@ -371,12 +404,15 @@ impl Switcher {
         if self.run {
             self.items[0] = typed_command(&command, &self.icons, self.place);
         }
+        if let Some(slot) = &self.model_slot {
+            self.items[0] = typed_model(slot, &command);
+        }
         let typed = self.run.then(|| self.items[0].target.clone());
         let candidates = self
             .items
             .iter()
             .enumerate()
-            .skip(usize::from(self.run))
+            .skip(usize::from(self.run || self.model_slot.is_some()))
             .filter(|(_, item)| self.shows(item.section))
             // The typed command, run before, is listed once: first.
             .filter(|(_, item)| Some(&item.target) != typed.as_ref());
@@ -436,6 +472,20 @@ impl Switcher {
         {
             selected = at(&found, best).unwrap_or(0);
         }
+        // A model no row offers goes last, chosen only when nothing matches.
+        if self.model_slot.is_some() && !command.is_empty() {
+            let typed = &self.items[0].target;
+            if !self.items[1..].iter().any(|item| item.target == *typed) {
+                found.push(Match {
+                    item: 0,
+                    label: Vec::new(),
+                    detail: Vec::new(),
+                });
+                if best.is_none() {
+                    selected = found.len() - 1;
+                }
+            }
+        }
         let sections: Vec<Section> = found.iter().map(|m| self.items[m.item].section).collect();
         self.places = chrome::switcher_places(
             (0..sections.len()).map(|i| i == 0 || sections[i - 1] != sections[i]),
@@ -475,6 +525,15 @@ impl Switcher {
             .and_then(|c| self.categories.iter().position(|s| *s == c))
             .map_or(0, |i| i as isize + 1);
         self.set_category((at + by).rem_euclid(n) as usize);
+    }
+
+    /// Select the row of `target`, if one matches.
+    fn select(&mut self, target: &Target) {
+        let at = (self.matches.iter()).position(|m| self.items[m.item].target == *target);
+        if let Some(i) = at {
+            self.selected = i;
+            self.reveal();
+        }
     }
 
     fn picked(&self) -> Option<&Target> {
@@ -646,6 +705,7 @@ impl Switcher {
         let selected = self.selected.checked_sub(first).filter(|i| *i < rows.len());
         let hover = self.hover.filter(|h| *h < rows.len());
         let hint = match (self.run, self.place) {
+            _ if self.model_slot.is_some() => self.model_hint,
             (true, Place::Split) => "Command to run in a split…",
             (true, Place::Tab) => "Command to run in a new tab…",
             (false, _) => "Go to a workspace, tab, agent, project, app, folder or command…",
@@ -683,7 +743,12 @@ impl Switcher {
 
     /// The footer's key hints: at most `chrome::SWITCHER_HINTS`.
     fn hints(&self) -> Vec<(String, String)> {
-        let mut hints = vec![("Enter", if self.run { "run" } else { "open" })];
+        let enter = match (self.run, &self.model_slot) {
+            (true, _) => "run",
+            (false, Some(_)) => "pick",
+            (false, None) => "open",
+        };
+        let mut hints = vec![("Enter", enter)];
         if self.place == Place::Split {
             hints.push(("Alt+Enter", "in a new tab"));
         }
@@ -731,6 +796,19 @@ fn command_icon(command: &str, icons: &HashMap<String, AppIcon>) -> ItemIcon {
         .map_or(ItemIcon::App, ItemIcon::Picture)
 }
 
+/// The item of a model typed into the picker of a stage's model.
+fn typed_model(slot: &ModelPick, typed: &str) -> Item {
+    Item::new(
+        ItemIcon::Command,
+        format!("Use \u{201c}{typed}\u{201d}"),
+        "a model not listed, by its full name or id",
+        Target::StageModel(ModelPick {
+            model: Some(typed.to_owned()),
+            ..slot.clone()
+        }),
+    )
+}
+
 /// The run prompt's item for the typed `command`, to run in `place`: an
 /// address, even without `https://`, opens as a web page.
 fn typed_command(command: &str, icons: &HashMap<String, AppIcon>, place: Place) -> Item {
@@ -763,6 +841,7 @@ fn frecency_key(
         Target::Tab(w, t) => format!("tab:{}:{t}", workspace_dir(*w)?.display()),
         Target::Agent(key) => format!("agent:{key}"),
         Target::NewAgent(_, command) => format!("agent-cli:{command}"),
+        Target::StageModel(pick) => format!("model:{}:{}", pick.agent, pick.model.as_ref()?),
         Target::T3(_) => "t3".to_owned(),
         Target::Project(id) => format!("project:{id}"),
         Target::Folder(dir) => format!("folder:{}", dir.display()),
@@ -897,6 +976,117 @@ impl Gerdr {
         let mut switcher = Switcher::new(self.weighed(items), false, Place::Tab);
         switcher.set_room(self.switcher_room());
         self.switcher = Some(switcher);
+    }
+
+    /// Open the switcher as the picker of `stage`'s model on feature `slug`,
+    /// for the agent of `slot`, on the row of the model picked now.
+    pub(crate) fn open_model_picker(
+        &mut self,
+        project: &str,
+        slug: &str,
+        stage: Stage,
+        slot: ModelSlot,
+    ) {
+        if Flavor::of(&slot.base) == Flavor::Cursor {
+            self.read_cursor_models(&slot.base);
+        }
+        self.make_room_for_switcher();
+        let pick = ModelPick {
+            project: project.to_owned(),
+            slug: slug.to_owned(),
+            stage,
+            agent: slot.agent.clone(),
+            model: None,
+        };
+        let now = Target::StageModel(ModelPick {
+            model: slot.picked.clone(),
+            ..pick.clone()
+        });
+        let mut switcher = Switcher::new(Vec::new(), false, Place::Tab);
+        switcher.model_slot = Some(pick);
+        switcher.model_hint = self.model_hint(&slot);
+        switcher.set_items(self.model_items(&slot, switcher.model_slot.as_ref()));
+        switcher.select(&now);
+        switcher.set_room(self.switcher_room());
+        self.switcher = Some(switcher);
+    }
+
+    /// Whether the picker of a stage's model is open.
+    pub(crate) fn model_picker_open(&self) -> bool {
+        (self.switcher.as_ref()).is_some_and(|s| s.model_slot.is_some())
+    }
+
+    /// Bring the open picker of a stage's model up to date, after a read of
+    /// the models it offers.
+    pub(crate) fn refresh_model_picker(&mut self) {
+        let Some(mut switcher) = self.switcher.take_if(|s| s.model_slot.is_some()) else {
+            return;
+        };
+        let slot = (switcher.model_slot.as_ref())
+            .and_then(|p| self.model_slot_of(&p.project, &p.slug, p.stage));
+        if let Some(slot) = slot {
+            switcher.model_hint = self.model_hint(&slot);
+            switcher.set_items(self.model_items(&slot, switcher.model_slot.as_ref()));
+        }
+        self.switcher = Some(switcher);
+    }
+
+    /// What the picker of `slot`'s model says over its list.
+    fn model_hint(&self, slot: &ModelSlot) -> &'static str {
+        let models = &self.features.cursor_models;
+        match Flavor::of(&slot.base) {
+            Flavor::Cursor if models.offers.is_empty() => match models.reading {
+                Reading::Busy => "Reading Cursor's models…",
+                Reading::Failed => "Couldn't read Cursor's models: type a model's id…",
+                Reading::Idle => "Type a model's id…",
+            },
+            _ => "Model for this stage's next start…",
+        }
+    }
+
+    /// The rows of the picker of `slot`'s model: the agent's own choice, then
+    /// what it offers, and the model picked now if it offers none such.
+    fn model_items(&self, slot: &ModelSlot, pick: Option<&ModelPick>) -> Vec<Item> {
+        let Some(pick) = pick else {
+            return Vec::new();
+        };
+        let mut offers = match Flavor::of(&slot.base) {
+            Flavor::Cursor => self.features.cursor_models.offers.clone(),
+            _ => stage_models::claude_offers(),
+        };
+        if let Some(id) = &slot.picked
+            && !offers.iter().any(|o| o.id == *id)
+        {
+            offers.push(Offer {
+                id: id.clone(),
+                name: id.clone(),
+            });
+        }
+        let icon = AgentIcon::from_agent(&slot.agent)
+            .picture()
+            .map_or(ItemIcon::Command, |picture| {
+                ItemIcon::Picture(picture.clone())
+            });
+        let row = |label: String, detail: String, model: Option<String>| {
+            let now = model == slot.picked;
+            let detail = match now {
+                true => format!("{detail} \u{b7} picked"),
+                false => detail,
+            };
+            Item::new(
+                icon.clone(),
+                label,
+                detail,
+                Target::StageModel(ModelPick {
+                    model,
+                    ..pick.clone()
+                }),
+            )
+        };
+        let own = format!("{}'s own choice", slot.agent);
+        let mut items = vec![row("Default".to_owned(), own, None)];
+        items.extend((offers.into_iter()).map(|o| row(o.name, o.id.clone(), Some(o.id))));
+        self.weighed(items)
     }
 
     /// Open the switcher as the run prompt, for a command to launch in
@@ -1186,7 +1376,8 @@ impl Gerdr {
 
     /// Bring the open switcher's items up to date.
     pub fn refresh_switcher(&mut self) {
-        if let Some(mut switcher) = self.switcher.take_if(|s| !s.run) {
+        // What the run prompt and the picker of a model list is their own.
+        if let Some(mut switcher) = self.switcher.take_if(|s| !s.run && s.model_slot.is_none()) {
             let items = self.switcher_items();
             switcher.set_items(items);
             self.switcher = Some(switcher);
@@ -1330,6 +1521,13 @@ impl Gerdr {
             Target::Tasks => self.open_tasks(0),
             Target::NewFeature => self.open_new_feature(None),
             Target::Features => self.open_features(),
+            Target::StageModel(pick) => self.set_stage_model(
+                &pick.project,
+                &pick.slug,
+                pick.stage,
+                &pick.agent,
+                pick.model,
+            ),
             Target::Settings => self.open_settings(place),
             Target::ProjectFile(id) => self.open_project_file(&id),
             Target::ReloadProjects => self.reload_projects(),
@@ -1861,6 +2059,90 @@ mod tests {
         assert_eq!(switcher.view().hover, None);
     }
 
+    fn model_pick(model: Option<&str>) -> ModelPick {
+        ModelPick {
+            project: "p".into(),
+            slug: "s".into(),
+            stage: Stage::Plan,
+            agent: "Claude Code".into(),
+            model: model.map(str::to_owned),
+        }
+    }
+
+    /// The picker of a model, offering these and each agent's own choice.
+    fn model_switcher(offers: &[&str]) -> Switcher {
+        let row = |model: Option<&str>| {
+            Item::new(
+                ItemIcon::Command,
+                model.unwrap_or("Default"),
+                "",
+                Target::StageModel(model_pick(model)),
+            )
+        };
+        let items = std::iter::once(row(None))
+            .chain(offers.iter().map(|o| row(Some(o))))
+            .collect();
+        let mut switcher = Switcher::new(Vec::new(), false, Place::Tab);
+        switcher.model_slot = Some(model_pick(None));
+        switcher.set_items(items);
+        switcher
+    }
+
+    fn typed_in(switcher: &mut Switcher, query: &str) {
+        switcher.query.set(query);
+        switcher.refilter();
+    }
+
+    #[test]
+    fn a_model_picker_lists_its_rows_and_can_start_on_the_one_picked() {
+        let mut switcher = model_switcher(&["opus", "sonnet"]);
+        assert_eq!(switcher.matches.len(), 3);
+        // The first item is the query's place: it shows only with a query.
+        assert!(switcher.matches.iter().all(|m| m.item != 0));
+        assert_eq!(switcher.categories, [Section::Models]);
+        assert!(!switcher.chips());
+        let now = Target::StageModel(model_pick(Some("sonnet")));
+        switcher.select(&now);
+        assert_eq!(switcher.picked(), Some(&now));
+    }
+
+    #[test]
+    fn a_model_no_row_offers_can_be_typed() {
+        let mut switcher = model_switcher(&["opus"]);
+        typed_in(&mut switcher, "claude-x[1m]");
+        assert_eq!(
+            switcher.picked(),
+            Some(&Target::StageModel(model_pick(Some("claude-x[1m]"))))
+        );
+        // A row that matches is chosen over it, which stays one key away.
+        typed_in(&mut switcher, "op");
+        assert_eq!(
+            switcher.picked(),
+            Some(&Target::StageModel(model_pick(Some("opus"))))
+        );
+        assert_eq!(switcher.matches.last().map(|m| m.item), Some(0));
+        // One a row has isn't offered twice.
+        typed_in(&mut switcher, "opus");
+        assert!(switcher.matches.iter().all(|m| m.item != 0));
+    }
+
+    #[test]
+    fn a_models_rows_stay_as_new_ones_come_in() {
+        let mut switcher = model_switcher(&["a"]);
+        let now = Target::StageModel(model_pick(Some("a")));
+        switcher.select(&now);
+        let row = |model: &str| {
+            Item::new(
+                ItemIcon::Command,
+                model,
+                "",
+                Target::StageModel(model_pick(Some(model))),
+            )
+        };
+        switcher.set_items(vec![row("z"), row("a")]);
+        assert_eq!(switcher.picked(), Some(&now));
+    }
+
     #[test]
     fn frecency_keys_name_the_target() {
         let dir = |w: usize| (w == 0).then(|| PathBuf::from("/home/x/gerdr"));
@@ -1870,6 +2152,11 @@ mod tests {
             Some("workspace:/home/x/gerdr")
         );
         assert_eq!(key(&Target::Workspace(3)), None);
+        assert_eq!(
+            key(&Target::StageModel(model_pick(Some("opus")))).as_deref(),
+            Some("model:Claude Code:opus")
+        );
+        assert_eq!(key(&Target::StageModel(model_pick(None))), None);
         assert_eq!(
             key(&Target::Tab(0, 2)).as_deref(),
             Some("tab:/home/x/gerdr:2")

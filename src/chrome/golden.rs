@@ -2833,6 +2833,7 @@ pub(super) fn feature_tab() -> super::FeatureTabView {
                     ],
                     buttons: vec![1, 2],
                     picks: Vec::new(),
+                    model: None,
                 },
                 PageSection::Milestones {
                     done: 3,
@@ -2908,6 +2909,7 @@ fn feature_tab_plan_ready() -> super::FeatureTabView {
                 tail: Vec::new(),
                 buttons: vec![1],
                 picks: Vec::new(),
+                model: None,
             },
             PageSection::File {
                 name: "plan.md".into(),
@@ -3006,6 +3008,7 @@ fn feature_tab_discover_brief() -> super::FeatureTabView {
                 tail: Vec::new(),
                 buttons: vec![1],
                 picks: Vec::new(),
+                model: None,
             },
             PageSection::File {
                 name: "brief.md".into(),
@@ -3071,6 +3074,7 @@ fn feature_tab_resume() -> super::FeatureTabView {
             tail: Vec::new(),
             buttons: vec![1],
             picks: Vec::new(),
+            model: None,
         }],
     };
     view
@@ -3290,6 +3294,7 @@ fn feature_tab_start_over() -> super::FeatureTabView {
                 tail: Vec::new(),
                 buttons: vec![1],
                 picks: Vec::new(),
+                model: None,
             },
             PageSection::File {
                 name: "plan.md".into(),
@@ -3407,6 +3412,7 @@ fn feature_tab_picks_later() -> super::FeatureTabView {
             tail: Vec::new(),
             buttons: Vec::new(),
             picks: agent_chips(1, true),
+            model: None,
         }],
     };
     view
@@ -3426,6 +3432,17 @@ fn feature_tab_picks_running() -> super::FeatureTabView {
         restart.label = "Restart with Cursor".into();
     }
     view.hover = Some(super::FeatureTabHit::AgentPick(0));
+    view
+}
+
+/// `view` with the agent card's model button saying `label`, the pointer on it.
+fn with_model_button(mut view: super::FeatureTabView, label: &str) -> super::FeatureTabView {
+    for section in &mut view.page.sections {
+        if let super::PageSection::Agent { model, .. } = section {
+            *model = Some(label.into());
+        }
+    }
+    view.hover = Some(super::FeatureTabHit::AgentModel);
     view
 }
 
@@ -3481,6 +3498,7 @@ fn feature_tab_held() -> super::FeatureTabView {
             tail: Vec::new(),
             buttons: vec![0, 1],
             picks,
+            model: None,
         }],
     };
     view
@@ -3511,6 +3529,7 @@ fn feature_tab_fixing() -> super::FeatureTabView {
                 tail: Vec::new(),
                 buttons: vec![0],
                 picks: Vec::new(),
+                model: None,
             },
             super::PageSection::Lines {
                 label: "Findings".into(),
@@ -3549,6 +3568,7 @@ fn feature_tab_t3_draft() -> super::FeatureTabView {
             tail: Vec::new(),
             buttons: Vec::new(),
             picks,
+            model: None,
         }],
     };
     view
@@ -3699,7 +3719,7 @@ fn feature_tab_rail_wrap() -> super::FeatureTabView {
 }
 
 /// The feature tab's fixtures, by name.
-fn feature_tabs() -> [(&'static str, super::FeatureTabView); 27] {
+fn feature_tabs() -> [(&'static str, super::FeatureTabView); 29] {
     [
         ("tab_build", feature_tab()),
         ("tab_plan_ready", feature_tab_plan_ready()),
@@ -3718,6 +3738,17 @@ fn feature_tabs() -> [(&'static str, super::FeatureTabView); 27] {
         ("tab_rail_wrap", feature_tab_rail_wrap()),
         ("tab_picks_later", feature_tab_picks_later()),
         ("tab_picks_running", feature_tab_picks_running()),
+        (
+            "tab_model_later",
+            with_model_button(feature_tab_picks_later(), "Model: default"),
+        ),
+        (
+            "tab_model_long",
+            with_model_button(
+                feature_tab_picks_running(),
+                "Model: claude-opus-4-8[context=1m,effort=high,fast=false]",
+            ),
+        ),
         ("tab_t3_draft", feature_tab_t3_draft()),
         ("tab_milestone_mode", feature_tab_milestone_mode()),
         ("tab_held", feature_tab_held()),
@@ -3732,7 +3763,7 @@ fn feature_tabs() -> [(&'static str, super::FeatureTabView); 27] {
 }
 
 /// Each fixture at the width it shows best at, and Build at all three.
-const TAB_SURFACES: [(&str, i32); 34] = [
+const TAB_SURFACES: [(&str, i32); 36] = [
     ("tab_build", 860),
     ("tab_build", 1180),
     ("tab_build", 1920),
@@ -3754,6 +3785,8 @@ const TAB_SURFACES: [(&str, i32); 34] = [
     ("tab_rail_wrap", 1180),
     ("tab_picks_later", 1180),
     ("tab_picks_running", 860),
+    ("tab_model_later", 1180),
+    ("tab_model_long", 860),
     ("tab_t3_draft", 860),
     ("tab_milestone_mode", 1180),
     ("tab_milestone_mode", 860),
@@ -3769,7 +3802,7 @@ const TAB_SURFACES: [(&str, i32); 34] = [
     ("tab_plan_long", 1180),
 ];
 
-const FEATURE_TAB: [&str; 34] = [
+const FEATURE_TAB: [&str; 36] = [
     "tab_build_860",
     "tab_build_1180",
     "tab_build_1920",
@@ -3791,6 +3824,8 @@ const FEATURE_TAB: [&str; 34] = [
     "tab_rail_wrap_1180",
     "tab_picks_later_1180",
     "tab_picks_running_860",
+    "tab_model_later_1180",
+    "tab_model_long_860",
     "tab_t3_draft_860",
     "tab_milestone_mode_1180",
     "tab_milestone_mode_860",
@@ -3807,7 +3842,7 @@ const FEATURE_TAB: [&str; 34] = [
 ];
 
 /// The recorded hashes of `FEATURE_TAB`, per case in `CASES`.
-const GOLDEN_FEATURE_TAB: [[u64; 34]; 4] = [
+const GOLDEN_FEATURE_TAB: [[u64; 36]; 4] = [
     // Dark at 1
     [
         0x332b7228d6306b6d, // tab_build_860
@@ -3831,6 +3866,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 34]; 4] = [
         0x9e1ed44325e0fa16, // tab_rail_wrap_1180
         0x3c252aa283117b96, // tab_picks_later_1180
         0xd88a505544d5cf95, // tab_picks_running_860
+        0x33e34326977ddd7f, // tab_model_later_1180
+        0x0575f6c2eb14bd24, // tab_model_long_860
         0x4dbc062367ae4fc1, // tab_t3_draft_860
         0x57745578929692cf, // tab_milestone_mode_1180
         0x86ae2bd76b9aac67, // tab_milestone_mode_860
@@ -3868,6 +3905,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 34]; 4] = [
         0x82c451aa75cff50c, // tab_rail_wrap_1180
         0x7aed0177026b8fc5, // tab_picks_later_1180
         0x8ca2ad134f56fc71, // tab_picks_running_860
+        0xc3df9d2de6f7635e, // tab_model_later_1180
+        0xe19bc9d3bae6257a, // tab_model_long_860
         0x3e55166b5b1aaeba, // tab_t3_draft_860
         0x10fd56555c59a8ed, // tab_milestone_mode_1180
         0x0fda7fb893110047, // tab_milestone_mode_860
@@ -3905,6 +3944,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 34]; 4] = [
         0xa7a01c7d9cafdf8f, // tab_rail_wrap_1180
         0x9d2fdb8947ae4a34, // tab_picks_later_1180
         0xa8aec2f4826ac6de, // tab_picks_running_860
+        0x82c925734ce7d2a2, // tab_model_later_1180
+        0x166b731a5f1b4e66, // tab_model_long_860
         0xdaae95dcf08288a0, // tab_t3_draft_860
         0x692f5c5da435e744, // tab_milestone_mode_1180
         0xeec716e4f88f3cfa, // tab_milestone_mode_860
@@ -3942,6 +3983,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 34]; 4] = [
         0xe368f7609b20caab, // tab_rail_wrap_1180
         0x4bdc8bb587ed3818, // tab_picks_later_1180
         0x5b14b0a0029e76e5, // tab_picks_running_860
+        0x0fc934b81f65b586, // tab_model_later_1180
+        0xcafd57922c765f2a, // tab_model_long_860
         0x9e296d650b865925, // tab_t3_draft_860
         0xf94e6032ecaf5cb5, // tab_milestone_mode_1180
         0x22524a82dd135edf, // tab_milestone_mode_860

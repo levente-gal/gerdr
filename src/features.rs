@@ -106,6 +106,8 @@ use crate::{
 pub struct Features {
     /// By project id, oldest first.
     pub all: BTreeMap<String, Vec<Feature>>,
+    /// Cursor's models, for the picker of a stage's model.
+    pub cursor_models: crate::stage_models::CursorModels,
     pub dialog: Option<NewFeatureDialog>,
     /// The project commands dialog, while it is open.
     pub commands: Option<crate::project_commands::CommandsDialog>,
@@ -1008,6 +1010,8 @@ pub enum PanelOutcome {
     NotYet(Stage),
     /// Run this agent stage with this agent, from its next start on.
     PickAgent(Stage, String),
+    /// Open the picker of the stage's model.
+    PickModel(Stage),
     /// Pick the next agent this agent stage's chips offer.
     CycleAgent(Stage),
     /// Build with a fresh agent per milestone, or one through them all.
@@ -2648,6 +2652,9 @@ impl FeaturePanel {
             Keysym::n | Keysym::N if ctrl => return Some(PanelOutcome::New),
             Keysym::a | Keysym::A if ctrl && mods.shift && needs(stage).is_some() => {
                 return Some(PanelOutcome::CycleAgent(stage));
+            }
+            Keysym::i | Keysym::I if ctrl && mods.shift && needs(stage).is_some() => {
+                return Some(PanelOutcome::PickModel(stage));
             }
             Keysym::b | Keysym::B if ctrl && mods.shift && milestone_switch(feature, stage) => {
                 return Some(PanelOutcome::FreshMilestones(!feature.fresh_milestones));
@@ -4610,6 +4617,7 @@ impl Gerdr {
             shipping: Default::default(),
             runs: Default::default(),
             stage_agents: Default::default(),
+            stage_models: Default::default(),
             fresh_milestones: false,
             setup: None,
             checks: Default::default(),
@@ -5260,6 +5268,7 @@ impl Gerdr {
                 self.pick_stage_agent(&project, &slug, stage, &name);
             }
             PanelOutcome::CycleAgent(stage) => self.cycle_stage_agent(&project, &slug, stage),
+            PanelOutcome::PickModel(stage) => self.pick_stage_model(&project, &slug, stage),
             PanelOutcome::FreshMilestones(fresh) => {
                 self.set_fresh_milestones(&project, &slug, fresh);
             }
@@ -6097,6 +6106,9 @@ impl Gerdr {
                         .then(|| PanelOutcome::PickAgent(stage, chips.swap_remove(i).name))
                 })
             }
+            FeatureTabHit::AgentModel => (self.features.panel.as_ref())
+                .filter(|p| !p.keys)
+                .map(|p| PanelOutcome::PickModel(p.page_stage(&feature))),
             FeatureTabHit::Hint(i) => {
                 let keys = self
                     .feature_tab_view()
@@ -6241,6 +6253,14 @@ impl Gerdr {
                     false => chip.name.clone(),
                 };
                 Some(Tooltip::new(&text, spot))
+            }
+            FeatureTabHit::AgentModel => {
+                let mut spot = layout.agent_model?;
+                spot.loc.y -= view.scroll[TabColumn::Page as usize].round() as i32;
+                Some(Tooltip::new(
+                    "The model its next start uses; an agent already open keeps its own",
+                    spot,
+                ))
             }
             FeatureTabHit::MilestoneMode(i) => {
                 let (_, segments) = layout.milestone_mode.as_ref()?;
@@ -6414,6 +6434,9 @@ impl Gerdr {
             check_tails: Some(&self.features.check_tails),
             code_review: self.code_review_line(&panel.project, &panel.slug),
             picks: self.chips_of(&panel.project, &panel.slug, panel.page_stage(feature)),
+            model: self
+                .model_slot_of(&panel.project, &panel.slug, panel.page_stage(feature))
+                .map(|slot| model_label(slot.picked.as_deref())),
             manual: manual_counts.map(crate::manual_test::counts_text),
             manual_gate: manual_counts.map(manual_gate),
         };
@@ -6846,6 +6869,14 @@ struct PanelState<'a> {
     /// The chips to pick the agent of the stage on the page with (see
     /// `feature_agents::stage_chips`).
     picks: Vec<AgentChip>,
+    /// The button picking its model, where gerdr can start the agent on
+    /// one (see `feature_agents::stage_model_slot`).
+    model: Option<String>,
+}
+
+/// What the button picking a stage's model says.
+fn model_label(picked: Option<&str>) -> String {
+    format!("Model: {}", picked.unwrap_or("default"))
 }
 
 /// `what` a task does as an inline status: "Setting up “T”" reads
@@ -7271,6 +7302,7 @@ fn agent_card(
             tail: Vec::new(),
             buttons,
             picks,
+            model: state.model.clone(),
         });
     };
     let mark = stage_mark(feature, stage);
@@ -7287,9 +7319,7 @@ fn agent_card(
     // The card's head names the agent already.
     let status = match (current, &state.agent) {
         // On a done Build too, where fixes wait: `started` would hide that.
-        _ if run.waits_to_send() => {
-            "waiting for you \u{b7} pick a model and send the prompt".to_owned()
-        }
+        _ if run.waits_to_send() => run.waiting_words().to_owned(),
         (true, Some(line)) => (line.strip_prefix(run.agent.as_str()))
             .map_or(line.as_str(), str::trim_start)
             .to_owned(),
@@ -7301,7 +7331,9 @@ fn agent_card(
             }
         }
     };
-    let status = back.map_or(status, |back| back.status().to_owned());
+    // Waiting, it says as much of the run above, and whether a model is due.
+    let status =
+        (back.filter(|b| *b != Rework::Waits)).map_or(status, |back| back.status().to_owned());
     // The tail read is the current stage's agent's, while its pane is.
     let tail = match current && run.pane.is_some() {
         true => state.tail.to_vec(),
@@ -7315,6 +7347,7 @@ fn agent_card(
         tail,
         buttons,
         picks,
+        model: state.model.clone(),
     })
 }
 
@@ -7336,10 +7369,14 @@ fn rework_card(
             Rework::Runs(dot) => dot,
             _ => Dot::Unknown,
         },
-        status: format!("Build agent \u{b7} {}", back.status()),
+        status: match back {
+            Rework::Waits => format!("Build agent \u{b7} {}", run.waiting_words()),
+            back => format!("Build agent \u{b7} {}", back.status()),
+        },
         tail: Vec::new(),
         buttons: agent_buttons(Stage::Build, actions),
         picks: Vec::new(),
+        model: None,
     })
 }
 
@@ -7977,6 +8014,7 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 4] = [
             ("Ctrl+R", "start the stage's agent afresh"),
             ("Ctrl+Shift+R", "show the stage's agent, or resume its chat"),
             ("Ctrl+Shift+A", "pick the stage's next agent"),
+            ("Ctrl+Shift+I", "pick the model of the stage's agent"),
             (
                 "Ctrl+Shift+B",
                 "Build: one agent, or a fresh agent per milestone",
@@ -8057,13 +8095,21 @@ fn keys_page() -> StagePage {
 
 /// The feature tab's key hints over `feature`, one of `slugs`, as `panel`
 /// has the keyboard on `stage`'s page.
+/// What can be picked of a stage's next agent, for the feature tab's footer.
+#[derive(Clone, Copy, Default)]
+struct AgentChoices<'a> {
+    picks: &'a [AgentChip],
+    /// Its model too.
+    model: bool,
+}
+
 fn tab_hints(
     panel: &FeaturePanel,
     feature: &Feature,
     stage: Stage,
     slugs: &[String],
     ctx: RowCtx,
-    picks: &[AgentChip],
+    choices: AgentChoices,
     plan: &[PlannedCheck],
 ) -> Vec<(String, String)> {
     let hint = |k: &str, what: &str| (k.to_owned(), what.to_owned());
@@ -8244,8 +8290,11 @@ fn tab_hints(
             {
                 hints.push(hint("Ctrl+Shift+R", &label.to_lowercase()));
             }
-            if picks.iter().filter(|c| !c.off).count() > 1 {
+            if choices.picks.iter().filter(|c| !c.off).count() > 1 {
                 hints.push(hint("Ctrl+Shift+A", "pick agent"));
+            }
+            if choices.model {
+                hints.push(hint("Ctrl+Shift+I", "pick model"));
             }
             if milestone_switch(feature, stage) {
                 let what = match feature.fresh_milestones {
@@ -8490,7 +8539,10 @@ fn tab_view(
             stage,
             slugs,
             state.ctx,
-            &state.picks,
+            AgentChoices {
+                picks: &state.picks,
+                model: state.model.is_some(),
+            },
             &state.plan,
         ),
     }
@@ -8562,6 +8614,7 @@ pub(crate) mod tests {
             shipping: Default::default(),
             runs: Default::default(),
             stage_agents: Default::default(),
+            stage_models: Default::default(),
             fresh_milestones: false,
             setup: None,
             checks: Default::default(),
@@ -11842,6 +11895,7 @@ pub(crate) mod tests {
                     tail: Vec::new(),
                     buttons: vec![0, 1],
                     picks: Vec::new(),
+                    model: None,
                 },
                 PageSection::MilestoneMode { fresh: false }
             ]
@@ -12017,7 +12071,17 @@ pub(crate) mod tests {
         );
         // Enter is called what it does, on both.
         let panel = FeaturePanel::default();
-        let hints = |ctx| tab_hints(&panel, &f, Stage::Discover, &[], ctx, &[], &[]);
+        let hints = |ctx| {
+            tab_hints(
+                &panel,
+                &f,
+                Stage::Discover,
+                &[],
+                ctx,
+                AgentChoices::default(),
+                &[],
+            )
+        };
         let enter = ("Enter".to_owned(), "go to the current stage".to_owned());
         let reopen = (REOPEN_KEY.to_owned(), "reopen".to_owned());
         assert!(hints(approved).contains(&enter));
@@ -13169,11 +13233,85 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn ctrl_shift_i_asks_for_the_model_on_an_agent_stage_only() {
+        let f = feature("a", vec![repo("r", true)], 0);
+        let mut panel = FeaturePanel {
+            slug: "a".into(),
+            ..FeaturePanel::default()
+        };
+        let mods = ModifiersState {
+            ctrl: true,
+            shift: true,
+            ..ModifiersState::default()
+        };
+        let ctx = RowCtx::default();
+        let press = |p: &mut FeaturePanel| p.key(&mods, Keysym::I, &f, &[], ctx, &[]);
+        assert_eq!(
+            press(&mut panel),
+            Some(PanelOutcome::PickModel(Stage::Discover))
+        );
+        panel.pick(&f, Stage::Verify);
+        assert_eq!(press(&mut panel), None);
+    }
+
+    #[test]
+    fn the_model_button_and_its_key_show_where_gerdr_can_tell_a_model() {
+        let f = feature("a", vec![repo("r", true)], 0);
+        let chip = AgentChip {
+            icon: AgentIcon::from_agent("Claude Code"),
+            name: "Claude Code".into(),
+            lit: true,
+            off: false,
+        };
+        let state = |model: Option<&str>| PanelState {
+            picks: vec![chip.clone()],
+            model: model.map(str::to_owned),
+            ..PanelState::default()
+        };
+        let label_on = |state: &PanelState| {
+            let page = stage_page(&f, Stage::Build, state, &[], 2_000);
+            let [PageSection::Agent { model, .. }] = page.sections.as_slice() else {
+                panic!("{:?}", page.sections);
+            };
+            model.clone()
+        };
+        assert_eq!(label_on(&state(None)), None);
+        assert_eq!(
+            label_on(&state(Some("Model: opus"))).as_deref(),
+            Some("Model: opus")
+        );
+        assert_eq!(model_label(None), "Model: default");
+        assert_eq!(model_label(Some("opus")), "Model: opus");
+
+        let panel = FeaturePanel {
+            slug: "a".into(),
+            ..FeaturePanel::default()
+        };
+        let hints = |model| {
+            let choices = AgentChoices { picks: &[], model };
+            tab_hints(
+                &panel,
+                &f,
+                Stage::Discover,
+                &[],
+                RowCtx::default(),
+                choices,
+                &[],
+            )
+        };
+        let shown = |hints: &[(String, String)]| hints.iter().any(|(k, _)| k == "Ctrl+Shift+I");
+        assert!(shown(&hints(true)));
+        assert!(!shown(&hints(false)));
+    }
+
+    #[test]
     fn the_feature_keys_old_record_has_no_picks_and_a_pick_round_trips() {
         let mut f = feature("a", vec![repo("r", true)], 0);
         let json = serde_json::to_string(&f).unwrap();
         assert!(!json.contains("stage_agents"), "{json}");
+        assert!(!json.contains("stage_models"), "{json}");
         f.stage_agents.insert(Stage::Plan, "Cursor".into());
+        (f.stage_models.entry(Stage::Plan).or_default()).insert("Cursor".into(), "gpt-5.2".into());
         let json = serde_json::to_string(&f).unwrap();
         assert_eq!(serde_json::from_str::<Feature>(&json).unwrap(), f);
     }

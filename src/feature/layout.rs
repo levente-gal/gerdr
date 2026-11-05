@@ -1395,6 +1395,7 @@ mod tests {
             shipping: Default::default(),
             runs: Default::default(),
             stage_agents: Default::default(),
+            stage_models: Default::default(),
             fresh_milestones: false,
             setup: None,
             checks: Default::default(),

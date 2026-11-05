@@ -36,6 +36,7 @@ rules, for reviewing a branch before it merges.
 | Ctrl+Shift+G | Start the sandbox again on the same data (feature tab, Manual test). |
 | Ctrl+Shift+X | Reset the sandbox's data from main's, or remove a stopped sandbox with its data, asking first (feature tab, Manual test). |
 | Ctrl+Shift+A | Pick the next agent on the feature tab's selected stage (the chips on its agent card). It applies from the agent's next start; one running goes on. |
+| Ctrl+Shift+I | Pick the model of the selected stage's agent on the feature tab (the "Model:" button on its agent card), for Claude Code and Cursor. It applies from the agent's next start; one already open keeps its own. |
 | Ctrl+Shift+B | On the feature tab's Build page: go between one agent through all milestones and a fresh agent per milestone (also the "Agents" choice on the page). It applies from the next milestone; an agent at work goes on. |
 | Ctrl+Shift+K | Skip Plan review on the feature tab, asking only when something would be lost. |
 | Ctrl+Shift+D | On the feature tab: from a final plan back to the decisions. |
