@@ -9043,11 +9043,25 @@ fn findings_count(feature: &Feature) -> String {
 /// name, as `probe` last read them; none while it has none.
 fn milestones_of(probe: Option<&Probe>, stage: Stage) -> Option<PageSection> {
     let items = probe?.docs.milestones.get(&stage)?;
-    (!items.is_empty()).then(|| PageSection::Milestones {
+    (!items.is_empty()).then(|| milestones_section(stage.label().to_owned(), items))
+}
+
+/// `items` as a group of Build's list, called `label`.
+fn milestones_section(label: String, items: &[(bool, String)]) -> PageSection {
+    PageSection::Milestones {
+        label,
         done: items.iter().filter(|(done, _)| *done).count(),
         total: items.len(),
-        items: items.clone(),
-    })
+        items: items.to_vec(),
+    }
+}
+
+/// What each fix round listed in the build log, oldest first, as `probe`
+/// last read it.
+fn fix_rounds_of(probe: Option<&Probe>) -> Vec<PageSection> {
+    (probe.iter().flat_map(|p| &p.docs.fix_rounds))
+        .map(|(n, items)| milestones_section(feature::fix_round::label(*n), items))
+        .collect()
 }
 
 /// `stage`'s file to read on its page, as `probe` last read it; none while
@@ -9166,11 +9180,13 @@ fn stage_page(
                 // last stop.
                 let stop = feature.runs.get(&stage).and_then(|r| r.stop);
                 let counted = stop.map(|stop| PageSection::Milestones {
+                    label: stage.label().to_owned(),
                     done: stop.done as usize,
                     total: stop.total as usize,
                     items: Vec::new(),
                 });
                 sections.extend(milestones_of(state.probe, stage).or(counted));
+                sections.extend(fix_rounds_of(state.probe));
             }
             Stage::Verify => {
                 sections.extend(verify_sections(feature, state, actions, now));
@@ -14724,6 +14740,7 @@ pub(crate) mod tests {
         assert_eq!(
             page.sections.last(),
             Some(&PageSection::Milestones {
+                label: "Build".to_owned(),
                 done: 1,
                 total: 3,
                 items: Vec::new()
@@ -15809,6 +15826,7 @@ pub(crate) mod tests {
         assert_eq!(
             page.sections.last(),
             Some(&PageSection::Milestones {
+                label: "Build".to_owned(),
                 done: 2,
                 total: 3,
                 items
@@ -15824,6 +15842,32 @@ pub(crate) mod tests {
             s,
             PageSection::Agent { tail, .. } if !tail.is_empty()
         )));
+        // Each fix round's list comes after, under its own label.
+        let round = |n, items: &[(bool, &str)]| {
+            (n, items.iter().map(|(d, t)| (*d, (*t).to_owned())).collect())
+        };
+        let mut read = p.clone();
+        read.docs.fix_rounds = vec![
+            round(1, &[(true, "r1-1"), (true, "r1-2")]),
+            round(3, &[(false, "r3-1")]),
+        ];
+        let state = PanelState {
+            probe: Some(&read),
+            ..PanelState::default()
+        };
+        let page = stage_page(&f, Stage::Build, &state, &actions, 2_000);
+        let groups: Vec<(&str, usize, usize)> = (page.sections.iter())
+            .filter_map(|section| match section {
+                PageSection::Milestones {
+                    label, done, total, ..
+                } => Some((label.as_str(), *done, *total)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            groups,
+            [("Build", 2, 3), ("Review 1", 2, 2), ("Review 3", 0, 1)]
+        );
     }
 
     #[test]

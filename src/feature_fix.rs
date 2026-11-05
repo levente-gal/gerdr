@@ -441,6 +441,8 @@ impl Gerdr {
                 round.done = done;
             }
             self.save_feature(project, slug);
+            // Build's page lists them, ticks and all.
+            self.probe_feature(project, slug);
         }
         let title = &feature.title;
         let open = left.join("; ");
@@ -899,6 +901,8 @@ impl Gerdr {
         if let Some(agent) = agent {
             self.watch_fixing(project, slug, agent);
         }
+        // Build's page lists them from now on.
+        self.probe_feature(project, slug);
         self.show_success(format!("Sent the fixes of \u{201c}{title}\u{201d} to {to}"));
         true
     }
@@ -951,7 +955,31 @@ impl Gerdr {
         (self.features.build.fix_watches).remove(&fix_key(project, slug));
         self.doc_done(project, slug, DocFile::FixPlan);
         if back {
+            self.drop_unticked(project, slug, n);
             self.give_back(project, slug, round.give_back);
+        }
+    }
+
+    /// Take dropped round `n`'s fixes not made from the build log: Build's
+    /// page would list them as still to do for good.
+    fn drop_unticked(&mut self, project: &str, slug: &str, n: u32) {
+        let path = build_log(&store::dir(None, project, slug));
+        let log = match std::fs::read_to_string(&path) {
+            Ok(log) => log,
+            // No log, no list: a round dropped before its fixes went.
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return,
+            Err(err) => {
+                tracing::warn!("reading {}: {err}", path.display());
+                self.show_error(format!("Couldn't read {}: {err}", path.display()));
+                return;
+            }
+        };
+        let tidy = fix_round::without_unticked(&log, n);
+        if tidy != log
+            && let Err(err) = std::fs::write(&path, tidy)
+        {
+            tracing::warn!("writing {}: {err}", path.display());
+            self.show_error(format!("Couldn't tidy {}: {err}", path.display()));
         }
     }
 

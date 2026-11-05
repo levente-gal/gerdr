@@ -14,7 +14,7 @@ use std::{
 };
 
 use super::{
-    Repo, Stage, artifacts,
+    Repo, Stage, artifacts, fix_round,
     layout::{base_ref, git},
     verify,
 };
@@ -42,6 +42,9 @@ pub struct Docs {
     /// Build's milestones by name, `true` = ticked (see
     /// `artifacts::milestone_items`); none for a file not there.
     pub milestones: BTreeMap<Stage, Vec<(bool, String)>>,
+    /// The fixes each fix round listed in the build log, by round, oldest
+    /// first (see `fix_round::rounds`).
+    pub fix_rounds: Vec<(u32, Vec<(bool, String)>)>,
     /// The brief and the plan as their pages show them; none for a file
     /// not there, and a note for one that can't be read.
     pub previews: BTreeMap<Stage, Arc<Vec<DocBlock>>>,
@@ -128,6 +131,7 @@ pub fn read_docs(data: &Path) -> Docs {
             Ok(text) => {
                 docs.milestones
                     .insert(stage, artifacts::milestone_items(&text));
+                docs.fix_rounds = fix_round::rounds(&text);
             }
             Err(err) => tracing::warn!("reading {}: {err}", path.display()),
         }
@@ -267,7 +271,8 @@ mod tests {
         std::fs::write(dir.join("brief.md"), "# Brief\n").unwrap();
         let milestones = "## Milestones\n- [x] API\n- [ ] UI\n";
         std::fs::write(dir.join("plan.md"), milestones).unwrap();
-        std::fs::write(dir.join("build.md"), milestones).unwrap();
+        let log = format!("{milestones}\n## Fix round 1\n\n- [x] r1-1\n- [ ] r1-2\n");
+        std::fs::write(dir.join("build.md"), log).unwrap();
         let docs = read_docs(&dir);
         std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(
@@ -289,6 +294,13 @@ mod tests {
                 Stage::Build,
                 vec![(true, "API".to_owned()), (false, "UI".to_owned())]
             )])
+        );
+        assert_eq!(
+            docs.fix_rounds,
+            [(
+                1,
+                vec![(true, "r1-1".to_owned()), (false, "r1-2".to_owned())]
+            )]
         );
     }
 
