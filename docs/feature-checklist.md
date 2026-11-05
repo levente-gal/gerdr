@@ -154,6 +154,9 @@ How to use it:
   has the project's timeout, and Enter on a stage whose work runs says so
   rather than starting it again. Verify's checks each run in a terminal of
   the feature's workspace, all at once, and stop from their cards on its page.
+  Those cards are there from the start, one for each check the feature will
+  run or skips; they show the check's last output lines as it runs, and read
+  its terminal only while the page shows.
 
 ## X. State across places
 

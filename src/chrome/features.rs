@@ -502,6 +502,23 @@ pub enum FindingTag {
     Running,
     Stopped,
     NotRun,
+    Skipped,
+}
+
+impl FindingTag {
+    /// The dot that says how a check stands, in place of a word. A finding
+    /// has none: it has its word.
+    pub fn dot(self) -> Option<Dot> {
+        match self {
+            Self::High | Self::Medium | Self::Low | Self::Yours => None,
+            Self::Passed => Some(Dot::Done),
+            Self::Failed => Some(Dot::Failed),
+            Self::Running => Some(Dot::Working),
+            Self::Stopped => Some(Dot::Blocked),
+            Self::NotRun => Some(Dot::Idle),
+            Self::Skipped => Some(Dot::Unknown),
+        }
+    }
 }
 
 /// An AI review finding as its stage's page shows it.
@@ -514,6 +531,8 @@ pub struct FindingCard {
     /// Its id, and where in the code it is.
     pub place: String,
     pub body: String,
+    /// The lines of output it shows, a check's.
+    pub preview: Vec<String>,
     /// The fix to make, labelled: the reviewer's or the user's.
     pub fix: String,
     /// The user's comment on it, labelled.
@@ -954,6 +973,8 @@ const PAGE_GAP: i32 = 16;
 const AGENT_PAD: i32 = 10;
 /// The room between the parts of a finding's card.
 const FINDING_GAP: i32 = 6;
+/// How far a check card's text stands right of its dot's left edge.
+const CHECK_DOT_ROOM: i32 = DOT + 8;
 const AGENT_HEAD: i32 = 28;
 /// Where an agent card's name starts, past its logo and dot.
 const AGENT_TEXT_AT: i32 = 36;
@@ -1053,6 +1074,9 @@ pub(super) enum Piece {
     /// The frame of the finding card of `StagePage::sections[i]`, with its
     /// buttons; its text goes in pieces of its own.
     FindingCard(usize),
+    /// How a check stands, on its card. It blinks when at work: see
+    /// `feature_tab_blinkers`.
+    CheckDot(Dot),
     /// `FeatureTabView::repos[i]`.
     Repo(usize),
     /// `StagePage::buttons[i]`, one acting on the stage as a whole.
@@ -1064,6 +1088,9 @@ pub(super) enum Piece {
     /// A line of a file's code block, cut where the column ends, on the
     /// block's ground; an empty one is the block's edge.
     CodeLine(String),
+    /// A line of a check's output on its card: a code block's, on a ground
+    /// that shows on the card in either theme.
+    OutputLine(String),
     /// The bar beside a file's quote.
     QuoteBar,
     /// A file's thematic break.
@@ -1225,6 +1252,9 @@ const DOC_MARK: i32 = 20;
 const DOC_QUOTE: i32 = 12;
 const DOC_QUOTE_BAR: i32 = 3;
 const DOC_CODE_PAD: i32 = 8;
+/// How far the ground of a check's output goes from the card's towards its
+/// text.
+const OUTPUT_GROUND: f32 = 0.06;
 const DOC_DEPTH_MAX: u8 = 4;
 const DOC_RULE: i32 = 13;
 /// How far off a line's width added up by word may be from it measured
@@ -1429,46 +1459,63 @@ impl Stack {
         self.w = (w - 2 * AGENT_PAD).max(1);
         self.y += AGENT_PAD;
         let body = if card.faded { Ink::Muted } else { Ink::Text };
+        let (left, width) = (self.x, self.w);
+        // A check's dot says how it stands; its text goes right of it.
+        if let Some(dot) = card.tag.dot() {
+            self.pieces.push((
+                Rectangle::new(
+                    (self.x, self.y + (BODY_LINE - DOT) / 2).into(),
+                    (DOT, DOT).into(),
+                ),
+                Piece::CheckDot(dot),
+            ));
+            self.x = left + CHECK_DOT_ROOM;
+            self.w = (width - CHECK_DOT_ROOM).max(1);
+        }
         self.all_text(&card.title, Font::Body, body, true, BODY_LINE);
-        // Its tag in its colour, then the rest of the line muted.
+        // A finding's tag in its colour, then the rest of the line muted.
         let tag = match card.tag {
-            FindingTag::High => "high",
-            FindingTag::Medium => "medium",
-            FindingTag::Low => "low",
-            FindingTag::Yours => "yours",
-            FindingTag::Passed => "passed",
-            FindingTag::Failed => "failed",
-            FindingTag::Running => "running",
-            FindingTag::Stopped => "stopped",
-            FindingTag::NotRun => "not run",
+            FindingTag::High => Some(("high", Ink::Error)),
+            FindingTag::Medium => Some(("medium", Ink::Warning)),
+            FindingTag::Low => Some(("low", Ink::Muted)),
+            FindingTag::Yours => Some(("yours", Ink::Accent)),
+            _ => None,
         };
-        let ink = match (card.faded, card.tag) {
-            (true, _) | (_, FindingTag::Low | FindingTag::NotRun) => Ink::Muted,
-            (_, FindingTag::High | FindingTag::Failed) => Ink::Error,
-            (_, FindingTag::Medium | FindingTag::Stopped) => Ink::Warning,
-            (_, FindingTag::Yours | FindingTag::Running) => Ink::Accent,
-            (_, FindingTag::Passed) => Ink::Tone(CheckTone::Ready),
-        };
-        let size = Font::Small.size();
-        let tag_w = width_of(tag, size).ceil() as i32 + 1;
-        self.pieces.push((
-            Rectangle::new((self.x, self.y).into(), (tag_w, TAIL_LINE).into()),
-            Piece::Text {
-                text: tag.to_owned(),
-                font: Font::Small,
-                ink,
-                bold: false,
-            },
-        ));
-        let mut rest = vec![String::new()];
+        let mut rest = Vec::new();
         rest.extend((!card.state.is_empty()).then(|| card.state.clone()));
         rest.push(card.place.clone());
-        let rest = rest.join(" \u{b7} ");
-        let (left, width) = (self.x, self.w);
-        self.x = left + tag_w;
-        self.w = (width - tag_w).max(1);
-        self.all_text(rest.trim_start(), Font::Small, Ink::Muted, false, TAIL_LINE);
+        let mut rest = rest.join(" \u{b7} ");
+        if let Some((tag, ink)) = tag {
+            let ink = if card.faded { Ink::Muted } else { ink };
+            let tag_w = width_of(tag, Font::Small.size()).ceil() as i32 + 1;
+            self.pieces.push((
+                Rectangle::new((self.x, self.y).into(), (tag_w, TAIL_LINE).into()),
+                Piece::Text {
+                    text: tag.to_owned(),
+                    font: Font::Small,
+                    ink,
+                    bold: false,
+                },
+            ));
+            rest = format!("\u{b7} {rest}");
+            self.x = left + tag_w;
+            self.w = (width - tag_w).max(1);
+        }
+        self.all_text(&rest, Font::Small, Ink::Muted, false, TAIL_LINE);
         (self.x, self.w) = (left, width);
+        if !card.preview.is_empty() {
+            self.y += FINDING_GAP;
+            let line = |s: &mut Self, h: i32, text: &str| {
+                let rect = Rectangle::new((s.x, s.y).into(), (s.w, h).into());
+                s.pieces.push((rect, Piece::OutputLine(text.to_owned())));
+                s.y += h;
+            };
+            line(self, DOC_CODE_PAD / 2, "");
+            for text in &card.preview {
+                line(self, TAIL_LINE, text);
+            }
+            line(self, DOC_CODE_PAD / 2, "");
+        }
         for text in [&card.body, &card.fix, &card.note] {
             if !text.is_empty() {
                 self.y += FINDING_GAP;
@@ -2401,6 +2448,11 @@ pub fn feature_tab_blinkers(
             && dot.blinks()
         {
             dots.push((agent_card_dot(*rect), Some(TabColumn::Page)));
+        }
+        if let Piece::CheckDot(dot) = piece
+            && dot.blinks()
+        {
+            dots.push((*rect, Some(TabColumn::Page)));
         }
     }
     if view.repos_error.is_none() {
@@ -3575,14 +3627,10 @@ impl Painter {
                     ItemMark::Under => {}
                 }
             }
-            Piece::CodeLine(text) => {
-                // On whole pixels, so a block's lines meet with no seam.
-                let (x, y, w, h) = rect_px(rect, scale);
-                c.fill(x as i32, y as i32, w as i32, h as i32, p.element);
-                let pad = (f64::from(DOC_CODE_PAD) * scale) as f32;
-                let (from, to) = (x + pad, x + w - pad);
-                let b = band(rect, scale);
-                self.mono_text(c, text, SMALL_FONT_SIZE, from, to, b, scale, p.text);
+            Piece::CodeLine(text) => self.code_line(c, rect, text, p.element, scale, p),
+            Piece::OutputLine(text) => {
+                let ground = mix(p.background, p.text, OUTPUT_GROUND);
+                self.code_line(c, rect, text, ground, scale, p);
             }
             Piece::QuoteBar => {
                 let (x, y, w, h) = rect_px(rect, scale);
@@ -3861,6 +3909,8 @@ impl Painter {
                     }
                 }
             }
+            // A dot at work blinks: it is composed over the tab.
+            Piece::CheckDot(dot) => status_dot(c, rect, *dot, scale, p),
             Piece::Button(i) => self.page_button(c, view, *i, rect, scale, p),
             Piece::Activity { row, lines } => {
                 let Some(a) = view.activity.get(*row) else {
@@ -3943,6 +3993,25 @@ impl Painter {
             from += w + gap;
         }
         Some((start / s).floor() as i32)
+    }
+
+    /// A line of a code block in `rect`, on `ground`. On whole pixels, so a
+    /// block's lines meet with no seam.
+    fn code_line(
+        &self,
+        c: &mut Canvas,
+        rect: Rect,
+        text: &str,
+        ground: Rgb,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let (x, y, w, h) = rect_px(rect, scale);
+        c.fill(x as i32, y as i32, w as i32, h as i32, ground);
+        let pad = (f64::from(DOC_CODE_PAD) * scale) as f32;
+        let (from, to) = (x + pad, x + w - pad);
+        let b = band(rect, scale);
+        self.mono_text(c, text, SMALL_FONT_SIZE, from, to, b, scale, p.text);
     }
 
     /// The page's button `i` in `rect`.
@@ -4395,6 +4464,27 @@ mod tests {
                     assert!(ratio >= 4.5, "{tone:?} at {ratio:.2}:1");
                 }
             }
+        }
+    }
+
+    #[test]
+    fn a_checks_dot_and_output_read_on_its_card_in_both_themes() {
+        for p in [&ONE_DARK, &ONE_LIGHT_PAGE] {
+            for tag in [
+                FindingTag::Passed,
+                FindingTag::Failed,
+                FindingTag::Running,
+                FindingTag::Stopped,
+                FindingTag::NotRun,
+                FindingTag::Skipped,
+            ] {
+                let dot = tag.dot().expect("a check has a dot");
+                let ratio = contrast(dot.color(p), p.background);
+                assert!(ratio >= 3.0, "{tag:?} at {ratio:.2}:1");
+            }
+            let ground = mix(p.background, p.text, OUTPUT_GROUND);
+            let ratio = contrast(p.text, ground);
+            assert!(ratio >= 4.5, "output at {ratio:.2}:1");
         }
     }
 
@@ -5356,6 +5446,7 @@ mod tests {
                 state: String::new(),
                 place: format!("r1-{i} \u{b7} src/a.rs:12"),
                 body: format!("{text}\n\n{text}"),
+                preview: Vec::new(),
                 fix: format!("Fix: {text}"),
                 note: String::new(),
                 faded: false,

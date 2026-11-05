@@ -2372,9 +2372,11 @@ fn commands(case: usize) -> super::CommandsView {
             label: label.into(),
             tag: tag.map(str::to_owned),
             suggestion: suggestion.map(str::to_owned),
+            borrowed: Vec::new(),
             line: text.into(),
         };
     let mut view = super::CommandsView {
+        tabs: &super::COMMANDS_PROJECT_TABS,
         tab: super::CommandsTab::Checks,
         body: "One command per line, run at once (&& keeps an order). A check that changes code fails Verify.",
         note: None,
@@ -2438,6 +2440,27 @@ fn commands(case: usize) -> super::CommandsView {
             ];
             view.limit = None;
         }
+        5 => {
+            view.tabs = &super::COMMANDS_FEATURE_TABS;
+            view.tab = super::CommandsTab::Feature;
+            view.body = crate::project_commands::FEATURE_BODY;
+            view.rows = vec![
+                row("api", None, None, "./e2e.sh login"),
+                row("web", Some("runs once this feature changes it"), None, ""),
+                row("Whole feature", Some("in the feature folder"), None, ""),
+            ];
+            let borrowed = |command: &str, skipped| super::CommandsBorrowed {
+                command: command.into(),
+                skipped,
+            };
+            view.rows[0].borrowed = vec![
+                borrowed("cargo test", false),
+                borrowed("cargo clippy -- -D warnings", true),
+            ];
+            view.rows[1].borrowed = vec![borrowed("npm test", false)];
+            view.limit = None;
+            view.hover = Some(super::CommandsHit::Tab(super::CommandsTab::Checks));
+        }
         _ => {}
     }
     view
@@ -2461,47 +2484,52 @@ fn paint_commands(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
         .collect()
 }
 
-const COMMANDS: [&str; 5] = [
+const COMMANDS: [&str; 6] = [
     "commands",
     "commands_setup",
     "commands_stale",
     "commands_low",
     "commands_run",
+    "commands_feature",
 ];
 
 /// The recorded hashes of `COMMANDS`, per case in `CASES`.
-const GOLDEN_COMMANDS: [[u64; 5]; 4] = [
+const GOLDEN_COMMANDS: [[u64; 6]; 4] = [
     // Dark at 1
     [
-        0xd414e8a765c3e2cc, // commands
-        0x47e94098c180a710, // commands_setup
-        0x9d68f2095f72ab88, // commands_stale
-        0x7219fae0c8069f24, // commands_low
-        0xff1c4e9b8056b29b, // commands_run
+        0xa9ca0b947ab0b4b9, // commands
+        0x3fe63a0dbef9f070, // commands_setup
+        0xe5f37a2aa20eee41, // commands_stale
+        0x599c8230d0f46a99, // commands_low
+        0x97c707e14f98b1db, // commands_run
+        0x5510179c6435358b, // commands_feature
     ],
     // Dark at 2
     [
-        0x168485155564a0be, // commands
-        0x15461b4cf2db1732, // commands_setup
-        0xefc0e3944b49b6e1, // commands_stale
-        0xf23ea96e61dfe08a, // commands_low
-        0x4c403cd029e400d2, // commands_run
+        0x5d32d734cfef9435, // commands
+        0xcddedce03bc25a32, // commands_setup
+        0xda6474ce9dd3aa5a, // commands_stale
+        0x90a0858dfd162a51, // commands_low
+        0x214dd92b595891f2, // commands_run
+        0x9b521764fde307fe, // commands_feature
     ],
     // Light at 1
     [
-        0xc248e4dd97ad8b2b, // commands
-        0x22941af9a35adde1, // commands_setup
-        0x592e4e56c21f8bd3, // commands_stale
-        0x89aa7a8f4b6d1714, // commands_low
-        0xecbb2e46882779bf, // commands_run
+        0x1e1cbf68120b0afb, // commands
+        0x46e153a554416741, // commands_setup
+        0xff579c2c14edcc03, // commands_stale
+        0xec2de8c3f16673c4, // commands_low
+        0x82b2055ddf45d39f, // commands_run
+        0xabb49a31021a1a6c, // commands_feature
     ],
     // Light at 2
     [
-        0x571d5f684f72d6b1, // commands
-        0xa2365dd3b0ae3547, // commands_setup
-        0x72e0480f42d1b85f, // commands_stale
-        0x44bd2d850826f2ff, // commands_low
-        0xea61f9dd498c694c, // commands_run
+        0x1f8d7273d23e1e71, // commands
+        0xfad4cbca3289ece2, // commands_setup
+        0xe7758ca9eafa711f, // commands_stale
+        0x8645cea7a55609bf, // commands_low
+        0x01b4767083cfef2d, // commands_run
+        0xf4cb147dcf114360, // commands_feature
     ],
 ];
 
@@ -3884,6 +3912,7 @@ fn tab_findings() -> super::FeatureTabView {
             state: state.into(),
             place: place.into(),
             body: body.into(),
+            preview: Vec::new(),
             fix: fix.into(),
             note: note.into(),
             faded: false,
@@ -3897,9 +3926,7 @@ fn tab_findings() -> super::FeatureTabView {
 /// The feature tab on Verify with a card of each way a check can stand, the
 /// second with the keyboard.
 fn tab_checks() -> super::FeatureTabView {
-    use super::{
-        ButtonStyle, CheckTone, FindingCard, FindingTag, NodeMark, PageButton, PageSection,
-    };
+    use super::{ButtonStyle, FindingCard, FindingTag, NodeMark, PageButton, PageSection};
     use crate::feature::Stage;
     let mut view = feature_tab();
     at_stage(&mut view, 4, NodeMark::Current, "running");
@@ -3909,8 +3936,9 @@ fn tab_checks() -> super::FeatureTabView {
     view.page.status = None;
     view.page.buttons.clear();
     view.page.sections = vec![PageSection::Lines {
-        label: "Checks".into(),
-        lines: vec![tab_line("Verifying: 3 of 5 done", CheckTone::Note)],
+        label: "Checks \u{b7} 1 passed \u{b7} 1 failed \u{b7} 1 running \u{b7} 1 stopped \u{b7} 1 not run \u{b7} 1 skipped"
+            .into(),
+        lines: Vec::new(),
     }];
     let button = |label: &str, style| PageButton {
         label: label.into(),
@@ -3928,16 +3956,20 @@ fn tab_checks() -> super::FeatureTabView {
         &'a str,
         &'a str,
         &'a str,
-        &'a str,
+        &'a [&'a str],
     );
-    let cards: [Card; 5] = [
+    let cards: [Card; 6] = [
         (
-            &["Show", "Run again"],
+            &["Show", "Run again", "Skip"],
             FindingTag::Passed,
             "cargo test",
-            "1m 12s",
+            "1m 12s \u{b7} on older code",
             "api \u{b7} 142 passed",
-            "",
+            &[
+                "test tree::walks ... ok",
+                "test tree::folds ... ok",
+                "test result: ok. 142 passed; 0 failed; 0 ignored",
+            ],
         ),
         (
             &["Show", "Run again"],
@@ -3945,34 +3977,47 @@ fn tab_checks() -> super::FeatureTabView {
             "npm test",
             "8s",
             "web \u{b7} exited with 1",
-            "Dialog.test.tsx (1 of 14) failed",
+            &[
+                "FAIL src/Dialog.test.tsx",
+                "  \u{25cf} Dialog \u{203a} closes on Esc",
+                "    expect(received).toBe(expected) // a very long line of output that has to stop at the edge of its card, whatever the width of the page is",
+                "    Expected: false",
+            ],
         ),
         (
             &["Show", "Stop"],
             FindingTag::Running,
             "npm run lint",
-            "",
+            "12s \u{b7} took 1m 40s last run",
             "web",
-            "",
+            &["checking src/App.tsx", "", "", ""],
         ),
         (
             &["Show", "Run again"],
             FindingTag::Stopped,
             "./e2e.sh",
             "4s",
-            "feature folder",
-            "",
+            "feature folder \u{b7} stopped",
+            &["starting browsers"],
         ),
         (
-            &["Run again"],
+            &["Skip"],
             FindingTag::NotRun,
             "cargo clippy",
             "",
             "api",
+            &[],
+        ),
+        (
+            &["Don't skip"],
+            FindingTag::Skipped,
+            "cargo bench",
             "",
+            "api \u{b7} skipped for this feature",
+            &[],
         ),
     ];
-    for (i, (labels, tag, title, state, place, body)) in cards.into_iter().enumerate() {
+    for (i, (labels, tag, title, state, place, preview)) in cards.into_iter().enumerate() {
         let at = view.page.buttons.len();
         for label in labels {
             view.page.buttons.push(button(label, ButtonStyle::Plain));
@@ -3982,10 +4027,11 @@ fn tab_checks() -> super::FeatureTabView {
             title: title.into(),
             state: state.into(),
             place: place.into(),
-            body: body.into(),
+            body: String::new(),
+            preview: preview.iter().map(|line| (*line).to_owned()).collect(),
             fix: String::new(),
             note: String::new(),
-            faded: false,
+            faded: tag == FindingTag::Skipped,
             selected: i == 1,
             buttons: (at..at + labels.len()).collect(),
         }));
@@ -4437,10 +4483,10 @@ const CHECK_CARDS: [&str; 2] = ["tab_checks_1180", "tab_checks_860"];
 
 /// The recorded hashes of `CHECK_CARDS`, per case in `CASES`.
 const GOLDEN_CHECK_CARDS: [[u64; 2]; 4] = [
-    [0xd12dc0cc0811f861, 0x7538898736f3ceb2],
-    [0x25c641441286084b, 0xd1ceec8d8d479280],
-    [0xe822a78b4d94cd02, 0x34c15295560f0dbe],
-    [0x16901b00165443cb, 0x8d17c94d68bd0d66],
+    [0x4965a66b6e5ceb4d, 0xfb5bfa4d2a75aa4f],
+    [0xdb2c439f46b10f6b, 0xc140e3ebdcbaab84],
+    [0xfc2afa1772d30dc0, 0xcceef38ef56e9688],
+    [0xc688613a14d7f5c1, 0xd2828d6e68c115be],
 ];
 
 #[test]

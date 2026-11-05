@@ -16,6 +16,7 @@ use std::{
 use super::{
     Repo, Stage, artifacts,
     layout::{base_ref, git},
+    verify,
 };
 use crate::{
     herdr::Herdr,
@@ -213,6 +214,15 @@ pub fn read_tail(socket: PathBuf, pane: &str) -> Result<Vec<String>, String> {
         return Ok(lines);
     }
     Ok(tail(&herdr.pane_read(pane, "visible", READ_LINES)?))
+}
+
+/// Read what the card of the check running in pane `pane` previews (see
+/// `verify::preview`), from the herdr server on `socket` (blocking: run it
+/// off the UI thread).
+pub fn read_check_tail(socket: PathBuf, pane: &str) -> Result<Vec<String>, String> {
+    let read = verify::PREVIEW_READ;
+    let text = Herdr::on_socket(socket).pane_read(pane, "recent_unwrapped", read)?;
+    Ok(verify::preview(&text))
 }
 
 #[cfg(test)]

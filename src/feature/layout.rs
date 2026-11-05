@@ -1397,6 +1397,8 @@ mod tests {
             stage_agents: Default::default(),
             fresh_milestones: false,
             setup: None,
+            checks: Default::default(),
+            skip_checks: Default::default(),
             verify: None,
             sandbox: None,
             review: None,

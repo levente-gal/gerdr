@@ -89,7 +89,10 @@ fn node(dir: &Path, out: &mut Suggested) {
     let package: Option<serde_json::Value> = serde_json::from_slice(&raw).ok();
     let runner = test.split(' ').next().unwrap_or("npm");
     for name in ["dev", "start"] {
-        if package.as_ref().is_some_and(|p| p["scripts"][name].is_string()) {
+        if package
+            .as_ref()
+            .is_some_and(|p| p["scripts"][name].is_string())
+        {
             out.run.push(format!("{runner} run {name}"));
             break;
         }
@@ -173,7 +176,10 @@ mod tests {
         let seen = [
             (PathBuf::from("/ao/api"), "./runlocal.sh".to_owned()),
             (PathBuf::from("/ao/api"), "./runlocal.sh".to_owned()),
-            (PathBuf::from("/ao/api/sub"), "celery -A x beat -l INFO".to_owned()),
+            (
+                PathBuf::from("/ao/api/sub"),
+                "celery -A x beat -l INFO".to_owned(),
+            ),
             (PathBuf::from("/ao/web"), "nx serve".to_owned()),
             (PathBuf::from("/ao/api/.features/f"), "./old.sh".to_owned()),
         ];

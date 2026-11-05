@@ -13,8 +13,13 @@
 //! changes here. A project file edited outside gerdr isn't saved over: the
 //! dialog says so and offers the reload, what was typed surviving that. So
 //! does closing it: what was typed comes back at the next opening.
+//!
+//! Opened from a feature it has a tab more, with the checks only that
+//! feature runs on top of what it borrows from the project, and which of
+//! those it skips: `Feature::checks` and `skip_checks`, in its record and not
+//! in the project file.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use smithay::{
     input::keyboard::{Keysym, ModifiersState},
@@ -24,10 +29,11 @@ use smithay::{
 use crate::{
     Gerdr,
     chrome::{
-        self, COMMANDS_GO, COMMANDS_NOTCH, CommandsFocus, CommandsHit, CommandsRow, CommandsTab,
-        CommandsView,
+        self, COMMANDS_FEATURE_TABS, COMMANDS_GO, COMMANDS_NOTCH, COMMANDS_PROJECT_TABS,
+        CommandsBorrowed, CommandsFocus, CommandsHit, CommandsRow, CommandsTab, CommandsView,
     },
     feature::{
+        Feature,
         suggest::{self, Suggested},
         verify::FEATURE_KEY,
     },
@@ -78,6 +84,17 @@ struct Row {
     run: Option<Slot>,
     /// None likewise.
     prepare: Option<Slot>,
+    /// The checks only the dialog's feature runs here; None unless the
+    /// feature holds it.
+    own: Option<Slot>,
+    /// Its `Feature::checks` key.
+    own_key: String,
+    /// The commands the project's file gives it, as written there.
+    stored: Vec<String>,
+    /// What the dialog's feature skips of what it borrows here, and what it
+    /// did when read from its record.
+    skip: BTreeSet<String>,
+    skip_was: BTreeSet<String>,
     /// The feature changes it, so its checks run.
     in_feature: bool,
     /// Looked for and not there: its commands stay until emptied.
@@ -92,6 +109,7 @@ impl Row {
             CommandsTab::Setup => self.setup.as_ref(),
             CommandsTab::Run => self.run.as_ref(),
             CommandsTab::Prepare => self.prepare.as_ref(),
+            CommandsTab::Feature => self.own.as_ref(),
         }
     }
 
@@ -101,6 +119,7 @@ impl Row {
             CommandsTab::Setup => self.setup.as_mut(),
             CommandsTab::Run => self.run.as_mut(),
             CommandsTab::Prepare => self.prepare.as_mut(),
+            CommandsTab::Feature => self.own.as_mut(),
         }
     }
 
@@ -116,10 +135,44 @@ impl Row {
             setup: (key != FEATURE_KEY).then(|| Slot::new(workflow.setup.get(key))),
             run: (key != FEATURE_KEY).then(|| Slot::new(workflow.run.get(key))),
             prepare: (key != FEATURE_KEY).then(|| Slot::new(workflow.prepare.get(key))),
+            own: None,
+            own_key: key.to_owned(),
+            stored: lines_as_written(workflow.verify.get(key)),
+            skip: BTreeSet::new(),
+            skip_was: BTreeSet::new(),
             in_feature: false,
             missing: false,
             suggested: Suggested::default(),
         }
+    }
+
+    /// What a feature borrows here, as the Checks tab stands: as written
+    /// in the file until that field is edited, a command a hand wrote over
+    /// several lines staying one.
+    fn borrowed(&self) -> Vec<String> {
+        match self.checks.changed() {
+            true => lines_of(&self.checks.field),
+            false => self.stored.clone(),
+        }
+    }
+
+    /// Whether what the feature skips here was edited.
+    fn skip_changed(&self) -> bool {
+        self.skip != self.skip_was
+    }
+
+    /// Take `feature`'s own commands here.
+    fn own_from(&mut self, feature: &Feature, key: String) {
+        self.own = Some(Slot::new(feature.checks.get(&key)));
+        self.skip = feature
+            .skip_checks
+            .get(&key)
+            .into_iter()
+            .flatten()
+            .cloned()
+            .collect();
+        self.skip_was = self.skip.clone();
+        self.own_key = key;
     }
 
     /// The commands its suggestions make on `tab`, if any.
@@ -129,6 +182,8 @@ impl Row {
             CommandsTab::Setup => &self.suggested.setup,
             CommandsTab::Run => &self.suggested.run,
             CommandsTab::Prepare => &self.suggested.prepare,
+            // What a repository suggests is for all its features.
+            CommandsTab::Feature => &[],
         }
     }
 }
@@ -139,6 +194,8 @@ impl Row {
 enum Focus {
     Row(String, String),
     Limit,
+    /// A line of what a feature borrows, on its row.
+    Borrowed(String, String, usize),
 }
 
 /// What was typed and not saved, for the next opening.
@@ -146,6 +203,8 @@ enum Focus {
 pub struct CommandsDraft {
     /// (project, key, tab, what its field holds).
     rows: Vec<(String, String, CommandsTab, String)>,
+    /// (project, key, what the feature skips there).
+    skips: Vec<(String, String, BTreeSet<String>)>,
     limit: Option<String>,
 }
 
@@ -157,6 +216,35 @@ pub struct CommandsBefore {
     verify: BTreeMap<String, Vec<String>>,
     setup: BTreeMap<String, Vec<String>>,
     verify_timeout: Option<u64>,
+}
+
+/// Make `skips` say whether the check `command` of `repo` is skipped. A
+/// repository with none left has no entry.
+fn set_skipped(skips: &mut BTreeMap<String, Vec<String>>, repo: &str, command: &str, skip: bool) {
+    let of = skips.entry(repo.to_owned()).or_default();
+    of.retain(|c| c.trim() != command);
+    if skip {
+        of.push(command.to_owned());
+    }
+    if of.is_empty() {
+        skips.remove(repo);
+    }
+}
+
+/// How a feature's own checks stood before a save, for its Undo.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OwnChecksBefore {
+    project: String,
+    slug: String,
+    checks: BTreeMap<String, Vec<String>>,
+    skip: BTreeMap<String, Vec<String>>,
+}
+
+/// What a save of the dialog changed, for its Undo.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommandsUndo {
+    projects: Vec<CommandsBefore>,
+    feature: Option<OwnChecksBefore>,
 }
 
 /// What the dialog asks gerdr to do.
@@ -198,6 +286,15 @@ fn lines_of(text: &str) -> Vec<String> {
     text.lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// `commands` as the file has them, trimmed, the empty ones gone.
+fn lines_as_written(commands: Option<&Vec<String>>) -> Vec<String> {
+    (commands.into_iter().flatten())
+        .map(|c| c.trim())
+        .filter(|c| !c.is_empty())
         .map(str::to_owned)
         .collect()
 }
@@ -289,6 +386,22 @@ impl CommandsDialog {
             .collect()
     }
 
+    /// The tabs it has: a feature's has that feature's own.
+    fn tabs(&self) -> &'static [CommandsTab] {
+        match self.scope.slug {
+            Some(_) => &COMMANDS_FEATURE_TABS,
+            None => &COMMANDS_PROJECT_TABS,
+        }
+    }
+
+    /// The tab after this one (`back`: before it), round.
+    fn step_tab(&mut self, back: bool) {
+        let tabs = self.tabs();
+        let at = tabs.iter().position(|t| *t == self.tab).unwrap_or(0);
+        let n = tabs.len();
+        self.set_tab(tabs[(at + if back { n - 1 } else { 1 }) % n]);
+    }
+
     fn has_limit(&self) -> bool {
         self.tab == CommandsTab::Checks
     }
@@ -296,18 +409,40 @@ impl CommandsDialog {
     /// What has the keyboard, in the order of the shown: the tab's rows
     /// then the time limit.
     fn stops(&self) -> Vec<Focus> {
-        let rows = self.shown().into_iter().map(|i| {
+        let mut stops = Vec::new();
+        for i in self.shown() {
             let row = &self.rows[i];
-            Focus::Row(row.project.clone(), row.key.clone())
-        });
-        let limit = self.has_limit().then_some(Focus::Limit);
-        rows.chain(limit).collect()
+            let (project, key) = (&row.project, &row.key);
+            if self.tab == CommandsTab::Feature {
+                let lines = 0..row.borrowed().len();
+                stops.extend(lines.map(|k| Focus::Borrowed(project.clone(), key.clone(), k)));
+            }
+            stops.push(Focus::Row(project.clone(), key.clone()));
+        }
+        stops.extend(self.has_limit().then_some(Focus::Limit));
+        stops
     }
 
+    /// The first field: what is borrowed is passed over, until asked for.
     fn focus_first(&mut self) {
-        if let Some(first) = self.stops().into_iter().next() {
-            self.focus = first;
+        let stops = self.stops();
+        let field = stops.iter().find(|s| !matches!(s, Focus::Borrowed(..)));
+        if let Some(first) = field {
+            self.focus = first.clone();
         }
+    }
+
+    /// Skip line `k` of what row `i` borrows, or run it again.
+    fn toggle_skip(&mut self, i: usize, k: usize) {
+        let row = &mut self.rows[i];
+        let Some(command) = row.borrowed().get(k).cloned() else {
+            return;
+        };
+        self.focus = Focus::Borrowed(row.project.clone(), row.key.clone(), k);
+        if !row.skip.remove(&command) {
+            row.skip.insert(command);
+        }
+        self.typed();
     }
 
     /// The next stop (`back`: the one before), round.
@@ -330,7 +465,7 @@ impl CommandsDialog {
     }
 
     fn row_of(&self, focus: &Focus) -> Option<usize> {
-        let Focus::Row(project, key) = focus else {
+        let (Focus::Row(project, key) | Focus::Borrowed(project, key, _)) = focus else {
             return None;
         };
         (self.rows.iter()).position(|row| row.project == *project && row.key == *key)
@@ -339,6 +474,9 @@ impl CommandsDialog {
     fn field_mut(&mut self) -> Option<&mut TextField> {
         if self.focus == Focus::Limit {
             return self.has_limit().then_some(&mut self.limit);
+        }
+        if matches!(self.focus, Focus::Borrowed(..)) {
+            return None;
         }
         let (i, tab) = (self.row_of(&self.focus)?, self.tab);
         Some(&mut self.rows[i].slot_mut(tab)?.field)
@@ -398,11 +536,16 @@ impl CommandsDialog {
             Keysym::ISO_Left_Tab | Keysym::Tab => self.step(true),
             Keysym::j | Keysym::J if ctrl => self.step(false),
             Keysym::k | Keysym::K if ctrl => self.step(true),
-            Keysym::Page_Up | Keysym::KP_Page_Up if ctrl => self.set_tab(self.tab.next(true)),
-            Keysym::Page_Down | Keysym::KP_Page_Down if ctrl => {
-                self.set_tab(self.tab.next(false));
-            }
+            Keysym::Page_Up | Keysym::KP_Page_Up if ctrl => self.step_tab(true),
+            Keysym::Page_Down | Keysym::KP_Page_Down if ctrl => self.step_tab(false),
             Keysym::u | Keysym::U if only_alt => self.use_suggestion(),
+            Keysym::space if bare && matches!(self.focus, Focus::Borrowed(..)) => {
+                if let Focus::Borrowed(_, _, k) = self.focus
+                    && let Some(i) = self.row_of(&self.focus)
+                {
+                    self.toggle_skip(i, k);
+                }
+            }
             _ => {
                 let edit = self
                     .field_mut()
@@ -477,8 +620,34 @@ impl CommandsDialog {
     /// Whether anything was typed.
     fn touched(&self) -> bool {
         self.limit_changed()
-            || (self.rows.iter())
-                .any(|r| r.checks.changed() || r.setup.as_ref().is_some_and(Slot::changed))
+            || self.own_changed()
+            || (self.rows.iter()).any(|r| {
+                (COMMANDS_PROJECT_TABS.iter()).any(|tab| r.slot(*tab).is_some_and(Slot::changed))
+            })
+    }
+
+    /// Whether what only the feature runs or skips was edited.
+    fn own_changed(&self) -> bool {
+        (self.rows.iter()).any(|r| r.own.as_ref().is_some_and(Slot::changed) || r.skip_changed())
+    }
+
+    /// Write what was edited of what only the feature runs into `checks`,
+    /// and of what it skips into `skip`: of that, what it still borrows.
+    fn apply_own(
+        &self,
+        checks: &mut BTreeMap<String, Vec<String>>,
+        skip: &mut BTreeMap<String, Vec<String>>,
+    ) {
+        for row in &self.rows {
+            if let Some(own) = row.own.as_ref().filter(|s| s.changed()) {
+                set_commands(checks, &row.own_key, lines_of(&own.field));
+            }
+            if row.skip_changed() {
+                let mut borrowed = row.borrowed();
+                borrowed.retain(|command| row.skip.contains(command));
+                set_commands(skip, &row.own_key, borrowed);
+            }
+        }
     }
 
     fn limit_changed(&self) -> bool {
@@ -489,15 +658,20 @@ impl CommandsDialog {
     fn draft(&self) -> CommandsDraft {
         let mut rows = Vec::new();
         for row in &self.rows {
-            for tab in CommandsTab::ALL {
+            for tab in COMMANDS_FEATURE_TABS {
                 if let Some(slot) = row.slot(tab).filter(|s| s.changed()) {
                     let text = slot.field.to_string();
                     rows.push((row.project.clone(), row.key.clone(), tab, text));
                 }
             }
         }
+        let skips = (self.rows.iter())
+            .filter(|row| row.skip_changed())
+            .map(|row| (row.project.clone(), row.key.clone(), row.skip.clone()))
+            .collect();
         CommandsDraft {
             rows,
+            skips,
             limit: self.limit_changed().then(|| self.limit.to_string()),
         }
     }
@@ -518,6 +692,13 @@ impl CommandsDialog {
                 slot.field.set(&text);
             }
         }
+        for (project, key, skip) in draft.skips {
+            let at = self.rows.iter_mut();
+            let mut at = at.filter(|r| r.project == project && r.key == key && r.own.is_some());
+            if let Some(row) = at.next() {
+                row.skip = skip;
+            }
+        }
         if let Some(limit) = draft.limit {
             self.limit.set(&limit);
         }
@@ -529,7 +710,7 @@ impl CommandsDialog {
         let edited = |id: &str| {
             (self.rows.iter()).any(|r| {
                 r.project == id
-                    && CommandsTab::ALL
+                    && COMMANDS_PROJECT_TABS
                         .iter()
                         .any(|tab| r.slot(*tab).is_some_and(Slot::changed))
             })
@@ -571,8 +752,11 @@ impl CommandsDialog {
     /// What shows of `row` on the tab, under `heading` if it starts its
     /// project.
     fn row_view(&self, row: &Row, slot: &Slot, heading: Option<String>) -> CommandsRow {
+        let on_feature = self.tab == CommandsTab::Feature;
         let tag = if row.is_feature() {
             Some("in the feature folder")
+        } else if on_feature {
+            (!row.in_feature).then_some("runs once this feature changes it")
         } else if row.missing {
             Some("not found")
         } else if row.in_feature {
@@ -590,6 +774,16 @@ impl CommandsDialog {
             tag: tag.map(str::to_owned),
             suggestion: (slot.field.is_empty() && !suggestion.is_empty())
                 .then(|| suggestion.join(", ")),
+            // As it stands in the Checks tab, saved or not.
+            borrowed: match on_feature {
+                true => (row.borrowed().into_iter())
+                    .map(|command| CommandsBorrowed {
+                        skipped: row.skip.contains(&command),
+                        command: command.replace('\n', " "),
+                    })
+                    .collect(),
+                false => Vec::new(),
+            },
             line: slot.field.line(),
         }
     }
@@ -628,19 +822,18 @@ impl CommandsDialog {
             rows.push(self.row_view(row, slot, heading));
         }
         let shown = self.shown();
+        let focused_row = self.row_of(&self.focus);
+        let at = focused_row.and_then(|i| shown.iter().position(|s| *s == i));
         let focus = match self.focus {
             Focus::Limit if self.has_limit() => CommandsFocus::Limit,
-            _ => {
-                let at = self.row_of(&self.focus);
-                let at = at.and_then(|i| shown.iter().position(|s| *s == i));
-                CommandsFocus::Row(at.unwrap_or(0))
-            }
+            Focus::Borrowed(_, _, k) => CommandsFocus::Borrowed(at.unwrap_or(0), k),
+            _ => CommandsFocus::Row(at.unwrap_or(0)),
         };
         let can_use = match focus {
             CommandsFocus::Row(i) => rows
                 .get(i)
                 .is_some_and(|r: &CommandsRow| r.suggestion.is_some()),
-            CommandsFocus::Limit => false,
+            CommandsFocus::Limit | CommandsFocus::Borrowed(..) => false,
         };
         let mut keys = Vec::new();
         if matches!(focus, CommandsFocus::Row(_)) {
@@ -649,10 +842,16 @@ impl CommandsDialog {
         if can_use {
             keys.push(("Alt+U", "use"));
         }
+        if let CommandsFocus::Borrowed(i, k) = focus {
+            let skipped = (rows.get(i).and_then(|r: &CommandsRow| r.borrowed.get(k)))
+                .is_some_and(|b| b.skipped);
+            keys.push(("Space", if skipped { "run" } else { "skip" }));
+        }
         keys.push(("Esc", "close"));
         keys.push(("Tab", "next"));
         keys.push(("Ctrl+PgDn", "next tab"));
         CommandsView {
+            tabs: self.tabs(),
             tab: self.tab,
             body: match self.tab {
                 CommandsTab::Checks => {
@@ -667,6 +866,7 @@ impl CommandsDialog {
                 CommandsTab::Prepare => {
                     "One command per line, in order, before a sandbox's commands: a migration on its data."
                 }
+                CommandsTab::Feature => FEATURE_BODY,
             },
             note: self.note(rows.len()),
             limit: self.has_limit().then(|| self.limit.line()),
@@ -680,6 +880,10 @@ impl CommandsDialog {
         }
     }
 }
+
+/// What the tab of a feature's own checks says they are.
+pub const FEATURE_BODY: &str =
+    "One command per line. They run beside the project's, for this feature only.";
 
 /// What the dialog says once a project's file changed outside gerdr.
 const STALE: &str = "The project file was edited outside gerdr. Reload it to save here.";
@@ -731,12 +935,13 @@ impl Gerdr {
         self.features.serial += 1;
         let serial = self.features.serial;
         let mut dialog = CommandsDialog::new(serial, scope.clone(), &projects, tab);
-        if let Some(draft) = self.features.commands_drafts.remove(&scope) {
-            dialog.restore(draft, &projects);
-        }
         // Rows of a feature's repositories show at once.
         if let Some(feature) = slug.and_then(|slug| self.feature(project, slug)) {
-            for repo in feature.repos.iter().filter(|r| r.touched) {
+            let whole = (dialog.rows.iter_mut()).find(|r| r.is_feature());
+            if let Some(row) = whole {
+                row.own_from(feature, FEATURE_KEY.to_owned());
+            }
+            for repo in &feature.repos {
                 let id = repo.project.as_deref().unwrap_or(project);
                 let Some((_, _, workflow)) = projects.iter().find(|(p, ..)| p == id) else {
                     continue;
@@ -746,9 +951,14 @@ impl Gerdr {
                     dialog.rows.push(Row::new(id, &repo.name, workflow));
                     dialog.rows.len() - 1
                 });
-                dialog.rows[i].in_feature = true;
+                let row = &mut dialog.rows[i];
+                row.in_feature = repo.touched;
+                row.own_from(feature, repo.key());
             }
             dialog.sort();
+        }
+        if let Some(draft) = self.features.commands_drafts.remove(&scope) {
+            dialog.restore(draft, &projects);
         }
         dialog.focus_first();
         if (projects.iter()).any(|(id, ..)| self.projects.file_changed(id)) {
@@ -878,8 +1088,9 @@ impl Gerdr {
         self.refresh_pointer_focus();
     }
 
-    /// Write what was edited to the project files. Nothing edited closes
-    /// it; a file it can't write to leaves it open, saying so.
+    /// Write what was edited to the project files and the feature's record.
+    /// Nothing edited closes it; a file it can't write to leaves it open,
+    /// saying so.
     fn save_commands(&mut self) {
         let size = self.output_size();
         let Some(dialog) = self.features.commands.as_mut() else {
@@ -896,7 +1107,8 @@ impl Gerdr {
             }
         };
         let ids = dialog.changed_projects();
-        if ids.is_empty() {
+        let own = dialog.own_changed();
+        if ids.is_empty() && !own {
             return self.close_commands();
         }
         if ids.iter().any(|id| self.projects.file_changed(id)) {
@@ -906,8 +1118,19 @@ impl Gerdr {
             }
             return;
         }
-        let Some(dialog) = self.features.commands.take() else {
+        let Some(mut dialog) = self.features.commands.take() else {
             return;
+        };
+        let feature_before = match own {
+            true => match self.save_own_checks(&dialog) {
+                Ok(before) => before,
+                Err(why) => {
+                    dialog.error = Some(why);
+                    self.features.commands = Some(dialog);
+                    return;
+                }
+            },
+            false => None,
         };
         let mut before = Vec::new();
         for id in &ids {
@@ -921,25 +1144,119 @@ impl Gerdr {
                 dialog.apply(id, &mut p.workflow, limit);
             }
         }
-        if !self.projects.save_projects(&ids) {
+        if !ids.is_empty() && !self.projects.save_projects(&ids) {
             tracing::warn!("couldn't write the project commands of {ids:?}");
             self.put_commands_back(&before);
             self.projects.save();
-            let mut dialog = dialog;
+            // The form says the save failed; a record that can't be put
+            // back says so too.
+            if let Some(Err(why)) = feature_before.as_ref().map(|w| self.put_own_checks_back(w)) {
+                self.show_error(why);
+            }
             dialog.error = Some("gerdr couldn't write the project file. See its log.".into());
             self.features.commands = Some(dialog);
             return;
         }
         self.features.commands_drafts.remove(&dialog.scope);
         self.refresh_pointer_focus();
+        let what = match (before.is_empty(), feature_before.is_some()) {
+            (true, _) => "This feature's checks",
+            (false, true) => "Commands",
+            (false, false) => "Project commands",
+        };
+        let undo = CommandsUndo {
+            projects: before,
+            feature: feature_before,
+        };
         self.toast_with(
-            "Project commands saved; they apply from the next run".to_owned(),
+            format!("{what} saved; they apply from the next run"),
             Level::Success,
-            Some((
-                "Undo".to_owned(),
-                MenuAction::RestoreProjectCommands(before),
-            )),
+            Some(("Undo".to_owned(), MenuAction::RestoreProjectCommands(undo))),
         );
+    }
+
+    /// Write what was edited of the dialog's feature's own checks to its
+    /// record: how they stood before, or why they couldn't be written.
+    fn save_own_checks(
+        &mut self,
+        dialog: &CommandsDialog,
+    ) -> Result<Option<OwnChecksBefore>, String> {
+        let scope = &dialog.scope;
+        let Some(slug) = &scope.slug else {
+            return Ok(None);
+        };
+        let Some(feature) = self.feature_mut(&scope.project, slug) else {
+            return Err("That feature is gone.".into());
+        };
+        let (checks, skip) = (feature.checks.clone(), feature.skip_checks.clone());
+        dialog.apply_own(&mut feature.checks, &mut feature.skip_checks);
+        if let Err(err) = crate::feature::store::save(None, feature) {
+            tracing::warn!("saving the checks of {}/{slug}: {err}", scope.project);
+            feature.checks = checks;
+            feature.skip_checks = skip;
+            return Err("gerdr couldn't write the feature's record. See its log.".into());
+        }
+        Ok(Some(OwnChecksBefore {
+            project: scope.project.clone(),
+            slug: slug.clone(),
+            checks,
+            skip,
+        }))
+    }
+
+    /// Skip the check `command` feature `slug` borrows for `repo`, or stop
+    /// skipping it: from a card on its Verify page. Like a save of the dialog
+    /// it applies from the next run, and can be undone.
+    pub(crate) fn set_check_skipped(
+        &mut self,
+        project: &str,
+        slug: &str,
+        repo: &str,
+        command: &str,
+        skip: bool,
+    ) {
+        let Some(feature) = self.feature_mut(project, slug) else {
+            return self.show_error("That feature is gone".into());
+        };
+        let (checks, was) = (feature.checks.clone(), feature.skip_checks.clone());
+        set_skipped(&mut feature.skip_checks, repo, command, skip);
+        if let Err(err) = crate::feature::store::save(None, feature) {
+            tracing::warn!("saving the checks of {project}/{slug}: {err}");
+            feature.skip_checks = was;
+            return self.show_error("gerdr couldn't write the feature's record".into());
+        }
+        let undo = CommandsUndo {
+            projects: Vec::new(),
+            feature: Some(OwnChecksBefore {
+                project: project.to_owned(),
+                slug: slug.to_owned(),
+                checks,
+                skip: was,
+            }),
+        };
+        let what = match skip {
+            true => "Skipped for this feature; it applies from the next run",
+            false => "No longer skipped; it applies from the next run",
+        };
+        self.toast_with(
+            what.to_owned(),
+            Level::Success,
+            Some(("Undo".to_owned(), MenuAction::RestoreProjectCommands(undo))),
+        );
+    }
+
+    /// Put a feature's own checks back; else why they couldn't be, in a
+    /// toast's words.
+    fn put_own_checks_back(&mut self, was: &OwnChecksBefore) -> Result<(), String> {
+        let Some(feature) = self.feature_mut(&was.project, &was.slug) else {
+            return Err("That feature is gone".into());
+        };
+        feature.checks = was.checks.clone();
+        feature.skip_checks = was.skip.clone();
+        crate::feature::store::save(None, feature).map_err(|err| {
+            tracing::warn!("saving the checks of {}/{}: {err}", was.project, was.slug);
+            "gerdr couldn't write the feature's record".to_owned()
+        })
     }
 
     fn put_commands_back(&mut self, before: &[CommandsBefore]) {
@@ -953,7 +1270,11 @@ impl Gerdr {
     }
 
     /// Undo a save of the dialog's, unless a file changed since.
-    pub(crate) fn restore_project_commands(&mut self, before: Vec<CommandsBefore>) {
+    pub(crate) fn restore_project_commands(&mut self, undo: CommandsUndo) {
+        let CommandsUndo {
+            projects: before,
+            feature,
+        } = undo;
         let ids: Vec<String> = before.iter().map(|b| b.project.clone()).collect();
         if ids.iter().any(|id| self.projects.file_changed(id)) {
             return self.toast_with(
@@ -962,9 +1283,22 @@ impl Gerdr {
                 Some(("Reload".to_owned(), MenuAction::ReloadProjects)),
             );
         }
+        if let Some(Err(why)) = feature.as_ref().map(|was| self.put_own_checks_back(was)) {
+            return self.show_error(why);
+        }
+        if ids.is_empty() {
+            if feature.is_some() {
+                self.show_success("This feature's checks put back".into());
+            }
+            return;
+        }
         self.put_commands_back(&before);
         if self.projects.save_projects(&ids) {
-            self.show_success("Project commands put back".into());
+            let what = match feature {
+                Some(_) => "Commands put back",
+                None => "Project commands put back",
+            };
+            self.show_success(what.into());
         } else {
             self.show_error("gerdr couldn't write the project file".into());
         }
@@ -987,7 +1321,10 @@ impl Gerdr {
             .insert(scope.clone(), dialog.draft());
         self.open_project_commands(&scope.project, scope.slug.as_deref(), tab);
         if let Some(dialog) = self.features.commands.as_mut() {
-            dialog.focus = focus;
+            // A borrowed line it was on may be gone with the reload.
+            if dialog.stops().contains(&focus) {
+                dialog.focus = focus;
+            }
             dialog.down = down;
         }
     }
@@ -1016,6 +1353,11 @@ impl Gerdr {
                 }
             }
             Some(CommandsHit::Limit) => dialog.focus = Focus::Limit,
+            Some(CommandsHit::Borrowed(i, k)) => {
+                if let Some(&at) = shown.get(i) {
+                    dialog.toggle_skip(at, k);
+                }
+            }
             // Off it, it stays: a click away never throws what was typed
             // away.
             None => {}
@@ -1061,6 +1403,21 @@ impl Gerdr {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_skip_goes_by_the_commands_words_and_leaves_no_empty_list() {
+        let mut skips = BTreeMap::new();
+        set_skipped(&mut skips, "api", "slow", true);
+        set_skipped(&mut skips, "api", "slow", true);
+        set_skipped(&mut skips, "api", "fast", true);
+        assert_eq!(skips["api"], ["slow", "fast"]);
+        set_skipped(&mut skips, "api", "slow", false);
+        assert_eq!(skips["api"], ["fast"]);
+        set_skipped(&mut skips, "api", "fast", false);
+        assert!(skips.is_empty());
+        set_skipped(&mut skips, "web", "never", false);
+        assert!(skips.is_empty());
+    }
 
     fn workflow() -> Workflow {
         let mut w = Workflow::default();
@@ -1387,6 +1744,194 @@ mod tests {
         d.error = Some("wrong".into());
         press(&mut d, none(), Keysym::a);
         assert_eq!(d.error, None);
+    }
+
+    /// A dialog for a feature holding `api` and `web`, its Whole feature row
+    /// too; `web` isn't touched.
+    fn feature_dialog() -> CommandsDialog {
+        let scope = CommandsScope {
+            project: "home".into(),
+            slug: Some("f".into()),
+        };
+        let mut d = CommandsDialog::new(1, scope, &projects(), CommandsTab::Feature);
+        for key in ["api", "web", FEATURE_KEY] {
+            row(&mut d, key).own = Some(Slot::new(None));
+        }
+        row(&mut d, "api").in_feature = true;
+        row(&mut d, "api").own_key = "api".into();
+        d.focus_first();
+        d
+    }
+
+    #[test]
+    fn a_feature_has_a_tab_of_its_own_a_project_doesnt() {
+        assert_eq!(dialog().view().tabs, COMMANDS_PROJECT_TABS);
+        let mut d = feature_dialog();
+        let view = d.view();
+        assert_eq!(view.tabs, COMMANDS_FEATURE_TABS);
+        assert_eq!(labels(&d), ["api", "web", "Whole feature"]);
+        assert!(view.limit.is_none());
+        // Ctrl+PgDn goes round them, Ctrl+PgUp back.
+        press(&mut d, ctrl(), Keysym::Page_Down);
+        assert_eq!(d.tab, CommandsTab::Run);
+        press(&mut d, ctrl(), Keysym::Page_Down);
+        assert_eq!(d.tab, CommandsTab::Prepare);
+        press(&mut d, ctrl(), Keysym::Page_Down);
+        assert_eq!(d.tab, CommandsTab::Checks);
+        press(&mut d, ctrl(), Keysym::Page_Up);
+        assert_eq!(d.tab, CommandsTab::Prepare);
+    }
+
+    #[test]
+    fn an_edit_on_the_run_tab_counts_as_touched() {
+        let mut d = dialog();
+        assert!(!d.touched());
+        let row = d.rows.first_mut().unwrap();
+        row.run.as_mut().unwrap().field.set("./runlocal.sh");
+        assert!(d.touched());
+        assert!(!d.changed_projects().is_empty());
+    }
+
+    #[test]
+    fn the_features_tab_says_what_it_borrows_as_it_stands() {
+        let mut d = feature_dialog();
+        let view = d.view();
+        let words = |r: &CommandsRow| {
+            let borrowed = r.borrowed.iter().map(|b| b.command.clone());
+            borrowed.collect::<Vec<_>>()
+        };
+        assert_eq!(words(&view.rows[0]), ["cargo test", "cargo clippy"]);
+        assert_eq!(view.rows[0].tag, None);
+        assert_eq!(
+            view.rows[1].tag.as_deref(),
+            Some("runs once this feature changes it")
+        );
+        assert!(view.rows.iter().all(|r| r.suggestion.is_none()));
+        // What was typed on the Checks tab shows, before any save.
+        row(&mut d, "api").checks.field.set("make");
+        assert_eq!(words(&d.view().rows[0]), ["make"]);
+        d.set_tab(CommandsTab::Checks);
+        assert!(d.view().rows.iter().all(|r| r.borrowed.is_empty()));
+    }
+
+    #[test]
+    fn a_features_checks_go_to_it_and_not_to_the_project() {
+        let mut d = feature_dialog();
+        assert!(!d.touched());
+        row(&mut d, "api")
+            .own
+            .as_mut()
+            .unwrap()
+            .field
+            .set(" ./e2e.sh \n\n");
+        assert!(d.touched() && d.own_changed());
+        assert!(d.changed_projects().is_empty());
+        let mut checks = BTreeMap::from([("web".to_owned(), vec!["stays".to_owned()])]);
+        let mut skip = BTreeMap::new();
+        d.apply_own(&mut checks, &mut skip);
+        assert_eq!(checks["api"], ["./e2e.sh"]);
+        assert_eq!(checks["web"], ["stays"]);
+        assert_eq!(saved(&d, Some(90)), workflow());
+        // Emptied, its key goes.
+        row(&mut d, "api").own = Some(Slot::new(checks.get("api")));
+        row(&mut d, "api").own.as_mut().unwrap().field.clear();
+        d.apply_own(&mut checks, &mut skip);
+        assert!(!checks.contains_key("api"));
+        assert!(skip.is_empty());
+    }
+
+    #[test]
+    fn space_skips_a_borrowed_check_and_runs_it_again() {
+        let mut d = feature_dialog();
+        // The first stop is a field; the checks borrowed are before it.
+        assert_eq!(d.focus, Focus::Row("home".into(), "api".into()));
+        press(&mut d, shift(), Keysym::Tab);
+        assert_eq!(d.focus, Focus::Borrowed("home".into(), "api".into(), 1));
+        assert!(d.view().keys.contains(&("Space", "skip")));
+        // No field has the keyboard: a space skips, a letter does nothing.
+        press(&mut d, none(), Keysym::x);
+        press(&mut d, none(), Keysym::space);
+        assert!(d.own_changed());
+        let view = d.view();
+        assert!(view.rows[0].borrowed[1].skipped);
+        assert!(!view.rows[0].borrowed[0].skipped);
+        assert_eq!(view.focus, CommandsFocus::Borrowed(0, 1));
+        assert!(view.keys.contains(&("Space", "run")));
+        assert_eq!(*row(&mut d, "api").own.as_ref().unwrap().field, *"");
+        let mut skip = BTreeMap::new();
+        d.apply_own(&mut BTreeMap::new(), &mut skip);
+        assert_eq!(skip["api"], ["cargo clippy"]);
+        // Nothing of the project changes.
+        assert!(d.changed_projects().is_empty());
+        assert_eq!(saved(&d, Some(90)), workflow());
+        // Back to running it, there is nothing to save.
+        press(&mut d, none(), Keysym::space);
+        assert!(!d.own_changed());
+        // Enter still saves from there.
+        assert_eq!(
+            press(&mut d, none(), Keysym::Return),
+            Some(CommandsOutcome::Go)
+        );
+    }
+
+    #[test]
+    fn a_skip_goes_by_the_whole_command_as_written() {
+        let mut w = workflow();
+        w.verify.insert("api".into(), vec!["a &&\nb".into()]);
+        let projects = vec![("home".to_owned(), "Home".to_owned(), w)];
+        let scope = CommandsScope {
+            project: "home".into(),
+            slug: Some("f".into()),
+        };
+        let mut d = CommandsDialog::new(1, scope, &projects, CommandsTab::Feature);
+        row(&mut d, "api").own = Some(Slot::new(None));
+        let at = d.row_of(&Focus::Row("home".into(), "api".into())).unwrap();
+        // One line, and one thing to skip.
+        assert_eq!(d.view().rows[0].borrowed[0].command, "a && b");
+        assert_eq!(d.view().rows[0].borrowed.len(), 1);
+        d.toggle_skip(at, 0);
+        let mut skip = BTreeMap::new();
+        d.apply_own(&mut BTreeMap::new(), &mut skip);
+        assert_eq!(skip["api"], ["a &&\nb"]);
+    }
+
+    #[test]
+    fn a_skip_of_what_is_no_longer_borrowed_goes() {
+        let mut d = feature_dialog();
+        let at = d.row_of(&Focus::Row("home".into(), "api".into())).unwrap();
+        d.toggle_skip(at, 0);
+        row(&mut d, "api").checks.field.set("something else");
+        let mut skip = BTreeMap::new();
+        d.apply_own(&mut BTreeMap::new(), &mut skip);
+        assert!(skip.is_empty());
+    }
+
+    #[test]
+    fn a_skip_comes_back_with_the_draft() {
+        let mut d = feature_dialog();
+        let at = d.row_of(&Focus::Row("home".into(), "api".into())).unwrap();
+        d.toggle_skip(at, 0);
+        let draft = d.draft();
+        assert_ne!(draft, CommandsDraft::default());
+        let mut back = feature_dialog();
+        back.restore(draft, &projects());
+        assert!(back.view().rows[0].borrowed[0].skipped);
+        assert!(back.own_changed());
+    }
+
+    #[test]
+    fn a_features_draft_comes_back_on_its_tab() {
+        let mut d = feature_dialog();
+        row(&mut d, "api").own.as_mut().unwrap().field.set("typed");
+        let draft = d.draft();
+        let mut back = feature_dialog();
+        back.restore(draft, &projects());
+        assert_eq!(*row(&mut back, "api").own.as_ref().unwrap().field, *"typed");
+        // A row without a field of its own there takes nothing.
+        let mut plain = dialog();
+        let draft = back.draft();
+        plain.restore(draft, &projects());
+        assert!(row(&mut plain, "api").own.is_none());
     }
 
     #[test]
