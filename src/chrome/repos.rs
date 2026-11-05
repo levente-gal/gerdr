@@ -779,6 +779,8 @@ pub enum ReposButton {
     /// The diff's review comments, copied for an agent; and dropped
     /// (asked first, on a sheet).
     CopyReview,
+    /// The cursor's line, or what is selected, to the clipboard.
+    CopyLines,
     ClearReview,
     /// The review, sent to the agent running in its workspace.
     SendReview,
@@ -867,6 +869,7 @@ impl ReposButton {
             ReposButton::CreateMissing => "Create where missing",
             ReposButton::EditName => "Edit name",
             ReposButton::CopyReview => "Copy review",
+            ReposButton::CopyLines => "Copy",
             ReposButton::SendReview => "Send to agent",
             ReposButton::ClearReview => "Clear review",
             ReposButton::Comment => "Comment",

@@ -271,7 +271,8 @@ impl Gerdr {
         view.modes = mode_switch(file, tab.mode, wide, tab.no_browser);
         if tab.mode == DocMode::Preview {
             view.detail = DetailView::default();
-            view.hints.retain(|h| h.button != ReposButton::Comment);
+            (view.hints)
+                .retain(|h| !matches!(h.button, ReposButton::Comment | ReposButton::CopyLines));
         }
         Some(view)
     }

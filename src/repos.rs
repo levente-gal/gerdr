@@ -81,7 +81,7 @@ use crate::{
         SheetView, Tone, TreeLine, TreeTool,
     },
     diff::FileDiff,
-    diff_edit::{FileEdit, Put},
+    diff_edit::{FileEdit, Put, Register},
     diff_view::{
         self, DiffView, Keys, Moved, NO_REVIEW, Place, Section, bounds, detail_line, in_dir,
         move_to, showing,
@@ -1082,7 +1082,7 @@ pub enum Outcome {
     /// Cut this out of a file, as a delete in the diff asks.
     Cut(FileEdit),
     /// Keep what this would cut, to paste, and copy it.
-    Yank(FileEdit),
+    Yank(Register),
     /// Put what was yanked or deleted last in a file.
     Paste(Put),
     /// Undo the last cut in the file (by root and path; with none, the
@@ -1278,7 +1278,7 @@ macro_rules! diff_ctx {
             note: None,
             selected: selected_file(&$panel.selected),
             read_only: false,
-            yanks: false,
+            no_edits: false,
         };
     };
 }
@@ -1697,6 +1697,10 @@ const FOCUS_KEYS: &[(&str, &str)] = &[
         "in the diff, yank (and copy); paste after, before",
     ),
     (
+        "Ctrl+C",
+        "in the diff, copy what the cursor is on: the selection, a line, a file's path, a hunk",
+    ),
+    (
         "Shift+R",
         "in the diff, restore the change at the caret or the lines selected",
     ),
@@ -1752,6 +1756,7 @@ pub(crate) fn key_name(button: ReposButton) -> &'static str {
     }
     match button {
         B::Comment => "c",
+        B::CopyLines => "Ctrl+C",
         B::CommentFile => "Shift+C",
         B::NextComment => "]",
         B::PrevComment => "[",
@@ -3560,6 +3565,7 @@ impl Panel {
             }
             B::ClearReview | B::DropOutdated => Err(Why::other("Asked on a sheet")),
             B::Comment
+            | B::CopyLines
             | B::SaveComment
             | B::DiscardComment
             | B::DeleteComment
@@ -7992,6 +7998,7 @@ mod tests {
                 (2, ReposButton::Restore),
                 (7, ReposButton::Restore),
                 (4, ReposButton::Comment),
+                (4, ReposButton::CopyLines),
                 (4, ReposButton::Restore)
             ]
         );
@@ -8226,7 +8233,13 @@ mod tests {
         let hunks = [(2, B::Restore), (7, B::Restore)];
         assert_eq!(
             buttons(&panel),
-            [hunks[0], hunks[1], (4, B::Comment), (4, B::Restore)]
+            [
+                hunks[0],
+                hunks[1],
+                (4, B::Comment),
+                (4, B::CopyLines),
+                (4, B::Restore)
+            ]
         );
         assert!(panel.view("p", &ctx).detail.title_buttons.is_empty());
         // Its button writes on them; Discard drops it, Save keeps it.
@@ -10205,7 +10218,7 @@ mod tests {
         panel.caret_to(ctx_row, 0, &ctx);
         assert_eq!(keys(&mut panel, "Vjj"), None);
         assert_eq!(
-            panel.diff.mode_title().as_deref(),
+            panel.diff.mode_title(true).as_deref(),
             Some("-- VISUAL LINE -- d delete · y yank · Shift+R restore · Esc stop")
         );
         assert_eq!(cut(keys(&mut panel, "d")).0, Cut::Lines(vec![1, 2]));
@@ -10223,27 +10236,31 @@ mod tests {
             Cut::Chars(spot(2, 4), spot(3, 5))
         );
         assert!(panel.diff.chosen(&shown).is_empty());
-        // `y` yanks as `d` deletes; `p` and `P` paste at the caret.
+        // `y` yanks as `d` deletes, what the diff shows; `p` and `P` paste
+        // at the caret.
         let yank = |o: Option<Outcome>| match o {
-            Some(Outcome::Yank(edit)) => edit.cut,
+            Some(Outcome::Yank(taken)) => (taken.text, taken.lines),
             other => panic!("not a yank: {other:?}"),
         };
+        let whole = |text: &str| (text.to_owned(), true);
+        let chars = |text: &str| (text.to_owned(), false);
         panel.caret_to(id, 4, &ctx);
-        assert_eq!(yank(keys(&mut panel, "yy")), Cut::Lines(vec![2]));
-        assert_eq!(yank(keys(&mut panel, "2Y")), Cut::Lines(vec![2, 3]));
+        assert_eq!(yank(keys(&mut panel, "yy")), whole("let id = 1;\n"));
         assert_eq!(
-            yank(keys(&mut panel, "yw")),
-            Cut::Chars(spot(2, 4), spot(2, 7))
+            yank(keys(&mut panel, "2Y")),
+            whole("let id = 1;\n\tfoo(bar)\n")
         );
-        assert_eq!(panel.diff.mode_title(), None);
+        assert_eq!(yank(keys(&mut panel, "yw")), chars("id "));
+        assert_eq!(panel.diff.mode_title(true), None);
         keys(&mut panel, "3y");
-        assert_eq!(panel.diff.mode_title().as_deref(), Some("3y"));
-        assert_eq!(yank(keys(&mut panel, "j")), Cut::Lines(vec![2, 3, 4, 5]));
-        keys(&mut panel, "vl");
+        assert_eq!(panel.diff.mode_title(true).as_deref(), Some("3y"));
+        // Only what the diff shows: this hunk ends there.
         assert_eq!(
-            yank(keys(&mut panel, "y")),
-            Cut::Chars(spot(2, 4), spot(2, 6))
+            yank(keys(&mut panel, "j")),
+            whole("let id = 1;\n\tfoo(bar)\n")
         );
+        keys(&mut panel, "vl");
+        assert_eq!(yank(keys(&mut panel, "y")), chars("id"));
         assert!(panel.diff.visual.is_none());
         match keys(&mut panel, "2P") {
             Some(Outcome::Paste(put)) => {

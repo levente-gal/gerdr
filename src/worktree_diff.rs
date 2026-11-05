@@ -369,6 +369,12 @@ impl WorktreeDiff {
         self.commit.is_some() || self.evidence() || self.closed()
     }
 
+    /// Whether the keys changing files are refused though comments aren't:
+    /// a feature's code, a file its agent is writing.
+    fn no_edits(&self) -> bool {
+        self.feature.is_some() || self.doc.as_ref().is_some_and(|d| d.locked.is_some())
+    }
+
     /// Reopen the file's stage, unless it is locked.
     fn reopen(&self) -> Option<Done> {
         let doc = self.doc.as_ref()?;
@@ -446,8 +452,6 @@ impl WorktreeDiff {
         }
         let refused = |o: &Outcome| o.edits() || *o == Outcome::Notice(diff_view::READ_ONLY);
         let restores = |o: &Outcome| matches!(o, Outcome::Cut(e) if e.cut.restored().is_some());
-        // A yank takes nothing from the file: it works however it stands.
-        let changes = |o: &Outcome| o.edits() && !matches!(o, Outcome::Yank(_));
         let locked = self.doc.as_ref().and_then(|d| d.locked);
         match outcome {
             Some(o) if self.evidence() && refused(&o) => Some(Outcome::Notice(EVIDENCE_READ_ONLY)),
@@ -456,7 +460,7 @@ impl WorktreeDiff {
                 locked.map(Outcome::Notice)
             }
             Some(o) if restores(&o) => Some(Outcome::Notice(DOC_NO_RESTORE)),
-            Some(o) if changes(&o) && locked.is_some() => locked.map(Outcome::Notice),
+            Some(o) if o.edits() && locked.is_some() => locked.map(Outcome::Notice),
             Some(Outcome::Copy { count, .. }) => Some(Outcome::Copy {
                 text: self.doc_markdown(),
                 count,
@@ -469,9 +473,7 @@ impl WorktreeDiff {
     fn help_lines(&self) -> Vec<(String, String, crate::chrome::Tone)> {
         // A read-only diff refuses the keys that edit the files.
         let edits = |what: &str| {
-            what.contains("delete from the file")
-                || what.contains("yank")
-                || what.contains("restore the change")
+            what.contains("delete from the file") || what.contains("restore the change")
         };
         let yank = |what: &str| what.contains("yank");
         // Evidence takes no comments either.
@@ -488,15 +490,21 @@ impl WorktreeDiff {
         let diff = (diff_help_lines().into_iter())
             .filter(|(_, what, _)| {
                 !(read_only && edits(what))
-                    // Its yanks take nothing from a locked file.
-                    && !(locked && edits(what) && !yank(what))
+                    && !(locked && edits(what))
                     && !(on_page && (restore(what) || other_file(what)))
                     && !((evidence || closed) && comments(what))
             })
-            .map(|(key, what, tone)| match locked && yank(&what) {
-                true => (key, what.replace("; paste after, before", ""), tone),
-                false => (key, what, tone),
-            })
+            // Yanks work on any diff, pastes only where it can be edited.
+            .map(
+                |(key, what, tone)| match (read_only || locked) && yank(&what) {
+                    true => (
+                        key.replace(", p / P", ""),
+                        what.replace("; paste after, before", ""),
+                        tone,
+                    ),
+                    false => (key, what, tone),
+                },
+            )
             .map(|(key, what, tone)| match on_page {
                 true => (
                     key.replace(" { }", ""),
@@ -506,6 +514,10 @@ impl WorktreeDiff {
                         .replace(
                             "the top, the end, the hunk before or after,",
                             "go to the top, the end,",
+                        )
+                        .replace(
+                            ": the selection, a line, a file's path, a hunk",
+                            ": the selection or the line",
                         )
                         .replace("in the diff, ", "in the review, "),
                     tone,
@@ -558,7 +570,7 @@ impl WorktreeDiff {
         let lead = self.lead();
         let empty = self.empty();
         let read_only = self.read_only();
-        let yanks = self.closed();
+        let no_edits = self.no_edits();
         let WorktreeDiff {
             root,
             label,
@@ -578,7 +590,7 @@ impl WorktreeDiff {
             None => (None, None),
         };
         let mut ctx = ctx(&sections, env, &lead, empty, read_only);
-        ctx.yanks = yanks;
+        ctx.no_edits = no_edits;
         (ctx.check, ctx.note) = marks;
         ctx.count_sections = feature.is_some_and(|f| f.repos.len() > 1);
         f(diff, &ctx)
@@ -597,7 +609,7 @@ impl WorktreeDiff {
             None => (None, None),
         };
         let mut ctx = ctx(&sections, env, &lead, self.empty(), self.read_only());
-        ctx.yanks = self.closed();
+        ctx.no_edits = self.no_edits();
         (ctx.check, ctx.note) = marks;
         ctx.count_sections = feature.is_some_and(|f| f.repos.len() > 1);
         f(&ctx)
@@ -713,7 +725,8 @@ impl WorktreeDiff {
         if let (Some(doc), Some(file)) = (
             &self.doc,
             self.doc_file().filter(|_| self.feature.is_none()),
-        ) {
+        ) && self.diff.mode_title(false).is_none()
+        {
             view.title = match file.added {
                 1 => format!("{} · 1 line", doc.name()),
                 n => format!("{} · {n} lines", doc.name()),
@@ -869,6 +882,7 @@ impl WorktreeDiff {
         if !self.read_only() {
             buttons.push(B::Comment);
         }
+        buttons.push(B::CopyLines);
         if self.feature.is_some() {
             buttons.extend([B::MarkViewed, B::NextUnviewed]);
         }
@@ -1162,7 +1176,7 @@ fn ctx<'a>(
         note: None,
         selected: None,
         read_only,
-        yanks: false,
+        no_edits: false,
     }
 }
 
@@ -1654,7 +1668,8 @@ mod tests {
     use super::*;
     use crate::{
         chrome::{DetailRow, ReposButton},
-        diff_view::Outcome,
+        diff_edit::Register,
+        diff_view::{DiffRow, Outcome},
         git::Change,
     };
 
@@ -1823,6 +1838,7 @@ mod tests {
         use ReposButton as B;
         let all = [
             B::Comment,
+            B::CopyLines,
             B::NextComment,
             B::CopyReview,
             B::ClearReview,
@@ -1853,7 +1869,7 @@ mod tests {
         // On a file's header: the file, Zed putting it where it was.
         wd.click(ReposHit::DiffRow(1), ENV);
         assert_eq!(key(&mut wd, Keysym::g), None);
-        assert_eq!(wd.diff.mode_title().as_deref(), Some("g"));
+        assert_eq!(wd.diff.mode_title(true).as_deref(), Some("g"));
         let (paths, place) = opened(key(&mut wd, Keysym::space));
         assert_eq!((paths, place), (vec!["a.rs".to_owned()], None));
         // On a line, its line at the caret's char.
@@ -1871,7 +1887,7 @@ mod tests {
             Some(Done::Diff(Outcome::Notice(said)))
         );
         assert_eq!(wd.diff.cursor.as_ref().map(|c| c.row), Some(4));
-        assert_eq!(wd.diff.mode_title(), None);
+        assert_eq!(wd.diff.mode_title(true), None);
         assert_eq!(key(&mut wd, Keysym::space), None);
         // Ctrl+click: the caret on the char pressed, there in Zed.
         wd.diff.pointer_char = Some((3, 0));
@@ -1905,6 +1921,125 @@ mod tests {
         assert_eq!(place.map(|at| at.col), Some(None));
     }
 
+    /// A commit's diff of two files with tabs and removed lines, in `git
+    /// diff`'s words.
+    fn commit_of_two() -> WorktreeDiff {
+        let commit = CommitOf {
+            oid: "c1".into(),
+            line: "c1 Tabs".into(),
+        };
+        let mut wd = WorktreeDiff::of_commit("/src/gerdr".into(), "gerdr".into(), commit, 3);
+        let text = "diff --git a/a.go b/a.go\n@@ -1,2 +1,2 @@\n keep\n-\told\n+\tnew\n\
+                    diff --git a/b.go b/b.go\n@@ -1 +1 @@\n-gone\n+here\n";
+        let mut files = crate::diff::parse(text);
+        files[0].path = "a.go".into();
+        files[1].path = "b.go".into();
+        let since = Since {
+            base: "c1^".into(),
+            commits: 1,
+            changes: vec![change("a.go", 'M'), change("b.go", 'M')],
+        };
+        wd.set_read(Ok((since, files)), ENV);
+        wd
+    }
+
+    /// Type `typed`, as `key` hears it; what the last key did.
+    fn typed(wd: &mut WorktreeDiff, typed: &str) -> Option<Done> {
+        let mut last = None;
+        for c in typed.chars() {
+            let sym = Keysym::from(c as u32);
+            last = wd.key(&none(), sym, sym, ENV);
+        }
+        last
+    }
+
+    fn yank_of(done: Option<Done>) -> (String, bool) {
+        match done {
+            Some(Done::Diff(Outcome::Yank(Register { text, lines }))) => (text, lines),
+            other => panic!("not a yank: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_yank_takes_what_the_diff_shows_of_any_line() {
+        let mut wd = commit_of_two();
+        let row = |wd: &WorktreeDiff, text: &str| {
+            let at = texts(wd).iter().position(|t| t == text);
+            at.unwrap_or_else(|| panic!("no {text} in {:?}", texts(wd)))
+        };
+        let (old, new, gone) = (row(&wd, "    old"), row(&wd, "    new"), row(&wd, "gone"));
+        // A removed line, with its tab; however the motion goes.
+        wd.click(ReposHit::DiffRow(old), ENV);
+        assert_eq!(yank_of(typed(&mut wd, "yy")), ("\told\n".into(), true));
+        assert_eq!(yank_of(typed(&mut wd, "Y")), ("\told\n".into(), true));
+        assert_eq!(yank_of(typed(&mut wd, "y$")), ("\told".into(), false));
+        assert_eq!(
+            yank_of(typed(&mut wd, "2yy")),
+            ("\told\n\tnew\n".into(), true)
+        );
+        // By lines over two files, without their headers.
+        wd.click(ReposHit::DiffRow(old), ENV);
+        typed(&mut wd, "V");
+        for _ in old..gone {
+            typed(&mut wd, "j");
+        }
+        assert_eq!(
+            yank_of(typed(&mut wd, "y")),
+            ("\told\n\tnew\ngone\n".into(), true)
+        );
+        assert!(wd.diff.visual.is_none());
+        // By chars, on to the next line: a shown char of a tab takes it.
+        wd.click(ReposHit::DiffRow(old), ENV);
+        typed(&mut wd, "$hvj");
+        assert_eq!(yank_of(typed(&mut wd, "y")), ("ld\n\tne".into(), false));
+        // Ctrl+C takes the line, or what is selected, and leaves it at that.
+        let ctrl = ModifiersState {
+            ctrl: true,
+            ..none()
+        };
+        wd.click(ReposHit::DiffRow(new), ENV);
+        let copied = wd.key(&ctrl, Keysym::c, Keysym::c, ENV);
+        assert_eq!(yank_of(copied), ("\tnew\n".into(), true));
+        // As does the button on the row.
+        let chip = ReposHit::Button(ReposButton::CopyLines);
+        assert_eq!(yank_of(wd.click(chip, ENV)), ("\tnew\n".into(), true));
+    }
+
+    #[test]
+    fn a_yank_off_a_line_takes_what_the_row_holds() {
+        let mut wd = commit_of_two();
+        let ctrl = ModifiersState {
+            ctrl: true,
+            ..none()
+        };
+        // No cursor: it says where to go.
+        assert_eq!(
+            wd.click(ReposHit::Button(ReposButton::CopyLines), ENV),
+            Some(Done::Diff(Outcome::Notice(diff_view::NOWHERE)))
+        );
+        let on = |wd: &mut WorktreeDiff, row: DiffRow| {
+            let r = wd.diff.rows.iter().position(|&x| x == row).unwrap();
+            wd.diff.set_cursor(r, None);
+        };
+        // A file's header, its path; a hunk's, its lines.
+        on(&mut wd, DiffRow::File(0, 1));
+        assert_eq!(yank_of(typed(&mut wd, "yy")), ("b.go".into(), false));
+        on(&mut wd, DiffRow::Hunk(0, 0, 0));
+        let hunk = wd.key(&ctrl, Keysym::c, Keysym::c, ENV);
+        assert_eq!(yank_of(hunk), ("keep\n\told\n\tnew\n".into(), true));
+        // A comment, what it says.
+        let mut wd = read();
+        let row = texts(&wd).iter().position(|t| t == "a").unwrap();
+        wd.click(ReposHit::DiffRow(row), ENV);
+        typed(&mut wd, "chi");
+        wd.key(&none(), Keysym::Return, Keysym::Return, ENV);
+        let head = (wd.diff.rows.iter())
+            .position(|r| matches!(r, DiffRow::CommentHead { .. }))
+            .unwrap();
+        wd.diff.set_cursor(head, None);
+        assert_eq!(yank_of(typed(&mut wd, "yy")), ("hi".into(), false));
+    }
+
     #[test]
     fn a_commits_diff_is_read_only() {
         let commit = CommitOf {
@@ -1925,7 +2060,8 @@ mod tests {
         assert_eq!(texts(&wd)[1], "file a.rs None");
         let key = |wd: &mut WorktreeDiff, sym: Keysym| wd.key(&none(), sym, sym, ENV);
         let refused = Some(Done::Diff(Outcome::Notice(diff_view::READ_ONLY)));
-        // On a line: no comment, delete, yank or restore; no buttons for them.
+        // On a line: no comment, delete or restore, no buttons for them;
+        // a yank takes what the diff shows.
         wd.click(ReposHit::DiffRow(3), ENV);
         assert_eq!(texts(&wd)[3], "a");
         assert_eq!(key(&mut wd, Keysym::c), refused);
@@ -1933,13 +2069,30 @@ mod tests {
         key(&mut wd, Keysym::d);
         assert_eq!(key(&mut wd, Keysym::d), refused);
         key(&mut wd, Keysym::y);
-        assert_eq!(key(&mut wd, Keysym::y), refused);
+        assert_eq!(
+            key(&mut wd, Keysym::y),
+            Some(Done::Diff(Outcome::Yank(Register {
+                text: "a\n".into(),
+                lines: true,
+            })))
+        );
+        assert_eq!(key(&mut wd, Keysym::p), refused);
         assert_eq!(key(&mut wd, Keysym::R), refused);
         assert_eq!(wd.click(ReposHit::DiffRestore(2), ENV), refused);
-        assert!(wd.view(ENV).row_buttons.is_empty());
+        let chips: Vec<ReposButton> = (wd.view(ENV).row_buttons.iter())
+            .map(|(_, h)| h.button)
+            .collect();
+        assert_eq!(chips, [ReposButton::CopyLines]);
         let hints: Vec<ReposButton> = wd.hints().iter().map(|h| h.button).collect();
-        assert_eq!(hints, [ReposButton::Help, ReposButton::Close]);
-        assert_eq!(wd.hints()[1].label, "back");
+        assert_eq!(
+            hints,
+            [
+                ReposButton::CopyLines,
+                ReposButton::Help,
+                ReposButton::Close
+            ]
+        );
+        assert_eq!(wd.hints()[2].label, "back");
         // Searching and opening in Zed still work; Esc closes it.
         key(&mut wd, Keysym::g);
         assert!(matches!(
@@ -2064,9 +2217,10 @@ mod tests {
         let hints: Vec<(ReposButton, String)> =
             wd.hints().into_iter().map(|h| (h.button, h.key)).collect();
         assert_eq!(
-            hints[..3],
+            hints[..4],
             [
                 (ReposButton::Comment, "c".into()),
+                (ReposButton::CopyLines, "Ctrl+C".into()),
                 (ReposButton::Approve, APPROVE_KEY.into()),
                 (ReposButton::SendBack, SEND_BACK_KEY.into()),
             ]
@@ -2604,12 +2758,15 @@ mod tests {
         assert_eq!(key(&mut wd, Keysym::d), refused);
         assert_eq!(key(&mut wd, Keysym::x), refused);
         assert_eq!(key(&mut wd, Keysym::u), refused);
-        // A yank takes nothing from it.
+        // A yank takes nothing from it, and the title offers only that.
         key(&mut wd, Keysym::y);
         assert!(matches!(
             key(&mut wd, Keysym::y),
             Some(Done::Diff(Outcome::Yank(_)))
         ));
+        key(&mut wd, Keysym::v);
+        assert_eq!(wd.view(ENV).title, "-- VISUAL -- y yank · Esc stop");
+        key(&mut wd, Keysym::Escape);
         let lines = wd.help_lines();
         assert!(
             lines
@@ -2769,6 +2926,17 @@ mod tests {
     #[test]
     fn the_evidence_is_only_read() {
         let mut wd = evidence();
+        // It is copied as any other: only its edits are refused.
+        let mut copied = evidence();
+        let row = texts(&copied)
+            .iter()
+            .position(|t| t == "# Evidence")
+            .unwrap();
+        copied.click(ReposHit::DiffRow(row), ENV);
+        assert_eq!(
+            yank_of(typed(&mut copied, "yy")),
+            ("# Evidence\n".into(), true)
+        );
         assert_eq!(wd.heading(), "Evidence of \u{201c}Log in\u{201d}");
         assert_eq!(wd.summary(), "run 2 failed");
         let refused = Some(Done::Diff(Outcome::Notice(EVIDENCE_READ_ONLY)));
@@ -2799,9 +2967,20 @@ mod tests {
         // Nor buttons, hints or keys sheet lines for them.
         let view = wd.view(ENV);
         assert!(view.title_buttons.is_empty());
-        assert!(view.row_buttons.is_empty());
+        assert!(
+            (view.row_buttons.iter()).all(|(_, h)| h.button == ReposButton::CopyLines),
+            "{:?}",
+            view.row_buttons
+        );
         let hints: Vec<ReposButton> = wd.hints().iter().map(|h| h.button).collect();
-        assert_eq!(hints, [ReposButton::Help, ReposButton::Close]);
+        assert_eq!(
+            hints,
+            [
+                ReposButton::CopyLines,
+                ReposButton::Help,
+                ReposButton::Close
+            ]
+        );
         let lines = wd.help_lines();
         assert_eq!(lines[0].1, "back to the feature");
         assert!(

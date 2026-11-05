@@ -51,7 +51,7 @@ rules, for reviewing a branch before it merges.
 | ] / [ | Any diff (repos panel, worktree, code review, a file under review): go to the next or previous AI review finding or comment, in the diff's order, past the last back to the first. A folded file unfolds, and a long one shows whole, to show it. The diff's title row has the same as buttons, and its scrollbar a tick per comment while no search is open. |
 | Space / Alt+Shift+Down | A feature's code review: mark the file viewed, or not (as Space checks a file in the repos panel); go to the next file not viewed (Alt+Shift+Up: the one before). A feature's manual test sheet: mark the criterion passed, or not; `f` marks it failed, with a note saying what went wrong. A plan review's sheet: accept the suggestion, or clear that (a question not answered asks for its answer first, then is accepted); `r` rejects it, or clears that; `n` writes a note; `a` adds one of your own, Esc keeping what was written as a draft. |
 | F1 | Every key of the focused panel, when its footer can't show them all. |
-| Ctrl+C | Copy. Never closes anything. |
+| Ctrl+C | Copy. Never closes anything. In any diff (repos panel, worktree, a commit, code review, a file under review, evidence) it copies what the cursor is on, as `y` yanks it: the selection, else the line (a removed one too), a file's path, a hunk's lines, a comment or finding's text. A read-only diff refuses edits and pastes, never yanks. The cursor's row has the same as a Copy button. |
 
 A chord means one thing across all panels. A verb with direction says it in
 the label ("Merge main into branch", "Squash into main").
