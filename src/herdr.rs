@@ -1046,6 +1046,16 @@ impl Herdr {
         }
     }
 
+    /// How many rows pane `pane_id` keeps above its screen: none while it
+    /// shows the alternate screen, whatever it kept before.
+    pub fn pane_scrollback_rows(&mut self, pane_id: &str) -> Result<u64, String> {
+        let pane: PaneState = self.get("pane.get", json!({"pane_id": pane_id}), "pane")?;
+        Ok(pane
+            .scroll
+            .ok_or("pane.get: no scroll")?
+            .max_offset_from_bottom)
+    }
+
     /// All that pane `pane_id` keeps of its output, oldest first, the lines
     /// it wrapped joined again; and how many rows up from the bottom its
     /// view stands. Read as a selection of every row, as `pane.read` gives

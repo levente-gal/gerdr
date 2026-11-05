@@ -18,17 +18,26 @@
 //! gone back to the shell is a service stopped (herdr has no exit status
 //! to tell a crash from a Ctrl+C: gerdr tells them apart by the keys it
 //! sent), and back again, running.
+//!
+//! A program drawing its own screen (an editor, a file manager) has run as
+//! long as a service may, but what it shows is no log and leaving it is no
+//! crash: while one runs, the pane is neither read nor reported on (see
+//! `draws_own_screen`).
 
 use std::{
     collections::HashMap,
-    os::fd::{AsFd, AsRawFd},
-    path::PathBuf,
+    fs::OpenOptions,
+    os::{
+        fd::{AsFd, AsRawFd},
+        unix::fs::{FileTypeExt, OpenOptionsExt},
+    },
+    path::{Path, PathBuf},
     sync::mpsc,
     time::{Duration, Instant},
 };
 
 use crate::{
-    herdr::{Herdr, OutputWatch},
+    herdr::{Herdr, OutputWatch, ProcessInfo},
     projects::{self, Foreground},
     service_errors::{self, Anchor, Patterns, ServiceError},
 };
@@ -92,6 +101,8 @@ struct Watch {
     command_shown: bool,
     /// Whether its command ran when last asked; `None` before.
     running: Option<bool>,
+    /// Whether its command drew its own screen when last seen running.
+    own_screen: bool,
     /// When it is next asked what runs in it.
     next_check: Instant,
 }
@@ -173,6 +184,7 @@ fn update(
                         read: false,
                         command_shown: true,
                         running: None,
+                        own_screen: false,
                         next_check: now,
                     },
                 );
@@ -235,6 +247,10 @@ fn read(
     watch: &mut Watch,
     now: Instant,
 ) -> Option<Report> {
+    if watch.own_screen {
+        watch.next_read = Some(now + POLL);
+        return None;
+    }
     let text = match herdr.pane_read(pane_id, "recent_unwrapped", READ_LINES) {
         Ok(text) => text,
         Err(err) => {
@@ -290,23 +306,28 @@ fn check(
     now: Instant,
 ) -> Vec<Report> {
     watch.next_check = now + POLL;
-    let running = match herdr.process_info(pane_id) {
-        // Its own command, not another typed in after it stopped; one
-        // whose command line can't be read back (gunicorn's title) counts.
-        Ok(info) => match projects::foreground_command(&info, None) {
-            Some(Foreground::Idle | Foreground::Untracked { denied: true, .. }) => false,
-            Some(Foreground::Busy { captured, .. }) => captured.command == watch.command,
-            Some(Foreground::Untracked { denied: false, .. }) => true,
-            None => return Vec::new(),
-        },
+    let info = match herdr.process_info(pane_id) {
+        Ok(info) => info,
         Err(err) => {
             tracing::debug!("asking what runs in {pane_id}: {err}");
             return Vec::new();
         }
     };
+    // Its own command, not another typed in after it stopped; one whose
+    // command line can't be read back (gunicorn's title) counts.
+    let running = match projects::foreground_command(&info, None) {
+        Some(Foreground::Idle | Foreground::Untracked { denied: true, .. }) => false,
+        Some(Foreground::Busy { captured, .. }) => captured.command == watch.command,
+        Some(Foreground::Untracked { denied: false, .. }) => true,
+        None => return Vec::new(),
+    };
+    // Kept once it stopped: its leaving is what isn't to be told.
+    if running {
+        watch.own_screen = draws_own_screen(herdr, pane_id, &info, &watch.command);
+    }
     let was = watch.running.replace(running);
     match (was, running) {
-        (Some(true), false) => {
+        (Some(true), false) if !watch.own_screen => {
             let text = herdr
                 .pane_read(pane_id, "recent_unwrapped", READ_LINES)
                 .unwrap_or_default();
@@ -327,6 +348,77 @@ fn check(
         }],
         _ => Vec::new(),
     }
+}
+
+/// Whether `command`, running in pane `pane_id`, draws its own screen: it
+/// is on the alternate screen. herdr doesn't tell which screen a pane shows,
+/// so that is pieced together: its terminal is in raw mode, the pane keeps
+/// no scrollback, and the shell's line of the command isn't there either.
+/// Raw mode alone won't do, as `nx run` turns it on while it serves; a
+/// service in a new pane has no scrollback yet, but its command's line shows
+/// until it has. Should a read fail, it counts as a service, as it did
+/// before anything was known.
+fn draws_own_screen(herdr: &mut Herdr, pane_id: &str, info: &ProcessInfo, command: &str) -> bool {
+    let raw = info
+        .foreground_processes
+        .iter()
+        .find_map(|process| terminal_raw(process.pid));
+    if raw != Some(true) {
+        return false;
+    }
+    let screen = herdr.pane_scrollback_rows(pane_id).and_then(|rows| {
+        (rows == 0)
+            .then(|| herdr.pane_read(pane_id, "recent_unwrapped", READ_LINES))
+            .transpose()
+    });
+    match screen {
+        Ok(Some(text)) => !text.lines().any(|line| typed_at_prompt(line, command)),
+        Ok(None) => false,
+        Err(err) => {
+            tracing::debug!("reading the screen of {pane_id}: {err}");
+            false
+        }
+    }
+}
+
+/// Whether `line` is the shell's line of `command`, by more than how it ends:
+/// what comes before is nothing or ends in a prompt's sign (`❯`, `$`). A
+/// process monitor's rows end in its own name too, after a column of numbers.
+fn typed_at_prompt(line: &str, command: &str) -> bool {
+    let prompt = line.trim_end().strip_suffix(command.trim()).unwrap_or(line);
+    service_errors::is_command_line(line, command)
+        && prompt
+            .trim_end()
+            .chars()
+            .last()
+            .is_none_or(|sign| !sign.is_alphanumeric())
+}
+
+/// Whether the terminal of process `pid` is in raw mode, by the first of
+/// its standard streams that is one; `None` if none is (or can't be read:
+/// another user's).
+fn terminal_raw(pid: i32) -> Option<bool> {
+    (0..3).find_map(|fd| path_raw(Path::new(&format!("/proc/{pid}/fd/{fd}"))))
+}
+
+/// Whether the terminal at `path` is in raw mode (no line editing), `None`
+/// if it is no terminal. Anything but a character device stays unopened: a
+/// pipe opened again would gain a reader. `O_NOCTTY`, or the terminal could
+/// become gerdr's own.
+fn path_raw(path: &Path) -> Option<bool> {
+    if !std::fs::metadata(path).ok()?.file_type().is_char_device() {
+        return None;
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOCTTY | libc::O_NONBLOCK)
+        .open(path)
+        .ok()?;
+    // SAFETY: an all-zero `termios` is valid plain data, filled in by
+    // `tcgetattr` on a descriptor `file` holds open.
+    let mut termios: libc::termios = unsafe { std::mem::zeroed() };
+    let read = unsafe { libc::tcgetattr(file.as_raw_fd(), &mut termios) };
+    (read == 0).then_some(termios.c_lflag & libc::ICANON == 0)
 }
 
 /// Open pane `pane_id`'s doorbell if it has none, once its command's line
@@ -393,6 +485,111 @@ mod tests {
 
     /// Against a scratch herdr server: `GERDR_PROBE_SOCKET` its socket,
     /// `GERDR_PROBE_PANE` a pane of it at a shell prompt.
+    #[test]
+    fn a_prompt_comes_before_a_typed_command() {
+        for line in ["htop", "❯ htop", "sh-5.2$ htop", "me@box:~/p# htop  "] {
+            assert!(typed_at_prompt(line, "htop"), "{line}");
+        }
+        for line in [
+            "  3039 lgal  20  0  12.1M  4.1M  3.2M R  1.3  0.0  0:00.42 htop",
+            "editing with htop",
+            "❯ cargo run",
+            "",
+        ] {
+            assert!(!typed_at_prompt(line, "htop"), "{line}");
+        }
+    }
+
+    #[test]
+    fn a_terminal_tells_if_it_is_in_raw_mode() {
+        let (mut leader, mut follower) = (0, 0);
+        let null = std::ptr::null_mut();
+        // SAFETY: both out pointers are valid; the others may be null. The
+        // descriptors are closed below.
+        let opened = unsafe {
+            libc::openpty(
+                &mut leader,
+                &mut follower,
+                null,
+                std::ptr::null(),
+                std::ptr::null(),
+            )
+        };
+        assert_eq!(opened, 0);
+        let path = format!("/proc/self/fd/{follower}");
+        let path = Path::new(&path);
+        assert_eq!(path_raw(path), Some(false));
+        // SAFETY: `termios` is filled in by `tcgetattr` before it is used.
+        unsafe {
+            let mut termios: libc::termios = std::mem::zeroed();
+            assert_eq!(libc::tcgetattr(follower, &mut termios), 0);
+            libc::cfmakeraw(&mut termios);
+            assert_eq!(libc::tcsetattr(follower, libc::TCSANOW, &termios), 0);
+        }
+        assert_eq!(path_raw(path), Some(true));
+        // SAFETY: opened above and not used after.
+        unsafe {
+            libc::close(follower);
+            libc::close(leader);
+        }
+        // A character device that is no terminal, a file, nothing at all.
+        assert_eq!(path_raw(Path::new("/dev/null")), None);
+        assert_eq!(path_raw(Path::new("/proc/self/exe")), None);
+        assert_eq!(path_raw(Path::new("/no/such/path")), None);
+    }
+
+    /// Needs a scratch herdr server, with panes that have no scrollback:
+    /// `GERDR_PROBE_PANE` for a program on the alternate screen and
+    /// `GERDR_PROBE_PANE2` for a service in raw mode.
+    #[test]
+    #[ignore]
+    fn probe_programs_on_their_own_screen() {
+        let socket = PathBuf::from(std::env::var("GERDR_PROBE_SOCKET").unwrap());
+        let (tx, rx) = mpsc::channel();
+        let feed = spawn(
+            socket.clone(),
+            Patterns::default(),
+            HashMap::new(),
+            move |r| tx.send(r).is_ok(),
+        );
+        let mut herdr = Herdr::on_socket(socket);
+        let is_stop = |r: &Report| matches!(r, Report::Stopped { .. });
+        let enough = POLL + Duration::from_secs(2);
+
+        let tui = std::env::var("GERDR_PROBE_PANE").unwrap();
+        // Whatever it had scrolled away: on the alternate screen, none shows.
+        // Process monitors list themselves, which is no shell's line.
+        for program in ["htop", "btop", "top", "lazydocker"] {
+            herdr.send_line(&tui, program).unwrap();
+            std::thread::sleep(Duration::from_secs(1));
+            feed.send(vec![Service {
+                pane_id: tui.clone(),
+                command: program.into(),
+            }])
+            .unwrap();
+            std::thread::sleep(enough);
+            herdr.send_keys(&tui, &["q"]).unwrap();
+            let stopped = until(&rx, enough, is_stop);
+            assert!(stopped.is_none(), "{program} told as stopped");
+        }
+
+        // Raw mode, as `nx run` has it, on the main screen.
+        let service = std::env::var("GERDR_PROBE_PANE2").unwrap();
+        let script = std::env::temp_dir().join("gerdr-probe-raw.py");
+        std::fs::write(&script, "import tty,time\ntty.setraw(0)\ntime.sleep(9)\n").unwrap();
+        let command = format!("python3 {}", script.display());
+        herdr.send_line(&service, &command).unwrap();
+        std::thread::sleep(Duration::from_secs(1));
+        feed.send(vec![Service {
+            pane_id: service,
+            command,
+        }])
+        .unwrap();
+        let wait = Duration::from_secs(9) + enough;
+        assert!(until(&rx, wait, is_stop).is_some(), "raw service not told");
+        let _ = std::fs::remove_file(script);
+    }
+
     #[test]
     #[ignore]
     fn probe_live_server() {

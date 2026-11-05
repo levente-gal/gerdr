@@ -92,10 +92,39 @@ fn path_like(word: &str) -> bool {
     word.contains('/') && !word.starts_with('@')
 }
 
+/// What of argument `word` names what `program` runs: of Nx's
+/// `project:target[:configuration]` the target, whatever the project's name
+/// (`nx run test-app:serve` runs no tests).
+fn named_part<'a>(program: &str, word: &'a str) -> &'a str {
+    match word.split_once(':') {
+        Some((_, target)) if program == "nx" => target,
+        _ => word,
+    }
+}
+
+/// The command line a package runner starts, if `program` is one with
+/// arguments `args`: `npx nx run app:test`, or `npm exec nx run app:test`
+/// (the title npm gives that process).
+fn launched<'a, 'b>(program: &str, args: &'a [&'b str]) -> Option<&'a [&'b str]> {
+    let from = |args: &'a [&'b str]| {
+        let first = args.iter().position(|a| !a.starts_with('-'))?;
+        Some(&args[first..])
+    };
+    match program {
+        "npx" | "pnpx" | "bunx" => from(args),
+        "npm" | "pnpm" | "yarn" => match from(args)? {
+            [verb, rest @ ..] if matches!(*verb, "exec" | "x" | "dlx") => from(rest),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// The test command `info` has in the foreground, if any: one whose
 /// program has "test" in its name (`pytest`, `vitest`), or whose first or
 /// second argument that isn't an option does (`cargo test`, `npm run
-/// test:e2e`, `python -m pytest`, `uv run pytest`). A file, as in `nvim
+/// test:e2e`, `python -m pytest`, `uv run pytest`), or what a package runner
+/// starts does (`npx nx run app:test`). A file, as in `nvim
 /// test_foo.py`, doesn't count: an argument counts by its base name, which
 /// must have no dot. Neither does what only sits in an argument: a folder
 /// given to anything but an interpreter (`claude --add-dir /f/test-x`), or
@@ -166,9 +195,13 @@ fn named_tests(words: &[&str]) -> Option<(String, String)> {
     let at = named.iter().take(2).position(|a| {
         !a.contains(char::is_whitespace)
             && (script_allowed || !path_like(a))
-            && testy(&base(a))
+            && testy(named_part(&program, &base(a)))
             && !unversioned(&base(a)).contains('.')
-    })?;
+    });
+    let Some(at) = at else {
+        let (short, _) = named_tests(launched(&program, args)?)?;
+        return Some((short, command(words)));
+    };
     // A script run by its path (`python3 /usr/bin/pytest`) is named alone.
     if path_like(named[at]) {
         let script = args.iter().position(|a| *a == named[at]).unwrap_or(0);
@@ -694,8 +727,32 @@ mod tests {
             "cargo test",
             "npm test",
             "uv run pytest",
+            "npx nx run ao-app:test",
+            "npx nx run ao-app:test:ci --skip-nx-cache",
+            "npx -y nx run ao-app:test",
+            "npm exec nx run ao-app:test",
+            "pnpm exec nx run ao-app:test",
+            "nx run ao-app:test",
         ] {
             assert!(runs_tests(tests), "{tests}");
+        }
+        // As npm titles the process, and as the card names it.
+        assert_eq!(
+            short(&["npm exec nx run ao-app:test"]).as_deref(),
+            Some("nx run ao-app:test")
+        );
+        assert_eq!(
+            short(&["npx", "nx", "run", "ao-app:test"]).as_deref(),
+            Some("nx run ao-app:test")
+        );
+        for service in [
+            "npx nx run ao-app:serve:local",
+            "npx nx run test-app:serve",
+            "nx run test-app:serve",
+            "npm exec nx run ao-app:build",
+            "npx create-thing@latest",
+        ] {
+            assert!(!runs_tests(service), "{service}");
         }
         for service in [
             "python /home/me/app/.venv/bin/celery -A app worker -l INFO",

@@ -111,13 +111,17 @@ fn offered(
 }
 
 /// Whether the saved `command` runs an agent CLI: one gerdr knows, installed
-/// or not, or one `config` starts.
+/// or not, or one `config` starts. npm's OpenCode runs as `opencode.exe`, on
+/// Linux too. Cursor's CLI, started by its other name, keeps that name in
+/// front of its script (`agent …/cursor-agent/versions/…/index.js`).
 pub fn runs_agent(command: &str, config: &BTreeMap<String, String>) -> bool {
     use crate::projects::command_program;
     let Some(program) = command_program(command) else {
         return false;
     };
-    KNOWN.iter().any(|(key, _)| *key == program)
+    let name = program.strip_suffix(".exe").unwrap_or(&program);
+    KNOWN.iter().any(|(key, _)| *key == name)
+        || (name == "agent" && command.contains("/cursor-agent/"))
         || config
             .values()
             .any(|c| command_program(c).as_ref() == Some(&program))
@@ -167,10 +171,13 @@ mod tests {
             "python /venv/bin/aider",
             "bash ./my-agent.sh",
             "/opt/bot --x",
+            "/home/me/.opencode/node_modules/opencode-linux-x64/bin/opencode.exe",
+            "agent --use-system-ca /home/me/.local/share/cursor-agent/versions/1/index.js",
         ] {
             assert!(runs_agent(agent, &config), "{agent}");
         }
         for service in [
+            "./agent --port 8000",
             "bash ./runlocal.sh",
             "bash ./run_celery.sh",
             "python /venv/bin/celery -A app worker",
