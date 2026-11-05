@@ -1,8 +1,8 @@
 //! A feature's sandbox from gerdr's side: the Manual test page's buttons, what
-//! runs in its tabs, and what goes when it goes. `feature::sandbox_run` does
+//! runs in its tab, and what goes when it goes. `feature::sandbox_run` does
 //! the work, off the UI thread.
 //!
-//! A tab of a sandbox is a plain terminal whose shell entered the namespace,
+//! A terminal of a sandbox is a plain one whose shell entered the namespace,
 //! so a command typed there or started again stays inside it. It isn't run
 //! again after a server restart, when its shell would be outside
 //! (`PaneRecord::restart_command`). A web page of the feature's workspace on
@@ -34,8 +34,11 @@ use crate::{
     },
     features::{Busy, Done, Job},
     menu::MenuAction,
-    prepare::{Tools, background_command},
+    prepare::{Prep, Tools, background_command, spawn_prepare},
 };
+
+/// What a tab of a sandbox's terminals is called.
+const TAB_LABEL: &str = "Sandbox";
 
 /// What stopping a sandbox is for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -422,11 +425,19 @@ impl Gerdr {
         let (Some(holder), Some(feature)) = (holder, self.feature(project, slug).cloned()) else {
             return;
         };
-        self.open_sandbox_tabs(project, slug, &feature, holder);
+        self.open_sandbox_terminals(project, slug, &feature, holder);
     }
 
-    /// Open a tab inside the sandbox for each of the project's run commands.
-    fn open_sandbox_tabs(&mut self, project: &str, slug: &str, feature: &Feature, holder: i32) {
+    /// Open a terminal inside the sandbox for each of the project's run
+    /// commands, together in a tab of their own, as Verify's checks are. It
+    /// stays behind what the user is at: starting takes a while.
+    fn open_sandbox_terminals(
+        &mut self,
+        project: &str,
+        slug: &str,
+        feature: &Feature,
+        holder: i32,
+    ) {
         let runs = self.projects.workflows(feature, |w| w.run.clone());
         let envs = self.projects.workflows(feature, |w| w.sandbox_env.clone());
         let mut env: Vec<(String, String)> = envs
@@ -436,27 +447,57 @@ impl Gerdr {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         env.extend(envs.home.iter().map(|(k, v)| (k.clone(), v.clone())));
-        let mut panes = Vec::new();
-        for line in lines_of(feature, &runs, false) {
-            if !line.on {
-                continue;
-            }
+        let lines: Vec<_> = lines_of(feature, &runs, false)
+            .into_iter()
+            .filter(|line| line.on)
+            .collect();
+        let dirs: Vec<PathBuf> = lines.iter().map(|line| line.dir.clone()).collect();
+        let panes = if lines.is_empty() {
+            Vec::new()
+        } else {
+            let Some(panes) = self.in_feature_workspace(project, slug, |gerdr, w| {
+                gerdr.open_terminal_tabs(w, TAB_LABEL, &dirs)
+            }) else {
+                return;
+            };
+            panes
+        };
+        let venv = self.feature_venv(project, slug);
+        let preps = (panes.iter().zip(&lines)).map(|(pane, line)| {
             let command = sandbox_run::enter_line(holder, slug, &env, &line.command);
-            match self.open_feature_tab(project, slug, &line.dir, Some(command)) {
-                Some(pane) => panes.push(pane),
-                None => self.show_error(format!("Couldn't open a tab for `{}`", line.command)),
-            }
+            let run = Some((line.dir.clone(), Some(command)));
+            Prep::new_pane(
+                pane.clone(),
+                line.dir.clone(),
+                feature.dir.clone(),
+                venv.clone(),
+                run,
+            )
+        });
+        let preps: Vec<Prep> = preps.collect();
+        if let Some(socket) = self.herdr.as_ref().map(|h| h.socket().to_path_buf()) {
+            spawn_prepare(socket, preps);
         }
+        let missing: Vec<String> = (lines.iter().skip(panes.len()))
+            .map(|line| format!("`{}`", line.command))
+            .collect();
         if let Some(f) = self.feature_mut(project, slug)
             && let Some(run) = f.sandbox.as_mut()
         {
             run.panes = panes;
         }
         self.save_feature(project, slug);
-        self.show_success(format!(
-            "The sandbox of \u{201c}{}\u{201d} is running",
-            feature.title
-        ));
+        if missing.is_empty() {
+            self.show_success(format!(
+                "The sandbox of \u{201c}{}\u{201d} is running",
+                feature.title
+            ));
+        } else {
+            self.show_error(format!(
+                "Couldn't open a terminal for {}",
+                missing.join(", ")
+            ));
+        }
     }
 
     /// Open the sandbox's app, in the feature's workspace.
@@ -518,7 +559,8 @@ impl Gerdr {
         };
         self.ask_sandbox(
             format!("Stop the sandbox of \u{201c}{title}\u{201d}?"),
-            "Its tabs close and its containers stop.\nIts data stays for the next start.".into(),
+            "Its terminals close and its containers stop.\nIts data stays for the next start."
+                .into(),
             "Stop",
             project,
             slug,
@@ -556,7 +598,7 @@ impl Gerdr {
         );
     }
 
-    /// Stop feature `slug`'s sandbox for `what`, as asked: its tabs close, then
+    /// Stop feature `slug`'s sandbox for `what`, as asked: its terminals close, then
     /// the rest goes off the thread.
     pub(crate) fn finish_stop(&mut self, project: &str, slug: &str, what: StopFor) {
         let Some(feature) = self.feature(project, slug) else {

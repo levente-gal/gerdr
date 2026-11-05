@@ -8,7 +8,7 @@
 
 use std::{
     collections::HashMap,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -263,15 +263,12 @@ impl Gerdr {
                 return;
             }
         }
-        while !fresh.is_empty() {
-            let count = fresh.len().min(TAB_PANES);
-            let chunk: Vec<usize> = fresh[..count].to_vec();
-            let opened = self.open_check_tab(w, rows, &chunk);
-            fresh.drain(..opened);
-            if opened < count {
-                return;
-            }
+        let dirs: Vec<PathBuf> = fresh.iter().map(|i| rows[*i].dir.clone()).collect();
+        let panes = self.open_terminal_tabs(w, TAB_LABEL, &dirs);
+        for (i, pane) in fresh.iter().zip(&panes) {
+            rows[*i].pane = Some(pane.clone());
         }
+        fresh.drain(..panes.len());
     }
 
     /// A terminal for `rows[i]` split off tab `t`'s last, sharing with it.
@@ -293,52 +290,77 @@ impl Gerdr {
             return false;
         };
         let split = Some((leaf, target, Dir::Right, 0.5));
-        self.check_pane(w, Some(t), split, rows, i).is_some()
+        let cwd = rows[i].dir.clone();
+        let Some((_, pane)) = self.background_pane(w, Some(t), split, &cwd, TAB_LABEL) else {
+            return false;
+        };
+        rows[i].pane = Some(pane);
+        true
     }
 
-    /// A new tab of workspace `w` with a terminal each for `rows` at `at`,
-    /// in a grid. How many of them got one.
-    fn open_check_tab(&mut self, w: usize, rows: &mut [CheckRun], at: &[usize]) -> usize {
-        let Some((first, pane)) = self.check_pane(w, None, None, rows, at[0]) else {
-            return 0;
+    /// New tabs of workspace `w` called `label`, as many as `TAB_PANES` asks
+    /// for, with a terminal in each of `dirs`, in a grid. They don't take the
+    /// screen. The herdr panes in `dirs`' order, up to the first that couldn't
+    /// open.
+    pub(crate) fn open_terminal_tabs(
+        &mut self,
+        w: usize,
+        label: &str,
+        dirs: &[PathBuf],
+    ) -> Vec<String> {
+        let mut panes = Vec::with_capacity(dirs.len());
+        for dirs in dirs.chunks(TAB_PANES) {
+            let opened = self.open_terminal_tab(w, label, dirs);
+            let all = opened.len() == dirs.len();
+            panes.extend(opened);
+            if !all {
+                break;
+            }
+        }
+        panes
+    }
+
+    /// `open_terminal_tabs`, for what fits in one tab.
+    fn open_terminal_tab(&mut self, w: usize, label: &str, dirs: &[PathBuf]) -> Vec<String> {
+        let Some(first) = self.background_pane(w, None, None, &dirs[0], label) else {
+            return Vec::new();
         };
         let t = self.workspaces[w].tabs.len() - 1;
-        let mut opened = vec![(first, pane)];
-        for (k, (from, dir, share)) in grid(at.len()).into_iter().enumerate() {
+        let mut opened = vec![first];
+        for (k, (from, dir, share)) in grid(dirs.len()).into_iter().enumerate() {
             let (leaf, target) = opened[from].clone();
             let split = Some((leaf, target, dir, share));
-            let Some(new) = self.check_pane(w, Some(t), split, rows, at[k + 1]) else {
+            let Some(new) = self.background_pane(w, Some(t), split, &dirs[k + 1], label) else {
                 break;
             };
             opened.push(new);
         }
-        opened.len()
+        opened.into_iter().map(|(_, pane)| pane).collect()
     }
 
-    /// Open the terminal of `rows[i]`, in its folder and kept in the
-    /// background: split off a leaf of tab `t` as `split` says, or in a new
-    /// tab. Its leaf and herdr pane; `None` (logged) when it couldn't.
-    fn check_pane(
+    /// Open a terminal in `cwd`, kept in the background: split off a leaf of
+    /// tab `t` as `split` says, or in a new tab called `label`. Its leaf and
+    /// herdr pane; `None` (logged) when it couldn't.
+    fn background_pane(
         &mut self,
         w: usize,
         t: Option<usize>,
         split: Option<(u32, String, Dir, f64)>,
-        rows: &mut [CheckRun],
-        i: usize,
+        cwd: &Path,
+        label: &str,
     ) -> Option<(u32, String)> {
-        let cwd = rows[i].dir.clone();
         let (target, dir) = match &split {
             Some((_, target, dir, _)) => (Some(target.clone()), *dir),
             None => (None, Dir::Right),
         };
-        let pane = match self.open_herdr_pane(w, target, dir, &cwd)? {
+        let pane = match self.open_herdr_pane(w, target, dir, cwd)? {
             Ok(pane) => pane,
             Err(err) => {
-                tracing::warn!("herdr didn't open a terminal for a check: {err}");
+                tracing::warn!("herdr didn't open a terminal for {label}: {err}");
                 return None;
             }
         };
-        let Some(pid) = self.attach(&pane, &cwd) else {
+        let Some(pid) = self.attach(&pane, cwd) else {
             if let Some(herdr) = self.herdr.as_mut()
                 && let Err(err) = herdr.pane_close(&pane.pane_id)
             {
@@ -348,7 +370,6 @@ impl Gerdr {
         };
         let id = self.new_pane_id();
         let pane_id = pane.pane_id.clone();
-        rows[i].pane = Some(pane_id.clone());
         let expected = Expected::terminal(pid, id, false, Some(pane));
         let tabs = &mut self.workspaces[w].tabs;
         match (t, split) {
@@ -362,7 +383,7 @@ impl Gerdr {
             _ => tabs.push(Tab {
                 layout: Some(Node::Leaf(id)),
                 expected: vec![expected],
-                label: Some(TAB_LABEL.to_owned()),
+                label: Some(label.to_owned()),
                 ..Default::default()
             }),
         }
