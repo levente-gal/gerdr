@@ -1,1 +1,1 @@
-Please go on with the next unticked milestone in {{artifact.path}}: build it, test it, commit it, tick it with a short note, and stop after it. If the plan is wrong for it, write a `Blocked: …` line under `## Milestones` and stop.
+Please go on with the next unticked milestone in {{artifact.path}}: build it, run only the tests of what it changes (never a whole test suite: gerdr runs those at Verify), commit it, tick it with a short note, and stop after it. If the plan is wrong for it, write a `Blocked: …` line under `## Milestones` and stop.

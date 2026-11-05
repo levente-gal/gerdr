@@ -248,6 +248,7 @@ pub fn fix_plan_state(feature: Option<&Feature>) -> String {
         };
     };
     let state = match round.phase {
+        FixPhase::Fixing if round.stalled.is_some() => "agent stopped with fixes left",
         FixPhase::Ready => "ready for review",
         FixPhase::CompactingToFix => "agent compacting its chat before the fixes",
         FixPhase::Fixing => "agent making the fixes",
@@ -270,6 +271,14 @@ fn fix_plan_locked(feature: Option<&Feature>) -> Option<&'static str> {
     };
     match feature.fix_round.as_ref().map(|r| r.phase) {
         Some(FixPhase::Ready) => None,
+        Some(FixPhase::Fixing)
+            if feature
+                .fix_round
+                .as_ref()
+                .is_some_and(|r| r.fixes_stopped()) =>
+        {
+            None
+        }
         Some(FixPhase::Compacting | FixPhase::Planning) => {
             Some("The agent is still writing the file")
         }
@@ -579,6 +588,8 @@ mod tests {
             ready: None,
             stalled: None,
             give_back: Default::default(),
+            items: Vec::new(),
+            done: 0,
         });
         assert_eq!(fix_plan_state(Some(&f)), fix_round::SENT);
         assert_eq!(fix_plan_locked(Some(&f)), None);

@@ -914,6 +914,8 @@ pub(crate) mod tests {
             ready: None,
             stalled: None,
             give_back: Default::default(),
+            items: Vec::new(),
+            done: 0,
         };
         let mut f = feature("a", 1);
         let at = f.current().unwrap();
