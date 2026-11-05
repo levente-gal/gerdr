@@ -556,7 +556,10 @@ impl Gerdr {
                 // What opens elsewhere closes the panel.
                 if matches!(
                     action,
-                    MenuAction::OpenT3 | MenuAction::ShowLog(_) | MenuAction::Repos
+                    MenuAction::OpenT3
+                        | MenuAction::ShowLog(_)
+                        | MenuAction::SetupLog(..)
+                        | MenuAction::Repos
                 ) {
                     self.close_tasks();
                 }

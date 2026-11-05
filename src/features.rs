@@ -29,6 +29,7 @@
 //! Verify's page its evidence, Ctrl+R starts the stage's agent afresh,
 //! Ctrl+Shift+R shows its agent, or goes back to its chat if its tab closed,
 //! Ctrl+Shift+U sets its worktrees up (Build and Verify: copies what they lack),
+//! Ctrl+Shift+I shows what the setup runs and printed,
 //! on Manual test Ctrl+Shift+T asks which commands its sandbox runs and starts
 //! it, or stops it (see `feature_sandbox`), Ctrl+Shift+Y opens its app, Ctrl+Shift+G restarts it and
 //! Ctrl+Shift+X resets its data or removes it,
@@ -951,6 +952,8 @@ pub enum PanelOutcome {
     },
     /// Set the feature's worktrees up (again): copy what they lack.
     SetUp,
+    /// Show what the setup runs and printed.
+    SetupLog,
     /// Show the diff at AI review's first finding to decide.
     Findings,
     /// Send AI review's findings to fix to the Build agent.
@@ -1967,6 +1970,7 @@ fn action_hint(action: &PanelOutcome) -> &'static str {
         PanelOutcome::Continue(_) => "continue",
         PanelOutcome::RunChecks => "run checks",
         PanelOutcome::SetUp => "set up",
+        PanelOutcome::SetupLog => "show setup log",
         PanelOutcome::StartSandbox => "start sandbox\u{2026}",
         PanelOutcome::OpenSandbox => "open app",
         PanelOutcome::RestartSandbox => "restart sandbox",
@@ -2656,6 +2660,9 @@ impl FeaturePanel {
             Keysym::u | Keysym::U if ctrl && mods.shift && offers_setup(feature, stage) => {
                 return Some(PanelOutcome::SetUp);
             }
+            Keysym::i | Keysym::I if ctrl && mods.shift && offers_setup_log(feature, stage) => {
+                return Some(PanelOutcome::SetupLog);
+            }
             Keysym::e | Keysym::E
                 if ctrl
                     && !mods.shift
@@ -2965,6 +2972,12 @@ pub fn page_actions(
         let ran = (feature.setup.as_ref()).is_some_and(|run| run.finished.is_some());
         let label = if ran { "Set up again" } else { "Set up" };
         out.push((button(label, ButtonStyle::Quiet), PanelOutcome::SetUp));
+        if offers_setup_log(feature, stage) {
+            out.push((
+                button("Setup log", ButtonStyle::Quiet),
+                PanelOutcome::SetupLog,
+            ));
+        }
         // It matters once Verify has nothing to run.
         let wanted = stage == Stage::Verify && mark == StageMark::Current && !ctx.checks;
         let style = match wanted {
@@ -3095,6 +3108,12 @@ fn offers_setup(feature: &Feature, stage: Stage) -> bool {
         && feature.status == Status::Open
         && !feature.repos.is_empty()
         && stage_mark(feature, stage) != StageMark::Later
+}
+
+/// Whether `stage`'s page of `feature` offers what its setup runs and printed:
+/// once one started.
+fn offers_setup_log(feature: &Feature, stage: Stage) -> bool {
+    offers_setup(feature, stage) && feature.setup.is_some()
 }
 
 /// The name of the feature tab's header button `i`: `FEATURE_BUTTONS`,
@@ -5177,6 +5196,7 @@ impl Gerdr {
             },
             PanelOutcome::Ship => self.ask_ship_feature(&project, &slug),
             PanelOutcome::SetUp => self.set_up_again(&project, &slug),
+            PanelOutcome::SetupLog => self.open_setup_log(&project, &slug),
             PanelOutcome::StartSandbox => self.ask_start_sandbox(&project, &slug),
             PanelOutcome::OpenSandbox => self.open_sandbox_app(&project, &slug),
             PanelOutcome::RestartSandbox => {
@@ -6529,12 +6549,19 @@ fn task_of(busy: &Busy, title: Option<&str>, project: &str) -> Task {
         }
         _ => project.to_owned(),
     };
+    let actions = match busy.job {
+        Job::Setup => vec![(
+            "Log",
+            MenuAction::SetupLog(busy.project.clone(), busy.slug.clone()),
+        )],
+        _ => Vec::new(),
+    };
     Task {
         title: busy.what.clone(),
         chip: chip.into(),
         detail,
         dot: Dot::Working,
-        actions: Vec::new(),
+        actions,
     }
 }
 
@@ -7965,6 +7992,10 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 4] = [
                 "copy what the worktrees lack: Build and Verify",
             ),
             (
+                "Ctrl+Shift+I",
+                "what the setup runs and printed: Build and Verify",
+            ),
+            (
                 "Ctrl+E",
                 "edit the project's commands: Build, Verify, Manual test",
             ),
@@ -8216,6 +8247,9 @@ fn tab_hints(
             }
             if offers_setup(feature, stage) {
                 hints.push(hint("Ctrl+Shift+U", "set up"));
+                if offers_setup_log(feature, stage) {
+                    hints.push(hint("Ctrl+Shift+I", "setup log"));
+                }
                 hints.push(hint("Ctrl+E", "edit commands"));
             }
             if offers_sandbox(feature, stage) {
@@ -11604,9 +11638,13 @@ pub(crate) mod tests {
             on.map(|(b, _)| (b.label.clone(), b.style))
         };
         assert_eq!(setup(&f), Some(("Set up".into(), ButtonStyle::Quiet)));
+        // Its log, once one started.
+        assert!(!offers_setup_log(&f, Stage::Verify));
         // Cut short by gerdr quitting: not run, as far as the button goes.
         f.setup = Some(feature::setup::SetupRun::default());
         assert_eq!(setup(&f).unwrap().0, "Set up");
+        assert!(offers_setup_log(&f, Stage::Verify));
+        assert!(!offers_setup_log(&f, Stage::AiReview));
         f.setup = Some(feature::setup::SetupRun {
             finished: Some(2),
             ..Default::default()

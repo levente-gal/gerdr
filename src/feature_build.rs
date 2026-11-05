@@ -356,6 +356,12 @@ impl Gerdr {
         true
     }
 
+    /// Whether feature `slug` is being set up.
+    pub(crate) fn setting_up(&self, project: &str, slug: &str) -> bool {
+        let key = (project.to_owned(), slug.to_owned());
+        self.features.build.setting_up.contains(&key)
+    }
+
     /// Set up feature `slug`'s worktrees off the thread, unless it is being
     /// set up.
     pub fn start_setup(&mut self, project: &str, slug: &str) -> bool {
@@ -479,10 +485,14 @@ impl Gerdr {
             Some(why) => feature.log(now, format!("Setup failed: {why}")),
         }
         self.save_feature(project, slug);
+        let log = || {
+            let action = MenuAction::SetupLog(project.to_owned(), slug.to_owned());
+            Some(("Show log".to_owned(), action))
+        };
         if !report.not_copied.is_empty() {
             let text = setup_copies_text(&title, &report.not_copied);
             crate::problems::report("features", text.clone());
-            self.show_warning(text);
+            self.toast_with(text, Level::Warning, log());
         }
         match &report.failed {
             None if report.not_copied.is_empty() => {
@@ -495,7 +505,7 @@ impl Gerdr {
                 if pending {
                     text.push_str("; starting the Build agent anyway");
                 }
-                self.show_warning(text);
+                self.toast_with(text, Level::Warning, log());
             }
         }
         if checks {
