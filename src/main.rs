@@ -3199,7 +3199,14 @@ impl Gerdr {
             })
         });
         let Some((w, t, window)) = found else {
-            return false;
+            // Its window isn't up yet: it takes focus in its tab as it maps.
+            let Some((w, t)) = self.herdr_pane_place(pane_id) else {
+                return false;
+            };
+            self.active_workspace = w;
+            self.workspaces[w].active_tab = t;
+            self.show_active();
+            return true;
         };
         self.active_workspace = w;
         let ws = &mut self.workspaces[w];
@@ -4117,6 +4124,22 @@ impl Gerdr {
         ws.tabs.push(Tab::terminal(pid, id, herdr));
         ws.active_tab = ws.tabs.len() - 1;
         self.show_active();
+        pane
+    }
+
+    /// Open a tab at the end of workspace `w` whose shell starts in `cd`
+    /// running `command`, and leave what shows as it is. Its herdr pane, when
+    /// herdr says.
+    pub fn new_tab_pane_behind(&mut self, w: usize, cd: &Path, command: String) -> Option<String> {
+        if w >= self.workspaces.len() {
+            return None;
+        }
+        let run = Some((cd.to_path_buf(), Some(command)));
+        let (pid, herdr) = self.start_terminal_running(w, None, Dir::Right, run)?;
+        let pane = herdr.as_ref().map(|h| h.pane_id.clone());
+        let id = self.new_pane_id();
+        self.workspaces[w].tabs.push(Tab::terminal(pid, id, herdr));
+        self.arrange();
         pane
     }
 

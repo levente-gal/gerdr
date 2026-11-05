@@ -680,8 +680,8 @@ impl Gerdr {
     }
 
     /// Show feature `slug`'s Build agent, just sent work: its tab is where
-    /// it runs, or waits for a model and its prompt. A T3 Code draft shows
-    /// itself (`t3_stage_drafted`), as does a new tab, its window not up yet.
+    /// it runs, or waits for its prompt. A T3 Code draft shows itself
+    /// (`t3_stage_drafted`).
     pub(crate) fn show_build_agent(&mut self, project: &str, slug: &str) {
         let Some(run) = (self.feature(project, slug)).and_then(|f| f.runs.get(&Stage::Build))
         else {

@@ -39,6 +39,14 @@ const SLOW_CALL: Duration = Duration::from_millis(10);
 /// How long after typing a line to an agent to press Enter. Any gap did on
 /// Cursor when probed; this one leaves room for a busy machine.
 const ENTER_AFTER: Duration = Duration::from_millis(50);
+/// How long after a line typed to an agent to look whether it took it. Each
+/// Enter pressed again doubles this: an agent can stay busy a good while.
+const LINE_CHECK: Duration = Duration::from_secs(2);
+/// How many times Enter is pressed again before the user is told.
+const LINE_TRIES: u32 = 6;
+/// How many lines at the screen's end are the agent's input box and what is
+/// around it.
+const LINE_BOX: usize = 14;
 /// herdr's caller context, inherited when gerdr itself runs inside herdr; it
 /// must not leak into gerdr's children.
 const INHERITED: [&str; 7] = [
@@ -540,6 +548,47 @@ pub struct Herdr {
     /// The config folder the server's shells get back, when the server was
     /// told the short one (see `pick_config_home`).
     shell_config_home: Option<PathBuf>,
+    /// The last line typed to each agent's pane, until it is seen taken.
+    sent_lines: HashMap<String, SentLine>,
+}
+
+/// A line typed to an agent CLI, not seen taken yet.
+#[derive(Clone, Debug)]
+struct SentLine {
+    text: String,
+    /// When to look next.
+    next: Instant,
+    /// How many times Enter was pressed again.
+    tries: u32,
+}
+
+/// What became of a line typed to an agent, looked at once it was due.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LineCheck {
+    /// It is out of the input box: nothing more to do.
+    Taken,
+    /// It still sits there, and Enter was pressed again.
+    Pressed,
+    /// It still sits there after every try: the user has to look.
+    GaveUp,
+}
+
+/// Whether `line` still sits in the input box at the end of `screen`, as
+/// Cursor leaves one whose Enter it read along with it while busy: long ones
+/// as `[Pasted text #1 +1 lines]` behind its `→`. One the agent just answered
+/// may match too, which costs an Enter on an empty box.
+fn line_left_in_box(screen: &str, line: &str) -> bool {
+    let tail: Vec<&str> = screen.lines().filter(|l| !l.trim().is_empty()).collect();
+    let tail = &tail[tail.len().saturating_sub(LINE_BOX)..];
+    if tail
+        .iter()
+        .any(|l| l.trim_start().starts_with("\u{2192} [Pasted text"))
+    {
+        return true;
+    }
+    let bare = |text: &str| -> String { text.chars().filter(|c| !c.is_whitespace()).collect() };
+    let head: String = bare(line).chars().take(30).collect();
+    !head.is_empty() && bare(&tail.join("")).contains(&head)
 }
 
 impl Herdr {
@@ -550,6 +599,7 @@ impl Herdr {
             socket,
             timeout: TIMEOUT,
             shell_config_home: None,
+            sent_lines: HashMap::new(),
         }
     }
 
@@ -941,14 +991,96 @@ impl Herdr {
 
     /// Type `text` into the agent CLI running in pane `pane_id`, then press
     /// Enter apart from it. Cursor (2026.11.05, probed) keeps text and Enter
-    /// that come together in its input box and runs nothing.
+    /// that come together in its input box and runs nothing, and it reads
+    /// them together however far apart they are sent while it is busy: see
+    /// `check_agent_lines`.
     pub fn send_agent_line(&mut self, pane_id: &str, text: &str) -> Result<(), String> {
         self.call(
             "pane.send_input",
             json!({"pane_id": pane_id, "text": text, "keys": []}),
         )?;
         std::thread::sleep(ENTER_AFTER);
-        self.send_keys(pane_id, &["Enter"])
+        self.send_keys(pane_id, &["Enter"])?;
+        self.sent_lines.insert(
+            pane_id.to_owned(),
+            SentLine {
+                text: text.to_owned(),
+                next: Instant::now() + LINE_CHECK,
+                tries: 0,
+            },
+        );
+        Ok(())
+    }
+
+    /// Whether a line typed to the agent in pane `pane_id` isn't seen taken
+    /// yet: it would be early to say the agent ignores it.
+    pub fn line_pending(&self, pane_id: &str) -> bool {
+        self.sent_lines.contains_key(pane_id)
+    }
+
+    /// Look at the lines typed to agents that are due, pressing Enter again
+    /// on one still in its input box. `at_work` says an agent is seen at work
+    /// or asking something: it took its line, and an Enter could answer it.
+    /// The panes whose agent ignored every Enter.
+    pub fn check_agent_lines(&mut self, at_work: impl Fn(&str) -> bool) -> Vec<String> {
+        if self.sent_lines.is_empty() {
+            return Vec::new();
+        }
+        let now = Instant::now();
+        let due: Vec<String> = (self.sent_lines.iter())
+            .filter(|(pane, line)| at_work(pane) || line.next <= now)
+            .map(|(pane, _)| pane.clone())
+            .collect();
+        let mut gave_up = Vec::new();
+        for pane in due {
+            match self.check_agent_line(&pane, at_work(&pane), now) {
+                LineCheck::Taken => {
+                    self.sent_lines.remove(&pane);
+                }
+                LineCheck::Pressed => {}
+                LineCheck::GaveUp => {
+                    self.sent_lines.remove(&pane);
+                    gave_up.push(pane);
+                }
+            }
+        }
+        gave_up
+    }
+
+    fn check_agent_line(&mut self, pane: &str, at_work: bool, now: Instant) -> LineCheck {
+        let Some(line) = self.sent_lines.get(pane).cloned() else {
+            return LineCheck::Taken;
+        };
+        if at_work {
+            return LineCheck::Taken;
+        }
+        // A pane gone or unread has no box to press Enter in.
+        let screen = match self.pane_read(pane, "visible", LINE_BOX * 4) {
+            Ok(screen) => screen,
+            Err(err) => {
+                tracing::debug!("reading pane {pane} for its line: {err}");
+                return LineCheck::Taken;
+            }
+        };
+        if !line_left_in_box(&screen, &line.text) {
+            return LineCheck::Taken;
+        }
+        if line.tries >= LINE_TRIES {
+            return LineCheck::GaveUp;
+        }
+        if let Err(err) = self.send_keys(pane, &["Enter"]) {
+            tracing::warn!("pressing Enter again in pane {pane}: {err}");
+            return LineCheck::Taken;
+        }
+        tracing::info!(
+            "pane {pane} still held its line: Enter again ({})",
+            line.tries + 1
+        );
+        if let Some(line) = self.sent_lines.get_mut(pane) {
+            line.tries += 1;
+            line.next = now + LINE_CHECK * 2u32.pow(line.tries);
+        }
+        LineCheck::Pressed
     }
 
     /// Run `line` in the shell of pane `pane_id`, which is at its prompt or
@@ -1490,6 +1622,23 @@ mod tests {
             !text.lines().any(|l| l.trim().starts_with("\u{2192} /")),
             "{text}"
         );
+    }
+
+    #[test]
+    fn a_line_left_in_the_input_box_is_told_from_one_taken() {
+        let stuck = "  Cursor Agent\n\n \u{2584}\u{2584}\n  \u{2192} [Pasted text #1 +1 lines]\n \u{2580}\u{2580}\n  Grok 4.7\n";
+        assert!(line_left_in_box(stuck, "Read it and make the fixes"));
+        let wrapped = " \u{2192} The user approved the fix\n   plan: please read it\n";
+        assert!(line_left_in_box(
+            wrapped,
+            "The user approved the fix plan: please read it"
+        ));
+        let empty = "  1042\n \u{2192} Add a follow-up\n  Grok 4.7\n";
+        assert!(!line_left_in_box(empty, "The user approved the fix plan"));
+        // Scrolled far up it isn't the box any more.
+        let far = format!("/summarize\n{}", "row\n".repeat(LINE_BOX));
+        assert!(!line_left_in_box(&far, "/summarize"));
+        assert!(!line_left_in_box("anything", ""));
     }
 
     #[test]

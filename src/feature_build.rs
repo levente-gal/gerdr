@@ -54,10 +54,8 @@ type Key = (String, String);
 pub(crate) const TAB_GONE: &str = "its tab is gone";
 /// Why a line couldn't reach a stage's agent, its CLI gone from its tab.
 pub(crate) const AGENT_QUIT: &str = "its agent has quit";
-/// Who gets fixes when the last Build agent can't: it only starts on them
-/// once the user sends its prompt.
-pub(crate) const FRESH_BUILD_AGENT: &str =
-    "a fresh Build agent, which waits for you to send its prompt";
+/// Who gets fixes when the last Build agent can't.
+pub(crate) const FRESH_BUILD_AGENT: &str = "a fresh Build agent";
 
 /// How long an agent just sent work counts as running before herdr sees it
 /// at work.
@@ -1010,9 +1008,10 @@ impl Gerdr {
         self.show_warning(format!("Verify of \u{201c}{title}\u{201d} failed: {first}"));
     }
 
-    /// Verify of feature `slug` (`title`) passed: AI review's agent starts
-    /// on it, and the toast says so. A reviewer that can't start says why
-    /// itself, and the panel's Enter starts it later.
+    /// Verify of feature `slug` (`title`) passed: AI review's page shows and
+    /// its agent starts on it behind that, and the toast says so. A reviewer
+    /// that can't start says why itself, and the panel's Enter starts it
+    /// later.
     fn start_reviewer(&mut self, project: &str, slug: &str, title: &str) {
         let reviewing = self
             .feature(project, slug)
@@ -1020,16 +1019,17 @@ impl Gerdr {
         if !reviewing {
             return self.show_success(format!("\u{201c}{title}\u{201d} passed Verify"));
         }
+        self.show_stage_page(project, slug);
         if !self.launch_stage_agent(project, slug, Stage::AiReview, &[]) {
             return;
         }
-        let agent = self
-            .feature(project, slug)
-            .and_then(|f| f.runs.get(&Stage::AiReview))
-            .map_or_else(|| "an agent".to_owned(), |r| r.agent.clone());
-        self.show_success(format!(
-            "\u{201c}{title}\u{201d} passed Verify; {agent} waits for its prompt"
-        ));
+        let run = (self.feature(project, slug)).and_then(|f| f.runs.get(&Stage::AiReview));
+        let agent = run.map_or("an agent", |r| r.agent.as_str());
+        let what = match run.is_some_and(|r| r.held) {
+            true => format!("{agent} waits for its prompt"),
+            false => format!("{agent} is reviewing it"),
+        };
+        self.show_success(format!("\u{201c}{title}\u{201d} passed Verify; {what}"));
     }
 
     /// Watch the Build agent in `pane` of feature `slug`, sent findings or

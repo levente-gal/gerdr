@@ -949,7 +949,7 @@ pub(crate) fn agent_line(
         if status == Some(AgentStatus::Working) {
             return "working \u{b7} its prompt wasn't sent".into();
         }
-        return "waiting for you \u{b7} pick a model and send the prompt".into();
+        return "waiting for you \u{b7} send the prompt".into();
     }
     if run.held {
         return format!("{} closed \u{b7} its prompt wasn't sent", run.agent);
@@ -1209,10 +1209,10 @@ impl Gerdr {
         self.launch_stage_agent(project, slug, stage, &[]);
     }
 
-    /// Show the agent waiting for `stage`'s prompt of feature `slug`, in a
-    /// new tab if its tab closed. The run stays, so the prompt it waits for
-    /// isn't lost, whatever it was rendered with. Its chat id is a new one:
-    /// the last never got a message.
+    /// Show the agent waiting for `stage`'s prompt of feature `slug`. With
+    /// its tab closed one opens behind what shows, its agent told the prompt
+    /// as it starts. The run stays, so the prompt isn't lost, whatever it was
+    /// rendered with. Its chat id is a new one: the last never got a message.
     fn reopen_held_agent(&mut self, project: &str, slug: &str, stage: Stage) {
         let Some(feature) = self.feature(project, slug).cloned() else {
             return;
@@ -1228,32 +1228,27 @@ impl Gerdr {
             return self.focus_agent(&agents::AgentKey::Herdr(pane));
         }
         let agent = run.agent.clone();
-        // Its model may have been picked since: nothing has run on the old,
-        // and with one picked it needs no one to send its prompt.
+        if let Some(why) = self.checks_refusal(project, slug) {
+            return self.show_warning(why);
+        }
+        // Its model may have been picked since: nothing has run on the old.
         let model = picked_model(&feature, stage, &agent);
-        let line = |text: Option<&str>| {
-            let line = command_line(
-                &with_model(&run.base, model.as_deref()),
-                &run.prompt,
-                &feature.agent_dirs(&store::dir(None, project, slug)),
-            );
-            text.map_or_else(|| line.clone(), |text| with_prompt(&line, text))
+        let line = command_line(
+            &with_model(&run.base, model.as_deref()),
+            &run.prompt,
+            &feature.agent_dirs(&store::dir(None, project, slug)),
+        );
+        let command = match self.start_line(&feature, project, slug, stage, &run.prompt) {
+            Ok(text) => with_prompt(&line, &text),
+            Err(err) => {
+                tracing::warn!("rendering the start of {}: {err}", stage.label());
+                return self.show_error(format!(
+                    "Couldn't write the {} prompt: {err}",
+                    stage.label()
+                ));
+            }
         };
-        let command = match &model {
-            Some(_) => match self.start_line(&feature, project, slug, stage, &run.prompt) {
-                Ok(text) => line(Some(&text)),
-                Err(err) => {
-                    tracing::warn!("rendering the start of {}: {err}", stage.label());
-                    return self.show_error(format!(
-                        "Couldn't write the {} prompt: {err}",
-                        stage.label()
-                    ));
-                }
-            },
-            None if run.asked_model.is_none() => run.command.clone(),
-            None => line(None),
-        };
-        let opened = self.open_feature_tab(project, slug, &feature.dir, Some(command.clone()));
+        let opened = self.open_feature_tab_behind(project, slug, &feature.dir, command.clone());
         let Some(pane) = opened else {
             tracing::warn!("no tab for {agent}, waiting on {}", stage.label());
             return self.show_error(format!("Couldn't open a tab for {agent}"));
@@ -1265,19 +1260,14 @@ impl Gerdr {
             return;
         };
         r.pane = Some(pane.clone());
-        let sent = model.clone();
         let now = feature::now();
-        if r.asked_model != model || sent.is_some() {
-            r.command = command;
-            r.model.clone_from(&model);
-            r.asked_model = model;
-        }
-        if sent.is_some() {
-            r.held = false;
-            r.nudged = false;
-            // Its work starts now: what it writes is new from here.
-            r.started = now;
-        }
+        r.command = command;
+        r.model.clone_from(&model);
+        r.asked_model.clone_from(&model);
+        r.held = false;
+        r.nudged = false;
+        // Its work starts now: what it writes is new from here.
+        r.started = now;
         f.log(
             now,
             format!("{} agent's tab opened again: {agent}", stage.label()),
@@ -1289,10 +1279,7 @@ impl Gerdr {
         if stage == Stage::Build {
             self.fixing_moved(project, slug, agents::AgentKey::Herdr(pane));
         }
-        self.show_success(match &sent {
-            Some(model) => sent_text(&agent, stage, model),
-            None => held_text(&agent, stage, &feature.title),
-        });
+        self.show_success(sent_text(&agent, stage, model.as_deref()));
     }
 
     /// The feature and stage of the active project whose agent waits for
@@ -1461,9 +1448,10 @@ impl Gerdr {
     /// them, `evidence` for a Build agent fixing Verify's failures). New work
     /// for an agent that still waits goes to that agent, model picked and
     /// all, not to a second tab: its new prompt names the one it never got.
-    /// Whether it started. It starts waiting: the user picks its model and
-    /// sends the prompt (see `send_stage_prompt`), clicked or not, and in
-    /// T3 Code sends its draft.
+    /// Whether it started. It starts on its prompt in a tab behind what
+    /// shows, clicked or not; with checks running on the code its prompt
+    /// waits for the user (see `send_stage_prompt`), and in T3 Code the user
+    /// sends its draft.
     pub(crate) fn launch_stage_agent(
         &mut self,
         project: &str,
@@ -1550,9 +1538,10 @@ impl Gerdr {
             self.log_not_started(project, slug, stage, "its prompt couldn't be written");
             return false;
         }
-        // With its model picked nothing is left to do in its tab, so it is
-        // told at once. Without, it waits for the user to pick and send.
-        let at_once = asked_model.is_some() && waiting.is_none();
+        // A new tab's agent is told as it starts. One already waiting is told
+        // once its run is new; checks running on the code hold off both.
+        let refused = self.checks_refusal(project, slug);
+        let at_once = waiting.is_none() && refused.is_none();
         let command = if in_t3 {
             base.clone()
         } else {
@@ -1592,14 +1581,14 @@ impl Gerdr {
             (true, _) => None,
             (false, Some(r)) => r.pane.clone(),
             (false, None) => {
-                self.open_feature_tab(project, slug, &feature.dir, Some(command.clone()))
+                self.open_feature_tab_behind(project, slug, &feature.dir, command.clone())
             }
         };
         let told = waiting.is_some();
         let now = feature::now();
         // With no tab it never got the prompt: Start agent opens it again.
         let sent = at_once && pane.is_some();
-        let sent_model = asked_model.clone().filter(|_| sent);
+        let sent_model = asked_model.clone();
         let run = StageRun {
             // What it was asked for, until its chat says what it used.
             model: asked_model.clone(),
@@ -1642,8 +1631,12 @@ impl Gerdr {
             self.t3_stage_drafted(project, slug, stage, &title);
             return true;
         }
-        if let Some(model) = sent_model {
-            self.show_success(sent_text(&agent, stage, &model));
+        if sent {
+            self.show_success(sent_text(&agent, stage, sent_model.as_deref()));
+            return true;
+        }
+        if told && refused.is_none() {
+            self.send_stage_prompt(project, slug, stage);
             return true;
         }
         // No tab: opening it said why.
@@ -1664,6 +1657,7 @@ impl Gerdr {
         let Some(project) = self.project.clone() else {
             return;
         };
+        self.agent_lines_tick();
         self.fixing_tick(&project);
         self.fix_rounds_tick(&project);
         self.adopt_checks(&project);
@@ -1867,6 +1861,34 @@ impl Gerdr {
         f.log(feature::now(), what);
         self.save_feature(project, slug);
         self.watch_its_work(project, slug, stage);
+    }
+
+    /// See what became of the lines typed to agents: one left in its input
+    /// box gets its Enter again. An agent that won't take it is the user's.
+    fn agent_lines_tick(&mut self) {
+        let Some(mut herdr) = self.herdr.take() else {
+            return;
+        };
+        let at_work = |pane: &str| {
+            (self.agents.iter()).any(|a| {
+                a.pane_id == pane
+                    && matches!(a.agent_status, AgentStatus::Working | AgentStatus::Blocked)
+            })
+        };
+        let gave_up = herdr.check_agent_lines(at_work);
+        self.herdr = Some(herdr);
+        for pane in gave_up {
+            tracing::warn!("pane {pane} never took the line typed to it");
+            let place = (self.herdr_pane_place(&pane))
+                .and_then(|(w, _)| self.workspaces.get(w))
+                .map_or_else(
+                    || "a tab".to_owned(),
+                    |ws| format!("\u{201c}{}\u{201d}", ws.name),
+                );
+            self.show_warning(format!(
+                "An agent in {place} didn't take the line typed to it: press Enter in its tab"
+            ));
+        }
     }
 
     /// The agent that waited on `stage` of feature `slug` is at work: its
@@ -2384,15 +2406,18 @@ fn with_earlier_prompt(text: &str, earlier: &Path) -> String {
 /// What gerdr says of `agent` opened on `stage` of feature `title`.
 fn held_text(agent: &str, stage: Stage, title: &str) -> String {
     format!(
-        "{agent} is open on {} of \u{201c}{title}\u{201d}: pick a model, then send the prompt",
+        "{agent} is open on {} of \u{201c}{title}\u{201d}: send the prompt once the checks end",
         stage.label()
     )
 }
 
-/// What gerdr says of `agent` started on `stage` with `model`, its prompt
-/// sent as it starts.
-fn sent_text(agent: &str, stage: Stage, model: &str) -> String {
-    format!("{agent} started on {} with {model}", stage.label())
+/// What gerdr says of `agent` started on `stage`, with `model` if picked, its
+/// prompt sent as it starts.
+fn sent_text(agent: &str, stage: Stage, model: Option<&str>) -> String {
+    match model {
+        Some(model) => format!("{agent} started on {} with {model}", stage.label()),
+        None => format!("{agent} started on {}", stage.label()),
+    }
 }
 
 /// Whether the tab of an agent waiting for its prompt is gone: not there
@@ -2529,10 +2554,7 @@ mod tests {
             ..StageRun::default()
         };
         let line = |run: &StageRun| agent_line(run, Stage::Plan, Some(AgentStatus::Idle), None, 9);
-        assert_eq!(
-            line(&held),
-            "waiting for you \u{b7} pick a model and send the prompt"
-        );
+        assert_eq!(line(&held), "waiting for you \u{b7} send the prompt");
         assert_eq!(
             agent_line(&held, Stage::Plan, Some(AgentStatus::Working), None, 9),
             "working \u{b7} its prompt wasn't sent"
