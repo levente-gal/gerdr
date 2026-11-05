@@ -35,7 +35,9 @@ use crate::{
             Flavor, StageRun, Stop, T3Run, command_line, needs, resume_line, run_needs,
             session_file,
         },
-        artifacts, graph, layout,
+        artifacts,
+        fix_round::FixPhase,
+        graph, layout,
         patch::Reading,
         plan_review,
         review_import::FindingState,
@@ -368,7 +370,7 @@ pub(crate) fn gate_of(
     }
     // A round open holds what its stage waited for.
     if let Some(round) = &f.fix_round {
-        let since = round.ready?;
+        let since = round.ready.filter(|_| round.phase == FixPhase::Ready)?;
         return Some((round.stage, since, GateKind::FixPlan));
     }
     let stage = f.current()?;
@@ -2187,7 +2189,7 @@ fn startable(feature: &Feature, stage: Stage) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::feature::fix_round::{FixPhase, FixRound};
+    use crate::feature::fix_round::FixRound;
 
     #[test]
     fn an_agent_waiting_for_its_prompt_is_a_gate_while_its_tab_is_there() {
@@ -3248,9 +3250,12 @@ mod tests {
         planning.fix_round = Some(round(FixPhase::Planning, None));
         let mut ready = failed("g");
         ready.fix_round = Some(round(FixPhase::Ready, Some(400)));
+        // Approved: its agent is at it, nothing waits for the user.
+        let mut fixing = failed("h");
+        fixing.fix_round = Some(round(FixPhase::Fixing, Some(400)));
         let all = BTreeMap::from([(
             "one".to_owned(),
-            vec![review, built, stopped, failed("d"), planning, ready],
+            vec![review, built, stopped, failed("d"), planning, ready, fixing],
         )]);
         let gates = gates(&all, |_| None);
         let got: Vec<(&str, Stage, u64, GateKind)> = gates

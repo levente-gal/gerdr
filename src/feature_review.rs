@@ -144,7 +144,7 @@ fn waiting_text(title: &str, review: &AiReview) -> Option<String> {
     let what = if open > 0 {
         format!("{} to decide", plural(open, "finding"))
     } else if fix > 0 {
-        format!("{} to send to Build", plural(fix, "finding"))
+        format!("{} to fix", plural(fix, "finding"))
     } else {
         return None;
     };
@@ -375,7 +375,7 @@ impl Gerdr {
         }
         if undecided == 0 && fix > 0 {
             return self.show_success(format!(
-                "Finding {id} {word}; {} to send to Build",
+                "Finding {id} {word}; {} to fix",
                 plural(fix, "finding")
             ));
         }
@@ -796,7 +796,7 @@ mod tests {
         review.findings[2].state = FindingState::Fix;
         assert_eq!(
             waiting_text("T", &review).as_deref(),
-            Some("AI review of \u{201c}T\u{201d}: 1 finding to send to Build")
+            Some("AI review of \u{201c}T\u{201d}: 1 finding to fix")
         );
         review.findings[2].state = FindingState::Dismissed;
         assert_eq!(waiting_text("T", &review), None);
