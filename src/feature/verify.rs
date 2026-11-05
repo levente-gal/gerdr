@@ -63,8 +63,9 @@ pub const FEATURE_KEY: &str = "_feature";
 pub const EVIDENCE: &str = "evidence.md";
 
 /// How long one check may run, unless the store file says otherwise
-/// (`"workflow": {"verify_timeout": 900}`, seconds).
-pub const TIMEOUT: Duration = Duration::from_secs(20 * 60);
+/// (`"workflow": {"verify_timeout": 900}`, seconds). Generous: all checks run
+/// at once, often beside busy agents, and a test run takes far longer then.
+pub const TIMEOUT: Duration = Duration::from_secs(60 * 60);
 
 /// How many of a check's last output lines the evidence keeps.
 pub const TAIL: usize = 40;
@@ -189,7 +190,7 @@ impl Evidence {
 
 impl Outcome {
     /// How it ended, after its command: "exited with 1", "timed out after
-    /// 20 min", "stopped".
+    /// 60 min", "stopped".
     pub fn how(&self) -> String {
         if self.timed_out {
             format!(

@@ -691,7 +691,7 @@ impl Painter {
                 self.field(
                     c,
                     limit,
-                    "1200",
+                    &crate::feature::verify::TIMEOUT.as_secs().to_string(),
                     shift(rects[1]),
                     view.focus == CommandsFocus::Limit,
                     scale,
