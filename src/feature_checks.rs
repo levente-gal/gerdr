@@ -1,6 +1,7 @@
 //! Verify's checks in terminals: a tab of panes in the feature's workspace,
-//! each check in its own, all at once (see `feature::verify` for what runs
-//! in them, and how it ends). A terminal stays when its check ended, and the
+//! each check in its own, all at once but for those of one folder, which take
+//! turns (see `feature::verify` for what runs in them, and how it ends). A
+//! terminal stays when its check ended, and the
 //! next run of the check uses it again while it is at its prompt.
 //!
 //! The panes go on without gerdr: a run still under way when gerdr starts is
@@ -19,7 +20,7 @@ use crate::{
     Expected, Gerdr, Tab,
     feature::{
         Feature, Status, store,
-        verify::{self, Begun, CheckRun, Outcome, Scope, Waited},
+        verify::{self, Begun, CheckRun, Outcome, Scope, Turn, Waited},
     },
     features::{Busy, Done, Job},
     herdr::Herdr,
@@ -411,12 +412,24 @@ impl Gerdr {
             };
             let title = feature.title.clone();
             let total = outcomes.len();
+            let turn_tx = tx.clone();
+            let (turn_project, turn_slug) = (project.clone(), slug.clone());
             verify::watch(
                 waited,
                 &dir,
                 timeout,
                 &stops,
                 &mut panes,
+                &mut |index, turn| {
+                    // As for `CheckEnded` below.
+                    let _ = turn_tx.send(Done::CheckTurn {
+                        project: turn_project.clone(),
+                        slug: turn_slug.clone(),
+                        n,
+                        index,
+                        turn,
+                    });
+                },
                 &mut |index, outcome| {
                     outcomes[index] = Some(outcome.clone());
                     let done = outcomes.iter().flatten().count();
@@ -470,6 +483,35 @@ impl Gerdr {
             return;
         };
         row.outcome = Some(outcome);
+        row.queued = false;
+        self.save_feature(project, slug);
+        self.sync_check_cards();
+    }
+
+    /// Check `index` of run `n` of feature `slug` has to wait for its folder,
+    /// or started.
+    pub(crate) fn check_turn(
+        &mut self,
+        project: &str,
+        slug: &str,
+        n: u32,
+        index: usize,
+        turn: Turn,
+    ) {
+        let row = (self.feature_mut(project, slug))
+            .and_then(|f| f.verify.as_mut())
+            .filter(|v| v.n == n)
+            .and_then(|v| v.checks.get_mut(index));
+        let Some(row) = row else {
+            return;
+        };
+        match turn {
+            Turn::Queued => row.queued = true,
+            Turn::Began(at) => {
+                row.queued = false;
+                row.began = Some(at);
+            }
+        }
         self.save_feature(project, slug);
         self.sync_check_cards();
     }

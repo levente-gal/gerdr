@@ -855,7 +855,7 @@ impl CommandsDialog {
             tab: self.tab,
             body: match self.tab {
                 CommandsTab::Checks => {
-                    "One command per line, run at once (&& keeps an order). A check that changes code fails Verify."
+                    "One per line, at once; in turn within a folder (&& keeps an order). Changing code fails Verify."
                 }
                 CommandsTab::Setup => {
                     "One command per line. They run in a new worktree, once it has its files."

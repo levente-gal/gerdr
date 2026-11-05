@@ -504,6 +504,8 @@ pub enum FindingTag {
     Passed,
     Failed,
     Running,
+    /// Its turn in its folder hasn't come.
+    Queued,
     Stopped,
     NotRun,
     Skipped,
@@ -519,7 +521,7 @@ impl FindingTag {
             Self::Failed => Some(Dot::Failed),
             Self::Running => Some(Dot::Working),
             Self::Stopped => Some(Dot::Blocked),
-            Self::NotRun => Some(Dot::Idle),
+            Self::Queued | Self::NotRun => Some(Dot::Idle),
             Self::Skipped => Some(Dot::Unknown),
         }
     }
@@ -4606,6 +4608,7 @@ mod tests {
                 FindingTag::Passed,
                 FindingTag::Failed,
                 FindingTag::Running,
+                FindingTag::Queued,
                 FindingTag::Stopped,
                 FindingTag::NotRun,
                 FindingTag::Skipped,

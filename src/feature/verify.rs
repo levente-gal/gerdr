@@ -43,7 +43,7 @@ use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
     sync::atomic::{AtomicBool, Ordering},
-    time::{Duration, Instant, SystemTime},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize};
@@ -447,6 +447,8 @@ pub fn plan(
                 outcome: kept.map(|(outcome, _)| outcome),
                 card_off: false,
                 last_secs: was.and_then(CheckRun::took_last),
+                queued: false,
+                began: None,
             }
         })
         .collect()
@@ -492,11 +494,24 @@ const HEAD: &str = "\u{25b6} Check ";
 /// The start of the line it prints after it.
 const END: &str = "\u{25a0} Check ";
 
+/// What a check's terminal says while another check has its folder.
+const QUEUED: &str = "Waiting for another check in this folder to end";
+/// What it says when nothing can make it wait.
+const NO_FLOCK: &str =
+    "flock isn't installed, so this check doesn't wait for others in this folder";
+
 /// The script of check `i` of `check`, which leaves its pid and then its exit
 /// code in `dir`, each file whole or not at all. It outlives an interrupt,
 /// as what it runs may take time to stop and its exit code is to be told.
 /// It clears the screen first: the line that started it is long, and the
 /// terminal may be narrow.
+///
+/// Checks of one folder take turns, by a lock on the folder, as they share
+/// what they write there: two `nx` starting together in a new worktree crash
+/// on the file they both copy. The script holds the lock itself, not what it
+/// runs: a daemon left behind doesn't keep it, and the kernel drops it however
+/// the script ends. It leaves `queued` when it has to wait, and `start` when
+/// the check starts; its time counts from there.
 pub fn script(dir: &Path, i: usize, check: &CheckRun, slug: &str) -> String {
     let path = |ext: &str| dir.join(format!("{i}.{ext}"));
     let quoted = |p: PathBuf| shell_quote(&p.to_string_lossy());
@@ -511,11 +526,21 @@ pub fn script(dir: &Path, i: usize, check: &CheckRun, slug: &str) -> String {
         ""
     };
     let head = format!("{HEAD}{}: {first}{more}", check.repo);
+    // Past a wait the screen starts over, so the output starts at the check.
+    // A lock that fails for any reason but a signal doesn't fail the check.
     format!(
         "trap : INT TERM\n{pid}printf '\\033[H\\033[2J%s\\n' {head}\nGERDR_FEATURE={slug}\nexport GERDR_FEATURE\n\
-         if cd {cwd}; then\n  sh -c {command} </dev/null\n  code=$?\nelse\n  code=127\nfi\n\
+         if cd {cwd}; then\n  code=0\n  if [ -r . ] && command -v flock >/dev/null 2>&1; then\n    exec 9<.\n    \
+         if ! flock -n 9; then\n      {queued}      printf '%s\\n' {waiting}\n      flock 9\n      code=$?\n      \
+         if [ \"$code\" -le 128 ]; then\n        code=0\n        printf '\\033[H\\033[2J%s\\n' {head}\n      fi\n    fi\n  \
+         else\n    printf '%s\\n' {no_flock}\n  fi\n  if [ \"$code\" -eq 0 ]; then\n    {start}    \
+         sh -c {command} </dev/null 9<&-\n    code=$?\n  fi\nelse\n  code=127\nfi\n\
          if [ \"$code\" -eq 0 ]; then\n  printf '%s\\n' {passed}\nelse\n  printf '%s\\n' \"{end}exited with $code\"\nfi\n{exit}",
         pid = leave("$$", "pid"),
+        queued = leave("$$", "queued"),
+        waiting = shell_quote(QUEUED),
+        no_flock = shell_quote(NO_FLOCK),
+        start = leave("$$", "start"),
         head = shell_quote(&head),
         slug = shell_quote(slug),
         cwd = shell_quote(&check.dir.to_string_lossy()),
@@ -573,17 +598,31 @@ struct Waiting {
     /// When it was cut short, and why.
     cut: Option<(Instant, Cut)>,
     killed: bool,
+    /// What has been told of its turn.
+    queued: bool,
+    began: bool,
+}
+
+/// Where a check stands in its folder's queue.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Turn {
+    /// Another check has its folder: it waits.
+    Queued,
+    /// It started, at these unix seconds.
+    Began(u64),
 }
 
 /// Wait for the checks `waited` of the run in `dir`, each for at most
-/// `timeout`; `ended` hears of each as it ends. `stops[index]` cuts one
-/// short, and is looked at all along.
+/// `timeout` from when it starts; `turn` hears when one has to wait and when
+/// it starts, `ended` of each as it ends. `stops[index]` cuts one short, and is
+/// looked at all along.
 pub fn watch(
     waited: Vec<Waited>,
     dir: &Path,
     timeout: Duration,
     stops: &[AtomicBool],
     panes: &mut dyn Panes,
+    turn: &mut dyn FnMut(usize, Turn),
     ended: &mut dyn FnMut(usize, Outcome),
 ) {
     let told = Instant::now();
@@ -594,6 +633,8 @@ pub fn watch(
             check,
             cut: None,
             killed: false,
+            queued: false,
+            began: false,
         })
         .collect();
     while !waiting.is_empty() {
@@ -604,6 +645,16 @@ pub fn watch(
         waiting.retain_mut(|w| {
             let i = w.check.index;
             let pid = read_number(&dir.join(format!("{i}.pid")));
+            let start = dir.join(format!("{i}.start"));
+            let began = modified(&start);
+            if let (false, Some(at)) = (w.began, began) {
+                w.began = true;
+                let secs = at.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
+                turn(i, Turn::Began(secs));
+            } else if !w.began && !w.queued && dir.join(format!("{i}.queued")).exists() {
+                w.queued = true;
+                turn(i, Turn::Queued);
+            }
             let outcome =
                 |exit: Option<i32>, error: Option<&str>, interrupted: bool, secs| Outcome {
                     repo: w.check.repo.clone(),
@@ -615,10 +666,12 @@ pub fn watch(
                     ..Outcome::default()
                 };
             if let Some(code) = read_number(&dir.join(format!("{i}.exit"))) {
-                let secs = took(
-                    &dir.join(format!("{i}.pid")),
-                    &dir.join(format!("{i}.exit")),
-                );
+                let from = if began.is_some() {
+                    start.clone()
+                } else {
+                    dir.join(format!("{i}.pid"))
+                };
+                let secs = took(&from, &dir.join(format!("{i}.exit")));
                 let mut o = match (w.cut.map(|(_, cut)| cut), code) {
                     (Some(Cut::TimedOut), _) => outcome(None, None, false, timeout.as_secs()),
                     (Some(Cut::Stopped), _) | (None, INTERRUPTED) => {
@@ -654,7 +707,13 @@ pub fn watch(
             match w.cut {
                 None => {
                     let stop = stops.get(i).is_some_and(|s| s.load(Ordering::Relaxed));
-                    let past = since(&dir.join(format!("{i}.pid"))) >= timeout;
+                    // A script from before queues had no `start`; one in the
+                    // queue hasn't started, so its time hasn't begun.
+                    let past = if began.is_some() {
+                        since(&start) >= timeout
+                    } else {
+                        !w.queued && since(&dir.join(format!("{i}.pid"))) >= timeout
+                    };
                     if stop || past {
                         let cut = if stop { Cut::Stopped } else { Cut::TimedOut };
                         w.cut = Some((Instant::now(), cut));
@@ -1089,6 +1148,12 @@ pub struct CheckRun {
     /// before the one that has it now.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_secs: Option<u64>,
+    /// It waits for another check in its folder.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub queued: bool,
+    /// When it started (unix seconds), past any wait.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub began: Option<u64>,
 }
 
 impl CheckRun {
@@ -1236,10 +1301,19 @@ mod tests {
         let (mut panes, waited) = start(feature, checks, &dir);
         let stops: Vec<AtomicBool> = checks.iter().map(|_| AtomicBool::new(false)).collect();
         let mut outcomes: Vec<Option<Outcome>> = checks.iter().map(|_| None).collect();
-        watch(waited, &dir, timeout, &stops, &mut panes, &mut |i, o| {
-            outcomes[i] = Some(o);
-            ended(i);
-        });
+        let mut turn = |_, _| {};
+        watch(
+            waited,
+            &dir,
+            timeout,
+            &stops,
+            &mut panes,
+            &mut turn,
+            &mut |i, o| {
+                outcomes[i] = Some(o);
+                ended(i);
+            },
+        );
         std::fs::remove_dir_all(&dir).unwrap();
         finish(
             feature,
@@ -1676,36 +1750,222 @@ mod tests {
     }
 
     #[test]
-    fn checks_run_at_the_same_time() {
+    fn checks_of_different_folders_run_at_the_same_time() {
         let t = Temp::new();
-        let f = feature_over(&t, &["api"], &[]);
+        let f = feature_over(&t, &["api", "web"], &[]);
         // Each waits for the other: one after the other they'd time out.
-        let wt = f.repos[0].worktree.display().to_string();
         let git_dir = git_run(&f.repos[0].worktree, &["rev-parse", "--absolute-git-dir"]);
         let meet = format!("{}/meet", git_dir.trim());
         let wait = |me: &str, other: &str| {
             format!("touch {meet}-{me}; until [ -e {meet}-{other} ]; do sleep 0.05; done; pwd")
         };
         let (a, b) = (wait("a", "b"), wait("b", "a"));
-        let c = checks(&f, &config(&[("api", &[a.as_str(), b.as_str()])]));
+        let c = checks(
+            &f,
+            &config(&[("api", &[a.as_str()]), ("web", &[b.as_str()])]),
+        );
         let e = run(&f, &c, Duration::from_secs(10), &mut |_| {});
         assert!(e.outcomes.iter().all(Outcome::passed), "{:?}", e.outcomes);
-        assert_eq!(e.outcomes[1].tail, wt);
+        assert_eq!(
+            e.outcomes[1].tail,
+            f.repos[1].worktree.display().to_string()
+        );
+    }
+
+    #[test]
+    fn checks_of_one_folder_take_turns() {
+        let t = Temp::new();
+        let f = feature_over(&t, &["api"], &[]);
+        let git_dir = git_run(&f.repos[0].worktree, &["rev-parse", "--absolute-git-dir"]);
+        let held = format!("{}/held", git_dir.trim());
+        // Each finds the folder its own while it runs, or says so.
+        let turn = format!(
+            "if ! mkdir {held}; then echo clash; exit 9; fi; echo mine; sleep 0.3; rmdir {held}"
+        );
+        let (a, b) = (format!("{turn}; : a"), format!("{turn}; : b"));
+        let c = checks(&f, &config(&[("api", &[a.as_str(), b.as_str()])]));
+        let dir = run_folder();
+        let (mut panes, waited) = start(&f, &c, &dir);
+        let stops: Vec<AtomicBool> = c.iter().map(|_| AtomicBool::new(false)).collect();
+        let (mut ended, mut turns) = (Vec::new(), Vec::new());
+        let mut heard = |i, turn| turns.push((i, turn));
+        watch(
+            waited,
+            &dir,
+            TIMEOUT,
+            &stops,
+            &mut panes,
+            &mut heard,
+            &mut |_, o| {
+                ended.push(o);
+            },
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(ended.iter().all(Outcome::passed), "{ended:?}");
+        // What the wait printed is no part of what the check printed.
+        assert!(ended.iter().all(|o| o.tail == "mine"), "{ended:?}");
+        let queued: Vec<usize> = (turns.iter())
+            .filter(|(_, turn)| *turn == Turn::Queued)
+            .map(|(i, _)| *i)
+            .collect();
+        assert_eq!(queued.len(), 1, "{turns:?}");
+        // It starts after the wait, and both are told.
+        let began = |i: usize| {
+            (turns.iter()).position(|(at, turn)| *at == i && matches!(turn, Turn::Began(_)))
+        };
+        let waiter = queued[0];
+        let wait_at = (turns.iter()).position(|t| *t == (waiter, Turn::Queued));
+        assert!(began(1 - waiter).is_some());
+        assert!(began(waiter) > wait_at, "{turns:?}");
+    }
+
+    #[test]
+    fn a_daemon_a_check_leaves_doesnt_keep_the_folder() {
+        let t = Temp::new();
+        let f = feature_over(&t, &["api"], &[]);
+        let c = checks(
+            &f,
+            &config(&[("api", &["(sleep 8 >/dev/null 2>&1 &) ; true", "true"])]),
+        );
+        let at = Instant::now();
+        let e = run(&f, &c, Duration::from_secs(5), &mut |_| {});
+        assert!(e.outcomes.iter().all(Outcome::passed), "{:?}", e.outcomes);
+        assert!(at.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn the_time_of_a_check_in_the_queue_hasnt_begun() {
+        let t = Temp::new();
+        let f = feature_over(&t, &["api"], &[]);
+        // Each fits its time, but the last's wait and run together don't.
+        let c = checks(
+            &f,
+            &config(&[(
+                "api",
+                &[
+                    "sleep 0.6; echo a",
+                    "sleep 0.6; echo b",
+                    "sleep 0.6; echo c",
+                ],
+            )]),
+        );
+        let e = run(&f, &c, Duration::from_secs(1), &mut |_| {});
+        assert!(e.outcomes.iter().all(Outcome::passed), "{:?}", e.outcomes);
+    }
+
+    #[test]
+    fn with_no_flock_a_check_still_runs_and_says_it_wont_wait() {
+        let t = Temp::new();
+        let f = feature_over(&t, &["api"], &[]);
+        let c = checks(&f, &config(&[("api", &["echo ran"])]));
+        let dir = run_folder();
+        // A PATH with what the script needs but flock.
+        let bin = dir.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        for tool in ["sh", "mv"] {
+            let found = on_path(tool);
+            std::os::unix::fs::symlink(found, bin.join(tool)).unwrap();
+        }
+        let row = &rows(&c)[0];
+        let script = script_path(&dir, 0);
+        std::fs::write(&script, super::script(&dir, 0, row, &f.slug)).unwrap();
+        let out = Command::new(bin.join("sh"))
+            .arg(&script)
+            .env("PATH", &bin)
+            .output()
+            .unwrap();
+        let printed = String::from_utf8_lossy(&out.stdout);
+        assert!(printed.contains(NO_FLOCK), "{printed}");
+        assert!(printed.contains("ran"), "{printed}");
+        assert_eq!(read_number(&dir.join("0.exit")), Some(0));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Where `tool` is on the PATH.
+    fn on_path(tool: &str) -> PathBuf {
+        (std::env::split_paths(&std::env::var_os("PATH").unwrap()))
+            .map(|dir| dir.join(tool))
+            .find(|path| path.exists())
+            .unwrap()
+    }
+
+    #[test]
+    fn a_check_in_the_queue_can_stop() {
+        let t = Temp::new();
+        let f = feature_over(&t, &["api"], &[]);
+        let c = checks(
+            &f,
+            &config(&[("api", &["echo held; sleep 30", "echo ran"])]),
+        );
+        let appears = |path: PathBuf| {
+            let from = Instant::now();
+            while !path.exists() {
+                assert!(from.elapsed() < Duration::from_secs(10), "{path:?}");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        };
+        let (holds, queues) = (run_folder(), run_folder());
+        let (mut hold_panes, hold) = start(&f, &c[..1], &holds);
+        appears(holds.join("0.start"));
+        let (mut queue_panes, queue) = start(&f, &c[1..], &queues);
+        appears(queues.join("0.queued"));
+
+        let stops = [AtomicBool::new(true)];
+        let mut ended = Vec::new();
+        let mut turns = Vec::new();
+        watch(
+            queue,
+            &queues,
+            TIMEOUT,
+            &stops,
+            &mut queue_panes,
+            &mut |i, turn| turns.push((i, turn)),
+            &mut |_, o| ended.push(o),
+        );
+        assert_eq!(ended[0].how(), "stopped");
+        assert!(ended[0].interrupted);
+        assert_eq!(ended[0].tail, QUEUED);
+        assert_eq!(turns, [(0, Turn::Queued)]);
+
+        let mut turn = |_, _| {};
+        watch(
+            hold,
+            &holds,
+            TIMEOUT,
+            &stops,
+            &mut hold_panes,
+            &mut turn,
+            &mut |_, _| {},
+        );
+        std::fs::remove_dir_all(&holds).unwrap();
+        std::fs::remove_dir_all(&queues).unwrap();
     }
 
     #[test]
     fn a_stopped_check_says_nothing_of_the_code() {
         let t = Temp::new();
-        let f = feature_over(&t, &["api"], &[]);
-        let c = checks(&f, &config(&[("api", &["echo up; sleep 30", "echo done"])]));
+        let f = feature_over(&t, &["api", "web"], &[]);
+        let c = checks(
+            &f,
+            &config(&[("api", &["echo up; sleep 30"]), ("web", &["echo done"])]),
+        );
         let dir = run_folder();
         let (mut panes, waited) = start(&f, &c, &dir);
         let stops: Vec<AtomicBool> = c.iter().map(|_| AtomicBool::new(false)).collect();
         stops[0].store(true, Ordering::Relaxed);
         let mut ended = Vec::new();
-        watch(waited, &dir, TIMEOUT, &stops, &mut panes, &mut |_, o| {
-            ended.push(o);
-        });
+        let mut turn = |_, _| {};
+        watch(
+            waited,
+            &dir,
+            TIMEOUT,
+            &stops,
+            &mut panes,
+            &mut turn,
+            &mut |_, o| {
+                ended.push(o);
+            },
+        );
         std::fs::remove_dir_all(&dir).unwrap();
         ended.sort_by_key(|o| o.command.clone());
         let (done, stopped) = (&ended[0], &ended[1]);
@@ -1731,9 +1991,18 @@ mod tests {
         let stops = [AtomicBool::new(false)];
         let mut ended = Vec::new();
         let at = Instant::now();
-        watch(waited, &dir, TIMEOUT, &stops, &mut panes, &mut |_, o| {
-            ended.push(o);
-        });
+        let mut turn = |_, _| {};
+        watch(
+            waited,
+            &dir,
+            TIMEOUT,
+            &stops,
+            &mut panes,
+            &mut turn,
+            &mut |_, o| {
+                ended.push(o);
+            },
+        );
         assert!(at.elapsed() < Duration::from_secs(10));
         panes.interrupt("p0");
         // Its script may still be leaving its exit code: not this test's.

@@ -498,6 +498,14 @@ pub(crate) enum Done {
         index: usize,
         outcome: feature::verify::Outcome,
     },
+    /// Check `index` of run `n` of feature `slug` has to wait, or started.
+    CheckTurn {
+        project: String,
+        slug: String,
+        n: u32,
+        index: usize,
+        turn: feature::verify::Turn,
+    },
     /// Verify's checks of feature `slug` ran: run `n`.
     #[allow(dead_code)] // sent from `feature_build` (inc 4 contract)
     Verified {
@@ -1779,14 +1787,21 @@ fn check_card(
         }
         Some(o) if o.interrupted => (FindingTag::Stopped, Some(o.how())),
         Some(o) => (FindingTag::Failed, Some(o.how())),
+        None if running && row.is_some_and(|row| row.queued) => (FindingTag::Queued, None),
         None if running => (FindingTag::Running, None),
         None => (FindingTag::NotRun, None),
     };
     let took = |secs: u64| crate::test_runs::took(std::time::Duration::from_secs(secs));
     let mut said = Vec::new();
     match (tag, outcome) {
+        (FindingTag::Queued, _) => said.push("waiting for a check in this folder".to_owned()),
         (FindingTag::Running, _) => {
-            said.extend(verify.map(|v| took(now.saturating_sub(v.started))));
+            let began = row.and_then(|row| row.began);
+            said.extend(
+                began
+                    .or(verify.map(|v| v.started))
+                    .map(|at| took(now.saturating_sub(at))),
+            );
             said.extend(
                 row.and_then(|row| row.last_secs)
                     .map(|secs| format!("took {} last run", took(secs))),
@@ -1806,7 +1821,7 @@ fn check_card(
     let mut at = vec![feature::verify::place_of(&entry.repo).to_owned()];
     at.extend(how);
     let preview = match (tag, outcome) {
-        (FindingTag::Running, _) => {
+        (FindingTag::Running | FindingTag::Queued, _) => {
             let live = (row.and_then(|row| row.pane.as_ref()))
                 .and_then(|pane| state.check_tails?.get(pane))
                 .map_or(Vec::new(), |tail| tail.lines.clone());
@@ -1866,6 +1881,7 @@ fn checks_heading(cards: &[FindingCard]) -> String {
         (FindingTag::Passed, "passed"),
         (FindingTag::Failed, "failed"),
         (FindingTag::Running, "running"),
+        (FindingTag::Queued, "waiting"),
         (FindingTag::Stopped, "stopped"),
         (FindingTag::NotRun, "not run"),
         (FindingTag::Skipped, "skipped"),
@@ -3731,6 +3747,13 @@ impl Gerdr {
                 index,
                 outcome,
             } => self.check_ended(&project, &slug, n, index, outcome),
+            Done::CheckTurn {
+                project,
+                slug,
+                n,
+                index,
+                turn,
+            } => self.check_turn(&project, &slug, n, index, turn),
         }
     }
 
@@ -12947,6 +12970,31 @@ pub(crate) mod tests {
         // The one that ended keeps what it printed.
         let ended = check_card(&entries[0], &f, &state, &[], 2_000);
         assert_eq!(ended.preview, ["first", "boom"]);
+    }
+
+    #[test]
+    fn a_check_in_the_queue_says_so_and_its_clock_starts_with_it() {
+        let mut f = verified(true);
+        let run = f.verify.as_mut().unwrap();
+        run.started = 1_000;
+        run.checks[1].queued = true;
+        run.checks[1].last_secs = Some(100);
+        let state = PanelState {
+            plan: vec![planned("lint", false, false), planned("test", false, false)],
+            ..PanelState::default()
+        };
+        let entries = check_entries(&f, Stage::Verify, &state.plan);
+        let card = check_card(&entries[1], &f, &state, &[], 2_000);
+        assert_eq!(card.tag, FindingTag::Queued);
+        assert_eq!(card.state, "waiting for a check in this folder");
+        assert!(checks_heading(std::slice::from_ref(&card)).ends_with("1 waiting"));
+        // Its turn came: the time before it isn't the check's.
+        let run = f.verify.as_mut().unwrap();
+        run.checks[1].queued = false;
+        run.checks[1].began = Some(1_990);
+        let card = check_card(&entries[1], &f, &state, &[], 2_000);
+        assert_eq!(card.tag, FindingTag::Running);
+        assert!(card.state.starts_with("10s"), "{}", card.state);
     }
 
     #[test]

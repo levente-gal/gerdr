@@ -2403,7 +2403,7 @@ fn commands(case: usize) -> super::CommandsView {
     let mut view = super::CommandsView {
         tabs: &super::COMMANDS_PROJECT_TABS,
         tab: super::CommandsTab::Checks,
-        body: "One command per line, run at once (&& keeps an order). A check that changes code fails Verify.",
+        body: "One per line, at once; in turn within a folder (&& keeps an order). Changing code fails Verify.",
         note: None,
         rows: vec![
             row(
@@ -2522,37 +2522,37 @@ const COMMANDS: [&str; 6] = [
 const GOLDEN_COMMANDS: [[u64; 6]; 4] = [
     // Dark at 1
     [
-        0xa9ca0b947ab0b4b9, // commands
+        0xff031e5e6db3a64f, // commands
         0x3fe63a0dbef9f070, // commands_setup
-        0xe5f37a2aa20eee41, // commands_stale
-        0x599c8230d0f46a99, // commands_low
+        0x2aab5777643adee7, // commands_stale
+        0x9a123ac89261edc7, // commands_low
         0x97c707e14f98b1db, // commands_run
         0x5510179c6435358b, // commands_feature
     ],
     // Dark at 2
     [
-        0x5d32d734cfef9435, // commands
+        0xd5968b6e9a017058, // commands
         0xcddedce03bc25a32, // commands_setup
-        0xda6474ce9dd3aa5a, // commands_stale
-        0x90a0858dfd162a51, // commands_low
+        0x4c08fe9429e83f07, // commands_stale
+        0x62f7f21243aa44c0, // commands_low
         0x214dd92b595891f2, // commands_run
         0x9b521764fde307fe, // commands_feature
     ],
     // Light at 1
     [
-        0x1e1cbf68120b0afb, // commands
+        0x2164a43b0806ac61, // commands
         0x46e153a554416741, // commands_setup
-        0xff579c2c14edcc03, // commands_stale
-        0xec2de8c3f16673c4, // commands_low
+        0x36e0025fe130b86d, // commands_stale
+        0x5c2304a89984beda, // commands_low
         0x82b2055ddf45d39f, // commands_run
         0xabb49a31021a1a6c, // commands_feature
     ],
     // Light at 2
     [
-        0x1f8d7273d23e1e71, // commands
+        0xdf8703a23c5b1362, // commands
         0xfad4cbca3289ece2, // commands_setup
-        0xe7758ca9eafa711f, // commands_stale
-        0x8645cea7a55609bf, // commands_low
+        0x05613c1913910cd0, // commands_stale
+        0xc13b51a13f012fdc, // commands_low
         0x01b4767083cfef2d, // commands_run
         0xf4cb147dcf114360, // commands_feature
     ],
