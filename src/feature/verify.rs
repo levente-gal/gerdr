@@ -69,6 +69,9 @@ pub const TIMEOUT: Duration = Duration::from_secs(20 * 60);
 /// How many of a check's last output lines the evidence keeps.
 pub const TAIL: usize = 40;
 
+/// How many of a check's output lines its card on the Verify page shows.
+pub const PREVIEW_LINES: usize = 4;
+
 /// One check to run.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Check {
@@ -122,11 +125,24 @@ pub struct Outcome {
     /// The last lines its terminal showed.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub tail: String,
+    /// When the code failed it: the lines of its output that say why (see
+    /// `failure_lines`), which may lie before `tail`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excerpt: Vec<String>,
 }
 
 impl Outcome {
     pub fn passed(&self) -> bool {
         self.exit == Some(0)
+    }
+
+    /// What its card previews: why it failed when that was found, else the
+    /// last lines it printed.
+    pub fn preview(&self) -> Vec<String> {
+        match self.excerpt.is_empty() {
+            true => last_lines(&self.tail),
+            false => self.excerpt.clone(),
+        }
     }
 }
 
@@ -204,23 +220,50 @@ pub fn skipped(feature: &Feature, config: &Config) -> Vec<Check> {
     split(feature, config).1
 }
 
-/// What the next run of `feature` does that its last run's cards don't
-/// show, a line each: first what it skips, which no line count may hide,
-/// then what it runs that isn't on a card yet.
-pub fn planned(feature: &Feature, config: &Config) -> Vec<String> {
-    let (runs, skips) = split(feature, config);
-    let cards = feature.verify.as_ref().map_or(&[][..], |v| &v.checks);
-    let on_card = |check: &Check| {
-        (cards.iter()).any(|card| card.repo == check.repo && card.command == check.command)
-    };
-    (skips.iter().map(Check::skipped_line))
-        .chain(runs.iter().filter(|c| !on_card(c)).map(Check::line))
+/// A check `config` gives a feature, as its Verify page lists it whether or
+/// not a run got to it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlannedCheck {
+    pub repo: String,
+    pub command: String,
+    /// The feature skips it.
+    pub skipped: bool,
+    /// Only this feature runs it: it isn't borrowed, so can't be skipped.
+    pub own: bool,
+}
+
+/// `repo` (a `Repo::key` or `FEATURE_KEY`) as the user knows it.
+pub fn place_of(repo: &str) -> &str {
+    match repo {
+        FEATURE_KEY => "feature folder",
+        repo => repo,
+    }
+}
+
+/// All the checks `config` gives `feature`, skipped or not, as they are
+/// listed: a skip leaves its check where it stands.
+pub fn plan_cards(feature: &Feature, config: &Config) -> Vec<PlannedCheck> {
+    (listed(feature, config).into_iter())
+        .map(|(check, skipped)| PlannedCheck {
+            repo: check.repo,
+            command: check.command,
+            skipped,
+            own: check.own,
+        })
         .collect()
 }
 
 /// What `feature` runs of what `config` gives it, in order, and what it
 /// skips.
 fn split(feature: &Feature, config: &Config) -> (Vec<Check>, Vec<Check>) {
+    let (skips, runs): (Vec<_>, Vec<_>) =
+        (listed(feature, config).into_iter()).partition(|(_, skipped)| *skipped);
+    let checks = |of: Vec<(Check, bool)>| of.into_iter().map(|(check, _)| check).collect();
+    (checks(runs), checks(skips))
+}
+
+/// Each check `config` gives `feature` in its order, and if it is skipped.
+fn listed(feature: &Feature, config: &Config) -> Vec<(Check, bool)> {
     let commands = |config: Option<&BTreeMap<String, Vec<String>>>, key: &str| {
         config
             .and_then(|c| c.get(key))
@@ -231,29 +274,26 @@ fn split(feature: &Feature, config: &Config) -> (Vec<Check>, Vec<Check>) {
             .map(str::to_owned)
             .collect::<Vec<_>>()
     };
-    // What `key` borrows, then what is its own and not borrowed already;
-    // and what it borrows and skips.
-    let mut skips = Vec::new();
-    let mut of = |borrowed: Vec<String>, key: String, dir: &PathBuf| {
+    // What `key` borrows, skipped or not, then what is its own and not
+    // borrowed and run already.
+    let of = |borrowed: Vec<String>, key: String, dir: &PathBuf| {
         let skip = commands(Some(&feature.skip_checks), &key);
-        let (skipped, borrowed): (Vec<_>, Vec<_>) =
-            borrowed.into_iter().partition(|c| skip.contains(c));
         let own: Vec<String> = commands(Some(&feature.checks), &key)
             .into_iter()
-            .filter(|c| !borrowed.contains(c))
+            .filter(|c| !borrowed.contains(c) || skip.contains(c))
             .collect();
-        let tagged = |commands: Vec<String>, own: bool| {
-            let (key, dir) = (key.clone(), dir.clone());
-            (commands.into_iter()).map(move |command| Check {
-                repo: key.clone(),
-                dir: dir.clone(),
-                command,
-                own,
-            })
+        let check = |command: String, own: bool| Check {
+            repo: key.clone(),
+            dir: dir.clone(),
+            command,
+            own,
         };
-        skips.extend(tagged(skipped, false));
-        tagged(borrowed, false)
-            .chain(tagged(own, true))
+        (borrowed.into_iter())
+            .map(|command| {
+                let skipped = skip.contains(&command);
+                (check(command, false), skipped)
+            })
+            .chain(own.into_iter().map(|command| (check(command, true), false)))
             .collect::<Vec<_>>()
     };
     let mut repos: Vec<_> = feature.touched().collect();
@@ -265,7 +305,7 @@ fn split(feature: &Feature, config: &Config) -> (Vec<Check>, Vec<Check>) {
     }
     let borrowed = commands(Some(&config.home), FEATURE_KEY);
     checks.extend(of(borrowed, FEATURE_KEY.into(), &feature.dir));
-    (checks, skips)
+    checks
 }
 
 /// The code a run of checks starts on.
@@ -405,6 +445,7 @@ pub fn plan(
                 run: kept.as_ref().map_or(n, |(_, run)| *run),
                 outcome: kept.map(|(outcome, _)| outcome),
                 card_off: false,
+                last_secs: was.and_then(CheckRun::took_last),
             }
         })
         .collect()
@@ -585,7 +626,7 @@ pub fn watch(
                     _ => outcome(Some(code), None, false, secs),
                 };
                 o.timed_out = w.cut.is_some_and(|(_, cut)| cut == Cut::TimedOut);
-                o.tail = output_tail(panes, &w.check.pane);
+                o.keep_output(panes, &w.check.pane);
                 // What it left running in the background goes with it, as
                 // nothing else would stop it: a server would hold its port.
                 if let Some(pid) = pid {
@@ -631,7 +672,7 @@ pub fn watch(
                         Cut::TimedOut => outcome(None, None, false, timeout.as_secs()),
                     };
                     o.timed_out = cut == Cut::TimedOut;
-                    o.tail = output_tail(panes, &w.check.pane);
+                    o.keep_output(panes, &w.check.pane);
                     ended(i, o);
                     return false;
                 }
@@ -675,22 +716,121 @@ pub const READ_LINES: usize = 1000;
 /// not have drawn yet.
 const READ_TRIES: usize = 5;
 
-/// The last lines of what the check in `pane` printed.
-fn output_tail(panes: &mut dyn Panes, pane: &str) -> String {
-    let mut text = String::new();
-    for try_ in 0..READ_TRIES {
-        if try_ > 0 {
-            std::thread::sleep(Duration::from_millis(100));
+impl Outcome {
+    /// Keep the last lines of what the check in `pane` printed, and when the
+    /// code failed it the lines that say why.
+    fn keep_output(&mut self, panes: &mut dyn Panes, pane: &str) {
+        let mut text = String::new();
+        for try_ in 0..READ_TRIES {
+            if try_ > 0 {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            let Some(read) = panes.text(pane) else {
+                break;
+            };
+            text = read;
+            if text.contains(END) {
+                break;
+            }
         }
-        let Some(read) = panes.text(pane) else {
-            break;
-        };
-        text = read;
-        if text.contains(END) {
-            break;
+        let output = output_of(&text);
+        self.tail = tail(output.as_bytes(), false);
+        if !self.passed() && !self.interrupted {
+            self.excerpt = failure_lines(output);
         }
     }
-    tail(output_of(&text).as_bytes(), false)
+}
+
+/// How many lines a terminal is asked for to preview it.
+pub const PREVIEW_READ: usize = 200;
+
+/// What the card of a check running in a terminal showing `text` previews:
+/// the last lines it printed. Nothing while the terminal still shows what it
+/// did before the check started there. Output too long for one read has lost
+/// its start line, but isn't that.
+pub fn preview(text: &str) -> Vec<String> {
+    let head = text.rfind(HEAD);
+    let ended = text.rfind(END).is_some_and(|end| Some(end) > head);
+    if ended || (head.is_none() && text.lines().count() < PREVIEW_READ / 2) {
+        return Vec::new();
+    }
+    last_lines(&tail(output_of(text).as_bytes(), false))
+}
+
+/// The last `PREVIEW_LINES` lines of `text` with something on them.
+pub fn last_lines(text: &str) -> Vec<String> {
+    let lines: Vec<&str> = (text.lines())
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    let from = lines.len().saturating_sub(PREVIEW_LINES);
+    lines[from..].iter().map(|line| untabbed(line)).collect()
+}
+
+/// `line` with spaces for its tabs: a card draws them as nothing.
+fn untabbed(line: &str) -> String {
+    line.replace('\t', "    ")
+}
+
+/// What says outright that something went wrong.
+const STRONG: [&str; 5] = ["error", "panicked", "traceback", "exception", "fatal"];
+/// What says so too, but also names lists of tests and their summaries.
+const WEAK: [&str; 3] = ["failed", "failure", "fail"];
+
+/// The lines of output `raw` that say why a check failed: the first that
+/// says so outright, else the first that says it failed, and what follows it,
+/// `PREVIEW_LINES` in all. Nothing when no line does: its last lines then say
+/// the most. A test run's last lines are its summary, not what broke.
+fn failure_lines(raw: &str) -> Vec<String> {
+    let lines: Vec<String> = clean_lines(raw.as_bytes(), false)
+        .into_iter()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    let first = |words: &[&str]| lines.iter().position(|line| says_any(line, words));
+    let Some(at) = first(&STRONG).or_else(|| first(&WEAK)) else {
+        return Vec::new();
+    };
+    (lines[at..].iter().take(PREVIEW_LINES))
+        .map(|line| untabbed(line))
+        .collect()
+}
+
+/// Whether `line` has one of `words` (in lower case) as a word of its own,
+/// in any case, and not to say there are none of it. The end of a name like
+/// `TypeError` counts; that of a path like `src/error.rs` or a test like
+/// `no_error_here` doesn't.
+fn says_any(line: &str, words: &[&str]) -> bool {
+    // ASCII only, so every character stays at its place in `line`.
+    let lower = line.to_ascii_lowercase();
+    let joined = |c: char| c == '_' || c == '-' || c == '/' || c == '.';
+    words.iter().any(|word| {
+        lower.match_indices(word).any(|(at, _)| {
+            let before = line[..at].chars().next_back();
+            let start = match before {
+                None => true,
+                Some(c) if joined(c) => false,
+                Some(c) if c.is_alphanumeric() => line[at..].starts_with(char::is_uppercase),
+                Some(_) => true,
+            };
+            let rest = &line[at + word.len()..];
+            let rest = rest.strip_prefix(['s', 'S']).unwrap_or(rest);
+            let end = match rest.chars().next() {
+                None => true,
+                Some('.') => !rest[1..].starts_with(char::is_alphanumeric),
+                Some(c) => !c.is_alphanumeric() && c != '_' && c != '-' && c != '/',
+            };
+            start && end && !says_none(&line[..at], rest)
+        })
+    })
+}
+
+/// Whether a word with `before` and `after` round it says there is none of
+/// it: "0 failed", "no errors", "Errors: 0".
+fn says_none(before: &str, after: &str) -> bool {
+    let last = before.split_whitespace().next_back().unwrap_or_default();
+    let count = after.trim_start_matches([':', '=', ' ']);
+    let zero =
+        count.starts_with('0') && !count[1..].starts_with(|c: char| c.is_ascii_digit() || c == '.');
+    zero || last == "0" || last.eq_ignore_ascii_case("no")
 }
 
 /// Of what a terminal shows, what its last check printed: from after the
@@ -706,11 +846,18 @@ fn output_of(text: &str) -> &str {
 /// How long a line of output the evidence keeps, in characters.
 const LINE: usize = 500;
 
-/// The last `TAIL` lines of output `raw`, made readable: colour and other
-/// terminal escapes off, of a line redrawn with `\r` only its last
-/// drawing, long lines cut. `cut` says `raw` starts mid-output, so its
-/// first line is partial and goes.
+/// The last `TAIL` lines of output `raw`, made readable (see `clean_lines`).
 fn tail(raw: &[u8], cut: bool) -> String {
+    let lines = clean_lines(raw, cut);
+    let from = lines.len().saturating_sub(TAIL);
+    lines[from..].join("\n")
+}
+
+/// The lines of output `raw`, made readable: colour and other terminal
+/// escapes off, of a line redrawn with `\r` only its last drawing, long lines
+/// cut. `cut` says `raw` starts mid-output, so its first line is partial and
+/// goes.
+fn clean_lines(raw: &[u8], cut: bool) -> Vec<String> {
     let text = strip_escapes(&String::from_utf8_lossy(raw));
     let mut lines: Vec<&str> = text.split('\n').collect();
     if cut && lines.len() > 1 {
@@ -736,8 +883,7 @@ fn tail(raw: &[u8], cut: bool) -> String {
     while lines.last().is_some_and(String::is_empty) {
         lines.pop();
     }
-    let from = lines.len().saturating_sub(TAIL);
-    lines[from..].join("\n")
+    lines
 }
 
 /// `text` without terminal escapes (CSI such as colours, OSC such as
@@ -942,9 +1088,21 @@ pub struct CheckRun {
     /// The user took its card off the sidebar.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub card_off: bool,
+    /// How many seconds it took the last time it ran to its end, in a run
+    /// before the one that has it now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_secs: Option<u64>,
 }
 
 impl CheckRun {
+    /// How many seconds its next run may be told it took.
+    fn took_last(&self) -> Option<u64> {
+        let ran = (self.outcome.as_ref())
+            .filter(|o| !o.interrupted && !o.timed_out)
+            .map(|o| o.secs);
+        ran.filter(|secs| *secs > 0).or(self.last_secs)
+    }
+
     /// What tells it from a feature's other checks.
     pub fn key(&self) -> (String, String) {
         (self.repo.clone(), self.command.clone())
@@ -952,10 +1110,7 @@ impl CheckRun {
 
     /// Its repository as the user knows it.
     pub fn place(&self) -> &str {
-        match self.repo.as_str() {
-            FEATURE_KEY => "feature folder",
-            repo => repo,
-        }
+        place_of(&self.repo)
     }
 }
 
@@ -1271,37 +1426,134 @@ mod tests {
     }
 
     #[test]
-    fn what_a_run_will_do_says_only_what_its_cards_dont() {
+    fn the_page_lists_checks_where_they_stand_skipped_or_not() {
         let t = Temp::new();
         let mut f = feature_over(&t, &["api"], &[]);
         let c = config(&[("api", &["slow", "fast"])]);
         f.skip_checks.insert("api".into(), vec!["slow".into()]);
         f.checks.insert("api".into(), vec!["mine".into()]);
+        let listed: Vec<_> = (plan_cards(&f, &c).into_iter())
+            .map(|p| (p.repo, p.command, p.skipped, p.own))
+            .collect();
+        let row =
+            |command: &str, skipped, own| ("api".to_owned(), command.to_owned(), skipped, own);
         assert_eq!(
-            planned(&f, &c),
+            listed,
             [
-                "api: slow (skipped for this feature)",
-                "api: fast",
-                "api: mine (this feature only)"
+                row("slow", true, false),
+                row("fast", false, false),
+                row("mine", false, true),
             ]
         );
-        let card = |command: &str| CheckRun {
-            repo: "api".into(),
-            command: command.into(),
-            ..CheckRun::default()
+    }
+
+    #[test]
+    fn a_preview_is_of_what_the_check_prints_now() {
+        let head = "\u{25b6} Check api: make";
+        let end = "\u{25a0} Check passed";
+        // The shell hasn't started it: no start line in a short read.
+        assert!(preview("$ sh gerdr-check-0\n").is_empty());
+        // What it did last time, in a terminal used again.
+        assert!(preview(&format!("{head}\nold\n{end}\n$ sh gerdr-check-0\n")).is_empty());
+        // Its last lines, without the start line; a redrawn line is one line.
+        let text = format!("$ prompt\n{head}\n1\n\n2\n3\n4\n50%\r100%\n");
+        assert_eq!(preview(&text), ["2", "3", "4", "100%"]);
+        // So long that the read lost its start line.
+        let long: String = (0..PREVIEW_READ).map(|i| format!("{i}\n")).collect();
+        assert_eq!(preview(&long).len(), PREVIEW_LINES);
+        assert_eq!(last_lines("a\tb\n\n"), ["a    b"]);
+    }
+
+    #[test]
+    fn the_lines_of_a_failure_say_why() {
+        let cargo_build = "   Compiling app v1\nerror[E0308]: mismatched types\n --> src/a.rs:1:1\n\nerror: could not compile\n";
+        assert_eq!(
+            failure_lines(cargo_build),
+            [
+                "error[E0308]: mismatched types",
+                " --> src/a.rs:1:1",
+                "error: could not compile"
+            ]
+        );
+        let cargo_test = "test a ... ok\ntest b ... FAILED\n\n---- b stdout ----\nthread 'b' panicked at src/a.rs:1:\nboom\n\nfailures:\n    b\n\ntest result: FAILED. 1 passed; 1 failed\n\nerror: test failed\n";
+        assert_eq!(
+            failure_lines(cargo_test)[0],
+            "thread 'b' panicked at src/a.rs:1:"
+        );
+        let pytest =
+            "tests/a.py F\n=== FAILURES ===\nE   AssertionError: no\n=== 1 failed in 0.1s ===\n";
+        assert_eq!(failure_lines(pytest)[0], "E   AssertionError: no");
+        let jest = "PASS src/a.test.js\nFAIL src/b.test.js\n  \u{25cf} b works\n";
+        assert_eq!(failure_lines(jest)[0], "FAIL src/b.test.js");
+        // What says none, and what only names one.
+        for clean in [
+            "0 failed\nno errors\nErrors: 0, Failures: 0\n",
+            "src/error.rs\ntest no_error_here ... ok\nmirror-errors/a\n",
+            "something else\n",
+        ] {
+            assert_eq!(failure_lines(clean), Vec::<String>::new(), "{clean}");
+        }
+    }
+
+    #[test]
+    fn a_check_interrupted_or_passed_keeps_no_excerpt() {
+        struct One(String);
+        impl Panes for One {
+            fn gone(&mut self, _: &str) -> bool {
+                false
+            }
+            fn text(&mut self, _: &str) -> Option<String> {
+                Some(self.0.clone())
+            }
+            fn interrupt(&mut self, _: &str) {}
+        }
+        let head = "\u{25b6} Check api: t";
+        let end = "\u{25a0} Check exited with 1";
+        let mut panes = One(format!("{head}\nerror: boom\nmore\nlast\n{end}\n"));
+        let mut failed = Outcome {
+            exit: Some(1),
+            ..Outcome::default()
         };
-        // On a card already: what it skips still says so, even with a card
-        // left from before it was skipped.
-        f.verify = Some(VerifyRun {
-            checks: vec![card("fast"), card("slow")],
-            ..VerifyRun::default()
+        failed.keep_output(&mut panes, "p");
+        assert_eq!(failed.excerpt, ["error: boom", "more", "last"]);
+        assert_eq!(failed.preview(), ["error: boom", "more", "last"]);
+        let mut passed = Outcome {
+            exit: Some(0),
+            ..Outcome::default()
+        };
+        passed.keep_output(&mut panes, "p");
+        assert!(passed.excerpt.is_empty());
+        let mut stopped = Outcome {
+            interrupted: true,
+            ..Outcome::default()
+        };
+        stopped.keep_output(&mut panes, "p");
+        assert!(stopped.excerpt.is_empty());
+        assert_eq!(stopped.preview(), ["error: boom", "more", "last"]);
+    }
+
+    #[test]
+    fn a_run_remembers_how_long_a_check_took() {
+        let wt = Path::new("/w");
+        let listed = [check("api", wt, "a")];
+        let mut last = plan(&listed, &[], false, &Scope::All, 1);
+        assert_eq!(last[0].last_secs, None);
+        last[0].outcome = Some(Outcome {
+            exit: Some(1),
+            secs: 90,
+            ..Outcome::default()
+        });
+        let mut next = plan(&listed, &last, false, &Scope::All, 2);
+        assert_eq!(next[0].last_secs, Some(90));
+        // Stopped says nothing of how long it takes.
+        next[0].outcome = Some(Outcome {
+            interrupted: true,
+            secs: 3,
+            ..Outcome::default()
         });
         assert_eq!(
-            planned(&f, &c),
-            [
-                "api: slow (skipped for this feature)",
-                "api: mine (this feature only)"
-            ]
+            plan(&listed, &next, false, &Scope::All, 3)[0].last_secs,
+            Some(90)
         );
     }
 

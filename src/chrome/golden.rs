@@ -2433,12 +2433,7 @@ fn commands(case: usize) -> super::CommandsView {
             view.rows = vec![
                 row("api", None, None, "./e2e.sh login"),
                 row("web", Some("runs once this feature changes it"), None, ""),
-                row(
-                    "Whole feature",
-                    Some("in the feature folder"),
-                    None,
-                    "",
-                ),
+                row("Whole feature", Some("in the feature folder"), None, ""),
             ];
             let borrowed = |command: &str, skipped| super::CommandsBorrowed {
                 command: command.into(),
@@ -3898,6 +3893,7 @@ fn tab_findings() -> super::FeatureTabView {
             state: state.into(),
             place: place.into(),
             body: body.into(),
+            preview: Vec::new(),
             fix: fix.into(),
             note: note.into(),
             faded: false,
@@ -3911,9 +3907,7 @@ fn tab_findings() -> super::FeatureTabView {
 /// The feature tab on Verify with a card of each way a check can stand, the
 /// second with the keyboard.
 fn tab_checks() -> super::FeatureTabView {
-    use super::{
-        ButtonStyle, CheckTone, FindingCard, FindingTag, NodeMark, PageButton, PageSection,
-    };
+    use super::{ButtonStyle, FindingCard, FindingTag, NodeMark, PageButton, PageSection};
     use crate::feature::Stage;
     let mut view = feature_tab();
     at_stage(&mut view, 4, NodeMark::Current, "running");
@@ -3923,8 +3917,9 @@ fn tab_checks() -> super::FeatureTabView {
     view.page.status = None;
     view.page.buttons.clear();
     view.page.sections = vec![PageSection::Lines {
-        label: "Checks".into(),
-        lines: vec![tab_line("Verifying: 3 of 5 done", CheckTone::Note)],
+        label: "Checks \u{b7} 1 passed \u{b7} 1 failed \u{b7} 1 running \u{b7} 1 stopped \u{b7} 1 not run \u{b7} 1 skipped"
+            .into(),
+        lines: Vec::new(),
     }];
     let button = |label: &str, style| PageButton {
         label: label.into(),
@@ -3942,16 +3937,20 @@ fn tab_checks() -> super::FeatureTabView {
         &'a str,
         &'a str,
         &'a str,
-        &'a str,
+        &'a [&'a str],
     );
-    let cards: [Card; 5] = [
+    let cards: [Card; 6] = [
         (
-            &["Show", "Run again"],
+            &["Show", "Run again", "Skip"],
             FindingTag::Passed,
             "cargo test",
-            "1m 12s",
+            "1m 12s \u{b7} on older code",
             "api \u{b7} 142 passed",
-            "",
+            &[
+                "test tree::walks ... ok",
+                "test tree::folds ... ok",
+                "test result: ok. 142 passed; 0 failed; 0 ignored",
+            ],
         ),
         (
             &["Show", "Run again"],
@@ -3959,34 +3958,47 @@ fn tab_checks() -> super::FeatureTabView {
             "npm test",
             "8s",
             "web \u{b7} exited with 1",
-            "Dialog.test.tsx (1 of 14) failed",
+            &[
+                "FAIL src/Dialog.test.tsx",
+                "  \u{25cf} Dialog \u{203a} closes on Esc",
+                "    expect(received).toBe(expected) // a very long line of output that has to stop at the edge of its card, whatever the width of the page is",
+                "    Expected: false",
+            ],
         ),
         (
             &["Show", "Stop"],
             FindingTag::Running,
             "npm run lint",
-            "",
+            "12s \u{b7} took 1m 40s last run",
             "web",
-            "",
+            &["checking src/App.tsx", "", "", ""],
         ),
         (
             &["Show", "Run again"],
             FindingTag::Stopped,
             "./e2e.sh",
             "4s",
-            "feature folder",
-            "",
+            "feature folder \u{b7} stopped",
+            &["starting browsers"],
         ),
         (
-            &["Run again"],
+            &["Skip"],
             FindingTag::NotRun,
             "cargo clippy",
             "",
             "api",
+            &[],
+        ),
+        (
+            &["Don't skip"],
+            FindingTag::Skipped,
+            "cargo bench",
             "",
+            "api \u{b7} skipped for this feature",
+            &[],
         ),
     ];
-    for (i, (labels, tag, title, state, place, body)) in cards.into_iter().enumerate() {
+    for (i, (labels, tag, title, state, place, preview)) in cards.into_iter().enumerate() {
         let at = view.page.buttons.len();
         for label in labels {
             view.page.buttons.push(button(label, ButtonStyle::Plain));
@@ -3996,10 +4008,11 @@ fn tab_checks() -> super::FeatureTabView {
             title: title.into(),
             state: state.into(),
             place: place.into(),
-            body: body.into(),
+            body: String::new(),
+            preview: preview.iter().map(|line| (*line).to_owned()).collect(),
             fix: String::new(),
             note: String::new(),
-            faded: false,
+            faded: tag == FindingTag::Skipped,
             selected: i == 1,
             buttons: (at..at + labels.len()).collect(),
         }));
@@ -4451,10 +4464,10 @@ const CHECK_CARDS: [&str; 2] = ["tab_checks_1180", "tab_checks_860"];
 
 /// The recorded hashes of `CHECK_CARDS`, per case in `CASES`.
 const GOLDEN_CHECK_CARDS: [[u64; 2]; 4] = [
-    [0xd12dc0cc0811f861, 0x7538898736f3ceb2],
-    [0x25c641441286084b, 0xd1ceec8d8d479280],
-    [0xe822a78b4d94cd02, 0x34c15295560f0dbe],
-    [0x16901b00165443cb, 0x8d17c94d68bd0d66],
+    [0x4965a66b6e5ceb4d, 0xfb5bfa4d2a75aa4f],
+    [0xdb2c439f46b10f6b, 0xc140e3ebdcbaab84],
+    [0xfc2afa1772d30dc0, 0xcceef38ef56e9688],
+    [0xc688613a14d7f5c1, 0xd2828d6e68c115be],
 ];
 
 #[test]

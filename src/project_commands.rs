@@ -205,6 +205,19 @@ pub struct CommandsBefore {
     verify_timeout: Option<u64>,
 }
 
+/// Make `skips` say whether the check `command` of `repo` is skipped. A
+/// repository with none left has no entry.
+fn set_skipped(skips: &mut BTreeMap<String, Vec<String>>, repo: &str, command: &str, skip: bool) {
+    let of = skips.entry(repo.to_owned()).or_default();
+    of.retain(|c| c.trim() != command);
+    if skip {
+        of.push(command.to_owned());
+    }
+    if of.is_empty() {
+        skips.remove(repo);
+    }
+}
+
 /// How a feature's own checks stood before a save, for its Undo.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OwnChecksBefore {
@@ -1135,6 +1148,47 @@ impl Gerdr {
         }))
     }
 
+    /// Skip the check `command` feature `slug` borrows for `repo`, or stop
+    /// skipping it: from a card on its Verify page. Like a save of the dialog
+    /// it applies from the next run, and can be undone.
+    pub(crate) fn set_check_skipped(
+        &mut self,
+        project: &str,
+        slug: &str,
+        repo: &str,
+        command: &str,
+        skip: bool,
+    ) {
+        let Some(feature) = self.feature_mut(project, slug) else {
+            return self.show_error("That feature is gone".into());
+        };
+        let (checks, was) = (feature.checks.clone(), feature.skip_checks.clone());
+        set_skipped(&mut feature.skip_checks, repo, command, skip);
+        if let Err(err) = crate::feature::store::save(None, feature) {
+            tracing::warn!("saving the checks of {project}/{slug}: {err}");
+            feature.skip_checks = was;
+            return self.show_error("gerdr couldn't write the feature's record".into());
+        }
+        let undo = CommandsUndo {
+            projects: Vec::new(),
+            feature: Some(OwnChecksBefore {
+                project: project.to_owned(),
+                slug: slug.to_owned(),
+                checks,
+                skip: was,
+            }),
+        };
+        let what = match skip {
+            true => "Skipped for this feature; it applies from the next run",
+            false => "No longer skipped; it applies from the next run",
+        };
+        self.toast_with(
+            what.to_owned(),
+            Level::Success,
+            Some(("Undo".to_owned(), MenuAction::RestoreProjectCommands(undo))),
+        );
+    }
+
     /// Put a feature's own checks back; else why they couldn't be, in a
     /// toast's words.
     fn put_own_checks_back(&mut self, was: &OwnChecksBefore) -> Result<(), String> {
@@ -1293,6 +1347,21 @@ impl Gerdr {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_skip_goes_by_the_commands_words_and_leaves_no_empty_list() {
+        let mut skips = BTreeMap::new();
+        set_skipped(&mut skips, "api", "slow", true);
+        set_skipped(&mut skips, "api", "slow", true);
+        set_skipped(&mut skips, "api", "fast", true);
+        assert_eq!(skips["api"], ["slow", "fast"]);
+        set_skipped(&mut skips, "api", "slow", false);
+        assert_eq!(skips["api"], ["fast"]);
+        set_skipped(&mut skips, "api", "fast", false);
+        assert!(skips.is_empty());
+        set_skipped(&mut skips, "web", "never", false);
+        assert!(skips.is_empty());
+    }
 
     fn workflow() -> Workflow {
         let mut w = Workflow::default();
