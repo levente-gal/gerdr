@@ -8,6 +8,12 @@
 //! (`PaneRecord::restart_command`). A web page of the feature's workspace on
 //! `localhost` opens inside too (`Gerdr::sandbox_for`), and so reaches this
 //! feature's app at the address the app expects.
+//!
+//! Start asks first which of the project's commands run, in the restart
+//! dialog (see `restart`). What is checked stays with the feature
+//! (`Feature::sandbox_picks`), not in the project file, and Restart and Reset
+//! run the same without asking. A command the feature hasn't been asked about
+//! runs, unless the project's line for it is a comment.
 
 use std::{
     collections::BTreeMap,
@@ -69,14 +75,50 @@ fn main_folder(root: &Path, name: &str) -> Option<PathBuf> {
     (root.file_name()?.to_string_lossy() == name).then(|| root.to_owned())
 }
 
+/// A command a sandbox can run.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SandboxLine {
+    /// Its repository's `feature::repo_key`.
+    pub repo: String,
+    /// Its repository's folder name.
+    pub name: String,
+    /// The feature holds that repository: it runs from its worktree.
+    pub held: bool,
+    /// Where it runs.
+    pub dir: PathBuf,
+    /// The project's words for it, without a comment's `#`.
+    pub words: String,
+    /// What runs in `dir`.
+    pub command: String,
+    /// Whether it runs: as picked, else unless its line is a comment.
+    pub on: bool,
+    /// It runs before the others, not in a tab: `workflow.prepare`.
+    pub first: bool,
+}
+
+impl SandboxLine {
+    /// Where it runs and when, as the dialog asking about it says.
+    pub fn place(&self) -> String {
+        let mut place = self.name.clone();
+        if !self.held {
+            place.push_str(" \u{b7} from main");
+        }
+        if self.first {
+            place.push_str(" \u{b7} runs first");
+        }
+        place
+    }
+}
+
 /// The commands `lists` give, each with the folder it runs in: the feature's
 /// worktree for a repository it holds, else the repository's main folder, so a
-/// project's other services run too, unchanged. A line starting with `#` is kept
-/// in the list but doesn't run. What names a main folder then names the worktree.
+/// project's other services run too, unchanged. What names a main folder then
+/// names the worktree. Those not to run are there too, `on` saying so.
 pub fn lines_of(
     feature: &Feature,
     lists: &PerProject<BTreeMap<String, Vec<String>>>,
-) -> Vec<(PathBuf, String)> {
+    first: bool,
+) -> Vec<SandboxLine> {
     let mut out = Vec::new();
     let mut add = |root: &Path, project: Option<&str>, list: &BTreeMap<String, Vec<String>>| {
         for (name, commands) in list {
@@ -89,15 +131,25 @@ pub fn lines_of(
                 tracing::warn!("no folder for repository {name}: its commands don't run");
                 continue;
             };
+            let repo = feature::repo_key(project, name);
+            let picks = feature.sandbox_picks.get(&repo);
             for command in commands {
                 let command = command.trim();
-                if command.is_empty() || command.starts_with('#') {
+                let words = command.trim_start_matches('#').trim();
+                if words.is_empty() {
                     continue;
                 }
-                out.push((
-                    dir.clone(),
-                    sandbox_run::in_worktrees(command, &feature.repos),
-                ));
+                let picked = picks.and_then(|p| p.get(words)).copied();
+                out.push(SandboxLine {
+                    repo: repo.clone(),
+                    name: name.clone(),
+                    held: held.is_some(),
+                    dir: dir.clone(),
+                    words: words.to_owned(),
+                    command: sandbox_run::in_worktrees(words, &feature.repos),
+                    on: picked.unwrap_or(!command.starts_with('#')),
+                    first,
+                });
             }
         }
     };
@@ -150,30 +202,81 @@ impl Gerdr {
         Some((holder, profile))
     }
 
-    /// Start feature `slug`'s sandbox, off the thread. With no run commands,
-    /// it asks for them first: nothing would run.
+    /// Whether `feature`'s sandbox can start now; if not, the user hears why.
+    /// With no run commands the dialog for them opens: nothing would run.
+    fn can_start_sandbox(&mut self, feature: &Feature) -> bool {
+        let key = (feature.project.clone(), feature.slug.clone());
+        if self.features.build.sandbox_stops.contains_key(&key) {
+            self.show_warning(format!(
+                "The sandbox of \u{201c}{}\u{201d} is being started or stopped",
+                feature.title
+            ));
+            return false;
+        }
+        if feature.sandbox.as_ref().is_some_and(SandboxRun::alive) {
+            self.show_warning(format!(
+                "The sandbox of \u{201c}{}\u{201d} is already running",
+                feature.title
+            ));
+            return false;
+        }
+        let runs = self.projects.workflows(feature, |w| w.run.clone());
+        if !has_commands(&runs) {
+            self.show_warning("Say what a sandbox runs first".into());
+            self.open_project_commands(&key.0, Some(&key.1), CommandsTab::Run);
+            return false;
+        }
+        true
+    }
+
+    /// Ask which commands feature `slug`'s sandbox runs, then start it. What
+    /// runs first is listed first, as it runs.
+    pub(crate) fn ask_start_sandbox(&mut self, project: &str, slug: &str) {
+        let Some(feature) = self.feature(project, slug).cloned() else {
+            return;
+        };
+        if !self.can_start_sandbox(&feature) {
+            return;
+        }
+        let prepares = self.projects.workflows(&feature, |w| w.prepare.clone());
+        let runs = self.projects.workflows(&feature, |w| w.run.clone());
+        let mut lines = lines_of(&feature, &prepares, true);
+        lines.extend(lines_of(&feature, &runs, false));
+        if lines.is_empty() {
+            return self.start_sandbox(project, slug);
+        }
+        self.open_sandbox_picks(project, slug, lines);
+    }
+
+    /// The commands of feature `slug`'s sandbox were checked or not: keep
+    /// that with the feature, and start it. A pick of a command not listed
+    /// now stays: that command may come back.
+    pub(crate) fn sandbox_picked(
+        &mut self,
+        project: &str,
+        slug: &str,
+        picks: &[(SandboxLine, bool)],
+    ) {
+        if let Some(f) = self.feature_mut(project, slug) {
+            for (line, on) in picks {
+                (f.sandbox_picks.entry(line.repo.clone()).or_default())
+                    .insert(line.words.clone(), *on);
+            }
+            self.save_feature(project, slug);
+        }
+        self.start_sandbox(project, slug);
+    }
+
+    /// Start feature `slug`'s sandbox, off the thread, with the commands its
+    /// record says.
     pub(crate) fn start_sandbox(&mut self, project: &str, slug: &str) {
         let Some(feature) = self.feature(project, slug).cloned() else {
             return;
         };
+        if !self.can_start_sandbox(&feature) {
+            return;
+        }
         let key = (project.to_owned(), slug.to_owned());
-        if self.features.build.sandbox_stops.contains_key(&key) {
-            return self.show_warning(format!(
-                "The sandbox of \u{201c}{}\u{201d} is being started or stopped",
-                feature.title
-            ));
-        }
-        if feature.sandbox.as_ref().is_some_and(SandboxRun::alive) {
-            return self.show_warning(format!(
-                "The sandbox of \u{201c}{}\u{201d} is already running",
-                feature.title
-            ));
-        }
-        let runs = self.projects.workflows(&feature, |w| w.run.clone());
-        if !has_commands(&runs) {
-            self.show_warning("Say what a sandbox runs first".into());
-            return self.open_project_commands(project, Some(slug), CommandsTab::Run);
-        }
         let prepares = self.projects.workflows(&feature, |w| w.prepare.clone());
         let venv = self.feature_venv(project, slug);
         let mut env: BTreeMap<String, String> = BTreeMap::new();
@@ -218,11 +321,13 @@ impl Gerdr {
         let (project, slug) = (project.to_owned(), slug.to_owned());
         self.feature_work(Some(busy), move |tx| {
             let tools = Tools::detect();
-            let prepare: Vec<(PathBuf, String)> = lines_of(&feature, &prepares)
+            let prepare: Vec<(PathBuf, String)> = lines_of(&feature, &prepares, true)
                 .into_iter()
-                .map(|(dir, line)| {
-                    let line = background_command(&line, &dir, &feature.dir, &venv, &tools);
-                    (dir, line)
+                .filter(|line| line.on)
+                .map(|line| {
+                    let command =
+                        background_command(&line.command, &line.dir, &feature.dir, &venv, &tools);
+                    (line.dir, command)
                 })
                 .collect();
             let mut roots = vec![feature.root.clone()];
@@ -326,11 +431,14 @@ impl Gerdr {
             .collect();
         env.extend(envs.home.iter().map(|(k, v)| (k.clone(), v.clone())));
         let mut panes = Vec::new();
-        for (dir, line) in lines_of(feature, &runs) {
-            let command = sandbox_run::enter_line(holder, slug, &env, &line);
-            match self.open_feature_tab(project, slug, &dir, Some(command)) {
+        for line in lines_of(feature, &runs, false) {
+            if !line.on {
+                continue;
+            }
+            let command = sandbox_run::enter_line(holder, slug, &env, &line.command);
+            match self.open_feature_tab(project, slug, &line.dir, Some(command)) {
                 Some(pane) => panes.push(pane),
-                None => self.show_error(format!("Couldn't open a tab for `{line}`")),
+                None => self.show_error(format!("Couldn't open a tab for `{}`", line.command)),
             }
         }
         if let Some(f) = self.feature_mut(project, slug)
@@ -635,10 +743,13 @@ mod tests {
             ("web".to_owned(), vec!["npm run dev".to_owned()]),
             ("gone".to_owned(), vec!["nope".to_owned()]),
         ]));
-        let lines = lines_of(&f, &lists);
+        let lines = lines_of(&f, &lists, false);
         let worktree = f.repos[0].worktree.clone();
+        let runs: Vec<_> = (lines.iter().filter(|l| l.on))
+            .map(|l| (l.dir.clone(), l.command.clone()))
+            .collect();
         assert_eq!(
-            lines,
+            runs,
             [
                 (
                     worktree.clone(),
@@ -648,6 +759,67 @@ mod tests {
             ]
         );
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// `f`'s lines of a repository `api`, written as `written`.
+    fn on_of(f: &Feature, written: &[&str]) -> Vec<(String, bool)> {
+        let written = written.iter().map(|&line| line.to_owned()).collect();
+        let lists = PerProject::all(BTreeMap::from([("api".to_owned(), written)]));
+        (lines_of(f, &lists, false).into_iter())
+            .map(|l| (l.words, l.on))
+            .collect()
+    }
+
+    #[test]
+    fn a_comment_is_listed_unchecked_and_a_pick_goes_over_what_the_project_says() {
+        let root = std::env::temp_dir().join(format!("gerdr-picks-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut f = feature_with(&root);
+        let written = ["runserver", "# celery beat", "#", "npm start"];
+        assert_eq!(
+            on_of(&f, &written),
+            [
+                ("runserver".to_owned(), true),
+                ("celery beat".to_owned(), false),
+                ("npm start".to_owned(), true),
+            ]
+        );
+        let picks = BTreeMap::from([
+            ("runserver".to_owned(), false),
+            ("celery beat".to_owned(), true),
+        ]);
+        f.sandbox_picks.insert("api".to_owned(), picks);
+        assert_eq!(
+            on_of(&f, &written),
+            [
+                ("runserver".to_owned(), false),
+                ("celery beat".to_owned(), true),
+                // Not asked about yet: as the project says.
+                ("npm start".to_owned(), true),
+            ]
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_line_says_where_and_when_it_runs() {
+        let line = SandboxLine {
+            repo: "web".to_owned(),
+            name: "web".to_owned(),
+            held: true,
+            dir: PathBuf::new(),
+            words: "npm start".to_owned(),
+            command: "npm start".to_owned(),
+            on: true,
+            first: false,
+        };
+        assert_eq!(line.place(), "web");
+        let outside = SandboxLine {
+            held: false,
+            first: true,
+            ..line
+        };
+        assert_eq!(outside.place(), "web \u{b7} from main \u{b7} runs first");
     }
 
     #[test]

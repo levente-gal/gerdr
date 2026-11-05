@@ -450,7 +450,7 @@ impl Chrome {
                 Kind::Restart => {
                     let restart = view.restart.take().map(|restart| {
                         let (loc, size) =
-                            shadowed(restart_layout(output, restart.rows.len()).panel);
+                            shadowed(restart_layout(output, restart.rows.len(), restart.action).panel);
                         ((restart, output, theme, scale), loc, size)
                     });
                     let part = self
@@ -1279,7 +1279,7 @@ fn hit_rects(
         rects.extend(layout.hints.into_iter().map(|(_, rect)| rect));
     }
     if let Some(restart) = &view.restart {
-        let layout = restart_layout(output, restart.rows.len());
+        let layout = restart_layout(output, restart.rows.len(), restart.action);
         rects.extend(layout.rows);
         rects.extend(layout.buttons);
     }

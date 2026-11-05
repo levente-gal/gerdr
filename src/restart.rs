@@ -20,6 +20,9 @@
 //! and Tab move between the buttons, Enter presses the selected one
 //! (Restart, by default: the dialog is a pick, and what stops starts
 //! again), Esc cancels.
+//!
+//! A feature's sandbox asks the same before it starts, which of the project's
+//! commands run in it (see `feature_sandbox`).
 
 use smithay::{
     input::keyboard::{Keysym, ModifiersState},
@@ -29,6 +32,7 @@ use smithay::{
 use crate::{
     Gerdr,
     chrome::{self, BarStatus, RestartHit, RestartRow, RestartView},
+    feature_sandbox::SandboxLine,
     home_dir, paths,
     projects::{Captured, RestartChoice},
 };
@@ -88,21 +92,48 @@ pub fn choose(choices: &mut Vec<RestartChoice>, picks: &[(&str, bool)]) {
     }
 }
 
+/// What the restart dialog is asking about.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Asks {
+    /// The commands of this workspace, to run again.
+    Workspace(usize),
+    /// The commands of this feature's sandbox, to start it with.
+    Sandbox { project: String, slug: String },
+}
+
+impl Asks {
+    /// The label of the button going on.
+    pub fn action(&self) -> &'static str {
+        match self {
+            Self::Workspace(_) => "Restart",
+            Self::Sandbox { .. } => "Start",
+        }
+    }
+}
+
+/// What a row of the restart dialog stands for.
+#[derive(Clone, Debug)]
+pub enum RowFor {
+    Pane {
+        pane_id: String,
+        captured: Captured,
+        /// It has exited: it runs again rather than restarting.
+        exited: bool,
+    },
+    Sandbox(SandboxLine),
+}
+
 /// A command the restart dialog offers.
 #[derive(Clone, Debug)]
 pub struct Row {
-    pub pane_id: String,
-    pub captured: Captured,
-    /// It has exited: it runs again rather than restarting.
-    pub exited: bool,
+    pub what: RowFor,
     pub checked: bool,
 }
 
 /// The restart dialog's state, while it is open.
 #[derive(Debug)]
 pub struct RestartDialog {
-    /// The workspace whose commands it restarts.
-    pub workspace: usize,
+    pub asks: Asks,
     pub rows: Vec<Row>,
     /// The row under the keyboard's cursor.
     pub cursor: usize,
@@ -247,15 +278,43 @@ impl Gerdr {
             .into_iter()
             .zip(checks)
             .map(|((pane_id, captured), checked)| Row {
-                exited: self.pane_bar_content(&pane_id).status == BarStatus::Exited,
-                pane_id,
-                captured,
+                what: RowFor::Pane {
+                    exited: self.pane_bar_content(&pane_id).status == BarStatus::Exited,
+                    pane_id,
+                    captured,
+                },
                 checked,
             })
             .collect();
+        self.open_picks(Asks::Workspace(w), rows);
+    }
+
+    /// Ask which of `lines` feature `slug`'s sandbox runs, each checked as
+    /// it says.
+    pub(crate) fn open_sandbox_picks(
+        &mut self,
+        project: &str,
+        slug: &str,
+        lines: Vec<SandboxLine>,
+    ) {
+        let rows = lines
+            .into_iter()
+            .map(|line| Row {
+                checked: line.on,
+                what: RowFor::Sandbox(line),
+            })
+            .collect();
+        let asks = Asks::Sandbox {
+            project: project.to_owned(),
+            slug: slug.to_owned(),
+        };
+        self.open_picks(asks, rows);
+    }
+
+    fn open_picks(&mut self, asks: Asks, rows: Vec<Row>) {
         self.context_menu = None;
         self.restart = Some(RestartDialog {
-            workspace: w,
+            asks,
             rows,
             cursor: 0,
             top: 0,
@@ -283,12 +342,16 @@ impl Gerdr {
 
     /// How many rows the restart dialog shows at once.
     fn restart_fit(&self) -> usize {
-        let rows = self.restart.as_ref().map_or(0, |d| d.rows.len());
-        chrome::restart_layout(self.output_size(), rows).rows.len()
+        let Some(dialog) = &self.restart else {
+            return 0;
+        };
+        chrome::restart_layout(self.output_size(), dialog.rows.len(), dialog.asks.action())
+            .rows
+            .len()
     }
 
-    /// Do what the restart dialog asked: keep the choices in the
-    /// workspace's record and restart the checked commands.
+    /// Do what the restart dialog asked: keep the choices and go on with
+    /// the checked commands.
     pub fn apply_restart(&mut self, outcome: Outcome) {
         let Some(dialog) = self.restart.take() else {
             return;
@@ -298,26 +361,45 @@ impl Gerdr {
         if outcome == Outcome::Cancel {
             return;
         }
-        let picks: Vec<(&str, bool)> = dialog
-            .rows
-            .iter()
-            .map(|r| (r.captured.command.as_str(), r.checked))
+        match dialog.asks {
+            Asks::Workspace(w) => self.restart_picked(w, dialog.rows),
+            Asks::Sandbox { project, slug } => {
+                let picks: Vec<(SandboxLine, bool)> = (dialog.rows.into_iter())
+                    .filter_map(|row| match row.what {
+                        RowFor::Sandbox(line) => Some((line, row.checked)),
+                        RowFor::Pane { .. } => None,
+                    })
+                    .collect();
+                self.sandbox_picked(&project, &slug, &picks);
+            }
+        }
+    }
+
+    /// Keep what `rows` checked in workspace `w`'s record, and restart those.
+    fn restart_picked(&mut self, w: usize, rows: Vec<Row>) {
+        let rows: Vec<(String, Captured, bool)> = (rows.into_iter())
+            .filter_map(|row| match row.what {
+                RowFor::Pane {
+                    pane_id, captured, ..
+                } => Some((pane_id, captured, row.checked)),
+                RowFor::Sandbox(_) => None,
+            })
             .collect();
-        let record = self
-            .workspaces
-            .get(dialog.workspace)
-            .map(|ws| ws.record.clone());
+        let picks: Vec<(&str, bool)> = rows
+            .iter()
+            .map(|(_, captured, checked)| (captured.command.as_str(), *checked))
+            .collect();
+        let record = self.workspaces.get(w).map(|ws| ws.record.clone());
         if let (Some(project), Some(record)) = (self.project.clone(), record)
             && let Some(record) = self.projects.record_mut(&project, &record)
         {
             choose(&mut record.restart_choices, &picks);
             self.projects.save();
         }
-        let picked: Vec<_> = dialog
-            .rows
+        let picked: Vec<_> = rows
             .into_iter()
-            .filter(|r| r.checked)
-            .map(|r| (r.pane_id, r.captured))
+            .filter(|(.., checked)| *checked)
+            .map(|(pane_id, captured, _)| (pane_id, captured))
             .collect();
         if picked.is_empty() {
             self.show_notice("Nothing restarted \u{b7} a new command is asked about".into());
@@ -332,7 +414,7 @@ impl Gerdr {
         let Some(dialog) = self.restart.as_mut() else {
             return false;
         };
-        let layout = chrome::restart_layout(size, dialog.rows.len());
+        let layout = chrome::restart_layout(size, dialog.rows.len(), dialog.asks.action());
         let outcome = match restart_hit(&layout, dialog.top, pos) {
             Some(RestartHit::Button(button)) => Some(dialog.press(button)),
             Some(RestartHit::Row(row)) => {
@@ -353,7 +435,7 @@ impl Gerdr {
     pub fn restart_hover(&mut self, pos: Point<f64, Logical>) {
         let size = self.output_size();
         if let Some(dialog) = self.restart.as_mut() {
-            let layout = chrome::restart_layout(size, dialog.rows.len());
+            let layout = chrome::restart_layout(size, dialog.rows.len(), dialog.asks.action());
             dialog.hover = restart_hit(&layout, dialog.top, pos);
         }
     }
@@ -364,35 +446,55 @@ impl Gerdr {
         let Some(dialog) = &self.restart else {
             return Vec::new();
         };
-        let layout = chrome::restart_layout(self.output_size(), dialog.rows.len());
+        let layout =
+            chrome::restart_layout(self.output_size(), dialog.rows.len(), dialog.asks.action());
         layout.rows.into_iter().chain(layout.buttons).collect()
     }
 
     pub fn restart_view(&self) -> Option<RestartView> {
         let dialog = self.restart.as_ref()?;
-        let workspace = self
-            .workspaces
-            .get(dialog.workspace)
-            .map(|ws| ws.name.clone())
-            .unwrap_or_default();
+        let (title, body) = match &dialog.asks {
+            Asks::Workspace(w) => {
+                let name = self.workspaces.get(*w).map_or("", |ws| ws.name.as_str());
+                (
+                    format!("Restart which commands in \u{201c}{name}\u{201d}?"),
+                    "The checked ones stop and run again; a new command is asked about",
+                )
+            }
+            Asks::Sandbox { .. } => (
+                "Run which commands in this sandbox?".to_owned(),
+                "The checked ones run inside it; this feature keeps the choice",
+            ),
+        };
         let home = home_dir();
         let rows = dialog
             .rows
             .iter()
-            .map(|row| {
-                let c = &row.captured;
-                RestartRow {
+            .map(|row| match &row.what {
+                RowFor::Pane {
+                    captured: c,
+                    exited,
+                    ..
+                } => RestartRow {
                     label: chrome::command_line(&c.command).unwrap_or_else(|| c.command.clone()),
                     place: c.cwd.as_deref().map_or(String::new(), |dir| {
                         paths::display(dir, home.as_deref(), 40)
                     }),
-                    exited: row.exited,
+                    exited: *exited,
                     checked: row.checked,
-                }
+                },
+                RowFor::Sandbox(line) => RestartRow {
+                    label: chrome::command_line(&line.words).unwrap_or_else(|| line.words.clone()),
+                    place: line.place(),
+                    exited: false,
+                    checked: row.checked,
+                },
             })
             .collect();
         Some(RestartView {
-            workspace,
+            title,
+            body,
+            action: dialog.asks.action(),
             rows,
             cursor: dialog.cursor,
             top: dialog.top,
@@ -470,17 +572,19 @@ mod tests {
 
     fn dialog(n: usize) -> RestartDialog {
         let row = |i: usize| Row {
-            pane_id: format!("w1:p{i}"),
-            captured: Captured {
-                command: format!("cmd {i}"),
-                cwd: None,
-                env: Vec::new(),
+            what: RowFor::Pane {
+                pane_id: format!("w1:p{i}"),
+                captured: Captured {
+                    command: format!("cmd {i}"),
+                    cwd: None,
+                    env: Vec::new(),
+                },
+                exited: false,
             },
-            exited: false,
             checked: true,
         };
         RestartDialog {
-            workspace: 0,
+            asks: Asks::Workspace(0),
             rows: (0..n).map(row).collect(),
             cursor: 0,
             top: 0,

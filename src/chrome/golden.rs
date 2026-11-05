@@ -2360,6 +2360,124 @@ fn dump_identity() {
     }
 }
 
+// ------------------------------------------------------- restart dialog
+
+/// The restart dialog: a workspace's commands, one exited and one unchecked,
+/// and what a feature's sandbox would run, the cursor on one to leave out.
+fn restart(sandbox: bool) -> super::RestartView {
+    let row = |label: &str, place: &str, exited: bool, checked: bool| super::RestartRow {
+        label: label.into(),
+        place: place.into(),
+        exited,
+        checked,
+    };
+    match sandbox {
+        false => super::RestartView {
+            title: "Restart which commands in \u{201c}api\u{201d}?".into(),
+            body: "The checked ones stop and run again; a new command is asked about",
+            action: "Restart",
+            rows: vec![
+                row("runserver", "~/work/api", false, true),
+                row("celery worker", "~/work/api", true, true),
+                row("pytest", "~/work/api", false, false),
+            ],
+            cursor: 0,
+            top: 0,
+            selected: 1,
+            hover: None,
+        },
+        true => super::RestartView {
+            title: "Run which commands in this sandbox?".into(),
+            body: "The checked ones run inside it; this feature keeps the choice",
+            action: "Start",
+            rows: vec![
+                row(
+                    "python manage.py migrate",
+                    "backend \u{b7} runs first",
+                    false,
+                    true,
+                ),
+                row("python manage.py runserver 9000", "backend", false, true),
+                row("celery -A app worker -l INFO", "backend", false, true),
+                row("celery -A app beat -l INFO", "backend", false, false),
+                row("nx serve", "frontend \u{b7} from main", false, true),
+            ],
+            cursor: 3,
+            top: 0,
+            selected: 1,
+            hover: None,
+        },
+    }
+}
+
+/// What the restart dialog is painted on.
+const RESTART_OUTPUT: (i32, i32) = (1280, 720);
+
+fn paint_restart(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
+    let p = theme.palette();
+    let size = RESTART_OUTPUT.into();
+    vec![
+        hash(painter.restart_dialog(&restart(false), size, scale, p)),
+        hash(painter.restart_dialog(&restart(true), size, scale, p)),
+    ]
+}
+
+/// The surfaces `paint_restart` hashes, in order.
+const RESTART: [&str; 2] = ["restart", "restart_sandbox"];
+
+/// The recorded hashes of `RESTART`, per case in `CASES`.
+const GOLDEN_RESTART: [[u64; 2]; 4] = [
+    [
+        0xb84e55277b561625, // restart
+        0x55e74402e1d07d07, // restart_sandbox
+    ],
+    [
+        0xf211e65cd2b4b59f, // restart
+        0x28f6476fac5dce8d, // restart_sandbox
+    ],
+    [
+        0x76ed5d9183dab2ce, // restart
+        0xc71a8cacc89f09c8, // restart_sandbox
+    ],
+    [
+        0x4d6f974e84ed3255, // restart
+        0x9f6f2f448431032e, // restart_sandbox
+    ],
+];
+
+#[test]
+fn the_restart_dialog_paints_the_same_pixels() {
+    let golden: Vec<&[u64]> = GOLDEN_RESTART.iter().map(|row| row.as_slice()).collect();
+    check(&RESTART, &golden, paint_restart);
+}
+
+/// With `GERDR_DUMP_DIR` set, write the restart dialog there.
+#[test]
+fn dump_restart() {
+    let Some(dir) = std::env::var_os("GERDR_DUMP_DIR") else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    let _ = std::fs::create_dir_all(&dir);
+    let painter = Painter::new();
+    let size = RESTART_OUTPUT.into();
+    for (theme, scale) in CASES {
+        let p = theme.palette();
+        let px = |v: i32| (v as f64 * scale).round() as usize;
+        let tag = format!("{}_{}", theme.name(), scale);
+        for (name, sandbox) in [("restart", false), ("restart_sandbox", true)] {
+            let view = restart(sandbox);
+            let panel = super::restart_layout(size, view.rows.len(), view.action).panel;
+            dump(
+                &dir,
+                &format!("{name}_{tag}"),
+                painter.restart_dialog(&view, size, scale, p),
+                px(panel.size.w + 2 * super::SHADOW),
+            );
+        }
+    }
+}
+
 // ------------------------------------------------------- project commands
 
 /// The project commands dialog, as `case` says: its Checks with a

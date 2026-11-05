@@ -29,8 +29,8 @@
 //! Verify's page its evidence, Ctrl+R starts the stage's agent afresh,
 //! Ctrl+Shift+R shows its agent, or goes back to its chat if its tab closed,
 //! Ctrl+Shift+U sets its worktrees up (Build and Verify: copies what they lack),
-//! on Manual test Ctrl+Shift+T starts or stops its sandbox (see
-//! `feature_sandbox`), Ctrl+Shift+Y opens its app, Ctrl+Shift+G restarts it and
+//! on Manual test Ctrl+Shift+T asks which commands its sandbox runs and starts
+//! it, or stops it (see `feature_sandbox`), Ctrl+Shift+Y opens its app, Ctrl+Shift+G restarts it and
 //! Ctrl+Shift+X resets its data or removes it,
 //! Ctrl+C copies its path, Ctrl+N starts a new one, Ctrl+Shift+L unfolds the
 //! repository strip into rows of every repository it can hold (Esc folds them
@@ -1954,7 +1954,7 @@ fn action_hint(action: &PanelOutcome) -> &'static str {
         PanelOutcome::Continue(_) => "continue",
         PanelOutcome::RunChecks => "run checks",
         PanelOutcome::SetUp => "set up",
-        PanelOutcome::StartSandbox => "start sandbox",
+        PanelOutcome::StartSandbox => "start sandbox\u{2026}",
         PanelOutcome::OpenSandbox => "open app",
         PanelOutcome::RestartSandbox => "restart sandbox",
         PanelOutcome::ResetSandbox => "reset data\u{2026}",
@@ -2895,7 +2895,7 @@ pub fn page_actions(
             ]);
         } else {
             out.push((
-                button("Start sandbox", ButtonStyle::Plain),
+                button("Start sandbox\u{2026}", ButtonStyle::Plain),
                 PanelOutcome::StartSandbox,
             ));
             if feature.sandbox.is_some() {
@@ -4509,6 +4509,7 @@ impl Gerdr {
             skip_checks: Default::default(),
             verify: None,
             sandbox: None,
+            sandbox_picks: Default::default(),
             review: None,
             plan_review: None,
             viewed: Default::default(),
@@ -5067,7 +5068,7 @@ impl Gerdr {
             },
             PanelOutcome::Ship => self.ask_ship_feature(&project, &slug),
             PanelOutcome::SetUp => self.set_up_again(&project, &slug),
-            PanelOutcome::StartSandbox => self.start_sandbox(&project, &slug),
+            PanelOutcome::StartSandbox => self.ask_start_sandbox(&project, &slug),
             PanelOutcome::OpenSandbox => self.open_sandbox_app(&project, &slug),
             PanelOutcome::RestartSandbox => {
                 let what = crate::feature_sandbox::StopFor::Restart;
@@ -8050,7 +8051,7 @@ fn tab_hints(
                     hints.push(hint("Ctrl+Shift+X", "reset data\u{2026}"));
                     hints.push(hint("Ctrl+Shift+T", "stop\u{2026}"));
                 } else {
-                    hints.push(hint("Ctrl+Shift+T", "start sandbox"));
+                    hints.push(hint("Ctrl+Shift+T", "start sandbox\u{2026}"));
                     if feature.sandbox.is_some() {
                         hints.push(hint("Ctrl+Shift+X", "remove sandbox\u{2026}"));
                     }
@@ -8392,6 +8393,7 @@ pub(crate) mod tests {
             skip_checks: Default::default(),
             verify: None,
             sandbox: None,
+            sandbox_picks: Default::default(),
             review: None,
             plan_review: None,
             viewed: Default::default(),
@@ -11361,7 +11363,7 @@ pub(crate) mod tests {
         assert_eq!(f.current(), Some(Stage::ManualTest));
         assert_eq!(
             sandbox_labels(&f, Stage::ManualTest, none),
-            ["Start sandbox"]
+            ["Start sandbox\u{2026}"]
         );
         assert!(sandbox_labels(&f, Stage::Verify, none).is_empty());
         assert!(sandbox_labels(&f, Stage::Ship, none).is_empty());
@@ -11381,7 +11383,7 @@ pub(crate) mod tests {
         });
         assert_eq!(
             sandbox_labels(&f, Stage::ManualTest, none),
-            ["Start sandbox", "Remove sandbox\u{2026}"]
+            ["Start sandbox\u{2026}", "Remove sandbox\u{2026}"]
         );
         f.status = Status::Abandoned;
         assert!(sandbox_labels(&f, Stage::ManualTest, none).is_empty());

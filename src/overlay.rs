@@ -321,8 +321,14 @@ impl Gerdr {
     pub fn overlay_scroll(&mut self, overlay: Overlay, motion: Motion) {
         match overlay {
             Overlay::Restart => {
-                let rows = self.restart.as_ref().map_or(0, |d| d.rows.len());
-                let layout = chrome::restart_layout(self.output_size(), rows);
+                let Some(dialog) = &self.restart else {
+                    return;
+                };
+                let layout = chrome::restart_layout(
+                    self.output_size(),
+                    dialog.rows.len(),
+                    dialog.asks.action(),
+                );
                 let rows = self.motion_rows(motion, row_pitch(&layout.rows));
                 if rows != 0 {
                     self.restart_scroll(rows);
