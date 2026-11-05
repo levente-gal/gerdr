@@ -305,7 +305,13 @@ impl Gerdr {
 
     /// Ask for a comment of the user's own, to go with the fixes.
     pub fn ask_add_comment(&mut self, project: &str, slug: &str) {
-        let about = "It goes to the Build agent with the fixes, and the next review checks it";
+        let stage = self
+            .feature(project, slug)
+            .and_then(crate::feature::Feature::current);
+        let about = match stage {
+            Some(Stage::CodeReview) => "It goes to the Build agent when you plan fixes",
+            _ => "It goes to the Build agent with the fixes, and the next review checks it",
+        };
         let from = vec![String::new()];
         self.open_finding_dialog(project, slug, Ask::Add, "", about.to_owned(), from, false);
     }

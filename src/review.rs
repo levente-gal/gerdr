@@ -70,6 +70,9 @@ pub struct Flag {
     pub id: String,
     pub severity: crate::feature::review_import::Severity,
     pub state: crate::feature::review_import::FindingState,
+    /// The user wrote it, on the stage's page or in the diff: it has no
+    /// severity, and is theirs to edit or drop.
+    pub yours: bool,
 }
 
 /// A project's review.
@@ -87,6 +90,11 @@ impl Default for Review {
             comments: Vec::new(),
         }
     }
+}
+
+/// Whether `comment` is on no line and no file: on the change as a whole.
+pub fn is_general(comment: &Comment) -> bool {
+    comment.path.is_empty() && comment.lines.is_empty()
 }
 
 impl Review {
@@ -211,8 +219,10 @@ pub fn markdown(
             } else {
                 ""
             };
+            if is_general(c) {
+                out.push_str(&format!("\n### General comment{stale}\n\n"));
             // On the whole file: no lines to quote.
-            if c.lines.is_empty() {
+            } else if c.lines.is_empty() {
                 out.push_str(&format!("\n### `{}` (the whole file){stale}\n\n", place(c)));
             } else {
                 out.push_str(&format!("\n### `{}`{stale}\n\n```diff\n", place(c)));

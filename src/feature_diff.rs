@@ -7,11 +7,15 @@
 //! show as comments of their own, on their line, else on their file's
 //! header, else in the list of those not on a line, each with Fix and
 //! Dismiss; `]` and `[` go through them. The user's own comments are kept
-//! in the feature's data dir (`code-review-comments.json`) until sent back
-//! to the Build agent. Each card's heading says whose it is.
+//! in the feature's data dir (`code-review-comments.json`) until they go to
+//! the Build agent, those on no line or file listed first, as General
+//! comments. Each card's heading says whose it is.
 //!
-//! Approve, only at the Code review stage, wants every file viewed as it
-//! is now, no comment left, nothing uncommitted and no finding holding up.
+//! It opens at any stage, and shows only what works at that one
+//! (`FeatureOf::role`, `FeatureOf::buttons`): at AI review, Plan fixes once
+//! every finding is decided; at Code review, Plan fixes for the comments and
+//! Approve, which wants every file viewed as it is now, no comment left,
+//! nothing uncommitted and no finding holding up.
 
 use std::{
     collections::HashMap,
@@ -21,14 +25,18 @@ use std::{
 use crate::{
     Gerdr,
     chrome::Check,
+    chrome::ReposButton,
     diff::{FileDiff, LineKind},
     diff_view::Section,
+    doc_review::DocFile,
     feature::{
         Feature, Repo, Stage, Status,
+        fix_round::FixPhase,
         review_import::{Decision, Finding, FindingState},
         store,
         viewed::{self, Tick, Viewed},
     },
+    features::plural,
     git_ops::Since,
     review::{self, Comment, Flag, Quoted, Review},
     toast::Level,
@@ -40,27 +48,30 @@ use crate::{
 pub const COMMENTS: &str = "code-review-comments.json";
 /// Why Approve waits on the diff being read.
 pub const STILL_READING: &str = "Still reading the diff";
-/// Why Send back does nothing.
-pub const NO_OWN_COMMENT: &str = "Add a comment first: press c on a line";
+/// Why Plan fixes does nothing at Code review: comments are all it sends.
+pub const NO_OWN_COMMENT: &str = "Add a comment first";
 
-/// The keys of a feature's code review, before the diff's own (F1).
-pub const KEYS: [(&str, &str); 9] = [
-    ("Esc", "close the code review"),
-    ("F1", "list the keys"),
-    ("Ctrl+Enter", "approve Code review"),
-    (
-        "Ctrl+Shift+Enter",
-        "send the comments back to the Build agent",
-    ),
-    ("Space", "mark the file viewed, or not"),
-    (
-        "Alt+Shift+Down / Up",
-        "go to the next or the previous file not viewed",
-    ),
-    ("f", "fix the finding, or take that back"),
-    ("c", "on a finding, edit its fix or comment on it"),
-    ("Del", "dismiss the finding, saying why, or reopen it"),
-];
+/// What Plan fixes waits for at AI review.
+pub fn decide_first(undecided: usize) -> String {
+    format!("Decide the {} left first", plural(undecided, "finding"))
+}
+
+/// What a feature's diff is for, as the feature stands now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Role {
+    /// Its code, on its way to AI review: only read.
+    Early,
+    /// AI review runs: its findings aren't in yet.
+    Reading,
+    /// AI review's findings wait to be decided, then planned.
+    Deciding,
+    /// A fix plan is open, wherever the feature is.
+    Round(FixPhase),
+    /// Code review: approved, or comments sent to be fixed.
+    Review,
+    /// Past Code review, or the feature closed.
+    Done,
+}
 
 /// A touched repository as its code review last read it.
 #[derive(Clone, Debug, Default)]
@@ -102,6 +113,12 @@ pub struct FeatureOf {
     pub state: String,
     /// The stage the feature is at: none once all are done.
     pub stage: Option<Stage>,
+    /// The feature isn't open any more.
+    pub closed: bool,
+    /// AI review's findings were read in.
+    pub ready: bool,
+    /// The open fix plan: its phase and how it stands, in words.
+    pub round: Option<(FixPhase, &'static str)>,
     /// Where the user's comments are kept (`COMMENTS`).
     pub comments: PathBuf,
     /// Opened from the feature panel, which Esc goes back to.
@@ -138,7 +155,185 @@ pub struct Read {
     pub repos: Vec<(String, PathBuf, Result<viewed::Read, String>)>,
 }
 
+/// What a feature's diff keeps of where the feature stands.
+struct Standing {
+    state: String,
+    stage: Option<Stage>,
+    closed: bool,
+    ready: bool,
+    round: Option<(FixPhase, &'static str)>,
+}
+
+impl Standing {
+    fn of(feature: &Feature) -> Standing {
+        let run = feature.runs.get(&Stage::AiReview);
+        Standing {
+            state: state(feature),
+            stage: feature.current(),
+            closed: feature.status != Status::Open,
+            ready: feature.review.is_some() && run.is_some_and(|r| r.ready.is_some()),
+            round: (feature.fix_round.as_ref()).map(|round| (round.phase, round.line())),
+        }
+    }
+}
+
 impl FeatureOf {
+    /// What it is for now.
+    pub fn role(&self) -> Role {
+        if self.closed {
+            return Role::Done;
+        }
+        if let Some((phase, _)) = self.round {
+            return Role::Round(phase);
+        }
+        match self.stage {
+            Some(Stage::CodeReview) => Role::Review,
+            Some(Stage::AiReview) if self.ready => Role::Deciding,
+            Some(Stage::AiReview) => Role::Reading,
+            Some(stage) if stage < Stage::AiReview => Role::Early,
+            _ => Role::Done,
+        }
+    }
+
+    /// Its heading: what the feature is at.
+    pub fn heading(&self) -> String {
+        let what = match self.stage.filter(|_| !self.closed) {
+            Some(Stage::AiReview) => "AI review",
+            Some(stage) if stage < Stage::AiReview => "Code",
+            _ => "Code review",
+        };
+        format!("{what} of \u{201c}{}\u{201d}", self.title)
+    }
+
+    /// How many findings stand at `state`.
+    fn count(&self, state: FindingState) -> usize {
+        self.findings.iter().filter(|f| f.state == state).count()
+    }
+
+    /// The buttons it has now, in the title row's order, with `own` comments
+    /// of the user's; each with why it can't be pressed yet, if so.
+    pub fn buttons(&self, own: usize) -> Vec<(ReposButton, Option<String>)> {
+        use ReposButton as B;
+        let (open, fix) = (
+            self.count(FindingState::Open),
+            self.count(FindingState::Fix),
+        );
+        match self.role() {
+            Role::Deciding => {
+                let mut buttons = vec![(B::AddComment, None)];
+                if open > 0 {
+                    buttons.push((B::FixAllFindings, None));
+                }
+                if open > 0 || fix > 0 {
+                    buttons.push((B::PlanFixes, self.plan_refusal(own)));
+                }
+                buttons
+            }
+            Role::Review => vec![
+                (B::AddComment, None),
+                (B::PlanFixes, self.plan_refusal(own)),
+                (B::Approve, None),
+            ],
+            Role::Round(FixPhase::Ready) => vec![(B::ReviewFixPlan, None)],
+            _ => Vec::new(),
+        }
+    }
+
+    /// Why Plan fixes can't be pressed yet, with `own` comments of the
+    /// user's: at AI review it goes by the findings alone.
+    pub fn plan_refusal(&self, own: usize) -> Option<String> {
+        match self.role() {
+            Role::Deciding => match self.count(FindingState::Open) {
+                0 => None,
+                n => Some(decide_first(n)),
+            },
+            Role::Review if own == 0 => Some(NO_OWN_COMMENT.into()),
+            Role::Review => None,
+            _ => Some(self.not_now().into()),
+        }
+    }
+
+    /// Why a button it doesn't have does nothing now.
+    pub fn not_now(&self) -> &'static str {
+        match self.role() {
+            Role::Early => "This code isn't up for review yet",
+            Role::Reading => "AI review's findings aren't in yet",
+            Role::Deciding => "No finding left to decide",
+            Role::Round(_) => "A fix plan is open: make the fixes or drop it first",
+            Role::Review => "Code review has no findings to decide",
+            Role::Done => "Code review is done",
+        }
+    }
+
+    /// The key of `button` as it stands: empty for one not of its own.
+    pub fn key_of(&self, button: ReposButton) -> &'static str {
+        use ReposButton as B;
+        match button {
+            B::AddComment => "Shift+C",
+            B::FixAllFindings => "Shift+F",
+            B::PlanFixes if self.role() == Role::Review => crate::worktree_diff::SEND_BACK_KEY,
+            B::PlanFixes | B::ReviewFixPlan | B::Approve => crate::worktree_diff::APPROVE_KEY,
+            _ => "",
+        }
+    }
+
+    /// Its keys as it stands, before the diff's own (F1).
+    pub fn keys(&self) -> Vec<(&'static str, &'static str)> {
+        let mut keys = vec![("Esc", "close the diff"), ("F1", "list the keys")];
+        match self.role() {
+            Role::Deciding => keys.extend([
+                (
+                    "Ctrl+Enter",
+                    "plan the fixes, once every finding is decided",
+                ),
+                ("Shift+C", "add a comment on no line or file"),
+                ("Shift+F", "mark every undecided finding to fix"),
+                ("f", "fix the finding, or take that back"),
+                ("c", "on a finding, edit its fix or comment on it"),
+                ("Del", "dismiss the finding, saying why, or reopen it"),
+            ]),
+            Role::Review => keys.extend([
+                ("Ctrl+Enter", "approve Code review"),
+                ("Ctrl+Shift+Enter", "plan fixes for the comments"),
+                ("Shift+C", "add a comment on no line or file"),
+            ]),
+            Role::Round(FixPhase::Ready) => keys.push(("Ctrl+Enter", "review the fix plan")),
+            _ => {}
+        }
+        keys.extend([
+            ("Space", "mark the file viewed, or not"),
+            (
+                "Alt+Shift+Down / Up",
+                "go to the next or the previous file not viewed",
+            ),
+        ]);
+        keys
+    }
+
+    /// Where its findings stand, as AI review's summary says it.
+    fn decisions(&self) -> String {
+        let mut parts = vec![format!("{} to fix", self.count(FindingState::Fix))];
+        match self.count(FindingState::Dismissed) {
+            0 => {}
+            n => parts.push(format!("{n} dismissed")),
+        }
+        parts.push(format!("{} to decide", self.count(FindingState::Open)));
+        match self.count(FindingState::Sent) {
+            0 => {}
+            n => parts.push(format!("{n} sent to Build")),
+        }
+        parts.join(" \u{b7} ")
+    }
+
+    /// Take where the feature stands now.
+    fn stands(&mut self, standing: Standing) {
+        self.state = standing.state;
+        self.stage = standing.stage;
+        self.closed = standing.closed;
+        self.ready = standing.ready;
+        self.round = standing.round;
+    }
+
     /// The repository at `root`.
     fn repo(&self, root: &Path) -> Option<&RepoOf> {
         self.repos.iter().find(|r| r.root == root)
@@ -217,9 +412,13 @@ impl FeatureOf {
 
     /// The header's summary: where the stage stands, then its counts.
     pub fn summary(&self, own: usize) -> String {
+        let head = match self.role() {
+            Role::Deciding => self.decisions(),
+            _ => self.state.clone(),
+        };
         match line(&self.counts(own)) {
-            Some(line) => format!("{} \u{b7} {line}", self.state),
-            None => self.state.clone(),
+            Some(line) => format!("{head} \u{b7} {line}"),
+            None => head,
         }
     }
 
@@ -246,8 +445,8 @@ impl FeatureOf {
         let single = (self.repos.len() == 1).then(|| &self.repos[0]);
         self.findings
             .iter()
-            // An item the user added with no file has no place here.
-            .filter(|f| !f.file.is_empty())
+            // Those the user dropped are gone from here, not from the page.
+            .filter(|f| !(f.yours && f.state == FindingState::Dismissed))
             .map(|f| {
                 let repo = (self.repos.iter().find(|r| r.name == f.repo)).or(single);
                 let root = repo.map(|r| r.root.clone()).unwrap_or_default();
@@ -301,6 +500,7 @@ pub fn finding_comment(f: &Finding, root: PathBuf, file: Option<&FileDiff>) -> C
             id: f.id.clone(),
             severity: f.severity,
             state: f.state,
+            yours: f.yours,
         }),
     }
 }
@@ -389,8 +589,12 @@ pub fn approve_refusal(gate: &Gate) -> Option<String> {
     }
     match gate.comments {
         0 => {}
-        1 => return Some("1 comment left: send it back or delete it".into()),
-        n => return Some(format!("{n} comments left: send them back or delete them")),
+        1 => return Some("1 comment left: plan fixes for it or delete it".into()),
+        n => {
+            return Some(format!(
+                "{n} comments left: plan fixes for them or delete them"
+            ));
+        }
     }
     match gate.holding {
         0 => None,
@@ -404,8 +608,12 @@ pub fn state(feature: &Feature) -> String {
     if feature.status != Status::Open {
         return "feature closed".into();
     }
+    if let Some(round) = &feature.fix_round {
+        return round.line().into();
+    }
     match feature.current() {
         Some(Stage::CodeReview) => "ready for review".into(),
+        Some(Stage::AiReview) => "waits for AI review's findings".into(),
         Some(stage) if stage < Stage::CodeReview => {
             format!("waits for {}", stage.label())
         }
@@ -531,12 +739,16 @@ impl Gerdr {
             .collect();
         let dir = store::dir(None, project, slug);
         let comments = dir.join(COMMENTS);
+        let standing = Standing::of(feature);
         let fe = FeatureOf {
             project: project.to_owned(),
             slug: slug.to_owned(),
             title: feature.title.clone(),
-            state: state(feature),
-            stage: feature.current(),
+            state: standing.state,
+            stage: standing.stage,
+            closed: standing.closed,
+            ready: standing.ready,
+            round: standing.round,
             comments: comments.clone(),
             back: (self.features.panel.as_ref())
                 .is_some_and(|p| p.project == project && p.slug == slug),
@@ -592,6 +804,19 @@ impl Gerdr {
         self.worktree_diff_read();
     }
 
+    /// The record of `project`'s `slug` was saved: its open diff, if any,
+    /// goes by where the feature stands now, with no reading.
+    pub(crate) fn feature_diff_stands(&mut self, project: &str, slug: &str) {
+        let Some(standing) = self.feature(project, slug).map(Standing::of) else {
+            return;
+        };
+        if let Some(fe) = (self.wd_mut().and_then(|wd| wd.feature.as_mut()))
+            .filter(|fe| fe.project == project && fe.slug == slug)
+        {
+            fe.stands(standing);
+        }
+    }
+
     /// The feature code review open, if one is.
     pub(crate) fn feature_of(&self) -> Option<&FeatureOf> {
         self.wd()?.feature.as_ref()
@@ -609,7 +834,7 @@ impl Gerdr {
             return;
         };
         let repos: Vec<Repo> = feature.touched().cloned().collect();
-        let (state, stage, viewed) = (state(feature), feature.current(), feature.viewed.clone());
+        let (standing, viewed) = (Standing::of(feature), feature.viewed.clone());
         let findings = (feature.review.as_ref())
             .map(|r| r.findings.clone())
             .unwrap_or_default();
@@ -621,7 +846,8 @@ impl Gerdr {
             wd.reading = true;
             if let Some(fe) = wd.feature.as_mut() {
                 let changed = fe.findings != findings;
-                (fe.state, fe.stage, fe.viewed, fe.findings) = (state, stage, viewed, findings);
+                fe.stands(standing);
+                (fe.viewed, fe.findings) = (viewed, findings);
                 if changed {
                     wd.place_findings(env);
                 }
@@ -739,8 +965,95 @@ impl Gerdr {
             return;
         };
         let (project, slug) = (fe.project.clone(), fe.slug.clone());
+        // Decided, the cursor goes on to what is left to decide.
+        let next = (!matches!(decision, Decision::Reopen))
+            .then(|| self.wd()?.diff.next_undecided(&id))
+            .flatten();
         self.decide_finding(&project, &slug, &id, decision);
+        if let Some(fe) = self.wd_mut().and_then(|wd| wd.feature.as_mut()) {
+            fe.focus = next;
+        }
         self.feature_findings_changed(&project, &slug);
+    }
+
+    /// The project and slug of the feature whose diff is open.
+    fn feature_open(&self) -> Option<(String, String)> {
+        let fe = self.feature_of()?;
+        Some((fe.project.clone(), fe.slug.clone()))
+    }
+
+    /// Plan fixes in the open diff, at AI review: the findings to fix go to
+    /// a fix plan, or it says what they wait for.
+    pub(crate) fn feature_plan_fixes(&mut self) {
+        if let Some((project, slug)) = self.feature_open() {
+            self.send_findings(&project, &slug);
+        }
+    }
+
+    /// Mark every undecided finding of the open diff to fix.
+    pub(crate) fn feature_fix_all(&mut self) {
+        if let Some((project, slug)) = self.feature_open() {
+            self.fix_all_findings(&project, &slug);
+        }
+    }
+
+    /// Ask for a comment on no line or file, in the open diff.
+    pub(crate) fn feature_ask_comment(&mut self) {
+        if let Some((project, slug)) = self.feature_open() {
+            self.ask_add_comment(&project, &slug);
+        }
+    }
+
+    /// Leave the open diff for the fix plan waiting for the user.
+    pub(crate) fn feature_review_fix_plan(&mut self) {
+        if let Some((project, slug)) = self.feature_open() {
+            self.close_feature_diff(false);
+            self.open_doc_tab(&project, &slug, DocFile::FixPlan);
+        }
+    }
+
+    /// A comment of the user's on no line or file of feature `slug`, kept
+    /// with their other comments to go with the fixes they plan at Code
+    /// review; shown first in its diff if open.
+    pub(crate) fn add_general_comment(&mut self, project: &str, slug: &str, text: &str) {
+        let Some(feature) = self.feature(project, slug) else {
+            return;
+        };
+        let Some(root) = feature.touched().next().map(|r| r.worktree.clone()) else {
+            return self.show_warning("Nothing was changed yet to comment on".into());
+        };
+        let comment = Comment {
+            root,
+            path: String::new(),
+            lines: Vec::new(),
+            text: text.trim().to_owned(),
+            flag: None,
+        };
+        let env = self.worktree_env();
+        let open = self.wd_mut().filter(|wd| {
+            (wd.feature.as_ref()).is_some_and(|fe| fe.project == project && fe.slug == slug)
+        });
+        if let Some(wd) = open {
+            wd.diff.review.comments.push(comment);
+            wd.diff.review_dirty = true;
+            wd.place_findings(env);
+            let at = wd.diff.review.own() - 1;
+            wd.with_diff(env, |diff, ctx| diff.show_comment(at, ctx));
+            self.feature_save_review();
+        } else {
+            let path = store::dir(None, project, slug).join(COMMENTS);
+            let mut own = review::load_file(&path);
+            own.comments.push(comment);
+            if let Err(err) = review::save_file(&path, &own) {
+                tracing::warn!("saving {}: {err}", path.display());
+                return self.show_error(format!("Couldn't save the comment: {err}"));
+            }
+            let key = (project.to_owned(), slug.to_owned());
+            if let Some(counts) = self.code_reviews.get_mut(&key) {
+                counts.comments = own.own();
+            }
+        }
+        self.show_success("Comment added, to go to Build when you plan fixes".into());
     }
 
     /// The findings of `project`'s `slug` changed: the open code review, if
@@ -897,10 +1210,12 @@ impl Gerdr {
 mod tests {
     use super::*;
     use crate::{
+        chrome::{Hint, ReposHit},
         diff::{Hunk, Line},
         feature::review_import::Severity,
         git::Change,
     };
+    use smithay::input::keyboard::Keysym;
 
     fn repo(name: &str, paths: &[&str]) -> RepoOf {
         RepoOf {
@@ -1001,7 +1316,7 @@ mod tests {
         };
         assert_eq!(
             approve_refusal(&comments).as_deref(),
-            Some("2 comments left: send them back or delete them")
+            Some("2 comments left: plan fixes for them or delete them")
         );
         let holding = Gate {
             holding: 1,
@@ -1020,7 +1335,7 @@ mod tests {
     }
 
     #[test]
-    fn a_findings_card_shows_the_users_words_and_an_item_with_no_file_stays_off_the_diff() {
+    fn a_findings_card_shows_the_users_words_and_an_item_of_theirs_shows_until_dropped() {
         let f = Finding {
             id: "r1-1".into(),
             file: "src/a.rs".into(),
@@ -1051,8 +1366,430 @@ mod tests {
             ..FeatureOf::default()
         };
         let comments = fe.finding_comments(&HashMap::new());
-        assert_eq!(comments.len(), 1);
+        assert_eq!(comments.len(), 2);
         assert_eq!(comments[0].flag.as_ref().unwrap().id, "r1-1");
+        let yours = comments[1].flag.as_ref().unwrap();
+        assert!(yours.yours && review::is_general(&comments[1]));
+        let mut fe = fe;
+        fe.findings[1].state = FindingState::Dismissed;
+        assert_eq!(fe.finding_comments(&HashMap::new()).len(), 1);
+    }
+
+    const POPUP_ENV: Env = Env {
+        sheet_rows: 10,
+        page: 20,
+        cols: 60,
+        density: crate::chrome::Density::Comfortable,
+    };
+
+    fn finding(id: &str, state: FindingState) -> Finding {
+        Finding {
+            id: id.into(),
+            repo: "api".into(),
+            file: "a.rs".into(),
+            line: Some(1),
+            title: format!("Finding {id}"),
+            state,
+            ..Finding::default()
+        }
+    }
+
+    /// A feature's diff at `stage`, its findings read, with `own` comments.
+    fn popup(stage: Stage, findings: Vec<Finding>, own: Review) -> WorktreeDiff {
+        let mut api = repo("api", &["a.rs"]);
+        api.since.changes[0].code = 'A';
+        let fe = FeatureOf {
+            title: "Login".into(),
+            stage: Some(stage),
+            ready: true,
+            repos: vec![api.clone()],
+            findings,
+            ..FeatureOf::default()
+        };
+        let mut wd = WorktreeDiff::of_feature(fe, "/w".into(), 0, own);
+        let read = viewed::Read {
+            since: api.since.clone(),
+            files: vec![crate::doc_review::added_file("a.rs", "let x = 1;\n")],
+            blobs: api.blobs.clone(),
+            dirty: Default::default(),
+        };
+        wd.set_feature(vec![("api".into(), "/w/api".into(), Ok(read))], POPUP_ENV);
+        wd
+    }
+
+    fn mods(ctrl: bool, shift: bool) -> smithay::input::keyboard::ModifiersState {
+        smithay::input::keyboard::ModifiersState {
+            ctrl,
+            shift,
+            ..Default::default()
+        }
+    }
+
+    /// What its title row and footer offer, by button.
+    fn offered(wd: &WorktreeDiff) -> (Vec<ReposButton>, Vec<ReposButton>) {
+        let title = wd
+            .view(POPUP_ENV)
+            .title_buttons
+            .into_iter()
+            .map(|h| h.button);
+        let title =
+            title.filter(|b| !matches!(b, ReposButton::PrevComment | ReposButton::NextComment));
+        let hints = wd.hints().into_iter().map(|h| h.button).collect();
+        (title.collect(), hints)
+    }
+
+    #[test]
+    fn it_shows_only_what_works_at_the_stage_the_feature_is_at() {
+        use ReposButton as B;
+        let at = |stage, ready, round| {
+            let fe = FeatureOf {
+                title: "Login".into(),
+                stage,
+                ready,
+                round,
+                findings: vec![finding("r1-1", FindingState::Open)],
+                ..FeatureOf::default()
+            };
+            (fe.role(), fe.heading(), fe.buttons(0))
+        };
+        let nothing: Vec<(ReposButton, Option<String>)> = Vec::new();
+        let early = at(Some(Stage::Verify), false, None);
+        assert_eq!(early.0, Role::Early);
+        assert_eq!(early.1, "Code of \u{201c}Login\u{201d}");
+        assert_eq!(early.2, nothing);
+        let reading = at(Some(Stage::AiReview), false, None);
+        assert_eq!(reading.0, Role::Reading);
+        assert_eq!(reading.1, "AI review of \u{201c}Login\u{201d}");
+        assert_eq!(reading.2, nothing);
+        let deciding = at(Some(Stage::AiReview), true, None);
+        assert_eq!(deciding.0, Role::Deciding);
+        assert_eq!(
+            deciding.2,
+            vec![
+                (B::AddComment, None),
+                (B::FixAllFindings, None),
+                (
+                    B::PlanFixes,
+                    Some("Decide the 1 finding left first".to_owned())
+                ),
+            ]
+        );
+        let planning = Some((FixPhase::Planning, "planning fixes"));
+        let round = at(Some(Stage::AiReview), true, planning);
+        assert_eq!(round.0, Role::Round(FixPhase::Planning));
+        assert_eq!(round.2, nothing);
+        let ready = Some((FixPhase::Ready, "fix plan ready"));
+        assert_eq!(
+            at(Some(Stage::AiReview), true, ready).2,
+            vec![(B::ReviewFixPlan, None)]
+        );
+        let review = at(Some(Stage::CodeReview), true, None);
+        assert_eq!(review.0, Role::Review);
+        assert_eq!(review.1, "Code review of \u{201c}Login\u{201d}");
+        assert_eq!(
+            review.2,
+            vec![
+                (B::AddComment, None),
+                (B::PlanFixes, Some(NO_OWN_COMMENT.to_owned())),
+                (B::Approve, None),
+            ]
+        );
+        let past = at(Some(Stage::ManualTest), true, None);
+        assert_eq!(past.0, Role::Done);
+        assert_eq!(past.1, "Code review of \u{201c}Login\u{201d}");
+        assert_eq!(past.2, nothing);
+        assert_eq!(at(None, true, None).0, Role::Done);
+    }
+
+    #[test]
+    fn ai_review_goes_by_its_findings_and_never_asks_for_a_comment() {
+        use crate::worktree_diff::Done;
+        use ReposButton as B;
+        let enter = Keysym::Return;
+        let mut wd = popup(
+            Stage::AiReview,
+            vec![
+                finding("r1-1", FindingState::Fix),
+                finding("r1-2", FindingState::Open),
+                finding("r1-3", FindingState::Dismissed),
+            ],
+            Review::default(),
+        );
+        let (title, hints) = offered(&wd);
+        assert_eq!(title, [B::AddComment, B::FixAllFindings, B::PlanFixes]);
+        for dead in [B::Approve, B::SendBack, B::CommentFile] {
+            assert!(!title.contains(&dead) && !hints.contains(&dead), "{dead:?}");
+        }
+        // Greyed in both places, saying what it waits for.
+        let why = |hints: Vec<Hint>| {
+            hints
+                .into_iter()
+                .find(|h| h.button == B::PlanFixes)
+                .unwrap()
+        };
+        let waits = Some("Decide the 1 finding left first".to_owned());
+        assert_eq!(why(wd.view(POPUP_ENV).title_buttons).disabled, waits);
+        assert_eq!(why(wd.hints()).disabled, waits);
+        assert_eq!(why(wd.hints()).key, "Ctrl+Enter");
+        // The summary says where they stand.
+        let summary = wd.summary();
+        assert!(
+            summary.starts_with("1 to fix \u{b7} 1 dismissed \u{b7} 1 to decide"),
+            "{summary}"
+        );
+        // Both keys go to its host, which says why or plans: no comment asked.
+        assert_eq!(
+            wd.key(&mods(true, false), enter, enter, POPUP_ENV),
+            Some(Done::PlanFixes)
+        );
+        assert_eq!(
+            wd.key(&mods(true, true), enter, enter, POPUP_ENV),
+            Some(Done::PlanFixes)
+        );
+        assert_eq!(
+            wd.click(ReposHit::Button(B::PlanFixes), POPUP_ENV),
+            Some(Done::PlanFixes)
+        );
+        let upper_f = Keysym::F;
+        assert_eq!(
+            wd.key(&mods(false, true), upper_f, upper_f, POPUP_ENV),
+            Some(Done::FixAll)
+        );
+        let upper_c = Keysym::C;
+        assert_eq!(
+            wd.key(&mods(false, true), upper_c, upper_c, POPUP_ENV),
+            Some(Done::AddComment)
+        );
+        // All decided: Plan fixes can be pressed, and Fix all open is gone.
+        let mut wd = popup(
+            Stage::AiReview,
+            vec![finding("r1-1", FindingState::Fix)],
+            Review::default(),
+        );
+        assert_eq!(offered(&wd).0, [B::AddComment, B::PlanFixes]);
+        assert_eq!(why(wd.view(POPUP_ENV).title_buttons).disabled, None);
+        assert_eq!(
+            wd.key(&mods(false, true), upper_f, upper_f, POPUP_ENV),
+            Some(Done::Diff(crate::diff_view::Outcome::Notice(
+                "No finding left to decide"
+            )))
+        );
+    }
+
+    #[test]
+    fn code_review_plans_fixes_only_for_comments_and_approves() {
+        use crate::worktree_diff::Done;
+        use ReposButton as B;
+        let enter = Keysym::Return;
+        let mut wd = popup(Stage::CodeReview, Vec::new(), Review::default());
+        assert_eq!(offered(&wd).0, [B::AddComment, B::PlanFixes, B::Approve]);
+        assert_eq!(
+            wd.key(&mods(true, true), enter, enter, POPUP_ENV),
+            Some(Done::Diff(crate::diff_view::Outcome::Notice(
+                NO_OWN_COMMENT
+            )))
+        );
+        assert_eq!(
+            wd.key(&mods(true, false), enter, enter, POPUP_ENV),
+            Some(Done::Approve)
+        );
+        let hint = |wd: &WorktreeDiff, b| wd.hints().into_iter().find(|h| h.button == b).unwrap();
+        assert_eq!(hint(&wd, B::PlanFixes).key, "Ctrl+Shift+Enter");
+        assert_eq!(hint(&wd, B::Approve).key, "Ctrl+Enter");
+        let own = Review {
+            comments: vec![Comment {
+                root: "/w/api".into(),
+                text: "The whole of it reads badly".into(),
+                ..Comment::default()
+            }],
+            ..Review::default()
+        };
+        let mut wd = popup(Stage::CodeReview, Vec::new(), own);
+        assert_eq!(hint(&wd, B::PlanFixes).disabled, None);
+        let sent = wd.key(&mods(true, true), enter, enter, POPUP_ENV);
+        let Some(Done::SendBack(text)) = sent else {
+            panic!("{sent:?}");
+        };
+        assert!(text.contains("### General comment\n"), "{text}");
+        assert!(text.contains("The whole of it reads badly"), "{text}");
+        assert!(!text.contains("the whole file"), "{text}");
+    }
+
+    #[test]
+    fn a_general_comment_is_listed_first_gone_to_edited_and_deleted() {
+        use crate::{chrome::DetailRow, diff_view::DiffRow};
+        let own = Review {
+            comments: vec![Comment {
+                root: "/w/api".into(),
+                text: "The name reads badly".into(),
+                ..Comment::default()
+            }],
+            ..Review::default()
+        };
+        let mut wd = popup(Stage::CodeReview, Vec::new(), own);
+        assert!(
+            matches!(wd.diff.rows[0], DiffRow::General),
+            "{:?}",
+            wd.diff.rows
+        );
+        assert!(matches!(wd.diff.rows[1], DiffRow::CommentHead { c: 0, .. }));
+        assert_eq!(wd.diff.outdated_count(), 0, "it isn't on a line gone");
+        let view = wd.view(POPUP_ENV);
+        assert!(view.rows.iter().any(|row| matches!(
+            row,
+            DetailRow::Hunk { context, .. } if context == "General comments"
+        )));
+        // ] goes to it.
+        let none = mods(false, false);
+        let right = Keysym::bracketright;
+        assert_eq!(wd.key(&none, right, right, POPUP_ENV), None);
+        let on = wd.diff.cursor.as_ref().map(|c| wd.diff.rows[c.row]);
+        assert!(
+            matches!(on, Some(DiffRow::CommentHead { c: 0, .. })),
+            "{on:?}"
+        );
+        // c edits it, in its place.
+        let c = Keysym::c;
+        assert_eq!(wd.key(&none, c, c, POPUP_ENV), None);
+        assert_eq!(wd.diff.editing.as_ref().and_then(|e| e.at), Some(0));
+        assert!(
+            matches!(wd.diff.rows[1], DiffRow::Editor { .. }),
+            "{:?}",
+            wd.diff.rows
+        );
+        // Ctrl+Enter keeps what is written, and approves nothing.
+        let enter = Keysym::Return;
+        let kept = wd.key(&mods(true, false), enter, enter, POPUP_ENV);
+        assert!(
+            !matches!(kept, Some(crate::worktree_diff::Done::Approve)),
+            "{kept:?}"
+        );
+        assert_eq!(wd.diff.editing.as_ref().map(|e| e.at), None);
+        // Del arms, Del deletes: gone with its heading.
+        assert_eq!(wd.key(&none, right, right, POPUP_ENV), None);
+        let del = Keysym::Delete;
+        assert_eq!(wd.key(&none, del, del, POPUP_ENV), None);
+        assert_eq!(wd.diff.review.own(), 1);
+        assert_eq!(wd.key(&none, del, del, POPUP_ENV), None);
+        assert_eq!(wd.diff.review.own(), 0);
+        assert!(!matches!(wd.diff.rows.first(), Some(DiffRow::General)));
+    }
+
+    #[test]
+    fn an_item_of_the_users_says_whose_it_is_and_is_edited_or_dropped() {
+        use crate::chrome::DetailRow;
+        let mine = Finding {
+            id: "u1".into(),
+            title: "Rename it".into(),
+            state: FindingState::Fix,
+            yours: true,
+            ..Finding::default()
+        };
+        let mut wd = popup(
+            Stage::AiReview,
+            vec![mine, finding("r1-1", FindingState::Open)],
+            Review::default(),
+        );
+        let none = mods(false, false);
+        let right = Keysym::bracketright;
+        assert_eq!(wd.key(&none, right, right, POPUP_ENV), None);
+        assert!(wd.diff.on_yours());
+        let view = wd.view(POPUP_ENV);
+        assert!(
+            view.rows.iter().any(|row| matches!(
+                row,
+                DetailRow::CommentHead { finding: None, place } if place == "comment 1 of 1"
+            )),
+            "{:?}",
+            view.rows
+        );
+        let labels: Vec<&str> = view
+            .row_buttons
+            .iter()
+            .map(|(_, h)| h.label.as_str())
+            .collect();
+        assert_eq!(labels, ["Edit\u{2026}", "Drop"]);
+        // f says why not; Del goes at once, with nothing to say.
+        let f = Keysym::f;
+        wd.key(&none, f, f, POPUP_ENV);
+        let (error, decided, _) = wd.take_error();
+        assert_eq!(error.as_deref(), Some(crate::diff_view::YOUR_COMMENT));
+        assert_eq!(decided, None);
+        let del = Keysym::Delete;
+        wd.key(&none, del, del, POPUP_ENV);
+        let (_, decided, _) = wd.take_error();
+        assert_eq!(
+            decided,
+            Some((
+                "u1".to_owned(),
+                Decision::Dismiss(crate::feature::review_import::DROPPED.to_owned())
+            ))
+        );
+        assert!(wd.diff.editing.is_none());
+    }
+
+    #[test]
+    fn a_finding_can_be_decided_only_at_ai_review() {
+        let decides = |stage| {
+            let mut wd = popup(
+                stage,
+                vec![finding("r1-1", FindingState::Dismissed)],
+                Review::default(),
+            );
+            let none = mods(false, false);
+            let right = Keysym::bracketright;
+            assert_eq!(wd.key(&none, right, right, POPUP_ENV), None);
+            assert!(wd.diff.on_finding());
+            let view = wd.view(POPUP_ENV);
+            (view.row_buttons.iter()).any(|(_, h)| h.button == ReposButton::FixFinding)
+        };
+        assert!(decides(Stage::AiReview));
+        assert!(!decides(Stage::CodeReview));
+        assert!(!decides(Stage::Verify));
+    }
+
+    #[test]
+    fn deciding_goes_on_to_what_is_left() {
+        let wd = popup(
+            Stage::AiReview,
+            vec![
+                finding("r1-1", FindingState::Open),
+                finding("r1-2", FindingState::Dismissed),
+                finding("r1-3", FindingState::Open),
+            ],
+            Review::default(),
+        );
+        assert_eq!(wd.diff.next_undecided("r1-1").as_deref(), Some("r1-3"));
+        // Round past the last.
+        assert_eq!(wd.diff.next_undecided("r1-3").as_deref(), Some("r1-1"));
+        let wd = popup(
+            Stage::AiReview,
+            vec![finding("r1-1", FindingState::Open)],
+            Review::default(),
+        );
+        assert_eq!(wd.diff.next_undecided("r1-1"), None);
+    }
+
+    #[test]
+    fn its_keys_list_what_it_offers() {
+        let keys = |stage| {
+            let fe = FeatureOf {
+                stage: Some(stage),
+                ready: true,
+                ..FeatureOf::default()
+            };
+            fe.keys()
+                .into_iter()
+                .map(|(key, _)| key)
+                .collect::<Vec<_>>()
+        };
+        let ai = keys(Stage::AiReview);
+        assert!(ai.contains(&"Shift+F") && ai.contains(&"f"));
+        assert!(!ai.contains(&"Ctrl+Shift+Enter"));
+        let code = keys(Stage::CodeReview);
+        assert!(code.contains(&"Ctrl+Shift+Enter") && code.contains(&"Shift+C"));
+        assert!(!code.contains(&"Shift+F") && !code.contains(&"f"));
+        assert!(!keys(Stage::Build).contains(&"Ctrl+Enter"));
     }
 
     #[test]

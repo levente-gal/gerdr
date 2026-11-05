@@ -49,6 +49,8 @@ pub const READ_ONLY: &str = "A commit's diff can't be edited";
 pub(crate) const NOWHERE: &str = "Move the cursor to a line first";
 /// Why `f` did nothing off a finding.
 pub const NO_FINDING: &str = "Move the cursor to a finding first";
+/// Why `f` does nothing on a comment of the user's own.
+pub const YOUR_COMMENT: &str = "This is your comment: c edits it, Del drops it";
 /// Why a dismissal did nothing.
 pub const NO_REASON: &str = "Not dismissed: say why first";
 /// Why `]` and `[` did nothing.
@@ -377,6 +379,8 @@ pub(crate) enum DiffRow {
     More(usize, usize),
     /// Comment `c`'s heading (by index into `review.comments`): who wrote
     /// it, over its rows.
+    /// The heading of the comments on no line or file, above the diff.
+    General,
     CommentHead {
         at: Option<(usize, usize)>,
         c: usize,
@@ -418,7 +422,11 @@ impl DiffRow {
             | DiffRow::Comment { at, .. }
             | DiffRow::Editor { at, .. }
             | DiffRow::EditorHint { at } => at,
-            DiffRow::Repo(_) | DiffRow::Reading(_) | DiffRow::Outdated(_) | DiffRow::Gap => None,
+            DiffRow::Repo(_)
+            | DiffRow::Reading(_)
+            | DiffRow::Outdated(_)
+            | DiffRow::General
+            | DiffRow::Gap => None,
         }
     }
 
@@ -630,7 +638,9 @@ impl DiffView {
             true => format!("{} · {}", ctx.lead, repos(dirty.len())),
             false => ctx.lead.to_owned(),
         };
-        let findings = (self.review.comments.iter()).filter_map(|c| c.flag.as_ref());
+        let findings = (self.review.comments.iter())
+            .filter_map(|c| c.flag.as_ref())
+            .filter(|flag| !flag.yours);
         let (found, open) = findings.fold((0, 0), |(n, open), f| {
             (n + 1, open + usize::from(f.state == FindingState::Open))
         });
@@ -670,6 +680,19 @@ impl DiffView {
         let mut rows = Vec::new();
         let mut order: Vec<(usize, usize)> = Vec::new();
         let mut line_parts = HashMap::new();
+        // Those on the change as a whole, above it: no line or file to go by.
+        let general: Vec<usize> = (comments.iter().enumerate())
+            .filter(|(_, c)| !self.plain && review::is_general(c))
+            .map(|(c, _)| c)
+            .collect();
+        if !general.is_empty() {
+            rows.push(DiffRow::General);
+            for &c in &general {
+                placed.insert(c);
+                order.push((c, rows.len()));
+                self.push_comment(&mut rows, None, c);
+            }
+        }
         // One less than fits: the caret past a line's end has room.
         let width = crate::chrome::diff_line_room(cols, self.plain_digits(), true)
             .saturating_sub(1)
@@ -1577,6 +1600,26 @@ impl DiffView {
         Some((c, self.review.comments.get(c)?.flag.as_ref()?))
     }
 
+    /// Whether the cursor is on a comment of the user's kept as a finding.
+    pub fn on_yours(&self) -> bool {
+        self.finding_here().is_some_and(|(_, flag)| flag.yours)
+    }
+
+    /// The next undecided finding after `id` in the diff's order, coming
+    /// round past the last; `id` itself doesn't count.
+    pub fn next_undecided(&self, id: &str) -> Option<String> {
+        let flag = |c: usize| self.review.comments.get(c)?.flag.as_ref();
+        let order = &self.comment_order;
+        let from = order
+            .iter()
+            .position(|&(c, _)| flag(c).is_some_and(|f| f.id == id))
+            .map_or(0, |at| at + 1);
+        let rest = order[from..].iter().chain(&order[..from]);
+        rest.filter_map(|&(c, _)| flag(c))
+            .find(|f| f.state == FindingState::Open && f.id != id)
+            .map(|f| f.id.clone())
+    }
+
     /// `f` on a finding: to fix (from undecided or dismissed), or back to
     /// undecided (from to fix). Off one, it says where to go when there
     /// are findings; else it isn't the diff's key.
@@ -1588,6 +1631,10 @@ impl DiffView {
             }
             return any;
         };
+        if flag.yours {
+            self.signals.error = Some(Some(YOUR_COMMENT.into()));
+            return true;
+        }
         match review_import::fix_key(flag.state) {
             Ok(decision) => self.signals.decided = Some((flag.id.clone(), decision)),
             Err(why) => self.signals.error = Some(Some(why.into())),
@@ -1602,6 +1649,12 @@ impl DiffView {
         let Some((c, flag)) = self.finding_here() else {
             return false;
         };
+        // The user's own: nothing to tell themselves.
+        if flag.yours {
+            let decision = Decision::Dismiss(review_import::DROPPED.to_owned());
+            self.signals.decided = Some((flag.id.clone(), decision));
+            return true;
+        }
         match review_import::dismiss_key(flag.state) {
             Ok(None) => {
                 let (id, comment) = (flag.id.clone(), &self.review.comments[c]);
@@ -1729,7 +1782,11 @@ impl DiffView {
     /// Where comment `c` is among those of its kind, findings or the
     /// user's own, in the diff's order: 1-based, and how many there are.
     fn comment_place(&self, c: usize) -> (usize, usize) {
-        let finding = |c: usize| (self.review.comments.get(c)).is_some_and(|c| c.flag.is_some());
+        let finding = |c: usize| {
+            (self.review.comments.get(c))
+                .and_then(|c| c.flag.as_ref())
+                .is_some_and(|flag| !flag.yours)
+        };
         let kind = finding(c);
         let like = self.comment_order.iter().map(|&(x, _)| x);
         let like: Vec<usize> = like.filter(|&x| finding(x) == kind).collect();
@@ -2245,13 +2302,14 @@ impl DiffView {
                     return blank();
                 };
                 let (at, of) = self.comment_place(c);
-                let noun = if comment.flag.is_some() {
+                let reviewer = (comment.flag.as_ref()).filter(|flag| !flag.yours);
+                let noun = if reviewer.is_some() {
                     "finding"
                 } else {
                     "comment"
                 };
                 DetailRow::CommentHead {
-                    finding: comment.flag.as_ref().map(|flag| FindingHead {
+                    finding: reviewer.map(|flag| FindingHead {
                         severity: flag.severity.label().into(),
                         state: finding_state_word(flag.state).map(Into::into),
                         tone: finding_tone(flag),
@@ -2271,7 +2329,9 @@ impl DiffView {
                     // Its heading rounds the card's top.
                     first: false,
                     last: i + 1 >= wrap.len(),
-                    tone: comment.flag.as_ref().map(finding_tone),
+                    tone: (comment.flag.as_ref())
+                        .filter(|flag| !flag.yours)
+                        .map(finding_tone),
                 }
             }
             (DiffRow::Editor { i, .. }, _) => {
@@ -2298,6 +2358,10 @@ impl DiffView {
                 }
                 .into(),
             ),
+            (DiffRow::General, _) => DetailRow::Hunk {
+                context: "General comments".into(),
+                number: 0,
+            },
             (DiffRow::Outdated(None), _) => DetailRow::Hunk {
                 context: match (self.outdated.is_empty(), self.plain) {
                     (true, _) => "Findings not on a line of the diff",
@@ -2423,6 +2487,17 @@ impl DiffView {
                 ..hint(button)
             };
             let choices = match flag.state {
+                FindingState::Fix if flag.yours => vec![
+                    Hint {
+                        label: "Edit\u{2026}".into(),
+                        ..keyed(B::Comment, "c")
+                    },
+                    Hint {
+                        label: "Drop".into(),
+                        ..keyed(B::DismissFinding, "Del")
+                    },
+                ],
+                _ if flag.yours => Vec::new(),
                 FindingState::Open => {
                     vec![keyed(B::FixFinding, "f"), keyed(B::DismissFinding, "Del")]
                 }

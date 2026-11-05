@@ -822,6 +822,13 @@ pub enum ReposButton {
     MarkViewed,
     /// A feature's code review: go to the next file not viewed.
     NextUnviewed,
+    /// A feature's diff (`feature_diff::FeatureOf::buttons`): a comment on no
+    /// line or file, every undecided finding marked to fix, a fix round
+    /// started on what is to fix, and the plan it wrote read.
+    AddComment,
+    FixAllFindings,
+    PlanFixes,
+    ReviewFixPlan,
     /// Go to the next review comment or finding in the diff, or the one
     /// before.
     NextComment,
@@ -892,6 +899,10 @@ impl ReposButton {
             ReposButton::ReopenFinding => "Reopen",
             ReposButton::MarkViewed => "Viewed",
             ReposButton::NextUnviewed => "Next unviewed",
+            ReposButton::AddComment => "Add comment\u{2026}",
+            ReposButton::FixAllFindings => "Fix all open",
+            ReposButton::PlanFixes => "Plan fixes",
+            ReposButton::ReviewFixPlan => "Review fix plan",
             ReposButton::NextComment => "Next comment",
             ReposButton::PrevComment => "Previous comment",
         }
@@ -4775,8 +4786,18 @@ impl Painter {
             // No key: the label on a button of its own.
             let (bx, bw) = (cap_x, w - 2.0 * (HINT_PAD as f32 * s).round());
             let cr = CAP_RADIUS * s;
+            // What a feature's diff waits for, once it can be pressed.
+            let primary = hint.button == ReposButton::PlanFixes && !disabled;
+            let (edge, inner, label_color) = match (primary, view.hover == Some(hit)) {
+                (true, true) => {
+                    let fill = mix(p.accent, p.text, 0.12);
+                    (fill, fill, p.on_accent)
+                }
+                (true, false) => (p.accent, p.accent, p.on_accent),
+                (false, _) if disabled => (edge, p.elevated, label_color),
+                (false, _) => (edge, p.element, label_color),
+            };
             c.rounded(bx, cap_y, bw, cap_h, cr, edge);
-            let inner = if disabled { p.elevated } else { p.element };
             c.rounded(
                 bx + b,
                 cap_y + b,

@@ -23,8 +23,8 @@
 //! A feature's code review (see `feature_diff`) shows the same way too:
 //! the feature's changes over every repository it touched, one section
 //! each, read-only. Each file's checkbox says whether it was viewed; the
-//! AI review's findings show as comments of their own; Approve and Send
-//! back sit on its header.
+//! AI review's findings show as comments of their own; its header has what
+//! works at the stage the feature is at (`FeatureOf::buttons`).
 
 use std::{
     path::{Path, PathBuf},
@@ -39,9 +39,10 @@ use crate::{
     diff_view::{self, CheckOf, DiffView, Keys, NoteOf, Outcome, Section},
     doc_review::DocFile,
     doc_tab::DocMode,
+    feature::fix_round::FixPhase,
     feature::review_import::Decision,
     feature::{Stage, Standing},
-    feature_diff::FeatureOf,
+    feature_diff::{FeatureOf, Role},
     git::Change,
     git_ops::Since,
     md_preview::PREVIEW_KEY,
@@ -222,6 +223,14 @@ pub enum Done {
     Reopen,
     /// Show the stage the feature is at, from an approved file.
     GoOn,
+    /// A feature's diff: send what is to fix to a fix plan.
+    PlanFixes,
+    /// A feature's diff: mark every undecided finding to fix.
+    FixAll,
+    /// A feature's diff: ask for a comment on no line or file.
+    AddComment,
+    /// A feature's diff: show the fix plan waiting for the user.
+    ReviewFixPlan,
 }
 
 impl WorktreeDiff {
@@ -439,10 +448,33 @@ impl WorktreeDiff {
         Some(Done::SendBack(self.doc_markdown()))
     }
 
-    /// Whether it is reviewed: a file under review, not the evidence nor
-    /// one whose stage is done, or a feature's code.
+    /// `button` of a feature's diff (`FeatureOf::buttons`): one it doesn't
+    /// have now says why, as does one greyed once its host looks.
+    fn feature_press(&self, button: ReposButton, env: Env) -> Option<Done> {
+        use ReposButton as B;
+        let fe = self.feature.as_ref()?;
+        let has = (fe.buttons(self.diff.review.own()).iter()).any(|(b, _)| *b == button);
+        if !has {
+            return Some(Done::Diff(Outcome::Notice(fe.not_now())));
+        }
+        if self.diff.editing.is_some() {
+            return Some(Done::Diff(Outcome::Notice(DRAFT_OPEN)));
+        }
+        match button {
+            B::Approve => self.approve(),
+            B::PlanFixes if fe.role() == Role::Review => self.send_back(env),
+            B::PlanFixes => Some(Done::PlanFixes),
+            B::FixAllFindings => Some(Done::FixAll),
+            B::AddComment => Some(Done::AddComment),
+            B::ReviewFixPlan => Some(Done::ReviewFixPlan),
+            _ => None,
+        }
+    }
+
+    /// Whether it is a file under review: not the evidence, nor one whose
+    /// stage is done.
     fn reviewed(&self) -> bool {
-        (self.doc.is_some() && !self.evidence() && !self.closed()) || self.feature.is_some()
+        self.doc.is_some() && !self.evidence() && !self.closed()
     }
 
     /// What the diff asked for, on a file under review: edits only while
@@ -535,8 +567,12 @@ impl WorktreeDiff {
         if self.doc.is_none() && self.feature.is_none() {
             return diff.collect();
         }
+        let feature_keys;
         let own: &[(&str, &str)] = match (evidence, &self.feature) {
-            (_, Some(_)) => &crate::feature_diff::KEYS,
+            (_, Some(fe)) => {
+                feature_keys = fe.keys();
+                &feature_keys
+            }
             (false, _) if closed => &[
                 ("Esc", "back to the feature"),
                 ("F1", "list the keys"),
@@ -679,7 +715,7 @@ impl WorktreeDiff {
     /// The panel's heading: whose diff it is.
     pub fn heading(&self) -> String {
         if let Some(feature) = &self.feature {
-            return format!("Code review of \u{201c}{}\u{201d}", feature.title);
+            return feature.heading();
         }
         if self.commit.is_some() {
             return format!("Commit · {}", self.label);
@@ -758,6 +794,22 @@ impl WorktreeDiff {
         if self.evidence() {
             return;
         }
+        if let Some(fe) = &self.feature {
+            view.title_buttons.extend(self.feature_hints());
+            // Findings are decided at AI review alone: past it their buttons
+            // would only refuse.
+            if fe.role() != Role::Deciding {
+                view.row_buttons.retain(|(_, hint)| {
+                    !matches!(
+                        hint.button,
+                        ReposButton::FixFinding
+                            | ReposButton::DismissFinding
+                            | ReposButton::ReopenFinding
+                    )
+                });
+            }
+            return;
+        }
         if let Some(doc) = self.doc.as_ref().filter(|d| d.closed()) {
             if doc.standing == Standing::Approved {
                 view.title_buttons
@@ -783,6 +835,21 @@ impl WorktreeDiff {
             hint(ReposButton::SendBack, SEND_BACK_KEY),
             go,
         ]);
+    }
+
+    /// A feature's buttons as it stands, with their keys.
+    fn feature_hints(&self) -> Vec<Hint> {
+        let Some(fe) = self.feature.as_ref() else {
+            return Vec::new();
+        };
+        (fe.buttons(self.diff.review.own()).into_iter())
+            .map(|(button, disabled)| Hint {
+                button,
+                label: button.label().into(),
+                key: fe.key_of(button).into(),
+                disabled,
+            })
+            .collect()
     }
 
     /// Its changes read again (`git_ops::changes_since`), with their diff:
@@ -839,7 +906,7 @@ impl WorktreeDiff {
         // keys.
         let enter = matches!(sym, Keysym::Return | Keysym::KP_Enter);
         let typing = self.diff.editing.is_some() || self.diff.search_focused();
-        let keyed = self.doc.is_some() || self.feature.is_some();
+        let keyed = self.doc.is_some();
         if self.closed() && enter && mods.ctrl && !mods.alt && !mods.logo && !typing {
             return match mods.shift {
                 false => self.go_on(),
@@ -851,6 +918,26 @@ impl WorktreeDiff {
                 false => self.approve(),
                 true => self.send_back(env),
             };
+        }
+        if let Some(fe) = self
+            .feature
+            .as_ref()
+            .filter(|_| !typing && !mods.alt && !mods.logo)
+        {
+            use ReposButton as B;
+            let button = match sym {
+                _ if enter && mods.ctrl => Some(match (mods.shift, fe.role()) {
+                    (true, _) | (_, Role::Deciding) => B::PlanFixes,
+                    (false, Role::Round(FixPhase::Ready)) => B::ReviewFixPlan,
+                    (false, _) => B::Approve,
+                }),
+                Keysym::c | Keysym::C if mods.shift && !mods.ctrl => Some(B::AddComment),
+                Keysym::f | Keysym::F if mods.shift && !mods.ctrl => Some(B::FixAllFindings),
+                _ => None,
+            };
+            if let Some(button) = button {
+                return self.feature_press(button, env);
+            }
         }
         let v = matches!(sym, Keysym::v | Keysym::V);
         if self.doc.is_some() && v && mods.ctrl && mods.shift && !mods.alt && !mods.logo && !typing
@@ -915,6 +1002,8 @@ impl WorktreeDiff {
         if self.reviewed() {
             buttons.extend([B::Approve, B::SendBack]);
         }
+        let feature_hints = self.feature_hints();
+        buttons.extend(feature_hints.iter().map(|hint| hint.button));
         if let Some(doc) = self.doc.as_ref().filter(|d| d.closed()) {
             if doc.standing == Standing::Approved {
                 buttons.push(B::Reopen);
@@ -936,6 +1025,7 @@ impl WorktreeDiff {
                     B::Comment if self.diff.plain && self.diff.cursor.is_none() => {
                         "comment on the file".into()
                     }
+                    B::Comment if self.diff.on_yours() => "edit the comment".into(),
                     B::Comment if self.diff.on_finding() => "edit the finding".into(),
                     B::Comment => "comment on the lines".into(),
                     B::Close if self.commit.is_some() || self.doc.is_some() => "back".into(),
@@ -958,10 +1048,15 @@ impl WorktreeDiff {
                     B::MarkViewed => "Space",
                     B::NextUnviewed => NEXT_UNVIEWED_KEY,
                     B::NextComment => "] / [",
-                    button => key_name(button),
+                    button => match self.feature.as_ref() {
+                        Some(fe) if !fe.key_of(button).is_empty() => fe.key_of(button),
+                        _ => key_name(button),
+                    },
                 }
                 .into(),
-                disabled: None,
+                disabled: (feature_hints.iter())
+                    .find(|hint| hint.button == button)
+                    .and_then(|hint| hint.disabled.clone()),
             })
             .collect()
     }
@@ -982,8 +1077,13 @@ impl WorktreeDiff {
         }
         if self.feature.is_some() {
             match hit {
-                ReposHit::Button(ReposButton::Approve) => return self.approve(),
-                ReposHit::Button(ReposButton::SendBack) => return self.send_back(env),
+                ReposHit::Button(
+                    button @ (ReposButton::Approve
+                    | ReposButton::PlanFixes
+                    | ReposButton::FixAllFindings
+                    | ReposButton::AddComment
+                    | ReposButton::ReviewFixPlan),
+                ) => return self.feature_press(button, env),
                 ReposHit::Button(ReposButton::MarkViewed) => {
                     return self
                         .with_diff(env, |diff, ctx| diff.toggle_current(ctx))
@@ -1516,6 +1616,22 @@ impl crate::Gerdr {
             }
             Done::SendBack(comments) if feature => {
                 self.feature_send_back(comments);
+                None
+            }
+            Done::PlanFixes => {
+                self.feature_plan_fixes();
+                None
+            }
+            Done::FixAll => {
+                self.feature_fix_all();
+                None
+            }
+            Done::AddComment => {
+                self.feature_ask_comment();
+                None
+            }
+            Done::ReviewFixPlan => {
+                self.feature_review_fix_plan();
                 None
             }
             // Back to the panel it was opened from.

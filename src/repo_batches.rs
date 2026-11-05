@@ -2614,6 +2614,9 @@ pub(crate) fn button_tip(
         Some((hint, *rect))
     };
     let (hint, rect) = title().or_else(row).or_else(result)?;
+    if let Some(why) = &hint.disabled {
+        return Some(Tooltip::new(why, rect));
+    }
     (!hint.key.is_empty()).then(|| Tooltip::new(&sentence(&hint.label), rect).key(&hint.key))
 }
 

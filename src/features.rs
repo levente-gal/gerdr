@@ -972,6 +972,8 @@ pub enum PanelOutcome {
     Findings,
     /// Send AI review's findings to fix to the Build agent.
     SendFixes,
+    /// Mark every undecided finding of its AI review to fix.
+    FixAllFindings,
     /// Start a fix round on Verify's failures.
     PlanFixes,
     /// Open the fix plan under review.
@@ -1472,6 +1474,14 @@ fn can_comment(feature: &Feature, stage: Stage) -> bool {
         && feature.current() == Some(stage)
         && (feature.runs.get(&stage)).is_some_and(|r| r.ready.is_some())
         && feature.review.is_some()
+}
+
+/// Whether `stage`'s page of `feature` can mark every undecided finding to
+/// fix at once.
+fn offers_fix_all(feature: &Feature, stage: Stage) -> bool {
+    can_comment(feature, stage)
+        && feature.fix_round.is_none()
+        && (feature.review.as_ref()).is_some_and(|r| r.count(FindingState::Open) > 0)
 }
 
 /// What dismissing `f` does: an item of the user's own goes at once, with
@@ -2101,6 +2111,7 @@ fn action_hint(action: &PanelOutcome) -> &'static str {
         PanelOutcome::RemoveSandbox => "remove sandbox\u{2026}",
         PanelOutcome::Findings => "review in diff",
         PanelOutcome::SendFixes | PanelOutcome::PlanFixes => "plan fixes",
+        PanelOutcome::FixAllFindings => "fix all open",
         PanelOutcome::ReviewFixPlan => "review fix plan",
         PanelOutcome::MakeFixes => "make fixes",
         PanelOutcome::AskFixPlan => "ask again",
@@ -2730,6 +2741,9 @@ impl FeaturePanel {
             {
                 return Some(PanelOutcome::StopChecks);
             }
+            Keysym::f | Keysym::F if plain && mods.shift && offers_fix_all(feature, stage) => {
+                return Some(PanelOutcome::FixAllFindings);
+            }
             // The card with the keyboard: the diff's keys for a finding.
             Keysym::f | Keysym::F if bare && self.focus == TabArea::Findings => {
                 let f = card?;
@@ -3220,12 +3234,10 @@ pub fn page_actions(
             PanelOutcome::EditCommands(commands_tab(stage)),
         ));
     }
-    let fixes = (feature.review.as_ref()).is_some_and(|r| r.count(FindingState::Fix) > 0);
-    if mark == StageMark::Current && round.is_none() && fixes && has(&out, &PanelOutcome::Findings)
-    {
+    if offers_fix_all(feature, stage) {
         out.push((
-            button("Plan fixes", ButtonStyle::Plain),
-            PanelOutcome::SendFixes,
+            button("Fix all open", ButtonStyle::Plain),
+            PanelOutcome::FixAllFindings,
         ));
     }
     if can_comment(feature, stage) {
@@ -3432,6 +3444,7 @@ impl Gerdr {
             self.show_error(format!("Couldn't save \u{201c}{title}\u{201d}: {err}"));
         }
         self.plan_sheet_follows();
+        self.feature_diff_stands(project, slug);
     }
 
     /// The slugs of the features the panel lists for `project`.
@@ -4367,6 +4380,8 @@ impl Gerdr {
         self.save_feature(project, slug);
         self.show_success(if shipped {
             format!("\u{201c}{title}\u{201d} is done")
+        } else if stage == Stage::AiReview {
+            "AI review done: Code review is next".to_owned()
         } else {
             format!("{} marked done", stage.label())
         });
@@ -5441,6 +5456,7 @@ impl Gerdr {
                 self.open_feature_diff(&project, &slug, first.as_deref());
             }
             PanelOutcome::SendFixes => self.send_findings(&project, &slug),
+            PanelOutcome::FixAllFindings => self.fix_all_findings(&project, &slug),
             PanelOutcome::PlanFixes => self.plan_verify_fixes(&project, &slug),
             PanelOutcome::ReviewFixPlan => self.open_doc_tab(&project, &slug, DocFile::FixPlan),
             PanelOutcome::MakeFixes => self.make_fixes_now(&project, &slug),
@@ -8532,6 +8548,9 @@ fn tab_hints(
             if can_comment(feature, stage) {
                 hints.push(hint("c", "add comment\u{2026}"));
             }
+            if offers_fix_all(feature, stage) {
+                hints.push(hint("Shift+F", "fix all open"));
+            }
             hints.push(hint("Tab", if repos { "repositories" } else { "stages" }));
         }
         _ => {
@@ -8543,6 +8562,9 @@ fn tab_hints(
             };
             if !enter.is_empty() {
                 hints.push(hint("Enter", enter));
+            }
+            if offers_fix_all(feature, stage) {
+                hints.push(hint("Shift+F", "fix all open"));
             }
             if matches!(row_action(feature, row, ctx), Some(PanelOutcome::Untick(_))) {
                 hints.push(hint(REOPEN_KEY, "reopen"));
@@ -11239,7 +11261,17 @@ pub(crate) mod tests {
             review_line(&open, None).as_deref(),
             Some("2 findings to decide")
         );
+        // While any waits, Plan fixes can't be pressed, so isn't there.
+        let labels = |f: &Feature| -> Vec<String> {
+            (page_actions(f, Stage::AiReview, none).into_iter())
+                .map(|(b, _)| b.label)
+                .collect()
+        };
+        assert!(labels(&open).contains(&"Fix all open".to_owned()));
+        assert!(!labels(&open).contains(&"Plan fixes".to_owned()));
         let fix = reviewing(&[S::Fix, S::Dismissed], true);
+        assert!(labels(&fix).contains(&"Plan fixes".to_owned()));
+        assert!(!labels(&fix).contains(&"Fix all open".to_owned()));
         assert_eq!(row_action(&fix, row, none), Some(PanelOutcome::SendFixes));
         assert_eq!(row_hint(&fix, row, none), "plan fixes");
         assert_eq!(review_line(&fix, None).as_deref(), Some("1 finding to fix"));
@@ -11495,6 +11527,15 @@ pub(crate) mod tests {
         assert_eq!(
             press(&mut panel, &f, key(Keysym::Delete)),
             Some(PanelOutcome::DecideFinding(id("r1-3"), Decision::Reopen))
+        );
+        // All open ones to fix at once, from anywhere on the page.
+        let shift_f = ModifiersState {
+            shift: true,
+            ..ModifiersState::default()
+        };
+        assert_eq!(
+            panel.key(&shift_f, Keysym::F, &f, &[], RowCtx::default(), &[]),
+            Some(PanelOutcome::FixAllFindings)
         );
         // A comment from anywhere on the page.
         assert_eq!(

@@ -27,9 +27,11 @@ use crate::{
         store,
     },
     feature_agents::Stamp,
-    feature_diff::COMMENTS,
+    feature_diff::{COMMENTS, decide_first},
     features::{Done, plural},
+    menu::MenuAction,
     review,
+    toast::Level,
 };
 
 /// The values the AI review prompt gets of `feature` besides the stage's
@@ -374,12 +376,43 @@ impl Gerdr {
             return self.read_and_tick(project, slug, Stage::AiReview);
         }
         if undecided == 0 && fix > 0 {
-            return self.show_success(format!(
-                "Finding {id} {word}; {} to fix",
-                plural(fix, "finding")
-            ));
+            return self.offer_plan(
+                project,
+                slug,
+                format!("All findings decided: {} to fix", plural(fix, "finding")),
+            );
         }
         self.show_success(format!("Finding {id} {word}"));
+    }
+
+    /// Say `text`, with a button for what comes next: nothing is left to
+    /// decide of feature `slug`'s AI review. Nothing starts by itself.
+    fn offer_plan(&mut self, project: &str, slug: &str, text: String) {
+        let plan = MenuAction::PlanFixes(project.to_owned(), slug.to_owned());
+        self.toast_with(text, Level::Success, Some(("Plan fixes".to_owned(), plan)));
+    }
+
+    /// Mark every undecided finding of feature `slug`'s AI review to fix.
+    pub(crate) fn fix_all_findings(&mut self, project: &str, slug: &str) {
+        let mut marked = 0;
+        let done = self.change_review(project, slug, |review| {
+            let open: Vec<String> = (review.findings.iter())
+                .filter(|f| f.state == FindingState::Open)
+                .map(|f| f.id.clone())
+                .collect();
+            if open.is_empty() {
+                return Err("No finding left to decide".to_owned());
+            }
+            for id in &open {
+                review_import::decide(review, id, &Decision::Fix)?;
+            }
+            marked = open.len();
+            Ok(format!("Marked to fix: {}", open.join(", ")))
+        });
+        if done {
+            let text = format!("{} marked to fix", plural(marked, "finding"));
+            self.offer_plan(project, slug, text);
+        }
     }
 
     /// Change feature `slug`'s AI review by `what` and keep it: `change`
@@ -431,8 +464,15 @@ impl Gerdr {
             let what = review_import::edit(review, id, fix, note)?;
             Ok(format!("Finding {id}: {what}"))
         });
-        if done {
-            self.show_success(format!("Finding {id} edited and marked to fix"));
+        if !done {
+            return;
+        }
+        let review = self.feature(project, slug).and_then(|f| f.review.as_ref());
+        let left = review.map_or(1, |r| r.count(FindingState::Open));
+        let text = format!("Finding {id} edited and marked to fix");
+        match left {
+            0 => self.offer_plan(project, slug, text),
+            _ => self.show_success(text),
         }
     }
 
@@ -450,12 +490,23 @@ impl Gerdr {
     /// Add an item of the user's own to feature `slug`'s AI review, to go
     /// to Build with the findings to fix.
     pub(crate) fn add_finding_comment(&mut self, project: &str, slug: &str, text: &str) {
+        // Past AI review, its findings are settled: with the user's others.
+        let stage = self.feature(project, slug).and_then(Feature::current);
+        if stage == Some(Stage::CodeReview) {
+            return self.add_general_comment(project, slug, text);
+        }
         let mut added = String::new();
         let done = self.change_review(project, slug, |review| {
             added = review_import::add(review, text)?;
             Ok(format!("You added comment {added}"))
         });
         if done {
+            if let Some(fe) = (self.wd_mut().and_then(|wd| wd.feature.as_mut()))
+                .filter(|fe| fe.project == project && fe.slug == slug)
+            {
+                fe.focus = Some(added.clone());
+            }
+            self.feature_findings_changed(project, slug);
             self.show_success(format!(
                 "Comment {added} added, to go to Build with the fixes"
             ));
@@ -467,6 +518,8 @@ impl Gerdr {
     /// they left in its diff; they are sent then, and the next review
     /// checks them.
     pub fn send_findings(&mut self, project: &str, slug: &str) {
+        // A toast's button can come while the open diff has comments unsaved.
+        self.feature_save_review();
         let Some(f) = self.feature(project, slug) else {
             return;
         };
@@ -479,10 +532,7 @@ impl Gerdr {
         };
         let undecided = review.count(FindingState::Open);
         if undecided > 0 {
-            return self.show_warning(format!(
-                "Decide the {} of \u{201c}{title}\u{201d} first",
-                plural(undecided, "finding")
-            ));
+            return self.show_warning(decide_first(undecided));
         }
         let ids: Vec<String> = (review.findings.iter())
             .filter(|f| f.state == FindingState::Fix)
@@ -542,6 +592,16 @@ impl Gerdr {
             }
         }
         self.save_feature(project, slug);
+        // From its diff: that closes, what it sent gone from it, as the
+        // Build agent's tab shows.
+        let open = (self.feature_of()).is_some_and(|fe| fe.project == project && fe.slug == slug);
+        if open {
+            if let Some(wd) = self.wd_mut() {
+                wd.diff.review.comments.retain(|c| c.flag.is_some());
+                wd.diff.review_dirty = false;
+            }
+            self.close_feature_diff(false);
+        }
         self.show_build_agent(project, slug);
     }
 

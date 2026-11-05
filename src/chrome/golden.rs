@@ -4575,7 +4575,114 @@ fn findings_view() -> super::ReposView {
     view
 }
 
-fn doc_tabs() -> [(&'static str, super::ReposView, i32); 9] {
+/// A feature's diff as each stage has it: at AI review with findings left
+/// to decide (Plan fixes greyed), all decided (blue, a general comment
+/// listed first), and at Code review.
+fn findings_popup(at: u8) -> super::ReposView {
+    use super::{DetailRow, Hint, ReposButton, RowMark, Tone};
+    let mut view = findings_view();
+    let button = |button: ReposButton, disabled: Option<&str>| Hint {
+        button,
+        label: button.label().into(),
+        key: String::new(),
+        disabled: disabled.map(Into::into),
+    };
+    let keyed = |b: ReposButton, key: &str, disabled: Option<&str>| Hint {
+        key: key.into(),
+        label: b.label().to_lowercase(),
+        ..button(b, disabled)
+    };
+    let waits = Some("Decide the 2 findings left first");
+    let nav = [
+        button(ReposButton::PrevComment, None),
+        button(ReposButton::NextComment, None),
+    ];
+    let (title, summary, buttons, hints): (_, _, Vec<Hint>, Vec<Hint>) = match at {
+        0 => (
+            "AI review of \u{201c}Bulk export\u{201d}",
+            "1 to fix \u{b7} 1 dismissed \u{b7} 2 to decide \u{b7} 1 of 3 files viewed",
+            vec![
+                button(ReposButton::AddComment, None),
+                button(ReposButton::FixAllFindings, None),
+                button(ReposButton::PlanFixes, waits),
+            ],
+            vec![
+                keyed(ReposButton::AddComment, "Shift+C", None),
+                keyed(ReposButton::FixAllFindings, "Shift+F", None),
+                keyed(ReposButton::PlanFixes, "Ctrl+Enter", waits),
+            ],
+        ),
+        1 => (
+            "AI review of \u{201c}Bulk export\u{201d}",
+            "3 to fix \u{b7} 1 dismissed \u{b7} 0 to decide \u{b7} 1 of 3 files viewed",
+            vec![
+                button(ReposButton::AddComment, None),
+                button(ReposButton::PlanFixes, None),
+            ],
+            vec![
+                keyed(ReposButton::AddComment, "Shift+C", None),
+                keyed(ReposButton::PlanFixes, "Ctrl+Enter", None),
+            ],
+        ),
+        _ => (
+            "Code review of \u{201c}Bulk export\u{201d}",
+            "ready for review \u{b7} 3 of 3 files viewed",
+            vec![
+                button(ReposButton::AddComment, None),
+                button(ReposButton::PlanFixes, Some("Add a comment first")),
+                button(ReposButton::Approve, None),
+            ],
+            vec![
+                keyed(ReposButton::AddComment, "Shift+C", None),
+                keyed(
+                    ReposButton::PlanFixes,
+                    "Ctrl+Shift+Enter",
+                    Some("Add a comment first"),
+                ),
+                keyed(ReposButton::Approve, "Ctrl+Enter", None),
+            ],
+        ),
+    };
+    view.title = title.to_string();
+    view.summary = summary.to_string();
+    view.summary_tone = Tone::Normal;
+    view.modes = None;
+    view.detail.title = match at {
+        0 => "Since its base \u{b7} 3 files \u{b7} +3 \u{2212}1 \u{b7} 4 findings, 2 open",
+        _ => "Since its base \u{b7} 3 files \u{b7} +3 \u{2212}1 \u{b7} 4 findings",
+    }
+    .into();
+    view.detail.title_buttons = nav.into_iter().chain(buttons).collect();
+    view.hints = hints;
+    view.hints.push(keyed(ReposButton::Help, "F1", None));
+    view.hints.push(keyed(ReposButton::Close, "Esc", None));
+    if at == 1 {
+        let mut rows = vec![
+            DetailRow::Hunk {
+                context: "General comments".into(),
+                number: 0,
+            },
+            DetailRow::CommentHead {
+                finding: None,
+                place: "comment 1 of 1".into(),
+            },
+            DetailRow::Comment {
+                text: "Log the export's size as well".into(),
+                first: false,
+                last: true,
+                tone: None,
+            },
+        ];
+        rows.extend(view.detail.rows.iter().skip(2).cloned());
+        view.detail.marks = vec![RowMark::default(); rows.len()];
+        view.detail.total = rows.len();
+        view.detail.rows = rows;
+        view.detail.row_buttons = Vec::new();
+    }
+    view
+}
+
+fn doc_tabs() -> [(&'static str, super::ReposView, i32); 12] {
     [
         ("doc_preview_1180", doc_tab(0, 0.0, Vec::new(), false), 1180),
         ("doc_review_1180", doc_tab(1, 1.0, Vec::new(), false), 1180),
@@ -4590,10 +4697,13 @@ fn doc_tabs() -> [(&'static str, super::ReposView, i32); 9] {
         ("doc_approved_1180", doc_tab_closed(false), 1180),
         ("doc_locked_1180", doc_tab_closed(true), 1180),
         ("findings_1180", findings_view(), 1180),
+        ("popup_deciding_1180", findings_popup(0), 1180),
+        ("popup_decided_1180", findings_popup(1), 1180),
+        ("popup_code_review_850", findings_popup(2), 850),
     ]
 }
 
-const DOC_TAB: [&str; 9] = [
+const DOC_TAB: [&str; 12] = [
     "doc_preview_1180",
     "doc_review_1180",
     "doc_review_no_browser",
@@ -4603,6 +4713,9 @@ const DOC_TAB: [&str; 9] = [
     "doc_approved_1180",
     "doc_locked_1180",
     "findings_1180",
+    "popup_deciding_1180",
+    "popup_decided_1180",
+    "popup_code_review_850",
 ];
 
 /// A doc tab's buffer, laid over the whole of a `w` wide content area.
@@ -4624,7 +4737,7 @@ fn paint_doc_tab(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
 }
 
 /// The recorded hashes of `DOC_TAB`, per case in `CASES`.
-const GOLDEN_DOC_TAB: [[u64; 9]; 4] = [
+const GOLDEN_DOC_TAB: [[u64; 12]; 4] = [
     // Dark at 1
     [
         0xe3291f02faaf07c4, // doc_preview_1180
@@ -4636,6 +4749,9 @@ const GOLDEN_DOC_TAB: [[u64; 9]; 4] = [
         0x991e984d1cf58986, // doc_approved_1180
         0xc795c2ffa685e118, // doc_locked_1180
         0x1c40aa6b13221217, // findings_1180
+        0xb071e0fde05d8cad, // popup_deciding_1180
+        0x73082977da96170b, // popup_decided_1180
+        0xc45deb5abd7f3db3, // popup_code_review_850
     ],
     // Dark at 2
     [
@@ -4648,6 +4764,9 @@ const GOLDEN_DOC_TAB: [[u64; 9]; 4] = [
         0xc29bb6d56b5beb67, // doc_approved_1180
         0x8a385f9aa43a43b8, // doc_locked_1180
         0x4fd4afbf7d726fc6, // findings_1180
+        0x73691c9d6890527f, // popup_deciding_1180
+        0x2e4b764d90bd8b7d, // popup_decided_1180
+        0x1e912058c8bd9ba0, // popup_code_review_850
     ],
     // Light at 1
     [
@@ -4660,6 +4779,9 @@ const GOLDEN_DOC_TAB: [[u64; 9]; 4] = [
         0x4d6fa62f8b977f1d, // doc_approved_1180
         0xf1603167ed70f699, // doc_locked_1180
         0xf1da44a290347a18, // findings_1180
+        0x0b26976cb4f67a3c, // popup_deciding_1180
+        0x3e18236aa3f06b70, // popup_decided_1180
+        0xf3236df5a10c1957, // popup_code_review_850
     ],
     // Light at 2
     [
@@ -4672,6 +4794,9 @@ const GOLDEN_DOC_TAB: [[u64; 9]; 4] = [
         0x84732f985b636d39, // doc_approved_1180
         0x153567080b2689aa, // doc_locked_1180
         0x6d35418382f8b37b, // findings_1180
+        0x8239074d29475664, // popup_deciding_1180
+        0x3cb078023a7b6874, // popup_decided_1180
+        0x440b4e98aa21393f, // popup_code_review_850
     ],
 ];
 

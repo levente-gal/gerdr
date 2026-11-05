@@ -35,6 +35,9 @@ pub enum MenuAction {
     /// The agent picker, for an agent CLI in a new tab of workspace `.0`
     /// (see `Gerdr::open_agent_picker`).
     NewAgent(usize),
+    /// The fixes of AI review of a project's feature, planned (see
+    /// `Gerdr::send_findings`).
+    PlanFixes(String, String),
     /// T3 Code's server, started in the background (see
     /// `Gerdr::spawn_t3`).
     StartT3,
@@ -479,6 +482,7 @@ impl Gerdr {
             MenuAction::Features => self.open_features(),
             MenuAction::NewFeature(at) => self.open_new_feature(at),
             MenuAction::OpenFeature(project, slug) => self.open_linked_feature(&project, &slug),
+            MenuAction::PlanFixes(project, slug) => self.send_findings(&project, &slug),
             MenuAction::InboxRestore {
                 project,
                 ids,
