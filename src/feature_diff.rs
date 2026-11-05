@@ -1170,7 +1170,8 @@ impl Gerdr {
         self.code_review_counted();
     }
 
-    /// Close the open code review: back to the feature panel when `back`.
+    /// Close the open code review: back to the page of the feature panel it
+    /// was opened from when `back`.
     pub(crate) fn close_feature_diff(&mut self, back: bool) {
         let Some(fe) = self.feature_of() else {
             return;
@@ -1178,7 +1179,7 @@ impl Gerdr {
         let (project, slug) = (fe.project.clone(), fe.slug.clone());
         self.close_worktree_diff();
         if back {
-            self.open_feature(&project, &slug);
+            self.back_to_feature(&project, &slug);
         }
     }
 

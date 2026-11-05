@@ -5268,6 +5268,18 @@ impl Gerdr {
     /// feature's current stage's page. The other panels close: they would
     /// cover it.
     pub fn open_feature(&mut self, project: &str, slug: &str) {
+        self.show_feature(project, slug, true);
+    }
+
+    /// Back on the feature panel of feature `slug` of `project` from what
+    /// covered it, on the page it was left on.
+    pub(crate) fn back_to_feature(&mut self, project: &str, slug: &str) {
+        self.show_feature(project, slug, false);
+    }
+
+    /// See `open_feature`; `to_current`: on its current stage's page even
+    /// when it shows already.
+    fn show_feature(&mut self, project: &str, slug: &str, to_current: bool) {
         if self.feature(project, slug).is_none() {
             return self.show_warning("That feature is gone".into());
         }
@@ -5292,7 +5304,10 @@ impl Gerdr {
             return;
         }
         // Showing it again where it shows goes back to its current stage.
-        if shown && let Some(panel) = self.features.panel.as_mut().filter(|p| same(p)) {
+        if shown
+            && to_current
+            && let Some(panel) = self.features.panel.as_mut().filter(|p| same(p))
+        {
             panel.unpick();
             panel.keys = false;
         }
