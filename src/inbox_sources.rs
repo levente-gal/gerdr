@@ -821,7 +821,7 @@ fn gate_words(gate: &Gate) -> (String, String, Option<&'static str>) {
         }
         GateKind::SendPrompt => (
             format!(
-                "{} of “{title}”: its agent waits for its prompt",
+                "{} of “{title}”: pick a model and send the prompt",
                 gate.stage.label()
             ),
             "send prompt".to_owned(),

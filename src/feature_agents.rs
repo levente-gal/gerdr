@@ -33,7 +33,7 @@ use crate::{
         self, Feature, PerProject, Stage, Status,
         agents::{
             Flavor, StageRun, Stop, T3Run, command_line, needs, resume_line, run_needs,
-            session_file, with_model,
+            session_file, with_model, with_prompt,
         },
         artifacts,
         fix_round::FixPhase,
@@ -943,7 +943,7 @@ pub(crate) fn agent_line(
         if status == Some(AgentStatus::Working) {
             return "working \u{b7} its prompt wasn't sent".into();
         }
-        return run.waiting_words().into();
+        return "waiting for you \u{b7} pick a model and send the prompt".into();
     }
     if run.held {
         return format!("{} closed \u{b7} its prompt wasn't sent", run.agent);
@@ -1222,16 +1222,30 @@ impl Gerdr {
             return self.focus_agent(&agents::AgentKey::Herdr(pane));
         }
         let agent = run.agent.clone();
-        // Its model may have been picked since: nothing has run on the old.
+        // Its model may have been picked since: nothing has run on the old,
+        // and with one picked it needs no one to send its prompt.
         let model = picked_model(&feature, stage, &agent);
-        let picked = model.is_some();
-        let command = match model == run.asked_model {
-            true => run.command.clone(),
-            false => command_line(
+        let line = |text: Option<&str>| {
+            let line = command_line(
                 &with_model(&run.base, model.as_deref()),
                 &run.prompt,
                 &feature.agent_dirs(&store::dir(None, project, slug)),
-            ),
+            );
+            text.map_or_else(|| line.clone(), |text| with_prompt(&line, text))
+        };
+        let command = match &model {
+            Some(_) => match self.start_line(&feature, project, slug, stage, &run.prompt) {
+                Ok(text) => line(Some(&text)),
+                Err(err) => {
+                    tracing::warn!("rendering the start of {}: {err}", stage.label());
+                    return self.show_error(format!(
+                        "Couldn't write the {} prompt: {err}",
+                        stage.label()
+                    ));
+                }
+            },
+            None if run.asked_model.is_none() => run.command.clone(),
+            None => line(None),
         };
         let opened = self.open_feature_tab(project, slug, &feature.dir, Some(command.clone()));
         let Some(pane) = opened else {
@@ -1245,13 +1259,21 @@ impl Gerdr {
             return;
         };
         r.pane = Some(pane.clone());
-        if r.asked_model != model {
+        let sent = model.clone();
+        let now = feature::now();
+        if r.asked_model != model || sent.is_some() {
             r.command = command;
             r.model.clone_from(&model);
             r.asked_model = model;
         }
+        if sent.is_some() {
+            r.held = false;
+            r.nudged = false;
+            // Its work starts now: what it writes is new from here.
+            r.started = now;
+        }
         f.log(
-            feature::now(),
+            now,
             format!("{} agent's tab opened again: {agent}", stage.label()),
         );
         self.save_feature(project, slug);
@@ -1261,7 +1283,10 @@ impl Gerdr {
         if stage == Stage::Build {
             self.fixing_moved(project, slug, agents::AgentKey::Herdr(pane));
         }
-        self.show_success(held_text(&agent, picked, stage, &feature.title));
+        self.show_success(match &sent {
+            Some(model) => sent_text(&agent, stage, model),
+            None => held_text(&agent, stage, &feature.title),
+        });
     }
 
     /// The feature and stage of the active project whose agent waits for
@@ -1296,15 +1321,9 @@ impl Gerdr {
         let pane = (run.pane.clone()).filter(|p| self.herdr_pane_place(p).is_some());
         let sent = match &pane {
             None => Err(String::from(crate::feature_build::TAB_GONE)),
-            Some(pane) => {
-                let data = store::dir(None, project, slug);
-                let names = self.projects.names(&feature);
-                let mut values = vars(&feature, &names, &data, stage);
-                values.insert("prompt.path".into(), run.prompt.display().to_string());
-                prompts::render_builtin("start", &values)
-                    .map_err(|e| e.to_string())
-                    .and_then(|line| self.tell_agent_pane(pane, line.trim()))
-            }
+            Some(pane) => self
+                .start_line(&feature, project, slug, stage, &run.prompt)
+                .and_then(|line| self.tell_agent_pane(pane, &line)),
         };
         let agent = run.agent;
         if let Err(why) = sent {
@@ -1343,6 +1362,23 @@ impl Gerdr {
         self.save_feature(project, slug);
         self.watch_its_work(project, slug, stage);
         self.show_success(format!("Sent the prompt to {agent}"));
+    }
+
+    /// The line that tells `stage`'s agent to do what `prompt` says.
+    fn start_line(
+        &self,
+        feature: &Feature,
+        project: &str,
+        slug: &str,
+        stage: Stage,
+        prompt: &Path,
+    ) -> Result<String, String> {
+        let data = store::dir(None, project, slug);
+        let names = self.projects.names(feature);
+        let mut values = vars(feature, &names, &data, stage);
+        values.insert("prompt.path".into(), prompt.display().to_string());
+        let line = prompts::render_builtin("start", &values).map_err(|e| e.to_string())?;
+        Ok(line.trim().to_owned())
     }
 
     /// Go back to the chat of `stage`'s last agent of feature `slug`, its
@@ -1505,11 +1541,35 @@ impl Gerdr {
             self.log_not_started(project, slug, stage, "its prompt couldn't be written");
             return false;
         }
+        // With its model picked nothing is left to do in its tab, so it is
+        // told at once. Without, it waits for the user to pick and send.
+        let at_once = asked_model.is_some() && waiting.is_none();
         let command = if in_t3 {
             base.clone()
         } else {
             let started = with_model(&base, asked_model.as_deref());
-            command_line(&started, &prompt, &feature.agent_dirs(&data))
+            let line = command_line(&started, &prompt, &feature.agent_dirs(&data));
+            if at_once {
+                match self.start_line(&feature, project, slug, stage, &prompt) {
+                    Ok(text) => with_prompt(&line, &text),
+                    Err(err) => {
+                        tracing::warn!("rendering the start of {}: {err}", stage.label());
+                        self.show_error(format!(
+                            "Couldn't write the {} prompt: {err}",
+                            stage.label()
+                        ));
+                        self.log_not_started(
+                            project,
+                            slug,
+                            stage,
+                            "its prompt couldn't be written",
+                        );
+                        return false;
+                    }
+                }
+            } else {
+                line
+            }
         };
         // Its chat goes on under the new prompt: `resume` looks beside that.
         if let Some(r) = waiting
@@ -1528,7 +1588,9 @@ impl Gerdr {
         };
         let told = waiting.is_some();
         let now = feature::now();
-        let picked = asked_model.is_some();
+        // With no tab it never got the prompt: Start agent opens it again.
+        let sent = at_once && pane.is_some();
+        let sent_model = asked_model.clone().filter(|_| sent);
         let run = StageRun {
             // What it was asked for, until its chat says what it used.
             model: asked_model.clone(),
@@ -1547,7 +1609,7 @@ impl Gerdr {
             sent_back: last.map_or(0, |r| r.sent_back),
             stop: None,
             blocked: None,
-            held: !in_t3,
+            held: !in_t3 && !sent,
         };
         let opened = run.pane.clone();
         let Some(feature) = self.feature_mut(project, slug) else {
@@ -1571,9 +1633,13 @@ impl Gerdr {
             self.t3_stage_drafted(project, slug, stage, &title);
             return true;
         }
+        if let Some(model) = sent_model {
+            self.show_success(sent_text(&agent, stage, &model));
+            return true;
+        }
         // No tab: opening it said why.
         if opened.is_some() {
-            let text = held_text(&agent, picked, stage, &title);
+            let text = held_text(&agent, stage, &title);
             self.notify_feature(project, slug, opened, &text);
             self.show_success(text);
         }
@@ -2291,17 +2357,18 @@ fn with_earlier_prompt(text: &str, earlier: &Path) -> String {
     )
 }
 
-/// What gerdr says of `agent` opened on `stage` of feature `title`, with
-/// its model `picked` already or not.
-fn held_text(agent: &str, picked: bool, stage: Stage, title: &str) -> String {
-    let due = match picked {
-        true => "send the prompt",
-        false => "pick a model, then send the prompt",
-    };
+/// What gerdr says of `agent` opened on `stage` of feature `title`.
+fn held_text(agent: &str, stage: Stage, title: &str) -> String {
     format!(
-        "{agent} is open on {} of \u{201c}{title}\u{201d}: {due}",
+        "{agent} is open on {} of \u{201c}{title}\u{201d}: pick a model, then send the prompt",
         stage.label()
     )
+}
+
+/// What gerdr says of `agent` started on `stage` with `model`, its prompt
+/// sent as it starts.
+fn sent_text(agent: &str, stage: Stage, model: &str) -> String {
+    format!("{agent} started on {} with {model}", stage.label())
 }
 
 /// Whether the tab of an agent waiting for its prompt is gone: not there

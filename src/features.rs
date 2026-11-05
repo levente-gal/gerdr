@@ -7510,7 +7510,9 @@ fn agent_card(
     // The card's head names the agent already.
     let status = match (current, &state.agent) {
         // On a done Build too, where fixes wait: `started` would hide that.
-        _ if run.waits_to_send() => run.waiting_words().to_owned(),
+        _ if run.waits_to_send() => {
+            "waiting for you \u{b7} pick a model and send the prompt".to_owned()
+        }
         (true, Some(line)) => (line.strip_prefix(run.agent.as_str()))
             .map_or(line.as_str(), str::trim_start)
             .to_owned(),
@@ -7522,9 +7524,7 @@ fn agent_card(
             }
         }
     };
-    // Waiting, it says as much of the run above, and whether a model is due.
-    let status =
-        (back.filter(|b| *b != Rework::Waits)).map_or(status, |back| back.status().to_owned());
+    let status = back.map_or(status, |back| back.status().to_owned());
     // The tail read is the current stage's agent's, while its pane is.
     let tail = match current && run.pane.is_some() {
         true => state.tail.to_vec(),
@@ -7560,10 +7560,7 @@ fn rework_card(
             Rework::Runs(dot) => dot,
             _ => Dot::Unknown,
         },
-        status: match back {
-            Rework::Waits => format!("Build agent \u{b7} {}", run.waiting_words()),
-            back => format!("Build agent \u{b7} {}", back.status()),
-        },
+        status: format!("Build agent \u{b7} {}", back.status()),
         tail: Vec::new(),
         buttons: agent_buttons(Stage::Build, actions),
         picks: Vec::new(),

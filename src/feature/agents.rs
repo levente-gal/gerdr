@@ -211,6 +211,12 @@ pub fn with_model(base: &str, model: Option<&str>) -> String {
     }
 }
 
+/// The command `line` told `text` as it starts: it is its first message, with
+/// no waiting for the CLI to be ready. Both CLIs that take a model take this.
+pub fn with_prompt(line: &str, text: &str) -> String {
+    format!("{line} -- {}", crate::desktop::shell_quote(text))
+}
+
 /// What `run`'s chat is resumed with. Claude's chat keeps its model (tried on
 /// 2.1.318), and one changed there with `/model` must stay. Whether Cursor's
 /// does couldn't be told from its chat, so it is told again.
@@ -359,15 +365,6 @@ impl StageRun {
     /// Whether its agent is there, waiting for the user to send its prompt.
     pub fn waits_to_send(&self) -> bool {
         self.held && self.live()
-    }
-
-    /// What is said of it while it waits for its prompt: its model was
-    /// picked already, or that is still to do, in its tab.
-    pub fn waiting_words(&self) -> &'static str {
-        match self.asked_model {
-            Some(_) => "waiting for you \u{b7} send the prompt",
-            None => "waiting for you \u{b7} pick a model and send the prompt",
-        }
     }
 
     /// Its T3 Code thread's id, once it was sent.
@@ -776,11 +773,27 @@ mod tests {
     }
 
     #[test]
-    fn waiting_says_a_model_is_to_pick_only_when_none_was() {
-        let mut run = StageRun::default();
-        assert!(run.waiting_words().contains("pick a model"));
-        run.asked_model = Some("opus".into());
-        assert!(!run.waiting_words().contains("pick a model"));
+    fn a_prompt_on_the_command_is_not_sent_again_by_a_rerun() {
+        let line = with_prompt(
+            "claude --model opus --session-id abc",
+            "Read /p.md and follow it.",
+        );
+        assert_eq!(
+            line,
+            "claude --model opus --session-id abc -- 'Read /p.md and follow it.'"
+        );
+        assert_eq!(
+            rerun_argv(&[
+                "claude",
+                "--model",
+                "opus",
+                "--session-id",
+                "abc",
+                "--",
+                "Read /p.md"
+            ]),
+            ["claude", "--model", "opus", "--resume", "abc"]
+        );
     }
 
     #[test]
