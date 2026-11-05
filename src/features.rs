@@ -1240,6 +1240,13 @@ pub struct RowCtx {
     pub sandbox_busy: bool,
     /// Verify has no checks to run because the feature skips them all.
     pub all_skipped: bool,
+    /// Its checks are being started, or wait for a setup to end. Once their
+    /// terminals are open `checks_running` says so too.
+    pub checks_busy: bool,
+    /// Its worktrees are being set up.
+    pub setting_up: bool,
+    /// Work of its runs off the thread (see `Gerdr::feature_busy`).
+    pub feature_busy: bool,
 }
 
 impl RowCtx {
@@ -1443,6 +1450,7 @@ fn agent_key(feature: &Feature, stage: Stage, ctx: RowCtx) -> Option<(&'static s
     rework_on(feature, stage, ctx)
         .and_then(|_| agent_button(feature, Stage::Build, ctx))
         .or_else(|| agent_button(feature, stage, ctx))
+        .filter(|(_, o)| !verify_going(feature, stage, ctx) || works_during_checks(o))
 }
 
 /// What an agent stage's row does: start its agent, show it while its
@@ -1689,17 +1697,50 @@ fn check_entries(feature: &Feature, stage: Stage, plan: &[PlannedCheck]) -> Vec<
     ran.chain(waits).collect()
 }
 
+/// Whether `feature`'s checks are going: starting, waiting for a setup, or
+/// running.
+fn checks_going(feature: &Feature, ctx: RowCtx) -> bool {
+    ctx.checks_busy || checks_running(feature)
+}
+
+/// Whether `stage` is the Verify `feature` is at, its checks going: its page
+/// then offers only what `works_during_checks` lets through.
+fn verify_going(feature: &Feature, stage: Stage, ctx: RowCtx) -> bool {
+    stage == Stage::Verify && feature.current() == Some(stage) && checks_going(feature, ctx)
+}
+
+/// Whether Verify's page offers `outcome` while its checks go: what stops
+/// them, what only reads, and what leaves the code they run on be. Anything
+/// else either refuses now or changes the code under them, and a new button
+/// is left out until someone decides otherwise.
+fn works_during_checks(outcome: &PanelOutcome) -> bool {
+    matches!(
+        outcome,
+        PanelOutcome::StopChecks
+            | PanelOutcome::StopCheck(_)
+            | PanelOutcome::ShowCheck(_)
+            | PanelOutcome::Evidence
+            | PanelOutcome::SetupLog
+            | PanelOutcome::EditCommands(_)
+            | PanelOutcome::ReviewFixPlan
+            | PanelOutcome::DropFixPlan
+            | PanelOutcome::ShowAgent(_)
+            | PanelOutcome::GoToCurrent
+    )
+}
+
 /// What skipping check `entry` of `feature` reads as, and does; nothing for
-/// one it can't skip, while the checks run, or on a stage not reached.
+/// one it can't skip, while the checks go, or on a stage not reached.
 fn skip_action(
     feature: &Feature,
     stage: Stage,
     entry: &CheckEntry,
+    ctx: RowCtx,
 ) -> Option<(&'static str, PanelOutcome)> {
     let can = entry.borrowed
         && feature.status == Status::Open
         && stage_mark(feature, stage) != StageMark::Later
-        && !checks_running(feature);
+        && !checks_going(feature, ctx);
     can.then(|| {
         let label = if entry.skipped { "Don't skip" } else { "Skip" };
         let skip = PanelOutcome::SkipCheck {
@@ -1729,7 +1770,7 @@ fn stage_actions(
     });
     out.extend(
         (entries.iter())
-            .filter_map(|entry| skip_action(feature, stage, entry))
+            .filter_map(|entry| skip_action(feature, stage, entry, ctx))
             .map(|(label, outcome)| {
                 let style = match label {
                     "Skip" => ButtonStyle::Quiet,
@@ -1851,11 +1892,21 @@ fn check_buttons(
     }
     let running = checks_running(feature);
     if running && row.outcome.is_none() {
-        out.push((plain("Stop"), PanelOutcome::StopCheck(i)));
+        // Told once: it ends by itself now.
+        if !row.stopping {
+            out.push((plain("Stop"), PanelOutcome::StopCheck(i)));
+        }
     } else if current && !running {
         out.push((plain("Run again"), PanelOutcome::RerunCheck(i)));
     }
     out
+}
+
+/// Whether some check of `feature` runs that hasn't been told to stop.
+fn can_stop_checks(feature: &Feature) -> bool {
+    checks_running(feature)
+        && (check_rows(feature, Stage::Verify).iter())
+            .any(|row| row.outcome.is_none() && !row.stopping)
 }
 
 /// The check an action on a card is about.
@@ -1903,6 +1954,9 @@ fn check_card(
     let took = |secs: u64| crate::test_runs::took(std::time::Duration::from_secs(secs));
     let mut said = Vec::new();
     match (tag, outcome) {
+        (FindingTag::Running | FindingTag::Queued, _) if row.is_some_and(|row| row.stopping) => {
+            said.push("stopping".to_owned());
+        }
         (FindingTag::Queued, _) => said.push("waiting for a check in this folder".to_owned()),
         (FindingTag::Running, _) => {
             let began = row.and_then(|row| row.began);
@@ -2161,13 +2215,15 @@ fn fresh_stage(feature: &Feature, row: PanelRow) -> Option<Stage> {
 /// The stage Ctrl+Shift+Del starts over on `stage`'s page of `feature`:
 /// the current one, once there is something to lose. Discover has no stage
 /// before it to free, and Ctrl+R starts its agent afresh. A fix plan open
-/// on the page goes first: that key drops it.
+/// on the page goes first: that key drops it. Not while work of the feature
+/// runs: it would write its result into the stage started over.
 fn start_over_stage(feature: &Feature, stage: Stage, ctx: RowCtx) -> Option<Stage> {
     let live = (feature.runs.get(&stage)).is_some_and(|run| run.live());
     (feature.status == Status::Open
         && feature.current() == Some(stage)
         && stage != Stage::Discover
         && fix_round_on(feature, stage).is_none()
+        && !ctx.feature_busy
         && (live || feature.has_output(stage, |s| ctx.has_file(s))))
     .then_some(stage)
 }
@@ -2844,11 +2900,15 @@ impl FeaturePanel {
             }
             Keysym::s if bare && self.focus == TabArea::Findings && !checks.is_empty() => {
                 let row = checks.get(self.finding)?.row?;
-                return Some(PanelOutcome::StopCheck(row));
+                // One that ended has nothing left to stop, one told already
+                // ends by itself.
+                let check = check_rows(feature, stage).get(row)?;
+                let goes = check.outcome.is_none() && !check.stopping;
+                return goes.then_some(PanelOutcome::StopCheck(row));
             }
             Keysym::space if bare && self.focus == TabArea::Findings && !checks.is_empty() => {
                 let check = checks.get(self.finding)?;
-                return skip_action(feature, stage, check).map(|(_, outcome)| outcome);
+                return skip_action(feature, stage, check, ctx).map(|(_, outcome)| outcome);
             }
             // All of them, from anywhere on the page.
             Keysym::r | Keysym::R
@@ -2864,7 +2924,7 @@ impl FeaturePanel {
                     && mods.shift
                     && self.focus != TabArea::Repos
                     && stage == Stage::Verify
-                    && checks_running(feature) =>
+                    && can_stop_checks(feature) =>
             {
                 return Some(PanelOutcome::StopChecks);
             }
@@ -3102,6 +3162,9 @@ fn page_enter(feature: &Feature, stage: Stage, ctx: RowCtx) -> Option<PanelOutco
         .into_iter()
         .find(|(b, _)| b.style == ButtonStyle::Primary)
         .map(|(_, outcome)| outcome)
+        // Its checks going, Enter says so: it never stops them, and never
+        // marks the stage done under them.
+        .or_else(|| verify_going(feature, stage, ctx).then_some(PanelOutcome::RunChecks))
         .or_else(|| row_action(feature, PanelRow::Stage(stage), ctx))
         .filter(|outcome| !matches!(outcome, PanelOutcome::Untick(_)))
 }
@@ -3378,7 +3441,9 @@ pub fn page_actions(
     if offers_setup(feature, stage) {
         let ran = (feature.setup.as_ref()).is_some_and(|run| run.finished.is_some());
         let label = if ran { "Set up again" } else { "Set up" };
-        out.push((button(label, ButtonStyle::Quiet), PanelOutcome::SetUp));
+        if can_set_up(feature, ctx) {
+            out.push((button(label, ButtonStyle::Quiet), PanelOutcome::SetUp));
+        }
         if offers_setup_log(feature, stage) {
             out.push((
                 button("Setup log", ButtonStyle::Quiet),
@@ -3456,14 +3521,22 @@ pub fn page_actions(
             PanelOutcome::RunFailed,
         ));
     }
-    if stage == Stage::Verify && checks_running(feature) {
-        out.push((
-            button("Stop all", ButtonStyle::Quiet),
-            PanelOutcome::StopChecks,
-        ));
+    if stage == Stage::Verify && can_stop_checks(feature) {
+        // First, as Run checks is when none runs. Not the primary: Enter
+        // pressed twice must not stop what it started.
+        out.insert(
+            0,
+            (
+                button("Stop all", ButtonStyle::Plain),
+                PanelOutcome::StopChecks,
+            ),
+        );
     }
     for (i, row) in check_rows(feature, stage).iter().enumerate() {
         out.extend(check_buttons(i, row, feature, current));
+    }
+    if verify_going(feature, stage, ctx) {
+        out.retain(|(_, outcome)| works_during_checks(outcome));
     }
     if stage == Stage::Ship {
         let one = feature.shipping.prs.len() == 1;
@@ -3511,6 +3584,12 @@ fn offers_setup(feature: &Feature, stage: Stage) -> bool {
         && feature.status == Status::Open
         && !feature.repos.is_empty()
         && stage_mark(feature, stage) != StageMark::Later
+}
+
+/// Whether a setup of `feature` can start now: not while one runs, nor under
+/// its checks, whose worktrees it would change.
+fn can_set_up(feature: &Feature, ctx: RowCtx) -> bool {
+    !ctx.setting_up && !checks_going(feature, ctx)
 }
 
 /// Whether `stage`'s page of `feature` offers what its setup runs and printed:
@@ -4067,6 +4146,9 @@ impl Gerdr {
             sandbox_busy: (self.features.build.sandbox_stops)
                 .contains_key(&(feature.project.clone(), feature.slug.clone())),
             all_skipped,
+            checks_busy: self.checks_busy(&feature.project, &feature.slug),
+            setting_up: self.setting_up(&feature.project, &feature.slug),
+            feature_busy: self.feature_busy(&feature.project, &feature.slug),
         }
     }
 
@@ -8830,19 +8912,20 @@ fn tab_hints(
                 hints.push(hint("Enter", "show terminal"));
             }
             let running = checks_running(feature);
-            if running && row.is_some_and(|row| row.outcome.is_none()) {
+            if running && row.is_some_and(|row| row.outcome.is_none() && !row.stopping) {
                 hints.push(hint("s", "stop"));
             }
-            if !running && feature.current() == Some(stage) && row.is_some() && !entry.skipped {
+            let going = checks_going(feature, ctx);
+            if !going && feature.current() == Some(stage) && row.is_some() && !entry.skipped {
                 hints.push(hint("r", "run again"));
             }
-            if let Some((label, _)) = skip_action(feature, stage, entry) {
+            if let Some((label, _)) = skip_action(feature, stage, entry, ctx) {
                 hints.push(hint("Space", &label.to_lowercase()));
             }
-            if has_failed_checks(feature, stage) {
+            if has_failed_checks(feature, stage) && !going {
                 hints.push(hint("Shift+R", "run failed"));
             }
-            if running {
+            if can_stop_checks(feature) {
                 hints.push(hint("Shift+S", "stop all"));
             }
             hints.push(hint("Tab", if repos { "repositories" } else { "stages" }));
@@ -8888,8 +8971,11 @@ fn tab_hints(
         _ => {
             let row = PanelRow::Stage(stage);
             hints.push(hint("Left / Right", "stage"));
+            let going = verify_going(feature, stage, ctx);
             let enter = match page_enter(feature, stage, ctx) {
                 Some(PanelOutcome::NotYet(_)) | None => "",
+                // It only says they run.
+                Some(PanelOutcome::RunChecks) if going => "",
                 Some(action) => action_hint(&action),
             };
             if !enter.is_empty() {
@@ -8905,10 +8991,10 @@ fn tab_hints(
                 hints.push(hint(REOPEN_KEY, "reopen"));
             }
             if let Some(round) = fix_round_on(feature, stage) {
-                if round.phase == FixPhase::Ready {
+                if round.phase == FixPhase::Ready && !going {
                     hints.push(hint("Ctrl+Enter", "make fixes"));
                 }
-                if round.fixes_stopped() {
+                if round.fixes_stopped() && !going {
                     hints.push(hint("Ctrl+Enter", "make fixes again"));
                 }
                 if round.can_drop() {
@@ -8916,16 +9002,16 @@ fn tab_hints(
                 }
             }
             // Manual test's has its own use for it.
-            if makes_fixes_again(feature, stage) && !tries_criteria(feature, stage) {
+            if makes_fixes_again(feature, stage) && !tries_criteria(feature, stage) && !going {
                 hints.push(hint("Ctrl+Enter", "make fixes again"));
             }
             if can_decide(feature, stage) {
                 hints.push(hint("c", "add comment\u{2026}"));
             }
-            if has_failed_checks(feature, stage) && feature.current() == Some(stage) {
+            if has_failed_checks(feature, stage) && feature.current() == Some(stage) && !going {
                 hints.push(hint("Shift+R", "run failed"));
             }
-            if stage == Stage::Verify && checks_running(feature) {
+            if stage == Stage::Verify && can_stop_checks(feature) {
                 hints.push(hint("Shift+S", "stop all"));
             }
             if !finding_cards(feature, stage).is_empty() && !panel.expanded {
@@ -8943,7 +9029,9 @@ fn tab_hints(
                 hints.push(hint("Ctrl+Shift+O", "fix plan"));
             }
             if offers_setup(feature, stage) {
-                hints.push(hint("Ctrl+Shift+U", "set up"));
+                if can_set_up(feature, ctx) {
+                    hints.push(hint("Ctrl+Shift+U", "set up"));
+                }
                 if offers_setup_log(feature, stage) {
                     hints.push(hint("Ctrl+Shift+I", "setup log"));
                 }
@@ -11236,6 +11324,291 @@ pub(crate) mod tests {
         let node = rail_node(&f, Stage::Verify, &state, 2_000);
         assert_eq!(node.mark, NodeMark::Ran);
         assert_ne!(node.line, "code changed");
+    }
+
+    /// The buttons at the title of Verify's page, not those on its cards.
+    fn verify_title_buttons(f: &Feature, ctx: RowCtx) -> Vec<String> {
+        (page_actions(f, Stage::Verify, ctx).into_iter())
+            .filter(|(_, o)| outcome_check(o).is_none())
+            .map(|(button, _)| button.label)
+            .collect()
+    }
+
+    #[test]
+    fn verify_offers_what_works_for_how_its_checks_stand() {
+        let ctx = RowCtx {
+            checks: true,
+            ..RowCtx::default()
+        };
+        // Before a run.
+        let before = feature("v", vec![repo("api", true)], 4);
+        assert_eq!(
+            verify_title_buttons(&before, ctx),
+            ["Run checks", "Set up", "Commands\u{2026}"]
+        );
+        // Starting, or waiting for a setup: nothing to stop yet.
+        let starting = RowCtx {
+            checks_busy: true,
+            ..ctx
+        };
+        assert_eq!(
+            verify_title_buttons(&before, starting),
+            ["Commands\u{2026}"]
+        );
+        // Running: Stop all first, and what only reads.
+        let running = verified(true);
+        assert_eq!(
+            verify_title_buttons(&running, ctx),
+            ["Stop all", "Evidence", "Commands\u{2026}"]
+        );
+        let stop = page_actions(&running, Stage::Verify, ctx).remove(0);
+        assert_eq!(stop.1, PanelOutcome::StopChecks);
+        assert_eq!(stop.0.style, ButtonStyle::Plain);
+        // Ended, failed.
+        let mut failed = verified(false);
+        failed.verify.as_mut().unwrap().passed = Some(false);
+        assert_eq!(
+            verify_title_buttons(&failed, ctx),
+            [
+                "Plan fixes",
+                "Run checks",
+                "Start over\u{2026}",
+                "Evidence",
+                "Set up",
+                "Commands\u{2026}",
+                "Run failed"
+            ]
+        );
+    }
+
+    #[test]
+    fn verify_cards_offer_stop_only_on_a_check_still_running() {
+        let ctx = RowCtx {
+            checks: true,
+            ..RowCtx::default()
+        };
+        let on_cards = |f: &Feature, ctx| -> Vec<PanelOutcome> {
+            (page_actions(f, Stage::Verify, ctx).into_iter())
+                .filter(|(_, o)| outcome_check(o).is_some())
+                .map(|(_, o)| o)
+                .collect()
+        };
+        assert_eq!(
+            on_cards(&verified(true), ctx),
+            [
+                PanelOutcome::ShowCheck(0),
+                PanelOutcome::ShowCheck(1),
+                PanelOutcome::StopCheck(1)
+            ]
+        );
+        let starting = RowCtx {
+            checks_busy: true,
+            ..ctx
+        };
+        let mut ended = verified(false);
+        ended.verify.as_mut().unwrap().passed = Some(false);
+        assert_eq!(
+            on_cards(&ended, starting),
+            [PanelOutcome::ShowCheck(0), PanelOutcome::ShowCheck(1)]
+        );
+        assert!(on_cards(&ended, ctx).contains(&PanelOutcome::RerunCheck(0)));
+    }
+
+    #[test]
+    fn a_check_told_to_stop_says_so_and_offers_no_stop_again() {
+        let ctx = RowCtx {
+            checks: true,
+            ..RowCtx::default()
+        };
+        let offered = |f: &Feature, o: PanelOutcome| {
+            (page_actions(f, Stage::Verify, ctx).iter()).any(|(_, x)| *x == o)
+        };
+        let mut f = verified(true);
+        assert!(offered(&f, PanelOutcome::StopCheck(1)));
+        assert!(offered(&f, PanelOutcome::StopChecks));
+        f.verify.as_mut().unwrap().checks[1].stopping = true;
+        // The only one running: nothing is left to stop.
+        assert!(!offered(&f, PanelOutcome::StopCheck(1)));
+        assert!(!offered(&f, PanelOutcome::StopChecks));
+        assert!(offered(&f, PanelOutcome::ShowCheck(1)));
+
+        let entries = check_entries(&f, Stage::Verify, &[]);
+        let card = check_card(&entries[1], &f, &PanelState::default(), &[], 2_000);
+        assert_eq!(card.tag, FindingTag::Running);
+        assert_eq!(card.state, "stopping");
+
+        // Another still going: Stop all stays for it.
+        f.verify.as_mut().unwrap().checks[0].outcome = None;
+        assert!(offered(&f, PanelOutcome::StopCheck(0)));
+        assert!(offered(&f, PanelOutcome::StopChecks));
+
+        // Neither its key nor the hints offer it again.
+        let slugs = vec!["v".to_owned()];
+        f.verify.as_mut().unwrap().checks[0].outcome = verified(false)
+            .verify
+            .unwrap()
+            .checks
+            .swap_remove(0)
+            .outcome;
+        let mut panel = FeaturePanel {
+            focus: TabArea::Findings,
+            finding: 1,
+            ..FeaturePanel::default()
+        };
+        let (mods, sym) = key(Keysym::s);
+        assert_eq!(panel.key(&mods, sym, &f, &slugs, ctx, &[]), None);
+        let keys: Vec<String> = (tab_hints(
+            &panel,
+            &f,
+            Stage::Verify,
+            &slugs,
+            ctx,
+            AgentChoices::default(),
+            &[],
+        )
+        .into_iter())
+        .map(|(key, _)| key)
+        .collect();
+        assert!(!keys.iter().any(|k| k == "s" || k == "Shift+S"), "{keys:?}");
+    }
+
+    #[test]
+    fn stopping_is_not_saved() {
+        let mut f = verified(true);
+        f.verify.as_mut().unwrap().checks[1].stopping = true;
+        let text = serde_json::to_string(&f).unwrap();
+        let back: Feature = serde_json::from_str(&text).unwrap();
+        assert!(!back.verify.unwrap().checks[1].stopping);
+    }
+
+    #[test]
+    fn enter_never_stops_the_checks_nor_marks_verify_done_under_them() {
+        let ctx = RowCtx {
+            checks: true,
+            ..RowCtx::default()
+        };
+        let running = verified(true);
+        assert_eq!(
+            page_enter(&running, Stage::Verify, ctx),
+            Some(PanelOutcome::RunChecks)
+        );
+        // Its checks edited away during the run: still not Mark done.
+        let none = RowCtx::default();
+        assert_eq!(
+            page_enter(&running, Stage::Verify, none),
+            Some(PanelOutcome::RunChecks)
+        );
+    }
+
+    #[test]
+    fn work_that_changes_the_code_waits_for_the_checks() {
+        let ctx = RowCtx {
+            checks: true,
+            ..RowCtx::default()
+        };
+        let offered = |f: &Feature, o: PanelOutcome| {
+            (page_actions(f, Stage::Verify, ctx).iter()).any(|(_, x)| *x == o)
+        };
+        let mut running = in_round(verified(true), Stage::Verify, FixPhase::Ready);
+        assert!(!offered(&running, PanelOutcome::MakeFixes));
+        assert!(offered(&running, PanelOutcome::ReviewFixPlan));
+        running.fix_round = None;
+        running.last_fix_round =
+            in_round(verified(true), Stage::Verify, FixPhase::Fixing).fix_round;
+        assert!(!offered(&running, PanelOutcome::MakeFixes));
+        assert!(offered(&running, PanelOutcome::ReviewFixPlan));
+        // On Build's page too: a setup would change the worktrees under them.
+        let build = |f: &Feature, ctx| {
+            (page_actions(f, Stage::Build, ctx).iter()).any(|(_, x)| *x == PanelOutcome::SetUp)
+        };
+        assert!(!build(&running, ctx));
+        let idle = feature("v", vec![repo("api", true)], 4);
+        assert!(build(&idle, ctx));
+        let setting_up = RowCtx {
+            setting_up: true,
+            ..ctx
+        };
+        assert!(!build(&idle, setting_up));
+    }
+
+    #[test]
+    fn start_over_goes_while_work_of_the_feature_runs() {
+        let mut failed = verified(false);
+        failed.verify.as_mut().unwrap().passed = Some(false);
+        let ctx = RowCtx {
+            checks: true,
+            ..RowCtx::default()
+        };
+        assert_eq!(
+            start_over_stage(&failed, Stage::Verify, ctx),
+            Some(Stage::Verify)
+        );
+        let busy = RowCtx {
+            feature_busy: true,
+            ..ctx
+        };
+        assert_eq!(start_over_stage(&failed, Stage::Verify, busy), None);
+    }
+
+    #[test]
+    fn verify_hints_match_its_buttons_while_checks_run() {
+        let slugs = vec!["v".to_owned()];
+        let ctx = RowCtx {
+            checks: true,
+            ..RowCtx::default()
+        };
+        let keys = |f: &Feature, ctx: RowCtx| -> Vec<String> {
+            let panel = FeaturePanel::default();
+            (tab_hints(
+                &panel,
+                f,
+                Stage::Verify,
+                &slugs,
+                ctx,
+                AgentChoices::default(),
+                &[],
+            )
+            .into_iter())
+            .map(|(key, _)| key)
+            .collect()
+        };
+        let running = keys(&verified(true), ctx);
+        assert!(!running.iter().any(|k| k == "Enter"), "{running:?}");
+        assert!(!running.iter().any(|k| k == "Ctrl+Shift+U"), "{running:?}");
+        assert!(running.iter().any(|k| k == "Shift+S"), "{running:?}");
+        let before = keys(&feature("v", vec![repo("api", true)], 4), ctx);
+        assert!(before.iter().any(|k| k == "Enter"), "{before:?}");
+        assert!(before.iter().any(|k| k == "Ctrl+Shift+U"), "{before:?}");
+        assert!(!before.iter().any(|k| k == "Shift+S"), "{before:?}");
+    }
+
+    #[test]
+    fn s_stops_a_check_still_running_only() {
+        let f = verified(true);
+        let ctx = RowCtx {
+            checks: true,
+            ..RowCtx::default()
+        };
+        let slugs = vec!["v".to_owned()];
+        let plan = [PlannedCheck {
+            repo: "api".into(),
+            command: "lint".into(),
+            skipped: false,
+            own: true,
+        }];
+        let mut panel = FeaturePanel {
+            focus: TabArea::Findings,
+            ..FeaturePanel::default()
+        };
+        let (mods, sym) = key(Keysym::s);
+        // Its first check ended, its second runs.
+        panel.finding = 0;
+        assert_eq!(panel.key(&mods, sym, &f, &slugs, ctx, &plan), None);
+        panel.finding = 1;
+        assert_eq!(
+            panel.key(&mods, sym, &f, &slugs, ctx, &plan),
+            Some(PanelOutcome::StopCheck(1))
+        );
     }
 
     #[test]
@@ -13852,7 +14225,7 @@ pub(crate) mod tests {
         let entries = check_entries(&f, Stage::Verify, &[planned("test", false, false)]);
         assert_eq!(entries[0].command, "lint");
         assert!(!entries[0].borrowed);
-        assert!(skip_action(&f, Stage::Verify, &entries[0]).is_none());
+        assert!(skip_action(&f, Stage::Verify, &entries[0], RowCtx::default()).is_none());
         assert!(check_entries(&f, Stage::Build, &plan).is_empty());
     }
 

@@ -3027,6 +3027,38 @@ fn feature_tab_verify_failed() -> super::FeatureTabView {
     view
 }
 
+/// Verify with its checks running: Stop all at the title's right, and only
+/// what works during a run beside it.
+fn feature_tab_verify_running() -> super::FeatureTabView {
+    use super::{ButtonStyle, CheckTone, NodeMark, PageButton, PageSection, StagePage};
+    use crate::feature::Stage;
+    let mut view = feature_tab();
+    at_stage(&mut view, 4, NodeMark::Current, "running");
+    let button = |label: &str, style| PageButton {
+        label: label.into(),
+        style,
+    };
+    view.page = StagePage {
+        title: "Verify".into(),
+        about: Stage::Verify.about().into(),
+        status: Some(tab_line(
+            "Verifying \u{201c}Export\u{201d}",
+            CheckTone::Note,
+        )),
+        buttons: vec![
+            button("Stop all", ButtonStyle::Plain),
+            button("Evidence", ButtonStyle::Plain),
+            button("Setup log", ButtonStyle::Quiet),
+            button("Commands\u{2026}", ButtonStyle::Quiet),
+        ],
+        sections: vec![PageSection::Lines {
+            label: "Checks \u{b7} 1 passed \u{b7} 2 running".into(),
+            lines: Vec::new(),
+        }],
+    };
+    view
+}
+
 /// `view` with the flow back at Build from stage `from`: what was done ran once.
 fn turned_back(view: &mut super::FeatureTabView, from: usize) {
     use super::NodeMark;
@@ -3842,11 +3874,12 @@ fn feature_tab_manual_test(note: bool) -> super::FeatureTabView {
 }
 
 /// The feature tab's fixtures, by name.
-fn feature_tabs() -> [(&'static str, super::FeatureTabView); 33] {
+fn feature_tabs() -> [(&'static str, super::FeatureTabView); 34] {
     [
         ("tab_build", feature_tab()),
         ("tab_plan_ready", feature_tab_plan_ready()),
         ("tab_verify_failed", feature_tab_verify_failed()),
+        ("tab_verify_running", feature_tab_verify_running()),
         ("tab_fix_plan", feature_tab_fix_plan()),
         ("tab_ship_blocked", feature_tab_ship_blocked()),
         ("tab_done", feature_tab_done()),
@@ -3890,12 +3923,13 @@ fn feature_tabs() -> [(&'static str, super::FeatureTabView); 33] {
 }
 
 /// Each fixture at the width it shows best at, and Build at all three.
-const TAB_SURFACES: [(&str, i32); 41] = [
+const TAB_SURFACES: [(&str, i32); 42] = [
     ("tab_build", 860),
     ("tab_build", 1180),
     ("tab_build", 1920),
     ("tab_plan_ready", 1180),
     ("tab_verify_failed", 1920),
+    ("tab_verify_running", 1180),
     ("tab_fix_plan", 860),
     ("tab_ship_blocked", 1180),
     ("tab_done", 1920),
@@ -3934,12 +3968,13 @@ const TAB_SURFACES: [(&str, i32); 41] = [
     ("tab_review_rounds", 1180),
 ];
 
-const FEATURE_TAB: [&str; 41] = [
+const FEATURE_TAB: [&str; 42] = [
     "tab_build_860",
     "tab_build_1180",
     "tab_build_1920",
     "tab_plan_ready_1180",
     "tab_verify_failed_1920",
+    "tab_verify_running_1180",
     "tab_fix_plan_860",
     "tab_ship_blocked_1180",
     "tab_done_1920",
@@ -3979,7 +4014,7 @@ const FEATURE_TAB: [&str; 41] = [
 ];
 
 /// The recorded hashes of `FEATURE_TAB`, per case in `CASES`.
-const GOLDEN_FEATURE_TAB: [[u64; 41]; 4] = [
+const GOLDEN_FEATURE_TAB: [[u64; 42]; 4] = [
     // Dark at 1
     [
         0xeea32b2dde14dbad, // tab_build_860
@@ -3987,6 +4022,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 41]; 4] = [
         0xb11ebf406b566492, // tab_build_1920
         0xc1278577e56967a2, // tab_plan_ready_1180
         0xe6c0a8c26922ed70, // tab_verify_failed_1920
+        0xceae385ff36ea8be, // tab_verify_running_1180
         0xcfa2304e2991cdb2, // tab_fix_plan_860
         0xda2f67811915ebb5, // tab_ship_blocked_1180
         0xb00d310aa6adb0d9, // tab_done_1920
@@ -4031,6 +4067,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 41]; 4] = [
         0x660947552ac763a4, // tab_build_1920
         0xd87da022045a2089, // tab_plan_ready_1180
         0xf060b4300361f434, // tab_verify_failed_1920
+        0x52a5d1ad9dffb717, // tab_verify_running_1180
         0x2b5e9dfc632c57ab, // tab_fix_plan_860
         0x379ac8c5c1f05b18, // tab_ship_blocked_1180
         0x4d6a8809d7dc9a9c, // tab_done_1920
@@ -4075,6 +4112,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 41]; 4] = [
         0x557a17f598e51cdb, // tab_build_1920
         0x1012d3e4c8093338, // tab_plan_ready_1180
         0x1446efceff05c114, // tab_verify_failed_1920
+        0xb9f4489df4669939, // tab_verify_running_1180
         0x62301cd9e6720d86, // tab_fix_plan_860
         0x728ffdd46aefb765, // tab_ship_blocked_1180
         0x3a0d691064b8edaa, // tab_done_1920
@@ -4119,6 +4157,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 41]; 4] = [
         0xe39bc64536ad6f24, // tab_build_1920
         0x9ba97245b9431b1d, // tab_plan_ready_1180
         0xc0a2a63f8deefc51, // tab_verify_failed_1920
+        0x1d13b9e1270b0ffc, // tab_verify_running_1180
         0xd8498ded5b6ad42e, // tab_fix_plan_860
         0x4cdb0a59ab2de925, // tab_ship_blocked_1180
         0x3ac49d19c9d059e8, // tab_done_1920
