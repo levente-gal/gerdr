@@ -3731,7 +3731,7 @@ fn feature_tab_manual_test(note: bool) -> super::FeatureTabView {
 }
 
 /// The feature tab's fixtures, by name.
-fn feature_tabs() -> [(&'static str, super::FeatureTabView); 29] {
+fn feature_tabs() -> [(&'static str, super::FeatureTabView); 31] {
     [
         ("tab_build", feature_tab()),
         ("tab_plan_ready", feature_tab_plan_ready()),
@@ -3777,7 +3777,7 @@ fn feature_tabs() -> [(&'static str, super::FeatureTabView); 29] {
 }
 
 /// Each fixture at the width it shows best at, and Build at all three.
-const TAB_SURFACES: [(&str, i32); 36] = [
+const TAB_SURFACES: [(&str, i32); 38] = [
     ("tab_build", 860),
     ("tab_build", 1180),
     ("tab_build", 1920),
@@ -3818,7 +3818,7 @@ const TAB_SURFACES: [(&str, i32); 36] = [
     ("tab_manual_note", 860),
 ];
 
-const FEATURE_TAB: [&str; 36] = [
+const FEATURE_TAB: [&str; 38] = [
     "tab_build_860",
     "tab_build_1180",
     "tab_build_1920",
@@ -3860,7 +3860,7 @@ const FEATURE_TAB: [&str; 36] = [
 ];
 
 /// The recorded hashes of `FEATURE_TAB`, per case in `CASES`.
-const GOLDEN_FEATURE_TAB: [[u64; 36]; 4] = [
+const GOLDEN_FEATURE_TAB: [[u64; 38]; 4] = [
     // Dark at 1
     [
         0x332b7228d6306b6d, // tab_build_860

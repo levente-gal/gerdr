@@ -11720,7 +11720,15 @@ pub(crate) mod tests {
         );
         // Writing a note, the footer has only its keys.
         panel.note = Some((1, TextField::default()));
-        let hints = tab_hints(&panel, &f, Stage::ManualTest, &slugs, ctx, &[], &[]);
+        let hints = tab_hints(
+            &panel,
+            &f,
+            Stage::ManualTest,
+            &slugs,
+            ctx,
+            AgentChoices::default(),
+            &[],
+        );
         assert_eq!(
             hints,
             [
