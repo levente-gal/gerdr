@@ -8,7 +8,7 @@
 
 use std::{
     ffi::{OsStr, OsString},
-    os::unix::process::CommandExt,
+    os::unix::{net::UnixStream, process::CommandExt},
     path::Path,
     process::{Child, Command, Stdio},
     time::{Duration, Instant},
@@ -152,9 +152,15 @@ fn free_display(tmp: &Path, wayland: &OsStr) -> Option<u32> {
         .find(|n| !display_taken(tmp, *n))
 }
 
-/// Whether a running X server holds display `number`. A lock file left by one
-/// that crashed doesn't count: the next server replaces it.
+/// Whether a running X server holds display `number`. It answers on its socket;
+/// not every server writes a lock file, and `xwayland-satellite` doesn't. A lock
+/// file or socket left by one that crashed doesn't count: the next server
+/// replaces it.
 fn display_taken(tmp: &Path, number: u32) -> bool {
+    let socket = tmp.join(format!(".X11-unix/X{number}"));
+    if UnixStream::connect(socket).is_ok() {
+        return true;
+    }
     let Ok(lock) = std::fs::read_to_string(tmp.join(format!(".X{number}-lock"))) else {
         return false;
     };
@@ -192,6 +198,22 @@ mod tests {
         let me = format!("{:>10}\n", std::process::id());
         std::fs::write(tmp.join(".X100-lock"), me).unwrap();
         assert_eq!(free_display(&tmp, OsStr::new("gerdr-0")), Some(101));
+    }
+
+    #[test]
+    fn a_display_a_server_answers_on_is_skipped() {
+        let tmp = scratch("socket");
+        std::fs::create_dir_all(tmp.join(".X11-unix")).unwrap();
+        let _server = std::os::unix::net::UnixListener::bind(tmp.join(".X11-unix/X100")).unwrap();
+        assert_eq!(free_display(&tmp, OsStr::new("gerdr-0")), Some(101));
+    }
+
+    #[test]
+    fn a_socket_left_by_a_crashed_server_frees_its_display() {
+        let tmp = scratch("dead");
+        std::fs::create_dir_all(tmp.join(".X11-unix")).unwrap();
+        drop(std::os::unix::net::UnixListener::bind(tmp.join(".X11-unix/X100")).unwrap());
+        assert_eq!(free_display(&tmp, OsStr::new("gerdr-0")), Some(100));
     }
 
     #[test]

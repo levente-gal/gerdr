@@ -1348,6 +1348,15 @@ pub fn program_name(command: &str) -> Option<String> {
     program(command).map(|(name, ..)| name)
 }
 
+/// `program` as the user knows it: a Flatpak goes by its app id, of which the
+/// last word is the app (`org.freecad.FreeCAD`).
+pub fn shown_name(program: &str) -> &str {
+    if program.matches('.').count() < 2 {
+        return program;
+    }
+    program.rsplit('.').next().unwrap_or(program)
+}
+
 /// The VS Code `command` starts (`cursor`, `code`…), by program, if any:
 /// one copy runs gerdr's profile and the next ones hand it their window.
 fn vs_code_of(command: &str) -> Option<String> {
@@ -1652,6 +1661,13 @@ mod tests {
         );
         assert_eq!(vs_code_of("zed ."), None);
         assert_eq!(vs_code_of("ghostty -e htop"), None);
+    }
+
+    #[test]
+    fn a_flatpak_shows_by_the_last_word_of_its_id() {
+        assert_eq!(super::shown_name("org.freecad.FreeCAD"), "FreeCAD");
+        assert_eq!(super::shown_name("freecad"), "freecad");
+        assert_eq!(super::shown_name("tool.sh"), "tool.sh");
     }
 
     #[test]

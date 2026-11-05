@@ -278,6 +278,9 @@ pub struct Pane {
     /// Another window of the app kept running that this command started
     /// (see `keep`), which comes back to the pane by its title.
     pub window_of: Option<String>,
+    /// The launched X11 app this window was taken for, while it may show a
+    /// window of its own in its place (see `remove_window`).
+    pub x11_app: Option<u32>,
 }
 
 /// A process we started for a tab whose window hasn't shown up yet.
@@ -320,6 +323,10 @@ pub struct Expected {
     /// Not started yet, as it keeps its logins in the keyring, which is
     /// locked (see `keyring`): started once it is open.
     pub held: bool,
+    /// An X11 app that already showed a window, which closed while the app
+    /// runs on (see `remove_window`). If no other comes, it quit or doesn't
+    /// want one, and that is nothing to report.
+    pub showed_window: bool,
 }
 
 impl Expected {
@@ -338,6 +345,7 @@ impl Expected {
             kept: false,
             window_of: None,
             held: false,
+            showed_window: false,
         }
     }
 
@@ -360,9 +368,13 @@ impl Expected {
     /// Whether it is a launched app still waiting for its window, which may
     /// come through the X11 bridge (see `x11`).
     fn waits_for_x11_window(&self) -> bool {
-        self.pid.is_some()
-            && self.exited.is_none()
-            && self.app_id.is_empty()
+        self.pid.is_some() && self.exited.is_none() && self.is_launched_app()
+    }
+
+    /// Whether it is an app the user started: one that gives no app_id to
+    /// wait for, and isn't a terminal or a kept app's.
+    fn is_launched_app(&self) -> bool {
+        self.app_id.is_empty()
             && self.app_command.is_some()
             && self.herdr.is_none()
             && !self.kept
@@ -832,6 +844,11 @@ fn window_app_id(window: &Window) -> String {
         data.lock().unwrap().app_id.clone()
     })
     .unwrap_or_default()
+}
+
+fn process_exists(pid: u32) -> bool {
+    // Safety: signal 0 sends nothing, it only asks whether the process exists.
+    unsafe { libc::kill(pid as i32, 0) == 0 }
 }
 
 /// Whether `window` keeps one size whatever it is offered.
@@ -4836,6 +4853,9 @@ impl Gerdr {
         let mut overdue = Vec::new();
         // Apps that went wrong before they showed a window.
         let mut no_window = Vec::new();
+        // Apps that ended well, with no window: maybe they handed over to a
+        // copy already running (`--single-instance`).
+        let mut handed_over = Vec::new();
         // Tabs showing a window of an X11 app.
         let x11_tabs: Vec<u64> = self
             .workspaces
@@ -4854,7 +4874,9 @@ impl Gerdr {
             tab.expected.retain_mut(|e| {
                 // No other window is coming: the app's only one has a fixed
                 // size, and took the place of a splash screen (see `place`).
-                if shows_x11 && e.waits_for_x11_window() && e.is_overdue(now) {
+                // Nor after an app's window that closed, if it runs on.
+                let no_more = shows_x11 || e.showed_window;
+                if no_more && e.waits_for_x11_window() && e.is_overdue(now) {
                     gone.push(e.pane);
                     return false;
                 }
@@ -4894,10 +4916,14 @@ impl Gerdr {
                     stopped = true;
                     return true;
                 }
-                if e.pid.is_some_and(|pid| failed.contains(&pid))
+                if !e.showed_window
                     && let Some(app) = e.app_command.as_deref().and_then(launch::program_name)
                 {
-                    no_window.push(app);
+                    if e.pid.is_some_and(|pid| failed.contains(&pid)) {
+                        no_window.push(app);
+                    } else if e.is_launched_app() && !shows_x11 {
+                        handed_over.push(app);
+                    }
                 }
                 gone.push(e.pane);
                 false
@@ -4931,11 +4957,19 @@ impl Gerdr {
             );
             if self.x11.display().is_some() {
                 let open_log = ("Open log".to_owned(), MenuAction::OpenLog);
-                let text = format!("{app} closed without a window");
+                let name = launch::shown_name(&app);
+                let text = format!("{name} closed without a window");
                 self.toast_with(text, Level::Error, Some(open_log));
             } else {
-                self.report_problem(x11::PROBLEM, x11::no_bridge_text(&app));
+                let text = x11::no_bridge_text(launch::shown_name(&app));
+                self.report_problem(x11::PROBLEM, text);
             }
+        }
+        for app in handed_over {
+            let name = launch::shown_name(&app);
+            self.show_warning(format!(
+                "{name} closed without a window; it may be running already"
+            ));
         }
         self.retired_groups.retain(|g| group_alive(*g));
         self.poll_picker();
@@ -5216,6 +5250,7 @@ impl Gerdr {
             app_command: e.app_command,
             stray: false,
             window_of: e.window_of.map(|(command, _)| command),
+            x11_app: e.pid.filter(|_| from_bridge),
         };
         self.add_pane(w, t, pane, e.focus);
         if dropped {
@@ -5277,6 +5312,7 @@ impl Gerdr {
             app_command: None,
             stray,
             window_of,
+            x11_app: None,
         };
         self.add_pane(w, t, pane, true);
     }
@@ -5495,6 +5531,25 @@ impl Gerdr {
             e.closed = true;
             tab.expected.push(e);
             if tab.focused.as_ref() == Some(&pane.window) {
+                tab.focused = tab.panes.first().map(|p| p.window.clone());
+            }
+            self.arrange();
+            if self.is_visible(w, t) {
+                self.focus(self.workspaces[w].tabs[t].focused.clone());
+            }
+            return;
+        }
+        // An X11 app's window that closes while the app runs on (a splash
+        // screen that didn't look like one, a first dialog): its main window
+        // is still to come, and goes in the same place. Without this the tab
+        // would close, and that window open in whichever tab is shown then.
+        if !asked && pane.x11_app.is_some_and(process_exists) {
+            let focus = tab.focused.as_ref() == Some(&pane.window);
+            let mut e = Expected::new(pane.x11_app, "", pane.id, focus);
+            e.app_command = pane.app_command;
+            e.showed_window = true;
+            tab.expected.push(e);
+            if focus {
                 tab.focused = tab.panes.first().map(|p| p.window.clone());
             }
             self.arrange();
@@ -7361,6 +7416,7 @@ mod tests {
             e
         };
         assert!(launched().waits_for_x11_window());
+        assert!(launched().is_launched_app());
         let mut queued = launched();
         queued.pid = None;
         assert!(!queued.waits_for_x11_window());
