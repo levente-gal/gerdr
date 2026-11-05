@@ -628,6 +628,9 @@ pub enum DetailRow {
         /// What the AI reviewer found; none for the user's own.
         finding: Option<FindingHead>,
         place: String,
+        /// It is the user's comment on a finding: inside that card, of this
+        /// tone.
+        within: Option<Tone>,
     },
     /// A row of a review comment: the last of its rows rounds its card. An
     /// AI review finding's card takes its `tone` (by severity, muted once
@@ -637,6 +640,9 @@ pub enum DetailRow {
         first: bool,
         last: bool,
         tone: Option<Tone>,
+        /// It is of the user's comment on a finding: inside that card, of
+        /// this tone. `last` is of them both.
+        within: Option<Tone>,
     },
     /// A row of the comment being written: with the caret on it, its byte
     /// in `text`; the selection on it, by bytes in `text`.
@@ -646,6 +652,9 @@ pub enum DetailRow {
         selection: Range<usize>,
         first: bool,
         last: bool,
+        /// It writes the user's comment on a finding: inside that card, of
+        /// this tone.
+        within: Option<Tone>,
     },
 }
 
@@ -789,6 +798,8 @@ pub enum ReposButton {
     Comment,
     /// Write a comment on the whole of the file under review.
     CommentFile,
+    /// Ask for the fix of the AI review finding the cursor is on.
+    EditFix,
     SaveComment,
     DiscardComment,
     DeleteComment,
@@ -884,6 +895,7 @@ impl ReposButton {
             ReposButton::SaveComment => "Save",
             ReposButton::DiscardComment => "Discard",
             ReposButton::DeleteComment => "Delete",
+            ReposButton::EditFix => "Edit fix\u{2026}",
             ReposButton::Restore => "Restore",
             ReposButton::Refresh => "Refresh",
             ReposButton::DeleteBranchMenu => "Delete a branch…",
@@ -4260,10 +4272,24 @@ impl Painter {
                     p.placeholder,
                 );
             }
-            DetailRow::CommentHead { finding, place } => {
+            DetailRow::CommentHead {
+                finding,
+                place,
+                within,
+            } => {
+                let room = self.finding_around(
+                    c,
+                    *within,
+                    (bx + inset, bend),
+                    row_band,
+                    false,
+                    lit.is_some(),
+                    scale,
+                    p,
+                );
                 self.comment_head(
                     c,
-                    (bx + inset, bend),
+                    room,
                     row_band,
                     (finding.as_ref(), place),
                     lit.is_some(),
@@ -4276,25 +4302,23 @@ impl Painter {
                 first,
                 last,
                 tone,
+                within,
             } => {
+                let (x0, x1) = self.finding_around(
+                    c,
+                    *within,
+                    (bx + inset, bend),
+                    row_band,
+                    *last,
+                    lit.is_some(),
+                    scale,
+                    p,
+                );
                 // A finding's card in its severity's colour.
                 let accent = tone.map_or(p.accent, |t| tone_color(t, p));
                 let fill = mix(p.elevated, accent, if lit.is_some() { 0.2 } else { 0.1 });
-                let tx = self.comment_card(
-                    c,
-                    (bx + inset, bend),
-                    row_band,
-                    (*first, *last),
-                    fill,
-                    scale,
-                );
-                c.fill(
-                    (bx + inset) as i32,
-                    y,
-                    px(2).max(1),
-                    h,
-                    mix(p.elevated, accent, 0.7),
-                );
+                let tx = self.comment_card(c, (x0, x1), row_band, (*first, *last), fill, scale);
+                c.fill(x0 as i32, y, px(2).max(1), h, mix(p.elevated, accent, 0.7));
                 // What the search found in it, tinted on the card.
                 let width = |t: &str| self.mono_width(t, REPOS_MONO_SIZE, scale);
                 let found = &look.found;
@@ -4312,8 +4336,18 @@ impl Painter {
                 selection,
                 first,
                 last,
+                within,
             } => {
-                let (x0, x1) = (bx + inset, bend);
+                let (x0, x1) = self.finding_around(
+                    c,
+                    *within,
+                    (bx + inset, bend),
+                    row_band,
+                    *last,
+                    lit.is_some(),
+                    scale,
+                    p,
+                );
                 self.comment_card(c, (x0, x1), row_band, (*first, *last), p.accent, scale);
                 let b = border as f32;
                 let (top, bottom) = (if *first { b } else { 0.0 }, if *last { b } else { 0.0 });
@@ -4430,6 +4464,39 @@ impl Painter {
             c.rounded(x0, top, x1 - x0, bottom - top, r, fill);
         });
         x0 + (COMMENT_INDENT as f32 * s).round()
+    }
+
+    /// With `within`, the row of a finding's card from `x.0` to `x.1` that
+    /// holds the user's comment on it, in its tone, the card's end at `last`.
+    /// Returns where the comment's own card goes.
+    #[allow(clippy::too_many_arguments)]
+    fn finding_around(
+        &self,
+        c: &mut Canvas,
+        within: Option<Tone>,
+        (x0, x1): (f32, f32),
+        row_band: (i32, i32),
+        last: bool,
+        lit: bool,
+        scale: f64,
+        p: &Palette,
+    ) -> (f32, f32) {
+        let Some(tone) = within else {
+            return (x0, x1);
+        };
+        let s = scale as f32;
+        let accent = tone_color(tone, p);
+        let fill = mix(p.elevated, accent, if lit { 0.2 } else { 0.1 });
+        self.comment_card(c, (x0, x1), row_band, (false, last), fill, scale);
+        c.fill(
+            x0 as i32,
+            row_band.0,
+            (2.0 * s).round().max(1.0) as i32,
+            row_band.1,
+            mix(p.elevated, accent, 0.7),
+        );
+        let pad = (COMMENT_INDENT as f32 * s).round();
+        (x0 + pad, x1 - pad)
     }
 
     /// A review comment's heading, the first row of its card, says whose
@@ -5755,18 +5822,21 @@ mod tests {
                     DetailRow::CommentHead {
                         finding: None,
                         place: "comment 1 of 1".into(),
+                        within: None,
                     },
                     DetailRow::Comment {
                         text: "Why -z here? Paths with newlines".into(),
                         first: false,
                         last: false,
                         tone: None,
+                        within: None,
                     },
                     DetailRow::Comment {
                         text: "need it, but check the parser.".into(),
                         first: false,
                         last: true,
                         tone: None,
+                        within: None,
                     },
                     DetailRow::Editor {
                         text: "And the caller".into(),
@@ -5774,6 +5844,7 @@ mod tests {
                         selection: 4..7,
                         first: true,
                         last: true,
+                        within: None,
                     },
                     DetailRow::Note("Shift+Enter breaks the line".into()),
                     DetailRow::Note("Binary file".into()),

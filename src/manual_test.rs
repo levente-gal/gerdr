@@ -20,7 +20,7 @@ use crate::{
         manual::{self, Criterion, Verdict},
         store,
     },
-    features::plural,
+    features::{CardNote, plural},
     text_field::TextField,
 };
 
@@ -215,8 +215,8 @@ impl Gerdr {
         self.probe_feature(project, slug);
     }
 
-    /// Criterion `i` has the keyboard, and shows.
-    fn select_criterion(&mut self, i: usize) {
+    /// Card `i` has the keyboard, and shows.
+    pub(crate) fn select_criterion(&mut self, i: usize) {
         if let Some(panel) = self.features.panel.as_mut() {
             panel.focus = TabArea::Findings;
             panel.finding = i;
@@ -233,11 +233,15 @@ impl Gerdr {
         let Some(feature) = self.feature(&panel.project, &panel.slug) else {
             return false;
         };
+        let stage = match panel.note {
+            Some((CardNote::Finding(_), _)) => Stage::AiReview,
+            _ => Stage::ManualTest,
+        };
         !panel.keys
             && !panel.expanded
-            && panel.page_stage(feature) == Stage::ManualTest
+            && panel.page_stage(feature) == stage
             && feature.status == Status::Open
-            && feature.current() == Some(Stage::ManualTest)
+            && feature.current() == Some(stage)
     }
 
     /// A key while the note of a criterion is being written; false when none
@@ -257,13 +261,28 @@ impl Gerdr {
             self.keep_criterion_note();
             return false;
         }
-        let Some((_, field)) = (self.features.panel.as_mut()).and_then(|p| p.note.as_mut()) else {
+        let Some((on, field)) = (self.features.panel.as_mut()).and_then(|p| p.note.as_mut()) else {
             return false;
         };
+        let finding = match on {
+            CardNote::Finding(id) => Some(id.clone()),
+            CardNote::Criterion(_) => None,
+        };
         match sym {
-            Keysym::Return | Keysym::KP_Enter if field.trim().is_empty() => {
-                self.show_warning(NO_NOTE.into());
-            }
+            Keysym::Return | Keysym::KP_Enter if field.trim().is_empty() => match finding {
+                // Emptied, it goes; nothing there, there is nothing to do.
+                Some(id) => {
+                    let panel = self.features.panel.as_mut();
+                    let Some((project, slug)) = panel.map(|p| {
+                        p.note = None;
+                        (p.project.clone(), p.slug.clone())
+                    }) else {
+                        return true;
+                    };
+                    self.delete_finding_comment(&project, &slug, &id);
+                }
+                None => self.show_warning(NO_NOTE.into()),
+            },
             Keysym::Return | Keysym::KP_Enter | Keysym::Escape => {
                 self.keep_criterion_note();
             }
@@ -283,12 +302,21 @@ impl Gerdr {
     /// never thrown away. False when it could not be saved yet, and goes on
     /// being written.
     pub(crate) fn keep_criterion_note(&mut self) -> bool {
-        let Some((i, field)) = (self.features.panel.as_mut()).and_then(|p| p.note.take()) else {
+        let Some((on, field)) = (self.features.panel.as_mut()).and_then(|p| p.note.take()) else {
             return true;
         };
         let note = field.trim().to_owned();
         if !note.is_empty() {
-            self.apply_manual_test(Outcome::Fail(i, note));
+            match on {
+                CardNote::Criterion(i) => self.apply_manual_test(Outcome::Fail(i, note)),
+                CardNote::Finding(id) => {
+                    let names =
+                        (self.features.panel.as_ref()).map(|p| (p.project.clone(), p.slug.clone()));
+                    if let Some((project, slug)) = names {
+                        self.note_finding(&project, &slug, &id, &note);
+                    }
+                }
+            }
         }
         !self.writing_criterion_note()
     }
@@ -438,7 +466,7 @@ impl Gerdr {
         let mut field = TextField::default();
         field.set(note);
         if let Some(panel) = self.features.panel.as_mut() {
-            panel.note = Some((i, field));
+            panel.note = Some((CardNote::Criterion(i), field));
         }
         self.stop_key_repeat();
         self.select_criterion(i);

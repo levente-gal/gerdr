@@ -53,11 +53,29 @@ pub const NO_FINDING: &str = "Move the cursor to a finding first";
 pub const YOUR_COMMENT: &str = "This is your comment: c edits it, Del drops it";
 /// Why a dismissal did nothing.
 pub const NO_REASON: &str = "Not dismissed: say why first";
+/// Why a finding can't be commented on or reworded now.
+const NOTES_CLOSED: &str = "A finding changes only while AI review decides";
 /// Why `]` and `[` did nothing.
 pub const NO_COMMENTS: &str = "No findings or comments here";
 
 /// How an AI review finding's card is coloured: by severity, muted once
 /// dismissed.
+/// How many characters less a row of the user's comment on a finding holds,
+/// its card being inside the finding's.
+const NOTE_COLS: usize = 4;
+
+/// Whether `comment` is the user's comment on an AI review finding.
+fn is_note(comment: &Comment) -> bool {
+    comment.flag.as_ref().is_some_and(|flag| flag.note)
+}
+
+/// The tone of the finding whose card `comment` is inside, if it is.
+fn note_tone(comment: &Comment) -> Option<Tone> {
+    (comment.flag.as_ref())
+        .filter(|flag| flag.note)
+        .map(finding_tone)
+}
+
 fn finding_tone(flag: &review::Flag) -> Tone {
     use crate::feature::review_import::Severity;
     match (flag.state, flag.severity) {
@@ -235,9 +253,12 @@ pub struct Signals {
     /// What the user decided of an AI review finding shown as a comment,
     /// by its id (see `review::Flag`).
     pub decided: Option<(String, Decision)>,
-    /// The AI review finding to edit, by its id: its fix and the user's
-    /// comment on it are asked for in a dialog.
+    /// The AI review finding to edit, by its id: its fix, or what the user's
+    /// own item says, is asked for in a dialog.
     pub edit_finding: Option<String>,
+    /// What the user's comment on an AI review finding now says, by the
+    /// finding's id: empty, it is deleted.
+    pub noted: Option<(String, String)>,
 }
 
 /// What the diff scrolls to: a checkout's header, a file's, or the first
@@ -283,6 +304,9 @@ pub struct DiffView {
     pub(crate) cursor: Option<Cursor>,
     /// The comment being written.
     pub(crate) editing: Option<Editing>,
+    /// The user's comments on AI review's findings can change: the feature
+    /// is at AI review, its findings read in.
+    pub(crate) notes_open: bool,
     /// Each comment's rows (by index into `review.comments`) and the
     /// editor's, as byte ranges into their text, wrapped at `cols`.
     comment_wraps: Vec<Vec<Range<usize>>>,
@@ -345,6 +369,9 @@ pub(crate) struct Editing {
     /// The reason AI review finding `at` (its id here) is dismissed for,
     /// written in place of a comment.
     dismiss: Option<String>,
+    /// The user's comment on this AI review finding: under the finding `at`
+    /// when it is new, in place of the comment `at` when it is written.
+    note_on: Option<String>,
 }
 
 /// A diff row by who it is, to find it again as the rows change.
@@ -665,14 +692,18 @@ impl DiffView {
     pub(crate) fn build_rows(&mut self, items: &[Section], anchor: Option<Anchor>) {
         let cols = if self.cols == 0 { 80 } else { self.cols };
         let comments = &self.review.comments;
+        let nested = cols.saturating_sub(NOTE_COLS).max(1);
         self.comment_wraps = comments
             .iter()
-            .map(|c| review::wrap(&c.text, cols))
+            .map(|c| review::wrap(&c.text, if is_note(c) { nested } else { cols }))
             .collect();
         self.editor_wrap = self
             .editing
             .as_ref()
-            .map(|e| review::wrap(&e.field, cols))
+            .map(|e| match e.note_on {
+                Some(_) => review::wrap(&e.field, nested),
+                None => review::wrap(&e.field, cols),
+            })
             .unwrap_or_default();
         // Shown under their lines, or waiting for their diffs.
         let mut placed: HashSet<usize> = HashSet::new();
@@ -819,7 +850,10 @@ impl DiffView {
             rows.push(DiffRow::Outdated(None));
             for &c in &gone {
                 order.push((c, rows.len()));
-                rows.push(DiffRow::Outdated(Some(c)));
+                // A comment on a finding goes under the finding's place.
+                if !comments.get(c).is_some_and(is_note) {
+                    rows.push(DiffRow::Outdated(Some(c)));
+                }
                 self.push_comment(&mut rows, None, c);
             }
             if lost {
@@ -833,6 +867,8 @@ impl DiffView {
         self.noted = noted;
         self.line_parts = line_parts;
         self.rows = rows;
+        // A comment on a finding is part of the finding: no stop of its own.
+        order.retain(|&(c, _)| !comments.get(c).is_some_and(is_note));
         self.comment_order = order;
         self.roots = items.iter().map(|i| i.root.to_path_buf()).collect();
         self.find_hits(false);
@@ -856,14 +892,17 @@ impl DiffView {
     /// it is edited.
     fn push_comment(&self, rows: &mut Vec<DiffRow>, at: Option<(usize, usize)>, c: usize) {
         let edited = self.editing.as_ref().filter(|e| e.at == Some(c));
-        if edited.is_some_and(|e| e.dismiss.is_none()) {
+        // Under it: a finding's dismissal, or a first comment on a finding.
+        let on_finding = (self.review.comments.get(c)).is_some_and(|c| !is_note(c));
+        let under =
+            edited.is_some_and(|e| e.dismiss.is_some() || (e.note_on.is_some() && on_finding));
+        if edited.is_some() && !under {
             return self.push_editor(rows, at);
         }
         let n = self.comment_wraps.get(c).map_or(1, Vec::len);
         rows.push(DiffRow::CommentHead { at, c });
         rows.extend((0..n).map(|i| DiffRow::Comment { at, c, i }));
-        // A finding being dismissed: the reason under it.
-        if edited.is_some() {
+        if under {
             self.push_editor(rows, at);
         }
     }
@@ -1423,6 +1462,7 @@ impl DiffView {
             lines,
             field: TextField::multiline(""),
             dismiss: None,
+            note_on: None,
         });
         self.build_rows(ctx.sections, self.diff_anchor());
         self.follow_editor(ctx);
@@ -1446,6 +1486,7 @@ impl DiffView {
             lines: Vec::new(),
             field: TextField::multiline(""),
             dismiss: None,
+            note_on: None,
         });
         self.build_rows(ctx.sections, self.diff_anchor());
         self.follow_editor(ctx);
@@ -1457,7 +1498,12 @@ impl DiffView {
             return;
         };
         if let Some(flag) = &comment.flag {
-            self.signals.edit_finding = Some(flag.id.clone());
+            // The user's own item is reworded where it was written.
+            if flag.yours && !flag.note {
+                self.signals.edit_finding = Some(flag.id.clone());
+            } else {
+                self.write_note(c, ctx);
+            }
             return;
         }
         self.signals.error = Some(None);
@@ -1469,9 +1515,72 @@ impl DiffView {
             lines: comment.lines.clone(),
             field: TextField::multiline(&comment.text),
             dismiss: None,
+            note_on: None,
         });
         self.build_rows(ctx.sections, self.diff_anchor());
         self.follow_editor(ctx);
+    }
+
+    /// Why the user's comment on finding `flag` can't change now, if so.
+    fn note_refused(&self, flag: &review::Flag) -> Option<String> {
+        if !self.notes_open {
+            return Some(NOTES_CLOSED.into());
+        }
+        review_import::editable_state(&flag.id, flag.state).err()
+    }
+
+    /// Open the editor on the user's comment on the finding comment `c` is,
+    /// or is the comment on: under the finding when there is none yet.
+    fn write_note(&mut self, c: usize, ctx: &Ctx) {
+        let comments = &self.review.comments;
+        let Some(flag) = comments.get(c).and_then(|comment| comment.flag.clone()) else {
+            return;
+        };
+        if let Some(why) = self.note_refused(&flag) {
+            self.signals.error = Some(Some(why));
+            return;
+        }
+        let at = match flag.note || !self.has_note(c) {
+            true => c,
+            false => c + 1,
+        };
+        let comment = &comments[at];
+        let text = if is_note(comment) {
+            comment.text.as_str()
+        } else {
+            ""
+        };
+        self.signals.error = Some(None);
+        self.signals.focus = true;
+        self.editing = Some(Editing {
+            at: Some(at),
+            root: comment.root.clone(),
+            path: comment.path.clone(),
+            lines: comment.lines.clone(),
+            field: TextField::multiline(text),
+            dismiss: None,
+            note_on: Some(flag.id),
+        });
+        self.build_rows(ctx.sections, self.diff_anchor());
+        self.follow_editor(ctx);
+    }
+
+    /// Whether the finding comment `c` is has the user's comment under it.
+    fn has_note(&self, c: usize) -> bool {
+        (self.review.comments.get(c + 1)).is_some_and(is_note)
+    }
+
+    /// Shift+E on a finding: ask for its fix. Whether the cursor is on one.
+    fn edit_fix(&mut self) -> bool {
+        let Some((_, flag)) = self.finding_here() else {
+            return false;
+        };
+        let id = flag.id.clone();
+        match self.note_refused(flag) {
+            Some(why) => self.signals.error = Some(Some(why)),
+            None => self.signals.edit_finding = Some(id),
+        }
+        true
     }
 
     /// Whether a finding's dismissal is being written with no reason yet.
@@ -1499,6 +1608,15 @@ impl DiffView {
             return;
         };
         let text = editing.field.trim().to_owned();
+        if let Some(id) = editing.note_on {
+            // The record has it, and shows it again from there. Nothing
+            // written where there was nothing: nothing to do.
+            let comment = editing.at.and_then(|c| self.review.comments.get(c));
+            if comment.is_some_and(is_note) || !text.is_empty() {
+                self.signals.noted = Some((id, text));
+            }
+            return self.build_rows(ctx.sections, self.diff_anchor());
+        }
         if let Some(id) = editing.dismiss {
             // No reason, no dismissal.
             self.signals.error = Some(match text.is_empty() {
@@ -1548,6 +1666,12 @@ impl DiffView {
         let Some(c) = self.comment_at(cursor.row) else {
             return;
         };
+        if let Some(flag) = self.note_here().map(|(_, flag)| flag)
+            && let Some(why) = self.note_refused(flag)
+        {
+            self.signals.error = Some(Some(why));
+            return;
+        }
         if self.delete_armed != Some(c) {
             self.delete_armed = Some(c);
             let why = "Press Del again to delete the comment";
@@ -1556,6 +1680,12 @@ impl DiffView {
         }
         self.delete_armed = None;
         self.signals.error = Some(None);
+        if self.delete_note() {
+            return;
+        }
+        let Some(cursor) = &self.cursor else {
+            return;
+        };
         let first = self.find_row(&RowKey::Comment(c)).unwrap_or(cursor.row);
         let above = self.cursor_stop(first.saturating_sub(1), -1);
         self.set_cursor(above, None);
@@ -1572,6 +1702,20 @@ impl DiffView {
         self.review.comments.remove(c);
         self.review_dirty = true;
         self.build_rows(ctx.sections, self.diff_anchor());
+    }
+
+    /// Delete the user's comment on a finding the cursor is on, the cursor
+    /// going to the finding. Whether it was on one.
+    fn delete_note(&mut self) -> bool {
+        let Some((c, flag)) = self.note_here() else {
+            return false;
+        };
+        let id = flag.id.clone();
+        if let Some(first) = self.find_row(&RowKey::Comment(c - 1)) {
+            self.set_cursor(first, None);
+        }
+        self.signals.noted = Some((id, String::new()));
+        true
     }
 
     /// The cursor's keys on comments from `from` on moved `by` (one was
@@ -1597,7 +1741,21 @@ impl DiffView {
     /// `review.comments`, and where it stands.
     fn finding_here(&self) -> Option<(usize, &review::Flag)> {
         let c = self.comment_at(self.cursor.as_ref()?.row)?;
-        Some((c, self.review.comments.get(c)?.flag.as_ref()?))
+        let flag = self.review.comments.get(c)?.flag.as_ref()?;
+        if flag.note {
+            // On the comment on a finding, what is decided is the finding.
+            let finding = c.checked_sub(1)?;
+            return Some((finding, self.review.comments.get(finding)?.flag.as_ref()?));
+        }
+        Some((c, flag))
+    }
+
+    /// The user's comment on a finding the cursor is on, by index into
+    /// `review.comments`, and where the finding stands.
+    fn note_here(&self) -> Option<(usize, &review::Flag)> {
+        let c = self.comment_at(self.cursor.as_ref()?.row)?;
+        let flag = self.review.comments.get(c)?.flag.as_ref()?;
+        flag.note.then_some((c, flag))
     }
 
     /// Whether the cursor is on a comment of the user's kept as a finding.
@@ -1646,6 +1804,10 @@ impl DiffView {
     /// undecided or to fix), or back to undecided (from dismissed).
     /// Whether the cursor is on one.
     fn dismiss_finding(&mut self, ctx: &Ctx) -> bool {
+        // Del on the user's comment on it deletes that.
+        if self.note_here().is_some() {
+            return false;
+        }
         let Some((c, flag)) = self.finding_here() else {
             return false;
         };
@@ -1667,6 +1829,7 @@ impl DiffView {
                     lines: comment.lines.clone(),
                     field: TextField::multiline(""),
                     dismiss: Some(id),
+                    note_on: None,
                 });
                 self.build_rows(ctx.sections, self.diff_anchor());
                 self.follow_editor(ctx);
@@ -1794,6 +1957,17 @@ impl DiffView {
         (at, like.len())
     }
 
+    /// Whether the card of comment `c`, a finding, goes on under its last
+    /// row: with the user's comment on it, or one being written.
+    fn card_goes_on(&self, c: usize) -> bool {
+        let finding = self.review.comments.get(c).is_some_and(|c| !is_note(c));
+        let writing = self
+            .editing
+            .as_ref()
+            .is_some_and(|e| e.at == Some(c) && e.note_on.is_some());
+        finding && (self.has_note(c) || writing)
+    }
+
     /// What `]` and `[` go through: findings when all are, else comments.
     fn comment_noun(&self) -> &'static str {
         match self.review.own() == 0 {
@@ -1917,8 +2091,13 @@ impl DiffView {
             B::DeleteComment => {
                 if let Some(editing) = &mut self.editing {
                     editing.field = TextField::multiline("");
+                    self.save_comment(ctx);
+                } else if self.delete_note() {
+                    self.signals.error = Some(None);
                 }
-                self.save_comment(ctx);
+            }
+            B::EditFix => {
+                self.edit_fix();
             }
             _ => return false,
         }
@@ -2301,6 +2480,7 @@ impl DiffView {
                 let Some(comment) = self.review.comments.get(c) else {
                     return blank();
                 };
+                let within = note_tone(comment);
                 let (at, of) = self.comment_place(c);
                 let reviewer = (comment.flag.as_ref()).filter(|flag| !flag.yours);
                 let noun = if reviewer.is_some() {
@@ -2314,7 +2494,12 @@ impl DiffView {
                         state: finding_state_word(flag.state).map(Into::into),
                         tone: finding_tone(flag),
                     }),
-                    place: format!("{noun} {at} of {of}"),
+                    // Part of its finding: it has no place of its own.
+                    place: match within {
+                        Some(_) => String::new(),
+                        None => format!("{noun} {at} of {of}"),
+                    },
+                    within,
                 }
             }
             (DiffRow::Comment { c, i, .. }, _) => {
@@ -2328,10 +2513,12 @@ impl DiffView {
                     text: comment.text[range].to_owned(),
                     // Its heading rounds the card's top.
                     first: false,
-                    last: i + 1 >= wrap.len(),
+                    // The finding's card goes on round the comment on it.
+                    last: i + 1 >= wrap.len() && !self.card_goes_on(c),
                     tone: (comment.flag.as_ref())
                         .filter(|flag| !flag.yours)
                         .map(finding_tone),
+                    within: note_tone(comment),
                 }
             }
             (DiffRow::Editor { i, .. }, _) => {
@@ -2349,6 +2536,10 @@ impl DiffView {
                     selection: clip(sel.start)..clip(sel.end),
                     first: i == 0,
                     last: i + 1 >= self.editor_wrap.len(),
+                    within: (editing.note_on.as_ref())
+                        .and(editing.at)
+                        .and_then(|c| self.review.comments.get(c)?.flag.as_ref())
+                        .map(finding_tone),
                 }
             }
             (DiffRow::EditorHint { .. }, _) => DetailRow::Note(
@@ -2459,7 +2650,10 @@ impl DiffView {
                 return vec![(i, dismiss), (i, hint(B::DiscardComment))];
             }
             let mut buttons = vec![(i, hint(B::SaveComment)), (i, hint(B::DiscardComment))];
-            if editing.at.is_some() {
+            // A first comment on a finding has nothing to delete.
+            let on = editing.at.and_then(|c| self.review.comments.get(c));
+            let new_note = editing.note_on.is_some() && !on.is_some_and(is_note);
+            if editing.at.is_some() && !new_note {
                 buttons.push((i, hint(B::DeleteComment)));
             }
             return buttons;
@@ -2479,6 +2673,23 @@ impl DiffView {
         let Some(cursor) = &self.cursor else {
             return buttons;
         };
+        // On the user's comment on a finding, what can be done to it.
+        if let Some((c, flag)) = self.note_here() {
+            let first = self.find_row(&RowKey::Comment(c)).and_then(at);
+            if let (Some(i), None) = (first, self.note_refused(flag)) {
+                let edit = Hint {
+                    label: "Edit".into(),
+                    ..hint(B::Comment)
+                };
+                let delete = Hint {
+                    key: "Del".into(),
+                    ..hint(B::DeleteComment)
+                };
+                buttons.push((i, edit));
+                buttons.push((i, delete));
+            }
+            return buttons;
+        }
         // On a finding, what can be decided of it, on its first row.
         if let Some((c, flag)) = self.finding_here() {
             let first = self.find_row(&RowKey::Comment(c)).and_then(at);
@@ -2512,8 +2723,14 @@ impl DiffView {
                 }
                 FindingState::Sent | FindingState::Fixed => Vec::new(),
             };
+            // What the user can say of a reviewer's finding.
+            let words = (!flag.yours && self.note_refused(flag).is_none()).then(|| {
+                let comment = (!self.has_note(c)).then(|| keyed(B::Comment, "c"));
+                comment.into_iter().chain([keyed(B::EditFix, "Shift+E")])
+            });
             if let Some(i) = first {
                 buttons.extend(choices.into_iter().map(|h| (i, h)));
+                buttons.extend(words.into_iter().flatten().map(|h| (i, h)));
             }
             return buttons;
         }
@@ -2903,6 +3120,11 @@ impl DiffView {
             }
             Keysym::f if plain => {
                 if !self.fix_finding() {
+                    return None;
+                }
+            }
+            Keysym::E if mods.shift && !(mods.ctrl || mods.alt || mods.logo) => {
+                if !self.edit_fix() {
                     return None;
                 }
             }
@@ -3335,7 +3557,8 @@ impl DiffView {
             | ReposButton::CommentFile
             | ReposButton::SaveComment
             | ReposButton::DiscardComment
-            | ReposButton::DeleteComment),
+            | ReposButton::DeleteComment
+            | ReposButton::EditFix),
         ) = hit
         {
             self.signals.focus = true;
@@ -3365,11 +3588,12 @@ impl DiffView {
                     // On a comment, it is edited; on a long file's last
                     // row shown, the rest show.
                     if let Some(c) = self.comment_at(r)
-                        && self
-                            .review
-                            .comments
-                            .get(c)
-                            .is_some_and(|c| c.flag.is_none())
+                        && (self.review.comments.get(c)).is_some_and(|comment| {
+                            match comment.flag.as_ref() {
+                                None => true,
+                                Some(flag) => flag.note && self.note_refused(flag).is_none(),
+                            }
+                        })
                     {
                         self.edit_comment(c, ctx);
                     }

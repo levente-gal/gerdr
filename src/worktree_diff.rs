@@ -194,6 +194,17 @@ fn clear_buttons(outdated: bool) -> [ReposButton; 2] {
     }
 }
 
+/// What the diff asked of its host since it was last asked.
+#[derive(Debug, Default)]
+pub struct Taken {
+    /// Why the last key did nothing.
+    pub error: Option<String>,
+    pub decided: Option<(String, Decision)>,
+    pub edit_finding: Option<String>,
+    /// A finding's id, and what the user's comment on it now says.
+    pub noted: Option<(String, String)>,
+}
+
 /// What the diff's views and keys need of the chrome.
 #[derive(Clone, Copy, Debug)]
 pub struct Env {
@@ -1247,13 +1258,14 @@ impl WorktreeDiff {
 
     /// Why the last key or click did nothing, if it says; and what was
     /// decided of an AI review finding, and the finding to edit.
-    pub fn take_error(&mut self) -> (Option<String>, Option<(String, Decision)>, Option<String>) {
+    pub fn take_error(&mut self) -> Taken {
         let signals = self.diff.take_signals();
-        (
-            signals.error.flatten(),
-            signals.decided,
-            signals.edit_finding,
-        )
+        Taken {
+            error: signals.error.flatten(),
+            decided: signals.decided,
+            edit_finding: signals.edit_finding,
+            noted: signals.noted,
+        }
     }
 
     /// Whether `path` is this worktree's.
@@ -1590,7 +1602,12 @@ impl crate::Gerdr {
     /// panel asks it; why it did nothing said briefly.
     fn worktree_done(&mut self, done: Option<Done>) -> Option<crate::repos::Outcome> {
         self.worktree_save_review();
-        let (error, decided, edit_finding) = self
+        let Taken {
+            error,
+            decided,
+            edit_finding,
+            noted,
+        } = self
             .wd_mut()
             .map(WorktreeDiff::take_error)
             .unwrap_or_default();
@@ -1602,6 +1619,9 @@ impl crate::Gerdr {
         }
         if let Some(id) = edit_finding {
             self.feature_edit_finding(&id);
+        }
+        if let Some((id, text)) = noted {
+            self.feature_note_finding(&id, &text);
         }
         let commit = self.wd().is_some_and(|wd| wd.commit.is_some());
         let doc = self.wd().is_some_and(|wd| wd.doc.is_some());
@@ -2256,7 +2276,7 @@ mod tests {
         assert_eq!(wd.diff.cursor.as_ref().map(|c| c.row), Some(2));
         let copy = ReposHit::Button(ReposButton::CopyReview);
         assert_eq!(wd.click(copy, ENV), None);
-        assert!(wd.take_error().0.is_some());
+        assert!(wd.take_error().error.is_some());
         // A file header's chevron folds it.
         wd.click(ReposHit::DiffFold(1), ENV);
         assert_eq!(texts(&wd)[1..3], ["file a.rs None", "file new.rs None"]);

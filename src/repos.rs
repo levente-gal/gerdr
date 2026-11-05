@@ -1756,6 +1756,7 @@ pub(crate) fn key_name(button: ReposButton) -> &'static str {
     }
     match button {
         B::Comment => "c",
+        B::EditFix => "Shift+E",
         B::CopyLines => "Ctrl+C",
         B::CommentFile => "Shift+C",
         B::NextComment => "]",
@@ -3581,6 +3582,7 @@ impl Panel {
             | B::FixFinding
             | B::DismissFinding
             | B::ReopenFinding
+            | B::EditFix
             | B::MarkViewed
             | B::NextUnviewed
             | B::AddComment
@@ -9847,7 +9849,7 @@ mod tests {
         let view = panel.view("p", &ctx);
         let places: Vec<(bool, String)> = (view.detail.rows.iter())
             .filter_map(|row| match row {
-                DetailRow::CommentHead { finding, place } => {
+                DetailRow::CommentHead { finding, place, .. } => {
                     Some((finding.is_some(), place.clone()))
                 }
                 _ => None,

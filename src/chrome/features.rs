@@ -557,12 +557,18 @@ pub struct FindingCard {
     pub preview: Vec<String>,
     /// The fix to make, labelled: the reviewer's or the user's.
     pub fix: String,
-    /// The user's comment on it, labelled.
+    /// A note on it, labelled: what went wrong, a criterion's.
     pub note: String,
+    /// The user's comment on a finding, in a card of its own inside this one.
+    pub comment: String,
+    /// The indices in `StagePage::buttons` of the buttons that comment holds.
+    pub comment_buttons: Vec<usize>,
     /// It no longer asks for anything: fixed or dismissed.
     pub faded: bool,
-    /// The note being written on it, a criterion's.
+    /// The note or comment being written on it.
     pub field: Option<Line>,
+    /// What its field shows while empty.
+    pub field_hint: &'static str,
     /// It has the keyboard.
     pub selected: bool,
     /// The indices in `StagePage::buttons` of the buttons it holds.
@@ -1046,6 +1052,10 @@ const PAGE_GAP: i32 = 16;
 const AGENT_PAD: i32 = 10;
 /// The room between the parts of a finding's card.
 const FINDING_GAP: i32 = 6;
+/// The room inside the card of the user's comment on a finding.
+const COMMENT_PAD: i32 = 8;
+/// How much of the accent tints that card, as a comment's card in a diff.
+const COMMENT_TINT: f32 = 0.1;
 /// How far a check card's text stands right of its dot's left edge.
 const CHECK_DOT_ROOM: i32 = DOT + 8;
 const AGENT_HEAD: i32 = 28;
@@ -1149,6 +1159,8 @@ pub(super) enum Piece {
     /// The frame of the finding card of `StagePage::sections[i]`, with its
     /// buttons; its text goes in pieces of its own.
     FindingCard(usize),
+    /// The card of the user's comment on a finding, behind its text.
+    YourComment,
     /// The note being written on the card of `StagePage::sections[i]`.
     CardField(usize),
     /// How a check stands, on its card. It blinks when at work: see
@@ -1599,6 +1611,10 @@ impl Stack {
                 self.all_text(text, Font::Body, body, false, BODY_LINE);
             }
         }
+        if !card.comment.is_empty() {
+            self.y += FINDING_GAP;
+            self.your_comment(card, page, buttons);
+        }
         if card.field.is_some() {
             self.y += FINDING_GAP;
             let rect = Rectangle::new((self.x, self.y).into(), (self.w, QUIT_BUTTON).into());
@@ -1626,6 +1642,51 @@ impl Stack {
         let frame = Rectangle::new((x, top).into(), (w, self.y - top).into());
         self.pieces.insert(frame_at, (frame, Piece::FindingCard(k)));
         frame
+    }
+
+    /// The user's comment on a finding, a card of its own inside the
+    /// finding's: "Your comment" and its buttons, then what it says.
+    fn your_comment(&mut self, card: &FindingCard, page: &StagePage, buttons: &mut [Option<Rect>]) {
+        let at = self.pieces.len();
+        let (x, w, top) = (self.x, self.w, self.y);
+        self.x += COMMENT_PAD;
+        self.w = (w - 2 * COMMENT_PAD).max(1);
+        self.y += COMMENT_PAD;
+        let held: Vec<usize> = (card.comment_buttons.iter().copied())
+            .filter(|b| *b < page.buttons.len())
+            .collect();
+        let widths: Vec<i32> = (held.iter())
+            .map(|b| button_width(&page.buttons[*b].label))
+            .collect();
+        let word = "Your comment";
+        // Bold runs wider than it measures.
+        let word_w = width_of(word, Font::Small.size()).ceil() as i32 * 9 / 8;
+        let placed = rows_from_right(&widths, self.x + word_w + QUIT_BUTTON_GAP, self.x + self.w);
+        let line = rows_height(&placed).max(TAIL_LINE);
+        self.pieces.push((
+            Rectangle::new(
+                (self.x, self.y).into(),
+                (word_w, ROW_BUTTON.min(line)).into(),
+            ),
+            Piece::Text {
+                text: word.to_owned(),
+                font: Font::Small,
+                ink: Ink::Text,
+                bold: true,
+            },
+        ));
+        for (i, (b, (bx, row))) in held.iter().zip(&placed).enumerate() {
+            let by = self.y + row * (ROW_BUTTON + QUIT_BUTTON_GAP);
+            let rect = Rectangle::new((*bx, by).into(), (widths[i], ROW_BUTTON).into());
+            buttons[*b] = Some(rect);
+            self.pieces.push((rect, Piece::Button(*b)));
+        }
+        self.y += line + FINDING_GAP / 2;
+        self.all_text(&card.comment, Font::Body, Ink::Text, false, BODY_LINE);
+        self.y += COMMENT_PAD;
+        (self.x, self.w) = (x, w);
+        let frame = Rectangle::new((x, top).into(), (w, self.y - top).into());
+        self.pieces.insert(at, (frame, Piece::YourComment));
     }
 
     /// The activity's rows, newest first.
@@ -1947,7 +2008,9 @@ fn page_stack(
         .flat_map(|sec| match sec {
             PageSection::Agent { buttons, .. } => buttons.clone(),
             PageSection::File { buttons, .. } => buttons.clone(),
-            PageSection::Finding(card) => card.buttons.clone(),
+            PageSection::Finding(card) => (card.buttons.iter().chain(&card.comment_buttons))
+                .copied()
+                .collect(),
             _ => Vec::new(),
         })
         .collect();
@@ -2487,6 +2550,16 @@ fn node_circle(slot: Rect) -> Rect {
 /// A card's frame on `c` at `rect`: a hairline border round the ground,
 /// as the agent and file cards have it. Gives the card's head row, inside
 /// its padding.
+/// The ground of the user's comment on a finding.
+fn comment_ground(p: &Palette) -> Rgb {
+    mix(p.background, p.accent, COMMENT_TINT)
+}
+
+/// The stripe down the left of that comment.
+fn comment_stripe(p: &Palette) -> Rgb {
+    p.accent
+}
+
 fn card_frame(c: &mut Canvas, rect: Rect, scale: f64, p: &Palette) -> Rect {
     let s = scale as f32;
     let (x, y, w, h) = rect_px(rect, scale);
@@ -3818,6 +3891,20 @@ impl Painter {
                 let ground = mix(p.background, p.text, OUTPUT_GROUND);
                 self.code_line(c, rect, text, ground, scale, p);
             }
+            Piece::YourComment => {
+                let (x, y, w, h) = rect_px(rect, scale);
+                let r = AGENT_RADIUS * s;
+                c.rounded(x, y, w, h, r, comment_ground(p));
+                c.clipped(
+                    x as i32,
+                    y as i32,
+                    (2.0 * s).round().max(1.0) as i32,
+                    h as i32,
+                    |c| {
+                        c.rounded(x, y, w, h, r, comment_stripe(p));
+                    },
+                );
+            }
             Piece::QuoteBar => {
                 let (x, y, w, h) = rect_px(rect, scale);
                 c.rounded(x, y, w, h, w / 2.0, p.border);
@@ -4102,13 +4189,14 @@ impl Painter {
                 }
             }
             Piece::CardField(k) => {
-                let Some(PageSection::Finding(FindingCard {
-                    field: Some(text), ..
-                })) = view.page.sections.get(*k)
-                else {
+                let Some(PageSection::Finding(card)) = view.page.sections.get(*k) else {
                     return;
                 };
-                self.field(c, text, "What went wrong", rect, true, scale, p);
+                let Some(text) = &card.field else {
+                    return;
+                };
+                let hint = card.field_hint;
+                self.field(c, text, hint, rect, true, scale, p);
             }
             // A dot at work blinks: it is composed over the tab.
             Piece::CheckDot(dot) => status_dot(c, rect, *dot, scale, p),
@@ -5929,13 +6017,84 @@ mod tests {
                 preview: Vec::new(),
                 fix: format!("Fix: {text}"),
                 note: String::new(),
+                comment: String::new(),
+                comment_buttons: Vec::new(),
                 faded: false,
                 field: None,
+                field_hint: "",
                 selected: false,
                 buttons: (at..at + 4).collect(),
             }));
         }
         view
+    }
+
+    #[test]
+    fn the_users_comment_on_a_finding_sits_inside_it_with_its_text_and_buttons() {
+        let text = "a long sentence that goes on and on ".repeat(12);
+        let mut view = findings_view(2, "short");
+        let at = view.page.buttons.len();
+        for label in ["Edit", "Delete"] {
+            view.page.buttons.push(PageButton {
+                label: label.to_owned(),
+                style: ButtonStyle::Plain,
+            });
+        }
+        if let Some(PageSection::Finding(card)) = view.page.sections.get_mut(0) {
+            card.comment = text.clone();
+            card.comment_buttons = vec![at, at + 1];
+        }
+        for width in [870, 1200, 1920] {
+            let l = tab_at(&view, width);
+            let page = &l.pieces[TabColumn::Page as usize];
+            let (back, _) = page
+                .iter()
+                .find(|(_, p)| matches!(p, Piece::YourComment))
+                .expect("the comment's card");
+            let card = l.finding_cards[0];
+            assert!(
+                back.loc.x >= card.loc.x
+                    && back.loc.x + back.size.w <= card.loc.x + card.size.w
+                    && back.loc.y >= card.loc.y
+                    && back.loc.y + back.size.h <= card.loc.y + card.size.h,
+                "inside the finding at {width}"
+            );
+            // Its first line and its last are in it, as are its buttons.
+            let words = page.iter().filter(|(r, p)| {
+                matches!(
+                    p,
+                    Piece::Text {
+                        ink: Ink::Text,
+                        bold: false,
+                        ..
+                    }
+                ) && r.loc.y >= back.loc.y
+                    && r.loc.y < back.loc.y + back.size.h
+            });
+            let last = words.max_by_key(|(r, _)| r.loc.y).expect("what it says").0;
+            assert!(last.loc.y + last.size.h <= back.loc.y + back.size.h);
+            for b in [at, at + 1] {
+                // On it alone, not with the page's own too.
+                let places = page
+                    .iter()
+                    .filter(|(_, p)| matches!(p, Piece::Button(i) if *i == b));
+                assert_eq!(places.count(), 1, "button {b} at {width}");
+                let r = l.page_buttons[b].expect("placed");
+                assert!(r.loc.x >= back.loc.x && r.loc.x + r.size.w <= back.loc.x + back.size.w);
+                assert!(r.loc.y >= back.loc.y && r.loc.y + r.size.h <= back.loc.y + back.size.h);
+            }
+        }
+    }
+
+    #[test]
+    fn the_users_comment_on_a_finding_reads_in_both_themes() {
+        for p in [&ONE_DARK, &ONE_LIGHT, &ONE_LIGHT_PAGE] {
+            let ground = comment_ground(p);
+            let ratio = contrast(p.text, ground);
+            assert!(ratio >= 4.5, "its words are {ratio:.2}:1");
+            let ratio = contrast(comment_stripe(p), ground);
+            assert!(ratio >= 3.0, "its stripe is {ratio:.2}:1");
+        }
     }
 
     #[test]

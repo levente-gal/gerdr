@@ -73,6 +73,11 @@ pub struct Flag {
     /// The user wrote it, on the stage's page or in the diff: it has no
     /// severity, and is theirs to edit or drop.
     pub yours: bool,
+    /// It is the user's comment on finding `id`, the comment right before
+    /// it in the review: shown inside that finding's card, written in the
+    /// diff's editor, kept in `Finding::note`. `severity` and `state` are the
+    /// finding's.
+    pub note: bool,
 }
 
 /// A project's review.

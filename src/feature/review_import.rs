@@ -613,8 +613,13 @@ pub fn decide(review: &mut AiReview, id: &str, decision: &Decision) -> Result<St
 
 /// Whether `f` can still be edited, undecided or to fix; else why not.
 pub fn editable(f: &Finding) -> Result<(), String> {
-    let id = &f.id;
-    match f.state {
+    editable_state(&f.id, f.state)
+}
+
+/// Whether a finding `id` standing at `state` can be reworded or commented
+/// on; else why not.
+pub fn editable_state(id: &str, state: FindingState) -> Result<(), String> {
+    match state {
         FindingState::Open | FindingState::Fix => Ok(()),
         FindingState::Dismissed => Err(format!("{id} is dismissed: reopen it first")),
         FindingState::Sent => Err(format!("{id} was sent to Build: the next review checks it")),
@@ -622,20 +627,35 @@ pub fn editable(f: &Finding) -> Result<(), String> {
     }
 }
 
-/// Reword finding `id`'s fix to `fix` and set the user's comment on it to
-/// `note`: a fix left as the reviewer's, or empty, is theirs again. Saved
-/// on an undecided finding it marks it to fix too, as rewording a fix means
-/// wanting it. What it did, for the log; else why it can't.
-pub fn edit(review: &mut AiReview, id: &str, fix: &str, note: &str) -> Result<String, String> {
+/// Reword finding `id`'s fix to `fix`: a fix left as the reviewer's, or
+/// empty, is theirs again. Saved on an undecided finding it marks it to fix
+/// too, as rewording a fix means wanting it. What it did, for the log; else
+/// why it can't.
+pub fn edit(review: &mut AiReview, id: &str, fix: &str) -> Result<String, String> {
     let Some(f) = review.findings.iter_mut().find(|f| f.id == id) else {
         return Err(format!("There's no finding {id}"));
     };
     editable(f)?;
     let fix = own_text(fix);
     f.my_fix = (!fix.is_empty() && fix != f.fix).then_some(fix);
-    f.note = own_text(note);
     f.state = FindingState::Fix;
     Ok("edited, to fix".into())
+}
+
+/// Set the user's comment on finding `id` to `note`; empty deletes it. It
+/// decides nothing: a remark isn't wanting the fix. What it did, for the log;
+/// else why it can't.
+pub fn set_note(review: &mut AiReview, id: &str, note: &str) -> Result<String, String> {
+    let Some(f) = review.findings.iter_mut().find(|f| f.id == id) else {
+        return Err(format!("There's no finding {id}"));
+    };
+    editable(f)?;
+    f.note = own_text(note);
+    Ok(match f.note.is_empty() {
+        true => "comment deleted",
+        false => "commented on",
+    }
+    .into())
 }
 
 /// `text` as an item's title (its first line) and body (the rest).
@@ -1164,20 +1184,41 @@ mod tests {
     #[test]
     fn an_edit_rewords_the_fix_keeps_the_reviewers_and_marks_it_to_fix() {
         let mut review = one_finding(FindingState::Open);
-        edit(&mut review, "r1-1", "Use a range", "Mind the tests").unwrap();
+        edit(&mut review, "r1-1", "Use a range").unwrap();
         let f = &review.findings[0];
         assert_eq!(f.fix, "Use ..=");
         assert_eq!(f.fix_text(), "Use a range");
-        assert_eq!(f.note, "Mind the tests");
         assert_eq!(f.state, FindingState::Fix);
         // Left as the reviewer's, or empty, it is the reviewer's again.
-        edit(&mut review, "r1-1", "Use ..=", "").unwrap();
+        edit(&mut review, "r1-1", "Use ..=").unwrap();
         assert_eq!(review.findings[0].my_fix, None);
-        edit(&mut review, "r1-1", "Mine", "").unwrap();
-        edit(&mut review, "r1-1", "  ", "").unwrap();
+        edit(&mut review, "r1-1", "Mine").unwrap();
+        edit(&mut review, "r1-1", "  ").unwrap();
         assert_eq!(review.findings[0].my_fix, None);
         assert_eq!(review.findings[0].fix_text(), "Use ..=");
+    }
+
+    #[test]
+    fn a_comment_on_a_finding_decides_nothing_and_empty_deletes_it() {
+        let mut review = one_finding(FindingState::Open);
+        set_note(&mut review, "r1-1", " Mind the tests ").unwrap();
+        assert_eq!(review.findings[0].note, "Mind the tests");
+        assert_eq!(review.findings[0].state, FindingState::Open);
+        // Rewording the fix leaves it alone.
+        edit(&mut review, "r1-1", "Use a range").unwrap();
+        assert_eq!(review.findings[0].note, "Mind the tests");
+        set_note(&mut review, "r1-1", "  ").unwrap();
         assert_eq!(review.findings[0].note, "");
+        assert_eq!(review.findings[0].state, FindingState::Fix);
+        assert!(set_note(&mut review, "nope", "x").is_err());
+        for state in [
+            FindingState::Dismissed,
+            FindingState::Sent,
+            FindingState::Fixed,
+        ] {
+            let mut review = one_finding(state);
+            assert!(set_note(&mut review, "r1-1", "x").is_err(), "{state:?}");
+        }
     }
 
     #[test]
@@ -1188,25 +1229,19 @@ mod tests {
             FindingState::Fixed,
         ] {
             let mut review = one_finding(state);
-            assert!(edit(&mut review, "r1-1", "x", "y").is_err(), "{state:?}");
+            assert!(edit(&mut review, "r1-1", "x").is_err(), "{state:?}");
             assert_eq!(review.findings[0].my_fix, None);
             assert_eq!(review.findings[0].state, state);
         }
         let mut review = one_finding(FindingState::Fix);
-        assert!(edit(&mut review, "nope", "x", "y").is_err());
-        assert!(edit(&mut review, "r1-1", "x", "y").is_ok());
+        assert!(edit(&mut review, "nope", "x").is_err());
+        assert!(edit(&mut review, "r1-1", "x").is_ok());
     }
 
     #[test]
     fn what_the_user_wrote_stays_as_written_and_is_made_safe() {
         let mut review = one_finding(FindingState::Open);
-        edit(
-            &mut review,
-            "r1-1",
-            " keep <div> \u{202e}\u{7}here\n2nd ",
-            "",
-        )
-        .unwrap();
+        edit(&mut review, "r1-1", " keep <div> \u{202e}\u{7}here\n2nd ").unwrap();
         assert_eq!(
             review.findings[0].my_fix.as_deref(),
             Some("keep <div> here\n2nd")
@@ -1220,7 +1255,8 @@ mod tests {
         let mut review = AiReview::default();
         let one = raw(None, "src/a.rs", Some(12), "Off by one");
         import(&mut review, 1, vec![one], &repos(), &diff());
-        edit(&mut review, "r1-1", "Mine", "Careful").unwrap();
+        edit(&mut review, "r1-1", "Mine").unwrap();
+        set_note(&mut review, "r1-1", "Careful").unwrap();
         review.findings[0].state = FindingState::Sent;
         let mut again = raw(Some("r1-1"), "src/a.rs", Some(12), "Still off by one");
         again.fix = "Reviewer's new".into();
@@ -1286,7 +1322,8 @@ mod tests {
     #[test]
     fn the_fixes_carry_the_users_words_and_items() {
         let mut review = one_finding(FindingState::Open);
-        edit(&mut review, "r1-1", "Use a range", "Mind the tests").unwrap();
+        edit(&mut review, "r1-1", "Use a range").unwrap();
+        set_note(&mut review, "r1-1", "Mind the tests").unwrap();
         add(&mut review, "Rename it\nIt reads badly").unwrap();
         let (n, md) = fixes_markdown(&review, "Bulk edit", false);
         assert_eq!(n, 2);

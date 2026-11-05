@@ -1,6 +1,5 @@
 //! The dialog asking for a finding's text, from AI review's page or its
-//! diff: why it is dismissed, its fix and the user's comment on it, or a
-//! comment of the user's own. Esc closes it and keeps what was typed for the
+//! diff: why it is dismissed, its fix, or a comment of the user's own. Esc closes it and keeps what was typed for the
 //! next opening on the same thing; nothing here loses anything, since a
 //! dismissed finding can be reopened.
 
@@ -26,7 +25,7 @@ use crate::{
 pub enum Ask {
     /// Why a finding is dismissed.
     Dismiss,
-    /// A finding's fix and the user's comment on it.
+    /// A finding's fix.
     Edit,
     /// What an item of the user's own says.
     EditOwn,
@@ -137,15 +136,8 @@ impl FindingDialog {
                 "Dismiss",
             ),
             Ask::Edit => (
-                format!("Edit {}", self.id),
-                &[
-                    ("Fix", "What should change", 6),
-                    (
-                        "Your comment",
-                        "Anything else the Build agent should know",
-                        3,
-                    ),
-                ],
+                format!("Edit the fix of {}", self.id),
+                &[("Fix", "What should change", 6)],
                 if self.marks_fix {
                     "Save and fix"
                 } else {
@@ -250,7 +242,12 @@ impl Gerdr {
 
     /// Finding `id` of `slug`, while its AI review is current; else says why
     /// not.
-    fn finding_to_ask(&mut self, project: &str, slug: &str, id: &str) -> Option<Finding> {
+    pub(crate) fn finding_to_ask(
+        &mut self,
+        project: &str,
+        slug: &str,
+        id: &str,
+    ) -> Option<Finding> {
         let feature = self.feature(project, slug)?;
         let title = feature.title.clone();
         if feature.status != Status::Open || feature.current() != Some(Stage::AiReview) {
@@ -272,8 +269,8 @@ impl Gerdr {
         }
     }
 
-    /// Ask for finding `id`'s fix and comment; for an item of the user's
-    /// own, for what it says.
+    /// Ask for finding `id`'s fix; for an item of the user's own, for what it
+    /// says.
     pub fn ask_edit_finding(&mut self, project: &str, slug: &str, id: &str) {
         let Some(f) = self.finding_to_ask(project, slug, id) else {
             return;
@@ -298,7 +295,7 @@ impl Gerdr {
                 marks_fix,
             );
         } else {
-            let from = vec![f.fix_text().to_owned(), f.note.clone()];
+            let from = vec![f.fix_text().to_owned()];
             self.open_finding_dialog(project, slug, Ask::Edit, id, f.title, from, marks_fix);
         }
     }
@@ -355,10 +352,7 @@ impl Gerdr {
                 self.decide_finding(project, slug, id, why);
                 self.feature_findings_changed(project, slug);
             }
-            Ask::Edit => {
-                let note = texts.get(1).map_or("", String::as_str);
-                self.edit_finding(project, slug, id, first, note);
-            }
+            Ask::Edit => self.edit_finding(project, slug, id, first),
             Ask::EditOwn => self.edit_own_finding(project, slug, id, first),
             Ask::Add => self.add_finding_comment(project, slug, first),
         }
@@ -527,6 +521,6 @@ mod tests {
         assert_eq!(d.view().action, "Save");
         assert_eq!(dialog(Ask::Dismiss, &[""]).view().action, "Dismiss");
         assert_eq!(dialog(Ask::Add, &[""]).view().action, "Add");
-        assert_eq!(dialog(Ask::Edit, &["a", "b"]).view().fields.len(), 2);
+        assert_eq!(dialog(Ask::Edit, &["a"]).view().fields.len(), 1);
     }
 }
