@@ -42,6 +42,8 @@ pub struct TestRun {
     /// The Verify run whose check it is, by its number: how it went comes
     /// from there, not from what its pane shows (see `sync_check_cards`).
     pub check: Option<u32>,
+    /// A Verify check that waits for another in its folder.
+    pub queued: bool,
 }
 
 /// How a finished run went.
@@ -321,6 +323,7 @@ pub fn step(
                     outcome: None,
                     seen: false,
                     check: None,
+                    queued: false,
                 };
                 match at {
                     Some(i) => runs[i] = run,
@@ -392,6 +395,7 @@ impl TestRun {
     /// long it took.
     fn title(&self) -> String {
         match &self.outcome {
+            None if self.queued => "waiting for a check in this folder".into(),
             None if self.command == self.short => "running".into(),
             None => self.command.clone(),
             Some(outcome) => {
@@ -422,7 +426,14 @@ impl TestRun {
             closable: true,
             subagents: Vec::new(),
             inbox: false,
-            test: Some(self.outcome.as_ref().map_or(CiState::Running, |o| o.state)),
+            test: Some(self.outcome.as_ref().map_or(
+                if self.queued {
+                    CiState::Unknown
+                } else {
+                    CiState::Running
+                },
+                |o| o.state,
+            )),
             icon: crate::agent_icons::AgentIcon::Test,
         }
     }
@@ -583,6 +594,7 @@ impl Gerdr {
             let at = self.test_runs.iter().position(|r| r.pane_id == pane_id);
             let current = at.filter(|i| self.test_runs[*i].check == Some(row.run));
             if let Some(i) = current {
+                self.test_runs[i].queued = row.queued;
                 if self.test_runs[i].outcome.is_none()
                     && let Some(o) = &row.outcome
                 {
@@ -611,6 +623,7 @@ impl Gerdr {
                 outcome: row.outcome.as_ref().map(check_outcome),
                 seen: row.outcome.is_some(),
                 check: Some(row.run),
+                queued: row.queued,
             };
             new.push((at, run));
         }
@@ -914,6 +927,20 @@ mod tests {
         // Its pane gone: it goes.
         step(&mut runs, &round(vec![pane("p2", Some(idle))]), later);
         assert!(runs.is_empty());
+    }
+
+    #[test]
+    fn a_card_says_its_check_waits() {
+        let mut runs = Vec::new();
+        step(
+            &mut runs,
+            &round(vec![pane("p1", Some(info(&["cargo", "test", "-q"])))]),
+            Instant::now(),
+        );
+        runs[0].queued = true;
+        let card = runs[0].view();
+        assert_eq!(card.test, Some(CiState::Unknown));
+        assert_eq!(card.title(), Some("waiting for a check in this folder"));
     }
 
     #[test]

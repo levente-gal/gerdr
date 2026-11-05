@@ -153,7 +153,8 @@ How to use it:
   stage's page on the feature tab ("setting up: api: npm ci (2 of 3)"),
   has the project's timeout, and Enter on a stage whose work runs says so
   rather than starting it again. Verify's checks each run in a terminal of
-  the feature's workspace, all at once, and stop from their cards on its page.
+  the feature's workspace, all at once but for those of one folder, which take
+  turns and say they wait, and stop from their cards on its page.
   Those cards are there from the start, one for each check the feature will
   run or skips; they show the check's last output lines as it runs, and read
   its terminal only while the page shows.
