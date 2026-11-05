@@ -7583,7 +7583,8 @@ fn setup_section(feature: &Feature, state: &PanelState) -> Option<PageSection> {
     let missed = (run.not_copied.iter())
         .map(|what| line(format!("couldn't copy {what}"), CheckTone::Blocker));
     let copied = (run.copied.iter()).map(|what| line(format!("copied {what}"), CheckTone::Note));
-    let mut out: Vec<_> = failed.chain(missed).chain(copied).collect();
+    let ran = (run.ran.iter()).map(|what| line(format!("ran {what}"), CheckTone::Note));
+    let mut out: Vec<_> = failed.chain(missed).chain(copied).chain(ran).collect();
     if out.is_empty() {
         out.push(line("nothing was missing", CheckTone::Note));
     }
@@ -11775,6 +11776,22 @@ pub(crate) mod tests {
             Some(lines(
                 "Setup",
                 vec![line("nothing was missing", CheckTone::Note)]
+            ))
+        );
+        // A command that ran isn't "nothing", whatever it changed.
+        f.setup = Some(feature::setup::SetupRun {
+            finished: Some(2),
+            ran: vec!["api: pip install -r requirements.txt".into()],
+            ..Default::default()
+        });
+        assert_eq!(
+            setup_section(&f, &state),
+            Some(lines(
+                "Setup",
+                vec![line(
+                    "ran api: pip install -r requirements.txt",
+                    CheckTone::Note
+                )]
             ))
         );
         f.setup = Some(feature::setup::SetupRun {
