@@ -366,7 +366,8 @@ pub fn unnamed_repos<'a>(text: &str, repos: &[&'a str]) -> Vec<&'a str> {
 struct Sections<'a> {
     /// Every line outside fences.
     lines: Vec<&'a str>,
-    /// Each heading, normalised, with its body's lines.
+    /// Each heading, normalised, with its body's lines: those of its deeper
+    /// headings too, and those headings themselves.
     sections: Vec<(String, Vec<&'a str>)>,
 }
 
@@ -374,6 +375,9 @@ impl<'a> Sections<'a> {
     fn of(text: &'a str) -> Self {
         let mut lines = Vec::new();
         let mut sections: Vec<(String, Vec<&'a str>)> = Vec::new();
+        // The sections the line is in, by index, with their heading's level:
+        // the outermost first.
+        let mut open: Vec<(usize, usize)> = Vec::new();
         let mut fenced = false;
         for line in text.lines() {
             let trimmed = line.trim();
@@ -385,12 +389,20 @@ impl<'a> Sections<'a> {
                 continue;
             }
             lines.push(line);
-            if let Some(heading) = heading(trimmed) {
+            let found = heading(trimmed);
+            if found.is_some() {
+                let level = trimmed.len() - trimmed.trim_start_matches('#').len();
+                open.retain(|(_, outer)| *outer < level);
+                open.push((sections.len(), level));
+            }
+            if !trimmed.is_empty() {
+                let last = open.len() - usize::from(found.is_some());
+                for (at, _) in open.iter().take(last) {
+                    sections[*at].1.push(trimmed);
+                }
+            }
+            if let Some(heading) = found {
                 sections.push((heading, Vec::new()));
-            } else if let Some((_, body)) = sections.last_mut()
-                && !trimmed.is_empty()
-            {
-                body.push(trimmed);
             }
         }
         Sections { lines, sections }
@@ -498,6 +510,38 @@ fn migrations_line(line: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_section_holds_its_deeper_headings_and_ends_at_its_own_level() {
+        let text = "# Plan\n\n## Fixes\n\n### One\nCause.\n\n#### Deep\nMore.\n\n### Two\nOther.\n\n## Questions\nWhy?\n";
+        assert_eq!(
+            section(text, "Fixes").unwrap(),
+            [
+                "### One",
+                "Cause.",
+                "#### Deep",
+                "More.",
+                "### Two",
+                "Other."
+            ]
+        );
+        assert_eq!(
+            section(text, "One").unwrap(),
+            ["Cause.", "#### Deep", "More."]
+        );
+        assert_eq!(section(text, "Two").unwrap(), ["Other."]);
+        assert_eq!(section(text, "Questions").unwrap(), ["Why?"]);
+        // A shallower heading ends it too.
+        assert_eq!(section("### A\nb\n# C\nd\n", "A").unwrap(), ["b"]);
+        // An empty section stays empty with its next one at the same level.
+        assert!(section("## A\n\n## B\nc\n", "A").unwrap().is_empty());
+    }
+
+    #[test]
+    fn checkboxes_under_a_subheading_count_as_milestones() {
+        let text = "## Milestones\n\n### First\n- [x] One\n\n### Second\n- [ ] Two\n\n## Notes\n- [ ] Not one\n";
+        assert_eq!(milestones(text), (1, 2));
+    }
 
     /// A folder of its own, as `name`.
     fn folder(name: &str) -> Dir {
