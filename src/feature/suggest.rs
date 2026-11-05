@@ -4,7 +4,7 @@
 //! It only reads files: nothing of the repository runs. Call it off the UI
 //! thread (checklist D3).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// What a repository's files suggest, each list in the order they would
 /// run. Empty when nothing there says.
@@ -14,6 +14,39 @@ pub struct Suggested {
     pub checks: Vec<String>,
     /// For setting up a new worktree.
     pub setup: Vec<String>,
+    /// For what a sandbox runs.
+    pub run: Vec<String>,
+    /// For what a sandbox runs once first.
+    pub prepare: Vec<String>,
+}
+
+/// Words of a command that does work on a schedule: copied data would make it
+/// do real work again, so it is suggested switched off.
+const SCHEDULED: &[&str] = &["beat", "cron", "scheduler"];
+
+/// Make what was seen running from `main` the suggested run commands: `seen`
+/// holds each with its folder. It is what really runs, so it goes over what the
+/// files suggest. A scheduler starts as a comment, to be switched on by hand.
+pub fn with_seen(out: &mut Suggested, main: &Path, seen: &[(PathBuf, String)]) {
+    let mut commands: Vec<String> = Vec::new();
+    for (dir, command) in seen {
+        if !dir.starts_with(main) || dir.components().any(|c| c.as_os_str() == ".features") {
+            continue;
+        }
+        let scheduled = command
+            .split_whitespace()
+            .any(|word| SCHEDULED.iter().any(|s| word.contains(s)));
+        let line = match scheduled {
+            true => format!("# {command}"),
+            false => command.clone(),
+        };
+        if !commands.contains(&line) {
+            commands.push(line);
+        }
+    }
+    if !commands.is_empty() {
+        out.run = commands;
+    }
 }
 
 /// What npm writes as the test script of a package that has no tests.
@@ -54,6 +87,16 @@ fn node(dir: &Path, out: &mut Suggested) {
     };
     out.setup.push(install.into());
     let package: Option<serde_json::Value> = serde_json::from_slice(&raw).ok();
+    let runner = test.split(' ').next().unwrap_or("npm");
+    for name in ["dev", "start"] {
+        if package
+            .as_ref()
+            .is_some_and(|p| p["scripts"][name].is_string())
+        {
+            out.run.push(format!("{runner} run {name}"));
+            break;
+        }
+    }
     let script = package.as_ref().and_then(|p| p["scripts"]["test"].as_str());
     if script.is_some_and(|s| !s.contains(NO_TESTS)) {
         out.checks.push(test.into());
@@ -63,6 +106,10 @@ fn node(dir: &Path, out: &mut Suggested) {
 /// A `pyproject.toml`: pytest and what installs its packages, by the tool
 /// that manages it.
 fn python(dir: &Path, out: &mut Suggested) {
+    if dir.join("manage.py").is_file() {
+        out.prepare.push("python manage.py migrate".into());
+        out.run.push("python manage.py runserver".into());
+    }
     if !dir.join("pyproject.toml").is_file() {
         return;
     }
@@ -109,6 +156,42 @@ mod tests {
     }
 
     const TESTED: &str = r#"{"scripts": {"test": "vitest"}}"#;
+
+    #[test]
+    fn what_runs_is_suggested_from_the_files() {
+        let dev = r#"{"scripts": {"dev": "vite", "start": "node ."}}"#;
+        assert_eq!(with(&[("package.json", dev)]).run, ["npm run dev"]);
+        let served = with(&[("manage.py", "")]);
+        assert_eq!(served.run, ["python manage.py runserver"]);
+        assert_eq!(served.prepare, ["python manage.py migrate"]);
+    }
+
+    #[test]
+    fn what_was_seen_running_goes_over_the_files_a_scheduler_commented() {
+        let mut out = Suggested {
+            run: vec!["npm run dev".into()],
+            ..Suggested::default()
+        };
+        let main = Path::new("/ao/api");
+        let seen = [
+            (PathBuf::from("/ao/api"), "./runlocal.sh".to_owned()),
+            (PathBuf::from("/ao/api"), "./runlocal.sh".to_owned()),
+            (
+                PathBuf::from("/ao/api/sub"),
+                "celery -A x beat -l INFO".to_owned(),
+            ),
+            (PathBuf::from("/ao/web"), "nx serve".to_owned()),
+            (PathBuf::from("/ao/api/.features/f"), "./old.sh".to_owned()),
+        ];
+        with_seen(&mut out, main, &seen);
+        assert_eq!(out.run, ["./runlocal.sh", "# celery -A x beat -l INFO"]);
+        let mut kept = Suggested {
+            run: vec!["npm run dev".into()],
+            ..Suggested::default()
+        };
+        with_seen(&mut kept, main, &[]);
+        assert_eq!(kept.run, ["npm run dev"]);
+    }
 
     #[test]
     fn a_folder_with_nothing_known_suggests_nothing() {

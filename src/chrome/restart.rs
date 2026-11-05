@@ -23,14 +23,16 @@ const ROW_INSET: i32 = 6;
 const PLACE_GAP: i32 = 12;
 /// The room kept above and below the dialog on a short output.
 const MARGIN: i32 = 40;
-/// The buttons' labels.
-const BUTTONS: [&str; 2] = ["Cancel", "Restart"];
 
 /// What the restart dialog shows.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RestartView {
-    /// The workspace's name.
-    pub workspace: String,
+    /// What it asks.
+    pub title: String,
+    /// What the checked ones do.
+    pub body: &'static str,
+    /// The label of the button going on.
+    pub action: &'static str,
     pub rows: Vec<RestartRow>,
     /// The row under the keyboard's cursor.
     pub cursor: usize,
@@ -69,13 +71,13 @@ pub struct RestartLayout {
     /// One per row that fits: the slots the rows from `RestartView::top`
     /// are shown in.
     pub rows: Vec<Rect>,
-    /// Cancel, Restart.
+    /// Cancel, and the button going on.
     pub buttons: [Rect; 2],
 }
 
-/// Where the restart dialog's parts go, with `rows` commands, centred on
-/// an output of `size`: as many rows as fit.
-pub fn restart_layout(size: Size<i32, Logical>, rows: usize) -> RestartLayout {
+/// Where the restart dialog's parts go, with `rows` commands and `action` as
+/// the button going on, centred on an output of `size`: as many rows as fit.
+pub fn restart_layout(size: Size<i32, Logical>, rows: usize, action: &str) -> RestartLayout {
     let fixed = 2 * QUIT_PADDING + QUIT_TITLE + 2 * QUIT_LINE_GAP + QUIT_BODY + ROWS_END - ROW_GAP
         + QUIT_BUTTON;
     let fit = ((size.h - 2 * MARGIN - fixed) / (CHECKBOX_ROW + ROW_GAP)).max(1) as usize;
@@ -102,7 +104,7 @@ pub fn restart_layout(size: Size<i32, Logical>, rows: usize) -> RestartLayout {
             Rectangle::new((x, y).into(), (inner, CHECKBOX_ROW).into())
         })
         .collect();
-    let buttons = dialog_buttons(panel, &BUTTONS);
+    let buttons = dialog_buttons(panel, &["Cancel", action]);
     let buttons = [buttons[0], buttons[1]];
     RestartLayout {
         panel,
@@ -116,8 +118,8 @@ pub fn restart_layout(size: Size<i32, Logical>, rows: usize) -> RestartLayout {
 impl Painter {
     /// The restart dialog for an output of `size`, inside a margin of
     /// `SHADOW` holding its drop shadow: a checkbox row per command shown
-    /// (from `top`), its folder after it, how many more there are, and
-    /// Cancel and Restart.
+    /// (from `top`), its place after it, how many more there are, and
+    /// Cancel and the button going on.
     pub(super) fn restart_dialog(
         &self,
         view: &RestartView,
@@ -125,7 +127,7 @@ impl Painter {
         scale: f64,
         p: &Palette,
     ) -> MemoryRenderBuffer {
-        let layout = restart_layout(size, view.rows.len());
+        let layout = restart_layout(size, view.rows.len(), view.action);
         let panel = layout.panel;
         let mut c = self.popup(panel.size, POPUP_RADIUS, scale, p);
         let s = scale as f32;
@@ -141,10 +143,7 @@ impl Painter {
         let (title_x, title_end) = phys(title, scale);
         self.text(
             &mut c,
-            &format!(
-                "Restart which commands in \u{201c}{}\u{201d}?",
-                view.workspace
-            ),
+            &view.title,
             LABEL_FONT_SIZE,
             title_x,
             title_end,
@@ -156,7 +155,7 @@ impl Painter {
         let (body_x, body_end) = phys(body, scale);
         self.text(
             &mut c,
-            "The checked ones stop and run again; a new command is asked about",
+            view.body,
             FONT_SIZE,
             body_x,
             body_end,
@@ -216,7 +215,7 @@ impl Painter {
         }
 
         // At the left of the buttons, how many rows don't show, else the
-        // keys besides the buttons; then the buttons, Restart, the
+        // keys besides the buttons; then the buttons, the one going on, the
         // default, in the accent.
         let first = shift(layout.buttons[0]);
         let left = shift(layout.body).loc.x;
@@ -244,7 +243,12 @@ impl Painter {
                 self.dialog_keys(&mut c, &KEYS, row, end, scale, p);
             }
         }
-        for (i, (rect, label)) in layout.buttons.iter().zip(BUTTONS).enumerate() {
+        for (i, (rect, label)) in layout
+            .buttons
+            .iter()
+            .zip(["Cancel", view.action])
+            .enumerate()
+        {
             let style = if i == 1 {
                 ButtonStyle::Primary
             } else {
@@ -268,7 +272,7 @@ mod tests {
     #[test]
     fn rows_stack_inside_the_panel_above_the_buttons() {
         let size: Size<i32, Logical> = (1920, 1080).into();
-        let l = restart_layout(size, 3);
+        let l = restart_layout(size, 3, "Restart");
         assert_eq!(l.rows.len(), 3);
         assert_eq!(l.panel.loc.x, 1920 - (l.panel.loc.x + l.panel.size.w));
         for part in l.rows.iter().chain(&l.buttons).chain([&l.title, &l.body]) {
@@ -290,9 +294,12 @@ mod tests {
 
     #[test]
     fn a_short_output_shows_the_rows_that_fit() {
-        let l = restart_layout((800, 300).into(), 20);
+        let l = restart_layout((800, 300).into(), 20, "Restart");
         assert!(!l.rows.is_empty() && l.rows.len() < 20);
         assert!(l.panel.size.h <= 300);
-        assert_eq!(restart_layout((800, 2000).into(), 20).rows.len(), 20);
+        assert_eq!(
+            restart_layout((800, 2000).into(), 20, "Start").rows.len(),
+            20
+        );
     }
 }

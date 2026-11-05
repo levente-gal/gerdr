@@ -341,6 +341,23 @@ pub struct Workflow {
     /// `feature::verify::TIMEOUT`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verify_timeout: Option<u64>,
+    /// What a feature's sandbox runs, a tab per command, by repository
+    /// folder name. A line starting with `#` starts unchecked when a sandbox
+    /// asks what to run (see `feature_sandbox`).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub run: std::collections::BTreeMap<String, Vec<String>>,
+    /// What a sandbox runs once before that, in its namespace, by repository
+    /// folder name: a migration on its copy of the data.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub prepare: std::collections::BTreeMap<String, Vec<String>>,
+    /// Variables set in a sandbox over what its files say: to keep it from
+    /// sending real mail, say. The file is the only place for them.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub sandbox_env: std::collections::BTreeMap<String, String>,
+    /// The page a sandbox's Open app opens, when what listens in it doesn't
+    /// tell (see `sandbox_run::app_port`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox_url: Option<String>,
     /// Let AI review run with the same agent as Build; by default gerdr
     /// refuses, as a model reviewing its own code misses what it missed.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -357,6 +374,10 @@ impl Workflow {
             && self.copy.is_empty()
             && self.verify.is_empty()
             && self.verify_timeout.is_none()
+            && self.run.is_empty()
+            && self.prepare.is_empty()
+            && self.sandbox_env.is_empty()
+            && self.sandbox_url.is_none()
             && !self.allow_same_reviewer
     }
 }
@@ -1187,9 +1208,18 @@ fn bad_name(path: &Path, now: u64) -> PathBuf {
 }
 
 impl PaneRecord {
+    /// Whether what ran here ran in a feature's sandbox.
+    pub fn in_sandbox(&self) -> bool {
+        (self.env.iter()).any(|(key, _)| key == crate::feature::sandbox_run::SANDBOX_VAR)
+    }
+
     /// The command to run when the pane comes back, unless the user said not
     /// to or it is never run again (see `DENY`).
     pub fn restart_command(&self) -> Option<&str> {
+        // A sandbox's: outside its namespace it would reach main's database.
+        if self.in_sandbox() {
+            return None;
+        }
         self.command
             .as_deref()
             .filter(|command| !self.skip.iter().any(|s| s == command))
@@ -1564,6 +1594,7 @@ pub fn environ_whitelist(raw: &[u8]) -> Vec<(String, String)> {
     let keep = |key: &str| {
         key == "VIRTUAL_ENV"
             || key == "MISE_ENV"
+            || key == crate::feature::sandbox_run::SANDBOX_VAR
             || key
                 .strip_prefix("MISE_")
                 .and_then(|tool| tool.strip_suffix("_VERSION"))

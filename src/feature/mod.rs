@@ -38,6 +38,8 @@ pub mod page;
 pub mod patch;
 pub mod plan_review;
 pub mod review_import;
+pub mod sandbox;
+pub mod sandbox_run;
 pub mod setup;
 pub mod ship;
 pub mod store;
@@ -370,6 +372,14 @@ pub struct Feature {
     /// Its latest Verify run (see `verify`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verify: Option<verify::VerifyRun>,
+    /// Its sandbox, once started (see `sandbox_run`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox: Option<sandbox_run::SandboxRun>,
+    /// Which of the project's sandbox commands its sandbox runs, as checked
+    /// when it was last started: by `repo_key`, then by the command's words
+    /// (see `feature_sandbox`). What isn't here runs unless it is a comment.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub sandbox_picks: BTreeMap<String, BTreeMap<String, bool>>,
     /// Its AI review's findings and what was decided of them (see
     /// `review_import`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -969,6 +979,8 @@ pub(crate) mod tests {
             checks: Default::default(),
             skip_checks: Default::default(),
             verify: None,
+            sandbox: None,
+            sandbox_picks: Default::default(),
             review: None,
             plan_review: None,
             viewed: Default::default(),
@@ -1049,6 +1061,8 @@ pub(crate) mod tests {
             checks: Default::default(),
             skip_checks: Default::default(),
             verify: None,
+            sandbox: None,
+            sandbox_picks: Default::default(),
             review: None,
             plan_review: None,
             viewed: Default::default(),

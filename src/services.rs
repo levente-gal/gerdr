@@ -260,7 +260,7 @@ impl Gerdr {
     /// runs: it ends by itself, and its card tells how it went. Nor is an
     /// agent: its card tells of it too, and what it prints isn't a service's
     /// log (the commands it runs, its talk of errors).
-    fn may_be_service(&self, command: &str) -> bool {
+    pub(crate) fn may_be_service(&self, command: &str) -> bool {
         !test_runs::runs_tests(command)
             && !crate::feature::verify::runs_check(command)
             && !cli_agents::runs_agent(command, &self.agent_config)

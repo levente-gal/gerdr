@@ -1,6 +1,6 @@
 //! The project commands dialog (see `crate::project_commands`): Verify's
 //! checks and the setup commands of a project, a field of lines per
-//! repository, on two tabs, and opened from a feature a third with the
+//! repository, on four tabs, and opened from a feature a fifth with the
 //! checks only it runs. The list of fields scrolls; the title, the tabs and
 //! the buttons stay.
 
@@ -15,12 +15,19 @@ use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
 /// The dialog's tabs for a project.
-pub const COMMANDS_PROJECT_TABS: [CommandsTab; 2] = [CommandsTab::Checks, CommandsTab::Setup];
+pub const COMMANDS_PROJECT_TABS: [CommandsTab; 4] = [
+    CommandsTab::Checks,
+    CommandsTab::Setup,
+    CommandsTab::Run,
+    CommandsTab::Prepare,
+];
 /// The dialog's tabs for a feature.
-pub const COMMANDS_FEATURE_TABS: [CommandsTab; 3] = [
+pub const COMMANDS_FEATURE_TABS: [CommandsTab; 5] = [
     CommandsTab::Checks,
     CommandsTab::Setup,
     CommandsTab::Feature,
+    CommandsTab::Run,
+    CommandsTab::Prepare,
 ];
 /// The dialog's buttons while it can save.
 pub const COMMANDS_BUTTONS: [&str; 2] = ["Cancel", "Save"];
@@ -58,6 +65,10 @@ pub enum CommandsTab {
     Setup,
     /// The checks only the dialog's feature runs.
     Feature,
+    /// What a feature's sandbox runs.
+    Run,
+    /// What a feature's sandbox runs once first.
+    Prepare,
 }
 
 impl CommandsTab {
@@ -66,6 +77,8 @@ impl CommandsTab {
             Self::Checks => "Checks",
             Self::Setup => "Setup",
             Self::Feature => "This feature",
+            Self::Run => "Run",
+            Self::Prepare => "Prepare",
         }
     }
 }
@@ -386,7 +399,11 @@ impl CommandsLayout {
     pub fn controls(&self) -> Vec<Rect> {
         let useful = (self.rows.iter())
             .filter_map(|row| row.use_button)
-            .chain(self.rows.iter().flat_map(|row| row.borrowed.iter().copied()))
+            .chain(
+                self.rows
+                    .iter()
+                    .flat_map(|row| row.borrowed.iter().copied()),
+            )
             .filter_map(|button| clip(button, self.list));
         (self.tabs.iter().map(|(_, rect)| *rect))
             .chain(self.buttons)
@@ -655,6 +672,8 @@ impl Painter {
                 let placeholder = match view.tab {
                     CommandsTab::Checks => "No checks",
                     CommandsTab::Setup => "No setup commands",
+                    CommandsTab::Run => "Nothing runs in a sandbox",
+                    CommandsTab::Prepare => "Nothing runs first",
                     CommandsTab::Feature => "Nothing added",
                 };
                 self.command_lines(
@@ -946,7 +965,10 @@ mod tests {
         v.rows[0].borrowed = vec![borrowed("cargo test"), borrowed("cargo clippy")];
         let layout = commands_layout(&v, BIG.into());
         let rows = &layout.rows[0];
-        assert_eq!(rows.field.loc.y - rows.label.loc.y, ROW_LABEL + 2 * BORROWED_H);
+        assert_eq!(
+            rows.field.loc.y - rows.label.loc.y,
+            ROW_LABEL + 2 * BORROWED_H
+        );
         assert_eq!(layout.total - plain.total, 2 * BORROWED_H);
         assert_eq!(
             layout.hit(centre(rows.borrowed[1])),

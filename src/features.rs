@@ -29,6 +29,9 @@
 //! Verify's page its evidence, Ctrl+R starts the stage's agent afresh,
 //! Ctrl+Shift+R shows its agent, or goes back to its chat if its tab closed,
 //! Ctrl+Shift+U sets its worktrees up (Build and Verify: copies what they lack),
+//! on Manual test Ctrl+Shift+T asks which commands its sandbox runs and starts
+//! it, or stops it (see `feature_sandbox`), Ctrl+Shift+Y opens its app, Ctrl+Shift+G restarts it and
+//! Ctrl+Shift+X resets its data or removes it,
 //! Ctrl+C copies its path, Ctrl+N starts a new one, Ctrl+Shift+L unfolds the
 //! repository strip into rows of every repository it can hold (Esc folds them
 //! first), Del on a repository of several takes it out (asking when it is on
@@ -255,6 +258,8 @@ pub(crate) enum Job {
     Verify,
     /// Building its code graphs (see `feature::graph`): holds nothing up.
     Graph,
+    /// Starting or stopping its sandbox (see `feature::sandbox_run`).
+    Sandbox,
 }
 
 /// Work on a feature running off the UI thread.
@@ -272,6 +277,24 @@ pub(crate) struct Busy {
 
 /// What the work off the thread came to.
 pub(crate) enum Done {
+    /// Starting a feature's sandbox ended; `stopped`: because it was asked to.
+    Sandbox {
+        project: String,
+        slug: String,
+        run: feature::sandbox_run::SandboxRun,
+        stopped: bool,
+    },
+    /// Stopping a feature's sandbox ended.
+    SandboxStopped {
+        project: String,
+        slug: String,
+        what: crate::feature_sandbox::StopFor,
+        result: Result<(), String>,
+    },
+    /// The compose projects of sandboxes whose feature is gone.
+    SandboxLeftovers { stacks: Vec<String> },
+    /// Removing those ended.
+    SandboxLeftoversRemoved { problems: Vec<String> },
     /// `t3 thread send` to `thread` ended.
     T3Told {
         thread: String,
@@ -906,6 +929,18 @@ pub enum PanelOutcome {
     StopCheck(usize),
     /// Stop all of Verify's checks.
     StopChecks,
+    /// Start the sandbox.
+    StartSandbox,
+    /// Open the sandbox's app.
+    OpenSandbox,
+    /// Start the sandbox again on the same data.
+    RestartSandbox,
+    /// Start the sandbox again on a new copy of main's data, asking.
+    ResetSandbox,
+    /// Stop the sandbox, asking; at once while it starts.
+    StopSandbox,
+    /// Remove the stopped sandbox with its data, asking.
+    RemoveSandbox,
     /// Show the terminal of this one of Verify's checks.
     ShowCheck(usize),
     /// Skip this check the feature borrows, or stop skipping it.
@@ -1172,6 +1207,8 @@ pub struct RowCtx {
     /// The Build agent's dot while it runs again with Build done (see
     /// `Gerdr::build_agent_fixing`).
     pub fixing: Option<Dot>,
+    /// Its sandbox is being started or stopped.
+    pub sandbox_busy: bool,
     /// Verify has no checks to run because the feature skips them all.
     pub all_skipped: bool,
 }
@@ -1930,6 +1967,12 @@ fn action_hint(action: &PanelOutcome) -> &'static str {
         PanelOutcome::Continue(_) => "continue",
         PanelOutcome::RunChecks => "run checks",
         PanelOutcome::SetUp => "set up",
+        PanelOutcome::StartSandbox => "start sandbox\u{2026}",
+        PanelOutcome::OpenSandbox => "open app",
+        PanelOutcome::RestartSandbox => "restart sandbox",
+        PanelOutcome::ResetSandbox => "reset data\u{2026}",
+        PanelOutcome::StopSandbox => "stop sandbox\u{2026}",
+        PanelOutcome::RemoveSandbox => "remove sandbox\u{2026}",
         PanelOutcome::Findings => "review in diff",
         PanelOutcome::SendFixes | PanelOutcome::PlanFixes => "plan fixes",
         PanelOutcome::ReviewFixPlan => "review fix plan",
@@ -2613,8 +2656,44 @@ impl FeaturePanel {
             Keysym::u | Keysym::U if ctrl && mods.shift && offers_setup(feature, stage) => {
                 return Some(PanelOutcome::SetUp);
             }
-            Keysym::e | Keysym::E if ctrl && !mods.shift && offers_setup(feature, stage) => {
+            Keysym::e | Keysym::E
+                if ctrl
+                    && !mods.shift
+                    && (offers_setup(feature, stage) || offers_sandbox(feature, stage)) =>
+            {
                 return Some(PanelOutcome::EditCommands(commands_tab(stage)));
+            }
+            Keysym::t | Keysym::T if ctrl && mods.shift && offers_sandbox(feature, stage) => {
+                let running = ctx.sandbox_busy || sandbox_alive(feature);
+                return Some(match running {
+                    true => PanelOutcome::StopSandbox,
+                    false => PanelOutcome::StartSandbox,
+                });
+            }
+            Keysym::y | Keysym::Y
+                if ctrl
+                    && mods.shift
+                    && offers_sandbox(feature, stage)
+                    && sandbox_alive(feature) =>
+            {
+                return Some(PanelOutcome::OpenSandbox);
+            }
+            Keysym::g | Keysym::G
+                if ctrl
+                    && mods.shift
+                    && offers_sandbox(feature, stage)
+                    && sandbox_alive(feature) =>
+            {
+                return Some(PanelOutcome::RestartSandbox);
+            }
+            Keysym::x | Keysym::X if ctrl && mods.shift && offers_sandbox(feature, stage) => {
+                match (sandbox_alive(feature), feature.sandbox.is_some()) {
+                    (true, _) => return Some(PanelOutcome::ResetSandbox),
+                    (false, true) if !ctx.sandbox_busy => {
+                        return Some(PanelOutcome::RemoveSandbox);
+                    }
+                    _ => {}
+                }
             }
             Keysym::k | Keysym::K if ctrl && mods.shift && plan_review_open(feature, stage) => {
                 return Some(PanelOutcome::SkipPlanReview);
@@ -2895,6 +2974,48 @@ pub fn page_actions(
         let edit = PanelOutcome::EditCommands(commands_tab(stage));
         out.push((button("Commands\u{2026}", style), edit));
     }
+    if offers_sandbox(feature, stage) {
+        if ctx.sandbox_busy {
+            out.push((
+                button("Stop", ButtonStyle::Plain),
+                PanelOutcome::StopSandbox,
+            ));
+        } else if sandbox_alive(feature) {
+            out.extend([
+                (
+                    button("Open app", ButtonStyle::Plain),
+                    PanelOutcome::OpenSandbox,
+                ),
+                (
+                    button("Restart", ButtonStyle::Quiet),
+                    PanelOutcome::RestartSandbox,
+                ),
+                (
+                    button("Reset data\u{2026}", ButtonStyle::Quiet),
+                    PanelOutcome::ResetSandbox,
+                ),
+                (
+                    button("Stop\u{2026}", ButtonStyle::Quiet),
+                    PanelOutcome::StopSandbox,
+                ),
+            ]);
+        } else {
+            out.push((
+                button("Start sandbox\u{2026}", ButtonStyle::Plain),
+                PanelOutcome::StartSandbox,
+            ));
+            if feature.sandbox.is_some() {
+                out.push((
+                    button("Remove sandbox\u{2026}", ButtonStyle::Quiet),
+                    PanelOutcome::RemoveSandbox,
+                ));
+            }
+        }
+        out.push((
+            button("Commands\u{2026}", ButtonStyle::Quiet),
+            PanelOutcome::EditCommands(commands_tab(stage)),
+        ));
+    }
     let fixes = (feature.review.as_ref()).is_some_and(|r| r.count(FindingState::Fix) > 0);
     if mark == StageMark::Current && round.is_none() && fixes && has(&out, &PanelOutcome::Findings)
     {
@@ -2947,9 +3068,24 @@ pub fn page_actions(
 fn commands_tab(stage: Stage) -> CommandsTab {
     match stage {
         Stage::Build => CommandsTab::Setup,
+        Stage::ManualTest => CommandsTab::Run,
         Stage::Verify => CommandsTab::Feature,
         _ => CommandsTab::Checks,
     }
+}
+
+/// Whether `stage`'s page of `feature` offers its sandbox: where it is tried
+/// by hand, once there.
+fn offers_sandbox(feature: &Feature, stage: Stage) -> bool {
+    stage == Stage::ManualTest
+        && feature.status == Status::Open
+        && !feature.repos.is_empty()
+        && stage_mark(feature, stage) != StageMark::Later
+}
+
+/// Whether `feature`'s sandbox runs.
+fn sandbox_alive(feature: &Feature) -> bool {
+    feature.sandbox.as_ref().is_some_and(|run| run.alive())
 }
 
 /// Whether `stage`'s page of `feature` offers to set its worktrees up, and
@@ -3143,6 +3279,28 @@ impl Gerdr {
     /// to is kept and said.
     fn feature_done(&mut self, done: Done) {
         match done {
+            Done::Sandbox {
+                project,
+                slug,
+                run,
+                stopped,
+            } => {
+                self.unbusy(&project, &slug, Job::Sandbox);
+                self.sandbox_started(&project, &slug, run, stopped);
+            }
+            Done::SandboxStopped {
+                project,
+                slug,
+                what,
+                result,
+            } => {
+                self.unbusy(&project, &slug, Job::Sandbox);
+                self.sandbox_stopped(&project, &slug, what, result);
+            }
+            Done::SandboxLeftovers { stacks } => self.sandbox_leftovers(stacks),
+            Done::SandboxLeftoversRemoved { problems } => {
+                self.sandbox_leftovers_removed(problems);
+            }
             Done::CommandsFound {
                 serial,
                 project,
@@ -3475,6 +3633,8 @@ impl Gerdr {
             criteria,
             written,
             fixing: self.build_agent_fixing(feature),
+            sandbox_busy: (self.features.build.sandbox_stops)
+                .contains_key(&(feature.project.clone(), feature.slug.clone())),
             all_skipped,
         }
     }
@@ -4455,6 +4615,8 @@ impl Gerdr {
             checks: Default::default(),
             skip_checks: Default::default(),
             verify: None,
+            sandbox: None,
+            sandbox_picks: Default::default(),
             review: None,
             plan_review: None,
             viewed: Default::default(),
@@ -5015,6 +5177,15 @@ impl Gerdr {
             },
             PanelOutcome::Ship => self.ask_ship_feature(&project, &slug),
             PanelOutcome::SetUp => self.set_up_again(&project, &slug),
+            PanelOutcome::StartSandbox => self.ask_start_sandbox(&project, &slug),
+            PanelOutcome::OpenSandbox => self.open_sandbox_app(&project, &slug),
+            PanelOutcome::RestartSandbox => {
+                let what = crate::feature_sandbox::StopFor::Restart;
+                self.finish_stop(&project, &slug, what);
+            }
+            PanelOutcome::ResetSandbox => self.ask_reset_sandbox(&project, &slug),
+            PanelOutcome::StopSandbox => self.ask_stop_sandbox(&project, &slug),
+            PanelOutcome::RemoveSandbox => self.ask_remove_sandbox(&project, &slug),
             PanelOutcome::StartAgent(stage, fresh) => {
                 self.start_stage_agent(&project, &slug, stage, fresh)
             }
@@ -5743,6 +5914,15 @@ impl Gerdr {
         }
         self.save_feature(project, slug);
         self.feature_cursor_to_current_of(project, slug);
+        // Shipped: its sandbox has done its work, and goes, or its tabs would
+        // keep the workspace open.
+        if done
+            && self
+                .feature(project, slug)
+                .is_some_and(|f| f.sandbox.is_some())
+        {
+            self.finish_stop(project, slug, crate::feature_sandbox::StopFor::Remove);
+        }
         // Shipped: its workspace closes, unless something runs in it.
         if done && let Some(kept) = self.close_shipped_workspace(project, slug) {
             text = format!("{text}; {kept}");
@@ -5803,6 +5983,14 @@ impl Gerdr {
                 feature.title
             ),
         };
+        // Its sandbox goes with it: nothing else would ever stop it.
+        let sandbox = self
+            .feature_mut(project, slug)
+            .and_then(|f| f.sandbox.take());
+        if sandbox.is_some() {
+            self.save_feature(project, slug);
+        }
+        let sandbox_dir = crate::feature_sandbox::sandbox_dir(project, slug);
         self.t3_forget_project(&feature.dir);
         for stage in feature.runs.keys() {
             if let Some(left) = self.t3_left_running(project, slug, *stage) {
@@ -5817,6 +6005,13 @@ impl Gerdr {
             let graphs = gerdr.running_feature_graphs(&project, &slug);
             gerdr.feature_work(Some(busy), move |_| {
                 stop_graphs(graphs);
+                if let Some(run) = &sandbox
+                    && let Err(why) = feature::sandbox_run::stop(run, &sandbox_dir, true)
+                {
+                    tracing::error!("removing the sandbox of {slug}: {why}");
+                    let text = format!("A removed feature's sandbox stayed behind: {why}");
+                    crate::problems::report(crate::feature_sandbox::PROBLEMS, text);
+                }
                 Done::Removed {
                     result: layout::remove(&feature, force),
                     project,
@@ -6213,6 +6408,7 @@ impl Gerdr {
             tail,
             ctx: self.row_ctx(feature),
             setup: doing(Job::Setup),
+            sandbox: doing(Job::Sandbox),
             verify: doing(Job::Verify),
             plan: self.planned_checks(feature),
             check_tails: Some(&self.features.check_tails),
@@ -6324,6 +6520,7 @@ fn task_of(busy: &Busy, title: Option<&str>, project: &str) -> Task {
         Job::Setup => "setup",
         Job::Verify => "checks",
         Job::Graph => "graph",
+        Job::Sandbox => "sandbox",
         _ => "feature",
     };
     let detail = match title {
@@ -6629,6 +6826,8 @@ struct PanelState<'a> {
     ctx: RowCtx,
     /// What its setup does now, while it runs.
     setup: Option<&'a str>,
+    /// What is being done to its sandbox now.
+    sandbox: Option<&'a str>,
     /// What Verify's checks do now, while they run.
     verify: Option<&'a str>,
     /// The checks its project gives Verify, and what the feature skips.
@@ -7305,6 +7504,73 @@ fn last_checks(feature: &Feature, state: &PanelState) -> Vec<CheckLine> {
 
 /// The setup's section of `feature`'s page, as `state` has it: what runs,
 /// or once it ended what went wrong and what it copied.
+/// What the Manual test page says of `feature`'s sandbox, once it has one, and
+/// what running in it doesn't keep apart from main.
+fn sandbox_sections(feature: &Feature, state: &PanelState) -> Vec<PageSection> {
+    if let Some(what) = state.sandbox {
+        return vec![lines("Sandbox", vec![line(inline(what), CheckTone::Note)])];
+    }
+    let mut out = Vec::new();
+    let Some(run) = feature.sandbox.as_ref() else {
+        let text = "the project running here, on a copy of its containers and data";
+        return vec![lines("Sandbox", vec![line(text, CheckTone::Note)])];
+    };
+    if let Some(why) = &run.failed {
+        return vec![lines(
+            "Sandbox",
+            vec![line(format!("failed: {why}"), CheckTone::Blocker)],
+        )];
+    }
+    if run.alive() {
+        out.push(line("running", CheckTone::Ready));
+        let ports = run.listening();
+        if !ports.is_empty() {
+            let ports: Vec<String> = ports.iter().map(u16::to_string).collect();
+            out.push(line(
+                format!("listening on {}", ports.join(", ")),
+                CheckTone::Note,
+            ));
+        }
+    } else if run.stopped {
+        out.push(line("stopped, its data kept", CheckTone::Note));
+    } else {
+        out.push(line("not running: its network ended", CheckTone::Note));
+    }
+    // What can hurt first: a long list cuts its end.
+    if !run.outward.is_empty() {
+        let text = format!("can reach real services: {}", run.outward.join(", "));
+        out.push(line(text, CheckTone::Blocker));
+    }
+    for name in &run.not_copied {
+        let text = format!("not copied: {name}, which compose didn't start");
+        out.push(line(text, CheckTone::Blocker));
+    }
+    out.push(line(
+        "files, unix sockets and the internet are shared with main",
+        CheckTone::Note,
+    ));
+    let mut sections = vec![lines("Sandbox", capped(out, CheckTone::Note))];
+    let mut out = Vec::new();
+    for forward in &run.forwards {
+        let text = format!(
+            "{}: port {} here, 127.0.0.1:{} from outside",
+            forward.service, forward.main_port, forward.host_port
+        );
+        out.push(line(text, CheckTone::Note));
+    }
+    for name in &run.copied {
+        out.push(line(format!("copied {name}"), CheckTone::Note));
+    }
+    for service in &run.fresh {
+        out.push(line(format!("{service} started empty"), CheckTone::Note));
+    }
+    // All of them: the ports are what another tool connects to.
+    if !out.is_empty() {
+        sections.push(lines("Containers", out));
+    }
+    sections
+}
+
 fn setup_section(feature: &Feature, state: &PanelState) -> Option<PageSection> {
     if let Some(what) = state.setup {
         return Some(lines("Setup", vec![line(inline(what), CheckTone::Note)]));
@@ -7567,6 +7833,7 @@ fn stage_page(
                 let text = (state.manual.clone())
                     .unwrap_or_else(|| "no criteria in the brief: Mark done by hand".into());
                 sections.push(lines("Criteria", vec![line(text, CheckTone::Note)]));
+                sections.extend(sandbox_sections(feature, state));
             }
             Stage::Ship => {
                 let check = check_lines(feature, state.probe, state.shipping, now);
@@ -7696,7 +7963,17 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 4] = [
                 "Ctrl+Shift+U",
                 "copy what the worktrees lack: Build and Verify",
             ),
-            ("Ctrl+E", "edit the project's commands: Build and Verify"),
+            (
+                "Ctrl+E",
+                "edit the project's commands: Build, Verify, Manual test",
+            ),
+            ("Ctrl+Shift+T", "Manual test: start the sandbox, or stop it"),
+            ("Ctrl+Shift+Y", "Manual test: open the sandbox's app"),
+            ("Ctrl+Shift+G", "Manual test: restart the sandbox"),
+            (
+                "Ctrl+Shift+X",
+                "Manual test: reset the sandbox's data, or remove it once stopped",
+            ),
             ("Ctrl+R", "start the stage's agent afresh"),
             ("Ctrl+Shift+R", "show the stage's agent, or resume its chat"),
             ("Ctrl+Shift+A", "pick the stage's next agent"),
@@ -7938,6 +8215,22 @@ fn tab_hints(
             }
             if offers_setup(feature, stage) {
                 hints.push(hint("Ctrl+Shift+U", "set up"));
+                hints.push(hint("Ctrl+E", "edit commands"));
+            }
+            if offers_sandbox(feature, stage) {
+                if ctx.sandbox_busy {
+                    hints.push(hint("Ctrl+Shift+T", "stop"));
+                } else if sandbox_alive(feature) {
+                    hints.push(hint("Ctrl+Shift+Y", "open app"));
+                    hints.push(hint("Ctrl+Shift+G", "restart"));
+                    hints.push(hint("Ctrl+Shift+X", "reset data\u{2026}"));
+                    hints.push(hint("Ctrl+Shift+T", "stop\u{2026}"));
+                } else {
+                    hints.push(hint("Ctrl+Shift+T", "start sandbox\u{2026}"));
+                    if feature.sandbox.is_some() {
+                        hints.push(hint("Ctrl+Shift+X", "remove sandbox\u{2026}"));
+                    }
+                }
                 hints.push(hint("Ctrl+E", "edit commands"));
             }
             if fresh_stage(feature, row).is_some() {
@@ -8274,6 +8567,8 @@ pub(crate) mod tests {
             checks: Default::default(),
             skip_checks: Default::default(),
             verify: None,
+            sandbox: None,
+            sandbox_picks: Default::default(),
             review: None,
             plan_review: None,
             viewed: Default::default(),
@@ -11318,6 +11613,140 @@ pub(crate) mod tests {
         assert_eq!(setup(&f).unwrap().0, "Set up again");
         f.status = Status::Abandoned;
         assert_eq!(setup(&f), None);
+    }
+
+    /// `f` with every stage before Manual test marked.
+    fn at_manual_test() -> Feature {
+        let at = Stage::ALL
+            .iter()
+            .position(|stage| *stage == Stage::ManualTest)
+            .unwrap();
+        feature("x", vec![repo("api", true)], at)
+    }
+
+    fn sandbox_labels(f: &Feature, stage: Stage, ctx: RowCtx) -> Vec<String> {
+        page_actions(f, stage, ctx)
+            .into_iter()
+            .filter(|(_, o)| {
+                matches!(
+                    o,
+                    PanelOutcome::StartSandbox
+                        | PanelOutcome::OpenSandbox
+                        | PanelOutcome::RestartSandbox
+                        | PanelOutcome::ResetSandbox
+                        | PanelOutcome::StopSandbox
+                        | PanelOutcome::RemoveSandbox
+                )
+            })
+            .map(|(b, _)| b.label)
+            .collect()
+    }
+
+    fn running_run() -> feature::sandbox_run::SandboxRun {
+        let me = std::process::id() as i32;
+        let start = std::fs::read_to_string(format!("/proc/{me}/stat")).unwrap();
+        let start: u64 = start
+            .rsplit_once(')')
+            .unwrap()
+            .1
+            .split_whitespace()
+            .nth(19)
+            .unwrap()
+            .parse()
+            .unwrap();
+        let proc = feature::sandbox_run::Proc { pid: me, start };
+        feature::sandbox_run::SandboxRun {
+            holder: Some(proc.clone()),
+            pasta: Some(proc),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_sandbox_is_offered_on_manual_test_only_and_by_its_state() {
+        let mut f = at_manual_test();
+        let none = RowCtx::default();
+        assert_eq!(f.current(), Some(Stage::ManualTest));
+        assert_eq!(
+            sandbox_labels(&f, Stage::ManualTest, none),
+            ["Start sandbox\u{2026}"]
+        );
+        assert!(sandbox_labels(&f, Stage::Verify, none).is_empty());
+        assert!(sandbox_labels(&f, Stage::Ship, none).is_empty());
+        let busy = RowCtx {
+            sandbox_busy: true,
+            ..none
+        };
+        assert_eq!(sandbox_labels(&f, Stage::ManualTest, busy), ["Stop"]);
+        f.sandbox = Some(running_run());
+        assert_eq!(
+            sandbox_labels(&f, Stage::ManualTest, none),
+            ["Open app", "Restart", "Reset data\u{2026}", "Stop\u{2026}"]
+        );
+        f.sandbox = Some(feature::sandbox_run::SandboxRun {
+            stopped: true,
+            ..running_run()
+        });
+        assert_eq!(
+            sandbox_labels(&f, Stage::ManualTest, none),
+            ["Start sandbox\u{2026}", "Remove sandbox\u{2026}"]
+        );
+        f.status = Status::Abandoned;
+        assert!(sandbox_labels(&f, Stage::ManualTest, none).is_empty());
+    }
+
+    #[test]
+    fn the_sandbox_section_says_what_it_copied_and_what_it_shares() {
+        let mut f = at_manual_test();
+        let mut state = PanelState::default();
+        let text = |f: &Feature, state: &PanelState| -> Vec<String> {
+            let mut said = Vec::new();
+            for section in sandbox_sections(f, state) {
+                let PageSection::Lines { lines, .. } = section else {
+                    panic!("no lines");
+                };
+                said.extend(lines.into_iter().map(|l| l.text));
+            }
+            said
+        };
+        assert_eq!(
+            text(&f, &state),
+            ["the project running here, on a copy of its containers and data"]
+        );
+        f.sandbox = Some(feature::sandbox_run::SandboxRun {
+            failed: Some("Docker isn't running, and a sandbox needs it".into()),
+            ..Default::default()
+        });
+        assert_eq!(
+            text(&f, &state),
+            ["failed: Docker isn't running, and a sandbox needs it"]
+        );
+        f.sandbox = Some(feature::sandbox_run::SandboxRun {
+            copied: vec!["docker_pgdata".into()],
+            fresh: vec!["redis".into()],
+            outward: vec!["EMAIL_HOST".into()],
+            forwards: vec![feature::sandbox::Forward {
+                service: "db".into(),
+                main_port: 5433,
+                host_port: 41001,
+                udp: false,
+            }],
+            stopped: true,
+            ..Default::default()
+        });
+        let said = text(&f, &state).join("\n");
+        for part in [
+            "stopped, its data kept",
+            "db: port 5433 here, 127.0.0.1:41001 from outside",
+            "copied docker_pgdata",
+            "redis started empty",
+            "can reach real services: EMAIL_HOST",
+            "shared with main",
+        ] {
+            assert!(said.contains(part), "{part} not in {said}");
+        }
+        state.sandbox = Some("Copying docker_pgdata");
+        assert_eq!(text(&f, &state).len(), 1);
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! The project commands dialog: what Verify checks (`workflow.verify`,
-//! `verify_timeout`) and what sets a new worktree up (`workflow.setup`),
-//! without editing the project file by hand.
+//! `verify_timeout`), what sets a new worktree up (`workflow.setup`) and what a
+//! sandbox runs (`workflow.run`, `workflow.prepare`), without editing the
+//! project file by hand.
 //!
 //! Each repository has a field of lines, a command a line; emptied, its key
 //! goes. Only what was edited is written, so a command a hand wrote over
@@ -79,6 +80,10 @@ struct Row {
     checks: Slot,
     /// None for the feature as a whole: only checks run there.
     setup: Option<Slot>,
+    /// None likewise.
+    run: Option<Slot>,
+    /// None likewise.
+    prepare: Option<Slot>,
     /// The checks only the dialog's feature runs here; None unless the
     /// feature holds it.
     own: Option<Slot>,
@@ -102,6 +107,8 @@ impl Row {
         match tab {
             CommandsTab::Checks => Some(&self.checks),
             CommandsTab::Setup => self.setup.as_ref(),
+            CommandsTab::Run => self.run.as_ref(),
+            CommandsTab::Prepare => self.prepare.as_ref(),
             CommandsTab::Feature => self.own.as_ref(),
         }
     }
@@ -110,6 +117,8 @@ impl Row {
         match tab {
             CommandsTab::Checks => Some(&mut self.checks),
             CommandsTab::Setup => self.setup.as_mut(),
+            CommandsTab::Run => self.run.as_mut(),
+            CommandsTab::Prepare => self.prepare.as_mut(),
             CommandsTab::Feature => self.own.as_mut(),
         }
     }
@@ -124,6 +133,8 @@ impl Row {
             key: key.to_owned(),
             checks: Slot::new(workflow.verify.get(key)),
             setup: (key != FEATURE_KEY).then(|| Slot::new(workflow.setup.get(key))),
+            run: (key != FEATURE_KEY).then(|| Slot::new(workflow.run.get(key))),
+            prepare: (key != FEATURE_KEY).then(|| Slot::new(workflow.prepare.get(key))),
             own: None,
             own_key: key.to_owned(),
             stored: lines_as_written(workflow.verify.get(key)),
@@ -169,6 +180,8 @@ impl Row {
         match tab {
             CommandsTab::Checks => &self.suggested.checks,
             CommandsTab::Setup => &self.suggested.setup,
+            CommandsTab::Run => &self.suggested.run,
+            CommandsTab::Prepare => &self.suggested.prepare,
             // What a repository suggests is for all its features.
             CommandsTab::Feature => &[],
         }
@@ -321,6 +334,8 @@ impl CommandsDialog {
         for (id, _, workflow) in projects {
             let keys = (workflow.verify.keys())
                 .chain(workflow.setup.keys())
+                .chain(workflow.run.keys())
+                .chain(workflow.prepare.keys())
                 .filter(|key| *key != FEATURE_KEY);
             let keys: std::collections::BTreeSet<_> = keys.collect();
             rows.extend(keys.into_iter().map(|key| Row::new(id, key, workflow)));
@@ -606,8 +621,9 @@ impl CommandsDialog {
     fn touched(&self) -> bool {
         self.limit_changed()
             || self.own_changed()
-            || (self.rows.iter())
-                .any(|r| r.checks.changed() || r.setup.as_ref().is_some_and(Slot::changed))
+            || (self.rows.iter()).any(|r| {
+                (COMMANDS_PROJECT_TABS.iter()).any(|tab| r.slot(*tab).is_some_and(Slot::changed))
+            })
     }
 
     /// Whether what only the feature runs or skips was edited.
@@ -694,7 +710,9 @@ impl CommandsDialog {
         let edited = |id: &str| {
             (self.rows.iter()).any(|r| {
                 r.project == id
-                    && (r.checks.changed() || r.setup.as_ref().is_some_and(Slot::changed))
+                    && COMMANDS_PROJECT_TABS
+                        .iter()
+                        .any(|tab| r.slot(*tab).is_some_and(Slot::changed))
             })
         };
         let mut ids: Vec<String> = (self.projects.iter())
@@ -718,6 +736,12 @@ impl CommandsDialog {
             }
             if let Some(setup) = row.setup.as_ref().filter(|s| s.changed()) {
                 set_commands(&mut workflow.setup, &row.key, lines_of(&setup.field));
+            }
+            if let Some(run) = row.run.as_ref().filter(|s| s.changed()) {
+                set_commands(&mut workflow.run, &row.key, lines_of(&run.field));
+            }
+            if let Some(prepare) = row.prepare.as_ref().filter(|s| s.changed()) {
+                set_commands(&mut workflow.prepare, &row.key, lines_of(&prepare.field));
             }
         }
         if project == self.scope.project && self.limit_changed() {
@@ -825,10 +849,7 @@ impl CommandsDialog {
         }
         keys.push(("Esc", "close"));
         keys.push(("Tab", "next"));
-        keys.push(match self.tabs().len() {
-            2 => ("Ctrl+PgDn", "other tab"),
-            _ => ("Ctrl+PgDn", "next tab"),
-        });
+        keys.push(("Ctrl+PgDn", "next tab"));
         CommandsView {
             tabs: self.tabs(),
             tab: self.tab,
@@ -838,6 +859,12 @@ impl CommandsDialog {
                 }
                 CommandsTab::Setup => {
                     "One command per line. They run in a new worktree, once it has its files."
+                }
+                CommandsTab::Run => {
+                    "One command per line, each in a tab of the sandbox. A line starting with # doesn't run."
+                }
+                CommandsTab::Prepare => {
+                    "One command per line, in order, before a sandbox's commands: a migration on its data."
                 }
                 CommandsTab::Feature => FEATURE_BODY,
             },
@@ -864,6 +891,25 @@ const STALE: &str = "The project file was edited outside gerdr. Reload it to sav
 impl Gerdr {
     /// The projects a dialog for `scope` holds, the home project first:
     /// id, name, workflow. None when it is gone.
+    fn commands_seen_running(&self, project: &str) -> Vec<(std::path::PathBuf, String)> {
+        let Some(p) = self.projects.project(project) else {
+            return Vec::new();
+        };
+        let mut seen = Vec::new();
+        for record in &p.workspaces {
+            for pane in &record.panes {
+                let Some(command) = pane.restart_command() else {
+                    continue;
+                };
+                if self.may_be_service(command) {
+                    let dir = pane.cwd.as_ref().unwrap_or(&record.dir);
+                    seen.push((dir.clone(), command.to_owned()));
+                }
+            }
+        }
+        seen
+    }
+
     fn commands_projects(&self, scope: &CommandsScope) -> Option<Vec<(String, String, Workflow)>> {
         let entry = |id: &str| {
             (self.projects.project(id)).map(|p| (p.id.clone(), p.name.clone(), p.workflow.clone()))
@@ -931,7 +977,13 @@ impl Gerdr {
                 .flatten()
                 .map(|f| f.dir.clone());
             match home_dir.or_else(|| search.0.first().cloned()) {
-                Some(from) => looks.push((id.clone(), from, search, self.other_projects_dirs(id))),
+                Some(from) => looks.push((
+                    id.clone(),
+                    from,
+                    search,
+                    self.other_projects_dirs(id),
+                    self.commands_seen_running(id),
+                )),
                 None => dialog.nowhere = true,
             }
         }
@@ -939,7 +991,7 @@ impl Gerdr {
         self.context_menu = None;
         self.stop_key_repeat();
         self.features.commands = Some(dialog);
-        for (id, from, (dirs, ignore, bases), others) in looks {
+        for (id, from, (dirs, ignore, bases), others, seen) in looks {
             self.feature_work(None, move |_| crate::features::Done::CommandsFound {
                 serial,
                 project: id,
@@ -948,7 +1000,11 @@ impl Gerdr {
                 )
                 .map(|root| {
                     (root.repos.iter())
-                        .map(|r| (r.name.clone(), suggest::suggest(&r.main)))
+                        .map(|r| {
+                            let mut suggested = suggest::suggest(&r.main);
+                            suggest::with_seen(&mut suggested, &r.main, &seen);
+                            (r.name.clone(), suggested)
+                        })
                         .collect()
                 }),
             });
@@ -1603,6 +1659,7 @@ mod tests {
         let suggested = Suggested {
             checks: vec!["a".into(), "b".into()],
             setup: vec!["c".into()],
+            ..Suggested::default()
         };
         d.found("home", vec![("zed".into(), suggested)], &workflow());
         d.focus = Focus::Row("home".into(), "zed".into());
@@ -1716,11 +1773,23 @@ mod tests {
         assert!(view.limit.is_none());
         // Ctrl+PgDn goes round them, Ctrl+PgUp back.
         press(&mut d, ctrl(), Keysym::Page_Down);
+        assert_eq!(d.tab, CommandsTab::Run);
+        press(&mut d, ctrl(), Keysym::Page_Down);
+        assert_eq!(d.tab, CommandsTab::Prepare);
+        press(&mut d, ctrl(), Keysym::Page_Down);
         assert_eq!(d.tab, CommandsTab::Checks);
         press(&mut d, ctrl(), Keysym::Page_Up);
-        assert_eq!(d.tab, CommandsTab::Feature);
-        press(&mut d, ctrl(), Keysym::Page_Up);
-        assert_eq!(d.tab, CommandsTab::Setup);
+        assert_eq!(d.tab, CommandsTab::Prepare);
+    }
+
+    #[test]
+    fn an_edit_on_the_run_tab_counts_as_touched() {
+        let mut d = dialog();
+        assert!(!d.touched());
+        let row = d.rows.first_mut().unwrap();
+        row.run.as_mut().unwrap().field.set("./runlocal.sh");
+        assert!(d.touched());
+        assert!(!d.changed_projects().is_empty());
     }
 
     #[test]

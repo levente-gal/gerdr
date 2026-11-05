@@ -561,11 +561,12 @@ impl Gerdr {
         }
         // A URL opens in the app for it, like a browser; a web page in a
         // window of its own.
+        let original = command;
         let url = desktop::url_command(command);
         let web = url.as_deref().and_then(|opener| web_app(command, opener));
         let mut app_id = String::new();
         let command = match web {
-            Some((web, site)) => match self.steered(&web, command, pane) {
+            Some((web, site)) => match self.steered(&web, command, pane, dir) {
                 Some(steered) => {
                     app_id = format!("-{}_", web_control::EXTENSION_ID);
                     steered
@@ -584,7 +585,8 @@ impl Gerdr {
             None => url.unwrap_or_else(|| command.to_owned()),
         };
         let bare_zed = opens_nothing_in_zed(&command);
-        match own_instance(&command, Some(&self.instance_dir)) {
+        let root = self.profile_root(original, dir);
+        match own_instance(&command, Some(root.as_path())) {
             Some((mut command, profile)) => {
                 if let Some(profile) = &profile {
                     self.ready_profile(&command, profile);
@@ -622,14 +624,15 @@ impl Gerdr {
     /// windows names the extension then, not the site. `None` for a
     /// browser not known to take the extension, or a Flatpak one, which
     /// can't run its host.
-    fn steered(&self, web: &str, url: &str, pane: Option<u32>) -> Option<String> {
+    fn steered(&self, web: &str, url: &str, pane: Option<u32>, dir: &Path) -> Option<String> {
         let pane = pane?;
         let socket = self.web_control.socket()?;
         let (key, _, flatpak) = program(web)?;
         if flatpak || !STEERED.contains(&key.as_str()) {
             return None;
         }
-        let profile = own_instance(web, Some(&self.instance_dir))?.1?;
+        let root = self.profile_root(url, dir);
+        let profile = own_instance(web, Some(root.as_path()))?.1?;
         // Before the extension goes in, which would count as its start.
         self.ready_profile(web, &profile);
         let extension = web_control::install(&profile, socket)
@@ -672,6 +675,13 @@ impl Gerdr {
         }
     }
 
+    /// Where a browser opening `command` from folder `dir` keeps its profile: a
+    /// sandbox's page apart, as its logins are on the sandbox's app.
+    fn profile_root(&self, command: &str, dir: &Path) -> PathBuf {
+        self.sandbox_for(command, dir)
+            .map_or_else(|| self.instance_dir.clone(), |(_, profile)| profile)
+    }
+
     /// Start `command` (trimmed) for tab `t` of workspace `w`, in the
     /// workspace's folder (see `prepare`), showing in `pane` when known.
     /// Its pid, or `None` if it is empty, the tab is gone, or it didn't
@@ -699,11 +709,21 @@ impl Gerdr {
         {
             tracing::warn!("creating {}: {err}", profile.display());
         }
+        // A page of a running sandbox opens inside it, where its address leads
+        // to the feature's app.
+        let sandbox = self.sandbox_for(command, &dir);
+        let line = match &sandbox {
+            Some((holder, _)) => format!(
+                "exec nsenter --user --net --preserve-credentials -t {holder} -- sh -c {}",
+                desktop::shell_quote(&prepared.command)
+            ),
+            None => prepared.command.clone(),
+        };
         let mut cmd = Command::new("sh");
         // Electron apps would look for an X server, and there is none: nor
         // for what runs in a terminal started here.
         cmd.arg("-c")
-            .arg(&prepared.command)
+            .arg(&line)
             .env("ELECTRON_OZONE_PLATFORM_HINT", "auto");
         let log = program_name(command).unwrap_or_else(|| "app".into());
         if log == CURSOR
@@ -718,7 +738,7 @@ impl Gerdr {
         }
         // Not one that hands its window to another process: that one's
         // would come and go with gerdr.
-        if prepared.app_id.is_empty() && self.keeps(command) {
+        if prepared.app_id.is_empty() && sandbox.is_none() && self.keeps(command) {
             return self.start_kept(cmd, &dir, &log, command.trim());
         }
         self.spawn(cmd, &dir, &log)

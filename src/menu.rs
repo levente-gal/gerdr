@@ -173,6 +173,8 @@ pub enum MenuAction {
         slug: Option<String>,
         tab: crate::chrome::CommandsTab,
     },
+    /// Ask before removing what sandboxes of gone features left.
+    AskRemoveSandboxLeftovers(Vec<String>),
     /// Read the project files again, after one was edited by hand.
     ReloadProjects,
     /// Join project `id`, open in another gerdr, here (see
@@ -492,6 +494,9 @@ impl Gerdr {
             MenuAction::RestoreProjectCommands(before) => self.restore_project_commands(before),
             MenuAction::EditCommands { project, slug, tab } => {
                 self.open_project_commands(&project, slug.as_deref(), tab);
+            }
+            MenuAction::AskRemoveSandboxLeftovers(stacks) => {
+                self.ask_remove_sandbox_leftovers(stacks);
             }
             MenuAction::RestoreContextRepo {
                 project,

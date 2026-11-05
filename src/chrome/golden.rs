@@ -2360,6 +2360,124 @@ fn dump_identity() {
     }
 }
 
+// ------------------------------------------------------- restart dialog
+
+/// The restart dialog: a workspace's commands, one exited and one unchecked,
+/// and what a feature's sandbox would run, the cursor on one to leave out.
+fn restart(sandbox: bool) -> super::RestartView {
+    let row = |label: &str, place: &str, exited: bool, checked: bool| super::RestartRow {
+        label: label.into(),
+        place: place.into(),
+        exited,
+        checked,
+    };
+    match sandbox {
+        false => super::RestartView {
+            title: "Restart which commands in \u{201c}api\u{201d}?".into(),
+            body: "The checked ones stop and run again; a new command is asked about",
+            action: "Restart",
+            rows: vec![
+                row("runserver", "~/work/api", false, true),
+                row("celery worker", "~/work/api", true, true),
+                row("pytest", "~/work/api", false, false),
+            ],
+            cursor: 0,
+            top: 0,
+            selected: 1,
+            hover: None,
+        },
+        true => super::RestartView {
+            title: "Run which commands in this sandbox?".into(),
+            body: "The checked ones run inside it; this feature keeps the choice",
+            action: "Start",
+            rows: vec![
+                row(
+                    "python manage.py migrate",
+                    "backend \u{b7} runs first",
+                    false,
+                    true,
+                ),
+                row("python manage.py runserver 9000", "backend", false, true),
+                row("celery -A app worker -l INFO", "backend", false, true),
+                row("celery -A app beat -l INFO", "backend", false, false),
+                row("nx serve", "frontend \u{b7} from main", false, true),
+            ],
+            cursor: 3,
+            top: 0,
+            selected: 1,
+            hover: None,
+        },
+    }
+}
+
+/// What the restart dialog is painted on.
+const RESTART_OUTPUT: (i32, i32) = (1280, 720);
+
+fn paint_restart(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
+    let p = theme.palette();
+    let size = RESTART_OUTPUT.into();
+    vec![
+        hash(painter.restart_dialog(&restart(false), size, scale, p)),
+        hash(painter.restart_dialog(&restart(true), size, scale, p)),
+    ]
+}
+
+/// The surfaces `paint_restart` hashes, in order.
+const RESTART: [&str; 2] = ["restart", "restart_sandbox"];
+
+/// The recorded hashes of `RESTART`, per case in `CASES`.
+const GOLDEN_RESTART: [[u64; 2]; 4] = [
+    [
+        0xb84e55277b561625, // restart
+        0x55e74402e1d07d07, // restart_sandbox
+    ],
+    [
+        0xf211e65cd2b4b59f, // restart
+        0x28f6476fac5dce8d, // restart_sandbox
+    ],
+    [
+        0x76ed5d9183dab2ce, // restart
+        0xc71a8cacc89f09c8, // restart_sandbox
+    ],
+    [
+        0x4d6f974e84ed3255, // restart
+        0x9f6f2f448431032e, // restart_sandbox
+    ],
+];
+
+#[test]
+fn the_restart_dialog_paints_the_same_pixels() {
+    let golden: Vec<&[u64]> = GOLDEN_RESTART.iter().map(|row| row.as_slice()).collect();
+    check(&RESTART, &golden, paint_restart);
+}
+
+/// With `GERDR_DUMP_DIR` set, write the restart dialog there.
+#[test]
+fn dump_restart() {
+    let Some(dir) = std::env::var_os("GERDR_DUMP_DIR") else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    let _ = std::fs::create_dir_all(&dir);
+    let painter = Painter::new();
+    let size = RESTART_OUTPUT.into();
+    for (theme, scale) in CASES {
+        let p = theme.palette();
+        let px = |v: i32| (v as f64 * scale).round() as usize;
+        let tag = format!("{}_{}", theme.name(), scale);
+        for (name, sandbox) in [("restart", false), ("restart_sandbox", true)] {
+            let view = restart(sandbox);
+            let panel = super::restart_layout(size, view.rows.len(), view.action).panel;
+            dump(
+                &dir,
+                &format!("{name}_{tag}"),
+                painter.restart_dialog(&view, size, scale, p),
+                px(panel.size.w + 2 * super::SHADOW),
+            );
+        }
+    }
+}
+
 // ------------------------------------------------------- project commands
 
 /// The project commands dialog, as `case` says: its Checks with a
@@ -2427,6 +2545,20 @@ fn commands(case: usize) -> super::CommandsView {
         }
         3 => view.down = 60,
         4 => {
+            view.tab = super::CommandsTab::Run;
+            view.body = "One command per line, each in a tab of the sandbox. A line starting with # doesn't run.";
+            view.rows = vec![
+                row(
+                    "aft-backend",
+                    Some("in this feature"),
+                    None,
+                    "./runlocal.sh\n./run_celery.sh\n# ./run_celery_beat.sh",
+                ),
+                row("web", None, Some("npx nx run ao-app:serve:local"), ""),
+            ];
+            view.limit = None;
+        }
+        5 => {
             view.tabs = &super::COMMANDS_FEATURE_TABS;
             view.tab = super::CommandsTab::Feature;
             view.body = crate::project_commands::FEATURE_BODY;
@@ -2470,47 +2602,52 @@ fn paint_commands(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
         .collect()
 }
 
-const COMMANDS: [&str; 5] = [
+const COMMANDS: [&str; 6] = [
     "commands",
     "commands_setup",
     "commands_stale",
     "commands_low",
+    "commands_run",
     "commands_feature",
 ];
 
 /// The recorded hashes of `COMMANDS`, per case in `CASES`.
-const GOLDEN_COMMANDS: [[u64; 5]; 4] = [
+const GOLDEN_COMMANDS: [[u64; 6]; 4] = [
     // Dark at 1
     [
-        0x1cc3fb9bbc5e8eca, // commands
-        0x8b5544100aae6646, // commands_setup
-        0x5f6e8d33498d735e, // commands_stale
-        0xd00f868aa03d6932, // commands_low
-        0x51fc01f8adc5c355, // commands_feature
+        0xa9ca0b947ab0b4b9, // commands
+        0x3fe63a0dbef9f070, // commands_setup
+        0xe5f37a2aa20eee41, // commands_stale
+        0x599c8230d0f46a99, // commands_low
+        0x97c707e14f98b1db, // commands_run
+        0x5510179c6435358b, // commands_feature
     ],
     // Dark at 2
     [
-        0x4f9812744fbb1fb7, // commands
-        0x863ddf0b9049bd4f, // commands_setup
-        0xee3aa69c564604d0, // commands_stale
-        0x95939744a5800b4f, // commands_low
-        0xfbeb00e80c771c34, // commands_feature
+        0x5d32d734cfef9435, // commands
+        0xcddedce03bc25a32, // commands_setup
+        0xda6474ce9dd3aa5a, // commands_stale
+        0x90a0858dfd162a51, // commands_low
+        0x214dd92b595891f2, // commands_run
+        0x9b521764fde307fe, // commands_feature
     ],
     // Light at 1
     [
-        0xb85ca1f9bceb8212, // commands
-        0x8b7dff0bbc21e4b4, // commands_setup
-        0x876ba609d52e1f5e, // commands_stale
-        0xfa5da00ab95f5061, // commands_low
-        0x22b10a35bb277d13, // commands_feature
+        0x1e1cbf68120b0afb, // commands
+        0x46e153a554416741, // commands_setup
+        0xff579c2c14edcc03, // commands_stale
+        0xec2de8c3f16673c4, // commands_low
+        0x82b2055ddf45d39f, // commands_run
+        0xabb49a31021a1a6c, // commands_feature
     ],
     // Light at 2
     [
-        0x1303b91e1d876816, // commands
-        0xff37bc0fc6539ba8, // commands_setup
-        0x1ba86a4f6c66674c, // commands_stale
-        0x03823def11970d00, // commands_low
-        0x9f7bc52d91b35fb8, // commands_feature
+        0x1f8d7273d23e1e71, // commands
+        0xfad4cbca3289ece2, // commands_setup
+        0xe7758ca9eafa711f, // commands_stale
+        0x8645cea7a55609bf, // commands_low
+        0x01b4767083cfef2d, // commands_run
+        0xf4cb147dcf114360, // commands_feature
     ],
 ];
 

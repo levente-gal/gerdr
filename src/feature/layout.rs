@@ -1400,6 +1400,8 @@ mod tests {
             checks: Default::default(),
             skip_checks: Default::default(),
             verify: None,
+            sandbox: None,
+            sandbox_picks: Default::default(),
             review: None,
             plan_review: None,
             viewed: Default::default(),
