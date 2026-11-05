@@ -160,6 +160,13 @@ pub enum MenuAction {
         slug: String,
         repo: Box<crate::feature::ContextRepo>,
     },
+    /// Undo deleting the user's comment on an AI review finding.
+    RestoreFindingComment {
+        project: String,
+        slug: String,
+        id: String,
+        note: String,
+    },
     /// Undo removing one of the user's own suggestions of a plan review:
     /// put it back at index `at`.
     RestoreSuggestion {
@@ -510,6 +517,14 @@ impl Gerdr {
                 slug,
                 repo,
             } => self.restore_context_repo(&project, &slug, *repo),
+            MenuAction::RestoreFindingComment {
+                project,
+                slug,
+                id,
+                note,
+            } => {
+                self.note_finding(&project, &slug, &id, &note);
+            }
             MenuAction::RestoreSuggestion {
                 project,
                 slug,

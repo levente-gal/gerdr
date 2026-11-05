@@ -28,9 +28,10 @@ use crate::{
     },
     feature_agents::Stamp,
     feature_diff::{COMMENTS, decide_first},
-    features::{Done, plural},
+    features::{CardNote, Done, plural},
     menu::MenuAction,
     review,
+    text_field::TextField,
     toast::Level,
 };
 
@@ -451,17 +452,70 @@ impl Gerdr {
         true
     }
 
-    /// Reword finding `id`'s fix and set the user's comment on it.
-    pub(crate) fn edit_finding(
-        &mut self,
-        project: &str,
-        slug: &str,
-        id: &str,
-        fix: &str,
-        note: &str,
-    ) {
+    /// Set the user's comment on finding `id`; empty deletes it. Whether it
+    /// was set: why not is said.
+    pub(crate) fn note_finding(&mut self, project: &str, slug: &str, id: &str, text: &str) -> bool {
+        // Left as it was: nothing to save or log.
+        let review = self.feature(project, slug).and_then(|f| f.review.as_ref());
+        if review
+            .and_then(|r| r.finding(id))
+            .is_some_and(|f| f.note == text.trim())
+        {
+            return true;
+        }
+        self.change_review(project, slug, |review| {
+            let what = review_import::set_note(review, id, text)?;
+            Ok(format!("Finding {id}: {what}"))
+        })
+    }
+
+    /// Delete the user's comment on finding `id`: the toast can bring it back
+    /// (checklist C4).
+    pub(crate) fn delete_finding_comment(&mut self, project: &str, slug: &str, id: &str) {
+        let review = self.feature(project, slug).and_then(|f| f.review.as_ref());
+        let note = review.and_then(|r| r.finding(id)).map(|f| f.note.clone());
+        let Some(note) = note.filter(|note| !note.is_empty()) else {
+            return;
+        };
+        if !self.note_finding(project, slug, id, "") {
+            return;
+        }
+        let undo = MenuAction::RestoreFindingComment {
+            project: project.to_owned(),
+            slug: slug.to_owned(),
+            id: id.to_owned(),
+            note,
+        };
+        self.toast_with(
+            format!("Comment on {id} deleted"),
+            Level::Success,
+            Some(("Undo".to_owned(), undo)),
+        );
+    }
+
+    /// Write or edit the user's comment on finding `id`, on its card on the
+    /// page: the keyboard goes to it there.
+    pub(crate) fn write_finding_comment(&mut self, project: &str, slug: &str, id: &str) {
+        let Some(f) = self.finding_to_ask(project, slug, id) else {
+            return;
+        };
+        if let Err(why) = review_import::editable(&f) {
+            return self.show_warning(why);
+        }
+        let mut field = TextField::default();
+        field.set(&f.note);
+        let Some(panel) = self.features.panel.as_mut() else {
+            return;
+        };
+        panel.note = Some((CardNote::Finding(id.to_owned()), field));
+        self.stop_key_repeat();
+        self.select_panel_finding(id);
+    }
+
+    /// Reword finding `id`'s fix.
+    pub(crate) fn edit_finding(&mut self, project: &str, slug: &str, id: &str, fix: &str) {
         let done = self.change_review(project, slug, |review| {
-            let what = review_import::edit(review, id, fix, note)?;
+            let what = review_import::edit(review, id, fix)?;
             Ok(format!("Finding {id}: {what}"))
         });
         if !done {

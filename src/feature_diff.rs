@@ -289,7 +289,8 @@ impl FeatureOf {
                 ("Shift+C", "add a comment on no line or file"),
                 ("Shift+F", "mark every undecided finding to fix"),
                 ("f", "fix the finding, or take that back"),
-                ("c", "on a finding, edit its fix or comment on it"),
+                ("c", "on a finding, write or edit your comment on it"),
+                ("Shift+E", "on a finding, edit its fix"),
                 ("Del", "dismiss the finding, saying why, or reopen it"),
             ]),
             Role::Review => keys.extend([
@@ -447,13 +448,15 @@ impl FeatureOf {
             .iter()
             // Those the user dropped are gone from here, not from the page.
             .filter(|f| !(f.yours && f.state == FindingState::Dismissed))
-            .map(|f| {
+            .flat_map(|f| {
                 let repo = (self.repos.iter().find(|r| r.name == f.repo)).or(single);
                 let root = repo.map(|r| r.root.clone()).unwrap_or_default();
                 let file = diffs
                     .get(&root)
                     .and_then(|(_, files)| files.iter().find(|d| d.path == f.file));
-                finding_comment(f, root, file)
+                let comment = finding_comment(f, root, file);
+                let note = finding_note(f, &comment);
+                std::iter::once(comment).chain(note)
             })
             .collect()
     }
@@ -487,10 +490,6 @@ pub fn finding_comment(f: &Finding, root: PathBuf, file: Option<&FileDiff>) -> C
         text.push_str("\nFix: ");
         text.push_str(&f.fix);
     }
-    if !f.note.is_empty() {
-        text.push_str("\nYour comment: ");
-        text.push_str(&f.note);
-    }
     Comment {
         root,
         path: f.file.clone(),
@@ -501,8 +500,26 @@ pub fn finding_comment(f: &Finding, root: PathBuf, file: Option<&FileDiff>) -> C
             severity: f.severity,
             state: f.state,
             yours: f.yours,
+            note: false,
         }),
     }
+}
+
+/// The user's comment on finding `f`, shown as `comment` is, right under it.
+fn finding_note(f: &Finding, comment: &Comment) -> Option<Comment> {
+    (!f.note.is_empty() && !f.yours).then(|| Comment {
+        root: comment.root.clone(),
+        path: comment.path.clone(),
+        lines: comment.lines.clone(),
+        text: f.note.clone(),
+        flag: Some(Flag {
+            id: f.id.clone(),
+            severity: f.severity,
+            state: f.state,
+            yours: true,
+            note: true,
+        }),
+    })
 }
 
 /// The panel row's line of `counts`: "3 of 7 files viewed · 2 comments
@@ -684,6 +701,7 @@ impl WorktreeDiff {
         };
         let comments = fe.finding_comments(&self.diff.diffs);
         let focus = fe.focus.clone();
+        self.diff.notes_open = fe.role() == Role::Deciding;
         let review = &mut self.diff.review;
         review.comments.retain(|c| c.flag.is_none());
         let first = review.comments.len();
@@ -848,6 +866,7 @@ impl Gerdr {
                 let changed = fe.findings != findings;
                 fe.stands(standing);
                 (fe.viewed, fe.findings) = (viewed, findings);
+                wd.diff.notes_open = fe.role() == Role::Deciding;
                 if changed {
                     wd.place_findings(env);
                 }
@@ -1070,6 +1089,20 @@ impl Gerdr {
         {
             fe.findings = findings;
             wd.place_findings(env);
+        }
+    }
+
+    /// Set the user's comment on finding `id` of the open code review; empty
+    /// deletes it.
+    pub(crate) fn feature_note_finding(&mut self, id: &str, text: &str) {
+        let Some((project, slug)) = self.feature_open() else {
+            return;
+        };
+        match text.is_empty() {
+            true => self.delete_finding_comment(&project, &slug, id),
+            false => {
+                self.note_finding(&project, &slug, id, text);
+            }
         }
     }
 
@@ -1348,7 +1381,7 @@ mod tests {
         };
         let c = finding_comment(&f, "/w/api".into(), None);
         assert!(c.text.contains("Your fix: Mine"), "{}", c.text);
-        assert!(c.text.contains("Your comment: Careful"), "{}", c.text);
+        assert!(!c.text.contains("Careful"), "{}", c.text);
         assert!(!c.text.contains("Reviewer's"), "{}", c.text);
         let fe = FeatureOf {
             repos: vec![RepoOf {
@@ -1367,13 +1400,246 @@ mod tests {
             ..FeatureOf::default()
         };
         let comments = fe.finding_comments(&HashMap::new());
-        assert_eq!(comments.len(), 2);
+        assert_eq!(comments.len(), 3);
         assert_eq!(comments[0].flag.as_ref().unwrap().id, "r1-1");
-        let yours = comments[1].flag.as_ref().unwrap();
-        assert!(yours.yours && review::is_general(&comments[1]));
+        // The user's comment on it, right under it.
+        let note = comments[1].flag.as_ref().unwrap();
+        assert!(note.note && note.yours && note.id == "r1-1");
+        assert_eq!(comments[1].text, "Careful");
+        assert_eq!(comments[1].lines, comments[0].lines);
+        let yours = comments[2].flag.as_ref().unwrap();
+        assert!(yours.yours && !yours.note && review::is_general(&comments[2]));
         let mut fe = fe;
         fe.findings[1].state = FindingState::Dismissed;
-        assert_eq!(fe.finding_comments(&HashMap::new()).len(), 1);
+        assert_eq!(fe.finding_comments(&HashMap::new()).len(), 2);
+    }
+
+    /// `wd` after the record's comment on its first finding became `note`.
+    fn noted(wd: &mut WorktreeDiff, note: &str) {
+        let fe = wd.feature.as_mut().unwrap();
+        fe.findings[0].note = note.to_owned();
+        wd.place_findings(POPUP_ENV);
+    }
+
+    #[test]
+    fn a_comment_on_a_finding_is_written_under_it_and_goes_to_the_record() {
+        use crate::chrome::DetailRow;
+        let mut wd = popup(
+            Stage::AiReview,
+            vec![finding("r1-1", FindingState::Open)],
+            Review::default(),
+        );
+        let none = mods(false, false);
+        let right = Keysym::bracketright;
+        wd.key(&none, right, right, POPUP_ENV);
+        let labels = |wd: &WorktreeDiff| -> Vec<String> {
+            let view = wd.view(POPUP_ENV);
+            view.row_buttons
+                .iter()
+                .map(|(_, h)| h.label.clone())
+                .collect()
+        };
+        let shown = labels(&wd);
+        for label in ["Comment", "Edit fix\u{2026}", "Fix", "Dismiss\u{2026}"] {
+            assert!(shown.iter().any(|l| l == label), "{label} in {shown:?}");
+        }
+        // The editor opens under the finding, inside its card.
+        let c = Keysym::c;
+        wd.key(&none, c, c, POPUP_ENV);
+        assert!(wd.diff.editing.is_some());
+        assert_eq!(wd.take_error().edit_finding, None);
+        let view = wd.view(POPUP_ENV);
+        let finding_last = view.rows.iter().find_map(|row| match row {
+            DetailRow::Comment {
+                last,
+                tone: Some(_),
+                ..
+            } => Some(*last),
+            _ => None,
+        });
+        assert_eq!(finding_last, Some(false));
+        assert!(view.rows.iter().any(|row| matches!(
+            row,
+            DetailRow::Editor {
+                within: Some(_),
+                ..
+            }
+        )));
+        // A first comment has nothing to delete.
+        assert!(!labels(&wd).iter().any(|l| l == "Delete"));
+        // Nothing written, nothing said.
+        let enter = Keysym::Return;
+        wd.key(&none, enter, enter, POPUP_ENV);
+        assert_eq!(wd.take_error().noted, None);
+        wd.key(&none, c, c, POPUP_ENV);
+        wd.key(&none, c, c, POPUP_ENV);
+        wd.key(&none, enter, enter, POPUP_ENV);
+        assert_eq!(
+            wd.take_error().noted,
+            Some(("r1-1".to_owned(), "c".to_owned()))
+        );
+        // It decides nothing, and none of it is saved with the user's own.
+        assert_eq!(wd.diff.review.own(), 0);
+    }
+
+    #[test]
+    fn a_comment_on_a_finding_shows_inside_its_card_with_what_can_be_done_to_it() {
+        use crate::chrome::DetailRow;
+        let mut wd = popup(
+            Stage::AiReview,
+            vec![finding("r1-1", FindingState::Open)],
+            Review::default(),
+        );
+        noted(&mut wd, "Careful");
+        let view = wd.view(POPUP_ENV);
+        let kinds: Vec<(bool, bool)> = (view.rows.iter())
+            .filter_map(|row| match row {
+                DetailRow::CommentHead {
+                    finding, within, ..
+                } => Some((finding.is_some(), within.is_some())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(kinds, [(true, false), (false, true)]);
+        // Of the finding's rows the last isn't the card's; the comment's is.
+        let ends: Vec<(String, bool)> = (view.rows.iter())
+            .filter_map(|row| match row {
+                DetailRow::Comment { text, last, .. } => Some((text.clone(), *last)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            ends,
+            [
+                ("Finding r1-1".to_owned(), false),
+                ("Careful".to_owned(), true),
+            ]
+        );
+        // It is no stop of its own, and isn't counted.
+        assert!(view.title.ends_with("1 finding, open"), "{}", view.title);
+        assert!(view.rows.iter().any(|row| matches!(
+            row,
+            DetailRow::CommentHead { finding: Some(_), place, .. } if place == "finding 1 of 1"
+        )));
+        let none = mods(false, false);
+        let right = Keysym::bracketright;
+        wd.key(&none, right, right, POPUP_ENV);
+        let on = wd.diff.cursor.as_ref().map(|c| c.row);
+        wd.key(&none, right, right, POPUP_ENV);
+        assert_eq!(wd.diff.cursor.as_ref().map(|c| c.row), on);
+        // On the finding, no second Comment: the one there is on its card.
+        let labels = |wd: &WorktreeDiff| -> Vec<String> {
+            let view = wd.view(POPUP_ENV);
+            view.row_buttons
+                .iter()
+                .map(|(_, h)| h.label.clone())
+                .collect()
+        };
+        assert!(!labels(&wd).iter().any(|l| l == "Comment"));
+        // Off the finding, on its comment.
+        let down = Keysym::Down;
+        wd.key(&none, down, down, POPUP_ENV);
+        wd.key(&none, down, down, POPUP_ENV);
+        assert!(wd.diff.on_finding());
+        assert_eq!(labels(&wd), ["Edit", "Delete"]);
+        // f decides the finding it is on.
+        let f = Keysym::f;
+        wd.key(&none, f, f, POPUP_ENV);
+        assert_eq!(
+            wd.take_error().decided,
+            Some(("r1-1".to_owned(), Decision::Fix))
+        );
+        // Del arms, Del deletes, and the finding isn't dismissed.
+        let del = Keysym::Delete;
+        wd.key(&none, del, del, POPUP_ENV);
+        let taken = wd.take_error();
+        assert_eq!((taken.noted, taken.decided), (None, None));
+        assert!(wd.diff.editing.is_none());
+        wd.key(&none, del, del, POPUP_ENV);
+        assert_eq!(
+            wd.take_error().noted,
+            Some(("r1-1".to_owned(), String::new()))
+        );
+        // The cursor stays with the finding once the record says so.
+        noted(&mut wd, "");
+        assert_eq!(wd.diff.cursor.as_ref().map(|c| c.row), on);
+    }
+
+    #[test]
+    fn a_comment_on_a_finding_is_edited_in_place_and_emptied_it_goes() {
+        let mut wd = popup(
+            Stage::AiReview,
+            vec![finding("r1-1", FindingState::Open)],
+            Review::default(),
+        );
+        noted(&mut wd, "Careful");
+        let none = mods(false, false);
+        let right = Keysym::bracketright;
+        wd.key(&none, right, right, POPUP_ENV);
+        // From the finding, `c` goes to the comment it has.
+        let c = Keysym::c;
+        wd.key(&none, c, c, POPUP_ENV);
+        let enter = Keysym::Return;
+        let view = wd.view(POPUP_ENV);
+        assert!(view.row_buttons.iter().any(|(_, h)| h.label == "Delete"));
+        // Left as it was: said again, which changes nothing.
+        wd.key(&none, enter, enter, POPUP_ENV);
+        assert_eq!(
+            wd.take_error().noted,
+            Some(("r1-1".to_owned(), "Careful".to_owned()))
+        );
+        wd.key(&none, c, c, POPUP_ENV);
+        wd.click(ReposHit::Button(ReposButton::DeleteComment), POPUP_ENV);
+        assert_eq!(
+            wd.take_error().noted,
+            Some(("r1-1".to_owned(), String::new()))
+        );
+    }
+
+    #[test]
+    fn a_findings_comment_changes_only_while_ai_review_decides_and_it_can_change() {
+        let none = mods(false, false);
+        let (c, right) = (Keysym::c, Keysym::bracketright);
+        // Past AI review: said why, no editor, no buttons for it.
+        let mut wd = popup(
+            Stage::CodeReview,
+            vec![finding("r1-1", FindingState::Dismissed)],
+            Review::default(),
+        );
+        noted(&mut wd, "Careful");
+        wd.key(&none, right, right, POPUP_ENV);
+        wd.key(&none, c, c, POPUP_ENV);
+        assert!(wd.diff.editing.is_none());
+        assert!(wd.take_error().error.is_some());
+        let view = wd.view(POPUP_ENV);
+        let shows = |l: &str| view.row_buttons.iter().any(|(_, h)| h.label == l);
+        assert!(!shows("Comment") && !shows("Edit") && !shows("Edit fix\u{2026}"));
+        // At AI review, a dismissed one is reopened first.
+        let mut wd = popup(
+            Stage::AiReview,
+            vec![finding("r1-1", FindingState::Dismissed)],
+            Review::default(),
+        );
+        wd.key(&none, right, right, POPUP_ENV);
+        wd.key(&none, c, c, POPUP_ENV);
+        assert!(wd.diff.editing.is_none());
+        assert_eq!(
+            wd.take_error().error.as_deref(),
+            Some("r1-1 is dismissed: reopen it first")
+        );
+    }
+
+    #[test]
+    fn shift_e_asks_for_a_findings_fix() {
+        let mut wd = popup(
+            Stage::AiReview,
+            vec![finding("r1-1", FindingState::Open)],
+            Review::default(),
+        );
+        let right = Keysym::bracketright;
+        wd.key(&mods(false, false), right, right, POPUP_ENV);
+        wd.key(&mods(false, true), Keysym::E, Keysym::E, POPUP_ENV);
+        assert_eq!(wd.take_error().edit_finding.as_deref(), Some("r1-1"));
     }
 
     const POPUP_ENV: Env = Env {
@@ -1699,7 +1965,7 @@ mod tests {
         assert!(
             view.rows.iter().any(|row| matches!(
                 row,
-                DetailRow::CommentHead { finding: None, place } if place == "comment 1 of 1"
+                DetailRow::CommentHead { finding: None, place, .. } if place == "comment 1 of 1"
             )),
             "{:?}",
             view.rows
@@ -1713,12 +1979,12 @@ mod tests {
         // f says why not; Del goes at once, with nothing to say.
         let f = Keysym::f;
         wd.key(&none, f, f, POPUP_ENV);
-        let (error, decided, _) = wd.take_error();
+        let crate::worktree_diff::Taken { error, decided, .. } = wd.take_error();
         assert_eq!(error.as_deref(), Some(crate::diff_view::YOUR_COMMENT));
         assert_eq!(decided, None);
         let del = Keysym::Delete;
         wd.key(&none, del, del, POPUP_ENV);
-        let (_, decided, _) = wd.take_error();
+        let decided = wd.take_error().decided;
         assert_eq!(
             decided,
             Some((
@@ -1925,7 +2191,7 @@ mod tests {
         assert!(view.title.ends_with("1 finding, open"), "{}", view.title);
         assert!(view.rows.iter().any(|row| matches!(
             row,
-            DetailRow::CommentHead { finding: Some(f), place }
+            DetailRow::CommentHead { finding: Some(f), place, .. }
                 if f.severity == "medium" && place == "finding 1 of 1"
         )));
         let hint = wd

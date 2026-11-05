@@ -903,10 +903,9 @@ pub struct FeaturePanel {
     /// The repository (`Repo::key`) a first Del was on: a second takes it
     /// out, any other key lets it go.
     pub armed: Option<String>,
-    /// The criterion (as `FeaturePanel::finding` counts them) whose note is
-    /// being written on its card, and the note. It stays with the panel when
-    /// another tab shows.
-    pub note: Option<(usize, TextField)>,
+    /// The card a note is being written on, and the note. It stays with the
+    /// panel when another tab shows.
+    pub note: Option<(CardNote, TextField)>,
     /// Each column's scroll, indexed by `TabColumn` (logical pixels).
     pub scroll: [Scroll; 3],
     /// The page the Page column's scroll is for: the stage, and whether
@@ -1049,6 +1048,10 @@ pub enum PanelOutcome {
     AskDismiss(String),
     /// Ask for this finding's fix and comment.
     EditFinding(String),
+    /// Write or edit the user's comment on a finding, on its card.
+    CommentFinding(String),
+    /// Delete the user's comment on a finding.
+    DeleteFindingComment(String),
     /// Ask for a comment of the user's own, to go with the fixes.
     AddComment,
     /// Show this finding in the diff.
@@ -1649,7 +1652,20 @@ fn finding_buttons(f: &ReviewFinding, current: bool) -> Vec<(PageButton, PanelOu
             _ => {}
         }
         if undecided {
-            out.push((plain("Edit\u{2026}"), PanelOutcome::EditFinding(id())));
+            // What the user says of it goes in a comment, on the card.
+            if !f.yours {
+                let label = if f.note.is_empty() { "Comment" } else { "Edit" };
+                out.push((plain(label), PanelOutcome::CommentFinding(id())));
+                if !f.note.is_empty() {
+                    out.push((plain("Delete"), PanelOutcome::DeleteFindingComment(id())));
+                }
+            }
+            let edit = if f.yours {
+                "Edit\u{2026}"
+            } else {
+                "Edit fix\u{2026}"
+            };
+            out.push((plain(edit), PanelOutcome::EditFinding(id())));
             let label = if f.yours { "Drop" } else { "Dismiss\u{2026}" };
             out.push((plain(label), dismiss_outcome(f)));
         }
@@ -1687,9 +1703,20 @@ fn outcome_finding(outcome: &PanelOutcome) -> Option<&str> {
         PanelOutcome::DecideFinding(id, _)
         | PanelOutcome::AskDismiss(id)
         | PanelOutcome::EditFinding(id)
+        | PanelOutcome::CommentFinding(id)
+        | PanelOutcome::DeleteFindingComment(id)
         | PanelOutcome::ShowFinding(id) => Some(id),
         _ => None,
     }
+}
+
+/// The card a note is being written on (`FeaturePanel::note`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CardNote {
+    /// A criterion, as `FeaturePanel::finding` counts them.
+    Criterion(usize),
+    /// A finding, by its id: the user's comment on it.
+    Finding(String),
 }
 
 /// `stage`'s checks in `feature`, as its page lists them: Verify's only.
@@ -1910,8 +1937,11 @@ fn criterion_card(
             true => String::new(),
             false => format!("What went wrong: {}", row.note),
         },
+        comment: String::new(),
+        comment_buttons: Vec::new(),
         faded: trying && tag == FindingTag::Passed,
         field: None,
+        field_hint: "What went wrong",
         selected: false,
         buttons: (actions.iter().enumerate())
             .filter(|(_, (_, o))| {
@@ -2060,8 +2090,11 @@ fn check_card(
         preview,
         fix: String::new(),
         note: String::new(),
+        comment: String::new(),
+        comment_buttons: Vec::new(),
         faded: tag == FindingTag::Skipped,
         field: None,
+        field_hint: "",
         selected: false,
         buttons: (actions.iter().enumerate())
             .filter(|(_, (_, o))| {
@@ -2146,9 +2179,20 @@ fn finding_card(
         None if f.fix.is_empty() => String::new(),
         None => format!("Fix: {}", f.fix),
     };
-    let note = match f.note.is_empty() {
-        true => String::new(),
-        false => format!("Your comment: {}", f.note),
+    // With a comment, the buttons on it sit on its card.
+    let on_comment = |o: &PanelOutcome| {
+        !f.note.is_empty()
+            && matches!(
+                o,
+                PanelOutcome::CommentFinding(_) | PanelOutcome::DeleteFindingComment(_)
+            )
+    };
+    let held = |comment: bool| -> Vec<usize> {
+        (actions.iter().enumerate())
+            .filter(|(_, (_, o))| outcome_finding(o) == Some(f.id.as_str()))
+            .filter(|(_, (_, o))| on_comment(o) == comment)
+            .map(|(i, _)| i)
+            .collect()
     };
     FindingCard {
         tag,
@@ -2158,14 +2202,14 @@ fn finding_card(
         body: f.body.clone(),
         preview: Vec::new(),
         fix,
-        note,
+        note: String::new(),
+        comment: f.note.clone(),
+        comment_buttons: held(true),
         faded: matches!(f.state, FindingState::Fixed | FindingState::Dismissed),
         field: None,
+        field_hint: "Your comment",
         selected: false,
-        buttons: (actions.iter().enumerate())
-            .filter(|(_, (_, o))| outcome_finding(o) == Some(f.id.as_str()))
-            .map(|(i, _)| i)
-            .collect(),
+        buttons: held(false),
     }
 }
 
@@ -3251,6 +3295,24 @@ impl FeaturePanel {
                 return Some(match refused {
                     Some(why) => PanelOutcome::FindingRefused(why),
                     None => PanelOutcome::EditFinding(f.id.clone()),
+                });
+            }
+            Keysym::c | Keysym::C
+                if bare && self.focus == TabArea::Findings && card.is_some_and(|f| !f.yours) =>
+            {
+                let f = card?;
+                return Some(match refused {
+                    Some(why) => PanelOutcome::FindingRefused(why),
+                    None => PanelOutcome::CommentFinding(f.id.clone()),
+                });
+            }
+            Keysym::Delete | Keysym::KP_Delete
+                if plain && mods.shift && self.focus == TabArea::Findings && card.is_some() =>
+            {
+                let f = card.filter(|f| !f.note.is_empty())?;
+                return Some(match refused {
+                    Some(why) => PanelOutcome::FindingRefused(why),
+                    None => PanelOutcome::DeleteFindingComment(f.id.clone()),
                 });
             }
             Keysym::Delete | Keysym::KP_Delete if bare && self.focus == TabArea::Findings => {
@@ -6167,6 +6229,10 @@ impl Gerdr {
             }
             PanelOutcome::AskDismiss(id) => self.ask_dismiss_finding(&project, &slug, &id),
             PanelOutcome::EditFinding(id) => self.ask_edit_finding(&project, &slug, &id),
+            PanelOutcome::CommentFinding(id) => self.write_finding_comment(&project, &slug, &id),
+            PanelOutcome::DeleteFindingComment(id) => {
+                self.delete_finding_comment(&project, &slug, &id);
+            }
             PanelOutcome::AddComment => self.ask_add_comment(&project, &slug),
             PanelOutcome::ShowFinding(id) => {
                 self.open_feature_diff(&project, &slug, Some(&id));
@@ -7374,9 +7440,14 @@ impl Gerdr {
                 chrome::feature_tab_field(&view, self.content_rect(), self.scale())
             });
             let in_it = spot.is_some_and(|field| field.area.to_f64().contains(pos));
-            let at = (self.features.panel.as_ref()).and_then(|p| p.note.as_ref().map(|n| n.0));
-            let own = matches!((&outcome, at),
-                (Some(PanelOutcome::Manual(Outcome::Write(i))), Some(at)) if *i == at);
+            let at = (self.features.panel.as_ref()).and_then(|p| p.note.as_ref().map(|n| &n.0));
+            let own = match (&outcome, at) {
+                (Some(PanelOutcome::Manual(Outcome::Write(i))), Some(CardNote::Criterion(at))) => {
+                    i == at
+                }
+                (Some(PanelOutcome::CommentFinding(id)), Some(CardNote::Finding(at))) => id == at,
+                _ => false,
+            };
             let picked = (self.features.panel.as_ref()).map(|p| p.finding);
             if in_it || own || !self.keep_criterion_note() {
                 return;
@@ -7390,6 +7461,18 @@ impl Gerdr {
         }
         if let Some(outcome) = outcome {
             self.apply_feature_panel(outcome);
+        }
+    }
+
+    /// Finding `id` of the page's stage has the keyboard, and shows.
+    pub(crate) fn select_panel_finding(&mut self, id: &str) {
+        let at = self.features.panel.as_ref().and_then(|panel| {
+            let feature = self.feature(&panel.project, &panel.slug)?;
+            let stage = panel.page_stage(feature);
+            (finding_cards(feature, stage).iter()).position(|f| f.id == id)
+        });
+        if let Some(at) = at {
+            self.select_criterion(at);
         }
     }
 
@@ -9388,10 +9471,14 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 5] = [
             ("Up / Down", "previous or next finding"),
             ("Home / End", "first or last finding"),
             ("f", "fix the finding, or take that back"),
-            ("Ctrl+E", "edit its fix, or comment on it"),
+            (
+                "c",
+                "write or edit your comment on it; off the cards, add a comment of your own",
+            ),
+            ("Shift+Del", "delete your comment on it"),
+            ("Ctrl+E", "edit its fix"),
             ("Del", "dismiss it, saying why, or reopen it"),
             ("Enter", "show it in the diff"),
-            ("c", "add a comment of your own, to go with the fixes"),
             ("Alt+E", "show or hide the earlier reviews"),
         ],
     ),
@@ -9481,12 +9568,15 @@ fn tab_hints(
     if panel.keys {
         return vec![hint("Esc", "back to the page"), hint("F1", "hide the keys")];
     }
-    if let Some((_, field)) = &panel.note {
-        let esc = match field.trim().is_empty() {
-            true => "cancel",
-            false => "save",
+    if let Some((on, field)) = &panel.note {
+        let empty = field.trim().is_empty();
+        let esc = if empty { "cancel" } else { "save" };
+        // Emptied, a finding's comment goes.
+        let enter = match (on, empty) {
+            (CardNote::Finding(_), true) => "delete",
+            _ => "save",
         };
-        return vec![hint("Enter", "save"), hint("Esc", esc)];
+        return vec![hint("Enter", enter), hint("Esc", esc)];
     }
     let mut hints = Vec::new();
     let entries = repo_entries(feature, &panel.sources, panel.expanded);
@@ -9610,7 +9700,16 @@ fn tab_hints(
                     _ => {}
                 }
                 if matches!(f.state, FindingState::Open | FindingState::Fix) {
-                    hints.push(hint("Ctrl+E", "edit\u{2026}"));
+                    hints.push(match f.yours {
+                        true => hint("Ctrl+E", "edit\u{2026}"),
+                        false => hint("Ctrl+E", "edit fix\u{2026}"),
+                    });
+                    if !f.yours && decides {
+                        hints.push(hint("c", "comment"));
+                        if !f.note.is_empty() {
+                            hints.push(hint("Shift+Del", "delete comment"));
+                        }
+                    }
                     hints.push(match f.yours {
                         true => hint("Del", "drop"),
                         false => hint("Del", "dismiss\u{2026}"),
@@ -9626,7 +9725,8 @@ fn tab_hints(
                     hints.push(hint("Enter", "edit\u{2026}"));
                 }
             }
-            if can_decide(feature, stage) {
+            // Off a reviewer's card, `c` adds a comment of the user's own.
+            if can_decide(feature, stage) && card.is_none_or(|f| f.yours) {
                 hints.push(hint("c", "add comment\u{2026}"));
             }
             if offers_fix_all(feature, stage) {
@@ -9940,15 +10040,27 @@ fn tab_view(
         .as_ref()
         .filter(|_| !panel.keys && !panel.expanded)
     {
-        let card = (page.sections.iter_mut())
-            .filter_map(|s| match s {
-                PageSection::Finding(card) => Some(card),
-                _ => None,
-            })
-            .nth(*i);
-        if let Some(card) = card.filter(|_| tries_criteria(feature, stage)) {
-            card.field = Some(field.line());
-            card.note = String::new();
+        let mut cards = (page.sections.iter_mut()).filter_map(|s| match s {
+            PageSection::Finding(card) => Some(card),
+            _ => None,
+        });
+        match i {
+            CardNote::Criterion(i) => {
+                let card = cards.nth(*i);
+                if let Some(card) = card.filter(|_| tries_criteria(feature, stage)) {
+                    card.field = Some(field.line());
+                    card.note = String::new();
+                }
+            }
+            // The live card, before those of earlier reviews with its id.
+            CardNote::Finding(id) => {
+                let card = cards.find(|c| c.place.split(" \u{b7} ").next() == Some(id.as_str()));
+                if let Some(card) = card.filter(|_| can_decide(feature, stage)) {
+                    card.field = Some(field.line());
+                    // Its buttons stay its own, unplaced, while it is written.
+                    card.comment = String::new();
+                }
+            }
         }
     }
     // A finished feature's code isn't read (`ship::probe_finished`).
@@ -12969,6 +13081,12 @@ pub(crate) mod tests {
         );
     }
 
+    fn comment_labels<'a>(page: &'a StagePage, card: &FindingCard) -> Vec<&'a str> {
+        (card.comment_buttons.iter())
+            .map(|&i| page.buttons[i].label.as_str())
+            .collect()
+    }
+
     fn cards_of(view: &FeatureTabView) -> Vec<&FindingCard> {
         (view.page.sections.iter())
             .filter_map(|s| match s {
@@ -13013,13 +13131,20 @@ pub(crate) mod tests {
         let labels: Vec<Vec<&str>> = cards.iter().map(|c| card_labels(&view.page, c)).collect();
         assert_eq!(
             labels[0],
-            ["Fix", "Edit\u{2026}", "Dismiss\u{2026}", "Show in diff"]
+            [
+                "Fix",
+                "Comment",
+                "Edit fix\u{2026}",
+                "Dismiss\u{2026}",
+                "Show in diff"
+            ]
         );
         assert_eq!(
             labels[1],
             [
                 "Don't fix",
-                "Edit\u{2026}",
+                "Comment",
+                "Edit fix\u{2026}",
                 "Dismiss\u{2026}",
                 "Show in diff"
             ]
@@ -13062,7 +13187,9 @@ pub(crate) mod tests {
         let cards = cards_of(&view);
         assert_eq!(cards[0].fix, "Fix: Reviewer's");
         assert_eq!(cards[1].fix, "Your fix: Mine");
-        assert_eq!(cards[1].note, "Your comment: Careful");
+        assert_eq!(cards[1].comment, "Careful");
+        assert_eq!(cards[1].note, "");
+        assert_eq!(comment_labels(&view.page, cards[1]), ["Edit", "Delete"]);
         let yours = cards[2];
         assert_eq!(yours.tag, FindingTag::Yours);
         assert_eq!(yours.title, "Also rename it");
@@ -13412,10 +13539,20 @@ pub(crate) mod tests {
             panel.key(&shift_f, Keysym::F, &f, &[], RowCtx::default(), &[], &[]),
             Some(PanelOutcome::FixAllFindings)
         );
-        // A comment from anywhere on the page.
+        // On a reviewer's card, a comment on it; on any other, one of the
+        // user's own.
         assert_eq!(
             press(&mut panel, &f, key(Keysym::c)),
-            Some(PanelOutcome::AddComment)
+            Some(PanelOutcome::CommentFinding(id("r1-3")))
+        );
+        let shift = ModifiersState {
+            shift: true,
+            ..ModifiersState::default()
+        };
+        // Nothing to delete: Shift+Del isn't Del, and does nothing here.
+        assert_eq!(
+            panel.key(&shift, Keysym::Delete, &f, &[], RowCtx::default(), &[], &[]),
+            None
         );
         panel.focus = TabArea::Stages;
         assert_eq!(
@@ -13467,10 +13604,10 @@ pub(crate) mod tests {
         for hint in [
             ("Up / Down", "finding"),
             ("f", "don't fix"),
-            ("Ctrl+E", "edit\u{2026}"),
+            ("Ctrl+E", "edit fix\u{2026}"),
+            ("c", "comment"),
             ("Del", "dismiss\u{2026}"),
             ("Enter", "show in diff"),
-            ("c", "add comment\u{2026}"),
             ("Tab", "repositories"),
         ] {
             let hint = (hint.0.to_owned(), hint.1.to_owned());
@@ -13692,7 +13829,7 @@ pub(crate) mod tests {
             on(Outcome::SendFailures)
         );
         // Writing a note, the footer has only its keys.
-        panel.note = Some((1, TextField::default()));
+        panel.note = Some((CardNote::Criterion(1), TextField::default()));
         let hints = tab_hints(
             &panel,
             &f,

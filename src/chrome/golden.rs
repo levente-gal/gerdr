@@ -3670,8 +3670,11 @@ fn feature_tab_review_rounds() -> super::FeatureTabView {
             preview: Vec::new(),
             fix: fix.into(),
             note: String::new(),
+            comment: String::new(),
+            comment_buttons: Vec::new(),
             faded,
             field: None,
+            field_hint: "",
             selected: false,
             buttons,
         })
@@ -4044,8 +4047,11 @@ fn feature_tab_manual_test(note: bool) -> super::FeatureTabView {
             preview: Vec::new(),
             fix: String::new(),
             note: said.into(),
+            comment: String::new(),
+            comment_buttons: Vec::new(),
             faded: tag == FindingTag::Passed,
             field: writing.then(|| Line::from("Takes 4 seconds")),
+            field_hint: "",
             selected: i == if note { 3 } else { 2 },
             buttons: (at..at + labels.len()).collect(),
         }));
@@ -4475,9 +4481,10 @@ fn tab_findings() -> super::FeatureTabView {
     view.page.about = "Another model reviews the diff".into();
     view.page.buttons.clear();
     view.page.sections.clear();
+    #[allow(clippy::type_complexity)]
     let cards: [(&[&str], FindingTag, &str, &str, &str, &str, &str, &str); 3] = [
         (
-            &["Fix", "Edit\u{2026}", "Dismiss\u{2026}", "Show in diff"],
+            &["Fix", "Edit fix\u{2026}", "Dismiss\u{2026}", "Show in diff"],
             FindingTag::High,
             "Retry stops one short",
             "",
@@ -4490,7 +4497,7 @@ fn tab_findings() -> super::FeatureTabView {
         (
             &[
                 "Don't fix",
-                "Edit\u{2026}",
+                "Edit fix\u{2026}",
                 "Dismiss\u{2026}",
                 "Show in diff",
             ],
@@ -4500,7 +4507,7 @@ fn tab_findings() -> super::FeatureTabView {
             "r1-2 \u{b7} login.py:2",
             "A user with no name raises AttributeError.",
             "Your fix: Fall back to the plain title",
-            "Your comment: Mind the tests",
+            "Mind the tests, and the greeting when the name is only spaces: it should fall back too.",
         ),
         (
             &["Edit\u{2026}", "Drop"],
@@ -4521,6 +4528,19 @@ fn tab_findings() -> super::FeatureTabView {
                 label: (*label).to_owned(),
                 style: ButtonStyle::Plain,
             }));
+        let end = view.page.buttons.len();
+        // The comment's own buttons, on it.
+        let comment_buttons: Vec<usize> = if note.is_empty() {
+            Vec::new()
+        } else {
+            view.page
+                .buttons
+                .extend(["Edit", "Delete"].map(|label| PageButton {
+                    label: label.to_owned(),
+                    style: ButtonStyle::Plain,
+                }));
+            (end..end + 2).collect()
+        };
         view.page.sections.push(PageSection::Finding(FindingCard {
             tag,
             title: title.into(),
@@ -4529,9 +4549,12 @@ fn tab_findings() -> super::FeatureTabView {
             body: body.into(),
             preview: Vec::new(),
             fix: fix.into(),
-            note: note.into(),
+            note: String::new(),
+            comment: note.into(),
+            comment_buttons,
             faded: false,
             field: None,
+            field_hint: "",
             selected: i == 1,
             buttons: (at..at + labels.len()).collect(),
         }));
@@ -4647,8 +4670,11 @@ fn tab_checks() -> super::FeatureTabView {
             preview: preview.iter().map(|line| (*line).to_owned()).collect(),
             fix: String::new(),
             note: String::new(),
+            comment: String::new(),
+            comment_buttons: Vec::new(),
             faded: tag == FindingTag::Skipped,
             field: None,
+            field_hint: "",
             selected: i == 1,
             buttons: (at..at + labels.len()).collect(),
         }));
@@ -4672,23 +4698,15 @@ fn finding_dialog(error: bool) -> super::FindingDialogView {
         }
     };
     super::FindingDialogView {
-        title: "Edit r1-2".into(),
+        title: "Edit the fix of r1-2".into(),
         about: "Title breaks with no name".into(),
-        fields: vec![
-            field(
-                "Fix",
-                "Fall back to the plain title when the user has no name, and add a test for it so \
+        fields: vec![field(
+            "Fix",
+            "Fall back to the plain title when the user has no name, and add a test for it so \
                  this can't come back later.\nKeep the greeting otherwise.",
-                "What should change",
-                6,
-            ),
-            field(
-                "Your comment",
-                "",
-                "Anything else the Build agent should know",
-                3,
-            ),
-        ],
+            "What should change",
+            6,
+        )],
         focus: 0,
         action: "Save and fix",
         error: error.then(|| "Say what to fix.".to_owned()),
@@ -4712,31 +4730,31 @@ const FINDINGS: [&str; 4] = [
 const GOLDEN_FINDINGS: [[u64; 4]; 4] = [
     // Dark at 1
     [
-        0x738e6c3ebfa44942, // tab_findings_1180
-        0x5c38f3af4e01808d, // tab_findings_860
-        0x9b1a1d7cdeb1eb3e, // finding_dialog
-        0xffe2d15a8e4e54f0, // finding_dialog_error
+        0x1fb0c3b7697288e0, // tab_findings_1180
+        0x17f9bed34c5544b2, // tab_findings_860
+        0xc8e97861327a6f3d, // finding_dialog
+        0x79e255ab5a829143, // finding_dialog_error
     ],
     // Dark at 2
     [
-        0x9ce8dbd93d012922, // tab_findings_1180
-        0x62d4ba4c4b10e21a, // tab_findings_860
-        0x55922cc4d7887d5e, // finding_dialog
-        0xe02075584e16834c, // finding_dialog_error
+        0xf9a76abf2835417e, // tab_findings_1180
+        0xae0f65292c113cc7, // tab_findings_860
+        0x43f1532742f932ff, // finding_dialog
+        0xb736e6151427fb01, // finding_dialog_error
     ],
     // Light at 1
     [
-        0xb6380118af2bc5b1, // tab_findings_1180
-        0x076b7755f1c235a7, // tab_findings_860
-        0x156e15adc70a4b27, // finding_dialog
-        0x61b681eab468960a, // finding_dialog_error
+        0xf5b68989d38074cb, // tab_findings_1180
+        0xeb4be35912d8f4df, // tab_findings_860
+        0x3af0633810888402, // finding_dialog
+        0x2f19c19c900552df, // finding_dialog_error
     ],
     // Light at 2
     [
-        0xbdec8b324b4b975d, // tab_findings_1180
-        0x29bf96ee5f4c4af9, // tab_findings_860
-        0x00bfaaad7b90e1a1, // finding_dialog
-        0xb3c382df7a6af0d6, // finding_dialog_error
+        0x77bb5a0bfe9ab73a, // tab_findings_1180
+        0x93b55ad817739303, // tab_findings_860
+        0xa9c6bc076a8eb05a, // finding_dialog
+        0x1e721b2638489f69, // finding_dialog_error
     ],
 ];
 
@@ -4919,12 +4937,14 @@ fn findings_view() -> super::ReposView {
             tone,
         }),
         place: place.into(),
+        within: None,
     };
     let line = |text: &str, last, tone| DetailRow::Comment {
         text: text.into(),
         first: false,
         last,
         tone,
+        within: None,
     };
     view.detail.title =
         "Bulk export \u{b7} 3 files \u{b7} +3 \u{2212}1 \u{b7} 4 findings, 2 open".into();
@@ -4936,15 +4956,36 @@ fn findings_view() -> super::ReposView {
         DetailRow::CommentHead {
             finding: None,
             place: "comment 1 of 1".into(),
+            within: None,
         },
         line("Why status here? Check the caller.", true, None),
         head("high", None, Tone::Error, "finding 1 of 4"),
         line("The parser splits on spaces", false, Some(Tone::Error)),
         line("Fix: split on NUL", true, Some(Tone::Error)),
         head("medium", Some("to fix"), Tone::Warning, "finding 2 of 4"),
-        line("No timeout on the status read", true, Some(Tone::Warning)),
+        line("No timeout on the status read", false, Some(Tone::Warning)),
+        DetailRow::CommentHead {
+            finding: None,
+            place: String::new(),
+            within: Some(Tone::Warning),
+        },
+        DetailRow::Comment {
+            text: "Keep it under a second".into(),
+            first: false,
+            last: true,
+            tone: None,
+            within: Some(Tone::Warning),
+        },
         head("low", None, Tone::Normal, "finding 3 of 4"),
-        line("This name says too little", true, Some(Tone::Normal)),
+        line("This name says too little", false, Some(Tone::Normal)),
+        DetailRow::Editor {
+            text: "It reads fine to me".into(),
+            caret: Some(19),
+            selection: 0..0,
+            first: true,
+            last: true,
+            within: Some(Tone::Normal),
+        },
         head("low", Some("dismissed"), Tone::Muted, "finding 4 of 4"),
         line("Dismissed: it reads fine", true, Some(Tone::Muted)),
     ];
@@ -5057,12 +5098,14 @@ fn findings_popup(at: u8) -> super::ReposView {
             DetailRow::CommentHead {
                 finding: None,
                 place: "comment 1 of 1".into(),
+                within: None,
             },
             DetailRow::Comment {
                 text: "Log the export's size as well".into(),
                 first: false,
                 last: true,
                 tone: None,
+                within: None,
             },
         ];
         rows.extend(view.detail.rows.iter().skip(2).cloned());
@@ -5140,10 +5183,10 @@ const GOLDEN_DOC_TAB: [[u64; 12]; 4] = [
         0x8dc4abbd4a4453aa, // doc_review_850
         0x991e984d1cf58986, // doc_approved_1180
         0xc795c2ffa685e118, // doc_locked_1180
-        0x1c40aa6b13221217, // findings_1180
-        0xb071e0fde05d8cad, // popup_deciding_1180
-        0x73082977da96170b, // popup_decided_1180
-        0xc45deb5abd7f3db3, // popup_code_review_850
+        0x3f15d5f92f9eda75, // findings_1180
+        0x8fadfc4bbd01f8f3, // popup_deciding_1180
+        0xbe2c435b869d8d35, // popup_decided_1180
+        0x6f1041c7f50aca45, // popup_code_review_850
     ],
     // Dark at 2
     [
@@ -5155,10 +5198,10 @@ const GOLDEN_DOC_TAB: [[u64; 12]; 4] = [
         0x0d72543f5d6587c5, // doc_review_850
         0xc29bb6d56b5beb67, // doc_approved_1180
         0x8a385f9aa43a43b8, // doc_locked_1180
-        0x4fd4afbf7d726fc6, // findings_1180
-        0x73691c9d6890527f, // popup_deciding_1180
-        0x2e4b764d90bd8b7d, // popup_decided_1180
-        0x1e912058c8bd9ba0, // popup_code_review_850
+        0x700557f5f8cc9865, // findings_1180
+        0x78c4b839e155a578, // popup_deciding_1180
+        0x7eb4dfd72d1f662a, // popup_decided_1180
+        0x2ebeec0af5c2ef1b, // popup_code_review_850
     ],
     // Light at 1
     [
@@ -5170,10 +5213,10 @@ const GOLDEN_DOC_TAB: [[u64; 12]; 4] = [
         0x59eff04f58c92d40, // doc_review_850
         0x4d6fa62f8b977f1d, // doc_approved_1180
         0xf1603167ed70f699, // doc_locked_1180
-        0xf1da44a290347a18, // findings_1180
-        0x0b26976cb4f67a3c, // popup_deciding_1180
-        0x3e18236aa3f06b70, // popup_decided_1180
-        0xf3236df5a10c1957, // popup_code_review_850
+        0xacaed3527aa1f4f0, // findings_1180
+        0xc318b335f76aa914, // popup_deciding_1180
+        0x53fda247fb4f2a78, // popup_decided_1180
+        0xdc7251d500deedf7, // popup_code_review_850
     ],
     // Light at 2
     [
@@ -5185,10 +5228,10 @@ const GOLDEN_DOC_TAB: [[u64; 12]; 4] = [
         0x6d05f471266e78e8, // doc_review_850
         0x84732f985b636d39, // doc_approved_1180
         0x153567080b2689aa, // doc_locked_1180
-        0x6d35418382f8b37b, // findings_1180
-        0x8239074d29475664, // popup_deciding_1180
-        0x3cb078023a7b6874, // popup_decided_1180
-        0x440b4e98aa21393f, // popup_code_review_850
+        0x5688ac50adad2001, // findings_1180
+        0x12cb6fc6385c6fea, // popup_deciding_1180
+        0xccffdce2a40e4dea, // popup_decided_1180
+        0x648afae740203419, // popup_code_review_850
     ],
 ];
 
