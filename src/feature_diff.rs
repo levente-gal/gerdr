@@ -609,7 +609,7 @@ pub fn state(feature: &Feature) -> String {
         return "feature closed".into();
     }
     if let Some(round) = &feature.fix_round {
-        return round.line().into();
+        return round.line();
     }
     match feature.current() {
         Some(Stage::CodeReview) => "ready for review".into(),

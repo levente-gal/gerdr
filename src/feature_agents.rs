@@ -1694,7 +1694,11 @@ impl Gerdr {
                 let data = store::dir(None, &project, &feature.slug);
                 let wrote = artifacts::path(&data, stage)
                     .map(|path| read_file(&feature, stage, &path, run.started));
-                if alive && wrote.is_some_and(|file| file.finished().is_some()) {
+                // A round's fixes are listed in the build log as this agent
+                // starts: that's gerdr's writing, not its.
+                let listed = stage == Stage::Build
+                    && (feature.fix_round.as_ref()).is_some_and(|r| !r.before_fixing());
+                if alive && !listed && wrote.is_some_and(|file| file.finished().is_some()) {
                     self.held_agent_wrote(&project, &feature.slug, stage);
                 }
                 continue;

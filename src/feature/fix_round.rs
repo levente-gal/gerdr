@@ -8,6 +8,11 @@
 //! takes, and then makes the fixes, the chat compacted again first as the
 //! plan is in its file. A feature has one round open at a time.
 //!
+//! The plan must speak of everything the round was sent. gerdr lists its
+//! fixes in the build log, apart from the milestones, and the round is over
+//! once every one is ticked: an agent resting before that is told to go on,
+//! and one that won't is the user's to send again or drop.
+//!
 //! This is the round's record and what decides its next step. Gerdr's side
 //! is `crate::feature_fix`.
 
