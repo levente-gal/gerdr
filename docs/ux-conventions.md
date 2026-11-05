@@ -30,6 +30,10 @@ rules, for reviewing a branch before it merges.
 | Ctrl+Shift+U | Set a feature's worktrees up (feature tab, Build and Verify): copy the ignored files and environments they lack from main, then run the project's setup commands. Nothing there is overwritten. |
 | Shift+Enter | In a field of several lines: a new line, Enter being the panel's action (a diff's review comment, the project commands dialog). |
 | Alt+U | In the project commands dialog: fill the focused empty field with what is suggested for it (also its Use button). Nothing is saved until Save. |
+| Ctrl+Shift+T | Start a feature's sandbox on the feature tab's Manual test page; stop it, asking, once it runs (at once while it starts). |
+| Ctrl+Shift+Y | Open the running sandbox's app, in a tab inside it (feature tab, Manual test). |
+| Ctrl+Shift+G | Start the sandbox again on the same data (feature tab, Manual test). |
+| Ctrl+Shift+X | Reset the sandbox's data from main's, or remove a stopped sandbox with its data, asking first (feature tab, Manual test). |
 | Ctrl+Shift+A | Pick the next agent on the feature tab's selected stage (the chips on its agent card). It applies from the agent's next start; one running goes on. |
 | Ctrl+Shift+B | On the feature tab's Build page: go between one agent through all milestones and a fresh agent per milestone (also the "Agents" choice on the page). It applies from the next milestone; an agent at work goes on. |
 | Ctrl+Shift+K | Skip Plan review on the feature tab, asking only when something would be lost. |

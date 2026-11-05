@@ -36,6 +36,7 @@ mod feature_diff;
 mod feature_graph;
 mod feature_plan_review;
 mod feature_review;
+mod feature_sandbox;
 mod feature_workspace;
 mod features;
 mod find;
@@ -2399,7 +2400,11 @@ impl Gerdr {
                     pane_cwd: pane.cwd.clone().unwrap_or_else(|| ws_dir.clone()),
                     ws_dir,
                     venv: record.map(|r| r.venv.clone()).unwrap_or_default(),
-                    captured_env: found.map(|r| r.env.clone()).unwrap_or_default(),
+                    // A sandbox's env means nothing in a pane outside it.
+                    captured_env: found
+                        .filter(|r| !r.in_sandbox())
+                        .map(|r| r.env.clone())
+                        .unwrap_or_default(),
                     cd: found.and_then(|r| r.cwd.clone()),
                     command: found.and_then(|r| r.restart_command()).map(str::to_owned),
                 });
@@ -7126,6 +7131,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     state.projects = store;
     state.restore_nav();
     state.load_features();
+    state.look_for_sandbox_leftovers();
     if loaded == projects::Loaded::Migrated {
         state.projects.save();
     }

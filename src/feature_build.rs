@@ -78,6 +78,9 @@ pub(crate) struct BuildState {
     pub(crate) scopes: BTreeMap<Key, Scope>,
     /// What stops the running checks of a feature, by their index.
     pub(crate) stops: BTreeMap<Key, Arc<Vec<AtomicBool>>>,
+    /// What stops a feature's sandbox being started; there too while it is
+    /// being stopped, so one thing happens to it at a time.
+    pub(crate) sandbox_stops: BTreeMap<Key, Arc<AtomicBool>>,
     /// Features whose Build agent was sent Verify's failures to fix: the
     /// code is probed once it rests, not at the patch watch's next round.
     fixing: BTreeMap<Key, Fixing>,

@@ -62,6 +62,14 @@ pub enum Then {
     /// Close this profile's app, import it, start the app again (see
     /// `Gerdr::import_profile`).
     ImportProfile(Source),
+    /// Stop this project's feature's sandbox (see `feature_sandbox`).
+    StopSandbox {
+        project: String,
+        slug: String,
+        what: crate::feature_sandbox::StopFor,
+    },
+    /// Remove what sandboxes of features that are gone left.
+    RemoveSandboxLeftovers(Vec<String>),
     /// Remove the worktrees of this project's feature, `force`: with the
     /// work they hold; abandon it if `abandon` (see
     /// `Gerdr::remove_feature`).
@@ -595,6 +603,12 @@ impl Gerdr {
                 }
             }
             Then::ImportProfile(source) => self.start_import(source, true),
+            Then::StopSandbox {
+                project,
+                slug,
+                what,
+            } => self.finish_stop(&project, &slug, what),
+            Then::RemoveSandboxLeftovers(stacks) => self.remove_sandbox_leftovers(stacks),
             Then::RemoveFeature {
                 project,
                 slug,

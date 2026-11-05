@@ -1398,6 +1398,7 @@ mod tests {
             fresh_milestones: false,
             setup: None,
             verify: None,
+            sandbox: None,
             review: None,
             plan_review: None,
             viewed: Default::default(),

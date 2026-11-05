@@ -1,6 +1,6 @@
 //! The project commands dialog (see `crate::project_commands`): Verify's
 //! checks and the setup commands of a project, a field of lines per
-//! repository, on two tabs. The list of fields scrolls; the title, the
+//! repository, on four tabs. The list of fields scrolls; the title, the
 //! tabs and the buttons stay.
 
 use super::{
@@ -14,7 +14,7 @@ use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
 /// The dialog's tabs' labels, in order.
-pub const COMMANDS_TABS: [&str; 2] = ["Checks", "Setup"];
+pub const COMMANDS_TABS: [&str; 4] = ["Checks", "Setup", "Run", "Prepare"];
 /// The dialog's buttons while it can save.
 pub const COMMANDS_BUTTONS: [&str; 2] = ["Cancel", "Save"];
 /// The dialog's buttons once the project file was edited outside gerdr.
@@ -24,7 +24,7 @@ pub const COMMANDS_GO: usize = 1;
 /// How far the dialog stays from the output's edges.
 const MARGIN: i32 = 40;
 /// How wide each tab is.
-const TAB_W: i32 = 80;
+const TAB_W: i32 = 72;
 /// The room between the tabs' outline and its segments.
 const TRACK_PAD: i32 = 2;
 /// How much higher a field gets for each line past its first.
@@ -47,21 +47,29 @@ pub enum CommandsTab {
     #[default]
     Checks,
     Setup,
+    /// What a feature's sandbox runs.
+    Run,
+    /// What a feature's sandbox runs once first.
+    Prepare,
 }
 
 impl CommandsTab {
-    /// The other one.
-    pub fn other(self) -> Self {
-        match self {
-            Self::Checks => Self::Setup,
-            Self::Setup => Self::Checks,
-        }
+    /// All of them, in order.
+    pub const ALL: [Self; 4] = [Self::Checks, Self::Setup, Self::Run, Self::Prepare];
+
+    /// The next one, `back`: the one before, going round.
+    pub fn next(self, back: bool) -> Self {
+        let n = Self::ALL.len();
+        let by = if back { n - 1 } else { 1 };
+        Self::ALL[(self.index() + by) % n]
     }
 
     fn index(self) -> usize {
         match self {
             Self::Checks => 0,
             Self::Setup => 1,
+            Self::Run => 2,
+            Self::Prepare => 3,
         }
     }
 }
@@ -145,7 +153,7 @@ pub struct CommandsLayout {
     pub title: Rect,
     /// The tabs' outline, and its segments.
     pub track: Rect,
-    pub tabs: [Rect; 2],
+    pub tabs: [Rect; CommandsTab::ALL.len()],
     pub body: Rect,
     pub note: Option<Rect>,
     pub list: Rect,
@@ -233,7 +241,7 @@ pub fn commands_layout(view: &CommandsView, size: Size<i32, Logical>) -> Command
     let list = next(list_h);
     let error = view.error.as_ref().map(|_| next(QUIT_BODY));
 
-    let track_w = 2 * TAB_W + 2 * TRACK_PAD;
+    let track_w = CommandsTab::ALL.len() as i32 * TAB_W + 2 * TRACK_PAD;
     let track = Rectangle::new(
         (header.loc.x + header.size.w - track_w, header.loc.y).into(),
         (track_w, header.size.h).into(),
@@ -295,7 +303,7 @@ pub fn commands_layout(view: &CommandsView, size: Size<i32, Logical>) -> Command
         panel,
         title,
         track,
-        tabs: [segment(0), segment(1)],
+        tabs: [segment(0), segment(1), segment(2), segment(3)],
         body,
         note,
         list,
@@ -319,10 +327,7 @@ impl CommandsLayout {
             return Some(CommandsHit::Button(button));
         }
         if let Some(tab) = self.tabs.iter().position(on) {
-            return Some(CommandsHit::Tab(match tab {
-                0 => CommandsTab::Checks,
-                _ => CommandsTab::Setup,
-            }));
+            return CommandsTab::ALL.get(tab).copied().map(CommandsHit::Tab);
         }
         // What is scrolled out of the list isn't there.
         if !on(&self.list) {
@@ -562,10 +567,9 @@ impl Painter {
             LABEL_FONT_SIZE,
             p.text,
         );
-        let tabs = [
-            (COMMANDS_TABS[0], shift(layout.tabs[0])),
-            (COMMANDS_TABS[1], shift(layout.tabs[1])),
-        ];
+        let tabs: Vec<_> = (COMMANDS_TABS.iter().zip(&layout.tabs))
+            .map(|(label, rect)| (*label, shift(*rect)))
+            .collect();
         let hover = match view.hover {
             Some(CommandsHit::Tab(tab)) => Some(tab.index()),
             _ => None,
@@ -597,6 +601,8 @@ impl Painter {
                 let placeholder = match view.tab {
                     CommandsTab::Checks => "No checks",
                     CommandsTab::Setup => "No setup commands",
+                    CommandsTab::Run => "Nothing runs in a sandbox",
+                    CommandsTab::Prepare => "Nothing runs first",
                 };
                 self.command_lines(
                     c,

@@ -2424,6 +2424,20 @@ fn commands(case: usize) -> super::CommandsView {
             view.hover = Some(super::CommandsHit::Button(1));
         }
         3 => view.down = 60,
+        4 => {
+            view.tab = super::CommandsTab::Run;
+            view.body = "One command per line, each in a tab of the sandbox. A line starting with # doesn't run.";
+            view.rows = vec![
+                row(
+                    "aft-backend",
+                    Some("in this feature"),
+                    None,
+                    "./runlocal.sh\n./run_celery.sh\n# ./run_celery_beat.sh",
+                ),
+                row("web", None, Some("npx nx run ao-app:serve:local"), ""),
+            ];
+            view.limit = None;
+        }
         _ => {}
     }
     view
@@ -2447,42 +2461,47 @@ fn paint_commands(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
         .collect()
 }
 
-const COMMANDS: [&str; 4] = [
+const COMMANDS: [&str; 5] = [
     "commands",
     "commands_setup",
     "commands_stale",
     "commands_low",
+    "commands_run",
 ];
 
 /// The recorded hashes of `COMMANDS`, per case in `CASES`.
-const GOLDEN_COMMANDS: [[u64; 4]; 4] = [
+const GOLDEN_COMMANDS: [[u64; 5]; 4] = [
     // Dark at 1
     [
-        0x1cc3fb9bbc5e8eca, // commands
-        0x8b5544100aae6646, // commands_setup
-        0x5f6e8d33498d735e, // commands_stale
-        0xd00f868aa03d6932, // commands_low
+        0xd414e8a765c3e2cc, // commands
+        0x47e94098c180a710, // commands_setup
+        0x9d68f2095f72ab88, // commands_stale
+        0x7219fae0c8069f24, // commands_low
+        0xff1c4e9b8056b29b, // commands_run
     ],
     // Dark at 2
     [
-        0x4f9812744fbb1fb7, // commands
-        0x863ddf0b9049bd4f, // commands_setup
-        0xee3aa69c564604d0, // commands_stale
-        0x95939744a5800b4f, // commands_low
+        0x168485155564a0be, // commands
+        0x15461b4cf2db1732, // commands_setup
+        0xefc0e3944b49b6e1, // commands_stale
+        0xf23ea96e61dfe08a, // commands_low
+        0x4c403cd029e400d2, // commands_run
     ],
     // Light at 1
     [
-        0xb85ca1f9bceb8212, // commands
-        0x8b7dff0bbc21e4b4, // commands_setup
-        0x876ba609d52e1f5e, // commands_stale
-        0xfa5da00ab95f5061, // commands_low
+        0xc248e4dd97ad8b2b, // commands
+        0x22941af9a35adde1, // commands_setup
+        0x592e4e56c21f8bd3, // commands_stale
+        0x89aa7a8f4b6d1714, // commands_low
+        0xecbb2e46882779bf, // commands_run
     ],
     // Light at 2
     [
-        0x1303b91e1d876816, // commands
-        0xff37bc0fc6539ba8, // commands_setup
-        0x1ba86a4f6c66674c, // commands_stale
-        0x03823def11970d00, // commands_low
+        0x571d5f684f72d6b1, // commands
+        0xa2365dd3b0ae3547, // commands_setup
+        0x72e0480f42d1b85f, // commands_stale
+        0x44bd2d850826f2ff, // commands_low
+        0xea61f9dd498c694c, // commands_run
     ],
 ];
 
