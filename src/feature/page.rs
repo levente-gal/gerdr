@@ -39,7 +39,7 @@ pub struct Docs {
     /// The approved stages whose file changed since, with no way to tell
     /// by whom: an agent's tab left open, or a hand.
     pub changed: BTreeSet<Stage>,
-    /// Plan's and Build's milestones by name, `true` = ticked (see
+    /// Build's milestones by name, `true` = ticked (see
     /// `artifacts::milestone_items`); none for a file not there.
     pub milestones: BTreeMap<Stage, Vec<(bool, String)>>,
     /// The brief and the plan as their pages show them; none for a file
@@ -122,8 +122,6 @@ pub fn read_docs(data: &Path) -> Docs {
                     docs.previews.insert(stage, Arc::new(vec![note]));
                 }
             }
-        }
-        if stage == Stage::Discover {
             continue;
         }
         match std::fs::read_to_string(&path) {
@@ -267,10 +265,15 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("gerdr-page-docs-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("brief.md"), "# Brief\n").unwrap();
-        std::fs::write(dir.join("plan.md"), "## Milestones\n- [x] API\n- [ ] UI\n").unwrap();
+        let milestones = "## Milestones\n- [x] API\n- [ ] UI\n";
+        std::fs::write(dir.join("plan.md"), milestones).unwrap();
+        std::fs::write(dir.join("build.md"), milestones).unwrap();
         let docs = read_docs(&dir);
         std::fs::remove_dir_all(&dir).unwrap();
-        assert_eq!(docs.written, BTreeSet::from([Stage::Discover, Stage::Plan]));
+        assert_eq!(
+            docs.written,
+            BTreeSet::from([Stage::Discover, Stage::Plan, Stage::Build])
+        );
         let heading = |text: &str| DocBlock::Heading {
             level: 1,
             text: text.to_owned(),
@@ -283,7 +286,7 @@ mod tests {
         assert_eq!(
             docs.milestones,
             BTreeMap::from([(
-                Stage::Plan,
+                Stage::Build,
                 vec![(true, "API".to_owned()), (false, "UI".to_owned())]
             )])
         );

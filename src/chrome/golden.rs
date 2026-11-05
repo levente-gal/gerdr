@@ -2931,18 +2931,12 @@ fn feature_tab_discover_brief() -> super::FeatureTabView {
     view
 }
 
-/// A plan too long for its column, its milestones over it, scrolled.
+/// A plan too long for its column, scrolled.
 fn feature_tab_plan_long() -> super::FeatureTabView {
     use super::{CheckTone, NodeMark, PageSection, TabColumn};
     let mut view = feature_tab_plan_ready();
     at_stage(&mut view, 1, NodeMark::Waiting, "ready for review");
     let blocks = (0..12).flat_map(|_| doc_blocks()).collect();
-    let items = vec![(true, "API".to_owned()), (false, "UI".to_owned())];
-    view.page.sections.push(PageSection::Milestones {
-        done: 1,
-        total: 2,
-        items,
-    });
     view.page.sections.push(PageSection::Doc {
         name: "plan.md".into(),
         blocks: std::sync::Arc::new(blocks),
@@ -3898,7 +3892,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 38]; 4] = [
         0xd35d28e964e71244, // tab_start_over_1180
         0x486c632f11ebc34c, // tab_discover_brief_1180
         0xc0d13e4c733a24fd, // tab_discover_brief_860
-        0x4729577634bc83f7, // tab_plan_long_1180
+        0x5f23ff6fe2c78117, // tab_plan_long_1180
         0x098d46261a41d41a, // tab_manual_test_1180
         0x449dde71dc52f456, // tab_manual_note_860
     ],
@@ -3939,7 +3933,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 38]; 4] = [
         0x9553d8c366a08944, // tab_start_over_1180
         0x9c01218e31710f3c, // tab_discover_brief_1180
         0xa6e5fd80ec31258c, // tab_discover_brief_860
-        0x3f8ffcb4947909c2, // tab_plan_long_1180
+        0x52af07e71ae3aa23, // tab_plan_long_1180
         0x59fbafdaf0af0298, // tab_manual_test_1180
         0x5c67226e281ec032, // tab_manual_note_860
     ],
@@ -3980,7 +3974,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 38]; 4] = [
         0x080148cb08d206bd, // tab_start_over_1180
         0x35987d557948e1c9, // tab_discover_brief_1180
         0x0cdbbd85ba57047c, // tab_discover_brief_860
-        0x6ddd399d19c87feb, // tab_plan_long_1180
+        0xb843eb7e1f0afe17, // tab_plan_long_1180
         0x015462a67373d01d, // tab_manual_test_1180
         0x82d62db81cb6795f, // tab_manual_note_860
     ],
@@ -4021,7 +4015,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 38]; 4] = [
         0x88932cd5b3fffe7d, // tab_start_over_1180
         0xfa9156bb407b2d46, // tab_discover_brief_1180
         0xb9cde853b7dca0c2, // tab_discover_brief_860
-        0xcc98539950d5ff17, // tab_plan_long_1180
+        0x364c80c96fc60b3e, // tab_plan_long_1180
         0x8b786b8d2d0b74d9, // tab_manual_test_1180
         0x35b6488ccbb08f83, // tab_manual_note_860
     ],

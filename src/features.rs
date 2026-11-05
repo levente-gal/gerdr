@@ -7948,8 +7948,8 @@ fn findings_count(feature: &Feature) -> String {
     .join(" \u{b7} ")
 }
 
-/// The milestones of `stage`'s file (Plan's, Build's) by name, as `probe`
-/// last read them; none while it has none.
+/// The milestones of `stage`'s file (Build's: nothing ticks a plan's) by
+/// name, as `probe` last read them; none while it has none.
 fn milestones_of(probe: Option<&Probe>, stage: Stage) -> Option<PageSection> {
     let items = probe?.docs.milestones.get(&stage)?;
     (!items.is_empty()).then(|| PageSection::Milestones {
@@ -8051,7 +8051,6 @@ fn stage_page(
             Stage::Discover | Stage::Plan => {
                 sections.extend(card());
                 sections.push(file_card(feature, stage, state.ctx, actions));
-                sections.extend(milestones_of(state.probe, stage));
                 sections.extend(doc_of(state.probe, stage));
             }
             Stage::Build => {
@@ -13459,7 +13458,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_written_plan_offers_review_and_lists_its_milestones() {
+    fn a_written_plan_offers_review() {
         let mut f = feature("b", vec![repo("api", true)], 1);
         f.runs.insert(Stage::Plan, agent_run(None, None));
         // Not there yet: no button.
@@ -13503,23 +13502,6 @@ pub(crate) mod tests {
                 &[held]
             ))
         );
-        // Its milestones by name, as the probe read them.
-        let mut p = probe(None);
-        let items = vec![(true, "API".to_owned()), (false, "UI".to_owned())];
-        p.docs.milestones.insert(Stage::Plan, items.clone());
-        let state = PanelState {
-            probe: Some(&p),
-            ..PanelState::default()
-        };
-        let page = stage_page(&f, Stage::Plan, &state, &actions, 2_000);
-        assert_eq!(
-            page.sections.last(),
-            Some(&PageSection::Milestones {
-                done: 1,
-                total: 2,
-                items
-            })
-        );
     }
 
     /// A file reads on its stage's page, under all else, once there is one
@@ -13531,8 +13513,6 @@ pub(crate) mod tests {
         let blocks = Arc::new(vec![DocBlock::Para("why".to_owned())]);
         let mut p = probe(None);
         p.docs.previews.insert(Stage::Plan, blocks.clone());
-        let milestones = vec![(false, "API".to_owned())];
-        p.docs.milestones.insert(Stage::Plan, milestones);
         let state = PanelState {
             probe: Some(&p),
             ..PanelState::default()
@@ -13558,10 +13538,6 @@ pub(crate) mod tests {
             f.runs.insert(Stage::Plan, agent_run(None, None));
             let page = stage_page(&f, Stage::Plan, &state, &[], 2_000);
             assert_eq!(page.sections.last(), Some(&doc), "at stage {at}");
-            let milestones = (page.sections.iter())
-                .position(|s| matches!(s, PageSection::Milestones { .. }))
-                .expect("its milestones");
-            assert_eq!(milestones, page.sections.len() - 2);
         }
         // Nothing read: nothing to show.
         let mut f = feature("b", vec![repo("api", true)], 1);
