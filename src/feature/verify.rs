@@ -890,7 +890,7 @@ pub(super) fn clean_lines(raw: &[u8], cut: bool) -> Vec<String> {
 /// `text` without terminal escapes (CSI such as colours, OSC such as
 /// titles and links, two-character ones) or other control characters
 /// than newline, carriage return and tab.
-fn strip_escapes(text: &str) -> String {
+pub(super) fn strip_escapes(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {

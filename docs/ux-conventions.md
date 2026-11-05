@@ -28,6 +28,7 @@ rules, for reviewing a branch before it merges.
 | Ctrl+Shift+S | Squash a worktree into main. |
 | Prefix, then Enter | Send the prompt of the stage agent waiting in the focused pane (also the arrow on its pane's bar, and Send prompt on the stage's page). A stage's agent opens waiting, so its model can be picked first. |
 | Ctrl+Shift+U | Set a feature's worktrees up (feature tab, Build and Verify): copy the ignored files and environments they lack from main, then run the project's setup commands. Nothing there is overwritten. |
+| Ctrl+Shift+I | Show a feature's setup log (feature tab, Build and Verify, once a setup started; also the "Setup log" button, the setup's row in the tasks panel and a failure's toast): its last run in the select and copy viewer, followed live while it runs. Selecting holds the following until the selection goes. |
 | Shift+Enter | In a field of several lines: a new line, Enter being the panel's action (a diff's review comment, the project commands dialog). |
 | Space | In the project commands dialog, on a borrowed check of the "This feature" tab: skip it for this feature, or run it again (also its Skip / Run button). Nothing is saved until Save. On a check's card on Verify's page: skip the check it borrows, or stop skipping it (also its Skip / Don't skip button). It saves at once, with an Undo, and applies from the next run. |
 | Alt+U | In the project commands dialog: fill the focused empty field with what is suggested for it (also its Use button). Nothing is saved until Save. |

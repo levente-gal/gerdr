@@ -27,9 +27,10 @@
 //! Every command runs with `sh -c`, on the Node and venv a new terminal
 //! there gets (`prepare::background_command`), stdin closed, its output
 //! appended to `setup.log` in the feature data dir, for at most `TIMEOUT`.
-//! The first
-//! one that fails stops the setup: its repository, command and exit go in
-//! the error. Each command runs in a process group of its own, and the
+//! The log says what each command ran as and where, what was kept, and how
+//! the run ended; the setup log viewer shows its last run (`shown_log`). The
+//! first one that fails stops the setup: its repository, command and exit go
+//! in the error. Each command runs in a process group of its own, and the
 //! group is killed when it ends or times out, so nothing it started
 //! lingers (`shell`, which Verify's checks run with too).
 //!
@@ -74,6 +75,11 @@ pub const TIMEOUT: Duration = Duration::from_secs(20 * 60);
 
 /// The setup log's name, in the feature data dir.
 pub const LOG: &str = "setup.log";
+
+/// The line that starts a run in the log.
+const RUN_START: &str = "== Setup started";
+/// The line that ends a failed run in the log.
+const RUN_FAILED: &str = "== Setup failed";
 
 /// Where a feature's setup stands, kept in its record.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -367,11 +373,52 @@ pub fn run(
     progress: &mut dyn FnMut(String),
 ) -> Report {
     let mut report = Report::default();
+    let started = Instant::now();
     let result = run_into(&mut report, feature, commands, extras, venv, log, progress);
+    let end = match &result {
+        Ok(()) => format!("== Setup finished after {} s", started.elapsed().as_secs()),
+        Err(why) => format!("{RUN_FAILED}: {why}"),
+    };
     if let Err(why) = result {
         report.failed = Some(why);
     }
+    // The log is a help to read, not the result: see `run_into`.
+    if let Ok(mut file) = std::fs::OpenOptions::new().append(true).open(log) {
+        let _ = writeln!(file, "{end}\n");
+    }
     report
+}
+
+/// What the viewer shows of the setup log `raw`: its last run, without
+/// terminal escapes, a line a program drew over and over only as it ended.
+pub fn shown_log(raw: &[u8]) -> String {
+    let text = String::from_utf8_lossy(raw);
+    let run = (text.match_indices(RUN_START))
+        .filter(|(at, _)| *at == 0 || text.as_bytes()[at - 1] == b'\n')
+        .last()
+        .map_or(0, |(at, _)| at);
+    let plain = super::verify::strip_escapes(&text[run..]);
+    let lines = plain.split('\n').map(|line| {
+        let line = line.trim_end_matches('\r');
+        line.rsplit('\r').next().unwrap_or(line)
+    });
+    lines.collect::<Vec<_>>().join("\n")
+}
+
+/// `shown_log`'s text with the escapes that draw it: gerdr's own lines bold,
+/// a failure red too, the commands' output plain (see `Scrollback::set_styles`).
+pub fn log_styles(text: &str) -> String {
+    let drawn = text.lines().map(|line| {
+        if line.starts_with(RUN_FAILED) || (line.starts_with("== ") && line.contains(": couldn't "))
+        {
+            format!("\x1b[1;31m{line}\x1b[0m")
+        } else if line.starts_with("== ") {
+            format!("\x1b[1m{line}\x1b[0m")
+        } else {
+            line.to_owned()
+        }
+    });
+    drawn.collect::<Vec<_>>().join("\n")
 }
 
 /// `run`, telling `report` as it goes; the error is what stopped it.
@@ -393,6 +440,7 @@ fn run_into(
         .append(true)
         .open(log)
         .map_err(|err| format!("couldn't open {}: {err}", shown(log)))?;
+    let _ = writeln!(file, "{RUN_START} {}", super::verify::utc(now()));
     let mut repos: Vec<_> = feature
         .repos
         .iter()
@@ -410,6 +458,7 @@ fn run_into(
         for item in to_copy(repo, &lines_of(extras, repo), &mut problems) {
             let path = &item.path;
             if repo.worktree.join(path).symlink_metadata().is_ok() {
+                let _ = writeln!(file, "== {name}: kept {path}, already there");
                 continue;
             }
             if item.environment {
@@ -441,6 +490,11 @@ fn run_into(
             progress(format!("{name}: {command} ({i} of {total})"));
             // As above: a log line lost doesn't stop the setup.
             let _ = writeln!(file, "== {} {name}: {command}", super::verify::utc(now()));
+            let _ = writeln!(file, "== in {}", shown(&repo.worktree));
+            let activated = background_command(command, &repo.worktree, &feature.dir, venv, &tools);
+            if activated != command {
+                let _ = writeln!(file, "== runs as: {activated}");
+            }
             let _ = file.flush();
             let out = file
                 .try_clone()
@@ -449,7 +503,6 @@ fn run_into(
                 .try_clone()
                 .map_err(|err| format!("couldn't write to {}: {err}", shown(log)))?;
             let started = Instant::now();
-            let activated = background_command(command, &repo.worktree, &feature.dir, venv, &tools);
             let exit = shell(
                 &activated,
                 &repo.worktree,
@@ -552,6 +605,8 @@ pub(super) fn shell_until(
         .stdout(stdout)
         .stderr(stderr)
         .env("GERDR_FEATURE", slug)
+        // What it prints reaches its log as it prints it.
+        .env("PYTHONUNBUFFERED", "1")
         .process_group(0);
     let child = cmd.spawn();
     // Our copies of the output's ends go, so a reader sees its end once
@@ -740,10 +795,15 @@ mod tests {
         assert!(!f.repos[2].worktree.join("never").exists());
         let text = std::fs::read_to_string(&log).unwrap();
         assert!(
-            text.contains("api: echo out; echo err >&2\nout\nerr\n"),
+            text.contains("api: echo out; echo err >&2\n== in "),
             "{text}"
         );
+        assert!(text.contains("\nout\nerr\n"), "{text}");
         assert!(text.contains("== exited with 3 after"), "{text}");
+        assert!(
+            text.contains("== Setup failed: web: `exit 3` exited with 3\n"),
+            "{text}"
+        );
         // A second run appends.
         run(
             &f,
@@ -755,6 +815,49 @@ mod tests {
         );
         let again = std::fs::read_to_string(&log).unwrap();
         assert!(again.starts_with(&text) && again.len() > text.len());
+    }
+
+    #[test]
+    fn the_log_shows_its_last_run_as_it_ended() {
+        let raw = b"== Setup started 1\nold\n== Setup started 2\n\x1b[32mgreen\x1b[0m\n10%\r50%\r100%\r\nsays == Setup started\n";
+        assert_eq!(
+            shown_log(raw),
+            "== Setup started 2\ngreen\n100%\nsays == Setup started\n"
+        );
+        // A log from before runs were marked shows whole.
+        assert_eq!(shown_log(b"a\nb\n"), "a\nb\n");
+        assert_eq!(shown_log(b""), "");
+    }
+
+    #[test]
+    fn the_log_draws_gerdrs_lines_apart_from_the_output() {
+        assert_eq!(
+            log_styles("== in ~/x\nout\n== Setup failed: no"),
+            "\x1b[1m== in ~/x\x1b[0m\nout\n\x1b[1;31m== Setup failed: no\x1b[0m"
+        );
+    }
+
+    #[test]
+    fn a_rerun_says_what_it_kept_and_how_it_ended() {
+        let t = Temp::new();
+        let f = feature_over(&t, &["api"], &[]);
+        put(&f.repos[0].main, ".env", "A=1\n");
+        ignore(&f.repos[0], ".env\n");
+        let log = t.0.join("data/setup.log");
+        let commands = map(&[("api", &["true"])]);
+        let again = |log: &Path| {
+            run(&f, &commands, &none(), &VenvSetting::Auto, log, &mut |_| {});
+            shown_log(&std::fs::read(log).unwrap())
+        };
+        assert!(again(&log).contains("copied .env"));
+        let text = again(&log);
+        assert!(text.starts_with("== Setup started"), "{text}");
+        assert!(
+            text.contains("== api: kept .env, already there\n"),
+            "{text}"
+        );
+        assert!(text.contains("api: true\n== in "), "{text}");
+        assert!(text.contains("== Setup finished after "), "{text}");
     }
 
     #[test]

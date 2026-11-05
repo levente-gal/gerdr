@@ -2,19 +2,24 @@
 //! over a terminal pane with all herdr keeps of the pane's output, placing
 //! it, and taking the keys and the pointer while it is open.
 
-use std::time::Instant;
+use std::{
+    path::Path,
+    time::{Duration, Instant},
+};
 
 use smithay::{
     input::keyboard::{Keysym, ModifiersState},
+    reexports::calloop::timer::{TimeoutAction, Timer},
     utils::{Logical, Point, Rectangle},
 };
 
 use crate::{
     Gerdr,
     chrome::{self, Rect, ScrollbackHit, ScrollbackRow, ScrollbackView, SearchPart},
+    feature::{setup, store},
     input::{MULTI_CLICK, MULTI_CLICK_SLOP, Overlay},
     scroll::Motion,
-    scrollback::{Fit, Outcome, Scrollback},
+    scrollback::{Fit, Outcome, Scrollback, Source},
     toast::ToastHit,
     tooltip::Tooltip,
 };
@@ -25,6 +30,8 @@ const MIN_WIDTH: i32 = 420;
 const MIN_HEIGHT: i32 = 240;
 /// How far the viewer stands in from its pane's edges, so its own show.
 const INSET: i32 = 4;
+/// How often a log shown is looked at for what it gained.
+const FOLLOW: Duration = Duration::from_millis(250);
 
 /// Every key the viewer takes, and the pointer's ways, as F1 lists them.
 const KEYS: &[(&str, &str)] = &[
@@ -68,7 +75,7 @@ const KEYS: &[(&str, &str)] = &[
         "Find the selection or the word at the caret, on or back",
     ),
     ("Tab / Shift+Tab", "Move between the search and the text"),
-    ("Ctrl+R", "Read the pane's output again"),
+    ("Ctrl+R", "Read the output again"),
     (
         "Drag / Shift+Click",
         "Select with the pointer, or reach the selection there",
@@ -123,6 +130,13 @@ fn hints(viewer: &Scrollback) -> Vec<(String, String)> {
             ("F1", "keys"),
             ("Esc", "clear"),
         ],
+        None if viewer.pane().is_none() => &[
+            ("V", "select"),
+            ("Ctrl+A", "select all"),
+            ("/", "find"),
+            ("F1", "keys"),
+            ("Esc / Q", "close"),
+        ],
         None => &[
             ("V", "select"),
             ("/", "find"),
@@ -135,6 +149,16 @@ fn hints(viewer: &Scrollback) -> Vec<(String, String)> {
         .iter()
         .map(|(key, what)| ((*key).to_owned(), (*what).to_owned()))
         .collect()
+}
+
+/// What the viewer shows of log `path`, and how long the file is: a log
+/// not there yet is empty, as its setup makes it once it starts.
+fn read_log(path: &Path) -> std::io::Result<(String, u64)> {
+    match std::fs::read(path) {
+        Ok(raw) => Ok((setup::shown_log(&raw), raw.len() as u64)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok((String::new(), 0)),
+        Err(err) => Err(err),
+    }
 }
 
 /// `rect` less `by` on every side.
@@ -184,15 +208,7 @@ impl Gerdr {
         let label = self.pane_bar_content(&pane_id).label;
         // Its errors are in view now.
         self.see_service_errors(&pane_id);
-        self.switcher = None;
-        self.project_menu = None;
-        self.worktrees.close();
-        self.repos.close();
-        self.inbox.close();
-        self.stop_key_repeat();
-        self.close_menu();
-        self.tooltip.hide();
-        self.chrome.drop_tooltip();
+        self.close_for_scrollback();
         let mut viewer = Scrollback::new(id, pane_id, label, &text, from_bottom);
         viewer.set_styles(&styled);
         if let Some(fit) = self.scrollback_fit_for(id) {
@@ -203,10 +219,119 @@ impl Gerdr {
         self.refresh_pointer_focus();
     }
 
+    /// What the viewer takes the place of goes.
+    fn close_for_scrollback(&mut self) {
+        self.switcher = None;
+        self.project_menu = None;
+        self.worktrees.close();
+        self.repos.close();
+        self.inbox.close();
+        self.stop_key_repeat();
+        self.close_menu();
+        self.tooltip.hide();
+        self.chrome.drop_tooltip();
+    }
+
+    /// Open the viewer on the last run of feature `slug`'s setup log, over
+    /// the app area, at its end: it follows the log while it stays there.
+    pub fn open_setup_log(&mut self, project: &str, slug: &str) {
+        let Some(title) = self.feature(project, slug).map(|f| f.title.clone()) else {
+            return;
+        };
+        let path = setup::log_path(&store::dir(None, project, slug));
+        let (text, read) = match read_log(&path) {
+            Ok(log) => log,
+            Err(err) => {
+                tracing::warn!("{}: {err}", path.display());
+                return self.show_error(format!("Couldn't read the setup log: {err}"));
+            }
+        };
+        self.close_for_scrollback();
+        let source = Source::SetupLog {
+            project: project.to_owned(),
+            slug: slug.to_owned(),
+            path,
+            read,
+        };
+        let mut viewer = Scrollback::of(source, title, &text, 0);
+        viewer.set_styles(&setup::log_styles(&text));
+        self.scrollback = Some(viewer);
+        if let Some((_, fit)) = self.scrollback_place()
+            && let Some(viewer) = self.scrollback.as_mut()
+        {
+            viewer.fit(fit);
+        }
+        // It takes the pointer from the terminal under it.
+        self.refresh_pointer_focus();
+        let follow = |_, _: &mut (), state: &mut Gerdr| match state.follow_log() {
+            true => TimeoutAction::ToDuration(FOLLOW),
+            false => TimeoutAction::Drop,
+        };
+        if let Err(err) = (self.loop_handle).insert_source(Timer::from_duration(FOLLOW), follow) {
+            tracing::warn!("following the setup log: {err}");
+        }
+    }
+
+    /// Show what the log the viewer shows gained. A selection stops it, as
+    /// reading drops the selection: it catches up once that goes. Whether
+    /// the viewer still shows a log.
+    fn follow_log(&mut self) -> bool {
+        let Some(viewer) = self.scrollback.as_ref() else {
+            return false;
+        };
+        let Source::SetupLog { path, read, .. } = &viewer.source else {
+            return false;
+        };
+        if viewer.has_selection() || viewer.dragging() || viewer.selecting() {
+            return true;
+        }
+        let len = std::fs::metadata(path).map_or(0, |m| m.len());
+        if len != *read {
+            self.reread_log();
+        }
+        true
+    }
+
+    /// Read the log the viewer shows again; whether it could. Why not goes to
+    /// the log: the viewer still shows what it read.
+    fn reread_log(&mut self) -> bool {
+        let Some((_, fit)) = self.scrollback_place() else {
+            return false;
+        };
+        let Some(viewer) = self.scrollback.as_mut() else {
+            return false;
+        };
+        let Source::SetupLog { path, read, .. } = &mut viewer.source else {
+            return false;
+        };
+        let (text, len) = match read_log(path) {
+            Ok(log) => log,
+            Err(err) => {
+                tracing::warn!("{}: {err}", path.display());
+                return false;
+            }
+        };
+        *read = len;
+        viewer.reload(&text, fit);
+        viewer.set_styles(&setup::log_styles(&text));
+        true
+    }
+
     /// Read the viewer's pane again, for what it printed since the viewer
-    /// opened (see `Scrollback::reload`).
+    /// opened (see `Scrollback::reload`), or its log.
     pub fn reload_scrollback(&mut self) {
-        let Some(pane_id) = self.scrollback.as_ref().map(|v| v.pane_id.clone()) else {
+        let Some(source) = self.scrollback.as_ref().map(|v| v.source.clone()) else {
+            return;
+        };
+        let Source::Pane { pane_id, .. } = source else {
+            if self.reread_log()
+                && let Some(n) = self.scrollback.as_ref().map(Scrollback::line_count)
+            {
+                let s = if n == 1 { "" } else { "s" };
+                self.show_success(format!("Log read again: {n} line{s}"));
+            } else {
+                self.show_error("Couldn't read the setup log again".into());
+            }
             return;
         };
         let read = match self.herdr.as_mut() {
@@ -292,7 +417,10 @@ impl Gerdr {
 
     /// Where the open viewer goes, and how its text fits there.
     fn scrollback_place(&self) -> Option<(Rect, Fit)> {
-        let panel = self.scrollback_panel_for(self.scrollback.as_ref()?.pane)?;
+        let panel = match self.scrollback.as_ref()?.pane() {
+            Some(pane) => self.scrollback_panel_for(pane)?,
+            None => inset(self.content_rect(), INSET),
+        };
         Some((panel, chrome::scrollback_fit(panel)))
     }
 
@@ -328,9 +456,22 @@ impl Gerdr {
             None if viewer.line_count() == 1 => "1 line".to_owned(),
             None => format!("{} lines", viewer.line_count()),
         };
+        let (title, note) = match &viewer.source {
+            Source::Pane { .. } => (format!("Scrollback snapshot · {}", viewer.label), note),
+            Source::SetupLog { project, slug, .. } => {
+                let state = match self.setting_up(project, slug) {
+                    true => "running",
+                    false => "last run",
+                };
+                (
+                    format!("Setup log · {}", viewer.label),
+                    format!("{state} · {note}"),
+                )
+            }
+        };
         Some(ScrollbackView {
             panel,
-            title: format!("Scrollback snapshot · {}", viewer.label),
+            title,
             note,
             rows,
             first,
