@@ -470,7 +470,7 @@ fn start_into(
         let label = sandbox::feature_label(job.project, job.slug);
         let running = stack.services.keys().cloned().collect();
         let file = job.dir.join(format!("{name}.json"));
-        let mut next_port = |taken: &std::collections::BTreeSet<u16>| sandbox::free_port(taken);
+        let mut next_port = sandbox::free_port;
         let generated = sandbox::generate(
             &config,
             Input {
@@ -478,6 +478,7 @@ fn start_into(
                 label: &label,
                 running: &running,
                 data_dir: job.dir,
+                taken: &taken,
                 copies_bind: &|path| copies_bind(path),
                 next_port: &mut next_port,
             },

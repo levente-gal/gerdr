@@ -203,6 +203,9 @@ pub struct Input<'a> {
     pub running: &'a BTreeSet<String>,
     /// The sandbox's own folder, where copied bind mounts go.
     pub data_dir: &'a Path,
+    /// Ports to stay off besides main's: other sandboxes', and this sandbox's
+    /// other stacks', which nothing has bound yet.
+    pub taken: &'a BTreeSet<u16>,
     /// Whether a writable bind mount of this folder holds data to copy,
     /// rather than something to keep sharing, like the docker socket.
     pub copies_bind: &'a dyn Fn(&Path) -> bool,
@@ -281,6 +284,7 @@ pub fn generate(config: &Value, input: Input) -> Result<Generated, String> {
     let mut used_volumes = BTreeMap::<String, Vec<String>>::new();
     let mut used_networks = BTreeSet::new();
     let mut taken = main_ports;
+    taken.extend(input.taken);
     let mut new_services = Map::new();
     for (name, service) in services {
         if !kept.contains(name) {
@@ -724,6 +728,7 @@ mod tests {
                 label: "ao/x",
                 running: &running,
                 data_dir: Path::new("/sandbox"),
+                taken: &BTreeSet::new(),
                 copies_bind: &|path| path.starts_with("/repo"),
                 next_port: &mut next_port,
             },
@@ -835,6 +840,7 @@ mod tests {
                 label: "ao/x",
                 running: &running,
                 data_dir: Path::new("/sandbox"),
+                taken: &BTreeSet::new(),
                 copies_bind: &|_| false,
                 next_port: &mut next_port,
             },
@@ -842,6 +848,33 @@ mod tests {
         .unwrap();
         let ports: BTreeSet<u16> = out.forwards.iter().map(|f| f.host_port).collect();
         assert_eq!(ports.len(), out.forwards.len());
+    }
+
+    #[test]
+    fn a_picked_port_never_is_one_held_elsewhere() {
+        let running = BTreeSet::new();
+        let elsewhere = BTreeSet::from([41001, 41002]);
+        let mut next_port =
+            |taken: &BTreeSet<u16>| Ok((41001..).find(|port| !taken.contains(port)).unwrap());
+        let out = generate(
+            &config(),
+            Input {
+                name: "gerdr-x",
+                label: "ao/x",
+                running: &running,
+                data_dir: Path::new("/sandbox"),
+                taken: &elsewhere,
+                copies_bind: &|_| false,
+                next_port: &mut next_port,
+            },
+        )
+        .unwrap();
+        assert!(!out.forwards.is_empty());
+        assert!(
+            out.forwards
+                .iter()
+                .all(|f| !elsewhere.contains(&f.host_port))
+        );
     }
 
     #[test]
