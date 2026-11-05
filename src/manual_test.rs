@@ -4,7 +4,8 @@
 //! card. The results save as they are given (`Feature::manual`, see
 //! `feature::manual`). Mark passed marks Manual test done once every criterion
 //! passed on the code as it is now; Plan fixes starts a fix round on the
-//! failures (see `feature_fix`).
+//! failures (see `feature_fix`). Once done the cards stay on the page, to read:
+//! reopening the stage is what changes them.
 //!
 //! The cards' keys are in `features`, with the rest of the tab's. This holds
 //! what they do, and the note being written.
@@ -180,9 +181,13 @@ impl Gerdr {
         ))
     }
 
-    /// The cards of feature `f`'s criteria, on its code as last read.
+    /// The cards of feature `f`'s criteria, on its code as last read; once
+    /// Manual test is done, as recorded: its page says if the code changed.
     pub(crate) fn criterion_rows(&self, f: &Feature) -> Vec<Row> {
-        let patch = self.manual_patch(&f.project, &f.slug);
+        let patch = match f.is_done(Stage::ManualTest) {
+            true => None,
+            false => self.manual_patch(&f.project, &f.slug),
+        };
         rows(
             f.manual.as_ref(),
             self.criteria(&f.project, &f.slug),

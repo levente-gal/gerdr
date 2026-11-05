@@ -1663,7 +1663,15 @@ fn stage_actions(
 /// Whether `stage`'s page of `feature` is where its criteria are tried:
 /// Manual test's, while the feature is at it.
 fn tries_criteria(feature: &Feature, stage: Stage) -> bool {
-    stage == Stage::ManualTest && stage_mark(feature, stage) == StageMark::Current
+    stage == Stage::ManualTest
+        && feature.status == Status::Open
+        && stage_mark(feature, stage) == StageMark::Current
+}
+
+/// Whether `stage`'s page of `feature` shows its criteria: Manual test's, once
+/// the feature got to it. Once done they are what was found, not to change.
+fn shows_criteria(feature: &Feature, stage: Stage) -> bool {
+    stage == Stage::ManualTest && stage_mark(feature, stage) != StageMark::Later
 }
 
 /// The buttons on criterion `i`'s card, as it stands.
@@ -1689,8 +1697,14 @@ fn criterion_buttons(i: usize, row: &Row) -> Vec<(PageButton, PanelOutcome)> {
 }
 
 /// Criterion `i`'s card on Manual test's page, its buttons those in
-/// `actions`: its dot tells how it went, the note what went wrong.
-fn criterion_card(i: usize, row: &Row, actions: &[(PageButton, PanelOutcome)]) -> FindingCard {
+/// `actions`: its dot tells how it went, the note what went wrong. While
+/// `trying`, one that passed fades: the rest are what is left to do.
+fn criterion_card(
+    i: usize,
+    row: &Row,
+    actions: &[(PageButton, PanelOutcome)],
+    trying: bool,
+) -> FindingCard {
     let tag = match row.found {
         None => FindingTag::NotRun,
         Some(Verdict::Pass) => FindingTag::Passed,
@@ -1712,7 +1726,7 @@ fn criterion_card(i: usize, row: &Row, actions: &[(PageButton, PanelOutcome)]) -
             true => String::new(),
             false => format!("What went wrong: {}", row.note),
         },
-        faded: tag == FindingTag::Passed,
+        faded: trying && tag == FindingTag::Passed,
         field: None,
         selected: false,
         buttons: (actions.iter().enumerate())
@@ -1722,6 +1736,16 @@ fn criterion_card(i: usize, row: &Row, actions: &[(PageButton, PanelOutcome)]) -
             .map(|(at, _)| at)
             .collect(),
     }
+}
+
+/// The cards of `state`'s criteria, in their order.
+fn criterion_sections<'a>(
+    state: &'a PanelState,
+    actions: &'a [(PageButton, PanelOutcome)],
+    trying: bool,
+) -> impl Iterator<Item = PageSection> + 'a {
+    (state.criteria.iter().enumerate())
+        .map(move |(i, row)| PageSection::Finding(criterion_card(i, row, actions, trying)))
 }
 
 /// The buttons on check `i`'s card: its terminal, then stopping it while it
@@ -2550,7 +2574,11 @@ impl FeaturePanel {
             true => ctx.criteria,
             false => 0,
         };
-        let carded = cards.len() + checks.len() + criteria;
+        let shown = match shows_criteria(feature, stage) {
+            true => ctx.criteria,
+            false => 0,
+        };
+        let carded = cards.len() + checks.len() + shown;
         self.finding = self.finding.min(carded.saturating_sub(1));
         if self.focus == TabArea::Findings && (carded == 0 || self.expanded) {
             self.focus = TabArea::Stages;
@@ -2736,7 +2764,10 @@ impl FeaturePanel {
             // A locked stage's is refused when done, saying why; any other
             // stage has nothing to reopen.
             Keysym::Return | Keysym::KP_Enter
-                if ctrl && mods.shift && self.focus == TabArea::Stages =>
+                if ctrl
+                    && mods.shift
+                    && (self.focus == TabArea::Stages
+                        || (self.focus == TabArea::Findings && shown > 0 && criteria == 0)) =>
             {
                 return (stage_mark(feature, stage) == StageMark::Done)
                     .then_some(PanelOutcome::Untick(stage));
@@ -3994,12 +4025,13 @@ impl Gerdr {
         let Some(feature) = self.feature(project, slug).cloned() else {
             return;
         };
+        // The brief may have changed: its criteria are read again. A finished
+        // feature's page shows them too.
+        self.load_criteria(project, slug);
         if feature.status != Status::Open {
             self.probe_finished(project, slug, &feature);
             return;
         }
-        // The brief may have changed: its criteria are read again.
-        self.load_criteria(project, slug);
         if self.feature_sender().is_none() {
             return;
         }
@@ -8101,13 +8133,16 @@ fn stage_page(
                     };
                     let said = said.map(|text| line(text, CheckTone::Note));
                     sections.push(lines("Criteria", said.into_iter().collect()));
-                    sections.extend(
-                        (state.criteria.iter().enumerate())
-                            .map(|(i, row)| criterion_card(i, row, actions))
-                            .map(PageSection::Finding),
-                    );
+                    sections.extend(criterion_sections(state, actions, true));
                 }
                 sections.extend(sandbox_sections(feature, state));
+            }
+            // What was found, kept to see: reopening is what changes it.
+            Stage::ManualTest if !state.criteria.is_empty() => {
+                let by_hand = state.criteria.iter().all(|row| row.found.is_none());
+                let said = by_hand.then(|| line("marked done by hand, not tried", CheckTone::Note));
+                sections.push(lines("Criteria", said.into_iter().collect()));
+                sections.extend(criterion_sections(state, actions, false));
             }
             Stage::Ship => {
                 let check = check_lines(feature, state.probe, state.shipping, now);
@@ -8443,6 +8478,14 @@ fn tab_hints(
             }
             hints.push(hint("Tab", if repos { "repositories" } else { "stages" }));
         }
+        TabArea::Findings if shows_criteria(feature, stage) && ctx.criteria > 0 => {
+            hints.push(hint("Up / Down", "criterion"));
+            let row = PanelRow::Stage(stage);
+            if matches!(row_action(feature, row, ctx), Some(PanelOutcome::Untick(_))) {
+                hints.push(hint(REOPEN_KEY, "reopen"));
+            }
+            hints.push(hint("Tab", if repos { "repositories" } else { "stages" }));
+        }
         TabArea::Findings if !check_entries(feature, stage, plan).is_empty() => {
             let entries = check_entries(feature, stage, plan);
             let entry = &entries[panel.finding.min(entries.len() - 1)];
@@ -8531,7 +8574,7 @@ fn tab_hints(
                 hints.push(hint("Tab", "findings"));
             } else if !check_entries(feature, stage, plan).is_empty() && !panel.expanded {
                 hints.push(hint("Tab", "checks"));
-            } else if tries_criteria(feature, stage) && ctx.criteria > 0 && !panel.expanded {
+            } else if shows_criteria(feature, stage) && ctx.criteria > 0 && !panel.expanded {
                 hints.push(hint("Tab", "criteria"));
             } else if repos {
                 hints.push(hint("Tab", "repositories"));
@@ -11756,6 +11799,112 @@ pub(crate) mod tests {
                 ("Esc".to_owned(), "cancel".to_owned())
             ]
         );
+    }
+
+    #[test]
+    fn an_approved_manual_test_shows_its_criteria_with_nothing_to_press() {
+        use crate::chrome::FindingTag;
+        let f = feature("m", vec![repo("api", true)], 8);
+        assert_eq!(stage_mark(&f, Stage::ManualTest), StageMark::Done);
+        let row = |found| Row {
+            id: "AC-1".into(),
+            text: "Given a, when b, then c".into(),
+            found,
+            note: String::new(),
+            sent: false,
+        };
+        let rows = vec![row(Some(Verdict::Pass)), row(Some(Verdict::Pass))];
+        let ctx = RowCtx {
+            criteria: 2,
+            ..RowCtx::default()
+        };
+        let state = PanelState {
+            ctx,
+            criteria: rows.clone(),
+            ..PanelState::default()
+        };
+        let actions = stage_actions(&f, Stage::ManualTest, ctx, &[], &rows);
+        let page = stage_page(&f, Stage::ManualTest, &state, &actions, 2_060);
+        let cards: Vec<&FindingCard> = (page.sections.iter())
+            .filter_map(|s| match s {
+                PageSection::Finding(card) => Some(card),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(cards.len(), 2);
+        // Readable, not faded as on the way, and with no buttons.
+        assert!(cards.iter().all(|c| c.tag == FindingTag::Passed));
+        assert!(cards.iter().all(|c| !c.faded && c.buttons.is_empty()));
+        assert!(matches!(
+            (page.sections.iter()).find(|s| matches!(s, PageSection::Lines { .. })),
+            Some(PageSection::Lines { label, lines, .. }) if label == "Criteria" && lines.is_empty()
+        ));
+        // Tab and the arrows go through them; nothing changes a result.
+        let mut panel = FeaturePanel {
+            project: "acme".into(),
+            slug: "m".into(),
+            ..FeaturePanel::default()
+        };
+        panel.pick(&f, Stage::ManualTest);
+        let slugs = vec!["m".to_owned()];
+        let mut go = |sym| {
+            let (mods, sym) = key(sym);
+            (
+                panel.key(&mods, sym, &f, &slugs, ctx, &[]),
+                panel.focus,
+                panel.finding,
+            )
+        };
+        assert_eq!(go(Keysym::Tab), (None, TabArea::Findings, 0));
+        assert_eq!(go(Keysym::Down), (None, TabArea::Findings, 1));
+        for sym in [Keysym::space, Keysym::f, Keysym::Delete] {
+            assert_eq!(go(sym).0, None);
+        }
+        let hints = tab_hints(
+            &panel,
+            &f,
+            Stage::ManualTest,
+            &slugs,
+            ctx,
+            AgentChoices::default(),
+            &[],
+        );
+        assert!(hints.iter().any(|(_, what)| what == "criterion"));
+        assert!(hints.iter().any(|(key, _)| key == REOPEN_KEY));
+        assert!(
+            !hints
+                .iter()
+                .any(|(_, what)| what == "pass" || what == "clear")
+        );
+        // What the footer says it reopens, from the cards too.
+        let both = ModifiersState {
+            ctrl: true,
+            shift: true,
+            ..ModifiersState::default()
+        };
+        assert_eq!(
+            panel.key(&both, Keysym::Return, &f, &slugs, ctx, &[]),
+            Some(PanelOutcome::Untick(Stage::ManualTest))
+        );
+        // Ticked by hand, they say so rather than read as not tried yet.
+        let rows = vec![row(None), row(None)];
+        let state = PanelState {
+            ctx,
+            criteria: rows,
+            ..PanelState::default()
+        };
+        let page = stage_page(&f, Stage::ManualTest, &state, &actions, 2_060);
+        assert!(matches!(
+            (page.sections.iter()).find(|s| matches!(s, PageSection::Lines { .. })),
+            Some(PageSection::Lines { lines, .. })
+                if lines.first().is_some_and(|l| l.text == "marked done by hand, not tried")
+        ));
+        // A finished feature stuck on it shows them, and nothing tries them.
+        let mut left = feature("l", vec![repo("api", true)], 7);
+        assert!(tries_criteria(&left, Stage::ManualTest));
+        left.status = Status::Abandoned;
+        assert!(!tries_criteria(&left, Stage::ManualTest));
+        assert!(shows_criteria(&left, Stage::ManualTest));
     }
 
     #[test]
