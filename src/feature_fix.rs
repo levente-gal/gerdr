@@ -121,6 +121,7 @@ impl Gerdr {
             return false;
         };
         f.fix_rounds = n;
+        f.last_fix_round = None;
         f.fix_round = Some(FixRound {
             n,
             what: what.to_owned(),
@@ -440,7 +441,15 @@ impl Gerdr {
             return;
         };
         let title = &feature.title;
-        let Some(round) = feature.fix_round.clone().filter(|r| r.before_fixing()) else {
+        let last = feature
+            .last_fix_round
+            .clone()
+            .filter(|_| feature.status == Status::Open);
+        let open = feature.fix_round.clone();
+        let Some(round) = (match open {
+            Some(round) => Some(round).filter(FixRound::before_fixing),
+            None => last,
+        }) else {
             return self.show_warning(format!(
                 "\u{201c}{title}\u{201d} has no fix plan waiting for review"
             ));
@@ -503,6 +512,7 @@ impl Gerdr {
         let Some(f) = self.feature_mut(project, slug) else {
             return;
         };
+        f.reopen_fix_round();
         if let Some(round) = f.fix_round.as_mut() {
             round.phase = FixPhase::Planning;
             round.sent_back = back;
@@ -517,15 +527,19 @@ impl Gerdr {
         self.show_success(text);
     }
 
-    /// The user approved the plan of feature `slug`: the agent makes the
-    /// fixes. Whether it went; a refusal says why and changes nothing.
+    /// The user approved the plan of feature `slug`, or asks for the fixes
+    /// of its last round again: the agent makes them. Whether it went; a
+    /// refusal says why and changes nothing.
     pub(crate) fn make_fixes(&mut self, project: &str, slug: &str) -> bool {
         let Some(feature) = self.feature(project, slug).cloned() else {
             return false;
         };
         let title = &feature.title;
+        let again = feature.fix_round.is_none()
+            && feature.status == Status::Open
+            && feature.last_fix_round.is_some();
         let waiting = (feature.fix_round.as_ref()).is_some_and(|r| r.phase == FixPhase::Ready);
-        if !waiting {
+        if !waiting && !again {
             self.show_warning(format!(
                 "\u{201c}{title}\u{201d} has no fix plan waiting for review"
             ));
@@ -577,10 +591,17 @@ impl Gerdr {
         let Some(f) = self.feature_mut(project, slug) else {
             return false;
         };
+        f.reopen_fix_round();
         if let Some(round) = f.fix_round.as_mut() {
             round.phase = FixPhase::Fixing;
         }
-        f.log(now, "Fix plan approved: fixes sent to the Build agent");
+        f.log(
+            now,
+            match again {
+                true => "Fix plan's fixes sent to the Build agent again",
+                false => "Fix plan approved: fixes sent to the Build agent",
+            },
+        );
         let agent = f.runs.get(&Stage::Build).and_then(|r| r.agent_key());
         self.save_feature(project, slug);
         if let Some(agent) = agent {
@@ -641,7 +662,10 @@ impl Gerdr {
         let n = round.n;
         match back {
             true => f.log(now, format!("Fix round {n} dropped")),
-            false => f.log(now, format!("Fix round {n} over")),
+            false => {
+                f.log(now, format!("Fix round {n} over"));
+                f.last_fix_round = Some(round.clone());
+            }
         }
         self.save_feature(project, slug);
         (self.features.build.fix_watches).remove(&fix_key(project, slug));

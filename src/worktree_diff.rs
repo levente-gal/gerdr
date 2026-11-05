@@ -823,6 +823,11 @@ impl WorktreeDiff {
             }
             return;
         }
+        // Going to its agent already: these would only refuse.
+        let fixing = |d: &DocOf| d.locked == Some(crate::doc_review::FIXING_THEM);
+        if self.fix_plan() && self.doc.as_ref().is_some_and(fixing) {
+            return;
+        }
         let go = match self.fix_plan() {
             true => Hint {
                 label: "Make fixes".to_owned(),

@@ -55,8 +55,8 @@ pub enum DocFile {
     /// Verify's `evidence.md`, only read: no comments, no Approve or Send
     /// back.
     Evidence,
-    /// The open fix round's plan: reviewed as a stage's file is, and Make
-    /// fixes where that has Approve.
+    /// The fix round's plan, open or the last: reviewed as a stage's file
+    /// is, and Make fixes where that has Approve.
     FixPlan,
 }
 
@@ -242,7 +242,10 @@ pub fn fix_plan_state(feature: Option<&Feature>) -> String {
         return "feature gone".into();
     };
     let Some(round) = &feature.fix_round else {
-        return "no fix plan open".into();
+        return match feature.last_fix_round {
+            Some(_) => fix_round::SENT.into(),
+            None => "no fix plan open".into(),
+        };
     };
     let state = match round.phase {
         FixPhase::Ready => "ready for review",
@@ -256,6 +259,9 @@ pub fn fix_plan_state(feature: Option<&Feature>) -> String {
     }
 }
 
+/// Why a fix plan can't be edited while its fixes are being made.
+pub const FIXING_THEM: &str = "The agent is making these fixes";
+
 /// Why the fix plan of `feature` can't be edited in its review now.
 fn fix_plan_locked(feature: Option<&Feature>) -> Option<&'static str> {
     let Some(feature) = feature else {
@@ -266,7 +272,8 @@ fn fix_plan_locked(feature: Option<&Feature>) -> Option<&'static str> {
         Some(FixPhase::Compacting | FixPhase::Planning) => {
             Some("The agent is still writing the file")
         }
-        Some(FixPhase::Fixing) => Some("The agent is making these fixes"),
+        Some(FixPhase::Fixing) => Some(FIXING_THEM),
+        None if feature.last_fix_round.is_some() => None,
         None => Some("No fix plan is open"),
     }
 }
@@ -554,6 +561,27 @@ impl Gerdr {
 mod tests {
     use super::*;
     use crate::feature::agents::StageRun;
+
+    #[test]
+    fn the_last_fix_plan_can_still_be_read_and_edited() {
+        let mut f = crate::feature::tests::feature("a", 1);
+        assert_eq!(fix_plan_state(Some(&f)), "no fix plan open");
+        assert_eq!(fix_plan_locked(Some(&f)), Some("No fix plan is open"));
+        f.last_fix_round = Some(crate::feature::fix_round::FixRound {
+            n: 1,
+            what: "1 finding".into(),
+            input: "/d/a.md".into(),
+            stage: Stage::Verify,
+            phase: FixPhase::Fixing,
+            sent_back: 0,
+            asked: 1,
+            ready: None,
+            stalled: None,
+            give_back: Default::default(),
+        });
+        assert_eq!(fix_plan_state(Some(&f)), fix_round::SENT);
+        assert_eq!(fix_plan_locked(Some(&f)), None);
+    }
 
     #[test]
     fn a_file_shows_as_one_hunk_of_added_lines() {

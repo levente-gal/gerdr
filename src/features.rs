@@ -26,7 +26,7 @@
 //! repository's (unfold the rows, press a row's button); Ctrl+PgUp/Ctrl+PgDn
 //! go to the previous or next feature, Ctrl+O opens a tab in the feature's folder,
 //! Ctrl+Shift+O opens the pull request of the repository picked, or on
-//! Verify's page its evidence, Ctrl+R starts the stage's agent afresh,
+//! Verify's page its evidence, or a fix plan already sent, Ctrl+R starts the stage's agent afresh,
 //! Ctrl+Shift+R shows its agent, or goes back to its chat if its tab closed,
 //! Ctrl+Shift+U sets its worktrees up (Build and Verify: copies what they lack),
 //! Ctrl+Shift+I shows what the setup runs and printed,
@@ -2791,7 +2791,9 @@ impl FeaturePanel {
                 if ctrl
                     && (self.focus == TabArea::Stages
                         || self.focus == TabArea::Findings && criteria > 0)
-                    && fix_round_on(feature, stage).is_some_and(|r| r.phase == FixPhase::Ready) =>
+                    && (fix_round_on(feature, stage)
+                        .is_some_and(|r| r.phase == FixPhase::Ready)
+                        || makes_fixes_again(feature, stage)) =>
             {
                 return Some(PanelOutcome::MakeFixes);
             }
@@ -2822,7 +2824,11 @@ impl FeaturePanel {
                 let back = matches!(sym, Keysym::Prior | Keysym::KP_Prior);
                 return switch(slugs, &self.slug, back).map(PanelOutcome::Show);
             }
-            Keysym::o | Keysym::O if ctrl && mods.shift => return row_page(feature, row),
+            Keysym::o | Keysym::O if ctrl && mods.shift => {
+                return row_page(feature, row).or_else(|| {
+                    opens_fix_plan(feature, stage).then_some(PanelOutcome::ReviewFixPlan)
+                });
+            }
             Keysym::o | Keysym::O if ctrl => return Some(PanelOutcome::Open(feature.dir.clone())),
             Keysym::c | Keysym::C if ctrl => return Some(PanelOutcome::CopyPath),
             Keysym::r | Keysym::R if ctrl && mods.shift => {
@@ -2972,6 +2978,28 @@ fn fix_round_on(feature: &Feature, stage: Stage) -> Option<&FixRound> {
         .filter(|r| r.stage == stage)
 }
 
+/// The last fix round of `feature`, its fixes sent, on the page of the stage
+/// that asked, or of an earlier one the feature came back to.
+fn last_round_on(feature: &Feature, stage: Stage) -> Option<&FixRound> {
+    (feature.status == Status::Open && feature.fix_round.is_none())
+        .then_some(feature.last_fix_round.as_ref())
+        .flatten()
+        .filter(|r| r.stage == stage || (feature.current() == Some(stage) && stage < r.stage))
+}
+
+/// Whether `stage`'s page can send the fixes of the last round again: only
+/// where the feature is at.
+fn makes_fixes_again(feature: &Feature, stage: Stage) -> bool {
+    last_round_on(feature, stage).is_some() && feature.current() == Some(stage)
+}
+
+/// Whether `stage`'s page opens a fix plan already sent: its Enter does
+/// other things.
+fn opens_fix_plan(feature: &Feature, stage: Stage) -> bool {
+    last_round_on(feature, stage).is_some()
+        || fix_round_on(feature, stage).is_some_and(|r| r.phase == FixPhase::Fixing)
+}
+
 /// The buttons of `round`, what Enter does first: what it waits for.
 fn fix_round_buttons(
     feature: &Feature,
@@ -3016,6 +3044,12 @@ fn fix_round_buttons(
         };
         out.push((button(label, style), outcome));
     }
+    if round.phase == FixPhase::Fixing {
+        out.push((
+            button("Open", ButtonStyle::Plain),
+            PanelOutcome::ReviewFixPlan,
+        ));
+    }
     if round.before_fixing() {
         out.push((
             button("Drop plan\u{2026}", ButtonStyle::Quiet),
@@ -3055,6 +3089,19 @@ pub fn page_actions(
     let round = fix_round_on(feature, stage);
     if let Some(round) = round {
         out.extend(fix_round_buttons(feature, round, ctx));
+    }
+    // Over, it asks nothing: Enter goes on with the stage.
+    if last_round_on(feature, stage).is_some() {
+        out.push((
+            button("Open", ButtonStyle::Plain),
+            PanelOutcome::ReviewFixPlan,
+        ));
+        if makes_fixes_again(feature, stage) {
+            out.push((
+                button("Make fixes again", ButtonStyle::Plain),
+                PanelOutcome::MakeFixes,
+            ));
+        }
     }
     let plan_fixes = stage == Stage::Verify
         && mark == StageMark::Current
@@ -4852,6 +4899,7 @@ impl Gerdr {
             viewed: Default::default(),
             manual: None,
             fix_round: None,
+            last_fix_round: None,
             fix_rounds: 0,
         };
         self.features
@@ -7691,6 +7739,23 @@ fn fix_round_card(
     }
 }
 
+/// The card of the last fix round: its plan and what it fixed stay at hand.
+fn last_round_card(round: &FixRound, actions: &[(PageButton, PanelOutcome)]) -> PageSection {
+    PageSection::File {
+        name: "Fix plan".to_owned(),
+        state: line(
+            format!("{} \u{b7} {}", round.what, feature::fix_round::SENT),
+            CheckTone::Note,
+        ),
+        buttons: (actions.iter().enumerate())
+            .filter(|(_, (_, o))| {
+                matches!(o, PanelOutcome::ReviewFixPlan | PanelOutcome::MakeFixes)
+            })
+            .map(|(i, _)| i)
+            .collect(),
+    }
+}
+
 /// How Discover's or Plan's file stands in `feature`, as `ctx` found it.
 /// A restarted agent leaves the last run's file be until it writes its
 /// own, so the card doesn't say it is gone.
@@ -8038,6 +8103,7 @@ fn stage_page(
     }
     if mark != StageMark::Later {
         sections.extend(fix_round_on(feature, stage).map(|r| fix_round_card(feature, r, actions)));
+        sections.extend(last_round_on(feature, stage).map(|r| last_round_card(r, actions)));
         sections.extend(rework_card(feature, stage, state, actions));
         if let Some(m) = feature.marks.get(&stage).filter(|m| !m.note.is_empty()) {
             sections.push(lines("Note", vec![line(m.note.clone(), CheckTone::Note)]));
@@ -8270,9 +8336,12 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 5] = [
             ),
             (
                 "Ctrl+Enter",
-                "make the fixes of a fix plan ready for review",
+                "make the fixes of a fix plan ready for review, or send them again",
             ),
-            ("Ctrl+Shift+O", "Verify's evidence"),
+            (
+                "Ctrl+Shift+O",
+                "Verify's evidence, or a fix plan already sent",
+            ),
             ("Tab", "Verify: to the checks, then Up / Down through them"),
             ("Enter", "a check: show its terminal"),
             ("r / s", "a check: run it again, stop it"),
@@ -8577,6 +8646,10 @@ fn tab_hints(
                     hints.push(hint(START_OVER_KEY, "drop plan\u{2026}"));
                 }
             }
+            // Manual test's has its own use for it.
+            if makes_fixes_again(feature, stage) && !tries_criteria(feature, stage) {
+                hints.push(hint("Ctrl+Enter", "make fixes again"));
+            }
             if can_comment(feature, stage) {
                 hints.push(hint("c", "add comment\u{2026}"));
             }
@@ -8597,6 +8670,8 @@ fn tab_hints(
             }
             if row_page(feature, row).is_some() {
                 hints.push(hint("Ctrl+Shift+O", "evidence"));
+            } else if opens_fix_plan(feature, stage) {
+                hints.push(hint("Ctrl+Shift+O", "fix plan"));
             }
             if offers_setup(feature, stage) {
                 hints.push(hint("Ctrl+Shift+U", "set up"));
@@ -8986,6 +9061,7 @@ pub(crate) mod tests {
             viewed: Default::default(),
             manual: None,
             fix_round: None,
+            last_fix_round: None,
             fix_rounds: 0,
         }
     }
@@ -10891,6 +10967,93 @@ pub(crate) mod tests {
         // No other stage's page has it.
         let other = page_actions(&ready, Stage::Build, RowCtx::default());
         assert!(!other.iter().any(|(_, o)| *o == PanelOutcome::MakeFixes));
+    }
+
+    #[test]
+    fn a_fix_plan_stays_on_the_page_once_its_fixes_went() {
+        let mut f = verified(false);
+        f.verify.as_mut().unwrap().finished = Some(1_100);
+        f.verify.as_mut().unwrap().passed = Some(false);
+        let held = |f: &Feature, stage| {
+            let actions = page_actions(f, stage, RowCtx::default());
+            let page = stage_page(f, stage, &PanelState::default(), &actions, 2_000);
+            let card = page.sections.into_iter().find_map(|s| match s {
+                PageSection::File {
+                    name,
+                    state,
+                    buttons,
+                } if name == "Fix plan" => Some((state.text, buttons)),
+                _ => None,
+            });
+            card.map(|(said, buttons)| {
+                let labels: Vec<String> = buttons
+                    .iter()
+                    .map(|i| actions[*i].0.label.clone())
+                    .collect();
+                (said, labels)
+            })
+        };
+        // Making them: the plan can be read.
+        let fixing = in_round(f.clone(), Stage::Verify, FixPhase::Fixing);
+        assert_eq!(
+            held(&fixing, Stage::Verify),
+            Some((
+                "Verify failures \u{b7} making fixes".to_owned(),
+                vec!["Open".to_owned()]
+            ))
+        );
+        // Its agent rested: read, or sent again as a rest doesn't tell the
+        // fixes were made.
+        let before = page_enter(&f, Stage::Verify, RowCtx::default());
+        let mut over = f.clone();
+        over.last_fix_round = fixing.fix_round.clone();
+        assert_eq!(
+            held(&over, Stage::Verify),
+            Some((
+                "Verify failures \u{b7} fixes sent".to_owned(),
+                vec!["Open".to_owned(), "Make fixes again".to_owned()]
+            ))
+        );
+        // Enter still does what the stage waits for.
+        assert_eq!(page_enter(&over, Stage::Verify, RowCtx::default()), before);
+        // Each has its key.
+        let slugs = vec![over.slug.clone()];
+        let mut panel = FeaturePanel {
+            slug: over.slug.clone(),
+            ..FeaturePanel::default()
+        };
+        let ctrl = ModifiersState {
+            ctrl: true,
+            ..ModifiersState::default()
+        };
+        let none = RowCtx::default();
+        assert_eq!(
+            panel.key(&ctrl, Keysym::Return, &over, &slugs, none, &[]),
+            Some(PanelOutcome::MakeFixes)
+        );
+        let hints = tab_view(&panel, &over, &slugs, &PanelState::default(), 2_000).hints;
+        assert!(hints.contains(&("Ctrl+Enter".into(), "make fixes again".into())));
+        // Past its stage it is only read.
+        let at = over.current().unwrap();
+        let mut past = over.clone();
+        past.last_fix_round.as_mut().unwrap().stage = Stage::Build;
+        assert!(at > Stage::Build);
+        assert_eq!(
+            held(&past, Stage::Build),
+            Some((
+                "Verify failures \u{b7} fixes sent".to_owned(),
+                vec!["Open".to_owned()]
+            ))
+        );
+        assert_eq!(held(&past, at), None);
+        // Back on a stage before the one that asked, it comes along.
+        let mut back = over.clone();
+        back.last_fix_round.as_mut().unwrap().stage = Stage::Ship;
+        assert!(makes_fixes_again(&back, at));
+        // A round open has the card to itself.
+        let mut both = fixing.clone();
+        both.last_fix_round = fixing.fix_round.clone();
+        assert!(last_round_on(&both, Stage::Verify).is_none());
     }
 
     #[test]

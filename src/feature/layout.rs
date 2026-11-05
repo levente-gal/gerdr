@@ -1408,6 +1408,7 @@ mod tests {
             viewed: Default::default(),
             manual: None,
             fix_round: None,
+            last_fix_round: None,
             fix_rounds: 0,
             history: Vec::new(),
         }

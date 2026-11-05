@@ -29,6 +29,8 @@ pub const FILE: &str = "fix-plan.md";
 pub const COMMENTS: &str = "fix-plan-comments.json";
 /// The section a plan must have, and not leave empty.
 pub const FIXES: &str = "Fixes";
+/// How a round stands once its fixes went and its agent rested.
+pub const SENT: &str = "fixes sent";
 /// How long an agent told to compact may show no work: a chat too short to
 /// compact stays idle, and the round must not hang on it. A compact that
 /// was only not seen does no harm: the next line waits in the agent.

@@ -402,6 +402,11 @@ pub struct Feature {
     /// The fix round open, if any (see `fix_round`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fix_round: Option<fix_round::FixRound>,
+    /// The last round, once its fixes went and its agent rested: what it
+    /// fixes can still be read and sent again, as resting doesn't tell the
+    /// fixes were made. The next round starts afresh.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_fix_round: Option<fix_round::FixRound>,
     /// How many fix rounds it had: the next one's number goes on from it.
     #[serde(default)]
     pub fix_rounds: u32,
@@ -593,6 +598,14 @@ impl Feature {
             return false;
         }
         self.forget_run(stage);
+        // What it fixed is gone with the stage that asked.
+        if self
+            .last_fix_round
+            .as_ref()
+            .is_some_and(|r| r.stage >= stage)
+        {
+            self.last_fix_round = None;
+        }
         match stage {
             Stage::Discover | Stage::Plan | Stage::Build => {}
             Stage::PlanReview => self.plan_review = None,
@@ -604,6 +617,19 @@ impl Feature {
         }
         self.log(now, format!("{} started over", stage.label()));
         true
+    }
+
+    /// Open its last fix round again, on the stage it is at now, unless one
+    /// is open.
+    pub fn reopen_fix_round(&mut self) {
+        if self.fix_round.is_some() {
+            return;
+        }
+        let current = self.current();
+        self.fix_round = self.last_fix_round.take().map(|mut round| {
+            round.stage = current.unwrap_or(round.stage);
+            round
+        });
     }
 
     /// Add `what` to its history at `now`.
@@ -853,6 +879,46 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_last_fix_round_opens_again_on_the_stage_it_is_at() {
+        let round = |stage| fix_round::FixRound {
+            n: 1,
+            what: "1 finding".into(),
+            input: "/d/a.md".into(),
+            stage,
+            phase: fix_round::FixPhase::Fixing,
+            sent_back: 0,
+            asked: 1,
+            ready: None,
+            stalled: None,
+            give_back: Default::default(),
+        };
+        let mut f = feature("a", 1);
+        let at = f.current().unwrap();
+        f.last_fix_round = Some(round(Stage::Ship));
+        f.reopen_fix_round();
+        assert_eq!(f.fix_round.as_ref().map(|r| r.stage), Some(at));
+        assert_eq!(f.last_fix_round, None);
+        // One open stays, and nothing is left to open.
+        f.reopen_fix_round();
+        assert!(f.fix_round.is_some());
+        // Starting over the stage that asked, or one before, forgets it.
+        let mut f = feature("b", 1);
+        f.tick(1, "gerdr", None);
+        let at = f.current().unwrap();
+        f.last_fix_round = Some(round(at));
+        assert!(f.start_over(at, 2));
+        assert_eq!(f.last_fix_round, None);
+        // One asked for earlier on stays.
+        let mut f = feature("c", 1);
+        f.tick(1, "gerdr", None);
+        let at = f.current().unwrap();
+        f.last_fix_round = Some(round(Stage::Discover));
+        assert!(at > Stage::Discover);
+        assert!(f.start_over(at, 2));
+        assert!(f.last_fix_round.is_some());
+    }
+
+    #[test]
     fn starting_over_forgets_only_the_current_stage_and_keeps_counting() {
         let mut f = done_up_to(Stage::PlanReview);
         f.runs.insert(
@@ -992,6 +1058,7 @@ pub(crate) mod tests {
             viewed: Default::default(),
             manual: None,
             fix_round: None,
+            last_fix_round: None,
             fix_rounds: 0,
         }
     }
@@ -1075,6 +1142,7 @@ pub(crate) mod tests {
             viewed: Default::default(),
             manual: None,
             fix_round: None,
+            last_fix_round: None,
             fix_rounds: 0,
         }
     }
