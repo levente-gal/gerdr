@@ -505,6 +505,7 @@ impl Gerdr {
         };
         row.outcome = Some(outcome);
         row.queued = false;
+        row.stopping = false;
         self.save_feature(project, slug);
         self.sync_check_cards();
     }
@@ -627,6 +628,17 @@ impl Gerdr {
         for (i, stop) in stops.iter().enumerate() {
             if index.is_none_or(|index| index == i) {
                 stop.store(true, Ordering::Relaxed);
+            }
+        }
+        // It may take a moment to end: its card says so meanwhile.
+        if let Some(run) = self
+            .feature_mut(project, slug)
+            .and_then(|f| f.verify.as_mut())
+        {
+            for (i, row) in run.checks.iter_mut().enumerate() {
+                if index.is_none_or(|index| index == i) && row.outcome.is_none() {
+                    row.stopping = true;
+                }
             }
         }
         true

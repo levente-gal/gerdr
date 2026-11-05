@@ -157,7 +157,11 @@ How to use it:
   turns and say they wait, and stop from their cards on its page.
   Those cards are there from the start, one for each check the feature will
   run or skips; they show the check's last output lines as it runs, and read
-  its terminal only while the page shows.
+  its terminal only while the page shows. While the checks go, from the press
+  on, the page offers only what works: Stop all once there is something to
+  stop, and what reads. What would change the code or the worktrees under them
+  (setup, fixes, a prompt to Build) is hidden, and refuses by its key. A check
+  told to stop says "stopping" until it ends, and offers no Stop again.
 
 ## X. State across places
 
