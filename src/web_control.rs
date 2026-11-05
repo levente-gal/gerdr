@@ -968,7 +968,7 @@ mod tests {
             line: None,
         };
         assert!(serde_json::to_value(&none).unwrap()["line"].is_null());
-        // A click on a block puts the caret on its first line.
+        // A click on a block puts the caret on the line clicked.
         let token = pane_token(4);
         let clicked = format!(r#"{{"type":"line","pane":"{token}","line":7}}"#);
         let FromBrowser::Line { pane, line } = serde_json::from_str(&clicked).unwrap() else {
@@ -1005,7 +1005,7 @@ mod tests {
             return;
         };
         let check = r#"
-const { sourceLines, pickBlock, lineY, yLine } = require(process.argv[1]);
+const { sourceLines, pickBlock, lineY, yLine, clickedLine } = require(process.argv[1]);
 const assert = require("assert");
 assert.deepStrictEqual(sourceLines("3:1-5:20"), [3, 5]);
 assert.strictEqual(sourceLines("x"), null);
@@ -1043,6 +1043,13 @@ assert.strictEqual(yLine(low, 0), 0);
 assert.strictEqual(yLine(low, 16), 0.5);
 assert.strictEqual(lineY([], 3), 0);
 assert.strictEqual(yLine([], 3), 1);
+// A click lands on the line under it: lines 10 to 19, 20 px each, from 100.
+assert.strictEqual(clickedLine(10, 19, 100, 200, 100), 10);
+assert.strictEqual(clickedLine(10, 19, 100, 200, 155), 12);
+assert.strictEqual(clickedLine(10, 19, 100, 200, 299), 19);
+// Off its edges, it stays in the block.
+assert.strictEqual(clickedLine(10, 19, 100, 200, 300), 19);
+assert.strictEqual(clickedLine(10, 19, 100, 200, 90), 10);
 "#;
         let blocks = concat!(
             env!("CARGO_MANIFEST_DIR"),
