@@ -418,8 +418,8 @@ pub enum NodeMark {
     /// accent and pulsing, over the current stage, where nothing runs then.
     Fixing,
     /// Done once and not standing now: its mark went when the code changed
-    /// or it was reopened, or the flow is back at Build (`RailBack`). A grey
-    /// ring with a tick.
+    /// or it was reopened, or the flow is back at Build (`RailBack`) and it's
+    /// Build or after. A grey ring with a tick.
     Ran,
     /// The current stage, with the flow back at Build on its account and the
     /// next move not its own: a ring round its number.
@@ -3547,9 +3547,13 @@ impl Painter {
             let past = |i: usize| view.rail.get(i).map(|n| n.mark);
             let done = matches!(past(i), Some(NodeMark::Done | NodeMark::Stale))
                 || !matches!(past(i + 1), Some(NodeMark::Later) | None);
-            let once = view.back.is_some()
-                || past(i) == Some(NodeMark::Ran)
-                || past(i + 1) == Some(NodeMark::Ran);
+            // Turned back, the flow stands good up to Build, and ran once from
+            // there on.
+            let ran = |i: usize| past(i) == Some(NodeMark::Ran);
+            let into_build = view.back.is_some_and(|back| i + 1 == back.to);
+            let once = view.back.is_some_and(|back| i >= back.to)
+                || ran(i)
+                || (ran(i + 1) && !into_build);
             let color = match (done, once) {
                 (false, _) => p.border,
                 (true, false) => p.success,

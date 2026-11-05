@@ -1018,6 +1018,25 @@ impl Store {
 impl Project {
     /// Give the workspace records saved before they had ids of their own
     /// one: their herdr workspace's id, else a new one.
+    /// Saved commands, freed of what a launcher added to them: they would
+    /// fail when run again (see `feature::agents::without_launcher`).
+    fn clean_saved_commands(&mut self) {
+        let clean = |command: &mut String| {
+            if let Some(line) = crate::feature::agents::without_launcher(command) {
+                *command = line;
+            }
+        };
+        for record in &mut self.workspaces {
+            for pane in &mut record.panes {
+                pane.command.iter_mut().for_each(clean);
+                pane.skip.iter_mut().for_each(clean);
+            }
+            for choice in &mut record.restart_choices {
+                clean(&mut choice.command);
+            }
+        }
+    }
+
     fn fill_workspace_ids(&mut self) {
         for record in &mut self.workspaces {
             if record.id.is_empty() {
@@ -1127,6 +1146,7 @@ fn read_project(id: &str, path: &Path) -> Result<(Project, u64), String> {
     let raw = std::fs::read(path).map_err(|err| err.to_string())?;
     let mut project: Project = serde_json::from_slice(&raw).map_err(|err| err.to_string())?;
     project.fill_workspace_ids();
+    project.clean_saved_commands();
     if !valid_id(&project.id) {
         return Err(format!("{:?} isn't a valid id", project.id));
     }
@@ -2073,6 +2093,33 @@ mod tests {
         );
         assert_eq!(program("python3"), None);
         assert_eq!(program(""), None);
+    }
+
+    #[test]
+    fn a_saved_cursor_command_loads_without_its_launchers_words() {
+        let dir = scratch("launcher-words");
+        std::fs::create_dir_all(&dir).unwrap();
+        let line = "/b/cursor-agent --use-system-ca /v/index.js --trust --resume id";
+        let mut project = sample().projects[0].clone();
+        project.id = "web".into();
+        project.workspaces.truncate(1);
+        project.workspaces[0].panes = vec![PaneRecord {
+            command: Some(line.into()),
+            skip: vec![line.into()],
+            ..PaneRecord::default()
+        }];
+        project.workspaces[0].restart_choices = vec![RestartChoice {
+            command: line.into(),
+            restart: true,
+        }];
+        let path = dir.join("web.json");
+        std::fs::write(&path, serde_json::to_vec(&project).unwrap()).unwrap();
+        let record = read_project("web", &path).unwrap().0.workspaces.remove(0);
+        let clean = "/b/cursor-agent --trust --resume id";
+        assert_eq!(record.panes[0].command.as_deref(), Some(clean));
+        assert_eq!(record.panes[0].skip, [clean]);
+        assert_eq!(record.restart_choices[0].command, clean);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

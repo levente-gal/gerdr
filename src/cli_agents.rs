@@ -112,8 +112,9 @@ fn offered(
 
 /// Whether the saved `command` runs an agent CLI: one gerdr knows, installed
 /// or not, or one `config` starts. npm's OpenCode runs as `opencode.exe`, on
-/// Linux too. Cursor's CLI, started by its other name, keeps that name in
-/// front of its script (`agent …/cursor-agent/versions/…/index.js`).
+/// Linux too. Cursor's CLI, started by its other name, is told by where that
+/// name leads (`…/cursor-agent/versions/…/cursor-agent`), or by its script
+/// in a line saved before gerdr dropped it.
 pub fn runs_agent(command: &str, config: &BTreeMap<String, String>) -> bool {
     use crate::projects::command_program;
     let Some(program) = command_program(command) else {
@@ -121,10 +122,17 @@ pub fn runs_agent(command: &str, config: &BTreeMap<String, String>) -> bool {
     };
     let name = program.strip_suffix(".exe").unwrap_or(&program);
     KNOWN.iter().any(|(key, _)| *key == name)
-        || (name == "agent" && command.contains("/cursor-agent/"))
+        || (name == "agent" && (command.contains("/cursor-agent/") || leads_to_cursor(command)))
         || config
             .values()
             .any(|c| command_program(c).as_ref() == Some(&program))
+}
+
+/// Whether the first word of `command` is a link into Cursor's CLI.
+fn leads_to_cursor(command: &str) -> bool {
+    (crate::projects::split_command(command).first())
+        .and_then(|program| std::fs::canonicalize(program).ok())
+        .is_some_and(|path| path.to_string_lossy().contains("/cursor-agent/"))
 }
 
 /// The agent `[agents]` calls `key`, named `name`, started by `start`.
@@ -154,6 +162,20 @@ mod tests {
             .iter()
             .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
             .collect()
+    }
+
+    #[test]
+    fn cursors_other_name_is_told_by_where_it_leads() {
+        let dir = std::env::temp_dir().join(format!("gerdr-agent-link-{}", std::process::id()));
+        let real = dir.join("cursor-agent/versions/1");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("cursor-agent"), "").unwrap();
+        let link = dir.join("agent");
+        std::os::unix::fs::symlink(real.join("cursor-agent"), &link).unwrap();
+        let config = config(&[]);
+        assert!(runs_agent(&format!("{} --trust", link.display()), &config));
+        assert!(!runs_agent("./agent --port 8000", &config));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

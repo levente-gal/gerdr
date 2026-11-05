@@ -3074,10 +3074,11 @@ fn feature_tab_verify_running() -> super::FeatureTabView {
     view
 }
 
-/// `view` with the flow back at Build from stage `from`: what was done ran once.
+/// `view` with the flow back at Build from stage `from`: what was done from
+/// Build on ran once.
 fn turned_back(view: &mut super::FeatureTabView, from: usize) {
     use super::NodeMark;
-    for node in &mut view.rail {
+    for node in &mut view.rail[3..] {
         if node.mark == NodeMark::Done {
             node.mark = NodeMark::Ran;
         }
@@ -4233,7 +4234,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 45]; 4] = [
         0xc1278577e56967a2, // tab_plan_ready_1180
         0xe6c0a8c26922ed70, // tab_verify_failed_1920
         0xceae385ff36ea8be, // tab_verify_running_1180
-        0xcfa2304e2991cdb2, // tab_fix_plan_860
+        0x17565c26a855e9ae, // tab_fix_plan_860
         0x6de8a0eac93ce4f5, // tab_ship_blocked_1180
         0x2edecb062d49117f, // tab_ship_routes_1180
         0x3f5339a12a61cb80, // tab_ship_routes_860
@@ -4260,9 +4261,9 @@ const GOLDEN_FEATURE_TAB: [[u64; 45]; 4] = [
         0x5ce4ec148de5244e, // tab_held_860
         0xb769e6bd04ceafe5, // tab_resume_1180
         0x3f752b44da659f99, // tab_resume_860
-        0x9395d0d81d749c1d, // tab_fixing_1180
-        0x585f89c3673c704a, // tab_fixed_code_1180
-        0xed2543ba784f3741, // tab_fixed_code_860
+        0xf41450c01f4d3adf, // tab_fixing_1180
+        0x0d622d9c24910310, // tab_fixed_code_1180
+        0xd23162371693b895, // tab_fixed_code_860
         0x39dad694534611c7, // tab_approved_1180
         0x1f0a0d2a92104906, // tab_locked_1180
         0xfc861ee78304bfbc, // tab_start_over_1180
@@ -4281,7 +4282,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 45]; 4] = [
         0xd87da022045a2089, // tab_plan_ready_1180
         0xf060b4300361f434, // tab_verify_failed_1920
         0x52a5d1ad9dffb717, // tab_verify_running_1180
-        0x2b5e9dfc632c57ab, // tab_fix_plan_860
+        0x66b1c34acb71140e, // tab_fix_plan_860
         0x3682781e663407d6, // tab_ship_blocked_1180
         0x6d13e764c0086335, // tab_ship_routes_1180
         0xe158f1612e5697d6, // tab_ship_routes_860
@@ -4308,9 +4309,9 @@ const GOLDEN_FEATURE_TAB: [[u64; 45]; 4] = [
         0xd6daee894876f1e5, // tab_held_860
         0xa614cc43a9952056, // tab_resume_1180
         0xf054db57d3898f64, // tab_resume_860
-        0x531a52802761bb59, // tab_fixing_1180
-        0x0cb20655e92d6a82, // tab_fixed_code_1180
-        0x8816fb1b6e76ee7c, // tab_fixed_code_860
+        0x033bf3af70bdcf58, // tab_fixing_1180
+        0x55e428d925351313, // tab_fixed_code_1180
+        0xa0c0462050967a8d, // tab_fixed_code_860
         0xbfd1ff58f63dabc7, // tab_approved_1180
         0x2ac9eea070a89ec7, // tab_locked_1180
         0x14684a4d8940be84, // tab_start_over_1180
@@ -4329,7 +4330,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 45]; 4] = [
         0x1012d3e4c8093338, // tab_plan_ready_1180
         0x1446efceff05c114, // tab_verify_failed_1920
         0xb9f4489df4669939, // tab_verify_running_1180
-        0x62301cd9e6720d86, // tab_fix_plan_860
+        0x0ed0f57c474cc6c7, // tab_fix_plan_860
         0xd59032fb24dd423d, // tab_ship_blocked_1180
         0x646e11565c9de4e0, // tab_ship_routes_1180
         0xcfa8d9cdcb053e97, // tab_ship_routes_860
@@ -4356,9 +4357,9 @@ const GOLDEN_FEATURE_TAB: [[u64; 45]; 4] = [
         0x5d758a3375ad59b4, // tab_held_860
         0xa79bf4b0e5c7222b, // tab_resume_1180
         0x823ad24610c8d561, // tab_resume_860
-        0xa3f2411cb14be74f, // tab_fixing_1180
-        0x4b81cbbd1bfa5f4c, // tab_fixed_code_1180
-        0xf91ceb069bbeb8f5, // tab_fixed_code_860
+        0x641f699132903dae, // tab_fixing_1180
+        0xd574491eb981be15, // tab_fixed_code_1180
+        0xf72beb87fc877f5c, // tab_fixed_code_860
         0xca21abeb42b40c90, // tab_approved_1180
         0xf8462e772a8bfb79, // tab_locked_1180
         0x6101ae175d95f95d, // tab_start_over_1180
@@ -4377,7 +4378,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 45]; 4] = [
         0x9ba97245b9431b1d, // tab_plan_ready_1180
         0xc0a2a63f8deefc51, // tab_verify_failed_1920
         0x1d13b9e1270b0ffc, // tab_verify_running_1180
-        0xd8498ded5b6ad42e, // tab_fix_plan_860
+        0x28cf2e2968f136f7, // tab_fix_plan_860
         0xd30b4e34c27b0745, // tab_ship_blocked_1180
         0xfd28fbee1d3acdfc, // tab_ship_routes_1180
         0xeb73d57026c5fc93, // tab_ship_routes_860
@@ -4404,9 +4405,9 @@ const GOLDEN_FEATURE_TAB: [[u64; 45]; 4] = [
         0x9cce9a5aa8d18670, // tab_held_860
         0xc5c23bc0a12c240e, // tab_resume_1180
         0xba0f501e1d90ab88, // tab_resume_860
-        0x5f20355ecf3438d7, // tab_fixing_1180
-        0xee03371f6d89ea57, // tab_fixed_code_1180
-        0x285d29c396bc96ce, // tab_fixed_code_860
+        0x7867b61f7675ee02, // tab_fixing_1180
+        0x07a65c8d19d31d4e, // tab_fixed_code_1180
+        0xc64f106fafea81fb, // tab_fixed_code_860
         0xaf6e62e9aa28626c, // tab_approved_1180
         0xe88210491ec9da6d, // tab_locked_1180
         0xe8e6a8189d0001cd, // tab_start_over_1180

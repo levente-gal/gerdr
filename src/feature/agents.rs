@@ -240,10 +240,42 @@ pub fn resume_line(base: &str, session: &str, dirs: &[PathBuf]) -> String {
     format!("{} --resume {id}", unattended(base, dirs))
 }
 
+/// Where the script of Cursor's CLI is in `argv`, what its process shows. Its
+/// launcher ends in `exec -a "$0" node --use-system-ca …/index.js "$@"`, so
+/// node's flags and the script come before what the CLI was told, and the CLI
+/// refuses them (`unknown option '--use-system-ca'`).
+fn launcher_script(argv: &[&str]) -> Option<usize> {
+    let name = argv.first()?.rsplit('/').next()?;
+    let at = argv.iter().skip(1).position(|w| !w.starts_with('-'))? + 1;
+    let ours = name == "cursor-agent" || (name == "agent" && argv[at].contains("/cursor-agent/"));
+    (ours && argv[at].ends_with("/index.js")).then_some(at)
+}
+
+/// `line`, a saved command, with no launcher's words in it, as `rerun_argv`
+/// now captures it; `None` if it has none. Older saves hold them.
+pub fn without_launcher(line: &str) -> Option<String> {
+    let words = crate::projects::split_command(line);
+    let argv: Vec<&str> = words.iter().map(String::as_str).collect();
+    launcher_script(&argv)?;
+    let quoted: Vec<_> = (rerun_argv(&argv).iter())
+        .map(|word| crate::desktop::shell_quote(word))
+        .collect();
+    Some(quoted.join(" "))
+}
+
 /// How to run `argv`, what a pane is seen running, again: a chat started
 /// with an id of its own goes back to that chat. Claude refuses an id already
-/// used, and the prompt would be sent a second time.
+/// used, and the prompt would be sent a second time. Cursor's runs without
+/// what its launcher adds (see `launcher_script`).
 pub fn rerun_argv<'a>(argv: &[&'a str]) -> Vec<&'a str> {
+    let told: Vec<&'a str>;
+    let argv = match launcher_script(argv) {
+        Some(script) => {
+            told = [&argv[..1], &argv[script + 1..]].concat();
+            &told[..]
+        }
+        None => argv,
+    };
     let same = || argv.to_vec();
     if !argv.first().is_some_and(|a| Flavor::of(a).resumes()) {
         return same();
@@ -871,6 +903,60 @@ mod tests {
             &[],
         ] {
             assert_eq!(rerun_argv(argv), argv);
+        }
+    }
+
+    #[test]
+    fn cursors_launcher_words_are_not_run_again() {
+        let script = "/h/.local/share/cursor-agent/versions/1/index.js";
+        assert_eq!(
+            rerun_argv(&[
+                "/h/bin/cursor-agent",
+                "--use-system-ca",
+                script,
+                "--trust",
+                "--add-dir",
+                "/d",
+                "--resume",
+                "id",
+            ]),
+            [
+                "/h/bin/cursor-agent",
+                "--trust",
+                "--add-dir",
+                "/d",
+                "--resume",
+                "id"
+            ]
+        );
+        // With no flag for node, by its other name, and with nothing told.
+        assert_eq!(
+            rerun_argv(&["cursor-agent", script, "--resume", "id", "--", "Do it"]),
+            ["cursor-agent", "--resume", "id"]
+        );
+        assert_eq!(
+            rerun_argv(&["/h/bin/agent", "--use-system-ca", script]),
+            ["/h/bin/agent"]
+        );
+        // Someone else's script, or a flag's value: as it was.
+        for argv in [
+            &["node", "--use-system-ca", script][..],
+            &["agent", "--use-system-ca", "/srv/app/index.js"],
+            &["cursor-agent", "--trust", "--add-dir", "/d"],
+        ] {
+            assert_eq!(rerun_argv(argv), argv);
+        }
+    }
+
+    #[test]
+    fn a_saved_line_loses_cursors_launcher_words() {
+        let line = "/h/bin/cursor-agent --use-system-ca '/h/my data/index.js' --add-dir '/d/a b' --resume id";
+        assert_eq!(
+            without_launcher(line).as_deref(),
+            Some("/h/bin/cursor-agent --add-dir '/d/a b' --resume id")
+        );
+        for line in ["cursor-agent --trust --resume id", "npm run dev", ""] {
+            assert_eq!(without_launcher(line), None);
         }
     }
 
