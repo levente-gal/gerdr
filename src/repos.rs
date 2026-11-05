@@ -3588,6 +3588,7 @@ impl Panel {
             | B::AddComment
             | B::FixAllFindings
             | B::PlanFixes
+            | B::MakeFixes
             | B::ReviewFixPlan => Err(Why::other("Nothing to review here")),
             B::All
             | B::CleanOnly

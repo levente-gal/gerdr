@@ -8,6 +8,10 @@
 //! takes, and then makes the fixes, the chat compacted again first as the
 //! plan is in its file. A feature has one round open at a time.
 //!
+//! AI review's findings taken as they are, with no word of the user's, skip
+//! the planning: gerdr writes the plan from them and the fixes go at once
+//! (`review_import::needs_plan`). The rest of the round is the same.
+//!
 //! The plan must speak of everything the round was sent. gerdr lists its
 //! fixes in the build log, apart from the milestones, and the round is over
 //! once every one is ticked: an agent resting before that is told to go on,

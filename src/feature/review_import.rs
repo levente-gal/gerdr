@@ -723,37 +723,90 @@ pub fn location(f: &Finding, multi: bool) -> String {
 /// The findings of `review` to fix, as Markdown for the Build agent of
 /// feature `title` (`multi`: over several repositories), and how many.
 pub fn fixes_markdown(review: &AiReview, title: &str, multi: bool) -> (usize, String) {
-    let fix: Vec<&Finding> = review
-        .findings
-        .iter()
-        .filter(|f| f.state == FindingState::Fix)
-        .collect();
+    let fix = to_fix(review);
     let mut md = format!(
         "# Findings to fix\n\nAI review of \u{201c}{title}\u{201d} found these, and the user wants each one fixed.\n"
     );
     for f in &fix {
         md.push_str(&format!("\n## {}: {}\n\n", f.id, f.title));
-        if f.yours {
-            md.push_str("- Added by the user, not by the review\n");
-        } else {
-            md.push_str(&format!("- Severity: {}\n", f.severity.label()));
-            md.push_str(&format!("- Where: {}\n", location(f, multi)));
-        }
-        if !f.body.is_empty() {
-            md.push_str(&format!("\n{}\n", f.body));
-        }
-        match f.my_fix.as_deref() {
-            Some(fix) => md.push_str(&format!("\nThe fix, as the user wants it: {fix}\n")),
-            None if !f.fix.is_empty() => {
-                md.push_str(&format!("\nSuggested fix: {}\n", f.fix));
-            }
-            None => {}
-        }
-        if !f.note.is_empty() {
-            md.push_str(&format!("\nThe user's comment: {}\n", f.note));
-        }
+        md.push_str(&fix_details(f, multi));
     }
     (fix.len(), md)
+}
+
+/// The findings the user wants fixed.
+fn to_fix(review: &AiReview) -> Vec<&Finding> {
+    (review.findings.iter())
+        .filter(|f| f.state == FindingState::Fix)
+        .collect()
+}
+
+/// What `f` says, under its heading.
+fn fix_details(f: &Finding, multi: bool) -> String {
+    let mut md = String::new();
+    if f.yours {
+        md.push_str("- Added by the user, not by the review\n");
+    } else {
+        md.push_str(&format!("- Severity: {}\n", f.severity.label()));
+        md.push_str(&format!("- Where: {}\n", location(f, multi)));
+    }
+    if !f.body.is_empty() {
+        md.push_str(&format!("\n{}\n", f.body));
+    }
+    match f.my_fix.as_deref() {
+        Some(fix) => md.push_str(&format!("\nThe fix, as the user wants it: {fix}\n")),
+        None if !f.fix.is_empty() => {
+            md.push_str(&format!("\nSuggested fix: {}\n", f.fix));
+        }
+        None => {}
+    }
+    if !f.note.is_empty() {
+        md.push_str(&format!("\nThe user's comment: {}\n", f.note));
+    }
+    md
+}
+
+/// Whether the fixes of `findings` need a plan the user reads first, with
+/// `comments` of theirs in the feature's diff: only what they wrote can be
+/// misunderstood, so an edited fix, a comment on a finding and an item of
+/// their own all do. A reviewer's findings taken as they are say what to fix
+/// as well as a plan would.
+pub fn needs_plan<'a>(findings: impl IntoIterator<Item = &'a Finding>, comments: usize) -> bool {
+    comments > 0
+        || (findings.into_iter()).any(|f| {
+            f.state == FindingState::Fix && (f.yours || f.my_fix.is_some() || !f.note.is_empty())
+        })
+}
+
+/// `text` with no line a Markdown heading: a plan's sections go by those.
+fn no_headings(text: &str) -> String {
+    let heading = |line: &str| {
+        let bare = line.trim_start_matches('#');
+        bare.len() < line.len() && bare.starts_with(' ')
+    };
+    (text.lines())
+        .map(|line| match heading(line) {
+            true => format!("\\{line}"),
+            false => line.to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The fix plan gerdr writes itself for the findings to fix of `review`, when
+/// nothing needs an agent's plan (`needs_plan`): `fix_round::missing` passes
+/// it, and each finding is one thing to tick.
+pub fn fixes_plan(review: &AiReview, title: &str, multi: bool) -> String {
+    let mut md = format!(
+        "# Fix plan of \u{201c}{title}\u{201d}\n\ngerdr wrote this from AI review's findings: the user takes them as they are, with no comment of their own, so no plan was asked for. Find each one's cause in the code before you change it.\n\n## {}\n",
+        super::fix_round::FIXES
+    );
+    for f in to_fix(review) {
+        md.push_str(&format!("\n### {}: {}\n\n", f.id, f.title));
+        md.push_str(&no_headings(&fix_details(f, multi)));
+        md.push('\n');
+    }
+    md
 }
 
 /// What the reviewer's work is read against, off the UI thread (see
@@ -1353,6 +1406,70 @@ mod tests {
         assert_eq!(dismiss_key(S::Dismissed), Ok(Some(Decision::Reopen)));
         assert_eq!(dismiss_key(S::Sent), Err(SENT));
         assert_eq!(dismiss_key(S::Fixed), Err(FIXED));
+    }
+
+    #[test]
+    fn only_the_users_words_need_a_plan() {
+        let fix = |edit: fn(&mut Finding)| {
+            let mut f = Finding {
+                id: "r1-1".into(),
+                state: FindingState::Fix,
+                ..Finding::default()
+            };
+            edit(&mut f);
+            f
+        };
+        assert!(!needs_plan(&[fix(|_| {})], 0));
+        assert!(needs_plan(&[fix(|_| {})], 1), "a comment in the diff");
+        assert!(needs_plan(&[fix(|f| f.note = "Careful".into())], 0));
+        assert!(needs_plan(&[fix(|f| f.my_fix = Some("Mine".into()))], 0));
+        assert!(needs_plan(&[fix(|f| f.yours = true)], 0));
+        // What doesn't go to the agent asks for no plan.
+        let gone = fix(|f| {
+            f.note = "Not this one".into();
+            f.state = FindingState::Dismissed;
+        });
+        assert!(!needs_plan(&[gone, fix(|_| {})], 0));
+    }
+
+    #[test]
+    fn a_plan_written_for_the_findings_has_each_as_a_fix() {
+        let mut review = AiReview::default();
+        let mut one = raw(None, "src/a.rs", Some(12), "Off by one");
+        one.body =
+            "It skips the last row.\n## Not a section\n### Nor a fix\n#[derive(Debug)]".into();
+        one.fix = "Use ..=".into();
+        import(
+            &mut review,
+            1,
+            vec![
+                one,
+                raw(None, "b", None, "Too long"),
+                raw(None, "c", None, "left"),
+            ],
+            &repos(),
+            &diff(),
+        );
+        decide(&mut review, "r1-1", &Decision::Fix).unwrap();
+        decide(&mut review, "r1-2", &Decision::Fix).unwrap();
+        let plan = fixes_plan(&review, "Bulk edit", false);
+        let ids = ["r1-1".to_owned(), "r1-2".to_owned()];
+        assert_eq!(
+            super::super::fix_round::missing(&plan, &ids),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            super::super::fix_round::items(&plan, &ids),
+            ["r1-1: Off by one", "r1-2: Too long"]
+        );
+        for words in [
+            "Suggested fix: Use ..=",
+            "\\## Not a section",
+            "#[derive(Debug)]",
+        ] {
+            assert!(plan.contains(words), "{words}: {plan}");
+        }
+        assert!(!plan.contains("left"), "{plan}");
     }
 
     #[test]

@@ -236,6 +236,8 @@ pub enum Done {
     GoOn,
     /// A feature's diff: send what is to fix to a fix plan.
     PlanFixes,
+    /// The same with no plan (`Gerdr::make_finding_fixes`).
+    MakeFixes,
     /// A feature's diff: mark every undecided finding to fix.
     FixAll,
     /// A feature's diff: ask for a comment on no line or file.
@@ -475,6 +477,7 @@ impl WorktreeDiff {
             B::Approve => self.approve(),
             B::PlanFixes if fe.role() == Role::Review => self.send_back(env),
             B::PlanFixes => Some(Done::PlanFixes),
+            B::MakeFixes => Some(Done::MakeFixes),
             B::FixAllFindings => Some(Done::FixAll),
             B::AddComment => Some(Done::AddComment),
             B::ReviewFixPlan => Some(Done::ReviewFixPlan),
@@ -581,7 +584,7 @@ impl WorktreeDiff {
         let feature_keys;
         let own: &[(&str, &str)] = match (evidence, &self.feature) {
             (_, Some(fe)) => {
-                feature_keys = fe.keys();
+                feature_keys = fe.keys(self.diff.review.own());
                 &feature_keys
             }
             (false, _) if closed => &[
@@ -862,7 +865,7 @@ impl WorktreeDiff {
             .map(|(button, disabled)| Hint {
                 button,
                 label: button.label().into(),
-                key: fe.key_of(button).into(),
+                key: fe.key_of(button, self.diff.review.own()).into(),
                 disabled,
             })
             .collect()
@@ -943,7 +946,8 @@ impl WorktreeDiff {
             use ReposButton as B;
             let button = match sym {
                 _ if enter && mods.ctrl => Some(match (mods.shift, fe.role()) {
-                    (true, _) | (_, Role::Deciding) => B::PlanFixes,
+                    (shift, Role::Deciding) => fe.deciding_button(shift, self.diff.review.own()),
+                    (true, _) => B::PlanFixes,
                     (false, Role::Round(FixPhase::Ready)) => B::ReviewFixPlan,
                     (false, _) => B::Approve,
                 }),
@@ -1065,7 +1069,9 @@ impl WorktreeDiff {
                     B::NextUnviewed => NEXT_UNVIEWED_KEY,
                     B::NextComment => "] / [",
                     button => match self.feature.as_ref() {
-                        Some(fe) if !fe.key_of(button).is_empty() => fe.key_of(button),
+                        Some(fe) if !fe.key_of(button, self.diff.review.own()).is_empty() => {
+                            fe.key_of(button, self.diff.review.own())
+                        }
                         _ => key_name(button),
                     },
                 }
@@ -1096,6 +1102,7 @@ impl WorktreeDiff {
                 ReposHit::Button(
                     button @ (ReposButton::Approve
                     | ReposButton::PlanFixes
+                    | ReposButton::MakeFixes
                     | ReposButton::FixAllFindings
                     | ReposButton::AddComment
                     | ReposButton::ReviewFixPlan),
@@ -1645,6 +1652,10 @@ impl crate::Gerdr {
             }
             Done::PlanFixes => {
                 self.feature_plan_fixes();
+                None
+            }
+            Done::MakeFixes => {
+                self.feature_make_fixes();
                 None
             }
             Done::FixAll => {
