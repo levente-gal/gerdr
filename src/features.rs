@@ -8520,8 +8520,9 @@ fn rail_node(feature: &Feature, stage: Stage, state: &PanelState, now: u64) -> R
     let (mark, line) = match (stage_mark(feature, stage), back) {
         (_, Some(back)) => back.node(),
         // Code changing is what's expected now: "code changed" says so once
-        // the work is over, when it asks for something.
-        (StageMark::Done, _) if turned.is_some() => {
+        // the work is over, when it asks for something. What comes before
+        // Build isn't bound to the code, so it stands as it was.
+        (StageMark::Done, _) if turned.is_some() && stage.bound() => {
             let at = feature.marks.get(&stage).map_or(0, |m| m.at);
             (NodeMark::Ran, projects::ago(now, at))
         }
@@ -12039,7 +12040,7 @@ pub(crate) mod tests {
         assert_eq!(turned_back(&f, running), Some(Stage::AiReview));
         assert_eq!(
             rail_marks(&f, running),
-            [Ran, Ran, Ran, Fixing, Ran, Paused, Later, Later, Later]
+            [Done, Done, Done, Fixing, Ran, Paused, Later, Later, Later]
         );
         // The plan is ready and the agent rests: the line stays, the next move
         // the user's.
@@ -12047,7 +12048,7 @@ pub(crate) mod tests {
         assert_eq!(turned_back(&f, at_rest), Some(Stage::AiReview));
         assert_eq!(
             rail_marks(&f, at_rest),
-            [Ran, Ran, Ran, Ran, Ran, Waiting, Later, Later, Later]
+            [Done, Done, Done, Ran, Ran, Waiting, Later, Later, Later]
         );
         // The fixes change the code: the marks from Build on go. What ran
         // doesn't turn into stages that never did, and when it ran still shows.
@@ -12056,7 +12057,7 @@ pub(crate) mod tests {
         assert_eq!(turned_back(&f, running), Some(Stage::AiReview));
         assert_eq!(
             rail_marks(&f, running),
-            [Ran, Ran, Ran, Current, Ran, Ran, Later, Later, Later]
+            [Done, Done, Done, Current, Ran, Ran, Later, Later, Later]
         );
         let state = PanelState::default();
         let asked = rail_node(
