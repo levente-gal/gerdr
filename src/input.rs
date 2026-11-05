@@ -171,8 +171,6 @@ enum Intercepted {
     Identity(crate::git_identity::IdentityOutcome),
     /// The project commands dialog asked for this.
     Commands(crate::project_commands::CommandsOutcome),
-    /// The manual test sheet asked for this.
-    ManualTest(crate::manual_test::Outcome),
     /// The plan review's sheet asked for this.
     PlanSheet(crate::plan_sheet::Outcome),
     /// The feature panel asked for this.
@@ -201,12 +199,10 @@ pub enum Overlay {
     Identity,
     /// The project commands dialog, with a field per repository.
     Commands,
-    /// The manual test sheet, with a failure's note field.
-    ManualTest,
     /// The plan review's sheet, with its note field.
     PlanSheet,
-    /// The feature panel, which has no field: only its key hints come
-    /// this way.
+    /// The feature tab: its key hints come this way, and what is typed into
+    /// a criterion's note while one is written.
     Features,
 }
 
@@ -273,7 +269,6 @@ fn closing(over: overlay::Overlay) -> Option<Intercepted> {
         O::Scrollback => Intercepted::Scrollback(scrollback::Outcome::Close),
         O::Switcher => Intercepted::CloseSwitcher,
         O::Tasks => Intercepted::Tasks(crate::tasks::Outcome::Close),
-        O::ManualTest => Intercepted::ManualTest(crate::manual_test::Outcome::Close),
         O::PlanSheet => Intercepted::PlanSheet(crate::plan_sheet::Outcome::Close),
         _ => return None,
     })
@@ -351,7 +346,6 @@ impl Gerdr {
                                 overlay::Overlay::FindingDialog => Some(Overlay::FindingDialog),
                                 overlay::Overlay::GitIdentity => Some(Overlay::Identity),
                                 overlay::Overlay::ProjectCommands => Some(Overlay::Commands),
-                                overlay::Overlay::ManualTest => Some(Overlay::ManualTest),
                                 overlay::Overlay::PlanSheet => Some(Overlay::PlanSheet),
                                 _ => None,
                             };
@@ -821,7 +815,6 @@ impl Gerdr {
             O::FindingDialog => self.finding_dialog_click(pos),
             O::GitIdentity => self.identity_click(pos),
             O::ProjectCommands => self.commands_click(pos),
-            O::ManualTest => self.manual_test_click(pos),
             O::PlanSheet => self.plan_sheet_click(pos),
             O::Features => self.feature_panel_click(pos),
             // A click on a toast dismisses it, on its button does what the
@@ -851,17 +844,14 @@ impl Gerdr {
             O::Tooltip | O::ContextMenu => {}
         }
         // A click on a field focuses it, and puts the caret there.
-        if overlay.grabs()
-            && (!overlay.is_dialog()
-                || matches!(
-                    overlay,
-                    O::NewFeature
-                        | O::GitIdentity
-                        | O::ProjectCommands
-                        | O::ManualTest
-                        | O::PlanSheet
-                ))
-        {
+        let takes_field = overlay == O::Features
+            || overlay.grabs()
+                && (!overlay.is_dialog()
+                    || matches!(
+                        overlay,
+                        O::NewFeature | O::GitIdentity | O::ProjectCommands | O::PlanSheet
+                    ));
+        if takes_field {
             self.press_field(pos);
         }
     }
@@ -885,7 +875,6 @@ impl Gerdr {
             O::FindingDialog => self.finding_dialog_controls().iter().any(on),
             O::GitIdentity => self.identity_controls().iter().any(on),
             O::ProjectCommands => self.commands_controls().iter().any(on),
-            O::ManualTest => self.manual_test_controls().iter().any(on),
             O::PlanSheet => self.plan_sheet_controls().iter().any(on),
             O::Features => self.feature_tab_control_at(pos),
             O::ContextMenu => self
@@ -1194,7 +1183,7 @@ impl Gerdr {
         let under = self.pointer_client(pos);
         // Over gerdr's chrome or a divider: gerdr's cursor shape, not a client's.
         if under.is_none() {
-            let over_field = at.is_some_and(overlay::Overlay::grabs)
+            let over_field = at.is_some_and(|o| o.grabs() || o == overlay::Overlay::Features)
                 && self
                     .field_spot()
                     .is_some_and(|field| field.area.to_f64().contains(pos))
@@ -1282,7 +1271,6 @@ impl Gerdr {
             Intercepted::FindingDialog(outcome) => self.apply_finding_dialog(outcome),
             Intercepted::Identity(outcome) => self.apply_identity(outcome),
             Intercepted::Commands(outcome) => self.apply_commands(outcome),
-            Intercepted::ManualTest(outcome) => self.apply_manual_test(outcome),
             Intercepted::PlanSheet(outcome) => self.apply_plan_sheet(outcome),
             Intercepted::Features(outcome) => self.apply_feature_panel(outcome),
         }
@@ -1312,7 +1300,6 @@ impl Gerdr {
             O::FindingDialog => Some(Overlay::FindingDialog),
             O::GitIdentity => Some(Overlay::Identity),
             O::ProjectCommands => Some(Overlay::Commands),
-            O::ManualTest => Some(Overlay::ManualTest),
             O::PlanSheet => Some(Overlay::PlanSheet),
             _ => None,
         }
@@ -1369,10 +1356,9 @@ impl Gerdr {
             Overlay::Commands => self
                 .commands_key(mods, sym, typed)
                 .map(Intercepted::Commands),
-            Overlay::Features => self.feature_panel_key(mods, sym).map(Intercepted::Features),
-            Overlay::ManualTest => self
-                .manual_test_key(mods, sym, typed)
-                .map(Intercepted::ManualTest),
+            Overlay::Features => self
+                .feature_panel_key(mods, sym, typed)
+                .map(Intercepted::Features),
             Overlay::PlanSheet => self
                 .plan_sheet_key(mods, sym, typed)
                 .map(Intercepted::PlanSheet),
@@ -1423,7 +1409,12 @@ impl Gerdr {
                 scale,
             )),
             // Its fields hold lines: it places their carets itself.
-            Overlay::Tasks | Overlay::Features | Overlay::FindingDialog => None,
+            Overlay::Tasks | Overlay::FindingDialog => None,
+            // A criterion's note, while one is written.
+            Overlay::Features => {
+                self.features.panel.as_ref()?.note.as_ref()?;
+                chrome::feature_tab_field(&self.feature_tab_view()?, self.content_rect(), scale)
+            }
             Overlay::NewFeature => Some(chrome::new_feature_field(
                 &self.new_feature_view()?,
                 size,
@@ -1431,9 +1422,6 @@ impl Gerdr {
             )),
             Overlay::Identity => chrome::identity_field(&self.identity_view()?, size, scale),
             Overlay::Commands => chrome::commands_field(&self.commands_view()?, size, scale),
-            Overlay::ManualTest => {
-                chrome::manual_test_field(&self.manual_test_view()?, size, scale)
-            }
             Overlay::PlanSheet => chrome::plan_sheet_field(&self.plan_sheet_view()?, size, scale),
         }
     }
@@ -1461,18 +1449,18 @@ impl Gerdr {
             Overlay::Inbox => self.inbox.field_mut(),
             Overlay::Scrollback => self.scrollback.as_mut()?.field_mut(),
             Overlay::Switcher(_) => Some(self.switcher.as_mut()?.field_mut()),
-            Overlay::Tasks | Overlay::Features => None,
+            Overlay::Tasks => None,
+            Overlay::Features => self
+                .features
+                .panel
+                .as_mut()?
+                .note
+                .as_mut()
+                .map(|(_, field)| field),
             Overlay::NewFeature => Some(&mut self.features.dialog.as_mut()?.title),
             Overlay::FindingDialog => self.finding_dialog_field_mut(),
             Overlay::Identity => self.identity_field_mut(),
             Overlay::Commands => self.commands_field_mut(),
-            Overlay::ManualTest => self
-                .features
-                .manual
-                .as_mut()?
-                .editing
-                .as_mut()
-                .map(|(_, field)| field),
             Overlay::PlanSheet => self
                 .features
                 .plan_sheet

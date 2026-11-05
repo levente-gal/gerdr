@@ -1755,8 +1755,6 @@ fn paint_features(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
     vec![
         hash(painter.new_feature_dialog(&new_feature(), size, scale, p)),
         hash(painter.sidebar_view(&features_sidebar(), (SIDEBAR_W, 520).into(), scale, p)),
-        hash(painter.manual_test_sheet(&manual_test(false), size, scale, p)),
-        hash(painter.manual_test_sheet(&manual_test(true), size, scale, p)),
         hash(painter.plan_sheet(&plan_sheet(false), size, scale, p)),
         hash(painter.plan_sheet(&plan_sheet(true), size, scale, p)),
         hash(painter.plan_sheet(&plan_sheet_narrow(), PLAN_NARROW.into(), scale, p)),
@@ -1772,77 +1770,6 @@ fn paint_features(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
         hash(painter.sidebar_view(&needs_you_sidebar(), (SIDEBAR_W, 520).into(), scale, p)),
         hash(painter.sidebar_view(&no_features_sidebar(), (SIDEBAR_W, 520).into(), scale, p)),
     ]
-}
-
-/// The manual test sheet: a criterion of each kind, one cut short, the
-/// last refusal said; `note`: a failure's note being written.
-fn manual_test(note: bool) -> super::ManualTestView {
-    use super::{ManualMark, ManualRow};
-    let row = |id: &str, text: &str, mark, note: &str, sent| ManualRow {
-        id: id.into(),
-        text: text.into(),
-        mark,
-        note: note.into(),
-        sent,
-    };
-    let hints: &[(&str, &str)] = if note {
-        &[("Enter", "save"), ("Esc", "save")]
-    } else {
-        &[
-            ("Space", "pass"),
-            ("f", "fail\u{2026}"),
-            ("Del", "clear"),
-            ("Ctrl+Enter", "mark passed"),
-            ("Ctrl+Shift+Enter", "plan fixes"),
-            ("F1", "keys"),
-            ("Esc", "close"),
-        ]
-    };
-    super::ManualTestView {
-        title: "Manual test of \u{201c}Bulk export of invoices\u{201d}".into(),
-        sub: "1 of 4 criteria passed \u{b7} 2 failed".into(),
-        rows: vec![
-            row(
-                "AC-1",
-                "Given two invoices, when I export both, then one CSV holds both",
-                ManualMark::Passed,
-                "",
-                false,
-            ),
-            row(
-                "AC-2",
-                "Given no invoices, when I export, then the button is off",
-                ManualMark::Failed,
-                "The button stays on and exports an empty file",
-                true,
-            ),
-            row(
-                "AC-3",
-                "Given a cancelled invoice, when I export, then it is left out of the file and the total",
-                ManualMark::Failed,
-                "It shows with a total of 0",
-                false,
-            ),
-            row(
-                "AC-4",
-                "Given 500 invoices, when I export, then it is done in a second",
-                ManualMark::Untested,
-                "",
-                false,
-            ),
-        ],
-        cursor: if note { 3 } else { 2 },
-        top: 0,
-        editing: note.then(|| (3, Line::from("Takes 4 seconds"))),
-        notice: (!note).then(|| "Not passed yet: AC-2 failed, AC-3 failed, AC-4 not tried".into()),
-        hover: (!note).then_some(super::ManualHit::Fail(3)),
-        primary: Some(super::MANUAL_SEND),
-        keys: None,
-        hints: hints
-            .iter()
-            .map(|(k, w)| ((*k).to_owned(), (*w).to_owned()))
-            .collect(),
-    }
 }
 
 /// A small output, for the plan review's sheet to fit.
@@ -2092,11 +2019,9 @@ fn plan_sheet_empty() -> super::PlanSheetView {
     view
 }
 
-const FEATURES: [&str; 13] = [
+const FEATURES: [&str; 11] = [
     "new_feature",
     "sidebar_features",
-    "manual_test",
-    "manual_test_note",
     "plan_sheet",
     "plan_sheet_note",
     "plan_sheet_narrow",
@@ -2109,13 +2034,11 @@ const FEATURES: [&str; 13] = [
 ];
 
 /// The recorded hashes of `FEATURES`, per case in `CASES`.
-const GOLDEN_FEATURES: [[u64; 13]; 4] = [
+const GOLDEN_FEATURES: [[u64; 11]; 4] = [
     // Dark at 1
     [
         0x73e88729cb0c3112, // new_feature
         0x6e2de5679125e8f8, // sidebar_features
-        0x48cd29190d92c364, // manual_test
-        0x30f2dee311b15b1a, // manual_test_note
         0xce73d235eada39de, // plan_sheet
         0xf0ef6e28af47b05c, // plan_sheet_note
         0x444a60ab9e0f4abf, // plan_sheet_narrow
@@ -2130,8 +2053,6 @@ const GOLDEN_FEATURES: [[u64; 13]; 4] = [
     [
         0xbc9770d9310bd319, // new_feature
         0x663ede1e025ab3c8, // sidebar_features
-        0xc69bc1300217b172, // manual_test
-        0x68136ae2af04111c, // manual_test_note
         0x354b777d647b74ae, // plan_sheet
         0x49003f081deb3c2e, // plan_sheet_note
         0x77de8b18241bb4b7, // plan_sheet_narrow
@@ -2146,8 +2067,6 @@ const GOLDEN_FEATURES: [[u64; 13]; 4] = [
     [
         0xb1780dfd60b1e9a8, // new_feature
         0x56baef2f92e48ad0, // sidebar_features
-        0x3153785246d452e4, // manual_test
-        0x02874c0ce90615f3, // manual_test_note
         0x6da7e766b94ea319, // plan_sheet
         0x6900962e338f6172, // plan_sheet_note
         0x5d1256e75161f348, // plan_sheet_narrow
@@ -2162,8 +2081,6 @@ const GOLDEN_FEATURES: [[u64; 13]; 4] = [
     [
         0x757537a93b40f9fa, // new_feature
         0x240f9f1a7f860b5c, // sidebar_features
-        0x8f9a1607bd3adf41, // manual_test
-        0x877356d1e45a0964, // manual_test_note
         0x5a9fa2f0a7a81443, // plan_sheet
         0x8bc60f688ce6245b, // plan_sheet_note
         0xf99dc433f41c1492, // plan_sheet_narrow
@@ -2204,16 +2121,6 @@ fn dump_features() {
             painter.new_feature_dialog(&new_feature(), size, scale, p),
             px(dialog.size.w + shadow),
         );
-        for (name, note) in [("manual_test", false), ("manual_test_note", true)] {
-            let view = manual_test(note);
-            let panel = super::manual_test_layout(&view, size).panel;
-            dump(
-                &dir,
-                &format!("{name}_{tag}"),
-                painter.manual_test_sheet(&view, size, scale, p),
-                px(panel.size.w + shadow),
-            );
-        }
         for (name, view, output) in [
             ("plan_sheet", plan_sheet(false), FEATURE_OUTPUT),
             ("plan_sheet_note", plan_sheet(true), FEATURE_OUTPUT),
@@ -3698,8 +3605,113 @@ fn feature_tab_rail_wrap() -> super::FeatureTabView {
     view
 }
 
+/// Manual test's page: a criterion of each kind, one long enough to wrap, a
+/// failure sent to Build; `note`: a failure's note being written on its card.
+fn feature_tab_manual_test(note: bool) -> super::FeatureTabView {
+    use super::{
+        ButtonStyle, CheckTone, FindingCard, FindingTag, NodeMark, PageButton, PageSection,
+        StagePage,
+    };
+    use crate::feature::Stage;
+    let mut view = feature_tab();
+    at_stage(&mut view, 7, NodeMark::Current, "1 of 4 passed");
+    let button = |label: &str, style| PageButton {
+        label: label.into(),
+        style,
+    };
+    let mut buttons = vec![
+        button("Plan fixes", ButtonStyle::Primary),
+        button("Mark passed", ButtonStyle::Plain),
+        button("Start sandbox\u{2026}", ButtonStyle::Plain),
+    ];
+    let cards: [(&[&str], FindingTag, [&str; 4]); 4] = [
+        (
+            &["Clear", "Fail\u{2026}"],
+            FindingTag::Passed,
+            [
+                "Given two invoices, when I export both, then one CSV holds both",
+                "",
+                "AC-1",
+                "",
+            ],
+        ),
+        (
+            &["Clear", "Edit note\u{2026}", "Pass"],
+            FindingTag::Failed,
+            [
+                "Given no invoices, when I export, then the button is off",
+                "sent to Build",
+                "AC-2",
+                "What went wrong: The button stays on and exports an empty file",
+            ],
+        ),
+        (
+            &["Clear", "Edit note\u{2026}", "Pass"],
+            FindingTag::Failed,
+            [
+                "Given a cancelled invoice, when I export, then it is left out of the file and \
+                 of the total at the bottom of the page, and the count above the table goes \
+                 down by one",
+                "",
+                "AC-3",
+                "What went wrong: It shows with a total of 0",
+            ],
+        ),
+        (
+            &["Pass", "Fail\u{2026}"],
+            FindingTag::NotRun,
+            [
+                "Given 500 invoices, when I export, then it is done in a second",
+                "",
+                "AC-4",
+                "",
+            ],
+        ),
+    ];
+    let mut sections = vec![PageSection::Lines {
+        label: "Criteria".into(),
+        lines: vec![tab_line("uncommitted changes in api", CheckTone::Note)],
+    }];
+    for (i, (labels, tag, [title, state, place, said])) in cards.into_iter().enumerate() {
+        let at = buttons.len();
+        buttons.extend(labels.iter().map(|l| button(l, ButtonStyle::Plain)));
+        let writing = note && i == 3;
+        sections.push(PageSection::Finding(FindingCard {
+            tag,
+            title: title.into(),
+            state: state.into(),
+            place: place.into(),
+            body: String::new(),
+            preview: Vec::new(),
+            fix: String::new(),
+            note: said.into(),
+            faded: tag == FindingTag::Passed,
+            field: writing.then(|| Line::from("Takes 4 seconds")),
+            selected: i == if note { 3 } else { 2 },
+            buttons: (at..at + labels.len()).collect(),
+        }));
+    }
+    view.page = StagePage {
+        title: Stage::ManualTest.label().into(),
+        about: Stage::ManualTest.about().into(),
+        status: Some(tab_line(
+            "1 of 4 criteria passed \u{b7} 2 failed",
+            CheckTone::Note,
+        )),
+        buttons,
+        sections,
+    };
+    if note {
+        view.hints = [("Enter", "save"), ("Esc", "save")]
+            .iter()
+            .map(|(k, w)| ((*k).to_owned(), (*w).to_owned()))
+            .collect();
+    }
+    view
+}
+
 /// The feature tab's fixtures, by name.
-fn feature_tabs() -> [(&'static str, super::FeatureTabView); 27] {
+fn feature_tabs() -> [(&'static str, super::FeatureTabView); 29] {
     [
         ("tab_build", feature_tab()),
         ("tab_plan_ready", feature_tab_plan_ready()),
@@ -3728,11 +3740,13 @@ fn feature_tabs() -> [(&'static str, super::FeatureTabView); 27] {
         ("tab_start_over", feature_tab_start_over()),
         ("tab_discover_brief", feature_tab_discover_brief()),
         ("tab_plan_long", feature_tab_plan_long()),
+        ("tab_manual_test", feature_tab_manual_test(false)),
+        ("tab_manual_note", feature_tab_manual_test(true)),
     ]
 }
 
 /// Each fixture at the width it shows best at, and Build at all three.
-const TAB_SURFACES: [(&str, i32); 34] = [
+const TAB_SURFACES: [(&str, i32); 36] = [
     ("tab_build", 860),
     ("tab_build", 1180),
     ("tab_build", 1920),
@@ -3767,9 +3781,11 @@ const TAB_SURFACES: [(&str, i32); 34] = [
     ("tab_discover_brief", 1180),
     ("tab_discover_brief", 860),
     ("tab_plan_long", 1180),
+    ("tab_manual_test", 1180),
+    ("tab_manual_note", 860),
 ];
 
-const FEATURE_TAB: [&str; 34] = [
+const FEATURE_TAB: [&str; 36] = [
     "tab_build_860",
     "tab_build_1180",
     "tab_build_1920",
@@ -3804,10 +3820,12 @@ const FEATURE_TAB: [&str; 34] = [
     "tab_discover_brief_1180",
     "tab_discover_brief_860",
     "tab_plan_long_1180",
+    "tab_manual_test_1180",
+    "tab_manual_note_860",
 ];
 
 /// The recorded hashes of `FEATURE_TAB`, per case in `CASES`.
-const GOLDEN_FEATURE_TAB: [[u64; 34]; 4] = [
+const GOLDEN_FEATURE_TAB: [[u64; 36]; 4] = [
     // Dark at 1
     [
         0x332b7228d6306b6d, // tab_build_860
@@ -3844,6 +3862,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 34]; 4] = [
         0x486c632f11ebc34c, // tab_discover_brief_1180
         0xc0d13e4c733a24fd, // tab_discover_brief_860
         0x4729577634bc83f7, // tab_plan_long_1180
+        0x098d46261a41d41a, // tab_manual_test_1180
+        0x449dde71dc52f456, // tab_manual_note_860
     ],
     // Dark at 2
     [
@@ -3881,6 +3901,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 34]; 4] = [
         0x9c01218e31710f3c, // tab_discover_brief_1180
         0xa6e5fd80ec31258c, // tab_discover_brief_860
         0x3f8ffcb4947909c2, // tab_plan_long_1180
+        0x59fbafdaf0af0298, // tab_manual_test_1180
+        0x5c67226e281ec032, // tab_manual_note_860
     ],
     // Light at 1
     [
@@ -3918,6 +3940,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 34]; 4] = [
         0x35987d557948e1c9, // tab_discover_brief_1180
         0x0cdbbd85ba57047c, // tab_discover_brief_860
         0x6ddd399d19c87feb, // tab_plan_long_1180
+        0x015462a67373d01d, // tab_manual_test_1180
+        0x82d62db81cb6795f, // tab_manual_note_860
     ],
     // Light at 2
     [
@@ -3955,6 +3979,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 34]; 4] = [
         0xfa9156bb407b2d46, // tab_discover_brief_1180
         0xb9cde853b7dca0c2, // tab_discover_brief_860
         0xcc98539950d5ff17, // tab_plan_long_1180
+        0x8b786b8d2d0b74d9, // tab_manual_test_1180
+        0x35b6488ccbb08f83, // tab_manual_note_860
     ],
 ];
 
@@ -4076,6 +4102,7 @@ fn tab_findings() -> super::FeatureTabView {
             fix: fix.into(),
             note: note.into(),
             faded: false,
+            field: None,
             selected: i == 1,
             buttons: (at..at + labels.len()).collect(),
         }));
@@ -4192,6 +4219,7 @@ fn tab_checks() -> super::FeatureTabView {
             fix: String::new(),
             note: String::new(),
             faded: tag == FindingTag::Skipped,
+            field: None,
             selected: i == 1,
             buttons: (at..at + labels.len()).collect(),
         }));
