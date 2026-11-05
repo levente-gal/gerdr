@@ -2711,7 +2711,16 @@ fn fix_round_buttons(
         style,
     };
     let mut out = Vec::new();
+    // A fresh agent has its prompt to go first: nothing is planned before.
+    let waits = (feature.runs.get(&Stage::Build)).is_some_and(|run| run.waits_to_send());
+    if waits {
+        out.push((
+            button("Send prompt", ButtonStyle::Primary),
+            PanelOutcome::SendPrompt(Stage::Build),
+        ));
+    }
     match round.phase {
+        _ if waits => {}
         FixPhase::Ready => {
             out.push((
                 button("Review", ButtonStyle::Primary),
@@ -2794,7 +2803,7 @@ pub fn page_actions(
     // Work sent back to the Build agent, seen from the stage the feature is
     // at: what it waits for comes first.
     let back = rework_on(feature, stage, ctx);
-    if back == Some(Rework::Waits) {
+    if back == Some(Rework::Waits) && round.is_none() {
         out.push((
             button("Send prompt", ButtonStyle::Primary),
             PanelOutcome::SendPrompt(Stage::Build),
@@ -5148,6 +5157,15 @@ impl Gerdr {
             resumes = run.resumes();
             self.save_feature(project, slug);
         }
+        // Build is locked by the stage that asked for the fix plan, and what
+        // comes of its chat is the round's to say.
+        let round = stage == Stage::Build
+            && (self.feature(project, slug)).is_some_and(|f| f.fix_round.is_some());
+        if round {
+            return self.show_warning(
+                "The Build agent's tab is gone: a fresh agent takes the fix plan on".to_owned(),
+            );
+        }
         if resumes {
             return self.resume_stage_agent(project, slug, stage);
         }
@@ -6887,7 +6905,11 @@ fn running_for(now: u64, started: u64) -> String {
 /// The short line under current `stage`'s node on the rail.
 fn current_line(feature: &Feature, stage: Stage, state: &LineState, now: u64) -> String {
     if let Some(round) = fix_round_on(feature, stage) {
-        return round.line().to_owned();
+        let waits = (feature.runs.get(&Stage::Build)).is_some_and(|run| run.waits_to_send());
+        return match waits {
+            true => "waiting to send".to_owned(),
+            false => round.line().to_owned(),
+        };
     }
     let run = feature.runs.get(&stage);
     let agent = || match run {
@@ -7145,13 +7167,22 @@ fn file_card(
 
 /// The open fix round's card: what it fixes and how it stands, with the
 /// page's buttons in `actions` that act on the plan.
-fn fix_round_card(round: &FixRound, actions: &[(PageButton, PanelOutcome)]) -> PageSection {
+fn fix_round_card(
+    feature: &Feature,
+    round: &FixRound,
+    actions: &[(PageButton, PanelOutcome)],
+) -> PageSection {
+    let waits = (feature.runs.get(&Stage::Build)).is_some_and(|run| run.waits_to_send());
     let tone = match (round.phase, round.stalled.is_some()) {
+        _ if waits => CheckTone::Note,
         (FixPhase::Ready, _) => CheckTone::Ready,
         (_, true) => CheckTone::Blocker,
         _ => CheckTone::Note,
     };
-    let said = round.stalled.as_deref().unwrap_or(round.line());
+    let said = match waits {
+        true => "waiting for you \u{b7} pick a model and send the prompt",
+        false => round.stalled.as_deref().unwrap_or(round.line()),
+    };
     PageSection::File {
         name: "Fix plan".to_owned(),
         state: line(format!("{} \u{b7} {said}", round.what), tone),
@@ -7441,7 +7472,7 @@ fn stage_page(
         }
     }
     if mark != StageMark::Later {
-        sections.extend(fix_round_on(feature, stage).map(|r| fix_round_card(r, actions)));
+        sections.extend(fix_round_on(feature, stage).map(|r| fix_round_card(feature, r, actions)));
         sections.extend(rework_card(feature, stage, state, actions));
         if let Some(m) = feature.marks.get(&stage).filter(|m| !m.note.is_empty()) {
             sections.push(lines("Note", vec![line(m.note.clone(), CheckTone::Note)]));
@@ -10111,6 +10142,30 @@ pub(crate) mod tests {
         let shown = labels_of(&planning);
         assert!(!shown.contains(&"Make fixes".to_owned()), "{shown:?}");
         assert!(shown.contains(&"Drop plan\u{2026}".to_owned()), "{shown:?}");
+        // A fresh agent held: its prompt goes first, and only one is primary.
+        let mut held = in_round(f.clone(), Stage::Verify, FixPhase::Planning);
+        held.runs.insert(
+            Stage::Build,
+            feature::agents::StageRun {
+                pane: Some("p1".into()),
+                held: true,
+                ..Default::default()
+            },
+        );
+        let actions = page_actions(&held, Stage::Verify, RowCtx::default());
+        let primary: Vec<&str> = (actions.iter())
+            .filter(|(b, _)| b.style == ButtonStyle::Primary)
+            .map(|(b, _)| b.label.as_str())
+            .collect();
+        assert_eq!(primary, ["Send prompt"]);
+        assert_eq!(
+            page_enter(&held, Stage::Verify, RowCtx::default()),
+            Some(PanelOutcome::SendPrompt(Stage::Build))
+        );
+        let sends = (actions.iter())
+            .filter(|(_, o)| *o == PanelOutcome::SendPrompt(Stage::Build))
+            .count();
+        assert_eq!(sends, 1);
         // Stopped without a plan: ask again, or drop it.
         let mut stalled = planning.clone();
         stalled.fix_round.as_mut().unwrap().stalled = Some("it stopped".into());

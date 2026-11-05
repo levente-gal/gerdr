@@ -364,6 +364,13 @@ impl WorktreeDiff {
         Some(Done::Diff(Outcome::Notice(why)))
     }
 
+    /// Whether it shows the fix plan: Make fixes where others have Approve.
+    fn fix_plan(&self) -> bool {
+        self.doc
+            .as_ref()
+            .is_some_and(|d| d.file == DocFile::FixPlan)
+    }
+
     /// Whether its lines take no comments: a commit's, the evidence, a
     /// file whose stage is done.
     fn read_only(&self) -> bool {
@@ -529,6 +536,14 @@ impl WorktreeDiff {
                 ("Esc", "back to the feature"),
                 ("F1", "list the keys"),
                 (PREVIEW_KEY, "go to the next of Preview, Review and Split"),
+            ],
+            (false, _) if self.fix_plan() => &[
+                ("Esc", "back to the feature"),
+                ("F1", "list the keys"),
+                (PREVIEW_KEY, "go between Review and Split"),
+                (APPROVE_KEY, "make the fixes as the file says"),
+                (SEND_BACK_KEY, "send it back to its agent with the comments"),
+                ("Shift+C", "in the review, comment on the whole file"),
             ],
             (false, _) => &[
                 ("Esc", "back to the feature"),
@@ -743,11 +758,7 @@ impl WorktreeDiff {
             }
             return;
         }
-        let go = match self
-            .doc
-            .as_ref()
-            .is_some_and(|d| d.file == DocFile::FixPlan)
-        {
+        let go = match self.fix_plan() {
             true => Hint {
                 label: "Make fixes".to_owned(),
                 ..hint(ReposButton::Approve, APPROVE_KEY)
@@ -924,6 +935,7 @@ impl WorktreeDiff {
                         Some(current) => format!("go to {}", current.label()),
                         None => "go on".into(),
                     },
+                    B::Approve if self.fix_plan() => "make fixes".into(),
                     button => button.label().to_lowercase(),
                 },
                 key: match button {

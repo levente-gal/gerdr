@@ -605,7 +605,7 @@ impl Gerdr {
     /// Ask before dropping the open round of feature `slug`.
     pub(crate) fn ask_drop_fix_plan(&mut self, project: String, slug: String) {
         let body = format!(
-            "What it was to fix comes back where it was, and its agent isn't stopped. {} stays in its folder until the next round.",
+            "What it was to fix comes back where it was, and its agent isn't stopped.\n{} stays in its folder until the next round.",
             fix_round::FILE
         );
         self.ask(
