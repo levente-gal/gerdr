@@ -16,11 +16,12 @@ pub fn builtin(name: &str) -> Option<(&'static str, u32)> {
         "plan-review" => (include_str!("../../assets/prompts/plan-review.md"), 1),
         "plan-review-back" => (include_str!("../../assets/prompts/plan-review-back.md"), 1),
         "plan-final" => (include_str!("../../assets/prompts/plan-final.md"), 1),
-        "build" => (include_str!("../../assets/prompts/build.md"), 5),
+        "build" => (include_str!("../../assets/prompts/build.md"), 6),
         "ai-review" => (include_str!("../../assets/prompts/ai-review.md"), 3),
         "send-fixes" => (include_str!("../../assets/prompts/send-fixes.md"), 2),
-        "fix-plan" => (include_str!("../../assets/prompts/fix-plan.md"), 1),
-        "fix-go" => (include_str!("../../assets/prompts/fix-go.md"), 1),
+        "fix-plan" => (include_str!("../../assets/prompts/fix-plan.md"), 2),
+        "fix-go" => (include_str!("../../assets/prompts/fix-go.md"), 2),
+        "fix-on" => (include_str!("../../assets/prompts/fix-on.md"), 1),
         "continue" => (include_str!("../../assets/prompts/continue.md"), 2),
         "nudge" => (include_str!("../../assets/prompts/nudge.md"), 1),
         "send-back" => (include_str!("../../assets/prompts/send-back.md"), 1),
@@ -81,6 +82,8 @@ mod tests {
             ("fixes", ""),
             ("fixes.path", "/d/bulk-edit/prompts/build-1-findings-1.md"),
             ("fixes.what", "2 findings"),
+            ("fixes.section", "Fix round 1"),
+            ("fixes.left", "r1-2: Off by one; r1-3"),
             ("review.diffs", "- api: `git diff abc123...HEAD`"),
             ("review.sent", ""),
             ("review.dismissed", ""),
@@ -106,6 +109,7 @@ mod tests {
             "build",
             "fix-plan",
             "fix-go",
+            "fix-on",
             "continue",
             "nudge",
             "send-back",
@@ -221,6 +225,7 @@ mod tests {
         assert!(text.contains("## r1-1: Off by one"));
         assert!(text.contains("/d/bulk-edit/prompts/build-1-findings-1.md"));
         assert!(!text.contains("Build the first unticked milestone"));
+        assert!(text.contains("`## Fix round 1`") && text.contains("every one is ticked"));
         let line = render_builtin("send-fixes", &v).unwrap();
         assert!(!line.trim_end().contains('\n'), "{line}");
         assert!(line.contains("2 findings") && line.contains("build-1-findings-1.md"));
@@ -293,6 +298,14 @@ mod tests {
         assert!(!go.trim_end().contains('\n'), "{go}");
         assert!(go.contains("/d/bulk-edit/fix-plan.md"));
         assert!(go.contains("commit") && go.contains("stop"));
+        // Every fix in one go, in its own section: no milestones of them.
+        assert!(go.contains("`## Fix round 1`") && go.contains("every one is ticked"));
+        assert!(go.contains("Do not add them under `## Milestones`"));
+        let on = render_builtin("fix-on", &v).unwrap();
+        assert!(!on.trim_end().contains('\n'), "{on}");
+        assert!(on.starts_with("Please "), "{on}");
+        assert!(on.contains("r1-2: Off by one; r1-3") && on.contains("`## Fix round 1`"));
+        assert!(on.contains("Do not add them under `## Milestones`"));
         let mut v = build_vars(false, "", "");
         v.insert("artifact.path".into(), "/d/bulk-edit/build.md".into());
         let go = render_builtin("continue", &v).unwrap();

@@ -118,7 +118,7 @@ pub struct FeatureOf {
     /// AI review's findings were read in.
     pub ready: bool,
     /// The open fix plan: its phase and how it stands, in words.
-    pub round: Option<(FixPhase, &'static str)>,
+    pub round: Option<(FixPhase, String)>,
     /// Where the user's comments are kept (`COMMENTS`).
     pub comments: PathBuf,
     /// Opened from the feature panel, which Esc goes back to.
@@ -161,7 +161,7 @@ struct Standing {
     stage: Option<Stage>,
     closed: bool,
     ready: bool,
-    round: Option<(FixPhase, &'static str)>,
+    round: Option<(FixPhase, String)>,
 }
 
 impl Standing {
@@ -183,8 +183,8 @@ impl FeatureOf {
         if self.closed {
             return Role::Done;
         }
-        if let Some((phase, _)) = self.round {
-            return Role::Round(phase);
+        if let Some((phase, _)) = &self.round {
+            return Role::Round(*phase);
         }
         match self.stage {
             Some(Stage::CodeReview) => Role::Review,
@@ -1474,11 +1474,11 @@ mod tests {
                 ),
             ]
         );
-        let planning = Some((FixPhase::Planning, "planning fixes"));
+        let planning = Some((FixPhase::Planning, "planning fixes".to_owned()));
         let round = at(Some(Stage::AiReview), true, planning);
         assert_eq!(round.0, Role::Round(FixPhase::Planning));
         assert_eq!(round.2, nothing);
-        let ready = Some((FixPhase::Ready, "fix plan ready"));
+        let ready = Some((FixPhase::Ready, "fix plan ready".to_owned()));
         assert_eq!(
             at(Some(Stage::AiReview), true, ready).2,
             vec![(B::ReviewFixPlan, None)]

@@ -208,6 +208,14 @@ fn fixing_next(worked: bool, status: Option<AgentStatus>, alive: bool) -> Fixing
     }
 }
 
+/// How many milestones the plan a prompt's `values` point at has: none if
+/// it can't be read or has none, as nothing can be said from it then.
+pub(crate) fn planned_milestones(values: &crate::prompts::render::Vars) -> Option<usize> {
+    let plan = std::fs::read_to_string(values.get("plan.path")?).ok()?;
+    let (_, total) = feature::artifacts::milestones(&plan);
+    (total > 0).then_some(total)
+}
+
 /// The toast's button that opens the checks of feature `slug`.
 fn set_checks(project: &str, slug: &str) -> (String, MenuAction) {
     let action = MenuAction::EditCommands {
@@ -708,15 +716,24 @@ impl Gerdr {
                 stage.label()
             ));
         };
+        // Past the plan's milestones what's left is fixes an agent wrote in as
+        // milestones: they go as the round they came from, not one by one.
+        let names = self.projects.names(&feature);
+        let values =
+            feature_agents::vars(&feature, &names, &store::dir(None, project, slug), stage);
+        if feature.fix_round.is_none()
+            && feature.last_fix_round.is_some()
+            && planned_milestones(&values).is_some_and(|n| stop.done as usize >= n)
+        {
+            self.make_fixes(project, slug);
+            return;
+        }
         let alive = run.agent_key().is_some() && self.stage_run_state(&run).1;
         let fresh = feature.fresh_milestones;
         let mut sent = Err(String::from(TAB_GONE));
         if fresh {
             sent = Err(String::from("each milestone gets a fresh agent"));
         } else if alive {
-            let data = store::dir(None, project, slug);
-            let names = self.projects.names(&feature);
-            let values = feature_agents::vars(&feature, &names, &data, stage);
             sent = crate::prompts::render_builtin("continue", &values)
                 .map_err(|e| e.to_string())
                 .and_then(|line| self.tell_build_agent(&feature, line.trim()));
@@ -995,19 +1012,6 @@ impl Gerdr {
         );
     }
 
-    /// The same for an agent found so after a restart, which may have ended
-    /// its work meanwhile: once it rests, its code is probed.
-    pub(crate) fn watch_fixing_found(&mut self, project: &str, slug: &str, agent: AgentKey) {
-        self.features.build.fixing.insert(
-            (project.to_owned(), slug.to_owned()),
-            Fixing {
-                agent,
-                worked: true,
-                since: Instant::now(),
-            },
-        );
-    }
-
     /// The dot of `feature`'s Build agent while it runs again with Build
     /// done: just sent work, or seen at work (what was sent isn't known
     /// after a restart). A line it never acted on stops counting.
@@ -1036,12 +1040,6 @@ impl Gerdr {
         }
     }
 
-    /// Whether the Build agent of feature `slug` is watched as fixing.
-    pub(crate) fn fixing_watched(&self, project: &str, slug: &str) -> bool {
-        let key = (project.to_owned(), slug.to_owned());
-        self.features.build.fixing.contains_key(&key)
-    }
-
     /// Look at the Build agents of `project` fixing what Verify or a review
     /// found: one that worked and rests has its code probed now. Watched
     /// while Build is done and a later stage is current.
@@ -1067,7 +1065,6 @@ impl Gerdr {
             let (status, alive) = self.agent_key_state(&fixing.agent);
             if !verifying {
                 self.features.build.fixing.remove(&key);
-                self.fix_round_fixed(project, slug);
                 continue;
             }
             // Not fixing yet: picking its model isn't work, nor its tab
@@ -1089,7 +1086,6 @@ impl Gerdr {
             match fixing_next(fixing.worked, status, alive) {
                 FixingNext::Wait if lost => {
                     self.features.build.fixing.remove(&key);
-                    self.fix_round_fixed(project, slug);
                     self.probe_feature(project, slug);
                 }
                 FixingNext::Wait => {}
@@ -1100,7 +1096,6 @@ impl Gerdr {
                 }
                 FixingNext::Probe => {
                     self.features.build.fixing.remove(&key);
-                    self.fix_round_fixed(project, slug);
                     self.probe_feature(project, slug);
                 }
             }
