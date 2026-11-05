@@ -1,1 +1,0 @@
-Verify failed: the checks and their output are in {{evidence.path}}. Please read it, fix the cause of each failure, commit the fixes, and stop without starting a new milestone. Do not skip, delete or weaken a check: if a check itself is wrong, say so and stop.

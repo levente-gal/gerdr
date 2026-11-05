@@ -864,11 +864,13 @@ fn detail_view(item: &InboxItem, actions: &[ItemAction], now: u64) -> InboxDetai
                     "Stopped",
                     "Enter opens the feature: settle it with its agent",
                 ),
-                K::VerifyFailed { .. } => {
-                    ("Failed", "Enter opens the feature: fix it, then run checks")
-                }
+                K::VerifyFailed => (
+                    "Failed",
+                    "Enter opens the feature: plan the fixes, or run the checks again",
+                ),
+                K::FixPlan => ("Ready", "Enter opens it to make the fixes or send it back"),
                 K::Findings { open: 0, .. } => {
-                    ("Read", "Enter opens the feature to send the fixes to Build")
+                    ("Read", "Enter opens the feature to plan the fixes")
                 }
                 K::Findings { .. } => ("Read", "Enter shows the diff at the first finding"),
                 K::Suggestions { open: 0 } => {
@@ -2158,20 +2160,23 @@ mod tests {
         let milestone = next(GateKind::Milestone { done: 2, total: 4 });
         assert!(milestone.contains(&field("Next", "Enter opens the feature to continue")));
         assert!(milestone.iter().any(|(k, _)| k == "Stopped"));
-        let failed = next(GateKind::VerifyFailed { fixes: 3 });
+        let plan = next(GateKind::FixPlan);
+        assert!(plan.contains(&field(
+            "Next",
+            "Enter opens it to make the fixes or send it back"
+        )));
+        let failed = next(GateKind::VerifyFailed);
         assert!(failed.contains(&field(
             "Next",
-            "Enter opens the feature: fix it, then run checks"
+            "Enter opens the feature: plan the fixes, or run the checks again"
         )));
         assert!(
             next(GateKind::Findings { open: 2, fix: 0 })
                 .contains(&field("Next", "Enter shows the diff at the first finding"))
         );
         assert!(
-            next(GateKind::Findings { open: 0, fix: 2 }).contains(&field(
-                "Next",
-                "Enter opens the feature to send the fixes to Build"
-            ))
+            next(GateKind::Findings { open: 0, fix: 2 })
+                .contains(&field("Next", "Enter opens the feature to plan the fixes"))
         );
         assert!(
             next(GateKind::CodeReview).contains(&field("Next", "Enter shows the diff to review"))

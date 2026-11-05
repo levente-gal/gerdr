@@ -3,7 +3,7 @@
 //! failure with a note saying what went wrong. The results save as they
 //! are given (`Feature::manual`, see `feature::manual`). Mark passed marks
 //! Manual test done once every criterion passed on the code as it is now;
-//! Send failures sends the failures to the Build agent.
+//! Plan fixes starts a fix round on the failures (see `feature_fix`).
 //!
 //! The model and its keys are here, the painting in `chrome::manual_test`.
 
@@ -75,7 +75,7 @@ fn keys_list() -> Vec<(String, String)> {
         ("f", "mark it failed, saying what went wrong"),
         ("Del", "clear its result"),
         ("Ctrl+Enter", "mark Manual test passed"),
-        ("Ctrl+Shift+Enter", "send the failures to the Build agent"),
+        ("Ctrl+Shift+Enter", "plan the fixes of the failures"),
         ("F1", "hide these keys"),
         ("Esc", "close the sheet"),
     ]
@@ -102,7 +102,7 @@ impl ManualSheet {
                 ("f", "fail\u{2026}"),
                 ("Del", "clear"),
                 ("Ctrl+Enter", "mark passed"),
-                ("Ctrl+Shift+Enter", "send failures"),
+                ("Ctrl+Shift+Enter", "plan fixes"),
                 ("F1", "keys"),
                 ("Esc", "close"),
             ]
@@ -262,7 +262,7 @@ fn left_text(rows: &[ManualRow]) -> String {
 }
 
 /// The sheet's button to press next, of `rows`: Mark passed once every
-/// criterion passed, Send failures while a failure waits to be sent.
+/// criterion passed, Plan fixes while a failure waits to be sent.
 fn primary_button(rows: &[ManualRow]) -> Option<usize> {
     if !rows.is_empty() && rows.iter().all(|r| r.mark == ManualMark::Passed) {
         Some(MANUAL_PASS)
@@ -575,7 +575,9 @@ impl Gerdr {
                     return;
                 }
                 if let Some(f) = self.feature_mut(&project, &slug) {
-                    manual::mark_sent(&mut f.manual, &criteria, Some(&patch));
+                    let checks = manual::mark_sent(&mut f.manual, &criteria, Some(&patch));
+                    let back = crate::feature::fix_round::GiveBack::Manual { checks };
+                    self.fix_round_gives_back(&project, &slug, back);
                 }
                 tracing::info!("sent {n} manual test failures of {project}/{slug} to Build");
                 self.manual_saved(&project, &slug);

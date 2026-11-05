@@ -38,15 +38,21 @@ How to work, every time:
    the checkbox lines of the plan's milestones, unticked (`- [ ] …`), in the
    plan's order. If it is there already, keep it and go on from it: an
    earlier agent, or you in an earlier round, started the build.
-{{#if evidence}}
-3. Verify failed on the code as it is. What failed:
+{{#if fix_plan.path}}
+3. The build is done, and the user wants these {{fixes.what}} fixed:
 
-{{evidence}}
+{{fixes}}
 
-   The checks and their output are in {{evidence.path}}. Read it, fix the
-   cause of each failure, commit the fixes, and stop. Do not start a new
-   milestone. Do not skip, delete or weaken a check: if a check itself is
-   wrong, say so and stop.
+   They are in {{fixes.path}} too. Do not fix them yet, and do not change any
+   code or commit: find the cause of each one, then write a plan for the user
+   to review at exactly this path:
+
+   {{fix_plan.path}}
+
+   Under a `## Fixes` heading, say for each one its cause, what you would
+   change and where, and how you would check it. Add a `## Questions` section
+   for anything the user must settle. Never plan to skip, delete or weaken a
+   check: if a check itself is wrong, say so. Then stop.
 {{else}}
 {{#if fixes}}
 3. The build is done, and the user wants these {{fixes.what}} fixed:

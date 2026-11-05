@@ -1049,10 +1049,6 @@ pub struct VerifyRun {
     /// What failed (`Evidence::failures`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failures: Vec<String>,
-    /// How many failed runs in a row were sent to the Build agent to fix:
-    /// gerdr stops sending after `MAX_FIXES`, and the user decides.
-    #[serde(default)]
-    pub fixes: u32,
     /// Its checks, each in its terminal.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub checks: Vec<CheckRun>,
@@ -1114,8 +1110,18 @@ impl CheckRun {
     }
 }
 
-/// How many failed Verify runs in a row gerdr sends to the Build agent.
-pub const MAX_FIXES: u32 = 3;
+/// What failed in `run` for the Build agent to fix: none while it runs, if
+/// it passed, or if a check was cut short, which says nothing of the code.
+pub fn to_fix(run: &VerifyRun) -> Option<Vec<String>> {
+    let cut = (run.checks.iter()).any(|c| c.outcome.as_ref().is_some_and(|o| o.interrupted));
+    if run.passed != Some(false) || run.finished.is_none() || cut {
+        return None;
+    }
+    Some(match run.failures.is_empty() {
+        true => vec![format!("see {EVIDENCE}")],
+        false => run.failures.clone(),
+    })
+}
 
 #[cfg(test)]
 mod tests {

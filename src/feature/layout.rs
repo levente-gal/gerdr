@@ -1404,6 +1404,8 @@ mod tests {
             plan_review: None,
             viewed: Default::default(),
             manual: None,
+            fix_round: None,
+            fix_rounds: 0,
             history: Vec::new(),
         }
     }

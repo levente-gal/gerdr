@@ -796,19 +796,21 @@ fn gate_words(gate: &Gate) -> (String, String, Option<&'static str>) {
             "settle it with its agent".to_owned(),
             crate::feature::artifacts::name(Stage::Build),
         ),
-        GateKind::VerifyFailed { fixes } => (
-            match fixes {
-                1 => format!("Verify of “{title}” failed once"),
-                n => format!("Verify of “{title}” failed {n} times"),
-            },
-            "fix it, then run checks".to_owned(),
+        GateKind::VerifyFailed => (
+            format!("Verify of “{title}” failed"),
+            "plan the fixes, or run the checks again".to_owned(),
             Some(crate::feature::verify::EVIDENCE),
+        ),
+        GateKind::FixPlan => (
+            format!("The fix plan of “{title}” is ready to review"),
+            "review it, then make the fixes".to_owned(),
+            Some(crate::feature::fix_round::FILE),
         ),
         GateKind::Findings { open, fix } => {
             let (n, what, next) = if open > 0 {
                 (open, "to decide", "decide them")
             } else {
-                (fix, "to send to Build", "send them to Build")
+                (fix, "to fix", "plan the fixes")
             };
             let findings = crate::features::plural(n as usize, "finding");
             (
@@ -1472,8 +1474,8 @@ mod tests {
         assert_eq!(
             gate(GateKind::Findings { open: 0, fix: 1 }),
             line(
-                "AI review of “log-in title”: 1 finding to send to Build",
-                "p1 name · send them to Build"
+                "AI review of “log-in title”: 1 finding to fix",
+                "p1 name · plan the fixes"
             )
         );
         assert_eq!(
@@ -1515,7 +1517,7 @@ mod tests {
         let mut milestone = gate_of("p1", "log-in", Stage::Build, 990_000);
         milestone.gate.kind = GateKind::Milestone { done: 2, total: 4 };
         let mut failed = gate_of("p2", "export", Stage::Verify, 995_000);
-        failed.gate.kind = GateKind::VerifyFailed { fixes: 3 };
+        failed.gate.kind = GateKind::VerifyFailed;
         let items = gate_items(&[failed.clone(), milestone.clone()], 1_000_000);
         let lines: Vec<_> = items
             .iter()
@@ -1529,8 +1531,8 @@ mod tests {
                     "p1 name · continue"
                 ),
                 (
-                    "Verify of “export title” failed 3 times",
-                    "p2 name · fix it, then run checks"
+                    "Verify of “export title” failed",
+                    "p2 name · plan the fixes, or run the checks again"
                 ),
             ]
         );
@@ -1542,7 +1544,7 @@ mod tests {
                 project: "p2".into(),
                 slug: "export".into(),
                 stage: Stage::Verify,
-                kind: GateKind::VerifyFailed { fixes: 3 },
+                kind: GateKind::VerifyFailed,
             }
         );
         assert!(matches!(
@@ -1558,11 +1560,20 @@ mod tests {
         let next = gate_items(&[next], 1_000_000);
         assert_eq!(next[0].id, items[0].id);
         assert_ne!(next[0].fingerprint, items[0].fingerprint);
-        failed.gate.kind = GateKind::VerifyFailed { fixes: 1 };
+        // A fix plan goes to its own place, and says what it waits for.
+        failed.gate.kind = GateKind::FixPlan;
+        let plan = gate_items(&[failed], 1_000_000);
         assert_eq!(
-            gate_items(&[failed], 1_000_000)[0].title,
-            "Verify of “export title” failed once"
+            plan[0].title,
+            "The fix plan of “export title” is ready to review"
         );
+        assert!(matches!(
+            plan[0].detail,
+            Detail::Gate {
+                file: Some("fix-plan.md"),
+                ..
+            }
+        ));
     }
 
     #[test]

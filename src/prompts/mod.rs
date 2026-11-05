@@ -16,10 +16,11 @@ pub fn builtin(name: &str) -> Option<(&'static str, u32)> {
         "plan-review" => (include_str!("../../assets/prompts/plan-review.md"), 1),
         "plan-review-back" => (include_str!("../../assets/prompts/plan-review-back.md"), 1),
         "plan-final" => (include_str!("../../assets/prompts/plan-final.md"), 1),
-        "build" => (include_str!("../../assets/prompts/build.md"), 4),
+        "build" => (include_str!("../../assets/prompts/build.md"), 5),
         "ai-review" => (include_str!("../../assets/prompts/ai-review.md"), 3),
         "send-fixes" => (include_str!("../../assets/prompts/send-fixes.md"), 2),
-        "fix" => (include_str!("../../assets/prompts/fix.md"), 2),
+        "fix-plan" => (include_str!("../../assets/prompts/fix-plan.md"), 1),
+        "fix-go" => (include_str!("../../assets/prompts/fix-go.md"), 1),
         "continue" => (include_str!("../../assets/prompts/continue.md"), 2),
         "nudge" => (include_str!("../../assets/prompts/nudge.md"), 1),
         "send-back" => (include_str!("../../assets/prompts/send-back.md"), 1),
@@ -67,6 +68,7 @@ mod tests {
             ("changes_code", ""),
             ("checks", ""),
             ("evidence", evidence),
+            ("fix_plan.path", ""),
             ("branch", "feature/bulk-edit"),
             ("multi_repo", if multi { "yes" } else { "" }),
             ("repos", "- api\n- web"),
@@ -102,7 +104,8 @@ mod tests {
             "plan-review-back",
             "plan-final",
             "build",
-            "fix",
+            "fix-plan",
+            "fix-go",
             "continue",
             "nudge",
             "send-back",
@@ -201,22 +204,11 @@ mod tests {
             assert!(one.contains(words), "{words}: {one}");
         }
         assert!(!one.contains("context only"));
-        assert!(!one.contains("Verify failed"));
+        assert!(!one.contains("do not change any\n   code"));
         assert!(!one.contains("comments on the build"));
 
-        let many = build(
-            true,
-            "Name the endpoint bulk.",
-            "api: `npm test` exited with 1",
-        );
+        let many = build(true, "Name the endpoint bulk.", "");
         assert!(many.contains("“context only” are there to read: never edit them"));
-        assert!(many.contains("Verify failed on the code"));
-        assert!(many.contains("api: `npm test` exited with 1"));
-        assert!(many.contains("/d/bulk-edit/evidence.md"));
-        assert!(many.contains("fix the\n   cause of each failure, commit the fixes, and stop"));
-        assert!(many.contains("Do not skip, delete or weaken a check"));
-        // A fix round builds no milestone.
-        assert!(!many.contains("Build the first unticked milestone"));
         assert!(many.contains("Name the endpoint bulk."));
     }
 
@@ -272,12 +264,35 @@ mod tests {
     }
 
     #[test]
-    fn fix_and_continue_are_one_line() {
+    fn a_fresh_agent_plans_the_fixes_and_changes_no_code() {
+        let mut v = build_vars(false, "", "");
+        v.insert("fixes".into(), "## r1-1: Off by one".into());
+        v.insert("fix_plan.path".into(), "/d/bulk-edit/fix-plan.md".into());
+        let text = render_builtin("build", &v).unwrap();
+        assert!(text.contains("## r1-1: Off by one"));
+        assert!(text.contains("/d/bulk-edit/fix-plan.md"));
+        assert!(text.contains("do not change any\n   code or commit"));
+        assert!(text.contains("`## Fixes`"));
+        // Fixing and building are for later.
+        assert!(!text.contains("Fix the cause of each one"));
+        assert!(!text.contains("Build the first unticked milestone"));
+    }
+
+    #[test]
+    fn fix_lines_and_continue_are_one_line() {
         // Typed into a live terminal, where a newline is Enter.
-        let fix = render_builtin("fix", &build_vars(true, "", "x")).unwrap();
-        assert!(!fix.trim_end().contains('\n'), "{fix}");
-        assert!(fix.contains("Verify failed") && fix.contains("/d/bulk-edit/evidence.md"));
-        assert!(fix.contains("commit") && fix.contains("stop"));
+        let mut v = build_vars(true, "", "");
+        v.insert("fix_plan.path".into(), "/d/bulk-edit/fix-plan.md".into());
+        let plan = render_builtin("fix-plan", &v).unwrap();
+        assert!(!plan.trim_end().contains('\n'), "{plan}");
+        assert!(plan.starts_with("Please "), "{plan}");
+        assert!(plan.contains("/d/bulk-edit/fix-plan.md") && plan.contains("`## Fixes`"));
+        assert!(plan.contains("build-1-findings-1.md") && plan.contains("2 findings"));
+        assert!(plan.contains("do not change any code and do not commit"));
+        let go = render_builtin("fix-go", &v).unwrap();
+        assert!(!go.trim_end().contains('\n'), "{go}");
+        assert!(go.contains("/d/bulk-edit/fix-plan.md"));
+        assert!(go.contains("commit") && go.contains("stop"));
         let mut v = build_vars(false, "", "");
         v.insert("artifact.path".into(), "/d/bulk-edit/build.md".into());
         let go = render_builtin("continue", &v).unwrap();

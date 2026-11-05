@@ -127,6 +127,7 @@ impl DocOf {
     pub fn tab_title(&self) -> &'static str {
         match self.file {
             DocFile::Evidence => "Evidence",
+            DocFile::FixPlan => "Fix plan",
             DocFile::Stage(Stage::Plan) => "Plan",
             DocFile::Stage(Stage::PlanReview) => "Final plan",
             DocFile::Stage(_) => "Brief",
@@ -742,10 +743,21 @@ impl WorktreeDiff {
             }
             return;
         }
+        let go = match self
+            .doc
+            .as_ref()
+            .is_some_and(|d| d.file == DocFile::FixPlan)
+        {
+            true => Hint {
+                label: "Make fixes".to_owned(),
+                ..hint(ReposButton::Approve, APPROVE_KEY)
+            },
+            false => hint(ReposButton::Approve, APPROVE_KEY),
+        };
         view.title_buttons.extend([
             hint(ReposButton::CommentFile, "Shift+C"),
             hint(ReposButton::SendBack, SEND_BACK_KEY),
-            hint(ReposButton::Approve, APPROVE_KEY),
+            go,
         ]);
     }
 

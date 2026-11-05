@@ -1,6 +1,6 @@
 //! The manual test sheet (see `crate::manual_test`): a feature's
 //! acceptance criteria, one row each with its mark, its id, its text and a
-//! Fail button, a failure's note under its row, then Close, Send failures
+//! Fail button, a failure's note under its row, then Close, Plan fixes
 //! and Mark passed over the key hints.
 
 use super::{
@@ -38,7 +38,7 @@ const MARGIN: i32 = 40;
 /// The label of a row's Fail button: a note to write follows.
 pub const FAIL_LABEL: &str = "Fail\u{2026}";
 /// The sheet's buttons: Close at the left, the others at the right.
-pub const MANUAL_BUTTONS: [&str; 3] = ["Close", "Send failures", "Mark passed"];
+pub const MANUAL_BUTTONS: [&str; 3] = ["Close", "Plan fixes", "Mark passed"];
 pub const MANUAL_CLOSE: usize = 0;
 pub const MANUAL_SEND: usize = 1;
 pub const MANUAL_PASS: usize = 2;
@@ -101,7 +101,7 @@ pub enum ManualHit {
     Fail(usize),
     /// The note field.
     Field,
-    /// Close, Send failures, Mark passed.
+    /// Close, Plan fixes, Mark passed.
     Button(usize),
     Hint(usize),
     /// Somewhere else on it.
@@ -137,7 +137,7 @@ pub struct ManualTestLayout {
     pub keys: Vec<Rect>,
     pub thumb: Option<Thumb>,
     pub notice: Option<Rect>,
-    /// Close, Send failures, Mark passed.
+    /// Close, Plan fixes, Mark passed.
     pub buttons: [Rect; 3],
     pub hints: Vec<(usize, Rect)>,
 }

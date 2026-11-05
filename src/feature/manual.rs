@@ -225,12 +225,12 @@ pub fn failures_markdown(
     (fails.len(), md)
 }
 
-/// Mark the failures not sent yet as sent; how many.
+/// Mark the failures not sent yet as sent: which, by id and text.
 pub fn mark_sent(
     test: &mut Option<ManualTest>,
     criteria: &[Criterion],
     patch: Option<&str>,
-) -> usize {
+) -> Vec<(String, String)> {
     let ids: Vec<(String, String)> = unsent(test.as_ref(), criteria, patch)
         .into_iter()
         .map(|(c, _)| (c.id.clone(), c.text.clone()))
@@ -242,7 +242,16 @@ pub fn mark_sent(
             }
         }
     }
-    ids.len()
+    ids
+}
+
+/// Mark `ids`, by id and text, as not sent: what `mark_sent` did, undone.
+pub fn unmark_sent(test: &mut ManualTest, ids: &[(String, String)]) {
+    for k in &mut test.checks {
+        if ids.iter().any(|(id, text)| *id == k.id && *text == k.text) {
+            k.sent = false;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -316,9 +325,14 @@ mod tests {
         assert!(md.contains("## AC-1: Given a, when b, then c."));
         assert!(md.contains("What went wrong: nothing happens"));
         assert!(!md.contains("AC-2"));
-        assert_eq!(mark_sent(&mut t, &all, Some("p")), 1);
+        let sent = mark_sent(&mut t, &all, Some("p"));
+        assert_eq!(sent.len(), 1);
         assert_eq!(unsent_count(t.as_ref(), &all, Some("p")), 0);
         assert_eq!(counts(t.as_ref(), &all, Some("p")).sent, 1);
+        // A dropped fix plan gives them back, and they can go again.
+        unmark_sent(t.as_mut().unwrap(), &sent);
+        assert_eq!(unsent_count(t.as_ref(), &all, Some("p")), 1);
+        assert_eq!(mark_sent(&mut t, &all, Some("p")), sent);
         // The same note keeps it sent; a new note makes it unsent.
         set(&mut t, &a, "p", Verdict::Fail, "nothing happens", 2);
         assert_eq!(unsent_count(t.as_ref(), &all, Some("p")), 0);

@@ -735,6 +735,12 @@ impl Gerdr {
             Target::Gate {
                 project,
                 slug,
+                kind: crate::feature_agents::GateKind::FixPlan,
+                ..
+            } => self.open_doc_tab(&project, &slug, DocFile::FixPlan),
+            Target::Gate {
+                project,
+                slug,
                 stage,
                 ..
             } => self.open_feature_at(&project, &slug, stage),

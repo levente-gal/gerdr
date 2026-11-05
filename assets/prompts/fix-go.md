@@ -1,0 +1,1 @@
+The user approved the fix plan: please read {{fix_plan.path}} again, as they may have edited it, make those fixes, commit them, and stop without starting a new milestone. Do not skip, delete or weaken a check to do it. If the plan turns out wrong, say so and stop.

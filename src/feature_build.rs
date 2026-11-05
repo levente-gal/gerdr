@@ -16,11 +16,10 @@
 //! Verify: the store file's checks (see `feature::verify`) run in terminals
 //! (see `feature_checks`), and are waited for off the
 //! thread; `evidence.md` is written either way. Passing marks Verify done
-//! on the code the checks ran on. Failing sends the failures to the Build
-//! agent, in its tab while it lives, else to a fresh one, up to
-//! `verify::MAX_FIXES` times in a row; its fix commits send the feature
-//! back to Build (the patch watch), and the loop goes round. A project
-//! without checks keeps Verify a manual mark.
+//! on the code the checks ran on. Failing waits for the user, who runs the
+//! checks again or plans the fixes (see `feature_fix`); the fixes' commits
+//! send the feature back to Build (the patch watch), and the loop goes
+//! round. A project without checks keeps Verify a manual mark.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -81,6 +80,8 @@ pub(crate) struct BuildState {
     /// Features whose Build agent was sent Verify's failures to fix: the
     /// code is probed once it rests, not at the patch watch's next round.
     fixing: BTreeMap<Key, Fixing>,
+    /// The open fix rounds' watches (see `feature_fix`).
+    pub(crate) fix_watches: BTreeMap<Key, crate::feature_fix::FixWatch>,
 }
 
 /// A Build agent fixing Verify's failures.
@@ -180,28 +181,6 @@ impl BuildCheck {
             )),
             Self::Stray(_) | Self::Holds => None,
         }
-    }
-}
-
-/// What gerdr does with Verify's failures, `fixes` sent in a row so far,
-/// the Build agent's tab there (`alive`) or not.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Fix {
-    /// Send them into its tab.
-    Send,
-    /// Start a fresh Build agent with them.
-    Launch,
-    /// Enough: the user decides (the Verify gate).
-    Stop,
-}
-
-fn fix_step(fixes: u32, alive: bool) -> Fix {
-    if fixes >= verify::MAX_FIXES {
-        Fix::Stop
-    } else if alive {
-        Fix::Send
-    } else {
-        Fix::Launch
     }
 }
 
@@ -843,7 +822,6 @@ impl Gerdr {
         let now = feature::now();
         let last = feature.verify.as_ref();
         let n = last.map_or(1, |v| v.n + 1);
-        let fixes = last.map_or(0, |v| v.fixes);
         // What the last run said stays until its code is read: then the
         // checks that are not run again keep it, on the same code.
         let (checks, patch) =
@@ -852,7 +830,6 @@ impl Gerdr {
             f.verify = Some(VerifyRun {
                 n,
                 started: now,
-                fixes,
                 checks,
                 patch,
                 skipped,
@@ -916,7 +893,6 @@ impl Gerdr {
                 check.outcome = None;
             }
         }
-        let fixes = run.fixes;
         let first = failures
             .first()
             .cloned()
@@ -943,9 +919,6 @@ impl Gerdr {
             }
             if let Some(f) = self.feature_mut(project, slug) {
                 f.tick(now, "gerdr", Some(&evidence.patch));
-                if let Some(v) = f.verify.as_mut() {
-                    v.fixes = 0;
-                }
                 self.save_feature(project, slug);
             }
             self.features.build.fixing.remove(&key);
@@ -962,88 +935,7 @@ impl Gerdr {
                 "The checks of \u{201c}{title}\u{201d} didn't all run: `{command}` {how}"
             ));
         }
-        let alive = (snapshot.runs.get(&Stage::Build))
-            .is_some_and(|r| r.agent_key().is_some() && self.stage_run_state(r).1);
-        match fix_step(fixes, alive) {
-            Fix::Stop => self.show_warning(format!(
-                "Verify of \u{201c}{title}\u{201d} failed again: {first}; gerdr stopped sending it to the Build agent after {fixes} fixes"
-            )),
-            step => self.send_fix(project, slug, &snapshot, &failures, step == Fix::Send),
-        }
-    }
-
-    /// Send Verify's `failures` of `feature` to its Build agent: into its
-    /// tab (`into_pane`), else to a fresh agent.
-    fn send_fix(
-        &mut self,
-        project: &str,
-        slug: &str,
-        feature: &Feature,
-        failures: &[String],
-        into_pane: bool,
-    ) {
-        let title = &feature.title;
-        let data = store::dir(None, project, slug);
-        let names = self.projects.names(feature);
-        let joined = failures.join("\n");
-        let mut sent = Err(String::from(TAB_GONE));
-        if into_pane {
-            let mut values = feature_agents::vars(feature, &names, &data, Stage::Build);
-            values.insert("evidence".into(), joined.clone());
-            sent = crate::prompts::render_builtin("fix", &values)
-                .map_err(|e| e.to_string())
-                .and_then(|line| self.tell_build_agent(feature, line.trim()));
-            if let Err(why) = &sent {
-                tracing::warn!("sending Verify's failures of {project}/{slug} to its agent: {why}");
-            }
-        }
-        let fresh = sent.is_err();
-        if fresh {
-            // Build stays done while Verify is current: the fix's commits
-            // send the feature back to Build, and its agent's run is seen
-            // as back there.
-            let build_at = feature.marks.get(&Stage::Build).map(|m| m.at);
-            if !self.launch_stage_agent(project, slug, Stage::Build, &[("evidence", joined)]) {
-                return;
-            }
-            if let Some(r) = self
-                .feature_mut(project, slug)
-                .and_then(|f| f.runs.get_mut(&Stage::Build))
-            {
-                r.ready = build_at;
-                self.save_feature(project, slug);
-            }
-        }
-        let now = feature::now();
-        let Some(f) = self.feature_mut(project, slug) else {
-            return;
-        };
-        let fixes = f.verify.as_mut().map_or(0, |v| {
-            v.fixes += 1;
-            v.fixes
-        });
-        let agent = f.runs.get(&Stage::Build).and_then(|r| r.agent_key());
-        f.log(
-            now,
-            format!(
-                "Verify's failures sent to the Build agent (fix {fixes} of {})",
-                verify::MAX_FIXES
-            ),
-        );
-        self.save_feature(project, slug);
-        if let Some(agent) = agent {
-            self.watch_fixing(project, slug, agent);
-        }
-        let first = failures.first().map_or("see evidence.md", String::as_str);
-        let to = if fresh {
-            FRESH_BUILD_AGENT
-        } else {
-            "the Build agent"
-        };
-        self.show_warning(format!(
-            "Verify of \u{201c}{title}\u{201d} failed: {first}; sent to {to} (fix {fixes} of {})",
-            verify::MAX_FIXES
-        ));
+        self.show_warning(format!("Verify of \u{201c}{title}\u{201d} failed: {first}"));
     }
 
     /// Verify of feature `slug` (`title`) passed: AI review's agent starts
@@ -1082,6 +974,19 @@ impl Gerdr {
         );
     }
 
+    /// The same for an agent found so after a restart, which may have ended
+    /// its work meanwhile: once it rests, its code is probed.
+    pub(crate) fn watch_fixing_found(&mut self, project: &str, slug: &str, agent: AgentKey) {
+        self.features.build.fixing.insert(
+            (project.to_owned(), slug.to_owned()),
+            Fixing {
+                agent,
+                worked: true,
+                since: Instant::now(),
+            },
+        );
+    }
+
     /// The dot of `feature`'s Build agent while it runs again with Build
     /// done: just sent work, or seen at work (what was sent isn't known
     /// after a restart). A line it never acted on stops counting.
@@ -1110,6 +1015,12 @@ impl Gerdr {
         }
     }
 
+    /// Whether the Build agent of feature `slug` is watched as fixing.
+    pub(crate) fn fixing_watched(&self, project: &str, slug: &str) -> bool {
+        let key = (project.to_owned(), slug.to_owned());
+        self.features.build.fixing.contains_key(&key)
+    }
+
     /// Look at the Build agents of `project` fixing what Verify or a review
     /// found: one that worked and rests has its code probed now. Watched
     /// while Build is done and a later stage is current.
@@ -1135,6 +1046,7 @@ impl Gerdr {
             let (status, alive) = self.agent_key_state(&fixing.agent);
             if !verifying {
                 self.features.build.fixing.remove(&key);
+                self.fix_round_fixed(project, slug);
                 continue;
             }
             // Not fixing yet: picking its model isn't work, nor its tab
@@ -1149,7 +1061,16 @@ impl Gerdr {
                 }
                 continue;
             }
+            // Not seen at work in time: it was too quick to see, or it never
+            // took the line. Reading its code tells either way, and a fix
+            // round must not wait on it for good.
+            let lost = !fixing.worked && fixing.since.elapsed() >= FIXING_STARTS;
             match fixing_next(fixing.worked, status, alive) {
+                FixingNext::Wait if lost => {
+                    self.features.build.fixing.remove(&key);
+                    self.fix_round_fixed(project, slug);
+                    self.probe_feature(project, slug);
+                }
                 FixingNext::Wait => {}
                 FixingNext::Worked => {
                     if let Some(f) = self.features.build.fixing.get_mut(&key) {
@@ -1158,6 +1079,7 @@ impl Gerdr {
                 }
                 FixingNext::Probe => {
                     self.features.build.fixing.remove(&key);
+                    self.fix_round_fixed(project, slug);
                     self.probe_feature(project, slug);
                 }
             }
@@ -1261,14 +1183,6 @@ mod tests {
         assert!(!refuse(&mut w, (1, 1), "no commits yet".into()));
         assert!(refuse(&mut w, (1, 1), "uncommitted changes in api".into()));
         assert!(refuse(&mut w, (2, 1), "uncommitted changes in api".into()));
-    }
-
-    #[test]
-    fn failures_go_to_the_pane_else_a_fresh_agent_until_too_many() {
-        assert_eq!(fix_step(0, true), Fix::Send);
-        assert_eq!(fix_step(0, false), Fix::Launch);
-        assert_eq!(fix_step(verify::MAX_FIXES - 1, false), Fix::Launch);
-        assert_eq!(fix_step(verify::MAX_FIXES, true), Fix::Stop);
     }
 
     #[test]
