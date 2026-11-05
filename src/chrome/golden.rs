@@ -1189,6 +1189,21 @@ fn dump_overlays() {
             painter.confirm_dialog(&confirm, (800, 600).into(), scale, p),
             px(confirm_w + shadow),
         );
+        let finish = super::ConfirmView {
+            title: "Finish \u{201c}Bulk export\u{201d} without shipping?".into(),
+            body: "Nothing gets pushed or merged\nfeature/bulk-export and its worktree stay\n\
+                   api has uncommitted changes"
+                .into(),
+            go: "Finish",
+            selected: 1,
+            hover: None,
+        };
+        dump(
+            &dir,
+            &format!("confirm_finish_{tag}"),
+            painter.confirm_dialog(&finish, (800, 600).into(), scale, p),
+            px(confirm_w + shadow),
+        );
         let row = |path: &str, files, link, clash| super::CheckoutRow {
             path: path.into(),
             files,
@@ -3027,6 +3042,38 @@ fn feature_tab_verify_failed() -> super::FeatureTabView {
     view
 }
 
+/// Verify with its checks running: Stop all at the title's right, and only
+/// what works during a run beside it.
+fn feature_tab_verify_running() -> super::FeatureTabView {
+    use super::{ButtonStyle, CheckTone, NodeMark, PageButton, PageSection, StagePage};
+    use crate::feature::Stage;
+    let mut view = feature_tab();
+    at_stage(&mut view, 4, NodeMark::Current, "running");
+    let button = |label: &str, style| PageButton {
+        label: label.into(),
+        style,
+    };
+    view.page = StagePage {
+        title: "Verify".into(),
+        about: Stage::Verify.about().into(),
+        status: Some(tab_line(
+            "Verifying \u{201c}Export\u{201d}",
+            CheckTone::Note,
+        )),
+        buttons: vec![
+            button("Stop all", ButtonStyle::Plain),
+            button("Evidence", ButtonStyle::Plain),
+            button("Setup log", ButtonStyle::Quiet),
+            button("Commands\u{2026}", ButtonStyle::Quiet),
+        ],
+        sections: vec![PageSection::Lines {
+            label: "Checks \u{b7} 1 passed \u{b7} 2 running".into(),
+            lines: Vec::new(),
+        }],
+    };
+    view
+}
+
 /// `view` with the flow back at Build from stage `from`: what was done ran once.
 fn turned_back(view: &mut super::FeatureTabView, from: usize) {
     use super::NodeMark;
@@ -3083,7 +3130,7 @@ fn feature_tab_ship_blocked() -> super::FeatureTabView {
     view.page = StagePage {
         title: "Ship".into(),
         about: Stage::Ship.about().into(),
-        status: Some(tab_line("2 things stop shipping", CheckTone::Blocker)),
+        status: None,
         buttons: vec![PageButton {
             label: "Ship\u{2026}".into(),
             style: ButtonStyle::Off,
@@ -3096,15 +3143,196 @@ fn feature_tab_ship_blocked() -> super::FeatureTabView {
                     tab_line("web is 3 commits behind dev", CheckTone::Blocker),
                 ],
             },
-            PageSection::Lines {
-                label: "How it ships".into(),
-                lines: vec![
-                    tab_line("api: squash into main", CheckTone::Note),
-                    tab_line("web: pull request into dev", CheckTone::Note),
+            PageSection::ShipGroup(ship_group(
+                "api \u{b7} 4 commits \u{b7} +120 \u{2212}8 \u{b7} into main",
+                1,
+                0,
+                None,
+                vec![
+                    ship_row(
+                        1,
+                        "Merge into main in ~/code/api",
+                        Some(("api's main worktree is on dev: switch it to main", true)),
+                        true,
+                    ),
+                    ship_row(2, "Push main to origin", None, false),
                 ],
-            },
+            )),
+            PageSection::ShipGroup(ship_afterwards(3, false)),
         ],
     };
+    view
+}
+
+/// A group of the Ship page: `row` its choice's row, `on` its way, if any.
+fn ship_group(
+    head: &str,
+    on: usize,
+    row: usize,
+    note: Option<&str>,
+    steps: Vec<super::ShipStepRow>,
+) -> super::ShipGroup {
+    super::ShipGroup {
+        head: head.into(),
+        caption: false,
+        route: Some(super::ShipRouteRow { row, on }),
+        note: note.map(str::to_owned),
+        steps,
+        selected: None,
+    }
+}
+
+/// A tick box of the Ship page: `detail` says what goes under it and whether
+/// that is why it can't run.
+fn ship_row(
+    row: usize,
+    label: &str,
+    detail: Option<(&str, bool)>,
+    ticked: bool,
+) -> super::ShipStepRow {
+    use super::CheckTone;
+    let tone = |blocks| match blocks {
+        true => CheckTone::Blocker,
+        false => CheckTone::Note,
+    };
+    super::ShipStepRow {
+        row,
+        label: label.into(),
+        detail: detail.map(|(text, blocks)| tab_line(text, tone(blocks))),
+        ticked,
+        off: detail.is_some_and(|(_, blocks)| blocks),
+    }
+}
+
+/// What follows shipping, from row `row` on; `removable`: all of it merges.
+fn ship_afterwards(row: usize, removable: bool) -> super::ShipGroup {
+    let mut remove = ship_row(
+        row + 1,
+        "Remove the worktree and branch",
+        (!removable).then_some(("Only when every repository merges into its base", false)),
+        false,
+    );
+    remove.off = !removable;
+    super::ShipGroup {
+        head: "Afterwards".into(),
+        caption: true,
+        route: None,
+        note: None,
+        steps: vec![ship_row(row, "Close the workspace", None, true), remove],
+        selected: None,
+    }
+}
+
+/// Ship with three repositories going three ways, the keyboard on a tick box
+/// and the pointer on a choice.
+fn feature_tab_ship_routes() -> super::FeatureTabView {
+    use super::{ButtonStyle, CheckTone, NodeMark, PageButton, PageSection, StagePage};
+    use crate::feature::Stage;
+    let mut view = feature_tab();
+    at_stage(&mut view, 8, NodeMark::Current, "ready to ship");
+    let mut api = ship_group(
+        "api \u{b7} 12 commits \u{b7} +420 \u{2212}80 \u{b7} into main",
+        0,
+        0,
+        None,
+        vec![
+            ship_row(1, "Push feature/bulk-export to origin", None, true),
+            ship_row(2, "Open a pull request into main", None, false),
+        ],
+    );
+    api.selected = Some(3);
+    let mut web = ship_group(
+        "web \u{b7} 3 commits \u{b7} +40 \u{2212}2 \u{b7} into dev",
+        1,
+        3,
+        None,
+        vec![
+            ship_row(
+                4,
+                "Merge into dev in ~/code/web",
+                Some(("Squash; you edit the message in a tab", false)),
+                true,
+            ),
+            ship_row(5, "Push dev to origin", None, true),
+        ],
+    );
+    web.selected = Some(3);
+    let mut docs = ship_group(
+        "docs \u{b7} 1 commit \u{b7} +4 \u{2212}0 \u{b7} into main",
+        2,
+        6,
+        Some("Nothing gets pushed or merged"),
+        Vec::new(),
+    );
+    docs.selected = Some(3);
+    view.page = StagePage {
+        title: "Ship".into(),
+        about: Stage::Ship.about().into(),
+        status: None,
+        buttons: vec![
+            PageButton {
+                label: "Ship\u{2026}".into(),
+                style: ButtonStyle::Primary,
+            },
+            PageButton {
+                label: "Start over\u{2026}".into(),
+                style: ButtonStyle::Quiet,
+            },
+        ],
+        sections: vec![
+            PageSection::Lines {
+                label: "Ship check".into(),
+                lines: vec![
+                    tab_line("Ready to ship", CheckTone::Ready),
+                    tab_line("lib has no commits: left out", CheckTone::Note),
+                ],
+            },
+            PageSection::ShipGroup(api),
+            PageSection::ShipGroup(web),
+            PageSection::ShipGroup(docs),
+            PageSection::ShipGroup(ship_afterwards(7, false)),
+        ],
+    };
+    view.hover = Some(super::FeatureTabHit::ShipRoute(3, 2));
+    view
+}
+
+/// Ship with no step ticked: it finishes, the pointer on a tick box.
+fn feature_tab_ship_finish() -> super::FeatureTabView {
+    use super::{ButtonStyle, CheckTone, NodeMark, PageButton, PageSection, StagePage};
+    use crate::feature::Stage;
+    let mut view = feature_tab();
+    at_stage(&mut view, 8, NodeMark::Current, "nothing ticked");
+    view.page = StagePage {
+        title: "Ship".into(),
+        about: Stage::Ship.about().into(),
+        status: None,
+        buttons: vec![PageButton {
+            label: "Finish\u{2026}".into(),
+            style: ButtonStyle::Primary,
+        }],
+        sections: vec![
+            PageSection::Lines {
+                label: "Ship check".into(),
+                lines: vec![tab_line(
+                    "No step ticked: Finish ends it without shipping",
+                    CheckTone::Note,
+                )],
+            },
+            PageSection::ShipGroup(ship_group(
+                "api \u{b7} 12 commits \u{b7} +420 \u{2212}80 \u{b7} into main",
+                0,
+                0,
+                None,
+                vec![
+                    ship_row(1, "Push feature/bulk-export to origin", None, false),
+                    ship_row(2, "Open a pull request into main", None, false),
+                ],
+            )),
+            PageSection::ShipGroup(ship_afterwards(3, false)),
+        ],
+    };
+    view.hover = Some(super::FeatureTabHit::ShipRow(1));
     view
 }
 
@@ -3848,13 +4076,16 @@ fn feature_tab_manual_test(note: bool) -> super::FeatureTabView {
 }
 
 /// The feature tab's fixtures, by name.
-fn feature_tabs() -> [(&'static str, super::FeatureTabView); 33] {
+fn feature_tabs() -> [(&'static str, super::FeatureTabView); 36] {
     [
         ("tab_build", feature_tab()),
         ("tab_plan_ready", feature_tab_plan_ready()),
         ("tab_verify_failed", feature_tab_verify_failed()),
+        ("tab_verify_running", feature_tab_verify_running()),
         ("tab_fix_plan", feature_tab_fix_plan()),
         ("tab_ship_blocked", feature_tab_ship_blocked()),
+        ("tab_ship_routes", feature_tab_ship_routes()),
+        ("tab_ship_finish", feature_tab_ship_finish()),
         ("tab_done", feature_tab_done()),
         ("tab_later", feature_tab_later()),
         ("tab_repos", feature_tab_repos()),
@@ -3896,14 +4127,18 @@ fn feature_tabs() -> [(&'static str, super::FeatureTabView); 33] {
 }
 
 /// Each fixture at the width it shows best at, and Build at all three.
-const TAB_SURFACES: [(&str, i32); 41] = [
+const TAB_SURFACES: [(&str, i32); 45] = [
     ("tab_build", 860),
     ("tab_build", 1180),
     ("tab_build", 1920),
     ("tab_plan_ready", 1180),
     ("tab_verify_failed", 1920),
+    ("tab_verify_running", 1180),
     ("tab_fix_plan", 860),
     ("tab_ship_blocked", 1180),
+    ("tab_ship_routes", 1180),
+    ("tab_ship_routes", 860),
+    ("tab_ship_finish", 1180),
     ("tab_done", 1920),
     ("tab_later", 860),
     ("tab_repos", 1180),
@@ -3940,14 +4175,18 @@ const TAB_SURFACES: [(&str, i32); 41] = [
     ("tab_review_rounds", 1180),
 ];
 
-const FEATURE_TAB: [&str; 41] = [
+const FEATURE_TAB: [&str; 45] = [
     "tab_build_860",
     "tab_build_1180",
     "tab_build_1920",
     "tab_plan_ready_1180",
     "tab_verify_failed_1920",
+    "tab_verify_running_1180",
     "tab_fix_plan_860",
     "tab_ship_blocked_1180",
+    "tab_ship_routes_1180",
+    "tab_ship_routes_860",
+    "tab_ship_finish_1180",
     "tab_done_1920",
     "tab_later_860",
     "tab_repos_1180",
@@ -3985,7 +4224,7 @@ const FEATURE_TAB: [&str; 41] = [
 ];
 
 /// The recorded hashes of `FEATURE_TAB`, per case in `CASES`.
-const GOLDEN_FEATURE_TAB: [[u64; 41]; 4] = [
+const GOLDEN_FEATURE_TAB: [[u64; 45]; 4] = [
     // Dark at 1
     [
         0xeea32b2dde14dbad, // tab_build_860
@@ -3993,14 +4232,18 @@ const GOLDEN_FEATURE_TAB: [[u64; 41]; 4] = [
         0xb11ebf406b566492, // tab_build_1920
         0xc1278577e56967a2, // tab_plan_ready_1180
         0xe6c0a8c26922ed70, // tab_verify_failed_1920
+        0xceae385ff36ea8be, // tab_verify_running_1180
         0xcfa2304e2991cdb2, // tab_fix_plan_860
-        0xda2f67811915ebb5, // tab_ship_blocked_1180
-        0xb00d310aa6adb0d9, // tab_done_1920
+        0x6de8a0eac93ce4f5, // tab_ship_blocked_1180
+        0x2edecb062d49117f, // tab_ship_routes_1180
+        0x3f5339a12a61cb80, // tab_ship_routes_860
+        0x02f7b20f388ca2bc, // tab_ship_finish_1180
+        0x5f710b55ff8ddf37, // tab_done_1920
         0x79859ce0110dd014, // tab_later_860
         0xecff1bca29656dcf, // tab_repos_1180
         0xb6bf09b42c8d84e5, // tab_unfolded_860
         0xc495b855ac66b078, // tab_unfolded_1920
-        0x511f6c31cccf4a64, // tab_shipped_1180
+        0x1bd1244a05d242d2, // tab_shipped_1180
         0xb7dc1edba91c95e9, // tab_repos_failed_1180
         0xc05ed6e05e8ab3ac, // tab_repos_error_860
         0xf94f331bc90122bd, // tab_more_repos_850
@@ -4037,14 +4280,18 @@ const GOLDEN_FEATURE_TAB: [[u64; 41]; 4] = [
         0x660947552ac763a4, // tab_build_1920
         0xd87da022045a2089, // tab_plan_ready_1180
         0xf060b4300361f434, // tab_verify_failed_1920
+        0x52a5d1ad9dffb717, // tab_verify_running_1180
         0x2b5e9dfc632c57ab, // tab_fix_plan_860
-        0x379ac8c5c1f05b18, // tab_ship_blocked_1180
-        0x4d6a8809d7dc9a9c, // tab_done_1920
+        0x3682781e663407d6, // tab_ship_blocked_1180
+        0x6d13e764c0086335, // tab_ship_routes_1180
+        0xe158f1612e5697d6, // tab_ship_routes_860
+        0x788a810c80dfa9ce, // tab_ship_finish_1180
+        0xa06ece6f31277e6c, // tab_done_1920
         0x7f7a0f831318ce48, // tab_later_860
         0x44ae908968e139c9, // tab_repos_1180
         0x4349aaaef31b566e, // tab_unfolded_860
         0x984b3863f4cde86f, // tab_unfolded_1920
-        0x69efa34e31fd40cc, // tab_shipped_1180
+        0x9b43722f12b2c738, // tab_shipped_1180
         0xedb7b9c5256b4829, // tab_repos_failed_1180
         0xc4fa857cf9c8c67c, // tab_repos_error_860
         0x5fbbc687c679f8bb, // tab_more_repos_850
@@ -4081,14 +4328,18 @@ const GOLDEN_FEATURE_TAB: [[u64; 41]; 4] = [
         0x557a17f598e51cdb, // tab_build_1920
         0x1012d3e4c8093338, // tab_plan_ready_1180
         0x1446efceff05c114, // tab_verify_failed_1920
+        0xb9f4489df4669939, // tab_verify_running_1180
         0x62301cd9e6720d86, // tab_fix_plan_860
-        0x728ffdd46aefb765, // tab_ship_blocked_1180
-        0x3a0d691064b8edaa, // tab_done_1920
+        0xd59032fb24dd423d, // tab_ship_blocked_1180
+        0x646e11565c9de4e0, // tab_ship_routes_1180
+        0xcfa8d9cdcb053e97, // tab_ship_routes_860
+        0xed0d4cc441828359, // tab_ship_finish_1180
+        0x667c5c9a3d2413e7, // tab_done_1920
         0x7363a198125024f1, // tab_later_860
         0xf9f35e244e66aa33, // tab_repos_1180
         0x19e6bce146728062, // tab_unfolded_860
         0xe253c3b2f1a9ff59, // tab_unfolded_1920
-        0x48407a8b2da2c5f8, // tab_shipped_1180
+        0xfe3e5d891d83a895, // tab_shipped_1180
         0x5f455a44a9f6214a, // tab_repos_failed_1180
         0x007f09e869bff64b, // tab_repos_error_860
         0x1d160effcecae7b6, // tab_more_repos_850
@@ -4125,14 +4376,18 @@ const GOLDEN_FEATURE_TAB: [[u64; 41]; 4] = [
         0xe39bc64536ad6f24, // tab_build_1920
         0x9ba97245b9431b1d, // tab_plan_ready_1180
         0xc0a2a63f8deefc51, // tab_verify_failed_1920
+        0x1d13b9e1270b0ffc, // tab_verify_running_1180
         0xd8498ded5b6ad42e, // tab_fix_plan_860
-        0x4cdb0a59ab2de925, // tab_ship_blocked_1180
-        0x3ac49d19c9d059e8, // tab_done_1920
+        0xd30b4e34c27b0745, // tab_ship_blocked_1180
+        0xfd28fbee1d3acdfc, // tab_ship_routes_1180
+        0xeb73d57026c5fc93, // tab_ship_routes_860
+        0x4f0e14cfecc7b814, // tab_ship_finish_1180
+        0xcf3c3a2235a70b9c, // tab_done_1920
         0x866b8ccb16687686, // tab_later_860
         0xe70e9f8146cd5206, // tab_repos_1180
         0xe1a01a189c787e42, // tab_unfolded_860
         0xde7558c397f7decc, // tab_unfolded_1920
-        0x16e2078fa994edfe, // tab_shipped_1180
+        0xb2ee50aa0a138d22, // tab_shipped_1180
         0xb33da6a05465fc9d, // tab_repos_failed_1180
         0xb0315864662e7e30, // tab_repos_error_860
         0xc4ba8dc90fb67e42, // tab_more_repos_850

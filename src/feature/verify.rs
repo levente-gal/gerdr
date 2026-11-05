@@ -449,6 +449,7 @@ pub fn plan(
                 last_secs: was.and_then(CheckRun::took_last),
                 queued: false,
                 began: None,
+                stopping: false,
             }
         })
         .collect()
@@ -1154,6 +1155,10 @@ pub struct CheckRun {
     /// When it started (unix seconds), past any wait.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub began: Option<u64>,
+    /// The user stopped it and it hasn't ended yet. Not saved: what would
+    /// stop it goes with the gerdr that was told, so a new one offers Stop.
+    #[serde(skip)]
+    pub stopping: bool,
 }
 
 impl CheckRun {

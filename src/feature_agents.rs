@@ -1324,6 +1324,9 @@ impl Gerdr {
             let title = &feature.title;
             return self.show_warning(format!("\u{201c}{title}\u{201d} isn't open"));
         }
+        if let Some(why) = self.checks_refusal(project, slug) {
+            return self.show_warning(why);
+        }
         let pane = (run.pane.clone()).filter(|p| self.herdr_pane_place(p).is_some());
         let sent = match &pane {
             None => Err(String::from(crate::feature_build::TAB_GONE)),
@@ -2016,7 +2019,7 @@ impl Gerdr {
         let sent = match &agent {
             agents::AgentKey::T3(id) => self.t3_send(id, &text),
             agents::AgentKey::Herdr(pane) => match self.herdr.as_mut() {
-                Some(herdr) => herdr.send_line(pane, &text),
+                Some(herdr) => herdr.send_agent_line(pane, &text),
                 None => Err("herdr isn't connected".into()),
             },
             _ => return,

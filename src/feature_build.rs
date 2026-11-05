@@ -40,6 +40,7 @@ use crate::{
         verify::{self, Evidence, Scope, VerifyRun},
     },
     feature_agents::{self, Stamp, Watch},
+    feature_checks::checks_running,
     features::{Busy, Done, Job},
     herdr::AgentStatus,
     menu::MenuAction,
@@ -376,9 +377,42 @@ impl Gerdr {
         self.start_setup_of(project, slug, None)
     }
 
+    /// Whether feature `slug`'s checks are being started or run.
+    fn checks_under_way(&self, project: &str, slug: &str) -> bool {
+        let key = (project.to_owned(), slug.to_owned());
+        self.features.build.verifying.contains(&key)
+            || (self.feature(project, slug)).is_some_and(checks_running)
+    }
+
+    /// Whether feature `slug`'s checks are being started or run, or wait for
+    /// its setup to end.
+    pub(crate) fn checks_busy(&self, project: &str, slug: &str) -> bool {
+        let key = (project.to_owned(), slug.to_owned());
+        self.features.build.pending_verify.contains(&key) || self.checks_under_way(project, slug)
+    }
+
+    /// Why the code of feature `slug` can't be changed now: its checks run on
+    /// it. A key can still ask, with no button showing.
+    pub(crate) fn checks_refusal(&self, project: &str, slug: &str) -> Option<String> {
+        let title = &self.feature(project, slug)?.title;
+        if self.checks_under_way(project, slug) {
+            return Some(format!(
+                "The checks of \u{201c}{title}\u{201d} are running: stop them first"
+            ));
+        }
+        self.checks_busy(project, slug).then(|| {
+            format!("The checks of \u{201c}{title}\u{201d} run once its setup ends: wait for them")
+        })
+    }
+
     /// The user asks to set feature `slug` up again: it copies what is
     /// missing and runs the commands. It says so when it can't start.
     pub(crate) fn set_up_again(&mut self, project: &str, slug: &str) {
+        if self.checks_under_way(project, slug)
+            && let Some(why) = self.checks_refusal(project, slug)
+        {
+            return self.show_warning(why);
+        }
         if self.start_setup(project, slug) {
             return;
         }
@@ -653,7 +687,7 @@ impl Gerdr {
         if crate::prepare::step(&herdr.process_info(pane)) != crate::prepare::Step::Busy {
             return Err(AGENT_QUIT.into());
         }
-        herdr.send_line(pane, line)
+        herdr.send_agent_line(pane, line)
     }
 
     /// The Build of feature `slug` holds on the code `patch`: marked done

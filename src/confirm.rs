@@ -122,6 +122,9 @@ pub enum Then {
         slug: String,
         stage: crate::feature::Stage,
     },
+    /// Finish this project's feature with nothing shipped (see
+    /// `Gerdr::finish_unshipped`).
+    FinishFeature { project: String, slug: String },
 }
 
 /// The confirm dialog's state, while it is open.
@@ -285,6 +288,35 @@ fn import_question(name: &str) -> (String, String) {
     (
         format!("Close {name} to import its profile?"),
         format!("{name} quits, its profile comes in, then it starts again"),
+    )
+}
+
+/// What the dialog finishing feature `title` unshipped says: what becomes of
+/// its branch and `worktrees` of them (`removing`: they go, as ticked), and
+/// `dirty`, its repositories with uncommitted changes.
+fn finish_question(
+    title: &str,
+    branch: &str,
+    (worktrees, removing): (usize, bool),
+    dirty: &[String],
+) -> (String, String) {
+    let those = match worktrees {
+        1 => "its worktree",
+        _ => "its worktrees",
+    };
+    let then = if removing { "go" } else { "stay" };
+    let mut body = format!("Nothing gets pushed or merged\n{branch} and {those} {then}");
+    match dirty {
+        [] => {}
+        [one] => body.push_str(&format!("\n{one} has uncommitted changes")),
+        many => body.push_str(&format!(
+            "\n{} repositories have uncommitted changes",
+            many.len()
+        )),
+    }
+    (
+        format!("Finish \u{201c}{title}\u{201d} without shipping?"),
+        body,
     )
 }
 
@@ -508,6 +540,25 @@ impl Gerdr {
         self.ask(question, body, "Ship", Then::ShipFeature { project, slug });
     }
 
+    /// Ask before finishing feature `slug` of `project` with nothing shipped
+    /// (see `Gerdr::finish_unshipped`).
+    pub fn ask_finish(
+        &mut self,
+        project: String,
+        slug: String,
+        (title, branch): (&str, &str),
+        worktrees: (usize, bool),
+        dirty: &[String],
+    ) {
+        let (question, body) = finish_question(title, branch, worktrees, dirty);
+        self.ask(
+            question,
+            body,
+            "Finish",
+            Then::FinishFeature { project, slug },
+        );
+    }
+
     /// Ask before approving `stage` of feature `slug` while `count` review
     /// comments on its file `name` are unsent (see `Gerdr::doc_approve`).
     pub fn ask_approve_unsent(
@@ -643,6 +694,7 @@ impl Gerdr {
                 to_context,
             } => self.remove_repos(&project, &slug, &keys, force, to_context),
             Then::ShipFeature { project, slug } => self.ship_feature(&project, &slug),
+            Then::FinishFeature { project, slug } => self.finish_unshipped(&project, &slug),
             Then::MakeFixes { project, slug } => self.make_fixes_now(&project, &slug),
             Then::DropFixPlan { project, slug } => self.drop_fix_plan(&project, &slug),
             Then::ApproveStage {
@@ -858,6 +910,32 @@ mod tests {
             "From feature/bulk-export:\nPush api\nOpen a pull request"
         );
         assert_eq!(chrome::confirm_body_lines(&body), 3);
+    }
+
+    #[test]
+    fn finishing_unshipped_says_what_stays() {
+        let (title, body) = finish_question("Bulk export", "feature/bulk", (1, false), &[]);
+        assert_eq!(
+            title,
+            "Finish \u{201c}Bulk export\u{201d} without shipping?"
+        );
+        assert_eq!(
+            body,
+            "Nothing gets pushed or merged\nfeature/bulk and its worktree stay"
+        );
+        let dirty = ["api".to_owned()];
+        let (_, body) = finish_question("Bulk export", "feature/bulk", (2, false), &dirty);
+        assert_eq!(
+            body,
+            "Nothing gets pushed or merged\nfeature/bulk and its worktrees stay\n\
+             api has uncommitted changes"
+        );
+        let dirty = ["api".to_owned(), "web".to_owned()];
+        let (_, body) = finish_question("Bulk export", "feature/bulk", (2, false), &dirty);
+        assert!(body.ends_with("2 repositories have uncommitted changes"));
+        let (_, body) = finish_question("Bulk export", "feature/bulk", (1, true), &[]);
+        assert!(body.ends_with("feature/bulk and its worktree go"), "{body}");
+        assert_eq!(chrome::confirm_body_lines(&body), 2);
     }
 
     #[test]

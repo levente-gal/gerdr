@@ -36,6 +36,9 @@ const PROBE: Duration = Duration::from_millis(300);
 const STARTUP: Duration = Duration::from_secs(5);
 /// A request that takes longer is logged: it may hold up the compositor.
 const SLOW_CALL: Duration = Duration::from_millis(10);
+/// How long after typing a line to an agent to press Enter. Any gap did on
+/// Cursor when probed; this one leaves room for a busy machine.
+const ENTER_AFTER: Duration = Duration::from_millis(50);
 /// herdr's caller context, inherited when gerdr itself runs inside herdr; it
 /// must not leak into gerdr's children.
 const INHERITED: [&str; 7] = [
@@ -936,6 +939,18 @@ impl Herdr {
         .map(drop)
     }
 
+    /// Type `text` into the agent CLI running in pane `pane_id`, then press
+    /// Enter apart from it. Cursor (2026.11.05, probed) keeps text and Enter
+    /// that come together in its input box and runs nothing.
+    pub fn send_agent_line(&mut self, pane_id: &str, text: &str) -> Result<(), String> {
+        self.call(
+            "pane.send_input",
+            json!({"pane_id": pane_id, "text": text, "keys": []}),
+        )?;
+        std::thread::sleep(ENTER_AFTER);
+        self.send_keys(pane_id, &["Enter"])
+    }
+
     /// Press `keys` in pane `pane_id`, as typed on its terminal: `ctrl+c`
     /// interrupts what runs in it. herdr checks every key before sending
     /// any, and refuses one it doesn't know (`invalid_key`).
@@ -1373,6 +1388,63 @@ fn moved_pane(mut result: Value) -> Result<PaneInfo, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_agents_line_gets_its_enter_apart() {
+        use std::os::unix::net::UnixListener;
+        let socket = std::env::temp_dir().join(format!("gerdr-enter-{}", std::process::id()));
+        let _ = std::fs::remove_file(&socket);
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = std::thread::spawn(move || {
+            let mut asked = Vec::new();
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut line = String::new();
+                BufReader::new(&stream).read_line(&mut line).unwrap();
+                let request: Value = serde_json::from_str(&line).unwrap();
+                stream.write_all(b"{\"result\":{}}\n").unwrap();
+                asked.push((request, Instant::now()));
+            }
+            asked
+        });
+
+        let sent = Herdr::on_socket(socket.clone()).send_agent_line("p1", "/summarize");
+        let _ = std::fs::remove_file(&socket);
+        sent.unwrap();
+
+        let asked = server.join().unwrap();
+        let (typed, typed_at) = &asked[0];
+        assert_eq!(typed["method"], "pane.send_input");
+        assert_eq!(typed["params"]["text"], "/summarize");
+        assert_eq!(typed["params"]["keys"], json!([]));
+        let (enter, enter_at) = &asked[1];
+        assert_eq!(enter["method"], "pane.send_keys");
+        assert_eq!(enter["params"]["pane_id"], "p1");
+        assert_eq!(enter["params"]["keys"], json!(["Enter"]));
+        assert!(*enter_at - *typed_at >= ENTER_AFTER);
+    }
+
+    /// Needs a scratch herdr server and `GERDR_PROBE_PANE` running a CLI
+    /// agent at its empty prompt. Cursor in an empty chat says "No active
+    /// session." and clears the box; the line left there is the bug.
+    #[test]
+    #[ignore]
+    fn probe_an_agent_runs_the_line() {
+        let socket = PathBuf::from(std::env::var("GERDR_PROBE_SOCKET").unwrap());
+        let pane = std::env::var("GERDR_PROBE_PANE").unwrap();
+        let line = std::env::var("GERDR_PROBE_LINE").unwrap_or_else(|_| "/summarize".into());
+        let mut herdr = Herdr::on_socket(socket);
+        herdr.send_agent_line(&pane, &line).unwrap();
+        std::thread::sleep(Duration::from_secs(2));
+        let screen = herdr
+            .call("pane.read", json!({"pane_id": pane, "source": "visible"}))
+            .unwrap();
+        let text = screen["read"]["text"].as_str().unwrap_or_default();
+        assert!(
+            !text.lines().any(|l| l.trim().starts_with("\u{2192} /")),
+            "{text}"
+        );
+    }
 
     #[test]
     fn closed_workspaces_are_reported() {
