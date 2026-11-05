@@ -358,6 +358,14 @@ pub struct Feature {
     /// Its worktrees' setup, once started (see `setup`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub setup: Option<setup::SetupRun>,
+    /// Checks only this feature runs, after the ones it borrows from its
+    /// projects, by `Repo::key` or `verify::FEATURE_KEY` (see `verify`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub checks: BTreeMap<String, Vec<String>>,
+    /// The borrowed checks this feature doesn't run, by the same keys, as
+    /// the project words them (see `verify`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub skip_checks: BTreeMap<String, Vec<String>>,
     /// Its latest Verify run (see `verify`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verify: Option<verify::VerifyRun>,
@@ -951,6 +959,8 @@ pub(crate) mod tests {
             stage_agents: Default::default(),
             fresh_milestones: false,
             setup: None,
+            checks: Default::default(),
+            skip_checks: Default::default(),
             verify: None,
             review: None,
             plan_review: None,
@@ -1027,6 +1037,8 @@ pub(crate) mod tests {
             stage_agents: BTreeMap::new(),
             fresh_milestones: false,
             setup: None,
+            checks: Default::default(),
+            skip_checks: Default::default(),
             verify: None,
             review: None,
             plan_review: None,

@@ -2628,6 +2628,7 @@ pub fn page_actions(
 fn commands_tab(stage: Stage) -> CommandsTab {
     match stage {
         Stage::Build => CommandsTab::Setup,
+        Stage::Verify => CommandsTab::Feature,
         _ => CommandsTab::Checks,
     }
 }
@@ -3126,6 +3127,13 @@ impl Gerdr {
     pub(crate) fn feature_docs(&self, project: &str, slug: &str) -> Option<&feature::page::Docs> {
         let key = (project.to_owned(), slug.to_owned());
         Some(&self.features.probes.get(&key)?.last.as_ref()?.docs)
+    }
+
+    /// What the Verify page says of `feature`'s next run (see
+    /// `verify::planned`).
+    fn planned_checks(&self, feature: &Feature) -> Vec<String> {
+        let config = self.projects.workflows(feature, |w| w.verify.clone());
+        feature::verify::planned(feature, &config)
     }
 
     /// What the panel's rows need of `feature` besides it.
@@ -4097,6 +4105,8 @@ impl Gerdr {
             stage_agents: Default::default(),
             fresh_milestones: false,
             setup: None,
+            checks: Default::default(),
+            skip_checks: Default::default(),
             verify: None,
             review: None,
             plan_review: None,
@@ -4687,6 +4697,16 @@ impl Gerdr {
             }
             PanelOutcome::SendFixes => self.send_findings(&project, &slug),
             PanelOutcome::EditCommands(tab) => {
+                // With nothing to run yet, what a repository always checks
+                // comes first.
+                let any = (self.feature(&project, &slug))
+                    .is_some_and(|f| {
+                        self.row_ctx(f).checks || !f.checks.is_empty() || !f.skip_checks.is_empty()
+                    });
+                let tab = match tab {
+                    CommandsTab::Feature if !any => CommandsTab::Checks,
+                    tab => tab,
+                };
                 self.open_project_commands(&project, Some(&slug), tab);
             }
             PanelOutcome::DecideFinding(id, decision) => {
@@ -5825,6 +5845,7 @@ impl Gerdr {
             ctx: self.row_ctx(feature),
             setup: doing(Job::Setup),
             verify: doing(Job::Verify),
+            planned: self.planned_checks(feature),
             code_review: self.code_review_line(&panel.project, &panel.slug),
             picks: self.chips_of(&panel.project, &panel.slug, panel.page_stage(feature)),
             manual: manual_counts.map(crate::manual_test::counts_text),
@@ -6240,6 +6261,8 @@ struct PanelState<'a> {
     setup: Option<&'a str>,
     /// What Verify's checks do now, while they run.
     verify: Option<&'a str>,
+    /// What the next Verify run runs and skips, a line each.
+    planned: Vec<String>,
     /// What Code review's row says once the diff was read (see
     /// `code_review_line`).
     code_review: Option<String>,
@@ -6802,6 +6825,17 @@ fn checks_lines(feature: &Feature, state: &PanelState) -> Vec<CheckLine> {
     if let Some(what) = state.verify {
         return vec![line(inline(what), CheckTone::Note)];
     }
+    let mut out = last_checks(feature, state);
+    let planned = state
+        .planned
+        .iter()
+        .map(|text| line(inline(text), CheckTone::Note));
+    out.extend(capped(planned.collect(), CheckTone::Note));
+    out
+}
+
+/// How Verify's checks last went in `feature`.
+fn last_checks(feature: &Feature, state: &PanelState) -> Vec<CheckLine> {
     match &feature.verify {
         Some(run) if run.passed == Some(true) => {
             vec![line(format!("run {} passed", run.n), CheckTone::Ready)]
@@ -7787,6 +7821,8 @@ pub(crate) mod tests {
             stage_agents: Default::default(),
             fresh_milestones: false,
             setup: None,
+            checks: Default::default(),
+            skip_checks: Default::default(),
             verify: None,
             review: None,
             plan_review: None,
@@ -8966,7 +9002,7 @@ pub(crate) mod tests {
     fn a_verify_with_nothing_to_run_points_to_its_commands() {
         let f = feature("v", vec![repo("api", true)], 4);
         assert_eq!(f.current(), Some(Stage::Verify));
-        let edit = PanelOutcome::EditCommands(CommandsTab::Checks);
+        let edit = PanelOutcome::EditCommands(CommandsTab::Feature);
         let style = |ctx: RowCtx| {
             let actions = page_actions(&f, Stage::Verify, ctx);
             let found = actions.into_iter().find(|(_, o)| *o == edit);
@@ -11124,7 +11160,7 @@ pub(crate) mod tests {
                 ("Set up", PanelOutcome::SetUp),
                 (
                     "Commands\u{2026}",
-                    PanelOutcome::EditCommands(CommandsTab::Checks)
+                    PanelOutcome::EditCommands(CommandsTab::Feature)
                 ),
             ]
         );
@@ -11162,6 +11198,36 @@ pub(crate) mod tests {
             [line("api: npm test (2 of 5)", CheckTone::Note)]
         );
         assert_eq!(rail_node(&f, Stage::Verify, &state, 2_000).line, "running");
+    }
+
+    #[test]
+    fn verifys_page_lists_what_runs_unless_it_is_running() {
+        let f = feature("f", Vec::new(), 0);
+        let planned = vec![
+            "api: make".to_owned(),
+            "api: e2e (this feature only)".to_owned(),
+        ];
+        let mut state = PanelState {
+            ctx: RowCtx {
+                checks: true,
+                ..RowCtx::default()
+            },
+            planned,
+            ..PanelState::default()
+        };
+        assert_eq!(
+            checks_lines(&f, &state),
+            [
+                line("not run yet", CheckTone::Note),
+                line("api: make", CheckTone::Note),
+                line("api: e2e (this feature only)", CheckTone::Note),
+            ]
+        );
+        state.verify = Some("api: make (1 of 2)");
+        assert_eq!(
+            checks_lines(&f, &state),
+            [line("api: make (1 of 2)", CheckTone::Note)]
+        );
     }
 
     #[test]

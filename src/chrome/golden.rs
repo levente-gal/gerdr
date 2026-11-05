@@ -2372,9 +2372,11 @@ fn commands(case: usize) -> super::CommandsView {
             label: label.into(),
             tag: tag.map(str::to_owned),
             suggestion: suggestion.map(str::to_owned),
+            borrowed: Vec::new(),
             line: text.into(),
         };
     let mut view = super::CommandsView {
+        tabs: &super::COMMANDS_PROJECT_TABS,
         tab: super::CommandsTab::Checks,
         body: "One command per line, run at once (&& keeps an order). A check that changes code fails Verify.",
         note: None,
@@ -2424,6 +2426,32 @@ fn commands(case: usize) -> super::CommandsView {
             view.hover = Some(super::CommandsHit::Button(1));
         }
         3 => view.down = 60,
+        4 => {
+            view.tabs = &super::COMMANDS_FEATURE_TABS;
+            view.tab = super::CommandsTab::Feature;
+            view.body = crate::project_commands::FEATURE_BODY;
+            view.rows = vec![
+                row("api", None, None, "./e2e.sh login"),
+                row("web", Some("runs once this feature changes it"), None, ""),
+                row(
+                    "Whole feature",
+                    Some("in the feature folder"),
+                    None,
+                    "",
+                ),
+            ];
+            let borrowed = |command: &str, skipped| super::CommandsBorrowed {
+                command: command.into(),
+                skipped,
+            };
+            view.rows[0].borrowed = vec![
+                borrowed("cargo test", false),
+                borrowed("cargo clippy -- -D warnings", true),
+            ];
+            view.rows[1].borrowed = vec![borrowed("npm test", false)];
+            view.limit = None;
+            view.hover = Some(super::CommandsHit::Tab(super::CommandsTab::Checks));
+        }
         _ => {}
     }
     view
@@ -2447,21 +2475,23 @@ fn paint_commands(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
         .collect()
 }
 
-const COMMANDS: [&str; 4] = [
+const COMMANDS: [&str; 5] = [
     "commands",
     "commands_setup",
     "commands_stale",
     "commands_low",
+    "commands_feature",
 ];
 
 /// The recorded hashes of `COMMANDS`, per case in `CASES`.
-const GOLDEN_COMMANDS: [[u64; 4]; 4] = [
+const GOLDEN_COMMANDS: [[u64; 5]; 4] = [
     // Dark at 1
     [
         0x1cc3fb9bbc5e8eca, // commands
         0x8b5544100aae6646, // commands_setup
         0x5f6e8d33498d735e, // commands_stale
         0xd00f868aa03d6932, // commands_low
+        0x51fc01f8adc5c355, // commands_feature
     ],
     // Dark at 2
     [
@@ -2469,6 +2499,7 @@ const GOLDEN_COMMANDS: [[u64; 4]; 4] = [
         0x863ddf0b9049bd4f, // commands_setup
         0xee3aa69c564604d0, // commands_stale
         0x95939744a5800b4f, // commands_low
+        0xfbeb00e80c771c34, // commands_feature
     ],
     // Light at 1
     [
@@ -2476,6 +2507,7 @@ const GOLDEN_COMMANDS: [[u64; 4]; 4] = [
         0x8b7dff0bbc21e4b4, // commands_setup
         0x876ba609d52e1f5e, // commands_stale
         0xfa5da00ab95f5061, // commands_low
+        0x22b10a35bb277d13, // commands_feature
     ],
     // Light at 2
     [
@@ -2483,6 +2515,7 @@ const GOLDEN_COMMANDS: [[u64; 4]; 4] = [
         0xff37bc0fc6539ba8, // commands_setup
         0x1ba86a4f6c66674c, // commands_stale
         0x03823def11970d00, // commands_low
+        0x9f7bc52d91b35fb8, // commands_feature
     ],
 ];
 

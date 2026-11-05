@@ -2996,6 +2996,7 @@ mod tests {
             repo: "api".into(),
             dir: "/w/api".into(),
             command: "npm test".into(),
+            own: false,
         }];
         let list = checks_list(&checks);
         assert_eq!(list, "- in /w/api: `npm test`");

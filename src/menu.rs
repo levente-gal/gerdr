@@ -166,7 +166,7 @@ pub enum MenuAction {
         suggestion: Box<crate::feature::plan_review::Suggestion>,
     },
     /// Undo a save of the project commands dialog.
-    RestoreProjectCommands(Vec<crate::project_commands::CommandsBefore>),
+    RestoreProjectCommands(crate::project_commands::CommandsUndo),
     /// Open the project commands dialog, for feature `slug` if one is given.
     EditCommands {
         project: String,

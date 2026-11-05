@@ -10,6 +10,12 @@
 //! repository takes its own project's checks, by its name; `_feature` is
 //! the home project's alone.
 //!
+//! A feature borrows those, and can add its own (`Feature::checks`, by
+//! `Repo::key` or `_feature`): each key's run beside what it borrows, a
+//! command it borrows already not running twice. It can also skip what it
+//! borrows (`Feature::skip_checks`), by the command's words: reworded in the
+//! project, a check runs again. The evidence says what was skipped.
+//!
 //! Verify fails when:
 //! - the code reads dirty, or an untouched repository has changes
 //!   (`patch::Reading::dirty`, `stray`): nothing runs;
@@ -71,6 +77,25 @@ pub struct Check {
     /// Where it runs: the repository's worktree, or the feature folder.
     pub dir: PathBuf,
     pub command: String,
+    /// Only this feature runs it: it isn't borrowed from a project.
+    pub own: bool,
+}
+
+impl Check {
+    /// What it is, in a line of the Verify page.
+    pub fn line(&self) -> String {
+        let repo = match self.repo.as_str() {
+            FEATURE_KEY => "whole feature",
+            repo => repo,
+        };
+        let only = if self.own { " (this feature only)" } else { "" };
+        format!("{repo}: {}{only}", self.command)
+    }
+
+    /// What it is, in a line, when the feature skips it.
+    pub fn skipped_line(&self) -> String {
+        format!("{} (skipped for this feature)", self.line())
+    }
 }
 
 /// What one check did.
@@ -171,6 +196,31 @@ pub type Config = PerProject<BTreeMap<String, Vec<String>>>;
 
 /// The checks `config` gives `feature`, in the order they are listed.
 pub fn checks(feature: &Feature, config: &Config) -> Vec<Check> {
+    split(feature, config).0
+}
+
+/// The checks `config` gives `feature` that it skips.
+pub fn skipped(feature: &Feature, config: &Config) -> Vec<Check> {
+    split(feature, config).1
+}
+
+/// What the next run of `feature` does that its last run's cards don't
+/// show, a line each: first what it skips, which no line count may hide,
+/// then what it runs that isn't on a card yet.
+pub fn planned(feature: &Feature, config: &Config) -> Vec<String> {
+    let (runs, skips) = split(feature, config);
+    let cards = feature.verify.as_ref().map_or(&[][..], |v| &v.checks);
+    let on_card = |check: &Check| {
+        (cards.iter()).any(|card| card.repo == check.repo && card.command == check.command)
+    };
+    (skips.iter().map(Check::skipped_line))
+        .chain(runs.iter().filter(|c| !on_card(c)).map(Check::line))
+        .collect()
+}
+
+/// What `feature` runs of what `config` gives it, in order, and what it
+/// skips.
+fn split(feature: &Feature, config: &Config) -> (Vec<Check>, Vec<Check>) {
     let commands = |config: Option<&BTreeMap<String, Vec<String>>>, key: &str| {
         config
             .and_then(|c| c.get(key))
@@ -181,26 +231,41 @@ pub fn checks(feature: &Feature, config: &Config) -> Vec<Check> {
             .map(str::to_owned)
             .collect::<Vec<_>>()
     };
+    // What `key` borrows, then what is its own and not borrowed already;
+    // and what it borrows and skips.
+    let mut skips = Vec::new();
+    let mut of = |borrowed: Vec<String>, key: String, dir: &PathBuf| {
+        let skip = commands(Some(&feature.skip_checks), &key);
+        let (skipped, borrowed): (Vec<_>, Vec<_>) =
+            borrowed.into_iter().partition(|c| skip.contains(c));
+        let own: Vec<String> = commands(Some(&feature.checks), &key)
+            .into_iter()
+            .filter(|c| !borrowed.contains(c))
+            .collect();
+        let tagged = |commands: Vec<String>, own: bool| {
+            let (key, dir) = (key.clone(), dir.clone());
+            (commands.into_iter()).map(move |command| Check {
+                repo: key.clone(),
+                dir: dir.clone(),
+                command,
+                own,
+            })
+        };
+        skips.extend(tagged(skipped, false));
+        tagged(borrowed, false)
+            .chain(tagged(own, true))
+            .collect::<Vec<_>>()
+    };
     let mut repos: Vec<_> = feature.touched().collect();
     repos.sort_by_key(|r| r.key());
     let mut checks = Vec::new();
     for repo in repos {
-        for command in commands(config.of(repo), &repo.name) {
-            checks.push(Check {
-                repo: repo.key(),
-                dir: repo.worktree.clone(),
-                command,
-            });
-        }
+        let borrowed = commands(config.of(repo), &repo.name);
+        checks.extend(of(borrowed, repo.key(), &repo.worktree));
     }
-    for command in commands(Some(&config.home), FEATURE_KEY) {
-        checks.push(Check {
-            repo: FEATURE_KEY.into(),
-            dir: feature.dir.clone(),
-            command,
-        });
-    }
-    checks
+    let borrowed = commands(Some(&config.home), FEATURE_KEY);
+    checks.extend(of(borrowed, FEATURE_KEY.into(), &feature.dir));
+    (checks, skips)
 }
 
 /// The code a run of checks starts on.
@@ -753,6 +818,14 @@ pub fn markdown(feature: &Feature, evidence: &Evidence) -> String {
             "\nNone ran.\n"
         });
     }
+    // Where nothing ran, nothing was left out of it.
+    let skipped = feature.verify.as_ref().map_or(&[][..], |v| &v.skipped);
+    if !skipped.is_empty() && !evidence.outcomes.is_empty() {
+        md.push_str("\nSkipped for this feature:\n\n");
+        for line in skipped {
+            md.push_str(&format!("- {line}\n"));
+        }
+    }
     for o in &evidence.outcomes {
         md.push_str(&format!("\n### {}: {}\n\n", o.repo, o.command));
         let how = if o.passed() {
@@ -837,6 +910,10 @@ pub struct VerifyRun {
     /// Its checks, each in its terminal.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub checks: Vec<CheckRun>,
+    /// The borrowed checks the feature skipped, a line each, for the
+    /// evidence. On the record, as a gerdr started later ends the run.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<String>,
     /// Each touched repository's `HEAD` commit it ran on, by `Repo::key`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub heads: Vec<(String, String)>,
@@ -1058,6 +1135,7 @@ mod tests {
             repo: repo.into(),
             dir: dir.to_owned(),
             command: command.into(),
+            own: false,
         }
     }
 
@@ -1098,6 +1176,148 @@ mod tests {
                 check("_feature", &f.dir, "./e2e.sh"),
             ]
         );
+    }
+
+    #[test]
+    fn a_feature_adds_to_what_it_borrows_and_runs_nothing_twice() {
+        let t = Temp::new();
+        let mut f = feature_over(&t, &["api", "web"], &["web"]);
+        let c = config(&[("api", &["cargo test"]), (FEATURE_KEY, &["./all.sh"])]);
+        let of = |f: &Feature| {
+            (checks(f, &c).into_iter())
+                .map(|check| (check.repo, check.command, check.own))
+                .collect::<Vec<_>>()
+        };
+        let plain = |repo: &str, command: &str, own| (repo.to_owned(), command.to_owned(), own);
+        assert_eq!(
+            of(&f),
+            [
+                plain("api", "cargo test", false),
+                plain(FEATURE_KEY, "./all.sh", false)
+            ]
+        );
+        for (key, commands) in [
+            ("api", vec![" ./e2e.sh ", "", "cargo test"]),
+            ("web", vec!["npm test"]),
+            (FEATURE_KEY, vec!["./smoke.sh"]),
+        ] {
+            let commands = commands.into_iter().map(str::to_owned).collect();
+            f.checks.insert(key.to_owned(), commands);
+        }
+        // Each after what its key borrows; an untouched repository's stay
+        // out, and a command it borrows already doesn't run twice.
+        assert_eq!(
+            of(&f),
+            [
+                plain("api", "cargo test", false),
+                plain("api", "./e2e.sh", true),
+                plain(FEATURE_KEY, "./all.sh", false),
+                plain(FEATURE_KEY, "./smoke.sh", true)
+            ]
+        );
+        assert_eq!(checks(&f, &c)[1].dir, f.repos[0].worktree);
+        assert_eq!(checks(&f, &c)[3].dir, f.dir);
+        // With nothing to borrow, its own are what runs.
+        let none = checks(&f, &Config::default());
+        assert_eq!(none.len(), 3);
+        assert!(none.iter().all(|check| check.own));
+    }
+
+    #[test]
+    fn a_feature_skips_what_it_borrows_by_its_words() {
+        let t = Temp::new();
+        let mut f = feature_over(&t, &["api"], &[]);
+        let c = config(&[
+            ("api", &["slow e2e", "cargo test"]),
+            (FEATURE_KEY, &["./all.sh"]),
+        ]);
+        let words = |checks: Vec<Check>| {
+            checks
+                .into_iter()
+                .map(|check| check.command)
+                .collect::<Vec<_>>()
+        };
+        f.skip_checks.insert("api".into(), vec!["slow e2e".into()]);
+        f.skip_checks
+            .insert(FEATURE_KEY.into(), vec!["./all.sh".into(), "gone".into()]);
+        assert_eq!(words(checks(&f, &c)), ["cargo test"]);
+        assert_eq!(words(skipped(&f, &c)), ["slow e2e", "./all.sh"]);
+        // Added back as its own, it runs, once.
+        f.checks.insert("api".into(), vec!["slow e2e".into()]);
+        assert_eq!(words(checks(&f, &c)), ["cargo test", "slow e2e"]);
+        assert!(checks(&f, &c)[1].own);
+        // Reworded in the project, it runs again.
+        f.checks.clear();
+        let c = config(&[("api", &["slow e2e --all"])]);
+        assert_eq!(words(checks(&f, &c)), ["slow e2e --all"]);
+        assert!(skipped(&f, &c).is_empty());
+    }
+
+    #[test]
+    fn the_evidence_says_what_was_skipped_if_anything_ran() {
+        let t = Temp::new();
+        let mut f = feature_over(&t, &["api"], &[]);
+        let e = Evidence {
+            outcomes: vec![Outcome::default()],
+            ..Evidence::default()
+        };
+        assert!(!markdown(&f, &e).contains("Skipped"));
+        f.verify = Some(VerifyRun {
+            skipped: vec!["api: slow (skipped for this feature)".into()],
+            ..VerifyRun::default()
+        });
+        assert!(markdown(&f, &e).contains("- api: slow (skipped for this feature)"));
+        assert!(!markdown(&f, &Evidence::default()).contains("Skipped"));
+    }
+
+    #[test]
+    fn what_a_run_will_do_says_only_what_its_cards_dont() {
+        let t = Temp::new();
+        let mut f = feature_over(&t, &["api"], &[]);
+        let c = config(&[("api", &["slow", "fast"])]);
+        f.skip_checks.insert("api".into(), vec!["slow".into()]);
+        f.checks.insert("api".into(), vec!["mine".into()]);
+        assert_eq!(
+            planned(&f, &c),
+            [
+                "api: slow (skipped for this feature)",
+                "api: fast",
+                "api: mine (this feature only)"
+            ]
+        );
+        let card = |command: &str| CheckRun {
+            repo: "api".into(),
+            command: command.into(),
+            ..CheckRun::default()
+        };
+        // On a card already: what it skips still says so, even with a card
+        // left from before it was skipped.
+        f.verify = Some(VerifyRun {
+            checks: vec![card("fast"), card("slow")],
+            ..VerifyRun::default()
+        });
+        assert_eq!(
+            planned(&f, &c),
+            [
+                "api: slow (skipped for this feature)",
+                "api: mine (this feature only)"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_check_says_what_it_is_in_a_line() {
+        let mut c = Check {
+            repo: "api".into(),
+            dir: PathBuf::new(),
+            command: "make".into(),
+            own: false,
+        };
+        assert_eq!(c.line(), "api: make");
+        c.own = true;
+        assert_eq!(c.line(), "api: make (this feature only)");
+        c.repo = FEATURE_KEY.into();
+        assert_eq!(c.line(), "whole feature: make (this feature only)");
     }
 
     #[test]

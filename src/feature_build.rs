@@ -800,6 +800,9 @@ impl Gerdr {
         };
         let config = self.projects.workflows(&feature, |w| w.verify.clone());
         let checks = verify::checks(&feature, &config);
+        let skipped: Vec<String> = (verify::skipped(&feature, &config).iter())
+            .map(verify::Check::skipped_line)
+            .collect();
         let key = (project.to_owned(), slug.to_owned());
         let running = self.features.build.verifying.contains(&key);
         if let Err(why) = verify_refusal(&feature, running, checks.len()) {
@@ -852,6 +855,7 @@ impl Gerdr {
                 fixes,
                 checks,
                 patch,
+                skipped,
                 ..VerifyRun::default()
             });
             f.log(now, format!("Verify run {n} started"));

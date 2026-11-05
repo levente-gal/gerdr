@@ -1,7 +1,8 @@
 //! The project commands dialog (see `crate::project_commands`): Verify's
 //! checks and the setup commands of a project, a field of lines per
-//! repository, on two tabs. The list of fields scrolls; the title, the
-//! tabs and the buttons stay.
+//! repository, on two tabs, and opened from a feature a third with the
+//! checks only it runs. The list of fields scrolls; the title, the tabs and
+//! the buttons stay.
 
 use super::{
     ButtonStyle, Canvas, DIALOG_WIDTH, FONT_SIZE, FieldSpot, LABEL_FONT_SIZE, POPUP_RADIUS,
@@ -13,8 +14,14 @@ use crate::text_field::Line;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
-/// The dialog's tabs' labels, in order.
-pub const COMMANDS_TABS: [&str; 2] = ["Checks", "Setup"];
+/// The dialog's tabs for a project.
+pub const COMMANDS_PROJECT_TABS: [CommandsTab; 2] = [CommandsTab::Checks, CommandsTab::Setup];
+/// The dialog's tabs for a feature.
+pub const COMMANDS_FEATURE_TABS: [CommandsTab; 3] = [
+    CommandsTab::Checks,
+    CommandsTab::Setup,
+    CommandsTab::Feature,
+];
 /// The dialog's buttons while it can save.
 pub const COMMANDS_BUTTONS: [&str; 2] = ["Cancel", "Save"];
 /// The dialog's buttons once the project file was edited outside gerdr.
@@ -31,6 +38,8 @@ const TRACK_PAD: i32 = 2;
 const LINE_H: i32 = 20;
 /// How high the row over a field is, holding its name and suggestion.
 const ROW_LABEL: i32 = 26;
+/// How high a borrowed check's line is, holding its button.
+const BORROWED_H: i32 = 26;
 /// How wide the label of the time limit's field is, and the field.
 const LIMIT_LABEL: i32 = 170;
 const LIMIT_FIELD: i32 = 100;
@@ -47,21 +56,16 @@ pub enum CommandsTab {
     #[default]
     Checks,
     Setup,
+    /// The checks only the dialog's feature runs.
+    Feature,
 }
 
 impl CommandsTab {
-    /// The other one.
-    pub fn other(self) -> Self {
+    fn label(self) -> &'static str {
         match self {
-            Self::Checks => Self::Setup,
-            Self::Setup => Self::Checks,
-        }
-    }
-
-    fn index(self) -> usize {
-        match self {
-            Self::Checks => 0,
-            Self::Setup => 1,
+            Self::Checks => "Checks",
+            Self::Setup => "Setup",
+            Self::Feature => "This feature",
         }
     }
 }
@@ -73,6 +77,22 @@ pub enum CommandsFocus {
     Row(usize),
     /// The time limit's field.
     Limit,
+    /// A borrowed check, by its row and its line there.
+    Borrowed(usize, usize),
+}
+
+/// A command a feature borrows from its project, as the dialog shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommandsBorrowed {
+    pub command: String,
+    /// The feature doesn't run it.
+    pub skipped: bool,
+}
+
+impl CommandsBorrowed {
+    fn button(&self) -> &'static str {
+        if self.skipped { "Run" } else { "Skip" }
+    }
 }
 
 /// A field of the dialog, as it shows.
@@ -86,12 +106,17 @@ pub struct CommandsRow {
     pub tag: Option<String>,
     /// What can fill it, while it is empty: the Use button's commands.
     pub suggestion: Option<String>,
+    /// The commands the feature borrows from the project, said over the
+    /// field of those it adds.
+    pub borrowed: Vec<CommandsBorrowed>,
     pub line: Line,
 }
 
 /// What the project commands dialog shows.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommandsView {
+    /// The tabs it has.
+    pub tabs: &'static [CommandsTab],
     pub tab: CommandsTab,
     /// What the tab's commands are, in a line.
     pub body: &'static str,
@@ -122,6 +147,8 @@ pub enum CommandsHit {
     /// The Use button of `CommandsView::rows`' row.
     Use(usize),
     Limit,
+    /// A borrowed check, by its row and its line there.
+    Borrowed(usize, usize),
     /// 0 Cancel, 1 Save or Reload file.
     Button(usize),
 }
@@ -133,6 +160,8 @@ pub struct CommandsRowLayout {
     pub label: Rect,
     /// The Use button, when it has something to use.
     pub use_button: Option<Rect>,
+    /// What it borrows, a line each.
+    pub borrowed: Vec<Rect>,
     pub field: Rect,
 }
 
@@ -145,7 +174,7 @@ pub struct CommandsLayout {
     pub title: Rect,
     /// The tabs' outline, and its segments.
     pub track: Rect,
-    pub tabs: [Rect; 2],
+    pub tabs: Vec<(CommandsTab, Rect)>,
     pub body: Rect,
     pub note: Option<Rect>,
     pub list: Rect,
@@ -178,7 +207,8 @@ fn list_height(view: &CommandsView) -> i32 {
             } else {
                 0
             };
-            heading + ROW_LABEL + field_height(lines_of(&row.line)) + QUIT_LINE_GAP
+            let borrowed = row.borrowed.len() as i32 * BORROWED_H;
+            heading + ROW_LABEL + borrowed + field_height(lines_of(&row.line)) + QUIT_LINE_GAP
         })
         .sum();
     let limit = if view.limit.is_some() {
@@ -233,7 +263,7 @@ pub fn commands_layout(view: &CommandsView, size: Size<i32, Logical>) -> Command
     let list = next(list_h);
     let error = view.error.as_ref().map(|_| next(QUIT_BODY));
 
-    let track_w = 2 * TAB_W + 2 * TRACK_PAD;
+    let track_w = view.tabs.len() as i32 * TAB_W + 2 * TRACK_PAD;
     let track = Rectangle::new(
         (header.loc.x + header.size.w - track_w, header.loc.y).into(),
         (track_w, header.size.h).into(),
@@ -267,6 +297,13 @@ pub fn commands_layout(view: &CommandsView, size: Size<i32, Logical>) -> Command
                 )
             });
             at += ROW_LABEL;
+            let borrowed = (row.borrowed.iter())
+                .map(|_| {
+                    let rect = Rectangle::new((x, at).into(), (inner, BORROWED_H).into());
+                    at += BORROWED_H;
+                    rect
+                })
+                .collect();
             let h = field_height(lines_of(&row.line));
             let field = Rectangle::new((x, at).into(), (inner, h).into());
             at += h + QUIT_LINE_GAP;
@@ -274,6 +311,7 @@ pub fn commands_layout(view: &CommandsView, size: Size<i32, Logical>) -> Command
                 heading,
                 label,
                 use_button,
+                borrowed,
                 field,
             }
         })
@@ -295,7 +333,9 @@ pub fn commands_layout(view: &CommandsView, size: Size<i32, Logical>) -> Command
         panel,
         title,
         track,
-        tabs: [segment(0), segment(1)],
+        tabs: (view.tabs.iter().enumerate())
+            .map(|(i, tab)| (*tab, segment(i as i32)))
+            .collect(),
         body,
         note,
         list,
@@ -318,11 +358,8 @@ impl CommandsLayout {
         if let Some(button) = self.buttons.iter().position(on) {
             return Some(CommandsHit::Button(button));
         }
-        if let Some(tab) = self.tabs.iter().position(on) {
-            return Some(CommandsHit::Tab(match tab {
-                0 => CommandsTab::Checks,
-                _ => CommandsTab::Setup,
-            }));
+        if let Some((tab, _)) = self.tabs.iter().find(|(_, rect)| on(rect)) {
+            return Some(CommandsHit::Tab(*tab));
         }
         // What is scrolled out of the list isn't there.
         if !on(&self.list) {
@@ -337,6 +374,9 @@ impl CommandsLayout {
             if row.use_button.as_ref().is_some_and(on) {
                 return Some(CommandsHit::Use(i));
             }
+            if let Some(line) = row.borrowed.iter().position(on) {
+                return Some(CommandsHit::Borrowed(i, line));
+            }
             // A click on a name goes to its field, as on a form.
             (on(&row.label) || on(&row.field)).then_some(CommandsHit::Field(i))
         })
@@ -346,11 +386,10 @@ impl CommandsLayout {
     pub fn controls(&self) -> Vec<Rect> {
         let useful = (self.rows.iter())
             .filter_map(|row| row.use_button)
+            .chain(self.rows.iter().flat_map(|row| row.borrowed.iter().copied()))
             .filter_map(|button| clip(button, self.list));
-        self.tabs
-            .iter()
-            .chain(&self.buttons)
-            .copied()
+        (self.tabs.iter().map(|(_, rect)| *rect))
+            .chain(self.buttons)
             .chain(useful)
             .collect()
     }
@@ -363,6 +402,13 @@ impl CommandsLayout {
     /// Where the focused line of `view` is in the list, unscrolled: its
     /// top, and how high it is.
     pub fn focus_span(&self, view: &CommandsView) -> Option<(i32, i32)> {
+        if let CommandsFocus::Borrowed(i, line) = view.focus {
+            let rect = *self.rows.get(i)?.borrowed.get(line)?;
+            // Its first line brings the name over it along.
+            let lead = if line == 0 { ROW_LABEL } else { 0 };
+            let top = rect.loc.y - self.list.loc.y + view.down;
+            return Some((top - lead, BORROWED_H + lead));
+        }
         let (rect, line_at) = match view.focus {
             CommandsFocus::Row(i) => {
                 let row = view.rows.get(i)?;
@@ -370,13 +416,15 @@ impl CommandsLayout {
                 (self.rows.get(i)?.field, before)
             }
             CommandsFocus::Limit => (self.limit?[1], 0),
+            CommandsFocus::Borrowed(..) => return None,
         };
         let top = rect.loc.y - self.list.loc.y + view.down + line_at * LINE_H;
         // A field's first line brings the name over it along.
-        let lead = if line_at == 0 && matches!(view.focus, CommandsFocus::Row(_)) {
-            ROW_LABEL
-        } else {
-            0
+        let lead = match view.focus {
+            CommandsFocus::Row(i) if line_at == 0 => {
+                ROW_LABEL + view.rows[i].borrowed.len() as i32 * BORROWED_H
+            }
+            _ => 0,
         };
         Some((top - lead, QUIT_BUTTON + lead))
     }
@@ -441,6 +489,7 @@ pub fn commands_field_at(
     let (area, line) = match view.focus {
         CommandsFocus::Row(i) => (layout.rows.get(i)?.field, &view.rows.get(i)?.line),
         CommandsFocus::Limit => (layout.limit?[1], view.limit.as_ref()?),
+        CommandsFocus::Borrowed(..) => return None,
     };
     let shown = clip(area, layout.list)?;
     if !held && !shown.to_f64().contains(pos) {
@@ -468,6 +517,7 @@ pub fn commands_field(
     let (area, line) = match view.focus {
         CommandsFocus::Row(i) => (layout.rows.get(i)?.field, &view.rows.get(i)?.line),
         CommandsFocus::Limit => (layout.limit?[1], view.limit.as_ref()?),
+        CommandsFocus::Borrowed(..) => return None,
     };
     Some(FieldSpot {
         area: clip(area, layout.list)?,
@@ -557,24 +607,27 @@ impl Painter {
         };
         line(
             &mut c,
-            "Project commands",
+            match view.tab {
+                CommandsTab::Feature => "Feature checks",
+                _ => "Project commands",
+            },
             layout.title,
             LABEL_FONT_SIZE,
             p.text,
         );
-        let tabs = [
-            (COMMANDS_TABS[0], shift(layout.tabs[0])),
-            (COMMANDS_TABS[1], shift(layout.tabs[1])),
-        ];
+        let tabs: Vec<_> = (layout.tabs.iter())
+            .map(|(tab, rect)| (tab.label(), shift(*rect)))
+            .collect();
+        let index = |tab: CommandsTab| view.tabs.iter().position(|t| *t == tab);
         let hover = match view.hover {
-            Some(CommandsHit::Tab(tab)) => Some(tab.index()),
+            Some(CommandsHit::Tab(tab)) => index(tab),
             _ => None,
         };
         self.segmented(
             &mut c,
             shift(layout.track),
             &tabs,
-            view.tab.index(),
+            index(view.tab).unwrap_or(0),
             hover,
             scale,
             p,
@@ -593,10 +646,16 @@ impl Painter {
                     line(c, heading, rect, FONT_SIZE, p.text);
                 }
                 self.commands_row_label(c, view, row, rects, i, &shift, scale, p);
+                for (k, (borrowed, rect)) in row.borrowed.iter().zip(&rects.borrowed).enumerate() {
+                    let on_it = view.focus == CommandsFocus::Borrowed(i, k);
+                    let hit = view.hover == Some(CommandsHit::Borrowed(i, k));
+                    self.borrowed_line(c, borrowed, shift(*rect), (on_it, hit), scale, p);
+                }
                 let focused = view.focus == CommandsFocus::Row(i);
                 let placeholder = match view.tab {
                     CommandsTab::Checks => "No checks",
                     CommandsTab::Setup => "No setup commands",
+                    CommandsTab::Feature => "Nothing added",
                 };
                 self.command_lines(
                     c,
@@ -666,6 +725,41 @@ impl Painter {
             );
         }
         c.into_buffer(false)
+    }
+
+    /// A borrowed check's line: what it is, and at the right the button
+    /// that skips it or runs it again. `(focused, hovered)` light it up.
+    fn borrowed_line(
+        &self,
+        c: &mut Canvas,
+        borrowed: &CommandsBorrowed,
+        rect: Rect,
+        (focused, hovered): (bool, bool),
+        scale: f64,
+        p: &Palette,
+    ) {
+        let hover = if hovered { 1.0 } else { 0.0 };
+        self.row_highlight(c, rect, (focused, hover), scale, p);
+        let label = borrowed.button();
+        let w = button_width(label);
+        let button = Rectangle::new(
+            (
+                rect.loc.x + rect.size.w - w,
+                rect.loc.y + (BORROWED_H - USE_H) / 2,
+            )
+                .into(),
+            (w, USE_H).into(),
+        );
+        let style = ButtonStyle::Plain;
+        self.button(c, label, button, (hovered, false), style, scale, p);
+        let (x, _) = phys(rect, scale);
+        let end = phys(button, scale).0 - TAG_GAP * scale as f32;
+        let (text, color) = match borrowed.skipped {
+            true => (format!("skipped: {}", borrowed.command), p.muted),
+            false => (format!("project: {}", borrowed.command), p.text),
+        };
+        let row_band = band(rect, scale);
+        self.text(c, &text, SMALL_FONT_SIZE, x, end, row_band, scale, color);
     }
 
     /// The row over a field: its name, what is said of it, and at the
@@ -740,12 +834,14 @@ mod tests {
             label: label.into(),
             tag: None,
             suggestion: None,
+            borrowed: Vec::new(),
             line: text.into(),
         }
     }
 
     fn view(rows: Vec<CommandsRow>) -> CommandsView {
         CommandsView {
+            tabs: &COMMANDS_PROJECT_TABS,
             tab: CommandsTab::Checks,
             body: "",
             note: None,
@@ -811,7 +907,7 @@ mod tests {
         let layout = commands_layout(&v, BIG.into());
         let rows = &layout.rows[0];
         assert_eq!(
-            layout.hit(centre(layout.tabs[1])),
+            layout.hit(centre(layout.tabs[1].1)),
             Some(CommandsHit::Tab(CommandsTab::Setup))
         );
         assert_eq!(
@@ -830,6 +926,43 @@ mod tests {
             layout.hit(centre(layout.buttons[0])),
             Some(CommandsHit::Button(0))
         );
+    }
+
+    #[test]
+    fn what_a_feature_borrows_stands_over_its_field_and_goes_to_it() {
+        let mut v = view(vec![row("api", "")]);
+        v.tabs = &COMMANDS_FEATURE_TABS;
+        v.tab = CommandsTab::Feature;
+        v.limit = None;
+        let plain = commands_layout(&v, BIG.into());
+        assert_eq!(
+            plain.hit(centre(plain.tabs[2].1)),
+            Some(CommandsHit::Tab(CommandsTab::Feature))
+        );
+        let borrowed = |command: &str| CommandsBorrowed {
+            command: command.into(),
+            skipped: false,
+        };
+        v.rows[0].borrowed = vec![borrowed("cargo test"), borrowed("cargo clippy")];
+        let layout = commands_layout(&v, BIG.into());
+        let rows = &layout.rows[0];
+        assert_eq!(rows.field.loc.y - rows.label.loc.y, ROW_LABEL + 2 * BORROWED_H);
+        assert_eq!(layout.total - plain.total, 2 * BORROWED_H);
+        assert_eq!(
+            layout.hit(centre(rows.borrowed[1])),
+            Some(CommandsHit::Borrowed(0, 1))
+        );
+        assert!(layout.controls().contains(&rows.borrowed[1]));
+        // Its first line brings them along, with the name.
+        let (top, height) = layout.focus_span(&v).unwrap();
+        assert_eq!(top, rows.label.loc.y - layout.list.loc.y);
+        assert_eq!(height, ROW_LABEL + 2 * BORROWED_H + QUIT_BUTTON);
+        // On a borrowed check, no field takes the pointer.
+        v.focus = CommandsFocus::Borrowed(0, 1);
+        let (top, height) = layout.focus_span(&v).unwrap();
+        assert_eq!(top, rows.borrowed[1].loc.y - layout.list.loc.y);
+        assert_eq!(height, BORROWED_H);
+        assert!(commands_field(&v, BIG.into(), 1.0).is_none());
     }
 
     #[test]
