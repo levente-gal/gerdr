@@ -1445,7 +1445,7 @@ impl Rework {
     /// What its agent's card says.
     fn status(self) -> &'static str {
         match self {
-            Rework::Waits => "waiting for you \u{b7} pick a model and send the prompt",
+            Rework::Waits => "waiting for you \u{b7} send the prompt",
             Rework::Closed => "its tab closed \u{b7} Start agent opens it again",
             Rework::Draft => "draft in T3 Code \u{b7} pick a model and send it",
             Rework::Runs(_) => "running again",
@@ -8631,9 +8631,7 @@ fn agent_card(
     // The card's head names the agent already.
     let status = match (current, &state.agent) {
         // On a done Build too, where fixes wait: `started` would hide that.
-        _ if run.waits_to_send() => {
-            "waiting for you \u{b7} pick a model and send the prompt".to_owned()
-        }
+        _ if run.waits_to_send() => "waiting for you \u{b7} send the prompt".to_owned(),
         (true, Some(line)) => (line.strip_prefix(run.agent.as_str()))
             .map_or(line.as_str(), str::trim_start)
             .to_owned(),
@@ -8725,7 +8723,7 @@ fn fix_round_card(
         _ => CheckTone::Note,
     };
     let said = match (waits, &round.stalled) {
-        (true, _) => "waiting for you \u{b7} pick a model and send the prompt".to_owned(),
+        (true, _) => "waiting for you \u{b7} send the prompt".to_owned(),
         (false, Some(why)) => why.clone(),
         (false, None) => round.line(),
     };

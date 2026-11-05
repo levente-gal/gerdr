@@ -419,8 +419,12 @@ impl Gerdr {
             Some(agent) => self.agent_key_state(&agent),
             None => (None, false),
         };
+        // Its line isn't seen taken yet: it hasn't rested on it.
+        let told_now = (run.and_then(|r| r.pane.as_deref()))
+            .zip(self.herdr.as_ref())
+            .is_some_and(|(pane, herdr)| herdr.line_pending(pane));
         let watch = self.features.build.fix_watches.entry(key).or_default();
-        if watch.log != at {
+        if watch.log != at || told_now {
             watch.log = at;
             watch.rest = Instant::now();
         }
@@ -456,8 +460,9 @@ impl Gerdr {
                 }
             }
             Fixes::Done => self.fixes_made(feature),
-            Fixes::GoOn => self.fixes_go_on(feature, round, &open),
+            // Said once: it stays stopped until the user sends them again.
             _ if round.stalled.is_some() => {}
+            Fixes::GoOn => self.fixes_go_on(feature, round, &open),
             Fixes::Blocked => self.fixes_stopped(
                 feature,
                 format!(

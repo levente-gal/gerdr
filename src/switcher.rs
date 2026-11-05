@@ -1086,10 +1086,7 @@ impl Gerdr {
                 }),
             )
         };
-        let own = format!(
-            "{}'s own choice: it opens and waits for you to send the prompt",
-            slot.agent
-        );
+        let own = format!("{}'s own choice", slot.agent);
         let mut items = vec![row("Default".to_owned(), own, None)];
         items.extend((offers.into_iter()).map(|o| row(o.name, o.id.clone(), Some(o.id))));
         self.weighed(items)

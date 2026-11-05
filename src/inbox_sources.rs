@@ -820,10 +820,7 @@ fn gate_words(gate: &Gate) -> (String, String, Option<&'static str>) {
             )
         }
         GateKind::SendPrompt => (
-            format!(
-                "{} of “{title}”: pick a model and send the prompt",
-                gate.stage.label()
-            ),
+            format!("{} of “{title}”: send the prompt", gate.stage.label()),
             "send prompt".to_owned(),
             None,
         ),
