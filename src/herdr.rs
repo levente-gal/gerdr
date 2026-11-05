@@ -1283,7 +1283,7 @@ pub fn watch_tabs(
 
 /// The command that shows herdr terminal `terminal_id` in an Alacritty
 /// window, taking it over from any other client, with Alacritty's
-/// `options` (the look's colours, see `Palette::alacritty_options`).
+/// `options` (see `Gerdr::terminal_options`).
 pub fn attach_command(terminal_id: &str, dir: &Path, options: &[String]) -> Command {
     let mut term = Command::new("alacritty");
     term.arg("--working-directory")

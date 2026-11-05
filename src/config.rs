@@ -72,6 +72,15 @@
 //! # default. The launcher's row turning it on or off writes this key.
 //! updates = false
 //!
+//! [terminal]
+//! # Whether each Alacritty gerdr starts reloads its config file when it
+//! # changes, which takes one of the user's inotify instances (128 by
+//! # default, and Zed needs them too). With false, new terminals read the
+//! # file once and take none; open ones let go of theirs when gerdr
+//! # restarts. On by default. The launcher's row turning it on or off
+//! # writes this key.
+//! live_config_reload = false
+//!
 //! [notifications]
 //! # Desktop notifications: of agents that need you, finished test runs and
 //! # the services' errors. On by default.
@@ -124,6 +133,7 @@ struct Config {
     agents: BTreeMap<String, String>,
     services: ServicesConfig,
     t3: T3Config,
+    terminal: TerminalConfig,
     notifications: NotificationsConfig,
 }
 
@@ -145,6 +155,40 @@ pub struct T3Settings {
 impl Default for T3Settings {
     fn default() -> Self {
         Self { updates: true }
+    }
+}
+
+/// The `[terminal]` table, as written.
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct TerminalConfig {
+    live_config_reload: Option<bool>,
+}
+
+/// How the Alacrittys gerdr starts behave, from the `[terminal]` table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TerminalSettings {
+    /// Whether each reloads its config file when it changes, which takes
+    /// one of the user's inotify instances (see `inotify_limit`).
+    pub live_config_reload: bool,
+}
+
+impl Default for TerminalSettings {
+    fn default() -> Self {
+        Self {
+            live_config_reload: true,
+        }
+    }
+}
+
+/// The `[terminal]` settings `text` describes. What is wrong with them is
+/// `from_text`'s to say.
+pub fn terminal_from_text(text: &str) -> TerminalSettings {
+    let table = Config::read(text, &mut Vec::new()).terminal;
+    TerminalSettings {
+        live_config_reload: table
+            .live_config_reload
+            .unwrap_or(TerminalSettings::default().live_config_reload),
     }
 }
 
@@ -334,7 +378,7 @@ pub fn services_from_text(text: &str) -> (Services, Vec<String>) {
 const KEYS_PROBLEM: &str = "[keys] ";
 
 /// The tables the file may have.
-const TABLES: [&str; 10] = [
+const TABLES: [&str; 11] = [
     "keys",
     "apps",
     "ui",
@@ -344,6 +388,7 @@ const TABLES: [&str; 10] = [
     "agents",
     "services",
     "t3",
+    "terminal",
     "notifications",
 ];
 
@@ -366,6 +411,7 @@ impl Config {
         let (keys, apps, ui, git) = (take("keys"), take("apps"), take("ui"), take("git"));
         let (keep, inbox, agents) = (take("keep"), take("inbox"), take("agents"));
         let (services, t3, notifications) = (take("services"), take("t3"), take("notifications"));
+        let terminal = take("terminal");
         Self {
             keys: table("keys", keys, problems),
             apps: table("apps", apps, problems),
@@ -376,6 +422,7 @@ impl Config {
             agents: table("agents", agents, problems),
             services: table("services", services, problems),
             t3: table("t3", t3, problems),
+            terminal: table("terminal", terminal, problems),
             notifications: table("notifications", notifications, problems),
         }
     }
@@ -563,6 +610,8 @@ pub struct Settings {
     pub services: Services,
     /// How T3 Code is kept up to date.
     pub t3: T3Settings,
+    /// How the Alacrittys gerdr starts behave.
+    pub terminal: TerminalSettings,
     /// Whether and how desktop notifications show.
     pub notifications: Notifications,
     /// What is wrong with the file, as sentences for the user.
@@ -593,6 +642,7 @@ pub fn load() -> Settings {
     let (services, service_problems) = services_from_text(&text);
     problems.extend(service_problems);
     let t3 = t3_from_text(&text);
+    let terminal = terminal_from_text(&text);
     let notifications = notifications_from_text(&text);
     // `Keymap::new` keeps its own under "keys": only the rest here.
     crate::problems::clear("config");
@@ -610,6 +660,7 @@ pub fn load() -> Settings {
         agents,
         services,
         t3,
+        terminal,
         notifications,
         problems,
     }
@@ -850,6 +901,15 @@ const TEMPLATE: &str = "\
 # # default. The launcher's row turning it on or off writes this key.
 # updates = false
 #
+# [terminal]
+# # Whether each Alacritty gerdr starts reloads its config file when it
+# # changes, which takes one of the user's inotify instances (128 by
+# # default, and Zed needs them too). With false, new terminals read the
+# # file once and take none; open ones let go of theirs when gerdr
+# # restarts. On by default. The launcher's row turning it on or off
+# # writes this key.
+# live_config_reload = false
+#
 # [notifications]
 # # Desktop notifications: of agents that need you, finished test runs and
 # # the services' errors. On by default.
@@ -906,7 +966,8 @@ impl Gerdr {
 
     /// Read the config file again and use what it says now: the keys,
     /// apps, look, git, inbox, kept apps, agents, notifications, how the
-    /// services' errors are found and whether T3 Code updates itself.
+    /// services' errors are found, whether T3 Code updates itself and
+    /// whether new terminals reload their config.
     /// What is wrong with it.
     pub fn apply_settings(&mut self) -> Vec<String> {
         self.settings_modified = modified();
@@ -944,6 +1005,8 @@ impl Gerdr {
         }
         self.set_service_settings(settings.services);
         self.t3.auto_update = settings.t3.updates;
+        // Terminals read it when they start: only new ones change.
+        self.live_config_reload = settings.terminal.live_config_reload;
         self.arrange();
         settings.problems
     }
@@ -1018,6 +1081,18 @@ mod tests {
         assert!(!services.patterns.is_error("a 500 FATAL"));
         assert!(!super::t3_from_text(&examples).updates);
         assert!(super::t3_from_text(TEMPLATE).updates);
+    }
+
+    #[test]
+    fn terminals_reload_their_config_unless_the_file_turns_it_off() {
+        let reload = |text: &str| super::terminal_from_text(text).live_config_reload;
+        assert!(reload(""));
+        assert!(reload(TEMPLATE));
+        assert!(!reload("[terminal]\nlive_config_reload = false\n"));
+        let (.., problems, _, _) = from_text("[terminal]\nlive_config_reload = false\n");
+        assert!(problems.is_empty(), "{problems:?}");
+        let (.., problems, _, _) = from_text("[terminal]\nlive_reload = false\n");
+        assert_eq!(problems.len(), 1, "{problems:?}");
     }
 
     #[test]

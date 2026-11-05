@@ -122,14 +122,33 @@ claude = "claude --dangerously-skip-permissions"
 apps = ["cursor"]
 ```
 
-The other sections are `[git]`, `[inbox]`, `[services]`, `[t3]` and
-`[notifications]`. The comments at the top of `src/config.rs` and
+The other sections are `[git]`, `[inbox]`, `[services]`, `[t3]`, `[terminal]`
+and `[notifications]`. The comments at the top of `src/config.rs` and
 `src/keys.rs` describe every key.
 
 Other files:
 
 - Projects: `~/.local/share/gerdr/projects/<id>.json` and `state.json`
 - Log: `$XDG_STATE_HOME/gerdr/gerdr.log` (`~/.local/state/gerdr/gerdr.log`)
+
+### Running out of inotify instances
+
+Zed saying "Could not start inotify", or a terminal showing "Unable to watch
+config file: Too many open files", means your user has no inotify instances
+left. The limit is 128 by default, and each terminal pane takes one to follow
+its Alacritty config. gerdr warns at 85% of the limit. To raise it, press "How
+to fix" on the warning, or run:
+
+```sh
+echo fs.inotify.max_user_instances=1024 | sudo tee /etc/sysctl.d/90-gerdr-inotify.conf
+sudo sysctl -p /etc/sysctl.d/90-gerdr-inotify.conf
+```
+
+To undo it, delete that file and reboot.
+
+To use fewer instead, set `live_config_reload = false` under `[terminal]`, or
+use the launcher's "Turn off terminal config reload" row. New terminals then
+read their config once. Open ones let go of theirs when gerdr restarts.
 
 ## Development
 

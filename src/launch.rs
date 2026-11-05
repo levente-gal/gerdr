@@ -548,7 +548,7 @@ impl Gerdr {
                     command,
                     &self.alacritty_socket(),
                     dir,
-                    &self.theme().palette().alacritty_options(),
+                    &self.terminal_options(),
                 ),
             };
             if let Some(command) = changed {
