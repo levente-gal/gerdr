@@ -2697,6 +2697,7 @@ pub(super) fn feature_tab() -> super::FeatureTabView {
         which: Some((0, 2)),
         remove: "Abandon\u{2026}",
         rail,
+        back: None,
         repos: vec![
             repo("api", "feature/bulk-export", true, None, Some((212, 38))),
             repo("web", "feature/bulk-export", true, None, Some((96, 4))),
@@ -3026,11 +3027,23 @@ fn feature_tab_verify_failed() -> super::FeatureTabView {
     view
 }
 
+/// `view` with the flow back at Build from stage `from`: what was done ran once.
+fn turned_back(view: &mut super::FeatureTabView, from: usize) {
+    use super::NodeMark;
+    for node in &mut view.rail {
+        if node.mark == NodeMark::Done {
+            node.mark = NodeMark::Ran;
+        }
+    }
+    view.back = Some(super::RailBack { from, to: 3 });
+}
+
 /// A fix plan from Verify's failures, ready to review.
 fn feature_tab_fix_plan() -> super::FeatureTabView {
     use super::{ButtonStyle, CheckTone, NodeMark, PageButton, PageSection};
     let mut view = feature_tab_verify_failed();
     at_stage(&mut view, 4, NodeMark::Waiting, "fix plan ready");
+    turned_back(&mut view, 4);
     view.page.buttons = vec![
         PageButton {
             label: "Review".into(),
@@ -3406,13 +3419,27 @@ fn feature_tab_held() -> super::FeatureTabView {
 }
 
 /// At AI review, its findings sent to the Build agent, which runs again.
+fn feature_tab_fixed_code() -> super::FeatureTabView {
+    use super::NodeMark;
+    let mut view = feature_tab();
+    at_stage(&mut view, 3, NodeMark::Current, "running 2m");
+    for node in &mut view.rail[4..=5] {
+        node.mark = NodeMark::Ran;
+        node.line = "1h ago".into();
+    }
+    turned_back(&mut view, 5);
+    view
+}
+
+/// AI review's findings sent back to the Build agent, running on them.
 fn feature_tab_fixing() -> super::FeatureTabView {
     use super::{ButtonStyle, CheckTone, Dot, NodeMark, PageButton, PageSection, StagePage};
     use crate::{agent_icons::AgentIcon, feature::Stage};
     let mut view = feature_tab();
-    at_stage(&mut view, 5, NodeMark::Current, "findings read");
+    at_stage(&mut view, 5, NodeMark::Paused, "making fixes");
     view.rail[3].mark = NodeMark::Fixing;
     view.rail[3].line = "running again".into();
+    turned_back(&mut view, 5);
     view.page = StagePage {
         title: "AI review".into(),
         about: Stage::AiReview.about().into(),
@@ -3725,7 +3752,7 @@ fn feature_tab_manual_test(note: bool) -> super::FeatureTabView {
 }
 
 /// The feature tab's fixtures, by name.
-fn feature_tabs() -> [(&'static str, super::FeatureTabView); 31] {
+fn feature_tabs() -> [(&'static str, super::FeatureTabView); 32] {
     [
         ("tab_build", feature_tab()),
         ("tab_plan_ready", feature_tab_plan_ready()),
@@ -3760,6 +3787,7 @@ fn feature_tabs() -> [(&'static str, super::FeatureTabView); 31] {
         ("tab_held", feature_tab_held()),
         ("tab_resume", feature_tab_resume()),
         ("tab_fixing", feature_tab_fixing()),
+        ("tab_fixed_code", feature_tab_fixed_code()),
         ("tab_approved", feature_tab_approved()),
         ("tab_locked", feature_tab_locked()),
         ("tab_start_over", feature_tab_start_over()),
@@ -3771,7 +3799,7 @@ fn feature_tabs() -> [(&'static str, super::FeatureTabView); 31] {
 }
 
 /// Each fixture at the width it shows best at, and Build at all three.
-const TAB_SURFACES: [(&str, i32); 38] = [
+const TAB_SURFACES: [(&str, i32); 40] = [
     ("tab_build", 860),
     ("tab_build", 1180),
     ("tab_build", 1920),
@@ -3802,6 +3830,8 @@ const TAB_SURFACES: [(&str, i32); 38] = [
     ("tab_resume", 1180),
     ("tab_resume", 860),
     ("tab_fixing", 1180),
+    ("tab_fixed_code", 1180),
+    ("tab_fixed_code", 860),
     ("tab_approved", 1180),
     ("tab_locked", 1180),
     ("tab_start_over", 1180),
@@ -3812,7 +3842,7 @@ const TAB_SURFACES: [(&str, i32); 38] = [
     ("tab_manual_note", 860),
 ];
 
-const FEATURE_TAB: [&str; 38] = [
+const FEATURE_TAB: [&str; 40] = [
     "tab_build_860",
     "tab_build_1180",
     "tab_build_1920",
@@ -3843,6 +3873,8 @@ const FEATURE_TAB: [&str; 38] = [
     "tab_resume_1180",
     "tab_resume_860",
     "tab_fixing_1180",
+    "tab_fixed_code_1180",
+    "tab_fixed_code_860",
     "tab_approved_1180",
     "tab_locked_1180",
     "tab_start_over_1180",
@@ -3854,170 +3886,178 @@ const FEATURE_TAB: [&str; 38] = [
 ];
 
 /// The recorded hashes of `FEATURE_TAB`, per case in `CASES`.
-const GOLDEN_FEATURE_TAB: [[u64; 38]; 4] = [
+const GOLDEN_FEATURE_TAB: [[u64; 40]; 4] = [
     // Dark at 1
     [
-        0x332b7228d6306b6d, // tab_build_860
-        0x4a560a01809ab615, // tab_build_1180
-        0x0ca3ff81897b4192, // tab_build_1920
-        0x3e5ff22621165ca2, // tab_plan_ready_1180
-        0xa2de827c5de38170, // tab_verify_failed_1920
-        0x886596dd8044d497, // tab_fix_plan_860
-        0x7d621f80e1bd26b5, // tab_ship_blocked_1180
-        0x520019d1eac6a259, // tab_done_1920
-        0xa5b16c0194b40754, // tab_later_860
-        0x10939923e98bbb10, // tab_repos_1180
-        0xf3923edf9fc086ca, // tab_unfolded_860
-        0xa2e3c3236d9a4c23, // tab_unfolded_1920
-        0x6bb08de3009489e4, // tab_shipped_1180
-        0xd7eb8b85f0f59ecc, // tab_repos_failed_1180
-        0x0df3c66a740956ec, // tab_repos_error_860
-        0x2deb63ac903f943d, // tab_more_repos_850
-        0x858f0cb5124dbd52, // tab_more_repos_mid_850
-        0x808bb47e4207e420, // tab_rail_wrap_500
-        0x9e1ed44325e0fa16, // tab_rail_wrap_1180
-        0x3c252aa283117b96, // tab_picks_later_1180
-        0xd88a505544d5cf95, // tab_picks_running_860
-        0x33e34326977ddd7f, // tab_model_later_1180
-        0x0575f6c2eb14bd24, // tab_model_long_860
-        0x4dbc062367ae4fc1, // tab_t3_draft_860
-        0x57745578929692cf, // tab_milestone_mode_1180
-        0x86ae2bd76b9aac67, // tab_milestone_mode_860
-        0x959063741091a5e0, // tab_held_860
-        0x32dfb9ea19dc6ce5, // tab_resume_1180
-        0x3dc610bcf46145d9, // tab_resume_860
-        0x5f8c8c6f813d9705, // tab_fixing_1180
-        0x1ca019021d57d8c7, // tab_approved_1180
-        0xc6318e4fe0bc1706, // tab_locked_1180
-        0xd35d28e964e71244, // tab_start_over_1180
-        0x486c632f11ebc34c, // tab_discover_brief_1180
-        0xc0d13e4c733a24fd, // tab_discover_brief_860
-        0x5f23ff6fe2c78117, // tab_plan_long_1180
-        0x098d46261a41d41a, // tab_manual_test_1180
-        0x449dde71dc52f456, // tab_manual_note_860
+        0xeea32b2dde14dbad, // tab_build_860
+        0x8bdca6bb843c3b15, // tab_build_1180
+        0xb11ebf406b566492, // tab_build_1920
+        0xc1278577e56967a2, // tab_plan_ready_1180
+        0xe6c0a8c26922ed70, // tab_verify_failed_1920
+        0xcfa2304e2991cdb2, // tab_fix_plan_860
+        0xda2f67811915ebb5, // tab_ship_blocked_1180
+        0xb00d310aa6adb0d9, // tab_done_1920
+        0x79859ce0110dd014, // tab_later_860
+        0xecff1bca29656dcf, // tab_repos_1180
+        0xb6bf09b42c8d84e5, // tab_unfolded_860
+        0xc495b855ac66b078, // tab_unfolded_1920
+        0x511f6c31cccf4a64, // tab_shipped_1180
+        0xb7dc1edba91c95e9, // tab_repos_failed_1180
+        0xc05ed6e05e8ab3ac, // tab_repos_error_860
+        0xf94f331bc90122bd, // tab_more_repos_850
+        0x086b5500dec7b9d2, // tab_more_repos_mid_850
+        0x94508698739a67e0, // tab_rail_wrap_500
+        0x481fc3240c4d3e16, // tab_rail_wrap_1180
+        0x7f35f7fe16d2bf96, // tab_picks_later_1180
+        0xfe37cf5084a0c7d5, // tab_picks_running_860
+        0x794d6c93750ad5ff, // tab_model_later_1180
+        0x0a461e0166ab2ce4, // tab_model_long_860
+        0x3836b05b3315ee81, // tab_t3_draft_860
+        0x3f362c130b5f3f4f, // tab_milestone_mode_1180
+        0x70a830e1e6daf5e7, // tab_milestone_mode_860
+        0xb2cc155d9a72e120, // tab_held_860
+        0xb769e6bd04ceafe5, // tab_resume_1180
+        0x3f752b44da659f99, // tab_resume_860
+        0x9395d0d81d749c1d, // tab_fixing_1180
+        0x585f89c3673c704a, // tab_fixed_code_1180
+        0xed2543ba784f3741, // tab_fixed_code_860
+        0x39dad694534611c7, // tab_approved_1180
+        0x1f0a0d2a92104906, // tab_locked_1180
+        0xfc861ee78304bfbc, // tab_start_over_1180
+        0xad2f66c417c0d574, // tab_discover_brief_1180
+        0x8210c973d4a3e76d, // tab_discover_brief_860
+        0xe478e5d0bfc203ff, // tab_plan_long_1180
+        0xa0b64a8d9cb72827, // tab_manual_test_1180
+        0xa873580051f4643e, // tab_manual_note_860
     ],
     // Dark at 2
     [
-        0xb633cfa4474a78dd, // tab_build_860
-        0x2d2c69e8032089db, // tab_build_1180
-        0x0b04f4e61d9547a4, // tab_build_1920
-        0x4d3c1f8e05267489, // tab_plan_ready_1180
-        0x7662f681d1008034, // tab_verify_failed_1920
-        0x8c09bbc7c0ad3977, // tab_fix_plan_860
-        0x149dd2e36ff9d918, // tab_ship_blocked_1180
-        0xe9ee9745a52c6e9c, // tab_done_1920
-        0x124488a8df67ef48, // tab_later_860
-        0xd0afc08ad8ccaba6, // tab_repos_1180
-        0x1ff0d27552536645, // tab_unfolded_860
-        0x428049c59a1b4410, // tab_unfolded_1920
-        0x02dee3f6e8043ccc, // tab_shipped_1180
-        0x04d99be59a1d9af8, // tab_repos_failed_1180
-        0x7cca6a3eeb926d7c, // tab_repos_error_860
-        0x92ccc566c9eef4bb, // tab_more_repos_850
-        0xbe8296ed381d2b08, // tab_more_repos_mid_850
-        0xa3df6c15988986e8, // tab_rail_wrap_500
-        0x82c451aa75cff50c, // tab_rail_wrap_1180
-        0x7aed0177026b8fc5, // tab_picks_later_1180
-        0x8ca2ad134f56fc71, // tab_picks_running_860
-        0xc3df9d2de6f7635e, // tab_model_later_1180
-        0xe19bc9d3bae6257a, // tab_model_long_860
-        0x3e55166b5b1aaeba, // tab_t3_draft_860
-        0x10fd56555c59a8ed, // tab_milestone_mode_1180
-        0x0fda7fb893110047, // tab_milestone_mode_860
-        0x0f4db73107d01bbf, // tab_held_860
-        0x390926dd9747f056, // tab_resume_1180
-        0x64fddb303f071664, // tab_resume_860
-        0xfaa0db85b1661c70, // tab_fixing_1180
-        0x81dcfe933b50d1c7, // tab_approved_1180
-        0x9eb70b3d664962c7, // tab_locked_1180
-        0x9553d8c366a08944, // tab_start_over_1180
-        0x9c01218e31710f3c, // tab_discover_brief_1180
-        0xa6e5fd80ec31258c, // tab_discover_brief_860
-        0x52af07e71ae3aa23, // tab_plan_long_1180
-        0x59fbafdaf0af0298, // tab_manual_test_1180
-        0x5c67226e281ec032, // tab_manual_note_860
+        0x26cd14793bc4d3dd, // tab_build_860
+        0x3d9a9499d8cc1bdb, // tab_build_1180
+        0x660947552ac763a4, // tab_build_1920
+        0xd87da022045a2089, // tab_plan_ready_1180
+        0xf060b4300361f434, // tab_verify_failed_1920
+        0x2b5e9dfc632c57ab, // tab_fix_plan_860
+        0x379ac8c5c1f05b18, // tab_ship_blocked_1180
+        0x4d6a8809d7dc9a9c, // tab_done_1920
+        0x7f7a0f831318ce48, // tab_later_860
+        0x44ae908968e139c9, // tab_repos_1180
+        0x4349aaaef31b566e, // tab_unfolded_860
+        0x984b3863f4cde86f, // tab_unfolded_1920
+        0x69efa34e31fd40cc, // tab_shipped_1180
+        0xedb7b9c5256b4829, // tab_repos_failed_1180
+        0xc4fa857cf9c8c67c, // tab_repos_error_860
+        0x5fbbc687c679f8bb, // tab_more_repos_850
+        0xfc353c128e0ee908, // tab_more_repos_mid_850
+        0x52a53e8cd337f3e8, // tab_rail_wrap_500
+        0x4ac84ccf98e26b0c, // tab_rail_wrap_1180
+        0x7e207be37044cbc5, // tab_picks_later_1180
+        0x3c61a0ba5a737571, // tab_picks_running_860
+        0xffcd124a220e3b5e, // tab_model_later_1180
+        0x48d935ffd669157a, // tab_model_long_860
+        0x768057f7dca79eba, // tab_t3_draft_860
+        0x3844e9a4d017f4ed, // tab_milestone_mode_1180
+        0x4f45010309ce5447, // tab_milestone_mode_860
+        0x677934c25f6783bf, // tab_held_860
+        0xa614cc43a9952056, // tab_resume_1180
+        0xf054db57d3898f64, // tab_resume_860
+        0x531a52802761bb59, // tab_fixing_1180
+        0x0cb20655e92d6a82, // tab_fixed_code_1180
+        0x8816fb1b6e76ee7c, // tab_fixed_code_860
+        0xbfd1ff58f63dabc7, // tab_approved_1180
+        0x2ac9eea070a89ec7, // tab_locked_1180
+        0x14684a4d8940be84, // tab_start_over_1180
+        0x5f23c0dfbcaab18c, // tab_discover_brief_1180
+        0xacea8b7421947944, // tab_discover_brief_860
+        0x9bf3d7ef05b66203, // tab_plan_long_1180
+        0x0381a16f4c182e79, // tab_manual_test_1180
+        0x69602a3c18bd7031, // tab_manual_note_860
     ],
     // Light at 1
     [
-        0xf25c14ce23c8189e, // tab_build_860
-        0x2106005dfecb09fc, // tab_build_1180
-        0x1ba3f2e720cededb, // tab_build_1920
-        0xf9924bda9bfd9238, // tab_plan_ready_1180
-        0x6090828d836d1594, // tab_verify_failed_1920
-        0x627de956e6331a79, // tab_fix_plan_860
-        0x5cdf73e777f176e5, // tab_ship_blocked_1180
-        0x78472c2acf57882a, // tab_done_1920
-        0xb09242356bf70e71, // tab_later_860
-        0x70febdf653f39fa7, // tab_repos_1180
-        0x98948b071a2d848e, // tab_unfolded_860
-        0x76bd5c3092b4e8b9, // tab_unfolded_1920
-        0x896a599b570059f8, // tab_shipped_1180
-        0x8ec3d2f39f095d4c, // tab_repos_failed_1180
-        0xaef1d3ff8a3537cb, // tab_repos_error_860
-        0xda13308acbc923f6, // tab_more_repos_850
-        0x218169350d798d58, // tab_more_repos_mid_850
-        0xeed70e469ce1486d, // tab_rail_wrap_500
-        0xa7a01c7d9cafdf8f, // tab_rail_wrap_1180
-        0x9d2fdb8947ae4a34, // tab_picks_later_1180
-        0xa8aec2f4826ac6de, // tab_picks_running_860
-        0x82c925734ce7d2a2, // tab_model_later_1180
-        0x166b731a5f1b4e66, // tab_model_long_860
-        0xdaae95dcf08288a0, // tab_t3_draft_860
-        0x692f5c5da435e744, // tab_milestone_mode_1180
-        0xeec716e4f88f3cfa, // tab_milestone_mode_860
-        0x31ab23617fe6347d, // tab_held_860
-        0x159317f24b4657ab, // tab_resume_1180
-        0x4320eabc301a6ee1, // tab_resume_860
-        0x11f148962fd8aa61, // tab_fixing_1180
-        0xf6951ad2aa678c10, // tab_approved_1180
-        0xc603896aa3e8ed79, // tab_locked_1180
-        0x080148cb08d206bd, // tab_start_over_1180
-        0x35987d557948e1c9, // tab_discover_brief_1180
-        0x0cdbbd85ba57047c, // tab_discover_brief_860
-        0xb843eb7e1f0afe17, // tab_plan_long_1180
-        0x015462a67373d01d, // tab_manual_test_1180
-        0x82d62db81cb6795f, // tab_manual_note_860
+        0x7a51e0da85c6fdde, // tab_build_860
+        0xe1be5bd4abe0c8fc, // tab_build_1180
+        0x557a17f598e51cdb, // tab_build_1920
+        0x1012d3e4c8093338, // tab_plan_ready_1180
+        0x1446efceff05c114, // tab_verify_failed_1920
+        0x62301cd9e6720d86, // tab_fix_plan_860
+        0x728ffdd46aefb765, // tab_ship_blocked_1180
+        0x3a0d691064b8edaa, // tab_done_1920
+        0x7363a198125024f1, // tab_later_860
+        0xf9f35e244e66aa33, // tab_repos_1180
+        0x19e6bce146728062, // tab_unfolded_860
+        0xe253c3b2f1a9ff59, // tab_unfolded_1920
+        0x48407a8b2da2c5f8, // tab_shipped_1180
+        0x5f455a44a9f6214a, // tab_repos_failed_1180
+        0x007f09e869bff64b, // tab_repos_error_860
+        0x1d160effcecae7b6, // tab_more_repos_850
+        0x3ede1db300993118, // tab_more_repos_mid_850
+        0xc9e77c6772226f6d, // tab_rail_wrap_500
+        0xcccbbd680936a90f, // tab_rail_wrap_1180
+        0xe4c3a23900240a34, // tab_picks_later_1180
+        0xe0c9c114ab51551e, // tab_picks_running_860
+        0x845dad8ceed3d6a2, // tab_model_later_1180
+        0x6d7aa10a711a8ba6, // tab_model_long_860
+        0x51bfb58b32dc5fe0, // tab_t3_draft_860
+        0x463ad372d2d29c44, // tab_milestone_mode_1180
+        0x51a0107161d7b6ba, // tab_milestone_mode_860
+        0x30aeff9ca125f77d, // tab_held_860
+        0xa79bf4b0e5c7222b, // tab_resume_1180
+        0x823ad24610c8d561, // tab_resume_860
+        0xa3f2411cb14be74f, // tab_fixing_1180
+        0x4b81cbbd1bfa5f4c, // tab_fixed_code_1180
+        0xf91ceb069bbeb8f5, // tab_fixed_code_860
+        0xca21abeb42b40c90, // tab_approved_1180
+        0xf8462e772a8bfb79, // tab_locked_1180
+        0x6101ae175d95f95d, // tab_start_over_1180
+        0x361a521b58676049, // tab_discover_brief_1180
+        0xde0d608a5eccfeec, // tab_discover_brief_860
+        0x77767b97a4381cff, // tab_plan_long_1180
+        0xe4bd695e759f1b44, // tab_manual_test_1180
+        0x061ec3807f66b135, // tab_manual_note_860
     ],
     // Light at 2
     [
-        0xf19be9907f9ce371, // tab_build_860
-        0x44899eb35f2aec7b, // tab_build_1180
-        0x13d5e838f53d5524, // tab_build_1920
-        0x37c9808a13a03d1d, // tab_plan_ready_1180
-        0xe64b80b331419051, // tab_verify_failed_1920
-        0xeda8429456482cbd, // tab_fix_plan_860
-        0x51737a248f38f325, // tab_ship_blocked_1180
-        0x20cb3b0d79c16be8, // tab_done_1920
-        0xb84b5c9831ec1f86, // tab_later_860
-        0x6a17727dd6dbbb2d, // tab_repos_1180
-        0xaf24250a819d1b09, // tab_unfolded_860
-        0x76eb84f7659ddc77, // tab_unfolded_1920
-        0x4224215c1b0e75fe, // tab_shipped_1180
-        0xb4371928c174ba57, // tab_repos_failed_1180
-        0xe779d128199f6f30, // tab_repos_error_860
-        0x719572628e89d542, // tab_more_repos_850
-        0x342e55c1e1946d34, // tab_more_repos_mid_850
-        0x4ddd164a165d3caf, // tab_rail_wrap_500
-        0xe368f7609b20caab, // tab_rail_wrap_1180
-        0x4bdc8bb587ed3818, // tab_picks_later_1180
-        0x5b14b0a0029e76e5, // tab_picks_running_860
-        0x0fc934b81f65b586, // tab_model_later_1180
-        0xcafd57922c765f2a, // tab_model_long_860
-        0x9e296d650b865925, // tab_t3_draft_860
-        0xf94e6032ecaf5cb5, // tab_milestone_mode_1180
-        0x22524a82dd135edf, // tab_milestone_mode_860
-        0x67bfd4b0c407cbf1, // tab_held_860
-        0xc659c9318b078c0e, // tab_resume_1180
-        0x4036574b8badfc88, // tab_resume_860
-        0x2e8e4d642b66d681, // tab_fixing_1180
-        0x90004c75fcd97c6c, // tab_approved_1180
-        0x214715da487d7e6d, // tab_locked_1180
-        0x88932cd5b3fffe7d, // tab_start_over_1180
-        0xfa9156bb407b2d46, // tab_discover_brief_1180
-        0xb9cde853b7dca0c2, // tab_discover_brief_860
-        0x364c80c96fc60b3e, // tab_plan_long_1180
-        0x8b786b8d2d0b74d9, // tab_manual_test_1180
-        0x35b6488ccbb08f83, // tab_manual_note_860
+        0x175dbccae1688b71, // tab_build_860
+        0xbea4d36a45eca67b, // tab_build_1180
+        0xe39bc64536ad6f24, // tab_build_1920
+        0x9ba97245b9431b1d, // tab_plan_ready_1180
+        0xc0a2a63f8deefc51, // tab_verify_failed_1920
+        0xd8498ded5b6ad42e, // tab_fix_plan_860
+        0x4cdb0a59ab2de925, // tab_ship_blocked_1180
+        0x3ac49d19c9d059e8, // tab_done_1920
+        0x866b8ccb16687686, // tab_later_860
+        0xe70e9f8146cd5206, // tab_repos_1180
+        0xe1a01a189c787e42, // tab_unfolded_860
+        0xde7558c397f7decc, // tab_unfolded_1920
+        0x16e2078fa994edfe, // tab_shipped_1180
+        0xb33da6a05465fc9d, // tab_repos_failed_1180
+        0xb0315864662e7e30, // tab_repos_error_860
+        0xc4ba8dc90fb67e42, // tab_more_repos_850
+        0x17ce11f708359634, // tab_more_repos_mid_850
+        0x3c42a1f76c838daf, // tab_rail_wrap_500
+        0x91255145f6402cab, // tab_rail_wrap_1180
+        0x3500dae802999418, // tab_picks_later_1180
+        0x9f887a9d31a494e5, // tab_picks_running_860
+        0x86e456cd43e28586, // tab_model_later_1180
+        0xd169b0d3837f502a, // tab_model_long_860
+        0x0e9955036c1a7725, // tab_t3_draft_860
+        0xc40a230cf0b112b5, // tab_milestone_mode_1180
+        0x44519de19defecdf, // tab_milestone_mode_860
+        0x274ca4955f6f73f1, // tab_held_860
+        0xc5c23bc0a12c240e, // tab_resume_1180
+        0xba0f501e1d90ab88, // tab_resume_860
+        0x5f20355ecf3438d7, // tab_fixing_1180
+        0xee03371f6d89ea57, // tab_fixed_code_1180
+        0x285d29c396bc96ce, // tab_fixed_code_860
+        0xaf6e62e9aa28626c, // tab_approved_1180
+        0xe88210491ec9da6d, // tab_locked_1180
+        0xe8e6a8189d0001cd, // tab_start_over_1180
+        0x1f0f7201920e14f6, // tab_discover_brief_1180
+        0x6772f0fb23152ac2, // tab_discover_brief_860
+        0x4c5a60823adfe9ae, // tab_plan_long_1180
+        0x1e2c584646dc9ba6, // tab_manual_test_1180
+        0x1b69d7c51f346529, // tab_manual_note_860
     ],
 ];
 
@@ -4320,29 +4360,29 @@ const FINDINGS: [&str; 4] = [
 const GOLDEN_FINDINGS: [[u64; 4]; 4] = [
     // Dark at 1
     [
-        0x4df3cb38dedb7e42, // tab_findings_1180
-        0xccd25bf5bdf427ad, // tab_findings_860
+        0x738e6c3ebfa44942, // tab_findings_1180
+        0x5c38f3af4e01808d, // tab_findings_860
         0x9b1a1d7cdeb1eb3e, // finding_dialog
         0xffe2d15a8e4e54f0, // finding_dialog_error
     ],
     // Dark at 2
     [
-        0x68dcd72f52258122, // tab_findings_1180
-        0xfc60645a630f2822, // tab_findings_860
+        0x9ce8dbd93d012922, // tab_findings_1180
+        0x62d4ba4c4b10e21a, // tab_findings_860
         0x55922cc4d7887d5e, // finding_dialog
         0xe02075584e16834c, // finding_dialog_error
     ],
     // Light at 1
     [
-        0x01a4e6b085c65b31, // tab_findings_1180
-        0x48552592349dde93, // tab_findings_860
+        0xb6380118af2bc5b1, // tab_findings_1180
+        0x076b7755f1c235a7, // tab_findings_860
         0x156e15adc70a4b27, // finding_dialog
         0x61b681eab468960a, // finding_dialog_error
     ],
     // Light at 2
     [
-        0xaaaf9e8e57d5e95d, // tab_findings_1180
-        0xfd11ed4c6338662d, // tab_findings_860
+        0xbdec8b324b4b975d, // tab_findings_1180
+        0x29bf96ee5f4c4af9, // tab_findings_860
         0x00bfaaad7b90e1a1, // finding_dialog
         0xb3c382df7a6af0d6, // finding_dialog_error
     ],
@@ -4833,10 +4873,10 @@ const CHECK_CARDS: [&str; 2] = ["tab_checks_1180", "tab_checks_860"];
 
 /// The recorded hashes of `CHECK_CARDS`, per case in `CASES`.
 const GOLDEN_CHECK_CARDS: [[u64; 2]; 4] = [
-    [0x4965a66b6e5ceb4d, 0xfb5bfa4d2a75aa4f],
-    [0xdb2c439f46b10f6b, 0xc140e3ebdcbaab84],
-    [0xfc2afa1772d30dc0, 0xcceef38ef56e9688],
-    [0xc688613a14d7f5c1, 0xd2828d6e68c115be],
+    [0x21b453e2d0c2ba9a, 0xa6741dfbd9e5f310],
+    [0x7e4ef9f9c9837727, 0x669bca54ffe6a240],
+    [0x45487a5a370e2db7, 0xc42764dd56db19ab],
+    [0xbef32e1c1f41926a, 0x9a8985c824ad4a1d],
 ];
 
 #[test]

@@ -72,8 +72,8 @@ use crate::{
     chrome::{
         self, ActivityRow, AgentChip, ButtonStyle, CheckLine, CheckTone, CommandsTab, Dot,
         FeatureRepoRow, FeatureTabHit, FeatureTabView, FindingCard, FindingTag, MAX_CHECK_LINES,
-        NewFeatureHit, NewFeatureRepo, NewFeatureView, NodeMark, PageButton, PageSection, RailNode,
-        RepoKind, RepoNote, StageMark, StagePage, TabArea, TabColumn,
+        NewFeatureHit, NewFeatureRepo, NewFeatureView, NodeMark, PageButton, PageSection, RailBack,
+        RailNode, RepoKind, RepoNote, StageMark, StagePage, TabArea, TabColumn,
     },
     doc_review::DocFile,
     feature::{
@@ -1398,6 +1398,32 @@ fn rework(feature: &Feature, ctx: RowCtx) -> Option<Rework> {
         });
     }
     ctx.fixing.map(Rework::Runs)
+}
+
+/// The stage that sent work back to `feature`'s Build agent, while the flow
+/// is back there: from a fix round's start to its end, at rest as it waits
+/// for the user too, then for as long as the agent is seen at it or the fixes
+/// have Build to do again. The rail reads as turned back then.
+fn turned_back(feature: &Feature, ctx: RowCtx) -> Option<Stage> {
+    if feature.status != Status::Open {
+        return None;
+    }
+    let last = feature.last_fix_round.as_ref().map(|r| r.stage);
+    let current = feature.current();
+    let from = if let Some(round) = &feature.fix_round {
+        Some(round.stage)
+    } else if current == Some(Stage::Build) {
+        last
+    } else if rework(feature, ctx).is_some() {
+        // The feature may have come back to before the stage that asked.
+        match (last, current) {
+            (Some(last), Some(current)) => Some(last.min(current)),
+            (last, current) => last.or(current),
+        }
+    } else {
+        None
+    };
+    from.filter(|stage| *stage > Stage::Build)
 }
 
 /// `rework`, on the page of `stage` when `stage` is where the feature is at.
@@ -4900,6 +4926,7 @@ impl Gerdr {
             manual: None,
             fix_round: None,
             last_fix_round: None,
+            ran_once: Default::default(),
             fix_rounds: 0,
         };
         self.features
@@ -7516,14 +7543,24 @@ fn current_line(feature: &Feature, stage: Stage, state: &LineState, now: u64) ->
 
 /// `stage`'s node on the rail of `feature`.
 fn rail_node(feature: &Feature, stage: Stage, state: &PanelState, now: u64) -> RailNode {
-    let done = stage_mark(feature, stage) == StageMark::Done;
+    let mark = stage_mark(feature, stage);
+    let ran = mark == StageMark::Later && feature.ran_once.contains_key(&stage);
+    let done = mark == StageMark::Done || ran;
     let agent = (feature.runs.get(&stage).filter(|_| done)).map(|run| {
         let what = run.model.as_deref().map_or(run.agent.as_str(), short_model);
         (AgentIcon::from_agent(&run.agent), what.to_owned())
     });
-    let back = rework(feature, state.ctx).filter(|_| stage == Stage::Build);
+    let at_work = rework(feature, state.ctx);
+    let back = at_work.filter(|_| stage == Stage::Build);
+    let turned = turned_back(feature, state.ctx);
     let (mark, line) = match (stage_mark(feature, stage), back) {
         (_, Some(back)) => back.node(),
+        // Code changing is what's expected now: "code changed" says so once
+        // the work is over, when it asks for something.
+        (StageMark::Done, _) if turned.is_some() => {
+            let at = feature.marks.get(&stage).map_or(0, |m| m.at);
+            (NodeMark::Ran, projects::ago(now, at))
+        }
         (StageMark::Done, _) if is_stale(feature, stage, state.probe) => {
             (NodeMark::Stale, "code changed".to_owned())
         }
@@ -7532,13 +7569,19 @@ fn rail_node(feature: &Feature, stage: Stage, state: &PanelState, now: u64) -> R
             (NodeMark::Done, projects::ago(now, at))
         }
         (StageMark::Current, _) => {
-            let mark = match waits(feature, stage, state) {
-                true => NodeMark::Waiting,
-                false => NodeMark::Current,
+            let mark = if waits(feature, stage, state) {
+                NodeMark::Waiting
+            } else if turned == Some(stage) && at_work.is_some() {
+                NodeMark::Paused
+            } else {
+                NodeMark::Current
             };
             (mark, current_line(feature, stage, &state.into(), now))
         }
-        (StageMark::Later, _) => (NodeMark::Later, String::new()),
+        (StageMark::Later, _) => match feature.ran_once.get(&stage) {
+            Some(at) => (NodeMark::Ran, projects::ago(now, *at)),
+            None => (NodeMark::Later, String::new()),
+        },
     };
     RailNode {
         label: stage.label().to_owned(),
@@ -8878,6 +8921,10 @@ fn tab_view(
             ..rail_node(feature, *s, state, now)
         })
         .collect();
+    let back = turned_back(feature, state.ctx).map(|from| RailBack {
+        from: stage_index(from),
+        to: stage_index(Stage::Build),
+    });
     let mut page = match panel.keys {
         true => keys_page(),
         false => stage_page(
@@ -8949,6 +8996,7 @@ fn tab_view(
         which,
         remove: remove_label(feature),
         rail,
+        back,
         repo: at,
         repos,
         repos_error,
@@ -9062,6 +9110,7 @@ pub(crate) mod tests {
             manual: None,
             fix_round: None,
             last_fix_round: None,
+            ran_once: Default::default(),
             fix_rounds: 0,
         }
     }
@@ -10842,6 +10891,123 @@ pub(crate) mod tests {
             give_back: Default::default(),
         });
         f
+    }
+
+    /// How `f`'s rail reads for `ctx`: its marks, in order.
+    fn rail_marks(f: &Feature, ctx: RowCtx) -> Vec<NodeMark> {
+        let state = PanelState {
+            ctx,
+            ..PanelState::default()
+        };
+        (Stage::ALL.iter())
+            .map(|s| rail_node(f, *s, &state, 2_000).mark)
+            .collect()
+    }
+
+    #[test]
+    fn the_rail_stays_turned_back_from_a_rounds_start_to_builds_next_mark() {
+        use NodeMark::{Current, Done, Fixing, Later, Paused, Ran, Waiting};
+        let running = RowCtx {
+            fixing: Some(Dot::Working),
+            ..RowCtx::default()
+        };
+        let at_rest = RowCtx::default();
+        // At AI review, nothing sent back yet.
+        let mut f = feature("b", vec![repo("api", true)], 5);
+        let mut run = held_run(Some("p1"));
+        run.held = false;
+        f.runs.insert(Stage::Build, run);
+        assert_eq!(turned_back(&f, at_rest), None);
+        assert_eq!(
+            rail_marks(&f, at_rest),
+            [Done, Done, Done, Done, Done, Current, Later, Later, Later]
+        );
+        // The agent plans: it alone stands out, the stage that asked waiting.
+        let mut f = in_round(f, Stage::AiReview, FixPhase::Planning);
+        assert_eq!(turned_back(&f, running), Some(Stage::AiReview));
+        assert_eq!(
+            rail_marks(&f, running),
+            [Ran, Ran, Ran, Fixing, Ran, Paused, Later, Later, Later]
+        );
+        // The plan is ready and the agent rests: the line stays, the next move
+        // the user's.
+        f = in_round(f, Stage::AiReview, FixPhase::Ready);
+        assert_eq!(turned_back(&f, at_rest), Some(Stage::AiReview));
+        assert_eq!(
+            rail_marks(&f, at_rest),
+            [Ran, Ran, Ran, Ran, Ran, Waiting, Later, Later, Later]
+        );
+        // The fixes change the code: the marks from Build on go. What ran
+        // doesn't turn into stages that never did, and when it ran still shows.
+        f = in_round(f, Stage::AiReview, FixPhase::Fixing);
+        assert_eq!(f.invalidate("changed", 1_500), Some(Stage::Build));
+        assert_eq!(turned_back(&f, running), Some(Stage::AiReview));
+        assert_eq!(
+            rail_marks(&f, running),
+            [Ran, Ran, Ran, Current, Ran, Ran, Later, Later, Later]
+        );
+        let state = PanelState::default();
+        let asked = rail_node(
+            &f,
+            Stage::AiReview,
+            &state,
+            f.ran_once[&Stage::AiReview] + 60,
+        );
+        assert_eq!(asked.line, "1m ago");
+        // The round is over, and Build still to do again.
+        f.last_fix_round = f.fix_round.take();
+        assert_eq!(turned_back(&f, at_rest), Some(Stage::AiReview));
+        // Build marked done: the flow goes on, and the line goes. The stages
+        // ahead stay grey until they are marked again.
+        f.tick(1_600, "you", Some("changed"));
+        assert_eq!(turned_back(&f, at_rest), None);
+        assert_eq!(
+            rail_marks(&f, at_rest),
+            [Done, Done, Done, Done, Current, Ran, Later, Later, Later]
+        );
+    }
+
+    #[test]
+    fn the_line_back_starts_at_the_stage_that_asked_and_only_past_build() {
+        let at_rest = RowCtx::default();
+        let done = |stage: Stage| stage_index(stage);
+        for stage in [
+            Stage::Verify,
+            Stage::AiReview,
+            Stage::CodeReview,
+            Stage::ManualTest,
+        ] {
+            let f = feature("b", vec![repo("api", true)], done(stage));
+            let f = in_round(f, stage, FixPhase::Planning);
+            assert_eq!(turned_back(&f, at_rest), Some(stage));
+        }
+        let f = feature("b", vec![repo("api", true)], 5);
+        let early = in_round(f.clone(), Stage::Build, FixPhase::Planning);
+        assert_eq!(turned_back(&early, at_rest), None);
+        let mut closed = in_round(f, Stage::AiReview, FixPhase::Planning);
+        closed.status = Status::Abandoned;
+        assert_eq!(turned_back(&closed, at_rest), None);
+    }
+
+    #[test]
+    fn code_changed_waits_for_the_round_to_be_over() {
+        let mut f = feature("b", vec![repo("api", true)], 6);
+        for mark in f.marks.values_mut() {
+            mark.patch = Some("p0".into());
+        }
+        // Done stages on other code than the probe read: stale, at rest.
+        let p = probe(None);
+        let state = PanelState {
+            probe: Some(&p),
+            ..PanelState::default()
+        };
+        let node = rail_node(&f, Stage::Verify, &state, 2_000);
+        assert_eq!(node.mark, NodeMark::Stale);
+        // In a round it's what's expected, and only ran once.
+        let f = in_round(f, Stage::CodeReview, FixPhase::Fixing);
+        let node = rail_node(&f, Stage::Verify, &state, 2_000);
+        assert_eq!(node.mark, NodeMark::Ran);
+        assert_ne!(node.line, "code changed");
     }
 
     #[test]

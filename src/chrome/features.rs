@@ -18,10 +18,10 @@ use super::{
     DETAIL_FONT_SIZE, DIALOG_WIDTH, DOT, Dot, FONT_SIZE, FieldSpot, LABEL_FONT_SIZE, ListBar,
     POPUP_RADIUS, Painter, Palette, QUIT_BODY, QUIT_BUTTON, QUIT_BUTTON_GAP, QUIT_LINE_GAP,
     QUIT_PADDING, QUIT_TITLE, Rect, Rgb, SHADOW, SMALL_FONT_SIZE, Thumb, agent_icon, band,
-    button_width, check, chevron_down, chevron_side, copy, cross, dialog_buttons, field_text,
-    focus_ring, footer_hint_spots, gutter_track, hint_strs, icon_sdf, measure, measure_bold,
-    measured_footer_height, mix, phys, physical, plus, rect_px, segment_tint, status_dot, tab,
-    trash,
+    button_width, check, chevron_down, chevron_side, copy, coverage, cross, dialog_buttons,
+    field_text, focus_ring, footer_hint_spots, gutter_track, hint_strs, icon_sdf, measure,
+    measure_bold, measured_footer_height, mix, phys, physical, plus, rect_px, segment,
+    segment_tint, status_dot, tab, trash,
 };
 use super::{code_mark, eye, flask, magnifier, plan_review_mark, ship_arrow, sparkle, text_lines};
 use crate::text_field::Line;
@@ -373,6 +373,21 @@ pub enum NodeMark {
     /// Done, its agent running again on work sent back to it: filled in the
     /// accent and pulsing, over the current stage, where nothing runs then.
     Fixing,
+    /// Done once and not standing now: its mark went when the code changed
+    /// or it was reopened, or the flow is back at Build (`RailBack`). A grey
+    /// ring with a tick.
+    Ran,
+    /// The current stage, with the flow back at Build on its account and the
+    /// next move not its own: a ring round its number.
+    Paused,
+}
+
+/// The flow turned back to Build: the line on the feature tab's rail, from
+/// the stage that sent work back to Build's. Indices into the rail.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct RailBack {
+    pub from: usize,
+    pub to: usize,
 }
 
 /// A stage's node on the feature tab's rail.
@@ -591,6 +606,8 @@ pub struct FeatureTabView {
     pub remove: &'static str,
     /// The nine stages, in order.
     pub rail: Vec<RailNode>,
+    /// The line back to Build, while work sent back to it is under way.
+    pub back: Option<RailBack>,
     /// The strip's chips, or with `expanded` the rows, all it could hold.
     pub repos: Vec<FeatureRepoRow>,
     /// Why the repositories couldn't be read, shown over them.
@@ -970,6 +987,15 @@ const RAIL_LABEL_STEP: i32 = 16;
 const RAIL_AGENT_GAP: i32 = 4;
 /// The room left between a node and the line joining it to the next.
 const CONNECTOR_GAP: i32 = 6;
+/// The room kept over the rail for the line back to Build, there or not, so
+/// the columns stay put when it comes.
+const RAIL_BACK: i32 = 8;
+/// How far over its nodes that line runs, how far from them it stops, the
+/// radius of its corners and the size of its arrowhead.
+const RAIL_BACK_RISE: i32 = 15;
+const RAIL_BACK_CLEAR: i32 = 5;
+const RAIL_BACK_CORNER: i32 = 5;
+const RAIL_BACK_ARROW: i32 = 4;
 /// How wide the activity's column is: the page takes the rest.
 pub const ACTIVITY_W: i32 = 240;
 /// Narrower than this, the activity has no column: its rows go at the
@@ -2187,7 +2213,7 @@ pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayou
     let sub = Rectangle::new((x, top + TAB_TITLE).into(), (text_w, TAB_SUB).into());
 
     // The rail: a slot per stage, its node at the slot's top middle.
-    let rail_top = top + header_h + RAIL_GAP;
+    let rail_top = top + header_h + RAIL_GAP + RAIL_BACK;
     let n = view.rail.len().max(1) as i32;
     let slot = |i: i32| (x + inner * i / n, x + inner * (i + 1) / n);
     // A label on two lines puts its node's short line under them: the
@@ -2562,6 +2588,57 @@ pub fn feature_tab_blinkers(
     dots
 }
 
+/// The colour of the line back to Build follows who has the next move: the
+/// Build agent while it runs, else the user if something waits for them.
+fn rail_back_color(view: &FeatureTabView, back: RailBack, p: &Palette) -> Rgb {
+    let mark = |i: usize| view.rail.get(i).map(|n| n.mark);
+    if mark(back.to) == Some(NodeMark::Fixing) {
+        p.accent
+    } else if [back.to, back.from]
+        .iter()
+        .any(|i| mark(*i) == Some(NodeMark::Waiting))
+    {
+        p.warning
+    } else {
+        p.accent
+    }
+}
+
+/// The line back to Build: up from node `from`, along over the rail, and
+/// down into node `to`, on its left, with an arrowhead.
+fn rail_back(c: &mut Canvas, from: Rect, to: Rect, scale: f64, color: Rgb) {
+    let s = scale as f32;
+    let centre = |node: Rect| (node.loc.x + NODE / 2) as f32 * s;
+    let (fx, tx) = (centre(from), centre(to));
+    let end = (from.loc.y - RAIL_BACK_CLEAR) as f32 * s;
+    let top = (from.loc.y - RAIL_BACK_RISE) as f32 * s;
+    let r = RAIL_BACK_CORNER as f32 * s;
+    let arrow = RAIL_BACK_ARROW as f32 * s;
+    // As wide as the rail's connectors.
+    let half = s;
+    let quarter = |x: f32, y: f32, cx: f32, right: bool| {
+        let cy = top + r;
+        match y <= cy && (x >= cx) == right {
+            true => ((x - cx).hypot(y - cy) - r).abs(),
+            false => f32::INFINITY,
+        }
+    };
+    let pad = (2.0 * s).ceil() as i32;
+    let (x, y) = ((tx - arrow).floor() as i32 - pad, top.floor() as i32 - pad);
+    let w = fx.ceil() as i32 + pad - x;
+    let h = end.ceil() as i32 + pad - y;
+    c.paint_in(x, y, w, h, color, |x, y| {
+        let line = (segment(x, y, fx, end, fx, top + r))
+            .min(quarter(x, y, fx - r, true))
+            .min(segment(x, y, fx - r, top, tx + r, top))
+            .min(quarter(x, y, tx + r, false))
+            .min(segment(x, y, tx, top + r, tx, end))
+            .min(segment(x, y, tx, end, tx - arrow, end - arrow))
+            .min(segment(x, y, tx, end, tx + arrow, end - arrow));
+        coverage(line - half)
+    });
+}
+
 /// How far the glow round the current stage's node reaches past it.
 const PULSE_HALO: i32 = 7;
 /// How opaque the glow is at the top of its pulse.
@@ -2650,6 +2727,7 @@ fn slice_view(view: &FeatureTabView, slice: TabSlice) -> FeatureTabView {
         which: None,
         remove: "",
         rail: Vec::new(),
+        back: None,
         repos: Vec::new(),
         repos_error: None,
         repo: 0,
@@ -2704,6 +2782,7 @@ fn slice_view(view: &FeatureTabView, slice: TabSlice) -> FeatureTabView {
             v.which = view.which;
             v.remove = view.remove;
             v.rail = view.rail.clone();
+            v.back = view.back;
             v.focus = view.focus;
             v.more = view.more;
             if strip {
@@ -3264,7 +3343,14 @@ impl Painter {
             let past = |i: usize| view.rail.get(i).map(|n| n.mark);
             let done = matches!(past(i), Some(NodeMark::Done | NodeMark::Stale))
                 || !matches!(past(i + 1), Some(NodeMark::Later) | None);
-            let color = if done { p.success } else { p.border };
+            let once = view.back.is_some()
+                || past(i) == Some(NodeMark::Ran)
+                || past(i + 1) == Some(NodeMark::Ran);
+            let color = match (done, once) {
+                (false, _) => p.border,
+                (true, false) => p.success,
+                (true, true) => p.muted,
+            };
             if to > from {
                 c.fill(
                     px(from),
@@ -3274,6 +3360,12 @@ impl Painter {
                     color,
                 );
             }
+        }
+        if let Some(back) = view.back
+            && let (Some(from), Some(to)) = (l.nodes.get(back.from), l.nodes.get(back.to))
+        {
+            let color = rail_back_color(view, back, p);
+            rail_back(c, circle(*from), circle(*to), scale, color);
         }
         for (i, (slot, node)) in l.nodes.iter().zip(&view.rail).enumerate() {
             let hovered = view.hover == Some(FeatureTabHit::Node(i));
@@ -3297,7 +3389,7 @@ impl Painter {
                 (slot.size.w - 4, NODE_LABEL).into(),
             );
             let label_color = match node.mark {
-                NodeMark::Later if !node.selected => p.muted,
+                NodeMark::Later | NodeMark::Ran if !node.selected => p.muted,
                 _ => p.text,
             };
             // A label too wide for its slot takes two lines, its node's
@@ -3318,7 +3410,7 @@ impl Painter {
                     (label.size.w, NODE_LINE).into(),
                 );
                 let color = match node.mark {
-                    NodeMark::Current | NodeMark::Fixing => p.accent,
+                    NodeMark::Current | NodeMark::Fixing | NodeMark::Paused => p.accent,
                     NodeMark::Waiting | NodeMark::Stale => p.warning,
                     _ => p.muted,
                 };
@@ -3437,11 +3529,11 @@ impl Painter {
         };
         let number = number.to_string();
         match mark {
-            NodeMark::Done | NodeMark::Stale => {
-                let color = if mark == NodeMark::Done {
-                    p.success
-                } else {
-                    p.warning
+            NodeMark::Done | NodeMark::Stale | NodeMark::Ran => {
+                let color = match mark {
+                    NodeMark::Done => p.success,
+                    NodeMark::Stale => p.warning,
+                    _ => p.muted,
                 };
                 disc(c, 0.0, color);
                 disc(c, ring, mix(p.background, color, 0.18));
@@ -3460,6 +3552,11 @@ impl Painter {
                 disc(c, 0.0, p.border);
                 disc(c, ring, p.background);
                 self.bold_centred(c, &number, spot, scale, p.muted);
+            }
+            NodeMark::Paused => {
+                disc(c, 0.0, p.muted);
+                disc(c, ring, p.background);
+                self.bold_centred(c, &number, spot, scale, p.text);
             }
         }
     }
@@ -5679,6 +5776,46 @@ mod tests {
             l.hit(&view, centre(chips[1])),
             Some(FeatureTabHit::AgentPickOff(1))
         );
+    }
+
+    #[test]
+    fn the_line_back_moves_nothing_and_is_drawn_with_the_head() {
+        let frame = Rectangle::from_size((1400, 800).into());
+        let mut view = super::super::golden::feature_tab();
+        let without = feature_tab_layout(&view, frame);
+        view.back = Some(RailBack { from: 5, to: 3 });
+        let with = feature_tab_layout(&view, frame);
+        assert_eq!(with.nodes, without.nodes);
+        assert_eq!(slice_view(&view, TabSlice::Head).back, view.back);
+        assert_eq!(slice_view(&view, TabSlice::Hints).back, None);
+        // It runs clear of the header above and of a node's focus ring below.
+        const {
+            assert!(RAIL_BACK_RISE < RAIL_GAP + RAIL_BACK);
+            assert!(RAIL_BACK_CLEAR as f32 > crate::chrome::FOCUS_GAP + crate::chrome::FOCUS_RING);
+        }
+    }
+
+    #[test]
+    fn grey_marks_read_in_both_themes() {
+        for p in [&ONE_DARK, &ONE_LIGHT, &ONE_LIGHT_PAGE] {
+            // A ran stage's tick on its disc, its ring on the ground.
+            let disc = mix(p.background, p.muted, 0.18);
+            assert!(
+                contrast(p.muted, disc) >= 3.0,
+                "tick {:.2}",
+                contrast(p.muted, disc)
+            );
+            let ring = contrast(p.muted, p.background);
+            assert!(ring >= 3.0, "ring {ring:.2}");
+            // A paused stage's number.
+            let number = contrast(p.text, p.background);
+            assert!(number >= 4.5, "number {number:.2}");
+            // The line back, in its two colours.
+            for line in [p.accent, p.warning] {
+                let ratio = contrast(line, p.background);
+                assert!(ratio >= 3.0, "line {ratio:.2}");
+            }
+        }
     }
 
     #[test]

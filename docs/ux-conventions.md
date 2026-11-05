@@ -97,7 +97,10 @@ A key is written in one place, not on the button that does the same thing:
   shows that agent's tab, where it runs or waits for its prompt. Work gerdr
   sends by itself doesn't take the screen. Either way the stage's node on the
   rail and the page of the stage the feature is at say the agent runs again or
-  waits, with a way to its tab.
+  waits, with a way to its tab. While that work is under way the rail reads as
+  turned back: done stages go grey, as they ran once, and a line runs from the
+  stage that asked back to Build. A stage whose mark went stays grey until it
+  is marked done again, so it doesn't read as one that never ran.
 
 ## Words
 
