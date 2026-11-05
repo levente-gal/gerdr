@@ -12,8 +12,9 @@
 //! comments. Each card's heading says whose it is.
 //!
 //! It opens at any stage, and shows only what works at that one
-//! (`FeatureOf::role`, `FeatureOf::buttons`): at AI review, Plan fixes once
-//! every finding is decided; at Code review, Plan fixes for the comments and
+//! (`FeatureOf::role`, `FeatureOf::buttons`): at AI review, Make fixes once
+//! every finding is decided, or only Plan fixes when the user wrote anything
+//! of their own; at Code review, Plan fixes for the comments and
 //! Approve, which wants every file viewed as it is now, no comment left,
 //! nothing uncommitted and no finding holding up.
 
@@ -225,7 +226,15 @@ impl FeatureOf {
                     buttons.push((B::FixAllFindings, None));
                 }
                 if open > 0 || fix > 0 {
-                    buttons.push((B::PlanFixes, self.plan_refusal(own)));
+                    let direct = !self.needs_plan(own);
+                    if direct {
+                        buttons.push((B::MakeFixes, self.plan_refusal(own)));
+                    }
+                    // Greyed, one says what they wait for, and the row is full
+                    // on a small output.
+                    if !direct || open == 0 {
+                        buttons.push((B::PlanFixes, self.plan_refusal(own)));
+                    }
                 }
                 buttons
             }
@@ -236,6 +245,23 @@ impl FeatureOf {
             ],
             Role::Round(FixPhase::Ready) => vec![(B::ReviewFixPlan, None)],
             _ => Vec::new(),
+        }
+    }
+
+    /// Whether AI review's fixes need a plan, with `own` comments of the
+    /// user's in the diff (`review_import::needs_plan`).
+    pub fn needs_plan(&self, own: usize) -> bool {
+        crate::feature::review_import::needs_plan(&self.findings, own)
+    }
+
+    /// What Ctrl+Enter (`shift`: Ctrl+Shift+Enter) presses while deciding,
+    /// with `own` comments of the user's: the button that is there, for the
+    /// host to say what it waits for.
+    pub fn deciding_button(&self, shift: bool, own: usize) -> ReposButton {
+        let direct = !self.needs_plan(own);
+        match direct && (!shift || self.count(FindingState::Open) > 0) {
+            true => ReposButton::MakeFixes,
+            false => ReposButton::PlanFixes,
         }
     }
 
@@ -265,27 +291,40 @@ impl FeatureOf {
         }
     }
 
-    /// The key of `button` as it stands: empty for one not of its own.
-    pub fn key_of(&self, button: ReposButton) -> &'static str {
+    /// The key of `button` as it stands with `own` comments of the user's:
+    /// empty for one not of its own.
+    pub fn key_of(&self, button: ReposButton, own: usize) -> &'static str {
         use ReposButton as B;
         match button {
             B::AddComment => "Shift+C",
             B::FixAllFindings => "Shift+F",
-            B::PlanFixes if self.role() == Role::Review => crate::worktree_diff::SEND_BACK_KEY,
-            B::PlanFixes | B::ReviewFixPlan | B::Approve => crate::worktree_diff::APPROVE_KEY,
+            B::PlanFixes if self.role() == Role::Review || !self.needs_plan(own) => {
+                crate::worktree_diff::SEND_BACK_KEY
+            }
+            B::MakeFixes | B::PlanFixes | B::ReviewFixPlan | B::Approve => {
+                crate::worktree_diff::APPROVE_KEY
+            }
             _ => "",
         }
     }
 
-    /// Its keys as it stands, before the diff's own (F1).
-    pub fn keys(&self) -> Vec<(&'static str, &'static str)> {
+    /// Its keys as it stands with `own` comments of the user's, before the
+    /// diff's own (F1).
+    pub fn keys(&self, own: usize) -> Vec<(&'static str, &'static str)> {
         let mut keys = vec![("Esc", "close the diff"), ("F1", "list the keys")];
         match self.role() {
             Role::Deciding => keys.extend([
-                (
-                    "Ctrl+Enter",
-                    "plan the fixes, once every finding is decided",
-                ),
+                match self.needs_plan(own) {
+                    true => (
+                        "Ctrl+Enter",
+                        "plan the fixes, once every finding is decided",
+                    ),
+                    false => (
+                        "Ctrl+Enter",
+                        "make the fixes, once every finding is decided",
+                    ),
+                },
+                ("Ctrl+Shift+Enter", "plan the fixes first"),
                 ("Shift+C", "add a comment on no line or file"),
                 ("Shift+F", "mark every undecided finding to fix"),
                 ("f", "fix the finding, or take that back"),
@@ -1006,6 +1045,14 @@ impl Gerdr {
     pub(crate) fn feature_plan_fixes(&mut self) {
         if let Some((project, slug)) = self.feature_open() {
             self.send_findings(&project, &slug);
+        }
+    }
+
+    /// Make fixes in the open diff, at AI review: the findings to fix go to
+    /// the Build agent, or it says what they wait for.
+    pub(crate) fn feature_make_fixes(&mut self) {
+        if let Some((project, slug)) = self.feature_open() {
+            self.make_finding_fixes(&project, &slug);
         }
     }
 
@@ -1736,7 +1783,7 @@ mod tests {
                 (B::AddComment, None),
                 (B::FixAllFindings, None),
                 (
-                    B::PlanFixes,
+                    B::MakeFixes,
                     Some("Decide the 1 finding left first".to_owned())
                 ),
             ]
@@ -1783,7 +1830,7 @@ mod tests {
             Review::default(),
         );
         let (title, hints) = offered(&wd);
-        assert_eq!(title, [B::AddComment, B::FixAllFindings, B::PlanFixes]);
+        assert_eq!(title, [B::AddComment, B::FixAllFindings, B::MakeFixes]);
         for dead in [B::Approve, B::SendBack, B::CommentFile] {
             assert!(!title.contains(&dead) && !hints.contains(&dead), "{dead:?}");
         }
@@ -1791,7 +1838,7 @@ mod tests {
         let why = |hints: Vec<Hint>| {
             hints
                 .into_iter()
-                .find(|h| h.button == B::PlanFixes)
+                .find(|h| h.button == B::MakeFixes)
                 .unwrap()
         };
         let waits = Some("Decide the 1 finding left first".to_owned());
@@ -1804,18 +1851,18 @@ mod tests {
             summary.starts_with("1 to fix \u{b7} 1 dismissed \u{b7} 1 to decide"),
             "{summary}"
         );
-        // Both keys go to its host, which says why or plans: no comment asked.
+        // Both keys go to its host, which says what they wait for.
         assert_eq!(
             wd.key(&mods(true, false), enter, enter, POPUP_ENV),
-            Some(Done::PlanFixes)
+            Some(Done::MakeFixes)
         );
         assert_eq!(
             wd.key(&mods(true, true), enter, enter, POPUP_ENV),
-            Some(Done::PlanFixes)
+            Some(Done::MakeFixes)
         );
         assert_eq!(
-            wd.click(ReposHit::Button(B::PlanFixes), POPUP_ENV),
-            Some(Done::PlanFixes)
+            wd.click(ReposHit::Button(B::MakeFixes), POPUP_ENV),
+            Some(Done::MakeFixes)
         );
         let upper_f = Keysym::F;
         assert_eq!(
@@ -1833,7 +1880,7 @@ mod tests {
             vec![finding("r1-1", FindingState::Fix)],
             Review::default(),
         );
-        assert_eq!(offered(&wd).0, [B::AddComment, B::PlanFixes]);
+        assert_eq!(offered(&wd).0, [B::AddComment, B::MakeFixes, B::PlanFixes]);
         assert_eq!(why(wd.view(POPUP_ENV).title_buttons).disabled, None);
         assert_eq!(
             wd.key(&mods(false, true), upper_f, upper_f, POPUP_ENV),
@@ -1841,6 +1888,59 @@ mod tests {
                 "No finding left to decide"
             )))
         );
+    }
+
+    #[test]
+    fn what_the_user_wrote_at_ai_review_goes_through_a_plan() {
+        use crate::worktree_diff::Done;
+        use ReposButton as B;
+        let enter = Keysym::Return;
+        let noted = Finding {
+            note: "Careful".into(),
+            ..finding("r1-1", FindingState::Fix)
+        };
+        let comment = Review {
+            comments: vec![Comment {
+                root: "/w/api".into(),
+                path: "src/a.rs".into(),
+                text: "This name is wrong".into(),
+                ..Comment::default()
+            }],
+            ..Review::default()
+        };
+        let plain = || vec![finding("r1-1", FindingState::Fix)];
+        for mut wd in [
+            popup(Stage::AiReview, vec![noted], Review::default()),
+            popup(Stage::AiReview, plain(), comment),
+        ] {
+            let title = offered(&wd).0;
+            assert!(title.contains(&B::PlanFixes), "{title:?}");
+            assert!(!title.contains(&B::MakeFixes), "{title:?}");
+            for shift in [false, true] {
+                assert_eq!(
+                    wd.key(&mods(true, shift), enter, enter, POPUP_ENV),
+                    Some(Done::PlanFixes)
+                );
+            }
+            let keys = wd.feature.as_ref().unwrap().keys(wd.diff.review.own());
+            assert!(keys.contains(&(
+                "Ctrl+Enter",
+                "plan the fixes, once every finding is decided"
+            )));
+        }
+        // With nothing of theirs the plan is a choice, on the other chord.
+        let mut wd = popup(Stage::AiReview, plain(), Review::default());
+        assert_eq!(
+            wd.key(&mods(true, true), enter, enter, POPUP_ENV),
+            Some(Done::PlanFixes)
+        );
+        assert_eq!(
+            wd.click(ReposHit::Button(B::MakeFixes), POPUP_ENV),
+            Some(Done::MakeFixes)
+        );
+        let hint = |b| wd.hints().into_iter().find(|h| h.button == b).unwrap();
+        assert_eq!(hint(B::MakeFixes).key, "Ctrl+Enter");
+        assert_eq!(hint(B::PlanFixes).key, "Ctrl+Shift+Enter");
     }
 
     #[test]
@@ -2045,14 +2145,14 @@ mod tests {
                 ready: true,
                 ..FeatureOf::default()
             };
-            fe.keys()
+            fe.keys(0)
                 .into_iter()
                 .map(|(key, _)| key)
                 .collect::<Vec<_>>()
         };
         let ai = keys(Stage::AiReview);
         assert!(ai.contains(&"Shift+F") && ai.contains(&"f"));
-        assert!(!ai.contains(&"Ctrl+Shift+Enter"));
+        assert!(ai.contains(&"Ctrl+Shift+Enter"));
         let code = keys(Stage::CodeReview);
         assert!(code.contains(&"Ctrl+Shift+Enter") && code.contains(&"Shift+C"));
         assert!(!code.contains(&"Shift+F") && !code.contains(&"f"));

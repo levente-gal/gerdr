@@ -5023,7 +5023,10 @@ fn findings_view() -> super::ReposView {
 
 /// A feature's diff as each stage has it: at AI review with findings left
 /// to decide (Plan fixes greyed), all decided (blue, a general comment
-/// listed first), and at Code review.
+/// listed first), and at Code review; then Make fixes, as with nothing of the
+/// user's: all decided, and with findings left at the width where the title
+/// row is fullest. Those two are about the buttons: their rows are the shared
+/// fixture's, comments and all.
 fn findings_popup(at: u8) -> super::ReposView {
     use super::{DetailRow, Hint, ReposButton, RowMark, Tone};
     let mut view = findings_view();
@@ -5068,6 +5071,34 @@ fn findings_popup(at: u8) -> super::ReposView {
             vec![
                 keyed(ReposButton::AddComment, "Shift+C", None),
                 keyed(ReposButton::PlanFixes, "Ctrl+Enter", None),
+            ],
+        ),
+        3 => (
+            "AI review of \u{201c}Bulk export\u{201d}",
+            "3 to fix \u{b7} 1 dismissed \u{b7} 0 to decide \u{b7} 1 of 3 files viewed",
+            vec![
+                button(ReposButton::AddComment, None),
+                button(ReposButton::MakeFixes, None),
+                button(ReposButton::PlanFixes, None),
+            ],
+            vec![
+                keyed(ReposButton::AddComment, "Shift+C", None),
+                keyed(ReposButton::MakeFixes, "Ctrl+Enter", None),
+                keyed(ReposButton::PlanFixes, "Ctrl+Shift+Enter", None),
+            ],
+        ),
+        4 => (
+            "AI review of \u{201c}Bulk export\u{201d}",
+            "1 to fix \u{b7} 1 dismissed \u{b7} 2 to decide \u{b7} 1 of 3 files viewed",
+            vec![
+                button(ReposButton::AddComment, None),
+                button(ReposButton::FixAllFindings, None),
+                button(ReposButton::MakeFixes, waits),
+            ],
+            vec![
+                keyed(ReposButton::AddComment, "Shift+C", None),
+                keyed(ReposButton::FixAllFindings, "Shift+F", None),
+                keyed(ReposButton::MakeFixes, "Ctrl+Enter", waits),
             ],
         ),
         _ => (
@@ -5130,7 +5161,7 @@ fn findings_popup(at: u8) -> super::ReposView {
     view
 }
 
-fn doc_tabs() -> [(&'static str, super::ReposView, i32); 12] {
+fn doc_tabs() -> [(&'static str, super::ReposView, i32); 14] {
     [
         ("doc_preview_1180", doc_tab(0, 0.0, Vec::new(), false), 1180),
         ("doc_review_1180", doc_tab(1, 1.0, Vec::new(), false), 1180),
@@ -5148,10 +5179,12 @@ fn doc_tabs() -> [(&'static str, super::ReposView, i32); 12] {
         ("popup_deciding_1180", findings_popup(0), 1180),
         ("popup_decided_1180", findings_popup(1), 1180),
         ("popup_code_review_850", findings_popup(2), 850),
+        ("popup_no_comments_1180", findings_popup(3), 1180),
+        ("popup_no_comments_850", findings_popup(4), 850),
     ]
 }
 
-const DOC_TAB: [&str; 12] = [
+const DOC_TAB: [&str; 14] = [
     "doc_preview_1180",
     "doc_review_1180",
     "doc_review_no_browser",
@@ -5164,6 +5197,8 @@ const DOC_TAB: [&str; 12] = [
     "popup_deciding_1180",
     "popup_decided_1180",
     "popup_code_review_850",
+    "popup_no_comments_1180",
+    "popup_no_comments_850",
 ];
 
 /// A doc tab's buffer, laid over the whole of a `w` wide content area.
@@ -5185,7 +5220,7 @@ fn paint_doc_tab(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
 }
 
 /// The recorded hashes of `DOC_TAB`, per case in `CASES`.
-const GOLDEN_DOC_TAB: [[u64; 12]; 4] = [
+const GOLDEN_DOC_TAB: [[u64; 14]; 4] = [
     // Dark at 1
     [
         0xe3291f02faaf07c4, // doc_preview_1180
@@ -5200,6 +5235,8 @@ const GOLDEN_DOC_TAB: [[u64; 12]; 4] = [
         0x8fadfc4bbd01f8f3, // popup_deciding_1180
         0xbe2c435b869d8d35, // popup_decided_1180
         0x6f1041c7f50aca45, // popup_code_review_850
+        0x07ad73f54e3e101c, // popup_no_comments_1180
+        0x08ab19690c613d25, // popup_no_comments_850
     ],
     // Dark at 2
     [
@@ -5215,6 +5252,8 @@ const GOLDEN_DOC_TAB: [[u64; 12]; 4] = [
         0x78c4b839e155a578, // popup_deciding_1180
         0x7eb4dfd72d1f662a, // popup_decided_1180
         0x2ebeec0af5c2ef1b, // popup_code_review_850
+        0x04f0f9c1258af57a, // popup_no_comments_1180
+        0x654aa94035b7bbae, // popup_no_comments_850
     ],
     // Light at 1
     [
@@ -5230,6 +5269,8 @@ const GOLDEN_DOC_TAB: [[u64; 12]; 4] = [
         0xc318b335f76aa914, // popup_deciding_1180
         0x53fda247fb4f2a78, // popup_decided_1180
         0xdc7251d500deedf7, // popup_code_review_850
+        0x078b0def98e11797, // popup_no_comments_1180
+        0x0f750109c62c42b8, // popup_no_comments_850
     ],
     // Light at 2
     [
@@ -5245,6 +5286,8 @@ const GOLDEN_DOC_TAB: [[u64; 12]; 4] = [
         0x12cb6fc6385c6fea, // popup_deciding_1180
         0xccffdce2a40e4dea, // popup_decided_1180
         0x648afae740203419, // popup_code_review_850
+        0x2435e6adfbb4e6b8, // popup_no_comments_1180
+        0x958a852299d3f6a4, // popup_no_comments_850
     ],
 ];
 

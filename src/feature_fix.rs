@@ -117,44 +117,17 @@ impl Gerdr {
         let Some(feature) = self.feature(project, slug).cloned() else {
             return false;
         };
-        let data = store::dir(None, project, slug);
-        if let Err(why) = archive_plan(&data, feature.fix_rounds) {
-            tracing::warn!("keeping the last fix plan of {project}/{slug}: {why}");
-            self.show_error(format!("Couldn't keep the last fix plan: {why}"));
+        if !self.keep_last_plan(&feature) {
             return false;
         }
         let compact = self.compact_line(&feature);
-        let n = feature.fix_rounds + 1;
-        let now = feature::now();
         let phase = match compact {
             Some(_) => FixPhase::Compacting,
             None => FixPhase::Planning,
         };
-        let Some(f) = self.feature_mut(project, slug) else {
+        if !self.open_fix_round(&feature, what, input, phase) {
             return false;
-        };
-        f.fix_rounds = n;
-        f.last_fix_round = None;
-        f.fix_round = Some(FixRound {
-            n,
-            what: what.to_owned(),
-            input,
-            stage: feature.current().unwrap_or(Stage::Build),
-            phase,
-            sent_back: 0,
-            asked: now,
-            ready: None,
-            stalled: None,
-            give_back: GiveBack::Nothing,
-            items: Vec::new(),
-            done: 0,
-        });
-        f.log(now, format!("Fix round {n} started: {what}"));
-        self.save_feature(project, slug);
-        self.features
-            .build
-            .fix_watches
-            .insert(fix_key(project, slug), FixWatch::default());
+        }
         let Some(line) = compact else {
             self.ask_fix_plan(project, slug);
             return true;
@@ -171,6 +144,86 @@ impl Gerdr {
                 self.ask_fix_plan(project, slug);
             }
         }
+        true
+    }
+
+    /// Start a fix round on feature `slug` that asks for no plan: gerdr wrote
+    /// `plan`, and it waits as an agent's would until `make_unplanned_fixes`.
+    /// Nothing is told to the agent yet. A failure says so.
+    pub(crate) fn start_unplanned_fix_round(
+        &mut self,
+        project: &str,
+        slug: &str,
+        what: &str,
+        input: PathBuf,
+        plan: &str,
+    ) -> bool {
+        let Some(feature) = self.feature(project, slug).cloned() else {
+            return false;
+        };
+        if !self.keep_last_plan(&feature) {
+            return false;
+        }
+        let path = fix_round::path(&store::dir(None, project, slug));
+        if let Err(err) = std::fs::write(&path, plan) {
+            tracing::warn!("writing {}: {err}", path.display());
+            self.show_error(format!("Couldn't write {}: {err}", fix_round::FILE));
+            return false;
+        }
+        self.open_fix_round(&feature, what, input, FixPhase::Ready)
+    }
+
+    /// Move `feature`'s last plan out of the way of a new round. A failure
+    /// says so.
+    fn keep_last_plan(&mut self, feature: &Feature) -> bool {
+        let (project, slug) = (feature.project.as_str(), feature.slug.as_str());
+        let data = store::dir(None, project, slug);
+        match archive_plan(&data, feature.fix_rounds) {
+            Ok(()) => true,
+            Err(why) => {
+                tracing::warn!("keeping the last fix plan of {project}/{slug}: {why}");
+                self.show_error(format!("Couldn't keep the last fix plan: {why}"));
+                false
+            }
+        }
+    }
+
+    /// Record `feature`'s new round, at `phase`.
+    fn open_fix_round(
+        &mut self,
+        feature: &Feature,
+        what: &str,
+        input: PathBuf,
+        phase: FixPhase,
+    ) -> bool {
+        let (project, slug) = (feature.project.as_str(), feature.slug.as_str());
+        let n = feature.fix_rounds + 1;
+        let now = feature::now();
+        let Some(f) = self.feature_mut(project, slug) else {
+            return false;
+        };
+        f.fix_rounds = n;
+        f.last_fix_round = None;
+        f.fix_round = Some(FixRound {
+            n,
+            what: what.to_owned(),
+            input,
+            stage: feature.current().unwrap_or(Stage::Build),
+            phase,
+            sent_back: 0,
+            asked: now,
+            ready: (phase == FixPhase::Ready).then_some(now),
+            stalled: None,
+            give_back: GiveBack::Nothing,
+            items: Vec::new(),
+            done: 0,
+        });
+        f.log(now, format!("Fix round {n} started: {what}"));
+        self.save_feature(project, slug);
+        self.features
+            .build
+            .fix_watches
+            .insert(fix_key(project, slug), FixWatch::default());
         true
     }
 
@@ -726,6 +779,16 @@ impl Gerdr {
     /// the plan is in its file, and then makes them. Whether it went; a
     /// refusal says why and changes nothing.
     pub(crate) fn make_fixes(&mut self, project: &str, slug: &str) -> bool {
+        self.fixes_go(project, slug, false)
+    }
+
+    /// The same for a round with no plan to approve, the one gerdr wrote
+    /// waiting (`start_unplanned_fix_round`).
+    pub(crate) fn make_unplanned_fixes(&mut self, project: &str, slug: &str) -> bool {
+        self.fixes_go(project, slug, true)
+    }
+
+    fn fixes_go(&mut self, project: &str, slug: &str, unplanned: bool) -> bool {
         let Some(feature) = self.feature(project, slug).cloned() else {
             return false;
         };
@@ -769,9 +832,12 @@ impl Gerdr {
         if let Some(line) = self.compact_line(&feature) {
             match self.tell_build_agent(&feature, line) {
                 Ok(()) => {
-                    let said = match again {
-                        true => "Fixes asked for again: the Build agent compacts its chat first",
-                        false => "Fix plan approved: the Build agent compacts its chat first",
+                    let said = match (again, unplanned) {
+                        (true, _) => {
+                            "Fixes asked for again: the Build agent compacts its chat first"
+                        }
+                        (_, true) => "No plan needed: the Build agent compacts its chat first",
+                        _ => "Fix plan approved: the Build agent compacts its chat first",
                     };
                     self.fixes_compact(project, slug, said);
                     self.show_success(format!(
@@ -784,9 +850,10 @@ impl Gerdr {
                 }
             }
         }
-        let said = match again {
-            true => "Fix plan's fixes sent to the Build agent again",
-            false => "Fix plan approved: fixes sent to the Build agent",
+        let said = match (again, unplanned) {
+            (true, _) => "Fix plan's fixes sent to the Build agent again",
+            (_, true) => "No plan needed: fixes sent to the Build agent",
+            _ => "Fix plan approved: fixes sent to the Build agent",
         };
         self.send_fixes(project, slug, said)
     }
