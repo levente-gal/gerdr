@@ -1040,6 +1040,9 @@ impl Gerdr {
                 Reading::Failed => "Couldn't read Cursor's models: type a model's id…",
                 Reading::Idle => "Type a model's id…",
             },
+            // Tried on 2026.10.22: its first message saves `--model` as the
+            // default of every Cursor chat, as its own `/model` does.
+            Flavor::Cursor => "Model for this stage's next start; Cursor keeps it as its default…",
             _ => "Model for this stage's next start…",
         }
     }
