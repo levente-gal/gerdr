@@ -986,14 +986,31 @@ fn loss(repo: &Repo) -> Option<String> {
     (!parts.is_empty()).then(|| format!("{}: {}", repo.key(), parts.join(", ")))
 }
 
-/// How many commits `repo`'s worktree has that its base doesn't.
+/// How many commits `repo`'s worktree has that its base doesn't: none once
+/// its branch is merged, a squash being one whose commits stay outside it.
 fn commits_of(repo: &Repo) -> Result<usize, String> {
     let range = format!("{}..HEAD", base_ref(repo));
     let count = git(&repo.worktree, &["rev-list", "--count", &range])?;
-    count
+    let n: usize = count
         .trim()
         .parse()
-        .map_err(|err| format!("couldn't read a commit count: {err}"))
+        .map_err(|err| format!("couldn't read a commit count: {err}"))?;
+    let merged = |branch: &String| merged_into_base(repo, branch);
+    Ok(if n > 0 && repo.branch.as_ref().is_some_and(merged) {
+        0
+    } else {
+        n
+    })
+}
+
+/// Whether `branch` of `repo` is merged into its base, squashed or not.
+pub(super) fn merged_into_base(repo: &Repo, branch: &str) -> bool {
+    // As a commit: `git::merged` keeps its answers per pair of names.
+    let spec = format!("{}^{{commit}}", repo.base);
+    let Ok(base) = git(&repo.main, &["rev-parse", "--verify", "--quiet", &spec]) else {
+        return false;
+    };
+    crate::git::merged(&repo.main, branch, &[base.trim()])
 }
 
 fn plural(n: usize, word: &str) -> String {
@@ -1170,7 +1187,7 @@ fn take_down_repo(branch: &str, repo: &Repo, force: bool, failed: &mut Vec<Strin
         let ahead = git(&repo.main, &["rev-list", "--count", &range])
             .ok()
             .and_then(|n| n.trim().parse::<usize>().ok());
-        if ahead != Some(0) {
+        if ahead != Some(0) && !merged_into_base(repo, branch) {
             failed.push(format!(
                 "{name}: kept branch {branch}, it has commits not in {}",
                 repo.base
@@ -1393,6 +1410,7 @@ mod tests {
             context: Vec::new(),
             removed: Vec::new(),
             shipping: Default::default(),
+            ship_plan: Default::default(),
             runs: Default::default(),
             stage_agents: Default::default(),
             stage_models: Default::default(),

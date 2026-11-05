@@ -317,7 +317,8 @@ pub struct Workflow {
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub base: std::collections::BTreeMap<String, String>,
     /// How features ship, for every repository; without it, per
-    /// repository by its `origin` (see `feature::ship::mode_of`).
+    /// repository by its `origin` (see `feature::ship::mode_of`). The way Ship's page starts
+    /// from; the page can pick another per feature.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ship: Option<crate::feature::ShipMode>,
     /// The agent each stage starts, by the picker's name ("Claude Code")

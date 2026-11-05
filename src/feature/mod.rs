@@ -22,8 +22,9 @@
 //! longer hold, and the feature goes back to Build (`Feature::invalidate`).
 //! Ship is never a tick: gerdr ships the feature (see `ship`) once every
 //! other stage holds, by opening pull requests or by squashing it into the
-//! base branch, and a `pre-push` hook (see `hook`) refuses to push a
-//! feature's branch that gerdr didn't clear.
+//! base branch, as its page ticks them (`ShipPlan`), and a `pre-push` hook
+//! (see `hook`) refuses to push a feature's branch that gerdr didn't clear.
+//! With no step ticked, it finishes unshipped once the user says so.
 
 #![allow(dead_code)]
 
@@ -117,7 +118,7 @@ impl Stage {
             Self::AiReview => "Another model reviews the diff",
             Self::CodeReview => "You review every changed file",
             Self::ManualTest => "You try it and check the brief's criteria",
-            Self::Ship => "Merge into main, or open the pull requests",
+            Self::Ship => "Open the pull requests, or merge into the base branch",
         }
     }
 
@@ -187,11 +188,190 @@ pub struct Shipping {
     /// feature is done once its branches read as merged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub squash_at: Option<u64>,
+    /// The repositories whose branch was pushed, by `Repo::key`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pushed: Vec<String>,
+    /// The repositories that squash, by `Repo::key`: those the merge waits
+    /// for. A record from before these were kept has none: then every
+    /// touched repository with commits.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub squash_repos: Vec<String>,
+    /// Those of them whose base goes to origin once merged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub push_base: Vec<String>,
 }
 
 impl Shipping {
     pub fn is_empty(&self) -> bool {
-        self.prs.is_empty() && self.squash_at.is_none()
+        self.prs.is_empty()
+            && self.squash_at.is_none()
+            && self.pushed.is_empty()
+            && self.squash_repos.is_empty()
+            && self.push_base.is_empty()
+    }
+}
+
+/// The way a repository goes when its feature ships, as Ship's page picks it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Route {
+    /// Through origin: `RepoPlan::push`, `RepoPlan::open_pr`.
+    Pr,
+    /// Into the base in its main worktree: `RepoPlan::merge`,
+    /// `RepoPlan::push_base`.
+    Merge,
+    /// It stays as it is.
+    Nothing,
+}
+
+impl Route {
+    /// In the order the page's choice has them.
+    pub const ALL: [Self; 3] = [Self::Pr, Self::Merge, Self::Nothing];
+
+    /// The route a repository takes without a pick: how its project ships.
+    pub fn of_mode(mode: ShipMode) -> Self {
+        match mode {
+            ShipMode::Pr => Self::Pr,
+            ShipMode::Squash => Self::Merge,
+        }
+    }
+
+    /// Its tick boxes, in the order they run.
+    pub fn steps(self) -> &'static [ShipStep] {
+        match self {
+            Self::Pr => &[ShipStep::Push, ShipStep::OpenPr],
+            Self::Merge => &[ShipStep::Merge, ShipStep::PushBase],
+            Self::Nothing => &[],
+        }
+    }
+
+    /// The one after it in the page's choice, round to the first.
+    pub fn next(self) -> Self {
+        match self {
+            Self::Pr => Self::Merge,
+            Self::Merge => Self::Nothing,
+            Self::Nothing => Self::Pr,
+        }
+    }
+
+    /// Its place in `ALL`.
+    pub fn index(self) -> usize {
+        match self {
+            Self::Pr => 0,
+            Self::Merge => 1,
+            Self::Nothing => 2,
+        }
+    }
+}
+
+/// A tick box of a repository's steps on Ship's page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ShipStep {
+    Push,
+    OpenPr,
+    Merge,
+    PushBase,
+}
+
+/// What a repository does when its feature ships. Every route's ticks are
+/// kept, so going back to a route finds them as they were.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepoPlan {
+    pub route: Route,
+    /// Push `feature/<slug>` to origin.
+    pub push: bool,
+    /// Open a pull request into the base: needs `push`.
+    pub open_pr: bool,
+    /// Squash `feature/<slug>` into the base in its main worktree.
+    pub merge: bool,
+    /// Push the base to origin after: needs `merge`.
+    pub push_base: bool,
+}
+
+impl RepoPlan {
+    /// What a repository taking `route` does until a tick says otherwise.
+    pub fn new(route: Route) -> Self {
+        Self {
+            route,
+            push: true,
+            open_pr: true,
+            merge: true,
+            push_base: false,
+        }
+    }
+
+    /// Whether `step` is ticked.
+    pub fn ticked(&self, step: ShipStep) -> bool {
+        match step {
+            ShipStep::Push => self.push,
+            ShipStep::OpenPr => self.push && self.open_pr,
+            ShipStep::Merge => self.merge,
+            ShipStep::PushBase => self.merge && self.push_base,
+        }
+    }
+
+    /// Flip `step`, and what depends on it or it depends on.
+    pub fn toggle(&mut self, step: ShipStep) {
+        let on = !self.ticked(step);
+        match step {
+            ShipStep::Push => {
+                self.push = on;
+                if !on {
+                    self.open_pr = false;
+                }
+            }
+            ShipStep::OpenPr => {
+                self.open_pr = on;
+                if on {
+                    self.push = true;
+                }
+            }
+            ShipStep::Merge => {
+                self.merge = on;
+                if !on {
+                    self.push_base = false;
+                }
+            }
+            ShipStep::PushBase => {
+                self.push_base = on;
+                if on {
+                    self.merge = true;
+                }
+            }
+        }
+    }
+
+    /// The steps of its route that are ticked, in the order they run.
+    pub fn steps(&self) -> Vec<ShipStep> {
+        (self.route.steps().iter().copied())
+            .filter(|s| self.ticked(*s))
+            .collect()
+    }
+}
+
+/// What the ticks on Ship's page say.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShipPlan {
+    /// By `Repo::key`: a repository not here takes its default route, all
+    /// its ticks as `RepoPlan::new` has them.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub repos: BTreeMap<String, RepoPlan>,
+    /// The workspace stays open once shipped.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub keep_workspace: bool,
+    /// Its worktrees and branches go once shipped.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub remove_worktrees: bool,
+}
+
+impl ShipPlan {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// What repository `key` does, `default` being its route without a pick.
+    pub fn repo(&self, key: &str, default: Route) -> RepoPlan {
+        (self.repos.get(key).cloned()).unwrap_or_else(|| RepoPlan::new(default))
     }
 }
 
@@ -350,6 +530,10 @@ pub struct Feature {
     pub history: Vec<Event>,
     #[serde(default, skip_serializing_if = "Shipping::is_empty")]
     pub shipping: Shipping,
+    /// What its Ship page's ticks say. Not `shipping`: ticks alone are no
+    /// work of the stage.
+    #[serde(default, skip_serializing_if = "ShipPlan::is_empty")]
+    pub ship_plan: ShipPlan,
     /// The agent stages' latest runs (see `agents`).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub runs: BTreeMap<Stage, agents::StageRun>,
@@ -636,7 +820,10 @@ impl Feature {
             Stage::AiReview => self.review = None,
             Stage::CodeReview => self.viewed = viewed::Viewed::default(),
             Stage::ManualTest => self.manual = None,
-            Stage::Ship => self.shipping = Shipping::default(),
+            Stage::Ship => {
+                self.shipping = Shipping::default();
+                self.ship_plan = ShipPlan::default();
+            }
         }
         self.log(now, format!("{} started over", stage.label()));
         true
@@ -1068,6 +1255,7 @@ pub(crate) mod tests {
             removed: Vec::new(),
             history: Vec::new(),
             shipping: Default::default(),
+            ship_plan: Default::default(),
             runs: Default::default(),
             stage_agents: Default::default(),
             stage_models: Default::default(),
@@ -1150,6 +1338,7 @@ pub(crate) mod tests {
             marks: BTreeMap::new(),
             history: Vec::new(),
             shipping: Shipping::default(),
+            ship_plan: Default::default(),
             run_counts: BTreeMap::new(),
             context: Vec::new(),
             removed: Vec::new(),

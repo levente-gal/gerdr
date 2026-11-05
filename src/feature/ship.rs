@@ -1,20 +1,25 @@
 //! Shipping a feature, and what stops it.
 //!
 //! `probe` reads a feature for the panel, off the UI thread: its patch-id,
-//! its guards, and when Ship is its stage, what blocks shipping or else
-//! what shipping does. Shipping then goes one of two ways, per repository
-//! (`ShipMode`):
+//! its guards, and when Ship is its stage, what can stop each step of it
+//! (`ShipCheck`). Which steps run is the page's ticks (`ShipPlan`), so
+//! `plan_actions` says what shipping does from the two, with no new probe.
+//! Each repository with commits goes its own way (`Route`):
 //!
-//! - pull requests (`open_prs`): for each touched repository with commits,
-//!   in the feature's order (home project first, then each link), allow the push (`hook::allow`), push `feature/<slug>`
-//!   with its upstream, guard it again, and open a pull request into its
-//!   base with `gh pr create`, or keep the one open for the branch already.
-//!   With more than one, every body links the others (`gh pr edit`).
+//! - through origin (`open_prs`), in the feature's order (home project
+//!   first, then each link): allow the push (`hook::allow`), push
+//!   `feature/<slug>` with its upstream, guard it again, and open a pull
+//!   request into its base with `gh pr create`, or keep the one open for the
+//!   branch already. With more than one, every body links the others
+//!   (`gh pr edit`).
 //! - squash (`squash_command`): a command for a tab that goes to each
 //!   repository's own main worktree in turn (a linked project's too) and
 //!   squashes the branch into the base and commits, the message
 //!   prefilled with the title, for the user to edit. The feature is done
-//!   once every branch reads as merged (`Probe::merged`).
+//!   once every such branch reads as merged (`Probe::merged`), then those
+//!   ticked go to origin (`push_base`).
+//! - nothing: it stays as it is. With no step ticked anywhere, the feature
+//!   finishes without shipping, once the user says so.
 //!
 //! Runs git and gh: call it off the UI thread (checklist D3).
 
@@ -27,9 +32,9 @@ use std::{
 };
 
 use super::{
-    Feature, PerProject, Pr, Repo, ShipMode, Stage, Status,
+    Feature, PerProject, Pr, Repo, RepoPlan, Route, ShipMode, ShipStep, Stage, Status,
     hook::{self, Guard},
-    layout::{git, shown},
+    layout::{git, merged_into_base, shown},
     page,
     patch::{self, Reading},
 };
@@ -49,6 +54,8 @@ pub enum Action {
     LinkPrs,
     /// Squash `feature/<slug>` of `repo` into `base` in its main worktree.
     Squash { repo: String, base: String },
+    /// Push `base` of `repo` to origin, once squashed.
+    PushBase { repo: String, base: String },
 }
 
 impl Action {
@@ -66,21 +73,138 @@ impl Action {
             }
             Self::LinkPrs => "Link the pull requests to each other".into(),
             Self::Squash { repo, base } => format!("Squash the feature into {base} in {repo}"),
+            Self::PushBase { repo, base } => format!("Push {base} of {repo} to origin"),
         }
     }
 }
 
-/// Whether a feature can ship now.
+/// What can stop a feature shipping, however its ticks stand.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ShipCheck {
-    /// What stops it, one line each ("services-api has uncommitted
-    /// changes"); empty when it can ship.
+    /// What stops any shipping, one line each ("services-api has uncommitted
+    /// changes"). Finishing without shipping goes on regardless.
     pub blockers: Vec<String>,
-    /// What shipping does, in order; empty while blocked.
-    pub actions: Vec<Action>,
+    /// The repositories it can ship: those with commits, not merged yet.
+    pub repos: Vec<RepoCheck>,
     /// What is worth knowing but stops nothing ("aft-backend has no
     /// commits: left out").
     pub notes: Vec<String>,
+    /// Its code couldn't be read: nothing is known of what it would do,
+    /// not even that it would do nothing.
+    pub unread: bool,
+}
+
+/// A repository `ShipCheck` found to ship.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RepoCheck {
+    /// Its `Repo::key`.
+    pub key: String,
+    /// The branch it merges into.
+    pub base: String,
+    /// Its main worktree.
+    pub main: PathBuf,
+    /// Its commits on the feature's branch.
+    pub commits: usize,
+    /// The route it takes without a pick (`mode_of`).
+    pub route: Route,
+    /// Why it can't go through origin, if so.
+    pub no_origin: Option<String>,
+    /// Why it can't merge into its base in its main worktree, if so.
+    pub no_merge: Option<String>,
+}
+
+impl RepoCheck {
+    /// Why `step` can't run, if so.
+    pub fn why_not(&self, step: ShipStep) -> Option<&str> {
+        match step {
+            ShipStep::Push | ShipStep::OpenPr | ShipStep::PushBase => self.no_origin.as_deref(),
+            ShipStep::Merge => self.no_merge.as_deref(),
+        }
+    }
+}
+
+/// What the ticks ask of a feature, given its `ShipCheck`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Planned {
+    /// What shipping does, in order; empty while `blockers` has any.
+    pub actions: Vec<Action>,
+    /// What stops what is ticked.
+    pub blockers: Vec<String>,
+    /// No step is ticked: shipping would do nothing.
+    pub nothing: bool,
+}
+
+/// What `repo` of `feature` does, by the page's ticks.
+pub fn repo_plan(feature: &Feature, repo: &RepoCheck) -> RepoPlan {
+    feature.ship_plan.repo(&repo.key, repo.route)
+}
+
+/// What `feature`'s ticks ask, as `check` found it. Runs nothing: the page
+/// calls it as ticks change.
+pub fn plan_actions(feature: &Feature, check: &ShipCheck) -> Planned {
+    let mut out = Planned::default();
+    if check.unread {
+        out.blockers = check.blockers.clone();
+        return out;
+    }
+    let plans: Vec<(&RepoCheck, RepoPlan)> = (check.repos.iter())
+        .map(|repo| (repo, repo_plan(feature, repo)))
+        .collect();
+    out.nothing = plans.iter().all(|(_, plan)| plan.steps().is_empty());
+    if out.nothing {
+        return out;
+    }
+    out.blockers = check.blockers.clone();
+    let mut through_origin = Vec::new();
+    let mut squashes = Vec::new();
+    let mut prs = 0;
+    for (repo, plan) in &plans {
+        for step in plan.steps() {
+            if let Some(why) = repo.why_not(step) {
+                let why = why.to_owned();
+                if !out.blockers.contains(&why) {
+                    out.blockers.push(why);
+                }
+                continue;
+            }
+            let (key, base) = (repo.key.clone(), repo.base.clone());
+            match step {
+                ShipStep::Push => through_origin.push(Action::Push { repo: key }),
+                ShipStep::OpenPr => {
+                    prs += 1;
+                    let kept = feature.shipping.prs.iter().find(|p| p.repo == key);
+                    through_origin.push(match kept {
+                        Some(pr) => Action::KeepPr {
+                            url: pr.url.clone(),
+                            repo: key,
+                        },
+                        None => Action::OpenPr { repo: key, base },
+                    });
+                }
+                ShipStep::Merge => squashes.push(Action::Squash { repo: key, base }),
+                ShipStep::PushBase => squashes.push(Action::PushBase { repo: key, base }),
+            }
+        }
+    }
+    if !out.blockers.is_empty() {
+        return out;
+    }
+    out.actions = through_origin;
+    if prs >= 2 {
+        out.actions.push(Action::LinkPrs);
+    }
+    out.actions.extend(squashes);
+    out
+}
+
+/// Whether the repositories with work all merge by `feature`'s ticks, which
+/// makes removing its worktrees and branches safe to ask for ahead.
+pub fn removable(feature: &Feature, check: &ShipCheck) -> bool {
+    !check.unread
+        && check.repos.iter().all(|repo| {
+            let plan = repo_plan(feature, repo);
+            plan.route == Route::Merge && plan.merge
+        })
 }
 
 /// What `probe` read of a feature.
@@ -91,7 +215,7 @@ pub struct Probe {
     /// Per touched repository, by `Repo::key`: whether pushes from its
     /// worktree are guarded (after making sure of the hook there).
     pub guards: BTreeMap<String, Guard>,
-    /// When Ship is its current stage: whether it can ship.
+    /// When Ship is its current stage: what can stop it shipping.
     pub ship: Option<ShipCheck>,
     /// When a squash started (`Shipping::squash_at`): whether every
     /// touched repository with commits reads as merged into its base.
@@ -196,28 +320,26 @@ fn guard_of(repo: &Repo, branch: &str) -> Guard {
     hook::ensure(&repo.worktree)
 }
 
-/// Whether every touched repository of `feature` with commits has its
-/// branch merged into its base.
+/// Whether the repositories squashing have `feature`'s branch merged into
+/// their bases: those of `Shipping::squash_repos`, or on a record from
+/// before it was kept, every touched repository with commits.
 fn merged(feature: &Feature, reading: &Reading) -> bool {
     let branch = feature.branch();
+    let squashing = &feature.shipping.squash_repos;
     let mut shipped = feature
         .touched()
-        .filter(|r| reading.commits.get(&r.key()).is_some_and(|n| *n > 0))
+        .filter(|r| match squashing.is_empty() {
+            true => reading.commits.get(&r.key()).is_some_and(|n| *n > 0),
+            false => squashing.contains(&r.key()),
+        })
         .peekable();
     if shipped.peek().is_none() {
         return false;
     }
-    shipped.all(|repo| {
-        // As a commit: `git::merged` keeps its answers per pair of names.
-        let spec = format!("{}^{{commit}}", repo.base);
-        let Ok(base) = git(&repo.main, &["rev-parse", "--verify", "--quiet", &spec]) else {
-            return false;
-        };
-        gitinfo::merged(&repo.main, &branch, &[base.trim()])
-    })
+    shipped.all(|repo| merged_into_base(repo, &branch))
 }
 
-/// Whether `feature`, at Ship, can ship as `reading` found it.
+/// What can stop `feature`, at Ship, shipping as `reading` found it.
 fn check(feature: &Feature, reading: &Result<Reading, String>, modes: &Modes) -> ShipCheck {
     let mut out = ShipCheck::default();
     for stage in Stage::ALL.into_iter().filter(|s| *s < Stage::Ship) {
@@ -235,6 +357,7 @@ fn check(feature: &Feature, reading: &Result<Reading, String>, modes: &Modes) ->
         Ok(reading) => reading,
         Err(err) => {
             out.blockers.push(format!("Couldn't read the code: {err}"));
+            out.unread = true;
             return out;
         }
     };
@@ -251,61 +374,30 @@ fn check(feature: &Feature, reading: &Result<Reading, String>, modes: &Modes) ->
         ));
     }
     let branch = feature.branch();
-    let commits = |r: &Repo| reading.commits.get(&r.key()).copied().unwrap_or(0);
-    let shipped: Vec<&Repo> = feature.touched().filter(|r| commits(r) > 0).collect();
-    if shipped.is_empty() {
-        out.blockers
-            .push(format!("Nothing to ship: no commits on {branch}"));
-        return out;
-    }
-    for repo in feature.touched().filter(|r| commits(r) == 0) {
-        out.notes
-            .push(format!("{} has no commits: left out", repo.key()));
-    }
-    let mut prs = Vec::new();
-    let mut squashes = Vec::new();
-    for repo in shipped {
-        match mode_of(feature, &repo.key(), modes) {
-            ShipMode::Pr => {
-                if git(&repo.main, &["remote", "get-url", "origin"]).is_err() {
-                    out.blockers.push(format!(
-                        "{} has no origin remote to open a pull request on",
-                        repo.key()
-                    ));
-                }
-                prs.push(repo);
-            }
-            ShipMode::Squash => {
-                out.blockers.extend(squash_blocker(repo, &branch));
-                squashes.push(repo);
-            }
-        }
-    }
-    if !out.blockers.is_empty() {
-        return out;
-    }
-    for repo in &prs {
-        out.actions.push(Action::Push { repo: repo.key() });
-        let kept = feature.shipping.prs.iter().find(|p| p.repo == repo.key());
-        out.actions.push(match kept {
-            Some(pr) => Action::KeepPr {
-                repo: repo.key(),
-                url: pr.url.clone(),
-            },
-            None => Action::OpenPr {
-                repo: repo.key(),
+    for repo in feature.touched() {
+        let commits = reading.commits.get(&repo.key()).copied().unwrap_or(0);
+        if commits == 0 {
+            out.notes
+                .push(format!("{} has no commits: left out", repo.key()));
+        } else if merged_into_base(repo, &branch) {
+            out.notes.push(format!(
+                "{} is merged into {} already: left out",
+                repo.key(),
+                repo.base
+            ));
+        } else {
+            out.repos.push(RepoCheck {
+                key: repo.key(),
                 base: repo.base.clone(),
-            },
-        });
-    }
-    if prs.len() >= 2 {
-        out.actions.push(Action::LinkPrs);
-    }
-    for repo in squashes {
-        out.actions.push(Action::Squash {
-            repo: repo.key(),
-            base: repo.base.clone(),
-        });
+                main: repo.main.clone(),
+                commits,
+                route: Route::of_mode(mode_of(feature, &repo.key(), modes)),
+                no_origin: git(&repo.main, &["remote", "get-url", "origin"])
+                    .is_err()
+                    .then(|| format!("{} has no origin remote", repo.key())),
+                no_merge: squash_blocker(repo, &branch),
+            });
+        }
     }
     out
 }
@@ -420,7 +512,7 @@ pub fn open_prs(
                     }
                 }
             }
-            Action::Squash { .. } => {}
+            Action::Squash { .. } | Action::PushBase { .. } => {}
         }
     }
     Ok(prs)
@@ -578,6 +670,26 @@ fn run_gh(gh: &str, dir: &Path, args: &[&str]) -> Result<String, String> {
     }
 }
 
+/// Push the base of `repo` to origin from its main worktree, which a squash
+/// left on it, unless the user went elsewhere since: then that is what would
+/// go. What stops it, in a line.
+pub fn push_base(repo: &Repo) -> Result<(), String> {
+    let on = git(&repo.main, &["symbolic-ref", "-q", "--short", "HEAD"])
+        .map(|b| b.trim().to_owned())
+        .unwrap_or_default();
+    if on != repo.base {
+        return Err(format!("its main worktree isn't on {} now", repo.base));
+    }
+    let common = git(
+        &repo.main,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )?;
+    let _turn = git_ops::Turn::take(Path::new(common.trim()), "the push");
+    git_ops::push(&repo.main, Some("origin"), false)
+        .map(|_| ())
+        .map_err(|failed| push_why(&failed))
+}
+
 /// The folder and the shell command of a squash ship of `feature`'s
 /// `actions`, for a tab: every `Squash` action's repository in turn.
 pub fn squash_command(feature: &Feature, actions: &[Action]) -> (PathBuf, String) {
@@ -632,6 +744,11 @@ mod tests {
             );
             run(&repo.main, &["push", "-q", "origin", "main"]);
         }
+    }
+
+    /// What `f`'s ticks ask, by a fresh probe.
+    fn planned(f: &Feature, modes: &Modes) -> Planned {
+        plan_actions(f, &probe(f, modes).ship.unwrap())
     }
 
     /// Mark every stage before Ship on `f`'s code as it is now.
@@ -699,7 +816,7 @@ esac
         let p = probe(&f, &Modes::all(Some(ShipMode::Pr)));
         assert_eq!(p.guards["api"], Guard::On);
         assert!(hook::guarded(&f.repos[0].main, "feature/f"));
-        let check = p.ship.unwrap();
+        let check = plan_actions(&f, &p.ship.unwrap());
         assert!(check.blockers.is_empty(), "{:?}", check.blockers);
         assert_eq!(
             check.actions,
@@ -752,7 +869,7 @@ esac
 
         // Shipped again: the pull request is kept, the push updates it.
         f.shipping.prs = prs.clone();
-        let check = probe(&f, &Modes::all(Some(ShipMode::Pr))).ship.unwrap();
+        let check = planned(&f, &Modes::all(Some(ShipMode::Pr)));
         assert_eq!(
             check.actions[1],
             Action::KeepPr {
@@ -774,8 +891,12 @@ esac
         commit(&wt(&f, "web"), "w1", "web change");
         mark_all(&mut f);
         let gh = fake_gh(&t);
-        let check = probe(&f, &Modes::all(Some(ShipMode::Pr))).ship.unwrap();
-        assert_eq!(check.notes, ["docs has no commits: left out"]);
+        let modes = Modes::all(Some(ShipMode::Pr));
+        assert_eq!(
+            probe(&f, &modes).ship.unwrap().notes,
+            ["docs has no commits: left out"]
+        );
+        let check = planned(&f, &modes);
         assert_eq!(check.actions.len(), 5);
         assert_eq!(check.actions[4], Action::LinkPrs);
         assert_eq!(
@@ -791,7 +912,7 @@ esac
         std::fs::remove_file(t.0.join("refuse")).unwrap();
 
         f.shipping.prs = so_far;
-        let check = probe(&f, &Modes::all(Some(ShipMode::Pr))).ship.unwrap();
+        let check = planned(&f, &Modes::all(Some(ShipMode::Pr)));
         assert!(matches!(check.actions[1], Action::KeepPr { .. }));
         let prs = open_prs(&f, &check.actions, &gh).unwrap();
         let urls: Vec<&str> = prs.iter().map(|p| p.url.as_str()).collect();
@@ -817,9 +938,7 @@ esac
 
         // One open for the branch already is used, not made again.
         std::fs::write(t.0.join("open"), "").unwrap();
-        let fresh = probe(&feature_over_again(&f), &Modes::all(Some(ShipMode::Pr)))
-            .ship
-            .unwrap();
+        let fresh = planned(&feature_over_again(&f), &Modes::all(Some(ShipMode::Pr)));
         let prs = open_prs(&f, &fresh.actions, &gh).unwrap();
         assert_eq!(prs[0].url, "https://github.com/o/r/pull/9");
     }
@@ -837,19 +956,16 @@ esac
         let mut f = feature_over(&t, &["api", "docs"], &["docs"]);
         origins(&t, &f);
         mark_all(&mut f);
-        let blockers = |f: &Feature| {
-            probe(f, &Modes::all(Some(ShipMode::Pr)))
-                .ship
-                .unwrap()
-                .blockers
-        };
-        assert_eq!(blockers(&f), ["Nothing to ship: no commits on feature/f"]);
+        // No commits: nothing to do, which stops nothing.
+        let none = planned(&f, &Modes::all(Some(ShipMode::Pr)));
+        assert!(none.nothing);
+        assert!(none.blockers.is_empty());
 
         // The marks were given on code without commits.
         commit(&wt(&f, "api"), "a1", "change");
         std::fs::write(wt(&f, "api").join("a1"), "more").unwrap();
         std::fs::write(wt(&f, "docs").join("a"), "x").unwrap();
-        let check = probe(&f, &Modes::all(Some(ShipMode::Pr))).ship.unwrap();
+        let check = planned(&f, &Modes::all(Some(ShipMode::Pr)));
         assert_eq!(
             check.blockers,
             [
@@ -910,7 +1026,7 @@ esac
         mark_all(&mut f);
         // No origin on GitHub: a squash.
         assert_eq!(mode_of(&f, "api", &Modes::default()), ShipMode::Squash);
-        let check = |f: &Feature| probe(f, &Modes::default()).ship.unwrap();
+        let check = |f: &Feature| planned(f, &Modes::default());
         assert_eq!(
             check(&f).actions,
             [Action::Squash {
@@ -950,7 +1066,7 @@ esac
         f.title = "Don't break".into();
         commit(&wt(&f, "api"), "x", "feature");
         mark_all(&mut f);
-        let check = probe(&f, &Modes::default()).ship.unwrap();
+        let check = planned(&f, &Modes::default());
         let (dir, command) = squash_command(&f, &check.actions);
         let main = f.repos[0].main.clone();
         assert_eq!(dir, main);
@@ -990,7 +1106,7 @@ esac
         assert_eq!(mode_of(&f, "api", &modes), ShipMode::Pr);
         let p = probe(&f, &modes);
         assert_eq!(p.guards.keys().collect::<Vec<_>>(), ["api", "other:api"]);
-        let check = p.ship.unwrap();
+        let check = plan_actions(&f, &p.ship.unwrap());
         assert!(check.blockers.is_empty(), "{:?}", check.blockers);
         assert_eq!(
             check.actions,
@@ -1017,6 +1133,221 @@ esac
         assert_eq!(prs[0].repo, "api");
     }
 
+    /// Set `key`'s route on `f`, its ticks as they are.
+    fn route(f: &mut Feature, key: &str, route: Route) {
+        let plan = f.ship_plan.repos.entry(key.into());
+        plan.or_insert_with(|| RepoPlan::new(route)).route = route;
+    }
+
+    #[test]
+    fn the_route_picks_the_steps_whatever_the_project_sets() {
+        let t = Temp::new();
+        let mut f = feature_over(&t, &["api"], &[]);
+        origins(&t, &f);
+        commit(&wt(&f, "api"), "a", "change");
+        mark_all(&mut f);
+        let modes = Modes::all(Some(ShipMode::Pr));
+        let api = || "api".to_owned();
+
+        route(&mut f, "api", Route::Merge);
+        let merge = Action::Squash {
+            repo: api(),
+            base: "main".into(),
+        };
+        assert_eq!(planned(&f, &modes).actions, std::slice::from_ref(&merge));
+
+        // Push the base too: run after the squash, named in the tab's stead.
+        let plan = f.ship_plan.repos.get_mut("api").unwrap();
+        plan.toggle(ShipStep::PushBase);
+        let check = planned(&f, &modes);
+        assert_eq!(
+            check.actions,
+            [
+                merge,
+                Action::PushBase {
+                    repo: api(),
+                    base: "main".into()
+                }
+            ]
+        );
+        let (_, command) = squash_command(&f, &check.actions);
+        assert!(!command.contains("git push"), "{command}");
+
+        // Push without a pull request.
+        route(&mut f, "api", Route::Pr);
+        let plan = f.ship_plan.repos.get_mut("api").unwrap();
+        plan.toggle(ShipStep::OpenPr);
+        assert_eq!(planned(&f, &modes).actions, [Action::Push { repo: api() }]);
+
+        route(&mut f, "api", Route::Nothing);
+        let none = planned(&f, &modes);
+        assert!(none.nothing && none.actions.is_empty());
+    }
+
+    #[test]
+    fn nothing_ticked_stops_nothing_and_a_ticked_step_that_cant_run_stops_it() {
+        let t = Temp::new();
+        let mut f = feature_over(&t, &["api"], &[]);
+        commit(&wt(&f, "api"), "a", "change");
+        mark_all(&mut f);
+        // Uncommitted, and no origin: no pull request can go.
+        std::fs::write(wt(&f, "api").join("a"), "more").unwrap();
+        let modes = Modes::all(Some(ShipMode::Pr));
+        let check = planned(&f, &modes);
+        assert!(!check.nothing);
+        assert_eq!(
+            check.blockers,
+            ["api has uncommitted changes", "api has no origin remote"]
+        );
+        assert!(check.actions.is_empty());
+
+        let mut plan = RepoPlan::new(Route::Pr);
+        plan.toggle(ShipStep::Push);
+        f.ship_plan.repos.insert("api".into(), plan);
+        let none = planned(&f, &modes);
+        assert!(none.nothing);
+        assert!(none.blockers.is_empty(), "{:?}", none.blockers);
+    }
+
+    #[test]
+    fn a_step_not_ticked_doesnt_stop_it() {
+        let t = Temp::new();
+        let mut f = feature_over(&t, &["api"], &[]);
+        origins(&t, &f);
+        let main = f.repos[0].main.clone();
+        commit(&wt(&f, "api"), "a", "change");
+        mark_all(&mut f);
+        // The main worktree stops a merge, which isn't what is asked.
+        run(&main, &["switch", "-q", "-c", "other"]);
+        let modes = Modes::all(Some(ShipMode::Pr));
+        assert!(planned(&f, &modes).blockers.is_empty());
+        route(&mut f, "api", Route::Merge);
+        assert_eq!(
+            planned(&f, &modes).blockers,
+            ["api's main worktree is on other: switch it to main"]
+        );
+        // The tick stays: it goes once the cause does.
+        run(&main, &["switch", "-q", "main"]);
+        assert!(planned(&f, &modes).blockers.is_empty());
+    }
+
+    #[test]
+    fn only_those_squashing_hold_the_merge_open() {
+        let t = Temp::new();
+        let mut f = feature_over(&t, &["api", "web"], &[]);
+        commit(&wt(&f, "api"), "a", "api change");
+        commit(&wt(&f, "web"), "w", "web change");
+        mark_all(&mut f);
+        f.shipping.squash_at = Some(5);
+        f.shipping.squash_repos = vec!["api".into()];
+        let modes = Modes::default();
+        assert!(!probe(&f, &modes).merged);
+        let main = f.repos[0].main.clone();
+        run(&main, &["merge", "-q", "--squash", "feature/f"]);
+        run(&main, &["commit", "-q", "-m", "api"]);
+        assert!(probe(&f, &modes).merged, "web stays out of it");
+        // A record from before these were kept waits for all.
+        f.shipping.squash_repos.clear();
+        assert!(!probe(&f, &modes).merged);
+    }
+
+    #[test]
+    fn a_branch_merged_already_is_left_out() {
+        let t = Temp::new();
+        let mut f = feature_over(&t, &["api"], &[]);
+        commit(&wt(&f, "api"), "a", "change");
+        mark_all(&mut f);
+        let main = f.repos[0].main.clone();
+        run(&main, &["merge", "-q", "--squash", "feature/f"]);
+        run(&main, &["commit", "-q", "-m", "by hand"]);
+        let check = probe(&f, &Modes::default()).ship.unwrap();
+        assert!(check.repos.is_empty());
+        assert_eq!(check.notes, ["api is merged into main already: left out"]);
+        assert!(plan_actions(&f, &check).nothing);
+        assert!(removable(&f, &check), "nothing is lost");
+    }
+
+    #[test]
+    fn a_squashed_branch_loses_nothing_and_goes_with_its_worktree() {
+        let t = Temp::new();
+        let mut f = feature_over(&t, &["api"], &[]);
+        commit(&wt(&f, "api"), "a", "change");
+        mark_all(&mut f);
+        let main = f.repos[0].main.clone();
+        assert_eq!(
+            crate::feature::layout::losses(&f),
+            ["api: 1 commit not in main"]
+        );
+        run(&main, &["merge", "-q", "--squash", "feature/f"]);
+        run(&main, &["commit", "-q", "-m", "squashed"]);
+        assert!(crate::feature::layout::losses(&f).is_empty());
+        crate::feature::layout::remove(&f, false).unwrap();
+        assert!(!wt(&f, "api").exists());
+        assert!(try_run(&main, &["rev-parse", "--verify", "-q", "feature/f"]).is_err());
+    }
+
+    #[test]
+    fn removing_goes_only_with_every_repository_merging() {
+        let t = Temp::new();
+        let mut f = feature_over(&t, &["api", "web"], &[]);
+        commit(&wt(&f, "api"), "a", "api change");
+        commit(&wt(&f, "web"), "w", "web change");
+        mark_all(&mut f);
+        let modes = Modes::all(Some(ShipMode::Squash));
+        let check = probe(&f, &modes).ship.unwrap();
+        assert!(removable(&f, &check));
+        route(&mut f, "web", Route::Nothing);
+        assert!(!removable(&f, &check));
+        route(&mut f, "web", Route::Merge);
+        assert!(removable(&f, &check));
+        f.ship_plan
+            .repos
+            .get_mut("web")
+            .unwrap()
+            .toggle(ShipStep::Merge);
+        assert!(!removable(&f, &check));
+    }
+
+    #[test]
+    fn pushing_the_base_goes_from_its_branch_only() {
+        let t = Temp::new();
+        let f = feature_over(&t, &["api"], &[]);
+        origins(&t, &f);
+        let repo = &f.repos[0];
+        commit(&repo.main, "m", "on main");
+        push_base(repo).unwrap();
+        let origin = t.0.join("api.git");
+        assert_eq!(
+            run(&origin, &["rev-parse", "main"]),
+            run(&repo.main, &["rev-parse", "main"])
+        );
+        run(&repo.main, &["switch", "-q", "-c", "other"]);
+        assert_eq!(
+            push_base(repo).unwrap_err(),
+            "its main worktree isn't on main now"
+        );
+    }
+
+    #[test]
+    fn a_tick_keeps_what_it_needs() {
+        let mut plan = RepoPlan::new(Route::Pr);
+        plan.toggle(ShipStep::Push);
+        assert!(!plan.ticked(ShipStep::OpenPr));
+        plan.toggle(ShipStep::OpenPr);
+        assert!(plan.ticked(ShipStep::Push) && plan.ticked(ShipStep::OpenPr));
+        plan.route = Route::Merge;
+        assert_eq!(plan.steps(), [ShipStep::Merge]);
+        plan.toggle(ShipStep::PushBase);
+        assert_eq!(plan.steps(), [ShipStep::Merge, ShipStep::PushBase]);
+        plan.toggle(ShipStep::Merge);
+        assert!(plan.steps().is_empty());
+        plan.toggle(ShipStep::PushBase);
+        assert_eq!(plan.steps(), [ShipStep::Merge, ShipStep::PushBase]);
+        // Another route's ticks wait.
+        plan.route = Route::Pr;
+        assert_eq!(plan.steps(), [ShipStep::Push, ShipStep::OpenPr]);
+    }
+
     #[test]
     fn actions_read_as_words() {
         let api = || "api".to_owned();
@@ -1034,6 +1365,10 @@ esac
                 repo: api(),
                 base: "main".into(),
             },
+            Action::PushBase {
+                repo: api(),
+                base: "main".into(),
+            },
         ]
         .iter()
         .map(Action::label)
@@ -1045,6 +1380,7 @@ esac
                 "Open a pull request into dev for api",
                 "Keep the pull request open for api: https://x/1",
                 "Squash the feature into main in api",
+                "Push main of api to origin",
             ]
         );
     }

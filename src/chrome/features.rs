@@ -14,11 +14,11 @@ use std::{
 };
 
 use super::{
-    AGENT_ICON, BUTTON_PADDING, ButtonStyle, CHECKBOX_GAP, CHECKBOX_ROW, Canvas, Check,
-    DETAIL_FONT_SIZE, DIALOG_WIDTH, DOT, Dot, FONT_SIZE, FieldSpot, LABEL_FONT_SIZE, ListBar,
-    POPUP_RADIUS, Painter, Palette, QUIT_BODY, QUIT_BUTTON, QUIT_BUTTON_GAP, QUIT_LINE_GAP,
-    QUIT_PADDING, QUIT_TITLE, Rect, Rgb, SHADOW, SMALL_FONT_SIZE, Thumb, agent_icon, band,
-    button_width, check, chevron_down, chevron_side, copy, coverage, cross, dialog_buttons,
+    AGENT_ICON, BUTTON_PADDING, ButtonStyle, CHECKBOX_GAP, CHECKBOX_ROW, CHECKBOX_SIZE, Canvas,
+    Check, DETAIL_FONT_SIZE, DIALOG_WIDTH, DOT, Dot, FONT_SIZE, FieldSpot, LABEL_FONT_SIZE,
+    ListBar, POPUP_RADIUS, Painter, Palette, QUIT_BODY, QUIT_BUTTON, QUIT_BUTTON_GAP,
+    QUIT_LINE_GAP, QUIT_PADDING, QUIT_TITLE, Rect, Rgb, SHADOW, SMALL_FONT_SIZE, Thumb, agent_icon,
+    band, button_width, check, chevron_down, chevron_side, copy, coverage, cross, dialog_buttons,
     field_text, focus_ring, footer_hint_spots, gutter_track, hint_strs, icon_sdf, measure,
     measure_bold, measured_footer_height, mix, phys, physical, plus, rect_px, segment,
     segment_tint, status_dot, tab, trash,
@@ -355,6 +355,50 @@ pub struct CheckLine {
     pub tone: CheckTone,
 }
 
+/// A tick box on the Ship page.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShipStepRow {
+    /// Its place among the page's rows (`Gerdr`'s `ship_rows`).
+    pub row: usize,
+    pub label: String,
+    /// What goes under it: why it can't run, or what it means.
+    pub detail: Option<CheckLine>,
+    pub ticked: bool,
+    /// It can't run as things are: dim. It can still be ticked or unticked.
+    pub off: bool,
+}
+
+/// A repository's choice of way on the Ship page.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShipRouteRow {
+    /// Its place among the page's rows.
+    pub row: usize,
+    /// The segment that is on, of `SHIP_ROUTES`.
+    pub on: usize,
+}
+
+/// A repository on the Ship page, or what follows shipping.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShipGroup {
+    pub head: String,
+    /// `head` reads as a caption over its rows, not a line of its own.
+    pub caption: bool,
+    pub route: Option<ShipRouteRow>,
+    pub note: Option<String>,
+    pub steps: Vec<ShipStepRow>,
+    /// The row under the keyboard's cursor, of all the page's.
+    pub selected: Option<usize>,
+}
+
+/// Where the Ship page's rows go, unscrolled.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ShipSpots {
+    /// Each choice: its row, its outline, and its segments.
+    pub routes: Vec<(usize, Rect, [Rect; 3])>,
+    /// Each row, the choices too, in the page's order.
+    pub rows: Vec<(usize, Rect)>,
+}
+
 /// How a stage's node on the feature tab's rail reads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum NodeMark {
@@ -498,6 +542,8 @@ pub enum PageSection {
     /// Build's choice: one agent through all milestones, or a fresh one
     /// per milestone (`fresh`).
     MilestoneMode { fresh: bool },
+    /// Ship's choice and tick boxes for a repository, or what follows.
+    ShipGroup(ShipGroup),
     /// The milestones, "done of total", with a bar, and each by name when
     /// known (`true` = done; empty until Inc 2 reads them).
     Milestones {
@@ -678,6 +724,11 @@ pub enum FeatureTabHit {
     /// A segment of Build's milestone choice: 0 one agent, 1 one per
     /// milestone.
     MilestoneMode(usize),
+    /// A segment of a repository's way on the Ship page: its row, then 0
+    /// pull request, 1 merge only, 2 nothing.
+    ShipRoute(usize, usize),
+    /// A row of the Ship page.
+    ShipRow(usize),
     /// A finding's card, as `FeatureTabLayout::finding_cards` has them.
     Finding(usize),
     Hint(usize),
@@ -735,7 +786,10 @@ pub struct FeatureTabLayout {
     pub agent_model: Option<Rect>,
     /// Build's milestone choice: its outline and two segments, unscrolled.
     pub milestone_mode: Option<(Rect, [Rect; 2])>,
-    /// Each finding's card, in the page's order.
+    /// The Ship page's rows.
+    pub ship: ShipSpots,
+    /// Each finding's card, in the page's order; the Ship page's rows too,
+    /// which the keyboard goes through the same way.
     pub finding_cards: Vec<Rect>,
     /// The footer, and where each hint goes in it.
     pub hints: Rect,
@@ -833,6 +887,16 @@ impl FeatureTabLayout {
                         let (_, segments) = self.milestone_mode.as_ref()?;
                         let i = segments.iter().position(|r| r.contains(at))?;
                         Some(FeatureTabHit::MilestoneMode(i))
+                    })
+                    .or_else(|| {
+                        (self.ship.routes.iter()).find_map(|(row, _, segments)| {
+                            let i = segments.iter().position(|r| r.contains(at))?;
+                            Some(FeatureTabHit::ShipRoute(*row, i))
+                        })
+                    })
+                    .or_else(|| {
+                        let on = (self.ship.rows.iter()).find(|(_, r)| r.contains(at))?;
+                        Some(FeatureTabHit::ShipRow(on.0))
                     })
                     .or_else(|| {
                         let on = |r: &Rect| r.contains(at);
@@ -1070,6 +1134,10 @@ const PICK_LABEL: i32 = 48;
 const AGENT_MODEL_MAX: i32 = 220;
 /// Build's milestone choice: its segments' words.
 const MODE_SEGMENTS: [&str; 2] = ["One agent", "Agent per milestone"];
+/// The ways a repository can go on the Ship page, in `Route::ALL`'s order.
+const SHIP_ROUTES: [&str; 3] = ["Pull request", "Merge only", "Nothing"];
+/// How far a Ship page tick box sits in from its row's left edge.
+const SHIP_STEP_INSET: i32 = 4;
 const AGENT_RADIUS: f32 = 6.0;
 /// A milestone's row, and the progress bar's height.
 const MILESTONE_ROW: i32 = 22;
@@ -1144,6 +1212,10 @@ pub(super) enum Piece {
     Agent(usize),
     /// Build's milestone choice, its label at the row's left.
     MilestoneMode { fresh: bool },
+    /// The choice of the Ship group of `StagePage::sections[i]`.
+    ShipRoute(usize),
+    /// Tick box `.1` of the Ship group of `StagePage::sections[.0]`.
+    ShipStep(usize, usize),
     /// The file card of `StagePage::sections[i]`.
     File(usize),
     /// The frame of the finding card of `StagePage::sections[i]`, with its
@@ -1921,6 +1993,30 @@ fn milestone_mode_rects(row: Rect) -> (Rect, [Rect; 2]) {
     (track, [left, right])
 }
 
+/// Where a Ship group's choice goes in `row`: its outline and segments.
+fn ship_route_rects(row: Rect) -> (Rect, [Rect; 3]) {
+    let room = (row.size.w - 2 * PICK_TRACK_PAD).max(3);
+    let widths = SHIP_ROUTES.map(button_width);
+    let all: i32 = widths.iter().sum();
+    let scaled = widths.map(|w| match all > room {
+        true => w * room / all,
+        false => w,
+    });
+    let y = row.loc.y + PICK_TRACK_PAD;
+    let h = PICK_TRACK - 2 * PICK_TRACK_PAD;
+    let mut x = row.loc.x + PICK_TRACK_PAD;
+    let segments = scaled.map(|w| {
+        let segment = Rectangle::new((x, y).into(), (w, h).into());
+        x += w;
+        segment
+    });
+    let track = Rectangle::new(
+        row.loc,
+        (scaled.iter().sum::<i32>() + 2 * PICK_TRACK_PAD, PICK_TRACK).into(),
+    );
+    (track, segments)
+}
+
 /// Where the agent card's choices go: its chips (their outline, then each)
 /// and the button picking its model.
 #[derive(Default)]
@@ -1929,12 +2025,14 @@ struct AgentChoiceSpots {
     model: Option<Rect>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn page_stack(
     view: &FeatureTabView,
     s: &mut Stack,
     buttons: &mut [Option<Rect>],
     choices: &mut AgentChoiceSpots,
     milestone_mode: &mut Option<(Rect, [Rect; 2])>,
+    ship: &mut ShipSpots,
     finding_cards: &mut Vec<Rect>,
     activity: bool,
 ) {
@@ -2090,6 +2188,31 @@ fn page_stack(
             PageSection::MilestoneMode { fresh } => {
                 let row = s.put(PICK_TRACK, Piece::MilestoneMode { fresh: *fresh });
                 *milestone_mode = Some(milestone_mode_rects(row));
+            }
+            PageSection::ShipGroup(group) => {
+                if group.caption {
+                    s.caption(&group.head);
+                } else {
+                    s.text(&group.head, Font::Body, Ink::Text, BODY_LINE);
+                    s.y += 4;
+                }
+                if let Some(route) = &group.route {
+                    let row = s.put(PICK_TRACK, Piece::ShipRoute(k));
+                    let (track, segments) = ship_route_rects(row);
+                    ship.routes.push((route.row, track, segments));
+                    ship.rows.push((route.row, row));
+                    finding_cards.push(row);
+                    s.y += 4;
+                }
+                if let Some(note) = &group.note {
+                    s.text(note, Font::Small, Ink::Muted, SMALL_LINE);
+                }
+                for (j, step) in group.steps.iter().enumerate() {
+                    let detail = step.detail.as_ref().map_or(0, |_| SMALL_LINE);
+                    let row = s.put(CHECKBOX_ROW + detail, Piece::ShipStep(k, j));
+                    ship.rows.push((step.row, row));
+                    finding_cards.push(row);
+                }
             }
             PageSection::File { buttons: held, .. } => {
                 let card = s.put(AGENT_PAD * 2 + AGENT_HEAD, Piece::File(k));
@@ -2375,6 +2498,7 @@ pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayou
     let mut page_buttons = vec![None; view.page.buttons.len()];
     let mut choices = AgentChoiceSpots::default();
     let mut milestone_mode = None;
+    let mut ship = ShipSpots::default();
     let mut finding_cards = Vec::new();
     for column in TabColumn::ALL {
         let Some(place) = columns[column as usize] else {
@@ -2400,6 +2524,7 @@ pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayou
                 &mut page_buttons,
                 &mut choices,
                 &mut milestone_mode,
+                &mut ship,
                 &mut finding_cards,
                 columns[TabColumn::Activity as usize].is_none(),
             ),
@@ -2433,6 +2558,7 @@ pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayou
         agent_picks: choices.picks,
         agent_model: choices.model,
         milestone_mode,
+        ship,
         finding_cards,
         hints,
         hint_spots,
@@ -2769,7 +2895,12 @@ fn slice_view(view: &FeatureTabView, slice: TabSlice) -> FeatureTabView {
         TabSlice::Column(TabColumn::Page) => {
             matches!(
                 hit,
-                H::PageButton(_) | H::AgentPick(_) | H::AgentModel | H::MilestoneMode(_)
+                H::PageButton(_)
+                    | H::AgentPick(_)
+                    | H::AgentModel
+                    | H::MilestoneMode(_)
+                    | H::ShipRoute(..)
+                    | H::ShipRow(_)
             )
         }
         TabSlice::Column(TabColumn::Activity) => false,
@@ -3869,6 +4000,75 @@ impl Painter {
                 };
                 let labelled = [(one, at(segments[0])), (each, at(segments[1]))];
                 self.segmented(c, track, &labelled, usize::from(*fresh), hover, scale, p);
+            }
+            Piece::ShipRoute(k) => {
+                let Some(PageSection::ShipGroup(group)) = view.page.sections.get(*k) else {
+                    return;
+                };
+                let Some(route) = &group.route else {
+                    return;
+                };
+                let Some((_, track, segments)) = (l.ship.routes.iter()).find(|r| r.0 == route.row)
+                else {
+                    return;
+                };
+                // Around the choice alone: wider, it reads as a wider track.
+                let around = at(*track);
+                let around = Rectangle::new(
+                    (around.loc.x - PICK_TRACK_PAD, around.loc.y - PICK_TRACK_PAD).into(),
+                    (
+                        around.size.w + 2 * PICK_TRACK_PAD,
+                        around.size.h + 2 * PICK_TRACK_PAD,
+                    )
+                        .into(),
+                );
+                let selected = group.selected == Some(route.row);
+                self.row_highlight(c, around, (selected, 0.0), scale, p);
+                let hover = match view.hover {
+                    Some(FeatureTabHit::ShipRoute(row, i)) if row == route.row => Some(i),
+                    _ => None,
+                };
+                let labelled: Vec<(&str, Rect)> = (SHIP_ROUTES.iter().copied())
+                    .zip(segments.iter().map(|r| at(*r)))
+                    .collect();
+                self.segmented(c, at(*track), &labelled, route.on, hover, scale, p);
+            }
+            Piece::ShipStep(k, j) => {
+                let Some(PageSection::ShipGroup(group)) = view.page.sections.get(*k) else {
+                    return;
+                };
+                let Some(step) = group.steps.get(*j) else {
+                    return;
+                };
+                let hovered = view.hover == Some(FeatureTabHit::ShipRow(step.row));
+                let selected = group.selected == Some(step.row);
+                let lit = if hovered { 1.0 } else { 0.0 };
+                self.row_highlight(c, rect, (selected, lit), scale, p);
+                let tick = Rectangle::new(
+                    (rect.loc.x + SHIP_STEP_INSET, rect.loc.y).into(),
+                    (CHECKBOX_SIZE, CHECKBOX_ROW).into(),
+                );
+                let state = if step.ticked { Check::On } else { Check::Off };
+                self.checkbox(c, tick, state, hovered, scale, p);
+                let text_x = tick.loc.x + CHECKBOX_SIZE + CHECKBOX_GAP;
+                let text_w = (rect.loc.x + rect.size.w - text_x - SHIP_STEP_INSET).max(1);
+                let label =
+                    Rectangle::new((text_x, rect.loc.y).into(), (text_w, CHECKBOX_ROW).into());
+                let ink = if step.off { p.muted } else { p.text };
+                line(c, &step.label, label, FONT_SIZE, ink);
+                if let Some(detail) = &step.detail {
+                    let under = Rectangle::new(
+                        (text_x, rect.loc.y + CHECKBOX_ROW).into(),
+                        (text_w, SMALL_LINE).into(),
+                    );
+                    line(
+                        c,
+                        &detail.text,
+                        under,
+                        SMALL_FONT_SIZE,
+                        detail.tone.color(p),
+                    );
+                }
             }
             Piece::Agent(k) => {
                 let Some(PageSection::Agent {

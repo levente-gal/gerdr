@@ -77,7 +77,7 @@ use crate::{
     },
     doc_review::DocFile,
     feature::{
-        self, Event, Feature, Pr, Repo, Stage, Status,
+        self, Event, Feature, Pr, Repo, Route, ShipStep, Stage, Status,
         agents::needs,
         fix_round::{FixPhase, FixRound},
         graph,
@@ -87,7 +87,7 @@ use crate::{
         review_import::{
             self, CodeRead, Decision, Finding as ReviewFinding, FindingState, ReviewRound, Severity,
         },
-        ship::{self, Action, Probe},
+        ship::{self, Action, Planned, Probe},
         store,
         verify::PlannedCheck,
     },
@@ -456,7 +456,22 @@ pub(crate) enum Done {
         /// The squash steps, to start in a tab once the code is found
         /// unchanged: then done once merged, not now.
         squash: Vec<Action>,
+        /// The repositories whose branch the steps push.
+        pushed: Vec<String>,
         result: Result<Vec<Pr>, (String, Vec<Pr>)>,
+    },
+    /// The bases a merged feature ticked to push, each by its
+    /// `Repo::key`, its name and how it went.
+    BasesPushed {
+        project: String,
+        slug: String,
+        results: Vec<(String, String, Result<(), String>)>,
+    },
+    /// What removing a shipped feature's worktrees loses, as ticked.
+    ShippedLosses {
+        project: String,
+        slug: String,
+        losses: Vec<String>,
     },
     /// The code read once run `n` of the Build agent was done, its
     /// `build.md` at `stamp`: whether Build holds (see `feature_build`).
@@ -916,6 +931,37 @@ pub struct FeaturePanel {
     pub repo_pick: Option<usize>,
 }
 
+/// What follows shipping, as the Ship page ticks it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShipAfter {
+    /// The workspace closes.
+    Close,
+    /// The worktrees and branches go.
+    Remove,
+}
+
+/// A row of the Ship page the keyboard and pointer can reach.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ShipRow {
+    /// Repository `repo`'s choice of way, now `route`.
+    Route { repo: String, route: Route },
+    /// A tick box of repository `repo`.
+    Step { repo: String, step: ShipStep },
+    /// A tick box of what follows.
+    After(ShipAfter),
+}
+
+impl ShipRow {
+    /// What Space does on it, and a click on a tick box.
+    fn outcome(&self) -> PanelOutcome {
+        match self {
+            Self::Route { repo, route } => PanelOutcome::ShipRoute(repo.clone(), route.next()),
+            Self::Step { repo, step } => PanelOutcome::ShipTick(repo.clone(), *step),
+            Self::After(after) => PanelOutcome::ShipAfter(*after),
+        }
+    }
+}
+
 /// What the feature panel asks gerdr to do.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PanelOutcome {
@@ -923,6 +969,15 @@ pub enum PanelOutcome {
     Tick,
     /// Ship it, after the Ship sheet: the current stage is Ship.
     Ship,
+    /// Finish it with nothing shipped, after asking: the current stage is
+    /// Ship, and no step is ticked.
+    Finish,
+    /// Send repository `.0` of the Ship page the way `.1` says.
+    ShipRoute(String, Route),
+    /// Flip a tick of repository `.0` on the Ship page.
+    ShipTick(String, ShipStep),
+    /// Flip a tick of what follows shipping.
+    ShipAfter(ShipAfter),
     /// Start this agent stage's agent (fresh: even if one runs).
     StartAgent(Stage, bool),
     /// Tell the agent waiting on this stage to read its prompt.
@@ -1240,6 +1295,8 @@ pub struct RowCtx {
     pub sandbox_busy: bool,
     /// Verify has no checks to run because the feature skips them all.
     pub all_skipped: bool,
+    /// At Ship, as last read, no step is ticked: it can only finish.
+    pub ship_nothing: bool,
 }
 
 impl RowCtx {
@@ -1299,6 +1356,7 @@ pub fn row_action(feature: &Feature, row: PanelRow, ctx: RowCtx) -> Option<Panel
                 PanelOutcome::GoToCurrent
             }
             StageMark::Done => PanelOutcome::Untick(stage),
+            StageMark::Current if stage == Stage::Ship && ctx.ship_nothing => PanelOutcome::Finish,
             StageMark::Current if stage == Stage::Ship => PanelOutcome::Ship,
             StageMark::Current if stage == Stage::Verify && ctx.checks => PanelOutcome::RunChecks,
             StageMark::Current if stage == Stage::PlanReview => plan_review_action(feature),
@@ -2233,6 +2291,7 @@ fn action_hint(action: &PanelOutcome) -> &'static str {
         PanelOutcome::WriteFinalPlan => "go on",
         PanelOutcome::Tick => "mark done",
         PanelOutcome::Ship => "ship\u{2026}",
+        PanelOutcome::Finish => "finish\u{2026}",
         PanelOutcome::Untick(_) => "reopen",
         PanelOutcome::GoToCurrent => "go to the current stage",
         PanelOutcome::Touch(_) => "add to feature",
@@ -2246,6 +2305,7 @@ fn stage_button(feature: &Feature, stage: Stage, ctx: RowCtx) -> Option<&'static
     match row_action(feature, PanelRow::Stage(stage), ctx)? {
         PanelOutcome::Tick => Some("Mark done"),
         PanelOutcome::Ship => Some("Ship\u{2026}"),
+        PanelOutcome::Finish => Some("Finish\u{2026}"),
         PanelOutcome::Untick(_) => Some("Reopen"),
         PanelOutcome::StartAgent(..) => Some("Start agent"),
         PanelOutcome::SendPrompt(_) => Some("Send prompt"),
@@ -2311,30 +2371,43 @@ enum ShipAsk {
     Checking,
     /// What stops it: the toast's text.
     Blocked(String),
-    /// It can ship, but nothing would.
-    Nothing,
+    /// No step is ticked: it can finish, leaving these with uncommitted
+    /// changes.
+    Finish(Vec<String>),
     Ready(Asked),
 }
 
-/// What shipping `title` asks for, given the latest `probe`.
-fn ship_ask(title: &str, probe: Option<&Probe>) -> ShipAsk {
+/// What `feature`'s ticks ask, as the latest `probe` found it, while Ship is
+/// its stage.
+fn ship_planned(feature: &Feature, probe: Option<&Probe>) -> Option<Planned> {
+    let check = probe?.ship.as_ref()?;
+    Some(ship::plan_actions(feature, check))
+}
+
+/// What shipping `feature` asks for, given the latest `probe`.
+fn ship_ask(feature: &Feature, probe: Option<&Probe>) -> ShipAsk {
+    let title = feature.title.as_str();
     let Some(probe) = probe else {
         return ShipAsk::Checking;
     };
-    let Some(check) = &probe.ship else {
+    let Some(planned) = ship_planned(feature, Some(probe)) else {
         return match &probe.reading {
             Err(why) => ShipAsk::Blocked(blocked_text(title, &[read_blocker(why)])),
             Ok(_) => ShipAsk::Checking,
         };
     };
-    if !check.blockers.is_empty() {
-        return ShipAsk::Blocked(blocked_text(title, &check.blockers));
+    if planned.nothing {
+        let dirty = probe
+            .reading
+            .as_ref()
+            .map_or(Vec::new(), |r| r.dirty.clone());
+        return ShipAsk::Finish(dirty);
     }
-    if check.actions.is_empty() {
-        return ShipAsk::Nothing;
+    if !planned.blockers.is_empty() {
+        return ShipAsk::Blocked(blocked_text(title, &planned.blockers));
     }
     ShipAsk::Ready(Asked {
-        actions: check.actions.clone(),
+        actions: planned.actions,
         patch: probe.reading.as_ref().ok().map(|r| r.patch.clone()),
     })
 }
@@ -2426,20 +2499,229 @@ fn check_lines(
             _ => vec![line("checking\u{2026}".into(), CheckTone::Note)],
         };
     };
-    if !check.blockers.is_empty() {
-        let lines = check
+    let planned = ship::plan_actions(feature, check);
+    if !planned.blockers.is_empty() {
+        let lines = planned
             .blockers
             .iter()
             .map(|b| line(b.clone(), CheckTone::Blocker))
             .collect();
         return capped(lines, CheckTone::Blocker);
     }
-    let ready = line("Ready to ship".into(), CheckTone::Ready);
+    let first = match planned.nothing {
+        true => line(NOTHING_TICKED.into(), CheckTone::Note),
+        false => line("Ready to ship".into(), CheckTone::Ready),
+    };
     let notes = check.notes.iter().map(|n| line(n.clone(), CheckTone::Note));
     capped(
-        std::iter::once(ready).chain(notes).collect(),
+        std::iter::once(first).chain(notes).collect(),
         CheckTone::Note,
     )
+}
+
+/// What Ship's mark and the history say of a feature finished unshipped.
+const FINISHED_UNSHIPPED: &str = "Finished without shipping";
+
+/// What the Ship check says with no step ticked.
+const NOTHING_TICKED: &str = "No step ticked: Finish ends it without shipping";
+
+/// The Ship page's rows the keyboard and pointer reach, in the order they
+/// show: none unless its ticks can still change, that is, with Ship the
+/// current stage and no squash under way.
+fn ship_rows(feature: &Feature, probe: Option<&Probe>) -> Vec<ShipRow> {
+    let check = probe.and_then(|p| p.ship.as_ref());
+    let Some(check) = check.filter(|c| {
+        !c.unread
+            && feature.status == Status::Open
+            && feature.current() == Some(Stage::Ship)
+            && feature.shipping.squash_at.is_none()
+    }) else {
+        return Vec::new();
+    };
+    let mut rows = Vec::new();
+    for repo in &check.repos {
+        let route = ship::repo_plan(feature, repo).route;
+        rows.push(ShipRow::Route {
+            repo: repo.key.clone(),
+            route,
+        });
+        rows.extend(route.steps().iter().map(|step| ShipRow::Step {
+            repo: repo.key.clone(),
+            step: *step,
+        }));
+    }
+    rows.push(ShipRow::After(ShipAfter::Close));
+    rows.push(ShipRow::After(ShipAfter::Remove));
+    rows
+}
+
+/// What repository `repo`'s header says: "api \u{b7} 12 commits \u{b7} +420
+/// \u{2212}80 \u{b7} into main".
+fn ship_repo_head(repo: &ship::RepoCheck, stat: Option<(usize, usize)>) -> String {
+    let commits = match repo.commits {
+        1 => "1 commit".to_owned(),
+        n => format!("{n} commits"),
+    };
+    let stat = stat.map_or(String::new(), |(added, deleted)| {
+        format!(" \u{b7} +{added} \u{2212}{deleted}")
+    });
+    format!(
+        "{} \u{b7} {commits}{stat} \u{b7} into {}",
+        repo.key, repo.base
+    )
+}
+
+/// The row of `step` of `repo` on the Ship page.
+fn ship_step_row(
+    feature: &Feature,
+    repo: &ship::RepoCheck,
+    step: ShipStep,
+    row: usize,
+) -> chrome::ShipStepRow {
+    let plan = ship::repo_plan(feature, repo);
+    let base = &repo.base;
+    let label = match step {
+        ShipStep::Push => format!("Push {} to origin", feature.branch()),
+        ShipStep::OpenPr => match feature.shipping.prs.iter().find(|p| p.repo == repo.key) {
+            Some(pr) => format!("Keep its pull request open: {}", pr_tail(&pr.url)),
+            None => format!("Open a pull request into {base}"),
+        },
+        ShipStep::Merge => format!("Merge into {base} in {}", tilde(&repo.main)),
+        ShipStep::PushBase => format!("Push {base} to origin"),
+    };
+    let why = repo.why_not(step);
+    let detail = match (why, step) {
+        (Some(why), _) => Some(CheckLine {
+            text: why.to_owned(),
+            tone: CheckTone::Blocker,
+        }),
+        (None, ShipStep::Merge) => Some(CheckLine {
+            text: "Squash; you edit the message in a tab".to_owned(),
+            tone: CheckTone::Note,
+        }),
+        _ => None,
+    };
+    chrome::ShipStepRow {
+        row,
+        label,
+        detail,
+        ticked: plan.ticked(step),
+        off: why.is_some(),
+    }
+}
+
+/// The Ship page's choices and tick boxes, as `ship_rows` numbers them.
+fn ship_sections(feature: &Feature, state: &PanelState) -> Vec<PageSection> {
+    let probe = state.probe;
+    let rows = ship_rows(feature, probe);
+    let Some(check) = probe
+        .and_then(|p| p.ship.as_ref())
+        .filter(|_| !rows.is_empty())
+    else {
+        return Vec::new();
+    };
+    let at = |wanted: &ShipRow| rows.iter().position(|r| r == wanted).unwrap_or(0);
+    let mut out = Vec::new();
+    for repo in &check.repos {
+        let plan = ship::repo_plan(feature, repo);
+        let stat = probe.and_then(|p| p.stats.get(&repo.key)).copied();
+        let steps = (plan.route.steps().iter())
+            .map(|step| {
+                let row = at(&ShipRow::Step {
+                    repo: repo.key.clone(),
+                    step: *step,
+                });
+                ship_step_row(feature, repo, *step, row)
+            })
+            .collect();
+        let pr_open = feature.shipping.prs.iter().any(|p| p.repo == repo.key);
+        let note = match (plan.route, pr_open) {
+            (Route::Nothing, false) => Some("Nothing gets pushed or merged"),
+            (Route::Nothing, true) => {
+                Some("Nothing gets pushed or merged; its pull request stays open on GitHub")
+            }
+            (Route::Merge, true) => Some("Its pull request stays open on GitHub"),
+            _ => None,
+        };
+        out.push(PageSection::ShipGroup(chrome::ShipGroup {
+            head: ship_repo_head(repo, stat),
+            caption: false,
+            route: Some(chrome::ShipRouteRow {
+                row: at(&ShipRow::Route {
+                    repo: repo.key.clone(),
+                    route: plan.route,
+                }),
+                on: plan.route.index(),
+            }),
+            note: note.map(str::to_owned),
+            steps,
+            selected: None,
+        }));
+    }
+    let removable = ship::removable(feature, check);
+    let remove = removable && feature.ship_plan.remove_worktrees;
+    let after = |which, label: &str, ticked, why: Option<&str>| chrome::ShipStepRow {
+        row: at(&ShipRow::After(which)),
+        label: label.to_owned(),
+        detail: why.map(|why| CheckLine {
+            text: why.to_owned(),
+            tone: CheckTone::Note,
+        }),
+        ticked,
+        off: why.is_some(),
+    };
+    let remove_label = match feature.touched().count() > 1 {
+        true => "Remove the worktrees and branches",
+        false => "Remove the worktree and branch",
+    };
+    out.push(PageSection::ShipGroup(chrome::ShipGroup {
+        head: "Afterwards".to_owned(),
+        caption: true,
+        route: None,
+        note: None,
+        steps: vec![
+            after(
+                ShipAfter::Close,
+                "Close the workspace",
+                remove || !feature.ship_plan.keep_workspace,
+                remove.then_some(REMOVING_CLOSES),
+            ),
+            after(
+                ShipAfter::Remove,
+                remove_label,
+                remove,
+                (!removable).then_some(ONLY_ONCE_MERGING),
+            ),
+        ],
+        selected: None,
+    }));
+    out
+}
+
+/// Why the workspace's tick can't go with the worktrees' on.
+const REMOVING_CLOSES: &str = "Removing the worktrees closes it";
+
+/// Why the worktrees can't go with what is ticked.
+const ONLY_ONCE_MERGING: &str = "Only when every repository merges into its base";
+
+/// What `feature`'s shipping did or goes on to do, by repository.
+fn ship_ran(feature: &Feature) -> Vec<CheckLine> {
+    let note = |text: String| CheckLine {
+        text,
+        tone: CheckTone::Note,
+    };
+    let shipping = &feature.shipping;
+    let mut out: Vec<CheckLine> = (shipping.pushed.iter())
+        .map(|key| note(format!("{key}: pushed {}", feature.branch())))
+        .collect();
+    out.extend((shipping.squash_repos.iter()).map(|key| {
+        let base = feature.repo(key).map_or("its base", |r| r.base.as_str());
+        note(match shipping.push_base.contains(key) {
+            true => format!("{key}: squash into {base}, then push it"),
+            false => format!("{key}: squash into {base}"),
+        })
+    }));
+    out
 }
 
 /// Whether the patch watch keeps an eye on `feature`: open, with a mark
@@ -2682,6 +2964,7 @@ impl FeaturePanel {
     }
 
     /// Handle a key over `feature`, one of `slugs` listed.
+    #[allow(clippy::too_many_arguments)]
     fn key(
         &mut self,
         mods: &ModifiersState,
@@ -2690,6 +2973,7 @@ impl FeaturePanel {
         slugs: &[String],
         ctx: RowCtx,
         plan: &[PlannedCheck],
+        ships: &[ShipRow],
     ) -> Option<PanelOutcome> {
         let entries = repo_entries(feature, &self.sources, self.expanded);
         let repos = entries.len();
@@ -2715,7 +2999,8 @@ impl FeaturePanel {
             true => ctx.criteria,
             false => 0,
         };
-        let carded = cards.len() + checks.len() + shown;
+        let ships = if stage == Stage::Ship { ships } else { &[] };
+        let carded = cards.len() + checks.len() + shown + ships.len();
         self.finding = self.finding.min(carded.saturating_sub(1));
         if self.focus == TabArea::Findings && (carded == 0 || self.expanded) {
             self.focus = TabArea::Stages;
@@ -2803,6 +3088,16 @@ impl FeaturePanel {
                 let back = mods.shift || sym == Keysym::ISO_Left_Tab;
                 let by = if back { stops.len() - 1 } else { 1 };
                 self.focus = stops[(at + by) % stops.len()];
+            }
+            // A tick box or choice of the Ship page with the keyboard; Enter
+            // still presses the page's button.
+            Keysym::space if bare && self.focus == TabArea::Findings && !ships.is_empty() => {
+                return ships.get(self.finding).map(ShipRow::outcome);
+            }
+            Keysym::Return | Keysym::KP_Enter
+                if bare && self.focus == TabArea::Findings && !ships.is_empty() =>
+            {
+                return page_enter(feature, stage, ctx);
             }
             // A criterion's card with the keyboard.
             Keysym::space | Keysym::Return | Keysym::KP_Enter
@@ -3934,10 +4229,30 @@ impl Gerdr {
                 slug,
                 patch,
                 squash,
+                pushed,
                 result,
             } => {
                 self.unbusy(&project, &slug, Job::Ship);
-                self.feature_shipped(&project, &slug, patch.as_deref(), &squash, result);
+                self.feature_shipped(&project, &slug, patch.as_deref(), &squash, pushed, result);
+            }
+            Done::BasesPushed {
+                project,
+                slug,
+                results,
+            } => {
+                self.unbusy(&project, &slug, Job::Ship);
+                self.bases_pushed(&project, &slug, results);
+            }
+            Done::ShippedLosses {
+                project,
+                slug,
+                losses,
+            } => {
+                self.unbusy(&project, &slug, Job::Losses);
+                match losses.is_empty() {
+                    true => self.remove_feature(&project, &slug, false, false),
+                    false => self.ask_remove_feature(project, slug, losses),
+                }
             }
             Done::BuildChecked {
                 project,
@@ -4054,9 +4369,8 @@ impl Gerdr {
         let criteria = self.criteria(&feature.project, &feature.slug).len();
         let manual = self.manual_counts(feature).unwrap_or_default();
         let key = (feature.project.clone(), feature.slug.clone());
-        let docs = (self.features.probes.get(&key))
-            .and_then(|p| p.last.as_ref())
-            .map(|p| &p.docs);
+        let last = (self.features.probes.get(&key)).and_then(|p| p.last.as_ref());
+        let docs = last.map(|p| &p.docs);
         let written = Stage::ALL.map(|stage| docs.is_some_and(|d| d.written.contains(&stage)));
         RowCtx {
             checks,
@@ -4067,6 +4381,7 @@ impl Gerdr {
             sandbox_busy: (self.features.build.sandbox_stops)
                 .contains_key(&(feature.project.clone(), feature.slug.clone())),
             all_skipped,
+            ship_nothing: ship_planned(feature, last).is_some_and(|planned| planned.nothing),
         }
     }
 
@@ -4422,10 +4737,73 @@ impl Gerdr {
         }
         feature.tick(feature::now(), "gerdr", patch);
         let title = feature.title.clone();
+        let bases: Vec<feature::Repo> = (feature.shipping.push_base.iter())
+            .filter_map(|key| feature.repo(key).cloned())
+            .collect();
         self.save_feature(project, slug);
         self.feature_cursor_to_current_of(project, slug);
         let mut text = format!("\u{201c}{title}\u{201d} is merged: done");
-        if let Some(kept) = self.close_shipped_workspace(project, slug) {
+        // Pushed here, not in the tab: a tab closing with the workspace would
+        // take a failed push's words with it. What follows waits for it.
+        if !bases.is_empty() {
+            self.show_success(format!("{text}; pushing"));
+            let busy = Busy {
+                project: project.to_owned(),
+                slug: slug.to_owned(),
+                job: Job::Ship,
+                repo: None,
+                what: format!("Pushing what \u{201c}{title}\u{201d} merged"),
+            };
+            let (project, slug) = (project.to_owned(), slug.to_owned());
+            return self.feature_work(Some(busy), move |_| Done::BasesPushed {
+                results: (bases.iter())
+                    .map(|repo| (repo.key(), repo.base.clone(), ship::push_base(repo)))
+                    .collect(),
+                project,
+                slug,
+            });
+        }
+        if let Some(kept) = self.after_ship(project, slug) {
+            text = format!("{text}; {kept}");
+        }
+        self.show_success(text);
+    }
+
+    /// The bases feature `slug` merged into went to origin, or some didn't.
+    fn bases_pushed(
+        &mut self,
+        project: &str,
+        slug: &str,
+        results: Vec<(String, String, Result<(), String>)>,
+    ) {
+        let Some(feature) = self.feature_mut(project, slug) else {
+            return;
+        };
+        let title = feature.title.clone();
+        let now = feature::now();
+        let mut failed = None;
+        let mut went = Vec::new();
+        for (key, base, result) in results {
+            match result {
+                Ok(()) => {
+                    feature.log(now, format!("Pushed {base} of {key}"));
+                    went.push(format!("{base} of {key}"));
+                }
+                Err(why) => {
+                    let text = format!("Couldn't push {base} of {key}: {why}");
+                    feature.log(now, text.clone());
+                    tracing::warn!("shipping feature {project}/{slug}: {text}");
+                    failed.get_or_insert(text);
+                }
+            }
+        }
+        self.save_feature(project, slug);
+        let kept = self.after_ship(project, slug);
+        if let Some(text) = failed {
+            return self.show_error(format!("\u{201c}{title}\u{201d}: {text}"));
+        }
+        let mut text = format!("Pushed {} for \u{201c}{title}\u{201d}", went.join(", "));
+        if let Some(kept) = kept {
             text = format!("{text}; {kept}");
         }
         self.show_success(text);
@@ -5037,6 +5415,7 @@ impl Gerdr {
                 what: "created".into(),
             }],
             shipping: Default::default(),
+            ship_plan: Default::default(),
             runs: Default::default(),
             stage_agents: Default::default(),
             stage_models: Default::default(),
@@ -5500,10 +5879,13 @@ impl Gerdr {
         let feature = self.feature(&panel.project, &panel.slug).cloned()?;
         let ctx = self.row_ctx(&feature);
         let plan = self.planned_checks(&feature);
+        let key = (feature.project.clone(), feature.slug.clone());
+        let probe = (self.features.probes.get(&key)).and_then(|p| p.last.as_ref());
+        let ships = ship_rows(&feature, probe);
         let panel = self.features.panel.as_mut()?;
         let before = (panel.focus, panel.repo, panel.expanded);
         let card_before = panel.finding;
-        let outcome = panel.key(mods, sym, &feature, &slugs, ctx, &plan);
+        let outcome = panel.key(mods, sym, &feature, &slugs, ctx, &plan, &ships);
         let now = (self.features.panel.as_ref()).map(|p| (p.focus, p.repo, p.expanded));
         if now.is_some_and(|(focus, repo, expanded)| {
             focus == TabArea::Repos && (focus, repo, expanded) != before
@@ -5625,7 +6007,14 @@ impl Gerdr {
                 }
                 None => self.show_warning("Nothing left to mark done".into()),
             },
-            PanelOutcome::Ship => self.ask_ship_feature(&project, &slug),
+            PanelOutcome::Ship | PanelOutcome::Finish => self.ask_ship_feature(&project, &slug),
+            PanelOutcome::ShipRoute(repo, route) => {
+                self.set_ship_route(&project, &slug, &repo, route);
+            }
+            PanelOutcome::ShipTick(repo, step) => {
+                self.tick_ship_step(&project, &slug, &repo, step);
+            }
+            PanelOutcome::ShipAfter(after) => self.tick_ship_after(&project, &slug, after),
             PanelOutcome::SetUp => self.set_up_again(&project, &slug),
             PanelOutcome::SetupLog => self.open_setup_log(&project, &slug),
             PanelOutcome::StartSandbox => self.ask_start_sandbox(&project, &slug),
@@ -6201,7 +6590,7 @@ impl Gerdr {
         let key = (project.to_owned(), slug.to_owned());
         let asked = self.features.asked.remove(&key).or_else(|| {
             let probe = self.features.probes.get(&key)?.last.as_ref();
-            match ship_ask(&title, probe) {
+            match ship_ask(&feature, probe) {
                 ShipAsk::Ready(asked) => Some(asked),
                 _ => None,
             }
@@ -6216,7 +6605,14 @@ impl Gerdr {
         }
         let (squash, prs): (Vec<Action>, Vec<Action>) = actions
             .into_iter()
-            .partition(|a| matches!(a, Action::Squash { .. }));
+            .partition(|a| matches!(a, Action::Squash { .. } | Action::PushBase { .. }));
+        let pushed: Vec<String> = (prs.iter())
+            .filter_map(|a| match a {
+                Action::Push { repo } => Some(repo.clone()),
+                _ => None,
+            })
+            .collect();
+        self.settle_ship_plan(project, slug);
         let busy = Busy {
             project: project.to_owned(),
             slug: slug.to_owned(),
@@ -6243,6 +6639,7 @@ impl Gerdr {
                 slug,
                 patch,
                 squash,
+                pushed,
             }
         });
     }
@@ -6278,6 +6675,18 @@ impl Gerdr {
         if let Some(feature) = self.feature_mut(project, slug) {
             let now = feature::now();
             feature.shipping.squash_at = Some(now);
+            feature.shipping.squash_repos = (squash.iter())
+                .filter_map(|a| match a {
+                    Action::Squash { repo, .. } => Some(repo.clone()),
+                    _ => None,
+                })
+                .collect();
+            feature.shipping.push_base = (squash.iter())
+                .filter_map(|a| match a {
+                    Action::PushBase { repo, .. } => Some(repo.clone()),
+                    _ => None,
+                })
+                .collect();
             feature.log(now, "Squash started");
         }
         self.save_feature(project, slug);
@@ -6286,12 +6695,10 @@ impl Gerdr {
     /// Ship was asked for on feature `slug`: say what stops it, or ask
     /// with what shipping does, as its latest Ship check has it.
     fn ask_ship_feature(&mut self, project: &str, slug: &str) {
-        let Some((title, branch)) = self
-            .feature(project, slug)
-            .map(|f| (f.title.clone(), f.branch()))
-        else {
+        let Some(feature) = self.feature(project, slug).cloned() else {
             return;
         };
+        let (title, branch) = (feature.title.clone(), feature.branch());
         if self.feature_busy(project, slug) {
             return self.show_warning(format!(
                 "\u{201c}{title}\u{201d} is busy; try again once it is done"
@@ -6299,7 +6706,7 @@ impl Gerdr {
         }
         let key = (project.to_owned(), slug.to_owned());
         let probe = self.features.probes.get(&key).and_then(|p| p.last.as_ref());
-        match ship_ask(&title, probe) {
+        match ship_ask(&feature, probe) {
             ShipAsk::Checking => {
                 self.show_warning(format!(
                     "Still checking \u{201c}{title}\u{201d}; try again in a moment"
@@ -6307,8 +6714,17 @@ impl Gerdr {
                 self.probe_feature(project, slug);
             }
             ShipAsk::Blocked(why) => self.show_warning(why),
-            ShipAsk::Nothing => {
-                self.show_warning(format!("Nothing to ship in \u{201c}{title}\u{201d}"));
+            ShipAsk::Finish(dirty) => {
+                let check = probe.and_then(|p| p.ship.as_ref());
+                let removing = feature.ship_plan.remove_worktrees
+                    && check.is_some_and(|c| ship::removable(&feature, c));
+                self.ask_finish(
+                    project.to_owned(),
+                    slug.to_owned(),
+                    (&title, &branch),
+                    (feature.repos.len(), removing),
+                    &dirty,
+                );
             }
             ShipAsk::Ready(asked) => {
                 let steps: Vec<String> = asked.actions.iter().map(Action::label).collect();
@@ -6327,6 +6743,7 @@ impl Gerdr {
         slug: &str,
         patch: Option<&str>,
         squash: &[Action],
+        pushed: Vec<String>,
         result: Result<Vec<Pr>, (String, Vec<Pr>)>,
     ) {
         if result.is_ok() && !squash.is_empty() {
@@ -6360,10 +6777,15 @@ impl Gerdr {
             self.show_error(format!("Couldn't ship \u{201c}{title}\u{201d}: {why}"));
             return self.probe_feature(project, slug);
         }
-        if n == 0 {
+        // Only a squash: it says so itself, once merged.
+        if n == 0 && pushed.is_empty() {
             return self.probe_feature(project, slug);
         }
-        let mut text = opened_text(&title, n - updated, updated);
+        let mut text = match n {
+            0 => format!("Pushed {} for \u{201c}{title}\u{201d}", pushed.join(", ")),
+            _ => opened_text(&title, n - updated, updated),
+        };
+        feature.shipping.pushed = pushed;
         feature.log(now, text.clone());
         let done = squash.is_empty()
             && feature.status == Status::Open
@@ -6373,21 +6795,204 @@ impl Gerdr {
         }
         self.save_feature(project, slug);
         self.feature_cursor_to_current_of(project, slug);
-        // Shipped: its sandbox has done its work, and goes, or its tabs would
-        // keep the workspace open.
-        if done
-            && self
-                .feature(project, slug)
-                .is_some_and(|f| f.sandbox.is_some())
-        {
-            self.finish_stop(project, slug, crate::feature_sandbox::StopFor::Remove);
-        }
-        // Shipped: its workspace closes, unless something runs in it.
-        if done && let Some(kept) = self.close_shipped_workspace(project, slug) {
+        if done && let Some(kept) = self.after_ship(project, slug) {
             text = format!("{text}; {kept}");
         }
         self.show_success(text);
         self.probe_feature(project, slug);
+    }
+
+    /// Feature `slug` is shipped or finished, whichever way: its sandbox has
+    /// done its work and goes, or its tabs would keep the workspace open.
+    /// Then its worktrees go, or its workspace closes, as its ticks say. What
+    /// keeps the workspace open, if anything.
+    fn after_ship(&mut self, project: &str, slug: &str) -> Option<String> {
+        let feature = self.feature(project, slug)?;
+        let plan = feature.ship_plan.clone();
+        if feature.sandbox.is_some() {
+            self.finish_stop(project, slug, crate::feature_sandbox::StopFor::Remove);
+        }
+        if plan.remove_worktrees {
+            self.check_removing_after_ship(project, slug);
+            return None;
+        }
+        if plan.keep_workspace {
+            return None;
+        }
+        self.close_shipped_workspace(project, slug)
+    }
+
+    /// The tick removing the worktrees holds only as long as what is ticked
+    /// merges everything: settled before shipping, as a route may have
+    /// changed since it was ticked.
+    fn settle_ship_plan(&mut self, project: &str, slug: &str) {
+        let key = (project.to_owned(), slug.to_owned());
+        let check = (self.features.probes.get(&key))
+            .and_then(|p| p.last.as_ref())
+            .and_then(|p| p.ship.clone());
+        let Some(check) = check else {
+            return;
+        };
+        let Some(feature) = self.feature_mut(project, slug) else {
+            return;
+        };
+        if feature.ship_plan.remove_worktrees && !ship::removable(feature, &check) {
+            feature.ship_plan.remove_worktrees = false;
+            self.save_feature(project, slug);
+        }
+    }
+
+    /// Feature `slug`'s tick was to remove its worktrees: with nothing to
+    /// lose they go at once, as asked; else it asks, naming what would.
+    fn check_removing_after_ship(&mut self, project: &str, slug: &str) {
+        let Some(feature) = self.feature(project, slug).cloned() else {
+            return;
+        };
+        if let Some(user) = self.feature_folder_in_use(project, slug) {
+            return self.show_warning(format!(
+                "\u{201c}{}\u{201d} has {user} in it; close it, then remove its worktrees",
+                feature.title
+            ));
+        }
+        let busy = Busy {
+            project: project.to_owned(),
+            slug: slug.to_owned(),
+            job: Job::Losses,
+            repo: None,
+            what: format!(
+                "Checking \u{201c}{}\u{201d} for unsaved work",
+                feature.title
+            ),
+        };
+        let (project, slug) = (project.to_owned(), slug.to_owned());
+        self.feature_work(Some(busy), move |_| Done::ShippedLosses {
+            losses: layout::losses(&feature),
+            project,
+            slug,
+        });
+    }
+
+    /// Finish feature `slug` with nothing shipped, once asked: Ship is done,
+    /// its branch and worktrees stay.
+    pub fn finish_unshipped(&mut self, project: &str, slug: &str) {
+        if !self.ship_plan_open(project, slug) {
+            return;
+        }
+        self.settle_ship_plan(project, slug);
+        let Some(feature) = self.feature_mut(project, slug) else {
+            return;
+        };
+        if feature.status != Status::Open || feature.current() != Some(Stage::Ship) {
+            return;
+        }
+        let now = feature::now();
+        feature.tick(now, "you", None);
+        if let Some(mark) = feature.marks.get_mut(&Stage::Ship) {
+            mark.note = FINISHED_UNSHIPPED.to_owned();
+        }
+        feature.log(now, FINISHED_UNSHIPPED);
+        let mut text = format!(
+            "\u{201c}{}\u{201d} finished without shipping",
+            feature.title
+        );
+        self.save_feature(project, slug);
+        self.feature_cursor_to_current_of(project, slug);
+        if let Some(kept) = self.after_ship(project, slug) {
+            text = format!("{text}; {kept}");
+        }
+        self.show_success(text);
+        self.probe_feature(project, slug);
+    }
+
+    /// Whether the Ship page's ticks of feature `slug` can change now; else
+    /// says why not.
+    fn ship_plan_open(&mut self, project: &str, slug: &str) -> bool {
+        if !self.feature_busy(project, slug) {
+            return true;
+        }
+        let title = (self.feature(project, slug)).map_or(String::new(), |f| f.title.clone());
+        self.show_warning(format!(
+            "\u{201c}{title}\u{201d} is busy; try again once it is done"
+        ));
+        false
+    }
+
+    /// The plan of repository `repo` of feature `slug`, kept from now on, with
+    /// the route it has now if it had no plan yet.
+    fn ship_repo_plan(
+        &mut self,
+        project: &str,
+        slug: &str,
+        repo: &str,
+    ) -> Option<&mut feature::RepoPlan> {
+        let key = (project.to_owned(), slug.to_owned());
+        let default = (self.features.probes.get(&key))
+            .and_then(|p| p.last.as_ref())
+            .and_then(|p| p.ship.as_ref())
+            .and_then(|c| c.repos.iter().find(|r| r.key == repo))?
+            .route;
+        let feature = self.feature_mut(project, slug)?;
+        let plans = &mut feature.ship_plan.repos;
+        Some(
+            plans
+                .entry(repo.to_owned())
+                .or_insert_with(|| feature::RepoPlan::new(default)),
+        )
+    }
+
+    /// Send repository `repo` of feature `slug` the way `route` says.
+    fn set_ship_route(&mut self, project: &str, slug: &str, repo: &str, route: Route) {
+        if !self.ship_plan_open(project, slug) {
+            return;
+        }
+        if let Some(plan) = self.ship_repo_plan(project, slug, repo) {
+            plan.route = route;
+            self.save_feature(project, slug);
+        }
+    }
+
+    /// Flip tick `step` of repository `repo` of feature `slug`.
+    fn tick_ship_step(&mut self, project: &str, slug: &str, repo: &str, step: ShipStep) {
+        if !self.ship_plan_open(project, slug) {
+            return;
+        }
+        if let Some(plan) = self.ship_repo_plan(project, slug, repo) {
+            plan.toggle(step);
+            self.save_feature(project, slug);
+        }
+    }
+
+    /// Flip a tick of what follows shipping feature `slug`.
+    fn tick_ship_after(&mut self, project: &str, slug: &str, after: ShipAfter) {
+        if !self.ship_plan_open(project, slug) {
+            return;
+        }
+        let key = (project.to_owned(), slug.to_owned());
+        let check = (self.features.probes.get(&key))
+            .and_then(|p| p.last.as_ref())
+            .and_then(|p| p.ship.clone());
+        let Some(feature) = self.feature(project, slug) else {
+            return;
+        };
+        let removable = check.is_some_and(|c| ship::removable(feature, &c));
+        let removing = removable && feature.ship_plan.remove_worktrees;
+        match after {
+            ShipAfter::Close if removing => {
+                return self.show_warning(REMOVING_CLOSES.into());
+            }
+            ShipAfter::Remove if !removable => {
+                return self.show_warning(ONLY_ONCE_MERGING.into());
+            }
+            _ => {}
+        }
+        let Some(feature) = self.feature_mut(project, slug) else {
+            return;
+        };
+        match after {
+            ShipAfter::Close => feature.ship_plan.keep_workspace ^= true,
+            ShipAfter::Remove => feature.ship_plan.remove_worktrees = !removing,
+        }
+        self.save_feature(project, slug);
     }
 
     /// Ask before removing feature `slug`'s worktrees, naming what goes
@@ -6526,6 +7131,19 @@ impl Gerdr {
         layout.hit(&view, pos.to_i32_round())
     }
 
+    /// Row `row` of the Ship page takes the keyboard, and is what a click
+    /// on it acts on.
+    fn ship_row_at(&mut self, feature: &Feature, row: usize) -> Option<ShipRow> {
+        let key = (feature.project.clone(), feature.slug.clone());
+        let probe = (self.features.probes.get(&key)).and_then(|p| p.last.as_ref());
+        let at = ship_rows(feature, probe).get(row).cloned()?;
+        if let Some(panel) = self.features.panel.as_mut() {
+            panel.focus = TabArea::Findings;
+            panel.finding = row;
+        }
+        Some(at)
+    }
+
     /// A left click in the feature tab: a stage's node shows its page, a
     /// repository takes the keyboard, a button does what it says.
     pub fn feature_panel_click(&mut self, pos: Point<f64, Logical>) {
@@ -6540,6 +7158,20 @@ impl Gerdr {
         let outcome = match hit {
             FeatureTabHit::Tab | FeatureTabHit::Column(_) | FeatureTabHit::AgentPickOff(_) => None,
             FeatureTabHit::MilestoneMode(i) => Some(PanelOutcome::FreshMilestones(i == 1)),
+            FeatureTabHit::ShipRoute(row, segment) => {
+                self.ship_row_at(&feature, row).and_then(|row| match row {
+                    ShipRow::Route { repo, .. } => {
+                        Some(PanelOutcome::ShipRoute(repo, *Route::ALL.get(segment)?))
+                    }
+                    _ => None,
+                })
+            }
+            FeatureTabHit::ShipRow(row) => {
+                self.ship_row_at(&feature, row).and_then(|at| match at {
+                    ShipRow::Route { .. } => None,
+                    at => Some(at.outcome()),
+                })
+            }
             FeatureTabHit::Finding(i) => {
                 if let Some(panel) = self.features.panel.as_mut() {
                     // An earlier review's card is a record: no keys to give it.
@@ -6747,6 +7379,17 @@ impl Gerdr {
                 let text = match i {
                     0 => "One agent keeps its chat through all milestones",
                     _ => "A fresh agent builds each milestone, reading the build log and plan",
+                };
+                Some(Tooltip::new(text, spot))
+            }
+            FeatureTabHit::ShipRoute(row, segment) => {
+                let (_, _, segments) = (layout.ship.routes.iter()).find(|r| r.0 == row)?;
+                let mut spot = *segments.get(segment)?;
+                spot.loc.y -= view.scroll[TabColumn::Page as usize].round() as i32;
+                let text = match segment {
+                    0 => "Through origin, for a review",
+                    1 => "Into the base in its main worktree; nothing leaves it unless ticked",
+                    _ => "It stays as it is",
                 };
                 Some(Tooltip::new(text, spot))
             }
@@ -7588,8 +8231,7 @@ fn card_tone(
         }
         Some(Stage::Verify) => (feature.verify.as_ref()).is_some_and(|v| v.passed == Some(false)),
         Some(Stage::Ship) => {
-            let check = state.probe.and_then(|p| p.ship.as_ref());
-            check.is_some_and(|c| !c.blockers.is_empty())
+            ship_planned(feature, state.probe).is_some_and(|p| !p.blockers.is_empty())
         }
         _ => false,
     };
@@ -7679,14 +8321,16 @@ fn current_line(feature: &Feature, stage: Stage, state: &LineState, now: u64) ->
             _ => String::new(),
         },
         Stage::Ship => {
-            let check = state.probe.and_then(|p| p.ship.as_ref());
+            let planned = ship_planned(feature, state.probe);
             if state.shipping {
                 "shipping".into()
             } else if feature.shipping.squash_at.is_some() {
                 "merging".into()
-            } else if check.is_some_and(|c| !c.blockers.is_empty()) {
+            } else if planned.as_ref().is_some_and(|p| !p.blockers.is_empty()) {
                 "blocked".into()
-            } else if check.is_some() {
+            } else if planned.as_ref().is_some_and(|p| p.nothing) {
+                "nothing ticked".into()
+            } else if planned.is_some() {
                 "ready to ship".into()
             } else {
                 String::new()
@@ -8409,6 +9053,11 @@ fn stage_page(
                 if !check.is_empty() {
                     sections.push(lines("Ship check", check));
                 }
+                sections.extend(ship_sections(feature, state));
+                let ran = ship_ran(feature);
+                if !ran.is_empty() {
+                    sections.push(lines("Shipped as", ran));
+                }
                 let prs: Vec<CheckLine> = (feature.shipping.prs.iter())
                     .map(|pr| line(pr_tail(&pr.url), CheckTone::Note))
                     .collect();
@@ -8426,7 +9075,9 @@ fn stage_page(
                 if !status.is_empty() && l.text.ends_with(status.as_str()))
         })
     };
-    let status = status.filter(|l| !carded(l));
+    // Ship's check says how it stands, and more.
+    let checked = mark == StageMark::Current && stage == Stage::Ship;
+    let status = status.filter(|l| !carded(l) && !checked);
     // A restart runs the agent picked: the button says so when it's another.
     let lit = state.picks.iter().find(|c| c.lit).map(|c| c.name.as_str());
     let other = lit.filter(|lit| {
@@ -8733,6 +9384,7 @@ struct AgentChoices<'a> {
     model: bool,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn tab_hints(
     panel: &FeaturePanel,
     feature: &Feature,
@@ -8741,6 +9393,7 @@ fn tab_hints(
     ctx: RowCtx,
     choices: AgentChoices,
     plan: &[PlannedCheck],
+    ships: &[ShipRow],
 ) -> Vec<(String, String)> {
     let hint = |k: &str, what: &str| (k.to_owned(), what.to_owned());
     if panel.keys {
@@ -8801,6 +9454,22 @@ fn tab_hints(
                     hint("Del", "remove repository")
                 });
             }
+        }
+        TabArea::Findings if stage == Stage::Ship && !ships.is_empty() => {
+            hints.push(hint("Up / Down", "row"));
+            let space = match ships.get(panel.finding) {
+                Some(ShipRow::Route { .. }) => "next way",
+                _ => "tick",
+            };
+            hints.push(hint("Space", space));
+            let enter = match page_enter(feature, stage, ctx) {
+                Some(PanelOutcome::NotYet(_)) | None => "",
+                Some(action) => action_hint(&action),
+            };
+            if !enter.is_empty() {
+                hints.push(hint("Enter", enter));
+            }
+            hints.push(hint("Tab", if repos { "repositories" } else { "stages" }));
         }
         TabArea::Findings if tries_criteria(feature, stage) && ctx.criteria > 0 => {
             hints.push(hint("Up / Down", "criterion"));
@@ -8928,7 +9597,9 @@ fn tab_hints(
             if stage == Stage::Verify && checks_running(feature) {
                 hints.push(hint("Shift+S", "stop all"));
             }
-            if !finding_cards(feature, stage).is_empty() && !panel.expanded {
+            if stage == Stage::Ship && !ships.is_empty() && !panel.expanded {
+                hints.push(hint("Tab", "steps"));
+            } else if !finding_cards(feature, stage).is_empty() && !panel.expanded {
                 hints.push(hint("Tab", "findings"));
             } else if !check_entries(feature, stage, plan).is_empty() && !panel.expanded {
                 hints.push(hint("Tab", "checks"));
@@ -9169,6 +9840,11 @@ fn tab_view(
         if let Some(card) = cards.into_iter().nth(panel.finding) {
             card.selected = true;
         }
+        for section in &mut page.sections {
+            if let PageSection::ShipGroup(group) = section {
+                group.selected = Some(panel.finding);
+            }
+        }
     }
     // The note being written, on its card in place of the one saved.
     if let Some((i, field)) = panel
@@ -9205,8 +9881,14 @@ fn tab_view(
     if feature.status == Status::Done {
         sub = format!("done \u{b7} {sub}");
     }
+    let ships = match stage {
+        Stage::Ship => ship_rows(feature, state.probe),
+        _ => Vec::new(),
+    };
     let carded = !panel.expanded
-        && !(finding_cards(feature, stage).is_empty() && check_rows(feature, stage).is_empty());
+        && !(finding_cards(feature, stage).is_empty()
+            && check_rows(feature, stage).is_empty()
+            && ships.is_empty());
     let focus = match panel.focus {
         TabArea::Repos if repos.is_empty() => TabArea::Stages,
         TabArea::Findings if !carded => TabArea::Stages,
@@ -9252,6 +9934,7 @@ fn tab_view(
                 model: state.model.is_some(),
             },
             &state.plan,
+            &ships,
         ),
     }
 }
@@ -9320,6 +10003,7 @@ pub(crate) mod tests {
                 .collect(),
             history: Vec::new(),
             shipping: Default::default(),
+            ship_plan: Default::default(),
             runs: Default::default(),
             stage_agents: Default::default(),
             stage_models: Default::default(),
@@ -9359,7 +10043,7 @@ pub(crate) mod tests {
         (mods, sym): (ModifiersState, Keysym),
     ) -> Option<PanelOutcome> {
         let slugs = vec!["a".to_owned(), "b".to_owned(), "c".to_owned()];
-        panel.key(&mods, sym, f, &slugs, RowCtx::default(), &[])
+        panel.key(&mods, sym, f, &slugs, RowCtx::default(), &[], &[])
     }
 
     fn root(names: &[&str]) -> Root {
@@ -11443,7 +12127,7 @@ pub(crate) mod tests {
         };
         let none = RowCtx::default();
         assert_eq!(
-            panel.key(&ctrl, Keysym::Return, &over, &slugs, none, &[]),
+            panel.key(&ctrl, Keysym::Return, &over, &slugs, none, &[], &[]),
             Some(PanelOutcome::MakeFixes)
         );
         let hints = tab_view(&panel, &over, &slugs, &PanelState::default(), 2_000).hints;
@@ -11534,12 +12218,12 @@ pub(crate) mod tests {
         let slugs = vec!["v".to_owned()];
         let (mods, sym) = key(Keysym::Return);
         assert_eq!(
-            panel.key(&mods, sym, &f, &slugs, checks, &[]),
+            panel.key(&mods, sym, &f, &slugs, checks, &[], &[]),
             Some(PanelOutcome::RunChecks)
         );
         let none = RowCtx::default();
         assert_eq!(
-            panel.key(&mods, sym, &f, &slugs, none, &[]),
+            panel.key(&mods, sym, &f, &slugs, none, &[], &[]),
             Some(PanelOutcome::Tick)
         );
         // Later stages aren't run early.
@@ -11570,7 +12254,7 @@ pub(crate) mod tests {
         };
         // No run yet: nothing to open, no hint.
         assert_eq!(
-            panel.key(&shift_ctrl, Keysym::O, &f, &slugs, none, &[]),
+            panel.key(&shift_ctrl, Keysym::O, &f, &slugs, none, &[], &[]),
             None
         );
         assert!(!hinted(&panel, &f));
@@ -11581,20 +12265,20 @@ pub(crate) mod tests {
             ..Default::default()
         });
         assert_eq!(
-            panel.key(&shift_ctrl, Keysym::O, &f, &slugs, none, &[]),
+            panel.key(&shift_ctrl, Keysym::O, &f, &slugs, none, &[], &[]),
             None
         );
         // Ended: there.
         f.verify.as_mut().unwrap().finished = Some(1_100);
         assert_eq!(
-            panel.key(&shift_ctrl, Keysym::O, &f, &slugs, none, &[]),
+            panel.key(&shift_ctrl, Keysym::O, &f, &slugs, none, &[], &[]),
             Some(PanelOutcome::Evidence)
         );
         assert!(hinted(&panel, &f));
         // Another page: not offered.
         panel.pick(&f, Stage::Build);
         assert_eq!(
-            panel.key(&shift_ctrl, Keysym::O, &f, &slugs, none, &[]),
+            panel.key(&shift_ctrl, Keysym::O, &f, &slugs, none, &[], &[]),
             None
         );
         assert!(!hinted(&panel, &f));
@@ -11762,11 +12446,22 @@ pub(crate) mod tests {
         }
     }
 
-    fn check(blockers: &[&str], actions: Vec<Action>, notes: &[&str]) -> Option<ShipCheck> {
+    /// A check finding `repos` to ship through origin, each with commits.
+    fn check(blockers: &[&str], repos: &[&str], notes: &[&str]) -> Option<ShipCheck> {
+        let repo = |key: &&str| ship::RepoCheck {
+            key: (*key).to_owned(),
+            base: "main".to_owned(),
+            main: PathBuf::from("/m"),
+            commits: 1,
+            route: Route::Pr,
+            no_origin: None,
+            no_merge: None,
+        };
         Some(ShipCheck {
             blockers: blockers.iter().map(|b| (*b).to_owned()).collect(),
-            actions,
+            repos: repos.iter().map(repo).collect(),
             notes: notes.iter().map(|n| (*n).to_owned()).collect(),
+            unread: false,
         })
     }
 
@@ -12339,7 +13034,7 @@ pub(crate) mod tests {
             ..ModifiersState::default()
         };
         assert_eq!(
-            panel.key(&shift_f, Keysym::F, &f, &[], RowCtx::default(), &[]),
+            panel.key(&shift_f, Keysym::F, &f, &[], RowCtx::default(), &[], &[]),
             Some(PanelOutcome::FixAllFindings)
         );
         // A comment from anywhere on the page.
@@ -12593,7 +13288,7 @@ pub(crate) mod tests {
         };
         let slugs = vec!["m".to_owned()];
         let go = |panel: &mut FeaturePanel, (mods, sym): (ModifiersState, Keysym)| {
-            panel.key(&mods, sym, &f, &slugs, ctx, &[])
+            panel.key(&mods, sym, &f, &slugs, ctx, &[], &[])
         };
         assert_eq!(go(&mut panel, key(Keysym::space)), None);
         assert_eq!(go(&mut panel, key(Keysym::Tab)), None);
@@ -12630,6 +13325,7 @@ pub(crate) mod tests {
             &slugs,
             ctx,
             AgentChoices::default(),
+            &[],
             &[],
         );
         assert_eq!(
@@ -12690,7 +13386,7 @@ pub(crate) mod tests {
         let mut go = |sym| {
             let (mods, sym) = key(sym);
             (
-                panel.key(&mods, sym, &f, &slugs, ctx, &[]),
+                panel.key(&mods, sym, &f, &slugs, ctx, &[], &[]),
                 panel.focus,
                 panel.finding,
             )
@@ -12708,6 +13404,7 @@ pub(crate) mod tests {
             ctx,
             AgentChoices::default(),
             &[],
+            &[],
         );
         assert!(hints.iter().any(|(_, what)| what == "criterion"));
         assert!(hints.iter().any(|(key, _)| key == REOPEN_KEY));
@@ -12723,7 +13420,7 @@ pub(crate) mod tests {
             ..ModifiersState::default()
         };
         assert_eq!(
-            panel.key(&both, Keysym::Return, &f, &slugs, ctx, &[]),
+            panel.key(&both, Keysym::Return, &f, &slugs, ctx, &[], &[]),
             Some(PanelOutcome::Untick(Stage::ManualTest))
         );
         // Ticked by hand, they say so rather than read as not tried yet.
@@ -12787,7 +13484,7 @@ pub(crate) mod tests {
         let slugs = vec!["s".to_owned()];
         let (mods, sym) = key(Keysym::Return);
         assert_eq!(
-            panel.key(&mods, sym, &shipping, &slugs, RowCtx::default(), &[]),
+            panel.key(&mods, sym, &shipping, &slugs, RowCtx::default(), &[], &[]),
             Some(PanelOutcome::Ship)
         );
     }
@@ -12819,18 +13516,34 @@ pub(crate) mod tests {
             ..ModifiersState::default()
         };
         assert_eq!(
-            panel.key(&shift_ctrl, Keysym::O, &f, &slugs, RowCtx::default(), &[]),
+            panel.key(
+                &shift_ctrl,
+                Keysym::O,
+                &f,
+                &slugs,
+                RowCtx::default(),
+                &[],
+                &[]
+            ),
             Some(PanelOutcome::OpenPr(url.into()))
         );
         // Ctrl+O still opens a tab; on a row without a PR, nothing.
         let (mods, sym) = ctrl(Keysym::o);
         assert_eq!(
-            panel.key(&mods, sym, &f, &slugs, RowCtx::default(), &[]),
+            panel.key(&mods, sym, &f, &slugs, RowCtx::default(), &[], &[]),
             Some(PanelOutcome::Open(f.dir.clone()))
         );
         panel.repo = 1;
         assert_eq!(
-            panel.key(&shift_ctrl, Keysym::O, &f, &slugs, RowCtx::default(), &[]),
+            panel.key(
+                &shift_ctrl,
+                Keysym::O,
+                &f,
+                &slugs,
+                RowCtx::default(),
+                &[],
+                &[]
+            ),
             None
         );
         // The view: the button, the line, and the hint on that row only.
@@ -12878,7 +13591,7 @@ pub(crate) mod tests {
         let f = feature("s", vec![repo("api", true)], 8);
         let none = check_lines(&f, None, false, 2_060);
         assert_eq!(texts(&none), [("checking\u{2026}", CheckTone::Note)]);
-        let blocked = probe(check(&["api is dirty", "web is behind"], Vec::new(), &[]));
+        let blocked = probe(check(&["api is dirty", "web is behind"], &["api"], &[]));
         assert_eq!(
             texts(&check_lines(&f, Some(&blocked), false, 2_060)),
             [
@@ -12886,17 +13599,29 @@ pub(crate) mod tests {
                 ("web is behind", CheckTone::Blocker)
             ]
         );
-        let many = probe(check(&["a", "b", "c", "d", "e", "f"], Vec::new(), &[]));
+        let many = probe(check(&["a", "b", "c", "d", "e", "f"], &["api"], &[]));
         let lines = check_lines(&f, Some(&many), false, 2_060);
         assert_eq!(lines.len(), MAX_CHECK_LINES);
         assert_eq!(lines[MAX_CHECK_LINES - 1].text, "and 3 more");
-        let push = Action::Push { repo: "api".into() };
-        let ready = probe(check(&[], vec![push.clone()], &["api pushes to origin"]));
+        let ready = probe(check(&[], &["api"], &["api pushes to origin"]));
         assert_eq!(
             texts(&check_lines(&f, Some(&ready), false, 2_060)),
             [
                 ("Ready to ship", CheckTone::Ready),
                 ("api pushes to origin", CheckTone::Note)
+            ]
+        );
+        // Nothing to do: what would stop shipping stops nothing.
+        let nothing = probe(check(
+            &["api is dirty"],
+            &[],
+            &["web has no commits: left out"],
+        ));
+        assert_eq!(
+            texts(&check_lines(&f, Some(&nothing), false, 2_060)),
+            [
+                (NOTHING_TICKED, CheckTone::Note),
+                ("web has no commits: left out", CheckTone::Note)
             ]
         );
         let unread = Probe {
@@ -12923,29 +13648,139 @@ pub(crate) mod tests {
 
     #[test]
     fn shipping_asks_with_the_last_check_or_says_why_not() {
-        assert_eq!(ship_ask("T", None), ShipAsk::Checking);
-        assert_eq!(ship_ask("T", Some(&probe(None))), ShipAsk::Checking);
-        let blocked = probe(check(&["a", "b", "c"], Vec::new(), &[]));
+        let mut f = feature("s", vec![repo("api", true)], 8);
+        f.title = "T".into();
+        assert_eq!(ship_ask(&f, None), ShipAsk::Checking);
+        assert_eq!(ship_ask(&f, Some(&probe(None))), ShipAsk::Checking);
+        let blocked = probe(check(&["a", "b", "c"], &["api"], &[]));
         assert_eq!(
-            ship_ask("T", Some(&blocked)),
+            ship_ask(&f, Some(&blocked)),
             ShipAsk::Blocked("Can't ship \u{201c}T\u{201d} yet: a, and 2 more".into())
         );
-        let one = probe(check(&["a"], Vec::new(), &[]));
+        let one = probe(check(&["a"], &["api"], &[]));
         assert_eq!(
-            ship_ask("T", Some(&one)),
+            ship_ask(&f, Some(&one)),
             ShipAsk::Blocked("Can't ship \u{201c}T\u{201d} yet: a".into())
         );
+        let dirty = Probe {
+            reading: Ok(Reading {
+                patch: "p1".into(),
+                dirty: vec!["api".into()],
+                ..Reading::default()
+            }),
+            ..probe(check(&["api has uncommitted changes"], &[], &[]))
+        };
         assert_eq!(
-            ship_ask("T", Some(&probe(check(&[], Vec::new(), &[])))),
-            ShipAsk::Nothing
+            ship_ask(&f, Some(&dirty)),
+            ShipAsk::Finish(vec!["api".into()])
         );
-        let actions = vec![Action::Push { repo: "api".into() }, Action::LinkPrs];
         assert_eq!(
-            ship_ask("T", Some(&probe(check(&[], actions.clone(), &[])))),
+            ship_ask(&f, Some(&probe(check(&[], &["api"], &[])))),
             ShipAsk::Ready(Asked {
-                actions,
+                actions: vec![
+                    Action::Push { repo: "api".into() },
+                    Action::OpenPr {
+                        repo: "api".into(),
+                        base: "main".into()
+                    }
+                ],
                 patch: Some("p1".into())
             })
+        );
+        // Code that can't be read says nothing of what shipping would do.
+        let unread = Probe {
+            reading: Err("no git".into()),
+            ship: Some(ShipCheck {
+                blockers: vec!["Couldn't read the code: no git".into()],
+                unread: true,
+                ..ShipCheck::default()
+            }),
+            ..probe(None)
+        };
+        assert!(matches!(ship_ask(&f, Some(&unread)), ShipAsk::Blocked(_)));
+    }
+
+    #[test]
+    fn the_ship_rows_follow_the_ticks_and_shut_once_a_squash_runs() {
+        let mut f = feature("s", vec![repo("api", true)], 8);
+        let found = probe(check(&[], &["api"], &[]));
+        let keys = |f: &Feature| ship_rows(f, Some(&found));
+        let api = || "api".to_owned();
+        assert_eq!(
+            keys(&f),
+            [
+                ShipRow::Route {
+                    repo: api(),
+                    route: Route::Pr
+                },
+                ShipRow::Step {
+                    repo: api(),
+                    step: ShipStep::Push
+                },
+                ShipRow::Step {
+                    repo: api(),
+                    step: ShipStep::OpenPr
+                },
+                ShipRow::After(ShipAfter::Close),
+                ShipRow::After(ShipAfter::Remove),
+            ]
+        );
+        // The choice goes round; Space on it says the next one.
+        assert_eq!(
+            keys(&f)[0].outcome(),
+            PanelOutcome::ShipRoute(api(), Route::Merge)
+        );
+        assert_eq!(
+            keys(&f)[1].outcome(),
+            PanelOutcome::ShipTick(api(), ShipStep::Push)
+        );
+        f.ship_plan
+            .repos
+            .insert(api(), feature::RepoPlan::new(Route::Nothing));
+        assert_eq!(keys(&f).len(), 3);
+        f.shipping.squash_at = Some(5);
+        assert!(keys(&f).is_empty());
+    }
+
+    #[test]
+    fn space_ticks_the_row_and_enter_presses_the_page_s_button() {
+        let f = feature("s", vec![repo("api", true)], 8);
+        assert_eq!(f.current(), Some(Stage::Ship));
+        let found = probe(check(&[], &["api"], &[]));
+        let ships = ship_rows(&f, Some(&found));
+        let mods = ModifiersState::default();
+        let mut panel = FeaturePanel::default();
+        let none = RowCtx::default();
+        let press =
+            |panel: &mut FeaturePanel, sym, ctx| panel.key(&mods, sym, &f, &[], ctx, &[], &ships);
+        // From the rail, Tab goes to the rows.
+        assert_eq!(press(&mut panel, Keysym::Tab, none), None);
+        assert_eq!(panel.focus, TabArea::Findings);
+        assert_eq!(
+            press(&mut panel, Keysym::space, none),
+            Some(PanelOutcome::ShipRoute("api".into(), Route::Merge))
+        );
+        assert_eq!(press(&mut panel, Keysym::Down, none), None);
+        assert_eq!(
+            press(&mut panel, Keysym::space, none),
+            Some(PanelOutcome::ShipTick("api".into(), ShipStep::Push))
+        );
+        assert_eq!(
+            press(&mut panel, Keysym::Return, none),
+            Some(PanelOutcome::Ship)
+        );
+        // With nothing ticked, it finishes.
+        let nothing = RowCtx {
+            ship_nothing: true,
+            ..none
+        };
+        assert_eq!(
+            press(&mut panel, Keysym::Return, nothing),
+            Some(PanelOutcome::Finish)
+        );
+        assert_eq!(
+            stage_button(&f, Stage::Ship, nothing),
+            Some("Finish\u{2026}")
         );
     }
 
@@ -13540,6 +14375,7 @@ pub(crate) mod tests {
                 ctx,
                 AgentChoices::default(),
                 &[],
+                &[],
             )
         };
         let enter = ("Enter".to_owned(), "go to the current stage".to_owned());
@@ -13892,7 +14728,7 @@ pub(crate) mod tests {
         let hit = |panel: &mut FeaturePanel, f: &Feature, sym| {
             let (mods, sym) = key(sym);
             let slugs = ["a".to_owned(), "b".to_owned(), "c".to_owned()];
-            panel.key(&mods, sym, f, &slugs, RowCtx::default(), &plan)
+            panel.key(&mods, sym, f, &slugs, RowCtx::default(), &plan, &[])
         };
         // A card with a row: Space skips it.
         assert_eq!(
@@ -14036,7 +14872,7 @@ pub(crate) mod tests {
     #[test]
     fn a_blocked_ship_says_what_stops_it() {
         let f = feature("s", vec![repo("api", true)], 8);
-        let p = probe(check(&["api has uncommitted changes"], Vec::new(), &[]));
+        let p = probe(check(&["api has uncommitted changes"], &["api"], &[]));
         let state = PanelState {
             probe: Some(&p),
             ..PanelState::default()
@@ -14045,18 +14881,29 @@ pub(crate) mod tests {
         assert_eq!(labels(&actions), [("Ship\u{2026}", PanelOutcome::Ship)]);
         let page = stage_page(&f, Stage::Ship, &state, &actions, 2_000);
         assert_eq!(
-            page.sections,
-            [lines(
+            page.sections[0],
+            lines(
                 "Ship check",
                 vec![line("api has uncommitted changes", CheckTone::Blocker)]
-            )]
+            )
+        );
+        // Below it, what shipping would do, and what comes after.
+        let heads: Vec<&str> = (page.sections.iter())
+            .filter_map(|s| match s {
+                PageSection::ShipGroup(group) => Some(group.head.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            heads,
+            ["api \u{b7} 1 commit \u{b7} into main", "Afterwards"]
         );
         let node = rail_node(&f, Stage::Ship, &state, 2_000);
         assert_eq!(
             (node.mark, node.line.as_str()),
             (NodeMark::Current, "blocked")
         );
-        let ready = probe(check(&[], Vec::new(), &[]));
+        let ready = probe(check(&[], &["api"], &[]));
         let state = PanelState {
             probe: Some(&ready),
             ..PanelState::default()
@@ -14559,7 +15406,8 @@ pub(crate) mod tests {
             slug: "b".into(),
             ..FeaturePanel::default()
         };
-        let press = |p: &mut FeaturePanel, f: &Feature| p.key(&mods, Keysym::B, f, &[], ctx, &[]);
+        let press =
+            |p: &mut FeaturePanel, f: &Feature| p.key(&mods, Keysym::B, f, &[], ctx, &[], &[]);
         assert_eq!(
             press(&mut panel, &f),
             Some(PanelOutcome::FreshMilestones(true))
@@ -14685,7 +15533,7 @@ pub(crate) mod tests {
             ..ModifiersState::default()
         };
         let ctx = RowCtx::default();
-        let press = |p: &mut FeaturePanel| p.key(&mods, Keysym::A, &f, &[], ctx, &[]);
+        let press = |p: &mut FeaturePanel| p.key(&mods, Keysym::A, &f, &[], ctx, &[], &[]);
         assert_eq!(
             press(&mut panel),
             Some(PanelOutcome::CycleAgent(Stage::Discover))
@@ -14707,7 +15555,7 @@ pub(crate) mod tests {
             ..ModifiersState::default()
         };
         let ctx = RowCtx::default();
-        let press = |p: &mut FeaturePanel| p.key(&mods, Keysym::I, &f, &[], ctx, &[]);
+        let press = |p: &mut FeaturePanel| p.key(&mods, Keysym::I, &f, &[], ctx, &[], &[]);
         assert_eq!(
             press(&mut panel),
             Some(PanelOutcome::PickModel(Stage::Discover))
@@ -14758,6 +15606,7 @@ pub(crate) mod tests {
                 &[],
                 RowCtx::default(),
                 choices,
+                &[],
                 &[],
             )
         };
