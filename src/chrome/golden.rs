@@ -2453,7 +2453,7 @@ fn commands(case: usize) -> super::CommandsView {
         3 => view.down = 60,
         4 => {
             view.tab = super::CommandsTab::Run;
-            view.body = "One command per line, each in a tab of the sandbox. A line starting with # doesn't run.";
+            view.body = "One command per line, each in a terminal of the sandbox. A line starting with # doesn't run.";
             view.rows = vec![
                 row(
                     "aft-backend",
@@ -2526,7 +2526,7 @@ const GOLDEN_COMMANDS: [[u64; 6]; 4] = [
         0x3fe63a0dbef9f070, // commands_setup
         0x2aab5777643adee7, // commands_stale
         0x9a123ac89261edc7, // commands_low
-        0x97c707e14f98b1db, // commands_run
+        0x8f88e245d96bbcbc, // commands_run
         0x5510179c6435358b, // commands_feature
     ],
     // Dark at 2
@@ -2535,7 +2535,7 @@ const GOLDEN_COMMANDS: [[u64; 6]; 4] = [
         0xcddedce03bc25a32, // commands_setup
         0x4c08fe9429e83f07, // commands_stale
         0x62f7f21243aa44c0, // commands_low
-        0x214dd92b595891f2, // commands_run
+        0x115701e19f38427d, // commands_run
         0x9b521764fde307fe, // commands_feature
     ],
     // Light at 1
@@ -2544,7 +2544,7 @@ const GOLDEN_COMMANDS: [[u64; 6]; 4] = [
         0x46e153a554416741, // commands_setup
         0x36e0025fe130b86d, // commands_stale
         0x5c2304a89984beda, // commands_low
-        0x82b2055ddf45d39f, // commands_run
+        0xb45b5b87e9f4cc59, // commands_run
         0xabb49a31021a1a6c, // commands_feature
     ],
     // Light at 2
@@ -2553,7 +2553,7 @@ const GOLDEN_COMMANDS: [[u64; 6]; 4] = [
         0xfad4cbca3289ece2, // commands_setup
         0x05613c1913910cd0, // commands_stale
         0xc13b51a13f012fdc, // commands_low
-        0x01b4767083cfef2d, // commands_run
+        0x4853624b12a58330, // commands_run
         0xf4cb147dcf114360, // commands_feature
     ],
 ];

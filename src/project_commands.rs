@@ -861,7 +861,7 @@ impl CommandsDialog {
                     "One command per line. They run in a new worktree, once it has its files."
                 }
                 CommandsTab::Run => {
-                    "One command per line, each in a tab of the sandbox. A line starting with # doesn't run."
+                    "One command per line, each in a terminal of the sandbox. A line starting with # doesn't run."
                 }
                 CommandsTab::Prepare => {
                     "One command per line, in order, before a sandbox's commands: a migration on its data."

@@ -341,7 +341,7 @@ pub struct Workflow {
     /// `feature::verify::TIMEOUT`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verify_timeout: Option<u64>,
-    /// What a feature's sandbox runs, a tab per command, by repository
+    /// What a feature's sandbox runs, a terminal per command, by repository
     /// folder name. A line starting with `#` starts unchecked when a sandbox
     /// asks what to run (see `feature_sandbox`).
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
