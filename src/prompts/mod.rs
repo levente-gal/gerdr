@@ -12,7 +12,7 @@ pub mod render;
 pub fn builtin(name: &str) -> Option<(&'static str, u32)> {
     Some(match name {
         "discover" => (include_str!("../../assets/prompts/discover.md"), 4),
-        "plan" => (include_str!("../../assets/prompts/plan.md"), 3),
+        "plan" => (include_str!("../../assets/prompts/plan.md"), 4),
         "plan-review" => (include_str!("../../assets/prompts/plan-review.md"), 1),
         "plan-review-back" => (include_str!("../../assets/prompts/plan-review-back.md"), 1),
         "plan-final" => (include_str!("../../assets/prompts/plan-final.md"), 1),
@@ -22,7 +22,7 @@ pub fn builtin(name: &str) -> Option<(&'static str, u32)> {
         "fix-plan" => (include_str!("../../assets/prompts/fix-plan.md"), 2),
         "fix-go" => (include_str!("../../assets/prompts/fix-go.md"), 2),
         "fix-on" => (include_str!("../../assets/prompts/fix-on.md"), 1),
-        "continue" => (include_str!("../../assets/prompts/continue.md"), 2),
+        "continue" => (include_str!("../../assets/prompts/continue.md"), 3),
         "nudge" => (include_str!("../../assets/prompts/nudge.md"), 1),
         "send-back" => (include_str!("../../assets/prompts/send-back.md"), 1),
         "start" => (include_str!("../../assets/prompts/start.md"), 1),
@@ -312,5 +312,7 @@ mod tests {
         assert!(!go.trim_end().contains('\n'), "{go}");
         assert!(go.contains("next unticked milestone in /d/bulk-edit/build.md"));
         assert!(go.contains("stop after it"));
+        // A whole suite per milestone takes ages: Verify runs those once.
+        assert!(go.contains("never a whole test suite"));
     }
 }

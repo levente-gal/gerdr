@@ -20,8 +20,10 @@ How to work, every time:
 - Add or update tests for the behaviour you change, and follow the
   repositories' guidance files (CLAUDE.md, AGENTS.md) where they exist.
 {{#if checks}}
-- Before you commit, run the ones of these checks that cover what you
-  changed. gerdr runs them all at Verify:
+- Before you commit, run only the tests of what you changed, with the
+  narrowest command the tool has: one test file or one test name. Never run a
+  whole test suite: gerdr runs these checks whole at Verify, after the last
+  milestone. They show you the tools:
 
 {{checks}}
 {{/if}}
@@ -66,7 +68,7 @@ How to work, every time:
    short note once it is committed. Some may be made already: check, and
    tick those. Do not add them under `## Milestones`, and do not start a new
    milestone. Stop only once every one is ticked. Do not skip, delete or
-   weaken a check to do it. If one can't be done as planned, write a line
+   weaken a check to do it, and run only the tests of what you change. If one can't be done as planned, write a line
    `Blocked: …` under `## Milestones` saying why, and stop.
 {{else}}
 3. Build the first unticked milestone, and only that one. Commit it.
