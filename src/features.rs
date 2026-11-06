@@ -9458,13 +9458,13 @@ fn verify_fixes_section(feature: &Feature, now: u64) -> Option<PageSection> {
     Some(lines("Verify failures", out))
 }
 
-/// The line of a fix round Verify's failures started: "Review 3 · run 4
+/// The line of a fix round Verify's failures started: "Verify 3 · run 4
 /// failed 12m ago · Claude Code · fixes made · run 5 passed". `open` is the
 /// round while it runs, and `on_card` says a card on the page tells how it
 /// stands.
 fn verify_fix_head(fix: &VerifyFix, open: Option<&FixRound>, on_card: bool, now: u64) -> CheckLine {
     let mut parts = vec![
-        feature::fix_round::label(fix.round),
+        fix.label(),
         format!("run {} failed {}", fix.run, projects::ago(now, fix.at)),
     ];
     if !fix.agent.is_empty() {
@@ -9597,11 +9597,14 @@ fn milestones_section(label: String, items: &[(bool, String)]) -> PageSection {
     }
 }
 
-/// What each fix round listed in the build log, oldest first, as `probe`
-/// last read it.
-fn fix_rounds_of(probe: Option<&Probe>) -> Vec<PageSection> {
+/// What each fix round of `feature` listed in the build log, oldest first,
+/// as `probe` last read it.
+fn fix_rounds_of(feature: &Feature, probe: Option<&Probe>) -> Vec<PageSection> {
     (probe.iter().flat_map(|p| &p.docs.fix_rounds))
-        .map(|(n, items)| milestones_section(feature::fix_round::label(*n), items))
+        .map(|(n, items)| {
+            let label = feature::fix_round::label(*n, &feature.verify_fixes);
+            milestones_section(label, items)
+        })
         .collect()
 }
 
@@ -9727,7 +9730,7 @@ fn stage_page(
                 });
                 sections.extend(verify_fixes_section(feature, now));
                 sections.extend(milestones_of(state.probe, stage).or(counted));
-                sections.extend(fix_rounds_of(state.probe));
+                sections.extend(fix_rounds_of(feature, state.probe));
                 sections.extend(setup_section(feature, state));
             }
             Stage::Verify => {
@@ -15839,7 +15842,7 @@ pub(crate) mod tests {
             said.unwrap(),
             &[
                 line(
-                    "Review 2 \u{b7} run 3 failed 16m ago \u{b7} Claude Code \u{b7} dropped",
+                    "Verify 2 \u{b7} run 3 failed 16m ago \u{b7} Claude Code \u{b7} dropped",
                     CheckTone::Note
                 ),
                 line("api: `test` exited with 1", CheckTone::Blocker),
@@ -15847,7 +15850,7 @@ pub(crate) mod tests {
                 line("web: `lint` exited with 2", CheckTone::Blocker),
                 // Only the newest takes a tone: this one's failure is history.
                 line(
-                    "Review 1 \u{b7} run 2 failed 16m ago \u{b7} Claude Code \u{b7} fixes made \u{b7} run 3 failed",
+                    "Verify 1 \u{b7} run 2 failed 16m ago \u{b7} Claude Code \u{b7} fixes made \u{b7} run 3 failed",
                     CheckTone::Note
                 ),
             ]
@@ -15867,14 +15870,14 @@ pub(crate) mod tests {
         assert_eq!(
             head(&fix, round, false),
             line(
-                "Review 1 \u{b7} run 2 failed 16m ago \u{b7} Claude Code \u{b7} fix plan ready",
+                "Verify 1 \u{b7} run 2 failed 16m ago \u{b7} Claude Code \u{b7} fix plan ready",
                 CheckTone::Blocker
             )
         );
         assert_eq!(
             head(&fix, round, true),
             line(
-                "Review 1 \u{b7} run 2 failed 16m ago \u{b7} Claude Code",
+                "Verify 1 \u{b7} run 2 failed 16m ago \u{b7} Claude Code",
                 CheckTone::Blocker
             )
         );
@@ -15886,7 +15889,7 @@ pub(crate) mod tests {
         assert_eq!(
             head(&passed, None, false),
             line(
-                "Review 1 \u{b7} run 2 failed 16m ago \u{b7} fixes made \u{b7} run 3 passed",
+                "Verify 1 \u{b7} run 2 failed 16m ago \u{b7} fixes made \u{b7} run 3 passed",
                 CheckTone::Ready
             )
         );
@@ -15905,7 +15908,7 @@ pub(crate) mod tests {
         };
         assert_eq!(
             lines[0].text,
-            "Review 1 \u{b7} run 2 failed 16m ago \u{b7} Claude Code"
+            "Verify 1 \u{b7} run 2 failed 16m ago \u{b7} Claude Code"
         );
     }
 
@@ -17030,6 +17033,8 @@ pub(crate) mod tests {
             round(1, &[(true, "r1-1"), (true, "r1-2")]),
             round(3, &[(false, "r3-1")]),
         ];
+        // Verify's failures started this one.
+        f.verify_fixes = vec![verify_fix(3, 2)];
         let state = PanelState {
             probe: Some(&read),
             ..PanelState::default()
@@ -17045,7 +17050,7 @@ pub(crate) mod tests {
             .collect();
         assert_eq!(
             groups,
-            [("Build", 2, 3), ("Review 1", 2, 2), ("Review 3", 0, 1)]
+            [("Build", 2, 3), ("Review 1", 2, 2), ("Verify 3", 0, 1)]
         );
     }
 

@@ -3162,7 +3162,7 @@ fn feature_tab_verify_fixes() -> super::FeatureTabView {
             label: "Verify failures".into(),
             lines: vec![
                 tab_line(
-                    "Review 2 \u{b7} run 3 failed 12m ago \u{b7} Claude Code \u{b7} making fixes \u{b7} 1 of 3 made",
+                    "Verify 2 \u{b7} run 3 failed 12m ago \u{b7} Claude Code \u{b7} making fixes \u{b7} 1 of 3 made",
                     CheckTone::Blocker,
                 ),
                 tab_line("api: `cargo test export::` exited with 101", CheckTone::Blocker),
@@ -3172,12 +3172,19 @@ fn feature_tab_verify_fixes() -> super::FeatureTabView {
                 ),
                 tab_line("web: `npm run lint` exited with 2", CheckTone::Blocker),
                 tab_line(
-                    "Review 1 \u{b7} run 2 failed 2h ago \u{b7} Cursor \u{b7} fixes made \u{b7} run 3 failed",
+                    "Verify 1 \u{b7} run 2 failed 2h ago \u{b7} Cursor \u{b7} fixes made \u{b7} run 3 failed",
                     CheckTone::Note,
                 ),
             ],
         },
     );
+    for section in &mut view.page.sections {
+        if let PageSection::Milestones { label, .. } = section
+            && label == "Review 1"
+        {
+            *label = "Verify 1".into();
+        }
+    }
     view.page.sections.push(PageSection::Lines {
         label: "Setup".into(),
         lines: vec![
@@ -4360,8 +4367,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 47]; 4] = [
         0xa0b64a8d9cb72827, // tab_manual_test_1180
         0xa873580051f4643e, // tab_manual_note_860
         0x3f93fa45c78f5866, // tab_review_rounds_1180
-        0x0f3df9cc94cd9bd0, // tab_verify_fixes_1180
-        0x9a3eb2d9b749f166, // tab_verify_fixes_860
+        0x1bb481da157e2c67, // tab_verify_fixes_1180
+        0x2f9cdf4933effa11, // tab_verify_fixes_860
     ],
     // Dark at 2
     [
@@ -4410,8 +4417,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 47]; 4] = [
         0x0381a16f4c182e79, // tab_manual_test_1180
         0x69602a3c18bd7031, // tab_manual_note_860
         0x8f279db4c0377c33, // tab_review_rounds_1180
-        0x5f77f0932430066e, // tab_verify_fixes_1180
-        0xbbbee10e3a49cc30, // tab_verify_fixes_860
+        0x1f9ea9bcba5f8329, // tab_verify_fixes_1180
+        0xb37b9ca850bd8933, // tab_verify_fixes_860
     ],
     // Light at 1
     [
@@ -4460,8 +4467,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 47]; 4] = [
         0xe4bd695e759f1b44, // tab_manual_test_1180
         0x061ec3807f66b135, // tab_manual_note_860
         0xe29b7adc8372deb1, // tab_review_rounds_1180
-        0x06497f7e81355840, // tab_verify_fixes_1180
-        0xfaef144a9cf2f302, // tab_verify_fixes_860
+        0x6e90e5c0915f6faf, // tab_verify_fixes_1180
+        0x133eaaca448e2d19, // tab_verify_fixes_860
     ],
     // Light at 2
     [
@@ -4510,8 +4517,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 47]; 4] = [
         0x1e2c584646dc9ba6, // tab_manual_test_1180
         0x1b69d7c51f346529, // tab_manual_note_860
         0xc202861bd8801f45, // tab_review_rounds_1180
-        0xf22eb3de2d0ec197, // tab_verify_fixes_1180
-        0x6f6f159577e44677, // tab_verify_fixes_860
+        0x99afe9e17842450a, // tab_verify_fixes_1180
+        0xbf5121e313facc7e, // tab_verify_fixes_860
     ],
 ];
 

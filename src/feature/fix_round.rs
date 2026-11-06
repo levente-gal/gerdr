@@ -227,6 +227,11 @@ pub struct VerifyFix {
 }
 
 impl VerifyFix {
+    /// What it is called on Build's page.
+    pub fn label(&self) -> String {
+        format!("Verify {}", self.round)
+    }
+
     /// What round `round` keeps of failed run `run`, going to `agent`.
     pub fn new(round: u32, run: &VerifyRun, agent: String) -> VerifyFix {
         let mut failures = run.failures.clone();
@@ -339,9 +344,12 @@ pub fn heading(n: u32) -> String {
     format!("{ROUND} {n}")
 }
 
-/// What round `n`'s list is called on Build's page, under the plan's own.
-pub fn label(n: u32) -> String {
-    format!("Review {n}")
+/// What round `n`'s list is called on Build's page, under the plan's own:
+/// by who asked, as far as `fixes` says. A Verify round from before they were
+/// kept reads as a review.
+pub fn label(n: u32, fixes: &[VerifyFix]) -> String {
+    (fixes.iter().find(|fix| fix.round == n))
+        .map_or_else(|| format!("Review {n}"), VerifyFix::label)
 }
 
 /// The number of round whose section `line` of a build log heads.
@@ -758,7 +766,12 @@ mod tests {
             ]
         );
         assert!(rounds("## Milestones\n- [ ] One\n").is_empty());
-        assert_eq!(label(2), "Review 2");
+        let fixes = [VerifyFix {
+            round: 3,
+            ..VerifyFix::default()
+        }];
+        assert_eq!(label(2, &fixes), "Review 2");
+        assert_eq!(label(3, &fixes), "Verify 3");
     }
 
     #[test]
