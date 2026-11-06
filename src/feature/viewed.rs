@@ -47,6 +47,10 @@ pub fn key(repo: &str, path: &str) -> String {
 /// Why a file can't be ticked: it has changes not committed.
 pub const NOT_COMMITTED: &str = "Commit it first: viewed marks the committed file";
 
+/// A file `Viewed::set_many` goes over: its key, its committed blob and
+/// whether it has changes not committed.
+pub type ManyFile = (String, Option<String>, bool);
+
 impl Viewed {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
@@ -82,6 +86,32 @@ impl Viewed {
             }
             _ => Err(NOT_COMMITTED),
         }
+    }
+
+    /// Toggle `files` as one, as a folder's or a repository's checkbox does:
+    /// those that can be ticked are, unless they all are already, and then
+    /// they are unticked. How many were left out as they can't be ticked;
+    /// refused, with why, when none can be.
+    pub fn set_many(&mut self, files: &[ManyFile]) -> Result<usize, &'static str> {
+        let can = |(_, blob, dirty): &&ManyFile| blob.is_some() && !*dirty;
+        let able: Vec<&ManyFile> = files.iter().filter(can).collect();
+        if able.is_empty() {
+            return Err(NOT_COMMITTED);
+        }
+        let all = (able.iter())
+            .all(|(key, blob, dirty)| self.tick(key, blob.as_deref(), *dirty) == Tick::Yes);
+        if all {
+            for (key, ..) in able {
+                self.0.remove(key);
+            }
+            return Ok(0);
+        }
+        for (key, blob, _) in &able {
+            if let Some(blob) = blob {
+                self.0.insert(key.clone(), blob.clone());
+            }
+        }
+        Ok(files.len() - able.len())
     }
 }
 
@@ -192,6 +222,32 @@ mod tests {
         assert_eq!(v.0.get(&k).map(String::as_str), Some("b2"));
         assert_eq!(v.toggle(&k, Some("b2"), false), Ok(false));
         assert!(v.is_empty());
+    }
+
+    #[test]
+    fn many_files_tick_as_one_leaving_out_those_not_committed() {
+        let mut v = Viewed::default();
+        let file = |k: &str, blob: Option<&str>, dirty| (k.to_owned(), blob.map(Into::into), dirty);
+        let files = [
+            file("a", Some("b1"), false),
+            file("b", Some("b2"), false),
+            file("c", Some("b3"), true),
+            file("d", None, false),
+        ];
+        // Some ticked: the rest are, and the two that can't be are told of.
+        v.0.insert("a".into(), "b1".into());
+        assert_eq!(v.set_many(&files), Ok(2));
+        assert_eq!(v.0.len(), 2);
+        assert_eq!(v.tick("b", Some("b2"), false), Tick::Yes);
+        // All that can be are ticked: they are unticked.
+        assert_eq!(v.set_many(&files), Ok(0));
+        assert!(v.is_empty());
+        // One ticked on an older blob is ticked on this one.
+        v.0.insert("a".into(), "old".into());
+        assert_eq!(v.set_many(&files[..2]), Ok(0));
+        assert_eq!(v.tick("a", Some("b1"), false), Tick::Yes);
+        // None can be.
+        assert_eq!(v.set_many(&files[2..]), Err(NOT_COMMITTED));
     }
 
     #[test]

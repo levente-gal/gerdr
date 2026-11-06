@@ -40,6 +40,7 @@ mod feature_review;
 mod feature_sandbox;
 mod feature_workspace;
 mod features;
+mod file_tree;
 mod find;
 mod finding_dialog;
 mod frecency;

@@ -257,6 +257,8 @@ impl Gerdr {
             cols: chrome::diff_only_cols(left),
             density: self.density,
             sheet_rows: chrome::repos_sheet_rows(area, true),
+            tree_page: chrome::diff_tree_page(area, self.density),
+            tree_share: 0.0,
         }
     }
 

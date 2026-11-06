@@ -38,6 +38,7 @@ use crate::{
         viewed::{self, Tick, Viewed},
     },
     features::plural,
+    file_tree::FileTree,
     git_ops::Since,
     review::{self, Comment, Flag, Quoted, Review},
     toast::Level,
@@ -704,6 +705,7 @@ impl WorktreeDiff {
             label: fe.title.clone(),
             workspace,
             feature: Some(fe),
+            tree: Some(FileTree::default()),
             ..WorktreeDiff::default()
         };
         wd.diff.review = review;
@@ -718,7 +720,7 @@ impl WorktreeDiff {
         env: Env,
     ) {
         self.reading = false;
-        let Some(fe) = self.feature.as_mut() else {
+        let (Some(fe), Some(tree)) = (self.feature.as_mut(), self.tree.as_mut()) else {
             return;
         };
         let mut files = Vec::new();
@@ -733,7 +735,12 @@ impl WorktreeDiff {
                     repo.since = read.since;
                     repo.blobs = read.blobs;
                     repo.dirty = read.dirty;
-                    files.push((root, read.files));
+                    // In the file list's order.
+                    let mut read_files = read.files;
+                    let rank = tree.rank(&repo.since.changes);
+                    read_files
+                        .sort_by_key(|f| rank.get(f.path.as_str()).copied().unwrap_or(usize::MAX));
+                    files.push((root, read_files));
                 }
                 Err(why) => repo.error = Some(format!("{}: {why}", repo.shown())),
             }
@@ -748,6 +755,10 @@ impl WorktreeDiff {
             }
         });
         self.place_findings(env);
+        if let (Some(tree), Some(fe)) = (self.tree.as_mut(), self.feature.as_ref()) {
+            tree.settle(&fe.sections(), env.tree_page);
+        }
+        self.follow_diff(env);
     }
 
     /// The findings, as the record has them now, as comments after the
@@ -867,7 +878,8 @@ impl Gerdr {
         if let Some(panel) = self.repos.panel.take() {
             self.repos.kept = Some((self.project.clone(), panel));
         }
-        let wd = WorktreeDiff::of_feature(fe, root, w, review);
+        let mut wd = WorktreeDiff::of_feature(fe, root, w, review);
+        wd.tree = Some(FileTree::new(self.projects.repo_grouping));
         self.repos.worktree = Some(wd);
         self.worktree_diff_read();
         // It takes the pointer from the client under it.
@@ -1044,6 +1056,53 @@ impl Gerdr {
             fe.viewed = viewed;
         }
         self.code_review_counted();
+    }
+
+    /// Tick files `paths` of the repository at `root` viewed, or untick them,
+    /// as a folder's or a repository's checkbox does: kept in the feature's
+    /// record, and said when some have changes not committed.
+    pub(crate) fn feature_toggle_many(&mut self, root: &Path, paths: &[String]) {
+        let seen = (self.wd().and_then(|wd| wd.feature.as_ref())).is_some_and(|fe| fe.seen);
+        if seen {
+            return self.show_warning(crate::doc_review::WRITTEN_ELSEWHERE.to_owned());
+        }
+        let Some(fe) = self.feature_of() else {
+            return;
+        };
+        let Some(repo) = fe.repo(root) else {
+            return;
+        };
+        let files: Vec<viewed::ManyFile> = (paths.iter())
+            .map(|path| {
+                let key = viewed::key(&repo.name, path);
+                (
+                    key,
+                    repo.blobs.get(path).cloned(),
+                    repo.dirty.contains(path),
+                )
+            })
+            .collect();
+        let (project, slug) = (fe.project.clone(), fe.slug.clone());
+        let Some(feature) = self.feature_mut(&project, &slug) else {
+            return self.show_warning("That feature is gone".into());
+        };
+        if feature.is_done(Stage::CodeReview) {
+            return self.show_warning("Code review is done: reopen it first".into());
+        }
+        let left = match feature.viewed.set_many(&files) {
+            Ok(left) => left,
+            Err(why) => return self.show_warning(why.into()),
+        };
+        let viewed = feature.viewed.clone();
+        self.save_feature(&project, &slug);
+        if let Some(fe) = self.wd_mut().and_then(|wd| wd.feature.as_mut()) {
+            fe.viewed = viewed;
+        }
+        self.code_review_counted();
+        if left > 0 {
+            let files = plural(left, "file");
+            self.show_warning(format!("{files} left out: commit them first"));
+        }
     }
 
     /// Finding `id` decided in the open code review: kept in the record,
@@ -1333,6 +1392,7 @@ mod tests {
         diff::{Hunk, Line},
         feature::review_import::Severity,
         git::Change,
+        worktree_diff::Done,
     };
     use smithay::input::keyboard::Keysym;
 
@@ -1732,6 +1792,8 @@ mod tests {
         page: 20,
         cols: 60,
         density: crate::chrome::Density::Comfortable,
+        tree_page: 20,
+        tree_share: 0.25,
     };
 
     fn finding(id: &str, state: FindingState) -> Finding {
@@ -1767,6 +1829,240 @@ mod tests {
         };
         wd.set_feature(vec![("api".into(), "/w/api".into(), Ok(read))], POPUP_ENV);
         wd
+    }
+
+    /// A feature's diff at Code review over these files of one repository,
+    /// read, each committed.
+    fn listed(paths: &[&str]) -> WorktreeDiff {
+        let api = repo("api", paths);
+        let fe = FeatureOf {
+            title: "Login".into(),
+            stage: Some(Stage::CodeReview),
+            repos: vec![api.clone()],
+            ..FeatureOf::default()
+        };
+        let mut wd = WorktreeDiff::of_feature(fe, "/w".into(), 0, Review::default());
+        wd.tree = Some(FileTree::new(crate::repos::Grouping::Folders));
+        let files = paths
+            .iter()
+            .map(|p| crate::doc_review::added_file(p, "x\n"));
+        let read = viewed::Read {
+            since: api.since.clone(),
+            files: files.collect(),
+            blobs: api.blobs.clone(),
+            dirty: Default::default(),
+        };
+        wd.set_feature(vec![("api".into(), "/w/api".into(), Ok(read))], POPUP_ENV);
+        wd
+    }
+
+    /// The file list's lines, as text.
+    fn tree_texts(wd: &WorktreeDiff, env: Env) -> Vec<String> {
+        use crate::chrome::TreeLine;
+        (wd.repos_view(env).lines.iter())
+            .map(|line| match line {
+                TreeLine::Repo(r) => format!("{} {:?}", r.label, r.check),
+                TreeLine::Dir(d) => format!("{}/ {:?}", d.name, d.check),
+                TreeLine::File(f) => format!("{} {:?}", f.path, f.check),
+                TreeLine::Clean(_) => "clean".into(),
+            })
+            .collect()
+    }
+
+    fn press(
+        wd: &mut WorktreeDiff,
+        mods: smithay::input::keyboard::ModifiersState,
+        sym: Keysym,
+    ) -> Option<Done> {
+        let done = wd.key(&mods, sym, sym, POPUP_ENV);
+        wd.follow_diff(POPUP_ENV);
+        done
+    }
+
+    fn plain() -> smithay::input::keyboard::ModifiersState {
+        smithay::input::keyboard::ModifiersState::default()
+    }
+
+    fn alt() -> smithay::input::keyboard::ModifiersState {
+        smithay::input::keyboard::ModifiersState {
+            alt: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_list_shows_each_files_viewed_tick_as_its_header_does() {
+        let mut wd = listed(&["src/a.rs", "src/b.rs", "top.rs"]);
+        assert_eq!(
+            tree_texts(&wd, POPUP_ENV),
+            ["api Off", "src/ Off", "a.rs Off", "b.rs Off", "top.rs Off"]
+        );
+        let root = PathBuf::from("/w/api");
+        let header =
+            |wd: &WorktreeDiff, path: &str| wd.feature.as_ref().unwrap().check(&root, path);
+        let record = |wd: &mut WorktreeDiff, path: &str| {
+            let fe = wd.feature.as_mut().unwrap();
+            let key = viewed::key("api", path);
+            let blob = format!("b-{path}");
+            fe.viewed.0.insert(key, blob);
+        };
+        // The one record both go by: a file's tick shows in the list, a folder
+        // takes after its files.
+        record(&mut wd, "src/a.rs");
+        assert_eq!(header(&wd, "src/a.rs"), Check::On);
+        assert_eq!(
+            tree_texts(&wd, POPUP_ENV),
+            [
+                "api Partial",
+                "src/ Partial",
+                "a.rs On",
+                "b.rs Off",
+                "top.rs Off"
+            ]
+        );
+        record(&mut wd, "src/b.rs");
+        record(&mut wd, "top.rs");
+        assert_eq!(
+            tree_texts(&wd, POPUP_ENV),
+            ["api On", "src/ On", "a.rs On", "b.rs On", "top.rs On"]
+        );
+        let counts = wd.feature.as_ref().unwrap().counts(0);
+        assert_eq!((counts.files, counts.viewed), (3, 3));
+    }
+
+    #[test]
+    fn a_tick_in_the_list_asks_for_what_the_headers_tick_asks() {
+        let mut wd = listed(&["src/a.rs", "src/b.rs", "top.rs"]);
+        let root = PathBuf::from("/w/api");
+        // Its checkbox, on a file's line.
+        assert_eq!(
+            wd.click(ReposHit::Check(2), POPUP_ENV),
+            Some(Done::Diff(crate::diff_view::Outcome::Toggle {
+                root: root.clone(),
+                path: "src/a.rs".into(),
+            }))
+        );
+        assert!(wd.tree.as_ref().unwrap().focused);
+        // On a folder's and a repository's: all under it.
+        assert_eq!(
+            wd.click(ReposHit::Check(1), POPUP_ENV),
+            Some(Done::TickFiles {
+                root: root.clone(),
+                paths: vec!["src/a.rs".into(), "src/b.rs".into()],
+            })
+        );
+        assert_eq!(
+            press(&mut wd, plain(), Keysym::Up),
+            None,
+            "moves to the repository's line"
+        );
+        assert_eq!(
+            press(&mut wd, plain(), Keysym::space),
+            Some(Done::TickFiles {
+                root: root.clone(),
+                paths: vec!["src/a.rs".into(), "src/b.rs".into(), "top.rs".into()],
+            })
+        );
+        // Space on a file's line.
+        press(&mut wd, plain(), Keysym::End);
+        assert_eq!(
+            press(&mut wd, plain(), Keysym::space),
+            Some(Done::Diff(crate::diff_view::Outcome::Toggle {
+                root,
+                path: "top.rs".into(),
+            }))
+        );
+    }
+
+    #[test]
+    fn tab_goes_between_the_list_and_the_diff_and_esc_still_closes() {
+        let mut wd = listed(&["src/a.rs", "top.rs"]);
+        let focused = |wd: &WorktreeDiff| wd.tree.as_ref().unwrap().focused;
+        assert!(!focused(&wd));
+        assert!(wd.view(POPUP_ENV).focused);
+        press(&mut wd, plain(), Keysym::Tab);
+        assert!(focused(&wd));
+        assert!(!wd.view(POPUP_ENV).focused);
+        assert_eq!(press(&mut wd, plain(), Keysym::Escape), Some(Done::Close));
+        press(&mut wd, plain(), Keysym::Tab);
+        assert!(!focused(&wd));
+        assert_eq!(press(&mut wd, plain(), Keysym::Escape), Some(Done::Close));
+    }
+
+    #[test]
+    fn a_line_takes_the_diff_to_its_file_and_the_diff_takes_the_list_along() {
+        let mut wd = listed(&["src/a.rs", "src/b.rs", "top.rs"]);
+        let at = |wd: &WorktreeDiff| wd.diff.scroll.pos();
+        let selected = |wd: &WorktreeDiff| {
+            wd.tree
+                .as_ref()
+                .unwrap()
+                .selected_file()
+                .map(|(_, p)| p.to_owned())
+        };
+        assert_eq!(wd.click(ReposHit::Line(3), POPUP_ENV), None);
+        assert_eq!(selected(&wd).as_deref(), Some("src/b.rs"));
+        let b = at(&wd);
+        assert!(b > 0.0);
+        // What shows has the keys: Space ticks that file, not the first.
+        wd.tree.as_mut().unwrap().focused = false;
+        assert_eq!(
+            press(&mut wd, plain(), Keysym::space),
+            Some(Done::Diff(crate::diff_view::Outcome::Toggle {
+                root: "/w/api".into(),
+                path: "src/b.rs".into(),
+            }))
+        );
+        // The diff going to the next file not viewed selects its line.
+        let mods = smithay::input::keyboard::ModifiersState {
+            shift: true,
+            ..alt()
+        };
+        press(&mut wd, mods, Keysym::Down);
+        assert_eq!(selected(&wd).as_deref(), Some("top.rs"));
+    }
+
+    #[test]
+    fn the_lists_toolbar_and_its_keys_fold_and_regroup() {
+        use crate::{chrome::TreeTool, repos::Grouping};
+        let mut wd = listed(&["src/a.rs", "top.rs"]);
+        assert_eq!(wd.repos_view(POPUP_ENV).grouping, Grouping::Folders);
+        assert_eq!(
+            press(&mut wd, alt(), Keysym::f),
+            Some(Done::Grouping(Grouping::List))
+        );
+        assert_eq!(
+            tree_texts(&wd, POPUP_ENV),
+            ["api Off", "src/a.rs Off", "top.rs Off"]
+        );
+        // Already so: nothing to save.
+        assert_eq!(wd.click(ReposHit::Tool(TreeTool::List), POPUP_ENV), None);
+        assert_eq!(
+            wd.click(ReposHit::Tool(TreeTool::Folders), POPUP_ENV),
+            Some(Done::Grouping(Grouping::Folders))
+        );
+        press(&mut wd, alt(), Keysym::Left);
+        assert_eq!(tree_texts(&wd, POPUP_ENV), ["api Off"]);
+        wd.click(ReposHit::Tool(TreeTool::Expand), POPUP_ENV);
+        assert_eq!(tree_texts(&wd, POPUP_ENV).len(), 4);
+    }
+
+    #[test]
+    fn with_no_room_for_it_the_list_is_gone_and_the_diff_keeps_the_keys() {
+        let mut wd = listed(&["src/a.rs", "top.rs"]);
+        let narrow = Env {
+            tree_share: 0.0,
+            ..POPUP_ENV
+        };
+        let view = wd.repos_view(narrow);
+        assert!(!view.diff_tree && view.lines.is_empty());
+        assert_eq!(wd.key(&plain(), Keysym::Tab, Keysym::Tab, narrow), None);
+        assert!(!wd.tree.as_ref().unwrap().focused);
+        assert!(wd.view(narrow).focused);
+        assert_eq!(wd.click(ReposHit::Line(1), narrow), None);
+        assert!(!wd.tree.as_ref().unwrap().focused);
+        let wide = wd.repos_view(POPUP_ENV);
+        assert!(wide.diff_tree && !wide.lines.is_empty());
     }
 
     fn mods(ctrl: bool, shift: bool) -> smithay::input::keyboard::ModifiersState {
@@ -2256,6 +2552,8 @@ mod tests {
             page: 20,
             cols: 60,
             density: Density::Comfortable,
+            tree_page: 20,
+            tree_share: 0.25,
         };
         let mut api = repo("api", &["a.rs"]);
         api.since.changes[0].code = 'A';

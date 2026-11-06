@@ -1204,7 +1204,16 @@ impl Gerdr {
     /// The line between the tree and the detail dragged to `pos`.
     pub fn repos_drag_to(&mut self, pos: Point<f64, Logical>) {
         let share = chrome::repos_share_at(pos.x, self.repos_rect());
-        self.repos.tree_share = Some(share);
+        if self.wd().is_none() {
+            self.repos.tree_share = Some(share);
+            return;
+        }
+        self.repos.review_tree_share = Some(share);
+        // A comment's lines wrap at the width it shows in.
+        let env = self.worktree_env();
+        if let Some(wd) = self.wd_mut() {
+            wd.with_diff(env, |diff, ctx| diff.rewrap(ctx));
+        }
     }
 
     /// The pointer dragged to `pos` from a press on the diff: the
@@ -1334,6 +1343,7 @@ impl Gerdr {
                     Some(Tooltip::new(crate::md_preview::NO_EXTENSION, *part))
                 }
                 ReposHit::Button(_) | ReposHit::DiffRestore(_) => button_tip(&view, &layout, pos),
+                ReposHit::Tool(tool) => tool_tip(&layout, tool),
                 _ => None,
             };
         }
@@ -1388,16 +1398,7 @@ impl Gerdr {
                 };
                 Some(Tooltip::new(text, rect))
             }
-            ReposHit::Tool(tool) => {
-                let (_, rect) = layout.tree_tools.iter().find(|(t, _)| *t == tool)?;
-                let (text, key) = match tool {
-                    TreeTool::Expand => ("Unfold every repository and folder", "Alt+Right"),
-                    TreeTool::Collapse => ("Fold every repository and folder", "Alt+Left"),
-                    TreeTool::List => ("List the changed files flat, by path", "Alt+F"),
-                    TreeTool::Folders => ("List the changed files by folder", "Alt+F"),
-                };
-                Some(Tooltip::new(text, *rect).key(key))
-            }
+            ReposHit::Tool(tool) => tool_tip(&layout, tool),
             ReposHit::Search(part) => search_tip(&layout, part),
             ReposHit::Chip(i) => {
                 let (_, rect) = layout.chips.iter().find(|(j, _)| *j == i)?;
@@ -1514,7 +1515,7 @@ impl Gerdr {
     /// scrollbar's thumb held there puts it.
     pub fn repos_scroll_to(&mut self, pos: f64, detail: bool) {
         if self.wd().is_some() {
-            return self.worktree_diff_scroll_to(pos);
+            return self.worktree_diff_scroll_to(pos, detail);
         }
         let page = self.repos_page();
         let (density, tree_share, cols, sheet_rows) = self.repos_env();
@@ -2570,6 +2571,18 @@ fn zed_place(file: &Path, at: Position) -> PathBuf {
         place.push(format!(":{column}"));
     }
     PathBuf::from(place)
+}
+
+/// The tooltip of the tree's toolbar button `tool`.
+fn tool_tip(layout: &chrome::ReposLayout, tool: TreeTool) -> Option<Tooltip> {
+    let (_, rect) = layout.tree_tools.iter().find(|(t, _)| *t == tool)?;
+    let (text, key) = match tool {
+        TreeTool::Expand => ("Unfold every repository and folder", "Alt+Right"),
+        TreeTool::Collapse => ("Fold every repository and folder", "Alt+Left"),
+        TreeTool::List => ("List the changed files flat, by path", "Alt+F"),
+        TreeTool::Folders => ("List the changed files by folder", "Alt+F"),
+    };
+    Some(Tooltip::new(text, *rect).key(key))
 }
 
 /// The tip of part `part` of the diff's search, as `layout` has it.

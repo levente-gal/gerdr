@@ -61,7 +61,7 @@
 //! right click offers the actions.
 
 use std::{
-    cmp::{Ordering, Reverse},
+    cmp::Reverse,
     collections::{BTreeMap, HashMap, HashSet},
     path::{Path, PathBuf},
     time::{Instant, SystemTime},
@@ -86,6 +86,7 @@ use crate::{
         self, DiffView, Keys, Moved, NO_REVIEW, Place, Section, bounds, detail_line, in_dir,
         move_to, showing,
     },
+    file_tree::{self, Folds, Row, change_text, file_name_text, file_rows, path_parts, tree_order},
     git::{Change, GitStatus, InProgress},
     git_ops::{Failure, Head, Integrate, OpResult, Pull, Ran, Verdict},
     scroll::{Bounds, Motion, Scroll},
@@ -142,6 +143,9 @@ pub struct Repos {
     /// The tree's share of the panel's width, dragged on the line between
     /// the tree and the detail; `None` for the default.
     pub(crate) tree_share: Option<f64>,
+    /// The same of a feature's code review, whose diff wants more of the
+    /// room; `None` for its default.
+    pub(crate) review_tree_share: Option<f64>,
     /// The cuts made from the diff, the last last, to undo; and those
     /// undone, to do again.
     pub(crate) cuts: Vec<crate::diff_edit::Done>,
@@ -292,7 +296,7 @@ impl Grouping {
     }
 
     /// The other one.
-    fn other(self) -> Grouping {
+    pub(crate) fn other(self) -> Grouping {
         match self {
             Grouping::List => Grouping::Folders,
             Grouping::Folders => Grouping::List,
@@ -341,7 +345,7 @@ pub struct Panel {
     /// How the files are listed.
     pub(crate) grouping: Grouping,
     /// Folders folded, by (root, path).
-    pub(crate) folded_dirs: HashSet<(PathBuf, String)>,
+    pub(crate) folded_dirs: Folds,
     /// The repositories that had something to do while a batch ran:
     /// they stay with the others, under no `Clean` heading, so that a
     /// line doesn't jump there as a batch commits and pushes it. Those
@@ -483,7 +487,7 @@ fn scroll_to(lines: &[MenuLine], k: usize, pos: f64, page: usize) -> f64 {
 /// Where a list of `len` rows with `page` of them in view stands by
 /// `scroll`, as far as it goes: its first row in view and the part of
 /// that row scrolled past.
-fn standing(scroll: &Scroll, len: usize, page: usize) -> (usize, f64) {
+pub(crate) fn standing(scroll: &Scroll, len: usize, page: usize) -> (usize, f64) {
     let last = len.saturating_sub(page.max(1));
     let pos = scroll.pos().clamp(0.0, last as f64);
     (pos.floor() as usize, pos.fract())
@@ -1100,161 +1104,6 @@ pub enum Outcome {
     Refresh,
     /// Stop the batches running: their commands killed, the rest not run.
     Stop,
-}
-
-/// A tree line, by index: a repository of `Ctx::items`, a folder of its
-/// changes, or one of its changes, by index into its `GitStatus::changes`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Row {
-    Repo(usize),
-    /// A folder of repository `k`, `depth` folders in: the first `to`
-    /// parts of the path of change `c` (the first file under it), shown
-    /// as its parts `from..to`, as a folder holding nothing but one folder
-    /// is one line with it.
-    Dir {
-        k: usize,
-        c: usize,
-        from: usize,
-        to: usize,
-        depth: usize,
-    },
-    /// Change `c` of repository `k`, `depth` folders in.
-    File(usize, usize, usize),
-    /// The heading over the repositories with nothing to do.
-    Clean,
-}
-
-impl Row {
-    /// The repository it is, or is under; none for the heading.
-    fn item(self) -> Option<usize> {
-        match self {
-            Row::Repo(k) | Row::Dir { k, .. } | Row::File(k, ..) => Some(k),
-            Row::Clean => None,
-        }
-    }
-
-    /// How many folders in it is; a repository is none.
-    fn depth(self) -> usize {
-        match self {
-            Row::Repo(_) | Row::Clean => 0,
-            Row::Dir { depth, .. } | Row::File(.., depth) => depth,
-        }
-    }
-}
-
-/// Parts `from..to` of `path`, split at `/`.
-fn path_parts(path: &str, from: usize, to: usize) -> &str {
-    // Where part `n` starts.
-    let cut = |n: usize| match n {
-        0 => Some(0),
-        n => path.match_indices('/').nth(n - 1).map(|(i, _)| i + 1),
-    };
-    let start = cut(from).unwrap_or(path.len());
-    let end = cut(to).map_or(path.len(), |i| i - 1);
-    &path[start..end.max(start)]
-}
-
-/// A folder of changed files: the folders in it, its files by name with
-/// their index into the changes, and the same for the folders git lists
-/// whole, as one change (untracked ones, `new/`).
-#[derive(Default)]
-struct Folder<'a> {
-    folders: BTreeMap<&'a str, Folder<'a>>,
-    files: Vec<(&'a str, usize)>,
-    whole: Vec<(&'a str, usize)>,
-}
-
-/// Names in the order the tree lists them: letter case aside first.
-fn by_name(a: &str, b: &str) -> Ordering {
-    let lower = |s: &str| s.to_lowercase();
-    lower(a).cmp(&lower(b)).then_with(|| a.cmp(b))
-}
-
-/// Repository `k`'s file lines, folded or not: as `file_order` has them;
-/// or by folder, each folder's folders before its files, by name.
-fn file_rows(k: usize, changes: &[Change], grouping: Grouping) -> Vec<Row> {
-    if grouping == Grouping::List {
-        let order = file_order(changes).into_iter();
-        return order.map(|c| Row::File(k, c, 0)).collect();
-    }
-    let mut top = Folder::default();
-    for (c, change) in changes.iter().enumerate() {
-        let path = change.path.strip_suffix('/');
-        let whole = path.is_some();
-        let (dirs, name) = match path.unwrap_or(&change.path).rsplit_once('/') {
-            Some((dirs, name)) => (Some(dirs), name),
-            None => (None, path.unwrap_or(&change.path)),
-        };
-        let mut folder = &mut top;
-        for part in dirs.into_iter().flat_map(|d| d.split('/')) {
-            folder = folder.folders.entry(part).or_default();
-        }
-        match whole {
-            true => folder.whole.push((name, c)),
-            false => folder.files.push((name, c)),
-        }
-    }
-    let mut rows = Vec::new();
-    folder_rows(&top, k, (0, 0), &mut rows);
-    rows
-}
-
-/// The order of `changes` in the tree, by index, folded or not.
-fn tree_order(changes: &[Change], grouping: Grouping) -> Vec<usize> {
-    let rows = file_rows(0, changes, grouping).into_iter();
-    rows.filter_map(|r| match r {
-        Row::File(_, c, _) => Some(c),
-        _ => None,
-    })
-    .collect()
-}
-
-/// The lines of `folder` of repository `k`, `at` parts down its paths
-/// and `depth` folders in, onto `rows`.
-fn folder_rows(folder: &Folder, k: usize, (at, depth): (usize, usize), rows: &mut Vec<Row>) {
-    // The folders git lists whole go by name among the others, a line
-    // each.
-    let mut folders: Vec<(&str, Option<&Folder>, usize)> = folder
-        .folders
-        .iter()
-        .map(|(name, sub)| (*name, Some(sub), 0))
-        .chain(folder.whole.iter().map(|&(name, c)| (name, None, c)))
-        .collect();
-    folders.sort_by(|a, b| by_name(a.0, b.0));
-    for (_, sub, c) in folders {
-        let Some(mut sub) = sub else {
-            rows.push(Row::File(k, c, depth));
-            continue;
-        };
-        let mut to = at + 1;
-        while sub.files.is_empty()
-            && sub.whole.is_empty()
-            && sub.folders.len() == 1
-            && let Some(only) = sub.folders.values().next()
-        {
-            sub = only;
-            to += 1;
-        }
-        let line = rows.len();
-        rows.push(Row::Dir {
-            k,
-            c: 0,
-            from: at,
-            to,
-            depth,
-        });
-        folder_rows(sub, k, (to, depth + 1), rows);
-        let first = rows[line..].iter().find_map(|r| match r {
-            Row::File(_, c, _) => Some(*c),
-            _ => None,
-        });
-        if let (Row::Dir { c, .. }, Some(first)) = (&mut rows[line], first) {
-            *c = first;
-        }
-    }
-    let mut files = folder.files.clone();
-    files.sort_by(|a, b| by_name(a.0, b.0));
-    rows.extend(files.into_iter().map(|(_, c)| Row::File(k, c, depth)));
 }
 
 /// The diff's `Ctx` for panel `$panel` over the panel's `$ctx`, as
@@ -1933,15 +1782,6 @@ fn repos(n: usize) -> String {
     }
 }
 
-/// The order `changes` are listed in, by index: conflicted ones first,
-/// then the rest as git lists them.
-fn file_order(changes: &[Change]) -> Vec<usize> {
-    let (mut order, mut rest): (Vec<usize>, Vec<usize>) =
-        (0..changes.len()).partition(|&c| changes[c].conflicted());
-    order.append(&mut rest);
-    order
-}
-
 /// The conflicted files of `item`.
 fn conflicted_files(item: &RepoItem) -> Vec<String> {
     let changes = &item.status.changes;
@@ -1950,35 +1790,6 @@ fn conflicted_files(item: &RepoItem) -> Vec<String> {
         .filter(|c| c.conflicted())
         .map(|c| c.path.clone())
         .collect()
-}
-
-/// How a change is shown: its path, a rename as `old → new`.
-fn change_text(change: &Change) -> String {
-    match &change.orig {
-        Some(orig) => format!("{orig} → {}", change.path),
-        None => change.path.clone(),
-    }
-}
-
-/// How a change is shown under its folder: its name, a rename as
-/// `old → new`, the old one by its name too when in the same folder.
-fn file_name_text(change: &Change) -> String {
-    let split = |path: &str| -> (String, String) {
-        match path.rsplit_once('/') {
-            Some((dir, name)) => (dir.to_owned(), name.to_owned()),
-            None => (String::new(), path.to_owned()),
-        }
-    };
-    // A folder git lists whole keeps its `/`.
-    let (dir, mut name) = split(change.path.trim_end_matches('/'));
-    if change.path.ends_with('/') {
-        name.push('/');
-    }
-    match &change.orig {
-        Some(orig) if split(orig).0 == dir => format!("{} → {name}", split(orig).1),
-        Some(orig) => format!("{orig} → {name}"),
-        None => name,
-    }
 }
 
 /// How long before `now` `then` was, in its largest unit: `2m`.
@@ -2185,22 +1996,16 @@ impl Panel {
 
     /// The path of folder line `row`.
     fn dir_path(row: Row, items: &[RepoItem]) -> Option<&str> {
-        let Row::Dir { k, c, to, .. } = row else {
+        let Row::Dir { k, .. } = row else {
             return None;
         };
-        Some(path_parts(&items[k].status.changes[c].path, 0, to))
+        file_tree::dir_path(row, &items[k].status.changes)
     }
 
     /// Whether `row`, a folder's line, shows its files; true of any other.
     fn dir_open(&self, row: Row, items: &[RepoItem]) -> bool {
-        if self.folded_dirs.is_empty() {
-            return true;
-        }
         match (Panel::dir_path(row, items), row.item()) {
-            (Some(path), Some(k)) => {
-                let key = (items[k].root.clone(), path.to_owned());
-                !self.folded_dirs.contains(&key)
-            }
+            (Some(path), Some(k)) => self.folded_dirs.open(&items[k].root, path),
             _ => true,
         }
     }
@@ -2210,19 +2015,13 @@ impl Panel {
         let (Some(path), Some(k)) = (Panel::dir_path(row, items), row.item()) else {
             return;
         };
-        let key = (items[k].root.clone(), path.to_owned());
-        if open {
-            self.folded_dirs.remove(&key);
-        } else {
-            self.folded_dirs.insert(key);
-        }
+        self.folded_dirs.set_open(&items[k].root, path, open);
     }
 
     /// Unfold the folders the file at `path` of the repository at `root`
     /// is in.
     fn reveal(&mut self, root: &Path, path: &str) {
-        self.folded_dirs
-            .retain(|(r, dir)| !(r == root && in_dir(path, dir)));
+        self.folded_dirs.reveal(root, path);
     }
 
     /// The line over line `at` of `rows`: its folder's, or its
@@ -2476,8 +2275,7 @@ impl Panel {
                 for (k, item) in items.iter().enumerate() {
                     for row in file_rows(k, &item.status.changes, self.grouping) {
                         if let Some(path) = Panel::dir_path(row, items) {
-                            self.folded_dirs
-                                .insert((item.root.clone(), path.to_owned()));
+                            self.folded_dirs.set_open(&item.root, path, false);
                         }
                     }
                 }
@@ -5417,6 +5215,7 @@ impl Panel {
             tree_share: ctx.tree_share,
             grouping: self.grouping,
             diff_only: false,
+            diff_tree: false,
             flat: false,
             detail_share: 1.0,
             modes: None,
@@ -9566,7 +9365,7 @@ mod tests {
             .map(|c| added(&c.path, 'M', &["x"]))
             .collect();
         panel.set_diffs(root("app"), wanted[0].2, files, &ctx);
-        panel.folded_dirs.insert((root("app"), "src".into()));
+        panel.folded_dirs.set_open(&root("app"), "src", false);
         let r = panel
             .diff
             .header_row(&root("app"), Some("src/main.rs"))
@@ -9576,7 +9375,7 @@ mod tests {
             panel.selected,
             Some(Selected::File(root("app"), "src/main.rs".into()))
         );
-        assert!(panel.folded_dirs.is_empty());
+        assert_eq!(panel.folded_dirs, Folds::default());
     }
 
     #[test]

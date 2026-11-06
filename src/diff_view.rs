@@ -2266,7 +2266,23 @@ impl DiffView {
 
     /// Scroll the diff to `place`.
     pub fn show(&mut self, place: Place) {
-        let head = match place {
+        if let Some(head) = self.head_of(place) {
+            self.scroll.jump(head as f64);
+        }
+    }
+
+    /// Go to `place` as `show` does, the cursor on its header: what the next
+    /// key acts on is what shows.
+    pub fn show_with_cursor(&mut self, place: Place) {
+        if let Some(head) = self.head_of(place) {
+            self.scroll.jump(head as f64);
+            self.set_cursor(head, None);
+        }
+    }
+
+    /// The row `place`'s header is on.
+    fn head_of(&self, place: Place) -> Option<usize> {
+        match place {
             Place::Section(root) => self.header_row(root, None),
             Place::File(root, path) => self
                 .header_row(root, Some(path))
@@ -2282,9 +2298,6 @@ impl DiffView {
                     _ => false,
                 })
                 .or_else(|| self.header_row(root, None)),
-        };
-        if let Some(head) = head {
-            self.scroll.jump(head as f64);
         }
     }
 
@@ -3238,6 +3251,14 @@ impl DiffView {
         self.editing = None;
         self.cursor = None;
         self.rebuild(sections);
+    }
+
+    /// Where the cursor went since the host last asked, and whether the
+    /// diff took the keyboard: for a host following only those, the rest of
+    /// the signals left for `take_signals`.
+    pub fn take_followed(&mut self) -> (Option<Moved>, bool) {
+        let focus = std::mem::take(&mut self.signals.focus);
+        (self.signals.moved.take(), focus)
     }
 
     /// What the host follows since it last took them.

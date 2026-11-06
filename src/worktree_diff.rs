@@ -34,7 +34,7 @@ use std::{
 use smithay::input::keyboard::{Keysym, ModifiersState};
 
 use crate::{
-    chrome::{Density, DetailView, Hint, ReposButton, ReposHit, SheetView},
+    chrome::{Density, DetailView, Hint, ReposButton, ReposHit, SheetView, TreeTool},
     diff::FileDiff,
     diff_view::{self, CheckOf, DiffView, Keys, NoteOf, Outcome, Section},
     doc_review::DocFile,
@@ -43,10 +43,11 @@ use crate::{
     feature::review_import::Decision,
     feature::{Stage, Standing},
     feature_diff::{FeatureOf, Role},
+    file_tree::{Asked, FileTree},
     git::Change,
     git_ops::Since,
     md_preview::PREVIEW_KEY,
-    repos::{diff_help_lines, help_title, key_name, scroll_lines, sheet_step},
+    repos::{Grouping, diff_help_lines, help_title, key_name, scroll_lines, sheet_step},
     review::Review,
     scroll::Motion,
 };
@@ -94,6 +95,9 @@ pub struct WorktreeDiff {
     /// A feature's code review instead: its changes over every repository
     /// it touched, read again with every Git status read, not edited.
     pub feature: Option<FeatureOf>,
+    /// A feature's code review's list of its files, beside the diff when
+    /// there is room for it (`Env::tree_share`).
+    pub tree: Option<FileTree>,
 }
 
 /// The feature stage's file a diff shows for review
@@ -217,6 +221,10 @@ pub struct Env {
     pub density: Density,
     /// How many lines a sheet shows (`chrome::repos_sheet_rows`).
     pub sheet_rows: usize,
+    /// How many lines of a file list fit (`chrome::diff_tree_page`).
+    pub tree_page: usize,
+    /// A file list's share of the width: none, no list.
+    pub tree_share: f64,
 }
 
 /// What a key or a click asked for.
@@ -245,6 +253,14 @@ pub enum Done {
     AddComment,
     /// A feature's diff: show the fix plan waiting for the user.
     ReviewFixPlan,
+    /// The files are listed this way now, for every list of them.
+    Grouping(Grouping),
+    /// A feature's diff: tick these files of the repository at `root` viewed,
+    /// or untick them (a folder's or a repository's checkbox).
+    TickFiles {
+        root: PathBuf,
+        paths: Vec<String>,
+    },
 }
 
 impl WorktreeDiff {
@@ -319,7 +335,185 @@ impl WorktreeDiff {
         if self.closed() {
             view.summary_tone = crate::chrome::Tone::Success;
         }
+        if let (Some(tree), Some(fe), true) = (&self.tree, &self.feature, env.tree_share > 0.0) {
+            view.diff_tree = true;
+            view.tree_share = env.tree_share;
+            view.empty = fe.empty(self.read).into();
+            let check = |root: &Path, path: &str| fe.check(root, path);
+            tree.fill(&mut view, &fe.sections(), &self.diff, &check, env.tree_page);
+        }
         view
+    }
+
+    /// The file list, if it shows at `env`.
+    fn tree_shows(&self, env: Env) -> bool {
+        self.tree.is_some() && self.feature.is_some() && env.tree_share > 0.0
+    }
+
+    /// Follow what the diff did: where its cursor went shows in the file list,
+    /// and it took the keyboard from the list.
+    pub fn follow_diff(&mut self, env: Env) {
+        let (moved, focus) = self.diff.take_followed();
+        let (Some(tree), Some(fe)) = (self.tree.as_mut(), self.feature.as_ref()) else {
+            return;
+        };
+        if focus {
+            tree.focused = false;
+        }
+        if let Some(moved) = moved {
+            tree.follow(moved, &fe.sections(), env.tree_page);
+        }
+    }
+
+    /// The files listed by `grouping`, and the diff in that order.
+    pub fn set_grouping(&mut self, grouping: Grouping, env: Env) {
+        let (Some(tree), Some(fe)) = (self.tree.as_mut(), self.feature.as_ref()) else {
+            return;
+        };
+        if tree.grouping == grouping {
+            return;
+        }
+        let sections = fe.sections();
+        tree.set_grouping(grouping, &sections, env.tree_page);
+        for section in &sections {
+            let rank = tree.rank(section.changes);
+            let of = |path: &str| rank.get(path).copied().unwrap_or(usize::MAX);
+            self.diff.order_files(section.root, of);
+        }
+        self.diff.rebuild(&sections);
+    }
+
+    /// The file list's toolbar pressed, as its keys press it.
+    fn tree_tool(&mut self, tool: TreeTool, env: Env) -> Option<Done> {
+        let grouping = match tool {
+            TreeTool::List => Grouping::List,
+            TreeTool::Folders => Grouping::Folders,
+            TreeTool::Expand | TreeTool::Collapse => {
+                let (tree, fe) = (self.tree.as_mut()?, self.feature.as_ref()?);
+                let open = tool == TreeTool::Expand;
+                tree.fold_all(open, &fe.sections(), env.tree_page);
+                return None;
+            }
+        };
+        if self.tree.as_ref()?.grouping == grouping {
+            return None;
+        }
+        self.set_grouping(grouping, env);
+        Some(Done::Grouping(grouping))
+    }
+
+    /// What the file list asked: the diff goes to its line, or a file is
+    /// ticked as its header's checkbox ticks it.
+    fn tree_asked(&mut self, asked: Option<Asked>) -> Option<Done> {
+        let tree = self.tree.as_mut()?;
+        match asked? {
+            Asked::Show => {
+                if let Some(place) = tree.place() {
+                    self.diff.show_with_cursor(place);
+                }
+                None
+            }
+            Asked::ToDiff => {
+                tree.focused = false;
+                if let Some(place) = tree.place() {
+                    self.diff.show_with_cursor(place);
+                }
+                None
+            }
+            Asked::Tick { root, mut paths } if paths.len() == 1 => {
+                let path = paths.pop()?;
+                Some(Done::Diff(Outcome::Toggle { root, path }))
+            }
+            Asked::Tick { root, paths } => Some(Done::TickFiles { root, paths }),
+        }
+    }
+
+    /// A key for the file list, unless the diff is typing: Tab goes between
+    /// it and the diff, and its toolbar's keys work from either. Whether it
+    /// took the key, and what that asks.
+    fn tree_key(&mut self, mods: &ModifiersState, sym: Keysym, env: Env) -> Option<Option<Done>> {
+        if !self.tree_shows(env) {
+            return None;
+        }
+        let alt = mods.alt && !(mods.ctrl || mods.shift || mods.logo);
+        match sym {
+            Keysym::Tab | Keysym::ISO_Left_Tab if !(mods.ctrl || mods.alt || mods.logo) => {
+                let tree = self.tree.as_mut()?;
+                tree.focused = !tree.focused;
+                return Some(None);
+            }
+            Keysym::f | Keysym::F if alt => {
+                let tool = match self.tree.as_ref()?.grouping {
+                    Grouping::List => TreeTool::Folders,
+                    Grouping::Folders => TreeTool::List,
+                };
+                return Some(self.tree_tool(tool, env));
+            }
+            Keysym::Left | Keysym::KP_Left if alt => {
+                return Some(self.tree_tool(TreeTool::Collapse, env));
+            }
+            Keysym::Right | Keysym::KP_Right if alt => {
+                return Some(self.tree_tool(TreeTool::Expand, env));
+            }
+            _ => {}
+        }
+        let (tree, fe) = (self.tree.as_mut()?, self.feature.as_ref()?);
+        if !tree.focused {
+            return None;
+        }
+        let asked = tree.key(mods, sym, &fe.sections(), env.tree_page)?;
+        Some(self.tree_asked(asked))
+    }
+
+    /// A click on the file list: whether it was, and what that asks.
+    fn tree_click(&mut self, hit: ReposHit, env: Env) -> Option<Option<Done>> {
+        if !self.tree_shows(env) {
+            return None;
+        }
+        if let ReposHit::Tool(tool) = hit {
+            return Some(self.tree_tool(tool, env));
+        }
+        let page = env.tree_page;
+        let (tree, fe) = (self.tree.as_mut()?, self.feature.as_ref()?);
+        let sections = fe.sections();
+        let asked = match hit {
+            ReposHit::Line(i) => tree.press_line(i, &sections, page),
+            ReposHit::Check(i) => tree.press_check(i, &sections, page),
+            ReposHit::Expander(i) => {
+                tree.press_expander(i, &sections, page);
+                None
+            }
+            _ => return None,
+        };
+        Some(self.tree_asked(asked))
+    }
+
+    /// The file on line `i` of the file list opened in Zed, as a double click
+    /// does: a folder's or a repository's line opens nothing.
+    pub fn open_tree_line(&mut self, i: usize, env: Env) -> Option<Done> {
+        let (tree, fe) = (self.tree.as_ref()?, self.feature.as_ref()?);
+        let (root, path) = tree.file_at(i, &fe.sections(), env.tree_page)?;
+        Some(Done::Diff(Outcome::OpenInZed {
+            root,
+            paths: vec![path],
+            at: None,
+        }))
+    }
+
+    /// The file list moved by `motion` at `now`.
+    pub fn scroll_tree(&mut self, motion: Motion, now: Instant, env: Env) {
+        if let (Some(tree), Some(fe)) = (self.tree.as_mut(), self.feature.as_ref()) {
+            let bounds = tree.bounds(&fe.sections(), env.tree_page, env.density);
+            tree.scroll.apply(motion, now, bounds);
+        }
+    }
+
+    /// Stand the file list at line `pos`, as its thumb held there puts it.
+    pub fn stand_tree_at(&mut self, pos: f64, env: Env) {
+        if let (Some(tree), Some(fe)) = (self.tree.as_mut(), self.feature.as_ref()) {
+            let bounds = tree.bounds(&fe.sections(), env.tree_page, env.density);
+            tree.scroll.jump(pos.clamp(0.0, bounds.max.max(0.0)));
+        }
     }
 
     /// The file under review read again (`Err`: why it couldn't be): held
@@ -625,7 +819,23 @@ impl WorktreeDiff {
                 ("Shift+C", "in the review, comment on the whole file"),
             ],
         };
-        let own = own.iter().map(|(key, what)| {
+        let list: &[(&str, &str)] = match self.tree.is_some() {
+            true => &[
+                ("Tab", "go between the file list and the diff"),
+                (
+                    "Space",
+                    "in the file list, mark the line's files viewed, or not",
+                ),
+                (
+                    "Enter",
+                    "in the file list, fold the line, or go to the file's diff",
+                ),
+                ("Alt+F", "list the files flat, or by folder"),
+                ("Alt+Left / Right", "fold or unfold the whole file list"),
+            ],
+            false => &[],
+        };
+        let own = own.iter().chain(list).map(|(key, what)| {
             (
                 key.to_string(),
                 what.to_string(),
@@ -653,9 +863,11 @@ impl WorktreeDiff {
             since,
             diff,
             feature,
+            tree,
             ..
         } = self;
         let feature = feature.as_ref();
+        let tree = tree.as_ref().filter(|_| env.tree_share > 0.0);
         let sections = sections(root, label, branch.as_deref(), since, feature);
         let check =
             |root: &Path, path: &str| feature.map(|f| f.check(root, path)).unwrap_or_default();
@@ -668,6 +880,12 @@ impl WorktreeDiff {
         ctx.no_edits = no_edits;
         (ctx.check, ctx.note) = marks;
         ctx.count_sections = feature.is_some_and(|f| f.repos.len() > 1);
+        if let Some(tree) = tree {
+            ctx.selected = tree.selected_file();
+            if tree.focused {
+                ctx.keys = Keys::Other;
+            }
+        }
         f(diff, &ctx)
     }
 
@@ -687,6 +905,12 @@ impl WorktreeDiff {
         ctx.no_edits = self.no_edits();
         (ctx.check, ctx.note) = marks;
         ctx.count_sections = feature.is_some_and(|f| f.repos.len() > 1);
+        if let Some(tree) = self.tree.as_ref().filter(|_| env.tree_share > 0.0) {
+            ctx.selected = tree.selected_file();
+            if tree.focused {
+                ctx.keys = Keys::Other;
+            }
+        }
         f(&ctx)
     }
 
@@ -988,6 +1212,9 @@ impl WorktreeDiff {
             let found = self.with_diff(env, |diff, ctx| diff.jump_unchecked(by, ctx));
             return (!found).then_some(Done::Diff(Outcome::Notice(ALL_VIEWED)));
         }
+        if !typing && let Some(done) = self.tree_key(mods, sym, env) {
+            return done;
+        }
         let outcome = self.with_diff(env, |diff, ctx| diff.key(mods, sym, typed, ctx));
         let done = match outcome {
             Some(outcome) => self.doc_outcome(outcome).map(Done::Diff),
@@ -1105,6 +1332,9 @@ impl WorktreeDiff {
                 self.sheet_press(button, env);
             }
             return None;
+        }
+        if let Some(done) = self.tree_click(hit, env) {
+            return done;
         }
         if self.feature.is_some() {
             match hit {
@@ -1259,7 +1489,14 @@ impl WorktreeDiff {
 
     /// Moved on to `now`; whether it still moves.
     pub fn scroll_tick(&mut self, now: Instant, env: Env) -> bool {
-        self.with_diff(env, |diff, ctx| diff.scroll_tick(now, ctx))
+        let mut moving = self.with_diff(env, |diff, ctx| diff.scroll_tick(now, ctx));
+        if let (Some(tree), Some(fe)) = (self.tree.as_mut(), self.feature.as_ref())
+            && tree.scroll.moving(now)
+        {
+            let bounds = tree.bounds(&fe.sections(), env.tree_page, env.density);
+            moving |= tree.scroll.tick(now, bounds);
+        }
+        moving
     }
 
     /// Stand at row `pos`, as the scrollbar's thumb held there puts it.
@@ -1269,7 +1506,7 @@ impl WorktreeDiff {
 
     /// Whether it moves on its own or under the fingers at `now`.
     pub fn scrolling(&self, now: Instant) -> bool {
-        self.diff.scroll.moving(now)
+        self.diff.scroll.moving(now) || self.tree.as_ref().is_some_and(|t| t.scroll.moving(now))
     }
 
     /// Why the last key or click did nothing, if it says; and what was
@@ -1370,11 +1607,24 @@ impl crate::Gerdr {
             return self.doc_env(tab.mode);
         }
         let size = self.repos_rect();
+        let tree_share = self.review_tree_share(size);
         Env {
             page: crate::chrome::diff_only_page(size, self.density),
-            cols: crate::chrome::diff_only_cols(size),
+            cols: crate::chrome::diff_tree_cols(size, tree_share),
             density: self.density,
             sheet_rows: crate::chrome::repos_sheet_rows(size, true),
+            tree_page: crate::chrome::diff_tree_page(size, self.density),
+            tree_share,
+        }
+    }
+
+    /// The share of `area` the file list of the diff on show takes: none
+    /// without one, or with too little room for it.
+    pub(crate) fn review_tree_share(&self, area: crate::chrome::Rect) -> f64 {
+        let list = self.wd().is_some_and(|wd| wd.tree.is_some());
+        match list && area.size.w >= crate::chrome::REVIEW_TREE_MIN_PANEL {
+            true => (self.repos.review_tree_share).unwrap_or(crate::chrome::REVIEW_TREE_SHARE),
+            false => 0.0,
         }
     }
 
@@ -1619,6 +1869,10 @@ impl crate::Gerdr {
     /// panel asks it; why it did nothing said briefly.
     fn worktree_done(&mut self, done: Option<Done>) -> Option<crate::repos::Outcome> {
         self.worktree_save_review();
+        let env = self.worktree_env();
+        if let Some(wd) = self.wd_mut() {
+            wd.follow_diff(env);
+        }
         let Taken {
             error,
             decided,
@@ -1656,6 +1910,11 @@ impl crate::Gerdr {
                 self.feature_toggle(&root, &path);
                 None
             }
+            Done::TickFiles { root, paths } => {
+                self.feature_toggle_many(&root, &paths);
+                None
+            }
+            Done::Grouping(grouping) => Some(crate::repos::Outcome::Grouping(grouping)),
             Done::Approve if feature => {
                 self.feature_approve();
                 None
@@ -1782,6 +2041,11 @@ impl crate::Gerdr {
         let done = match (hit, shift, double) {
             (ReposHit::Button(button), ..) => wd.press(button, env),
             (ReposHit::DiffRow(i), _, _) if ctrl => wd.goto_row(i, env),
+            // Twice on a file of the list, it opens in Zed.
+            (ReposHit::Line(i), _, true) => {
+                wd.click(hit, env);
+                wd.open_tree_line(i, env)
+            }
             (ReposHit::DiffRow(i), true, false) => {
                 wd.extend_row(i, env);
                 drags = wd.drags_rows(env);
@@ -1821,8 +2085,16 @@ impl crate::Gerdr {
     pub(crate) fn worktree_diff_scroll(&mut self, motion: Motion) {
         let now = Instant::now();
         let env = self.worktree_env();
+        let pos = self.seat.get_pointer().map(|p| p.current_location());
+        let over_tree = (self.repos_view())
+            .map(|view| crate::chrome::repos_layout(&view, self.repos_rect()))
+            .zip(pos)
+            .is_some_and(|(layout, pos)| layout.tree.to_f64().contains(pos));
         if let Some(wd) = self.wd_mut() {
-            wd.scroll(motion, now, env);
+            match over_tree {
+                true => wd.scroll_tree(motion, now, env),
+                false => wd.scroll(motion, now, env),
+            }
             if wd.scrolling(now) {
                 wd.hover = None;
             }
@@ -1831,10 +2103,13 @@ impl crate::Gerdr {
 
     /// Stand the worktree's diff at row `pos`, as its scrollbar's thumb
     /// held there puts it.
-    pub(crate) fn worktree_diff_scroll_to(&mut self, pos: f64) {
+    pub(crate) fn worktree_diff_scroll_to(&mut self, pos: f64, detail: bool) {
         let env = self.worktree_env();
         if let Some(wd) = self.wd_mut() {
-            wd.stand_at(pos, env);
+            match detail {
+                true => wd.stand_at(pos, env),
+                false => wd.stand_tree_at(pos, env),
+            }
         }
     }
 
@@ -1868,6 +2143,8 @@ mod tests {
         page: 20,
         cols: 60,
         density: Density::Comfortable,
+        tree_page: 20,
+        tree_share: 0.25,
     };
 
     fn none() -> ModifiersState {
