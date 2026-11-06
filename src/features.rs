@@ -4692,21 +4692,21 @@ impl Gerdr {
     /// shown, each unless a read of it runs. A check that ended takes its
     /// tail along: its card has what it printed by then.
     fn check_tails_tick(&mut self) {
-        let panes: Vec<String> = (self.panel_feature().zip(self.features.panel.as_ref()))
+        let panes: Vec<(String, bool)> = (self.panel_feature().zip(self.features.panel.as_ref()))
             .filter(|(feature, panel)| panel.page_stage(feature) == Stage::Verify && !panel.keys)
             .map(|(feature, _)| {
                 (check_rows(feature, Stage::Verify).iter())
                     .filter(|row| row.outcome.is_none() && checks_running(feature))
-                    .filter_map(|row| row.pane.clone())
-                    .filter(|pane| self.herdr_pane_place(pane).is_some())
+                    .filter_map(|row| Some((row.pane.clone()?, row.began.is_some())))
+                    .filter(|(pane, _)| self.herdr_pane_place(pane).is_some())
                     .collect()
             })
             .unwrap_or_default();
-        (self.features.check_tails).retain(|pane, _| panes.contains(pane));
+        (self.features.check_tails).retain(|pane, _| panes.iter().any(|(p, _)| p == pane));
         let Some(socket) = self.herdr.as_ref().map(|h| h.socket().to_path_buf()) else {
             return;
         };
-        for pane in panes {
+        for (pane, began) in panes {
             let tail = (self.features.check_tails.entry(pane.clone())).or_default();
             if tail.reading {
                 continue;
@@ -4715,7 +4715,7 @@ impl Gerdr {
             tail.reading = true;
             let socket = socket.clone();
             self.feature_work(None, move |_| Done::CheckTail {
-                lines: feature::page::read_check_tail(socket, &pane),
+                lines: feature::page::read_check_tail(socket, &pane, began),
                 pane,
             });
         }

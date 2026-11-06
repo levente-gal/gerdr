@@ -554,12 +554,22 @@ pub fn script(dir: &Path, i: usize, check: &CheckRun, slug: &str) -> String {
 
 /// The checks' terminals, as `watch` needs them.
 pub trait Panes {
-    /// Whether pane `pane` is gone.
+    /// Whether pane `pane` is gone. A server too busy to answer doesn't say
+    /// that: its terminals go on.
     fn gone(&mut self, pane: &str) -> bool;
     /// What pane `pane` shows, its last lines, those it wrapped joined.
-    fn text(&mut self, pane: &str) -> Option<String>;
+    fn text(&mut self, pane: &str) -> Result<String, Unread>;
     /// Press Ctrl+C in pane `pane`.
     fn interrupt(&mut self, pane: &str);
+}
+
+/// Why a terminal's text wasn't read, and what the error said.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Unread {
+    /// The terminal is gone, and its text with it.
+    Gone(String),
+    /// The server didn't answer in time: it may yet.
+    Busy(String),
 }
 
 /// A check `watch` waits for.
@@ -775,24 +785,39 @@ fn took(from: &Path, to: &Path) -> u64 {
 pub const READ_LINES: usize = 1000;
 /// How many times a terminal is read for a check's last line, which it may
 /// not have drawn yet.
-const READ_TRIES: usize = 5;
+const READ_TRIES: usize = 20;
+/// How long a server that doesn't answer is asked for the text of a check that
+/// ended: a machine under load stalls it for a minute or more, and the text is
+/// all that says what the check found.
+const READ_PATIENCE: Duration = Duration::from_secs(60);
 
 impl Outcome {
     /// Keep the last lines of what the check in `pane` printed, and when the
     /// code failed it the lines that say why.
     fn keep_output(&mut self, panes: &mut dyn Panes, pane: &str) {
         let mut text = String::new();
-        for try_ in 0..READ_TRIES {
-            if try_ > 0 {
-                std::thread::sleep(Duration::from_millis(100));
+        let from = Instant::now();
+        let mut tries = 0;
+        loop {
+            match panes.text(pane) {
+                Ok(read) => {
+                    text = read;
+                    tries += 1;
+                    if ended(&text) || tries >= READ_TRIES {
+                        break;
+                    }
+                }
+                Err(Unread::Busy(why)) if from.elapsed() >= READ_PATIENCE => {
+                    tracing::warn!("reading the check's pane {pane}, gave up: {why}");
+                    break;
+                }
+                Err(Unread::Busy(_)) => {}
+                Err(Unread::Gone(why)) => {
+                    tracing::warn!("reading the check's pane {pane}: {why}");
+                    break;
+                }
             }
-            let Some(read) = panes.text(pane) else {
-                break;
-            };
-            text = read;
-            if text.contains(END) {
-                break;
-            }
+            std::thread::sleep(Duration::from_millis(100));
         }
         let output = output_of(&text);
         self.tail = tail(output.as_bytes(), false);
@@ -805,14 +830,18 @@ impl Outcome {
 /// How many lines a terminal is asked for to preview it.
 pub const PREVIEW_READ: usize = 200;
 
+/// Whether the last check in a terminal showing `text` has ended there.
+fn ended(text: &str) -> bool {
+    let head = text.rfind(HEAD);
+    text.rfind(END).is_some_and(|end| Some(end) > head)
+}
+
 /// What the card of a check running in a terminal showing `text` previews:
 /// the last lines it printed. Nothing while the terminal still shows what it
-/// did before the check started there. Output too long for one read has lost
-/// its start line, but isn't that.
-pub fn preview(text: &str) -> Vec<String> {
-    let head = text.rfind(HEAD);
-    let ended = text.rfind(END).is_some_and(|end| Some(end) > head);
-    if ended || (head.is_none() && text.lines().count() < PREVIEW_READ / 2) {
+/// did before the check started there. Once it `began`, output too long for
+/// one read has lost its start line, but isn't that.
+pub fn preview(text: &str, began: bool) -> Vec<String> {
+    if ended(text) || (!began && !text.contains(HEAD)) {
         return Vec::new();
     }
     last_lines(&tail(output_of(text).as_bytes(), false))
@@ -1229,8 +1258,10 @@ mod tests {
             self.closed.iter().any(|p| p == pane)
         }
 
-        fn text(&mut self, pane: &str) -> Option<String> {
-            std::fs::read_to_string(self.out.get(pane)?).ok()
+        fn text(&mut self, pane: &str) -> Result<String, Unread> {
+            let path = self.out.get(pane);
+            (path.and_then(|path| std::fs::read_to_string(path).ok()))
+                .ok_or(Unread::Gone("not there".into()))
         }
 
         fn interrupt(&mut self, pane: &str) {
@@ -1537,16 +1568,21 @@ mod tests {
     fn a_preview_is_of_what_the_check_prints_now() {
         let head = "\u{25b6} Check api: make";
         let end = "\u{25a0} Check passed";
-        // The shell hasn't started it: no start line in a short read.
-        assert!(preview("$ sh gerdr-check-0\n").is_empty());
+        // The shell hasn't started it: no start line, and it hasn't begun.
+        assert!(preview("$ sh gerdr-check-0\n", false).is_empty());
+        let old: String = (0..PREVIEW_READ).map(|i| format!("{i}\n")).collect();
+        assert!(preview(&old, false).is_empty());
         // What it did last time, in a terminal used again.
-        assert!(preview(&format!("{head}\nold\n{end}\n$ sh gerdr-check-0\n")).is_empty());
+        let again = format!("{head}\nold\n{end}\n$ sh gerdr-check-0\n");
+        assert!(preview(&again, false).is_empty());
+        assert!(preview(&again, true).is_empty());
         // Its last lines, without the start line; a redrawn line is one line.
         let text = format!("$ prompt\n{head}\n1\n\n2\n3\n4\n50%\r100%\n");
-        assert_eq!(preview(&text), ["2", "3", "4", "100%"]);
-        // So long that the read lost its start line.
-        let long: String = (0..PREVIEW_READ).map(|i| format!("{i}\n")).collect();
-        assert_eq!(preview(&long).len(), PREVIEW_LINES);
+        assert_eq!(preview(&text, false), ["2", "3", "4", "100%"]);
+        assert_eq!(preview(&text, true), ["2", "3", "4", "100%"]);
+        // So long that the read lost its start line. Long lines wrap, so the
+        // read's rows may hold only a few of them.
+        assert_eq!(preview("a\nb\nc\nd\ne\n", true), ["b", "c", "d", "e"]);
         assert_eq!(last_lines("a\tb\n\n"), ["a    b"]);
     }
 
@@ -1588,8 +1624,8 @@ mod tests {
             fn gone(&mut self, _: &str) -> bool {
                 false
             }
-            fn text(&mut self, _: &str) -> Option<String> {
-                Some(self.0.clone())
+            fn text(&mut self, _: &str) -> Result<String, Unread> {
+                Ok(self.0.clone())
             }
             fn interrupt(&mut self, _: &str) {}
         }
@@ -1616,6 +1652,75 @@ mod tests {
         stopped.keep_output(&mut panes, "p");
         assert!(stopped.excerpt.is_empty());
         assert_eq!(stopped.preview(), ["error: boom", "more", "last"]);
+    }
+
+    /// A terminal whose reads go through `reads`, in order, its last for good.
+    struct Reads {
+        reads: Vec<Result<String, Unread>>,
+        asked: usize,
+    }
+
+    impl Panes for Reads {
+        fn gone(&mut self, _: &str) -> bool {
+            false
+        }
+        fn text(&mut self, _: &str) -> Result<String, Unread> {
+            self.asked += 1;
+            let at = (self.asked - 1).min(self.reads.len() - 1);
+            self.reads[at].clone()
+        }
+        fn interrupt(&mut self, _: &str) {}
+    }
+
+    #[test]
+    fn a_busy_server_doesnt_lose_what_a_check_printed() {
+        let busy = || Err(Unread::Busy("timed out".into()));
+        let text = "\u{25b6} Check api: t\nboom\n\u{25a0} Check exited with 1\n".to_owned();
+        let mut panes = Reads {
+            reads: vec![busy(), busy(), Ok(text)],
+            asked: 0,
+        };
+        let mut failed = Outcome {
+            exit: Some(1),
+            ..Outcome::default()
+        };
+        failed.keep_output(&mut panes, "p");
+        assert_eq!(failed.tail, "boom");
+        assert_eq!(panes.asked, 3);
+    }
+
+    #[test]
+    fn a_read_that_lags_waits_for_the_end_line_of_this_run() {
+        let head = "\u{25b6} Check api: t";
+        let end = "\u{25a0} Check passed";
+        // The end line of the run before doesn't count.
+        let lags = format!("{head}\nold\n{end}\n{head}\nnew\n");
+        let done = format!("{lags}last\n{end}\n");
+        let mut panes = Reads {
+            reads: vec![Ok(lags), Ok(done)],
+            asked: 0,
+        };
+        let mut passed = Outcome {
+            exit: Some(0),
+            ..Outcome::default()
+        };
+        passed.keep_output(&mut panes, "p");
+        assert_eq!(passed.tail, "new\nlast");
+    }
+
+    #[test]
+    fn a_terminal_gone_isnt_read_again() {
+        let mut panes = Reads {
+            reads: vec![Err(Unread::Gone("pane not found".into()))],
+            asked: 0,
+        };
+        let mut stopped = Outcome {
+            interrupted: true,
+            ..Outcome::default()
+        };
+        stopped.keep_output(&mut panes, "p");
+        assert_eq!(stopped.tail, "");
+        assert_eq!(panes.asked, 1);
     }
 
     #[test]

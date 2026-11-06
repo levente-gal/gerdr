@@ -20,7 +20,7 @@ use crate::{
     Expected, Gerdr, Tab,
     feature::{
         Feature, Status, store,
-        verify::{self, Begun, CheckRun, Outcome, Scope, Turn, Waited},
+        verify::{self, Begun, CheckRun, Outcome, Scope, Turn, Unread, Waited},
     },
     features::{Busy, Done, Job},
     herdr::Herdr,
@@ -35,7 +35,7 @@ const TAB_LABEL: &str = "Checks";
 /// small to follow.
 const TAB_PANES: usize = 6;
 /// How many times in a row herdr must fail to know a pane before it counts
-/// as closed: a busy server isn't a closed terminal.
+/// as closed.
 const GONE_AFTER: u32 = 3;
 
 /// What a new tab of `n` terminals does to lay them out: for each one after
@@ -67,25 +67,43 @@ fn grid(n: usize) -> Vec<(usize, Dir, f64)> {
 struct HerdrPanes {
     herdr: Herdr,
     missed: HashMap<String, u32>,
+    /// The server last didn't answer: told to the log once.
+    busy: bool,
 }
 
 impl verify::Panes for HerdrPanes {
     fn gone(&mut self, pane: &str) -> bool {
-        let info = self.herdr.process_info(pane);
-        if prepare::step(&info) != prepare::Step::Drop {
+        let Err(err) = self.herdr.process_info(pane) else {
             self.missed.remove(pane);
+            self.busy = false;
+            return false;
+        };
+        // A machine under load stalls the server for a minute or more. Its
+        // terminals go on, and a check counted as closed gets killed.
+        if !self.herdr.pane_lost(&err) {
+            if !self.busy {
+                tracing::warn!("herdr didn't answer about the checks' pane {pane}: {err}");
+                self.busy = true;
+            }
             return false;
         }
         let missed = self.missed.entry(pane.to_owned()).or_default();
         *missed += 1;
-        *missed >= GONE_AFTER
+        if *missed < GONE_AFTER {
+            return false;
+        }
+        tracing::warn!("the checks' pane {pane} is gone: {err}");
+        true
     }
 
-    fn text(&mut self, pane: &str) -> Option<String> {
-        self.herdr
-            .pane_read(pane, "recent_unwrapped", verify::READ_LINES)
-            .inspect_err(|err| tracing::warn!("reading the checks' pane {pane}: {err}"))
-            .ok()
+    fn text(&mut self, pane: &str) -> Result<String, Unread> {
+        let read = self
+            .herdr
+            .pane_read(pane, "recent_unwrapped", verify::READ_LINES);
+        read.map_err(|err| match self.herdr.pane_lost(&err) {
+            true => Unread::Gone(err),
+            false => Unread::Busy(err),
+        })
     }
 
     fn interrupt(&mut self, pane: &str) {
@@ -430,6 +448,7 @@ impl Gerdr {
             let mut panes = HerdrPanes {
                 herdr: Herdr::on_socket(socket),
                 missed: HashMap::new(),
+                busy: false,
             };
             let title = feature.title.clone();
             let total = outcomes.len();
@@ -657,7 +676,77 @@ pub(crate) fn checks_running(feature: &Feature) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        io::{BufRead, BufReader, Write},
+        os::unix::net::UnixListener,
+    };
+
     use super::*;
+    use crate::feature::verify::Panes;
+
+    /// A server that gives each of `replies` to one request. `pane_lost` only
+    /// connects, and gets none.
+    fn server(name: &str, replies: Vec<&'static str>) -> PathBuf {
+        let socket = std::env::temp_dir().join(format!("gerdr-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_file(&socket);
+        let listener = UnixListener::bind(&socket).unwrap();
+        std::thread::spawn(move || {
+            let mut replies = replies.into_iter();
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let mut line = String::new();
+                BufReader::new(&stream).read_line(&mut line).unwrap();
+                if !line.is_empty()
+                    && let Some(reply) = replies.next()
+                {
+                    stream.write_all(reply.as_bytes()).unwrap();
+                }
+            }
+        });
+        socket
+    }
+
+    fn panes_on(socket: &Path) -> HerdrPanes {
+        HerdrPanes {
+            herdr: Herdr::on_socket(socket.to_path_buf()),
+            missed: HashMap::new(),
+            busy: false,
+        }
+    }
+
+    const NOT_FOUND: &str =
+        "{\"error\":{\"code\":\"pane_not_found\",\"message\":\"pane not found\"}}\n";
+
+    #[test]
+    fn only_the_servers_word_makes_a_terminal_closed() {
+        let socket = server("gone", vec![NOT_FOUND, NOT_FOUND, NOT_FOUND]);
+        let mut panes = panes_on(&socket);
+        assert!(!panes.gone("p"));
+        assert!(!panes.gone("p"));
+        assert!(panes.gone("p"));
+        let _ = std::fs::remove_file(&socket);
+    }
+
+    #[test]
+    fn a_server_with_trouble_answering_closes_no_terminal() {
+        let not_json = "not json\n";
+        let socket = server("stall", vec![not_json; 5]);
+        let mut panes = panes_on(&socket);
+        assert!((0..5).all(|_| !panes.gone("p")));
+        assert!(panes.missed.is_empty());
+        let _ = std::fs::remove_file(&socket);
+    }
+
+    #[test]
+    fn no_server_at_all_closes_its_terminals() {
+        let socket = std::env::temp_dir().join(format!("gerdr-none-{}", std::process::id()));
+        let _ = std::fs::remove_file(&socket);
+        let mut panes = panes_on(&socket);
+        assert!(!panes.gone("p"));
+        assert!(!panes.gone("p"));
+        assert!(panes.gone("p"));
+        assert!(matches!(panes.text("p"), Err(Unread::Gone(_))));
+    }
 
     /// The rows and columns the panes of `grid(n)` end in: it must be
     /// (nearly) square, with equal shares.
