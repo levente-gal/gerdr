@@ -4,6 +4,7 @@
 //! the test and copy the table it prints).
 
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Condvar, Mutex};
 use std::time::Instant;
 
 use super::{
@@ -980,16 +981,56 @@ const GOLDEN_OVERLAYS: [[u64; 11]; 4] = [
     ],
 ];
 
-/// Run `job` for every index below `count`, on every core, and give the
-/// results in index order. A `Painter` is not `Sync`, so each thread makes
-/// its own; the slow surfaces take most of the test run in a dev build.
+/// How many threads the tests may keep busy: `RUST_TEST_THREADS`, which
+/// `.cargo/config.toml` sets, else every core.
+fn test_threads() -> usize {
+    std::env::var("RUST_TEST_THREADS")
+        .ok()
+        .and_then(|n| n.parse().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()))
+}
+
+/// Paint threads at work now, in all the tests running together.
+static PAINTING: (Mutex<usize>, Condvar) = (Mutex::new(0), Condvar::new());
+
+/// A paint thread's turn: it waits until fewer than `limit` are at work,
+/// and gives the turn back when dropped, also on a panic.
+struct PaintTurn;
+
+impl PaintTurn {
+    fn take(limit: usize) -> Self {
+        let (painting, freed) = &PAINTING;
+        let mut painting = painting.lock().unwrap();
+        while *painting >= limit {
+            painting = freed.wait(painting).unwrap();
+        }
+        *painting += 1;
+        Self
+    }
+}
+
+impl Drop for PaintTurn {
+    fn drop(&mut self) {
+        let (painting, freed) = &PAINTING;
+        *painting.lock().unwrap() -= 1;
+        freed.notify_one();
+    }
+}
+
+/// Run `job` for every index below `count`, on `test_threads` threads, and
+/// give the results in index order. The limit holds across tests: without
+/// it, tests running together would each take that many, and fill every
+/// core. A `Painter` is not `Sync`, so each thread makes its own; the slow
+/// surfaces take most of the test run in a dev build.
 pub(super) fn fan_out<T: Send>(count: usize, job: impl Fn(&Painter, usize) -> T + Sync) -> Vec<T> {
     let next = AtomicUsize::new(0);
-    let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let limit = test_threads();
     let mut done: Vec<(usize, T)> = std::thread::scope(|scope| {
-        let workers: Vec<_> = (0..cores.min(count))
+        let workers: Vec<_> = (0..limit.min(count))
             .map(|_| {
                 scope.spawn(|| {
+                    let _turn = PaintTurn::take(limit);
                     let painter = Painter::new();
                     let mut done = Vec::new();
                     loop {
