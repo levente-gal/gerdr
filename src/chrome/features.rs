@@ -27,7 +27,7 @@ use super::{code_mark, eye, flask, magnifier, plan_review_mark, ship_arrow, spar
 use crate::text_field::Line;
 use crate::{
     agent_icons::AgentIcon,
-    feature::Stage,
+    feature::{Stage, page::Stat},
     md_blocks::{DocBlock, ItemMark},
 };
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
@@ -339,9 +339,9 @@ pub struct FeatureRepoRow {
     pub buttons: Vec<&'static str>,
     /// Whether it shows the button taking it out of the feature.
     pub remove: bool,
-    /// Lines added and removed since its base, uncommitted changes
-    /// included, once read (`git diff --numstat`).
-    pub stat: Option<(usize, usize)>,
+    /// Files changed and lines added and removed since its base,
+    /// uncommitted changes included, once read (`page::stat`).
+    pub stat: Option<Stat>,
 }
 
 /// How a line of the Ship check reads.
@@ -1473,9 +1473,8 @@ fn break_long(line: String, size: f32, width: i32) -> Vec<String> {
     lines
 }
 
-/// The room left between a repository row's name and its line stat,
-/// between the stat's two counts, and the least of the name the stat
-/// leaves showing.
+/// The room left between a repository row's name and its stat, between
+/// the stat's counts, and the least of the name the stat leaves showing.
 const STAT_GAP: i32 = 8;
 const STAT_SPACE: i32 = 5;
 const STAT_NAME_MIN: i32 = 40;
@@ -2136,17 +2135,27 @@ fn repo_stack(
     }
 }
 
-/// How wide a repository's lines changed are, or nothing for none.
-fn stat_width(stat: Option<(usize, usize)>) -> i32 {
-    let Some((added, removed)) = stat else {
+/// A repository's `stat` as words: its files, the lines added, the lines
+/// removed, each left out when 0.
+fn stat_parts(stat: Stat) -> [Option<String>; 3] {
+    let files = match stat.files {
+        1 => "1 file".to_owned(),
+        n => format!("{n} files"),
+    };
+    [
+        (stat.files > 0).then_some(files),
+        (stat.added > 0).then(|| format!("+{}", stat.added)),
+        (stat.removed > 0).then(|| format!("\u{2212}{}", stat.removed)),
+    ]
+}
+
+/// How wide a repository's stat is, or nothing for none.
+fn stat_width(stat: Option<Stat>) -> i32 {
+    let Some(stat) = stat else {
         return 0;
     };
-    let parts = [
-        (added > 0).then(|| format!("+{added}")),
-        (removed > 0).then(|| format!("\u{2212}{removed}")),
-    ];
-    let parts = parts.iter().flatten();
-    let widths = parts.map(|t| width_of(t, DETAIL_FONT_SIZE).ceil() as i32);
+    let parts = stat_parts(stat);
+    let widths = (parts.iter().flatten()).map(|t| width_of(t, DETAIL_FONT_SIZE).ceil() as i32);
     let widths: Vec<i32> = widths.collect();
     widths.iter().sum::<i32>() + STAT_SPACE * (widths.len() as i32 - 1).max(0)
 }
@@ -4689,27 +4698,22 @@ impl Painter {
         }
     }
 
-    /// A repository's `stat` as "+A −R" (added in the success
-    /// colour, removed in the error colour, a side that is 0 left out),
-    /// from the right of `rect` if it fits in it: where it starts (in
-    /// logical pixels), or `None` when nothing is drawn.
+    /// A repository's `stat` as "F files +A −R" (files muted, added in
+    /// the success colour, removed in the error colour, a count that is 0
+    /// left out), from the right of `rect` if it fits in it: where it
+    /// starts (in logical pixels), or `None` when nothing is drawn.
     fn repo_stat(
         &self,
         c: &mut Canvas,
-        stat: Option<(usize, usize)>,
+        stat: Option<Stat>,
         rect: Rect,
         scale: f64,
         p: &Palette,
     ) -> Option<i32> {
-        let (added, removed) = stat?;
-        let parts: Vec<(String, Rgb)> = [
-            (added, format!("+{added}"), p.success),
-            (removed, format!("\u{2212}{removed}"), p.error),
-        ]
-        .into_iter()
-        .filter(|(n, ..)| *n > 0)
-        .map(|(_, text, color)| (text, color))
-        .collect();
+        let parts: Vec<(String, Rgb)> = (stat_parts(stat?).into_iter())
+            .zip([p.muted, p.success, p.error])
+            .filter_map(|(text, color)| Some((text?, color)))
+            .collect();
         if parts.is_empty() {
             return None;
         }
@@ -6310,6 +6314,24 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A stat says only the counts it has, a lone file in the singular.
+    #[test]
+    fn the_stat_leaves_out_what_is_zero() {
+        let parts = |files, added, removed| {
+            let stat = Stat {
+                files,
+                added,
+                removed,
+            };
+            stat_parts(stat).into_iter().flatten().collect::<Vec<_>>()
+        };
+        assert_eq!(parts(3, 12, 4), ["3 files", "+12", "\u{2212}4"]);
+        assert_eq!(parts(1, 0, 0), ["1 file"]);
+        assert_eq!(parts(0, 0, 0), [""; 0]);
+        assert_eq!(stat_width(None), 0);
+        assert_eq!(stat_width(Some(Stat::default())), 0);
     }
 
     /// The line stat's colours read on the repositories' column, on a

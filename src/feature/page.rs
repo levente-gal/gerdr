@@ -2,7 +2,7 @@
 //! record, read off the UI thread: the stage files there, the blocks of
 //! those shown on their pages, and their milestones by name (with the
 //! probe, `ship::probe`), each touched
-//! repository's line stat (`git diff --numstat`, with the probe too), and
+//! repository's stat (files and lines changed, with the probe too), and
 //! the last lines of the current stage agent's pane (`tail`, every
 //! `TAIL_EVERY` while the tab shows).
 
@@ -156,12 +156,23 @@ pub fn numstat(out: &str) -> (usize, usize) {
     })
 }
 
-/// The lines touched repository `repo` adds and deletes against its base:
-/// its commits since it left the base, and its uncommitted changes.
-pub fn stat(repo: &Repo) -> Result<(usize, usize), String> {
+/// What a touched repository changes against its base.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Stat {
+    /// The files its code review lists: untracked ones too, which `added`
+    /// doesn't count, and a folder untracked whole as one.
+    pub files: usize,
+    pub added: usize,
+    pub removed: usize,
+}
+
+/// What touched repository `repo` changes against its base: its commits
+/// since it left the base, and its uncommitted changes.
+pub fn stat(repo: &Repo) -> Result<Stat, String> {
     let name = repo.key();
     let dir = &repo.worktree;
-    let range = format!("{}...HEAD", base_ref(repo));
+    let base = base_ref(repo);
+    let range = format!("{base}...HEAD");
     let flags = ["diff", "--numstat", "--no-ext-diff", "--no-textconv"];
     let read = |what: &str| {
         let args: Vec<&str> = flags.iter().copied().chain([what]).collect();
@@ -169,20 +180,26 @@ pub fn stat(repo: &Repo) -> Result<(usize, usize), String> {
     };
     let committed = numstat(&read(&range)?);
     let uncommitted = numstat(&read("HEAD")?);
-    Ok((committed.0 + uncommitted.0, committed.1 + uncommitted.1))
+    let since = crate::git_ops::changes_since(dir, Some(&base))
+        .map_err(|err| format!("{name}: couldn't count its files: {err}"))?;
+    Ok(Stat {
+        files: since.changes.len(),
+        added: committed.0 + uncommitted.0,
+        removed: committed.1 + uncommitted.1,
+    })
 }
 
-/// The line stat of each touched repository of `repos`, by `Repo::key`;
+/// The stat of each touched repository of `repos`, by `Repo::key`;
 /// one that can't be read is left out, so its row shows no stat rather
 /// than a wrong one. Only to debug: the probe runs every few seconds, and
 /// the same git failing fails the probe's reading too, which the Repos
 /// column and the log say once.
-pub fn stats<'a>(repos: impl Iterator<Item = &'a Repo>) -> BTreeMap<String, (usize, usize)> {
+pub fn stats<'a>(repos: impl Iterator<Item = &'a Repo>) -> BTreeMap<String, Stat> {
     repos
         .filter_map(|repo| match stat(repo) {
             Ok(stat) => Some((repo.key(), stat)),
             Err(why) => {
-                tracing::debug!("feature line stat: {why}");
+                tracing::debug!("feature stat: {why}");
                 None
             }
         })
@@ -241,6 +258,49 @@ mod tests {
         assert_eq!(numstat(out), (13, 1));
         assert_eq!(numstat(""), (0, 0));
         assert_eq!(numstat("garbage line\n"), (0, 0));
+    }
+
+    /// Files count what the code review lists, untracked ones too, once
+    /// each, while lines count only what git diffs.
+    #[test]
+    fn the_stat_counts_committed_uncommitted_and_untracked_files() {
+        let dir = std::env::temp_dir().join(format!("gerdr-page-stat-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let run = |args: &[&str]| git(&dir, args).unwrap();
+        run(&["init", "-q", "-b", "main"]);
+        run(&["config", "user.email", "t@t"]);
+        run(&["config", "user.name", "t"]);
+        std::fs::write(dir.join("a"), "one\n").unwrap();
+        std::fs::write(dir.join("b"), "one\n").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-qm", "base"]);
+        run(&["checkout", "-qb", "feature/x"]);
+        std::fs::write(dir.join("a"), "one\ntwo\n").unwrap();
+        run(&["commit", "-qam", "more"]);
+        // Committed and changed again: still one file.
+        std::fs::write(dir.join("a"), "one\ntwo\nthree\n").unwrap();
+        std::fs::write(dir.join("b"), "").unwrap();
+        std::fs::write(dir.join("new"), "untracked\n").unwrap();
+        let repo = Repo {
+            name: "x".into(),
+            main: dir.clone(),
+            base: "main".into(),
+            base_commit: String::new(),
+            worktree: dir.clone(),
+            touched: true,
+            branch: None,
+            project: None,
+        };
+        let stat = stat(&repo);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(
+            stat,
+            Ok(Stat {
+                files: 3,
+                added: 2,
+                removed: 1,
+            })
+        );
     }
 
     #[test]
