@@ -62,6 +62,7 @@ mod keyring;
 mod keys;
 mod launch;
 mod layout;
+mod machine_checks;
 mod machine_work;
 mod machines;
 mod manual_test;

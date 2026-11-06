@@ -6,6 +6,10 @@
 //!
 //! The panes go on without gerdr: a run still under way when gerdr starts is
 //! waited for again (`adopt_checks`), as what each check leaves is in files.
+//!
+//! Placed on another machine, a run's terminals are there, and opened from the
+//! thread that waits for them (`machine_checks`). They show here only on
+//! request (`show_check`), as an agent there does.
 
 use std::{
     collections::HashMap,
@@ -64,11 +68,24 @@ fn grid(n: usize) -> Vec<(usize, Dir, f64)> {
 }
 
 /// herdr, as `verify::watch` needs it, on a connection of its own.
-struct HerdrPanes {
-    herdr: Herdr,
-    missed: HashMap<String, u32>,
+pub(crate) struct HerdrPanes {
+    pub(crate) herdr: Herdr,
+    pub(crate) missed: HashMap<String, u32>,
     /// The server last didn't answer: told to the log once.
-    busy: bool,
+    pub(crate) busy: bool,
+    /// It is reached over a link to another machine: no connection only says
+    /// that machine is out of reach.
+    pub(crate) over_link: bool,
+}
+
+impl HerdrPanes {
+    /// Whether `err`, of a call about a pane, says that pane is gone.
+    fn lost(&self, err: &str) -> bool {
+        match self.over_link {
+            true => Herdr::says_no_pane(err),
+            false => self.herdr.pane_lost(err),
+        }
+    }
 }
 
 impl verify::Panes for HerdrPanes {
@@ -80,7 +97,7 @@ impl verify::Panes for HerdrPanes {
         };
         // A machine under load stalls the server for a minute or more. Its
         // terminals go on, and a check counted as closed gets killed.
-        if !self.herdr.pane_lost(&err) {
+        if !self.lost(&err) {
             if !self.busy {
                 tracing::warn!("herdr didn't answer about the checks' pane {pane}: {err}");
                 self.busy = true;
@@ -100,7 +117,7 @@ impl verify::Panes for HerdrPanes {
         let read = self
             .herdr
             .pane_read(pane, "recent_unwrapped", verify::READ_LINES);
-        read.map_err(|err| match self.herdr.pane_lost(&err) {
+        read.map_err(|err| match self.lost(&err) {
             true => Unread::Gone(err),
             false => Unread::Busy(err),
         })
@@ -115,7 +132,7 @@ impl verify::Panes for HerdrPanes {
 }
 
 /// The outcome of a check that couldn't even start, because `why`.
-fn not_started(row: &CheckRun, why: String) -> Outcome {
+pub(crate) fn not_started(row: &CheckRun, why: String) -> Outcome {
     Outcome {
         repo: row.repo.clone(),
         command: row.command.clone(),
@@ -160,14 +177,19 @@ impl Gerdr {
         let stands = rows.iter().filter(|row| row.outcome.is_some()).count();
         let total = rows.len();
         let dir = verify::run_dir(&store::dir(None, project, slug), n);
-        self.open_check_terminals(project, slug, feature, &mut rows, &dir);
+        // On another machine what opens them can't wait: it is told in the
+        // thread that waits for them (`checks_there`).
+        let there = run.machine.is_some();
+        if !there {
+            self.open_check_terminals(project, slug, feature, &mut rows, &dir);
+        }
         if let Some(f) = self.feature_mut(project, slug)
             && let Some(run) = f.verify.as_mut()
         {
             run.checks = rows;
             run.patch = Some(begun.patch).filter(|p| !p.is_empty());
             run.heads = begun.heads;
-            run.opened = true;
+            run.opened = !there;
         }
         if stands > 0 && !same {
             let why = "keep their results: their code didn't change";
@@ -434,12 +456,27 @@ impl Gerdr {
         let Some(run) = feature.verify.clone() else {
             return;
         };
-        let Some(socket) = self.herdr.as_ref().map(|h| h.socket().to_path_buf()) else {
-            return;
-        };
         let timeout = (self.projects.project(project))
             .and_then(|p| p.workflow.verify_timeout)
             .map_or(verify::TIMEOUT, std::time::Duration::from_secs);
+        let there = match &run.machine {
+            Some(id) => match self.machine_remote(id, &feature) {
+                Some(remote) => Some(remote),
+                // It goes on there: `adopt_checks` waits for it once it is back.
+                None if run.opened => {
+                    return tracing::info!(
+                        "feature {project}/{slug}: its checks' machine isn't up"
+                    );
+                }
+                // Gone before anything started there: nothing will start.
+                None => return self.checks_never_opened(project, slug, id, &feature, &run),
+            },
+            None => None,
+        };
+        let socket = self.herdr.as_ref().map(|h| h.socket().to_path_buf());
+        if there.is_none() && socket.is_none() {
+            return;
+        }
         let stops: Arc<Vec<AtomicBool>> =
             Arc::new(run.checks.iter().map(|_| AtomicBool::new(false)).collect());
         let key = (project.to_owned(), slug.to_owned());
@@ -447,9 +484,30 @@ impl Gerdr {
         let data = store::dir(None, project, slug);
         let (project, slug) = (project.to_owned(), slug.to_owned());
         self.feature_work(busy, move |tx| {
+            let mut run = run;
             let n = run.n;
             verify::prune_runs(&data, n);
             let dir = verify::run_dir(&data, n);
+            let begun = Begun {
+                patch: run.patch.clone().unwrap_or_default(),
+                heads: run.heads.clone(),
+            };
+            let at = (project.as_str(), slug.as_str(), n);
+            let mut ran_on = None;
+            if let Some(remote) = &there {
+                ran_on = Some(remote.name.clone());
+                if !run.opened
+                    && let Some(evidence) = remote.open_checks(&feature, at, &mut run, &begun, &tx)
+                {
+                    let evidence = crate::feature_build::write_evidence(&feature, &data, evidence);
+                    return Done::Verified {
+                        project,
+                        slug,
+                        n,
+                        evidence,
+                    };
+                }
+            }
             let mut outcomes: Vec<Option<Outcome>> =
                 run.checks.iter().map(|c| c.outcome.clone()).collect();
             let waited: Vec<Waited> = (run.checks.iter().enumerate())
@@ -458,60 +516,79 @@ impl Gerdr {
                     index,
                     repo: c.repo.clone(),
                     command: c.command.clone(),
-                    pane: c.pane.clone().unwrap_or_default(),
+                    pane: c
+                        .pane
+                        .as_deref()
+                        .map(|p| crate::machine_work::split_pane(p).map_or(p, |(_, bare)| bare))
+                        .unwrap_or_default()
+                        .to_owned(),
                 })
                 .collect();
             let mut panes = HerdrPanes {
-                herdr: Herdr::on_socket(socket),
+                herdr: Herdr::on_socket(match &there {
+                    Some(remote) => remote.socket.clone(),
+                    None => socket.unwrap_or_default(),
+                }),
                 missed: HashMap::new(),
                 busy: false,
+                over_link: there.is_some(),
             };
             let title = feature.title.clone();
             let total = outcomes.len();
             let turn_tx = tx.clone();
             let (turn_project, turn_slug) = (project.clone(), slug.clone());
-            verify::watch(
-                waited,
-                &dir,
-                timeout,
-                &stops,
-                &mut panes,
-                &mut |index, turn| {
-                    // As for `CheckEnded` below.
-                    let _ = turn_tx.send(Done::CheckTurn {
-                        project: turn_project.clone(),
-                        slug: turn_slug.clone(),
-                        n,
-                        index,
-                        turn,
-                    });
-                },
-                &mut |index, outcome| {
-                    outcomes[index] = Some(outcome.clone());
-                    let done = outcomes.iter().flatten().count();
-                    // They fail only once gerdr quits: nothing is left to
-                    // show them in, and a new gerdr reads what the files say.
-                    let _ = tx.send(Done::CheckEnded {
-                        project: project.clone(),
-                        slug: slug.clone(),
-                        n,
-                        index,
-                        outcome,
-                    });
-                    let _ = tx.send(Done::Progress {
-                        project: project.clone(),
-                        slug: slug.clone(),
-                        job: Job::Verify,
-                        what: format!("Verifying \u{201c}{title}\u{201d}: {done} of {total} done"),
-                    });
-                },
-            );
-            let begun = Begun {
-                patch: run.patch.clone().unwrap_or_default(),
-                heads: run.heads.clone(),
+            let mut turn = |index, turn: Turn| {
+                // As for `CheckEnded` below.
+                let _ = turn_tx.send(Done::CheckTurn {
+                    project: turn_project.clone(),
+                    slug: turn_slug.clone(),
+                    n,
+                    index,
+                    turn,
+                });
             };
+            let back = there.as_ref().map(|remote| remote.paths.back());
+            let mut ended = |index, mut outcome: Outcome| {
+                // What comes from there reads as it does here.
+                if let Some(back) = &back {
+                    outcome.tail = back.text(&outcome.tail);
+                    outcome.excerpt = (outcome.excerpt.iter()).map(|l| back.text(l)).collect();
+                }
+                outcomes[index] = Some(outcome.clone());
+                let done = outcomes.iter().flatten().count();
+                // They fail only once gerdr quits: nothing is left to
+                // show them in, and a new gerdr reads what the files say.
+                let _ = tx.send(Done::CheckEnded {
+                    project: project.clone(),
+                    slug: slug.clone(),
+                    n,
+                    index,
+                    outcome,
+                });
+                let _ = tx.send(Done::Progress {
+                    project: project.clone(),
+                    slug: slug.clone(),
+                    job: Job::Verify,
+                    what: format!("Verifying \u{201c}{title}\u{201d}: {done} of {total} done"),
+                });
+            };
+            match &there {
+                Some(remote) => {
+                    let mut files = remote.files(n);
+                    verify::watch_files(
+                        waited, &mut files, timeout, &stops, &mut panes, &mut turn, &mut ended,
+                    );
+                }
+                None => verify::watch(
+                    waited, &dir, timeout, &stops, &mut panes, &mut turn, &mut ended,
+                ),
+            }
             let ended = outcomes.into_iter().flatten().collect();
-            let evidence = verify::finish(&feature, &begun, run.started, ended);
+            let mut evidence = verify::finish(&feature, &begun, run.started, ended);
+            evidence.ran_on = ran_on;
+            if let Some(remote) = &there {
+                remote.after_checks(&feature, &begun, &mut evidence);
+            }
             let evidence = crate::feature_build::write_evidence(&feature, &data, evidence);
             Done::Verified {
                 project,
@@ -520,6 +597,67 @@ impl Gerdr {
                 evidence,
             }
         });
+    }
+
+    /// Machine `id` went before run `run` of feature `slug` could start there:
+    /// its checks end now, having said nothing of the code.
+    fn checks_never_opened(
+        &mut self,
+        project: &str,
+        slug: &str,
+        id: &str,
+        feature: &Feature,
+        run: &verify::VerifyRun,
+    ) {
+        let name = self.machine_name(id);
+        let why = format!("couldn't run on {name}: it can't be reached");
+        tracing::warn!("{project}/{slug}: {why}");
+        let (feature, run) = (feature.clone(), run.clone());
+        let data = store::dir(None, project, slug);
+        let (project, slug) = (project.to_owned(), slug.to_owned());
+        self.feature_work(None, move |_| {
+            let begun = Begun {
+                patch: run.patch.clone().unwrap_or_default(),
+                heads: run.heads.clone(),
+            };
+            let outcomes = (run.checks.iter())
+                .map(|row| (row.outcome.clone()).unwrap_or_else(|| not_started(row, why.clone())))
+                .collect();
+            let mut evidence = verify::finish(&feature, &begun, run.started, outcomes);
+            evidence.ran_on = Some(name);
+            Done::Verified {
+                project,
+                slug,
+                n: run.n,
+                evidence: crate::feature_build::write_evidence(&feature, &data, evidence),
+            }
+        });
+    }
+
+    /// The panes of run `n` of feature `slug`'s checks on another machine
+    /// opened, or why not: they can be shown, and a gerdr started later waits
+    /// for them.
+    pub(crate) fn checks_opened(
+        &mut self,
+        project: &str,
+        slug: &str,
+        n: u32,
+        panes: Vec<(usize, Result<String, String>)>,
+    ) {
+        let run = (self.feature_mut(project, slug))
+            .and_then(|f| f.verify.as_mut())
+            .filter(|v| v.n == n);
+        let Some(run) = run else {
+            return;
+        };
+        run.opened = true;
+        for (i, pane) in panes {
+            if let (Some(row), Ok(pane)) = (run.checks.get_mut(i), pane) {
+                row.pane = Some(pane);
+            }
+        }
+        self.save_feature(project, slug);
+        self.sync_check_cards();
     }
 
     /// Check `index` of run `n` of feature `slug` ended.
@@ -576,9 +714,7 @@ impl Gerdr {
     /// Wait again for the runs of the shown project's features that were
     /// under way when gerdr last stopped: their terminals went on.
     pub(crate) fn adopt_checks(&mut self, project: &str) {
-        if self.herdr.is_none() || self.herdr_tabs.is_empty() {
-            return;
-        }
+        let here = self.herdr.is_some() && !self.herdr_tabs.is_empty();
         let Some(all) = self.features.all.get(project) else {
             return;
         };
@@ -586,9 +722,14 @@ impl Gerdr {
             .iter()
             .filter(|f| f.status == Status::Open)
             .filter(|f| {
-                (f.verify.as_ref()).is_some_and(|v| v.opened && v.finished.is_none())
-                    && !(self.features.build.verifying)
-                        .contains(&(project.to_owned(), f.slug.clone()))
+                (f.verify.as_ref()).is_some_and(|v| {
+                    let place = match &v.machine {
+                        Some(id) => self.work_of(id).is_some(),
+                        None => here,
+                    };
+                    place && v.opened && v.finished.is_none()
+                }) && !(self.features.build.verifying)
+                    .contains(&(project.to_owned(), f.slug.clone()))
             })
             .map(|f| (f.slug.clone(), f.title.clone()))
             .collect();
@@ -613,7 +754,11 @@ impl Gerdr {
             .and_then(|f| f.verify.as_ref())
             .and_then(|v| v.checks.get(index))
             .and_then(|c| c.pane.clone());
-        if !pane.is_some_and(|pane| self.focus_test_run(&pane)) {
+        // On another machine what's wrong was said, in that machine's words.
+        let there = pane
+            .as_deref()
+            .is_some_and(|p| crate::machine_work::split_pane(p).is_some());
+        if !pane.is_some_and(|pane| self.focus_test_run(&pane)) && !there {
             self.show_warning("That check's terminal isn't open: Run again opens one".into());
         }
     }
@@ -725,6 +870,7 @@ mod tests {
             herdr: Herdr::on_socket(socket.to_path_buf()),
             missed: HashMap::new(),
             busy: false,
+            over_link: false,
         }
     }
 

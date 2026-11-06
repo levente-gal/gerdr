@@ -1,0 +1,5 @@
+# Tests keep 8 threads busy, so a run leaves the desktop and other sessions
+# the other cores. `chrome::golden::fan_out` reads this limit too. A value
+# already in the environment wins: RUST_TEST_THREADS=24 cargo test.
+[env]
+RUST_TEST_THREADS = "8"

@@ -133,6 +133,16 @@ impl Paths {
         self.map(path).to_string_lossy().into_owned()
     }
 
+    /// The way back: what reads there as it reads here. For what comes from
+    /// there to be read here, like a check's output.
+    pub fn back(&self) -> Self {
+        Self::of(
+            (self.pairs.iter())
+                .map(|(from, to)| (to.clone(), from.clone()))
+                .collect(),
+        )
+    }
+
     /// `text` with the paths it names as they read there: a prompt, a command
     /// or a line typed to an agent. Whole paths only, and in one pass, so a
     /// home inside the other home isn't translated twice.
@@ -408,6 +418,108 @@ pub fn status_script(places: &[Place]) -> String {
                 shell_quote(worktree)
             ));
         }
+    }
+    script
+}
+
+/// What a terminal there needs before a check or a setup command, in `sh`: the
+/// virtual environment of its folder, as a new terminal here gets. Nothing tells
+/// `sh` about one there otherwise, and a setup builds it in the worktree.
+pub const ACTIVATE: &str = "for v in .venv venv; do if [ -f \"$v/pyvenv.cfg\" ] && [ -f \"$v/bin/activate\" ]; then . \"$v/bin/activate\"; break; fi; done\n";
+
+/// The script saying what's in folder `dir`, of the files matching `patterns`:
+/// the clock there on the first line, then a line per file, its name, when it
+/// was written and its first line. No folder yet reads as no files.
+pub fn look_script(dir: &str, patterns: &str) -> String {
+    format!(
+        r#"date +%s
+cd {} 2>/dev/null || exit 0
+for f in {patterns}; do
+  [ -e "$f" ] || continue
+  printf '%s\t%s\t%s\n' "$f" "$(stat -c %Y "$f")" "$(head -n 1 "$f")"
+done
+"#,
+        shell_quote(dir),
+    )
+}
+
+/// What `look_script` said.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Look {
+    /// The clock there, in Unix seconds.
+    pub now: u64,
+    /// By file name: when it was written, and its first line.
+    pub files: BTreeMap<String, (u64, String)>,
+}
+
+impl Look {
+    /// `None` when `text` isn't what the script says: not to be taken for a
+    /// folder with nothing in it.
+    pub fn parse(text: &str) -> Option<Self> {
+        let mut lines = text.lines();
+        let now = lines.next()?.trim().parse().ok()?;
+        let mut files = BTreeMap::new();
+        for line in lines {
+            let mut parts = line.splitn(3, '\t');
+            let (Some(name), Some(at)) = (parts.next(), parts.next()) else {
+                continue;
+            };
+            let Ok(at) = at.parse() else {
+                continue;
+            };
+            let first = parts.next().unwrap_or_default().to_owned();
+            files.insert(name.to_owned(), (at, first));
+        }
+        Some(Self { now, files })
+    }
+
+    /// The number in file `name`, once it is there whole.
+    pub fn number(&self, name: &str) -> Option<i32> {
+        self.files.get(name)?.1.trim().parse().ok()
+    }
+
+    /// When file `name` was written.
+    pub fn written(&self, name: &str) -> Option<u64> {
+        self.files.get(name).map(|(at, _)| *at)
+    }
+}
+
+/// The script sending `signal` (a name, like `TERM`) to process group `group`
+/// there. One gone is fine: what is wanted of it is that it ended.
+pub fn kill_group_script(group: i32, signal: &str) -> String {
+    format!("kill -s {signal} -- -{group} 2>/dev/null\nexit 0\n")
+}
+
+/// `kill_group_script`, for the group process `pid` is in: its shell's job.
+/// Group 0 and 1 are never meant, whatever `ps` says.
+pub fn kill_group_of_script(pid: i32, signal: &str) -> String {
+    format!(
+        "g=$(ps -o pgid= -p {pid} 2>/dev/null | tr -d ' ')\nif [ -n \"$g\" ] && [ \"$g\" -gt 1 ]; then kill -s {signal} -- \"-$g\" 2>/dev/null; fi\nexit 0\n"
+    )
+}
+
+/// The script saying which of `items` worktree `worktree` there doesn't have, a
+/// line each.
+pub fn missing_script(worktree: &str, items: &[String]) -> String {
+    let mut script = format!("cd {} || exit 1\n", shell_quote(worktree));
+    for item in items {
+        let item = shell_quote(item);
+        script.push_str(&format!(
+            "if [ ! -e {item} ] && [ ! -L {item} ]; then printf '%s\\n' {item}; fi\n"
+        ));
+    }
+    script
+}
+
+/// The script taking from worktree `worktree` there what `items` git doesn't
+/// ignore on its branch, saying each on a line: it would show as a change.
+pub fn unignored_script(worktree: &str, items: &[String]) -> String {
+    let mut script = format!("cd {} || exit 1\n", shell_quote(worktree));
+    for item in items {
+        let item = shell_quote(item);
+        script.push_str(&format!(
+            "if [ -n \"$(git --literal-pathspecs status --porcelain -- {item})\" ]; then rm -rf -- {item}; printf '%s\\n' {item}; fi\n"
+        ));
     }
     script
 }
@@ -719,6 +831,60 @@ impl Reach {
         self.run_rsync("Couldn't copy the feature's files back", rsync, cancel)
     }
 
+    /// Copy file `there` here as it is there: a log, which only there grows.
+    pub fn pull_file(&self, local: &Path, there: &str, cancel: &AtomicBool) -> Result<(), Trouble> {
+        if let Some(parent) = local.parent()
+            && let Err(err) = std::fs::create_dir_all(parent)
+        {
+            return Err(Trouble::Work(format!(
+                "Couldn't make {}: {err}",
+                parent.display()
+            )));
+        }
+        let mut rsync = Command::new("rsync");
+        rsync
+            .arg("-t")
+            .arg("-e")
+            .arg(self.ssh_line())
+            .arg(format!("{}:{there}", self.host()))
+            .arg(local);
+        self.run_rsync("Couldn't copy a file back", rsync, cancel)
+    }
+
+    /// Copy `items` (paths inside `main`) to the worktree `there`, leaving
+    /// what is there already. They are ignored files like `.env`: only that
+    /// account reads them there.
+    pub fn push_ignored(
+        &self,
+        main: &Path,
+        there: &str,
+        items: &[String],
+        cancel: &AtomicBool,
+    ) -> Result<(), Trouble> {
+        let mut rsync = Command::new("rsync");
+        rsync
+            .args(["-rlpts", "--chmod=go-rwx", "--ignore-existing"])
+            .args(["--from0", "--files-from=-"])
+            .arg("-e")
+            .arg(self.ssh_line())
+            .arg(format!("{}/", main.display()))
+            .arg(self.rsync_path(there));
+        let list = items.join("\0");
+        let out = match machines::run_with_input(rsync, list.as_bytes(), DATA, cancel) {
+            Ok(out) => out,
+            Err(machines::Failure::NoSsh) => {
+                return Err(Trouble::Work(
+                    "rsync isn't installed on this machine".into(),
+                ));
+            }
+            Err(failure) => return Err(Trouble::Link(failure.why())),
+        };
+        if out.status.success() {
+            return Ok(());
+        }
+        Err(trouble("Couldn't copy ignored files there", &out))
+    }
+
     /// What's missing there for `program` to run, as what to say: git and
     /// rsync for commands, and `program` in a login shell's PATH.
     pub fn missing(&self, program: &str, cancel: &AtomicBool) -> Result<Option<String>, Trouble> {
@@ -737,6 +903,79 @@ impl Reach {
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn sh_c(script: &str) -> std::process::Output {
+        Command::new("sh").arg("-c").arg(script).output().unwrap()
+    }
+
+    #[test]
+    fn a_look_reads_files_by_the_clock_there() {
+        let t = crate::feature::tests::Temp::new();
+        std::fs::write(t.0.as_path().join("0.pid"), "77\n").unwrap();
+        std::fs::write(t.0.as_path().join("0.exit"), "3\nmore\n").unwrap();
+        std::fs::write(t.0.as_path().join("gerdr-check-0"), "script").unwrap();
+        let dir = t.0.as_path().to_string_lossy().into_owned();
+        let out = sh_c(&look_script(&dir, "*.pid *.queued *.exit"));
+        let look = Look::parse(&String::from_utf8_lossy(&out.stdout)).unwrap();
+        assert!(look.now > 0);
+        assert_eq!(look.number("0.pid"), Some(77));
+        assert_eq!(look.number("0.exit"), Some(3));
+        assert!(look.written("0.pid").is_some());
+        assert_eq!(look.number("0.queued"), None);
+        assert!(!look.files.contains_key("gerdr-check-0"));
+    }
+
+    #[test]
+    fn a_look_at_no_folder_is_no_files_and_no_answer_is_not_that() {
+        let out = sh_c(&look_script("/no/such/folder", "*.pid"));
+        let look = Look::parse(&String::from_utf8_lossy(&out.stdout)).unwrap();
+        assert!(look.files.is_empty());
+        assert_eq!(Look::parse(""), None);
+        assert_eq!(Look::parse("ssh: lost\n"), None);
+    }
+
+    #[test]
+    fn signals_there_reach_the_checks_group_and_nothing_else() {
+        // A process group of its own, as a shell's job is.
+        use std::os::unix::process::CommandExt;
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pid = child.id() as i32;
+        let out = sh_c(&kill_group_of_script(pid, "KILL"));
+        assert!(out.status.success(), "{out:?}");
+        assert!(child.wait().unwrap().code().is_none());
+        // Gone by now: asked again, it is no failure and kills nothing.
+        assert!(sh_c(&kill_group_script(pid, "TERM")).status.success());
+        assert!(sh_c(&kill_group_of_script(pid, "KILL")).status.success());
+    }
+
+    #[test]
+    fn what_a_branch_doesnt_ignore_goes_again() {
+        let t = crate::feature::tests::Temp::new();
+        let run = |args: &[&str]| crate::feature::tests::run(t.0.as_path(), args);
+        run(&["init", "-q"]);
+        std::fs::write(t.0.as_path().join(".gitignore"), ".env\n").unwrap();
+        std::fs::write(t.0.as_path().join(".env"), "a").unwrap();
+        std::fs::write(t.0.as_path().join("local.py"), "b").unwrap();
+        let wt = t.0.as_path().to_string_lossy().into_owned();
+        let items = [".env".to_owned(), "local.py".to_owned()];
+        let out = sh_c(&unignored_script(&wt, &items));
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "local.py\n");
+        assert!(t.0.as_path().join(".env").exists());
+        assert!(!t.0.as_path().join("local.py").exists());
+    }
+
+    #[test]
+    fn output_there_reads_as_it_does_here() {
+        let back = paths().back();
+        assert_eq!(
+            back.text("at /home/ana/Personal/x/src/a.rs:3 and /var/ana/gerdr/f"),
+            "at /home/lg/Personal/x/src/a.rs:3 and /home/lg/.local/share/gerdr/f"
+        );
+    }
 
     use super::*;
     use crate::feature::{ContextRepo, Repo};
