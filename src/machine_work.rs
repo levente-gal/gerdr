@@ -1171,6 +1171,13 @@ impl Gerdr {
         match kind {
             StartKind::Sent => {
                 self.show_success(format!("{agent} is on {} on {name}", stage.label()));
+                // Started from its page and still there: the user waits to
+                // answer it. Gone elsewhere, the screen stays theirs.
+                let at_feature = (self.features.panel.as_ref())
+                    .is_some_and(|p| p.project == project && p.slug == slug);
+                if crate::feature_agents::asks_first(stage) && at_feature {
+                    self.show_machine_pane(&pane);
+                }
             }
             StartKind::Resumed => {
                 self.show_success(format!("Resumed {agent} on {name}"));
