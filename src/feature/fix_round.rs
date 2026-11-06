@@ -220,7 +220,8 @@ pub struct VerifyFix {
     /// The user dropped the round.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub dropped: bool,
-    /// The next run that said something of the code, and whether it passed.
+    /// The last run since that said something of the code, and whether it
+    /// passed. It stays as it was once a newer round came.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next: Option<(u32, bool)>,
 }
@@ -261,8 +262,9 @@ pub fn verify_ended(fixes: &mut [VerifyFix], n: u32, evidence: &Evidence) {
     if evidence.outcomes.is_empty() || evidence.interrupted() {
         return;
     }
-    // Only the newest: an older one's next run was the one that failed again.
-    if let Some(fix) = (fixes.last_mut()).filter(|fix| fix.next.is_none() && fix.run < n) {
+    // Only the newest: what fixed an older one is told by the run after it.
+    // Its fixes can go again, so a later run replaces an earlier one's word.
+    if let Some(fix) = fixes.last_mut().filter(|fix| fix.run < n) {
         fix.next = Some((n, evidence.passed()));
     }
 }
@@ -954,12 +956,13 @@ mod tests {
         assert_eq!(fixes[0].next, None);
         verify_ended(&mut fixes, 3, &evidence(vec![outcome(Some(1))]));
         assert_eq!(fixes[0].next, Some((3, false)));
-        // It stays with the first, and later ones go to the newer round.
-        verify_ended(&mut fixes, 4, &evidence(vec![outcome(Some(0))]));
-        assert_eq!(fixes[0].next, Some((3, false)));
+        // Its fixes sent again: the later run says.
+        verify_ended(&mut fixes, 4, &evidence(vec![outcome(Some(1))]));
+        assert_eq!(fixes[0].next, Some((4, false)));
+        // Later ones go to the newer round.
         fixes.push(fix(2, 3));
         verify_ended(&mut fixes, 4, &evidence(vec![outcome(Some(0))]));
-        assert_eq!(fixes[0].next, Some((3, false)));
+        assert_eq!(fixes[0].next, Some((4, false)));
         assert_eq!(fixes[1].next, Some((4, true)));
         // An older round left without a next doesn't take a later run's.
         let mut fixes = vec![

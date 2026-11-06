@@ -9489,9 +9489,14 @@ fn verify_fix_head(fix: &VerifyFix, open: Option<&FixRound>, on_card: bool, now:
     line(parts.join(" \u{b7} "), tone)
 }
 
-/// What failed in fix round `fix`, with why under the failure that says.
+/// What failed in fix round `fix`, with why under the failure that says. A
+/// run that passed since leaves them a record.
 fn verify_fix_lines(fix: &VerifyFix) -> Vec<CheckLine> {
-    let mut failures = (fix.failures.iter()).map(|f| line(f.clone(), CheckTone::Blocker));
+    let tone = match fix.next {
+        Some((_, true)) => CheckTone::Note,
+        _ => CheckTone::Blocker,
+    };
+    let mut failures = (fix.failures.iter()).map(|f| line(f.clone(), tone));
     let first = failures.next();
     let why = (fix.why.iter()).map(|w| line(w.clone(), CheckTone::Note));
     first.into_iter().chain(why).chain(failures).collect()
@@ -15902,6 +15907,17 @@ pub(crate) mod tests {
             lines[0].text,
             "Review 1 \u{b7} run 2 failed 16m ago \u{b7} Claude Code"
         );
+    }
+
+    #[test]
+    fn verify_failures_stop_reading_as_open_once_a_run_passes() {
+        let fix = verify_fix(1, 2);
+        assert_eq!(verify_fix_lines(&fix)[0].tone, CheckTone::Blocker);
+        let passed = VerifyFix {
+            next: Some((3, true)),
+            ..fix
+        };
+        assert_eq!(verify_fix_lines(&passed)[0].tone, CheckTone::Note);
     }
 
     #[test]
