@@ -37,6 +37,12 @@
 //! starting) says nothing of the code: Verify fails, but its failures don't
 //! go to the Build agent.
 //!
+//! Run again after fixes, only what can say something new runs: the checks
+//! that didn't pass, and those of a repository whose `HEAD` moved. A passed
+//! check of a repository that didn't move stands (`VerifyRun::holds`), though
+//! it never ran beside the new code of the others. A `_feature` check reads
+//! them all, so it runs again whenever any moved. Run checks runs them all.
+//!
 //! Runs processes: call it off the UI thread (checklist D3).
 
 use std::{
@@ -412,17 +418,25 @@ pub enum Scope {
     #[default]
     All,
     /// These, by `CheckRun::key`. What the last run said of the others
-    /// stands, when it was on this code.
+    /// stands, where their code didn't change (`VerifyRun::holds`).
     Only(Vec<(String, String)>),
 }
 
+impl Scope {
+    /// What a run after `last` runs when the code changed: what didn't pass.
+    /// The checks of what changed run as well, as `plan` keeps none of them.
+    pub fn after_changes(last: Option<&VerifyRun>) -> Self {
+        last.map_or(Self::All, |run| Self::Only(run.not_passed()))
+    }
+}
+
 /// What run `n` of `checks` is to do: a row for each, those that `scope`
-/// keeps with their outcomes from the `last` run if it was on this code
-/// (`same_code`). Every row keeps its terminal, to run in again.
+/// keeps with their outcomes from the `last` run if `holds` says that still
+/// goes for their repository. Every row keeps its terminal, to run in again.
 pub fn plan(
     checks: &[Check],
     last: &[CheckRun],
-    same_code: bool,
+    holds: &dyn Fn(&str) -> bool,
     scope: &Scope,
     n: u32,
 ) -> Vec<CheckRun> {
@@ -436,7 +450,7 @@ pub fn plan(
                 Scope::Only(keys) => keys.contains(&key),
             };
             let kept = was
-                .filter(|_| same_code && !again)
+                .filter(|_| holds(&check.repo) && !again)
                 .and_then(|c| Some((c.outcome.clone()?, c.run)));
             CheckRun {
                 repo: check.repo.clone(),
@@ -1074,7 +1088,18 @@ pub fn markdown(feature: &Feature, evidence: &Evidence) -> String {
                 .map(|c| c.to_uppercase().chain(first).collect())
                 .unwrap_or(how)
         };
-        md.push_str(&format!("{how}, in {} s.\n", o.secs));
+        // An earlier run's: its code didn't change since.
+        let earlier = feature.verify.as_ref().and_then(|v| {
+            let row = (v.checks.iter()).find(|c| c.repo == o.repo && c.command == o.command);
+            row.filter(|c| c.run != v.n).map(|c| c.run)
+        });
+        match earlier {
+            Some(run) => md.push_str(&format!(
+                "{how}, in {} s, in run {run}: its code didn't change since.\n",
+                o.secs
+            )),
+            None => md.push_str(&format!("{how}, in {} s.\n", o.secs)),
+        }
         if o.tail.is_empty() {
             md.push_str("\nNo output.\n");
         } else {
@@ -1153,6 +1178,31 @@ pub struct VerifyRun {
     /// and a gerdr started later waits for them.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub opened: bool,
+}
+
+impl VerifyRun {
+    /// The keys of its checks that didn't pass.
+    pub fn not_passed(&self) -> Vec<(String, String)> {
+        (self.checks.iter())
+            .filter(|c| !c.outcome.as_ref().is_some_and(Outcome::passed))
+            .map(CheckRun::key)
+            .collect()
+    }
+
+    /// Whether what it said of `repo`'s checks (a `Repo::key` or
+    /// `FEATURE_KEY`) goes for the code `begun` read: the whole feature's
+    /// change is the same, or that repository's `HEAD` is. Each check it
+    /// keeps ran on the `HEAD` it lists, as one that moved keeps none.
+    pub fn holds(&self, begun: &Begun, repo: &str) -> bool {
+        if !begun.patch.is_empty() && self.patch.as_deref() == Some(begun.patch.as_str()) {
+            return true;
+        }
+        let head = |heads: &'_ [(String, String)]| {
+            let found = heads.iter().find(|(key, _)| key == repo);
+            found.map(|(_, head)| head.clone())
+        };
+        repo != FEATURE_KEY && head(&self.heads).is_some_and(|h| head(&begun.heads) == Some(h))
+    }
 }
 
 /// One check of a feature's Verify run, as its record keeps it.
@@ -1271,7 +1321,7 @@ mod tests {
 
     /// The rows of a run of `checks`.
     fn rows(checks: &[Check]) -> Vec<CheckRun> {
-        plan(checks, &[], false, &Scope::All, 1)
+        plan(checks, &[], &|_| false, &Scope::All, 1)
     }
 
     /// A folder for a run's files, outside of any repository.
@@ -1727,14 +1777,14 @@ mod tests {
     fn a_run_remembers_how_long_a_check_took() {
         let wt = Path::new("/w");
         let listed = [check("api", wt, "a")];
-        let mut last = plan(&listed, &[], false, &Scope::All, 1);
+        let mut last = plan(&listed, &[], &|_| false, &Scope::All, 1);
         assert_eq!(last[0].last_secs, None);
         last[0].outcome = Some(Outcome {
             exit: Some(1),
             secs: 90,
             ..Outcome::default()
         });
-        let mut next = plan(&listed, &last, false, &Scope::All, 2);
+        let mut next = plan(&listed, &last, &|_| false, &Scope::All, 2);
         assert_eq!(next[0].last_secs, Some(90));
         // Stopped says nothing of how long it takes.
         next[0].outcome = Some(Outcome {
@@ -1743,7 +1793,7 @@ mod tests {
             ..Outcome::default()
         });
         assert_eq!(
-            plan(&listed, &next, false, &Scope::All, 3)[0].last_secs,
+            plan(&listed, &next, &|_| false, &Scope::All, 3)[0].last_secs,
             Some(90)
         );
     }
@@ -2140,7 +2190,7 @@ mod tests {
             check("api", wt, "b"),
             check("api", wt, "c"),
         ];
-        let mut last = plan(&listed, &[], false, &Scope::All, 1);
+        let mut last = plan(&listed, &[], &|_| false, &Scope::All, 1);
         for row in &mut last {
             row.pane = Some(format!("pane-{}", row.command));
             row.outcome = Some(Outcome {
@@ -2149,14 +2199,14 @@ mod tests {
             });
         }
         let only_b = Scope::Only(vec![last[1].key()]);
-        let same = plan(&listed, &last, true, &only_b, 2);
+        let same = plan(&listed, &last, &|_| true, &only_b, 2);
         assert!(same[0].outcome.is_some() && same[2].outcome.is_some());
         assert_eq!((same[0].run, same[2].run), (1, 1));
         assert!(same[1].outcome.is_none());
         assert_eq!(same[1].run, 2);
         assert_eq!(same[1].pane.as_deref(), Some("pane-b"));
         // On other code nothing stands.
-        let other = plan(&listed, &last, false, &only_b, 2);
+        let other = plan(&listed, &last, &|_| false, &only_b, 2);
         assert!(
             other
                 .iter()
@@ -2165,13 +2215,152 @@ mod tests {
         assert!(other.iter().all(|row| row.pane.is_some()));
         // All of them: nothing stands either, and cards come back.
         last[0].card_off = true;
-        let all = plan(&listed, &last, true, &Scope::All, 2);
+        let all = plan(&listed, &last, &|_| true, &Scope::All, 2);
         assert!(all.iter().all(|row| row.outcome.is_none() && !row.card_off));
         // A check no longer set goes, and a new one runs.
         let changed = [check("api", wt, "a"), check("api", wt, "new")];
-        let row = plan(&changed, &last, true, &Scope::Only(Vec::new()), 2);
+        let row = plan(&changed, &last, &|_| true, &Scope::Only(Vec::new()), 2);
         assert_eq!(row.len(), 2);
         assert!(row[0].outcome.is_some() && row[1].outcome.is_none());
+    }
+
+    #[test]
+    fn a_rerun_keeps_what_passed_where_the_code_didnt_move() {
+        let wt = Path::new("/w");
+        let listed = [
+            check("api", wt, "a"),
+            check("api", wt, "b"),
+            check("web", wt, "lint"),
+            check("web", wt, "test"),
+            check("docs", wt, "build"),
+            check(FEATURE_KEY, wt, "e2e"),
+        ];
+        let mut rows = plan(&listed, &[], &|_| false, &Scope::All, 1);
+        for row in &mut rows {
+            let failed = row.command == "a" || row.command == "lint";
+            row.outcome = Some(Outcome {
+                exit: Some(i32::from(failed)),
+                ..Outcome::default()
+            });
+        }
+        let heads = |api: &str| {
+            vec![
+                ("api".to_owned(), api.to_owned()),
+                ("docs".to_owned(), "d".to_owned()),
+                ("web".to_owned(), "w".to_owned()),
+            ]
+        };
+        let last = VerifyRun {
+            n: 1,
+            patch: Some("old".into()),
+            checks: rows,
+            heads: heads("a1"),
+            ..VerifyRun::default()
+        };
+        // The fix moved api alone.
+        let begun = Begun {
+            patch: "new".into(),
+            heads: heads("a2"),
+        };
+        let scope = Scope::after_changes(Some(&last));
+        let holds = |repo: &str| last.holds(&begun, repo);
+        let next = plan(&listed, &last.checks, &holds, &scope, 2);
+        let runs: Vec<_> = (next.iter())
+            .filter(|row| row.outcome.is_none())
+            .map(|row| row.command.as_str())
+            .collect();
+        // All of api's, web's that failed though web didn't move, and the
+        // whole feature's. What passed elsewhere stands, from its run.
+        assert_eq!(runs, ["a", "b", "lint", "e2e"]);
+        let stands = |command: &str| next.iter().find(|row| row.command == command).unwrap().run;
+        assert_eq!((stands("test"), stands("build")), (1, 1));
+        assert_eq!((stands("a"), stands("e2e")), (2, 2));
+        // A first run has nothing to keep.
+        assert_eq!(Scope::after_changes(None), Scope::All);
+    }
+
+    #[test]
+    fn what_a_run_said_holds_on_its_code_only() {
+        let heads = |api: &str| vec![("api".to_owned(), api.to_owned())];
+        let run = VerifyRun {
+            patch: Some("p".into()),
+            heads: heads("a1"),
+            ..VerifyRun::default()
+        };
+        let begun = |patch: &str, api: &str| Begun {
+            patch: patch.into(),
+            heads: heads(api),
+        };
+        // The same change, rebased: all of it holds.
+        assert!(run.holds(&begun("p", "a2"), "api"));
+        assert!(run.holds(&begun("p", "a2"), FEATURE_KEY));
+        // Another change: a repository holds by its HEAD alone.
+        assert!(run.holds(&begun("q", "a1"), "api"));
+        assert!(!run.holds(&begun("q", "a2"), "api"));
+        // The whole feature's checks read all the code.
+        assert!(!run.holds(&begun("q", "a1"), FEATURE_KEY));
+        // A repository with no HEAD on either side says nothing.
+        assert!(!run.holds(&begun("q", "a1"), "web"));
+        assert!(!(VerifyRun::default()).holds(&begun("q", "a1"), "api"));
+        // No patch read is no proof of the same change.
+        let unread = VerifyRun::default();
+        assert!(!unread.holds(&begun("", "a1"), FEATURE_KEY));
+    }
+
+    #[test]
+    fn begun_reads_which_repository_a_fix_moved() {
+        let tmp = Temp::new();
+        let f = feature_over(&tmp, &["api", "web"], &[]);
+        commit(&f.repos[0].worktree, "a.txt", "1");
+        commit(&f.repos[1].worktree, "w.txt", "1");
+        let before = begin(&f).unwrap();
+        commit(&f.repos[0].worktree, "a.txt", "2");
+        let after = begin(&f).unwrap();
+        assert_ne!(before.patch, after.patch);
+        let run = VerifyRun {
+            patch: Some(before.patch),
+            heads: before.heads,
+            ..VerifyRun::default()
+        };
+        assert!(!run.holds(&after, &f.repos[0].key()));
+        assert!(run.holds(&after, &f.repos[1].key()));
+    }
+
+    #[test]
+    fn the_evidence_says_a_check_stands_from_an_earlier_run() {
+        let tmp = Temp::new();
+        let mut f = feature_over(&tmp, &["api"], &[]);
+        let ran = |command: &str| Outcome {
+            repo: "api".into(),
+            command: command.into(),
+            exit: Some(0),
+            secs: 7,
+            ..Outcome::default()
+        };
+        let row = |command: &str, run| CheckRun {
+            repo: "api".into(),
+            command: command.into(),
+            run,
+            outcome: Some(ran(command)),
+            ..CheckRun::default()
+        };
+        f.verify = Some(VerifyRun {
+            n: 3,
+            checks: vec![row("old", 2), row("new", 3)],
+            ..VerifyRun::default()
+        });
+        let md = markdown(
+            &f,
+            &Evidence {
+                outcomes: vec![ran("old"), ran("new")],
+                ..Evidence::default()
+            },
+        );
+        assert!(
+            md.contains("Passed, in 7 s, in run 2: its code didn't change since."),
+            "{md}"
+        );
+        assert!(md.contains("Passed, in 7 s.\n"), "{md}");
     }
 
     #[test]

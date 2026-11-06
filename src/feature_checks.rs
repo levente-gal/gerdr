@@ -152,8 +152,13 @@ impl Gerdr {
         };
         let config = self.projects.workflows(feature, |w| w.verify.clone());
         let checks = verify::checks(feature, &config);
-        let same = !begun.patch.is_empty() && run.patch.as_deref() == Some(begun.patch.as_str());
-        let mut rows = verify::plan(&checks, &run.checks, same, &scope, n);
+        let holds = |repo: &str| run.holds(&begun, repo);
+        let mut rows = verify::plan(&checks, &run.checks, &holds, &scope, n);
+        // On the same code the user asked for just these: on changed code,
+        // why the others don't run is worth a word.
+        let same = run.patch.as_deref() == Some(begun.patch.as_str());
+        let stands = rows.iter().filter(|row| row.outcome.is_some()).count();
+        let total = rows.len();
         let dir = verify::run_dir(&store::dir(None, project, slug), n);
         self.open_check_terminals(project, slug, feature, &mut rows, &dir);
         if let Some(f) = self.feature_mut(project, slug)
@@ -163,6 +168,17 @@ impl Gerdr {
             run.patch = Some(begun.patch).filter(|p| !p.is_empty());
             run.heads = begun.heads;
             run.opened = true;
+        }
+        if stands > 0 && !same {
+            let why = "keep their results: their code didn't change";
+            let title = &feature.title;
+            self.show_notice(format!(
+                "{stands} of {total} checks of \u{201c}{title}\u{201d} {why}"
+            ));
+            if let Some(f) = self.feature_mut(project, slug) {
+                let line = format!("Verify run {n}: {stands} of {total} checks {why}");
+                f.log(crate::feature::now(), line);
+            }
         }
         self.save_feature(project, slug);
         self.watch_checks(project, slug, None);
@@ -603,7 +619,7 @@ impl Gerdr {
     }
 
     /// Run again feature `slug`'s check `index`. What the others said stands,
-    /// if the code is the same.
+    /// where their code is the same.
     pub(crate) fn rerun_check(&mut self, project: &str, slug: &str, index: usize) {
         let row = (self.feature(project, slug))
             .and_then(|f| f.verify.as_ref())
@@ -614,14 +630,12 @@ impl Gerdr {
         }
     }
 
-    /// Run again the checks of feature `slug` that didn't pass.
+    /// Run again the checks of feature `slug` that didn't pass, and those
+    /// of a repository that changed since they did.
     pub(crate) fn rerun_failed_checks(&mut self, project: &str, slug: &str) {
-        let keys: Vec<_> = (self.feature(project, slug))
+        let keys = (self.feature(project, slug))
             .and_then(|f| f.verify.as_ref())
-            .map(|v| {
-                let failed = v.checks.iter().filter(|c| !check_passed(c));
-                failed.map(CheckRun::key).collect()
-            })
+            .map(verify::VerifyRun::not_passed)
             .unwrap_or_default();
         if keys.is_empty() {
             return self.show_warning("No check failed".into());
