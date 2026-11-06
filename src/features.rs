@@ -3328,13 +3328,13 @@ fn ship_rows(feature: &Feature, probe: Option<&Probe>) -> Vec<ShipRow> {
 
 /// What repository `repo`'s header says: "api \u{b7} 12 commits \u{b7} +420
 /// \u{2212}80 \u{b7} into main".
-fn ship_repo_head(repo: &ship::RepoCheck, stat: Option<(usize, usize)>) -> String {
+fn ship_repo_head(repo: &ship::RepoCheck, stat: Option<feature::page::Stat>) -> String {
     let commits = match repo.commits {
         1 => "1 commit".to_owned(),
         n => format!("{n} commits"),
     };
-    let stat = stat.map_or(String::new(), |(added, deleted)| {
-        format!(" \u{b7} +{added} \u{2212}{deleted}")
+    let stat = stat.map_or(String::new(), |stat| {
+        format!(" \u{b7} +{} \u{2212}{}", stat.added, stat.removed)
     });
     format!(
         "{} \u{b7} {commits}{stat} \u{b7} into {}",
@@ -18136,7 +18136,7 @@ pub(crate) mod tests {
         let mut f = feature("d", vec![repo("api", true)], 9);
         f.status = Status::Done;
         let p = Probe {
-            stats: BTreeMap::from([("api".to_owned(), (4, 1))]),
+            stats: BTreeMap::from([("api".to_owned(), feature::page::Stat::default())]),
             ..ship::probe_finished(&f)
         };
         assert!(p.reading.is_err());
@@ -18419,7 +18419,12 @@ pub(crate) mod tests {
         };
         let slugs = vec!["b".to_owned()];
         let mut p = probe(None);
-        p.stats.insert(f.repos[0].key(), (12, 3));
+        let stat = feature::page::Stat {
+            files: 2,
+            added: 12,
+            removed: 3,
+        };
+        p.stats.insert(f.repos[0].key(), stat);
         let state = PanelState {
             probe: Some(&p),
             ..PanelState::default()
@@ -18427,7 +18432,7 @@ pub(crate) mod tests {
         let view = tab_view(&panel, &f, &slugs, &state, 2_060);
         let stats: Vec<_> = view.repos.iter().map(|r| r.stat).collect();
         // The one not read shows none, not a zero.
-        assert_eq!(stats, [Some((12, 3)), None]);
+        assert_eq!(stats, [Some(stat), None]);
     }
 
     #[test]

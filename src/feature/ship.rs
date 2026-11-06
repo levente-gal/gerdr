@@ -220,10 +220,10 @@ pub struct Probe {
     /// When a squash started (`Shipping::squash_at`): whether every
     /// touched repository with commits reads as merged into its base.
     pub merged: bool,
-    /// Per touched repository, by `Repo::key`: the lines it adds and
-    /// deletes against its base, uncommitted ones included; none for one
+    /// Per touched repository, by `Repo::key`: the files and lines it
+    /// changes against its base, uncommitted ones included; none for one
     /// that couldn't be read (see `page::stats`).
-    pub stats: BTreeMap<String, (usize, usize)>,
+    pub stats: BTreeMap<String, page::Stat>,
     /// The stage files in its data dir, and their milestones.
     pub docs: page::Docs,
     /// The models its stages' agents use, with the run each read was of
