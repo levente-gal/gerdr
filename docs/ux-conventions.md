@@ -102,11 +102,14 @@ A key is written in one place, not on the button that does the same thing:
 - A stage's agent starts on its prompt in a tab behind the stage's page,
   clicked or not, and the page's Show agent goes to it. When Verify passes,
   the AI review page comes to the front of the feature's workspace; another
-  workspace keeps the screen.
+  workspace keeps the screen. Discover's agent is the exception: its first
+  message is a question, so Start agent shows its tab, ready to answer in.
 - An agent placed on another machine opens no tab here: nothing from another
-  machine shows until asked. Show agent opens one tab attached over SSH, taking
-  the terminal from any other view, and closing that tab asks nothing, as it
-  only ends the view. The agent's card says "on <machine>". A machine out of
+  machine shows until asked. Show agent opens one tab attached over SSH, as
+  does Discover's Start agent once its agent is up, if the user stayed on the
+  feature's page. That tab takes the terminal from any other view, and closing
+  it asks nothing, as it only ends the view. The agent's card says "on
+  <machine>". A machine out of
   reach reads "<machine> can't be reached", and its runs wait: only a list of
   that machine's panes can say a pane is gone.
 - Verify's checks and a setup placed on another machine follow the same rule:

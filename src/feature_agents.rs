@@ -1242,7 +1242,23 @@ impl Gerdr {
         if stage == Stage::Build && self.setup_before_build(project, slug, fresh || first) {
             return;
         }
-        self.launch_stage_agent(project, slug, stage, &[]);
+        if self.launch_stage_agent(project, slug, stage, &[]) {
+            self.show_agent_asking(project, slug, stage);
+        }
+    }
+
+    /// Show `stage`'s agent just started by the user if its first move is to
+    /// ask them something, so they can answer at once. Its pane is none yet
+    /// on another machine (`machine_started` shows it), and in T3 Code, which
+    /// shows itself.
+    fn show_agent_asking(&mut self, project: &str, slug: &str, stage: Stage) {
+        if !asks_first(stage) {
+            return;
+        }
+        let pane = (self.feature(project, slug)).and_then(|f| f.runs.get(&stage)?.pane.clone());
+        if let Some(pane) = pane {
+            self.focus_agent(&agents::AgentKey::Herdr(pane));
+        }
     }
 
     /// Show the agent waiting for `stage`'s prompt of feature `slug`. With
@@ -1338,6 +1354,7 @@ impl Gerdr {
             self.fixing_moved(project, slug, agents::AgentKey::Herdr(pane));
         }
         self.show_success(sent_text(&agent, stage, model.as_deref()));
+        self.show_agent_asking(project, slug, stage);
     }
 
     /// The feature and stage of the active project whose agent waits for
@@ -2550,6 +2567,12 @@ fn held_text(agent: &str, stage: Stage, title: &str) -> String {
         "{agent} is open on {} of \u{201c}{title}\u{201d}: send the prompt once the checks end",
         stage.label()
     )
+}
+
+/// Whether `stage`'s agent starts by asking the user something, and waits:
+/// Discover's first message is its question (`assets/prompts/discover.md`).
+pub(crate) fn asks_first(stage: Stage) -> bool {
+    stage == Stage::Discover
 }
 
 /// What gerdr says of `agent` started on `stage`, with `model` if picked, its
