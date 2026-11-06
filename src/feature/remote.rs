@@ -740,6 +740,19 @@ impl Reach {
         Err(trouble("A command there failed", &out))
     }
 
+    /// `command` there, over the master and reading and writing what is given
+    /// to it, and quick to give up with the master gone.
+    pub fn relay(&self, command: &str) -> Command {
+        let mut ssh = Command::new("ssh");
+        ssh.arg("-S")
+            .arg(&self.control)
+            .args(["-o", "BatchMode=yes", "-o", "ControlMaster=no"])
+            .args(["-o", "ConnectTimeout=5"])
+            .arg(&self.target)
+            .arg(command);
+        ssh
+    }
+
     fn git(&self, dir: &Path) -> Command {
         let mut git = Command::new("git");
         for var in ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"] {

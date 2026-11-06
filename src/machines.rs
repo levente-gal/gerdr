@@ -836,6 +836,8 @@ pub struct Machines {
     pub(crate) starting: HashMap<WatchKey, String>,
     /// The local pane showing each pane on a machine.
     pub(crate) views: HashMap<String, String>,
+    /// What's open here of sandboxes elsewhere, by project and slug.
+    pub(crate) sandboxes: HashMap<(String, String), crate::machine_sandbox::SandboxView>,
     /// When a line was last typed to a pane on a machine.
     pub(crate) lines: HashMap<String, Instant>,
     /// What keeps each feature's work from coming back.

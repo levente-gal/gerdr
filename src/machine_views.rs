@@ -25,7 +25,7 @@ use crate::{
     feature::{
         self, Feature, Status,
         remote::{self, Paths, Reach, Side, Trouble},
-        store,
+        sandbox_run, store,
         view::{self, Live, LivePane, Placed, PlacedRepo, SeenPane},
     },
     machine_work::{WorkEvent, split_pane},
@@ -292,6 +292,7 @@ fn view_round(
         }
     }
     features.sort_by(|a, b| a.created.cmp(&b.created).then_with(|| a.slug.cmp(&b.slug)));
+    ask_sandboxes(place, &mut features, cancel)?;
     let live = view::read_live(&place.root, project);
     let panes = view::seen_panes(&features, live.as_ref(), &place.id);
     let news = (rounds.told.as_ref())
@@ -307,6 +308,30 @@ fn view_round(
     }
     if let Ok(mut mine) = latest.lock() {
         *mine = Some((project.to_owned(), features, with));
+    }
+    Ok(())
+}
+
+/// Ask the machine how the sandboxes of `features` stand. Its own `/proc` says,
+/// with its gerdr open or not: a sandbox goes on without it.
+fn ask_sandboxes(
+    place: &ViewPlace,
+    features: &mut [Feature],
+    cancel: &AtomicBool,
+) -> Result<(), Trouble> {
+    let running = |f: &&Feature| {
+        f.status == Status::Open && f.sandbox.as_ref().is_some_and(sandbox_run::to_ask_there)
+    };
+    if !features.iter().any(|f| running(&f)) {
+        return Ok(());
+    }
+    let asked = (features.iter().filter(running))
+        .filter_map(|f| Some((f.slug.as_str(), f.sandbox.as_ref()?)));
+    let said = place.reach.script(&sandbox_run::there_script(asked), cancel)?;
+    for feature in features {
+        if let Some(run) = feature.sandbox.as_mut().filter(|r| sandbox_run::to_ask_there(r)) {
+            run.elsewhere = Some(sandbox_run::read_there(&said, &feature.slug, run));
+        }
     }
     Ok(())
 }

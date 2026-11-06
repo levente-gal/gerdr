@@ -899,11 +899,8 @@ impl Gerdr {
     /// The feature whose stage agent or check runs in `pane`.
     fn owner_of_pane(&self, pane: &str) -> Option<&Feature> {
         let viewed = self.features.viewed.values().flatten();
-        (self.features.all.values().flatten().chain(viewed)).find(|f| {
-            let agent = (f.runs.values()).any(|r| r.pane.as_deref() == Some(pane));
-            let checks = f.verify.iter().flat_map(|v| &v.checks);
-            agent || checks.into_iter().any(|c| c.pane.as_deref() == Some(pane))
-        })
+        (self.features.all.values().flatten().chain(viewed))
+            .find(|f| crate::feature::view::panes_of(f).contains(&pane))
     }
 
     /// Type `line` to the agent in `pane` on another machine, its paths as
@@ -1404,6 +1401,8 @@ impl Gerdr {
     /// back from there.
     pub(crate) fn machine_work_tick(&mut self) {
         self.publish_live();
+        // Before anything that needs a link: losing the last closes what used it.
+        self.sandbox_views_tick();
         if self.machines.links.values().all(|link| link.work.is_none()) {
             return;
         }

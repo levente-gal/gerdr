@@ -97,11 +97,28 @@ pub struct SandboxRun {
     /// `sandbox::out_of_reach`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub out_of_reach: Vec<String>,
+    /// It runs on another machine, and this is how it stands there. Its numbers
+    /// mean nothing here, so nothing is looked up or signalled by them.
+    #[serde(skip)]
+    pub elsewhere: Option<Elsewhere>,
+}
+
+/// How a sandbox on another machine stands, as last asked there.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Elsewhere {
+    /// That machine has said: until then nothing is known of it.
+    pub asked: bool,
+    pub alive: bool,
+    /// What listens inside it, by port, leaving out the proxy's own ports.
+    pub ports: Vec<u16>,
 }
 
 impl SandboxRun {
     /// Whether its namespace is there, so its commands can run.
     pub fn alive(&self) -> bool {
+        if let Some(there) = &self.elsewhere {
+            return there.alive;
+        }
         !self.stopped
             && self.failed.is_none()
             && self.holder.as_ref().is_some_and(Proc::alive)
@@ -112,6 +129,9 @@ impl SandboxRun {
     /// without a whole sandbox, after a failed start. What still runs inside
     /// goes first: a browser's window would stay, on a dead network.
     pub fn kill_network(&self) {
+        if self.elsewhere.is_some() {
+            return;
+        }
         if let Some(holder) = self.holder.as_ref().filter(|h| h.alive()) {
             end_inside(holder);
         }
@@ -125,6 +145,9 @@ impl SandboxRun {
 
     /// What listens inside it, by port, leaving out the proxy's own ports.
     pub fn listening(&self) -> Vec<u16> {
+        if let Some(there) = &self.elsewhere {
+            return there.ports.clone();
+        }
         let Some(holder) = self.holder.as_ref().filter(|h| h.alive()) else {
             return Vec::new();
         };
@@ -139,6 +162,60 @@ impl SandboxRun {
         ports.dedup();
         ports.retain(|port| !self.forwards.iter().any(|f| f.main_port == *port));
         ports
+    }
+}
+
+/// Whether what `run` names on its machine is worth asking about there.
+pub fn to_ask_there(run: &SandboxRun) -> bool {
+    !run.stopped && run.failed.is_none() && run.holder.is_some() && run.pasta.is_some()
+}
+
+/// The script asking the machine of `runs` (by a name for each) how they stand:
+/// what `read_there` reads. A process that's gone just says nothing.
+pub fn there_script<'a>(runs: impl IntoIterator<Item = (&'a str, &'a SandboxRun)>) -> String {
+    let mut script = String::new();
+    for (name, run) in runs {
+        let (Some(holder), Some(pasta)) = (&run.holder, &run.pasta) else {
+            continue;
+        };
+        let name = shell_quote(name);
+        let (holder, pasta) = (holder.pid, pasta.pid);
+        script.push_str(&format!(
+            "echo '@holder' {name}; cat /proc/{holder}/stat 2>/dev/null\n\
+             echo '@pasta' {name}; cat /proc/{pasta}/stat 2>/dev/null\n\
+             echo '@ports' {name}; cat /proc/{holder}/net/tcp /proc/{holder}/net/tcp6 2>/dev/null\n"
+        ));
+    }
+    script.push_str("exit 0\n");
+    script
+}
+
+/// How `run`, called `name`, stands by what `there_script` said.
+pub fn read_there(said: &str, name: &str, run: &SandboxRun) -> Elsewhere {
+    let section = |what: &str| -> String {
+        let head = format!("@{what} {name}");
+        let mut lines = said.lines().skip_while(|l| *l != head);
+        lines.next();
+        let body: Vec<&str> = lines.take_while(|l| !l.starts_with('@')).collect();
+        body.join("\n")
+    };
+    let same = |proc: &Option<Proc>, what: &str| {
+        proc.as_ref()
+            .is_some_and(|p| start_in_stat(&section(what)) == Some(p.start))
+    };
+    let alive = same(&run.holder, "holder") && same(&run.pasta, "pasta");
+    let mut ports = Vec::new();
+    if alive {
+        // Two tables, each with its heading: a heading has no port to read.
+        ports = listening_in(&section("ports"));
+        ports.sort_unstable();
+        ports.dedup();
+        ports.retain(|port| !run.forwards.iter().any(|f| f.main_port == *port));
+    }
+    Elsewhere {
+        asked: true,
+        alive,
+        ports,
     }
 }
 
@@ -1081,6 +1158,9 @@ fn last_error(raw: &[u8]) -> Option<String> {
 /// its data and `dir` too, and nothing of it remains. What couldn't be stopped
 /// is the error, with the rest still done.
 pub fn stop(run: &SandboxRun, dir: &Path, remove: bool) -> Result<(), String> {
+    if run.elsewhere.is_some() {
+        return Err("it runs on another machine".to_owned());
+    }
     run.kill_network();
     let never = AtomicBool::new(false);
     let mut problems = Vec::new();
@@ -1310,6 +1390,68 @@ mod tests {
             line("b", "created", "", 0)
         );
         assert_eq!(ready_of(&two), Ready::Waiting("b".to_owned()));
+    }
+
+    #[test]
+    fn a_sandbox_elsewhere_stands_as_its_machine_says() {
+        let run = SandboxRun {
+            holder: Some(Proc { pid: 1, start: 22 }),
+            pasta: Some(Proc { pid: 2, start: 33 }),
+            forwards: vec![Forward {
+                service: "db".into(),
+                main_port: 5432,
+                host_port: 15432,
+                udp: false,
+            }],
+            ..SandboxRun::default()
+        };
+        let stat = |start: u64| {
+            let fields = vec!["0"; 18].join(" ");
+            format!("1 (a b) S {fields} {start} 0")
+        };
+        let table = "  sl  local_address rem_address   st\n\
+                     0: 00000000:1435 00000000:0000 0A\n\
+                     1: 00000000:1538 00000000:0000 0A\n\
+                     2: 00000000:0050 00000000:0000 01";
+        let v6 = "  sl  local_address rem_address   st\n\
+                  0: 00000000000000000000000000000000:1F40 00000000000000000000000000000000:0000 0A";
+        let said = format!(
+            "@holder x\n{}\n@pasta x\n{}\n@ports x\n{table}\n{v6}\n@holder other\nnope\n",
+            stat(22),
+            stat(33),
+        );
+        // The proxy's own port is left out, and what isn't listening.
+        assert_eq!(
+            read_there(&said, "x", &run),
+            Elsewhere {
+                asked: true,
+                alive: true,
+                ports: vec![5173, 8000],
+            }
+        );
+        // A later process with that number isn't it, and nothing said is nothing.
+        let later = said.replace(&stat(33), &stat(34));
+        assert!(!read_there(&later, "x", &run).alive);
+        assert_eq!(read_there(&later, "x", &run).ports, Vec::<u16>::new());
+        assert!(!read_there("", "x", &run).alive);
+    }
+
+    #[test]
+    fn the_numbers_of_a_sandbox_elsewhere_say_nothing_here() {
+        // This very process is alive, and it isn't what the record means.
+        let me = Proc::of(std::process::id() as i32).unwrap();
+        let run = SandboxRun {
+            holder: Some(me.clone()),
+            pasta: Some(me),
+            elsewhere: Some(Elsewhere::default()),
+            ..SandboxRun::default()
+        };
+        assert!(!run.alive());
+        assert!(run.listening().is_empty());
+        assert!(stop(&run, Path::new("/nonexistent"), true).is_err());
+        // Never saved: what it is depends on who reads it.
+        let json = serde_json::to_string(&run).unwrap();
+        assert!(!json.contains("elsewhere"), "{json}");
     }
 
     #[test]

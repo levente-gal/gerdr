@@ -36,8 +36,8 @@ rules, for reviewing a branch before it merges.
 | Alt+U | In the project commands dialog: fill the focused empty field with what is suggested for it (also its Use button). Nothing is saved until Save. |
 | Alt+B | In the new feature dialog: choose the branch the selected repository's worktree starts from (the first ticked one from the title; also its "from <branch>" button). It lists the repository's branches, the default first; typing filters them, Enter uses the selected one, Esc clears the filter and then goes back. The default is the branch the project's settings give it (`workflow.base`), else what origin says now, else the local `origin/HEAD`, else the checked out branch. A repository added to a feature later starts from that default too. |
 | Alt+X | In the dialog connecting a machine: press the button fixing what failed (Copy command, Open terminal). Only there. |
-| Ctrl+Shift+T | Start a feature's sandbox on the feature tab's Manual test page, after a dialog asks which commands run in it (Space checks; the feature keeps the choice, and Ctrl+Shift+G and Ctrl+Shift+X go by it without asking); stop it, asking, once it runs (at once while it starts). |
-| Ctrl+Shift+Y | Open the running sandbox's app, in a tab inside it (feature tab, Manual test). |
+| Ctrl+Shift+T | Start a feature's sandbox on the feature tab's Manual test page, after a dialog asks which commands run in it (Space checks; the feature keeps the choice, and Ctrl+Shift+G and Ctrl+Shift+X go by it without asking); stop it, asking, once it runs (at once while it starts). On a feature another machine writes it shows the sandbox's terminals instead. |
+| Ctrl+Shift+Y | Open the running sandbox's app, in a tab inside it (feature tab, Manual test). On a feature another machine writes, in a tab here, through ports opened on this machine. |
 | Ctrl+Shift+G | Start the sandbox again on the same data (feature tab, Manual test). |
 | Ctrl+Shift+X | Reset the sandbox's data from main's, or remove a stopped sandbox with its data, asking first (feature tab, Manual test). |
 | Ctrl+Shift+A | Pick the next agent on the feature tab's selected stage (the chips on its agent card). It applies from the agent's next start; one running goes on. |
@@ -130,6 +130,13 @@ A key is written in one place, not on the button that does the same thing:
   takes the terminal, as any Show does. One in the writer's own session only
   looks: that machine's gerdr keeps it, and keys go nowhere. A feature's code comes
   here once it is opened, by commits: what isn't committed there doesn't show.
+- A sandbox stays on the machine that started it. Another gerdr showing its
+  feature says how it stands and offers only Open app and Show terminals: it is
+  stopped there, and its page says so. Open app opens the app's ports here under
+  the same numbers, for as long as a page on `localhost` shows in the feature's
+  workspace and the link is up. A port taken here is said by name, on the "!" badge
+  too, and a page never opens on it. Show terminals only looks, as above. Anything
+  on this machine can reach those ports while they are open, as with `ssh -L`.
 - A line gerdr types to an agent and finds still in its input box gets Enter
   again, up to six times over about four minutes. Only then is the user told.
 - Work the user sends to an agent (findings, review comments, failed tests)
