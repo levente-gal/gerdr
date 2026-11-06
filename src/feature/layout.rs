@@ -13,6 +13,10 @@ use super::{Feature, Link, Repo, hook};
 
 /// The folder features' worktrees go in, under a root.
 pub const FEATURES_DIR: &str = ".features";
+/// Denies Cursor's agents what it lists, on top of keeping it from indexing.
+pub const CURSOR_DENY: &str = ".cursorignore";
+/// Keeps what it lists from Cursor's index only.
+pub const CURSOR_INDEX: &str = ".cursorindexingignore";
 
 /// Where a project's repositories are, as a new feature would use them.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -274,8 +278,8 @@ pub struct Created {
     /// `<root>/.features/<slug>`.
     pub dir: PathBuf,
     /// The ignore files `.features/` was added to (`.git/info/exclude`,
-    /// `.cursorignore`, `.graphifyignore`, `pyrightconfig.json`): only
-    /// those that changed.
+    /// `.cursorindexingignore`, `.graphifyignore`, `pyrightconfig.json`):
+    /// only those that changed.
     pub ignores: Vec<PathBuf>,
     /// The root's files and folders other than repositories (AGENTS.md,
     /// .agents) linked into the feature folder, multi-repository only.
@@ -753,9 +757,13 @@ fn keep_out(root: &Root) -> Result<Vec<PathBuf>, String> {
     if !root.multi {
         changed.extend(exclude_line(&root.path, "/.features/")?);
     }
+    match cursor_index_rule(&root.path) {
+        Ok(file) => changed.extend(file),
+        Err(err) => tracing::warn!("{err}"),
+    }
     // The tools' files are only edited when there; one that can't be is
     // logged and left, as a feature can do without it.
-    for name in [".cursorignore", ".graphifyignore", "pyrightconfig.json"] {
+    for name in [".graphifyignore", "pyrightconfig.json"] {
         let path = root.path.join(name);
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
@@ -778,6 +786,57 @@ fn keep_out(root: &Root) -> Result<Vec<PathBuf>, String> {
         }
     }
     Ok(changed)
+}
+
+/// Keep `.features/` out of what Cursor indexes in `root`, in a project that
+/// uses Cursor. Not `.cursorignore`: that one also denies its agents every
+/// read and edit under the folder, from inside it too, and they go round by
+/// the shell. The file, when it changed.
+fn cursor_index_rule(root: &Path) -> Result<Option<PathBuf>, String> {
+    let file = root.join(CURSOR_INDEX);
+    let text = match std::fs::read_to_string(&file) {
+        Ok(text) => text,
+        Err(err) if err.kind() != std::io::ErrorKind::NotFound => {
+            return Err(format!("couldn't read {}: {err}", shown(&file)));
+        }
+        Err(_) if root.join(CURSOR_DENY).exists() => String::new(),
+        Err(_) => return Ok(None),
+    };
+    let Some(text) = add_line(&text, ".features/") else {
+        return Ok(None);
+    };
+    std::fs::write(&file, text).map_err(|err| format!("couldn't write {}: {err}", shown(&file)))?;
+    Ok(Some(file))
+}
+
+/// Take `.features` out of `root`'s `.cursorignore`, where gerdr once put it,
+/// and into what Cursor doesn't index (see `cursor_index_rule`). Whether it
+/// was there. Touches files: off the UI thread.
+pub fn free_for_cursor(root: &Path) -> Result<bool, String> {
+    let file = root.join(CURSOR_DENY);
+    let text = match std::fs::read_to_string(&file) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(format!("couldn't read {}: {err}", shown(&file))),
+    };
+    let Some(text) = without_features(&text) else {
+        return Ok(false);
+    };
+    // In this order: Cursor never gets to index the folder between the two.
+    cursor_index_rule(root)?;
+    std::fs::write(&file, text).map_err(|err| format!("couldn't write {}: {err}", shown(&file)))?;
+    Ok(true)
+}
+
+/// `text` without its lines that ignore all of `.features`, every other byte
+/// kept, unless it has none.
+fn without_features(text: &str) -> Option<String> {
+    let ignores = |line: &str| {
+        let pattern = unanchored(line).trim_end_matches("/**");
+        pattern.trim_end_matches('/') == FEATURES_DIR
+    };
+    let kept: String = text.split_inclusive('\n').filter(|l| !ignores(l)).collect();
+    (kept.len() != text.len()).then_some(kept)
 }
 
 /// `line` in the git exclude file of the repository at `repo`, shared by
@@ -2177,11 +2236,16 @@ mod tests {
             t.0.join("AGENTS.md")
         );
         // pyright leaves dot folders out unless a config names excludes.
-        assert_eq!(created.ignores, vec![t.0.join(".cursorignore")]);
+        assert_eq!(created.ignores, vec![t.0.join(CURSOR_INDEX)]);
         assert!(!t.0.join(".graphifyignore").exists());
+        // Cursor's agents may read and edit in it: indexed no, denied no.
         assert_eq!(
-            std::fs::read_to_string(t.0.join(".cursorignore")).unwrap(),
-            "target\n.features/\n"
+            std::fs::read_to_string(t.0.join(CURSOR_DENY)).unwrap(),
+            "target"
+        );
+        assert_eq!(
+            std::fs::read_to_string(t.0.join(CURSOR_INDEX)).unwrap(),
+            ".features/\n"
         );
         assert_eq!(
             std::fs::read_to_string(t.0.join("pyrightconfig.json")).unwrap(),
@@ -2281,6 +2345,73 @@ mod tests {
         assert!(again.ignores.is_empty(), "{:?}", again.ignores);
         let exclude = std::fs::read_to_string(repo.join(".git/info/exclude")).unwrap();
         assert_eq!(exclude.matches(".features").count(), 1);
+    }
+
+    #[test]
+    fn a_project_without_cursor_files_gets_none() {
+        let t = Temp::new();
+        assert_eq!(cursor_index_rule(&t.0).unwrap(), None);
+        assert_eq!(free_for_cursor(&t.0), Ok(false));
+        assert!(!t.0.join(CURSOR_INDEX).exists());
+    }
+
+    #[test]
+    fn the_indexing_rule_joins_what_is_there_once() {
+        let t = Temp::new();
+        let index = t.0.join(CURSOR_INDEX);
+        std::fs::write(&index, "dist").unwrap();
+        assert_eq!(cursor_index_rule(&t.0).unwrap(), Some(index.clone()));
+        assert_eq!(cursor_index_rule(&t.0).unwrap(), None);
+        assert_eq!(
+            std::fs::read_to_string(&index).unwrap(),
+            "dist\n.features/\n"
+        );
+    }
+
+    #[test]
+    fn a_project_cursor_was_denied_is_freed_once_and_keeps_its_other_rules() {
+        let t = Temp::new();
+        let (deny, index) = (t.0.join(CURSOR_DENY), t.0.join(CURSOR_INDEX));
+        std::fs::write(&deny, "# why\n**/dist/**\n\n.features/\n.tools/**").unwrap();
+
+        assert_eq!(free_for_cursor(&t.0), Ok(true));
+        assert_eq!(
+            std::fs::read_to_string(&deny).unwrap(),
+            "# why\n**/dist/**\n\n.tools/**"
+        );
+        assert_eq!(std::fs::read_to_string(&index).unwrap(), ".features/\n");
+
+        // Nothing left to do, and the user's own edits stay.
+        std::fs::write(&index, "").unwrap();
+        assert_eq!(free_for_cursor(&t.0), Ok(false));
+        assert_eq!(std::fs::read_to_string(&index).unwrap(), "");
+    }
+
+    #[test]
+    fn only_lines_over_all_of_the_features_folder_go() {
+        for line in [
+            ".features",
+            ".features/",
+            "/.features/",
+            "**/.features/**",
+            ".features/**",
+            "  .features/  ",
+        ] {
+            assert_eq!(
+                without_features(&format!("a\n{line}\nb\n")).as_deref(),
+                Some("a\nb\n")
+            );
+        }
+        for text in [
+            "",
+            "a\n",
+            ".features/a/\n",
+            "x/.features/\n",
+            "# .features/\n",
+            "!.features/\n",
+        ] {
+            assert_eq!(without_features(text), None, "{text}");
+        }
     }
 
     #[test]

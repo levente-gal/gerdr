@@ -137,6 +137,8 @@ pub struct Features {
     /// The feature folders whose docs link was seen to this run:
     /// `link_feature_docs` goes once for each.
     pub(crate) docs_linked: BTreeSet<PathBuf>,
+    /// The project roots `layout::free_for_cursor` went over this run.
+    pub(crate) cursor_freed: BTreeSet<PathBuf>,
     /// The code graph builds running, by project and slug, to stop.
     pub(crate) graphs: BTreeMap<(String, String), Arc<graph::Run>>,
     /// The features whose repositories changed under a code graph build:
@@ -345,6 +347,12 @@ pub(crate) enum Done {
     DocsLinked {
         title: String,
         result: Result<Option<PathBuf>, String>,
+    },
+    /// `.features` was taken out of `.cursorignore` in `root` if it was
+    /// there, and whether it was, or why not.
+    CursorFreed {
+        root: PathBuf,
+        result: Result<bool, String>,
     },
     /// A build of feature `slug`'s code graphs ended.
     Graphed {
@@ -4573,6 +4581,14 @@ impl Gerdr {
                     ));
                 }
             },
+            Done::CursorFreed { root, result } => match result {
+                Ok(false) => {}
+                Ok(true) => self.show_success(cursor_freed_text(&root)),
+                Err(why) => {
+                    tracing::warn!("opening {} to Cursor: {why}", root.display());
+                    self.show_warning(format!("Cursor agents can't edit feature folders: {why}"));
+                }
+            },
             Done::Graphed {
                 project,
                 slug,
@@ -8300,6 +8316,18 @@ fn created_text(title: &str, root: &Path, ignores: &[PathBuf]) -> String {
     )
 }
 
+/// What the toast says once `.features` left `root`'s `.cursorignore`
+/// (checklist D1).
+fn cursor_freed_text(root: &Path) -> String {
+    format!(
+        "Cursor agents can edit feature folders \u{b7} moved {} from {} to {} in {}",
+        layout::FEATURES_DIR,
+        layout::CURSOR_DENY,
+        layout::CURSOR_INDEX,
+        tilde(root)
+    )
+}
+
 /// What the toast says once `names` were linked to feature `title`, and
 /// the ignore files that took it (checklist D1).
 fn linked_text(title: &str, names: &[String], root: &Path, ignores: &[PathBuf]) -> String {
@@ -8933,6 +8961,17 @@ fn current_line(feature: &Feature, stage: Stage, state: &LineState, now: u64) ->
     }
 }
 
+/// The stage last worked on, when the flow has since gone back before it:
+/// of what ran after the current stage, what ran last. The stage the flow
+/// left is kept as of then, older marks as of when they were made.
+fn left_off(feature: &Feature) -> Option<Stage> {
+    let current = feature.current()?;
+    (feature.ran_once.iter())
+        .filter(|(stage, _)| **stage > current)
+        .max_by_key(|(stage, at)| (**at, **stage))
+        .map(|(stage, _)| *stage)
+}
+
 /// How `stage` of `feature` reads, on the rail and in the dots of its
 /// sidebar card alike.
 fn node_mark(feature: &Feature, stage: Stage, ctx: RowCtx, state: &LineState) -> NodeMark {
@@ -8951,6 +8990,7 @@ fn node_mark(feature: &Feature, stage: Stage, ctx: RowCtx, state: &LineState) ->
         StageMark::Current if waits(feature, stage, state) => NodeMark::Waiting,
         StageMark::Current if turned == Some(stage) && at_work.is_some() => NodeMark::Paused,
         StageMark::Current => NodeMark::Current,
+        StageMark::Later if left_off(feature) == Some(stage) => NodeMark::Paused,
         StageMark::Later if feature.ran_once.contains_key(&stage) => NodeMark::Ran,
         StageMark::Later => NodeMark::Later,
     }
@@ -12551,11 +12591,11 @@ pub(crate) mod tests {
         // The fixes change the code: the marks from Build on go. What ran
         // doesn't turn into stages that never did, and when it ran still shows.
         f = in_round(f, Stage::AiReview, FixPhase::Fixing);
-        assert_eq!(f.invalidate("changed", 1_500), Some(Stage::Build));
+        assert_eq!(f.invalidate("changed", 2_500), Some(Stage::Build));
         assert_eq!(turned_back(&f, running), Some(Stage::AiReview));
         assert_eq!(
             rail_marks(&f, running),
-            [Done, Done, Done, Current, Ran, Ran, Later, Later, Later]
+            [Done, Done, Done, Current, Ran, Paused, Later, Later, Later]
         );
         let state = PanelState::default();
         let asked = rail_node(
@@ -12569,13 +12609,36 @@ pub(crate) mod tests {
         f.last_fix_round = f.fix_round.take();
         assert_eq!(turned_back(&f, at_rest), Some(Stage::AiReview));
         // Build marked done: the flow goes on, and the line goes. The stages
-        // ahead stay grey until they are marked again.
-        f.tick(1_600, "you", Some("changed"));
+        // ahead stay as they were until they are marked again.
+        f.tick(2_600, "you", Some("changed"));
         assert_eq!(turned_back(&f, at_rest), None);
         assert_eq!(
             rail_marks(&f, at_rest),
-            [Done, Done, Done, Done, Current, Ran, Later, Later, Later]
+            [Done, Done, Done, Done, Current, Paused, Later, Later, Later]
         );
+    }
+
+    #[test]
+    fn the_stage_left_off_at_is_the_one_that_ran_last() {
+        let mut f = feature("b", vec![repo("api", true)], 3);
+        assert_eq!(f.current(), Some(Stage::Build));
+        assert_eq!(left_off(&f), None);
+        // What ran last counts, not what stands furthest on.
+        f.ran_once.insert(Stage::ManualTest, 100);
+        f.ran_once.insert(Stage::AiReview, 200);
+        assert_eq!(left_off(&f), Some(Stage::AiReview));
+        // In the same second, the later stage.
+        f.ran_once.insert(Stage::CodeReview, 200);
+        assert_eq!(left_off(&f), Some(Stage::CodeReview));
+        // Starting over forgets what came after it.
+        assert!(f.start_over(Stage::Build, 300));
+        assert_eq!(left_off(&f), None);
+        // The stage it is at isn't one it left, though it ran once.
+        let mut f = feature("b", vec![repo("api", true)], 5);
+        f.ran_once.insert(Stage::AiReview, 200);
+        assert_eq!(left_off(&f), None);
+        let marks = rail_marks(&f, RowCtx::default());
+        assert_eq!(marks[stage_index(Stage::AiReview)], NodeMark::Current);
     }
 
     #[test]
@@ -15262,6 +15325,15 @@ pub(crate) mod tests {
              pyrightconfig.json, /elsewhere/.git/info/exclude"
         );
         assert_eq!(created_text("X", root, &[]), "Created \u{201c}X\u{201d}");
+    }
+
+    #[test]
+    fn the_cursor_toast_says_what_moved_where() {
+        assert_eq!(
+            cursor_freed_text(Path::new("/w/multi")),
+            "Cursor agents can edit feature folders \u{b7} moved .features from \
+             .cursorignore to .cursorindexingignore in /w/multi"
+        );
     }
 
     #[test]
