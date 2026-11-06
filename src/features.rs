@@ -3561,10 +3561,17 @@ impl FeaturePanel {
                 if bare && self.focus == TabArea::Findings && diff_note.is_some() =>
             {
                 let c = diff_note?;
-                return Some(match refused {
-                    Some(why) => PanelOutcome::FindingRefused(why),
-                    None => PanelOutcome::DeleteDiffNote(c.clone()),
-                });
+                if let Some(why) = refused {
+                    return Some(PanelOutcome::FindingRefused(why));
+                }
+                // The first press arms it (checklist C4): the next card takes
+                // its place, so a press too many would hit that one.
+                let key = format!("note:{}:{}", note_id(c), c.text);
+                if armed.as_ref() != Some(&key) {
+                    self.armed = Some(key);
+                    return None;
+                }
+                return Some(PanelOutcome::DeleteDiffNote(c.clone()));
             }
             Keysym::Return | Keysym::KP_Enter
                 if plain && self.focus == TabArea::Findings && diff_note.is_some() =>
@@ -3607,7 +3614,16 @@ impl FeaturePanel {
                     return Some(PanelOutcome::FindingRefused(why));
                 }
                 if f.yours {
-                    return Some(delete_own_outcome(f));
+                    let outcome = delete_own_outcome(f);
+                    let key = format!("own:{}", f.id);
+                    // As a comment left in the diff: the first press arms it.
+                    if matches!(outcome, PanelOutcome::DeleteOwnFinding(_))
+                        && armed.as_ref() != Some(&key)
+                    {
+                        self.armed = Some(key);
+                        return None;
+                    }
+                    return Some(outcome);
                 }
                 return Some(match review_import::dismiss_key(f.state) {
                     Ok(None) => PanelOutcome::AskDismiss(f.id.clone()),
@@ -9907,7 +9923,7 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 5] = [
             ("Ctrl+E", "edit its fix, or a comment of your own"),
             (
                 "Del",
-                "dismiss it, saying why, or reopen it; a comment of your own is deleted",
+                "dismiss it, saying why, or reopen it; a comment of your own: press twice to delete",
             ),
             ("Enter", "show it in the diff"),
             ("Alt+E", "show or hide the earlier reviews"),
@@ -10127,9 +10143,13 @@ fn tab_hints(
             let diff_note = on.and_then(ReviewCard::diff_note);
             hints.push(hint("Up / Down", "finding"));
             let decides = can_decide(feature, stage);
+            let del = match panel.armed {
+                Some(_) => hint("Del", "again to delete"),
+                None => hint("Del", "delete"),
+            };
             if diff_note.is_some() && decides {
                 hints.push(hint("c", "edit\u{2026}"));
-                hints.push(hint("Del", "delete"));
+                hints.push(del.clone());
             }
             if let Some(c) = diff_note {
                 match (crate::review::is_general(c), decides) {
@@ -10162,7 +10182,7 @@ fn tab_hints(
                 }
                 match (f.yours, f.state) {
                     (true, FindingState::Open | FindingState::Fix | FindingState::Dismissed) => {
-                        hints.push(hint("Del", "delete"));
+                        hints.push(del);
                     }
                     (false, FindingState::Open | FindingState::Fix) => {
                         hints.push(hint("Del", "dismiss\u{2026}"));
@@ -10497,6 +10517,9 @@ fn tab_view(
         if let Some(card) = cards.into_iter().nth(panel.finding) {
             card.selected = true;
             card.collapsed = false;
+            if panel.armed.is_some() {
+                "Press Del again".clone_into(&mut card.state);
+            }
         }
         for section in &mut page.sections {
             if let PageSection::ShipGroup(group) = section {
@@ -14198,6 +14221,12 @@ pub(crate) mod tests {
         };
         for state in [S::Open, S::Fix, S::Dismissed] {
             f.review.as_mut().unwrap().findings[0].state = state;
+            // The first press arms it; any other key lets it go.
+            assert_eq!(press(&mut panel, &f, key(Keysym::Delete)), None);
+            assert!(panel.armed.is_some());
+            assert_eq!(press(&mut panel, &f, key(Keysym::Down)), None);
+            assert_eq!(panel.armed, None);
+            assert_eq!(press(&mut panel, &f, key(Keysym::Delete)), None);
             assert_eq!(
                 press(&mut panel, &f, key(Keysym::Delete)),
                 Some(PanelOutcome::DeleteOwnFinding(id.clone())),
@@ -14244,6 +14273,7 @@ pub(crate) mod tests {
         let mods = ModifiersState::default();
         let mut hit = |sym| panel.key(&mods, sym, &f, &[], RowCtx::default(), &[], &[], &notes);
         assert_eq!(hit(Keysym::c), Some(PanelOutcome::EditDiffNote(c.clone())));
+        assert_eq!(hit(Keysym::Delete), None);
         assert_eq!(
             hit(Keysym::Delete),
             Some(PanelOutcome::DeleteDiffNote(c.clone()))
@@ -14393,11 +14423,12 @@ pub(crate) mod tests {
             Some(PanelOutcome::Remove)
         );
         assert_eq!(press(&mut panel, &f, key(Keysym::f)), None);
-        // An item of the user's: deleted at once, Enter edits it.
+        // An item of the user's: Del twice deletes it, Enter edits it.
         let added = review_import::add(f.review.as_mut().unwrap(), "Rename it").unwrap();
         (f.review.as_mut().unwrap().findings).retain(|finding| finding.id == added);
         panel.focus = TabArea::Findings;
         panel.finding = 0;
+        assert_eq!(press(&mut panel, &f, key(Keysym::Delete)), None);
         assert_eq!(
             press(&mut panel, &f, key(Keysym::Delete)),
             Some(PanelOutcome::DeleteOwnFinding(added.clone()))

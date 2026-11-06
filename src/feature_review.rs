@@ -682,12 +682,8 @@ impl Gerdr {
         if let Some(fe) = (self.wd_mut().and_then(|wd| wd.feature.as_mut()))
             .filter(|fe| fe.project == project && fe.slug == slug)
         {
+            // Its diff is being read: the cursor goes there once it is.
             fe.focus_note = Some(c);
-        }
-        // Its diff may be read already: else this waits for that.
-        let env = self.worktree_env();
-        if let Some(wd) = self.wd_mut() {
-            wd.place_findings(env);
         }
     }
 

@@ -760,7 +760,11 @@ pub fn delete_own(review: &mut AiReview, id: &str) -> Result<(usize, Finding), S
     match review.findings[at].state {
         FindingState::Sent => Err(SENT.to_owned()),
         FindingState::Fixed => Err(FIXED.to_owned()),
-        _ => Ok((at, review.findings.remove(at))),
+        _ => {
+            // An older record has its ids only in its list: remember this one.
+            review.own_made = own_ids(review).max().unwrap_or(0).max(review.own_made);
+            Ok((at, review.findings.remove(at)))
+        }
     }
 }
 
@@ -1452,6 +1456,12 @@ mod tests {
         let first = add(&mut review, "One").unwrap();
         delete_own(&mut review, &first).unwrap();
         assert_ne!(add(&mut review, "Two").unwrap(), first);
+        // Nor one from a record older than `own_made`.
+        let mut review = severities(&[]);
+        let old = add(&mut review, "Old").unwrap();
+        review.own_made = 0;
+        delete_own(&mut review, &old).unwrap();
+        assert_ne!(add(&mut review, "New").unwrap(), old);
         // Nor one only an earlier review still holds, in an older record.
         let mut review = severities(&[]);
         review.rounds.push(ReviewRound {
