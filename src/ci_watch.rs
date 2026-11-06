@@ -415,7 +415,7 @@ fn repo_home(url: &str) -> Option<String> {
 
 /// The tab of `ws` and the leaf in it showing a page `wanted` takes (or
 /// waiting for one), if any; the page is given without a trailing "/".
-fn showing(ws: &Workspace, wanted: impl Fn(&str) -> bool) -> Option<(usize, u32)> {
+pub(crate) fn showing(ws: &Workspace, wanted: impl Fn(&str) -> bool) -> Option<(usize, u32)> {
     let same = |command: &Option<String>| {
         command
             .as_deref()

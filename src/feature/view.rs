@@ -199,6 +199,8 @@ pub fn rebased(feature: &Feature, paths: &Paths, id: &str) -> Result<Feature, St
         setup.machine.get_or_insert_with(|| id.to_owned());
     }
     if let Some(sandbox) = &mut out.sandbox {
+        // Not known yet: never what those numbers happen to be here.
+        sandbox.elsewhere = Some(Default::default());
         for pane in &mut sandbox.panes {
             let mut one = Some(std::mem::take(pane));
             name(&mut one);
@@ -452,6 +454,21 @@ mod tests {
         );
         assert_eq!(run.pane.as_deref(), Some("m1/w1:p1"));
         assert_eq!(run.machine.as_deref(), Some("m1"));
+    }
+
+    #[test]
+    fn a_sandbox_read_from_there_is_not_looked_up_here() {
+        let mut f = there();
+        let me = crate::feature::sandbox_run::SandboxRun {
+            panes: vec!["w3:p1".into()],
+            ..Default::default()
+        };
+        f.sandbox = Some(me);
+        let out = rebased(&f, &paths(), "m1").unwrap();
+        let run = out.sandbox.as_ref().unwrap();
+        assert!(run.elsewhere.is_some());
+        assert_eq!(run.panes, ["m1/w3:p1"]);
+        assert_eq!(panes_of(&out), ["m1/w1:p1", "m1/w3:p1"]);
     }
 
     #[test]

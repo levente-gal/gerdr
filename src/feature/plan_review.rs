@@ -38,7 +38,7 @@ use serde_json::Value;
 
 use super::{
     agents::StageRun,
-    review_import::{Severity, clean},
+    review_import::{Severity, clean, quoted},
 };
 
 /// The file the reviewer writes, in the feature data dir.
@@ -340,7 +340,7 @@ fn evidence_of(value: Option<&Value>, k: usize, lacks: &mut Vec<String>) -> Vec<
     for item in list.iter().take(MAX_EVIDENCE) {
         let text_of = |key: &str| item.get(key).and_then(Value::as_str).unwrap_or("");
         let file = clean(text_of("file"), false);
-        let quote = clean(text_of("quote"), false);
+        let quote = quoted(text_of("quote"));
         let line = item.get("line").and_then(Value::as_u64).filter(|n| *n >= 1);
         let (false, false, Some(line)) = (file.is_empty(), quote.is_empty(), line) else {
             lacks.push(format!(
@@ -505,7 +505,7 @@ pub fn add_own(review: &mut PlanReview, text: &str) -> String {
 /// A line of text as a citation compares it: cleaned as the file's quote
 /// was, spaces collapsed.
 fn normal(text: &str) -> String {
-    clean(text, false)
+    quoted(text)
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
@@ -856,7 +856,7 @@ mod tests {
         let t = Temp::new();
         let repos = t.repos();
         let holds = |e: Evidence| citation_holds(&e, &repos);
-        // Spaces, tabs and tags don't count: the file's quote lost them too.
+        // Spaces and tabs don't count: the file's quote lost them too.
         assert!(holds(cited("api", "src/a.rs", 2, "fn a<T>() {")));
         // A few lines off still reads as the same place.
         assert!(holds(cited("api", "src/a.rs", 5, "fn a<T>()")));
@@ -872,6 +872,23 @@ mod tests {
         assert!(!holds(cited("nope", "w.ts", 1, "web line")));
         // No repository, several to pick from.
         assert!(!holds(cited("", "src/a.rs", 2, "fn")));
+    }
+
+    #[test]
+    fn a_quoted_line_of_markup_is_kept_and_holds() {
+        let text = r#"{"suggestions": [{"kind": "gap", "plan": "Milestone 2",
+            "title": "T", "why": "W", "change": "C",
+            "evidence": [{"file": "t.html", "line": 2, "quote": "        </form>"}]}]}"#;
+        let raws = parse(text).unwrap();
+        assert_eq!(raws[0].evidence[0].quote, "</form>");
+        let t = Temp::new();
+        let repos = t.repos();
+        let html = repos[0].1.join("t.html");
+        std::fs::write(&html, "<form>\n  </form>\n<b>x</b> y\n").unwrap();
+        let cite = |line, quote| citation_holds(&cited("api", "t.html", line, quote), &repos);
+        assert!(cite(2, "</form>"));
+        assert!(cite(3, "<b>x</b> y"));
+        assert!(!cite(3, "<i>x</i> y"));
     }
 
     #[test]

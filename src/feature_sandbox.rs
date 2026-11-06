@@ -9,6 +9,10 @@
 //! `localhost` opens inside too (`Gerdr::sandbox_for`), and so reaches this
 //! feature's app at the address the app expects.
 //!
+//! A sandbox runs on the machine that started it, the one writing its feature;
+//! another gerdr showing that feature opens its app and looks at its terminals
+//! (see `machine_sandbox`).
+//!
 //! Start asks first which of the project's commands run, in the restart
 //! dialog (see `restart`). What is checked stays with the feature
 //! (`Feature::sandbox_picks`), not in the project file, and Restart and Reset
@@ -176,18 +180,36 @@ fn has_commands(lists: &PerProject<BTreeMap<String, Vec<String>>>) -> bool {
 /// Whether `command` opens a page on this machine's `localhost`, which means
 /// the sandbox's own inside it. `*.localhost` isn't: T3 Code's pages are named
 /// that way, and its server runs outside.
-fn is_local_page(command: &str) -> bool {
+pub(crate) fn is_local_page(command: &str) -> bool {
+    host_and_port(command).is_some_and(|(host, _)| matches!(host, "localhost" | "127.0.0.1" | "::1"))
+}
+
+/// The port a page on `localhost` is at.
+pub(crate) fn local_port(command: &str) -> Option<u16> {
+    let (host, port) = host_and_port(command)?;
+    matches!(host, "localhost" | "127.0.0.1" | "::1").then_some(port)?
+}
+
+/// The host of a page `command` opens, and its port: `None` when what it says of
+/// that is no port.
+fn host_and_port(command: &str) -> Option<(&str, Option<u16>)> {
     let command = command.trim();
-    let Some(rest) = (command.strip_prefix("http://")).or_else(|| command.strip_prefix("https://"))
-    else {
-        return false;
+    let (rest, usual) = match command.strip_prefix("http://") {
+        Some(rest) => (rest, 80),
+        None => (command.strip_prefix("https://")?, 443),
     };
     let host_port = rest.split(['/', '?', '#']).next().unwrap_or(rest);
-    let host = match host_port.strip_prefix('[') {
-        Some(v6) => v6.split(']').next().unwrap_or(v6),
-        None => host_port.split(':').next().unwrap_or(host_port),
+    let (host, port) = match host_port.strip_prefix('[') {
+        Some(v6) => {
+            let (host, after) = v6.split_once(']').unwrap_or((v6, ""));
+            (host, after.strip_prefix(':'))
+        }
+        None => match host_port.split_once(':') {
+            Some((host, port)) => (host, Some(port)),
+            None => (host_port, None),
+        },
     };
-    matches!(host, "localhost" | "127.0.0.1" | "::1")
+    Some((host, port.map_or(Some(usual), |p| p.parse().ok())))
 }
 
 impl Gerdr {
@@ -505,17 +527,23 @@ impl Gerdr {
         let Some(feature) = self.feature(project, slug) else {
             return;
         };
+        if let Some(id) = feature.writer.clone() {
+            return self.open_seen_sandbox_app(project, slug, &id);
+        }
         let Some(run) = feature.sandbox.as_ref().filter(|r| r.alive()) else {
             return self.show_warning("The sandbox isn't running".into());
         };
-        let set = (self.projects.project(project)).and_then(|p| p.workflow.sandbox_url.clone());
-        let url = set.or_else(|| {
-            sandbox_run::app_port(&run.listening()).map(|port| format!("http://localhost:{port}"))
-        });
-        match url {
+        let ports = run.listening();
+        match self.sandbox_url(project, &ports) {
             Some(url) => self.open_feature_page(project, slug, url),
             None => self.show_warning("Nothing listens in the sandbox yet".into()),
         }
+    }
+
+    /// Where the app of a sandbox of `project` is, with `ports` listening in it.
+    pub(crate) fn sandbox_url(&self, project: &str, ports: &[u16]) -> Option<String> {
+        let set = (self.projects.project(project)).and_then(|p| p.workflow.sandbox_url.clone());
+        set.or_else(|| sandbox_run::app_port(ports).map(|port| format!("http://localhost:{port}")))
     }
 
     fn ask_sandbox(
@@ -782,6 +810,17 @@ mod tests {
         assert!(!is_local_page("https://github.com"));
         assert!(!is_local_page("chromium http://localhost:1"));
         assert!(!is_local_page("zed"));
+    }
+
+    #[test]
+    fn a_local_page_says_its_port() {
+        assert_eq!(local_port("http://localhost:4200/x?y"), Some(4200));
+        assert_eq!(local_port("https://localhost"), Some(443));
+        assert_eq!(local_port("http://127.0.0.1"), Some(80));
+        assert_eq!(local_port("http://[::1]:3000/a"), Some(3000));
+        assert_eq!(local_port("http://localhost:nope"), None);
+        assert_eq!(local_port("http://proj.localhost:3773"), None);
+        assert_eq!(local_port("https://github.com"), None);
     }
 
     fn feature_with(root: &Path) -> Feature {

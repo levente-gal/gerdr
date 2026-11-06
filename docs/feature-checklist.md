@@ -181,6 +181,14 @@ How to use it:
   only shows something. What reads a feature's files goes through `store::dir`:
   a path built from the project folder would miss the copy.
 
+  A sandbox stays on the machine that started it. On another gerdr
+  `SandboxRun::elsewhere` holds how it stands, as that machine's `/proc` says: a
+  pid in the record means nothing here, so nothing looks it up or signals it. Its
+  app's ports open here while the feature's workspace shows a page on `localhost`,
+  each connection a command of its own that enters the namespace there
+  (`machine_sandbox`). A port taken here says so, and a page never opens on it, as
+  that would show what holds it as if it were the sandbox.
+
 ## X. State across places
 
 - **X1** The same count or "seen" state is shared everywhere it shows:

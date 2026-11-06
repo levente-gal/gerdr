@@ -64,6 +64,7 @@ mod keys;
 mod launch;
 mod layout;
 mod machine_checks;
+mod machine_sandbox;
 mod machine_views;
 mod machine_work;
 mod machines;
