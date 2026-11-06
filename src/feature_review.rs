@@ -671,8 +671,9 @@ impl Gerdr {
         let done = self.change_diff_notes(project, slug, |own| {
             own.iter_mut().find(|x| *x == c).map(|x| x.text = text)
         });
-        if done.is_none() {
-            self.show_warning("That comment is gone already".into());
+        match done {
+            Some(()) => self.show_success("Comment saved, to go to Build with the fixes".into()),
+            None => self.show_warning("That comment is gone already".into()),
         }
     }
 
