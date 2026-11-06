@@ -30,6 +30,8 @@ use crate::{home_dir, layout::Dir, state_dir};
 const SOURCE: &str = "gerdr";
 /// How long a request may take before gerdr gives up on it.
 const TIMEOUT: Duration = Duration::from_secs(3);
+/// What the server answers of a pane it doesn't have.
+const NO_PANE: &str = "pane not found";
 /// How long a ping may take when only checking whether a server runs.
 const PROBE: Duration = Duration::from_millis(300);
 /// How long a server gerdr started may take to answer.
@@ -987,6 +989,14 @@ impl Herdr {
         )
     }
 
+    /// Whether `err`, the error of a call about a pane, says that pane is
+    /// gone: the server says so, or there is no server, and its terminals
+    /// ended with it. Any other says nothing of it: a server that didn't answer
+    /// in time still has its terminals.
+    pub fn pane_lost(&self, err: &str) -> bool {
+        err.ends_with(NO_PANE) || UnixStream::connect(&self.socket).is_err()
+    }
+
     /// Stop the session's server, ending everything that runs in it. It
     /// saves its layout first.
     pub fn stop(&mut self) -> Result<(), String> {
@@ -1548,6 +1558,23 @@ fn moved_pane(mut result: Value) -> Result<PaneInfo, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_server_that_doesnt_answer_says_nothing_of_a_pane() {
+        use std::os::unix::net::UnixListener;
+        let socket = std::env::temp_dir().join(format!("gerdr-mute-{}", std::process::id()));
+        let _ = std::fs::remove_file(&socket);
+        // It takes the connection and stays silent, as one stalled does.
+        let listener = UnixListener::bind(&socket).unwrap();
+        let mut herdr = Herdr::on_socket(socket.clone());
+        herdr.timeout = Duration::from_millis(50);
+        let err = herdr.process_info("p1").unwrap_err();
+        assert!(!herdr.pane_lost(&err), "{err}");
+        assert!(herdr.pane_lost("pane.process_info: pane not found"));
+        drop(listener);
+        let _ = std::fs::remove_file(&socket);
+        assert!(herdr.pane_lost(&err), "no server: {err}");
+    }
 
     #[test]
     fn a_shell_line_clears_the_input_line_first() {

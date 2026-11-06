@@ -222,13 +222,13 @@ pub fn read_tail(socket: PathBuf, pane: &str) -> Result<Vec<String>, String> {
     Ok(tail(&herdr.pane_read(pane, "visible", READ_LINES)?))
 }
 
-/// Read what the card of the check running in pane `pane` previews (see
-/// `verify::preview`), from the herdr server on `socket` (blocking: run it
-/// off the UI thread).
-pub fn read_check_tail(socket: PathBuf, pane: &str) -> Result<Vec<String>, String> {
+/// Read what the card of the check running in pane `pane` previews, which
+/// `began` or not (see `verify::preview`), from the herdr server on `socket`
+/// (blocking: run it off the UI thread).
+pub fn read_check_tail(socket: PathBuf, pane: &str, began: bool) -> Result<Vec<String>, String> {
     let read = verify::PREVIEW_READ;
     let text = Herdr::on_socket(socket).pane_read(pane, "recent_unwrapped", read)?;
-    Ok(verify::preview(&text))
+    Ok(verify::preview(&text, began))
 }
 
 #[cfg(test)]
