@@ -31,6 +31,8 @@ pub enum Ask {
     EditOwn,
     /// A new item of the user's own.
     Add,
+    /// What a comment the user left in the diff says.
+    EditDiffNote,
 }
 
 /// What was typed and left: by project, slug, what was asked and the finding.
@@ -54,6 +56,8 @@ pub struct FindingDialog {
     pub hover: Option<FindingDialogHit>,
     /// Saving it marks the finding to fix too.
     pub marks_fix: bool,
+    /// The comment in the diff it edits (`Ask::EditDiffNote`).
+    pub note: Option<crate::review::Comment>,
 }
 
 /// What the dialog asks gerdr to do.
@@ -69,7 +73,7 @@ impl FindingDialog {
         let empty = self.fields.first().is_none_or(|f| f.trim().is_empty());
         match self.ask {
             Ask::Dismiss if empty => Some("Say why you dismiss it."),
-            Ask::Add | Ask::EditOwn if empty => Some("Say what to fix."),
+            Ask::Add | Ask::EditOwn | Ask::EditDiffNote if empty => Some("Say what to fix."),
             _ => None,
         }
     }
@@ -153,6 +157,11 @@ impl FindingDialog {
                     "Save"
                 },
             ),
+            Ask::EditDiffNote => (
+                format!("Edit your comment on {}", self.id),
+                &[("Comment", "What should change", 6)],
+                "Save",
+            ),
             Ask::Add => (
                 "Add a comment".to_owned(),
                 &[("Comment", "What should change", 6)],
@@ -235,6 +244,7 @@ impl Gerdr {
             error: None,
             hover: None,
             marks_fix,
+            note: None,
         });
         // It takes the pointer from the client under it.
         self.refresh_pointer_focus();
@@ -300,6 +310,17 @@ impl Gerdr {
         }
     }
 
+    /// Ask what comment `c` the user left in the diff should say.
+    pub fn ask_edit_diff_note(&mut self, project: &str, slug: &str, c: &crate::review::Comment) {
+        let about = "It goes to the Build agent with the fixes".to_owned();
+        let id = crate::features::note_id(c);
+        let from = vec![c.text.clone()];
+        self.open_finding_dialog(project, slug, Ask::EditDiffNote, &id, about, from, false);
+        if let Some(dialog) = self.features.finding_dialog.as_mut() {
+            dialog.note = Some(c.clone());
+        }
+    }
+
     /// Ask for a comment of the user's own, to go with the fixes.
     pub fn ask_add_comment(&mut self, project: &str, slug: &str) {
         let stage = self
@@ -351,9 +372,16 @@ impl Gerdr {
                 let why = Decision::Dismiss(first.to_owned());
                 self.decide_finding(project, slug, id, why);
                 self.feature_findings_changed(project, slug);
+                // Its card closes: the keyboard goes on to what is left.
+                self.select_next_open_after(id);
             }
             Ask::Edit => self.edit_finding(project, slug, id, first),
             Ask::EditOwn => self.edit_own_finding(project, slug, id, first),
+            Ask::EditDiffNote => {
+                if let Some(note) = &dialog.note {
+                    self.edit_diff_note(project, slug, note, first);
+                }
+            }
             Ask::Add => self.add_finding_comment(project, slug, first),
         }
     }
@@ -440,6 +468,7 @@ mod tests {
             error: None,
             hover: None,
             marks_fix: true,
+            note: None,
         }
     }
 

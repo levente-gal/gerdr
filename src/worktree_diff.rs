@@ -200,6 +200,7 @@ pub struct Taken {
     /// Why the last key did nothing.
     pub error: Option<String>,
     pub decided: Option<(String, Decision)>,
+    pub delete_own: Option<String>,
     pub edit_finding: Option<String>,
     /// A finding's id, and what the user's comment on it now says.
     pub noted: Option<(String, String)>,
@@ -1270,6 +1271,7 @@ impl WorktreeDiff {
         Taken {
             error: signals.error.flatten(),
             decided: signals.decided,
+            delete_own: signals.delete_own,
             edit_finding: signals.edit_finding,
             noted: signals.noted,
         }
@@ -1612,6 +1614,7 @@ impl crate::Gerdr {
         let Taken {
             error,
             decided,
+            delete_own,
             edit_finding,
             noted,
         } = self
@@ -1623,6 +1626,9 @@ impl crate::Gerdr {
         }
         if let Some((id, decision)) = decided {
             self.feature_decide(id, decision);
+        }
+        if let Some(id) = delete_own {
+            self.feature_delete_own(&id);
         }
         if let Some(id) = edit_finding {
             self.feature_edit_finding(&id);

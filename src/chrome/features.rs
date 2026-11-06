@@ -615,6 +615,15 @@ impl FindingTag {
     }
 }
 
+/// How a finding the user decided on is marked on its card.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CardStripe {
+    /// It goes to Build with the next fixes.
+    ToFix,
+    /// It went to Build.
+    Sent,
+}
+
 /// An AI review finding, a Verify check or a Manual test criterion, as its
 /// stage's page shows it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -640,6 +649,10 @@ pub struct FindingCard {
     pub made: bool,
     /// It no longer asks for anything: fixed or dismissed.
     pub faded: bool,
+    /// It shows as one line, until selected: what it says and its first button.
+    pub collapsed: bool,
+    /// The mark down its left edge: what it has been decided to be.
+    pub stripe: Option<CardStripe>,
     /// The note or comment being written on it.
     pub field: Option<Line>,
     /// What its field shows while empty.
@@ -1346,6 +1359,23 @@ fn wrapped(text: &str, size: f32, width: i32) -> Rc<Vec<String>> {
     })
 }
 
+/// `text` cut to fit `width` at `size`, with an ellipsis if it had to be.
+fn cut_to_width(text: &str, size: f32, width: i32) -> String {
+    let width = width as f32;
+    if width_of(text, size) <= width {
+        return text.to_owned();
+    }
+    let mut cut: String = text.to_owned();
+    while !cut.is_empty() {
+        cut.pop();
+        let trimmed = cut.trim_end();
+        if width_of(&format!("{trimmed}\u{2026}"), size) <= width {
+            return format!("{trimmed}\u{2026}");
+        }
+    }
+    "\u{2026}".to_owned()
+}
+
 /// `wrap` to at most `max` lines.
 fn wrap_to(text: &str, size: f32, width: i32, max: usize) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
@@ -1648,6 +1678,14 @@ impl Stack {
         self.x += AGENT_PAD;
         self.w = (w - 2 * AGENT_PAD).max(1);
         self.y += AGENT_PAD;
+        if card.collapsed {
+            self.collapsed_card(card, page, buttons);
+            self.y += AGENT_PAD;
+            (self.x, self.w) = (x, w);
+            let frame = Rectangle::new((x, top).into(), (w, self.y - top).into());
+            self.pieces.insert(frame_at, (frame, Piece::FindingCard(k)));
+            return frame;
+        }
         let body = if card.faded { Ink::Muted } else { Ink::Text };
         let (left, width) = (self.x, self.w);
         // A check's dot says how it stands; its text goes right of it.
@@ -1671,26 +1709,44 @@ impl Stack {
             FindingTag::Yours => Some(("yours", Ink::Accent)),
             _ => None,
         };
+        // What the user decided stands out from the rest of the line.
+        let marked = card.stripe == Some(CardStripe::ToFix) && !card.state.is_empty();
         let mut rest = Vec::new();
-        rest.extend((!card.state.is_empty()).then(|| card.state.clone()));
+        rest.extend((!card.state.is_empty() && !marked).then(|| card.state.clone()));
         rest.push(card.place.clone());
         let mut rest = rest.join(" \u{b7} ");
-        if let Some((tag, ink)) = tag {
-            let ink = if card.faded { Ink::Muted } else { ink };
-            let tag_w = width_of(tag, Font::Small.size()).ceil() as i32 + 1;
-            self.pieces.push((
-                Rectangle::new((self.x, self.y).into(), (tag_w, TAIL_LINE).into()),
+        let word = |this: &mut Self, text: &str, ink: Ink, bold: bool| {
+            let w = width_of(text, Font::Small.size()).ceil() as i32 + 1;
+            // Bold runs wider than it measures.
+            let w = if bold { w * 9 / 8 } else { w };
+            this.pieces.push((
+                Rectangle::new((this.x, this.y).into(), (w, TAIL_LINE).into()),
                 Piece::Text {
-                    text: tag.to_owned(),
+                    text: text.to_owned(),
                     font: Font::Small,
                     ink,
-                    bold: false,
+                    bold,
                 },
             ));
-            rest = format!("\u{b7} {rest}");
             // Past the dot too, if it has one.
-            self.x += tag_w;
-            self.w = (self.w - tag_w).max(1);
+            this.x += w;
+            this.w = (this.w - w).max(1);
+        };
+        if let Some((tag, ink)) = tag {
+            let ink = if card.faded { Ink::Muted } else { ink };
+            word(self, tag, ink, false);
+            rest = format!("\u{b7} {rest}");
+        }
+        if marked {
+            let text = match tag {
+                Some(_) => format!("\u{b7} {}", card.state),
+                None => card.state.clone(),
+            };
+            word(self, &text, Ink::Accent, true);
+            rest = match tag {
+                Some(_) => rest,
+                None => format!("\u{b7} {rest}"),
+            };
         }
         self.all_text(&rest, Font::Small, Ink::Muted, false, TAIL_LINE);
         (self.x, self.w) = (left, width);
@@ -1744,6 +1800,72 @@ impl Stack {
         let frame = Rectangle::new((x, top).into(), (w, self.y - top).into());
         self.pieces.insert(frame_at, (frame, Piece::FindingCard(k)));
         frame
+    }
+
+    /// A collapsed card's one line: tag, title and where it stands cut to fit,
+    /// its first button at the right.
+    fn collapsed_card(
+        &mut self,
+        card: &FindingCard,
+        page: &StagePage,
+        buttons: &mut [Option<Rect>],
+    ) {
+        let first = card
+            .buttons
+            .first()
+            .copied()
+            .filter(|b| *b < page.buttons.len());
+        let line = if first.is_some() {
+            ROW_BUTTON
+        } else {
+            BODY_LINE
+        };
+        let (mut left, mut right) = (self.x, self.x + self.w);
+        if let Some(b) = first {
+            let w = button_width(&page.buttons[b].label);
+            right -= w;
+            buttons[b] = Some(Rectangle::new(
+                (right, self.y).into(),
+                (w, ROW_BUTTON).into(),
+            ));
+            right -= QUIT_BUTTON_GAP;
+        }
+        let tag = match card.tag {
+            FindingTag::High => Some("high"),
+            FindingTag::Medium => Some("medium"),
+            FindingTag::Low => Some("low"),
+            FindingTag::Yours => Some("yours"),
+            _ => None,
+        };
+        let text_y = self.y + (line - TAIL_LINE) / 2;
+        if let Some(tag) = tag {
+            let w = width_of(tag, Font::Small.size()).ceil() as i32 + 1;
+            self.pieces.push((
+                Rectangle::new((left, text_y).into(), (w, TAIL_LINE).into()),
+                Piece::Text {
+                    text: tag.to_owned(),
+                    font: Font::Small,
+                    ink: Ink::Muted,
+                    bold: false,
+                },
+            ));
+            left += w + QUIT_BUTTON_GAP;
+        }
+        let mut text = card.title.clone();
+        if !card.state.is_empty() {
+            text.push_str(&format!(" \u{b7} {}", card.state));
+        }
+        let room = (right - left).max(1);
+        self.pieces.push((
+            Rectangle::new((left, text_y).into(), (room, TAIL_LINE).into()),
+            Piece::Text {
+                text: cut_to_width(&text, Font::Small.size(), room),
+                font: Font::Small,
+                ink: Ink::Muted,
+                bold: false,
+            },
+        ));
+        self.y += line;
     }
 
     /// The user's comment on a finding, a card of its own inside the
@@ -3586,9 +3708,8 @@ impl Painter {
             // there on.
             let ran = |i: usize| past(i) == Some(NodeMark::Ran);
             let into_build = view.back.is_some_and(|back| i + 1 == back.to);
-            let once = view.back.is_some_and(|back| i >= back.to)
-                || ran(i)
-                || (ran(i + 1) && !into_build);
+            let once =
+                view.back.is_some_and(|back| i >= back.to) || ran(i) || (ran(i + 1) && !into_build);
             let color = match (done, once) {
                 (false, _) => p.border,
                 (true, false) => p.success,
@@ -4420,6 +4541,18 @@ impl Painter {
                     let r = AGENT_RADIUS * s;
                     c.rounded(x, y, w, h, r, p.accent);
                     c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, r - b, p.background);
+                }
+                if let Some(stripe) = card.stripe {
+                    let (x, y, _, h) = rect_px(rect, scale);
+                    let s = scale as f32;
+                    let colour = match stripe {
+                        CardStripe::ToFix => p.accent,
+                        CardStripe::Sent => p.muted,
+                    };
+                    let inset = AGENT_RADIUS * s;
+                    let (bar, edge) = ((3.0 * s).round(), (2.0 * s).round());
+                    let high = (h - 2.0 * inset).max(0.0);
+                    c.rounded(x + edge, y + inset, bar, high, bar / 2.0, colour);
                 }
                 for &i in &card.buttons {
                     if let Some(r) = l.page_buttons.get(i).copied().flatten() {
@@ -6321,6 +6454,8 @@ mod tests {
                 comment_buttons: Vec::new(),
                 made: false,
                 faded: false,
+                collapsed: false,
+                stripe: None,
                 field: None,
                 field_hint: "",
                 selected: false,
@@ -6396,6 +6531,59 @@ mod tests {
             let ratio = contrast(comment_stripe(p), ground);
             assert!(ratio >= 3.0, "its stripe is {ratio:.2}:1");
         }
+    }
+
+    #[test]
+    fn a_collapsed_card_is_one_line_with_only_its_first_button() {
+        let area = Rectangle::new((0, 0).into(), (1000, 800).into());
+        let mut view = tab_view();
+        view.page.sections.clear();
+        view.page.buttons = ["Reopen", "Comment", "Show in diff"]
+            .map(|label| PageButton {
+                label: label.into(),
+                style: ButtonStyle::Plain,
+            })
+            .to_vec();
+        let card = |collapsed| FindingCard {
+            tag: FindingTag::Low,
+            title: "A title long enough to go past the end of any line it is cut to fit on, \
+                    however wide the page it sits on happens to be today"
+                .repeat(3),
+            state: "dismissed: why".into(),
+            place: "r1-1 \u{b7} a.rs:1".into(),
+            body: "Body".into(),
+            preview: Vec::new(),
+            fix: "Fix: this".into(),
+            note: String::new(),
+            comment: String::new(),
+            comment_buttons: Vec::new(),
+            made: false,
+            faded: true,
+            collapsed,
+            stripe: None,
+            field: None,
+            field_hint: "",
+            selected: false,
+            buttons: vec![0, 1, 2],
+        };
+        view.page.sections.push(PageSection::Finding(card(true)));
+        let closed = feature_tab_layout(&view, area);
+        let frame = closed.finding_cards[0];
+        assert_eq!(frame.size.h, 2 * AGENT_PAD + ROW_BUTTON);
+        assert!(closed.page_buttons[0].is_some());
+        assert!(closed.page_buttons[1].is_none() && closed.page_buttons[2].is_none());
+        let button = closed.page_buttons[0].unwrap();
+        assert!(button.loc.x + button.size.w <= frame.loc.x + frame.size.w);
+        // Its text stays clear of the button.
+        assert_eq!(
+            width_of(&cut_to_width("abc def ghi", 12.0, 1), 12.0) as i32,
+            width_of("\u{2026}", 12.0) as i32
+        );
+        assert_eq!(cut_to_width("short", 12.0, 500), "short");
+        view.page.sections[0] = PageSection::Finding(card(false));
+        let open = feature_tab_layout(&view, area);
+        assert!(open.finding_cards[0].size.h > frame.size.h);
+        assert!(open.page_buttons.iter().take(3).all(Option::is_some));
     }
 
     #[test]

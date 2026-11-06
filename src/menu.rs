@@ -171,6 +171,22 @@ pub enum MenuAction {
         id: String,
         note: String,
     },
+    /// Undo deleting an item of the user's own from an AI review: put it back
+    /// at index `at`.
+    RestoreOwnFinding {
+        project: String,
+        slug: String,
+        at: usize,
+        finding: Box<crate::feature::review_import::Finding>,
+    },
+    /// Undo deleting a comment the user left in a feature's diff: put it back
+    /// at index `at` of their comments.
+    RestoreDiffNote {
+        project: String,
+        slug: String,
+        at: usize,
+        comment: Box<crate::review::Comment>,
+    },
     /// Undo removing one of the user's own suggestions of a plan review:
     /// put it back at index `at`.
     RestoreSuggestion {
@@ -533,6 +549,18 @@ impl Gerdr {
             } => {
                 self.note_finding(&project, &slug, &id, &note);
             }
+            MenuAction::RestoreOwnFinding {
+                project,
+                slug,
+                at,
+                finding,
+            } => self.restore_own_finding(&project, &slug, at, *finding),
+            MenuAction::RestoreDiffNote {
+                project,
+                slug,
+                at,
+                comment,
+            } => self.restore_diff_note(&project, &slug, at, *comment),
             MenuAction::RestoreSuggestion {
                 project,
                 slug,
