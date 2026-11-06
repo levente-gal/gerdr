@@ -270,6 +270,33 @@ fn base_of(name: &str, main: &Path, bases: &[(String, String)]) -> Result<String
     ))
 }
 
+/// The branches a feature in `main`'s repository can start from, the newest
+/// commit first: local ones and origin's, each name once (`commit_of` takes
+/// the local one first).
+pub fn branches_of(main: &Path) -> Result<Vec<String>, String> {
+    let refs = git(
+        main,
+        &[
+            "for-each-ref",
+            "--sort=-committerdate",
+            "--format=%(refname)",
+            "refs/heads",
+            "refs/remotes/origin",
+        ],
+    )?;
+    let mut seen = std::collections::BTreeSet::new();
+    Ok(refs
+        .lines()
+        .filter_map(|r| {
+            r.strip_prefix("refs/heads/")
+                .or_else(|| r.strip_prefix("refs/remotes/origin/"))
+        })
+        // origin's own pointer at its default branch.
+        .filter(|name| *name != "HEAD" && seen.insert(name.to_string()))
+        .map(str::to_owned)
+        .collect())
+}
+
 /// What `create` did to files outside the feature's folder, to tell the
 /// user (checklist D1).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1908,6 +1935,45 @@ mod tests {
             find_root(&repo, &[], &[], &bases).unwrap().repos[0].base,
             "release"
         );
+    }
+
+    #[test]
+    fn branches_of_lists_local_and_origins_once() {
+        let t = Temp::new();
+        let repo = t.repo("app", "main");
+        run(&repo, &["branch", "next"]);
+        for name in ["main", "dev"] {
+            run(
+                &repo,
+                &["update-ref", &format!("refs/remotes/origin/{name}"), "HEAD"],
+            );
+        }
+        run(
+            &repo,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ],
+        );
+        run(
+            &repo,
+            &["update-ref", "refs/remotes/other/elsewhere", "HEAD"],
+        );
+        let mut all = branches_of(&repo).unwrap();
+        all.sort();
+        assert_eq!(all, ["dev", "main", "next"]);
+    }
+
+    #[test]
+    fn a_base_only_on_origin_starts_a_worktree() {
+        let t = Temp::new();
+        let repo = t.repo("app", "main");
+        run(&repo, &["update-ref", "refs/remotes/origin/dev", "HEAD"]);
+        let mut root = find_root(&repo, &[], &[], &[]).unwrap();
+        root.repos[0].base = "dev".into();
+        let created = create(&root, "x", &[]).unwrap();
+        assert_eq!(created.repos[0].base, "dev");
     }
 
     #[test]

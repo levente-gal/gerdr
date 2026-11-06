@@ -860,6 +860,27 @@ fn default_remote(dir: &Path) -> Option<String> {
     (all.len() == 1).then(|| all[0].clone())
 }
 
+/// The branch `origin` says is its default now, asked over the network: a
+/// clone's `origin/HEAD` stays what it was when cloned, and a fetch doesn't
+/// move it. `None` with no `origin`, or one that names no branch.
+pub fn remote_default(dir: &Path) -> Result<Option<String>, String> {
+    if !remotes(dir).iter().any(|r| r == "origin") {
+        return Ok(None);
+    }
+    let out = exec(
+        dir,
+        &["ls-remote", "--symref", "origin", "HEAD"],
+        Reach::Network,
+    );
+    if !out.ran.ok {
+        return Err(out.ran.output.trim().to_owned());
+    }
+    Ok(out.stdout.lines().find_map(|line| {
+        let (head, name) = line.strip_prefix("ref: refs/heads/")?.split_once('\t')?;
+        (name == "HEAD").then(|| head.to_owned())
+    }))
+}
+
 /// The remote that has a branch `name`: `origin` when several do.
 fn remote_having(dir: &Path, name: &str) -> Option<String> {
     let refs = query(
@@ -2515,6 +2536,26 @@ mod tests {
         branch("feat", &["one"]);
         git(r, &["switch", "-q", "main"]);
         assert_eq!(unmerged_commits(r, "feat"), Some(1));
+    }
+
+    #[test]
+    fn remote_default_sees_past_a_stale_origin_head() {
+        let t = std::env::temp_dir().join(format!("gerdr-remote-default-{}", std::process::id()));
+        let (bare, r) = (t.join("o.git"), t.join("r"));
+        std::fs::create_dir_all(&r).unwrap();
+        git(&t, &["init", "-q", "--bare", "-b", "main", "o.git"]);
+        git(&r, &["init", "-q", "-b", "main"]);
+        assert_eq!(remote_default(&r), Ok(None));
+        git(&r, &["remote", "add", "origin", &bare.to_string_lossy()]);
+        git(&r, &["commit", "-q", "--allow-empty", "-m", "one"]);
+        git(&r, &["push", "-q", "origin", "main", "main:dev"]);
+        git(&r, &["remote", "set-head", "origin", "main"]);
+        assert_eq!(remote_default(&r), Ok(Some("main".to_owned())));
+        // The remote's default moves; the clone's pointer doesn't.
+        git(&bare, &["symbolic-ref", "HEAD", "refs/heads/dev"]);
+        git(&r, &["fetch", "-q", "origin"]);
+        assert_eq!(remote_default(&r), Ok(Some("dev".to_owned())));
+        std::fs::remove_dir_all(&t).unwrap();
     }
 
     /// The files HEAD's commit changed, as `<letter> <path>`.

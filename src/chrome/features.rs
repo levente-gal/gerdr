@@ -44,6 +44,13 @@ const PLACE_GAP: i32 = 12;
 const MARGIN: i32 = 40;
 /// The new feature dialog's buttons.
 pub const NEW_FEATURE_BUTTONS: [&str; 2] = ["Cancel", "Create"];
+/// What the new feature dialog's field says while empty.
+pub const TITLE_HINT: &str = "What it does, in a few words";
+/// How wide a repository row's base branch button is: the same on all, so
+/// they line up, whatever the branch.
+const BASE_BUTTON_W: i32 = 168;
+/// How far a long branch name stays from that button's ends.
+const BASE_BUTTON_INSET: i32 = 8;
 /// The Create button, after Cancel: the dialog's default.
 pub const CREATE: usize = 1;
 /// The new feature dialog's Projects row button: the project picker,
@@ -85,14 +92,16 @@ pub(super) fn stage_dot(mark: StageMark, x: f32, y: f32, d: f32) -> f32 {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NewFeatureRepo {
     pub name: String,
-    /// What follows the name: the branch it starts from and what the
-    /// feature does with it, or why a project can't be linked.
+    /// What follows the name: what the feature does with it, or why a
+    /// project can't be linked.
     pub place: String,
     /// Whether the feature changes it (a project: links it).
     pub touched: bool,
     /// It can't be ticked or left out: the only repository, a project
     /// linked already or not found.
     pub fixed: bool,
+    /// The label of its base branch button, a repository's only.
+    pub base: Option<String>,
 }
 
 /// What the new feature dialog shows.
@@ -100,9 +109,16 @@ pub struct NewFeatureRepo {
 pub struct NewFeatureView {
     /// Its heading: "New feature in “Shop”".
     pub heading: String,
+    /// Its field's text: the title, or what filters the branches.
     pub title: Line,
-    /// The repository row with the keyboard; `None`: the title field.
+    /// What its field says while empty.
+    pub hint: &'static str,
+    /// Its field has the keys.
+    pub field_focus: bool,
+    /// The row with the keyboard; `None`: the title field.
     pub focus: Option<usize>,
+    /// The row slots it makes room for (see `new_feature_layout`).
+    pub slots: usize,
     /// The line about where the feature goes: the root, or that it is
     /// being found, or why there is none.
     pub root: String,
@@ -128,6 +144,8 @@ pub enum NewFeatureHit {
     Field,
     /// Index as in `NewFeatureView::repos`.
     Repo(usize),
+    /// That row's base branch button.
+    Base(usize),
     /// The Projects row's button.
     Link,
     /// 0 Cancel, 1 Create.
@@ -148,6 +166,8 @@ pub struct NewFeatureLayout {
     /// One per repository that fits: the slots the ones from
     /// `NewFeatureView::top` are shown in.
     pub rows: Vec<Rect>,
+    /// Where each of those has its base branch button.
+    pub bases: Vec<Rect>,
     /// Cancel, Create.
     pub buttons: [Rect; 2],
 }
@@ -199,10 +219,16 @@ pub fn new_feature_layout(size: Size<i32, Logical>, repos: usize, error: bool) -
         (projects.loc.x + projects.size.w - link_w, projects.loc.y).into(),
         (link_w, QUIT_BUTTON).into(),
     );
-    let rows = (0..shown as i32)
+    let rows: Vec<Rect> = (0..shown as i32)
         .map(|i| {
             let y = y + i * (CHECKBOX_ROW + ROW_GAP);
             Rectangle::new((x, y).into(), (inner, CHECKBOX_ROW).into())
+        })
+        .collect();
+    let bases = (rows.iter())
+        .map(|row| {
+            let x = row.loc.x + row.size.w - ROW_INSET - BASE_BUTTON_W;
+            Rectangle::new((x, row.loc.y).into(), (BASE_BUTTON_W, row.size.h).into())
         })
         .collect();
     let buttons = dialog_buttons(panel, &NEW_FEATURE_BUTTONS);
@@ -215,6 +241,7 @@ pub fn new_feature_layout(size: Size<i32, Logical>, repos: usize, error: bool) -
         projects,
         link,
         rows,
+        bases,
         buttons: [buttons[0], buttons[1]],
     }
 }
@@ -231,6 +258,9 @@ impl NewFeatureLayout {
         }
         if on(&self.link) {
             return Some(NewFeatureHit::Link);
+        }
+        if let Some(slot) = self.bases.iter().position(on) {
+            return Some(NewFeatureHit::Base(top + slot));
         }
         self.rows
             .iter()
@@ -250,7 +280,7 @@ impl NewFeatureLayout {
 /// The new feature dialog's title field, as the caret and the pointer
 /// care.
 pub fn new_feature_field(view: &NewFeatureView, size: Size<i32, Logical>, scale: f64) -> FieldSpot {
-    let area = new_feature_layout(size, view.repos.len(), view.error.is_some()).field;
+    let area = new_feature_layout(size, view.slots, view.error.is_some()).field;
     FieldSpot {
         area,
         text: field_text(area, scale),
@@ -3408,7 +3438,7 @@ impl Painter {
         scale: f64,
         p: &Palette,
     ) -> MemoryRenderBuffer {
-        let layout = new_feature_layout(size, view.repos.len(), view.error.is_some());
+        let layout = new_feature_layout(size, view.slots, view.error.is_some());
         let panel = layout.panel;
         let mut c = self.popup(panel.size, POPUP_RADIUS, scale, p);
         let s = scale as f32;
@@ -3427,9 +3457,9 @@ impl Painter {
         self.field(
             &mut c,
             &view.title,
-            "What it does, in a few words",
+            view.hint,
             shift(layout.field),
-            view.focus.is_none(),
+            view.field_focus,
             scale,
             p,
         );
@@ -3453,7 +3483,8 @@ impl Painter {
         line(&mut c, &view.projects, projects, FONT_SIZE, p.muted);
 
         let shown = view.repos.iter().enumerate().skip(view.top);
-        for (rect, (i, repo)) in layout.rows.iter().zip(shown) {
+        let slots = layout.rows.iter().zip(&layout.bases);
+        for ((rect, base), (i, repo)) in slots.zip(shown) {
             let rect = shift(*rect);
             let hovered = view.hover == Some(NewFeatureHit::Repo(i)) && !repo.fixed;
             self.row_highlight(
@@ -3469,7 +3500,34 @@ impl Painter {
             );
             let state = if repo.touched { Check::On } else { Check::Off };
             let box_end = self.checkbox(&mut c, check, state, false, scale, p);
-            let end = phys(rect, scale).1 - (ROW_INSET as f32 * s).round();
+            let mut end = phys(rect, scale).1 - (ROW_INSET as f32 * s).round();
+            if let Some(label) = &repo.base {
+                let base = shift(*base);
+                let on = view.hover == Some(NewFeatureHit::Base(i));
+                // A long branch name ellipsizes inside it.
+                let centred = self.text_width(label, FONT_SIZE, scale)
+                    <= ((BASE_BUTTON_W - 2 * BASE_BUTTON_INSET) as f64 * scale) as f32;
+                let word = if centred { label.as_str() } else { "" };
+                self.button(
+                    &mut c,
+                    word,
+                    base,
+                    (on, false),
+                    ButtonStyle::Plain,
+                    scale,
+                    p,
+                );
+                if !centred {
+                    let inside = Rectangle::new(
+                        (base.loc.x + BASE_BUTTON_INSET, base.loc.y).into(),
+                        (BASE_BUTTON_W - 2 * BASE_BUTTON_INSET, base.size.h).into(),
+                    );
+                    let (x, to) = phys(inside, scale);
+                    let at = band(inside, scale);
+                    self.text(&mut c, label, FONT_SIZE, x, to, at, scale, p.text);
+                }
+                end = phys(base, scale).0 - (PLACE_GAP as f32 * s).round();
+            }
             let row_band = band(rect, scale);
             let after = self.text(
                 &mut c,

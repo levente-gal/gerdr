@@ -1600,19 +1600,20 @@ fn dump_status() {
 /// The new feature dialog over three repositories, the second unticked,
 /// and a linked project's one, the keyboard on the title.
 fn new_feature() -> super::NewFeatureView {
-    let repo = |name: &str, base: &str, touched| super::NewFeatureRepo {
+    let repo = |name: &str, base: &str, touched: bool| super::NewFeatureRepo {
         name: name.into(),
-        place: format!(
-            "from {base} \u{b7} {}",
-            if touched { "linked" } else { "left out" }
-        ),
+        place: if touched { "linked" } else { "left out" }.into(),
         touched,
         fixed: false,
+        base: Some(format!("from {base}")),
     };
     super::NewFeatureView {
         heading: "New feature in \u{201c}aft\u{201d}".into(),
         title: Line::from("Bulk export of invoices"),
+        hint: super::TITLE_HINT,
+        field_focus: true,
         focus: None,
+        slots: 4,
         root: "~/Work/aft".into(),
         root_failed: false,
         projects: "Projects: aft (home) \u{b7} billing".into(),
@@ -1620,7 +1621,7 @@ fn new_feature() -> super::NewFeatureView {
         repos: vec![
             repo("api", "dev", true),
             repo("shared", "main", false),
-            repo("web", "dev", true),
+            repo("web", "feature/a-branch-name-too-long-for-its-button", true),
             repo("billing: ledger", "main", false),
         ],
         top: 0,
@@ -1629,9 +1630,41 @@ fn new_feature() -> super::NewFeatureView {
         keys: vec![
             ("Tab", "next"),
             ("Space", "tick"),
+            ("Alt+B", "base branch"),
             ("Ctrl+Shift+L", "link project"),
             ("Esc", "clear"),
         ],
+    }
+}
+
+/// The new feature dialog's list of a repository's branches, filtered, the
+/// keyboard on the one it starts from.
+fn new_feature_bases() -> super::NewFeatureView {
+    let row = |name: &str, place: &str, touched| super::NewFeatureRepo {
+        name: name.into(),
+        place: place.into(),
+        touched,
+        fixed: false,
+        base: None,
+    };
+    super::NewFeatureView {
+        title: Line::from("de"),
+        hint: "Filter branches",
+        focus: Some(0),
+        slots: 4,
+        root: "assettag-mobile starts from".into(),
+        repos: vec![
+            row("dev", "default", true),
+            row("feature/decode", "", false),
+        ],
+        hover: None,
+        keys: vec![
+            ("Tab", "next"),
+            ("Enter", "use branch"),
+            ("Ctrl+Shift+L", "link project"),
+            ("Esc", "clear"),
+        ],
+        ..new_feature()
     }
 }
 
@@ -1788,6 +1821,7 @@ fn paint_features(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
     let size = FEATURE_OUTPUT.into();
     vec![
         hash(painter.new_feature_dialog(&new_feature(), size, scale, p)),
+        hash(painter.new_feature_dialog(&new_feature_bases(), size, scale, p)),
         hash(painter.sidebar_view(&features_sidebar(), (SIDEBAR_W, 520).into(), scale, p)),
         hash(painter.plan_sheet(&plan_sheet(false), size, scale, p)),
         hash(painter.plan_sheet(&plan_sheet(true), size, scale, p)),
@@ -2053,8 +2087,9 @@ fn plan_sheet_empty() -> super::PlanSheetView {
     view
 }
 
-const FEATURES: [&str; 11] = [
+const FEATURES: [&str; 12] = [
     "new_feature",
+    "new_feature_bases",
     "sidebar_features",
     "plan_sheet",
     "plan_sheet_note",
@@ -2068,10 +2103,11 @@ const FEATURES: [&str; 11] = [
 ];
 
 /// The recorded hashes of `FEATURES`, per case in `CASES`.
-const GOLDEN_FEATURES: [[u64; 11]; 4] = [
+const GOLDEN_FEATURES: [[u64; 12]; 4] = [
     // Dark at 1
     [
-        0x73e88729cb0c3112, // new_feature
+        0x8374c9414949fa5b, // new_feature
+        0xc87c6c9be76cea36, // new_feature_bases
         0xa77cf538d219f4ef, // sidebar_features
         0xce73d235eada39de, // plan_sheet
         0xf0ef6e28af47b05c, // plan_sheet_note
@@ -2085,7 +2121,8 @@ const GOLDEN_FEATURES: [[u64; 11]; 4] = [
     ],
     // Dark at 2
     [
-        0xbc9770d9310bd319, // new_feature
+        0x62ad1d17fcbe8faa, // new_feature
+        0xe00bb64532ae6b5f, // new_feature_bases
         0x21105ece42c0dd0e, // sidebar_features
         0x354b777d647b74ae, // plan_sheet
         0x49003f081deb3c2e, // plan_sheet_note
@@ -2099,7 +2136,8 @@ const GOLDEN_FEATURES: [[u64; 11]; 4] = [
     ],
     // Light at 1
     [
-        0xb1780dfd60b1e9a8, // new_feature
+        0x461f595ad7da5726, // new_feature
+        0x569469f7ecfe02c8, // new_feature_bases
         0xaf41feb3e3003f04, // sidebar_features
         0x6da7e766b94ea319, // plan_sheet
         0x6900962e338f6172, // plan_sheet_note
@@ -2113,7 +2151,8 @@ const GOLDEN_FEATURES: [[u64; 11]; 4] = [
     ],
     // Light at 2
     [
-        0x757537a93b40f9fa, // new_feature
+        0x785a91256084024b, // new_feature
+        0x465dcd5a19cbedc5, // new_feature_bases
         0x690bf93cbdab10ee, // sidebar_features
         0x5a9fa2f0a7a81443, // plan_sheet
         0x8bc60f688ce6245b, // plan_sheet_note
@@ -2153,6 +2192,12 @@ fn dump_features() {
             &dir,
             &format!("new_feature_{tag}"),
             painter.new_feature_dialog(&new_feature(), size, scale, p),
+            px(dialog.size.w + shadow),
+        );
+        dump(
+            &dir,
+            &format!("new_feature_bases_{tag}"),
+            painter.new_feature_dialog(&new_feature_bases(), size, scale, p),
             px(dialog.size.w + shadow),
         );
         for (name, view, output) in [

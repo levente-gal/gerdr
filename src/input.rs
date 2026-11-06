@@ -1474,7 +1474,7 @@ impl Gerdr {
                 .note
                 .as_mut()
                 .map(|(_, field)| field),
-            Overlay::NewFeature => Some(&mut self.features.dialog.as_mut()?.title),
+            Overlay::NewFeature => Some(self.features.dialog.as_mut()?.field_mut()),
             Overlay::FindingDialog => self.finding_dialog_field_mut(),
             Overlay::Identity => self.identity_field_mut(),
             Overlay::Machine => self.machine_field_mut(),

@@ -335,6 +335,18 @@ pub(crate) enum Done {
         project: String,
         result: Result<Root, String>,
     },
+    /// The branches a repository of the dialog of `serial` can start from.
+    BaseBranches {
+        serial: u64,
+        repo: RepoKey,
+        result: Result<Vec<String>, String>,
+    },
+    /// The branch origin says is that repository's default.
+    RemoteBase {
+        serial: u64,
+        repo: RepoKey,
+        result: Result<Option<String>, String>,
+    },
     Created {
         project: String,
         title: String,
@@ -583,6 +595,30 @@ pub struct Other {
     pub touched: Vec<bool>,
 }
 
+/// A repository of the new feature dialog: the linked project it is of
+/// (`None`: the home one), and its name.
+pub type RepoKey = (Option<String>, String);
+
+/// What the new feature dialog knows of a repository's branches. The branch
+/// a feature would start from is the `Found::base` of the root it holds.
+#[derive(Debug, Default)]
+pub struct RepoBranches {
+    /// The branch the repository's features start from by itself.
+    default: String,
+    /// Those it can start from, once read.
+    branches: Option<Result<Vec<String>, String>>,
+    /// The user picked one: what origin says no longer moves it.
+    picked: bool,
+}
+
+/// The repository whose base branch the new feature dialog is choosing.
+#[derive(Debug)]
+struct Choosing {
+    repo: RepoKey,
+    /// The focus and first row to go back to.
+    back: (Option<usize>, usize),
+}
+
 /// The new feature dialog's state, while it is open.
 #[derive(Debug)]
 pub struct NewFeatureDialog {
@@ -604,6 +640,12 @@ pub struct NewFeatureDialog {
     pub others: Vec<Other>,
     /// The rows are the project picker's, not the repositories.
     pub picking: bool,
+    /// The repositories' branches, read as each is found or linked.
+    bases: BTreeMap<RepoKey, RepoBranches>,
+    /// The rows are this repository's branches, not the repositories.
+    choosing: Option<Choosing>,
+    /// What filters those branches.
+    query: TextField,
 }
 
 /// What a row of the new feature dialog is.
@@ -615,6 +657,8 @@ enum DialogRow {
     Linked(usize, usize),
     /// Project `k` of `others`, in the picker.
     Project(usize),
+    /// Branch `i` of `branch_rows`, in the base branch list.
+    Branch(usize),
 }
 
 /// What the new feature dialog asks gerdr to do.
@@ -646,6 +690,9 @@ impl NewFeatureDialog {
             from,
             others: Vec::new(),
             picking: false,
+            bases: BTreeMap::new(),
+            choosing: None,
+            query: TextField::default(),
         }
     }
 
@@ -683,9 +730,15 @@ impl NewFeatureDialog {
         };
     }
 
-    /// Its rows: the projects while picking; else the repositories, the
-    /// linked projects' after the home root's.
+    /// Its rows: the branches while choosing a base, the projects while
+    /// picking; else the repositories, the linked projects' after the home
+    /// root's.
     fn rows(&self) -> Vec<DialogRow> {
+        if self.choosing.is_some() {
+            return (0..self.branch_rows().len())
+                .map(DialogRow::Branch)
+                .collect();
+        }
         if self.picking {
             return (0..self.others.len()).map(DialogRow::Project).collect();
         }
@@ -701,10 +754,11 @@ impl NewFeatureDialog {
         rows
     }
 
-    /// Whether its rows can be ticked: projects, linked repositories, and
-    /// the home root's when it holds several.
+    /// Whether its rows can be ticked or picked: branches, projects, linked
+    /// repositories, and the home root's when it holds several.
     fn multi(&self) -> bool {
         self.picking
+            || self.choosing.is_some()
             || matches!(&self.root, Finding::Found(root) if root.multi)
             || self.others.iter().any(|o| o.linked)
     }
@@ -713,12 +767,261 @@ impl NewFeatureDialog {
         self.rows().len()
     }
 
+    /// The row slots it makes room for: a filter narrowing the branches
+    /// doesn't resize it, or the field being typed in would move.
+    fn slots(&self) -> usize {
+        match &self.choosing {
+            Some(_) => self.branches_offered().len(),
+            None => self.repos(),
+        }
+    }
+
+    /// The repository `key` as found.
+    fn repo_found(&self, key: &RepoKey) -> Option<&Found> {
+        let finding = match &key.0 {
+            None => &self.root,
+            Some(project) => &self.others.iter().find(|o| o.project == *project)?.root,
+        };
+        let Finding::Found(root) = finding else {
+            return None;
+        };
+        root.repos.iter().find(|r| r.name == key.1)
+    }
+
+    /// `repo_found`, to change.
+    fn repo_found_mut(&mut self, key: &RepoKey) -> Option<&mut Found> {
+        let finding = match &key.0 {
+            None => &mut self.root,
+            Some(project) => &mut self.others.iter_mut().find(|o| o.project == *project)?.root,
+        };
+        let Finding::Found(root) = finding else {
+            return None;
+        };
+        root.repos.iter_mut().find(|r| r.name == key.1)
+    }
+
+    /// The repository of row `row`, if it is one.
+    fn row_repo(&self, row: DialogRow) -> Option<RepoKey> {
+        let (project, finding, i) = match row {
+            DialogRow::Home(i) => (None, &self.root, i),
+            DialogRow::Linked(k, i) => {
+                let other = self.others.get(k)?;
+                (Some(other.project.clone()), &other.root, i)
+            }
+            DialogRow::Project(_) | DialogRow::Branch(_) => return None,
+        };
+        let Finding::Found(root) = finding else {
+            return None;
+        };
+        Some((project, root.repos.get(i)?.name.clone()))
+    }
+
+    /// The repositories in it whose branches nobody looked for yet: the home
+    /// root's, and those of the projects linked. Noted as looked for.
+    fn unlooked(&mut self) -> Vec<(RepoKey, Found)> {
+        let root_of = |project: Option<&String>, finding: &Finding| match finding {
+            Finding::Found(root) => (root.repos.iter())
+                .map(|r| ((project.cloned(), r.name.clone()), r.clone()))
+                .collect(),
+            _ => Vec::new(),
+        };
+        let mut all: Vec<(RepoKey, Found)> = root_of(None, &self.root);
+        for other in self.others.iter().filter(|o| o.linked) {
+            all.extend(root_of(Some(&other.project), &other.root));
+        }
+        all.retain(|(key, _)| !self.bases.contains_key(key));
+        for (key, found) in &all {
+            self.bases.insert(
+                key.clone(),
+                RepoBranches {
+                    default: found.base.clone(),
+                    ..Default::default()
+                },
+            );
+        }
+        all
+    }
+
+    /// The branches of repository `key` were read, or not.
+    fn base_branches(&mut self, key: &RepoKey, result: Result<Vec<String>, String>) {
+        if let Some(entry) = self.bases.get_mut(key) {
+            entry.branches = Some(result);
+        }
+    }
+
+    /// Origin says `branch` is the default of repository `key`: its features
+    /// start from it, unless the user picked or it was never fetched, which
+    /// `create` couldn't start from. Then what git has here stands, and the
+    /// log says why.
+    fn remote_base(&mut self, key: &RepoKey, branch: String) {
+        let Some(entry) = self.bases.get_mut(key) else {
+            return;
+        };
+        let known = matches!(&entry.branches, Some(Ok(all)) if all.contains(&branch));
+        if !known {
+            tracing::warn!("{}: origin's default {branch} isn't fetched", key.1);
+            return;
+        }
+        if entry.picked || entry.default == branch {
+            return;
+        }
+        entry.default = branch.clone();
+        if let Some(found) = self.repo_found_mut(key) {
+            found.base = branch;
+        }
+    }
+
+    /// The branches of the repository being chosen for: its default first,
+    /// then the one picked, then the newest.
+    fn branches_offered(&self) -> Vec<String> {
+        let Some(choosing) = &self.choosing else {
+            return Vec::new();
+        };
+        let entry = self.bases.get(&choosing.repo);
+        let current = self.repo_found(&choosing.repo).map(|r| r.base.clone());
+        let listed = (entry.and_then(|e| e.branches.as_ref()))
+            .and_then(|b| b.as_ref().ok())
+            .map_or(&[][..], Vec::as_slice);
+        let mut all: Vec<String> = (entry.map(|e| e.default.clone()).into_iter())
+            .chain(current)
+            .chain(listed.iter().cloned())
+            .collect();
+        let mut seen = BTreeSet::new();
+        all.retain(|b| seen.insert(b.clone()));
+        all
+    }
+
+    /// `branches_offered` the filter lets through.
+    fn branch_rows(&self) -> Vec<String> {
+        let query = self.query.trim().to_lowercase();
+        let mut all = self.branches_offered();
+        all.retain(|b| b.to_lowercase().contains(&query));
+        all
+    }
+
+    /// The row Alt+B acts on: the one with the keyboard, else the first
+    /// repository ticked, else the first.
+    fn base_row(&self) -> Option<usize> {
+        let rows = self.rows();
+        let is_repo = |i: &usize| rows.get(*i).is_some_and(|r| self.row_repo(*r).is_some());
+        self.focus.filter(is_repo).or_else(|| {
+            let ticked = |i: &usize| match rows[*i] {
+                DialogRow::Home(n) => self.touched.get(n) == Some(&true),
+                DialogRow::Linked(k, n) => self.others[k].touched.get(n) == Some(&true),
+                _ => false,
+            };
+            (0..rows.len())
+                .find(ticked)
+                .or_else(|| (0..rows.len()).find(is_repo))
+        })
+    }
+
+    /// List the branches of row `i`'s repository in place of the rows, the
+    /// one it starts from now with the keyboard.
+    fn open_bases(&mut self, i: usize) {
+        let Some(repo) = self.rows().get(i).and_then(|r| self.row_repo(*r)) else {
+            return;
+        };
+        let current = self.repo_found(&repo).map(|r| r.base.clone());
+        self.choosing = Some(Choosing {
+            repo,
+            back: (self.focus, self.top),
+        });
+        self.query.clear();
+        let rows = self.branch_rows();
+        self.focus = Some(
+            current
+                .and_then(|c| rows.iter().position(|b| *b == c))
+                .unwrap_or(0),
+        );
+        self.top = 0;
+        self.error = None;
+    }
+
+    /// Back to the rows it came from.
+    fn close_bases(&mut self) {
+        if let Some(choosing) = self.choosing.take() {
+            (self.focus, self.top) = choosing.back;
+        }
+        self.query.clear();
+        self.error = None;
+    }
+
+    /// Start the repository being chosen for from branch row `i`.
+    fn pick_base(&mut self, i: usize) {
+        let Some(branch) = self.branch_rows().get(i).cloned() else {
+            return;
+        };
+        let Some(repo) = self.choosing.as_ref().map(|c| c.repo.clone()) else {
+            return;
+        };
+        if let Some(entry) = self.bases.get_mut(&repo) {
+            entry.picked = true;
+        }
+        if let Some(found) = self.repo_found_mut(&repo) {
+            found.base = branch;
+        }
+        self.close_bases();
+    }
+
+    /// A key while choosing a base: all but the movement and Enter go to the
+    /// filter.
+    fn base_key(&mut self, mods: &ModifiersState, sym: Keysym, typed: Keysym) {
+        let ctrl = mods.ctrl && !mods.alt && !mods.logo;
+        let alt = mods.alt && !mods.ctrl && !mods.logo;
+        let n = self.repos();
+        let step = |at: Option<usize>, back: bool| match (at, n) {
+            (_, 0) => None,
+            (None, _) => Some(0),
+            (Some(i), _) if back => Some((i + n - 1) % n),
+            (Some(i), _) => Some((i + 1) % n),
+        };
+        match sym {
+            Keysym::Escape if !self.query.is_empty() => {
+                self.query.clear();
+                self.focus = Some(0);
+                self.top = 0;
+                self.error = None;
+            }
+            Keysym::Escape => self.close_bases(),
+            Keysym::b | Keysym::B if alt => self.close_bases(),
+            Keysym::l | Keysym::L if ctrl && mods.shift => self.pick(),
+            Keysym::Return | Keysym::KP_Enter if n == 0 => {
+                self.error = Some("No branch matches that.".into());
+            }
+            Keysym::Return | Keysym::KP_Enter => {
+                // A paste narrows the rows without moving the keyboard.
+                self.pick_base(self.focus.filter(|i| *i < n).unwrap_or(0));
+            }
+            Keysym::Tab if !mods.shift => self.focus = step(self.focus, false),
+            Keysym::ISO_Left_Tab | Keysym::Tab => self.focus = step(self.focus, true),
+            Keysym::Down | Keysym::KP_Down => self.focus = step(self.focus, false),
+            Keysym::Up | Keysym::KP_Up => self.focus = step(self.focus, true),
+            Keysym::j | Keysym::J if ctrl => self.focus = step(self.focus, false),
+            Keysym::k | Keysym::K if ctrl => self.focus = step(self.focus, true),
+            _ if self.query.key(mods, sym, typed) == Edit::Changed => {
+                self.focus = (self.repos() > 0).then_some(0);
+                self.top = 0;
+                self.error = None;
+            }
+            _ => {}
+        }
+    }
+
+    /// The field the keys type in: the branch filter while choosing a base.
+    pub fn field_mut(&mut self) -> &mut TextField {
+        match self.choosing {
+            Some(_) => &mut self.query,
+            None => &mut self.title,
+        }
+    }
+
     /// Whether row `row` can't be ticked: the only home repository, a
     /// project not found.
     fn fixed(&self, row: DialogRow) -> bool {
         match row {
             DialogRow::Home(_) => !matches!(&self.root, Finding::Found(root) if root.multi),
-            DialogRow::Linked(..) => false,
+            DialogRow::Linked(..) | DialogRow::Branch(_) => false,
             DialogRow::Project(k) => !matches!(self.others[k].root, Finding::Found(_)),
         }
     }
@@ -734,6 +1037,7 @@ impl NewFeatureDialog {
             DialogRow::Home(i) => self.touched.get_mut(i),
             DialogRow::Linked(k, i) => self.others[k].touched.get_mut(i),
             DialogRow::Project(k) => Some(&mut self.others[k].linked),
+            DialogRow::Branch(_) => None,
         };
         if let Some(t) = tick {
             *t = !*t;
@@ -808,6 +1112,7 @@ impl NewFeatureDialog {
 
     /// Switch the rows between the repositories and the project picker.
     fn pick(&mut self) {
+        self.close_bases();
         self.picking = !self.picking;
         // The picker's rows have the keyboard, found yet or not.
         self.focus = self.picking.then_some(0);
@@ -825,6 +1130,22 @@ impl NewFeatureDialog {
             (at + 1) % (n + 1)
         };
         self.focus = to.checked_sub(1);
+    }
+
+    /// What `pos` is over: a row with no base button there is only a row.
+    fn hit(
+        &self,
+        layout: &chrome::NewFeatureLayout,
+        pos: Point<f64, Logical>,
+    ) -> Option<NewFeatureHit> {
+        match layout.hit(self.top, pos) {
+            Some(NewFeatureHit::Base(i))
+                if !(self.rows().get(i)).is_some_and(|r| self.row_repo(*r).is_some()) =>
+            {
+                Some(NewFeatureHit::Repo(i))
+            }
+            hit => hit,
+        }
     }
 
     /// Scroll so the focused row is among the `fit` shown.
@@ -851,6 +1172,12 @@ impl NewFeatureDialog {
     ) -> Option<DialogOutcome> {
         let plain = !(mods.ctrl || mods.alt || mods.logo);
         let ctrl = mods.ctrl && !mods.alt && !mods.logo;
+        let alt = mods.alt && !mods.ctrl && !mods.logo;
+        if self.choosing.is_some() {
+            self.base_key(mods, sym, typed);
+            self.reveal(fit);
+            return None;
+        }
         match sym {
             Keysym::Escape => {
                 // Out of the picker, back to the title, then the title
@@ -871,6 +1198,11 @@ impl NewFeatureDialog {
                 Err(why) => self.error = Some(why),
             },
             Keysym::l | Keysym::L if ctrl && mods.shift => self.pick(),
+            Keysym::b | Keysym::B if alt => {
+                if let Some(i) = self.base_row() {
+                    self.open_bases(i);
+                }
+            }
             Keysym::Tab if !mods.shift => self.step(false),
             Keysym::ISO_Left_Tab | Keysym::Tab => self.step(true),
             Keysym::Down | Keysym::KP_Down => self.step(false),
@@ -4527,6 +4859,7 @@ impl Gerdr {
                     }
                     dialog.found(result);
                 }
+                self.find_bases();
             }
             Done::FoundRepos {
                 project,
@@ -4575,6 +4908,40 @@ impl Gerdr {
                     && dialog.serial == serial
                 {
                     dialog.found_other(&project, result);
+                }
+                self.find_bases();
+            }
+            Done::BaseBranches {
+                serial,
+                repo,
+                result,
+            } => {
+                if let Err(why) = &result {
+                    tracing::warn!("listing the branches of {}: {why}", repo.1);
+                }
+                // Dropped when the dialog it was for closed, as above.
+                if let Some(dialog) = self.features.dialog.as_mut()
+                    && dialog.serial == serial
+                {
+                    dialog.base_branches(&repo, result);
+                }
+            }
+            Done::RemoteBase {
+                serial,
+                repo,
+                result,
+            } => {
+                // Offline is no fault of the dialog's: what git has here
+                // stands, which the row shows.
+                let branch = result.unwrap_or_else(|why| {
+                    tracing::warn!("asking origin for the default of {}: {why}", repo.1);
+                    None
+                });
+                if let Some(dialog) = self.features.dialog.as_mut()
+                    && dialog.serial == serial
+                    && let Some(branch) = branch
+                {
+                    dialog.remote_base(&repo, branch);
                 }
             }
             Done::DocsLinked { title, result } => match result {
@@ -5816,12 +6183,48 @@ impl Gerdr {
         }
     }
 
+    /// Read off the thread (checklist D3) the branches of the dialog's
+    /// repositories not looked at yet, then what origin says their default
+    /// is: a clone's `origin/HEAD` can be long out of date. A base the
+    /// project's settings set isn't asked about. Takes as long as the
+    /// network does, so the branches come first, and the row says which it
+    /// has meanwhile.
+    fn find_bases(&mut self) {
+        let Some(dialog) = self.features.dialog.as_mut() else {
+            return;
+        };
+        let (home, serial) = (dialog.project.clone(), dialog.serial);
+        for (repo, found) in dialog.unlooked() {
+            let of = repo.0.as_deref().unwrap_or(&home);
+            let set =
+                (self.projects.project(of)).is_some_and(|p| p.workflow.base.contains_key(&repo.1));
+            self.feature_work(None, move |tx| {
+                let result = layout::branches_of(&found.main);
+                let branches = Done::BaseBranches {
+                    serial,
+                    repo: repo.clone(),
+                    result,
+                };
+                if set {
+                    return branches;
+                }
+                // It fails only once the loop is gone, as in `feature_work`.
+                let _ = tx.send(branches);
+                Done::RemoteBase {
+                    serial,
+                    repo,
+                    result: crate::git_ops::remote_default(&found.main),
+                }
+            });
+        }
+    }
+
     /// How many repositories the dialog shows at once.
     fn new_feature_fit(&self) -> usize {
         let Some(dialog) = &self.features.dialog else {
             return 1;
         };
-        chrome::new_feature_layout(self.output_size(), dialog.repos(), dialog.error.is_some())
+        chrome::new_feature_layout(self.output_size(), dialog.slots(), dialog.error.is_some())
             .rows
             .len()
     }
@@ -5836,6 +6239,7 @@ impl Gerdr {
         let fit = self.new_feature_fit();
         let outcome = self.features.dialog.as_mut()?.key(mods, sym, typed, fit);
         self.find_others();
+        self.find_bases();
         outcome
     }
 
@@ -6056,9 +6460,9 @@ impl Gerdr {
         let Some(dialog) = self.features.dialog.as_mut() else {
             return;
         };
-        let layout = chrome::new_feature_layout(size, dialog.repos(), dialog.error.is_some());
+        let layout = chrome::new_feature_layout(size, dialog.slots(), dialog.error.is_some());
         let mut picked = false;
-        let outcome = match layout.hit(dialog.top, pos) {
+        let outcome = match dialog.hit(&layout, pos) {
             Some(NewFeatureHit::Button(chrome::CREATE)) => match dialog.create() {
                 Ok(outcome) => Some(outcome),
                 Err(why) => {
@@ -6067,6 +6471,14 @@ impl Gerdr {
                 }
             },
             Some(NewFeatureHit::Button(_)) => Some(DialogOutcome::Cancel),
+            Some(NewFeatureHit::Base(i)) => {
+                dialog.open_bases(i);
+                None
+            }
+            Some(NewFeatureHit::Repo(i)) if dialog.choosing.is_some() => {
+                dialog.pick_base(i);
+                None
+            }
             Some(NewFeatureHit::Repo(i)) => {
                 if dialog.multi() {
                     dialog.focus = Some(i);
@@ -6074,6 +6486,8 @@ impl Gerdr {
                 }
                 None
             }
+            // Its filter has the keys all along.
+            Some(NewFeatureHit::Field) if dialog.choosing.is_some() => None,
             Some(NewFeatureHit::Field) => {
                 dialog.focus = None;
                 None
@@ -6090,6 +6504,7 @@ impl Gerdr {
         if picked {
             self.find_others();
         }
+        self.find_bases();
         if let Some(outcome) = outcome {
             self.apply_new_feature(outcome);
         }
@@ -6099,8 +6514,8 @@ impl Gerdr {
     pub fn new_feature_hover(&mut self, pos: Point<f64, Logical>) {
         let size = self.output_size();
         if let Some(dialog) = self.features.dialog.as_mut() {
-            let layout = chrome::new_feature_layout(size, dialog.repos(), dialog.error.is_some());
-            dialog.hover = layout.hit(dialog.top, pos);
+            let layout = chrome::new_feature_layout(size, dialog.slots(), dialog.error.is_some());
+            dialog.hover = dialog.hit(&layout, pos);
         }
     }
 
@@ -6118,7 +6533,7 @@ impl Gerdr {
         let Some(dialog) = &self.features.dialog else {
             return Vec::new();
         };
-        chrome::new_feature_layout(self.output_size(), dialog.repos(), dialog.error.is_some()).rows
+        chrome::new_feature_layout(self.output_size(), dialog.slots(), dialog.error.is_some()).rows
     }
 
     /// What the pointer can press in the new feature dialog.
@@ -6126,7 +6541,7 @@ impl Gerdr {
         let Some(dialog) = &self.features.dialog else {
             return Vec::new();
         };
-        chrome::new_feature_layout(self.output_size(), dialog.repos(), dialog.error.is_some())
+        chrome::new_feature_layout(self.output_size(), dialog.slots(), dialog.error.is_some())
             .controls()
     }
 
@@ -8501,7 +8916,7 @@ fn new_feature_view(dialog: &NewFeatureDialog, project: String) -> NewFeatureVie
             (_, true) => "linked",
             (_, false) => "left out",
         };
-        format!("from {base} \u{b7} {word}")
+        (word.to_owned(), Some(format!("from {base}")))
     };
     let found = |root: &Root| {
         let n = root.repos.len();
@@ -8511,7 +8926,23 @@ fn new_feature_view(dialog: &NewFeatureDialog, project: String) -> NewFeatureVie
             format!("In {}", tilde(&root.path))
         }
     };
-    let (root, root_failed) = if dialog.picking && dialog.others.is_empty() {
+    let chosen = dialog.choosing.as_ref().map(|c| &c.repo);
+    let of_chosen = chosen.and_then(|repo| dialog.bases.get(repo));
+    let chosen_name = chosen.map_or("", |repo| repo.1.as_str());
+    let (root, root_failed) = if chosen.is_some() {
+        match of_chosen.and_then(|e| e.branches.as_ref()) {
+            None => (
+                format!("listing the branches of {chosen_name}\u{2026}"),
+                false,
+            ),
+            Some(Err(why)) => (
+                format!("Couldn't list the branches of {chosen_name}: {why}"),
+                true,
+            ),
+            Some(Ok(_)) if dialog.repos() == 0 => ("No branch matches that".to_owned(), true),
+            Some(Ok(_)) => (format!("{chosen_name} starts from"), false),
+        }
+    } else if dialog.picking && dialog.others.is_empty() {
         ("The store has no other project to link".to_owned(), true)
     } else {
         match &dialog.root {
@@ -8520,6 +8951,8 @@ fn new_feature_view(dialog: &NewFeatureDialog, project: String) -> NewFeatureVie
             Finding::Found(root) => (found(root), false),
         }
     };
+    let branches = dialog.branch_rows();
+    let current = chosen.and_then(|repo| dialog.repo_found(repo).map(|r| r.base.clone()));
     let repos = dialog
         .rows()
         .into_iter()
@@ -8531,11 +8964,13 @@ fn new_feature_view(dialog: &NewFeatureDialog, project: String) -> NewFeatureVie
                         return None;
                     };
                     let (r, touched) = (root.repos.get(i)?, *dialog.touched.get(i)?);
+                    let (place, base) = place(&r.base, touched, fixed);
                     NewFeatureRepo {
                         name: r.name.clone(),
-                        place: place(&r.base, touched, fixed),
+                        place,
                         touched,
                         fixed,
+                        base,
                     }
                 }
                 DialogRow::Linked(k, i) => {
@@ -8544,11 +8979,13 @@ fn new_feature_view(dialog: &NewFeatureDialog, project: String) -> NewFeatureVie
                         return None;
                     };
                     let (r, touched) = (root.repos.get(i)?, *other.touched.get(i)?);
+                    let (place, base) = place(&r.base, touched, false);
                     NewFeatureRepo {
                         name: format!("{}: {}", other.name, r.name),
-                        place: place(&r.base, touched, false),
+                        place,
                         touched,
                         fixed: false,
+                        base,
                     }
                 }
                 DialogRow::Project(k) => {
@@ -8563,6 +9000,20 @@ fn new_feature_view(dialog: &NewFeatureDialog, project: String) -> NewFeatureVie
                         place,
                         touched: other.linked,
                         fixed,
+                        base: None,
+                    }
+                }
+                DialogRow::Branch(i) => {
+                    let name = branches.get(i)?.clone();
+                    NewFeatureRepo {
+                        place: match of_chosen.is_some_and(|e| e.default == name) {
+                            true => "default".to_owned(),
+                            false => String::new(),
+                        },
+                        touched: current.as_ref() == Some(&name),
+                        fixed: false,
+                        base: None,
+                        name,
                     }
                 }
             })
@@ -8572,18 +9023,25 @@ fn new_feature_view(dialog: &NewFeatureDialog, project: String) -> NewFeatureVie
     for other in dialog.others.iter().filter(|o| o.linked) {
         projects.push_str(&format!(" \u{b7} {}", other.name));
     }
-    let mut keys = if dialog.multi() {
-        vec![("Tab", "next"), ("Space", "tick")]
-    } else {
-        Vec::new()
+    let mut keys = match (dialog.choosing.is_some(), dialog.multi()) {
+        (true, _) => vec![("Tab", "next"), ("Enter", "use branch")],
+        (false, true) => vec![("Tab", "next"), ("Space", "tick")],
+        (false, false) => Vec::new(),
     };
-    keys.push(if dialog.picking {
+    if !dialog.picking && dialog.choosing.is_none() && dialog.base_row().is_some() {
+        keys.push(("Alt+B", "base branch"));
+    }
+    keys.push(if dialog.choosing.is_some() {
+        ("Ctrl+Shift+L", "link project")
+    } else if dialog.picking {
         ("Ctrl+Shift+L", "repositories")
     } else {
         ("Ctrl+Shift+L", "link project")
     });
     // Esc steps back as `NewFeatureDialog::key` has it.
-    keys.push(if dialog.picking || dialog.focus.is_some() {
+    keys.push(if dialog.choosing.is_some() && !dialog.query.is_empty() {
+        ("Esc", "clear")
+    } else if dialog.choosing.is_some() || dialog.picking || dialog.focus.is_some() {
         ("Esc", "back")
     } else if !dialog.title.is_empty() {
         ("Esc", "clear")
@@ -8593,8 +9051,18 @@ fn new_feature_view(dialog: &NewFeatureDialog, project: String) -> NewFeatureVie
     let heading = format!("New feature in \u{201c}{project}\u{201d}");
     NewFeatureView {
         heading,
-        title: dialog.title.line(),
+        title: match dialog.choosing {
+            Some(_) => dialog.query.line(),
+            None => dialog.title.line(),
+        },
+        hint: match dialog.choosing {
+            Some(_) => "Filter branches",
+            None => chrome::TITLE_HINT,
+        },
+        // The filter takes the keys while a branch row is selected.
+        field_focus: dialog.choosing.is_some() || dialog.focus.is_none(),
         focus: dialog.focus,
+        slots: dialog.slots(),
         root,
         root_failed,
         projects,
@@ -10975,6 +11443,166 @@ pub(crate) mod tests {
         d.key(&mods, sym, sym, 8)
     }
 
+    fn alt(sym: Keysym) -> (ModifiersState, Keysym) {
+        let mods = ModifiersState {
+            alt: true,
+            ..Default::default()
+        };
+        (mods, sym)
+    }
+
+    fn base_of(d: &NewFeatureDialog, name: &str) -> String {
+        let key = (None, name.to_owned());
+        d.repo_found(&key).unwrap().base.clone()
+    }
+
+    /// A dialog over `names`, each with these branches read.
+    fn with_branches(names: &[&str], branches: &[&str]) -> NewFeatureDialog {
+        let mut d = NewFeatureDialog::new("acme".into(), 1, "/work/api".into());
+        d.found(Ok(root(names)));
+        for (key, _) in d.unlooked() {
+            let all = branches.iter().map(|b| (*b).to_owned()).collect();
+            d.base_branches(&key, Ok(all));
+        }
+        d
+    }
+
+    #[test]
+    fn a_picked_base_branch_goes_with_the_feature() {
+        let mut d = with_branches(&["api", "web"], &["main", "dev", "next"]);
+        type_into(&mut d, "Bulk");
+        dkey(&mut d, alt(Keysym::b));
+        // The repository ticked first, opened from the title.
+        assert_eq!(d.choosing.as_ref().unwrap().repo.1, "api");
+        assert_eq!(d.focus, Some(0));
+        assert_eq!(d.branch_rows(), ["main", "dev", "next"]);
+        type_into(&mut d, "de");
+        assert_eq!(d.branch_rows(), ["dev"]);
+        assert_eq!(dkey(&mut d, key(Keysym::Return)), None);
+        assert!(d.choosing.is_none());
+        // Back as it was: the keyboard, the title, the filter gone.
+        assert_eq!(d.focus, None);
+        assert_eq!(&*d.title, "Bulk");
+        assert!(d.query.is_empty());
+        assert_eq!(base_of(&d, "api"), "dev");
+        assert_eq!(base_of(&d, "web"), "main");
+        let Some(DialogOutcome::Create { root, .. }) = dkey(&mut d, key(Keysym::Return)) else {
+            panic!("it should create");
+        };
+        assert_eq!(root.repos[0].base, "dev");
+        assert_eq!(root.repos[1].base, "main");
+    }
+
+    #[test]
+    fn esc_clears_the_branch_filter_then_keeps_the_base_it_had() {
+        let mut d = with_branches(&["api"], &["main", "dev"]);
+        dkey(&mut d, alt(Keysym::b));
+        type_into(&mut d, "zz");
+        assert_eq!(d.repos(), 0);
+        // The filter can't move the field: it keeps its room.
+        assert_eq!(d.slots(), 2);
+        assert_eq!(dkey(&mut d, key(Keysym::Return)), None);
+        assert!(d.error.is_some() && d.choosing.is_some());
+        dkey(&mut d, key(Keysym::Escape));
+        assert!(d.query.is_empty() && d.choosing.is_some());
+        assert_eq!(d.focus, Some(0));
+        dkey(&mut d, key(Keysym::Escape));
+        assert!(d.choosing.is_none());
+        assert_eq!(base_of(&d, "api"), "main");
+        // Esc only stepped back: the dialog is there.
+        assert_eq!(
+            dkey(&mut d, key(Keysym::Escape)),
+            Some(DialogOutcome::Cancel)
+        );
+    }
+
+    #[test]
+    fn origins_default_moves_a_base_nobody_picked() {
+        let mut d = with_branches(&["api", "web", "app"], &["main", "dev"]);
+        let (api, web, app) = (
+            (None, "api".to_owned()),
+            (None, "web".to_owned()),
+            (None, "app".to_owned()),
+        );
+        d.remote_base(&api, "dev".into());
+        assert_eq!(base_of(&d, "api"), "dev");
+        // The default leads the list, and says so in the view.
+        d.focus = Some(0);
+        d.open_bases(0);
+        assert_eq!(d.branch_rows(), ["dev", "main"]);
+        let view = new_feature_view(&d, "Acme".into());
+        assert_eq!(view.repos[0].place, "default");
+        assert!(view.repos[0].touched);
+        d.close_bases();
+        // Picked by hand: origin's say comes too late.
+        d.focus = Some(1);
+        d.open_bases(1);
+        d.pick_base(0);
+        d.remote_base(&web, "dev".into());
+        assert_eq!(base_of(&d, "web"), "main");
+        // Never fetched: a worktree couldn't start from it.
+        d.remote_base(&app, "gone".into());
+        assert_eq!(base_of(&d, "app"), "main");
+    }
+
+    #[test]
+    fn the_only_repository_can_choose_its_base_too() {
+        let mut d = with_branches(&["api"], &["main", "dev"]);
+        let view = new_feature_view(&d, "Acme".into());
+        assert_eq!(view.repos[0].base.as_deref(), Some("from main"));
+        assert_eq!(view.repos[0].place, "the only repository");
+        assert!(view.keys.contains(&("Alt+B", "base branch")));
+        dkey(&mut d, alt(Keysym::b));
+        dkey(&mut d, key(Keysym::Down));
+        dkey(&mut d, key(Keysym::Return));
+        assert_eq!(base_of(&d, "api"), "dev");
+    }
+
+    #[test]
+    fn only_linked_projects_have_their_branches_looked_for() {
+        let mut d = with_branches(&["api"], &[]);
+        assert!(d.unlooked().is_empty(), "once each");
+        d.others.push(Other {
+            project: "billing".into(),
+            name: "Billing".into(),
+            root: Finding::Found(root(&["ledger"])),
+            linked: false,
+            touched: vec![true],
+        });
+        assert!(d.unlooked().is_empty());
+        d.others[0].linked = true;
+        let looked = d.unlooked();
+        assert_eq!(
+            looked[0].0,
+            (Some("billing".to_owned()), "ledger".to_owned())
+        );
+        // A linked repository's base goes with its link.
+        let key = looked[0].0.clone();
+        d.base_branches(&key, Ok(vec!["main".into(), "dev".into()]));
+        let at = d
+            .rows()
+            .iter()
+            .position(|r| matches!(r, DialogRow::Linked(..)));
+        d.open_bases(at.unwrap());
+        d.pick_base(1);
+        assert_eq!(d.links()[0].root.repos[0].base, "dev");
+    }
+
+    #[test]
+    fn a_project_row_opens_no_base_list() {
+        let mut d = with_branches(&["api"], &["main"]);
+        d.others.push(Other {
+            project: "billing".into(),
+            name: "Billing".into(),
+            root: Finding::Failed("nope".into()),
+            linked: false,
+            touched: Vec::new(),
+        });
+        d.pick();
+        d.open_bases(0);
+        assert!(d.choosing.is_none() && d.picking);
+    }
+
     #[test]
     fn esc_goes_back_to_the_title_then_clears_it_then_closes() {
         let mut d = NewFeatureDialog::new("acme".into(), 1, "/work/api".into());
@@ -11059,7 +11687,11 @@ pub(crate) mod tests {
         assert!(view.repos[0].fixed);
         assert_eq!(
             view.keys,
-            [("Ctrl+Shift+L", "link project"), ("Esc", "close")]
+            [
+                ("Alt+B", "base branch"),
+                ("Ctrl+Shift+L", "link project"),
+                ("Esc", "close")
+            ]
         );
     }
 
