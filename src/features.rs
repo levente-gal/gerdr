@@ -135,6 +135,8 @@ pub struct Features {
     /// The feature folders whose docs link was seen to this run:
     /// `link_feature_docs` goes once for each.
     pub(crate) docs_linked: BTreeSet<PathBuf>,
+    /// The project roots `layout::free_for_cursor` went over this run.
+    pub(crate) cursor_freed: BTreeSet<PathBuf>,
     /// The code graph builds running, by project and slug, to stop.
     pub(crate) graphs: BTreeMap<(String, String), Arc<graph::Run>>,
     /// The features whose repositories changed under a code graph build:
@@ -343,6 +345,12 @@ pub(crate) enum Done {
     DocsLinked {
         title: String,
         result: Result<Option<PathBuf>, String>,
+    },
+    /// `.features` was taken out of `.cursorignore` in `root` if it was
+    /// there, and whether it was, or why not.
+    CursorFreed {
+        root: PathBuf,
+        result: Result<bool, String>,
     },
     /// A build of feature `slug`'s code graphs ended.
     Graphed {
@@ -4296,6 +4304,14 @@ impl Gerdr {
                     ));
                 }
             },
+            Done::CursorFreed { root, result } => match result {
+                Ok(false) => {}
+                Ok(true) => self.show_success(cursor_freed_text(&root)),
+                Err(why) => {
+                    tracing::warn!("opening {} to Cursor: {why}", root.display());
+                    self.show_warning(format!("Cursor agents can't edit feature folders: {why}"));
+                }
+            },
             Done::Graphed {
                 project,
                 slug,
@@ -7908,6 +7924,18 @@ fn created_text(title: &str, root: &Path, ignores: &[PathBuf]) -> String {
         "Created \u{201c}{title}\u{201d} \u{b7} added {} to {}",
         layout::FEATURES_DIR,
         names.join(", ")
+    )
+}
+
+/// What the toast says once `.features` left `root`'s `.cursorignore`
+/// (checklist D1).
+fn cursor_freed_text(root: &Path) -> String {
+    format!(
+        "Cursor agents can edit feature folders \u{b7} moved {} from {} to {} in {}",
+        layout::FEATURES_DIR,
+        layout::CURSOR_DENY,
+        layout::CURSOR_INDEX,
+        tilde(root)
     )
 }
 
@@ -14555,6 +14583,15 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_cursor_toast_says_what_moved_where() {
+        assert_eq!(
+            cursor_freed_text(Path::new("/w/multi")),
+            "Cursor agents can edit feature folders \u{b7} moved .features from \
+             .cursorignore to .cursorindexingignore in /w/multi"
+        );
+    }
+
+    #[test]
     fn removing_names_what_is_lost() {
         assert_eq!(
             removal_body(&[]),
@@ -15985,7 +16022,10 @@ pub(crate) mod tests {
         )));
         // Each fix round's list comes after, under its own label.
         let round = |n, items: &[(bool, &str)]| {
-            (n, items.iter().map(|(d, t)| (*d, (*t).to_owned())).collect())
+            (
+                n,
+                items.iter().map(|(d, t)| (*d, (*t).to_owned())).collect(),
+            )
         };
         let mut read = p.clone();
         read.docs.fix_rounds = vec![

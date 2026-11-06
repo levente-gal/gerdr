@@ -278,6 +278,17 @@ impl Gerdr {
             };
             let (slug, title) = (feature.slug.clone(), feature.title.clone());
             let (dir, multi) = (feature.dir.clone(), feature.multi);
+            let roots: Vec<PathBuf> = std::iter::once(feature.root.clone())
+                .chain(feature.links.iter().map(|l| l.root.clone()))
+                .collect();
+            for root in roots {
+                if self.features.cursor_freed.insert(root.clone()) {
+                    self.feature_work(None, move |_| Done::CursorFreed {
+                        result: layout::free_for_cursor(&root),
+                        root,
+                    });
+                }
+            }
             if !self.features.docs_linked.insert(dir.clone()) {
                 continue;
             }
