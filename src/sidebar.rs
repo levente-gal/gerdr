@@ -120,14 +120,9 @@ fn feature_fields(f: &crate::feature::Feature) -> Vec<(String, String)> {
 }
 
 /// The tooltip of stage dot `k` of feature `f`, about `anchor`.
-fn stage_tooltip(f: &crate::feature::Feature, k: usize, anchor: Rect) -> Option<Tooltip> {
+fn stage_tooltip(card: &chrome::FeatureCard, k: usize, anchor: Rect) -> Option<Tooltip> {
     let stage = *Stage::ALL.get(k)?;
-    let state = match crate::features::stage_mark(f, stage) {
-        chrome::StageMark::Done => "done",
-        chrome::StageMark::Current => "current",
-        chrome::StageMark::Later => "later",
-    };
-    let text = format!("{} \u{b7} {state}", stage.label());
+    let text = format!("{} \u{b7} {}", stage.label(), card.marks.get(k)?.word());
     Some(Tooltip::new(&text, anchor).fields(vec![("About".to_owned(), stage.about().to_owned())]))
 }
 
@@ -1019,11 +1014,12 @@ impl Gerdr {
             SidebarHit::Stage(i, k) => {
                 let f = self.workspace_feature(i)?;
                 let rect = layout.rows.get(i)?.stages?;
-                Some(stage_tooltip(f, k, rect)?.key("click to open this stage"))
+                let card = self.feature_card(f);
+                Some(stage_tooltip(&card, k, rect)?.key("click to open this stage"))
             }
             SidebarHit::FeatureDot(n, k) => {
                 let f = self.sidebar_feature(n)?;
-                let tip = stage_tooltip(f, k, *layout.features.get(n)?)?;
+                let tip = stage_tooltip(&self.feature_card(f), k, *layout.features.get(n)?)?;
                 if self.project.as_deref() == Some(f.project.as_str()) {
                     return Some(tip.key("click to open this stage"));
                 }

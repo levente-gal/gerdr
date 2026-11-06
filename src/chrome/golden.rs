@@ -14,7 +14,7 @@ use super::{
     SidebarState, SidebarView, SwitcherRow, SwitcherView, TabStripView, TabView, Theme, ThemeMode,
     ToastView, TooltipView, WelcomeHit, WelcomeView, WorkspaceView,
 };
-use super::{CardTone, FeatureCard};
+use super::{CardTone, FeatureCard, NodeMark};
 use crate::feature::Stage;
 use crate::{
     Action, WorkspaceKind, git::GitStatus, herdr::AgentStatus, text_field::Line, toast::Level,
@@ -1636,13 +1636,12 @@ fn new_feature() -> super::NewFeatureView {
 }
 
 /// A mark per stage, the first `done` of them done.
-fn stage_marks(done: usize) -> Vec<super::StageMark> {
-    use super::StageMark;
+fn stage_marks(done: usize) -> Vec<NodeMark> {
     (0..crate::feature::Stage::ALL.len())
         .map(|i| match i {
-            i if i < done => StageMark::Done,
-            i if i == done => StageMark::Current,
-            _ => StageMark::Later,
+            i if i < done => NodeMark::Done,
+            i if i == done => NodeMark::Current,
+            _ => NodeMark::Later,
         })
         .collect()
 }
@@ -1700,8 +1699,8 @@ fn feature_workspace_sidebar() -> SidebarView {
     }
 }
 
-/// The sidebar with two open features under its workspaces, the second
-/// under the pointer.
+/// The sidebar with three open features under its workspaces, the second
+/// under the pointer, the third turned back to Build as the rail draws it.
 fn features_sidebar() -> SidebarView {
     use super::FeatureRowView;
     SidebarView {
@@ -1726,9 +1725,29 @@ fn features_sidebar() -> SidebarView {
                     CardTone::Failed,
                 ),
             },
+            FeatureRowView {
+                title: "Turned back".into(),
+                card: FeatureCard {
+                    marks: Stage::ALL
+                        .iter()
+                        .map(|stage| match *stage {
+                            Stage::Build => NodeMark::Waiting,
+                            Stage::Verify => NodeMark::Ran,
+                            Stage::AiReview => NodeMark::Paused,
+                            s if s < Stage::Build => NodeMark::Done,
+                            _ => NodeMark::Later,
+                        })
+                        .collect(),
+                    ..card(
+                        Stage::Build,
+                        "Build \u{b7} waiting to send",
+                        CardTone::Waits,
+                    )
+                },
+            },
         ],
         state: SidebarState {
-            features: vec![0, 16],
+            features: vec![0, 16, 0],
             feature_dot: Some((1, 2)),
             ..SidebarState::default()
         },
@@ -2053,7 +2072,7 @@ const GOLDEN_FEATURES: [[u64; 11]; 4] = [
     // Dark at 1
     [
         0x73e88729cb0c3112, // new_feature
-        0xc1a69256781c03f4, // sidebar_features
+        0x5a4215e048760077, // sidebar_features
         0xce73d235eada39de, // plan_sheet
         0xf0ef6e28af47b05c, // plan_sheet_note
         0x444a60ab9e0f4abf, // plan_sheet_narrow
@@ -2061,13 +2080,13 @@ const GOLDEN_FEATURES: [[u64; 11]; 4] = [
         0xe472df71a44ddf16, // plan_sheet_keys
         0x93dd44d0af75ae63, // plan_sheet_empty
         0x4f489a294fd6cfe9, // sidebar_feature_workspace
-        0x0aa59d316e41ff3e, // sidebar_needs_you
+        0x6075405f8e8206a5, // sidebar_needs_you
         0x0cbbecc8e276c3fc, // sidebar_no_features
     ],
     // Dark at 2
     [
         0xbc9770d9310bd319, // new_feature
-        0xf5cc8a7d8aa86100, // sidebar_features
+        0x2420876a1713c00e, // sidebar_features
         0x354b777d647b74ae, // plan_sheet
         0x49003f081deb3c2e, // plan_sheet_note
         0x77de8b18241bb4b7, // plan_sheet_narrow
@@ -2075,13 +2094,13 @@ const GOLDEN_FEATURES: [[u64; 11]; 4] = [
         0x6ad99a47f32750f1, // plan_sheet_keys
         0xf4f48a436676b8ed, // plan_sheet_empty
         0x25a6c3532952ab77, // sidebar_feature_workspace
-        0x6971db10970b7155, // sidebar_needs_you
+        0xc8b3c8ac0d8ade67, // sidebar_needs_you
         0xf97a94d1cbc468b6, // sidebar_no_features
     ],
     // Light at 1
     [
         0xb1780dfd60b1e9a8, // new_feature
-        0xcc1a94bf5db9bbcc, // sidebar_features
+        0x5fa35c5309cb2f6c, // sidebar_features
         0x6da7e766b94ea319, // plan_sheet
         0x6900962e338f6172, // plan_sheet_note
         0x5d1256e75161f348, // plan_sheet_narrow
@@ -2089,13 +2108,13 @@ const GOLDEN_FEATURES: [[u64; 11]; 4] = [
         0x60c2fae25b1a30c4, // plan_sheet_keys
         0x6b284b7ef20e69aa, // plan_sheet_empty
         0x8c099eb3525e36fa, // sidebar_feature_workspace
-        0x44d7612e414d3bf7, // sidebar_needs_you
+        0xa043acdb1cfde9cb, // sidebar_needs_you
         0xb97e2bad7455858d, // sidebar_no_features
     ],
     // Light at 2
     [
         0x757537a93b40f9fa, // new_feature
-        0x950ac124a2800264, // sidebar_features
+        0xbdf675c5248b6976, // sidebar_features
         0x5a9fa2f0a7a81443, // plan_sheet
         0x8bc60f688ce6245b, // plan_sheet_note
         0xf99dc433f41c1492, // plan_sheet_narrow
@@ -2103,7 +2122,7 @@ const GOLDEN_FEATURES: [[u64; 11]; 4] = [
         0x64823c62e6db84ec, // plan_sheet_keys
         0x13fb250de721df9f, // plan_sheet_empty
         0x3653c34b3b5ea64a, // sidebar_feature_workspace
-        0xf4d5feb9684493d3, // sidebar_needs_you
+        0xff8bb35d09015939, // sidebar_needs_you
         0x7ae57ba63db05473, // sidebar_no_features
     ],
 ];

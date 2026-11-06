@@ -7802,7 +7802,9 @@ impl Gerdr {
         let back = rework(f, ctx);
         let (stage, text, tone) = card_status(f, &line, gate, busy, back, feature::now());
         chrome::FeatureCard {
-            marks: Stage::ALL.iter().map(|s| stage_mark(f, *s)).collect(),
+            marks: (Stage::ALL.iter())
+                .map(|s| node_mark(f, *s, ctx, &line))
+                .collect(),
             stage,
             line: text,
             tone,
@@ -8451,7 +8453,7 @@ fn card_tone(
 /// Whether the current `stage` of `feature` waits for the user: a file to
 /// review, a stop to go on from, findings to decide (see
 /// `feature_agents::gate_of`).
-fn waits(feature: &Feature, stage: Stage, state: &PanelState) -> bool {
+fn waits(feature: &Feature, stage: Stage, state: &LineState) -> bool {
     crate::feature_agents::gate_of(feature, |_| state.manual_gate).is_some_and(|g| g.0 == stage)
 }
 
@@ -8542,6 +8544,29 @@ fn current_line(feature: &Feature, stage: Stage, state: &LineState, now: u64) ->
     }
 }
 
+/// How `stage` of `feature` reads, on the rail and in the dots of its
+/// sidebar card alike.
+fn node_mark(feature: &Feature, stage: Stage, ctx: RowCtx, state: &LineState) -> NodeMark {
+    let at_work = rework(feature, ctx);
+    if let Some(back) = at_work.filter(|_| stage == Stage::Build) {
+        return back.node().0;
+    }
+    let turned = turned_back(feature, ctx);
+    match stage_mark(feature, stage) {
+        // Code changing is what's expected now: "code changed" says so once
+        // the work is over, when it asks for something. What comes before
+        // Build isn't bound to the code, so it stands as it was.
+        StageMark::Done if turned.is_some() && stage.bound() => NodeMark::Ran,
+        StageMark::Done if is_stale(feature, stage, state.probe) => NodeMark::Stale,
+        StageMark::Done => NodeMark::Done,
+        StageMark::Current if waits(feature, stage, state) => NodeMark::Waiting,
+        StageMark::Current if turned == Some(stage) && at_work.is_some() => NodeMark::Paused,
+        StageMark::Current => NodeMark::Current,
+        StageMark::Later if feature.ran_once.contains_key(&stage) => NodeMark::Ran,
+        StageMark::Later => NodeMark::Later,
+    }
+}
+
 /// `stage`'s node on the rail of `feature`.
 fn rail_node(feature: &Feature, stage: Stage, state: &PanelState, now: u64) -> RailNode {
     let mark = stage_mark(feature, stage);
@@ -8551,39 +8576,20 @@ fn rail_node(feature: &Feature, stage: Stage, state: &PanelState, now: u64) -> R
         let what = run.model.as_deref().map_or(run.agent.as_str(), short_model);
         (AgentIcon::from_agent(&run.agent), what.to_owned())
     });
-    let at_work = rework(feature, state.ctx);
-    let back = at_work.filter(|_| stage == Stage::Build);
-    let turned = turned_back(feature, state.ctx);
-    let (mark, line) = match (stage_mark(feature, stage), back) {
-        (_, Some(back)) => back.node(),
-        // Code changing is what's expected now: "code changed" says so once
-        // the work is over, when it asks for something. What comes before
-        // Build isn't bound to the code, so it stands as it was.
-        (StageMark::Done, _) if turned.is_some() && stage.bound() => {
-            let at = feature.marks.get(&stage).map_or(0, |m| m.at);
-            (NodeMark::Ran, projects::ago(now, at))
-        }
-        (StageMark::Done, _) if is_stale(feature, stage, state.probe) => {
-            (NodeMark::Stale, "code changed".to_owned())
-        }
+    let lines = LineState::from(state);
+    let mark = node_mark(feature, stage, state.ctx, &lines);
+    let back = rework(feature, state.ctx).filter(|_| stage == Stage::Build);
+    let line = match (stage_mark(feature, stage), back) {
+        (_, Some(back)) => back.node().1,
+        (StageMark::Done, _) if mark == NodeMark::Stale => "code changed".to_owned(),
         (StageMark::Done, _) => {
             let at = feature.marks.get(&stage).map_or(0, |m| m.at);
-            (NodeMark::Done, projects::ago(now, at))
+            projects::ago(now, at)
         }
-        (StageMark::Current, _) => {
-            let mark = if waits(feature, stage, state) {
-                NodeMark::Waiting
-            } else if turned == Some(stage) && at_work.is_some() {
-                NodeMark::Paused
-            } else {
-                NodeMark::Current
-            };
-            (mark, current_line(feature, stage, &state.into(), now))
+        (StageMark::Current, _) => current_line(feature, stage, &lines, now),
+        (StageMark::Later, _) => {
+            (feature.ran_once.get(&stage)).map_or_else(String::new, |at| projects::ago(now, *at))
         }
-        (StageMark::Later, _) => match feature.ran_once.get(&stage) {
-            Some(at) => (NodeMark::Ran, projects::ago(now, *at)),
-            None => (NodeMark::Later, String::new()),
-        },
     };
     RailNode {
         label: stage.label().to_owned(),
@@ -9146,7 +9152,7 @@ fn stage_page(
             let failed = text.contains("failed") || text.contains("not ready");
             let tone = if failed {
                 CheckTone::Blocker
-            } else if waits(feature, stage, state) {
+            } else if waits(feature, stage, &state.into()) {
                 CheckTone::Ready
             } else {
                 CheckTone::Note

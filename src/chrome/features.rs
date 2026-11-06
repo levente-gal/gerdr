@@ -68,19 +68,6 @@ pub enum StageMark {
     Later,
 }
 
-impl StageMark {
-    /// Its colour: done in the success colour, the current one in the
-    /// accent, the later ones in the placeholder's (dim, but readable as
-    /// a mark: 3:1 at least).
-    pub(super) fn color(self, p: &Palette) -> Rgb {
-        match self {
-            Self::Done => p.success,
-            Self::Current => p.accent,
-            Self::Later => p.placeholder,
-        }
-    }
-}
-
 /// Signed distance to a stage's mark `d` across, centred on the origin: a
 /// dot for done and current, a ring for a later one.
 pub(super) fn stage_dot(mark: StageMark, x: f32, y: f32, d: f32) -> f32 {
@@ -424,6 +411,44 @@ pub enum NodeMark {
     /// The current stage, with the flow back at Build on its account and the
     /// next move not its own: a ring round its number.
     Paused,
+}
+
+impl NodeMark {
+    /// The colour of its dot on a sidebar card, the one of its node on the
+    /// rail; still to come in the placeholder's (dim, but readable as a
+    /// mark: 3:1 at least).
+    pub(super) fn dot_color(self, p: &Palette) -> Rgb {
+        match self {
+            Self::Done => p.success,
+            Self::Current | Self::Fixing => p.accent,
+            Self::Stale | Self::Waiting => p.warning,
+            Self::Ran | Self::Paused => p.muted,
+            Self::Later => p.placeholder,
+        }
+    }
+
+    /// The shape of its dot on a sidebar card: a ring for what isn't
+    /// behind the flow or at work, as on the rail.
+    fn dot_shape(self) -> StageMark {
+        match self {
+            Self::Later | Self::Paused => StageMark::Later,
+            _ => StageMark::Done,
+        }
+    }
+
+    /// How a stage's tooltip says it stands.
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Done => "done",
+            Self::Current => "current",
+            Self::Later => "later",
+            Self::Stale => "code changed",
+            Self::Waiting => "waiting for you",
+            Self::Fixing => "running again",
+            Self::Ran => "ran once",
+            Self::Paused => "waiting for fixes",
+        }
+    }
 }
 
 /// The flow turned back to Build: the line on the feature tab's rail, from
@@ -4591,8 +4616,8 @@ impl Painter {
                 continue;
             }
             let spot = stage_dot_rect(rect, big, i);
-            icon_sdf(c, spot, scale, mark.color(p), |x, y| {
-                stage_dot(*mark, x, y, stage_dot_across(spot, scale))
+            icon_sdf(c, spot, scale, mark.dot_color(p), |x, y| {
+                stage_dot(mark.dot_shape(), x, y, stage_dot_across(spot, scale))
             });
         }
     }
@@ -4638,7 +4663,8 @@ impl CardTone {
 /// on the header of its own workspace.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct FeatureCard {
-    pub marks: Vec<StageMark>,
+    /// Each stage as the rail of its feature tab reads it.
+    pub marks: Vec<NodeMark>,
     /// The stage it is at; none once every stage is done.
     pub stage: Option<Stage>,
     /// How that stage stands, in words: "Build · milestone 2/5".
@@ -4651,15 +4677,26 @@ pub struct FeatureCard {
 }
 
 impl FeatureCard {
-    /// The stage dot that is big: the stage its icon and line are about.
-    pub(super) fn big_dot(&self) -> Option<usize> {
-        let stage = self.stage?;
-        Stage::ALL.iter().position(|s| *s == stage)
+    /// Which stage dot has `mark`, the first if several do.
+    fn dot_marked(&self, mark: NodeMark) -> Option<usize> {
+        self.marks.iter().position(|m| *m == mark)
     }
 
-    /// The stage dot that blinks: the big one, while that stage runs.
+    /// The stage dot that is big: the stage its icon and line are about,
+    /// unless the flow went back from it: then the one the rail pulses.
+    pub(super) fn big_dot(&self) -> Option<usize> {
+        let stage = (self.stage).and_then(|s| Stage::ALL.iter().position(|a| *a == s));
+        let left = stage.filter(|k| self.marks.get(*k) == Some(&NodeMark::Ran));
+        self.dot_marked(NodeMark::Fixing)
+            .or_else(|| left.and_then(|_| self.dot_marked(NodeMark::Current)))
+            .or(stage)
+    }
+
+    /// The stage dot that blinks: the big one, while it runs.
     pub(super) fn running_dot(&self) -> Option<usize> {
-        self.big_dot().filter(|_| self.tone == CardTone::Working)
+        self.big_dot().filter(|k| {
+            self.tone == CardTone::Working || self.marks.get(*k) == Some(&NodeMark::Fixing)
+        })
     }
 
     /// Whether it shows how many repositories it holds: only with several.
@@ -4745,7 +4782,8 @@ pub(super) fn stage_marks_width(marks: usize) -> i32 {
 pub(super) fn stage_blink_dot(scale: f64, p: &Palette) -> MemoryRenderBuffer {
     let spot: Rect = Rectangle::from_size((STAGE_DOT_BIG, STAGE_DOT_BIG).into());
     let mut c = Canvas::new(super::physical(spot.size, scale));
-    icon_sdf(&mut c, spot, scale, StageMark::Current.color(p), |x, y| {
+    let color = NodeMark::Current.dot_color(p);
+    icon_sdf(&mut c, spot, scale, color, |x, y| {
         stage_dot(StageMark::Current, x, y, stage_dot_across(spot, scale))
     });
     c.into_buffer(false)
@@ -4824,7 +4862,7 @@ mod tests {
             let mut ws = WorkspaceView::new(name.into(), WorkspaceKind::Terminal, &[]);
             if feature {
                 ws.feature = Some(FeatureCard {
-                    marks: vec![StageMark::Done, StageMark::Current],
+                    marks: vec![NodeMark::Done, NodeMark::Current],
                     ..FeatureCard::default()
                 });
             }
@@ -4854,7 +4892,7 @@ mod tests {
         let mut ws = WorkspaceView::new("Bulk".into(), WorkspaceKind::Terminal, &[]);
         ws.branch = Some("feature/bulk".into());
         ws.feature = Some(FeatureCard {
-            marks: vec![StageMark::Later; Stage::ALL.len()],
+            marks: vec![NodeMark::Later; Stage::ALL.len()],
             repos: 3,
             ..FeatureCard::default()
         });
@@ -4961,7 +4999,7 @@ mod tests {
         let mut ws = WorkspaceView::new("Bulk".into(), crate::WorkspaceKind::Terminal, &[]);
         ws.picks = vec![AgentIcon::Claude];
         ws.feature = Some(FeatureCard {
-            marks: vec![StageMark::Later; Stage::ALL.len()],
+            marks: vec![NodeMark::Later; Stage::ALL.len()],
             ..FeatureCard::default()
         });
         let layout = sidebar_layout_at(std::slice::from_ref(&ws), &[], 200, Density::Comfortable);
@@ -4981,7 +5019,7 @@ mod tests {
         let d = Density::Comfortable;
         let mut ws = WorkspaceView::new("Bulk".into(), crate::WorkspaceKind::Terminal, &[]);
         ws.feature = Some(FeatureCard {
-            marks: vec![StageMark::Later; Stage::ALL.len()],
+            marks: vec![NodeMark::Later; Stage::ALL.len()],
             ..FeatureCard::default()
         });
         let layout = sidebar_layout_at(std::slice::from_ref(&ws), &[], 200, d)
@@ -5049,7 +5087,7 @@ mod tests {
         let rows = [FeatureRowView {
             title: "A feature".into(),
             card: FeatureCard {
-                marks: vec![StageMark::Later; Stage::ALL.len()],
+                marks: vec![NodeMark::Later; Stage::ALL.len()],
                 stage: Some(Stage::Build),
                 ..FeatureCard::default()
             },
@@ -5078,7 +5116,7 @@ mod tests {
         use crate::chrome::{Density, SidebarView, WorkspaceView, sidebar_layout_at};
         let d = Density::Comfortable;
         let card = |tone| FeatureCard {
-            marks: vec![StageMark::Later; Stage::ALL.len()],
+            marks: vec![NodeMark::Later; Stage::ALL.len()],
             stage: Some(Stage::Verify),
             tone,
             ..FeatureCard::default()
@@ -5126,19 +5164,67 @@ mod tests {
         );
         // Every stage done: no stage to be big or to blink.
         let done = FeatureCard {
-            marks: vec![StageMark::Done; Stage::ALL.len()],
+            marks: vec![NodeMark::Done; Stage::ALL.len()],
             tone: CardTone::Working,
             ..FeatureCard::default()
         };
         assert_eq!((done.big_dot(), done.running_dot()), (None, None));
+        // Turned back, the dots follow the rail: the one it pulses is big
+        // and blinks, not the stage that sent the work back.
+        let mut marks = vec![NodeMark::Later; Stage::ALL.len()];
+        let at = |stage| Stage::ALL.iter().position(|s| *s == stage).unwrap();
+        let (build, review) = (at(Stage::Build), at(Stage::AiReview));
+        marks[build] = NodeMark::Fixing;
+        marks[review] = NodeMark::Paused;
+        let fixing = FeatureCard {
+            marks: marks.clone(),
+            stage: Some(Stage::AiReview),
+            tone: CardTone::Failed,
+            ..FeatureCard::default()
+        };
+        assert_eq!(
+            (fixing.big_dot(), fixing.running_dot()),
+            (Some(build), Some(build))
+        );
+        marks[build] = NodeMark::Current;
+        marks[review] = NodeMark::Ran;
+        let cleared = FeatureCard {
+            marks: marks.clone(),
+            stage: Some(Stage::AiReview),
+            tone: CardTone::Working,
+            ..FeatureCard::default()
+        };
+        assert_eq!(
+            (cleared.big_dot(), cleared.running_dot()),
+            (Some(build), Some(build))
+        );
+        // At rest, waiting on the stage that asked: that one stays big.
+        marks[build] = NodeMark::Ran;
+        marks[review] = NodeMark::Waiting;
+        let waits = FeatureCard {
+            marks,
+            stage: Some(Stage::AiReview),
+            tone: CardTone::Waits,
+            ..FeatureCard::default()
+        };
+        assert_eq!((waits.big_dot(), waits.running_dot()), (Some(review), None));
     }
 
     #[test]
     fn stage_marks_read_on_the_panels_in_both_themes() {
         for p in [&ONE_DARK, &ONE_LIGHT, &ONE_LIGHT_PAGE] {
-            for mark in [StageMark::Done, StageMark::Current, StageMark::Later] {
+            for mark in [
+                NodeMark::Done,
+                NodeMark::Current,
+                NodeMark::Later,
+                NodeMark::Stale,
+                NodeMark::Waiting,
+                NodeMark::Fixing,
+                NodeMark::Ran,
+                NodeMark::Paused,
+            ] {
                 for ground in [p.panel, p.elevated, p.selected] {
-                    let ratio = contrast(mark.color(p), ground);
+                    let ratio = contrast(mark.dot_color(p), ground);
                     assert!(ratio >= 3.0, "{mark:?} at {ratio:.2}:1");
                 }
             }
