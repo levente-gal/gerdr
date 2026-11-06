@@ -738,6 +738,14 @@ fn commit_of(main: &Path, base: &str) -> Result<String, String> {
 /// The ref `losses` and `remove` count commits from for `repo`: its base
 /// branch if it is there, else origin's, else the commit it started at.
 pub(super) fn base_ref(repo: &Repo) -> String {
+    // Shown here, written on another machine: where it left off there, whatever
+    // the same branch here is at.
+    if let Some(seen) = repo.branch.as_deref().map(super::remote::view_base_ref) {
+        let spec = format!("{seen}^{{commit}}");
+        if git(&repo.main, &["rev-parse", "--verify", "--quiet", &spec]).is_ok() {
+            return seen;
+        }
+    }
     for name in [repo.base.clone(), format!("origin/{}", repo.base)] {
         let spec = format!("{name}^{{commit}}");
         if git(&repo.main, &["rev-parse", "--verify", "--quiet", &spec]).is_ok() {
@@ -1498,6 +1506,7 @@ mod tests {
     fn feature_of(root: &Root, created: Created, slug: &str) -> Feature {
         Feature {
             version: VERSION,
+            writer: None,
             slug: slug.into(),
             title: slug.into(),
             project: "p".into(),

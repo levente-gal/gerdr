@@ -63,6 +63,7 @@ mod keys;
 mod launch;
 mod layout;
 mod machine_checks;
+mod machine_views;
 mod machine_work;
 mod machines;
 mod manual_test;
@@ -3697,9 +3698,11 @@ impl Gerdr {
         let mut zed_expected = false;
         for record in records {
             // A feature's workspace comes back with only its panel tab.
-            let feature = (self.project.as_ref())
-                .and_then(|id| self.features.all.get(id))
-                .is_some_and(|all| feature_workspace::feature_on(all, &record.dir).is_some());
+            let feature = (self.project.as_ref()).is_some_and(|id| {
+                let own = self.features.all.get(id).map_or(&[][..], Vec::as_slice);
+                feature_workspace::feature_on(own, &record.dir).is_some()
+                    || feature_workspace::feature_on(self.viewed_of(id), &record.dir).is_some()
+            });
             if !feature && !record.tabs.iter().any(|t| t.layout.holds_apps()) {
                 if record.herdr_id.is_none() && !record.keeps_place() {
                     self.forget_workspace(&record.id);

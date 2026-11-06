@@ -116,6 +116,8 @@ pub struct FeatureOf {
     pub stage: Option<Stage>,
     /// The feature isn't open any more.
     pub closed: bool,
+    /// Another machine writes it: nothing can be left on its code from here.
+    pub seen: bool,
     /// AI review's findings were read in.
     pub ready: bool,
     /// The open fix plan: its phase and how it stands, in words.
@@ -173,7 +175,8 @@ impl Standing {
         Standing {
             state: state(feature),
             stage: feature.current(),
-            closed: feature.status != Status::Open,
+            // What's written elsewhere is only looked at here, as a closed one.
+            closed: feature.status != Status::Open || feature.writer.is_some(),
             ready: feature.review.is_some() && run.is_some_and(|r| r.ready.is_some()),
             round: (feature.fix_round.as_ref()).map(|round| (round.phase, round.line())),
         }
@@ -341,6 +344,9 @@ impl FeatureOf {
             ]),
             Role::Round(FixPhase::Ready) => keys.push(("Ctrl+Enter", "review the fix plan")),
             _ => {}
+        }
+        if self.seen {
+            return keys;
         }
         keys.extend([
             ("Space", "mark the file viewed, or not"),
@@ -670,6 +676,9 @@ pub fn approve_refusal(gate: &Gate) -> Option<String> {
 
 /// Where Code review of `feature` stands, as its header says it.
 pub fn state(feature: &Feature) -> String {
+    if feature.writer.is_some() {
+        return "written on another machine".into();
+    }
     if feature.status != Status::Open {
         return "feature closed".into();
     }
@@ -819,6 +828,7 @@ impl Gerdr {
             state: standing.state,
             stage: standing.stage,
             closed: standing.closed,
+            seen: feature.writer.is_some(),
             ready: standing.ready,
             round: standing.round,
             comments: comments.clone(),
@@ -1005,6 +1015,10 @@ impl Gerdr {
     /// Tick file `path` of the repository at `root` viewed, or untick it:
     /// kept in the feature's record.
     pub(crate) fn feature_toggle(&mut self, root: &Path, path: &str) {
+        let seen = (self.wd().and_then(|wd| wd.feature.as_ref())).is_some_and(|fe| fe.seen);
+        if seen {
+            return self.show_warning(crate::doc_review::WRITTEN_ELSEWHERE.to_owned());
+        }
         let Some(fe) = self.feature_of() else {
             return;
         };

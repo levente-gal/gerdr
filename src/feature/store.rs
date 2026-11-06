@@ -4,8 +4,10 @@
 //! a folder given in tests.
 
 use std::{
+    collections::BTreeMap,
     io::ErrorKind,
     path::{Path, PathBuf},
+    sync::RwLock,
 };
 
 use super::{Feature, VERSION};
@@ -17,8 +19,26 @@ pub fn project_dir(root: Option<&Path>, project: &str) -> PathBuf {
     root.join("features").join(project)
 }
 
+/// The copies of the features other machines write, by project and slug: where
+/// their folders are. Everything reading a feature's files goes by `dir`, from
+/// threads too, so this is where they are told apart.
+static SEEN: RwLock<BTreeMap<(String, String), PathBuf>> = RwLock::new(BTreeMap::new());
+
+/// The features shown here that other machines write: their folders.
+pub fn set_seen(seen: BTreeMap<(String, String), PathBuf>) {
+    if let Ok(mut mine) = SEEN.write() {
+        *mine = seen;
+    }
+}
+
 /// Feature `slug`'s folder: its record and stage files.
 pub fn dir(root: Option<&Path>, project: &str, slug: &str) -> PathBuf {
+    if root.is_none()
+        && let Ok(seen) = SEEN.read()
+        && let Some(found) = seen.get(&(project.to_owned(), slug.to_owned()))
+    {
+        return found.clone();
+    }
     project_dir(root, project).join(slug)
 }
 
@@ -104,6 +124,23 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn a_feature_shown_from_elsewhere_reads_from_its_copy() {
+        let project = "seen-project-of-this-test";
+        let copy = PathBuf::from("/copy/of/it");
+        let seen = BTreeMap::from([((project.to_owned(), "a".to_owned()), copy.clone())]);
+        set_seen(seen);
+        assert_eq!(dir(None, project, "a"), copy);
+        // Only that one, and not for a folder given.
+        assert_ne!(dir(None, project, "b"), copy);
+        assert_eq!(
+            dir(Some(Path::new("/r")), project, "a"),
+            Path::new("/r/features").join(project).join("a")
+        );
+        set_seen(BTreeMap::new());
+        assert_ne!(dir(None, project, "a"), copy);
     }
 
     #[test]

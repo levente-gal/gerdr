@@ -727,7 +727,8 @@ pub struct FeatureTabView {
     /// Which of how many features it is, when there are several.
     pub which: Option<(usize, usize)>,
     /// The label of the header's last button, removing its worktrees
-    /// (Abandon…, Remove worktrees…), after `FEATURE_BUTTONS`.
+    /// (Abandon…, Remove worktrees…), after `FEATURE_BUTTONS`. Empty: the header
+    /// has no buttons, as on a feature another machine writes.
     pub remove: &'static str,
     /// The nine stages, in order.
     pub rail: Vec<RailNode>,
@@ -2551,6 +2552,7 @@ pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayou
         .iter()
         .copied()
         .chain([view.remove])
+        .filter(|_| !view.remove.is_empty())
         .collect();
     let by = top + (header_h - TAB_BUTTON) / 2;
     let mut bx = right;
@@ -5625,6 +5627,10 @@ mod tests {
             assert_eq!(hit(&l, &view, *b), Some(FeatureTabHit::Button(i)));
         }
         assert_eq!(l.buttons.len(), FEATURE_BUTTONS.len() + 1);
+        // A feature another machine writes has none of them.
+        let mut seen = view.clone();
+        seen.remove = "";
+        assert!(tab_at(&seen, 1920).buttons.is_empty());
         for (i, n) in l.nodes.iter().enumerate() {
             assert_eq!(hit(&l, &view, *n), Some(FeatureTabHit::Node(i)));
         }

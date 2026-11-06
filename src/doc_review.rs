@@ -99,6 +99,9 @@ impl DocFile {
 
     /// Why it can't be edited now. None: it can.
     pub fn locked(self, feature: Option<&Feature>, docs: &Docs) -> Option<&'static str> {
+        if feature.is_some_and(|f| f.writer.is_some()) {
+            return Some(WRITTEN_ELSEWHERE);
+        }
         match self {
             DocFile::Stage(stage) => locked(feature, stage, docs),
             DocFile::Evidence => Some(EVIDENCE_READ_ONLY),
@@ -109,6 +112,12 @@ impl DocFile {
     /// Whether it is closed for good and why. The evidence is only read
     /// however Verify stands, and has no actions to change.
     pub fn standing(self, feature: Option<&Feature>, docs: &Docs) -> Standing {
+        // Written elsewhere, it is only read here, whichever stage it is at.
+        if self != DocFile::Evidence
+            && let Some(feature) = feature.filter(|f| f.writer.is_some())
+        {
+            return Standing::Locked(feature.current().unwrap_or(Stage::Ship));
+        }
         match (self, feature) {
             (DocFile::Stage(stage), Some(feature)) => {
                 feature.standing(stage, |s| docs.written.contains(&s))
@@ -173,6 +182,8 @@ pub use crate::feature::artifacts::comments_path;
 
 /// Why an edit, a comment or Send back do nothing on an approved file.
 pub const APPROVED_FILE: &str = "An approved file can't be edited: reopen it first";
+/// Why those do nothing on a file of a feature another machine writes.
+pub const WRITTEN_ELSEWHERE: &str = "This feature is written on another machine: change it there";
 /// Why those, and Reopen, do nothing on a locked one.
 pub const LOCKED_FILE: &str = "This file is locked: start over the stages after it first";
 
@@ -708,6 +719,12 @@ mod tests {
         assert_eq!(locked(Some(&f), Stage::Discover, &docs), Some(LOCKED_FILE));
         // The evidence has no actions to close.
         assert_eq!(DocFile::Evidence.standing(Some(&f), &docs), Standing::Open);
+        // What another machine writes is only read here, at any stage.
+        let mut seen = f.clone();
+        seen.writer = Some("m1".into());
+        let file = DocFile::Stage(Stage::Discover);
+        assert!(matches!(file.standing(Some(&seen), &docs), Standing::Locked(_)));
+        assert_eq!(file.locked(Some(&seen), &docs), Some(WRITTEN_ELSEWHERE));
     }
 
     #[test]

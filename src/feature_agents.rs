@@ -669,7 +669,11 @@ pub(crate) fn stage_model_slot(
     workflow: Option<&Workflow>,
     installed: &[CliAgent],
 ) -> Option<ModelSlot> {
-    if feature.status != Status::Open || needs(stage).is_none() || feature.is_done(stage) {
+    if feature.writer.is_some()
+        || feature.status != Status::Open
+        || needs(stage).is_none()
+        || feature.is_done(stage)
+    {
         return None;
     }
     let Pick::Agent(agent, base) = stage_pick(feature, stage, workflow, installed) else {
@@ -692,7 +696,11 @@ pub(crate) fn stage_chips(
     workflow: Option<&Workflow>,
     installed: &[CliAgent],
 ) -> Vec<AgentChip> {
-    if feature.status != Status::Open || needs(stage).is_none() || feature.is_done(stage) {
+    if feature.writer.is_some()
+        || feature.status != Status::Open
+        || needs(stage).is_none()
+        || feature.is_done(stage)
+    {
         return Vec::new();
     }
     let mut agents: Vec<(String, String)> = installed

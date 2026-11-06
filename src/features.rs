@@ -112,6 +112,19 @@ use crate::{
 pub struct Features {
     /// By project id, oldest first.
     pub all: BTreeMap<String, Vec<Feature>>,
+    /// The features other machines write that are shown here, the same way:
+    /// apart from `all`, so what walks those never acts on these (see
+    /// `machine_views`).
+    pub(crate) viewed: BTreeMap<String, Vec<Feature>>,
+    /// The panes their records name, as their writers say (see `feature::view`).
+    pub(crate) seen: BTreeMap<String, feature::view::SeenPane>,
+    /// What was last said of this gerdr's own panes, and when.
+    pub(crate) live_last: Option<(feature::view::Live, u64)>,
+    /// How the code of those shown here stands, by project and slug.
+    pub(crate) code_here: BTreeMap<(String, String), crate::machine_views::CodeHere>,
+    /// The features of other machines already said not to show, by machine and
+    /// slug: their names are taken here.
+    pub(crate) clashes: BTreeSet<(String, String)>,
     /// Cursor's models, for the picker of a stage's model.
     pub cursor_models: crate::stage_models::CursorModels,
     pub dialog: Option<NewFeatureDialog>,
@@ -1494,6 +1507,31 @@ pub enum PanelOutcome {
     Show(String),
 }
 
+impl PanelOutcome {
+    /// Whether it only shows something: what a feature another machine writes
+    /// can do here. Anything new counts as changing it until said otherwise.
+    pub fn reads_only(&self) -> bool {
+        matches!(
+            self,
+            Self::ShowAgent(_)
+                | Self::ShowCheck(_)
+                | Self::OpenDoc(_)
+                | Self::ReviewFixPlan
+                | Self::Evidence
+                | Self::SetupLog
+                | Self::Findings
+                | Self::ShowFinding(_)
+                | Self::ShowDiffNote(_)
+                | Self::FoldRound(_)
+                | Self::CodeReview
+                | Self::OpenPr(_)
+                | Self::GoToCurrent
+                | Self::CopyPath
+                | Self::Show(_)
+        )
+    }
+}
+
 /// A row of the feature panel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PanelRow {
@@ -1588,6 +1626,19 @@ pub fn entry_key(feature: &Feature, sources: &[RepoSource], entry: RepoEntry) ->
 /// only join what a source still finds it in: a removed one whose folder
 /// went has none.
 pub fn entry_buttons(
+    feature: &Feature,
+    sources: &[RepoSource],
+    entry: RepoEntry,
+) -> Vec<(&'static str, PanelOutcome)> {
+    let mut buttons = writers_entry_buttons(feature, sources, entry);
+    if feature.writer.is_some() {
+        buttons.retain(|(_, outcome)| outcome.reads_only());
+    }
+    buttons
+}
+
+/// `entry_buttons` on the machine writing `feature`.
+fn writers_entry_buttons(
     feature: &Feature,
     sources: &[RepoSource],
     entry: RepoEntry,
@@ -1726,6 +1777,12 @@ pub(crate) fn lock_why(feature: &Feature, by: Stage) -> String {
 
 /// What Enter (or the row's button) does on `row` of `feature`.
 pub fn row_action(feature: &Feature, row: PanelRow, ctx: RowCtx) -> Option<PanelOutcome> {
+    let action = writers_row_action(feature, row, ctx)?;
+    (feature.writer.is_none() || action.reads_only()).then_some(action)
+}
+
+/// `row_action` on the machine writing `feature`.
+fn writers_row_action(feature: &Feature, row: PanelRow, ctx: RowCtx) -> Option<PanelOutcome> {
     match row {
         PanelRow::Repo(i) => {
             let repo = feature.repos.get(i)?;
@@ -2052,6 +2109,7 @@ fn why_not_decide(feature: &Feature, stage: Stage) -> Option<&'static str> {
 /// comment of the user's added: AI review, current, its latest run read.
 fn can_decide(feature: &Feature, stage: Stage) -> bool {
     stage == Stage::AiReview
+        && feature.writer.is_none()
         && feature.status == Status::Open
         && feature.current() == Some(stage)
         && (feature.runs.get(&stage)).is_some_and(|r| r.ready.is_some())
@@ -2381,6 +2439,9 @@ fn stage_actions(
     );
     if tries_criteria(feature, stage) {
         out.extend((criteria.iter().enumerate()).flat_map(|(i, row)| criterion_buttons(i, row)));
+    }
+    if feature.writer.is_some() {
+        out.retain(|(_, outcome)| outcome.reads_only());
     }
     out
 }
@@ -3450,7 +3511,9 @@ fn watch_every(feature: &Feature) -> Duration {
 /// The label of what removes `feature`'s worktrees: abandoning it while
 /// open, removing them once done.
 pub fn remove_label(feature: &Feature) -> &'static str {
-    if feature.status == Status::Done {
+    if feature.writer.is_some() {
+        ""
+    } else if feature.status == Status::Done {
         "Remove worktrees"
     } else {
         "Abandon"
@@ -4349,6 +4412,26 @@ pub fn page_actions(
     stage: Stage,
     ctx: RowCtx,
 ) -> Vec<(PageButton, PanelOutcome)> {
+    let mut out = writers_page_actions(feature, stage, ctx);
+    if feature.writer.is_some() {
+        out.retain(|(_, outcome)| outcome.reads_only());
+        // There's nothing to do to a file here but read it.
+        for (button, outcome) in &mut out {
+            if matches!(outcome, PanelOutcome::OpenDoc(_)) {
+                button.label = "Open".to_owned();
+                button.style = ButtonStyle::Plain;
+            }
+        }
+    }
+    out
+}
+
+/// `page_actions` on the machine writing `feature`.
+fn writers_page_actions(
+    feature: &Feature,
+    stage: Stage,
+    ctx: RowCtx,
+) -> Vec<(PageButton, PanelOutcome)> {
     let mark = stage_mark(feature, stage);
     if mark == StageMark::Later {
         return review_actions(feature, stage);
@@ -4752,10 +4835,14 @@ impl Gerdr {
             }
         }
         self.features.all = all;
+        self.seen_folders_changed();
         let all = &self.features.all;
+        let viewed = &self.features.viewed;
         let kept = |(project, slug): &(String, String)| {
-            all.get(project)
-                .is_some_and(|fs| fs.iter().any(|f| f.slug == *slug))
+            [all, viewed].into_iter().any(|map| {
+                map.get(project)
+                    .is_some_and(|fs| fs.iter().any(|f| f.slug == *slug))
+            })
         };
         self.features.probes.retain(|key, _| kept(key));
         self.features.asked.retain(|key, _| kept(key));
@@ -4766,16 +4853,15 @@ impl Gerdr {
         self.sync_feature_panel();
     }
 
-    /// Feature `slug` of project `project`.
+    /// Feature `slug` of project `project`, whichever machine writes it.
     pub fn feature(&self, project: &str, slug: &str) -> Option<&Feature> {
-        self.features
-            .all
-            .get(project)?
-            .iter()
-            .find(|f| f.slug == slug)
+        let own = self.features.all.get(project).into_iter().flatten();
+        let viewed = self.features.viewed.get(project).into_iter().flatten();
+        own.chain(viewed).find(|f| f.slug == slug)
     }
 
-    /// Feature `slug` of project `project`, to change.
+    /// Feature `slug` of project `project`, to change: only this machine's own
+    /// can be.
     pub(crate) fn feature_mut(&mut self, project: &str, slug: &str) -> Option<&mut Feature> {
         self.features
             .all
@@ -4786,7 +4872,7 @@ impl Gerdr {
 
     /// Save feature `slug` of `project` as it is now; a failure says so.
     pub(crate) fn save_feature(&mut self, project: &str, slug: &str) {
-        let Some(feature) = self.feature(project, slug) else {
+        let Some(feature) = self.feature(project, slug).filter(|f| f.writer.is_none()) else {
             return;
         };
         if let Err(err) = store::save(None, feature) {
@@ -4800,11 +4886,11 @@ impl Gerdr {
 
     /// The slugs of the features the panel lists for `project`.
     fn listed_slugs(&self, project: &str) -> Vec<String> {
-        self.features
-            .all
-            .get(project)
-            .map(|all| listed(all).into_iter().map(|f| f.slug.clone()).collect())
-            .unwrap_or_default()
+        let own = self.features.all.get(project).map(|all| listed(all));
+        let viewed = listed(self.viewed_of(project));
+        (own.unwrap_or_default().into_iter().chain(viewed))
+            .map(|f| f.slug.clone())
+            .collect()
     }
 
     /// Where the threads send what they came to; set up the first time.
@@ -5502,10 +5588,16 @@ impl Gerdr {
         let data = store::dir(None, project, slug);
         let (project, slug) = (project.to_owned(), slug.to_owned());
         self.feature_work(None, move |_| Done::Probed {
-            probe: Probe {
-                docs: feature::page::read_docs(&data),
-                models: feature::agents::read_models(&feature),
-                ..ship::probe(&feature, &modes)
+            probe: match feature.writer {
+                Some(_) => Probe {
+                    docs: feature::page::read_docs(&data),
+                    ..ship::probe_seen(&feature)
+                },
+                None => Probe {
+                    docs: feature::page::read_docs(&data),
+                    models: feature::agents::read_models(&feature),
+                    ..ship::probe(&feature, &modes)
+                },
             },
             project,
             slug,
@@ -5555,7 +5647,9 @@ impl Gerdr {
                 .and_then(|p| p.last.as_ref())
                 .is_none_or(|last| last.docs.notes != probe.docs.notes);
         let selected = notes_changed.then(|| self.selected_review_card()).flatten();
-        let open = (self.feature(project, slug)).is_some_and(|f| f.status == Status::Open);
+        // Written elsewhere, what its code says is for its writer to act on.
+        let open = (self.feature(project, slug))
+            .is_some_and(|f| f.status == Status::Open && f.writer.is_none());
         let probed = self.features.probes.entry(key).or_default();
         probed.running = false;
         let docs = std::mem::take(&mut probe.docs);
@@ -6321,7 +6415,11 @@ impl Gerdr {
             .all
             .get(&project)
             .map_or(&[][..], Vec::as_slice);
-        let slug = new_slug(&title, all);
+        // One another machine has shown here keeps its name.
+        let shown: Vec<Feature> = (all.iter().chain(self.viewed_of(&project)))
+            .cloned()
+            .collect();
+        let slug = new_slug(&title, &shown);
         let busy = Busy {
             project: project.clone(),
             slug: slug.clone(),
@@ -6372,6 +6470,7 @@ impl Gerdr {
         }
         let feature = Feature {
             version: feature::VERSION,
+            writer: None,
             slug: slug.clone(),
             title: title.clone(),
             project: project.clone(),
@@ -6771,7 +6870,7 @@ impl Gerdr {
             self.sync_feature_page();
             self.probe_feature(&project, &slug);
             self.watch_feature_tail();
-            if fresh {
+            if fresh && self.feature_writer(&project, &slug).is_none() {
                 self.find_repo_sources();
             }
         }
@@ -6986,6 +7085,12 @@ impl Gerdr {
         else {
             return;
         };
+        if let Some(writer) = self.feature_writer(&project, &slug)
+            && !outcome.reads_only()
+        {
+            let name = self.machine_name(writer);
+            return self.show_warning(format!("Only gerdr on {name} can change this feature"));
+        }
         match outcome {
             PanelOutcome::Tick => match self.feature(&project, &slug).and_then(Feature::current) {
                 Some(stage) if needs(stage).is_some() => {
@@ -7165,6 +7270,10 @@ impl Gerdr {
         let in_t3 = (self.feature(project, slug))
             .and_then(|f| f.runs.get(&stage))
             .is_some_and(|run| run.t3.is_some());
+        if let (true, Some(writer)) = (in_t3, self.feature_writer(project, slug)) {
+            let name = self.machine_name(writer);
+            return self.show_warning(format!("That agent runs in T3 Code on {name}"));
+        }
         if in_t3 {
             return self.show_t3_stage(project, slug, stage);
         }
@@ -7173,6 +7282,10 @@ impl Gerdr {
             .and_then(|f| f.runs.get(&stage)?.pane.clone());
         if let Some(pane) = pane.filter(|p| self.pane_there(p)) {
             return self.focus_agent(&crate::agents::AgentKey::Herdr(pane));
+        }
+        if let Some(writer) = self.feature_writer(project, slug) {
+            let name = self.machine_name(writer);
+            return self.show_warning(format!("{}'s agent isn't running on {name}", stage.label()));
         }
         let mut resumes = false;
         if let Some(run) = self
@@ -8687,6 +8800,7 @@ impl Gerdr {
                 .map(|slot| model_label(slot.picked.as_deref())),
             place: self.place_label(feature, panel.page_stage(feature)),
             machine_line: self.machine_line(feature, panel.page_stage(feature)),
+            seen_note: self.seen_note(feature),
             setup_on: (feature.setup.as_ref())
                 .and_then(|s| s.machine.as_deref())
                 .map(|id| self.machine_name(id)),
@@ -8733,6 +8847,11 @@ impl Gerdr {
         let busy = mine().next().is_some();
         let back = rework(f, ctx);
         let (stage, text, tone) = card_status(f, &line, gate, busy, back, feature::now());
+        // What another machine writes says which, first as the end may not fit.
+        let text = match f.writer.as_deref() {
+            Some(id) => format!("{}: {text}", self.machine_name(id)),
+            None => text,
+        };
         chrome::FeatureCard {
             marks: (Stage::ALL.iter())
                 .map(|s| node_mark(f, *s, ctx, &line))
@@ -8778,8 +8897,9 @@ impl Gerdr {
             .all
             .get(project)
             .map(|all| sidebar_features(all));
-        let mut listed =
-            crate::feature_workspace::without_workspace(own.unwrap_or_default(), &dirs);
+        let mut features = own.unwrap_or_default();
+        features.extend(sidebar_features(self.viewed_of(project)));
+        let mut listed = crate::feature_workspace::without_workspace(features, &dirs);
         listed.extend(
             linked_in(&self.features.all, project)
                 .into_iter()
@@ -9156,6 +9276,9 @@ fn new_feature_view(dialog: &NewFeatureDialog, project: String) -> NewFeatureVie
 /// What the feature panel shows of a feature besides the feature itself.
 #[derive(Default)]
 struct PanelState<'a> {
+    /// What the page says of a feature another machine writes: the words, and
+    /// whether something is wrong.
+    seen_note: Option<(String, bool)>,
     /// The repositories being touched, by `Repo::key`.
     busy: &'a [&'a str],
     /// The feature's projects' names, for its repositories' labels.
@@ -9664,7 +9787,8 @@ fn stops_on_machine(feature: &Feature, stage: Stage) -> bool {
 
 /// The button stopping `stage`'s agent on another machine.
 fn stop_action(feature: &Feature, stage: Stage) -> Option<(PageButton, PanelOutcome)> {
-    stops_on_machine(feature, stage).then(|| {
+    let here = feature.writer.is_none();
+    (here && stops_on_machine(feature, stage)).then(|| {
         let label = "Stop agent".to_owned();
         let style = ButtonStyle::Plain;
         (PageButton { label, style }, PanelOutcome::StopOnMachine(stage))
@@ -10268,6 +10392,10 @@ fn stage_page(
 ) -> StagePage {
     let mark = stage_mark(feature, stage);
     let mut sections = Vec::new();
+    if let Some((text, wrong)) = &state.seen_note {
+        let tone = if *wrong { CheckTone::Blocker } else { CheckTone::Note };
+        sections.push(lines("Another machine", vec![line(text.clone(), tone)]));
+    }
     let status = match mark {
         StageMark::Later => {
             let before = Stage::ALL[stage_index(stage).saturating_sub(1)];
@@ -10753,6 +10881,61 @@ struct AgentChoices<'a> {
 
 #[allow(clippy::too_many_arguments)]
 fn tab_hints(
+    panel: &FeaturePanel,
+    feature: &Feature,
+    stage: Stage,
+    slugs: &[String],
+    ctx: RowCtx,
+    choices: AgentChoices,
+    plan: &[PlannedCheck],
+    ships: &[ShipRow],
+    notes: &[Comment],
+) -> Vec<(String, String)> {
+    let mut hints = writers_tab_hints(
+        panel, feature, stage, slugs, ctx, choices, plan, ships, notes,
+    );
+    if feature.writer.is_some() {
+        hints.retain_mut(|(key, what)| {
+            // Enter goes by the page's own action, which only reads.
+            if key == "Enter" {
+                if let Some(rest) = what.strip_prefix("review ") {
+                    *what = format!("open {rest}");
+                }
+                return true;
+            }
+            SEEN_HINTS.contains(&what.as_str())
+        });
+    }
+    hints
+}
+
+/// The hints that hold on a feature another machine writes: going about it and
+/// showing it. A key that does more says it can't.
+const SEEN_HINTS: [&str; 19] = [
+    "stage",
+    "stages",
+    "repository",
+    "repositories",
+    "all repositories",
+    "button",
+    "row",
+    "check",
+    "criterion",
+    "finding",
+    "show all",
+    "hide them",
+    "show agent",
+    "show terminal",
+    "show in diff",
+    "earlier reviews",
+    "copy path",
+    "open PR",
+    "all keys",
+];
+
+/// `tab_hints` on the machine writing `feature`.
+#[allow(clippy::too_many_arguments)]
+fn writers_tab_hints(
     panel: &FeaturePanel,
     feature: &Feature,
     stage: Stage,
@@ -11430,6 +11613,7 @@ pub(crate) mod tests {
     pub(crate) fn feature(slug: &str, repos: Vec<Repo>, done: usize) -> Feature {
         Feature {
             version: feature::VERSION,
+            writer: None,
             slug: slug.into(),
             title: format!("Feature {slug}"),
             project: "acme".into(),
@@ -11555,6 +11739,75 @@ pub(crate) mod tests {
             d.base_branches(&key, Ok(all));
         }
         d
+    }
+
+    /// A feature at Plan with an agent at work, written on another machine.
+    fn written_elsewhere() -> Feature {
+        let mut f = feature("f", vec![repo("api", true)], 1);
+        f.runs.insert(
+            Stage::Plan,
+            feature::agents::StageRun {
+                pane: Some("m1/w1:p1".into()),
+                machine: Some("m1".into()),
+                ..Default::default()
+            },
+        );
+        f.writer = Some("m1".into());
+        f
+    }
+
+    #[test]
+    fn what_another_machine_writes_offers_only_what_shows_something() {
+        let f = written_elsewhere();
+        let actions = page_actions(&f, Stage::Plan, RowCtx::default());
+        assert!(
+            actions.iter().all(|(_, outcome)| outcome.reads_only()),
+            "{actions:?}"
+        );
+        let labels: Vec<&str> = actions.iter().map(|(b, _)| b.label.as_str()).collect();
+        assert!(labels.contains(&"Show agent"), "{labels:?}");
+        // The same feature on the machine writing it has more to do.
+        let mut mine = f.clone();
+        mine.writer = None;
+        let own = page_actions(&mine, Stage::Plan, RowCtx::default());
+        assert!(own.iter().any(|(_, outcome)| !outcome.reads_only()), "{own:?}");
+        assert_eq!(stop_action(&f, Stage::Plan), None);
+        assert!(stop_action(&mine, Stage::Plan).is_some());
+    }
+
+    #[test]
+    fn what_another_machine_writes_has_no_header_buttons_or_row_actions() {
+        let f = written_elsewhere();
+        assert_eq!(remove_label(&f), "");
+        let ctx = RowCtx::default();
+        assert_eq!(row_action(&f, PanelRow::Repo(0), ctx), None);
+        assert!(!can_decide(&f, Stage::AiReview));
+        let entry = RepoEntry::Held(0);
+        assert!(entry_buttons(&f, &[], entry).is_empty());
+    }
+
+    #[test]
+    fn only_a_look_counts_as_only_reading() {
+        for outcome in [
+            PanelOutcome::ShowAgent(Stage::Plan),
+            PanelOutcome::ShowCheck(0),
+            PanelOutcome::CodeReview,
+            PanelOutcome::Evidence,
+            PanelOutcome::Show("g".into()),
+        ] {
+            assert!(outcome.reads_only(), "{outcome:?}");
+        }
+        for outcome in [
+            PanelOutcome::Tick,
+            PanelOutcome::Remove,
+            PanelOutcome::StartAgent(Stage::Plan, false),
+            PanelOutcome::StopChecks,
+            PanelOutcome::ApproveDoc(Stage::Plan),
+            PanelOutcome::New,
+            PanelOutcome::Open("/x".into()),
+        ] {
+            assert!(!outcome.reads_only(), "{outcome:?}");
+        }
     }
 
     #[test]

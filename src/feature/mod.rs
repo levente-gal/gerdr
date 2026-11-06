@@ -47,6 +47,7 @@ pub mod ship;
 pub mod store;
 pub mod suggest;
 pub mod verify;
+pub mod view;
 pub mod viewed;
 
 use std::{
@@ -608,6 +609,10 @@ pub struct Feature {
     /// How many fix rounds it had: the next one's number goes on from it.
     #[serde(default)]
     pub fix_rounds: u32,
+    /// The machine that writes it, when that isn't this one: it is only shown
+    /// here (see `view`). Never saved: the record is its writer's.
+    #[serde(skip)]
+    pub writer: Option<String>,
     /// The fix rounds Verify's failures started, oldest first: what Build's
     /// page says of them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1273,6 +1278,7 @@ pub(crate) mod tests {
             .collect();
         Feature {
             version: VERSION,
+            writer: None,
             slug: "f".into(),
             title: "Log in".into(),
             project: "p".into(),
@@ -1362,6 +1368,7 @@ pub(crate) mod tests {
     pub(crate) fn feature(slug: &str, created: u64) -> Feature {
         Feature {
             version: VERSION,
+            writer: None,
             slug: slug.into(),
             title: format!("Feature {slug}"),
             project: "p".into(),

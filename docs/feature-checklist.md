@@ -175,6 +175,12 @@ How to use it:
   link. Only a check told to stop ends here without it, and says it may still
   run there.
 
+  A feature another machine writes shows here from `Features::viewed`, not `all`:
+  what walks `all` never acts on it, and `feature_mut` doesn't find it. Anything
+  new on its page counts as changing it unless `PanelOutcome::reads_only` says it
+  only shows something. What reads a feature's files goes through `store::dir`:
+  a path built from the project folder would miss the copy.
+
 ## X. State across places
 
 - **X1** The same count or "seen" state is shared everywhere it shows:

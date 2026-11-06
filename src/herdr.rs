@@ -21,7 +21,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::{home_dir, layout::Dir, state_dir};
@@ -327,7 +327,7 @@ pub struct LayoutPane {
 }
 
 /// What herdr makes of the coding agent in a pane.
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentStatus {
     /// Ready for input, and seen since it got there.

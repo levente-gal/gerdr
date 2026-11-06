@@ -397,7 +397,12 @@ impl WorktreeDiff {
     /// Whether its lines take no comments: a commit's, the evidence, a
     /// file whose stage is done.
     fn read_only(&self) -> bool {
-        self.commit.is_some() || self.evidence() || self.closed()
+        self.commit.is_some() || self.evidence() || self.closed() || self.seen()
+    }
+
+    /// Whether it shows the code of a feature another machine writes.
+    fn seen(&self) -> bool {
+        self.feature.as_ref().is_some_and(|f| f.seen)
     }
 
     /// Whether the keys changing files are refused though comments aren't:
@@ -498,6 +503,9 @@ impl WorktreeDiff {
     fn doc_outcome(&self, outcome: Option<Outcome>) -> Option<Outcome> {
         if self.feature.is_some() {
             return match outcome {
+                Some(Outcome::Notice(diff_view::READ_ONLY)) if self.seen() => {
+                    Some(Outcome::Notice(crate::doc_review::WRITTEN_ELSEWHERE))
+                }
                 Some(o) if o.edits() => Some(Outcome::Notice(FEATURE_READ_ONLY)),
                 outcome => outcome,
             };
@@ -1014,7 +1022,7 @@ impl WorktreeDiff {
             buttons.push(B::Comment);
         }
         buttons.push(B::CopyLines);
-        if self.feature.is_some() {
+        if self.feature.is_some() && !self.seen() {
             buttons.extend([B::MarkViewed, B::NextUnviewed]);
         }
         if self.diff.comments_to_visit().is_some() {

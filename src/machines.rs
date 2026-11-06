@@ -256,7 +256,12 @@ pub struct Site {
 impl Site {
     /// The socket of the worker session's server there.
     pub(crate) fn socket(&self) -> String {
-        format!("{}/herdr.sock", self.session())
+        self.socket_of(WORKER_SESSION)
+    }
+
+    /// The socket of session `session`'s server there.
+    pub(crate) fn socket_of(&self, session: &str) -> String {
+        format!("{}/herdr/sessions/{session}/herdr.sock", self.config)
     }
 
     fn session(&self) -> String {
@@ -304,6 +309,12 @@ echo "MACHINE=$(cat "$f" 2>/dev/null)"
 echo "NOW=$(date +%s)"
 "#
     )
+}
+
+/// The socket of this machine's own worker session, where another gerdr's work
+/// runs here.
+pub(crate) fn worker_socket_here() -> PathBuf {
+    crate::herdr::socket_path(WORKER_SESSION)
 }
 
 /// What `look_script` printed.
@@ -980,6 +991,7 @@ impl Gerdr {
     pub fn watch_machines(&mut self, saved: BTreeMap<String, String>) {
         clear_leftovers();
         self.set_saved_machines(saved);
+        self.load_viewed();
     }
 
     /// The settings say these machines: start what is new or changed, and
@@ -991,6 +1003,10 @@ impl Gerdr {
                 && let Some(link) = self.machines.links.remove(name)
             {
                 link.stop();
+            }
+            // Taken out of the settings, it is removed like from the dialog.
+            if !saved.contains_key(name) {
+                self.forget_viewed_of(name);
             }
         }
         for (name, target) in saved {
@@ -1369,6 +1385,7 @@ impl Gerdr {
         if let Some(link) = self.machines.links.remove(name) {
             link.stop();
         }
+        self.forget_viewed_of(name);
         self.machines.saved.remove(name);
         self.starts_lost();
         self.report_machines();

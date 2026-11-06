@@ -68,6 +68,11 @@ const SETTLE_MOST: Duration = Duration::from_secs(60);
 /// How many times in a row bringing a feature's work back may fail for what
 /// looks like a lost connection before it is said: a lost link ends sooner.
 const PULL_TRIES: u32 = 5;
+/// How wide a look at a terminal there asks for: wider than any, as what's wider
+/// than the terminal here is cut.
+const OBSERVE_COLS: u32 = 400;
+/// How tall, when that machine doesn't say.
+const OBSERVE_ROWS: u32 = 50;
 /// What says a run's place is this machine, over the project's default.
 pub const HERE: &str = "here";
 
@@ -186,6 +191,18 @@ pub enum WorkEvent {
     LineIgnored(String),
     /// A removed feature couldn't be taken off the machine: why.
     NotForgotten(String),
+    /// What the machine has of the project open here.
+    Viewed(Box<crate::machine_views::ViewNews>),
+    /// How a feature's code here stands.
+    ViewCode {
+        project: String,
+        slug: String,
+        state: crate::machine_views::CodeHere,
+    },
+    /// The machine's features can't be brought here: why.
+    ViewTrouble(String),
+    /// What it last said of that holds no more.
+    ViewTroubleOver(String),
     Pulled {
         project: String,
         slug: String,
@@ -216,6 +233,8 @@ pub struct Work {
     /// The panes whose agents came to rest, and when: until what they did
     /// came back, they aren't done here (see `settling`).
     rested: HashMap<String, Instant>,
+    /// What is wanted of its features (see `machine_views`).
+    views: Arc<Mutex<crate::machine_views::ViewAsk>>,
 }
 
 impl Drop for Work {
@@ -237,6 +256,7 @@ impl Work {
             target: target.clone(),
             control: info.control.clone(),
         };
+        let view_tx = tx.clone();
         let lister = {
             let (socket, stop, tx, id) =
                 (info.socket.clone(), stop.clone(), tx.clone(), id.clone());
@@ -258,7 +278,32 @@ impl Work {
         std::thread::Builder::new()
             .name("machine work".into())
             .spawn(worker)?;
+        let views = Arc::new(Mutex::new(crate::machine_views::ViewAsk::default()));
+        let place = crate::machine_views::ViewPlace {
+            id: id.clone(),
+            reach: Reach {
+                target: target.clone(),
+                control: info.control.clone(),
+            },
+            there: Side {
+                home: info.site.home.clone(),
+                data: format!("{}/gerdr", info.site.data),
+            },
+            home: crate::home_dir().map_or_else(String::new, |h| h.to_string_lossy().into_owned()),
+            root: feature::view::root(&crate::projects::data_dir(), &id),
+        };
+        let viewer = {
+            let (ask, stop, id) = (views.clone(), stop.clone(), id.clone());
+            move || {
+                let tell = move |event| send(&view_tx, &id, event);
+                crate::machine_views::watch_views(place, ask, stop, tell)
+            }
+        };
+        std::thread::Builder::new()
+            .name("machine views".into())
+            .spawn(viewer)?;
         Ok(Self {
+            views,
             id,
             target,
             info,
@@ -319,9 +364,50 @@ impl Work {
         }
     }
 
+    /// Say what is wanted of this machine's features.
+    pub(crate) fn ask_views(&self, ask: crate::machine_views::ViewAsk) {
+        if let Ok(mut mine) = self.views.lock() {
+            *mine = ask;
+        }
+    }
+
+    /// The line showing here what `terminal` in `session` there shows, taking it
+    /// from nothing: that machine's gerdr shows it itself. herdr sends whole
+    /// frames in base64, a line at a time, cut to the size asked for; a frame
+    /// wider than this terminal is cut too, rather than wrapped and then joined
+    /// up when the terminal changes size, and it waits for a new tab to get its
+    /// size, as the whole frame comes only first. It is read-only: keys go nowhere.
+    pub(crate) fn observe_line(
+        &self,
+        terminal: &str,
+        session: &str,
+        rows: Option<u32>,
+        name: &str,
+    ) -> String {
+        let site = &self.info.site;
+        let herdr = site.herdr.as_deref().unwrap_or("herdr");
+        let there = format!(
+            "env HERDR_SOCKET_PATH={} {} terminal session observe {} --cols {OBSERVE_COLS} --rows {}",
+            shell_quote(&site.socket_of(session)),
+            shell_quote(herdr),
+            shell_quote(terminal),
+            rows.unwrap_or(OBSERVE_ROWS),
+        );
+        let said = format!(
+            "This view ended. It only looked: what runs there keeps running on {name}."
+        );
+        format!(
+            r#"printf '\033[?7l'; sleep 1; ssh -n -S {} -o BatchMode=yes -o ControlMaster=no {} {} | sed -u -n 's/.*"bytes":"\([^"]*\)".*/\1/p' | while IFS= read -r l; do printf %s "$l" | base64 -d; done; printf '\033[?7h\033[?25h\033[0m\n'; echo {}"#,
+            shell_quote(&self.info.control.to_string_lossy()),
+            shell_quote(&self.target),
+            shell_quote(&there),
+            shell_quote(&said),
+        )
+    }
+
     /// The line attaching a terminal here to `terminal` there, taking it from
     /// any other client. It says what ending means: the agent goes on.
-    fn attach_line(&self, terminal: &str, name: &str) -> String {
+    pub(crate) fn attach_line(&self, terminal: &str, name: &str) -> String {
         let site = &self.info.site;
         let herdr = site.herdr.as_deref().unwrap_or("herdr");
         let there = format!(
@@ -339,6 +425,18 @@ impl Work {
             shell_quote(&said),
         )
     }
+}
+
+/// The line attaching a terminal here to `terminal` of this machine's own worker
+/// session: work another gerdr put here.
+pub(crate) fn attach_here(terminal: &str) -> String {
+    let socket = crate::machines::worker_socket_here();
+    format!(
+        "env HERDR_SOCKET_PATH={} herdr terminal attach {} --takeover; echo {}",
+        shell_quote(&socket.to_string_lossy()),
+        shell_quote(terminal),
+        shell_quote("This view ended. What runs here keeps running."),
+    )
 }
 
 fn send(tx: &WorkTx, id: &str, event: WorkEvent) {
@@ -657,6 +755,15 @@ impl Gerdr {
         };
         let id = info.site.id.clone();
         self.machines.names.insert(id.clone(), name.to_owned());
+        let place = feature::view::Place {
+            name: name.to_owned(),
+            home: info.site.home.clone(),
+            data: format!("{}/gerdr", info.site.data),
+        };
+        let root = feature::view::root(&crate::projects::data_dir(), &id);
+        if let Err(err) = feature::view::write_place(&root, &place) {
+            tracing::warn!("machine {name}: noting where things are there: {err}");
+        }
         match Work::start(id, target, info, tx) {
             Ok(work) => {
                 if let Some(link) = self.machines.links.get_mut(name) {
@@ -688,12 +795,21 @@ impl Gerdr {
 
     /// What the user calls machine `id`.
     pub(crate) fn machine_name(&self, id: &str) -> String {
-        (self.machines.names.get(id).cloned()).unwrap_or_else(|| "another machine".to_owned())
+        if let Some(name) = self.machines.names.get(id) {
+            return name.clone();
+        }
+        match Self::is_this_machine(id) {
+            true => "this machine".to_owned(),
+            false => "another machine".to_owned(),
+        }
     }
 
     /// Whether herdr pane `pane` is still there. On another machine, unless
     /// told otherwise by a list of its panes: what can't be reached isn't gone.
     pub(crate) fn pane_there(&self, pane: &str) -> bool {
+        if let Some((_, alive)) = self.seen_pane_state(pane) {
+            return alive;
+        }
         let Some((id, bare)) = split_pane(pane) else {
             return self.herdr_pane_place(pane).is_some();
         };
@@ -703,6 +819,9 @@ impl Gerdr {
     /// What's known of pane `pane` on another machine, unless it is here.
     /// Not reachable, its agent isn't known to do anything.
     pub(crate) fn machine_pane_state(&self, pane: &str) -> Option<(Option<AgentStatus>, bool)> {
+        if let Some(state) = self.seen_pane_state(pane) {
+            return Some(state);
+        }
         let (id, bare) = split_pane(pane)?;
         let Some(panes) = self.work_of(id).and_then(|w| w.panes.as_ref()) else {
             return Some((Some(AgentStatus::Unknown), true));
@@ -722,6 +841,9 @@ impl Gerdr {
     /// Whether the machine of `pane` can't say how it stands now: nothing
     /// that depends on it is decided meanwhile.
     pub(crate) fn pane_out_of_reach(&self, pane: &str) -> bool {
+        if let Some(out) = self.seen_out_of_reach(pane) {
+            return out;
+        }
         split_pane(pane)
             .is_some_and(|(id, _)| (self.work_of(id).and_then(|w| w.panes.as_ref())).is_none())
     }
@@ -734,6 +856,10 @@ impl Gerdr {
                 Some((socket, pane.to_owned()))
             }
             Some((id, bare)) => {
+                // In its writer's own session: no socket to that one comes here.
+                if (self.features.seen.get(pane)).is_some_and(|seen| seen.session.is_some()) {
+                    return None;
+                }
                 let work = self.work_of(id)?;
                 Some((work.info.socket.clone(), bare.to_owned()))
             }
@@ -772,7 +898,8 @@ impl Gerdr {
 
     /// The feature whose stage agent or check runs in `pane`.
     fn owner_of_pane(&self, pane: &str) -> Option<&Feature> {
-        (self.features.all.values().flatten()).find(|f| {
+        let viewed = self.features.viewed.values().flatten();
+        (self.features.all.values().flatten().chain(viewed)).find(|f| {
             let agent = (f.runs.values()).any(|r| r.pane.as_deref() == Some(pane));
             let checks = f.verify.iter().flat_map(|v| &v.checks);
             agent || checks.into_iter().any(|c| c.pane.as_deref() == Some(pane))
@@ -904,23 +1031,32 @@ impl Gerdr {
                 self.close_herdr_pane(&view);
             }
         }
-        let Some(work) = self.work_of(id) else {
-            self.show_warning(format!(
-                "{name} can't be reached: what runs there keeps running"
-            ));
-            return false;
+        let command = match self.seen_pane_line(pane) {
+            Some(Ok(line)) => line,
+            Some(Err(why)) => {
+                self.show_warning(why);
+                return false;
+            }
+            None => {
+                let Some(work) = self.work_of(id) else {
+                    self.show_warning(format!(
+                        "{name} can't be reached: what runs there keeps running"
+                    ));
+                    return false;
+                };
+                let Some(panes) = &work.panes else {
+                    self.show_warning(format!(
+                        "{name} isn't answering yet: what runs there keeps running"
+                    ));
+                    return false;
+                };
+                let Some(listed) = panes.get(bare) else {
+                    self.show_warning(format!("That terminal is gone from {name}"));
+                    return false;
+                };
+                work.attach_line(&listed.terminal, &name)
+            }
         };
-        let Some(panes) = &work.panes else {
-            self.show_warning(format!(
-                "{name} isn't answering yet: what runs there keeps running"
-            ));
-            return false;
-        };
-        let Some(listed) = panes.get(bare) else {
-            self.show_warning(format!("That terminal is gone from {name}"));
-            return false;
-        };
-        let command = work.attach_line(&listed.terminal, &name);
         let owner = self
             .owner_of_pane(pane)
             .map(|f| (f.project.clone(), f.slug.clone(), f.dir.clone()));
@@ -1019,6 +1155,32 @@ impl Gerdr {
                     ": try again once it is back"
                 };
                 self.show_warning(format!("The agent on {name} wasn't told: {why}{then}"));
+            }
+            WorkEvent::Viewed(news) => self.machine_viewed(id, *news),
+            WorkEvent::ViewCode {
+                project,
+                slug,
+                state,
+            } => {
+                let here = state == crate::machine_views::CodeHere::Here;
+                if let crate::machine_views::CodeHere::Failed(why) = &state {
+                    tracing::warn!("the code of {project}/{slug} didn't come: {why}");
+                }
+                (self.features.code_here).insert((project.clone(), slug.clone()), state);
+                if here {
+                    self.probe_feature(&project, &slug);
+                }
+            }
+            WorkEvent::ViewTrouble(why) => {
+                let name = self.machine_name(id);
+                tracing::warn!("machine {name}: {why}");
+                let text = crate::machine_views::view_trouble_text(&name, &why);
+                self.report_problem("machine features", text);
+            }
+            WorkEvent::ViewTroubleOver(why) => {
+                let name = self.machine_name(id);
+                let text = crate::machine_views::view_trouble_text(&name, &why);
+                crate::problems::forget("machine features", &text);
             }
             WorkEvent::NotForgotten(why) => {
                 let name = self.machine_name(id);
@@ -1241,9 +1403,11 @@ impl Gerdr {
     /// more until it is told to, and a file taken away here must not come
     /// back from there.
     pub(crate) fn machine_work_tick(&mut self) {
+        self.publish_live();
         if self.machines.links.values().all(|link| link.work.is_none()) {
             return;
         }
+        self.views_tick();
         let mut pulls: HashMap<String, Vec<Pull>> = HashMap::new();
         let listed = self.project.iter().filter_map(|p| self.features.all.get(p));
         for feature in listed.flatten().filter(|f| f.status == Status::Open) {
@@ -1359,7 +1523,8 @@ impl Gerdr {
     /// machine to place it on.
     pub(crate) fn place_label(&self, feature: &Feature, stage: Stage) -> Option<String> {
         let running = stage == Stage::Verify && crate::feature_checks::checks_running(feature);
-        if feature.status != Status::Open
+        if feature.writer.is_some()
+            || feature.status != Status::Open
             || !takes_a_place(stage)
             || feature.is_done(stage)
             || running
@@ -1464,14 +1629,20 @@ impl Gerdr {
                 return None;
             }
             let name = self.machine_name(id);
-            return Some(match self.work_of(id).is_some_and(|w| w.panes.is_some()) {
+            // Seen from elsewhere, what its writer says is all there is to ask.
+            let reached = match feature.writer.as_deref() {
+                Some(writer) => self.work_of(writer).is_some(),
+                None => self.work_of(id).is_some_and(|w| w.panes.is_some()),
+            };
+            return Some(match reached {
                 true => (format!("on {name}"), false),
                 false => (format!("{name} can't be reached"), false),
             });
         }
         let run = feature.runs.get(&stage)?;
         let id = run.machine.as_deref()?;
-        let name = self.machine_name(id);
+        // Seen from elsewhere, what its writer says is all there is to ask.
+        let name = self.machine_name(feature.writer.as_deref().unwrap_or(id));
         if self.starting_on_machine(&feature.project, &feature.slug, stage) {
             return Some((format!("starting on {name}\u{2026}"), true));
         }
@@ -1479,7 +1650,11 @@ impl Gerdr {
         if self.pane_out_of_reach(pane) {
             return Some((format!("{name} can't be reached"), true));
         }
-        Some((format!("on {name}"), false))
+        // On the machine writing it: the feature's own line says that already.
+        if feature.writer.as_deref() == Some(id) {
+            return None;
+        }
+        Some((format!("on {}", self.machine_name(id)), false))
     }
 
     /// The data folder there and the feature's own, to go with a `StartJob`.
@@ -1608,6 +1783,7 @@ mod tests {
     fn work() -> Work {
         let (jobs, _rx) = mpsc::channel();
         Work {
+            views: Arc::default(),
             id: "m".into(),
             target: "ana@box".into(),
             info: LinkInfo {
@@ -1627,6 +1803,26 @@ mod tests {
             dirty: HashMap::new(),
             rested: HashMap::new(),
         }
+    }
+
+    #[test]
+    fn a_look_at_a_writers_terminal_takes_nothing_from_it() {
+        let work = work();
+        let line = work.observe_line("t1", "gerdr-app", Some(78), "box");
+        assert!(line.contains("terminal session observe"), "{line}");
+        assert!(!line.contains("--takeover"), "{line}");
+        assert!(line.contains("sessions/gerdr-app/herdr.sock"), "{line}");
+        assert!(line.contains("--rows 78"), "{line}");
+        assert!(line.contains("ssh -n -S "), "{line}");
+        assert!(line.contains("It only looked"), "{line}");
+        // It reads as a shell line, and the terminal is put back after.
+        let check = std::process::Command::new("sh")
+            .args(["-n", "-c", &line])
+            .output()
+            .unwrap();
+        assert!(check.status.success(), "{check:?}");
+        assert!(line.contains(r"\033[?7l"), "{line}");
+        assert!(line.contains(r"\033[?7h"), "{line}");
     }
 
     #[test]

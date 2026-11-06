@@ -244,7 +244,7 @@ pub fn ensure_script(places: &[(Place, String)]) -> String {
   if [ ! -e "$m" ]; then
     mkdir -p "$(dirname "$m")" && git init -q "$m" || exit 4
   elif [ ! -e "$m/.git" ]; then
-    if [ -n "$(ls -A "$m")" ]; then echo "OCCUPIED $m"; exit 3; fi
+    if [ -n "$(ls -A "$m" | grep -vxF .features)" ]; then echo "OCCUPIED $m"; exit 3; fi
     git init -q "$m" || exit 4
   fi
   roots=$(git -C "$m" rev-list --max-parents=0 --all 2>/dev/null)
@@ -262,6 +262,114 @@ pub fn ensure_script(places: &[(Place, String)]) -> String {
         ));
     }
     script
+}
+
+/// The ref holding what a feature's branch `branch` left, shown here and written
+/// on another machine.
+pub fn view_base_ref(branch: &str) -> String {
+    format!("refs/gerdr/view-base/{branch}")
+}
+
+/// The ref holding what the worktree of repository `key` of feature `slug` is at
+/// on the machine that writes it.
+pub fn view_head_ref(slug: &str, key: &str) -> String {
+    format!("refs/gerdr/view-head/{slug}/{}", key.replace(':', "-"))
+}
+
+/// The script saying where a feature's repositories are on the machine that
+/// writes it: a line per repository with its key, the commit of its worktree and
+/// that of what it started from, the name first as `layout::base_ref` goes.
+pub fn heads_script(places: &[Place]) -> String {
+    let mut script = String::from(
+        r#"st() {
+  h=""
+  [ -d "$3" ] && h=$(git -C "$3" rev-parse -q --verify HEAD)
+  b=$(git -C "$2" rev-parse -q --verify "$4^{commit}" ||
+      git -C "$2" rev-parse -q --verify "origin/$4^{commit}" || echo "$5")
+  printf '%s	%s	%s
+' "$1" "$h" "$b"
+}
+"#,
+    );
+    for place in places {
+        if let Some(worktree) = &place.worktree {
+            script.push_str(&format!(
+                "st {} {} {} {} {}
+",
+                shell_quote(&place.key),
+                shell_quote(&place.main),
+                shell_quote(worktree),
+                shell_quote(&place.base),
+                shell_quote(&place.commit),
+            ));
+        }
+    }
+    script
+}
+
+/// What `heads_script` said: by key, the worktree's commit (empty with none
+/// there) and the one it started from.
+pub fn parse_heads(text: &str) -> BTreeMap<String, (String, String)> {
+    (text.lines())
+        .filter_map(|line| {
+            let mut parts = line.split('\t');
+            let (key, head, base) = (parts.next()?, parts.next()?, parts.next()?);
+            Some((key.to_owned(), (head.to_owned(), base.to_owned())))
+        })
+        .collect()
+}
+
+/// The script placing a worktree here at commit ref `name`, for a look at a
+/// feature written on another machine: it is on no branch, as nothing is to be
+/// committed in it. Changes made in it are the user's: what's in their way ends
+/// it, saying `INWAY <folder>`.
+pub fn view_worktree_script(main: &Path, worktree: &Path, name: &str) -> String {
+    let main = shell_quote(&main.to_string_lossy());
+    let worktree = shell_quote(&worktree.to_string_lossy());
+    let name = shell_quote(name);
+    format!(
+        r#"m={main}; w={worktree}; r={name}
+f=$(git -C "$m" rev-parse --git-path info/exclude) && case "$f" in /*) ;; *) f="$m/$f";; esac
+mkdir -p "$(dirname "$f")" && {{ grep -qxF .features/ "$f" 2>/dev/null || echo .features/ >> "$f"; }}
+if [ ! -e "$w/.git" ]; then
+  git -C "$m" worktree prune
+  mkdir -p "$(dirname "$w")"
+  git -C "$m" worktree add -q --detach "$w" "$r" || exit 5
+else
+  h=$(git -C "$w" rev-parse -q --verify HEAD)
+  t=$(git -C "$m" rev-parse -q --verify "$r")
+  if [ "$h" != "$t" ]; then
+    git -C "$w" checkout -q --detach "$t" || {{ echo "INWAY $w"; exit 6; }}
+  fi
+fi
+"#
+    )
+}
+
+/// Run `script` for `sh` here, off the UI thread.
+pub fn local_script(script: &str, cancel: &AtomicBool) -> Result<String, Trouble> {
+    let mut sh = Command::new("sh");
+    sh.arg("-s");
+    for var in ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"] {
+        sh.env_remove(var);
+    }
+    let out = machines::run_with_input(sh, script.as_bytes(), SCRIPT, cancel)
+        .map_err(|failure| Trouble::Work(failure.why()))?;
+    if out.status.success() {
+        return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
+    }
+    let said = String::from_utf8_lossy(&out.stdout);
+    if let Some(folder) = said.lines().find_map(|l| l.strip_prefix("OCCUPIED ")) {
+        return Err(Trouble::Work(format!(
+            "{folder} holds something else: name a folder for it under machine_folders in the project's file"
+        )));
+    }
+    if let Some(folder) = said.lines().find_map(|l| l.strip_prefix("INWAY ")) {
+        return Err(Trouble::Work(format!(
+            "changes in {folder} are in the way of what came"
+        )));
+    }
+    Err(trouble("A command here failed", &out))
 }
 
 /// The script setting up the worktrees there once the code is pushed: each on
@@ -742,6 +850,100 @@ impl Reach {
         Ok(())
     }
 
+    /// Bring the features folder `there` here as it is there, records too: what
+    /// is here goes by it, so a stray change here doesn't last. What's in `skip`
+    /// (folders of that one) doesn't come. Evidence can name secrets: only this
+    /// account reads it here.
+    pub fn mirror(
+        &self,
+        there: &str,
+        local: &Path,
+        skip: &[String],
+        cancel: &AtomicBool,
+    ) -> Result<(), Trouble> {
+        let mut rsync = Command::new("rsync");
+        rsync
+            .args(["-rlts", "--delete", "--chmod=D700,F600"])
+            .arg("-e")
+            .arg(self.ssh_line());
+        for folder in skip {
+            rsync.arg("--exclude").arg(format!("/{folder}/"));
+        }
+        rsync
+            .arg(self.rsync_path(there))
+            .arg(format!("{}/", local.display()));
+        self.run_rsync("Couldn't copy the features from there", rsync, cancel)
+    }
+
+    /// Bring here the code of `feature`, as the machine it is written on has it,
+    /// by `places` (`there` is that machine). `known` says what is here already;
+    /// whether anything came. All that's made here is the repository if there is
+    /// none, its refs for this and a worktree at them.
+    pub fn view_code(
+        &self,
+        feature: &Feature,
+        places: &[Place],
+        known: &mut BTreeMap<String, (String, String)>,
+        cancel: &AtomicBool,
+    ) -> Result<bool, Trouble> {
+        let places: Vec<&Place> = places.iter().filter(|p| p.worktree.is_some()).collect();
+        let owned: Vec<Place> = places.iter().map(|p| (*p).clone()).collect();
+        let said = parse_heads(&self.script(&heads_script(&owned), cancel)?);
+        let mut came = false;
+        for place in places {
+            let Some((head, base)) = said.get(&place.key) else {
+                continue;
+            };
+            let at = (head.clone(), base.clone());
+            let worktree = place.local_worktree.as_deref().unwrap_or(Path::new(""));
+            if known.get(&place.key) == Some(&at) && worktree.join(".git").exists() {
+                continue;
+            }
+            if base.is_empty() {
+                return Err(Trouble::Work(format!("{} has no commits there", place.key)));
+            }
+            if !known.contains_key(&place.key) {
+                let root = self.script(
+                    &format!(
+                        "git -C {} rev-list --max-parents=0 {} | head -n 1
+",
+                        shell_quote(&place.main),
+                        shell_quote(base),
+                    ),
+                    cancel,
+                )?;
+                let here = Place {
+                    main: place.local_main.to_string_lossy().into_owned(),
+                    ..place.clone()
+                };
+                local_script(
+                    &ensure_script(&[(here, root.trim().to_owned())]),
+                    cancel,
+                )?;
+            }
+            let head_at = if head.is_empty() { base } else { head };
+            let head_ref = view_head_ref(&feature.slug, &place.key);
+            let mut git = self.git(&place.local_main);
+            git.args(["fetch", "-q", "--no-tags"])
+                .arg(self.git_url(&place.main))
+                .arg(format!("+{head_at}:{head_ref}"));
+            if let Some(branch) = &place.branch {
+                git.arg(format!("+{base}:{}", view_base_ref(branch)));
+            }
+            let out = machines::run(git, CODE, cancel).map_err(|f| Trouble::Link(f.why()))?;
+            if !out.status.success() {
+                return Err(trouble(&format!("Couldn't fetch {}", place.key), &out));
+            }
+            local_script(
+                &view_worktree_script(&place.local_main, worktree, &head_ref),
+                cancel,
+            )?;
+            known.insert(place.key.clone(), at);
+            came = true;
+        }
+        Ok(came)
+    }
+
     fn rsync(&self, delete: bool) -> Command {
         let mut rsync = Command::new("rsync");
         rsync
@@ -1172,6 +1374,95 @@ mod tests {
             commit_ref: "refs/gerdr/base/x".into(),
         };
         (place, root)
+    }
+
+    #[test]
+    fn a_folder_holding_only_feature_folders_is_free_for_a_repository() {
+        let tmp = Scratch::new();
+        let (mut place, root) = repo(&tmp, "there");
+        std::fs::create_dir_all(tmp.0.join("there/.features/x")).unwrap();
+        place.main = tmp.path("there");
+        let ensure = ensure_script(&[(place.clone(), root.clone())]);
+        assert!(sh(&ensure).status.success());
+        assert!(tmp.0.join("there/.git").exists());
+        // Anything else there is the user's.
+        std::fs::create_dir_all(tmp.0.join("other")).unwrap();
+        std::fs::write(tmp.0.join("other/notes"), "n").unwrap();
+        place.main = tmp.path("other");
+        let out = sh(&ensure_script(&[(place, root)]));
+        assert!(String::from_utf8_lossy(&out.stdout).contains("OCCUPIED"), "{out:?}");
+    }
+
+    #[test]
+    fn a_look_here_follows_commits_and_leaves_changes_alone() {
+        let tmp = Scratch::new();
+        let (place, _) = repo(&tmp, "there");
+        let main = place.local_main.to_string_lossy().into_owned();
+        let worktree = tmp.0.join("here/.features/x");
+        let name = view_head_ref("x", "app");
+        git(&main, &format!("update-ref {name} HEAD"));
+        let script = view_worktree_script(&place.local_main, &worktree, &name);
+        let cancel = AtomicBool::new(false);
+        local_script(&script, &cancel).unwrap();
+        let wt = worktree.to_string_lossy().into_owned();
+        assert_eq!(git(&wt, "rev-parse HEAD"), git(&main, &format!("rev-parse {name}")));
+        assert_eq!(git(&main, "rev-parse --abbrev-ref HEAD"), "main");
+        assert_eq!(git(&wt, "rev-parse --abbrev-ref HEAD"), "HEAD");
+        assert_eq!(git(&main, "status --porcelain"), "");
+        // New commits there move it.
+        git(&main, "checkout -q feature/x");
+        std::fs::write(tmp.0.join("here/a"), "b").unwrap();
+        git(&main, "commit -qam two");
+        git(&main, &format!("update-ref {name} HEAD"));
+        local_script(&script, &cancel).unwrap();
+        assert_eq!(std::fs::read_to_string(worktree.join("a")).unwrap(), "b");
+        // What the user changed here isn't run over, and it says so.
+        std::fs::write(worktree.join("a"), "mine").unwrap();
+        std::fs::write(tmp.0.join("here/a"), "c").unwrap();
+        git(&main, "commit -qam three");
+        git(&main, &format!("update-ref {name} HEAD"));
+        let refused = local_script(&script, &cancel).unwrap_err();
+        assert!(refused.text().contains("in the way"), "{}", refused.text());
+        assert_eq!(std::fs::read_to_string(worktree.join("a")).unwrap(), "mine");
+    }
+
+    #[test]
+    fn heads_say_the_worktree_and_where_it_started() {
+        let tmp = Scratch::new();
+        let (mut place, root) = repo(&tmp, "there");
+        place.main = place.local_main.to_string_lossy().into_owned();
+        place.worktree = Some(place.main.clone());
+        let out = sh(&heads_script(std::slice::from_ref(&place)));
+        let said = parse_heads(&String::from_utf8_lossy(&out.stdout));
+        assert_eq!(said["app"], (root.clone(), root.clone()));
+        // No worktree there yet: only where it started.
+        place.worktree = Some(tmp.path("gone"));
+        let out = sh(&heads_script(std::slice::from_ref(&place)));
+        let said = parse_heads(&String::from_utf8_lossy(&out.stdout));
+        assert_eq!(said["app"], (String::new(), root));
+    }
+
+    #[test]
+    fn a_feature_written_elsewhere_reads_from_where_it_left_there() {
+        let tmp = Scratch::new();
+        let (place, root) = repo(&tmp, "there");
+        let main = place.local_main.to_string_lossy().into_owned();
+        let repo = crate::feature::Repo {
+            name: "app".into(),
+            main: place.local_main.clone(),
+            base: "main".into(),
+            base_commit: root.clone(),
+            worktree: place.local_main.clone(),
+            touched: true,
+            branch: Some("feature/x".into()),
+            project: None,
+        };
+        assert_eq!(super::super::layout::base_ref(&repo), "main");
+        git(&main, &format!("update-ref {} HEAD", view_base_ref("feature/x")));
+        assert_eq!(
+            super::super::layout::base_ref(&repo),
+            "refs/gerdr/view-base/feature/x"
+        );
     }
 
     /// `git push` to the place, as `Reach::push_code` does over SSH.

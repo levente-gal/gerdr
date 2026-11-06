@@ -151,8 +151,10 @@ impl Gerdr {
     /// The feature whose workspace workspace `w` is, if any.
     pub(crate) fn workspace_feature(&self, w: usize) -> Option<&Feature> {
         let ws = self.workspaces.get(w)?;
-        let all = self.features.all.get(self.project.as_ref()?)?;
-        feature_on(all, &ws.dir)
+        let project = self.project.as_ref()?;
+        let own = self.features.all.get(project).map(|all| feature_on(all, &ws.dir));
+        own.flatten()
+            .or_else(|| feature_on(self.viewed_of(project), &ws.dir))
     }
 
     /// What runs in workspace `w`'s panes, as their bars say it.
@@ -191,6 +193,11 @@ impl Gerdr {
         }
         if let Some(w) = self.feature_workspace(project, slug) {
             return Some((w, false));
+        }
+        // Written elsewhere, its folder here comes with its code, once asked for.
+        let seen = self.feature_writer(project, slug).is_some();
+        if seen && let Err(err) = std::fs::create_dir_all(&dir) {
+            tracing::warn!("making {}: {err}", dir.display());
         }
         if !dir.is_dir() {
             self.show_error(format!(
@@ -273,7 +280,7 @@ impl Gerdr {
             return;
         };
         for w in 0..self.workspaces.len() {
-            let Some(feature) = self.workspace_feature(w) else {
+            let Some(feature) = self.workspace_feature(w).filter(|f| f.writer.is_none()) else {
                 continue;
             };
             let (slug, title) = (feature.slug.clone(), feature.title.clone());

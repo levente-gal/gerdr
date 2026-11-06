@@ -119,6 +119,17 @@ A key is written in one place, not on the button that does the same thing:
   ends here after a moment and says it may still run there. A setup there sends
   small ignored files like `.env` to that account, privately, and its page
   says what it copied; environments stay here, and its commands build them.
+- A connected machine's features of the open project show here too, with the
+  machine's name first on their cards. The gerdr that made a feature writes it,
+  and only that one: here it can be looked at, not changed. Its page offers only
+  what shows something, a key that would do more says "Only gerdr on <machine> can
+  change this feature", and its diff and files take no comments or ticks. Its page
+  says where it is written, whether that machine can be reached, and whether its
+  gerdr is open. It stays on the sidebar with the machine away, as it last was.
+- A terminal of such a feature opens here on request as well. One on a worker
+  takes the terminal, as any Show does. One in the writer's own session only
+  looks: that machine's gerdr keeps it, and keys go nowhere. A feature's code comes
+  here once it is opened, by commits: what isn't committed there doesn't show.
 - A line gerdr types to an agent and finds still in its input box gets Enter
   again, up to six times over about four minutes. Only then is the user told.
 - Work the user sends to an agent (findings, review comments, failed tests)

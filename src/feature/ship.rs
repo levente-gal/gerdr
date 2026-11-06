@@ -278,6 +278,21 @@ pub fn probe(feature: &Feature, modes: &Modes) -> Probe {
     }
 }
 
+/// Read `feature` written on another machine, as much as is read of it here: its
+/// code as far as it came. Its hooks aren't made sure of: nothing is pushed from
+/// here, and Ship is for its writer.
+pub fn probe_seen(feature: &Feature) -> Probe {
+    Probe {
+        reading: patch::read(feature),
+        guards: BTreeMap::new(),
+        ship: None,
+        merged: false,
+        stats: page::stats(feature.touched().filter(|r| r.worktree.is_dir())),
+        docs: page::Docs::default(),
+        models: BTreeMap::new(),
+    }
+}
+
 /// Read finished `feature` for its tab: the line counts of its touched
 /// repositories whose worktree is still there, and nothing of its code
 /// (`reading` says so; a finished feature's tab doesn't show it).
