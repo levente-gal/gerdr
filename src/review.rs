@@ -70,6 +70,8 @@ pub struct Flag {
     pub id: String,
     pub severity: crate::feature::review_import::Severity,
     pub state: crate::feature::review_import::FindingState,
+    /// Sent to Build and its fix made (`Finding::fix_made`).
+    pub made: bool,
     /// The user wrote it, on the stage's page or in the diff: it has no
     /// severity, and is theirs to edit or drop.
     pub yours: bool,

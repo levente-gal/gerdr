@@ -686,6 +686,7 @@ impl Gerdr {
             for finding in &mut review.findings {
                 if finding.state == FindingState::Fix {
                     finding.state = FindingState::Sent;
+                    finding.made = false;
                 }
             }
         }

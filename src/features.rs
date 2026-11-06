@@ -1952,6 +1952,7 @@ fn criterion_card(
         },
         comment: String::new(),
         comment_buttons: Vec::new(),
+        made: false,
         faded: trying && tag == FindingTag::Passed,
         field: None,
         field_hint: "What went wrong",
@@ -2105,6 +2106,7 @@ fn check_card(
         note: String::new(),
         comment: String::new(),
         comment_buttons: Vec::new(),
+        made: false,
         faded: tag == FindingTag::Skipped,
         field: None,
         field_hint: "",
@@ -2176,6 +2178,7 @@ fn finding_card(
     let state = match f.state {
         FindingState::Open => String::new(),
         FindingState::Fix => "to fix".to_owned(),
+        FindingState::Sent if f.made => "fix made".to_owned(),
         FindingState::Sent => "sent to Build".to_owned(),
         FindingState::Fixed => "fixed".to_owned(),
         FindingState::Dismissed => format!("dismissed: {}", f.reason),
@@ -2218,6 +2221,7 @@ fn finding_card(
         note: String::new(),
         comment: f.note.clone(),
         comment_buttons: held(true),
+        made: f.fix_made(),
         faded: matches!(f.state, FindingState::Fixed | FindingState::Dismissed),
         field: None,
         field_hint: "Your comment",
@@ -2254,6 +2258,7 @@ fn round_count(round: &ReviewRound) -> String {
 fn round_card(f: &ReviewFinding, multi: bool) -> FindingCard {
     let mut card = finding_card(f, multi, &[]);
     card.faded = true;
+    card.made = false;
     if f.state == FindingState::Sent {
         "raised again".clone_into(&mut card.state);
     }
@@ -2312,7 +2317,11 @@ fn review_line(feature: &Feature, agent: Option<&str>) -> Option<String> {
     } else if fix > 0 {
         format!("{} to fix", plural(fix, "finding"))
     } else if sent > 0 {
-        format!("{} sent to Build", plural(sent, "finding"))
+        let sent = format!("{} sent to Build", plural(sent, "finding"));
+        match review.fixes_made() {
+            0 => sent,
+            made => format!("{sent} \u{b7} {made} made"),
+        }
     } else if review.findings.is_empty() {
         "no findings".into()
     } else {
@@ -9067,20 +9076,20 @@ fn findings_count(feature: &Feature) -> String {
         return String::new();
     };
     let shown = review.shown();
+    let count = |of: &dyn Fn(&ReviewFinding) -> bool| shown.iter().filter(|f| of(f)).count();
+    let state = |state| count(&|f| f.state == state);
+    let made = count(&|f| f.fix_made());
+    let said = |n: usize, what: &str| (n > 0).then(|| format!("{n} {what}"));
     [
-        (FindingState::Open, "to decide"),
-        (FindingState::Fix, "to fix"),
-        (FindingState::Sent, "sent to Build"),
-        (FindingState::Fixed, "fixed"),
-        (FindingState::Dismissed, "dismissed"),
+        said(state(FindingState::Open), "to decide"),
+        said(state(FindingState::Fix), "to fix"),
+        said(state(FindingState::Sent) - made, "sent to Build"),
+        (made > 0).then(|| review_import::fixes_made_words(made)),
+        said(state(FindingState::Fixed), "fixed"),
+        said(state(FindingState::Dismissed), "dismissed"),
     ]
     .into_iter()
-    .filter_map(
-        |(state, what)| match shown.iter().filter(|f| f.state == state).count() {
-            0 => None,
-            n => Some(format!("{n} {what}")),
-        },
-    )
+    .flatten()
     .collect::<Vec<_>>()
     .join(" \u{b7} ")
 }
@@ -13536,6 +13545,38 @@ pub(crate) mod tests {
         assert!(cards[2].faded && cards[2].buttons.is_empty());
         let label = (view.page.buttons.iter()).find(|b| b.label == "Hide");
         assert!(label.is_some(), "{:?}", view.page.buttons);
+    }
+
+    #[test]
+    fn a_finding_sent_to_build_says_when_its_fix_is_made() {
+        use FindingState as S;
+        let mut f = with_round(carded(&[S::Sent, S::Sent]));
+        let review = f.review.as_mut().unwrap();
+        review.findings[1].made = true;
+        // An earlier review's is a record: raised again, whatever it was.
+        review.rounds[0].findings[1].made = true;
+        sent_back(&mut f);
+        let state = PanelState {
+            rounds_open: BTreeSet::from([1]),
+            ..PanelState::default()
+        };
+        let view = view_of(&f, &state);
+        let cards = cards_of(&view);
+        let said: Vec<(&str, bool)> = (cards.iter()).map(|c| (c.state.as_str(), c.made)).collect();
+        assert_eq!(
+            said,
+            [
+                ("sent to Build", false),
+                ("fix made", true),
+                ("raised again", false),
+                ("fixed", false),
+            ]
+        );
+        assert_eq!(findings_count(&f), "1 sent to Build \u{b7} 1 fix made");
+        f.review.as_mut().unwrap().findings[0].made = true;
+        assert_eq!(findings_count(&f), "2 fixes made");
+        // Only the next review can call it fixed: it still holds AI review up.
+        assert_eq!(f.review.as_ref().unwrap().open(), 2);
     }
 
     #[test]

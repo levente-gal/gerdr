@@ -358,9 +358,13 @@ impl FeatureOf {
             n => parts.push(format!("{n} dismissed")),
         }
         parts.push(format!("{} to decide", self.count(FindingState::Open)));
-        match self.count(FindingState::Sent) {
+        let made = self.findings.iter().filter(|f| f.fix_made()).count();
+        match self.count(FindingState::Sent) - made {
             0 => {}
             n => parts.push(format!("{n} sent to Build")),
+        }
+        if made > 0 {
+            parts.push(crate::feature::review_import::fixes_made_words(made));
         }
         parts.join(" \u{b7} ")
     }
@@ -538,6 +542,7 @@ pub fn finding_comment(f: &Finding, root: PathBuf, file: Option<&FileDiff>) -> C
             id: f.id.clone(),
             severity: f.severity,
             state: f.state,
+            made: f.fix_made(),
             yours: f.yours,
             note: false,
         }),
@@ -555,6 +560,7 @@ fn finding_note(f: &Finding, comment: &Comment) -> Option<Comment> {
             id: f.id.clone(),
             severity: f.severity,
             state: f.state,
+            made: f.fix_made(),
             yours: true,
             note: true,
         }),

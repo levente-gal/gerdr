@@ -611,6 +611,8 @@ pub struct FindingCard {
     pub comment: String,
     /// The indices in `StagePage::buttons` of the buttons that comment holds.
     pub comment_buttons: Vec<usize>,
+    /// A finding whose fix the Build agent made: a dot says so, as a check's.
+    pub made: bool,
     /// It no longer asks for anything: fixed or dismissed.
     pub faded: bool,
     /// The note or comment being written on it.
@@ -1624,7 +1626,7 @@ impl Stack {
         let body = if card.faded { Ink::Muted } else { Ink::Text };
         let (left, width) = (self.x, self.w);
         // A check's dot says how it stands; its text goes right of it.
-        if let Some(dot) = card.tag.dot() {
+        if let Some(dot) = card.tag.dot().or(card.made.then_some(Dot::Done)) {
             self.pieces.push((
                 Rectangle::new(
                     (self.x, self.y + (BODY_LINE - DOT) / 2).into(),
@@ -1661,8 +1663,9 @@ impl Stack {
                 },
             ));
             rest = format!("\u{b7} {rest}");
-            self.x = left + tag_w;
-            self.w = (width - tag_w).max(1);
+            // Past the dot too, if it has one.
+            self.x += tag_w;
+            self.w = (self.w - tag_w).max(1);
         }
         self.all_text(&rest, Font::Small, Ink::Muted, false, TAIL_LINE);
         (self.x, self.w) = (left, width);
@@ -6230,6 +6233,7 @@ mod tests {
                 note: String::new(),
                 comment: String::new(),
                 comment_buttons: Vec::new(),
+                made: false,
                 faded: false,
                 field: None,
                 field_hint: "",

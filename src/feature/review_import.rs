@@ -134,6 +134,11 @@ pub struct Finding {
     /// The user added it: no reviewer raised it, and it may have no file.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub yours: bool,
+    /// Sent to Build, and its agent ticked its fix in the build log. Only
+    /// the next review can say it is fixed. Going to Build clears it, and it
+    /// means nothing unless `state` is `Sent` (see `fix_made`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub made: bool,
     /// The review run that raised it last.
     pub run: u32,
     /// Its file (and line) is in the diff it was read against.
@@ -142,6 +147,11 @@ pub struct Finding {
 }
 
 impl Finding {
+    /// Whether it went to Build and its agent says the fix is made.
+    pub fn fix_made(&self) -> bool {
+        self.state == FindingState::Sent && self.made
+    }
+
     /// The fix to make: the user's wording, else the reviewer's.
     pub fn fix_text(&self) -> &str {
         self.my_fix.as_deref().unwrap_or(&self.fix)
@@ -251,9 +261,22 @@ impl AiReview {
         self.findings.iter().filter(|f| f.state == state).count()
     }
 
+    /// How many findings went to Build with their fix made since.
+    pub fn fixes_made(&self) -> usize {
+        self.findings.iter().filter(|f| f.fix_made()).count()
+    }
+
     /// The first finding not decided yet, in the order raised.
     pub fn first_open(&self) -> Option<&Finding> {
         self.findings.iter().find(|f| f.state == FindingState::Open)
+    }
+}
+
+/// `n` fixes made, in words: "1 fix made", "3 fixes made".
+pub fn fixes_made_words(n: usize) -> String {
+    match n {
+        1 => "1 fix made".to_owned(),
+        n => format!("{n} fixes made"),
     }
 }
 

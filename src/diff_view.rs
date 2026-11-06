@@ -87,10 +87,11 @@ fn finding_tone(flag: &review::Flag) -> Tone {
 }
 
 /// What a finding's card says of where it stands; none while undecided.
-fn finding_state_word(state: FindingState) -> Option<&'static str> {
-    match state {
+fn finding_state_word(flag: &review::Flag) -> Option<&'static str> {
+    match flag.state {
         FindingState::Open => None,
         FindingState::Fix => Some("to fix"),
+        FindingState::Sent if flag.made => Some("fix made"),
         FindingState::Sent => Some("sent to fix"),
         FindingState::Fixed => Some("fixed"),
         FindingState::Dismissed => Some("dismissed"),
@@ -2491,7 +2492,7 @@ impl DiffView {
                 DetailRow::CommentHead {
                     finding: reviewer.map(|flag| FindingHead {
                         severity: flag.severity.label().into(),
-                        state: finding_state_word(flag.state).map(Into::into),
+                        state: finding_state_word(flag).map(Into::into),
                         tone: finding_tone(flag),
                     }),
                     // Part of its finding: it has no place of its own.

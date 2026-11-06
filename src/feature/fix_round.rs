@@ -15,7 +15,9 @@
 //! The plan must speak of everything the round was sent. gerdr lists its
 //! fixes in the build log, apart from the milestones, and the round is over
 //! once every one is ticked: an agent resting before that is told to go on,
-//! and one that won't is the user's to send again or drop.
+//! and one that won't is the user's to send again or drop. A tick also marks
+//! the AI review findings it covers (`mark_made`), so that stage's page shows
+//! them made as they go.
 //!
 //! This is the round's record and what decides its next step. Gerdr's side
 //! is `crate::feature_fix`.
@@ -455,6 +457,27 @@ pub fn findings_back(review: &mut AiReview, ids: &[String]) {
     }
 }
 
+/// Mark the findings `round` was sent as `left` says: a finding's fix is made
+/// once every item naming it is ticked, and `items` gives each one at least
+/// one. Says whether any changed.
+pub fn mark_made(review: &mut AiReview, round: &FixRound, left: &[String]) -> bool {
+    let GiveBack::Findings { ids, .. } = &round.give_back else {
+        return false;
+    };
+    let mut changed = false;
+    for finding in &mut review.findings {
+        if finding.state != FindingState::Sent || !ids.contains(&finding.id) {
+            continue;
+        }
+        let id = &finding.id;
+        let mut named = round.items.iter().filter(|item| names(item, id)).peekable();
+        let made = named.peek().is_some() && !named.any(|item| left.contains(item));
+        changed |= finding.made != made;
+        finding.made = made;
+    }
+    changed
+}
+
 /// What a compacting agent comes to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Compact {
@@ -680,6 +703,75 @@ mod tests {
         assert_eq!(between, "## Notes\n\nHi\n");
         // No such round: as it was.
         assert_eq!(without_unticked(log, 9), log);
+    }
+
+    #[test]
+    fn a_finding_is_made_once_every_item_naming_it_is_ticked() {
+        use super::super::review_import::Finding;
+        let finding = |id: &str, state| Finding {
+            id: id.to_owned(),
+            state,
+            ..Finding::default()
+        };
+        let mut review = AiReview {
+            findings: vec![
+                finding("r1-1", FindingState::Sent),
+                finding("r1-2", FindingState::Sent),
+                finding("r1-3", FindingState::Sent),
+                // r1-11 isn't r1-1, and this one went in no round of these.
+                finding("r1-11", FindingState::Sent),
+                finding("r1-4", FindingState::Open),
+            ],
+            ..AiReview::default()
+        };
+        let ids: Vec<String> = ["r1-1", "r1-2", "r1-3", "r1-4"].map(str::to_owned).into();
+        let items: Vec<String> = ["r1-1 and r1-2: one cause", "r1-2: its test", "r1-3: a typo"]
+            .map(str::to_owned)
+            .into();
+        let round = FixRound {
+            n: 1,
+            what: String::new(),
+            input: PathBuf::new(),
+            stage: Stage::AiReview,
+            phase: FixPhase::Fixing,
+            sent_back: 0,
+            asked: 0,
+            ready: None,
+            stalled: None,
+            give_back: GiveBack::Findings {
+                ids,
+                comments: None,
+            },
+            items: items.clone(),
+            done: 0,
+        };
+        let made = |review: &AiReview| -> Vec<String> {
+            (review.findings.iter())
+                .filter(|f| f.fix_made())
+                .map(|f| f.id.clone())
+                .collect()
+        };
+        assert!(!mark_made(&mut review, &round, &items));
+        assert!(made(&review).is_empty());
+        // One item of two for r1-2, the only one for r1-1.
+        assert!(mark_made(&mut review, &round, &items[1..]));
+        assert_eq!(made(&review), ["r1-1"]);
+        // As it was: nothing to save.
+        assert!(!mark_made(&mut review, &round, &items[1..]));
+        assert!(mark_made(&mut review, &round, &[]));
+        assert_eq!(made(&review), ["r1-1", "r1-2", "r1-3"]);
+        // A box unticked again takes it back.
+        assert!(mark_made(&mut review, &round, &items[2..]));
+        assert_eq!(made(&review), ["r1-1", "r1-2"]);
+        // Past Build, the word goes whatever the flag says.
+        review.findings[0].state = FindingState::Fixed;
+        assert_eq!(made(&review), ["r1-2"]);
+        // A round of something else marks nothing.
+        let other = FixRound {
+            give_back: GiveBack::Nothing,
+            ..round
+        };
+        assert!(!mark_made(&mut review, &other, &items));
     }
 
     #[test]

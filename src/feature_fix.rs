@@ -487,7 +487,14 @@ impl Gerdr {
         }
         let (rested, told) = (watch.rest.elapsed(), watch.told);
         let done = u32::try_from(round.items.len() - left.len()).unwrap_or(u32::MAX);
-        if done != round.done {
+        // AI review's page says which of its findings are made by now.
+        let made = (self.feature_mut(project, slug))
+            .and_then(|f| f.review.as_mut())
+            .is_some_and(|review| fix_round::mark_made(review, round, &left));
+        if made {
+            self.feature_findings_changed(project, slug);
+        }
+        if done != round.done || made {
             if let Some(round) =
                 (self.feature_mut(project, slug)).and_then(|f| f.fix_round.as_mut())
             {

@@ -3685,6 +3685,7 @@ fn feature_tab_review_rounds() -> super::FeatureTabView {
             note: String::new(),
             comment: String::new(),
             comment_buttons: Vec::new(),
+            made: state == "fix made",
             faded,
             field: None,
             field_hint: "",
@@ -3708,7 +3709,7 @@ fn feature_tab_review_rounds() -> super::FeatureTabView {
         ],
         sections: vec![
             PageSection::Lines {
-                label: "Findings \u{b7} 1 sent to Build".into(),
+                label: "Findings \u{b7} 1 sent to Build \u{b7} 1 fix made".into(),
                 lines: vec![tab_line(
                     "From the last review. The code has changed since.",
                     CheckTone::Note,
@@ -3722,6 +3723,15 @@ fn feature_tab_review_rounds() -> super::FeatureTabView {
                 "Fix: Stop at n.",
                 false,
                 vec![0],
+            ),
+            card(
+                FindingTag::Medium,
+                "Empty name logs in",
+                "fix made",
+                "r2-2 \u{b7} login.py:9",
+                "Fix: Refuse an empty name.",
+                false,
+                Vec::new(),
             ),
             round("Review 2", "2 fixed", 1),
             round(
@@ -4062,6 +4072,7 @@ fn feature_tab_manual_test(note: bool) -> super::FeatureTabView {
             note: said.into(),
             comment: String::new(),
             comment_buttons: Vec::new(),
+            made: false,
             faded: tag == FindingTag::Passed,
             field: writing.then(|| Line::from("Takes 4 seconds")),
             field_hint: "",
@@ -4284,7 +4295,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 45]; 4] = [
         0xe478e5d0bfc203ff, // tab_plan_long_1180
         0xa0b64a8d9cb72827, // tab_manual_test_1180
         0xa873580051f4643e, // tab_manual_note_860
-        0xafa7bbfaa659462e, // tab_review_rounds_1180
+        0x3f93fa45c78f5866, // tab_review_rounds_1180
     ],
     // Dark at 2
     [
@@ -4332,7 +4343,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 45]; 4] = [
         0x9bf3d7ef05b66203, // tab_plan_long_1180
         0x0381a16f4c182e79, // tab_manual_test_1180
         0x69602a3c18bd7031, // tab_manual_note_860
-        0xbe82884156261a72, // tab_review_rounds_1180
+        0x8f279db4c0377c33, // tab_review_rounds_1180
     ],
     // Light at 1
     [
@@ -4380,7 +4391,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 45]; 4] = [
         0x77767b97a4381cff, // tab_plan_long_1180
         0xe4bd695e759f1b44, // tab_manual_test_1180
         0x061ec3807f66b135, // tab_manual_note_860
-        0xdcd31a2db70da82d, // tab_review_rounds_1180
+        0xe29b7adc8372deb1, // tab_review_rounds_1180
     ],
     // Light at 2
     [
@@ -4428,7 +4439,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 45]; 4] = [
         0x4c5a60823adfe9ae, // tab_plan_long_1180
         0x1e2c584646dc9ba6, // tab_manual_test_1180
         0x1b69d7c51f346529, // tab_manual_note_860
-        0xc5d7d16b306fef83, // tab_review_rounds_1180
+        0xc202861bd8801f45, // tab_review_rounds_1180
     ],
 ];
 
@@ -4565,6 +4576,7 @@ fn tab_findings() -> super::FeatureTabView {
             note: String::new(),
             comment: note.into(),
             comment_buttons,
+            made: false,
             faded: false,
             field: None,
             field_hint: "",
@@ -4685,6 +4697,7 @@ fn tab_checks() -> super::FeatureTabView {
             note: String::new(),
             comment: String::new(),
             comment_buttons: Vec::new(),
+            made: false,
             faded: tag == FindingTag::Skipped,
             field: None,
             field_hint: "",
