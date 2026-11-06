@@ -408,8 +408,9 @@ pub enum NodeMark {
     /// or it was reopened, or the flow is back at Build (`RailBack`) and it's
     /// Build or after. A grey ring with a tick.
     Ran,
-    /// The current stage, with the flow back at Build on its account and the
-    /// next move not its own: a ring round its number.
+    /// The stage last worked on: the current one with the flow back at Build
+    /// on its account and the next move not its own, or the one the flow has
+    /// since gone back from. An accent ring round its number.
     Paused,
 }
 
@@ -420,9 +421,9 @@ impl NodeMark {
     pub(super) fn dot_color(self, p: &Palette) -> Rgb {
         match self {
             Self::Done => p.success,
-            Self::Current | Self::Fixing => p.accent,
+            Self::Current | Self::Fixing | Self::Paused => p.accent,
             Self::Stale | Self::Waiting => p.warning,
-            Self::Ran | Self::Paused => p.muted,
+            Self::Ran => p.muted,
             Self::Later => p.placeholder,
         }
     }
@@ -446,7 +447,7 @@ impl NodeMark {
             Self::Waiting => "waiting for you",
             Self::Fixing => "running again",
             Self::Ran => "ran once",
-            Self::Paused => "waiting for fixes",
+            Self::Paused => "last worked on",
         }
     }
 }
@@ -3584,7 +3585,7 @@ impl Painter {
                 || !matches!(past(i + 1), Some(NodeMark::Later) | None);
             // Turned back, the flow stands good up to Build, and ran once from
             // there on.
-            let ran = |i: usize| past(i) == Some(NodeMark::Ran);
+            let ran = |i: usize| matches!(past(i), Some(NodeMark::Ran | NodeMark::Paused));
             let into_build = view.back.is_some_and(|back| i + 1 == back.to);
             let once = view.back.is_some_and(|back| i >= back.to)
                 || ran(i)
@@ -3797,7 +3798,7 @@ impl Painter {
                 self.bold_centred(c, &number, spot, scale, p.muted);
             }
             NodeMark::Paused => {
-                disc(c, 0.0, p.muted);
+                disc(c, 0.0, p.accent);
                 disc(c, ring, p.background);
                 self.bold_centred(c, &number, spot, scale, p.text);
             }
@@ -4686,7 +4687,8 @@ impl FeatureCard {
     /// unless the flow went back from it: then the one the rail pulses.
     pub(super) fn big_dot(&self) -> Option<usize> {
         let stage = (self.stage).and_then(|s| Stage::ALL.iter().position(|a| *a == s));
-        let left = stage.filter(|k| self.marks.get(*k) == Some(&NodeMark::Ran));
+        let left =
+            stage.filter(|k| matches!(self.marks.get(*k), Some(NodeMark::Ran | NodeMark::Paused)));
         self.dot_marked(NodeMark::Fixing)
             .or_else(|| left.and_then(|_| self.dot_marked(NodeMark::Current)))
             .or(stage)
@@ -5187,7 +5189,7 @@ mod tests {
             (Some(build), Some(build))
         );
         marks[build] = NodeMark::Current;
-        marks[review] = NodeMark::Ran;
+        marks[review] = NodeMark::Paused;
         let cleared = FeatureCard {
             marks: marks.clone(),
             stage: Some(Stage::AiReview),
