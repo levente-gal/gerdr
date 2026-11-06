@@ -3013,6 +3013,7 @@ fn feature_tab_plan_ready() -> super::FeatureTabView {
         buttons: vec![
             button("Review", ButtonStyle::Primary),
             button("Show agent", ButtonStyle::Plain),
+            button("Approve", ButtonStyle::Plain),
         ],
         sections: vec![
             PageSection::Agent {
@@ -3028,7 +3029,7 @@ fn feature_tab_plan_ready() -> super::FeatureTabView {
             PageSection::File {
                 name: "plan.md".into(),
                 state: tab_line("ready for review", CheckTone::Ready),
-                buttons: vec![0],
+                buttons: vec![0, 2],
             },
         ],
     };
@@ -3112,6 +3113,10 @@ fn feature_tab_discover_brief() -> super::FeatureTabView {
                 label: "Show agent".into(),
                 style: ButtonStyle::Plain,
             },
+            PageButton {
+                label: "Approve".into(),
+                style: ButtonStyle::Plain,
+            },
         ],
         sections: vec![
             PageSection::Agent {
@@ -3127,7 +3132,7 @@ fn feature_tab_discover_brief() -> super::FeatureTabView {
             PageSection::File {
                 name: "brief.md".into(),
                 state: tab_line("ready for review", CheckTone::Ready),
-                buttons: vec![0],
+                buttons: vec![0, 2],
             },
             PageSection::Doc {
                 name: "brief.md".into(),
@@ -4485,7 +4490,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 47]; 4] = [
         0x6283066ad99ffd8d, // tab_build_860
         0xaa4a9c59e083ffc5, // tab_build_1180
         0x7cd5d2c2cd59dd02, // tab_build_1920
-        0xc1278577e56967a2, // tab_plan_ready_1180
+        0x83ac39ab87abb634, // tab_plan_ready_1180
         0xe6c0a8c26922ed70, // tab_verify_failed_1920
         0xceae385ff36ea8be, // tab_verify_running_1180
         0x17565c26a855e9ae, // tab_fix_plan_860
@@ -4521,8 +4526,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 47]; 4] = [
         0x39dad694534611c7, // tab_approved_1180
         0x1f0a0d2a92104906, // tab_locked_1180
         0xfc861ee78304bfbc, // tab_start_over_1180
-        0xad2f66c417c0d574, // tab_discover_brief_1180
-        0x8210c973d4a3e76d, // tab_discover_brief_860
+        0x78bd9d6b503c4886, // tab_discover_brief_1180
+        0xf547b05b6ada76eb, // tab_discover_brief_860
         0xe478e5d0bfc203ff, // tab_plan_long_1180
         0xa0b64a8d9cb72827, // tab_manual_test_1180
         0xa873580051f4643e, // tab_manual_note_860
@@ -4535,7 +4540,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 47]; 4] = [
         0x0d7bb23945e58d57, // tab_build_860
         0x545381491e68b809, // tab_build_1180
         0xf5ca19121037fb0a, // tab_build_1920
-        0xd87da022045a2089, // tab_plan_ready_1180
+        0x3951e144ec4549f0, // tab_plan_ready_1180
         0xf060b4300361f434, // tab_verify_failed_1920
         0x52a5d1ad9dffb717, // tab_verify_running_1180
         0x66b1c34acb71140e, // tab_fix_plan_860
@@ -4571,8 +4576,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 47]; 4] = [
         0xbfd1ff58f63dabc7, // tab_approved_1180
         0x2ac9eea070a89ec7, // tab_locked_1180
         0x14684a4d8940be84, // tab_start_over_1180
-        0x5f23c0dfbcaab18c, // tab_discover_brief_1180
-        0xacea8b7421947944, // tab_discover_brief_860
+        0x848eaab4b86a5cf5, // tab_discover_brief_1180
+        0xeeddb1101f8c20b5, // tab_discover_brief_860
         0x9bf3d7ef05b66203, // tab_plan_long_1180
         0x0381a16f4c182e79, // tab_manual_test_1180
         0x69602a3c18bd7031, // tab_manual_note_860
@@ -4585,7 +4590,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 47]; 4] = [
         0x0ce645a86801977b, // tab_build_860
         0xd7e7901f7634429d, // tab_build_1180
         0x1665a96aaee281ee, // tab_build_1920
-        0x1012d3e4c8093338, // tab_plan_ready_1180
+        0xb9080acc1aae0948, // tab_plan_ready_1180
         0x1446efceff05c114, // tab_verify_failed_1920
         0xb9f4489df4669939, // tab_verify_running_1180
         0x0ed0f57c474cc6c7, // tab_fix_plan_860
@@ -4621,8 +4626,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 47]; 4] = [
         0xca21abeb42b40c90, // tab_approved_1180
         0xf8462e772a8bfb79, // tab_locked_1180
         0x6101ae175d95f95d, // tab_start_over_1180
-        0x361a521b58676049, // tab_discover_brief_1180
-        0xde0d608a5eccfeec, // tab_discover_brief_860
+        0x97e7385ce9104fb5, // tab_discover_brief_1180
+        0xde9fd4f0aac04258, // tab_discover_brief_860
         0x77767b97a4381cff, // tab_plan_long_1180
         0xe4bd695e759f1b44, // tab_manual_test_1180
         0x061ec3807f66b135, // tab_manual_note_860
@@ -4635,7 +4640,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 47]; 4] = [
         0xa00f642ec3c54e2f, // tab_build_860
         0x7f40d44968ffbe15, // tab_build_1180
         0x2a16d342affb412e, // tab_build_1920
-        0x9ba97245b9431b1d, // tab_plan_ready_1180
+        0x2567f0f88e482f97, // tab_plan_ready_1180
         0xc0a2a63f8deefc51, // tab_verify_failed_1920
         0x1d13b9e1270b0ffc, // tab_verify_running_1180
         0x28cf2e2968f136f7, // tab_fix_plan_860
@@ -4671,8 +4676,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 47]; 4] = [
         0xaf6e62e9aa28626c, // tab_approved_1180
         0xe88210491ec9da6d, // tab_locked_1180
         0xe8e6a8189d0001cd, // tab_start_over_1180
-        0x1f0f7201920e14f6, // tab_discover_brief_1180
-        0x6772f0fb23152ac2, // tab_discover_brief_860
+        0x172431189b3d411c, // tab_discover_brief_1180
+        0x98f220706857b028, // tab_discover_brief_860
         0x4c5a60823adfe9ae, // tab_plan_long_1180
         0x1e2c584646dc9ba6, // tab_manual_test_1180
         0x1b69d7c51f346529, // tab_manual_note_860

@@ -484,19 +484,42 @@ impl Gerdr {
         let Some(doc) = wd.doc.clone() else {
             return;
         };
-        let count = wd.diff.review.comments.len();
         if doc.file == DocFile::FixPlan {
+            let count = wd.diff.review.comments.len();
             if count > 0 {
                 return self.ask_make_fixes_unsent(doc.project, doc.slug, count);
             }
             return self.make_fixes_now(&doc.project, &doc.slug);
         }
-        if count > 0 {
-            let name = doc.name();
-            let stage = doc.file.stage();
-            return self.ask_approve_unsent(doc.project, doc.slug, stage, &name, count);
+        self.approve_doc(&doc.project, &doc.slug, doc.file.stage());
+    }
+
+    /// Approve `stage`'s file of feature `slug`, from its review or from
+    /// the stage's page: asked first when comments on it would go unsent,
+    /// refused while its tab has one being written.
+    pub(crate) fn approve_doc(&mut self, project: &str, slug: &str, stage: Stage) {
+        let file = DocFile::Stage(stage);
+        let is_it = |d: &DocOf| d.project == project && d.slug == slug && d.file == file;
+        let tab = (self.workspaces.iter().flat_map(|ws| &ws.tabs))
+            .filter_map(|tab| tab.review())
+            .map(|r| &r.wd)
+            .find(|wd| wd.doc.as_ref().is_some_and(is_it));
+        if tab.is_some_and(|wd| wd.diff.editing.is_some()) {
+            return self.show_warning(crate::worktree_diff::DRAFT_OPEN.into());
         }
-        self.approve_doc_now(&doc.project, &doc.slug, doc.file.stage());
+        let count = match tab {
+            Some(wd) => wd.diff.review.comments.len(),
+            None => {
+                let dir = store::dir(None, project, slug);
+                review::load_file(&file.comments(&dir)).comments.len()
+            }
+        };
+        if count > 0 {
+            let name = artifacts::name(stage).unwrap_or("its file");
+            let (project, slug) = (project.to_owned(), slug.to_owned());
+            return self.ask_approve_unsent(project, slug, stage, name, count);
+        }
+        self.approve_doc_now(project, slug, stage);
     }
 
     /// Approve `stage` of feature `slug`: the stage marked done, then its
