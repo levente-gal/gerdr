@@ -9641,7 +9641,6 @@ fn stage_page(
                     let why = line(blocked.why.clone(), CheckTone::Blocker);
                     sections.push(lines("Blocked", vec![why]));
                 }
-                sections.extend(setup_section(feature, state));
                 sections.extend(card());
                 if milestone_switch(feature, stage) {
                     sections.push(PageSection::MilestoneMode {
@@ -9659,6 +9658,7 @@ fn stage_page(
                 });
                 sections.extend(milestones_of(state.probe, stage).or(counted));
                 sections.extend(fix_rounds_of(state.probe));
+                sections.extend(setup_section(feature, state));
             }
             Stage::Verify => {
                 sections.extend(verify_sections(feature, state, actions, now));
@@ -15678,7 +15678,7 @@ pub(crate) mod tests {
             (node.mark, node.line.as_str()),
             (NodeMark::Waiting, "milestone 1/3")
         );
-        // Its setup failing shows above.
+        // Its setup goes last, its failure said by the status at the top.
         f.setup = Some(feature::setup::SetupRun {
             started: 1_000,
             finished: Some(1_100),
@@ -15687,15 +15687,16 @@ pub(crate) mod tests {
         });
         let page = stage_page(&f, Stage::Build, &state, &actions, 2_000);
         assert_eq!(
-            page.sections[0],
-            lines(
+            page.sections.last(),
+            Some(&lines(
                 "Setup",
                 vec![line(
                     "failed: api: `npm ci` exited with 1",
                     CheckTone::Blocker
                 )]
-            )
+            ))
         );
+        assert!(matches!(page.sections[0], PageSection::Agent { .. }));
         assert_eq!(page.status.map(|s| s.tone), Some(CheckTone::Blocker));
     }
 
