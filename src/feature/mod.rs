@@ -598,6 +598,10 @@ pub struct Feature {
     /// How many fix rounds it had: the next one's number goes on from it.
     #[serde(default)]
     pub fix_rounds: u32,
+    /// The fix rounds Verify's failures started, oldest first: what Build's
+    /// page says of them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub verify_fixes: Vec<fix_round::VerifyFix>,
     /// The last run number of each stage whose run was forgotten: a later
     /// run goes on from it, so its prompt doesn't overwrite an old one.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -812,6 +816,10 @@ impl Feature {
             .is_some_and(|r| r.stage >= stage)
         {
             self.last_fix_round = None;
+        }
+        // Their runs' numbers start again with Verify's record.
+        if stage <= Stage::Verify {
+            self.verify_fixes.clear();
         }
         match stage {
             Stage::Discover | Stage::Plan | Stage::Build => {}
@@ -1272,6 +1280,7 @@ pub(crate) mod tests {
             manual: None,
             fix_round: None,
             last_fix_round: None,
+            verify_fixes: Vec::new(),
             ran_once: Default::default(),
             fix_rounds: 0,
         }
@@ -1358,6 +1367,7 @@ pub(crate) mod tests {
             manual: None,
             fix_round: None,
             last_fix_round: None,
+            verify_fixes: Vec::new(),
             ran_once: Default::default(),
             fix_rounds: 0,
         }

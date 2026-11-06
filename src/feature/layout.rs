@@ -1486,6 +1486,7 @@ mod tests {
             manual: None,
             fix_round: None,
             last_fix_round: None,
+            verify_fixes: Vec::new(),
             ran_once: Default::default(),
             fix_rounds: 0,
             history: Vec::new(),

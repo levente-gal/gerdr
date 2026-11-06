@@ -3271,6 +3271,42 @@ fn feature_tab_fix_plan() -> super::FeatureTabView {
     view
 }
 
+/// Build's page after Verify's failures came back to it twice, and a setup.
+fn feature_tab_verify_fixes() -> super::FeatureTabView {
+    use super::{CheckTone, PageSection};
+    let mut view = feature_tab();
+    view.page.sections.insert(
+        1,
+        PageSection::Lines {
+            label: "Verify failures".into(),
+            lines: vec![
+                tab_line(
+                    "Review 2 \u{b7} run 3 failed 12m ago \u{b7} Claude Code \u{b7} making fixes \u{b7} 1 of 3 made",
+                    CheckTone::Blocker,
+                ),
+                tab_line("api: `cargo test export::` exited with 101", CheckTone::Blocker),
+                tab_line(
+                    "error[E0599]: no method named `stream` found for struct `Export` in the current scope, which is long enough to reach the side of the page at the narrow width",
+                    CheckTone::Note,
+                ),
+                tab_line("web: `npm run lint` exited with 2", CheckTone::Blocker),
+                tab_line(
+                    "Review 1 \u{b7} run 2 failed 2h ago \u{b7} Cursor \u{b7} fixes made \u{b7} run 3 failed",
+                    CheckTone::Note,
+                ),
+            ],
+        },
+    );
+    view.page.sections.push(PageSection::Lines {
+        label: "Setup".into(),
+        lines: vec![
+            tab_line("copied api: .env", CheckTone::Note),
+            tab_line("ran web: npm ci", CheckTone::Note),
+        ],
+    });
+    view
+}
+
 /// Ship current, blocked by what isn't committed and a branch behind.
 fn feature_tab_ship_blocked() -> super::FeatureTabView {
     use super::{ButtonStyle, CheckTone, NodeMark, PageButton, PageSection, StagePage};
@@ -4242,9 +4278,10 @@ fn feature_tab_manual_test(note: bool) -> super::FeatureTabView {
 }
 
 /// The feature tab's fixtures, by name.
-fn feature_tabs() -> [(&'static str, super::FeatureTabView); 36] {
+fn feature_tabs() -> [(&'static str, super::FeatureTabView); 37] {
     [
         ("tab_build", feature_tab()),
+        ("tab_verify_fixes", feature_tab_verify_fixes()),
         ("tab_plan_ready", feature_tab_plan_ready()),
         ("tab_verify_failed", feature_tab_verify_failed()),
         ("tab_verify_running", feature_tab_verify_running()),
@@ -4293,7 +4330,7 @@ fn feature_tabs() -> [(&'static str, super::FeatureTabView); 36] {
 }
 
 /// Each fixture at the width it shows best at, and Build at all three.
-const TAB_SURFACES: [(&str, i32); 45] = [
+const TAB_SURFACES: [(&str, i32); 47] = [
     ("tab_build", 860),
     ("tab_build", 1180),
     ("tab_build", 1920),
@@ -4339,9 +4376,11 @@ const TAB_SURFACES: [(&str, i32); 45] = [
     ("tab_manual_test", 1180),
     ("tab_manual_note", 860),
     ("tab_review_rounds", 1180),
+    ("tab_verify_fixes", 1180),
+    ("tab_verify_fixes", 860),
 ];
 
-const FEATURE_TAB: [&str; 45] = [
+const FEATURE_TAB: [&str; 47] = [
     "tab_build_860",
     "tab_build_1180",
     "tab_build_1920",
@@ -4387,10 +4426,12 @@ const FEATURE_TAB: [&str; 45] = [
     "tab_manual_test_1180",
     "tab_manual_note_860",
     "tab_review_rounds_1180",
+    "tab_verify_fixes_1180",
+    "tab_verify_fixes_860",
 ];
 
 /// The recorded hashes of `FEATURE_TAB`, per case in `CASES`.
-const GOLDEN_FEATURE_TAB: [[u64; 45]; 4] = [
+const GOLDEN_FEATURE_TAB: [[u64; 47]; 4] = [
     // Dark at 1
     [
         0x6283066ad99ffd8d, // tab_build_860
@@ -4438,6 +4479,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 45]; 4] = [
         0xa0b64a8d9cb72827, // tab_manual_test_1180
         0xa873580051f4643e, // tab_manual_note_860
         0x3f93fa45c78f5866, // tab_review_rounds_1180
+        0x0f3df9cc94cd9bd0, // tab_verify_fixes_1180
+        0x9a3eb2d9b749f166, // tab_verify_fixes_860
     ],
     // Dark at 2
     [
@@ -4486,6 +4529,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 45]; 4] = [
         0x0381a16f4c182e79, // tab_manual_test_1180
         0x69602a3c18bd7031, // tab_manual_note_860
         0x8f279db4c0377c33, // tab_review_rounds_1180
+        0x5f77f0932430066e, // tab_verify_fixes_1180
+        0xbbbee10e3a49cc30, // tab_verify_fixes_860
     ],
     // Light at 1
     [
@@ -4534,6 +4579,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 45]; 4] = [
         0xe4bd695e759f1b44, // tab_manual_test_1180
         0x061ec3807f66b135, // tab_manual_note_860
         0xe29b7adc8372deb1, // tab_review_rounds_1180
+        0x06497f7e81355840, // tab_verify_fixes_1180
+        0xfaef144a9cf2f302, // tab_verify_fixes_860
     ],
     // Light at 2
     [
@@ -4582,6 +4629,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 45]; 4] = [
         0x1e2c584646dc9ba6, // tab_manual_test_1180
         0x1b69d7c51f346529, // tab_manual_note_860
         0xc202861bd8801f45, // tab_review_rounds_1180
+        0xf22eb3de2d0ec197, // tab_verify_fixes_1180
+        0x6f6f159577e44677, // tab_verify_fixes_860
     ],
 ];
 

@@ -32,6 +32,7 @@ use serde::{Deserialize, Serialize};
 use super::{
     Stage, artifacts,
     review_import::{AiReview, FindingState},
+    verify::{Evidence, VerifyRun},
 };
 use crate::herdr::AgentStatus;
 
@@ -191,6 +192,80 @@ impl FixRound {
             GiveBack::Manual { checks } => checks.iter().map(|(id, _)| id.clone()).collect(),
             GiveBack::Nothing | GiveBack::Comments { .. } => Vec::new(),
         }
+    }
+}
+
+/// How many lines saying why a check failed a `VerifyFix` keeps.
+const WHY_LINES: usize = 2;
+
+/// A fix round Verify's failures started, kept for Build's page once the run
+/// and the round are gone: `VerifyRun` and `FixRound` only hold the latest.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerifyFix {
+    /// `FixRound::n`.
+    pub round: u32,
+    /// The Verify run that failed.
+    pub run: u32,
+    /// Unix seconds that run ended.
+    pub at: u64,
+    /// The Build agent it went to; empty if it has none.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub agent: String,
+    /// What failed (`VerifyRun::failures`), the check `why` explains first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failures: Vec<String>,
+    /// The first lines saying why the first failure failed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub why: Vec<String>,
+    /// The user dropped the round.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub dropped: bool,
+    /// The last run since that said something of the code, and whether it
+    /// passed. It stays as it was once a newer round came.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next: Option<(u32, bool)>,
+}
+
+impl VerifyFix {
+    /// What round `round` keeps of failed run `run`, going to `agent`.
+    pub fn new(round: u32, run: &VerifyRun, agent: String) -> VerifyFix {
+        let mut failures = run.failures.clone();
+        // Not every failed check prints a line that says why.
+        let explained = (run.checks.iter())
+            .filter_map(|check| check.outcome.as_ref())
+            .filter(|outcome| !outcome.passed() && !outcome.excerpt.is_empty())
+            .find_map(|outcome| {
+                let own = format!("{}: `{}`", outcome.repo, outcome.command);
+                let at = failures.iter().position(|f| f.starts_with(&own))?;
+                Some((at, &outcome.excerpt))
+            });
+        let why = explained.map_or_else(Vec::new, |(at, excerpt)| {
+            failures[..=at].rotate_right(1);
+            excerpt.iter().take(WHY_LINES).cloned().collect()
+        });
+        VerifyFix {
+            round,
+            run: run.n,
+            at: run.finished.unwrap_or(run.started),
+            agent,
+            failures,
+            why,
+            dropped: false,
+            next: None,
+        }
+    }
+}
+
+/// Note on the newest of `fixes` how Verify's run `n` went, if that says
+/// something of the code: not when nothing ran, or a check was cut short.
+pub fn verify_ended(fixes: &mut [VerifyFix], n: u32, evidence: &Evidence) {
+    if evidence.outcomes.is_empty() || evidence.interrupted() {
+        return;
+    }
+    // Only the newest: what fixed an older one is told by the run after it.
+    // Its fixes can go again, so a later run replaces an earlier one's word.
+    if let Some(fix) = fixes.last_mut().filter(|fix| fix.run < n) {
+        fix.next = Some((n, evidence.passed()));
     }
 }
 
@@ -800,6 +875,105 @@ mod tests {
         // herdr can't say: only a long quiet counts.
         assert_eq!(next(None, true, long, 3, false, 0), Fixes::Wait);
         assert_eq!(next(None, true, QUIET, 3, false, 0), Fixes::GoOn);
+    }
+
+    #[test]
+    fn a_verify_fix_puts_the_failure_it_explains_first() {
+        let failed =
+            |repo: &str, command: &str, excerpt: &[&str]| crate::feature::verify::CheckRun {
+                outcome: Some(crate::feature::verify::Outcome {
+                    repo: repo.into(),
+                    command: command.into(),
+                    exit: Some(1),
+                    excerpt: excerpt.iter().map(|l| (*l).to_owned()).collect(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+        let run = VerifyRun {
+            n: 4,
+            started: 100,
+            finished: Some(160),
+            failures: vec![
+                "uncommitted changes in web".to_owned(),
+                "api: `lint` exited with 1".to_owned(),
+                "web: `test` exited with 1".to_owned(),
+            ],
+            checks: vec![
+                failed("api", "lint", &[]),
+                failed("web", "test", &["one", "two", "three"]),
+            ],
+            ..Default::default()
+        };
+        let fix = VerifyFix::new(3, &run, "Claude Code".to_owned());
+        assert_eq!((fix.round, fix.run, fix.at), (3, 4, 160));
+        assert_eq!(
+            fix.failures,
+            [
+                "web: `test` exited with 1",
+                "uncommitted changes in web",
+                "api: `lint` exited with 1"
+            ]
+        );
+        assert_eq!(fix.why, ["one", "two"]);
+        // Nothing says why: they stay as they were.
+        let run = VerifyRun {
+            checks: vec![failed("api", "lint", &[])],
+            ..run
+        };
+        let fix = VerifyFix::new(3, &run, String::new());
+        assert_eq!(fix.failures[0], "uncommitted changes in web");
+        assert!(fix.why.is_empty());
+    }
+
+    #[test]
+    fn only_a_run_that_says_something_of_the_code_counts_as_the_next() {
+        let outcome = |exit| crate::feature::verify::Outcome {
+            exit,
+            ..Default::default()
+        };
+        let evidence = |outcomes| Evidence {
+            outcomes,
+            ..Evidence::default()
+        };
+        let fix = |round, run| VerifyFix {
+            round,
+            run,
+            ..VerifyFix::default()
+        };
+        let mut fixes = vec![fix(1, 2)];
+        // Nothing ran: uncommitted changes, say.
+        verify_ended(&mut fixes, 3, &evidence(Vec::new()));
+        assert_eq!(fixes[0].next, None);
+        let cut = crate::feature::verify::Outcome {
+            interrupted: true,
+            ..outcome(None)
+        };
+        verify_ended(&mut fixes, 3, &evidence(vec![cut]));
+        assert_eq!(fixes[0].next, None);
+        // The run it came from says nothing of what it fixed.
+        verify_ended(&mut fixes, 2, &evidence(vec![outcome(Some(0))]));
+        assert_eq!(fixes[0].next, None);
+        verify_ended(&mut fixes, 3, &evidence(vec![outcome(Some(1))]));
+        assert_eq!(fixes[0].next, Some((3, false)));
+        // Its fixes sent again: the later run says.
+        verify_ended(&mut fixes, 4, &evidence(vec![outcome(Some(1))]));
+        assert_eq!(fixes[0].next, Some((4, false)));
+        // Later ones go to the newer round.
+        fixes.push(fix(2, 3));
+        verify_ended(&mut fixes, 4, &evidence(vec![outcome(Some(0))]));
+        assert_eq!(fixes[0].next, Some((4, false)));
+        assert_eq!(fixes[1].next, Some((4, true)));
+        // An older round left without a next doesn't take a later run's.
+        let mut fixes = vec![
+            fix(1, 2),
+            VerifyFix {
+                next: Some((4, true)),
+                ..fix(2, 3)
+            },
+        ];
+        verify_ended(&mut fixes, 5, &evidence(vec![outcome(Some(0))]));
+        assert_eq!(fixes[0].next, None);
     }
 
     #[test]

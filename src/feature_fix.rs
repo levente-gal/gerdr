@@ -18,7 +18,7 @@ use crate::{
     feature::{
         self, Feature, Stage, Status,
         agents::Flavor,
-        fix_round::{self, Compact, FixPhase, FixRound, Fixes, GiveBack, Plan},
+        fix_round::{self, Compact, FixPhase, FixRound, Fixes, GiveBack, Plan, VerifyFix},
         store,
     },
     feature_agents::{stamp, vars},
@@ -1019,7 +1019,12 @@ impl Gerdr {
         let now = feature::now();
         let n = round.n;
         match back {
-            true => f.log(now, format!("Fix round {n} dropped")),
+            true => {
+                f.log(now, format!("Fix round {n} dropped"));
+                if let Some(fix) = f.verify_fixes.iter_mut().find(|fix| fix.round == n) {
+                    fix.dropped = true;
+                }
+            }
             false => {
                 f.log(now, format!("Fix round {n} over"));
                 f.last_fix_round = Some(round.clone());
@@ -1122,6 +1127,7 @@ impl Gerdr {
                 "\u{201c}{title}\u{201d} has no failed checks to fix"
             ));
         };
+        let run = feature.verify.clone().unwrap_or_default();
         let data = store::dir(None, project, slug);
         let evidence = data.join(feature::verify::EVIDENCE);
         let text = format!(
@@ -1134,6 +1140,13 @@ impl Gerdr {
             evidence.display()
         );
         if self.send_to_build(project, slug, "Verify failures", text) {
+            if let Some(f) = self.feature_mut(project, slug) {
+                let agent =
+                    (f.runs.get(&Stage::Build)).map_or_else(String::new, |r| r.agent.clone());
+                let fix = VerifyFix::new(f.fix_rounds, &run, agent);
+                f.verify_fixes.push(fix);
+                self.save_feature(project, slug);
+            }
             self.show_build_agent(project, slug);
         }
     }

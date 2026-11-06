@@ -113,6 +113,12 @@ A key is written in one place, not on the button that does the same thing:
   as they are, as fixes don't touch what they made. A stage whose mark went
   stays grey until it is marked done again, so it doesn't read as one that
   never ran.
+- Build's page keeps a "Verify failures" section for the fix rounds Verify's
+  failures started: what the newest one was sent, then a line for each older
+  one (its run, its agent, how it stands, how the next run went). It only
+  reads: the full output is on Verify's page, the ticks in the list below it
+  under the same "Review N". Setup goes last on that page; a failed setup is
+  still said by the status at its top.
 
 ## Words
 
