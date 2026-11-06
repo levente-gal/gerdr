@@ -997,6 +997,13 @@ impl Herdr {
         err.ends_with(NO_PANE) || UnixStream::connect(&self.socket).is_err()
     }
 
+    /// Whether `err`, the error of a call about a pane, is the server saying
+    /// it has no such pane. Asked over a link, nothing else says it is gone:
+    /// no connection only means the machine is out of reach.
+    pub fn says_no_pane(err: &str) -> bool {
+        err.ends_with(NO_PANE)
+    }
+
     /// Stop the session's server, ending everything that runs in it. It
     /// saves its layout first.
     pub fn stop(&mut self) -> Result<(), String> {

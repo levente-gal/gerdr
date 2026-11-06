@@ -1472,6 +1472,7 @@ mod tests {
             ship_plan: Default::default(),
             runs: Default::default(),
             stage_agents: Default::default(),
+            stage_machines: Default::default(),
             stage_models: Default::default(),
             fresh_milestones: false,
             setup: None,

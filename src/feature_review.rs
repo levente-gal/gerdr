@@ -169,8 +169,12 @@ impl Gerdr {
             return;
         };
         let (project, slug) = (project.to_owned(), slug.to_owned());
+        let there = self.machine_dirt(&project, &slug);
         self.feature_work(None, move |_| Done::ReviewRead {
-            result: review_import::read_code(&feature, &path).map(Box::new),
+            result: review_import::read_code(&feature, &path).map(|mut read| {
+                crate::machine_work::with_dirt(&feature, &mut read.reading, &there);
+                Box::new(read)
+            }),
             project,
             slug,
             n,
@@ -911,7 +915,7 @@ impl Gerdr {
         if run.t3_thread().is_some() {
             return self.show_t3_stage(project, slug, Stage::Build);
         }
-        if let Some(pane) = (run.pane.clone()).filter(|p| self.herdr_pane_place(p).is_some()) {
+        if let Some(pane) = (run.pane.clone()).filter(|p| self.pane_there(p)) {
             self.focus_agent(&crate::agents::AgentKey::Herdr(pane));
         }
     }

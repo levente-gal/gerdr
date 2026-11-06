@@ -44,6 +44,7 @@ use crate::{
         store, verify,
     },
     herdr::AgentStatus,
+    machine_work::{Placed, StartKind, split_pane},
     projects,
     projects::Workflow,
     prompts::{self, render::Vars},
@@ -140,6 +141,9 @@ pub(crate) struct Watch {
     /// build log still at that many is the stop it went on from: when
     /// herdr can't say whether the agent rests, it isn't a stop again.
     pub(crate) went_on: Option<u32>,
+    /// When it first looked done, for an agent on another machine: what it
+    /// did by then has to come back first.
+    seen_done: Option<Instant>,
 }
 
 impl Watch {
@@ -1166,6 +1170,16 @@ impl Gerdr {
         }
     }
 
+    /// Whether `stage`'s next agent can run on another machine: T3 Code's
+    /// threads are this machine's.
+    pub(crate) fn takes_a_machine(&self, feature: &Feature, stage: Stage) -> bool {
+        let workflow = self.projects.project(&feature.project).map(|p| &p.workflow);
+        !matches!(
+            stage_pick(feature, stage, workflow, &self.cli_agents),
+            Pick::Agent(_, base) if Flavor::of(&base) == Flavor::T3
+        )
+    }
+
     /// Pick the next agent `stage`'s chips offer (Ctrl+Shift+A).
     pub(crate) fn cycle_stage_agent(&mut self, project: &str, slug: &str, stage: Stage) {
         let chips = self.chips_of(project, slug, stage);
@@ -1177,11 +1191,33 @@ impl Gerdr {
     /// Start `stage`'s agent for feature `slug` (`fresh`: a new one even
     /// when its last run's pane is still there).
     pub fn start_stage_agent(&mut self, project: &str, slug: &str, stage: Stage, fresh: bool) {
+        if fresh && self.asks_before_fresh(project, slug, stage) {
+            return;
+        }
+        self.start_stage_agent_now(project, slug, stage, fresh);
+    }
+
+    /// `start_stage_agent`, past asking.
+    pub(crate) fn start_stage_agent_now(
+        &mut self,
+        project: &str,
+        slug: &str,
+        stage: Stage,
+        fresh: bool,
+    ) {
         let Some(feature) = self.feature(project, slug) else {
             return;
         };
         if needs(stage).is_none() {
             return self.show_warning(format!("No agent runs {} yet", stage.label()));
+        }
+        if self.starting_on_machine(project, slug, stage) {
+            let name = (feature.runs.get(&stage).and_then(|r| r.machine.as_deref()))
+                .map_or_else(|| "another machine".to_owned(), |id| self.machine_name(id));
+            return self.show_notice(format!(
+                "{}'s agent is still starting on {name}",
+                stage.label()
+            ));
         }
         // Before `startable`: a fresh Build agent for fixes waits while Build
         // is done, and what it was to be told is in its prompt.
@@ -1197,13 +1233,17 @@ impl Gerdr {
         let pane = feature.runs.get(&stage).and_then(|r| r.pane.clone());
         // The first agent gets a failed setup run again, like a fresh one.
         let first = !feature.runs.contains_key(&stage);
-        if !fresh && let Some(pane) = pane.filter(|p| self.herdr_pane_place(p).is_some()) {
+        if !fresh && let Some(pane) = pane.filter(|p| self.pane_there(p)) {
             return self.focus_agent(&agents::AgentKey::Herdr(pane));
         }
         if !fresh && feature.runs.get(&stage).is_some_and(StageRun::resumes) {
             return self.resume_stage_agent(project, slug, stage);
         }
-        if stage == Stage::Build && self.setup_before_build(project, slug, fresh || first) {
+        // A setup is this machine's: on another the agent starts as it is.
+        if stage == Stage::Build
+            && self.placed(feature, stage) == Placed::Here
+            && self.setup_before_build(project, slug, fresh || first)
+        {
             return;
         }
         self.launch_stage_agent(project, slug, stage, &[]);
@@ -1224,7 +1264,7 @@ impl Gerdr {
         let Some(run) = feature.runs.get(&stage) else {
             return;
         };
-        if let Some(pane) = (run.pane.clone()).filter(|p| self.herdr_pane_place(p).is_some()) {
+        if let Some(pane) = (run.pane.clone()).filter(|p| self.pane_there(p)) {
             return self.focus_agent(&agents::AgentKey::Herdr(pane));
         }
         let agent = run.agent.clone();
@@ -1248,6 +1288,28 @@ impl Gerdr {
                 ));
             }
         };
+        if let Some(id) = &run.machine {
+            let job = (stage, run.n, StartKind::Sent);
+            let Some(job) = self.machine_start_job(id, &feature, job, &run.base, &command) else {
+                let name = self.machine_name(id);
+                return self.show_warning(format!(
+                    "{name} can't be reached: try again once it is back"
+                ));
+            };
+            let stored = job.command.clone();
+            if let Some(r) = self
+                .feature_mut(project, slug)
+                .and_then(|f| f.runs.get_mut(&stage))
+            {
+                r.pane = None;
+                r.command = stored;
+                r.model.clone_from(&model);
+                r.asked_model.clone_from(&model);
+                r.nudged = false;
+            }
+            self.save_feature(project, slug);
+            return self.start_on_machine(&id.clone(), job);
+        }
         let opened = self.open_feature_tab_behind(project, slug, &feature.dir, command.clone());
         let Some(pane) = opened else {
             tracing::warn!("no tab for {agent}, waiting on {}", stage.label());
@@ -1314,7 +1376,7 @@ impl Gerdr {
         if let Some(why) = self.checks_refusal(project, slug) {
             return self.show_warning(why);
         }
-        let pane = (run.pane.clone()).filter(|p| self.herdr_pane_place(p).is_some());
+        let pane = (run.pane.clone()).filter(|p| self.pane_there(p));
         let sent = match &pane {
             None => Err(String::from(crate::feature_build::TAB_GONE)),
             Some(pane) => self
@@ -1393,12 +1455,12 @@ impl Gerdr {
         };
         // Its tab back since the page was drawn only shows it: that changes
         // nothing. A chat to go on with would.
-        let live = (run.pane.as_deref()).is_some_and(|p| self.herdr_pane_place(p).is_some());
+        let live = (run.pane.as_deref()).is_some_and(|p| self.pane_there(p));
         if !live && let Some(why) = self.stage_lock_warning(project, slug, stage) {
             return self.show_warning(why);
         }
         // Its tab came back since the page was drawn: one chat, one tab.
-        if let Some(pane) = (run.pane.clone()).filter(|p| self.herdr_pane_place(p).is_some()) {
+        if let Some(pane) = (run.pane.clone()).filter(|p| self.pane_there(p)) {
             return self.focus_agent(&agents::AgentKey::Herdr(pane));
         }
         let Some(session) = run.session() else {
@@ -1420,6 +1482,16 @@ impl Gerdr {
             &feature.agent_dirs(&data),
         );
         let agent = run.agent.clone();
+        if let Some(id) = &run.machine {
+            let job = (stage, run.n, StartKind::Resumed);
+            let Some(job) = self.machine_start_job(id, &feature, job, &run.base, &command) else {
+                let name = self.machine_name(id);
+                return self.show_warning(format!(
+                    "{name} can't be reached, and {agent}'s chat stays there: try again once it is back"
+                ));
+            };
+            return self.start_on_machine(&id.clone(), job);
+        }
         let opened = self.open_feature_tab(project, slug, &feature.dir, Some(command));
         let Some(pane) = opened else {
             tracing::warn!("no tab for {agent}'s chat on {}", stage.label());
@@ -1489,6 +1561,19 @@ impl Gerdr {
             self.log_not_started(project, slug, stage, &why);
             return false;
         }
+        let machine = match if in_t3 { Placed::Here } else { self.placed(&feature, stage) } {
+            Placed::Here => None,
+            Placed::There(id) => Some(id),
+            Placed::Away(name) => {
+                let why = format!(
+                    "{name} isn't connected: connect it, or run {} here",
+                    stage.label()
+                );
+                self.log_not_started(project, slug, stage, &why);
+                self.show_warning(why);
+                return false;
+            }
+        };
         let data = store::dir(None, project, slug);
         let last = feature.runs.get(&stage);
         let n = feature.next_run(stage);
@@ -1515,7 +1600,8 @@ impl Gerdr {
             .then(|| picked_model(&feature, stage, &agent))
             .flatten();
         let waiting = takes_new_work(last, &base, asked_model.as_deref(), extra)
-            .filter(|r| (r.pane.as_deref()).is_some_and(|p| self.herdr_pane_place(p).is_some()));
+            .filter(|r| r.machine == machine)
+            .filter(|r| (r.pane.as_deref()).is_some_and(|p| self.pane_there(p)));
         let text = match prompts::render_builtin(need.template, &values) {
             Ok(text) => {
                 waiting.map_or_else(|| text.clone(), |r| with_earlier_prompt(&text, &r.prompt))
@@ -1529,6 +1615,14 @@ impl Gerdr {
                 self.log_not_started(project, slug, stage, "its prompt couldn't be written");
                 return false;
             }
+        };
+        // What an agent reads names the folders of the machine it runs on.
+        let text = match machine.as_deref() {
+            None => text,
+            Some(id) => match self.machine_paths(id, Some(&feature)) {
+                Some(paths) => paths.text(&text),
+                None => text,
+            },
         };
         let written = std::fs::create_dir_all(data.join("prompts"))
             .and_then(|()| std::fs::write(&prompt, text));
@@ -1580,9 +1674,29 @@ impl Gerdr {
         let pane = match (in_t3, waiting) {
             (true, _) => None,
             (false, Some(r)) => r.pane.clone(),
+            // Once its run is kept: `machine_started` gives it its pane.
+            (false, None) if machine.is_some() => None,
             (false, None) => {
                 self.open_feature_tab_behind(project, slug, &feature.dir, command.clone())
             }
+        };
+        // Nothing here could show the one before, or end it.
+        let replaced = (last.filter(|_| waiting.is_none()))
+            .filter(|r| r.machine.is_some())
+            .and_then(|r| r.pane.clone());
+        let job = match (machine.as_deref(), waiting) {
+            (Some(id), None) => {
+                let kind = if at_once { StartKind::Sent } else { StartKind::Held };
+                let job = self.machine_start_job(id, &feature, (stage, n, kind), &base, &command);
+                let Some(job) = job else {
+                    let why = format!("{} can't be reached", self.machine_name(id));
+                    self.log_not_started(project, slug, stage, &why);
+                    self.show_warning(why);
+                    return false;
+                };
+                Some(job)
+            }
+            _ => None,
         };
         let told = waiting.is_some();
         let now = feature::now();
@@ -1595,9 +1709,10 @@ impl Gerdr {
             asked_model,
             n,
             agent: agent.clone(),
-            command,
+            command: job.as_ref().map_or(command, |job| job.command.clone()),
             base,
             pane,
+            machine: machine.clone(),
             t3: in_t3.then_some(T3Run::Draft),
             prompt,
             template: format!("builtin:{}@{version}", need.template),
@@ -1627,8 +1742,15 @@ impl Gerdr {
         self.features
             .agents
             .remove(&(project.to_owned(), slug.to_owned(), stage));
+        if let Some(old) = replaced {
+            self.close_machine_pane(&old);
+        }
         if in_t3 {
             self.t3_stage_drafted(project, slug, stage, &title);
+            return true;
+        }
+        if let (Some(id), Some(job)) = (machine.as_deref(), job) {
+            self.start_on_machine(id, job);
             return true;
         }
         if sent {
@@ -1658,6 +1780,7 @@ impl Gerdr {
             return;
         };
         self.agent_lines_tick();
+        self.machine_work_tick();
         self.fixing_tick(&project);
         self.fix_rounds_tick(&project);
         self.adopt_checks(&project);
@@ -1679,6 +1802,11 @@ impl Gerdr {
         let now = Instant::now();
         for (feature, stage, run) in runs {
             let key = (project.clone(), feature.slug.clone(), stage);
+            // Nothing is known of it: what it wrote may not be here yet, and
+            // it is there until a list of its machine's panes says otherwise.
+            if (run.pane.as_deref()).is_some_and(|p| self.pane_out_of_reach(p)) {
+                continue;
+            }
             if run.held {
                 // No work to judge yet, only a tab to lose, unless the user
                 // told it what to do themselves and its file shows it.
@@ -1772,6 +1900,17 @@ impl Gerdr {
                 run.nudged,
                 now,
             );
+            // Done on another machine, it is judged on all it did: nothing is
+            // decided until what came back started after it was seen done.
+            if verdict == Verdict::Wait {
+                watch.seen_done = None;
+            } else if let Some(id) = run.machine.as_deref() {
+                let since = *watch.seen_done.get_or_insert(now);
+                let slug = feature.slug.as_str();
+                if !Gerdr::machine_pulled_since(&self.machines, id, (&project, slug), since) {
+                    continue;
+                }
+            }
             match verdict {
                 Verdict::Wait => {}
                 // Read in already: only a rewrite is news.
@@ -1906,6 +2045,9 @@ impl Gerdr {
         match key {
             agents::AgentKey::T3(id) => self.t3_thread_state(id),
             agents::AgentKey::Herdr(pane) => {
+                if let Some(state) = self.machine_pane_state(pane) {
+                    return state;
+                }
                 let status = (self.agents.iter())
                     .find(|a| a.pane_id == *pane)
                     .map(|a| a.agent_status);
@@ -1929,7 +2071,7 @@ impl Gerdr {
 
     /// The tab of `stage`'s agent of feature `slug` is gone: its run
     /// forgets it.
-    fn forget_pane(&mut self, project: &str, slug: &str, stage: Stage) {
+    pub(crate) fn forget_pane(&mut self, project: &str, slug: &str, stage: Stage) {
         if let Some(f) = self.feature_mut(project, slug)
             && let Some(r) = f.runs.get_mut(&stage)
         {
@@ -2040,6 +2182,9 @@ impl Gerdr {
         };
         let sent = match &agent {
             agents::AgentKey::T3(id) => self.t3_send(id, &text),
+            agents::AgentKey::Herdr(pane) if split_pane(pane).is_some() => {
+                self.tell_machine_pane(pane, &text)
+            }
             agents::AgentKey::Herdr(pane) => match self.herdr.as_mut() {
                 Some(herdr) => herdr.send_agent_line(pane, &text),
                 None => Err("herdr isn't connected".into()),
@@ -2304,7 +2449,7 @@ impl Gerdr {
         let alive = run
             .pane
             .as_deref()
-            .is_some_and(|p| self.herdr_pane_place(p).is_some());
+            .is_some_and(|p| self.pane_there(p));
         let mut sent = Err(String::from(crate::feature_build::TAB_GONE));
         if alive && let Some(pane) = run.pane.clone() {
             sent = std::fs::create_dir_all(data.join("prompts"))

@@ -38,6 +38,7 @@ pub mod manual;
 pub mod page;
 pub mod patch;
 pub mod plan_review;
+pub mod remote;
 pub mod review_import;
 pub mod sandbox;
 pub mod sandbox_run;
@@ -547,6 +548,11 @@ pub struct Feature {
     /// keeps its own, as a model of one means nothing to another.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub stage_models: BTreeMap<Stage, BTreeMap<String, String>>,
+    /// The machine picked on a stage's page, by its id (`machines::Site::id`)
+    /// or `machine_work::HERE`; over the project's `workflow.machines`, and
+    /// only where it differs from what that gives.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub stage_machines: BTreeMap<Stage, String>,
     /// Build starts a fresh agent for each milestone, instead of one agent
     /// going on through them all.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -1266,6 +1272,7 @@ pub(crate) mod tests {
             ship_plan: Default::default(),
             runs: Default::default(),
             stage_agents: Default::default(),
+            stage_machines: Default::default(),
             stage_models: Default::default(),
             fresh_milestones: false,
             setup: None,
@@ -1353,6 +1360,7 @@ pub(crate) mod tests {
             removed: Vec::new(),
             runs: BTreeMap::new(),
             stage_agents: BTreeMap::new(),
+            stage_machines: BTreeMap::new(),
             stage_models: Default::default(),
             fresh_milestones: false,
             setup: None,

@@ -62,6 +62,7 @@ mod keyring;
 mod keys;
 mod launch;
 mod layout;
+mod machine_work;
 mod machines;
 mod manual_test;
 mod md_blocks;
@@ -3240,6 +3241,10 @@ impl Gerdr {
     /// Show the pane agent card `pane_id` stands for: switch to its workspace
     /// and tab and focus its window. herdr counts the agent as seen then.
     fn focus_herdr_agent(&mut self, pane_id: &str) {
+        if machine_work::split_pane(pane_id).is_some() {
+            self.show_machine_pane(pane_id);
+            return;
+        }
         if !self.show_herdr_pane(pane_id) {
             return;
         }
@@ -3281,6 +3286,9 @@ impl Gerdr {
     /// Close herdr pane `pane_id` and what shows it; its tab goes too if
     /// that was all it held.
     pub(crate) fn close_herdr_pane(&mut self, pane_id: &str) {
+        if machine_work::split_pane(pane_id).is_some() {
+            return self.close_machine_pane(pane_id);
+        }
         let is_it = |h: &Option<herdr::PaneInfo>| h.as_ref().is_some_and(|p| p.pane_id == pane_id);
         let mut panes = Vec::new();
         for tab in self.workspaces.iter().flat_map(|ws| &ws.tabs) {

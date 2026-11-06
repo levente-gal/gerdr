@@ -150,8 +150,12 @@ impl Gerdr {
         let repos = citable(&feature);
         let path = store::dir(None, project, slug).join(plan_review::FILE);
         let (project, slug) = (project.to_owned(), slug.to_owned());
+        let there = self.machine_dirt(&project, &slug);
         self.feature_work(None, move |_| Done::PlanReviewRead {
-            result: read_plan(&feature, &path, &repos, writing).map(Box::new),
+            result: read_plan(&feature, &path, &repos, writing).map(|mut read| {
+                crate::machine_work::with_dirt(&feature, &mut read.reading, &there);
+                Box::new(read)
+            }),
             project,
             slug,
             n,
@@ -347,7 +351,7 @@ impl Gerdr {
             self.launch_stage_agent(project, slug, STAGE, &[("comments", notes)]);
             return;
         };
-        let pane = (run.pane.clone()).filter(|p| self.herdr_pane_place(p).is_some());
+        let pane = (run.pane.clone()).filter(|p| self.pane_there(p));
         let Some(pane) = pane.filter(|_| !run.held) else {
             self.launch_stage_agent(project, slug, STAGE, &[("comments", notes)]);
             return;
@@ -456,7 +460,7 @@ impl Gerdr {
             .and_then(|r| r.reviewer.as_ref());
         (feature.runs.get(&STAGE).into_iter().chain(parked))
             .filter_map(|run| run.pane.clone())
-            .filter(|pane| self.herdr_pane_place(pane).is_some())
+            .filter(|pane| self.pane_there(pane))
             .collect()
     }
 
@@ -465,7 +469,7 @@ impl Gerdr {
         let parked = self
             .feature(project, slug)
             .and_then(|f| f.plan_review.as_ref()?.reviewer.as_ref()?.pane.clone());
-        if let Some(pane) = parked.filter(|p| self.herdr_pane_place(p).is_some()) {
+        if let Some(pane) = parked.filter(|p| self.pane_there(p)) {
             self.close_herdr_pane(&pane);
         }
     }
@@ -526,7 +530,7 @@ impl Gerdr {
         let Some(run) = self.feature(project, slug).and_then(|f| f.runs.get(&STAGE)) else {
             return self.change_decisions_now(project, slug);
         };
-        let live = (run.pane.as_deref()).is_some_and(|p| self.herdr_pane_place(p).is_some());
+        let live = (run.pane.as_deref()).is_some_and(|p| self.pane_there(p));
         if !live {
             return self.change_decisions_now(project, slug);
         }
@@ -557,7 +561,7 @@ impl Gerdr {
         }
         let writer = (self.feature(project, slug))
             .and_then(|f| f.runs.get(&STAGE)?.pane.clone())
-            .filter(|pane| self.herdr_pane_place(pane).is_some());
+            .filter(|pane| self.pane_there(pane));
         if let Some(pane) = writer {
             self.close_herdr_pane(&pane);
         }

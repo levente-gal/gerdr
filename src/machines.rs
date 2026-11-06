@@ -20,7 +20,7 @@
 
 use std::{
     collections::{BTreeMap, HashMap},
-    io::Read,
+    io::{Read, Write},
     os::unix::process::CommandExt,
     path::{Path, PathBuf},
     process::{Child, Command, Output, Stdio},
@@ -42,7 +42,9 @@ use crate::{
     Gerdr,
     chrome::{self, Dot, MachineFocus, MachineHit, MachineView},
     desktop::shell_quote,
+    feature_agents::WatchKey,
     herdr::Herdr,
+    machine_work::{Work, WorkEvent},
     menu::MenuAction,
     tasks::Task,
     text_field::{Edit, TextField},
@@ -253,7 +255,7 @@ pub struct Site {
 
 impl Site {
     /// The socket of the worker session's server there.
-    fn socket(&self) -> String {
+    pub(crate) fn socket(&self) -> String {
         format!("{}/herdr.sock", self.session())
     }
 
@@ -396,7 +398,7 @@ fn clear_leftovers() {
 }
 
 /// `ssh` over the master at `control`.
-fn over_master(control: &Path, target: &str) -> Command {
+pub(crate) fn over_master(control: &Path, target: &str) -> Command {
     let mut ssh = Command::new("ssh");
     ssh.arg("-S")
         .arg(control)
@@ -411,15 +413,40 @@ fn in_sh(script: &str) -> String {
 }
 
 /// Run `command` to its end, or until `limit` or `cancel`.
-fn run(mut command: Command, limit: Duration, cancel: &AtomicBool) -> Result<Output, Failure> {
+pub(crate) fn run(
+    command: Command,
+    limit: Duration,
+    cancel: &AtomicBool,
+) -> Result<Output, Failure> {
+    run_with_input(command, &[], limit, cancel)
+}
+
+/// `run`, with `input` on its standard input.
+pub(crate) fn run_with_input(
+    mut command: Command,
+    input: &[u8],
+    limit: Duration,
+    cancel: &AtomicBool,
+) -> Result<Output, Failure> {
     command
-        .stdin(Stdio::null())
+        .stdin(match input.is_empty() {
+            true => Stdio::null(),
+            false => Stdio::piped(),
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = command.spawn().map_err(|err| match err.kind() {
         std::io::ErrorKind::NotFound => Failure::NoSsh,
         _ => Failure::Other(err.to_string()),
     })?;
+    if let Some(mut stdin) = child.stdin.take() {
+        let input = input.to_vec();
+        // On its own thread: a pipe full of what isn't read yet mustn't hold
+        // up the limit below. It ends with the child, whatever it wrote.
+        std::thread::spawn(move || {
+            let _ = stdin.write_all(&input);
+        });
+    }
     let reader = |pipe: Option<Box<dyn Read + Send>>| {
         std::thread::spawn(move || {
             let mut bytes = Vec::new();
@@ -759,15 +786,17 @@ pub enum LinkState {
 
 /// A machine's link, while it has a thread.
 #[derive(Debug)]
-struct Link {
+pub(crate) struct Link {
     target: String,
     /// Which thread it is: what an older one says is stale.
     serial: u64,
     cancel: Arc<AtomicBool>,
-    state: LinkState,
+    pub(crate) state: LinkState,
     /// It was up and went away: said, so its coming back is too. Away from
     /// the start is what its dot says.
     lost: bool,
+    /// What runs on the machine, while the link is up.
+    pub(crate) work: Option<Work>,
 }
 
 impl Link {
@@ -780,13 +809,26 @@ impl Link {
 #[derive(Debug, Default)]
 pub struct Machines {
     /// By name, as the settings file has them.
-    saved: BTreeMap<String, String>,
-    links: HashMap<String, Link>,
+    pub(crate) saved: BTreeMap<String, String>,
+    pub(crate) links: HashMap<String, Link>,
     next_serial: u64,
     tx: Option<channel::Sender<(String, u64, LinkEvent)>>,
     pub dialog: Option<MachineDialog>,
     /// What was typed when the dialog closed: address, name.
     draft: Option<(String, String)>,
+    /// Where links' work threads say things.
+    pub(crate) work_tx: Option<channel::Sender<(String, WorkEvent)>>,
+    /// The name of each machine seen connected, by its id: what its runs are
+    /// called by when it isn't.
+    pub(crate) names: HashMap<String, String>,
+    /// The runs whose agents are on their way up on a machine.
+    pub(crate) starting: HashMap<WatchKey, String>,
+    /// The local pane showing each pane on a machine.
+    pub(crate) views: HashMap<String, String>,
+    /// When a line was last typed to a pane on a machine.
+    pub(crate) lines: HashMap<String, Instant>,
+    /// What keeps each feature's work from coming back.
+    pub(crate) troubles: HashMap<(String, String), String>,
 }
 
 /// What the dialog asks gerdr to do.
@@ -993,6 +1035,7 @@ impl Gerdr {
             cancel: cancel.clone(),
             state: LinkState::Connecting("connecting\u{2026}".into()),
             lost: false,
+            work: None,
         };
         if let Some(old) = self.machines.links.insert(name.clone(), link) {
             old.stop();
@@ -1038,8 +1081,9 @@ impl Gerdr {
             }
             LinkEvent::Up(info) => {
                 tracing::info!("machine {name} connected: herdr {}", info.site.version);
-                link.state = LinkState::Up(info);
+                link.state = LinkState::Up(info.clone());
                 let link_was_lost = std::mem::take(&mut link.lost);
+                self.start_work(&name, target.clone(), info);
                 if asked {
                     self.machine_connected(name, target);
                 } else if link_was_lost {
@@ -1049,6 +1093,7 @@ impl Gerdr {
             LinkEvent::Down { failure, retrying } => {
                 tracing::warn!("machine {name}: {failure:?}");
                 link.lost |= was_up;
+                link.work = None;
                 link.state = if retrying {
                     LinkState::Retrying(failure.clone())
                 } else {
@@ -1068,6 +1113,7 @@ impl Gerdr {
                 }
             }
         }
+        self.starts_lost();
         self.report_machines();
     }
 
@@ -1309,7 +1355,9 @@ impl Gerdr {
             return;
         };
         link.stop();
+        link.work = None;
         link.state = LinkState::Off;
+        self.starts_lost();
         self.report_machines();
         self.show_success(format!(
             "Disconnected {name}; its herdr keeps running there"
@@ -1322,6 +1370,7 @@ impl Gerdr {
             link.stop();
         }
         self.machines.saved.remove(name);
+        self.starts_lost();
         self.report_machines();
         match crate::config::write_machine(name, None) {
             Ok(()) => {

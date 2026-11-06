@@ -40,6 +40,8 @@ rules, for reviewing a branch before it merges.
 | Ctrl+Shift+G | Start the sandbox again on the same data (feature tab, Manual test). |
 | Ctrl+Shift+X | Reset the sandbox's data from main's, or remove a stopped sandbox with its data, asking first (feature tab, Manual test). |
 | Ctrl+Shift+A | Pick the next agent on the feature tab's selected stage (the chips on its agent card). It applies from the agent's next start; one running goes on. |
+| Ctrl+Shift+Q | Stop the selected stage's agent on another machine, on the feature tab (also the "Stop agent" button on its agent card), asking while it works. Closing its Show agent tab only ends the view. |
+| Ctrl+Shift+W | Pick the machine the selected stage's next agent runs on, on the feature tab: this one, then each connected machine (the "Runs here" or "Runs on" button on its agent card). It applies from the agent's next start; one running stays where it is. The project's file can give each stage a machine under `machines`. Not offered with no machine saved, or for T3 Code. |
 | Ctrl+Shift+I | Pick the model of the selected stage's agent on the feature tab (the "Model:" button on its agent card), for Claude Code and Cursor. It applies from the agent's next start; one already open keeps its own. Default leaves it to the CLI. Cursor also keeps a picked model as its default for all its chats, as its own `/model` does, and its picker says so. |
 | Ctrl+Shift+B | On the feature tab's Build page: go between one agent through all milestones and a fresh agent per milestone (also the "Agents" choice on the page). It applies from the next milestone; an agent at work goes on. |
 | Ctrl+Shift+K | Skip Plan review on the feature tab, asking only when something would be lost. |
@@ -101,6 +103,12 @@ A key is written in one place, not on the button that does the same thing:
   clicked or not, and the page's Show agent goes to it. When Verify passes,
   the AI review page comes to the front of the feature's workspace; another
   workspace keeps the screen.
+- An agent placed on another machine opens no tab here: nothing from another
+  machine shows until asked. Show agent opens one tab attached over SSH, taking
+  the terminal from any other view, and closing that tab asks nothing, as it
+  only ends the view. The agent's card says "on <machine>". A machine out of
+  reach reads "<machine> can't be reached", and its runs wait: only a list of
+  that machine's panes can say a pane is gone.
 - A line gerdr types to an agent and finds still in its input box gets Enter
   again, up to six times over about four minutes. Only then is the user told.
 - Work the user sends to an agent (findings, review comments, failed tests)

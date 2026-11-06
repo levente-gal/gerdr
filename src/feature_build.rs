@@ -572,8 +572,12 @@ impl Gerdr {
             return;
         };
         let (project, slug) = (project.to_owned(), slug.to_owned());
+        let there = self.machine_dirt(&project, &slug);
         self.feature_work(None, move |_| Done::BuildChecked {
-            result: patch::read(&feature),
+            result: patch::read(&feature).map(|mut reading| {
+                crate::machine_work::with_dirt(&feature, &mut reading, &there);
+                reading
+            }),
             project,
             slug,
             n,
@@ -670,7 +674,7 @@ impl Gerdr {
         }
         let pane = run
             .and_then(|r| r.pane.clone())
-            .filter(|p| self.herdr_pane_place(p).is_some())
+            .filter(|p| self.pane_there(p))
             .ok_or_else(|| String::from(TAB_GONE))?;
         self.tell_agent_pane(&pane, line)
     }
@@ -679,6 +683,9 @@ impl Gerdr {
     /// still runs there: a pane back at its shell's prompt would run the
     /// line as a command.
     pub(crate) fn tell_agent_pane(&mut self, pane: &str, line: &str) -> Result<(), String> {
+        if crate::machine_work::split_pane(pane).is_some() {
+            return self.tell_machine_pane(pane, line);
+        }
         let Some(herdr) = self.herdr.as_mut() else {
             return Err("herdr isn't connected".into());
         };

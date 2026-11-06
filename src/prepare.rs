@@ -456,6 +456,23 @@ pub fn shell_of(info: &ProcessInfo) -> Shell {
     reported.or_else(from_proc).unwrap_or(Shell::Posix)
 }
 
+/// The line running `command` in `dir`, for the shell `info` says, in a pane
+/// on another machine: nothing of that machine is here to go by. As for
+/// `Plan::line`, it keeps out of the shell's history, and `command` stays in
+/// `sh`'s syntax.
+pub fn line_there(info: &ProcessInfo, dir: &str, command: &str) -> String {
+    let pid = info.foreground_process_group_id.or(info.shell_pid);
+    let shell = (info.foreground_processes.iter())
+        .find(|process| Some(process.pid) == pid)
+        .and_then(shell_name)
+        .unwrap_or(Shell::Posix);
+    let whole = format!("cd {} && {command}", shell_quote(dir));
+    match shell {
+        Shell::Posix => format!(" {whole}"),
+        _ => format!(" sh -c {}", shell.quote(&whole)),
+    }
+}
+
 /// What a pane gets, worked out before its shell is known.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Plan {
@@ -814,6 +831,35 @@ mod tests {
             cd: None,
             command: None,
         }
+    }
+
+    #[test]
+    fn a_line_on_another_machine_goes_by_what_herdr_says_of_its_shell() {
+        let shell = |name: &str| ProcessInfo {
+            shell_pid: Some(7),
+            foreground_process_group_id: Some(7),
+            foreground_processes: vec![Process {
+                pid: 7,
+                name: name.into(),
+                argv: vec![name.into()],
+                ..serde_json::from_value(serde_json::json!({"pid": 7, "name": name}))
+                    .unwrap()
+            }],
+        };
+        assert_eq!(
+            line_there(&shell("bash"), "/home/a/x y", "claude --go"),
+            " cd '/home/a/x y' && claude --go"
+        );
+        // Kept in `sh`'s syntax whatever the shell, and nothing of this
+        // machine is looked at to tell.
+        let fish = line_there(&shell("fish"), "/home/a", "claude \"$(cat f)\"");
+        assert!(fish.starts_with(" sh -c '"), "{fish}");
+        let unknown = ProcessInfo {
+            shell_pid: Some(i32::MAX),
+            foreground_process_group_id: None,
+            foreground_processes: Vec::new(),
+        };
+        assert!(line_there(&unknown, "/a", "c").starts_with(" cd "));
     }
 
     #[test]

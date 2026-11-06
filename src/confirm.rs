@@ -37,6 +37,10 @@ const GO: usize = 1;
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[allow(clippy::enum_variant_names)]
 pub enum Then {
+    /// Stop this stage's agent on another machine: project, feature, stage.
+    StopOnMachine(String, String, crate::feature::Stage),
+    /// Start this stage's agent afresh, ending the one on another machine.
+    FreshOnMachine(String, String, crate::feature::Stage),
     /// Close the agent of this card (see `Gerdr::close_agent`).
     CloseAgent(AgentKey),
     /// Close this pane of the active tab (see `Gerdr::close_pane`).
@@ -666,6 +670,12 @@ impl Gerdr {
             }
             Then::ClosePane(id) => self.close_pane_now(id),
             Then::RestartT3 => self.restart_t3(),
+            Then::StopOnMachine(project, slug, stage) => {
+                self.stop_on_machine(&project, &slug, stage);
+            }
+            Then::FreshOnMachine(project, slug, stage) => {
+                self.start_stage_agent_now(&project, &slug, stage, true);
+            }
             Then::StopT3 => self.stop_t3(|_| {}),
             Then::RaiseInotifyLimit => self.raise_inotify_limit(),
             Then::StopKept(id) => {

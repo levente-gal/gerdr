@@ -1113,6 +1113,10 @@ pub enum PanelOutcome {
     PickAgent(Stage, String),
     /// Open the picker of the stage's model.
     PickModel(Stage),
+    /// Run this agent stage's next agent on the next machine that is up.
+    CycleMachine(Stage),
+    /// Stop this stage's agent, on another machine.
+    StopOnMachine(Stage),
     /// Pick the next agent this agent stage's chips offer.
     CycleAgent(Stage),
     /// Build with a fresh agent per milestone, or one through them all.
@@ -3733,6 +3737,12 @@ impl FeaturePanel {
             Keysym::i | Keysym::I if ctrl && mods.shift && needs(stage).is_some() => {
                 return Some(PanelOutcome::PickModel(stage));
             }
+            Keysym::w | Keysym::W if ctrl && mods.shift && needs(stage).is_some() => {
+                return Some(PanelOutcome::CycleMachine(stage));
+            }
+            Keysym::q | Keysym::Q if ctrl && mods.shift && stops_on_machine(feature, stage) => {
+                return Some(PanelOutcome::StopOnMachine(stage));
+            }
             Keysym::b | Keysym::B if ctrl && mods.shift && milestone_switch(feature, stage) => {
                 return Some(PanelOutcome::FreshMilestones(!feature.fresh_milestones));
             }
@@ -4927,7 +4937,7 @@ impl Gerdr {
         let feature = self.panel_feature()?;
         let stage = feature.current().filter(|s| needs(*s).is_some())?;
         let pane = feature.runs.get(&stage)?.pane.clone()?;
-        self.herdr_pane_place(&pane).is_some().then_some(pane)
+        self.pane_there(&pane).then_some(pane)
     }
 
     /// Read the shown feature's agent tail off the thread, unless a read
@@ -4954,12 +4964,14 @@ impl Gerdr {
         if tail.reading {
             return true;
         }
-        let Some(socket) = self.herdr.as_ref().map(|h| h.socket().to_path_buf()) else {
+        let Some((socket, bare)) = self.pane_socket(&pane) else {
             return true;
         };
-        tail.reading = true;
+        if let Some(tail) = self.features.tail.as_mut() {
+            tail.reading = true;
+        }
         self.feature_work(None, move |_| Done::Tail {
-            lines: feature::page::read_tail(socket, &pane),
+            lines: feature::page::read_tail(socket, &bare),
             pane,
         });
         true
@@ -5323,8 +5335,12 @@ impl Gerdr {
             return;
         };
         let (project, slug) = (project.to_owned(), slug.to_owned());
+        let there = self.machine_dirt(&project, &slug);
         self.feature_work(None, move |_| Done::PlanChecked {
-            result: patch::read(&feature),
+            result: patch::read(&feature).map(|mut reading| {
+                crate::machine_work::with_dirt(&feature, &mut reading, &there);
+                reading
+            }),
             project,
             slug,
             n,
@@ -5919,6 +5935,7 @@ impl Gerdr {
             ship_plan: Default::default(),
             runs: Default::default(),
             stage_agents: Default::default(),
+            stage_machines: Default::default(),
             stage_models: Default::default(),
             fresh_milestones: false,
             setup: None,
@@ -6604,6 +6621,10 @@ impl Gerdr {
             }
             PanelOutcome::CycleAgent(stage) => self.cycle_stage_agent(&project, &slug, stage),
             PanelOutcome::PickModel(stage) => self.pick_stage_model(&project, &slug, stage),
+            PanelOutcome::CycleMachine(stage) => self.cycle_stage_machine(&project, &slug, stage),
+            PanelOutcome::StopOnMachine(stage) => {
+                self.ask_stop_on_machine(&project, &slug, stage);
+            }
             PanelOutcome::FreshMilestones(fresh) => {
                 self.set_fresh_milestones(&project, &slug, fresh);
             }
@@ -6660,7 +6681,7 @@ impl Gerdr {
         let pane = self
             .feature(project, slug)
             .and_then(|f| f.runs.get(&stage)?.pane.clone());
-        if let Some(pane) = pane.filter(|p| self.herdr_pane_place(p).is_some()) {
+        if let Some(pane) = pane.filter(|p| self.pane_there(p)) {
             return self.focus_agent(&crate::agents::AgentKey::Herdr(pane));
         }
         let mut resumes = false;
@@ -7557,6 +7578,8 @@ impl Gerdr {
                 self.show_warning(left);
             }
         }
+        // Its agents on other machines go with its tabs.
+        self.close_machine_panes_of(&feature);
         let (project, slug) = (project.to_owned(), slug.to_owned());
         // Its workspace closes first, its terminals gone before its
         // worktrees go.
@@ -7612,6 +7635,9 @@ impl Gerdr {
         } else {
             format!("Removed the worktrees of \u{201c}{title}\u{201d}")
         });
+        if let Some(feature) = self.feature(project, slug).cloned() {
+            self.forget_on_machines(&feature);
+        }
     }
 
     /// The feature tab's view and its layout in the tab's area.
@@ -7789,6 +7815,9 @@ impl Gerdr {
                     let probe = (self.features.probes.get(&key)).and_then(|p| p.last.as_ref());
                     let notes = notes_of(probe);
                     let mut actions = stage_actions(&feature, stage, ctx, &plan, &rows, notes);
+                    let place = self.place_label(&feature, stage);
+                    actions.extend(place_action(place.as_deref(), stage));
+                    actions.extend(stop_action(&feature, stage));
                     (i < actions.len()).then(|| actions.swap_remove(i).1)
                 })
             }
@@ -8166,6 +8195,8 @@ impl Gerdr {
             model: self
                 .model_slot_of(&panel.project, &panel.slug, panel.page_stage(feature))
                 .map(|slot| model_label(slot.picked.as_deref())),
+            place: self.place_label(feature, panel.page_stage(feature)),
+            machine_line: self.machine_line(feature, panel.page_stage(feature)),
             manual: manual_counts.map(crate::manual_test::counts_text),
             criteria: self.criterion_rows(feature),
             manual_gate: manual_counts.map(manual_gate),
@@ -8195,7 +8226,9 @@ impl Gerdr {
         let key = (f.project.clone(), f.slug.clone());
         let manual = self.manual_counts(f).map(manual_gate);
         let ctx = self.row_ctx(f);
+        let machine = f.current().and_then(|stage| self.machine_line(f, stage));
         let line = LineState {
+            machine,
             probe: (self.features.probes.get(&key)).and_then(|p| p.last.as_ref()),
             shipping: mine().any(|b| b.job == Job::Ship),
             checks: ctx.checks,
@@ -8624,6 +8657,12 @@ struct PanelState<'a> {
     /// The button picking its model, where gerdr can start the agent on
     /// one (see `feature_agents::stage_model_slot`).
     model: Option<String>,
+    /// What the button placing the next agent says, with machines to place it
+    /// on (see `machine_work::place_label`).
+    place: Option<String>,
+    /// Where the current agent runs, if on another machine, and whether that
+    /// says all there is to say of it (see `machine_work::machine_line`).
+    machine_line: Option<(String, bool)>,
 }
 
 /// What the button picking a stage's model says.
@@ -8777,6 +8816,9 @@ struct LineState<'a> {
     setup: Option<&'a str>,
     verify: Option<&'a str>,
     manual_gate: Option<(u32, u32)>,
+    /// Where its current agent runs, if on another machine, and whether that
+    /// says all there is to say of it.
+    machine: Option<(String, bool)>,
 }
 
 impl<'a> From<&PanelState<'a>> for LineState<'a> {
@@ -8788,6 +8830,7 @@ impl<'a> From<&PanelState<'a>> for LineState<'a> {
             setup: state.setup,
             verify: state.verify,
             manual_gate: state.manual_gate,
+            machine: state.machine_line.clone(),
         }
     }
 }
@@ -8833,6 +8876,11 @@ fn card_line(feature: &Feature, stage: Option<Stage>, state: &LineState, now: u6
     if what.is_empty() {
         let last = feature.history.iter().map(|e| e.at).max();
         what = projects::ago(now, last.unwrap_or(feature.created));
+    }
+    match &state.machine {
+        Some((line, true)) => what.clone_from(line),
+        Some((line, false)) => what = format!("{what} \u{b7} {line}"),
+        None => {}
     }
     format!("{} \u{b7} {what}", stage.label())
 }
@@ -9052,6 +9100,29 @@ fn lines(label: &str, lines: Vec<CheckLine>) -> PageSection {
     }
 }
 
+/// The button saying where `stage`'s next agent runs, on the machine that
+/// `label` says, with machines to place it on.
+fn place_action(label: Option<&str>, stage: Stage) -> Option<(PageButton, PanelOutcome)> {
+    let label = label?.to_owned();
+    let style = ButtonStyle::Plain;
+    Some((PageButton { label, style }, PanelOutcome::CycleMachine(stage)))
+}
+
+/// Whether `stage`'s agent runs on another machine: only there does it need
+/// a way to stop that isn't closing its tab, which only ends the view.
+fn stops_on_machine(feature: &Feature, stage: Stage) -> bool {
+    (feature.runs.get(&stage)).is_some_and(|run| run.machine.is_some() && run.pane.is_some())
+}
+
+/// The button stopping `stage`'s agent on another machine.
+fn stop_action(feature: &Feature, stage: Stage) -> Option<(PageButton, PanelOutcome)> {
+    stops_on_machine(feature, stage).then(|| {
+        let label = "Stop agent".to_owned();
+        let style = ButtonStyle::Plain;
+        (PageButton { label, style }, PanelOutcome::StopOnMachine(stage))
+    })
+}
+
 /// The indices in `actions` of what acts on `stage`'s agent: the buttons of
 /// its card.
 fn agent_buttons(stage: Stage, actions: &[(PageButton, PanelOutcome)]) -> Vec<usize> {
@@ -9061,6 +9132,8 @@ fn agent_buttons(stage: Stage, actions: &[(PageButton, PanelOutcome)]) -> Vec<us
             | PanelOutcome::ShowAgent(s)
             | PanelOutcome::ResumeAgent(s)
             | PanelOutcome::Continue(s)
+            | PanelOutcome::CycleMachine(s)
+            | PanelOutcome::StopOnMachine(s)
             | PanelOutcome::StartAgent(s, _) => *s == stage,
             _ => false,
         })
@@ -9118,6 +9191,13 @@ fn agent_card(
         }
     };
     let status = back.map_or(status, |back| back.status().to_owned());
+    // Where it runs goes with that, or says all there is to say of it.
+    let status = match &state.machine_line {
+        Some((line, true)) => line.clone(),
+        Some((line, false)) if status.is_empty() => line.clone(),
+        Some((line, false)) => format!("{status} \u{b7} {line}"),
+        None => status,
+    };
     // The tail read is the current stage's agent's, while its pane is.
     let tail = match current && run.pane.is_some() {
         true => state.tail.to_vec(),
@@ -9996,6 +10076,8 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 5] = [
             ("Ctrl+R", "start the stage's agent afresh"),
             ("Ctrl+Shift+R", "show the stage's agent, or resume its chat"),
             ("Ctrl+Shift+A", "pick the stage's next agent"),
+            ("Ctrl+Shift+W", "pick the machine the stage's next agent runs on"),
+            ("Ctrl+Shift+Q", "stop the stage's agent on another machine"),
             ("Ctrl+Shift+I", "pick the model of the stage's agent"),
             (
                 "Ctrl+Shift+B",
@@ -10111,6 +10193,8 @@ struct AgentChoices<'a> {
     picks: &'a [AgentChip],
     /// Its model too.
     model: bool,
+    /// The machine it runs on too.
+    place: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -10436,6 +10520,12 @@ fn tab_hints(
             if choices.model {
                 hints.push(hint("Ctrl+Shift+I", "pick model"));
             }
+            if choices.place {
+                hints.push(hint("Ctrl+Shift+W", "pick machine"));
+            }
+            if stops_on_machine(feature, stage) {
+                hints.push(hint("Ctrl+Shift+Q", "stop agent"));
+            }
             if milestone_switch(feature, stage) {
                 let what = match feature.fresh_milestones {
                     true => "one agent",
@@ -10607,20 +10697,19 @@ fn tab_view(
     });
     let mut page = match panel.keys {
         true => keys_page(),
-        false => stage_page(
-            feature,
-            stage,
-            state,
-            &stage_actions(
+        false => {
+            let mut actions = stage_actions(
                 feature,
                 stage,
                 state.ctx,
                 &state.plan,
                 &state.criteria,
                 notes_of(state.probe),
-            ),
-            now,
-        ),
+            );
+            actions.extend(place_action(state.place.as_deref(), stage));
+            actions.extend(stop_action(feature, stage));
+            stage_page(feature, stage, state, &actions, now)
+        }
     };
     if panel.focus == TabArea::Findings && !panel.expanded {
         let cards = (page.sections.iter_mut()).filter_map(|s| match s {
@@ -10739,6 +10828,7 @@ fn tab_view(
             AgentChoices {
                 picks: &state.picks,
                 model: state.model.is_some(),
+                place: state.place.is_some(),
             },
             &state.plan,
             &ships,
@@ -10814,6 +10904,7 @@ pub(crate) mod tests {
             ship_plan: Default::default(),
             runs: Default::default(),
             stage_agents: Default::default(),
+            stage_machines: Default::default(),
             stage_models: Default::default(),
             fresh_milestones: false,
             setup: None,
@@ -17337,7 +17428,11 @@ pub(crate) mod tests {
             ..FeaturePanel::default()
         };
         let hints = |model| {
-            let choices = AgentChoices { picks: &[], model };
+            let choices = AgentChoices {
+                picks: &[],
+                model,
+                place: false,
+            };
             tab_hints(
                 &panel,
                 &f,
@@ -17353,6 +17448,127 @@ pub(crate) mod tests {
         let shown = |hints: &[(String, String)]| hints.iter().any(|(k, _)| k == "Ctrl+Shift+I");
         assert!(shown(&hints(true)));
         assert!(!shown(&hints(false)));
+    }
+
+    /// `f` with a run of Plan's agent on another machine.
+    fn on_a_machine() -> Feature {
+        let mut f = feature("a", vec![repo("r", true)], 0);
+        f.tick(1, "you", None);
+        f.runs.insert(
+            Stage::Plan,
+            feature::agents::StageRun {
+                n: 1,
+                agent: "Claude Code".into(),
+                pane: Some("m/w1:p1".into()),
+                machine: Some("m".into()),
+                ..Default::default()
+            },
+        );
+        f
+    }
+
+    #[test]
+    fn a_stage_placed_on_a_machine_says_so_and_offers_its_button() {
+        let f = on_a_machine();
+        let mut actions = page_actions(&f, Stage::Plan, RowCtx::default());
+        let at = actions.len();
+        actions.extend(place_action(Some("Runs on box"), Stage::Plan));
+        assert_eq!(
+            actions[at].1,
+            PanelOutcome::CycleMachine(Stage::Plan),
+            "the button acts on where the next agent runs"
+        );
+        assert_eq!(place_action(None, Stage::Plan), None);
+        // What runs there can be stopped; what runs here closes with its tab.
+        let stop = stop_action(&f, Stage::Plan).map(|(_, outcome)| outcome);
+        assert_eq!(stop, Some(PanelOutcome::StopOnMachine(Stage::Plan)));
+        assert_eq!(stop_action(&f, Stage::Build), None);
+        let status_of = |machine_line| {
+            let state = PanelState {
+                machine_line,
+                ..PanelState::default()
+            };
+            let page = stage_page(&f, Stage::Plan, &state, &actions, 2_000);
+            (page.sections.iter()).find_map(|s| match s {
+                PageSection::Agent {
+                    status, buttons, ..
+                } => Some((status.clone(), buttons.contains(&at))),
+                _ => None,
+            })
+        };
+        let (status, held) = status_of(Some(("on box".to_owned(), false))).unwrap();
+        assert!(status.ends_with("\u{b7} on box"), "{status}");
+        assert!(held, "the button is on the agent's card");
+        // Out of reach, nothing else is known of the agent.
+        let (status, _) = status_of(Some(("box can't be reached".to_owned(), true))).unwrap();
+        assert_eq!(status, "box can't be reached");
+    }
+
+    #[test]
+    fn a_card_says_where_its_agent_runs() {
+        let f = on_a_machine();
+        let line = |machine| {
+            let state = LineState {
+                probe: None,
+                shipping: false,
+                checks: false,
+                setup: None,
+                verify: None,
+                manual_gate: None,
+                machine,
+            };
+            card_line(&f, Some(Stage::Plan), &state, 2_000)
+        };
+        let on = line(Some(("on box".to_owned(), false)));
+        assert!(on.starts_with("Plan \u{b7} ") && on.ends_with(" \u{b7} on box"), "{on}");
+        assert_eq!(
+            line(Some(("box can't be reached".to_owned(), true))),
+            "Plan \u{b7} box can't be reached"
+        );
+    }
+
+    #[test]
+    fn the_footer_offers_a_machine_only_with_one_to_pick() {
+        let f = feature("a", vec![repo("r", true)], 0);
+        let panel = FeaturePanel {
+            slug: "a".into(),
+            ..FeaturePanel::default()
+        };
+        let shown = |place| {
+            let choices = AgentChoices {
+                picks: &[],
+                model: false,
+                place,
+            };
+            let hints = tab_hints(
+                &panel,
+                &f,
+                Stage::Discover,
+                &[],
+                RowCtx::default(),
+                choices,
+                &[],
+                &[],
+                &[],
+            );
+            hints.iter().any(|(k, _)| k == "Ctrl+Shift+W")
+        };
+        assert!(shown(true));
+        assert!(!shown(false));
+    }
+
+    #[test]
+    fn a_record_from_before_machines_loads_and_a_placed_run_round_trips() {
+        let mut f = feature("a", vec![repo("r", true)], 0);
+        let json = serde_json::to_string(&f).unwrap();
+        assert!(!json.contains("stage_machines"), "{json}");
+        f.stage_machines.insert(Stage::Build, "m".into());
+        f.runs = on_a_machine().runs;
+        let json = serde_json::to_string(&f).unwrap();
+        assert_eq!(serde_json::from_str::<Feature>(&json).unwrap(), f);
+        let run = feature::agents::StageRun::default();
+        let json = serde_json::to_string(&run).unwrap();
+        assert!(!json.contains("machine"), "{json}");
     }
 
     #[test]

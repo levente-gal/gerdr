@@ -326,6 +326,19 @@ pub struct Workflow {
     /// A feature's own pick on a stage's page goes over it.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub agents: std::collections::BTreeMap<crate::feature::Stage, String>,
+    /// The machine each stage's agent runs on, by its name in `[machines]`;
+    /// without one, this machine. A feature's own pick on a stage's page goes
+    /// over it.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub machines: std::collections::BTreeMap<crate::feature::Stage, String>,
+    /// Where this project's folders are on a machine, by its name in
+    /// `[machines]`, then this machine's folder: without one, a folder goes to
+    /// the same place under the home there.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub machine_folders: std::collections::BTreeMap<
+        String,
+        std::collections::BTreeMap<String, String>,
+    >,
     /// The commands that set up a new feature's worktree, by repository
     /// folder name (see `feature::setup`).
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]

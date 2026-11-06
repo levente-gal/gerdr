@@ -474,8 +474,10 @@ impl Gerdr {
         };
         // Its line isn't seen taken yet: it hasn't rested on it.
         let told_now = (run.and_then(|r| r.pane.as_deref()))
-            .zip(self.herdr.as_ref())
-            .is_some_and(|(pane, herdr)| herdr.line_pending(pane));
+            .is_some_and(|pane| {
+                self.machine_line_pending(pane)
+                    || self.herdr.as_ref().is_some_and(|h| h.line_pending(pane))
+            });
         let watch = self.features.build.fix_watches.entry(key).or_default();
         if watch.log != at || told_now {
             watch.log = at;

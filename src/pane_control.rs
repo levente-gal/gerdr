@@ -908,6 +908,10 @@ impl Gerdr {
     /// What runs in `pane`, as its bar says it, if a command runs there
     /// or is being stopped.
     pub fn running_in(&self, pane: &Pane) -> Option<String> {
+        // Only a view: what runs is on the other machine, and stays there.
+        if pane.herdr.as_ref().is_some_and(|h| self.is_machine_view(&h.pane_id)) {
+            return None;
+        }
         let content = self.pane_bar_of(pane);
         content.status.runs().then_some(content.label)
     }

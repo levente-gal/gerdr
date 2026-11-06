@@ -357,9 +357,14 @@ pub struct StageRun {
     /// it went on to use.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub asked_model: Option<String>,
-    /// The herdr pane it runs in, while known.
+    /// The herdr pane it runs in, while known: `<machine id>/<pane>` on
+    /// another machine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pane: Option<String>,
+    /// The id of the machine it runs on, if not this one: a chat stays on the
+    /// machine of its run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine: Option<String>,
     /// Where it runs in T3 Code, for one that runs there: gone with the
     /// thread.
     #[serde(default, skip_serializing_if = "Option::is_none")]

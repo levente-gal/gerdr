@@ -91,7 +91,7 @@ impl Gerdr {
     fn live_stage_pane(&self, project: &str, slug: &str, stage: Stage) -> Option<String> {
         let run = self.feature(project, slug)?.runs.get(&stage)?;
         let pane = run.pane.clone()?;
-        self.herdr_pane_place(&pane).map(|_| pane)
+        self.pane_there(&pane).then_some(pane)
     }
 
     /// What to say when `stage`'s agent of feature `slug` is at work in a
