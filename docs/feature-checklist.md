@@ -167,6 +167,14 @@ How to use it:
   ones. The rest keep their results, their cards say "from run N" and the
   evidence says so too. Run checks runs them all.
 
+  On another machine, setup and checks are that same work: the same rows and
+  cards, and the page says where. A setup there sends small ignored files like
+  `.env`, not environments, and builds those with its commands. Each terminal
+  shows here on request only, and closing that tab ends the view. A lost link
+  decides nothing: the work goes on there and its state comes back with the
+  link. Only a check told to stop ends here without it, and says it may still
+  run there.
+
 ## X. State across places
 
 - **X1** The same count or "seen" state is shared everywhere it shows:

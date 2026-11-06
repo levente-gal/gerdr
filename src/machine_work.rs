@@ -1,4 +1,5 @@
-//! What runs on other machines: stage agents, for now.
+//! What runs on other machines: stage agents here; Verify's checks and setups
+//! in `machine_checks`, over the same links.
 //!
 //! A run placed on a machine has that machine's id in its record, and its pane
 //! is `<machine id>/<pane>`: herdr's ids repeat across servers, and a machine's
@@ -303,6 +304,14 @@ impl Work {
         settling
     }
 
+    /// How to run commands there.
+    pub(crate) fn reach(&self) -> Reach {
+        Reach {
+            target: self.target.clone(),
+            control: self.info.control.clone(),
+        }
+    }
+
     fn side(&self) -> Side {
         Side {
             home: self.info.site.home.clone(),
@@ -555,13 +564,28 @@ fn start_there(
     let exact = job.kind != StartKind::Resumed;
     reach.push_data(&job.data, &job.data_there, exact, stop)?;
     reach.push_graphs(&job.feature, &job.paths, stop);
+    let (pane, terminal, info) = open_there(herdr, &job.project, &job.cwd, stop)?;
+    let line = prepare::line_there(&info, &job.cwd, &job.command);
+    herdr.send_shell_line(&pane, &line).map_err(Trouble::Link)?;
+    Ok((pane, terminal))
+}
+
+/// A new tab in `cwd`, in `project`'s workspace of the worker session there,
+/// once its shell can be told something: its pane, terminal and what runs in
+/// it.
+pub(crate) fn open_there(
+    herdr: &mut Herdr,
+    project: &str,
+    cwd: &str,
+    stop: &AtomicBool,
+) -> Result<(String, String, crate::herdr::ProcessInfo), Trouble> {
     let link = |err: String| Trouble::Link(err);
-    let cwd = Path::new(&job.cwd);
+    let dir = Path::new(cwd);
     let workspaces = herdr.workspace_list().map_err(link)?;
-    let found = (workspaces.iter()).find(|w| w.label == job.project);
+    let found = (workspaces.iter()).find(|w| w.label == project);
     let pane = match found {
-        Some(w) => herdr.tab_create(&w.workspace_id, cwd, &json!({})),
-        None => herdr.workspace_create(cwd, &job.project, true, &json!({})),
+        Some(w) => herdr.tab_create(&w.workspace_id, dir, &json!({})),
+        None => herdr.workspace_create(dir, project, true, &json!({})),
     }
     .map_err(link)?;
     let (pane, terminal) = (pane.pane_id, pane.terminal_id);
@@ -585,9 +609,13 @@ fn start_there(
             return Err(Trouble::Link("stopped".into()));
         }
     };
-    let line = prepare::line_there(&info, &job.cwd, &job.command);
-    herdr.send_shell_line(&pane, &line).map_err(link)?;
-    Ok((pane, terminal))
+    Ok((pane, terminal, info))
+}
+
+/// Whether what `stage` runs can go on another machine: its agent, or for
+/// Verify its checks.
+pub fn takes_a_place(stage: Stage) -> bool {
+    stage == Stage::Verify || feature::agents::needs(stage).is_some()
 }
 
 /// Where a stage's next agent runs.
@@ -634,6 +662,10 @@ impl Gerdr {
                 if let Some(link) = self.machines.links.get_mut(name) {
                     link.work = Some(work);
                 }
+                // Checks that went on there while nobody could wait for them.
+                if let Some(project) = self.project.clone() {
+                    self.adopt_checks(&project);
+                }
             }
             Err(err) => {
                 tracing::warn!("machine {name}: starting its work: {err}");
@@ -642,7 +674,7 @@ impl Gerdr {
         }
     }
 
-    fn work_of(&self, id: &str) -> Option<&Work> {
+    pub(crate) fn work_of(&self, id: &str) -> Option<&Work> {
         (self.machines.links.values())
             .filter_map(|link| link.work.as_ref())
             .find(|work| work.id == id)
@@ -738,10 +770,13 @@ impl Gerdr {
         Some(Paths::new(&here, &work.side(), &folders, feature))
     }
 
-    /// The feature whose stage agent runs in `pane`.
+    /// The feature whose stage agent or check runs in `pane`.
     fn owner_of_pane(&self, pane: &str) -> Option<&Feature> {
-        (self.features.all.values().flatten())
-            .find(|f| (f.runs.values()).any(|r| r.pane.as_deref() == Some(pane)))
+        (self.features.all.values().flatten()).find(|f| {
+            let agent = (f.runs.values()).any(|r| r.pane.as_deref() == Some(pane));
+            let checks = f.verify.iter().flat_map(|v| &v.checks);
+            agent || checks.into_iter().any(|c| c.pane.as_deref() == Some(pane))
+        })
     }
 
     /// Type `line` to the agent in `pane` on another machine, its paths as
@@ -799,12 +834,18 @@ impl Gerdr {
         }
     }
 
-    /// Close every agent `feature` has on other machines: it is over.
+    /// Close every agent and check `feature` has on other machines: it is
+    /// over.
     pub(crate) fn close_machine_panes_of(&mut self, feature: &Feature) {
-        let panes: Vec<String> = (feature.runs.values())
-            .filter_map(|r| r.pane.clone())
+        let agents = feature.runs.values().filter_map(|r| r.pane.clone());
+        let checks = (feature.verify.iter())
+            .flat_map(|v| &v.checks)
+            .filter_map(|c| c.pane.clone());
+        let mut panes: Vec<String> = (agents.chain(checks))
             .filter(|p| split_pane(p).is_some())
             .collect();
+        panes.sort();
+        panes.dedup();
         for pane in panes {
             self.close_machine_pane(&pane);
         }
@@ -814,9 +855,11 @@ impl Gerdr {
     /// them, its worktrees and files. A machine out of reach keeps it, and it
     /// is said.
     pub(crate) fn forget_on_machines(&mut self, feature: &Feature) {
-        let mut ids: Vec<String> = (feature.runs.values())
-            .filter_map(|r| r.machine.clone())
-            .collect();
+        let agents = feature.runs.values().filter_map(|r| r.machine.clone());
+        let checks = feature.verify.iter().filter_map(|v| v.machine.clone());
+        let setups = (feature.setup.iter().chain(&feature.setups_elsewhere))
+            .filter_map(|s| s.machine.clone());
+        let mut ids: Vec<String> = agents.chain(checks).chain(setups).collect();
         ids.sort();
         ids.dedup();
         for id in ids {
@@ -863,18 +906,18 @@ impl Gerdr {
         }
         let Some(work) = self.work_of(id) else {
             self.show_warning(format!(
-                "{name} can't be reached: its agent keeps running there"
+                "{name} can't be reached: what runs there keeps running"
             ));
             return false;
         };
         let Some(panes) = &work.panes else {
             self.show_warning(format!(
-                "{name} isn't answering yet: its agent keeps running there"
+                "{name} isn't answering yet: what runs there keeps running"
             ));
             return false;
         };
         let Some(listed) = panes.get(bare) else {
-            self.show_warning(format!("That agent's tab is gone from {name}"));
+            self.show_warning(format!("That terminal is gone from {name}"));
             return false;
         };
         let command = work.attach_line(&listed.terminal, &name);
@@ -893,7 +936,7 @@ impl Gerdr {
         };
         let Some(view) = opened else {
             tracing::warn!("no tab to show pane {pane}");
-            self.show_error(format!("Couldn't open a tab for the agent on {name}"));
+            self.show_error(format!("Couldn't open a tab to show what runs on {name}"));
             return false;
         };
         self.machines.views.insert(pane.to_owned(), view);
@@ -1308,9 +1351,11 @@ impl Gerdr {
     /// What the button placing `stage`'s next agent says: none with no
     /// machine to place it on.
     pub(crate) fn place_label(&self, feature: &Feature, stage: Stage) -> Option<String> {
+        let running = stage == Stage::Verify && crate::feature_checks::checks_running(feature);
         if feature.status != Status::Open
-            || feature::agents::needs(stage).is_none()
+            || !takes_a_place(stage)
             || feature.is_done(stage)
+            || running
             || !self.takes_a_machine(feature, stage)
         {
             return None;
@@ -1333,6 +1378,11 @@ impl Gerdr {
         let Some(feature) = self.feature(project, slug) else {
             return;
         };
+        if stage == Stage::Verify && crate::feature_checks::checks_running(feature) {
+            return self.show_warning(
+                "Its checks are running: pick their machine once they ended".to_owned(),
+            );
+        }
         if self.place_label(feature, stage).is_none() {
             let why = match self.takes_a_machine(feature, stage) {
                 true => "Connect a machine first, from the launcher: Connect a machine\u{2026}",
@@ -1400,6 +1450,18 @@ impl Gerdr {
     /// What `feature`'s card and page say of where its current agent runs:
     /// the words, and whether they say all there is to say of it.
     pub(crate) fn machine_line(&self, feature: &Feature, stage: Stage) -> Option<(String, bool)> {
+        if stage == Stage::Verify {
+            let run = feature.verify.as_ref()?;
+            let id = run.machine.as_deref()?;
+            if !crate::feature_checks::checks_running(feature) {
+                return None;
+            }
+            let name = self.machine_name(id);
+            return Some(match self.work_of(id).is_some_and(|w| w.panes.is_some()) {
+                true => (format!("on {name}"), false),
+                false => (format!("{name} can't be reached"), false),
+            });
+        }
         let run = feature.runs.get(&stage)?;
         let id = run.machine.as_deref()?;
         let name = self.machine_name(id);

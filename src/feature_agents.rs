@@ -1239,11 +1239,7 @@ impl Gerdr {
         if !fresh && feature.runs.get(&stage).is_some_and(StageRun::resumes) {
             return self.resume_stage_agent(project, slug, stage);
         }
-        // A setup is this machine's: on another the agent starts as it is.
-        if stage == Stage::Build
-            && self.placed(feature, stage) == Placed::Here
-            && self.setup_before_build(project, slug, fresh || first)
-        {
+        if stage == Stage::Build && self.setup_before_build(project, slug, fresh || first) {
             return;
         }
         self.launch_stage_agent(project, slug, stage, &[]);

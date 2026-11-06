@@ -43,6 +43,12 @@
 //! it never ran beside the new code of the others. A `_feature` check reads
 //! them all, so it runs again whenever any moved. Run checks runs them all.
 //!
+//! Verify can run on another machine (`Stage::Verify`'s place, as for an
+//! agent): the same script in a terminal there, its files read and its
+//! processes signalled over the link (`Files`, `machine_checks`). What is judged
+//! stays the code read here, which goes there by fast-forward first. What can't
+//! be told over a lost link decides nothing.
+//!
 //! Runs processes: call it off the UI thread (checklist D3).
 
 use std::{
@@ -169,6 +175,8 @@ pub struct Evidence {
     /// changes", "the checks changed the code in services-api",
     /// "couldn't read the code: …".
     pub problems: Vec<String>,
+    /// Where the checks ran, in words, if not on this machine.
+    pub ran_on: Option<String>,
 }
 
 impl Evidence {
@@ -383,6 +391,7 @@ pub fn finish(feature: &Feature, begun: &Begun, at: u64, outcomes: Vec<Outcome>)
         heads: begun.heads.clone(),
         outcomes,
         problems: Vec::new(),
+        ran_on: None,
     };
     match patch::read(feature) {
         Err(err) => evidence
@@ -528,6 +537,12 @@ const NO_FLOCK: &str =
 /// the script ends. It leaves `queued` when it has to wait, and `start` when
 /// the check starts; its time counts from there.
 pub fn script(dir: &Path, i: usize, check: &CheckRun, slug: &str) -> String {
+    script_with(dir, i, check, slug, "")
+}
+
+/// `script`, with `prelude` run right before the check: lines of `sh`, for what
+/// a terminal on another machine doesn't get by itself.
+pub fn script_with(dir: &Path, i: usize, check: &CheckRun, slug: &str, prelude: &str) -> String {
     let path = |ext: &str| dir.join(format!("{i}.{ext}"));
     let quoted = |p: PathBuf| shell_quote(&p.to_string_lossy());
     let leave = |what: &str, ext: &str| {
@@ -548,7 +563,7 @@ pub fn script(dir: &Path, i: usize, check: &CheckRun, slug: &str) -> String {
          if cd {cwd}; then\n  code=0\n  if [ -r . ] && command -v flock >/dev/null 2>&1; then\n    exec 9<.\n    \
          if ! flock -n 9; then\n      {queued}      printf '%s\\n' {waiting}\n      flock 9\n      code=$?\n      \
          if [ \"$code\" -le 128 ]; then\n        code=0\n        printf '\\033[H\\033[2J%s\\n' {head}\n      fi\n    fi\n  \
-         else\n    printf '%s\\n' {no_flock}\n  fi\n  if [ \"$code\" -eq 0 ]; then\n    {start}    \
+         else\n    printf '%s\\n' {no_flock}\n  fi\n  if [ \"$code\" -eq 0 ]; then\n    {start}    {prelude}\
          sh -c {command} </dev/null 9<&-\n    code=$?\n  fi\nelse\n  code=127\nfi\n\
          if [ \"$code\" -eq 0 ]; then\n  printf '%s\\n' {passed}\nelse\n  printf '%s\\n' \"{end}exited with $code\"\nfi\n{exit}",
         pid = leave("$$", "pid"),
@@ -577,6 +592,73 @@ pub trait Panes {
     fn interrupt(&mut self, pane: &str);
 }
 
+/// The files a run's checks leave, and the processes they name: on this
+/// machine, or on another one with its own pids and clock.
+pub trait Files {
+    /// Look at them again. False: nothing can be told now, so nothing is
+    /// decided from them.
+    fn look(&mut self) -> bool;
+    /// The number check `i` left in its file `ext`, once it is there whole.
+    fn number(&self, i: usize, ext: &str) -> Option<i32>;
+    /// When check `i` wrote its file `ext`, if it did.
+    fn written(&self, i: usize, ext: &str) -> Option<SystemTime>;
+    /// How long ago `at` was, by the clock of where the check runs.
+    fn age(&self, at: SystemTime) -> Duration;
+    /// Send `signal` to process group `group`.
+    fn kill_group(&mut self, group: i32, signal: i32);
+    /// Send `signal` to the process group `pid` is in.
+    fn kill_group_of(&mut self, pid: i32, signal: i32);
+    /// How often to look.
+    fn every(&self) -> Duration;
+    /// How a check told to stop reads when it can't be reached to stop it.
+    fn out_of_reach(&self) -> String;
+}
+
+/// A run's files on this machine, in its folder.
+pub struct LocalFiles<'a>(pub &'a Path);
+
+impl LocalFiles<'_> {
+    fn path(&self, i: usize, ext: &str) -> PathBuf {
+        self.0.join(format!("{i}.{ext}"))
+    }
+}
+
+impl Files for LocalFiles<'_> {
+    fn look(&mut self) -> bool {
+        true
+    }
+
+    fn number(&self, i: usize, ext: &str) -> Option<i32> {
+        read_number(&self.path(i, ext))
+    }
+
+    fn written(&self, i: usize, ext: &str) -> Option<SystemTime> {
+        modified(&self.path(i, ext))
+    }
+
+    fn age(&self, at: SystemTime) -> Duration {
+        at.elapsed().unwrap_or_default()
+    }
+
+    fn kill_group(&mut self, group: i32, signal: i32) {
+        kill_group(group, signal);
+    }
+
+    fn kill_group_of(&mut self, pid: i32, signal: i32) {
+        // SAFETY: getpgid takes no pointers; a pid gone gives -1, which
+        // `kill_group` leaves alone.
+        kill_group(unsafe { libc::getpgid(pid) }, signal);
+    }
+
+    fn every(&self) -> Duration {
+        WATCH_POLL
+    }
+
+    fn out_of_reach(&self) -> String {
+        "stopped".to_owned()
+    }
+}
+
 /// Why a terminal's text wasn't read, and what the error said.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Unread {
@@ -603,6 +685,13 @@ const START_WAIT: Duration = Duration::from_secs(30);
 const STOP_GRACE: Duration = Duration::from_secs(3);
 /// How long the files of a killed check are waited for.
 const KILL_GRACE: Duration = Duration::from_secs(1);
+/// How long a check told to stop waits for a machine out of reach to come
+/// back, before it ends here and goes on there.
+const OUT_OF_REACH_STOP: Duration = if cfg!(test) {
+    Duration::from_millis(30)
+} else {
+    Duration::from_secs(15)
+};
 /// How often the files are looked at.
 const WATCH_POLL: Duration = Duration::from_millis(200);
 /// How often the panes are asked about.
@@ -626,6 +715,8 @@ struct Waiting {
     /// What has been told of its turn.
     queued: bool,
     began: bool,
+    /// Since when it was told to stop with nobody to tell it to.
+    unheard: Option<Instant>,
 }
 
 /// Where a check stands in its folder's queue.
@@ -650,7 +741,24 @@ pub fn watch(
     turn: &mut dyn FnMut(usize, Turn),
     ended: &mut dyn FnMut(usize, Outcome),
 ) {
-    let told = Instant::now();
+    let mut files = LocalFiles(dir);
+    watch_files(waited, &mut files, timeout, stops, panes, turn, ended);
+}
+
+/// `watch`, over `files` wherever they are. What can't be looked at decides
+/// nothing: not that a check started, passed or ran out of time. Only one told
+/// to stop ends then, after a while, as nothing else would end it if the
+/// machine never comes back.
+pub fn watch_files(
+    waited: Vec<Waited>,
+    files: &mut dyn Files,
+    timeout: Duration,
+    stops: &[AtomicBool],
+    panes: &mut dyn Panes,
+    turn: &mut dyn FnMut(usize, Turn),
+    ended: &mut dyn FnMut(usize, Outcome),
+) {
+    let mut told = Instant::now();
     let mut asked = Instant::now();
     let mut waiting: Vec<Waiting> = waited
         .into_iter()
@@ -660,23 +768,57 @@ pub fn watch(
             killed: false,
             queued: false,
             began: false,
+            unheard: None,
         })
         .collect();
+    let mut was_out = false;
     while !waiting.is_empty() {
+        if !files.look() {
+            let word = files.out_of_reach();
+            waiting.retain_mut(|w| {
+                let i = w.check.index;
+                let stop = stops.get(i).is_some_and(|s| s.load(Ordering::Relaxed));
+                if !stop {
+                    return true;
+                }
+                let since = *w.unheard.get_or_insert_with(Instant::now);
+                if since.elapsed() < OUT_OF_REACH_STOP {
+                    return true;
+                }
+                let outcome = Outcome {
+                    repo: w.check.repo.clone(),
+                    command: w.check.command.clone(),
+                    error: Some(word.clone()),
+                    interrupted: true,
+                    ..Outcome::default()
+                };
+                ended(i, outcome);
+                false
+            });
+            was_out = true;
+            std::thread::sleep(files.every());
+            continue;
+        }
+        // Back: a shell gets its time from now, as nobody knows what it had.
+        if std::mem::take(&mut was_out) {
+            told = Instant::now();
+            for w in &mut waiting {
+                w.unheard = None;
+            }
+        }
         let ask = asked.elapsed() >= PANE_POLL;
         if ask {
             asked = Instant::now();
         }
         waiting.retain_mut(|w| {
             let i = w.check.index;
-            let pid = read_number(&dir.join(format!("{i}.pid")));
-            let start = dir.join(format!("{i}.start"));
-            let began = modified(&start);
+            let pid = files.number(i, "pid");
+            let began = files.written(i, "start");
             if let (false, Some(at)) = (w.began, began) {
                 w.began = true;
                 let secs = at.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
                 turn(i, Turn::Began(secs));
-            } else if !w.began && !w.queued && dir.join(format!("{i}.queued")).exists() {
+            } else if !w.began && !w.queued && files.written(i, "queued").is_some() {
                 w.queued = true;
                 turn(i, Turn::Queued);
             }
@@ -690,13 +832,9 @@ pub fn watch(
                     secs,
                     ..Outcome::default()
                 };
-            if let Some(code) = read_number(&dir.join(format!("{i}.exit"))) {
-                let from = if began.is_some() {
-                    start.clone()
-                } else {
-                    dir.join(format!("{i}.pid"))
-                };
-                let secs = took(&from, &dir.join(format!("{i}.exit")));
+            if let Some(code) = files.number(i, "exit") {
+                let from = began.or_else(|| files.written(i, "pid"));
+                let secs = took(from, files.written(i, "exit"));
                 let mut o = match (w.cut.map(|(_, cut)| cut), code) {
                     (Some(Cut::TimedOut), _) => outcome(None, None, false, timeout.as_secs()),
                     (Some(Cut::Stopped), _) | (None, INTERRUPTED) => {
@@ -709,14 +847,14 @@ pub fn watch(
                 // What it left running in the background goes with it, as
                 // nothing else would stop it: a server would hold its port.
                 if let Some(pid) = pid {
-                    kill_group(pid, libc::SIGTERM);
+                    files.kill_group(pid, libc::SIGTERM);
                 }
                 ended(i, o);
                 return false;
             }
             if ask && panes.gone(&w.check.pane) {
                 if let Some(pid) = pid {
-                    kill_group(pid, libc::SIGTERM);
+                    files.kill_group(pid, libc::SIGTERM);
                 }
                 ended(i, outcome(None, Some("its terminal was closed"), true, 0));
                 return false;
@@ -734,10 +872,14 @@ pub fn watch(
                     let stop = stops.get(i).is_some_and(|s| s.load(Ordering::Relaxed));
                     // A script from before queues had no `start`; one in the
                     // queue hasn't started, so its time hasn't begun.
-                    let past = if began.is_some() {
-                        since(&start) >= timeout
-                    } else {
-                        !w.queued && since(&dir.join(format!("{i}.pid"))) >= timeout
+                    let past = match began {
+                        Some(at) => files.age(at) >= timeout,
+                        None => {
+                            !w.queued
+                                && files
+                                    .written(i, "pid")
+                                    .is_some_and(|at| files.age(at) >= timeout)
+                        }
                     };
                     if stop || past {
                         let cut = if stop { Cut::Stopped } else { Cut::TimedOut };
@@ -747,11 +889,11 @@ pub fn watch(
                 }
                 Some((at, _)) if !w.killed && at.elapsed() >= STOP_GRACE => {
                     w.killed = true;
-                    // SAFETY: getpgid takes no pointers; a pid gone gives -1,
-                    // which `kill_group` leaves alone.
-                    kill_group(unsafe { libc::getpgid(pid) }, libc::SIGKILL);
+                    files.kill_group_of(pid, libc::SIGKILL);
                 }
-                Some((at, cut)) if w.killed && at.elapsed() >= STOP_GRACE + KILL_GRACE => {
+                Some((at, cut))
+                    if w.killed && at.elapsed() >= STOP_GRACE + KILL_GRACE + files.every() =>
+                {
                     let mut o = match cut {
                         Cut::Stopped => outcome(None, Some("stopped"), true, 0),
                         Cut::TimedOut => outcome(None, None, false, timeout.as_secs()),
@@ -766,7 +908,7 @@ pub fn watch(
             true
         });
         if !waiting.is_empty() {
-            std::thread::sleep(WATCH_POLL);
+            std::thread::sleep(files.every());
         }
     }
 }
@@ -780,17 +922,9 @@ fn modified(path: &Path) -> Option<SystemTime> {
     std::fs::metadata(path).ok()?.modified().ok()
 }
 
-/// How long ago `path` was written.
-fn since(path: &Path) -> Duration {
-    modified(path)
-        .and_then(|at| at.elapsed().ok())
-        .unwrap_or_default()
-}
-
-/// How many seconds lie between writing `from` and `to`.
-fn took(from: &Path, to: &Path) -> u64 {
-    modified(from)
-        .zip(modified(to))
+/// How many seconds lie between two writes.
+fn took(from: Option<SystemTime>, to: Option<SystemTime>) -> u64 {
+    from.zip(to)
         .and_then(|(from, to)| to.duration_since(from).ok())
         .map_or(0, |d| d.as_secs())
 }
@@ -1047,6 +1181,9 @@ pub fn markdown(feature: &Feature, evidence: &Evidence) -> String {
         md.push_str(&format!("- Patch-id: `{}`\n", evidence.patch));
     }
     md.push_str(&format!("- Branch: `{}`\n", feature.branch()));
+    if let Some(place) = &evidence.ran_on {
+        md.push_str(&format!("- Ran on: {place}\n"));
+    }
     if !evidence.heads.is_empty() {
         md.push_str("\n## Commits checked\n\n| Repository | HEAD |\n| --- | --- |\n");
         for (repo, head) in &evidence.heads {
@@ -1178,6 +1315,9 @@ pub struct VerifyRun {
     /// and a gerdr started later waits for them.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub opened: bool,
+    /// The machine it runs on, by id; `None`: this one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine: Option<String>,
 }
 
 impl VerifyRun {
@@ -1285,6 +1425,183 @@ mod tests {
 
     use super::*;
     use crate::feature::tests::{Temp, commit, feature_over, link_over, run as git_run};
+
+    /// Files as a look finds them: name, when written, the number in them.
+    type Seen = Vec<(&'static str, u64, i32)>;
+
+    /// A run's files on a machine: `script` says, look by look, what can be
+    /// told then; past its end, the last goes on.
+    struct FarFiles {
+        script: Vec<Option<Seen>>,
+        now: Vec<u64>,
+        look: usize,
+        kills: Vec<(i32, i32)>,
+    }
+
+    impl FarFiles {
+        fn new(script: Vec<Option<Seen>>, now: Vec<u64>) -> Self {
+            Self {
+                script,
+                now,
+                look: 0,
+                kills: Vec::new(),
+            }
+        }
+
+        fn at(&self) -> usize {
+            self.look.saturating_sub(1).min(self.script.len() - 1)
+        }
+
+        fn file(&self, i: usize, ext: &str) -> Option<(u64, i32)> {
+            let name = format!("{i}.{ext}");
+            let files = self.script[self.at()].as_ref()?;
+            let file = files.iter().find(|(f, _, _)| *f == name)?;
+            Some((file.1, file.2))
+        }
+    }
+
+    impl Files for FarFiles {
+        fn look(&mut self) -> bool {
+            self.look += 1;
+            self.script[self.at()].is_some()
+        }
+
+        fn number(&self, i: usize, ext: &str) -> Option<i32> {
+            self.file(i, ext).map(|(_, n)| n)
+        }
+
+        fn written(&self, i: usize, ext: &str) -> Option<SystemTime> {
+            let (at, _) = self.file(i, ext)?;
+            Some(UNIX_EPOCH + Duration::from_secs(at))
+        }
+
+        fn age(&self, at: SystemTime) -> Duration {
+            let now = self.now[self.at().min(self.now.len() - 1)];
+            (UNIX_EPOCH + Duration::from_secs(now))
+                .duration_since(at)
+                .unwrap_or_default()
+        }
+
+        fn kill_group(&mut self, group: i32, signal: i32) {
+            self.kills.push((group, signal));
+        }
+
+        fn kill_group_of(&mut self, pid: i32, signal: i32) {
+            self.kills.push((pid, signal));
+        }
+
+        fn every(&self) -> Duration {
+            Duration::from_millis(1)
+        }
+
+        fn out_of_reach(&self) -> String {
+            "stopped here".to_owned()
+        }
+    }
+
+    /// Terminals on a machine: they say nothing of themselves.
+    #[derive(Default)]
+    struct FarPanes {
+        interrupted: Vec<String>,
+    }
+
+    impl Panes for FarPanes {
+        fn gone(&mut self, _: &str) -> bool {
+            false
+        }
+
+        fn text(&mut self, _: &str) -> Result<String, Unread> {
+            Ok(format!("{HEAD}a: t\nsaid\n{END}passed\n"))
+        }
+
+        fn interrupt(&mut self, pane: &str) {
+            self.interrupted.push(pane.to_owned());
+        }
+    }
+
+    fn far_watch(files: &mut FarFiles, panes: &mut FarPanes, stop: bool) -> Vec<Outcome> {
+        let waited = vec![Waited {
+            index: 0,
+            repo: "a".into(),
+            command: "t".into(),
+            pane: "p".into(),
+        }];
+        let stops = [AtomicBool::new(stop)];
+        let mut outcomes = Vec::new();
+        watch_files(
+            waited,
+            files,
+            Duration::from_secs(100),
+            &stops,
+            panes,
+            &mut |_, _| {},
+            &mut |_, outcome| outcomes.push(outcome),
+        );
+        outcomes
+    }
+
+    #[test]
+    fn a_lost_link_decides_nothing_of_a_check() {
+        // Past its time and with no word of it for a while: back, it passed.
+        let mut files = FarFiles::new(
+            vec![
+                Some(vec![("0.pid", 10, 77), ("0.start", 10, 77)]),
+                None,
+                None,
+                None,
+                Some(vec![
+                    ("0.pid", 10, 77),
+                    ("0.start", 10, 77),
+                    ("0.exit", 50, 0),
+                ]),
+            ],
+            vec![20, 500, 500, 500, 500],
+        );
+        let mut panes = FarPanes::default();
+        let outcomes = far_watch(&mut files, &mut panes, false);
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].exit, Some(0));
+        assert_eq!(outcomes[0].secs, 40);
+        assert!(!outcomes[0].timed_out);
+        assert!(panes.interrupted.is_empty());
+    }
+
+    #[test]
+    fn time_there_cuts_a_check_short_once_it_can_be_told() {
+        let running = vec![("0.pid", 10, 77), ("0.start", 10, 77)];
+        let ended = vec![("0.pid", 10, 77), ("0.start", 10, 77), ("0.exit", 200, 130)];
+        let mut files = FarFiles::new(vec![None, Some(running), Some(ended)], vec![0, 500, 500]);
+        let mut panes = FarPanes::default();
+        let outcomes = far_watch(&mut files, &mut panes, false);
+        assert!(outcomes[0].timed_out);
+        assert_eq!(panes.interrupted, ["p"]);
+    }
+
+    #[test]
+    fn a_check_stopped_out_of_reach_ends_here_and_kills_nothing() {
+        let mut files = FarFiles::new(vec![None], vec![0]);
+        let mut panes = FarPanes::default();
+        let outcomes = far_watch(&mut files, &mut panes, true);
+        assert_eq!(outcomes[0].error.as_deref(), Some("stopped here"));
+        assert!(outcomes[0].interrupted);
+        assert!(files.kills.is_empty());
+    }
+
+    #[test]
+    fn what_a_check_left_there_is_killed_there() {
+        let mut files = FarFiles::new(
+            vec![Some(vec![
+                ("0.pid", 10, 4_000_000),
+                ("0.start", 10, 4_000_000),
+                ("0.exit", 12, 1),
+            ])],
+            vec![20],
+        );
+        let mut panes = FarPanes::default();
+        let outcomes = far_watch(&mut files, &mut panes, false);
+        assert_eq!(outcomes[0].exit, Some(1));
+        assert_eq!(files.kills, [(4_000_000, libc::SIGTERM)]);
+    }
 
     /// Terminals made of plain processes, each with its output in a file.
     struct Direct {
@@ -2405,6 +2722,7 @@ mod tests {
                 },
             ],
             problems: Vec::new(),
+            ran_on: None,
         };
         let md = markdown(&f, &e);
         for words in [
