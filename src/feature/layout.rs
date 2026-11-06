@@ -297,6 +297,23 @@ pub fn branches_of(main: &Path) -> Result<Vec<String>, String> {
         .collect())
 }
 
+/// Start `found` from the branch origin says is its default now, when it
+/// has that branch here: a clone's `origin/HEAD` stays what it was when
+/// cloned. Asks over the network, so it can take a while. Unreachable or not
+/// fetched, what git has here stands, and the log says why.
+pub fn follow_origin(found: &mut Found) {
+    match crate::git_ops::remote_default(&found.main) {
+        Ok(Some(branch)) if branches_of(&found.main).is_ok_and(|all| all.contains(&branch)) => {
+            found.base = branch;
+        }
+        Ok(Some(branch)) => {
+            tracing::warn!("{}: origin's default {branch} isn't fetched", found.name);
+        }
+        Ok(None) => {}
+        Err(why) => tracing::warn!("asking origin for the default of {}: {why}", found.name),
+    }
+}
+
 /// What `create` did to files outside the feature's folder, to tell the
 /// user (checklist D1).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1963,6 +1980,48 @@ mod tests {
         let mut all = branches_of(&repo).unwrap();
         all.sort();
         assert_eq!(all, ["dev", "main", "next"]);
+    }
+
+    #[test]
+    fn following_origin_sees_past_a_stale_origin_head() {
+        let t = Temp::new();
+        let repo = t.repo("app", "main");
+        let found = |base: &str| Found {
+            name: "app".into(),
+            main: repo.clone(),
+            base: base.into(),
+        };
+        let follow = |base: &str| {
+            let mut found = found(base);
+            follow_origin(&mut found);
+            found.base
+        };
+        // No origin: nothing to ask.
+        assert_eq!(follow("main"), "main");
+        let bare = t.0.join("o.git");
+        run(&t.0, &["init", "-q", "--bare", "-b", "dev", "o.git"]);
+        run(&repo, &["remote", "add", "origin", &bare.to_string_lossy()]);
+        run(&repo, &["push", "-q", "origin", "main", "main:dev"]);
+        // Never fetched: a worktree couldn't start from it.
+        run(&repo, &["update-ref", "-d", "refs/remotes/origin/dev"]);
+        assert_eq!(follow("main"), "main");
+        run(&repo, &["fetch", "-q", "origin"]);
+        run(
+            &repo,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ],
+        );
+        assert_eq!(
+            find_root(&repo, &[], &[], &[]).unwrap().repos[0].base,
+            "main"
+        );
+        assert_eq!(follow("main"), "dev");
+        // Unreachable: what git has here stands.
+        run(&repo, &["remote", "set-url", "origin", "/nowhere/at/all"]);
+        assert_eq!(follow("main"), "main");
     }
 
     #[test]

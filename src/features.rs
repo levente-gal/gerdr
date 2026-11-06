@@ -6409,6 +6409,17 @@ impl Gerdr {
             ));
         }
         let names: Vec<String> = adds.iter().flat_map(|a| a.names.iter().cloned()).collect();
+        // A base the project's settings set isn't asked about, as in the new
+        // feature dialog (see `find_bases`).
+        let set: Vec<std::collections::BTreeMap<String, String>> = (adds.iter())
+            .map(|a| {
+                let of = a.project.as_deref().unwrap_or(&project);
+                self.projects
+                    .project(of)
+                    .map(|p| p.workflow.base.clone())
+                    .unwrap_or_default()
+            })
+            .collect();
         let busy = Busy {
             project: project.clone(),
             slug: slug.clone(),
@@ -6421,6 +6432,13 @@ impl Gerdr {
             ),
         };
         self.feature_work(Some(busy), move |_| {
+            let mut adds = adds;
+            for (add, set) in adds.iter_mut().zip(&set) {
+                let names = &add.names;
+                (add.root.repos.iter_mut())
+                    .filter(|r| names.contains(&r.name) && !set.contains_key(&r.name))
+                    .for_each(layout::follow_origin);
+            }
             let result = layout::link_more(&feature, &[], &adds);
             Done::Linked {
                 project,
