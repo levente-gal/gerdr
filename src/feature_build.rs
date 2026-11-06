@@ -728,7 +728,7 @@ impl Gerdr {
         // Checks running already run again on this code once they end.
         let key = (project.to_owned(), slug.to_owned());
         if !self.features.build.verifying.contains(&key) {
-            self.run_verify(project, slug);
+            self.recheck(project, slug);
         }
     }
 
@@ -842,6 +842,15 @@ impl Gerdr {
         self.run_checks(project, slug, Scope::All);
     }
 
+    /// Run Verify's checks on feature `slug` as its code changed: only where
+    /// that can say something new (`Scope::after_changes`). All of them if
+    /// none ran yet.
+    fn recheck(&mut self, project: &str, slug: &str) {
+        let scope =
+            Scope::after_changes(self.feature(project, slug).and_then(|f| f.verify.as_ref()));
+        self.run_checks(project, slug, scope);
+    }
+
     /// Run `scope`'s checks of Verify on feature `slug`, in terminals.
     pub(crate) fn run_checks(&mut self, project: &str, slug: &str, scope: Scope) {
         let Some(feature) = self.feature(project, slug).cloned() else {
@@ -893,9 +902,10 @@ impl Gerdr {
         let last = feature.verify.as_ref();
         let n = last.map_or(1, |v| v.n + 1);
         // What the last run said stays until its code is read: then the
-        // checks that are not run again keep it, on the same code.
-        let (checks, patch) =
-            last.map_or((Vec::new(), None), |v| (v.checks.clone(), v.patch.clone()));
+        // checks that are not run again keep it, where the code is the same.
+        let (checks, patch, heads) = last.map_or((Vec::new(), None, Vec::new()), |v| {
+            (v.checks.clone(), v.patch.clone(), v.heads.clone())
+        });
         if let Some(f) = self.feature_mut(project, slug) {
             f.verify = Some(VerifyRun {
                 n,
@@ -903,6 +913,7 @@ impl Gerdr {
                 checks,
                 patch,
                 skipped,
+                heads,
                 ..VerifyRun::default()
             });
             f.log(now, format!("Verify run {n} started"));
@@ -983,7 +994,7 @@ impl Gerdr {
             // Build was marked done on other code while the checks ran:
             // they run again on it.
             tracing::info!("feature {project}/{slug}: Verify ran on older code; again");
-            return self.run_verify(project, slug);
+            return self.recheck(project, slug);
         }
         if passed {
             if !verify_holds(&snapshot, &evidence) {

@@ -162,6 +162,10 @@ How to use it:
   stop, and what reads. What would change the code or the worktrees under them
   (setup, fixes, a prompt to Build) is hidden, and refuses by its key. A check
   told to stop says "stopping" until it ends, and offers no Stop again.
+  After code changes, a rerun runs only what can say something new: the checks
+  that didn't pass, those of a repository whose HEAD moved, and whole-feature
+  ones. The rest keep their results, their cards say "from run N" and the
+  evidence says so too. Run checks runs them all.
 
 ## X. State across places
 
