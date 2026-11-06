@@ -40,6 +40,8 @@ pub enum Overlay {
     FindingDialog,
     /// The name and email git wants to commit (see `git_identity`).
     GitIdentity,
+    /// The dialog connecting another machine (see `machines`).
+    Machines,
     /// A project's Verify checks and setup commands (see
     /// `project_commands`).
     ProjectCommands,
@@ -70,7 +72,7 @@ pub enum Overlay {
 
 impl Overlay {
     /// Every overlay, top first.
-    pub const ORDER: [Self; 23] = [
+    pub const ORDER: [Self; 24] = [
         Self::Tooltip,
         Self::Quit,
         Self::Restart,
@@ -78,6 +80,7 @@ impl Overlay {
         Self::NewFeature,
         Self::FindingDialog,
         Self::GitIdentity,
+        Self::Machines,
         Self::ProjectCommands,
         Self::Confirm,
         Self::ContextMenu,
@@ -110,6 +113,7 @@ impl Overlay {
                 | Self::NewFeature
                 | Self::FindingDialog
                 | Self::GitIdentity
+                | Self::Machines
                 | Self::ProjectCommands
                 | Self::PlanSheet
                 | Self::Confirm
@@ -174,6 +178,7 @@ impl Overlay {
             Self::NewFeature => "the new feature dialog",
             Self::FindingDialog => "the finding dialog",
             Self::GitIdentity => "the name and email dialog",
+            Self::Machines => "the connect a machine dialog",
             Self::ProjectCommands => "the project commands dialog",
             Self::PlanSheet => "the plan review's sheet",
             Self::Confirm => "the dialog",
@@ -206,6 +211,7 @@ impl Gerdr {
             Overlay::NewFeature => self.features.dialog.is_some(),
             Overlay::FindingDialog => self.features.finding_dialog.is_some(),
             Overlay::GitIdentity => self.repos.identity.is_some(),
+            Overlay::Machines => self.machines.dialog.is_some(),
             Overlay::ProjectCommands => self.features.commands.is_some(),
             Overlay::PlanSheet => self.features.plan_sheet.is_some(),
             Overlay::Confirm => self.confirm.is_some(),
@@ -290,6 +296,7 @@ impl Gerdr {
             Overlay::NewFeature => self.new_feature_hover(pos),
             Overlay::FindingDialog => self.finding_dialog_hover(pos),
             Overlay::GitIdentity => self.identity_hover(pos),
+            Overlay::Machines => self.machine_hover(pos),
             Overlay::ProjectCommands => self.commands_hover(pos),
             Overlay::PlanSheet => return self.plan_sheet_hover(pos),
             Overlay::Features => return self.feature_panel_hover(pos),

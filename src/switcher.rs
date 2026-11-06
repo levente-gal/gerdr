@@ -80,6 +80,8 @@ pub enum Target {
     Shortcuts,
     /// The inbox panel.
     Inbox,
+    /// The dialog connecting another machine (see `machines`).
+    Machines,
     /// An agent CLI's command, to run in a new tab of workspace `.0` (see
     /// `Gerdr::new_agent`).
     NewAgent(usize, String),
@@ -151,6 +153,7 @@ impl Target {
             Target::Welcome
             | Target::Shortcuts
             | Target::Inbox
+            | Target::Machines
             | Target::NewAgent(..)
             | Target::T3(_)
             | Target::UpdateT3
@@ -183,6 +186,7 @@ impl Target {
             Target::Welcome
             | Target::Shortcuts
             | Target::Inbox
+            | Target::Machines
             | Target::NewAgent(..)
             | Target::T3(_)
             | Target::UpdateT3
@@ -859,6 +863,7 @@ fn frecency_key(
         Target::Welcome
         | Target::Shortcuts
         | Target::Inbox
+        | Target::Machines
         | Target::Settings
         | Target::ProjectFile(_)
         | Target::ReloadProjects
@@ -1174,6 +1179,7 @@ impl Gerdr {
         items.extend(self.t3_update_entries());
         items.push(self.inbox_entry());
         items.push(self.tasks_entry());
+        items.push(self.machines_entry());
         items.extend(self.feature_entries());
         let home = home_dir();
         if let Some(home) = &home {
@@ -1267,6 +1273,21 @@ impl Gerdr {
             n => format!("{n} need you"),
         };
         Item::new(ItemIcon::Command, "Inbox", detail, Target::Inbox)
+    }
+
+    /// The row connecting another machine, saying how many are.
+    fn machines_entry(&self) -> Item {
+        let detail = match self.machines_up() {
+            0 => "run agents and checks elsewhere".to_owned(),
+            1 => "1 connected".to_owned(),
+            n => format!("{n} connected"),
+        };
+        Item::new(
+            ItemIcon::Command,
+            "Connect a machine\u{2026}",
+            detail,
+            Target::Machines,
+        )
     }
 
     fn tasks_entry(&self) -> Item {
@@ -1527,6 +1548,7 @@ impl Gerdr {
             Target::Welcome => self.open_welcome(true),
             Target::Shortcuts => self.help_pinned = true,
             Target::Inbox => self.open_inbox(None),
+            Target::Machines => self.open_machine_dialog(),
             Target::NewAgent(w, command) => self.new_agent(w, &command),
             Target::T3(w) => self.new_t3_thread(w),
             Target::UpdateT3 => self.update_t3(None),

@@ -57,6 +57,12 @@ pub enum MenuAction {
     ShowLog(std::path::PathBuf),
     /// The apps project `.0` keeps running, stopped (see `keep::stop`).
     StopKept(String),
+    /// The dialog connecting another machine (see `machines`).
+    AddMachine,
+    /// Connect, disconnect or forget the machine of this name.
+    ConnectMachine(String),
+    DisconnectMachine(String),
+    RemoveMachine(String),
     /// T3 Code, updated to the newest version gerdr reads, or to this one
     /// (see `Gerdr::update_t3`).
     UpdateT3(Option<String>),
@@ -442,6 +448,10 @@ impl Gerdr {
             MenuAction::CheckT3 => self.check_t3(true),
             MenuAction::ShowLog(path) => self.show_log(path),
             MenuAction::StopKept(id) => self.ask_stop_kept(&id),
+            MenuAction::AddMachine => self.open_machine_dialog(),
+            MenuAction::ConnectMachine(name) => self.connect_machine(&name),
+            MenuAction::DisconnectMachine(name) => self.disconnect_machine(&name),
+            MenuAction::RemoveMachine(name) => self.remove_machine(&name),
             MenuAction::UpdateT3(version) => self.update_t3(version),
             MenuAction::NewTab(w) => {
                 self.switch_workspace(w);

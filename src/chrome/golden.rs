@@ -2301,6 +2301,125 @@ fn dump_identity() {
     }
 }
 
+// ------------------------------------------------------- connect a machine
+
+/// The dialog connecting a machine: empty, connecting, and after a failure
+/// with what to do about it.
+fn machine(case: usize) -> super::MachineView {
+    use crate::text_field::TextField;
+    let mut target = TextField::default();
+    if case > 0 {
+        target.set("ana@build-box");
+    }
+    let (body, error, how, buttons, keys): (&str, _, _, &[&str], Vec<_>) = match case {
+        0 => (
+            "Agents and checks can run there. It uses your SSH keys.",
+            None,
+            None,
+            &["Cancel", "Connect"],
+            vec![("Tab", "next"), ("Esc", "close")],
+        ),
+        1 => (
+            "herdr 0.9.5, starting its server\u{2026}",
+            None,
+            None,
+            &["Stop"],
+            vec![("Esc", "stop")],
+        ),
+        _ => (
+            "Agents and checks can run there. It uses your SSH keys.",
+            Some("It didn't accept any of your SSH keys.".to_owned()),
+            Some("Add a key with ssh-copy-id ana@build-box. A locked key needs ssh-add.".to_owned()),
+            &["Cancel", "Copy command", "Try again"],
+            vec![("Tab", "next"), ("Alt+X", "fix"), ("Esc", "close")],
+        ),
+    };
+    super::MachineView {
+        body: body.into(),
+        target: target.line(),
+        name: TextField::default().line(),
+        name_hint: if case > 0 { "build-box".into() } else { String::new() },
+        focus: super::MachineFocus::Target,
+        error,
+        how,
+        buttons: buttons.iter().map(|b| (*b).to_owned()).collect(),
+        busy: case == 1,
+        hover: (case == 0).then_some(super::MachineHit::Button(1)),
+        keys,
+    }
+}
+
+const MACHINE: [&str; 3] = ["machine", "machine_connecting", "machine_failed"];
+
+fn paint_machine(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
+    let p = theme.palette();
+    let size = IDENTITY_OUTPUT.into();
+    (0..MACHINE.len())
+        .map(|case| hash(painter.machine_dialog(&machine(case), size, scale, p)))
+        .collect()
+}
+
+/// The recorded hashes of `MACHINE`, per case in `CASES`.
+const GOLDEN_MACHINE: [[u64; 3]; 4] = [
+    // Dark at 1
+    [
+        0x0eef78ab99aee544, // machine
+        0x769aa7f1aa46bec8, // machine_connecting
+        0x34c796af55488a82, // machine_failed
+    ],
+    // Dark at 2
+    [
+        0xe5ab34736a3caf0e, // machine
+        0x78f22125390eb432, // machine_connecting
+        0x689bd69d0124f5ee, // machine_failed
+    ],
+    // Light at 1
+    [
+        0x86041125f2ad5a26, // machine
+        0xb8942dad552aef31, // machine_connecting
+        0x06d0f2b8806ab255, // machine_failed
+    ],
+    // Light at 2
+    [
+        0x74d988afd18b10df, // machine
+        0xe3ce3d0226d52a90, // machine_connecting
+        0x7368a8037554ece4, // machine_failed
+    ],
+];
+
+#[test]
+fn the_machine_dialog_paints_the_same_pixels() {
+    let golden: Vec<&[u64]> = GOLDEN_MACHINE.iter().map(|row| row.as_slice()).collect();
+    check(&MACHINE, &golden, paint_machine);
+}
+
+/// With `GERDR_DUMP_DIR` set, write the dialog connecting a machine there.
+#[test]
+fn dump_machine() {
+    let Some(dir) = std::env::var_os("GERDR_DUMP_DIR") else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    let _ = std::fs::create_dir_all(&dir);
+    let painter = Painter::new();
+    let size = IDENTITY_OUTPUT.into();
+    for (theme, scale) in CASES {
+        let p = theme.palette();
+        let px = |v: i32| (v as f64 * scale).round() as usize;
+        let tag = format!("{}_{}", theme.name(), scale);
+        for (case, name) in MACHINE.iter().enumerate() {
+            let view = machine(case);
+            let panel = super::machine_layout(&view, size).panel;
+            dump(
+                &dir,
+                &format!("{name}_{tag}"),
+                painter.machine_dialog(&view, size, scale, p),
+                px(panel.size.w + 2 * super::SHADOW),
+            );
+        }
+    }
+}
+
 // ------------------------------------------------------- restart dialog
 
 /// The restart dialog: a workspace's commands, one exited and one unchecked,

@@ -62,6 +62,7 @@ mod keyring;
 mod keys;
 mod launch;
 mod layout;
+mod machines;
 mod manual_test;
 mod md_blocks;
 mod md_preview;
@@ -1418,6 +1419,8 @@ pub struct Gerdr {
     pub footer_hover: Option<chrome::FooterHit>,
     /// The tasks panel, while it is open over the footer.
     pub tasks_panel: Option<tasks::TasksPanel>,
+    /// Other machines, and the dialog connecting one (see `machines`).
+    pub machines: machines::Machines,
     /// The features of every project, and the dialog and panel on them.
     pub features: features::Features,
     /// Each feature's code review counts, once read (see `feature_diff`).
@@ -6716,6 +6719,7 @@ impl Gerdr {
             new_feature: self.new_feature_view(),
             finding_dialog: self.finding_dialog_view(),
             identity: self.identity_view(),
+            machine: self.machine_view(),
             commands: self.commands_view(),
             plan_sheet: self.plan_sheet_view(),
             features: self.feature_tab_view(),
@@ -7026,6 +7030,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         linear,
         keep: keep_apps,
         agents: agent_config,
+        machines: saved_machines,
         services: service_settings,
         t3: t3_settings,
         terminal,
@@ -7061,6 +7066,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         show_footer: ui.footer,
         footer_hover: None,
         tasks_panel: None,
+        machines: machines::Machines::default(),
         features: features::Features::default(),
         code_reviews: Default::default(),
         kept: Vec::new(),
@@ -7366,6 +7372,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     state.watch_cursor_agents();
     state.watch_t3_agents();
     state.watch_tasks();
+    state.watch_machines(saved_machines);
     state.watch_web_control();
     state.watch_web_pages();
     state.watch_ci();
