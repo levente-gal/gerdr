@@ -553,6 +553,10 @@ pub struct Feature {
     /// only where it differs from what that gives.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub stage_machines: BTreeMap<Stage, String>,
+    /// The last setup on each other place than where `setup` ran: each has
+    /// worktrees of its own to set up.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub setups_elsewhere: Vec<setup::SetupRun>,
     /// Build starts a fresh agent for each milestone, instead of one agent
     /// going on through them all.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -628,6 +632,22 @@ pub enum Standing {
 }
 
 impl Feature {
+    /// The last setup on machine `machine` (`None`: this one).
+    pub fn setup_at(&self, machine: Option<&str>) -> Option<&setup::SetupRun> {
+        (self.setup.iter().chain(&self.setups_elsewhere)).find(|s| s.machine.as_deref() == machine)
+    }
+
+    /// `run` is its setup now, the last it had elsewhere kept.
+    pub fn begin_setup(&mut self, run: setup::SetupRun) {
+        if let Some(old) = self.setup.replace(run)
+            && old.machine != self.setup.as_ref().and_then(|s| s.machine.clone())
+        {
+            self.setups_elsewhere.push(old);
+        }
+        let machine = self.setup.as_ref().and_then(|s| s.machine.clone());
+        self.setups_elsewhere.retain(|s| s.machine != machine);
+    }
+
     /// Bring a record of an older format up to this one; whether it was
     /// older. A feature that went past Plan before Plan review existed has
     /// that stage marked done, at Plan's time, so it stays where it was.
@@ -1273,6 +1293,7 @@ pub(crate) mod tests {
             runs: Default::default(),
             stage_agents: Default::default(),
             stage_machines: Default::default(),
+            setups_elsewhere: Vec::new(),
             stage_models: Default::default(),
             fresh_milestones: false,
             setup: None,
@@ -1361,6 +1382,7 @@ pub(crate) mod tests {
             runs: BTreeMap::new(),
             stage_agents: BTreeMap::new(),
             stage_machines: BTreeMap::new(),
+            setups_elsewhere: Vec::new(),
             stage_models: Default::default(),
             fresh_milestones: false,
             setup: None,

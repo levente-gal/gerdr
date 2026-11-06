@@ -290,7 +290,11 @@ pub fn step(
     }
     let mut panes: Vec<&PaneState> = tabs.values().flat_map(|d| &d.panes).collect();
     panes.sort_by(|a, b| a.pane_id.cmp(&b.pane_id));
-    runs.retain(|r| panes.iter().any(|p| p.pane_id == r.pane_id));
+    // One on another machine is no pane here: its check says how it goes.
+    runs.retain(|r| {
+        crate::machine_work::split_pane(&r.pane_id).is_some()
+            || panes.iter().any(|p| p.pane_id == r.pane_id)
+    });
     let mut finished = Vec::new();
     for pane in panes {
         let Some(info) = &pane.process else { continue };
@@ -526,7 +530,11 @@ impl Gerdr {
     /// Show the pane of the test run in `pane_id`; a finished run is seen.
     /// Whether it shows.
     pub(crate) fn focus_test_run(&mut self, pane_id: &str) -> bool {
-        if !self.show_herdr_pane(pane_id) {
+        let shown = match crate::machine_work::split_pane(pane_id) {
+            Some(_) => self.show_machine_pane(pane_id),
+            None => self.show_herdr_pane(pane_id),
+        };
+        if !shown {
             return false;
         }
         if let Some(run) = self.test_runs.iter_mut().find(|r| r.pane_id == pane_id) {
@@ -571,23 +579,23 @@ impl Gerdr {
         let Some(all) = (self.project.as_ref()).and_then(|p| self.features.all.get(p)) else {
             return;
         };
-        let rows = all
+        let rows: Vec<(&crate::feature::Feature, _)> = all
             .iter()
-            .filter_map(|f| f.verify.as_ref())
-            .flat_map(|v| &v.checks);
+            .filter_map(|f| Some((f, f.verify.as_ref()?)))
+            .flat_map(|(f, v)| v.checks.iter().map(move |row| (f, row)))
+            .collect();
         let panes: Vec<&PaneState> = self.herdr_tabs.values().flat_map(|d| &d.panes).collect();
-        let rows: Vec<_> = rows.collect();
         // A check no longer among them takes its card along: its terminal
         // may stay, for the user to look at.
         self.test_runs.retain(|r| {
             r.check.is_none_or(|run| {
                 let pane = Some(r.pane_id.as_str());
                 rows.iter()
-                    .any(|row| row.pane.as_deref() == pane && row.run == run)
+                    .any(|(_, row)| row.pane.as_deref() == pane && row.run == run)
             })
         });
         let mut new = Vec::new();
-        for row in rows.into_iter().filter(|row| !row.card_off) {
+        for (feature, row) in rows.iter().copied().filter(|(_, row)| !row.card_off) {
             let Some(pane_id) = row.pane.as_deref() else {
                 continue;
             };
@@ -606,14 +614,23 @@ impl Gerdr {
             if at.is_some_and(|i| self.test_runs[i].check.is_none()) {
                 continue;
             }
-            let Some(pane) = panes.iter().find(|p| p.pane_id == pane_id) else {
+            // One on another machine goes with its feature's workspace here.
+            let place = match crate::machine_work::split_pane(pane_id) {
+                Some(_) => self
+                    .feature_workspace(&feature.project, &feature.slug)
+                    .and_then(|w| self.workspaces[w].herdr_id())
+                    .map(|id| (id.to_owned(), String::new())),
+                None => (panes.iter().find(|p| p.pane_id == pane_id))
+                    .map(|pane| (pane.workspace_id.clone(), pane.tab_id.clone())),
+            };
+            let Some((workspace_id, tab_id)) = place else {
                 continue;
             };
             let short = row.command.lines().next().unwrap_or_default().to_owned();
             let run = TestRun {
                 pane_id: pane_id.to_owned(),
-                workspace_id: pane.workspace_id.clone(),
-                tab_id: pane.tab_id.clone(),
+                workspace_id,
+                tab_id,
                 pid: row.run as i32,
                 command: short.clone(),
                 short,

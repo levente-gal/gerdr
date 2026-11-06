@@ -40,7 +40,7 @@
 //! [machines]
 //! # Other machines gerdr reaches over SSH, by name: "Connect a machine" in
 //! # the launcher adds them here. gerdr connects with your SSH keys. A
-//! # feature stage's page picks the machine its agent runs on; a project's
+//! # feature stage's page picks the machine it runs on; a project's
 //! # file gives its stages one under "machines", and folders under
 //! # "machine_folders".
 //! build-box = "ana@10.0.0.5"
@@ -913,7 +913,7 @@ const TEMPLATE: &str = "\
 # [machines]
 # # Other machines gerdr reaches over SSH, by name: \"Connect a machine\" in
 # # the launcher adds them here. gerdr connects with your SSH keys. A
-# # feature stage's page picks the machine its agent runs on; a project's
+# # feature stage's page picks the machine it runs on; a project's
 # # file gives its stages one under \"machines\", and folders under
 # # \"machine_folders\".
 # build-box = \"ana@10.0.0.5\"

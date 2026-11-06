@@ -34,6 +34,12 @@
 //! group is killed when it ends or times out, so nothing it started
 //! lingers (`shell`, which Verify's checks run with too).
 //!
+//! On another machine the same setup differs in what it copies: only what's
+//! small enough to send (`for_machine`). An environment isn't sent, as it is
+//! built for this machine and its paths: the commands build it there. They run
+//! in a terminal there, by a script (`script_there`), so they go on when the
+//! link drops; `machine_checks` waits for it.
+//!
 //! Runs processes: call it off the UI thread (checklist D3).
 
 use std::{
@@ -84,6 +90,12 @@ const RUN_FAILED: &str = "== Setup failed";
 /// Where a feature's setup stands, kept in its record.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SetupRun {
+    /// The machine it runs on, by id; `None`: this one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine: Option<String>,
+    /// Its terminal there, as `machine_work::qualified` says it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane: Option<String>,
     /// Unix seconds.
     pub started: u64,
     /// When it ended, either way (unix seconds); `None` while it runs, or
@@ -120,6 +132,192 @@ pub struct Report {
 /// Lines each project's store file gives, by repository name: the
 /// `"workflow"` of the project a repository is in.
 pub type PerRepo = PerProject<BTreeMap<String, Vec<String>>>;
+
+/// The folder a setup's files are in, under the data folder there.
+pub const RUN_THERE: &str = "setup-run";
+
+/// What a repository's setup on another machine copies, and leaves.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ForMachine {
+    /// By path, as `Item::path`.
+    pub send: Vec<String>,
+    /// Environments it has here, which aren't sent: built for this machine.
+    pub environments: Vec<String>,
+    /// What couldn't be told, a line each.
+    pub problems: Vec<String>,
+}
+
+/// What `repo`'s setup on another machine copies from its main worktree.
+pub fn for_machine(repo: &Repo, extras: &PerRepo) -> ForMachine {
+    let mut out = ForMachine::default();
+    for item in to_copy(repo, &lines_of(extras, repo), &mut out.problems) {
+        match item.environment {
+            true => out.environments.push(item.path),
+            false => out.send.push(item.path),
+        }
+    }
+    out
+}
+
+/// A command of a setup on another machine.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StepThere {
+    /// Its repository, by `Repo::key`.
+    pub repo: String,
+    /// Its worktree there.
+    pub dir: String,
+    /// As it reads here.
+    pub command: String,
+    /// As it reads there.
+    pub line: String,
+}
+
+impl StepThere {
+    /// Where it stands, as `Report` says it: "api: npm ci".
+    pub fn said(&self) -> String {
+        format!("{}: {}", self.repo, self.command)
+    }
+
+    /// How it failed, as `Report::failed` says it.
+    pub fn failure(&self, how: &str) -> String {
+        format!("{}: `{}` {how}", self.repo, self.command)
+    }
+}
+
+/// `commands`' lines for `feature` on another machine, in the order of a setup
+/// here; `there` translates each repository's worktree, `text` each command.
+pub fn steps_there(
+    feature: &Feature,
+    commands: &PerRepo,
+    there: &dyn Fn(&Path) -> String,
+    text: &dyn Fn(&str) -> String,
+) -> Vec<StepThere> {
+    let mut repos: Vec<_> = feature.repos.iter().collect();
+    repos.sort_by_key(|r| r.key());
+    let mut steps = Vec::new();
+    for repo in repos {
+        for command in lines_of(commands, repo) {
+            steps.push(StepThere {
+                repo: repo.key(),
+                dir: there(&repo.worktree),
+                command: command.to_owned(),
+                line: text(command),
+            });
+        }
+    }
+    steps
+}
+
+/// The script running `steps` in a terminal on another machine, its output
+/// going to the log `log`, in a form `shown_log` reads. It keeps to its folder
+/// `dir` what `machine_checks` waits for: `pid`, `step` (the command it is at,
+/// from 1) and `exit`. Past a failure nothing more runs, as here.
+pub fn script_there(
+    dir: &str,
+    log: &str,
+    steps: &[StepThere],
+    slug: &str,
+    notes: &[String],
+    prelude: &str,
+) -> String {
+    let q = crate::desktop::shell_quote;
+    let mut script = format!(
+        r#"trap : INT TERM
+d={dir}
+log={log}
+GERDR_FEATURE={slug}
+export GERDR_FEATURE
+rm -rf "$d"
+mkdir -p "$d" "$(dirname "$log")"
+leave() {{ printf '%s\n' "$2" > "$d/$1.new" && mv "$d/$1.new" "$d/$1"; }}
+leave pid "$$"
+began=$(date +%s)
+printf '%s\n' "{start} $(date -u '+%Y-%m-%d %H:%M UTC')" >> "$log"
+"#,
+        dir = q(dir),
+        log = q(log),
+        slug = q(slug),
+        start = RUN_START,
+    );
+    for note in notes {
+        script.push_str(&format!("printf '%s\\n' {} >> \"$log\"\n", q(note)));
+    }
+    script.push_str(&format!(
+        r#"step() {{
+  leave step "$1"
+  printf '%s\n' "== $(date -u '+%Y-%m-%d %H:%M UTC') $2: $3" "== in $4" >> "$log"
+  s=$(date +%s)
+  rm -f "$d/rc"
+  ( cd "$4" || exit 1
+    {prelude}
+    sh -c "$5" </dev/null
+    echo $? > "$d/rc" ) 2>&1 | tee -a "$log"
+  c=$(cat "$d/rc" 2>/dev/null)
+  c=${{c:-1}}
+  printf '== exited with %s after %s s\n\n' "$c" "$(($(date +%s) - s))" >> "$log"
+  if [ "$c" -ne 0 ]; then
+    printf '%s\n' "{failed}: $2: \`$3\` exited with $c" >> "$log"
+    leave exit "$c"
+    exit "$c"
+  fi
+}}
+"#,
+        prelude = prelude.trim_end(),
+        failed = RUN_FAILED,
+    ));
+    for (i, step) in steps.iter().enumerate() {
+        script.push_str(&format!(
+            "step {} {} {} {} {}\n",
+            i + 1,
+            q(&step.repo),
+            q(&step.command),
+            q(&step.dir),
+            q(&step.line),
+        ));
+    }
+    script.push_str(
+        r#"printf '%s\n\n' "== Setup finished after $(($(date +%s) - began)) s" >> "$log"
+leave exit 0
+"#,
+    );
+    script
+}
+
+/// What a setup there says it did: `at`, the command it got to (from 1), and
+/// how it ended. `exit` is 0 past them all; `how` says how it was cut short.
+pub fn report_there(
+    steps: &[StepThere],
+    at: usize,
+    how: Result<(), String>,
+) -> (Vec<String>, Option<String>) {
+    let done = match &how {
+        Ok(()) => steps.len(),
+        Err(_) => at.saturating_sub(1).min(steps.len()),
+    };
+    let ran = steps[..done].iter().map(StepThere::said).collect();
+    let failed = how
+        .err()
+        .map(|how| match at.checked_sub(1).and_then(|i| steps.get(i)) {
+            Some(step) => step.failure(&how),
+            None => how,
+        });
+    (ran, failed)
+}
+
+/// How a setup command that ran past its time reads.
+pub fn timed_out() -> String {
+    Exit::TimedOut(TIMEOUT).describe()
+}
+
+/// The line a log ends with when a setup couldn't get to run its commands.
+pub fn failed_line(why: &str) -> String {
+    format!("{RUN_FAILED}: {why}")
+}
+
+/// The line a log starts a run with, at `at`.
+pub fn started_line(at: u64) -> String {
+    format!("{RUN_START} {}", super::verify::utc(at))
+}
 
 /// Whether `feature` has a worktree to set up.
 pub fn has_work(feature: &Feature) -> bool {
@@ -668,6 +866,113 @@ pub fn log_path(data: &Path) -> PathBuf {
 mod tests {
     use super::*;
     use crate::feature::tests::{Temp, feature_over, link_over};
+
+    fn step_there(repo: &str, dir: &Path, line: &str) -> StepThere {
+        StepThere {
+            repo: repo.into(),
+            dir: dir.to_string_lossy().into_owned(),
+            command: line.into(),
+            line: line.into(),
+        }
+    }
+
+    /// Run a setup script as a terminal there would: what it left, and its log.
+    fn run_there(t: &Temp, steps: &[StepThere]) -> (PathBuf, String) {
+        let dir = t.0.as_path().join("run");
+        let log = t.0.as_path().join("data/setup.log");
+        let script = script_there(
+            &dir.to_string_lossy(),
+            &log.to_string_lossy(),
+            steps,
+            "slug",
+            &["== api: copied .env".to_owned()],
+            crate::feature::remote::ACTIVATE,
+        );
+        let out = Command::new("sh").arg("-c").arg(&script).output().unwrap();
+        assert!(out.stderr.is_empty(), "{out:?}");
+        (dir, std::fs::read_to_string(&log).unwrap())
+    }
+
+    #[test]
+    fn a_setup_there_runs_its_commands_in_their_folders_and_says_how_it_went() {
+        let t = Temp::new();
+        let (a, b) = (t.0.as_path().join("a"), t.0.as_path().join("b"));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let steps = [
+            step_there("a", &a, "echo $GERDR_FEATURE > made; echo out"),
+            step_there("b", &b, "pwd"),
+        ];
+        let (dir, log) = run_there(&t, &steps);
+        assert_eq!(std::fs::read_to_string(a.join("made")).unwrap(), "slug\n");
+        assert_eq!(std::fs::read_to_string(dir.join("exit")).unwrap(), "0\n");
+        assert_eq!(std::fs::read_to_string(dir.join("step")).unwrap(), "2\n");
+        assert!(log.contains("== api: copied .env"), "{log}");
+        assert!(log.contains("\nout\n"), "{log}");
+        assert!(log.contains("== Setup finished after"), "{log}");
+        assert!(!log.contains(RUN_FAILED), "{log}");
+        assert_eq!(
+            report_there(&steps, 2, Ok(())),
+            (vec![steps[0].said(), steps[1].said()], None)
+        );
+    }
+
+    #[test]
+    fn a_setup_there_stops_at_its_first_failure() {
+        let t = Temp::new();
+        let a = t.0.as_path().join("a");
+        std::fs::create_dir_all(&a).unwrap();
+        let steps = [
+            step_there("a", &a, "exit 3"),
+            step_there("a", &a, "touch never"),
+        ];
+        let (dir, log) = run_there(&t, &steps);
+        assert_eq!(std::fs::read_to_string(dir.join("exit")).unwrap(), "3\n");
+        assert!(!a.join("never").exists());
+        assert!(
+            log.contains("== Setup failed: a: `exit 3` exited with 3"),
+            "{log}"
+        );
+        let (ran, failed) = report_there(&steps, 1, Err("exited with 3".into()));
+        assert!(ran.is_empty());
+        assert_eq!(failed.as_deref(), Some("a: `exit 3` exited with 3"));
+    }
+
+    #[test]
+    fn a_setup_there_without_its_folder_fails_and_runs_nothing_elsewhere() {
+        let t = Temp::new();
+        let steps = [step_there("a", &t.0.as_path().join("gone"), "touch here")];
+        let dir = t.0.as_path().join("run");
+        let script = script_there(
+            &dir.to_string_lossy(),
+            &t.0.as_path().join("l").to_string_lossy(),
+            &steps,
+            "s",
+            &[],
+            crate::feature::remote::ACTIVATE,
+        );
+        let out = Command::new("sh")
+            .arg("-c")
+            .arg(&script)
+            .current_dir(t.0.as_path())
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(1), "{out:?}");
+        assert!(!t.0.as_path().join("here").exists());
+    }
+
+    #[test]
+    fn the_environment_built_there_is_on_for_the_next_command() {
+        let t = Temp::new();
+        let a = t.0.as_path().join("a");
+        let bin = a.join(".venv/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(a.join(".venv/pyvenv.cfg"), "").unwrap();
+        std::fs::write(bin.join("activate"), "ACTIVE=yes\nexport ACTIVE\n").unwrap();
+        let steps = [step_there("a", &a, "echo $ACTIVE > said")];
+        run_there(&t, &steps);
+        assert_eq!(std::fs::read_to_string(a.join("said")).unwrap(), "yes\n");
+    }
 
     fn by_name(pairs: &[(&str, &[&str])]) -> BTreeMap<String, Vec<String>> {
         pairs

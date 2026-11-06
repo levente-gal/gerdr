@@ -65,6 +65,7 @@ use smithay::{
 };
 
 use crate::feature::manual::Verdict;
+use crate::machine_work::takes_a_place;
 use crate::manual_test::Row;
 use crate::{
     Gerdr,
@@ -507,6 +508,20 @@ pub(crate) enum Done {
         project: String,
         slug: String,
         report: feature::setup::Report,
+    },
+    /// A setup on another machine has this terminal there.
+    SetupPane {
+        project: String,
+        slug: String,
+        pane: String,
+    },
+    /// The terminals of run `n` of feature `slug`'s checks on another machine
+    /// were told to run: each one's qualified pane, or why it has none.
+    ChecksOpened {
+        project: String,
+        slug: String,
+        n: u32,
+        panes: Vec<(usize, Result<String, String>)>,
     },
     /// The code run `n` of feature `slug`'s checks is to run on was read.
     ChecksBegun {
@@ -3756,7 +3771,7 @@ impl FeaturePanel {
             Keysym::i | Keysym::I if ctrl && mods.shift && needs(stage).is_some() => {
                 return Some(PanelOutcome::PickModel(stage));
             }
-            Keysym::w | Keysym::W if ctrl && mods.shift && needs(stage).is_some() => {
+            Keysym::w | Keysym::W if ctrl && mods.shift && takes_a_place(stage) => {
                 return Some(PanelOutcome::CycleMachine(stage));
             }
             Keysym::q | Keysym::Q if ctrl && mods.shift && stops_on_machine(feature, stage) => {
@@ -4816,6 +4831,23 @@ impl Gerdr {
                 n,
                 begun,
             } => self.checks_begun(&project, &slug, n, begun),
+            Done::ChecksOpened {
+                project,
+                slug,
+                n,
+                panes,
+            } => self.checks_opened(&project, &slug, n, panes),
+            Done::SetupPane {
+                project,
+                slug,
+                pane,
+            } => {
+                let run = self.feature_mut(&project, &slug).and_then(|f| f.setup.as_mut());
+                if let Some(run) = run {
+                    run.pane = Some(pane);
+                    self.save_feature(&project, &slug);
+                }
+            }
             Done::CheckEnded {
                 project,
                 slug,
@@ -5010,24 +5042,23 @@ impl Gerdr {
                 (check_rows(feature, Stage::Verify).iter())
                     .filter(|row| row.outcome.is_none() && checks_running(feature))
                     .filter_map(|row| Some((row.pane.clone()?, row.began.is_some())))
-                    .filter(|(pane, _)| self.herdr_pane_place(pane).is_some())
+                    .filter(|(pane, _)| self.pane_there(pane))
                     .collect()
             })
             .unwrap_or_default();
         (self.features.check_tails).retain(|pane, _| panes.iter().any(|(p, _)| p == pane));
-        let Some(socket) = self.herdr.as_ref().map(|h| h.socket().to_path_buf()) else {
-            return;
-        };
         for (pane, began) in panes {
+            let Some((socket, there)) = self.pane_socket(&pane) else {
+                continue;
+            };
             let tail = (self.features.check_tails.entry(pane.clone())).or_default();
             if tail.reading {
                 continue;
             }
             tail.pane = pane.clone();
             tail.reading = true;
-            let socket = socket.clone();
             self.feature_work(None, move |_| Done::CheckTail {
-                lines: feature::page::read_check_tail(socket, &pane, began),
+                lines: feature::page::read_check_tail(socket, &there, began),
                 pane,
             });
         }
@@ -5862,6 +5893,7 @@ impl Gerdr {
         outcome
     }
 
+
     /// Do what the new feature dialog asked: create the feature off the
     /// thread, shown in the tasks panel meanwhile.
     pub fn apply_new_feature(&mut self, outcome: DialogOutcome) {
@@ -5959,6 +5991,7 @@ impl Gerdr {
             runs: Default::default(),
             stage_agents: Default::default(),
             stage_machines: Default::default(),
+            setups_elsewhere: Vec::new(),
             stage_models: Default::default(),
             fresh_milestones: false,
             setup: None,
@@ -8221,6 +8254,9 @@ impl Gerdr {
                 .map(|slot| model_label(slot.picked.as_deref())),
             place: self.place_label(feature, panel.page_stage(feature)),
             machine_line: self.machine_line(feature, panel.page_stage(feature)),
+            setup_on: (feature.setup.as_ref())
+                .and_then(|s| s.machine.as_deref())
+                .map(|id| self.machine_name(id)),
             manual: manual_counts.map(crate::manual_test::counts_text),
             criteria: self.criterion_rows(feature),
             manual_gate: manual_counts.map(manual_gate),
@@ -8687,6 +8723,8 @@ struct PanelState<'a> {
     /// Where the current agent runs, if on another machine, and whether that
     /// says all there is to say of it (see `machine_work::machine_line`).
     machine_line: Option<(String, bool)>,
+    /// The machine `Feature::setup` ran on, if not this one.
+    setup_on: Option<String>,
 }
 
 /// What the button picking a stage's model says.
@@ -9408,6 +9446,9 @@ fn verify_sections(
     if !said.is_empty() {
         said.remove(0);
     }
+    if let Some((place, _)) = &state.machine_line {
+        said.insert(0, line(place.clone(), CheckTone::Note));
+    }
     let mut out = vec![lines(&checks_heading(&cards), said)];
     out.extend(cards.into_iter().map(PageSection::Finding));
     out
@@ -9527,6 +9568,7 @@ fn setup_section(feature: &Feature, state: &PanelState) -> Option<PageSection> {
         .setup
         .as_ref()
         .filter(|run| run.finished.is_some())?;
+    let place = (state.setup_on.iter()).map(|name| line(format!("on {name}"), CheckTone::Note));
     let failed = (run.failed.iter()).map(|why| line(format!("failed: {why}"), CheckTone::Blocker));
     let missed = (run.not_copied.iter())
         .map(|what| line(format!("couldn't copy {what}"), CheckTone::Blocker));
@@ -9536,6 +9578,7 @@ fn setup_section(feature: &Feature, state: &PanelState) -> Option<PageSection> {
     if out.is_empty() {
         out.push(line("nothing was missing", CheckTone::Note));
     }
+    out.splice(0..0, place);
     Some(lines("Setup", capped(out, CheckTone::Note)))
 }
 
@@ -10101,7 +10144,7 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 5] = [
             ("Ctrl+R", "start the stage's agent afresh"),
             ("Ctrl+Shift+R", "show the stage's agent, or resume its chat"),
             ("Ctrl+Shift+A", "pick the stage's next agent"),
-            ("Ctrl+Shift+W", "pick the machine the stage's next agent runs on"),
+            ("Ctrl+Shift+W", "pick the machine the stage's next agent or check run goes on"),
             ("Ctrl+Shift+Q", "stop the stage's agent on another machine"),
             ("Ctrl+Shift+I", "pick the model of the stage's agent"),
             (
@@ -10933,6 +10976,7 @@ pub(crate) mod tests {
             runs: Default::default(),
             stage_agents: Default::default(),
             stage_machines: Default::default(),
+            setups_elsewhere: Vec::new(),
             stage_models: Default::default(),
             fresh_milestones: false,
             setup: None,

@@ -28,6 +28,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::machine_work::Placed;
 use crate::{
     Gerdr,
     agents::AgentKey,
@@ -334,10 +335,16 @@ impl Gerdr {
         let Some(feature) = self.feature(project, slug) else {
             return false;
         };
+        // A machine that isn't up says so where the agent starts.
+        let place = match self.placed(feature, Stage::Build) {
+            Placed::Here => None,
+            Placed::There(id) => Some(id),
+            Placed::Away(_) => return false,
+        };
         let has = setup::has_work(feature);
         let key = (project.to_owned(), slug.to_owned());
         let running = self.features.build.setting_up.contains(&key);
-        let first = setup_first(has, feature.setup.as_ref(), running, fresh);
+        let first = setup_first(has, feature.setup_at(place.as_deref()), running, fresh);
         let title = feature.title.clone();
         if first == SetupFirst::No {
             return false;
@@ -355,7 +362,7 @@ impl Gerdr {
             self.save_feature(project, slug);
         }
         if first == SetupFirst::Run {
-            self.start_setup(project, slug);
+            self.start_setup_on(project, slug, None, place);
         }
         self.show_warning(format!(
             "Setting up \u{201c}{title}\u{201d}; the Build agent starts once it is done"
@@ -411,7 +418,18 @@ impl Gerdr {
         {
             return self.show_warning(why);
         }
-        if self.start_setup(project, slug) {
+        let Some(feature) = self.feature(project, slug) else {
+            return;
+        };
+        let place = match self.setup_place(feature) {
+            Ok(place) => place,
+            Err(name) => {
+                return self.show_warning(format!(
+                    "{name} can't be reached: connect it to set this feature up there"
+                ));
+            }
+        };
+        if self.start_setup_on(project, slug, None, place) {
             return;
         }
         let Some(feature) = self.feature(project, slug) else {
@@ -429,18 +447,53 @@ impl Gerdr {
     /// `start_setup` of its repositories `only` (`Repo::key`), one that
     /// joined later, or all. Whether a setup started.
     pub fn start_setup_of(&mut self, project: &str, slug: &str, only: Option<Vec<String>>) -> bool {
+        self.start_setup_on(project, slug, only, None)
+    }
+
+    /// `start_setup_of`, on machine `place` (`None`: this one).
+    pub(crate) fn start_setup_on(
+        &mut self,
+        project: &str,
+        slug: &str,
+        only: Option<Vec<String>>,
+        place: Option<String>,
+    ) -> bool {
         if self.projects.project(project).is_none() {
             return false;
         }
         let Some(mut feature) = self.feature(project, slug).cloned() else {
             return false;
         };
+        let remote = match &place {
+            Some(id) => match self.machine_remote(id, &feature) {
+                Some(remote) => Some(remote),
+                None => {
+                    let name = self.machine_name(id);
+                    self.show_warning(format!(
+                        "{name} can't be reached: connect it to set this feature up there"
+                    ));
+                    return false;
+                }
+            },
+            None => None,
+        };
+        // A repository that joined isn't set up on the machines that ran the
+        // rest: they set it up again before they next run something.
+        if only.is_some()
+            && let Some(f) = self.feature_mut(project, slug)
+        {
+            f.setups_elsewhere.retain(|s| s.machine.is_none());
+            if f.setup.as_ref().is_some_and(|s| s.machine.is_some()) {
+                f.setup = None;
+            }
+        }
         if let Some(only) = only {
             feature.repos.retain(|r| only.contains(&r.key()));
         }
         if !setup::has_work(&feature) {
             return false;
         }
+        let old_pane = (feature.setup_at(place.as_deref())).and_then(|s| s.pane.clone());
         let commands = self.projects.workflows(&feature, |w| w.setup.clone());
         let extras = self.projects.workflows(&feature, |w| w.copy.clone());
         let venv = self.feature_venv(project, slug);
@@ -452,7 +505,7 @@ impl Gerdr {
         if let Some(f) = self.feature_mut(project, slug) {
             // A failure an earlier setup put in the problems list goes: this
             // run fixes it or reports its own.
-            if let Some(old) = f.setup.as_ref() {
+            if let Some(old) = f.setup_at(place.as_deref()) {
                 if let Some(why) = old.failed.as_deref() {
                     crate::problems::forget("features", &setup_failed_text(&f.title, why));
                 }
@@ -461,7 +514,8 @@ impl Gerdr {
                     crate::problems::forget("features", &text);
                 }
             }
-            f.setup = Some(SetupRun {
+            f.begin_setup(SetupRun {
+                machine: place,
                 started: now,
                 ..SetupRun::default()
             });
@@ -479,7 +533,7 @@ impl Gerdr {
         let log = setup::log_path(&store::dir(None, project, slug));
         let (project, slug) = (project.to_owned(), slug.to_owned());
         self.feature_work(Some(busy), move |tx| {
-            let mut progress = |what: String| {
+            let progress = |what: String| {
                 // It fails only once gerdr quits: nothing is left to show
                 // the progress in.
                 let _ = tx.send(Done::Progress {
@@ -489,7 +543,31 @@ impl Gerdr {
                     what: format!("Setting up \u{201c}{title}\u{201d}: {what}"),
                 });
             };
-            let report = setup::run(&feature, &commands, &extras, &venv, &log, &mut progress);
+            let report = match &remote {
+                Some(remote) => {
+                    let on_pane = |pane: String| {
+                        // As for the progress.
+                        let _ = tx.send(Done::SetupPane {
+                            project: project.clone(),
+                            slug: slug.clone(),
+                            pane,
+                        });
+                    };
+                    remote.set_up(&crate::machine_checks::SetupAsked {
+                        feature: &feature,
+                        commands: &commands,
+                        extras: &extras,
+                        old: old_pane.as_deref(),
+                        log: &log,
+                        progress: &progress,
+                        on_pane: &on_pane,
+                    })
+                }
+                None => {
+                    let mut progress = progress;
+                    setup::run(&feature, &commands, &extras, &venv, &log, &mut progress)
+                }
+            };
             Done::SetUp {
                 project,
                 slug,
@@ -516,6 +594,7 @@ impl Gerdr {
             ..SetupRun::default()
         });
         run.finished = Some(now);
+        run.pane = None;
         run.failed = report.failed.clone();
         run.copied = report.copied.clone();
         run.not_copied = report.not_copied.clone();
@@ -883,20 +962,29 @@ impl Gerdr {
                 "\u{201c}{title}\u{201d} is a feature of another project: switch to it to run its checks"
             ));
         }
-        if self.herdr.is_none() {
+        let machine = match self.placed(&feature, Stage::Verify) {
+            Placed::Here => None,
+            Placed::There(id) => Some(id),
+            Placed::Away(name) => {
+                return self.show_warning(format!(
+                    "{name} can't be reached: connect it, or pick another place for Verify"
+                ));
+            }
+        };
+        if machine.is_none() && self.herdr.is_none() {
             return self.show_error(
                 "The checks run in herdr's terminals, and herdr isn't connected".into(),
             );
         }
         // The checks need what the setup copies. A feature made before it
-        // copied anything hasn't had one.
+        // copied anything hasn't had one. Each machine has its own worktrees.
         let setting_up = self.features.build.setting_up.contains(&key);
         let has = setup::has_work(&feature);
-        let first = setup_first(has, feature.setup.as_ref(), setting_up, false);
+        let first = setup_first(has, feature.setup_at(machine.as_deref()), setting_up, false);
         let waits = match first {
             SetupFirst::No => false,
             SetupFirst::Wait => true,
-            SetupFirst::Run => self.start_setup(project, slug),
+            SetupFirst::Run => self.start_setup_on(project, slug, None, machine.clone()),
         };
         if waits {
             self.features.build.pending_verify.insert(key);
@@ -921,6 +1009,7 @@ impl Gerdr {
                 patch,
                 skipped,
                 heads,
+                machine,
                 ..VerifyRun::default()
             });
             f.log(now, format!("Verify run {n} started"));

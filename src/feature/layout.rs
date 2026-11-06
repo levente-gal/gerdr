@@ -1473,6 +1473,7 @@ mod tests {
             runs: Default::default(),
             stage_agents: Default::default(),
             stage_machines: Default::default(),
+            setups_elsewhere: Vec::new(),
             stage_models: Default::default(),
             fresh_milestones: false,
             setup: None,
