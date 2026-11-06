@@ -29,6 +29,7 @@ mod golden;
 mod help;
 mod hints;
 mod identity;
+mod machines;
 mod inbox;
 mod layers;
 mod menu;
@@ -80,6 +81,7 @@ pub use footer::*;
 pub use help::*;
 pub use hints::*;
 pub use identity::*;
+pub use machines::*;
 pub use inbox::*;
 pub use layers::ChromeElement;
 use layers::*;
@@ -169,6 +171,7 @@ pub struct ChromeView {
     pub finding_dialog: Option<FindingDialogView>,
     /// Set while the name and email dialog is open.
     pub identity: Option<IdentityView>,
+    pub machine: Option<MachineView>,
     /// Set while the project commands dialog is open.
     pub commands: Option<CommandsView>,
     /// Set while the plan review's sheet is open.
@@ -231,6 +234,7 @@ pub struct Chrome {
     new_feature: Overlay<(NewFeatureView, Size<i32, Logical>, Theme, f64)>,
     finding_dialog: Overlay<(FindingDialogView, Size<i32, Logical>, Theme, f64)>,
     identity: Overlay<(IdentityView, Size<i32, Logical>, Theme, f64)>,
+    machine: Overlay<(MachineView, Size<i32, Logical>, Theme, f64)>,
     commands: Overlay<(CommandsView, Size<i32, Logical>, Theme, f64)>,
     plan_sheet: Overlay<(PlanSheetView, Size<i32, Logical>, Theme, f64)>,
     features: FeatureTabLayers,
@@ -298,6 +302,7 @@ impl Chrome {
             new_feature: Overlay::default(),
             finding_dialog: Overlay::default(),
             identity: Overlay::default(),
+            machine: Overlay::default(),
             commands: Overlay::default(),
             plan_sheet: Overlay::default(),
             features: FeatureTabLayers::default(),
@@ -498,6 +503,16 @@ impl Chrome {
                     });
                     let part = self.identity.part(dialog, now, true, |(v, output, ..)| {
                         painter.identity_dialog(v, *output, scale, theme.palette())
+                    });
+                    parts.extend(scrimmed(part, output, theme.palette()));
+                }
+                Kind::Machines => {
+                    let dialog = view.machine.take().map(|v| {
+                        let (loc, size) = shadowed(machine_layout(&v, output).panel);
+                        ((v, output, theme, scale), loc, size)
+                    });
+                    let part = self.machine.part(dialog, now, true, |(v, output, ..)| {
+                        painter.machine_dialog(v, *output, scale, theme.palette())
                     });
                     parts.extend(scrimmed(part, output, theme.palette()));
                 }

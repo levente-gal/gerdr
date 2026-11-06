@@ -37,6 +37,11 @@
 //! claude = "claude --dangerously-skip-permissions"
 //! my-agent = "my-agent --fast"
 //!
+//! [machines]
+//! # Other machines gerdr reaches over SSH, by name: "Connect a machine" in
+//! # the launcher adds them here. gerdr connects with your SSH keys.
+//! build-box = "ana@10.0.0.5"
+//!
 //! [keep]
 //! # Apps that keep running when gerdr quits, as terminals do, by program:
 //! # gerdr shows them again when it starts. Needs wprs (wprsd and wprsc) on
@@ -131,6 +136,8 @@ struct Config {
     inbox: InboxConfig,
     /// Agent CLI commands by name (see `cli_agents`).
     agents: BTreeMap<String, String>,
+    /// Other machines' SSH targets by name (see `machines`).
+    machines: BTreeMap<String, String>,
     services: ServicesConfig,
     t3: T3Config,
     terminal: TerminalConfig,
@@ -213,6 +220,17 @@ pub fn sets(text: &str, table: &str, key: &str) -> bool {
 /// the end when it isn't there, everything else (comments, other keys,
 /// their order and spacing) as it was.
 pub fn with_bool(text: &str, table: &str, key: &str, value: bool) -> Result<String, String> {
+    with_value(text, table, key, Some(toml_edit::value(value)))
+}
+
+/// `with_bool` for any value; no value takes the key out, what else the
+/// table holds and its comments left be.
+fn with_value(
+    text: &str,
+    table: &str,
+    key: &str,
+    value: Option<toml_edit::Item>,
+) -> Result<String, String> {
     let mut doc: toml_edit::DocumentMut = text.parse().map_err(|err: toml_edit::TomlError| {
         err.message().to_owned() + &line_of(text, err.span())
     })?;
@@ -234,7 +252,14 @@ pub fn with_bool(text: &str, table: &str, key: &str, value: bool) -> Result<Stri
             doc.insert(table, toml_edit::Item::Table(new));
         }
     }
-    doc[table][key] = toml_edit::value(value);
+    match value {
+        Some(value) => doc[table][key] = value,
+        None => {
+            if let Some(table) = doc[table].as_table_like_mut() {
+                table.remove(key);
+            }
+        }
+    }
     Ok(doc.to_string())
 }
 
@@ -246,6 +271,16 @@ pub fn write_bool(table: &str, key: &str, value: bool) -> Result<(), String> {
     ensure_file(&path).map_err(|err| err.to_string())?;
     let text = std::fs::read_to_string(&path).map_err(|err| err.to_string())?;
     let text = with_bool(&text, table, key, value)?;
+    crate::projects::write_atomic(&path, text.as_bytes()).map_err(|err| err.to_string())
+}
+
+/// Keep machine `name`'s SSH target in `[machines]` of the config file, or
+/// take it out, keeping the rest of the file as it was (see `with_bool`).
+pub fn write_machine(name: &str, target: Option<&str>) -> Result<(), String> {
+    let path = config_file();
+    ensure_file(&path).map_err(|err| err.to_string())?;
+    let text = std::fs::read_to_string(&path).map_err(|err| err.to_string())?;
+    let text = with_value(&text, "machines", name, target.map(toml_edit::value))?;
     crate::projects::write_atomic(&path, text.as_bytes()).map_err(|err| err.to_string())
 }
 
@@ -378,7 +413,7 @@ pub fn services_from_text(text: &str) -> (Services, Vec<String>) {
 const KEYS_PROBLEM: &str = "[keys] ";
 
 /// The tables the file may have.
-const TABLES: [&str; 11] = [
+const TABLES: [&str; 12] = [
     "keys",
     "apps",
     "ui",
@@ -386,6 +421,7 @@ const TABLES: [&str; 11] = [
     "keep",
     "inbox",
     "agents",
+    "machines",
     "services",
     "t3",
     "terminal",
@@ -411,7 +447,7 @@ impl Config {
         let (keys, apps, ui, git) = (take("keys"), take("apps"), take("ui"), take("git"));
         let (keep, inbox, agents) = (take("keep"), take("inbox"), take("agents"));
         let (services, t3, notifications) = (take("services"), take("t3"), take("notifications"));
-        let terminal = take("terminal");
+        let (terminal, machines) = (take("terminal"), take("machines"));
         Self {
             keys: table("keys", keys, problems),
             apps: table("apps", apps, problems),
@@ -420,6 +456,7 @@ impl Config {
             keep: table("keep", keep, problems),
             inbox: table("inbox", inbox, problems),
             agents: table("agents", agents, problems),
+            machines: table("machines", machines, problems),
             services: table("services", services, problems),
             t3: table("t3", t3, problems),
             terminal: table("terminal", terminal, problems),
@@ -606,6 +643,8 @@ pub struct Settings {
     pub keep: Vec<String>,
     /// The agent CLI commands by name (see `cli_agents`).
     pub agents: BTreeMap<String, String>,
+    /// Other machines' SSH targets by name (see `machines`).
+    pub machines: BTreeMap<String, String>,
     /// How the services' errors are found and told (see `services`).
     pub services: Services,
     /// How T3 Code is kept up to date.
@@ -644,6 +683,7 @@ pub fn load() -> Settings {
     let t3 = t3_from_text(&text);
     let terminal = terminal_from_text(&text);
     let notifications = notifications_from_text(&text);
+    let machines = Config::read(&text, &mut Vec::new()).machines;
     // `Keymap::new` keeps its own under "keys": only the rest here.
     crate::problems::clear("config");
     for problem in problems.iter().filter(|p| !p.starts_with(KEYS_PROBLEM)) {
@@ -658,6 +698,7 @@ pub fn load() -> Settings {
         linear,
         keep,
         agents,
+        machines,
         services,
         t3,
         terminal,
@@ -866,6 +907,11 @@ const TEMPLATE: &str = "\
 # claude = \"claude --dangerously-skip-permissions\"
 # my-agent = \"my-agent --fast\"
 #
+# [machines]
+# # Other machines gerdr reaches over SSH, by name: \"Connect a machine\" in
+# # the launcher adds them here. gerdr connects with your SSH keys.
+# build-box = \"ana@10.0.0.5\"
+#
 # [keep]
 # # Apps that keep running when gerdr quits, as terminals do, by program:
 # # gerdr shows them again when it starts. Needs wprs (wprsd and wprsc) on
@@ -992,6 +1038,7 @@ impl Gerdr {
         self.keep_apps = settings.keep;
         self.cli_agents = crate::cli_agents::installed(&settings.agents);
         self.agent_config = settings.agents;
+        self.set_saved_machines(settings.machines);
         if let Some(notifier) = &mut self.notifier {
             notifier.set_settings(settings.notifications);
         }

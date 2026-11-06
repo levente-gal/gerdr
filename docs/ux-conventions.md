@@ -34,6 +34,7 @@ rules, for reviewing a branch before it merges.
 | Shift+Enter | In a field of several lines: a new line, Enter being the panel's action (a diff's review comment, the project commands dialog). |
 | Space | In the project commands dialog, on a borrowed check of the "This feature" tab: skip it for this feature, or run it again (also its Skip / Run button). Nothing is saved until Save. On a check's card on Verify's page: skip the check it borrows, or stop skipping it (also its Skip / Don't skip button). It saves at once, with an Undo, and applies from the next run. |
 | Alt+U | In the project commands dialog: fill the focused empty field with what is suggested for it (also its Use button). Nothing is saved until Save. |
+| Alt+X | In the dialog connecting a machine: press the button fixing what failed (Copy command, Open terminal). Only there. |
 | Ctrl+Shift+T | Start a feature's sandbox on the feature tab's Manual test page, after a dialog asks which commands run in it (Space checks; the feature keeps the choice, and Ctrl+Shift+G and Ctrl+Shift+X go by it without asking); stop it, asking, once it runs (at once while it starts). |
 | Ctrl+Shift+Y | Open the running sandbox's app, in a tab inside it (feature tab, Manual test). |
 | Ctrl+Shift+G | Start the sandbox again on the same data (feature tab, Manual test). |
