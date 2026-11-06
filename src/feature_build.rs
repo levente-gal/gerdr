@@ -963,6 +963,10 @@ impl Gerdr {
                 check.outcome = None;
             }
         }
+        // A run on older code goes again: that one will say.
+        if !outdated(feature, &evidence) {
+            feature::fix_round::verify_ended(&mut feature.verify_fixes, n, &evidence);
+        }
         let first = failures
             .first()
             .cloned()

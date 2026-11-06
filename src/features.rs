@@ -80,7 +80,7 @@ use crate::{
     feature::{
         self, Event, Feature, Pr, Repo, Route, ShipStep, Stage, Status,
         agents::needs,
-        fix_round::{FixPhase, FixRound},
+        fix_round::{FixPhase, FixRound, VerifyFix},
         graph,
         hook::Guard,
         layout::{self, AddSpec, Created, Found, LinkSpec, Root},
@@ -5933,6 +5933,7 @@ impl Gerdr {
             manual: None,
             fix_round: None,
             last_fix_round: None,
+            verify_fixes: Vec::new(),
             ran_once: Default::default(),
             fix_rounds: 0,
         };
@@ -9433,6 +9434,69 @@ fn setup_section(feature: &Feature, state: &PanelState) -> Option<PageSection> {
     Some(lines("Setup", capped(out, CheckTone::Note)))
 }
 
+/// What Build's page says of the fix rounds Verify's failures started in
+/// `feature`, newest first: what failed only of the newest, which is the one
+/// that still counts, so only its line takes a tone. Ticks are in the list
+/// below, under the same name.
+fn verify_fixes_section(feature: &Feature, now: u64) -> Option<PageSection> {
+    let carded = fix_round_on(feature, Stage::Build)
+        .or_else(|| last_round_on(feature, Stage::Build))
+        .map(|round| round.n);
+    let head = |fix: &VerifyFix| {
+        let open = (feature.fix_round.as_ref()).filter(|round| round.n == fix.round);
+        verify_fix_head(fix, open, carded == Some(fix.round), now)
+    };
+    let mut fixes = feature.verify_fixes.iter().rev();
+    let newest = fixes.next()?;
+    let mut out = vec![head(newest)];
+    out.extend(capped(verify_fix_lines(newest), CheckTone::Blocker));
+    let older = fixes.map(|fix| CheckLine {
+        tone: CheckTone::Note,
+        ..head(fix)
+    });
+    out.extend(capped(older.collect(), CheckTone::Note));
+    Some(lines("Verify failures", out))
+}
+
+/// The line of a fix round Verify's failures started: "Review 3 · run 4
+/// failed 12m ago · Claude Code · fixes made · run 5 passed". `open` is the
+/// round while it runs, and `on_card` says a card on the page tells how it
+/// stands.
+fn verify_fix_head(fix: &VerifyFix, open: Option<&FixRound>, on_card: bool, now: u64) -> CheckLine {
+    let mut parts = vec![
+        feature::fix_round::label(fix.round),
+        format!("run {} failed {}", fix.run, projects::ago(now, fix.at)),
+    ];
+    if !fix.agent.is_empty() {
+        parts.push(fix.agent.clone());
+    }
+    if !on_card {
+        parts.push(match open {
+            Some(round) => round.line(),
+            None if fix.dropped => "dropped".to_owned(),
+            None => feature::fix_round::SENT.to_owned(),
+        });
+    }
+    if let Some((n, passed)) = fix.next {
+        let how = if passed { "passed" } else { "failed" };
+        parts.push(format!("run {n} {how}"));
+    }
+    let tone = match (open, fix.next) {
+        (Some(_), _) | (None, Some((_, false))) => CheckTone::Blocker,
+        (None, Some((_, true))) => CheckTone::Ready,
+        (None, None) => CheckTone::Note,
+    };
+    line(parts.join(" \u{b7} "), tone)
+}
+
+/// What failed in fix round `fix`, with why under the failure that says.
+fn verify_fix_lines(fix: &VerifyFix) -> Vec<CheckLine> {
+    let mut failures = (fix.failures.iter()).map(|f| line(f.clone(), CheckTone::Blocker));
+    let first = failures.next();
+    let why = (fix.why.iter()).map(|w| line(w.clone(), CheckTone::Note));
+    first.into_iter().chain(why).chain(failures).collect()
+}
+
 /// AI review's findings in `feature`, by state, once read.
 fn suggestions_section(feature: &Feature) -> Option<PageSection> {
     use crate::feature::plan_review::State;
@@ -9656,6 +9720,7 @@ fn stage_page(
                     total: stop.total as usize,
                     items: Vec::new(),
                 });
+                sections.extend(verify_fixes_section(feature, now));
                 sections.extend(milestones_of(state.probe, stage).or(counted));
                 sections.extend(fix_rounds_of(state.probe));
                 sections.extend(setup_section(feature, state));
@@ -10755,6 +10820,7 @@ pub(crate) mod tests {
             manual: None,
             fix_round: None,
             last_fix_round: None,
+            verify_fixes: Vec::new(),
             ran_once: Default::default(),
             fix_rounds: 0,
         }
@@ -15698,6 +15764,175 @@ pub(crate) mod tests {
         );
         assert!(matches!(page.sections[0], PageSection::Agent { .. }));
         assert_eq!(page.status.map(|s| s.tone), Some(CheckTone::Blocker));
+    }
+
+    /// `f`'s Build page sections, past its agent's card and what's picked.
+    fn build_sections(f: &Feature) -> Vec<PageSection> {
+        stage_page(f, Stage::Build, &PanelState::default(), &[], 10_000).sections
+    }
+
+    fn verify_fix(round: u32, run: u32) -> VerifyFix {
+        VerifyFix {
+            round,
+            run,
+            at: 9_000,
+            agent: "Claude Code".into(),
+            failures: vec![
+                "api: `test` exited with 1".into(),
+                "web: `lint` exited with 2".into(),
+            ],
+            why: vec!["FAIL auth".into()],
+            ..VerifyFix::default()
+        }
+    }
+
+    #[test]
+    fn builds_page_says_what_verify_sent_back_above_its_list_and_setup_last() {
+        let mut f = feature("p", vec![repo("api", true)], 4);
+        assert!(
+            !(build_sections(&f).iter()).any(
+                |s| matches!(s, PageSection::Lines { label, .. } if label == "Verify failures")
+            ),
+            "none with no such round"
+        );
+        f.setup = Some(feature::setup::SetupRun {
+            finished: Some(2),
+            ..Default::default()
+        });
+        f.verify_fixes = vec![
+            VerifyFix {
+                next: Some((3, false)),
+                ..verify_fix(1, 2)
+            },
+            VerifyFix {
+                dropped: true,
+                ..verify_fix(2, 3)
+            },
+        ];
+        let mut read = probe(None);
+        read.docs.milestones = BTreeMap::from([(Stage::Build, vec![(true, "API".to_owned())])]);
+        let state = PanelState {
+            probe: Some(&read),
+            ..PanelState::default()
+        };
+        let page = stage_page(&f, Stage::Build, &state, &[], 10_000);
+        let names: Vec<&str> = (page.sections.iter())
+            .map(|s| match s {
+                PageSection::Lines { label, .. } | PageSection::Milestones { label, .. } => {
+                    label.as_str()
+                }
+                _ => "",
+            })
+            .filter(|name| !name.is_empty() && *name != "Stale")
+            .collect();
+        assert_eq!(names, ["Verify failures", "Build", "Setup"]);
+        let said = (page.sections.iter()).find_map(|s| match s {
+            PageSection::Lines { label, lines } if label == "Verify failures" => Some(lines),
+            _ => None,
+        });
+        assert_eq!(
+            said.unwrap(),
+            &[
+                line(
+                    "Review 2 \u{b7} run 3 failed 16m ago \u{b7} Claude Code \u{b7} dropped",
+                    CheckTone::Note
+                ),
+                line("api: `test` exited with 1", CheckTone::Blocker),
+                line("FAIL auth", CheckTone::Note),
+                line("web: `lint` exited with 2", CheckTone::Blocker),
+                // Only the newest takes a tone: this one's failure is history.
+                line(
+                    "Review 1 \u{b7} run 2 failed 16m ago \u{b7} Claude Code \u{b7} fixes made \u{b7} run 3 failed",
+                    CheckTone::Note
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_verify_rounds_line_says_how_it_stands_unless_a_card_does() {
+        let f = in_round(
+            feature("p", vec![repo("api", true)], 4),
+            Stage::Verify,
+            FixPhase::Ready,
+        );
+        let round = f.fix_round.as_ref();
+        let fix = verify_fix(1, 2);
+        let head = |fix: &VerifyFix, open, on_card| verify_fix_head(fix, open, on_card, 10_000);
+        assert_eq!(
+            head(&fix, round, false),
+            line(
+                "Review 1 \u{b7} run 2 failed 16m ago \u{b7} Claude Code \u{b7} fix plan ready",
+                CheckTone::Blocker
+            )
+        );
+        assert_eq!(
+            head(&fix, round, true),
+            line(
+                "Review 1 \u{b7} run 2 failed 16m ago \u{b7} Claude Code",
+                CheckTone::Blocker
+            )
+        );
+        let passed = VerifyFix {
+            next: Some((3, true)),
+            agent: String::new(),
+            ..verify_fix(1, 2)
+        };
+        assert_eq!(
+            head(&passed, None, false),
+            line(
+                "Review 1 \u{b7} run 2 failed 16m ago \u{b7} fixes made \u{b7} run 3 passed",
+                CheckTone::Ready
+            )
+        );
+        // Its first commit brings the round's card to Build's page.
+        let fixing = in_round(
+            feature("p", vec![repo("api", true)], 3),
+            Stage::Verify,
+            FixPhase::Fixing,
+        );
+        assert!(fix_round_on(&fixing, Stage::Build).is_some());
+        let mut fixing = fixing;
+        fixing.verify_fixes = vec![fix];
+        let section = verify_fixes_section(&fixing, 10_000).unwrap();
+        let PageSection::Lines { lines, .. } = section else {
+            panic!("not lines");
+        };
+        assert_eq!(
+            lines[0].text,
+            "Review 1 \u{b7} run 2 failed 16m ago \u{b7} Claude Code"
+        );
+    }
+
+    #[test]
+    fn a_long_verify_failure_list_stays_short() {
+        let mut f = feature("p", vec![repo("api", true)], 4);
+        f.verify_fixes = (1..=7).map(|n| verify_fix(n, n + 1)).collect();
+        f.verify_fixes[6].failures = (0..9).map(|i| format!("check {i}")).collect();
+        let PageSection::Lines { lines, .. } = verify_fixes_section(&f, 10_000).unwrap() else {
+            panic!("not lines");
+        };
+        let texts: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(texts.len(), 1 + MAX_CHECK_LINES + MAX_CHECK_LINES);
+        assert_eq!(texts[MAX_CHECK_LINES], "and 7 more");
+        assert_eq!(texts.last(), Some(&"and 3 more"));
+    }
+
+    #[test]
+    fn a_record_without_verify_fixes_reads_and_starting_over_forgets_them() {
+        let mut f = feature("p", vec![repo("api", true)], 3);
+        f.verify_fixes = vec![verify_fix(1, 2)];
+        let mut raw = serde_json::to_value(&f).unwrap();
+        raw.as_object_mut().unwrap().remove("verify-fixes");
+        raw.as_object_mut().unwrap().remove("verify_fixes");
+        let old: Feature = serde_json::from_value(raw).unwrap();
+        assert!(old.verify_fixes.is_empty());
+        assert!(verify_fixes_section(&old, 10_000).is_none());
+        let again: Feature = serde_json::from_str(&serde_json::to_string(&f).unwrap()).unwrap();
+        assert_eq!(again.verify_fixes, f.verify_fixes);
+        let at = f.current().unwrap();
+        assert!(f.start_over(at, 10_000));
+        assert!(f.verify_fixes.is_empty());
     }
 
     #[test]
