@@ -750,6 +750,11 @@ pub struct FeatureTabView {
     /// Groups of rows not read yet, or that couldn't be: `expanded` only.
     pub repo_notes: Vec<RepoNote>,
     pub page: StagePage,
+    /// A feature's code review takes the tab under the rail: no strip,
+    /// columns or footer of its own.
+    pub review_page: bool,
+    /// That review has the keys: the rail shows no focus.
+    pub review_keys: bool,
     pub activity: Vec<ActivityRow>,
     /// How far each column is scrolled down, in logical pixels, indexed
     /// by `TabColumn`.
@@ -819,6 +824,8 @@ pub enum FeatureTabHit {
 /// not scrolled: `FeatureTabView::scroll` moves it up.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FeatureTabLayout {
+    /// With `FeatureTabView::review_page`: all under the rail's rule.
+    pub review: Option<Rect>,
     pub frame: Rect,
     pub title: Rect,
     pub sub: Rect,
@@ -2614,8 +2621,15 @@ pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayou
             Rectangle::new((left, rail_top).into(), (next - left, rail_h).into())
         })
         .collect();
-    // Under the rail's rule, the columns.
-    let mut body_top = rail_top + rail_h + RAIL_GAP + 1 + COLUMN_GAP;
+    // Under the rail's rule, the columns; or across it all, the review.
+    let rule_end = rail_top + rail_h + RAIL_GAP + 1;
+    let review = view.review_page.then(|| {
+        Rectangle::new(
+            (frame.loc.x, rule_end).into(),
+            (width, (frame.loc.y + frame.size.h - rule_end).max(0)).into(),
+        )
+    });
+    let mut body_top = rule_end + COLUMN_GAP;
 
     let hints_h = measured_footer_height(&hint_strs(&view.hints), width);
     let hints = Rectangle::new(
@@ -2628,7 +2642,8 @@ pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayou
     let mut repo_buttons = Vec::new();
     let mut repo_removes = Vec::new();
     let mut more_repos = Vec::new();
-    let strip = Rectangle::new((x, body_top).into(), (inner, CHIP_ROW).into());
+    let strip_h = if view.review_page { 0 } else { CHIP_ROW };
+    let strip = Rectangle::new((x, body_top).into(), (inner, strip_h).into());
     body_top += CHIP_ROW + COLUMN_GAP;
     let chip_y = strip.loc.y + (CHIP_ROW - ROW_BUTTON) / 2;
     let label_w = width_of(REPOS_LABEL, SMALL_FONT_SIZE).ceil() as i32;
@@ -2638,9 +2653,9 @@ pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayou
     });
     let repos_toggle = Rectangle::new(
         (right - toggle_w, chip_y).into(),
-        (toggle_w, ROW_BUTTON).into(),
+        (if view.review_page { 0 } else { toggle_w }, ROW_BUTTON).into(),
     );
-    if !view.expanded && view.repos_error.is_none() {
+    if !view.expanded && view.repos_error.is_none() && !view.review_page {
         // The chips that fit, from the selected one if it would be past
         // them.
         let start = x + label_w + REPOS_LABEL_GAP;
@@ -2712,7 +2727,7 @@ pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayou
     let bottom = hints.loc.y - 4;
     // Unfolded, the rows' card goes across the tab, as tall as they need
     // up to its share of the body, pushing the other columns down.
-    let repos_card = view.expanded.then(|| {
+    let repos_card = (view.expanded && !view.review_page).then(|| {
         let mut dry = Stack {
             x: 0,
             w: (inner - 2 * CARD_PAD).max(1),
@@ -2740,11 +2755,13 @@ pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayou
     let page_x = x;
     let mut page_w = inner;
     columns[TabColumn::Repos as usize] = repos_card;
-    if width >= ACTIVITY_BELOW {
-        columns[TabColumn::Activity as usize] = Some(card(right - ACTIVITY_W, ACTIVITY_W));
-        page_w -= ACTIVITY_W + COLUMN_GAP;
+    if !view.review_page {
+        if width >= ACTIVITY_BELOW {
+            columns[TabColumn::Activity as usize] = Some(card(right - ACTIVITY_W, ACTIVITY_W));
+            page_w -= ACTIVITY_W + COLUMN_GAP;
+        }
+        columns[TabColumn::Page as usize] = Some(card(page_x, page_w.max(1)));
     }
-    columns[TabColumn::Page as usize] = Some(card(page_x, page_w.max(1)));
 
     let mut pieces: [Vec<(Rect, Piece)>; 3] = Default::default();
     let mut content = [0; 3];
@@ -2791,6 +2808,7 @@ pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayou
     }
 
     FeatureTabLayout {
+        review,
         frame,
         title,
         sub,
@@ -3121,6 +3139,8 @@ fn slice_view(view: &FeatureTabView, slice: TabSlice) -> FeatureTabView {
         repos_error: None,
         repo: 0,
         focus: TabArea::Stages,
+        review_page: view.review_page,
+        review_keys: view.review_keys,
         expanded: view.expanded,
         more: 0,
         picked: None,
@@ -3796,7 +3816,7 @@ impl Painter {
             let hovered = view.hover == Some(FeatureTabHit::Node(i));
             let spot = circle(*slot);
             if node.selected {
-                let ring = if view.focus == TabArea::Stages {
+                let ring = if view.focus == TabArea::Stages && !view.review_keys {
                     p.accent
                 } else {
                     p.border
@@ -4047,6 +4067,10 @@ impl Painter {
                 color,
             )
         };
+        // The review over the tab has no strip.
+        if view.review_page {
+            return;
+        }
         let focused = view.focus == TabArea::Repos;
         let label = if focused { p.accent } else { p.muted };
         line(c, REPOS_LABEL, l.repos_label, label);
@@ -5466,6 +5490,32 @@ mod tests {
     /// of two features.
     fn tab_view() -> FeatureTabView {
         crate::chrome::golden::feature_tab()
+    }
+
+    #[test]
+    fn a_review_on_the_page_takes_all_under_the_rail() {
+        let mut view = super::super::golden::feature_tab();
+        let plain = tab_at(&view, 1180);
+        assert!(plain.review.is_none());
+        view.review_page = true;
+        view.hints.clear();
+        let l = tab_at(&view, 1180);
+        let review = l.review.expect("the review's place");
+        // Under the rail, over all the rest of the tab.
+        let rail_end = l.nodes.iter().map(|n| n.loc.y + n.size.h).max().unwrap();
+        assert!(review.loc.y >= rail_end);
+        assert_eq!(review.size.w, 1180);
+        assert_eq!(review.loc.y + review.size.h, l.frame.loc.y + l.frame.size.h);
+        // No columns, chips or toggle left to press under it.
+        assert!(l.columns.iter().all(Option::is_none));
+        assert_eq!(l.strip.size.h, 0);
+        assert_eq!(l.repos_toggle.size.w, 0);
+        assert!(l.repos.iter().all(|r| r.size.w == 0));
+        // The rail still works.
+        assert_eq!(
+            l.hit(&view, centre(l.nodes[2])),
+            Some(FeatureTabHit::Node(2))
+        );
     }
 
     fn tab_at(view: &FeatureTabView, w: i32) -> FeatureTabLayout {

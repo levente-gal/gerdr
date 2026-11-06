@@ -22,7 +22,9 @@
 //!
 //! A feature's code review (see `feature_diff`) shows the same way too:
 //! the feature's changes over every repository it touched, one section
-//! each, read-only. Each file's checkbox says whether it was viewed; the
+//! each, read-only, its files listed beside the diff when there is room
+//! (`file_tree::FileTree`), and on its stage's page laid flat under the rail.
+//! Each file's checkbox says whether it was viewed; the
 //! AI review's findings show as comments of their own; its header has what
 //! works at the stage the feature is at (`FeatureOf::buttons`).
 
@@ -1285,6 +1287,9 @@ impl WorktreeDiff {
                     B::Comment if self.diff.on_finding() => "edit the finding".into(),
                     B::Comment => "comment on the lines".into(),
                     B::Close if self.commit.is_some() || self.doc.is_some() => "back".into(),
+                    B::Close if self.feature.as_ref().is_some_and(|f| f.inline) => {
+                        "go to the stages".into()
+                    }
                     B::Close if self.feature.as_ref().is_some_and(|f| f.back) => "back".into(),
                     B::Close => "close".into(),
                     B::NextComment => match self.diff.comments_to_visit() {
@@ -1585,7 +1590,10 @@ impl crate::Gerdr {
         if self.repos.panel.is_some() {
             return None;
         }
-        Some(&self.review_tab()?.wd)
+        match self.review_tab() {
+            Some(tab) => Some(&tab.wd),
+            None => self.inline_wd(),
+        }
     }
 
     /// `wd`, to change.
@@ -1596,7 +1604,10 @@ impl crate::Gerdr {
         if self.repos.panel.is_some() {
             return None;
         }
-        Some(&mut self.review_tab_mut()?.wd)
+        if self.review_tab().is_some() {
+            return Some(&mut self.review_tab_mut()?.wd);
+        }
+        self.inline_wd_mut()
     }
 
     /// What the worktree diff's views and keys need of the chrome.
@@ -1606,8 +1617,16 @@ impl crate::Gerdr {
         {
             return self.doc_env(tab.mode);
         }
-        let size = self.repos_rect();
-        let tree_share = self.review_tree_share(size);
+        let list = self.wd().is_some_and(|wd| wd.tree.is_some());
+        self.env_in(self.repos_rect(), list)
+    }
+
+    /// What a diff in `size`, with a file list or not, needs of the chrome.
+    pub(crate) fn env_in(&self, size: crate::chrome::Rect, list: bool) -> Env {
+        let tree_share = match list && size.size.w >= crate::chrome::REVIEW_TREE_MIN_PANEL {
+            true => (self.repos.review_tree_share).unwrap_or(crate::chrome::REVIEW_TREE_SHARE),
+            false => 0.0,
+        };
         Env {
             page: crate::chrome::diff_only_page(size, self.density),
             cols: crate::chrome::diff_tree_cols(size, tree_share),
@@ -1615,16 +1634,6 @@ impl crate::Gerdr {
             sheet_rows: crate::chrome::repos_sheet_rows(size, true),
             tree_page: crate::chrome::diff_tree_page(size, self.density),
             tree_share,
-        }
-    }
-
-    /// The share of `area` the file list of the diff on show takes: none
-    /// without one, or with too little room for it.
-    pub(crate) fn review_tree_share(&self, area: crate::chrome::Rect) -> f64 {
-        let list = self.wd().is_some_and(|wd| wd.tree.is_some());
-        match list && area.size.w >= crate::chrome::REVIEW_TREE_MIN_PANEL {
-            true => (self.repos.review_tree_share).unwrap_or(crate::chrome::REVIEW_TREE_SHARE),
-            false => 0.0,
         }
     }
 
@@ -1902,6 +1911,14 @@ impl crate::Gerdr {
         let doc = self.wd().is_some_and(|wd| wd.doc.is_some());
         let feature = self.wd().is_some_and(|wd| wd.feature.is_some());
         match done? {
+            // On the Code review page there is nothing to close: the rail has
+            // the keys, to go to another page.
+            Done::Close if feature && self.on_inline_review() => {
+                if let Some(panel) = self.features.panel.as_mut() {
+                    panel.rail_keys = true;
+                }
+                None
+            }
             Done::Close if feature => {
                 self.close_feature_review();
                 None
@@ -2017,6 +2034,19 @@ impl crate::Gerdr {
         sym: Keysym,
         typed: Keysym,
     ) -> Option<crate::repos::Outcome> {
+        // On the feature's page, Ctrl+PgUp and PgDn still go to another
+        // feature.
+        let only_ctrl = mods.ctrl && !(mods.alt || mods.shift || mods.logo);
+        let pages = matches!(
+            sym,
+            Keysym::Page_Up | Keysym::KP_Page_Up | Keysym::Page_Down | Keysym::KP_Page_Down
+        );
+        if only_ctrl && pages && self.on_inline_review() {
+            if let Some(outcome) = self.feature_panel_key(mods, sym, typed) {
+                self.apply_feature_panel(outcome);
+            }
+            return None;
+        }
         let env = self.worktree_env();
         let done = self.wd_mut()?.key(mods, sym, typed, env);
         self.worktree_done(done)
@@ -2085,11 +2115,9 @@ impl crate::Gerdr {
     pub(crate) fn worktree_diff_scroll(&mut self, motion: Motion) {
         let now = Instant::now();
         let env = self.worktree_env();
-        let pos = self.seat.get_pointer().map(|p| p.current_location());
         let over_tree = (self.repos_view())
             .map(|view| crate::chrome::repos_layout(&view, self.repos_rect()))
-            .zip(pos)
-            .is_some_and(|(layout, pos)| layout.tree.to_f64().contains(pos));
+            .is_some_and(|layout| layout.tree.to_f64().contains(self.pointer));
         if let Some(wd) = self.wd_mut() {
             match over_tree {
                 true => wd.scroll_tree(motion, now, env),

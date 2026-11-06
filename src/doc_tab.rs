@@ -264,7 +264,9 @@ impl Gerdr {
 
     /// What the shown file's tab paints, whatever is over it.
     pub(crate) fn doc_tab_view(&self) -> Option<ReposView> {
-        let tab = self.review_tab()?;
+        let Some(tab) = self.review_tab() else {
+            return self.inline_review_view();
+        };
         let file = tab.wd.doc.as_ref()?.file;
         let mut view = tab.wd.repos_view(self.doc_env(tab.mode));
         let wide = self.doc_wide();
@@ -297,7 +299,10 @@ impl Gerdr {
             }
         }
         self.sync_preview_marks();
-        shown?;
+        // No file's tab: a feature's review on its page paints the same way.
+        if shown.is_none() {
+            return self.sync_inline_review();
+        }
         self.doc_stand();
         let (w, t) = (self.active_workspace, self.workspace()?.active_tab);
         let workspace = self.active_workspace;
@@ -422,6 +427,10 @@ impl Gerdr {
     /// Whether the shown file's tab has the keys now: not in Preview, where
     /// the page has them, unless a sheet of its own is open.
     pub(crate) fn doc_tab_takes_keys(&self) -> bool {
+        if let Some(wd) = self.inline_wd() {
+            let rail = self.features.panel.as_ref().is_some_and(|p| p.rail_keys);
+            return !rail || wd.sheet(self.inline_env()).is_some();
+        }
         self.review_tab().is_some_and(|tab| {
             tab.mode != DocMode::Preview || tab.wd.sheet(self.doc_env(tab.mode)).is_some()
         })
@@ -431,7 +440,7 @@ impl Gerdr {
     /// page, the browser does, unless a sheet of its own is open.
     pub(crate) fn doc_tab_covers(&self, pos: Point<f64, Logical>) -> bool {
         let Some(tab) = self.review_tab() else {
-            return false;
+            return self.inline_wd().is_some() && self.review_area().to_f64().contains(pos);
         };
         if !self.content_rect().to_f64().contains(pos) {
             return false;
@@ -461,7 +470,7 @@ impl Gerdr {
 
     /// The panels a tab coming to show would sit under close, the
     /// repositories panel kept as it was.
-    fn close_panels_for_tab(&mut self) {
+    pub(crate) fn close_panels_for_tab(&mut self) {
         self.switcher = None;
         self.project_menu = None;
         self.tasks_panel = None;
@@ -562,9 +571,13 @@ impl Gerdr {
             return None;
         }
         let view = self.doc_tab_view()?;
-        let layout = chrome::repos_layout(&view, self.content_rect());
+        let layout = chrome::repos_layout(&view, self.review_area());
         if layout.sheet.is_some() {
             return None;
+        }
+        // Beside a feature's review, its file list.
+        if layout.splitter.to_f64().contains(pos) {
+            return Some(Drag::ReposSplit);
         }
         let gap = layout.page_gap?.to_f64();
         let near = pos.x >= gap.loc.x - 2.0
@@ -584,10 +597,18 @@ impl Gerdr {
     /// Where the repositories panel goes: centred in the output; the
     /// review of a file's tab across the tab, with no panel over it.
     pub fn repos_rect(&self) -> Rect {
-        match !self.repos.is_open() && self.review_tab().is_some() {
-            true => self.content_rect(),
+        let flat = self.review_tab().is_some() || self.inline_wd().is_some();
+        match !self.repos.is_open() && flat {
+            true => self.review_area(),
             false => chrome::repos_panel_rect(self.output_size()),
         }
+    }
+
+    /// Where a review laid flat into its tab goes: across the tab, but for
+    /// a feature's on its page, under the rail.
+    pub(crate) fn review_area(&self) -> Rect {
+        let on_page = self.inline_wd().and(self.features.panel.as_ref());
+        (on_page.and_then(|panel| panel.review_rect)).unwrap_or_else(|| self.content_rect())
     }
 
     /// The review of `file`, any tab's: its caret's line and its comments.

@@ -690,6 +690,11 @@ impl Gerdr {
             // Its diff is being read: the cursor goes there once it is.
             fe.focus_note = Some(c);
         }
+        // On the page it may have been read already.
+        let env = self.worktree_env();
+        if let Some(wd) = self.inline_wd_mut().filter(|wd| wd.read) {
+            wd.place_findings(env);
+        }
     }
 
     /// Write or edit the user's comment on finding `id`, on its card on the

@@ -1,9 +1,18 @@
 //! Code review of a feature: its diff over every repository it touched,
 //! shown across the repositories panel as a worktree's diff is (see
-//! `worktree_diff`, `WorktreeDiff::feature`), read-only.
+//! `worktree_diff`, `WorktreeDiff::feature`), read-only, with a list of its
+//! files beside it (`file_tree::FileTree`).
 //!
-//! Each file's header has a checkbox: viewed, not viewed, or changed since
-//! viewed (see `feature::viewed`); Space ticks it. AI review's findings
+//! While the feature waits on Code review it is that stage's page, under the
+//! rail on the feature tab (`inline_review`, `FeaturePanel::review`): Esc gives
+//! the rail the keys, Enter, Tab or a press there gives them back. From anywhere
+//! else, with a fix plan open, or for a feature another machine writes, it is a
+//! popup over the app.
+//!
+//! Each file's header and its line in the list have a checkbox: viewed, not
+//! viewed, or changed since viewed (see `feature::viewed`), one record behind
+//! both; Space ticks it. A folder's or a repository's ticks the files under it
+//! that can be, and says how many it left out. AI review's findings
 //! show as comments of their own, on their line, else on their file's
 //! header, else in the list of those not on a line, each with Fix and
 //! Dismiss; `]` and `[` go through them. The user's own comments are kept
@@ -56,6 +65,23 @@ pub const NO_OWN_COMMENT: &str = "Add a comment first";
 /// What Plan fixes waits for at AI review.
 pub fn decide_first(undecided: usize) -> String {
     format!("Decide the {} left first", plural(undecided, "finding"))
+}
+
+/// Whether `feature`'s code review is laid into its Code review page rather
+/// than opened over the app: while that stage waits on the user alone. With a
+/// fix plan open that page has its cards to show, and another machine writing
+/// the feature, what it says of that; those keep the popup.
+pub fn inline_review(feature: &Feature) -> bool {
+    feature.current() == Some(Stage::CodeReview)
+        && feature.fix_round.is_none()
+        && feature.writer.is_none()
+        && feature.status == Status::Open
+        && feature.touched().next().is_some()
+}
+
+/// Whether `panel` shows `feature`'s Code review page with its review on it.
+pub fn review_page(panel: &crate::features::FeaturePanel, feature: &Feature) -> bool {
+    !panel.keys && panel.page_stage(feature) == Stage::CodeReview && inline_review(feature)
 }
 
 /// What a feature's diff is for, as the feature stands now.
@@ -127,6 +153,8 @@ pub struct FeatureOf {
     pub comments: PathBuf,
     /// Opened from the feature panel, which Esc goes back to.
     pub back: bool,
+    /// Laid into its Code review page: Esc gives the rail the keys.
+    pub inline: bool,
     /// Its touched repositories, in name order.
     pub repos: Vec<RepoOf>,
     /// The viewed ticks, as the record has them.
@@ -317,7 +345,11 @@ impl FeatureOf {
     /// Its keys as it stands with `own` comments of the user's, before the
     /// diff's own (F1).
     pub fn keys(&self, own: usize) -> Vec<(&'static str, &'static str)> {
-        let mut keys = vec![("Esc", "close the diff"), ("F1", "list the keys")];
+        let esc = match self.inline {
+            true => "go to the stages",
+            false => "close the diff",
+        };
+        let mut keys = vec![("Esc", esc), ("F1", "list the keys")];
         match self.role() {
             Role::Deciding => keys.extend([
                 match self.needs_plan(own) {
@@ -817,6 +849,80 @@ impl Gerdr {
             );
             return self.show_warning(text);
         }
+        if inline_review(feature) && self.show_inline_review(project, slug, finding) {
+            return;
+        }
+        let Some(mut wd) = self.new_feature_diff(project, slug, finding) else {
+            return;
+        };
+        wd.tree = Some(FileTree::new(self.projects.repo_grouping));
+        // It covers the other panels: they close, the repositories panel
+        // kept as it was.
+        self.switcher = None;
+        self.project_menu = None;
+        self.tasks_panel = None;
+        if self.inbox.is_open() {
+            self.close_inbox();
+        }
+        self.scrollback = None;
+        self.worktrees.close();
+        self.stop_key_repeat();
+        self.close_menu();
+        self.tooltip.hide();
+        self.chrome.drop_tooltip();
+        if self.wd().is_some() {
+            self.worktree_save_review();
+            self.repos.close_worktree();
+        }
+        if let Some(panel) = self.repos.panel.take() {
+            self.repos.kept = Some((self.project.clone(), panel));
+        }
+        self.repos.worktree = Some(wd);
+        self.worktree_diff_read();
+        // It takes the pointer from the client under it.
+        self.refresh_pointer_focus();
+    }
+
+    /// Show feature `slug`'s Code review page with the keys on its review,
+    /// the cursor on finding `finding` if any; whether it shows.
+    fn show_inline_review(&mut self, project: &str, slug: &str, finding: Option<&str>) -> bool {
+        self.close_panels_for_tab();
+        if !self.show_feature_tab(project, slug) {
+            return false;
+        }
+        self.sync_feature_panel();
+        let Some(panel) = (self.features.panel.as_mut())
+            .filter(|panel| panel.project == project && panel.slug == slug)
+        else {
+            return false;
+        };
+        panel.unpick();
+        panel.keys = false;
+        panel.rail_keys = false;
+        self.sync_inline_review();
+        let env = self.worktree_env();
+        let Some(wd) = self.inline_wd_mut() else {
+            return false;
+        };
+        if let Some(fe) = wd.feature.as_mut() {
+            fe.focus = finding.map(str::to_owned);
+        }
+        // Once read it goes there now; before, when it is.
+        if finding.is_some() && wd.read {
+            wd.place_findings(env);
+        }
+        self.refresh_pointer_focus();
+        true
+    }
+
+    /// The diff of feature `slug`, not read yet.
+    fn new_feature_diff(
+        &self,
+        project: &str,
+        slug: &str,
+        finding: Option<&str>,
+    ) -> Option<WorktreeDiff> {
+        let feature = self.feature(project, slug)?;
         let branch = feature.branch();
         let names = self.projects.names(feature);
         let repos = feature
@@ -845,6 +951,7 @@ impl Gerdr {
             comments: comments.clone(),
             back: (self.features.panel.as_ref())
                 .is_some_and(|p| p.project == project && p.slug == slug),
+            inline: false,
             repos,
             viewed: feature.viewed.clone(),
             findings: (feature.review.as_ref())
@@ -857,33 +964,114 @@ impl Gerdr {
         // A Zed opened from it goes to the feature's own workspace.
         let w = (self.feature_workspace(project, slug)).unwrap_or(self.active_workspace);
         let review = review::load_file(&comments).without_findings();
-        // It covers the other panels: they close, the repositories panel
-        // kept as it was.
-        self.switcher = None;
-        self.project_menu = None;
-        self.tasks_panel = None;
-        if self.inbox.is_open() {
-            self.close_inbox();
+        Some(WorktreeDiff::of_feature(fe, root, w, review))
+    }
+
+    /// The code review on the feature tab's Code review page, while that
+    /// page shows.
+    pub(crate) fn inline_wd(&self) -> Option<&WorktreeDiff> {
+        let panel = self.features.panel.as_ref()?;
+        let feature = self.feature(&panel.project, &panel.slug)?;
+        let shows = self.tab().is_some_and(crate::Tab::is_feature) && review_page(panel, feature);
+        shows.then_some(panel.review.as_deref())?
+    }
+
+    /// `inline_wd`, to change.
+    pub(crate) fn inline_wd_mut(&mut self) -> Option<&mut WorktreeDiff> {
+        self.inline_wd()?;
+        self.features.panel.as_mut()?.review.as_deref_mut()
+    }
+
+    /// Whether the diff the keys and clicks go to is the one on the page.
+    pub(crate) fn on_inline_review(&self) -> bool {
+        !self.repos.is_open() && self.inline_wd().is_some()
+    }
+
+    /// Bring the feature tab's review up to date, every frame: made when its
+    /// page first shows, read when it comes to show, as what was over it or
+    /// another page took its reads, and laid out where the tab leaves room.
+    /// What it paints, while its page shows.
+    pub(crate) fn sync_inline_review(&mut self) -> Option<crate::chrome::ReposView> {
+        let panel = self.features.panel.as_ref()?;
+        let (project, slug) = (panel.project.clone(), panel.slug.clone());
+        let feature = self.feature(&project, &slug)?;
+        let at_it = feature.current() == Some(Stage::CodeReview);
+        let wanted = review_page(panel, feature) && self.tab().is_some_and(crate::Tab::is_feature);
+        let made = panel.review.is_some();
+        if !wanted {
+            let panel = self.features.panel.as_mut()?;
+            panel.review_shown = false;
+            // The feature moved on: it starts anew if it comes back.
+            if !at_it {
+                panel.review = None;
+            }
+            return None;
         }
-        self.scrollback = None;
-        self.worktrees.close();
-        self.stop_key_repeat();
-        self.close_menu();
-        self.tooltip.hide();
-        self.chrome.drop_tooltip();
-        if self.wd().is_some() {
-            self.worktree_save_review();
-            self.repos.close_worktree();
+        if !made {
+            let mut wd = self.new_feature_diff(&project, &slug, None)?;
+            wd.tree = Some(FileTree::new(self.projects.repo_grouping));
+            if let Some(fe) = wd.feature.as_mut() {
+                fe.inline = true;
+            }
+            self.features.panel.as_mut()?.review = Some(Box::new(wd));
         }
-        if let Some(panel) = self.repos.panel.take() {
-            self.repos.kept = Some((self.project.clone(), panel));
+        // Laid out anew only as it comes to show or the tab's size changes:
+        // this runs every frame, and the tab's view isn't cheap.
+        let area = self.content_rect();
+        let panel = self.features.panel.as_ref()?;
+        if !panel.review_shown || panel.review_area != Some(area) {
+            let (_, layout) = self.feature_tab_parts()?;
+            let panel = self.features.panel.as_mut()?;
+            panel.review_rect = layout.review;
+            panel.review_area = Some(area);
         }
-        let mut wd = WorktreeDiff::of_feature(fe, root, w, review);
-        wd.tree = Some(FileTree::new(self.projects.repo_grouping));
-        self.repos.worktree = Some(wd);
-        self.worktree_diff_read();
-        // It takes the pointer from the client under it.
-        self.refresh_pointer_focus();
+        let open = self.repos.is_open();
+        let panel = self.features.panel.as_mut()?;
+        panel.focus = crate::chrome::TabArea::Stages;
+        let fresh = !std::mem::replace(&mut panel.review_shown, !open);
+        let grouping = self.projects.repo_grouping;
+        let workspace = self.active_workspace;
+        let env = self.inline_env();
+        let wd = self.inline_wd_mut()?;
+        wd.workspace = workspace;
+        wd.set_grouping(grouping, env);
+        wd.with_diff(env, |diff, ctx| diff.rewrap(ctx));
+        if fresh && !open {
+            // A read that came back to nothing, as this one wasn't on show.
+            (wd.reading, wd.again) = (false, false);
+            // What was left on its code from elsewhere meanwhile.
+            if !wd.diff.review_dirty {
+                let path = wd.feature.as_ref().map(|fe| fe.comments.clone());
+                if let Some(path) = path {
+                    wd.diff.review = review::load_file(&path).without_findings();
+                }
+                if wd.read {
+                    wd.place_findings(env);
+                }
+            }
+            self.worktree_diff_read();
+        }
+        self.inline_review_view()
+    }
+
+    /// What the feature tab's review needs of the chrome, wherever the keys
+    /// are.
+    pub(crate) fn inline_env(&self) -> Env {
+        let area = (self.features.panel.as_ref())
+            .and_then(|panel| panel.review_rect)
+            .unwrap_or_else(|| self.content_rect());
+        self.env_in(area, true)
+    }
+
+    /// What the feature tab's review paints.
+    pub(crate) fn inline_review_view(&self) -> Option<crate::chrome::ReposView> {
+        let wd = self.inline_wd()?;
+        let mut view = wd.repos_view(self.inline_env());
+        view.flat = true;
+        // The rail has the keys, or a panel over it does.
+        let rail = self.features.panel.as_ref().is_some_and(|p| p.rail_keys);
+        view.detail.focused &= !rail && !self.repos.is_open();
+        Some(view)
     }
 
     /// The record of `project`'s `slug` changed: its code review, if
@@ -1000,7 +1188,7 @@ impl Gerdr {
         back: Vec<review::Comment>,
         own: usize,
     ) {
-        let open = self.repos.worktree.as_mut().filter(|wd| {
+        let open = self.wd_mut().filter(|wd| {
             (wd.feature.as_ref()).is_some_and(|fe| fe.project == project && fe.slug == slug)
         });
         if let Some(wd) = open {
@@ -1099,9 +1287,10 @@ impl Gerdr {
             fe.viewed = viewed;
         }
         self.code_review_counted();
-        if left > 0 {
-            let files = plural(left, "file");
-            self.show_warning(format!("{files} left out: commit them first"));
+        match left {
+            0 => {}
+            1 => self.show_warning("1 file left out: commit it first".into()),
+            n => self.show_warning(format!("{n} files left out: commit them first")),
         }
     }
 
@@ -1328,9 +1517,7 @@ impl Gerdr {
     /// the findings left out; a failure says so.
     pub(crate) fn feature_save_review(&mut self) {
         let Some(wd) = self
-            .repos
-            .worktree
-            .as_mut()
+            .wd_mut()
             .filter(|wd| wd.diff.review_dirty && wd.feature.is_some())
         else {
             return;
@@ -1829,6 +2016,22 @@ mod tests {
         };
         wd.set_feature(vec![("api".into(), "/w/api".into(), Ok(read))], POPUP_ENV);
         wd
+    }
+
+    #[test]
+    fn on_its_page_esc_says_it_goes_to_the_stages() {
+        use crate::chrome::ReposButton;
+        let mut wd = listed(&["a.rs"]);
+        let close = |wd: &WorktreeDiff| {
+            let hints = wd.hints();
+            let hint = hints.iter().find(|h| h.button == ReposButton::Close);
+            hint.map(|h| h.label.clone()).unwrap_or_default()
+        };
+        assert_eq!(close(&wd), "close");
+        wd.feature.as_mut().unwrap().inline = true;
+        assert_eq!(close(&wd), "go to the stages");
+        let keys = wd.feature.as_ref().unwrap().keys(0);
+        assert_eq!(keys[0], ("Esc", "go to the stages"));
     }
 
     /// A feature's diff at Code review over these files of one repository,

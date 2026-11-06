@@ -684,7 +684,7 @@ impl Chrome {
                 // A file's tab, flat in the tab's place, under every popup.
                 Kind::Doc => parts.extend(self.doc.parts(
                     view.doc_tab.take(),
-                    area,
+                    view.doc_tab_rect,
                     theme,
                     scale,
                     now,

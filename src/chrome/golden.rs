@@ -2931,6 +2931,8 @@ pub(super) fn feature_tab() -> super::FeatureTabView {
         ("F1", "all keys"),
     ];
     FeatureTabView {
+        review_page: false,
+        review_keys: false,
         title: "Bulk export of invoices".into(),
         sub: "bulk-export \u{b7} ~/Work/aft/.features/bulk-export \u{b7} started 3h ago".into(),
         which: Some((0, 2)),
@@ -3785,6 +3787,18 @@ fn feature_tab_done() -> super::FeatureTabView {
     view
 }
 
+/// Code review current: the rail over all else, its review painted apart
+/// (`inline_review_view`), the rail with no focus as the review has the keys.
+fn feature_tab_review_page() -> super::FeatureTabView {
+    let mut view = feature_tab();
+    at_stage(&mut view, 6, super::NodeMark::Waiting, "to review");
+    select_node(&mut view, 6);
+    view.review_page = true;
+    view.review_keys = true;
+    view.hints.clear();
+    view
+}
+
 /// Build current, a later stage's page picked: no buttons.
 fn feature_tab_later() -> super::FeatureTabView {
     use super::{CheckTone, PageSection, StagePage};
@@ -4376,7 +4390,7 @@ fn feature_tab_manual_test(note: bool) -> super::FeatureTabView {
 }
 
 /// The feature tab's fixtures, by name.
-fn feature_tabs() -> [(&'static str, super::FeatureTabView); 37] {
+fn feature_tabs() -> [(&'static str, super::FeatureTabView); 38] {
     [
         ("tab_build", feature_tab()),
         ("tab_verify_fixes", feature_tab_verify_fixes()),
@@ -4389,6 +4403,7 @@ fn feature_tabs() -> [(&'static str, super::FeatureTabView); 37] {
         ("tab_ship_finish", feature_tab_ship_finish()),
         ("tab_done", feature_tab_done()),
         ("tab_later", feature_tab_later()),
+        ("tab_review_page", feature_tab_review_page()),
         ("tab_repos", feature_tab_repos()),
         ("tab_unfolded", feature_tab_unfolded()),
         ("tab_shipped", feature_tab_shipped()),
@@ -4428,7 +4443,7 @@ fn feature_tabs() -> [(&'static str, super::FeatureTabView); 37] {
 }
 
 /// Each fixture at the width it shows best at, and Build at all three.
-const TAB_SURFACES: [(&str, i32); 47] = [
+const TAB_SURFACES: [(&str, i32); 48] = [
     ("tab_build", 860),
     ("tab_build", 1180),
     ("tab_build", 1920),
@@ -4476,9 +4491,10 @@ const TAB_SURFACES: [(&str, i32); 47] = [
     ("tab_review_rounds", 1180),
     ("tab_verify_fixes", 1180),
     ("tab_verify_fixes", 860),
+    ("tab_review_page", 1180),
 ];
 
-const FEATURE_TAB: [&str; 47] = [
+const FEATURE_TAB: [&str; 48] = [
     "tab_build_860",
     "tab_build_1180",
     "tab_build_1920",
@@ -4526,10 +4542,11 @@ const FEATURE_TAB: [&str; 47] = [
     "tab_review_rounds_1180",
     "tab_verify_fixes_1180",
     "tab_verify_fixes_860",
+    "tab_review_page_1180",
 ];
 
 /// The recorded hashes of `FEATURE_TAB`, per case in `CASES`.
-const GOLDEN_FEATURE_TAB: [[u64; 47]; 4] = [
+const GOLDEN_FEATURE_TAB: [[u64; 48]; 4] = [
     // Dark at 1
     [
         0x6283066ad99ffd8d, // tab_build_860
@@ -4579,6 +4596,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 47]; 4] = [
         0x3f93fa45c78f5866, // tab_review_rounds_1180
         0x1bb481da157e2c67, // tab_verify_fixes_1180
         0x2f9cdf4933effa11, // tab_verify_fixes_860
+        0xc3c0eb01c731fa77, // tab_review_page_1180
     ],
     // Dark at 2
     [
@@ -4629,6 +4647,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 47]; 4] = [
         0x8f279db4c0377c33, // tab_review_rounds_1180
         0x1f9ea9bcba5f8329, // tab_verify_fixes_1180
         0xb37b9ca850bd8933, // tab_verify_fixes_860
+        0x63268c0db2af8304, // tab_review_page_1180
     ],
     // Light at 1
     [
@@ -4679,6 +4698,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 47]; 4] = [
         0xe29b7adc8372deb1, // tab_review_rounds_1180
         0x6e90e5c0915f6faf, // tab_verify_fixes_1180
         0x133eaaca448e2d19, // tab_verify_fixes_860
+        0x4fa6d907684af5e4, // tab_review_page_1180
     ],
     // Light at 2
     [
@@ -4729,6 +4749,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 47]; 4] = [
         0xc202861bd8801f45, // tab_review_rounds_1180
         0x99afe9e17842450a, // tab_verify_fixes_1180
         0xbf5121e313facc7e, // tab_verify_fixes_860
+        0x7de225c3c6b86c3c, // tab_review_page_1180
     ],
 ];
 
@@ -5478,7 +5499,7 @@ fn findings_popup(at: u8) -> super::ReposView {
     view
 }
 
-fn doc_tabs() -> [(&'static str, super::ReposView, i32); 14] {
+fn doc_tabs() -> [(&'static str, super::ReposView, i32); 16] {
     [
         ("doc_preview_1180", doc_tab(0, 0.0, Vec::new(), false), 1180),
         ("doc_review_1180", doc_tab(1, 1.0, Vec::new(), false), 1180),
@@ -5498,10 +5519,75 @@ fn doc_tabs() -> [(&'static str, super::ReposView, i32); 14] {
         ("popup_code_review_850", findings_popup(2), 850),
         ("popup_no_comments_1180", findings_popup(3), 1180),
         ("popup_no_comments_850", findings_popup(4), 850),
+        ("popup_listed_1180", listed_review(false), 1180),
+        ("inline_listed_1180", listed_review(true), 1180),
     ]
 }
 
-const DOC_TAB: [&str; 14] = [
+/// A feature's code review with its file list, by folder: as a popup, or
+/// laid into the feature tab's page (`flat`). Files viewed, not viewed and
+/// changed since, a folder partly viewed.
+fn listed_review(flat: bool) -> super::ReposView {
+    use super::{Check, DirLine, FileLine, LineState, RepoLine, TreeLine};
+    let file = |path: &str, check, depth, added, removed, comments| {
+        TreeLine::File(FileLine {
+            check,
+            code: 'M',
+            path: path.into(),
+            conflicted: false,
+            depth,
+            added,
+            removed,
+            edited: false,
+            comments,
+        })
+    };
+    let dir = |name: &str, check, depth| {
+        TreeLine::Dir(DirLine {
+            check,
+            open: true,
+            name: name.into(),
+            depth,
+        })
+    };
+    let lines = vec![
+        TreeLine::Repo(RepoLine {
+            check: Check::Partial,
+            expanded: Some(true),
+            label: "api".into(),
+            branch: Some("feature/login".into()),
+            dirty: false,
+            ahead: 0,
+            behind: 0,
+            no_upstream: false,
+            stashes: 0,
+            files: 4,
+            added: 62,
+            removed: 18,
+            chip: None,
+            state: LineState::Settled,
+        }),
+        dir("src/auth", Check::Partial, 0),
+        file("login.rs", Check::On, 1, 40, 12, 2),
+        file("session.rs", Check::Partial, 1, 9, 2, 0),
+        dir("tests", Check::On, 0),
+        file("login.rs", Check::On, 1, 12, 0, 0),
+        file("Cargo.toml", Check::Off, 0, 1, 4, 0),
+    ];
+    let total = lines.len();
+    super::ReposView {
+        diff_tree: true,
+        flat,
+        tree_share: super::REVIEW_TREE_SHARE,
+        grouping: crate::repos::Grouping::Folders,
+        lines,
+        total,
+        selected: Some(3),
+        ..findings_popup(2)
+    }
+}
+
+const DOC_TAB: [&str; 16] = [
     "doc_preview_1180",
     "doc_review_1180",
     "doc_review_no_browser",
@@ -5516,6 +5602,8 @@ const DOC_TAB: [&str; 14] = [
     "popup_code_review_850",
     "popup_no_comments_1180",
     "popup_no_comments_850",
+    "popup_listed_1180",
+    "inline_listed_1180",
 ];
 
 /// A doc tab's buffer, laid over the whole of a `w` wide content area.
@@ -5537,7 +5625,7 @@ fn paint_doc_tab(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
 }
 
 /// The recorded hashes of `DOC_TAB`, per case in `CASES`.
-const GOLDEN_DOC_TAB: [[u64; 14]; 4] = [
+const GOLDEN_DOC_TAB: [[u64; 16]; 4] = [
     // Dark at 1
     [
         0xe3291f02faaf07c4, // doc_preview_1180
@@ -5554,6 +5642,8 @@ const GOLDEN_DOC_TAB: [[u64; 14]; 4] = [
         0x6f1041c7f50aca45, // popup_code_review_850
         0x07ad73f54e3e101c, // popup_no_comments_1180
         0x08ab19690c613d25, // popup_no_comments_850
+        0x6c93117995af7046, // popup_listed_1180
+        0x893c019f611419ee, // inline_listed_1180
     ],
     // Dark at 2
     [
@@ -5571,6 +5661,8 @@ const GOLDEN_DOC_TAB: [[u64; 14]; 4] = [
         0x2ebeec0af5c2ef1b, // popup_code_review_850
         0x04f0f9c1258af57a, // popup_no_comments_1180
         0x654aa94035b7bbae, // popup_no_comments_850
+        0xe300ffa270cdca65, // popup_listed_1180
+        0xbb06c362572d0b69, // inline_listed_1180
     ],
     // Light at 1
     [
@@ -5588,6 +5680,8 @@ const GOLDEN_DOC_TAB: [[u64; 14]; 4] = [
         0xdc7251d500deedf7, // popup_code_review_850
         0x078b0def98e11797, // popup_no_comments_1180
         0x0f750109c62c42b8, // popup_no_comments_850
+        0xc9e494d0472d5184, // popup_listed_1180
+        0x51f3d2ac97eb79d4, // inline_listed_1180
     ],
     // Light at 2
     [
@@ -5605,6 +5699,8 @@ const GOLDEN_DOC_TAB: [[u64; 14]; 4] = [
         0x648afae740203419, // popup_code_review_850
         0x2435e6adfbb4e6b8, // popup_no_comments_1180
         0x958a852299d3f6a4, // popup_no_comments_850
+        0x92e8143024b2758a, // popup_listed_1180
+        0x0ba0ca9eb3570a9e, // inline_listed_1180
     ],
 ];
 

@@ -990,6 +990,12 @@ impl Gerdr {
         let Some(view) = self.repos_view() else {
             return;
         };
+        // A press on a feature's review on its page gives it the keys.
+        if self.on_inline_review()
+            && let Some(panel) = self.features.panel.as_mut()
+        {
+            panel.rail_keys = false;
+        }
         // The gap beside the file's preview drags their split.
         if let Some(drag) = self.doc_gap_at(pos) {
             self.drag = Some(drag);
@@ -1328,6 +1334,11 @@ impl Gerdr {
     pub fn repos_hover(&mut self, pos: Point<f64, Logical>) -> Option<Tooltip> {
         let view = self.repos_view()?;
         let size = self.repos_rect();
+        if self.on_inline_review()
+            && let Some(panel) = self.features.panel.as_mut()
+        {
+            panel.tab_hover = None;
+        }
         if let Some(wd) = self.wd_mut() {
             if wd.scrolling(std::time::Instant::now()) {
                 wd.hover = None;

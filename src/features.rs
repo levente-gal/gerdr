@@ -1276,6 +1276,19 @@ pub struct FeaturePanel {
     /// The card a note is being written on, and the note. It stays with the
     /// panel when another tab shows.
     pub note: Option<(CardNote, TextField)>,
+    /// The feature's code review on its Code review page, once that showed
+    /// (see `feature_diff::inline_review`): where it stands stays with the
+    /// panel.
+    pub review: Option<Box<crate::worktree_diff::WorktreeDiff>>,
+    /// That page's review is up to date with what shows, read as it came to
+    /// show: another diff or panel over it, or another page, and it isn't.
+    pub review_shown: bool,
+    /// Where that review goes, and the tab area it was worked out in: the
+    /// rail changes height only with what takes the page from it.
+    pub review_rect: Option<chrome::Rect>,
+    pub review_area: Option<chrome::Rect>,
+    /// On that page, the rail has the keys, not the review (Esc there).
+    pub rail_keys: bool,
     /// Each column's scroll, indexed by `TabColumn` (logical pixels).
     pub scroll: [Scroll; 3],
     /// The page the Page column's scroll is for: the stage, and whether
@@ -6391,7 +6404,6 @@ impl Gerdr {
         outcome
     }
 
-
     /// Do what the new feature dialog asked: create the feature off the
     /// thread, shown in the tasks panel meanwhile.
     pub fn apply_new_feature(&mut self, outcome: DialogOutcome) {
@@ -6865,6 +6877,9 @@ impl Gerdr {
                 ..FeaturePanel::default()
             });
             let fresh = panel.sources.is_empty();
+            // Coming to show, its review has the keys.
+            let mut panel = panel;
+            panel.rail_keys = false;
             self.features.panel = Some(panel);
             self.features.shown.insert(project.clone(), slug.clone());
             self.sync_feature_page();
@@ -6943,6 +6958,17 @@ impl Gerdr {
             return None;
         }
         let plain = !(mods.ctrl || mods.shift || mods.alt || mods.logo);
+        // On the rail over the review, Tab and Down go back to it: the page
+        // has nothing else to go to.
+        let tabs = matches!(sym, Keysym::Tab | Keysym::ISO_Left_Tab)
+            && !(mods.ctrl || mods.alt || mods.logo);
+        let down = matches!(sym, Keysym::Down | Keysym::KP_Down) && plain;
+        if (tabs || down) && self.inline_wd().is_some() {
+            if let Some(panel) = self.features.panel.as_mut() {
+                panel.rail_keys = false;
+            }
+            return None;
+        }
         let page = match sym {
             Keysym::Page_Up | Keysym::KP_Page_Up if plain => Some(-1.0),
             Keysym::Page_Down | Keysym::KP_Page_Down if plain => Some(1.0),
@@ -6974,6 +7000,7 @@ impl Gerdr {
         let notes = notes_of(probe).to_vec();
         let panel = self.features.panel.as_mut()?;
         let before = (panel.focus, panel.repo, panel.expanded);
+        let before_stage = panel.stage;
         let card_before = panel.finding;
         let outcome = panel.key(mods, sym, &feature, &slugs, ctx, &plan, &ships, &notes);
         let now = (self.features.panel.as_ref()).map(|p| (p.focus, p.repo, p.expanded));
@@ -6993,6 +7020,12 @@ impl Gerdr {
             self.find_repo_sources();
         }
         self.sync_feature_page();
+        // Walking the rail, a stop at the review's page doesn't take the keys.
+        if let Some(panel) = self.features.panel.as_mut()
+            && panel.stage != before_stage
+        {
+            panel.rail_keys = true;
+        }
         outcome
     }
 
@@ -8244,7 +8277,9 @@ impl Gerdr {
     }
 
     /// The feature tab's view and its layout in the tab's area.
-    fn feature_tab_parts(&self) -> Option<(chrome::FeatureTabView, chrome::FeatureTabLayout)> {
+    pub(crate) fn feature_tab_parts(
+        &self,
+    ) -> Option<(chrome::FeatureTabView, chrome::FeatureTabLayout)> {
         let view = self.feature_tab_view()?;
         let layout = chrome::feature_tab_layout(&view, self.content_rect());
         Some((view, layout))
@@ -8276,6 +8311,11 @@ impl Gerdr {
         let Some(feature) = self.panel_feature().cloned() else {
             return;
         };
+        // A press on the header or the rail: the page it leaves on has the
+        // keys, the review if that is what shows.
+        if let Some(panel) = self.features.panel.as_mut() {
+            panel.rail_keys = false;
+        }
         let ctx = self.row_ctx(&feature);
         let Some(hit) = self.feature_tab_hit(pos) else {
             return;
@@ -8554,6 +8594,9 @@ impl Gerdr {
     /// The pointer moved while the feature tab shows: what is under it
     /// lights up, and a stage's node tells what is done in it.
     pub fn feature_panel_hover(&mut self, pos: Point<f64, Logical>) -> Option<Tooltip> {
+        if let Some(wd) = self.inline_wd_mut() {
+            wd.hover = None;
+        }
         let (view, layout) = self.feature_tab_parts()?;
         let hit = layout.hit(&view, pos.to_i32_round());
         if let Some(panel) = self.features.panel.as_mut() {
@@ -11534,7 +11577,9 @@ fn tab_view(
     let picked = (entries.get(at))
         .filter(|_| panel.expanded && focus == TabArea::Repos)
         .and_then(|e| panel.picked(feature, *e));
-    FeatureTabView {
+    let mut view = FeatureTabView {
+        review_page: crate::feature_diff::review_page(panel, feature),
+        review_keys: false,
         title: feature.title.clone(),
         sub,
         which,
@@ -11574,7 +11619,13 @@ fn tab_view(
             &ships,
             notes_of(state.probe),
         ),
+    };
+    // The review under the rail has its own keys and footer.
+    if view.review_page {
+        view.hints.clear();
+        view.review_keys = !panel.rail_keys;
     }
+    view
 }
 
 /// How far `col` of the tab laid out as `layout` scrolls, for its
@@ -13666,6 +13717,56 @@ pub(crate) mod tests {
     }
 
     /// `f`, with a fix round asked by `stage`, in `phase`.
+    #[test]
+    fn only_a_code_review_waiting_on_the_user_goes_on_its_page() {
+        use crate::feature_diff::inline_review;
+        let code_review = stage_index(Stage::CodeReview);
+        let f = feature("f", vec![repo("api", true)], code_review);
+        assert_eq!(f.current(), Some(Stage::CodeReview));
+        assert!(inline_review(&f));
+        // Its code isn't changed: nothing to review.
+        let mut no_code = f.clone();
+        no_code.repos[0].touched = false;
+        assert!(!inline_review(&no_code));
+        // Another machine writes it: the page says so.
+        let mut elsewhere = f.clone();
+        elsewhere.writer = Some("m1".into());
+        assert!(!inline_review(&elsewhere));
+        // A fix plan has its cards on the page.
+        assert!(!inline_review(&in_round(
+            f.clone(),
+            Stage::CodeReview,
+            FixPhase::Ready
+        )));
+        // Closed, or done with it: the page says how it went.
+        let mut closed = f.clone();
+        closed.status = Status::Abandoned;
+        assert!(!inline_review(&closed));
+        let done = feature("f", vec![repo("api", true)], code_review + 1);
+        assert!(!inline_review(&done));
+    }
+
+    #[test]
+    fn the_review_page_goes_by_the_page_showing_and_the_keys_list() {
+        use crate::feature_diff::review_page;
+        let code_review = stage_index(Stage::CodeReview);
+        let f = feature("f", vec![repo("api", true)], code_review);
+        let mut panel = FeaturePanel::default();
+        assert!(review_page(&panel, &f));
+        panel.pick(&f, Stage::Build);
+        assert!(!review_page(&panel, &f));
+        panel.unpick();
+        panel.keys = true;
+        assert!(!review_page(&panel, &f));
+        // The page's view says so, with no strip's or footer's keys.
+        panel.keys = false;
+        let view = tab_view(&panel, &f, &[], &PanelState::default(), 2_000);
+        assert!(view.review_page && view.review_keys && view.hints.is_empty());
+        panel.rail_keys = true;
+        let view = tab_view(&panel, &f, &[], &PanelState::default(), 2_000);
+        assert!(view.review_page && !view.review_keys);
+    }
+
     fn in_round(mut f: Feature, stage: Stage, phase: FixPhase) -> Feature {
         f.fix_round = Some(FixRound {
             n: 1,
