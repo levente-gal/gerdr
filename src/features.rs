@@ -5960,27 +5960,9 @@ impl Gerdr {
     }
 
     /// Open the feature panel on feature `slug` of `project` on `stage`'s
-    /// page. AI review with findings to decide shows
-    /// the diff at the first instead, and Code review the diff, as their
-    /// rows' Enter does; Manual test with criteria has the keyboard on them.
+    /// page, so what comes next is in sight: the page's button opens a
+    /// review's diff. Manual test with criteria has the keyboard on them.
     pub fn open_feature_at(&mut self, project: &str, slug: &str, stage: Stage) {
-        let current = self
-            .feature(project, slug)
-            .filter(|f| f.status == Status::Open && f.current() == Some(stage));
-        if let Some(f) = current
-            && matches!(stage, Stage::AiReview | Stage::CodeReview)
-        {
-            let ready = f.runs.get(&stage).is_some_and(|r| r.ready.is_some());
-            let first = f
-                .review
-                .as_ref()
-                .and_then(|r| r.first_open())
-                .map(|x| x.id.clone())
-                .filter(|_| ready);
-            if stage == Stage::CodeReview || first.is_some() {
-                return self.open_feature_diff(project, slug, first.as_deref());
-            }
-        }
         self.open_feature(project, slug);
         // Suggestions to decide open over the panel.
         let deciding = stage == Stage::PlanReview
