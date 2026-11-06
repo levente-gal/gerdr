@@ -1330,6 +1330,8 @@ pub enum PanelOutcome {
     /// Show the stage's file in its tab: one already open as it stands, a
     /// new one as `DocMode::opens_on` it.
     OpenDoc(Stage),
+    /// Approve `stage`'s file from its page, without opening its tab.
+    ApproveDoc(Stage),
     /// Let this agent stage's agent go on after a milestone stop.
     Continue(Stage),
     /// Run Verify's checks (again).
@@ -1885,6 +1887,14 @@ fn agent_action(feature: &Feature, stage: Stage) -> PanelOutcome {
         Some(run) if run.resumes() => PanelOutcome::ResumeAgent(stage),
         _ => PanelOutcome::StartAgent(stage, false),
     }
+}
+
+/// Whether `stage`'s file can be approved from its page: it is there and
+/// waits for review, so reading it in its tab is the user's choice.
+fn approves_doc(feature: &Feature, stage: Stage, ctx: RowCtx) -> bool {
+    feature.status == Status::Open
+        && ctx.wrote(stage)
+        && row_action(feature, PanelRow::Stage(stage), ctx) == Some(PanelOutcome::OpenDoc(stage))
 }
 
 /// What Plan review's row does: as any agent stage's while its agent
@@ -2942,6 +2952,7 @@ fn action_hint(action: &PanelOutcome) -> &'static str {
         PanelOutcome::ResumeAgent(_) => "resume agent",
         PanelOutcome::OpenDoc(Stage::Discover) => "review brief",
         PanelOutcome::OpenDoc(_) => "review plan",
+        PanelOutcome::ApproveDoc(_) => "approve",
         PanelOutcome::Continue(_) => "continue",
         PanelOutcome::RunChecks => "run checks",
         PanelOutcome::SetUp => "set up",
@@ -4021,6 +4032,14 @@ impl FeaturePanel {
             {
                 return Some(PanelOutcome::MakeFixes);
             }
+            Keysym::Return | Keysym::KP_Enter
+                if ctrl
+                    && !mods.shift
+                    && self.focus == TabArea::Stages
+                    && approves_doc(feature, stage, ctx) =>
+            {
+                return Some(PanelOutcome::ApproveDoc(stage));
+            }
             // With a fix plan under way a criterion's card has no use for it.
             Keysym::Return | Keysym::KP_Enter
                 if ctrl && self.focus == TabArea::Findings && criteria > 0 =>
@@ -4442,6 +4461,10 @@ pub fn page_actions(
             _ => "Review",
         };
         out.push((button(label, ButtonStyle::Plain), open));
+    }
+    if approves_doc(feature, stage, ctx) {
+        let approve = PanelOutcome::ApproveDoc(stage);
+        out.push((button("Approve", ButtonStyle::Plain), approve));
     }
     if plan_review_open(feature, stage) {
         let suggestions = PanelOutcome::PlanSuggestions;
@@ -6952,6 +6975,7 @@ impl Gerdr {
             PanelOutcome::OpenDoc(stage) => {
                 self.open_doc_tab(&project, &slug, DocFile::Stage(stage));
             }
+            PanelOutcome::ApproveDoc(stage) => self.approve_doc(&project, &slug, stage),
             PanelOutcome::Continue(stage) => self.continue_stage_agent(&project, &slug, stage),
             PanelOutcome::RunChecks => match self.feature(&project, &slug) {
                 Some(f) if self.busy_with(&project, &slug, Job::Verify).is_some() => {
@@ -9710,21 +9734,22 @@ fn rework_card(
 }
 
 /// The card of Discover's or Plan's file in `feature`: how it stands, with
-/// the page's button to its tab in `actions`, plain or the one to press next.
+/// the page's buttons on it in `actions`: to its tab, plain or the one to
+/// press next, and Approve while it waits for review.
 fn file_card(
     feature: &Feature,
     stage: Stage,
     ctx: RowCtx,
     actions: &[(PageButton, PanelOutcome)],
 ) -> PageSection {
-    let own = PanelOutcome::OpenDoc(stage);
+    let own = [PanelOutcome::OpenDoc(stage), PanelOutcome::ApproveDoc(stage)];
     PageSection::File {
         name: crate::feature::artifacts::name(stage)
             .unwrap_or("file")
             .to_owned(),
         state: file_line(feature, stage, ctx),
         buttons: (actions.iter().enumerate())
-            .filter(|(_, (_, o))| *o == own)
+            .filter(|(_, (_, o))| own.contains(o))
             .map(|(i, _)| i)
             .collect(),
     }
@@ -10511,7 +10536,7 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 5] = [
             ),
             (
                 "Ctrl+Enter",
-                "make the fixes of a fix plan ready for review, or send them again; at AI review, send the findings to fix, with no plan unless you commented",
+                "approve a brief or plan ready for review; make the fixes of a fix plan ready for review, or send them again; at AI review, send the findings to fix, with no plan unless you commented",
             ),
             (
                 "Ctrl+Shift+O",
@@ -10920,6 +10945,9 @@ fn tab_hints(
             // Manual test's has its own use for it.
             if makes_fixes_again(feature, stage) && !tries_criteria(feature, stage) && !going {
                 hints.push(hint("Ctrl+Enter", "make fixes again"));
+            }
+            if approves_doc(feature, stage, ctx) {
+                hints.push(hint("Ctrl+Enter", "approve"));
             }
             if can_decide(feature, stage) {
                 hints.push(hint("c", "add comment\u{2026}"));
@@ -16879,6 +16907,67 @@ pub(crate) mod tests {
     }
 
     /// Every stage's file is there.
+    #[test]
+    fn a_file_ready_for_review_is_approved_from_its_page() {
+        let stage = Stage::Discover;
+        let approve = PanelOutcome::ApproveDoc(stage);
+        let ctx = wrote(&[stage]);
+        let mut f = feature("a", vec![repo("api", true)], 0);
+        let offered = |f: &Feature, ctx| {
+            page_actions(f, stage, ctx)
+                .iter()
+                .any(|(_, o)| *o == approve)
+        };
+        // Being written: nothing to approve yet.
+        f.runs.insert(stage, agent_run(Some("p1"), None));
+        assert!(!offered(&f, ctx));
+        f.runs.insert(stage, agent_run(Some("p1"), Some(1_500)));
+        assert!(!offered(&f, RowCtx::default()));
+        let actions = page_actions(&f, stage, ctx);
+        // On the file's card, next to Review, which Enter still presses.
+        let state = PanelState {
+            ctx,
+            ..PanelState::default()
+        };
+        let page = stage_page(&f, stage, &state, &actions, 2_000);
+        let held = page.sections.iter().find_map(|s| match s {
+            PageSection::File { buttons, .. } => Some(buttons.clone()),
+            _ => None,
+        });
+        let on_card: Vec<&str> = (held.unwrap().iter())
+            .map(|i| actions[*i].0.label.as_str())
+            .collect();
+        assert_eq!(on_card, ["Review", "Approve"]);
+        assert_eq!(
+            page_enter(&f, stage, ctx),
+            Some(PanelOutcome::OpenDoc(stage))
+        );
+        // Ctrl+Enter approves, and the footer says so.
+        let mut panel = FeaturePanel::default();
+        let ctrl = ModifiersState {
+            ctrl: true,
+            ..ModifiersState::default()
+        };
+        let slugs = ["a".to_owned()];
+        let got = panel.key(&ctrl, Keysym::Return, &f, &slugs, ctx, &[], &[], &[]);
+        assert_eq!(got, Some(approve.clone()));
+        let hints = tab_hints(
+            &panel,
+            &f,
+            stage,
+            &[],
+            ctx,
+            AgentChoices::default(),
+            &[],
+            &[],
+            &[],
+        );
+        assert!(hints.contains(&("Ctrl+Enter".into(), "approve".into())));
+        // A closed feature approves nothing.
+        f.status = Status::Abandoned;
+        assert!(!offered(&f, ctx));
+    }
+
     fn wrote_all() -> RowCtx {
         RowCtx {
             written: [true; Stage::ALL.len()],
@@ -17612,6 +17701,10 @@ pub(crate) mod tests {
             .position(|(_, o)| *o == PanelOutcome::OpenDoc(Stage::Plan))
             .unwrap();
         assert_eq!(actions[held].0.style, ButtonStyle::Primary);
+        let approve = actions
+            .iter()
+            .position(|(_, o)| *o == PanelOutcome::ApproveDoc(Stage::Plan))
+            .unwrap();
         let page = stage_page(&f, Stage::Plan, &PanelState::default(), &actions, 2_000);
         let card = page
             .sections
@@ -17622,7 +17715,7 @@ pub(crate) mod tests {
             Some(&file(
                 "plan.md",
                 line("ready for review", CheckTone::Ready),
-                &[held]
+                &[held, approve]
             ))
         );
     }
