@@ -107,6 +107,9 @@ const STABLE: Duration = Duration::from_secs(10);
 /// How often a refused Plan's or review's code is read again: undoing the agent's
 /// changes lets the plan go up for review.
 const RECHECK: Duration = Duration::from_secs(10);
+/// How long a done agent rests before it is told its file isn't right. An
+/// agent just started can rest for a moment before its prompt reaches it.
+const REST: Duration = Duration::from_secs(30);
 
 /// A file's modification time (unix seconds) and length: whether it
 /// changed.
@@ -144,6 +147,10 @@ pub(crate) struct Watch {
     /// When it first looked done, for an agent on another machine: what it
     /// did by then has to come back first.
     seen_done: Option<Instant>,
+    /// The file the user was told can't be read: told once until it changes.
+    told_bad: Option<Stamp>,
+    /// Since when it has rested, done and its file not right.
+    rested: Option<Instant>,
 }
 
 impl Watch {
@@ -218,6 +225,8 @@ enum Verdict {
     Nudge {
         absent: bool,
     },
+    /// Done with a file that still can't be read after that: for the user.
+    StillBad,
     /// Its pane is gone, and with it the agent.
     Gone,
     /// A Build agent stopped after milestone `done` of `total`.
@@ -251,6 +260,7 @@ fn judge(
         watch.worked = true;
         watch.stable = None;
         watch.gone = None;
+        watch.rested = None;
         return Verdict::Wait;
     }
     if !alive {
@@ -266,15 +276,21 @@ fn judge(
         if let Some(verdict) = file.verdict() {
             return verdict;
         }
+        let rested = *watch.rested.get_or_insert(now);
+        if now.duration_since(rested) < REST {
+            return Verdict::Wait;
+        }
         return match file {
             File::Good(_) | File::Partial(..) | File::Blocked(..) => Verdict::Wait,
             // A chat: the brief comes when the user and it agree.
             File::Absent | File::Old if discover => Verdict::Wait,
+            File::Bad(..) if nudged => Verdict::StillBad,
             _ if nudged => Verdict::Wait,
             File::Absent | File::Old => Verdict::Nudge { absent: true },
             File::Bad(..) => Verdict::Nudge { absent: false },
         };
     }
+    watch.rested = None;
     let went_on = match file {
         File::Partial(_, done, _) => watch.went_on.is_some_and(|after| *done <= after),
         _ => false,
@@ -1986,10 +2002,17 @@ impl Gerdr {
                     let missing = watch.missing.join("; ");
                     self.nudge_stage_agent(&feature, stage, &run, absent, missing);
                 }
-                Verdict::Gone if run.live() => {
-                    self.forget_pane(&project, &feature.slug, stage);
+                Verdict::StillBad | Verdict::Gone => {
+                    if let File::Bad(stamp, lacks) = &file
+                        && watch.told_bad != Some(*stamp)
+                    {
+                        watch.told_bad = Some(*stamp);
+                        self.tell_bad_file(&project, &feature, stage, lacks);
+                    }
+                    if verdict == Verdict::Gone && run.live() {
+                        self.forget_pane(&project, &feature.slug, stage);
+                    }
                 }
-                Verdict::Gone => {}
             }
             if unblocked
                 && let Some(r) = self
@@ -2242,6 +2265,24 @@ impl Gerdr {
             }
         }
         self.save_feature(&project, &slug);
+    }
+
+    /// `stage`'s agent left a file that can't be read and won't be told again:
+    /// the page shows nothing new, so the user is told what it lacks.
+    fn tell_bad_file(&mut self, project: &str, feature: &Feature, stage: Stage, lacks: &[String]) {
+        let label = stage.label();
+        let why = lacks.join("; ");
+        let slug = feature.slug.as_str();
+        tracing::warn!("feature {project}/{slug}: {label} not read: {why}");
+        if let Some(f) = self.feature_mut(project, slug) {
+            f.log(feature::now(), format!("{label} not read: {why}"));
+            self.save_feature(project, slug);
+        }
+        let lack = lacks.first().map_or("", String::as_str);
+        let title = &feature.title;
+        self.show_warning(format!(
+            "{label} of \u{201c}{title}\u{201d} can't be read: {lack}. Tell its agent, or edit its file"
+        ));
     }
 
     /// `stage` of feature `slug` is done with a good file: its gate waits.
@@ -3181,6 +3222,8 @@ mod tests {
         let mut w = watch();
         w.worked = true;
         let idle = Some(AgentStatus::Idle);
+        judge(&mut w, idle, true, &File::Absent, false, false, t);
+        let t = t + REST;
         assert_eq!(
             judge(&mut w, idle, true, &File::Absent, false, false, t),
             Verdict::Nudge { absent: true }
@@ -3195,6 +3238,11 @@ mod tests {
             Verdict::Nudge { absent: false }
         );
         assert_eq!(w.missing, vec!["no Outcome section".to_owned()]);
+        // Told once, it may rest on a file still bad: that is for the user.
+        assert_eq!(
+            judge(&mut w, idle, true, &bad, false, true, t),
+            Verdict::StillBad
+        );
         // A Discover chat without its brief yet is left to talk.
         assert_eq!(
             judge(&mut w, idle, true, &File::Absent, true, false, t),
@@ -3204,6 +3252,22 @@ mod tests {
             judge(&mut w, idle, true, &File::Old, true, false, t),
             Verdict::Wait
         );
+    }
+
+    #[test]
+    fn an_agent_resting_a_moment_before_its_prompt_is_not_nudged() {
+        let t = Instant::now();
+        let mut w = watch();
+        let (idle, working) = (Some(AgentStatus::Idle), Some(AgentStatus::Working));
+        let mut at =
+            |status, since| judge(&mut w, status, true, &File::Absent, false, false, since);
+        // Starting up, it reads as working, then at rest, then gets its prompt.
+        assert_eq!(at(working, t), Verdict::Wait);
+        assert_eq!(at(idle, t + REST / 2), Verdict::Wait);
+        assert_eq!(at(working, t + REST), Verdict::Wait);
+        // Rest starts over: only a rest that lasts counts.
+        assert_eq!(at(idle, t + REST * 2), Verdict::Wait);
+        assert_eq!(at(idle, t + REST * 3), Verdict::Nudge { absent: true });
     }
 
     #[test]

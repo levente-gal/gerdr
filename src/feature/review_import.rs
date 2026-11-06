@@ -450,6 +450,12 @@ pub fn clean(text: &str, lines: bool) -> String {
     scrub(&strip_tags(text), lines)
 }
 
+/// A line of code an agent quotes, made safe to keep: as `clean`, but what
+/// looks like a tag is the code quoted. Of `</form>` nothing else would be left.
+pub fn quoted(text: &str) -> String {
+    scrub(text, false)
+}
+
 /// What the user wrote made safe to keep: as `clean`, but it is their text
 /// and not an agent's, so what looks like a tag stays (a comment about a
 /// `<div>`).
