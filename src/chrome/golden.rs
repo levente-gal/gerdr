@@ -3706,6 +3706,8 @@ fn feature_tab_review_rounds() -> super::FeatureTabView {
             comment_buttons: Vec::new(),
             made: state == "fix made",
             faded,
+            collapsed: false,
+            stripe: None,
             field: None,
             field_hint: "",
             selected: false,
@@ -4093,6 +4095,8 @@ fn feature_tab_manual_test(note: bool) -> super::FeatureTabView {
             comment_buttons: Vec::new(),
             made: false,
             faded: tag == FindingTag::Passed,
+            collapsed: false,
+            stripe: None,
             field: writing.then(|| Line::from("Takes 4 seconds")),
             field_hint: "",
             selected: i == if note { 3 } else { 2 },
@@ -4514,8 +4518,9 @@ fn dump_feature_tab() {
 
 // ---------------------------------------------------- AI review's findings
 
-/// The feature tab on AI review with a card of each kind, the second with
-/// the keyboard.
+/// The feature tab on AI review with a card of each kind, in the page's order:
+/// the user's own, a finding to decide, one dismissed and closed, and one to
+/// fix with the keyboard.
 fn tab_findings() -> super::FeatureTabView {
     use super::{ButtonStyle, FindingCard, FindingTag, PageButton, PageSection};
     let mut view = feature_tab();
@@ -4525,7 +4530,17 @@ fn tab_findings() -> super::FeatureTabView {
     view.page.buttons.clear();
     view.page.sections.clear();
     #[allow(clippy::type_complexity)]
-    let cards: [(&[&str], FindingTag, &str, &str, &str, &str, &str, &str); 3] = [
+    let cards: [(&[&str], FindingTag, &str, &str, &str, &str, &str, &str); 4] = [
+        (
+            &["Edit\u{2026}", "Delete"],
+            FindingTag::Yours,
+            "Rename retry",
+            "to fix",
+            "u1",
+            "It reads badly.",
+            "",
+            "",
+        ),
         (
             &["Fix", "Edit fix\u{2026}", "Dismiss\u{2026}", "Show in diff"],
             FindingTag::High,
@@ -4535,6 +4550,16 @@ fn tab_findings() -> super::FeatureTabView {
             "The loop runs range(n - 1), so the last try never happens, and a caller asking for \
              one retry gets none at all.",
             "Fix: Stop at n.",
+            "",
+        ),
+        (
+            &["Reopen", "Comment", "Show in diff"],
+            FindingTag::High,
+            "Unused import left behind by the last refactor of the login page",
+            "dismissed: gone in the next branch \u{b7} commented",
+            "r1-3 \u{b7} login.py:1",
+            "",
+            "",
             "",
         ),
         (
@@ -4551,16 +4576,6 @@ fn tab_findings() -> super::FeatureTabView {
             "A user with no name raises AttributeError.",
             "Your fix: Fall back to the plain title",
             "Mind the tests, and the greeting when the name is only spaces: it should fall back too.",
-        ),
-        (
-            &["Edit\u{2026}", "Drop"],
-            FindingTag::Yours,
-            "Rename retry",
-            "to fix",
-            "u1",
-            "It reads badly.",
-            "",
-            "",
         ),
     ];
     for (i, (labels, tag, title, state, place, body, fix, note)) in cards.into_iter().enumerate() {
@@ -4596,10 +4611,12 @@ fn tab_findings() -> super::FeatureTabView {
             comment: note.into(),
             comment_buttons,
             made: false,
-            faded: false,
+            faded: state.starts_with("dismissed"),
+            collapsed: state.starts_with("dismissed"),
+            stripe: (state == "to fix").then_some(super::CardStripe::ToFix),
             field: None,
             field_hint: "",
-            selected: i == 1,
+            selected: i == 3,
             buttons: (at..at + labels.len()).collect(),
         }));
     }
@@ -4718,6 +4735,8 @@ fn tab_checks() -> super::FeatureTabView {
             comment_buttons: Vec::new(),
             made: false,
             faded: tag == FindingTag::Skipped,
+            collapsed: false,
+            stripe: None,
             field: None,
             field_hint: "",
             selected: i == 1,
@@ -4775,29 +4794,29 @@ const FINDINGS: [&str; 4] = [
 const GOLDEN_FINDINGS: [[u64; 4]; 4] = [
     // Dark at 1
     [
-        0x1fb0c3b7697288e0, // tab_findings_1180
-        0x17f9bed34c5544b2, // tab_findings_860
+        0x92c31bd180b86dd5, // tab_findings_1180
+        0x3cfbab9775e7b2b9, // tab_findings_860
         0xc8e97861327a6f3d, // finding_dialog
         0x79e255ab5a829143, // finding_dialog_error
     ],
     // Dark at 2
     [
-        0xf9a76abf2835417e, // tab_findings_1180
-        0xae0f65292c113cc7, // tab_findings_860
+        0x74eaa7e08adb40e5, // tab_findings_1180
+        0xb48d6a0e3e3b67ae, // tab_findings_860
         0x43f1532742f932ff, // finding_dialog
         0xb736e6151427fb01, // finding_dialog_error
     ],
     // Light at 1
     [
-        0xf5b68989d38074cb, // tab_findings_1180
-        0xeb4be35912d8f4df, // tab_findings_860
+        0x7d89cce6b7c71ce5, // tab_findings_1180
+        0x41c9d7df8802233d, // tab_findings_860
         0x3af0633810888402, // finding_dialog
         0x2f19c19c900552df, // finding_dialog_error
     ],
     // Light at 2
     [
-        0x77bb5a0bfe9ab73a, // tab_findings_1180
-        0x93b55ad817739303, // tab_findings_860
+        0xd093678f17c9523f, // tab_findings_1180
+        0x1670c3df91937aee, // tab_findings_860
         0xa9c6bc076a8eb05a, // finding_dialog
         0x1e721b2638489f69, // finding_dialog_error
     ],

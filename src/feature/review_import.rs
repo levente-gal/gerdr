@@ -25,7 +25,7 @@
 //!
 //! What the user decides (`Decision`): Fix, or Dismiss with a reason. They
 //! may also reword a finding's fix and comment on it (`edit`), and add an
-//! item of their own (`add`). Once
+//! item of their own (`add`), which they can delete again (`delete_own`). Once
 //! none is `Open`, the ones to fix go to the Build agent together (state
 //! `Sent`); its fix changes the code, the feature goes back to Build, and
 //! after Verify the reviewer runs again on what changed since it last
@@ -172,9 +172,6 @@ pub enum Decision {
 pub const SENT: &str = "That finding went to the Build agent to fix";
 /// Why a fixed finding isn't decided again.
 pub const FIXED: &str = "That finding is fixed";
-/// The reason an item of the user's own is dismissed for: they needn't
-/// tell themselves why.
-pub const DROPPED: &str = "dropped by you";
 
 /// What `f` does to a finding in `state`: to fix (from undecided or
 /// dismissed), or back to undecided (from to fix); else why it does
@@ -231,6 +228,21 @@ pub struct AiReview {
     /// show.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rounds: Vec<ReviewRound>,
+    /// The highest `u<k>` given to an item of the user's own: a deleted
+    /// item's id is never given again, as `rounds` and the build log go by
+    /// ids.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub own_made: u32,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
+/// Where `f` goes in a review's list, the findings of a run being stable
+/// within this: the user's own first, then by severity.
+pub fn list_rank(f: &Finding) -> (bool, Severity) {
+    (!f.yours, f.severity)
 }
 
 impl AiReview {
@@ -244,6 +256,15 @@ impl AiReview {
         (self.findings.iter())
             .filter(|f| f.state != FindingState::Fixed || !kept(&f.id))
             .collect()
+    }
+
+    /// What `shown` lists, as the page does: the user's own first, then by
+    /// severity, each group in the order raised. A decision doesn't move a
+    /// finding.
+    pub fn in_order(&self) -> Vec<&Finding> {
+        let mut list = self.shown();
+        list.sort_by_key(|f| list_rank(f));
+        list
     }
 
     /// How many findings AI review still waits on.
@@ -266,9 +287,9 @@ impl AiReview {
         self.findings.iter().filter(|f| f.fix_made()).count()
     }
 
-    /// The first finding not decided yet, in the order raised.
+    /// The first finding not decided yet, as the page lists them.
     pub fn first_open(&self) -> Option<&Finding> {
-        self.findings.iter().find(|f| f.state == FindingState::Open)
+        (self.in_order().into_iter()).find(|f| f.state == FindingState::Open)
     }
 }
 
@@ -650,6 +671,16 @@ pub fn editable_state(id: &str, state: FindingState) -> Result<(), String> {
     }
 }
 
+/// Whether a comment of the user's on a finding standing at `state` can be
+/// written, changed or deleted: a dismissed finding keeps its own, as saying
+/// why is part of dismissing. Else why not.
+pub fn note_editable(id: &str, state: FindingState) -> Result<(), String> {
+    match state {
+        FindingState::Dismissed => Ok(()),
+        state => editable_state(id, state),
+    }
+}
+
 /// Reword finding `id`'s fix to `fix`: a fix left as the reviewer's, or
 /// empty, is theirs again. Saved on an undecided finding it marks it to fix
 /// too, as rewording a fix means wanting it. What it did, for the log; else
@@ -672,7 +703,7 @@ pub fn set_note(review: &mut AiReview, id: &str, note: &str) -> Result<String, S
     let Some(f) = review.findings.iter_mut().find(|f| f.id == id) else {
         return Err(format!("There's no finding {id}"));
     };
-    editable(f)?;
+    note_editable(&f.id, f.state)?;
     f.note = own_text(note);
     Ok(match f.note.is_empty() {
         true => "comment deleted",
@@ -697,10 +728,9 @@ pub fn add(review: &mut AiReview, text: &str) -> Result<String, String> {
     if title.is_empty() {
         return Err("Say what to fix".into());
     }
-    let id = (1..)
-        .map(|k| format!("u{k}"))
-        .find(|id| review.finding(id).is_none())
-        .unwrap_or_default();
+    let k = own_ids(review).max().unwrap_or(0).max(review.own_made) + 1;
+    review.own_made = k;
+    let id = format!("u{k}");
     review.findings.push(Finding {
         id: id.clone(),
         title,
@@ -711,6 +741,41 @@ pub fn add(review: &mut AiReview, text: &str) -> Result<String, String> {
         ..Finding::default()
     });
     Ok(id)
+}
+
+/// The `k` of every `u<k>` in `review`, earlier reviews too.
+fn own_ids(review: &AiReview) -> impl Iterator<Item = u32> + '_ {
+    let rounds = review.rounds.iter().flat_map(|round| &round.findings);
+    (review.findings.iter().chain(rounds))
+        .filter_map(|f| f.id.strip_prefix('u')?.parse::<u32>().ok())
+}
+
+/// Take item `id` of the user's own out of `review`: where it was and what
+/// it was, to put it back (`restore_own`). One gone to Build stays: the next
+/// review checks it. Else why it can't.
+pub fn delete_own(review: &mut AiReview, id: &str) -> Result<(usize, Finding), String> {
+    let Some(at) = (review.findings.iter()).position(|f| f.id == id && f.yours) else {
+        return Err(format!("There's no item {id} of yours"));
+    };
+    match review.findings[at].state {
+        FindingState::Sent => Err(SENT.to_owned()),
+        FindingState::Fixed => Err(FIXED.to_owned()),
+        _ => {
+            // An older record has its ids only in its list: remember this one.
+            review.own_made = own_ids(review).max().unwrap_or(0).max(review.own_made);
+            Ok((at, review.findings.remove(at)))
+        }
+    }
+}
+
+/// Put back an item `delete_own` took out, where it was or as near as the
+/// list now allows. An id already there means it came back some other way.
+pub fn restore_own(review: &mut AiReview, at: usize, finding: Finding) {
+    if review.finding(&finding.id).is_some() {
+        return;
+    }
+    let at = at.min(review.findings.len());
+    review.findings.insert(at, finding);
 }
 
 /// Rewrite item `id` of the user's own to say `text`. What it did, for the
@@ -759,9 +824,11 @@ pub fn fixes_markdown(review: &AiReview, title: &str, multi: bool) -> (usize, St
 
 /// The findings the user wants fixed.
 fn to_fix(review: &AiReview) -> Vec<&Finding> {
-    (review.findings.iter())
+    let mut fix: Vec<&Finding> = (review.findings.iter())
         .filter(|f| f.state == FindingState::Fix)
-        .collect()
+        .collect();
+    fix.sort_by_key(|f| list_rank(f));
+    fix
 }
 
 /// What `f` says, under its heading.
@@ -1287,14 +1354,125 @@ mod tests {
         assert_eq!(review.findings[0].note, "");
         assert_eq!(review.findings[0].state, FindingState::Fix);
         assert!(set_note(&mut review, "nope", "x").is_err());
-        for state in [
-            FindingState::Dismissed,
-            FindingState::Sent,
-            FindingState::Fixed,
-        ] {
+        for state in [FindingState::Sent, FindingState::Fixed] {
             let mut review = one_finding(state);
             assert!(set_note(&mut review, "r1-1", "x").is_err(), "{state:?}");
         }
+        // Dismissed, it keeps its comment, and still decides nothing.
+        let mut review = one_finding(FindingState::Dismissed);
+        set_note(&mut review, "r1-1", "Why not").unwrap();
+        assert_eq!(review.findings[0].note, "Why not");
+        set_note(&mut review, "r1-1", "").unwrap();
+        assert_eq!(review.findings[0].note, "");
+        assert_eq!(review.findings[0].state, FindingState::Dismissed);
+    }
+
+    /// Findings with these severities, ids `r1-1` on, all undecided.
+    fn severities(of: &[Severity]) -> AiReview {
+        let findings = (of.iter().enumerate())
+            .map(|(i, severity)| Finding {
+                id: format!("r1-{}", i + 1),
+                title: format!("Finding {}", i + 1),
+                severity: *severity,
+                ..Finding::default()
+            })
+            .collect();
+        AiReview {
+            n: 1,
+            findings,
+            ..AiReview::default()
+        }
+    }
+
+    fn ids(list: &[&Finding]) -> Vec<String> {
+        list.iter().map(|f| f.id.clone()).collect()
+    }
+
+    #[test]
+    fn the_list_goes_by_severity_and_a_decision_moves_nothing() {
+        use Severity::{High, Low, Medium};
+        let mut review = severities(&[Low, High, Medium, High]);
+        let own = add(&mut review, "Mine").unwrap();
+        let want = [own.as_str(), "r1-2", "r1-4", "r1-3", "r1-1"];
+        assert_eq!(ids(&review.in_order()), want);
+        // The most severe to decide comes first, past the user's own.
+        assert_eq!(review.first_open().unwrap().id, "r1-2");
+        decide(&mut review, "r1-2", &Decision::Fix).unwrap();
+        decide(&mut review, "r1-4", &Decision::Dismiss("no".into())).unwrap();
+        assert_eq!(ids(&review.in_order()), want);
+        assert_eq!(review.first_open().unwrap().id, "r1-3");
+    }
+
+    #[test]
+    fn fixes_reach_build_most_severe_first() {
+        use Severity::{High, Low};
+        let mut review = severities(&[Low, High]);
+        decide(&mut review, "r1-1", &Decision::Fix).unwrap();
+        decide(&mut review, "r1-2", &Decision::Fix).unwrap();
+        let (n, md) = fixes_markdown(&review, "t", false);
+        assert_eq!(n, 2);
+        assert!(md.find("r1-2").unwrap() < md.find("r1-1").unwrap(), "{md}");
+    }
+
+    #[test]
+    fn an_item_of_the_users_own_goes_for_good_until_it_is_sent() {
+        let mut review = severities(&[Severity::High]);
+        let id = add(&mut review, "Mine").unwrap();
+        // A reviewer's finding is dismissed, not deleted.
+        assert!(delete_own(&mut review, "r1-1").is_err());
+        for state in [
+            FindingState::Open,
+            FindingState::Fix,
+            FindingState::Dismissed,
+        ] {
+            review.findings[1].state = state;
+            let (at, gone) = delete_own(&mut review, &id).unwrap();
+            assert_eq!((at, gone.id.as_str()), (1, id.as_str()));
+            assert!(review.finding(&id).is_none());
+            restore_own(&mut review, at, gone);
+            assert_eq!(review.findings[1].id, id);
+            assert_eq!(review.findings[1].state, state);
+        }
+        for (state, why) in [(FindingState::Sent, SENT), (FindingState::Fixed, FIXED)] {
+            review.findings[1].state = state;
+            assert_eq!(delete_own(&mut review, &id), Err(why.to_owned()));
+        }
+    }
+
+    #[test]
+    fn restoring_an_item_fits_the_list_and_never_doubles_it() {
+        let mut review = severities(&[]);
+        let id = add(&mut review, "Mine").unwrap();
+        let (_, gone) = delete_own(&mut review, &id).unwrap();
+        restore_own(&mut review, 9, gone.clone());
+        assert_eq!(review.findings.len(), 1);
+        restore_own(&mut review, 0, gone);
+        assert_eq!(review.findings.len(), 1);
+    }
+
+    #[test]
+    fn an_id_of_the_users_own_is_never_given_twice() {
+        let mut review = severities(&[]);
+        let first = add(&mut review, "One").unwrap();
+        delete_own(&mut review, &first).unwrap();
+        assert_ne!(add(&mut review, "Two").unwrap(), first);
+        // Nor one from a record older than `own_made`.
+        let mut review = severities(&[]);
+        let old = add(&mut review, "Old").unwrap();
+        review.own_made = 0;
+        delete_own(&mut review, &old).unwrap();
+        assert_ne!(add(&mut review, "New").unwrap(), old);
+        // Nor one only an earlier review still holds, in an older record.
+        let mut review = severities(&[]);
+        review.rounds.push(ReviewRound {
+            n: 1,
+            findings: vec![Finding {
+                id: "u7".into(),
+                yours: true,
+                ..Finding::default()
+            }],
+        });
+        assert_eq!(add(&mut review, "Next").unwrap(), "u8");
     }
 
     #[test]

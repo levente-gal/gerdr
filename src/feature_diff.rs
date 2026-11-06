@@ -132,6 +132,8 @@ pub struct FeatureOf {
     pub findings: Vec<Finding>,
     /// The finding to put the cursor on once read.
     pub focus: Option<String>,
+    /// The comment of the user's to go to, if any (`focus` is for findings).
+    pub focus_note: Option<Comment>,
 }
 
 /// What code review counts of a feature, for its panel row.
@@ -489,7 +491,8 @@ impl FeatureOf {
         let single = (self.repos.len() == 1).then(|| &self.repos[0]);
         self.findings
             .iter()
-            // Those the user dropped are gone from here, not from the page.
+            // Those an older gerdr dropped: gone from here, on the page until
+            // deleted.
             .filter(|f| !(f.yours && f.state == FindingState::Dismissed))
             .flat_map(|f| {
                 let repo = (self.repos.iter().find(|r| r.name == f.repo)).or(single);
@@ -746,6 +749,7 @@ impl WorktreeDiff {
         };
         let comments = fe.finding_comments(&self.diff.diffs);
         let focus = fe.focus.clone();
+        let focus_note = fe.focus_note.clone();
         self.diff.notes_open = fe.role() == Role::Deciding;
         let review = &mut self.diff.review;
         review.comments.retain(|c| c.flag.is_none());
@@ -756,6 +760,10 @@ impl WorktreeDiff {
                 .iter()
                 .position(|c| c.flag.as_ref().is_some_and(|f| f.id == id));
             found.map(|i| first + i)
+        });
+        let at = at.or_else(|| {
+            let note = focus_note.as_ref()?;
+            review.comments[..first].iter().position(|c| c == note)
         });
         let sections = self
             .feature
@@ -768,6 +776,7 @@ impl WorktreeDiff {
             && let Some(fe) = self.feature.as_mut()
         {
             fe.focus = None;
+            fe.focus_note = None;
         }
     }
 }
@@ -821,6 +830,7 @@ impl Gerdr {
                 .map(|r| r.findings.clone())
                 .unwrap_or_default(),
             focus: finding.map(str::to_owned),
+            focus_note: None,
         };
         let root = feature.root.clone();
         // A Zed opened from it goes to the feature's own workspace.
@@ -1157,6 +1167,14 @@ impl Gerdr {
                 self.note_finding(&project, &slug, id, text);
             }
         }
+    }
+
+    /// Delete the user's own item `id` of the open code review.
+    pub(crate) fn feature_delete_own(&mut self, id: &str) {
+        let Some((project, slug)) = self.feature_open() else {
+            return;
+        };
+        self.delete_own_finding(&project, &slug, id);
     }
 
     /// Edit finding `id` of the open code review, in the finding dialog.
@@ -1667,19 +1685,19 @@ mod tests {
         let view = wd.view(POPUP_ENV);
         let shows = |l: &str| view.row_buttons.iter().any(|(_, h)| h.label == l);
         assert!(!shows("Comment") && !shows("Edit") && !shows("Edit fix\u{2026}"));
-        // At AI review, a dismissed one is reopened first.
+        // At AI review a dismissed one keeps its comment open, but its fix
+        // waits for it to be reopened.
         let mut wd = popup(
             Stage::AiReview,
             vec![finding("r1-1", FindingState::Dismissed)],
             Review::default(),
         );
         wd.key(&none, right, right, POPUP_ENV);
+        let view = wd.view(POPUP_ENV);
+        let shows = |l: &str| view.row_buttons.iter().any(|(_, h)| h.label == l);
+        assert!(shows("Comment") && !shows("Edit fix\u{2026}"));
         wd.key(&none, c, c, POPUP_ENV);
-        assert!(wd.diff.editing.is_none());
-        assert_eq!(
-            wd.take_error().error.as_deref(),
-            Some("r1-1 is dismissed: reopen it first")
-        );
+        assert!(wd.diff.editing.is_some());
     }
 
     #[test]
@@ -2081,7 +2099,7 @@ mod tests {
             .iter()
             .map(|(_, h)| h.label.as_str())
             .collect();
-        assert_eq!(labels, ["Edit\u{2026}", "Drop"]);
+        assert_eq!(labels, ["Edit\u{2026}", "Delete"]);
         // f says why not; Del goes at once, with nothing to say.
         let f = Keysym::f;
         wd.key(&none, f, f, POPUP_ENV);
@@ -2090,14 +2108,9 @@ mod tests {
         assert_eq!(decided, None);
         let del = Keysym::Delete;
         wd.key(&none, del, del, POPUP_ENV);
-        let decided = wd.take_error().decided;
-        assert_eq!(
-            decided,
-            Some((
-                "u1".to_owned(),
-                Decision::Dismiss(crate::feature::review_import::DROPPED.to_owned())
-            ))
-        );
+        let taken = wd.take_error();
+        assert_eq!(taken.decided, None);
+        assert_eq!(taken.delete_own.as_deref(), Some("u1"));
         assert!(wd.diff.editing.is_none());
     }
 
@@ -2247,6 +2260,7 @@ mod tests {
                 ..Finding::default()
             }],
             focus: Some("r1-1".into()),
+            focus_note: None,
             ..FeatureOf::default()
         };
         let mut wd = WorktreeDiff::of_feature(fe, "/w".into(), 0, Review::default());

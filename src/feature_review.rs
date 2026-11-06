@@ -364,9 +364,6 @@ impl Gerdr {
             Ok(what) => what,
             Err(why) => return self.show_warning(why),
         };
-        let open = review.open();
-        let fix = review.count(FindingState::Fix);
-        let undecided = review.count(FindingState::Open);
         f.log(feature::now(), format!("Finding {id}: {what}"));
         self.save_feature(project, slug);
         let word = match decision {
@@ -374,18 +371,42 @@ impl Gerdr {
             Decision::Dismiss(_) => "dismissed",
             Decision::Reopen => "reopened",
         };
+        self.after_decision(project, slug, format!("Finding {id} {word}"), None);
+    }
+
+    /// What comes of a change to feature `slug`'s findings, said in `done`,
+    /// with `undo` on its toast: nothing left, and AI review is done; nothing
+    /// left to decide, and the fixes are offered. An offer has its own button,
+    /// so only the toast that says `done` can undo.
+    fn after_decision(
+        &mut self,
+        project: &str,
+        slug: &str,
+        done: String,
+        undo: Option<MenuAction>,
+    ) {
+        let Some(review) = self.feature(project, slug).and_then(|f| f.review.as_ref()) else {
+            return;
+        };
+        let open = review.open();
+        let fix = review.count(FindingState::Fix);
+        let undecided = review.count(FindingState::Open);
+        let said = |this: &mut Self, done: String, undo: Option<MenuAction>| {
+            let button = undo.map(|undo| ("Undo".to_owned(), undo));
+            this.toast_with(done, Level::Success, button);
+        };
         if open == 0 {
-            self.show_success(format!("Finding {id} {word}"));
+            said(self, done, undo);
             return self.read_and_tick(project, slug, Stage::AiReview);
         }
-        if undecided == 0 && fix > 0 {
+        if undecided == 0 && fix > 0 && undo.is_none() {
             return self.offer_fixes(
                 project,
                 slug,
                 format!("All findings decided: {} to fix", plural(fix, "finding")),
             );
         }
-        self.show_success(format!("Finding {id} {word}"));
+        said(self, done, undo);
     }
 
     /// Say `text`, with a button for what comes next: nothing is left to
@@ -515,13 +536,165 @@ impl Gerdr {
         );
     }
 
+    /// Delete item `id` of the user's own from feature `slug`'s AI review: it
+    /// goes for good, not dismissed. The toast can bring it back (checklist C4).
+    pub(crate) fn delete_own_finding(&mut self, project: &str, slug: &str, id: &str) {
+        let selected = self.selected_review_card();
+        let mut gone = None;
+        let done = self.change_review(project, slug, |review| {
+            gone = Some(review_import::delete_own(review, id)?);
+            Ok(format!("You deleted comment {id}"))
+        });
+        let Some((at, finding)) = gone.filter(|_| done) else {
+            return;
+        };
+        self.feature_findings_changed(project, slug);
+        self.reselect_review_card(selected);
+        let undo = MenuAction::RestoreOwnFinding {
+            project: project.to_owned(),
+            slug: slug.to_owned(),
+            at,
+            finding: Box::new(finding),
+        };
+        self.after_decision(project, slug, format!("Comment {id} deleted"), Some(undo));
+    }
+
+    /// Undo `delete_own_finding`. Past AI review `change_review` refuses, and
+    /// says why: its findings are settled.
+    pub(crate) fn restore_own_finding(
+        &mut self,
+        project: &str,
+        slug: &str,
+        at: usize,
+        finding: review_import::Finding,
+    ) {
+        let id = finding.id.clone();
+        let selected = self.selected_review_card();
+        let done = self.change_review(project, slug, |review| {
+            review_import::restore_own(review, at, finding);
+            Ok(format!("You brought back comment {id}"))
+        });
+        if done {
+            self.feature_findings_changed(project, slug);
+            self.reselect_review_card(selected);
+        }
+    }
+
+    /// Change the comments the user left in feature `slug`'s diff with
+    /// `change`: what it made of them, if it changed any. They go to the open
+    /// diff if it is that feature's, else to their file; a failure to save says
+    /// so. The page shows the change at once, with no wait for the next probe.
+    fn change_diff_notes<R>(
+        &mut self,
+        project: &str,
+        slug: &str,
+        change: impl FnOnce(&mut Vec<review::Comment>) -> Option<R>,
+    ) -> Option<R> {
+        let selected = self.selected_review_card();
+        let env = self.worktree_env();
+        let open = self.wd_mut().filter(|wd| {
+            (wd.feature.as_ref()).is_some_and(|fe| fe.project == project && fe.slug == slug)
+        });
+        let (done, own) = if let Some(wd) = open {
+            let mut own = wd.diff.review.without_findings().comments;
+            let done = change(&mut own)?;
+            wd.diff.review.comments.clone_from(&own);
+            wd.diff.review_dirty = true;
+            wd.place_findings(env);
+            self.feature_save_review();
+            (done, own)
+        } else {
+            let path = store::dir(None, project, slug).join(COMMENTS);
+            let mut review = review::load_file(&path);
+            let done = change(&mut review.comments)?;
+            if let Err(err) = review::save_file(&path, &review) {
+                tracing::warn!("saving {}: {err}", path.display());
+                self.show_error(format!("Couldn't save your comments: {err}"));
+                return None;
+            }
+            (done, review.comments)
+        };
+        self.notes_are(project, slug, own);
+        self.reselect_review_card(selected);
+        self.probe_feature(project, slug);
+        Some(done)
+    }
+
+    /// Delete comment `c` the user left in feature `slug`'s diff: the toast
+    /// can bring it back (checklist C4).
+    pub(crate) fn delete_diff_note(&mut self, project: &str, slug: &str, c: &review::Comment) {
+        let at = self.change_diff_notes(project, slug, |own| {
+            let at = own.iter().position(|x| x == c)?;
+            own.remove(at);
+            Some(at)
+        });
+        let Some(at) = at else {
+            return self.show_warning("That comment is gone already".into());
+        };
+        let undo = MenuAction::RestoreDiffNote {
+            project: project.to_owned(),
+            slug: slug.to_owned(),
+            at,
+            comment: Box::new(c.clone()),
+        };
+        self.toast_with(
+            "Comment deleted".to_owned(),
+            Level::Success,
+            Some(("Undo".to_owned(), undo)),
+        );
+    }
+
+    /// Undo `delete_diff_note`.
+    pub(crate) fn restore_diff_note(
+        &mut self,
+        project: &str,
+        slug: &str,
+        at: usize,
+        comment: review::Comment,
+    ) {
+        self.change_diff_notes(project, slug, |own| {
+            let at = at.min(own.len());
+            own.insert(at, comment);
+            Some(())
+        });
+    }
+
+    /// Make comment `c` the user left in feature `slug`'s diff say `text`.
+    pub(crate) fn edit_diff_note(
+        &mut self,
+        project: &str,
+        slug: &str,
+        c: &review::Comment,
+        text: &str,
+    ) {
+        let text = text.trim().to_owned();
+        let done = self.change_diff_notes(project, slug, |own| {
+            own.iter_mut().find(|x| *x == c).map(|x| x.text = text)
+        });
+        match done {
+            Some(()) => self.show_success("Comment saved, to go to Build with the fixes".into()),
+            None => self.show_warning("That comment is gone already".into()),
+        }
+    }
+
+    /// Show comment `c` the user left in feature `slug`'s diff.
+    pub(crate) fn show_diff_note(&mut self, project: &str, slug: &str, c: review::Comment) {
+        self.open_feature_diff(project, slug, None);
+        if let Some(fe) = (self.wd_mut().and_then(|wd| wd.feature.as_mut()))
+            .filter(|fe| fe.project == project && fe.slug == slug)
+        {
+            // Its diff is being read: the cursor goes there once it is.
+            fe.focus_note = Some(c);
+        }
+    }
+
     /// Write or edit the user's comment on finding `id`, on its card on the
     /// page: the keyboard goes to it there.
     pub(crate) fn write_finding_comment(&mut self, project: &str, slug: &str, id: &str) {
         let Some(f) = self.finding_to_ask(project, slug, id) else {
             return;
         };
-        if let Err(why) = review_import::editable(&f) {
+        if let Err(why) = review_import::note_editable(&f.id, f.state) {
             return self.show_warning(why);
         }
         let mut field = TextField::default();
@@ -583,6 +756,8 @@ impl Gerdr {
                 fe.focus = Some(added.clone());
             }
             self.feature_findings_changed(project, slug);
+            // It lands at the top of the page's list.
+            self.select_panel_finding(&added);
             self.show_success(format!(
                 "Comment {added} added, to go to Build with the fixes"
             ));
@@ -673,10 +848,8 @@ impl Gerdr {
                 tracing::warn!("deleting {}: {err}", path.display());
                 self.show_error(format!("Couldn't delete the sent comments: {err}"));
             }
-            let key = (project.to_owned(), slug.to_owned());
-            if let Some(counts) = self.code_reviews.get_mut(&key) {
-                counts.comments = 0;
-            }
+            // Their cards go with them, with no wait for the probe.
+            self.notes_are(project, slug, Vec::new());
             self.probe_feature(project, slug);
         }
         let Some(f) = self.feature_mut(project, slug) else {

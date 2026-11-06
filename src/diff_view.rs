@@ -50,7 +50,7 @@ pub(crate) const NOWHERE: &str = "Move the cursor to a line first";
 /// Why `f` did nothing off a finding.
 pub const NO_FINDING: &str = "Move the cursor to a finding first";
 /// Why `f` does nothing on a comment of the user's own.
-pub const YOUR_COMMENT: &str = "This is your comment: c edits it, Del drops it";
+pub const YOUR_COMMENT: &str = "This is your comment: c edits it, Del deletes it";
 /// Why a dismissal did nothing.
 pub const NO_REASON: &str = "Not dismissed: say why first";
 /// Why a finding can't be commented on or reworded now.
@@ -254,6 +254,9 @@ pub struct Signals {
     /// What the user decided of an AI review finding shown as a comment,
     /// by its id (see `review::Flag`).
     pub decided: Option<(String, Decision)>,
+    /// The user's own item to delete, by its id: their comment kept as a
+    /// finding (`review::Flag::yours`).
+    pub delete_own: Option<String>,
     /// The AI review finding to edit, by its id: its fix, or what the user's
     /// own item says, is asked for in a dialog.
     pub edit_finding: Option<String>,
@@ -1527,7 +1530,7 @@ impl DiffView {
         if !self.notes_open {
             return Some(NOTES_CLOSED.into());
         }
-        review_import::editable_state(&flag.id, flag.state).err()
+        review_import::note_editable(&flag.id, flag.state).err()
     }
 
     /// Open the editor on the user's comment on the finding comment `c` is,
@@ -1812,10 +1815,9 @@ impl DiffView {
         let Some((c, flag)) = self.finding_here() else {
             return false;
         };
-        // The user's own: nothing to tell themselves.
+        // The user's own: nothing to tell themselves, so it just goes.
         if flag.yours {
-            let decision = Decision::Dismiss(review_import::DROPPED.to_owned());
-            self.signals.decided = Some((flag.id.clone(), decision));
+            self.signals.delete_own = Some(flag.id.clone());
             return true;
         }
         match review_import::dismiss_key(flag.state) {
@@ -2705,7 +2707,7 @@ impl DiffView {
                         ..keyed(B::Comment, "c")
                     },
                     Hint {
-                        label: "Drop".into(),
+                        label: "Delete".into(),
                         ..keyed(B::DismissFinding, "Del")
                     },
                 ],
@@ -2727,7 +2729,11 @@ impl DiffView {
             // What the user can say of a reviewer's finding.
             let words = (!flag.yours && self.note_refused(flag).is_none()).then(|| {
                 let comment = (!self.has_note(c)).then(|| keyed(B::Comment, "c"));
-                comment.into_iter().chain([keyed(B::EditFix, "Shift+E")])
+                // A dismissed finding's fix waits for it to be reopened.
+                let fix = review_import::editable_state(&flag.id, flag.state)
+                    .is_ok()
+                    .then(|| keyed(B::EditFix, "Shift+E"));
+                comment.into_iter().chain(fix)
             });
             if let Some(i) = first {
                 buttons.extend(choices.into_iter().map(|h| (i, h)));
