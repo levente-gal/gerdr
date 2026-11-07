@@ -19,9 +19,9 @@ use super::{
     ListBar, POPUP_RADIUS, Painter, Palette, QUIT_BODY, QUIT_BUTTON, QUIT_BUTTON_GAP,
     QUIT_LINE_GAP, QUIT_PADDING, QUIT_TITLE, Rect, Rgb, SHADOW, SMALL_FONT_SIZE, Thumb, agent_icon,
     band, button_width, check, chevron_down, chevron_side, copy, coverage, cross, dialog_buttons,
-    field_text, focus_ring, footer_hint_spots, gutter_track, hint_strs, icon_sdf, measure,
-    measure_bold, measured_footer_height, mix, phys, physical, plus, rect_px, segment,
-    segment_tint, status_dot, tab, trash,
+    field_lines_height, field_text, focus_ring, footer_hint_spots, gutter_track, hint_strs,
+    icon_sdf, measure, measure_bold, measured_footer_height, mix, phys, physical, plus, rect_px,
+    segment, segment_tint, status_dot, tab, trash,
 };
 use super::{
     bars, code_mark, eye, flask, magnifier, plan_review_mark, ship_arrow, sparkle, text_lines,
@@ -2010,11 +2010,12 @@ impl Stack {
             self.y += FINDING_GAP;
             self.your_comment(card, page, buttons);
         }
-        if card.field.is_some() {
+        if let Some(field) = &card.field {
             self.y += FINDING_GAP;
-            let rect = Rectangle::new((self.x, self.y).into(), (self.w, QUIT_BUTTON).into());
+            let h = field_lines_height(field.text.split('\n').count());
+            let rect = Rectangle::new((self.x, self.y).into(), (self.w, h).into());
             self.pieces.push((rect, Piece::CardField(k)));
-            self.y += QUIT_BUTTON;
+            self.y += h;
         }
         let held: Vec<usize> = (card.buttons.iter().copied())
             .filter(|b| *b < page.buttons.len())
@@ -5088,7 +5089,7 @@ impl Painter {
                     return;
                 };
                 let hint = card.field_hint;
-                self.field(c, text, hint, rect, true, scale, p);
+                self.field_of_lines(c, text, hint, rect, true, scale, p);
             }
             // A dot at work blinks: it is composed over the tab.
             Piece::CheckDot(dot) => status_dot(c, rect, *dot, scale, p),
@@ -5442,7 +5443,9 @@ pub(super) fn stage_blink_dot(scale: f64, p: &Palette) -> MemoryRenderBuffer {
 mod tests {
     use super::*;
     use crate::chrome::sidebar::feature_dots_rect as feature_row_dots;
-    use crate::chrome::{ONE_DARK, ONE_LIGHT, ONE_LIGHT_PAGE, contrast, inside};
+    use crate::chrome::{
+        FIELD_LINE, ONE_DARK, ONE_LIGHT, ONE_LIGHT_PAGE, contrast, field_line_spot, inside,
+    };
 
     #[test]
     fn the_dialog_stacks_its_parts_inside_it() {
@@ -7027,6 +7030,50 @@ mod tests {
             }));
         }
         view
+    }
+
+    #[test]
+    fn a_note_being_written_holds_its_lines_and_the_pointer_finds_each() {
+        let field_of = |view: &FeatureTabView| {
+            let l = tab_at(view, 1200);
+            let page = &l.pieces[TabColumn::Page as usize];
+            let (rect, _) = (page.iter())
+                .find(|(_, p)| matches!(p, Piece::CardField(0)))
+                .expect("the note's field");
+            (*rect, l.finding_cards[0], l.finding_cards[1])
+        };
+        let mut view = findings_view(2, "short");
+        let note = |view: &mut FeatureTabView, text: &str| {
+            if let Some(PageSection::Finding(card)) = view.page.sections.get_mut(0) {
+                card.field = Some(Line {
+                    text: text.into(),
+                    caret: text.len(),
+                    anchor: text.len(),
+                });
+            }
+        };
+        note(&mut view, "one line");
+        let (one, card, _) = field_of(&view);
+        assert_eq!(one.size.h, QUIT_BUTTON);
+        note(&mut view, "first\nsecond\nthird");
+        let (three, grown, next) = field_of(&view);
+        assert_eq!(three.size.h - one.size.h, 2 * FIELD_LINE);
+        assert_eq!(grown.size.h - card.size.h, 2 * FIELD_LINE);
+        assert!(three.loc.y + three.size.h <= grown.loc.y + grown.size.h);
+        assert!(grown.loc.y + grown.size.h <= next.loc.y, "the next card moves down");
+        let whole = Line {
+            text: "first\nsecond\nthird".into(),
+            caret: 0,
+            anchor: 0,
+        };
+        let at = |y: i32| Point::from((three.loc.x as f64 + 5.0, (three.loc.y + y) as f64));
+        let line_at = |y: i32| {
+            let (spot, base) = field_line_spot(three, three, &whole, at(y), 1.0);
+            (spot.line.text, base)
+        };
+        assert_eq!(line_at(5), ("first".to_owned(), 0));
+        assert_eq!(line_at(FIELD_LINE + 5), ("second".to_owned(), 6));
+        assert_eq!(line_at(three.size.h + 40), ("third".to_owned(), 13));
     }
 
     #[test]

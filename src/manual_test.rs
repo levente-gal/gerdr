@@ -291,7 +291,8 @@ impl Gerdr {
     /// A key while the note of a criterion is being written; false when none
     /// is, or its page has gone (the note is kept then), and the key is the
     /// tab's. Enter saves it, as does Esc; with nothing written, Enter says
-    /// why not and Esc leaves the criterion as it was.
+    /// why not and Esc leaves the criterion as it was. Shift+Enter breaks
+    /// the line.
     pub(crate) fn criterion_note_key(
         &mut self,
         mods: &ModifiersState,
@@ -312,6 +313,12 @@ impl Gerdr {
             CardNote::Finding(id) => Some(id.clone()),
             CardNote::Criterion(_) => None,
         };
+        let enter = matches!(sym, Keysym::Return | Keysym::KP_Enter);
+        let only_shift = mods.shift && !(mods.ctrl || mods.alt || mods.logo);
+        if enter && only_shift {
+            field.newline();
+            return true;
+        }
         match sym {
             Keysym::Return | Keysym::KP_Enter if field.trim().is_empty() => match finding {
                 // Emptied, it goes; nothing there, there is nothing to do.
@@ -561,8 +568,7 @@ impl Gerdr {
 
     /// Start writing criterion `i`'s note, from `note`, on its card.
     fn write_criterion_note(&mut self, i: usize, note: &str) {
-        let mut field = TextField::default();
-        field.set(note);
+        let field = TextField::multiline(note);
         if let Some(panel) = self.features.panel.as_mut() {
             panel.note = Some((CardNote::Criterion(i), field));
         }
