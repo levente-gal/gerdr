@@ -16,7 +16,10 @@ use std::{
     time::{Duration, UNIX_EPOCH},
 };
 
-use rusqlite::{Connection, OpenFlags, OptionalExtension as _, Transaction, params};
+use rusqlite::{
+    Connection, ErrorCode, OpenFlags, OptionalExtension as _, Transaction, TransactionBehavior,
+    params,
+};
 use serde_json::Value;
 
 use super::{AgentKind, BlobRef, Event, FORMAT, Line, usage, zst};
@@ -62,7 +65,9 @@ pub fn version() -> i64 {
     i64::from(SCHEMA) * 1000 + i64::from(FORMAT)
 }
 
-/// The index under `root`, to write to; made, or made again, as needed.
+/// The index under `root`, to write to; made, or made again when it is of
+/// another version or no index at all. Another gerdr writing it a while,
+/// or any other error, leaves it as it is: it is tried again later.
 pub fn open(root: &Path) -> Result<Connection, String> {
     std::fs::create_dir_all(root).map_err(|e| format!("making {}: {e}", root.display()))?;
     if let Err(err) = std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700)) {
@@ -71,20 +76,53 @@ pub fn open(root: &Path) -> Result<Connection, String> {
     let file = path(root);
     match open_tables(&file) {
         Ok(conn) => Ok(conn),
-        Err(why) => {
+        Err(Unopened::Redo(why)) => {
             // The connection is closed by now: what is left goes, then the
             // index is drawn again from the files.
             tracing::warn!("ai work: drawing {} again: {why}", file.display());
             remove(&file)?;
-            open_tables(&file).map_err(|why| format!("making {}: {why}", file.display()))
+            open_tables(&file).map_err(|un| format!("making {}: {}", file.display(), un.why()))
+        }
+        Err(Unopened::Failed(why)) => Err(format!("opening {}: {why}", file.display())),
+    }
+}
+
+/// Why the index couldn't be opened.
+#[derive(Debug)]
+enum Unopened {
+    /// It is of another version, or no database at all: it is made again.
+    Redo(String),
+    /// Anything else, as a lock another gerdr holds: it stays.
+    Failed(String),
+}
+
+impl Unopened {
+    fn of(err: &rusqlite::Error) -> Self {
+        match redo(err) {
+            true => Self::Redo(err.to_string()),
+            false => Self::Failed(err.to_string()),
+        }
+    }
+
+    fn why(&self) -> &str {
+        match self {
+            Self::Redo(why) | Self::Failed(why) => why,
         }
     }
 }
 
+/// Whether `err` says the file is no index to read: what made again mends.
+fn redo(err: &rusqlite::Error) -> bool {
+    matches!(
+        err.sqlite_error_code(),
+        Some(ErrorCode::NotADatabase | ErrorCode::DatabaseCorrupt)
+    )
+}
+
 /// The index at `file`, its tables made if it is new. Of another version,
-/// or no database at all, it is an error.
-fn open_tables(file: &Path) -> Result<Connection, String> {
-    let fail = |e: rusqlite::Error| e.to_string();
+/// or no database at all, it is to be made again.
+fn open_tables(file: &Path) -> Result<Connection, Unopened> {
+    let fail = |e: rusqlite::Error| Unopened::of(&e);
     let conn = Connection::open(file).map_err(fail)?;
     conn.busy_timeout(BUSY).map_err(fail)?;
     let found: i64 = (conn.query_row("PRAGMA user_version", [], |r| r.get(0))).map_err(fail)?;
@@ -92,7 +130,10 @@ fn open_tables(file: &Path) -> Result<Connection, String> {
         (conn.query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get(0))).map_err(fail)?;
     if found != version() {
         if found != 0 || tables != 0 {
-            return Err(format!("its version is {found}, not {}", version()));
+            return Err(Unopened::Redo(format!(
+                "its version is {found}, not {}",
+                version()
+            )));
         }
         conn.pragma_update(None, "journal_mode", "WAL")
             .map_err(fail)?;
@@ -160,28 +201,29 @@ pub fn dirs(root: &Path) -> Vec<PathBuf> {
 }
 
 /// Empty every table of `conn`, for it to be drawn again from the files.
-pub fn clear(conn: &mut Connection) -> Result<(), String> {
-    let tx = conn.transaction().map_err(|e| e.to_string())?;
+pub fn clear(conn: &mut Connection) -> rusqlite::Result<()> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     for table in FEATURE_TABLES.iter().chain(&["ingest"]) {
-        tx.execute(&format!("DELETE FROM {table}"), [])
-            .map_err(|e| e.to_string())?;
+        tx.execute(&format!("DELETE FROM {table}"), [])?;
     }
-    tx.commit().map_err(|e| e.to_string())
+    tx.commit()
 }
 
 /// The index under `root`, emptied, to be drawn again from the files: the
 /// file stays, so a reader open on it reads on. One that can't be emptied
-/// is made anew.
+/// as it is no index is made anew; one another gerdr holds stays.
 pub fn reset(root: &Path) -> Result<Connection, String> {
-    let emptied = open(root).and_then(|mut conn| clear(&mut conn).map(|()| conn));
-    match emptied {
-        Ok(conn) => Ok(conn),
-        Err(why) => {
+    let mut conn = open(root)?;
+    match clear(&mut conn) {
+        Ok(()) => Ok(conn),
+        Err(err) if redo(&err) => {
+            drop(conn);
             let file = path(root);
-            tracing::warn!("ai work: making {} anew: {why}", file.display());
+            tracing::warn!("ai work: making {} anew: {err}", file.display());
             remove(&file)?;
             open(root)
         }
+        Err(err) => Err(format!("emptying {}: {err}", path(root).display())),
     }
 }
 
@@ -192,10 +234,13 @@ pub fn ingest(conn: &mut Connection, dirs: &[PathBuf]) -> Result<usize, String> 
     let mut lines = 0;
     let mut failed = Vec::new();
     for dir in dirs {
-        let one = conn.transaction().and_then(|tx| {
-            let n = ingest_dir(&tx, dir)?;
-            tx.commit().map(|()| n)
-        });
+        // Several gerdrs may write it: each takes the lock before it reads.
+        let one = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .and_then(|tx| {
+                let n = ingest_dir(&tx, dir)?;
+                tx.commit().map(|()| n)
+            });
         match one {
             Ok(n) => lines += n,
             Err(err) => {
@@ -1340,6 +1385,21 @@ mod tests {
         let mode = std::fs::metadata(path(&root)).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Only an index that is none any more is drawn again: one another
+    /// gerdr holds stays.
+    #[test]
+    fn only_a_broken_index_is_made_again() {
+        let code = |c| rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(c), None);
+        assert!(redo(&code(rusqlite::ffi::SQLITE_NOTADB)));
+        assert!(redo(&code(rusqlite::ffi::SQLITE_CORRUPT)));
+        assert!(!redo(&code(rusqlite::ffi::SQLITE_BUSY)));
+        assert!(!redo(&code(rusqlite::ffi::SQLITE_IOERR)));
+        assert!(matches!(
+            Unopened::of(&code(rusqlite::ffi::SQLITE_BUSY)),
+            Unopened::Failed(_)
+        ));
     }
 
     #[test]

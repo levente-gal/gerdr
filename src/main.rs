@@ -6444,6 +6444,8 @@ impl Gerdr {
     /// End gerdr, stopping what `stops` says of the project. It counts as
     /// stopped only once its session is.
     pub fn quit_app(&mut self, stops: projects::Stops) {
+        // Best effort: their rsync stops rather than going on alone.
+        self.ai_work.stop_pulls();
         self.take_web_urls(web_pages::read_now(self.web_panes(), &self.instance_dir));
         self.record_tabs();
         self.close_web_control();

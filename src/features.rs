@@ -5170,6 +5170,12 @@ impl Gerdr {
         for (project, slug) in keys {
             self.ai_work_seed(&project, &slug);
         }
+        // Chats at work before gerdr started, or before the projects were
+        // read again, are kept again while they last.
+        if self.ai_work.is_on() {
+            let chats = self.ai_work_chats();
+            self.ai_work.send(ai_work::thread::Job::Watch { chats });
+        }
         self.seen_folders_changed();
         let all = &self.features.all;
         let viewed = &self.features.viewed;
@@ -5363,15 +5369,18 @@ impl Gerdr {
             }
         }
         let wrote = written.iter().any(Result::is_ok);
+        // Each feature's own: one that keeps failing keeps its problem.
+        let at = format!("{p}/{s}");
         match written.into_iter().find_map(Result::err) {
-            Some(err) => crate::problems::report(
+            Some(err) => crate::problems::report_at(
                 "ai-work",
+                &at,
                 format!(
                     "Couldn't keep the AI work of \u{201c}{}\u{201d}: {err}",
                     feature.title
                 ),
             ),
-            None if wrote => crate::problems::clear("ai-work"),
+            None if wrote => crate::problems::clear_at("ai-work", &at),
             None => {}
         }
         if wrote {

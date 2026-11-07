@@ -69,8 +69,10 @@ pub fn take_moved() -> usize {
 /// other stores do) and logged, and the rest still load. A folder that
 /// can't be listed is an error.
 ///
-/// A record of an older format is saved in this one, synced to disk: one
-/// that still holds its history has it moved out (counted by `take_moved`).
+/// A record of an older format is saved in this one: one that still holds
+/// its history has it moved out (counted by `take_moved`). The files are
+/// synced to disk on a thread of their own (`sync_later`), so a start with
+/// many to move doesn't wait on the disk.
 pub fn load_all(root: Option<&Path>, project: &str) -> Result<Vec<Feature>, String> {
     let (features, moved) = load_dir(&project_dir(root, project))?;
     MOVED.fetch_add(moved, Ordering::Relaxed);
@@ -87,6 +89,7 @@ fn load_dir(folder: &Path) -> Result<(Vec<Feature>, usize), String> {
     };
     let mut features = Vec::new();
     let mut moved = 0;
+    let mut written = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|err| format!("couldn't list {}: {err}", folder.display()))?;
         let dir = entry.path();
@@ -108,8 +111,11 @@ fn load_dir(folder: &Path) -> Result<(Vec<Feature>, usize), String> {
                 attach_sides(&dir, &mut feature);
                 // Unsaved, it is only brought up to date again next time.
                 if feature.migrate(super::now()) || inline {
-                    match write_at(&dir, &feature, true) {
-                        Ok(()) => moved += usize::from(first),
+                    match write_at(&dir, &feature) {
+                        Ok(()) => {
+                            moved += usize::from(first);
+                            written.push(dir.clone());
+                        }
                         Err(err) => {
                             tracing::warn!("saving {} in its new format: {err}", path.display());
                         }
@@ -124,7 +130,39 @@ fn load_dir(folder: &Path) -> Result<(Vec<Feature>, usize), String> {
         }
     }
     features.sort_by(|a, b| a.created.cmp(&b.created).then_with(|| a.slug.cmp(&b.slug)));
+    sync_later(written);
     Ok((features, moved))
+}
+
+/// Sync to disk, on a thread of its own, the files saved in folders `dirs`
+/// and the folders: what is kept beside each record first, then the
+/// record. Only syncs: a save made meanwhile is never written over.
+fn sync_later(dirs: Vec<PathBuf>) {
+    if dirs.is_empty() {
+        return;
+    }
+    let sync = move || {
+        for dir in &dirs {
+            for name in [HISTORY, ROUNDS, FILE] {
+                let path = dir.join(name);
+                match std::fs::File::open(&path).and_then(|f| f.sync_all()) {
+                    Err(err) if err.kind() != ErrorKind::NotFound => {
+                        tracing::warn!("syncing {}: {err}", path.display());
+                    }
+                    _ => {}
+                }
+            }
+            if let Err(err) = std::fs::File::open(dir).and_then(|f| f.sync_all()) {
+                tracing::warn!("syncing {}: {err}", dir.display());
+            }
+        }
+    };
+    if let Err(err) = std::thread::Builder::new()
+        .name("feature store sync".into())
+        .spawn(sync)
+    {
+        tracing::warn!("syncing the features saved in their new format: {err}");
+    }
 }
 
 /// The record's file name in a feature's folder.
@@ -350,18 +388,17 @@ pub fn save(root: Option<&Path>, feature: &Feature) -> std::io::Result<()> {
 /// `dir` would still find elsewhere. What is kept beside the record is written
 /// first: a record never names more than the files have.
 pub fn save_at(dir: &Path, feature: &Feature) -> std::io::Result<()> {
-    write_at(dir, feature, false)
+    write_at(dir, feature)
 }
 
-/// `save_at`, each file synced to disk when `sync`: for the migration, off the
-/// UI thread.
-fn write_at(dir: &Path, feature: &Feature, sync: bool) -> std::io::Result<()> {
-    save_history(dir, &feature.history, sync)?;
+/// `save_at`: the side files, then the record.
+fn write_at(dir: &Path, feature: &Feature) -> std::io::Result<()> {
+    save_history(dir, &feature.history)?;
     let rounds = feature
         .review
         .as_ref()
         .map_or(&[][..], |r| r.rounds.as_slice());
-    save_rounds(dir, rounds, sync)?;
+    save_rounds(dir, rounds)?;
     let mut feature = feature.clone();
     feature.version = VERSION;
     feature.history = Vec::new();
@@ -369,13 +406,13 @@ fn write_at(dir: &Path, feature: &Feature, sync: bool) -> std::io::Result<()> {
         review.rounds = Vec::new();
     }
     let bytes = serde_json::to_vec_pretty(&feature).map_err(std::io::Error::other)?;
-    write_whole(&dir.join(FILE), &bytes, sync)
+    crate::projects::write_atomic(&dir.join(FILE), &bytes)
 }
 
 /// Write `events` to the history file in `dir`: only the new ones, when it is
 /// still what was last written of them. No events never empty a file: history
 /// only grows, and a record read without it would lose it all.
-fn save_history(dir: &Path, events: &[Event], sync: bool) -> std::io::Result<()> {
+fn save_history(dir: &Path, events: &[Event]) -> std::io::Result<()> {
     if events.is_empty() {
         return Ok(());
     }
@@ -399,13 +436,10 @@ fn save_history(dir: &Path, events: &[Event], sync: bool) -> std::io::Result<()>
                 .create(true)
                 .open(&path)?;
             file.write_all(&bytes)?;
-            if sync {
-                file.sync_all()?;
-            }
             w.len + bytes.len() as u64
         }
         None => {
-            write_whole(&path, &bytes, sync)?;
+            crate::projects::write_atomic(&path, &bytes)?;
             bytes.len() as u64
         }
     };
@@ -420,7 +454,7 @@ fn save_history(dir: &Path, events: &[Event], sync: bool) -> std::io::Result<()>
 
 /// Write `rounds` to the rounds file in `dir`, when they aren't what it holds;
 /// none take it away.
-fn save_rounds(dir: &Path, rounds: &[ReviewRound], sync: bool) -> std::io::Result<()> {
+fn save_rounds(dir: &Path, rounds: &[ReviewRound]) -> std::io::Result<()> {
     let path = dir.join(ROUNDS);
     let mut saved = saved();
     let known = saved.remove(&path);
@@ -437,28 +471,10 @@ fn save_rounds(dir: &Path, rounds: &[ReviewRound], sync: bool) -> std::io::Resul
         len: bytes.len() as u64,
     };
     if known != Some(written) || len_of(&path) != written.len {
-        write_whole(&path, &bytes, sync)?;
+        crate::projects::write_atomic(&path, &bytes)?;
     }
     saved.insert(path, written);
     Ok(())
-}
-
-/// Write `bytes` to `path` atomically, synced to disk with the folder that
-/// holds it when `sync`.
-fn write_whole(path: &Path, bytes: &[u8], sync: bool) -> std::io::Result<()> {
-    if !sync {
-        return crate::projects::write_atomic(path, bytes);
-    }
-    let dir = path.parent().unwrap_or(Path::new("."));
-    std::fs::create_dir_all(dir)?;
-    let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".tmp");
-    let mut file = std::fs::File::create(&tmp)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    drop(file);
-    std::fs::rename(&tmp, path)?;
-    std::fs::File::open(dir)?.sync_all()
 }
 
 /// Make side file `name` (`HISTORY` or `ROUNDS`) in folder `dir` hold

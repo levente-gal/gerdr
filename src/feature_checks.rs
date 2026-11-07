@@ -162,10 +162,17 @@ fn keep_check_log(dir: &Path, run: &str, i: usize, outcome: &Outcome, scrollback
         };
         write::append(dir, &Line::now(event))
     });
+    // Each check's own: another kept doesn't clear it.
+    let at = format!(
+        "{}#{}",
+        dir.display(),
+        observe::check_key(&outcome.repo, &outcome.command)
+    );
     match kept {
-        Ok(()) => crate::problems::clear("ai-work"),
-        Err(err) => crate::problems::report(
+        Ok(()) => crate::problems::clear_at("ai-work", &at),
+        Err(err) => crate::problems::report_at(
             "ai-work",
+            &at,
             format!("Couldn't keep the log of {}: {err}", outcome.command),
         ),
     }

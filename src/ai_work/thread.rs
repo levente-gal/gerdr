@@ -8,7 +8,8 @@
 //! `transcript.jsonl.zst` (frames appended as it grows) or, for Cursor,
 //! `store.db.zst` (a snapshot taken again when the database moved), and
 //! the files that go with it are `extra/<rel>.zst`. A chat on another
-//! machine is pulled into `.staging/<host>/` first, on a thread of its own.
+//! machine is pulled into `.staging/<host>/` first, on a thread of its own,
+//! and that copy goes once it is kept.
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet, VecDeque},
@@ -495,8 +496,8 @@ struct Worker {
     /// Set by the loop to stop a backfill or a rescan, the thread going on
     /// (see `Live::stop_busy`).
     cancel: Arc<AtomicBool>,
-    /// A problem was said and nothing worked since.
-    failing: bool,
+    /// Where a problem was said and nothing worked since (see `failed`).
+    failing: HashSet<String>,
     watch: Vec<(String, String, Chat)>,
     swept: Instant,
     index: Option<rusqlite::Connection>,
@@ -521,12 +522,15 @@ pub fn run(
     let (back, backs) = mpsc::channel();
     let mut worker = Worker::new(root, Homes::here(), super::machine(), done, back);
     worker.cancel = cancel;
-    let dirs = super::index::dirs(&worker.root);
-    if !dirs.is_empty() {
-        worker.ingest(&dirs);
+    let mut queue = VecDeque::new();
+    if worker.catch_up(&jobs, &mut queue) {
+        worker.serve(&jobs, &backs, queue);
     }
-    worker.serve(&jobs, &backs);
 }
+
+/// How long the first reading of the files goes before the tasks panel
+/// shows it.
+const SHOW_AFTER: Duration = Duration::from_secs(1);
 
 impl Worker {
     fn new(
@@ -544,7 +548,7 @@ impl Worker {
             back,
             stop: Arc::new(AtomicBool::new(false)),
             cancel: Arc::new(AtomicBool::new(false)),
-            failing: false,
+            failing: HashSet::new(),
             watch: Vec::new(),
             swept: Instant::now(),
             index: None,
@@ -555,8 +559,12 @@ impl Worker {
         }
     }
 
-    fn serve(&mut self, jobs: &mpsc::Receiver<Job>, backs: &mpsc::Receiver<Back>) {
-        let mut queue = VecDeque::new();
+    fn serve(
+        &mut self,
+        jobs: &mpsc::Receiver<Job>,
+        backs: &mpsc::Receiver<Back>,
+        mut queue: VecDeque<Job>,
+    ) {
         loop {
             while let Ok(back) = backs.try_recv() {
                 self.came_back(back);
@@ -625,7 +633,16 @@ impl Worker {
                 run,
                 log,
             } => self.setup_slice(&project, &slug, run, &log),
-            Job::Watch { chats } => self.watch = chats,
+            Job::Watch { chats } => {
+                // The first chats to watch, as after a start: kept soon,
+                // not 10 minutes on.
+                if self.watch.is_empty()
+                    && let Some(due) = Instant::now().checked_sub(SWEEP)
+                {
+                    self.swept = due;
+                }
+                self.watch = chats;
+            }
             Job::Rescan => self.rescan(),
             Job::Backfill { features } => return self.backfill(&features, jobs, queue),
             Job::Pulled {
@@ -653,6 +670,7 @@ impl Worker {
             Ok(marks) => marks,
             Err(err) => {
                 return self.failed(
+                    &at(project, slug),
                     what,
                     format!("{}: {err}", write::marks_path(&dir).display()),
                 );
@@ -661,8 +679,9 @@ impl Worker {
         marks.backfilled = true;
         marks.history_noted = marks.history_noted.max(history);
         match write::write_marks(&dir, &marks) {
-            Ok(()) => self.worked(),
+            Ok(()) => self.worked(&at(project, slug)),
             Err(err) => self.failed(
+                &at(project, slug),
                 what,
                 format!("{}: {err}", write::marks_path(&dir).display()),
             ),
@@ -675,18 +694,22 @@ impl Worker {
         let _ = self.done.send(Done::AiWork(report));
     }
 
-    fn failed(&mut self, what: &str, why: String) {
-        tracing::warn!("ai-work: {what}: {why}");
-        self.failing = true;
+    /// `what` failed at `at` (a feature, see `at`, or a part of the
+    /// thread's own), `why`: said as that place's problem, and logged
+    /// once there (`problems::report_at`).
+    fn failed(&mut self, at: &str, what: &str, why: String) {
+        self.failing.insert(at.to_owned());
         self.report(Report::Failed {
+            at: at.to_owned(),
             what: what.to_owned(),
             why,
         });
     }
 
-    fn worked(&mut self) {
-        if std::mem::take(&mut self.failing) {
-            self.report(Report::Worked);
+    /// Something worked at `at`: its problem goes, the others' stay.
+    fn worked(&mut self, at: &str) {
+        if self.failing.remove(at) {
+            self.report(Report::Worked { at: at.to_owned() });
         }
     }
 
@@ -705,10 +728,14 @@ impl Worker {
         };
         match write::append(&self.dir(project, slug), &line) {
             Ok(()) => {
-                self.worked();
+                self.worked(&at(project, slug));
                 self.index_later(project, slug);
             }
-            Err(err) => self.failed("Couldn't keep AI work", format!("{project}/{slug}: {err}")),
+            Err(err) => self.failed(
+                &at(project, slug),
+                "Couldn't keep AI work",
+                format!("{project}/{slug}: {err}"),
+            ),
         }
     }
 
@@ -735,18 +762,86 @@ impl Worker {
         };
         let mut conn = match conn {
             Ok(conn) => conn,
-            Err(why) => return self.failed("Couldn't update the AI work stats", why),
+            Err(why) => return self.failed("stats", "Couldn't update the AI work stats", why),
         };
         match super::index::ingest(&mut conn, dirs) {
             Ok(lines) => {
                 self.index = Some(conn);
-                self.worked();
+                self.worked("stats");
                 if lines > 0 {
                     self.report(Report::Indexed { lines });
                 }
             }
             // Opened again next time, in case it was what failed.
-            Err(why) => self.failed("Couldn't update the AI work stats", why),
+            Err(why) => self.failed("stats", "Couldn't update the AI work stats", why),
+        }
+    }
+
+    /// Take into the index what the files gained while gerdr was away, one
+    /// feature at a time, the jobs that come meanwhile put in `queue`. Past
+    /// `SHOW_AFTER` it shows as drawing the stats again, which the tasks
+    /// panel can stop: what is left comes in at the next change, or the
+    /// next start. False: stop.
+    fn catch_up(&mut self, jobs: &mpsc::Receiver<Job>, queue: &mut VecDeque<Job>) -> bool {
+        let dirs = super::index::dirs(&self.root);
+        let total = dirs.len();
+        let begun = Instant::now();
+        let (mut lines, mut shown, mut stopped) = (0, false, false);
+        for (i, dir) in dirs.iter().enumerate() {
+            while let Ok(job) = jobs.try_recv() {
+                if matches!(job, Job::Stop) {
+                    self.stop.store(true, Ordering::Relaxed);
+                }
+                queue.push_back(job);
+            }
+            if self.stopped() {
+                stopped = true;
+                break;
+            }
+            match self.ingest_one(dir) {
+                Some(n) => lines += n,
+                // No index to write to: the rest would fail the same way.
+                None => break,
+            }
+            if shown || begun.elapsed() >= SHOW_AFTER {
+                shown = true;
+                self.report(Report::Rescanning { done: i + 1, total });
+            }
+        }
+        if shown {
+            self.report(Report::Rescanned { lines, stopped });
+        } else if lines > 0 {
+            self.report(Report::Indexed { lines });
+        }
+        self.cancel.store(false, Ordering::Relaxed);
+        !self.stop.load(Ordering::Relaxed)
+    }
+
+    /// Take feature folder `dir`'s new lines into the index: how many,
+    /// none when it failed. `None`: the index can't be opened.
+    fn ingest_one(&mut self, dir: &Path) -> Option<usize> {
+        let conn = match self.index.take() {
+            Some(conn) => Ok(conn),
+            None => super::index::open(&self.root),
+        };
+        let mut conn = match conn {
+            Ok(conn) => conn,
+            Err(why) => {
+                self.failed("stats", "Couldn't update the AI work stats", why);
+                return None;
+            }
+        };
+        match super::index::ingest(&mut conn, &[dir.to_path_buf()]) {
+            Ok(n) => {
+                self.index = Some(conn);
+                self.worked("stats");
+                Some(n)
+            }
+            // Opened again next time, in case it was what failed.
+            Err(why) => {
+                self.failed("stats", "Couldn't update the AI work stats", why);
+                Some(0)
+            }
         }
     }
 
@@ -767,7 +862,7 @@ impl Worker {
         let mut conn = match super::index::reset(&self.root) {
             Ok(conn) => conn,
             Err(why) => {
-                self.failed(what, why);
+                self.failed("stats", what, why);
                 return self.report(Report::Rescanned {
                     lines: 0,
                     stopped: false,
@@ -791,8 +886,8 @@ impl Worker {
         }
         self.index = Some(conn);
         match failed.is_empty() {
-            true => self.worked(),
-            false => self.failed(what, failed.join("; ")),
+            true => self.worked("stats"),
+            false => self.failed("stats", what, failed.join("; ")),
         }
         self.report(Report::Rescanned { lines, stopped });
     }
@@ -813,7 +908,7 @@ impl Worker {
     }
 
     /// Keep `found`, `chat`'s, in feature `slug`; `pulled`: from another
-    /// machine, from there.
+    /// machine, from there. Whether it is kept, as it is now.
     fn keep(
         &mut self,
         project: &str,
@@ -821,7 +916,7 @@ impl Worker {
         chat: &Chat,
         found: &Found,
         pulled: Option<&str>,
-    ) {
+    ) -> bool {
         let machine = chat.machine.clone().unwrap_or_else(|| self.machine.clone());
         let dir = self.dir(project, slug);
         match keep(&dir, found, (chat.stage, chat.n), &machine, pulled) {
@@ -829,15 +924,21 @@ impl Worker {
                 self.missing
                     .remove(&(project.to_owned(), slug.to_owned(), chat.stage, chat.n));
                 self.say(project, slug, event);
+                true
             }
-            Ok(None) => {}
+            Ok(None) => true,
             Err(err) => {
                 let what = format!(
                     "Couldn't keep the chat of {} {}",
                     chat.stage.label(),
                     chat.n
                 );
-                self.failed(&what, format!("{}: {err}", found.main.display()));
+                self.failed(
+                    &at(project, slug),
+                    &what,
+                    format!("{}: {err}", found.main.display()),
+                );
+                false
             }
         }
     }
@@ -847,12 +948,18 @@ impl Worker {
     fn capture_here(&mut self, project: &str, slug: &str, chat: &Chat, quiet: bool) {
         let Some(homes) = self.homes.clone() else {
             let what = "Couldn't keep the agents' chats";
-            return self.failed(what, "this machine has no home folder (HOME)".to_owned());
+            return self.failed(
+                "home",
+                what,
+                "this machine has no home folder (HOME)".to_owned(),
+            );
         };
         let dir = self.dir(project, slug);
         let chat = with_known_id(&dir, chat);
         match locate::find(&homes, &chat, &claimed(&dir, &chat)) {
-            Ok(Some(found)) => self.keep(project, slug, &chat, &found, None),
+            Ok(Some(found)) => {
+                self.keep(project, slug, &chat, &found, None);
+            }
             Ok(None) if quiet => {}
             Ok(None) => self.missing(project, slug, &chat, "not found on this machine"),
             Err(why) => {
@@ -861,7 +968,7 @@ impl Worker {
                     chat.stage.label(),
                     chat.n
                 );
-                self.failed(&what, why);
+                self.failed(&at(project, slug), &what, why);
             }
         }
     }
@@ -945,7 +1052,11 @@ impl Worker {
             Ok(_) => {
                 self.pulling.insert(key);
             }
-            Err(err) => self.failed("Couldn't copy an agent's chat", err.to_string()),
+            Err(err) => self.failed(
+                &at(&key.0, &key.1),
+                "Couldn't copy an agent's chat",
+                err.to_string(),
+            ),
         }
     }
 
@@ -974,7 +1085,7 @@ impl Worker {
             }
             Back::Failed { key, what, why } => {
                 self.pulling.remove(&key);
-                self.failed(&what, why);
+                self.failed(&at(&key.0, &key.1), &what, why);
             }
         }
     }
@@ -989,7 +1100,14 @@ impl Worker {
         };
         let source = std::fs::read_to_string(staging.join(SOURCE))
             .unwrap_or_else(|_| staging.to_string_lossy().into_owned());
-        self.keep(project, slug, chat, &found, Some(source.trim()));
+        // Kept, the copy goes: it holds the chat unpacked. The next pull
+        // brings it whole again.
+        if self.keep(project, slug, chat, &found, Some(source.trim()))
+            && let Err(err) = std::fs::remove_dir_all(staging)
+            && err.kind() != io::ErrorKind::NotFound
+        {
+            tracing::warn!("ai-work: removing {}: {err}", staging.display());
+        }
     }
 
     fn outputs(&mut self, project: &str, slug: &str, files: &[(String, PathBuf)], reason: &str) {
@@ -999,6 +1117,7 @@ impl Worker {
             Ok(marks) => marks,
             Err(err) => {
                 return self.failed(
+                    &at(project, slug),
                     what,
                     format!("{}: {err}", write::marks_path(&dir).display()),
                 );
@@ -1011,7 +1130,11 @@ impl Worker {
                 // Not written (yet): there is nothing to keep.
                 Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
                 Err(err) => {
-                    self.failed(what, format!("{}: {err}", path.display()));
+                    self.failed(
+                        &at(project, slug),
+                        what,
+                        format!("{}: {err}", path.display()),
+                    );
                     continue;
                 }
             };
@@ -1020,7 +1143,11 @@ impl Worker {
                 continue;
             }
             if let Err(err) = blobs::put(&dir, &bytes) {
-                self.failed(what, format!("{}: {err}", path.display()));
+                self.failed(
+                    &at(project, slug),
+                    what,
+                    format!("{}: {err}", path.display()),
+                );
                 continue;
             }
             marks.outputs.insert(name.clone(), blob.sha.clone());
@@ -1038,6 +1165,7 @@ impl Worker {
         }
         if let Err(err) = write::write_marks(&dir, &marks) {
             self.failed(
+                &at(project, slug),
                 what,
                 format!("{}: {err}", write::marks_path(&dir).display()),
             );
@@ -1051,6 +1179,7 @@ impl Worker {
                 Ok(blob) => Some(blob),
                 Err(err) => {
                     self.failed(
+                        &at(project, slug),
                         "Couldn't keep the setup log",
                         format!("{}: {err}", dir.display()),
                     );
@@ -1061,6 +1190,7 @@ impl Worker {
             Err(err) if err.kind() == io::ErrorKind::NotFound => None,
             Err(err) => {
                 self.failed(
+                    &at(project, slug),
                     "Couldn't keep the setup log",
                     format!("{}: {err}", log.display()),
                 );
@@ -1118,10 +1248,11 @@ impl Worker {
                 Ok(done) => {
                     kept += 1;
                     gone += done.gone;
-                    self.worked();
+                    self.worked(&at(project, slug));
                     self.index_later(project, slug);
                 }
                 Err(why) => self.failed(
+                    &at(project, slug),
                     "Couldn't keep earlier AI work",
                     format!("{project}/{slug}: {why}"),
                 ),
@@ -1137,6 +1268,11 @@ impl Worker {
         });
         !self.stop.load(Ordering::Relaxed)
     }
+}
+
+/// Where the problems of feature `slug` of `project` are said.
+fn at(project: &str, slug: &str) -> String {
+    format!("{project}/{slug}")
 }
 
 /// Pull `chat` with `script` from the machine `reach` reaches into its
@@ -1502,6 +1638,46 @@ mod tests {
     }
 
     #[test]
+    fn the_first_reading_can_be_stopped() {
+        let root = scratch("thread-catch-up");
+        let (mut w, dones) = worker(&root);
+        w.say("p", "a", Event::Unmarked { stage: Stage::Plan });
+        w.say("p", "b", Event::Unmarked { stage: Stage::Plan });
+        let _ = reports(&dones);
+        let (_tx, jobs) = mpsc::channel();
+        let mut queue = VecDeque::new();
+        w.cancel.store(true, Ordering::Relaxed);
+        assert!(w.catch_up(&jobs, &mut queue));
+        assert!(reports(&dones).is_empty(), "stopped before the first");
+        assert!(!w.cancel.load(Ordering::Relaxed));
+        assert!(w.catch_up(&jobs, &mut queue));
+        assert_eq!(reports(&dones), [Report::Indexed { lines: 2 }]);
+    }
+
+    #[test]
+    fn a_pulled_chat_leaves_no_copy_once_kept() {
+        let root = scratch("thread-pulled");
+        let (mut w, _dones) = worker(&root);
+        let staging = root.join("p/s/.staging/box/claude-c1");
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(staging.join("transcript.jsonl"), "{\"type\":\"user\"}\n").unwrap();
+        std::fs::write(staging.join(SOURCE), "box:/home/ana/c1.jsonl").unwrap();
+        let chat = Chat {
+            agent: AgentKind::Claude,
+            id: Some("c1".into()),
+            stage: Stage::Build,
+            n: 1,
+            started: 0,
+            folders: Vec::new(),
+            machine: Some("box".into()),
+        };
+        w.pulled("p", "s", &chat, &staging);
+        assert!(!staging.exists());
+        let kept = root.join("p/s/sessions/claude-c1").join(TRANSCRIPT);
+        assert!(kept.is_file(), "{}", kept.display());
+    }
+
+    #[test]
     fn stage_files_are_kept_when_they_change() {
         let root = scratch("thread-outputs");
         let (mut w, _dones) = worker(&root);
@@ -1590,11 +1766,18 @@ mod tests {
         w.say("p", "s", Event::Unmarked { stage: Stage::Plan });
         assert!(matches!(
             dones.try_recv(),
-            Ok(Done::AiWork(Report::Failed { .. }))
+            Ok(Done::AiWork(Report::Failed { at, .. })) if at == "p/s"
         ));
+        // Another feature that works leaves the failing one's problem.
         w.say("p", "t", Event::Unmarked { stage: Stage::Plan });
-        assert!(matches!(dones.try_recv(), Ok(Done::AiWork(Report::Worked))));
-        w.say("p", "t", Event::Unmarked { stage: Stage::Plan });
+        assert!(dones.try_recv().is_err(), "p/s still fails");
+        std::fs::remove_file(root.join("p/s")).unwrap();
+        w.say("p", "s", Event::Unmarked { stage: Stage::Plan });
+        assert!(matches!(
+            dones.try_recv(),
+            Ok(Done::AiWork(Report::Worked { at })) if at == "p/s"
+        ));
+        w.say("p", "s", Event::Unmarked { stage: Stage::Plan });
         assert!(dones.try_recv().is_err(), "said once");
     }
 

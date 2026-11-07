@@ -4,7 +4,7 @@
 //! until that source works again, for the chrome to list (the tab
 //! strip's problems button).
 
-use std::sync::Mutex;
+use std::{collections::BTreeMap, sync::Mutex};
 
 /// One thing that went wrong: where (`"config"`, `"keys"`, `"zenity"`,
 /// `"inbox:github"`, ...) and what, as a sentence for the user.
@@ -67,4 +67,59 @@ pub fn set(source: &'static str, texts: Vec<String>) {
 /// The problems kept, oldest first.
 pub fn list() -> Vec<Problem> {
     PROBLEMS.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// The problems of the sources said by place (`report_at`), by source and
+/// place.
+static AT: Mutex<BTreeMap<(&'static str, String), String>> = Mutex::new(BTreeMap::new());
+
+/// Keep `text` as the problem from `source` at `at` (a feature, a file), in
+/// place of the one it had there: a source says each place's own, and one
+/// place that works again (`clear_at`) leaves the others'. Logged once,
+/// when it is new.
+pub fn report_at(source: &'static str, at: &str, text: impl Into<String>) {
+    let mut all = AT.lock().unwrap_or_else(|e| e.into_inner());
+    all.insert((source, at.to_owned()), text.into());
+    set_from(source, &all);
+}
+
+/// Let go of the problem from `source` at `at`: it works there again.
+pub fn clear_at(source: &'static str, at: &str) {
+    let mut all = AT.lock().unwrap_or_else(|e| e.into_inner());
+    if all.remove(&(source, at.to_owned())).is_some() {
+        set_from(source, &all);
+    }
+}
+
+fn set_from(source: &'static str, all: &BTreeMap<(&'static str, String), String>) {
+    let texts = (all.iter())
+        .filter(|((s, _), _)| *s == source)
+        .map(|(_, text)| text.clone())
+        .collect();
+    set(source, texts);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_place_that_works_again_leaves_the_others_problems() {
+        let source = "test:report-at";
+        let of = || -> Vec<String> {
+            (list().into_iter())
+                .filter(|p| p.source == source)
+                .map(|p| p.text)
+                .collect()
+        };
+        report_at(source, "p/a", "a failed");
+        report_at(source, "p/b", "b failed");
+        report_at(source, "p/a", "a failed again");
+        assert_eq!(of(), ["a failed again", "b failed"]);
+        clear_at(source, "p/b");
+        assert_eq!(of(), ["a failed again"]);
+        clear_at(source, "p/c");
+        clear_at(source, "p/a");
+        assert!(of().is_empty());
+    }
 }

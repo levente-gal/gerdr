@@ -671,10 +671,20 @@ impl Gerdr {
         let (project, slug) = (project.to_owned(), slug.to_owned());
         let (title, name_there, from) = (title.to_owned(), name.clone(), from.to_owned());
         let history = self.feature(&project, &slug).map_or(0, |f| f.history.len());
+        let stop = Arc::new(AtomicBool::new(false));
+        let key = (project.clone(), slug.clone());
+        let pulling = crate::ai_work::Pulling {
+            title: shown.clone(),
+            from: name.clone(),
+            stop: stop.clone(),
+        };
         let pull = move || {
             let name = name_there;
-            let quiet = AtomicBool::new(false);
-            match reach.pull_ai_work(&there, &local, &from, &quiet) {
+            let ended = crate::ai_work::Report::PullEnded {
+                project: project.clone(),
+                slug: slug.clone(),
+            };
+            match reach.pull_ai_work(&there, &local, &from, &stop) {
                 Ok(true) => {
                     if let Some(jobs) = jobs {
                         // What came holds the earlier work: it isn't kept again.
@@ -688,10 +698,14 @@ impl Gerdr {
                     }
                 }
                 Ok(false) => {}
+                // Asked to stop: what came stays, the rest comes another time.
+                Err(_) if stop.load(Ordering::Relaxed) => {
+                    tracing::info!("{project}/{slug}: bringing its AI work from {name}: stopped");
+                }
                 Err(trouble) => {
                     let why = trouble.text().to_owned();
                     tracing::warn!("{project}/{slug}: bringing its AI work from {name}: {why}");
-                    if let Some(done) = done {
+                    if let Some(done) = &done {
                         let report = crate::ai_work::Report::NotBrought {
                             title,
                             from: name,
@@ -702,15 +716,23 @@ impl Gerdr {
                     }
                 }
             }
+            if let Some(done) = &done {
+                let _ = done.send(crate::features::Done::AiWork(ended));
+            }
         };
-        if let Err(err) = std::thread::Builder::new()
+        match std::thread::Builder::new()
             .name("ai work pull".into())
             .spawn(pull)
         {
-            tracing::warn!("bringing the AI work of {shown} from {name}: {err}");
-            self.show_warning(format!(
-                "The AI work of \u{201c}{shown}\u{201d} stays on {name}: {err}"
-            ));
+            Ok(_) => {
+                self.ai_work.pulls.insert(key, pulling);
+            }
+            Err(err) => {
+                tracing::warn!("bringing the AI work of {shown} from {name}: {err}");
+                self.show_warning(format!(
+                    "The AI work of \u{201c}{shown}\u{201d} stays on {name}: {err}"
+                ));
+            }
         }
     }
 

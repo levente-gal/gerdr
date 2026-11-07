@@ -406,10 +406,15 @@ pub struct Chat {
 /// What the thread came to, back on the loop as `Done::AiWork`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Report {
-    /// A write or read worked again: the problem said goes.
-    Worked,
-    /// `what` failed: `why`, said as a problem.
-    Failed { what: String, why: String },
+    /// A write or read worked again at `at`: the problem said there goes.
+    Worked { at: String },
+    /// `what` failed at `at` (a feature, or a part of the thread): `why`,
+    /// said as a problem there.
+    Failed {
+        at: String,
+        what: String,
+        why: String,
+    },
     /// The index took in `lines` new lines.
     Indexed { lines: usize },
     /// Keeping earlier AI work: `done` of `total` features.
@@ -433,6 +438,9 @@ pub enum Report {
         from: String,
         why: String,
     },
+    /// Bringing the AI work of feature `slug` of `project` is over, as it
+    /// went.
+    PullEnded { project: String, slug: String },
 }
 
 /// What the thread works at that the tasks panel shows, and can stop.
@@ -461,6 +469,20 @@ pub struct Live {
     pub busy: Option<Busy>,
     /// It was asked to stop what `busy` says.
     pub stopping: bool,
+    /// The AI work being brought from another machine, by project and slug.
+    pub pulls: BTreeMap<(String, String), Pulling>,
+}
+
+/// The AI work of a feature taken over, coming from the machine that wrote
+/// it, on a thread of its own.
+#[derive(Debug)]
+pub struct Pulling {
+    /// The feature's title.
+    pub title: String,
+    /// The name of the machine it comes from.
+    pub from: String,
+    /// Set to stop it: by the tasks panel, or as gerdr quits.
+    pub stop: Arc<AtomicBool>,
 }
 
 impl Live {
@@ -475,6 +497,7 @@ impl Live {
             cancel: Arc::new(AtomicBool::new(false)),
             busy: None,
             stopping: false,
+            pulls: BTreeMap::new(),
         }
     }
 
@@ -515,6 +538,7 @@ impl Live {
             cancel,
             busy: None,
             stopping: false,
+            pulls: BTreeMap::new(),
         }
     }
 
@@ -528,6 +552,20 @@ impl Live {
         if self.busy.is_some() {
             self.cancel.store(true, Ordering::Relaxed);
             self.stopping = true;
+        }
+    }
+
+    /// Stop bringing the AI work of feature `slug` of `project`.
+    pub fn stop_pull(&mut self, project: &str, slug: &str) {
+        if let Some(pull) = self.pulls.get(&(project.to_owned(), slug.to_owned())) {
+            pull.stop.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// Stop every pull: gerdr quits.
+    pub fn stop_pulls(&self) {
+        for pull in self.pulls.values() {
+            pull.stop.store(true, Ordering::Relaxed);
         }
     }
 
@@ -585,9 +623,9 @@ impl Gerdr {
     /// What the AI work's thread came to.
     pub(crate) fn ai_work_done(&mut self, report: Report) {
         match report {
-            Report::Worked => crate::problems::clear(THREAD_PROBLEM),
-            Report::Failed { what, why } => {
-                crate::problems::report(THREAD_PROBLEM, format!("{what}: {why}"));
+            Report::Worked { at } => crate::problems::clear_at(THREAD_PROBLEM, &at),
+            Report::Failed { at, what, why } => {
+                crate::problems::report_at(THREAD_PROBLEM, &at, format!("{what}: {why}"));
             }
             Report::Indexed { .. } => self.ai_stats_refresh(),
             Report::Backfilling { done, total } => {
@@ -612,6 +650,9 @@ impl Gerdr {
             Report::NotBrought { title, from, why } => self.show_warning(format!(
                 "The AI work of \u{201c}{title}\u{201d} stays on {from}: {why}"
             )),
+            Report::PullEnded { project, slug } => {
+                self.ai_work.pulls.remove(&(project, slug));
+            }
             Report::Rescanning { done, total } => {
                 self.ai_work.busy = Some(Busy::Rescan { done, total });
             }
@@ -645,10 +686,35 @@ impl Gerdr {
         }
     }
 
-    /// The AI work's tasks: a backfill or a rescan under way.
+    /// The AI work's tasks: a backfill or a rescan under way, and the AI
+    /// work coming from other machines.
     pub(crate) fn ai_work_tasks(&self) -> Vec<crate::tasks::Task> {
+        let mut tasks: Vec<crate::tasks::Task> = (self.ai_work.pulls.iter())
+            .map(|((project, slug), pull)| {
+                let stopping = pull.stop.load(Ordering::Relaxed);
+                crate::tasks::Task {
+                    title: format!(
+                        "Bringing the AI work of \u{201c}{}\u{201d} from {}",
+                        pull.title, pull.from
+                    ),
+                    chip: "ai work".to_owned(),
+                    detail: match stopping {
+                        true => "Stopping".to_owned(),
+                        false => "Its chats, prompts and stats, kept there".to_owned(),
+                    },
+                    dot: crate::chrome::Dot::Working,
+                    actions: match stopping {
+                        true => Vec::new(),
+                        false => vec![(
+                            "Stop",
+                            crate::menu::MenuAction::StopAiWorkPull(project.clone(), slug.clone()),
+                        )],
+                    },
+                }
+            })
+            .collect();
         let Some(busy) = self.ai_work.busy else {
-            return Vec::new();
+            return tasks;
         };
         let (title, detail, done, total) = match busy {
             Busy::Backfill { done, total } => (
@@ -673,13 +739,14 @@ impl Gerdr {
             true => Vec::new(),
             false => vec![("Stop", crate::menu::MenuAction::StopAiWork)],
         };
-        vec![crate::tasks::Task {
+        tasks.push(crate::tasks::Task {
             title: format!("{title} ({done} of {total})"),
             chip: "ai work".to_owned(),
             detail,
             dot: crate::chrome::Dot::Working,
             actions,
-        }]
+        });
+        tasks
     }
 }
 
