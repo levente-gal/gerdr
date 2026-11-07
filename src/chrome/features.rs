@@ -696,8 +696,15 @@ fn test_strip_spots(x: i32, y: i32, width: i32, open: bool) -> TestStripSpots {
     let mut search = Vec::new();
     let mut count = None;
     let width = if open {
-        let close = Rectangle::new((right - h, y).into(), (h, h).into());
-        let count_at = close.loc.x - QUIT_BUTTON_GAP - STRIP_COUNT_W;
+        // Its buttons to the match before and the next, and closing it.
+        let mut left = right;
+        let mut buttons = Vec::new();
+        for part in [SearchPart::Close, SearchPart::Next, SearchPart::Prev] {
+            left -= h;
+            buttons.push((part, Rectangle::new((left, y).into(), (h, h).into())));
+            left -= QUIT_BUTTON_GAP;
+        }
+        let count_at = left - STRIP_COUNT_W;
         let field_w = STRIP_SEARCH_W.min(width / 2).max(STRIP_SEARCH_MIN);
         let field_x = (count_at - QUIT_BUTTON_GAP - field_w).max(x);
         let field = Rectangle::new(
@@ -709,7 +716,7 @@ fn test_strip_spots(x: i32, y: i32, width: i32, open: bool) -> TestStripSpots {
             (STRIP_COUNT_W, h).into(),
         ));
         search.push((SearchPart::Field, field));
-        search.push((SearchPart::Close, close));
+        search.extend(buttons.into_iter().rev());
         (field_x - COLUMN_GAP - x).max(0)
     } else {
         let button = Rectangle::new((right - h, y).into(), (h, h).into());
@@ -926,9 +933,62 @@ pub struct SheetRow {
     pub steps: Vec<(&'static str, String)>,
     /// The search hides it.
     pub hidden: bool,
-    /// What the search looks for, lowercase, tinted where it shows; empty
-    /// for none.
+    /// What the search looks for, as typed (see `crate::find`), tinted
+    /// where it shows; empty for none.
     pub needle: String,
+    /// It looks for `needle` only as a word of its own (vim's `*`).
+    pub whole: bool,
+}
+
+/// A place in the text of the feature tab's page: which of its lines
+/// (`FeatureTabLayout::texts`), and the char in it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TextSpot {
+    pub line: usize,
+    pub ch: usize,
+}
+
+/// Text of the page selected with the pointer: from where the press was
+/// to where it went, and what those two lines said then, so a page that
+/// changed under it drops it rather than mark other text.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct TextPick {
+    pub anchor: TextSpot,
+    pub cursor: TextSpot,
+    pub said: [String; 2],
+}
+
+impl TextPick {
+    /// Its ends, first to last.
+    pub fn ends(&self) -> (TextSpot, TextSpot) {
+        (self.anchor.min(self.cursor), self.anchor.max(self.cursor))
+    }
+}
+
+/// What marks the page's text: the search's match gone to (by its index
+/// in `FeatureTabLayout::matches`), and the text selected.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct PageMarks {
+    pub found_at: Option<usize>,
+    pub pick: Option<TextPick>,
+}
+
+/// A line of text on the page: its piece in the page's, the criterion's
+/// card it is in (as `FeatureTabHit::Finding` counts them), and whether it
+/// goes on the line before it, wrapped.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PageText {
+    pub piece: usize,
+    pub card: Option<usize>,
+    pub joins: bool,
+}
+
+/// A place the search found on the page: its line and chars.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PageMatch {
+    pub line: usize,
+    pub card: Option<usize>,
+    pub range: std::ops::Range<usize>,
 }
 
 /// The selected stage's page, in the feature tab's middle column.
@@ -1002,6 +1062,8 @@ pub struct FeatureTabView {
     pub scroll: [f64; 3],
     pub hover: Option<FeatureTabHit>,
     pub hints: Vec<(String, String)>,
+    /// The search's match gone to, and the text selected on the page.
+    pub marks: PageMarks,
 }
 
 impl FeatureTabView {
@@ -1138,6 +1200,10 @@ pub struct FeatureTabLayout {
     pub hint_spots: Vec<(usize, Rect)>,
     /// What each column paints, indexed by `TabColumn`.
     pub(super) pieces: [Vec<(Rect, Piece)>; 3],
+    /// The page's lines of text, top to bottom: what can be selected.
+    pub texts: Vec<PageText>,
+    /// The places the search found on the page, top to bottom.
+    pub matches: Vec<PageMatch>,
 }
 
 /// The note being written on a card of the tab in `frame`, where it shows,
@@ -1355,6 +1421,99 @@ impl FeatureTabLayout {
         Some(to.clamp(0.0, room))
     }
 
+    /// The line of text on the page at `pos`, and the char in it nearest
+    /// the pointer: on the line under it, nearest it across. With `near`,
+    /// also off the text or the page: the line nearest, as a drag goes on
+    /// past the page's edge.
+    pub fn text_at(
+        &self,
+        view: &FeatureTabView,
+        pos: Point<i32, Logical>,
+        near: bool,
+    ) -> Option<TextSpot> {
+        let col = TabColumn::Page as usize;
+        let place = self.columns[col]?;
+        if !near && !place.contains(pos) {
+            return None;
+        }
+        let down = view.scroll[col].round() as i32;
+        let at: Point<i32, Logical> = Point::from((pos.x, pos.y + down));
+        let pieces = &self.pieces[col];
+        let rect = |t: &PageText| pieces[t.piece].0;
+        let apart = |t: &PageText| {
+            let r = rect(t);
+            let dy = (r.loc.y - at.y).max(at.y - (r.loc.y + r.size.h - 1)).max(0);
+            let (text, font, bold) = piece_text(&pieces[t.piece].1).unwrap_or(("", Font::Body, false));
+            let end = r.loc.x + text_width_of(text, font, bold).ceil() as i32;
+            let dx = (r.loc.x - at.x).max(at.x - end).max(0);
+            (dy, dx)
+        };
+        let (line, t) = (self.texts.iter().enumerate()).min_by_key(|(_, t)| apart(t))?;
+        if !near && apart(t) != (0, 0) {
+            return None;
+        }
+        let (r, (text, font, bold)) = (rect(t), piece_text(&pieces[t.piece].1)?);
+        let ch = char_at_x(text, font, bold, (at.x - r.loc.x) as f32);
+        Some(TextSpot { line, ch })
+    }
+
+    /// What line `line` of the page's text says.
+    pub fn line_text(&self, line: usize) -> Option<&str> {
+        let t = self.texts.get(line)?;
+        piece_text(&self.pieces[TabColumn::Page as usize].get(t.piece)?.1).map(|(text, ..)| text)
+    }
+
+    /// The text `view` has selected, as it goes on the clipboard: lines
+    /// side by side or wrapped joined by a space, others by a new line.
+    /// `None` with none, or once the page changed under it.
+    pub fn picked_text(&self, view: &FeatureTabView) -> Option<String> {
+        let pick = view.marks.pick.as_ref()?;
+        let says = |spot: TextSpot, text: &str| self.line_text(spot.line) == Some(text);
+        if !says(pick.anchor, &pick.said[0]) || !says(pick.cursor, &pick.said[1]) {
+            return None;
+        }
+        let (from, to) = pick.ends();
+        let pieces = &self.pieces[TabColumn::Page as usize];
+        let mut out = String::new();
+        for line in from.line..=to.line {
+            let text = self.line_text(line)?;
+            let n = text.chars().count();
+            let (start, end) = match (line == from.line, line == to.line) {
+                (true, true) => (from.ch, to.ch),
+                (true, false) => (from.ch, n),
+                (false, true) => (0, to.ch),
+                (false, false) => (0, n),
+            };
+            if line > from.line {
+                let (before, now) = (&self.texts[line - 1], &self.texts[line]);
+                let beside = pieces[before.piece].0.loc.y == pieces[now.piece].0.loc.y;
+                out.push(if beside || now.joins { ' ' } else { '\n' });
+            }
+            out.extend(text.chars().skip(start).take(end.saturating_sub(start)));
+        }
+        (!out.is_empty()).then_some(out)
+    }
+
+    /// How far down the page to scroll, from `down`, to show line `line`
+    /// of its text.
+    pub fn reveal_line(&self, line: usize, down: f64) -> Option<f64> {
+        let place = self.columns[TabColumn::Page as usize]?;
+        let t = self.texts.get(line)?;
+        let r = self.pieces[TabColumn::Page as usize].get(t.piece)?.0;
+        let top = f64::from(r.loc.y - place.loc.y) - f64::from(CARD_PAD);
+        let bottom = f64::from(r.loc.y - place.loc.y + r.size.h) + f64::from(CARD_PAD);
+        let view = f64::from(place.size.h);
+        let room = f64::from(self.scroll_room(TabColumn::Page));
+        let to = if top < down {
+            top
+        } else if bottom > down + view {
+            bottom - view
+        } else {
+            return Some(down);
+        };
+        Some(to.clamp(0.0, room))
+    }
+
     /// How far down the page to scroll, from `down`, to show finding `i`:
     /// its top first when it is taller than the page shows.
     pub fn reveal_finding(&self, i: usize, down: f64) -> Option<f64> {
@@ -1513,18 +1672,39 @@ const SHEET_WORD_GAP: i32 = 10;
 const SHEET_BUTTON_GAP: i32 = 2;
 const TOOLBAR_GAP: i32 = 14;
 const TOOLBAR_PADDING: i32 = 10;
+/// How much of the accent the ground of selected text on the page has,
+/// as the scrollback viewer's selection.
+const PICKED_TINT: f32 = 0.35;
 
-/// Where `text` says `needle` (lowercase), by char, for `found_tints`; none
-/// where lowercase changes how many chars it has.
-fn found_ranges(text: &str, needle: &str) -> Vec<(std::ops::Range<usize>, bool)> {
-    let lower = text.to_lowercase();
-    if needle.is_empty() || lower.chars().count() != text.chars().count() {
-        return Vec::new();
-    }
-    let char_at = |byte: usize| lower[..byte].chars().count();
-    (lower.match_indices(needle))
-        .map(|(at, m)| (char_at(at)..char_at(at + m.len()), false))
+/// Where `text` says `needle` (see `crate::find`), by char, for
+/// `found_tints`.
+fn found_ranges(text: &str, needle: &str, whole: bool) -> Vec<(std::ops::Range<usize>, bool)> {
+    (crate::find::find(text, needle, whole).into_iter())
+        .map(|r| (r, false))
         .collect()
+}
+
+/// A line of `text`, tinted where it says what `sheet` looks for.
+fn found_piece(text: String, font: Font, ink: Ink, bold: bool, sheet: &SheetRow) -> Piece {
+    let says = !sheet.needle.is_empty()
+        && !crate::find::find(&text, &sheet.needle, sheet.whole).is_empty();
+    match says {
+        true => Piece::Found {
+            text,
+            font,
+            ink,
+            bold,
+            needle: sheet.needle.clone(),
+            whole: sheet.whole,
+            current: None,
+        },
+        false => Piece::Text {
+            text,
+            font,
+            ink,
+            bold,
+        },
+    }
 }
 
 /// How wide toolbar `groups` run: their words and buttons, as `Stack::toolbar`
@@ -1663,13 +1843,24 @@ pub(super) enum Piece {
     /// The chevron folding or opening the sheet row of
     /// `StagePage::sections[i]`.
     Fold(usize),
-    /// A line of text, the places saying `needle` (lowercase) tinted.
+    /// A line of text, the places saying `needle` (see `crate::find`)
+    /// tinted, the `current`th of them more: the match gone to.
     Found {
         text: String,
         font: Font,
         ink: Ink,
         bold: bool,
         needle: String,
+        whole: bool,
+        current: Option<usize>,
+    },
+    /// The ground of the chars `range` of the line of text after it,
+    /// selected: `text` in `font`, bold or not, as that line has it.
+    Picked {
+        text: String,
+        font: Font,
+        bold: bool,
+        range: std::ops::Range<usize>,
     },
     /// The card of the user's comment on a finding, behind its text.
     YourComment,
@@ -1949,6 +2140,7 @@ fn doc_stack(blocks: &[DocBlock], w: i32) -> Stack {
         w,
         y: 0,
         pieces: Vec::new(),
+        joins: Vec::new(),
     };
     for (i, block) in blocks.iter().enumerate() {
         if i > 0 {
@@ -2016,9 +2208,19 @@ struct Stack {
     w: i32,
     y: i32,
     pieces: Vec<(Rect, Piece)>,
+    /// The pieces that are lines going on the line of text before them,
+    /// wrapped: copied, a space joins them, not a new line.
+    joins: Vec<usize>,
 }
 
 impl Stack {
+    /// Note the next piece as going on the line before it.
+    fn join_next(&mut self, first: bool) {
+        if !first {
+            self.joins.push(self.pieces.len());
+        }
+    }
+
     fn put(&mut self, h: i32, piece: Piece) -> Rect {
         let rect = Rectangle::new((self.x, self.y).into(), (self.w, h).into());
         self.pieces.push((rect, piece));
@@ -2032,7 +2234,8 @@ impl Stack {
 
     /// `text` wrapped to the column, a line `h` high each.
     fn text(&mut self, text: &str, font: Font, ink: Ink, h: i32) {
-        for line in wrap(text, font.size(), self.w) {
+        for (i, line) in wrap(text, font.size(), self.w).into_iter().enumerate() {
+            self.join_next(i == 0);
             self.put(
                 h,
                 Piece::Text {
@@ -2049,7 +2252,8 @@ impl Stack {
     fn all_text(&mut self, text: &str, font: Font, ink: Ink, bold: bool, h: i32) {
         // Bold runs wider than `wrapped` measures.
         let w = if bold { self.w - self.w / 16 } else { self.w };
-        for line in wrapped(text, font.size(), w).iter() {
+        for (i, line) in wrapped(text, font.size(), w).iter().enumerate() {
+            self.join_next(i == 0);
             self.put(
                 h,
                 Piece::Text {
@@ -2239,29 +2443,16 @@ impl Stack {
     }
 
     /// `text` wrapped to the column as `all_text` does, the places saying
-    /// `needle` (lowercase) tinted; none for an empty one.
+    /// what `sheet` looks for tinted; none while it looks for nothing.
     #[allow(clippy::too_many_arguments)]
-    fn found_text(&mut self, text: &str, font: Font, ink: Ink, bold: bool, h: i32, needle: &str) {
-        if needle.is_empty() {
+    fn found_text(&mut self, text: &str, font: Font, ink: Ink, bold: bool, h: i32, sheet: &SheetRow) {
+        if sheet.needle.is_empty() {
             return self.all_text(text, font, ink, bold, h);
         }
         let w = if bold { self.w - self.w / 16 } else { self.w };
-        for line in wrapped(text, font.size(), w).iter() {
-            let piece = match line.to_lowercase().contains(needle) {
-                true => Piece::Found {
-                    text: line.clone(),
-                    font,
-                    ink,
-                    bold,
-                    needle: needle.to_owned(),
-                },
-                false => Piece::Text {
-                    text: line.clone(),
-                    font,
-                    ink,
-                    bold,
-                },
-            };
+        for (i, line) in wrapped(text, font.size(), w).iter().enumerate() {
+            self.join_next(i == 0);
+            let piece = found_piece(line.clone(), font, ink, bold, sheet);
             self.put(h, piece);
         }
     }
@@ -2283,7 +2474,6 @@ impl Stack {
             return Rectangle::new((x, top).into(), (w, 0).into());
         }
         let frame_at = self.pieces.len();
-        let needle = sheet.needle.as_str();
         let ink = if card.faded { Ink::Muted } else { Ink::Text };
         self.y += SHEET_PAD;
         // Its buttons at the right of its first line, both always there.
@@ -2330,23 +2520,7 @@ impl Stack {
             let title = cut_to_width(&card.title, Font::Body.size(), title_room * 8 / 9);
             let title_w = (width_of(&title, Font::Body.size()).ceil() as i32 * 9 / 8 + 1)
                 .min(title_room);
-            let piece = |text: String, font, ink, bold| match needle.is_empty()
-                || !text.to_lowercase().contains(needle)
-            {
-                true => Piece::Text {
-                    text,
-                    font,
-                    ink,
-                    bold,
-                },
-                false => Piece::Found {
-                    text,
-                    font,
-                    ink,
-                    bold,
-                    needle: needle.to_owned(),
-                },
-            };
+            let piece = |text, font, ink, bold| found_piece(text, font, ink, bold, sheet);
             self.pieces.push((
                 Rectangle::new((text_x, line_y).into(), (title_w, BODY_LINE).into()),
                 piece(title, Font::Body, ink, true),
@@ -2370,8 +2544,8 @@ impl Stack {
             // The title whole, beside the buttons, and its id under it.
             (self.x, self.w) = (text_x, room);
             self.y = line_y;
-            self.found_text(&card.title, Font::Body, ink, true, BODY_LINE, needle);
-            self.found_text(&tail, Font::Small, Ink::Muted, false, TAIL_LINE, needle);
+            self.found_text(&card.title, Font::Body, ink, true, BODY_LINE, sheet);
+            self.found_text(&tail, Font::Small, Ink::Muted, false, TAIL_LINE, sheet);
             self.y = self.y.max(head + buttons_h);
             // Its steps, under all that, across the row.
             let word_w = (sheet.steps.iter())
@@ -2399,7 +2573,7 @@ impl Stack {
                     ));
                 }
                 (self.x, self.w) = (text_x + word_room, (right - text_x - word_room).max(1));
-                self.found_text(text, Font::Body, ink, false, BODY_LINE, needle);
+                self.found_text(text, Font::Body, ink, false, BODY_LINE, sheet);
             }
             (self.x, self.w) = (text_x, (right - text_x).max(1));
             if !card.body.is_empty() {
@@ -2408,7 +2582,7 @@ impl Stack {
             }
             if !card.note.is_empty() {
                 self.y += FINDING_GAP;
-                self.found_text(&card.note, Font::Body, Ink::Error, false, BODY_LINE, needle);
+                self.found_text(&card.note, Font::Body, Ink::Error, false, BODY_LINE, sheet);
             }
             // As tall as its lines, as on a card.
             if let Some(field) = &card.field {
@@ -3478,6 +3652,7 @@ pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayou
             w: (inner - 2 * CARD_PAD).max(1),
             y: 0,
             pieces: Vec::new(),
+            joins: Vec::new(),
         };
         repo_stack(
             view,
@@ -3515,6 +3690,7 @@ pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayou
     let mut milestone_mode = None;
     let mut ship = ShipSpots::default();
     let mut finding_cards = Vec::new();
+    let (mut texts, mut matches) = (Vec::new(), Vec::new());
     for column in TabColumn::ALL {
         let Some(place) = columns[column as usize] else {
             continue;
@@ -3524,6 +3700,7 @@ pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayou
             w: (place.size.w - 2 * CARD_PAD).max(1),
             y: place.loc.y + CARD_PAD,
             pieces: Vec::new(),
+            joins: Vec::new(),
         };
         match column {
             TabColumn::Repos => repo_stack(
@@ -3549,6 +3726,9 @@ pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayou
             }
         }
         content[column as usize] = s.y + CARD_PAD - place.loc.y;
+        if column == TabColumn::Page {
+            (s.pieces, texts, matches) = mark_page(view, s.pieces, &s.joins);
+        }
         pieces[column as usize] = s.pieces;
     }
 
@@ -3581,7 +3761,119 @@ pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayou
         hints,
         hint_spots,
         pieces,
+        texts,
+        matches,
     }
+}
+
+/// The page's `pieces` marked as `view` has it: each place the search
+/// found numbered down the page, the one gone to tinted more, and the
+/// ground of the text selected under it. Gives them, with the page's lines
+/// of text and those places. `joins` are the pieces going on the line
+/// before them (see `Stack::joins`).
+fn mark_page(
+    view: &FeatureTabView,
+    pieces: Vec<(Rect, Piece)>,
+    joins: &[usize],
+) -> (Vec<(Rect, Piece)>, Vec<PageText>, Vec<PageMatch>) {
+    let said: Vec<&str> = (pieces.iter())
+        .filter_map(|(_, piece)| piece_text(piece).map(|(text, ..)| text))
+        .collect();
+    // A selection of lines no longer saying what they did is gone.
+    let pick = (view.marks.pick.as_ref())
+        .filter(|pick| {
+            let says = |spot: TextSpot, text: &str| said.get(spot.line) == Some(&text);
+            says(pick.anchor, &pick.said[0]) && says(pick.cursor, &pick.said[1])
+        })
+        .map(TextPick::ends)
+        .filter(|(from, to)| from != to);
+    let mut out = Vec::with_capacity(pieces.len() + 4);
+    let (mut texts, mut matches) = (Vec::new(), Vec::new());
+    let mut card: Option<(usize, Rect)> = None;
+    for (i, (rect, mut piece)) in pieces.into_iter().enumerate() {
+        if let Piece::FindingCard(k) = piece {
+            let n = (view.page.sections[..k].iter())
+                .filter(|s| matches!(s, PageSection::Finding(_)))
+                .count();
+            card = Some((n, rect));
+        }
+        let Some((text, font, bold)) = piece_text(&piece) else {
+            out.push((rect, piece));
+            continue;
+        };
+        let line = texts.len();
+        let in_card = card.filter(|(_, r)| r.contains(rect.loc)).map(|(n, _)| n);
+        if let Some((from, to)) = pick.filter(|(from, to)| (from.line..=to.line).contains(&line)) {
+            let start = if line == from.line { from.ch } else { 0 };
+            let end = if line == to.line { to.ch } else { text.chars().count() };
+            if start < end {
+                let (text, range) = (text.to_owned(), start..end);
+                out.push((rect, Piece::Picked { text, font, bold, range }));
+            }
+        }
+        if let Piece::Found {
+            text,
+            needle,
+            whole,
+            current,
+            ..
+        } = &mut piece
+        {
+            for (n, range) in crate::find::find(text, needle, *whole).into_iter().enumerate() {
+                if view.marks.found_at == Some(matches.len()) {
+                    *current = Some(n);
+                }
+                matches.push(PageMatch {
+                    line,
+                    card: in_card,
+                    range,
+                });
+            }
+        }
+        texts.push(PageText {
+            piece: out.len(),
+            card: in_card,
+            joins: joins.contains(&i),
+        });
+        out.push((rect, piece));
+    }
+    (out, texts, matches)
+}
+
+/// A piece's line of text, its font and whether bold: what can be
+/// selected on the page.
+fn piece_text(piece: &Piece) -> Option<(&str, Font, bool)> {
+    match piece {
+        Piece::Text {
+            text, font, bold, ..
+        }
+        | Piece::Found {
+            text, font, bold, ..
+        } => Some((text, *font, *bold)),
+        _ => None,
+    }
+}
+
+/// How wide `text` is in `font`, bold or not, in logical pixels.
+fn text_width_of(text: &str, font: Font, bold: bool) -> f32 {
+    match bold {
+        true => measure_bold(text, font.size()).unwrap_or_else(|| width_of(text, font.size())),
+        false => width_of(text, font.size()),
+    }
+}
+
+/// The char of `text` nearest `x`, its first at 0: the one whose middle
+/// `x` is before, else past the last.
+fn char_at_x(text: &str, font: Font, bold: bool, x: f32) -> usize {
+    let mut pen = 0.0;
+    for (i, ch) in text.chars().enumerate() {
+        let advance = text_width_of(ch.encode_utf8(&mut [0; 4]), font, bold);
+        if x < pen + advance / 2.0 {
+            return i;
+        }
+        pen += advance;
+    }
+    text.chars().count()
 }
 
 /// What the strip's chip standing for `n` hidden repositories says: "+N"
@@ -3919,6 +4211,7 @@ fn slice_view(view: &FeatureTabView, slice: TabSlice) -> FeatureTabView {
         scroll: [0.0; 3],
         hover: None,
         hints: Vec::new(),
+        marks: PageMarks::default(),
     };
     use FeatureTabHit as H;
     let strip = !view.expanded;
@@ -3982,6 +4275,7 @@ fn slice_view(view: &FeatureTabView, slice: TabSlice) -> FeatureTabView {
         TabSlice::Column(TabColumn::Page) => {
             v.page = view.page.clone();
             v.activity = view.activity.clone();
+            v.marks = view.marks.clone();
         }
         TabSlice::Column(TabColumn::Activity) => v.activity = view.activity.clone(),
         TabSlice::Hints => v.hints = view.hints.clone(),
@@ -5570,17 +5864,43 @@ impl Painter {
                     false => chevron_side(false, x, y, 1.0 * s),
                 });
             }
+            Piece::Picked {
+                text,
+                font,
+                bold,
+                range,
+            } => {
+                let (x, end) = phys(rect, scale);
+                let (y, h) = band(rect, scale);
+                let size = font.size();
+                let width = |t: &str| match bold {
+                    true => self.bold_width(t, size, scale),
+                    false => self.text_width(t, size, scale),
+                };
+                let byte = |n: usize| text.char_indices().nth(n).map_or(text.len(), |(b, _)| b);
+                let x0 = x + width(&text[..byte(range.start)]);
+                let x1 = (x + width(&text[..byte(range.end)])).min(end);
+                if x1 > x0 {
+                    let color = mix(p.background, p.accent, PICKED_TINT);
+                    c.rounded(x0, y as f32, x1 - x0, h as f32, 2.0 * s, color);
+                }
+            }
             Piece::Found {
                 text,
                 font,
                 ink,
                 bold,
                 needle,
+                whole,
+                current,
             } => {
                 let (x, end) = phys(rect, scale);
                 let b = band(rect, scale);
                 let size = font.size();
-                let found = found_ranges(text, needle);
+                let mut found = found_ranges(text, needle, *whole);
+                if let Some(at) = (*current).and_then(|n| found.get_mut(n)) {
+                    at.1 = true;
+                }
                 let width = |t: &str| self.text_width(t, size, scale);
                 self.found_tints(c, text, &found, (x, end), b, width, p.background, scale, p);
                 if *bold {

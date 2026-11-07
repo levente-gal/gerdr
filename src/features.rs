@@ -1363,6 +1363,13 @@ pub struct FeaturePanel {
     pub repo_pick: Option<usize>,
     /// The search through Manual test's criteria, while open.
     pub search: Option<crate::manual_test::Search>,
+    /// The text selected on the page with the pointer.
+    pub pick: Option<chrome::TextPick>,
+    /// The pointer holds a press selecting text on the page.
+    pub picking: bool,
+    /// The last press on the page's text: when, where and how many in a
+    /// row, for a double click.
+    pub pick_clicks: Option<(std::time::Instant, Point<f64, Logical>, u32)>,
 }
 
 /// What follows shipping, as the Ship page ticks it.
@@ -2762,6 +2769,7 @@ fn criterion_card(
             steps: criterion_steps(row),
             hidden: false,
             needle: String::new(),
+            whole: false,
         })),
         preview: Vec::new(),
         fix: String::new(),
@@ -7781,6 +7789,9 @@ impl Gerdr {
         if self.criterion_note_key(mods, sym, typed) {
             return None;
         }
+        if self.page_text_key(mods, sym, typed) {
+            return None;
+        }
         if self.criteria_search_key(mods, sym, typed) {
             return None;
         }
@@ -9197,6 +9208,9 @@ impl Gerdr {
             FeatureTabHit::Search(part) => {
                 match part {
                     chrome::SearchPart::Close => self.close_criteria_search(),
+                    chrome::SearchPart::Prev | chrome::SearchPart::Next => {
+                        self.go_to_match(part == chrome::SearchPart::Prev, false);
+                    }
                     _ => self.open_criteria_search(),
                 }
                 None
@@ -9550,6 +9564,8 @@ impl Gerdr {
                 let text = match part {
                     chrome::SearchPart::Close => "Close the search (Esc)",
                     chrome::SearchPart::Field => return None,
+                    chrome::SearchPart::Prev => "Previous match (Shift+N)",
+                    chrome::SearchPart::Next => "Next match (N)",
                     _ => "Search the criteria (/ or Ctrl+F)",
                 };
                 Some(Tooltip::new(text, *spot))
@@ -9823,7 +9839,19 @@ impl Gerdr {
             rounds_open: panel.rounds_open.clone(),
             comment_rounds_open: panel.comment_rounds_open.clone(),
         };
-        Some(tab_view(panel, feature, &slugs, &state, now))
+        let mut view = tab_view(panel, feature, &slugs, &state, now);
+        // The search counts the places it found as the page shows them.
+        let typed = (panel.search.as_ref()).is_some_and(|s| !s.needle().is_empty());
+        if typed {
+            let layout = chrome::feature_tab_layout(&view, self.content_rect());
+            let n = layout.matches.len();
+            let count = chrome::search_count(true, n, view.marks.found_at.filter(|a| *a < n));
+            if let Some(bar) = view.test_strip.as_mut().and_then(|s| s.search.as_mut()) {
+                bar.count = count;
+                bar.found = n > 0;
+            }
+        }
+        Some(view)
     }
 
     /// The sidebar's rows for the shown project's open features.
@@ -12290,7 +12318,13 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 6] = [
                 "/ or Ctrl+F",
                 "search them: only those saying it show, open; Enter goes to them",
             ),
+            ("n / Shift+N", "go to the next place found, or the one before"),
+            (
+                "* / #",
+                "search for the text selected, else the word under the pointer",
+            ),
             ("Esc", "clear the search, then close it"),
+            ("Ctrl+C / y", "copy the text selected with the pointer"),
             ("Space / Enter", "mark it passed, or not; passed, it folds"),
             ("f", "mark it failed, saying what went wrong, or edit that"),
             ("Shift+Enter", "writing what went wrong: start a new line"),
@@ -12421,6 +12455,18 @@ fn tab_hints(
     let mut hints = writers_tab_hints(
         panel, feature, stage, slugs, ctx, choices, plan, ships, notes,
     );
+    // Text selected on the page goes first: what it is for is copying.
+    let typing = panel.search.as_ref().is_some_and(|s| s.typing);
+    let picked = panel.pick.as_ref().is_some_and(|p| p.anchor != p.cursor);
+    if picked && !panel.keys && panel.note.is_none() && !typing {
+        let mut picked = vec![("Ctrl+C / y".to_owned(), "copy".to_owned())];
+        if shows_criteria(feature, stage) {
+            picked.push(("* / #".to_owned(), "search it".to_owned()));
+        }
+        picked.push(("Esc".to_owned(), "unselect".to_owned()));
+        hints.retain(|(k, _)| k != "Esc");
+        hints.splice(0..0, picked);
+    }
     if stage == Stage::CodeReview
         && !panel.keys
         && panel.note.is_none()
@@ -12466,15 +12512,17 @@ fn fold_tip(page: &chrome::StagePage, i: usize) -> Option<String> {
     Some(format!("{verb} {what} ({key})"))
 }
 
-/// The hint of the criteria's search: `/` opens it; open, Esc clears it,
-/// then closes it.
-fn search_hint(panel: &FeaturePanel) -> (String, String) {
-    let (key, what) = match &panel.search {
-        None => ("/", "search"),
-        Some(s) if s.query.is_empty() => ("Esc", "close search"),
-        Some(_) => ("Esc", "clear search"),
+/// The hints of the criteria's search: `/` opens it; open, `n` / `N` go
+/// through what it found, and Esc clears it, then closes it.
+fn search_hints(panel: &FeaturePanel) -> Vec<(String, String)> {
+    let hints: &[(&str, &str)] = match &panel.search {
+        None => &[("/", "search")],
+        Some(s) if s.query.is_empty() => &[("Esc", "close search")],
+        Some(_) => &[("n / N", "next / previous match"), ("Esc", "clear search")],
     };
-    (key.to_owned(), what.to_owned())
+    (hints.iter())
+        .map(|(k, w)| ((*k).to_owned(), (*w).to_owned()))
+        .collect()
 }
 
 /// `tab_hints` on the machine writing `feature`.
@@ -12584,7 +12632,7 @@ fn writers_tab_hints(
             hints.push(hint("Space", "pass"));
             hints.push(hint("f", "fail\u{2026}"));
             hints.push(hint("Del", "clear"));
-            hints.push(search_hint(panel));
+            hints.extend(search_hints(panel));
             if fix_round_on(feature, stage).is_none() {
                 hints.push(hint("Ctrl+Enter", "mark passed"));
                 hints.push(hint("Ctrl+Shift+Enter", "plan fixes"));
@@ -12594,7 +12642,7 @@ fn writers_tab_hints(
         TabArea::Findings if shows_criteria(feature, stage) && ctx.criteria > 0 => {
             hints.push(hint("Up / Down", "criterion"));
             hints.push(hint("Left / Right", "fold / open"));
-            hints.push(search_hint(panel));
+            hints.extend(search_hints(panel));
             let row = PanelRow::Stage(stage);
             if matches!(row_action(feature, row, ctx), Some(PanelOutcome::Untick(_))) {
                 hints.push(hint(REOPEN_KEY, "reopen"));
@@ -13030,12 +13078,13 @@ fn tab_view(
     };
     // The search hides the criteria not saying what it looks for, and opens
     // those that do, the places tinted.
-    let needle = (panel.search.as_ref())
-        .filter(|_| !panel.keys && shows_criteria(feature, stage))
+    let search = (panel.search.as_ref()).filter(|_| !panel.keys && shows_criteria(feature, stage));
+    let whole = search.is_some_and(|s| s.whole);
+    let needle = search
         .map(crate::manual_test::Search::needle)
         .filter(|n| !n.is_empty());
     if let Some(needle) = &needle {
-        let shown = crate::manual_test::shown(&state.criteria, needle);
+        let shown = crate::manual_test::shown(&state.criteria, needle, whole);
         let sheets = (page.sections.iter_mut()).filter_map(|s| match s {
             PageSection::Finding(card) if card.sheet.is_some() => Some(card),
             _ => None,
@@ -13045,6 +13094,7 @@ fn tab_view(
             if let Some(sheet) = card.sheet.as_mut() {
                 sheet.hidden = !shown;
                 sheet.needle = needle.clone();
+                sheet.whole = whole;
             }
         }
     }
@@ -13168,25 +13218,15 @@ fn tab_view(
     .then(|| test_strip(&state.criteria))
     .flatten()
     .map(|mut strip| {
-        strip.search = panel.search.as_ref().map(|search| {
-            let total = state.criteria.len();
-            let n = needle.as_deref().map_or(total, |needle| {
-                (crate::manual_test::shown(&state.criteria, needle).iter())
-                    .filter(|s| **s)
-                    .count()
-            });
-            chrome::SearchBar {
-                query: search.query.line(),
-                placeholder: "Search the criteria".into(),
-                count: match (needle.is_some(), n) {
-                    (false, _) => String::new(),
-                    (true, 0) => "No matches".into(),
-                    (true, n) => format!("{n} of {total}"),
-                },
-                found: needle.is_none() || n > 0,
-                focused: search.typing,
-                whole: false,
-            }
+        // Its count is of the places found, as the page lays them out:
+        // `Gerdr::feature_tab_view` gives it.
+        strip.search = panel.search.as_ref().map(|search| chrome::SearchBar {
+            query: search.query.line(),
+            placeholder: "Search the criteria".into(),
+            count: String::new(),
+            found: needle.is_none(),
+            focused: search.typing,
+            whole: search.whole,
         });
         strip
     });
@@ -13234,6 +13274,10 @@ fn tab_view(
             &ships,
             notes_of(state.probe),
         ),
+        marks: chrome::PageMarks {
+            found_at: search.and_then(|s| s.at).filter(|_| needle.is_some()),
+            pick: panel.pick.clone(),
+        },
     };
     // The review under the rail has its own keys and footer.
     if view.review_page {
@@ -18341,9 +18385,18 @@ pub(crate) mod tests {
         assert_eq!(hidden, [true, false, true]);
         // Folded, it opens while it is found.
         assert!(!cards[1].collapsed);
-        assert_eq!(cards[1].sheet.as_ref().unwrap().needle, "csv");
-        let bar = view.test_strip.and_then(|s| s.search).unwrap();
-        assert_eq!(bar.count, "1 of 3");
+        assert_eq!(cards[1].sheet.as_ref().unwrap().needle, "CSV");
+        // What it found, as laid out, is all in the criterion shown; the
+        // count of those is `Gerdr::feature_tab_view`'s.
+        let frame = smithay::utils::Rectangle::from_size((1180, 900).into());
+        let layout = chrome::feature_tab_layout(&view, frame);
+        assert!(!layout.matches.is_empty());
+        assert!(layout.matches.iter().all(|m| m.card == Some(1)));
+        // A match gone to is the one tinted more.
+        let mut view = view;
+        view.marks.found_at = Some(0);
+        let layout = chrome::feature_tab_layout(&view, frame);
+        assert_eq!(layout.matches.len(), 1 + (layout.matches.len() - 1));
     }
 
     #[test]
