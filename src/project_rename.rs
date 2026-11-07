@@ -335,11 +335,19 @@ fn json_kind(path: &Path) -> Option<bool> {
     }
 }
 
-/// The folders in `dir`, in name order; none if it can't be listed.
+/// The folders in `dir`, in name order; none if it isn't there or can't
+/// be listed (logged: its files keep the old id).
 fn subdirs(dir: &Path) -> Vec<PathBuf> {
-    let mut dirs: Vec<PathBuf> = fs::read_dir(dir)
-        .into_iter()
-        .flatten()
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(err) => {
+            if err.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!("changing a project's id: listing {}: {err}", dir.display());
+            }
+            return Vec::new();
+        }
+    };
+    let mut dirs: Vec<PathBuf> = entries
         .flatten()
         .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
         .map(|e| e.path())
@@ -525,7 +533,7 @@ impl Gerdr {
             return self.change_project_id_now(id, new);
         }
         self.ask(
-            format!("Change \u{201c}{name}\u{201d}\u{2019}s id?"),
+            format!("Change the id of \u{201c}{name}\u{201d}?"),
             "It still runs: changing its id stops its terminals, agents and apps".to_owned(),
             "Stop and change id",
             Then::ChangeProjectId(id.to_owned(), new.to_owned()),
@@ -661,6 +669,13 @@ impl Gerdr {
             if let Err(why) = rewrite.typed(nav) {
                 tracing::warn!("changing project {old}'s id in the tab history: {why}");
             }
+        }
+        // Cached under the old id, they would be saved back there.
+        if self.inbox.store.as_ref().is_some_and(|(id, _)| id == old) {
+            self.inbox.store = None;
+        }
+        if (self.repos.kept.as_ref()).is_some_and(|(id, _)| id.as_deref() == Some(old)) {
+            self.repos.kept = None;
         }
         if self
             .frecency
