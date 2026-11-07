@@ -9,6 +9,8 @@
 //! fixes they asked for land, and what they found stays. An edited
 //! criterion drops its result.
 
+use std::collections::BTreeSet;
+
 use serde::{Deserialize, Serialize};
 
 use super::artifacts;
@@ -24,6 +26,60 @@ pub struct Criterion {
     /// The Given/When/Then part. Results match on it, so a renamed title
     /// keeps them.
     pub text: String,
+}
+
+/// Which criteria of a feature show their steps on Manual test's page, and
+/// which the user read, each by its Given/When/Then as results match. A
+/// feature's criteria start folded: none is open until the user opens it.
+/// Kept in `state.json`, as it only says how the page shows them.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Folds {
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub open: BTreeSet<String>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub seen: BTreeSet<String>,
+}
+
+impl Folds {
+    pub fn is_empty(&self) -> bool {
+        self.open.is_empty() && self.seen.is_empty()
+    }
+
+    /// Open or fold criterion `text`; whether that changed anything. Opened,
+    /// it counts as read.
+    pub fn set(&mut self, text: &str, open: bool) -> bool {
+        let changed = match open {
+            true => self.open.insert(text.to_owned()),
+            false => self.open.remove(text),
+        };
+        let read = open && self.see(text);
+        changed || read
+    }
+
+    /// Note criterion `text` as read; whether it wasn't yet.
+    pub fn see(&mut self, text: &str) -> bool {
+        !self.seen.contains(text) && self.seen.insert(text.to_owned())
+    }
+
+    /// Only what `criteria` still say: a criterion edited in the brief
+    /// starts folded and unread, as its result goes too.
+    pub fn keep_only(&mut self, criteria: &[Criterion]) -> bool {
+        let before = (self.open.len(), self.seen.len());
+        let live = |t: &String| criteria.iter().any(|c| &c.text == t);
+        self.open.retain(live);
+        self.seen.retain(live);
+        before != (self.open.len(), self.seen.len())
+    }
+}
+
+/// Which criteria a fold button acts on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FoldScope {
+    All,
+    /// Those that passed.
+    Done,
+    /// Those the user read: opened, or marked.
+    Seen,
 }
 
 /// The criteria in `brief`: the Given/When/Then items of its `Acceptance
@@ -361,6 +417,30 @@ pub fn unmark_sent(test: &mut ManualTest, ids: &[(String, String)]) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn folds_say_what_is_open_and_read_and_forget_edited_criteria() {
+        let c = |id: &str, text: &str| Criterion {
+            id: id.into(),
+            title: String::new(),
+            text: text.into(),
+        };
+        let mut folds = Folds::default();
+        // Opened, it is read too; opened again, nothing changes.
+        assert!(folds.set("a", true));
+        assert!(!folds.set("a", true));
+        assert!(folds.seen.contains("a"));
+        // Folded, it stays read.
+        assert!(folds.set("a", false));
+        assert!(folds.open.is_empty() && folds.seen.contains("a"));
+        assert!(folds.see("b") && !folds.see("b"));
+        folds.set("b", true);
+        // What the brief no longer says goes.
+        assert!(folds.keep_only(&[c("AC-1", "b")]));
+        assert_eq!(folds.seen.iter().collect::<Vec<_>>(), ["b"]);
+        assert!(!folds.keep_only(&[c("AC-1", "b")]));
+        assert!(!folds.is_empty());
+    }
+
     use super::*;
 
     const BRIEF: &str = "# Bulk edit\n\n## Outcome\nGiven nothing, when no, then not this.\n\n### ACCEPTANCE Criteria:\n- [ ] Given two rows, when I edit both, then both change.\n1. Given one row, when I clear it, then it is empty.\n- not a criterion\n```\n- Given a fence, when read, then skipped.\n```\n* [x] Given a done box, when read, then kept.\n\n## Notes\n- Given later, when read, then not in.\n";

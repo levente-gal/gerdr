@@ -4014,6 +4014,7 @@ fn feature_tab_review_fixes() -> super::FeatureTabView {
     };
     let card = |state: &str, place: &str, title: &str, made, stripe, buttons: Vec<usize>| {
         PageSection::Finding(FindingCard {
+            sheet: None,
             tag: FindingTag::Yours,
             title: title.into(),
             state: state.into(),
@@ -4262,6 +4263,7 @@ fn feature_tab_review_rounds() -> super::FeatureTabView {
     };
     let card = |tag, title: &str, state: &str, place: &str, fix: &str, faded, buttons| {
         PageSection::Finding(FindingCard {
+            sheet: None,
             tag,
             title: title.into(),
             state: state.into(),
@@ -4666,22 +4668,47 @@ fn feature_tab_manual_test(note: bool) -> super::FeatureTabView {
             ],
         ),
     ];
-    let mut sections = vec![PageSection::Lines {
-        label: "Criteria".into(),
-        lines: vec![tab_line("uncommitted changes in api", CheckTone::Note)],
-    }];
+    // The row folding them, at the caption's right.
+    let mut groups = Vec::new();
+    for word in ["Collapse", "Expand"] {
+        let at = buttons.len();
+        buttons.extend(["All", "Done", "Seen"].map(|l| button(l, plain)));
+        groups.push((word.to_owned(), (at..at + 3).collect()));
+    }
+    let mut sections = vec![
+        PageSection::Lines {
+            label: "Criteria".into(),
+            lines: vec![tab_line("uncommitted changes in api", CheckTone::Note)],
+        },
+        PageSection::Toolbar { groups },
+    ];
     for (i, (labels, tag, [title, state, place, said, steps])) in cards.into_iter().enumerate() {
         let at = buttons.len();
         buttons.extend(labels.iter().map(|(l, style)| button(l, *style)));
         let writing = note && i == 3;
         let selected = i == if note { 3 } else { 2 };
-        let steps = if selected { steps } else { "" };
+        // The one passed folded to its line, as passing left it.
+        let open = tag != FindingTag::Passed;
+        let steps = steps
+            .lines()
+            .map(|l| {
+                let (word, rest) = l.split_once(' ').unwrap_or(("", l));
+                let word = ["Given", "When", "Then"].into_iter().find(|w| *w == word);
+                (word.unwrap_or(""), rest.to_owned())
+            })
+            .collect();
         sections.push(PageSection::Finding(FindingCard {
+            sheet: Some(Box::new(super::SheetRow {
+                open,
+                steps,
+                hidden: false,
+                needle: String::new(),
+            })),
             tag,
             title: title.into(),
             state: state.into(),
             place: place.into(),
-            body: steps.into(),
+            body: String::new(),
             preview: Vec::new(),
             fix: String::new(),
             note: said.into(),
@@ -4689,7 +4716,7 @@ fn feature_tab_manual_test(note: bool) -> super::FeatureTabView {
             comment_buttons: Vec::new(),
             made: i == 1,
             faded: tag == FindingTag::Passed,
-            collapsed: false,
+            collapsed: !open,
             stripe: None,
             field: writing.then(|| Line::from("Takes 4 seconds")),
             field_hint: "",
@@ -4706,6 +4733,7 @@ fn feature_tab_manual_test(note: bool) -> super::FeatureTabView {
     };
     // Its counts go in the bar over the page.
     view.test_strip = Some(super::TestStrip {
+        search: None,
         passed: 1,
         failed: 2,
         untested: 1,
@@ -4717,6 +4745,40 @@ fn feature_tab_manual_test(note: bool) -> super::FeatureTabView {
             .map(|(k, w)| ((*k).to_owned(), (*w).to_owned()))
             .collect();
     }
+    view
+}
+
+/// Manual test's page searching its criteria for "total": only the one
+/// saying it shows, open, the places tinted, the field with the keys.
+fn feature_tab_manual_search() -> super::FeatureTabView {
+    use super::{PageSection, SearchBar};
+    let mut view = feature_tab_manual_test(false);
+    let needle = "total";
+    for section in &mut view.page.sections {
+        if let PageSection::Finding(card) = section
+            && let Some(sheet) = card.sheet.as_mut()
+        {
+            let says = sheet.steps.iter().any(|(_, t)| t.contains(needle));
+            sheet.hidden = !says;
+            sheet.needle = needle.into();
+            card.collapsed = !says;
+            card.selected = says;
+        }
+    }
+    if let Some(strip) = view.test_strip.as_mut() {
+        strip.search = Some(SearchBar {
+            query: Line::from(needle),
+            placeholder: "Search the criteria".into(),
+            count: "1 of 4".into(),
+            found: true,
+            focused: true,
+            whole: false,
+        });
+    }
+    view.hints = [("Enter", "to the criteria"), ("Esc", "clear")]
+        .iter()
+        .map(|(k, w)| ((*k).to_owned(), (*w).to_owned()))
+        .collect();
     view
 }
 
@@ -4745,7 +4807,7 @@ fn feature_tab_manual_pages() -> super::FeatureTabView {
 }
 
 /// The feature tab's fixtures, by name.
-fn feature_tabs() -> [(&'static str, super::FeatureTabView); 40] {
+fn feature_tabs() -> [(&'static str, super::FeatureTabView); 41] {
     [
         ("tab_build", feature_tab()),
         ("tab_verify_fixes", feature_tab_verify_fixes()),
@@ -4795,12 +4857,13 @@ fn feature_tabs() -> [(&'static str, super::FeatureTabView); 40] {
         ("tab_manual_test", feature_tab_manual_test(false)),
         ("tab_manual_note", feature_tab_manual_test(true)),
         ("tab_manual_pages", feature_tab_manual_pages()),
+        ("tab_manual_search", feature_tab_manual_search()),
         ("tab_review_rounds", feature_tab_review_rounds()),
     ]
 }
 
 /// Each fixture at the width it shows best at, and Build at all three.
-const TAB_SURFACES: [(&str, i32); 51] = [
+const TAB_SURFACES: [(&str, i32); 52] = [
     ("tab_build", 860),
     ("tab_build", 1180),
     ("tab_build", 1920),
@@ -4852,9 +4915,10 @@ const TAB_SURFACES: [(&str, i32); 51] = [
     ("tab_open_round", 1180),
     ("tab_open_round", 860),
     ("tab_manual_pages", 860),
+    ("tab_manual_search", 860),
 ];
 
-const FEATURE_TAB: [&str; 51] = [
+const FEATURE_TAB: [&str; 52] = [
     "tab_build_860",
     "tab_build_1180",
     "tab_build_1920",
@@ -4906,10 +4970,11 @@ const FEATURE_TAB: [&str; 51] = [
     "tab_open_round_1180",
     "tab_open_round_860",
     "tab_manual_pages_860",
+    "tab_manual_search_860",
 ];
 
 /// The recorded hashes of `FEATURE_TAB`, per case in `CASES`.
-const GOLDEN_FEATURE_TAB: [[u64; 51]; 4] = [
+const GOLDEN_FEATURE_TAB: [[u64; 52]; 4] = [
     // Dark at 1
     [
         0xf9675552d233b10a, // tab_build_860
@@ -4954,15 +5019,16 @@ const GOLDEN_FEATURE_TAB: [[u64; 51]; 4] = [
         0xe697af65a0b1ba91, // tab_discover_brief_1180
         0xc7901979745e2440, // tab_discover_brief_860
         0xcc41ad7a9ec091c0, // tab_plan_long_1180
-        0x1e6e3b15e13d22a1, // tab_manual_test_1180
-        0x1dc0a82b7fe24781, // tab_manual_note_860
+        0xda3254659545ff6d, // tab_manual_test_1180
+        0xd356fc844361740e, // tab_manual_note_860
         0xaae0ccef435a4695, // tab_review_rounds_1180
         0xde0e7ad0287e548c, // tab_verify_fixes_1180
         0xe02ce500d771436c, // tab_verify_fixes_860
         0x991d1848f7033107, // tab_review_page_1180
         0xc4b722d8b35c09b2, // tab_open_round_1180
         0xa55646a352f29557, // tab_open_round_860
-        0x30ad567b0a45d46a, // tab_manual_pages_860
+        0x3ca562e56cb5ac79, // tab_manual_pages_860
+        0xebe69c2a656a36be, // tab_manual_search_860
     ],
     // Dark at 2
     [
@@ -5008,15 +5074,16 @@ const GOLDEN_FEATURE_TAB: [[u64; 51]; 4] = [
         0x22f0bccd99fd3099, // tab_discover_brief_1180
         0x2f235fbf0ce377d7, // tab_discover_brief_860
         0x371817eb8ef63723, // tab_plan_long_1180
-        0x9f78779c82c942be, // tab_manual_test_1180
-        0xdf53bb4c82869794, // tab_manual_note_860
+        0xd9c655ce9a75a8df, // tab_manual_test_1180
+        0xa6da4ebd7e0ae33f, // tab_manual_note_860
         0x696373a9ac9ae597, // tab_review_rounds_1180
         0x83fbb804ca6bacdd, // tab_verify_fixes_1180
         0x305eebdbc8d8a0ff, // tab_verify_fixes_860
         0xa37c484a9e95f3ca, // tab_review_page_1180
         0x2cd07330c04ac653, // tab_open_round_1180
         0x10c9f9ce73220117, // tab_open_round_860
-        0x49b4d1096fa816ea, // tab_manual_pages_860
+        0x638d93fbc6e1f713, // tab_manual_pages_860
+        0xf221ec8385fae2e3, // tab_manual_search_860
     ],
     // Light at 1
     [
@@ -5062,15 +5129,16 @@ const GOLDEN_FEATURE_TAB: [[u64; 51]; 4] = [
         0x0dd9604ad2510baf, // tab_discover_brief_1180
         0x038d08ac68187bad, // tab_discover_brief_860
         0x09cb9855696f5c01, // tab_plan_long_1180
-        0x6bff5c23c9bf32bb, // tab_manual_test_1180
-        0x94edf51b3d46aa5b, // tab_manual_note_860
+        0xa3e0ebbd2a4604b0, // tab_manual_test_1180
+        0x5673f5d1da0365bf, // tab_manual_note_860
         0x29372c9287bd44bf, // tab_review_rounds_1180
         0x8200660d7d2c371d, // tab_verify_fixes_1180
         0xbe515ae3c5939904, // tab_verify_fixes_860
         0xc80d83cdbecf59b3, // tab_review_page_1180
         0xbd227132ee696c72, // tab_open_round_1180
         0x31a745f74d2e8e52, // tab_open_round_860
-        0x8681b353f28beb8a, // tab_manual_pages_860
+        0x3d753e7555e243d8, // tab_manual_pages_860
+        0x0cc17567dfb80ce6, // tab_manual_search_860
     ],
     // Light at 2
     [
@@ -5116,15 +5184,16 @@ const GOLDEN_FEATURE_TAB: [[u64; 51]; 4] = [
         0x85626dff437b80ab, // tab_discover_brief_1180
         0x6955e849ed161c3d, // tab_discover_brief_860
         0x22810cee688c087d, // tab_plan_long_1180
-        0x22ccf4e16c0fd11e, // tab_manual_test_1180
-        0x0c83f098457acb78, // tab_manual_note_860
+        0x3ede05e76054f570, // tab_manual_test_1180
+        0x474d8c1cfa1394f7, // tab_manual_note_860
         0x18a3b0870e7a6ac2, // tab_review_rounds_1180
         0x8162095ee657492d, // tab_verify_fixes_1180
         0xa1c6ec276ac6f131, // tab_verify_fixes_860
         0xb7f9bee96811fb6a, // tab_review_page_1180
         0x752ec2845bdeb8a4, // tab_open_round_1180
         0xd75e42f004429c32, // tab_open_round_860
-        0x474ce52b74bbeaf7, // tab_manual_pages_860
+        0xcba476b8512b8cc8, // tab_manual_pages_860
+        0x44ba953b9b4a7da9, // tab_manual_search_860
     ],
 ];
 
@@ -5262,6 +5331,7 @@ fn tab_findings() -> super::FeatureTabView {
             (end..end + 2).collect()
         };
         view.page.sections.push(PageSection::Finding(FindingCard {
+            sheet: None,
             tag,
             title: title.into(),
             state: state.into(),
@@ -5385,6 +5455,7 @@ fn tab_checks() -> super::FeatureTabView {
             view.page.buttons.push(button(label, ButtonStyle::Plain));
         }
         view.page.sections.push(PageSection::Finding(FindingCard {
+            sheet: None,
             tag,
             title: title.into(),
             state: state.into(),

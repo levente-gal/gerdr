@@ -1359,6 +1359,8 @@ pub struct FeaturePanel {
     /// The button Left and Right picked on the selected row (see
     /// `FeaturePanel::picked`).
     pub repo_pick: Option<usize>,
+    /// The search through Manual test's criteria, while open.
+    pub search: Option<crate::manual_test::Search>,
 }
 
 /// What follows shipping, as the Ship page ticks it.
@@ -1530,6 +1532,10 @@ pub enum PanelOutcome {
     ManualTest,
     /// What a Manual test page's criteria ask.
     Manual(crate::manual_test::Outcome),
+    /// Open Manual test's criterion `.0` to its steps (true), or fold it.
+    FoldCriterion(usize, bool),
+    /// Open the criteria `.0` names (true), or fold them.
+    FoldCriteria(crate::feature::manual::FoldScope, bool),
     /// Open Plan review's suggestions, to decide them.
     PlanSuggestions,
     /// The suggestions are decided: start the final plan, or with nothing
@@ -1626,6 +1632,8 @@ impl PanelOutcome {
                 | Self::ShowDiffNote(_)
                 | Self::FoldRound(_)
                 | Self::FoldCommentRound(_)
+                | Self::FoldCriterion(..)
+                | Self::FoldCriteria(..)
                 | Self::ReviewView(_)
                 | Self::CodeReview
                 | Self::OpenPr(_)
@@ -2591,7 +2599,50 @@ fn stage_actions(
     if tries_criteria(feature, stage) {
         out.extend((criteria.iter().enumerate()).flat_map(|(i, row)| criterion_buttons(i, row)));
     }
+    if shows_criteria(feature, stage) && !criteria.is_empty() {
+        out.extend(fold_actions());
+    }
     out
+}
+
+/// The buttons folding Manual test's criteria to their lines, or opening
+/// them to their steps: all, those passed, those read.
+fn fold_actions() -> Vec<(PageButton, PanelOutcome)> {
+    use crate::feature::manual::FoldScope;
+    let scopes = [
+        ("All", FoldScope::All),
+        ("Done", FoldScope::Done),
+        ("Seen", FoldScope::Seen),
+    ];
+    [false, true]
+        .into_iter()
+        .flat_map(|open| {
+            scopes.into_iter().map(move |(label, scope)| {
+                let button = PageButton {
+                    label: label.to_owned(),
+                    style: ButtonStyle::Plain,
+                };
+                (button, PanelOutcome::FoldCriteria(scope, open))
+            })
+        })
+        .collect()
+}
+
+/// The row over Manual test's criteria: "Collapse" and "Expand", each with
+/// its buttons of `actions` (see `fold_actions`).
+fn fold_toolbar(actions: &[(PageButton, PanelOutcome)]) -> PageSection {
+    let of = |open: bool| -> Vec<usize> {
+        (actions.iter().enumerate())
+            .filter(|(_, (_, o))| matches!(o, PanelOutcome::FoldCriteria(_, x) if *x == open))
+            .map(|(at, _)| at)
+            .collect()
+    };
+    PageSection::Toolbar {
+        groups: vec![
+            ("Collapse".to_owned(), of(false)),
+            ("Expand".to_owned(), of(true)),
+        ],
+    }
 }
 
 /// Whether `stage`'s page of `feature` is where its criteria are tried:
@@ -2604,7 +2655,7 @@ fn tries_criteria(feature: &Feature, stage: Stage) -> bool {
 
 /// Whether `stage`'s page of `feature` shows its criteria: Manual test's, once
 /// the feature got to it. Once done they are what was found, not to change.
-fn shows_criteria(feature: &Feature, stage: Stage) -> bool {
+pub(crate) fn shows_criteria(feature: &Feature, stage: Stage) -> bool {
     stage == Stage::ManualTest && stage_mark(feature, stage) != StageMark::Later
 }
 
@@ -2642,18 +2693,27 @@ fn criterion_buttons(i: usize, row: &Row) -> Vec<(PageButton, PanelOutcome)> {
     out
 }
 
-/// What criterion `row` checks, step by step, for its card while selected:
-/// a line each for its Given, When and Then, or its text as the brief has
-/// it when it doesn't split.
-fn criterion_details(row: &Row) -> String {
-    let mut text = match crate::feature::manual::split_gwt(&row.text) {
-        Some([given, when, then]) => format!("Given {given}\nWhen {when}\nThen {then}"),
-        None => row.text.clone(),
-    };
-    if row.earlier && row.found.is_some() && !row.made {
-        text.push_str("\n\nTried before the latest fixes");
+/// What criterion `row` checks, step by step, for its card while open: a
+/// line each for its Given, When and Then, or its text as the brief has it
+/// when it doesn't split.
+fn criterion_steps(row: &Row) -> Vec<(&'static str, String)> {
+    match crate::feature::manual::split_gwt(&row.text) {
+        Some([given, when, then]) => vec![
+            ("Given", given.to_owned()),
+            ("When", when.to_owned()),
+            ("Then", then.to_owned()),
+        ],
+        None => vec![("", row.text.clone())],
     }
-    text
+}
+
+/// What the card of criterion `row` says under its steps: whether it was
+/// tried on other code than the feature's now.
+fn criterion_details(row: &Row) -> String {
+    match row.earlier && row.found.is_some() && !row.made {
+        true => "Tried before the latest fixes".to_owned(),
+        false => String::new(),
+    }
 }
 
 /// Criterion `i`'s card on Manual test's page, its buttons those in
@@ -2680,7 +2740,13 @@ fn criterion_card(
         title: row.title.clone(),
         state: state.to_owned(),
         place: row.id.clone(),
-        body: String::new(),
+        body: criterion_details(row),
+        sheet: Some(Box::new(chrome::SheetRow {
+            open: row.open,
+            steps: criterion_steps(row),
+            hidden: false,
+            needle: String::new(),
+        })),
         preview: Vec::new(),
         fix: String::new(),
         note: match row.note.is_empty() {
@@ -2691,7 +2757,7 @@ fn criterion_card(
         comment_buttons: Vec::new(),
         made: row.made,
         faded: trying && tag == FindingTag::Passed,
-        collapsed: false,
+        collapsed: !row.open,
         stripe: None,
         field: None,
         field_hint: "What went wrong",
@@ -2705,14 +2771,16 @@ fn criterion_card(
     }
 }
 
-/// The cards of `state`'s criteria, in their order.
+/// The cards of `state`'s criteria, in their order, after the row folding
+/// them.
 fn criterion_sections<'a>(
     state: &'a PanelState,
     actions: &'a [(PageButton, PanelOutcome)],
     trying: bool,
 ) -> impl Iterator<Item = PageSection> + 'a {
-    (state.criteria.iter().enumerate())
-        .map(move |(i, row)| PageSection::Finding(criterion_card(i, row, actions, trying)))
+    let cards = (state.criteria.iter().enumerate())
+        .map(move |(i, row)| PageSection::Finding(criterion_card(i, row, actions, trying)));
+    std::iter::once(fold_toolbar(actions)).chain(cards)
 }
 
 /// The buttons on check `i`'s card: its terminal, then stopping it while it
@@ -2852,6 +2920,7 @@ fn check_card(
         field: None,
         field_hint: "",
         selected: false,
+        sheet: None,
         buttons: (actions.iter().enumerate())
             .filter(|(_, (_, o))| {
                 entry.row.is_some() && outcome_check(o) == entry.row
@@ -2978,6 +3047,7 @@ fn finding_card(
         field: None,
         field_hint: "Your comment",
         selected: false,
+        sheet: None,
         buttons: held(false),
     }
 }
@@ -3029,6 +3099,7 @@ fn note_card(c: &Comment, multi: bool, actions: &[(PageButton, PanelOutcome)]) -
         field: None,
         field_hint: "",
         selected: false,
+        sheet: None,
         buttons: (actions.iter().enumerate())
             .filter(|(_, (_, o))| outcome_note(o) == Some(c))
             .map(|(i, _)| i)
@@ -3153,6 +3224,7 @@ fn test_strip(rows: &[Row]) -> Option<chrome::TestStrip> {
         failed: n.failed,
         untested: n.untested,
         text: crate::manual_test::strip_text(n),
+        search: None,
     })
 }
 
@@ -4072,6 +4144,32 @@ impl FeaturePanel {
             if let (Some(back), Some(entry)) = (back, entry) {
                 self.pick_button(feature, entry, back);
                 return None;
+            }
+        }
+        // A criterion opens to its steps and folds to its line, as a tree's
+        // rows do; with Alt, all of them, those passed or those read.
+        if shown > 0 && self.focus == TabArea::Findings && bare {
+            match sym {
+                Keysym::Left | Keysym::KP_Left => {
+                    return Some(PanelOutcome::FoldCriterion(self.finding, false));
+                }
+                Keysym::Right | Keysym::KP_Right => {
+                    return Some(PanelOutcome::FoldCriterion(self.finding, true));
+                }
+                _ => {}
+            }
+        }
+        if shown > 0 && self.focus != TabArea::Repos && mods.alt && !(mods.ctrl || mods.logo) {
+            use crate::feature::manual::FoldScope;
+            let fold = match sym {
+                Keysym::Left | Keysym::KP_Left if !mods.shift => Some((FoldScope::All, false)),
+                Keysym::Right | Keysym::KP_Right if !mods.shift => Some((FoldScope::All, true)),
+                Keysym::d | Keysym::D => Some((FoldScope::Done, mods.shift)),
+                Keysym::s | Keysym::S => Some((FoldScope::Seen, mods.shift)),
+                _ => None,
+            };
+            if let Some((scope, open)) = fold {
+                return Some(PanelOutcome::FoldCriteria(scope, open));
             }
         }
         let step = match sym {
@@ -7658,6 +7756,9 @@ impl Gerdr {
         if self.criterion_note_key(mods, sym, typed) {
             return None;
         }
+        if self.criteria_search_key(mods, sym, typed) {
+            return None;
+        }
         let plain = !(mods.ctrl || mods.shift || mods.alt || mods.logo);
         // On the rail over the review, Tab and Down go back to it: the page
         // has nothing else to go to.
@@ -7710,6 +7811,11 @@ impl Gerdr {
         }) {
             self.reveal_feature_repo();
         }
+        // A criterion the search hides is stepped over, the way the key went.
+        if (self.features.panel.as_ref()).is_some_and(|p| p.focus == TabArea::Findings) {
+            let back = (self.features.panel.as_ref()).is_some_and(|p| p.finding < card_before);
+            self.settle_criteria(back);
+        }
         let card_now = (self.features.panel.as_ref()).map(|p| (p.focus, p.finding));
         if card_now.is_some_and(|(focus, card)| {
             focus == TabArea::Findings && (focus != before.0 || card != card_before)
@@ -7717,6 +7823,7 @@ impl Gerdr {
             self.sync_feature_page();
             self.reveal_feature_finding();
         }
+        self.see_selected_criterion();
         if now.is_some_and(|(_, _, expanded)| expanded && !before.2) {
             self.find_repo_sources();
         }
@@ -7956,6 +8063,8 @@ impl Gerdr {
             PanelOutcome::CodeReview => self.open_feature_diff(&project, &slug, None),
             PanelOutcome::ManualTest => self.focus_criteria(&project, &slug),
             PanelOutcome::Manual(outcome) => self.apply_manual_test(outcome),
+            PanelOutcome::FoldCriterion(i, open) => self.fold_criterion(i, open),
+            PanelOutcome::FoldCriteria(scope, open) => self.fold_criteria(scope, open),
             PanelOutcome::PlanSuggestions => self.open_plan_sheet(&project, &slug),
             PanelOutcome::WriteFinalPlan => self.write_final_plan(&project, &slug),
             PanelOutcome::SkipPlanReview => self.ask_skip_plan_review(&project, &slug),
@@ -9049,9 +9158,24 @@ impl Gerdr {
         let Some(hit) = self.feature_tab_hit(pos) else {
             return;
         };
+        // A press off the search gives the keys back to the page.
+        if !matches!(hit, FeatureTabHit::Search(_))
+            && let Some(search) = (self.features.panel.as_mut()).and_then(|p| p.search.as_mut())
+        {
+            search.typing = false;
+        }
         let outcome = match hit {
             FeatureTabHit::Tab | FeatureTabHit::Column(_) | FeatureTabHit::AgentPickOff(_) => None,
             FeatureTabHit::MilestoneMode(i) => Some(PanelOutcome::FreshMilestones(i == 1)),
+            FeatureTabHit::Fold(i) => (self.criterion_rows(&feature).get(i))
+                .map(|row| PanelOutcome::FoldCriterion(i, !row.open)),
+            FeatureTabHit::Search(part) => {
+                match part {
+                    chrome::SearchPart::Close => self.close_criteria_search(),
+                    _ => self.open_criteria_search(),
+                }
+                None
+            }
             // The review's own: pressed as on its title row in the popup.
             FeatureTabHit::ReviewButton(i) => {
                 let button = (self.feature_tab_parts())
@@ -9246,6 +9370,7 @@ impl Gerdr {
         if let Some(outcome) = outcome {
             self.apply_feature_panel(outcome);
         }
+        self.see_selected_criterion();
     }
 
     /// The cards of AI review's page in the panel, with what `visit` makes of
@@ -9385,6 +9510,31 @@ impl Gerdr {
             FeatureTabHit::Button(i) if layout.compact => {
                 let label = header_label(view.remove, i)?;
                 Some(Tooltip::new(label, *layout.buttons.get(i)?))
+            }
+            FeatureTabHit::Fold(i) => {
+                let open = self.panel_feature().map(|f| self.criterion_rows(f))?.get(i)?.open;
+                let text = match open {
+                    true => "Fold it to its line (Left)",
+                    false => "Open it to its steps (Right)",
+                };
+                Some(Tooltip::new(text, smithay::utils::Rectangle::new(pos.to_i32_round(), (1, 1).into())))
+            }
+            FeatureTabHit::Search(part) => {
+                let spots = layout.test_strip.as_ref()?;
+                let (_, spot) = spots.search.iter().find(|(p, _)| *p == part)?;
+                let text = match part {
+                    chrome::SearchPart::Close => "Close the search (Esc)",
+                    chrome::SearchPart::Field => return None,
+                    _ => "Search the criteria (/ or Ctrl+F)",
+                };
+                Some(Tooltip::new(text, *spot))
+            }
+            // The fold buttons over the criteria: what they fold, and the key.
+            FeatureTabHit::PageButton(i) => {
+                let text = fold_tip(&view.page, i)?;
+                let mut spot = (*layout.page_buttons.get(i)?)?;
+                spot.loc.y -= view.scroll[TabColumn::Page as usize].round() as i32;
+                Some(Tooltip::new(&text, spot))
             }
             FeatureTabHit::ToggleRepos => {
                 let text = match view.expanded {
@@ -12075,7 +12225,16 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 6] = [
             ),
             ("Up / Down", "previous or next criterion"),
             ("Home / End", "first or last criterion"),
-            ("Space / Enter", "mark it passed, or not"),
+            ("Left / Right", "fold it to its line, or open it to its steps"),
+            ("Alt+Left / Alt+Right", "fold all, or open all"),
+            ("Alt+D / Alt+Shift+D", "fold those passed, or open them"),
+            ("Alt+S / Alt+Shift+S", "fold those seen, or open them"),
+            (
+                "/ or Ctrl+F",
+                "search them: only those saying it show, open; Enter goes to them",
+            ),
+            ("Esc", "clear the search, then close it"),
+            ("Space / Enter", "mark it passed, or not; passed, it folds"),
             ("f", "mark it failed, saying what went wrong, or edit that"),
             ("Del", "clear its result"),
             ("Ctrl+Enter", "mark Manual test passed"),
@@ -12226,6 +12385,39 @@ fn tab_hints(
     hints
 }
 
+/// What fold button `i` of `page` does, with its key; none for another.
+fn fold_tip(page: &chrome::StagePage, i: usize) -> Option<String> {
+    let word = page.sections.iter().find_map(|s| match s {
+        PageSection::Toolbar { groups } => (groups.iter())
+            .find(|(_, held)| held.contains(&i))
+            .map(|(word, _)| word.as_str()),
+        _ => None,
+    })?;
+    let open = word == "Expand";
+    let label = &page.buttons.get(i)?.label;
+    let (what, key) = match label.as_str() {
+        "All" => ("every criterion", if open { "Alt+Right" } else { "Alt+Left" }),
+        "Done" => ("the criteria passed", if open { "Alt+Shift+D" } else { "Alt+D" }),
+        _ => (
+            "the criteria seen: opened or marked",
+            if open { "Alt+Shift+S" } else { "Alt+S" },
+        ),
+    };
+    let verb = if open { "Open" } else { "Fold" };
+    Some(format!("{verb} {what} ({key})"))
+}
+
+/// The hint of the criteria's search: `/` opens it; open, Esc clears it,
+/// then closes it.
+fn search_hint(panel: &FeaturePanel) -> (String, String) {
+    let (key, what) = match &panel.search {
+        None => ("/", "search"),
+        Some(s) if s.query.is_empty() => ("Esc", "close search"),
+        Some(_) => ("Esc", "clear search"),
+    };
+    (key.to_owned(), what.to_owned())
+}
+
 /// `tab_hints` on the machine writing `feature`.
 #[allow(clippy::too_many_arguments)]
 fn writers_tab_hints(
@@ -12252,6 +12444,11 @@ fn writers_tab_hints(
             _ => "save",
         };
         return vec![hint("Enter", enter), hint("Esc", esc)];
+    }
+    let searching = (panel.search.as_ref()).filter(|s| s.typing && shows_criteria(feature, stage));
+    if let Some(search) = searching {
+        let esc = if search.query.is_empty() { "close" } else { "clear" };
+        return vec![hint("Enter", "to the criteria"), hint("Esc", esc)];
     }
     let mut hints = Vec::new();
     let entries = repo_entries(feature, &panel.sources, panel.expanded);
@@ -12320,9 +12517,11 @@ fn writers_tab_hints(
         }
         TabArea::Findings if tries_criteria(feature, stage) && ctx.criteria > 0 => {
             hints.push(hint("Up / Down", "criterion"));
+            hints.push(hint("Left / Right", "fold / open"));
             hints.push(hint("Space", "pass"));
             hints.push(hint("f", "fail\u{2026}"));
             hints.push(hint("Del", "clear"));
+            hints.push(search_hint(panel));
             if fix_round_on(feature, stage).is_none() {
                 hints.push(hint("Ctrl+Enter", "mark passed"));
                 hints.push(hint("Ctrl+Shift+Enter", "plan fixes"));
@@ -12331,6 +12530,8 @@ fn writers_tab_hints(
         }
         TabArea::Findings if shows_criteria(feature, stage) && ctx.criteria > 0 => {
             hints.push(hint("Up / Down", "criterion"));
+            hints.push(hint("Left / Right", "fold / open"));
+            hints.push(search_hint(panel));
             let row = PanelRow::Stage(stage);
             if matches!(row_action(feature, row, ctx), Some(PanelOutcome::Untick(_))) {
                 hints.push(hint(REOPEN_KEY, "reopen"));
@@ -12764,6 +12965,26 @@ fn tab_view(
             stage_page(feature, stage, state, &actions, now)
         }
     };
+    // The search hides the criteria not saying what it looks for, and opens
+    // those that do, the places tinted.
+    let needle = (panel.search.as_ref())
+        .filter(|_| !panel.keys && shows_criteria(feature, stage))
+        .map(crate::manual_test::Search::needle)
+        .filter(|n| !n.is_empty());
+    if let Some(needle) = &needle {
+        let shown = crate::manual_test::shown(&state.criteria, needle);
+        let sheets = (page.sections.iter_mut()).filter_map(|s| match s {
+            PageSection::Finding(card) if card.sheet.is_some() => Some(card),
+            _ => None,
+        });
+        for (card, shown) in sheets.zip(shown) {
+            card.collapsed = !shown;
+            if let Some(sheet) = card.sheet.as_mut() {
+                sheet.hidden = !shown;
+                sheet.needle = needle.clone();
+            }
+        }
+    }
     if panel.focus == TabArea::Findings && !panel.expanded {
         let cards = (page.sections.iter_mut()).filter_map(|s| match s {
             PageSection::Finding(card) => Some(card),
@@ -12771,12 +12992,10 @@ fn tab_view(
         });
         if let Some(card) = cards.into_iter().nth(panel.finding) {
             card.selected = true;
-            card.collapsed = false;
-            // A criterion's steps show on its card while it is selected.
-            if shows_criteria(feature, stage)
-                && let Some(row) = state.criteria.get(panel.finding)
-            {
-                card.body = criterion_details(row);
+            // A criterion stays folded as the user left it: selecting it
+            // only shows which it is.
+            if card.sheet.is_none() {
+                card.collapsed = false;
             }
             if panel.armed.is_some() {
                 "Press Del again".clone_into(&mut card.state);
@@ -12802,6 +13021,11 @@ fn tab_view(
             CardNote::Criterion(i) => {
                 let card = cards.nth(*i);
                 if let Some(card) = card.filter(|_| tries_criteria(feature, stage)) {
+                    // Opened to write in, and shown, whatever the search says.
+                    card.collapsed = false;
+                    if let Some(sheet) = card.sheet.as_mut() {
+                        sheet.hidden = false;
+                    }
                     card.field = Some(field.line());
                     card.note = String::new();
                     // Its Fail shows chosen while what went wrong is written.
@@ -12879,7 +13103,30 @@ fn tab_view(
         && !panel.keys
         && stage_mark(feature, stage) != StageMark::Later)
     .then(|| test_strip(&state.criteria))
-    .flatten();
+    .flatten()
+    .map(|mut strip| {
+        strip.search = panel.search.as_ref().map(|search| {
+            let total = state.criteria.len();
+            let n = needle.as_deref().map_or(total, |needle| {
+                (crate::manual_test::shown(&state.criteria, needle).iter())
+                    .filter(|s| **s)
+                    .count()
+            });
+            chrome::SearchBar {
+                query: search.query.line(),
+                placeholder: "Search the criteria".into(),
+                count: match (needle.is_some(), n) {
+                    (false, _) => String::new(),
+                    (true, 0) => "No matches".into(),
+                    (true, n) => format!("{n} of {total}"),
+                },
+                found: needle.is_none() || n > 0,
+                focused: search.typing,
+                whole: false,
+            }
+        });
+        strip
+    });
     let mut view = FeatureTabView {
         review_page: crate::feature_diff::review_page(panel, feature),
         review_switch,
@@ -17865,11 +18112,183 @@ pub(crate) mod tests {
         );
     }
 
+    /// Manual test's rows: one not tried, open; one passed, folded; one
+    /// failed, open; the feature at Manual test.
+    fn sheet_rows() -> (Feature, Vec<Row>, RowCtx) {
+        let f = feature("m", vec![repo("api", true)], 7);
+        let row = |id: &str, title: &str, text: &str, found, open| Row {
+            id: id.into(),
+            title: title.into(),
+            text: text.into(),
+            found,
+            note: String::new(),
+            sent: false,
+            made: false,
+            earlier: false,
+            open,
+            seen: false,
+        };
+        let rows = vec![
+            row("AC-1", "Saves", "Given a draft, when I save, then it lists", None, true),
+            row(
+                "AC-2",
+                "Exports",
+                "Given rows, when I export, then a CSV holds them",
+                Some(Verdict::Pass),
+                false,
+            ),
+            row(
+                "AC-3",
+                "Empty name",
+                "Given the dialog, when the name is empty, then Save is off",
+                Some(Verdict::Fail),
+                true,
+            ),
+        ];
+        let ctx = RowCtx {
+            criteria: 3,
+            ..RowCtx::default()
+        };
+        (f, rows, ctx)
+    }
+
+    #[test]
+    fn criteria_show_their_steps_as_left_with_a_row_folding_them() {
+        use crate::feature::manual::FoldScope;
+        let (f, rows, ctx) = sheet_rows();
+        let state = PanelState {
+            ctx,
+            criteria: rows.clone(),
+            ..PanelState::default()
+        };
+        let actions = stage_actions(&f, Stage::ManualTest, ctx, &[], &rows, &[]);
+        let page = stage_page(&f, Stage::ManualTest, &state, &actions, 2_060);
+        let cards: Vec<&FindingCard> = (page.sections.iter())
+            .filter_map(|s| match s {
+                PageSection::Finding(card) => Some(card),
+                _ => None,
+            })
+            .collect();
+        // Each its steps, open or folded as the user left it.
+        let open: Vec<bool> = cards.iter().map(|c| !c.collapsed).collect();
+        assert_eq!(open, [true, false, true]);
+        let sheet = cards[0].sheet.as_ref().unwrap();
+        assert_eq!(
+            sheet.steps,
+            [
+                ("Given", "a draft".to_owned()),
+                ("When", "I save".to_owned()),
+                ("Then", "it lists".to_owned()),
+            ]
+        );
+        assert!(cards.iter().all(|c| c.sheet.as_ref().is_some_and(|s| !s.hidden)));
+        // The row over them: Collapse and Expand, each all, done and seen.
+        let groups = (page.sections.iter())
+            .find_map(|s| match s {
+                PageSection::Toolbar { groups } => Some(groups.clone()),
+                _ => None,
+            })
+            .unwrap();
+        let words: Vec<&str> = groups.iter().map(|(w, _)| w.as_str()).collect();
+        assert_eq!(words, ["Collapse", "Expand"]);
+        let of = |g: usize| -> Vec<PanelOutcome> {
+            groups[g].1.iter().map(|b| actions[*b].1.clone()).collect()
+        };
+        let fold = PanelOutcome::FoldCriteria;
+        assert_eq!(
+            of(0),
+            [
+                fold(FoldScope::All, false),
+                fold(FoldScope::Done, false),
+                fold(FoldScope::Seen, false)
+            ]
+        );
+        assert_eq!(of(1)[1], fold(FoldScope::Done, true));
+        // Folding only shows them otherwise: it changes no feature.
+        assert!(fold(FoldScope::All, true).reads_only());
+        assert!(PanelOutcome::FoldCriterion(0, false).reads_only());
+        // Also on the done page, where nothing else acts.
+        let mut done = f.clone();
+        done.tick(100, "you", None);
+        assert_eq!(stage_mark(&done, Stage::ManualTest), StageMark::Done);
+        let actions = stage_actions(&done, Stage::ManualTest, ctx, &[], &rows, &[]);
+        let folds = actions.iter().filter(|(_, o)| matches!(o, PanelOutcome::FoldCriteria(..)));
+        assert_eq!(folds.count(), 6);
+    }
+
+    #[test]
+    fn left_and_right_fold_a_criterion_and_alt_folds_them_all() {
+        use crate::feature::manual::FoldScope;
+        let (f, _, ctx) = sheet_rows();
+        let mut panel = FeaturePanel {
+            focus: TabArea::Findings,
+            finding: 2,
+            ..FeaturePanel::default()
+        };
+        let slugs = vec!["m".to_owned()];
+        let mut hit = |mods: ModifiersState, sym| {
+            panel.key(&mods, sym, &f, &slugs, ctx, &[], &[], &[])
+        };
+        let none = ModifiersState::default();
+        assert_eq!(hit(none, Keysym::Left), Some(PanelOutcome::FoldCriterion(2, false)));
+        assert_eq!(hit(none, Keysym::Right), Some(PanelOutcome::FoldCriterion(2, true)));
+        let alt = ModifiersState {
+            alt: true,
+            ..none
+        };
+        let alt_shift = ModifiersState {
+            shift: true,
+            ..alt
+        };
+        let fold = PanelOutcome::FoldCriteria;
+        assert_eq!(hit(alt, Keysym::Left), Some(fold(FoldScope::All, false)));
+        assert_eq!(hit(alt, Keysym::Right), Some(fold(FoldScope::All, true)));
+        // Shift+D comes as `d`, Shift held (K8).
+        assert_eq!(hit(alt, Keysym::d), Some(fold(FoldScope::Done, false)));
+        assert_eq!(hit(alt_shift, Keysym::d), Some(fold(FoldScope::Done, true)));
+        assert_eq!(hit(alt, Keysym::s), Some(fold(FoldScope::Seen, false)));
+        assert_eq!(hit(alt_shift, Keysym::s), Some(fold(FoldScope::Seen, true)));
+        // Up and Down still go through them.
+        assert_eq!(hit(none, Keysym::Up), None);
+        assert_eq!(panel.finding, 1);
+        // The footer's "/" presses the key that opens the search.
+        assert_eq!(crate::keys::hint_key("/").map(|k| k.1), Some(Keysym::slash));
+    }
+
+    #[test]
+    fn a_search_shows_only_the_criteria_saying_it_open_and_tinted() {
+        let (f, rows, ctx) = sheet_rows();
+        let state = PanelState {
+            ctx,
+            criteria: rows,
+            ..PanelState::default()
+        };
+        let mut search = crate::manual_test::Search::default();
+        search.query.set("CSV");
+        let panel = FeaturePanel {
+            search: Some(search),
+            ..FeaturePanel::default()
+        };
+        let view = tab_view(&panel, &f, &["m".to_owned()], &state, 2_060);
+        let cards = cards_of(&view);
+        let hidden: Vec<bool> = (cards.iter())
+            .map(|c| c.sheet.as_ref().unwrap().hidden)
+            .collect();
+        assert_eq!(hidden, [true, false, true]);
+        // Folded, it opens while it is found.
+        assert!(!cards[1].collapsed);
+        assert_eq!(cards[1].sheet.as_ref().unwrap().needle, "csv");
+        let bar = view.test_strip.and_then(|s| s.search).unwrap();
+        assert_eq!(bar.count, "1 of 3");
+    }
+
     #[test]
     fn a_criterions_card_holds_its_keys_and_buttons() {
         use crate::{chrome::FindingTag, manual_test::Outcome};
         let f = feature("m", vec![repo("api", true)], 7);
         let row = |found, note: &str| Row {
+            open: false,
+            seen: false,
             id: "AC-1".into(),
             title: "C".into(),
             text: "Given a, when b, then c".into(),
@@ -18015,6 +18434,8 @@ pub(crate) mod tests {
         let f = feature("m", vec![repo("api", true)], 7);
         assert_eq!(f.current(), Some(Stage::ManualTest));
         let row = |found, sent, made| Row {
+            open: false,
+            seen: false,
             id: "AC-1".into(),
             title: "C".into(),
             text: "Given a, when b, then c".into(),
@@ -18143,6 +18564,8 @@ pub(crate) mod tests {
         let f = feature("m", vec![repo("api", true)], 8);
         assert_eq!(stage_mark(&f, Stage::ManualTest), StageMark::Done);
         let row = |found| Row {
+            open: false,
+            seen: false,
             id: "AC-1".into(),
             title: "C".into(),
             text: "Given a, when b, then c".into(),

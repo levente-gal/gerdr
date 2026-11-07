@@ -99,6 +99,10 @@ pub struct Store {
     /// `nav_history`).
     #[serde(default, skip_serializing_if = "NavHistory::is_empty")]
     pub nav: NavHistory<Visit>,
+    /// Which criteria on each feature's Manual test page show their steps,
+    /// and which the user read, by `<project>/<slug>` (see `manual::Folds`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub criteria_folds: BTreeMap<String, crate::feature::manual::Folds>,
     #[serde(skip)]
     books: Books,
 }
@@ -141,6 +145,8 @@ struct State {
     ignored_errors: Vec<crate::services::ErrorGroup>,
     #[serde(default, skip_serializing_if = "NavHistory::is_empty")]
     nav: NavHistory<Visit>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    criteria_folds: BTreeMap<String, crate::feature::manual::Folds>,
 }
 
 /// Where the store lives and what gerdr last read or wrote of its files.
@@ -594,6 +600,7 @@ impl Store {
         self.service_errors = state.service_errors;
         self.ignored_errors = state.ignored_errors;
         self.nav = state.nav;
+        self.criteria_folds = state.criteria_folds;
     }
 
     fn state(&self) -> State {
@@ -614,6 +621,7 @@ impl Store {
             service_errors: self.service_errors.clone(),
             ignored_errors: self.ignored_errors.clone(),
             nav: self.nav.clone(),
+            criteria_folds: self.criteria_folds.clone(),
         }
     }
 
@@ -1928,6 +1936,7 @@ mod tests {
             service_anchors: BTreeMap::new(),
             service_errors: Vec::new(),
             ignored_errors: Vec::new(),
+            criteria_folds: BTreeMap::new(),
             nav: {
                 let mut nav = NavHistory::default();
                 nav.visit(
