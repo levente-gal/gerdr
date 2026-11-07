@@ -46,6 +46,7 @@ mod scrollback;
 mod search;
 mod shapes;
 mod sidebar;
+mod stats;
 mod switcher;
 mod tabs;
 mod theme;
@@ -99,6 +100,7 @@ pub use scrollback::*;
 pub use search::*;
 use shapes::*;
 pub use sidebar::*;
+pub use stats::*;
 pub use switcher::*;
 pub use tabs::*;
 pub use theme::*;
@@ -244,6 +246,10 @@ pub struct Chrome {
     doc: ReposLayers,
     inbox: InboxLayers,
     scrollback: ScrollbackLayers,
+    stats: Overlay<(StatsView, Size<i32, Logical>, Theme, f64)>,
+    /// The stats panel while it is open (see `stats_panel`): held here, so
+    /// it paints from here, until gerdr holds it itself.
+    pub(crate) ai_stats: Option<crate::stats_panel::StatsPanel>,
     /// One per toast, by id, kept while it fades out.
     toasts: Vec<(u64, ToastOverlay)>,
     /// One per placeholder, and the spinner they share.
@@ -312,6 +318,8 @@ impl Chrome {
             doc: ReposLayers::default(),
             inbox: InboxLayers::default(),
             scrollback: ScrollbackLayers::default(),
+            stats: Overlay::default(),
+            ai_stats: None,
             toasts: Vec::new(),
             placeholders: Vec::new(),
             spinner: Cached::default(),
@@ -408,7 +416,11 @@ impl Chrome {
 
         // The hit rects, outlined for checking them against the drawing.
         if self.debug_hits {
-            let rects = hit_rects(&view, output, area, footer_h);
+            let mut rects = hit_rects(&view, output, area, footer_h);
+            if let Some(panel) = &self.ai_stats {
+                let stats = panel.view(crate::stats_panel::now_secs());
+                rects.extend(stats_hit_rects(&stats, output));
+            }
             let buffer = self.hits.get((rects, output, scale), |(rects, output, _)| {
                 hit_outlines(rects, *output, scale)
             });
@@ -709,6 +721,18 @@ impl Chrome {
                     painter,
                     Some((dot, blink)),
                 )),
+                // The stats panel on the AI work, centred on the output.
+                Kind::AiStats => {
+                    let now_secs = crate::stats_panel::now_secs();
+                    let stats = self.ai_stats.as_ref().map(|panel| {
+                        let view = panel.view(now_secs);
+                        let (loc, size) = shadowed(stats_layout(&view, output).panel);
+                        ((view, output, theme, scale), loc, size)
+                    });
+                    parts.extend(self.stats.part(stats, now, true, |(view, output, ..)| {
+                        painter.stats_panel(view, *output, scale, theme.palette())
+                    }));
+                }
                 // The scrollback viewer, over its pane.
                 Kind::Scrollback => parts.extend(self.scrollback.parts(
                     view.scrollback.take(),

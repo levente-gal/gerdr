@@ -6044,3 +6044,112 @@ fn dump_check_cards() {
         }
     }
 }
+
+// ------------------------------------------------------------ AI work stats
+
+/// An output as small as the panel fits on.
+const STATS_OUTPUT: (i32, i32) = (870, 720);
+
+/// The stats panel with nothing kept, read, in a feature's detail, after
+/// a failed read, and on its Agents tab, each from a fake index view.
+fn stats_views() -> [super::StatsView; 5] {
+    use crate::ai_work::stats::View;
+    use crate::stats_panel::fixtures;
+    let empty = fixtures::panel(|scope| {
+        Some(Ok(View {
+            scope,
+            ..View::default()
+        }))
+    });
+    let loaded = fixtures::panel(|scope| Some(Ok(fixtures::view(scope))));
+    let detail = fixtures::detail_panel();
+    let error = fixtures::panel(|_| Some(Err("database disk image is malformed".into())));
+    let mut agents = fixtures::panel(|_| None);
+    agents.scope.tab = crate::ai_work::stats::Tab::Agents;
+    agents.view = Some(Ok(fixtures::view(agents.scope.clone())));
+    [empty, loaded, detail, error, agents].map(|panel| panel.view(fixtures::NOW))
+}
+
+const STATS: [&str; 5] = [
+    "stats_empty",
+    "stats_loaded",
+    "stats_detail",
+    "stats_error",
+    "stats_agents",
+];
+
+fn paint_stats(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
+    let p = theme.palette();
+    stats_views()
+        .iter()
+        .map(|view| hash(painter.stats_panel(view, STATS_OUTPUT.into(), scale, p)))
+        .collect()
+}
+
+/// The recorded hashes of `STATS`, per case in `CASES`.
+const GOLDEN_STATS: [[u64; 5]; 4] = [
+    // Dark at 1
+    [
+        0x3ecd7ae10491736d, // stats_empty
+        0x4db8367a92bbd159, // stats_loaded
+        0x9a6b94f0298e73af, // stats_detail
+        0x4e7cc838543fc104, // stats_error
+        0xfb2b003820ccb01b, // stats_agents
+    ],
+    // Dark at 2
+    [
+        0x6c4dc1ffbab0344c, // stats_empty
+        0xa7d7398b35f469ee, // stats_loaded
+        0xb19f933e3e7a7fce, // stats_detail
+        0x2b6e230562105139, // stats_error
+        0x3292e612b9090e1a, // stats_agents
+    ],
+    // Light at 1
+    [
+        0x6695908c94c81dd2, // stats_empty
+        0xd3f9f3332bde0d29, // stats_loaded
+        0xc1d59a6f6af5ac0d, // stats_detail
+        0xa75f2212f3552f53, // stats_error
+        0x2cbb1f7ad8577dee, // stats_agents
+    ],
+    // Light at 2
+    [
+        0x2065c665d0b7b6f5, // stats_empty
+        0x0b60bbbae3167cf7, // stats_loaded
+        0x7babe280ab55f696, // stats_detail
+        0x4bff2eb6622e1e98, // stats_error
+        0xac2dc27058ad1885, // stats_agents
+    ],
+];
+
+#[test]
+fn the_stats_panel_paints_the_same_pixels() {
+    let golden: Vec<&[u64]> = GOLDEN_STATS.iter().map(|row| row.as_slice()).collect();
+    check(&STATS, &golden, paint_stats);
+}
+
+/// With `GERDR_DUMP_DIR` set, write the stats panel there.
+#[test]
+fn dump_stats() {
+    let Some(dir) = std::env::var_os("GERDR_DUMP_DIR") else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    let _ = std::fs::create_dir_all(&dir);
+    let painter = Painter::new();
+    let size = STATS_OUTPUT.into();
+    for (theme, scale) in CASES {
+        let p = theme.palette();
+        let px = |v: i32| (v as f64 * scale).round() as usize;
+        let tag = format!("{}_{}", theme.name(), scale);
+        for (name, view) in STATS.iter().zip(stats_views()) {
+            let panel = super::stats_layout(&view, size).panel;
+            dump(
+                &dir,
+                &format!("{name}_{tag}"),
+                painter.stats_panel(&view, size, scale, p),
+                px(panel.size.w + 2 * super::SHADOW),
+            );
+        }
+    }
+}
