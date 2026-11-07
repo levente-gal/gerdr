@@ -1566,6 +1566,8 @@ mod tests {
             comment_fixes: Vec::new(),
             ran_once: Default::default(),
             fix_rounds: 0,
+            carry: None,
+            unverified: None,
             epoch: 0,
             history: Vec::new(),
         }

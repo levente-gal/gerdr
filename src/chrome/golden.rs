@@ -2938,6 +2938,7 @@ pub(super) fn feature_tab() -> super::FeatureTabView {
     FeatureTabView {
         review_page: false,
         review_switch: None,
+        test_strip: None,
         review_keys: false,
         title: "Bulk export of invoices".into(),
         sub: "bulk-export \u{b7} ~/Work/aft/.features/bulk-export \u{b7} started 3h ago".into(),
@@ -4592,7 +4593,7 @@ fn feature_tab_manual_test(note: bool) -> super::FeatureTabView {
             FindingTag::Failed,
             [
                 "Export off with no invoices",
-                "sent to Build",
+                "fix made: try again",
                 "AC-2",
                 "What went wrong: The button stays on and exports an empty file",
                 "Given no invoices\nWhen I export\nThen the button is off",
@@ -4648,7 +4649,7 @@ fn feature_tab_manual_test(note: bool) -> super::FeatureTabView {
             note: said.into(),
             comment: String::new(),
             comment_buttons: Vec::new(),
-            made: false,
+            made: i == 1,
             faded: tag == FindingTag::Passed,
             collapsed: false,
             stripe: None,
@@ -4661,13 +4662,17 @@ fn feature_tab_manual_test(note: bool) -> super::FeatureTabView {
     view.page = StagePage {
         title: Stage::ManualTest.label().into(),
         about: Stage::ManualTest.about().into(),
-        status: Some(tab_line(
-            "1 of 4 criteria passed \u{b7} 2 failed",
-            CheckTone::Note,
-        )),
+        status: None,
         buttons,
         sections,
     };
+    // Its counts go in the bar over the page.
+    view.test_strip = Some(super::TestStrip {
+        passed: 1,
+        failed: 2,
+        untested: 1,
+        text: "1 passed \u{b7} 2 failed \u{b7} 1 untested \u{b7} 1 fix made".into(),
+    });
     if note {
         view.hints = [("Enter", "save"), ("Esc", "save")]
             .iter()
@@ -4884,8 +4889,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 50]; 4] = [
         0xe697af65a0b1ba91, // tab_discover_brief_1180
         0xc7901979745e2440, // tab_discover_brief_860
         0xcc41ad7a9ec091c0, // tab_plan_long_1180
-        0x8ff4f2c0f03bf465, // tab_manual_test_1180
-        0xd03a72e38945dd44, // tab_manual_note_860
+        0x1e6e3b15e13d22a1, // tab_manual_test_1180
+        0x1dc0a82b7fe24781, // tab_manual_note_860
         0xaae0ccef435a4695, // tab_review_rounds_1180
         0xde0e7ad0287e548c, // tab_verify_fixes_1180
         0xe02ce500d771436c, // tab_verify_fixes_860
@@ -4937,8 +4942,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 50]; 4] = [
         0x22f0bccd99fd3099, // tab_discover_brief_1180
         0x2f235fbf0ce377d7, // tab_discover_brief_860
         0x371817eb8ef63723, // tab_plan_long_1180
-        0xb02210e94fb5f932, // tab_manual_test_1180
-        0xccdbc5f598da3e77, // tab_manual_note_860
+        0x9f78779c82c942be, // tab_manual_test_1180
+        0xdf53bb4c82869794, // tab_manual_note_860
         0x696373a9ac9ae597, // tab_review_rounds_1180
         0x83fbb804ca6bacdd, // tab_verify_fixes_1180
         0x305eebdbc8d8a0ff, // tab_verify_fixes_860
@@ -4990,8 +4995,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 50]; 4] = [
         0x0dd9604ad2510baf, // tab_discover_brief_1180
         0x038d08ac68187bad, // tab_discover_brief_860
         0x09cb9855696f5c01, // tab_plan_long_1180
-        0x8dae738b3c0d1734, // tab_manual_test_1180
-        0xd4e15d63b022c546, // tab_manual_note_860
+        0x6bff5c23c9bf32bb, // tab_manual_test_1180
+        0x94edf51b3d46aa5b, // tab_manual_note_860
         0x29372c9287bd44bf, // tab_review_rounds_1180
         0x8200660d7d2c371d, // tab_verify_fixes_1180
         0xbe515ae3c5939904, // tab_verify_fixes_860
@@ -5043,8 +5048,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 50]; 4] = [
         0x85626dff437b80ab, // tab_discover_brief_1180
         0x6955e849ed161c3d, // tab_discover_brief_860
         0x22810cee688c087d, // tab_plan_long_1180
-        0x09d8b05d5a2af2c4, // tab_manual_test_1180
-        0x8e2aed16427a6c0d, // tab_manual_note_860
+        0x22ccf4e16c0fd11e, // tab_manual_test_1180
+        0x0c83f098457acb78, // tab_manual_note_860
         0x18a3b0870e7a6ac2, // tab_review_rounds_1180
         0x8162095ee657492d, // tab_verify_fixes_1180
         0xa1c6ec276ac6f131, // tab_verify_fixes_860

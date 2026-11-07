@@ -22,8 +22,8 @@
 //! fixes in the build log, apart from the milestones, and the round is over
 //! once every one is ticked: an agent resting before that is told to go on,
 //! and one that won't is the user's to send again or drop. A tick also marks
-//! the AI review findings it covers (`mark_made`), so that stage's page shows
-//! them made as they go.
+//! the AI review findings it covers (`mark_made`), and Manual test's
+//! failures (`mark_criteria_made`), so those pages show them made as they go.
 //!
 //! This is the round's record and what decides its next step. Gerdr's side
 //! is `crate::feature_fix`.
@@ -38,6 +38,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     Stage, artifacts,
+    manual::{ManualTest, Verdict},
     review_import::{AiReview, FindingState},
     verify::{Evidence, VerifyRun},
 };
@@ -640,6 +641,27 @@ pub fn mark_made(review: &mut AiReview, round: &FixRound, left: &[String]) -> bo
     changed
 }
 
+/// Mark Manual test's failures `round` was sent in `test` as `left` says,
+/// as `mark_made` does findings: a made fix waits to be tried again. Says
+/// whether any changed.
+pub fn mark_criteria_made(test: &mut ManualTest, round: &FixRound, left: &[String]) -> bool {
+    let GiveBack::Manual { checks } = &round.give_back else {
+        return false;
+    };
+    let mut changed = false;
+    for k in &mut test.checks {
+        let sent = checks.iter().any(|(id, text)| *id == k.id && *text == k.text);
+        if !sent || !k.sent || k.state != Verdict::Fail {
+            continue;
+        }
+        let mut named = round.items.iter().filter(|item| names(item, &k.id)).peekable();
+        let made = named.peek().is_some() && !named.any(|item| left.contains(item));
+        changed |= k.made != made;
+        k.made = made;
+    }
+    changed
+}
+
 /// Mark the comments `round` was sent in `fix` as `left` says, as `mark_made`
 /// does findings. Says whether any changed.
 pub fn mark_comments_made(fix: &mut CommentFix, round: &FixRound, left: &[String]) -> bool {
@@ -1066,6 +1088,63 @@ mod tests {
             ..round
         };
         assert!(!mark_made(&mut review, &other, &items));
+    }
+
+    #[test]
+    fn ticks_mark_manual_failures_made() {
+        use super::super::manual::{Check, ManualTest};
+        let check = |id: &str, state, sent| Check {
+            id: id.into(),
+            text: format!("Given {id}, when b, then c."),
+            state,
+            note: "x".into(),
+            at: 1,
+            sent,
+            patch: "p".into(),
+            made: false,
+        };
+        let mut test = ManualTest {
+            patch: "p".into(),
+            checks: vec![
+                check("AC-1", Verdict::Fail, true),
+                check("AC-2", Verdict::Fail, true),
+                check("AC-3", Verdict::Fail, false),
+            ],
+        };
+        let sent = |id: &str| (id.to_owned(), format!("Given {id}, when b, then c."));
+        let items: Vec<String> = ["AC-1: save the form", "AC-2: its test", "AC-3: not sent"]
+            .map(str::to_owned)
+            .into();
+        let round = FixRound {
+            n: 1,
+            what: String::new(),
+            input: PathBuf::new(),
+            stage: Stage::ManualTest,
+            phase: FixPhase::Fixing,
+            sent_back: 0,
+            asked: 0,
+            ready: None,
+            stalled: None,
+            give_back: GiveBack::Manual {
+                checks: vec![sent("AC-1"), sent("AC-2")],
+            },
+            items: items.clone(),
+            done: 0,
+            ended: None,
+        };
+        let made = |test: &ManualTest| -> Vec<String> {
+            (test.checks.iter())
+                .filter(|k| k.fix_made())
+                .map(|k| k.id.clone())
+                .collect()
+        };
+        assert!(!mark_criteria_made(&mut test, &round, &items));
+        assert!(mark_criteria_made(&mut test, &round, &items[1..]));
+        assert_eq!(made(&test), ["AC-1"]);
+        // Not sent in the round: never made, even when its item is ticked.
+        assert!(mark_criteria_made(&mut test, &round, &[]));
+        assert_eq!(made(&test), ["AC-1", "AC-2"]);
+        assert!(!mark_criteria_made(&mut test, &round, &[]));
     }
 
     #[test]

@@ -4,9 +4,10 @@
 //! The criteria are the Given/When/Then items of the brief's `Acceptance
 //! criteria` section, numbered `AC-1`, `AC-2`… in order. The results live
 //! in `feature.json` (`Feature::manual`), each with the criterion's text
-//! and, for the whole set, the patch-id of the code they were given on. A
-//! result counts only while its criterion still reads the same and the
-//! code is still that patch: an edited brief or changed code drops it.
+//! and the patch-id of the code it was given on. A result counts while its
+//! criterion still reads the same, on whatever code: the user tests as the
+//! fixes they asked for land, and what they found stays. An edited
+//! criterion drops its result.
 
 use serde::{Deserialize, Serialize};
 
@@ -162,44 +163,59 @@ pub struct Check {
     /// Whether this failure went to the Build agent.
     #[serde(default, skip_serializing_if = "is_false")]
     pub sent: bool,
+    /// The patch-id of the code it was tried on; empty in older records,
+    /// which kept one for all (`ManualTest::patch`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub patch: String,
+    /// Whether the Build agent made the fix of this sent failure: it is to
+    /// try again.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub made: bool,
+}
+
+impl Check {
+    /// Whether this sent failure's fix is made, and it waits to be tried
+    /// again.
+    pub fn fix_made(&self) -> bool {
+        self.state == Verdict::Fail && self.sent && self.made
+    }
 }
 
 fn is_false(b: &bool) -> bool {
     !b
 }
 
-/// The results of a manual test, on one patch.
+/// The results of a manual test.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManualTest {
-    /// The patch-id of the code tried.
+    /// The patch-id of the code last tried.
     pub patch: String,
     #[serde(default)]
     pub checks: Vec<Check>,
 }
 
-/// The result of criterion `c` that still counts: tried on `patch` (when
-/// known; `None` trusts the record) and on the criterion's current text.
-pub fn check<'a>(
-    test: Option<&'a ManualTest>,
-    c: &Criterion,
-    patch: Option<&str>,
-) -> Option<&'a Check> {
-    let test = test?;
-    if patch.is_some_and(|p| p != test.patch) {
-        return None;
-    }
-    test.checks
-        .iter()
-        .find(|k| k.id == c.id && k.text == c.text)
+/// The result of criterion `c` that still counts: one given on its current
+/// text, on any code.
+pub fn check<'a>(test: Option<&'a ManualTest>, c: &Criterion) -> Option<&'a Check> {
+    (test?.checks.iter()).find(|k| k.id == c.id && k.text == c.text)
 }
 
-/// How many criteria passed, failed (and of those, went to Build) and
-/// aren't tried yet.
+/// The patch-id of the code `k` of `test` was tried on.
+pub fn tried_on<'a>(test: &'a ManualTest, k: &'a Check) -> &'a str {
+    match k.patch.is_empty() {
+        true => &test.patch,
+        false => &k.patch,
+    }
+}
+
+/// How many criteria passed, failed (and of those, went to Build, and of
+/// those, had their fix made) and aren't tried yet.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Counts {
     pub passed: usize,
     pub failed: usize,
     pub sent: usize,
+    pub made: usize,
     pub untested: usize,
 }
 
@@ -209,15 +225,16 @@ impl Counts {
     }
 }
 
-/// The counts of `criteria` in `test` on `patch`.
-pub fn counts(test: Option<&ManualTest>, criteria: &[Criterion], patch: Option<&str>) -> Counts {
+/// The counts of `criteria` in `test`.
+pub fn counts(test: Option<&ManualTest>, criteria: &[Criterion]) -> Counts {
     let mut n = Counts::default();
     for c in criteria {
-        match check(test, c, patch) {
+        match check(test, c) {
             Some(k) if k.state == Verdict::Pass => n.passed += 1,
             Some(k) => {
                 n.failed += 1;
                 n.sent += usize::from(k.sent);
+                n.made += usize::from(k.fix_made());
             }
             None => n.untested += 1,
         }
@@ -226,13 +243,14 @@ pub fn counts(test: Option<&ManualTest>, criteria: &[Criterion], patch: Option<&
 }
 
 /// Whether there are criteria and every one passed.
-pub fn all_passed(test: Option<&ManualTest>, criteria: &[Criterion], patch: Option<&str>) -> bool {
-    !criteria.is_empty() && counts(test, criteria, patch).passed == criteria.len()
+pub fn all_passed(test: Option<&ManualTest>, criteria: &[Criterion]) -> bool {
+    !criteria.is_empty() && counts(test, criteria).passed == criteria.len()
 }
 
-/// Record `state` (with `note`) for criterion `c` on `patch` at `now`.
-/// Results on another patch go: the code they were given on is gone. A
-/// failure keeps its sent mark while its note stays the same.
+/// Record `state` (with `note`) for criterion `c` on `patch` at `now`. The
+/// others stay, whatever code they were tried on. A failure keeps its sent
+/// mark while its note stays the same, until its fix is made: tried again
+/// after that, it is a new failure to send.
 pub fn set(
     test: &mut Option<ManualTest>,
     c: &Criterion,
@@ -242,17 +260,18 @@ pub fn set(
     now: u64,
 ) {
     let t = test.get_or_insert_with(Default::default);
-    if t.patch != patch {
-        *t = ManualTest {
-            patch: patch.to_string(),
-            checks: Vec::new(),
-        };
+    // Older records keep one patch for all: each says its own from now on.
+    for k in &mut t.checks {
+        if k.patch.is_empty() {
+            k.patch = t.patch.clone();
+        }
     }
+    t.patch = patch.to_string();
     let sent = t
         .checks
         .iter()
         .find(|k| k.id == c.id && k.text == c.text)
-        .is_some_and(|k| k.sent && k.state == state && k.note == note);
+        .is_some_and(|k| k.sent && !k.made && k.state == state && k.note == note);
     t.checks.retain(|k| k.id != c.id);
     t.checks.push(Check {
         id: c.id.clone(),
@@ -261,6 +280,8 @@ pub fn set(
         note: note.to_string(),
         at: now,
         sent,
+        patch: patch.to_string(),
+        made: false,
     });
 }
 
@@ -276,26 +297,21 @@ pub fn clear(test: &mut Option<ManualTest>, id: &str) -> bool {
     gone
 }
 
-/// The failures of `criteria` on `patch` not yet sent to Build.
+/// The failures of `criteria` not yet sent to Build.
 fn unsent<'a>(
     test: Option<&'a ManualTest>,
     criteria: &'a [Criterion],
-    patch: Option<&str>,
 ) -> Vec<(&'a Criterion, &'a Check)> {
     criteria
         .iter()
-        .filter_map(|c| Some((c, check(test, c, patch)?)))
+        .filter_map(|c| Some((c, check(test, c)?)))
         .filter(|(_, k)| k.state == Verdict::Fail && !k.sent)
         .collect()
 }
 
 /// How many failures haven't gone to Build yet.
-pub fn unsent_count(
-    test: Option<&ManualTest>,
-    criteria: &[Criterion],
-    patch: Option<&str>,
-) -> usize {
-    unsent(test, criteria, patch).len()
+pub fn unsent_count(test: Option<&ManualTest>, criteria: &[Criterion]) -> usize {
+    unsent(test, criteria).len()
 }
 
 /// The failures not sent yet, as Markdown for the Build agent of feature
@@ -303,10 +319,9 @@ pub fn unsent_count(
 pub fn failures_markdown(
     test: Option<&ManualTest>,
     criteria: &[Criterion],
-    patch: Option<&str>,
     title: &str,
 ) -> (usize, String) {
-    let fails = unsent(test, criteria, patch);
+    let fails = unsent(test, criteria);
     let mut md = format!(
         "# Manual test failures\n\nThe user tried \u{201c}{title}\u{201d} by hand against its acceptance criteria, and these failed. Fix each one.\n"
     );
@@ -318,12 +333,8 @@ pub fn failures_markdown(
 }
 
 /// Mark the failures not sent yet as sent: which, by id and text.
-pub fn mark_sent(
-    test: &mut Option<ManualTest>,
-    criteria: &[Criterion],
-    patch: Option<&str>,
-) -> Vec<(String, String)> {
-    let ids: Vec<(String, String)> = unsent(test.as_ref(), criteria, patch)
+pub fn mark_sent(test: &mut Option<ManualTest>, criteria: &[Criterion]) -> Vec<(String, String)> {
+    let ids: Vec<(String, String)> = unsent(test.as_ref(), criteria)
         .into_iter()
         .map(|(c, _)| (c.id.clone(), c.text.clone()))
         .collect();
@@ -331,6 +342,7 @@ pub fn mark_sent(
         for k in &mut t.checks {
             if ids.iter().any(|(id, text)| *id == k.id && *text == k.text) {
                 k.sent = true;
+                k.made = false;
             }
         }
     }
@@ -342,6 +354,7 @@ pub fn unmark_sent(test: &mut ManualTest, ids: &[(String, String)]) {
     for k in &mut test.checks {
         if ids.iter().any(|(id, text)| *id == k.id && *text == k.text) {
             k.sent = false;
+            k.made = false;
         }
     }
 }
@@ -419,7 +432,7 @@ mod tests {
             parse_criteria("## Acceptance criteria\n- **C holds**: Given a, when b, then c.\n");
         let mut t = None;
         set(&mut t, &old[0], "p", Verdict::Pass, "", 1);
-        assert!(check(t.as_ref(), &new[0], Some("p")).is_some());
+        assert!(check(t.as_ref(), &new[0]).is_some());
     }
 
     #[test]
@@ -445,24 +458,22 @@ mod tests {
         let mut t = None;
         set(&mut t, &a, "p1", Verdict::Pass, "", 10);
         set(&mut t, &b, "p1", Verdict::Fail, "broke", 11);
-        let n = counts(t.as_ref(), &all, Some("p1"));
+        let n = counts(t.as_ref(), &all);
         assert_eq!((n.passed, n.failed, n.untested), (1, 1, 0));
-        assert!(!all_passed(t.as_ref(), &all, Some("p1")));
-        // Another patch: nothing counts.
-        assert_eq!(counts(t.as_ref(), &all, Some("p2")).untested, 2);
-        // Unknown patch trusts the record.
-        assert_eq!(counts(t.as_ref(), &all, None).passed, 1);
+        assert!(!all_passed(t.as_ref(), &all));
         // An edited criterion drops its result.
         let edited = vec![a.clone(), crit(2, "Given d, when e, then g.")];
-        assert_eq!(counts(t.as_ref(), &edited, Some("p1")).untested, 1);
-        // Passing b makes all pass.
-        set(&mut t, &b, "p1", Verdict::Pass, "", 12);
-        assert!(all_passed(t.as_ref(), &all, Some("p1")));
-        assert!(!all_passed(t.as_ref(), &[], Some("p1")));
-        // A result on a new patch drops the old ones.
-        set(&mut t, &a, "p2", Verdict::Pass, "", 13);
-        assert_eq!(t.as_ref().unwrap().checks.len(), 1);
+        assert_eq!(counts(t.as_ref(), &edited).untested, 1);
+        // A result on new code keeps the others, each on its own code.
+        set(&mut t, &b, "p2", Verdict::Pass, "", 12);
+        assert!(all_passed(t.as_ref(), &all));
+        assert!(!all_passed(t.as_ref(), &[]));
+        let test = t.as_ref().unwrap();
+        assert_eq!(test.checks.len(), 2);
+        assert_eq!(tried_on(test, check(t.as_ref(), &a).unwrap()), "p1");
+        assert_eq!(tried_on(test, check(t.as_ref(), &b).unwrap()), "p2");
         assert!(clear(&mut t, "AC-1"));
+        assert!(clear(&mut t, "AC-2"));
         assert!(t.is_none());
         assert!(!clear(&mut t, "AC-1"));
     }
@@ -475,24 +486,48 @@ mod tests {
         let mut t = None;
         set(&mut t, &a, "p", Verdict::Fail, "nothing happens", 1);
         set(&mut t, &b, "p", Verdict::Pass, "", 1);
-        let (n, md) = failures_markdown(t.as_ref(), &all, Some("p"), "Bulk");
+        let (n, md) = failures_markdown(t.as_ref(), &all, "Bulk");
         assert_eq!(n, 1);
         assert!(md.contains("## AC-1: C\n\nGiven a, when b, then c."));
         assert!(md.contains("What went wrong: nothing happens"));
         assert!(!md.contains("AC-2"));
-        let sent = mark_sent(&mut t, &all, Some("p"));
+        let sent = mark_sent(&mut t, &all);
         assert_eq!(sent.len(), 1);
-        assert_eq!(unsent_count(t.as_ref(), &all, Some("p")), 0);
-        assert_eq!(counts(t.as_ref(), &all, Some("p")).sent, 1);
+        assert_eq!(unsent_count(t.as_ref(), &all), 0);
+        assert_eq!(counts(t.as_ref(), &all).sent, 1);
         // A dropped fix plan gives them back, and they can go again.
         unmark_sent(t.as_mut().unwrap(), &sent);
-        assert_eq!(unsent_count(t.as_ref(), &all, Some("p")), 1);
-        assert_eq!(mark_sent(&mut t, &all, Some("p")), sent);
+        assert_eq!(unsent_count(t.as_ref(), &all), 1);
+        assert_eq!(mark_sent(&mut t, &all), sent);
         // The same note keeps it sent; a new note makes it unsent.
         set(&mut t, &a, "p", Verdict::Fail, "nothing happens", 2);
-        assert_eq!(unsent_count(t.as_ref(), &all, Some("p")), 0);
+        assert_eq!(unsent_count(t.as_ref(), &all), 0);
         set(&mut t, &a, "p", Verdict::Fail, "it crashes", 3);
-        assert_eq!(unsent_count(t.as_ref(), &all, Some("p")), 1);
+        assert_eq!(unsent_count(t.as_ref(), &all), 1);
+        // Its fix made, it waits to be tried again; failed again, even with
+        // the same note, it is a new failure to send.
+        mark_sent(&mut t, &all);
+        t.as_mut().unwrap().checks.iter_mut().for_each(|k| k.made = k.sent);
+        let n = counts(t.as_ref(), &all);
+        assert_eq!((n.failed, n.sent, n.made), (1, 1, 1));
+        assert!(check(t.as_ref(), &a).unwrap().fix_made());
+        set(&mut t, &a, "p2", Verdict::Fail, "it crashes", 4);
+        assert_eq!(unsent_count(t.as_ref(), &all), 1);
+        assert!(!check(t.as_ref(), &a).unwrap().fix_made());
+    }
+
+    #[test]
+    fn an_older_record_loads_with_its_one_patch() {
+        let json = r#"{"patch":"p","checks":[{"id":"AC-1","text":"Given a, when b, then c.","state":"pass","at":1}]}"#;
+        let test: ManualTest = serde_json::from_str(json).unwrap();
+        let a = crit(1, "Given a, when b, then c.");
+        let k = check(Some(&test), &a).unwrap();
+        assert_eq!((tried_on(&test, k), k.made), ("p", false));
+        // A new result elsewhere keeps the patch it had.
+        let mut t = Some(test);
+        set(&mut t, &crit(2, "Given d, when e, then f."), "q", Verdict::Pass, "", 2);
+        let test = t.as_ref().unwrap();
+        assert_eq!(tried_on(test, check(t.as_ref(), &a).unwrap()), "p");
     }
 
     #[test]

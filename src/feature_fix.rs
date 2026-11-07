@@ -219,6 +219,11 @@ impl Gerdr {
         f.fix_rounds = n;
         f.fix_asked.insert(n, asked);
         f.last_fix_round = None;
+        // Asked from Manual test, its fixes leave the feature there: the user
+        // goes on trying it as they land.
+        if feature.current() == Some(Stage::ManualTest) {
+            f.carry = Some(n);
+        }
         f.fix_round = Some(FixRound {
             n,
             what: what.to_owned(),
@@ -516,7 +521,11 @@ impl Gerdr {
         let noted = (self.feature_mut(project, slug))
             .and_then(|f| f.comment_fixes.iter_mut().find(|fix| fix.round == round.n))
             .is_some_and(|fix| fix_round::mark_comments_made(fix, round, &left));
-        if done != round.done || made || noted {
+        // And Manual test's of its failures.
+        let tried = (self.feature_mut(project, slug))
+            .and_then(|f| f.manual.as_mut())
+            .is_some_and(|test| fix_round::mark_criteria_made(test, round, &left));
+        if done != round.done || made || noted || tried {
             if let Some(round) =
                 (self.feature_mut(project, slug)).and_then(|f| f.fix_round.as_mut())
             {

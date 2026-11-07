@@ -2,10 +2,14 @@
 //! each on the stage's page in the feature tab, to try by hand and mark passed
 //! or failed, a failure with a note saying what went wrong, written on its
 //! card. The results save as they are given (`Feature::manual`, see
-//! `feature::manual`). Mark passed marks Manual test done once every criterion
-//! passed on the code as it is now; Plan fixes starts a fix round on the
-//! failures (see `feature_fix`). Once done the cards stay on the page, to read:
-//! reopening the stage is what changes them.
+//! `feature::manual`) and stay as the code changes. Plan fixes starts a fix
+//! round on the failures found so far (see `feature_fix`): the user goes on
+//! trying the rest while the Build agent fixes them, the feature stays on
+//! Manual test, and Verify runs again on the fixes (`Feature::carry`). A
+//! failure whose fix is made says so, to try again. Mark passed marks Manual
+//! test done once every criterion passed and Verify holds on the code as it
+//! is now. Once done the cards stay on the page, to read: reopening the stage
+//! is what changes them.
 //!
 //! The cards' keys are in `features`, with the rest of the tab's. This holds
 //! what they do, and the note being written.
@@ -69,9 +73,14 @@ pub struct Row {
     pub note: String,
     /// The failure went to the Build agent.
     pub sent: bool,
+    /// The Build agent made the fix of the failure: to try again.
+    pub made: bool,
+    /// It was tried on other code than the feature's now.
+    pub earlier: bool,
 }
 
-/// The cards' rows: `criteria` as `test` has them on `patch`.
+/// The cards' rows: `criteria` as `test` has them, the feature's code being
+/// `patch`'s (`None`: unknown, or not to tell).
 fn rows(
     test: Option<&manual::ManualTest>,
     criteria: &[Criterion],
@@ -80,7 +89,7 @@ fn rows(
     criteria
         .iter()
         .map(|c| {
-            let check = manual::check(test, c, patch);
+            let check = manual::check(test, c);
             Row {
                 id: c.id.clone(),
                 title: c.title.clone(),
@@ -90,6 +99,10 @@ fn rows(
                     .filter(|k| k.state == Verdict::Fail)
                     .map_or_else(String::new, |k| k.note.clone()),
                 sent: check.is_some_and(|k| k.state == Verdict::Fail && k.sent),
+                made: check.is_some_and(manual::Check::fix_made),
+                earlier: (test.zip(check)).zip(patch).is_some_and(|((t, k), p)| {
+                    manual::tried_on(t, k) != p
+                }),
             }
         })
         .collect()
@@ -97,12 +110,17 @@ fn rows(
 
 /// How far the manual test of `criteria` went, in words: "2 of 3
 /// criteria passed · 1 failed", "1 of 3 criteria passed · 1 failure
-/// sent to Build".
+/// sent to Build", "… · 1 fix made: try again".
 pub(crate) fn counts_text(n: manual::Counts) -> String {
     let total = n.total();
     let what = if total == 1 { "criterion" } else { "criteria" };
     let passed = format!("{} of {total} {what} passed", n.passed);
-    if n.failed > 0 && n.sent == n.failed {
+    if n.made > 0 {
+        format!(
+            "{passed} \u{b7} {} made: try again",
+            fixes(n.made)
+        )
+    } else if n.failed > 0 && n.sent == n.failed {
         format!(
             "{passed} \u{b7} {} sent to Build",
             plural(n.sent, "failure")
@@ -112,6 +130,27 @@ pub(crate) fn counts_text(n: manual::Counts) -> String {
     } else {
         passed
     }
+}
+
+/// "1 fix", "2 fixes".
+fn fixes(n: usize) -> String {
+    match n {
+        1 => "1 fix".into(),
+        n => format!("{n} fixes"),
+    }
+}
+
+/// The counts in a few words, for the bar over the cards: "3 passed · 1
+/// failed · 2 untested", and how many fixes wait to be tried.
+pub(crate) fn strip_text(n: manual::Counts) -> String {
+    let mut text = format!(
+        "{} passed \u{b7} {} failed \u{b7} {} untested",
+        n.passed, n.failed, n.untested
+    );
+    if n.made > 0 {
+        text.push_str(&format!(" \u{b7} {} made", fixes(n.made)));
+    }
+    text
 }
 
 /// What is left before every criterion passed: "AC-2 failed, AC-3 not
@@ -170,23 +209,19 @@ impl Gerdr {
         self.feature_reading(project, slug).map(|r| r.patch.clone())
     }
 
-    /// How far feature `f`'s manual test went on its code as last read
-    /// (unknown: as recorded); `None` when its brief has no criteria.
+    /// How far feature `f`'s manual test went; `None` when its brief has no
+    /// criteria.
     pub(crate) fn manual_counts(&self, f: &Feature) -> Option<manual::Counts> {
         let criteria = self.criteria(&f.project, &f.slug);
         if criteria.is_empty() {
             return None;
         }
-        let patch = self.manual_patch(&f.project, &f.slug);
-        Some(manual::counts(
-            f.manual.as_ref(),
-            criteria,
-            patch.as_deref(),
-        ))
+        Some(manual::counts(f.manual.as_ref(), criteria))
     }
 
-    /// The cards of feature `f`'s criteria, on its code as last read; once
-    /// Manual test is done, as recorded: its page says if the code changed.
+    /// The cards of feature `f`'s criteria, telling the ones tried on other
+    /// code than its own as last read; once Manual test is done, as recorded:
+    /// its page says if the code changed.
     pub(crate) fn criterion_rows(&self, f: &Feature) -> Vec<Row> {
         let patch = match f.is_done(Stage::ManualTest) {
             true => None,
@@ -351,7 +386,7 @@ impl Gerdr {
                     return;
                 };
                 let note = self.feature(&project, &slug).and_then(|f| {
-                    let check = manual::check(f.manual.as_ref(), c, patch.as_deref())?;
+                    let check = manual::check(f.manual.as_ref(), c)?;
                     Some(check.note.clone())
                 });
                 self.write_criterion_note(i, note.as_deref().unwrap_or(""));
@@ -376,7 +411,7 @@ impl Gerdr {
                 let Some(f) = self.feature_mut(&project, &slug) else {
                     return;
                 };
-                let passed = manual::check(f.manual.as_ref(), c, Some(&patch))
+                let passed = manual::check(f.manual.as_ref(), c)
                     .is_some_and(|k| k.state == Verdict::Pass);
                 match outcome {
                     Outcome::Fail(_, note) => {
@@ -432,21 +467,18 @@ impl Gerdr {
                 if !left.is_empty() {
                     return self.show_warning(format!("Not passed yet: {left}"));
                 }
+                if let Some(fixed) = feature.unverified.clone()
+                    && self.fixes_hold_up(&project, &slug, &fixed)
+                {
+                    return;
+                }
                 self.read_and_tick(&project, &slug, Stage::ManualTest);
             }
             Outcome::SendFailures => {
-                let Some(patch) = patch else {
-                    return self.show_warning(reading_text);
-                };
                 let Some(feature) = self.feature(&project, &slug) else {
                     return;
                 };
-                let (n, text) = manual::failures_markdown(
-                    feature.manual.as_ref(),
-                    &criteria,
-                    Some(&patch),
-                    &title,
-                );
+                let (n, text) = manual::failures_markdown(feature.manual.as_ref(), &criteria, &title);
                 if n == 0 {
                     return self.show_warning("No failures to send: mark one failed first".into());
                 }
@@ -460,7 +492,7 @@ impl Gerdr {
                     return;
                 }
                 if let Some(f) = self.feature_mut(&project, &slug) {
-                    let checks = manual::mark_sent(&mut f.manual, &criteria, Some(&patch));
+                    let checks = manual::mark_sent(&mut f.manual, &criteria);
                     let back = crate::feature::fix_round::GiveBack::Manual { checks };
                     self.fix_round_gives_back(&project, &slug, back);
                 }
@@ -469,6 +501,41 @@ impl Gerdr {
                 self.show_build_agent(&project, &slug);
             }
         }
+    }
+
+    /// Whether Manual test of feature `slug` can't be marked passed as
+    /// Verify hasn't passed on `fixed`, the code its fixes made. The toast
+    /// says why, and checks that never ran on it start.
+    fn fixes_hold_up(&mut self, project: &str, slug: &str, fixed: &str) -> bool {
+        let Some(feature) = self.feature(project, slug) else {
+            return true;
+        };
+        let title = feature.title.clone();
+        let run = (feature.verify.as_ref()).filter(|r| r.patch.as_deref() == Some(fixed));
+        if run.is_some_and(|r| r.passed == Some(true)) {
+            if let Some(f) = self.feature_mut(project, slug) {
+                f.unverified = None;
+                self.save_feature(project, slug);
+            }
+            return false;
+        }
+        let failed = run.and_then(feature::verify::to_fix);
+        if self.checks_under_way(project, slug) {
+            self.show_warning(format!(
+                "Verify is checking the fixes of \u{201c}{title}\u{201d}: mark it passed once they pass"
+            ));
+        } else if let Some(failed) = failed {
+            let first = failed.first().cloned().unwrap_or_default();
+            self.show_warning(format!(
+                "Verify failed on the fixes of \u{201c}{title}\u{201d}: {first}; Make Verify fixes sends it"
+            ));
+        } else {
+            self.recheck(project, slug);
+            self.show_warning(format!(
+                "Verify hadn't run on the fixes of \u{201c}{title}\u{201d}; it runs now: mark it passed once it passes"
+            ));
+        }
+        true
     }
 
     /// Start writing criterion `i`'s note, from `note`, on its card.
@@ -495,6 +562,8 @@ mod tests {
             found,
             note: String::new(),
             sent: false,
+            made: false,
+            earlier: false,
         }
     }
 
@@ -504,6 +573,7 @@ mod tests {
             passed,
             failed,
             sent,
+            made: 0,
             untested,
         };
         assert_eq!(
@@ -514,6 +584,22 @@ mod tests {
         assert_eq!(
             counts_text(n(1, 1, 1, 1)),
             "1 of 3 criteria passed \u{b7} 1 failure sent to Build"
+        );
+        let made = manual::Counts {
+            made: 1,
+            ..n(1, 2, 1, 0)
+        };
+        assert_eq!(
+            counts_text(made),
+            "1 of 3 criteria passed \u{b7} 1 fix made: try again"
+        );
+        assert_eq!(
+            strip_text(n(3, 1, 0, 2)),
+            "3 passed \u{b7} 1 failed \u{b7} 2 untested"
+        );
+        assert_eq!(
+            strip_text(made),
+            "1 passed \u{b7} 2 failed \u{b7} 0 untested \u{b7} 1 fix made"
         );
         assert_eq!(
             left_text(&[

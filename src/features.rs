@@ -2633,10 +2633,14 @@ fn criterion_buttons(i: usize, row: &Row) -> Vec<(PageButton, PanelOutcome)> {
 /// a line each for its Given, When and Then, or its text as the brief has
 /// it when it doesn't split.
 fn criterion_details(row: &Row) -> String {
-    match crate::feature::manual::split_gwt(&row.text) {
+    let mut text = match crate::feature::manual::split_gwt(&row.text) {
         Some([given, when, then]) => format!("Given {given}\nWhen {when}\nThen {then}"),
         None => row.text.clone(),
+    };
+    if row.earlier && row.found.is_some() && !row.made {
+        text.push_str("\n\nTried before the latest fixes");
     }
+    text
 }
 
 /// Criterion `i`'s card on Manual test's page, its buttons those in
@@ -2653,9 +2657,10 @@ fn criterion_card(
         Some(Verdict::Pass) => FindingTag::Passed,
         Some(Verdict::Fail) => FindingTag::Failed,
     };
-    let state = match row.sent {
-        true => "sent to Build",
-        false => "",
+    let state = match (row.made, row.sent) {
+        (true, _) => "fix made: try again",
+        (false, true) => "sent to Build",
+        (false, false) => "",
     };
     FindingCard {
         tag,
@@ -2671,7 +2676,7 @@ fn criterion_card(
         },
         comment: String::new(),
         comment_buttons: Vec::new(),
-        made: false,
+        made: row.made,
         faded: trying && tag == FindingTag::Passed,
         collapsed: false,
         stripe: None,
@@ -3110,6 +3115,32 @@ pub(crate) fn plural(n: usize, thing: &str) -> String {
     } else {
         format!("{n} {thing}s")
     }
+}
+
+/// The bar over Manual test's criteria `rows`: how many passed, failed and
+/// are left, and the fixes made to try again; none with no criteria.
+fn test_strip(rows: &[Row]) -> Option<chrome::TestStrip> {
+    if rows.is_empty() {
+        return None;
+    }
+    let mut n = crate::feature::manual::Counts::default();
+    for row in rows {
+        match row.found {
+            Some(Verdict::Pass) => n.passed += 1,
+            Some(Verdict::Fail) => {
+                n.failed += 1;
+                n.sent += usize::from(row.sent);
+                n.made += usize::from(row.made);
+            }
+            None => n.untested += 1,
+        }
+    }
+    Some(chrome::TestStrip {
+        passed: n.passed,
+        failed: n.failed,
+        untested: n.untested,
+        text: crate::manual_test::strip_text(n),
+    })
 }
 
 /// The detail of AI review's row while it is current, beside `agent`,
@@ -4604,13 +4635,30 @@ fn sends_round_again(feature: &Feature, stage: Stage, ctx: RowCtx) -> bool {
 }
 
 /// Whether `stage`'s page can send `feature`'s Verify failures to Build: at
-/// Verify, its last run failed, nothing running and no round open.
+/// Verify, its last run failed, nothing running and no round open. So can
+/// Manual test's, of the checks of the fixes it asked for (see
+/// `Feature::unverified`).
 fn verify_sends(feature: &Feature, stage: Stage) -> bool {
-    stage == Stage::Verify
-        && stage_mark(feature, stage) == StageMark::Current
+    stage_mark(feature, stage) == StageMark::Current
         && feature.fix_round.is_none()
         && !checks_running(feature)
-        && (feature.verify.as_ref()).is_some_and(|v| feature::verify::to_fix(v).is_some())
+        && (feature.verify.as_ref()).is_some_and(|v| {
+            feature::verify::to_fix(v).is_some()
+                && match stage {
+                    Stage::Verify => true,
+                    // On the code the fixes made, not before them.
+                    _ => verifies_fixes(feature, stage) && v.patch == feature.unverified,
+                }
+        })
+}
+
+/// Whether `stage`'s page has Verify's checks of the fixes Manual test asked
+/// for: at Manual test, until they pass on the code those made.
+fn verifies_fixes(feature: &Feature, stage: Stage) -> bool {
+    stage == Stage::ManualTest
+        && feature.status == Status::Open
+        && feature.current() == Some(stage)
+        && feature.unverified.is_some()
 }
 
 /// Whether `stage` of `feature` has fixes of its own waiting to be sent, or
@@ -4787,14 +4835,16 @@ fn writers_page_actions(
     // one can still be wanted.
     let plan_fixes = verify_sends(feature, stage);
     if plan_fixes {
+        // Beside the criteria's own, they say whose they are.
+        let (make, plan) = match stage {
+            Stage::Verify => ("Make fixes", "Plan fixes"),
+            _ => ("Make Verify fixes", "Plan Verify fixes"),
+        };
         out.push((
-            button("Make fixes", ButtonStyle::Primary),
+            button(make, ButtonStyle::Primary),
             PanelOutcome::MakeVerifyFixes,
         ));
-        out.push((
-            button("Plan fixes", ButtonStyle::Plain),
-            PanelOutcome::PlanFixes,
-        ));
+        out.push((button(plan, ButtonStyle::Plain), PanelOutcome::PlanFixes));
     }
     let waits = feature.status == Status::Open
         && (feature.runs.get(&stage)).is_some_and(|run| run.waits_to_send());
@@ -4840,13 +4890,14 @@ fn writers_page_actions(
     }
     if tries_criteria(feature, stage) && ctx.criteria > 0 {
         use crate::manual_test::Outcome;
-        // What the fix plan or Build waits for comes first.
-        let free = back != Some(Rework::Waits) && round.is_none();
+        // What the fix plan, Build or Verify's failures wait for comes first.
+        let free = back != Some(Rework::Waits) && round.is_none() && !plan_fixes;
         let style = |next: bool| match free && next {
             true => ButtonStyle::Primary,
             false => ButtonStyle::Plain,
         };
-        if ctx.manual.failed > ctx.manual.sent {
+        // Found while a round is open, they wait for the next one.
+        if ctx.manual.failed > ctx.manual.sent && feature.fix_round.is_none() {
             out.push((
                 button("Plan fixes", style(true)),
                 PanelOutcome::Manual(Outcome::SendFailures),
@@ -6256,7 +6307,7 @@ impl Gerdr {
         self.reselect_review_card(selected);
         if let Some(patch) = &patch {
             self.feature_code_is(project, slug, patch);
-            self.feature_criteria_are(project, slug, patch);
+            self.feature_criteria_are(project, slug);
         }
         if merged {
             self.feature_merged(project, slug, patch.as_deref());
@@ -6293,11 +6344,11 @@ impl Gerdr {
         }
     }
 
-    /// The criteria of feature `slug` are as last read from its brief, on
-    /// its code (`patch`'s): Manual test, passed on its page, is to do
+    /// The criteria of feature `slug` are as last read from its brief:
+    /// Manual test, passed on its page, is to do
     /// again when one of them was added or reworded since, and the toast
     /// says so. A Manual test ticked plainly (no results kept) stays.
-    fn feature_criteria_are(&mut self, project: &str, slug: &str, patch: &str) {
+    fn feature_criteria_are(&mut self, project: &str, slug: &str) {
         let criteria = self.criteria(project, slug).to_vec();
         let Some(feature) = self.feature_mut(project, slug) else {
             return;
@@ -6306,7 +6357,7 @@ impl Gerdr {
             && feature.marks.contains_key(&Stage::ManualTest)
             && feature.manual.is_some()
             && !criteria.is_empty()
-            && !feature::manual::all_passed(feature.manual.as_ref(), &criteria, Some(patch));
+            && !feature::manual::all_passed(feature.manual.as_ref(), &criteria);
         if !reopen || !feature.untick(Stage::ManualTest, feature::now()) {
             return;
         }
@@ -6320,8 +6371,22 @@ impl Gerdr {
     }
 
     /// The code of feature `slug` is `patch`'s now: the marks that no
-    /// longer hold go, and the toast says so.
+    /// longer hold go, and the toast says so. The fixes Manual test asked
+    /// for leave them, and Verify runs on them (see `Feature::keep_marks`).
     pub(crate) fn feature_code_is(&mut self, project: &str, slug: &str, patch: &str) {
+        let Some(feature) = self.feature_mut(project, slug) else {
+            return;
+        };
+        if feature.keep_marks(patch, feature::now()) {
+            return self.fixes_landed(project, slug, patch);
+        }
+        // The code is read after its round is over: its last commit counted.
+        if feature.carry.is_some()
+            && feature.fix_round.as_ref().map(|r| r.n) != feature.carry
+        {
+            feature.carry = None;
+            self.save_feature(project, slug);
+        }
         let Some(feature) = self.feature_mut(project, slug) else {
             return;
         };
@@ -6521,12 +6586,10 @@ impl Gerdr {
             Stage::ManualTest if !self.criteria(project, slug).is_empty() => {
                 let criteria = self.criteria(project, slug).to_vec();
                 let passed = self.feature(project, slug).is_some_and(|f| {
-                    feature::manual::all_passed(f.manual.as_ref(), &criteria, Some(&reading.patch))
+                    feature::manual::all_passed(f.manual.as_ref(), &criteria)
                 });
                 if !passed {
-                    self.show_warning(
-                        "The code changed since the manual test; try the criteria again".into(),
-                    );
+                    self.show_warning("Not every criterion passed yet; try them first".into());
                 } else {
                     self.tick_feature(project, slug, Some(&reading.patch), "you");
                     let n = criteria.len();
@@ -7096,6 +7159,8 @@ impl Gerdr {
             comment_fixes: Vec::new(),
             ran_once: Default::default(),
             fix_rounds: 0,
+            carry: None,
+            unverified: None,
         };
         self.features
             .all
@@ -10806,6 +10871,31 @@ fn verify_sections(
     out
 }
 
+/// How Verify's checks of the fixes Manual test asked for go, on its page
+/// (see `verifies_fixes`): Verify's own page has a card for each.
+fn fixes_checks(feature: &Feature, state: &PanelState) -> Vec<CheckLine> {
+    if let Some(what) = state.verify {
+        return vec![line(inline(what), CheckTone::Note)];
+    }
+    let fixed = feature.unverified.as_deref();
+    match &feature.verify {
+        Some(run) if run.patch.as_deref() != fixed || run.finished.is_none() => {
+            vec![line("waits to run on the fixes", CheckTone::Note)]
+        }
+        Some(run) if run.passed == Some(false) => {
+            let mut out = vec![line(
+                format!("run {} failed on the fixes", run.n),
+                CheckTone::Blocker,
+            )];
+            let failures = (run.failures.iter()).map(|f| line(f.clone(), CheckTone::Blocker));
+            out.extend(capped(failures.collect(), CheckTone::Blocker));
+            out
+        }
+        Some(run) => vec![line(format!("run {} passed", run.n), CheckTone::Ready)],
+        None => vec![line("waits to run on the fixes", CheckTone::Note)],
+    }
+}
+
 /// How Verify's checks last went in `feature`.
 fn last_checks(feature: &Feature, state: &PanelState) -> Vec<CheckLine> {
     match &feature.verify {
@@ -11290,6 +11380,8 @@ fn stage_page(
             }
             line(text, CheckTone::Ready)
         }),
+        // The bar over the page counts its criteria.
+        StageMark::Current if stage == Stage::ManualTest && !state.criteria.is_empty() => None,
         StageMark::Current => stage_line(feature, stage, state).map(|text| {
             let failed = text.contains("failed") || text.contains("not ready");
             let tone = if failed {
@@ -11424,8 +11516,24 @@ fn stage_page(
                         )),
                         Some(_) => None,
                     };
-                    let said = said.map(|text| line(text, CheckTone::Note));
-                    sections.push(lines("Criteria", said.into_iter().collect()));
+                    let mut said: Vec<CheckLine> =
+                        said.map(|text| line(text, CheckTone::Note)).into_iter().collect();
+                    // Found while a round is open: the next one takes them.
+                    let waiting = state.ctx.manual.failed - state.ctx.manual.sent;
+                    if waiting > 0 && feature.fix_round.is_some() {
+                        let text = format!(
+                            "{} for the current round",
+                            match waiting {
+                                1 => "1 failure waits".to_owned(),
+                                n => format!("{n} failures wait"),
+                            }
+                        );
+                        said.push(line(text, CheckTone::Note));
+                    }
+                    if verifies_fixes(feature, stage) {
+                        sections.push(lines("Verify of the fixes", fixes_checks(feature, state)));
+                    }
+                    sections.push(lines("Criteria", said));
                     sections.extend(criterion_sections(state, actions, true));
                 }
                 sections.extend(sandbox_sections(feature, state));
@@ -12668,9 +12776,15 @@ fn tab_view(
             buttons,
         }
     });
+    let test_strip = (stage == Stage::ManualTest
+        && !panel.keys
+        && stage_mark(feature, stage) != StageMark::Later)
+    .then(|| test_strip(&state.criteria))
+    .flatten();
     let mut view = FeatureTabView {
         review_page: crate::feature_diff::review_page(panel, feature),
         review_switch,
+        test_strip,
         review_keys: false,
         title: feature.title.clone(),
         sub,
@@ -12810,6 +12924,8 @@ pub(crate) mod tests {
             comment_fixes: Vec::new(),
             ran_once: Default::default(),
             fix_rounds: 0,
+            carry: None,
+            unverified: None,
         }
     }
 
@@ -17622,6 +17738,7 @@ pub(crate) mod tests {
                 passed,
                 failed,
                 sent,
+                made: 0,
                 untested,
             },
             ..RowCtx::default()
@@ -17660,6 +17777,8 @@ pub(crate) mod tests {
             found,
             note: note.into(),
             sent: false,
+            made: false,
+            earlier: false,
         };
         let rows = vec![
             row(None, ""),
@@ -17792,6 +17911,134 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn manual_test_goes_on_while_its_fixes_are_made() {
+        use crate::{chrome::FindingTag, manual_test::Outcome};
+        let f = feature("m", vec![repo("api", true)], 7);
+        assert_eq!(f.current(), Some(Stage::ManualTest));
+        let row = |found, sent, made| Row {
+            id: "AC-1".into(),
+            title: "C".into(),
+            text: "Given a, when b, then c".into(),
+            found,
+            note: "x".into(),
+            sent,
+            made,
+            earlier: true,
+        };
+        let rows = vec![
+            row(Some(Verdict::Fail), true, true),
+            row(Some(Verdict::Fail), false, false),
+            row(Some(Verdict::Pass), false, false),
+            row(None, false, false),
+        ];
+        let ctx = RowCtx {
+            criteria: 4,
+            manual: crate::feature::manual::Counts {
+                passed: 1,
+                failed: 2,
+                sent: 1,
+                made: 1,
+                untested: 1,
+            },
+            ..RowCtx::default()
+        };
+        let state = PanelState {
+            ctx,
+            criteria: rows.clone(),
+            ..PanelState::default()
+        };
+        let labels = |f: &Feature| -> Vec<String> {
+            let actions = stage_actions(f, Stage::ManualTest, ctx, &[], &rows, &[]);
+            let page = stage_page(f, Stage::ManualTest, &state, &actions, 2_060);
+            page.buttons.iter().map(|b| b.label.clone()).collect()
+        };
+        let said = |f: &Feature| -> Vec<(String, Vec<String>)> {
+            let actions = stage_actions(f, Stage::ManualTest, ctx, &[], &rows, &[]);
+            let page = stage_page(f, Stage::ManualTest, &state, &actions, 2_060);
+            (page.sections.iter())
+                .filter_map(|s| match s {
+                    PageSection::Lines { label, lines } => Some((
+                        label.clone(),
+                        lines.iter().map(|l| l.text.clone()).collect(),
+                    )),
+                    _ => None,
+                })
+                .collect()
+        };
+        // No round open: the unsent failure can go.
+        assert!(labels(&f).contains(&"Plan fixes".to_owned()));
+        // A round open: it waits for the next, and the page says so.
+        let fixing = in_round(f.clone(), Stage::ManualTest, FixPhase::Fixing);
+        assert!(!labels(&fixing).contains(&"Plan fixes".to_owned()));
+        let criteria = said(&fixing).into_iter().find(|(l, _)| l == "Criteria");
+        assert_eq!(
+            criteria.unwrap().1,
+            ["reading the code", "1 failure waits for the current round"]
+        );
+        // The fix made: its card says to try it again, with a dot.
+        let actions = stage_actions(&fixing, Stage::ManualTest, ctx, &[], &rows, &[]);
+        let page = stage_page(&fixing, Stage::ManualTest, &state, &actions, 2_060);
+        let cards: Vec<&FindingCard> = (page.sections.iter())
+            .filter_map(|s| match s {
+                PageSection::Finding(card) => Some(card),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(cards[0].tag, FindingTag::Failed);
+        assert_eq!(cards[0].state, "fix made: try again");
+        assert!(cards[0].made);
+        assert_eq!(cards[1].state, "");
+        // The counts go in the bar over the page, not its status.
+        assert!(page.status.is_none());
+        let strip = test_strip(&rows).unwrap();
+        assert_eq!(
+            (strip.passed, strip.failed, strip.untested),
+            (1, 2, 1)
+        );
+        assert_eq!(
+            strip.text,
+            "1 passed \u{b7} 2 failed \u{b7} 1 untested \u{b7} 1 fix made"
+        );
+        assert_eq!(test_strip(&[]), None);
+        // A pass tried before the fixes says so once selected; a made fix
+        // says to try again instead.
+        assert!(criterion_details(&rows[2]).ends_with("Tried before the latest fixes"));
+        assert!(!criterion_details(&rows[0]).contains("Tried before"));
+        // Verify failed on the fixes: its section, and its own buttons first.
+        let mut checked = f.clone();
+        checked.unverified = Some("p2".into());
+        checked.verify = Some(feature::verify::VerifyRun {
+            n: 2,
+            started: 1_000,
+            finished: Some(1_100),
+            patch: Some("p2".into()),
+            passed: Some(false),
+            failures: vec!["api: `make` exited 2".into()],
+            ..Default::default()
+        });
+        let verify = said(&checked).into_iter().find(|(l, _)| l == "Verify of the fixes");
+        assert_eq!(
+            verify.unwrap().1,
+            ["run 2 failed on the fixes", "api: `make` exited 2"]
+        );
+        let actions = page_actions(&checked, Stage::ManualTest, ctx);
+        let primary: Vec<&PanelOutcome> = (actions.iter())
+            .filter(|(b, _)| b.style == ButtonStyle::Primary)
+            .map(|(_, o)| o)
+            .collect();
+        assert_eq!(primary, [&PanelOutcome::MakeVerifyFixes]);
+        assert!(labels(&checked).contains(&"Plan Verify fixes".to_owned()));
+        assert!(
+            (actions.iter()).any(|(_, o)| *o == PanelOutcome::Manual(Outcome::SendFailures))
+        );
+        // Still running on older code: it waits.
+        checked.verify.as_mut().unwrap().patch = Some("p1".into());
+        let verify = said(&checked).into_iter().find(|(l, _)| l == "Verify of the fixes");
+        assert_eq!(verify.unwrap().1, ["waits to run on the fixes"]);
+        assert!(!labels(&checked).contains(&"Plan Verify fixes".to_owned()));
+    }
+
+    #[test]
     fn an_approved_manual_test_shows_its_criteria_with_nothing_to_press() {
         use crate::chrome::FindingTag;
         let f = feature("m", vec![repo("api", true)], 8);
@@ -17803,6 +18050,8 @@ pub(crate) mod tests {
             found,
             note: String::new(),
             sent: false,
+            made: false,
+            earlier: false,
         };
         let rows = vec![row(Some(Verdict::Pass)), row(Some(Verdict::Pass))];
         let ctx = RowCtx {

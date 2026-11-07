@@ -615,6 +615,15 @@ pub struct Feature {
     /// How many fix rounds it had: the next one's number goes on from it.
     #[serde(default)]
     pub fix_rounds: u32,
+    /// The fix round Manual test asked for, whose commits leave the marks
+    /// as they are (see `keep_marks`): the user goes on trying the feature as
+    /// they land. Forgotten once the code is read after the round is over.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub carry: Option<u32>,
+    /// The patch-id of the code those fixes made that Verify hasn't passed
+    /// on yet: Manual test can't be marked passed until it does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unverified: Option<String>,
     /// The machine that writes it, when that isn't this one: it is only shown
     /// here (see `view`). Never saved: the record is its writer's.
     #[serde(skip)]
@@ -780,6 +789,30 @@ impl Feature {
         })
     }
 
+    /// The code is now `patch`'s by the fixes Manual test asked for (`carry`),
+    /// with Manual test current: the marks before it are moved onto it, and
+    /// it is logged ("Code changed by fix round 2: marks kept"). Verify is
+    /// to run on it again (`unverified`). Says whether they were; when not,
+    /// `invalidate` says what goes.
+    pub fn keep_marks(&mut self, patch: &str, now: u64) -> bool {
+        let Some(n) = self.carry else {
+            return false;
+        };
+        if self.status != Status::Open
+            || self.current() != Some(Stage::ManualTest)
+            || self.stale(patch).is_none()
+        {
+            return false;
+        }
+        for (stage, mark) in &mut self.marks {
+            if stage.bound() && *stage < Stage::ManualTest {
+                mark.patch = Some(patch.to_owned());
+            }
+        }
+        self.log(now, format!("Code changed by fix round {n}: marks kept"));
+        true
+    }
+
     /// The code is now `patch`'s: clear the marks that no longer hold, from
     /// the first stale stage on, and log it ("Code changed: Build to do
     /// again"). A done feature is left as it is: it shipped. Returns the
@@ -790,6 +823,9 @@ impl Feature {
         }
         let stage = self.stale(patch)?;
         self.clear_marks_from(stage, now);
+        // The code went its own way: what Manual test fixed is gone over again.
+        self.carry = None;
+        self.unverified = None;
         self.log(now, format!("Code changed: {} to do again", stage.label()));
         Some(stage)
     }
@@ -911,6 +947,9 @@ impl Feature {
             round.ended = None;
             round
         });
+        if current == Some(Stage::ManualTest) {
+            self.carry = self.fix_round.as_ref().map(|r| r.n).or(self.carry);
+        }
     }
 
     /// Add `what` to its history at `now`.
@@ -1385,6 +1424,8 @@ pub(crate) mod tests {
             comment_fixes: Vec::new(),
             ran_once: Default::default(),
             fix_rounds: 0,
+            carry: None,
+            unverified: None,
         }
     }
 
@@ -1478,6 +1519,8 @@ pub(crate) mod tests {
             comment_fixes: Vec::new(),
             ran_once: Default::default(),
             fix_rounds: 0,
+            carry: None,
+            unverified: None,
         }
     }
 
@@ -1578,6 +1621,33 @@ pub(crate) mod tests {
         assert_eq!(f.ran_once[&Stage::Build], 10);
         assert!(f.start_over(Stage::Build, 12));
         assert!(f.ran_once.is_empty());
+    }
+
+    #[test]
+    fn manual_test_fixes_keep_the_marks() {
+        let mut f = feature("a", 1);
+        while f.current() != Some(Stage::ManualTest) {
+            f.tick(1, "you", Some("p1"));
+        }
+        // No round of Manual test's: the code changing sends it back.
+        assert!(!f.keep_marks("p2", 2));
+        let mut kept = f.clone();
+        assert_eq!(f.invalidate("p2", 2), Some(Stage::Build));
+        // Its round's commits leave every mark, moved onto the new code.
+        kept.carry = Some(3);
+        assert!(!kept.keep_marks("p1", 2));
+        assert!(kept.keep_marks("p2", 2));
+        assert_eq!(kept.current(), Some(Stage::ManualTest));
+        assert_eq!(kept.stale("p2"), None);
+        assert_eq!(
+            kept.history.last().unwrap().what,
+            "Code changed by fix round 3: marks kept"
+        );
+        // Away from Manual test it doesn't hold.
+        kept.untick(Stage::CodeReview, 3);
+        assert!(!kept.keep_marks("p3", 3));
+        assert_eq!(kept.invalidate("p3", 3), Some(Stage::Build));
+        assert_eq!(kept.carry, None);
     }
 
     #[test]

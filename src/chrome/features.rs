@@ -643,6 +643,79 @@ impl ReviewSwitch {
     }
 }
 
+/// The line under Manual test's rail: how far trying its criteria came, in a
+/// bar and in words, as Code review's switch says how far its review did.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TestStrip {
+    pub passed: usize,
+    pub failed: usize,
+    pub untested: usize,
+    /// "3 passed · 1 failed · 2 untested".
+    pub text: String,
+}
+
+impl TestStrip {
+    fn total(&self) -> usize {
+        self.passed + self.failed + self.untested
+    }
+
+    /// Whether every criterion passed: the good news.
+    fn good(&self) -> bool {
+        self.total() > 0 && self.passed == self.total()
+    }
+}
+
+/// Where `TestStrip`'s parts go.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TestStripSpots {
+    /// The bar, while there is room.
+    pub bar: Option<Rect>,
+    /// The words.
+    pub text: Rect,
+}
+
+/// Where `strip` goes in the row at `(x, y)`, `width` wide: the bar, then its
+/// words.
+fn test_strip_spots(x: i32, y: i32, width: i32) -> TestStripSpots {
+    let h = REVIEW_SWITCH_H;
+    let has_bar = width >= REVIEW_BAR_W + COLUMN_GAP + REVIEW_LEFT_MIN;
+    let bar = has_bar.then(|| {
+        Rectangle::new(
+            (x, y + (h - REVIEW_BAR_H) / 2).into(),
+            (REVIEW_BAR_W, REVIEW_BAR_H).into(),
+        )
+    });
+    let text_x = bar.map_or(x, |bar| bar.loc.x + bar.size.w + COLUMN_GAP);
+    let text = Rectangle::new((text_x, y).into(), ((x + width - text_x).max(0), h).into());
+    TestStripSpots { bar, text }
+}
+
+/// A bar counting `total` things in `bar`: each of `parts` fills its share in
+/// its colour, from the left, one after the other; the rest is the track.
+fn count_bar(
+    c: &mut Canvas,
+    bar: Rect,
+    parts: &[(usize, Rgb)],
+    total: usize,
+    scale: f64,
+    p: &Palette,
+) {
+    let (x, y, w, h) = rect_px(bar, scale);
+    c.rounded(x, y, w, h, h / 2.0, p.border);
+    if total == 0 {
+        return;
+    }
+    // From the whole share down, each over the last: rounded ends overlap.
+    let mut upto: usize = parts.iter().map(|(n, _)| n).sum::<usize>().min(total);
+    for (n, tone) in parts.iter().rev() {
+        if upto > 0 && *n > 0 {
+            let f = upto as f32 / total as f32;
+            c.rounded(x, y, (w * f).max(h), h, h / 2.0, *tone);
+        }
+        upto = upto.saturating_sub(*n);
+    }
+}
+
 /// A part of a stage's page, under its title and what it says.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PageSection {
@@ -849,6 +922,8 @@ pub struct FeatureTabView {
     pub review_page: bool,
     /// Code review's page goes between that review and its fixes.
     pub review_switch: Option<ReviewSwitch>,
+    /// Manual test's page counts its criteria.
+    pub test_strip: Option<TestStrip>,
     /// That review has the keys: the rail shows no focus.
     pub review_keys: bool,
     pub activity: Vec<ActivityRow>,
@@ -930,6 +1005,8 @@ pub struct FeatureTabLayout {
     pub review: Option<Rect>,
     /// With `FeatureTabView::review_switch`.
     pub review_switch: Option<ReviewSwitchSpots>,
+    /// With `FeatureTabView::test_strip`, when there is no switch.
+    pub test_strip: Option<TestStripSpots>,
     pub frame: Rect,
     pub title: Rect,
     pub sub: Rect,
@@ -2861,9 +2938,12 @@ pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayou
     let review_switch = view.review_switch.as_ref().map(|switch| {
         review_switch_spots(switch, x, rule_end + REVIEW_SWITCH_GAP, inner)
     });
-    let rule_end = match review_switch {
-        Some(_) => rule_end + 2 * REVIEW_SWITCH_GAP + REVIEW_SWITCH_H,
-        None => rule_end,
+    let test_strip = (view.test_strip.as_ref())
+        .filter(|_| review_switch.is_none())
+        .map(|_| test_strip_spots(x, rule_end + REVIEW_SWITCH_GAP, inner));
+    let rule_end = match review_switch.is_some() || test_strip.is_some() {
+        true => rule_end + 2 * REVIEW_SWITCH_GAP + REVIEW_SWITCH_H,
+        false => rule_end,
     };
     let review = view.review_page.then(|| {
         Rectangle::new(
@@ -3051,6 +3131,7 @@ pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayou
 
     FeatureTabLayout {
         review_switch,
+        test_strip,
         review,
         frame,
         title,
@@ -3384,6 +3465,7 @@ fn slice_view(view: &FeatureTabView, slice: TabSlice) -> FeatureTabView {
         focus: TabArea::Stages,
         review_page: view.review_page,
         review_switch: None,
+        test_strip: None,
         review_keys: view.review_keys,
         expanded: view.expanded,
         more: 0,
@@ -3450,6 +3532,7 @@ fn slice_view(view: &FeatureTabView, slice: TabSlice) -> FeatureTabView {
             v.focus = view.focus;
             v.more = view.more;
             v.review_switch = view.review_switch.clone();
+            v.test_strip = view.test_strip.clone();
             if strip {
                 repos(&mut v);
             }
@@ -4129,6 +4212,7 @@ impl Painter {
         }
 
         self.review_switch(c, view, l, scale, p);
+        self.test_strip(c, view, l, scale, p);
         self.repo_strip(c, view, l, scale, p);
     }
 
@@ -4296,6 +4380,37 @@ impl Painter {
         );
     }
 
+    /// The line on Manual test's page: how many criteria passed, failed and
+    /// are left, as a bar and in words.
+    fn test_strip(
+        &self,
+        c: &mut Canvas,
+        view: &FeatureTabView,
+        l: &FeatureTabLayout,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let (Some(strip), Some(spots)) = (&view.test_strip, &l.test_strip) else {
+            return;
+        };
+        if let Some(bar) = spots.bar.filter(|_| strip.total() > 0) {
+            let parts = [(strip.passed, p.success), (strip.failed, p.error)];
+            count_bar(c, bar, &parts, strip.total(), scale, p);
+        }
+        let tone = if strip.good() { p.success } else { p.warning };
+        let (x, end) = phys(spots.text, scale);
+        self.bold_text(
+            c,
+            &strip.text,
+            FONT_SIZE,
+            x,
+            end,
+            band(spots.text, scale),
+            scale,
+            tone,
+        );
+    }
+
     /// The switch on Code review's page, with the figures that say how far its
     /// review has come.
     fn review_switch(
@@ -4332,12 +4447,7 @@ impl Painter {
             && let Some(bar) = spots.bar
         {
             let tone = if files.left().1 { p.success } else { p.warning };
-            let (x, y, w, h) = rect_px(bar, scale);
-            c.rounded(x, y, w, h, h / 2.0, p.border);
-            if files.viewed > 0 {
-                let f = files.viewed.min(files.total) as f32 / files.total as f32;
-                c.rounded(x, y, (w * f).max(h), h, h / 2.0, tone);
-            }
+            count_bar(c, bar, &[(files.viewed, tone)], files.total, scale, p);
         }
         let Some((said, good)) = switch.said() else {
             return;
