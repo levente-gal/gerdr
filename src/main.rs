@@ -6910,6 +6910,17 @@ fn extend_path() {
     }
 }
 
+/// Drops what lets a process speak to systemd for the unit gerdr runs in.
+/// Under a session unit like `sway.service`, which takes word from any of its
+/// processes, `podman run` sends its conmon as the unit's main process: when
+/// that container ends, systemd stops the unit and the user is logged out.
+fn leave_service_manager() {
+    for var in ["NOTIFY_SOCKET", "WATCHDOG_PID", "WATCHDOG_USEC"] {
+        // SAFETY: called at the start of `main`, before any other thread.
+        unsafe { std::env::remove_var(var) };
+    }
+}
+
 /// Log to stderr (warnings, or as `RUST_LOG` says) and to `log_path`
 /// (gerdr's own news from info up, everything's warnings): started from a
 /// desktop entry, stderr goes nowhere.
@@ -7001,6 +7012,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (store, loaded) = projects::Store::load();
 
     extend_path();
+    leave_service_manager();
     // The portal can be slow to answer: asked now, alongside the setup.
     let system_theme = system_theme::read();
 
