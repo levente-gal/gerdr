@@ -10,7 +10,9 @@
 
 mod activate;
 mod agent_icons;
+mod agent_tell;
 mod agents;
+mod ai_work;
 mod anim;
 mod app_icons;
 mod checkout;
@@ -111,6 +113,7 @@ mod services;
 mod sidebar;
 mod stage_lock;
 mod stage_models;
+mod stats_panel;
 mod switcher;
 mod syntax;
 mod system_theme;
@@ -1344,6 +1347,8 @@ pub enum Action {
     /// Open the scrollback viewer over the focused terminal, to select
     /// and copy more of its output than a screen.
     Scrollback,
+    /// Open the stats panel on the features' AI work, or close it again.
+    AiStats,
     /// Read the project files again, after one was edited by hand.
     ReloadProjects,
     /// Ask whether to keep the project running, and quit.
@@ -1784,6 +1789,13 @@ pub struct Gerdr {
     /// The address of each workspace folder's repository page, once read
     /// (see `git::web_url`).
     pub repo_pages: HashMap<PathBuf, Option<String>>,
+    /// The features' AI work, kept as it happens (see `ai_work`).
+    pub ai_work: ai_work::Live,
+    /// The stats panel on the AI work, while it is open (see `stats_panel`).
+    pub(crate) ai_stats: Option<stats_panel::StatsPanel>,
+    /// The stats panel as it was when it opened a file in the scrollback
+    /// viewer: closing the viewer shows it again.
+    pub(crate) ai_stats_behind: Option<stats_panel::StatsPanel>,
 
     pub compositor_state: CompositorState,
     pub xdg_shell_state: XdgShellState,
@@ -4550,6 +4562,7 @@ impl Gerdr {
             Action::Features => self.open_features(),
             Action::Scrollback if self.is_open(Overlay::Scrollback) => self.close_scrollback(),
             Action::Scrollback => self.open_focused_scrollback(),
+            Action::AiStats => self.toggle_ai_stats(),
             // Nothing to keep running without a project.
             Action::Quit if self.project.is_none() => self.quit_app(projects::Stops::default()),
             Action::Quit => self.open_quit(),
@@ -6435,6 +6448,8 @@ impl Gerdr {
     /// End gerdr, stopping what `stops` says of the project. It counts as
     /// stopped only once its session is.
     pub fn quit_app(&mut self, stops: projects::Stops) {
+        // Best effort: their rsync stops rather than going on alone.
+        self.ai_work.stop_pulls();
         self.take_web_urls(web_pages::read_now(self.web_panes(), &self.instance_dir));
         self.record_tabs();
         self.close_web_control();
@@ -6753,6 +6768,7 @@ impl Gerdr {
             doc_tab,
             inbox,
             scrollback: self.scrollback_view(),
+            stats: self.ai_stats_view(),
             toasts: self.toast_views(),
             // A file's tab is flat: its page has no bar (see `doc_tab`).
             pane_bars: match flat {
@@ -7243,6 +7259,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         old_zed: Vec::new(),
         old_zed_until: None,
         repo_pages: HashMap::new(),
+        ai_work: ai_work::Live::off(),
+        ai_stats: None,
+        ai_stats_behind: None,
         compositor_state: CompositorState::new::<Gerdr>(&dh),
         xdg_shell_state: XdgShellState::new::<Gerdr>(&dh),
         xdg_decoration_state: XdgDecorationState::new::<Gerdr>(&dh),
@@ -7372,7 +7391,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     state.projects = store;
     state.restore_nav();
+    // Before the features, so each is seen as it is at start.
+    if let Some(done) = state.feature_sender() {
+        state.ai_work = ai_work::Live::start(&projects::data_dir(), done);
+    }
     state.load_features();
+    state.ai_work_backfill();
     state.look_for_sandbox_leftovers();
     if loaded == projects::Loaded::Migrated {
         state.projects.save();

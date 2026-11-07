@@ -29,7 +29,7 @@
 //! `Hidden`); one closed while it runs, until that run is over.
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -1292,6 +1292,29 @@ pub struct T3 {
     pub started_at: Option<std::time::Instant>,
     /// Whether the server is being stopped.
     pub stopping: bool,
+    /// The lines sent to each thread that `t3 thread send` hasn't taken
+    /// yet, oldest first: one that fails is kept with the AI work.
+    told: HashMap<String, VecDeque<crate::agent_tell::Told>>,
+}
+
+impl T3 {
+    /// `told` goes to `thread`.
+    fn telling(&mut self, thread: &str, told: crate::agent_tell::Told) {
+        self.told
+            .entry(thread.to_owned())
+            .or_default()
+            .push_back(told);
+    }
+
+    /// The oldest line going to `thread`, now that a send to it ended.
+    fn told(&mut self, thread: &str) -> Option<crate::agent_tell::Told> {
+        let queue = self.told.get_mut(thread)?;
+        let told = queue.pop_front();
+        if queue.is_empty() {
+            self.told.remove(thread);
+        }
+        told
+    }
 }
 
 impl crate::Gerdr {
@@ -2131,16 +2154,23 @@ impl crate::Gerdr {
         true
     }
 
-    /// Send T3 Code thread `id` a message, as its next turn when it is
-    /// busy, off the event loop. Why not, when it can't be tried.
-    pub(crate) fn t3_send(&mut self, id: &str, text: &str) -> Result<(), String> {
+    /// Send T3 Code thread `id` the line `told`, as its next turn when it
+    /// is busy, off the event loop. Why not, when it can't be tried.
+    pub(crate) fn t3_send(
+        &mut self,
+        id: &str,
+        told: &crate::agent_tell::Told,
+    ) -> Result<(), String> {
         let home = self.t3.home.clone();
         let server = self.t3.server.clone().filter(|_| self.t3.alive);
         let (Some(home), Some(server)) = (home, server) else {
             return Err("T3 Code's server isn't running".into());
         };
         let binary = t3_binary(&home, &server).ok_or_else(|| "no t3 command found".to_owned())?;
-        let (thread, text) = (id.to_owned(), text.to_owned());
+        let (thread, text) = (id.to_owned(), told.text.clone());
+        if self.ai_work.is_on() {
+            self.t3.telling(id, told.clone());
+        }
         self.feature_work(None, move |_| {
             let mut send = std::process::Command::new(&binary);
             send.args(["thread", "send", "--base-dir"])
@@ -2161,8 +2191,12 @@ impl crate::Gerdr {
 
     /// `t3 thread send` to `thread` ended.
     pub(crate) fn t3_told(&mut self, thread: &str, result: Result<(), String>) {
+        let told = self.t3.told(thread);
         if let Err(why) = result {
             tracing::warn!("t3 code: sending thread {thread} a message: {why}");
+            if let Some(told) = told {
+                self.told_failed(&told, crate::ai_work::Via::T3, &why);
+            }
             self.show_error(format!("Couldn't message T3 Code's thread: {why}"));
         }
     }
@@ -2496,6 +2530,27 @@ impl Start<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_send_that_ends_finds_its_line_by_thread() {
+        let told = |n, text: &str| crate::agent_tell::Told {
+            project: "p".into(),
+            slug: "s".into(),
+            stage: crate::feature::Stage::Build,
+            n,
+            kind: crate::ai_work::SendKind::FixOn,
+            text: text.into(),
+        };
+        let mut t3 = T3::default();
+        t3.telling("a", told(1, "one"));
+        t3.telling("b", told(2, "other"));
+        t3.telling("a", told(1, "two"));
+        assert_eq!(t3.told("a"), Some(told(1, "one")));
+        assert_eq!(t3.told("a"), Some(told(1, "two")));
+        assert_eq!(t3.told("a"), None);
+        assert_eq!(t3.told("b"), Some(told(2, "other")));
+        assert!(t3.told.is_empty());
+    }
 
     #[test]
     fn pairing_tokens_move_to_the_query() {

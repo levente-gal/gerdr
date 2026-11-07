@@ -32,6 +32,7 @@ use crate::machine_work::Placed;
 use crate::{
     Gerdr,
     agents::AgentKey,
+    ai_work::SendKind,
     chrome::{CommandsTab, Dot},
     feature::{
         self, Feature, Stage, Status,
@@ -718,7 +719,7 @@ impl Gerdr {
         tracing::warn!("feature {project}/{slug}: Build isn't done: {why}");
         let told = check
             .nudge(&feature.branch())
-            .map(|line| self.tell_build_agent(&feature, &line));
+            .map(|line| self.tell_build_agent(&feature, SendKind::BuildCheck, &line));
         let text = match (&check, told) {
             (BuildCheck::Stray(repos), _) => format!(
                 "Build of \u{201c}{title}\u{201d} changed {}, which the feature doesn't touch; undo it",
@@ -740,44 +741,6 @@ impl Gerdr {
             self.save_feature(project, slug);
         }
         self.show_warning(text);
-    }
-
-    /// Send `line` to the Build agent's tab of `feature`, if it is there.
-    pub(crate) fn tell_build_agent(&mut self, feature: &Feature, line: &str) -> Result<(), String> {
-        let run = feature.runs.get(&Stage::Build);
-        if run.is_some_and(|r| r.held) {
-            return Err("its prompt wasn't sent yet".into());
-        }
-        if let Some(run) = run.filter(|r| r.t3.is_some()) {
-            let id = run
-                .t3_thread()
-                .ok_or_else(|| String::from("its T3 Code draft wasn't sent yet"))?;
-            if !self.t3_thread_state(id).1 {
-                return Err("its T3 Code thread is gone".into());
-            }
-            return self.t3_send(id, line);
-        }
-        let pane = run
-            .and_then(|r| r.pane.clone())
-            .filter(|p| self.pane_there(p))
-            .ok_or_else(|| String::from(TAB_GONE))?;
-        self.tell_agent_pane(&pane, line)
-    }
-
-    /// Type `line` into `pane`, where a stage's agent ran, if something
-    /// still runs there: a pane back at its shell's prompt would run the
-    /// line as a command.
-    pub(crate) fn tell_agent_pane(&mut self, pane: &str, line: &str) -> Result<(), String> {
-        if crate::machine_work::split_pane(pane).is_some() {
-            return self.tell_machine_pane(pane, line);
-        }
-        let Some(herdr) = self.herdr.as_mut() else {
-            return Err("herdr isn't connected".into());
-        };
-        if crate::prepare::step(&herdr.process_info(pane)) != crate::prepare::Step::Busy {
-            return Err(AGENT_QUIT.into());
-        }
-        herdr.send_agent_line(pane, line)
     }
 
     /// The Build of feature `slug` holds on the code `patch`: marked done
@@ -860,7 +823,7 @@ impl Gerdr {
         } else if alive {
             sent = crate::prompts::render_builtin("continue", &values)
                 .map_err(|e| e.to_string())
-                .and_then(|line| self.tell_build_agent(&feature, line.trim()));
+                .and_then(|line| self.tell_build_agent(&feature, SendKind::Continue, line.trim()));
         }
         if let Err(why) = sent {
             if alive && !fresh {

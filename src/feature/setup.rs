@@ -630,15 +630,21 @@ pub fn run(
     report
 }
 
+/// The part of setup log `raw` its last run wrote: from its last start line
+/// on, all of it for a log from before runs were marked.
+pub(crate) fn last_run(raw: &[u8]) -> &[u8] {
+    let start = RUN_START.as_bytes();
+    let from = (raw.windows(start.len()).enumerate())
+        .rfind(|(at, window)| *window == start && (*at == 0 || raw[at - 1] == b'\n'))
+        .map_or(0, |(at, _)| at);
+    &raw[from..]
+}
+
 /// What the viewer shows of the setup log `raw`: its last run, without
 /// terminal escapes, a line a program drew over and over only as it ended.
 pub fn shown_log(raw: &[u8]) -> String {
-    let text = String::from_utf8_lossy(raw);
-    let run = (text.match_indices(RUN_START))
-        .filter(|(at, _)| *at == 0 || text.as_bytes()[at - 1] == b'\n')
-        .last()
-        .map_or(0, |(at, _)| at);
-    let plain = super::verify::strip_escapes(&text[run..]);
+    let text = String::from_utf8_lossy(last_run(raw));
+    let plain = super::verify::strip_escapes(&text);
     let lines = plain.split('\n').map(|line| {
         let line = line.trim_end_matches('\r');
         line.rsplit('\r').next().unwrap_or(line)
@@ -1175,6 +1181,23 @@ mod tests {
         // A log from before runs were marked shows whole.
         assert_eq!(shown_log(b"a\nb\n"), "a\nb\n");
         assert_eq!(shown_log(b""), "");
+    }
+
+    #[test]
+    fn the_last_run_is_cut_from_its_start_line_as_it_was_written() {
+        let raw = b"== Setup started 1\nold\n== Setup started 2\n\x1b[32mgreen\x1b[0m\n10%\r100%\r\nsays == Setup started\n";
+        assert_eq!(
+            last_run(raw),
+            b"== Setup started 2\n\x1b[32mgreen\x1b[0m\n10%\r100%\r\nsays == Setup started\n"
+        );
+        assert_eq!(last_run(b"== Setup started 1\n"), b"== Setup started 1\n");
+        assert_eq!(last_run(b"a\nb\n"), b"a\nb\n");
+        assert_eq!(last_run(b""), b"");
+        // Bytes that aren't text don't move the cut.
+        assert_eq!(
+            last_run(b"\xff\n== Setup started 3\nx"),
+            b"== Setup started 3\nx"
+        );
     }
 
     #[test]

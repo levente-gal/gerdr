@@ -13,6 +13,7 @@ use std::{
 
 use crate::{
     Gerdr,
+    ai_work::SendKind,
     confirm::Then,
     doc_review::DocFile,
     feature::{
@@ -133,7 +134,7 @@ impl Gerdr {
             self.ask_fix_plan(project, slug);
             return true;
         };
-        match self.tell_build_agent(&feature, line) {
+        match self.tell_build_agent(&feature, SendKind::Compact, line) {
             Ok(()) => {
                 let title = &feature.title;
                 self.show_success(format!(
@@ -274,7 +275,7 @@ impl Gerdr {
         values.insert("fix_plan.path".into(), plan.clone());
         let sent = prompts::render_builtin("fix-plan", &values)
             .map_err(|e| e.to_string())
-            .and_then(|line| self.tell_build_agent(&feature, line.trim()));
+            .and_then(|line| self.tell_build_agent(&feature, SendKind::FixPlan, line.trim()));
         let title = &feature.title;
         let text = match sent {
             Ok(()) => format!("The Build agent of \u{201c}{title}\u{201d} plans the fixes"),
@@ -577,7 +578,7 @@ impl Gerdr {
         values.insert("fixes.left".into(), open.to_owned());
         let sent = prompts::render_builtin("fix-on", &values)
             .map_err(|e| e.to_string())
-            .and_then(|line| self.tell_build_agent(feature, line.trim()));
+            .and_then(|line| self.tell_build_agent(feature, SendKind::FixOn, line.trim()));
         if let Err(why) = sent {
             tracing::info!("telling {project}/{slug}'s Build agent to go on with fixes: {why}");
             return self.fixes_stopped(
@@ -762,7 +763,7 @@ impl Gerdr {
         values.insert("comments.path".into(), shown);
         let sent = prompts::render_builtin("send-back", &values)
             .map_err(|e| e.to_string())
-            .and_then(|line| self.tell_build_agent(&feature, line.trim()));
+            .and_then(|line| self.tell_build_agent(&feature, SendKind::SendBack, line.trim()));
         let text = match sent {
             Ok(()) => {
                 format!("Sent the fix plan of \u{201c}{title}\u{201d} back to the Build agent")
@@ -898,7 +899,7 @@ impl Gerdr {
             Go::Again => format!("Fix round {n} sent again"),
         };
         if let Some(line) = self.compact_line(&feature) {
-            match self.tell_build_agent(&feature, line) {
+            match self.tell_build_agent(&feature, SendKind::Compact, line) {
                 Ok(()) => {
                     let said = format!("{why}: the Build agent compacts its chat first");
                     self.fixes_compact(project, slug, &said);
@@ -1024,7 +1025,7 @@ impl Gerdr {
         values.insert("fixes.section".into(), section.clone());
         let sent = prompts::render_builtin("fix-go", &values)
             .map_err(|e| e.to_string())
-            .and_then(|line| self.tell_build_agent(&feature, line.trim()));
+            .and_then(|line| self.tell_build_agent(&feature, SendKind::FixGo, line.trim()));
         let mut to = "the Build agent";
         if let Err(why) = sent {
             tracing::info!("telling {project}/{slug}'s Build agent to make the fixes: {why}");

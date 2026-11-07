@@ -32,7 +32,9 @@ use serde_json::json;
 use smithay::reexports::calloop::channel;
 
 use crate::{
-    Gerdr, agents,
+    Gerdr,
+    agent_tell::Told,
+    agents,
     confirm::Then,
     desktop::shell_quote,
     feature::{
@@ -140,6 +142,8 @@ enum Job {
         line: String,
         data: PathBuf,
         data_there: String,
+        /// The line as it reads here, to keep should it fail.
+        told: Box<Told>,
     },
     Close {
         pane: String,
@@ -197,6 +201,8 @@ pub enum WorkEvent {
         why: String,
         /// The agent quit: it is gone, not out of reach.
         quit: bool,
+        /// The line, as it reads here.
+        told: Box<Told>,
     },
     /// The agent in this pane never took a line.
     LineIgnored(String),
@@ -613,13 +619,19 @@ fn do_work(
                 line,
                 data,
                 data_there,
+                told,
             }) => {
-                let told = reach
+                let typed = reach
                     .push_data(&data, &data_there, false, stop)
                     .map_err(|t| (t.text().to_owned(), false))
                     .and_then(|()| type_line(&mut herdr, &pane, &line));
-                if let Err((why, quit)) = told {
-                    tell(WorkEvent::NotTold { pane, why, quit });
+                if let Err((why, quit)) = typed {
+                    tell(WorkEvent::NotTold {
+                        pane,
+                        why,
+                        quit,
+                        told,
+                    });
                 }
             }
             Ok(Job::Close { pane }) => {
@@ -880,6 +892,13 @@ impl Gerdr {
             .find(|work| work.id == id)
     }
 
+    /// How to reach machine `id`, and its folders, for a thread of its own
+    /// that copies AI work from there: none while its link is down.
+    pub(crate) fn archive_reach(&self, machine_id: &str) -> Option<(Reach, Side)> {
+        let work = self.work_of(machine_id)?;
+        Some((work.reach(), work.side()))
+    }
+
     fn work_of_mut(&mut self, id: &str) -> Option<&mut Work> {
         (self.machines.links.values_mut())
             .filter_map(|link| link.work.as_mut())
@@ -996,10 +1015,10 @@ impl Gerdr {
             .find(|f| crate::feature::view::panes_of(f).contains(&pane))
     }
 
-    /// Type `line` to the agent in `pane` on another machine, its paths as
-    /// they read there. It goes in the machine's turn: a failure comes later,
-    /// as a warning.
-    pub(crate) fn tell_machine_pane(&mut self, pane: &str, line: &str) -> Result<(), String> {
+    /// Type the line `told` to the agent in `pane` on another machine, its
+    /// paths as they read there. It goes in the machine's turn: a failure
+    /// comes later, as a warning.
+    pub(crate) fn tell_machine_pane(&mut self, pane: &str, told: &Told) -> Result<(), String> {
         let (id, bare) = split_pane(pane).ok_or_else(|| String::from("no such pane"))?;
         let name = self.machine_name(id);
         let Some(work) = self.work_of(id) else {
@@ -1014,9 +1033,10 @@ impl Gerdr {
         let data = store::dir(None, &feature.project, &feature.slug);
         let job = Job::Tell {
             pane: bare.to_owned(),
-            line: paths.text(line),
+            line: paths.text(&told.text),
             data_there: paths.there(&data),
             data,
+            told: Box::new(told.clone()),
         };
         work.jobs
             .send(job)
@@ -1248,9 +1268,15 @@ impl Gerdr {
                 kind,
                 result,
             } => self.machine_started(id, (&project, &slug, stage), n, kind, result),
-            WorkEvent::NotTold { pane, why, quit } => {
+            WorkEvent::NotTold {
+                pane,
+                why,
+                quit,
+                told,
+            } => {
                 let name = self.machine_name(id);
                 tracing::warn!("telling pane {pane} on {name}: {why}");
+                self.told_failed(&told, crate::ai_work::Via::Machine, &why);
                 let then = if quit {
                     ""
                 } else {

@@ -221,6 +221,8 @@ impl Gerdr {
 
     /// What the viewer takes the place of goes.
     fn close_for_scrollback(&mut self) {
+        // Another file in the viewer: the stats panel isn't what is under it.
+        self.ai_stats_behind = None;
         self.switcher = None;
         self.project_menu = None;
         self.worktrees.close();
@@ -416,6 +418,11 @@ impl Gerdr {
     /// Close the viewer.
     pub fn close_scrollback(&mut self) {
         self.scrollback = None;
+        // Opened from the stats panel, the viewer goes back to it.
+        if let Some(panel) = self.ai_stats_behind.take() {
+            self.ai_stats = Some(panel);
+            self.ai_stats_refresh();
+        }
         // Gone, the terminal under the pointer gets it back.
         self.refresh_pointer_focus();
     }
