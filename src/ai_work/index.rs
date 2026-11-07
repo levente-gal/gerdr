@@ -166,11 +166,15 @@ fn remove(file: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// What `open_read` says of an index not made yet, or of another version
+/// and so about to be made again: the stats are still to come.
+pub const NOT_MADE: &str = "the index isn't made yet";
+
 /// The index under `root`, only to read.
 pub fn open_read(root: &Path) -> Result<Connection, String> {
     let file = path(root);
     if !file.exists() {
-        return Err("the index isn't made yet".to_owned());
+        return Err(NOT_MADE.to_owned());
     }
     let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
     let fail = |e: rusqlite::Error| format!("reading {}: {e}", file.display());
@@ -178,7 +182,7 @@ pub fn open_read(root: &Path) -> Result<Connection, String> {
     conn.busy_timeout(BUSY).map_err(fail)?;
     let found: i64 = (conn.query_row("PRAGMA user_version", [], |r| r.get(0))).map_err(fail)?;
     if found != version() {
-        return Err("the index is being drawn again".to_owned());
+        return Err(NOT_MADE.to_owned());
     }
     Ok(conn)
 }
@@ -253,6 +257,35 @@ pub fn ingest(conn: &mut Connection, dirs: &[PathBuf]) -> Result<usize, String> 
         true => Ok(lines),
         false => Err(failed.join("; ")),
     }
+}
+
+/// Take out of `conn` the features whose folder is gone: their AI work
+/// was removed by hand. How many.
+pub fn prune(conn: &mut Connection) -> Result<usize, String> {
+    let fail = |e: rusqlite::Error| e.to_string();
+    let tx = (conn.transaction_with_behavior(TransactionBehavior::Immediate)).map_err(fail)?;
+    let gone: Vec<(String, String, String)> = {
+        let mut stmt = tx
+            .prepare("SELECT project, slug, dir FROM features")
+            .map_err(fail)?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .map_err(fail)?;
+        let all: Vec<(String, String, String)> = rows.collect::<Result<_, _>>().map_err(fail)?;
+        (all.into_iter())
+            .filter(|(_, _, dir)| !Path::new(dir).exists())
+            .collect()
+    };
+    for (project, slug, dir) in &gone {
+        let f = Feature {
+            project: project.clone(),
+            slug: slug.clone(),
+            dir: Path::new(dir),
+        };
+        wipe(&tx, &f, &format!("{dir}/")).map_err(fail)?;
+    }
+    tx.commit().map_err(fail)?;
+    Ok(gone.len())
 }
 
 /// A feature being taken in: its names and its folder.
@@ -1395,6 +1428,23 @@ mod tests {
                 .collect()
         };
         assert_eq!(is, vec![8]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_feature_whose_folder_went_leaves_the_index() {
+        let root = root("prune");
+        let (a, b) = (root.join("p").join("a"), root.join("p").join("b"));
+        append(&a, "here", &[note(0, 10)]);
+        append(&b, "here", &[note(0, 10)]);
+        let mut conn = open(&root).unwrap();
+        ingest(&mut conn, &[a.clone(), b.clone()]).unwrap();
+        assert_eq!(count(&conn, "notes"), 2);
+        std::fs::remove_dir_all(&b).unwrap();
+        assert_eq!(prune(&mut conn), Ok(1));
+        assert_eq!(count(&conn, "notes"), 1);
+        assert_eq!(count(&conn, "features"), 1);
+        assert_eq!(prune(&mut conn), Ok(0));
         let _ = std::fs::remove_dir_all(&root);
     }
 

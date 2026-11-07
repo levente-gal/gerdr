@@ -783,6 +783,7 @@ impl Worker {
     /// panel can stop: what is left comes in at the next change, or the
     /// next start. False: stop.
     fn catch_up(&mut self, jobs: &mpsc::Receiver<Job>, queue: &mut VecDeque<Job>) -> bool {
+        self.prune_gone();
         let dirs = super::index::dirs(&self.root);
         let total = dirs.len();
         let begun = Instant::now();
@@ -815,6 +816,31 @@ impl Worker {
         }
         self.cancel.store(false, Ordering::Relaxed);
         !self.stop.load(Ordering::Relaxed)
+    }
+
+    /// Take the features whose AI work was removed by hand out of the
+    /// index. With no index yet there is nothing to take out.
+    fn prune_gone(&mut self) {
+        if self.index.is_none() && !super::index::path(&self.root).exists() {
+            return;
+        }
+        let conn = match self.index.take() {
+            Some(conn) => Ok(conn),
+            None => super::index::open(&self.root),
+        };
+        let mut conn = match conn {
+            Ok(conn) => conn,
+            Err(why) => return self.failed("stats", "Couldn't update the AI work stats", why),
+        };
+        match super::index::prune(&mut conn) {
+            Ok(0) => {}
+            Ok(n) => {
+                tracing::info!("ai work: {n} features gone from the stats: their folders are");
+                self.report(Report::Indexed { lines: 0 });
+            }
+            Err(why) => self.failed("stats", "Couldn't update the AI work stats", why),
+        }
+        self.index = Some(conn);
     }
 
     /// Take feature folder `dir`'s new lines into the index: how many,

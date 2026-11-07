@@ -6091,34 +6091,34 @@ const GOLDEN_STATS: [[u64; 5]; 4] = [
     // Dark at 1
     [
         0x3ecd7ae10491736d, // stats_empty
-        0x4db8367a92bbd159, // stats_loaded
+        0x7ff1c5244db4a4bd, // stats_loaded
         0x9a6b94f0298e73af, // stats_detail
         0x4e7cc838543fc104, // stats_error
-        0xfb2b003820ccb01b, // stats_agents
+        0x60991de1592ee886, // stats_agents
     ],
     // Dark at 2
     [
         0x6c4dc1ffbab0344c, // stats_empty
-        0xa7d7398b35f469ee, // stats_loaded
+        0xbc6749187627e251, // stats_loaded
         0xb19f933e3e7a7fce, // stats_detail
         0x2b6e230562105139, // stats_error
-        0x3292e612b9090e1a, // stats_agents
+        0xd7503278afc50519, // stats_agents
     ],
     // Light at 1
     [
         0x6695908c94c81dd2, // stats_empty
-        0xd3f9f3332bde0d29, // stats_loaded
+        0x8375ecb1097bdd5e, // stats_loaded
         0xc1d59a6f6af5ac0d, // stats_detail
         0xa75f2212f3552f53, // stats_error
-        0x2cbb1f7ad8577dee, // stats_agents
+        0xe49ef6e8b8245c36, // stats_agents
     ],
     // Light at 2
     [
         0x2065c665d0b7b6f5, // stats_empty
-        0x0b60bbbae3167cf7, // stats_loaded
+        0x92397aeafb1cfd13, // stats_loaded
         0x7babe280ab55f696, // stats_detail
         0x4bff2eb6622e1e98, // stats_error
-        0xac2dc27058ad1885, // stats_agents
+        0xbacf9f97ed3f17a7, // stats_agents
     ],
 ];
 

@@ -1792,6 +1792,9 @@ pub struct Gerdr {
     pub ai_work: ai_work::Live,
     /// The stats panel on the AI work, while it is open (see `stats_panel`).
     pub(crate) ai_stats: Option<stats_panel::StatsPanel>,
+    /// The stats panel as it was when it opened a file in the scrollback
+    /// viewer: closing the viewer shows it again.
+    pub(crate) ai_stats_behind: Option<stats_panel::StatsPanel>,
 
     pub compositor_state: CompositorState,
     pub xdg_shell_state: XdgShellState,
@@ -7257,6 +7260,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         repo_pages: HashMap::new(),
         ai_work: ai_work::Live::off(),
         ai_stats: None,
+        ai_stats_behind: None,
         compositor_state: CompositorState::new::<Gerdr>(&dh),
         xdg_shell_state: XdgShellState::new::<Gerdr>(&dh),
         xdg_decoration_state: XdgDecorationState::new::<Gerdr>(&dh),

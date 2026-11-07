@@ -41,6 +41,8 @@ pub struct View {
     pub agents: Vec<AgentRow>,
     pub checks: Vec<CheckRow>,
     pub detail: Option<Detail>,
+    /// AI work is kept, but the index isn't drawn from it yet.
+    pub building: bool,
 }
 
 /// A feature, on the Features tab. Times are in seconds.
@@ -717,7 +719,9 @@ fn agents(conn: &Connection, project: Option<&str>) -> rusqlite::Result<Vec<Agen
             model,
             runs: sum.runs,
             median_secs: median(sum.spans),
-            tokens_per_run: (sum.with_usage > 0).then(|| sum.tokens / u64::from(sum.with_usage)),
+            // Chats that tell no tokens (Cursor's) say nothing of them.
+            tokens_per_run: (sum.with_usage > 0 && sum.tokens > 0)
+                .then(|| sum.tokens / u64::from(sum.with_usage)),
             nudge_rate: rate(sum.nudged, sum.runs),
             send_back_rate: rate(sum.sent_back, sum.runs),
             findings: sum.findings,

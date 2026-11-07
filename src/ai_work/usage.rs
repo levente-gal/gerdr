@@ -254,6 +254,30 @@ fn cursor_conn(raw: &[u8]) -> rusqlite::Result<rusqlite::Connection> {
     Ok(conn)
 }
 
+/// The messages of Cursor chat database `raw`, as its blobs hold them
+/// (a role and a content each), in the order they were written. Blobs
+/// that are no message are left out.
+pub fn cursor_messages(raw: &[u8]) -> Result<Vec<Value>, String> {
+    let read = || -> rusqlite::Result<Vec<Value>> {
+        let conn = cursor_conn(raw)?;
+        let mut stmt = conn.prepare("SELECT data FROM blobs ORDER BY rowid")?;
+        let mut rows = stmt.query([])?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next()? {
+            let Ok(data) = row.get::<_, Vec<u8>>(0) else {
+                continue;
+            };
+            if let Ok(blob) = serde_json::from_slice::<Value>(&data)
+                && blob["role"].is_string()
+            {
+                out.push(blob);
+            }
+        }
+        Ok(out)
+    };
+    read().map_err(|err| err.to_string())
+}
+
 fn cursor_rows(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<Message>> {
     let meta = conn.query_row("SELECT value FROM meta WHERE key = '0'", [], |r| {
         r.get::<_, String>(0)

@@ -59,7 +59,7 @@ pub(crate) const KEYS: &[(&str, &str)] = &[
     ("Ctrl+F / /", "Search the rows"),
     ("Ctrl+O", "Open the run's transcript or the check's log"),
     ("Ctrl+C", "Copy the row"),
-    ("Ctrl+R", "Draw the index again from the kept files"),
+    ("Ctrl+R", "Draw the stats again from the kept files"),
     ("Esc", "Clear the search, go back, then close"),
     ("F1", "List these keys"),
 ];
@@ -149,6 +149,11 @@ pub(crate) struct StatsPanel {
     /// The Features list as it was before Enter showed a feature, to go
     /// back to.
     back: Option<Back>,
+    /// The title of the feature shown in detail, as its record or its row
+    /// said it, until the index says it.
+    detail_title: Option<String>,
+    /// Enter was pressed while the rows were still to come.
+    enter_queued: bool,
 }
 
 impl StatsPanel {
@@ -166,11 +171,17 @@ impl StatsPanel {
         }
     }
 
-    /// The panel on feature `feature` (project, slug) in detail; Esc goes
-    /// back to the Features tab of `project`, as `new` has it.
-    pub fn on_feature(project: Option<(String, String)>, feature: (String, String)) -> Self {
+    /// The panel on feature `feature` (project, slug), called `title`, in
+    /// detail; Esc goes back to the Features tab of `project`, as `new` has
+    /// it.
+    pub fn on_feature(
+        project: Option<(String, String)>,
+        feature: (String, String),
+        title: Option<String>,
+    ) -> Self {
         let mut panel = Self::new(project);
         panel.scope.detail = Some(feature);
+        panel.detail_title = title.filter(|t| !t.is_empty());
         panel
     }
 
@@ -238,14 +249,14 @@ impl StatsPanel {
                 col("Stage", 76, false),
                 col("Agent", 84, false),
                 col("Model", 0, false),
-                col("Runs", 40, true),
-                col("Median", 56, true),
-                col("Tokens", 56, true),
-                col("Nudged", 56, true),
-                col("Sent back", 66, true),
-                col("Findings", 96, false),
-                col("Fixes", 44, true),
-                col("Verify", 52, true),
+                col("Runs", 36, true),
+                col("Median", 52, true),
+                col("Tokens/run", 72, true),
+                col("Nudged", 52, true),
+                col("Sent back", 62, true),
+                col("Findings", 84, false),
+                col("Fixes", 36, true),
+                col("Verify passed", 86, true),
             ],
             Tab::Checks => vec![
                 col("Repository", 150, false),
@@ -303,6 +314,8 @@ impl StatsPanel {
             && view.checks.is_empty()
             && view.detail.is_none();
         let note = match (self.scope.detail.is_some(), self.scope.tab) {
+            // Kept, but not in the index yet: it is drawn from the files.
+            _ if nothing && view.building => "Building the stats from the AI work kept…",
             (true, _) => "No AI work kept for this feature yet",
             (false, _) if nothing => "No AI work kept yet",
             (false, Tab::Features) => "No features with AI work kept yet",
@@ -413,6 +426,14 @@ impl StatsPanel {
     /// Show the selected feature in detail, if it is one.
     fn drill(&mut self, now: u64) -> Option<Outcome> {
         let (project, slug) = self.selected_line(now)?.drill?;
+        self.detail_title = (self.current().and_then(|v| v.as_ref().ok()))
+            .and_then(|v| {
+                v.features
+                    .iter()
+                    .find(|f| f.project == project && f.slug == slug)
+            })
+            .map(|f| f.title.clone())
+            .filter(|t| !t.is_empty());
         let view = self.view.take();
         self.back = Some((view, self.selected, self.first));
         self.scope.detail = Some((project, slug));
@@ -427,6 +448,7 @@ impl StatsPanel {
     /// was then. Opened on the feature, the list is still to read.
     fn leave_detail(&mut self) -> Option<Outcome> {
         self.scope.detail = None;
+        self.detail_title = None;
         self.query.clear();
         self.searching = false;
         match self.back.take() {
@@ -449,12 +471,13 @@ impl StatsPanel {
         let Some(line) = self.selected_line(now) else {
             return Outcome::NothingToOpen;
         };
+        // What it is says the run or the check: the title names whose.
+        let title = match self.scope.detail {
+            Some(_) => self.title(),
+            None => line.cells.first().cloned().unwrap_or_default(),
+        };
         match line.open {
-            Some((path, what)) => Outcome::Open {
-                path,
-                what,
-                title: line.cells.first().cloned().unwrap_or_default(),
-            },
+            Some((path, what)) => Outcome::Open { path, what, title },
             None => Outcome::NothingToOpen,
         }
     }
@@ -481,7 +504,8 @@ impl StatsPanel {
         now: u64,
     ) -> Option<Outcome> {
         let bare = !(mods.ctrl || mods.alt || mods.logo || mods.shift);
-        let ctrl = mods.ctrl && !(mods.alt || mods.logo);
+        // Ctrl alone: Ctrl+Shift+O and the like are no keys of the panel's.
+        let ctrl = mods.ctrl && !(mods.alt || mods.logo || mods.shift);
         // The keys listed take only what closes them.
         if self.keys {
             if bare && matches!(sym, Keysym::Escape | Keysym::F1 | Keysym::Return) {
@@ -536,6 +560,11 @@ impl StatsPanel {
             Keysym::Return | Keysym::KP_Enter => {
                 if self.focus != StatsFocus::List {
                     self.focus = StatsFocus::List;
+                    return None;
+                }
+                // Its rows still to come: it goes once they are.
+                if self.current().is_none() {
+                    self.enter_queued = true;
                     return None;
                 }
                 return self.drill(now);
@@ -656,20 +685,25 @@ impl StatsPanel {
             .collect()
     }
 
+    /// The panel's title: the feature's in its detail, as the index says
+    /// it once read, as its record or row said it until then.
+    fn title(&self) -> String {
+        let Some((_, slug)) = &self.scope.detail else {
+            return "AI work".into();
+        };
+        let read = (self.current().and_then(|v| v.as_ref().ok()))
+            .and_then(|v| v.detail.as_ref())
+            .map(|d| d.title.clone());
+        (read.filter(|t| !t.is_empty() && t != slug))
+            .or_else(|| self.detail_title.clone())
+            .unwrap_or_else(|| slug.clone())
+    }
+
     /// What the panel shows at `now`.
     pub fn view(&self, now: u64) -> StatsView {
         let lines = self.lines(now);
         let detail = self.scope.detail.as_ref();
-        let title = match (detail, self.current()) {
-            (
-                Some(_),
-                Some(Ok(View {
-                    detail: Some(d), ..
-                })),
-            ) if !d.title.is_empty() => d.title.clone(),
-            (Some((_, slug)), _) => slug.clone(),
-            (None, _) => "AI work".into(),
-        };
+        let title = self.title();
         let selected = self.selected.min(lines.len().saturating_sub(1));
         let selected = lines
             .get(selected)
@@ -768,6 +802,15 @@ pub(crate) fn tokens(n: u64) -> String {
     }
 }
 
+/// Tokens in and out: "12.3k / 950", or "–" when none were told, as a
+/// Cursor chat tells none.
+fn tokens_both(input: u64, output: u64) -> String {
+    match (input, output) {
+        (0, 0) => NONE.into(),
+        _ => format!("{} / {}", tokens(input), tokens(output)),
+    }
+}
+
 /// A share, 0 to 1, as a percentage: "40%".
 fn share(of: f32) -> String {
     format!("{:.0}%", of * 100.0)
@@ -830,7 +873,7 @@ fn feature_line(f: &stats::FeatureRow, all: bool, now: u64) -> Line {
                 span(f.ai_secs),
                 f.runs.to_string(),
                 f.fix_rounds.to_string(),
-                format!("{} / {}", tokens(f.tokens_in), tokens(f.tokens_out)),
+                tokens_both(f.tokens_in, f.tokens_out),
                 f.nudges.to_string(),
                 f.send_backs.to_string(),
             ],
@@ -938,7 +981,7 @@ fn detail_lines(d: &stats::Detail, now: u64) -> Vec<Line> {
                         agent_name(r.agent.name()),
                         model_name(&r.model),
                         took(Some(r.started), r.ended),
-                        format!("{} / {}", tokens(r.tokens_in), tokens(r.tokens_out)),
+                        tokens_both(r.tokens_in, r.tokens_out),
                         r.nudges.to_string(),
                         r.send_backs.to_string(),
                     ],
@@ -996,11 +1039,16 @@ fn read(root: Option<&Path>, scope: &Scope) -> Result<View, String> {
     let Some(root) = root else {
         return Ok(nothing());
     };
-    if !index::path(root).exists() {
-        return Ok(nothing());
+    // Kept, the index not drawn from it yet: it is on the way.
+    let building = || View {
+        building: !index::dirs(root).is_empty(),
+        ..nothing()
+    };
+    match index::open_read(root) {
+        Ok(conn) => stats::query(&conn, scope),
+        Err(why) if why == index::NOT_MADE => Ok(building()),
+        Err(why) => Err(why),
     }
-    let conn = index::open_read(root)?;
-    stats::query(&conn, scope)
 }
 
 /// The text of a kept file at `path`, to read: unpacked when it is
@@ -1011,14 +1059,17 @@ pub(crate) fn readable(path: &Path) -> Result<String, String> {
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
     let plain = name.strip_suffix(".zst").unwrap_or(&name);
-    if plain.ends_with(".db") {
-        return Err("a Cursor chat is kept as its database, which can't be shown as text".into());
-    }
     let raw = std::fs::read(path).map_err(|err| err.to_string())?;
     let bytes = match plain.len() < name.len() {
         true => zst::decompress(&raw).map_err(|err| err.to_string())?,
         false => raw,
     };
+    // A Cursor chat is kept as its database: its messages are read out.
+    if plain.ends_with(".db") {
+        let messages = ai_work::usage::cursor_messages(&bytes)?;
+        let lines: Vec<String> = messages.iter().map(Value::to_string).collect();
+        return Ok(chat_text(&lines.join("\n")));
+    }
     let text = String::from_utf8_lossy(&bytes);
     Ok(match plain.ends_with(".jsonl") {
         true => chat_text(&text),
@@ -1038,7 +1089,7 @@ pub(crate) fn chat_text(jsonl: &str) -> String {
             .get("message")
             .or_else(|| value.get("payload"))
             .unwrap_or(&value);
-        let role = [body.get("role"), value.get("role"), value.get("type")]
+        let mut role = [body.get("role"), value.get("role"), value.get("type")]
             .into_iter()
             .flatten()
             .find_map(Value::as_str)
@@ -1046,6 +1097,10 @@ pub(crate) fn chat_text(jsonl: &str) -> String {
         let mut said = Vec::new();
         if let Some(content) = body.get("content") {
             words(content, &mut said);
+        } else if body["type"] == "function_call" {
+            // Codex's tool calls are lines of their own.
+            words(body, &mut said);
+            role = "assistant";
         }
         let said = said.join("\n");
         if said.trim().is_empty() {
@@ -1069,16 +1124,69 @@ fn words(content: &Value, out: &mut Vec<String>) {
         Value::String(text) => out.push(text.clone()),
         Value::Array(parts) => parts.iter().for_each(|part| words(part, out)),
         Value::Object(part) => {
+            let name = (part.get("name").or_else(|| part.get("toolName"))).and_then(Value::as_str);
             if let Some(Value::String(text)) = part.get("text") {
                 out.push(text.clone());
-            } else if let Some(Value::String(name)) = part.get("name") {
-                out.push(format!("[{name}]"));
+            } else if let Some(name) = name {
+                let input = ["input", "args", "arguments"]
+                    .into_iter()
+                    .find_map(|k| part.get(k))
+                    .and_then(tool_gist);
+                out.push(match input {
+                    Some(gist) => format!("[{name}] {gist}"),
+                    None => format!("[{name}]"),
+                });
             } else if let Some(inner) = part.get("content") {
                 words(inner, out);
             }
         }
         _ => {}
     }
+}
+
+/// What a tool was called with, in one line: its command, its file, what
+/// it looked for; else the first text it was given. JSON given as text
+/// (Codex's arguments) is read first.
+fn tool_gist(input: &Value) -> Option<String> {
+    let parsed;
+    let input = match input {
+        Value::String(text) => match serde_json::from_str::<Value>(text) {
+            Ok(value @ Value::Object(_)) => {
+                parsed = value;
+                &parsed
+            }
+            _ => return first_line(text),
+        },
+        other => other,
+    };
+    let keys = [
+        "command",
+        "cmd",
+        "file_path",
+        "path",
+        "pattern",
+        "query",
+        "url",
+        "description",
+        "prompt",
+    ];
+    let said = |v: &Value| match v {
+        Value::String(text) => first_line(text),
+        Value::Array(parts) => {
+            let words: Vec<&str> = parts.iter().filter_map(Value::as_str).collect();
+            first_line(&words.join(" "))
+        }
+        _ => None,
+    };
+    let object = input.as_object()?;
+    (keys.iter().find_map(|k| object.get(*k).and_then(said)))
+        .or_else(|| object.values().find_map(said))
+}
+
+/// The first line of `text` that says something, cut short when long.
+fn first_line(text: &str) -> Option<String> {
+    let line = text.lines().map(str::trim).find(|l| !l.is_empty())?;
+    Some(short(line, 160))
 }
 
 /// Now, in seconds since the epoch.
@@ -1116,10 +1224,14 @@ impl Gerdr {
                 .map_or_else(|| id.clone(), |p| p.name.clone());
             (id, name)
         });
-        // Over a feature's tab, on that feature.
+        // Over a feature's tab, on that feature, by the title its record has.
         let feature = (self.features.panel.as_ref()).map(|p| (p.project.clone(), p.slug.clone()));
+        self.ai_stats_behind = None;
         self.ai_stats = Some(match feature {
-            Some(feature) => StatsPanel::on_feature(project, feature),
+            Some((p, slug)) => {
+                let title = self.feature(&p, &slug).map(|f| f.title.clone());
+                StatsPanel::on_feature(project, (p, slug), title)
+            }
             None => StatsPanel::new(project),
         });
         self.ai_stats_request();
@@ -1173,6 +1285,12 @@ impl Gerdr {
         panel.reading = false;
         panel.view = Some(result.map(|view| View { scope, ..view }));
         panel.settle(panel.selected, true, page, now_secs());
+        // Enter pressed while they were to come acts on them now.
+        if std::mem::take(&mut panel.enter_queued)
+            && let Some(outcome) = panel.drill(now_secs())
+        {
+            self.apply_ai_stats(outcome);
+        }
     }
 
     /// How many rows the panel's list shows.
@@ -1216,11 +1334,11 @@ impl Gerdr {
                 }
                 if matches!(self.ai_work.busy, Some(ai_work::Busy::Rescan { .. })) {
                     return self
-                        .show_warning("The AI work's index is being drawn again already".into());
+                        .show_warning("The AI work's stats are being drawn again already".into());
                 }
                 // Read again once it is drawn (`Report::Rescanned`).
                 self.ai_work.send(Job::Rescan);
-                self.show_notice("Drawing the AI work's index again from its files".into());
+                self.show_notice("Drawing the AI work's stats again from its files".into());
             }
             Outcome::Open { path, what, title } => self.ai_stats_open(path, what, title),
         }
@@ -1262,7 +1380,11 @@ impl Gerdr {
                 return self.show_error(format!("Couldn't open the {what}: {err}"));
             }
         };
-        self.ai_stats = None;
+        // Esc from the viewer comes back to the panel as it was.
+        self.ai_stats_behind = self.ai_stats.take().map(|mut panel| {
+            panel.hover = None;
+            panel
+        });
         self.stop_key_repeat();
         self.tooltip.hide();
         self.chrome.drop_tooltip();
@@ -1437,6 +1559,7 @@ pub(crate) mod fixtures {
                 last_log: Some("/d/blobs/ab/ab12.zst".into()),
             }],
             detail: None,
+            building: false,
         }
     }
 
@@ -1707,7 +1830,7 @@ mod tests {
     fn opened_on_a_feature_esc_reads_the_features_list() {
         let feature = ("gerdr".to_owned(), "stats".to_owned());
         let project = Some(("gerdr".to_owned(), "gerdr".to_owned()));
-        let mut panel = StatsPanel::on_feature(project, feature.clone());
+        let mut panel = StatsPanel::on_feature(project, feature.clone(), None);
         assert_eq!(panel.scope.detail, Some(feature));
         assert_eq!(panel.esc_word(), "back");
         panel.view = Some(Ok(detail(panel.scope.clone())));
@@ -1792,10 +1915,47 @@ mod tests {
         let mut panel = detail_panel();
         key(&mut panel, Keysym::Down);
         key(&mut panel, Keysym::Down);
-        let Some(Outcome::Open { what, .. }) = ctrl(&mut panel, Keysym::o) else {
+        let Some(Outcome::Open { what, title, .. }) = ctrl(&mut panel, Keysym::o) else {
             panic!("no transcript");
         };
         assert_eq!(what, "Transcript of Build 1");
+        // The viewer says the run once, and whose it is.
+        assert_eq!(title, "Keep all AI work");
+    }
+
+    /// Ctrl with Shift is no key of the panel's.
+    #[test]
+    fn ctrl_shift_keys_do_nothing() {
+        let mut panel = loaded();
+        for sym in [Keysym::r, Keysym::o, Keysym::c, Keysym::f] {
+            assert_eq!(
+                press(&mut panel, mods(true, true), sym, sym),
+                None,
+                "{sym:?}"
+            );
+        }
+        assert!(!panel.searching);
+    }
+
+    /// Enter while the rows are still to come acts once they are.
+    #[test]
+    fn enter_while_reading_waits_for_the_rows() {
+        let mut panel = panel(|_| None);
+        assert_eq!(key(&mut panel, Keysym::Return), None);
+        assert!(panel.enter_queued);
+        panel.view = Some(Ok(view(panel.scope.clone())));
+        assert!(std::mem::take(&mut panel.enter_queued));
+        assert_eq!(panel.drill(NOW), Some(Outcome::Read));
+        assert!(panel.scope.detail.is_some());
+    }
+
+    /// Opened on a feature, its record's title shows before the index says
+    /// it.
+    #[test]
+    fn opened_on_a_feature_its_title_shows_at_once() {
+        let feature = ("gerdr".to_owned(), "stats".to_owned());
+        let panel = StatsPanel::on_feature(None, feature, Some("Keep all AI work".into()));
+        assert_eq!(panel.view(NOW).title, "Keep all AI work");
     }
 
     #[test]
@@ -1889,7 +2049,7 @@ mod tests {
     }
 
     #[test]
-    fn a_kept_file_is_unpacked_and_a_cursor_chat_refused() {
+    fn a_kept_file_is_unpacked_and_a_cursor_chat_read() {
         let dir = std::env::temp_dir().join(format!("gerdr-stats-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let log = dir.join("ab12.zst");
@@ -1899,7 +2059,31 @@ mod tests {
         let line = br#"{"message":{"role":"user","content":"hi"}}"#;
         std::fs::write(&chat, zst::compress(line, 3).unwrap()).unwrap();
         assert_eq!(readable(&chat).unwrap(), "user: hi");
-        assert!(readable(&dir.join("store.db.zst")).is_err());
+        // A Cursor chat's database, its messages read out in order.
+        let db = dir.join("store.db");
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch("CREATE TABLE blobs (id TEXT PRIMARY KEY, data BLOB);")
+            .unwrap();
+        let blobs = [
+            r#"{"role":"user","content":"list it"}"#,
+            "\u{1}encrypted",
+            r#"{"role":"assistant","content":[{"type":"text","text":"Sure"},{"type":"tool-call","toolName":"shell","args":{"command":"ls -la\nmore"}}]}"#,
+        ];
+        for (i, b) in blobs.iter().enumerate() {
+            conn.execute(
+                "INSERT INTO blobs VALUES (?1, ?2)",
+                rusqlite::params![format!("z{i}"), b.as_bytes()],
+            )
+            .unwrap();
+        }
+        drop(conn);
+        let packed = dir.join("store.db.zst");
+        let raw = std::fs::read(&db).unwrap();
+        std::fs::write(&packed, zst::compress(&raw, 3).unwrap()).unwrap();
+        assert_eq!(
+            readable(&packed).unwrap(),
+            "user: list it\n\nassistant: Sure\n[shell] ls -la"
+        );
         assert!(readable(&dir.join("gone.zst")).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1907,8 +2091,50 @@ mod tests {
     #[test]
     fn with_no_index_nothing_is_kept_yet() {
         let dir = std::env::temp_dir().join(format!("gerdr-stats-none-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         let scope = Scope::default();
         assert_eq!(read(Some(&dir), &scope), Ok(View::default()));
         assert_eq!(read(None, &scope), Ok(View::default()));
+        // AI work kept, no index yet: the stats are on the way.
+        std::fs::create_dir_all(dir.join("p").join("a")).unwrap();
+        let view = read(Some(&dir), &scope).unwrap();
+        assert!(view.building);
+        let mut panel = StatsPanel::new(None);
+        panel.view = Some(Ok(view));
+        assert_eq!(
+            panel.note(NOW),
+            Some(("Building the stats from the AI work kept…".into(), false))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_tool_call_says_what_it_was_called_with() {
+        let said = |line: &str| chat_text(line);
+        assert_eq!(
+            said(
+                r#"{"message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":{"command":"cargo test","description":"run"}}]}}"#
+            ),
+            "assistant: [Bash] cargo test"
+        );
+        assert_eq!(
+            said(
+                r#"{"message":{"role":"assistant","content":[{"type":"tool_use","name":"Read","input":{"file_path":"/a/b.rs"}}]}}"#
+            ),
+            "assistant: [Read] /a/b.rs"
+        );
+        assert_eq!(
+            said(
+                r#"{"message":{"role":"assistant","content":[{"type":"tool_use","name":"Todo"}]}}"#
+            ),
+            "assistant: [Todo]"
+        );
+        // Codex's: its arguments are JSON in a string.
+        assert_eq!(
+            said(
+                r#"{"type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{\"command\":[\"bash\",\"-lc\",\"ls\"]}"}}"#
+            ),
+            "assistant: [shell] bash -lc ls"
+        );
     }
 }
