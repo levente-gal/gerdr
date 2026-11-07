@@ -524,7 +524,7 @@ pub fn without_added_milestones(log: &str, planned: usize) -> String {
         }
         if inside && let Some(mark) = artifacts::checkbox(line.trim_start()) {
             boxes += 1;
-            if boxes > planned && mark == "[ ]" {
+            if boxes > planned && !artifacts::ticked(mark) {
                 continue;
             }
         }
@@ -546,7 +546,7 @@ pub fn without_unticked(log: &str, n: u32) -> String {
         .position(|line| line.starts_with("# ") || line.starts_with("## "))
         .map_or(lines.len(), |i| start + 1 + i);
     let body: Vec<&str> = (lines[start + 1..next].iter().copied())
-        .filter(|line| artifacts::checkbox(line.trim_start()) != Some("[ ]"))
+        .filter(|line| artifacts::checkbox(line.trim_start()).is_none_or(artifacts::ticked))
         .collect();
     let mut out: Vec<&str> = lines[..start].to_vec();
     if body.iter().all(|line| line.trim().is_empty()) {

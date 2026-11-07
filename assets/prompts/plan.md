@@ -19,7 +19,16 @@ Your job: turn the approved brief into a plan the Build stage can follow.
 
    - `## Milestones`: a checkbox list (`- [ ] …`), each milestone small
      enough to build and check on its own, in the order to build them.
+{{#if multi_repo}}
+     Keep each to one repository where you can, and put what the repositories
+     must agree on (an API, a schema) in its own milestone first: milestones
+     that need nothing of each other are built at once.
+{{/if}}
      Under each, as indented lines:
+{{#if multi_repo}}
+     `Repo:` the repository it changes;
+     `Needs:` the milestones that must be done before it, or “none”;
+{{/if}}
      `Files:` the files it changes, so Build need not search for them;
      `Covers:` the brief's acceptance criteria it meets;
      `Check:` how to tell it works: the one test file or test name to run,

@@ -11,7 +11,8 @@
 //! level, case-insensitively; fenced code doesn't count.
 //!
 //! A build log (`build.md`, Build) needs `## Milestones` with at least one
-//! checkbox item, and is good once every one is ticked (`- [x] …`);
+//! checkbox item, and is good once every one is ticked (`- [x] …`; `- [~] …`
+//! is one its agent says it is at work on);
 //! `milestones` counts them, for the stops between milestones. A
 //! checkbox item may be a numbered one too (`1. [ ] …`).
 
@@ -311,7 +312,7 @@ pub fn check(stage: Stage, text: &str) -> Result<(), Vec<String>> {
 pub fn milestones(text: &str) -> (usize, usize) {
     let body = Sections::of(text).get("Milestones").unwrap_or_default();
     let boxes: Vec<&str> = body.iter().filter_map(|l| checkbox(l)).collect();
-    let ticked = boxes.iter().filter(|b| **b != "[ ]").count();
+    let ticked = boxes.iter().filter(|b| ticked(b)).count();
     (ticked, boxes.len())
 }
 
@@ -342,8 +343,19 @@ pub fn items_under(text: &str, heading: &str) -> Vec<(bool, String)> {
         .filter_map(|line| {
             let mark = checkbox(line)?;
             let rest = list_item(line)?.strip_prefix(mark)?;
-            Some((mark != "[ ]", rest.trim().to_owned()))
+            Some((ticked(mark), rest.trim().to_owned()))
         })
+        .collect()
+}
+
+/// Where in `milestone_items(text)` the items its agent says it is at work
+/// on (`- [~] …`) are.
+pub fn milestones_running(text: &str) -> Vec<usize> {
+    let body = Sections::of(text).get("Milestones").unwrap_or_default();
+    (body.iter().filter_map(|line| checkbox(line)))
+        .enumerate()
+        .filter(|(_, mark)| *mark == RUNNING)
+        .map(|(i, _)| i)
         .collect()
 }
 
@@ -486,11 +498,19 @@ pub(crate) fn list_item(line: &str) -> Option<&str> {
     Some(rest?.trim_start())
 }
 
-/// The box of checkbox list item `line` (trimmed): `[ ]`, `[x]` or
+/// The box of an item its agent says it is at work on.
+const RUNNING: &str = "[~]";
+
+/// Whether checkbox `mark` (see `checkbox`) says its item is done.
+pub(crate) fn ticked(mark: &str) -> bool {
+    matches!(mark, "[x]" | "[X]")
+}
+
+/// The box of checkbox list item `line` (trimmed): `[ ]`, `[~]`, `[x]` or
 /// `[X]`. A numbered item (`1. [ ] …`, `1) [ ] …`) counts too.
 pub(crate) fn checkbox(line: &str) -> Option<&'static str> {
     let rest = list_item(line)?;
-    ["[ ]", "[x]", "[X]"]
+    ["[ ]", RUNNING, "[x]", "[X]"]
         .into_iter()
         .find(|b| rest.starts_with(b))
 }
@@ -781,6 +801,17 @@ mod tests {
         // Boxes in code don't count.
         let fenced = "## Milestones\n```\n- [ ] a\n```\n- [x] b\n";
         assert_eq!(milestones(fenced), (1, 1));
+    }
+
+    #[test]
+    fn a_milestone_at_work_is_there_but_not_ticked() {
+        let log = "## Milestones\n- [x] API\n- [~] UI\n- [ ] Docs\n1. [~] Tests\n";
+        assert_eq!(milestones(log), (1, 4));
+        assert_eq!(milestones_running(log), [1, 3]);
+        assert_eq!(milestone_items(log)[1], (false, "UI".to_owned()));
+        assert!(check(Stage::Build, log).is_err());
+        assert!(milestones_running("## Milestones\n- [ ] a\n- [x] b\n").is_empty());
+        assert!(milestones_running("## Notes\n- [~] a\n").is_empty());
     }
 
     #[test]

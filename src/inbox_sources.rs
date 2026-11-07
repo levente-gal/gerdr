@@ -787,7 +787,7 @@ fn gate_words(gate: &Gate) -> (String, String, Option<&'static str>) {
             (format!("{kind} ready: “{title}”"), review, file)
         }
         GateKind::Milestone { done, total } => (
-            format!("Build of “{title}”: milestone {done} of {total} done"),
+            format!("Build of “{title}” stopped after milestone {done} of {total}"),
             "continue".to_owned(),
             crate::feature::artifacts::name(Stage::Build),
         ),
@@ -1529,7 +1529,7 @@ mod tests {
             lines,
             [
                 (
-                    "Build of “log-in title”: milestone 2 of 4 done",
+                    "Build of “log-in title” stopped after milestone 2 of 4",
                     "p1 name · continue"
                 ),
                 (

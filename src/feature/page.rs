@@ -43,6 +43,9 @@ pub struct Docs {
     /// Build's milestones by name, `true` = ticked (see
     /// `artifacts::milestone_items`); none for a file not there.
     pub milestones: BTreeMap<Stage, Vec<(bool, String)>>,
+    /// Which of Build's milestones its agent says it is at work on (see
+    /// `artifacts::milestones_running`).
+    pub milestones_running: Vec<usize>,
     /// The fixes each fix round listed in the build log, by round, oldest
     /// first (see `fix_round::rounds`).
     pub fix_rounds: Vec<(u32, Vec<(bool, String)>)>,
@@ -234,6 +237,7 @@ pub fn read_docs(data: &Path) -> Docs {
             Ok(text) => {
                 docs.milestones
                     .insert(stage, artifacts::milestone_items(&text));
+                docs.milestones_running = artifacts::milestones_running(&text);
                 docs.fix_rounds = fix_round::rounds(&text);
             }
             Err(err) => tracing::warn!("reading {}: {err}", path.display()),

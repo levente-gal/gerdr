@@ -6,9 +6,11 @@
 //! runs it first, and starts the agent once it is done.
 //!
 //! Build: its agent (see `feature_agents`) builds the plan's milestones
-//! one at a time in the touched worktrees, commits each, ticks it in
-//! `build.md`, and stops: the feature waits at a milestone gate until the
-//! user lets it go on (`continue_stage_agent`). With every milestone
+//! right through in the touched worktrees, commits each and ticks it in
+//! `build.md`, marking `[~]` what it is at work on. One resting with some left
+//! is told to go on; only one that gets no further waits at a milestone gate
+//! for the user (`continue_stage_agent`). With a fresh agent per milestone
+//! each stops at its milestone and gerdr starts the next. With every milestone
 //! ticked and the agent done, gerdr reads the code: nothing uncommitted,
 //! no change in an untouched repository, at least one commit. Then gerdr
 //! marks Build done on that code and runs Verify.
@@ -824,19 +826,39 @@ impl Gerdr {
 
     /// Let `stage`'s agent of feature `slug` go on after a milestone stop.
     pub fn continue_stage_agent(&mut self, project: &str, slug: &str, stage: Stage) {
-        let Some(feature) = self.feature(project, slug).cloned() else {
+        let Some(feature) = self.feature(project, slug) else {
             return;
         };
-        let title = &feature.title;
         let run = feature
             .runs
             .get(&stage)
             .filter(|_| feature.status == Status::Open && feature.current() == Some(stage));
-        let Some((run, stop)) = run.and_then(|r| Some((r.clone(), r.stop?))) else {
+        let Some(stop) = run.and_then(|r| r.stop) else {
+            let title = &feature.title;
             return self.show_warning(format!(
                 "The {} agent of \u{201c}{title}\u{201d} isn't stopped at a milestone",
                 stage.label()
             ));
+        };
+        self.go_on_from(project, slug, stage, stop, true);
+    }
+
+    /// `stage`'s agent of feature `slug` goes on from `stop`. `asked`: the user
+    /// said so, and hears it did.
+    pub(crate) fn go_on_from(
+        &mut self,
+        project: &str,
+        slug: &str,
+        stage: Stage,
+        stop: feature::agents::Stop,
+        asked: bool,
+    ) {
+        let Some(feature) = self.feature(project, slug).cloned() else {
+            return;
+        };
+        let title = &feature.title;
+        let Some(run) = feature.runs.get(&stage).cloned() else {
+            return;
         };
         // Past the plan's milestones what's left is fixes an agent wrote in as
         // milestones: they go as the round they came from, not one by one.
@@ -917,12 +939,14 @@ impl Gerdr {
         let mut watch = Watch::of(run.n);
         watch.went_on = Some(stop.done);
         self.features.agents.insert(key, watch);
-        self.show_success(format!(
-            "{} of \u{201c}{title}\u{201d} goes on with milestone {} of {}",
-            stage.label(),
-            stop.done + 1,
-            stop.total
-        ));
+        if asked {
+            self.show_success(format!(
+                "{} of \u{201c}{title}\u{201d} goes on with milestone {} of {}",
+                stage.label(),
+                stop.done + 1,
+                stop.total
+            ));
+        }
     }
 
     // ----------------------------------------------------------- verify

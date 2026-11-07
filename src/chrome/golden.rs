@@ -3052,6 +3052,7 @@ pub(super) fn feature_tab() -> super::FeatureTabView {
                     ]
                     .map(|(d, t)| (d, t.to_owned()))
                     .into(),
+                    running: Vec::new(),
                     buttons: Vec::new(),
                 },
                 PageSection::Milestones {
@@ -3068,6 +3069,7 @@ pub(super) fn feature_tab() -> super::FeatureTabView {
                     ]
                     .map(|(d, t)| (d, t.to_owned()))
                     .into(),
+                    running: vec![3, 4],
                     buttons: Vec::new(),
                 },
             ],
@@ -3499,6 +3501,7 @@ fn feature_tab_open_round() -> super::FeatureTabView {
             ]
             .map(|(d, t)| (d, t.to_owned()))
             .into(),
+            running: Vec::new(),
             buttons: Vec::new(),
         },
     );
@@ -4977,9 +4980,9 @@ const FEATURE_TAB: [&str; 52] = [
 const GOLDEN_FEATURE_TAB: [[u64; 52]; 4] = [
     // Dark at 1
     [
-        0xf9675552d233b10a, // tab_build_860
-        0xd228b38c94dd8c3a, // tab_build_1180
-        0x73e9bf04b13bb83a, // tab_build_1920
+        0xa1cb47fc387244fb, // tab_build_860
+        0xe439bc6e843af18f, // tab_build_1180
+        0x5e841e6e2835a33f, // tab_build_1920
         0xe189a91009663b5f, // tab_plan_ready_1180
         0xe5c6b54fe50866d8, // tab_verify_failed_1920
         0x182a16a4819b681d, // tab_verify_running_1180
@@ -4995,24 +4998,24 @@ const GOLDEN_FEATURE_TAB: [[u64; 52]; 4] = [
         0xa9a0b346455ef4a5, // tab_unfolded_1920
         0x04e5e35642817215, // tab_shipped_1180
         0x81472ba0294ba9a3, // tab_repos_failed_1180
-        0xb96f9863922c3230, // tab_repos_error_860
-        0xa19b5a83949cc20e, // tab_more_repos_850
-        0x1ecdd2993d120611, // tab_more_repos_mid_850
-        0xc0e3b12a3c33a1c2, // tab_rail_wrap_500
-        0xda975f306189a7f5, // tab_rail_wrap_1180
+        0x7bd54bcba61e72c5, // tab_repos_error_860
+        0xef44c914ca5fffc7, // tab_more_repos_850
+        0xb5a3233ac93c9508, // tab_more_repos_mid_850
+        0x60ded0b28fb6bee3, // tab_rail_wrap_500
+        0x716b40ef5a012cb0, // tab_rail_wrap_1180
         0xd82dd2c9a82f222d, // tab_picks_later_1180
-        0x376c0417eef61db2, // tab_picks_running_860
+        0x523374f3503f6b33, // tab_picks_running_860
         0x5b4ea1e7416a2668, // tab_model_later_1180
-        0x7bce49ebb9bcf203, // tab_model_long_860
+        0x5a5068350321a55e, // tab_model_long_860
         0x1b190673f5a76dea, // tab_t3_draft_860
-        0xaf602045190a3d50, // tab_milestone_mode_1180
-        0x396fb6a2733ad4fb, // tab_milestone_mode_860
+        0x399e4a5edb3d0e41, // tab_milestone_mode_1180
+        0x357b66d29749d302, // tab_milestone_mode_860
         0x3daadf48429854b9, // tab_held_860
         0xdd57288e450f32e2, // tab_resume_1180
         0x1d3b7ea983d73226, // tab_resume_860
         0x37ef3c6e3ca8a6a0, // tab_fixing_1180
-        0xbf7e4abcb96a309b, // tab_fixed_code_1180
-        0x8f9e32b3d5bddd9a, // tab_fixed_code_860
+        0x8321e646c7b94f9a, // tab_fixed_code_1180
+        0xd2b31d606f880bab, // tab_fixed_code_860
         0x9b367d320c5201f4, // tab_approved_1180
         0xf2b01358173773fd, // tab_locked_1180
         0x7561d1ebf47b39af, // tab_start_over_1180
@@ -5022,19 +5025,19 @@ const GOLDEN_FEATURE_TAB: [[u64; 52]; 4] = [
         0xda3254659545ff6d, // tab_manual_test_1180
         0xd356fc844361740e, // tab_manual_note_860
         0xaae0ccef435a4695, // tab_review_rounds_1180
-        0xde0e7ad0287e548c, // tab_verify_fixes_1180
-        0xe02ce500d771436c, // tab_verify_fixes_860
+        0x1cdf599525fd2195, // tab_verify_fixes_1180
+        0x1f9c87379eb46eac, // tab_verify_fixes_860
         0x991d1848f7033107, // tab_review_page_1180
-        0xc4b722d8b35c09b2, // tab_open_round_1180
-        0xa55646a352f29557, // tab_open_round_860
+        0x1ab3028834af4e64, // tab_open_round_1180
+        0xae6244bc63e11d4d, // tab_open_round_860
         0x3ca562e56cb5ac79, // tab_manual_pages_860
         0xebe69c2a656a36be, // tab_manual_search_860
     ],
     // Dark at 2
     [
-        0xb9c345019ed356d9, // tab_build_860
-        0x800da66a31d8d30d, // tab_build_1180
-        0x1d8d87be5b31fe25, // tab_build_1920
+        0x1813f1afbef89404, // tab_build_860
+        0x791a3739a7050d68, // tab_build_1180
+        0x4efdc144802d38f8, // tab_build_1920
         0xd84ef3781722f490, // tab_plan_ready_1180
         0xd1ad4571a21deadf, // tab_verify_failed_1920
         0xe95f15636a93b97f, // tab_verify_running_1180
@@ -5050,24 +5053,24 @@ const GOLDEN_FEATURE_TAB: [[u64; 52]; 4] = [
         0x93365c790b704686, // tab_unfolded_1920
         0x0a0e10a081f275bb, // tab_shipped_1180
         0x2ffda56703f0873f, // tab_repos_failed_1180
-        0xaba2be30e237b8a2, // tab_repos_error_860
-        0x53817be82422cb6e, // tab_more_repos_850
-        0x18f33014ce8b6e4a, // tab_more_repos_mid_850
-        0xbc30f89f92aa7d86, // tab_rail_wrap_500
-        0x921c98e9244d040a, // tab_rail_wrap_1180
+        0xcc7d7b883c120c03, // tab_repos_error_860
+        0xdbc07eeaf469deff, // tab_more_repos_850
+        0x9a5aa192d13b756b, // tab_more_repos_mid_850
+        0x5f4b22f7e4ddefbb, // tab_rail_wrap_500
+        0x55856d90dae1dbb3, // tab_rail_wrap_1180
         0x8baf7d92f24cc865, // tab_picks_later_1180
-        0x8e05f84c5ec9f311, // tab_picks_running_860
+        0xd858b4b6a497511c, // tab_picks_running_860
         0x289abf81f924a67e, // tab_model_later_1180
-        0x42e952172f88fec2, // tab_model_long_860
+        0xeea191097b6c58e3, // tab_model_long_860
         0x13b24120dc0e0e14, // tab_t3_draft_860
-        0x0dd24db12672cabf, // tab_milestone_mode_1180
-        0xd9cbe87edff301c8, // tab_milestone_mode_860
+        0x25e2289954f2fd82, // tab_milestone_mode_1180
+        0x2521a8778015a78d, // tab_milestone_mode_860
         0x32729d0f0b9d7adf, // tab_held_860
         0x5e8649fc158bfc2e, // tab_resume_1180
         0x30c2ac05c31f179a, // tab_resume_860
         0x8687d8dffc051930, // tab_fixing_1180
-        0x50a35413e771894d, // tab_fixed_code_1180
-        0x164f4a13bb7efd89, // tab_fixed_code_860
+        0xe5309f5ebcaf5328, // tab_fixed_code_1180
+        0xe2ca6f4bc7252cb4, // tab_fixed_code_860
         0xb003336ceee49767, // tab_approved_1180
         0xc4a02e8c5e16bf27, // tab_locked_1180
         0xd146cd83aa7b15e4, // tab_start_over_1180
@@ -5077,19 +5080,19 @@ const GOLDEN_FEATURE_TAB: [[u64; 52]; 4] = [
         0xd9c655ce9a75a8df, // tab_manual_test_1180
         0xa6da4ebd7e0ae33f, // tab_manual_note_860
         0x696373a9ac9ae597, // tab_review_rounds_1180
-        0x83fbb804ca6bacdd, // tab_verify_fixes_1180
-        0x305eebdbc8d8a0ff, // tab_verify_fixes_860
+        0xf6449d4a64d596b8, // tab_verify_fixes_1180
+        0x28d00b565d38589e, // tab_verify_fixes_860
         0xa37c484a9e95f3ca, // tab_review_page_1180
-        0x2cd07330c04ac653, // tab_open_round_1180
-        0x10c9f9ce73220117, // tab_open_round_860
+        0xb6c596e311face93, // tab_open_round_1180
+        0x3f93d48fbc514097, // tab_open_round_860
         0x638d93fbc6e1f713, // tab_manual_pages_860
         0xf221ec8385fae2e3, // tab_manual_search_860
     ],
     // Light at 1
     [
-        0x04c809a4c167b192, // tab_build_860
-        0xb0b25bdd655a681b, // tab_build_1180
-        0xaa14f34031677e08, // tab_build_1920
+        0x9fe5226d7f54bfe8, // tab_build_860
+        0x9bb2694db8c65bdd, // tab_build_1180
+        0x9e1efe8b0cb41b26, // tab_build_1920
         0xbd427b01de8543f6, // tab_plan_ready_1180
         0x7c07bc659866d87e, // tab_verify_failed_1920
         0x4a8e336fe34d7a13, // tab_verify_running_1180
@@ -5105,24 +5108,24 @@ const GOLDEN_FEATURE_TAB: [[u64; 52]; 4] = [
         0x20dbf102ddafdfa1, // tab_unfolded_1920
         0x5b330bf0d9c30f69, // tab_shipped_1180
         0x96a55c04b91c96ae, // tab_repos_failed_1180
-        0x74033dce5d135882, // tab_repos_error_860
-        0x57d0e19254b9b578, // tab_more_repos_850
-        0x95bb652361dba386, // tab_more_repos_mid_850
-        0xe2ef18873a51e643, // tab_rail_wrap_500
-        0x68f263e05babdfd2, // tab_rail_wrap_1180
+        0x4b827bc5d4a22378, // tab_repos_error_860
+        0x286417632bb9751e, // tab_more_repos_850
+        0x18c7a26f85b1fcec, // tab_more_repos_mid_850
+        0x70a81da1b6817435, // tab_rail_wrap_500
+        0x1a5e937548fa7f50, // tab_rail_wrap_1180
         0x9cbfe325692a158e, // tab_picks_later_1180
-        0x173f70f7fb4ad282, // tab_picks_running_860
+        0xeebeaeef72d99d78, // tab_picks_running_860
         0x57c74b45fd9d3840, // tab_model_later_1180
-        0xd38cbb1d6f63b976, // tab_model_long_860
+        0x1875a99afb819f1c, // tab_model_long_860
         0xfc9fc69cee351bb5, // tab_t3_draft_860
-        0xba4fa0201506e0d7, // tab_milestone_mode_1180
-        0x471fdf111e2c5e70, // tab_milestone_mode_860
+        0xb5ee209b2e91e529, // tab_milestone_mode_1180
+        0x2028b1f71ea7076e, // tab_milestone_mode_860
         0x2da12a0b77b87f7d, // tab_held_860
         0x06e5930e69a1bf8d, // tab_resume_1180
         0xa3c3da37be3f43ac, // tab_resume_860
         0x25a49252fee1fa58, // tab_fixing_1180
-        0xaf4cef34a6a2dfbe, // tab_fixed_code_1180
-        0x0b52d132849cc628, // tab_fixed_code_860
+        0x83816428fbbefe7c, // tab_fixed_code_1180
+        0x5a22cd3eb219f9be, // tab_fixed_code_860
         0xf19adff484ee2b2a, // tab_approved_1180
         0x7f803f198678b403, // tab_locked_1180
         0x7b90aece3880d81f, // tab_start_over_1180
@@ -5132,19 +5135,19 @@ const GOLDEN_FEATURE_TAB: [[u64; 52]; 4] = [
         0xa3e0ebbd2a4604b0, // tab_manual_test_1180
         0x5673f5d1da0365bf, // tab_manual_note_860
         0x29372c9287bd44bf, // tab_review_rounds_1180
-        0x8200660d7d2c371d, // tab_verify_fixes_1180
-        0xbe515ae3c5939904, // tab_verify_fixes_860
+        0x6d347c11e8a9dfb7, // tab_verify_fixes_1180
+        0x490ed3d87f30d272, // tab_verify_fixes_860
         0xc80d83cdbecf59b3, // tab_review_page_1180
-        0xbd227132ee696c72, // tab_open_round_1180
-        0x31a745f74d2e8e52, // tab_open_round_860
+        0xcf3c025a23ff89a8, // tab_open_round_1180
+        0xa5b2c702e3dcfd64, // tab_open_round_860
         0x3d753e7555e243d8, // tab_manual_pages_860
         0x0cc17567dfb80ce6, // tab_manual_search_860
     ],
     // Light at 2
     [
-        0xfbc3dbe2a34bb4a2, // tab_build_860
-        0x273e62a2467699da, // tab_build_1180
-        0x2b8defda8efa404a, // tab_build_1920
+        0x7f27ddfbd3ee1cca, // tab_build_860
+        0x6d7f9ad149916b76, // tab_build_1180
+        0x77a01303162dca9a, // tab_build_1920
         0x765df7bc08d22fb0, // tab_plan_ready_1180
         0x834e87d1b77bb685, // tab_verify_failed_1920
         0x82805a0d8a12c5b7, // tab_verify_running_1180
@@ -5160,24 +5163,24 @@ const GOLDEN_FEATURE_TAB: [[u64; 52]; 4] = [
         0xeb7e4df37f643511, // tab_unfolded_1920
         0x287d19ae79556ac4, // tab_shipped_1180
         0x1bf86e4e01f7dfe7, // tab_repos_failed_1180
-        0x859ae20922da839a, // tab_repos_error_860
-        0xdb348ffe8d464149, // tab_more_repos_850
-        0x23ea1c960d70a015, // tab_more_repos_mid_850
-        0xca229003853bb88f, // tab_rail_wrap_500
-        0xfb93f52c68572787, // tab_rail_wrap_1180
+        0xbf1bb5086a68b5b2, // tab_repos_error_860
+        0xa727912a15f49241, // tab_more_repos_850
+        0x5101d91b272b6165, // tab_more_repos_mid_850
+        0x6363e3b4c300bab7, // tab_rail_wrap_500
+        0x7417ef85da3d7fa7, // tab_rail_wrap_1180
         0xf7066df5c259ecf7, // tab_picks_later_1180
-        0xa524103c6ea9d7ce, // tab_picks_running_860
+        0x61baf4140acc772e, // tab_picks_running_860
         0xe21cfcfdfbe96e55, // tab_model_later_1180
-        0x75b112aa93f616e1, // tab_model_long_860
+        0x83de7249a97db3c9, // tab_model_long_860
         0x59cc00aad601ffe0, // tab_t3_draft_860
-        0x7db0625b54db10d8, // tab_milestone_mode_1180
-        0xd9961ae96276662e, // tab_milestone_mode_860
+        0xb5503f8cd4b47c38, // tab_milestone_mode_1180
+        0x7a752d7c956977ca, // tab_milestone_mode_860
         0x3d244f2c3d21f79d, // tab_held_860
         0x02071bcc4b2b9ced, // tab_resume_1180
         0xb0d99250844e1321, // tab_resume_860
         0xe86e179b29262da5, // tab_fixing_1180
-        0xd023fb401802a513, // tab_fixed_code_1180
-        0xc188f1c793de230c, // tab_fixed_code_860
+        0xfefd74873e1b308b, // tab_fixed_code_1180
+        0x6f50a852c4a3c270, // tab_fixed_code_860
         0x094c66e22d9bdfdb, // tab_approved_1180
         0xf689681c2eec0052, // tab_locked_1180
         0xba74f3edaf07f8ca, // tab_start_over_1180
@@ -5187,11 +5190,11 @@ const GOLDEN_FEATURE_TAB: [[u64; 52]; 4] = [
         0x3ede05e76054f570, // tab_manual_test_1180
         0x474d8c1cfa1394f7, // tab_manual_note_860
         0x18a3b0870e7a6ac2, // tab_review_rounds_1180
-        0x8162095ee657492d, // tab_verify_fixes_1180
-        0xa1c6ec276ac6f131, // tab_verify_fixes_860
+        0x975a0edb5a888f19, // tab_verify_fixes_1180
+        0x06334814357ca080, // tab_verify_fixes_860
         0xb7f9bee96811fb6a, // tab_review_page_1180
-        0x752ec2845bdeb8a4, // tab_open_round_1180
-        0xd75e42f004429c32, // tab_open_round_860
+        0x05be9740c8c25364, // tab_open_round_1180
+        0xfafa8c8fa68aecb2, // tab_open_round_860
         0xcba476b8512b8cc8, // tab_manual_pages_860
         0x44ba953b9b4a7da9, // tab_manual_search_860
     ],
