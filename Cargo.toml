@@ -8,7 +8,7 @@ license = "MIT"
 ab_glyph = "0.2"
 calloop-wayland-source = "0.4"
 dbus = { version = "0.9.12", features = ["vendored"] }
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled", "serialize"] }
 libc = "0.2.190"
 resvg = { version = "0.48.1", default-features = false }
 serde = { version = "1.0.229", features = ["derive"] }

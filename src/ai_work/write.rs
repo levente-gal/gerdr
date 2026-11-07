@@ -28,6 +28,13 @@ pub fn events_path(dir: &Path, machine: &str) -> PathBuf {
     dir.join(format!("events-{machine}.jsonl"))
 }
 
+/// The name the lines machine `from` wrote with no id yet (its
+/// `events-here.jsonl`) are kept under here: every machine has a file of
+/// that name, each its own.
+pub fn brought_name(from: &str) -> String {
+    format!("events-here-{}.jsonl", safe_name(from))
+}
+
 /// `name` fit for a file's name: what isn't a letter, digit, `-`, `_` or
 /// `.` becomes `_`, and a name of dots only is `_` too.
 pub fn safe_name(name: &str) -> String {

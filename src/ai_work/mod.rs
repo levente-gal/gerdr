@@ -66,7 +66,8 @@ pub fn dir(data: &Path, project: &str, slug: &str) -> PathBuf {
 }
 
 /// What this machine is called in the files it writes: its id among the
-/// machines, or "here" while it has none.
+/// machines, or "here" while it has none. `Live::start` makes the id, so
+/// two machines never both write `events-here.jsonl` from then on.
 pub fn machine() -> String {
     crate::machine_views::own_id().unwrap_or_else(|| "here".to_owned())
 }
@@ -481,6 +482,11 @@ impl Live {
     /// what it came to. Without its thread the lines are still written,
     /// and the problem is said.
     pub(crate) fn start(data: &Path, done: channel::Sender<Done>) -> Self {
+        // The lines name this machine: an id first, or each machine's
+        // would be `here`, and one would go over another's.
+        if data == crate::projects::data_dir() {
+            crate::machine_lease::own_id_made();
+        }
         let root = root(data);
         let (tx, rx) = mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));

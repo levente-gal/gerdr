@@ -247,6 +247,14 @@ impl TakeJob {
             let mut record = self.parse(&raw)?;
             reach.pull_data(&local, &dir, cancel)?;
             // Saved there before it was handed: what came with it is its own.
+            // `pull_data` leaves a copy here newer by its time, but what is
+            // kept beside the record must be the record's.
+            for side in lease::SIDES {
+                let raw = reach.script(&lease::record_script(&dir, side), cancel)?;
+                store::put_side(&local, side, raw.as_bytes()).map_err(|err| {
+                    TakeEnd::Failed(format!("Couldn't save its {side} here: {err}"))
+                })?;
+            }
             store::attach_sides(&local, &mut record);
             let feature = self.taken(&record)?;
             reach.view_code(&feature, &self.places(&feature), &mut known, cancel)?;
@@ -661,15 +669,22 @@ impl Gerdr {
         let (jobs, done) = (self.ai_work.sender(), self.feature_sender());
         let (name, shown) = (self.machine_name(from), title.to_owned());
         let (project, slug) = (project.to_owned(), slug.to_owned());
-        let (title, name_there) = (title.to_owned(), name.clone());
+        let (title, name_there, from) = (title.to_owned(), name.clone(), from.to_owned());
+        let history = self.feature(&project, &slug).map_or(0, |f| f.history.len());
         let pull = move || {
             let name = name_there;
             let quiet = AtomicBool::new(false);
-            match reach.pull_ai_work(&there, &local, &quiet) {
+            match reach.pull_ai_work(&there, &local, &from, &quiet) {
                 Ok(true) => {
                     if let Some(jobs) = jobs {
+                        // What came holds the earlier work: it isn't kept again.
+                        let job = crate::ai_work::thread::Job::Brought {
+                            project,
+                            slug,
+                            history,
+                        };
                         // Gone only when the AI work's thread is: gerdr is quitting.
-                        let _ = jobs.send(crate::ai_work::thread::Job::Index { project, slug });
+                        let _ = jobs.send(job);
                     }
                 }
                 Ok(false) => {}
@@ -1154,9 +1169,9 @@ impl Gerdr {
 
     /// Another machine's record of feature `slug` won: this one's goes aside.
     ///
-    /// Only the record goes aside (`lease::ASIDE`): what is kept beside it, its
-    /// history and review rounds (`store::HISTORY`, `store::ROUNDS`), stays in
-    /// the folder, and the winner's, coming here later, may write over it.
+    /// The record goes aside (`lease::ASIDE`), and what is kept beside it, its
+    /// history and review rounds (`lease::SIDES`), with it: the winner's,
+    /// coming here later, is never mixed with this one's.
     pub(crate) fn lost_feature(&mut self, project: &str, slug: &str, to: &str) {
         let Some(feature) = (self.features.all.get(project).into_iter().flatten())
             .find(|f| f.slug == slug)
@@ -1165,10 +1180,12 @@ impl Gerdr {
             return;
         };
         let dir = store::project_dir(None, project).join(slug);
-        let aside = dir.join(format!("{}{}", lease::ASIDE, feature::now()));
+        let at = feature::now();
+        let aside = dir.join(lease::aside_name(store::FILE, at));
         let name = self.machine_name(to);
         let moved = crate::projects::write_atomic(&dir.join(lease::HANDED_TO), to.as_bytes())
             .and_then(|()| std::fs::rename(dir.join(store::FILE), &aside));
+        set_sides_aside(&dir, at);
         // Its file gone, that machine got to it first: only memory is left to clear.
         if let Err(err) = moved.or_else(|err| match err.kind() {
             std::io::ErrorKind::NotFound => Ok(()),
@@ -1335,8 +1352,8 @@ pub fn this_machines_name() -> String {
 }
 
 /// This machine's id, made now if no other machine has connected to it yet: a
-/// record names it from here on.
-fn own_id_made() -> Option<String> {
+/// record names it from here on, and so do the AI work's files.
+pub(crate) fn own_id_made() -> Option<String> {
     if let Some(id) = own_id() {
         return Some(id);
     }
@@ -1353,6 +1370,20 @@ fn own_id_made() -> Option<String> {
         return None;
     }
     own_id()
+}
+
+/// Move what is kept beside a record that lost in folder `dir` aside with
+/// it, named for `at` (`lease::aside_name`). None there is nothing to do.
+fn set_sides_aside(dir: &Path, at: u64) {
+    for side in lease::SIDES {
+        let to = dir.join(lease::aside_name(side, at));
+        match std::fs::rename(dir.join(side), &to) {
+            Err(err) if err.kind() != std::io::ErrorKind::NotFound => {
+                tracing::warn!("setting {} aside: {err}", to.display());
+            }
+            _ => {}
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1399,6 +1430,11 @@ mod tests {
             before,
             forced: false,
         };
+        // What this machine had of it before, newer by its time.
+        let mut stale = f.clone();
+        stale.history = Vec::new();
+        stale.log(9, "only here");
+        store::save_at(&job.dir_here(), &stale).unwrap();
         let taken = job.taken_here(&AtomicBool::new(false)).unwrap();
         assert!(taken.same);
         // "Taken over from ana" after what it had.
@@ -1406,6 +1442,23 @@ mod tests {
         assert_eq!(taken.feature.history.len(), 3);
         let mine = store::read_at(&job.dir_here()).unwrap();
         assert_eq!(mine.history, taken.feature.history);
+        std::fs::remove_dir_all(&t).unwrap();
+    }
+
+    #[test]
+    fn what_is_kept_beside_a_record_that_lost_goes_aside_with_it() {
+        let t = std::env::temp_dir().join(format!("gerdr-lease-aside-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&t);
+        std::fs::create_dir_all(&t).unwrap();
+        std::fs::write(t.join(store::HISTORY), "{}\n").unwrap();
+        std::fs::write(t.join(store::ROUNDS), "[]").unwrap();
+        set_sides_aside(&t, 5);
+        for side in lease::SIDES {
+            assert!(!t.join(side).exists(), "{side}");
+            assert!(t.join(lease::aside_name(side, 5)).exists(), "{side}");
+        }
+        // Nothing left to move is nothing to say.
+        set_sides_aside(&t, 6);
         std::fs::remove_dir_all(&t).unwrap();
     }
 }

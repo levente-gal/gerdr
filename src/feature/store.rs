@@ -461,6 +461,22 @@ fn write_whole(path: &Path, bytes: &[u8], sync: bool) -> std::io::Result<()> {
     std::fs::File::open(dir)?.sync_all()
 }
 
+/// Make side file `name` (`HISTORY` or `ROUNDS`) in folder `dir` hold
+/// `bytes`, as another machine has it; none take it away. What was known
+/// of the file here is forgotten, so the next save writes it whole if it
+/// must.
+pub fn put_side(dir: &Path, name: &str, bytes: &[u8]) -> std::io::Result<()> {
+    let path = dir.join(name);
+    saved().remove(&path);
+    if bytes.is_empty() {
+        return match std::fs::remove_file(&path) {
+            Err(err) if err.kind() != ErrorKind::NotFound => Err(err),
+            _ => Ok(()),
+        };
+    }
+    crate::projects::write_atomic(&path, bytes)
+}
+
 /// How the files kept beside a record in a folder stand: when it changes, so
 /// may the feature, with its record the same.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -748,6 +764,37 @@ mod tests {
         let back = read_at(&dir).unwrap();
         assert_eq!(back.history, old.history);
         assert_eq!(back.review, f.review);
+    }
+
+    /// A copy here newer by its time than another machine's is replaced all
+    /// the same, and none there takes this one's away.
+    #[test]
+    fn sides_put_from_elsewhere_are_what_is_read_and_saved() {
+        let t = Temp::new();
+        let mut here = busy("a");
+        here.log(99, "only here");
+        let dir = dir(Some(&t.0), "p", "a");
+        save_at(&dir, &here).unwrap();
+        let there = busy("a");
+        let mut lines = Vec::new();
+        for e in &there.history {
+            serde_json::to_writer(&mut lines, e).unwrap();
+            lines.push(b'\n');
+        }
+        put_side(&dir, HISTORY, &lines).unwrap();
+        put_side(&dir, ROUNDS, b"").unwrap();
+        assert!(!dir.join(ROUNDS).exists());
+        put_side(&dir, ROUNDS, b"").unwrap();
+        let mut record = there.clone();
+        record.history.clear();
+        if let Some(review) = &mut record.review {
+            review.rounds.clear();
+        }
+        attach_sides(&dir, &mut record);
+        assert_eq!(record.history, there.history);
+        record.log(100, "Taken over");
+        save_at(&dir, &record).unwrap();
+        assert_eq!(read_at(&dir).unwrap().history, record.history);
     }
 
     #[test]

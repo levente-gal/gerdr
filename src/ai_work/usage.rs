@@ -229,29 +229,32 @@ fn codex(raw: &[u8]) -> Vec<Message> {
 }
 
 /// Cursor CLI's chat database: its messages are JSON blobs with a role.
-/// It says no tokens and no times.
+/// It says no tokens and no times. The kept copy is read in memory, so
+/// the chat never lands in a temp file other users can read.
 fn cursor(raw: &[u8]) -> Vec<Message> {
-    let file = std::env::temp_dir().join(format!(
-        "gerdr-ai-work-cursor-{}-{}.db",
-        std::process::id(),
-        super::BlobRef::of(raw).sha
-    ));
-    if let Err(err) = std::fs::write(&file, raw) {
-        tracing::warn!("ai work: writing {}: {err}", file.display());
-        return Vec::new();
-    }
-    let read = cursor_rows(&file);
-    if let Err(err) = std::fs::remove_file(&file) {
-        tracing::warn!("ai work: removing {}: {err}", file.display());
-    }
-    read.unwrap_or_else(|err| {
-        tracing::warn!("ai work: reading a Cursor chat: {err}");
-        Vec::new()
-    })
+    cursor_conn(raw)
+        .and_then(|conn| cursor_rows(&conn))
+        .unwrap_or_else(|err| {
+            tracing::warn!("ai work: reading a Cursor chat: {err}");
+            Vec::new()
+        })
 }
 
-fn cursor_rows(file: &std::path::Path) -> rusqlite::Result<Vec<Message>> {
-    let conn = crate::cursor_agents::open_read_only(file)?;
+/// A read-only in-memory database of `raw`, a whole SQLite file.
+fn cursor_conn(raw: &[u8]) -> rusqlite::Result<rusqlite::Connection> {
+    let mut bytes = raw.to_vec();
+    // An in-memory database can't keep a WAL: bytes 18 and 19 say
+    // "rollback journal" so SQLite reads the pages as they are.
+    if bytes.len() >= 20 && bytes.starts_with(b"SQLite format 3\0") {
+        bytes[18] = 1;
+        bytes[19] = 1;
+    }
+    let mut conn = rusqlite::Connection::open_in_memory()?;
+    conn.deserialize_read_exact(rusqlite::MAIN_DB, bytes.as_slice(), bytes.len(), true)?;
+    Ok(conn)
+}
+
+fn cursor_rows(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<Message>> {
     let meta = conn.query_row("SELECT value FROM meta WHERE key = '0'", [], |r| {
         r.get::<_, String>(0)
     });
@@ -471,11 +474,27 @@ mod tests {
 
     #[test]
     fn cursor_chats_count_their_answers() {
-        let dir = std::env::temp_dir().join(format!("gerdr-usage-cursor-{}", std::process::id()));
+        cursor_chat_counts("rollback", "DELETE");
+    }
+
+    /// A chat copied in WAL mode reads in memory too.
+    #[test]
+    fn cursor_chats_in_wal_mode_read_in_memory() {
+        cursor_chat_counts("wal", "WAL");
+    }
+
+    fn cursor_chat_counts(name: &str, journal: &str) {
+        let dir =
+            std::env::temp_dir().join(format!("gerdr-usage-cursor-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let db = dir.join("store.db");
         let conn = rusqlite::Connection::open(&db).unwrap();
+        let _: String = conn
+            .query_row(&format!("PRAGMA journal_mode = {journal}"), [], |r| {
+                r.get(0)
+            })
+            .unwrap();
         conn.execute_batch(
             "CREATE TABLE blobs (id TEXT PRIMARY KEY, data BLOB);
              CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);",
@@ -498,8 +517,11 @@ mod tests {
             )
             .unwrap();
         }
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+            .unwrap();
         drop(conn);
         let raw = std::fs::read(&db).unwrap();
+        assert_eq!(raw[18], if journal == "WAL" { 2 } else { 1 });
         let got = read(AgentKind::Cursor, &raw);
         assert_eq!(got.len(), 2);
         assert_eq!(got[0].model, "grok-4.7");

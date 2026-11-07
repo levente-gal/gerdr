@@ -41,8 +41,17 @@ pub const ANSWER: &str = ".take-answer.json";
 pub const HANDED: &str = "feature.json.handed";
 /// In a feature's folder there: the machine it moved to.
 pub const HANDED_TO: &str = ".handed-to";
-/// What starts the name of a record that lost, kept beside the others.
+/// What starts the name of a record that lost, kept beside the others. What
+/// was kept beside it (`SIDES`) goes aside with it, named by `aside_name`:
+/// the winner's, coming later, has the names to itself.
 pub const ASIDE: &str = "feature.json.aside-";
+/// The files kept beside a record: its history and its review rounds.
+pub const SIDES: [&str; 2] = [store::HISTORY, store::ROUNDS];
+
+/// The name file `file` of a record that lost at `at` is kept under.
+pub fn aside_name(file: &str, at: u64) -> String {
+    format!("{file}.aside-{at}")
+}
 /// In a feature's folder there: what another machine asks of its sandbox.
 pub const SANDBOX_ASK: &str = ".sandbox-ask.json";
 /// In a feature's folder there: why a gerdr open there didn't do what was asked.
@@ -314,13 +323,17 @@ pub fn aside_script(dir: &str, to: &str, at: u64) -> String {
     format!(
         r#"cd {} || exit 0
 [ -e {file} ] && mv {file} {ASIDE}{at}
-rm -f {HANDED}
+{sides}rm -f {HANDED}
 printf '%s' {} > {HANDED_TO}
 exit 0
 "#,
         shell_quote(dir),
         shell_quote(to),
         file = store::FILE,
+        sides = SIDES
+            .iter()
+            .map(|side| format!("[ -e {side} ] && mv {side} {}\n", aside_name(side, at)))
+            .collect::<String>(),
     )
 }
 
@@ -649,9 +662,15 @@ mod tests {
         let t = Temp::new();
         let dir = t.0.to_string_lossy().into_owned();
         std::fs::write(t.0.join(store::FILE), "{}").unwrap();
+        std::fs::write(t.0.join(store::HISTORY), "{}\n").unwrap();
         sh(&aside_script(&dir, "me", 7));
         assert!(!t.0.join(store::FILE).exists());
         assert!(t.0.join(format!("{ASIDE}7")).exists());
+        assert_eq!(aside_name(store::FILE, 7), format!("{ASIDE}7"));
+        // Its history goes with it; there are no rounds to move.
+        assert!(!t.0.join(store::HISTORY).exists());
+        assert!(t.0.join(aside_name(store::HISTORY, 7)).exists());
+        assert!(!t.0.join(aside_name(store::ROUNDS, 7)).exists());
         assert_eq!(std::fs::read_to_string(t.0.join(HANDED_TO)).unwrap(), "me");
     }
 

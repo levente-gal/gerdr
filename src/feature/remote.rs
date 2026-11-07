@@ -689,10 +689,12 @@ fn trouble(what: &str, out: &std::process::Output) -> Trouble {
 }
 
 /// What of a feature's folder isn't its files, and stays on each machine: its
-/// record, one that moved or lost, and what its gerdrs say to each other.
-const RECORDS: [&str; 9] = [
+/// record, one that moved or lost and what was kept beside that, and what its
+/// gerdrs say to each other.
+const RECORDS: [&str; 10] = [
     store::FILE,
     "feature.json.*",
+    "*.aside-*",
     super::lease::REQUEST,
     super::lease::ANSWER,
     super::lease::HANDED_TO,
@@ -724,6 +726,54 @@ pub fn copy_data(copy: &Path, local: &Path, cancel: &AtomicBool) -> Result<(), T
         return Ok(());
     }
     Err(trouble("Couldn't copy the feature's files", &out))
+}
+
+/// The events file a machine writes while it has no id yet.
+const OLD_EVENTS: &str = "events-here.jsonl";
+
+/// What of a feature's AI work folder stays on each machine: chats pulled
+/// half way, how far it was taken there (`cursor.json`), its latest record
+/// there, and its lines from before it had an id, which come apart.
+const AI_WORK_OWN: [&str; 4] = [
+    "/.staging/",
+    "/cursor.json",
+    "/record.json",
+    "/events-here.jsonl",
+];
+
+/// The rsync commands bringing AI work folder `source` (as rsync names it,
+/// ending in `/`) of machine `from` to `local`, over `ssh` when it is
+/// another machine's. `old`: it has lines from before it had an id, which
+/// come as `ai_work::write::brought_name`.
+fn ai_work_copies(
+    source: &str,
+    local: &Path,
+    from: &str,
+    old: bool,
+    ssh: Option<&str>,
+) -> Vec<Command> {
+    let rsync = |args: &[&str]| {
+        let mut rsync = Command::new("rsync");
+        rsync.args(args).arg("--chmod=D700,F600");
+        if let Some(ssh) = ssh {
+            rsync.arg("-e").arg(ssh);
+        }
+        rsync
+    };
+    let mut all = rsync(&["-rlts", "--update"]);
+    all.args(AI_WORK_OWN.iter().flat_map(|file| ["--exclude", file]))
+        .arg(source)
+        .arg(format!("{}/", local.display()));
+    let mut out = vec![all];
+    if old {
+        // Only there does it grow: what is here is an older copy of it.
+        let mut lines = rsync(&["-ts"]);
+        lines
+            .arg(format!("{source}{OLD_EVENTS}"))
+            .arg(local.join(crate::ai_work::write::brought_name(from)));
+        out.push(lines);
+    }
+    out
 }
 
 /// What the commands reaching a machine go through: its link's master.
@@ -937,30 +987,35 @@ impl Reach {
         self.run_rsync("Couldn't copy the features from there", rsync, cancel)
     }
 
-    /// Bring a feature's AI work folder `there` here: only what is newer
-    /// there comes, and nothing here goes. False: there is none there.
-    /// Transcripts can name secrets: only this account reads them here.
+    /// Bring a feature's AI work folder `there` here, from machine `from`:
+    /// only what is newer there comes, and nothing here goes. What each
+    /// machine keeps for itself stays (`AI_WORK_OWN`), and the lines `from`
+    /// wrote with no id yet come under a name of their own. False: there is
+    /// none there. Transcripts can name secrets: only this account reads
+    /// them here.
     pub fn pull_ai_work(
         &self,
         there: &str,
         local: &Path,
+        from: &str,
         cancel: &AtomicBool,
     ) -> Result<bool, Trouble> {
-        let look = format!("[ -d {} ] && echo HERE\nexit 0\n", shell_quote(there));
-        if self.script(&look, cancel)?.trim() != "HERE" {
+        let look = format!(
+            "cd {} 2>/dev/null || exit 0\necho HERE\n[ -f {OLD_EVENTS} ] && echo OLD\nexit 0\n",
+            shell_quote(there)
+        );
+        let said = self.script(&look, cancel)?;
+        let said: Vec<&str> = said.lines().map(str::trim).collect();
+        if !said.contains(&"HERE") {
             return Ok(false);
         }
         crate::ai_work::write::make_dir(local)
             .map_err(|err| Trouble::Work(format!("Couldn't make {}: {err}", local.display())))?;
-        let mut rsync = Command::new("rsync");
-        rsync
-            .args(["-rlts", "--update", "--chmod=D700,F600"])
-            .args(["--exclude", "/.staging/"])
-            .arg("-e")
-            .arg(self.ssh_line())
-            .arg(self.rsync_path(there))
-            .arg(format!("{}/", local.display()));
-        self.run_rsync("Couldn't copy the AI work from there", rsync, cancel)?;
+        let ssh = self.ssh_line();
+        let source = self.rsync_path(there);
+        for rsync in ai_work_copies(&source, local, from, said.contains(&"OLD"), Some(&ssh)) {
+            self.run_rsync("Couldn't copy the AI work from there", rsync, cancel)?;
+        }
         Ok(true)
     }
 
@@ -1407,6 +1462,27 @@ mod tests {
         assert!(!Path::new(&to).join("sandbox").exists());
         // Only the feature's own: another folder of that name is just that.
         assert!(Path::new(&to).join("verify/sandbox/note").exists());
+    }
+
+    #[test]
+    fn ai_work_brought_keeps_each_machines_own_files() {
+        let tmp = Scratch::new();
+        let (from, to) = (tmp.path("from"), tmp.path("to"));
+        sh(&format!(
+            "mkdir -p {from}/.staging/h {from}/blobs/aa {to} && cd {from} && echo old > events-here.jsonl && echo new > events-m1.jsonl && echo there > cursor.json && echo there > record.json && echo x > .staging/h/x && echo b > blobs/aa/b.zst && cd {to} && echo mine > events-here.jsonl && echo mine > cursor.json"
+        ));
+        let local = Path::new(&to);
+        for mut rsync in ai_work_copies(&format!("{from}/"), local, "m1", true, None) {
+            assert!(rsync.status().unwrap().success());
+        }
+        let read = |name: &str| std::fs::read_to_string(local.join(name)).unwrap_or_default();
+        assert_eq!(read("events-here.jsonl"), "mine\n");
+        assert_eq!(read("cursor.json"), "mine\n");
+        assert_eq!(read("events-m1.jsonl"), "new\n");
+        assert_eq!(read(&crate::ai_work::write::brought_name("m1")), "old\n");
+        assert_eq!(read("blobs/aa/b.zst"), "b\n");
+        assert!(!local.join("record.json").exists());
+        assert!(!local.join(".staging").exists());
     }
 
     #[test]

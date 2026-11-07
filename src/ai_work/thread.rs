@@ -84,6 +84,14 @@ pub enum Job {
         chat: Chat,
         staging: PathBuf,
     },
+    /// The AI work of feature `slug`, taken over from another machine,
+    /// came from there: its earlier work is kept, and its `history` lines
+    /// of history are in the events already.
+    Brought {
+        project: String,
+        slug: String,
+        history: usize,
+    },
     /// End.
     Stop,
 }
@@ -626,9 +634,40 @@ impl Worker {
                 chat,
                 staging,
             } => self.pulled(&project, &slug, &chat, &staging),
+            Job::Brought {
+                project,
+                slug,
+                history,
+            } => self.brought(&project, &slug, history),
             Job::Stop => return false,
         }
         true
+    }
+
+    /// Feature `slug`'s AI work came from its writer before: it is kept as
+    /// a backfill would keep it, and its `history` lines noted.
+    fn brought(&mut self, project: &str, slug: &str, history: usize) {
+        let dir = self.dir(project, slug);
+        let what = "Couldn't keep the AI work brought from another machine";
+        let mut marks = match write::read_marks(&dir) {
+            Ok(marks) => marks,
+            Err(err) => {
+                return self.failed(
+                    what,
+                    format!("{}: {err}", write::marks_path(&dir).display()),
+                );
+            }
+        };
+        marks.backfilled = true;
+        marks.history_noted = marks.history_noted.max(history);
+        match write::write_marks(&dir, &marks) {
+            Ok(()) => self.worked(),
+            Err(err) => self.failed(
+                what,
+                format!("{}: {err}", write::marks_path(&dir).display()),
+            ),
+        }
+        self.index_later(project, slug);
     }
 
     fn report(&self, report: Report) {
