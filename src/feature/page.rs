@@ -45,6 +45,11 @@ pub struct Docs {
     /// The fixes each fix round listed in the build log, by round, oldest
     /// first (see `fix_round::rounds`).
     pub fix_rounds: Vec<(u32, Vec<(bool, String)>)>,
+    /// The rounds whose plans were put aside for the next (see
+    /// `fix_round::archive_path`), by number.
+    pub plans: BTreeSet<u32>,
+    /// Whether the latest round's plan is there (`fix_round::FILE`).
+    pub plan: bool,
     /// The brief and the plan as their pages show them; none for a file
     /// not there, and a note for one that can't be read.
     pub previews: BTreeMap<Stage, Arc<Vec<DocBlock>>>,
@@ -94,6 +99,20 @@ fn own_comments(data: &Path) -> Vec<crate::review::Comment> {
         .map_or_else(Vec::new, |review| review.without_findings().comments)
 }
 
+/// The rounds whose plans are put aside under feature data dir `data`.
+fn archived_plans(data: &Path) -> BTreeSet<u32> {
+    let Ok(dir) = std::fs::read_dir(data.join("prompts")) else {
+        return BTreeSet::new();
+    };
+    (dir.flatten())
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let n = name.to_str()?.strip_prefix("fix-plan-")?;
+            n.strip_suffix(".md")?.parse().ok()
+        })
+        .collect()
+}
+
 /// Read the stage files in feature data dir `data`. A file that can't be
 /// read is still there: its stage's page shows why in its place, and Review
 /// says so too when pressed.
@@ -105,6 +124,8 @@ pub fn read_docs(data: &Path) -> Docs {
         notes,
         ..Docs::default()
     };
+    docs.plans = archived_plans(data);
+    docs.plan = fix_round::path(data).exists();
     docs.changed = (docs.written.iter().copied())
         .filter(|stage| artifacts::changed_since_approved(data, *stage))
         .collect();

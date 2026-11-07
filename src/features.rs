@@ -1452,6 +1452,9 @@ pub enum PanelOutcome {
     /// The fixes of the last round, over, go once more, unticked
     /// (`Gerdr::resend_fixes`).
     ResendFixes,
+    /// Show round `n`'s fix plan, from Build's page: the latest in its tab,
+    /// an earlier one only to read.
+    OpenRoundPlan(u32),
     /// Tell the agent again to write the fix plan: it stopped without one.
     AskFixPlan,
     /// Drop the open fix plan, after asking.
@@ -3081,6 +3084,7 @@ fn action_hint(action: &PanelOutcome) -> &'static str {
         PanelOutcome::ReviewFixPlan => "review fix plan",
         PanelOutcome::MakeFixes => "make fixes",
         PanelOutcome::ResendFixes => "send the fixes again",
+        PanelOutcome::OpenRoundPlan(_) => "open the round's plan",
         PanelOutcome::AskFixPlan => "ask again",
         PanelOutcome::EditCommands(_) => "edit commands",
         PanelOutcome::CodeReview => "review code",
@@ -7307,6 +7311,7 @@ impl Gerdr {
             PanelOutcome::ReviewFixPlan => self.open_doc_tab(&project, &slug, DocFile::FixPlan),
             PanelOutcome::MakeFixes => self.make_fixes_now(&project, &slug),
             PanelOutcome::ResendFixes => self.resend_fixes(&project, &slug),
+            PanelOutcome::OpenRoundPlan(n) => self.open_round_plan(&project, &slug, n),
             PanelOutcome::AskFixPlan => self.ask_fix_plan(&project, &slug),
             PanelOutcome::DropFixPlan => self.ask_drop_fix_plan(project.clone(), slug.clone()),
             PanelOutcome::EditCommands(tab) => {
@@ -8564,6 +8569,7 @@ impl Gerdr {
                     let probe = (self.features.probes.get(&key)).and_then(|p| p.last.as_ref());
                     let notes = notes_of(probe);
                     let mut actions = stage_actions(&feature, stage, ctx, &plan, &rows, notes);
+                    actions.extend(round_plan_actions(&feature, stage, probe));
                     let place = self.place_label(&feature, stage);
                     actions.extend(place_action(place.as_deref(), stage));
                     actions.extend(stop_action(&feature, stage));
@@ -10583,7 +10589,40 @@ fn milestones_section(
         done: items.iter().filter(|(done, _)| *done).count(),
         total: items.len(),
         items: items.to_vec(),
+        buttons: Vec::new(),
     }
+}
+
+/// The rounds of `feature` whose plans can be shown, as `probe` found them:
+/// the latest's is `fix_round::FILE`, those before it put aside.
+fn round_plans(feature: &Feature, probe: Option<&Probe>) -> Vec<u32> {
+    let Some(docs) = probe.map(|p| &p.docs) else {
+        return Vec::new();
+    };
+    let latest = (docs.plan && feature.fix_rounds > 0).then_some(feature.fix_rounds);
+    let mut out: Vec<u32> = docs.plans.iter().copied().chain(latest).collect();
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// The buttons showing the plans of the rounds Build's page lists, by
+/// `probe`: on that page only.
+fn round_plan_actions(
+    feature: &Feature,
+    stage: Stage,
+    probe: Option<&Probe>,
+) -> Vec<(PageButton, PanelOutcome)> {
+    if stage != Stage::Build || stage_mark(feature, stage) == StageMark::Later {
+        return Vec::new();
+    }
+    let button = PageButton {
+        label: "Open plan".to_owned(),
+        style: ButtonStyle::Plain,
+    };
+    (round_plans(feature, probe).into_iter())
+        .map(|n| (button.clone(), PanelOutcome::OpenRoundPlan(n)))
+        .collect()
 }
 
 /// What each fix round of `feature` listed in the build log, newest first,
@@ -10591,7 +10630,23 @@ fn milestones_section(
 /// log only lists its fixes once they go, and it is at work before that.
 /// How the open one stands shows here unless the page says so already, on
 /// the round's card or under "Verify failures".
-fn fix_rounds_of(feature: &Feature, probe: Option<&Probe>) -> Vec<PageSection> {
+fn fix_rounds_of(
+    feature: &Feature,
+    probe: Option<&Probe>,
+    actions: &[(PageButton, PanelOutcome)],
+) -> Vec<PageSection> {
+    let held = |n: u32| -> Vec<usize> {
+        (actions.iter().enumerate())
+            .filter(|(_, (_, o))| *o == PanelOutcome::OpenRoundPlan(n))
+            .map(|(i, _)| i)
+            .collect()
+    };
+    let with_plan = |n: u32, mut section: PageSection| {
+        if let PageSection::Milestones { buttons, .. } = &mut section {
+            *buttons = held(n);
+        }
+        section
+    };
     let label = |n| feature::fix_round::label(n, &feature.verify_fixes, &feature.fix_asked);
     let open = (feature.fix_round.as_ref()).filter(|_| feature.status == Status::Open);
     let state = open
@@ -10616,12 +10671,14 @@ fn fix_rounds_of(feature: &Feature, probe: Option<&Probe>) -> Vec<PageSection> {
                 .iter()
                 .map(|item| (false, item.clone()))
                 .collect();
-            out.push(milestones_section(label(round.n), &items, state.clone()));
+            let section = milestones_section(label(round.n), &items, state.clone());
+            out.push(with_plan(round.n, section));
         }
     }
     out.extend(listed.iter().rev().map(|(n, items)| {
         let own = open.is_some_and(|round| round.n == *n);
-        milestones_section(label(*n), items, state.clone().filter(|_| own))
+        let section = milestones_section(label(*n), items, state.clone().filter(|_| own));
+        with_plan(*n, section)
     }));
     out
 }
@@ -10759,9 +10816,10 @@ fn stage_page(
                     done: stop.done as usize,
                     total: stop.total as usize,
                     items: Vec::new(),
+                    buttons: Vec::new(),
                 });
                 sections.extend(verify_fixes_section(feature, now));
-                sections.extend(fix_rounds_of(feature, state.probe));
+                sections.extend(fix_rounds_of(feature, state.probe, actions));
                 sections.extend(milestones_of(state.probe, stage).or(counted));
                 sections.extend(setup_section(feature, state));
             }
@@ -11707,6 +11765,7 @@ fn tab_view(
                 &state.criteria,
                 notes_of(state.probe),
             );
+            actions.extend(round_plan_actions(feature, stage, state.probe));
             actions.extend(place_action(state.place.as_deref(), stage));
             actions.extend(stop_action(feature, stage));
             stage_page(feature, stage, state, &actions, now)
@@ -17363,7 +17422,8 @@ pub(crate) mod tests {
                 state: None,
                 done: 1,
                 total: 3,
-                items: Vec::new()
+                items: Vec::new(),
+                buttons: Vec::new(),
             })
         );
         let PageSection::Agent { buttons, .. } = &page.sections[0] else {
@@ -18697,7 +18757,8 @@ pub(crate) mod tests {
                 state: None,
                 done: 2,
                 total: 3,
-                items
+                items,
+                buttons: Vec::new(),
             })
         );
         let PageSection::Agent { tail: shown, .. } = &page.sections[0] else {
@@ -18765,7 +18826,7 @@ pub(crate) mod tests {
         });
         let mut read = probe(None);
         read.docs.fix_rounds = vec![(1, vec![(true, "r1-1".to_owned())])];
-        let sections = |f: &Feature| fix_rounds_of(f, Some(&read));
+        let sections = |f: &Feature| fix_rounds_of(f, Some(&read), &[]);
         let state = |f: &Feature| Some(fix_round_state(f, f.fix_round.as_ref().unwrap()));
         // Nothing is in the build log yet, and the plan isn't written: an old
         // reading of it doesn't count.
@@ -18786,7 +18847,7 @@ pub(crate) mod tests {
         // The build log lists it now, and its ticks win; once over it stands alone.
         let ticked = vec![(true, "a.rs:1".to_owned())];
         read.docs.fix_rounds.push((2, ticked.clone()));
-        let sections = |f: &Feature| fix_rounds_of(f, Some(&read));
+        let sections = |f: &Feature| fix_rounds_of(f, Some(&read), &[]);
         let listed = milestones_section("Code review 2".into(), &ticked, state(&f));
         assert_eq!(sections(&f), [listed, review.clone()]);
         let over = milestones_section("Code review 2".into(), &ticked, None);
@@ -18803,7 +18864,27 @@ pub(crate) mod tests {
             ..f.last_fix_round.clone().unwrap()
         });
         verify.verify_fixes = vec![verify_fix(3, 2)];
-        assert_eq!(fix_rounds_of(&verify, Some(&read)).len(), 2);
+        assert_eq!(fix_rounds_of(&verify, Some(&read), &[]).len(), 2);
+        // Each round with its plan there opens it: the latest from its file,
+        // the one before put aside; one with no plan has no button.
+        f.fix_rounds = 2;
+        read.docs.plan = true;
+        let actions = round_plan_actions(&f, Stage::Build, Some(&read));
+        assert_eq!(
+            (actions.iter()).map(|(_, o)| o.clone()).collect::<Vec<_>>(),
+            [PanelOutcome::OpenRoundPlan(2)]
+        );
+        read.docs.plans.insert(1);
+        let actions = round_plan_actions(&f, Stage::Build, Some(&read));
+        let held: Vec<Vec<usize>> = (fix_rounds_of(&f, Some(&read), &actions).into_iter())
+            .map(|s| match s {
+                PageSection::Milestones { buttons, .. } => buttons,
+                _ => Vec::new(),
+            })
+            .collect();
+        assert_eq!(held, [vec![1], vec![0]]);
+        assert_eq!(actions[1].0.label, "Open plan");
+        assert!(round_plan_actions(&f, Stage::Verify, Some(&read)).is_empty());
     }
 
     #[test]

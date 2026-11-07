@@ -609,6 +609,8 @@ pub enum PageSection {
         done: usize,
         total: usize,
         items: Vec<(bool, String)>,
+        /// The page's buttons it holds, at its caption's right.
+        buttons: Vec<usize>,
     },
 }
 
@@ -2306,7 +2308,9 @@ fn page_stack(
         .iter()
         .flat_map(|sec| match sec {
             PageSection::Agent { buttons, .. } => buttons.clone(),
-            PageSection::File { buttons, .. } => buttons.clone(),
+            PageSection::File { buttons, .. } | PageSection::Milestones { buttons, .. } => {
+                buttons.clone()
+            }
             PageSection::Finding(card) => (card.buttons.iter().chain(&card.comment_buttons))
                 .copied()
                 .collect(),
@@ -2508,8 +2512,19 @@ fn page_stack(
                 done,
                 total,
                 items,
+                buttons: held,
             } => {
-                s.caption(&format!("{label} \u{b7} {done} of {total}"));
+                let said = format!("{label} \u{b7} {done} of {total}").to_uppercase();
+                let caption = s.put(CAPTION, Piece::Caption(said));
+                // Its buttons from the caption's right, in their order.
+                let mut bx = caption.loc.x + caption.size.w;
+                let by = caption.loc.y + (CAPTION - ROW_BUTTON) / 2;
+                for &b in held.iter().rev().filter(|b| **b < page.buttons.len()) {
+                    let w = button_width(&page.buttons[b].label);
+                    bx -= w;
+                    buttons[b] = Some(Rectangle::new((bx, by).into(), (w, ROW_BUTTON).into()));
+                    bx -= QUIT_BUTTON_GAP;
+                }
                 s.y += 2;
                 s.put(
                     PROGRESS,

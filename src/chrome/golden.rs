@@ -3012,6 +3012,7 @@ pub(super) fn feature_tab() -> super::FeatureTabView {
                     ]
                     .map(|(d, t)| (d, t.to_owned()))
                     .into(),
+                    buttons: Vec::new(),
                 },
                 PageSection::Milestones {
                     label: "Build".into(),
@@ -3027,6 +3028,7 @@ pub(super) fn feature_tab() -> super::FeatureTabView {
                     ]
                     .map(|(d, t)| (d, t.to_owned()))
                     .into(),
+                    buttons: Vec::new(),
                 },
             ],
         },
@@ -3457,6 +3459,7 @@ fn feature_tab_open_round() -> super::FeatureTabView {
             ]
             .map(|(d, t)| (d, t.to_owned()))
             .into(),
+            buttons: Vec::new(),
         },
     );
     view
