@@ -424,6 +424,18 @@ impl Gerdr {
         }
     }
 
+    /// Whether this press goes to the next of a file's tab's modes: Ctrl+Shift+V
+    /// is a paste only while a comment or the search is being typed.
+    pub(crate) fn doc_cycles(&self, mods: &ModifiersState, sym: Keysym) -> bool {
+        let v = matches!(sym, Keysym::v | Keysym::V);
+        v && mods.ctrl
+            && mods.shift
+            && !(mods.alt || mods.logo)
+            && self
+                .review_tab()
+                .is_some_and(|tab| tab.wd.diff.editing.is_none() && !tab.wd.diff.search_focused())
+    }
+
     /// Whether the shown file's tab has the keys now: not in Preview, where
     /// the page has them, unless a sheet of its own is open.
     pub(crate) fn doc_tab_takes_keys(&self) -> bool {

@@ -2465,7 +2465,7 @@ impl Gerdr {
     fn repos_open_in_zed(&mut self, root: &Path, paths: &[String], at: Option<Position>) {
         let worktree = self
             .wd()
-            .filter(|wd| wd.is(root))
+            .filter(|wd| wd.shows(root))
             .map(|wd| (wd.workspace, wd.home));
         let home = match worktree {
             Some((_, home)) => home,
@@ -2476,7 +2476,8 @@ impl Gerdr {
         };
         let home = home.filter(|&w| w < self.workspaces.len());
         let Some(w) = home.or(worktree.map(|(w, _)| w)) else {
-            return;
+            let why = format!("No workspace holds {}: Zed can't open it", root.display());
+            return self.show_error(why);
         };
         let mut files: Vec<PathBuf> = paths.iter().map(|path| root.join(path)).collect();
         if let (Some(first), Some(at)) = (files.first_mut(), at) {

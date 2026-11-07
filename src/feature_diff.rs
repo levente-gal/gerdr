@@ -1970,8 +1970,60 @@ mod tests {
         );
         let right = Keysym::bracketright;
         wd.key(&mods(false, false), right, right, POPUP_ENV);
-        wd.key(&mods(false, true), Keysym::E, Keysym::E, POPUP_ENV);
+        // As input sends it: the letter's own sym, the capital as typed.
+        wd.key(&mods(false, true), Keysym::e, Keysym::E, POPUP_ENV);
         assert_eq!(wd.take_error().edit_finding.as_deref(), Some("r1-1"));
+    }
+
+    #[test]
+    fn g_space_opens_the_code_in_the_repository_it_is_in() {
+        use crate::diff_view::Outcome;
+        let mut wd = listed(&["top.rs"]);
+        press(&mut wd, plain(), Keysym::Down);
+        press(&mut wd, plain(), Keysym::Down);
+        press(&mut wd, plain(), Keysym::g);
+        let done = press(&mut wd, plain(), Keysym::space);
+        let Some(Done::Diff(Outcome::OpenInZed { root, paths, .. })) = done else {
+            panic!("{done:?}");
+        };
+        assert_eq!(root, Path::new("/w/api"));
+        assert_eq!(paths, ["top.rs"]);
+        // Not the feature's own folder: Zed still finds where to open it.
+        assert!(wd.shows(&root) && !wd.is(&root));
+        assert!(wd.shows(Path::new("/w")));
+        assert!(!wd.shows(Path::new("/elsewhere")));
+    }
+
+    #[test]
+    fn a_key_the_list_does_not_take_is_the_diffs_and_the_keyboard_goes_with_it() {
+        use crate::diff_view::Outcome;
+        let mut wd = listed(&["src/a.rs", "top.rs"]);
+        let focused = |wd: &WorktreeDiff| wd.tree.as_ref().unwrap().focused;
+        wd.tree.as_mut().unwrap().focused = true;
+        // The list's own stay its own.
+        press(&mut wd, plain(), Keysym::Down);
+        assert!(focused(&wd));
+        // None's key: it stays where it was.
+        assert_eq!(press(&mut wd, plain(), Keysym::z), None);
+        assert!(focused(&wd));
+        // Esc closes from the list, as before.
+        assert_eq!(press(&mut wd, plain(), Keysym::Escape), Some(Done::Close));
+        assert!(focused(&wd));
+        // `g` Space opens the code there, and doesn't tick the file.
+        press(&mut wd, plain(), Keysym::g);
+        assert!(!focused(&wd));
+        assert!(matches!(
+            press(&mut wd, plain(), Keysym::space),
+            Some(Done::Diff(Outcome::OpenInZed { .. }))
+        ));
+        // A comment started from the list is written in the diff.
+        for _ in 0..3 {
+            press(&mut wd, plain(), Keysym::j);
+        }
+        wd.tree.as_mut().unwrap().focused = true;
+        press(&mut wd, plain(), Keysym::c);
+        assert!(!focused(&wd));
+        assert!(wd.diff.editing.is_some());
     }
 
     const POPUP_ENV: Env = Env {

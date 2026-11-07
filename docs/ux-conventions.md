@@ -12,7 +12,7 @@ rules, for reviewing a branch before it merges.
 | Esc | Step back one level: clear the query, then leave a sub-mode (search, comment, rename), then close. On the feature tab it folds the repository rows first. On a feature's Code review page, where its review is laid under the rail, it gives the rail the keys: Enter, Tab, Down or a press on the review gives them back. The footer hint reads "clear" while there is something to clear, "close" otherwise. A comment or commit draft is kept, never thrown away by Esc. |
 | Enter | Do the selected row's main action. On the feature tab's page of a done stage it goes to the current stage: it never undoes a done stage. |
 | Up / Down, PgUp / PgDn, Home / End | Move the selection. Ctrl+J / Ctrl+K also move it. Ctrl+N / Ctrl+P never move it. Where there is no list to page through, PgUp / PgDn scroll a page (the feature tab's stage page). |
-| Tab / Shift+Tab | Next / previous focus area or form field. Shift+Tab always goes the other way. In a feature's code review: between the file list and the diff. |
+| Tab / Shift+Tab | Next / previous focus area or form field. Shift+Tab always goes the other way. In a feature's code review: between the file list and the diff; a key the list doesn't take goes to the diff, and the keyboard with it. |
 | Left / Right | Move along a row of choices laid out across: the feature tab's stage rail (previous / next stage's page; Up / Down step it too), its repository strip, and the buttons of an unfolded repository row. |
 | Ctrl+PgUp / Ctrl+PgDn | Previous / next item of a set shown one at a time: the feature tab's previous / next feature (its ‹ › buttons), the project commands dialog's next or previous tab. |
 | Ctrl+N | New / create (project, branch, todo). |
