@@ -14,8 +14,9 @@ use std::{
 };
 
 use super::{
-    Repo, Stage, artifacts, fix_round,
+    Feature, Repo, Stage, artifacts, fix_round,
     layout::{base_ref, git},
+    review_import::FindingState,
     verify,
 };
 use crate::{
@@ -56,8 +57,14 @@ pub struct Docs {
     /// How many comments the user left in the feature's diff (`notes`).
     pub comments: usize,
     /// The comments the user left in the feature's diff: they go to Build
-    /// with AI review's fixes, or wait for Code review.
+    /// with AI review's fixes, or wait for Code review. After them, flagged
+    /// sent, those the latest of Code review's fix rounds took (`round_notes`).
     pub notes: Vec<crate::review::Comment>,
+    /// The comments Code review's earlier fix rounds took, by round.
+    pub old_notes: BTreeMap<u32, Vec<crate::review::Comment>>,
+    /// The fix plan of the latest of Code review's fix rounds, as its page
+    /// shows it.
+    pub comment_plan: Option<Arc<Vec<DocBlock>>>,
 }
 
 impl Docs {
@@ -73,8 +80,79 @@ impl Docs {
                 *blocks = same.clone();
             }
         }
+        if let (Some(blocks), Some(old)) = (&mut self.comment_plan, old)
+            && let Some(same) = old.comment_plan.as_ref().filter(|o| *o == blocks)
+        {
+            *blocks = same.clone();
+        }
         self
     }
+
+    /// These docs with what `feature`'s Code review rounds left in data dir
+    /// `data`.
+    pub fn with_comment_fixes(mut self, data: &Path, feature: &Feature) -> Docs {
+        let mut rounds = feature.comment_fixes.iter().map(|fix| fix.round).rev();
+        let latest = rounds.next().or_else(|| {
+            (feature.fix_round.as_ref())
+                .filter(|round| round.stage == Stage::CodeReview)
+                .map(|round| round.n)
+        });
+        let Some(latest) = latest else {
+            return self;
+        };
+        self.notes.extend(sent_notes(data, latest));
+        self.old_notes = rounds.map(|n| (n, sent_notes(data, n))).collect();
+        // Once the next round starts its plan is put away.
+        let path = match latest == feature.fix_rounds {
+            true => fix_round::path(data),
+            false => fix_round::archive_path(data, latest),
+        };
+        self.comment_plan = match preview_of(&path) {
+            Ok(blocks) => Some(Arc::new(blocks)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+            Err(err) => {
+                tracing::warn!("reading {}: {err}", path.display());
+                let note = DocBlock::Note(format!("Couldn't read this file: {err}"));
+                Some(Arc::new(vec![note]))
+            }
+        };
+        self
+    }
+}
+
+/// The comments fix round `n` took from Code review, as they went: each flagged
+/// sent, under the id the agent had it by, so they are never saved as the user's.
+fn sent_notes(data: &Path, n: u32) -> Vec<crate::review::Comment> {
+    let path = fix_round::comments_copy(data, n);
+    let raw = match std::fs::read(&path) {
+        Ok(raw) => raw,
+        // Keeping it failed, which said so, or the round is from before there
+        // were cards to show it on.
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(err) => {
+            tracing::warn!("reading {}: {err}", path.display());
+            return Vec::new();
+        }
+    };
+    let kept = match serde_json::from_slice::<crate::review::Review>(&raw) {
+        Ok(kept) => kept,
+        Err(err) => {
+            tracing::warn!("reading {}: {err}", path.display());
+            return Vec::new();
+        }
+    };
+    (kept.without_findings().comments.into_iter().enumerate())
+        .map(|(at, mut comment)| {
+            comment.flag = Some(crate::review::Flag {
+                id: crate::review::comment_id(at),
+                state: FindingState::Sent,
+                yours: true,
+                sent: true,
+                ..crate::review::Flag::default()
+            });
+            comment
+        })
+        .collect()
 }
 
 /// What a stage's page shows of a file too big to read through there.
@@ -267,6 +345,139 @@ pub fn read_check_tail(socket: PathBuf, pane: &str, began: bool) -> Result<Vec<S
     let read = verify::PREVIEW_READ;
     let text = Herdr::on_socket(socket).pane_read(pane, "recent_unwrapped", read)?;
     Ok(verify::preview(&text, began))
+}
+
+#[cfg(test)]
+mod comment_fix_tests {
+    use super::*;
+    use crate::{
+        feature::fix_round::{CommentFix, FixPhase, FixRound, GiveBack},
+        review::{Comment, Review},
+    };
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "gerdr-comment-fixes-{name}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("prompts")).unwrap();
+        dir
+    }
+
+    fn keep(data: &Path, n: u32, texts: &[&str]) {
+        let review = Review {
+            comments: (texts.iter())
+                .map(|text| Comment {
+                    text: (*text).to_owned(),
+                    ..Comment::default()
+                })
+                .collect(),
+            ..Review::default()
+        };
+        crate::review::save_file(&fix_round::comments_copy(data, n), &review).unwrap();
+    }
+
+    fn feature_with(rounds: &[u32], last: u32) -> Feature {
+        let mut f = crate::features::tests::feature("f", Vec::new(), 0);
+        f.comment_fixes = (rounds.iter())
+            .map(|n| CommentFix {
+                round: *n,
+                made: Vec::new(),
+            })
+            .collect();
+        f.fix_rounds = last;
+        f
+    }
+
+    #[test]
+    fn the_latest_rounds_comments_come_after_those_not_sent_flagged() {
+        let data = scratch("latest");
+        keep(&data, 1, &["Old"]);
+        keep(&data, 2, &["New one", "New two"]);
+        std::fs::write(fix_round::path(&data), "## Fixes\n### C1\n").unwrap();
+        let docs = Docs {
+            notes: vec![Comment {
+                text: "Not sent".into(),
+                ..Comment::default()
+            }],
+            ..Docs::default()
+        }
+        .with_comment_fixes(&data, &feature_with(&[1, 2], 2));
+        let said: Vec<&str> = docs.notes.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(said, ["Not sent", "New one", "New two"]);
+        assert!(docs.notes[0].flag.is_none());
+        let flag = docs.notes[2].flag.as_ref().unwrap();
+        assert_eq!(flag.id, "C2");
+        assert!(flag.sent && flag.yours);
+        assert_eq!(flag.state, FindingState::Sent);
+        assert_eq!(docs.old_notes[&1][0].text, "Old");
+        assert!(docs.comment_plan.is_some());
+        // Never what is saved as the user's.
+        let review = Review {
+            comments: docs.notes,
+            ..Review::default()
+        };
+        assert_eq!(review.without_findings().comments.len(), 1);
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[test]
+    fn a_later_rounds_plan_leaves_this_one_read_from_where_it_was_put() {
+        let data = scratch("archive");
+        keep(&data, 1, &["Mine"]);
+        std::fs::write(fix_round::path(&data), "## Fixes\n### Someone else's\n").unwrap();
+        std::fs::write(fix_round::archive_path(&data, 1), "## Fixes\n### C1: mine\n").unwrap();
+        let docs = Docs::default().with_comment_fixes(&data, &feature_with(&[1], 2));
+        let blocks = format!("{:?}", docs.comment_plan.unwrap());
+        assert!(blocks.contains("C1: mine"), "{blocks}");
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[test]
+    fn no_round_of_code_reviews_reads_nothing_and_a_missing_copy_is_no_card() {
+        let data = scratch("none");
+        std::fs::write(fix_round::path(&data), "## Fixes\n### AI's\n").unwrap();
+        let docs = Docs::default().with_comment_fixes(&data, &feature_with(&[], 1));
+        assert_eq!(docs, Docs::default());
+        // Its copy couldn't be kept: the round still shows, its plan and all.
+        let mut f = feature_with(&[], 1);
+        f.fix_round = Some(FixRound {
+            n: 1,
+            what: String::new(),
+            input: PathBuf::new(),
+            stage: Stage::CodeReview,
+            phase: FixPhase::Ready,
+            sent_back: 0,
+            asked: 0,
+            ready: None,
+            stalled: None,
+            give_back: GiveBack::Nothing,
+            items: Vec::new(),
+            done: 0,
+            ended: None,
+        });
+        let docs = Docs::default().with_comment_fixes(&data, &f);
+        assert!(docs.notes.is_empty() && docs.comment_plan.is_some());
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[test]
+    fn the_same_plan_read_again_keeps_what_painted_it() {
+        let data = scratch("keeping");
+        keep(&data, 1, &["Mine"]);
+        std::fs::write(fix_round::path(&data), "## Fixes\n### C1\n").unwrap();
+        let f = feature_with(&[1], 1);
+        let first = Docs::default().with_comment_fixes(&data, &f);
+        let again = Docs::default()
+            .with_comment_fixes(&data, &f)
+            .keeping(Some(&first));
+        assert!(Arc::ptr_eq(
+            first.comment_plan.as_ref().unwrap(),
+            again.comment_plan.as_ref().unwrap()
+        ));
+        let _ = std::fs::remove_dir_all(&data);
+    }
 }
 
 #[cfg(test)]

@@ -511,7 +511,11 @@ impl Gerdr {
         if made {
             self.feature_findings_changed(project, slug);
         }
-        if done != round.done || made {
+        // So does Code review's of its comments.
+        let noted = (self.feature_mut(project, slug))
+            .and_then(|f| f.comment_fixes.iter_mut().find(|fix| fix.round == round.n))
+            .is_some_and(|fix| fix_round::mark_comments_made(fix, round, &left));
+        if done != round.done || made || noted {
             if let Some(round) =
                 (self.feature_mut(project, slug)).and_then(|f| f.fix_round.as_mut())
             {
@@ -708,6 +712,8 @@ impl Gerdr {
         self.save_feature(project, slug);
         (self.features.build.fix_watches).remove(&fix_key(project, slug));
         self.doc_reread_shown(project, slug, DocFile::FixPlan);
+        // Code review's page shows it.
+        self.probe_feature(project, slug);
         let text = format!("The fix plan of \u{201c}{title}\u{201d} is ready to review");
         self.notify_feature(project, slug, None, &text);
         self.show_success(text);
@@ -1103,6 +1109,7 @@ impl Gerdr {
                 if let Some(fix) = f.verify_fixes.iter_mut().find(|fix| fix.round == n) {
                     fix.dropped = true;
                 }
+                f.comment_fixes.retain(|fix| fix.round != n);
             }
             false => {
                 f.log(now, format!("Fix round {n} over"));
@@ -1115,6 +1122,14 @@ impl Gerdr {
         self.save_feature(project, slug);
         (self.features.build.fix_watches).remove(&fix_key(project, slug));
         self.doc_done(project, slug, DocFile::FixPlan);
+        // Code review's page shows its fixes again, whatever was looked at
+        // while they were made, or its code once there are none.
+        if round.stage == Stage::CodeReview
+            && let Some(panel) = (self.features.panel.as_mut())
+                .filter(|panel| panel.project == project && panel.slug == slug)
+        {
+            panel.review_view = None;
+        }
         if back {
             self.drop_unticked(project, slug, n);
             self.give_back(project, slug, round.give_back);
@@ -1160,7 +1175,7 @@ impl Gerdr {
                     self.comments_back(project, slug, &copy);
                 }
             }
-            GiveBack::Comments { copy } => self.comments_back(project, slug, &copy),
+            GiveBack::Comments { copy, .. } => self.comments_back(project, slug, &copy),
             GiveBack::Manual { checks } => {
                 if let Some(test) = self
                     .feature_mut(project, slug)

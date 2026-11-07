@@ -104,8 +104,12 @@ pub enum GiveBack {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         comments: Option<PathBuf>,
     },
-    /// Code review's comments, as they were kept.
-    Comments { copy: PathBuf },
+    /// Code review's comments, as they were kept, and the ids they went by.
+    Comments {
+        copy: PathBuf,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        ids: Vec<String>,
+    },
     /// Manual test's failures marked sent, by criterion id and text.
     Manual { checks: Vec<(String, String)> },
 }
@@ -217,10 +221,30 @@ impl FixRound {
     pub fn ids(&self) -> Vec<String> {
         match &self.give_back {
             GiveBack::Findings { ids, .. } => ids.clone(),
+            GiveBack::Comments { ids, .. } => ids.clone(),
             GiveBack::Manual { checks } => checks.iter().map(|(id, _)| id.clone()).collect(),
-            GiveBack::Nothing | GiveBack::Comments { .. } => Vec::new(),
+            GiveBack::Nothing => Vec::new(),
         }
     }
+}
+
+/// A fix round Code review's comments started, kept for that stage's page once
+/// the round is gone, as `FixRound` only holds the latest. The comments are in
+/// the round's copy (`comments_copy`); a dropped round leaves no record, as they
+/// went back to the diff.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommentFix {
+    /// `FixRound::n`.
+    pub round: u32,
+    /// The ids of the comments whose fix the Build agent made.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub made: Vec<String>,
+}
+
+/// Where the comments round `n` took from Code review are kept, under feature
+/// data dir `dir`.
+pub fn comments_copy(dir: &Path, n: u32) -> PathBuf {
+    dir.join("prompts").join(format!("fix-plan-{n}-comments.json"))
 }
 
 /// How many lines saying why a check failed a `VerifyFix` keeps.
@@ -616,6 +640,24 @@ pub fn mark_made(review: &mut AiReview, round: &FixRound, left: &[String]) -> bo
     changed
 }
 
+/// Mark the comments `round` was sent in `fix` as `left` says, as `mark_made`
+/// does findings. Says whether any changed.
+pub fn mark_comments_made(fix: &mut CommentFix, round: &FixRound, left: &[String]) -> bool {
+    let GiveBack::Comments { ids, .. } = &round.give_back else {
+        return false;
+    };
+    let made: Vec<String> = (ids.iter())
+        .filter(|id| {
+            let mut named = round.items.iter().filter(|item| names(item, id)).peekable();
+            named.peek().is_some() && !named.any(|item| left.contains(item))
+        })
+        .cloned()
+        .collect();
+    let changed = fix.made != made;
+    fix.made = made;
+    changed
+}
+
 /// What a compacting agent comes to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Compact {
@@ -713,6 +755,77 @@ mod tests {
             ..VerifyFix::default()
         };
         assert_eq!(label(9, &[kept]), "Verify 9");
+    }
+
+    #[test]
+    fn a_comments_fix_is_made_once_each_item_naming_it_is_ticked() {
+        let ids: Vec<String> = ["C1", "C2", "C10"].map(str::to_owned).into();
+        let items: Vec<String> = ["C1 and C2: one cause", "C2: its test", "C10: a typo"]
+            .map(str::to_owned)
+            .into();
+        let round = FixRound {
+            n: 1,
+            what: String::new(),
+            input: PathBuf::new(),
+            stage: Stage::CodeReview,
+            phase: FixPhase::Fixing,
+            sent_back: 0,
+            asked: 0,
+            ready: None,
+            stalled: None,
+            give_back: GiveBack::Comments {
+                copy: PathBuf::new(),
+                ids,
+            },
+            items: items.clone(),
+            done: 0,
+            ended: None,
+        };
+        let mut fix = CommentFix {
+            round: 1,
+            made: Vec::new(),
+        };
+        assert!(!mark_comments_made(&mut fix, &round, &items));
+        assert!(fix.made.is_empty());
+        // C10's tick says nothing of C1.
+        assert!(mark_comments_made(&mut fix, &round, &items[..2]));
+        assert_eq!(fix.made, ["C10"]);
+        assert!(mark_comments_made(&mut fix, &round, &items[1..2]));
+        assert_eq!(fix.made, ["C1", "C10"]);
+        assert!(!mark_comments_made(&mut fix, &round, &items[1..2]));
+        assert!(mark_comments_made(&mut fix, &round, &[]));
+        assert_eq!(fix.made, ["C1", "C2", "C10"]);
+    }
+
+    #[test]
+    fn a_plan_must_speak_of_each_comment_and_an_old_round_of_none() {
+        let round = |back| FixRound {
+            n: 1,
+            what: String::new(),
+            input: PathBuf::new(),
+            stage: Stage::CodeReview,
+            phase: FixPhase::Planning,
+            sent_back: 0,
+            asked: 0,
+            ready: None,
+            stalled: None,
+            give_back: back,
+            items: Vec::new(),
+            done: 0,
+            ended: None,
+        };
+        let ids: Vec<String> = ["C1", "C10"].map(str::to_owned).into();
+        let new = round(GiveBack::Comments {
+            copy: PathBuf::new(),
+            ids: ids.clone(),
+        });
+        assert_eq!(new.ids(), ids);
+        let plan = "## Fixes\n### C10: rename\n";
+        assert_eq!(missing(plan, &new.ids()), ["a fix for C1"]);
+        // One saved before there were ids reads, and asks for none.
+        let saved = r#"{"comments":{"copy":"/d/c.json"}}"#;
+        let old: GiveBack = serde_json::from_str(saved).unwrap();
+        assert_eq!(round(old).ids(), Vec::<String>::new());
     }
 
     #[test]

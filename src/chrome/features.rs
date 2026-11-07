@@ -552,6 +552,67 @@ pub struct AgentChip {
     pub off: bool,
 }
 
+/// What Code review's page shows under the rail.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ReviewView {
+    /// The diff, its file list and the comments being written.
+    #[default]
+    Code,
+    /// The fixes the comments asked for: the plan and the comments as cards.
+    Fixes,
+}
+
+/// A feature's code review's files, as `ReviewSwitch` counts them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ReviewFiles {
+    pub viewed: usize,
+    pub total: usize,
+    /// Viewed, then changed since.
+    pub changed: usize,
+}
+
+impl ReviewFiles {
+    /// What is left to read in a few words, and whether that is all of them
+    /// read: "5 of 8 files left · 1 changed since viewed", "All 8 files viewed".
+    fn left(self) -> (String, bool) {
+        let left = self.total.saturating_sub(self.viewed);
+        let files = match self.total {
+            1 => "1 file".to_owned(),
+            n => format!("{n} files"),
+        };
+        if left == 0 {
+            return (format!("All {files} viewed"), true);
+        }
+        let text = match self.changed {
+            0 => format!("{left} of {files} left"),
+            n => format!("{left} of {files} left \u{b7} {n} changed since viewed"),
+        };
+        (text, false)
+    }
+}
+
+/// The line under Code review's rail: the two views to go between, with how far
+/// each has come, and the files left to review.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReviewSwitch {
+    pub view: ReviewView,
+    /// None until they can be counted.
+    pub files: Option<ReviewFiles>,
+    /// How the fixes stand: "2 of 3 made", "planning fixes".
+    pub fixes: String,
+}
+
+impl ReviewSwitch {
+    /// What each segment says.
+    fn labels(&self) -> [String; 2] {
+        let code = match self.files {
+            Some(files) => format!("Code review \u{b7} {} of {} files", files.viewed, files.total),
+            None => "Code review".to_owned(),
+        };
+        [code, format!("Fixes \u{b7} {}", self.fixes)]
+    }
+}
+
 /// A part of a stage's page, under its title and what it says.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PageSection {
@@ -756,6 +817,8 @@ pub struct FeatureTabView {
     /// A feature's code review takes the tab under the rail: no strip,
     /// columns or footer of its own.
     pub review_page: bool,
+    /// Code review's page goes between that review and its fixes.
+    pub review_switch: Option<ReviewSwitch>,
     /// That review has the keys: the rail shows no focus.
     pub review_keys: bool,
     pub activity: Vec<ActivityRow>,
@@ -812,6 +875,8 @@ pub enum FeatureTabHit {
     /// A segment of Build's milestone choice: 0 one agent, 1 one per
     /// milestone.
     MilestoneMode(usize),
+    /// A segment of Code review's switch: 0 its code, 1 its fixes.
+    ReviewView(usize),
     /// A segment of a repository's way on the Ship page: its row, then 0
     /// pull request, 1 merge only, 2 nothing.
     ShipRoute(usize, usize),
@@ -827,8 +892,11 @@ pub enum FeatureTabHit {
 /// not scrolled: `FeatureTabView::scroll` moves it up.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FeatureTabLayout {
-    /// With `FeatureTabView::review_page`: all under the rail's rule.
+    /// With `FeatureTabView::review_page`: all under the rail's rule and the
+    /// switch.
     pub review: Option<Rect>,
+    /// With `FeatureTabView::review_switch`.
+    pub review_switch: Option<ReviewSwitchSpots>,
     pub frame: Rect,
     pub title: Rect,
     pub sub: Rect,
@@ -942,6 +1010,11 @@ impl FeatureTabLayout {
         }
         if let Some(n) = self.nodes.iter().position(on) {
             return Some(FeatureTabHit::Node(n));
+        }
+        if let Some(spots) = &self.review_switch
+            && let Some(i) = spots.segments.iter().position(on)
+        {
+            return Some(FeatureTabHit::ReviewView(i));
         }
         if on(&self.repos_toggle) {
             return Some(FeatureTabHit::ToggleRepos);
@@ -1158,6 +1231,13 @@ pub const ACTIVITY_BELOW: i32 = 1180;
 /// The gap between the columns' cards, the room inside them, and their
 /// corners.
 const COLUMN_GAP: i32 = 12;
+/// The height of the switch on Code review's page, and the gaps round it.
+const REVIEW_SWITCH_H: i32 = 30;
+const REVIEW_SWITCH_GAP: i32 = 8;
+/// The size of its bar of files viewed, and the least room left for its words.
+const REVIEW_BAR_W: i32 = 120;
+const REVIEW_BAR_H: i32 = 8;
+const REVIEW_LEFT_MIN: i32 = 60;
 const CARD_PAD: i32 = 12;
 const CARD_RADIUS: f32 = 8.0;
 /// How far in from a card's top and bottom its scrollbar runs.
@@ -2570,6 +2650,63 @@ fn page_stack(
     }
 }
 
+/// Where `ReviewSwitch`'s parts go.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReviewSwitchSpots {
+    pub track: Rect,
+    pub segments: [Rect; 2],
+    /// How many files are viewed, drawn as a bar, while there is room.
+    pub bar: Option<Rect>,
+    /// What is left, in words.
+    pub left: Rect,
+    /// The segments say their figures: there is room.
+    pub full: bool,
+}
+
+/// Where `switch` goes in the row at `(x, y)`, `width` wide: the choice at its
+/// left, its figures cut if they wouldn't fit, then the bar and what is left.
+fn review_switch_spots(switch: &ReviewSwitch, x: i32, y: i32, width: i32) -> ReviewSwitchSpots {
+    let measure = |label: &str| width_of(label, SMALL_FONT_SIZE).ceil() as i32 + 2 * CHIP_PAD;
+    let [code, fixes] = switch.labels();
+    let widths = [measure(&code), measure(&fixes)];
+    let room = width - 2 * PICK_TRACK_PAD;
+    let full = widths[0] + widths[1] <= room;
+    let widths = match full {
+        true => widths,
+        false => [measure("Code review"), measure("Fixes")],
+    };
+    let h = REVIEW_SWITCH_H;
+    let inner = h - 2 * PICK_TRACK_PAD;
+    let first = Rectangle::new(
+        (x + PICK_TRACK_PAD, y + PICK_TRACK_PAD).into(),
+        (widths[0], inner).into(),
+    );
+    let second = Rectangle::new(
+        (first.loc.x + widths[0], y + PICK_TRACK_PAD).into(),
+        (widths[1], inner).into(),
+    );
+    let track_w = widths[0] + widths[1] + 2 * PICK_TRACK_PAD;
+    let track = Rectangle::new((x, y).into(), (track_w, h).into());
+    let from = x + track_w + COLUMN_GAP;
+    let end = x + width;
+    let has_bar = switch.files.is_some() && end - from >= REVIEW_BAR_W + 2 * COLUMN_GAP + REVIEW_LEFT_MIN;
+    let bar = has_bar.then(|| {
+        Rectangle::new(
+            (from, y + (h - REVIEW_BAR_H) / 2).into(),
+            (REVIEW_BAR_W, REVIEW_BAR_H).into(),
+        )
+    });
+    let left_x = bar.map_or(from, |bar| bar.loc.x + bar.size.w + COLUMN_GAP);
+    let left = Rectangle::new((left_x, y).into(), ((end - left_x).max(0), h).into());
+    ReviewSwitchSpots {
+        track,
+        segments: [first, second],
+        bar,
+        left,
+        full,
+    }
+}
+
 /// Where the feature tab's parts go in `frame`, its tab's area: a header,
 /// the stages' rail, then the repositories', page's and activity's
 /// columns, and the hints at the foot.
@@ -2652,6 +2789,13 @@ pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayou
         .collect();
     // Under the rail's rule, the columns; or across it all, the review.
     let rule_end = rail_top + rail_h + RAIL_GAP + 1;
+    let review_switch = view.review_switch.as_ref().map(|switch| {
+        review_switch_spots(switch, x, rule_end + REVIEW_SWITCH_GAP, inner)
+    });
+    let rule_end = match review_switch {
+        Some(_) => rule_end + 2 * REVIEW_SWITCH_GAP + REVIEW_SWITCH_H,
+        None => rule_end,
+    };
     let review = view.review_page.then(|| {
         Rectangle::new(
             (frame.loc.x, rule_end).into(),
@@ -2837,6 +2981,7 @@ pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayou
     }
 
     FeatureTabLayout {
+        review_switch,
         review,
         frame,
         title,
@@ -3169,6 +3314,7 @@ fn slice_view(view: &FeatureTabView, slice: TabSlice) -> FeatureTabView {
         repo: 0,
         focus: TabArea::Stages,
         review_page: view.review_page,
+        review_switch: None,
         review_keys: view.review_keys,
         expanded: view.expanded,
         more: 0,
@@ -3198,7 +3344,7 @@ fn slice_view(view: &FeatureTabView, slice: TabSlice) -> FeatureTabView {
         TabSlice::Head => {
             matches!(
                 hit,
-                H::Prev | H::Next | H::Button(_) | H::Node(_) | H::ToggleRepos
+                H::Prev | H::Next | H::Button(_) | H::Node(_) | H::ToggleRepos | H::ReviewView(_)
             ) || strip && matches!(hit, H::Repo(_) | H::MoreRepos(_))
         }
         TabSlice::Column(TabColumn::Repos) => {
@@ -3228,6 +3374,7 @@ fn slice_view(view: &FeatureTabView, slice: TabSlice) -> FeatureTabView {
             v.back = view.back;
             v.focus = view.focus;
             v.more = view.more;
+            v.review_switch = view.review_switch.clone();
             if strip {
                 repos(&mut v);
             }
@@ -3905,6 +4052,7 @@ impl Painter {
             c.fill(0, px(y), c.w, px(1).max(1), p.border_variant);
         }
 
+        self.review_switch(c, view, l, scale, p);
         self.repo_strip(c, view, l, scale, p);
     }
 
@@ -4069,6 +4217,57 @@ impl Painter {
             band(rect, scale),
             scale,
             color,
+        );
+    }
+
+    /// The switch on Code review's page, with the figures that say how far its
+    /// review has come.
+    fn review_switch(
+        &self,
+        c: &mut Canvas,
+        view: &FeatureTabView,
+        l: &FeatureTabLayout,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let (Some(switch), Some(spots)) = (&view.review_switch, &l.review_switch) else {
+            return;
+        };
+        let [code, fixes] = switch.labels();
+        let labels: [&str; 2] = match spots.full {
+            true => [&code, &fixes],
+            false => ["Code review", "Fixes"],
+        };
+        let hover = match view.hover {
+            Some(FeatureTabHit::ReviewView(i)) => Some(i),
+            _ => None,
+        };
+        let on = usize::from(switch.view == ReviewView::Fixes);
+        let labelled = [(labels[0], spots.segments[0]), (labels[1], spots.segments[1])];
+        self.segmented(c, spots.track, &labelled, on, hover, scale, p);
+        let Some(files) = switch.files.filter(|files| files.total > 0) else {
+            return;
+        };
+        let (left, done) = files.left();
+        let tone = if done { p.success } else { p.warning };
+        if let Some(bar) = spots.bar {
+            let (x, y, w, h) = rect_px(bar, scale);
+            c.rounded(x, y, w, h, h / 2.0, p.border);
+            if files.viewed > 0 {
+                let f = files.viewed.min(files.total) as f32 / files.total as f32;
+                c.rounded(x, y, (w * f).max(h), h, h / 2.0, tone);
+            }
+        }
+        let (x, end) = phys(spots.left, scale);
+        self.bold_text(
+            c,
+            &left,
+            FONT_SIZE,
+            x,
+            end,
+            band(spots.left, scale),
+            scale,
+            tone,
         );
     }
 
