@@ -62,6 +62,8 @@ pub struct FeatureRow {
     pub tokens_out: u64,
     pub nudges: u32,
     pub send_backs: u32,
+    /// What its AI work takes on disk, in bytes (see `stats_panel`).
+    pub kept: u64,
 }
 
 /// A stage's agent and model, on the Agents tab.
@@ -1179,6 +1181,7 @@ mod tests {
             tokens_out: 50,
             nudges: 1,
             send_backs: 1,
+            kept: 0,
         };
         let b = FeatureRow {
             project: "q".into(),

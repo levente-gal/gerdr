@@ -153,8 +153,11 @@ beside the projects is drawn from those files for the stats panel (prefix
 - Claude Code deletes its chats after 30 days unless `cleanupPeriodDays` is
   set in `~/.claude/settings.json`. gerdr copies them while it runs, so a
   chat is kept once gerdr has seen it.
-- There is no delete button. To remove a feature's AI work, delete its
-  folder. The stats drop it the next time gerdr starts.
+- You choose what stays. The stats panel's Features tab shows what each
+  feature's AI work takes on disk. Its trash button (or Del) deletes it on
+  this machine, after asking. A feature still at work goes on keeping what
+  its agents do from then on. A copy another machine kept stays there, and
+  comes back here if you take the feature over from it.
 
 ### Running out of inotify instances
 

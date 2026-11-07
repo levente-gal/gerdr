@@ -452,6 +452,8 @@ pub enum Report {
     /// Bringing the AI work of feature `slug` of `project` is over, as it
     /// went.
     PullEnded { project: String, slug: String },
+    /// The AI work of feature `title` was deleted, or couldn't be: `why`.
+    Deleted { title: String, why: Option<String> },
 }
 
 /// What the thread works at that the tasks panel shows, and can stop.
@@ -661,6 +663,19 @@ impl Gerdr {
             Report::NotBrought { title, from, why } => self.show_warning(format!(
                 "The AI work of \u{201c}{title}\u{201d} stays on {from}: {why}"
             )),
+            Report::Deleted { title, why: None } => {
+                self.show_success(format!("Deleted the AI work of \u{201c}{title}\u{201d}"));
+                self.ai_stats_refresh();
+            }
+            Report::Deleted {
+                title,
+                why: Some(why),
+            } => {
+                self.show_error(format!(
+                    "Couldn't delete the AI work of \u{201c}{title}\u{201d}: {why}"
+                ));
+                self.ai_stats_refresh();
+            }
             Report::PullEnded { project, slug } => {
                 self.ai_work.pulls.remove(&(project, slug));
             }
