@@ -326,9 +326,9 @@ pub struct Workflow {
     /// A feature's own pick on a stage's page goes over it.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub agents: std::collections::BTreeMap<crate::feature::Stage, String>,
-    /// The machine each stage's agent runs on, by its name in `[machines]`;
-    /// without one, this machine. A feature's own pick on a stage's page goes
-    /// over it.
+    /// The machine each stage's agent, Verify's checks or the sandbox runs on, by
+    /// its name in `[machines]` or `least busy`; without one, this machine. A
+    /// feature's own pick on a stage's page goes over it.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub machines: std::collections::BTreeMap<crate::feature::Stage, String>,
     /// Where this project's folders are on a machine, by its name in

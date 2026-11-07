@@ -73,6 +73,10 @@ How to use it:
 - **K7** A button shows its label only. Its key goes in the footer, its tooltip
   and F1, never on the button or in its text. Footer hints and menu rows may
   show keys.
+- **K8** A key comes as its layout's unshifted sym, and `typed` has what Shift
+  made of it: Shift+E is `sym == e`, `typed == E`, and `$` is `sym == 4`. Match
+  capitals and symbols on `typed` or on both forms, and send a test the key as
+  input does. `Keysym::E` alone on `sym` passes its test and never fires.
 
 ## O. Overlays, popups, panels
 
@@ -187,9 +191,13 @@ How to use it:
   and must not end what still runs on a worker: the new writer is following it.
   Whatever a record names that only one machine can reach goes in `lease::taken`.
 
-  A sandbox stays on the machine that started it. On another gerdr
-  `SandboxRun::elsewhere` holds how it stands, as that machine's `/proc` says: a
-  pid in the record means nothing here, so nothing looks it up or signals it. Its
+  A sandbox is on the machine `SandboxRun::machine` names, or on the writer with
+  none. Anything acting on one goes through `sandbox_run::Host`, with paths that
+  machine's (`sandbox_dir_of`): a pid or a path in the record means nothing here. On
+  another machine `SandboxRun::elsewhere` holds how it stands, as that machine's
+  `/proc` says, so nothing looks it up or signals it here. A record out of reach of
+  what was done gets a note to catch up with, and what can't be taken down now is
+  kept for when that machine is back (`machine_sandbox`). Its
   app's ports open here while the feature's workspace shows a page on `localhost`,
   each connection a command of its own that enters the namespace there
   (`machine_sandbox`). A port taken here says so, and a page never opens on it, as

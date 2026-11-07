@@ -399,6 +399,7 @@ impl Gerdr {
                         // clipboard's text comes back as a key for it.
                         if !state.prefix_armed
                             && text_field::is_paste(mods, sym)
+                            && !state.doc_cycles(mods, sym)
                             && let Some(overlay) = state.text_overlay().filter(|o| {
                                 *o != Overlay::Scrollback
                                     || state.scrollback.as_ref().is_some_and(|s| s.find_focused())

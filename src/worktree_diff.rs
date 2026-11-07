@@ -1217,7 +1217,20 @@ impl WorktreeDiff {
         if !typing && let Some(done) = self.tree_key(mods, sym, env) {
             return done;
         }
+        // The list has no field to type in: a key it doesn't take is the
+        // diff's, which gets the keyboard with it. Esc still closes from
+        // the list.
+        let listed = !typing
+            && sym != Keysym::Escape
+            && self.tree_shows(env)
+            && self.tree.as_ref().is_some_and(|tree| tree.focused);
+        if let Some(tree) = self.tree.as_mut().filter(|_| listed) {
+            tree.focused = false;
+        }
         let outcome = self.with_diff(env, |diff, ctx| diff.key(mods, sym, typed, ctx));
+        if let Some(tree) = self.tree.as_mut().filter(|_| listed && outcome.is_none()) {
+            tree.focused = true;
+        }
         let done = match outcome {
             Some(outcome) => self.doc_outcome(outcome).map(Done::Diff),
             None => (sym == Keysym::Escape && plain).then_some(Done::Close),
@@ -1530,6 +1543,14 @@ impl WorktreeDiff {
     /// Whether `path` is this worktree's.
     pub fn is(&self, path: &Path) -> bool {
         self.root == path
+    }
+
+    /// Whether `path` is a checkout it shows: its worktree, or one of its
+    /// feature's repositories, each in a worktree of its own.
+    pub fn shows(&self, path: &Path) -> bool {
+        self.is(path)
+            || (self.feature.as_ref())
+                .is_some_and(|fe| fe.repos.iter().any(|repo| repo.root == path))
     }
 }
 
@@ -2984,6 +3005,17 @@ mod tests {
         assert_eq!(label(&wd), "comment on the file");
         wd.click(ReposHit::DiffRow(1), ENV);
         assert_eq!(label(&wd), "comment on the lines");
+    }
+
+    #[test]
+    fn shift_c_comments_on_the_whole_file_as_input_sends_it() {
+        let mut wd = doc();
+        let shift = ModifiersState {
+            shift: true,
+            ..Default::default()
+        };
+        wd.key(&shift, Keysym::c, Keysym::C, ENV);
+        assert!(wd.diff.editing.is_some());
     }
 
     #[test]

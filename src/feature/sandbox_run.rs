@@ -11,6 +11,9 @@
 //! that moment would leave, which a database recovers from. `Paused` lets go
 //! however the copy ends. On a copy-on-write file system it takes under a
 //! second.
+//!
+//! All of it can happen on another machine: `Host` says where. Its containers,
+//! files and processes are that machine's, as are the paths in `Job`.
 
 use std::{
     fs::{self, File},
@@ -27,6 +30,7 @@ use serde_json::Value;
 
 use super::{
     Repo, now,
+    remote::Reach,
     sandbox::{self, Forward, Generated, Input, Stack},
     setup::{self, Exit},
 };
@@ -48,6 +52,11 @@ const END_WAIT: Duration = Duration::from_secs(3);
 const SYSTEM_DIRS: &[&str] = &[
     "/var/run", "/run", "/sys", "/proc", "/dev", "/tmp", "/etc", "/usr",
 ];
+/// How long a small command on another machine may run.
+const THERE_TIMEOUT: Duration = Duration::from_secs(60);
+/// Where plain `ssh host command` doesn't look, and these tools can be.
+const PATH_THERE: &str =
+    "PATH=\"$PATH:/usr/local/bin:/usr/sbin:/sbin:$HOME/.local/bin\"; export PATH\n";
 
 /// The variable that tells a pane's commands they are in a sandbox; what
 /// keeps them from running again outside it (see `PaneRecord::restart_command`).
@@ -56,6 +65,11 @@ pub const SANDBOX_VAR: &str = "GERDR_SANDBOX";
 /// The sandbox of a feature: kept in its record, so a restarted gerdr finds it.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SandboxRun {
+    /// The machine it runs on, by id, when that isn't the one writing this
+    /// record. Shown from another machine, it is never empty unless that is
+    /// this machine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine: Option<String>,
     /// Unix seconds.
     pub started: u64,
     /// When starting ended, either way; `None` while it starts, or when
@@ -97,6 +111,11 @@ pub struct SandboxRun {
     /// `sandbox::out_of_reach`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub out_of_reach: Vec<String>,
+    /// Compose projects running under the project on the machine that sent it
+    /// there, which don't run on the machine it runs on: nothing of those got
+    /// copied.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub not_there: Vec<String>,
     /// It runs on another machine, and this is how it stands there. Its numbers
     /// mean nothing here, so nothing is looked up or signalled by them.
     #[serde(skip)]
@@ -114,10 +133,15 @@ pub struct Elsewhere {
 }
 
 impl SandboxRun {
+    /// Whether it is on another machine, so its numbers mean nothing here.
+    pub fn on_another_machine(&self) -> bool {
+        self.machine.is_some() || self.elsewhere.is_some()
+    }
+
     /// Whether its namespace is there, so its commands can run.
     pub fn alive(&self) -> bool {
-        if let Some(there) = &self.elsewhere {
-            return there.alive;
+        if self.on_another_machine() {
+            return !self.stopped && self.elsewhere.as_ref().is_some_and(|there| there.alive);
         }
         !self.stopped
             && self.failed.is_none()
@@ -136,9 +160,15 @@ impl SandboxRun {
     /// Stop its network, the only part that takes no docker: its pieces
     /// without a whole sandbox, after a failed start. What still runs inside
     /// goes first: a browser's window would stay, on a dead network.
-    pub fn kill_network(&self) {
-        if self.elsewhere.is_some() {
-            return;
+    ///
+    /// `host` is where it runs: an error says that machine couldn't be told.
+    pub fn kill_network(&self, host: &Host) -> Result<(), String> {
+        if let Host::There(reach) = host {
+            let script = network_end_script(self);
+            return Host::script(reach, &script, THERE_TIMEOUT, "Ending its network", &NEVER);
+        }
+        if self.on_another_machine() {
+            return Ok(());
         }
         if let Some(holder) = self.holder.as_ref().filter(|h| h.alive()) {
             end_inside(holder);
@@ -149,12 +179,13 @@ impl SandboxRun {
         if let Some(holder) = &self.holder {
             holder.kill();
         }
+        Ok(())
     }
 
     /// What listens inside it, by port, leaving out the proxy's own ports.
     pub fn listening(&self) -> Vec<u16> {
-        if let Some(there) = &self.elsewhere {
-            return there.ports.clone();
+        if self.on_another_machine() {
+            return (self.elsewhere.iter()).flat_map(|there| there.ports.clone()).collect();
         }
         let Some(holder) = self.holder.as_ref().filter(|h| h.alive()) else {
             return Vec::new();
@@ -198,6 +229,44 @@ pub fn there_script<'a>(runs: impl IntoIterator<Item = (&'a str, &'a SandboxRun)
     script
 }
 
+/// The script ending what `run` has running on its machine: what runs inside
+/// its namespace first, as `end_inside` does, then its proxy and its holder. A
+/// process with another start time is another's, and left alone. A shell in a
+/// terminal ignores what ends the others, and no gerdr may be there to close that
+/// terminal: a hangup ends it.
+pub fn network_end_script(run: &SandboxRun) -> String {
+    let same = "same() {\n\
+                s=$(cat /proc/$1/stat 2>/dev/null) || return 1\n\
+                s=${s##*) }\n\
+                w=$2\n\
+                set -- $s\n\
+                [ \"$1\" != Z ] && [ \"${20}\" = \"$w\" ]\n\
+                }\n";
+    let mut script = same.to_owned();
+    // Never what this shell is in: that is everything else on the machine, as a
+    // holder that isn't one would have it.
+    script.push_str("own=$(readlink /proc/$$/ns/net)\n");
+    if let Some(holder) = &run.holder {
+        let (pid, start) = (holder.pid, holder.start);
+        script.push_str(&format!(
+            "net=\nif same {pid} {start}; then net=$(readlink /proc/{pid}/ns/net); fi\n\
+             if [ -n \"$own\" ] && [ -n \"$net\" ] && [ \"$net\" != \"$own\" ]; then\n\
+             inside() {{ ls -l /proc/[0-9]*/ns/net 2>/dev/null | awk -v n=\"$net\" '$NF == n {{ split($(NF-2), a, \"/\"); if (a[3] != {pid}) print a[3] }}'; }}\n\
+             for p in $(inside); do kill \"$p\" 2>/dev/null; done\n\
+             i=0\n\
+             while [ \"$i\" -lt 30 ] && [ -n \"$(inside)\" ]; do sleep 0.1; i=$((i+1)); done\n\
+             for p in $(inside); do kill -HUP \"$p\" 2>/dev/null; done\n\
+             fi\n"
+        ));
+    }
+    for proc in [&run.pasta, &run.holder].into_iter().flatten() {
+        let (pid, start) = (proc.pid, proc.start);
+        script.push_str(&format!("if same {pid} {start}; then kill {pid}; fi\n"));
+    }
+    script.push_str("exit 0\n");
+    script
+}
+
 /// How `run`, called `name`, stands by what `there_script` said.
 pub fn read_there(said: &str, name: &str, run: &SandboxRun) -> Elsewhere {
     let section = |what: &str| -> String {
@@ -233,6 +302,12 @@ fn end_inside(holder: &Proc) {
     let Ok(net) = fs::read_link(format!("/proc/{}/ns/net", holder.pid)) else {
         return;
     };
+    // Never what gerdr is in: that is everything else on the machine, as a holder
+    // that isn't one would have it.
+    if fs::read_link("/proc/self/ns/net").map_or(true, |own| own == net) {
+        tracing::error!("a sandbox's holder is in this machine's own network: nothing ended");
+        return;
+    }
     let inside = || -> Vec<i32> {
         // A folder that can't be listed leaves nothing to end.
         let entries = fs::read_dir("/proc").into_iter().flatten().flatten();
@@ -299,6 +374,263 @@ pub fn outward_keys(env: &str) -> Vec<String> {
         .map(|(key, _)| key)
         .filter(|key| WORDS.iter().any(|word| key.contains(word)))
         .collect()
+}
+
+/// What never asks anything to stop.
+static NEVER: AtomicBool = AtomicBool::new(false);
+
+/// Where a sandbox's commands run.
+#[derive(Clone, Debug, Default)]
+pub enum Host {
+    #[default]
+    Here,
+    /// On another machine, over its link.
+    There(Reach),
+}
+
+impl Host {
+    /// Run `script` there, with where its tools are. Nothing comes of what it
+    /// wrote: for what `output` isn't.
+    fn script(
+        reach: &Reach,
+        script: &str,
+        limit: Duration,
+        what: &str,
+        stop: &AtomicBool,
+    ) -> Result<(), String> {
+        let script = format!("{PATH_THERE}{script}");
+        (reach.script_for(&script, limit, what, stop)).map(drop).map_err(|t| t.text().to_owned())
+    }
+
+    fn said(reach: &Reach, script: &str, stop: &AtomicBool) -> Result<String, String> {
+        let script = format!("{PATH_THERE}{script}");
+        (reach.script_for(&script, THERE_TIMEOUT, "A command there failed", stop))
+            .map_err(|t| t.text().to_owned())
+    }
+
+    /// `output` where this is.
+    fn output(
+        &self,
+        program: &str,
+        args: &[&str],
+        timeout: Duration,
+        stop: &AtomicBool,
+    ) -> Result<String, String> {
+        let Self::There(reach) = self else {
+            return output(program, args, timeout, stop);
+        };
+        let mut line = format!("{PATH_THERE}exec {}", shell_quote(program));
+        for arg in args {
+            line.push(' ');
+            line.push_str(&shell_quote(arg));
+        }
+        line.push('\n');
+        (reach.script_for(&line, timeout, program, stop)).map_err(|t| t.text().to_owned())
+    }
+
+    /// Whether `tool` is there to run.
+    fn has(&self, tool: &str) -> bool {
+        let Self::There(reach) = self else {
+            let found = Command::new(tool)
+                .arg("--version")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            return found.is_ok();
+        };
+        let script = format!("command -v {} >/dev/null 2>&1\n", shell_quote(tool));
+        Self::said(reach, &script, &NEVER).is_ok()
+    }
+
+    /// The text of file `path`, if it can be read.
+    fn read(&self, path: &Path) -> Option<String> {
+        let Self::There(reach) = self else {
+            return fs::read_to_string(path).ok();
+        };
+        let script = format!("cat {} 2>/dev/null\n", shell_quote(&path.to_string_lossy()));
+        Self::said(reach, &script, &NEVER).ok()
+    }
+
+    /// Write `text` to file `path`, making its folder.
+    fn write(&self, path: &Path, text: &str) -> Result<(), String> {
+        let shown = path.display();
+        let parent = path.parent().unwrap_or(path);
+        self.make_dir(parent)?;
+        let Self::There(reach) = self else {
+            return fs::write(path, text).map_err(|e| format!("couldn't write {shown}: {e}"));
+        };
+        let script = format!(
+            "cat > {} <<'GERDR_SANDBOX_FILE'\n{text}\nGERDR_SANDBOX_FILE\n",
+            shell_quote(&path.to_string_lossy())
+        );
+        Self::said(reach, &script, &NEVER)
+            .map(drop)
+            .map_err(|why| format!("couldn't write {shown}: {why}"))
+    }
+
+    fn make_dir(&self, path: &Path) -> Result<(), String> {
+        let shown = path.display();
+        let Self::There(reach) = self else {
+            return fs::create_dir_all(path).map_err(|e| format!("couldn't make {shown}: {e}"));
+        };
+        let script = format!("mkdir -p {}\n", shell_quote(&path.to_string_lossy()));
+        Self::said(reach, &script, &NEVER)
+            .map(drop)
+            .map_err(|why| format!("couldn't make {shown}: {why}"))
+    }
+
+    /// Whether `path` is there.
+    fn exists(&self, path: &Path) -> bool {
+        let Self::There(reach) = self else {
+            return path.exists();
+        };
+        let script = format!("[ -e {} ]\n", shell_quote(&path.to_string_lossy()));
+        Self::said(reach, &script, &NEVER).is_ok()
+    }
+
+    /// Whether git tracks what `path` names, a file or a folder's content.
+    fn tracked(&self, path: &Path) -> bool {
+        let Self::There(reach) = self else {
+            let (dir, name) = if path.is_dir() {
+                (path, ".".to_owned())
+            } else {
+                let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
+                (path.parent().unwrap_or(path), name.unwrap_or_default())
+            };
+            let tracked = Command::new("git")
+                .args(["ls-files", "--", &name])
+                .current_dir(dir)
+                .stderr(Stdio::null())
+                .output();
+            return matches!(tracked, Ok(out) if out.status.success() && !out.stdout.is_empty());
+        };
+        let path = shell_quote(&path.to_string_lossy());
+        let script = format!(
+            "if [ -d {path} ]; then cd {path} && git ls-files -- .; else cd \"$(dirname {path})\" && git ls-files -- \"$(basename {path})\"; fi 2>/dev/null\n"
+        );
+        Self::said(reach, &script, &NEVER).is_ok_and(|said| !said.trim().is_empty())
+    }
+
+    /// A port to publish a copy on, free here on both loopback addresses and
+    /// not among `taken`.
+    fn free_port(&self, taken: &std::collections::BTreeSet<u16>) -> Result<u16, String> {
+        let Self::There(reach) = self else {
+            return sandbox::free_port(taken);
+        };
+        let tables = "cat /proc/net/tcp /proc/net/tcp6 2>/dev/null; exit 0\n";
+        let said = Self::said(reach, tables, &NEVER)?;
+        let held: std::collections::BTreeSet<u16> = listening_in(&said).into_iter().collect();
+        let spread = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |at| at.subsec_nanos());
+        free_among(&held, taken, spread).ok_or_else(|| "no free port found".to_owned())
+    }
+
+    /// Start the process that keeps the namespaces alive.
+    fn start_holder(&self) -> Result<Proc, String> {
+        let Self::There(reach) = self else {
+            return start_holder();
+        };
+        let said = Self::said(reach, HOLDER_SCRIPT, &NEVER);
+        said.ok().and_then(|said| started_proc(&said)).ok_or_else(|| {
+            // Most likely this system doesn't let a user make namespaces.
+            "Couldn't start its network: unshare made no namespace".to_owned()
+        })
+    }
+
+    /// Start pasta, the proxy leading `forwards`' ports inside to the host.
+    fn start_pasta(&self, holder: &Proc, forwards: &[Forward], dir: &Path) -> Result<Proc, String> {
+        let Self::There(reach) = self else {
+            return start_pasta(holder, forwards, dir);
+        };
+        let log = dir.join("pasta.log");
+        let script = pasta_script(&pasta_args(holder.pid, forwards), &log.to_string_lossy());
+        let said = Self::said(reach, &script, &NEVER).map_err(|why| format!("Couldn't start pasta: {why}"))?;
+        started_proc(&said).ok_or_else(|| {
+            let text = self.read(&log).unwrap_or_default();
+            format!("pasta stopped: {}", last_lines(&text, "no reason given"))
+        })
+    }
+
+    /// Run the shell line `command` in `dir`, what it says added to file `log`.
+    fn run_logged(
+        reach: &Reach,
+        command: &str,
+        dir: &Path,
+        log: &Path,
+        stop: &AtomicBool,
+    ) -> Result<(), String> {
+        let script = format!(
+            "cd {} || exit 1\n{command} >> {} 2>&1\n",
+            shell_quote(&dir.to_string_lossy()),
+            shell_quote(&log.to_string_lossy()),
+        );
+        Self::script(reach, &script, setup::TIMEOUT, "It", stop)
+    }
+
+    /// Remove folder `dir` and what's in it.
+    fn remove_dir(&self, dir: &Path) -> Result<(), String> {
+        let shown = dir.display();
+        let Self::There(reach) = self else {
+            return match fs::remove_dir_all(dir) {
+                Ok(()) => Ok(()),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(err) => Err(format!("{shown}: {err}")),
+            };
+        };
+        let script = format!("rm -rf -- {}\n", shell_quote(&dir.to_string_lossy()));
+        Self::said(reach, &script, &NEVER).map(drop).map_err(|why| format!("{shown}: {why}"))
+    }
+}
+
+/// A port not in `held` nor `taken`, starting from a place `spread` picks: two
+/// sandboxes starting at once shouldn't go for one port.
+fn free_among(
+    held: &std::collections::BTreeSet<u16>,
+    taken: &std::collections::BTreeSet<u16>,
+    spread: u32,
+) -> Option<u16> {
+    const FIRST: u32 = 49152;
+    const COUNT: u32 = 10000;
+    (0..COUNT)
+        .map(|i| (FIRST + (spread + i) % COUNT) as u16)
+        .find(|port| !held.contains(port) && !taken.contains(port))
+}
+
+/// The script starting what keeps the namespaces there, and saying its pid and
+/// `/proc` stat line. A background job here is no group leader, so `setsid` runs
+/// `unshare` in place, and it becomes `sleep`: the pid stays.
+const HOLDER_SCRIPT: &str = "own=$(readlink /proc/$$/ns/net)\n\
+setsid unshare --user --map-current-user --net sleep infinity </dev/null >/dev/null 2>&1 &\n\
+p=$!\n\
+i=0\n\
+while [ \"$i\" -lt 150 ]; do\n\
+net=$(readlink /proc/$p/ns/net 2>/dev/null)\n\
+if [ -n \"$net\" ] && [ \"$net\" != \"$own\" ]; then echo \"$p\"; cat /proc/$p/stat; exit 0; fi\n\
+sleep 0.02\n\
+i=$((i+1))\n\
+done\n\
+kill \"$p\" 2>/dev/null\n\
+exit 3\n";
+
+/// The script starting pasta there, its output in file `log`, and saying its pid
+/// and `/proc` stat line once it stayed a moment. Nothing more once it is gone.
+fn pasta_script(args: &[String], log: &str) -> String {
+    let args: Vec<String> = args.iter().map(|arg| shell_quote(arg)).collect();
+    format!(
+        "setsid pasta {} </dev/null >{} 2>&1 &\np=$!\nsleep 0.3\necho \"$p\"\ncat /proc/$p/stat 2>/dev/null\nexit 0\n",
+        args.join(" "),
+        shell_quote(log),
+    )
+}
+
+/// The process a start script says: its pid, then its `/proc` stat line.
+fn started_proc(said: &str) -> Option<Proc> {
+    let mut lines = said.lines();
+    let pid = lines.next()?.trim().parse().ok()?;
+    let start = start_in_stat(lines.next()?)?;
+    Some(Proc { pid, start })
 }
 
 /// A compose project of a sandbox.
@@ -469,38 +801,42 @@ fn last_lines(text: &str, otherwise: &str) -> String {
     }
 }
 
-fn docker(args: &[&str], stop: &AtomicBool) -> Result<String, String> {
-    output("docker", args, DOCKER_TIMEOUT, stop)
+fn docker(host: &Host, args: &[&str], stop: &AtomicBool) -> Result<String, String> {
+    host.output("docker", args, DOCKER_TIMEOUT, stop)
 }
 
 /// Which tool is missing for a sandbox, in words, or the docker daemon being
 /// down.
-pub fn tools_missing() -> Option<String> {
+pub fn tools_missing(host: &Host) -> Option<String> {
     let stop = AtomicBool::new(false);
-    for tool in ["pasta", "unshare", "nsenter"] {
-        let found = Command::new(tool)
-            .arg("--version")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        if found.is_err() {
+    let tools = ["pasta", "unshare", "nsenter"];
+    let tools = tools.iter().chain(match host {
+        Host::Here => &[][..],
+        // A sandbox's terminals and a look at its app need it there; the
+        // holder and the proxy start through it.
+        Host::There(_) => &["setsid", "bash"][..],
+    });
+    for tool in tools {
+        if !host.has(tool) {
             return Some(format!("{tool} isn't installed, and a sandbox needs it"));
         }
     }
     let info = ["info", "--format", "{{.ServerVersion}}"];
-    if output("docker", &info, Duration::from_secs(15), &stop).is_err() {
+    if host.output("docker", &info, Duration::from_secs(15), &stop).is_err() {
         return Some("Docker isn't running, and a sandbox needs it".to_owned());
     }
     let compose = ["compose", "version"];
-    if output("docker", &compose, Duration::from_secs(15), &stop).is_err() {
+    if host.output("docker", &compose, Duration::from_secs(15), &stop).is_err() {
         return Some("Docker Compose isn't installed, and a sandbox needs it".to_owned());
     }
     None
 }
 
-/// What it takes to start a sandbox.
+/// What it takes to start a sandbox. The paths are those of the machine it
+/// starts on.
 pub struct Job<'a> {
+    /// Where it starts.
+    pub host: &'a Host,
     pub project: &'a str,
     pub slug: &'a str,
     pub repos: &'a [Repo],
@@ -545,11 +881,11 @@ fn start_into(
     job: &Job,
     progress: &mut dyn FnMut(String),
 ) -> Result<(), String> {
-    if let Some(missing) = tools_missing() {
+    if let Some(missing) = tools_missing(job.host) {
         return Err(missing);
     }
-    fs::create_dir_all(job.dir).map_err(|e| format!("couldn't make {}: {e}", job.dir.display()))?;
-    let containers = running_containers(job.stop)?;
+    job.host.make_dir(job.dir)?;
+    let containers = running_containers(job.host, job.stop)?;
     let stacks = sandbox::stacks_under(&containers, job.roots);
     run.not_copied = sandbox::loose(&containers)
         .iter()
@@ -565,7 +901,7 @@ fn start_into(
         let label = sandbox::feature_label(job.project, job.slug);
         let running = stack.services.keys().cloned().collect();
         let file = job.dir.join(format!("{name}.json"));
-        let mut next_port = sandbox::free_port;
+        let mut next_port = |taken: &std::collections::BTreeSet<u16>| job.host.free_port(taken);
         let generated = sandbox::generate(
             &config,
             Input {
@@ -574,13 +910,13 @@ fn start_into(
                 running: &running,
                 data_dir: job.dir,
                 taken: &taken,
-                copies_bind: &|path| copies_bind(path),
+                copies_bind: &|path| copies_bind(job.host, path),
                 next_port: &mut next_port,
             },
         )?;
         taken.extend(generated.forwards.iter().map(|f| f.host_port));
         let text = serde_json::to_string_pretty(&generated.compose).map_err(|e| e.to_string())?;
-        fs::write(&file, text).map_err(|e| format!("couldn't write {}: {e}", file.display()))?;
+        job.host.write(&file, &text)?;
         copy_data(stack, &generated, &config, job, run, progress)?;
         run.forwards.extend(generated.forwards);
         run.stacks.push(StackRun { name, file });
@@ -602,17 +938,17 @@ fn start_into(
             "-s",
             "-v",
         ];
-        docker(&args, job.stop)?;
+        docker(job.host, &args, job.stop)?;
         let args = ["compose", "-p", &stack.name, "-f", &file, "up", "-d"];
-        docker(&args, job.stop)?;
-        wait_ready(&stack, job.stop)?;
+        docker(job.host, &args, job.stop)?;
+        wait_ready(job.host, &stack, job.stop)?;
     }
     progress("Making its network".to_owned());
-    let holder = start_holder()?;
+    let holder = job.host.start_holder()?;
     run.holder = Some(holder.clone());
-    let pasta = start_pasta(&holder, &run.forwards, job.dir)?;
+    let pasta = job.host.start_pasta(&holder, &run.forwards, job.dir)?;
     run.pasta = Some(pasta);
-    wait_loopback(&holder);
+    wait_loopback(job.host, &holder);
     for (i, step) in job.prepare.iter().enumerate() {
         if job.stop.load(Ordering::Relaxed) {
             return Err("Stopped".to_owned());
@@ -641,7 +977,7 @@ fn outward_of(job: &Job) -> Vec<String> {
     let mut keys: Vec<String> = job
         .repos
         .iter()
-        .filter_map(|repo| fs::read_to_string(repo.worktree.join(".env")).ok())
+        .filter_map(|repo| job.host.read(&repo.worktree.join(".env")))
         .flat_map(|text| outward_keys(&text))
         .filter(|key| !overridden(key, job.env))
         .collect();
@@ -656,7 +992,7 @@ fn out_of_reach_of(job: &Job, containers: &[sandbox::Container]) -> Vec<String> 
     let mut found: Vec<String> = job
         .repos
         .iter()
-        .filter_map(|repo| fs::read_to_string(repo.worktree.join(".env")).ok())
+        .filter_map(|repo| job.host.read(&repo.worktree.join(".env")))
         .flat_map(|text| {
             sandbox::out_of_reach(&sandbox_pairs(&text, job.env), containers, job.roots)
         })
@@ -691,21 +1027,21 @@ fn overridden(key: &str, env: &[(String, String)]) -> bool {
 }
 
 /// The running containers, whichever project they are of.
-fn running_containers(stop: &AtomicBool) -> Result<Vec<sandbox::Container>, String> {
-    let ids = docker(&["ps", "-q"], stop)?;
+pub fn running_containers(host: &Host, stop: &AtomicBool) -> Result<Vec<sandbox::Container>, String> {
+    let ids = docker(host, &["ps", "-q"], stop)?;
     let ids: Vec<&str> = ids.split_whitespace().collect();
     if ids.is_empty() {
         return Ok(Vec::new());
     }
     let mut args = vec!["inspect"];
     args.extend(&ids);
-    sandbox::containers_of(&docker(&args, stop)?)
+    sandbox::containers_of(&docker(host, &args, stop)?)
 }
 
 /// `path` in the feature if it is there, else as it is.
-fn in_feature(path: &Path, repos: &[Repo]) -> PathBuf {
+fn in_feature(host: &Host, path: &Path, repos: &[Repo]) -> PathBuf {
     let mapped = sandbox::in_worktree(path, repos);
-    if mapped.exists() {
+    if host.exists(&mapped) {
         mapped
     } else {
         path.to_owned()
@@ -716,7 +1052,7 @@ fn in_feature(path: &Path, repos: &[Repo]) -> PathBuf {
 /// main's project name, so the names it spells out are the ones of main's
 /// volumes, which are what gets copied.
 fn compose_config(stack: &Stack, job: &Job) -> Result<Value, String> {
-    let dir = in_feature(&stack.working_dir, job.repos);
+    let dir = in_feature(job.host, &stack.working_dir, job.repos);
     let dir = dir.to_string_lossy().into_owned();
     let mut owned = vec![
         "compose".to_owned(),
@@ -727,49 +1063,38 @@ fn compose_config(stack: &Stack, job: &Job) -> Result<Value, String> {
     ];
     if let Some(env) = &stack.env_file {
         owned.push("--env-file".to_owned());
-        owned.push(in_feature(env, job.repos).to_string_lossy().into_owned());
+        owned.push(in_feature(job.host, env, job.repos).to_string_lossy().into_owned());
     }
     for file in &stack.config_files {
         owned.push("-f".to_owned());
-        owned.push(in_feature(file, job.repos).to_string_lossy().into_owned());
+        owned.push(in_feature(job.host, file, job.repos).to_string_lossy().into_owned());
     }
     owned.extend(["config", "--format", "json"].map(str::to_owned));
     let args: Vec<&str> = owned.iter().map(String::as_str).collect();
-    let text = docker(&args, job.stop)?;
+    let text = docker(job.host, &args, job.stop)?;
     serde_json::from_str(&text).map_err(|e| format!("couldn't read the compose file: {e}"))
 }
 
 /// Whether a writable bind mount of `path` holds data to copy. What git tracks
 /// is the project's files, like a config, and the system's folders are shared
 /// on purpose, like the docker socket.
-fn copies_bind(path: &Path) -> bool {
+fn copies_bind(host: &Host, path: &Path) -> bool {
     if SYSTEM_DIRS.iter().any(|dir| path.starts_with(dir)) {
         return false;
     }
-    let (dir, name) = if path.is_dir() {
-        (path, ".".to_owned())
-    } else {
-        let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
-        (path.parent().unwrap_or(path), name.unwrap_or_default())
-    };
-    let tracked = Command::new("git")
-        .args(["ls-files", "--", &name])
-        .current_dir(dir)
-        .stderr(Stdio::null())
-        .output();
-    !matches!(tracked, Ok(out) if out.status.success() && !out.stdout.is_empty())
+    !host.tracked(path)
 }
 
 /// Unpauses its containers however a copy ends. If gerdr dies meanwhile they
 /// stay paused, until `docker unpause`: nothing here looks for that, and the
 /// next start fails on pausing them again.
-struct Paused(Vec<String>);
+struct Paused(Vec<String>, Host);
 
 impl Paused {
-    fn new(containers: Vec<String>, stop: &AtomicBool) -> Result<Self, String> {
-        let mut paused = Self(Vec::new());
+    fn new(host: &Host, containers: Vec<String>, stop: &AtomicBool) -> Result<Self, String> {
+        let mut paused = Self(Vec::new(), host.clone());
         for container in containers {
-            docker(&["pause", &container], stop)?;
+            docker(host, &["pause", &container], stop)?;
             paused.0.push(container);
         }
         Ok(paused)
@@ -780,7 +1105,7 @@ impl Drop for Paused {
     fn drop(&mut self) {
         let never = AtomicBool::new(false);
         for container in &self.0 {
-            if let Err(why) = docker(&["unpause", container], &never) {
+            if let Err(why) = docker(&self.1, &["unpause", container], &never) {
                 tracing::error!("couldn't unpause {container}: {why}");
             }
         }
@@ -806,7 +1131,7 @@ fn copy_data(
     for copy in &generated.copies {
         run.copied.push(copy.from.clone());
         let mark = copy_mark(job.dir, &copy.to);
-        if mark.exists() {
+        if job.host.exists(&mark) {
             continue;
         }
         let image = copy
@@ -820,7 +1145,7 @@ fn copy_data(
                     .map(str::to_owned)
             })
             .ok_or_else(|| format!("Volume {} has no image to copy it with", copy.from))?;
-        if docker(&["volume", "inspect", &copy.from], job.stop).is_err() {
+        if docker(job.host, &["volume", "inspect", &copy.from], job.stop).is_err() {
             // Nothing in main to copy: it starts empty, as main's did.
             run.copied.pop();
             continue;
@@ -841,8 +1166,8 @@ fn copy_data(
             sandbox::feature_label(job.project, job.slug)
         );
         // Whatever is in it is a copy cut short.
-        let _ = docker(&["volume", "rm", &copy.to], job.stop);
-        docker(&["volume", "create", "--label", &label, &copy.to], job.stop)?;
+        let _ = docker(job.host, &["volume", "rm", &copy.to], job.stop);
+        docker(job.host, &["volume", "create", "--label", &label, &copy.to], job.stop)?;
         let from = format!("{}:/from:ro", copy.from);
         let to = format!("{}:/to", copy.to);
         let args = [
@@ -865,51 +1190,39 @@ fn copy_data(
             "/to/",
         ];
         let copied = {
-            let _paused = Paused::new(containers, job.stop)?;
-            output("docker", &args, COPY_TIMEOUT, job.stop)
+            let _paused = Paused::new(job.host, containers, job.stop)?;
+            job.host.output("docker", &args, COPY_TIMEOUT, job.stop)
         };
         if let Err(why) = copied {
             // A copy cut short mustn't be taken for data. Failing to remove it
             // changes nothing: without a mark, the next start copies again.
-            let _ = docker(&["volume", "rm", &copy.to], job.stop);
+            let _ = docker(job.host, &["volume", "rm", &copy.to], job.stop);
             return Err(format!("Couldn't copy volume {}: {why}", copy.from));
         }
-        write_mark(&mark)?;
+        job.host.write(&mark, "")?;
     }
     for bind in &generated.binds {
         let mark = bind.to.with_extension("copied");
-        if mark.exists() {
+        if job.host.exists(&mark) {
             continue;
         }
-        if !bind.from.exists() {
-            fs::create_dir_all(&bind.to)
-                .map_err(|e| format!("couldn't make {}: {e}", bind.to.display()))?;
+        if !job.host.exists(&bind.from) {
+            job.host.make_dir(&bind.to)?;
             continue;
         }
         progress(format!("Copying {}", bind.from.display()));
         if let Some(parent) = bind.to.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|e| format!("couldn't make {}: {e}", parent.display()))?;
+            job.host.make_dir(parent)?;
         }
         let (from, to) = (bind.from.to_string_lossy(), bind.to.to_string_lossy());
         let args = ["-a", "--reflink=auto", from.as_ref(), to.as_ref()];
-        output("cp", &args, COPY_TIMEOUT, job.stop)
+        (job.host.output("cp", &args, COPY_TIMEOUT, job.stop))
             .map_err(|why| format!("Couldn't copy {from}: {why}"))?;
-        write_mark(&mark)?;
+        job.host.write(&mark, "")?;
     }
     run.fresh
         .extend(generated.fresh.iter().map(|f| f.service.clone()));
     Ok(())
-}
-
-fn write_mark(mark: &Path) -> Result<(), String> {
-    if let Some(parent) = mark.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("couldn't make {}: {e}", parent.display()))?;
-    }
-    File::create(mark)
-        .map(drop)
-        .map_err(|e| format!("couldn't write {}: {e}", mark.display()))
 }
 
 /// How a compose project's containers stand.
@@ -945,7 +1258,7 @@ fn ready_of(text: &str) -> Ready {
 }
 
 /// Wait for `stack`'s containers to come up, health checks included.
-fn wait_ready(stack: &StackRun, stop: &AtomicBool) -> Result<(), String> {
+fn wait_ready(host: &Host, stack: &StackRun, stop: &AtomicBool) -> Result<(), String> {
     let file = stack.file.to_string_lossy();
     let args = [
         "compose",
@@ -960,7 +1273,7 @@ fn wait_ready(stack: &StackRun, stop: &AtomicBool) -> Result<(), String> {
     ];
     let started = Instant::now();
     loop {
-        match ready_of(&docker(&args, stop)?) {
+        match ready_of(&docker(host, &args, stop)?) {
             Ready::Yes => return Ok(()),
             Ready::Failed(why) => {
                 return Err(format!("{why} (docker compose -p {} logs)", stack.name));
@@ -1070,7 +1383,7 @@ fn pasta_args(holder: i32, forwards: &[Forward]) -> Vec<String> {
 
 /// Wait until the loopback address inside is up, which is pasta's to do. Without
 /// `ip` to ask, the first connection will tell.
-fn wait_loopback(holder: &Proc) {
+fn wait_loopback(host: &Host, holder: &Proc) {
     let pid = holder.pid.to_string();
     let args = [
         "--user",
@@ -1088,7 +1401,7 @@ fn wait_loopback(holder: &Proc) {
     let stop = AtomicBool::new(false);
     let started = Instant::now();
     while started.elapsed() < Duration::from_secs(3) {
-        match output("nsenter", &args, Duration::from_secs(2), &stop) {
+        match host.output("nsenter", &args, Duration::from_secs(2), &stop) {
             Ok(text) if text.contains("127.0.0.1") => return,
             Ok(_) | Err(_) => std::thread::sleep(Duration::from_millis(50)),
         }
@@ -1101,6 +1414,9 @@ fn run_inside(holder: &Proc, job: &Job, step: &PrepareStep) -> Result<(), String
     let PrepareStep { dir, line, shown } = step;
     use std::io::Write;
     let log = job.dir.join("prepare.log");
+    if let Host::There(reach) = job.host {
+        return run_inside_there(reach, holder, job, step, &log);
+    }
     let mut file = fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -1111,15 +1427,7 @@ fn run_inside(holder: &Proc, job: &Job, step: &PrepareStep) -> Result<(), String
     // Where this run's output starts: the log keeps the earlier runs'.
     let from = file.metadata().map_or(0, |m| m.len() as usize);
     let out = file.try_clone().map_err(|e| e.to_string())?;
-    let mut command = format!(
-        "exec nsenter --user --net --preserve-credentials -t {} -- env {SANDBOX_VAR}={}",
-        holder.pid,
-        shell_quote(job.slug)
-    );
-    for (key, value) in job.env {
-        command.push_str(&format!(" {}={}", key, shell_quote(value)));
-    }
-    command.push_str(&format!(" sh -c {}", shell_quote(line)));
+    let command = format!("exec {}", inside_line(holder, job, line));
     let exit: Exit = setup::shell_until(
         &command,
         dir,
@@ -1144,6 +1452,48 @@ fn run_inside(holder: &Proc, job: &Job, step: &PrepareStep) -> Result<(), String
     }
 }
 
+/// The shell line running `line` in the sandbox `holder` keeps.
+fn inside_line(holder: &Proc, job: &Job, line: &str) -> String {
+    let mut command = format!(
+        "nsenter --user --net --preserve-credentials -t {} -- env {SANDBOX_VAR}={}",
+        holder.pid,
+        shell_quote(job.slug)
+    );
+    for (key, value) in job.env {
+        command.push_str(&format!(" {}={}", key, shell_quote(value)));
+    }
+    command.push_str(&format!(" sh -c {}", shell_quote(line)));
+    command
+}
+
+/// `run_inside` on another machine. Stopping it here ends only the connection:
+/// what's in the sandbox then goes with its network, as a stop takes that down.
+fn run_inside_there(
+    reach: &Reach,
+    holder: &Proc,
+    job: &Job,
+    step: &PrepareStep,
+    log: &Path,
+) -> Result<(), String> {
+    let PrepareStep { dir, line, shown } = step;
+    let quoted = shell_quote(&log.to_string_lossy());
+    // Where this run's output starts: the log keeps the earlier runs'.
+    let mark = format!("wc -c < {quoted} 2>/dev/null || echo 0\n");
+    let from: usize = (job.host.output("sh", &["-c", &mark], THERE_TIMEOUT, job.stop))
+        .ok()
+        .and_then(|said| said.trim().parse().ok())
+        .unwrap_or(0);
+    let command = inside_line(holder, job, line);
+    let ran = Host::run_logged(reach, &command, dir, log, job.stop);
+    ran.map_err(|why| {
+        // Unreadable, the log it points at says as much as this would.
+        let said = job.host.read(log).unwrap_or_default();
+        let error = last_error(said.as_bytes().get(from..).unwrap_or_default())
+            .unwrap_or(why);
+        format!("`{shown}` failed: {error} (see {} there)", log.display())
+    })
+}
+
 /// The line of output `raw` that best says why a command failed: the last one
 /// not indented. What's indented continues it: a traceback's error comes last
 /// but for its hints.
@@ -1165,32 +1515,47 @@ fn last_error(raw: &[u8]) -> Option<String> {
 /// Stop `run`: its network, then its containers. With `remove`, its containers,
 /// its data and `dir` too, and nothing of it remains. What couldn't be stopped
 /// is the error, with the rest still done.
-pub fn stop(run: &SandboxRun, dir: &Path, remove: bool) -> Result<(), String> {
-    if run.elsewhere.is_some() {
+///
+/// `host` is where it runs, and `dir` its folder there: what a record read on
+/// another machine says of a path there may have been translated. With its compose
+/// file gone docker finds the project by its name, and then knows only the volumes
+/// compose made: those made for a copy go by name, as in `remove_stack`.
+pub fn stop(run: &SandboxRun, dir: &Path, remove: bool, host: &Host) -> Result<(), String> {
+    if matches!(host, Host::Here) && run.on_another_machine() {
         return Err("it runs on another machine".to_owned());
     }
-    run.kill_network();
     let never = AtomicBool::new(false);
     let mut problems = Vec::new();
+    if let Err(why) = run.kill_network(host) {
+        problems.push(why);
+    }
     for stack in &run.stacks {
-        let file = stack.file.to_string_lossy();
-        let base = ["compose", "-p", &stack.name, "-f", &file];
-        let mut args = base.to_vec();
+        let file = dir.join(format!("{}.json", stack.name));
+        let file = match host {
+            Host::Here => stack.file.clone(),
+            Host::There(_) => file,
+        };
+        let shown = file.to_string_lossy();
+        let mut args = vec!["compose", "-p", &stack.name];
+        if host.exists(&file) {
+            args.extend(["-f", &shown]);
+        }
         if remove {
             args.extend(["down", "-v", "--remove-orphans"]);
         } else {
             args.push("stop");
         }
-        if let Err(why) = output("docker", &args, STOP_TIMEOUT, &never) {
+        if let Err(why) = host.output("docker", &args, STOP_TIMEOUT, &never) {
+            problems.push(format!("{}: {why}", stack.name));
+        } else if remove && let Err(why) = remove_copies(host, &stack.name, &never) {
             problems.push(format!("{}: {why}", stack.name));
         }
     }
-    if remove && problems.is_empty() {
-        match fs::remove_dir_all(dir) {
-            Ok(()) => {}
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => problems.push(format!("{}: {err}", dir.display())),
-        }
+    if remove
+        && problems.is_empty()
+        && let Err(why) = host.remove_dir(dir)
+    {
+        problems.push(why);
     }
     if problems.is_empty() {
         Ok(())
@@ -1206,10 +1571,16 @@ pub fn remove_stack(stack: &str) -> Result<(), String> {
     let never = AtomicBool::new(false);
     let args = ["compose", "-p", stack, "down", "-v", "--remove-orphans"];
     output("docker", &args, STOP_TIMEOUT, &never)?;
+    remove_copies(&Host::Here, stack, &never)
+}
+
+/// Remove the volumes of compose project `stack` that made it through its going
+/// down. Their names hold a hash of the feature's, so nothing else has them.
+fn remove_copies(host: &Host, stack: &str, stop: &AtomicBool) -> Result<(), String> {
     let filter = format!("name=^{stack}_");
-    let names = docker(&["volume", "ls", "-q", "--filter", &filter], &never)?;
+    let names = docker(host, &["volume", "ls", "-q", "--filter", &filter], stop)?;
     for name in names.split_whitespace() {
-        docker(&["volume", "rm", name], &never)?;
+        docker(host, &["volume", "rm", name], stop)?;
     }
     Ok(())
 }
@@ -1223,6 +1594,7 @@ pub fn labelled(stop: &AtomicBool) -> Result<Vec<(String, String)>, String> {
         sandbox::LABEL
     );
     let text = docker(
+        &Host::Here,
         &["ps", "-a", "--filter", &filter, "--format", &format],
         stop,
     )?;
@@ -1480,7 +1852,7 @@ mod tests {
         };
         assert!(!run.alive());
         assert!(run.listening().is_empty());
-        assert!(stop(&run, Path::new("/nonexistent"), true).is_err());
+        assert!(stop(&run, Path::new("/nonexistent"), true, &Host::Here).is_err());
         // Never saved: what it is depends on who reads it.
         let json = serde_json::to_string(&run).unwrap();
         assert!(!json.contains("elsewhere"), "{json}");
@@ -1565,8 +1937,8 @@ django.db.utils.OperationalError: connection refused\n\
 
     #[test]
     fn system_folders_stay_shared() {
-        assert!(!copies_bind(Path::new("/var/run/docker.sock")));
-        assert!(!copies_bind(Path::new("/etc/hosts")));
+        assert!(!copies_bind(&Host::Here, Path::new("/var/run/docker.sock")));
+        assert!(!copies_bind(&Host::Here, Path::new("/etc/hosts")));
     }
 
     /// Against real docker, on the stack `gerdr-spike-src` the sandbox spike
@@ -1581,6 +1953,7 @@ django.db.utils.OperationalError: connection refused\n\
         let dir = home.join(".cache/gerdr-sandbox-test");
         let stop = AtomicBool::new(false);
         let job = Job {
+            host: &Host::Here,
             project: "spike",
             slug: "test",
             repos: &[],
@@ -1622,6 +1995,7 @@ django.db.utils.OperationalError: connection refused\n\
             let name = &run.stacks[0].name;
             let container = format!("{name}-db-1");
             let mounts = docker(
+                &Host::Here,
                 &[
                     "inspect",
                     &container,
@@ -1632,6 +2006,7 @@ django.db.utils.OperationalError: connection refused\n\
             )?;
             assert!(!mounts.contains("gerdr-spike-src_pgdata"), "{mounts}");
             let rows = docker(
+                &Host::Here,
                 &[
                     "exec",
                     &container,
@@ -1651,13 +2026,218 @@ django.db.utils.OperationalError: connection refused\n\
         let stopped = stop_for_test(&run, &dir);
         result.unwrap();
         stopped.unwrap();
-        let left = docker(&["volume", "ls", "-q"], &AtomicBool::new(false)).unwrap();
+        let left = docker(&Host::Here, &["volume", "ls", "-q"], &AtomicBool::new(false)).unwrap();
         assert!(!left.contains("gerdr-test"), "{left}");
         assert!(!dir.exists());
         assert!(!run.holder.unwrap().alive());
     }
 
     fn stop_for_test(run: &SandboxRun, dir: &Path) -> Result<(), String> {
-        stop(run, dir, true)
+        stop(run, dir, true, &Host::Here)
+    }
+
+    /// A process to be ended by a script: asleep until then.
+    fn sleeper() -> (std::process::Child, Proc) {
+        let child = Command::new("sleep").arg("60").spawn().unwrap();
+        let proc = Proc::of(child.id() as i32).unwrap();
+        (child, proc)
+    }
+
+    fn ended(child: &mut std::process::Child) -> bool {
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(5) {
+            if child.try_wait().unwrap().is_some() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        false
+    }
+
+    fn sh(script: &str) -> std::process::Output {
+        Command::new("sh").args(["-c", script]).output().unwrap()
+    }
+
+    #[test]
+    fn a_holder_in_this_machines_own_network_ends_nothing_else() {
+        let (mut bystander, _) = sleeper();
+        let (mut pasta, pasta_proc) = sleeper();
+        let (mut holder, holder_proc) = sleeper();
+        let run = SandboxRun {
+            holder: Some(holder_proc),
+            pasta: Some(pasta_proc),
+            ..SandboxRun::default()
+        };
+        let out = sh(&network_end_script(&run));
+        assert!(out.status.success(), "{out:?}");
+        assert!(ended(&mut pasta), "the proxy stays");
+        assert!(ended(&mut holder), "the holder stays");
+        assert!(bystander.try_wait().unwrap().is_none(), "ended another's process");
+        bystander.kill().unwrap();
+        bystander.wait().unwrap();
+    }
+
+    #[test]
+    fn what_runs_inside_ends_with_the_network_and_nothing_else() {
+        let out = sh(HOLDER_SCRIPT);
+        // Not every system lets a user make namespaces.
+        if !out.status.success() {
+            return;
+        }
+        let said = String::from_utf8(out.stdout).unwrap();
+        let holder = started_proc(&said).expect(&said);
+        let (mut bystander, _) = sleeper();
+        let enter = |script: &str| {
+            Command::new("nsenter")
+                .args(["--user", "--net", "--preserve-credentials", "-t"])
+                .arg(holder.pid.to_string())
+                .args(["--", "sh", "-c", script])
+                .spawn()
+                .unwrap()
+        };
+        let mut plain = enter("exec sleep 60");
+        // As an interactive shell does.
+        let mut deaf = enter("trap '' TERM; while :; do sleep 0.1; done");
+        std::thread::sleep(Duration::from_millis(300));
+        let run = SandboxRun {
+            holder: Some(holder.clone()),
+            ..SandboxRun::default()
+        };
+        let began = Instant::now();
+        let out = sh(&network_end_script(&run));
+        assert!(out.status.success(), "{out:?}");
+        assert!(began.elapsed() < Duration::from_secs(10), "{:?}", began.elapsed());
+        assert!(ended(&mut plain), "what's inside stays");
+        assert!(ended(&mut deaf), "what ignores the first signal stays");
+        assert!(bystander.try_wait().unwrap().is_none(), "ended another's process");
+        bystander.kill().unwrap();
+        bystander.wait().unwrap();
+    }
+
+    #[test]
+    fn a_pid_that_came_to_another_process_is_left_alone() {
+        let (mut other, proc) = sleeper();
+        let run = SandboxRun {
+            pasta: Some(Proc {
+                start: proc.start + 1,
+                ..proc
+            }),
+            ..SandboxRun::default()
+        };
+        let out = sh(&network_end_script(&run));
+        assert!(out.status.success(), "{out:?}");
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(other.try_wait().unwrap().is_none(), "ended another's process");
+        other.kill().unwrap();
+        other.wait().unwrap();
+    }
+
+    #[test]
+    fn a_network_gone_already_ends_without_complaint() {
+        let (mut gone, proc) = sleeper();
+        gone.kill().unwrap();
+        gone.wait().unwrap();
+        let run = SandboxRun {
+            holder: Some(proc.clone()),
+            pasta: Some(proc),
+            ..SandboxRun::default()
+        };
+        assert!(sh(&network_end_script(&run)).status.success());
+    }
+
+    #[test]
+    fn a_holder_started_there_says_who_it_is_and_has_a_namespace_of_its_own() {
+        let out = sh(HOLDER_SCRIPT);
+        // Not every system lets a user make namespaces.
+        if !out.status.success() {
+            return;
+        }
+        let said = String::from_utf8(out.stdout).unwrap();
+        let proc = started_proc(&said).expect(&said);
+        assert!(proc.alive());
+        let own = fs::read_link("/proc/self/ns/net").unwrap();
+        assert_ne!(fs::read_link(format!("/proc/{}/ns/net", proc.pid)).unwrap(), own);
+        // It outlives the shell that started it, in a session of its own.
+        let run = SandboxRun {
+            holder: Some(proc.clone()),
+            ..SandboxRun::default()
+        };
+        assert!(sh(&network_end_script(&run)).status.success());
+        let started = Instant::now();
+        while proc.alive() && started.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!proc.alive());
+    }
+
+    #[test]
+    fn a_proxy_gone_at_once_says_no_process() {
+        let tmp = std::env::temp_dir().join(format!("gerdr-pasta-{}", std::process::id()));
+        let script = pasta_script(&["--no-such-flag".to_owned()], &tmp.to_string_lossy());
+        // No pasta here, or one that refuses: either way it isn't there after.
+        let said = String::from_utf8(sh(&script).stdout).unwrap();
+        assert!(started_proc(&said).is_none(), "{said}");
+        let _ = fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn nothing_started_says_no_process() {
+        assert_eq!(started_proc(""), None);
+        assert_eq!(started_proc("12\n"), None);
+        assert_eq!(started_proc("x\nstat\n"), None);
+    }
+
+    #[test]
+    fn a_port_there_is_free_of_what_listens_and_what_others_hold() {
+        use std::collections::BTreeSet;
+        let held: BTreeSet<u16> = [49152].into();
+        let taken: BTreeSet<u16> = [49153].into();
+        assert_eq!(free_among(&held, &taken, 0), Some(49154));
+        assert_eq!(free_among(&held, &taken, 2), Some(49154));
+        assert_eq!(free_among(&held, &taken, 3), Some(49155));
+        // Past the end of the range it goes round.
+        assert_eq!(free_among(&held, &taken, 9999), Some(59151));
+        let all: BTreeSet<u16> = (49152..59152).collect();
+        assert_eq!(free_among(&all, &taken, 0), None);
+    }
+
+    #[test]
+    fn a_sandbox_placed_on_a_machine_is_never_looked_up_here() {
+        // This pid is alive: that means nothing for one on another machine.
+        let me = Proc::of(std::process::id() as i32).unwrap();
+        let mut run = SandboxRun {
+            machine: Some("w".into()),
+            holder: Some(me.clone()),
+            pasta: Some(me),
+            ..SandboxRun::default()
+        };
+        assert!(!run.alive());
+        assert!(run.listening().is_empty());
+        assert!(stop(&run, Path::new("/nonexistent"), true, &Host::Here).is_err());
+        assert!(run.kill_network(&Host::Here).is_ok());
+        // As that machine said, until it is stopped.
+        run.elsewhere = Some(Elsewhere {
+            asked: true,
+            alive: true,
+            ports: vec![80],
+        });
+        assert!(run.alive());
+        assert_eq!(run.listening(), [80]);
+        run.stopped = true;
+        assert!(!run.alive());
+    }
+
+    #[test]
+    fn where_a_sandbox_runs_stays_in_its_record() {
+        let run = SandboxRun {
+            machine: Some("w".into()),
+            ..SandboxRun::default()
+        };
+        let json = serde_json::to_string(&run).unwrap();
+        let back: SandboxRun = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.machine.as_deref(), Some("w"));
+        let plain = serde_json::to_string(&SandboxRun::default()).unwrap();
+        assert!(!plain.contains("machine"), "{plain}");
+        assert!(!plain.contains("not_there"), "{plain}");
     }
 }

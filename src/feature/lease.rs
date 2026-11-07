@@ -43,6 +43,13 @@ pub const HANDED: &str = "feature.json.handed";
 pub const HANDED_TO: &str = ".handed-to";
 /// What starts the name of a record that lost, kept beside the others.
 pub const ASIDE: &str = "feature.json.aside-";
+/// In a feature's folder there: what another machine asks of its sandbox.
+pub const SANDBOX_ASK: &str = ".sandbox-ask.json";
+/// In a feature's folder there: why a gerdr open there didn't do what was asked.
+pub const SANDBOX_ANSWER: &str = ".sandbox-answer.json";
+/// In a feature's folder there: what another machine did to its sandbox with no
+/// gerdr open there, for its record to catch up with when one opens.
+pub const SANDBOX_TOLD: &str = ".sandbox-told.json";
 /// How long a gerdr open on the writer gets to answer.
 pub const ASK_FOR: Duration = Duration::from_secs(12);
 /// How long a record may wait for its new writer before it goes back.
@@ -69,6 +76,23 @@ pub struct Request {
     /// Taken already: the one asked lost, and nothing it says changes that.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub forced: bool,
+}
+
+/// Another machine asks a gerdr open on the writer to do this to a sandbox.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SandboxAsk {
+    pub what: crate::feature_sandbox::StopFor,
+    /// What that machine calls itself.
+    pub name: String,
+    /// When the sandbox it is about started: a later one is another.
+    #[serde(default)]
+    pub started: u64,
+}
+
+/// A gerdr open on the writer won't do what was asked of a sandbox.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SandboxRefusal {
+    pub why: String,
 }
 
 /// What a gerdr open on the writer says to a `Request`.
@@ -163,8 +187,19 @@ pub fn taken(
     let latest = out.setup.as_ref().map(|s| s.machine.clone());
     out.setups_elsewhere
         .retain(|s| latest.as_ref() != Some(&s.machine));
-    // A sandbox stays on the machine that started it.
-    out.sandbox = None;
+    // A sandbox on its old writer stays there. One on a worker goes on running:
+    // its record comes along, and so does what it left there.
+    out.sandbox = out.sandbox.take().and_then(|mut run| {
+        let on = run.machine.take()?;
+        run.elsewhere = None;
+        if on == me {
+            // On this machine's worker session: not one of this gerdr's panes.
+            run.panes.clear();
+        } else {
+            run.machine = Some(on);
+        }
+        Some(run)
+    });
     for machine in out.stage_machines.values_mut() {
         if machine == me {
             *machine = HERE.to_owned();
@@ -203,6 +238,38 @@ pub fn ask_script(dir: &str, request: &str) -> String {
         shell_quote(dir),
         shell_quote(request)
     )
+}
+
+/// The script asking a gerdr open there to do `ask`, as JSON, to a sandbox. An
+/// answer to an earlier one goes first.
+pub fn sandbox_ask_script(dir: &str, ask: &str) -> String {
+    format!(
+        "cd {} || exit 3\nrm -f {SANDBOX_ANSWER}\nprintf '%s' {} > {SANDBOX_ASK}.tmp && mv {SANDBOX_ASK}.tmp {SANDBOX_ASK}\n",
+        shell_quote(dir),
+        shell_quote(ask)
+    )
+}
+
+/// The script leaving `ask`, as JSON, for a gerdr that opens there later.
+pub fn sandbox_told_script(dir: &str, ask: &str) -> String {
+    format!(
+        "cd {} || exit 3\nprintf '%s' {} > {SANDBOX_TOLD}.tmp && mv {SANDBOX_TOLD}.tmp {SANDBOX_TOLD}\n",
+        shell_quote(dir),
+        shell_quote(ask)
+    )
+}
+
+/// The script saying `WAITS` while what was asked of a sandbox isn't taken yet.
+pub fn sandbox_waits_script(dir: &str) -> String {
+    format!(
+        "cd {} || exit 3\nif [ -e {SANDBOX_ASK} ]; then echo WAITS; fi\n",
+        shell_quote(dir)
+    )
+}
+
+/// The script taking back what was asked of a sandbox.
+pub fn sandbox_unask_script(dir: &str) -> String {
+    format!("cd {} || exit 3\nrm -f {SANDBOX_ASK}\n", shell_quote(dir))
 }
 
 /// The script taking the record out of the way there, with no gerdr to ask. Says
@@ -483,6 +550,32 @@ mod tests {
     }
 
     #[test]
+    fn a_sandbox_on_a_worker_is_taken_along() {
+        let mut f = record();
+        f.sandbox = Some(crate::feature::sandbox_run::SandboxRun {
+            machine: Some("w9".into()),
+            panes: vec!["w9/w1:p1".into()],
+            ..Default::default()
+        });
+        let run = take(&f).sandbox.unwrap();
+        assert_eq!(run.machine.as_deref(), Some("w9"));
+        assert_eq!(run.panes, ["w9/w1:p1"]);
+    }
+
+    #[test]
+    fn a_sandbox_on_this_machine_is_its_own_now() {
+        let mut f = record();
+        f.sandbox = Some(crate::feature::sandbox_run::SandboxRun {
+            machine: Some("me".into()),
+            panes: vec!["me/w1:p1".into()],
+            ..Default::default()
+        });
+        let run = take(&f).sandbox.unwrap();
+        assert_eq!(run.machine, None);
+        assert!(run.panes.is_empty());
+    }
+
+    #[test]
     fn the_higher_epoch_wins_and_a_tie_goes_the_same_way_everywhere() {
         let (mut a, mut b) = (record(), record());
         a.epoch = 3;
@@ -560,6 +653,33 @@ mod tests {
         assert!(!t.0.join(store::FILE).exists());
         assert!(t.0.join(format!("{ASIDE}7")).exists());
         assert_eq!(std::fs::read_to_string(t.0.join(HANDED_TO)).unwrap(), "me");
+    }
+
+    #[test]
+    fn what_is_asked_of_a_sandbox_waits_until_it_is_taken_or_taken_back() {
+        let t = Temp::new();
+        let dir = t.0.to_string_lossy().into_owned();
+        assert_eq!(sh(&sandbox_waits_script(&dir)), "");
+        let ask = SandboxAsk {
+            what: crate::feature_sandbox::StopFor::Stop,
+            name: "lap'top".into(),
+            started: 7,
+        };
+        let json = serde_json::to_string(&ask).unwrap();
+        assert!(json.contains("\"stop\""), "{json}");
+        sh(&sandbox_ask_script(&dir, &json));
+        assert_eq!(sh(&sandbox_waits_script(&dir)).trim(), "WAITS");
+        let raw = std::fs::read(t.0.join(SANDBOX_ASK)).unwrap();
+        assert_eq!(serde_json::from_slice::<SandboxAsk>(&raw).unwrap(), ask);
+        sh(&sandbox_unask_script(&dir));
+        assert_eq!(sh(&sandbox_waits_script(&dir)), "");
+        // An answer left from before says nothing of a new request.
+        std::fs::write(t.0.join(SANDBOX_ANSWER), "{}").unwrap();
+        sh(&sandbox_ask_script(&dir, &json));
+        assert!(!t.0.join(SANDBOX_ANSWER).exists());
+        sh(&sandbox_told_script(&dir, &json));
+        let raw = std::fs::read(t.0.join(SANDBOX_TOLD)).unwrap();
+        assert_eq!(serde_json::from_slice::<SandboxAsk>(&raw).unwrap().started, 7);
     }
 
     #[test]

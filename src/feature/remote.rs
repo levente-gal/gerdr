@@ -690,12 +690,18 @@ fn trouble(what: &str, out: &std::process::Output) -> Trouble {
 
 /// What of a feature's folder isn't its files, and stays on each machine: its
 /// record, one that moved or lost, and what its gerdrs say to each other.
-const RECORDS: [&str; 5] = [
+const RECORDS: [&str; 9] = [
     store::FILE,
     "feature.json.*",
     super::lease::REQUEST,
     super::lease::ANSWER,
     super::lease::HANDED_TO,
+    super::lease::SANDBOX_ASK,
+    super::lease::SANDBOX_ANSWER,
+    super::lease::SANDBOX_TOLD,
+    // Each machine's own: what a copy of a project's data holds, its pipes
+    // and a browser's profile have no use elsewhere.
+    "/sandbox/",
 ];
 
 /// Copy the feature's files kept in `copy` to `local` on this machine, leaving
@@ -756,9 +762,20 @@ impl Reach {
     /// Run `script` for `sh` there, given on its input: a login shell's
     /// quoting, whichever it is, never gets to read it.
     pub fn script(&self, script: &str, cancel: &AtomicBool) -> Result<String, Trouble> {
+        self.script_for(script, SCRIPT, "A command there failed", cancel)
+    }
+
+    /// `script`, for what may take up to `limit`, and `what` it is if it fails.
+    pub fn script_for(
+        &self,
+        script: &str,
+        limit: Duration,
+        what: &str,
+        cancel: &AtomicBool,
+    ) -> Result<String, Trouble> {
         let mut ssh = machines::over_master(&self.control, &self.target);
         ssh.arg("sh -s");
-        let out = machines::run_with_input(ssh, script.as_bytes(), SCRIPT, cancel)
+        let out = machines::run_with_input(ssh, script.as_bytes(), limit, cancel)
             .map_err(|failure| Trouble::Link(failure.why()))?;
         if out.status.success() {
             return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
@@ -769,7 +786,7 @@ impl Reach {
                 "{folder} holds something else: name a folder for it under machine_folders in the project's file"
             )));
         }
-        Err(trouble("A command there failed", &out))
+        Err(trouble(what, &out))
     }
 
     /// `command` there, over the master and reading and writing what is given
@@ -1344,6 +1361,25 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn a_sandbox_stays_out_of_what_goes_between_machines() {
+        let tmp = Scratch::new();
+        let (from, to) = (tmp.path("from"), tmp.path("to"));
+        sh(&format!(
+            "mkdir -p {from}/sandbox/data {from}/verify/sandbox && echo x > {from}/sandbox/data/f && echo y > {from}/plan.md && echo z > {from}/verify/sandbox/note"
+        ));
+        copy_data(
+            Path::new(&from),
+            Path::new(&to),
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+        .unwrap();
+        assert!(Path::new(&to).join("plan.md").exists());
+        assert!(!Path::new(&to).join("sandbox").exists());
+        // Only the feature's own: another folder of that name is just that.
+        assert!(Path::new(&to).join("verify/sandbox/note").exists());
     }
 
     #[test]

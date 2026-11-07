@@ -12,7 +12,7 @@ rules, for reviewing a branch before it merges.
 | Esc | Step back one level: clear the query, then leave a sub-mode (search, comment, rename), then close. On the feature tab it folds the repository rows first. On a feature's Code review page, where its review is laid under the rail, it gives the rail the keys: Enter, Tab, Down or a press on the review gives them back. The footer hint reads "clear" while there is something to clear, "close" otherwise. A comment or commit draft is kept, never thrown away by Esc. |
 | Enter | Do the selected row's main action. On the feature tab's page of a done stage it goes to the current stage: it never undoes a done stage. |
 | Up / Down, PgUp / PgDn, Home / End | Move the selection. Ctrl+J / Ctrl+K also move it. Ctrl+N / Ctrl+P never move it. Where there is no list to page through, PgUp / PgDn scroll a page (the feature tab's stage page). |
-| Tab / Shift+Tab | Next / previous focus area or form field. Shift+Tab always goes the other way. In a feature's code review: between the file list and the diff. |
+| Tab / Shift+Tab | Next / previous focus area or form field. Shift+Tab always goes the other way. In a feature's code review: between the file list and the diff; a key the list doesn't take goes to the diff, and the keyboard with it. |
 | Left / Right | Move along a row of choices laid out across: the feature tab's stage rail (previous / next stage's page; Up / Down step it too), its repository strip, and the buttons of an unfolded repository row. |
 | Ctrl+PgUp / Ctrl+PgDn | Previous / next item of a set shown one at a time: the feature tab's previous / next feature (its ‹ › buttons), the project commands dialog's next or previous tab. |
 | Ctrl+N | New / create (project, branch, todo). |
@@ -36,14 +36,14 @@ rules, for reviewing a branch before it merges.
 | Alt+U | In the project commands dialog: fill the focused empty field with what is suggested for it (also its Use button). Nothing is saved until Save. |
 | Alt+B | In the new feature dialog: choose the branch the selected repository's worktree starts from (the first ticked one from the title; also its "from <branch>" button). It lists the repository's branches, the default first; typing filters them, Enter uses the selected one, Esc clears the filter and then goes back. The default is the branch the project's settings give it (`workflow.base`), else what origin says now, else the local `origin/HEAD`, else the checked out branch. A repository added to a feature later starts from that default too. |
 | Alt+X | In the dialog connecting a machine: press the button fixing what failed (Copy command, Open terminal). Only there. |
-| Ctrl+Shift+T | Start a feature's sandbox on the feature tab's Manual test page, after a dialog asks which commands run in it (Space checks; the feature keeps the choice, and Ctrl+Shift+G and Ctrl+Shift+X go by it without asking); stop it, asking, once it runs (at once while it starts). On a feature another machine writes it shows the sandbox's terminals instead. |
-| Ctrl+Shift+Y | Open the running sandbox's app, in a tab inside it (feature tab, Manual test). On a feature another machine writes, in a tab here, through ports opened on this machine. |
+| Ctrl+Shift+T | Start a feature's sandbox on the feature tab's Manual test page, after a dialog asks which commands run in it (Space checks; the feature keeps the choice, and Ctrl+Shift+G and Ctrl+Shift+X go by it without asking); stop it, asking, once it runs (at once while it starts). With the sandbox on another machine it shows the sandbox's terminals instead, and Ctrl+Shift+Q stops it. |
+| Ctrl+Shift+Y | Open the running sandbox's app, in a tab inside it (feature tab, Manual test). With the sandbox on another machine, in a tab here, through ports opened on this machine. |
 | Ctrl+Shift+G | Start the sandbox again on the same data (feature tab, Manual test). |
 | Ctrl+Shift+X | Reset the sandbox's data from main's, or remove a stopped sandbox with its data, asking first (feature tab, Manual test). |
 | Ctrl+Shift+A | Pick the next agent on the feature tab's selected stage (the chips on its agent card). It applies from the agent's next start; one running goes on. |
 | Ctrl+Shift+E | Take over a feature another machine writes, on the feature tab (also the "Take over" button): it is written here from then on. Any press that changes such a feature does this first. |
-| Ctrl+Shift+Q | Stop the selected stage's agent on another machine, on the feature tab (also the "Stop agent" button on its agent card), asking while it works. Closing its Show agent tab only ends the view. |
-| Ctrl+Shift+W | Pick the machine the selected stage's next agent or Verify's next run goes on, on the feature tab: this one, then each connected machine (the "Runs here" or "Runs on" button on its agent card, or Verify's page). It applies from the next start; what runs stays where it is. The project's file can give each stage a machine under `machines`. Not offered with no machine saved, while Verify's checks run, or for T3 Code. |
+| Ctrl+Shift+Q | Stop the selected stage's agent on another machine, on the feature tab (also the "Stop agent" button on its agent card), asking while it works; on Manual test, the sandbox on another machine, asking. Closing its Show agent tab only ends the view. |
+| Ctrl+Shift+W | Pick the machine the selected stage's next agent, Verify's next run or the next sandbox goes on, on the feature tab: this one, then each connected machine, then whichever is least busy (the "Runs here" or "Runs on" button on its agent card, or on Verify's and Manual test's page). It applies from the next start; what runs stays where it is. The project's file can give each stage a machine under `machines`, or `least busy`. Not offered with no machine saved, while Verify's checks run, for T3 Code, or while a sandbox has a record: its data is on its machine, so it is removed first. |
 | Ctrl+Shift+I | Pick the model of the selected stage's agent on the feature tab (the "Model:" button on its agent card), for Claude Code and Cursor. It applies from the agent's next start; one already open keeps its own. Default leaves it to the CLI. Cursor also keeps a picked model as its default for all its chats, as its own `/model` does, and its picker says so. |
 | Ctrl+Shift+B | On the feature tab's Build page: go between one agent through all milestones and a fresh agent per milestone (also the "Agents" choice on the page). It applies from the next milestone; an agent at work goes on. |
 | Ctrl+Shift+K | Skip Plan review on the feature tab, asking only when something would be lost. |
@@ -134,7 +134,7 @@ A key is written in one place, not on the button that does the same thing:
   until it is. Work on a worker goes on and is followed from here. What runs in the
   writer's own tabs stays there, so while it works the press says to wait; at rest,
   its tab stays there, and its chat goes back on that machine. A sandbox running
-  there keeps the feature there too. The old writer shows the feature from the new
+  there keeps the feature there too; one on a worker goes on, and comes along. The old writer shows the feature from the new
   one if connected to it, and otherwise says so.
 - A gerdr open on the writer has to agree. When it doesn't answer, or the machine
   can't be reached, a dialog asks, as what happens there from then on is kept aside
@@ -144,9 +144,17 @@ A key is written in one place, not on the button that does the same thing:
   takes the terminal, as any Show does. One in the writer's own session only
   looks: that machine's gerdr keeps it, and keys go nowhere. A feature's code comes
   here once it is opened, by commits: what isn't committed there doesn't show.
-- A sandbox stays on the machine that started it. Another gerdr showing its
-  feature says how it stands and offers only Open app and Show terminals: it is
-  stopped there, and its page says so. Open app opens the app's ports here under
+- A sandbox runs on the machine writing its feature, or on the one Manual test's
+  page picked: that one needs Docker, pasta and the project's containers running,
+  as those are what's copied, and its page says what it found none of. Its setup
+  runs there first. It stays there until it is removed: its data is there.
+- Any gerdr showing its feature says how it stands, and can open its app, show its
+  terminals, and stop, restart, reset or remove it, with no need to take the feature
+  over. A gerdr open on the writer does that, so its record says so. With none open,
+  Stop and Remove go to the sandbox's machine directly, and Restart and Reset say to
+  open gerdr there. Starting one is a change to the feature, so it moves the feature
+  here first, as any press does.
+- Open app opens the app's ports here under
   the same numbers, for as long as a page on `localhost` shows in the feature's
   workspace and the link is up. A port taken here is said by name, on the "!" badge
   too, and a page never opens on it. Show terminals only looks, as above. Anything

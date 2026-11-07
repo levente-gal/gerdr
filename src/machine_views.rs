@@ -362,8 +362,12 @@ fn ask_sandboxes(
     features: &mut [Feature],
     cancel: &AtomicBool,
 ) -> Result<(), Trouble> {
+    // One on another machine isn't this one's to say.
     let running = |f: &&Feature| {
-        f.status == Status::Open && f.sandbox.as_ref().is_some_and(sandbox_run::to_ask_there)
+        f.status == Status::Open
+            && (f.sandbox.as_ref()).is_some_and(|run| {
+                sandbox_run::to_ask_there(run) && run.machine.as_deref() == Some(place.id.as_str())
+            })
     };
     if !features.iter().any(|f| running(&f)) {
         return Ok(());
@@ -372,7 +376,10 @@ fn ask_sandboxes(
         .filter_map(|f| Some((f.slug.as_str(), f.sandbox.as_ref()?)));
     let said = place.reach.script(&sandbox_run::there_script(asked), cancel)?;
     for feature in features {
-        if let Some(run) = feature.sandbox.as_mut().filter(|r| sandbox_run::to_ask_there(r)) {
+        let here = Some(place.id.as_str());
+        if let Some(run) = (feature.sandbox.as_mut())
+            .filter(|r| sandbox_run::to_ask_there(r) && r.machine.as_deref() == here)
+        {
             run.elsewhere = Some(sandbox_run::read_there(&said, &feature.slug, run));
         }
     }
@@ -520,7 +527,16 @@ impl Gerdr {
         for (machine, name) in names {
             self.machines.names.entry(machine).or_insert(name);
         }
-        let features = self.rivals(id, &project, features);
+        let mut features = self.rivals(id, &project, features);
+        // One running on this very machine: its numbers mean what they say here.
+        for feature in &mut features {
+            if let Some(run) = feature.sandbox.as_mut().filter(|run| {
+                run.machine.as_deref().is_some_and(Self::is_this_machine)
+            }) {
+                run.machine = None;
+                run.elsewhere = None;
+            }
+        }
         let own: Vec<String> = (self.features.all.get(&project).into_iter().flatten())
             .map(|f| f.slug.clone())
             .collect();

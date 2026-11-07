@@ -28,7 +28,8 @@ use crate::{
         self, Feature, Status,
         lease::{self, Answer, Request},
         remote::{self, Paths, Reach, Side, Trouble},
-        sandbox_run, store, view,
+        sandbox_run::{self, SandboxRun},
+        store, view,
     },
     feature_checks::checks_running,
     features::{Job, PanelOutcome},
@@ -643,9 +644,12 @@ impl Gerdr {
     fn take_blocker(&self, feature: &Feature, me: &str) -> Option<Blocker> {
         let writer = feature.writer.as_deref()?;
         let name = self.machine_name(writer);
-        if feature.sandbox.as_ref().is_some_and(|run| run.may_run_there()) {
+        if (feature.sandbox.as_ref())
+            .filter(|run| run.machine.as_deref() == Some(writer))
+            .is_some_and(SandboxRun::may_run_there)
+        {
             return Some(Blocker {
-                why: format!("Its sandbox runs on {name}: stop it there first"),
+                why: format!("Its sandbox runs on {name}: stop it first"),
                 stale: false,
             });
         }
@@ -782,8 +786,53 @@ impl Gerdr {
         for (slug, request) in asked {
             self.answer_request(&project, &slug, &request);
         }
+        self.answer_sandbox_asks(&project);
         self.restore_handed();
         self.notice_moved(&project);
+    }
+
+    /// What other machines asked of the sandboxes of the features written here, or
+    /// did with no gerdr to ask. Taken at once: the one asking only waits to see that
+    /// it was, and to read why not.
+    fn answer_sandbox_asks(&mut self, project: &str) {
+        let read = |file: &Path| -> Option<lease::SandboxAsk> {
+            serde_json::from_slice(&std::fs::read(file).ok()?).ok()
+        };
+        let gone = |file: &Path| {
+            if let Err(err) = std::fs::remove_file(file) {
+                tracing::warn!("removing {}: {err}", file.display());
+            }
+        };
+        let slugs: Vec<String> = (self.features.all.get(project).into_iter().flatten())
+            .filter(|f| f.status == Status::Open)
+            .map(|f| f.slug.clone())
+            .collect();
+        for slug in slugs {
+            let dir = store::dir(None, project, &slug);
+            let told = dir.join(lease::SANDBOX_TOLD);
+            if told.exists() {
+                let ask = read(&told);
+                gone(&told);
+                if let Some(ask) = ask {
+                    self.sandbox_told(project, &slug, &ask);
+                }
+            }
+            let file = dir.join(lease::SANDBOX_ASK);
+            if !file.exists() {
+                continue;
+            }
+            let fresh = (std::fs::metadata(&file).and_then(|m| m.modified()).ok())
+                .and_then(|at| at.elapsed().ok())
+                .is_none_or(|age| age <= lease::REQUEST_STANDS);
+            if let Some(ask) = read(&file).filter(|_| fresh) {
+                match self.sandbox_refusal(project, &slug, &ask) {
+                    Some(why) => write_refusal(&dir, why),
+                    None => self.answer_sandbox_ask(project, &slug, &ask),
+                }
+            }
+            // Last: the one asking reads the answer once this is gone.
+            gone(&file);
+        }
     }
 
     /// Features of the project that left while it wasn't shown here: their records
@@ -886,10 +935,12 @@ impl Gerdr {
     fn keeps_feature(&self, feature: &Feature) -> Option<String> {
         let (project, slug) = (feature.project.as_str(), feature.slug.as_str());
         let name = this_machines_name();
-        if feature.sandbox.as_ref().is_some_and(|run| !run.stopped && run.alive())
+        // One on a worker goes on where it is, whoever writes the feature.
+        if (feature.sandbox.as_ref())
+            .is_some_and(|run| run.machine.is_none() && !run.stopped && run.alive())
             || self.busy_with(project, slug, Job::Sandbox).is_some()
         {
-            return Some(format!("Its sandbox runs on {name}: stop it there first"));
+            return Some(format!("Its sandbox runs on {name}: stop it first"));
         }
         if self.busy_with(project, slug, Job::Setup).is_some() {
             return Some(format!("Its setup runs on {name}: wait for it"));
@@ -944,7 +995,7 @@ impl Gerdr {
         self.unbusy(project, slug, Job::Verify);
         // Its stopped sandbox's data stays with nobody's record if it isn't taken
         // away now, and one still running stops with it.
-        if let Some(run) = feature.sandbox.clone() {
+        if let Some(run) = feature.sandbox.clone().filter(|run| run.machine.is_none()) {
             for pane in &run.panes {
                 self.close_herdr_pane(pane);
             }
@@ -952,7 +1003,8 @@ impl Gerdr {
             let spawned = std::thread::Builder::new()
                 .name("sandbox of a feature gone".into())
                 .spawn(move || {
-                    if let Err(err) = sandbox_run::stop(&run, &dir, true) {
+                    let here = sandbox_run::Host::Here;
+                    if let Err(err) = sandbox_run::stop(&run, &dir, true, &here) {
                         tracing::warn!("removing a sandbox whose feature moved: {err}");
                     }
                 });
@@ -1161,6 +1213,16 @@ pub struct Handing {
 }
 
 /// Put a handed record back in its place, where it never moved.
+/// Say why what was asked of a sandbox isn't done, for the one who asked.
+fn write_refusal(dir: &Path, why: String) {
+    let said = serde_json::to_vec(&lease::SandboxRefusal { why })
+        .map_err(std::io::Error::other)
+        .and_then(|text| std::fs::write(dir.join(lease::SANDBOX_ANSWER), text));
+    if let Err(err) = said {
+        tracing::warn!("answering what was asked of a sandbox: {err}");
+    }
+}
+
 fn restore_record(dir: &Path) -> std::io::Result<()> {
     std::fs::rename(dir.join(lease::HANDED), dir.join(store::FILE))?;
     for file in [lease::HANDED_TO, lease::ANSWER] {

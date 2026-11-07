@@ -307,11 +307,19 @@ pub(crate) struct Busy {
 
 /// What the work off the thread came to.
 pub(crate) enum Done {
+    /// What was asked of a sandbox another machine's gerdr writes of ended.
+    SandboxAsked {
+        project: String,
+        slug: String,
+        result: Result<crate::machine_sandbox::StopAfar, String>,
+    },
     /// Starting a feature's sandbox ended; `stopped`: because it was asked to.
     Sandbox {
         project: String,
         slug: String,
         run: feature::sandbox_run::SandboxRun,
+        /// It opened its terminals on the machine it runs on: those it couldn't.
+        opened: Option<Vec<String>>,
         stopped: bool,
     },
     /// Stopping a feature's sandbox ended.
@@ -319,6 +327,13 @@ pub(crate) enum Done {
         project: String,
         slug: String,
         what: crate::feature_sandbox::StopFor,
+        result: Result<(), String>,
+    },
+    /// What a removed feature left on a machine went, or still can't.
+    SandboxLeftGone {
+        file: PathBuf,
+        title: String,
+        name: String,
         result: Result<(), String>,
     },
     /// The compose projects of sandboxes whose feature is gone.
@@ -1398,7 +1413,7 @@ pub enum PanelOutcome {
     StartSandbox,
     /// Open the sandbox's app.
     OpenSandbox,
-    /// Show the terminals of a sandbox on the machine writing the feature.
+    /// Show the terminals of a sandbox on another machine.
     ShowSandbox,
     /// Start the sandbox again on the same data.
     RestartSandbox,
@@ -1535,7 +1550,7 @@ pub enum PanelOutcome {
 }
 
 impl PanelOutcome {
-    /// Whether it acts on a feature's sandbox as it is: that stays on the machine
+    /// Whether it acts on a feature's sandbox as it is: that goes on on the machine
     /// that started it, whichever writes the feature.
     pub fn acts_on_sandbox(&self) -> bool {
         matches!(
@@ -1803,12 +1818,6 @@ pub(crate) fn lock_why(feature: &Feature, by: Stage) -> String {
 
 /// What Enter (or the row's button) does on `row` of `feature`.
 pub fn row_action(feature: &Feature, row: PanelRow, ctx: RowCtx) -> Option<PanelOutcome> {
-    let action = writers_row_action(feature, row, ctx)?;
-    (feature.writer.is_none() || !action.acts_on_sandbox()).then_some(action)
-}
-
-/// `row_action` on the machine writing `feature`.
-fn writers_row_action(feature: &Feature, row: PanelRow, ctx: RowCtx) -> Option<PanelOutcome> {
     match row {
         PanelRow::Repo(i) => {
             let repo = feature.repos.get(i)?;
@@ -4195,6 +4204,16 @@ impl FeaturePanel {
             Keysym::q | Keysym::Q if ctrl && mods.shift && stops_on_machine(feature, stage) => {
                 return Some(PanelOutcome::StopOnMachine(stage));
             }
+            // Ctrl+Shift+T shows its terminals there, where this would stop it.
+            Keysym::q | Keysym::Q
+                if ctrl
+                    && mods.shift
+                    && offers_sandbox(feature, stage)
+                    && sandbox_elsewhere(feature)
+                    && (ctx.sandbox_busy || sandbox_alive(feature)) =>
+            {
+                return Some(PanelOutcome::StopSandbox);
+            }
             Keysym::e | Keysym::E
                 if ctrl
                     && mods.shift
@@ -4221,7 +4240,7 @@ impl FeaturePanel {
                 return Some(PanelOutcome::EditCommands(commands_tab(stage)));
             }
             Keysym::t | Keysym::T if ctrl && mods.shift && offers_sandbox(feature, stage) => {
-                if feature.writer.is_some() && sandbox_alive(feature) {
+                if sandbox_elsewhere(feature) && sandbox_alive(feature) {
                     return Some(PanelOutcome::ShowSandbox);
                 }
                 let running = ctx.sandbox_busy || sandbox_alive(feature);
@@ -4448,7 +4467,6 @@ pub fn page_actions(
 ) -> Vec<(PageButton, PanelOutcome)> {
     let mut out = writers_page_actions(feature, stage, ctx);
     if feature.writer.is_some() {
-        out.retain(|(_, outcome)| !outcome.acts_on_sandbox());
         // Its review is on the machine that writes it, until it is taken over.
         for (button, outcome) in &mut out {
             if matches!(outcome, PanelOutcome::OpenDoc(_)) {
@@ -4665,7 +4683,7 @@ fn writers_page_actions(
                 PanelOutcome::OpenSandbox,
             ));
             // Here they are in a tab of their own already.
-            if feature.writer.is_some() {
+            if sandbox_elsewhere(feature) {
                 out.push((
                     button("Show terminals", ButtonStyle::Quiet),
                     PanelOutcome::ShowSandbox,
@@ -4771,6 +4789,11 @@ fn offers_sandbox(feature: &Feature, stage: Stage) -> bool {
         && feature.status == Status::Open
         && !feature.repos.is_empty()
         && stage_mark(feature, stage) != StageMark::Later
+}
+
+/// Whether `feature`'s sandbox is on another machine, as far as its terminals go.
+fn sandbox_elsewhere(feature: &Feature) -> bool {
+    feature.writer.is_some() || feature.sandbox.as_ref().is_some_and(|run| run.machine.is_some())
 }
 
 /// Whether `feature`'s sandbox runs.
@@ -4990,9 +5013,10 @@ impl Gerdr {
                 slug,
                 run,
                 stopped,
+                opened,
             } => {
                 self.unbusy(&project, &slug, Job::Sandbox);
-                self.sandbox_started(&project, &slug, run, stopped);
+                self.sandbox_started(&project, &slug, run, stopped, opened);
             }
             Done::SandboxStopped {
                 project,
@@ -5003,6 +5027,20 @@ impl Gerdr {
                 self.unbusy(&project, &slug, Job::Sandbox);
                 self.sandbox_stopped(&project, &slug, what, result);
             }
+            Done::SandboxAsked {
+                project,
+                slug,
+                result,
+            } => {
+                self.unbusy(&project, &slug, Job::Sandbox);
+                self.sandbox_asked(&project, &slug, result);
+            }
+            Done::SandboxLeftGone {
+                file,
+                title,
+                name,
+                result,
+            } => self.sandbox_left_gone(&file, &title, &name, result),
             Done::SandboxLeftovers { stacks } => self.sandbox_leftovers(stacks),
             Done::SandboxLeftoversRemoved { problems } => {
                 self.sandbox_leftovers_removed(problems);
@@ -5431,7 +5469,11 @@ impl Gerdr {
             written,
             fixing: self.build_agent_fixing(feature),
             sandbox_busy: (self.features.build.sandbox_stops)
-                .contains_key(&(feature.project.clone(), feature.slug.clone())),
+                .contains_key(&(feature.project.clone(), feature.slug.clone()))
+                || (feature.writer.is_some()
+                    && (feature.sandbox.as_ref()).is_some_and(|run| {
+                        run.finished.is_none() && run.failed.is_none() && !run.stopped
+                    })),
             all_skipped,
             ship_nothing: ship_planned(feature, last).is_some_and(|planned| planned.nothing),
             checks_busy: self.checks_busy(&feature.project, &feature.slug),
@@ -7154,13 +7196,10 @@ impl Gerdr {
         else {
             return;
         };
-        if let Some(writer) = self.feature_writer(&project, &slug)
-            && outcome.acts_on_sandbox()
+        if self.feature_writer(&project, &slug).is_some()
+            && !outcome.reads_only()
+            && !outcome.acts_on_sandbox()
         {
-            let name = self.machine_name(writer);
-            return self.show_warning(format!("The sandbox stays on {name}: do that there"));
-        }
-        if self.feature_writer(&project, &slug).is_some() && !outcome.reads_only() {
             let press = (outcome != PanelOutcome::TakeOver).then_some(outcome);
             return self.take_feature(&project, &slug, press);
         }
@@ -8250,7 +8289,7 @@ impl Gerdr {
         if sandbox.is_some() {
             self.save_feature(project, slug);
         }
-        let sandbox_dir = crate::feature_sandbox::sandbox_dir(project, slug);
+        let removal = sandbox.as_ref().map(|run| self.sandbox_removal(&feature, run));
         self.t3_forget_project(&feature.dir);
         for stage in feature.runs.keys() {
             if let Some(left) = self.t3_left_running(project, slug, *stage) {
@@ -8267,12 +8306,8 @@ impl Gerdr {
             let graphs = gerdr.running_feature_graphs(&project, &slug);
             gerdr.feature_work(Some(busy), move |_| {
                 stop_graphs(graphs);
-                if let Some(run) = &sandbox
-                    && let Err(why) = feature::sandbox_run::stop(run, &sandbox_dir, true)
-                {
-                    tracing::error!("removing the sandbox of {slug}: {why}");
-                    let text = format!("A removed feature's sandbox stayed behind: {why}");
-                    crate::problems::report(crate::feature_sandbox::PROBLEMS, text);
+                if let Some(removal) = &removal {
+                    removal.go();
                 }
                 Done::Removed {
                     result: layout::remove(&feature, force),
@@ -10199,7 +10234,12 @@ fn sandbox_sections(feature: &Feature, state: &PanelState) -> Vec<PageSection> {
     let seen = state.sandbox_seen.as_ref();
     let Some(run) = feature.sandbox.as_ref() else {
         let text = match seen {
-            Some(seen) => format!("none on {}: start it there", seen.name),
+            Some(seen) => format!("none on {}: starting one brings the feature here", seen.name),
+            // It goes where the page's button says, and copies what runs there.
+            None if state.place.as_deref().is_some_and(|place| place != "Runs here") => {
+                "the project, on a copy of the containers and data of the machine it runs on"
+                    .to_owned()
+            }
             None => "the project running here, on a copy of its containers and data".to_owned(),
         };
         return vec![lines("Sandbox", vec![line(text, CheckTone::Note)])];
@@ -10216,7 +10256,7 @@ fn sandbox_sections(feature: &Feature, state: &PanelState) -> Vec<PageSection> {
     };
     if run.alive() {
         let text = match seen {
-            Some(seen) => format!("running on {}: stop it there", seen.name),
+            Some(seen) => format!("running on {}", seen.name),
             None => "running".to_owned(),
         };
         out.push(line(text, CheckTone::Ready));
@@ -10239,7 +10279,11 @@ fn sandbox_sections(feature: &Feature, state: &PanelState) -> Vec<PageSection> {
     } else if let Some(seen) = seen {
         let asked = run.elsewhere.as_ref().is_some_and(|there| there.asked);
         let text = match (run.stopped, run.finished) {
-            (true, _) => format!("stopped on {}, its data kept: start it there", seen.name),
+            (true, _) if feature.writer.is_some() && feature.writer == run.machine => format!(
+                "stopped on {}, its data kept: starting one here brings the feature here, with a new copy",
+                seen.name
+            ),
+            (true, _) => format!("stopped on {}, its data kept", seen.name),
             (false, None) => format!("starting on {}", seen.name),
             (false, Some(_)) if asked => {
                 format!("not running on {}: its network ended", seen.name)
@@ -10266,6 +10310,11 @@ fn sandbox_sections(feature: &Feature, state: &PanelState) -> Vec<PageSection> {
     }
     for name in &run.not_copied {
         let text = format!("not copied: {name}, which compose didn't start");
+        out.push(line(text, CheckTone::Blocker));
+    }
+    for name in &run.not_there {
+        let on = seen.map_or("that machine", |seen| seen.name.as_str());
+        let text = format!("not copied: {name}, which doesn't run on {on}");
         out.push(line(text, CheckTone::Blocker));
     }
     out.push(line(
@@ -10916,7 +10965,7 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 5] = [
             ),
             (
                 "Ctrl+Shift+T",
-                "Manual test: start or stop the sandbox, or show its terminals if on another machine",
+                "Manual test: start or stop the sandbox, or show its terminals if on another machine (Ctrl+Shift+Q stops it there)",
             ),
             ("Ctrl+Shift+Y", "Manual test: open the sandbox's app"),
             ("Ctrl+Shift+G", "Manual test: restart the sandbox"),
@@ -11379,12 +11428,16 @@ fn writers_tab_hints(
                     hints.push(hint("Ctrl+Shift+T", "stop"));
                 } else if sandbox_alive(feature) {
                     hints.push(hint("Ctrl+Shift+Y", "open app"));
-                    if feature.writer.is_some() {
+                    if sandbox_elsewhere(feature) {
                         hints.push(hint("Ctrl+Shift+T", "show terminals"));
                     }
                     hints.push(hint("Ctrl+Shift+G", "restart"));
                     hints.push(hint("Ctrl+Shift+X", "reset data\u{2026}"));
-                    hints.push(hint("Ctrl+Shift+T", "stop\u{2026}"));
+                    let stop = match sandbox_elsewhere(feature) {
+                        true => "Ctrl+Shift+Q",
+                        false => "Ctrl+Shift+T",
+                    };
+                    hints.push(hint(stop, "stop\u{2026}"));
                 } else {
                     hints.push(hint("Ctrl+Shift+T", "start sandbox\u{2026}"));
                     if feature.sandbox.is_some() {
@@ -11995,27 +12048,49 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_sandbox_running_elsewhere_offers_its_app_and_terminals_only() {
+    fn a_sandbox_running_elsewhere_can_be_opened_looked_at_and_stopped_from_here() {
         let f = sandbox_elsewhere(true);
         assert_eq!(f.current(), Some(Stage::ManualTest));
         let offered = page_outcomes(&f, Stage::ManualTest);
-        assert!(offered.contains(&PanelOutcome::OpenSandbox), "{offered:?}");
-        assert!(offered.contains(&PanelOutcome::ShowSandbox), "{offered:?}");
-        for not in [
+        for yes in [
+            PanelOutcome::OpenSandbox,
+            PanelOutcome::ShowSandbox,
             PanelOutcome::StopSandbox,
             PanelOutcome::RestartSandbox,
             PanelOutcome::ResetSandbox,
-            PanelOutcome::StartSandbox,
-            PanelOutcome::RemoveSandbox,
         ] {
-            assert!(!offered.contains(&not), "{offered:?}");
+            assert!(offered.contains(&yes), "{offered:?}");
         }
-        // Not running there: nothing to show. A new one starts where it is pressed,
-        // and what is left of that one stays there.
+        assert!(!offered.contains(&PanelOutcome::StartSandbox), "{offered:?}");
+        assert!(!offered.contains(&PanelOutcome::RemoveSandbox), "{offered:?}");
+        // Not running there: nothing to show. A new one starts where it is pressed.
         let off = page_outcomes(&sandbox_elsewhere(false), Stage::ManualTest);
         assert!(!off.contains(&PanelOutcome::OpenSandbox), "{off:?}");
         assert!(off.contains(&PanelOutcome::StartSandbox), "{off:?}");
-        assert!(!off.contains(&PanelOutcome::RemoveSandbox), "{off:?}");
+        assert!(off.contains(&PanelOutcome::RemoveSandbox), "{off:?}");
+    }
+
+    #[test]
+    fn a_sandbox_placed_on_a_worker_shows_its_terminals_from_the_writer_too() {
+        let mut f = sandbox_elsewhere(true);
+        f.writer = None;
+        f.sandbox.as_mut().unwrap().machine = Some("w1".into());
+        let offered = page_outcomes(&f, Stage::ManualTest);
+        assert!(offered.contains(&PanelOutcome::ShowSandbox), "{offered:?}");
+        assert!(offered.contains(&PanelOutcome::StopSandbox), "{offered:?}");
+    }
+
+    #[test]
+    fn what_is_done_to_a_sandbox_elsewhere_doesnt_move_its_feature() {
+        for outcome in [
+            PanelOutcome::StopSandbox,
+            PanelOutcome::RestartSandbox,
+            PanelOutcome::ResetSandbox,
+            PanelOutcome::RemoveSandbox,
+        ] {
+            assert!(outcome.acts_on_sandbox(), "{outcome:?}");
+        }
+        assert!(!PanelOutcome::StartSandbox.acts_on_sandbox());
     }
 
     #[test]
@@ -12048,7 +12123,8 @@ pub(crate) mod tests {
             taken: vec![8000],
         };
         let said = texts(&sandbox_elsewhere(true), seen.clone()).join("\n");
-        assert!(said.contains("running on box: stop it there"), "{said}");
+        assert!(said.contains("running on box"), "{said}");
+        assert!(!said.contains("stop it there"), "{said}");
         assert!(said.contains("taken here, so not open: 8000"), "{said}");
         assert!(said.contains("open here on the same ports: 5173"), "{said}");
         let closed = crate::machine_sandbox::SandboxSeen {
