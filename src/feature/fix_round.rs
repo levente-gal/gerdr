@@ -23,6 +23,7 @@
 //! is `crate::feature_fix`.
 
 use std::{
+    collections::BTreeMap,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -133,8 +134,8 @@ pub struct FixRound {
     pub stalled: Option<String>,
     #[serde(default)]
     pub give_back: GiveBack,
-    /// What the agent must tick in the build log for the round to end, once
-    /// the fixes went.
+    /// What the agent must tick in the build log for the round to end: read
+    /// from its plan once that waits, and settled when the fixes go.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub items: Vec<String>,
     /// How many of them were ticked when last read.
@@ -172,6 +173,15 @@ impl FixRound {
     /// Whether its agent stopped with fixes left: the user's turn.
     pub fn fixes_stopped(&self) -> bool {
         self.phase == FixPhase::Fixing && self.stalled.is_some()
+    }
+
+    /// The fixes its plan lists, to show ahead of the build log: none while
+    /// the plan is being written, as an older reading no longer holds then.
+    pub fn planned(&self) -> &[String] {
+        match self.phase {
+            FixPhase::Compacting | FixPhase::Planning => &[],
+            FixPhase::Ready | FixPhase::CompactingToFix | FixPhase::Fixing => &self.items,
+        }
     }
 
     /// Whether the user can tell the agent to make the fixes now.
@@ -344,12 +354,19 @@ pub fn heading(n: u32) -> String {
     format!("{ROUND} {n}")
 }
 
-/// What round `n`'s list is called on Build's page, under the plan's own:
-/// by who asked, as far as `fixes` says. A Verify round from before they were
-/// kept reads as a review.
-pub fn label(n: u32, fixes: &[VerifyFix]) -> String {
-    (fixes.iter().find(|fix| fix.round == n))
-        .map_or_else(|| format!("Review {n}"), VerifyFix::label)
+/// What round `n`'s list is called on Build's page, under the plan's own: by
+/// who asked, as `fixes` and `asked` say. AI review's read "Review N", and so
+/// does a round from before they were kept.
+pub fn label(n: u32, fixes: &[VerifyFix], asked: &BTreeMap<u32, Stage>) -> String {
+    if let Some(fix) = fixes.iter().find(|fix| fix.round == n) {
+        return fix.label();
+    }
+    match asked.get(&n) {
+        Some(stage @ (Stage::Verify | Stage::CodeReview | Stage::ManualTest)) => {
+            format!("{} {n}", stage.label())
+        }
+        _ => format!("Review {n}"),
+    }
 }
 
 /// The number of round whose section `line` of a build log heads.
@@ -625,6 +642,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_rounds_label_says_who_asked() {
+        let asked = BTreeMap::from([
+            (1, Stage::AiReview),
+            (2, Stage::CodeReview),
+            (3, Stage::ManualTest),
+            (4, Stage::Verify),
+        ]);
+        let label = |n, fixes: &[VerifyFix]| label(n, fixes, &asked);
+        assert_eq!(label(1, &[]), "Review 1");
+        assert_eq!(label(2, &[]), "Code review 2");
+        assert_eq!(label(3, &[]), "Manual test 3");
+        assert_eq!(label(4, &[]), "Verify 4");
+        // From before they were kept.
+        assert_eq!(label(9, &[]), "Review 9");
+        let kept = VerifyFix {
+            round: 9,
+            ..VerifyFix::default()
+        };
+        assert_eq!(label(9, &[kept]), "Verify 9");
+    }
+
+    #[test]
     fn a_compact_before_the_fixes_is_past_the_users_word() {
         let round = |phase| FixRound {
             n: 1,
@@ -770,8 +809,8 @@ mod tests {
             round: 3,
             ..VerifyFix::default()
         }];
-        assert_eq!(label(2, &fixes), "Review 2");
-        assert_eq!(label(3, &fixes), "Verify 3");
+        assert_eq!(label(2, &fixes, &BTreeMap::new()), "Review 2");
+        assert_eq!(label(3, &fixes, &BTreeMap::new()), "Verify 3");
     }
 
     #[test]

@@ -622,6 +622,10 @@ pub struct Feature {
     /// page says of them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub verify_fixes: Vec<fix_round::VerifyFix>,
+    /// Which stage sent each fix round, by its number: what Build's page
+    /// calls its list. Round numbers go on across a start over, so they stay.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub fix_asked: BTreeMap<u32, Stage>,
     /// The last run number of each stage whose run was forgotten: a later
     /// run goes on from it, so its prompt doesn't overwrite an old one.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -1345,6 +1349,7 @@ pub(crate) mod tests {
             fix_round: None,
             last_fix_round: None,
             verify_fixes: Vec::new(),
+            fix_asked: Default::default(),
             ran_once: Default::default(),
             fix_rounds: 0,
         }
@@ -1436,6 +1441,7 @@ pub(crate) mod tests {
             fix_round: None,
             last_fix_round: None,
             verify_fixes: Vec::new(),
+            fix_asked: Default::default(),
             ran_once: Default::default(),
             fix_rounds: 0,
         }

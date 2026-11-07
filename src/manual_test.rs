@@ -446,7 +446,13 @@ impl Gerdr {
                 if n == 0 {
                     return self.show_warning("No failures to send: mark one failed first".into());
                 }
-                if !self.send_to_build(&project, &slug, "manual test failures", text) {
+                if !self.send_to_build(
+                    &project,
+                    &slug,
+                    Stage::ManualTest,
+                    "manual test failures",
+                    text,
+                ) {
                     return;
                 }
                 if let Some(f) = self.feature_mut(&project, &slug) {

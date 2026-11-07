@@ -167,8 +167,12 @@ A key is written in one place, not on the button that does the same thing:
   failures started: what the newest one was sent, then a line for each older
   one (its run, its agent, how it stands, how the next run went). It only
   reads: the full output is on Verify's page, the ticks in the list below it
-  under the same "Verify N", where other rounds read "Review N". Setup goes
-  last on that page; a failed setup is still said by the status at its top.
+  under the same "Verify N". The other rounds read "Review N" for AI review,
+  "Code review N" and "Manual test N". That list has the newest round on top
+  and Build's own milestones under the rounds. A round shows in it from its
+  start: how it stands at first, the plan's fixes unticked once the plan waits.
+  Setup goes last on that page; a failed setup is still said by the status at
+  its top.
 
 ## Words
 

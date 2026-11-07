@@ -833,9 +833,16 @@ impl Gerdr {
             Some(plan) => self
                 .fix_input(project, slug, &what, &text)
                 .is_some_and(|input| {
-                    self.start_unplanned_fix_round(project, slug, &what, input, &plan)
+                    self.start_unplanned_fix_round(
+                        project,
+                        slug,
+                        Stage::AiReview,
+                        &what,
+                        input,
+                        &plan,
+                    )
                 }),
-            None => self.send_to_build(project, slug, &what, text),
+            None => self.send_to_build(project, slug, Stage::AiReview, &what, text),
         };
         if !started {
             return;
@@ -926,8 +933,9 @@ impl Gerdr {
     }
 
     /// Start a fix round on `text` (Markdown) of feature `slug`, for its
-    /// Build agent: see `feature_fix`. `what` names it for the log, the
-    /// toasts and the prompts: "review comments", "2 findings". Whether it
+    /// Build agent: see `feature_fix`. `asked` is the stage sending it, and
+    /// `what` names it for the log, the toasts and the prompts: "review
+    /// comments", "2 findings". Whether it
     /// started: a refusal says why, and nothing is taken.
     ///
     /// It goes to `prompts/build-<n>-<what>-<k>.md`, and the agent is told
@@ -937,11 +945,12 @@ impl Gerdr {
         &mut self,
         project: &str,
         slug: &str,
+        asked: Stage,
         what: &str,
         text: String,
     ) -> bool {
         self.fix_input(project, slug, what, &text)
-            .is_some_and(|input| self.start_fix_round(project, slug, what, input))
+            .is_some_and(|input| self.start_fix_round(project, slug, asked, what, input))
     }
 
     /// Where `text` went for a new fix round of feature `slug`: none if a

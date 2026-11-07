@@ -601,10 +601,11 @@ pub enum PageSection {
     /// Ship's choice and tick boxes for a repository, or what follows.
     ShipGroup(ShipGroup),
     /// A group of Build's list, its `label` ("Build", "Review 1") with "done
-    /// of total" and a bar, and each by name when known (`true` = done; empty
-    /// until the build log is read).
+    /// of total" and a bar, how it stands if it says (`state`), and each by
+    /// name when known (`true` = done; empty until the build log is read).
     Milestones {
         label: String,
+        state: Option<CheckLine>,
         done: usize,
         total: usize,
         items: Vec<(bool, String)>,
@@ -2503,6 +2504,7 @@ fn page_stack(
             }
             PageSection::Milestones {
                 label,
+                state,
                 done,
                 total,
                 items,
@@ -2517,6 +2519,9 @@ fn page_stack(
                     },
                 );
                 s.y += 8;
+                if let Some(state) = state {
+                    s.text(&state.text, Font::Body, Ink::Tone(state.tone), BODY_LINE);
+                }
                 let next = items.iter().position(|(d, _)| !d);
                 for (i, (done, text)) in items.iter().enumerate() {
                     s.put(

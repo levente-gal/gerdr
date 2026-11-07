@@ -111,6 +111,7 @@ impl Gerdr {
         &mut self,
         project: &str,
         slug: &str,
+        asked: Stage,
         what: &str,
         input: PathBuf,
     ) -> bool {
@@ -125,7 +126,7 @@ impl Gerdr {
             Some(_) => FixPhase::Compacting,
             None => FixPhase::Planning,
         };
-        if !self.open_fix_round(&feature, what, input, phase) {
+        if !self.open_fix_round(&feature, asked, what, input, phase) {
             return false;
         }
         let Some(line) = compact else {
@@ -154,6 +155,7 @@ impl Gerdr {
         &mut self,
         project: &str,
         slug: &str,
+        asked: Stage,
         what: &str,
         input: PathBuf,
         plan: &str,
@@ -170,7 +172,17 @@ impl Gerdr {
             self.show_error(format!("Couldn't write {}: {err}", fix_round::FILE));
             return false;
         }
-        self.open_fix_round(&feature, what, input, FixPhase::Ready)
+        if !self.open_fix_round(&feature, asked, what, input, FixPhase::Ready) {
+            return false;
+        }
+        if let Some(round) = self
+            .feature_mut(project, slug)
+            .and_then(|f| f.fix_round.as_mut())
+        {
+            round.items = fix_round::items(plan, &[]);
+        }
+        self.save_feature(project, slug);
+        true
     }
 
     /// Move `feature`'s last plan out of the way of a new round. A failure
@@ -188,10 +200,11 @@ impl Gerdr {
         }
     }
 
-    /// Record `feature`'s new round, at `phase`.
+    /// Record `feature`'s new round, sent by `asked`, at `phase`.
     fn open_fix_round(
         &mut self,
         feature: &Feature,
+        asked: Stage,
         what: &str,
         input: PathBuf,
         phase: FixPhase,
@@ -203,6 +216,7 @@ impl Gerdr {
             return false;
         };
         f.fix_rounds = n;
+        f.fix_asked.insert(n, asked);
         f.last_fix_round = None;
         f.fix_round = Some(FixRound {
             n,
@@ -654,8 +668,9 @@ impl Gerdr {
             .as_ref()
             .map(FixRound::ids)
             .unwrap_or_default();
-        let missing = match std::fs::read_to_string(path) {
-            Ok(text) => fix_round::missing(&text, &ids),
+        let read = std::fs::read_to_string(path);
+        let missing = match &read {
+            Ok(text) => fix_round::missing(text, &ids),
             Err(err) => {
                 tracing::warn!("reading {}: {err}", path.display());
                 vec![format!("to be readable: {err}")]
@@ -681,6 +696,8 @@ impl Gerdr {
             round.phase = FixPhase::Ready;
             round.ready = Some(now);
             round.stalled = None;
+            // Build's page lists them ahead of the build log.
+            round.items = read.map_or_else(|_| Vec::new(), |text| fix_round::items(&text, &ids));
         }
         f.log(now, "Fix plan ready for review");
         self.save_feature(project, slug);
@@ -1141,7 +1158,7 @@ impl Gerdr {
                 .join("\n"),
             evidence.display()
         );
-        if self.send_to_build(project, slug, "Verify failures", text) {
+        if self.send_to_build(project, slug, Stage::Verify, "Verify failures", text) {
             if let Some(f) = self.feature_mut(project, slug) {
                 let agent =
                     (f.runs.get(&Stage::Build)).map_or_else(String::new, |r| r.agent.clone());

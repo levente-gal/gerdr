@@ -1491,7 +1491,7 @@ impl Gerdr {
         if let Some(why) = stage_refusal(stage) {
             return self.show_warning(why);
         }
-        if !self.send_to_build(&project, &slug, "review comments", text) {
+        if !self.send_to_build(&project, &slug, Stage::CodeReview, "review comments", text) {
             return;
         }
         // What is kept to give back must be all that was sent.
