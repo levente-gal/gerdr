@@ -142,6 +142,10 @@ pub struct Outcome {
     /// `failure_lines`), which may lie before `tail`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub excerpt: Vec<String>,
+    /// All its terminal kept, to keep with the AI work (see `Panes::keep_log`)
+    /// and then let go of. Never saved: the record keeps `tail`.
+    #[serde(skip)]
+    pub log: Option<String>,
 }
 
 impl Outcome {
@@ -514,7 +518,7 @@ pub fn runs_check(command: &str) -> bool {
 }
 
 /// The start of the line a check's script prints before it.
-const HEAD: &str = "\u{25b6} Check ";
+pub(crate) const HEAD: &str = "\u{25b6} Check ";
 /// The start of the line it prints after it.
 const END: &str = "\u{25a0} Check ";
 
@@ -590,6 +594,11 @@ pub trait Panes {
     fn text(&mut self, pane: &str) -> Result<String, Unread>;
     /// Press Ctrl+C in pane `pane`.
     fn interrupt(&mut self, pane: &str);
+    /// All pane `pane` keeps of what it printed, oldest first, for the AI
+    /// work; none while that isn't kept.
+    fn keep_log(&mut self, _pane: &str) -> Option<String> {
+        None
+    }
 }
 
 /// The files a run's checks leave, and the processes they name: on this
@@ -972,6 +981,7 @@ impl Outcome {
         if !self.passed() && !self.interrupted {
             self.excerpt = failure_lines(output);
         }
+        self.log = panes.keep_log(pane);
     }
 }
 
@@ -2126,6 +2136,47 @@ mod tests {
         stopped.keep_output(&mut panes, "p");
         assert_eq!(stopped.tail, "");
         assert_eq!(panes.asked, 1);
+    }
+
+    #[test]
+    fn a_check_keeps_its_whole_log_only_when_its_terminal_gives_one() {
+        // Terminals that keep no log, as by default.
+        let text = format!("{HEAD}api: t\nboom\n{END}exited with 1\n");
+        let mut panes = Reads {
+            reads: vec![Ok(text.clone())],
+            asked: 0,
+        };
+        let mut failed = Outcome {
+            exit: Some(1),
+            ..Outcome::default()
+        };
+        failed.keep_output(&mut panes, "p");
+        assert_eq!(failed.log, None);
+
+        struct Kept(String, Vec<String>);
+        impl Panes for Kept {
+            fn gone(&mut self, _: &str) -> bool {
+                false
+            }
+            fn text(&mut self, _: &str) -> Result<String, Unread> {
+                Ok(self.0.clone())
+            }
+            fn interrupt(&mut self, _: &str) {}
+            fn keep_log(&mut self, pane: &str) -> Option<String> {
+                self.1.push(pane.to_owned());
+                Some(format!("before\n{}", self.0))
+            }
+        }
+        let mut panes = Kept(text.clone(), Vec::new());
+        failed.keep_output(&mut panes, "p7");
+        assert_eq!(failed.log, Some(format!("before\n{text}")));
+        assert_eq!(panes.1, ["p7"]);
+        assert_eq!(failed.tail, "boom");
+        // The record never holds it.
+        let saved = serde_json::to_string(&failed).unwrap();
+        assert!(!saved.contains("before"), "{saved}");
+        let read: Outcome = serde_json::from_str(&saved).unwrap();
+        assert_eq!(read.log, None);
     }
 
     #[test]
