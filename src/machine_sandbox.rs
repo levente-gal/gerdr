@@ -1192,19 +1192,28 @@ impl Gerdr {
 
     /// Open feature `slug`'s sandbox's app, which runs on machine `id`:
     /// its ports open here first, and a page opens on one that is really its own.
-    pub(crate) fn open_seen_sandbox_app(&mut self, project: &str, slug: &str, id: &str) {
+    pub(crate) fn open_seen_sandbox_app(
+        &mut self,
+        project: &str,
+        slug: &str,
+        id: &str,
+        page: usize,
+    ) {
         let name = self.machine_name(id);
         let Some(feature) = self.feature(project, slug) else {
             return;
         };
-        let Some(ports) = Self::seen_sandbox(feature).map(|(_, run)| run.listening()) else {
+        let Some(run) = Self::seen_sandbox(feature).map(|(_, run)| run.clone()) else {
             return self.show_warning(format!("The sandbox isn't running on {name}"));
         };
         if self.work_of(id).is_none() {
             return self.show_warning(format!("Connect {name} to open its sandbox's app"));
         }
-        let Some(url) = self.sandbox_url(project, &ports) else {
-            return self.show_warning("Nothing listens in the sandbox yet".into());
+        let ports = run.listening();
+        let set = self.set_sandbox_url(project);
+        let Some(url) = crate::feature_sandbox::sandbox_url(&run, page, &ports, set.as_deref())
+        else {
+            return self.show_warning(crate::feature_sandbox::nothing_listens(&run, page));
         };
         let said = self.follow_sandbox(project, slug);
         let key = (project.to_owned(), slug.to_owned());

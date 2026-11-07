@@ -117,6 +117,10 @@ pub struct SandboxRun {
     /// copied.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub not_there: Vec<String>,
+    /// The pages of its app, the first the one Open app opens, as found
+    /// when it started (see `sandbox_pages`): empty when nothing told.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pages: Vec<super::sandbox_pages::Page>,
     /// It runs on another machine, and this is how it stands there. Its numbers
     /// mean nothing here, so nothing is looked up or signalled by them.
     #[serde(skip)]
