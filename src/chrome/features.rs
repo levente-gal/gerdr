@@ -23,7 +23,9 @@ use super::{
     measure_bold, measured_footer_height, mix, phys, physical, plus, rect_px, segment,
     segment_tint, status_dot, tab, trash,
 };
-use super::{code_mark, eye, flask, magnifier, plan_review_mark, ship_arrow, sparkle, text_lines};
+use super::{
+    bars, code_mark, eye, flask, magnifier, plan_review_mark, ship_arrow, sparkle, text_lines,
+};
 use crate::text_field::Line;
 use crate::{
     agent_icons::AgentIcon,
@@ -64,7 +66,7 @@ const SWITCH_W: i32 = 28;
 /// check, Verify's failures): past it, the last says how many more.
 pub const MAX_CHECK_LINES: usize = 4;
 /// The feature tab's header buttons, before the one removing worktrees.
-pub const FEATURE_BUTTONS: [&str; 3] = ["Open tab", "Copy path", "New feature\u{2026}"];
+pub const FEATURE_BUTTONS: [&str; 4] = ["Open tab", "Copy path", "Stats", "New feature\u{2026}"];
 
 /// Where a stage stands in a feature, for its mark.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -3942,7 +3944,8 @@ impl Painter {
             icon_sdf(c, *rect, scale, color, |x, y| match i {
                 0 => tab(x, y, s * 0.8),
                 1 => copy(x, y, s * 1.2),
-                2 => plus(x, y, 0.0, 0.0, 4.5 * s, s),
+                2 => bars(x, y, s),
+                3 => plus(x, y, 0.0, 0.0, 4.5 * s, s),
                 _ => trash(x, y, s),
             });
         }

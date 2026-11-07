@@ -169,6 +169,22 @@ pub fn clear(conn: &mut Connection) -> Result<(), String> {
     tx.commit().map_err(|e| e.to_string())
 }
 
+/// The index under `root`, emptied, to be drawn again from the files: the
+/// file stays, so a reader open on it reads on. One that can't be emptied
+/// is made anew.
+pub fn reset(root: &Path) -> Result<Connection, String> {
+    let emptied = open(root).and_then(|mut conn| clear(&mut conn).map(|()| conn));
+    match emptied {
+        Ok(conn) => Ok(conn),
+        Err(why) => {
+            let file = path(root);
+            tracing::warn!("ai work: making {} anew: {why}", file.display());
+            remove(&file)?;
+            open(root)
+        }
+    }
+}
+
 /// Take what was added to the events files of feature folders `dirs` since
 /// last time into `conn`: the number of lines. A folder that fails is told
 /// in the error once the others are in.
@@ -1323,6 +1339,28 @@ mod tests {
         assert_eq!(ingest(&mut conn, std::slice::from_ref(&dir)), Ok(1));
         let mode = std::fs::metadata(path(&root)).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_reset_index_takes_everything_in_again() {
+        let root = root("reset");
+        let dir = root.join("p").join("a");
+        append(&dir, "here", &[note(0, 10)]);
+        let mut conn = open(&root).unwrap();
+        assert_eq!(ingest(&mut conn, std::slice::from_ref(&dir)), Ok(1));
+        assert_eq!(ingest(&mut conn, std::slice::from_ref(&dir)), Ok(0));
+        drop(conn);
+        let mut conn = reset(&root).unwrap();
+        assert_eq!(count(&conn, "notes"), 0);
+        assert_eq!(ingest(&mut conn, std::slice::from_ref(&dir)), Ok(1));
+        assert_eq!(count(&conn, "notes"), 1);
+        drop(conn);
+        // Not a database: made anew.
+        remove(&path(&root)).unwrap();
+        std::fs::write(path(&root), "not a database, not at all, no").unwrap();
+        let mut conn = reset(&root).unwrap();
+        assert_eq!(ingest(&mut conn, std::slice::from_ref(&dir)), Ok(1));
         let _ = std::fs::remove_dir_all(&root);
     }
 

@@ -605,13 +605,11 @@ pub(crate) enum Done {
         evidence: feature::verify::Evidence,
     },
     /// The AI work's index was read for the stats panel.
-    #[allow(dead_code)] // sent from `stats_panel` (AI work contract)
     AiStats {
         scope: crate::ai_work::stats::Scope,
         result: Result<crate::ai_work::stats::View, String>,
     },
     /// What the AI work's thread came to.
-    #[allow(dead_code)] // sent from `ai_work::thread` (AI work contract)
     AiWork(crate::ai_work::Report),
 }
 
@@ -1569,6 +1567,8 @@ pub enum PanelOutcome {
     /// worktree.
     Open(PathBuf),
     CopyPath,
+    /// Show what its AI work came to, in the stats panel.
+    Stats,
     /// Abandon it, or once done remove its worktrees, after asking.
     Remove,
     New,
@@ -1610,6 +1610,7 @@ impl PanelOutcome {
                 | Self::OpenPr(_)
                 | Self::GoToCurrent
                 | Self::CopyPath
+                | Self::Stats
                 | Self::Show(_)
         )
     }
@@ -5153,6 +5154,13 @@ impl Gerdr {
             }
         }
         self.features.all = all;
+        match store::take_moved() {
+            0 => {}
+            1 => self.show_success("Moved the activity of 1 feature to files of its own".into()),
+            n => self.show_success(format!(
+                "Moved the activity of {n} features to files of their own"
+            )),
+        }
         // What the records hold already happened: the AI work tells only
         // what changes from here.
         self.ai_work.seen.clear();
@@ -5299,10 +5307,17 @@ impl Gerdr {
         let (p, s) = (project.to_owned(), slug.to_owned());
         for follow in follow {
             match follow {
-                Follow::Capture(chat) => {
+                Follow::Capture(mut chat) => {
                     let there = match chat.machine.as_deref() {
                         Some(id) => match self.archive_reach(id) {
-                            Some(there) => Some(there),
+                            Some(there) => {
+                                // Found there by its folders as that machine has them.
+                                if let Some(paths) = self.machine_paths(id, Some(feature)) {
+                                    chat.folders =
+                                        chat.folders.iter().map(|f| paths.map(f)).collect();
+                                }
+                                Some(there)
+                            }
                             // Its chat stays there: it is kept once watched again.
                             None => {
                                 tracing::info!(
@@ -5393,7 +5408,7 @@ impl Gerdr {
     }
 
     /// Where the threads send what they came to; set up the first time.
-    fn feature_sender(&mut self) -> Option<channel::Sender<Done>> {
+    pub(crate) fn feature_sender(&mut self) -> Option<channel::Sender<Done>> {
         if self.features.done.is_none() {
             let (tx, rx) = channel::channel::<Done>();
             let inserted = self
@@ -7817,6 +7832,8 @@ impl Gerdr {
                 }
             }
             PanelOutcome::Remove => self.check_remove_feature(&project, &slug),
+            // On this feature, as it is the one shown.
+            PanelOutcome::Stats => self.open_ai_stats(),
             PanelOutcome::New => self.open_new_feature(None),
             // In its own tab, its workspace opened if need be.
             PanelOutcome::Show(to) => self.open_feature(&project, &to),
@@ -8998,7 +9015,8 @@ impl Gerdr {
             }
             FeatureTabHit::Button(0) => Some(PanelOutcome::Open(feature.dir.clone())),
             FeatureTabHit::Button(1) => Some(PanelOutcome::CopyPath),
-            FeatureTabHit::Button(2) => Some(PanelOutcome::New),
+            FeatureTabHit::Button(2) => Some(PanelOutcome::Stats),
+            FeatureTabHit::Button(3) => Some(PanelOutcome::New),
             FeatureTabHit::Button(_) => Some(PanelOutcome::Remove),
         };
         self.sync_feature_page();
@@ -11793,6 +11811,7 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 6] = [
             ("Ctrl+PgUp / Ctrl+PgDn", "previous or next feature"),
             ("Ctrl+O", "open a tab in the feature's folder"),
             ("Ctrl+C", "copy the feature's path"),
+            ("Prefix, then U", "show the feature's AI work stats"),
             ("Ctrl+N", "new feature"),
             ("Ctrl+Shift+L", "show or hide all repositories"),
             (
@@ -13957,9 +13976,10 @@ pub(crate) mod tests {
     #[test]
     fn header_buttons_and_the_strip_wheel() {
         assert_eq!(header_label("Abandon", 0), Some("Open tab"));
-        assert_eq!(header_label("Abandon", 2), Some("New feature\u{2026}"));
-        assert_eq!(header_label("Abandon", 3), Some("Abandon"));
-        assert_eq!(header_label("Abandon", 4), None);
+        assert_eq!(header_label("Abandon", 2), Some("Stats"));
+        assert_eq!(header_label("Abandon", 3), Some("New feature\u{2026}"));
+        assert_eq!(header_label("Abandon", 4), Some("Abandon"));
+        assert_eq!(header_label("Abandon", 5), None);
         // The wheel over the chips steps the repositories, stopping at
         // the ends.
         assert_eq!(strip_step(0, 1, 3), 1);

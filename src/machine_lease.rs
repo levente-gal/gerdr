@@ -619,6 +619,9 @@ impl Gerdr {
         all.retain(|f| f.slug != slug);
         all.push(feature);
         all.sort_by(|a, b| a.created.cmp(&b.created).then_with(|| a.slug.cmp(&b.slug)));
+        // What it holds happened there: the AI work tells what changes here.
+        self.ai_work_seed(project, slug);
+        self.pull_ai_work(project, slug, &taking.from, &title);
         self.seen_folders_changed();
         self.prune();
         self.sync_feature_panel();
@@ -639,6 +642,60 @@ impl Gerdr {
         }
         if on_it {
             self.apply_feature_panel(press);
+        }
+    }
+
+    /// Bring the AI work of feature `slug` (`title`) from machine `from`, its
+    /// writer before, on a thread of its own: what its agents did there.
+    /// Only what is newer there comes, and nothing here goes. With no link
+    /// it stays there; a copy that fails is said, and stays there too.
+    fn pull_ai_work(&mut self, project: &str, slug: &str, from: &str, title: &str) {
+        let Some(local) = self.ai_work.dir(project, slug) else {
+            return;
+        };
+        let Some((reach, side)) = self.archive_reach(from) else {
+            return tracing::info!("{project}/{slug}: its AI work stays on {from}: no link");
+        };
+        let there = crate::ai_work::dir(Path::new(&side.data), project, slug);
+        let there = there.to_string_lossy().into_owned();
+        let (jobs, done) = (self.ai_work.sender(), self.feature_sender());
+        let (name, shown) = (self.machine_name(from), title.to_owned());
+        let (project, slug) = (project.to_owned(), slug.to_owned());
+        let (title, name_there) = (title.to_owned(), name.clone());
+        let pull = move || {
+            let name = name_there;
+            let quiet = AtomicBool::new(false);
+            match reach.pull_ai_work(&there, &local, &quiet) {
+                Ok(true) => {
+                    if let Some(jobs) = jobs {
+                        // Gone only when the AI work's thread is: gerdr is quitting.
+                        let _ = jobs.send(crate::ai_work::thread::Job::Index { project, slug });
+                    }
+                }
+                Ok(false) => {}
+                Err(trouble) => {
+                    let why = trouble.text().to_owned();
+                    tracing::warn!("{project}/{slug}: bringing its AI work from {name}: {why}");
+                    if let Some(done) = done {
+                        let report = crate::ai_work::Report::NotBrought {
+                            title,
+                            from: name,
+                            why,
+                        };
+                        // Gone only when the loop is: there is no one left to tell.
+                        let _ = done.send(crate::features::Done::AiWork(report));
+                    }
+                }
+            }
+        };
+        if let Err(err) = std::thread::Builder::new()
+            .name("ai work pull".into())
+            .spawn(pull)
+        {
+            tracing::warn!("bringing the AI work of {shown} from {name}: {err}");
+            self.show_warning(format!(
+                "The AI work of \u{201c}{shown}\u{201d} stays on {name}: {err}"
+            ));
         }
     }
 
@@ -1084,6 +1141,7 @@ impl Gerdr {
         all.retain(|f| f.slug != slug);
         all.push(feature);
         all.sort_by(|a, b| a.created.cmp(&b.created).then_with(|| a.slug.cmp(&b.slug)));
+        self.ai_work_seed(project, slug);
         self.seen_folders_changed();
         self.sync_feature_panel();
         self.sync_feature_page();

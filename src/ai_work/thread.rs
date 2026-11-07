@@ -484,6 +484,9 @@ struct Worker {
     back: mpsc::Sender<Back>,
     /// Set at the end: pulls and backfills stop.
     stop: Arc<AtomicBool>,
+    /// Set by the loop to stop a backfill or a rescan, the thread going on
+    /// (see `Live::stop_busy`).
+    cancel: Arc<AtomicBool>,
     /// A problem was said and nothing worked since.
     failing: bool,
     watch: Vec<(String, String, Chat)>,
@@ -498,10 +501,22 @@ struct Worker {
 }
 
 /// Do `jobs` under `root` (see `super::root`) until told to stop, telling
-/// `done` what they came to.
-pub fn run(root: PathBuf, jobs: mpsc::Receiver<Job>, done: channel::Sender<Done>) {
+/// `done` what they came to. `cancel` stops a backfill or a rescan. The
+/// index first takes in what the files gained while gerdr was away: lines
+/// another machine wrote, or all of them when the index is new.
+pub fn run(
+    root: PathBuf,
+    jobs: mpsc::Receiver<Job>,
+    done: channel::Sender<Done>,
+    cancel: Arc<AtomicBool>,
+) {
     let (back, backs) = mpsc::channel();
     let mut worker = Worker::new(root, Homes::here(), super::machine(), done, back);
+    worker.cancel = cancel;
+    let dirs = super::index::dirs(&worker.root);
+    if !dirs.is_empty() {
+        worker.ingest(&dirs);
+    }
     worker.serve(&jobs, &backs);
 }
 
@@ -520,6 +535,7 @@ impl Worker {
             done,
             back,
             stop: Arc::new(AtomicBool::new(false)),
+            cancel: Arc::new(AtomicBool::new(false)),
             failing: false,
             watch: Vec::new(),
             swept: Instant::now(),
@@ -695,44 +711,51 @@ impl Worker {
         }
     }
 
-    /// Every feature folder under the root.
-    fn feature_dirs(&self) -> Vec<PathBuf> {
-        let subdirs = |dir: &Path| -> Vec<PathBuf> {
-            let Ok(entries) = std::fs::read_dir(dir) else {
-                return Vec::new();
-            };
-            let mut dirs: Vec<PathBuf> = (entries.flatten())
-                .filter(|e| e.file_type().is_ok_and(|kind| kind.is_dir()))
-                .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
-                .map(|e| e.path())
-                .collect();
-            dirs.sort();
-            dirs
-        };
-        (subdirs(&self.root).iter())
-            .flat_map(|project| subdirs(project))
-            .collect()
+    /// Whether a backfill or a rescan should stop here.
+    fn stopped(&self) -> bool {
+        self.stop.load(Ordering::Relaxed) || self.cancel.load(Ordering::Relaxed)
     }
 
+    /// Draw the index again from the files: emptied, then every feature
+    /// folder taken in, one at a time so a stop can come between two. What
+    /// a stop leaves out comes in when the thread starts again.
     fn rescan(&mut self) {
+        self.cancel.store(false, Ordering::Relaxed);
         self.index = None;
-        let path = super::index::path(&self.root);
-        for end in ["", "-wal", "-shm"] {
-            let mut file = path.as_os_str().to_owned();
-            file.push(end);
-            match std::fs::remove_file(&file) {
-                Ok(()) => {}
-                Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-                Err(err) => {
-                    let why = format!("{}: {err}", Path::new(&file).display());
-                    return self.failed("Couldn't draw the AI work stats again", why);
-                }
-            }
-        }
         self.pending.clear();
         self.since = None;
-        let dirs = self.feature_dirs();
-        self.ingest(&dirs);
+        let what = "Couldn't draw the AI work stats again";
+        let mut conn = match super::index::reset(&self.root) {
+            Ok(conn) => conn,
+            Err(why) => {
+                self.failed(what, why);
+                return self.report(Report::Rescanned {
+                    lines: 0,
+                    stopped: false,
+                });
+            }
+        };
+        let dirs = super::index::dirs(&self.root);
+        let total = dirs.len();
+        self.report(Report::Rescanning { done: 0, total });
+        let (mut lines, mut failed, mut stopped) = (0, Vec::new(), false);
+        for (i, dir) in dirs.iter().enumerate() {
+            if self.stopped() {
+                stopped = true;
+                break;
+            }
+            match super::index::ingest(&mut conn, std::slice::from_ref(dir)) {
+                Ok(n) => lines += n,
+                Err(why) => failed.push(why),
+            }
+            self.report(Report::Rescanning { done: i + 1, total });
+        }
+        self.index = Some(conn);
+        match failed.is_empty() {
+            true => self.worked(),
+            false => self.failed(what, failed.join("; ")),
+        }
+        self.report(Report::Rescanned { lines, stopped });
     }
 
     fn missing(&mut self, project: &str, slug: &str, chat: &Chat, why: &str) {
@@ -1022,16 +1045,29 @@ impl Worker {
             .map(Path::to_path_buf)
             .unwrap_or_default();
         let shared = data == crate::projects::data_dir();
+        self.cancel.store(false, Ordering::Relaxed);
+        // Those kept already are passed over, so the count is of the rest.
+        let features: Vec<&(String, String)> = (features.iter())
+            .filter(|(project, slug)| {
+                !super::write::read_marks(&self.dir(project, slug)).is_ok_and(|m| m.backfilled)
+            })
+            .collect();
+        if features.is_empty() {
+            return true;
+        }
         let total = features.len();
-        let (mut kept, mut gone) = (0, 0);
-        for (i, (project, slug)) in features.iter().enumerate() {
+        self.report(Report::Backfilling { done: 0, total });
+        let (mut kept, mut gone, mut stopped) = (0, 0, false);
+        for (i, (project, slug)) in features.into_iter().enumerate() {
             while let Ok(job) = jobs.try_recv() {
                 if matches!(job, Job::Stop) {
                     self.stop.store(true, Ordering::Relaxed);
+                    self.cancel.store(true, Ordering::Relaxed);
                 }
                 queue.push_back(job);
             }
-            if self.stop.load(Ordering::Relaxed) {
+            if self.stopped() {
+                stopped = true;
                 break;
             }
             // The data folder this gerdr reads goes by `store::dir`, which
@@ -1039,7 +1075,7 @@ impl Worker {
             let feature =
                 crate::feature::store::dir((!shared).then_some(data.as_path()), project, slug);
             let dir = self.dir(project, slug);
-            match super::backfill::feature(&feature, &dir, &self.stop) {
+            match super::backfill::feature(&feature, &dir, &self.cancel) {
                 Ok(done) => {
                     kept += 1;
                     gone += done.gone;
@@ -1053,9 +1089,12 @@ impl Worker {
             }
             self.report(Report::Backfilling { done: i + 1, total });
         }
+        // A stop that came during the last one may have cut it short.
+        stopped |= self.stopped();
         self.report(Report::Backfilled {
             features: kept,
             gone,
+            stopped,
         });
         !self.stop.load(Ordering::Relaxed)
     }
@@ -1520,12 +1559,95 @@ mod tests {
         assert!(dones.try_recv().is_err(), "said once");
     }
 
+    fn reports(dones: &channel::Channel<Done>) -> Vec<Report> {
+        std::iter::from_fn(|| match dones.try_recv() {
+            Ok(Done::AiWork(report)) => Some(report),
+            _ => None,
+        })
+        .collect()
+    }
+
+    fn noted(root: &Path, slug: &str) {
+        let note = Event::Note {
+            i: 0,
+            at: 10,
+            what: "made".into(),
+        };
+        let line = crate::ai_work::index::testing::line(10, note);
+        crate::ai_work::index::testing::append(&root.join("p").join(slug), "m1", &[line]);
+    }
+
+    #[test]
+    fn a_rescan_draws_every_feature_again_and_says_how_far() {
+        let root = scratch("thread-rescan");
+        noted(&root, "a");
+        noted(&root, "b");
+        let (mut w, dones) = worker(&root);
+        w.rescan();
+        w.rescan();
+        let rescan = [
+            Report::Rescanning { done: 0, total: 2 },
+            Report::Rescanning { done: 1, total: 2 },
+            Report::Rescanning { done: 2, total: 2 },
+            Report::Rescanned {
+                lines: 2,
+                stopped: false,
+            },
+        ];
+        // The second takes it all in again.
+        assert_eq!(reports(&dones), [rescan.clone(), rescan].concat());
+        // Told to stop, it stops before the next feature.
+        w.stop.store(true, Ordering::Relaxed);
+        w.rescan();
+        assert_eq!(
+            reports(&dones),
+            [
+                Report::Rescanning { done: 0, total: 2 },
+                Report::Rescanned {
+                    lines: 0,
+                    stopped: true
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn a_backfill_passes_over_the_features_kept_already() {
+        let root = scratch("thread-backfill");
+        let kept = root.join("p").join("a");
+        write::make_dir(&kept).unwrap();
+        let marks = super::super::write::Marks {
+            backfilled: true,
+            ..Default::default()
+        };
+        super::super::write::write_marks(&kept, &marks).unwrap();
+        let (mut w, dones) = worker(&root);
+        let (_jobs, rx) = mpsc::channel();
+        let mut queue = VecDeque::new();
+        let all = [
+            ("p".to_owned(), "a".to_owned()),
+            ("p".to_owned(), "b".to_owned()),
+        ];
+        assert!(w.backfill(&all, &rx, &mut queue));
+        let said = reports(&dones);
+        assert_eq!(said[0], Report::Backfilling { done: 0, total: 1 });
+        assert!(said.contains(&Report::Backfilling { done: 1, total: 1 }));
+        assert!(matches!(
+            said.last(),
+            Some(Report::Backfilled { stopped: false, .. })
+        ));
+        // All kept: nothing to say.
+        assert!(w.backfill(&all[..1], &rx, &mut queue));
+        assert_eq!(reports(&dones), []);
+    }
+
     #[test]
     fn the_thread_stops_when_told() {
         let root = scratch("thread-stop");
         let (done, _dones) = channel::channel();
         let (jobs, rx) = mpsc::channel();
-        let handle = std::thread::spawn(move || run(root, rx, done));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let handle = std::thread::spawn(move || run(root, rx, done, cancel));
         jobs.send(Job::Watch { chats: Vec::new() }).unwrap();
         jobs.send(Job::Stop).unwrap();
         handle.join().unwrap();

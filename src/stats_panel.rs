@@ -7,8 +7,8 @@
 //! again. A transcript or log it opens is unpacked off the loop too, then
 //! shown in the scrollback viewer in its place.
 //!
-//! Until gerdr holds the panel itself, `Chrome::ai_stats` does, so the
-//! chrome paints it from there (see `chrome::stats`).
+//! Gerdr holds the panel (`Gerdr::ai_stats`); the chrome paints what it
+//! shows from `ChromeView::stats` (see `chrome::stats`).
 
 use std::{
     path::{Path, PathBuf},
@@ -25,7 +25,7 @@ use smithay::{
 use crate::{
     Gerdr,
     ai_work::{
-        AgentKind, index,
+        self, AgentKind, index,
         stats::{self, Scope, Tab, View},
         thread::Job,
         zst,
@@ -164,6 +164,14 @@ impl StatsPanel {
             project,
             ..Self::default()
         }
+    }
+
+    /// The panel on feature `feature` (project, slug) in detail; Esc goes
+    /// back to the Features tab of `project`, as `new` has it.
+    pub fn on_feature(project: Option<(String, String)>, feature: (String, String)) -> Self {
+        let mut panel = Self::new(project);
+        panel.scope.detail = Some(feature);
+        panel
     }
 
     /// What the index held for the scope as it is now: nothing while the
@@ -416,15 +424,23 @@ impl StatsPanel {
     }
 
     /// Go back from a feature's detail to the list it was picked in, as it
-    /// was then.
-    fn leave_detail(&mut self) {
+    /// was then. Opened on the feature, the list is still to read.
+    fn leave_detail(&mut self) -> Option<Outcome> {
         self.scope.detail = None;
         self.query.clear();
         self.searching = false;
-        if let Some((view, selected, first)) = self.back.take() {
-            self.view = view;
-            self.selected = selected;
-            self.first = first;
+        match self.back.take() {
+            Some((view, selected, first)) => {
+                self.view = view;
+                self.selected = selected;
+                self.first = first;
+                None
+            }
+            None => {
+                self.selected = 0;
+                self.first = 0;
+                Some(Outcome::Read)
+            }
         }
     }
 
@@ -486,8 +502,9 @@ impl StatsPanel {
                 } else if self.searching {
                     self.searching = false;
                 } else if self.scope.detail.is_some() {
-                    self.leave_detail();
+                    let read = self.leave_detail();
                     self.settle(self.selected, true, page, now);
+                    return read;
                 } else {
                     return Some(Outcome::Close);
                 }
@@ -595,9 +612,9 @@ impl StatsPanel {
                 self.show_all(all)
             }
             StatsHit::Back => {
-                self.leave_detail();
+                let read = self.leave_detail();
                 self.settle(self.selected, true, page, now);
-                None
+                read
             }
             StatsHit::Query => {
                 self.searching = true;
@@ -822,8 +839,9 @@ fn feature_line(f: &stats::FeatureRow, all: bool, now: u64) -> Line {
 }
 
 fn agent_line(a: &stats::AgentRow) -> Line {
-    // The worst first, as the AI review sorts them.
-    let order = ["critical", "high", "medium", "low"];
+    // The worst first, as the AI review sorts them; it knows no others.
+    use crate::feature::review_import::Severity;
+    let order = [Severity::High, Severity::Medium, Severity::Low].map(Severity::label);
     let rank = |s: &str| order.iter().position(|o| *o == s).unwrap_or(order.len());
     let mut findings: Vec<(&String, &u32)> = a.findings.iter().filter(|(_, n)| **n > 0).collect();
     findings.sort_by_key(|(s, _)| rank(s));
@@ -1073,7 +1091,7 @@ pub(crate) fn now_secs() -> u64 {
 impl Gerdr {
     /// Open the stats panel, or close it again.
     pub(crate) fn toggle_ai_stats(&mut self) {
-        match self.chrome.ai_stats.is_some() {
+        match self.ai_stats.is_some() {
             true => self.close_ai_stats(),
             false => self.open_ai_stats(),
         }
@@ -1098,7 +1116,12 @@ impl Gerdr {
                 .map_or_else(|| id.clone(), |p| p.name.clone());
             (id, name)
         });
-        self.chrome.ai_stats = Some(StatsPanel::new(project));
+        // Over a feature's tab, on that feature.
+        let feature = (self.features.panel.as_ref()).map(|p| (p.project.clone(), p.slug.clone()));
+        self.ai_stats = Some(match feature {
+            Some(feature) => StatsPanel::on_feature(project, feature),
+            None => StatsPanel::new(project),
+        });
         self.ai_stats_request();
         // It takes the pointer from the client under it.
         self.refresh_pointer_focus();
@@ -1106,23 +1129,22 @@ impl Gerdr {
 
     /// Close the stats panel.
     pub(crate) fn close_ai_stats(&mut self) {
-        self.chrome.ai_stats = None;
+        self.ai_stats = None;
         // Gone, what is under the pointer gets it back.
         self.refresh_pointer_focus();
     }
 
     /// Read the index again for the panel, if it is open: the AI work's
     /// thread took new lines in.
-    #[allow(dead_code)] // on `Report::Indexed`, once the thread runs (AI work, wave 2)
     pub(crate) fn ai_stats_refresh(&mut self) {
-        if self.chrome.ai_stats.as_ref().is_some_and(|p| !p.reading) {
+        if self.ai_stats.as_ref().is_some_and(|p| !p.reading) {
             self.ai_stats_request();
         }
     }
 
     /// Ask for the panel's scope off the loop; `ai_stats_read` takes it.
     fn ai_stats_request(&mut self) {
-        let Some(panel) = self.chrome.ai_stats.as_mut() else {
+        let Some(panel) = self.ai_stats.as_mut() else {
             return;
         };
         panel.reading = true;
@@ -1142,7 +1164,7 @@ impl Gerdr {
         let page = self.ai_stats_page();
         // Closed since, or moved on to another scope: what was read is of
         // no use, and a newer read is under way for the scope shown.
-        let Some(panel) = self.chrome.ai_stats.as_mut() else {
+        let Some(panel) = self.ai_stats.as_mut() else {
             return;
         };
         if panel.scope != scope {
@@ -1160,7 +1182,7 @@ impl Gerdr {
 
     /// What the panel shows, while it is open.
     pub(crate) fn ai_stats_view(&self) -> Option<StatsView> {
-        Some(self.chrome.ai_stats.as_ref()?.view(now_secs()))
+        Some(self.ai_stats.as_ref()?.view(now_secs()))
     }
 
     /// A key while the panel has the keyboard. `sym` is the key's own
@@ -1172,7 +1194,7 @@ impl Gerdr {
         typed: Keysym,
     ) -> Option<Outcome> {
         let page = self.ai_stats_page();
-        let panel = self.chrome.ai_stats.as_mut()?;
+        let panel = self.ai_stats.as_mut()?;
         panel.key(mods, sym, typed, page, now_secs())
     }
 
@@ -1192,9 +1214,13 @@ impl Gerdr {
                 if !self.ai_work.is_on() {
                     return self.show_warning("AI work isn't kept on this gerdr".into());
                 }
+                if matches!(self.ai_work.busy, Some(ai_work::Busy::Rescan { .. })) {
+                    return self
+                        .show_warning("The AI work's index is being drawn again already".into());
+                }
+                // Read again once it is drawn (`Report::Rescanned`).
                 self.ai_work.send(Job::Rescan);
                 self.show_notice("Drawing the AI work's index again from its files".into());
-                self.ai_stats_request();
             }
             Outcome::Open { path, what, title } => self.ai_stats_open(path, what, title),
         }
@@ -1226,7 +1252,7 @@ impl Gerdr {
     /// The text of `what` came, to show in the viewer in the panel's place.
     /// With the panel closed meanwhile it isn't shown: the user moved on.
     fn ai_stats_opened(&mut self, what: &str, title: &str, result: Result<String, String>) {
-        if self.chrome.ai_stats.is_none() {
+        if self.ai_stats.is_none() {
             return;
         }
         let text = match result {
@@ -1236,7 +1262,7 @@ impl Gerdr {
                 return self.show_error(format!("Couldn't open the {what}: {err}"));
             }
         };
-        self.chrome.ai_stats = None;
+        self.ai_stats = None;
         self.stop_key_repeat();
         self.tooltip.hide();
         self.chrome.drop_tooltip();
@@ -1276,7 +1302,7 @@ impl Gerdr {
             }
             Some(hit) => {
                 let page = self.ai_stats_page();
-                let panel = self.chrome.ai_stats.as_mut();
+                let panel = self.ai_stats.as_mut();
                 panel.and_then(|panel| panel.click(hit, page, now_secs()))
             }
             None => match self.toast_press(pos) {
@@ -1299,7 +1325,7 @@ impl Gerdr {
         let view = self.ai_stats_view()?;
         let layout = chrome::stats_layout(&view, self.output_size());
         let hit = chrome::stats_hit(&view, &layout, pos);
-        self.chrome.ai_stats.as_mut()?.hover = hit;
+        self.ai_stats.as_mut()?.hover = hit;
         match hit? {
             StatsHit::Back => Some(Tooltip::new("Back to the list", layout.back?).key("Esc")),
             _ => None,
@@ -1320,19 +1346,30 @@ impl Gerdr {
 
     /// The wheel or the touchpad moved the panel's list.
     pub(crate) fn ai_stats_scroll(&mut self, motion: crate::scroll::Motion) {
-        if self.chrome.ai_stats.is_none() {
+        if self.ai_stats.is_none() {
             return;
         }
         let rows = self.motion_rows(motion, chrome::STATS_ROW as f64);
         let page = self.ai_stats_page();
-        if let Some(panel) = self.chrome.ai_stats.as_mut() {
+        if let Some(panel) = self.ai_stats.as_mut() {
             panel.scroll_by(rows, page, now_secs());
+        }
+    }
+
+    /// Put the list where its scrollbar's thumb was dragged: `pos` rows
+    /// (in pixels) down.
+    pub(crate) fn ai_stats_scroll_to(&mut self, pos: f64) {
+        let page = self.ai_stats_page();
+        if let Some(panel) = self.ai_stats.as_mut() {
+            let row = (pos / chrome::STATS_ROW as f64).round() as isize;
+            let by = row - panel.first as isize;
+            panel.scroll_by(by, page, now_secs());
         }
     }
 
     /// The query's field, for a press or a drag in it.
     pub(crate) fn ai_stats_field_mut(&mut self) -> Option<&mut TextField> {
-        Some(&mut self.chrome.ai_stats.as_mut()?.query)
+        Some(&mut self.ai_stats.as_mut()?.query)
     }
 }
 
@@ -1663,6 +1700,25 @@ mod tests {
         assert_eq!(panel.selected, 1);
         // The list as it was, with no read.
         assert_eq!(panel.note(NOW), None);
+        assert_eq!(key(&mut panel, Keysym::Escape), Some(Outcome::Close));
+    }
+
+    #[test]
+    fn opened_on_a_feature_esc_reads_the_features_list() {
+        let feature = ("gerdr".to_owned(), "stats".to_owned());
+        let project = Some(("gerdr".to_owned(), "gerdr".to_owned()));
+        let mut panel = StatsPanel::on_feature(project, feature.clone());
+        assert_eq!(panel.scope.detail, Some(feature));
+        assert_eq!(panel.esc_word(), "back");
+        panel.view = Some(Ok(detail(panel.scope.clone())));
+        panel.settle(0, true, 10, NOW);
+        assert_eq!(panel.view(NOW).title, "Keep all AI work");
+        // No list was left behind it: it is read.
+        assert_eq!(key(&mut panel, Keysym::Escape), Some(Outcome::Read));
+        assert_eq!(panel.scope.detail, None);
+        assert_eq!(panel.scope.tab, Tab::Features);
+        assert_eq!(panel.scope.project.as_deref(), Some("gerdr"));
+        panel.view = Some(Ok(view(panel.scope.clone())));
         assert_eq!(key(&mut panel, Keysym::Escape), Some(Outcome::Close));
     }
 

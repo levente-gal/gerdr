@@ -489,21 +489,15 @@ pub fn diff_with(
 
     // The setups that ended.
     for setup in &digest.setups {
-        let Some(at) = setup.finished else {
+        if setup.finished.is_none() {
             continue;
-        };
+        }
         let was =
             (prev.setups.iter()).find(|s| s.machine == setup.machine && s.started == setup.started);
         if was.is_some_and(|s| s.finished.is_some()) {
             continue;
         }
-        out.tell(
-            Some(at * 1000),
-            Event::SetupEnded {
-                run: value(setup),
-                log: None,
-            },
-        );
+        // The thread tells `SetupEnded` once it has kept the log.
         out.then(Follow::SetupSlice { run: value(setup) });
     }
 
@@ -1121,16 +1115,8 @@ mod tests {
         ended.setup.as_mut().unwrap().finished = Some(20);
         let diffed = step(&f, &ended);
         let run = value(ended.setup.as_ref().unwrap());
-        assert_eq!(
-            diffed.events,
-            [(
-                Some(20_000),
-                Event::SetupEnded {
-                    run: run.clone(),
-                    log: None
-                }
-            )]
-        );
+        // The thread tells it, with the log it kept.
+        assert_eq!(diffed.events, []);
         assert_eq!(diffed.follow, [Follow::SetupSlice { run }]);
         // Moved aside by a setup on another machine, it doesn't end again.
         let mut elsewhere = ended.clone();
@@ -1139,7 +1125,7 @@ mod tests {
             started: 30,
             ..SetupRun::default()
         });
-        assert_eq!(step(&ended, &elsewhere).events, []);
+        assert_eq!(step(&ended, &elsewhere).follow, []);
     }
 
     #[test]
