@@ -882,15 +882,17 @@ impl Feature {
         true
     }
 
-    /// Open its last fix round again, on the stage it is at now, unless one
-    /// is open.
+    /// Open its last fix round again, unless one is open: on the stage it is
+    /// at now if that comes after the one that asked. A later one keeps the
+    /// round, as its page shows a round being fixed from an earlier stage, and
+    /// the round's card stays on the page of the stage that asked.
     pub fn reopen_fix_round(&mut self) {
         if self.fix_round.is_some() {
             return;
         }
         let current = self.current();
         self.fix_round = self.last_fix_round.take().map(|mut round| {
-            round.stage = current.unwrap_or(round.stage);
+            round.stage = current.map_or(round.stage, |at| at.max(round.stage));
             round
         });
     }
@@ -1178,10 +1180,15 @@ pub(crate) mod tests {
         };
         let mut f = feature("a", 1);
         let at = f.current().unwrap();
-        f.last_fix_round = Some(round(Stage::Ship));
+        f.last_fix_round = Some(round(Stage::Discover));
         f.reopen_fix_round();
         assert_eq!(f.fix_round.as_ref().map(|r| r.stage), Some(at));
         assert_eq!(f.last_fix_round, None);
+        // A later stage that asked keeps it: its card stays on that page.
+        let mut later = feature("a", 1);
+        later.last_fix_round = Some(round(Stage::Ship));
+        later.reopen_fix_round();
+        assert_eq!(later.fix_round.as_ref().map(|r| r.stage), Some(Stage::Ship));
         // One open stays, and nothing is left to open.
         f.reopen_fix_round();
         assert!(f.fix_round.is_some());

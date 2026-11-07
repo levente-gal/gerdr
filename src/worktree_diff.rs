@@ -1072,11 +1072,19 @@ impl WorktreeDiff {
             }
             return;
         }
-        // Going to its agent already: these would only refuse.
-        let fixing = |d: &DocOf| d.locked == Some(crate::doc_review::FIXING_THEM);
+        // Going to its agent already, or over: these would only refuse.
+        let fixing = |d: &DocOf| {
+            matches!(
+                d.locked,
+                Some(crate::doc_review::FIXING_THEM | crate::doc_review::FIXES_MADE)
+            )
+        };
         if self.fix_plan() && self.doc.as_ref().is_some_and(fixing) {
             return;
         }
+        // Its agent stopped with fixes left: they go on, not back to be planned.
+        let stopped = |d: &DocOf| d.state.starts_with(crate::doc_review::STOPPED);
+        let stopped = self.fix_plan() && self.doc.as_ref().is_some_and(stopped);
         let go = match self.fix_plan() {
             true => Hint {
                 label: "Make fixes".to_owned(),
@@ -1084,11 +1092,13 @@ impl WorktreeDiff {
             },
             false => hint(ReposButton::Approve, APPROVE_KEY),
         };
-        view.title_buttons.extend([
-            hint(ReposButton::CommentFile, "Shift+C"),
-            hint(ReposButton::SendBack, SEND_BACK_KEY),
-            go,
-        ]);
+        view.title_buttons
+            .push(hint(ReposButton::CommentFile, "Shift+C"));
+        if !stopped {
+            view.title_buttons
+                .push(hint(ReposButton::SendBack, SEND_BACK_KEY));
+        }
+        view.title_buttons.push(go);
     }
 
     /// A feature's buttons as it stands, with their keys.

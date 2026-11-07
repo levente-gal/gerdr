@@ -443,6 +443,26 @@ pub fn left(log: &str, n: u32, items: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// Build log `log` with round `n`'s boxes unticked, as its fixes are sent
+/// again: it is over only once the agent ticks each anew. What it wrote
+/// after a box stays.
+pub fn untick(log: &str, n: u32) -> String {
+    let own = format!("## {}", heading(n));
+    let mut inside = false;
+    let out: Vec<String> = (log.lines())
+        .map(|line| {
+            if line.starts_with("# ") || line.starts_with("## ") {
+                inside = line.trim() == own;
+            }
+            match artifacts::checkbox(line.trim_start()) {
+                Some(mark) if inside && mark != "[ ]" => line.replacen(mark, "[ ]", 1),
+                _ => line.to_owned(),
+            }
+        })
+        .collect();
+    format!("{}\n", out.join("\n"))
+}
+
 /// Build log `log` without the unticked boxes its agent added under
 /// `## Milestones` past the plan's `planned`: the round's own section has
 /// the fixes, and those would hold Build up as milestones never to be built.
@@ -640,6 +660,20 @@ pub fn plan_next(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_round_sent_again_is_unticked_and_not_over() {
+        let log = "## Milestones\n\n- [x] Build it\n\n## Fix round 2\n\n- [x] `a.rs:3` committed 1a2b\n- [X] Second\n- [ ] Third\n\n## Fix round 3\n\n- [x] Other\n";
+        let items = ["`a.rs:3`", "Second", "Third"].map(str::to_owned);
+        assert_eq!(left(log, 2, &items), ["Third"]);
+        let again = untick(log, 2);
+        assert_eq!(left(&again, 2, &items), items);
+        // What the agent wrote stays, and other sections are as they were.
+        assert!(again.contains("- [ ] `a.rs:3` committed 1a2b"));
+        assert!(again.contains("- [x] Build it") && again.contains("- [x] Other"));
+        // Its boxes stand as they are, so nothing is added.
+        assert_eq!(with_items(&again, 2, &items), again);
+    }
 
     #[test]
     fn a_rounds_label_says_who_asked() {

@@ -1449,6 +1449,9 @@ pub enum PanelOutcome {
     ReviewFixPlan,
     /// The user approved the fix plan: the agent makes the fixes.
     MakeFixes,
+    /// The fixes of the last round, over, go once more, unticked
+    /// (`Gerdr::resend_fixes`).
+    ResendFixes,
     /// Tell the agent again to write the fix plan: it stopped without one.
     AskFixPlan,
     /// Drop the open fix plan, after asking.
@@ -3077,6 +3080,7 @@ fn action_hint(action: &PanelOutcome) -> &'static str {
         PanelOutcome::FixAllFindings => "fix all open",
         PanelOutcome::ReviewFixPlan => "review fix plan",
         PanelOutcome::MakeFixes => "make fixes",
+        PanelOutcome::ResendFixes => "send the fixes again",
         PanelOutcome::AskFixPlan => "ask again",
         PanelOutcome::EditCommands(_) => "edit commands",
         PanelOutcome::CodeReview => "review code",
@@ -4137,8 +4141,7 @@ impl FeaturePanel {
                 if ctrl
                     && (self.focus == TabArea::Stages
                         || self.focus == TabArea::Findings && criteria > 0)
-                    && (fix_round_on(feature, stage).is_some_and(FixRound::can_make_fixes)
-                        || makes_fixes_again(feature, stage)) =>
+                    && fix_round_on(feature, stage).is_some_and(FixRound::can_make_fixes) =>
             {
                 return Some(PanelOutcome::MakeFixes);
             }
@@ -4378,9 +4381,27 @@ fn last_round_on(feature: &Feature, stage: Stage) -> Option<&FixRound> {
 }
 
 /// Whether `stage`'s page can send the fixes of the last round again: only
-/// where the feature is at.
-fn makes_fixes_again(feature: &Feature, stage: Stage) -> bool {
-    last_round_on(feature, stage).is_some() && feature.current() == Some(stage)
+/// where the feature is at, and only with nothing new of the stage's own to
+/// send, as that is what goes on then, not the old round.
+fn sends_round_again(feature: &Feature, stage: Stage, ctx: RowCtx) -> bool {
+    last_round_on(feature, stage).is_some()
+        && feature.current() == Some(stage)
+        && !has_new_fixes(feature, stage, ctx)
+}
+
+/// Whether `stage` of `feature` has fixes of its own waiting to be sent, or
+/// to be decided: findings, failed checks or criteria, comments in the diff.
+fn has_new_fixes(feature: &Feature, stage: Stage, ctx: RowCtx) -> bool {
+    match stage {
+        Stage::AiReview => (feature.review.as_ref())
+            .is_some_and(|r| r.count(FindingState::Open) > 0 || r.count(FindingState::Fix) > 0),
+        Stage::Verify => {
+            (feature.verify.as_ref()).is_some_and(|v| feature::verify::to_fix(v).is_some())
+        }
+        Stage::CodeReview => ctx.comments > 0,
+        Stage::ManualTest => ctx.manual.failed > ctx.manual.sent,
+        _ => false,
+    }
 }
 
 /// Whether `stage`'s page opens a fix plan already sent: its Enter does
@@ -4514,10 +4535,14 @@ fn writers_page_actions(
             button("Open", ButtonStyle::Plain),
             PanelOutcome::ReviewFixPlan,
         ));
-        if makes_fixes_again(feature, stage) {
+        if let Some(round) =
+            last_round_on(feature, stage).filter(|_| sends_round_again(feature, stage, ctx))
+        {
+            let label =
+                feature::fix_round::label(round.n, &feature.verify_fixes, &feature.fix_asked);
             out.push((
-                button("Make fixes again", ButtonStyle::Plain),
-                PanelOutcome::MakeFixes,
+                button(&format!("Send {label} again"), ButtonStyle::Quiet),
+                PanelOutcome::ResendFixes,
             ));
         }
     }
@@ -7282,6 +7307,7 @@ impl Gerdr {
             PanelOutcome::PlanFixes => self.plan_verify_fixes(&project, &slug),
             PanelOutcome::ReviewFixPlan => self.open_doc_tab(&project, &slug, DocFile::FixPlan),
             PanelOutcome::MakeFixes => self.make_fixes_now(&project, &slug),
+            PanelOutcome::ResendFixes => self.resend_fixes(&project, &slug),
             PanelOutcome::AskFixPlan => self.ask_fix_plan(&project, &slug),
             PanelOutcome::DropFixPlan => self.ask_drop_fix_plan(project.clone(), slug.clone()),
             PanelOutcome::EditCommands(tab) => {
@@ -10113,7 +10139,7 @@ fn last_round_card(round: &FixRound, actions: &[(PageButton, PanelOutcome)]) -> 
         ),
         buttons: (actions.iter().enumerate())
             .filter(|(_, (_, o))| {
-                matches!(o, PanelOutcome::ReviewFixPlan | PanelOutcome::MakeFixes)
+                matches!(o, PanelOutcome::ReviewFixPlan | PanelOutcome::ResendFixes)
             })
             .map(|(i, _)| i)
             .collect(),
@@ -11390,10 +11416,6 @@ fn writers_tab_hints(
                 if round.can_drop() {
                     hints.push(hint(START_OVER_KEY, "drop plan\u{2026}"));
                 }
-            }
-            // Manual test's has its own use for it.
-            if makes_fixes_again(feature, stage) && !tries_criteria(feature, stage) && !going {
-                hints.push(hint("Ctrl+Enter", "make fixes again"));
             }
             if approves_doc(feature, stage, ctx) {
                 hints.push(hint("Ctrl+Enter", "approve"));
@@ -14724,7 +14746,8 @@ pub(crate) mod tests {
                 vec!["Open".to_owned()]
             ))
         );
-        // Every fix ticked: read, or sent again if one turned out not made.
+        // Every fix ticked: read. With failures still to send, those go, not
+        // the old round.
         let before = page_enter(&f, Stage::Verify, RowCtx::default());
         let mut over = f.clone();
         over.last_fix_round = fixing.fix_round.clone();
@@ -14732,13 +14755,23 @@ pub(crate) mod tests {
             held(&over, Stage::Verify),
             Some((
                 "Verify failures \u{b7} fixes made".to_owned(),
-                vec!["Open".to_owned(), "Make fixes again".to_owned()]
+                vec!["Open".to_owned()]
             ))
         );
+        // With nothing new it can go again, by its name, if one turned out
+        // not made.
+        let mut quiet = over.clone();
+        quiet.verify.as_mut().unwrap().passed = Some(true);
+        let (_, labels) = held(&quiet, Stage::Verify).unwrap();
+        assert_eq!(labels, ["Open", "Send Review 1 again"]);
         // Enter still does what the stage waits for.
         assert_eq!(page_enter(&over, Stage::Verify, RowCtx::default()), before);
-        // Each has its key.
-        let slugs = vec![over.slug.clone()];
+        assert_ne!(
+            page_enter(&quiet, Stage::Verify, RowCtx::default()),
+            Some(PanelOutcome::ResendFixes)
+        );
+        // No key sends it again.
+        let slugs = vec![quiet.slug.clone()];
         let mut panel = FeaturePanel {
             slug: over.slug.clone(),
             ..FeaturePanel::default()
@@ -14748,12 +14781,19 @@ pub(crate) mod tests {
             ..ModifiersState::default()
         };
         let none = RowCtx::default();
-        assert_eq!(
-            panel.key(&ctrl, Keysym::Return, &over, &slugs, none, &[], &[], &[]),
-            Some(PanelOutcome::MakeFixes)
-        );
-        let hints = tab_view(&panel, &over, &slugs, &PanelState::default(), 2_000).hints;
-        assert!(hints.contains(&("Ctrl+Enter".into(), "make fixes again".into())));
+        for f in [&over, &quiet] {
+            let pressed = panel.key(&ctrl, Keysym::Return, f, &slugs, none, &[], &[], &[]);
+            assert!(
+                !matches!(
+                    pressed,
+                    Some(PanelOutcome::MakeFixes | PanelOutcome::ResendFixes)
+                ),
+                "{pressed:?}"
+            );
+            let hints = tab_view(&panel, f, &slugs, &PanelState::default(), 2_000).hints;
+            let again = hints.iter().any(|(_, said)| said.contains("again"));
+            assert!(!again, "{hints:?}");
+        }
         // Past its stage it is only read.
         let at = over.current().unwrap();
         let mut past = over.clone();
@@ -14768,9 +14808,10 @@ pub(crate) mod tests {
         );
         assert_eq!(held(&past, at), None);
         // Back on a stage before the one that asked, it comes along.
-        let mut back = over.clone();
+        let mut back = quiet.clone();
         back.last_fix_round.as_mut().unwrap().stage = Stage::Ship;
-        assert!(makes_fixes_again(&back, at));
+        assert!(sends_round_again(&back, at, none));
+        assert!(!sends_round_again(&over, at, none), "failures to send");
         // A round open has the card to itself.
         let mut both = fixing.clone();
         both.last_fix_round = fixing.fix_round.clone();
