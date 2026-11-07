@@ -1396,6 +1396,8 @@ impl Gerdr {
             if let Some(counts) = self.code_reviews.get_mut(&key) {
                 counts.comments = own.own();
             }
+            // With no diff open its file is what counts them.
+            self.probe_feature(project, slug);
         }
         self.show_success("Comment added, to go to Build when you plan fixes".into());
     }
@@ -1491,11 +1493,12 @@ impl Gerdr {
         if let Some(why) = stage_refusal(stage) {
             return self.show_warning(why);
         }
+        // What is kept to give back must be all that was sent. Saved now: once
+        // the round is open the review on the page is no longer `wd`.
+        self.feature_save_review();
         if !self.send_to_build(&project, &slug, Stage::CodeReview, "review comments", text) {
             return;
         }
-        // What is kept to give back must be all that was sent.
-        self.feature_save_review();
         if let Some(copy) = self.keep_comments(&project, &slug) {
             let back = crate::feature::fix_round::GiveBack::Comments { copy };
             self.fix_round_gives_back(&project, &slug, back);
@@ -1504,13 +1507,38 @@ impl Gerdr {
             tracing::warn!("deleting {}: {err}", path.display());
             self.toast(format!("Couldn't delete the review: {err}"), Level::Error);
         }
-        if let Some(wd) = self.wd_mut() {
+        self.sent_comments_gone(&project, &slug);
+        self.close_feature_diff(false);
+        self.show_build_agent(&project, &slug);
+    }
+
+    /// Feature `slug`'s comments went to Build: they are gone from its diff
+    /// wherever that is, the one on its page included, which `wd` can't reach
+    /// with the round open, and from what counts them.
+    fn sent_comments_gone(&mut self, project: &str, slug: &str) {
+        let of = |wd: &mut crate::worktree_diff::WorktreeDiff| {
+            (wd.feature.as_ref()).is_some_and(|fe| fe.project == project && fe.slug == slug)
+        };
+        let popup = self.repos.worktree.as_mut();
+        let page = (self.features.panel.as_mut()).and_then(|panel| panel.review.as_deref_mut());
+        let open = (popup.into_iter().chain(page)).filter_map(|wd| of(wd).then_some(wd));
+        for wd in open {
             wd.diff.review.comments.retain(|c| c.flag.is_some());
             wd.diff.review_dirty = false;
         }
-        self.code_review_counted();
-        self.close_feature_diff(false);
-        self.show_build_agent(&project, &slug);
+        self.notes_are(project, slug, Vec::new());
+    }
+
+    /// Whether a diff of feature `slug` is open, over the app or on its page:
+    /// only then does `code_reviews` know more than its file does.
+    pub(crate) fn diff_open_of(&self, project: &str, slug: &str) -> bool {
+        let of = |wd: &crate::worktree_diff::WorktreeDiff| {
+            (wd.feature.as_ref()).is_some_and(|fe| fe.project == project && fe.slug == slug)
+        };
+        self.repos.worktree.as_ref().is_some_and(of)
+            || (self.features.panel.as_ref())
+                .and_then(|panel| panel.review.as_deref())
+                .is_some_and(of)
     }
 
     /// Save the user's comments in the open code review, if they changed:

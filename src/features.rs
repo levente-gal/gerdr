@@ -5459,9 +5459,12 @@ impl Gerdr {
         let last = (self.features.probes.get(&key)).and_then(|p| p.last.as_ref());
         let docs = last.map(|p| &p.docs);
         let written = Stage::ALL.map(|stage| docs.is_some_and(|d| d.written.contains(&stage)));
-        // The open diff's may not be saved yet, and is gone after a restart.
-        let comments = (docs.map_or(0, |d| d.comments))
-            .max(self.code_reviews.get(&key).map_or(0, |c| c.comments));
+        // The open diff's may not be saved yet. Its count means nothing once
+        // it is closed: the file says, and a press looks again (`findings_go`).
+        let open = (self.diff_open_of(&feature.project, &feature.slug))
+            .then(|| self.code_reviews.get(&key))
+            .flatten();
+        let comments = (docs.map_or(0, |d| d.comments)).max(open.map_or(0, |c| c.comments));
         RowCtx {
             checks,
             criteria,
@@ -10838,6 +10841,12 @@ fn review_sections(
             )),
             _ => {}
         }
+        // Make fixes is gone: not with no word of why.
+        if sends_findings(feature, stage, state.ctx) == Some(PanelOutcome::SendFixes) {
+            let findings = feature.review.iter().flat_map(|r| &r.findings);
+            let why = review_import::plan_why(findings, state.ctx.comments);
+            notes.extend(why.map(|why| line(why, CheckTone::Note)));
+        }
         sections.push(lines(&label, notes));
         sections.extend(cards.into_iter().map(|card| {
             PageSection::Finding(match card {
@@ -15211,7 +15220,31 @@ pub(crate) mod tests {
                 .collect();
             assert!(!shown.contains(&"Make fixes".to_owned()), "{shown:?}");
             assert!(shown.contains(&"Plan fixes".to_owned()), "{shown:?}");
+            // The page says why.
+            let state = PanelState {
+                ctx,
+                ..PanelState::default()
+            };
+            let actions = page_actions(f, Stage::AiReview, ctx);
+            let sections =
+                review_sections(f, Stage::AiReview, StageMark::Current, &state, &actions);
+            let why = sections.iter().find_map(|s| match s {
+                PageSection::Lines { lines, .. } => (lines.iter())
+                    .find(|l| l.text.starts_with("A plan comes first"))
+                    .map(|l| l.text.clone()),
+                _ => None,
+            });
+            assert!(why.is_some(), "{sections:?}");
         }
+        // With no word of the user's, nothing to say.
+        let state = PanelState::default();
+        let actions = page_actions(&fix, Stage::AiReview, none);
+        let sections = review_sections(&fix, Stage::AiReview, StageMark::Current, &state, &actions);
+        let says = |s: &PageSection| {
+            matches!(s, PageSection::Lines { lines, .. }
+                if lines.iter().any(|l| l.text.starts_with("A plan comes first")))
+        };
+        assert!(!sections.iter().any(says));
         assert_eq!(review_line(&fix, None).as_deref(), Some("1 finding to fix"));
         let sent = reviewing(&[S::Sent, S::Sent], true);
         assert_eq!(
