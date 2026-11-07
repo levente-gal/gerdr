@@ -315,7 +315,9 @@ impl StatsPanel {
             && view.detail.is_none();
         let note = match (self.scope.detail.is_some(), self.scope.tab) {
             // Kept, but not in the index yet: it is drawn from the files.
-            _ if nothing && view.building => "Building the stats from the AI work kept…",
+            _ if view.building && (nothing || self.scope.detail.is_some()) => {
+                "Building the stats from the AI work kept…"
+            }
             (true, _) => "No AI work kept for this feature yet",
             (false, _) if nothing => "No AI work kept yet",
             (false, Tab::Features) => "No features with AI work kept yet",
@@ -1274,6 +1276,9 @@ impl Gerdr {
             tracing::warn!("reading the AI work's stats: {err}");
         }
         let page = self.ai_stats_page();
+        // The index is made but still being filled: what it lacks is on the
+        // way, not missing.
+        let filling = self.ai_work.busy.is_some();
         // Closed since, or moved on to another scope: what was read is of
         // no use, and a newer read is under way for the scope shown.
         let Some(panel) = self.ai_stats.as_mut() else {
@@ -1283,7 +1288,11 @@ impl Gerdr {
             return;
         }
         panel.reading = false;
-        panel.view = Some(result.map(|view| View { scope, ..view }));
+        panel.view = Some(result.map(|view| View {
+            scope,
+            building: view.building || filling,
+            ..view
+        }));
         panel.settle(panel.selected, true, page, now_secs());
         // Enter pressed while they were to come acts on them now.
         if std::mem::take(&mut panel.enter_queued)
