@@ -97,9 +97,10 @@ impl Overlay {
         Self::Inbox,
         Self::Scrollback,
         Self::Switcher,
-        // In their tabs, under every popup.
-        Self::Features,
+        // In their tabs, under every popup: a feature's code review over the
+        // tab it is laid into.
         Self::Doc,
+        Self::Features,
     ];
 
     /// Whether it is a modal dialog: over all but the tooltip, asking
@@ -224,7 +225,7 @@ impl Gerdr {
             Overlay::Help => self.prefix_armed || self.help_pinned,
             Overlay::Tasks => self.tasks_panel.is_some(),
             Overlay::Features => self.features.panel.is_some(),
-            Overlay::Doc => self.review_tab().is_some(),
+            Overlay::Doc => self.review_tab().is_some() || self.inline_wd().is_some(),
             Overlay::ProjectMenu => self.project_menu.is_some(),
             Overlay::Worktrees => self.worktrees.is_open(),
             Overlay::Repos => self.repos.is_open(),

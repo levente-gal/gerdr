@@ -40,6 +40,7 @@ mod feature_review;
 mod feature_sandbox;
 mod feature_workspace;
 mod features;
+mod file_tree;
 mod find;
 mod finding_dialog;
 mod frecency;
@@ -6764,7 +6765,7 @@ impl Gerdr {
             sidebar_width: self.sidebar_width,
             size: self.output_size(),
             repos_rect: self.repos_rect(),
-            doc_tab_rect: self.content_rect(),
+            doc_tab_rect: self.review_area(),
             scale: self.scale(),
         }
     }

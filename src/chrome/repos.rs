@@ -51,6 +51,12 @@ const HEADER_GAP: i32 = 12;
 pub const REPOS_TREE_SHARE: f64 = 0.42;
 pub const REPOS_TREE_SHARE_MIN: f64 = 0.2;
 pub const REPOS_TREE_SHARE_MAX: f64 = 0.8;
+/// The file list's share of a feature's code review, whose diff wants the
+/// room more than the repositories panel's does.
+pub const REVIEW_TREE_SHARE: f64 = 0.25;
+/// How wide a feature's code review must be to have its file list beside
+/// the diff, logical pixels.
+pub const REVIEW_TREE_MIN_PANEL: i32 = 640;
 const REPOS_TREE_MIN: i32 = 300;
 pub const SPLITTER_GRAB: i32 = 5;
 /// The room above and below the tree's lines and the detail's, and beside
@@ -242,6 +248,9 @@ pub struct ReposView {
     /// The diff alone across the panel, `title` its heading: no tree,
     /// branch picker, tabs, field or footer (a worktree's diff).
     pub diff_only: bool,
+    /// With `diff_only`: the tree beside the diff all the same, its lines
+    /// and toolbar (a feature's code review).
+    pub diff_tree: bool,
     /// Laid flat into a tab rather than floating over the app: no shadow,
     /// border or rounded corners.
     pub flat: bool,
@@ -299,6 +308,7 @@ impl ReposView {
             tree_share: 0.0,
             grouping: Default::default(),
             diff_only: true,
+            diff_tree: false,
             flat: false,
             detail_share: 1.0,
             modes: None,
@@ -1499,6 +1509,24 @@ pub fn diff_only_cols(panel: Rect) -> usize {
     detail_cols(panel.size.w)
 }
 
+/// How many characters a review comment's row holds with a diff and its
+/// file list across `panel`, the list taking `share`; none (0): the diff
+/// alone.
+pub fn diff_tree_cols(panel: Rect, share: f64) -> usize {
+    match share > 0.0 {
+        true => repos_detail_cols(panel, share),
+        false => diff_only_cols(panel),
+    }
+}
+
+/// How many lines the file list beside a diff shows at once in `panel`:
+/// with the footer's rows all there, as `diff_only_page`.
+pub fn diff_tree_page(panel: Rect, density: Density) -> usize {
+    let middle = panel.size.h - REPOS_HEADER - footer_h(REPOS_FOOTER_ROWS);
+    let tree = (middle - REPOS_DETAIL_TITLE - 2 * REPOS_PAD) / repos_row(density);
+    tree.max(1) as usize
+}
+
 /// The room between the line numbers before a diff line, and between
 /// them and its text.
 const GUTTER_GAP: i32 = 6;
@@ -1902,6 +1930,7 @@ fn parts(view: &ReposView, panel: Rect) -> Parts {
     let header = Rectangle::new((x, top).into(), (w, REPOS_HEADER).into());
     // The diff alone: none of the rest, all of the panel under the header.
     let only = view.diff_only;
+    let no_tree = only && !view.diff_tree;
     // The branch picker at the header's left, no more than a third of it.
     let pw = picker_width(&view.branch.label).min(inner_w / 3).max(1);
     let branch = Rectangle::new(
@@ -1941,7 +1970,7 @@ fn parts(view: &ReposView, panel: Rect) -> Parts {
     let middle_h = (y - middle_y).max(0);
 
     // The tree and its lines, short of its scrollbar.
-    let tree_w = if only {
+    let tree_w = if no_tree {
         0
     } else {
         tree_width(w, view.tree_share)
@@ -2033,7 +2062,7 @@ fn parts(view: &ReposView, panel: Rect) -> Parts {
     });
     let splitter = Rectangle::new(
         (x + tree_w - SPLITTER_GRAB, middle_y).into(),
-        (if only { 0 } else { 2 * SPLITTER_GRAB }, middle_h).into(),
+        (if no_tree { 0 } else { 2 * SPLITTER_GRAB }, middle_h).into(),
     );
     let tab_y = middle_y + (REPOS_DETAIL_TITLE - ROW_BUTTON) / 2;
     let tabs: &[DetailTab] = match only {
@@ -2342,7 +2371,11 @@ fn parts(view: &ReposView, panel: Rect) -> Parts {
             panel,
             header,
             tree,
-            tree_tools: if only { Vec::new() } else { tree_tools(tree) },
+            tree_tools: if no_tree {
+                Vec::new()
+            } else {
+                tree_tools(tree)
+            },
             lines,
             tree_list,
             marks,
@@ -3002,10 +3035,11 @@ impl Painter {
             .iter()
             .map(|&(g, r)| (g, shift(r)))
             .collect();
-        if !only {
+        let no_tree = only && !view.diff_tree;
+        if !no_tree {
             self.tree_title(&mut c, view, tree, &tools, scale, p);
         }
-        if !only && view.lines.is_empty() && !view.empty.is_empty() {
+        if !no_tree && view.lines.is_empty() && !view.empty.is_empty() {
             let first = Rectangle::new(
                 (
                     tree.loc.x + REPOS_PAD + REPOS_LINE_INSET,
@@ -3031,7 +3065,7 @@ impl Painter {
             );
         }
         let detail = shift(layout.detail);
-        if !only {
+        if !no_tree {
             c.fill(
                 px(detail.loc.x),
                 px(detail.loc.y),
@@ -5317,6 +5351,7 @@ fn frame_view(view: &ReposView) -> ReposView {
         tree_share: view.tree_share,
         grouping: view.grouping,
         diff_only: view.diff_only,
+        diff_tree: view.diff_tree,
         flat: view.flat,
         detail_share: view.detail_share,
         modes: view.modes.clone(),
@@ -5918,6 +5953,7 @@ mod tests {
             density: DENSITY,
             tree_share: REPOS_TREE_SHARE,
             diff_only: false,
+            diff_tree: false,
             flat: false,
         }
     }

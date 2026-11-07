@@ -27,7 +27,7 @@ use super::{code_mark, eye, flask, magnifier, plan_review_mark, ship_arrow, spar
 use crate::text_field::Line;
 use crate::{
     agent_icons::AgentIcon,
-    feature::Stage,
+    feature::{Stage, page::Stat},
     md_blocks::{DocBlock, ItemMark},
 };
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
@@ -339,9 +339,9 @@ pub struct FeatureRepoRow {
     pub buttons: Vec<&'static str>,
     /// Whether it shows the button taking it out of the feature.
     pub remove: bool,
-    /// Lines added and removed since its base, uncommitted changes
-    /// included, once read (`git diff --numstat`).
-    pub stat: Option<(usize, usize)>,
+    /// Files changed and lines added and removed since its base,
+    /// uncommitted changes included, once read (`page::stat`).
+    pub stat: Option<Stat>,
 }
 
 /// How a line of the Ship check reads.
@@ -750,6 +750,11 @@ pub struct FeatureTabView {
     /// Groups of rows not read yet, or that couldn't be: `expanded` only.
     pub repo_notes: Vec<RepoNote>,
     pub page: StagePage,
+    /// A feature's code review takes the tab under the rail: no strip,
+    /// columns or footer of its own.
+    pub review_page: bool,
+    /// That review has the keys: the rail shows no focus.
+    pub review_keys: bool,
     pub activity: Vec<ActivityRow>,
     /// How far each column is scrolled down, in logical pixels, indexed
     /// by `TabColumn`.
@@ -819,6 +824,8 @@ pub enum FeatureTabHit {
 /// not scrolled: `FeatureTabView::scroll` moves it up.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FeatureTabLayout {
+    /// With `FeatureTabView::review_page`: all under the rail's rule.
+    pub review: Option<Rect>,
     pub frame: Rect,
     pub title: Rect,
     pub sub: Rect,
@@ -1466,9 +1473,8 @@ fn break_long(line: String, size: f32, width: i32) -> Vec<String> {
     lines
 }
 
-/// The room left between a repository row's name and its line stat,
-/// between the stat's two counts, and the least of the name the stat
-/// leaves showing.
+/// The room left between a repository row's name and its stat, between
+/// the stat's counts, and the least of the name the stat leaves showing.
 const STAT_GAP: i32 = 8;
 const STAT_SPACE: i32 = 5;
 const STAT_NAME_MIN: i32 = 40;
@@ -2129,17 +2135,27 @@ fn repo_stack(
     }
 }
 
-/// How wide a repository's lines changed are, or nothing for none.
-fn stat_width(stat: Option<(usize, usize)>) -> i32 {
-    let Some((added, removed)) = stat else {
+/// A repository's `stat` as words: its files, the lines added, the lines
+/// removed, each left out when 0.
+fn stat_parts(stat: Stat) -> [Option<String>; 3] {
+    let files = match stat.files {
+        1 => "1 file".to_owned(),
+        n => format!("{n} files"),
+    };
+    [
+        (stat.files > 0).then_some(files),
+        (stat.added > 0).then(|| format!("+{}", stat.added)),
+        (stat.removed > 0).then(|| format!("\u{2212}{}", stat.removed)),
+    ]
+}
+
+/// How wide a repository's stat is, or nothing for none.
+fn stat_width(stat: Option<Stat>) -> i32 {
+    let Some(stat) = stat else {
         return 0;
     };
-    let parts = [
-        (added > 0).then(|| format!("+{added}")),
-        (removed > 0).then(|| format!("\u{2212}{removed}")),
-    ];
-    let parts = parts.iter().flatten();
-    let widths = parts.map(|t| width_of(t, DETAIL_FONT_SIZE).ceil() as i32);
+    let parts = stat_parts(stat);
+    let widths = (parts.iter().flatten()).map(|t| width_of(t, DETAIL_FONT_SIZE).ceil() as i32);
     let widths: Vec<i32> = widths.collect();
     widths.iter().sum::<i32>() + STAT_SPACE * (widths.len() as i32 - 1).max(0)
 }
@@ -2614,8 +2630,15 @@ pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayou
             Rectangle::new((left, rail_top).into(), (next - left, rail_h).into())
         })
         .collect();
-    // Under the rail's rule, the columns.
-    let mut body_top = rail_top + rail_h + RAIL_GAP + 1 + COLUMN_GAP;
+    // Under the rail's rule, the columns; or across it all, the review.
+    let rule_end = rail_top + rail_h + RAIL_GAP + 1;
+    let review = view.review_page.then(|| {
+        Rectangle::new(
+            (frame.loc.x, rule_end).into(),
+            (width, (frame.loc.y + frame.size.h - rule_end).max(0)).into(),
+        )
+    });
+    let mut body_top = rule_end + COLUMN_GAP;
 
     let hints_h = measured_footer_height(&hint_strs(&view.hints), width);
     let hints = Rectangle::new(
@@ -2628,7 +2651,8 @@ pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayou
     let mut repo_buttons = Vec::new();
     let mut repo_removes = Vec::new();
     let mut more_repos = Vec::new();
-    let strip = Rectangle::new((x, body_top).into(), (inner, CHIP_ROW).into());
+    let strip_h = if view.review_page { 0 } else { CHIP_ROW };
+    let strip = Rectangle::new((x, body_top).into(), (inner, strip_h).into());
     body_top += CHIP_ROW + COLUMN_GAP;
     let chip_y = strip.loc.y + (CHIP_ROW - ROW_BUTTON) / 2;
     let label_w = width_of(REPOS_LABEL, SMALL_FONT_SIZE).ceil() as i32;
@@ -2638,9 +2662,9 @@ pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayou
     });
     let repos_toggle = Rectangle::new(
         (right - toggle_w, chip_y).into(),
-        (toggle_w, ROW_BUTTON).into(),
+        (if view.review_page { 0 } else { toggle_w }, ROW_BUTTON).into(),
     );
-    if !view.expanded && view.repos_error.is_none() {
+    if !view.expanded && view.repos_error.is_none() && !view.review_page {
         // The chips that fit, from the selected one if it would be past
         // them.
         let start = x + label_w + REPOS_LABEL_GAP;
@@ -2712,7 +2736,7 @@ pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayou
     let bottom = hints.loc.y - 4;
     // Unfolded, the rows' card goes across the tab, as tall as they need
     // up to its share of the body, pushing the other columns down.
-    let repos_card = view.expanded.then(|| {
+    let repos_card = (view.expanded && !view.review_page).then(|| {
         let mut dry = Stack {
             x: 0,
             w: (inner - 2 * CARD_PAD).max(1),
@@ -2740,11 +2764,13 @@ pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayou
     let page_x = x;
     let mut page_w = inner;
     columns[TabColumn::Repos as usize] = repos_card;
-    if width >= ACTIVITY_BELOW {
-        columns[TabColumn::Activity as usize] = Some(card(right - ACTIVITY_W, ACTIVITY_W));
-        page_w -= ACTIVITY_W + COLUMN_GAP;
+    if !view.review_page {
+        if width >= ACTIVITY_BELOW {
+            columns[TabColumn::Activity as usize] = Some(card(right - ACTIVITY_W, ACTIVITY_W));
+            page_w -= ACTIVITY_W + COLUMN_GAP;
+        }
+        columns[TabColumn::Page as usize] = Some(card(page_x, page_w.max(1)));
     }
-    columns[TabColumn::Page as usize] = Some(card(page_x, page_w.max(1)));
 
     let mut pieces: [Vec<(Rect, Piece)>; 3] = Default::default();
     let mut content = [0; 3];
@@ -2791,6 +2817,7 @@ pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayou
     }
 
     FeatureTabLayout {
+        review,
         frame,
         title,
         sub,
@@ -3121,6 +3148,8 @@ fn slice_view(view: &FeatureTabView, slice: TabSlice) -> FeatureTabView {
         repos_error: None,
         repo: 0,
         focus: TabArea::Stages,
+        review_page: view.review_page,
+        review_keys: view.review_keys,
         expanded: view.expanded,
         more: 0,
         picked: None,
@@ -3796,7 +3825,7 @@ impl Painter {
             let hovered = view.hover == Some(FeatureTabHit::Node(i));
             let spot = circle(*slot);
             if node.selected {
-                let ring = if view.focus == TabArea::Stages {
+                let ring = if view.focus == TabArea::Stages && !view.review_keys {
                     p.accent
                 } else {
                     p.border
@@ -4047,6 +4076,10 @@ impl Painter {
                 color,
             )
         };
+        // The review over the tab has no strip.
+        if view.review_page {
+            return;
+        }
         let focused = view.focus == TabArea::Repos;
         let label = if focused { p.accent } else { p.muted };
         line(c, REPOS_LABEL, l.repos_label, label);
@@ -4665,27 +4698,22 @@ impl Painter {
         }
     }
 
-    /// A repository's `stat` as "+A −R" (added in the success
-    /// colour, removed in the error colour, a side that is 0 left out),
-    /// from the right of `rect` if it fits in it: where it starts (in
-    /// logical pixels), or `None` when nothing is drawn.
+    /// A repository's `stat` as "F files +A −R" (files muted, added in
+    /// the success colour, removed in the error colour, a count that is 0
+    /// left out), from the right of `rect` if it fits in it: where it
+    /// starts (in logical pixels), or `None` when nothing is drawn.
     fn repo_stat(
         &self,
         c: &mut Canvas,
-        stat: Option<(usize, usize)>,
+        stat: Option<Stat>,
         rect: Rect,
         scale: f64,
         p: &Palette,
     ) -> Option<i32> {
-        let (added, removed) = stat?;
-        let parts: Vec<(String, Rgb)> = [
-            (added, format!("+{added}"), p.success),
-            (removed, format!("\u{2212}{removed}"), p.error),
-        ]
-        .into_iter()
-        .filter(|(n, ..)| *n > 0)
-        .map(|(_, text, color)| (text, color))
-        .collect();
+        let parts: Vec<(String, Rgb)> = (stat_parts(stat?).into_iter())
+            .zip([p.muted, p.success, p.error])
+            .filter_map(|(text, color)| Some((text?, color)))
+            .collect();
         if parts.is_empty() {
             return None;
         }
@@ -5466,6 +5494,32 @@ mod tests {
     /// of two features.
     fn tab_view() -> FeatureTabView {
         crate::chrome::golden::feature_tab()
+    }
+
+    #[test]
+    fn a_review_on_the_page_takes_all_under_the_rail() {
+        let mut view = super::super::golden::feature_tab();
+        let plain = tab_at(&view, 1180);
+        assert!(plain.review.is_none());
+        view.review_page = true;
+        view.hints.clear();
+        let l = tab_at(&view, 1180);
+        let review = l.review.expect("the review's place");
+        // Under the rail, over all the rest of the tab.
+        let rail_end = l.nodes.iter().map(|n| n.loc.y + n.size.h).max().unwrap();
+        assert!(review.loc.y >= rail_end);
+        assert_eq!(review.size.w, 1180);
+        assert_eq!(review.loc.y + review.size.h, l.frame.loc.y + l.frame.size.h);
+        // No columns, chips or toggle left to press under it.
+        assert!(l.columns.iter().all(Option::is_none));
+        assert_eq!(l.strip.size.h, 0);
+        assert_eq!(l.repos_toggle.size.w, 0);
+        assert!(l.repos.iter().all(|r| r.size.w == 0));
+        // The rail still works.
+        assert_eq!(
+            l.hit(&view, centre(l.nodes[2])),
+            Some(FeatureTabHit::Node(2))
+        );
     }
 
     fn tab_at(view: &FeatureTabView, w: i32) -> FeatureTabLayout {
@@ -6260,6 +6314,24 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A stat says only the counts it has, a lone file in the singular.
+    #[test]
+    fn the_stat_leaves_out_what_is_zero() {
+        let parts = |files, added, removed| {
+            let stat = Stat {
+                files,
+                added,
+                removed,
+            };
+            stat_parts(stat).into_iter().flatten().collect::<Vec<_>>()
+        };
+        assert_eq!(parts(3, 12, 4), ["3 files", "+12", "\u{2212}4"]);
+        assert_eq!(parts(1, 0, 0), ["1 file"]);
+        assert_eq!(parts(0, 0, 0), [""; 0]);
+        assert_eq!(stat_width(None), 0);
+        assert_eq!(stat_width(Some(Stat::default())), 0);
     }
 
     /// The line stat's colours read on the repositories' column, on a
