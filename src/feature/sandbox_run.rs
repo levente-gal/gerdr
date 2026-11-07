@@ -10,8 +10,10 @@
 //!
 //! A volume copies with its container paused, so the copy is what a crash at
 //! that moment would leave, which a database recovers from. `Paused` lets go
-//! however the copy ends. On a copy-on-write file system it takes under a
-//! second.
+//! however the copy ends, and notes what it paused in the sandbox's folder:
+//! a gerdr that dies meanwhile leaves main's containers paused, and
+//! `unpause_left` lets them go at the next start, stop or launch. On a
+//! copy-on-write file system it takes under a second.
 //!
 //! All of it can happen on another machine: `Host` says where. Its containers,
 //! files and processes are that machine's, as are the paths in `Job`.
@@ -967,6 +969,8 @@ fn start_into(
     }
     let engines = engines(job.host)?;
     job.host.make_dir(job.dir)?;
+    // Paused, main's containers would be left out of the copy.
+    unpause_left(job.host, job.dir)?;
     let containers = running_containers(job.host, &engines, job.stop)?;
     let stacks = sandbox::stacks_under(&containers, job.roots);
     run.not_copied = Vec::new();
@@ -1134,7 +1138,16 @@ pub fn running_containers(
 ) -> Result<Vec<sandbox::Container>, String> {
     let mut all = Vec::new();
     for &engine in engines {
-        let ids = tool(host, engine, &["ps", "-q"], stop)?;
+        // Podman leaves paused ones out unless asked, Docker lists them.
+        let ps = [
+            "ps",
+            "-q",
+            "--filter",
+            "status=running",
+            "--filter",
+            "status=paused",
+        ];
+        let ids = tool(host, engine, &ps, stop)?;
         let ids: Vec<&str> = ids.split_whitespace().collect();
         if ids.is_empty() {
             continue;
@@ -1230,21 +1243,55 @@ fn copies_bind(host: &Host, path: &Path) -> bool {
 }
 
 /// Unpauses its containers however a copy ends. If gerdr dies meanwhile they
-/// stay paused, until `docker unpause` (or `podman unpause`): nothing here looks for that, and the
-/// next start fails on pausing them again.
-struct Paused(Vec<String>, Host, Engine);
+/// stay paused, and main's app with them: the note `paused_file` holds lets
+/// `unpause_left` find them.
+struct Paused {
+    containers: Vec<String>,
+    host: Host,
+    engine: Engine,
+    dir: PathBuf,
+}
+
+/// A container a copy paused, as the sandbox's folder notes it.
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct PausedNote {
+    engine: Engine,
+    container: String,
+}
+
+/// Where sandbox folder `dir` notes the containers a copy has paused. Empty
+/// or missing: none.
+fn paused_file(dir: &Path) -> PathBuf {
+    dir.join("paused")
+}
 
 impl Paused {
     fn new(
         host: &Host,
         engine: Engine,
         containers: Vec<String>,
+        dir: &Path,
         stop: &AtomicBool,
     ) -> Result<Self, String> {
-        let mut paused = Self(Vec::new(), host.clone(), engine);
+        let notes: Vec<PausedNote> = (containers.iter())
+            .map(|container| PausedNote {
+                engine,
+                container: container.clone(),
+            })
+            .collect();
+        let text = serde_json::to_string(&notes).map_err(|e| e.to_string())?;
+        // Noted before pausing: a gerdr that dies between the two leaves
+        // nothing unnoted.
+        host.write(&paused_file(dir), &text)?;
+        let mut paused = Self {
+            containers: Vec::new(),
+            host: host.clone(),
+            engine,
+            dir: dir.to_owned(),
+        };
         for container in containers {
             tool(host, engine, &["pause", &container], stop)?;
-            paused.0.push(container);
+            paused.containers.push(container);
         }
         Ok(paused)
     }
@@ -1253,11 +1300,62 @@ impl Paused {
 impl Drop for Paused {
     fn drop(&mut self) {
         let never = AtomicBool::new(false);
-        for container in &self.0 {
-            if let Err(why) = tool(&self.1, self.2, &["unpause", container], &never) {
+        let mut all = true;
+        for container in &self.containers {
+            if let Err(why) = tool(&self.host, self.engine, &["unpause", container], &never) {
                 tracing::error!("couldn't unpause {container}: {why}");
+                all = false;
             }
         }
+        // What didn't unpause stays noted, for `unpause_left` to try again.
+        if all && let Err(why) = self.host.write(&paused_file(&self.dir), "") {
+            tracing::error!("sandbox: couldn't clear {}: {why}", self.dir.display());
+        }
+    }
+}
+
+/// What `paused_file`'s `text` notes.
+fn paused_notes(text: &str) -> Result<Vec<PausedNote>, String> {
+    if text.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    serde_json::from_str(text).map_err(|e| e.to_string())
+}
+
+/// Unpause what a copy of sandbox folder `dir` paused and a gerdr that died
+/// left so. What another unpaused already, or what is gone, needs nothing.
+pub fn unpause_left(host: &Host, dir: &Path) -> Result<(), String> {
+    let file = paused_file(dir);
+    let Some(text) = host.read(&file) else {
+        return Ok(());
+    };
+    let notes = paused_notes(&text).map_err(|why| format!("{}: {why}", file.display()))?;
+    if notes.is_empty() {
+        return Ok(());
+    }
+    let never = AtomicBool::new(false);
+    let mut problems = Vec::new();
+    for PausedNote { engine, container } in &notes {
+        let state = ["inspect", "--format", "{{.State.Paused}}", container];
+        match tool(host, *engine, &state, &never) {
+            Ok(said) if said.trim() == "true" => {
+                match tool(host, *engine, &["unpause", container], &never) {
+                    Ok(_) => tracing::info!(
+                        "sandbox: unpaused {container}, which a copy cut short left paused"
+                    ),
+                    Err(why) => problems.push(format!("Couldn't unpause {container}: {why}")),
+                }
+            }
+            Ok(_) => {}
+            Err(why) => {
+                tracing::warn!("sandbox: couldn't look at {container}, noted paused: {why}")
+            }
+        }
+    }
+    if problems.is_empty() {
+        host.write(&file, "")
+    } else {
+        Err(problems.join("; "))
     }
 }
 
@@ -1348,7 +1446,7 @@ fn copy_data(
             "/to/",
         ];
         let copied = {
-            let _paused = Paused::new(job.host, engine, containers, job.stop)?;
+            let _paused = Paused::new(job.host, engine, containers, job.dir, job.stop)?;
             job.host
                 .output(engine.program(), &args, COPY_TIMEOUT, job.stop)
         };
@@ -1881,6 +1979,10 @@ pub fn stop(run: &SandboxRun, dir: &Path, remove: bool, host: &Host) -> Result<(
     }
     let never = AtomicBool::new(false);
     let mut problems = Vec::new();
+    // Before its folder can go, with the note of what to unpause.
+    if let Err(why) = unpause_left(host, dir) {
+        problems.push(why);
+    }
     if let Err(why) = run.kill_network(host) {
         problems.push(why);
     }
@@ -2573,6 +2675,78 @@ django.db.utils.OperationalError: connection refused\n\
         assert!(!left.contains("gerdr-test"), "{left}");
         assert!(!dir.exists());
         assert!(!run.holder.unwrap().alive());
+    }
+
+    #[test]
+    fn paused_notes_read_empty_as_none() {
+        assert_eq!(paused_notes(""), Ok(Vec::new()));
+        assert_eq!(paused_notes(" \n"), Ok(Vec::new()));
+        let text = r#"[{"engine":"podman-compose","container":"asset-track_db_1"}]"#;
+        let notes = paused_notes(text).unwrap();
+        assert_eq!(
+            notes,
+            [PausedNote {
+                engine: Engine::PodmanCompose,
+                container: "asset-track_db_1".to_owned()
+            }]
+        );
+        assert!(paused_notes("{broken").is_err());
+    }
+
+    #[test]
+    fn a_folder_with_no_note_has_nothing_to_unpause() {
+        let dir = std::env::temp_dir().join(format!("gerdr-paused-{}", std::process::id()));
+        assert_eq!(unpause_left(&Host::Here, &dir), Ok(()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(paused_file(&dir), "").unwrap();
+        assert_eq!(unpause_left(&Host::Here, &dir), Ok(()));
+        fs::write(paused_file(&dir), "{broken").unwrap();
+        assert!(unpause_left(&Host::Here, &dir).is_err());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A gerdr that died copying: the container it paused is listed as
+    /// running, and the next look unpauses it and clears the note.
+    #[test]
+    #[ignore = "needs podman and the alpine:3.20 image"]
+    fn real_podman_container_left_paused_is_seen_and_unpaused() {
+        let stop = AtomicBool::new(false);
+        let podman = |args: &[&str]| tool(&Host::Here, Engine::Podman, args, &stop);
+        let name = format!("gerdr-paused-test-{}", std::process::id());
+        let dir = std::env::temp_dir().join(&name);
+        fs::create_dir_all(&dir).unwrap();
+        podman(&[
+            "run",
+            "-d",
+            "--name",
+            &name,
+            "--entrypoint",
+            "sleep",
+            "docker.io/library/alpine:3.20",
+            "300",
+        ])
+        .unwrap();
+        let paused =
+            Paused::new(&Host::Here, Engine::Podman, vec![name.clone()], &dir, &stop).unwrap();
+        std::mem::forget(paused);
+        let result = (|| -> Result<(), String> {
+            let listed = running_containers(&Host::Here, &[Engine::Podman], &stop)?;
+            if !listed.iter().any(|c| c.name == name) {
+                return Err("a paused container isn't listed".into());
+            }
+            unpause_left(&Host::Here, &dir)?;
+            let state = podman(&["inspect", "--format", "{{.State.Paused}}", &name])?;
+            if state.trim() != "false" {
+                return Err(format!("still paused: {state}"));
+            }
+            match fs::read_to_string(paused_file(&dir)) {
+                Ok(text) if text.is_empty() => Ok(()),
+                other => Err(format!("note not cleared: {other:?}")),
+            }
+        })();
+        podman(&["rm", "-f", &name]).unwrap();
+        fs::remove_dir_all(&dir).unwrap();
+        result.unwrap();
     }
 
     /// Against real podman with podman-compose, on a stack in folder

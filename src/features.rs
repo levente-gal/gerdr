@@ -346,6 +346,8 @@ pub(crate) enum Done {
         /// Where they were looked for: none, here.
         machine: Option<String>,
         stacks: Vec<crate::feature_sandbox::LeftStack>,
+        /// Containers a copy cut short left paused that wouldn't unpause.
+        still_paused: Vec<String>,
     },
     /// Removing those ended.
     SandboxLeftoversRemoved {
@@ -5631,7 +5633,14 @@ impl Gerdr {
                 name,
                 result,
             } => self.sandbox_left_gone(&file, &title, &name, result),
-            Done::SandboxLeftovers { machine, stacks } => self.sandbox_leftovers(machine, stacks),
+            Done::SandboxLeftovers {
+                machine,
+                stacks,
+                still_paused,
+            } => {
+                self.sandbox_still_paused(machine.is_none(), still_paused);
+                self.sandbox_leftovers(machine, stacks);
+            }
             Done::SandboxLeftoversRemoved { removed, problems } => {
                 self.sandbox_leftovers_removed(removed, problems);
             }
