@@ -80,6 +80,9 @@ pub struct Flag {
     /// diff's editor, kept in `Finding::note`. `severity` and `state` are the
     /// finding's.
     pub note: bool,
+    /// It isn't a finding but a comment of the user's that went to Build: to
+    /// see, not to decide or change. Its id is what the agent has it by.
+    pub sent: bool,
 }
 
 /// A project's review.
@@ -202,14 +205,42 @@ pub fn markdown(
     label: impl Fn(&Path) -> String,
     outdated: impl Fn(&Comment) -> bool,
 ) -> String {
-    let mut by_root: BTreeMap<(usize, &Path), Vec<&Comment>> = BTreeMap::new();
+    write_markdown(review, order, label, outdated, false)
+}
+
+/// `markdown` with each comment headed by its id (`comment_id`): what goes to
+/// a feature's Build agent, whose plan must then speak of each.
+pub fn numbered_markdown(
+    review: &Review,
+    order: &[PathBuf],
+    label: impl Fn(&Path) -> String,
+    outdated: impl Fn(&Comment) -> bool,
+) -> String {
+    write_markdown(review, order, label, outdated, true)
+}
+
+/// The id of the comment at `at` among those of a review sent to Build, the
+/// findings not counted. Each round's start again from C1.
+pub fn comment_id(at: usize) -> String {
+    format!("C{}", at + 1)
+}
+
+fn write_markdown(
+    review: &Review,
+    order: &[PathBuf],
+    label: impl Fn(&Path) -> String,
+    outdated: impl Fn(&Comment) -> bool,
+    numbered: bool,
+) -> String {
+    let mut by_root: BTreeMap<(usize, &Path), Vec<(usize, &Comment)>> = BTreeMap::new();
     // Findings aren't the user's: never copied.
-    for c in review.comments.iter().filter(|c| c.flag.is_none()) {
+    let own = review.comments.iter().filter(|c| c.flag.is_none());
+    for (at, c) in own.enumerate() {
         let rank = order
             .iter()
             .position(|r| *r == c.root)
             .unwrap_or(order.len());
-        by_root.entry((rank, &c.root)).or_default().push(c);
+        by_root.entry((rank, &c.root)).or_default().push((at, c));
     }
     let n = review.own();
     let mut out = format!(
@@ -218,21 +249,28 @@ pub fn markdown(
         if n == 1 { "" } else { "s" }
     );
     for ((_, root), mut comments) in by_root {
-        comments.sort_by_key(|c| (&c.path, c.lines.first().map(|q| q.number)));
+        comments.sort_by_key(|(_, c)| (&c.path, c.lines.first().map(|q| q.number)));
         out.push_str(&format!("\n## {} ({})\n", label(root), root.display()));
-        for c in comments {
+        for (at, c) in comments {
             let stale = if outdated(c) {
                 " (the code changed since)"
             } else {
                 ""
             };
+            let id = match numbered {
+                true => format!("{}: ", comment_id(at)),
+                false => String::new(),
+            };
             if is_general(c) {
-                out.push_str(&format!("\n### General comment{stale}\n\n"));
+                out.push_str(&format!("\n### {id}General comment{stale}\n\n"));
             // On the whole file: no lines to quote.
             } else if c.lines.is_empty() {
-                out.push_str(&format!("\n### `{}` (the whole file){stale}\n\n", place(c)));
+                out.push_str(&format!(
+                    "\n### {id}`{}` (the whole file){stale}\n\n",
+                    place(c)
+                ));
             } else {
-                out.push_str(&format!("\n### `{}`{stale}\n\n```diff\n", place(c)));
+                out.push_str(&format!("\n### {id}`{}`{stale}\n\n```diff\n", place(c)));
                 for q in &c.lines {
                     let sign = match q.kind {
                         LineKind::Added => '+',
@@ -494,6 +532,42 @@ pub fn now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())
+}
+
+#[cfg(test)]
+mod numbered_tests {
+    use super::*;
+
+    #[test]
+    fn numbered_comments_go_by_their_place_in_the_saved_list() {
+        let comment = |path: &str, text: &str| Comment {
+            root: "/w/api".into(),
+            path: path.into(),
+            text: text.into(),
+            ..Comment::default()
+        };
+        let review = Review {
+            comments: vec![
+                comment("z.rs", "Second in the file, first saved"),
+                // A finding takes no number.
+                Comment {
+                    flag: Some(Flag::default()),
+                    ..comment("f.rs", "A finding")
+                },
+                comment("a.rs", "First in the file, second saved"),
+                comment("", "On the whole change"),
+            ],
+            ..Review::default()
+        };
+        let text = numbered_markdown(&review, &[], |_| "api".into(), |_| false);
+        assert!(text.contains("### C1: `z.rs` (the whole file)"), "{text}");
+        assert!(text.contains("### C2: `a.rs` (the whole file)"), "{text}");
+        assert!(text.contains("### C3: General comment"), "{text}");
+        assert!(!text.contains("A finding"), "{text}");
+        // What is only copied has none.
+        let plain = markdown(&review, &[], |_| "api".into(), |_| false);
+        assert!(!plain.contains("C1"), "{plain}");
+    }
 }
 
 #[cfg(test)]

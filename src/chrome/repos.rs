@@ -243,6 +243,9 @@ pub struct ReposView {
     pub density: Density,
     /// The tree's share of the panel's width.
     pub tree_share: f64,
+    /// What the tree's title says in place of its name, and in what tone: how
+    /// many of a code review's files are left.
+    pub tree_note: Option<(String, Tone)>,
     /// How the tree lists the files: the toolbar over it says.
     pub grouping: Grouping,
     /// The diff alone across the panel, `title` its heading: no tree,
@@ -306,6 +309,7 @@ impl ReposView {
             branch: Default::default(),
             density,
             tree_share: 0.0,
+            tree_note: None,
             grouping: Default::default(),
             diff_only: true,
             diff_tree: false,
@@ -467,6 +471,8 @@ pub struct FileLine {
     pub edited: bool,
     /// How many review comments are on it.
     pub comments: usize,
+    /// It is read and done with: it steps back, what is left standing out.
+    pub viewed: bool,
 }
 
 /// A checkbox: a repository's is `Partial` when only some of its files are
@@ -3441,6 +3447,7 @@ impl Painter {
                 }
                 let name = match file.code {
                     _ if file.conflicted => p.error,
+                    _ if file.viewed => p.muted,
                     'D' => p.muted,
                     _ => p.text,
                 };
@@ -4665,16 +4672,13 @@ impl Painter {
             right = px(first.loc.x) as f32 - (FIELD_GAP as f32 * s).round();
         }
         let x = x + px(HELP_PADDING) as f32;
-        self.mixed_text(
-            c,
-            "Changes",
-            FONT_SIZE,
-            x,
-            right,
-            band(title, scale),
-            scale,
-            p.text,
-        );
+        let (text, color) = match &view.tree_note {
+            Some((text, Tone::Success)) => (text.as_str(), p.success),
+            Some((text, Tone::Warning)) => (text.as_str(), p.warning),
+            Some((text, _)) => (text.as_str(), p.text),
+            None => ("Changes", p.text),
+        };
+        self.mixed_text(c, text, FONT_SIZE, x, right, band(title, scale), scale, color);
         for &(tool, rect) in tools {
             self.tool_button(c, view, tool, rect, scale, p);
         }
@@ -5349,6 +5353,7 @@ fn frame_view(view: &ReposView) -> ReposView {
         },
         density: view.density,
         tree_share: view.tree_share,
+        tree_note: view.tree_note.clone(),
         grouping: view.grouping,
         diff_only: view.diff_only,
         diff_tree: view.diff_tree,
@@ -5666,6 +5671,7 @@ mod tests {
         TreeLine::File(FileLine {
             check,
             code,
+            viewed: false,
             path: path.into(),
             conflicted: code == 'U',
             depth: 0,
@@ -5952,6 +5958,7 @@ mod tests {
             },
             density: DENSITY,
             tree_share: REPOS_TREE_SHARE,
+            tree_note: None,
             diff_only: false,
             diff_tree: false,
             flat: false,
@@ -6402,6 +6409,7 @@ mod tests {
             empty: view.empty,
             branch: view.branch,
             tree_share: view.tree_share,
+        tree_note: view.tree_note.clone(),
             grouping: view.grouping,
             part: view.part,
             over: view.over,
