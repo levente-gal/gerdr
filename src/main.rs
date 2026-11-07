@@ -10,7 +10,9 @@
 
 mod activate;
 mod agent_icons;
+mod agent_tell;
 mod agents;
+mod ai_work;
 mod anim;
 mod app_icons;
 mod checkout;
@@ -110,6 +112,7 @@ mod services;
 mod sidebar;
 mod stage_lock;
 mod stage_models;
+mod stats_panel;
 mod switcher;
 mod syntax;
 mod system_theme;
@@ -1343,6 +1346,8 @@ pub enum Action {
     /// Open the scrollback viewer over the focused terminal, to select
     /// and copy more of its output than a screen.
     Scrollback,
+    /// Open the stats panel on the features' AI work, or close it again.
+    AiStats,
     /// Read the project files again, after one was edited by hand.
     ReloadProjects,
     /// Ask whether to keep the project running, and quit.
@@ -1783,6 +1788,8 @@ pub struct Gerdr {
     /// The address of each workspace folder's repository page, once read
     /// (see `git::web_url`).
     pub repo_pages: HashMap<PathBuf, Option<String>>,
+    /// The features' AI work, kept as it happens (see `ai_work`).
+    pub ai_work: ai_work::Live,
 
     pub compositor_state: CompositorState,
     pub xdg_shell_state: XdgShellState,
@@ -4549,6 +4556,7 @@ impl Gerdr {
             Action::Features => self.open_features(),
             Action::Scrollback if self.is_open(Overlay::Scrollback) => self.close_scrollback(),
             Action::Scrollback => self.open_focused_scrollback(),
+            Action::AiStats => self.toggle_ai_stats(),
             // Nothing to keep running without a project.
             Action::Quit if self.project.is_none() => self.quit_app(projects::Stops::default()),
             Action::Quit => self.open_quit(),
@@ -7242,6 +7250,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         old_zed: Vec::new(),
         old_zed_until: None,
         repo_pages: HashMap::new(),
+        ai_work: ai_work::Live::off(),
         compositor_state: CompositorState::new::<Gerdr>(&dh),
         xdg_shell_state: XdgShellState::new::<Gerdr>(&dh),
         xdg_decoration_state: XdgDecorationState::new::<Gerdr>(&dh),

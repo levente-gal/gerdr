@@ -853,6 +853,14 @@ impl Gerdr {
             .find(|work| work.id == id)
     }
 
+    /// How to reach machine `id`, and its folders, for a thread of its own
+    /// that copies AI work from there: none while its link is down.
+    #[allow(dead_code)] // used by `ai_work` in wave 2 (AI work contract)
+    pub(crate) fn archive_reach(&self, machine_id: &str) -> Option<(Reach, Side)> {
+        let work = self.work_of(machine_id)?;
+        Some((work.reach(), work.side()))
+    }
+
     fn work_of_mut(&mut self, id: &str) -> Option<&mut Work> {
         (self.machines.links.values_mut())
             .filter_map(|link| link.work.as_mut())

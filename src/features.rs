@@ -603,6 +603,15 @@ pub(crate) enum Done {
         n: u32,
         evidence: feature::verify::Evidence,
     },
+    /// The AI work's index was read for the stats panel.
+    #[allow(dead_code)] // sent from `stats_panel` (AI work contract)
+    AiStats {
+        scope: crate::ai_work::stats::Scope,
+        result: Result<crate::ai_work::stats::View, String>,
+    },
+    /// What the AI work's thread came to.
+    #[allow(dead_code)] // sent from `ai_work::thread` (AI work contract)
+    AiWork(crate::ai_work::Report),
 }
 
 /// An open feature of another project spanning the one shown.
@@ -5621,6 +5630,8 @@ impl Gerdr {
                 index,
                 turn,
             } => self.check_turn(&project, &slug, n, index, turn),
+            Done::AiStats { scope, result } => self.ai_stats_read(scope, result),
+            Done::AiWork(report) => self.ai_work_done(report),
         }
     }
 
