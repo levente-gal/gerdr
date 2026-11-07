@@ -56,6 +56,7 @@ pub(crate) const KEYS: &[(&str, &str)] = &[
     ("Left / Right", "Pick the tab or the scope that has focus"),
     ("Ctrl+PgUp / Ctrl+PgDn", "Go to the previous or next tab"),
     ("Enter", "Show the feature's stages, runs and fix rounds"),
+    ("Del", "Delete the feature's AI work kept, after asking"),
     ("Ctrl+F / /", "Search the rows"),
     ("Ctrl+O", "Open the run's transcript or the check's log"),
     ("Ctrl+C", "Copy the row"),
@@ -82,6 +83,18 @@ pub(crate) enum Outcome {
     Copy(String),
     /// Draw the index again from the files.
     Rebuild,
+    /// Ask before deleting a feature's AI work.
+    Delete(Kept),
+}
+
+/// A feature's AI work kept, as its row on the Features tab shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Kept {
+    pub project: String,
+    pub slug: String,
+    pub title: String,
+    /// What it takes on disk.
+    pub bytes: u64,
 }
 
 /// A row of the list, as the panel works it out from the index.
@@ -97,6 +110,8 @@ pub(crate) struct Line {
     pub open: Option<(PathBuf, String)>,
     /// The feature Enter shows in detail (project, slug).
     pub drill: Option<(String, String)>,
+    /// The AI work Del deletes, after asking.
+    pub delete: Option<Kept>,
 }
 
 impl Line {
@@ -107,6 +122,7 @@ impl Line {
             heading: false,
             open: None,
             drill: None,
+            delete: None,
         }
     }
 
@@ -242,8 +258,9 @@ impl StatsPanel {
                 col("Runs", 44, true),
                 col("Fix rounds", 70, true),
                 col("Tokens in / out", 104, true),
-                col("Nudges", 56, true),
-                col("Sent back", 70, true),
+                col("Kept", 64, true),
+                // Its trash button.
+                col("", chrome::STATS_DELETE_COLUMN, true),
             ],
             Tab::Agents => vec![
                 col("Stage", 76, false),
@@ -576,6 +593,11 @@ impl StatsPanel {
                 return None;
             }
             Keysym::o if ctrl => return Some(self.open(now)),
+            // Searching, Del edits the query.
+            Keysym::Delete | Keysym::KP_Delete if bare && !self.searching => {
+                let kept = self.selected_line(now).and_then(|l| l.delete);
+                return kept.map(Outcome::Delete);
+            }
             Keysym::r if ctrl => return Some(Outcome::Rebuild),
             // What is selected in the query copies from there.
             Keysym::c if ctrl && !(self.searching && !self.query.line().selection().is_empty()) => {
@@ -660,6 +682,12 @@ impl StatsPanel {
                 // A feature clicked is shown, as Enter shows it.
                 self.drill(now)
             }
+            StatsHit::Delete(i) => {
+                let kept = self.lines(now).get(i)?.delete.clone()?;
+                self.focus = StatsFocus::List;
+                self.settle(i, true, page, now);
+                Some(Outcome::Delete(kept))
+            }
             StatsHit::Hint(_) | StatsHit::Panel => None,
         }
     }
@@ -673,6 +701,9 @@ impl StatsPanel {
         }
         if line.as_ref().is_some_and(|l| l.open.is_some()) {
             hints.push(("Ctrl+O", "open"));
+        }
+        if line.as_ref().is_some_and(|l| l.delete.is_some()) {
+            hints.push(("Del", "delete"));
         }
         hints.push(("Ctrl+F", "search"));
         if line.is_some() {
@@ -737,6 +768,7 @@ impl StatsPanel {
                     set: l.set,
                     cells: l.cells,
                     heading: l.heading,
+                    delete: l.delete.is_some(),
                 })
                 .collect(),
             first: self.first,
@@ -813,6 +845,31 @@ fn tokens_both(input: u64, output: u64) -> String {
     }
 }
 
+/// A size on disk, for people: "950 B", "12 KB", "3.4 MB", "1.2 GB".
+pub(crate) fn size(bytes: u64) -> String {
+    const K: u64 = 1024;
+    match bytes {
+        b if b < K => format!("{b} B"),
+        b if b < K * K => format!("{} KB", b / K),
+        b if b < K * K * K => format!("{:.1} MB", b as f64 / (K * K) as f64),
+        b => format!("{:.1} GB", b as f64 / (K * K * K) as f64),
+    }
+}
+
+/// What the files under `dir` take on disk, links not followed.
+fn kept_bytes(dir: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    (entries.flatten())
+        .map(|e| match e.file_type() {
+            Ok(t) if t.is_dir() => kept_bytes(&e.path()),
+            Ok(t) if t.is_file() => e.metadata().map_or(0, |m| m.len()),
+            _ => 0,
+        })
+        .sum()
+}
+
 /// A share, 0 to 1, as a percentage: "40%".
 fn share(of: f32) -> String {
     format!("{:.0}%", of * 100.0)
@@ -866,6 +923,12 @@ fn feature_line(f: &stats::FeatureRow, all: bool, now: u64) -> Line {
     };
     Line {
         drill: Some((f.project.clone(), f.slug.clone())),
+        delete: Some(Kept {
+            project: f.project.clone(),
+            slug: f.slug.clone(),
+            title: name.clone(),
+            bytes: f.kept,
+        }),
         ..Line::row(
             0,
             vec![
@@ -876,8 +939,7 @@ fn feature_line(f: &stats::FeatureRow, all: bool, now: u64) -> Line {
                 f.runs.to_string(),
                 f.fix_rounds.to_string(),
                 tokens_both(f.tokens_in, f.tokens_out),
-                f.nudges.to_string(),
-                f.send_backs.to_string(),
+                size(f.kept),
             ],
         )
     }
@@ -1047,7 +1109,12 @@ fn read(root: Option<&Path>, scope: &Scope) -> Result<View, String> {
         ..nothing()
     };
     match index::open_read(root) {
-        Ok(conn) => stats::query(&conn, scope),
+        Ok(conn) => stats::query(&conn, scope).map(|mut view| {
+            for f in &mut view.features {
+                f.kept = kept_bytes(&root.join(&f.project).join(&f.slug));
+            }
+            view
+        }),
         Err(why) if why == index::NOT_MADE => Ok(building()),
         Err(why) => Err(why),
     }
@@ -1350,6 +1417,66 @@ impl Gerdr {
                 self.show_notice("Drawing the AI work's stats again from its files".into());
             }
             Outcome::Open { path, what, title } => self.ai_stats_open(path, what, title),
+            Outcome::Delete(kept) => self.ask_delete_ai_work(kept),
+        }
+    }
+
+    /// Ask before deleting the AI work kept of a feature: it can't be
+    /// undone.
+    fn ask_delete_ai_work(&mut self, kept: Kept) {
+        let going_on = (self.features.all.get(&kept.project))
+            .is_some_and(|fs| fs.iter().any(|f| f.slug == kept.slug));
+        let then = match going_on {
+            true => " What its agents do from now on is still kept.",
+            false => "",
+        };
+        let body = format!(
+            "\u{201c}{}\u{201d}: its chats, prompts, check logs and stats on this machine, {}. This can't be undone.{then}",
+            kept.title,
+            size(kept.bytes),
+        );
+        self.ask(
+            "Delete this feature's AI work?".into(),
+            body,
+            "Delete",
+            crate::confirm::Then::DeleteAiWork {
+                project: kept.project,
+                slug: kept.slug,
+                title: kept.title,
+            },
+        );
+    }
+
+    /// Delete the AI work kept of feature `slug` of `project`, called
+    /// `title`, on the AI work's thread; it says how it went
+    /// (`Report::Deleted`). A feature still written here keeps what it
+    /// does from now on.
+    pub(crate) fn delete_ai_work(&mut self, project: &str, slug: &str, title: String) {
+        let Some(jobs) = self.ai_work.sender() else {
+            let why = match self.ai_work.is_on() {
+                true => "the AI work's thread isn't running",
+                false => "AI work isn't kept on this gerdr",
+            };
+            return self.show_error(format!(
+                "Couldn't delete the AI work of \u{201c}{title}\u{201d}: {why}"
+            ));
+        };
+        let going_on = (self.features.all.get(project))
+            .and_then(|fs| fs.iter().find(|f| f.slug == slug))
+            .map(|f| f.history.len());
+        // What is on its way from another machine would land in it again.
+        self.ai_work.stop_pull(project, slug);
+        let job = Job::Delete {
+            project: project.to_owned(),
+            slug: slug.to_owned(),
+            title: title.clone(),
+            going_on,
+        };
+        if jobs.send(job).is_err() {
+            tracing::warn!("ai work: deleting {project}/{slug}: its thread is gone");
+            self.show_error(format!(
+                "Couldn't delete the AI work of \u{201c}{title}\u{201d}: the AI work's thread isn't running"
+            ));
         }
     }
 
@@ -1459,6 +1586,10 @@ impl Gerdr {
         self.ai_stats.as_mut()?.hover = hit;
         match hit? {
             StatsHit::Back => Some(Tooltip::new("Back to the list", layout.back?).key("Esc")),
+            StatsHit::Delete(i) => {
+                let rect = layout.deletes.iter().find(|(k, _)| *k == i)?.1;
+                Some(Tooltip::new("Delete its AI work", rect).key("Del"))
+            }
             _ => None,
         }
     }
@@ -1533,6 +1664,7 @@ pub(crate) mod fixtures {
                     tokens_out: 84_000,
                     nudges: 3,
                     send_backs: 1,
+                    kept: 19_400_000,
                 },
                 stats::FeatureRow {
                     project: "gerdr".into(),
@@ -1542,6 +1674,7 @@ pub(crate) mod fixtures {
                     created: NOW - 7200,
                     ai_secs: 1500,
                     runs: 3,
+                    kept: 840_000,
                     ..stats::FeatureRow::default()
                 },
             ],
@@ -2039,6 +2172,71 @@ mod tests {
         assert_eq!(tokens(12_340), "12.3k");
         assert_eq!(tokens(340_000), "340k");
         assert_eq!(tokens(1_250_000), "1.2M");
+    }
+
+    #[test]
+    fn sizes_read_as_people_say_them() {
+        assert_eq!(size(950), "950 B");
+        assert_eq!(size(12 * 1024 + 300), "12 KB");
+        assert_eq!(size(19_400_000), "18.5 MB");
+        assert_eq!(size(1_300_000_000), "1.2 GB");
+    }
+
+    #[test]
+    fn what_is_kept_counts_every_file_below() {
+        let dir = std::env::temp_dir().join(format!("gerdr-stats-kept-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sessions").join("claude-1")).unwrap();
+        std::fs::write(dir.join("events-m1.jsonl"), [0; 100]).unwrap();
+        std::fs::write(dir.join("sessions").join("claude-1").join("meta.json"), [0; 20]).unwrap();
+        assert_eq!(kept_bytes(&dir), 120);
+        assert_eq!(kept_bytes(&dir.join("gone")), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn kept_alpha() -> Kept {
+        Kept {
+            project: "gerdr".into(),
+            slug: "ai-work".into(),
+            title: "Keep all AI work".into(),
+            bytes: 19_400_000,
+        }
+    }
+
+    #[test]
+    fn del_asks_to_delete_the_selected_features_ai_work() {
+        let mut p = loaded();
+        assert_eq!(key(&mut p, Keysym::Delete), Some(Outcome::Delete(kept_alpha())));
+        assert_eq!(p.lines(NOW)[0].cells.last().unwrap(), "18.5 MB");
+        assert!(p.view(NOW).rows.iter().all(|r| r.delete));
+        assert!(p.hints(NOW).iter().any(|(k, w)| k == "Del" && w == "delete"));
+        // Searching, Del edits the query.
+        key(&mut p, Keysym::slash);
+        assert_eq!(key(&mut p, Keysym::Delete), None);
+        assert!(p.searching);
+        // The Agents tab has no AI work of a feature to delete.
+        let mut p = loaded();
+        ctrl(&mut p, Keysym::Page_Down);
+        p.view = Some(Ok(view(p.scope.clone())));
+        assert_eq!(key(&mut p, Keysym::Delete), None);
+        assert!(!p.hints(NOW).iter().any(|(k, _)| k == "Del"));
+    }
+
+    #[test]
+    fn a_trash_button_selects_its_row_and_asks() {
+        let mut p = loaded();
+        let second = Kept {
+            project: "gerdr".into(),
+            slug: "stats".into(),
+            title: "Stats panel".into(),
+            bytes: 840_000,
+        };
+        assert_eq!(
+            p.click(StatsHit::Delete(1), 10, NOW),
+            Some(Outcome::Delete(second))
+        );
+        assert_eq!(p.selected, 1);
+        assert_eq!(p.click(StatsHit::Delete(9), 10, NOW), None);
     }
 
     #[test]

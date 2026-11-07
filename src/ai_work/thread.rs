@@ -93,6 +93,16 @@ pub enum Job {
         slug: String,
         history: usize,
     },
+    /// Delete the AI work of feature `slug`, called `title`: its folder and
+    /// its rows in the index. `going_on`: the feature is still written
+    /// here, with `history` lines of history; what it does from now on is
+    /// kept, and its earlier work isn't kept again.
+    Delete {
+        project: String,
+        slug: String,
+        title: String,
+        going_on: Option<usize>,
+    },
     /// End.
     Stop,
 }
@@ -656,9 +666,68 @@ impl Worker {
                 slug,
                 history,
             } => self.brought(&project, &slug, history),
+            Job::Delete {
+                project,
+                slug,
+                title,
+                going_on,
+            } => self.delete(&project, &slug, title, going_on),
             Job::Stop => return false,
         }
         true
+    }
+
+    /// Delete the AI work of feature `slug`: out of the index first, so the
+    /// stats never show what is no longer kept, then its folder. A feature
+    /// still written here gets marks saying its earlier work was kept, or
+    /// the next start would keep it again.
+    fn delete(&mut self, project: &str, slug: &str, title: String, going_on: Option<usize>) {
+        let dir = self.dir(project, slug);
+        let feature = (project.to_owned(), slug.to_owned());
+        self.watch.retain(|(p, s, _)| (p, s) != (&feature.0, &feature.1));
+        self.pending.remove(&feature);
+        self.missing.retain(|(p, s, _, _)| (p, s) != (&feature.0, &feature.1));
+        let result = self.delete_dir(project, slug, &dir, going_on);
+        if let Err(why) = &result {
+            tracing::warn!("ai work: deleting {}: {why}", dir.display());
+        }
+        self.report(Report::Deleted {
+            title,
+            why: result.err(),
+        });
+    }
+
+    fn delete_dir(
+        &mut self,
+        project: &str,
+        slug: &str,
+        dir: &Path,
+        going_on: Option<usize>,
+    ) -> Result<(), String> {
+        if self.index.is_some() || super::index::path(&self.root).exists() {
+            let mut conn = match self.index.take() {
+                Some(conn) => conn,
+                None => super::index::open(&self.root)?,
+            };
+            let forgot = super::index::forget(&mut conn, project, slug, dir);
+            self.index = Some(conn);
+            forgot?;
+        }
+        match std::fs::remove_dir_all(dir) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(format!("{}: {err}", dir.display())),
+        }
+        let Some(history) = going_on else {
+            return Ok(());
+        };
+        let marks = write::Marks {
+            backfilled: true,
+            history_noted: history,
+            ..write::Marks::default()
+        };
+        (write::make_dir(dir).and_then(|()| write::write_marks(dir, &marks)))
+            .map_err(|err| format!("{}: {err}", write::marks_path(dir).display()))
     }
 
     /// Feature `slug`'s AI work came from its writer before: it is kept as
@@ -1887,6 +1956,45 @@ mod tests {
         // All kept: nothing to say.
         assert!(w.backfill(&all[..1], &rx, &mut queue));
         assert_eq!(reports(&dones), []);
+    }
+
+    #[test]
+    fn a_delete_takes_the_folder_and_its_rows_and_says_so() {
+        let root = scratch("thread-delete");
+        noted(&root, "a");
+        noted(&root, "b");
+        noted(&root, "c");
+        let (mut w, dones) = worker(&root);
+        w.rescan();
+        let _ = reports(&dones);
+        let (a, b) = (root.join("p").join("a"), root.join("p").join("b"));
+        w.delete("p", "a", "Alpha".into(), None);
+        assert!(!a.exists());
+        assert_eq!(
+            reports(&dones),
+            [Report::Deleted {
+                title: "Alpha".into(),
+                why: None
+            }]
+        );
+        // Still written here: its marks stay, so its earlier work isn't
+        // kept again at the next start.
+        w.delete("p", "b", "Beta".into(), Some(4));
+        let marks = write::read_marks(&b).unwrap();
+        assert!(marks.backfilled);
+        assert_eq!(marks.history_noted, 4);
+        assert!(!b.join("events-m1.jsonl").exists());
+        let conn = w.index.as_ref().unwrap();
+        let features: i64 = conn
+            .query_row("SELECT count(*) FROM features", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(features, 1);
+        // One gone already is no failure.
+        w.delete("p", "a", "Alpha".into(), None);
+        assert!(matches!(
+            reports(&dones)[..],
+            [_, Report::Deleted { why: None, .. }]
+        ));
     }
 
     #[test]

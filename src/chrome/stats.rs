@@ -11,7 +11,7 @@ use smithay::{
 };
 
 use super::{
-    BUTTON_RADIUS, ButtonStyle, Canvas, FONT_SIZE, FieldSpot, HELP_MARGIN, HELP_PADDING,
+    BUTTON_RADIUS, ButtonStyle, Canvas, icon_sdf, trash, FONT_SIZE, FieldSpot, HELP_MARGIN, HELP_PADDING,
     HINT_KEY_GAP, LABEL_FONT_SIZE, ListBar, POPUP_RADIUS, PROJECT_MENU_INPUT, PROJECT_MENU_PADDING,
     Painter, Palette, ROW_BUTTON, Rect, Rgb, SHADOW, SMALL_FONT_SIZE, Thumb, band, button_width,
     focus_ring, gutter_track, hint_at, hint_spots, hint_strs, measure, phys, query_text,
@@ -70,13 +70,20 @@ pub struct StatsColumn {
 }
 
 /// A row of the table, laid out in the columns of set `set`; a heading
-/// names them.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// names them. `delete`: a trash button in its last column, which takes no
+/// cell.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StatsRow {
     pub set: usize,
     pub cells: Vec<String>,
     pub heading: bool,
+    pub delete: bool,
 }
+
+/// The side of a row's trash button.
+const DELETE_BUTTON: i32 = 24;
+/// The width of the column a row's trash button goes in.
+pub const STATS_DELETE_COLUMN: i32 = DELETE_BUTTON;
 
 /// What the stats panel shows.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -123,6 +130,8 @@ pub enum StatsHit {
     Back,
     Query,
     Row(usize),
+    /// A row's trash button.
+    Delete(usize),
     Hint(usize),
     /// Anywhere else on it.
     Panel,
@@ -144,6 +153,8 @@ pub struct StatsLayout {
     /// The list's ground, and the rows shown on it (by index).
     pub list: Rect,
     pub rows: Vec<(usize, Rect)>,
+    /// The trash buttons of the rows shown that have one (by index).
+    pub deletes: Vec<(usize, Rect)>,
     pub footer: Rect,
     /// Where each of the hints that fit goes, by index.
     pub hints: Vec<(usize, Rect)>,
@@ -236,6 +247,17 @@ pub fn stats_layout(view: &StatsView, size: Size<i32, Logical>) -> StatsLayout {
             .collect(),
         false => Vec::new(),
     };
+    let deletes = (rows.iter())
+        .filter(|(i, _)| view.rows[*i].delete)
+        .filter_map(|&(i, row)| {
+            let columns = view.columns.get(view.rows[i].set)?;
+            let last = *cells(columns, row).last()?;
+            let side = DELETE_BUTTON.min(row.size.h);
+            let x = last.loc.x + last.size.w - side;
+            let y = row.loc.y + (row.size.h - side) / 2;
+            Some((i, Rectangle::new((x, y).into(), (side, side).into())))
+        })
+        .collect();
     let hint_row = Rectangle::new(
         (x + HELP_PADDING, footer.loc.y).into(),
         ((w - 2 * HELP_PADDING).max(0), FOOTER).into(),
@@ -251,6 +273,7 @@ pub fn stats_layout(view: &StatsView, size: Size<i32, Logical>) -> StatsLayout {
         header,
         list,
         rows,
+        deletes,
         footer,
         hints,
     }
@@ -341,6 +364,9 @@ pub fn stats_hit(
     if on(&layout.query) {
         return Some(StatsHit::Query);
     }
+    if let Some((i, _)) = layout.deletes.iter().find(|(_, r)| on(r)) {
+        return Some(StatsHit::Delete(*i));
+    }
     if let Some((i, _)) = layout.rows.iter().find(|(_, r)| on(r)) {
         return Some(StatsHit::Row(*i));
     }
@@ -373,6 +399,7 @@ pub(super) fn stats_hit_rects(view: &StatsView, size: Size<i32, Logical>) -> Vec
     rects.extend(layout.back);
     rects.push(layout.query);
     rects.extend(layout.rows.iter().map(|(_, r)| *r));
+    rects.extend(layout.deletes.iter().map(|(_, r)| *r));
     rects.extend(layout.hints.iter().map(|(_, r)| *r));
     rects
 }
@@ -574,7 +601,8 @@ impl Painter {
         for &(i, rect) in &layout.rows {
             let row = &view.rows[i];
             let rect = shift(rect);
-            let hovered = view.hover == Some(StatsHit::Row(i)) && !row.heading;
+            let on_delete = view.hover == Some(StatsHit::Delete(i));
+            let hovered = (view.hover == Some(StatsHit::Row(i)) || on_delete) && !row.heading;
             let selected = view.selected == Some(i);
             self.row_highlight(
                 c,
@@ -600,6 +628,17 @@ impl Painter {
                 };
                 self.stats_cell(c, cell, spot, column.right, font, scale, color);
             }
+        }
+        // Each trash button shows on its row, not only the one pointed at.
+        let s = scale as f32;
+        for &(i, rect) in &layout.deletes {
+            let rect = shift(rect);
+            let on = view.hover == Some(StatsHit::Delete(i));
+            if on {
+                self.button(c, "", rect, (true, false), ButtonStyle::Plain, scale, p);
+            }
+            let color = if on { p.error } else { p.muted };
+            icon_sdf(c, rect, scale, color, |x, y| trash(x, y, s));
         }
         if let Some(thumb) = list_thumb(view, shift(layout.list), layout.rows.len()) {
             self.thumb_in(c, &thumb, scale, p);
@@ -682,6 +721,7 @@ mod tests {
                     set: 0,
                     cells: vec![i.to_string()],
                     heading: false,
+                    delete: i == 1,
                 })
                 .collect(),
             hints: vec![

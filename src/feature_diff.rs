@@ -61,6 +61,10 @@ pub const COMMENTS: &str = "code-review-comments.json";
 pub const STILL_READING: &str = "Still reading the diff";
 /// Why Plan fixes does nothing at Code review: comments are all it sends.
 pub const NO_OWN_COMMENT: &str = "Add a comment first";
+/// Why a done Code review's diff takes no comments or viewed ticks.
+pub const REVIEW_DONE: &str = "Code review is done: reopen it first";
+/// Why a closed feature's diff takes no comments or viewed ticks.
+pub const FEATURE_CLOSED: &str = "The feature is closed";
 
 /// What Plan fixes waits for at AI review.
 pub fn decide_first(undecided: usize) -> String {
@@ -76,11 +80,13 @@ pub fn has_rounds(feature: &Feature) -> bool {
 
 /// Whether `feature`'s Code review page goes between its code, laid into the
 /// page rather than opened over the app, and the fixes it asked for: while the
-/// stage is at hand, and once it sent any back, wherever the feature went for
-/// them. Another machine writing the feature keeps the popup, its page saying
-/// what it can.
+/// stage is at hand, once it sent any back, wherever the feature went for
+/// them, and once it is done, to read as it was worked. Another machine
+/// writing the feature keeps the popup, its page saying what it can.
 pub fn review_views(feature: &Feature) -> bool {
-    (feature.current() == Some(Stage::CodeReview) || has_rounds(feature))
+    (feature.current() == Some(Stage::CodeReview)
+        || has_rounds(feature)
+        || feature.is_done(Stage::CodeReview))
         && feature.writer.is_none()
         && feature.status == Status::Open
         && feature.touched().next().is_some()
@@ -291,7 +297,37 @@ impl FeatureOf {
                 (B::Approve, None),
             ],
             Role::Round(FixPhase::Ready) => vec![(B::ReviewFixPlan, None)],
+            // Done with, it only reads: going on, or back to it.
+            Role::Done if !self.closed => {
+                let mut buttons = Vec::new();
+                if self.stage.is_some() {
+                    buttons.push((B::GoOn, None));
+                }
+                buttons.push((B::Reopen, None));
+                buttons
+            }
             _ => Vec::new(),
+        }
+    }
+
+    /// Why its code takes no comments or viewed ticks, if it doesn't: another
+    /// machine writes it, Code review is done, or the feature closed.
+    pub fn locked(&self) -> Option<&'static str> {
+        if self.seen {
+            return Some(crate::doc_review::WRITTEN_ELSEWHERE);
+        }
+        match self.role() {
+            Role::Done if self.closed => Some(FEATURE_CLOSED),
+            Role::Done => Some(REVIEW_DONE),
+            _ => None,
+        }
+    }
+
+    /// What Go on is called: going to the stage the feature is at.
+    pub fn go_on_label(&self) -> String {
+        match self.stage {
+            Some(stage) => format!("Go to {}", stage.label()),
+            None => ReposButton::GoOn.label().into(),
         }
     }
 
@@ -334,7 +370,8 @@ impl FeatureOf {
             Role::Deciding => "No finding left to decide",
             Role::Round(_) => "A fix plan is open: make the fixes or drop it first",
             Role::Review => "Code review has no findings to decide",
-            Role::Done => "Code review is done",
+            Role::Done if self.closed => FEATURE_CLOSED,
+            Role::Done => REVIEW_DONE,
         }
     }
 
@@ -348,9 +385,10 @@ impl FeatureOf {
             B::PlanFixes if self.role() == Role::Review || !self.needs_plan(own) => {
                 crate::worktree_diff::SEND_BACK_KEY
             }
-            B::MakeFixes | B::PlanFixes | B::ReviewFixPlan | B::Approve => {
+            B::MakeFixes | B::PlanFixes | B::ReviewFixPlan | B::Approve | B::GoOn => {
                 crate::worktree_diff::APPROVE_KEY
             }
+            B::Reopen => crate::worktree_diff::SEND_BACK_KEY,
             _ => "",
         }
     }
@@ -389,9 +427,15 @@ impl FeatureOf {
                 ("Shift+C", "add a comment on no line or file"),
             ]),
             Role::Round(FixPhase::Ready) => keys.push(("Ctrl+Enter", "review the fix plan")),
+            Role::Done if !self.closed => {
+                if self.stage.is_some() {
+                    keys.push(("Ctrl+Enter", "go to the stage the feature is at"));
+                }
+                keys.push(("Ctrl+Shift+Enter", "reopen Code review"));
+            }
             _ => {}
         }
-        if self.seen {
+        if self.locked().is_some() {
             return keys;
         }
         keys.extend([
@@ -1336,9 +1380,9 @@ impl Gerdr {
     /// Tick file `path` of the repository at `root` viewed, or untick it:
     /// kept in the feature's record.
     pub(crate) fn feature_toggle(&mut self, root: &Path, path: &str) {
-        let seen = (self.wd().and_then(|wd| wd.feature.as_ref())).is_some_and(|fe| fe.seen);
-        if seen {
-            return self.show_warning(crate::doc_review::WRITTEN_ELSEWHERE.to_owned());
+        let locked = (self.wd().and_then(|wd| wd.feature.as_ref())).and_then(FeatureOf::locked);
+        if let Some(why) = locked {
+            return self.show_warning(why.to_owned());
         }
         let Some(fe) = self.feature_of() else {
             return;
@@ -1371,9 +1415,9 @@ impl Gerdr {
     /// as a folder's or a repository's checkbox does: kept in the feature's
     /// record, and said when some have changes not committed.
     pub(crate) fn feature_toggle_many(&mut self, root: &Path, paths: &[String]) {
-        let seen = (self.wd().and_then(|wd| wd.feature.as_ref())).is_some_and(|fe| fe.seen);
-        if seen {
-            return self.show_warning(crate::doc_review::WRITTEN_ELSEWHERE.to_owned());
+        let locked = (self.wd().and_then(|wd| wd.feature.as_ref())).and_then(FeatureOf::locked);
+        if let Some(why) = locked {
+            return self.show_warning(why.to_owned());
         }
         let Some(fe) = self.feature_of() else {
             return;
@@ -2598,8 +2642,57 @@ mod tests {
         let past = at(Some(Stage::ManualTest), true, None);
         assert_eq!(past.0, Role::Done);
         assert_eq!(past.1, "Code review of \u{201c}Login\u{201d}");
-        assert_eq!(past.2, nothing);
+        assert_eq!(past.2, vec![(B::GoOn, None), (B::Reopen, None)]);
         assert_eq!(at(None, true, None).0, Role::Done);
+    }
+
+    #[test]
+    fn a_done_code_review_reads_as_worked_and_changes_nothing() {
+        use crate::{diff_view::Outcome, worktree_diff::Done};
+        use ReposButton as B;
+        let enter = Keysym::Return;
+        let mut wd = popup(Stage::ManualTest, Vec::new(), Review::default());
+        let fe = wd.feature.as_ref().unwrap();
+        assert_eq!(fe.role(), Role::Done);
+        assert_eq!(fe.locked(), Some(REVIEW_DONE));
+        // Going on, or back to it: no comment, no viewed tick.
+        let (title, hints) = offered(&wd);
+        assert_eq!(title, [B::GoOn, B::Reopen]);
+        for dead in [B::Comment, B::AddComment, B::MarkViewed, B::Approve, B::PlanFixes] {
+            assert!(!title.contains(&dead) && !hints.contains(&dead), "{dead:?}");
+        }
+        let go = (wd.feature_hints().into_iter()).find(|h| h.button == B::GoOn);
+        assert_eq!(go.map(|h| h.label), Some("Go to Manual test".to_owned()));
+        // Its keys and buttons go to its host.
+        assert_eq!(
+            wd.key(&mods(true, false), enter, enter, POPUP_ENV),
+            Some(Done::GoOn)
+        );
+        assert_eq!(
+            wd.key(&mods(true, true), enter, enter, POPUP_ENV),
+            Some(Done::Reopen)
+        );
+        assert_eq!(
+            wd.click(ReposHit::Button(B::Reopen), POPUP_ENV),
+            Some(Done::Reopen)
+        );
+        // A comment is refused, saying why.
+        let c = Keysym::c;
+        let none = mods(false, false);
+        assert_eq!(
+            wd.key(&none, c, c, POPUP_ENV),
+            Some(Done::Diff(Outcome::Notice(REVIEW_DONE)))
+        );
+        assert!(wd.diff.editing.is_none());
+        let upper_c = Keysym::C;
+        assert_eq!(
+            wd.key(&mods(false, true), upper_c, upper_c, POPUP_ENV),
+            Some(Done::Diff(Outcome::Notice(REVIEW_DONE)))
+        );
+        // Closed, it has nothing to go on to.
+        wd.feature.as_mut().unwrap().closed = true;
+        assert_eq!(offered(&wd).0, Vec::<ReposButton>::new());
+        assert_eq!(wd.feature.as_ref().unwrap().locked(), Some(FEATURE_CLOSED));
     }
 
     #[test]

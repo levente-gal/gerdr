@@ -3965,6 +3965,37 @@ fn feature_tab_review_ready() -> super::FeatureTabView {
     view
 }
 
+/// Code review's page once it is done: the review as it was worked, only to
+/// read, with Go to Manual test and Reopen on its line.
+fn feature_tab_review_done() -> super::FeatureTabView {
+    use super::{ButtonStyle, ReposButton as B, ReviewButton};
+    let mut view = feature_tab_review_page();
+    at_stage(&mut view, 7, super::NodeMark::Waiting, "to test");
+    select_node(&mut view, 6);
+    let mut switch = review_switch(super::ReviewView::Code);
+    switch.files = Some(super::ReviewFiles {
+        viewed: 8,
+        total: 8,
+        changed: 0,
+    });
+    switch.fixes = "none".into();
+    let next = "Approved \u{b7} only to read: Reopen to change it";
+    switch.next = Some((next.into(), true));
+    let button = |button: B, label: &str, style, key: &str| ReviewButton {
+        button,
+        label: label.into(),
+        style,
+        key: key.into(),
+        disabled: None,
+    };
+    switch.buttons = vec![
+        button(B::GoOn, "Go to Manual test", ButtonStyle::Primary, "Ctrl+Enter"),
+        button(B::Reopen, "Reopen", ButtonStyle::Plain, "Ctrl+Shift+Enter"),
+    ];
+    view.review_switch = Some(switch);
+    view
+}
+
 /// Code review's page on its fixes: the plan's card, the comments as cards, an
 /// earlier round folded, and the plan to read.
 fn feature_tab_review_fixes() -> super::FeatureTabView {
@@ -6044,20 +6075,21 @@ fn dump_doc_tab() {
     }
 }
 
-const REVIEW_VIEWS: [&str; 5] = [
+const REVIEW_VIEWS: [&str; 6] = [
     "tab_review_code_1180",
     "tab_review_fixes_1180",
     "tab_review_fixes_860",
     "tab_review_ready_1180",
     "tab_review_code_860",
+    "tab_review_done_1180",
 ];
 
 /// The recorded hashes of `REVIEW_VIEWS`, per case in `CASES`.
-const GOLDEN_REVIEW_VIEWS: [[u64; 5]; 4] = [
-    [0xc079d4a47dfb8f07, 0x54dd901fa2a70abe, 0xc1545fdb81fe7fd2, 0x60ced7661f313794, 0xaae0e6667caf58df],
-    [0xfcf48c5be95bbf79, 0x59cae7d81cf2cf1e, 0x05aa91649802c5af, 0xc4f6953a672794c3, 0xeac75621de8e7164],
-    [0xae786b051cb842b1, 0x0d41cf897de24c29, 0x65af65532294c589, 0xef1bc3ecb1d7efb8, 0xc337cdceb0414f87],
-    [0xf66d26606fa40b14, 0xd45dc034c427728c, 0xb72af0e7cce0522e, 0x8c892e5a6b0924f8, 0xdc3053ee5331a665],
+const GOLDEN_REVIEW_VIEWS: [[u64; 6]; 4] = [
+    [0xc079d4a47dfb8f07, 0x54dd901fa2a70abe, 0xc1545fdb81fe7fd2, 0x60ced7661f313794, 0xaae0e6667caf58df, 0xc51714381cece119],
+    [0xfcf48c5be95bbf79, 0x59cae7d81cf2cf1e, 0x05aa91649802c5af, 0xc4f6953a672794c3, 0xeac75621de8e7164, 0xecd0cd1d777ac778],
+    [0xae786b051cb842b1, 0x0d41cf897de24c29, 0x65af65532294c589, 0xef1bc3ecb1d7efb8, 0xc337cdceb0414f87, 0x992052e127fa1b18],
+    [0xf66d26606fa40b14, 0xd45dc034c427728c, 0xb72af0e7cce0522e, 0x8c892e5a6b0924f8, 0xdc3053ee5331a665, 0xb52e5a4e08ebfe8c],
 ];
 
 #[test]
@@ -6072,6 +6104,7 @@ fn code_reviews_views_paint_the_same_pixels() {
         (feature_tab_review_fixes(), 860),
         (feature_tab_review_ready(), 1180),
         (feature_tab_review_code(), 860),
+        (feature_tab_review_done(), 1180),
     ];
     check_each(&REVIEW_VIEWS, &golden, |painter, theme, scale, surface| {
         let (view, w) = &views[surface];
@@ -6100,6 +6133,7 @@ fn dump_review_views() {
         (feature_tab_review_fixes(), 860),
         (feature_tab_review_ready(), 1180),
         (feature_tab_review_code(), 860),
+        (feature_tab_review_done(), 1180),
     ];
     for (theme, scale) in CASES {
         for ((view, w), name) in views.iter().zip(REVIEW_VIEWS) {
@@ -6168,7 +6202,7 @@ const STATS_OUTPUT: (i32, i32) = (870, 720);
 
 /// The stats panel with nothing kept, read, in a feature's detail, after
 /// a failed read, and on its Agents tab, each from a fake index view.
-fn stats_views() -> [super::StatsView; 5] {
+fn stats_views() -> [super::StatsView; 6] {
     use crate::ai_work::stats::View;
     use crate::stats_panel::fixtures;
     let empty = fixtures::panel(|scope| {
@@ -6183,15 +6217,19 @@ fn stats_views() -> [super::StatsView; 5] {
     let mut agents = fixtures::panel(|_| None);
     agents.scope.tab = crate::ai_work::stats::Tab::Agents;
     agents.view = Some(Ok(fixtures::view(agents.scope.clone())));
-    [empty, loaded, detail, error, agents].map(|panel| panel.view(fixtures::NOW))
+    // The pointer on the second feature's trash button.
+    let mut delete = fixtures::panel(|scope| Some(Ok(fixtures::view(scope))));
+    delete.hover = Some(super::StatsHit::Delete(1));
+    [empty, loaded, detail, error, agents, delete].map(|panel| panel.view(fixtures::NOW))
 }
 
-const STATS: [&str; 5] = [
+const STATS: [&str; 6] = [
     "stats_empty",
     "stats_loaded",
     "stats_detail",
     "stats_error",
     "stats_agents",
+    "stats_delete_hover",
 ];
 
 fn paint_stats(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
@@ -6203,38 +6241,42 @@ fn paint_stats(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
 }
 
 /// The recorded hashes of `STATS`, per case in `CASES`.
-const GOLDEN_STATS: [[u64; 5]; 4] = [
+const GOLDEN_STATS: [[u64; 6]; 4] = [
     // Dark at 1
     [
-        0x3ecd7ae10491736d, // stats_empty
-        0x7ff1c5244db4a4bd, // stats_loaded
+        0x7ce62109153834eb, // stats_empty
+        0x6c6105487d2a09bd, // stats_loaded
         0x9a6b94f0298e73af, // stats_detail
-        0x4e7cc838543fc104, // stats_error
+        0x7f8a74f5703ea296, // stats_error
         0x60991de1592ee886, // stats_agents
+        0x7ad9b1510e0b96d2, // stats_delete_hover
     ],
     // Dark at 2
     [
-        0x6c4dc1ffbab0344c, // stats_empty
-        0xbc6749187627e251, // stats_loaded
+        0x42a94d0679740ce9, // stats_empty
+        0x93f49384440ab73b, // stats_loaded
         0xb19f933e3e7a7fce, // stats_detail
-        0x2b6e230562105139, // stats_error
+        0xb7302566af5b1ebc, // stats_error
         0xd7503278afc50519, // stats_agents
+        0x6a0508fd8b48fcb3, // stats_delete_hover
     ],
     // Light at 1
     [
-        0x6695908c94c81dd2, // stats_empty
-        0x8375ecb1097bdd5e, // stats_loaded
+        0xc2fc398c9ca048e8, // stats_empty
+        0x2894911b05035e9e, // stats_loaded
         0xc1d59a6f6af5ac0d, // stats_detail
-        0xa75f2212f3552f53, // stats_error
+        0x8f259b70cfde972d, // stats_error
         0xe49ef6e8b8245c36, // stats_agents
+        0x2a2080f3d62898ef, // stats_delete_hover
     ],
     // Light at 2
     [
-        0x2065c665d0b7b6f5, // stats_empty
-        0x92397aeafb1cfd13, // stats_loaded
+        0xb68169e238ab6ce5, // stats_empty
+        0x1a8ecda88d2183a2, // stats_loaded
         0x7babe280ab55f696, // stats_detail
-        0x4bff2eb6622e1e98, // stats_error
+        0xce7120c1de473188, // stats_error
         0xbacf9f97ed3f17a7, // stats_agents
+        0xc0d77a6855d31869, // stats_delete_hover
     ],
 ];
 

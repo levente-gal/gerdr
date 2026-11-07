@@ -603,8 +603,8 @@ pub struct ReviewSwitch {
     pub files: Option<ReviewFiles>,
     /// How the fixes stand: "2 of 3 made", "planning fixes".
     pub fixes: String,
-    /// What to do next, and whether that is all done but Approve; none says
-    /// only how many files are left.
+    /// What to do next, and whether it reads well: all done but Approve, or
+    /// approved; none says only how many files are left.
     pub next: Option<(String, bool)>,
     /// The review's actions, from the left: on the code's view alone.
     pub buttons: Vec<ReviewButton>,
