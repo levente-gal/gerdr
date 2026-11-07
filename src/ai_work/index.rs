@@ -288,6 +288,20 @@ pub fn prune(conn: &mut Connection) -> Result<usize, String> {
     Ok(gone.len())
 }
 
+/// Take feature `slug` of `project`, whose folder is `dir`, out of `conn`:
+/// its AI work is being deleted.
+pub fn forget(conn: &mut Connection, project: &str, slug: &str, dir: &Path) -> Result<(), String> {
+    let fail = |e: rusqlite::Error| e.to_string();
+    let tx = (conn.transaction_with_behavior(TransactionBehavior::Immediate)).map_err(fail)?;
+    let f = Feature {
+        project: project.to_owned(),
+        slug: slug.to_owned(),
+        dir,
+    };
+    wipe(&tx, &f, &format!("{}/", dir.display())).map_err(fail)?;
+    tx.commit().map_err(fail)
+}
+
 /// A feature being taken in: its names and its folder.
 struct Feature<'a> {
     project: String,
@@ -1445,6 +1459,31 @@ mod tests {
         assert_eq!(count(&conn, "notes"), 1);
         assert_eq!(count(&conn, "features"), 1);
         assert_eq!(prune(&mut conn), Ok(0));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_feature_forgotten_leaves_the_index_and_the_others_stay() {
+        let root = root("forget");
+        let (a, b) = (root.join("p").join("a"), root.join("p").join("b"));
+        append(&a, "here", &[note(0, 10)]);
+        append(&b, "here", &[note(0, 10)]);
+        let mut conn = open(&root).unwrap();
+        ingest(&mut conn, &[a.clone(), b.clone()]).unwrap();
+        assert_eq!(forget(&mut conn, "p", "b", &b), Ok(()));
+        assert_eq!(count(&conn, "notes"), 1);
+        assert_eq!(count(&conn, "features"), 1);
+        // How far its files were read went too: a new line is taken from
+        // the start.
+        let read: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM ingest WHERE path LIKE ?1",
+                [format!("{}/%", b.display())],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(read, 0);
+        assert_eq!(count(&conn, "ingest"), 1);
         let _ = std::fs::remove_dir_all(&root);
     }
 
