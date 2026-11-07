@@ -869,7 +869,7 @@ const GOLDEN: [[u64; 12]; 4] = [
         0xfc09c643c2d57ae1, // switcher
         0xe4d55e0a322e116f, // welcome
         0x1fac2c9284ad07fa, // quit
-        0x92a49c766cb37d1c, // project_menu
+        0xa153da032809bb28, // project_menu
         0xaf72881e8b741219, // project_form
         0xbd0d423ca3de12bd, // toast
         0x1b80b690e340528a, // agent_strip
@@ -884,7 +884,7 @@ const GOLDEN: [[u64; 12]; 4] = [
         0x1a39f33e0a29f83b, // switcher
         0xc6a2b9324f6b7b75, // welcome
         0x91306b9e268dc79d, // quit
-        0x68b0b29c55156a50, // project_menu
+        0xe4d3ddc977880896, // project_menu
         0x1d108a7b493c0cd1, // project_form
         0x8a9a152ce2a17651, // toast
         0x95f9334ab0c42dc0, // agent_strip
@@ -899,7 +899,7 @@ const GOLDEN: [[u64; 12]; 4] = [
         0x422064c274f92b90, // switcher
         0x232afdce7d51101b, // welcome
         0xc9fc61e2fab1872e, // quit
-        0xaf88a1744cdd63ab, // project_menu
+        0x2acadbe4552d8f00, // project_menu
         0xe2e62fecf8cb83c6, // project_form
         0x3023720e0af5627f, // toast
         0xa37db337f4fcec5f, // agent_strip
@@ -914,7 +914,7 @@ const GOLDEN: [[u64; 12]; 4] = [
         0x77eb0acf1f4d4fd5, // switcher
         0xc5b0dff47ac46d40, // welcome
         0x0a88810aa7ad751e, // quit
-        0xad9c7bc5aa554ff4, // project_menu
+        0xb1cf73a20f25f32b, // project_menu
         0x527909807a17afb5, // project_form
         0xd1410a8fb372b973, // toast
         0x8aeabdb50084b1d6, // agent_strip
@@ -2387,6 +2387,44 @@ fn dump_identity() {
     }
 }
 
+/// With `GERDR_DUMP_DIR` set, write the project menu there: as in the
+/// golden surfaces, and with the selected project's id being changed.
+#[test]
+fn dump_project_menu() {
+    let Some(dir) = std::env::var_os("GERDR_DUMP_DIR") else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    let _ = std::fs::create_dir_all(&dir);
+    let painter = Painter::new();
+    let size = (800, 600).into();
+    let mut changing = project_menu();
+    if let Some(MenuEntry::Project { renaming, .. }) = changing.entries.get_mut(3) {
+        *renaming = Some(crate::text_field::TextField::from("gerdr-app").line());
+    }
+    changing.hints = vec![
+        ("Enter".into(), "change id".into()),
+        ("Esc".into(), "cancel".into()),
+    ];
+    for (theme, scale) in CASES {
+        let p = theme.palette();
+        let px = |v: i32| (v as f64 * scale).round() as usize;
+        let tag = format!("{}_{}", theme.name(), scale);
+        for (name, view) in [
+            ("project_menu", project_menu()),
+            ("project_menu_id", changing.clone()),
+        ] {
+            let width = super::project_menu_layout(&view, size).panel.size.w + 2 * super::SHADOW;
+            dump(
+                &dir,
+                &format!("{name}_{tag}"),
+                painter.project_menu(&view, size, scale, p),
+                px(width),
+            );
+        }
+    }
+}
+
 // ------------------------------------------------------- connect a machine
 
 /// The dialog connecting a machine: empty, connecting, and after a failure
@@ -2937,6 +2975,8 @@ pub(super) fn feature_tab() -> super::FeatureTabView {
     ];
     FeatureTabView {
         review_page: false,
+        review_switch: None,
+        test_strip: None,
         review_keys: false,
         title: "Bulk export of invoices".into(),
         sub: "bulk-export \u{b7} ~/Work/aft/.features/bulk-export \u{b7} started 3h ago".into(),
@@ -3013,6 +3053,7 @@ pub(super) fn feature_tab() -> super::FeatureTabView {
                     .map(|(d, t)| (d, t.to_owned()))
                     .into(),
                     running: Vec::new(),
+                    buttons: Vec::new(),
                 },
                 PageSection::Milestones {
                     label: "Build".into(),
@@ -3029,6 +3070,7 @@ pub(super) fn feature_tab() -> super::FeatureTabView {
                     .map(|(d, t)| (d, t.to_owned()))
                     .into(),
                     running: vec![3, 4],
+                    buttons: Vec::new(),
                 },
             ],
         },
@@ -3460,6 +3502,7 @@ fn feature_tab_open_round() -> super::FeatureTabView {
             .map(|(d, t)| (d, t.to_owned()))
             .into(),
             running: Vec::new(),
+            buttons: Vec::new(),
         },
     );
     view
@@ -3857,6 +3900,210 @@ fn feature_tab_review_page() -> super::FeatureTabView {
     view
 }
 
+/// Code review's switch and its figures, in the given view.
+fn review_switch(view: super::ReviewView) -> super::ReviewSwitch {
+    super::ReviewSwitch {
+        view,
+        files: Some(super::ReviewFiles {
+            viewed: 3,
+            total: 8,
+            changed: 1,
+        }),
+        fixes: "1 of 2 made".into(),
+        next: None,
+        buttons: Vec::new(),
+    }
+}
+
+/// Code review's actions on its line: Add comment… lit, Plan fixes and
+/// Approve in `plan` and `approve`, Approve held up by `why`.
+fn review_buttons(
+    plan: super::ButtonStyle,
+    approve: super::ButtonStyle,
+    why: Option<&str>,
+) -> Vec<super::ReviewButton> {
+    use super::{ButtonStyle, ReposButton as B, ReviewButton};
+    let button = |button: B, style, key: &str, disabled: Option<&str>| ReviewButton {
+        button,
+        label: button.label().into(),
+        style,
+        key: key.into(),
+        disabled: disabled.map(Into::into),
+    };
+    let plan_why = (plan == ButtonStyle::Off).then_some("Add a comment first");
+    vec![
+        button(B::AddComment, ButtonStyle::Plain, "Shift+C", None),
+        button(B::PlanFixes, plan, "Ctrl+Shift+Enter", plan_why),
+        button(B::Approve, approve, "Ctrl+Enter", why),
+    ]
+}
+
+/// Code review's page on its code: the switch over the review, files left
+/// and Approve held up.
+fn feature_tab_review_code() -> super::FeatureTabView {
+    use super::ButtonStyle;
+    let mut view = feature_tab_review_page();
+    let mut switch = review_switch(super::ReviewView::Code);
+    switch.next = Some(("5 of 8 files left \u{b7} 1 changed since viewed".into(), false));
+    let why = Some("5 files not viewed: api/src/a.rs, api/src/b.rs, web/c.ts, …");
+    switch.buttons = review_buttons(ButtonStyle::Off, ButtonStyle::Off, why);
+    view.review_switch = Some(switch);
+    view
+}
+
+/// Code review's page with every file viewed and nothing holding it up:
+/// Approve is the one to press.
+fn feature_tab_review_ready() -> super::FeatureTabView {
+    use super::ButtonStyle;
+    let mut view = feature_tab_review_page();
+    let mut switch = review_switch(super::ReviewView::Code);
+    switch.files = Some(super::ReviewFiles {
+        viewed: 8,
+        total: 8,
+        changed: 0,
+    });
+    let next = "All 8 files viewed \u{b7} Approve to go on to Manual test";
+    switch.next = Some((next.into(), true));
+    switch.buttons = review_buttons(ButtonStyle::Off, ButtonStyle::Primary, None);
+    view.review_switch = Some(switch);
+    view
+}
+
+/// Code review's page once it is done: the review as it was worked, only to
+/// read, with Go to Manual test and Reopen on its line.
+fn feature_tab_review_done() -> super::FeatureTabView {
+    use super::{ButtonStyle, ReposButton as B, ReviewButton};
+    let mut view = feature_tab_review_page();
+    at_stage(&mut view, 7, super::NodeMark::Waiting, "to test");
+    select_node(&mut view, 6);
+    let mut switch = review_switch(super::ReviewView::Code);
+    switch.files = Some(super::ReviewFiles {
+        viewed: 8,
+        total: 8,
+        changed: 0,
+    });
+    switch.fixes = "none".into();
+    let next = "Approved \u{b7} only to read: Reopen to change it";
+    switch.next = Some((next.into(), true));
+    let button = |button: B, label: &str, style, key: &str| ReviewButton {
+        button,
+        label: label.into(),
+        style,
+        key: key.into(),
+        disabled: None,
+    };
+    switch.buttons = vec![
+        button(B::GoOn, "Go to Manual test", ButtonStyle::Primary, "Ctrl+Enter"),
+        button(B::Reopen, "Reopen", ButtonStyle::Plain, "Ctrl+Shift+Enter"),
+    ];
+    view.review_switch = Some(switch);
+    view
+}
+
+/// Code review's page on its fixes: the plan's card, the comments as cards, an
+/// earlier round folded, and the plan to read.
+fn feature_tab_review_fixes() -> super::FeatureTabView {
+    use super::{
+        ButtonStyle, CardStripe, CheckTone, FindingCard, FindingTag, NodeMark, PageButton,
+        PageSection, StagePage,
+    };
+    let mut view = feature_tab();
+    at_stage(&mut view, 6, NodeMark::Waiting, "3 of 8 files");
+    select_node(&mut view, 6);
+    view.review_switch = Some(review_switch(super::ReviewView::Fixes));
+    let button = |label: &str, style| PageButton {
+        label: label.into(),
+        style,
+    };
+    let card = |state: &str, place: &str, title: &str, made, stripe, buttons: Vec<usize>| {
+        PageSection::Finding(FindingCard {
+            sheet: None,
+            tag: FindingTag::Yours,
+            title: title.into(),
+            state: state.into(),
+            place: place.into(),
+            body: String::new(),
+            preview: Vec::new(),
+            fix: String::new(),
+            note: String::new(),
+            comment: String::new(),
+            comment_buttons: Vec::new(),
+            made,
+            faded: false,
+            collapsed: false,
+            stripe,
+            field: None,
+            field_hint: "",
+            selected: false,
+            buttons,
+        })
+    };
+    view.page = StagePage {
+        title: "Code review".into(),
+        about: "Read the change and comment on it".into(),
+        status: None,
+        buttons: vec![
+            button("Review", ButtonStyle::Primary),
+            button("Make fixes", ButtonStyle::Plain),
+            button("Drop plan\u{2026}", ButtonStyle::Quiet),
+            button("Edit\u{2026}", ButtonStyle::Plain),
+            button("Delete", ButtonStyle::Plain),
+            button("Show in diff", ButtonStyle::Quiet),
+            button("Show in diff", ButtonStyle::Quiet),
+            button("Show in diff", ButtonStyle::Quiet),
+            button("Show", ButtonStyle::Plain),
+        ],
+        sections: vec![
+            PageSection::File {
+                name: "Fix plan".into(),
+                state: tab_line("review comments \u{b7} fix plan ready", CheckTone::Ready),
+                buttons: vec![0, 1, 2],
+            },
+            PageSection::Lines {
+                label: "Comments \u{b7} 1 of 2 made".into(),
+                lines: Vec::new(),
+            },
+            card(
+                "goes with the fixes",
+                "src/new.rs:3",
+                "This should say what it waits for",
+                false,
+                None,
+                vec![3, 4, 5],
+            ),
+            card(
+                "sent to Build",
+                "C1 \u{b7} src/login.rs:12",
+                "Rename this to say it retries",
+                false,
+                Some(CardStripe::Sent),
+                vec![6],
+            ),
+            card(
+                "fix made",
+                "C2 \u{b7} src/retry.rs:40",
+                "Add a test for the last attempt",
+                true,
+                Some(CardStripe::Sent),
+                vec![7],
+            ),
+            PageSection::File {
+                name: "Round 1".into(),
+                state: tab_line("2 of 2 made", CheckTone::Note),
+                buttons: vec![8],
+            },
+            PageSection::Doc {
+                name: "fix-plan.md".into(),
+                blocks: std::sync::Arc::new(crate::md_blocks::blocks(
+                    "## Fixes\n\n### C1: Rename the loop\n\nIts name hides that it retries.\n\n\
+                     ### C2: Test the last attempt\n\nNothing checks the limit.\n",
+                )),
+            },
+        ],
+    };
+    view
+}
+
 /// Build current, a later stage's page picked: no buttons.
 fn feature_tab_later() -> super::FeatureTabView {
     use super::{CheckTone, PageSection, StagePage};
@@ -4019,6 +4266,7 @@ fn feature_tab_review_rounds() -> super::FeatureTabView {
     };
     let card = |tag, title: &str, state: &str, place: &str, fix: &str, faded, buttons| {
         PageSection::Finding(FindingCard {
+            sheet: None,
             tag,
             title: title.into(),
             state: state.into(),
@@ -4359,59 +4607,106 @@ fn feature_tab_manual_test(note: bool) -> super::FeatureTabView {
         button("Mark passed", ButtonStyle::Plain),
         button("Start sandbox\u{2026}", ButtonStyle::Plain),
     ];
-    let cards: [(&[&str], FindingTag, [&str; 4]); 4] = [
+    let (pass, fail, plain, quiet) = (
+        ButtonStyle::Passed,
+        ButtonStyle::Failed,
+        ButtonStyle::Plain,
+        ButtonStyle::Quiet,
+    );
+    // Its buttons, how it went, and its title, state, id, note and steps.
+    type Card<'a> = (&'a [(&'a str, ButtonStyle)], FindingTag, [&'a str; 5]);
+    let cards: [Card; 4] = [
         (
-            &["Clear", "Fail\u{2026}"],
+            &[("Pass", pass), ("Fail\u{2026}", plain)],
             FindingTag::Passed,
             [
-                "Given two invoices, when I export both, then one CSV holds both",
+                "Export holds both invoices",
                 "",
                 "AC-1",
                 "",
+                "Given two invoices\nWhen I export both\nThen one CSV holds both",
             ],
         ),
         (
-            &["Clear", "Edit note\u{2026}", "Pass"],
+            &[
+                ("Edit note\u{2026}", quiet),
+                ("Pass", plain),
+                ("Fail", fail),
+            ],
             FindingTag::Failed,
             [
-                "Given no invoices, when I export, then the button is off",
-                "sent to Build",
+                "Export off with no invoices",
+                "fix made: try again",
                 "AC-2",
                 "What went wrong: The button stays on and exports an empty file",
+                "Given no invoices\nWhen I export\nThen the button is off",
             ],
         ),
         (
-            &["Clear", "Edit note\u{2026}", "Pass"],
+            &[
+                ("Edit note\u{2026}", quiet),
+                ("Pass", plain),
+                ("Fail", fail),
+            ],
             FindingTag::Failed,
             [
-                "Given a cancelled invoice, when I export, then it is left out of the file and \
-                 of the total at the bottom of the page, and the count above the table goes \
-                 down by one",
+                "Cancelled invoices left out",
                 "",
                 "AC-3",
                 "What went wrong: It shows with a total of 0",
+                "Given a cancelled invoice\nWhen I export\nThen it is left out of the file and \
+                 of the total at the bottom of the page, and the count above the table goes \
+                 down by one",
             ],
         ),
         (
-            &["Pass", "Fail\u{2026}"],
+            &[("Pass", plain), ("Fail\u{2026}", if note { fail } else { plain })],
             FindingTag::NotRun,
             [
-                "Given 500 invoices, when I export, then it is done in a second",
+                "Export takes a second",
                 "",
                 "AC-4",
                 "",
+                "Given 500 invoices\nWhen I export\nThen it is done in a second",
             ],
         ),
     ];
-    let mut sections = vec![PageSection::Lines {
-        label: "Criteria".into(),
-        lines: vec![tab_line("uncommitted changes in api", CheckTone::Note)],
-    }];
-    for (i, (labels, tag, [title, state, place, said])) in cards.into_iter().enumerate() {
+    // The row folding them, at the caption's right.
+    let mut groups = Vec::new();
+    for word in ["Collapse", "Expand"] {
         let at = buttons.len();
-        buttons.extend(labels.iter().map(|l| button(l, ButtonStyle::Plain)));
+        buttons.extend(["All", "Done", "Seen"].map(|l| button(l, plain)));
+        groups.push((word.to_owned(), (at..at + 3).collect()));
+    }
+    let mut sections = vec![
+        PageSection::Lines {
+            label: "Criteria".into(),
+            lines: vec![tab_line("uncommitted changes in api", CheckTone::Note)],
+        },
+        PageSection::Toolbar { groups },
+    ];
+    for (i, (labels, tag, [title, state, place, said, steps])) in cards.into_iter().enumerate() {
+        let at = buttons.len();
+        buttons.extend(labels.iter().map(|(l, style)| button(l, *style)));
         let writing = note && i == 3;
+        let selected = i == if note { 3 } else { 2 };
+        // The one passed folded to its line, as passing left it.
+        let open = tag != FindingTag::Passed;
+        let steps = steps
+            .lines()
+            .map(|l| {
+                let (word, rest) = l.split_once(' ').unwrap_or(("", l));
+                let word = ["Given", "When", "Then"].into_iter().find(|w| *w == word);
+                (word.unwrap_or(""), rest.to_owned())
+            })
+            .collect();
         sections.push(PageSection::Finding(FindingCard {
+            sheet: Some(Box::new(super::SheetRow {
+                open,
+                steps,
+                hidden: false,
+                needle: String::new(),
+            })),
             tag,
             title: title.into(),
             state: state.into(),
@@ -4422,26 +4717,31 @@ fn feature_tab_manual_test(note: bool) -> super::FeatureTabView {
             note: said.into(),
             comment: String::new(),
             comment_buttons: Vec::new(),
-            made: false,
+            made: i == 1,
             faded: tag == FindingTag::Passed,
-            collapsed: false,
+            collapsed: !open,
             stripe: None,
             field: writing.then(|| Line::from("Takes 4 seconds")),
             field_hint: "",
-            selected: i == if note { 3 } else { 2 },
+            selected,
             buttons: (at..at + labels.len()).collect(),
         }));
     }
     view.page = StagePage {
         title: Stage::ManualTest.label().into(),
         about: Stage::ManualTest.about().into(),
-        status: Some(tab_line(
-            "1 of 4 criteria passed \u{b7} 2 failed",
-            CheckTone::Note,
-        )),
+        status: None,
         buttons,
         sections,
     };
+    // Its counts go in the bar over the page.
+    view.test_strip = Some(super::TestStrip {
+        search: None,
+        passed: 1,
+        failed: 2,
+        untested: 1,
+        text: "1 passed \u{b7} 2 failed \u{b7} 1 untested \u{b7} 1 fix made".into(),
+    });
     if note {
         view.hints = [("Enter", "save"), ("Esc", "save")]
             .iter()
@@ -4451,8 +4751,66 @@ fn feature_tab_manual_test(note: bool) -> super::FeatureTabView {
     view
 }
 
+/// Manual test's page searching its criteria for "total": only the one
+/// saying it shows, open, the places tinted, the field with the keys.
+fn feature_tab_manual_search() -> super::FeatureTabView {
+    use super::{PageSection, SearchBar};
+    let mut view = feature_tab_manual_test(false);
+    let needle = "total";
+    for section in &mut view.page.sections {
+        if let PageSection::Finding(card) = section
+            && let Some(sheet) = card.sheet.as_mut()
+        {
+            let says = sheet.steps.iter().any(|(_, t)| t.contains(needle));
+            sheet.hidden = !says;
+            sheet.needle = needle.into();
+            card.collapsed = !says;
+            card.selected = says;
+        }
+    }
+    if let Some(strip) = view.test_strip.as_mut() {
+        strip.search = Some(SearchBar {
+            query: Line::from(needle),
+            placeholder: "Search the criteria".into(),
+            count: "1 of 4".into(),
+            found: true,
+            focused: true,
+            whole: false,
+        });
+    }
+    view.hints = [("Enter", "to the criteria"), ("Esc", "clear")]
+        .iter()
+        .map(|(k, w)| ((*k).to_owned(), (*w).to_owned()))
+        .collect();
+    view
+}
+
+/// Manual test's page with its sandbox running, its app with three pages:
+/// a button for each past the first, all at the title.
+fn feature_tab_manual_pages() -> super::FeatureTabView {
+    use super::{ButtonStyle, PageButton};
+    let mut view = feature_tab_manual_test(false);
+    let button = |label: &str, style| PageButton {
+        label: label.into(),
+        style,
+    };
+    view.page.buttons[2] = button("Open app", ButtonStyle::Plain);
+    for (label, style) in [
+        ("Django admin", ButtonStyle::Quiet),
+        ("Expo web", ButtonStyle::Quiet),
+        ("Open to network\u{2026}", ButtonStyle::Quiet),
+        ("Restart", ButtonStyle::Quiet),
+        ("Reset data\u{2026}", ButtonStyle::Quiet),
+        ("Stop\u{2026}", ButtonStyle::Quiet),
+        ("Commands\u{2026}", ButtonStyle::Quiet),
+    ] {
+        view.page.buttons.push(button(label, style));
+    }
+    view
+}
+
 /// The feature tab's fixtures, by name.
-fn feature_tabs() -> [(&'static str, super::FeatureTabView); 39] {
+fn feature_tabs() -> [(&'static str, super::FeatureTabView); 41] {
     [
         ("tab_build", feature_tab()),
         ("tab_verify_fixes", feature_tab_verify_fixes()),
@@ -4501,12 +4859,14 @@ fn feature_tabs() -> [(&'static str, super::FeatureTabView); 39] {
         ("tab_plan_long", feature_tab_plan_long()),
         ("tab_manual_test", feature_tab_manual_test(false)),
         ("tab_manual_note", feature_tab_manual_test(true)),
+        ("tab_manual_pages", feature_tab_manual_pages()),
+        ("tab_manual_search", feature_tab_manual_search()),
         ("tab_review_rounds", feature_tab_review_rounds()),
     ]
 }
 
 /// Each fixture at the width it shows best at, and Build at all three.
-const TAB_SURFACES: [(&str, i32); 50] = [
+const TAB_SURFACES: [(&str, i32); 52] = [
     ("tab_build", 860),
     ("tab_build", 1180),
     ("tab_build", 1920),
@@ -4557,9 +4917,11 @@ const TAB_SURFACES: [(&str, i32); 50] = [
     ("tab_review_page", 1180),
     ("tab_open_round", 1180),
     ("tab_open_round", 860),
+    ("tab_manual_pages", 860),
+    ("tab_manual_search", 860),
 ];
 
-const FEATURE_TAB: [&str; 50] = [
+const FEATURE_TAB: [&str; 52] = [
     "tab_build_860",
     "tab_build_1180",
     "tab_build_1920",
@@ -4610,221 +4972,231 @@ const FEATURE_TAB: [&str; 50] = [
     "tab_review_page_1180",
     "tab_open_round_1180",
     "tab_open_round_860",
+    "tab_manual_pages_860",
+    "tab_manual_search_860",
 ];
 
 /// The recorded hashes of `FEATURE_TAB`, per case in `CASES`.
-const GOLDEN_FEATURE_TAB: [[u64; 50]; 4] = [
+const GOLDEN_FEATURE_TAB: [[u64; 52]; 4] = [
     // Dark at 1
     [
-        0x0c5cd62f96736e5f, // tab_build_860
-        0xacdcc1228748329f, // tab_build_1180
-        0x51567cab9f1a38d4, // tab_build_1920
-        0x6d1d30bee391634f, // tab_plan_ready_1180
-        0x1dafe75dbc5e3ddf, // tab_verify_failed_1920
-        0x705780f9825ffc0d, // tab_verify_running_1180
-        0xd58038e6879bc3b5, // tab_fix_plan_860
-        0x6593336c4e9170fe, // tab_ship_blocked_1180
-        0x1453ea7146797724, // tab_ship_routes_1180
-        0x4ed9f62fec9cdd8f, // tab_ship_routes_860
-        0xdc0f841b697e0faf, // tab_ship_finish_1180
-        0xc84ad179fa1d4cb0, // tab_done_1920
-        0x5a30a60f1819d5a3, // tab_later_860
-        0x52f6fd370e49415e, // tab_repos_1180
-        0x59ad0faa83a67a50, // tab_unfolded_860
-        0xac7f4c780de70f0e, // tab_unfolded_1920
-        0xdc9c40727cb16319, // tab_shipped_1180
-        0xd234afd29abfc653, // tab_repos_failed_1180
-        0x07dc987a2b262329, // tab_repos_error_860
-        0xb9392b15e8d6aaf3, // tab_more_repos_850
-        0x506f75707b913434, // tab_more_repos_mid_850
-        0x8c5e5b46def65b60, // tab_rail_wrap_500
-        0x19c7e47429d749e0, // tab_rail_wrap_1180
-        0x86280be84d96c4fd, // tab_picks_later_1180
-        0xdc5364db8c9f9d9f, // tab_picks_running_860
-        0x1d7aecf6a9fa9858, // tab_model_later_1180
-        0x6e1edfb6b6b8c5f2, // tab_model_long_860
-        0x885ce43c6c7cc176, // tab_t3_draft_860
-        0xe202d14300600c31, // tab_milestone_mode_1180
-        0xc583dc2c6fbb13ee, // tab_milestone_mode_860
-        0xf470660985799afd, // tab_held_860
-        0x590175d8e76f5852, // tab_resume_1180
-        0x2afc5cb3c3c0b32a, // tab_resume_860
-        0x0457aae1c59cec30, // tab_fixing_1180
-        0x73e1c05a3e22d04a, // tab_fixed_code_1180
-        0xe6719118f2cfb2f7, // tab_fixed_code_860
-        0xc02a040a3a2fa764, // tab_approved_1180
-        0xc7e251ac87b1d6cd, // tab_locked_1180
-        0xbad314be5419157f, // tab_start_over_1180
-        0x9c43cde7e6f778c1, // tab_discover_brief_1180
-        0x60105fb03f2a047c, // tab_discover_brief_860
-        0x303b7441acc09af0, // tab_plan_long_1180
-        0x7bedaa61fef0bf04, // tab_manual_test_1180
-        0x059caf3fa61d55f9, // tab_manual_note_860
-        0x1d7f2de06d4d35c5, // tab_review_rounds_1180
-        0x967217b05446e4e5, // tab_verify_fixes_1180
-        0x4c2d82ca7b08de00, // tab_verify_fixes_860
-        0xc3c0eb01c731fa77, // tab_review_page_1180
-        0x690bdaa149241054, // tab_open_round_1180
-        0xb889d443411470c1, // tab_open_round_860
+        0xa1cb47fc387244fb, // tab_build_860
+        0xe439bc6e843af18f, // tab_build_1180
+        0x5e841e6e2835a33f, // tab_build_1920
+        0xe189a91009663b5f, // tab_plan_ready_1180
+        0xe5c6b54fe50866d8, // tab_verify_failed_1920
+        0x182a16a4819b681d, // tab_verify_running_1180
+        0x82bb7f6171efd999, // tab_fix_plan_860
+        0x5a50ecfcc094d3ce, // tab_ship_blocked_1180
+        0x47bcafcac87dbe34, // tab_ship_routes_1180
+        0x3f86b0346bf552cb, // tab_ship_routes_860
+        0xad0003676bd9219f, // tab_ship_finish_1180
+        0x426ec15d8a3d8d53, // tab_done_1920
+        0xcc415c3a7a99a7ff, // tab_later_860
+        0x976a61eaa755274e, // tab_repos_1180
+        0xeb30a9a866fdf824, // tab_unfolded_860
+        0xa9a0b346455ef4a5, // tab_unfolded_1920
+        0x04e5e35642817215, // tab_shipped_1180
+        0x81472ba0294ba9a3, // tab_repos_failed_1180
+        0x7bd54bcba61e72c5, // tab_repos_error_860
+        0xef44c914ca5fffc7, // tab_more_repos_850
+        0xb5a3233ac93c9508, // tab_more_repos_mid_850
+        0x60ded0b28fb6bee3, // tab_rail_wrap_500
+        0x716b40ef5a012cb0, // tab_rail_wrap_1180
+        0xd82dd2c9a82f222d, // tab_picks_later_1180
+        0x523374f3503f6b33, // tab_picks_running_860
+        0x5b4ea1e7416a2668, // tab_model_later_1180
+        0x5a5068350321a55e, // tab_model_long_860
+        0x1b190673f5a76dea, // tab_t3_draft_860
+        0x399e4a5edb3d0e41, // tab_milestone_mode_1180
+        0x357b66d29749d302, // tab_milestone_mode_860
+        0x3daadf48429854b9, // tab_held_860
+        0xdd57288e450f32e2, // tab_resume_1180
+        0x1d3b7ea983d73226, // tab_resume_860
+        0x37ef3c6e3ca8a6a0, // tab_fixing_1180
+        0x8321e646c7b94f9a, // tab_fixed_code_1180
+        0xd2b31d606f880bab, // tab_fixed_code_860
+        0x9b367d320c5201f4, // tab_approved_1180
+        0xf2b01358173773fd, // tab_locked_1180
+        0x7561d1ebf47b39af, // tab_start_over_1180
+        0xe697af65a0b1ba91, // tab_discover_brief_1180
+        0xc7901979745e2440, // tab_discover_brief_860
+        0xcc41ad7a9ec091c0, // tab_plan_long_1180
+        0xda3254659545ff6d, // tab_manual_test_1180
+        0xd356fc844361740e, // tab_manual_note_860
+        0xaae0ccef435a4695, // tab_review_rounds_1180
+        0x1cdf599525fd2195, // tab_verify_fixes_1180
+        0x1f9c87379eb46eac, // tab_verify_fixes_860
+        0x991d1848f7033107, // tab_review_page_1180
+        0x1ab3028834af4e64, // tab_open_round_1180
+        0xae6244bc63e11d4d, // tab_open_round_860
+        0x3ca562e56cb5ac79, // tab_manual_pages_860
+        0xebe69c2a656a36be, // tab_manual_search_860
     ],
     // Dark at 2
     [
-        0x13ec65cce10eba04, // tab_build_860
-        0x207273134f4d141a, // tab_build_1180
-        0x89ae0d09cf0b9b55, // tab_build_1920
-        0x593c7d1bb14a1a86, // tab_plan_ready_1180
-        0x44d0475998d4d13e, // tab_verify_failed_1920
-        0xf0eb2e78cd177599, // tab_verify_running_1180
-        0x24d61c0b9975c364, // tab_fix_plan_860
-        0xe5b990fb91fcb418, // tab_ship_blocked_1180
-        0x3c2d2c92d23ad8ff, // tab_ship_routes_1180
-        0xce808ddc77bd60f0, // tab_ship_routes_860
-        0x2860efe9da38da64, // tab_ship_finish_1180
-        0xf809a4468254429e, // tab_done_1920
-        0x6a052c95033f9f1a, // tab_later_860
-        0xef9830fc0884d09f, // tab_repos_1180
-        0x7373230d7d7bbdec, // tab_unfolded_860
-        0x1aec47ff0ee6274f, // tab_unfolded_1920
-        0x2094b8b49ffbaff5, // tab_shipped_1180
-        0x2dbc14e5bf9c8b51, // tab_repos_failed_1180
-        0xc855efa55e283203, // tab_repos_error_860
-        0xf57a55aa5545c1ff, // tab_more_repos_850
-        0xb41478523217586b, // tab_more_repos_mid_850
-        0x6efcbac42858115e, // tab_rail_wrap_500
-        0x985952b5b3835dd1, // tab_rail_wrap_1180
-        0x4af50511adea061b, // tab_picks_later_1180
-        0xd43128d3c6ad771c, // tab_picks_running_860
-        0x167251e4643ce090, // tab_model_later_1180
-        0xea7a05269d827ee3, // tab_model_long_860
-        0x0f8ab53dfe243414, // tab_t3_draft_860
-        0x715137af259efdb0, // tab_milestone_mode_1180
-        0x20fa1c94a22bcd8d, // tab_milestone_mode_860
-        0x2e4b112c2db3a0df, // tab_held_860
-        0x50dc334d8df8ed58, // tab_resume_1180
-        0x2c9b2022e5353d9a, // tab_resume_860
-        0x62b66e085fba8f02, // tab_fixing_1180
-        0x663114b8596c55d2, // tab_fixed_code_1180
-        0xdea2e368e93b52b4, // tab_fixed_code_860
-        0xacf05673e7183f9d, // tab_approved_1180
-        0x967bf963285fba45, // tab_locked_1180
-        0xa62dd821024a0c4e, // tab_start_over_1180
-        0xb6ecd8a76e90440b, // tab_discover_brief_1180
-        0x2afbd3dc2ef99dd7, // tab_discover_brief_860
-        0x4c725a8e72188161, // tab_plan_long_1180
-        0xd70a8706404f184b, // tab_manual_test_1180
-        0x31c9a56724d35a67, // tab_manual_note_860
-        0xe2b93c938615029d, // tab_review_rounds_1180
-        0x256aa7fb75c56272, // tab_verify_fixes_1180
-        0x24a87f737f4e7e9e, // tab_verify_fixes_860
-        0x63268c0db2af8304, // tab_review_page_1180
-        0x867565f4c31e2a75, // tab_open_round_1180
-        0x3b6c48acde676697, // tab_open_round_860
+        0x1813f1afbef89404, // tab_build_860
+        0x791a3739a7050d68, // tab_build_1180
+        0x4efdc144802d38f8, // tab_build_1920
+        0xd84ef3781722f490, // tab_plan_ready_1180
+        0xd1ad4571a21deadf, // tab_verify_failed_1920
+        0xe95f15636a93b97f, // tab_verify_running_1180
+        0x28fda7ee775f9d64, // tab_fix_plan_860
+        0x41161f008a5bd7ae, // tab_ship_blocked_1180
+        0x0edbde3fc83da971, // tab_ship_routes_1180
+        0xd2a819bf55a73af0, // tab_ship_routes_860
+        0xbbd5ef5f84b78c62, // tab_ship_finish_1180
+        0x90a36aaee3d0aa1f, // tab_done_1920
+        0x6e2cb877e129791a, // tab_later_860
+        0x4d3e881637bfd165, // tab_repos_1180
+        0x779aaef05b6597ec, // tab_unfolded_860
+        0x93365c790b704686, // tab_unfolded_1920
+        0x0a0e10a081f275bb, // tab_shipped_1180
+        0x2ffda56703f0873f, // tab_repos_failed_1180
+        0xcc7d7b883c120c03, // tab_repos_error_860
+        0xdbc07eeaf469deff, // tab_more_repos_850
+        0x9a5aa192d13b756b, // tab_more_repos_mid_850
+        0x5f4b22f7e4ddefbb, // tab_rail_wrap_500
+        0x55856d90dae1dbb3, // tab_rail_wrap_1180
+        0x8baf7d92f24cc865, // tab_picks_later_1180
+        0xd858b4b6a497511c, // tab_picks_running_860
+        0x289abf81f924a67e, // tab_model_later_1180
+        0xeea191097b6c58e3, // tab_model_long_860
+        0x13b24120dc0e0e14, // tab_t3_draft_860
+        0x25e2289954f2fd82, // tab_milestone_mode_1180
+        0x2521a8778015a78d, // tab_milestone_mode_860
+        0x32729d0f0b9d7adf, // tab_held_860
+        0x5e8649fc158bfc2e, // tab_resume_1180
+        0x30c2ac05c31f179a, // tab_resume_860
+        0x8687d8dffc051930, // tab_fixing_1180
+        0xe5309f5ebcaf5328, // tab_fixed_code_1180
+        0xe2ca6f4bc7252cb4, // tab_fixed_code_860
+        0xb003336ceee49767, // tab_approved_1180
+        0xc4a02e8c5e16bf27, // tab_locked_1180
+        0xd146cd83aa7b15e4, // tab_start_over_1180
+        0x22f0bccd99fd3099, // tab_discover_brief_1180
+        0x2f235fbf0ce377d7, // tab_discover_brief_860
+        0x371817eb8ef63723, // tab_plan_long_1180
+        0xd9c655ce9a75a8df, // tab_manual_test_1180
+        0xa6da4ebd7e0ae33f, // tab_manual_note_860
+        0x696373a9ac9ae597, // tab_review_rounds_1180
+        0xf6449d4a64d596b8, // tab_verify_fixes_1180
+        0x28d00b565d38589e, // tab_verify_fixes_860
+        0xa37c484a9e95f3ca, // tab_review_page_1180
+        0xb6c596e311face93, // tab_open_round_1180
+        0x3f93d48fbc514097, // tab_open_round_860
+        0x638d93fbc6e1f713, // tab_manual_pages_860
+        0xf221ec8385fae2e3, // tab_manual_search_860
     ],
     // Light at 1
     [
-        0x07e5523d44052654, // tab_build_860
-        0x0a746ba1c63cec76, // tab_build_1180
-        0x2d2872d03da74ed1, // tab_build_1920
-        0xe17790a2a4ef082d, // tab_plan_ready_1180
-        0x597405476fa9ac15, // tab_verify_failed_1920
-        0xd2c6a31dfcff2b94, // tab_verify_running_1180
-        0x779b3d884ea811b6, // tab_fix_plan_860
-        0x68c9335f5d0bddc8, // tab_ship_blocked_1180
-        0x1bf306c69f0761d5, // tab_ship_routes_1180
-        0x6522e25a1b3f7eba, // tab_ship_routes_860
-        0xa67ecff2653d16bc, // tab_ship_finish_1180
-        0x422097817ee1883a, // tab_done_1920
-        0xdc3f655e2085c5dc, // tab_later_860
-        0x03e8cfa58ae82c40, // tab_repos_1180
-        0x15327d38d0036ad9, // tab_unfolded_860
-        0xa1bd20fa80aa3a02, // tab_unfolded_1920
-        0xa9438e0d1c3c381a, // tab_shipped_1180
-        0x25892212e8e97749, // tab_repos_failed_1180
-        0x26e29a97f26c6e14, // tab_repos_error_860
-        0x3f6003f8eb4a3402, // tab_more_repos_850
-        0xe0e4790309abf4d0, // tab_more_repos_mid_850
-        0x2a60c2024a67881d, // tab_rail_wrap_500
-        0xd0f7ac723a24c39f, // tab_rail_wrap_1180
-        0x31328e3ccb2604d5, // tab_picks_later_1180
-        0xd3c21a0edd74812c, // tab_picks_running_860
-        0x43eac6968d217467, // tab_model_later_1180
-        0xd5c2af42a4031d10, // tab_model_long_860
-        0x8325f1b391e76a49, // tab_t3_draft_860
-        0x0706a14f0fbce502, // tab_milestone_mode_1180
-        0xc4264220b1efef0a, // tab_milestone_mode_860
-        0xd8889f1a30a2ff09, // tab_held_860
-        0xb784013d31d97502, // tab_resume_1180
-        0x0abb56ebe7ce22d8, // tab_resume_860
-        0xfe7da72677934d37, // tab_fixing_1180
-        0x4afe9502a96ae747, // tab_fixed_code_1180
-        0x1b4701425a1837ba, // tab_fixed_code_860
-        0x8c45a23da175031d, // tab_approved_1180
-        0x85a6313a1fb34e58, // tab_locked_1180
-        0x60ce71b5b40de0e8, // tab_start_over_1180
-        0x9f8a0adf0b5ecb70, // tab_discover_brief_1180
-        0x2815cc9241ce69c9, // tab_discover_brief_860
-        0xf09480b2d91aa016, // tab_plan_long_1180
-        0x2f2f6ac844f37a05, // tab_manual_test_1180
-        0x4ee34eae8ddb8264, // tab_manual_note_860
-        0x12fa13a9ec4aac6c, // tab_review_rounds_1180
-        0x413b22cde446fe3c, // tab_verify_fixes_1180
-        0xa003eee074b4dc4e, // tab_verify_fixes_860
-        0x4fa6d907684af5e4, // tab_review_page_1180
-        0x8c28e3f4bd817367, // tab_open_round_1180
-        0xe300a128161a2f18, // tab_open_round_860
+        0x9fe5226d7f54bfe8, // tab_build_860
+        0x9bb2694db8c65bdd, // tab_build_1180
+        0x9e1efe8b0cb41b26, // tab_build_1920
+        0xbd427b01de8543f6, // tab_plan_ready_1180
+        0x7c07bc659866d87e, // tab_verify_failed_1920
+        0x4a8e336fe34d7a13, // tab_verify_running_1180
+        0xf0f24acb3a4499c2, // tab_fix_plan_860
+        0x8f1d878a66cd4e33, // tab_ship_blocked_1180
+        0x2083802d8d04668a, // tab_ship_routes_1180
+        0x79aa1577f500bb1e, // tab_ship_routes_860
+        0xce65a05e867740c3, // tab_ship_finish_1180
+        0xb2b62b674cb05405, // tab_done_1920
+        0x94793a1c5513c298, // tab_later_860
+        0x283dffaf193a122b, // tab_repos_1180
+        0x1c519fda445b0165, // tab_unfolded_860
+        0x20dbf102ddafdfa1, // tab_unfolded_1920
+        0x5b330bf0d9c30f69, // tab_shipped_1180
+        0x96a55c04b91c96ae, // tab_repos_failed_1180
+        0x4b827bc5d4a22378, // tab_repos_error_860
+        0x286417632bb9751e, // tab_more_repos_850
+        0x18c7a26f85b1fcec, // tab_more_repos_mid_850
+        0x70a81da1b6817435, // tab_rail_wrap_500
+        0x1a5e937548fa7f50, // tab_rail_wrap_1180
+        0x9cbfe325692a158e, // tab_picks_later_1180
+        0xeebeaeef72d99d78, // tab_picks_running_860
+        0x57c74b45fd9d3840, // tab_model_later_1180
+        0x1875a99afb819f1c, // tab_model_long_860
+        0xfc9fc69cee351bb5, // tab_t3_draft_860
+        0xb5ee209b2e91e529, // tab_milestone_mode_1180
+        0x2028b1f71ea7076e, // tab_milestone_mode_860
+        0x2da12a0b77b87f7d, // tab_held_860
+        0x06e5930e69a1bf8d, // tab_resume_1180
+        0xa3c3da37be3f43ac, // tab_resume_860
+        0x25a49252fee1fa58, // tab_fixing_1180
+        0x83816428fbbefe7c, // tab_fixed_code_1180
+        0x5a22cd3eb219f9be, // tab_fixed_code_860
+        0xf19adff484ee2b2a, // tab_approved_1180
+        0x7f803f198678b403, // tab_locked_1180
+        0x7b90aece3880d81f, // tab_start_over_1180
+        0x0dd9604ad2510baf, // tab_discover_brief_1180
+        0x038d08ac68187bad, // tab_discover_brief_860
+        0x09cb9855696f5c01, // tab_plan_long_1180
+        0xa3e0ebbd2a4604b0, // tab_manual_test_1180
+        0x5673f5d1da0365bf, // tab_manual_note_860
+        0x29372c9287bd44bf, // tab_review_rounds_1180
+        0x6d347c11e8a9dfb7, // tab_verify_fixes_1180
+        0x490ed3d87f30d272, // tab_verify_fixes_860
+        0xc80d83cdbecf59b3, // tab_review_page_1180
+        0xcf3c025a23ff89a8, // tab_open_round_1180
+        0xa5b2c702e3dcfd64, // tab_open_round_860
+        0x3d753e7555e243d8, // tab_manual_pages_860
+        0x0cc17567dfb80ce6, // tab_manual_search_860
     ],
     // Light at 2
     [
-        0x503c7adc9f87e77a, // tab_build_860
-        0xddacdb6e80f99db8, // tab_build_1180
-        0x4b573169a41e8ce7, // tab_build_1920
-        0xc6f0a571ea0cc1f2, // tab_plan_ready_1180
-        0x3989ce6c0c498f04, // tab_verify_failed_1920
-        0xa31b5cc9500b8e79, // tab_verify_running_1180
-        0xcd048fc2697d05aa, // tab_fix_plan_860
-        0x2a5350735340d018, // tab_ship_blocked_1180
-        0x05662c9c9ca4e2b9, // tab_ship_routes_1180
-        0x159bac5fcb2834aa, // tab_ship_routes_860
-        0x43827fadfdbd3285, // tab_ship_finish_1180
-        0x55b3ffc5968742d1, // tab_done_1920
-        0x61769b89d2a74f1f, // tab_later_860
-        0x71700d3dc4d2dedf, // tab_repos_1180
-        0x316c208d945aed47, // tab_unfolded_860
-        0x159340df1bf6f928, // tab_unfolded_1920
-        0xae6981f0bd2fd6a2, // tab_shipped_1180
-        0x9715e9f3e4c99161, // tab_repos_failed_1180
-        0xbcafbabd8a86e802, // tab_repos_error_860
-        0xc9508754281569f1, // tab_more_repos_850
-        0xab4e5d0f9bf7a415, // tab_more_repos_mid_850
-        0x710557dec136ae51, // tab_rail_wrap_500
-        0xa3529de321595ed5, // tab_rail_wrap_1180
-        0x6c84c7ac7f402bb9, // tab_picks_later_1180
-        0xafac4d80fffe67fe, // tab_picks_running_860
-        0x74948172af8ae943, // tab_model_later_1180
-        0x7086348067ee6579, // tab_model_long_860
-        0x3f782f645d478770, // tab_t3_draft_860
-        0xec9f26bb28b73bde, // tab_milestone_mode_1180
-        0x7d68736f673ca71a, // tab_milestone_mode_860
-        0x1113241219c9aacd, // tab_held_860
-        0xdb66fe7bd8a59377, // tab_resume_1180
-        0x1d1cb8c789ad1f71, // tab_resume_860
-        0x78d69cb17c06f013, // tab_fixing_1180
-        0x42275b15ee10bdd1, // tab_fixed_code_1180
-        0xeacd8d7ab9644d00, // tab_fixed_code_860
-        0xdbe23bbdd982808d, // tab_approved_1180
-        0xea397455330096c8, // tab_locked_1180
-        0xd3f19be994f92644, // tab_start_over_1180
-        0xcd9ffc1b80d5ad81, // tab_discover_brief_1180
-        0x3fc79af6007fde4d, // tab_discover_brief_860
-        0xb97286d3085e1e53, // tab_plan_long_1180
-        0xc8c4083d6fbad237, // tab_manual_test_1180
-        0x7d79a05f821f26d0, // tab_manual_note_860
-        0x9f8d73cd2f79e70c, // tab_review_rounds_1180
-        0x9af7e6f088696947, // tab_verify_fixes_1180
-        0xce6a2f2d95085ef0, // tab_verify_fixes_860
-        0x7de225c3c6b86c3c, // tab_review_page_1180
-        0xc3045f2e3ac0184a, // tab_open_round_1180
-        0x4315061256ef4e22, // tab_open_round_860
+        0x7f27ddfbd3ee1cca, // tab_build_860
+        0x6d7f9ad149916b76, // tab_build_1180
+        0x77a01303162dca9a, // tab_build_1920
+        0x765df7bc08d22fb0, // tab_plan_ready_1180
+        0x834e87d1b77bb685, // tab_verify_failed_1920
+        0x82805a0d8a12c5b7, // tab_verify_running_1180
+        0x0c25cafde96fceda, // tab_fix_plan_860
+        0xf9b724da9768cf8e, // tab_ship_blocked_1180
+        0xd891c3261b8c5337, // tab_ship_routes_1180
+        0xd0a0f2ea13ee735a, // tab_ship_routes_860
+        0x6f8069682d015e87, // tab_ship_finish_1180
+        0x430e69f233dbc908, // tab_done_1920
+        0x973f418bd020aecf, // tab_later_860
+        0xcb423e520618727d, // tab_repos_1180
+        0x2723014455f0ac97, // tab_unfolded_860
+        0xeb7e4df37f643511, // tab_unfolded_1920
+        0x287d19ae79556ac4, // tab_shipped_1180
+        0x1bf86e4e01f7dfe7, // tab_repos_failed_1180
+        0xbf1bb5086a68b5b2, // tab_repos_error_860
+        0xa727912a15f49241, // tab_more_repos_850
+        0x5101d91b272b6165, // tab_more_repos_mid_850
+        0x6363e3b4c300bab7, // tab_rail_wrap_500
+        0x7417ef85da3d7fa7, // tab_rail_wrap_1180
+        0xf7066df5c259ecf7, // tab_picks_later_1180
+        0x61baf4140acc772e, // tab_picks_running_860
+        0xe21cfcfdfbe96e55, // tab_model_later_1180
+        0x83de7249a97db3c9, // tab_model_long_860
+        0x59cc00aad601ffe0, // tab_t3_draft_860
+        0xb5503f8cd4b47c38, // tab_milestone_mode_1180
+        0x7a752d7c956977ca, // tab_milestone_mode_860
+        0x3d244f2c3d21f79d, // tab_held_860
+        0x02071bcc4b2b9ced, // tab_resume_1180
+        0xb0d99250844e1321, // tab_resume_860
+        0xe86e179b29262da5, // tab_fixing_1180
+        0xfefd74873e1b308b, // tab_fixed_code_1180
+        0x6f50a852c4a3c270, // tab_fixed_code_860
+        0x094c66e22d9bdfdb, // tab_approved_1180
+        0xf689681c2eec0052, // tab_locked_1180
+        0xba74f3edaf07f8ca, // tab_start_over_1180
+        0x85626dff437b80ab, // tab_discover_brief_1180
+        0x6955e849ed161c3d, // tab_discover_brief_860
+        0x22810cee688c087d, // tab_plan_long_1180
+        0x3ede05e76054f570, // tab_manual_test_1180
+        0x474d8c1cfa1394f7, // tab_manual_note_860
+        0x18a3b0870e7a6ac2, // tab_review_rounds_1180
+        0x975a0edb5a888f19, // tab_verify_fixes_1180
+        0x06334814357ca080, // tab_verify_fixes_860
+        0xb7f9bee96811fb6a, // tab_review_page_1180
+        0x05be9740c8c25364, // tab_open_round_1180
+        0xfafa8c8fa68aecb2, // tab_open_round_860
+        0xcba476b8512b8cc8, // tab_manual_pages_860
+        0x44ba953b9b4a7da9, // tab_manual_search_860
     ],
 ];
 
@@ -4962,6 +5334,7 @@ fn tab_findings() -> super::FeatureTabView {
             (end..end + 2).collect()
         };
         view.page.sections.push(PageSection::Finding(FindingCard {
+            sheet: None,
             tag,
             title: title.into(),
             state: state.into(),
@@ -5085,6 +5458,7 @@ fn tab_checks() -> super::FeatureTabView {
             view.page.buttons.push(button(label, ButtonStyle::Plain));
         }
         view.page.sections.push(PageSection::Finding(FindingCard {
+            sheet: None,
             tag,
             title: title.into(),
             state: state.into(),
@@ -5156,29 +5530,29 @@ const FINDINGS: [&str; 4] = [
 const GOLDEN_FINDINGS: [[u64; 4]; 4] = [
     // Dark at 1
     [
-        0xc854159a6c34d76e, // tab_findings_1180
-        0xab2baa34613b3d1e, // tab_findings_860
+        0x482d5f412c91dade, // tab_findings_1180
+        0x0fb25411cd881a52, // tab_findings_860
         0xc8e97861327a6f3d, // finding_dialog
         0x79e255ab5a829143, // finding_dialog_error
     ],
     // Dark at 2
     [
-        0xa04022e7aa2ac49f, // tab_findings_1180
-        0x30e7027e073ebf7c, // tab_findings_860
+        0xd2e5791549724869, // tab_findings_1180
+        0x350e8e60e528997c, // tab_findings_860
         0x43f1532742f932ff, // finding_dialog
         0xb736e6151427fb01, // finding_dialog_error
     ],
     // Light at 1
     [
-        0xd91acae4443c9f58, // tab_findings_1180
-        0xfc142d576fbc2140, // tab_findings_860
+        0xcc394981314fee87, // tab_findings_1180
+        0x89128c839add7414, // tab_findings_860
         0x3af0633810888402, // finding_dialog
         0x2f19c19c900552df, // finding_dialog_error
     ],
     // Light at 2
     [
-        0xa804ea098aa11b7e, // tab_findings_1180
-        0xa45457d341a588f7, // tab_findings_860
+        0x500881f99e44e624, // tab_findings_1180
+        0x84a2fd05fc3341e7, // tab_findings_860
         0xa9c6bc076a8eb05a, // finding_dialog
         0x1e721b2638489f69, // finding_dialog_error
     ],
@@ -5606,6 +5980,7 @@ fn listed_review(flat: bool) -> super::ReposView {
     use super::{Check, DirLine, FileLine, LineState, RepoLine, TreeLine};
     let file = |path: &str, check, depth, added, removed, comments| {
         TreeLine::File(FileLine {
+            viewed: check == Check::On,
             check,
             code: 'M',
             path: path.into(),
@@ -5652,6 +6027,8 @@ fn listed_review(flat: bool) -> super::ReposView {
     let total = lines.len();
     super::ReposView {
         diff_tree: true,
+        tree_nav: Some(true),
+        tree_note: Some(("12 of 31 files left".into(), super::Tone::Warning)),
         flat,
         tree_share: super::REVIEW_TREE_SHARE,
         grouping: crate::repos::Grouping::Folders,
@@ -5717,8 +6094,8 @@ const GOLDEN_DOC_TAB: [[u64; 16]; 4] = [
         0x6f1041c7f50aca45, // popup_code_review_850
         0x07ad73f54e3e101c, // popup_no_comments_1180
         0x08ab19690c613d25, // popup_no_comments_850
-        0x6c93117995af7046, // popup_listed_1180
-        0x893c019f611419ee, // inline_listed_1180
+        0xd21560c9a783804d, // popup_listed_1180
+        0x3b5db476e7b52529, // inline_listed_1180
     ],
     // Dark at 2
     [
@@ -5736,8 +6113,8 @@ const GOLDEN_DOC_TAB: [[u64; 16]; 4] = [
         0x2ebeec0af5c2ef1b, // popup_code_review_850
         0x04f0f9c1258af57a, // popup_no_comments_1180
         0x654aa94035b7bbae, // popup_no_comments_850
-        0xe300ffa270cdca65, // popup_listed_1180
-        0xbb06c362572d0b69, // inline_listed_1180
+        0x8f448f5322832f16, // popup_listed_1180
+        0x9a0d83469e09aac2, // inline_listed_1180
     ],
     // Light at 1
     [
@@ -5755,8 +6132,8 @@ const GOLDEN_DOC_TAB: [[u64; 16]; 4] = [
         0xdc7251d500deedf7, // popup_code_review_850
         0x078b0def98e11797, // popup_no_comments_1180
         0x0f750109c62c42b8, // popup_no_comments_850
-        0xc9e494d0472d5184, // popup_listed_1180
-        0x51f3d2ac97eb79d4, // inline_listed_1180
+        0xa16b5b7e08cc2dc7, // popup_listed_1180
+        0xad31f141b1186eb7, // inline_listed_1180
     ],
     // Light at 2
     [
@@ -5774,8 +6151,8 @@ const GOLDEN_DOC_TAB: [[u64; 16]; 4] = [
         0x648afae740203419, // popup_code_review_850
         0x2435e6adfbb4e6b8, // popup_no_comments_1180
         0x958a852299d3f6a4, // popup_no_comments_850
-        0x92e8143024b2758a, // popup_listed_1180
-        0x0ba0ca9eb3570a9e, // inline_listed_1180
+        0x34dfd6786e24cd23, // popup_listed_1180
+        0xff75249516f27ec3, // inline_listed_1180
     ],
 ];
 
@@ -5808,14 +6185,84 @@ fn dump_doc_tab() {
     }
 }
 
+const REVIEW_VIEWS: [&str; 6] = [
+    "tab_review_code_1180",
+    "tab_review_fixes_1180",
+    "tab_review_fixes_860",
+    "tab_review_ready_1180",
+    "tab_review_code_860",
+    "tab_review_done_1180",
+];
+
+/// The recorded hashes of `REVIEW_VIEWS`, per case in `CASES`.
+const GOLDEN_REVIEW_VIEWS: [[u64; 6]; 4] = [
+    [0xc079d4a47dfb8f07, 0x54dd901fa2a70abe, 0xc1545fdb81fe7fd2, 0x60ced7661f313794, 0xaae0e6667caf58df, 0xc51714381cece119],
+    [0xfcf48c5be95bbf79, 0x59cae7d81cf2cf1e, 0x05aa91649802c5af, 0xc4f6953a672794c3, 0xeac75621de8e7164, 0xecd0cd1d777ac778],
+    [0xae786b051cb842b1, 0x0d41cf897de24c29, 0x65af65532294c589, 0xef1bc3ecb1d7efb8, 0xc337cdceb0414f87, 0x992052e127fa1b18],
+    [0xf66d26606fa40b14, 0xd45dc034c427728c, 0xb72af0e7cce0522e, 0x8c892e5a6b0924f8, 0xdc3053ee5331a665, 0xb52e5a4e08ebfe8c],
+];
+
+#[test]
+fn code_reviews_views_paint_the_same_pixels() {
+    let golden: Vec<&[u64]> = GOLDEN_REVIEW_VIEWS
+        .iter()
+        .map(|row| row.as_slice())
+        .collect();
+    let views = [
+        (feature_tab_review_code(), 1180),
+        (feature_tab_review_fixes(), 1180),
+        (feature_tab_review_fixes(), 860),
+        (feature_tab_review_ready(), 1180),
+        (feature_tab_review_code(), 860),
+        (feature_tab_review_done(), 1180),
+    ];
+    check_each(&REVIEW_VIEWS, &golden, |painter, theme, scale, surface| {
+        let (view, w) = &views[surface];
+        hash(super::feature_tab_composed(
+            painter,
+            view,
+            (*w, TAB_HEIGHT).into(),
+            theme,
+            scale,
+        ))
+    });
+}
+
+/// With `GERDR_DUMP_DIR` set, write Code review's views there.
+#[test]
+fn dump_review_views() {
+    let Some(dir) = std::env::var_os("GERDR_DUMP_DIR") else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    let _ = std::fs::create_dir_all(&dir);
+    let painter = Painter::new();
+    let views = [
+        (feature_tab_review_code(), 1180),
+        (feature_tab_review_fixes(), 1180),
+        (feature_tab_review_fixes(), 860),
+        (feature_tab_review_ready(), 1180),
+        (feature_tab_review_code(), 860),
+        (feature_tab_review_done(), 1180),
+    ];
+    for (theme, scale) in CASES {
+        for ((view, w), name) in views.iter().zip(REVIEW_VIEWS) {
+            let width = (*w as f64 * scale).round() as usize;
+            let buffer =
+                super::feature_tab_composed(&painter, view, (*w, TAB_HEIGHT).into(), theme, scale);
+            dump(&dir, &format!("{name}_{}_{}", theme.name(), scale), buffer, width);
+        }
+    }
+}
+
 const CHECK_CARDS: [&str; 2] = ["tab_checks_1180", "tab_checks_860"];
 
 /// The recorded hashes of `CHECK_CARDS`, per case in `CASES`.
 const GOLDEN_CHECK_CARDS: [[u64; 2]; 4] = [
-    [0x609ba83ce681a885, 0x0a441277df0981f3],
-    [0xc0fdb39ce8483a69, 0xce9084591ebbe95e],
-    [0x110a812915f41016, 0xa7cea965913d8dde],
-    [0x08b87b683014f0ff, 0x69bf59ed2459f0cc],
+    [0x249eedb62ea74cb5, 0x17d649e3462727bf],
+    [0x13495a1e5de5b92f, 0xd2b8103bfca5c35e],
+    [0xa9eb999b1a536351, 0x4374fc732388a592],
+    [0x2dd3e85b4e42cddd, 0xa20f274d0590e49c],
 ];
 
 #[test]
@@ -5854,6 +6301,271 @@ fn dump_check_cards() {
             let tab =
                 super::feature_tab_composed(&painter, &view, (w, TAB_HEIGHT).into(), theme, scale);
             dump(&dir, &format!("tab_checks_{w}_{tag}"), tab, px(w));
+        }
+    }
+}
+
+// ------------------------------------------------------------ AI work stats
+
+/// An output as small as the panel fits on.
+const STATS_OUTPUT: (i32, i32) = (870, 720);
+
+/// The stats panel with nothing kept, read, in a feature's detail, after
+/// a failed read, and on its Agents tab, each from a fake index view.
+fn stats_views() -> [super::StatsView; 6] {
+    use crate::ai_work::stats::View;
+    use crate::stats_panel::fixtures;
+    let empty = fixtures::panel(|scope| {
+        Some(Ok(View {
+            scope,
+            ..View::default()
+        }))
+    });
+    let loaded = fixtures::panel(|scope| Some(Ok(fixtures::view(scope))));
+    let detail = fixtures::detail_panel();
+    let error = fixtures::panel(|_| Some(Err("database disk image is malformed".into())));
+    let mut agents = fixtures::panel(|_| None);
+    agents.scope.tab = crate::ai_work::stats::Tab::Agents;
+    agents.view = Some(Ok(fixtures::view(agents.scope.clone())));
+    // The pointer on the second feature's trash button.
+    let mut delete = fixtures::panel(|scope| Some(Ok(fixtures::view(scope))));
+    delete.hover = Some(super::StatsHit::Delete(1));
+    [empty, loaded, detail, error, agents, delete].map(|panel| panel.view(fixtures::NOW))
+}
+
+const STATS: [&str; 6] = [
+    "stats_empty",
+    "stats_loaded",
+    "stats_detail",
+    "stats_error",
+    "stats_agents",
+    "stats_delete_hover",
+];
+
+fn paint_stats(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
+    let p = theme.palette();
+    stats_views()
+        .iter()
+        .map(|view| hash(painter.stats_panel(view, STATS_OUTPUT.into(), scale, p)))
+        .collect()
+}
+
+/// The recorded hashes of `STATS`, per case in `CASES`.
+const GOLDEN_STATS: [[u64; 6]; 4] = [
+    // Dark at 1
+    [
+        0x7ce62109153834eb, // stats_empty
+        0x6c6105487d2a09bd, // stats_loaded
+        0x9a6b94f0298e73af, // stats_detail
+        0x7f8a74f5703ea296, // stats_error
+        0x60991de1592ee886, // stats_agents
+        0x7ad9b1510e0b96d2, // stats_delete_hover
+    ],
+    // Dark at 2
+    [
+        0x42a94d0679740ce9, // stats_empty
+        0x93f49384440ab73b, // stats_loaded
+        0xb19f933e3e7a7fce, // stats_detail
+        0xb7302566af5b1ebc, // stats_error
+        0xd7503278afc50519, // stats_agents
+        0x6a0508fd8b48fcb3, // stats_delete_hover
+    ],
+    // Light at 1
+    [
+        0xc2fc398c9ca048e8, // stats_empty
+        0x2894911b05035e9e, // stats_loaded
+        0xc1d59a6f6af5ac0d, // stats_detail
+        0x8f259b70cfde972d, // stats_error
+        0xe49ef6e8b8245c36, // stats_agents
+        0x2a2080f3d62898ef, // stats_delete_hover
+    ],
+    // Light at 2
+    [
+        0xb68169e238ab6ce5, // stats_empty
+        0x1a8ecda88d2183a2, // stats_loaded
+        0x7babe280ab55f696, // stats_detail
+        0xce7120c1de473188, // stats_error
+        0xbacf9f97ed3f17a7, // stats_agents
+        0xc0d77a6855d31869, // stats_delete_hover
+    ],
+];
+
+#[test]
+fn the_stats_panel_paints_the_same_pixels() {
+    let golden: Vec<&[u64]> = GOLDEN_STATS.iter().map(|row| row.as_slice()).collect();
+    check(&STATS, &golden, paint_stats);
+}
+
+/// With `GERDR_DUMP_DIR` set, write the stats panel there.
+#[test]
+fn dump_stats() {
+    let Some(dir) = std::env::var_os("GERDR_DUMP_DIR") else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    let _ = std::fs::create_dir_all(&dir);
+    let painter = Painter::new();
+    let size = STATS_OUTPUT.into();
+    for (theme, scale) in CASES {
+        let p = theme.palette();
+        let px = |v: i32| (v as f64 * scale).round() as usize;
+        let tag = format!("{}_{}", theme.name(), scale);
+        for (name, view) in STATS.iter().zip(stats_views()) {
+            let panel = super::stats_layout(&view, size).panel;
+            dump(
+                &dir,
+                &format!("{name}_{tag}"),
+                painter.stats_panel(&view, size, scale, p),
+                px(panel.size.w + 2 * super::SHADOW),
+            );
+        }
+    }
+}
+
+/// The pane the criteria strip floats over.
+const STRIP_PANE: (i32, i32) = (1000, 640);
+
+/// The criteria strip over a sandbox's app: its row, its steps shown with
+/// the pointer on Pass, a note being written with a screenshot and the
+/// keys, a failure sent to Build with its note, and folded to its chip.
+fn strip_views() -> [super::CriteriaStripView; 5] {
+    use super::{ButtonStyle, CriteriaStripView, StripHit, StripTag};
+    let plain = |label: &str| (label.to_owned(), ButtonStyle::Plain);
+    let row = CriteriaStripView {
+        pane: Rect::new((0, 0).into(), STRIP_PANE.into()),
+        folded: false,
+        open: false,
+        place: "AC-3 \u{b7} 3/7".into(),
+        title: "Rows save on edit".into(),
+        tag: StripTag::NotRun,
+        state: String::new(),
+        steps: vec![
+            "Given two rows in the table".into(),
+            "When I edit both and press Save".into(),
+            "Then both rows show the new values after a reload".into(),
+        ],
+        note: String::new(),
+        field: None,
+        shots: String::new(),
+        buttons: vec![plain("Pass"), plain("Fail\u{2026}")],
+        steps_through: true,
+        hover: None,
+        keys: false,
+    };
+    let open = CriteriaStripView {
+        open: true,
+        hover: Some(StripHit::Button(0)),
+        ..row.clone()
+    };
+    let mut note = Line::default();
+    note.text = "the second row reverts after a reload".into();
+    note.caret = note.text.len();
+    note.anchor = note.caret;
+    let writing = CriteriaStripView {
+        open: true,
+        field: Some(note),
+        shots: "1 screenshot".into(),
+        keys: true,
+        ..row.clone()
+    };
+    let failed = CriteriaStripView {
+        open: true,
+        tag: StripTag::Failed,
+        state: "sent to Build".into(),
+        note: "the second row reverts after a reload".into(),
+        buttons: vec![
+            ("Edit note\u{2026}".into(), ButtonStyle::Quiet),
+            plain("Pass"),
+            ("Fail".into(), ButtonStyle::Failed),
+        ],
+        ..row.clone()
+    };
+    let chip = CriteriaStripView {
+        folded: true,
+        tag: StripTag::Passed,
+        ..row.clone()
+    };
+    [row, open, writing, failed, chip]
+}
+
+const STRIP: [&str; 5] = [
+    "strip_row",
+    "strip_open",
+    "strip_note",
+    "strip_failed",
+    "strip_chip",
+];
+
+fn paint_strip(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
+    let p = theme.palette();
+    (strip_views().iter())
+        .map(|view| hash(painter.criteria_strip(view, scale, p)))
+        .collect()
+}
+
+/// The recorded hashes of `STRIP`, per case in `CASES`.
+const GOLDEN_STRIP: [[u64; 5]; 4] = [
+    // Dark at 1
+    [
+        0x9b9e1214c2a413a5, // strip_row
+        0x499a852fd941bec8, // strip_open
+        0xf55cfa59cc50a01e, // strip_note
+        0x7b874b70e3adcacd, // strip_failed
+        0xe134649e78702bbf, // strip_chip
+    ],
+    // Dark at 2
+    [
+        0x4ad958f67e705f77, // strip_row
+        0xef8be6f34fac8adf, // strip_open
+        0x4ca742e7664fdf25, // strip_note
+        0x02c2e5894b0ffbda, // strip_failed
+        0xb63f093b83828479, // strip_chip
+    ],
+    // Light at 1
+    [
+        0xeec613f4ff5d62dc, // strip_row
+        0xd0f92667606918cf, // strip_open
+        0x0765d00a20ba94ad, // strip_note
+        0xf558997476215cce, // strip_failed
+        0x60faa77000796bed, // strip_chip
+    ],
+    // Light at 2
+    [
+        0xa66aa28d6e9e00ed, // strip_row
+        0xe0d2238f9a5d3a72, // strip_open
+        0x850a45e49126971d, // strip_note
+        0xbbb523f9b9455746, // strip_failed
+        0x45481f7462f5972c, // strip_chip
+    ],
+];
+
+#[test]
+fn criteria_strip_paints_the_same_pixels() {
+    let golden: Vec<&[u64]> = GOLDEN_STRIP.iter().map(|row| row.as_slice()).collect();
+    check(&STRIP, &golden, paint_strip);
+}
+
+/// With `GERDR_DUMP_DIR` set, write the criteria strip's looks there.
+#[test]
+fn dump_criteria_strip() {
+    let Some(dir) = std::env::var_os("GERDR_DUMP_DIR") else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    let _ = std::fs::create_dir_all(&dir);
+    let painter = Painter::new();
+    for (theme, scale) in CASES {
+        let p = theme.palette();
+        let px = |v: i32| (v as f64 * scale).round() as usize;
+        let tag = format!("{}_{}", theme.name(), scale);
+        for (name, view) in STRIP.iter().zip(strip_views()) {
+            let panel = super::criteria_strip_layout(&view).panel;
+            dump(
+                &dir,
+                &format!("{name}_{tag}"),
+                painter.criteria_strip(&view, scale, p),
+                px(panel.size.w + 2 * super::SHADOW),
+            );
         }
     }
 }

@@ -1563,8 +1563,11 @@ mod tests {
             last_fix_round: None,
             verify_fixes: Vec::new(),
             fix_asked: Default::default(),
+            comment_fixes: Vec::new(),
             ran_once: Default::default(),
             fix_rounds: 0,
+            carry: None,
+            unverified: None,
             epoch: 0,
             history: Vec::new(),
         }

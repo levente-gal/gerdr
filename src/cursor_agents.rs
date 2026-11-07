@@ -1897,6 +1897,12 @@ mod tests {
         let dead = dir.join("gerdr-dead.cursor");
         drop(bind_hook_socket(&dead).unwrap());
         assert!(dead.exists());
+        // A process starting on another thread holds a copy until it has started.
+        let started = std::time::Instant::now();
+        while sender.send_to(&[], &dead).is_ok() {
+            assert!(started.elapsed().as_secs() < 5, "still takes datagrams");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
         let again = bind_hook_socket(&path).unwrap();
         assert!(!dead.exists() && path.exists());
         sender.send_to(&[], &path).unwrap();

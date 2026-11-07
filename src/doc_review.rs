@@ -93,7 +93,7 @@ impl DocFile {
         match self {
             DocFile::Stage(stage) => state(feature, stage, docs, now),
             DocFile::Evidence => evidence_state(feature, running),
-            DocFile::FixPlan => fix_plan_state(feature),
+            DocFile::FixPlan => fix_plan_state(feature, now),
         }
     }
 
@@ -247,33 +247,53 @@ pub fn locked(feature: Option<&Feature>, stage: Stage, docs: &Docs) -> Option<&'
     }
 }
 
-/// Where the fix plan of `feature` stands, as its review's header says it.
-pub fn fix_plan_state(feature: Option<&Feature>) -> String {
+/// Where the fix plan of `feature` stands at `now`, as its review's header
+/// says it: which round's it is first.
+pub fn fix_plan_state(feature: Option<&Feature>, now: u64) -> String {
     let Some(feature) = feature else {
         return "feature gone".into();
     };
+    let label = |round: &fix_round::FixRound| {
+        fix_round::label(round.n, &feature.verify_fixes, &feature.fix_asked)
+    };
     let Some(round) = &feature.fix_round else {
-        return match feature.last_fix_round {
-            Some(_) => fix_round::SENT.into(),
+        return match &feature.last_fix_round {
+            Some(round) => {
+                let mut said = vec![label(round), round.made()];
+                let ago = |at| crate::projects::ago(now, at);
+                said.extend(round.ended.map(|at| format!("finished {}", ago(at))));
+                said.join(" \u{b7} ")
+            }
             None => "no fix plan open".into(),
         };
     };
     let state = match round.phase {
-        FixPhase::Fixing if round.stalled.is_some() => "agent stopped with fixes left",
+        FixPhase::Fixing if round.stalled.is_some() => STOPPED,
         FixPhase::Ready => "ready for review",
         FixPhase::CompactingToFix => "agent compacting its chat before the fixes",
         FixPhase::Fixing => "agent making the fixes",
         FixPhase::Compacting | FixPhase::Planning => "agent still working",
     };
+    let mut said = vec![label(round), state.to_owned()];
     match round.sent_back {
-        0 => state.into(),
-        1 => format!("{state} · sent back once"),
-        n => format!("{state} · sent back {n} times"),
+        0 => {}
+        1 => said.push("sent back once".to_owned()),
+        n => said.push(format!("sent back {n} times")),
     }
+    if let Some(at) = round.ready.filter(|_| round.phase == FixPhase::Ready) {
+        said.push(format!("written {}", crate::projects::ago(now, at)));
+    }
+    said.join(" \u{b7} ")
 }
 
 /// Why a fix plan can't be edited while its fixes are being made.
 pub const FIXING_THEM: &str = "The agent is making these fixes";
+/// Why the plan of a round that is over can't be edited.
+pub const FIXES_MADE: &str =
+    "These fixes are made: for more, add a comment or a finding where the feature is";
+/// How a plan whose agent stopped with fixes left stands: Make fixes sends it
+/// on, and it can't go back to be planned again.
+pub const STOPPED: &str = "agent stopped with fixes left";
 
 /// Why the fix plan of `feature` can't be edited in its review now.
 fn fix_plan_locked(feature: Option<&Feature>) -> Option<&'static str> {
@@ -294,7 +314,7 @@ fn fix_plan_locked(feature: Option<&Feature>) -> Option<&'static str> {
             Some("The agent is still writing the file")
         }
         Some(FixPhase::CompactingToFix | FixPhase::Fixing) => Some(FIXING_THEM),
-        None if feature.last_fix_round.is_some() => None,
+        None if feature.last_fix_round.is_some() => Some(FIXES_MADE),
         None => Some("No fix plan is open"),
     }
 }
@@ -498,7 +518,8 @@ impl Gerdr {
         if doc.file == DocFile::FixPlan {
             let count = wd.diff.review.comments.len();
             if count > 0 {
-                return self.ask_make_fixes_unsent(doc.project, doc.slug, count);
+                let back = !doc.state.contains(STOPPED);
+                return self.ask_make_fixes_unsent(doc.project, doc.slug, count, back);
             }
             return self.make_fixes_now(&doc.project, &doc.slug);
         }
@@ -610,9 +631,9 @@ mod tests {
     use crate::feature::agents::StageRun;
 
     #[test]
-    fn the_last_fix_plan_can_still_be_read_and_edited() {
+    fn the_last_fix_plan_is_only_read() {
         let mut f = crate::feature::tests::feature("a", 1);
-        assert_eq!(fix_plan_state(Some(&f)), "no fix plan open");
+        assert_eq!(fix_plan_state(Some(&f), 100), "no fix plan open");
         assert_eq!(fix_plan_locked(Some(&f)), Some("No fix plan is open"));
         f.last_fix_round = Some(crate::feature::fix_round::FixRound {
             n: 1,
@@ -627,9 +648,17 @@ mod tests {
             give_back: Default::default(),
             items: Vec::new(),
             done: 0,
+            ended: None,
         });
-        assert_eq!(fix_plan_state(Some(&f)), fix_round::SENT);
-        assert_eq!(fix_plan_locked(Some(&f)), None);
+        assert_eq!(fix_plan_state(Some(&f), 100), "Review 1 \u{b7} fixes made");
+        f.last_fix_round.as_mut().unwrap().items = vec!["One".into(), "Two".into()];
+        f.last_fix_round.as_mut().unwrap().done = 2;
+        f.last_fix_round.as_mut().unwrap().ended = Some(880);
+        assert_eq!(
+            fix_plan_state(Some(&f), 1_000),
+            "Review 1 \u{b7} 2 of 2 made \u{b7} finished 2m ago"
+        );
+        assert_eq!(fix_plan_locked(Some(&f)), Some(FIXES_MADE));
     }
 
     #[test]

@@ -34,6 +34,7 @@ use crate::machine_work::Placed;
 use crate::{
     Gerdr,
     agents::AgentKey,
+    ai_work::SendKind,
     chrome::{CommandsTab, Dot},
     feature::{
         self, Feature, Stage, Status,
@@ -84,6 +85,11 @@ pub(crate) struct BuildState {
     /// What stops a feature's sandbox being started; there too while it is
     /// being stopped, so one thing happens to it at a time.
     pub(crate) sandbox_stops: BTreeMap<Key, Arc<AtomicBool>>,
+    /// The page of each feature's sandbox last opened, by its index in
+    /// `SandboxRun::pages`: where Alt+Y goes on from.
+    pub(crate) sandbox_pages: BTreeMap<Key, usize>,
+    /// Sandboxes open to the network, for a phone (see `sandbox_lan`).
+    pub(crate) sandbox_lan: BTreeMap<Key, crate::sandbox_lan::LanOpen>,
     /// Features whose Build agent was sent Verify's failures to fix: the
     /// code is probed once it rests, not at the patch watch's next round.
     fixing: BTreeMap<Key, Fixing>,
@@ -387,7 +393,7 @@ impl Gerdr {
     }
 
     /// Whether feature `slug`'s checks are being started or run.
-    fn checks_under_way(&self, project: &str, slug: &str) -> bool {
+    pub(crate) fn checks_under_way(&self, project: &str, slug: &str) -> bool {
         let key = (project.to_owned(), slug.to_owned());
         self.features.build.verifying.contains(&key)
             || (self.feature(project, slug)).is_some_and(checks_running)
@@ -720,7 +726,7 @@ impl Gerdr {
         tracing::warn!("feature {project}/{slug}: Build isn't done: {why}");
         let told = check
             .nudge(&feature.branch())
-            .map(|line| self.tell_build_agent(&feature, &line));
+            .map(|line| self.tell_build_agent(&feature, SendKind::BuildCheck, &line));
         let text = match (&check, told) {
             (BuildCheck::Stray(repos), _) => format!(
                 "Build of \u{201c}{title}\u{201d} changed {}, which the feature doesn't touch; undo it",
@@ -742,44 +748,6 @@ impl Gerdr {
             self.save_feature(project, slug);
         }
         self.show_warning(text);
-    }
-
-    /// Send `line` to the Build agent's tab of `feature`, if it is there.
-    pub(crate) fn tell_build_agent(&mut self, feature: &Feature, line: &str) -> Result<(), String> {
-        let run = feature.runs.get(&Stage::Build);
-        if run.is_some_and(|r| r.held) {
-            return Err("its prompt wasn't sent yet".into());
-        }
-        if let Some(run) = run.filter(|r| r.t3.is_some()) {
-            let id = run
-                .t3_thread()
-                .ok_or_else(|| String::from("its T3 Code draft wasn't sent yet"))?;
-            if !self.t3_thread_state(id).1 {
-                return Err("its T3 Code thread is gone".into());
-            }
-            return self.t3_send(id, line);
-        }
-        let pane = run
-            .and_then(|r| r.pane.clone())
-            .filter(|p| self.pane_there(p))
-            .ok_or_else(|| String::from(TAB_GONE))?;
-        self.tell_agent_pane(&pane, line)
-    }
-
-    /// Type `line` into `pane`, where a stage's agent ran, if something
-    /// still runs there: a pane back at its shell's prompt would run the
-    /// line as a command.
-    pub(crate) fn tell_agent_pane(&mut self, pane: &str, line: &str) -> Result<(), String> {
-        if crate::machine_work::split_pane(pane).is_some() {
-            return self.tell_machine_pane(pane, line);
-        }
-        let Some(herdr) = self.herdr.as_mut() else {
-            return Err("herdr isn't connected".into());
-        };
-        if crate::prepare::step(&herdr.process_info(pane)) != crate::prepare::Step::Busy {
-            return Err(AGENT_QUIT.into());
-        }
-        herdr.send_agent_line(pane, line)
     }
 
     /// The Build of feature `slug` holds on the code `patch`: marked done
@@ -818,6 +786,36 @@ impl Gerdr {
         }
         self.show_success(format!(
             "Build of \u{201c}{title}\u{201d} is done; verifying"
+        ));
+        // Checks running already run again on this code once they end.
+        let key = (project.to_owned(), slug.to_owned());
+        if !self.features.build.verifying.contains(&key) {
+            self.recheck(project, slug);
+        }
+    }
+
+    /// The fixes Manual test asked for made feature `slug`'s code `patch`'s,
+    /// its marks kept (see `Feature::keep_marks`): Verify runs on it, and
+    /// Manual test can't be marked passed until it passes there.
+    pub(crate) fn fixes_landed(&mut self, project: &str, slug: &str, patch: &str) {
+        let config = match self.feature(project, slug) {
+            Some(feature) => self.projects.workflows(feature, |w| w.verify.clone()),
+            None => return,
+        };
+        let Some(feature) = self.feature_mut(project, slug) else {
+            return;
+        };
+        let checks = verify::checks(feature, &config).len();
+        feature.unverified = (checks > 0).then(|| patch.to_owned());
+        let title = feature.title.clone();
+        self.save_feature(project, slug);
+        if checks == 0 {
+            return self.show_notice(format!(
+                "\u{201c}{title}\u{201d} changed by its fixes; no checks to run on them"
+            ));
+        }
+        self.show_notice(format!(
+            "\u{201c}{title}\u{201d} changed by its fixes; verifying"
         ));
         // Checks running already run again on this code once they end.
         let key = (project.to_owned(), slug.to_owned());
@@ -871,7 +869,7 @@ impl Gerdr {
             && feature.last_fix_round.is_some()
             && planned_milestones(&values).is_some_and(|n| stop.done as usize >= n)
         {
-            self.make_fixes(project, slug);
+            self.continue_fixes(project, slug);
             return;
         }
         let alive = run.agent_key().is_some() && self.stage_run_state(&run).1;
@@ -882,7 +880,7 @@ impl Gerdr {
         } else if alive {
             sent = crate::prompts::render_builtin("continue", &values)
                 .map_err(|e| e.to_string())
-                .and_then(|line| self.tell_build_agent(&feature, line.trim()));
+                .and_then(|line| self.tell_build_agent(&feature, SendKind::Continue, line.trim()));
         }
         if let Err(why) = sent {
             if alive && !fresh {
@@ -961,7 +959,7 @@ impl Gerdr {
     /// Run Verify's checks on feature `slug` as its code changed: only where
     /// that can say something new (`Scope::after_changes`). All of them if
     /// none ran yet.
-    fn recheck(&mut self, project: &str, slug: &str) {
+    pub(crate) fn recheck(&mut self, project: &str, slug: &str) {
         let scope =
             Scope::after_changes(self.feature(project, slug).and_then(|f| f.verify.as_ref()));
         self.run_checks(project, slug, scope);
@@ -1116,6 +1114,12 @@ impl Gerdr {
         let title = feature.title.clone();
         let snapshot = feature.clone();
         self.save_feature(project, slug);
+        // The checks of fixes Manual test asked for: the feature stays there.
+        if let Some(fixed) = (snapshot.unverified.as_deref())
+            .filter(|_| snapshot.status == Status::Open && snapshot.current() > Some(Stage::Verify))
+        {
+            return self.fixes_verified(project, slug, fixed, &evidence, &first);
+        }
         if outdated(&snapshot, &evidence) {
             // Build was marked done on other code while the checks ran:
             // they run again on it.
@@ -1147,6 +1151,52 @@ impl Gerdr {
             ));
         }
         self.show_warning(format!("Verify of \u{201c}{title}\u{201d} failed: {first}"));
+    }
+
+    /// Verify's checks of feature `slug`, kept at Manual test while its fixes
+    /// land, ended with `evidence` (`first`: what failed first), Verify not to
+    /// pass until they ran on `fixed`, the code as the fixes left it: once
+    /// they pass there, Manual test can be marked passed.
+    fn fixes_verified(
+        &mut self,
+        project: &str,
+        slug: &str,
+        fixed: &str,
+        evidence: &Evidence,
+        first: &str,
+    ) {
+        let Some(title) = self.feature(project, slug).map(|f| f.title.clone()) else {
+            return;
+        };
+        if evidence.patch.is_empty() {
+            return self.show_warning(format!(
+                "The checks of \u{201c}{title}\u{201d} ran, but its code couldn't be read; run them again"
+            ));
+        }
+        // They ran on code from before the last fix: again, on that.
+        if evidence.patch != fixed {
+            tracing::info!("feature {project}/{slug}: Verify ran on older fixes; again");
+            return self.recheck(project, slug);
+        }
+        if let Some(cut) = evidence.outcomes.iter().find(|o| o.interrupted) {
+            let (command, how) = (&cut.command, cut.how());
+            return self.show_warning(format!(
+                "The checks of \u{201c}{title}\u{201d} didn't all run: `{command}` {how}"
+            ));
+        }
+        if !evidence.passed() {
+            return self.show_warning(format!(
+                "Verify of \u{201c}{title}\u{201d} failed on its fixes: {first}"
+            ));
+        }
+        if let Some(f) = self.feature_mut(project, slug) {
+            f.unverified = None;
+            f.log(feature::now(), "Verify passed on the fixes");
+            self.save_feature(project, slug);
+        }
+        self.show_success(format!(
+            "\u{201c}{title}\u{201d} passed Verify on its fixes"
+        ));
     }
 
     /// Verify of feature `slug` (`title`) passed: AI review's page shows and

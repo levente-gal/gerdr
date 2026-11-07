@@ -114,6 +114,16 @@ impl Frecency {
         self.entries.get(key)
     }
 
+    /// Count what was `from`'s as `to`'s (a project's id changed); whether
+    /// there was anything to count.
+    pub fn rename(&mut self, from: &str, to: &str) -> bool {
+        let Some(entry) = self.entries.remove(from) else {
+            return false;
+        };
+        self.entries.insert(to.to_owned(), entry);
+        true
+    }
+
     /// Start from `keys`, the most recent first, as if each had been
     /// touched once, a second apart: for a history kept before there was
     /// frecency. Does nothing when any of them is known already.

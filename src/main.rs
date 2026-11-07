@@ -10,7 +10,9 @@
 
 mod activate;
 mod agent_icons;
+mod agent_tell;
 mod agents;
+mod ai_work;
 mod anim;
 mod app_icons;
 mod checkout;
@@ -21,6 +23,7 @@ mod cli_agents;
 mod clipboard;
 mod config;
 mod confirm;
+mod criteria_strip;
 mod cursor_agents;
 mod desktop;
 mod diff;
@@ -66,7 +69,9 @@ mod layout;
 mod machine_checks;
 mod machine_lease;
 mod machine_load;
+mod machine_reach;
 mod machine_sandbox;
+mod sandbox_lan;
 mod machine_views;
 mod machine_work;
 mod machines;
@@ -90,6 +95,7 @@ mod project_commands;
 mod project_list;
 mod project_lock;
 mod project_menu;
+mod project_rename;
 mod projects;
 mod prompts;
 mod quit;
@@ -110,6 +116,7 @@ mod services;
 mod sidebar;
 mod stage_lock;
 mod stage_models;
+mod stats_panel;
 mod switcher;
 mod syntax;
 mod system_theme;
@@ -1343,6 +1350,11 @@ pub enum Action {
     /// Open the scrollback viewer over the focused terminal, to select
     /// and copy more of its output than a screen.
     Scrollback,
+    /// Open the stats panel on the features' AI work, or close it again.
+    AiStats,
+    /// Give the keys to the criteria strip over the sandbox's app shown,
+    /// unfolded, or back to the app (see `criteria_strip`).
+    Criteria,
     /// Read the project files again, after one was edited by hand.
     ReloadProjects,
     /// Ask whether to keep the project running, and quit.
@@ -1544,6 +1556,8 @@ pub struct Gerdr {
     pub inbox: inbox::Inbox,
     /// The scrollback viewer, while it is open over a terminal pane.
     pub scrollback: Option<scrollback::Scrollback>,
+    /// The criteria strip over a sandbox's app, and what it holds.
+    pub criteria_strip: criteria_strip::CriteriaStrip,
     /// gerdr's connection to the host's notification daemon; `None` without
     /// a session bus.
     pub notifier: Option<notify::Notifier>,
@@ -1680,6 +1694,9 @@ pub struct Gerdr {
     /// The projects to forget once their sessions have stopped, by id (see
     /// `Gerdr::forget_project`).
     pub forget_after_stop: HashSet<String>,
+    /// Projects to give a new id once stopped: by id, the new one (see
+    /// `project_rename`).
+    pub id_after_stop: HashMap<String, String>,
     /// The project just made and being shown, by id: the switch's notice
     /// says it was made.
     pub just_created: Option<String>,
@@ -1783,6 +1800,13 @@ pub struct Gerdr {
     /// The address of each workspace folder's repository page, once read
     /// (see `git::web_url`).
     pub repo_pages: HashMap<PathBuf, Option<String>>,
+    /// The features' AI work, kept as it happens (see `ai_work`).
+    pub ai_work: ai_work::Live,
+    /// The stats panel on the AI work, while it is open (see `stats_panel`).
+    pub(crate) ai_stats: Option<stats_panel::StatsPanel>,
+    /// The stats panel as it was when it opened a file in the scrollback
+    /// viewer: closing the viewer shows it again.
+    pub(crate) ai_stats_behind: Option<stats_panel::StatsPanel>,
 
     pub compositor_state: CompositorState,
     pub xdg_shell_state: XdgShellState,
@@ -4549,6 +4573,8 @@ impl Gerdr {
             Action::Features => self.open_features(),
             Action::Scrollback if self.is_open(Overlay::Scrollback) => self.close_scrollback(),
             Action::Scrollback => self.open_focused_scrollback(),
+            Action::AiStats => self.toggle_ai_stats(),
+            Action::Criteria => self.toggle_criteria_keys(),
             // Nothing to keep running without a project.
             Action::Quit if self.project.is_none() => self.quit_app(projects::Stops::default()),
             Action::Quit => self.open_quit(),
@@ -6307,6 +6333,8 @@ impl Gerdr {
         if !stops.session || !self.stopping.insert(id.to_owned()) {
             if self.forget_after_stop.remove(id) {
                 self.forget_project_now(id);
+            } else if let Some(new) = self.id_after_stop.remove(id) {
+                self.change_project_id_now(id, &new);
             }
             return;
         }
@@ -6349,13 +6377,18 @@ impl Gerdr {
     fn project_stopped(&mut self, id: &str, stopped: bool) {
         self.stopping.remove(id);
         let forget = self.forget_after_stop.remove(id);
+        let new_id = self.id_after_stop.remove(id);
         let Some(name) = self.projects.project(id).map(|p| p.name.clone()) else {
             return;
         };
         if !stopped {
             // Whether it still runs is found out again.
             self.check_running();
-            let kept = if forget { "; it is kept" } else { "" };
+            let kept = match (forget, &new_id) {
+                (true, _) => "; it is kept",
+                (false, Some(_)) => "; its id stays",
+                (false, None) => "",
+            };
             return self.show_error(format!("Couldn't stop {name}{kept}"));
         }
         self.running.insert(id.to_owned(), false);
@@ -6371,6 +6404,10 @@ impl Gerdr {
         if forget {
             self.forget_project_now(id);
             return self.show_success(format!("Stopped and forgot {name}"));
+        }
+        if let Some(new) = new_id {
+            // Its own toast says so, or why not.
+            return self.change_project_id_now(id, &new);
         }
         self.refresh_project_menu();
         self.show_success(format!("Stopped {name}"));
@@ -6434,6 +6471,8 @@ impl Gerdr {
     /// End gerdr, stopping what `stops` says of the project. It counts as
     /// stopped only once its session is.
     pub fn quit_app(&mut self, stops: projects::Stops) {
+        // Best effort: their rsync stops rather than going on alone.
+        self.ai_work.stop_pulls();
         self.take_web_urls(web_pages::read_now(self.web_panes(), &self.instance_dir));
         self.record_tabs();
         self.close_web_control();
@@ -6752,6 +6791,8 @@ impl Gerdr {
             doc_tab,
             inbox,
             scrollback: self.scrollback_view(),
+            stats: self.ai_stats_view(),
+            criteria_strip: self.criteria_strip_view(),
             toasts: self.toast_views(),
             // A file's tab is flat: its page has no bar (see `doc_tab`).
             pane_bars: match flat {
@@ -6869,6 +6910,17 @@ fn extend_path() {
     }
 }
 
+/// Drops what lets a process speak to systemd for the unit gerdr runs in.
+/// Under a session unit like `sway.service`, which takes word from any of its
+/// processes, `podman run` sends its conmon as the unit's main process: when
+/// that container ends, systemd stops the unit and the user is logged out.
+fn leave_service_manager() {
+    for var in ["NOTIFY_SOCKET", "WATCHDOG_PID", "WATCHDOG_USEC"] {
+        // SAFETY: called at the start of `main`, before any other thread.
+        unsafe { std::env::remove_var(var) };
+    }
+}
+
 /// Log to stderr (warnings, or as `RUST_LOG` says) and to `log_path`
 /// (gerdr's own news from info up, everything's warnings): started from a
 /// desktop entry, stderr goes nowhere.
@@ -6960,6 +7012,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (store, loaded) = projects::Store::load();
 
     extend_path();
+    leave_service_manager();
     // The portal can be slow to answer: asked now, alongside the setup.
     let system_theme = system_theme::read();
 
@@ -7201,9 +7254,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         repos_rows_drag: false,
         doc_tab_shown: None,
         scrollback: None,
+        criteria_strip: Default::default(),
         thumb_drag: None,
         stopping: HashSet::new(),
         forget_after_stop: HashSet::new(),
+        id_after_stop: HashMap::new(),
         just_created: None,
         attach_once: None,
         project_menu: None,
@@ -7242,6 +7297,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         old_zed: Vec::new(),
         old_zed_until: None,
         repo_pages: HashMap::new(),
+        ai_work: ai_work::Live::off(),
+        ai_stats: None,
+        ai_stats_behind: None,
         compositor_state: CompositorState::new::<Gerdr>(&dh),
         xdg_shell_state: XdgShellState::new::<Gerdr>(&dh),
         xdg_decoration_state: XdgDecorationState::new::<Gerdr>(&dh),
@@ -7371,7 +7429,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     state.projects = store;
     state.restore_nav();
+    // Before the features, so each is seen as it is at start.
+    if let Some(done) = state.feature_sender() {
+        state.ai_work = ai_work::Live::start(&projects::data_dir(), done);
+    }
     state.load_features();
+    state.ai_work_backfill();
     state.look_for_sandbox_leftovers();
     if loaded == projects::Loaded::Migrated {
         state.projects.save();

@@ -430,9 +430,10 @@ mod tests {
                 let ratio = contrast(colour, p.selected);
                 assert!(ratio >= 3.0, "{name}: {what} on selected is {ratio:.2}:1");
             }
-            // A badge's count on its colour.
+            // A badge's count, or a chosen Pass button's label, on its colour.
             for (what, colour) in [
                 ("accent", p.accent),
+                ("success", p.success),
                 ("warning", p.warning),
                 ("error", p.error),
             ] {

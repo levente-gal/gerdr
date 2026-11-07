@@ -287,6 +287,13 @@ pub(super) fn copy(x: f32, y: f32, s: f32) -> f32 {
     (front.abs() - STROKE * s).min(back)
 }
 
+/// Signed distance to three bars rising from left to right, centred on the
+/// origin: stats.
+pub(super) fn bars(x: f32, y: f32, s: f32) -> f32 {
+    let bar = |cx: f32, top: f32| segment(x, y, cx * s, 5.0 * s, cx * s, top * s) - 1.1 * s;
+    bar(-4.0, 1.5).min(bar(0.0, -1.5)).min(bar(4.0, -5.0))
+}
+
 /// Signed distance to a magnifying glass centred on the origin: a ring and
 /// its handle to the bottom right.
 pub(super) fn magnifier(x: f32, y: f32, s: f32) -> f32 {
@@ -314,6 +321,28 @@ pub(super) fn pencil(x: f32, y: f32, s: f32) -> f32 {
         0.0,
     )) - STROKE * s;
     body.min(tip)
+}
+
+/// Signed distance to a "#" centred on the origin, its uprights leaning
+/// right: an id.
+pub(super) fn hash_mark(x: f32, y: f32, s: f32) -> f32 {
+    let uprights = segment(x, y, -1.2 * s, 4.6 * s, -0.2 * s, -4.6 * s).min(segment(
+        x,
+        y,
+        2.4 * s,
+        4.6 * s,
+        3.4 * s,
+        -4.6 * s,
+    ));
+    let bars = segment(x, y, -4.0 * s, -1.6 * s, 4.6 * s, -1.6 * s).min(segment(
+        x,
+        y,
+        -4.6 * s,
+        1.8 * s,
+        4.0 * s,
+        1.8 * s,
+    ));
+    uprights.min(bars) - STROKE * s
 }
 
 /// Signed distance to a prompt, ">_", centred on the origin: a project's

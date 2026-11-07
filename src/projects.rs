@@ -74,6 +74,10 @@ pub struct Store {
     /// How the repositories panel lists changed files, as last picked.
     #[serde(default, skip_serializing_if = "Grouping::is_list")]
     pub repo_grouping: Grouping,
+    /// Whether the criteria strip over a sandbox's app was left folded to
+    /// its chip (see `criteria_strip`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub criteria_folded: bool,
     /// How wide the sidebar was left, in logical pixels.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sidebar_width: Option<i32>,
@@ -99,6 +103,10 @@ pub struct Store {
     /// `nav_history`).
     #[serde(default, skip_serializing_if = "NavHistory::is_empty")]
     pub nav: NavHistory<Visit>,
+    /// Which criteria on each feature's Manual test page show their steps,
+    /// and which the user read, by `<project>/<slug>` (see `manual::Folds`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub criteria_folds: BTreeMap<String, crate::feature::manual::Folds>,
     #[serde(skip)]
     books: Books,
 }
@@ -127,6 +135,8 @@ struct State {
     ci_watched: crate::ci::Watched,
     #[serde(default, skip_serializing_if = "Grouping::is_list")]
     repo_grouping: Grouping,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    criteria_folded: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     sidebar_width: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -141,6 +151,8 @@ struct State {
     ignored_errors: Vec<crate::services::ErrorGroup>,
     #[serde(default, skip_serializing_if = "NavHistory::is_empty")]
     nav: NavHistory<Visit>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    criteria_folds: BTreeMap<String, crate::feature::manual::Folds>,
 }
 
 /// Where the store lives and what gerdr last read or wrote of its files.
@@ -372,6 +384,11 @@ pub struct Workflow {
     /// tell (see `sandbox_run::app_port`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox_url: Option<String>,
+    /// The sandbox's pages, each a button on Manual test's page, the first
+    /// the one Open app opens; over `sandbox_url` and what the commands tell
+    /// (see `feature::sandbox_pages`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sandbox_pages: Vec<crate::feature::sandbox_pages::Page>,
     /// Let AI review run with the same agent as Build; by default gerdr
     /// refuses, as a model reviewing its own code misses what it missed.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -392,6 +409,7 @@ impl Workflow {
             && self.prepare.is_empty()
             && self.sandbox_env.is_empty()
             && self.sandbox_url.is_none()
+            && self.sandbox_pages.is_empty()
             && !self.allow_same_reviewer
     }
 }
@@ -581,6 +599,7 @@ impl Store {
         self.t3_finished = state.t3_finished;
         self.ci_watched = state.ci_watched;
         self.repo_grouping = state.repo_grouping;
+        self.criteria_folded = state.criteria_folded;
         self.sidebar_width = state.sidebar_width;
         self.dock_share = state.dock_share;
         self.window_size = state.window_size;
@@ -588,6 +607,7 @@ impl Store {
         self.service_errors = state.service_errors;
         self.ignored_errors = state.ignored_errors;
         self.nav = state.nav;
+        self.criteria_folds = state.criteria_folds;
     }
 
     fn state(&self) -> State {
@@ -601,6 +621,7 @@ impl Store {
             t3_finished: self.t3_finished.clone(),
             ci_watched: self.ci_watched.clone(),
             repo_grouping: self.repo_grouping,
+            criteria_folded: self.criteria_folded,
             sidebar_width: self.sidebar_width,
             dock_share: self.dock_share,
             window_size: self.window_size,
@@ -608,6 +629,7 @@ impl Store {
             service_errors: self.service_errors.clone(),
             ignored_errors: self.ignored_errors.clone(),
             nav: self.nav.clone(),
+            criteria_folds: self.criteria_folds.clone(),
         }
     }
 
@@ -974,6 +996,39 @@ impl Store {
         self.projects.iter_mut().find(|p| p.id == id)
     }
 
+    /// Give project `rewrite.old` the id `rewrite.new`, and change what else
+    /// the store holds of it (its paths, the state's errors and tab history;
+    /// see `project_rename`). Saved by `save`: its new file written, the old
+    /// one removed.
+    pub fn change_id(&mut self, rewrite: &crate::project_rename::Rewrite) -> Result<(), String> {
+        let (old, new) = (rewrite.old.as_str(), rewrite.new.as_str());
+        if self.project(new).is_some() {
+            return Err(format!("another project has the id {new}"));
+        }
+        let Some(project) = self.project_mut(old) else {
+            return Err(format!("no project {old}"));
+        };
+        let mut changed = project.clone();
+        rewrite.typed(&mut changed)?;
+        changed.id = new.to_owned();
+        let mut service_errors = self.service_errors.clone();
+        let mut ignored_errors = self.ignored_errors.clone();
+        let mut nav = self.nav.clone();
+        rewrite.typed(&mut service_errors)?;
+        rewrite.typed(&mut ignored_errors)?;
+        rewrite.typed(&mut nav)?;
+        if let Some(project) = self.project_mut(old) {
+            *project = changed;
+        }
+        self.service_errors = service_errors;
+        self.ignored_errors = ignored_errors;
+        self.nav = nav;
+        if self.last_active.as_deref() == Some(old) {
+            self.last_active = Some(new.to_owned());
+        }
+        Ok(())
+    }
+
     /// Put project `project`'s workspaces in `order` (record ids) among the
     /// places they hold; those not in it (a workspace not open just now,
     /// such as the Cursor one between two windows) keep theirs, to come
@@ -1125,7 +1180,7 @@ pub fn project_file(id: &str) -> PathBuf {
 
 /// Whether `id` can be a project's, and so a file's name: lowercase
 /// `[a-z0-9-]`, not starting with a dash, as `slugify` makes them.
-fn valid_id(id: &str) -> bool {
+pub(crate) fn valid_id(id: &str) -> bool {
     !id.is_empty()
         && !id.starts_with('-')
         && id
@@ -1883,12 +1938,14 @@ mod tests {
             t3_finished: Default::default(),
             ci_watched: Default::default(),
             repo_grouping: Grouping::Folders,
+            criteria_folded: true,
             sidebar_width: Some(280),
             dock_share: Some(0.6),
             window_size: Some((1600, 1000)),
             service_anchors: BTreeMap::new(),
             service_errors: Vec::new(),
             ignored_errors: Vec::new(),
+            criteria_folds: BTreeMap::new(),
             nav: {
                 let mut nav = NavHistory::default();
                 nav.visit(
@@ -2731,6 +2788,33 @@ mod tests {
         assert!(!store.write());
         assert!(!root.join("escaped.json").exists());
         assert_eq!(names(&dir).len(), 3);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_changed_id_moves_the_file_and_what_names_it() {
+        let root = scratch("change-id");
+        let mut store = at(&root, sample());
+        store.save();
+        let dir = root.join("projects");
+        assert!(dir.join("api.json").exists());
+        let rewrite = crate::project_rename::Rewrite::new("api", "api2", &root);
+        store.change_id(&rewrite).unwrap();
+        assert!(store.save_projects(&["api2".to_owned()]));
+        assert!(!dir.join("api.json").exists());
+        let (loaded, how) = Store::load_from(&root, || None);
+        assert_eq!(how, Loaded::File);
+        assert!(loaded.project("api").is_none());
+        assert_eq!(loaded.project("api2").map(|p| p.id.as_str()), Some("api2"));
+        assert_eq!(loaded.last_active.as_deref(), Some("api2"));
+        let parked = serde_json::to_string(&loaded.nav).unwrap();
+        assert!(
+            parked.contains("\"api2\"") && !parked.contains("\"api\""),
+            "{parked}"
+        );
+        // Not over another project.
+        let back = crate::project_rename::Rewrite::new("api2", "api2", &root);
+        assert!(store.change_id(&back).is_err());
         let _ = std::fs::remove_dir_all(&root);
     }
 

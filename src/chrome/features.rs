@@ -19,11 +19,13 @@ use super::{
     ListBar, POPUP_RADIUS, Painter, Palette, QUIT_BODY, QUIT_BUTTON, QUIT_BUTTON_GAP,
     QUIT_LINE_GAP, QUIT_PADDING, QUIT_TITLE, Rect, Rgb, SHADOW, SMALL_FONT_SIZE, Thumb, agent_icon,
     band, button_width, check, chevron_down, chevron_side, copy, coverage, cross, dialog_buttons,
-    field_text, focus_ring, footer_hint_spots, gutter_track, hint_strs, icon_sdf, measure,
-    measure_bold, measured_footer_height, mix, phys, physical, plus, rect_px, segment,
-    segment_tint, status_dot, tab, trash,
+    field_lines_height, field_text, focus_ring, footer_hint_spots, gutter_track, hint_strs,
+    icon_sdf, measure, measure_bold, measured_footer_height, mix, phys, physical, plus, rect_px,
+    segment, segment_tint, status_dot, tab, trash,
 };
-use super::{code_mark, eye, flask, magnifier, plan_review_mark, ship_arrow, sparkle, text_lines};
+use super::{
+    bars, code_mark, eye, flask, magnifier, plan_review_mark, ship_arrow, sparkle, text_lines,
+};
 use crate::text_field::Line;
 use crate::{
     agent_icons::AgentIcon,
@@ -64,7 +66,7 @@ const SWITCH_W: i32 = 28;
 /// check, Verify's failures): past it, the last says how many more.
 pub const MAX_CHECK_LINES: usize = 4;
 /// The feature tab's header buttons, before the one removing worktrees.
-pub const FEATURE_BUTTONS: [&str; 3] = ["Open tab", "Copy path", "New feature\u{2026}"];
+pub const FEATURE_BUTTONS: [&str; 4] = ["Open tab", "Copy path", "Stats", "New feature\u{2026}"];
 
 /// Where a stage stands in a feature, for its mark.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -552,6 +554,211 @@ pub struct AgentChip {
     pub off: bool,
 }
 
+/// What Code review's page shows under the rail.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ReviewView {
+    /// The diff, its file list and the comments being written.
+    #[default]
+    Code,
+    /// The fixes the comments asked for: the plan and the comments as cards.
+    Fixes,
+}
+
+/// A feature's code review's files, as `ReviewSwitch` counts them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ReviewFiles {
+    pub viewed: usize,
+    pub total: usize,
+    /// Viewed, then changed since.
+    pub changed: usize,
+}
+
+impl ReviewFiles {
+    /// What is left to read in a few words, and whether that is all of them
+    /// read: "5 of 8 files left · 1 changed since viewed", "All 8 files viewed".
+    fn left(self) -> (String, bool) {
+        let left = self.total.saturating_sub(self.viewed);
+        let files = match self.total {
+            1 => "1 file".to_owned(),
+            n => format!("{n} files"),
+        };
+        if left == 0 {
+            return (format!("All {files} viewed"), true);
+        }
+        let text = match self.changed {
+            0 => format!("{left} of {files} left"),
+            n => format!("{left} of {files} left \u{b7} {n} changed since viewed"),
+        };
+        (text, false)
+    }
+}
+
+/// The line under Code review's rail: the two views to go between, with how far
+/// each has come, the files left to review or what to do next, and the
+/// stage's actions at its right.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReviewSwitch {
+    pub view: ReviewView,
+    /// None until they can be counted.
+    pub files: Option<ReviewFiles>,
+    /// How the fixes stand: "2 of 3 made", "planning fixes".
+    pub fixes: String,
+    /// What to do next, and whether it reads well: all done but Approve, or
+    /// approved; none says only how many files are left.
+    pub next: Option<(String, bool)>,
+    /// The review's actions, from the left: on the code's view alone.
+    pub buttons: Vec<ReviewButton>,
+}
+
+/// An action on Code review's line: what the review's own title row has in
+/// its popup.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReviewButton {
+    pub button: super::ReposButton,
+    pub label: String,
+    /// `Primary` for the one to press next, `Off` while it can't be pressed.
+    pub style: ButtonStyle,
+    /// Its key, for its tooltip: the footer lists it too.
+    pub key: String,
+    /// Why it can't be pressed now.
+    pub disabled: Option<String>,
+}
+
+impl ReviewSwitch {
+    /// What the line says after the bar, and whether that is the good news.
+    fn said(&self) -> Option<(String, bool)> {
+        match &self.next {
+            Some(next) => Some(next.clone()),
+            None => (self.files.filter(|f| f.total > 0)).map(ReviewFiles::left),
+        }
+    }
+
+    /// What each segment says.
+    fn labels(&self) -> [String; 2] {
+        let code = match self.files {
+            Some(files) => format!("Code review \u{b7} {} of {} files", files.viewed, files.total),
+            None => "Code review".to_owned(),
+        };
+        [code, format!("Fixes \u{b7} {}", self.fixes)]
+    }
+}
+
+/// The line under Manual test's rail: how far trying its criteria came, in a
+/// bar and in words, as Code review's switch says how far its review did.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TestStrip {
+    pub passed: usize,
+    pub failed: usize,
+    pub untested: usize,
+    /// "3 passed · 1 failed · 2 untested".
+    pub text: String,
+    /// The search through the criteria, open; closed, a button opens it.
+    pub search: Option<super::SearchBar>,
+}
+
+impl TestStrip {
+    fn total(&self) -> usize {
+        self.passed + self.failed + self.untested
+    }
+
+    /// Whether every criterion passed: the good news.
+    fn good(&self) -> bool {
+        self.total() > 0 && self.passed == self.total()
+    }
+}
+
+/// Where `TestStrip`'s parts go.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TestStripSpots {
+    /// The bar, while there is room.
+    pub bar: Option<Rect>,
+    /// The words.
+    pub text: Rect,
+    /// The search's parts, at the row's right: its button, or its field
+    /// and the button closing it.
+    pub search: Vec<(super::SearchPart, Rect)>,
+    /// Where the open search says how many criteria it shows.
+    pub count: Option<Rect>,
+}
+
+/// How wide the criteria's search field is at most, and at least; room for
+/// how many it shows.
+const STRIP_SEARCH_W: i32 = 260;
+const STRIP_SEARCH_MIN: i32 = 120;
+const STRIP_COUNT_W: i32 = 76;
+
+/// Where `strip` goes in the row at `(x, y)`, `width` wide: the bar, then its
+/// words, then at the right its search (`open`: its field).
+fn test_strip_spots(x: i32, y: i32, width: i32, open: bool) -> TestStripSpots {
+    use super::SearchPart;
+    let h = REVIEW_SWITCH_H;
+    let right = x + width;
+    let mut search = Vec::new();
+    let mut count = None;
+    let width = if open {
+        let close = Rectangle::new((right - h, y).into(), (h, h).into());
+        let count_at = close.loc.x - QUIT_BUTTON_GAP - STRIP_COUNT_W;
+        let field_w = STRIP_SEARCH_W.min(width / 2).max(STRIP_SEARCH_MIN);
+        let field_x = (count_at - QUIT_BUTTON_GAP - field_w).max(x);
+        let field = Rectangle::new(
+            (field_x, y).into(),
+            ((count_at - QUIT_BUTTON_GAP - field_x).max(0), h).into(),
+        );
+        count = Some(Rectangle::new(
+            (count_at, y).into(),
+            (STRIP_COUNT_W, h).into(),
+        ));
+        search.push((SearchPart::Field, field));
+        search.push((SearchPart::Close, close));
+        (field_x - COLUMN_GAP - x).max(0)
+    } else {
+        let button = Rectangle::new((right - h, y).into(), (h, h).into());
+        search.push((SearchPart::Open, button));
+        (button.loc.x - COLUMN_GAP - x).max(0)
+    };
+    let has_bar = width >= REVIEW_BAR_W + COLUMN_GAP + REVIEW_LEFT_MIN;
+    let bar = has_bar.then(|| {
+        Rectangle::new(
+            (x, y + (h - REVIEW_BAR_H) / 2).into(),
+            (REVIEW_BAR_W, REVIEW_BAR_H).into(),
+        )
+    });
+    let text_x = bar.map_or(x, |bar| bar.loc.x + bar.size.w + COLUMN_GAP);
+    let text = Rectangle::new((text_x, y).into(), ((x + width - text_x).max(0), h).into());
+    TestStripSpots {
+        bar,
+        text,
+        search,
+        count,
+    }
+}
+
+/// A bar counting `total` things in `bar`: each of `parts` fills its share in
+/// its colour, from the left, one after the other; the rest is the track.
+fn count_bar(
+    c: &mut Canvas,
+    bar: Rect,
+    parts: &[(usize, Rgb)],
+    total: usize,
+    scale: f64,
+    p: &Palette,
+) {
+    let (x, y, w, h) = rect_px(bar, scale);
+    c.rounded(x, y, w, h, h / 2.0, p.border);
+    if total == 0 {
+        return;
+    }
+    // From the whole share down, each over the last: rounded ends overlap.
+    let mut upto: usize = parts.iter().map(|(n, _)| n).sum::<usize>().min(total);
+    for (n, tone) in parts.iter().rev() {
+        if upto > 0 && *n > 0 {
+            let f = upto as f32 / total as f32;
+            c.rounded(x, y, (w * f).max(h), h, h / 2.0, *tone);
+        }
+        upto = upto.saturating_sub(*n);
+    }
+}
+
 /// A part of a stage's page, under its title and what it says.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PageSection {
@@ -583,6 +790,12 @@ pub enum PageSection {
     },
     /// An AI review finding, with what can be done of it.
     Finding(FindingCard),
+    /// Words, each with the indices in `StagePage::buttons` of the buttons
+    /// after it, in a row at the right of the caption before it if they fit,
+    /// else on a line of their own: Manual test's "Collapse" and "Expand".
+    Toolbar {
+        groups: Vec<(String, Vec<usize>)>,
+    },
     /// A labelled list of lines in their tones: the checks, findings,
     /// criteria, the Ship check, a done stage's note.
     Lines {
@@ -611,6 +824,8 @@ pub enum PageSection {
         total: usize,
         items: Vec<(bool, String)>,
         running: Vec<usize>,
+        /// The page's buttons it holds, at its caption's right.
+        buttons: Vec<usize>,
     },
 }
 
@@ -695,6 +910,25 @@ pub struct FindingCard {
     pub selected: bool,
     /// The indices in `StagePage::buttons` of the buttons it holds.
     pub buttons: Vec<usize>,
+    /// A Manual test criterion's: drawn as a row of a sheet of text, not
+    /// a card, `collapsed` folding it to its line.
+    pub sheet: Option<Box<SheetRow>>,
+}
+
+/// What a criterion's row on Manual test's sheet has more than a card.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SheetRow {
+    /// It is open to its steps, as the user left it: its chevron says so.
+    /// The search may show it open without.
+    pub open: bool,
+    /// Its Given, When and Then, each word with its part; one part with no
+    /// word when the criterion doesn't split.
+    pub steps: Vec<(&'static str, String)>,
+    /// The search hides it.
+    pub hidden: bool,
+    /// What the search looks for, lowercase, tinted where it shows; empty
+    /// for none.
+    pub needle: String,
 }
 
 /// The selected stage's page, in the feature tab's middle column.
@@ -756,6 +990,10 @@ pub struct FeatureTabView {
     /// A feature's code review takes the tab under the rail: no strip,
     /// columns or footer of its own.
     pub review_page: bool,
+    /// Code review's page goes between that review and its fixes.
+    pub review_switch: Option<ReviewSwitch>,
+    /// Manual test's page counts its criteria.
+    pub test_strip: Option<TestStrip>,
     /// That review has the keys: the rail shows no focus.
     pub review_keys: bool,
     pub activity: Vec<ActivityRow>,
@@ -812,6 +1050,11 @@ pub enum FeatureTabHit {
     /// A segment of Build's milestone choice: 0 one agent, 1 one per
     /// milestone.
     MilestoneMode(usize),
+    /// A segment of Code review's switch: 0 its code, 1 its fixes.
+    ReviewView(usize),
+    /// A button at the right of Code review's line, by its index in
+    /// `ReviewSwitch::buttons`.
+    ReviewButton(usize),
     /// A segment of a repository's way on the Ship page: its row, then 0
     /// pull request, 1 merge only, 2 nothing.
     ShipRoute(usize, usize),
@@ -819,6 +1062,10 @@ pub enum FeatureTabHit {
     ShipRow(usize),
     /// A finding's card, as `FeatureTabLayout::finding_cards` has them.
     Finding(usize),
+    /// The chevron of a criterion's row, indexed as `Finding`.
+    Fold(usize),
+    /// A part of the criteria's search, on the line under the rail.
+    Search(super::SearchPart),
     Hint(usize),
 }
 
@@ -827,8 +1074,13 @@ pub enum FeatureTabHit {
 /// not scrolled: `FeatureTabView::scroll` moves it up.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FeatureTabLayout {
-    /// With `FeatureTabView::review_page`: all under the rail's rule.
+    /// With `FeatureTabView::review_page`: all under the rail's rule and the
+    /// switch.
     pub review: Option<Rect>,
+    /// With `FeatureTabView::review_switch`.
+    pub review_switch: Option<ReviewSwitchSpots>,
+    /// With `FeatureTabView::test_strip`, when there is no switch.
+    pub test_strip: Option<TestStripSpots>,
     pub frame: Rect,
     pub title: Rect,
     pub sub: Rect,
@@ -892,6 +1144,18 @@ pub struct FeatureTabLayout {
 /// as the pointer and the selection care: `None` while it is scrolled away.
 pub fn feature_tab_field(view: &FeatureTabView, frame: Rect, scale: f64) -> Option<FieldSpot> {
     let layout = feature_tab_layout(view, frame);
+    // The criteria's search, while it has the keys.
+    let search = (view.test_strip.as_ref()).and_then(|s| s.search.as_ref());
+    if let Some(bar) = search.filter(|b| b.focused) {
+        let spots = layout.test_strip.as_ref()?;
+        let (_, area) = (spots.search.iter()).find(|(p, _)| *p == super::SearchPart::Field)?;
+        return Some(FieldSpot {
+            area: *area,
+            text: super::search_field_text(*area, scale),
+            size: FONT_SIZE,
+            line: bar.query.clone(),
+        });
+    }
     let col = TabColumn::Page as usize;
     let (rect, k) = layout.pieces[col]
         .iter()
@@ -943,6 +1207,19 @@ impl FeatureTabLayout {
         if let Some(n) = self.nodes.iter().position(on) {
             return Some(FeatureTabHit::Node(n));
         }
+        if let Some(spots) = &self.test_strip
+            && let Some((part, _)) = spots.search.iter().find(|(_, r)| on(r))
+        {
+            return Some(FeatureTabHit::Search(*part));
+        }
+        if let Some(spots) = &self.review_switch {
+            if let Some(i) = spots.segments.iter().position(on) {
+                return Some(FeatureTabHit::ReviewView(i));
+            }
+            if let Some(i) = (spots.buttons.iter()).position(|b| b.as_ref().is_some_and(on)) {
+                return Some(FeatureTabHit::ReviewButton(i));
+            }
+        }
         if on(&self.repos_toggle) {
             return Some(FeatureTabHit::ToggleRepos);
         }
@@ -987,6 +1264,18 @@ impl FeatureTabLayout {
                     .or_else(|| {
                         let on = (self.ship.rows.iter()).find(|(_, r)| r.contains(at))?;
                         Some(FeatureTabHit::ShipRow(on.0))
+                    })
+                    .or_else(|| {
+                        let k = self.pieces[TabColumn::Page as usize].iter().find_map(
+                            |(r, piece)| match piece {
+                                Piece::Fold(k) if r.contains(at) => Some(*k),
+                                _ => None,
+                            },
+                        )?;
+                        let card = (view.page.sections[..k].iter())
+                            .filter(|s| matches!(s, PageSection::Finding(_)))
+                            .count();
+                        Some(FeatureTabHit::Fold(card))
                     })
                     .or_else(|| {
                         let on = |r: &Rect| r.contains(at);
@@ -1158,6 +1447,13 @@ pub const ACTIVITY_BELOW: i32 = 1180;
 /// The gap between the columns' cards, the room inside them, and their
 /// corners.
 const COLUMN_GAP: i32 = 12;
+/// The height of the switch on Code review's page, and the gaps round it.
+const REVIEW_SWITCH_H: i32 = 30;
+const REVIEW_SWITCH_GAP: i32 = 8;
+/// The size of its bar of files viewed, and the least room left for its words.
+const REVIEW_BAR_W: i32 = 120;
+const REVIEW_BAR_H: i32 = 8;
+const REVIEW_LEFT_MIN: i32 = 60;
 const CARD_PAD: i32 = 12;
 const CARD_RADIUS: f32 = 8.0;
 /// How far in from a card's top and bottom its scrollbar runs.
@@ -1206,6 +1502,49 @@ const COMMENT_PAD: i32 = 8;
 const COMMENT_TINT: f32 = 0.1;
 /// How far a check card's text stands right of its dot's left edge.
 const CHECK_DOT_ROOM: i32 = DOT + 8;
+/// A sheet row's room above and below its text, its chevron's width, the
+/// least its title gets beside its buttons, and the gap after the words of
+/// its steps.
+const SHEET_PAD: i32 = 6;
+const SHEET_FOLD: i32 = 18;
+const SHEET_TITLE_MIN: i32 = 120;
+const SHEET_WORD_GAP: i32 = 10;
+/// Between a toolbar's buttons, and before its next word.
+const SHEET_BUTTON_GAP: i32 = 2;
+const TOOLBAR_GAP: i32 = 14;
+const TOOLBAR_PADDING: i32 = 10;
+
+/// Where `text` says `needle` (lowercase), by char, for `found_tints`; none
+/// where lowercase changes how many chars it has.
+fn found_ranges(text: &str, needle: &str) -> Vec<(std::ops::Range<usize>, bool)> {
+    let lower = text.to_lowercase();
+    if needle.is_empty() || lower.chars().count() != text.chars().count() {
+        return Vec::new();
+    }
+    let char_at = |byte: usize| lower[..byte].chars().count();
+    (lower.match_indices(needle))
+        .map(|(at, m)| (char_at(at)..char_at(at + m.len()), false))
+        .collect()
+}
+
+/// How wide toolbar `groups` run: their words and buttons, as `Stack::toolbar`
+/// lays them.
+fn toolbar_width(groups: &[(String, Vec<usize>)], page: &StagePage) -> i32 {
+    let mut w = 0;
+    for (word, held) in groups {
+        w += width_of(word, Font::Small.size()).ceil() as i32 + 1 + TOOLBAR_GAP;
+        for &b in held.iter().filter(|b| **b < page.buttons.len()) {
+            w += toolbar_button_width(&page.buttons[b].label) + SHEET_BUTTON_GAP;
+        }
+    }
+    w
+}
+
+/// A toolbar button's width: its label and a little room, not a full
+/// button's least width, so a row of them stays short.
+fn toolbar_button_width(label: &str) -> i32 {
+    width_of(label, FONT_SIZE).ceil() as i32 + 2 * TOOLBAR_PADDING
+}
 const AGENT_HEAD: i32 = 28;
 /// Where an agent card's name starts, past its logo and dot.
 const AGENT_TEXT_AT: i32 = 36;
@@ -1288,6 +1627,9 @@ impl Ink {
 pub(super) enum Piece {
     /// A section's uppercase label.
     Caption(String),
+    /// A list of milestones' or fixes' uppercase label, with the buttons of
+    /// its section `k` at its right.
+    GroupCaption(usize, String),
     Text {
         text: String,
         font: Font,
@@ -1315,8 +1657,20 @@ pub(super) enum Piece {
     /// The file card of `StagePage::sections[i]`.
     File(usize),
     /// The frame of the finding card of `StagePage::sections[i]`, with its
-    /// buttons; its text goes in pieces of its own.
+    /// buttons; its text goes in pieces of its own. A sheet's row has no
+    /// frame: its ground when selected or hovered, and a rule under it.
     FindingCard(usize),
+    /// The chevron folding or opening the sheet row of
+    /// `StagePage::sections[i]`.
+    Fold(usize),
+    /// A line of text, the places saying `needle` (lowercase) tinted.
+    Found {
+        text: String,
+        font: Font,
+        ink: Ink,
+        bold: bool,
+        needle: String,
+    },
     /// The card of the user's comment on a finding, behind its text.
     YourComment,
     /// The note being written on the card of `StagePage::sections[i]`.
@@ -1716,6 +2070,9 @@ impl Stack {
         page: &StagePage,
         buttons: &mut [Option<Rect>],
     ) -> Rect {
+        if let Some(sheet) = &card.sheet {
+            return self.sheet_row(k, card, sheet, page, buttons);
+        }
         let frame_at = self.pieces.len();
         let (x, w, top) = (self.x, self.w, self.y);
         self.x += AGENT_PAD;
@@ -1816,11 +2173,12 @@ impl Stack {
             self.y += FINDING_GAP;
             self.your_comment(card, page, buttons);
         }
-        if card.field.is_some() {
+        if let Some(field) = &card.field {
             self.y += FINDING_GAP;
-            let rect = Rectangle::new((self.x, self.y).into(), (self.w, QUIT_BUTTON).into());
+            let h = field_lines_height(field.text.split('\n').count());
+            let rect = Rectangle::new((self.x, self.y).into(), (self.w, h).into());
             self.pieces.push((rect, Piece::CardField(k)));
-            self.y += QUIT_BUTTON;
+            self.y += h;
         }
         let held: Vec<usize> = (card.buttons.iter().copied())
             .filter(|b| *b < page.buttons.len())
@@ -1839,6 +2197,229 @@ impl Stack {
             self.y += rows_height(&placed);
         }
         self.y += AGENT_PAD;
+        (self.x, self.w) = (x, w);
+        let frame = Rectangle::new((x, top).into(), (w, self.y - top).into());
+        self.pieces.insert(frame_at, (frame, Piece::FindingCard(k)));
+        frame
+    }
+
+    /// `groups` of a toolbar in `row`, from its right: each word, muted,
+    /// then its buttons.
+    fn toolbar(
+        &mut self,
+        groups: &[(String, Vec<usize>)],
+        page: &StagePage,
+        buttons: &mut [Option<Rect>],
+        row: Rect,
+    ) {
+        let mut x = row.loc.x + row.size.w;
+        for (word, held) in groups.iter().rev() {
+            for &b in held.iter().rev().filter(|b| **b < page.buttons.len()) {
+                let w = toolbar_button_width(&page.buttons[b].label);
+                x -= w;
+                let rect = Rectangle::new((x, row.loc.y).into(), (w, ROW_BUTTON).into());
+                buttons[b] = Some(rect);
+                self.pieces.push((rect, Piece::Button(b)));
+                x -= SHEET_BUTTON_GAP;
+            }
+            let w = width_of(word, Font::Small.size()).ceil() as i32 + 1;
+            x -= w;
+            let y = row.loc.y + (ROW_BUTTON - TAIL_LINE) / 2;
+            self.pieces.push((
+                Rectangle::new((x, y).into(), (w, TAIL_LINE).into()),
+                Piece::Text {
+                    text: word.clone(),
+                    font: Font::Small,
+                    ink: Ink::Muted,
+                    bold: false,
+                },
+            ));
+            x -= TOOLBAR_GAP;
+        }
+    }
+
+    /// `text` wrapped to the column as `all_text` does, the places saying
+    /// `needle` (lowercase) tinted; none for an empty one.
+    #[allow(clippy::too_many_arguments)]
+    fn found_text(&mut self, text: &str, font: Font, ink: Ink, bold: bool, h: i32, needle: &str) {
+        if needle.is_empty() {
+            return self.all_text(text, font, ink, bold, h);
+        }
+        let w = if bold { self.w - self.w / 16 } else { self.w };
+        for line in wrapped(text, font.size(), w).iter() {
+            let piece = match line.to_lowercase().contains(needle) {
+                true => Piece::Found {
+                    text: line.clone(),
+                    font,
+                    ink,
+                    bold,
+                    needle: needle.to_owned(),
+                },
+                false => Piece::Text {
+                    text: line.clone(),
+                    font,
+                    ink,
+                    bold,
+                },
+            };
+            self.put(h, piece);
+        }
+    }
+
+    /// Criterion card `k` as a row of Manual test's sheet: its chevron, dot
+    /// and title, its buttons at the right; open, its steps under them,
+    /// each word in a column of its own, and what went wrong. A rule ends
+    /// it. Hidden by the search, it takes no room.
+    fn sheet_row(
+        &mut self,
+        k: usize,
+        card: &FindingCard,
+        sheet: &SheetRow,
+        page: &StagePage,
+        buttons: &mut [Option<Rect>],
+    ) -> Rect {
+        let (x, w, top) = (self.x, self.w, self.y);
+        if sheet.hidden {
+            return Rectangle::new((x, top).into(), (w, 0).into());
+        }
+        let frame_at = self.pieces.len();
+        let needle = sheet.needle.as_str();
+        let ink = if card.faded { Ink::Muted } else { Ink::Text };
+        self.y += SHEET_PAD;
+        // Its buttons at the right of its first line, both always there.
+        let held: Vec<usize> = (card.buttons.iter().copied())
+            .filter(|b| *b < page.buttons.len())
+            .collect();
+        let widths: Vec<i32> = (held.iter())
+            .map(|b| button_width(&page.buttons[*b].label))
+            .collect();
+        let text_x = x + SHEET_FOLD + CHECK_DOT_ROOM;
+        let right = x + w - SHEET_PAD;
+        let placed = rows_from_right(&widths, text_x + SHEET_TITLE_MIN, right);
+        for (b, ((bx, row), bw)) in held.iter().zip(placed.iter().zip(&widths)) {
+            let by = self.y + row * (ROW_BUTTON + QUIT_BUTTON_GAP);
+            buttons[*b] = Some(Rectangle::new((*bx, by).into(), (*bw, ROW_BUTTON).into()));
+        }
+        let buttons_left = placed.iter().map(|(bx, _)| *bx).min().unwrap_or(right);
+        let buttons_h = rows_height(&placed).max(ROW_BUTTON);
+        let head = self.y;
+        // Its chevron, then its dot, lined up with the first line's text.
+        let line_y = head + (ROW_BUTTON - BODY_LINE) / 2;
+        self.pieces.push((
+            Rectangle::new((x, head).into(), (SHEET_FOLD, ROW_BUTTON).into()),
+            Piece::Fold(k),
+        ));
+        if let Some(dot) = card.tag.dot().or(card.made.then_some(Dot::Done)) {
+            self.pieces.push((
+                Rectangle::new(
+                    (x + SHEET_FOLD, line_y + (BODY_LINE - DOT) / 2).into(),
+                    (DOT, DOT).into(),
+                ),
+                Piece::CheckDot(dot),
+            ));
+        }
+        let room = (buttons_left - QUIT_BUTTON_GAP - text_x).max(1);
+        let tail = match card.state.is_empty() {
+            true => card.place.clone(),
+            false => format!("{} \u{b7} {}", card.place, card.state),
+        };
+        if card.collapsed {
+            // One line: the title cut to fit, then its id and how it stands.
+            let tail_w = (width_of(&tail, Font::Small.size()).ceil() as i32 + 1).min(room / 2);
+            let title_room = (room - tail_w - QUIT_BUTTON_GAP).max(1);
+            let title = cut_to_width(&card.title, Font::Body.size(), title_room * 8 / 9);
+            let title_w = (width_of(&title, Font::Body.size()).ceil() as i32 * 9 / 8 + 1)
+                .min(title_room);
+            let piece = |text: String, font, ink, bold| match needle.is_empty()
+                || !text.to_lowercase().contains(needle)
+            {
+                true => Piece::Text {
+                    text,
+                    font,
+                    ink,
+                    bold,
+                },
+                false => Piece::Found {
+                    text,
+                    font,
+                    ink,
+                    bold,
+                    needle: needle.to_owned(),
+                },
+            };
+            self.pieces.push((
+                Rectangle::new((text_x, line_y).into(), (title_w, BODY_LINE).into()),
+                piece(title, Font::Body, ink, true),
+            ));
+            let tail_x = text_x + title_w + QUIT_BUTTON_GAP;
+            let tail_room = (buttons_left - QUIT_BUTTON_GAP - tail_x).max(1);
+            self.pieces.push((
+                Rectangle::new(
+                    (tail_x, head + (ROW_BUTTON - TAIL_LINE) / 2).into(),
+                    (tail_room, TAIL_LINE).into(),
+                ),
+                piece(
+                    cut_to_width(&tail, Font::Small.size(), tail_room),
+                    Font::Small,
+                    Ink::Muted,
+                    false,
+                ),
+            ));
+            self.y = head + buttons_h;
+        } else {
+            // The title whole, beside the buttons, and its id under it.
+            (self.x, self.w) = (text_x, room);
+            self.y = line_y;
+            self.found_text(&card.title, Font::Body, ink, true, BODY_LINE, needle);
+            self.found_text(&tail, Font::Small, Ink::Muted, false, TAIL_LINE, needle);
+            self.y = self.y.max(head + buttons_h);
+            // Its steps, under all that, across the row.
+            let word_w = (sheet.steps.iter())
+                .map(|(word, _)| width_of(word, Font::Body.size()).ceil() as i32)
+                .max()
+                .unwrap_or(0);
+            let word_room = match word_w {
+                0 => 0,
+                w => w + SHEET_WORD_GAP,
+            };
+            if !sheet.steps.is_empty() {
+                self.y += FINDING_GAP;
+            }
+            for (word, text) in &sheet.steps {
+                let at = self.y;
+                if !word.is_empty() {
+                    self.pieces.push((
+                        Rectangle::new((text_x, at).into(), (word_w + 1, BODY_LINE).into()),
+                        Piece::Text {
+                            text: (*word).to_owned(),
+                            font: Font::Body,
+                            ink: Ink::Muted,
+                            bold: false,
+                        },
+                    ));
+                }
+                (self.x, self.w) = (text_x + word_room, (right - text_x - word_room).max(1));
+                self.found_text(text, Font::Body, ink, false, BODY_LINE, needle);
+            }
+            (self.x, self.w) = (text_x, (right - text_x).max(1));
+            if !card.body.is_empty() {
+                self.y += FINDING_GAP;
+                self.all_text(&card.body, Font::Small, Ink::Muted, false, TAIL_LINE);
+            }
+            if !card.note.is_empty() {
+                self.y += FINDING_GAP;
+                self.found_text(&card.note, Font::Body, Ink::Error, false, BODY_LINE, needle);
+            }
+            // As tall as its lines, as on a card.
+            if let Some(field) = &card.field {
+                self.y += FINDING_GAP;
+                let h = field_lines_height(field.text.split('\n').count());
+                let rect = Rectangle::new((self.x, self.y).into(), (self.w, h).into());
+                self.pieces.push((rect, Piece::CardField(k)));
+                self.y += h;
+            }
+        }
+        self.y += SHEET_PAD;
         (self.x, self.w) = (x, w);
         let frame = Rectangle::new((x, top).into(), (w, self.y - top).into());
         self.pieces.insert(frame_at, (frame, Piece::FindingCard(k)));
@@ -2310,7 +2891,10 @@ fn page_stack(
         .iter()
         .flat_map(|sec| match sec {
             PageSection::Agent { buttons, .. } => buttons.clone(),
-            PageSection::File { buttons, .. } => buttons.clone(),
+            PageSection::File { buttons, .. } | PageSection::Milestones { buttons, .. } => {
+                buttons.clone()
+            }
+            PageSection::Toolbar { groups } => groups.iter().flat_map(|(_, b)| b.clone()).collect(),
             PageSection::Finding(card) => (card.buttons.iter().chain(&card.comment_buttons))
                 .copied()
                 .collect(),
@@ -2363,13 +2947,25 @@ fn page_stack(
         }
         s.y += rows_height(&placed);
     }
+    // The toolbar went at the right of the caption before it.
+    let mut beside = None;
+    let sheet = |k: usize| {
+        matches!(page.sections.get(k), Some(PageSection::Finding(c)) if c.sheet.is_some())
+    };
     for (k, section) in page.sections.iter().enumerate() {
-        if matches!(section, PageSection::Doc { .. }) {
+        if matches!(section, PageSection::Doc { .. }) || beside == Some(k) {
             continue;
         }
-        s.y += PAGE_GAP;
+        // A sheet's rows go one under the other, a rule between them.
+        if !(sheet(k) && k > 0 && (sheet(k - 1) || beside == Some(k - 1))) {
+            s.y += PAGE_GAP;
+        }
         match section {
             PageSection::Doc { .. } => {}
+            PageSection::Toolbar { groups } => {
+                let row = s.put(ROW_BUTTON, Piece::Caption(String::new()));
+                s.toolbar(groups, page, buttons, row);
+            }
             PageSection::Agent {
                 name,
                 tail,
@@ -2500,7 +3096,21 @@ fn page_stack(
             }
             PageSection::Lines { label, lines } => {
                 if !label.is_empty() {
-                    s.caption(label);
+                    let caption = s.put(CAPTION, Piece::Caption(label.to_uppercase()));
+                    if let Some(PageSection::Toolbar { groups }) = page.sections.get(k + 1) {
+                        let room = caption.size.w
+                            - width_of(&label.to_uppercase(), DETAIL_FONT_SIZE).ceil() as i32
+                            - PAGE_GAP;
+                        if toolbar_width(groups, page) <= room {
+                            let row = Rectangle::new(
+                                (caption.loc.x, caption.loc.y + (CAPTION - ROW_BUTTON) / 2).into(),
+                                (caption.size.w, ROW_BUTTON).into(),
+                            );
+                            s.toolbar(groups, page, buttons, row);
+                            s.y = s.y.max(row.loc.y + ROW_BUTTON) + 2;
+                            beside = Some(k + 1);
+                        }
+                    }
                 }
                 for line in lines {
                     s.text(&line.text, Font::Body, Ink::Tone(line.tone), BODY_LINE);
@@ -2513,8 +3123,19 @@ fn page_stack(
                 total,
                 items,
                 running,
+                buttons: held,
             } => {
-                s.caption(&format!("{label} \u{b7} {done} of {total}"));
+                let said = format!("{label} \u{b7} {done} of {total}").to_uppercase();
+                let caption = s.put(CAPTION, Piece::GroupCaption(k, said));
+                // Its buttons from the caption's right, in their order.
+                let mut bx = caption.loc.x + caption.size.w;
+                let by = caption.loc.y + (CAPTION - ROW_BUTTON) / 2;
+                for &b in held.iter().rev().filter(|b| **b < page.buttons.len()) {
+                    let w = button_width(&page.buttons[b].label);
+                    bx -= w;
+                    buttons[b] = Some(Rectangle::new((bx, by).into(), (w, ROW_BUTTON).into()));
+                    bx -= QUIT_BUTTON_GAP;
+                }
                 s.y += 2;
                 s.put(
                     PROGRESS,
@@ -2562,6 +3183,93 @@ fn page_stack(
             }
             s.doc(blocks);
         }
+    }
+}
+
+/// Where `ReviewSwitch`'s parts go.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReviewSwitchSpots {
+    pub track: Rect,
+    pub segments: [Rect; 2],
+    /// How many files are viewed, drawn as a bar, while there is room.
+    pub bar: Option<Rect>,
+    /// What is left, in words.
+    pub left: Rect,
+    /// The segments say their figures: there is room.
+    pub full: bool,
+    /// Where each of `ReviewSwitch::buttons` goes; none for one the row has
+    /// no room for, the leftmost going first.
+    pub buttons: Vec<Option<Rect>>,
+}
+
+/// Where `switch` goes in the row at `(x, y)`, `width` wide: the choice at its
+/// left, its figures cut if they wouldn't fit, then the bar and what is left,
+/// the buttons at the right.
+fn review_switch_spots(switch: &ReviewSwitch, x: i32, y: i32, width: i32) -> ReviewSwitchSpots {
+    let measure = |label: &str| width_of(label, SMALL_FONT_SIZE).ceil() as i32 + 2 * CHIP_PAD;
+    let [code, fixes] = switch.labels();
+    let widths = [measure(&code), measure(&fixes)];
+    let h = REVIEW_SWITCH_H;
+    // The buttons first: the least of the switch and its words is all they
+    // leave. The rightmost, the one to press next, stays longest.
+    let least = measure("Code review") + measure("Fixes") + 2 * PICK_TRACK_PAD + COLUMN_GAP;
+    let mut sizes: Vec<i32> = (switch.buttons.iter())
+        .map(|b| button_width(&b.label))
+        .collect();
+    let mut dropped = 0;
+    while sizes.len() > 1 && row_width(&sizes) > width - least - REVIEW_LEFT_MIN {
+        sizes.remove(0);
+        dropped += 1;
+    }
+    let fits = !sizes.is_empty() && row_width(&sizes) <= width - least;
+    let end = x + width;
+    let mut buttons = vec![None; switch.buttons.len()];
+    let by = y + (h - ROW_BUTTON) / 2;
+    if fits {
+        for (i, (bx, _)) in rows_from_right(&sizes, x, end).into_iter().enumerate() {
+            let rect = Rectangle::new((bx, by).into(), (sizes[i], ROW_BUTTON).into());
+            buttons[dropped + i] = Some(rect);
+        }
+    }
+    let end = match buttons.iter().flatten().next() {
+        Some(first) => first.loc.x - COLUMN_GAP,
+        None => end,
+    };
+    let width = end - x;
+    let room = width - 2 * PICK_TRACK_PAD;
+    let full = widths[0] + widths[1] <= room;
+    let widths = match full {
+        true => widths,
+        false => [measure("Code review"), measure("Fixes")],
+    };
+    let inner = h - 2 * PICK_TRACK_PAD;
+    let first = Rectangle::new(
+        (x + PICK_TRACK_PAD, y + PICK_TRACK_PAD).into(),
+        (widths[0], inner).into(),
+    );
+    let second = Rectangle::new(
+        (first.loc.x + widths[0], y + PICK_TRACK_PAD).into(),
+        (widths[1], inner).into(),
+    );
+    let track_w = widths[0] + widths[1] + 2 * PICK_TRACK_PAD;
+    let track = Rectangle::new((x, y).into(), (track_w, h).into());
+    let from = x + track_w + COLUMN_GAP;
+    let has_bar = switch.files.is_some() && end - from >= REVIEW_BAR_W + 2 * COLUMN_GAP + REVIEW_LEFT_MIN;
+    let bar = has_bar.then(|| {
+        Rectangle::new(
+            (from, y + (h - REVIEW_BAR_H) / 2).into(),
+            (REVIEW_BAR_W, REVIEW_BAR_H).into(),
+        )
+    });
+    let left_x = bar.map_or(from, |bar| bar.loc.x + bar.size.w + COLUMN_GAP);
+    let left = Rectangle::new((left_x, y).into(), ((end - left_x).max(0), h).into());
+    ReviewSwitchSpots {
+        track,
+        segments: [first, second],
+        bar,
+        left,
+        full,
+        buttons,
     }
 }
 
@@ -2647,6 +3355,19 @@ pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayou
         .collect();
     // Under the rail's rule, the columns; or across it all, the review.
     let rule_end = rail_top + rail_h + RAIL_GAP + 1;
+    let review_switch = view.review_switch.as_ref().map(|switch| {
+        review_switch_spots(switch, x, rule_end + REVIEW_SWITCH_GAP, inner)
+    });
+    let test_strip = (view.test_strip.as_ref())
+        .filter(|_| review_switch.is_none())
+        .map(|strip| {
+            let open = strip.search.is_some();
+            test_strip_spots(x, rule_end + REVIEW_SWITCH_GAP, inner, open)
+        });
+    let rule_end = match review_switch.is_some() || test_strip.is_some() {
+        true => rule_end + 2 * REVIEW_SWITCH_GAP + REVIEW_SWITCH_H,
+        false => rule_end,
+    };
     let review = view.review_page.then(|| {
         Rectangle::new(
             (frame.loc.x, rule_end).into(),
@@ -2832,6 +3553,8 @@ pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayou
     }
 
     FeatureTabLayout {
+        review_switch,
+        test_strip,
         review,
         frame,
         title,
@@ -3178,6 +3901,8 @@ fn slice_view(view: &FeatureTabView, slice: TabSlice) -> FeatureTabView {
         repo: 0,
         focus: TabArea::Stages,
         review_page: view.review_page,
+        review_switch: None,
+        test_strip: None,
         review_keys: view.review_keys,
         expanded: view.expanded,
         more: 0,
@@ -3207,7 +3932,13 @@ fn slice_view(view: &FeatureTabView, slice: TabSlice) -> FeatureTabView {
         TabSlice::Head => {
             matches!(
                 hit,
-                H::Prev | H::Next | H::Button(_) | H::Node(_) | H::ToggleRepos
+                H::Prev
+                    | H::Next
+                    | H::Button(_)
+                    | H::Node(_)
+                    | H::ToggleRepos
+                    | H::ReviewView(_)
+                    | H::ReviewButton(_)
             ) || strip && matches!(hit, H::Repo(_) | H::MoreRepos(_))
         }
         TabSlice::Column(TabColumn::Repos) => {
@@ -3237,6 +3968,8 @@ fn slice_view(view: &FeatureTabView, slice: TabSlice) -> FeatureTabView {
             v.back = view.back;
             v.focus = view.focus;
             v.more = view.more;
+            v.review_switch = view.review_switch.clone();
+            v.test_strip = view.test_strip.clone();
             if strip {
                 repos(&mut v);
             }
@@ -3801,7 +4534,8 @@ impl Painter {
             icon_sdf(c, *rect, scale, color, |x, y| match i {
                 0 => tab(x, y, s * 0.8),
                 1 => copy(x, y, s * 1.2),
-                2 => plus(x, y, 0.0, 0.0, 4.5 * s, s),
+                2 => bars(x, y, s),
+                3 => plus(x, y, 0.0, 0.0, 4.5 * s, s),
                 _ => trash(x, y, s),
             });
         }
@@ -3914,6 +4648,8 @@ impl Painter {
             c.fill(0, px(y), c.w, px(1).max(1), p.border_variant);
         }
 
+        self.review_switch(c, view, l, scale, p);
+        self.test_strip(c, view, l, scale, p);
         self.repo_strip(c, view, l, scale, p);
     }
 
@@ -4078,6 +4814,98 @@ impl Painter {
             band(rect, scale),
             scale,
             color,
+        );
+    }
+
+    /// The line on Manual test's page: how many criteria passed, failed and
+    /// are left, as a bar and in words.
+    fn test_strip(
+        &self,
+        c: &mut Canvas,
+        view: &FeatureTabView,
+        l: &FeatureTabLayout,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let (Some(strip), Some(spots)) = (&view.test_strip, &l.test_strip) else {
+            return;
+        };
+        let hover = match view.hover {
+            Some(FeatureTabHit::Search(part)) => Some(part),
+            _ => None,
+        };
+        let bar = strip.search.as_ref();
+        self.search_bar(c, bar, &spots.search, spots.count, hover, scale, p);
+        if let Some(bar) = spots.bar.filter(|_| strip.total() > 0) {
+            let parts = [(strip.passed, p.success), (strip.failed, p.error)];
+            count_bar(c, bar, &parts, strip.total(), scale, p);
+        }
+        let tone = if strip.good() { p.success } else { p.warning };
+        let (x, end) = phys(spots.text, scale);
+        self.bold_text(
+            c,
+            &strip.text,
+            FONT_SIZE,
+            x,
+            end,
+            band(spots.text, scale),
+            scale,
+            tone,
+        );
+    }
+
+    /// The switch on Code review's page, with the figures that say how far its
+    /// review has come.
+    fn review_switch(
+        &self,
+        c: &mut Canvas,
+        view: &FeatureTabView,
+        l: &FeatureTabLayout,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let (Some(switch), Some(spots)) = (&view.review_switch, &l.review_switch) else {
+            return;
+        };
+        let [code, fixes] = switch.labels();
+        let labels: [&str; 2] = match spots.full {
+            true => [&code, &fixes],
+            false => ["Code review", "Fixes"],
+        };
+        let hover = match view.hover {
+            Some(FeatureTabHit::ReviewView(i)) => Some(i),
+            _ => None,
+        };
+        let on = usize::from(switch.view == ReviewView::Fixes);
+        let labelled = [(labels[0], spots.segments[0]), (labels[1], spots.segments[1])];
+        self.segmented(c, spots.track, &labelled, on, hover, scale, p);
+        for (i, (b, rect)) in switch.buttons.iter().zip(&spots.buttons).enumerate() {
+            let Some(rect) = rect else {
+                continue;
+            };
+            let lit = view.hover == Some(FeatureTabHit::ReviewButton(i));
+            self.button(c, &b.label, *rect, (lit, false), b.style, scale, p);
+        }
+        if let Some(files) = switch.files.filter(|files| files.total > 0)
+            && let Some(bar) = spots.bar
+        {
+            let tone = if files.left().1 { p.success } else { p.warning };
+            count_bar(c, bar, &[(files.viewed, tone)], files.total, scale, p);
+        }
+        let Some((said, good)) = switch.said() else {
+            return;
+        };
+        let tone = if good { p.success } else { p.warning };
+        let (x, end) = phys(spots.left, scale);
+        self.bold_text(
+            c,
+            &said,
+            FONT_SIZE,
+            x,
+            end,
+            band(spots.left, scale),
+            scale,
+            tone,
         );
     }
 
@@ -4259,6 +5087,18 @@ impl Painter {
         match piece {
             Piece::Caption(text) => {
                 line(c, text, rect, DETAIL_FONT_SIZE, p.muted);
+            }
+            Piece::GroupCaption(k, text) => {
+                line(c, text, rect, DETAIL_FONT_SIZE, p.muted);
+                let Some(PageSection::Milestones { buttons, .. }) = view.page.sections.get(*k)
+                else {
+                    return;
+                };
+                for &i in buttons {
+                    if let Some(r) = l.page_buttons.get(i).copied().flatten() {
+                        self.page_button(c, view, i, at(r), scale, p);
+                    }
+                }
             }
             Piece::Text {
                 text,
@@ -4667,6 +5507,25 @@ impl Painter {
                 let Some(PageSection::Finding(card)) = view.page.sections.get(*k) else {
                     return;
                 };
+                if card.sheet.is_some() {
+                    let n = (view.page.sections[..*k].iter())
+                        .filter(|s| matches!(s, PageSection::Finding(_)))
+                        .count();
+                    let hovered = matches!(view.hover,
+                        Some(FeatureTabHit::Finding(i) | FeatureTabHit::Fold(i)) if i == n);
+                    let lit = (card.selected, if hovered { 1.0 } else { 0.0 });
+                    self.row_highlight(c, rect, lit, scale, p);
+                    // The rule under it, across the row.
+                    let (x, y, w, h) = rect_px(rect, scale);
+                    let b = (scale as f32).round().max(1.0);
+                    c.rounded(x, y + h - b, w, b, 0.0, p.border);
+                    for &i in &card.buttons {
+                        if let Some(r) = l.page_buttons.get(i).copied().flatten() {
+                            self.page_button(c, view, i, at(r), scale, p);
+                        }
+                    }
+                    return;
+                }
                 card_frame(c, rect, scale, p);
                 // Inside the frame: the column cuts off what goes past it.
                 if card.selected {
@@ -4694,6 +5553,42 @@ impl Painter {
                     }
                 }
             }
+            Piece::Fold(k) => {
+                let Some(PageSection::Finding(card)) = view.page.sections.get(*k) else {
+                    return;
+                };
+                let open = card.sheet.as_ref().is_some_and(|sheet| sheet.open);
+                let n = (view.page.sections[..*k].iter())
+                    .filter(|s| matches!(s, PageSection::Finding(_)))
+                    .count();
+                let color = match view.hover == Some(FeatureTabHit::Fold(n)) {
+                    true => p.text,
+                    false => p.muted,
+                };
+                icon_sdf(c, rect, scale, color, |x, y| match open {
+                    true => chevron_down(x, y, 1.0 * s),
+                    false => chevron_side(false, x, y, 1.0 * s),
+                });
+            }
+            Piece::Found {
+                text,
+                font,
+                ink,
+                bold,
+                needle,
+            } => {
+                let (x, end) = phys(rect, scale);
+                let b = band(rect, scale);
+                let size = font.size();
+                let found = found_ranges(text, needle);
+                let width = |t: &str| self.text_width(t, size, scale);
+                self.found_tints(c, text, &found, (x, end), b, width, p.background, scale, p);
+                if *bold {
+                    self.bold_text(c, text, size, x, end, b, scale, ink.color(p));
+                } else {
+                    self.text(c, text, size, x, end, b, scale, ink.color(p));
+                }
+            }
             Piece::CardField(k) => {
                 let Some(PageSection::Finding(card)) = view.page.sections.get(*k) else {
                     return;
@@ -4702,7 +5597,7 @@ impl Painter {
                     return;
                 };
                 let hint = card.field_hint;
-                self.field(c, text, hint, rect, true, scale, p);
+                self.field_of_lines(c, text, hint, rect, true, scale, p);
             }
             // A dot at work blinks: it is composed over the tab.
             Piece::CheckDot(dot) => status_dot(c, rect, *dot, scale, p),
@@ -5056,7 +5951,9 @@ pub(super) fn stage_blink_dot(scale: f64, p: &Palette) -> MemoryRenderBuffer {
 mod tests {
     use super::*;
     use crate::chrome::sidebar::feature_dots_rect as feature_row_dots;
-    use crate::chrome::{ONE_DARK, ONE_LIGHT, ONE_LIGHT_PAGE, contrast, inside};
+    use crate::chrome::{
+        FIELD_LINE, ONE_DARK, ONE_LIGHT, ONE_LIGHT_PAGE, contrast, field_line_spot, inside,
+    };
 
     #[test]
     fn the_dialog_stacks_its_parts_inside_it() {
@@ -6638,6 +7535,7 @@ mod tests {
                 });
             }
             view.page.sections.push(PageSection::Finding(FindingCard {
+                sheet: None,
                 tag: FindingTag::High,
                 title: format!("Finding {i}: {text}"),
                 state: String::new(),
@@ -6659,6 +7557,50 @@ mod tests {
             }));
         }
         view
+    }
+
+    #[test]
+    fn a_note_being_written_holds_its_lines_and_the_pointer_finds_each() {
+        let field_of = |view: &FeatureTabView| {
+            let l = tab_at(view, 1200);
+            let page = &l.pieces[TabColumn::Page as usize];
+            let (rect, _) = (page.iter())
+                .find(|(_, p)| matches!(p, Piece::CardField(0)))
+                .expect("the note's field");
+            (*rect, l.finding_cards[0], l.finding_cards[1])
+        };
+        let mut view = findings_view(2, "short");
+        let note = |view: &mut FeatureTabView, text: &str| {
+            if let Some(PageSection::Finding(card)) = view.page.sections.get_mut(0) {
+                card.field = Some(Line {
+                    text: text.into(),
+                    caret: text.len(),
+                    anchor: text.len(),
+                });
+            }
+        };
+        note(&mut view, "one line");
+        let (one, card, _) = field_of(&view);
+        assert_eq!(one.size.h, QUIT_BUTTON);
+        note(&mut view, "first\nsecond\nthird");
+        let (three, grown, next) = field_of(&view);
+        assert_eq!(three.size.h - one.size.h, 2 * FIELD_LINE);
+        assert_eq!(grown.size.h - card.size.h, 2 * FIELD_LINE);
+        assert!(three.loc.y + three.size.h <= grown.loc.y + grown.size.h);
+        assert!(grown.loc.y + grown.size.h <= next.loc.y, "the next card moves down");
+        let whole = Line {
+            text: "first\nsecond\nthird".into(),
+            caret: 0,
+            anchor: 0,
+        };
+        let at = |y: i32| Point::from((three.loc.x as f64 + 5.0, (three.loc.y + y) as f64));
+        let line_at = |y: i32| {
+            let (spot, base) = field_line_spot(three, three, &whole, at(y), 1.0);
+            (spot.line.text, base)
+        };
+        assert_eq!(line_at(5), ("first".to_owned(), 0));
+        assert_eq!(line_at(FIELD_LINE + 5), ("second".to_owned(), 6));
+        assert_eq!(line_at(three.size.h + 40), ("third".to_owned(), 13));
     }
 
     #[test]
@@ -6730,6 +7672,33 @@ mod tests {
     }
 
     #[test]
+    fn a_list_of_fixes_holds_its_button_at_its_captions_right() {
+        let area = Rectangle::new((0, 0).into(), (1000, 800).into());
+        let mut view = tab_view();
+        view.page.sections.clear();
+        view.page.buttons = vec![PageButton {
+            label: "Open plan".into(),
+            style: ButtonStyle::Plain,
+        }];
+        view.page.sections.push(PageSection::Milestones {
+            label: "Code review 1".into(),
+            state: None,
+            done: 1,
+            total: 1,
+            items: vec![(true, "a.rs:1".into())],
+            running: Vec::new(),
+            buttons: vec![0],
+        });
+        let l = feature_tab_layout(&view, area);
+        let button = l.page_buttons[0].expect("placed");
+        let caption = (l.pieces.iter().flatten())
+            .find_map(|(rect, piece)| matches!(piece, Piece::GroupCaption(0, _)).then_some(*rect))
+            .expect("its caption");
+        assert_eq!(button.loc.x + button.size.w, caption.loc.x + caption.size.w);
+        assert!((button.loc.y - caption.loc.y).abs() <= ROW_BUTTON - CAPTION);
+    }
+
+    #[test]
     fn a_collapsed_card_is_one_line_with_only_its_first_button() {
         let area = Rectangle::new((0, 0).into(), (1000, 800).into());
         let mut view = tab_view();
@@ -6741,6 +7710,7 @@ mod tests {
             })
             .to_vec();
         let card = |collapsed| FindingCard {
+            sheet: None,
             tag: FindingTag::Low,
             title: "A title long enough to go past the end of any line it is cut to fit on, \
                     however wide the page it sits on happens to be today"

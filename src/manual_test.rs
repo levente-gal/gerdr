@@ -1,11 +1,18 @@
-//! Manual test: a feature's acceptance criteria (from its brief), one card
-//! each on the stage's page in the feature tab, to try by hand and mark passed
-//! or failed, a failure with a note saying what went wrong, written on its
-//! card. The results save as they are given (`Feature::manual`, see
-//! `feature::manual`). Mark passed marks Manual test done once every criterion
-//! passed on the code as it is now; Plan fixes starts a fix round on the
-//! failures (see `feature_fix`). Once done the cards stay on the page, to read:
-//! reopening the stage is what changes them.
+//! Manual test: a feature's acceptance criteria (from its brief), a row
+//! each of a sheet of text on the stage's page in the feature tab, to try by
+//! hand and mark passed or failed, a failure with a note saying what went
+//! wrong, written on its row. Each row folds to its line or opens to its
+//! steps; they start folded, one folds as it passes, and what is open and
+//! read is kept in `state.json` (`manual::Folds`). A search over them hides
+//! those not saying what is typed and opens the rest. The results save as they are given (`Feature::manual`, see
+//! `feature::manual`) and stay as the code changes. Plan fixes starts a fix
+//! round on the failures found so far (see `feature_fix`): the user goes on
+//! trying the rest while the Build agent fixes them, the feature stays on
+//! Manual test, and Verify runs again on the fixes (`Feature::carry`). A
+//! failure whose fix is made says so, to try again. Mark passed marks Manual
+//! test done once every criterion passed and Verify holds on the code as it
+//! is now. Once done the cards stay on the page, to read: reopening the stage
+//! is what changes them.
 //!
 //! The cards' keys are in `features`, with the rest of the tab's. This holds
 //! what they do, and the note being written.
@@ -21,7 +28,7 @@ use crate::{
         store,
     },
     features::{CardNote, plural},
-    text_field::TextField,
+    text_field::{Edit, TextField},
 };
 
 /// What Enter says with no note written.
@@ -59,6 +66,9 @@ impl Outcome {
 pub struct Row {
     /// `AC-1`…
     pub id: String,
+    /// What it checks, in a few words.
+    pub title: String,
+    /// Its Given/When/Then.
     pub text: String,
     /// What the user found, on the code as it is now.
     pub found: Option<Verdict>,
@@ -66,26 +76,103 @@ pub struct Row {
     pub note: String,
     /// The failure went to the Build agent.
     pub sent: bool,
+    /// The Build agent made the fix of the failure: to try again.
+    pub made: bool,
+    /// It was tried on other code than the feature's now.
+    pub earlier: bool,
+    /// It shows its steps, as the user left it (see `manual::Folds`).
+    pub open: bool,
+    /// The user read it: opened it, or marked it.
+    pub seen: bool,
+    /// The screenshots of a failure, by file name (see `manual::SHOTS_DIR`).
+    pub shots: Vec<String>,
 }
 
-/// The cards' rows: `criteria` as `test` has them on `patch`.
+impl Row {
+    /// Whether it says `query` (lowercase) anywhere the page shows: its id,
+    /// title, steps or note, in any case.
+    pub fn says(&self, query: &str) -> bool {
+        [&self.id, &self.title, &self.text, &self.note]
+            .iter()
+            .any(|t| t.to_lowercase().contains(query))
+    }
+}
+
+/// The search through the criteria on Manual test's page: a field over
+/// them, the criteria not saying what it holds hidden. It stays with the
+/// panel while other pages show.
+#[derive(Debug, Default)]
+pub struct Search {
+    pub query: TextField,
+    /// The field has the keys, not the criteria.
+    pub typing: bool,
+}
+
+impl Search {
+    /// What it looks for, lowercase; empty for nothing.
+    pub fn needle(&self) -> String {
+        self.query.trim().to_lowercase()
+    }
+}
+
+/// Which of `rows` show while searching for `needle` (lowercase): all with
+/// nothing typed.
+pub fn shown(rows: &[Row], needle: &str) -> Vec<bool> {
+    rows.iter()
+        .map(|r| needle.is_empty() || r.says(needle))
+        .collect()
+}
+
+/// The criterion to select of those `shown` instead of hidden `at`: the
+/// next one shown on from it (`back`: before it), else the nearest the
+/// other way; `None` with none shown.
+pub fn settle(at: usize, back: bool, shown: &[bool]) -> Option<usize> {
+    if shown.get(at).copied().unwrap_or(false) {
+        return Some(at);
+    }
+    let on = (at..shown.len()).find(|i| shown[*i]);
+    let before = (0..at.min(shown.len())).rev().find(|i| shown[*i]);
+    match back {
+        true => before.or(on),
+        false => on.or(before),
+    }
+}
+
+/// The key `state.json` keeps feature `slug`'s folds under.
+fn folds_key(project: &str, slug: &str) -> String {
+    format!("{project}/{slug}")
+}
+
+/// The cards' rows: `criteria` as `test` has them, the feature's code being
+/// `patch`'s (`None`: unknown, or not to tell).
 fn rows(
     test: Option<&manual::ManualTest>,
     criteria: &[Criterion],
     patch: Option<&str>,
+    folds: Option<&manual::Folds>,
 ) -> Vec<Row> {
     criteria
         .iter()
         .map(|c| {
-            let check = manual::check(test, c, patch);
+            let check = manual::check(test, c);
             Row {
                 id: c.id.clone(),
+                title: c.title.clone(),
                 text: c.text.clone(),
                 found: check.map(|k| k.state),
                 note: check
                     .filter(|k| k.state == Verdict::Fail)
                     .map_or_else(String::new, |k| k.note.clone()),
                 sent: check.is_some_and(|k| k.state == Verdict::Fail && k.sent),
+                made: check.is_some_and(manual::Check::fix_made),
+                earlier: (test.zip(check)).zip(patch).is_some_and(|((t, k), p)| {
+                    manual::tried_on(t, k) != p
+                }),
+                open: folds.is_some_and(|f| f.open.contains(&c.text)),
+                seen: folds.is_some_and(|f| f.seen.contains(&c.text)) || check.is_some(),
+                shots: check
+                    .filter(|k| k.state == Verdict::Fail)
+                    .map_or_else(Vec::new, |k| k.shots.clone()),
             }
         })
         .collect()
@@ -93,12 +180,17 @@ fn rows(
 
 /// How far the manual test of `criteria` went, in words: "2 of 3
 /// criteria passed · 1 failed", "1 of 3 criteria passed · 1 failure
-/// sent to Build".
+/// sent to Build", "… · 1 fix made: try again".
 pub(crate) fn counts_text(n: manual::Counts) -> String {
     let total = n.total();
     let what = if total == 1 { "criterion" } else { "criteria" };
     let passed = format!("{} of {total} {what} passed", n.passed);
-    if n.failed > 0 && n.sent == n.failed {
+    if n.made > 0 {
+        format!(
+            "{passed} \u{b7} {} made: try again",
+            fixes(n.made)
+        )
+    } else if n.failed > 0 && n.sent == n.failed {
         format!(
             "{passed} \u{b7} {} sent to Build",
             plural(n.sent, "failure")
@@ -108,6 +200,27 @@ pub(crate) fn counts_text(n: manual::Counts) -> String {
     } else {
         passed
     }
+}
+
+/// "1 fix", "2 fixes".
+fn fixes(n: usize) -> String {
+    match n {
+        1 => "1 fix".into(),
+        n => format!("{n} fixes"),
+    }
+}
+
+/// The counts in a few words, for the bar over the cards: "3 passed · 1
+/// failed · 2 untested", and how many fixes wait to be tried.
+pub(crate) fn strip_text(n: manual::Counts) -> String {
+    let mut text = format!(
+        "{} passed \u{b7} {} failed \u{b7} {} untested",
+        n.passed, n.failed, n.untested
+    );
+    if n.made > 0 {
+        text.push_str(&format!(" \u{b7} {} made", fixes(n.made)));
+    }
+    text
 }
 
 /// What is left before every criterion passed: "AC-2 failed, AC-3 not
@@ -166,23 +279,19 @@ impl Gerdr {
         self.feature_reading(project, slug).map(|r| r.patch.clone())
     }
 
-    /// How far feature `f`'s manual test went on its code as last read
-    /// (unknown: as recorded); `None` when its brief has no criteria.
+    /// How far feature `f`'s manual test went; `None` when its brief has no
+    /// criteria.
     pub(crate) fn manual_counts(&self, f: &Feature) -> Option<manual::Counts> {
         let criteria = self.criteria(&f.project, &f.slug);
         if criteria.is_empty() {
             return None;
         }
-        let patch = self.manual_patch(&f.project, &f.slug);
-        Some(manual::counts(
-            f.manual.as_ref(),
-            criteria,
-            patch.as_deref(),
-        ))
+        Some(manual::counts(f.manual.as_ref(), criteria))
     }
 
-    /// The cards of feature `f`'s criteria, on its code as last read; once
-    /// Manual test is done, as recorded: its page says if the code changed.
+    /// The cards of feature `f`'s criteria, telling the ones tried on other
+    /// code than its own as last read; once Manual test is done, as recorded:
+    /// its page says if the code changed.
     pub(crate) fn criterion_rows(&self, f: &Feature) -> Vec<Row> {
         let patch = match f.is_done(Stage::ManualTest) {
             true => None,
@@ -192,7 +301,238 @@ impl Gerdr {
             f.manual.as_ref(),
             self.criteria(&f.project, &f.slug),
             patch.as_deref(),
+            self.projects.criteria_folds.get(&folds_key(&f.project, &f.slug)),
         )
+    }
+
+    /// Change the folds of feature `slug`'s criteria by `change`, which
+    /// says whether it changed them, and save that.
+    fn change_folds(
+        &mut self,
+        project: &str,
+        slug: &str,
+        change: impl FnOnce(&mut manual::Folds, &[Criterion]) -> bool,
+    ) {
+        let criteria = self.criteria(project, slug).to_vec();
+        if criteria.is_empty() {
+            return;
+        }
+        let key = folds_key(project, slug);
+        let folds = self.projects.criteria_folds.entry(key.clone()).or_default();
+        // What the brief no longer says goes with the change.
+        let pruned = folds.keep_only(&criteria);
+        let changed = change(folds, &criteria);
+        if folds.is_empty() {
+            self.projects.criteria_folds.remove(&key);
+        }
+        if changed || pruned {
+            self.projects.save();
+        }
+    }
+
+    /// Open criterion `i` of the feature on the tab to show its steps, or
+    /// fold it to its line.
+    pub(crate) fn fold_criterion(&mut self, i: usize, open: bool) {
+        let Some((project, slug)) = self.tab_feature_names() else {
+            return;
+        };
+        self.change_folds(&project, &slug, |folds, criteria| {
+            criteria.get(i).is_some_and(|c| folds.set(&c.text, open))
+        });
+        self.select_criterion(i);
+    }
+
+    /// Open or fold the criteria `scope` names of the feature on the tab.
+    pub(crate) fn fold_criteria(&mut self, scope: manual::FoldScope, open: bool) {
+        let Some((project, slug)) = self.tab_feature_names() else {
+            return;
+        };
+        let rows = match self.feature(&project, &slug) {
+            Some(f) => self.criterion_rows(f),
+            None => return,
+        };
+        self.change_folds(&project, &slug, |folds, criteria| {
+            let mut changed = false;
+            for (c, row) in criteria.iter().zip(&rows) {
+                let wanted = match scope {
+                    manual::FoldScope::All => true,
+                    manual::FoldScope::Done => row.found == Some(Verdict::Pass),
+                    manual::FoldScope::Seen => row.seen,
+                };
+                if wanted && row.open != open {
+                    // Opening many reads none of them.
+                    changed |= match open {
+                        true => folds.open.insert(c.text.clone()),
+                        false => folds.open.remove(&c.text),
+                    };
+                }
+            }
+            changed
+        });
+        self.sync_feature_page();
+        self.reveal_feature_finding();
+    }
+
+    /// Note the selected criterion as read, if it shows its steps.
+    pub(crate) fn see_selected_criterion(&mut self) {
+        let Some(panel) = self.features.panel.as_ref() else {
+            return;
+        };
+        if panel.focus != TabArea::Findings || panel.keys || panel.expanded {
+            return;
+        }
+        let (project, slug, i) = (panel.project.clone(), panel.slug.clone(), panel.finding);
+        let Some(feature) = self.feature(&project, &slug) else {
+            return;
+        };
+        if panel.page_stage(feature) != Stage::ManualTest {
+            return;
+        }
+        let searching = (panel.search.as_ref()).is_some_and(|s| !s.needle().is_empty());
+        let rows = self.criterion_rows(feature);
+        let Some(row) = rows.get(i).filter(|r| (r.open || searching) && !r.seen) else {
+            return;
+        };
+        let text = row.text.clone();
+        self.change_folds(&project, &slug, |folds, _| folds.see(&text));
+    }
+
+    /// The project and slug of the feature on the tab.
+    fn tab_feature_names(&self) -> Option<(String, String)> {
+        let panel = self.features.panel.as_ref()?;
+        Some((panel.project.clone(), panel.slug.clone()))
+    }
+
+    /// Whether the page with the criteria shows, so their search can.
+    fn criteria_search_shows(&self) -> bool {
+        let Some(panel) = &self.features.panel else {
+            return false;
+        };
+        let Some(feature) = self.feature(&panel.project, &panel.slug) else {
+            return false;
+        };
+        !panel.keys
+            && !panel.expanded
+            && crate::features::shows_criteria(feature, panel.page_stage(feature))
+            && !self.criteria(&panel.project, &panel.slug).is_empty()
+    }
+
+    /// Open the criteria's search, the keys in its field.
+    pub(crate) fn open_criteria_search(&mut self) {
+        if !self.criteria_search_shows() {
+            return;
+        }
+        if let Some(panel) = self.features.panel.as_mut() {
+            panel.search.get_or_insert_with(Search::default).typing = true;
+        }
+        self.stop_key_repeat();
+    }
+
+    /// Close the criteria's search: they all show again.
+    pub(crate) fn close_criteria_search(&mut self) {
+        if let Some(panel) = self.features.panel.as_mut() {
+            panel.search = None;
+        }
+        self.sync_feature_page();
+        self.reveal_feature_finding();
+    }
+
+    /// The criterion selected is one the search shows: the nearest, `back`
+    /// before it first.
+    pub(crate) fn settle_criteria(&mut self, back: bool) {
+        let Some(panel) = self.features.panel.as_ref() else {
+            return;
+        };
+        let Some(needle) = (panel.search.as_ref()).map(Search::needle) else {
+            return;
+        };
+        let Some(feature) = self.feature(&panel.project, &panel.slug) else {
+            return;
+        };
+        if !crate::features::shows_criteria(feature, panel.page_stage(feature)) {
+            return;
+        }
+        let shown = shown(&self.criterion_rows(feature), &needle);
+        if let Some(panel) = self.features.panel.as_mut()
+            && let Some(at) = settle(panel.finding, back, &shown)
+        {
+            panel.finding = at;
+        }
+    }
+
+    /// A key for the criteria's search; false when it isn't the search's.
+    /// `/` and Ctrl+F open it; while its field has the keys, what is typed
+    /// goes there, Enter, Tab and Down give the keys to the criteria it
+    /// shows, and Esc clears it, then closes it. With the keys on the
+    /// criteria, Esc does the same.
+    pub(crate) fn criteria_search_key(
+        &mut self,
+        mods: &ModifiersState,
+        sym: Keysym,
+        typed: Keysym,
+    ) -> bool {
+        let ctrl = mods.ctrl && !(mods.alt || mods.logo || mods.shift);
+        let bare = !(mods.ctrl || mods.alt || mods.logo || mods.shift);
+        let opens = (ctrl && sym == Keysym::f)
+            || (!mods.ctrl && !mods.alt && (sym == Keysym::slash || typed == Keysym::slash));
+        if !self.criteria_search_shows() {
+            // Away from the criteria, the keys are the page's.
+            if let Some(search) = (self.features.panel.as_mut()).and_then(|p| p.search.as_mut()) {
+                search.typing = false;
+            }
+            return false;
+        }
+        let Some(panel) = self.features.panel.as_mut() else {
+            return false;
+        };
+        let writing = panel.note.is_some();
+        let Some(search) = panel.search.as_mut() else {
+            if opens && !writing {
+                self.open_criteria_search();
+                return true;
+            }
+            return false;
+        };
+        if sym == Keysym::Escape && bare {
+            if search.query.is_empty() {
+                self.close_criteria_search();
+            } else {
+                search.query.clear();
+                search.typing = true;
+                self.sync_feature_page();
+            }
+            return true;
+        }
+        if !search.typing {
+            if opens {
+                search.typing = true;
+                self.stop_key_repeat();
+                return true;
+            }
+            return false;
+        }
+        let to_list = matches!(
+            sym,
+            Keysym::Return | Keysym::KP_Enter | Keysym::Down | Keysym::KP_Down | Keysym::Tab
+        ) && !(mods.ctrl || mods.alt || mods.logo);
+        let edit = match to_list || (ctrl && sym == Keysym::f) {
+            true => Edit::Moved,
+            false => search.query.key(mods, sym, typed),
+        };
+        if to_list {
+            search.typing = false;
+        }
+        // Chords not the field's are the tab's: Ctrl+Enter marks passed.
+        if edit == Edit::Ignored && (mods.ctrl || mods.alt || mods.logo) {
+            return false;
+        }
+        if to_list || edit == Edit::Changed {
+            panel.focus = TabArea::Findings;
+            self.settle_criteria(false);
+            self.sync_feature_page();
+            self.reveal_feature_finding();
+        }
+        true
     }
 
     /// Give the keyboard to the criteria of the feature on the tab, at the
@@ -247,7 +587,8 @@ impl Gerdr {
     /// A key while the note of a criterion is being written; false when none
     /// is, or its page has gone (the note is kept then), and the key is the
     /// tab's. Enter saves it, as does Esc; with nothing written, Enter says
-    /// why not and Esc leaves the criterion as it was.
+    /// why not and Esc leaves the criterion as it was. Shift+Enter breaks
+    /// the line.
     pub(crate) fn criterion_note_key(
         &mut self,
         mods: &ModifiersState,
@@ -268,6 +609,12 @@ impl Gerdr {
             CardNote::Finding(id) => Some(id.clone()),
             CardNote::Criterion(_) => None,
         };
+        let enter = matches!(sym, Keysym::Return | Keysym::KP_Enter);
+        let only_shift = mods.shift && !(mods.ctrl || mods.alt || mods.logo);
+        if enter && only_shift {
+            field.newline();
+            return true;
+        }
         match sym {
             Keysym::Return | Keysym::KP_Enter if field.trim().is_empty() => match finding {
                 // Emptied, it goes; nothing there, there is nothing to do.
@@ -328,6 +675,19 @@ impl Gerdr {
         else {
             return;
         };
+        self.apply_manual_test_on(&project, &slug, outcome);
+    }
+
+    /// Whether the feature tab shows feature `slug` of `project`.
+    fn panel_on(&self, project: &str, slug: &str) -> bool {
+        (self.features.panel.as_ref()).is_some_and(|p| p.project == project && p.slug == slug)
+    }
+
+    /// Do what the criteria of feature `slug` of `project` asked, from its
+    /// page or from the criteria strip over its sandbox's app.
+    pub(crate) fn apply_manual_test_on(&mut self, project: &str, slug: &str, outcome: Outcome) {
+        let (project, slug) = (project.to_owned(), slug.to_owned());
+        let on_page = self.panel_on(&project, &slug);
         let Some(feature) = self.feature(&project, &slug) else {
             return self.show_warning("That feature is gone".into());
         };
@@ -338,16 +698,17 @@ impl Gerdr {
         let patch = reading.as_ref().map(|r| r.patch.clone());
         let reading_text =
             format!("Still reading the code of \u{201c}{title}\u{201d}; try again in a moment");
-        if let Some(i) = outcome.criterion() {
+        if let Some(i) = outcome.criterion().filter(|_| on_page) {
             self.select_criterion(i);
         }
         match outcome {
+            Outcome::Write(_) if !on_page => {}
             Outcome::Write(i) => {
                 let Some(c) = criteria.get(i) else {
                     return;
                 };
                 let note = self.feature(&project, &slug).and_then(|f| {
-                    let check = manual::check(f.manual.as_ref(), c, patch.as_deref())?;
+                    let check = manual::check(f.manual.as_ref(), c)?;
                     Some(check.note.clone())
                 });
                 self.write_criterion_note(i, note.as_deref().unwrap_or(""));
@@ -364,7 +725,9 @@ impl Gerdr {
                 }
                 let Some(patch) = patch else {
                     // The note goes back in its field, not thrown away.
-                    if let Outcome::Fail(_, note) = &outcome {
+                    if let Outcome::Fail(_, note) = &outcome
+                        && on_page
+                    {
                         self.write_criterion_note(i, note);
                     }
                     return self.show_warning(reading_text);
@@ -372,8 +735,12 @@ impl Gerdr {
                 let Some(f) = self.feature_mut(&project, &slug) else {
                     return;
                 };
-                let passed = manual::check(f.manual.as_ref(), c, Some(&patch))
+                let passed = manual::check(f.manual.as_ref(), c)
                     .is_some_and(|k| k.state == Verdict::Pass);
+                let text = c.text.clone();
+                // Marked, it was read; passed, it folds: what is left to try
+                // is what stays open.
+                let passes = !passed && matches!(outcome, Outcome::Toggle(_));
                 match outcome {
                     Outcome::Fail(_, note) => {
                         manual::set(
@@ -389,6 +756,10 @@ impl Gerdr {
                     _ => manual::set(&mut f.manual, c, &patch, Verdict::Pass, "", feature::now()),
                 }
                 self.save_feature(&project, &slug);
+                self.change_folds(&project, &slug, |folds, _| {
+                    let folded = passes && folds.open.remove(&text);
+                    folds.see(&text) || folded
+                });
             }
             Outcome::Clear(i) => {
                 let Some(c) = criteria.get(i) else {
@@ -423,26 +794,23 @@ impl Gerdr {
                         reading.dirty.join(", ")
                     ));
                 }
-                let rows = rows(feature.manual.as_ref(), &criteria, Some(&reading.patch));
+                let rows = rows(feature.manual.as_ref(), &criteria, Some(&reading.patch), None);
                 let left = left_text(&rows);
                 if !left.is_empty() {
                     return self.show_warning(format!("Not passed yet: {left}"));
                 }
+                if let Some(fixed) = feature.unverified.clone()
+                    && self.fixes_hold_up(&project, &slug, &fixed)
+                {
+                    return;
+                }
                 self.read_and_tick(&project, &slug, Stage::ManualTest);
             }
             Outcome::SendFailures => {
-                let Some(patch) = patch else {
-                    return self.show_warning(reading_text);
-                };
                 let Some(feature) = self.feature(&project, &slug) else {
                     return;
                 };
-                let (n, text) = manual::failures_markdown(
-                    feature.manual.as_ref(),
-                    &criteria,
-                    Some(&patch),
-                    &title,
-                );
+                let (n, text) = manual::failures_markdown(feature.manual.as_ref(), &criteria, &title);
                 if n == 0 {
                     return self.show_warning("No failures to send: mark one failed first".into());
                 }
@@ -456,7 +824,7 @@ impl Gerdr {
                     return;
                 }
                 if let Some(f) = self.feature_mut(&project, &slug) {
-                    let checks = manual::mark_sent(&mut f.manual, &criteria, Some(&patch));
+                    let checks = manual::mark_sent(&mut f.manual, &criteria);
                     let back = crate::feature::fix_round::GiveBack::Manual { checks };
                     self.fix_round_gives_back(&project, &slug, back);
                 }
@@ -467,12 +835,50 @@ impl Gerdr {
         }
     }
 
+    /// Whether Manual test of feature `slug` can't be marked passed as
+    /// Verify hasn't passed on `fixed`, the code its fixes made. The toast
+    /// says why, and checks that never ran on it start.
+    fn fixes_hold_up(&mut self, project: &str, slug: &str, fixed: &str) -> bool {
+        let Some(feature) = self.feature(project, slug) else {
+            return true;
+        };
+        let title = feature.title.clone();
+        let run = (feature.verify.as_ref()).filter(|r| r.patch.as_deref() == Some(fixed));
+        if run.is_some_and(|r| r.passed == Some(true)) {
+            if let Some(f) = self.feature_mut(project, slug) {
+                f.unverified = None;
+                self.save_feature(project, slug);
+            }
+            return false;
+        }
+        let failed = run.and_then(feature::verify::to_fix);
+        if self.checks_under_way(project, slug) {
+            self.show_warning(format!(
+                "Verify is checking the fixes of \u{201c}{title}\u{201d}: mark it passed once they pass"
+            ));
+        } else if let Some(failed) = failed {
+            let first = failed.first().cloned().unwrap_or_default();
+            self.show_warning(format!(
+                "Verify failed on the fixes of \u{201c}{title}\u{201d}: {first}; Make Verify fixes sends it"
+            ));
+        } else {
+            self.recheck(project, slug);
+            self.show_warning(format!(
+                "Verify hadn't run on the fixes of \u{201c}{title}\u{201d}; it runs now: mark it passed once it passes"
+            ));
+        }
+        true
+    }
+
     /// Start writing criterion `i`'s note, from `note`, on its card.
     fn write_criterion_note(&mut self, i: usize, note: &str) {
-        let mut field = TextField::default();
-        field.set(note);
+        let field = TextField::multiline(note);
         if let Some(panel) = self.features.panel.as_mut() {
             panel.note = Some((CardNote::Criterion(i), field));
+            // The note has the keys, not the search.
+            if let Some(search) = panel.search.as_mut() {
+                search.typing = false;
+            }
         }
         self.stop_key_repeat();
         self.select_criterion(i);
@@ -486,10 +892,16 @@ mod tests {
     fn row(id: &str, found: Option<Verdict>) -> Row {
         Row {
             id: id.into(),
+            title: "C".into(),
             text: "Given a, when b, then c".into(),
             found,
             note: String::new(),
             sent: false,
+            made: false,
+            earlier: false,
+            open: false,
+            seen: false,
+            shots: Vec::new(),
         }
     }
 
@@ -499,6 +911,7 @@ mod tests {
             passed,
             failed,
             sent,
+            made: 0,
             untested,
         };
         assert_eq!(
@@ -510,6 +923,22 @@ mod tests {
             counts_text(n(1, 1, 1, 1)),
             "1 of 3 criteria passed \u{b7} 1 failure sent to Build"
         );
+        let made = manual::Counts {
+            made: 1,
+            ..n(1, 2, 1, 0)
+        };
+        assert_eq!(
+            counts_text(made),
+            "1 of 3 criteria passed \u{b7} 1 fix made: try again"
+        );
+        assert_eq!(
+            strip_text(n(3, 1, 0, 2)),
+            "3 passed \u{b7} 1 failed \u{b7} 2 untested"
+        );
+        assert_eq!(
+            strip_text(made),
+            "1 passed \u{b7} 2 failed \u{b7} 0 untested \u{b7} 1 fix made"
+        );
         assert_eq!(
             left_text(&[
                 row("AC-1", Some(Verdict::Pass)),
@@ -518,6 +947,29 @@ mod tests {
             ]),
             "AC-2 failed, AC-3 not tried"
         );
+    }
+
+    #[test]
+    fn a_search_finds_any_text_a_criterion_shows_and_steps_over_the_rest() {
+        let mut rows = vec![
+            row("AC-1", None),
+            row("AC-2", Some(Verdict::Fail)),
+            row("AC-3", None),
+        ];
+        rows[1].note = "Save stays ON".into();
+        rows[2].title = "Exports".into();
+        assert_eq!(shown(&rows, ""), [true, true, true]);
+        assert_eq!(shown(&rows, "save stays"), [false, true, false]);
+        assert_eq!(shown(&rows, "export"), [false, false, true]);
+        assert_eq!(shown(&rows, "ac-1"), [true, false, false]);
+        assert_eq!(shown(&rows, "when b"), [true, true, true]);
+        // Hidden, the selection goes on the way it went, else back.
+        let some = [true, false, true];
+        assert_eq!(settle(1, false, &some), Some(2));
+        assert_eq!(settle(1, true, &some), Some(0));
+        assert_eq!(settle(0, false, &some), Some(0));
+        assert_eq!(settle(2, false, &[true, false, false]), Some(0));
+        assert_eq!(settle(1, false, &[false, false, false]), None);
     }
 
     #[test]

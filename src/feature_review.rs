@@ -684,11 +684,17 @@ impl Gerdr {
     /// Show comment `c` the user left in feature `slug`'s diff.
     pub(crate) fn show_diff_note(&mut self, project: &str, slug: &str, c: review::Comment) {
         self.open_feature_diff(project, slug, None);
+        let sent = self.sent_notes(project, slug);
         if let Some(fe) = (self.wd_mut().and_then(|wd| wd.feature.as_mut()))
             .filter(|fe| fe.project == project && fe.slug == slug)
         {
-            // Its diff is being read: the cursor goes there once it is.
-            fe.focus_note = Some(c);
+            fe.sent_notes = sent;
+            // Its diff is being read: the cursor goes there once it is. One
+            // that went to Build is found by id, as a finding is.
+            match c.flag {
+                Some(flag) => fe.focus = Some(flag.id),
+                None => fe.focus_note = Some(c),
+            }
         }
         // On the page it may have been read already.
         let env = self.worktree_env();
@@ -706,8 +712,7 @@ impl Gerdr {
         if let Err(why) = review_import::note_editable(&f.id, f.state) {
             return self.show_warning(why);
         }
-        let mut field = TextField::default();
-        field.set(&f.note);
+        let field = TextField::multiline(&f.note);
         let Some(panel) = self.features.panel.as_mut() else {
             return;
         };
@@ -901,9 +906,7 @@ impl Gerdr {
     pub(crate) fn keep_comments(&mut self, project: &str, slug: &str) -> Option<PathBuf> {
         let data = store::dir(None, project, slug);
         let n = self.feature(project, slug)?.fix_rounds;
-        let copy = data
-            .join("prompts")
-            .join(format!("fix-plan-{n}-comments.json"));
+        let copy = crate::feature::fix_round::comments_copy(&data, n);
         match std::fs::copy(data.join(COMMENTS), &copy) {
             Ok(_) => Some(copy),
             Err(err) => {
@@ -955,7 +958,13 @@ impl Gerdr {
 
     /// Where `text` went for a new fix round of feature `slug`: none if a
     /// round can't start now, as is said.
-    fn fix_input(&mut self, project: &str, slug: &str, what: &str, text: &str) -> Option<PathBuf> {
+    pub(crate) fn fix_input(
+        &mut self,
+        project: &str,
+        slug: &str,
+        what: &str,
+        text: &str,
+    ) -> Option<PathBuf> {
         let feature = self.feature(project, slug)?.clone();
         let title = &feature.title;
         if feature.status != Status::Open || !feature.is_done(Stage::Build) {

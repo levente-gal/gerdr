@@ -96,6 +96,77 @@ pub(super) fn field_text(rect: Rect, scale: f64) -> (f32, f32) {
     (x + pad, x + w - pad - px(CARET_WIDTH + 1))
 }
 
+/// How much lower each line of a field of lines (`Painter::lines_field`)
+/// is than the one before.
+pub(super) const FIELD_LINE: i32 = 20;
+
+/// How high a field of `lines` lines is: a one-line field's height, and
+/// `FIELD_LINE` more for each line past its first.
+pub(super) fn field_lines_height(lines: usize) -> i32 {
+    super::QUIT_BUTTON + (lines.max(1) as i32 - 1) * FIELD_LINE
+}
+
+/// A line of a field of several: its text, with the caret and selection of
+/// the whole as far as they are in it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct SubLine {
+    pub(super) line: Line,
+    /// The byte of the whole where it starts.
+    pub(super) start: usize,
+    pub(super) has_caret: bool,
+}
+
+/// The lines of `whole`.
+pub(super) fn sub_lines(whole: &Line) -> Vec<SubLine> {
+    let mut start = 0;
+    let mut lines = Vec::new();
+    for text in whole.text.split('\n') {
+        let end = start + text.len();
+        let inside = |at: usize| at.clamp(start, end) - start;
+        lines.push(SubLine {
+            line: Line {
+                text: text.to_owned(),
+                caret: inside(whole.caret),
+                anchor: inside(whole.anchor),
+            },
+            start,
+            has_caret: (start..=end).contains(&whole.caret),
+        });
+        start = end + 1;
+    }
+    lines
+}
+
+/// The band of line `i` of a field of lines in `field`.
+fn field_line_rect(field: Rect, i: usize) -> Rect {
+    Rectangle::new(
+        (field.loc.x, field.loc.y + i as i32 * FIELD_LINE).into(),
+        (field.size.w, super::QUIT_BUTTON).into(),
+    )
+}
+
+/// The line of `whole`, a field of lines drawn in `area` (`shown` of it in
+/// view), the pointer at `pos` is on, and the byte of `whole` its text
+/// starts at: above or below its lines, the nearest.
+pub fn field_line_spot(
+    area: Rect,
+    shown: Rect,
+    whole: &Line,
+    pos: smithay::utils::Point<f64, Logical>,
+    scale: f64,
+) -> (FieldSpot, usize) {
+    let lines = sub_lines(whole);
+    let at = ((pos.y - area.loc.y as f64) / FIELD_LINE as f64).floor();
+    let sub = &lines[(at.max(0.0) as usize).min(lines.len() - 1)];
+    let spot = FieldSpot {
+        area: shown,
+        text: field_text(area, scale),
+        size: FONT_SIZE,
+        line: sub.line.clone(),
+    };
+    (spot, sub.start)
+}
+
 /// The text caret at `x`, vertically centred in the band `(top, height)`.
 pub(super) fn caret(c: &mut Canvas, x: f32, (top, height): (i32, i32), scale: f64, color: Rgb) {
     let px = |v: i32| (v as f64 * scale).round() as i32;
@@ -159,6 +230,11 @@ pub enum ButtonStyle {
     /// Only its label, until hovered, when it is lit as a plain one: one
     /// to have at hand that nothing asks for.
     Quiet,
+    /// Filled with the success colour: the choice made, of a pair like a
+    /// criterion's Pass and Fail. Pressing it again takes it back.
+    Passed,
+    /// Filled with the error colour: the other choice made of such a pair.
+    Failed,
 }
 
 impl From<bool> for ButtonStyle {
@@ -670,6 +746,60 @@ impl Painter {
         );
     }
 
+    /// A field of lines in `rect`: each as one line of a field is, the
+    /// caret and selection where they are when `focused`, and `placeholder`
+    /// while it is empty.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn field_of_lines(
+        &self,
+        c: &mut Canvas,
+        whole: &Line,
+        placeholder: &str,
+        rect: Rect,
+        focused: bool,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let px = |v: i32| (v as f64 * scale).round() as i32;
+        let s = scale as f32;
+        let (x, y, w, h) = rect_px(rect, scale);
+        let (b, r) = (px(1).max(1) as f32, BUTTON_RADIUS * s);
+        c.rounded(x, y, w, h, r, p.border);
+        c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, r - b, p.element);
+        let text = field_text(rect, scale);
+        for (i, sub) in sub_lines(whole).iter().enumerate() {
+            let line_band = band(field_line_rect(rect, i), scale);
+            let selection = sub.line.selection();
+            if focused && !sub.has_caret && !selection.is_empty() {
+                // The caret's line paints its own selection, with the
+                // caret; the rest of it goes over these.
+                let width = |t: &str| self.text_width(t, FONT_SIZE, scale);
+                let from = text.0 + width(&sub.line[..selection.start]);
+                let to = (text.0 + width(&sub.line[..selection.end])).min(text.1);
+                let inset = px(3) as f32;
+                c.rounded(
+                    from - s,
+                    line_band.0 as f32 + inset,
+                    to - from + 2.0 * s,
+                    line_band.1 as f32 - 2.0 * inset,
+                    2.0 * s,
+                    p.selected,
+                );
+            }
+            self.edit_line(
+                c,
+                &sub.line,
+                if i == 0 { placeholder } else { "" },
+                text,
+                line_band,
+                focused && sub.has_caret,
+                FONT_SIZE,
+                scale,
+                p,
+            );
+        }
+    }
+
     /// The text of a field being edited, `line`, between `x` and `max_x`
     /// (physical pixels) in the band `(top, height)`: `placeholder` without
     /// any text, and when `focused`, the selection behind it and the caret.
@@ -763,15 +893,20 @@ impl Painter {
         let hovered = hovered && style != ButtonStyle::Off;
         if focused {
             let ring = match style {
-                ButtonStyle::Destructive => p.error,
+                ButtonStyle::Destructive | ButtonStyle::Failed => p.error,
+                ButtonStyle::Passed => p.success,
                 _ => p.accent,
             };
             focus_ring(c, rect, BUTTON_RADIUS, p.elevated, scale, ring);
         }
         let color = match style {
-            ButtonStyle::Primary | ButtonStyle::Destructive => {
+            ButtonStyle::Primary
+            | ButtonStyle::Destructive
+            | ButtonStyle::Passed
+            | ButtonStyle::Failed => {
                 let base = match style {
-                    ButtonStyle::Destructive => p.error,
+                    ButtonStyle::Destructive | ButtonStyle::Failed => p.error,
+                    ButtonStyle::Passed => p.success,
                     _ => p.accent,
                 };
                 let fill = if hovered {

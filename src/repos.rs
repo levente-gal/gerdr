@@ -4183,6 +4183,8 @@ impl Panel {
                 TreeTool::Collapse => self.fold_all(false, ctx),
                 TreeTool::List => return self.set_grouping(Grouping::List, ctx),
                 TreeTool::Folders => return self.set_grouping(Grouping::Folders, ctx),
+                // Laid out only over a feature's code review.
+                TreeTool::PrevUnviewed | TreeTool::NextUnviewed => {}
             },
             ReposHit::Field => self.focus = Focus::Field,
             ReposHit::Button(button) => return self.act(button, ctx),
@@ -4682,6 +4684,7 @@ impl Panel {
         let diff = files.iter().find(|f| f.path == change.path);
         let here = |root: &Path, path: &str| *root == item.root && path == change.path;
         TreeLine::File(FileLine {
+            viewed: false,
             edited: self.edited.iter().any(|(root, path)| here(root, path)),
             comments: (self.diff.review.comments.iter())
                 .filter(|c| here(&c.root, &c.path))
@@ -5184,6 +5187,7 @@ impl Panel {
             }
         });
         ReposView {
+            tree_note: None,
             title: title.into(),
             summary: self.summary(ctx),
             summary_tone: Tone::Muted,
@@ -5216,6 +5220,7 @@ impl Panel {
             grouping: self.grouping,
             diff_only: false,
             diff_tree: false,
+            tree_nav: None,
             flat: false,
             detail_share: 1.0,
             modes: None,

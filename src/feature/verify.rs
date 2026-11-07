@@ -142,6 +142,10 @@ pub struct Outcome {
     /// `failure_lines`), which may lie before `tail`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub excerpt: Vec<String>,
+    /// All its terminal kept, to keep with the AI work (see `Panes::keep_log`)
+    /// and then let go of. Never saved: the record keeps `tail`.
+    #[serde(skip)]
+    pub log: Option<String>,
 }
 
 impl Outcome {
@@ -514,7 +518,7 @@ pub fn runs_check(command: &str) -> bool {
 }
 
 /// The start of the line a check's script prints before it.
-const HEAD: &str = "\u{25b6} Check ";
+pub(crate) const HEAD: &str = "\u{25b6} Check ";
 /// The start of the line it prints after it.
 const END: &str = "\u{25a0} Check ";
 
@@ -590,6 +594,11 @@ pub trait Panes {
     fn text(&mut self, pane: &str) -> Result<String, Unread>;
     /// Press Ctrl+C in pane `pane`.
     fn interrupt(&mut self, pane: &str);
+    /// All pane `pane` keeps of what it printed, oldest first, for the AI
+    /// work; none while that isn't kept.
+    fn keep_log(&mut self, _pane: &str) -> Option<String> {
+        None
+    }
 }
 
 /// The files a run's checks leave, and the processes they name: on this
@@ -972,6 +981,7 @@ impl Outcome {
         if !self.passed() && !self.interrupted {
             self.excerpt = failure_lines(output);
         }
+        self.log = panes.keep_log(pane);
     }
 }
 
@@ -1400,6 +1410,25 @@ impl CheckRun {
     }
 }
 
+/// The fix plan gerdr writes itself for Verify's `failures` of feature
+/// `title`, `evidence` the file with their output: nothing of the user's
+/// goes with them, so no plan is asked for, and each failure is one thing to
+/// tick (`fix_round::items`).
+pub fn fixes_plan(failures: &[String], title: &str, evidence: &Path) -> String {
+    let mut md = format!(
+        "# Fix plan of \u{201c}{title}\u{201d}\n\ngerdr wrote this from Verify's failures: the user wrote nothing of their own, so no plan was asked for. Find each one's cause in the checks' output, in {}, before you change code.\n\n## {}\n",
+        evidence.display(),
+        super::fix_round::FIXES
+    );
+    for failure in failures {
+        // A line of its own: the heading is what is ticked.
+        let first = failure.lines().next().unwrap_or_default();
+        let one = first.trim_start_matches('#').trim();
+        md.push_str(&format!("\n### {one}\n"));
+    }
+    md
+}
+
 /// What failed in `run` for the Build agent to fix: none while it runs, if
 /// it passed, or if a check was cut short, which says nothing of the code.
 pub fn to_fix(run: &VerifyRun) -> Option<Vec<String>> {
@@ -1541,6 +1570,25 @@ mod tests {
     }
 
     #[test]
+    fn a_plan_written_for_the_failures_has_each_as_a_fix() {
+        use crate::feature::fix_round;
+        let failures = [
+            "api: `cargo test` exited with 101".to_owned(),
+            "## web: `npm test` exited with 1\nmore".to_owned(),
+        ];
+        let plan = fixes_plan(&failures, "Export", Path::new("/d/evidence.md"));
+        assert!(fix_round::missing(&plan, &[]).is_empty(), "{plan}");
+        assert_eq!(
+            fix_round::items(&plan, &[]),
+            [
+                "api: `cargo test` exited with 101",
+                "web: `npm test` exited with 1"
+            ]
+        );
+        assert!(plan.contains("/d/evidence.md"));
+    }
+
+    #[test]
     fn a_lost_link_decides_nothing_of_a_check() {
         // Past its time and with no word of it for a while: back, it passed.
         let mut files = FarFiles::new(
@@ -1649,6 +1697,9 @@ mod tests {
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
+        // Named the same in a run before, as in a namespace where every run is
+        // pid 1, it can hold what a script of that run wrote late.
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -2088,6 +2139,47 @@ mod tests {
         stopped.keep_output(&mut panes, "p");
         assert_eq!(stopped.tail, "");
         assert_eq!(panes.asked, 1);
+    }
+
+    #[test]
+    fn a_check_keeps_its_whole_log_only_when_its_terminal_gives_one() {
+        // Terminals that keep no log, as by default.
+        let text = format!("{HEAD}api: t\nboom\n{END}exited with 1\n");
+        let mut panes = Reads {
+            reads: vec![Ok(text.clone())],
+            asked: 0,
+        };
+        let mut failed = Outcome {
+            exit: Some(1),
+            ..Outcome::default()
+        };
+        failed.keep_output(&mut panes, "p");
+        assert_eq!(failed.log, None);
+
+        struct Kept(String, Vec<String>);
+        impl Panes for Kept {
+            fn gone(&mut self, _: &str) -> bool {
+                false
+            }
+            fn text(&mut self, _: &str) -> Result<String, Unread> {
+                Ok(self.0.clone())
+            }
+            fn interrupt(&mut self, _: &str) {}
+            fn keep_log(&mut self, pane: &str) -> Option<String> {
+                self.1.push(pane.to_owned());
+                Some(format!("before\n{}", self.0))
+            }
+        }
+        let mut panes = Kept(text.clone(), Vec::new());
+        failed.keep_output(&mut panes, "p7");
+        assert_eq!(failed.log, Some(format!("before\n{text}")));
+        assert_eq!(panes.1, ["p7"]);
+        assert_eq!(failed.tail, "boom");
+        // The record never holds it.
+        let saved = serde_json::to_string(&failed).unwrap();
+        assert!(!saved.contains("before"), "{saved}");
+        let read: Outcome = serde_json::from_str(&saved).unwrap();
+        assert_eq!(read.log, None);
     }
 
     #[test]

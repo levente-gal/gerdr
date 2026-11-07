@@ -801,6 +801,11 @@ fn gate_words(gate: &Gate) -> (String, String, Option<&'static str>) {
             "plan the fixes, or run the checks again".to_owned(),
             Some(crate::feature::verify::EVIDENCE),
         ),
+        GateKind::FixesStopped => (
+            format!("Fixes of “{title}” stopped with some left"),
+            "make the fixes again, or settle it with the Build agent".to_owned(),
+            Some(crate::feature::fix_round::FILE),
+        ),
         GateKind::FixPlan => (
             format!("The fix plan of “{title}” is ready to review"),
             "review it, then make the fixes".to_owned(),

@@ -4,8 +4,9 @@
 //! Typing filters the projects; under them, rows start a new project, named
 //! as typed or in a folder zoxide knows that matches. Enter opens the
 //! selected entry, Alt+1 to 9 a recent project, Ctrl+N the form for a new
-//! one, F2 renames the selected project in place, Ctrl+Q stops its
-//! session, Delete twice forgets it, Ctrl+R reads the projects again. The
+//! one, F2 renames the selected project in place, Shift+F2 changes its id
+//! there (see `project_rename`), Ctrl+Q stops its session, Delete twice
+//! forgets it, Ctrl+R reads the projects again. The
 //! form asks for the name, an optional folder (typed, picked from zoxide's,
 //! or browsed for) and what the folder opens as. Ctrl+E edits the selected
 //! project's start and stop commands. Esc backs out one step at a time.
@@ -107,13 +108,21 @@ enum Picked {
     Folder(PathBuf),
 }
 
-/// A project's name being edited in place.
+/// A project's name, or its id, being edited in place.
 #[derive(Clone, Debug)]
 struct Renaming {
     id: String,
-    /// The name typed so far; at first the old one, all selected, for
-    /// typing to replace.
+    /// The name or id typed so far; at first the old one, all selected,
+    /// for typing to replace.
     name: TextField,
+    what: Renamed,
+}
+
+/// What of a project is being edited in place.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Renamed {
+    Name,
+    Id,
 }
 
 /// The form for a new project.
@@ -161,6 +170,8 @@ pub enum Outcome {
     },
     /// Rename project `id` (the first) to the second.
     Rename(String, String),
+    /// Give project `id` (the first) the second id.
+    ChangeId(String, String),
     /// Stop project `id`'s session; not the shown one.
     Stop(String),
     /// Open the form for project `id`'s start and stop commands.
@@ -380,7 +391,8 @@ impl ProjectMenu {
             }
             Keysym::Return | Keysym::KP_Enter => return self.enter(self.selected),
             Keysym::n if ctrl => self.open_form(),
-            Keysym::F2 if !ctrl => self.start_renaming(self.selected),
+            Keysym::F2 if !ctrl && mods.shift => self.start_renaming(self.selected, Renamed::Id),
+            Keysym::F2 if !ctrl => self.start_renaming(self.selected, Renamed::Name),
             Keysym::r if ctrl => return Some(Outcome::Refresh),
             Keysym::q if ctrl => return self.stop(self.selected),
             Keysym::e if ctrl => return self.edit_settings(self.selected),
@@ -408,6 +420,25 @@ impl ProjectMenu {
         let renaming = self.renaming.as_mut()?;
         match sym {
             Keysym::Escape => self.renaming = None,
+            Keysym::Return | Keysym::KP_Enter if renaming.what == Renamed::Id => {
+                let new = renaming.name.trim();
+                if new == renaming.id {
+                    self.renaming = None;
+                    return None;
+                }
+                // The field stays open to pick another.
+                if !crate::projects::valid_id(new) {
+                    return Some(Outcome::Notice(
+                        "An id has only lowercase letters, digits and dashes, not first a dash"
+                            .into(),
+                    ));
+                }
+                if self.projects.iter().any(|(p, _)| p == new) {
+                    return Some(Outcome::Notice(format!("Another project has the id {new}")));
+                }
+                let Renaming { id, name, .. } = self.renaming.take()?;
+                return Some(Outcome::ChangeId(id, name.trim().to_owned()));
+            }
             Keysym::Return | Keysym::KP_Enter => {
                 let name = renaming.name.trim();
                 let taken = self.projects.iter().any(|(p, row)| {
@@ -496,15 +527,19 @@ impl ProjectMenu {
         });
     }
 
-    /// Start renaming entry `i`, if it is a project.
-    fn start_renaming(&mut self, i: usize) {
+    /// Start editing `what` of entry `i` in place, if it is a project.
+    fn start_renaming(&mut self, i: usize, what: Renamed) {
         if let Some(Item::Project(p)) = self.items.get(i) {
             let (id, row) = &self.projects[*p];
-            let mut name = TextField::from(row.name.as_str());
+            let mut name = TextField::from(match what {
+                Renamed::Name => row.name.as_str(),
+                Renamed::Id => id.as_str(),
+            });
             name.select_all();
             self.renaming = Some(Renaming {
                 id: id.clone(),
                 name,
+                what,
             });
         }
     }
@@ -838,7 +873,11 @@ impl ProjectMenu {
                     RowButton::Settings => self.edit_settings(i),
                     RowButton::ProjectFile => self.project_file(i),
                     RowButton::Rename => {
-                        self.start_renaming(i);
+                        self.start_renaming(i, Renamed::Name);
+                        None
+                    }
+                    RowButton::ChangeId => {
+                        self.start_renaming(i, Renamed::Id);
                         None
                     }
                     RowButton::Stop => self.stop(i),
@@ -1106,8 +1145,12 @@ impl ProjectMenu {
                 })
             })
             .collect();
-        let hints = if self.renaming.is_some() {
-            hints(&[("Enter", "save"), ("Esc", "cancel")])
+        let hints = if let Some(renaming) = &self.renaming {
+            let enter = match renaming.what {
+                Renamed::Name => "save",
+                Renamed::Id => "change id",
+            };
+            hints(&[("Enter", enter), ("Esc", "cancel")])
         } else {
             let (del, esc) = match (&self.confirm_forget, self.query.is_empty()) {
                 (Some(_), _) => ("again to forget", "cancel"),
@@ -1383,6 +1426,7 @@ impl Gerdr {
             // Each lists the projects again once done: a rename at once,
             // a stop or forget once it is (after its question, if asked).
             Outcome::Rename(id, name) => self.rename_project(&id, &name),
+            Outcome::ChangeId(id, new) => self.change_project_id(&id, &new),
             Outcome::Stop(id) => self.stop_project(&id, crate::projects::Stops::ALL),
             Outcome::Settings(id) => {
                 let found = self.projects.project(&id).map(|p| {
@@ -1417,7 +1461,8 @@ impl Gerdr {
                 self.query_zoxide();
             }
             Outcome::Browse(start) => self.pick_folder_for_menu(start),
-            Outcome::Notice(text) => self.show_notice(text),
+            // A refusal: the field stays open to try another.
+            Outcome::Notice(text) => self.show_warning(text),
             Outcome::Closed => self.project_menu = None,
         }
         // Gone, the client under the pointer gets it back.
@@ -1891,6 +1936,55 @@ mod tests {
         press(&mut m, Keysym::Tab);
         type_text(&mut m, "~/src");
         assert_eq!(form(&m).name, "blo");
+    }
+
+    #[test]
+    fn shift_f2_changes_the_id_refusing_a_bad_or_taken_one() {
+        let mut m = menu(&["gerdr", "blog"]);
+        let shift = ModifiersState {
+            shift: true,
+            ..ModifiersState::default()
+        };
+        let field = |m: &ProjectMenu| {
+            view(m).entries.iter().find_map(|e| match e {
+                MenuEntry::Project { renaming, .. } => renaming.clone(),
+                _ => None,
+            })
+        };
+        let clear = |m: &mut ProjectMenu| {
+            for _ in 0..20 {
+                press(m, Keysym::BackSpace);
+            }
+        };
+        assert_eq!(chord(&mut m, shift, Keysym::F2), None);
+        assert_eq!(field(&m).as_deref(), Some("gerdr"));
+        assert_eq!(view(&m).hints[0], ("Enter".into(), "change id".into()));
+        // The same id: nothing to do.
+        assert_eq!(press(&mut m, Keysym::Return), None);
+        assert_eq!(field(&m), None);
+        chord(&mut m, shift, Keysym::F2);
+        type_text(&mut m, "Gerdr app");
+        assert!(matches!(
+            press(&mut m, Keysym::Return),
+            Some(Outcome::Notice(_))
+        ));
+        // The field stays open to pick another.
+        clear(&mut m);
+        type_text(&mut m, "blog");
+        assert_eq!(
+            press(&mut m, Keysym::Return),
+            Some(Outcome::Notice("Another project has the id blog".into()))
+        );
+        clear(&mut m);
+        type_text(&mut m, "gerdr-app");
+        assert_eq!(
+            press(&mut m, Keysym::Return),
+            Some(Outcome::ChangeId("gerdr".into(), "gerdr-app".into()))
+        );
+        assert_eq!(field(&m), None);
+        // F2 alone still renames.
+        press(&mut m, Keysym::F2);
+        assert_eq!(view(&m).hints[0], ("Enter".into(), "save".into()));
     }
 
     #[test]

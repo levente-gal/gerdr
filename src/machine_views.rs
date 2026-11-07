@@ -109,7 +109,16 @@ pub fn watch_views(
         tracing::warn!("machine {}: bringing code here: {err}", place.id);
     }
     let mut rounds = Rounds::default();
+    // Connecting just left word of this gerdr there.
+    let mut touched = Instant::now();
     while !stop.load(Ordering::Relaxed) {
+        if touched.elapsed() >= crate::machine_reach::TOUCH_EVERY {
+            touched = Instant::now();
+            let touch = own_id().and_then(|own| crate::machine_reach::touch_script(&place.there.data, &own));
+            if let Some(Err(why)) = touch.map(|script| place.reach.script(&script, &stop)) {
+                tracing::warn!("machine {}: touching what says this gerdr is around: {why:?}", place.id);
+            }
+        }
         let asked = ask.lock().map(|a| a.clone()).unwrap_or_default();
         if asked.project.is_some() {
             match view_round(&place, &asked, &mut rounds, &latest, &stop, &tell) {
@@ -263,8 +272,9 @@ fn code_round(
 /// What's kept from one round to the next.
 #[derive(Default)]
 struct Rounds {
-    /// Each record as it came, and as it reads here.
-    records: HashMap<(String, String), (Vec<u8>, Feature)>,
+    /// Each record as it came, how the files beside it stood, and as it reads
+    /// here.
+    records: HashMap<(String, String), (Vec<u8>, store::Stamp, Feature)>,
     /// The project last told of, and what.
     told: Option<(String, Vec<Feature>, BTreeMap<String, SeenPane>)>,
     /// The trouble last said.
@@ -312,22 +322,23 @@ fn view_round(
     let mut features = Vec::with_capacity(with.len());
     for slug in &with {
         let key = (project.to_owned(), slug.clone());
-        let raw = match view::read_record(&place.root, project, slug) {
-            Ok(raw) => raw,
+        let kept = match view::read_record(&place.root, project, slug) {
+            Ok(kept) => kept,
             Err(err) => {
                 tracing::debug!("reading the copy of {project}/{slug}: {err}");
                 continue;
             }
         };
-        if let Some((same, feature)) = rounds.records.get(&key)
-            && *same == raw
+        if let Some((same, stamp, feature)) = rounds.records.get(&key)
+            && (same, stamp) == (&kept.raw, &kept.stamp)
         {
             features.push(feature.clone());
             continue;
         }
-        match read_copy(&raw, &place.there, &here, &asked.folders, &place.id) {
+        let view::Kept { raw, dir, stamp } = kept;
+        match read_copy(&raw, &dir, &place.there, &here, &asked.folders, &place.id) {
             Ok(feature) => {
-                rounds.records.insert(key, (raw, feature.clone()));
+                rounds.records.insert(key, (raw, stamp, feature.clone()));
                 features.push(feature);
             }
             Err(why) => tracing::warn!("reading the copy of {project}/{slug}: {why}"),
@@ -386,15 +397,18 @@ fn ask_sandboxes(
     Ok(())
 }
 
-/// A record kept of machine `id`, as it reads here.
+/// A record kept of machine `id`, as it reads here, with what is kept beside
+/// it in its folder `dir`.
 pub fn read_copy(
     raw: &[u8],
+    dir: &Path,
     there: &Side,
     here: &Side,
     folders: &BTreeMap<String, String>,
     id: &str,
 ) -> Result<Feature, String> {
     let mut feature: Feature = serde_json::from_slice(raw).map_err(|err| err.to_string())?;
+    store::attach_sides(dir, &mut feature);
     // Not saved: only what is read now is brought up to date.
     feature.migrate(feature::now());
     let paths = Paths::new(there, here, folders, Some(&feature));
@@ -774,9 +788,12 @@ impl Gerdr {
         };
         let mut features: Vec<Feature> = entries
             .filter_map(Result::ok)
-            .filter_map(|entry| std::fs::read(entry.path().join(store::FILE)).ok())
-            .filter_map(|raw| {
-                read_copy(&raw, &place.side(), &here, &folders, id)
+            .filter_map(|entry| {
+                let dir = entry.path();
+                Some((std::fs::read(dir.join(store::FILE)).ok()?, dir))
+            })
+            .filter_map(|(raw, dir)| {
+                read_copy(&raw, &dir, &place.side(), &here, &folders, id)
                     .inspect_err(|why| tracing::warn!("reading a copy of {project}: {why}"))
                     .ok()
             })
@@ -925,6 +942,7 @@ impl Gerdr {
             .map(|(id, _)| id.clone())
             .collect();
         for id in ids {
+            self.left_there_forgotten(&id);
             self.machines.names.remove(&id);
             self.forget_viewed(&id);
         }
@@ -940,7 +958,7 @@ impl Gerdr {
         let root = view::root(&crate::projects::data_dir(), id);
         let spawned = std::thread::Builder::new()
             .name("forget a machine".into())
-            .spawn(move || view::forget_machine(&root, &AtomicBool::new(false)));
+            .spawn(move || view::forget_machine(&root, &[crate::machine_sandbox::LEFT], &AtomicBool::new(false)));
         if let Err(err) = spawned {
             tracing::warn!("removing what's kept of a machine: {err}");
         }
@@ -1025,12 +1043,42 @@ mod tests {
         f.root = "/home/ana/app".into();
         f.dir = "/home/ana/app/.features/a".into();
         let raw = serde_json::to_vec(&f).unwrap();
-        let out = read_copy(&raw, &there, &here, &BTreeMap::new(), "m1").unwrap();
+        let none = Path::new("/nowhere");
+        let out = read_copy(&raw, none, &there, &here, &BTreeMap::new(), "m1").unwrap();
         assert_eq!(out.root, Path::new("/home/lg/app"));
         assert_eq!(out.writer.as_deref(), Some("m1"));
         // A folder named in the project's file goes where it says.
         let moved = BTreeMap::from([("/home/ana/app".to_owned(), "/src/app".to_owned())]);
-        let out = read_copy(&raw, &there, &here, &moved, "m1").unwrap();
+        let out = read_copy(&raw, none, &there, &here, &moved, "m1").unwrap();
         assert_eq!(out.dir, Path::new("/src/app/.features/a"));
+    }
+
+    #[test]
+    fn a_copy_reads_with_the_history_beside_it() {
+        let t = std::env::temp_dir().join(format!("gerdr-views-copy-{}", std::process::id()));
+        let dir = t.join("features/p/a");
+        let mut f = crate::feature::tests::feature("a", 5);
+        f.log(1, "created");
+        f.log(2, "Brief ticked");
+        store::save_at(&dir, &f).unwrap();
+        let raw = std::fs::read(dir.join(store::FILE)).unwrap();
+        let side = Side {
+            home: "/home/ana".into(),
+            data: "/home/ana/.local/share/gerdr".into(),
+        };
+        let out = read_copy(&raw, &dir, &side, &side, &BTreeMap::new(), "m1").unwrap();
+        assert_eq!(out.history, f.history);
+        // The record alone has none.
+        let bare = read_copy(&raw, Path::new("/nowhere"), &side, &side, &BTreeMap::new(), "m1");
+        assert!(bare.unwrap().history.is_empty());
+        // What is beside it changes without the record: the stamp tells.
+        let kept = view::read_record(&t, "p", "a").unwrap();
+        assert_eq!((kept.raw.as_slice(), &kept.dir), (raw.as_slice(), &dir));
+        f.log(3, "Plan ticked");
+        store::save_at(&dir, &f).unwrap();
+        let again = view::read_record(&t, "p", "a").unwrap();
+        assert_eq!(again.raw, kept.raw);
+        assert_ne!(again.stamp, kept.stamp);
+        std::fs::remove_dir_all(&t).unwrap();
     }
 }

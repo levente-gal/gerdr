@@ -25,6 +25,9 @@ use crate::{
 #[derive(Clone, Debug, PartialEq)]
 pub enum MenuAction {
     NewTerminal,
+    /// Give project `.0` the id `.1` (see `Gerdr::change_project_id`): a
+    /// change's Undo.
+    ChangeProjectId(String, String),
     /// An action of the repositories panel, as its footer offers it.
     ReposAction(ReposButton),
     /// The dialog raising the inotify limit (see `inotify_limit`).
@@ -59,11 +62,18 @@ pub enum MenuAction {
     StopKept(String),
     /// The dialog connecting another machine (see `machines`).
     AddMachine,
+    /// The connect dialog, filled in for a gerdr that reached this machine.
+    AddMachineFrom { target: String, name: String },
     /// Connect, disconnect or forget the machine of this name.
     ConnectMachine(String),
     DisconnectMachine(String),
     /// Stop taking this feature over from another machine: project, slug.
     StopTakeOver(String, String),
+    /// Stop keeping earlier AI work, or drawing its stats again.
+    StopAiWork,
+    /// Stop bringing the AI work of a feature (project, slug) from the
+    /// machine it was taken over from.
+    StopAiWorkPull(String, String),
     RemoveMachine(String),
     /// T3 Code, updated to the newest version gerdr reads, or to this one
     /// (see `Gerdr::update_t3`).
@@ -212,7 +222,7 @@ pub enum MenuAction {
         tab: crate::chrome::CommandsTab,
     },
     /// Ask before removing what sandboxes of gone features left.
-    AskRemoveSandboxLeftovers(Vec<String>),
+    AskRemoveSandboxLeftovers(Vec<crate::feature_sandbox::LeftStack>),
     /// Read the project files again, after one was edited by hand.
     ReloadProjects,
     /// Join project `id`, open in another gerdr, here (see
@@ -432,6 +442,7 @@ impl Gerdr {
     pub fn menu_action(&mut self, action: MenuAction) {
         match action {
             MenuAction::NewTerminal => self.run_action(Action::NewTerminal),
+            MenuAction::ChangeProjectId(id, new) => self.change_project_id(&id, &new),
             MenuAction::NewCursor => self.open_cursor(None),
             MenuAction::OpenPage(w, url) => self.open_page(w, url),
             MenuAction::OpenPageInNewTab(w, url) => self.open_page_in_new_tab(w, url),
@@ -451,10 +462,13 @@ impl Gerdr {
             MenuAction::ShowLog(path) => self.show_log(path),
             MenuAction::StopKept(id) => self.ask_stop_kept(&id),
             MenuAction::AddMachine => self.open_machine_dialog(),
+            MenuAction::AddMachineFrom { target, name } => self.add_machine_from(target, name),
             MenuAction::ConnectMachine(name) => self.connect_machine(&name),
             MenuAction::DisconnectMachine(name) => self.disconnect_machine(&name),
             MenuAction::StopTakeOver(project, slug) => self.stop_take(&project, &slug),
-            MenuAction::RemoveMachine(name) => self.remove_machine(&name),
+            MenuAction::StopAiWork => self.ai_work.stop_busy(),
+            MenuAction::StopAiWorkPull(project, slug) => self.ai_work.stop_pull(&project, &slug),
+            MenuAction::RemoveMachine(name) => self.ask_remove_machine(&name),
             MenuAction::UpdateT3(version) => self.update_t3(version),
             MenuAction::NewTab(w) => {
                 self.switch_workspace(w);

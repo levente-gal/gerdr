@@ -42,6 +42,7 @@ pub mod plan_review;
 pub mod remote;
 pub mod review_import;
 pub mod sandbox;
+pub mod sandbox_pages;
 pub mod sandbox_run;
 pub mod setup;
 pub mod ship;
@@ -58,8 +59,10 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-/// The record's format; bumped when a field changes meaning.
-pub const VERSION: u32 = 2;
+/// The record's format; bumped when a field changes meaning. 3: its history
+/// and its AI review's earlier rounds are kept in files of their own beside
+/// it (see `store`).
+pub const VERSION: u32 = 3;
 
 /// The stages, in order. Every one has to be done; only Plan review can be
 /// done by skipping it.
@@ -529,7 +532,10 @@ pub struct Feature {
     /// are again: they ran once, and the rail says so.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub ran_once: BTreeMap<Stage, u64>,
-    #[serde(default)]
+    /// What happened to it, oldest first. Kept in `store::HISTORY`, not in
+    /// `feature.json`: `store` takes it out when it saves and puts it back
+    /// when it reads. An older gerdr's record still has it here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub history: Vec<Event>,
     #[serde(default, skip_serializing_if = "Shipping::is_empty")]
     pub shipping: Shipping,
@@ -610,6 +616,15 @@ pub struct Feature {
     /// How many fix rounds it had: the next one's number goes on from it.
     #[serde(default)]
     pub fix_rounds: u32,
+    /// The fix round Manual test asked for, whose commits leave the marks
+    /// as they are (see `keep_marks`): the user goes on trying the feature as
+    /// they land. Forgotten once the code is read after the round is over.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub carry: Option<u32>,
+    /// The patch-id of the code those fixes made that Verify hasn't passed
+    /// on yet: Manual test can't be marked passed until it does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unverified: Option<String>,
     /// The machine that writes it, when that isn't this one: it is only shown
     /// here (see `view`). Never saved: the record is its writer's.
     #[serde(skip)]
@@ -626,6 +641,10 @@ pub struct Feature {
     /// calls its list. Round numbers go on across a start over, so they stay.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub fix_asked: BTreeMap<u32, Stage>,
+    /// The fix rounds Code review's comments started, oldest first: what its
+    /// page says of them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub comment_fixes: Vec<fix_round::CommentFix>,
     /// The last run number of each stage whose run was forgotten: a later
     /// run goes on from it, so its prompt doesn't overwrite an old one.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -670,6 +689,7 @@ impl Feature {
     /// Bring a record of an older format up to this one; whether it was
     /// older. A feature that went past Plan before Plan review existed has
     /// that stage marked done, at Plan's time, so it stays where it was.
+    /// Nothing changes for 3: saving it moves its history out (see `store`).
     pub fn migrate(&mut self, now: u64) -> bool {
         if self.version >= VERSION {
             return false;
@@ -758,6 +778,10 @@ impl Feature {
         self.ran_once
             .extend(cleared.into_iter().map(|(s, mark)| (s, mark.at)));
         self.ran_once.extend(was_at.map(|at| (at, now)));
+        // Verify to pass again as a stage: no fixes wait for it apart.
+        if stage <= Stage::Verify {
+            self.unverified = None;
+        }
     }
 
     /// The first bound stage marked on other code than `patch`'s: from it
@@ -770,6 +794,30 @@ impl Feature {
         })
     }
 
+    /// The code is now `patch`'s by the fixes Manual test asked for (`carry`),
+    /// with Manual test current: the marks before it are moved onto it, and
+    /// it is logged ("Code changed by fix round 2: marks kept"). Verify is
+    /// to run on it again (`unverified`). Says whether they were; when not,
+    /// `invalidate` says what goes.
+    pub fn keep_marks(&mut self, patch: &str, now: u64) -> bool {
+        let Some(n) = self.carry else {
+            return false;
+        };
+        if self.status != Status::Open
+            || self.current() != Some(Stage::ManualTest)
+            || self.stale(patch).is_none()
+        {
+            return false;
+        }
+        for (stage, mark) in &mut self.marks {
+            if stage.bound() && *stage < Stage::ManualTest {
+                mark.patch = Some(patch.to_owned());
+            }
+        }
+        self.log(now, format!("Code changed by fix round {n}: marks kept"));
+        true
+    }
+
     /// The code is now `patch`'s: clear the marks that no longer hold, from
     /// the first stale stage on, and log it ("Code changed: Build to do
     /// again"). A done feature is left as it is: it shipped. Returns the
@@ -780,6 +828,9 @@ impl Feature {
         }
         let stage = self.stale(patch)?;
         self.clear_marks_from(stage, now);
+        // The code went its own way: what Manual test fixed is gone over again.
+        self.carry = None;
+        self.unverified = None;
         self.log(now, format!("Code changed: {} to do again", stage.label()));
         Some(stage)
     }
@@ -866,6 +917,10 @@ impl Feature {
         if stage <= Stage::Verify {
             self.verify_fixes.clear();
         }
+        // The comments went with the review that made them.
+        if stage <= Stage::CodeReview {
+            self.comment_fixes.clear();
+        }
         match stage {
             Stage::Discover | Stage::Plan | Stage::Build => {}
             Stage::PlanReview => self.plan_review = None,
@@ -882,17 +937,24 @@ impl Feature {
         true
     }
 
-    /// Open its last fix round again, on the stage it is at now, unless one
-    /// is open.
+    /// Open its last fix round again, unless one is open: on the stage it is
+    /// at now if that comes after the one that asked. A later one keeps the
+    /// round, as its page shows a round being fixed from an earlier stage, and
+    /// the round's card stays on the page of the stage that asked.
     pub fn reopen_fix_round(&mut self) {
         if self.fix_round.is_some() {
             return;
         }
         let current = self.current();
         self.fix_round = self.last_fix_round.take().map(|mut round| {
-            round.stage = current.unwrap_or(round.stage);
+            round.stage = current.map_or(round.stage, |at| at.max(round.stage));
+            // Open again, it isn't over.
+            round.ended = None;
             round
         });
+        if current == Some(Stage::ManualTest) {
+            self.carry = self.fix_round.as_ref().map(|r| r.n).or(self.carry);
+        }
     }
 
     /// Add `what` to its history at `now`.
@@ -1175,13 +1237,27 @@ pub(crate) mod tests {
             give_back: Default::default(),
             items: Vec::new(),
             done: 0,
+            ended: None,
         };
         let mut f = feature("a", 1);
         let at = f.current().unwrap();
-        f.last_fix_round = Some(round(Stage::Ship));
+        f.last_fix_round = Some(round(Stage::Discover));
         f.reopen_fix_round();
         assert_eq!(f.fix_round.as_ref().map(|r| r.stage), Some(at));
         assert_eq!(f.last_fix_round, None);
+        // A later stage that asked keeps it: its card stays on that page.
+        let mut later = feature("a", 1);
+        later.last_fix_round = Some(round(Stage::Ship));
+        later.reopen_fix_round();
+        assert_eq!(later.fix_round.as_ref().map(|r| r.stage), Some(Stage::Ship));
+        // Open again, it isn't over.
+        let mut over = feature("a", 1);
+        over.last_fix_round = Some(fix_round::FixRound {
+            ended: Some(5),
+            ..round(Stage::Ship)
+        });
+        over.reopen_fix_round();
+        assert_eq!(over.fix_round.as_ref().map(|r| r.ended), Some(None));
         // One open stays, and nothing is left to open.
         f.reopen_fix_round();
         assert!(f.fix_round.is_some());
@@ -1350,8 +1426,11 @@ pub(crate) mod tests {
             last_fix_round: None,
             verify_fixes: Vec::new(),
             fix_asked: Default::default(),
+            comment_fixes: Vec::new(),
             ran_once: Default::default(),
             fix_rounds: 0,
+            carry: None,
+            unverified: None,
         }
     }
 
@@ -1442,8 +1521,11 @@ pub(crate) mod tests {
             last_fix_round: None,
             verify_fixes: Vec::new(),
             fix_asked: Default::default(),
+            comment_fixes: Vec::new(),
             ran_once: Default::default(),
             fix_rounds: 0,
+            carry: None,
+            unverified: None,
         }
     }
 
@@ -1544,6 +1626,41 @@ pub(crate) mod tests {
         assert_eq!(f.ran_once[&Stage::Build], 10);
         assert!(f.start_over(Stage::Build, 12));
         assert!(f.ran_once.is_empty());
+    }
+
+    #[test]
+    fn manual_test_fixes_keep_the_marks() {
+        let mut f = feature("a", 1);
+        while f.current() != Some(Stage::ManualTest) {
+            f.tick(1, "you", Some("p1"));
+        }
+        // No round of Manual test's: the code changing sends it back.
+        assert!(!f.keep_marks("p2", 2));
+        let mut kept = f.clone();
+        assert_eq!(f.invalidate("p2", 2), Some(Stage::Build));
+        // Its round's commits leave every mark, moved onto the new code.
+        kept.carry = Some(3);
+        assert!(!kept.keep_marks("p1", 2));
+        assert!(kept.keep_marks("p2", 2));
+        assert_eq!(kept.current(), Some(Stage::ManualTest));
+        assert_eq!(kept.stale("p2"), None);
+        assert_eq!(
+            kept.history.last().unwrap().what,
+            "Code changed by fix round 3: marks kept"
+        );
+        // Away from Manual test it doesn't hold.
+        kept.untick(Stage::CodeReview, 3);
+        assert!(!kept.keep_marks("p3", 3));
+        assert_eq!(kept.invalidate("p3", 3), Some(Stage::Build));
+        assert_eq!(kept.carry, None);
+        // Verify done again as a stage, nothing waits on it apart.
+        let mut f = feature("a", 1);
+        while f.current() != Some(Stage::ManualTest) {
+            f.tick(1, "you", Some("p1"));
+        }
+        f.unverified = Some("p3".into());
+        assert!(f.untick(Stage::Verify, 4));
+        assert_eq!(f.unverified, None);
     }
 
     #[test]

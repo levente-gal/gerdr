@@ -67,7 +67,7 @@ const NOT_FOUND: i32 = 127;
 ///
 /// bash because of `/dev/tcp`: nothing else that can connect comes with every
 /// system. It only runs to its `exec`: `$$` is then the `cat` passing replies.
-fn relay_script(port: u16) -> String {
+pub(crate) fn relay_script(port: u16) -> String {
     format!(
         "exec 3<>/dev/tcp/localhost/{port} || exit 7\n\
          {{ cat >&3; kill $$; }} <&0 >/dev/null 2>&1 &\n\
@@ -189,6 +189,7 @@ impl ThereJob {
             host: &host,
             project: &self.feature.project,
             slug: &self.feature.slug,
+            owner: &crate::machine_lease::own_id_made().unwrap_or_default(),
             repos: &repos,
             roots: &roots,
             dir: &dir,
@@ -211,7 +212,9 @@ impl ThereJob {
     /// worker has no containers but those started on it. Not being able to ask
     /// here means there's nothing to say.
     fn not_there(&self, run: &SandboxRun, stop: &AtomicBool) -> Vec<String> {
-        let Ok(containers) = sandbox_run::running_containers(&Host::Here, stop) else {
+        let found = sandbox_run::engines(&Host::Here)
+            .and_then(|engines| sandbox_run::running_containers(&Host::Here, &engines, stop));
+        let Ok(containers) = found else {
             return Vec::new();
         };
         let links = self.feature.links.iter().map(|l| l.root.clone());
@@ -350,7 +353,7 @@ impl AfarJob {
 
 /// `port` here, listening for connections to pass on. Dropped, it closes them all.
 #[derive(Debug)]
-struct Relay {
+pub(crate) struct Relay {
     stop: Arc<AtomicBool>,
 }
 
@@ -381,7 +384,7 @@ fn listen_on(port: u16) -> io::Result<Vec<TcpListener>> {
 const ASK_EVERY: Duration = Duration::from_millis(400);
 /// Under what's kept of a machine: the records of features removed here whose
 /// sandboxes that machine still has.
-const LEFT: &str = "sandboxes-left";
+pub(crate) const LEFT: &str = "sandboxes-left";
 
 /// Where feature `slug`'s record waits for machine `id` to be back.
 pub(crate) fn left_file(id: &str, project: &str, slug: &str) -> std::path::PathBuf {
@@ -393,6 +396,26 @@ pub(crate) fn left_file(id: &str, project: &str, slug: &str) -> std::path::PathB
 /// What the problems list says of a removed feature's sandbox on a machine.
 fn left_text(title: &str, name: &str) -> String {
     format!("The sandbox of \u{201c}{title}\u{201d} stays on {name} until that can be reached")
+}
+
+/// The records waiting for machine `id` to be back, with their files.
+fn left_records(id: &str) -> Vec<(std::path::PathBuf, Feature)> {
+    let dir = crate::feature::view::root(&crate::projects::data_dir(), id).join(LEFT);
+    let entries = std::fs::read_dir(dir).into_iter().flatten().flatten();
+    (entries.map(|entry| entry.path()))
+        .filter_map(|file| {
+            let read = std::fs::read(&file).map_err(|err| err.to_string()).and_then(|raw| {
+                serde_json::from_slice::<Feature>(&raw).map_err(|err| err.to_string())
+            });
+            match read {
+                Ok(feature) => Some((file, feature)),
+                Err(why) => {
+                    tracing::warn!("reading {}: {why}", file.display());
+                    None
+                }
+            }
+        })
+        .collect()
 }
 
 /// Keep `feature` at `file`, for what it left to go later.
@@ -451,7 +474,7 @@ impl SandboxRemoval {
 
 /// What a relay of `port` found that says the whole thing can't work.
 #[derive(Clone, Debug, Default)]
-struct Missing(Arc<AtomicBool>);
+pub(crate) struct Missing(pub(crate) Arc<AtomicBool>);
 
 /// Start passing connections to `port` here on, each with the command `command`
 /// makes. An error says the port can't be had.
@@ -460,7 +483,16 @@ fn start_relay(
     command: impl Fn() -> Command + Send + 'static,
     missing: Missing,
 ) -> io::Result<Relay> {
-    let listeners = listen_on(port)?;
+    start_relay_on(listen_on(port)?, port, command, missing)
+}
+
+/// `start_relay` on `listeners`, which listen on `port`.
+pub(crate) fn start_relay_on(
+    listeners: Vec<TcpListener>,
+    port: u16,
+    command: impl Fn() -> Command + Send + 'static,
+    missing: Missing,
+) -> io::Result<Relay> {
     let stop = Arc::new(AtomicBool::new(false));
     let thread_stop = Arc::clone(&stop);
     std::thread::Builder::new()
@@ -639,7 +671,7 @@ pub struct SandboxSeen {
 
 /// What's said of `port` being taken: it goes on the badge too, for what it takes
 /// is for the user to do.
-fn taken_text(title: &str, port: u16) -> String {
+pub(crate) fn taken_text(title: &str, port: u16) -> String {
     format!(
         "Port {port} is taken here, so the sandbox of \u{201c}{title}\u{201d} can't be reached at it: stop what holds it"
     )
@@ -922,21 +954,7 @@ impl Gerdr {
 
     /// Machine `id` is back: what removed features left on it goes.
     pub(crate) fn clean_left_there(&mut self, id: &str) {
-        let dir = crate::feature::view::root(&crate::projects::data_dir(), id).join(LEFT);
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            return;
-        };
-        for file in entries.flatten().map(|entry| entry.path()) {
-            let read = std::fs::read(&file).map_err(|err| err.to_string()).and_then(|raw| {
-                serde_json::from_slice::<Feature>(&raw).map_err(|err| err.to_string())
-            });
-            let feature = match read {
-                Ok(feature) => feature,
-                Err(why) => {
-                    tracing::warn!("reading {}: {why}", file.display());
-                    continue;
-                }
-            };
+        for (file, feature) in left_records(id) {
             let Some(run) = feature.sandbox.clone() else {
                 continue;
             };
@@ -950,6 +968,50 @@ impl Gerdr {
                 name,
             });
         }
+    }
+
+    /// Where stack `left` is, and its sandbox's folder on a machine.
+    pub(crate) fn left_stack_place(
+        &self,
+        left: &feature_sandbox::LeftStack,
+    ) -> (Result<Host, String>, Option<std::path::PathBuf>) {
+        let Some(id) = left.machine.as_deref() else {
+            return (Ok(Host::Here), None);
+        };
+        let Some(work) = self.work_of(id) else {
+            return (Err(self.machine_name(id)), None);
+        };
+        let dir = (left.feature.split_once('/'))
+            .and_then(|(project, slug)| self.data_there(id, project, slug))
+            .map(|data| std::path::PathBuf::from(data).join("sandbox"));
+        (Ok(Host::There(work.reach())), dir)
+    }
+
+    /// The titles of the features whose sandboxes this gerdr answers for on machine
+    /// `name`: those running there, and those of removed features waiting for it.
+    pub(crate) fn sandboxes_on(&self, name: &str) -> Vec<String> {
+        let mut titles = Vec::new();
+        for (id, _) in (self.machines.names.iter()).filter(|(_, called)| *called == name) {
+            let runs = (self.features.all.values().flatten()).filter(|f| {
+                (f.sandbox.as_ref()).is_some_and(|run| run.machine.as_deref() == Some(id))
+            });
+            titles.extend(runs.map(|f| f.title.clone()));
+            titles.extend(left_records(id).into_iter().map(|(_, f)| f.title));
+        }
+        titles.sort();
+        titles.dedup();
+        titles
+    }
+
+    /// Machine `id` is forgotten: what it left is no longer said. Its records stay,
+    /// for it to be cleaned if it is added again.
+    pub(crate) fn left_there_forgotten(&mut self, id: &str) {
+        let name = self.machine_name(id);
+        for (_, feature) in left_records(id) {
+            crate::problems::forget(feature_sandbox::PROBLEMS, &left_text(&feature.title, &name));
+        }
+        (self.machines.left_told).retain(|left| left.machine.as_deref() != Some(id));
+        self.machines.left.remove(&Some(id.to_owned()));
     }
 
     /// What a removed feature left on a machine went, or still can't.
@@ -980,13 +1042,9 @@ impl Gerdr {
     pub(crate) fn report_left_there(&self) {
         let data = crate::projects::data_dir();
         for id in crate::feature::view::kept_ids(&data) {
-            let dir = crate::feature::view::root(&data, &id).join(LEFT);
-            for file in std::fs::read_dir(dir).into_iter().flatten().flatten() {
-                let raw = std::fs::read(file.path()).unwrap_or_default();
-                if let Ok(feature) = serde_json::from_slice::<Feature>(&raw) {
-                    let text = left_text(&feature.title, &self.machine_name(&id));
-                    crate::problems::report(feature_sandbox::PROBLEMS, text);
-                }
+            for (_, feature) in left_records(&id) {
+                let text = left_text(&feature.title, &self.machine_name(&id));
+                crate::problems::report(feature_sandbox::PROBLEMS, text);
             }
         }
     }
@@ -1143,19 +1201,28 @@ impl Gerdr {
 
     /// Open feature `slug`'s sandbox's app, which runs on machine `id`:
     /// its ports open here first, and a page opens on one that is really its own.
-    pub(crate) fn open_seen_sandbox_app(&mut self, project: &str, slug: &str, id: &str) {
+    pub(crate) fn open_seen_sandbox_app(
+        &mut self,
+        project: &str,
+        slug: &str,
+        id: &str,
+        page: usize,
+    ) {
         let name = self.machine_name(id);
         let Some(feature) = self.feature(project, slug) else {
             return;
         };
-        let Some(ports) = Self::seen_sandbox(feature).map(|(_, run)| run.listening()) else {
+        let Some(run) = Self::seen_sandbox(feature).map(|(_, run)| run.clone()) else {
             return self.show_warning(format!("The sandbox isn't running on {name}"));
         };
         if self.work_of(id).is_none() {
             return self.show_warning(format!("Connect {name} to open its sandbox's app"));
         }
-        let Some(url) = self.sandbox_url(project, &ports) else {
-            return self.show_warning("Nothing listens in the sandbox yet".into());
+        let ports = run.listening();
+        let set = self.set_sandbox_url(project);
+        let Some(url) = crate::feature_sandbox::sandbox_url(&run, page, &ports, set.as_deref())
+        else {
+            return self.show_warning(crate::feature_sandbox::nothing_listens(&run, page));
         };
         let said = self.follow_sandbox(project, slug);
         let key = (project.to_owned(), slug.to_owned());
@@ -1171,6 +1238,7 @@ impl Gerdr {
             }
             return;
         }
+        self.sandbox_shown(project, slug);
         self.open_feature_page(project, slug, url);
     }
 
@@ -1230,6 +1298,22 @@ mod tests {
         probe.local_addr().unwrap().port()
     }
 
+    /// A relay on a port that was free. A port seen free can be taken by the time
+    /// it is bound, and not only by another test: a process starting on another
+    /// thread holds a copy of the closed probe until it has started.
+    fn relay_on_free_port(
+        command: impl Fn() -> Command + Clone + Send + 'static,
+        missing: &Missing,
+    ) -> (u16, Relay) {
+        for _ in 0..50 {
+            let port = free_port();
+            if let Ok(relay) = start_relay(port, command.clone(), missing.clone()) {
+                return (port, relay);
+            }
+        }
+        panic!("no free port found");
+    }
+
     fn sh(script: &'static str) -> Command {
         let mut command = Command::new("sh");
         command.args(["-c", script]);
@@ -1246,8 +1330,7 @@ mod tests {
 
     #[test]
     fn a_port_here_passes_on_to_a_command_per_connection() {
-        let port = free_port();
-        let relay = start_relay(port, || sh("cat"), Missing::default()).unwrap();
+        let (port, relay) = relay_on_free_port(|| sh("cat"), &Missing::default());
         // Two at a time: each has its own.
         let mut one = connect(port);
         let mut two = connect(port);
@@ -1262,8 +1345,12 @@ mod tests {
         drop(relay);
         let mut rest = Vec::new();
         assert_eq!(one.read_to_end(&mut rest).unwrap_or(0), 0);
-        std::thread::sleep(Duration::from_millis(2 * POLL_MS as u64));
-        assert!(TcpStream::connect((Ipv4Addr::LOCALHOST, port)).is_err());
+        // A process starting elsewhere can hold the closed port for a moment.
+        let started = Instant::now();
+        while TcpStream::connect((Ipv4Addr::LOCALHOST, port)).is_ok() {
+            assert!(started.elapsed() < Duration::from_secs(5), "still open");
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     #[test]
@@ -1284,9 +1371,8 @@ mod tests {
 
     #[test]
     fn a_missing_program_there_is_said() {
-        let port = free_port();
         let missing = Missing::default();
-        let _relay = start_relay(port, || sh("exit 127"), missing.clone()).unwrap();
+        let (port, _relay) = relay_on_free_port(|| sh("exit 127"), &missing);
         let mut stream = connect(port);
         let mut rest = Vec::new();
         assert_eq!(stream.read_to_end(&mut rest).unwrap_or(0), 0);

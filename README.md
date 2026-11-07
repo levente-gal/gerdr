@@ -32,6 +32,10 @@ they come back when it starts again.
   branch in nine stages, with agents doing the work. A stage's agent is Claude
   Code, Cursor or T3 Code, picked on its page. T3 Code opens its prompt as a
   draft in its app, where you pick the model and send it.
+- **AI work stats** (prefix `U`). gerdr keeps what each feature's agents
+  did: their chats, the lines typed into them, stage files, check logs. The
+  stats panel shows it by feature, by agent and model, and by check. See
+  [AI work](#ai-work).
 - **Web panes.** A Chromium extension lets gerdr steer browser panes: back,
   forward, reload and copy the URL.
 - **Kept apps.** Apps such as Cursor can keep running across gerdr restarts
@@ -131,6 +135,29 @@ Other files:
 
 - Projects: `~/.local/share/gerdr/projects/<id>.json` and `state.json`
 - Log: `$XDG_STATE_HOME/gerdr/gerdr.log` (`~/.local/state/gerdr/gerdr.log`)
+
+### AI work
+
+gerdr keeps the AI work of every feature in
+`~/.local/share/gerdr/ai-work/<project>/<feature>/`: what happened, the
+prompts and files sent, stage files, check and setup logs, and a copy of
+each agent's chat. It stays when the feature is removed. `index.sqlite`
+beside the projects is drawn from those files for the stats panel (prefix
+`U`, Ctrl+R in it draws it again).
+
+- It is private. Folders are 0700 and files 0600, as chats can hold
+  secrets. Nothing of it is sent to worker machines. When you take a feature
+  over from another machine, its AI work comes from there to this one.
+- It grows. Chats are compressed, and a busy feature takes about 10 to
+  20 MB.
+- Claude Code deletes its chats after 30 days unless `cleanupPeriodDays` is
+  set in `~/.claude/settings.json`. gerdr copies them while it runs, so a
+  chat is kept once gerdr has seen it.
+- You choose what stays. The stats panel's Features tab shows what each
+  feature's AI work takes on disk. Its trash button (or Del) deletes it on
+  this machine, after asking. A feature still at work goes on keeping what
+  its agents do from then on. A copy another machine kept stays there, and
+  comes back here if you take the feature over from it.
 
 ### Running out of inotify instances
 

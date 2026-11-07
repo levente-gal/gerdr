@@ -168,7 +168,7 @@ pub const DOC_NO_RESTORE: &str = "There's nothing to restore in a file under rev
 pub const EVIDENCE_READ_ONLY: &str = "The evidence is only read";
 /// Why going to the current stage does nothing.
 pub const ALL_DONE: &str = "Every stage is done";
-/// Why Alt+Shift+Down did nothing.
+/// Why Alt+Shift+Down or Up did nothing.
 pub const ALL_VIEWED: &str = "Every file is viewed";
 /// Why Send back does nothing yet.
 pub const NO_COMMENT: &str = "Add a comment first";
@@ -180,7 +180,7 @@ pub const FEATURE_READ_ONLY: &str = "A feature's code review can't edit the code
 pub const APPROVE_KEY: &str = "Ctrl+Enter";
 pub const SEND_BACK_KEY: &str = "Ctrl+Shift+Enter";
 /// The key going to the next file not viewed in a feature's code review.
-pub const NEXT_UNVIEWED_KEY: &str = "Alt+Shift+Down";
+pub const NEXT_UNVIEWED_KEY: &str = "Alt+Shift+Down / Up";
 
 /// The commit a diff shows (`WorktreeDiff::commit`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -341,6 +341,9 @@ impl WorktreeDiff {
             view.diff_tree = true;
             view.tree_share = env.tree_share;
             view.empty = fe.empty(self.read).into();
+            view.tree_note = fe.tree_note(self.read);
+            let counts = fe.counts(0);
+            view.tree_nav = Some(counts.viewed < counts.files);
             let check = |root: &Path, path: &str| fe.check(root, path);
             tree.fill(&mut view, &fe.sections(), &self.diff, &check, env.tree_page);
         }
@@ -396,12 +399,24 @@ impl WorktreeDiff {
                 tree.fold_all(open, &fe.sections(), env.tree_page);
                 return None;
             }
+            TreeTool::PrevUnviewed | TreeTool::NextUnviewed => {
+                return self.jump_unviewed(tool == TreeTool::NextUnviewed, env);
+            }
         };
         if self.tree.as_ref()?.grouping == grouping {
             return None;
         }
         self.set_grouping(grouping, env);
         Some(Done::Grouping(grouping))
+    }
+
+    /// Go to the next file not viewed, else the one before: the diff at its
+    /// header, its line selected in the file list, the keyboard left where
+    /// it was. A toast says when every file is viewed.
+    fn jump_unviewed(&mut self, next: bool, env: Env) -> Option<Done> {
+        let by = if next { 1 } else { -1 };
+        let found = self.with_diff(env, |diff, ctx| diff.jump_unchecked(by, ctx));
+        (!found).then_some(Done::Diff(Outcome::Notice(ALL_VIEWED)))
     }
 
     /// What the file list asked: the diff goes to its line, or a file is
@@ -593,12 +608,12 @@ impl WorktreeDiff {
     /// Whether its lines take no comments: a commit's, the evidence, a
     /// file whose stage is done.
     fn read_only(&self) -> bool {
-        self.commit.is_some() || self.evidence() || self.closed() || self.seen()
+        self.commit.is_some() || self.evidence() || self.closed() || self.locked().is_some()
     }
 
-    /// Whether it shows the code of a feature another machine writes.
-    fn seen(&self) -> bool {
-        self.feature.as_ref().is_some_and(|f| f.seen)
+    /// Why it shows a feature's code only to read (`FeatureOf::locked`).
+    fn locked(&self) -> Option<&'static str> {
+        self.feature.as_ref().and_then(FeatureOf::locked)
     }
 
     /// Whether the keys changing files are refused though comments aren't:
@@ -652,7 +667,7 @@ impl WorktreeDiff {
             return Some(Done::Diff(Outcome::Notice(DRAFT_OPEN)));
         }
         if self.feature.is_some() {
-            return Some(match self.with_ctx(env, |ctx| self.diff.copy_review(ctx)) {
+            return Some(match self.with_ctx(env, |ctx| self.diff.send_review(ctx)) {
                 Ok(Outcome::Copy { text, .. }) => Done::SendBack(text),
                 _ => Done::Diff(Outcome::Notice(crate::feature_diff::NO_OWN_COMMENT)),
             });
@@ -683,6 +698,8 @@ impl WorktreeDiff {
             B::FixAllFindings => Some(Done::FixAll),
             B::AddComment => Some(Done::AddComment),
             B::ReviewFixPlan => Some(Done::ReviewFixPlan),
+            B::GoOn => Some(Done::GoOn),
+            B::Reopen => Some(Done::Reopen),
             _ => None,
         }
     }
@@ -699,8 +716,8 @@ impl WorktreeDiff {
     fn doc_outcome(&self, outcome: Option<Outcome>) -> Option<Outcome> {
         if self.feature.is_some() {
             return match outcome {
-                Some(Outcome::Notice(diff_view::READ_ONLY)) if self.seen() => {
-                    Some(Outcome::Notice(crate::doc_review::WRITTEN_ELSEWHERE))
+                Some(Outcome::Notice(diff_view::READ_ONLY)) if self.locked().is_some() => {
+                    self.locked().map(Outcome::Notice)
                 }
                 Some(o) if o.edits() => Some(Outcome::Notice(FEATURE_READ_ONLY)),
                 outcome => outcome,
@@ -837,6 +854,11 @@ impl WorktreeDiff {
             ],
             false => &[],
         };
+        let on_page: &[(&str, &str)] = match self.feature.as_ref().is_some_and(|fe| fe.inline) {
+            true => &[("Alt+1 / Alt+2", "show the code, or the fixes the comments asked for")],
+            false => &[],
+        };
+        let list = list.iter().chain(on_page);
         let own = own.iter().chain(list).map(|(key, what)| {
             (
                 key.to_string(),
@@ -1044,7 +1066,11 @@ impl WorktreeDiff {
             return;
         }
         if let Some(fe) = &self.feature {
-            view.title_buttons.extend(self.feature_hints());
+            // Laid into its page, the review's actions are on the page's line
+            // over it (`ReviewSwitch::buttons`).
+            if !fe.inline {
+                view.title_buttons.extend(self.feature_hints());
+            }
             // Findings are decided at AI review alone: past it their buttons
             // would only refuse.
             if fe.role() != Role::Deciding {
@@ -1072,11 +1098,19 @@ impl WorktreeDiff {
             }
             return;
         }
-        // Going to its agent already: these would only refuse.
-        let fixing = |d: &DocOf| d.locked == Some(crate::doc_review::FIXING_THEM);
+        // Going to its agent already, or over: these would only refuse.
+        let fixing = |d: &DocOf| {
+            matches!(
+                d.locked,
+                Some(crate::doc_review::FIXING_THEM | crate::doc_review::FIXES_MADE)
+            )
+        };
         if self.fix_plan() && self.doc.as_ref().is_some_and(fixing) {
             return;
         }
+        // Its agent stopped with fixes left: they go on, not back to be planned.
+        let stopped = |d: &DocOf| d.state.contains(crate::doc_review::STOPPED);
+        let stopped = self.fix_plan() && self.doc.as_ref().is_some_and(stopped);
         let go = match self.fix_plan() {
             true => Hint {
                 label: "Make fixes".to_owned(),
@@ -1084,24 +1118,34 @@ impl WorktreeDiff {
             },
             false => hint(ReposButton::Approve, APPROVE_KEY),
         };
-        view.title_buttons.extend([
-            hint(ReposButton::CommentFile, "Shift+C"),
-            hint(ReposButton::SendBack, SEND_BACK_KEY),
-            go,
-        ]);
+        view.title_buttons
+            .push(hint(ReposButton::CommentFile, "Shift+C"));
+        if !stopped {
+            view.title_buttons
+                .push(hint(ReposButton::SendBack, SEND_BACK_KEY));
+        }
+        view.title_buttons.push(go);
     }
 
-    /// A feature's buttons as it stands, with their keys.
-    fn feature_hints(&self) -> Vec<Hint> {
+    /// A feature's buttons as it stands, with their keys; Approve with what
+    /// holds it up.
+    pub(crate) fn feature_hints(&self) -> Vec<Hint> {
         let Some(fe) = self.feature.as_ref() else {
             return Vec::new();
         };
         (fe.buttons(self.diff.review.own()).into_iter())
             .map(|(button, disabled)| Hint {
                 button,
-                label: button.label().into(),
+                label: match button {
+                    ReposButton::GoOn => fe.go_on_label(),
+                    _ => button.label().into(),
+                },
                 key: fe.key_of(button, self.diff.review.own()).into(),
-                disabled,
+                disabled: match button {
+                    ReposButton::Approve => (self.approve_gate(fe.stage))
+                        .and_then(|gate| crate::feature_diff::approve_refusal(&gate)),
+                    _ => disabled,
+                },
             })
             .collect()
     }
@@ -1182,6 +1226,8 @@ impl WorktreeDiff {
             let button = match sym {
                 _ if enter && mods.ctrl => Some(match (mods.shift, fe.role()) {
                     (shift, Role::Deciding) => fe.deciding_button(shift, self.diff.review.own()),
+                    (false, Role::Done) => B::GoOn,
+                    (true, Role::Done) => B::Reopen,
                     (true, _) => B::PlanFixes,
                     (false, Role::Round(FixPhase::Ready)) => B::ReviewFixPlan,
                     (false, _) => B::Approve,
@@ -1211,8 +1257,7 @@ impl WorktreeDiff {
             && mods.shift
             && !(mods.ctrl || mods.logo)
         {
-            let found = self.with_diff(env, |diff, ctx| diff.jump_unchecked(by, ctx));
-            return (!found).then_some(Done::Diff(Outcome::Notice(ALL_VIEWED)));
+            return self.jump_unviewed(by > 0, env);
         }
         if !typing && let Some(done) = self.tree_key(mods, sym, env) {
             return done;
@@ -1264,7 +1309,7 @@ impl WorktreeDiff {
             buttons.push(B::Comment);
         }
         buttons.push(B::CopyLines);
-        if self.feature.is_some() && !self.seen() {
+        if self.feature.is_some() && self.locked().is_none() {
             buttons.extend([B::MarkViewed, B::NextUnviewed]);
         }
         if self.diff.comments_to_visit().is_some() {
@@ -1305,11 +1350,14 @@ impl WorktreeDiff {
                     }
                     B::Close if self.feature.as_ref().is_some_and(|f| f.back) => "back".into(),
                     B::Close => "close".into(),
+                    B::NextUnviewed => "next, previous unviewed".into(),
                     B::NextComment => match self.diff.comments_to_visit() {
                         Some("finding") => "next, previous finding".into(),
                         _ => "next, previous comment".into(),
                     },
-                    B::GoOn => match self.doc.as_ref().and_then(|d| d.current) {
+                    B::GoOn => match (self.doc.as_ref().and_then(|d| d.current))
+                        .or_else(|| self.feature.as_ref().and_then(|f| f.stage))
+                    {
                         Some(current) => format!("go to {}", current.label()),
                         None => "go on".into(),
                     },
@@ -1362,7 +1410,9 @@ impl WorktreeDiff {
                     | ReposButton::MakeFixes
                     | ReposButton::FixAllFindings
                     | ReposButton::AddComment
-                    | ReposButton::ReviewFixPlan),
+                    | ReposButton::ReviewFixPlan
+                    | ReposButton::GoOn
+                    | ReposButton::Reopen),
                 ) => return self.feature_press(button, env),
                 ReposHit::Button(ReposButton::MarkViewed) => {
                     return self
@@ -1370,8 +1420,7 @@ impl WorktreeDiff {
                         .map(Done::Diff);
                 }
                 ReposHit::Button(ReposButton::NextUnviewed) => {
-                    let found = self.with_diff(env, |diff, ctx| diff.jump_unchecked(1, ctx));
-                    return (!found).then_some(Done::Diff(Outcome::Notice(ALL_VIEWED)));
+                    return self.jump_unviewed(true, env);
                 }
                 ReposHit::DiffRestore(_) => {
                     return Some(Done::Diff(Outcome::Notice(FEATURE_READ_ONLY)));
@@ -2022,14 +2071,23 @@ impl crate::Gerdr {
                 let of = self.wd().and_then(|wd| wd.doc.clone());
                 if let Some(of) = of {
                     self.reopen_stage(&of.project, &of.slug, of.file.stage());
+                } else if let Some(fe) = self.feature_of() {
+                    let (project, slug) = (fe.project.clone(), fe.slug.clone());
+                    self.reopen_stage(&project, &slug, Stage::CodeReview);
                 }
                 None
             }
             Done::GoOn => {
-                let of = self.wd().and_then(|wd| wd.doc.clone());
-                if let Some(of) = of {
-                    self.show_feature_tab(&of.project, &of.slug);
-                    self.feature_cursor_to_current_of(&of.project, &of.slug);
+                let of = (self.wd().and_then(|wd| wd.doc.clone()))
+                    .map(|of| (of.project, of.slug))
+                    .or_else(|| (self.feature_of()).map(|f| (f.project.clone(), f.slug.clone())));
+                // A feature's popup makes way for the page it goes to.
+                if self.feature_of().is_some_and(|f| !f.inline) {
+                    self.close_feature_diff(false);
+                }
+                if let Some((project, slug)) = of {
+                    self.show_feature_tab(&project, &slug);
+                    self.feature_cursor_to_current_of(&project, &slug);
                 }
                 None
             }
@@ -2063,6 +2121,23 @@ impl crate::Gerdr {
             Keysym::Page_Up | Keysym::KP_Page_Up | Keysym::Page_Down | Keysym::KP_Page_Down
         );
         if only_ctrl && pages && self.on_inline_review() {
+            if let Some(outcome) = self.feature_panel_key(mods, sym, typed) {
+                self.apply_feature_panel(outcome);
+            }
+            return None;
+        }
+        // On Code review's page, Alt+1 and Alt+2 go between its code and its
+        // fixes; text being written takes them as any key.
+        let only_alt = mods.alt && !(mods.ctrl || mods.shift || mods.logo);
+        let views = matches!(
+            sym,
+            Keysym::_1 | Keysym::KP_1 | Keysym::_2 | Keysym::KP_2
+        );
+        if only_alt
+            && views
+            && self.on_inline_review()
+            && self.wd().is_some_and(|wd| wd.diff.editing.is_none())
+        {
             if let Some(outcome) = self.feature_panel_key(mods, sym, typed) {
                 self.apply_feature_panel(outcome);
             }

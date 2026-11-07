@@ -32,7 +32,9 @@ use serde_json::json;
 use smithay::reexports::calloop::channel;
 
 use crate::{
-    Gerdr, agents,
+    Gerdr,
+    agent_tell::Told,
+    agents,
     confirm::Then,
     desktop::shell_quote,
     feature::{
@@ -140,6 +142,8 @@ enum Job {
         line: String,
         data: PathBuf,
         data_there: String,
+        /// The line as it reads here, to keep should it fail.
+        told: Box<Told>,
     },
     Close {
         pane: String,
@@ -197,6 +201,8 @@ pub enum WorkEvent {
         why: String,
         /// The agent quit: it is gone, not out of reach.
         quit: bool,
+        /// The line, as it reads here.
+        told: Box<Told>,
     },
     /// The agent in this pane never took a line.
     LineIgnored(String),
@@ -438,16 +444,19 @@ impl Work {
     }
 
     /// The line attaching a terminal here to `terminal` there, taking it from
-    /// any other client. It says what ending means: the agent goes on.
+    /// any other client. It says what ending means: the agent goes on; and, when
+    /// another machine took the view, which.
     pub(crate) fn attach_line(&self, terminal: &str, name: &str) -> String {
         let site = &self.info.site;
         let herdr = site.herdr.as_deref().unwrap_or("herdr");
-        let there = format!(
+        let attach = format!(
             "env HERDR_SOCKET_PATH={} {} terminal attach {} --takeover",
             shell_quote(&site.socket()),
             shell_quote(herdr),
             shell_quote(terminal),
         );
+        let views = format!("{}/gerdr/{VIEWS}", site.data);
+        let there = viewed_by(&views, terminal, &crate::machine_lease::this_machines_name(), &attach);
         let said = format!("This view ended. What runs there keeps running on {name}.");
         format!(
             "ssh -t -S {} -o BatchMode=yes -o ControlMaster=no {} {}; echo {}",
@@ -459,14 +468,37 @@ impl Work {
     }
 }
 
+/// The folder, in gerdr's folder of a machine, saying which machine last opened a
+/// view of each terminal there.
+const VIEWS: &str = "views";
+
+/// `attach`, a view of `terminal` taking it from any other, run by shell where the
+/// terminal is: it first says there that machine `me` has it, in folder `views`,
+/// and once it ends, says which machine took it, if one did; if none did, what
+/// it said goes.
+fn viewed_by(views: &str, terminal: &str, me: &str, attach: &str) -> String {
+    let file = shell_quote(&format!("{views}/{}", terminal.replace('/', "_")));
+    let me = shell_quote(me);
+    format!(
+        r#"mkdir -p {views} 2>/dev/null; printf %s {me} > {file} 2>/dev/null; {attach}; s=$?; w=$(cat {file} 2>/dev/null); if [ "$w" = {me} ]; then rm -f {file}; elif [ -n "$w" ]; then printf '\nOpened on %s.\n' "$w"; fi; exit $s"#,
+        views = shell_quote(views),
+    )
+}
+
 /// The line attaching a terminal here to `terminal` of this machine's own worker
 /// session: work another gerdr put here.
 pub(crate) fn attach_here(terminal: &str) -> String {
     let socket = crate::machines::worker_socket_here();
-    format!(
-        "env HERDR_SOCKET_PATH={} herdr terminal attach {} --takeover; echo {}",
+    let attach = format!(
+        "env HERDR_SOCKET_PATH={} herdr terminal attach {} --takeover",
         shell_quote(&socket.to_string_lossy()),
         shell_quote(terminal),
+    );
+    let views = crate::projects::data_dir().join(VIEWS);
+    let me = crate::machine_lease::this_machines_name();
+    format!(
+        "sh -c {}; echo {}",
+        shell_quote(&viewed_by(&views.to_string_lossy(), terminal, &me, &attach)),
         shell_quote("This view ended. What runs here keeps running."),
     )
 }
@@ -587,13 +619,19 @@ fn do_work(
                 line,
                 data,
                 data_there,
+                told,
             }) => {
-                let told = reach
+                let typed = reach
                     .push_data(&data, &data_there, false, stop)
                     .map_err(|t| (t.text().to_owned(), false))
                     .and_then(|()| type_line(&mut herdr, &pane, &line));
-                if let Err((why, quit)) = told {
-                    tell(WorkEvent::NotTold { pane, why, quit });
+                if let Err((why, quit)) = typed {
+                    tell(WorkEvent::NotTold {
+                        pane,
+                        why,
+                        quit,
+                        told,
+                    });
                 }
             }
             Ok(Job::Close { pane }) => {
@@ -839,6 +877,7 @@ impl Gerdr {
                     self.adopt_checks(&project);
                 }
                 self.clean_left_there(&place_id);
+                self.look_for_sandbox_leftovers_there(&place_id);
             }
             Err(err) => {
                 tracing::warn!("machine {name}: starting its work: {err}");
@@ -851,6 +890,13 @@ impl Gerdr {
         (self.machines.links.values())
             .filter_map(|link| link.work.as_ref())
             .find(|work| work.id == id)
+    }
+
+    /// How to reach machine `id`, and its folders, for a thread of its own
+    /// that copies AI work from there: none while its link is down.
+    pub(crate) fn archive_reach(&self, machine_id: &str) -> Option<(Reach, Side)> {
+        let work = self.work_of(machine_id)?;
+        Some((work.reach(), work.side()))
     }
 
     fn work_of_mut(&mut self, id: &str) -> Option<&mut Work> {
@@ -969,10 +1015,10 @@ impl Gerdr {
             .find(|f| crate::feature::view::panes_of(f).contains(&pane))
     }
 
-    /// Type `line` to the agent in `pane` on another machine, its paths as
-    /// they read there. It goes in the machine's turn: a failure comes later,
-    /// as a warning.
-    pub(crate) fn tell_machine_pane(&mut self, pane: &str, line: &str) -> Result<(), String> {
+    /// Type the line `told` to the agent in `pane` on another machine, its
+    /// paths as they read there. It goes in the machine's turn: a failure
+    /// comes later, as a warning.
+    pub(crate) fn tell_machine_pane(&mut self, pane: &str, told: &Told) -> Result<(), String> {
         let (id, bare) = split_pane(pane).ok_or_else(|| String::from("no such pane"))?;
         let name = self.machine_name(id);
         let Some(work) = self.work_of(id) else {
@@ -987,9 +1033,10 @@ impl Gerdr {
         let data = store::dir(None, &feature.project, &feature.slug);
         let job = Job::Tell {
             pane: bare.to_owned(),
-            line: paths.text(line),
+            line: paths.text(&told.text),
             data_there: paths.there(&data),
             data,
+            told: Box::new(told.clone()),
         };
         work.jobs
             .send(job)
@@ -1221,9 +1268,15 @@ impl Gerdr {
                 kind,
                 result,
             } => self.machine_started(id, (&project, &slug, stage), n, kind, result),
-            WorkEvent::NotTold { pane, why, quit } => {
+            WorkEvent::NotTold {
+                pane,
+                why,
+                quit,
+                told,
+            } => {
                 let name = self.machine_name(id);
                 tracing::warn!("telling pane {pane} on {name}: {why}");
+                self.told_failed(&told, crate::ai_work::Via::Machine, &why);
                 let then = if quit {
                     ""
                 } else {
@@ -1479,12 +1532,14 @@ impl Gerdr {
     /// more until it is told to, and a file taken away here must not come
     /// back from there.
     pub(crate) fn machine_work_tick(&mut self) {
+        self.reach_tick();
         self.publish_live();
         // Asked over another machine's link to this one: this one may have none.
         self.lease_tick();
         // Before anything that needs a link: losing the last closes what used it.
         self.sandbox_places_tick();
         self.sandbox_views_tick();
+        self.sandbox_lan_tick();
         if self.machines.links.values().all(|link| link.work.is_none()) {
             return;
         }
@@ -1947,5 +2002,24 @@ mod tests {
         assert!(line.contains("--takeover"), "{line}");
         assert!(line.contains("gerdr-worker/herdr.sock"), "{line}");
         assert!(line.contains("keeps running on box"), "{line}");
+    }
+
+    #[test]
+    fn a_view_taken_by_another_machine_says_which() {
+        let views = std::env::temp_dir().join(format!("gerdr-views-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&views);
+        let views = views.to_string_lossy().into_owned();
+        let run = |attach: &str| {
+            let script = viewed_by(&views, "w1/t1", "my box", attach);
+            let out = std::process::Command::new("sh").args(["-c", &script]).output().unwrap();
+            (out.status.code(), String::from_utf8_lossy(&out.stdout).into_owned())
+        };
+        // Ended here, by closing: nothing to say, nor left there.
+        assert_eq!(run("true"), (Some(0), String::new()));
+        assert!(!std::path::Path::new(&format!("{views}/w1_t1")).exists());
+        // Another machine opened it meanwhile, which ends this one.
+        let taken = format!("printf %s desk > '{views}/w1_t1'; false");
+        assert_eq!(run(&taken), (Some(1), "\nOpened on desk.\n".to_owned()));
+        let _ = std::fs::remove_dir_all(&views);
     }
 }

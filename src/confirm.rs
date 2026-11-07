@@ -41,6 +41,8 @@ pub enum Then {
     StopOnMachine(String, String, crate::feature::Stage),
     /// Take this feature over from a machine that can't be asked: project, feature.
     TakeOver(String, String),
+    /// Open this feature's sandbox to the network: project, feature.
+    OpenSandboxLan(String, String),
     /// Start this stage's agent afresh, ending the one on another machine.
     FreshOnMachine(String, String, crate::feature::Stage),
     /// Close the agent of this card (see `Gerdr::close_agent`).
@@ -58,6 +60,9 @@ pub enum Then {
     /// Stop this project's session and apps, then forget it (see
     /// `Gerdr::forget_project`).
     ForgetProject(String),
+    /// Stop this project's session and apps, then give it the second id
+    /// (see `Gerdr::change_project_id`).
+    ChangeProjectId(String, String),
     /// Restart T3 Code's server at the version waiting (see
     /// `Gerdr::restart_t3`).
     RestartT3,
@@ -77,7 +82,16 @@ pub enum Then {
         what: crate::feature_sandbox::StopFor,
     },
     /// Remove what sandboxes of features that are gone left.
-    RemoveSandboxLeftovers(Vec<String>),
+    RemoveSandboxLeftovers(Vec<crate::feature_sandbox::LeftStack>),
+    /// Forget machine `name`, whose sandboxes stay on it.
+    RemoveMachine(String),
+    /// Delete the AI work kept of this project's feature, called `title`
+    /// (see `Gerdr::delete_ai_work`).
+    DeleteAiWork {
+        project: String,
+        slug: String,
+        title: String,
+    },
     /// Remove the worktrees of this project's feature, `force`: with the
     /// work they hold; abandon it if `abandon` (see
     /// `Gerdr::remove_feature`).
@@ -451,7 +465,7 @@ impl Gerdr {
 
     /// Whether project `id`'s herdr session runs, as last found out, else
     /// asked now.
-    fn session_runs(&self, id: &str) -> bool {
+    pub(crate) fn session_runs(&self, id: &str) -> bool {
         if self.stopping.contains(id) {
             return false;
         }
@@ -595,16 +609,26 @@ impl Gerdr {
 
     /// Ask before making the fixes of feature `slug`'s plan while `count`
     /// review comments on it are unsent (see `Gerdr::doc_approve`).
-    pub fn ask_make_fixes_unsent(&mut self, project: String, slug: String, count: usize) {
+    /// `back`: whether Send back can still send them; not once the agent
+    /// stopped making the fixes.
+    pub fn ask_make_fixes_unsent(
+        &mut self,
+        project: String,
+        slug: String,
+        count: usize,
+        back: bool,
+    ) {
         let title = match count {
             1 => "Make the fixes with 1 comment unsent?".to_owned(),
             n => format!("Make the fixes with {n} comments unsent?"),
         };
-        let body = format!(
-            "The comments on {} are deleted, not sent to its agent. \
-             Send back sends them.",
+        let mut body = format!(
+            "The comments on {} are deleted, not sent to its agent.",
             crate::feature::fix_round::FILE
         );
+        if back {
+            body.push_str(" Send back sends them.");
+        }
         self.ask(title, body, "Make fixes", Then::MakeFixes { project, slug });
     }
 
@@ -676,6 +700,7 @@ impl Gerdr {
                 self.stop_on_machine(&project, &slug, stage);
             }
             Then::TakeOver(project, slug) => self.take_feature_anyway(&project, &slug),
+            Then::OpenSandboxLan(project, slug) => self.open_sandbox_lan(&project, &slug),
             Then::FreshOnMachine(project, slug, stage) => {
                 self.start_stage_agent_now(&project, &slug, stage, true);
             }
@@ -696,6 +721,12 @@ impl Gerdr {
                 what,
             } => self.finish_stop(&project, &slug, what),
             Then::RemoveSandboxLeftovers(stacks) => self.remove_sandbox_leftovers(stacks),
+            Then::RemoveMachine(name) => self.remove_machine(&name),
+            Then::DeleteAiWork {
+                project,
+                slug,
+                title,
+            } => self.delete_ai_work(&project, &slug, title),
             Then::RemoveFeature {
                 project,
                 slug,
@@ -757,6 +788,11 @@ impl Gerdr {
             }
             Then::ForgetProject(id) => {
                 self.forget_after_stop.insert(id.clone());
+                self.stop_project_now(&id, Stops::ALL);
+                self.refresh_project_menu();
+            }
+            Then::ChangeProjectId(id, new) => {
+                self.id_after_stop.insert(id.clone(), new);
                 self.stop_project_now(&id, Stops::ALL);
                 self.refresh_project_menu();
             }
