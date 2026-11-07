@@ -77,6 +77,8 @@ pub struct Row {
     pub made: bool,
     /// It was tried on other code than the feature's now.
     pub earlier: bool,
+    /// The screenshots of a failure, by file name (see `manual::SHOTS_DIR`).
+    pub shots: Vec<String>,
 }
 
 /// The cards' rows: `criteria` as `test` has them, the feature's code being
@@ -103,6 +105,9 @@ fn rows(
                 earlier: (test.zip(check)).zip(patch).is_some_and(|((t, k), p)| {
                     manual::tried_on(t, k) != p
                 }),
+                shots: check
+                    .filter(|k| k.state == Verdict::Fail)
+                    .map_or_else(Vec::new, |k| k.shots.clone()),
             }
         })
         .collect()
@@ -374,6 +379,19 @@ impl Gerdr {
         else {
             return;
         };
+        self.apply_manual_test_on(&project, &slug, outcome);
+    }
+
+    /// Whether the feature tab shows feature `slug` of `project`.
+    fn panel_on(&self, project: &str, slug: &str) -> bool {
+        (self.features.panel.as_ref()).is_some_and(|p| p.project == project && p.slug == slug)
+    }
+
+    /// Do what the criteria of feature `slug` of `project` asked, from its
+    /// page or from the criteria strip over its sandbox's app.
+    pub(crate) fn apply_manual_test_on(&mut self, project: &str, slug: &str, outcome: Outcome) {
+        let (project, slug) = (project.to_owned(), slug.to_owned());
+        let on_page = self.panel_on(&project, &slug);
         let Some(feature) = self.feature(&project, &slug) else {
             return self.show_warning("That feature is gone".into());
         };
@@ -384,10 +402,11 @@ impl Gerdr {
         let patch = reading.as_ref().map(|r| r.patch.clone());
         let reading_text =
             format!("Still reading the code of \u{201c}{title}\u{201d}; try again in a moment");
-        if let Some(i) = outcome.criterion() {
+        if let Some(i) = outcome.criterion().filter(|_| on_page) {
             self.select_criterion(i);
         }
         match outcome {
+            Outcome::Write(_) if !on_page => {}
             Outcome::Write(i) => {
                 let Some(c) = criteria.get(i) else {
                     return;
@@ -410,7 +429,9 @@ impl Gerdr {
                 }
                 let Some(patch) = patch else {
                     // The note goes back in its field, not thrown away.
-                    if let Outcome::Fail(_, note) = &outcome {
+                    if let Outcome::Fail(_, note) = &outcome
+                        && on_page
+                    {
                         self.write_criterion_note(i, note);
                     }
                     return self.show_warning(reading_text);
@@ -570,6 +591,7 @@ mod tests {
             sent: false,
             made: false,
             earlier: false,
+            shots: Vec::new(),
         }
     }
 

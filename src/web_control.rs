@@ -89,8 +89,14 @@ const FILES: [(&str, &str); 8] = [
     ),
 ];
 
-/// A message bigger than this ends the connection.
+/// A message to the browser bigger than this ends the connection: the
+/// browser takes no more from its host.
 pub(crate) const MESSAGE_MAX: usize = 1 << 20;
+
+/// A message from the browser bigger than this ends the connection. The
+/// browser sends its host up to 4 GB; a page's screenshot is the biggest
+/// gerdr asks for.
+const FROM_BROWSER_MAX: usize = 64 << 20;
 
 /// How often the host tries gerdr's socket again while it isn't there.
 const HOST_RETRY: Duration = Duration::from_secs(1);
@@ -122,6 +128,16 @@ enum FromBrowser {
     },
     /// T3 Code's app in the pane's tab took its project filter.
     Scoped { pane: String },
+    /// What the pane's tab shows, as gerdr asked for it (see
+    /// `Gerdr::capture_web_pane`): a PNG as a `data:` URL, or why there is
+    /// none.
+    Shot {
+        pane: String,
+        #[serde(default)]
+        data: Option<String>,
+        #[serde(default)]
+        error: Option<String>,
+    },
     /// A link clicked in the pane's preview (see `md_preview`).
     Open { pane: String, url: String },
     /// The pane's preview page loaded, and shows nothing yet.
@@ -204,6 +220,10 @@ enum ToBrowser<'a> {
     Scroll {
         pane: String,
         line: f64,
+    },
+    /// Send back what the pane's tab shows, as a PNG.
+    Capture {
+        pane: String,
     },
 }
 
@@ -395,7 +415,7 @@ pub fn run_host(socket: &Path) {
         return;
     };
     std::thread::spawn(move || {
-        pass_messages(&mut std::io::stdin().lock(), &mut to_gerdr);
+        pass_messages(&mut std::io::stdin().lock(), &mut to_gerdr, FROM_BROWSER_MAX);
         std::process::exit(0);
     });
     // Unbuffered: the browser waits for each message whole.
@@ -403,12 +423,13 @@ pub fn run_host(socket: &Path) {
     let Ok(stdout) = std::io::stdout().as_fd().try_clone_to_owned() else {
         return;
     };
-    pass_messages(&mut &stream, &mut std::fs::File::from(stdout));
+    pass_messages(&mut &stream, &mut std::fs::File::from(stdout), MESSAGE_MAX);
 }
 
-/// Pass the messages read from `from` on to `to`, until either ends.
-fn pass_messages(from: &mut impl Read, to: &mut impl Write) {
-    while let Some(message) = read_message(from) {
+/// Pass the messages read from `from` on to `to`, until either ends or
+/// one is bigger than `max`.
+fn pass_messages(from: &mut impl Read, to: &mut impl Write, max: usize) {
+    while let Some(message) = read_message(from, max) {
         if to.write_all(&framed(&message)).is_err() {
             return;
         }
@@ -417,12 +438,12 @@ fn pass_messages(from: &mut impl Read, to: &mut impl Write) {
 
 /// The next message on `stream`: its size in four bytes (in the machine's
 /// order, as the browser writes it), then its JSON. `None` once the stream
-/// ends or goes wrong.
-fn read_message(stream: &mut impl Read) -> Option<Vec<u8>> {
+/// ends or goes wrong, or the message is bigger than `max`.
+fn read_message(stream: &mut impl Read, max: usize) -> Option<Vec<u8>> {
     let mut size = [0; 4];
     stream.read_exact(&mut size).ok()?;
     let size = u32::from_ne_bytes(size) as usize;
-    if size > MESSAGE_MAX {
+    if size > max {
         return None;
     }
     let mut message = vec![0; size];
@@ -459,7 +480,7 @@ fn listen(socket: &Path) -> std::io::Result<channel::Channel<Event>> {
             }
             let tx = tx.clone();
             std::thread::spawn(move || {
-                while let Some(message) = read_message(&mut stream) {
+                while let Some(message) = read_message(&mut stream, FROM_BROWSER_MAX) {
                     match serde_json::from_slice(&message) {
                         Ok(message) => {
                             if tx.send(Event::Message(id, message)).is_err() {
@@ -566,6 +587,15 @@ impl Gerdr {
             ) => {
                 if let Some(pane) = token_pane(&pane) {
                     self.t3_no_thread(pane, &reason, &detail);
+                }
+            }
+            Event::Message(_, FromBrowser::Shot { pane, data, error }) => {
+                if let Some(pane) = token_pane(&pane) {
+                    let shot = match (data, error) {
+                        (Some(data), _) => png_of(&data),
+                        (None, error) => Err(error.unwrap_or_else(|| "no picture came".into())),
+                    };
+                    self.web_pane_shot(pane, shot);
                 }
             }
             Event::Message(_, FromBrowser::Scoped { pane }) => {
@@ -725,6 +755,15 @@ impl Gerdr {
         self.send_to_browser(pane, &message)
     }
 
+    /// Ask for what `pane`'s tab shows, if the extension follows it; whether
+    /// it was asked. It comes back to `Gerdr::web_pane_shot`.
+    pub(crate) fn capture_web_pane(&mut self, pane: u32) -> bool {
+        let message = ToBrowser::Capture {
+            pane: pane_token(pane),
+        };
+        self.send_to_browser(pane, &message)
+    }
+
     /// Send `message` to the browser holding `pane`'s tab; whether it went.
     fn send_to_browser(&mut self, pane: u32, message: &ToBrowser) -> bool {
         let Ok(message) = serde_json::to_vec(message) else {
@@ -745,6 +784,39 @@ impl Gerdr {
             .get_mut(&id)
             .is_some_and(|stream| stream.write_all(&framed(message)).is_ok())
     }
+}
+
+/// The PNG in `url`, a `data:` URL of one in base64.
+fn png_of(url: &str) -> Result<Vec<u8>, String> {
+    let data = (url.strip_prefix("data:image/png;base64,"))
+        .ok_or_else(|| "the picture isn't a PNG".to_owned())?;
+    base64_decoded(data).ok_or_else(|| "the picture came broken".to_owned())
+}
+
+/// The bytes `text` holds in base64 (padded or not); `None` when it holds
+/// anything else.
+fn base64_decoded(text: &str) -> Option<Vec<u8>> {
+    let value = |c: u8| match c {
+        b'A'..=b'Z' => Some(c - b'A'),
+        b'a'..=b'z' => Some(c - b'a' + 26),
+        b'0'..=b'9' => Some(c - b'0' + 52),
+        b'+' => Some(62),
+        b'/' => Some(63),
+        _ => None,
+    };
+    let text = text.trim_end_matches('=').as_bytes();
+    let mut out = Vec::with_capacity(text.len() * 3 / 4);
+    let (mut bits, mut held) = (0u32, 0);
+    for &c in text {
+        bits = bits << 6 | u32::from(value(c)?);
+        held += 6;
+        if held >= 8 {
+            held -= 8;
+            out.push((bits >> held) as u8);
+            bits &= (1 << held) - 1;
+        }
+    }
+    Some(out)
 }
 
 /// The message showing `shown` in `pane`'s preview page, its body `body`
@@ -806,15 +878,35 @@ mod tests {
     #[test]
     fn messages_are_framed_by_their_size() {
         let mut bytes: &[u8] = &framed(b"{}");
-        assert_eq!(read_message(&mut bytes).as_deref(), Some(&b"{}"[..]));
-        assert_eq!(read_message(&mut bytes), None);
+        assert_eq!(read_message(&mut bytes, MESSAGE_MAX).as_deref(), Some(&b"{}"[..]));
+        assert_eq!(read_message(&mut bytes, MESSAGE_MAX), None);
+        // One too big ends it.
+        let mut bytes: &[u8] = &framed(b"{\"a\":1}");
+        assert_eq!(read_message(&mut bytes, 4), None);
+    }
+
+    #[test]
+    fn a_screenshot_comes_as_a_png_in_base64() {
+        assert_eq!(base64_decoded("TWFu").as_deref(), Some(&b"Man"[..]));
+        assert_eq!(base64_decoded("TWE=").as_deref(), Some(&b"Ma"[..]));
+        assert_eq!(base64_decoded("TQ==").as_deref(), Some(&b"M"[..]));
+        assert_eq!(base64_decoded("T!=="), None);
+        assert_eq!(png_of("data:image/png;base64,TWFu"), Ok(b"Man".to_vec()));
+        assert!(png_of("data:image/jpeg;base64,TWFu").is_err());
+        let shot: FromBrowser =
+            serde_json::from_str(r#"{"type":"shot","pane":"1.2","data":"data:image/png;base64,TQ=="}"#)
+                .unwrap();
+        assert!(matches!(shot, FromBrowser::Shot { data: Some(_), error: None, .. }));
+        let failed: FromBrowser =
+            serde_json::from_str(r#"{"type":"shot","pane":"1.2","error":"no"}"#).unwrap();
+        assert!(matches!(failed, FromBrowser::Shot { data: None, error: Some(_), .. }));
     }
 
     #[test]
     fn the_host_passes_messages_whole() {
         let input = [framed(b"{\"a\":1}"), framed(b"{}")].concat();
         let mut output = Vec::new();
-        pass_messages(&mut &input[..], &mut output);
+        pass_messages(&mut &input[..], &mut output, MESSAGE_MAX);
         assert_eq!(output, input);
     }
 

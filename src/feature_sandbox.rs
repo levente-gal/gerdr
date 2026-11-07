@@ -722,7 +722,10 @@ impl Gerdr {
         };
         let ports = run.listening();
         match sandbox_url(&run, page, &ports, self.set_sandbox_url(project).as_deref()) {
-            Some(url) => self.open_feature_page(project, slug, url),
+            Some(url) => {
+                self.sandbox_shown(project, slug);
+                self.open_feature_page(project, slug, url);
+            }
             None => self.show_warning(nothing_listens(&run, page)),
         }
     }

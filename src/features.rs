@@ -2596,7 +2596,7 @@ fn stage_actions(
 
 /// Whether `stage`'s page of `feature` is where its criteria are tried:
 /// Manual test's, while the feature is at it.
-fn tries_criteria(feature: &Feature, stage: Stage) -> bool {
+pub(crate) fn tries_criteria(feature: &Feature, stage: Stage) -> bool {
     stage == Stage::ManualTest
         && feature.status == Status::Open
         && stage_mark(feature, stage) == StageMark::Current
@@ -2612,7 +2612,7 @@ fn shows_criteria(feature: &Feature, stage: Stage) -> bool {
 /// that order, the one it stands at filled. Pressing that one again takes
 /// it back; Fail on one not failed asks what went wrong. A failed one can
 /// have its note edited too.
-fn criterion_buttons(i: usize, row: &Row) -> Vec<(PageButton, PanelOutcome)> {
+pub(crate) fn criterion_buttons(i: usize, row: &Row) -> Vec<(PageButton, PanelOutcome)> {
     use crate::manual_test::Outcome;
     let button = |label: &str, style, outcome| {
         let button = PageButton {
@@ -2645,7 +2645,7 @@ fn criterion_buttons(i: usize, row: &Row) -> Vec<(PageButton, PanelOutcome)> {
 /// What criterion `row` checks, step by step, for its card while selected:
 /// a line each for its Given, When and Then, or its text as the brief has
 /// it when it doesn't split.
-fn criterion_details(row: &Row) -> String {
+pub(crate) fn criterion_details(row: &Row) -> String {
     let mut text = match crate::feature::manual::split_gwt(&row.text) {
         Some([given, when, then]) => format!("Given {given}\nWhen {when}\nThen {then}"),
         None => row.text.clone(),
@@ -2683,9 +2683,11 @@ fn criterion_card(
         body: String::new(),
         preview: Vec::new(),
         fix: String::new(),
-        note: match row.note.is_empty() {
-            true => String::new(),
-            false => format!("What went wrong: {}", row.note),
+        note: match (row.note.is_empty(), row.shots.len()) {
+            (true, _) => String::new(),
+            (false, 0) => format!("What went wrong: {}", row.note),
+            (false, 1) => format!("What went wrong: {} (1 screenshot)", row.note),
+            (false, n) => format!("What went wrong: {} ({n} screenshots)", row.note),
         },
         comment: String::new(),
         comment_buttons: Vec::new(),
@@ -17884,6 +17886,7 @@ pub(crate) mod tests {
             sent: false,
             made: false,
             earlier: false,
+            shots: Vec::new(),
         };
         let rows = vec![
             row(None, ""),
@@ -18030,6 +18033,7 @@ pub(crate) mod tests {
             sent,
             made,
             earlier: true,
+            shots: Vec::new(),
         };
         let rows = vec![
             row(Some(Verdict::Fail), true, true),
@@ -18158,6 +18162,7 @@ pub(crate) mod tests {
             sent: false,
             made: false,
             earlier: false,
+            shots: Vec::new(),
         };
         let rows = vec![row(Some(Verdict::Pass)), row(Some(Verdict::Pass))];
         let ctx = RowCtx {
