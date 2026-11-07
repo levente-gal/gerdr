@@ -5,8 +5,8 @@
 //! From the top: the tooltip, the modal dialogs (quit, restart, checkout,
 //! new feature, the manual test sheet, the plan review's sheet, confirm), the context menu, the toasts, the welcome screen,
 //! the help panel, then the panels (the tasks, the project menu, the
-//! worktrees popup, the repositories and inbox panels, the scrollback
-//! viewer, the switcher), and last the feature panel and the file's tab,
+//! worktrees popup, the repositories and inbox panels, the AI work's
+//! stats, the scrollback viewer, the switcher), and last the feature panel and the file's tab,
 //! which are not over the apps but in a tab of their own.
 //! The toasts are over every popup but the menu and the dialogs, so what
 //! a panel reports shows while it is open; the help panel is under them,
@@ -66,13 +66,15 @@ pub enum Overlay {
     Worktrees,
     Repos,
     Inbox,
+    /// The stats panel on the features' AI work (see `stats_panel`).
+    AiStats,
     Scrollback,
     Switcher,
 }
 
 impl Overlay {
     /// Every overlay, top first.
-    pub const ORDER: [Self; 24] = [
+    pub const ORDER: [Self; 25] = [
         Self::Tooltip,
         Self::Quit,
         Self::Restart,
@@ -95,6 +97,8 @@ impl Overlay {
         Self::Worktrees,
         Self::Repos,
         Self::Inbox,
+        // Under the panels its prefix keys open over it.
+        Self::AiStats,
         Self::Scrollback,
         Self::Switcher,
         // In their tabs, under every popup: a feature's code review over the
@@ -129,6 +133,7 @@ impl Overlay {
                 | Self::Worktrees
                 | Self::Repos
                 | Self::Inbox
+                | Self::AiStats
                 | Self::Scrollback
                 | Self::Switcher
                 | Self::Tasks
@@ -161,6 +166,7 @@ impl Overlay {
             Self::Worktrees => Action::Worktrees,
             Self::Repos => Action::Repos,
             Self::Inbox => Action::Inbox,
+            Self::AiStats => Action::AiStats,
             Self::Scrollback => Action::Scrollback,
             Self::Switcher => Action::Switcher,
             Self::Help => Action::Shortcuts,
@@ -194,6 +200,7 @@ impl Overlay {
             Self::Worktrees => "the worktrees popup",
             Self::Repos => "the repositories panel",
             Self::Inbox => "the inbox",
+            Self::AiStats => "the AI work stats",
             Self::Scrollback => "the scrollback viewer",
             Self::Switcher => "the switcher",
         }
@@ -230,6 +237,7 @@ impl Gerdr {
             Overlay::Worktrees => self.worktrees.is_open(),
             Overlay::Repos => self.repos.is_open(),
             Overlay::Inbox => self.inbox.is_open(),
+            Overlay::AiStats => self.chrome.ai_stats.is_some(),
             Overlay::Scrollback => self.scrollback.is_some(),
             Overlay::Switcher => self.switcher.is_some(),
         }
@@ -308,6 +316,7 @@ impl Gerdr {
             Overlay::Worktrees => return self.worktrees_hover(pos),
             Overlay::Repos => return self.repos_hover(pos),
             Overlay::Inbox => return self.inbox_hover(pos),
+            Overlay::AiStats => return self.ai_stats_hover(pos),
             Overlay::Scrollback => return self.scrollback_hover(pos),
             Overlay::Switcher => return self.switcher_motion(pos),
             Overlay::Tooltip | Overlay::Toasts | Overlay::Help => {}
@@ -345,6 +354,7 @@ impl Gerdr {
             Overlay::Worktrees => self.worktrees_scroll(motion),
             Overlay::Repos => self.repos_scroll(motion),
             Overlay::Inbox => self.inbox_scroll(motion),
+            Overlay::AiStats => self.ai_stats_scroll(motion),
             Overlay::Scrollback => self.scrollback_scroll(motion),
             Overlay::Switcher => self.switcher_scroll(motion),
             Overlay::NewFeature => {
@@ -437,6 +447,7 @@ mod tests {
             assert!(panel.toggled_by().is_some(), "{panel:?}");
         }
         assert_eq!(Overlay::Repos.toggled_by(), Some(Action::Repos));
+        assert_eq!(Overlay::AiStats.toggled_by(), Some(Action::AiStats));
         assert_eq!(Overlay::Quit.toggled_by(), None);
     }
 }

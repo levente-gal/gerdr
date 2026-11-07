@@ -160,6 +160,8 @@ enum Intercepted {
     Inbox(inbox::Outcome),
     /// The scrollback viewer asked for this.
     Scrollback(scrollback::Outcome),
+    /// The stats panel on the AI work asked for this.
+    AiStats(crate::stats_panel::Outcome),
     /// The switcher's key, pressed after the prefix over it, closes it.
     CloseSwitcher,
     /// The tasks panel asked for this.
@@ -187,6 +189,8 @@ pub enum Overlay {
     Worktrees,
     Repos,
     Inbox,
+    /// The stats panel on the AI work, with its search.
+    AiStats,
     /// The scrollback viewer, whose search has a field.
     Scrollback,
     /// The switcher of this serial: not one opened after it.
@@ -229,6 +233,7 @@ fn over_panel(action: &Action) -> bool {
             | Action::Shortcuts
             | Action::Projects
             | Action::Inbox
+            | Action::AiStats
             | Action::Tasks
             | Action::Features
             | Action::Repos
@@ -254,6 +259,7 @@ fn opens_panel(action: &Action) -> bool {
         action,
         Action::Projects
             | Action::Inbox
+            | Action::AiStats
             | Action::Repos
             | Action::Worktrees
             | Action::Switcher
@@ -270,6 +276,7 @@ fn closing(over: overlay::Overlay) -> Option<Intercepted> {
         O::Worktrees => Intercepted::Worktrees(worktrees::Outcome::Close),
         O::Repos => Intercepted::Repos(repos::Outcome::Close),
         O::Inbox => Intercepted::Inbox(inbox::Outcome::Close),
+        O::AiStats => Intercepted::AiStats(crate::stats_panel::Outcome::Close),
         O::Scrollback => Intercepted::Scrollback(scrollback::Outcome::Close),
         O::Switcher => Intercepted::CloseSwitcher,
         O::Tasks => Intercepted::Tasks(crate::tasks::Outcome::Close),
@@ -846,6 +853,7 @@ impl Gerdr {
             O::Worktrees => self.worktrees_click(pos),
             O::Repos | O::Doc => self.repos_click(pos),
             O::Inbox => self.inbox_click(pos),
+            O::AiStats => self.ai_stats_click(pos),
             O::Scrollback => self.scrollback_click(pos),
             O::Switcher => self.switcher_click(pos),
             O::Tooltip | O::ContextMenu => {}
@@ -916,6 +924,7 @@ impl Gerdr {
                     None | Some(chrome::InboxHit::Panel | chrome::InboxHit::Query)
                 )
             }),
+            O::AiStats => self.ai_stats_control_at(pos),
             O::Worktrees => self.worktrees_view().is_some_and(|view| {
                 let layout = chrome::worktrees_layout(&view, output);
                 layout.entries.iter().any(|(rect, _)| on(rect))
@@ -1274,6 +1283,7 @@ impl Gerdr {
             Intercepted::Repos(outcome) => self.apply_repos(outcome),
             Intercepted::Inbox(outcome) => self.apply_inbox(outcome),
             Intercepted::Scrollback(outcome) => self.apply_scrollback(outcome),
+            Intercepted::AiStats(outcome) => self.apply_ai_stats(outcome),
             Intercepted::CloseSwitcher => {
                 self.switcher = None;
                 self.refresh_pointer_focus();
@@ -1306,6 +1316,7 @@ impl Gerdr {
             O::Worktrees => Some(Overlay::Worktrees),
             O::Repos => Some(Overlay::Repos),
             O::Inbox => Some(Overlay::Inbox),
+            O::AiStats => Some(Overlay::AiStats),
             O::Scrollback => Some(Overlay::Scrollback),
             O::Switcher => self.switcher.as_ref().map(|s| Overlay::Switcher(s.serial)),
             O::Tasks => Some(Overlay::Tasks),
@@ -1351,6 +1362,9 @@ impl Gerdr {
                 .map(Intercepted::Worktrees),
             Overlay::Repos => self.repos_key(mods, sym, typed).map(Intercepted::Repos),
             Overlay::Inbox => self.inbox_key(mods, sym, typed).map(Intercepted::Inbox),
+            Overlay::AiStats => self
+                .ai_stats_key(mods, sym, typed)
+                .map(Intercepted::AiStats),
             Overlay::Scrollback => self
                 .scrollback_key(mods, sym, typed)
                 .map(Intercepted::Scrollback),
@@ -1419,6 +1433,7 @@ impl Gerdr {
                 scale,
             )),
             Overlay::Inbox => Some(chrome::inbox_field(&self.inbox_view()?, size, scale)),
+            Overlay::AiStats => chrome::stats_field(&self.ai_stats_view()?, size, scale),
             Overlay::Scrollback => chrome::scrollback_field(&self.scrollback_view()?, scale),
             Overlay::Switcher(_) => Some(chrome::switcher_field(
                 &self.switcher_view()?,
@@ -1465,6 +1480,7 @@ impl Gerdr {
             Overlay::Repos if !self.repos.is_open() => self.wd_mut()?.diff.search_field_mut(),
             Overlay::Repos => self.repos.field_mut(),
             Overlay::Inbox => self.inbox.field_mut(),
+            Overlay::AiStats => self.ai_stats_field_mut(),
             Overlay::Scrollback => self.scrollback.as_mut()?.field_mut(),
             Overlay::Switcher(_) => Some(self.switcher.as_mut()?.field_mut()),
             Overlay::Tasks => None,
