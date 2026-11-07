@@ -84,6 +84,8 @@ pub struct Row {
     pub open: bool,
     /// The user read it: opened it, or marked it.
     pub seen: bool,
+    /// The screenshots of a failure, by file name (see `manual::SHOTS_DIR`).
+    pub shots: Vec<String>,
 }
 
 impl Row {
@@ -168,6 +170,9 @@ fn rows(
                 }),
                 open: folds.is_some_and(|f| f.open.contains(&c.text)),
                 seen: folds.is_some_and(|f| f.seen.contains(&c.text)) || check.is_some(),
+                shots: check
+                    .filter(|k| k.state == Verdict::Fail)
+                    .map_or_else(Vec::new, |k| k.shots.clone()),
             }
         })
         .collect()
@@ -582,7 +587,8 @@ impl Gerdr {
     /// A key while the note of a criterion is being written; false when none
     /// is, or its page has gone (the note is kept then), and the key is the
     /// tab's. Enter saves it, as does Esc; with nothing written, Enter says
-    /// why not and Esc leaves the criterion as it was.
+    /// why not and Esc leaves the criterion as it was. Shift+Enter breaks
+    /// the line.
     pub(crate) fn criterion_note_key(
         &mut self,
         mods: &ModifiersState,
@@ -603,6 +609,12 @@ impl Gerdr {
             CardNote::Finding(id) => Some(id.clone()),
             CardNote::Criterion(_) => None,
         };
+        let enter = matches!(sym, Keysym::Return | Keysym::KP_Enter);
+        let only_shift = mods.shift && !(mods.ctrl || mods.alt || mods.logo);
+        if enter && only_shift {
+            field.newline();
+            return true;
+        }
         match sym {
             Keysym::Return | Keysym::KP_Enter if field.trim().is_empty() => match finding {
                 // Emptied, it goes; nothing there, there is nothing to do.
@@ -663,6 +675,19 @@ impl Gerdr {
         else {
             return;
         };
+        self.apply_manual_test_on(&project, &slug, outcome);
+    }
+
+    /// Whether the feature tab shows feature `slug` of `project`.
+    fn panel_on(&self, project: &str, slug: &str) -> bool {
+        (self.features.panel.as_ref()).is_some_and(|p| p.project == project && p.slug == slug)
+    }
+
+    /// Do what the criteria of feature `slug` of `project` asked, from its
+    /// page or from the criteria strip over its sandbox's app.
+    pub(crate) fn apply_manual_test_on(&mut self, project: &str, slug: &str, outcome: Outcome) {
+        let (project, slug) = (project.to_owned(), slug.to_owned());
+        let on_page = self.panel_on(&project, &slug);
         let Some(feature) = self.feature(&project, &slug) else {
             return self.show_warning("That feature is gone".into());
         };
@@ -673,10 +698,11 @@ impl Gerdr {
         let patch = reading.as_ref().map(|r| r.patch.clone());
         let reading_text =
             format!("Still reading the code of \u{201c}{title}\u{201d}; try again in a moment");
-        if let Some(i) = outcome.criterion() {
+        if let Some(i) = outcome.criterion().filter(|_| on_page) {
             self.select_criterion(i);
         }
         match outcome {
+            Outcome::Write(_) if !on_page => {}
             Outcome::Write(i) => {
                 let Some(c) = criteria.get(i) else {
                     return;
@@ -699,7 +725,9 @@ impl Gerdr {
                 }
                 let Some(patch) = patch else {
                     // The note goes back in its field, not thrown away.
-                    if let Outcome::Fail(_, note) = &outcome {
+                    if let Outcome::Fail(_, note) = &outcome
+                        && on_page
+                    {
                         self.write_criterion_note(i, note);
                     }
                     return self.show_warning(reading_text);
@@ -844,8 +872,7 @@ impl Gerdr {
 
     /// Start writing criterion `i`'s note, from `note`, on its card.
     fn write_criterion_note(&mut self, i: usize, note: &str) {
-        let mut field = TextField::default();
-        field.set(note);
+        let field = TextField::multiline(note);
         if let Some(panel) = self.features.panel.as_mut() {
             panel.note = Some((CardNote::Criterion(i), field));
             // The note has the keys, not the search.
@@ -874,6 +901,7 @@ mod tests {
             earlier: false,
             open: false,
             seen: false,
+            shots: Vec::new(),
         }
     }
 

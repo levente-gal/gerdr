@@ -212,6 +212,9 @@ pub enum Overlay {
     /// The feature tab: its key hints come this way, and what is typed into
     /// a criterion's note while one is written.
     Features,
+    /// The criteria strip over a sandbox's app, once given the keys: what is
+    /// typed into the note being written there.
+    Criteria,
 }
 
 /// Whether `action`, picked with the prefix, works over the welcome screen:
@@ -247,8 +250,9 @@ pub(crate) fn works_over(over: overlay::Overlay, action: &Action) -> bool {
         overlay::Overlay::Welcome => over_welcome(action),
         // A dialog asks first: nothing else goes on over it.
         o if o.is_dialog() => false,
-        // The feature panel and a file's tab are tabs: every key works there.
-        overlay::Overlay::Features | overlay::Overlay::Doc => true,
+        // The feature panel and a file's tab are tabs: every key works there,
+        // as over the app the criteria strip is on.
+        overlay::Overlay::Features | overlay::Overlay::Doc | overlay::Overlay::Criteria => true,
         _ => over_panel(action),
     }
 }
@@ -685,6 +689,9 @@ impl Gerdr {
             self.overlay_press(hit, location, button);
             return true;
         }
+        // A press on the app or gerdr's chrome takes the keys from the
+        // criteria strip: they go where the press went.
+        self.drop_criteria_keys();
         // The mouse's back and forward buttons over gerdr's own parts go
         // back and forward through the tabs shown; a window under the
         // pointer (a browser, Zed) gets them itself.
@@ -831,6 +838,7 @@ impl Gerdr {
             O::ProjectCommands => self.commands_click(pos),
             O::PlanSheet => self.plan_sheet_click(pos),
             O::Features => self.feature_panel_click(pos),
+            O::Criteria => self.criteria_strip_click(pos),
             // A click on a toast dismisses it, on its button does what the
             // button says.
             O::Toasts => {
@@ -859,7 +867,7 @@ impl Gerdr {
             O::Tooltip | O::ContextMenu => {}
         }
         // A click on a field focuses it, and puts the caret there.
-        let takes_field = overlay == O::Features
+        let takes_field = matches!(overlay, O::Features | O::Criteria)
             || overlay.grabs()
                 && (!overlay.is_dialog()
                     || matches!(
@@ -897,6 +905,10 @@ impl Gerdr {
             O::ProjectCommands => self.commands_controls().iter().any(on),
             O::PlanSheet => self.plan_sheet_controls().iter().any(on),
             O::Features => self.feature_tab_control_at(pos),
+            O::Criteria => !matches!(
+                self.criteria_strip_hit(pos),
+                None | Some(chrome::StripHit::Panel)
+            ),
             O::ContextMenu => self
                 .context_menu
                 .as_ref()
@@ -1158,6 +1170,9 @@ impl Gerdr {
         {
             review.wd.hover = None;
         }
+        if at != Some(overlay::Overlay::Criteria) {
+            self.criteria_strip.hover = None;
+        }
         // The keys of the help panel light up under the pointer.
         self.help_hover = if at == Some(overlay::Overlay::Help) {
             self.help_hit(pos)
@@ -1204,7 +1219,9 @@ impl Gerdr {
         let under = self.pointer_client(pos);
         // Over gerdr's chrome or a divider: gerdr's cursor shape, not a client's.
         if under.is_none() {
-            let over_field = at.is_some_and(|o| o.grabs() || o == overlay::Overlay::Features)
+            let over_field = at.is_some_and(|o| {
+                o.grabs() || matches!(o, overlay::Overlay::Features | overlay::Overlay::Criteria)
+            })
                 && self
                     .field_spot()
                     .is_some_and(|field| field.area.to_f64().contains(pos))
@@ -1305,8 +1322,10 @@ impl Gerdr {
         use crate::overlay::Overlay as O;
         // The feature panel's tab or a file's tab, with nothing over it.
         let Some(top) = self.grabbing_overlay() else {
-            if self.key_overlay() == Some(O::Doc) {
-                return Some(Overlay::Repos);
+            match self.key_overlay() {
+                Some(O::Doc) => return Some(Overlay::Repos),
+                Some(O::Criteria) => return Some(Overlay::Criteria),
+                _ => {}
             }
             return self.is_open(O::Features).then_some(Overlay::Features);
         };
@@ -1393,6 +1412,10 @@ impl Gerdr {
             Overlay::PlanSheet => self
                 .plan_sheet_key(mods, sym, typed)
                 .map(Intercepted::PlanSheet),
+            Overlay::Criteria => {
+                self.criteria_strip_key(mods, sym, typed);
+                None
+            }
         }
     }
 
@@ -1452,6 +1475,9 @@ impl Gerdr {
                 }
                 chrome::feature_tab_field(&self.feature_tab_view()?, self.content_rect(), scale)
             }
+            Overlay::Criteria => {
+                chrome::criteria_strip_field(&self.criteria_strip_view()?, scale)
+            }
             Overlay::NewFeature => Some(chrome::new_feature_field(
                 &self.new_feature_view()?,
                 size,
@@ -1472,7 +1498,18 @@ impl Gerdr {
             let (size, scale) = (self.output_size(), self.scale());
             return chrome::commands_field_at(&self.commands_view()?, size, scale, pos, held);
         }
-        Some((self.field_spot()?, 0))
+        let spot = self.field_spot()?;
+        // A card's note holds lines.
+        if self.text_overlay() == Some(Overlay::Features) {
+            return Some(chrome::field_line_spot(
+                spot.area,
+                spot.area,
+                &spot.line,
+                pos,
+                self.scale(),
+            ));
+        }
+        Some((spot, 0))
     }
 
     /// The text field with the keyboard, in the overlay that has it.
@@ -1498,6 +1535,7 @@ impl Gerdr {
                         .map(|s| &mut s.query),
                 }
             }
+            Overlay::Criteria => self.criteria_field_mut(),
             Overlay::NewFeature => Some(self.features.dialog.as_mut()?.field_mut()),
             Overlay::FindingDialog => self.finding_dialog_field_mut(),
             Overlay::Identity => self.identity_field_mut(),

@@ -346,6 +346,8 @@ pub(crate) enum Done {
         /// Where they were looked for: none, here.
         machine: Option<String>,
         stacks: Vec<crate::feature_sandbox::LeftStack>,
+        /// Containers a copy cut short left paused that wouldn't unpause.
+        still_paused: Vec<String>,
     },
     /// Removing those ended.
     SandboxLeftoversRemoved {
@@ -2647,7 +2649,7 @@ fn fold_toolbar(actions: &[(PageButton, PanelOutcome)]) -> PageSection {
 
 /// Whether `stage`'s page of `feature` is where its criteria are tried:
 /// Manual test's, while the feature is at it.
-fn tries_criteria(feature: &Feature, stage: Stage) -> bool {
+pub(crate) fn tries_criteria(feature: &Feature, stage: Stage) -> bool {
     stage == Stage::ManualTest
         && feature.status == Status::Open
         && stage_mark(feature, stage) == StageMark::Current
@@ -2663,7 +2665,7 @@ pub(crate) fn shows_criteria(feature: &Feature, stage: Stage) -> bool {
 /// that order, the one it stands at filled. Pressing that one again takes
 /// it back; Fail on one not failed asks what went wrong. A failed one can
 /// have its note edited too.
-fn criterion_buttons(i: usize, row: &Row) -> Vec<(PageButton, PanelOutcome)> {
+pub(crate) fn criterion_buttons(i: usize, row: &Row) -> Vec<(PageButton, PanelOutcome)> {
     use crate::manual_test::Outcome;
     let button = |label: &str, style, outcome| {
         let button = PageButton {
@@ -2707,13 +2709,27 @@ fn criterion_steps(row: &Row) -> Vec<(&'static str, String)> {
     }
 }
 
-/// What the card of criterion `row` says under its steps: whether it was
+/// What the row of criterion `row` says under its steps: whether it was
 /// tried on other code than the feature's now.
-fn criterion_details(row: &Row) -> String {
+fn criterion_earlier(row: &Row) -> String {
     match row.earlier && row.found.is_some() && !row.made {
         true => "Tried before the latest fixes".to_owned(),
         false => String::new(),
     }
+}
+
+/// What criterion `row` checks, step by step, as the criteria strip shows
+/// it: a line each for its Given, When and Then, or its text as the brief
+/// has it when it doesn't split.
+pub(crate) fn criterion_details(row: &Row) -> String {
+    let mut text = match crate::feature::manual::split_gwt(&row.text) {
+        Some([given, when, then]) => format!("Given {given}\nWhen {when}\nThen {then}"),
+        None => row.text.clone(),
+    };
+    if row.earlier && row.found.is_some() && !row.made {
+        text.push_str("\n\nTried before the latest fixes");
+    }
+    text
 }
 
 /// Criterion `i`'s card on Manual test's page, its buttons those in
@@ -2740,7 +2756,7 @@ fn criterion_card(
         title: row.title.clone(),
         state: state.to_owned(),
         place: row.id.clone(),
-        body: criterion_details(row),
+        body: criterion_earlier(row),
         sheet: Some(Box::new(chrome::SheetRow {
             open: row.open,
             steps: criterion_steps(row),
@@ -2749,9 +2765,11 @@ fn criterion_card(
         })),
         preview: Vec::new(),
         fix: String::new(),
-        note: match row.note.is_empty() {
-            true => String::new(),
-            false => format!("What went wrong: {}", row.note),
+        note: match (row.note.is_empty(), row.shots.len()) {
+            (true, _) => String::new(),
+            (false, 0) => format!("What went wrong: {}", row.note),
+            (false, 1) => format!("What went wrong: {} (1 screenshot)", row.note),
+            (false, n) => format!("What went wrong: {} ({n} screenshots)", row.note),
         },
         comment: String::new(),
         comment_buttons: Vec::new(),
@@ -5727,7 +5745,14 @@ impl Gerdr {
                 name,
                 result,
             } => self.sandbox_left_gone(&file, &title, &name, result),
-            Done::SandboxLeftovers { machine, stacks } => self.sandbox_leftovers(machine, stacks),
+            Done::SandboxLeftovers {
+                machine,
+                stacks,
+                still_paused,
+            } => {
+                self.sandbox_still_paused(machine.is_none(), still_paused);
+                self.sandbox_leftovers(machine, stacks);
+            }
             Done::SandboxLeftoversRemoved { removed, problems } => {
                 self.sandbox_leftovers_removed(removed, problems);
             }
@@ -12236,6 +12261,7 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 6] = [
             ("Esc", "clear the search, then close it"),
             ("Space / Enter", "mark it passed, or not; passed, it folds"),
             ("f", "mark it failed, saying what went wrong, or edit that"),
+            ("Shift+Enter", "writing what went wrong: start a new line"),
             ("Del", "clear its result"),
             ("Ctrl+Enter", "mark Manual test passed"),
             ("Ctrl+Shift+Enter", "plan the fixes of the failures"),
@@ -12252,6 +12278,7 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 6] = [
                 "c",
                 "write or edit your comment on it; off the cards, add a comment of your own",
             ),
+            ("Shift+Enter", "writing your comment: start a new line"),
             ("Shift+Del", "delete your comment on it"),
             ("Ctrl+E", "edit its fix, or a comment of your own"),
             (
@@ -12443,7 +12470,11 @@ fn writers_tab_hints(
             (CardNote::Finding(_), true) => "delete",
             _ => "save",
         };
-        return vec![hint("Enter", enter), hint("Esc", esc)];
+        return vec![
+            hint("Enter", enter),
+            hint("Shift+Enter", "new line"),
+            hint("Esc", esc),
+        ];
     }
     let searching = (panel.search.as_ref()).filter(|s| s.typing && shows_criteria(feature, stage));
     if let Some(search) = searching {
@@ -18127,6 +18158,7 @@ pub(crate) mod tests {
             earlier: false,
             open,
             seen: false,
+            shots: Vec::new(),
         };
         let rows = vec![
             row("AC-1", "Saves", "Given a draft, when I save, then it lists", None, true),
@@ -18297,6 +18329,7 @@ pub(crate) mod tests {
             sent: false,
             made: false,
             earlier: false,
+            shots: Vec::new(),
         };
         let rows = vec![
             row(None, ""),
@@ -18423,6 +18456,7 @@ pub(crate) mod tests {
             hints,
             [
                 ("Enter".to_owned(), "save".to_owned()),
+                ("Shift+Enter".to_owned(), "new line".to_owned()),
                 ("Esc".to_owned(), "cancel".to_owned())
             ]
         );
@@ -18444,6 +18478,7 @@ pub(crate) mod tests {
             sent,
             made,
             earlier: true,
+            shots: Vec::new(),
         };
         let rows = vec![
             row(Some(Verdict::Fail), true, true),
@@ -18574,6 +18609,7 @@ pub(crate) mod tests {
             sent: false,
             made: false,
             earlier: false,
+            shots: Vec::new(),
         };
         let rows = vec![row(Some(Verdict::Pass)), row(Some(Verdict::Pass))];
         let ctx = RowCtx {

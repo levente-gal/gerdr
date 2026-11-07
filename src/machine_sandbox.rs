@@ -1238,6 +1238,7 @@ impl Gerdr {
             }
             return;
         }
+        self.sandbox_shown(project, slug);
         self.open_feature_page(project, slug, url);
     }
 

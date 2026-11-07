@@ -712,8 +712,7 @@ impl Gerdr {
         if let Err(why) = review_import::note_editable(&f.id, f.state) {
             return self.show_warning(why);
         }
-        let mut field = TextField::default();
-        field.set(&f.note);
+        let field = TextField::multiline(&f.note);
         let Some(panel) = self.features.panel.as_mut() else {
             return;
         };

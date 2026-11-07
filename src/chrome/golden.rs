@@ -6418,3 +6418,151 @@ fn dump_stats() {
         }
     }
 }
+
+/// The pane the criteria strip floats over.
+const STRIP_PANE: (i32, i32) = (1000, 640);
+
+/// The criteria strip over a sandbox's app: its row, its steps shown with
+/// the pointer on Pass, a note being written with a screenshot and the
+/// keys, a failure sent to Build with its note, and folded to its chip.
+fn strip_views() -> [super::CriteriaStripView; 5] {
+    use super::{ButtonStyle, CriteriaStripView, StripHit, StripTag};
+    let plain = |label: &str| (label.to_owned(), ButtonStyle::Plain);
+    let row = CriteriaStripView {
+        pane: Rect::new((0, 0).into(), STRIP_PANE.into()),
+        folded: false,
+        open: false,
+        place: "AC-3 \u{b7} 3/7".into(),
+        title: "Rows save on edit".into(),
+        tag: StripTag::NotRun,
+        state: String::new(),
+        steps: vec![
+            "Given two rows in the table".into(),
+            "When I edit both and press Save".into(),
+            "Then both rows show the new values after a reload".into(),
+        ],
+        note: String::new(),
+        field: None,
+        shots: String::new(),
+        buttons: vec![plain("Pass"), plain("Fail\u{2026}")],
+        steps_through: true,
+        hover: None,
+        keys: false,
+    };
+    let open = CriteriaStripView {
+        open: true,
+        hover: Some(StripHit::Button(0)),
+        ..row.clone()
+    };
+    let mut note = Line::default();
+    note.text = "the second row reverts after a reload".into();
+    note.caret = note.text.len();
+    note.anchor = note.caret;
+    let writing = CriteriaStripView {
+        open: true,
+        field: Some(note),
+        shots: "1 screenshot".into(),
+        keys: true,
+        ..row.clone()
+    };
+    let failed = CriteriaStripView {
+        open: true,
+        tag: StripTag::Failed,
+        state: "sent to Build".into(),
+        note: "the second row reverts after a reload".into(),
+        buttons: vec![
+            ("Edit note\u{2026}".into(), ButtonStyle::Quiet),
+            plain("Pass"),
+            ("Fail".into(), ButtonStyle::Failed),
+        ],
+        ..row.clone()
+    };
+    let chip = CriteriaStripView {
+        folded: true,
+        tag: StripTag::Passed,
+        ..row.clone()
+    };
+    [row, open, writing, failed, chip]
+}
+
+const STRIP: [&str; 5] = [
+    "strip_row",
+    "strip_open",
+    "strip_note",
+    "strip_failed",
+    "strip_chip",
+];
+
+fn paint_strip(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
+    let p = theme.palette();
+    (strip_views().iter())
+        .map(|view| hash(painter.criteria_strip(view, scale, p)))
+        .collect()
+}
+
+/// The recorded hashes of `STRIP`, per case in `CASES`.
+const GOLDEN_STRIP: [[u64; 5]; 4] = [
+    // Dark at 1
+    [
+        0x9b9e1214c2a413a5, // strip_row
+        0x499a852fd941bec8, // strip_open
+        0xf55cfa59cc50a01e, // strip_note
+        0x7b874b70e3adcacd, // strip_failed
+        0xe134649e78702bbf, // strip_chip
+    ],
+    // Dark at 2
+    [
+        0x4ad958f67e705f77, // strip_row
+        0xef8be6f34fac8adf, // strip_open
+        0x4ca742e7664fdf25, // strip_note
+        0x02c2e5894b0ffbda, // strip_failed
+        0xb63f093b83828479, // strip_chip
+    ],
+    // Light at 1
+    [
+        0xeec613f4ff5d62dc, // strip_row
+        0xd0f92667606918cf, // strip_open
+        0x0765d00a20ba94ad, // strip_note
+        0xf558997476215cce, // strip_failed
+        0x60faa77000796bed, // strip_chip
+    ],
+    // Light at 2
+    [
+        0xa66aa28d6e9e00ed, // strip_row
+        0xe0d2238f9a5d3a72, // strip_open
+        0x850a45e49126971d, // strip_note
+        0xbbb523f9b9455746, // strip_failed
+        0x45481f7462f5972c, // strip_chip
+    ],
+];
+
+#[test]
+fn criteria_strip_paints_the_same_pixels() {
+    let golden: Vec<&[u64]> = GOLDEN_STRIP.iter().map(|row| row.as_slice()).collect();
+    check(&STRIP, &golden, paint_strip);
+}
+
+/// With `GERDR_DUMP_DIR` set, write the criteria strip's looks there.
+#[test]
+fn dump_criteria_strip() {
+    let Some(dir) = std::env::var_os("GERDR_DUMP_DIR") else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    let _ = std::fs::create_dir_all(&dir);
+    let painter = Painter::new();
+    for (theme, scale) in CASES {
+        let p = theme.palette();
+        let px = |v: i32| (v as f64 * scale).round() as usize;
+        let tag = format!("{}_{}", theme.name(), scale);
+        for (name, view) in STRIP.iter().zip(strip_views()) {
+            let panel = super::criteria_strip_layout(&view).panel;
+            dump(
+                &dir,
+                &format!("{name}_{tag}"),
+                painter.criteria_strip(&view, scale, p),
+                px(panel.size.w + 2 * super::SHADOW),
+            );
+        }
+    }
+}

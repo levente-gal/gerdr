@@ -5,10 +5,11 @@
 //! the buttons stay.
 
 use super::{
-    ButtonStyle, Canvas, DIALOG_WIDTH, FONT_SIZE, FieldSpot, LABEL_FONT_SIZE, POPUP_RADIUS,
-    Painter, Palette, QUIT_BODY, QUIT_BUTTON, QUIT_BUTTON_GAP, QUIT_LINE_GAP, QUIT_PADDING,
-    QUIT_TITLE, Rect, Rgb, SHADOW, SMALL_FONT_SIZE, Thumb, band, button_width, dialog_buttons,
-    field_text, gutter_track, phys, rect_px,
+    ButtonStyle, Canvas, DIALOG_WIDTH, FIELD_LINE, FONT_SIZE, FieldSpot, LABEL_FONT_SIZE,
+    POPUP_RADIUS, Painter, Palette, QUIT_BODY, QUIT_BUTTON, QUIT_BUTTON_GAP, QUIT_LINE_GAP,
+    QUIT_PADDING, QUIT_TITLE, Rect, Rgb, SHADOW, SMALL_FONT_SIZE, Thumb, band, button_width,
+    dialog_buttons, field_line_spot, field_lines_height, field_text, gutter_track, phys, rect_px,
+    sub_lines,
 };
 use crate::text_field::Line;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
@@ -42,7 +43,7 @@ const TAB_W: i32 = 80;
 /// The room between the tabs' outline and its segments.
 const TRACK_PAD: i32 = 2;
 /// How much higher a field gets for each line past its first.
-const LINE_H: i32 = 20;
+const LINE_H: i32 = FIELD_LINE;
 /// How high the row over a field is, holding its name and suggestion.
 const ROW_LABEL: i32 = 26;
 /// How high a borrowed check's line is, holding its button.
@@ -201,11 +202,6 @@ pub struct CommandsLayout {
     pub buttons: [Rect; 2],
 }
 
-/// How high a field of `lines` lines is.
-fn field_height(lines: usize) -> i32 {
-    QUIT_BUTTON + (lines.max(1) as i32 - 1) * LINE_H
-}
-
 /// How many lines `text` shows on.
 fn lines_of(text: &str) -> usize {
     text.split('\n').count()
@@ -221,7 +217,7 @@ fn list_height(view: &CommandsView) -> i32 {
                 0
             };
             let borrowed = row.borrowed.len() as i32 * BORROWED_H;
-            heading + ROW_LABEL + borrowed + field_height(lines_of(&row.line)) + QUIT_LINE_GAP
+            heading + ROW_LABEL + borrowed + field_lines_height(lines_of(&row.line)) + QUIT_LINE_GAP
         })
         .sum();
     let limit = if view.limit.is_some() {
@@ -317,7 +313,7 @@ pub fn commands_layout(view: &CommandsView, size: Size<i32, Logical>) -> Command
                     rect
                 })
                 .collect();
-            let h = field_height(lines_of(&row.line));
+            let h = field_lines_height(lines_of(&row.line));
             let field = Rectangle::new((x, at).into(), (inner, h).into());
             at += h + QUIT_LINE_GAP;
             CommandsRowLayout {
@@ -452,45 +448,6 @@ fn clip(rect: Rect, within: Rect) -> Option<Rect> {
     rect.intersection(within)
 }
 
-/// A line of a field of several: its text, with the caret and selection of
-/// the whole as far as they are in it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct SubLine {
-    line: Line,
-    /// The byte of the whole where it starts.
-    start: usize,
-    has_caret: bool,
-}
-
-/// The lines of `whole`.
-fn sub_lines(whole: &Line) -> Vec<SubLine> {
-    let mut start = 0;
-    let mut lines = Vec::new();
-    for text in whole.text.split('\n') {
-        let end = start + text.len();
-        let inside = |at: usize| at.clamp(start, end) - start;
-        lines.push(SubLine {
-            line: Line {
-                text: text.to_owned(),
-                caret: inside(whole.caret),
-                anchor: inside(whole.anchor),
-            },
-            start,
-            has_caret: (start..=end).contains(&whole.caret),
-        });
-        start = end + 1;
-    }
-    lines
-}
-
-/// The band of `field`'s line `i`.
-fn line_rect(field: Rect, i: usize) -> Rect {
-    Rectangle::new(
-        (field.loc.x, field.loc.y + i as i32 * LINE_H).into(),
-        (field.size.w, QUIT_BUTTON).into(),
-    )
-}
-
 /// The dialog's field and line at `pos`, and the byte its text starts at,
 /// for the pointer: only the field with the keyboard is there. Above or
 /// below its lines, the nearest. None past the field while `pos` isn't on
@@ -512,16 +469,7 @@ pub fn commands_field_at(
     if !held && !shown.to_f64().contains(pos) {
         return None;
     }
-    let lines = sub_lines(line);
-    let at = ((pos.y - area.loc.y as f64) / LINE_H as f64).floor();
-    let sub = &lines[(at.max(0.0) as usize).min(lines.len() - 1)];
-    let spot = FieldSpot {
-        area: shown,
-        text: field_text(area, scale),
-        size: FONT_SIZE,
-        line: sub.line.clone(),
-    };
-    Some((spot, sub.start))
+    Some(field_line_spot(area, shown, line, pos, scale))
 }
 
 /// The dialog's field with the keyboard, as the pointer's shape cares.
@@ -545,60 +493,6 @@ pub fn commands_field(
 }
 
 impl Painter {
-    /// A field of lines in `rect`: each as one line of a field is, the
-    /// caret and selection where they are when `focused`, and `placeholder`
-    /// while it is empty.
-    #[allow(clippy::too_many_arguments)]
-    fn command_lines(
-        &self,
-        c: &mut Canvas,
-        whole: &Line,
-        placeholder: &str,
-        rect: Rect,
-        focused: bool,
-        scale: f64,
-        p: &Palette,
-    ) {
-        let px = |v: i32| (v as f64 * scale).round() as i32;
-        let s = scale as f32;
-        let (x, y, w, h) = rect_px(rect, scale);
-        let (b, r) = (px(1).max(1) as f32, super::BUTTON_RADIUS * s);
-        c.rounded(x, y, w, h, r, p.border);
-        c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, r - b, p.element);
-        let text = field_text(rect, scale);
-        for (i, sub) in sub_lines(whole).iter().enumerate() {
-            let line_band = band(line_rect(rect, i), scale);
-            let selection = sub.line.selection();
-            if focused && !sub.has_caret && !selection.is_empty() {
-                // The caret's line paints its own selection, with the
-                // caret; the rest of it goes over these.
-                let width = |t: &str| self.text_width(t, FONT_SIZE, scale);
-                let from = text.0 + width(&sub.line[..selection.start]);
-                let to = (text.0 + width(&sub.line[..selection.end])).min(text.1);
-                let inset = px(3) as f32;
-                c.rounded(
-                    from - s,
-                    line_band.0 as f32 + inset,
-                    to - from + 2.0 * s,
-                    line_band.1 as f32 - 2.0 * inset,
-                    2.0 * s,
-                    p.selected,
-                );
-            }
-            self.edit_line(
-                c,
-                &sub.line,
-                if i == 0 { placeholder } else { "" },
-                text,
-                line_band,
-                focused && sub.has_caret,
-                FONT_SIZE,
-                scale,
-                p,
-            );
-        }
-    }
-
     /// The project commands dialog for an output of `size`, inside a
     /// margin of `SHADOW` holding its drop shadow.
     pub(super) fn commands_dialog(
@@ -676,7 +570,7 @@ impl Painter {
                     CommandsTab::Prepare => "Nothing runs first",
                     CommandsTab::Feature => "Nothing added",
                 };
-                self.command_lines(
+                self.field_of_lines(
                     c,
                     &row.line,
                     placeholder,

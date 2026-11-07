@@ -23,6 +23,7 @@ mod cli_agents;
 mod clipboard;
 mod config;
 mod confirm;
+mod criteria_strip;
 mod cursor_agents;
 mod desktop;
 mod diff;
@@ -1351,6 +1352,9 @@ pub enum Action {
     Scrollback,
     /// Open the stats panel on the features' AI work, or close it again.
     AiStats,
+    /// Give the keys to the criteria strip over the sandbox's app shown,
+    /// unfolded, or back to the app (see `criteria_strip`).
+    Criteria,
     /// Read the project files again, after one was edited by hand.
     ReloadProjects,
     /// Ask whether to keep the project running, and quit.
@@ -1552,6 +1556,8 @@ pub struct Gerdr {
     pub inbox: inbox::Inbox,
     /// The scrollback viewer, while it is open over a terminal pane.
     pub scrollback: Option<scrollback::Scrollback>,
+    /// The criteria strip over a sandbox's app, and what it holds.
+    pub criteria_strip: criteria_strip::CriteriaStrip,
     /// gerdr's connection to the host's notification daemon; `None` without
     /// a session bus.
     pub notifier: Option<notify::Notifier>,
@@ -4568,6 +4574,7 @@ impl Gerdr {
             Action::Scrollback if self.is_open(Overlay::Scrollback) => self.close_scrollback(),
             Action::Scrollback => self.open_focused_scrollback(),
             Action::AiStats => self.toggle_ai_stats(),
+            Action::Criteria => self.toggle_criteria_keys(),
             // Nothing to keep running without a project.
             Action::Quit if self.project.is_none() => self.quit_app(projects::Stops::default()),
             Action::Quit => self.open_quit(),
@@ -6785,6 +6792,7 @@ impl Gerdr {
             inbox,
             scrollback: self.scrollback_view(),
             stats: self.ai_stats_view(),
+            criteria_strip: self.criteria_strip_view(),
             toasts: self.toast_views(),
             // A file's tab is flat: its page has no bar (see `doc_tab`).
             pane_bars: match flat {
@@ -6902,6 +6910,17 @@ fn extend_path() {
     }
 }
 
+/// Drops what lets a process speak to systemd for the unit gerdr runs in.
+/// Under a session unit like `sway.service`, which takes word from any of its
+/// processes, `podman run` sends its conmon as the unit's main process: when
+/// that container ends, systemd stops the unit and the user is logged out.
+fn leave_service_manager() {
+    for var in ["NOTIFY_SOCKET", "WATCHDOG_PID", "WATCHDOG_USEC"] {
+        // SAFETY: called at the start of `main`, before any other thread.
+        unsafe { std::env::remove_var(var) };
+    }
+}
+
 /// Log to stderr (warnings, or as `RUST_LOG` says) and to `log_path`
 /// (gerdr's own news from info up, everything's warnings): started from a
 /// desktop entry, stderr goes nowhere.
@@ -6993,6 +7012,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (store, loaded) = projects::Store::load();
 
     extend_path();
+    leave_service_manager();
     // The portal can be slow to answer: asked now, alongside the setup.
     let system_theme = system_theme::read();
 
@@ -7234,6 +7254,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         repos_rows_drag: false,
         doc_tab_shown: None,
         scrollback: None,
+        criteria_strip: Default::default(),
         thumb_drag: None,
         stopping: HashSet::new(),
         forget_after_stop: HashSet::new(),

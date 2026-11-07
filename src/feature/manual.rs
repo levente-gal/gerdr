@@ -227,7 +227,15 @@ pub struct Check {
     /// try again.
     #[serde(default, skip_serializing_if = "is_false")]
     pub made: bool,
+    /// The screenshots taken of a failure, by file name in the feature's
+    /// data folder's `SHOTS_DIR`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shots: Vec<String>,
 }
+
+/// The folder of a feature's data folder holding the screenshots of its
+/// manual test's failures.
+pub const SHOTS_DIR: &str = "manual";
 
 impl Check {
     /// Whether this sent failure's fix is made, and it waits to be tried
@@ -328,6 +336,12 @@ pub fn set(
         .iter()
         .find(|k| k.id == c.id && k.text == c.text)
         .is_some_and(|k| k.sent && !k.made && k.state == state && k.note == note);
+    // A failure's note edited keeps the screenshots of what went wrong.
+    let shots = (t.checks.iter())
+        .find(|k| k.id == c.id && k.text == c.text && k.state == Verdict::Fail)
+        .filter(|_| state == Verdict::Fail)
+        .map(|k| k.shots.clone())
+        .unwrap_or_default();
     t.checks.retain(|k| k.id != c.id);
     t.checks.push(Check {
         id: c.id.clone(),
@@ -338,7 +352,33 @@ pub fn set(
         sent,
         patch: patch.to_string(),
         made: false,
+        shots,
     });
+}
+
+/// Add screenshots `names` to the failure of criterion `c`; false when it
+/// has none.
+pub fn add_shots(test: &mut Option<ManualTest>, c: &Criterion, names: &[String]) -> bool {
+    let Some(k) = (test.iter_mut().flat_map(|t| &mut t.checks))
+        .find(|k| k.id == c.id && k.text == c.text && k.state == Verdict::Fail)
+    else {
+        return false;
+    };
+    for name in names {
+        if !k.shots.contains(name) {
+            k.shots.push(name.clone());
+        }
+    }
+    true
+}
+
+/// The name of the next screenshot of criterion `id`, in a folder holding
+/// `taken`: `AC-3-1.png`, then `AC-3-2.png`.
+pub fn shot_name(id: &str, taken: &[String]) -> String {
+    (1..)
+        .map(|n| format!("{id}-{n}.png"))
+        .find(|name| !taken.contains(name))
+        .unwrap_or_default()
 }
 
 /// Forget the result of criterion `id`; true when there was one.
@@ -384,6 +424,12 @@ pub fn failures_markdown(
     for (c, k) in &fails {
         md.push_str(&format!("\n## {}: {}\n\n{}\n\n", c.id, c.title, c.text));
         md.push_str(&format!("What went wrong: {}\n", k.note));
+        for shot in &k.shots {
+            md.push_str(&format!(
+                "\nScreenshot: {}/{SHOTS_DIR}/{shot}\n",
+                super::layout::DOCS_LINK
+            ));
+        }
     }
     (fails.len(), md)
 }
@@ -594,6 +640,27 @@ mod tests {
         set(&mut t, &a, "p2", Verdict::Fail, "it crashes", 4);
         assert_eq!(unsent_count(t.as_ref(), &all), 1);
         assert!(!check(t.as_ref(), &a).unwrap().fix_made());
+    }
+
+    #[test]
+    fn a_failures_screenshots_stay_with_it_and_go_to_build() {
+        let a = crit(1, "Given a, when b, then c.");
+        let all = vec![a.clone()];
+        let mut t = None;
+        // Nothing failed: nothing to put them on.
+        assert!(!add_shots(&mut t, &a, &["AC-1-1.png".into()]));
+        set(&mut t, &a, "p", Verdict::Fail, "nothing happens", 1);
+        assert!(add_shots(&mut t, &a, &["AC-1-1.png".into(), "AC-1-1.png".into()]));
+        assert_eq!(check(t.as_ref(), &a).unwrap().shots, ["AC-1-1.png"]);
+        // Its note edited, they stay; passed, they go with the failure.
+        set(&mut t, &a, "p", Verdict::Fail, "it crashes", 2);
+        assert_eq!(check(t.as_ref(), &a).unwrap().shots, ["AC-1-1.png"]);
+        let (_, md) = failures_markdown(t.as_ref(), &all, "Bulk");
+        assert!(md.contains("Screenshot: feature-docs/manual/AC-1-1.png"), "{md}");
+        set(&mut t, &a, "p", Verdict::Pass, "", 3);
+        assert!(check(t.as_ref(), &a).unwrap().shots.is_empty());
+        assert_eq!(shot_name("AC-1", &[]), "AC-1-1.png");
+        assert_eq!(shot_name("AC-1", &["AC-1-1.png".into()]), "AC-1-2.png");
     }
 
     #[test]
