@@ -919,6 +919,25 @@ impl Feature {
             .collect()
     }
 
+    /// `agent_dirs` for the agent `base` starts. Cursor's CLI also gets each
+    /// repository's worktree under a folder that holds several: it tells an
+    /// agent a root's git branch and status only for a root that is a git
+    /// repository, which such a folder isn't, and a root's own search leaves
+    /// out roots nested in it. A worktree that isn't there is left out, as the
+    /// CLI refuses to start on a root that doesn't exist (checked on
+    /// 2026.11.05).
+    pub fn agent_dirs_for(&self, base: &str, data: &Path) -> Vec<PathBuf> {
+        let mut dirs = self.agent_dirs(data);
+        if agents::Flavor::of(base) == agents::Flavor::Cursor {
+            let roots = self.repos.iter().map(|r| &r.worktree).filter(|worktree| {
+                **worktree != self.dir && !dirs.contains(*worktree) && worktree.is_dir()
+            });
+            let roots: Vec<_> = roots.cloned().collect();
+            dirs.extend(roots);
+        }
+        dirs
+    }
+
     /// Keep `repo` as context: it is no longer one taken out.
     pub fn add_context(&mut self, repo: ContextRepo) {
         let key = repo.key();
@@ -1532,6 +1551,38 @@ pub(crate) mod tests {
         assert_eq!(f.current(), None);
         f.status = Status::Abandoned;
         assert_eq!(f.invalidate("p2", 2), None);
+    }
+
+    #[test]
+    fn cursor_gets_each_repository_of_a_folder_of_several_as_a_root() {
+        let t = Temp::new();
+        let mut f = feature_over(&t, &["api", "web"], &["web"]);
+        let data = Path::new("/data");
+        let (api, web) = (f.dir.join("api"), f.dir.join("web"));
+        assert_eq!(
+            f.agent_dirs_for("cursor-agent --model x", data),
+            [data.to_path_buf(), api.clone(), web.clone()],
+            "an untouched repository too: its worktree is there to read"
+        );
+        assert_eq!(
+            f.agent_dirs_for("env A=1 cursor-agent", data),
+            [data.to_path_buf(), api.clone(), web.clone()]
+        );
+        for other in ["claude", "codex"] {
+            assert_eq!(f.agent_dirs_for(other, data), [data.to_path_buf()]);
+        }
+
+        // The CLI refuses a root that doesn't exist.
+        std::fs::remove_dir_all(&web).unwrap();
+        assert_eq!(
+            f.agent_dirs_for("cursor-agent", data),
+            [data.to_path_buf(), api.clone()]
+        );
+
+        // The folder it starts in is its first root already.
+        f.repos[0].worktree = f.dir.clone();
+        f.repos.truncate(1);
+        assert_eq!(f.agent_dirs_for("cursor-agent", data), [data.to_path_buf()]);
     }
 
     #[test]

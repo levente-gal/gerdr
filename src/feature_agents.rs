@@ -1310,7 +1310,7 @@ impl Gerdr {
         let line = command_line(
             &with_model(&run.base, model.as_deref()),
             &run.prompt,
-            &feature.agent_dirs(&store::dir(None, project, slug)),
+            &feature.agent_dirs_for(&run.base, &store::dir(None, project, slug)),
         );
         let command = match self.start_line(&feature, project, slug, stage, &run.prompt) {
             Ok(text) => with_prompt(&line, &text),
@@ -1514,7 +1514,7 @@ impl Gerdr {
         let command = resume_line(
             &feature::agents::resume_base(run),
             &session,
-            &feature.agent_dirs(&data),
+            &feature.agent_dirs_for(&run.base, &data),
         );
         let agent = run.agent.clone();
         if let Some(id) = &run.machine {
@@ -1675,7 +1675,7 @@ impl Gerdr {
             base.clone()
         } else {
             let started = with_model(&base, asked_model.as_deref());
-            let line = command_line(&started, &prompt, &feature.agent_dirs(&data));
+            let line = command_line(&started, &prompt, &feature.agent_dirs_for(&base, &data));
             if at_once {
                 match self.start_line(&feature, project, slug, stage, &prompt) {
                     Ok(text) => with_prompt(&line, &text),
