@@ -27,6 +27,7 @@ use crate::{
     Gerdr,
     agent_icons::AgentIcon,
     agents,
+    ai_work::SendKind,
     chrome::AgentChip,
     cli_agents::CliAgent,
     feature::{
@@ -44,7 +45,7 @@ use crate::{
         store, verify,
     },
     herdr::AgentStatus,
-    machine_work::{Placed, StartKind, split_pane},
+    machine_work::{Placed, StartKind},
     projects,
     projects::Workflow,
     prompts::{self, render::Vars},
@@ -1417,9 +1418,11 @@ impl Gerdr {
         let pane = (run.pane.clone()).filter(|p| self.pane_there(p));
         let sent = match &pane {
             None => Err(String::from(crate::feature_build::TAB_GONE)),
-            Some(pane) => self
+            Some(_) => self
                 .start_line(&feature, project, slug, stage, &run.prompt)
-                .and_then(|line| self.tell_agent_pane(pane, &line)),
+                .and_then(|line| {
+                    self.tell_stage_agent(project, slug, stage, SendKind::Start, &line)
+                }),
         };
         let agent = run.agent;
         if let Err(why) = sent {
@@ -2208,9 +2211,9 @@ impl Gerdr {
         absent: bool,
         missing: String,
     ) {
-        let Some(agent) = run.agent_key() else {
+        if run.agent_key().is_none() {
             return;
-        };
+        }
         let project = feature.project.clone();
         let slug = feature.slug.clone();
         let names = self.projects.names(feature);
@@ -2225,17 +2228,7 @@ impl Gerdr {
             Ok(text) => text.trim().to_owned(),
             Err(err) => return tracing::warn!("rendering the nudge: {err}"),
         };
-        let sent = match &agent {
-            agents::AgentKey::T3(id) => self.t3_send(id, &text),
-            agents::AgentKey::Herdr(pane) if split_pane(pane).is_some() => {
-                self.tell_machine_pane(pane, &text)
-            }
-            agents::AgentKey::Herdr(pane) => match self.herdr.as_mut() {
-                Some(herdr) => herdr.send_agent_line(pane, &text),
-                None => Err("herdr isn't connected".into()),
-            },
-            _ => return,
-        };
+        let sent = self.tell_stage_agent(&project, &slug, stage, SendKind::Nudge, &text);
         let now = feature::now();
         let Some(f) = self.feature_mut(&project, &slug) else {
             return;
@@ -2509,12 +2502,9 @@ impl Gerdr {
         let file =
             data.join("prompts")
                 .join(format!("{}-{}-back-{back}.md", stage_key(stage), run.n));
-        let alive = run
-            .pane
-            .as_deref()
-            .is_some_and(|p| self.pane_there(p));
+        let alive = run.pane.as_deref().is_some_and(|p| self.pane_there(p));
         let mut sent = Err(String::from(crate::feature_build::TAB_GONE));
-        if alive && let Some(pane) = run.pane.clone() {
+        if alive {
             sent = std::fs::create_dir_all(data.join("prompts"))
                 .and_then(|()| std::fs::write(&file, &comments))
                 .map_err(|e| format!("writing {}: {e}", file.display()))
@@ -2525,7 +2515,9 @@ impl Gerdr {
                     values.insert("comments.path".into(), file.display().to_string());
                     prompts::render_builtin("send-back", &values).map_err(|e| e.to_string())
                 })
-                .and_then(|line| self.tell_agent_pane(&pane, line.trim()));
+                .and_then(|line| {
+                    self.tell_stage_agent(project, slug, stage, SendKind::SendBack, line.trim())
+                });
         }
         let now = feature::now();
         let Some(f) = self.feature_mut(project, slug) else {
