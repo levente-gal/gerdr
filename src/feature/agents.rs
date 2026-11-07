@@ -13,7 +13,8 @@
 //! - `claude [--add-dir <dir>]… -- "<prompt>"`: interactive, prompt first.
 //! - `cursor-agent --trust [--add-dir <dir>]… -- "<prompt>"`: a folder it
 //!   doesn't know stops at a trust question before the prompt, and each
-//!   feature's folder is new (checked on 2026-11-04).
+//!   feature's folder is new (checked on 2026-11-04). In a folder of several
+//!   repositories each worktree is a `--add-dir` too (`Feature::agent_dirs_for`).
 //! - `codex [--add-dir <dir>]… -- "<prompt>"`.
 //!
 //! The `--` matters: claude's `--add-dir` takes any number of directories,

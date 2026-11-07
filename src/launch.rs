@@ -382,7 +382,8 @@ impl Gerdr {
         };
         let dirs = match (self.project.as_deref(), self.workspace_feature(w)) {
             (Some(project), Some(feature)) => {
-                feature.agent_dirs(&crate::feature::store::dir(None, project, &feature.slug))
+                let data = crate::feature::store::dir(None, project, &feature.slug);
+                feature.agent_dirs_for(command, &data)
             }
             _ => Vec::new(),
         };
