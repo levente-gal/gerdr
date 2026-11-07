@@ -212,7 +212,9 @@ impl ThereJob {
     /// worker has no containers but those started on it. Not being able to ask
     /// here means there's nothing to say.
     fn not_there(&self, run: &SandboxRun, stop: &AtomicBool) -> Vec<String> {
-        let Ok(containers) = sandbox_run::running_containers(&Host::Here, stop) else {
+        let found = sandbox_run::engines(&Host::Here)
+            .and_then(|engines| sandbox_run::running_containers(&Host::Here, &engines, stop));
+        let Ok(containers) = found else {
             return Vec::new();
         };
         let links = self.feature.links.iter().map(|l| l.root.clone());

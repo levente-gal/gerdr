@@ -35,6 +35,7 @@ use crate::{
     chrome::CommandsTab,
     feature::{
         self, Feature, PerProject, Stage,
+        sandbox::Engine,
         sandbox_run::{self, Host, SandboxRun},
         store,
     },
@@ -870,7 +871,8 @@ impl Gerdr {
         self.feature_work(None, move |_| {
             let never = AtomicBool::new(false);
             let found = sandbox_run::labelled(&host, &never).unwrap_or_else(|why| {
-                // Mostly docker not running: nothing to say to one who doesn't use it.
+                // Mostly neither Docker nor Podman running: nothing to say to
+                // one who uses neither.
                 tracing::debug!("looking for sandboxes left behind: {why}");
                 Vec::new()
             });
@@ -1022,7 +1024,9 @@ impl Gerdr {
             for (left, host, dir) in jobs {
                 let result = (host.as_ref())
                     .map_err(|name| format!("{name} can't be reached"))
-                    .and_then(|host| sandbox_run::remove_stack(&left.stack, dir.as_deref(), host));
+                    .and_then(|host| {
+                        sandbox_run::remove_stack(&left.stack, left.engine, dir.as_deref(), host)
+                    });
                 match result {
                     Ok(()) => removed.push(left),
                     Err(why) => problems.push(format!("{}: {why}", left.stack)),
@@ -1057,8 +1061,10 @@ pub struct LeftStack {
     /// What `sandbox::LABEL` says of it.
     pub(crate) feature: String,
     pub(crate) stack: String,
-    /// The day it started, as Docker says.
+    /// The day it started, as Docker or Podman says.
     pub(crate) started: String,
+    /// What runs it.
+    pub(crate) engine: Engine,
     /// The gerdr that started it, if not this one.
     pub(crate) from: Option<LeftFrom>,
 }
@@ -1140,6 +1146,7 @@ fn left_behind(
                 feature: left.feature,
                 stack: left.stack,
                 started: left.started,
+                engine: left.engine,
                 from,
             })
         })
@@ -1178,6 +1185,7 @@ mod tests {
             stack: format!("gerdr-{feature}"),
             owner: owner.into(),
             started: "2026-11-07".into(),
+            engine: Engine::Docker,
         }
     }
 
