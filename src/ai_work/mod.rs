@@ -37,7 +37,11 @@ pub mod zst;
 use std::{
     collections::{BTreeMap, HashMap},
     path::{Path, PathBuf},
-    sync::mpsc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
 };
 
 use serde::{Deserialize, Serialize};
@@ -410,8 +414,33 @@ pub enum Report {
     /// Keeping earlier AI work: `done` of `total` features.
     Backfilling { done: usize, total: usize },
     /// Earlier AI work kept for `features` features; `gone` of their chats
-    /// were gone already.
-    Backfilled { features: usize, gone: usize },
+    /// were gone already. `stopped`: asked to stop before the end.
+    Backfilled {
+        features: usize,
+        gone: usize,
+        stopped: bool,
+    },
+    /// Drawing the index again from the files: `done` of `total` features.
+    Rescanning { done: usize, total: usize },
+    /// The index was drawn again, with `lines` lines; `stopped`: asked to
+    /// stop before the end.
+    Rescanned { lines: usize, stopped: bool },
+    /// The AI work of feature `title`, taken over from machine `from`,
+    /// couldn't be brought here: `why`. It stays there.
+    NotBrought {
+        title: String,
+        from: String,
+        why: String,
+    },
+}
+
+/// What the thread works at that the tasks panel shows, and can stop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Busy {
+    /// Keeping earlier AI work: `done` of `total` features.
+    Backfill { done: usize, total: usize },
+    /// Drawing the index again: `done` of `total` features.
+    Rescan { done: usize, total: usize },
 }
 
 /// The AI work of this gerdr: where it goes, the thread doing the heavy
@@ -425,6 +454,12 @@ pub struct Live {
     pub seen: HashMap<(String, String), observe::Digest>,
     /// This machine, in the lines it writes.
     machine: String,
+    /// Set to stop a backfill or a rescan, the thread going on.
+    cancel: Arc<AtomicBool>,
+    /// What the thread works at, for the tasks panel.
+    pub busy: Option<Busy>,
+    /// It was asked to stop what `busy` says.
+    pub stopping: bool,
 }
 
 impl Live {
@@ -436,19 +471,57 @@ impl Live {
             jobs: None,
             seen: HashMap::new(),
             machine: String::new(),
+            cancel: Arc::new(AtomicBool::new(false)),
+            busy: None,
+            stopping: false,
         }
     }
 
     /// Keep AI work under data folder `data`, the thread telling `done`
-    /// what it came to.
+    /// what it came to. Without its thread the lines are still written,
+    /// and the problem is said.
     pub(crate) fn start(data: &Path, done: channel::Sender<Done>) -> Self {
-        // The thread comes later; until then nothing runs.
-        let _ = done;
+        let root = root(data);
+        let (tx, rx) = mpsc::channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let spawned = {
+            let (root, cancel) = (root.clone(), cancel.clone());
+            std::thread::Builder::new()
+                .name("ai-work".into())
+                .spawn(move || thread::run(root, rx, done, cancel))
+        };
+        let jobs = match spawned {
+            Ok(_) => Some(tx),
+            Err(err) => {
+                tracing::warn!("ai-work: starting its thread: {err}");
+                crate::problems::report(
+                    THREAD_PROBLEM,
+                    format!("Couldn't start keeping the AI work's chats and stats: {err}"),
+                );
+                None
+            }
+        };
         Self {
-            root: Some(root(data)),
-            jobs: None,
+            root: Some(root),
+            jobs,
             seen: HashMap::new(),
             machine: machine(),
+            cancel,
+            busy: None,
+            stopping: false,
+        }
+    }
+
+    /// Where the thread's jobs go, for another thread to give it some.
+    pub fn sender(&self) -> Option<mpsc::Sender<thread::Job>> {
+        self.jobs.clone()
+    }
+
+    /// Stop the backfill or the rescan under way; the thread goes on.
+    pub fn stop_busy(&mut self) {
+        if self.busy.is_some() {
+            self.cancel.store(true, Ordering::Relaxed);
+            self.stopping = true;
         }
     }
 
@@ -480,10 +553,127 @@ impl Live {
     }
 }
 
+/// The problems the thread says go under this source. The writes on the
+/// loop say theirs under `"ai-work"`, so neither clears the other's.
+pub const THREAD_PROBLEM: &str = "ai-work-thread";
+
+/// What the toast says once earlier AI work was kept.
+fn backfilled_text(features: usize, gone: usize, stopped: bool) -> String {
+    let kept = match features {
+        1 => "Kept the AI work of 1 feature".to_owned(),
+        n => format!("Kept the AI work of {n} features"),
+    };
+    let gone = match gone {
+        0 => String::new(),
+        1 => "; 1 chat was already gone".to_owned(),
+        n => format!("; {n} chats were already gone"),
+    };
+    let stopped = match stopped {
+        true => "; the rest is kept when gerdr starts again",
+        false => "",
+    };
+    format!("{kept}{gone}{stopped}")
+}
+
 impl Gerdr {
     /// What the AI work's thread came to.
     pub(crate) fn ai_work_done(&mut self, report: Report) {
-        let _ = report;
+        match report {
+            Report::Worked => crate::problems::clear(THREAD_PROBLEM),
+            Report::Failed { what, why } => {
+                crate::problems::report(THREAD_PROBLEM, format!("{what}: {why}"));
+            }
+            Report::Indexed { .. } => self.ai_stats_refresh(),
+            Report::Backfilling { done, total } => {
+                self.ai_work.busy = Some(Busy::Backfill { done, total });
+            }
+            Report::Backfilled {
+                features,
+                gone,
+                stopped,
+            } => {
+                self.ai_work.busy = None;
+                self.ai_work.stopping = false;
+                if features == 0 && gone == 0 && !stopped {
+                    return;
+                }
+                let text = backfilled_text(features, gone, stopped);
+                match gone > 0 {
+                    true => self.show_warning(text),
+                    false => self.show_success(text),
+                }
+            }
+            Report::NotBrought { title, from, why } => self.show_warning(format!(
+                "The AI work of \u{201c}{title}\u{201d} stays on {from}: {why}"
+            )),
+            Report::Rescanning { done, total } => {
+                self.ai_work.busy = Some(Busy::Rescan { done, total });
+            }
+            Report::Rescanned { stopped, .. } => {
+                self.ai_work.busy = None;
+                self.ai_work.stopping = false;
+                if stopped {
+                    self.show_warning(
+                        "Stopped drawing the AI work's stats again: the rest comes in when gerdr starts again".into(),
+                    );
+                }
+                self.ai_stats_refresh();
+            }
+        }
+    }
+
+    /// Keep the earlier AI work of every feature this machine writes, once:
+    /// the thread passes over those kept already.
+    pub(crate) fn ai_work_backfill(&mut self) {
+        if !self.ai_work.is_on() {
+            return;
+        }
+        let features: Vec<(String, String)> = (self.features.all.iter())
+            .flat_map(|(project, fs)| {
+                (fs.iter().filter(|f| f.writer.is_none()))
+                    .map(move |f| (project.clone(), f.slug.clone()))
+            })
+            .collect();
+        if !features.is_empty() {
+            self.ai_work.send(thread::Job::Backfill { features });
+        }
+    }
+
+    /// The AI work's tasks: a backfill or a rescan under way.
+    pub(crate) fn ai_work_tasks(&self) -> Vec<crate::tasks::Task> {
+        let Some(busy) = self.ai_work.busy else {
+            return Vec::new();
+        };
+        let (title, detail, done, total) = match busy {
+            Busy::Backfill { done, total } => (
+                "Keeping earlier AI work",
+                "Once per feature: its record, prompts, files and the chats still there",
+                done,
+                total,
+            ),
+            Busy::Rescan { done, total } => (
+                "Drawing the AI work's stats again",
+                "From the files kept of each feature",
+                done,
+                total,
+            ),
+        };
+        let stopping = self.ai_work.stopping;
+        let detail = match stopping {
+            true => "Stopping".to_owned(),
+            false => detail.to_owned(),
+        };
+        let actions = match stopping {
+            true => Vec::new(),
+            false => vec![("Stop", crate::menu::MenuAction::StopAiWork)],
+        };
+        vec![crate::tasks::Task {
+            title: format!("{title} ({done} of {total})"),
+            chip: "ai work".to_owned(),
+            detail,
+            dot: crate::chrome::Dot::Working,
+            actions,
+        }]
     }
 }
 
@@ -523,6 +713,22 @@ mod tests {
         assert_eq!(
             blob.path(Path::new("/d")),
             Path::new("/d/blobs/ba").join(format!("{}.zst", blob.sha))
+        );
+    }
+
+    #[test]
+    fn the_backfill_toast_counts_what_it_says() {
+        assert_eq!(
+            backfilled_text(1, 0, false),
+            "Kept the AI work of 1 feature"
+        );
+        assert_eq!(
+            backfilled_text(41, 1, false),
+            "Kept the AI work of 41 features; 1 chat was already gone"
+        );
+        assert_eq!(
+            backfilled_text(3, 2, true),
+            "Kept the AI work of 3 features; 2 chats were already gone; the rest is kept when gerdr starts again"
         );
     }
 

@@ -937,6 +937,33 @@ impl Reach {
         self.run_rsync("Couldn't copy the features from there", rsync, cancel)
     }
 
+    /// Bring a feature's AI work folder `there` here: only what is newer
+    /// there comes, and nothing here goes. False: there is none there.
+    /// Transcripts can name secrets: only this account reads them here.
+    pub fn pull_ai_work(
+        &self,
+        there: &str,
+        local: &Path,
+        cancel: &AtomicBool,
+    ) -> Result<bool, Trouble> {
+        let look = format!("[ -d {} ] && echo HERE\nexit 0\n", shell_quote(there));
+        if self.script(&look, cancel)?.trim() != "HERE" {
+            return Ok(false);
+        }
+        crate::ai_work::write::make_dir(local)
+            .map_err(|err| Trouble::Work(format!("Couldn't make {}: {err}", local.display())))?;
+        let mut rsync = Command::new("rsync");
+        rsync
+            .args(["-rlts", "--update", "--chmod=D700,F600"])
+            .args(["--exclude", "/.staging/"])
+            .arg("-e")
+            .arg(self.ssh_line())
+            .arg(self.rsync_path(there))
+            .arg(format!("{}/", local.display()));
+        self.run_rsync("Couldn't copy the AI work from there", rsync, cancel)?;
+        Ok(true)
+    }
+
     /// Bring here the code of `feature`, as the machine it is written on has it,
     /// by `places` (`there` is that machine). `known` says what is here already;
     /// whether anything came. All that's made here is the repository if there is

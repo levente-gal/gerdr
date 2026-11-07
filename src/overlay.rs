@@ -237,7 +237,7 @@ impl Gerdr {
             Overlay::Worktrees => self.worktrees.is_open(),
             Overlay::Repos => self.repos.is_open(),
             Overlay::Inbox => self.inbox.is_open(),
-            Overlay::AiStats => self.chrome.ai_stats.is_some(),
+            Overlay::AiStats => self.ai_stats.is_some(),
             Overlay::Scrollback => self.scrollback.is_some(),
             Overlay::Switcher => self.switcher.is_some(),
         }

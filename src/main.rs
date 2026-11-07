@@ -1790,6 +1790,8 @@ pub struct Gerdr {
     pub repo_pages: HashMap<PathBuf, Option<String>>,
     /// The features' AI work, kept as it happens (see `ai_work`).
     pub ai_work: ai_work::Live,
+    /// The stats panel on the AI work, while it is open (see `stats_panel`).
+    pub(crate) ai_stats: Option<stats_panel::StatsPanel>,
 
     pub compositor_state: CompositorState,
     pub xdg_shell_state: XdgShellState,
@@ -6760,6 +6762,7 @@ impl Gerdr {
             doc_tab,
             inbox,
             scrollback: self.scrollback_view(),
+            stats: self.ai_stats_view(),
             toasts: self.toast_views(),
             // A file's tab is flat: its page has no bar (see `doc_tab`).
             pane_bars: match flat {
@@ -7251,6 +7254,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         old_zed_until: None,
         repo_pages: HashMap::new(),
         ai_work: ai_work::Live::off(),
+        ai_stats: None,
         compositor_state: CompositorState::new::<Gerdr>(&dh),
         xdg_shell_state: XdgShellState::new::<Gerdr>(&dh),
         xdg_decoration_state: XdgDecorationState::new::<Gerdr>(&dh),
@@ -7380,7 +7384,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     state.projects = store;
     state.restore_nav();
+    // Before the features, so each is seen as it is at start.
+    if let Some(done) = state.feature_sender() {
+        state.ai_work = ai_work::Live::start(&projects::data_dir(), done);
+    }
     state.load_features();
+    state.ai_work_backfill();
     state.look_for_sandbox_leftovers();
     if loaded == projects::Loaded::Migrated {
         state.projects.save();

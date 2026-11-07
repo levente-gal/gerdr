@@ -256,6 +256,34 @@ pub fn stats_layout(view: &StatsView, size: Size<i32, Logical>) -> StatsLayout {
     }
 }
 
+/// The scrollbar of a list at `list` showing `shown` of `view`'s rows,
+/// while they don't all show.
+fn list_thumb(view: &StatsView, list: Rect, shown: usize) -> Option<Thumb> {
+    let right = list.loc.x + list.size.w - PAD - GUTTER;
+    let inner = Rectangle::new(
+        (list.loc.x, list.loc.y + PAD).into(),
+        (list.size.w, (list.size.h - 2 * PAD).max(1)).into(),
+    );
+    let bar = ListBar {
+        down: view.first as f64 * STATS_ROW as f64,
+        total: view.rows.len() as f64 * STATS_ROW as f64,
+    };
+    Thumb::of(
+        gutter_track(right, inner),
+        (shown as i32 * STATS_ROW) as f64,
+        bar,
+    )
+}
+
+/// The list's scrollbar, in window coordinates, while the rows show and
+/// don't all fit: its thumb can be held.
+pub fn stats_thumb(view: &StatsView, layout: &StatsLayout) -> Option<Thumb> {
+    if !view.keys.is_empty() || view.note.is_some() {
+        return None;
+    }
+    list_thumb(view, layout.list, layout.rows.len())
+}
+
 /// How many rows the list shows on an output of `size`, with the columns'
 /// titles over it.
 pub fn stats_page(size: Size<i32, Logical>) -> usize {
@@ -573,19 +601,7 @@ impl Painter {
                 self.stats_cell(c, cell, spot, column.right, font, scale, color);
             }
         }
-        let rows = view.rows.len() as f64 * STATS_ROW as f64;
-        let list = shift(layout.list);
-        let right = list.loc.x + list.size.w - PAD - GUTTER;
-        let inner = Rectangle::new(
-            (list.loc.x, list.loc.y + PAD).into(),
-            (list.size.w, (list.size.h - 2 * PAD).max(1)).into(),
-        );
-        let shown = (layout.rows.len() as i32 * STATS_ROW) as f64;
-        let bar = ListBar {
-            down: view.first as f64 * STATS_ROW as f64,
-            total: rows,
-        };
-        if let Some(thumb) = Thumb::of(gutter_track(right, inner), shown, bar) {
+        if let Some(thumb) = list_thumb(view, shift(layout.list), layout.rows.len()) {
             self.thumb_in(c, &thumb, scale, p);
         }
     }

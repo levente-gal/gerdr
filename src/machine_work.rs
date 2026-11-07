@@ -867,7 +867,6 @@ impl Gerdr {
 
     /// How to reach machine `id`, and its folders, for a thread of its own
     /// that copies AI work from there: none while its link is down.
-    #[allow(dead_code)] // used by `ai_work` in wave 2 (AI work contract)
     pub(crate) fn archive_reach(&self, machine_id: &str) -> Option<(Reach, Side)> {
         let work = self.work_of(machine_id)?;
         Some((work.reach(), work.side()))

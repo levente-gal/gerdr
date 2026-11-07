@@ -119,6 +119,8 @@ pub enum Target {
     RaiseInotifyLimit,
     /// The tasks running in the background (see `tasks`).
     Tasks,
+    /// The stats panel on the features' AI work (see `stats_panel`).
+    AiStats,
     /// The new feature dialog (see `features`).
     NewFeature,
     /// The feature panel on the project's features.
@@ -161,6 +163,7 @@ impl Target {
             | Target::TerminalReload
             | Target::RaiseInotifyLimit
             | Target::Tasks
+            | Target::AiStats
             | Target::NewFeature
             | Target::Features
             | Target::Settings
@@ -194,6 +197,7 @@ impl Target {
             | Target::TerminalReload
             | Target::RaiseInotifyLimit
             | Target::Tasks
+            | Target::AiStats
             | Target::NewFeature
             | Target::Features
             | Target::Settings
@@ -873,6 +877,7 @@ fn frecency_key(
         | Target::TerminalReload
         | Target::RaiseInotifyLimit
         | Target::Tasks
+        | Target::AiStats
         | Target::NewFeature
         | Target::Features
         | Target::ImportProfile(_) => return None,
@@ -1179,6 +1184,12 @@ impl Gerdr {
         items.extend(self.t3_update_entries());
         items.push(self.inbox_entry());
         items.push(self.tasks_entry());
+        items.push(Item::new(
+            ItemIcon::Command,
+            "AI work stats",
+            "what the features' agents and checks came to",
+            Target::AiStats,
+        ));
         items.push(self.machines_entry());
         items.extend(self.feature_entries());
         let home = home_dir();
@@ -1556,6 +1567,7 @@ impl Gerdr {
             Target::TerminalReload => self.toggle_terminal_reload(),
             Target::RaiseInotifyLimit => self.ask_raise_inotify(),
             Target::Tasks => self.open_tasks(0),
+            Target::AiStats => self.open_ai_stats(),
             Target::NewFeature => self.open_new_feature(None),
             Target::Features => self.open_features(),
             Target::StageModel(pick) => self.set_stage_model(
