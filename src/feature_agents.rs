@@ -342,6 +342,24 @@ fn at_rest(alive: bool, stop: Option<Stop>, went_on: Option<u32>, done: u32, tot
     }
 }
 
+/// Whether a Build agent stopped with milestones left (`status` as herdr says)
+/// has rested long enough to be told to go on. One herdr sees resting gets
+/// `REST` from then: it may be waiting on something. One herdr can't read was
+/// quiet `MILESTONE_QUIET` already, and one told to do a milestone and stop
+/// (`fresh`) is through.
+fn rested_enough(
+    watch: &mut Watch,
+    fresh: bool,
+    status: Option<AgentStatus>,
+    now: Instant,
+) -> bool {
+    if fresh || !matches!(status, Some(AgentStatus::Done | AgentStatus::Idle)) {
+        return true;
+    }
+    let rested = *watch.rested.get_or_insert(now);
+    now.duration_since(rested) >= REST
+}
+
 /// Whether `text` is a good `stage` file for `feature`; else what it
 /// lacks. A multi-repository plan must name the touched repositories.
 pub(crate) fn validate(feature: &Feature, stage: Stage, text: &str) -> Result<(), Vec<String>> {
@@ -2026,10 +2044,7 @@ impl Gerdr {
                 }
                 Verdict::Ready(_) => self.stage_ready(&project, &feature.slug, stage),
                 Verdict::Stop { done, total } => {
-                    // A rest may only be one: it can be waiting on something.
-                    // One told to do a milestone and stop is through.
-                    let rested = *watch.rested.get_or_insert(now);
-                    let long = feature.fresh_milestones || now.duration_since(rested) >= REST;
+                    let long = rested_enough(watch, feature.fresh_milestones, status, now);
                     match at_rest(alive, run.stop, watch.went_on, done, total) {
                         AtRest::Waits => {}
                         AtRest::Gate => {
@@ -3775,6 +3790,35 @@ mod tests {
             ),
             Verdict::Stop { done: 2, total: 4 }
         );
+    }
+
+    #[test]
+    fn a_stopped_build_is_told_to_go_on_once_it_has_rested() {
+        let t = Instant::now();
+        let partial = File::Partial((5, 9), 2, 4);
+        let stop = Verdict::Stop { done: 2, total: 4 };
+        let at = |w: &mut Watch, status, now| judge(w, status, true, &partial, false, false, now);
+        // herdr can't read it: the quiet log was its rest, on every tick.
+        let mut w = watch();
+        at(&mut w, None, t);
+        for later in [MILESTONE_QUIET, MILESTONE_QUIET + STABLE] {
+            assert_eq!(at(&mut w, None, t + later), stop);
+            assert!(rested_enough(&mut w, false, None, t + later));
+        }
+        let unknown = Some(AgentStatus::Unknown);
+        assert!(rested_enough(&mut w, false, unknown, t));
+        // herdr sees it rest: `REST` from the first stop, whatever ticks between.
+        let idle = Some(AgentStatus::Idle);
+        let mut w = Watch {
+            worked: true,
+            ..watch()
+        };
+        assert_eq!(at(&mut w, idle, t), stop);
+        assert!(!rested_enough(&mut w, false, idle, t));
+        assert_eq!(at(&mut w, idle, t + REST), stop);
+        assert!(rested_enough(&mut w, false, idle, t + REST));
+        // One told to do a milestone and stop is through at once.
+        assert!(rested_enough(&mut Watch::of(1), true, idle, t));
     }
 
     #[test]
