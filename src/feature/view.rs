@@ -321,9 +321,22 @@ pub fn parse_moved(text: &str) -> BTreeMap<String, String> {
         .collect()
 }
 
+/// A record kept of a feature, as it came, and where it is.
+pub struct Kept {
+    pub raw: Vec<u8>,
+    /// Its folder: what is kept beside the record is read from there
+    /// (`store::attach_sides`).
+    pub dir: PathBuf,
+    /// How the files beside it stand: they change without the record.
+    pub stamp: store::Stamp,
+}
+
 /// A record kept of a feature, as it came.
-pub fn read_record(root: &Path, project: &str, slug: &str) -> std::io::Result<Vec<u8>> {
-    std::fs::read(store::dir(Some(root), project, slug).join(store::FILE))
+pub fn read_record(root: &Path, project: &str, slug: &str) -> std::io::Result<Kept> {
+    let dir = store::dir(Some(root), project, slug);
+    let raw = std::fs::read(dir.join(store::FILE))?;
+    let stamp = store::sides_stamp(&dir);
+    Ok(Kept { raw, dir, stamp })
 }
 
 /// What the copy of a project's features has for `Live`.
