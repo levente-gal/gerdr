@@ -63,6 +63,7 @@ mod keys;
 mod launch;
 mod layout;
 mod machine_checks;
+mod machine_lease;
 mod machine_sandbox;
 mod machine_views;
 mod machine_work;
@@ -1630,6 +1631,9 @@ pub struct Gerdr {
     /// The lock that tells other gerdrs the project shown is open here;
     /// kept while it is shown again after a reload.
     project_lock: Option<project_lock::ProjectLock>,
+    /// Says to other machines that this gerdr shows the project: `project_lock`
+    /// is under a runtime folder they can't name (see `feature::lease`).
+    lease_lock: Option<project_lock::ProjectLock>,
     /// Started with `--attach`: projects another gerdr has open may be
     /// shown here too.
     attach: bool,
@@ -5882,6 +5886,10 @@ impl Gerdr {
         let left = self.project.clone();
         self.detach_project();
         self.project_lock = lock;
+        let lease_dir = feature::lease::lock_dir(&projects::data_dir());
+        self.lease_lock = project_lock::ProjectLock::take(&lease_dir, id)
+            .inspect_err(|err| tracing::warn!("saying project {id} is open: {err}"))
+            .ok();
         self.welcome = None;
         self.quit = None;
         self.restart = None;
@@ -7175,6 +7183,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         projects: projects::Store::default(),
         project: None,
         project_lock: None,
+        lease_lock: None,
         attach: args.attach,
         welcome: None,
         running: HashMap::new(),

@@ -24,6 +24,7 @@ use crate::{
     Gerdr,
     feature::{
         self, Feature, Status,
+        lease::{self, Rival},
         remote::{self, Paths, Reach, Side, Trouble},
         sandbox_run, store,
         view::{self, Live, LivePane, Placed, PlacedRepo, SeenPane},
@@ -43,6 +44,9 @@ pub struct ViewAsk {
     pub folders: BTreeMap<String, String>,
     /// The features whose code is wanted here now.
     pub code: Vec<String>,
+    /// The features being taken over: what's here of them isn't to be touched,
+    /// even with their record gone there.
+    pub holding: Vec<String>,
 }
 
 /// What the machine told, once it changed.
@@ -52,6 +56,8 @@ pub struct ViewNews {
     pub features: Vec<Feature>,
     pub panes: BTreeMap<String, SeenPane>,
     pub names: BTreeMap<String, String>,
+    /// The features that went to another machine, with its id.
+    pub moved: BTreeMap<String, String>,
 }
 
 /// Where a feature's code here stands.
@@ -136,7 +142,7 @@ fn rest(time: Duration, stop: &AtomicBool) {
 
 /// The features a machine's project has, as last read: the project, those read
 /// and the folders that hold a record.
-type Latest = (String, Vec<Feature>, Vec<String>);
+type Latest = (String, Vec<Feature>, Vec<String>, BTreeMap<String, String>);
 
 /// Bring the code of the features asked for here, and take away that of those
 /// over, until told to stop.
@@ -151,12 +157,15 @@ fn watch_code(
     while !stop.load(Ordering::Relaxed) {
         let asked = ask.lock().map(|a| a.clone()).unwrap_or_default();
         let read = latest.lock().ok().and_then(|l| l.clone());
-        if let Some((project, features, with)) = read
+        if let Some((project, features, with, moved)) = read
             && asked.project.as_deref() == Some(project.as_str())
         {
-            code_round(
-                &place, &asked, &project, &features, &with, &mut code, &stop, &tell,
-            );
+            let told = Told {
+                features: &features,
+                with: &with,
+                moved: &moved,
+            };
+            code_round(&place, &asked, &project, told, &mut code, &stop, &tell);
         }
         rest(VIEW_EVERY, &stop);
     }
@@ -171,23 +180,44 @@ struct CodeRounds {
     failed: HashMap<(String, String), String>,
 }
 
-#[allow(clippy::too_many_arguments)]
+/// What a machine last said of a project's features.
+#[derive(Clone, Copy)]
+struct Told<'a> {
+    features: &'a [Feature],
+    with: &'a [String],
+    moved: &'a BTreeMap<String, String>,
+}
+
 fn code_round(
     place: &ViewPlace,
     asked: &ViewAsk,
     project: &str,
-    features: &[Feature],
-    with: &[String],
+    told: Told,
     rounds: &mut CodeRounds,
     cancel: &AtomicBool,
     tell: &impl Fn(WorkEvent),
 ) {
+    let Told {
+        features,
+        with,
+        moved,
+    } = told;
     // What's over there, or gone, goes here. A record that couldn't be read says
     // nothing of that.
     let over = |slug: &String| {
         !with.contains(slug) || (features.iter()).any(|f| f.slug == *slug && f.status != Status::Open)
     };
     for slug in view::placed_slugs(&place.root, project) {
+        if asked.holding.contains(&slug) {
+            continue;
+        }
+        // Looked at from where it went from now on, which may be this machine.
+        if let Some(to) = moved.get(&slug) {
+            rounds.heads.remove(&(project.to_owned(), slug.clone()));
+            let machines = place.root.parent().unwrap_or(&place.root);
+            view::move_placed(&place.root, &machines.join(to), project, &slug);
+            continue;
+        }
         if over(&slug) {
             rounds.heads.remove(&(project.to_owned(), slug.clone()));
             if let Err(why) = view::unplace(&place.root, project, &slug, cancel) {
@@ -253,7 +283,9 @@ fn view_round(
         return Ok(());
     };
     let there = format!("{}/features/{project}", place.there.data);
-    let (with, without) = view::parse_list(&place.reach.script(&view::list_script(&there), cancel)?);
+    let listed = place.reach.script(&view::list_script(&there), cancel)?;
+    let (with, without) = view::parse_list(&listed);
+    let moved = view::parse_moved(&listed);
     let local = store::project_dir(Some(&place.root), project);
     if with.is_empty() {
         // That machine has none now: none is kept.
@@ -265,6 +297,16 @@ fn view_round(
     } else {
         std::fs::create_dir_all(&local).map_err(|err| Trouble::Work(err.to_string()))?;
         place.reach.mirror(&there, &local, &without, cancel)?;
+        // What's left out above stays as it was: a record that isn't there any more
+        // would read as one next time.
+        for slug in &without {
+            let gone = local.join(slug);
+            if let Err(err) = std::fs::remove_dir_all(&gone)
+                && err.kind() != std::io::ErrorKind::NotFound
+            {
+                tracing::warn!("removing {}: {err}", gone.display());
+            }
+        }
     }
     let here = view::side_here(&place.home, &place.root);
     let mut features = Vec::with_capacity(with.len());
@@ -304,10 +346,11 @@ fn view_round(
             features: features.clone(),
             panes,
             names: live.map(|l| l.names).unwrap_or_default(),
+            moved: moved.clone(),
         })));
     }
     if let Ok(mut mine) = latest.lock() {
-        *mine = Some((project.to_owned(), features, with));
+        *mine = Some((project.to_owned(), features, with, moved));
     }
     Ok(())
 }
@@ -472,10 +515,12 @@ impl Gerdr {
             features,
             panes,
             names,
+            moved,
         } = news;
         for (machine, name) in names {
             self.machines.names.entry(machine).or_insert(name);
         }
+        let features = self.rivals(id, &project, features);
         let own: Vec<String> = (self.features.all.get(&project).into_iter().flatten())
             .map(|f| f.slug.clone())
             .collect();
@@ -494,7 +539,44 @@ impl Gerdr {
                 ));
             }
         }
-        self.set_viewed(id, &project, kept, panes);
+        self.set_viewed(id, &project, kept, panes, &moved);
+    }
+
+    /// The features machine `id` tells of, without those that lost to a record
+    /// seen here of the same feature. A record of this machine's that lost goes,
+    /// and that machine is told of one of its own.
+    fn rivals(&mut self, id: &str, project: &str, features: Vec<Feature>) -> Vec<Feature> {
+        let me = own_id().unwrap_or_default();
+        let mut kept = Vec::with_capacity(features.len());
+        for feature in features {
+            let mine = (self.features.all.get(project).into_iter().flatten())
+                .find(|f| f.slug == feature.slug);
+            match mine.map(|mine| lease::rival(mine, &me, &feature, id)) {
+                Some(Rival::IWin) => {
+                    self.claim_feature(id, project, &feature.slug);
+                    continue;
+                }
+                Some(Rival::TheyWin) => self.lost_feature(project, &feature.slug, id),
+                Some(Rival::Clash) | None => {}
+            }
+            // Two others having it, the higher shows.
+            let shown = (self.viewed_of(project).iter())
+                .find(|f| f.slug == feature.slug && f.writer.as_deref() != Some(id))
+                .map(|f| (f.created, f.writer.clone().unwrap_or_default(), f.clone()));
+            if let Some((created, writer, other)) = shown
+                && created == feature.created
+                && (other.epoch != 0 || feature.epoch != 0)
+            {
+                if lease::rival(&other, &writer, &feature, id) == Rival::IWin {
+                    continue;
+                }
+                if let Some(list) = self.features.viewed.get_mut(project) {
+                    list.retain(|f| f.slug != feature.slug);
+                }
+            }
+            kept.push(feature);
+        }
+        kept
     }
 
     /// Machine `id`'s features of `project` are `features` now.
@@ -502,10 +584,26 @@ impl Gerdr {
         &mut self,
         id: &str,
         project: &str,
-        features: Vec<Feature>,
+        mut features: Vec<Feature>,
         panes: BTreeMap<String, SeenPane>,
+        moved: &BTreeMap<String, String>,
     ) {
-        // Over there, or not open any more: its code here goes the same.
+        // While it is being taken over it shows as it was, whatever that machine
+        // has of it by now, and so does one that moved to a machine connected here,
+        // until that one tells of it: its workspace would go with it.
+        let holds = |slug: &str| {
+            let key = (project.to_owned(), slug.to_owned());
+            self.features.taking.contains_key(&key)
+                || moved.get(slug).is_some_and(|to| self.work_of(to).is_some())
+        };
+        let held: Vec<Feature> = (self.viewed_of(project).iter())
+            .filter(|f| f.writer.as_deref() == Some(id) && holds(&f.slug))
+            .cloned()
+            .collect();
+        features.retain(|f| !holds(&f.slug));
+        features.extend(held);
+        // Over there, or not open any more: its code here goes the same. What only
+        // moved to another machine shows from there.
         let gone: Vec<(String, String)> = (self.viewed_of(project).iter())
             .filter(|f| f.writer.as_deref() == Some(id) && f.status == Status::Open)
             .filter(|f| {
@@ -514,7 +612,10 @@ impl Gerdr {
             .map(|f| (f.slug.clone(), f.title.clone()))
             .collect();
         for (slug, title) in gone {
-            self.close_gone_workspace(id, project, &slug, &title);
+            match moved.get(&slug) {
+                Some(to) => self.say_moved(project, &slug, &title, to),
+                None => self.close_gone_workspace(id, project, &slug, &title),
+            }
             (self.features.code_here).remove(&(project.to_owned(), slug));
         }
         let list = self.features.viewed.entry(project.to_owned()).or_default();
@@ -540,10 +641,27 @@ impl Gerdr {
     /// workspace here goes first, unless what the user started runs in it. Views
     /// of what ran there aren't that.
     fn close_gone_workspace(&mut self, id: &str, project: &str, slug: &str, title: &str) {
+        let name = self.machine_name(id);
+        let running = format!(
+            "\u{201c}{title}\u{201d} is over on {name}: its folder here goes, and something runs in it"
+        );
+        let closed = format!("\u{201c}{title}\u{201d} is over on {name}");
+        self.close_feature_workspace(project, slug, running, closed);
+    }
+
+    /// Close feature `slug`'s workspace here and say `closed`, unless what the user
+    /// started runs in it: then only say `running`. Views of what ran elsewhere
+    /// aren't that.
+    pub(crate) fn close_feature_workspace(
+        &mut self,
+        project: &str,
+        slug: &str,
+        running: String,
+        closed: String,
+    ) {
         let Some(w) = self.feature_workspace(project, slug) else {
             return;
         };
-        let name = self.machine_name(id);
         let panes: Vec<_> = (self.workspaces[w].tabs.iter())
             .flat_map(|tab| &tab.panes)
             .filter(|p| {
@@ -552,13 +670,11 @@ impl Gerdr {
             })
             .filter_map(|p| self.running_in(p))
             .collect();
-        if let [first, ..] = panes.as_slice() {
-            return self.show_warning(format!(
-                "\u{201c}{title}\u{201d} is over on {name}: its folder here goes, and \u{201c}{first}\u{201d} runs in it"
-            ));
+        if !panes.is_empty() {
+            return self.show_warning(running);
         }
         self.close_workspace_now(w);
-        self.show_warning(format!("\u{201c}{title}\u{201d} is over on {name}"));
+        self.show_warning(closed);
     }
 
     /// Everything reading a feature's files finds those of the ones shown here.
@@ -573,7 +689,8 @@ impl Gerdr {
             .filter_map(|(project, f)| {
                 let root = view::root(&data, f.writer.as_deref()?);
                 let dir = store::dir(Some(&root), project, &f.slug);
-                Some(((project.clone(), f.slug.clone()), dir))
+                // Just moved away, its copy isn't here yet: its files still are.
+                dir.is_dir().then(|| ((project.clone(), f.slug.clone()), dir))
             })
             .collect();
         store::set_seen(seen);
@@ -613,6 +730,7 @@ impl Gerdr {
                     features,
                     panes,
                     names,
+                    moved: BTreeMap::new(),
                 };
                 self.machine_viewed(&id, news);
             }
@@ -655,7 +773,7 @@ impl Gerdr {
 
     /// `project`'s folders on machine `name` to here: its file says them the
     /// other way, as work goes there.
-    fn folders_from(&self, name: &str, project: &str) -> BTreeMap<String, String> {
+    pub(crate) fn folders_from(&self, name: &str, project: &str) -> BTreeMap<String, String> {
         (self.projects.project(project))
             .and_then(|p| p.workflow.machine_folders.get(name))
             .map(flipped)
@@ -673,8 +791,13 @@ impl Gerdr {
                 continue;
             };
             let id = work.id.clone();
+            let holding: Vec<String> = (self.features.taking.keys())
+                .filter(|(p, _)| *p == project)
+                .map(|(_, slug)| slug.clone())
+                .collect();
             let code: Vec<String> = (self.viewed_of(&project).iter())
                 .filter(|f| f.writer.as_deref() == Some(id.as_str()))
+                .filter(|f| !holding.contains(&f.slug))
                 .filter(|f| {
                     let shown = (self.features.panel.as_ref())
                         .is_some_and(|p| p.project == project && p.slug == f.slug);
@@ -691,6 +814,7 @@ impl Gerdr {
                 project: Some(project.clone()),
                 folders: self.folders_from(&name, &project),
                 code,
+                holding,
             };
             if let Some(work) = self.machines.links.get(&name).and_then(|l| l.work.as_ref()) {
                 work.ask_views(ask);
@@ -795,7 +919,7 @@ impl Gerdr {
     fn forget_viewed(&mut self, id: &str) {
         let projects: Vec<String> = self.features.viewed.keys().cloned().collect();
         for project in projects {
-            self.set_viewed(id, &project, Vec::new(), BTreeMap::new());
+            self.set_viewed(id, &project, Vec::new(), BTreeMap::new(), &BTreeMap::new());
         }
         let root = view::root(&crate::projects::data_dir(), id);
         let spawned = std::thread::Builder::new()
@@ -808,11 +932,14 @@ impl Gerdr {
 
     /// What the page of feature `f`, written on another machine, says of that.
     pub(crate) fn seen_note(&self, f: &Feature) -> Option<(String, bool)> {
+        if let Some(note) = self.take_note(f) {
+            return Some(note);
+        }
         let id = f.writer.as_deref()?;
         let name = self.machine_name(id);
         if self.work_of(id).is_none() {
             return Some((
-                format!("Written on {name}, which can't be reached: this is how it last was"),
+                format!("Written on {name}, which can't be reached: this is how it last was. Changing it here asks first"),
                 true,
             ));
         }
@@ -837,14 +964,14 @@ impl Gerdr {
             ));
         }
         Some((
-            format!("Written on {name}: change it there. Only its commits show here"),
+            format!("Written on {name}: changing it here moves it here. Only its commits show"),
             false,
         ))
     }
 }
 
 /// This machine's id, if it has one: it has once another connected to it.
-fn own_id() -> Option<String> {
+pub(crate) fn own_id() -> Option<String> {
     // Once it is there it stays; until then, asking again costs a failed open.
     static ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     if let Some(id) = ID.get() {

@@ -213,7 +213,7 @@ pub fn rebased(feature: &Feature, paths: &Paths, id: &str) -> Result<Feature, St
 
 /// Every text of a record, as it reads here: a path holder added later is
 /// translated as well, and what it says of a path reads the same as the path.
-fn translate(value: &mut Value, paths: &Paths) {
+pub(super) fn translate(value: &mut Value, paths: &Paths) {
     match value {
         Value::String(text) => {
             if text.contains('/') {
@@ -284,11 +284,14 @@ pub fn list_script(dir: &str) -> String {
 for d in */; do
   d=${{d%/}}
   [ -d "$d" ] || continue
-  if [ -f "$d/{file}" ]; then echo "R $d"; else echo "N $d"; fi
+  if [ -f "$d/{file}" ]; then echo "R $d"
+  elif [ -f "$d/{handed}" ]; then echo "H $d $(cat "$d/{handed}")"
+  else echo "N $d"; fi
 done
 "#,
         shell_quote(dir),
         file = store::FILE,
+        handed = super::lease::HANDED_TO,
     )
 }
 
@@ -301,9 +304,20 @@ pub fn parse_list(text: &str) -> (Vec<String>, Vec<String>) {
             with.push(slug.to_owned());
         } else if let Some(slug) = line.strip_prefix("N ") {
             without.push(slug.to_owned());
+        } else if let Some((slug, _)) = line.strip_prefix("H ").and_then(|l| l.split_once(' ')) {
+            without.push(slug.to_owned());
         }
     }
     (with, without)
+}
+
+/// What `list_script` said of the features that moved: the machine each went to.
+pub fn parse_moved(text: &str) -> BTreeMap<String, String> {
+    (text.lines())
+        .filter_map(|line| line.strip_prefix("H ")?.split_once(' '))
+        .map(|(slug, machine)| (slug.to_owned(), machine.trim().to_owned()))
+        .filter(|(_, machine)| !machine.is_empty())
+        .collect()
 }
 
 /// A record kept of a feature, as it came.
@@ -339,6 +353,31 @@ fn placed_file(root: &Path, project: &str, slug: &str) -> PathBuf {
 pub fn note_placed(root: &Path, project: &str, slug: &str, placed: &Placed) -> std::io::Result<()> {
     let bytes = serde_json::to_vec_pretty(placed).map_err(std::io::Error::other)?;
     crate::projects::write_atomic(&placed_file(root, project, slug), &bytes)
+}
+
+/// What was placed from machine `root` of feature `slug` is no look any more.
+pub fn forget_placed(root: &Path, project: &str, slug: &str) {
+    if let Err(err) = std::fs::remove_file(placed_file(root, project, slug))
+        && err.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!("forgetting what came of {project}/{slug}: {err}");
+    }
+}
+
+/// Feature `slug` moved from machine `from` to machine `to` (both as `root` gives
+/// them): what is here of its code is looked at from that one now.
+pub fn move_placed(from: &Path, to: &Path, project: &str, slug: &str) {
+    let (old, new) = (placed_file(from, project, slug), placed_file(to, project, slug));
+    if !old.exists() {
+        return;
+    }
+    let moved = new
+        .parent()
+        .map_or(Ok(()), std::fs::create_dir_all)
+        .and_then(|()| std::fs::rename(&old, &new));
+    if let Err(err) = moved {
+        tracing::warn!("following {project}/{slug} to another machine: {err}");
+    }
 }
 
 /// The features of `project` whose code was placed here from machine `root`.
@@ -590,9 +629,46 @@ mod tests {
 
     #[test]
     fn only_folders_with_a_record_are_features() {
-        let (with, without) = parse_list("R one\nN two\nnoise\nR three\n");
+        let (with, without) = parse_list("R one\nN two\nnoise\nR three\nH four m9\n");
         assert_eq!(with, ["one", "three"]);
-        assert_eq!(without, ["two"]);
+        assert_eq!(without, ["two", "four"]);
+    }
+
+    #[test]
+    fn a_feature_gone_to_another_machine_is_told_from_one_over() {
+        let t = crate::feature::tests::Temp::new();
+        let dir = t.0.as_path();
+        std::fs::create_dir_all(dir.join("gone")).unwrap();
+        std::fs::write(dir.join("gone").join(super::super::lease::HANDED_TO), "m9").unwrap();
+        std::fs::create_dir_all(dir.join("files")).unwrap();
+        let out = std::process::Command::new("sh")
+            .args(["-c", &list_script(&dir.to_string_lossy())])
+            .output()
+            .unwrap();
+        let said = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(
+            parse_moved(&said),
+            BTreeMap::from([("gone".to_owned(), "m9".to_owned())])
+        );
+        let (with, without) = parse_list(&said);
+        assert!(with.is_empty());
+        assert_eq!(without.len(), 2);
+    }
+
+    #[test]
+    fn what_came_of_a_feature_that_moved_is_kept_under_where_it_went() {
+        let t = crate::feature::tests::Temp::new();
+        let (a, b) = (t.0.join("a"), t.0.join("b"));
+        note_placed(&a, "p", "s", &Placed::default()).unwrap();
+        assert_eq!(placed_slugs(&a, "p"), ["s"]);
+        move_placed(&a, &b, "p", "s");
+        assert!(placed_slugs(&a, "p").is_empty());
+        assert_eq!(placed_slugs(&b, "p"), ["s"]);
+        forget_placed(&b, "p", "s");
+        assert!(placed_slugs(&b, "p").is_empty());
+        // Nothing to move or forget is nothing.
+        move_placed(&a, &b, "p", "s");
+        forget_placed(&b, "p", "s");
     }
 
     #[test]

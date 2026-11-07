@@ -34,6 +34,7 @@ pub mod fix_round;
 pub mod graph;
 pub mod hook;
 pub mod layout;
+pub mod lease;
 pub mod manual;
 pub mod page;
 pub mod patch;
@@ -613,6 +614,10 @@ pub struct Feature {
     /// here (see `view`). Never saved: the record is its writer's.
     #[serde(skip)]
     pub writer: Option<String>,
+    /// How many times it moved to another machine's gerdr: of two records of it,
+    /// the higher goes on (see `lease`).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub epoch: u64,
     /// The fix rounds Verify's failures started, oldest first: what Build's
     /// page says of them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -621,6 +626,11 @@ pub struct Feature {
     /// run goes on from it, so its prompt doesn't overwrite an old one.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub run_counts: BTreeMap<Stage, u32>,
+}
+
+/// What serde needs to leave out a number that says nothing.
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 /// How a stage stands once it comes to changing it.
@@ -1300,6 +1310,7 @@ pub(crate) mod tests {
             stage_agents: Default::default(),
             stage_machines: Default::default(),
             setups_elsewhere: Vec::new(),
+            epoch: 0,
             stage_models: Default::default(),
             fresh_milestones: false,
             setup: None,
@@ -1390,6 +1401,7 @@ pub(crate) mod tests {
             stage_agents: BTreeMap::new(),
             stage_machines: BTreeMap::new(),
             setups_elsewhere: Vec::new(),
+            epoch: 0,
             stage_models: Default::default(),
             fresh_milestones: false,
             setup: None,

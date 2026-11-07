@@ -126,6 +126,14 @@ pub struct Features {
     /// The features of other machines already said not to show, by machine and
     /// slug: their names are taken here.
     pub(crate) clashes: BTreeSet<(String, String)>,
+    /// Those being taken over from another machine, by project and slug.
+    pub(crate) taking: BTreeMap<(String, String), crate::machine_lease::Taking>,
+    /// What was pressed on one, while the user is asked whether to take it over.
+    pub(crate) take_asked: BTreeMap<(String, String), Option<PanelOutcome>>,
+    /// This gerdr's features another machine was told it can have, until it has.
+    pub(crate) handing: BTreeMap<(String, String), crate::machine_lease::Handing>,
+    /// When each machine was last told its record lost, by machine, project, slug.
+    pub(crate) claims: HashMap<(String, String, String), Instant>,
     /// Cursor's models, for the picker of a stage's model.
     pub cursor_models: crate::stage_models::CursorModels,
     pub dialog: Option<NewFeatureDialog>,
@@ -1482,6 +1490,9 @@ pub enum PanelOutcome {
     CycleMachine(Stage),
     /// Stop this stage's agent, on another machine.
     StopOnMachine(Stage),
+    /// Make a feature another machine writes this machine's, with nothing else to
+    /// do. Any other that changes it does that first.
+    TakeOver,
     /// Pick the next agent this agent stage's chips offer.
     CycleAgent(Stage),
     /// Build with a fresh agent per milestone, or one through them all.
@@ -1511,8 +1522,18 @@ pub enum PanelOutcome {
 }
 
 impl PanelOutcome {
-    /// Whether it only shows something: what a feature another machine writes
-    /// can do here. Anything new counts as changing it until said otherwise.
+    /// Whether it acts on a feature's sandbox as it is: that stays on the machine
+    /// that started it, whichever writes the feature.
+    pub fn acts_on_sandbox(&self) -> bool {
+        matches!(
+            self,
+            Self::StopSandbox | Self::RestartSandbox | Self::ResetSandbox | Self::RemoveSandbox
+        )
+    }
+
+    /// Whether it only shows something: all a feature another machine writes can
+    /// do here without moving it here. Anything new counts as changing it until
+    /// said otherwise.
     pub fn reads_only(&self) -> bool {
         matches!(
             self,
@@ -1631,19 +1652,6 @@ pub fn entry_key(feature: &Feature, sources: &[RepoSource], entry: RepoEntry) ->
 /// only join what a source still finds it in: a removed one whose folder
 /// went has none.
 pub fn entry_buttons(
-    feature: &Feature,
-    sources: &[RepoSource],
-    entry: RepoEntry,
-) -> Vec<(&'static str, PanelOutcome)> {
-    let mut buttons = writers_entry_buttons(feature, sources, entry);
-    if feature.writer.is_some() {
-        buttons.retain(|(_, outcome)| outcome.reads_only());
-    }
-    buttons
-}
-
-/// `entry_buttons` on the machine writing `feature`.
-fn writers_entry_buttons(
     feature: &Feature,
     sources: &[RepoSource],
     entry: RepoEntry,
@@ -1783,7 +1791,7 @@ pub(crate) fn lock_why(feature: &Feature, by: Stage) -> String {
 /// What Enter (or the row's button) does on `row` of `feature`.
 pub fn row_action(feature: &Feature, row: PanelRow, ctx: RowCtx) -> Option<PanelOutcome> {
     let action = writers_row_action(feature, row, ctx)?;
-    (feature.writer.is_none() || action.reads_only()).then_some(action)
+    (feature.writer.is_none() || !action.acts_on_sandbox()).then_some(action)
 }
 
 /// `row_action` on the machine writing `feature`.
@@ -2114,7 +2122,6 @@ fn why_not_decide(feature: &Feature, stage: Stage) -> Option<&'static str> {
 /// comment of the user's added: AI review, current, its latest run read.
 fn can_decide(feature: &Feature, stage: Stage) -> bool {
     stage == Stage::AiReview
-        && feature.writer.is_none()
         && feature.status == Status::Open
         && feature.current() == Some(stage)
         && (feature.runs.get(&stage)).is_some_and(|r| r.ready.is_some())
@@ -2444,9 +2451,6 @@ fn stage_actions(
     );
     if tries_criteria(feature, stage) {
         out.extend((criteria.iter().enumerate()).flat_map(|(i, row)| criterion_buttons(i, row)));
-    }
-    if feature.writer.is_some() {
-        out.retain(|(_, outcome)| outcome.reads_only());
     }
     out
 }
@@ -3517,7 +3521,7 @@ fn watch_every(feature: &Feature) -> Duration {
 /// The label of what removes `feature`'s worktrees: abandoning it while
 /// open, removing them once done.
 pub fn remove_label(feature: &Feature) -> &'static str {
-    if feature.writer.is_some() {
+    if feature.writer.is_some() && feature.status != Status::Open {
         ""
     } else if feature.status == Status::Done {
         "Remove worktrees"
@@ -4178,6 +4182,14 @@ impl FeaturePanel {
             Keysym::q | Keysym::Q if ctrl && mods.shift && stops_on_machine(feature, stage) => {
                 return Some(PanelOutcome::StopOnMachine(stage));
             }
+            Keysym::e | Keysym::E
+                if ctrl
+                    && mods.shift
+                    && feature.writer.is_some()
+                    && feature.status == Status::Open =>
+            {
+                return Some(PanelOutcome::TakeOver);
+            }
             Keysym::b | Keysym::B if ctrl && mods.shift && milestone_switch(feature, stage) => {
                 return Some(PanelOutcome::FreshMilestones(!feature.fresh_milestones));
             }
@@ -4423,13 +4435,18 @@ pub fn page_actions(
 ) -> Vec<(PageButton, PanelOutcome)> {
     let mut out = writers_page_actions(feature, stage, ctx);
     if feature.writer.is_some() {
-        out.retain(|(_, outcome)| outcome.reads_only());
-        // There's nothing to do to a file here but read it.
+        out.retain(|(_, outcome)| !outcome.acts_on_sandbox());
+        // Its review is on the machine that writes it, until it is taken over.
         for (button, outcome) in &mut out {
             if matches!(outcome, PanelOutcome::OpenDoc(_)) {
                 button.label = "Open".to_owned();
                 button.style = ButtonStyle::Plain;
             }
+        }
+        if feature.status == Status::Open {
+            let label = "Take over".to_owned();
+            let style = ButtonStyle::Plain;
+            out.push((PageButton { label, style }, PanelOutcome::TakeOver));
         }
     }
     out
@@ -4837,6 +4854,7 @@ impl Gerdr {
             .collect();
         let mut all = BTreeMap::new();
         for (id, name) in ids {
+            crate::machine_lease::restore_left_records(&id);
             match store::load_all(None, &id) {
                 Ok(features) => {
                     all.insert(id, features);
@@ -6511,6 +6529,7 @@ impl Gerdr {
             stage_agents: Default::default(),
             stage_machines: Default::default(),
             setups_elsewhere: Vec::new(),
+            epoch: 0,
             stage_models: Default::default(),
             fresh_milestones: false,
             setup: None,
@@ -7102,12 +7121,18 @@ impl Gerdr {
             return;
         };
         if let Some(writer) = self.feature_writer(&project, &slug)
-            && !outcome.reads_only()
+            && outcome.acts_on_sandbox()
         {
             let name = self.machine_name(writer);
-            return self.show_warning(format!("Only gerdr on {name} can change this feature"));
+            return self.show_warning(format!("The sandbox stays on {name}: do that there"));
+        }
+        if self.feature_writer(&project, &slug).is_some() && !outcome.reads_only() {
+            let press = (outcome != PanelOutcome::TakeOver).then_some(outcome);
+            return self.take_feature(&project, &slug, press);
         }
         match outcome {
+            // Only offered on what another machine writes, above.
+            PanelOutcome::TakeOver => {}
             PanelOutcome::Tick => match self.feature(&project, &slug).and_then(Feature::current) {
                 Some(stage) if needs(stage).is_some() => {
                     self.approve_stage(&project, &slug, stage);
@@ -9807,8 +9832,7 @@ fn stops_on_machine(feature: &Feature, stage: Stage) -> bool {
 
 /// The button stopping `stage`'s agent on another machine.
 fn stop_action(feature: &Feature, stage: Stage) -> Option<(PageButton, PanelOutcome)> {
-    let here = feature.writer.is_none();
-    (here && stops_on_machine(feature, stage)).then(|| {
+    stops_on_machine(feature, stage).then(|| {
         let label = "Stop agent".to_owned();
         let style = ButtonStyle::Plain;
         (PageButton { label, style }, PanelOutcome::StopOnMachine(stage))
@@ -10820,6 +10844,7 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 5] = [
             ("Ctrl+Shift+A", "pick the stage's next agent"),
             ("Ctrl+Shift+W", "pick the machine the stage's next agent or check run goes on"),
             ("Ctrl+Shift+Q", "stop the stage's agent on another machine"),
+            ("Ctrl+Shift+E", "make a feature another machine writes this machine's"),
             ("Ctrl+Shift+I", "pick the model of the stage's agent"),
             (
                 "Ctrl+Shift+B",
@@ -10955,45 +10980,20 @@ fn tab_hints(
         panel, feature, stage, slugs, ctx, choices, plan, ships, notes,
     );
     if feature.writer.is_some() {
-        hints.retain_mut(|(key, what)| {
-            // Enter goes by the page's own action, which only reads.
-            if key == "Enter" {
-                if let Some(rest) = what.strip_prefix("review ") {
-                    *what = format!("open {rest}");
-                }
-                return true;
+        for (key, what) in &mut hints {
+            // Enter goes by the page's own action, which only reads a file there.
+            if key == "Enter"
+                && let Some(rest) = what.strip_prefix("review ")
+            {
+                *what = format!("open {rest}");
             }
-            SEEN_HINTS.contains(&what.as_str())
-        });
+        }
+        if feature.status == Status::Open && !panel.keys && panel.note.is_none() {
+            hints.push(("Ctrl+Shift+E".to_owned(), "take over".to_owned()));
+        }
     }
     hints
 }
-
-/// The hints that hold on a feature another machine writes: going about it and
-/// showing it. A key that does more says it can't.
-const SEEN_HINTS: [&str; 21] = [
-    "stage",
-    "stages",
-    "repository",
-    "repositories",
-    "all repositories",
-    "button",
-    "row",
-    "check",
-    "criterion",
-    "finding",
-    "show all",
-    "hide them",
-    "show agent",
-    "show terminal",
-    "show terminals",
-    "open app",
-    "show in diff",
-    "earlier reviews",
-    "copy path",
-    "open PR",
-    "all keys",
-];
 
 /// `tab_hints` on the machine writing `feature`.
 #[allow(clippy::too_many_arguments)]
@@ -11712,6 +11712,7 @@ pub(crate) mod tests {
             stage_agents: Default::default(),
             stage_machines: Default::default(),
             setups_elsewhere: Vec::new(),
+            epoch: 0,
             stage_models: Default::default(),
             fresh_milestones: false,
             setup: None,
@@ -11822,33 +11823,63 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn what_another_machine_writes_offers_only_what_shows_something() {
+    fn what_another_machine_writes_offers_what_this_one_would_and_taking_it_over() {
         let f = written_elsewhere();
         let actions = page_actions(&f, Stage::Plan, RowCtx::default());
-        assert!(
-            actions.iter().all(|(_, outcome)| outcome.reads_only()),
-            "{actions:?}"
-        );
         let labels: Vec<&str> = actions.iter().map(|(b, _)| b.label.as_str()).collect();
         assert!(labels.contains(&"Show agent"), "{labels:?}");
-        // The same feature on the machine writing it has more to do.
+        assert!(labels.contains(&"Take over"), "{labels:?}");
         let mut mine = f.clone();
         mine.writer = None;
         let own = page_actions(&mine, Stage::Plan, RowCtx::default());
-        assert!(own.iter().any(|(_, outcome)| !outcome.reads_only()), "{own:?}");
-        assert_eq!(stop_action(&f, Stage::Plan), None);
-        assert!(stop_action(&mine, Stage::Plan).is_some());
+        assert!(own.iter().all(|(_, o)| *o != PanelOutcome::TakeOver), "{own:?}");
+        // All else is the same: a press on it moves the feature here first.
+        let without: Vec<_> = (actions.iter())
+            .filter(|(_, o)| *o != PanelOutcome::TakeOver)
+            .cloned()
+            .collect();
+        assert_eq!(without, own);
+        assert!(stop_action(&f, Stage::Plan).is_some());
     }
 
     #[test]
-    fn what_another_machine_writes_has_no_header_buttons_or_row_actions() {
+    fn what_another_machine_writes_has_the_buttons_of_its_writer() {
         let f = written_elsewhere();
-        assert_eq!(remove_label(&f), "");
-        let ctx = RowCtx::default();
-        assert_eq!(row_action(&f, PanelRow::Repo(0), ctx), None);
-        assert!(!can_decide(&f, Stage::AiReview));
+        assert_eq!(remove_label(&f), "Abandon");
         let entry = RepoEntry::Held(0);
-        assert!(entry_buttons(&f, &[], entry).is_empty());
+        let mut mine = f.clone();
+        mine.writer = None;
+        assert_eq!(entry_buttons(&f, &[], entry), entry_buttons(&mine, &[], entry));
+    }
+
+    #[test]
+    fn what_is_over_on_another_machine_stays_only_to_look_at() {
+        let mut f = written_elsewhere();
+        f.status = Status::Done;
+        assert_eq!(remove_label(&f), "");
+        let actions = page_actions(&f, Stage::Plan, RowCtx::default());
+        assert!(actions.iter().all(|(_, o)| *o != PanelOutcome::TakeOver), "{actions:?}");
+    }
+
+    #[test]
+    fn ctrl_shift_e_takes_over_only_what_another_machine_writes() {
+        let f = written_elsewhere();
+        let mut panel = FeaturePanel {
+            slug: f.slug.clone(),
+            ..FeaturePanel::default()
+        };
+        let mods = ModifiersState {
+            ctrl: true,
+            shift: true,
+            ..ModifiersState::default()
+        };
+        let press = |panel: &mut FeaturePanel, f: &Feature| {
+            panel.key(&mods, Keysym::E, f, &[], RowCtx::default(), &[], &[], &[])
+        };
+        assert_eq!(press(&mut panel, &f), Some(PanelOutcome::TakeOver));
+        let mut mine = f.clone();
+        mine.writer = None;
+        assert_eq!(press(&mut panel, &mine), None);
     }
 
     /// A feature another machine writes, at Manual test, with its sandbox as
@@ -11870,7 +11901,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_sandbox_elsewhere_offers_its_app_and_terminals_only() {
+    fn a_sandbox_running_elsewhere_offers_its_app_and_terminals_only() {
         let f = sandbox_elsewhere(true);
         assert_eq!(f.current(), Some(Stage::ManualTest));
         let offered = page_outcomes(&f, Stage::ManualTest);
@@ -11885,10 +11916,11 @@ pub(crate) mod tests {
         ] {
             assert!(!offered.contains(&not), "{offered:?}");
         }
-        // Not running there: nothing to show, nothing to do from here.
+        // Not running there: nothing to show. A new one starts where it is pressed,
+        // and what is left of that one stays there.
         let off = page_outcomes(&sandbox_elsewhere(false), Stage::ManualTest);
         assert!(!off.contains(&PanelOutcome::OpenSandbox), "{off:?}");
-        assert!(!off.contains(&PanelOutcome::StartSandbox), "{off:?}");
+        assert!(off.contains(&PanelOutcome::StartSandbox), "{off:?}");
         assert!(!off.contains(&PanelOutcome::RemoveSandbox), "{off:?}");
     }
 

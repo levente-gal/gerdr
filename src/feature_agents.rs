@@ -685,8 +685,7 @@ pub(crate) fn stage_model_slot(
     workflow: Option<&Workflow>,
     installed: &[CliAgent],
 ) -> Option<ModelSlot> {
-    if feature.writer.is_some()
-        || feature.status != Status::Open
+    if feature.status != Status::Open
         || needs(stage).is_none()
         || feature.is_done(stage)
     {
@@ -712,8 +711,7 @@ pub(crate) fn stage_chips(
     workflow: Option<&Workflow>,
     installed: &[CliAgent],
 ) -> Vec<AgentChip> {
-    if feature.writer.is_some()
-        || feature.status != Status::Open
+    if feature.status != Status::Open
         || needs(stage).is_none()
         || feature.is_done(stage)
     {

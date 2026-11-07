@@ -92,7 +92,13 @@ pub const FILE: &str = "feature.json";
 
 /// Save `feature`'s record, atomically (`projects::write_atomic`).
 pub fn save(root: Option<&Path>, feature: &Feature) -> std::io::Result<()> {
-    let path = dir(root, &feature.project, &feature.slug).join(FILE);
+    save_at(&dir(root, &feature.project, &feature.slug), feature)
+}
+
+/// Save `feature`'s record in folder `dir`, as `save` does: for a feature that
+/// `dir` would still find elsewhere.
+pub fn save_at(dir: &Path, feature: &Feature) -> std::io::Result<()> {
+    let path = dir.join(FILE);
     let mut feature = feature.clone();
     feature.version = VERSION;
     let bytes = serde_json::to_vec_pretty(&feature).map_err(std::io::Error::other)?;

@@ -688,6 +688,38 @@ fn trouble(what: &str, out: &std::process::Output) -> Trouble {
     }
 }
 
+/// What of a feature's folder isn't its files, and stays on each machine: its
+/// record, one that moved or lost, and what its gerdrs say to each other.
+const RECORDS: [&str; 5] = [
+    store::FILE,
+    "feature.json.*",
+    super::lease::REQUEST,
+    super::lease::ANSWER,
+    super::lease::HANDED_TO,
+];
+
+/// Copy the feature's files kept in `copy` to `local` on this machine, leaving
+/// what's newer there as it is.
+pub fn copy_data(copy: &Path, local: &Path, cancel: &AtomicBool) -> Result<(), Trouble> {
+    if let Err(err) = std::fs::create_dir_all(local) {
+        return Err(Trouble::Work(format!(
+            "Couldn't make {}: {err}",
+            local.display()
+        )));
+    }
+    let mut rsync = Command::new("rsync");
+    rsync
+        .args(["-rlts", "--update"])
+        .args(RECORDS.iter().flat_map(|file| ["--exclude", file]))
+        .arg(format!("{}/", copy.display()))
+        .arg(format!("{}/", local.display()));
+    let out = machines::run(rsync, DATA, cancel).map_err(|f| Trouble::Work(f.why()))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    Err(trouble("Couldn't copy the feature's files", &out))
+}
+
 /// What the commands reaching a machine go through: its link's master.
 #[derive(Clone, Debug)]
 pub struct Reach {
@@ -960,7 +992,8 @@ impl Reach {
     fn rsync(&self, delete: bool) -> Command {
         let mut rsync = Command::new("rsync");
         rsync
-            .args(["-rlts", "--exclude", store::FILE])
+            .args(["-rlts"])
+            .args(RECORDS.iter().flat_map(|file| ["--exclude", file]))
             .arg("-e")
             .arg(self.ssh_line());
         if delete {

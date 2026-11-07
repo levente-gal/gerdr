@@ -193,6 +193,8 @@ pub enum WorkEvent {
     NotForgotten(String),
     /// What the machine has of the project open here.
     Viewed(Box<crate::machine_views::ViewNews>),
+    /// How taking a feature over from that machine goes.
+    Take(crate::machine_lease::TakeEvent),
     /// How a feature's code here stands.
     ViewCode {
         project: String,
@@ -244,7 +246,7 @@ impl Drop for Work {
 }
 
 /// How a link's threads say things.
-type WorkTx = channel::Sender<(String, WorkEvent)>;
+pub(crate) type WorkTx = channel::Sender<(String, WorkEvent)>;
 
 impl Work {
     /// Start the threads of a link that is up.
@@ -728,7 +730,7 @@ pub enum Placed {
 
 impl Gerdr {
     /// Where the threads of links say things; set up the first time.
-    fn work_sender(&mut self) -> Option<WorkTx> {
+    pub(crate) fn work_sender(&mut self) -> Option<WorkTx> {
         if self.machines.work_tx.is_none() {
             let (tx, rx) = channel::channel::<(String, WorkEvent)>();
             let inserted = self.loop_handle.insert_source(rx, |event, _, state| {
@@ -1154,6 +1156,7 @@ impl Gerdr {
                 self.show_warning(format!("The agent on {name} wasn't told: {why}{then}"));
             }
             WorkEvent::Viewed(news) => self.machine_viewed(id, *news),
+            WorkEvent::Take(event) => self.take_event(event),
             WorkEvent::ViewCode {
                 project,
                 slug,
@@ -1401,6 +1404,8 @@ impl Gerdr {
     /// back from there.
     pub(crate) fn machine_work_tick(&mut self) {
         self.publish_live();
+        // Asked over another machine's link to this one: this one may have none.
+        self.lease_tick();
         // Before anything that needs a link: losing the last closes what used it.
         self.sandbox_views_tick();
         if self.machines.links.values().all(|link| link.work.is_none()) {
@@ -1522,8 +1527,7 @@ impl Gerdr {
     /// machine to place it on.
     pub(crate) fn place_label(&self, feature: &Feature, stage: Stage) -> Option<String> {
         let running = stage == Stage::Verify && crate::feature_checks::checks_running(feature);
-        if feature.writer.is_some()
-            || feature.status != Status::Open
+        if feature.status != Status::Open
             || !takes_a_place(stage)
             || feature.is_done(stage)
             || running

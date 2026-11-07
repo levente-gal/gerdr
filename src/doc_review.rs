@@ -183,7 +183,7 @@ pub use crate::feature::artifacts::comments_path;
 /// Why an edit, a comment or Send back do nothing on an approved file.
 pub const APPROVED_FILE: &str = "An approved file can't be edited: reopen it first";
 /// Why those do nothing on a file of a feature another machine writes.
-pub const WRITTEN_ELSEWHERE: &str = "This feature is written on another machine: change it there";
+pub const WRITTEN_ELSEWHERE: &str = "This feature is written on another machine: take it over on its page to change it";
 /// Why those, and Reopen, do nothing on a locked one.
 pub const LOCKED_FILE: &str = "This file is locked: start over the stages after it first";
 

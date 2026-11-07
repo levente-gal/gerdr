@@ -125,6 +125,14 @@ impl SandboxRun {
             && self.pasta.as_ref().is_some_and(Proc::alive)
     }
 
+    /// Whether it may be running on the machine that started it, as far as is
+    /// known on another: until that machine says, it may.
+    pub fn may_run_there(&self) -> bool {
+        !self.stopped
+            && self.failed.is_none()
+            && (self.elsewhere.as_ref()).is_none_or(|there| there.alive || !there.asked)
+    }
+
     /// Stop its network, the only part that takes no docker: its pieces
     /// without a whole sandbox, after a failed start. What still runs inside
     /// goes first: a browser's window would stay, on a dead network.
@@ -1390,6 +1398,30 @@ mod tests {
             line("b", "created", "", 0)
         );
         assert_eq!(ready_of(&two), Ready::Waiting("b".to_owned()));
+    }
+
+    #[test]
+    fn a_sandbox_elsewhere_may_run_until_its_machine_says_otherwise() {
+        let there = |elsewhere| SandboxRun {
+            elsewhere: Some(elsewhere),
+            ..SandboxRun::default()
+        };
+        assert!(there(Elsewhere::default()).may_run_there());
+        let off = Elsewhere {
+            asked: true,
+            ..Elsewhere::default()
+        };
+        assert!(!there(off.clone()).may_run_there());
+        let on = Elsewhere {
+            alive: true,
+            ..off
+        };
+        assert!(there(on.clone()).may_run_there());
+        let stopped = SandboxRun {
+            stopped: true,
+            ..there(on)
+        };
+        assert!(!stopped.may_run_there());
     }
 
     #[test]

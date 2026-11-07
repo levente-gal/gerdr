@@ -178,8 +178,14 @@ How to use it:
   A feature another machine writes shows here from `Features::viewed`, not `all`:
   what walks `all` never acts on it, and `feature_mut` doesn't find it. Anything
   new on its page counts as changing it unless `PanelOutcome::reads_only` says it
-  only shows something. What reads a feature's files goes through `store::dir`:
+  only shows something: pressed, it moves the feature here first
+  (`machine_lease`). What reads a feature's files goes through `store::dir`:
   a path built from the project folder would miss the copy.
+
+  A feature can leave `all` at any moment now, for another machine. Work coming
+  back off a thread finds no feature to change (`feature_mut`) and stops there,
+  and must not end what still runs on a worker: the new writer is following it.
+  Whatever a record names that only one machine can reach goes in `lease::taken`.
 
   A sandbox stays on the machine that started it. On another gerdr
   `SandboxRun::elsewhere` holds how it stands, as that machine's `/proc` says: a

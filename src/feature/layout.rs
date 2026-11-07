@@ -948,6 +948,26 @@ pub fn link_docs(dir: &Path, multi: bool, data: &Path) -> Result<Option<PathBuf>
     Ok(exclude)
 }
 
+/// What a feature taken over from another machine needs of its folder, whose
+/// worktrees came on their own: the guard on its branches, the root's links in a
+/// folder of several repositories, the link to its files. A help to its agents, so
+/// what fails is said in the log and the rest still goes.
+pub fn settle_taken(feature: &Feature, data: &Path) {
+    for repo in feature.repos.iter().filter(|r| r.touched) {
+        if let Some(branch) = &repo.branch {
+            guard_worktree(repo, branch);
+        }
+    }
+    if feature.multi
+        && let Err(why) = link_root(&feature.root, &feature.dir)
+    {
+        tracing::warn!("{}: {why}", feature.slug);
+    }
+    if let Err(why) = link_docs(&feature.dir, feature.multi, data) {
+        tracing::warn!("{}: {why}", feature.slug);
+    }
+}
+
 /// `pattern`, an ignore file's line, without what anchors it.
 fn unanchored(pattern: &str) -> &str {
     let pattern = pattern.trim();
@@ -1544,6 +1564,7 @@ mod tests {
             verify_fixes: Vec::new(),
             ran_once: Default::default(),
             fix_rounds: 0,
+            epoch: 0,
             history: Vec::new(),
         }
     }

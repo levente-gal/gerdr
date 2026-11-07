@@ -41,6 +41,7 @@ rules, for reviewing a branch before it merges.
 | Ctrl+Shift+G | Start the sandbox again on the same data (feature tab, Manual test). |
 | Ctrl+Shift+X | Reset the sandbox's data from main's, or remove a stopped sandbox with its data, asking first (feature tab, Manual test). |
 | Ctrl+Shift+A | Pick the next agent on the feature tab's selected stage (the chips on its agent card). It applies from the agent's next start; one running goes on. |
+| Ctrl+Shift+E | Take over a feature another machine writes, on the feature tab (also the "Take over" button): it is written here from then on. Any press that changes such a feature does this first. |
 | Ctrl+Shift+Q | Stop the selected stage's agent on another machine, on the feature tab (also the "Stop agent" button on its agent card), asking while it works. Closing its Show agent tab only ends the view. |
 | Ctrl+Shift+W | Pick the machine the selected stage's next agent or Verify's next run goes on, on the feature tab: this one, then each connected machine (the "Runs here" or "Runs on" button on its agent card, or Verify's page). It applies from the next start; what runs stays where it is. The project's file can give each stage a machine under `machines`. Not offered with no machine saved, while Verify's checks run, or for T3 Code. |
 | Ctrl+Shift+I | Pick the model of the selected stage's agent on the feature tab (the "Model:" button on its agent card), for Claude Code and Cursor. It applies from the agent's next start; one already open keeps its own. Default leaves it to the CLI. Cursor also keeps a picked model as its default for all its chats, as its own `/model` does, and its picker says so. |
@@ -121,11 +122,23 @@ A key is written in one place, not on the button that does the same thing:
   says what it copied; environments stay here, and its commands build them.
 - A connected machine's features of the open project show here too, with the
   machine's name first on their cards. The gerdr that made a feature writes it,
-  and only that one: here it can be looked at, not changed. Its page offers only
-  what shows something, a key that would do more says "Only gerdr on <machine> can
-  change this feature", and its diff and files take no comments or ticks. Its page
-  says where it is written, whether that machine can be reached, and whether its
-  gerdr is open. It stays on the sidebar with the machine away, as it last was.
+  and only one writes it at a time. Its page says where it is written, whether that
+  machine can be reached, and whether its gerdr is open. It stays on the sidebar
+  with the machine away, as it last was.
+- A feature's page offers the same buttons on any machine. Pressing one that
+  changes it moves the feature here first (Take over does only that), and then the
+  press goes on, or says the feature changed on the way. Its diff and files take no
+  comments or ticks until then. While it moves, the page and a tasks row with Stop
+  say so. Files and commits come, and what isn't committed there keeps it there
+  until it is. Work on a worker goes on and is followed from here. What runs in the
+  writer's own tabs stays there, so while it works the press says to wait; at rest,
+  its tab stays there, and its chat goes back on that machine. A sandbox running
+  there keeps the feature there too. The old writer shows the feature from the new
+  one if connected to it, and otherwise says so.
+- A gerdr open on the writer has to agree. When it doesn't answer, or the machine
+  can't be reached, a dialog asks, as what happens there from then on is kept aside
+  (a toast, the "!" badge and the file named there), its commits staying on its
+  branch. Once both can be seen, the record moved most often stands.
 - A terminal of such a feature opens here on request as well. One on a worker
   takes the terminal, as any Show does. One in the writer's own session only
   looks: that machine's gerdr keeps it, and keys go nowhere. A feature's code comes
