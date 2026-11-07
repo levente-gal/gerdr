@@ -869,7 +869,7 @@ const GOLDEN: [[u64; 12]; 4] = [
         0xfc09c643c2d57ae1, // switcher
         0xe4d55e0a322e116f, // welcome
         0x1fac2c9284ad07fa, // quit
-        0x92a49c766cb37d1c, // project_menu
+        0xa153da032809bb28, // project_menu
         0xaf72881e8b741219, // project_form
         0xbd0d423ca3de12bd, // toast
         0x1b80b690e340528a, // agent_strip
@@ -884,7 +884,7 @@ const GOLDEN: [[u64; 12]; 4] = [
         0x1a39f33e0a29f83b, // switcher
         0xc6a2b9324f6b7b75, // welcome
         0x91306b9e268dc79d, // quit
-        0x68b0b29c55156a50, // project_menu
+        0xe4d3ddc977880896, // project_menu
         0x1d108a7b493c0cd1, // project_form
         0x8a9a152ce2a17651, // toast
         0x95f9334ab0c42dc0, // agent_strip
@@ -899,7 +899,7 @@ const GOLDEN: [[u64; 12]; 4] = [
         0x422064c274f92b90, // switcher
         0x232afdce7d51101b, // welcome
         0xc9fc61e2fab1872e, // quit
-        0xaf88a1744cdd63ab, // project_menu
+        0x2acadbe4552d8f00, // project_menu
         0xe2e62fecf8cb83c6, // project_form
         0x3023720e0af5627f, // toast
         0xa37db337f4fcec5f, // agent_strip
@@ -914,7 +914,7 @@ const GOLDEN: [[u64; 12]; 4] = [
         0x77eb0acf1f4d4fd5, // switcher
         0xc5b0dff47ac46d40, // welcome
         0x0a88810aa7ad751e, // quit
-        0xad9c7bc5aa554ff4, // project_menu
+        0xb1cf73a20f25f32b, // project_menu
         0x527909807a17afb5, // project_form
         0xd1410a8fb372b973, // toast
         0x8aeabdb50084b1d6, // agent_strip
@@ -2382,6 +2382,44 @@ fn dump_identity() {
                 &format!("{name}_{tag}"),
                 painter.identity_dialog(&identity(error), size, scale, p),
                 px(panel.size.w + 2 * super::SHADOW),
+            );
+        }
+    }
+}
+
+/// With `GERDR_DUMP_DIR` set, write the project menu there: as in the
+/// golden surfaces, and with the selected project's id being changed.
+#[test]
+fn dump_project_menu() {
+    let Some(dir) = std::env::var_os("GERDR_DUMP_DIR") else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    let _ = std::fs::create_dir_all(&dir);
+    let painter = Painter::new();
+    let size = (800, 600).into();
+    let mut changing = project_menu();
+    if let Some(MenuEntry::Project { renaming, .. }) = changing.entries.get_mut(3) {
+        *renaming = Some(crate::text_field::TextField::from("gerdr-app").line());
+    }
+    changing.hints = vec![
+        ("Enter".into(), "change id".into()),
+        ("Esc".into(), "cancel".into()),
+    ];
+    for (theme, scale) in CASES {
+        let p = theme.palette();
+        let px = |v: i32| (v as f64 * scale).round() as usize;
+        let tag = format!("{}_{}", theme.name(), scale);
+        for (name, view) in [
+            ("project_menu", project_menu()),
+            ("project_menu_id", changing.clone()),
+        ] {
+            let width = super::project_menu_layout(&view, size).panel.size.w + 2 * super::SHADOW;
+            dump(
+                &dir,
+                &format!("{name}_{tag}"),
+                painter.project_menu(&view, size, scale, p),
+                px(width),
             );
         }
     }

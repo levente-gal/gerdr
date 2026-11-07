@@ -93,6 +93,7 @@ mod project_commands;
 mod project_list;
 mod project_lock;
 mod project_menu;
+mod project_rename;
 mod projects;
 mod prompts;
 mod quit;
@@ -1686,6 +1687,9 @@ pub struct Gerdr {
     /// The projects to forget once their sessions have stopped, by id (see
     /// `Gerdr::forget_project`).
     pub forget_after_stop: HashSet<String>,
+    /// Projects to give a new id once stopped: by id, the new one (see
+    /// `project_rename`).
+    pub id_after_stop: HashMap<String, String>,
     /// The project just made and being shown, by id: the switch's notice
     /// says it was made.
     pub just_created: Option<String>,
@@ -6321,6 +6325,8 @@ impl Gerdr {
         if !stops.session || !self.stopping.insert(id.to_owned()) {
             if self.forget_after_stop.remove(id) {
                 self.forget_project_now(id);
+            } else if let Some(new) = self.id_after_stop.remove(id) {
+                self.change_project_id_now(id, &new);
             }
             return;
         }
@@ -6363,13 +6369,18 @@ impl Gerdr {
     fn project_stopped(&mut self, id: &str, stopped: bool) {
         self.stopping.remove(id);
         let forget = self.forget_after_stop.remove(id);
+        let new_id = self.id_after_stop.remove(id);
         let Some(name) = self.projects.project(id).map(|p| p.name.clone()) else {
             return;
         };
         if !stopped {
             // Whether it still runs is found out again.
             self.check_running();
-            let kept = if forget { "; it is kept" } else { "" };
+            let kept = match (forget, &new_id) {
+                (true, _) => "; it is kept",
+                (false, Some(_)) => "; its id stays",
+                (false, None) => "",
+            };
             return self.show_error(format!("Couldn't stop {name}{kept}"));
         }
         self.running.insert(id.to_owned(), false);
@@ -6385,6 +6396,10 @@ impl Gerdr {
         if forget {
             self.forget_project_now(id);
             return self.show_success(format!("Stopped and forgot {name}"));
+        }
+        if let Some(new) = new_id {
+            // Its own toast says so, or why not.
+            return self.change_project_id_now(id, &new);
         }
         self.refresh_project_menu();
         self.show_success(format!("Stopped {name}"));
@@ -7221,6 +7236,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         thumb_drag: None,
         stopping: HashSet::new(),
         forget_after_stop: HashSet::new(),
+        id_after_stop: HashMap::new(),
         just_created: None,
         attach_once: None,
         project_menu: None,

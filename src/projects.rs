@@ -974,6 +974,39 @@ impl Store {
         self.projects.iter_mut().find(|p| p.id == id)
     }
 
+    /// Give project `rewrite.old` the id `rewrite.new`, and change what else
+    /// the store holds of it (its paths, the state's errors and tab history;
+    /// see `project_rename`). Saved by `save`: its new file written, the old
+    /// one removed.
+    pub fn change_id(&mut self, rewrite: &crate::project_rename::Rewrite) -> Result<(), String> {
+        let (old, new) = (rewrite.old.as_str(), rewrite.new.as_str());
+        if self.project(new).is_some() {
+            return Err(format!("another project has the id {new}"));
+        }
+        let Some(project) = self.project_mut(old) else {
+            return Err(format!("no project {old}"));
+        };
+        let mut changed = project.clone();
+        rewrite.typed(&mut changed)?;
+        changed.id = new.to_owned();
+        let mut service_errors = self.service_errors.clone();
+        let mut ignored_errors = self.ignored_errors.clone();
+        let mut nav = self.nav.clone();
+        rewrite.typed(&mut service_errors)?;
+        rewrite.typed(&mut ignored_errors)?;
+        rewrite.typed(&mut nav)?;
+        if let Some(project) = self.project_mut(old) {
+            *project = changed;
+        }
+        self.service_errors = service_errors;
+        self.ignored_errors = ignored_errors;
+        self.nav = nav;
+        if self.last_active.as_deref() == Some(old) {
+            self.last_active = Some(new.to_owned());
+        }
+        Ok(())
+    }
+
     /// Put project `project`'s workspaces in `order` (record ids) among the
     /// places they hold; those not in it (a workspace not open just now,
     /// such as the Cursor one between two windows) keep theirs, to come
@@ -1125,7 +1158,7 @@ pub fn project_file(id: &str) -> PathBuf {
 
 /// Whether `id` can be a project's, and so a file's name: lowercase
 /// `[a-z0-9-]`, not starting with a dash, as `slugify` makes them.
-fn valid_id(id: &str) -> bool {
+pub(crate) fn valid_id(id: &str) -> bool {
     !id.is_empty()
         && !id.starts_with('-')
         && id
@@ -2731,6 +2764,33 @@ mod tests {
         assert!(!store.write());
         assert!(!root.join("escaped.json").exists());
         assert_eq!(names(&dir).len(), 3);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_changed_id_moves_the_file_and_what_names_it() {
+        let root = scratch("change-id");
+        let mut store = at(&root, sample());
+        store.save();
+        let dir = root.join("projects");
+        assert!(dir.join("api.json").exists());
+        let rewrite = crate::project_rename::Rewrite::new("api", "api2", &root);
+        store.change_id(&rewrite).unwrap();
+        assert!(store.save_projects(&["api2".to_owned()]));
+        assert!(!dir.join("api.json").exists());
+        let (loaded, how) = Store::load_from(&root, || None);
+        assert_eq!(how, Loaded::File);
+        assert!(loaded.project("api").is_none());
+        assert_eq!(loaded.project("api2").map(|p| p.id.as_str()), Some("api2"));
+        assert_eq!(loaded.last_active.as_deref(), Some("api2"));
+        let parked = serde_json::to_string(&loaded.nav).unwrap();
+        assert!(
+            parked.contains("\"api2\"") && !parked.contains("\"api\""),
+            "{parked}"
+        );
+        // Not over another project.
+        let back = crate::project_rename::Rewrite::new("api2", "api2", &root);
+        assert!(store.change_id(&back).is_err());
         let _ = std::fs::remove_dir_all(&root);
     }
 

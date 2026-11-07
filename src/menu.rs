@@ -25,6 +25,9 @@ use crate::{
 #[derive(Clone, Debug, PartialEq)]
 pub enum MenuAction {
     NewTerminal,
+    /// Give project `.0` the id `.1` (see `Gerdr::change_project_id`): a
+    /// change's Undo.
+    ChangeProjectId(String, String),
     /// An action of the repositories panel, as its footer offers it.
     ReposAction(ReposButton),
     /// The dialog raising the inotify limit (see `inotify_limit`).
@@ -439,6 +442,7 @@ impl Gerdr {
     pub fn menu_action(&mut self, action: MenuAction) {
         match action {
             MenuAction::NewTerminal => self.run_action(Action::NewTerminal),
+            MenuAction::ChangeProjectId(id, new) => self.change_project_id(&id, &new),
             MenuAction::NewCursor => self.open_cursor(None),
             MenuAction::OpenPage(w, url) => self.open_page(w, url),
             MenuAction::OpenPageInNewTab(w, url) => self.open_page_in_new_tab(w, url),
