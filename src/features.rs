@@ -11643,6 +11643,7 @@ fn review_toolbar(
     panel: &FeaturePanel,
     feature: &Feature,
     files: Option<chrome::ReviewFiles>,
+    ctx: RowCtx,
 ) -> (Option<(String, bool)>, Vec<chrome::ReviewButton>) {
     use crate::chrome::ReposButton as B;
     let wd = (panel.review.as_deref())
@@ -11655,12 +11656,28 @@ fn review_toolbar(
         return (None, Vec::new());
     };
     let (total, changed) = files.map_or((0, 0), |f| (f.total, f.changed));
-    let next = crate::feature_diff::next_step(&gate, total, changed);
+    // Done with, it reads as it was worked; Reopen waits on the next stage.
+    let done = (wd.feature.as_ref()).is_some_and(|fe| fe.locked().is_some());
+    let locked = (ctx.locked_by(feature, Stage::CodeReview)).filter(|_| done);
+    let next = match done {
+        true => match locked {
+            Some(by) => (
+                format!("Approved \u{b7} locked: {}", lock_why(feature, by)),
+                true,
+            ),
+            None => ("Approved \u{b7} only to read: Reopen to change it".to_owned(), true),
+        },
+        false => crate::feature_diff::next_step(&gate, total, changed),
+    };
     let buttons = (wd.feature_hints().into_iter())
-        .map(|hint| {
+        .map(|mut hint| {
+            if let (B::Reopen, Some(by)) = (hint.button, locked) {
+                let why = crate::stage_lock::locked_warning(feature, Stage::CodeReview, by);
+                hint.disabled = Some(why);
+            }
             let style = match (&hint.disabled, hint.button) {
                 (Some(_), _) => ButtonStyle::Off,
-                (None, B::Approve) => ButtonStyle::Primary,
+                (None, B::Approve | B::GoOn) => ButtonStyle::Primary,
                 (None, B::PlanFixes) if gate.comments > 0 => ButtonStyle::Primary,
                 _ => ButtonStyle::Plain,
             };
@@ -11703,6 +11720,7 @@ fn fixes_word(feature: &Feature, notes: &[Comment]) -> String {
     let made: &[String] = (feature.comment_fixes.last()).map_or(&[], |fix| &fix.made);
     let sent = notes.iter().filter(|c| c.flag.is_some());
     match sent.clone().count() {
+        0 if feature.is_done(Stage::CodeReview) => "none".to_owned(),
         0 => "none yet".to_owned(),
         total => {
             let done = sent.filter(|c| note_made(c, made)).count();
@@ -12641,7 +12659,7 @@ fn tab_view(
         && crate::feature_diff::review_views(feature))
     .then(|| {
         let files = review_files(feature, state);
-        let (next, buttons) = review_toolbar(panel, feature, files);
+        let (next, buttons) = review_toolbar(panel, feature, files, state.ctx);
         chrome::ReviewSwitch {
             view: panel.review_view_of(feature),
             files,
@@ -14952,7 +14970,7 @@ pub(crate) mod tests {
 
     /// `f`, with a fix round asked by `stage`, in `phase`.
     #[test]
-    fn only_a_code_review_waiting_on_the_user_goes_on_its_page() {
+    fn a_code_review_at_hand_or_done_goes_on_its_page() {
         use crate::feature_diff::review_views;
         let code_review = stage_index(Stage::CodeReview);
         let f = feature("f", vec![repo("api", true)], code_review);
@@ -14972,12 +14990,13 @@ pub(crate) mod tests {
             Stage::CodeReview,
             FixPhase::Ready
         )));
-        // Closed, or done with it: the page says how it went.
+        // Closed: the page says how it went.
         let mut closed = f.clone();
         closed.status = Status::Abandoned;
         assert!(!review_views(&closed));
+        // Done with it: the review stays, only to read.
         let done = feature("f", vec![repo("api", true)], code_review + 1);
-        assert!(!review_views(&done));
+        assert!(review_views(&done));
     }
 
     #[test]

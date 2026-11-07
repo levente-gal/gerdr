@@ -3927,6 +3927,37 @@ fn feature_tab_review_ready() -> super::FeatureTabView {
     view
 }
 
+/// Code review's page once it is done: the review as it was worked, only to
+/// read, with Go to Manual test and Reopen on its line.
+fn feature_tab_review_done() -> super::FeatureTabView {
+    use super::{ButtonStyle, ReposButton as B, ReviewButton};
+    let mut view = feature_tab_review_page();
+    at_stage(&mut view, 7, super::NodeMark::Waiting, "to test");
+    select_node(&mut view, 6);
+    let mut switch = review_switch(super::ReviewView::Code);
+    switch.files = Some(super::ReviewFiles {
+        viewed: 8,
+        total: 8,
+        changed: 0,
+    });
+    switch.fixes = "none".into();
+    let next = "Approved \u{b7} only to read: Reopen to change it";
+    switch.next = Some((next.into(), true));
+    let button = |button: B, label: &str, style, key: &str| ReviewButton {
+        button,
+        label: label.into(),
+        style,
+        key: key.into(),
+        disabled: None,
+    };
+    switch.buttons = vec![
+        button(B::GoOn, "Go to Manual test", ButtonStyle::Primary, "Ctrl+Enter"),
+        button(B::Reopen, "Reopen", ButtonStyle::Plain, "Ctrl+Shift+Enter"),
+    ];
+    view.review_switch = Some(switch);
+    view
+}
+
 /// Code review's page on its fixes: the plan's card, the comments as cards, an
 /// earlier round folded, and the plan to read.
 fn feature_tab_review_fixes() -> super::FeatureTabView {
@@ -6006,20 +6037,21 @@ fn dump_doc_tab() {
     }
 }
 
-const REVIEW_VIEWS: [&str; 5] = [
+const REVIEW_VIEWS: [&str; 6] = [
     "tab_review_code_1180",
     "tab_review_fixes_1180",
     "tab_review_fixes_860",
     "tab_review_ready_1180",
     "tab_review_code_860",
+    "tab_review_done_1180",
 ];
 
 /// The recorded hashes of `REVIEW_VIEWS`, per case in `CASES`.
-const GOLDEN_REVIEW_VIEWS: [[u64; 5]; 4] = [
-    [0xc079d4a47dfb8f07, 0x54dd901fa2a70abe, 0xc1545fdb81fe7fd2, 0x60ced7661f313794, 0xaae0e6667caf58df],
-    [0xfcf48c5be95bbf79, 0x59cae7d81cf2cf1e, 0x05aa91649802c5af, 0xc4f6953a672794c3, 0xeac75621de8e7164],
-    [0xae786b051cb842b1, 0x0d41cf897de24c29, 0x65af65532294c589, 0xef1bc3ecb1d7efb8, 0xc337cdceb0414f87],
-    [0xf66d26606fa40b14, 0xd45dc034c427728c, 0xb72af0e7cce0522e, 0x8c892e5a6b0924f8, 0xdc3053ee5331a665],
+const GOLDEN_REVIEW_VIEWS: [[u64; 6]; 4] = [
+    [0xc079d4a47dfb8f07, 0x54dd901fa2a70abe, 0xc1545fdb81fe7fd2, 0x60ced7661f313794, 0xaae0e6667caf58df, 0xc51714381cece119],
+    [0xfcf48c5be95bbf79, 0x59cae7d81cf2cf1e, 0x05aa91649802c5af, 0xc4f6953a672794c3, 0xeac75621de8e7164, 0xecd0cd1d777ac778],
+    [0xae786b051cb842b1, 0x0d41cf897de24c29, 0x65af65532294c589, 0xef1bc3ecb1d7efb8, 0xc337cdceb0414f87, 0x992052e127fa1b18],
+    [0xf66d26606fa40b14, 0xd45dc034c427728c, 0xb72af0e7cce0522e, 0x8c892e5a6b0924f8, 0xdc3053ee5331a665, 0xb52e5a4e08ebfe8c],
 ];
 
 #[test]
@@ -6034,6 +6066,7 @@ fn code_reviews_views_paint_the_same_pixels() {
         (feature_tab_review_fixes(), 860),
         (feature_tab_review_ready(), 1180),
         (feature_tab_review_code(), 860),
+        (feature_tab_review_done(), 1180),
     ];
     check_each(&REVIEW_VIEWS, &golden, |painter, theme, scale, surface| {
         let (view, w) = &views[surface];
@@ -6062,6 +6095,7 @@ fn dump_review_views() {
         (feature_tab_review_fixes(), 860),
         (feature_tab_review_ready(), 1180),
         (feature_tab_review_code(), 860),
+        (feature_tab_review_done(), 1180),
     ];
     for (theme, scale) in CASES {
         for ((view, w), name) in views.iter().zip(REVIEW_VIEWS) {

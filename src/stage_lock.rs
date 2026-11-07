@@ -20,7 +20,7 @@ use crate::{
 /// What refusing to change locked `stage` of `feature` says: why, and what
 /// frees it. The later stage `by` reopens first when it is done, else it
 /// starts over.
-fn locked_warning(feature: &Feature, stage: Stage, by: Stage) -> String {
+pub(crate) fn locked_warning(feature: &Feature, stage: Stage, by: Stage) -> String {
     let what = match feature.is_done(by) {
         true => "reopen",
         false => "start",
