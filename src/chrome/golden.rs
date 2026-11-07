@@ -3078,6 +3078,7 @@ pub(super) fn feature_tab() -> super::FeatureTabView {
         scroll: [0.0; 3],
         hover: None,
         hints: hints.map(|(k, a)| (k.to_owned(), a.to_owned())).into(),
+        marks: Default::default(),
     }
 }
 
@@ -4706,6 +4707,7 @@ fn feature_tab_manual_test(note: bool) -> super::FeatureTabView {
                 steps,
                 hidden: false,
                 needle: String::new(),
+                whole: false,
             })),
             tag,
             title: title.into(),
@@ -4772,17 +4774,119 @@ fn feature_tab_manual_search() -> super::FeatureTabView {
         strip.search = Some(SearchBar {
             query: Line::from(needle),
             placeholder: "Search the criteria".into(),
-            count: "1 of 4".into(),
+            count: "1 of 2".into(),
             found: true,
             focused: true,
             whole: false,
         });
     }
+    view.marks.found_at = Some(0);
     view.hints = [("Enter", "to the criteria"), ("Esc", "clear")]
         .iter()
         .map(|(k, w)| ((*k).to_owned(), (*w).to_owned()))
         .collect();
     view
+}
+
+/// Manual test's page with text selected across an open criterion's
+/// lines, from its title into its steps.
+fn feature_tab_manual_select() -> super::FeatureTabView {
+    use super::{TextPick, TextSpot};
+    let mut view = feature_tab_manual_test(false);
+    let frame = smithay::utils::Rectangle::from_size((860, TAB_HEIGHT).into());
+    let layout = super::feature_tab_layout(&view, frame);
+    let first = (layout.texts.iter())
+        .position(|t| t.card.is_some_and(|c| c > 0))
+        .expect("a criterion's line");
+    let (anchor, cursor) = (
+        TextSpot { line: first, ch: 4 },
+        TextSpot {
+            line: first + 3,
+            ch: 9,
+        },
+    );
+    let said = |s: TextSpot| layout.line_text(s.line).expect("a line").to_owned();
+    view.marks.pick = Some(TextPick {
+        anchor,
+        cursor,
+        said: [said(anchor), said(cursor)],
+    });
+    view.hints = [("Ctrl+C / y", "copy"), ("* / #", "search it"), ("Esc", "unselect")]
+        .iter()
+        .map(|(k, w)| ((*k).to_owned(), (*w).to_owned()))
+        .collect();
+    view
+}
+
+#[test]
+fn the_page_text_under_the_pointer_selects_and_copies_as_it_reads() {
+    use super::{Piece, TabColumn, TextPick, TextSpot};
+    let mut view = feature_tab_manual_test(false);
+    let frame = smithay::utils::Rectangle::from_size((860, TAB_HEIGHT).into());
+    let layout = super::feature_tab_layout(&view, frame);
+    // AC-2 is open: its title, its id line, then "Given" beside its step.
+    let line = (layout.texts.iter())
+        .position(|t| t.card == Some(1))
+        .expect("AC-2's title");
+    let text = |n: usize| layout.line_text(n).expect("a line").to_owned();
+    assert_eq!(text(line), "Export off with no invoices");
+    assert_eq!(text(line + 2), "Given");
+    let rect = |n: usize| layout.pieces[TabColumn::Page as usize][layout.texts[n].piece].0;
+    let start = rect(line);
+    let at = |x: i32, y: i32| layout.text_at(&view, (x, y).into(), false);
+    let mid = start.loc.y + start.size.h / 2;
+    assert_eq!(at(start.loc.x + 1, mid), Some(TextSpot { line, ch: 0 }));
+    // Off the page's text: nothing, unless near.
+    assert_eq!(at(start.loc.x - 40, mid), None);
+    let near = layout.text_at(&view, (start.loc.x - 40, mid).into(), true);
+    assert_eq!(near, Some(TextSpot { line, ch: 0 }));
+    // From the title into the step beside "Given": lines side by side
+    // joined by a space, others by a new line; backwards the same.
+    let pick = |anchor: TextSpot, cursor: TextSpot| TextPick {
+        anchor,
+        cursor,
+        said: [text(anchor.line), text(cursor.line)],
+    };
+    let (from, to) = (TextSpot { line, ch: 7 }, TextSpot { line: line + 3, ch: 2 });
+    view.marks.pick = Some(pick(to, from));
+    let copied = layout.picked_text(&view).expect("text selected");
+    assert_eq!(copied, format!("off with no invoices\n{}\nGiven no", text(line + 1)));
+    // Painted: a ground under each line it takes.
+    let laid = super::feature_tab_layout(&view, frame);
+    let grounds = laid.pieces[TabColumn::Page as usize]
+        .iter()
+        .filter(|(_, p)| matches!(p, Piece::Picked { .. }))
+        .count();
+    assert_eq!(grounds, 4);
+    // Once the page says something else there, it is gone.
+    let mut gone = pick(from, to);
+    gone.said[0] = "Something else".into();
+    view.marks.pick = Some(gone);
+    assert_eq!(layout.picked_text(&view), None);
+    let laid = super::feature_tab_layout(&view, frame);
+    let pieces = &laid.pieces[TabColumn::Page as usize];
+    assert!(!pieces.iter().any(|(_, p)| matches!(p, Piece::Picked { .. })));
+}
+
+#[test]
+fn the_match_gone_to_is_the_one_tinted_more() {
+    use super::{Piece, TabColumn};
+    let mut view = feature_tab_manual_search();
+    let frame = smithay::utils::Rectangle::from_size((860, TAB_HEIGHT).into());
+    let currents = |view: &super::FeatureTabView| -> Vec<Option<usize>> {
+        let layout = super::feature_tab_layout(view, frame);
+        (layout.pieces[TabColumn::Page as usize].iter())
+            .filter_map(|(_, p)| match p {
+                Piece::Found { current, .. } => Some(*current),
+                _ => None,
+            })
+            .collect()
+    };
+    let layout = super::feature_tab_layout(&view, frame);
+    assert_eq!(layout.matches.len(), 2);
+    assert_eq!(currents(&view), [Some(0), None]);
+    view.marks.found_at = Some(1);
+    assert_eq!(currents(&view), [None, Some(0)]);
 }
 
 /// Manual test's page with its sandbox running, its app with three pages:
@@ -4810,7 +4914,7 @@ fn feature_tab_manual_pages() -> super::FeatureTabView {
 }
 
 /// The feature tab's fixtures, by name.
-fn feature_tabs() -> [(&'static str, super::FeatureTabView); 41] {
+fn feature_tabs() -> [(&'static str, super::FeatureTabView); 42] {
     [
         ("tab_build", feature_tab()),
         ("tab_verify_fixes", feature_tab_verify_fixes()),
@@ -4861,12 +4965,13 @@ fn feature_tabs() -> [(&'static str, super::FeatureTabView); 41] {
         ("tab_manual_note", feature_tab_manual_test(true)),
         ("tab_manual_pages", feature_tab_manual_pages()),
         ("tab_manual_search", feature_tab_manual_search()),
+        ("tab_manual_select", feature_tab_manual_select()),
         ("tab_review_rounds", feature_tab_review_rounds()),
     ]
 }
 
 /// Each fixture at the width it shows best at, and Build at all three.
-const TAB_SURFACES: [(&str, i32); 52] = [
+const TAB_SURFACES: [(&str, i32); 53] = [
     ("tab_build", 860),
     ("tab_build", 1180),
     ("tab_build", 1920),
@@ -4919,9 +5024,10 @@ const TAB_SURFACES: [(&str, i32); 52] = [
     ("tab_open_round", 860),
     ("tab_manual_pages", 860),
     ("tab_manual_search", 860),
+    ("tab_manual_select", 860),
 ];
 
-const FEATURE_TAB: [&str; 52] = [
+const FEATURE_TAB: [&str; 53] = [
     "tab_build_860",
     "tab_build_1180",
     "tab_build_1920",
@@ -4974,10 +5080,11 @@ const FEATURE_TAB: [&str; 52] = [
     "tab_open_round_860",
     "tab_manual_pages_860",
     "tab_manual_search_860",
+    "tab_manual_select_860",
 ];
 
 /// The recorded hashes of `FEATURE_TAB`, per case in `CASES`.
-const GOLDEN_FEATURE_TAB: [[u64; 52]; 4] = [
+const GOLDEN_FEATURE_TAB: [[u64; 53]; 4] = [
     // Dark at 1
     [
         0xa1cb47fc387244fb, // tab_build_860
@@ -5031,7 +5138,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 52]; 4] = [
         0x1ab3028834af4e64, // tab_open_round_1180
         0xae6244bc63e11d4d, // tab_open_round_860
         0x3ca562e56cb5ac79, // tab_manual_pages_860
-        0xebe69c2a656a36be, // tab_manual_search_860
+        0xf439e283f4cafda2, // tab_manual_search_860
+        0x010ec66c0954969d, // tab_manual_select_860
     ],
     // Dark at 2
     [
@@ -5086,7 +5194,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 52]; 4] = [
         0xb6c596e311face93, // tab_open_round_1180
         0x3f93d48fbc514097, // tab_open_round_860
         0x638d93fbc6e1f713, // tab_manual_pages_860
-        0xf221ec8385fae2e3, // tab_manual_search_860
+        0x15a2d69adf802796, // tab_manual_search_860
+        0x9a471d9cc1895e23, // tab_manual_select_860
     ],
     // Light at 1
     [
@@ -5141,7 +5250,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 52]; 4] = [
         0xcf3c025a23ff89a8, // tab_open_round_1180
         0xa5b2c702e3dcfd64, // tab_open_round_860
         0x3d753e7555e243d8, // tab_manual_pages_860
-        0x0cc17567dfb80ce6, // tab_manual_search_860
+        0x31b855efdeeab544, // tab_manual_search_860
+        0xc85de47f1e15da39, // tab_manual_select_860
     ],
     // Light at 2
     [
@@ -5196,7 +5306,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 52]; 4] = [
         0x05be9740c8c25364, // tab_open_round_1180
         0xfafa8c8fa68aecb2, // tab_open_round_860
         0xcba476b8512b8cc8, // tab_manual_pages_860
-        0x44ba953b9b4a7da9, // tab_manual_search_860
+        0x085ecd92e9b0d5f2, // tab_manual_search_860
+        0xc5481c04265fbb04, // tab_manual_select_860
     ],
 ];
 

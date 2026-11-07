@@ -507,6 +507,7 @@ impl Gerdr {
                     self.field_drag = false;
                     self.repos_rows_drag = false;
                     self.scrollback_release();
+                    self.release_page_text();
                     if self.thumb_drag.take().is_some() {
                         return;
                     }
@@ -866,6 +867,10 @@ impl Gerdr {
             O::Switcher => self.switcher_click(pos),
             O::Tooltip | O::ContextMenu => {}
         }
+        // On the feature tab's page, a press on text selects from there.
+        if overlay == O::Features {
+            self.press_page_text(pos);
+        }
         // A click on a field focuses it, and puts the caret there.
         let takes_field = matches!(overlay, O::Features | O::Criteria)
             || overlay.grabs()
@@ -1158,6 +1163,9 @@ impl Gerdr {
         if self.scrollback_dragging() {
             self.scrollback_drag(pos);
         }
+        if self.picking_page_text() {
+            self.drag_page_text(pos);
+        }
         if self.thumb_drag.is_some() {
             self.drag_thumb(pos);
         }
@@ -1225,7 +1233,8 @@ impl Gerdr {
                 && self
                     .field_spot()
                     .is_some_and(|field| field.area.to_f64().contains(pos))
-                || self.on_scrollback_text(pos);
+                || self.on_scrollback_text(pos)
+                || at == Some(overlay::Overlay::Features) && self.on_page_text(pos);
             let hit = self.region_hit(pos, &regions);
             // What can be held and dragged: a workspace row, a tab, a
             // pane by its bar's label, a scrollbar's thumb.

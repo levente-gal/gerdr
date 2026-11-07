@@ -4,7 +4,10 @@
 //! wrong, written on its row. Each row folds to its line or opens to its
 //! steps; they start folded, one folds as it passes, and what is open and
 //! read is kept in `state.json` (`manual::Folds`). A search over them hides
-//! those not saying what is typed and opens the rest. The results save as they are given (`Feature::manual`, see
+//! those not saying what is typed and opens the rest; `n` and `N` go
+//! through the places it found, as the page lays them out (`next_match`),
+//! and `*` / `#` search for text selected on the page (`page_text`). The
+//! results save as they are given (`Feature::manual`, see
 //! `feature::manual`) and stay as the code changes. Plan fixes starts a fix
 //! round on the failures found so far (see `feature_fix`): the user goes on
 //! trying the rest while the Build agent fixes them, the feature stays on
@@ -21,7 +24,7 @@ use smithay::input::keyboard::{Keysym, ModifiersState};
 
 use crate::{
     Gerdr,
-    chrome::TabArea,
+    chrome::{TabArea, TabColumn},
     feature::{
         self, Feature, Stage, Status, artifacts,
         manual::{self, Criterion, Verdict},
@@ -89,12 +92,13 @@ pub struct Row {
 }
 
 impl Row {
-    /// Whether it says `query` (lowercase) anywhere the page shows: its id,
-    /// title, steps or note, in any case.
-    pub fn says(&self, query: &str) -> bool {
+    /// Whether it says `query` anywhere the page shows: its id, title,
+    /// steps or note, as `crate::find` finds it (any case for one in lower
+    /// case; a `whole` word only as a word of its own).
+    pub fn says(&self, query: &str, whole: bool) -> bool {
         [&self.id, &self.title, &self.text, &self.note]
             .iter()
-            .any(|t| t.to_lowercase().contains(query))
+            .any(|t| !crate::find::find(t, query, whole).is_empty())
     }
 }
 
@@ -106,21 +110,53 @@ pub struct Search {
     pub query: TextField,
     /// The field has the keys, not the criteria.
     pub typing: bool,
+    /// It finds the query only as a word of its own: `*` and `#` searched
+    /// for the word under the pointer. Typing ends it.
+    pub whole: bool,
+    /// The match gone to, by its index down the page
+    /// (`chrome::FeatureTabLayout::matches`); `None` before any.
+    pub at: Option<usize>,
 }
 
 impl Search {
-    /// What it looks for, lowercase; empty for nothing.
+    /// What it looks for, as typed (see `crate::find`); empty for nothing.
     pub fn needle(&self) -> String {
-        self.query.trim().to_lowercase()
+        self.query.trim().to_owned()
     }
 }
 
-/// Which of `rows` show while searching for `needle` (lowercase): all with
-/// nothing typed.
-pub fn shown(rows: &[Row], needle: &str) -> Vec<bool> {
+/// Which of `rows` show while searching for `needle` (see `Row::says`):
+/// all with nothing typed.
+pub fn shown(rows: &[Row], needle: &str, whole: bool) -> Vec<bool> {
     rows.iter()
-        .map(|r| needle.is_empty() || r.says(needle))
+        .map(|r| needle.is_empty() || r.says(needle, whole))
         .collect()
+}
+
+/// The match to go to of `matches` (each with the criterion it is in),
+/// from `at` with `selected` the criterion selected: the next (`back`:
+/// the one before), round the ends; with the selection moved off `at`'s
+/// criterion, the first in or after it (`back`: the last in or before
+/// it), as vim's `n` goes from the cursor. `None` with none.
+pub fn next_match(
+    matches: &[Option<usize>],
+    at: Option<usize>,
+    selected: usize,
+    back: bool,
+) -> Option<usize> {
+    let n = matches.len();
+    if n == 0 {
+        return None;
+    }
+    let on = at.filter(|a| *a < n && matches[*a] == Some(selected));
+    if let Some(a) = on {
+        return Some(if back { (a + n - 1) % n } else { (a + 1) % n });
+    }
+    let card = |i: usize| matches[i].unwrap_or(0);
+    match back {
+        false => (0..n).find(|&i| card(i) >= selected).or(Some(0)),
+        true => (0..n).rev().find(|&i| card(i) <= selected).or(Some(n - 1)),
+    }
 }
 
 /// The criterion to select of those `shown` instead of hidden `at`: the
@@ -404,7 +440,7 @@ impl Gerdr {
     }
 
     /// Whether the page with the criteria shows, so their search can.
-    fn criteria_search_shows(&self) -> bool {
+    pub(crate) fn criteria_search_shows(&self) -> bool {
         let Some(panel) = &self.features.panel else {
             return false;
         };
@@ -443,7 +479,7 @@ impl Gerdr {
         let Some(panel) = self.features.panel.as_ref() else {
             return;
         };
-        let Some(needle) = (panel.search.as_ref()).map(Search::needle) else {
+        let Some((needle, whole)) = (panel.search.as_ref()).map(|s| (s.needle(), s.whole)) else {
             return;
         };
         let Some(feature) = self.feature(&panel.project, &panel.slug) else {
@@ -452,7 +488,7 @@ impl Gerdr {
         if !crate::features::shows_criteria(feature, panel.page_stage(feature)) {
             return;
         }
-        let shown = shown(&self.criterion_rows(feature), &needle);
+        let shown = shown(&self.criterion_rows(feature), &needle, whole);
         if let Some(panel) = self.features.panel.as_mut()
             && let Some(at) = settle(panel.finding, back, &shown)
         {
@@ -498,7 +534,7 @@ impl Gerdr {
                 self.close_criteria_search();
             } else {
                 search.query.clear();
-                search.typing = true;
+                (search.typing, search.whole, search.at) = (true, false, None);
                 self.sync_feature_page();
             }
             return true;
@@ -507,6 +543,13 @@ impl Gerdr {
             if opens {
                 search.typing = true;
                 self.stop_key_repeat();
+                return true;
+            }
+            // n and Shift+N go through what it found, as vim's.
+            let shift = mods.shift && !(mods.ctrl || mods.alt || mods.logo);
+            let next = (bare || shift) && matches!(sym, Keysym::n | Keysym::N);
+            if next && !search.needle().is_empty() {
+                self.go_to_match(shift, false);
                 return true;
             }
             return false;
@@ -522,6 +565,10 @@ impl Gerdr {
         if to_list {
             search.typing = false;
         }
+        if edit == Edit::Changed {
+            // What is typed is found anywhere, not as a word of its own.
+            (search.whole, search.at) = (false, None);
+        }
         // Chords not the field's are the tab's: Ctrl+Enter marks passed.
         if edit == Edit::Ignored && (mods.ctrl || mods.alt || mods.logo) {
             return false;
@@ -531,8 +578,57 @@ impl Gerdr {
             self.settle_criteria(false);
             self.sync_feature_page();
             self.reveal_feature_finding();
+            if edit == Edit::Changed {
+                self.go_to_match(false, true);
+            }
         }
         true
+    }
+
+    /// Go to the next place the criteria's search found (`back`: the one
+    /// before), as `n` and `N` do, its criterion selected and the page
+    /// scrolled to it; `fresh` for what was just typed: the first in or
+    /// after the criterion selected.
+    pub(crate) fn go_to_match(&mut self, back: bool, fresh: bool) {
+        self.sync_feature_page();
+        let Some((_, layout)) = self.feature_tab_parts() else {
+            return;
+        };
+        let cards: Vec<Option<usize>> = layout.matches.iter().map(|m| m.card).collect();
+        let Some(panel) = self.features.panel.as_mut() else {
+            return;
+        };
+        let selected = panel.finding;
+        let Some(search) = panel.search.as_mut() else {
+            return;
+        };
+        let from = if fresh { None } else { search.at };
+        search.at = next_match(&cards, from, selected, back);
+        let Some(at) = search.at else {
+            return;
+        };
+        if let Some(card) = cards[at] {
+            panel.finding = card;
+            panel.focus = TabArea::Findings;
+        }
+        self.sync_feature_page();
+        self.reveal_page_line(layout.matches[at].line);
+    }
+
+    /// Scroll the page to show line `line` of its text, as laid out now.
+    pub(crate) fn reveal_page_line(&mut self, line: usize) {
+        let Some((_, layout)) = self.feature_tab_parts() else {
+            return;
+        };
+        let Some(panel) = self.features.panel.as_mut() else {
+            return;
+        };
+        let scroll = &mut panel.scroll[TabColumn::Page as usize];
+        if let Some(to) = layout.reveal_line(line, scroll.pos())
+            && to != scroll.pos()
+        {
+            scroll.jump(to);
+        }
     }
 
     /// Give the keyboard to the criteria of the feature on the tab, at the
@@ -958,11 +1054,16 @@ mod tests {
         ];
         rows[1].note = "Save stays ON".into();
         rows[2].title = "Exports".into();
-        assert_eq!(shown(&rows, ""), [true, true, true]);
-        assert_eq!(shown(&rows, "save stays"), [false, true, false]);
-        assert_eq!(shown(&rows, "export"), [false, false, true]);
-        assert_eq!(shown(&rows, "ac-1"), [true, false, false]);
-        assert_eq!(shown(&rows, "when b"), [true, true, true]);
+        assert_eq!(shown(&rows, "", false), [true, true, true]);
+        assert_eq!(shown(&rows, "save stays", false), [false, true, false]);
+        assert_eq!(shown(&rows, "export", false), [false, false, true]);
+        assert_eq!(shown(&rows, "ac-1", false), [true, false, false]);
+        assert_eq!(shown(&rows, "when b", false), [true, true, true]);
+        // One with a capital finds only that case; a whole word only alone.
+        assert_eq!(shown(&rows, "Save", false), [false, true, false]);
+        assert_eq!(shown(&rows, "ON", false), [false, true, false]);
+        assert_eq!(shown(&rows, "Export", true), [false, false, false]);
+        assert_eq!(shown(&rows, "Exports", true), [false, false, true]);
         // Hidden, the selection goes on the way it went, else back.
         let some = [true, false, true];
         assert_eq!(settle(1, false, &some), Some(2));
@@ -970,6 +1071,24 @@ mod tests {
         assert_eq!(settle(0, false, &some), Some(0));
         assert_eq!(settle(2, false, &[true, false, false]), Some(0));
         assert_eq!(settle(1, false, &[false, false, false]), None);
+    }
+
+    #[test]
+    fn n_goes_on_from_the_match_and_from_the_criterion_the_selection_moved_to() {
+        // Two matches in criterion 0, one in 2, one in 3.
+        let cards = [Some(0), Some(0), Some(2), Some(3)];
+        assert_eq!(next_match(&cards, None, 0, false), Some(0));
+        assert_eq!(next_match(&cards, Some(0), 0, false), Some(1));
+        assert_eq!(next_match(&cards, Some(1), 0, false), Some(2));
+        // Round the ends, both ways.
+        assert_eq!(next_match(&cards, Some(3), 3, false), Some(0));
+        assert_eq!(next_match(&cards, Some(0), 0, true), Some(3));
+        // The selection moved to criterion 1: on from there, or back.
+        assert_eq!(next_match(&cards, Some(0), 1, false), Some(2));
+        assert_eq!(next_match(&cards, Some(0), 1, true), Some(1));
+        // Past the last criterion found, `n` goes round to the first.
+        assert_eq!(next_match(&cards, None, 5, false), Some(0));
+        assert_eq!(next_match(&[], None, 0, false), None);
     }
 
     #[test]

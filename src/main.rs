@@ -76,6 +76,7 @@ mod machine_views;
 mod machine_work;
 mod machines;
 mod manual_test;
+mod page_text;
 mod md_blocks;
 mod md_preview;
 mod menu;
