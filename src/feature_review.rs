@@ -684,11 +684,17 @@ impl Gerdr {
     /// Show comment `c` the user left in feature `slug`'s diff.
     pub(crate) fn show_diff_note(&mut self, project: &str, slug: &str, c: review::Comment) {
         self.open_feature_diff(project, slug, None);
+        let sent = self.sent_notes(project, slug);
         if let Some(fe) = (self.wd_mut().and_then(|wd| wd.feature.as_mut()))
             .filter(|fe| fe.project == project && fe.slug == slug)
         {
-            // Its diff is being read: the cursor goes there once it is.
-            fe.focus_note = Some(c);
+            fe.sent_notes = sent;
+            // Its diff is being read: the cursor goes there once it is. One
+            // that went to Build is found by id, as a finding is.
+            match c.flag {
+                Some(flag) => fe.focus = Some(flag.id),
+                None => fe.focus_note = Some(c),
+            }
         }
         // On the page it may have been read already.
         let env = self.worktree_env();
@@ -833,9 +839,16 @@ impl Gerdr {
             Some(plan) => self
                 .fix_input(project, slug, &what, &text)
                 .is_some_and(|input| {
-                    self.start_unplanned_fix_round(project, slug, &what, input, &plan)
+                    self.start_unplanned_fix_round(
+                        project,
+                        slug,
+                        Stage::AiReview,
+                        &what,
+                        input,
+                        &plan,
+                    )
                 }),
-            None => self.send_to_build(project, slug, &what, text),
+            None => self.send_to_build(project, slug, Stage::AiReview, &what, text),
         };
         if !started {
             return;
@@ -894,9 +907,7 @@ impl Gerdr {
     pub(crate) fn keep_comments(&mut self, project: &str, slug: &str) -> Option<PathBuf> {
         let data = store::dir(None, project, slug);
         let n = self.feature(project, slug)?.fix_rounds;
-        let copy = data
-            .join("prompts")
-            .join(format!("fix-plan-{n}-comments.json"));
+        let copy = crate::feature::fix_round::comments_copy(&data, n);
         match std::fs::copy(data.join(COMMENTS), &copy) {
             Ok(_) => Some(copy),
             Err(err) => {
@@ -926,8 +937,9 @@ impl Gerdr {
     }
 
     /// Start a fix round on `text` (Markdown) of feature `slug`, for its
-    /// Build agent: see `feature_fix`. `what` names it for the log, the
-    /// toasts and the prompts: "review comments", "2 findings". Whether it
+    /// Build agent: see `feature_fix`. `asked` is the stage sending it, and
+    /// `what` names it for the log, the toasts and the prompts: "review
+    /// comments", "2 findings". Whether it
     /// started: a refusal says why, and nothing is taken.
     ///
     /// It goes to `prompts/build-<n>-<what>-<k>.md`, and the agent is told
@@ -937,16 +949,23 @@ impl Gerdr {
         &mut self,
         project: &str,
         slug: &str,
+        asked: Stage,
         what: &str,
         text: String,
     ) -> bool {
         self.fix_input(project, slug, what, &text)
-            .is_some_and(|input| self.start_fix_round(project, slug, what, input))
+            .is_some_and(|input| self.start_fix_round(project, slug, asked, what, input))
     }
 
     /// Where `text` went for a new fix round of feature `slug`: none if a
     /// round can't start now, as is said.
-    fn fix_input(&mut self, project: &str, slug: &str, what: &str, text: &str) -> Option<PathBuf> {
+    pub(crate) fn fix_input(
+        &mut self,
+        project: &str,
+        slug: &str,
+        what: &str,
+        text: &str,
+    ) -> Option<PathBuf> {
         let feature = self.feature(project, slug)?.clone();
         let title = &feature.title;
         if feature.status != Status::Open || !feature.is_done(Stage::Build) {

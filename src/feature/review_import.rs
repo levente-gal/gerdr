@@ -868,10 +868,36 @@ fn fix_details(f: &Finding, multi: bool) -> String {
 /// their own all do. A reviewer's findings taken as they are say what to fix
 /// as well as a plan would.
 pub fn needs_plan<'a>(findings: impl IntoIterator<Item = &'a Finding>, comments: usize) -> bool {
-    comments > 0
-        || (findings.into_iter()).any(|f| {
-            f.state == FindingState::Fix && (f.yours || f.my_fix.is_some() || !f.note.is_empty())
+    plan_why(findings, comments).is_some()
+}
+
+/// Why the fixes of `findings` need a plan (`needs_plan`), for the page to say:
+/// none if they don't.
+pub fn plan_why<'a>(
+    findings: impl IntoIterator<Item = &'a Finding>,
+    comments: usize,
+) -> Option<String> {
+    let mut why: Vec<String> = (findings.into_iter())
+        .filter(|f| f.state == FindingState::Fix)
+        .filter_map(|f| {
+            let what = if f.yours {
+                "your item"
+            } else if f.my_fix.is_some() {
+                "your fix of"
+            } else if !f.note.is_empty() {
+                "your comment on"
+            } else {
+                return None;
+            };
+            Some(format!("{what} {}", f.id))
         })
+        .collect();
+    match comments {
+        0 => {}
+        1 => why.push("1 comment of yours in the diff".to_owned()),
+        n => why.push(format!("{n} comments of yours in the diff")),
+    }
+    (!why.is_empty()).then(|| format!("A plan comes first: {}", why.join(", ")))
 }
 
 /// `text` with no line a Markdown heading: a plan's sections go by those.
@@ -1636,7 +1662,17 @@ mod tests {
             f.note = "Not this one".into();
             f.state = FindingState::Dismissed;
         });
-        assert!(!needs_plan(&[gone, fix(|_| {})], 0));
+        assert!(!needs_plan(&[gone.clone(), fix(|_| {})], 0));
+        // The page says why, naming what the user wrote.
+        assert_eq!(plan_why(&[gone, fix(|_| {})], 0), None);
+        let noted = fix(|f| f.note = "Careful".into());
+        let id = noted.id.clone();
+        assert_eq!(
+            plan_why(&[noted], 2),
+            Some(format!(
+                "A plan comes first: your comment on {id}, 2 comments of yours in the diff"
+            ))
+        );
     }
 
     #[test]

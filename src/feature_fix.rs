@@ -111,6 +111,7 @@ impl Gerdr {
         &mut self,
         project: &str,
         slug: &str,
+        asked: Stage,
         what: &str,
         input: PathBuf,
     ) -> bool {
@@ -125,7 +126,7 @@ impl Gerdr {
             Some(_) => FixPhase::Compacting,
             None => FixPhase::Planning,
         };
-        if !self.open_fix_round(&feature, what, input, phase) {
+        if !self.open_fix_round(&feature, asked, what, input, phase) {
             return false;
         }
         let Some(line) = compact else {
@@ -154,6 +155,7 @@ impl Gerdr {
         &mut self,
         project: &str,
         slug: &str,
+        asked: Stage,
         what: &str,
         input: PathBuf,
         plan: &str,
@@ -170,7 +172,17 @@ impl Gerdr {
             self.show_error(format!("Couldn't write {}: {err}", fix_round::FILE));
             return false;
         }
-        self.open_fix_round(&feature, what, input, FixPhase::Ready)
+        if !self.open_fix_round(&feature, asked, what, input, FixPhase::Ready) {
+            return false;
+        }
+        if let Some(round) = self
+            .feature_mut(project, slug)
+            .and_then(|f| f.fix_round.as_mut())
+        {
+            round.items = fix_round::items(plan, &[]);
+        }
+        self.save_feature(project, slug);
+        true
     }
 
     /// Move `feature`'s last plan out of the way of a new round. A failure
@@ -188,10 +200,11 @@ impl Gerdr {
         }
     }
 
-    /// Record `feature`'s new round, at `phase`.
+    /// Record `feature`'s new round, sent by `asked`, at `phase`.
     fn open_fix_round(
         &mut self,
         feature: &Feature,
+        asked: Stage,
         what: &str,
         input: PathBuf,
         phase: FixPhase,
@@ -203,6 +216,7 @@ impl Gerdr {
             return false;
         };
         f.fix_rounds = n;
+        f.fix_asked.insert(n, asked);
         f.last_fix_round = None;
         f.fix_round = Some(FixRound {
             n,
@@ -217,6 +231,7 @@ impl Gerdr {
             give_back: GiveBack::Nothing,
             items: Vec::new(),
             done: 0,
+            ended: None,
         });
         f.log(now, format!("Fix round {n} started: {what}"));
         self.save_feature(project, slug);
@@ -496,7 +511,11 @@ impl Gerdr {
         if made {
             self.feature_findings_changed(project, slug);
         }
-        if done != round.done || made {
+        // So does Code review's of its comments.
+        let noted = (self.feature_mut(project, slug))
+            .and_then(|f| f.comment_fixes.iter_mut().find(|fix| fix.round == round.n))
+            .is_some_and(|fix| fix_round::mark_comments_made(fix, round, &left));
+        if done != round.done || made || noted {
             if let Some(round) =
                 (self.feature_mut(project, slug)).and_then(|f| f.fix_round.as_mut())
             {
@@ -620,6 +639,10 @@ impl Gerdr {
                 self.show_error(format!("Couldn't tidy {}: {err}", path.display()));
             }
         }
+        // Each is ticked: the count read last may be from before the last.
+        if let Some(round) = (self.feature_mut(project, slug)).and_then(|f| f.fix_round.as_mut()) {
+            round.done = round.items.len() as u32;
+        }
         self.end_fix_round(project, slug, false);
         self.probe_feature(project, slug);
         let title = &feature.title;
@@ -654,8 +677,9 @@ impl Gerdr {
             .as_ref()
             .map(FixRound::ids)
             .unwrap_or_default();
-        let missing = match std::fs::read_to_string(path) {
-            Ok(text) => fix_round::missing(&text, &ids),
+        let read = std::fs::read_to_string(path);
+        let missing = match &read {
+            Ok(text) => fix_round::missing(text, &ids),
             Err(err) => {
                 tracing::warn!("reading {}: {err}", path.display());
                 vec![format!("to be readable: {err}")]
@@ -681,11 +705,15 @@ impl Gerdr {
             round.phase = FixPhase::Ready;
             round.ready = Some(now);
             round.stalled = None;
+            // Build's page lists them ahead of the build log.
+            round.items = read.map_or_else(|_| Vec::new(), |text| fix_round::items(&text, &ids));
         }
         f.log(now, "Fix plan ready for review");
         self.save_feature(project, slug);
         (self.features.build.fix_watches).remove(&fix_key(project, slug));
         self.doc_reread_shown(project, slug, DocFile::FixPlan);
+        // Code review's page shows it.
+        self.probe_feature(project, slug);
         let text = format!("The fix plan of \u{201c}{title}\u{201d} is ready to review");
         self.notify_feature(project, slug, None, &text);
         self.show_success(text);
@@ -697,15 +725,12 @@ impl Gerdr {
             return;
         };
         let title = &feature.title;
-        let last = feature
-            .last_fix_round
-            .clone()
-            .filter(|_| feature.status == Status::Open);
-        let open = feature.fix_round.clone();
-        let Some(round) = (match open {
-            Some(round) => Some(round).filter(FixRound::before_fixing),
-            None => last,
-        }) else {
+        if (feature.fix_round.as_ref()).is_some_and(FixRound::fixes_stopped) {
+            return self.show_warning(format!(
+                "The Build agent of \u{201c}{title}\u{201d} stopped with fixes left: Make fixes sends it on"
+            ));
+        }
+        let Some(round) = feature.fix_round.clone().filter(FixRound::before_fixing) else {
             return self.show_warning(format!(
                 "\u{201c}{title}\u{201d} has no fix plan waiting for review"
             ));
@@ -768,7 +793,6 @@ impl Gerdr {
         let Some(f) = self.feature_mut(project, slug) else {
             return;
         };
-        f.reopen_fix_round();
         if let Some(round) = f.fix_round.as_mut() {
             round.phase = FixPhase::Planning;
             round.sent_back = back;
@@ -788,25 +812,51 @@ impl Gerdr {
     /// the plan is in its file, and then makes them. Whether it went; a
     /// refusal says why and changes nothing.
     pub(crate) fn make_fixes(&mut self, project: &str, slug: &str) -> bool {
-        self.fixes_go(project, slug, false)
+        self.fixes_go(project, slug, Go::Approved)
     }
 
     /// The same for a round with no plan to approve, the one gerdr wrote
     /// waiting (`start_unplanned_fix_round`).
     pub(crate) fn make_unplanned_fixes(&mut self, project: &str, slug: &str) -> bool {
-        self.fixes_go(project, slug, true)
+        self.fixes_go(project, slug, Go::Unplanned)
     }
 
-    fn fixes_go(&mut self, project: &str, slug: &str, unplanned: bool) -> bool {
+    /// Send the fixes of feature `slug`'s last round, over, once more: its
+    /// boxes in the build log are unticked, so it is over only once the agent
+    /// ticks each again. The user asks for it by its name, with nothing new
+    /// to send from where the feature is.
+    pub(crate) fn resend_fixes(&mut self, project: &str, slug: &str) {
+        if self.fixes_go(project, slug, Go::Again) {
+            self.show_build_agent(project, slug);
+        }
+    }
+
+    /// Go on with the fixes of feature `slug`'s last round, from Build's
+    /// Continue: what the agent wrote in as milestones goes as that round,
+    /// its ticks as they are.
+    pub(crate) fn continue_fixes(&mut self, project: &str, slug: &str) -> bool {
+        self.fixes_go(project, slug, Go::Continue)
+    }
+
+    fn fixes_go(&mut self, project: &str, slug: &str, go: Go) -> bool {
         let Some(feature) = self.feature(project, slug).cloned() else {
             return false;
         };
         let title = &feature.title;
-        let again = feature.fix_round.is_none()
+        let last = feature.fix_round.is_none()
             && feature.status == Status::Open
             && feature.last_fix_round.is_some();
+        let stopped = (feature.fix_round.as_ref()).is_some_and(FixRound::fixes_stopped);
+        let go = match go {
+            Go::Approved if stopped => Go::Stopped,
+            go => go,
+        };
         let waiting = (feature.fix_round.as_ref()).is_some_and(FixRound::can_make_fixes);
-        if !waiting && !again {
+        let ok = match go {
+            Go::Again | Go::Continue => last,
+            Go::Approved | Go::Unplanned | Go::Stopped => waiting,
+        };
+        if !ok {
             self.show_warning(format!(
                 "\u{201c}{title}\u{201d} has no fix plan waiting for review"
             ));
@@ -838,17 +888,21 @@ impl Gerdr {
             self.show_warning(format!("The fix plan needs {lacks}"));
             return false;
         }
+        let n = (feature.fix_round.as_ref())
+            .or(feature.last_fix_round.as_ref())
+            .map_or(0, |r| r.n);
+        let why = match go {
+            Go::Approved => "Fix plan approved".to_owned(),
+            Go::Unplanned => "No plan needed".to_owned(),
+            Go::Stopped | Go::Continue => "Fixes asked for again".to_owned(),
+            Go::Again => format!("Fix round {n} sent again"),
+        };
         if let Some(line) = self.compact_line(&feature) {
             match self.tell_build_agent(&feature, line) {
                 Ok(()) => {
-                    let said = match (again, unplanned) {
-                        (true, _) => {
-                            "Fixes asked for again: the Build agent compacts its chat first"
-                        }
-                        (_, true) => "No plan needed: the Build agent compacts its chat first",
-                        _ => "Fix plan approved: the Build agent compacts its chat first",
-                    };
-                    self.fixes_compact(project, slug, said);
+                    let said = format!("{why}: the Build agent compacts its chat first");
+                    self.fixes_compact(project, slug, &said);
+                    self.fixes_went(project, slug, go);
                     self.show_success(format!(
                         "The Build agent of \u{201c}{title}\u{201d} compacts its chat, then makes the fixes"
                     ));
@@ -859,12 +913,41 @@ impl Gerdr {
                 }
             }
         }
-        let said = match (again, unplanned) {
-            (true, _) => "Fix plan's fixes sent to the Build agent again",
-            (_, true) => "No plan needed: fixes sent to the Build agent",
-            _ => "Fix plan approved: fixes sent to the Build agent",
+        let said = format!("{why}: fixes sent to the Build agent");
+        let went = self.send_fixes(project, slug, &said);
+        if went {
+            self.fixes_went(project, slug, go);
+        }
+        went
+    }
+
+    /// What follows once the fixes of feature `slug`'s round went as `go`
+    /// says: a round sent again takes nothing to give back, as it took
+    /// nothing, and is over only once each of its fixes is ticked anew.
+    fn fixes_went(&mut self, project: &str, slug: &str, go: Go) {
+        if go != Go::Again {
+            return;
+        }
+        let Some(f) = self.feature_mut(project, slug) else {
+            return;
         };
-        self.send_fixes(project, slug, said)
+        let Some(round) = f.fix_round.as_mut() else {
+            return;
+        };
+        round.give_back = GiveBack::Nothing;
+        round.done = 0;
+        let n = round.n;
+        self.save_feature(project, slug);
+        let path = build_log(&store::dir(None, project, slug));
+        let unticked = std::fs::read_to_string(&path)
+            .map(|log| fix_round::untick(&log, n))
+            .and_then(|log| std::fs::write(&path, log));
+        if let Err(err) = unticked {
+            tracing::warn!("unticking round {n} in {}: {err}", path.display());
+            self.show_error(format!(
+                "Couldn't untick the fixes in the build log: the round may end at once ({err})"
+            ));
+        }
     }
 
     /// The Build agent of feature `slug` was told to compact before the
@@ -1026,15 +1109,27 @@ impl Gerdr {
                 if let Some(fix) = f.verify_fixes.iter_mut().find(|fix| fix.round == n) {
                     fix.dropped = true;
                 }
+                f.comment_fixes.retain(|fix| fix.round != n);
             }
             false => {
                 f.log(now, format!("Fix round {n} over"));
-                f.last_fix_round = Some(round.clone());
+                f.last_fix_round = Some(FixRound {
+                    ended: Some(now),
+                    ..round.clone()
+                });
             }
         }
         self.save_feature(project, slug);
         (self.features.build.fix_watches).remove(&fix_key(project, slug));
         self.doc_done(project, slug, DocFile::FixPlan);
+        // Code review's page shows its fixes again, whatever was looked at
+        // while they were made, or its code once there are none.
+        if round.stage == Stage::CodeReview
+            && let Some(panel) = (self.features.panel.as_mut())
+                .filter(|panel| panel.project == project && panel.slug == slug)
+        {
+            panel.review_view = None;
+        }
         if back {
             self.drop_unticked(project, slug, n);
             self.give_back(project, slug, round.give_back);
@@ -1080,7 +1175,7 @@ impl Gerdr {
                     self.comments_back(project, slug, &copy);
                 }
             }
-            GiveBack::Comments { copy } => self.comments_back(project, slug, &copy),
+            GiveBack::Comments { copy, .. } => self.comments_back(project, slug, &copy),
             GiveBack::Manual { checks } => {
                 if let Some(test) = self
                     .feature_mut(project, slug)
@@ -1120,6 +1215,16 @@ impl Gerdr {
 
     /// Plan fixes for feature `slug`'s failed Verify run.
     pub(crate) fn plan_verify_fixes(&mut self, project: &str, slug: &str) {
+        self.verify_fixes_go(project, slug, false);
+    }
+
+    /// Make the fixes of feature `slug`'s failed Verify run with no plan:
+    /// nothing in them is the user's, so gerdr writes it.
+    pub(crate) fn make_verify_fixes(&mut self, project: &str, slug: &str) {
+        self.verify_fixes_go(project, slug, true);
+    }
+
+    fn verify_fixes_go(&mut self, project: &str, slug: &str, unplanned: bool) {
         let Some(feature) = self.feature(project, slug) else {
             return;
         };
@@ -1141,14 +1246,27 @@ impl Gerdr {
                 .join("\n"),
             evidence.display()
         );
-        if self.send_to_build(project, slug, "Verify failures", text) {
-            if let Some(f) = self.feature_mut(project, slug) {
-                let agent =
-                    (f.runs.get(&Stage::Build)).map_or_else(String::new, |r| r.agent.clone());
-                let fix = VerifyFix::new(f.fix_rounds, &run, agent);
-                f.verify_fixes.push(fix);
-                self.save_feature(project, slug);
+        let what = "Verify failures";
+        let started = match unplanned {
+            true => {
+                let plan = feature::verify::fixes_plan(&failures, &title, &evidence);
+                (self.fix_input(project, slug, what, &text)).is_some_and(|input| {
+                    self.start_unplanned_fix_round(project, slug, Stage::Verify, what, input, &plan)
+                })
             }
+            false => self.send_to_build(project, slug, Stage::Verify, what, text),
+        };
+        if !started {
+            return;
+        }
+        if let Some(f) = self.feature_mut(project, slug) {
+            let agent = (f.runs.get(&Stage::Build)).map_or_else(String::new, |r| r.agent.clone());
+            let fix = VerifyFix::new(f.fix_rounds, &run, agent);
+            f.verify_fixes.push(fix);
+            self.save_feature(project, slug);
+        }
+        // Not sent: its plan waits on the page, with what was said of why.
+        if !unplanned || self.make_unplanned_fixes(project, slug) {
             self.show_build_agent(project, slug);
         }
     }
@@ -1172,6 +1290,21 @@ fn write_items(data: &Path, n: u32, items: &[String]) -> Result<(), String> {
         return Ok(());
     }
     std::fs::write(&path, with).map_err(|err| err.to_string())
+}
+
+/// How the fixes of a round go to the Build agent (`Gerdr::fixes_go`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Go {
+    /// Its plan approved.
+    Approved,
+    /// The plan gerdr wrote, with nothing to approve.
+    Unplanned,
+    /// Again, its agent having stopped with fixes left.
+    Stopped,
+    /// The last round's, over, once more: its ticks cleared.
+    Again,
+    /// The last round's, from Build's Continue: its ticks as they are.
+    Continue,
 }
 
 /// A feature's key among the watches.

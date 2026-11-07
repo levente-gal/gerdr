@@ -740,11 +740,15 @@ impl FileTree {
                     added: diff_of.map_or(0, |f| f.added),
                     removed: diff_of.map_or(0, |f| f.removed),
                     edited: false,
-                    // A finding dismissed asks nothing more of the file.
+                    // A finding dismissed asks nothing more of the file, nor a
+                    // comment gone to Build.
                     comments: (diff.review.comments.iter())
                         .filter(|c| c.root == section.root && c.path == change.path)
-                        .filter(|c| !c.flag.as_ref().is_some_and(|f| f.state == Dismissed))
+                        .filter(|c| {
+                            !c.flag.as_ref().is_some_and(|f| f.state == Dismissed || f.sent)
+                        })
                         .count(),
+                    viewed: check(section.root, &change.path) == Check::On,
                 })
             }
             _ => TreeLine::Repo(RepoLine {

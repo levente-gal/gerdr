@@ -849,7 +849,7 @@ impl Gerdr {
             && feature.last_fix_round.is_some()
             && planned_milestones(&values).is_some_and(|n| stop.done as usize >= n)
         {
-            self.make_fixes(project, slug);
+            self.continue_fixes(project, slug);
             return;
         }
         let alive = run.agent_key().is_some() && self.stage_run_state(&run).1;

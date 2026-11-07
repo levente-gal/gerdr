@@ -190,6 +190,8 @@ pub enum Source {
         /// How long the file was when last read.
         read: u64,
     },
+    /// A file read once, `what` it is: an earlier fix plan.
+    File { what: String },
 }
 
 /// The viewer as it stands.
@@ -267,7 +269,7 @@ impl Scrollback {
     pub fn pane(&self) -> Option<u32> {
         match self.source {
             Source::Pane { pane, .. } => Some(pane),
-            Source::SetupLog { .. } => None,
+            Source::SetupLog { .. } | Source::File { .. } => None,
         }
     }
 

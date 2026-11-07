@@ -4682,6 +4682,7 @@ impl Panel {
         let diff = files.iter().find(|f| f.path == change.path);
         let here = |root: &Path, path: &str| *root == item.root && path == change.path;
         TreeLine::File(FileLine {
+            viewed: false,
             edited: self.edited.iter().any(|(root, path)| here(root, path)),
             comments: (self.diff.review.comments.iter())
                 .filter(|c| here(&c.root, &c.path))
@@ -5184,6 +5185,7 @@ impl Panel {
             }
         });
         ReposView {
+            tree_note: None,
             title: title.into(),
             summary: self.summary(ctx),
             summary_tone: Tone::Muted,

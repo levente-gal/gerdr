@@ -1400,6 +1400,25 @@ impl CheckRun {
     }
 }
 
+/// The fix plan gerdr writes itself for Verify's `failures` of feature
+/// `title`, `evidence` the file with their output: nothing of the user's
+/// goes with them, so no plan is asked for, and each failure is one thing to
+/// tick (`fix_round::items`).
+pub fn fixes_plan(failures: &[String], title: &str, evidence: &Path) -> String {
+    let mut md = format!(
+        "# Fix plan of \u{201c}{title}\u{201d}\n\ngerdr wrote this from Verify's failures: the user wrote nothing of their own, so no plan was asked for. Find each one's cause in the checks' output, in {}, before you change code.\n\n## {}\n",
+        evidence.display(),
+        super::fix_round::FIXES
+    );
+    for failure in failures {
+        // A line of its own: the heading is what is ticked.
+        let first = failure.lines().next().unwrap_or_default();
+        let one = first.trim_start_matches('#').trim();
+        md.push_str(&format!("\n### {one}\n"));
+    }
+    md
+}
+
 /// What failed in `run` for the Build agent to fix: none while it runs, if
 /// it passed, or if a check was cut short, which says nothing of the code.
 pub fn to_fix(run: &VerifyRun) -> Option<Vec<String>> {
@@ -1538,6 +1557,25 @@ mod tests {
             &mut |_, outcome| outcomes.push(outcome),
         );
         outcomes
+    }
+
+    #[test]
+    fn a_plan_written_for_the_failures_has_each_as_a_fix() {
+        use crate::feature::fix_round;
+        let failures = [
+            "api: `cargo test` exited with 101".to_owned(),
+            "## web: `npm test` exited with 1\nmore".to_owned(),
+        ];
+        let plan = fixes_plan(&failures, "Export", Path::new("/d/evidence.md"));
+        assert!(fix_round::missing(&plan, &[]).is_empty(), "{plan}");
+        assert_eq!(
+            fix_round::items(&plan, &[]),
+            [
+                "api: `cargo test` exited with 101",
+                "web: `npm test` exited with 1"
+            ]
+        );
+        assert!(plan.contains("/d/evidence.md"));
     }
 
     #[test]

@@ -622,6 +622,14 @@ pub struct Feature {
     /// page says of them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub verify_fixes: Vec<fix_round::VerifyFix>,
+    /// Which stage sent each fix round, by its number: what Build's page
+    /// calls its list. Round numbers go on across a start over, so they stay.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub fix_asked: BTreeMap<u32, Stage>,
+    /// The fix rounds Code review's comments started, oldest first: what its
+    /// page says of them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub comment_fixes: Vec<fix_round::CommentFix>,
     /// The last run number of each stage whose run was forgotten: a later
     /// run goes on from it, so its prompt doesn't overwrite an old one.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -862,6 +870,10 @@ impl Feature {
         if stage <= Stage::Verify {
             self.verify_fixes.clear();
         }
+        // The comments went with the review that made them.
+        if stage <= Stage::CodeReview {
+            self.comment_fixes.clear();
+        }
         match stage {
             Stage::Discover | Stage::Plan | Stage::Build => {}
             Stage::PlanReview => self.plan_review = None,
@@ -878,15 +890,19 @@ impl Feature {
         true
     }
 
-    /// Open its last fix round again, on the stage it is at now, unless one
-    /// is open.
+    /// Open its last fix round again, unless one is open: on the stage it is
+    /// at now if that comes after the one that asked. A later one keeps the
+    /// round, as its page shows a round being fixed from an earlier stage, and
+    /// the round's card stays on the page of the stage that asked.
     pub fn reopen_fix_round(&mut self) {
         if self.fix_round.is_some() {
             return;
         }
         let current = self.current();
         self.fix_round = self.last_fix_round.take().map(|mut round| {
-            round.stage = current.unwrap_or(round.stage);
+            round.stage = current.map_or(round.stage, |at| at.max(round.stage));
+            // Open again, it isn't over.
+            round.ended = None;
             round
         });
     }
@@ -1171,13 +1187,27 @@ pub(crate) mod tests {
             give_back: Default::default(),
             items: Vec::new(),
             done: 0,
+            ended: None,
         };
         let mut f = feature("a", 1);
         let at = f.current().unwrap();
-        f.last_fix_round = Some(round(Stage::Ship));
+        f.last_fix_round = Some(round(Stage::Discover));
         f.reopen_fix_round();
         assert_eq!(f.fix_round.as_ref().map(|r| r.stage), Some(at));
         assert_eq!(f.last_fix_round, None);
+        // A later stage that asked keeps it: its card stays on that page.
+        let mut later = feature("a", 1);
+        later.last_fix_round = Some(round(Stage::Ship));
+        later.reopen_fix_round();
+        assert_eq!(later.fix_round.as_ref().map(|r| r.stage), Some(Stage::Ship));
+        // Open again, it isn't over.
+        let mut over = feature("a", 1);
+        over.last_fix_round = Some(fix_round::FixRound {
+            ended: Some(5),
+            ..round(Stage::Ship)
+        });
+        over.reopen_fix_round();
+        assert_eq!(over.fix_round.as_ref().map(|r| r.ended), Some(None));
         // One open stays, and nothing is left to open.
         f.reopen_fix_round();
         assert!(f.fix_round.is_some());
@@ -1345,6 +1375,8 @@ pub(crate) mod tests {
             fix_round: None,
             last_fix_round: None,
             verify_fixes: Vec::new(),
+            fix_asked: Default::default(),
+            comment_fixes: Vec::new(),
             ran_once: Default::default(),
             fix_rounds: 0,
         }
@@ -1436,6 +1468,8 @@ pub(crate) mod tests {
             fix_round: None,
             last_fix_round: None,
             verify_fixes: Vec::new(),
+            fix_asked: Default::default(),
+            comment_fixes: Vec::new(),
             ran_once: Default::default(),
             fix_rounds: 0,
         }

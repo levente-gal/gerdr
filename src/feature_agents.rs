@@ -78,6 +78,9 @@ pub enum GateKind {
     /// The Build agent stopped because the plan doesn't hold, and says what
     /// it needs: the user settles it with the agent.
     Blocked,
+    /// A fix round's agent stopped with fixes left: the user makes the fixes
+    /// again or settles it with the agent (any stage: the one that asked).
+    FixesStopped,
     /// Verify failed: the user runs the checks again or plans the fixes
     /// (stage: Verify).
     VerifyFailed,
@@ -392,7 +395,7 @@ pub(crate) fn gate_of(
     if let Some(round) = &f.fix_round {
         if round.fixes_stopped() {
             let since = round.ready.unwrap_or(round.asked);
-            return Some((round.stage, since, GateKind::Blocked));
+            return Some((round.stage, since, GateKind::FixesStopped));
         }
         let since = round.ready.filter(|_| round.phase == FixPhase::Ready)?;
         return Some((round.stage, since, GateKind::FixPlan));
@@ -3747,6 +3750,7 @@ mod tests {
             give_back: Default::default(),
             items: Vec::new(),
             done: 0,
+            ended: None,
         };
         let mut planning = failed("f");
         planning.fix_round = Some(round(FixPhase::Planning, None));
@@ -3755,12 +3759,12 @@ mod tests {
         // Approved: its agent is at it, nothing waits for the user.
         let mut fixing = failed("h");
         fixing.fix_round = Some(round(FixPhase::Fixing, Some(400)));
-        // Stopped with fixes left it waits for the user, as a blocked Build.
+        // Stopped with fixes left it waits for the user, saying so.
         let mut halted = fixing.clone();
         halted.fix_round.as_mut().unwrap().stalled = Some("it stopped".into());
         assert_eq!(
             gate_of(&halted, |_| None),
-            Some((Stage::Verify, 400, GateKind::Blocked))
+            Some((Stage::Verify, 400, GateKind::FixesStopped))
         );
         let all = BTreeMap::from([(
             "one".to_owned(),

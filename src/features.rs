@@ -82,7 +82,7 @@ use crate::{
     feature::{
         self, Event, Feature, Pr, Repo, Route, ShipStep, Stage, Status,
         agents::needs,
-        fix_round::{FixPhase, FixRound, VerifyFix},
+        fix_round::{CommentFix, FixPhase, FixRound, VerifyFix},
         graph,
         hook::Guard,
         layout::{self, AddSpec, Created, Found, LinkSpec, Root},
@@ -1342,6 +1342,11 @@ pub struct FeaturePanel {
     pub collapse_to: TabArea,
     /// The earlier AI reviews showing their findings, by run.
     pub rounds_open: BTreeSet<u32>,
+    /// Code review's earlier fix rounds showing their comments, by round.
+    pub comment_rounds_open: BTreeSet<u32>,
+    /// What the user picked Code review's page to show; none, what goes by
+    /// where the feature stands (`review_view_of`).
+    pub review_view: Option<chrome::ReviewView>,
     /// The button Left and Right picked on the selected row (see
     /// `FeaturePanel::picked`).
     pub repo_pick: Option<usize>,
@@ -1459,6 +1464,14 @@ pub enum PanelOutcome {
     ReviewFixPlan,
     /// The user approved the fix plan: the agent makes the fixes.
     MakeFixes,
+    /// The fixes of the last round, over, go once more, unticked
+    /// (`Gerdr::resend_fixes`).
+    ResendFixes,
+    /// Verify's failures go to the Build agent with no plan.
+    MakeVerifyFixes,
+    /// Show round `n`'s fix plan, from Build's page: the latest in its tab,
+    /// an earlier one only to read.
+    OpenRoundPlan(u32),
     /// Tell the agent again to write the fix plan: it stopped without one.
     AskFixPlan,
     /// Drop the open fix plan, after asking.
@@ -1491,6 +1504,10 @@ pub enum PanelOutcome {
     FindingRefused(&'static str),
     /// Show this earlier review's findings on its page, or fold them.
     FoldRound(u32),
+    /// Show Code review's earlier fix round `n`'s comments, or fold them.
+    FoldCommentRound(u32),
+    /// Show Code review's code, or the fixes it asked for.
+    ReviewView(chrome::ReviewView),
     /// Review the feature's diff (Code review).
     CodeReview,
     /// Give the keyboard to Manual test's criteria.
@@ -1587,6 +1604,8 @@ impl PanelOutcome {
                 | Self::ShowFinding(_)
                 | Self::ShowDiffNote(_)
                 | Self::FoldRound(_)
+                | Self::FoldCommentRound(_)
+                | Self::ReviewView(_)
                 | Self::CodeReview
                 | Self::OpenPr(_)
                 | Self::GoToCurrent
@@ -2086,10 +2105,66 @@ pub(crate) enum CardId {
 /// `feature` lists them: those going with AI review's fixes. Once it is done
 /// they wait for Code review instead.
 fn shown_notes<'a>(feature: &Feature, stage: Stage, notes: &'a [Comment]) -> &'a [Comment] {
-    let shown = stage == Stage::AiReview
-        && stage_mark(feature, stage) == StageMark::Current
-        && feature.review.is_some();
-    if shown { notes } else { &[] }
+    // Those that went to Build come after, and only Code review lists them.
+    let own = notes.iter().take_while(|c| c.flag.is_none()).count();
+    match stage {
+        Stage::AiReview
+            if stage_mark(feature, stage) == StageMark::Current && feature.review.is_some() =>
+        {
+            &notes[..own]
+        }
+        Stage::CodeReview if lists_comments(feature) => notes,
+        _ => &[],
+    }
+}
+
+/// Whether Code review's page of `feature` lists comments: while it waits for
+/// them, and for good once some went to Build.
+fn lists_comments(feature: &Feature) -> bool {
+    feature.current() == Some(Stage::CodeReview) || crate::feature_diff::has_rounds(feature)
+}
+
+/// Whether `stage`'s page of `feature` takes a comment of the user's own.
+fn can_add_comment(feature: &Feature, stage: Stage) -> bool {
+    can_decide(feature, stage)
+        || (stage == Stage::CodeReview
+            && feature.status == Status::Open
+            && feature.current() == Some(stage)
+            && feature.writer.is_none())
+}
+
+/// Whether comment `c` left in `feature`'s diff can change on `stage`'s page.
+fn can_edit_note(feature: &Feature, stage: Stage, c: &Comment) -> bool {
+    c.flag.is_none()
+        && match stage {
+            Stage::CodeReview => {
+                feature.status == Status::Open && feature.current() == Some(stage)
+            }
+            _ => can_decide(feature, stage),
+        }
+}
+
+/// Why comment `c` left in `feature`'s diff can't change on `stage`'s page,
+/// when it can't.
+fn why_not_edit_note(feature: &Feature, stage: Stage, c: &Comment) -> Option<&'static str> {
+    if can_edit_note(feature, stage, c) {
+        return None;
+    }
+    if c.flag.is_some() {
+        return Some(SENT_NOTE);
+    }
+    if stage != Stage::CodeReview {
+        return why_not_decide(feature, stage);
+    }
+    Some(match stage_mark(feature, stage) {
+        StageMark::Later => "Code review comes later: change it there",
+        _ => "Code review is done: reopen it to change its comments",
+    })
+}
+
+/// Code review's fix rounds of `feature` before its latest, the newest first.
+fn earlier_comment_rounds(feature: &Feature) -> impl Iterator<Item = &CommentFix> {
+    feature.comment_fixes.iter().rev().skip(1)
 }
 
 /// The cards of `stage`'s page of `feature`, as `FeaturePanel::finding`
@@ -2301,10 +2376,9 @@ fn note_actions(
         label: label.to_owned(),
         style,
     };
-    let decides = can_decide(feature, stage);
     let mut out = Vec::new();
     for c in shown_notes(feature, stage, notes) {
-        if decides {
+        if can_edit_note(feature, stage, c) {
             out.push((
                 button("Edit\u{2026}", ButtonStyle::Plain),
                 PanelOutcome::EditDiffNote(c.clone()),
@@ -2463,6 +2537,15 @@ fn stage_actions(
 ) -> Vec<(PageButton, PanelOutcome)> {
     let mut out = page_actions(feature, stage, ctx);
     out.extend(note_actions(feature, stage, notes));
+    if stage == Stage::CodeReview {
+        out.extend(earlier_comment_rounds(feature).map(|fix| {
+            let button = PageButton {
+                label: "Show".to_owned(),
+                style: ButtonStyle::Plain,
+            };
+            (button, PanelOutcome::FoldCommentRound(fix.round))
+        }));
+    }
     let entries = check_entries(feature, stage, plan);
     // What it skips doesn't run, once or at all.
     out.retain(|(_, outcome)| {
@@ -2902,6 +2985,27 @@ fn note_card(c: &Comment, multi: bool, actions: &[(PageButton, PanelOutcome)]) -
     }
 }
 
+/// The card of `c`, a comment that went to Build, whose fix is `made` or not;
+/// it holds its buttons in `actions`, none for one of an earlier round.
+fn sent_note_card(
+    c: &Comment,
+    multi: bool,
+    made: bool,
+    actions: &[(PageButton, PanelOutcome)],
+) -> FindingCard {
+    let mut card = note_card(c, multi, actions);
+    if let Some(flag) = &c.flag {
+        card.place = format!("{} \u{b7} {}", flag.id, card.place);
+    }
+    card.state = match made {
+        true => "fix made".to_owned(),
+        false => "sent to Build".to_owned(),
+    };
+    card.made = made;
+    card.stripe = Some(CardStripe::Sent);
+    card
+}
+
 /// How `round`, an earlier review, went, in a few words: "3 fixed · 1 raised
 /// again".
 fn round_count(round: &ReviewRound) -> String {
@@ -3087,6 +3191,9 @@ fn action_hint(action: &PanelOutcome) -> &'static str {
         PanelOutcome::FixAllFindings => "fix all open",
         PanelOutcome::ReviewFixPlan => "review fix plan",
         PanelOutcome::MakeFixes => "make fixes",
+        PanelOutcome::ResendFixes => "send the fixes again",
+        PanelOutcome::OpenRoundPlan(_) => "open the round's plan",
+        PanelOutcome::MakeVerifyFixes => "make fixes",
         PanelOutcome::AskFixPlan => "ask again",
         PanelOutcome::EditCommands(_) => "edit commands",
         PanelOutcome::CodeReview => "review code",
@@ -3608,7 +3715,13 @@ impl FeaturePanel {
     /// one (Ship once every stage is done).
     pub fn page_stage(&self, feature: &Feature) -> Stage {
         let current = feature.current();
+        // The first commit of a fix round sends the feature back, and Code
+        // review's fixes are followed where they were asked for.
+        let round = (feature.fix_round.as_ref())
+            .filter(|round| round.stage == Stage::CodeReview && feature.status == Status::Open)
+            .map(|round| round.stage);
         (self.stage.filter(|_| self.picked_at == current))
+            .or(round)
             .or(current)
             .unwrap_or(Stage::Ship)
     }
@@ -3677,6 +3790,23 @@ impl FeaturePanel {
         self.repo_pick = pick;
     }
 
+    /// What Code review's page of `feature` shows: what was picked, else its
+    /// code until fixes were asked for, and those from then on.
+    pub fn review_view_of(&self, feature: &Feature) -> chrome::ReviewView {
+        self.review_view
+            .unwrap_or(match crate::feature_diff::has_rounds(feature) {
+                true => chrome::ReviewView::Fixes,
+                false => chrome::ReviewView::Code,
+            })
+    }
+
+    /// Show the comments of Code review's earlier round `n`, or fold them.
+    pub fn toggle_comment_round(&mut self, n: u32) {
+        if !self.comment_rounds_open.remove(&n) {
+            self.comment_rounds_open.insert(n);
+        }
+    }
+
     /// Show the earlier review `n`'s findings, or fold them.
     pub fn toggle_round(&mut self, n: u32) {
         if !self.rounds_open.remove(&n) {
@@ -3687,6 +3817,15 @@ impl FeaturePanel {
     /// Fold the earlier reviews of `stage`'s page of `feature` if any shows,
     /// else show them all.
     fn toggle_rounds(&mut self, feature: &Feature, stage: Stage) {
+        if stage == Stage::CodeReview {
+            let all: BTreeSet<u32> = earlier_comment_rounds(feature).map(|r| r.round).collect();
+            self.comment_rounds_open =
+                match all.iter().any(|n| self.comment_rounds_open.contains(n)) {
+                    true => BTreeSet::new(),
+                    false => all,
+                };
+            return;
+        }
         let all: BTreeSet<u32> = earlier_reviews(feature, stage).map(|r| r.n).collect();
         self.rounds_open = match all.iter().any(|n| self.rounds_open.contains(n)) {
             true => BTreeSet::new(),
@@ -3799,7 +3938,11 @@ impl FeaturePanel {
             self.unpick();
         }
         let stage = self.page_stage(feature);
-        let cards = review_cards(feature, stage, notes);
+        // The review on the page has the cards' place, and its own keys.
+        let cards = match crate::feature_diff::review_page(self, feature) {
+            true => Vec::new(),
+            false => review_cards(feature, stage, notes),
+        };
         let checks = check_entries(feature, stage, plan);
         let criteria = match tries_criteria(feature, stage) {
             true => ctx.criteria,
@@ -3821,7 +3964,10 @@ impl FeaturePanel {
         let ctrl = mods.ctrl && !mods.alt && !mods.logo;
         let plain = !(mods.ctrl || mods.alt || mods.logo);
         let bare = plain && !mods.shift;
-        let refused = why_not_decide(feature, stage);
+        let refused = match diff_note {
+            Some(c) => why_not_edit_note(feature, stage, c),
+            None => why_not_decide(feature, stage),
+        };
         // The keys list: F1 or Esc puts it away, as does any other key
         // (it does nothing else then).
         if self.keys {
@@ -3982,12 +4128,25 @@ impl FeaturePanel {
             Keysym::f | Keysym::F if plain && mods.shift && offers_fix_all(feature, stage) => {
                 return Some(PanelOutcome::FixAllFindings);
             }
+            Keysym::_1 | Keysym::KP_1 | Keysym::_2 | Keysym::KP_2
+                if mods.alt
+                    && !(mods.ctrl || mods.shift || mods.logo)
+                    && stage == Stage::CodeReview
+                    && crate::feature_diff::review_views(feature) =>
+            {
+                return Some(PanelOutcome::ReviewView(match sym {
+                    Keysym::_1 | Keysym::KP_1 => chrome::ReviewView::Code,
+                    _ => chrome::ReviewView::Fixes,
+                }));
+            }
             // The card with the keyboard: the diff's keys for a finding.
             Keysym::e | Keysym::E
                 if mods.alt
                     && !(mods.ctrl || mods.shift || mods.logo)
                     && !self.expanded
-                    && earlier_reviews(feature, stage).next().is_some() =>
+                    && (earlier_reviews(feature, stage).next().is_some()
+                        || (stage == Stage::CodeReview
+                            && earlier_comment_rounds(feature).next().is_some())) =>
             {
                 self.toggle_rounds(feature, stage);
                 return None;
@@ -3995,7 +4154,12 @@ impl FeaturePanel {
             Keysym::f | Keysym::F
                 if bare && self.focus == TabArea::Findings && diff_note.is_some() =>
             {
-                return Some(PanelOutcome::FindingRefused(DIFF_NOTE));
+                return Some(PanelOutcome::FindingRefused(
+                    match diff_note.is_some_and(|c| c.flag.is_some()) {
+                        true => SENT_NOTE,
+                        false => DIFF_NOTE,
+                    },
+                ));
             }
             Keysym::f | Keysym::F if bare && self.focus == TabArea::Findings => {
                 let f = card?;
@@ -4115,7 +4279,7 @@ impl FeaturePanel {
                 });
             }
             Keysym::c | Keysym::C
-                if bare && self.focus != TabArea::Repos && can_decide(feature, stage) =>
+                if bare && self.focus != TabArea::Repos && can_add_comment(feature, stage) =>
             {
                 return Some(PanelOutcome::AddComment);
             }
@@ -4130,6 +4294,15 @@ impl FeaturePanel {
                     true => Some(PanelOutcome::SendFixes),
                     false => sends_findings(feature, stage, ctx),
                 };
+            }
+            // Verify's, the same way, off its check cards too.
+            Keysym::Return | Keysym::KP_Enter
+                if ctrl && self.focus != TabArea::Repos && verify_sends(feature, stage) =>
+            {
+                return Some(match mods.shift {
+                    true => PanelOutcome::PlanFixes,
+                    false => PanelOutcome::MakeVerifyFixes,
+                });
             }
             // A locked stage's is refused when done, saying why; any other
             // stage has nothing to reopen.
@@ -4147,8 +4320,7 @@ impl FeaturePanel {
                 if ctrl
                     && (self.focus == TabArea::Stages
                         || self.focus == TabArea::Findings && criteria > 0)
-                    && (fix_round_on(feature, stage).is_some_and(FixRound::can_make_fixes)
-                        || makes_fixes_again(feature, stage)) =>
+                    && fix_round_on(feature, stage).is_some_and(FixRound::can_make_fixes) =>
             {
                 return Some(PanelOutcome::MakeFixes);
             }
@@ -4364,6 +4536,8 @@ const REOPEN_KEY: &str = "Ctrl+Shift+Enter";
 const START_OVER_KEY: &str = "Ctrl+Shift+Del";
 /// Why `f` does nothing on a comment left in the diff.
 const DIFF_NOTE: &str = "This comment goes with the fixes: Del deletes it";
+/// Why a comment that went to Build can't change.
+const SENT_NOTE: &str = crate::diff_view::SENT_COMMENT;
 
 /// The open fix round of `feature`, on the page of the stage that asked.
 fn fix_round_on(feature: &Feature, stage: Stage) -> Option<&FixRound> {
@@ -4388,9 +4562,37 @@ fn last_round_on(feature: &Feature, stage: Stage) -> Option<&FixRound> {
 }
 
 /// Whether `stage`'s page can send the fixes of the last round again: only
-/// where the feature is at.
-fn makes_fixes_again(feature: &Feature, stage: Stage) -> bool {
-    last_round_on(feature, stage).is_some() && feature.current() == Some(stage)
+/// where the feature is at, and only with nothing new of the stage's own to
+/// send, as that is what goes on then, not the old round.
+fn sends_round_again(feature: &Feature, stage: Stage, ctx: RowCtx) -> bool {
+    last_round_on(feature, stage).is_some()
+        && feature.current() == Some(stage)
+        && !has_new_fixes(feature, stage, ctx)
+}
+
+/// Whether `stage`'s page can send `feature`'s Verify failures to Build: at
+/// Verify, its last run failed, nothing running and no round open.
+fn verify_sends(feature: &Feature, stage: Stage) -> bool {
+    stage == Stage::Verify
+        && stage_mark(feature, stage) == StageMark::Current
+        && feature.fix_round.is_none()
+        && !checks_running(feature)
+        && (feature.verify.as_ref()).is_some_and(|v| feature::verify::to_fix(v).is_some())
+}
+
+/// Whether `stage` of `feature` has fixes of its own waiting to be sent, or
+/// to be decided: findings, failed checks or criteria, comments in the diff.
+fn has_new_fixes(feature: &Feature, stage: Stage, ctx: RowCtx) -> bool {
+    match stage {
+        Stage::AiReview => (feature.review.as_ref())
+            .is_some_and(|r| r.count(FindingState::Open) > 0 || r.count(FindingState::Fix) > 0),
+        Stage::Verify => {
+            (feature.verify.as_ref()).is_some_and(|v| feature::verify::to_fix(v).is_some())
+        }
+        Stage::CodeReview => ctx.comments > 0,
+        Stage::ManualTest => ctx.manual.failed > ctx.manual.sent,
+        _ => false,
+    }
 }
 
 /// Whether `stage`'s page opens a fix plan already sent: its Enter does
@@ -4500,13 +4702,27 @@ fn writers_page_actions(
     ctx: RowCtx,
 ) -> Vec<(PageButton, PanelOutcome)> {
     let mark = stage_mark(feature, stage);
-    if mark == StageMark::Later {
-        return review_actions(feature, stage);
-    }
     let button = |label: &str, style| PageButton {
         label: label.to_owned(),
         style,
     };
+    if mark == StageMark::Later {
+        let mut out = review_actions(feature, stage);
+        // The fixes its comments asked for go on from an earlier stage, and
+        // its page stays where they are followed.
+        if stage == Stage::CodeReview {
+            if let Some(round) = fix_round_on(feature, stage) {
+                out.extend(fix_round_buttons(feature, round, ctx));
+            }
+            if last_round_on(feature, stage).is_some() {
+                out.push((
+                    button("Open", ButtonStyle::Plain),
+                    PanelOutcome::ReviewFixPlan,
+                ));
+            }
+        }
+        return out;
+    }
     let row = PanelRow::Stage(stage);
     let mut out = Vec::new();
     // First whatever the stage's mark: a fresh Build agent for fixes waits
@@ -4524,21 +4740,26 @@ fn writers_page_actions(
             button("Open", ButtonStyle::Plain),
             PanelOutcome::ReviewFixPlan,
         ));
-        if makes_fixes_again(feature, stage) {
+        if let Some(round) =
+            last_round_on(feature, stage).filter(|_| sends_round_again(feature, stage, ctx))
+        {
+            let label = round_label(feature, round);
             out.push((
-                button("Make fixes again", ButtonStyle::Plain),
-                PanelOutcome::MakeFixes,
+                button(&format!("Send {label} again"), ButtonStyle::Quiet),
+                PanelOutcome::ResendFixes,
             ));
         }
     }
-    let plan_fixes = stage == Stage::Verify
-        && mark == StageMark::Current
-        && feature.fix_round.is_none()
-        && !checks_running(feature)
-        && (feature.verify.as_ref()).is_some_and(|v| feature::verify::to_fix(v).is_some());
+    // Verify's failures hold no word of the user's: they need no plan, but
+    // one can still be wanted.
+    let plan_fixes = verify_sends(feature, stage);
     if plan_fixes {
         out.push((
-            button("Plan fixes", ButtonStyle::Primary),
+            button("Make fixes", ButtonStyle::Primary),
+            PanelOutcome::MakeVerifyFixes,
+        ));
+        out.push((
+            button("Plan fixes", ButtonStyle::Plain),
             PanelOutcome::PlanFixes,
         ));
     }
@@ -4736,7 +4957,7 @@ fn writers_page_actions(
             PanelOutcome::FixAllFindings,
         ));
     }
-    if can_decide(feature, stage) {
+    if can_add_comment(feature, stage) {
         out.push((
             button("Add comment\u{2026}", ButtonStyle::Plain),
             PanelOutcome::AddComment,
@@ -5469,9 +5690,12 @@ impl Gerdr {
         let last = (self.features.probes.get(&key)).and_then(|p| p.last.as_ref());
         let docs = last.map(|p| &p.docs);
         let written = Stage::ALL.map(|stage| docs.is_some_and(|d| d.written.contains(&stage)));
-        // The open diff's may not be saved yet, and is gone after a restart.
-        let comments = (docs.map_or(0, |d| d.comments))
-            .max(self.code_reviews.get(&key).map_or(0, |c| c.comments));
+        // The open diff's may not be saved yet. Its count means nothing once
+        // it is closed: the file says, and a press looks again (`findings_go`).
+        let open = (self.diff_open_of(&feature.project, &feature.slug))
+            .then(|| self.code_reviews.get(&key))
+            .flatten();
+        let comments = (docs.map_or(0, |d| d.comments)).max(open.map_or(0, |c| c.comments));
         RowCtx {
             checks,
             criteria,
@@ -5689,11 +5913,11 @@ impl Gerdr {
         self.feature_work(None, move |_| Done::Probed {
             probe: match feature.writer {
                 Some(_) => Probe {
-                    docs: feature::page::read_docs(&data),
+                    docs: feature::page::read_docs(&data).with_comment_fixes(&data, &feature),
                     ..ship::probe_seen(&feature)
                 },
                 None => Probe {
-                    docs: feature::page::read_docs(&data),
+                    docs: feature::page::read_docs(&data).with_comment_fixes(&data, &feature),
                     models: feature::agents::read_models(&feature),
                     ..ship::probe(&feature, &modes)
                 },
@@ -5724,7 +5948,7 @@ impl Gerdr {
         let (project, slug, feature) = (project.to_owned(), slug.to_owned(), feature.clone());
         self.feature_work(None, move |_| Done::Probed {
             probe: Probe {
-                docs: feature::page::read_docs(&data),
+                docs: feature::page::read_docs(&data).with_comment_fixes(&data, &feature),
                 models: feature::agents::read_models(&feature),
                 ..ship::probe_finished(&feature)
             },
@@ -6612,6 +6836,8 @@ impl Gerdr {
             fix_round: None,
             last_fix_round: None,
             verify_fixes: Vec::new(),
+            fix_asked: Default::default(),
+            comment_fixes: Vec::new(),
             ran_once: Default::default(),
             fix_rounds: 0,
         };
@@ -7289,8 +7515,11 @@ impl Gerdr {
             PanelOutcome::MakeFindingFixes => self.make_finding_fixes(&project, &slug),
             PanelOutcome::FixAllFindings => self.fix_all_findings(&project, &slug),
             PanelOutcome::PlanFixes => self.plan_verify_fixes(&project, &slug),
+            PanelOutcome::MakeVerifyFixes => self.make_verify_fixes(&project, &slug),
             PanelOutcome::ReviewFixPlan => self.open_doc_tab(&project, &slug, DocFile::FixPlan),
             PanelOutcome::MakeFixes => self.make_fixes_now(&project, &slug),
+            PanelOutcome::ResendFixes => self.resend_fixes(&project, &slug),
+            PanelOutcome::OpenRoundPlan(n) => self.open_round_plan(&project, &slug, n),
             PanelOutcome::AskFixPlan => self.ask_fix_plan(&project, &slug),
             PanelOutcome::DropFixPlan => self.ask_drop_fix_plan(project.clone(), slug.clone()),
             PanelOutcome::EditCommands(tab) => {
@@ -7325,6 +7554,12 @@ impl Gerdr {
                 self.open_feature_diff(&project, &slug, Some(&id));
             }
             PanelOutcome::FindingRefused(why) => self.show_warning(why.to_owned()),
+            PanelOutcome::ReviewView(view) => self.show_review_view(view),
+            PanelOutcome::FoldCommentRound(n) => {
+                if let Some(panel) = self.features.panel.as_mut() {
+                    panel.toggle_comment_round(n);
+                }
+            }
             PanelOutcome::FoldRound(n) => {
                 if let Some(panel) = self.features.panel.as_mut() {
                     panel.toggle_round(n);
@@ -8423,6 +8658,10 @@ impl Gerdr {
         let outcome = match hit {
             FeatureTabHit::Tab | FeatureTabHit::Column(_) | FeatureTabHit::AgentPickOff(_) => None,
             FeatureTabHit::MilestoneMode(i) => Some(PanelOutcome::FreshMilestones(i == 1)),
+            FeatureTabHit::ReviewView(i) => Some(PanelOutcome::ReviewView(match i {
+                0 => chrome::ReviewView::Code,
+                _ => chrome::ReviewView::Fixes,
+            })),
             FeatureTabHit::ShipRoute(row, segment) => {
                 self.ship_row_at(&feature, row).and_then(|row| match row {
                     ShipRow::Route { repo, .. } => {
@@ -8451,7 +8690,8 @@ impl Gerdr {
                 if let Some(panel) = self.features.panel.as_mut() {
                     // An earlier review's card is a record: no keys to give it.
                     let stage = panel.page_stage(&feature);
-                    if stage != Stage::AiReview || i < review_cards(&feature, stage, &notes).len() {
+                    let has_records = matches!(stage, Stage::AiReview | Stage::CodeReview);
+                    if !has_records || i < review_cards(&feature, stage, &notes).len() {
                         panel.focus = TabArea::Findings;
                         panel.finding = i;
                     }
@@ -8558,6 +8798,7 @@ impl Gerdr {
                     let probe = (self.features.probes.get(&key)).and_then(|p| p.last.as_ref());
                     let notes = notes_of(probe);
                     let mut actions = stage_actions(&feature, stage, ctx, &plan, &rows, notes);
+                    actions.extend(round_plan_actions(&feature, stage, probe));
                     let place = self.place_label(&feature, stage);
                     actions.extend(place_action(place.as_deref(), stage));
                     actions.extend(stop_action(&feature, stage));
@@ -8626,6 +8867,25 @@ impl Gerdr {
         }
     }
 
+    /// The comments feature `slug`'s latest Code review round took, as its page
+    /// has them, to show in its diff.
+    pub(crate) fn sent_notes(&self, project: &str, slug: &str) -> Vec<Comment> {
+        let key = (project.to_owned(), slug.to_owned());
+        let made = self.feature(project, slug).and_then(|f| f.comment_fixes.last());
+        (self.features.probes.get(&key).and_then(|p| p.last.as_ref()))
+            .map_or(&[][..], |p| p.docs.notes.as_slice())
+            .iter()
+            .filter(|c| c.flag.is_some())
+            .cloned()
+            .map(|mut c| {
+                if let (Some(flag), Some(fix)) = (c.flag.as_mut(), made) {
+                    flag.made = fix.made.contains(&flag.id);
+                }
+                c
+            })
+            .collect()
+    }
+
     /// The comments feature `slug`'s diff holds are `notes` now, without
     /// waiting for its next probe.
     pub(crate) fn notes_are(&mut self, project: &str, slug: &str, notes: Vec<Comment>) {
@@ -8636,7 +8896,11 @@ impl Gerdr {
         let last = (self.features.probes.get_mut(&key)).and_then(|p| p.last.as_mut());
         if let Some(probe) = last {
             probe.docs.comments = notes.len();
+            // Those that went to Build stay, after them.
+            let sent = probe.docs.notes.iter().filter(|c| c.flag.is_some()).cloned();
+            let sent: Vec<Comment> = sent.collect();
             probe.docs.notes = notes;
+            probe.docs.notes.extend(sent);
         }
     }
 
@@ -8754,6 +9018,15 @@ impl Gerdr {
                     "The model its next start uses; an agent already open keeps its own",
                     spot,
                 ))
+            }
+            FeatureTabHit::ReviewView(i) => {
+                let spots = layout.review_switch.as_ref()?;
+                let spot = *spots.segments.get(i)?;
+                let text = match i {
+                    0 => "The code and its comments (Alt+1)",
+                    _ => "The fixes the comments asked for, and their plan (Alt+2)",
+                };
+                Some(Tooltip::new(text, spot))
             }
             FeatureTabHit::MilestoneMode(i) => {
                 let (_, segments) = layout.milestone_mode.as_ref()?;
@@ -8937,6 +9210,10 @@ impl Gerdr {
             plan: self.planned_checks(feature),
             check_tails: Some(&self.features.check_tails),
             code_review: self.code_review_line(&panel.project, &panel.slug),
+            code_counts: self
+                .code_reviews
+                .get(&(panel.project.clone(), panel.slug.clone()))
+                .copied(),
             picks: self.chips_of(&panel.project, &panel.slug, panel.page_stage(feature)),
             model: self
                 .model_slot_of(&panel.project, &panel.slug, panel.page_stage(feature))
@@ -8952,6 +9229,7 @@ impl Gerdr {
             criteria: self.criterion_rows(feature),
             manual_gate: manual_counts.map(manual_gate),
             rounds_open: panel.rounds_open.clone(),
+            comment_rounds_open: panel.comment_rounds_open.clone(),
         };
         Some(tab_view(panel, feature, &slugs, &state, now))
     }
@@ -8986,6 +9264,7 @@ impl Gerdr {
             setup: doing(Job::Setup),
             verify: doing(Job::Verify),
             manual_gate: manual,
+            code_counts: self.code_reviews.get(&key).copied(),
         };
         let gate = crate::feature_agents::gate_of(f, |_| manual).is_some();
         let busy = mine().next().is_some();
@@ -9453,6 +9732,8 @@ struct PanelState<'a> {
     /// What Code review's row says once the diff was read (see
     /// `code_review_line`).
     code_review: Option<String>,
+    /// That line's figures, once its diff was read.
+    code_counts: Option<crate::feature_diff::Counts>,
     /// How far Manual test's criteria went, in words, when the brief has
     /// some (see `manual_test::counts_text`).
     manual: Option<String>,
@@ -9464,6 +9745,9 @@ struct PanelState<'a> {
     /// The earlier AI reviews showing their findings (see
     /// `FeaturePanel::rounds_open`).
     rounds_open: BTreeSet<u32>,
+    /// Code review's earlier fix rounds showing their comments (see
+    /// `FeaturePanel::comment_rounds_open`).
+    comment_rounds_open: BTreeSet<u32>,
     /// The chips to pick the agent of the stage on the page with (see
     /// `feature_agents::stage_chips`).
     picks: Vec<AgentChip>,
@@ -9633,6 +9917,8 @@ struct LineState<'a> {
     setup: Option<&'a str>,
     verify: Option<&'a str>,
     manual_gate: Option<(u32, u32)>,
+    /// How far its code review came, once its diff was read.
+    code_counts: Option<crate::feature_diff::Counts>,
     /// Where its current agent runs, if on another machine, and whether that
     /// says all there is to say of it.
     machine: Option<(String, bool)>,
@@ -9647,6 +9933,7 @@ impl<'a> From<&PanelState<'a>> for LineState<'a> {
             setup: state.setup,
             verify: state.verify,
             manual_gate: state.manual_gate,
+            code_counts: state.code_counts,
             machine: state.machine_line.clone(),
         }
     }
@@ -9802,7 +10089,10 @@ fn current_line(feature: &Feature, stage: Stage, state: &LineState, now: u64) ->
                 None => agent(),
             }
         }
-        Stage::CodeReview => "to review".into(),
+        Stage::CodeReview => match state.code_counts.filter(|c| c.files > 0) {
+            Some(c) => format!("{} of {} files", c.viewed, c.files),
+            None => "to review".into(),
+        },
         Stage::ManualTest => match state.manual_gate {
             Some((passed, total)) if total > 0 => format!("{passed} of {total} passed"),
             _ => String::new(),
@@ -10080,28 +10370,27 @@ fn file_card(
     }
 }
 
-/// The open fix round's card: what it fixes and how it stands, with the
-/// page's buttons in `actions` that act on the plan.
+/// What round `round` of `feature` is called, as Build's page has it.
+fn round_label(feature: &Feature, round: &FixRound) -> String {
+    feature::fix_round::label(round.n, &feature.verify_fixes, &feature.fix_asked)
+}
+
+/// The open fix round's card: which it is, what it fixes and how it stands,
+/// at `now`, with the page's buttons in `actions` that act on the plan.
 fn fix_round_card(
     feature: &Feature,
     round: &FixRound,
     actions: &[(PageButton, PanelOutcome)],
+    now: u64,
 ) -> PageSection {
-    let waits = (feature.runs.get(&Stage::Build)).is_some_and(|run| run.waits_to_send());
-    let tone = match (round.phase, round.stalled.is_some()) {
-        _ if waits => CheckTone::Note,
-        (FixPhase::Ready, _) => CheckTone::Ready,
-        (_, true) => CheckTone::Blocker,
-        _ => CheckTone::Note,
-    };
-    let said = match (waits, &round.stalled) {
-        (true, _) => "waiting for you \u{b7} send the prompt".to_owned(),
-        (false, Some(why)) => why.clone(),
-        (false, None) => round.line(),
-    };
+    let mut state = fix_round_state(feature, round);
+    if let Some(at) = round.ready.filter(|_| round.phase == FixPhase::Ready) {
+        let written = format!(" \u{b7} written {}", projects::ago(now, at));
+        state.text.push_str(&written);
+    }
     PageSection::File {
-        name: "Fix plan".to_owned(),
-        state: line(format!("{} \u{b7} {said}", round.what), tone),
+        name: format!("Fix plan: {}", round_label(feature, round)),
+        state,
         buttons: (actions.iter().enumerate())
             .filter(|(_, (_, o))| {
                 matches!(
@@ -10117,17 +10406,41 @@ fn fix_round_card(
     }
 }
 
-/// The card of the last fix round: its plan and what it fixed stay at hand.
-fn last_round_card(round: &FixRound, actions: &[(PageButton, PanelOutcome)]) -> PageSection {
+/// What open round `round` of `feature` is about and how it stands.
+fn fix_round_state(feature: &Feature, round: &FixRound) -> CheckLine {
+    let waits = (feature.runs.get(&Stage::Build)).is_some_and(|run| run.waits_to_send());
+    let tone = match (round.phase, round.stalled.is_some()) {
+        _ if waits => CheckTone::Note,
+        (FixPhase::Ready, _) => CheckTone::Ready,
+        (_, true) => CheckTone::Blocker,
+        _ => CheckTone::Note,
+    };
+    let said = match (waits, &round.stalled) {
+        (true, _) => "waiting for you \u{b7} send the prompt".to_owned(),
+        (false, Some(why)) => why.clone(),
+        (false, None) => round.line(),
+    };
+    line(format!("{} \u{b7} {said}", round.what), tone)
+}
+
+/// The card of the last fix round: which it was, what it made and when, at
+/// `now`, its plan at hand.
+fn last_round_card(
+    feature: &Feature,
+    round: &FixRound,
+    actions: &[(PageButton, PanelOutcome)],
+    now: u64,
+) -> PageSection {
+    let mut said = vec![round.what.clone(), round.made()];
+    let ago = |at| projects::ago(now, at);
+    said.extend(round.ready.map(|at| format!("written {}", ago(at))));
+    said.extend(round.ended.map(|at| format!("finished {}", ago(at))));
     PageSection::File {
-        name: "Fix plan".to_owned(),
-        state: line(
-            format!("{} \u{b7} {}", round.what, feature::fix_round::SENT),
-            CheckTone::Note,
-        ),
+        name: format!("Last fix plan: {}", round_label(feature, round)),
+        state: line(said.join(" \u{b7} "), CheckTone::Note),
         buttons: (actions.iter().enumerate())
             .filter(|(_, (_, o))| {
-                matches!(o, PanelOutcome::ReviewFixPlan | PanelOutcome::MakeFixes)
+                matches!(o, PanelOutcome::ReviewFixPlan | PanelOutcome::ResendFixes)
             })
             .map(|(i, _)| i)
             .collect(),
@@ -10538,28 +10851,114 @@ fn findings_count(feature: &Feature) -> String {
 /// name, as `probe` last read them; none while it has none.
 fn milestones_of(probe: Option<&Probe>, stage: Stage) -> Option<PageSection> {
     let items = probe?.docs.milestones.get(&stage)?;
-    (!items.is_empty()).then(|| milestones_section(stage.label().to_owned(), items))
+    (!items.is_empty()).then(|| milestones_section(stage.label().to_owned(), items, None))
 }
 
-/// `items` as a group of Build's list, called `label`.
-fn milestones_section(label: String, items: &[(bool, String)]) -> PageSection {
+/// `items` as a group of Build's list, called `label`, saying `state` of how
+/// it stands.
+fn milestones_section(
+    label: String,
+    items: &[(bool, String)],
+    state: Option<CheckLine>,
+) -> PageSection {
     PageSection::Milestones {
         label,
+        state,
         done: items.iter().filter(|(done, _)| *done).count(),
         total: items.len(),
         items: items.to_vec(),
+        buttons: Vec::new(),
     }
 }
 
-/// What each fix round of `feature` listed in the build log, oldest first,
-/// as `probe` last read it.
-fn fix_rounds_of(feature: &Feature, probe: Option<&Probe>) -> Vec<PageSection> {
-    (probe.iter().flat_map(|p| &p.docs.fix_rounds))
-        .map(|(n, items)| {
-            let label = feature::fix_round::label(*n, &feature.verify_fixes);
-            milestones_section(label, items)
-        })
+/// The rounds of `feature` whose plans can be shown, as `probe` found them:
+/// the latest's is `fix_round::FILE`, those before it put aside.
+fn round_plans(feature: &Feature, probe: Option<&Probe>) -> Vec<u32> {
+    let Some(docs) = probe.map(|p| &p.docs) else {
+        return Vec::new();
+    };
+    let latest = (docs.plan && feature.fix_rounds > 0).then_some(feature.fix_rounds);
+    let mut out: Vec<u32> = docs.plans.iter().copied().chain(latest).collect();
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// The buttons showing the plans of the rounds Build's page lists, by
+/// `probe`: on that page only.
+fn round_plan_actions(
+    feature: &Feature,
+    stage: Stage,
+    probe: Option<&Probe>,
+) -> Vec<(PageButton, PanelOutcome)> {
+    if stage != Stage::Build || stage_mark(feature, stage) == StageMark::Later {
+        return Vec::new();
+    }
+    let button = PageButton {
+        label: "Open plan".to_owned(),
+        style: ButtonStyle::Plain,
+    };
+    (round_plans(feature, probe).into_iter())
+        .map(|n| (button.clone(), PanelOutcome::OpenRoundPlan(n)))
         .collect()
+}
+
+/// What each fix round of `feature` listed in the build log, newest first,
+/// as `probe` last read it, under the open round if it isn't there yet: the
+/// log only lists its fixes once they go, and it is at work before that.
+/// How the open one stands shows here unless the page says so already, on
+/// the round's card or under "Verify failures".
+fn fix_rounds_of(
+    feature: &Feature,
+    probe: Option<&Probe>,
+    actions: &[(PageButton, PanelOutcome)],
+) -> Vec<PageSection> {
+    let held = |n: u32| -> Vec<usize> {
+        (actions.iter().enumerate())
+            .filter(|(_, (_, o))| *o == PanelOutcome::OpenRoundPlan(n))
+            .map(|(i, _)| i)
+            .collect()
+    };
+    let with_plan = |n: u32, mut section: PageSection| {
+        if let PageSection::Milestones { buttons, .. } = &mut section {
+            *buttons = held(n);
+        }
+        section
+    };
+    let label = |n| feature::fix_round::label(n, &feature.verify_fixes, &feature.fix_asked);
+    let open = (feature.fix_round.as_ref()).filter(|_| feature.status == Status::Open);
+    let state = open
+        .filter(|round| {
+            fix_round_on(feature, Stage::Build).is_none()
+                && !feature.verify_fixes.iter().any(|fix| fix.round == round.n)
+        })
+        .map(|round| fix_round_state(feature, round));
+    let listed = probe.map_or(&[][..], |p| &p.docs.fix_rounds);
+    let mut out = Vec::new();
+    let ahead = open.filter(|round| !listed.iter().any(|(n, _)| *n == round.n));
+    if let Some(round) = ahead {
+        if round.planned().is_empty() {
+            out.extend(
+                state
+                    .clone()
+                    .map(|state| lines(&label(round.n), vec![state])),
+            );
+        } else {
+            let items: Vec<(bool, String)> = round
+                .planned()
+                .iter()
+                .map(|item| (false, item.clone()))
+                .collect();
+            let section = milestones_section(label(round.n), &items, state.clone());
+            out.push(with_plan(round.n, section));
+        }
+    }
+    out.extend(listed.iter().rev().map(|(n, items)| {
+        let own = open.is_some_and(|round| round.n == *n);
+        let section = milestones_section(label(*n), items, state.clone().filter(|_| own));
+        with_plan(*n, section)
+    }));
+    out
 }
 
 /// `stage`'s file to read on its page, as `probe` last read it; none while
@@ -10620,6 +11019,7 @@ fn stage_page(
         }),
     };
     // A stage not reached yet may start by itself: its agent is picked ahead.
+    let mut last_after = None;
     if mark == StageMark::Later {
         sections.extend(agent_card(feature, stage, state, actions, now));
         // What it will run is there to see ahead too.
@@ -10630,10 +11030,26 @@ fn stage_page(
         if stage == Stage::AiReview && feature.review.is_some() {
             sections.extend(review_sections(feature, stage, mark, state, actions));
         }
+        // So do the comments, whose fixes this came back for.
+        if stage == Stage::CodeReview && crate::feature_diff::has_rounds(feature) {
+            let open = fix_round_on(feature, stage);
+            sections.extend(open.map(|r| fix_round_card(feature, r, actions, now)));
+            let last = last_round_on(feature, stage);
+            sections.extend(last.map(|r| last_round_card(feature, r, actions, now)));
+            sections.extend(comment_sections(feature, state, actions));
+        }
     }
     if mark != StageMark::Later {
-        sections.extend(fix_round_on(feature, stage).map(|r| fix_round_card(feature, r, actions)));
-        sections.extend(last_round_on(feature, stage).map(|r| last_round_card(r, actions)));
+        let open = fix_round_on(feature, stage);
+        sections.extend(open.map(|r| fix_round_card(feature, r, actions, now)));
+        // Over, it goes under what the stage has new to send.
+        let last = last_round_on(feature, stage).map(|r| last_round_card(feature, r, actions, now));
+        let (first, after) = match has_new_fixes(feature, stage, state.ctx) {
+            true => (None, last),
+            false => (last, None),
+        };
+        sections.extend(first);
+        last_after = after;
         sections.extend(rework_card(feature, stage, state, actions));
         if let Some(m) = feature.marks.get(&stage).filter(|m| !m.note.is_empty()) {
             sections.push(lines("Note", vec![line(m.note.clone(), CheckTone::Note)]));
@@ -10682,13 +11098,15 @@ fn stage_page(
                 let stop = feature.runs.get(&stage).and_then(|r| r.stop);
                 let counted = stop.map(|stop| PageSection::Milestones {
                     label: stage.label().to_owned(),
+                    state: None,
                     done: stop.done as usize,
                     total: stop.total as usize,
                     items: Vec::new(),
+                    buttons: Vec::new(),
                 });
                 sections.extend(verify_fixes_section(feature, now));
+                sections.extend(fix_rounds_of(feature, state.probe, actions));
                 sections.extend(milestones_of(state.probe, stage).or(counted));
-                sections.extend(fix_rounds_of(feature, state.probe));
                 sections.extend(setup_section(feature, state));
             }
             Stage::Verify => {
@@ -10699,10 +11117,14 @@ fn stage_page(
                 sections.extend(card());
                 sections.extend(review_sections(feature, stage, mark, state, actions));
             }
-            Stage::CodeReview if mark == StageMark::Current => {
-                let text = (state.code_review.clone())
-                    .unwrap_or_else(|| "review every changed file".into());
-                sections.push(lines("Files", vec![line(text, CheckTone::Note)]));
+            Stage::CodeReview => {
+                // The switcher above says it, where there is one.
+                if mark == StageMark::Current && !crate::feature_diff::review_views(feature) {
+                    let text = (state.code_review.clone())
+                        .unwrap_or_else(|| "review every changed file".into());
+                    sections.push(lines("Files", vec![line(text, CheckTone::Note)]));
+                }
+                sections.extend(comment_sections(feature, state, actions));
             }
             Stage::ManualTest if mark == StageMark::Current => {
                 if state.criteria.is_empty() {
@@ -10748,9 +11170,10 @@ fn stage_page(
                     sections.push(lines("Pull requests", prs));
                 }
             }
-            Stage::CodeReview | Stage::ManualTest => {}
+            Stage::ManualTest => {}
         }
     }
+    sections.extend(last_after);
     // The agent's card says what it does: the status line needn't again.
     let carded = |l: &CheckLine| {
         (sections.iter()).any(|s| {
@@ -10760,7 +11183,9 @@ fn stage_page(
     };
     // Ship's check says how it stands, and more.
     let checked = mark == StageMark::Current && stage == Stage::Ship;
-    let status = status.filter(|l| !carded(l) && !checked);
+    // Code review's switch says how its files stand.
+    let switched = stage == Stage::CodeReview && crate::feature_diff::review_views(feature);
+    let status = status.filter(|l| !carded(l) && !checked && !switched);
     // A restart runs the agent picked: the button says so when it's another.
     let lit = state.picks.iter().find(|c| c.lit).map(|c| c.name.as_str());
     let other = lit.filter(|lit| {
@@ -10775,6 +11200,12 @@ fn stage_page(
             label: "Hide".to_owned(),
             ..b.clone()
         },
+        (_, PanelOutcome::FoldCommentRound(n)) if state.comment_rounds_open.contains(n) => {
+            PageButton {
+                label: "Hide".to_owned(),
+                ..b.clone()
+            }
+        }
         _ => b.clone(),
     };
     StagePage {
@@ -10819,6 +11250,12 @@ fn review_sections(
             )),
             _ => {}
         }
+        // Make fixes is gone: not with no word of why.
+        if sends_findings(feature, stage, state.ctx) == Some(PanelOutcome::SendFixes) {
+            let findings = feature.review.iter().flat_map(|r| &r.findings);
+            let why = review_import::plan_why(findings, state.ctx.comments);
+            notes.extend(why.map(|why| line(why, CheckTone::Note)));
+        }
         sections.push(lines(&label, notes));
         sections.extend(cards.into_iter().map(|card| {
             PageSection::Finding(match card {
@@ -10847,6 +11284,125 @@ fn review_sections(
         }
     }
     sections
+}
+
+/// Code review's page of `feature` below its fix plan's card: the comments as
+/// AI review's findings are, those not sent yet first; each earlier round's,
+/// folded unless `state` shows it; and the plan to read.
+fn comment_sections(
+    feature: &Feature,
+    state: &PanelState,
+    actions: &[(PageButton, PanelOutcome)],
+) -> Vec<PageSection> {
+    if !lists_comments(feature) {
+        return Vec::new();
+    }
+    let multi = feature.many_repos();
+    let notes = shown_notes(feature, Stage::CodeReview, notes_of(state.probe));
+    let made: &[String] = (feature.comment_fixes.last()).map_or(&[], |fix| &fix.made);
+    let sent = notes.iter().filter(|c| c.flag.is_some());
+    let done = sent.clone().filter(|c| note_made(c, made)).count();
+    let mut sections = Vec::new();
+    match (notes.is_empty(), sent.count()) {
+        (true, _) => {
+            let text = "none yet: write them in Code review, then plan the fixes";
+            sections.push(lines("Comments", vec![line(text, CheckTone::Note)]));
+        }
+        (false, 0) => sections.push(lines("Comments", Vec::new())),
+        (false, total) => sections.push(lines(
+            &format!("Comments \u{b7} {done} of {total} made"),
+            Vec::new(),
+        )),
+    }
+    sections.extend(notes.iter().map(|c| {
+        PageSection::Finding(match c.flag.is_some() {
+            true => sent_note_card(c, multi, note_made(c, made), actions),
+            false => note_card(c, multi, actions),
+        })
+    }));
+    let old = state.probe.map(|p| &p.docs.old_notes);
+    for fix in earlier_comment_rounds(feature) {
+        let notes = old.and_then(|old| old.get(&fix.round));
+        let notes = notes.map_or(&[][..], Vec::as_slice);
+        let count = |c: &&Comment| note_made(c, &fix.made);
+        let text = format!(
+            "{} of {} made",
+            notes.iter().filter(count).count(),
+            notes.len()
+        );
+        sections.push(PageSection::File {
+            name: format!("Round {}", fix.round),
+            state: line(text, CheckTone::Note),
+            buttons: (actions.iter().enumerate())
+                .filter(|(_, (_, o))| *o == PanelOutcome::FoldCommentRound(fix.round))
+                .map(|(i, _)| i)
+                .collect(),
+        });
+        if state.comment_rounds_open.contains(&fix.round) {
+            sections.extend(notes.iter().map(|c| {
+                let mut card = sent_note_card(c, multi, note_made(c, &fix.made), &[]);
+                card.faded = true;
+                card.stripe = None;
+                PageSection::Finding(card)
+            }));
+        }
+    }
+    sections.extend(comment_plan(feature, state.probe));
+    sections
+}
+
+/// The files of `feature`'s code review, as the switch counts them: by its last
+/// read once there was one, else by what the probe found and the viewed marks.
+fn review_files(feature: &Feature, state: &PanelState) -> Option<chrome::ReviewFiles> {
+    if let Some(counts) = state.code_counts {
+        return Some(chrome::ReviewFiles {
+            viewed: counts.viewed,
+            total: counts.files,
+            changed: counts.changed,
+        });
+    }
+    let total: usize = state.probe?.stats.values().map(|stat| stat.files).sum();
+    (total > 0).then(|| chrome::ReviewFiles {
+        viewed: feature.viewed.0.len().min(total),
+        total,
+        changed: 0,
+    })
+}
+
+/// How the fixes of `feature`'s Code review stand, as the switch says it; `notes`
+/// as `Docs::notes` holds them.
+fn fixes_word(feature: &Feature, notes: &[Comment]) -> String {
+    if let Some(round) = (feature.fix_round.as_ref()).filter(|r| r.stage == Stage::CodeReview) {
+        return round.line();
+    }
+    let made: &[String] = (feature.comment_fixes.last()).map_or(&[], |fix| &fix.made);
+    let sent = notes.iter().filter(|c| c.flag.is_some());
+    match sent.clone().count() {
+        0 => "none yet".to_owned(),
+        total => {
+            let done = sent.filter(|c| note_made(c, made)).count();
+            format!("{done} of {total} made")
+        }
+    }
+}
+
+/// Whether sent comment `c`'s id is among those of its round `made`.
+fn note_made(c: &Comment, made: &[String]) -> bool {
+    (c.flag.as_ref()).is_some_and(|flag| made.contains(&flag.id))
+}
+
+/// The fix plan of `feature`'s latest Code review round, as `probe` last read
+/// it, once written: while the agent writes it again, what is there is old.
+fn comment_plan(feature: &Feature, probe: Option<&Probe>) -> Option<PageSection> {
+    let writing = (feature.fix_round.as_ref()).is_some_and(|round| {
+        round.stage == Stage::CodeReview
+            && matches!(round.phase, FixPhase::Compacting | FixPhase::Planning)
+    });
+    let blocks = probe?.docs.comment_plan.as_ref().filter(|_| !writing)?;
+    Some(PageSection::Doc {
+        name: feature::fix_round::FILE.to_owned(),
+        blocks: blocks.clone(),
+    })
 }
 
 /// How a line of `feature`'s history reads in the activity: a send-back
@@ -10899,7 +11455,7 @@ fn activity(feature: &Feature, now: u64) -> Vec<ActivityRow> {
 
 /// Every key the feature tab takes, by where it works, as F1 lists them:
 /// (heading, [(keys, what they do)]).
-const TAB_KEYS: [(&str, &[(&str, &str)]); 5] = [
+const TAB_KEYS: [(&str, &[(&str, &str)]); 6] = [
     (
         "Stages",
         &[
@@ -10921,7 +11477,7 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 5] = [
             ),
             (
                 "Ctrl+Enter",
-                "approve a brief or plan ready for review; make the fixes of a fix plan ready for review, or send them again; at AI review, send the findings to fix, with no plan unless you commented",
+                "approve a brief or plan ready for review; make the fixes of a fix plan ready for review, or again once its agent stopped with fixes left; at AI review, send the findings to fix, with no plan unless you commented; at Verify, send its failures with no plan (Ctrl+Shift+Enter plans them first)",
             ),
             (
                 "Ctrl+Shift+O",
@@ -11004,6 +11560,17 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 5] = [
             ),
             ("Enter", "show it in the diff"),
             ("Alt+E", "show or hide the earlier reviews"),
+        ],
+    ),
+    (
+        "Code review",
+        &[
+            ("Alt+1 / Alt+2", "show the code, or the fixes the comments asked for"),
+            ("Up / Down", "fixes: previous or next comment"),
+            ("Enter", "fixes: show the comment in the diff"),
+            ("c / Del", "fixes: edit or delete a comment not sent yet"),
+            ("c", "fixes: off the cards, add a comment of your own"),
+            ("Alt+E", "fixes: show or hide the earlier rounds"),
         ],
     ),
     (
@@ -11094,6 +11661,13 @@ fn tab_hints(
     let mut hints = writers_tab_hints(
         panel, feature, stage, slugs, ctx, choices, plan, ships, notes,
     );
+    if stage == Stage::CodeReview
+        && !panel.keys
+        && panel.note.is_none()
+        && crate::feature_diff::review_views(feature)
+    {
+        hints.push(("Alt+1".to_owned(), "code review".to_owned()));
+    }
     if feature.writer.is_some() {
         for (key, what) in &mut hints {
             // Enter goes by the page's own action, which only reads a file there.
@@ -11246,6 +11820,10 @@ fn writers_tab_hints(
             if can_stop_checks(feature) {
                 hints.push(hint("Shift+S", "stop all"));
             }
+            if verify_sends(feature, stage) {
+                hints.push(hint("Ctrl+Enter", "make fixes"));
+                hints.push(hint("Ctrl+Shift+Enter", "plan fixes"));
+            }
             hints.push(hint("Tab", if repos { "repositories" } else { "stages" }));
         }
         TabArea::Findings => {
@@ -11258,12 +11836,13 @@ fn writers_tab_hints(
                 Some(_) => hint("Del", "again to delete"),
                 None => hint("Del", "delete"),
             };
-            if diff_note.is_some() && decides {
+            let edits = diff_note.is_some_and(|c| can_edit_note(feature, stage, c));
+            if edits {
                 hints.push(hint("c", "edit\u{2026}"));
                 hints.push(del.clone());
             }
             if let Some(c) = diff_note {
-                match (crate::review::is_general(c), decides) {
+                match (crate::review::is_general(c), edits) {
                     (false, _) => hints.push(hint("Enter", "show in diff")),
                     (true, true) => hints.push(hint("Enter", "edit\u{2026}")),
                     (true, false) => {}
@@ -11343,7 +11922,9 @@ fn writers_tab_hints(
             if offers_fix_all(feature, stage) {
                 hints.push(hint("Shift+F", "fix all open"));
             }
-            if sends_findings(feature, stage, ctx) == Some(PanelOutcome::MakeFindingFixes) {
+            if sends_findings(feature, stage, ctx) == Some(PanelOutcome::MakeFindingFixes)
+                || verify_sends(feature, stage)
+            {
                 hints.push(hint("Ctrl+Shift+Enter", "plan fixes"));
             }
             if earlier_reviews(feature, stage).next().is_some() {
@@ -11362,10 +11943,6 @@ fn writers_tab_hints(
                 if round.can_drop() {
                     hints.push(hint(START_OVER_KEY, "drop plan\u{2026}"));
                 }
-            }
-            // Manual test's has its own use for it.
-            if makes_fixes_again(feature, stage) && !tries_criteria(feature, stage) && !going {
-                hints.push(hint("Ctrl+Enter", "make fixes again"));
             }
             if approves_doc(feature, stage, ctx) {
                 hints.push(hint("Ctrl+Enter", "approve"));
@@ -11630,6 +12207,7 @@ fn tab_view(
                 &state.criteria,
                 notes_of(state.probe),
             );
+            actions.extend(round_plan_actions(feature, stage, state.probe));
             actions.extend(place_action(state.place.as_deref(), stage));
             actions.extend(stop_action(feature, stage));
             stage_page(feature, stage, state, &actions, now)
@@ -11718,8 +12296,17 @@ fn tab_view(
     let picked = (entries.get(at))
         .filter(|_| panel.expanded && focus == TabArea::Repos)
         .and_then(|e| panel.picked(feature, *e));
+    let review_switch = (stage == Stage::CodeReview
+        && !panel.keys
+        && crate::feature_diff::review_views(feature))
+    .then(|| chrome::ReviewSwitch {
+        view: panel.review_view_of(feature),
+        files: review_files(feature, state),
+        fixes: fixes_word(feature, notes_of(state.probe)),
+    });
     let mut view = FeatureTabView {
         review_page: crate::feature_diff::review_page(panel, feature),
+        review_switch,
         review_keys: false,
         title: feature.title.clone(),
         sub,
@@ -11855,6 +12442,8 @@ pub(crate) mod tests {
             fix_round: None,
             last_fix_round: None,
             verify_fixes: Vec::new(),
+            fix_asked: Default::default(),
+            comment_fixes: Vec::new(),
             ran_once: Default::default(),
             fix_rounds: 0,
         }
@@ -14017,21 +14606,21 @@ pub(crate) mod tests {
     /// `f`, with a fix round asked by `stage`, in `phase`.
     #[test]
     fn only_a_code_review_waiting_on_the_user_goes_on_its_page() {
-        use crate::feature_diff::inline_review;
+        use crate::feature_diff::review_views;
         let code_review = stage_index(Stage::CodeReview);
         let f = feature("f", vec![repo("api", true)], code_review);
         assert_eq!(f.current(), Some(Stage::CodeReview));
-        assert!(inline_review(&f));
+        assert!(review_views(&f));
         // Its code isn't changed: nothing to review.
         let mut no_code = f.clone();
         no_code.repos[0].touched = false;
-        assert!(!inline_review(&no_code));
+        assert!(!review_views(&no_code));
         // Another machine writes it: the page says so.
         let mut elsewhere = f.clone();
         elsewhere.writer = Some("m1".into());
-        assert!(!inline_review(&elsewhere));
-        // A fix plan has its cards on the page.
-        assert!(!inline_review(&in_round(
+        assert!(!review_views(&elsewhere));
+        // A fix plan of its own keeps the review there, beside it.
+        assert!(review_views(&in_round(
             f.clone(),
             Stage::CodeReview,
             FixPhase::Ready
@@ -14039,9 +14628,9 @@ pub(crate) mod tests {
         // Closed, or done with it: the page says how it went.
         let mut closed = f.clone();
         closed.status = Status::Abandoned;
-        assert!(!inline_review(&closed));
+        assert!(!review_views(&closed));
         let done = feature("f", vec![repo("api", true)], code_review + 1);
-        assert!(!inline_review(&done));
+        assert!(!review_views(&done));
     }
 
     #[test]
@@ -14065,6 +14654,395 @@ pub(crate) mod tests {
         assert!(view.review_page && !view.review_keys);
     }
 
+    /// A comment in `path` of the kind Code review's round took, id `id`.
+    fn sent(id: &str, path: &str, text: &str) -> Comment {
+        Comment {
+            path: path.into(),
+            text: text.into(),
+            lines: vec![crate::review::Quoted {
+                number: 3,
+                ..Default::default()
+            }],
+            flag: Some(crate::review::Flag {
+                id: id.into(),
+                state: FindingState::Sent,
+                yours: true,
+                sent: true,
+                ..Default::default()
+            }),
+            ..Comment::default()
+        }
+    }
+
+    /// `f` with Code review's round `n` open at `phase`, taking C1 and C2.
+    fn comment_round(mut f: Feature, phase: FixPhase) -> Feature {
+        f = in_round(f, Stage::CodeReview, phase);
+        f.fix_rounds = 1;
+        let round = f.fix_round.as_mut().unwrap();
+        round.what = "review comments".into();
+        round.give_back = feature::fix_round::GiveBack::Comments {
+            copy: "/d/c.json".into(),
+            ids: vec!["C1".into(), "C2".into()],
+        };
+        f.comment_fixes = vec![CommentFix {
+            round: 1,
+            made: Vec::new(),
+        }];
+        f
+    }
+
+    fn fixes_probe(notes: Vec<Comment>, plan: bool) -> Probe {
+        Probe {
+            docs: feature::page::Docs {
+                notes,
+                comment_plan: plan.then(|| {
+                    std::sync::Arc::new(vec![crate::md_blocks::DocBlock::Note("The plan".into())])
+                }),
+                ..Default::default()
+            },
+            ..ship::probe_seen(&feature("x", vec![repo("api", true)], 6))
+        }
+    }
+
+    #[test]
+    fn code_review_opens_on_its_code_then_on_its_fixes_for_good() {
+        use crate::{chrome::ReviewView::*, feature_diff::review_page};
+        let code_review = stage_index(Stage::CodeReview);
+        let f = feature("f", vec![repo("api", true)], code_review);
+        let mut panel = FeaturePanel::default();
+        // First time, the review.
+        assert_eq!(panel.review_view_of(&f), Code);
+        assert!(review_page(&panel, &f));
+        // Plan fixes, and from there on its fixes.
+        let planning = comment_round(f.clone(), FixPhase::Planning);
+        assert_eq!(panel.review_view_of(&planning), Fixes);
+        assert!(!review_page(&panel, &planning));
+        let ready = comment_round(f.clone(), FixPhase::Ready);
+        assert_eq!(panel.review_view_of(&ready), Fixes);
+        let mut over = ready.clone();
+        over.last_fix_round = over.fix_round.take();
+        assert_eq!(panel.review_view_of(&over), Fixes);
+        // The code changed and sent it back: the page is still where the
+        // fixes are followed, and still goes to the code.
+        let mut fixing = comment_round(f.clone(), FixPhase::Fixing);
+        fixing.marks.remove(&Stage::Build);
+        assert_eq!(fixing.current(), Some(Stage::Build));
+        // While they are made, the commits sending it back don't move the page.
+        assert_eq!(panel.page_stage(&fixing), Stage::CodeReview);
+        assert_eq!(panel.review_view_of(&fixing), Fixes);
+        panel.pick(&fixing, Stage::Build);
+        assert_eq!(panel.page_stage(&fixing), Stage::Build);
+        panel.unpick();
+        let mut back = over.clone();
+        back.marks.remove(&Stage::AiReview);
+        assert_eq!(back.current(), Some(Stage::AiReview));
+        // Made, the page goes on with the feature.
+        assert_eq!(panel.page_stage(&back), Stage::AiReview);
+        panel.pick(&back, Stage::CodeReview);
+        assert_eq!(panel.review_view_of(&back), Fixes);
+        assert!(crate::feature_diff::review_views(&back));
+        panel.unpick();
+        // Picked, it stays so whatever the default.
+        panel.review_view = Some(Code);
+        assert_eq!(panel.review_view_of(&over), Code);
+        assert!(review_page(&panel, &over));
+        panel.review_view = None;
+        assert!(!review_page(&panel, &over));
+        // Dropped: nothing to follow, so its code.
+        let mut dropped = over;
+        dropped.comment_fixes.clear();
+        dropped.last_fix_round = None;
+        assert_eq!(panel.review_view_of(&dropped), Code);
+    }
+
+    #[test]
+    fn alt_digits_go_between_code_review_and_its_fixes_only_there() {
+        use crate::chrome::ReviewView::*;
+        let code_review = stage_index(Stage::CodeReview);
+        let f = feature("f", vec![repo("api", true)], code_review);
+        let mut panel = FeaturePanel::default();
+        assert_eq!(
+            press(&mut panel, &f, alt(Keysym::_2)),
+            Some(PanelOutcome::ReviewView(Fixes))
+        );
+        assert_eq!(
+            press(&mut panel, &f, alt(Keysym::_1)),
+            Some(PanelOutcome::ReviewView(Code))
+        );
+        let build = feature("b", vec![repo("api", true)], stage_index(Stage::Build));
+        assert_eq!(press(&mut panel, &build, alt(Keysym::_2)), None);
+        // Off the cards, as on AI review's page, a comment of one's own.
+        panel.review_view = Some(Fixes);
+        assert_eq!(
+            press(&mut panel, &f, key(Keysym::c)),
+            Some(PanelOutcome::AddComment)
+        );
+        panel.review_view = None;
+        // Another machine writes it: no switch to go by.
+        let mut elsewhere = f.clone();
+        elsewhere.writer = Some("m1".into());
+        assert_eq!(press(&mut panel, &elsewhere, alt(Keysym::_2)), None);
+    }
+
+    #[test]
+    fn the_fixes_view_shows_the_plan_and_comments_as_ai_review_does() {
+        let code_review = stage_index(Stage::CodeReview);
+        let f = feature("f", vec![repo("api", true)], code_review);
+        let mut f = comment_round(f, FixPhase::Ready);
+        f.comment_fixes[0].made = vec!["C2".into()];
+        let probe = fixes_probe(
+            vec![
+                note("src/new.rs", "Not sent yet"),
+                sent("C1", "src/a.rs", "Rename it"),
+                sent("C2", "src/b.rs", "Add a test"),
+            ],
+            true,
+        );
+        let state = PanelState {
+            probe: Some(&probe),
+            ..PanelState::default()
+        };
+        let notes = notes_of(state.probe);
+        let actions = stage_actions(
+            &f,
+            Stage::CodeReview,
+            RowCtx::default(),
+            &[],
+            &[],
+            notes,
+        );
+        let page = stage_page(&f, Stage::CodeReview, &state, &actions, 2_000);
+        // The plan's card holds what acts on it, as ever.
+        let Some(PageSection::File { name, buttons, .. }) = page.sections.first() else {
+            panic!("{:?}", page.sections);
+        };
+        assert!(name.starts_with("Fix plan: "), "{name}");
+        let held: Vec<&str> = buttons.iter().map(|i| page.buttons[*i].label.as_str()).collect();
+        assert_eq!(held[..2], ["Review", "Make fixes"]);
+        assert!(page.sections.iter().any(|s| matches!(s,
+            PageSection::Lines { label, .. } if label == "Comments \u{b7} 1 of 2 made")));
+        let cards: Vec<&FindingCard> = (page.sections.iter())
+            .filter_map(|s| match s {
+                PageSection::Finding(card) => Some(card),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(cards.len(), 3);
+        assert_eq!(cards[0].state, "goes with the fixes");
+        assert_eq!(cards[0].stripe, None);
+        assert_eq!(cards[1].state, "sent to Build");
+        assert_eq!(cards[1].stripe, Some(CardStripe::Sent));
+        assert!(cards[1].place.starts_with("C1 \u{b7} "), "{}", cards[1].place);
+        assert_eq!(cards[2].state, "fix made");
+        assert!(cards[2].made);
+        // Last, whatever comes before it, the plan to read.
+        assert!(matches!(
+            page.sections.last(),
+            Some(PageSection::Doc { name, .. }) if name == feature::fix_round::FILE
+        ));
+        // What went to Build can be shown, not changed; what didn't, both.
+        let label = |card: &FindingCard| -> Vec<String> {
+            (card.buttons.iter())
+                .map(|i| page.buttons[*i].label.clone())
+                .collect()
+        };
+        assert_eq!(label(cards[1]), ["Show in diff"]);
+        assert_eq!(label(cards[0]), ["Edit\u{2026}", "Delete", "Show in diff"]);
+    }
+
+    #[test]
+    fn a_plan_being_written_again_isnt_shown_as_if_it_were_the_one() {
+        let code_review = stage_index(Stage::CodeReview);
+        let f = feature("f", vec![repo("api", true)], code_review);
+        let probe = fixes_probe(vec![sent("C1", "src/a.rs", "Rename it")], true);
+        let has_doc = |f: &Feature| {
+            let state = PanelState {
+                probe: Some(&probe),
+                ..PanelState::default()
+            };
+            comment_sections(f, &state, &[])
+                .iter()
+                .any(|s| matches!(s, PageSection::Doc { .. }))
+        };
+        assert!(!has_doc(&comment_round(f.clone(), FixPhase::Planning)));
+        assert!(!has_doc(&comment_round(f.clone(), FixPhase::Compacting)));
+        assert!(has_doc(&comment_round(f.clone(), FixPhase::Ready)));
+        assert!(has_doc(&comment_round(f, FixPhase::Fixing)));
+    }
+
+    #[test]
+    fn its_fixes_stay_on_the_page_once_the_feature_went_back_for_them() {
+        let code_review = stage_index(Stage::CodeReview);
+        let f = feature("f", vec![repo("api", true)], code_review);
+        let mut f = comment_round(f, FixPhase::Fixing);
+        f.marks.remove(&Stage::AiReview);
+        assert_eq!(stage_mark(&f, Stage::CodeReview), StageMark::Later);
+        let probe = fixes_probe(vec![sent("C1", "src/a.rs", "Rename it")], true);
+        let state = PanelState {
+            probe: Some(&probe),
+            ..PanelState::default()
+        };
+        let actions = stage_actions(
+            &f,
+            Stage::CodeReview,
+            RowCtx::default(),
+            &[],
+            &[],
+            notes_of(state.probe),
+        );
+        let page = stage_page(&f, Stage::CodeReview, &state, &actions, 2_000);
+        let has = |what: fn(&PageSection) -> bool| page.sections.iter().any(what);
+        assert!(has(
+            |s| matches!(s, PageSection::File { name, .. } if name.contains("ix plan: "))
+        ));
+        assert!(has(|s| matches!(s, PageSection::Finding(_))));
+        assert!(has(|s| matches!(s, PageSection::Doc { .. })));
+        let labels: Vec<&str> = page.buttons.iter().map(|b| b.label.as_str()).collect();
+        assert!(labels.contains(&"Open"), "{labels:?}");
+        assert!(labels.contains(&"Show in diff"), "{labels:?}");
+    }
+
+    #[test]
+    fn a_comment_gone_to_build_only_shows_while_one_not_sent_can_change() {
+        let code_review = stage_index(Stage::CodeReview);
+        let f = comment_round(
+            feature("f", vec![repo("api", true)], code_review),
+            FixPhase::Ready,
+        );
+        let unsent = note("src/new.rs", "Not sent yet");
+        let gone = sent("C1", "src/a.rs", "Rename it");
+        let notes = [unsent.clone(), gone.clone()];
+        let slugs: Vec<String> = Vec::new();
+        let mut panel = FeaturePanel {
+            review_view: Some(chrome::ReviewView::Fixes),
+            focus: TabArea::Findings,
+            ..FeaturePanel::default()
+        };
+        let hit = |panel: &mut FeaturePanel, at: usize, (mods, sym)| {
+            panel.finding = at;
+            panel.key(&mods, sym, &f, &slugs, RowCtx::default(), &[], &[], &notes)
+        };
+        assert_eq!(
+            hit(&mut panel, 0, key(Keysym::c)),
+            Some(PanelOutcome::EditDiffNote(unsent.clone()))
+        );
+        assert_eq!(
+            hit(&mut panel, 1, key(Keysym::c)),
+            Some(PanelOutcome::FindingRefused(SENT_NOTE))
+        );
+        assert_eq!(
+            hit(&mut panel, 1, key(Keysym::Delete)),
+            Some(PanelOutcome::FindingRefused(SENT_NOTE))
+        );
+        assert_eq!(
+            hit(&mut panel, 1, key(Keysym::f)),
+            Some(PanelOutcome::FindingRefused(SENT_NOTE))
+        );
+        assert_eq!(
+            hit(&mut panel, 1, key(Keysym::Return)),
+            Some(PanelOutcome::ShowDiffNote(gone))
+        );
+        // AI review lists none that went with Code review's round.
+        let ai = feature("a", vec![repo("api", true)], stage_index(Stage::AiReview));
+        assert_eq!(shown_notes(&ai, Stage::AiReview, &notes).len(), 0);
+    }
+
+    #[test]
+    fn earlier_rounds_fold_to_a_card_of_how_they_went() {
+        let code_review = stage_index(Stage::CodeReview);
+        let mut f = comment_round(
+            feature("f", vec![repo("api", true)], code_review),
+            FixPhase::Ready,
+        );
+        f.fix_round.as_mut().unwrap().n = 2;
+        f.comment_fixes = vec![
+            CommentFix {
+                round: 1,
+                made: vec!["C1".into()],
+            },
+            CommentFix {
+                round: 2,
+                made: Vec::new(),
+            },
+        ];
+        let mut probe = fixes_probe(vec![sent("C1", "src/b.rs", "Latest")], false);
+        probe.docs.old_notes = BTreeMap::from([(1, vec![
+            sent("C1", "src/a.rs", "Old"),
+            sent("C2", "src/a.rs", "Older"),
+        ])]);
+        let cards = |open: BTreeSet<u32>| {
+            let state = PanelState {
+                probe: Some(&probe),
+                comment_rounds_open: open,
+                ..PanelState::default()
+            };
+            comment_sections(&f, &state, &[])
+        };
+        let folded = cards(BTreeSet::new());
+        assert!(folded.iter().any(|s| matches!(s, PageSection::File { name, state, .. }
+            if name == "Round 1" && state.text == "1 of 2 made")));
+        let count = |sections: &[PageSection]| {
+            (sections.iter())
+                .filter(|s| matches!(s, PageSection::Finding(_)))
+                .count()
+        };
+        assert_eq!(count(&folded), 1);
+        assert_eq!(count(&cards(BTreeSet::from([1]))), 3);
+        // Alt+E shows and folds them all, on this page.
+        let mut panel = FeaturePanel {
+            review_view: Some(chrome::ReviewView::Fixes),
+            ..FeaturePanel::default()
+        };
+        assert_eq!(press(&mut panel, &f, alt(Keysym::e)), None);
+        assert_eq!(panel.comment_rounds_open, BTreeSet::from([1]));
+        assert_eq!(press(&mut panel, &f, alt(Keysym::e)), None);
+        assert!(panel.comment_rounds_open.is_empty());
+    }
+
+    #[test]
+    fn the_switch_says_how_far_the_review_and_its_fixes_have_come() {
+        let code_review = stage_index(Stage::CodeReview);
+        let f = feature("f", vec![repo("api", true)], code_review);
+        let counts = crate::feature_diff::Counts {
+            files: 8,
+            viewed: 3,
+            changed: 1,
+            comments: 0,
+        };
+        let state = PanelState {
+            code_counts: Some(counts),
+            ..PanelState::default()
+        };
+        let view = tab_view(&FeaturePanel::default(), &f, &[], &state, 2_000);
+        let switch = view.review_switch.expect("its switch");
+        assert_eq!(switch.view, chrome::ReviewView::Code);
+        assert_eq!(switch.fixes, "none yet");
+        assert_eq!(
+            switch.files,
+            Some(chrome::ReviewFiles {
+                viewed: 3,
+                total: 8,
+                changed: 1
+            })
+        );
+        // The rail says the same as the switch.
+        assert_eq!(
+            rail_node(&f, Stage::CodeReview, &state, 2_000).line,
+            "3 of 8 files"
+        );
+        let round = comment_round(f.clone(), FixPhase::Planning);
+        assert_eq!(fixes_word(&round, &[]), "planning fixes");
+        let mut over = comment_round(f.clone(), FixPhase::Ready);
+        over.last_fix_round = over.fix_round.take();
+        over.comment_fixes[0].made = vec!["C1".into()];
+        let notes = [sent("C1", "a", "x"), sent("C2", "b", "y")];
+        assert_eq!(fixes_word(&over, &notes), "1 of 2 made");
+        // Elsewhere, no switch.
+        let build = feature("b", vec![repo("api", true)], stage_index(Stage::Build));
+        let view = tab_view(&FeaturePanel::default(), &build, &[], &state, 2_000);
+        assert_eq!(view.review_switch, None);
+    }
+
     fn in_round(mut f: Feature, stage: Stage, phase: FixPhase) -> Feature {
         f.fix_round = Some(FixRound {
             n: 1,
@@ -14079,6 +15057,7 @@ pub(crate) mod tests {
             give_back: Default::default(),
             items: Vec::new(),
             done: 0,
+            ended: None,
         });
         f
     }
@@ -14267,6 +15246,7 @@ pub(crate) mod tests {
         assert_eq!(
             verify_title_buttons(&failed, ctx),
             [
+                "Make fixes",
                 "Plan fixes",
                 "Run checks",
                 "Start over\u{2026}",
@@ -14516,7 +15496,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_failed_verify_waits_for_plan_fixes_on_enter() {
+    fn a_failed_verify_waits_for_its_fixes_on_enter() {
         let mut f = verified(false);
         // `verified` ran to its end, a check failing.
         f.verify.as_mut().unwrap().finished = Some(1_100);
@@ -14527,8 +15507,32 @@ pub(crate) mod tests {
         };
         assert_eq!(
             page_enter(&f, Stage::Verify, ctx),
-            Some(PanelOutcome::PlanFixes)
+            Some(PanelOutcome::MakeVerifyFixes)
         );
+        // Ctrl+Enter makes them too, Ctrl+Shift+Enter plans them, from the
+        // stages and the check cards alike.
+        let slugs = vec![f.slug.clone()];
+        let plan = [planned("lint", false, true)];
+        for focus in [TabArea::Stages, TabArea::Findings] {
+            let mut panel = FeaturePanel {
+                slug: f.slug.clone(),
+                stage: Some(Stage::Verify),
+                focus,
+                ..FeaturePanel::default()
+            };
+            let ctrl = |shift| ModifiersState {
+                ctrl: true,
+                shift,
+                ..ModifiersState::default()
+            };
+            let press = |panel: &mut FeaturePanel, shift| {
+                let mods = ctrl(shift);
+                panel.key(&mods, Keysym::Return, &f, &slugs, ctx, &plan, &[], &[])
+            };
+            let made = press(&mut panel, false);
+            assert_eq!(made, Some(PanelOutcome::MakeVerifyFixes));
+            assert_eq!(press(&mut panel, true), Some(PanelOutcome::PlanFixes));
+        }
         let plain = page_actions(&f, Stage::Verify, ctx);
         let run = plain.iter().find(|(_, o)| *o == PanelOutcome::RunChecks);
         assert_eq!(run.map(|(b, _)| b.style), Some(ButtonStyle::Plain));
@@ -14583,8 +15587,11 @@ pub(crate) mod tests {
         else {
             panic!("the fix plan's card first: {:?}", page.sections);
         };
-        assert_eq!(name, "Fix plan");
-        assert_eq!(state.text, "Verify failures \u{b7} fix plan ready");
+        assert_eq!(name, "Fix plan: Review 1");
+        assert_eq!(
+            state.text,
+            "Verify failures \u{b7} fix plan ready \u{b7} written 15m ago"
+        );
         assert_eq!(state.tone, CheckTone::Ready);
         let held: Vec<&str> = buttons
             .iter()
@@ -14654,6 +15661,36 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_last_round_says_which_it_was_what_it_made_and_when() {
+        let fixing = in_round(verified(false), Stage::CodeReview, FixPhase::Fixing);
+        let mut f = fixing.clone();
+        let mut round = fixing.fix_round.clone().unwrap();
+        f.fix_round = None;
+        f.fix_asked.insert(round.n, Stage::CodeReview);
+        round.what = "review comments".into();
+        round.items = vec!["One".into(), "Two".into()];
+        round.done = 2;
+        round.ready = Some(1_000);
+        round.ended = Some(1_900);
+        let PageSection::File { name, state, .. } = last_round_card(&f, &round, &[], 2_000) else {
+            panic!("a file card");
+        };
+        assert_eq!(name, format!("Last fix plan: Code review {}", round.n));
+        assert_eq!(
+            state.text,
+            "review comments \u{b7} 2 of 2 made \u{b7} written 16m ago \u{b7} finished 1m ago"
+        );
+        // One kept from before it was timed says what it knows.
+        round.ended = None;
+        round.ready = None;
+        round.items.clear();
+        let PageSection::File { state, .. } = last_round_card(&f, &round, &[], 2_000) else {
+            panic!("a file card");
+        };
+        assert_eq!(state.text, "review comments \u{b7} fixes made");
+    }
+
+    #[test]
     fn a_fix_plan_stays_on_the_page_once_its_fixes_went() {
         let mut f = verified(false);
         f.verify.as_mut().unwrap().finished = Some(1_100);
@@ -14666,7 +15703,9 @@ pub(crate) mod tests {
                     name,
                     state,
                     buttons,
-                } if name == "Fix plan" => Some((state.text, buttons)),
+                } if name.starts_with("Fix plan: ") || name.starts_with("Last fix plan: ") => {
+                    Some((state.text, buttons))
+                }
                 _ => None,
             });
             card.map(|(said, buttons)| {
@@ -14695,7 +15734,8 @@ pub(crate) mod tests {
                 vec!["Open".to_owned()]
             ))
         );
-        // Every fix ticked: read, or sent again if one turned out not made.
+        // Every fix ticked: read. With failures still to send, those go, not
+        // the old round.
         let before = page_enter(&f, Stage::Verify, RowCtx::default());
         let mut over = f.clone();
         over.last_fix_round = fixing.fix_round.clone();
@@ -14703,13 +15743,23 @@ pub(crate) mod tests {
             held(&over, Stage::Verify),
             Some((
                 "Verify failures \u{b7} fixes made".to_owned(),
-                vec!["Open".to_owned(), "Make fixes again".to_owned()]
+                vec!["Open".to_owned()]
             ))
         );
+        // With nothing new it can go again, by its name, if one turned out
+        // not made.
+        let mut quiet = over.clone();
+        quiet.verify.as_mut().unwrap().passed = Some(true);
+        let (_, labels) = held(&quiet, Stage::Verify).unwrap();
+        assert_eq!(labels, ["Open", "Send Review 1 again"]);
         // Enter still does what the stage waits for.
         assert_eq!(page_enter(&over, Stage::Verify, RowCtx::default()), before);
-        // Each has its key.
-        let slugs = vec![over.slug.clone()];
+        assert_ne!(
+            page_enter(&quiet, Stage::Verify, RowCtx::default()),
+            Some(PanelOutcome::ResendFixes)
+        );
+        // No key sends it again.
+        let slugs = vec![quiet.slug.clone()];
         let mut panel = FeaturePanel {
             slug: over.slug.clone(),
             ..FeaturePanel::default()
@@ -14719,12 +15769,19 @@ pub(crate) mod tests {
             ..ModifiersState::default()
         };
         let none = RowCtx::default();
-        assert_eq!(
-            panel.key(&ctrl, Keysym::Return, &over, &slugs, none, &[], &[], &[]),
-            Some(PanelOutcome::MakeFixes)
-        );
-        let hints = tab_view(&panel, &over, &slugs, &PanelState::default(), 2_000).hints;
-        assert!(hints.contains(&("Ctrl+Enter".into(), "make fixes again".into())));
+        for f in [&over, &quiet] {
+            let pressed = panel.key(&ctrl, Keysym::Return, f, &slugs, none, &[], &[], &[]);
+            assert!(
+                !matches!(
+                    pressed,
+                    Some(PanelOutcome::MakeFixes | PanelOutcome::ResendFixes)
+                ),
+                "{pressed:?}"
+            );
+            let hints = tab_view(&panel, f, &slugs, &PanelState::default(), 2_000).hints;
+            let again = hints.iter().any(|(_, said)| said.contains("again"));
+            assert!(!again, "{hints:?}");
+        }
         // Past its stage it is only read.
         let at = over.current().unwrap();
         let mut past = over.clone();
@@ -14739,9 +15796,10 @@ pub(crate) mod tests {
         );
         assert_eq!(held(&past, at), None);
         // Back on a stage before the one that asked, it comes along.
-        let mut back = over.clone();
+        let mut back = quiet.clone();
         back.last_fix_round.as_mut().unwrap().stage = Stage::Ship;
-        assert!(makes_fixes_again(&back, at));
+        assert!(sends_round_again(&back, at, none));
+        assert!(!sends_round_again(&over, at, none), "failures to send");
         // A round open has the card to itself.
         let mut both = fixing.clone();
         both.last_fix_round = fixing.fix_round.clone();
@@ -15191,7 +16249,31 @@ pub(crate) mod tests {
                 .collect();
             assert!(!shown.contains(&"Make fixes".to_owned()), "{shown:?}");
             assert!(shown.contains(&"Plan fixes".to_owned()), "{shown:?}");
+            // The page says why.
+            let state = PanelState {
+                ctx,
+                ..PanelState::default()
+            };
+            let actions = page_actions(f, Stage::AiReview, ctx);
+            let sections =
+                review_sections(f, Stage::AiReview, StageMark::Current, &state, &actions);
+            let why = sections.iter().find_map(|s| match s {
+                PageSection::Lines { lines, .. } => (lines.iter())
+                    .find(|l| l.text.starts_with("A plan comes first"))
+                    .map(|l| l.text.clone()),
+                _ => None,
+            });
+            assert!(why.is_some(), "{sections:?}");
         }
+        // With no word of the user's, nothing to say.
+        let state = PanelState::default();
+        let actions = page_actions(&fix, Stage::AiReview, none);
+        let sections = review_sections(&fix, Stage::AiReview, StageMark::Current, &state, &actions);
+        let says = |s: &PageSection| {
+            matches!(s, PageSection::Lines { lines, .. }
+                if lines.iter().any(|l| l.text.starts_with("A plan comes first")))
+        };
+        assert!(!sections.iter().any(says));
         assert_eq!(review_line(&fix, None).as_deref(), Some("1 finding to fix"));
         let sent = reviewing(&[S::Sent, S::Sent], true);
         assert_eq!(
@@ -16093,6 +17175,7 @@ pub(crate) mod tests {
         );
         let state = PanelState {
             code_review: Some("3 of 7 files viewed".into()),
+            code_counts: None,
             ..PanelState::default()
         };
         assert_eq!(
@@ -16105,9 +17188,20 @@ pub(crate) mod tests {
         assert_eq!(
             page.sections,
             [lines(
-                "Files",
-                vec![line("3 of 7 files viewed", CheckTone::Note)]
+                "Comments",
+                vec![line(
+                    "none yet: write them in Code review, then plan the fixes",
+                    CheckTone::Note
+                )]
             )]
+        );
+        // Written elsewhere there is no switch to count the files: the page does.
+        let mut elsewhere = f.clone();
+        elsewhere.writer = Some("m1".into());
+        let page = stage_page(&elsewhere, Stage::CodeReview, &state, &actions, 2_060);
+        assert_eq!(
+            page.sections[0],
+            lines("Files", vec![line("3 of 7 files viewed", CheckTone::Note)])
         );
     }
 
@@ -17203,9 +18297,11 @@ pub(crate) mod tests {
             page.sections.last(),
             Some(&PageSection::Milestones {
                 label: "Build".to_owned(),
+                state: None,
                 done: 1,
                 total: 3,
-                items: Vec::new()
+                items: Vec::new(),
+                buttons: Vec::new(),
             })
         );
         let PageSection::Agent { buttons, .. } = &page.sections[0] else {
@@ -17766,6 +18862,7 @@ pub(crate) mod tests {
         assert_eq!(
             labels(&actions),
             [
+                ("Make fixes", PanelOutcome::MakeVerifyFixes),
                 ("Plan fixes", PanelOutcome::PlanFixes),
                 ("Run checks", PanelOutcome::RunChecks),
                 ("Start over\u{2026}", PanelOutcome::StartOver(Stage::Verify)),
@@ -18536,9 +19633,11 @@ pub(crate) mod tests {
             page.sections.last(),
             Some(&PageSection::Milestones {
                 label: "Build".to_owned(),
+                state: None,
                 done: 2,
                 total: 3,
-                items
+                items,
+                buttons: Vec::new(),
             })
         );
         let PageSection::Agent { tail: shown, .. } = &page.sections[0] else {
@@ -18551,7 +19650,7 @@ pub(crate) mod tests {
             s,
             PageSection::Agent { tail, .. } if !tail.is_empty()
         )));
-        // Each fix round's list comes after, under its own label.
+        // Each fix round's list comes above, newest first, under its own label.
         let round = |n, items: &[(bool, &str)]| {
             (
                 n,
@@ -18580,8 +19679,91 @@ pub(crate) mod tests {
             .collect();
         assert_eq!(
             groups,
-            [("Build", 2, 3), ("Review 1", 2, 2), ("Verify 3", 0, 1)]
+            [("Verify 3", 0, 1), ("Review 1", 2, 2), ("Build", 2, 3)]
         );
+    }
+
+    #[test]
+    fn builds_page_shows_an_open_round_from_its_start_by_who_asked() {
+        let mut f = feature("b", vec![repo("api", true)], 4);
+        f.fix_asked.insert(1, Stage::AiReview);
+        f.fix_asked.insert(2, Stage::CodeReview);
+        f.fix_round = Some(FixRound {
+            n: 2,
+            what: "review comments".into(),
+            input: "fixes.md".into(),
+            stage: Stage::CodeReview,
+            phase: FixPhase::Planning,
+            sent_back: 0,
+            asked: 0,
+            ready: None,
+            stalled: None,
+            give_back: Default::default(),
+            items: vec!["left from before".into()],
+            done: 0,
+            ended: None,
+        });
+        let mut read = probe(None);
+        read.docs.fix_rounds = vec![(1, vec![(true, "r1-1".to_owned())])];
+        let sections = |f: &Feature| fix_rounds_of(f, Some(&read), &[]);
+        let state = |f: &Feature| Some(fix_round_state(f, f.fix_round.as_ref().unwrap()));
+        // Nothing is in the build log yet, and the plan isn't written: an old
+        // reading of it doesn't count.
+        let said = lines("Code review 2", vec![state(&f).unwrap()]);
+        let review = milestones_section("Review 1".into(), &read.docs.fix_rounds[0].1, None);
+        assert_eq!(sections(&f), [said, review.clone()]);
+        // Its plan waits: its fixes show, not ticked, and it says it waits.
+        let round = f.fix_round.as_mut().unwrap();
+        round.phase = FixPhase::Ready;
+        round.items = vec!["a.rs:1".into()];
+        let planned = milestones_section(
+            "Code review 2".into(),
+            &[(false, "a.rs:1".to_owned())],
+            state(&f),
+        );
+        assert_eq!(sections(&f), [planned.clone(), review.clone()]);
+        assert!(state(&f).unwrap().text.contains("fix plan ready"));
+        // The build log lists it now, and its ticks win; once over it stands alone.
+        let ticked = vec![(true, "a.rs:1".to_owned())];
+        read.docs.fix_rounds.push((2, ticked.clone()));
+        let sections = |f: &Feature| fix_rounds_of(f, Some(&read), &[]);
+        let listed = milestones_section("Code review 2".into(), &ticked, state(&f));
+        assert_eq!(sections(&f), [listed, review.clone()]);
+        let over = milestones_section("Code review 2".into(), &ticked, None);
+        f.last_fix_round = f.fix_round.take();
+        assert_eq!(sections(&f), [over, review.clone()]);
+        // Verify's round says how it stands under "Verify failures" already.
+        let mut verify = f.clone();
+        verify.last_fix_round = None;
+        verify.fix_round = Some(FixRound {
+            n: 3,
+            phase: FixPhase::Planning,
+            items: Vec::new(),
+            stage: Stage::Verify,
+            ..f.last_fix_round.clone().unwrap()
+        });
+        verify.verify_fixes = vec![verify_fix(3, 2)];
+        assert_eq!(fix_rounds_of(&verify, Some(&read), &[]).len(), 2);
+        // Each round with its plan there opens it: the latest from its file,
+        // the one before put aside; one with no plan has no button.
+        f.fix_rounds = 2;
+        read.docs.plan = true;
+        let actions = round_plan_actions(&f, Stage::Build, Some(&read));
+        assert_eq!(
+            (actions.iter()).map(|(_, o)| o.clone()).collect::<Vec<_>>(),
+            [PanelOutcome::OpenRoundPlan(2)]
+        );
+        read.docs.plans.insert(1);
+        let actions = round_plan_actions(&f, Stage::Build, Some(&read));
+        let held: Vec<Vec<usize>> = (fix_rounds_of(&f, Some(&read), &actions).into_iter())
+            .map(|s| match s {
+                PageSection::Milestones { buttons, .. } => buttons,
+                _ => Vec::new(),
+            })
+            .collect();
+        assert_eq!(held, [vec![1], vec![0]]);
+        assert_eq!(actions[1].0.label, "Open plan");
+        assert!(round_plan_actions(&f, Stage::Verify, Some(&read)).is_empty());
     }
 
     #[test]
@@ -18959,6 +20141,7 @@ pub(crate) mod tests {
                 setup: None,
                 verify: None,
                 manual_gate: None,
+                code_counts: None,
                 machine,
             };
             card_line(&f, Some(Stage::Plan), &state, 2_000)

@@ -597,16 +597,26 @@ impl Gerdr {
 
     /// Ask before making the fixes of feature `slug`'s plan while `count`
     /// review comments on it are unsent (see `Gerdr::doc_approve`).
-    pub fn ask_make_fixes_unsent(&mut self, project: String, slug: String, count: usize) {
+    /// `back`: whether Send back can still send them; not once the agent
+    /// stopped making the fixes.
+    pub fn ask_make_fixes_unsent(
+        &mut self,
+        project: String,
+        slug: String,
+        count: usize,
+        back: bool,
+    ) {
         let title = match count {
             1 => "Make the fixes with 1 comment unsent?".to_owned(),
             n => format!("Make the fixes with {n} comments unsent?"),
         };
-        let body = format!(
-            "The comments on {} are deleted, not sent to its agent. \
-             Send back sends them.",
+        let mut body = format!(
+            "The comments on {} are deleted, not sent to its agent.",
             crate::feature::fix_round::FILE
         );
+        if back {
+            body.push_str(" Send back sends them.");
+        }
         self.ask(title, body, "Make fixes", Then::MakeFixes { project, slug });
     }
 

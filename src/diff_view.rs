@@ -49,6 +49,8 @@ pub const READ_ONLY: &str = "A commit's diff can't be edited";
 pub(crate) const NOWHERE: &str = "Move the cursor to a line first";
 /// Why `f` did nothing off a finding.
 pub const NO_FINDING: &str = "Move the cursor to a finding first";
+/// Why a comment that went to the Build agent can't be changed.
+pub const SENT_COMMENT: &str = "That comment went to the Build agent to fix";
 /// Why `f` does nothing on a comment of the user's own.
 pub const YOUR_COMMENT: &str = "This is your comment: c edits it, Del deletes it";
 /// Why a dismissal did nothing.
@@ -92,6 +94,7 @@ fn finding_state_word(flag: &review::Flag) -> Option<&'static str> {
         FindingState::Open => None,
         FindingState::Fix => Some("to fix"),
         FindingState::Sent if flag.made => Some("fix made"),
+        FindingState::Sent if flag.sent => Some("sent to Build"),
         FindingState::Sent => Some("sent to fix"),
         FindingState::Fixed => Some("fixed"),
         FindingState::Dismissed => Some("dismissed"),
@@ -1502,6 +1505,10 @@ impl DiffView {
             return;
         };
         if let Some(flag) = &comment.flag {
+            if flag.sent {
+                self.signals.error = Some(Some(SENT_COMMENT.into()));
+                return;
+            }
             // The user's own item is reworded where it was written.
             if flag.yours && !flag.note {
                 self.signals.edit_finding = Some(flag.id.clone());
@@ -1764,7 +1771,7 @@ impl DiffView {
 
     /// Whether the cursor is on a comment of the user's kept as a finding.
     pub fn on_yours(&self) -> bool {
-        self.finding_here().is_some_and(|(_, flag)| flag.yours)
+        self.finding_here().is_some_and(|(_, flag)| flag.yours && !flag.sent)
     }
 
     /// The next undecided finding after `id` in the diff's order, coming
@@ -1793,6 +1800,10 @@ impl DiffView {
             }
             return any;
         };
+        if flag.sent {
+            self.signals.error = Some(Some(SENT_COMMENT.into()));
+            return true;
+        }
         if flag.yours {
             self.signals.error = Some(Some(YOUR_COMMENT.into()));
             return true;
@@ -1815,6 +1826,10 @@ impl DiffView {
         let Some((c, flag)) = self.finding_here() else {
             return false;
         };
+        if flag.sent {
+            self.signals.error = Some(Some(SENT_COMMENT.into()));
+            return true;
+        }
         // The user's own: nothing to tell themselves, so it just goes.
         if flag.yours {
             self.signals.delete_own = Some(flag.id.clone());
@@ -2153,6 +2168,16 @@ impl DiffView {
 
     /// The review as Markdown for an agent, to copy, else why not.
     pub fn copy_review(&self, ctx: &Ctx) -> Result<Outcome, &'static str> {
+        self.review_markdown(ctx, false)
+    }
+
+    /// The review as Markdown for a feature's Build agent, each comment with
+    /// its id, else why not.
+    pub fn send_review(&self, ctx: &Ctx) -> Result<Outcome, &'static str> {
+        self.review_markdown(ctx, true)
+    }
+
+    fn review_markdown(&self, ctx: &Ctx, numbered: bool) -> Result<Outcome, &'static str> {
         if self.review.own() == 0 {
             return Err(match self.plain {
                 true => "No review comments: press c on a line",
@@ -2177,8 +2202,12 @@ impl DiffView {
             let at = comments.iter().position(|x| std::ptr::eq(x, c));
             at.is_some_and(|at| self.outdated.contains(&at))
         };
+        let text = match numbered {
+            true => review::numbered_markdown(&self.review, &order, label, outdated),
+            false => review::markdown(&self.review, &order, label, outdated),
+        };
         Ok(Outcome::Copy {
-            text: review::markdown(&self.review, &order, label, outdated),
+            text,
             count: self.review.own(),
         })
     }
@@ -2511,9 +2540,15 @@ impl DiffView {
                         tone: finding_tone(flag),
                     }),
                     // Part of its finding: it has no place of its own.
-                    place: match within {
-                        Some(_) => String::new(),
-                        None => format!("{noun} {at} of {of}"),
+                    // One that went to Build says so, by the id the agent has.
+                    place: match (within, comment.flag.as_ref().filter(|flag| flag.sent)) {
+                        (Some(_), _) => String::new(),
+                        (None, Some(flag)) => format!(
+                            "{} \u{b7} {} \u{b7} {noun} {at} of {of}",
+                            flag.id,
+                            finding_state_word(flag).unwrap_or_default()
+                        ),
+                        (None, None) => format!("{noun} {at} of {of}"),
                     },
                     within,
                 }

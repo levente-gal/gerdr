@@ -16,7 +16,7 @@ use smithay::{
 use crate::{
     Gerdr,
     chrome::{self, Rect, ScrollbackHit, ScrollbackRow, ScrollbackView, SearchPart},
-    feature::{setup, store},
+    feature::{fix_round, setup, store},
     input::{MULTI_CLICK, MULTI_CLICK_SLOP, Overlay},
     scroll::Motion,
     scrollback::{Fit, Outcome, Scrollback, Source},
@@ -234,6 +234,37 @@ impl Gerdr {
 
     /// Open the viewer on the last run of feature `slug`'s setup log, over
     /// the app area, at its end: it follows the log while it stays there.
+    /// Show round `n`'s fix plan of feature `slug`: the latest in its tab,
+    /// where it is reviewed, an earlier one put aside in the viewer, only to
+    /// read and copy from.
+    pub fn open_round_plan(&mut self, project: &str, slug: &str, n: u32) {
+        let Some(feature) = self.feature(project, slug) else {
+            return;
+        };
+        if n == feature.fix_rounds {
+            return self.open_doc_tab(project, slug, crate::doc_review::DocFile::FixPlan);
+        }
+        let title = feature.title.clone();
+        let label = fix_round::label(n, &feature.verify_fixes, &feature.fix_asked);
+        let path = fix_round::archive_path(&store::dir(None, project, slug), n);
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(err) => {
+                tracing::warn!("reading {}: {err}", path.display());
+                return self.show_error(format!("Couldn't read the plan of {label}: {err}"));
+            }
+        };
+        self.close_for_scrollback();
+        let what = format!("Fix plan of {label}");
+        self.scrollback = Some(Scrollback::of(Source::File { what }, title, &text, 0));
+        if let Some((_, fit)) = self.scrollback_place()
+            && let Some(viewer) = self.scrollback.as_mut()
+        {
+            viewer.fit(fit);
+        }
+        self.refresh_pointer_focus();
+    }
+
     pub fn open_setup_log(&mut self, project: &str, slug: &str) {
         let Some(title) = self.feature(project, slug).map(|f| f.title.clone()) else {
             return;
@@ -458,6 +489,7 @@ impl Gerdr {
         };
         let (title, note) = match &viewer.source {
             Source::Pane { .. } => (format!("Scrollback snapshot · {}", viewer.label), note),
+            Source::File { what } => (format!("{what} · {}", viewer.label), note),
             Source::SetupLog { project, slug, .. } => {
                 let state = match self.setting_up(project, slug) {
                     true => "running",
