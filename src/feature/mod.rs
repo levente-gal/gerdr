@@ -901,6 +901,8 @@ impl Feature {
         let current = self.current();
         self.fix_round = self.last_fix_round.take().map(|mut round| {
             round.stage = current.map_or(round.stage, |at| at.max(round.stage));
+            // Open again, it isn't over.
+            round.ended = None;
             round
         });
     }
@@ -1198,6 +1200,14 @@ pub(crate) mod tests {
         later.last_fix_round = Some(round(Stage::Ship));
         later.reopen_fix_round();
         assert_eq!(later.fix_round.as_ref().map(|r| r.stage), Some(Stage::Ship));
+        // Open again, it isn't over.
+        let mut over = feature("a", 1);
+        over.last_fix_round = Some(fix_round::FixRound {
+            ended: Some(5),
+            ..round(Stage::Ship)
+        });
+        over.reopen_fix_round();
+        assert_eq!(over.fix_round.as_ref().map(|r| r.ended), Some(None));
         // One open stays, and nothing is left to open.
         f.reopen_fix_round();
         assert!(f.fix_round.is_some());
