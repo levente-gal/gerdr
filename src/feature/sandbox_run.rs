@@ -839,6 +839,8 @@ pub struct Job<'a> {
     pub host: &'a Host,
     pub project: &'a str,
     pub slug: &'a str,
+    /// This machine's id, for what's started to say whose it is. Empty if it has none.
+    pub owner: &'a str,
     pub repos: &'a [Repo],
     /// The folders whose compose projects are the feature's: its projects'.
     pub roots: &'a [PathBuf],
@@ -907,6 +909,7 @@ fn start_into(
             Input {
                 name: &name,
                 label: &label,
+                owner: job.owner,
                 running: &running,
                 data_dir: job.dir,
                 taken: &taken,
@@ -1567,11 +1570,14 @@ pub fn stop(run: &SandboxRun, dir: &Path, remove: bool, host: &Host) -> Result<(
 /// Remove compose project `stack`, whose file may be gone, with its volumes.
 /// Volumes made for a copy before compose ran go by name, which holds a hash
 /// of the feature's, so nothing else has it.
-pub fn remove_stack(stack: &str) -> Result<(), String> {
+///
+/// `dir` is the sandbox's folder on a machine, where nothing else takes it away.
+pub fn remove_stack(stack: &str, dir: Option<&Path>, host: &Host) -> Result<(), String> {
     let never = AtomicBool::new(false);
     let args = ["compose", "-p", stack, "down", "-v", "--remove-orphans"];
-    output("docker", &args, STOP_TIMEOUT, &never)?;
-    remove_copies(&Host::Here, stack, &never)
+    host.output("docker", &args, STOP_TIMEOUT, &never)?;
+    remove_copies(host, stack, &never)?;
+    dir.map_or(Ok(()), |dir| host.remove_dir(dir))
 }
 
 /// Remove the volumes of compose project `stack` that made it through its going
@@ -1585,34 +1591,65 @@ fn remove_copies(host: &Host, stack: &str, stop: &AtomicBool) -> Result<(), Stri
     Ok(())
 }
 
-/// The compose project names of the containers and volumes carrying `LABEL`,
-/// with the feature each is of: what a removed feature could leave behind.
-pub fn labelled(stop: &AtomicBool) -> Result<Vec<(String, String)>, String> {
+/// A compose project carrying `LABEL`.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Labelled {
+    /// What `LABEL` says.
+    pub feature: String,
+    pub stack: String,
+    /// What `OWNER` says. Empty for what started before there was one.
+    pub owner: String,
+}
+
+/// The compose projects whose containers on `host` carry `LABEL`: what a removed
+/// feature could leave behind.
+pub fn labelled(host: &Host, stop: &AtomicBool) -> Result<Vec<Labelled>, String> {
     let filter = format!("label={}", sandbox::LABEL);
     let format = format!(
-        "{{{{.Label \"{}\"}}}}\t{{{{.Label \"com.docker.compose.project\"}}}}",
-        sandbox::LABEL
+        "{{{{.Label \"{}\"}}}}\t{{{{.Label \"com.docker.compose.project\"}}}}\t{{{{.Label \"{}\"}}}}",
+        sandbox::LABEL,
+        sandbox::OWNER
     );
     let text = docker(
-        &Host::Here,
+        host,
         &["ps", "-a", "--filter", &filter, "--format", &format],
         stop,
     )?;
-    let mut found: Vec<(String, String)> = text
+    Ok(read_labelled(&text))
+}
+
+/// What `docker ps` said in the format `labelled` asks.
+fn read_labelled(text: &str) -> Vec<Labelled> {
+    let mut found: Vec<Labelled> = text
         .lines()
         .filter_map(|line| {
-            let (feature, stack) = line.split_once('\t')?;
-            Some((feature.to_owned(), stack.to_owned()))
+            let mut parts = line.split('\t');
+            Some(Labelled {
+                feature: parts.next()?.to_owned(),
+                stack: parts.next()?.to_owned(),
+                owner: parts.next().unwrap_or_default().to_owned(),
+            })
         })
         .collect();
     found.sort();
     found.dedup();
-    Ok(found)
+    found
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn what_carries_the_label_is_read_with_or_without_an_owner() {
+        let found = read_labelled("p/a\tgerdr-a\tme\np/a\tgerdr-a\tme\np/old\tgerdr-old\t\n");
+        let of = |feature: &str, stack: &str, owner: &str| Labelled {
+            feature: feature.into(),
+            stack: stack.into(),
+            owner: owner.into(),
+        };
+        assert_eq!(found, [of("p/a", "gerdr-a", "me"), of("p/old", "gerdr-old", "")]);
+    }
 
     fn repo(main: &str, worktree: &str) -> Repo {
         Repo {
@@ -1956,6 +1993,7 @@ django.db.utils.OperationalError: connection refused\n\
             host: &Host::Here,
             project: "spike",
             slug: "test",
+            owner: "me",
             repos: &[],
             roots: std::slice::from_ref(&root),
             dir: &dir,

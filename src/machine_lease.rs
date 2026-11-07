@@ -1273,7 +1273,7 @@ pub fn this_machines_name() -> String {
 
 /// This machine's id, made now if no other machine has connected to it yet: a
 /// record names it from here on.
-fn own_id_made() -> Option<String> {
+pub(crate) fn own_id_made() -> Option<String> {
     if let Some(id) = own_id() {
         return Some(id);
     }

@@ -842,6 +842,8 @@ pub struct Machines {
     /// features whose record this gerdr holds apart from that machine.
     pub(crate) sandboxes_there:
         HashMap<(String, String), (String, crate::feature::sandbox_run::Elsewhere)>,
+    /// What gone features left that was already offered to be removed.
+    pub(crate) left_told: std::collections::HashSet<crate::feature_sandbox::LeftStack>,
     /// When a line was last typed to a pane on a machine.
     pub(crate) lines: HashMap<String, Instant>,
     /// What keeps each feature's work from coming back.
@@ -1010,8 +1012,16 @@ impl Gerdr {
             {
                 link.stop();
             }
-            // Taken out of the settings, it is removed like from the dialog.
+            // Taken out of the settings, it is removed like from the dialog,
+            // which says what stays there.
             if !saved.contains_key(name) {
+                let stays = self.sandboxes_on(name);
+                if !stays.is_empty() {
+                    self.show_warning(format!(
+                        "{name} is out of the settings, and keeps the sandboxes of {}",
+                        stays.join(", ")
+                    ));
+                }
                 self.forget_viewed_of(name);
             }
         }
@@ -1386,6 +1396,21 @@ impl Gerdr {
         ));
     }
 
+    /// The Remove button of a machine's task: asks only if sandboxes this gerdr
+    /// answers for are there, as nothing here will know of them after.
+    pub fn ask_remove_machine(&mut self, name: &str) {
+        let stays = self.sandboxes_on(name);
+        if stays.is_empty() {
+            return self.remove_machine(name);
+        }
+        self.ask(
+            format!("Remove {name}?"),
+            remove_machine_body(&stays),
+            "Remove",
+            crate::confirm::Then::RemoveMachine(name.to_owned()),
+        );
+    }
+
     /// Forget a machine, from its task. What runs there keeps running.
     pub fn remove_machine(&mut self, name: &str) {
         if let Some(link) = self.machines.links.remove(name) {
@@ -1426,6 +1451,14 @@ impl Gerdr {
             })
             .collect()
     }
+}
+
+/// What asking to remove a machine says of the sandboxes of `titles` on it.
+fn remove_machine_body(titles: &[String]) -> String {
+    format!(
+        "These sandboxes stay on it, with their data:\n{}\nAdd the machine again to reach them.",
+        titles.join("\n")
+    )
 }
 
 /// Machine `name`'s task, its link in `state`.
@@ -1632,6 +1665,7 @@ mod tests {
         assert_eq!(off.dot, Dot::Idle);
         assert!(!off.runs(), "a machine disconnected isn't in the footer");
         assert_eq!(labels(&off), ["Connect", "Remove"]);
+        assert!(remove_machine_body(&["A".to_owned(), "B".to_owned()]).contains("\nA\nB\n"));
         let failed = machine_task("b", "a@b", Some(&LinkState::Failed(Failure::Auth)));
         assert_eq!(failed.dot, Dot::Failed);
         assert_eq!(labels(&failed), ["Connect", "Remove"]);

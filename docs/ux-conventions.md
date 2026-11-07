@@ -148,6 +148,11 @@ A key is written in one place, not on the button that does the same thing:
   page picked: that one needs Docker, pasta and the project's containers running,
   as those are what's copied, and its page says what it found none of. Its setup
   runs there first. It stays there until it is removed: its data is there.
+- A sandbox says which gerdr started it. Each time a machine connects, gerdr looks
+  there for sandboxes of its own whose feature is gone and offers to remove them.
+  It never offers another gerdr's. Removing a machine that holds this gerdr's
+  sandboxes asks first and names them; they stay there, and adding the machine
+  again reaches them, or removes those of features already removed.
 - Any gerdr showing its feature says how it stands, and can open its app, show its
   terminals, and stop, restart, reset or remove it, with no need to take the feature
   over. A gerdr open on the writer does that, so its record says so. With none open,

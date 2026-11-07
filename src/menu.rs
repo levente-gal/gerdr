@@ -212,7 +212,7 @@ pub enum MenuAction {
         tab: crate::chrome::CommandsTab,
     },
     /// Ask before removing what sandboxes of gone features left.
-    AskRemoveSandboxLeftovers(Vec<String>),
+    AskRemoveSandboxLeftovers(Vec<crate::feature_sandbox::LeftStack>),
     /// Read the project files again, after one was edited by hand.
     ReloadProjects,
     /// Join project `id`, open in another gerdr, here (see
@@ -454,7 +454,7 @@ impl Gerdr {
             MenuAction::ConnectMachine(name) => self.connect_machine(&name),
             MenuAction::DisconnectMachine(name) => self.disconnect_machine(&name),
             MenuAction::StopTakeOver(project, slug) => self.stop_take(&project, &slug),
-            MenuAction::RemoveMachine(name) => self.remove_machine(&name),
+            MenuAction::RemoveMachine(name) => self.ask_remove_machine(&name),
             MenuAction::UpdateT3(version) => self.update_t3(version),
             MenuAction::NewTab(w) => {
                 self.switch_workspace(w);

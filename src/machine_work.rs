@@ -839,6 +839,7 @@ impl Gerdr {
                     self.adopt_checks(&project);
                 }
                 self.clean_left_there(&place_id);
+                self.look_for_sandbox_leftovers_there(&place_id);
             }
             Err(err) => {
                 tracing::warn!("machine {name}: starting its work: {err}");

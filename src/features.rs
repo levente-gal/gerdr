@@ -337,7 +337,9 @@ pub(crate) enum Done {
         result: Result<(), String>,
     },
     /// The compose projects of sandboxes whose feature is gone.
-    SandboxLeftovers { stacks: Vec<String> },
+    SandboxLeftovers {
+        stacks: Vec<crate::feature_sandbox::LeftStack>,
+    },
     /// Removing those ended.
     SandboxLeftoversRemoved { problems: Vec<String> },
     /// `t3 thread send` to `thread` ended.

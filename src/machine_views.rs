@@ -925,6 +925,7 @@ impl Gerdr {
             .map(|(id, _)| id.clone())
             .collect();
         for id in ids {
+            self.left_there_forgotten(&id);
             self.machines.names.remove(&id);
             self.forget_viewed(&id);
         }
@@ -940,7 +941,7 @@ impl Gerdr {
         let root = view::root(&crate::projects::data_dir(), id);
         let spawned = std::thread::Builder::new()
             .name("forget a machine".into())
-            .spawn(move || view::forget_machine(&root, &AtomicBool::new(false)));
+            .spawn(move || view::forget_machine(&root, &[crate::machine_sandbox::LEFT], &AtomicBool::new(false)));
         if let Err(err) = spawned {
             tracing::warn!("removing what's kept of a machine: {err}");
         }

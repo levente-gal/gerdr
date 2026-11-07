@@ -28,6 +28,9 @@ use super::Repo;
 /// The label on everything a sandbox starts, its value naming the feature
 /// (`feature_label`): how leftovers are found again.
 pub const LABEL: &str = "gerdr.feature";
+/// Beside it, the id of the machine whose gerdr started the sandbox. A feature
+/// gone from one gerdr can be another's, on a machine both reach.
+pub const OWNER: &str = "gerdr.owner";
 
 const LABEL_PROJECT: &str = "com.docker.compose.project";
 const LABEL_SERVICE: &str = "com.docker.compose.service";
@@ -294,6 +297,8 @@ pub struct Input<'a> {
     pub name: &'a str,
     /// What `LABEL` says (`feature_label`).
     pub label: &'a str,
+    /// What `OWNER` says, if this machine has an id.
+    pub owner: &'a str,
     /// The services running in main. The copy starts those and what they
     /// depend on; with none, all that `config` lists.
     pub running: &'a BTreeSet<String>,
@@ -393,16 +398,17 @@ pub fn generate(config: &Value, input: Input) -> Result<Generated, String> {
             .ok_or("the compose file has a service that isn't a mapping")?;
         fields.remove("container_name");
         rewrite_ports(name, fields, &mut taken, &mut forwards, input.next_port)?;
-        let label = Value::String(input.label.to_owned());
+        let mut own = Map::from_iter([(
+            LABEL.to_owned(),
+            Value::String(input.label.to_owned()),
+        )]);
+        if !input.owner.is_empty() {
+            own.insert(OWNER.to_owned(), Value::String(input.owner.to_owned()));
+        }
         match fields.get_mut("labels").and_then(Value::as_object_mut) {
-            Some(labels) => {
-                labels.insert(LABEL.to_owned(), label);
-            }
+            Some(labels) => labels.extend(own),
             None => {
-                fields.insert(
-                    "labels".to_owned(),
-                    Value::Object(Map::from_iter([(LABEL.to_owned(), label)])),
-                );
+                fields.insert("labels".to_owned(), Value::Object(own));
             }
         }
         rewrite_mounts(name, fields, &input, &mut used_volumes, &mut binds);
@@ -822,6 +828,7 @@ mod tests {
             Input {
                 name: "gerdr-x",
                 label: "ao/x",
+                owner: "me",
                 running: &running,
                 data_dir: Path::new("/sandbox"),
                 taken: &BTreeSet::new(),
@@ -934,6 +941,7 @@ mod tests {
             Input {
                 name: "gerdr-x",
                 label: "ao/x",
+                owner: "me",
                 running: &running,
                 data_dir: Path::new("/sandbox"),
                 taken: &BTreeSet::new(),
@@ -957,6 +965,7 @@ mod tests {
             Input {
                 name: "gerdr-x",
                 label: "ao/x",
+                owner: "me",
                 running: &running,
                 data_dir: Path::new("/sandbox"),
                 taken: &elsewhere,
@@ -1054,6 +1063,7 @@ mod tests {
         assert_eq!(out.compose["services"]["db"]["labels"]["mine"], "kept");
         for service in out.compose["services"].as_object().unwrap().values() {
             assert_eq!(service["labels"][LABEL], "ao/x");
+            assert_eq!(service["labels"][OWNER], "me");
         }
     }
 
