@@ -2584,25 +2584,47 @@ fn shows_criteria(feature: &Feature, stage: Stage) -> bool {
     stage == Stage::ManualTest && stage_mark(feature, stage) != StageMark::Later
 }
 
-/// The buttons on criterion `i`'s card, as it stands.
+/// The buttons on criterion `i`'s card: Pass and Fail, always both and in
+/// that order, the one it stands at filled. Pressing that one again takes
+/// it back; Fail on one not failed asks what went wrong. A failed one can
+/// have its note edited too.
 fn criterion_buttons(i: usize, row: &Row) -> Vec<(PageButton, PanelOutcome)> {
     use crate::manual_test::Outcome;
-    let plain = |label: &str, outcome| {
+    let button = |label: &str, style, outcome| {
         let button = PageButton {
             label: label.to_owned(),
-            style: ButtonStyle::Plain,
+            style,
         };
         (button, PanelOutcome::Manual(outcome))
     };
-    let (pass, fail, clear) = (
-        plain("Pass", Outcome::Toggle(i)),
-        plain("Fail\u{2026}", Outcome::Write(i)),
-        plain("Clear", Outcome::Clear(i)),
-    );
-    match row.found {
-        None => vec![pass, fail],
-        Some(Verdict::Pass) => vec![clear, fail],
-        Some(Verdict::Fail) => vec![clear, plain("Edit note\u{2026}", Outcome::Write(i)), pass],
+    let (pass, fail) = match row.found {
+        None => (ButtonStyle::Plain, ButtonStyle::Plain),
+        Some(Verdict::Pass) => (ButtonStyle::Passed, ButtonStyle::Plain),
+        Some(Verdict::Fail) => (ButtonStyle::Plain, ButtonStyle::Failed),
+    };
+    // Fail asks what went wrong, unless it is what was chosen.
+    let (fail_label, fail_outcome) = match row.found {
+        Some(Verdict::Fail) => ("Fail", Outcome::Clear(i)),
+        _ => ("Fail\u{2026}", Outcome::Write(i)),
+    };
+    let mut out = Vec::new();
+    // To the left of the pair, so the pair stays put.
+    if row.found == Some(Verdict::Fail) {
+        let edit = button("Edit note\u{2026}", ButtonStyle::Quiet, Outcome::Write(i));
+        out.push(edit);
+    }
+    out.push(button("Pass", pass, Outcome::Toggle(i)));
+    out.push(button(fail_label, fail, fail_outcome));
+    out
+}
+
+/// What criterion `row` checks, step by step, for its card while selected:
+/// a line each for its Given, When and Then, or its text as the brief has
+/// it when it doesn't split.
+fn criterion_details(row: &Row) -> String {
+    match crate::feature::manual::split_gwt(&row.text) {
+        Some([given, when, then]) => format!("Given {given}\nWhen {when}\nThen {then}"),
+        None => row.text.clone(),
     }
 }
 
@@ -2626,7 +2648,7 @@ fn criterion_card(
     };
     FindingCard {
         tag,
-        title: row.text.clone(),
+        title: row.title.clone(),
         state: state.to_owned(),
         place: row.id.clone(),
         body: String::new(),
@@ -11597,7 +11619,7 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 6] = [
             ("Up / Down", "previous or next criterion"),
             ("Home / End", "first or last criterion"),
             ("Space / Enter", "mark it passed, or not"),
-            ("f", "mark it failed, saying what went wrong"),
+            ("f", "mark it failed, saying what went wrong, or edit that"),
             ("Del", "clear its result"),
             ("Ctrl+Enter", "mark Manual test passed"),
             ("Ctrl+Shift+Enter", "plan the fixes of the failures"),
@@ -12283,6 +12305,12 @@ fn tab_view(
         if let Some(card) = cards.into_iter().nth(panel.finding) {
             card.selected = true;
             card.collapsed = false;
+            // A criterion's steps show on its card while it is selected.
+            if shows_criteria(feature, stage)
+                && let Some(row) = state.criteria.get(panel.finding)
+            {
+                card.body = criterion_details(row);
+            }
             if panel.armed.is_some() {
                 "Press Del again".clone_into(&mut card.state);
             }
@@ -12309,6 +12337,14 @@ fn tab_view(
                 if let Some(card) = card.filter(|_| tries_criteria(feature, stage)) {
                     card.field = Some(field.line());
                     card.note = String::new();
+                    // Its Fail shows chosen while what went wrong is written.
+                    for b in &card.buttons {
+                        if let Some(button) = page.buttons.get_mut(*b)
+                            && button.label.starts_with("Fail")
+                        {
+                            button.style = ButtonStyle::Failed;
+                        }
+                    }
                 }
             }
             // The live card, before those of earlier reviews with its id.
@@ -17357,6 +17393,7 @@ pub(crate) mod tests {
         let f = feature("m", vec![repo("api", true)], 7);
         let row = |found, note: &str| Row {
             id: "AC-1".into(),
+            title: "C".into(),
             text: "Given a, when b, then c".into(),
             found,
             note: note.into(),
@@ -17399,9 +17436,35 @@ pub(crate) mod tests {
             let labels = card.buttons.iter();
             labels.map(|b| page.buttons[*b].label.clone()).collect()
         };
+        // Pass and Fail always, in place; the one chosen filled, and
+        // pressed again it takes the choice back.
         assert_eq!(labels(cards[0]), ["Pass", "Fail\u{2026}"]);
-        assert_eq!(labels(cards[1]), ["Clear", "Fail\u{2026}"]);
-        assert_eq!(labels(cards[2]), ["Clear", "Edit note\u{2026}", "Pass"]);
+        assert_eq!(labels(cards[1]), ["Pass", "Fail\u{2026}"]);
+        assert_eq!(labels(cards[2]), ["Edit note\u{2026}", "Pass", "Fail"]);
+        let styles = |card: &FindingCard| -> Vec<ButtonStyle> {
+            card.buttons.iter().map(|b| page.buttons[*b].style).collect()
+        };
+        assert_eq!(styles(cards[0]), [ButtonStyle::Plain, ButtonStyle::Plain]);
+        assert_eq!(styles(cards[1]), [ButtonStyle::Passed, ButtonStyle::Plain]);
+        assert_eq!(
+            styles(cards[2]),
+            [ButtonStyle::Quiet, ButtonStyle::Plain, ButtonStyle::Failed]
+        );
+        let outcomes = |card: &FindingCard| -> Vec<PanelOutcome> {
+            card.buttons.iter().map(|b| actions[*b].1.clone()).collect()
+        };
+        let on = |o| PanelOutcome::Manual(o);
+        assert_eq!(
+            outcomes(cards[0]),
+            [on(Outcome::Toggle(0)), on(Outcome::Write(0))]
+        );
+        assert_eq!(
+            outcomes(cards[2]),
+            [on(Outcome::Write(2)), on(Outcome::Toggle(2)), on(Outcome::Clear(2))]
+        );
+        // The title alone, until selected.
+        assert_eq!(cards[0].title, "C");
+        assert!(cards.iter().all(|c| c.body.is_empty()));
         // Not on another stage's page, nor once done.
         assert!(
             stage_actions(&f, Stage::Build, ctx, &[], &rows, &[])
@@ -17473,6 +17536,7 @@ pub(crate) mod tests {
         assert_eq!(stage_mark(&f, Stage::ManualTest), StageMark::Done);
         let row = |found| Row {
             id: "AC-1".into(),
+            title: "C".into(),
             text: "Given a, when b, then c".into(),
             found,
             note: String::new(),

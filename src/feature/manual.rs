@@ -17,12 +17,18 @@ use super::artifacts;
 pub struct Criterion {
     /// `AC-1`, `AC-2`…
     pub id: String,
+    /// What it checks, in a few words: the brief's own, before the Given,
+    /// or made from the Then part.
+    pub title: String,
+    /// The Given/When/Then part. Results match on it, so a renamed title
+    /// keeps them.
     pub text: String,
 }
 
 /// The criteria in `brief`: the Given/When/Then items of its `Acceptance
 /// criteria` section (any heading level, any case), list markers and
-/// checkboxes off, fenced code skipped.
+/// checkboxes off, fenced code skipped. A title before the Given
+/// (`**Title**: Given …`, `Title — Given …`) is split off.
 pub fn parse_criteria(brief: &str) -> Vec<Criterion> {
     let Some(lines) = artifacts::section(brief, "acceptance criteria") else {
         return Vec::new();
@@ -36,15 +42,101 @@ pub fn parse_criteria(brief: &str) -> Vec<Criterion> {
                 .into_iter()
                 .find_map(|b| text.strip_prefix(b))
                 .unwrap_or(text);
-            text.trim().to_string()
+            text.trim()
         })
         .filter(|t| !t.is_empty())
         .enumerate()
-        .map(|(i, text)| Criterion {
-            id: format!("AC-{}", i + 1),
-            text,
+        .map(|(i, line)| {
+            let (title, text) = split_title(line);
+            Criterion {
+                id: format!("AC-{}", i + 1),
+                title: title.unwrap_or_else(|| fallback_title(text)),
+                text: text.to_string(),
+            }
         })
         .collect()
+}
+
+/// Where `word` starts in `text` at or after byte `from`, as a whole word,
+/// in any case.
+fn word_at(text: &str, word: &str, from: usize) -> Option<usize> {
+    let lower = text.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    let alnum = |at: usize| bytes.get(at).is_some_and(|b| b.is_ascii_alphanumeric());
+    let mut at = from;
+    while let Some(i) = lower.get(at..)?.find(word) {
+        let start = at + i;
+        let end = start + word.len();
+        if (start == 0 || !alnum(start - 1)) && !alnum(end) {
+            return Some(start);
+        }
+        at = end;
+    }
+    None
+}
+
+/// A criterion line's title, when it has one before its Given, and the
+/// Given/When/Then rest. The title ends in `:`, a dash, or bold: "On the
+/// page, given …" has none.
+fn split_title(line: &str) -> (Option<String>, &str) {
+    let Some(given) = word_at(line, "given", 0).filter(|g| *g > 0) else {
+        return (None, line);
+    };
+    let head = line[..given].trim_end();
+    let bold = head.ends_with("**") || head.ends_with("__");
+    let cut = head.trim_end_matches([':', '\u{2014}', '\u{2013}', '-', '.', ' ']);
+    if !bold && cut.len() == head.len() {
+        return (None, line);
+    }
+    let title = cut
+        .trim_matches(['*', '_', ' '])
+        .trim_end_matches([':', '\u{2014}', '\u{2013}', '-', '.', ' ']);
+    if title.is_empty() || title.split_whitespace().count() > 12 {
+        return (None, line);
+    }
+    (Some(title.to_string()), &line[given..])
+}
+
+/// A Given/When/Then part without its spaces, commas and full stop.
+fn part(s: &str) -> &str {
+    s.trim()
+        .trim_matches([',', ';'])
+        .trim()
+        .trim_end_matches('.')
+        .trim_end()
+}
+
+/// The longest a title made from a criterion's Then part runs, in words.
+const FALLBACK_WORDS: usize = 8;
+
+/// A title for a criterion `text` the brief gave none: its Then part, cut
+/// to a few words.
+fn fallback_title(text: &str) -> String {
+    let then = match split_gwt(text) {
+        Some([_, _, then]) => then,
+        None => text,
+    };
+    let words: Vec<&str> = then.split_whitespace().collect();
+    let mut title = words[..words.len().min(FALLBACK_WORDS)].join(" ");
+    title = title.trim_end_matches(['.', ',', ';']).to_string();
+    if words.len() > FALLBACK_WORDS {
+        title.push('\u{2026}');
+    }
+    let mut chars = title.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => title,
+    }
+}
+
+/// The Given, When and Then parts of criterion `text`, their words and
+/// commas off: "two rows", "I edit both", "both change".
+pub fn split_gwt(text: &str) -> Option<[&str; 3]> {
+    let g = word_at(text, "given", 0)?;
+    let w = word_at(text, "when", g + 5)?;
+    let t = word_at(text, "then", w + 4)?;
+    let parts = [&text[g + 5..w], &text[w + 4..t], &text[t + 4..]].map(part);
+    parts.iter().all(|p| !p.is_empty()).then_some(parts)
 }
 
 /// What the user found of a criterion.
@@ -219,7 +311,7 @@ pub fn failures_markdown(
         "# Manual test failures\n\nThe user tried \u{201c}{title}\u{201d} by hand against its acceptance criteria, and these failed. Fix each one.\n"
     );
     for (c, k) in &fails {
-        md.push_str(&format!("\n## {}: {}\n\n", c.id, c.text));
+        md.push_str(&format!("\n## {}: {}\n\n{}\n\n", c.id, c.title, c.text));
         md.push_str(&format!("What went wrong: {}\n", k.note));
     }
     (fails.len(), md)
@@ -263,8 +355,71 @@ mod tests {
     fn crit(n: usize, text: &str) -> Criterion {
         Criterion {
             id: format!("AC-{n}"),
+            title: fallback_title(text),
             text: text.into(),
         }
+    }
+
+    #[test]
+    fn a_title_before_the_given_is_split_off() {
+        let brief = "## Acceptance criteria\n\
+            - **Both rows change**: Given two rows, when I edit both, then both change.\n\
+            - **Row empties:** Given one row, when I clear it, then it is empty.\n\
+            - Port fetch \u{2014} Given a port, when picked, then prices load.\n\
+            - On the page, given a row, when read, then shown.\n\
+            - Given the custom port switch is on, when the editor opens, then the ballast/laden selector shows the value inferred.\n";
+        let got = parse_criteria(brief);
+        let titles: Vec<&str> = got.iter().map(|c| c.title.as_str()).collect();
+        assert_eq!(
+            titles,
+            [
+                "Both rows change",
+                "Row empties",
+                "Port fetch",
+                "Shown",
+                "The ballast/laden selector shows the value inferred",
+            ]
+        );
+        assert_eq!(
+            got[0].text,
+            "Given two rows, when I edit both, then both change."
+        );
+        assert_eq!(got[2].text, "Given a port, when picked, then prices load.");
+        assert_eq!(
+            got[3].text,
+            "On the page, given a row, when read, then shown."
+        );
+        // A long Then part is cut, with an ellipsis.
+        assert_eq!(
+            fallback_title(
+                "Given a, when b, then the decision is created and recosted exactly as today."
+            ),
+            "The decision is created and recosted exactly as\u{2026}"
+        );
+    }
+
+    #[test]
+    fn criteria_split_into_given_when_then() {
+        assert_eq!(
+            split_gwt("Given two rows, when I edit both, then both change."),
+            Some(["two rows", "I edit both", "both change"])
+        );
+        // Words inside others don't count: "whenever", "thence".
+        assert_eq!(
+            split_gwt("Given whenever, When thence it runs, Then done"),
+            Some(["whenever", "thence it runs", "done"])
+        );
+        assert_eq!(split_gwt("Given a, when b"), None);
+    }
+
+    #[test]
+    fn a_renamed_title_keeps_the_result() {
+        let old = parse_criteria("## Acceptance criteria\n- Given a, when b, then c.\n");
+        let new =
+            parse_criteria("## Acceptance criteria\n- **C holds**: Given a, when b, then c.\n");
+        let mut t = None;
+        set(&mut t, &old[0], "p", Verdict::Pass, "", 1);
+        assert!(check(t.as_ref(), &new[0], Some("p")).is_some());
     }
 
     #[test]
@@ -322,7 +477,7 @@ mod tests {
         set(&mut t, &b, "p", Verdict::Pass, "", 1);
         let (n, md) = failures_markdown(t.as_ref(), &all, Some("p"), "Bulk");
         assert_eq!(n, 1);
-        assert!(md.contains("## AC-1: Given a, when b, then c."));
+        assert!(md.contains("## AC-1: C\n\nGiven a, when b, then c."));
         assert!(md.contains("What went wrong: nothing happens"));
         assert!(!md.contains("AC-2"));
         let sent = mark_sent(&mut t, &all, Some("p"));

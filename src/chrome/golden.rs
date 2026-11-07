@@ -4532,47 +4532,67 @@ fn feature_tab_manual_test(note: bool) -> super::FeatureTabView {
         button("Mark passed", ButtonStyle::Plain),
         button("Start sandbox\u{2026}", ButtonStyle::Plain),
     ];
-    let cards: [(&[&str], FindingTag, [&str; 4]); 4] = [
+    let (pass, fail, plain, quiet) = (
+        ButtonStyle::Passed,
+        ButtonStyle::Failed,
+        ButtonStyle::Plain,
+        ButtonStyle::Quiet,
+    );
+    // Its buttons, how it went, and its title, state, id, note and steps.
+    type Card<'a> = (&'a [(&'a str, ButtonStyle)], FindingTag, [&'a str; 5]);
+    let cards: [Card; 4] = [
         (
-            &["Clear", "Fail\u{2026}"],
+            &[("Pass", pass), ("Fail\u{2026}", plain)],
             FindingTag::Passed,
             [
-                "Given two invoices, when I export both, then one CSV holds both",
+                "Export holds both invoices",
                 "",
                 "AC-1",
                 "",
+                "Given two invoices\nWhen I export both\nThen one CSV holds both",
             ],
         ),
         (
-            &["Clear", "Edit note\u{2026}", "Pass"],
+            &[
+                ("Edit note\u{2026}", quiet),
+                ("Pass", plain),
+                ("Fail", fail),
+            ],
             FindingTag::Failed,
             [
-                "Given no invoices, when I export, then the button is off",
+                "Export off with no invoices",
                 "sent to Build",
                 "AC-2",
                 "What went wrong: The button stays on and exports an empty file",
+                "Given no invoices\nWhen I export\nThen the button is off",
             ],
         ),
         (
-            &["Clear", "Edit note\u{2026}", "Pass"],
+            &[
+                ("Edit note\u{2026}", quiet),
+                ("Pass", plain),
+                ("Fail", fail),
+            ],
             FindingTag::Failed,
             [
-                "Given a cancelled invoice, when I export, then it is left out of the file and \
-                 of the total at the bottom of the page, and the count above the table goes \
-                 down by one",
+                "Cancelled invoices left out",
                 "",
                 "AC-3",
                 "What went wrong: It shows with a total of 0",
+                "Given a cancelled invoice\nWhen I export\nThen it is left out of the file and \
+                 of the total at the bottom of the page, and the count above the table goes \
+                 down by one",
             ],
         ),
         (
-            &["Pass", "Fail\u{2026}"],
+            &[("Pass", plain), ("Fail\u{2026}", if note { fail } else { plain })],
             FindingTag::NotRun,
             [
-                "Given 500 invoices, when I export, then it is done in a second",
+                "Export takes a second",
                 "",
                 "AC-4",
                 "",
+                "Given 500 invoices\nWhen I export\nThen it is done in a second",
             ],
         ),
     ];
@@ -4580,16 +4600,18 @@ fn feature_tab_manual_test(note: bool) -> super::FeatureTabView {
         label: "Criteria".into(),
         lines: vec![tab_line("uncommitted changes in api", CheckTone::Note)],
     }];
-    for (i, (labels, tag, [title, state, place, said])) in cards.into_iter().enumerate() {
+    for (i, (labels, tag, [title, state, place, said, steps])) in cards.into_iter().enumerate() {
         let at = buttons.len();
-        buttons.extend(labels.iter().map(|l| button(l, ButtonStyle::Plain)));
+        buttons.extend(labels.iter().map(|(l, style)| button(l, *style)));
         let writing = note && i == 3;
+        let selected = i == if note { 3 } else { 2 };
+        let steps = if selected { steps } else { "" };
         sections.push(PageSection::Finding(FindingCard {
             tag,
             title: title.into(),
             state: state.into(),
             place: place.into(),
-            body: String::new(),
+            body: steps.into(),
             preview: Vec::new(),
             fix: String::new(),
             note: said.into(),
@@ -4601,7 +4623,7 @@ fn feature_tab_manual_test(note: bool) -> super::FeatureTabView {
             stripe: None,
             field: writing.then(|| Line::from("Takes 4 seconds")),
             field_hint: "",
-            selected: i == if note { 3 } else { 2 },
+            selected,
             buttons: (at..at + labels.len()).collect(),
         }));
     }
@@ -4831,8 +4853,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 50]; 4] = [
         0x9c43cde7e6f778c1, // tab_discover_brief_1180
         0x60105fb03f2a047c, // tab_discover_brief_860
         0x303b7441acc09af0, // tab_plan_long_1180
-        0x7bedaa61fef0bf04, // tab_manual_test_1180
-        0x059caf3fa61d55f9, // tab_manual_note_860
+        0x71235028cabd3b55, // tab_manual_test_1180
+        0x4e5e82fb2ebf35b8, // tab_manual_note_860
         0x1d7f2de06d4d35c5, // tab_review_rounds_1180
         0xc193bcc5b3526abc, // tab_verify_fixes_1180
         0xcd8bff5ece7d0988, // tab_verify_fixes_860
@@ -4884,8 +4906,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 50]; 4] = [
         0xb6ecd8a76e90440b, // tab_discover_brief_1180
         0x2afbd3dc2ef99dd7, // tab_discover_brief_860
         0x4c725a8e72188161, // tab_plan_long_1180
-        0xd70a8706404f184b, // tab_manual_test_1180
-        0x31c9a56724d35a67, // tab_manual_note_860
+        0x445f3c78904d3a90, // tab_manual_test_1180
+        0xc8b43a12baf06477, // tab_manual_note_860
         0xe2b93c938615029d, // tab_review_rounds_1180
         0x899957252463d32f, // tab_verify_fixes_1180
         0x2c375ff8eaeec6ff, // tab_verify_fixes_860
@@ -4937,8 +4959,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 50]; 4] = [
         0x9f8a0adf0b5ecb70, // tab_discover_brief_1180
         0x2815cc9241ce69c9, // tab_discover_brief_860
         0xf09480b2d91aa016, // tab_plan_long_1180
-        0x2f2f6ac844f37a05, // tab_manual_test_1180
-        0x4ee34eae8ddb8264, // tab_manual_note_860
+        0xfe84d86c9138cd67, // tab_manual_test_1180
+        0xc30b1d24e94dd14a, // tab_manual_note_860
         0x12fa13a9ec4aac6c, // tab_review_rounds_1180
         0x7f9e396c909865fe, // tab_verify_fixes_1180
         0x147e036930fd14b8, // tab_verify_fixes_860
@@ -4990,8 +5012,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 50]; 4] = [
         0xcd9ffc1b80d5ad81, // tab_discover_brief_1180
         0x3fc79af6007fde4d, // tab_discover_brief_860
         0xb97286d3085e1e53, // tab_plan_long_1180
-        0xc8c4083d6fbad237, // tab_manual_test_1180
-        0x7d79a05f821f26d0, // tab_manual_note_860
+        0x9403098bcba8b382, // tab_manual_test_1180
+        0x283c0eed678c853d, // tab_manual_note_860
         0x9f8d73cd2f79e70c, // tab_review_rounds_1180
         0xe734eebc9cd79ba7, // tab_verify_fixes_1180
         0x489ed573fe69c141, // tab_verify_fixes_860

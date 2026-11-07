@@ -59,6 +59,9 @@ impl Outcome {
 pub struct Row {
     /// `AC-1`…
     pub id: String,
+    /// What it checks, in a few words.
+    pub title: String,
+    /// Its Given/When/Then.
     pub text: String,
     /// What the user found, on the code as it is now.
     pub found: Option<Verdict>,
@@ -80,6 +83,7 @@ fn rows(
             let check = manual::check(test, c, patch);
             Row {
                 id: c.id.clone(),
+                title: c.title.clone(),
                 text: c.text.clone(),
                 found: check.map(|k| k.state),
                 note: check
@@ -486,6 +490,7 @@ mod tests {
     fn row(id: &str, found: Option<Verdict>) -> Row {
         Row {
             id: id.into(),
+            title: "C".into(),
             text: "Given a, when b, then c".into(),
             found,
             note: String::new(),

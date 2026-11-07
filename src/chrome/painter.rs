@@ -159,6 +159,11 @@ pub enum ButtonStyle {
     /// Only its label, until hovered, when it is lit as a plain one: one
     /// to have at hand that nothing asks for.
     Quiet,
+    /// Filled with the success colour: the choice made, of a pair like a
+    /// criterion's Pass and Fail. Pressing it again takes it back.
+    Passed,
+    /// Filled with the error colour: the other choice made of such a pair.
+    Failed,
 }
 
 impl From<bool> for ButtonStyle {
@@ -763,15 +768,20 @@ impl Painter {
         let hovered = hovered && style != ButtonStyle::Off;
         if focused {
             let ring = match style {
-                ButtonStyle::Destructive => p.error,
+                ButtonStyle::Destructive | ButtonStyle::Failed => p.error,
+                ButtonStyle::Passed => p.success,
                 _ => p.accent,
             };
             focus_ring(c, rect, BUTTON_RADIUS, p.elevated, scale, ring);
         }
         let color = match style {
-            ButtonStyle::Primary | ButtonStyle::Destructive => {
+            ButtonStyle::Primary
+            | ButtonStyle::Destructive
+            | ButtonStyle::Passed
+            | ButtonStyle::Failed => {
                 let base = match style {
-                    ButtonStyle::Destructive => p.error,
+                    ButtonStyle::Destructive | ButtonStyle::Failed => p.error,
+                    ButtonStyle::Passed => p.success,
                     _ => p.accent,
                 };
                 let fill = if hovered {

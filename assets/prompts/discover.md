@@ -21,9 +21,12 @@ Your job: find out with the user what this feature is, then write its brief.
    - `## Outcome`: what changes for the user, in a few sentences.
    - `## In scope`: a list of what this feature does.
    - `## Out of scope`: a list of what it does not do.
-   - `## Acceptance criteria`: a list of checks, each in the form
-     “Given …, when …, then …”. Cover what happens on failure and when
-     there is nothing to show, not only the usual path.
+   - `## Acceptance criteria`: a list of checks, each a short title in
+     bold, then the check in the form “Given …, when …, then …”:
+     `- **Export holds both invoices**: Given two invoices, when I export
+     both, then one CSV holds both.` The title names what is checked in
+     3 to 6 words; the user ticks the checks off by it. Cover what happens
+     on failure and when there is nothing to show, not only the usual path.
    - `## Open questions`: what is still undecided. Leave the section out
      when nothing is.
 
