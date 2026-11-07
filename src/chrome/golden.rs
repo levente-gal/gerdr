@@ -3868,13 +3868,62 @@ fn review_switch(view: super::ReviewView) -> super::ReviewSwitch {
             changed: 1,
         }),
         fixes: "1 of 2 made".into(),
+        next: None,
+        buttons: Vec::new(),
     }
 }
 
-/// Code review's page on its code: the switch over the review.
+/// Code review's actions on its line: Add comment… lit, Plan fixes and
+/// Approve in `plan` and `approve`, Approve held up by `why`.
+fn review_buttons(
+    plan: super::ButtonStyle,
+    approve: super::ButtonStyle,
+    why: Option<&str>,
+) -> Vec<super::ReviewButton> {
+    use super::{ButtonStyle, ReposButton as B, ReviewButton};
+    let button = |button: B, style, key: &str, disabled: Option<&str>| ReviewButton {
+        button,
+        label: button.label().into(),
+        style,
+        key: key.into(),
+        disabled: disabled.map(Into::into),
+    };
+    let plan_why = (plan == ButtonStyle::Off).then_some("Add a comment first");
+    vec![
+        button(B::AddComment, ButtonStyle::Plain, "Shift+C", None),
+        button(B::PlanFixes, plan, "Ctrl+Shift+Enter", plan_why),
+        button(B::Approve, approve, "Ctrl+Enter", why),
+    ]
+}
+
+/// Code review's page on its code: the switch over the review, files left
+/// and Approve held up.
 fn feature_tab_review_code() -> super::FeatureTabView {
+    use super::ButtonStyle;
     let mut view = feature_tab_review_page();
-    view.review_switch = Some(review_switch(super::ReviewView::Code));
+    let mut switch = review_switch(super::ReviewView::Code);
+    switch.next = Some(("5 of 8 files left \u{b7} 1 changed since viewed".into(), false));
+    let why = Some("5 files not viewed: api/src/a.rs, api/src/b.rs, web/c.ts, …");
+    switch.buttons = review_buttons(ButtonStyle::Off, ButtonStyle::Off, why);
+    view.review_switch = Some(switch);
+    view
+}
+
+/// Code review's page with every file viewed and nothing holding it up:
+/// Approve is the one to press.
+fn feature_tab_review_ready() -> super::FeatureTabView {
+    use super::ButtonStyle;
+    let mut view = feature_tab_review_page();
+    let mut switch = review_switch(super::ReviewView::Code);
+    switch.files = Some(super::ReviewFiles {
+        viewed: 8,
+        total: 8,
+        changed: 0,
+    });
+    let next = "All 8 files viewed \u{b7} Approve to go on to Manual test";
+    switch.next = Some((next.into(), true));
+    switch.buttons = review_buttons(ButtonStyle::Off, ButtonStyle::Primary, None);
+    view.review_switch = Some(switch);
     view
 }
 
@@ -5777,9 +5826,10 @@ fn listed_review(flat: bool) -> super::ReposView {
     let total = lines.len();
     super::ReposView {
         diff_tree: true,
+        tree_nav: Some(true),
+        tree_note: Some(("12 of 31 files left".into(), super::Tone::Warning)),
         flat,
         tree_share: super::REVIEW_TREE_SHARE,
-        tree_note: None,
         grouping: crate::repos::Grouping::Folders,
         lines,
         total,
@@ -5843,8 +5893,8 @@ const GOLDEN_DOC_TAB: [[u64; 16]; 4] = [
         0x6f1041c7f50aca45, // popup_code_review_850
         0x07ad73f54e3e101c, // popup_no_comments_1180
         0x08ab19690c613d25, // popup_no_comments_850
-        0xad881c43d2b80952, // popup_listed_1180
-        0x74ec422f94dccc42, // inline_listed_1180
+        0xd21560c9a783804d, // popup_listed_1180
+        0x3b5db476e7b52529, // inline_listed_1180
     ],
     // Dark at 2
     [
@@ -5862,8 +5912,8 @@ const GOLDEN_DOC_TAB: [[u64; 16]; 4] = [
         0x2ebeec0af5c2ef1b, // popup_code_review_850
         0x04f0f9c1258af57a, // popup_no_comments_1180
         0x654aa94035b7bbae, // popup_no_comments_850
-        0x1d52e3abf66dfd6d, // popup_listed_1180
-        0x094a7588f08fc1d1, // inline_listed_1180
+        0x8f448f5322832f16, // popup_listed_1180
+        0x9a0d83469e09aac2, // inline_listed_1180
     ],
     // Light at 1
     [
@@ -5881,8 +5931,8 @@ const GOLDEN_DOC_TAB: [[u64; 16]; 4] = [
         0xdc7251d500deedf7, // popup_code_review_850
         0x078b0def98e11797, // popup_no_comments_1180
         0x0f750109c62c42b8, // popup_no_comments_850
-        0xef0c1db60fab9ed4, // popup_listed_1180
-        0xc6754a4ffff0c0b4, // inline_listed_1180
+        0xa16b5b7e08cc2dc7, // popup_listed_1180
+        0xad31f141b1186eb7, // inline_listed_1180
     ],
     // Light at 2
     [
@@ -5900,8 +5950,8 @@ const GOLDEN_DOC_TAB: [[u64; 16]; 4] = [
         0x648afae740203419, // popup_code_review_850
         0x2435e6adfbb4e6b8, // popup_no_comments_1180
         0x958a852299d3f6a4, // popup_no_comments_850
-        0xbef0592f947c975e, // popup_listed_1180
-        0x25bb1306909649ca, // inline_listed_1180
+        0x34dfd6786e24cd23, // popup_listed_1180
+        0xff75249516f27ec3, // inline_listed_1180
     ],
 ];
 
@@ -5934,18 +5984,20 @@ fn dump_doc_tab() {
     }
 }
 
-const REVIEW_VIEWS: [&str; 3] = [
+const REVIEW_VIEWS: [&str; 5] = [
     "tab_review_code_1180",
     "tab_review_fixes_1180",
     "tab_review_fixes_860",
+    "tab_review_ready_1180",
+    "tab_review_code_860",
 ];
 
 /// The recorded hashes of `REVIEW_VIEWS`, per case in `CASES`.
-const GOLDEN_REVIEW_VIEWS: [[u64; 3]; 4] = [
-    [0xed8ad63b06e3b085, 0x54dd901fa2a70abe, 0xc1545fdb81fe7fd2],
-    [0x432d52b5b8e4915a, 0x59cae7d81cf2cf1e, 0x05aa91649802c5af],
-    [0xf787e0189e4f7fee, 0x0d41cf897de24c29, 0x65af65532294c589],
-    [0x1750cea632eccfa4, 0xd45dc034c427728c, 0xb72af0e7cce0522e],
+const GOLDEN_REVIEW_VIEWS: [[u64; 5]; 4] = [
+    [0xc079d4a47dfb8f07, 0x54dd901fa2a70abe, 0xc1545fdb81fe7fd2, 0x60ced7661f313794, 0xaae0e6667caf58df],
+    [0xfcf48c5be95bbf79, 0x59cae7d81cf2cf1e, 0x05aa91649802c5af, 0xc4f6953a672794c3, 0xeac75621de8e7164],
+    [0xae786b051cb842b1, 0x0d41cf897de24c29, 0x65af65532294c589, 0xef1bc3ecb1d7efb8, 0xc337cdceb0414f87],
+    [0xf66d26606fa40b14, 0xd45dc034c427728c, 0xb72af0e7cce0522e, 0x8c892e5a6b0924f8, 0xdc3053ee5331a665],
 ];
 
 #[test]
@@ -5958,6 +6010,8 @@ fn code_reviews_views_paint_the_same_pixels() {
         (feature_tab_review_code(), 1180),
         (feature_tab_review_fixes(), 1180),
         (feature_tab_review_fixes(), 860),
+        (feature_tab_review_ready(), 1180),
+        (feature_tab_review_code(), 860),
     ];
     check_each(&REVIEW_VIEWS, &golden, |painter, theme, scale, surface| {
         let (view, w) = &views[surface];
@@ -5984,6 +6038,8 @@ fn dump_review_views() {
         (feature_tab_review_code(), 1180),
         (feature_tab_review_fixes(), 1180),
         (feature_tab_review_fixes(), 860),
+        (feature_tab_review_ready(), 1180),
+        (feature_tab_review_code(), 860),
     ];
     for (theme, scale) in CASES {
         for ((view, w), name) in views.iter().zip(REVIEW_VIEWS) {

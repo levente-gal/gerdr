@@ -293,7 +293,7 @@ fn new_enough(version: &str) -> bool {
 /// `parse_site` reads, and leaves the machine an id (`new_id`) if it has
 /// none. Noise from a login shell's startup files doesn't matter: only the
 /// lines of `env` asked for are kept.
-fn look_script(new_id: &str) -> String {
+fn look_script(new_id: &str, leave: &str) -> String {
     format!(
         r#"e=$("${{SHELL:-/bin/sh}}" -lc env </dev/null 2>/dev/null)
 pick() {{ printf '%s\n' "$e" | sed -n "s/^$1=//p" | tail -n 1; }}
@@ -305,7 +305,7 @@ echo "HERDR=$h"
 if [ -n "$h" ]; then echo "VERSION=$("$h" --version 2>/dev/null)"; fi
 f="$d/gerdr/machine-id"
 mkdir -p "$d/gerdr" && {{ [ -s "$f" ] || echo {new_id} > "$f"; }}
-echo "MACHINE=$(cat "$f" 2>/dev/null)"
+{leave}echo "MACHINE=$(cat "$f" 2>/dev/null)"
 echo "NOW=$(date +%s)"
 "#
     )
@@ -657,7 +657,12 @@ fn connect(
         std::process::id()
     );
     let mut look = over_master(&link.info.control, target);
-    look.arg(in_sh(&look_script(&new_id)));
+    // Leave word there of this gerdr, for that machine's own gerdr.
+    let leave = (crate::machine_lease::own_id_made()).map_or_else(String::new, |own| {
+        let user = std::env::var("USER").unwrap_or_default();
+        crate::machine_reach::leave_lines(&own, &crate::machine_lease::this_machines_name(), &user)
+    });
+    look.arg(in_sh(&look_script(&new_id, &leave)));
     let out = run(look, COMMAND, cancel)?;
     if !out.status.success() {
         return Err(classify(&String::from_utf8_lossy(&out.stderr)));
@@ -826,7 +831,7 @@ pub struct Machines {
     tx: Option<channel::Sender<(String, u64, LinkEvent)>>,
     pub dialog: Option<MachineDialog>,
     /// What was typed when the dialog closed: address, name.
-    draft: Option<(String, String)>,
+    pub(crate) draft: Option<(String, String)>,
     /// Where links' work threads say things.
     pub(crate) work_tx: Option<channel::Sender<(String, WorkEvent)>>,
     /// The name of each machine seen connected, by its id: what its runs are
@@ -842,6 +847,13 @@ pub struct Machines {
     /// features whose record this gerdr holds apart from that machine.
     pub(crate) sandboxes_there:
         HashMap<(String, String), (String, crate::feature::sandbox_run::Elsewhere)>,
+    /// When this gerdr last looked for gerdrs that reached this machine.
+    pub(crate) reach_looked: Option<Instant>,
+    /// What sandboxes of gone features left, by the machine they are on (none:
+    /// here), as last looked for: the tasks panel offers to remove each.
+    pub(crate) left: HashMap<Option<String>, Vec<crate::feature_sandbox::LeftStack>>,
+    /// What gone features left that was already offered to be removed.
+    pub(crate) left_told: std::collections::HashSet<crate::feature_sandbox::LeftStack>,
     /// When a line was last typed to a pane on a machine.
     pub(crate) lines: HashMap<String, Instant>,
     /// What keeps each feature's work from coming back.
@@ -1010,8 +1022,16 @@ impl Gerdr {
             {
                 link.stop();
             }
-            // Taken out of the settings, it is removed like from the dialog.
+            // Taken out of the settings, it is removed like from the dialog,
+            // which says what stays there.
             if !saved.contains_key(name) {
+                let stays = self.sandboxes_on(name);
+                if !stays.is_empty() {
+                    self.show_warning(format!(
+                        "{name} is out of the settings, and keeps the sandboxes of {}",
+                        stays.join(", ")
+                    ));
+                }
                 self.forget_viewed_of(name);
             }
         }
@@ -1386,6 +1406,21 @@ impl Gerdr {
         ));
     }
 
+    /// The Remove button of a machine's task: asks only if sandboxes this gerdr
+    /// answers for are there, as nothing here will know of them after.
+    pub fn ask_remove_machine(&mut self, name: &str) {
+        let stays = self.sandboxes_on(name);
+        if stays.is_empty() {
+            return self.remove_machine(name);
+        }
+        self.ask(
+            format!("Remove {name}?"),
+            remove_machine_body(&stays),
+            "Remove",
+            crate::confirm::Then::RemoveMachine(name.to_owned()),
+        );
+    }
+
     /// Forget a machine, from its task. What runs there keeps running.
     pub fn remove_machine(&mut self, name: &str) {
         if let Some(link) = self.machines.links.remove(name) {
@@ -1426,6 +1461,14 @@ impl Gerdr {
             })
             .collect()
     }
+}
+
+/// What asking to remove a machine says of the sandboxes of `titles` on it.
+fn remove_machine_body(titles: &[String]) -> String {
+    format!(
+        "These sandboxes stay on it, with their data:\n{}\nAdd the machine again to reach them.",
+        titles.join("\n")
+    )
 }
 
 /// Machine `name`'s task, its link in `state`.
@@ -1553,7 +1596,7 @@ mod tests {
         std::fs::set_permissions(&shell, std::os::unix::fs::PermissionsExt::from_mode(0o755))
             .unwrap();
         let out = Command::new("/bin/sh")
-            .args(["-c", &look_script("newid")])
+            .args(["-c", &look_script("newid", "")])
             .env_clear()
             .env("HOME", &home)
             .env("SHELL", &shell)
@@ -1568,7 +1611,7 @@ mod tests {
         assert!(site.now > 0);
         // Asked again, it keeps its id.
         let out = Command::new("/bin/sh")
-            .args(["-c", &look_script("other")])
+            .args(["-c", &look_script("other", "")])
             .env_clear()
             .env("HOME", &home)
             .env("SHELL", &shell)
@@ -1632,6 +1675,7 @@ mod tests {
         assert_eq!(off.dot, Dot::Idle);
         assert!(!off.runs(), "a machine disconnected isn't in the footer");
         assert_eq!(labels(&off), ["Connect", "Remove"]);
+        assert!(remove_machine_body(&["A".to_owned(), "B".to_owned()]).contains("\nA\nB\n"));
         let failed = machine_task("b", "a@b", Some(&LinkState::Failed(Failure::Auth)));
         assert_eq!(failed.dot, Dot::Failed);
         assert_eq!(labels(&failed), ["Connect", "Remove"]);

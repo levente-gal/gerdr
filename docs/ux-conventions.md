@@ -23,7 +23,7 @@ rules, for reviewing a branch before it merges.
 | c / Shift+E | On an AI review finding, in its diff: write or edit the user's comment on it, in the row editor under it / edit its fix. On AI review's page `c` does the same in a field on the focused finding's card, Shift+Del deletes the comment, Ctrl+E edits the fix; a dismissed finding's comment can still be written, changed and deleted, its fix not. On a card of a comment left in the diff, `c` and Ctrl+E edit it in a dialog. Off a reviewer's card `c` adds a comment of the user's own. |
 | Shift+C / Shift+F | In a feature's diff: add a comment on no line or file, listed first as General comments / mark every undecided finding to fix (Shift+F also on AI review's page). On a file under review, Shift+C comments on the whole file. |
 | Ctrl+Shift+R | On the feature tab: show the selected stage's agent, done stage or not, or go back to its chat in a new tab once its tab is closed (Claude Code and Cursor; Ctrl+R starts afresh). On a later stage's page, while work sent back to the Build agent is under way, it shows that agent. |
-| Ctrl+Enter / Ctrl+Shift+Enter | The panel's finishing action: commit / commit and push (repos), create (branch menu), approve / send back (a file under review; Verify's evidence is only read, so there it says so and does nothing); approve, also from the feature tab's stage page while its brief or plan is ready for review (its "Approve" button on the file card; comments left on the file ask first); approve / plan fixes for the comments (a feature's diff at Code review); make the fixes with no plan / plan them first (a feature's diff and AI review page, when the user added no comment, edited no fix and added no item of their own: greyed in the diff until every finding is decided); plan fixes, on either chord (the same once the user wrote anything of their own: then a plan is required); make the fixes with no plan / plan them first (a feature's Verify page once its checks failed, also off its check cards); mark passed / plan the fixes of the failures (a feature's Manual test page, with criteria); make the fixes / send back (a fix plan, in its review; Ctrl+Enter also on the page of the stage it came from, and again once its agent stopped with fixes left, when Send back is gone. A fix plan already made is only read, and no key sends it again: its card's quiet "Send … again" button does, only while the stage has nothing new to send); write the final plan, or use the plan as it is / ask the reviewer (a plan review's sheet: while suggestions are still to decide, Ctrl+Enter stays and says how many). On the file of a done stage, which is only read: go to the current stage / reopen the stage, as on its page in the feature tab (Ctrl+Shift+Enter there), until the stage after it has made something. |
+| Ctrl+Enter / Ctrl+Shift+Enter | The panel's finishing action: commit / commit and push (repos), create (branch menu), approve / send back (a file under review; Verify's evidence is only read, so there it says so and does nothing); approve, also from the feature tab's stage page while its brief or plan is ready for review (its "Approve" button on the file card; comments left on the file ask first); approve / plan fixes for the comments (a feature's diff at Code review; on its page, also the buttons at the right of the line under the rail, which says what comes next. Approve is greyed, saying what holds it up, until nothing does, then it is the one to press); make the fixes with no plan / plan them first (a feature's diff and AI review page, when the user added no comment, edited no fix and added no item of their own: greyed in the diff until every finding is decided); plan fixes, on either chord (the same once the user wrote anything of their own: then a plan is required); make the fixes with no plan / plan them first (a feature's Verify page once its checks failed, also off its check cards); mark passed / plan the fixes of the failures (a feature's Manual test page, with criteria); make the fixes / send back (a fix plan, in its review; Ctrl+Enter also on the page of the stage it came from, and again once its agent stopped with fixes left, when Send back is gone. A fix plan already made is only read, and no key sends it again: its card's quiet "Send … again" button does, only while the stage has nothing new to send); write the final plan, or use the plan as it is / ask the reviewer (a plan review's sheet: while suggestions are still to decide, Ctrl+Enter stays and says how many). On the file of a done stage, which is only read: go to the current stage / reopen the stage, as on its page in the feature tab (Ctrl+Shift+Enter there), until the stage after it has made something. |
 | Ctrl+Shift+V | In a feature's file's tab: go between Review and Split (its brief or plan, read on the stage's page), or to the next of Preview, Review and Split (Verify's evidence). Split, the two side by side, following its edits and caret and scrolling together, is there only on an output 1400 px wide or more. A new tab of a brief or plan opens on Split there, on Review on a narrower one; pressing its button again only switches to the open tab, keeping what it shows. Esc goes back to the feature tab. |
 | F2 | Rename. |
 | Ctrl+S | Switch to / check out a branch (repos, worktrees). |
@@ -62,7 +62,7 @@ rules, for reviewing a branch before it merges.
 | r / s, Shift+R / Shift+S | The feature tab's Verify page: on a check's card (Tab goes to the cards, Enter shows its terminal), run it again, or stop it; anywhere on the page, run the failed ones again, or stop them all. While the checks go, Enter only says they run: it never stops them. Ctrl+Shift+U and Ctrl+Enter refuse there, as a setup or fixes would change the code under them, and their buttons are hidden. |
 | ] / [ | Any diff (repos panel, worktree, code review, a file under review): go to the next or previous AI review finding or comment, in the diff's order, past the last back to the first. A folded file unfolds, and a long one shows whole, to show it. The diff's title row has the same as buttons, and its scrollbar a tick per comment while no search is open. |
 | Space | On the feature tab's Ship page, once Tab has gone to its rows: tick a step or what comes after it, or move a repository's choice to its next way (Pull request, Merge only, Nothing; also a click). It saves at once. Enter still presses Ship…, or Finish… with no step ticked, which asks first as nothing gets pushed or merged. |
-| Space / Alt+Shift+Down | A feature's code review: mark the file viewed, or not (as Space checks a file in the repos panel), on the diff or on its line in the file list, the same tick; on a folder's or a repository's line, the files under it that can be, a toast saying how many were left out as not committed; go to the next file not viewed (Alt+Shift+Up: the one before). A criterion's card on a feature's Manual test page: mark it passed, or not; `f` marks it failed, with a note saying what went wrong, written on the card (Enter or Esc saves it; with nothing written, Esc leaves it as it was). A plan review's sheet: accept the suggestion, or clear that (a question not answered asks for its answer first, then is accepted); `r` rejects it, or clears that; `n` writes a note; `a` adds one of your own, Esc keeping what was written as a draft. |
+| Space / Alt+Shift+Down | A feature's code review: mark the file viewed, or not (as Space checks a file in the repos panel), on the diff or on its line in the file list, the same tick; on a folder's or a repository's line, the files under it that can be, a toast saying how many were left out as not committed; go to the next file not viewed (Alt+Shift+Up: the one before), from the diff or the file list, as the ↑ and ↓ buttons over the file list do. A criterion's card on a feature's Manual test page: mark it passed, or not; `f` marks it failed, with a note saying what went wrong, written on the card (Enter or Esc saves it; with nothing written, Esc leaves it as it was). A plan review's sheet: accept the suggestion, or clear that (a question not answered asks for its answer first, then is accepted); `r` rejects it, or clears that; `n` writes a note; `a` adds one of your own, Esc keeping what was written as a draft. |
 | Alt+F / Alt+Left / Alt+Right | The repos panel's file tree and a feature's code review's file list: list the files flat or by folder (kept in `state.json`, one for both) / fold everything / unfold everything (also the buttons on the list's toolbar). |
 | F1 | Every key of the focused panel, when its footer can't show them all. |
 | Ctrl+C | Copy. Never closes anything. In any diff (repos panel, worktree, a commit, code review, a file under review, evidence) it copies what the cursor is on, as `y` yanks it: the selection, else the line (a removed one too), a file's path, a hunk's lines, a comment or finding's text. A read-only diff refuses edits and pastes, never yanks. The cursor's row has the same as a Copy button. |
@@ -113,7 +113,8 @@ A key is written in one place, not on the button that does the same thing:
   machine shows until asked. Show agent opens one tab attached over SSH, as
   does Discover's Start agent once its agent is up, if the user stayed on the
   feature's page. That tab takes the terminal from any other view, and closing
-  it asks nothing, as it only ends the view. The agent's card says "on
+  it asks nothing, as it only ends the view. A view taken by another machine
+  ends saying which ("Opened on desk"). The agent's card says "on
   <machine>". A machine out of
   reach reads "<machine> can't be reached", and its runs wait: only a list of
   that machine's panes can say a pane is gone.
@@ -130,7 +131,9 @@ A key is written in one place, not on the button that does the same thing:
   with the machine away, as it last was.
 - A feature's page offers the same buttons on any machine. Pressing one that
   changes it moves the feature here first (Take over does only that), and then the
-  press goes on, or says the feature changed on the way. Its diff and files take no
+  press goes on, or says the feature changed on the way. Ship pressed before the
+  feature's code was read here, as just after a move, says so and asks once it
+  is. Its diff and files take no
   comments or ticks until then. While it moves, the page and a tasks row with Stop
   say so. Files and commits come, and what isn't committed there keeps it there
   until it is. Work on a worker goes on and is followed from here. What runs in the
@@ -147,9 +150,23 @@ A key is written in one place, not on the button that does the same thing:
   looks: that machine's gerdr keeps it, and keys go nowhere. A feature's code comes
   here once it is opened, by commits: what isn't committed there doesn't show.
 - A sandbox runs on the machine writing its feature, or on the one Manual test's
-  page picked: that one needs Docker, pasta and the project's containers running,
-  as those are what's copied, and its page says what it found none of. Its setup
-  runs there first. It stays there until it is removed: its data is there.
+  page picked: that one needs Docker or Podman, pasta and the project's containers
+  running, as those are what's copied, and its page says what it found none of.
+  Podman's compose can be Docker's or podman-compose; a sandbox's copy runs under
+  the same one as main's. Its setup runs there first. It stays there until it is
+  removed: its data is there.
+- A sandbox says which gerdr started it. Each time a machine connects, gerdr looks
+  there for sandboxes whose feature is gone. Each one stays as a row in the tasks
+  panel, with Remove, which asks; a toast offers this gerdr's own once as well.
+  Another gerdr's shows only when that gerdr isn't connected here and hasn't been
+  on that machine for two days, and the row and the question name it: it may still
+  want it. Removing a machine that holds this gerdr's sandboxes asks first and names
+  them; they stay there, and adding the machine again reaches them, or removes those
+  of features already removed.
+- A gerdr connecting to a machine leaves word there of who it is and where it came
+  from, and refreshes it hourly while connected. A gerdr open on that machine that
+  doesn't know it offers once, by a toast, to add it back: each shows only the
+  features of machines it added. Add opens the connect dialog filled in.
 - Any gerdr showing its feature says how it stands, and can open its app, show its
   terminals, and stop, restart, reset or remove it, with no need to take the feature
   over. A gerdr open on the writer does that, so its record says so. With none open,

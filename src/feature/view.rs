@@ -440,8 +440,9 @@ pub fn unplace(root: &Path, project: &str, slug: &str, cancel: &AtomicBool) -> R
 }
 
 /// Take away all that is kept of machine `root`: the code placed from it, then
-/// its copy.
-pub fn forget_machine(root: &Path, cancel: &AtomicBool) {
+/// its copy. What is under `keep` stays, though it no longer counts as a machine
+/// kept (`kept_ids`): it is for that machine, if it is ever added again.
+pub fn forget_machine(root: &Path, keep: &[&str], cancel: &AtomicBool) {
     if let Ok(projects) = std::fs::read_dir(root.join(CODE)) {
         for project in projects.filter_map(Result::ok) {
             let Some(project) = project.file_name().to_str().map(str::to_owned) else {
@@ -454,11 +455,19 @@ pub fn forget_machine(root: &Path, cancel: &AtomicBool) {
             }
         }
     }
-    if let Err(err) = std::fs::remove_dir_all(root)
-        && err.kind() != std::io::ErrorKind::NotFound
-    {
-        tracing::warn!("removing {}: {err}", root.display());
+    let kept = |path: &Path| keep.iter().any(|name| path.file_name() == Some(name.as_ref()));
+    let entries = std::fs::read_dir(root).into_iter().flatten().flatten();
+    for path in entries.map(|e| e.path()).filter(|path| !kept(path)) {
+        let removed = match path.is_dir() {
+            true => std::fs::remove_dir_all(&path),
+            false => std::fs::remove_file(&path),
+        };
+        if let Err(err) = removed {
+            tracing::warn!("removing {}: {err}", path.display());
+        }
     }
+    // Only if nothing was kept.
+    let _ = std::fs::remove_dir(root);
 }
 
 #[cfg(test)]
@@ -628,9 +637,16 @@ mod tests {
         // A folder saying nothing of itself isn't one.
         std::fs::create_dir_all(root(data, "m2")).unwrap();
         assert_eq!(kept_ids(data), ["m1"]);
-        assert_eq!(read_place(&there), Some(place));
-        forget_machine(&there, &AtomicBool::new(false));
+        assert_eq!(read_place(&there), Some(place.clone()));
+        forget_machine(&there, &[], &AtomicBool::new(false));
         assert!(!there.exists());
+        assert!(kept_ids(data).is_empty());
+        // What's asked to stay does, and the machine isn't kept for it.
+        write_place(&there, &place).unwrap();
+        std::fs::create_dir_all(there.join("left")).unwrap();
+        std::fs::write(there.join("left/x.json"), "{}").unwrap();
+        forget_machine(&there, &["left"], &AtomicBool::new(false));
+        assert!(there.join("left/x.json").exists());
         assert!(kept_ids(data).is_empty());
     }
 

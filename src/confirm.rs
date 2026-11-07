@@ -77,7 +77,9 @@ pub enum Then {
         what: crate::feature_sandbox::StopFor,
     },
     /// Remove what sandboxes of features that are gone left.
-    RemoveSandboxLeftovers(Vec<String>),
+    RemoveSandboxLeftovers(Vec<crate::feature_sandbox::LeftStack>),
+    /// Forget machine `name`, whose sandboxes stay on it.
+    RemoveMachine(String),
     /// Remove the worktrees of this project's feature, `force`: with the
     /// work they hold; abandon it if `abandon` (see
     /// `Gerdr::remove_feature`).
@@ -706,6 +708,7 @@ impl Gerdr {
                 what,
             } => self.finish_stop(&project, &slug, what),
             Then::RemoveSandboxLeftovers(stacks) => self.remove_sandbox_leftovers(stacks),
+            Then::RemoveMachine(name) => self.remove_machine(&name),
             Then::RemoveFeature {
                 project,
                 slug,

@@ -1,6 +1,7 @@
-//! Starting and stopping a feature's sandbox (see `sandbox`): docker, the
-//! network namespace and the proxy into it. Runs processes: call all of it off
-//! the UI thread (checklist D3), except what reads only `/proc`.
+//! Starting and stopping a feature's sandbox (see `sandbox`): its containers
+//! under Docker or Podman (`Engine`), the network namespace and the proxy into
+//! it. Runs processes: call all of it off the UI thread (checklist D3), except
+//! what reads only `/proc`.
 //!
 //! Network: `holder` keeps a user and network namespace alive, and pasta leads
 //! main's port numbers there to the copies' ports on the host. pasta is handed
@@ -31,13 +32,13 @@ use serde_json::Value;
 use super::{
     Repo, now,
     remote::Reach,
-    sandbox::{self, Forward, Generated, Input, Stack},
+    sandbox::{self, Engine, Forward, Generated, Input, Stack},
     setup::{self, Exit},
 };
 use crate::desktop::shell_quote;
 
-/// How long one docker command may run: pulling an image can take a while.
-const DOCKER_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+/// How long one container command may run: pulling an image can take a while.
+const ENGINE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 /// How long the copies may take to come up, health checks included.
 const READY_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// How long a copy of one volume may run, with main's container paused.
@@ -416,16 +417,44 @@ impl Host {
         timeout: Duration,
         stop: &AtomicBool,
     ) -> Result<String, String> {
+        self.output_in(None, program, args, timeout, stop)
+    }
+
+    /// `output` where this is, run in folder `dir` when given.
+    fn output_in(
+        &self,
+        dir: Option<&Path>,
+        program: &str,
+        args: &[&str],
+        timeout: Duration,
+        stop: &AtomicBool,
+    ) -> Result<String, String> {
         let Self::There(reach) = self else {
-            return output(program, args, timeout, stop);
+            return output(dir, program, args, timeout, stop);
         };
-        let mut line = format!("{PATH_THERE}exec {}", shell_quote(program));
+        let mut line = PATH_THERE.to_owned();
+        if let Some(dir) = dir {
+            line.push_str(&format!(
+                "cd {} || exit 1\n",
+                shell_quote(&dir.to_string_lossy())
+            ));
+        }
+        line.push_str(&format!("exec {}", shell_quote(program)));
         for arg in args {
             line.push(' ');
             line.push_str(&shell_quote(arg));
         }
         line.push('\n');
         (reach.script_for(&line, timeout, program, stop)).map_err(|t| t.text().to_owned())
+    }
+
+    /// The user's home folder there.
+    fn home(&self) -> Option<PathBuf> {
+        let Self::There(reach) = self else {
+            return std::env::var_os("HOME").map(PathBuf::from);
+        };
+        let said = Self::said(reach, "printf %s \"$HOME\"\n", &NEVER).ok()?;
+        (!said.trim().is_empty()).then(|| PathBuf::from(said.trim()))
     }
 
     /// Whether `tool` is there to run.
@@ -638,6 +667,9 @@ fn started_proc(said: &str) -> Option<Proc> {
 pub struct StackRun {
     pub name: String,
     pub file: PathBuf,
+    /// What runs it: main's stack's.
+    #[serde(default, skip_serializing_if = "Engine::is_docker")]
+    pub engine: Engine,
 }
 
 /// A process, told from a later one with the same pid.
@@ -747,12 +779,17 @@ fn is_name_char(c: char) -> bool {
 /// Run `program` with `args`, its output read: what it wrote to stdout, or why
 /// it failed. Past `timeout` or once `stop` is set, it is killed.
 fn output(
+    dir: Option<&Path>,
     program: &str,
     args: &[&str],
     timeout: Duration,
     stop: &AtomicBool,
 ) -> Result<String, String> {
-    let mut child = Command::new(program)
+    let mut command = Command::new(program);
+    if let Some(dir) = dir {
+        command.current_dir(dir);
+    }
+    let mut child = command
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -801,14 +838,14 @@ fn last_lines(text: &str, otherwise: &str) -> String {
     }
 }
 
-fn docker(host: &Host, args: &[&str], stop: &AtomicBool) -> Result<String, String> {
-    host.output("docker", args, DOCKER_TIMEOUT, stop)
+/// Run `engine`'s program with `args`.
+fn tool(host: &Host, engine: Engine, args: &[&str], stop: &AtomicBool) -> Result<String, String> {
+    host.output(engine.program(), args, ENGINE_TIMEOUT, stop)
 }
 
-/// Which tool is missing for a sandbox, in words, or the docker daemon being
-/// down.
+/// Which tool is missing for a sandbox's network, in words. What runs its
+/// containers is `engines`' to find.
 pub fn tools_missing(host: &Host) -> Option<String> {
-    let stop = AtomicBool::new(false);
     let tools = ["pasta", "unshare", "nsenter"];
     let tools = tools.iter().chain(match host {
         Host::Here => &[][..],
@@ -821,15 +858,53 @@ pub fn tools_missing(host: &Host) -> Option<String> {
             return Some(format!("{tool} isn't installed, and a sandbox needs it"));
         }
     }
-    let info = ["info", "--format", "{{.ServerVersion}}"];
-    if host.output("docker", &info, Duration::from_secs(15), &stop).is_err() {
-        return Some("Docker isn't running, and a sandbox needs it".to_owned());
-    }
-    let compose = ["compose", "version"];
-    if host.output("docker", &compose, Duration::from_secs(15), &stop).is_err() {
-        return Some("Docker Compose isn't installed, and a sandbox needs it".to_owned());
-    }
     None
+}
+
+/// What runs containers on `host` with their compose projects: Docker,
+/// Podman, or both. When neither does, why, in words, with what to do.
+pub fn engines(host: &Host) -> Result<Vec<Engine>, String> {
+    let stop = AtomicBool::new(false);
+    let quick = Duration::from_secs(15);
+    let mut found = Vec::new();
+    let mut problems = Vec::new();
+    if host.has("docker") {
+        let info = ["info", "--format", "{{.ServerVersion}}"];
+        if host.output("docker", &info, quick, &stop).is_err() {
+            problems.push("Docker isn't running, and a sandbox needs it");
+        } else if (host.output("docker", &["compose", "version"], quick, &stop)).is_err() {
+            problems.push("Docker Compose isn't installed, and a sandbox needs it");
+        } else {
+            found.push(Engine::Docker);
+        }
+    }
+    if host.has("podman") {
+        match host.output("podman", &["compose", "version"], quick, &stop) {
+            Ok(said) if said.contains("podman-compose") => found.push(Engine::PodmanCompose),
+            // Docker's compose talks to Podman's service, which runs only once
+            // the user turns it on.
+            Ok(_) if (host.output("podman", &["compose", "ls"], quick, &stop)).is_ok() => {
+                found.push(Engine::Podman);
+            }
+            Ok(_) => problems.push(
+                "Podman's service isn't on, and docker-compose needs it: run systemctl --user enable --now podman.socket",
+            ),
+            Err(_) => problems.push(
+                "Podman has no compose, and a sandbox needs one: install podman-compose or docker-compose",
+            ),
+        }
+    }
+    if !found.is_empty() {
+        // Its containers aren't looked at: a sandbox that finds none of a
+        // project's says why only here.
+        for problem in &problems {
+            tracing::warn!("sandbox: {problem}");
+        }
+        return Ok(found);
+    }
+    Err((problems.first().copied())
+        .unwrap_or("Neither Docker nor Podman is installed, and a sandbox needs one")
+        .to_owned())
 }
 
 /// What it takes to start a sandbox. The paths are those of the machine it
@@ -839,6 +914,8 @@ pub struct Job<'a> {
     pub host: &'a Host,
     pub project: &'a str,
     pub slug: &'a str,
+    /// This machine's id, for what's started to say whose it is. Empty if it has none.
+    pub owner: &'a str,
     pub repos: &'a [Repo],
     /// The folders whose compose projects are the feature's: its projects'.
     pub roots: &'a [PathBuf],
@@ -884,8 +961,9 @@ fn start_into(
     if let Some(missing) = tools_missing(job.host) {
         return Err(missing);
     }
+    let engines = engines(job.host)?;
     job.host.make_dir(job.dir)?;
-    let containers = running_containers(job.host, job.stop)?;
+    let containers = running_containers(job.host, &engines, job.stop)?;
     let stacks = sandbox::stacks_under(&containers, job.roots);
     run.not_copied = sandbox::loose(&containers)
         .iter()
@@ -894,9 +972,11 @@ fn start_into(
     run.outward = outward_of(job);
     run.out_of_reach = out_of_reach_of(job, &containers);
     let mut taken: std::collections::BTreeSet<u16> = job.taken.iter().copied().collect();
+    let mut starting: Vec<Vec<String>> = Vec::new();
     for stack in &stacks {
         progress(format!("Reading {}", stack.project));
         let config = compose_config(stack, job)?;
+        let engine = stack.engine;
         let name = sandbox::compose_name(job.project, job.slug, &stack.project);
         let label = sandbox::feature_label(job.project, job.slug);
         let running = stack.services.keys().cloned().collect();
@@ -907,6 +987,7 @@ fn start_into(
             Input {
                 name: &name,
                 label: &label,
+                owner: job.owner,
                 running: &running,
                 data_dir: job.dir,
                 taken: &taken,
@@ -915,14 +996,26 @@ fn start_into(
             },
         )?;
         taken.extend(generated.forwards.iter().map(|f| f.host_port));
-        let text = serde_json::to_string_pretty(&generated.compose).map_err(|e| e.to_string())?;
+        let mut compose = generated.compose.clone();
+        if engine == Engine::PodmanCompose {
+            sandbox::for_podman_compose(&mut compose);
+        }
+        let text = serde_json::to_string_pretty(&compose).map_err(|e| e.to_string())?;
         job.host.write(&file, &text)?;
         copy_data(stack, &generated, &config, job, run, progress)?;
         run.forwards.extend(generated.forwards);
-        run.stacks.push(StackRun { name, file });
+        let services = (compose["services"].as_object().into_iter().flatten())
+            .map(|(service, _)| service.clone())
+            .collect();
+        starting.push(services);
+        run.stacks.push(StackRun { name, file, engine });
     }
-    for stack in run.stacks.clone() {
+    for (stack, services) in run.stacks.clone().into_iter().zip(starting) {
         progress(format!("Starting {}", stack.name));
+        if stack.engine == Engine::PodmanCompose {
+            start_podman_compose(job.host, &stack, &services, job.stop)?;
+            continue;
+        }
         let file = stack.file.to_string_lossy();
         // Fresh containers each start: the file names new host ports, and `up`
         // on a stopped stack would recreate them and orphan each anonymous
@@ -938,9 +1031,9 @@ fn start_into(
             "-s",
             "-v",
         ];
-        docker(job.host, &args, job.stop)?;
+        tool(job.host, stack.engine, &args, job.stop)?;
         let args = ["compose", "-p", &stack.name, "-f", &file, "up", "-d"];
-        docker(job.host, &args, job.stop)?;
+        tool(job.host, stack.engine, &args, job.stop)?;
         wait_ready(job.host, &stack, job.stop)?;
     }
     progress("Making its network".to_owned());
@@ -1026,16 +1119,27 @@ fn overridden(key: &str, env: &[(String, String)]) -> bool {
     env.iter().any(|(set, _)| key.starts_with(set.as_str()))
 }
 
-/// The running containers, whichever project they are of.
-pub fn running_containers(host: &Host, stop: &AtomicBool) -> Result<Vec<sandbox::Container>, String> {
-    let ids = docker(host, &["ps", "-q"], stop)?;
-    let ids: Vec<&str> = ids.split_whitespace().collect();
-    if ids.is_empty() {
-        return Ok(Vec::new());
+/// The running containers of `engines`, whichever project they are of.
+pub fn running_containers(
+    host: &Host,
+    engines: &[Engine],
+    stop: &AtomicBool,
+) -> Result<Vec<sandbox::Container>, String> {
+    let mut all = Vec::new();
+    for &engine in engines {
+        let ids = tool(host, engine, &["ps", "-q"], stop)?;
+        let ids: Vec<&str> = ids.split_whitespace().collect();
+        if ids.is_empty() {
+            continue;
+        }
+        let mut args = vec!["inspect"];
+        args.extend(&ids);
+        all.extend(sandbox::containers_of(
+            &tool(host, engine, &args, stop)?,
+            engine,
+        )?);
     }
-    let mut args = vec!["inspect"];
-    args.extend(&ids);
-    sandbox::containers_of(&docker(host, &args, stop)?)
+    Ok(all)
 }
 
 /// `path` in the feature if it is there, else as it is.
@@ -1053,26 +1157,51 @@ fn in_feature(host: &Host, path: &Path, repos: &[Repo]) -> PathBuf {
 /// volumes, which are what gets copied.
 fn compose_config(stack: &Stack, job: &Job) -> Result<Value, String> {
     let dir = in_feature(job.host, &stack.working_dir, job.repos);
-    let dir = dir.to_string_lossy().into_owned();
-    let mut owned = vec![
-        "compose".to_owned(),
-        "-p".to_owned(),
-        stack.project.clone(),
-        "--project-directory".to_owned(),
-        dir,
-    ];
+    let podman_compose = stack.engine == Engine::PodmanCompose;
+    let mut owned = vec!["compose".to_owned(), "-p".to_owned(), stack.project.clone()];
+    if !podman_compose {
+        owned.push("--project-directory".to_owned());
+        owned.push(dir.to_string_lossy().into_owned());
+    }
     if let Some(env) = &stack.env_file {
         owned.push("--env-file".to_owned());
         owned.push(in_feature(job.host, env, job.repos).to_string_lossy().into_owned());
     }
     for file in &stack.config_files {
+        let file = config_file(job.host, file, &stack.working_dir);
         owned.push("-f".to_owned());
-        owned.push(in_feature(job.host, file, job.repos).to_string_lossy().into_owned());
+        owned.push(
+            in_feature(job.host, &file, job.repos)
+                .to_string_lossy()
+                .into_owned(),
+        );
+    }
+    if podman_compose {
+        // It has no `--project-directory` and prints only YAML, in the
+        // short syntax as written.
+        owned.push("config".to_owned());
+        let args: Vec<&str> = owned.iter().map(String::as_str).collect();
+        let program = stack.engine.program();
+        let text = job
+            .host
+            .output_in(Some(&dir), program, &args, ENGINE_TIMEOUT, job.stop)?;
+        let home = job.host.home();
+        return sandbox::from_podman_compose(&text, &stack.project, &dir, home.as_deref());
     }
     owned.extend(["config", "--format", "json"].map(str::to_owned));
     let args: Vec<&str> = owned.iter().map(String::as_str).collect();
-    let text = docker(job.host, &args, job.stop)?;
+    let text = tool(job.host, stack.engine, &args, job.stop)?;
     serde_json::from_str(&text).map_err(|e| format!("couldn't read the compose file: {e}"))
+}
+
+/// Compose file `file` of a stack in folder `dir`. podman-compose names it as
+/// it was given, from wherever it ran: mostly the folder, else the file is
+/// looked for there by name.
+fn config_file(host: &Host, file: &Path, dir: &Path) -> PathBuf {
+    match file.file_name() {
+        Some(name) if !host.exists(file) && host.exists(&dir.join(name)) => dir.join(name),
+        _ => file.to_owned(),
+    }
 }
 
 /// Whether a writable bind mount of `path` holds data to copy. What git tracks
@@ -1086,15 +1215,20 @@ fn copies_bind(host: &Host, path: &Path) -> bool {
 }
 
 /// Unpauses its containers however a copy ends. If gerdr dies meanwhile they
-/// stay paused, until `docker unpause`: nothing here looks for that, and the
+/// stay paused, until `docker unpause` (or `podman unpause`): nothing here looks for that, and the
 /// next start fails on pausing them again.
-struct Paused(Vec<String>, Host);
+struct Paused(Vec<String>, Host, Engine);
 
 impl Paused {
-    fn new(host: &Host, containers: Vec<String>, stop: &AtomicBool) -> Result<Self, String> {
-        let mut paused = Self(Vec::new(), host.clone());
+    fn new(
+        host: &Host,
+        engine: Engine,
+        containers: Vec<String>,
+        stop: &AtomicBool,
+    ) -> Result<Self, String> {
+        let mut paused = Self(Vec::new(), host.clone(), engine);
         for container in containers {
-            docker(host, &["pause", &container], stop)?;
+            tool(host, engine, &["pause", &container], stop)?;
             paused.0.push(container);
         }
         Ok(paused)
@@ -1105,7 +1239,7 @@ impl Drop for Paused {
     fn drop(&mut self) {
         let never = AtomicBool::new(false);
         for container in &self.0 {
-            if let Err(why) = docker(&self.1, &["unpause", container], &never) {
+            if let Err(why) = tool(&self.1, self.2, &["unpause", container], &never) {
                 tracing::error!("couldn't unpause {container}: {why}");
             }
         }
@@ -1145,7 +1279,15 @@ fn copy_data(
                     .map(str::to_owned)
             })
             .ok_or_else(|| format!("Volume {} has no image to copy it with", copy.from))?;
-        if docker(job.host, &["volume", "inspect", &copy.from], job.stop).is_err() {
+        let engine = stack.engine;
+        if tool(
+            job.host,
+            engine,
+            &["volume", "inspect", &copy.from],
+            job.stop,
+        )
+        .is_err()
+        {
             // Nothing in main to copy: it starts empty, as main's did.
             run.copied.pop();
             continue;
@@ -1166,8 +1308,9 @@ fn copy_data(
             sandbox::feature_label(job.project, job.slug)
         );
         // Whatever is in it is a copy cut short.
-        let _ = docker(job.host, &["volume", "rm", &copy.to], job.stop);
-        docker(job.host, &["volume", "create", "--label", &label, &copy.to], job.stop)?;
+        let _ = tool(job.host, engine, &["volume", "rm", &copy.to], job.stop);
+        let create = ["volume", "create", "--label", &label, &copy.to];
+        tool(job.host, engine, &create, job.stop)?;
         let from = format!("{}:/from:ro", copy.from);
         let to = format!("{}:/to", copy.to);
         let args = [
@@ -1190,13 +1333,14 @@ fn copy_data(
             "/to/",
         ];
         let copied = {
-            let _paused = Paused::new(job.host, containers, job.stop)?;
-            job.host.output("docker", &args, COPY_TIMEOUT, job.stop)
+            let _paused = Paused::new(job.host, engine, containers, job.stop)?;
+            job.host
+                .output(engine.program(), &args, COPY_TIMEOUT, job.stop)
         };
         if let Err(why) = copied {
             // A copy cut short mustn't be taken for data. Failing to remove it
             // changes nothing: without a mark, the next start copies again.
-            let _ = docker(job.host, &["volume", "rm", &copy.to], job.stop);
+            let _ = tool(job.host, engine, &["volume", "rm", &copy.to], job.stop);
             return Err(format!("Couldn't copy volume {}: {why}", copy.from));
         }
         job.host.write(&mark, "")?;
@@ -1239,7 +1383,7 @@ fn ready_of(text: &str) -> Ready {
     let mut waiting = None;
     for line in text.lines().filter(|l| !l.trim().is_empty()) {
         let Ok(item) = serde_json::from_str::<Value>(line) else {
-            return Ready::Waiting("reading docker".to_owned());
+            return Ready::Waiting("reading compose".to_owned());
         };
         let service = item["Service"].as_str().unwrap_or("a service").to_owned();
         let state = item["State"].as_str().unwrap_or_default();
@@ -1272,11 +1416,12 @@ fn wait_ready(host: &Host, stack: &StackRun, stop: &AtomicBool) -> Result<(), St
         "json",
     ];
     let started = Instant::now();
+    let program = stack.engine.program();
     loop {
-        match ready_of(&docker(host, &args, stop)?) {
+        match ready_of(&tool(host, stack.engine, &args, stop)?) {
             Ready::Yes => return Ok(()),
             Ready::Failed(why) => {
-                return Err(format!("{why} (docker compose -p {} logs)", stack.name));
+                return Err(format!("{why} ({program} compose -p {} logs)", stack.name));
             }
             Ready::Waiting(service) if started.elapsed() >= READY_TIMEOUT => {
                 return Err(format!("{service} didn't come up in time"));
@@ -1288,6 +1433,201 @@ fn wait_ready(host: &Host, stack: &StackRun, stop: &AtomicBool) -> Result<(), St
         }
         std::thread::sleep(Duration::from_millis(500));
     }
+}
+
+/// Start podman-compose project `stack` afresh, its containers up with health
+/// checks passed. podman-compose has no `rm`, and its `up` waits without end
+/// for a service another needs when that one fails: what runs is watched
+/// meanwhile, and a failure cuts it short.
+fn start_podman_compose(
+    host: &Host,
+    stack: &StackRun,
+    services: &[String],
+    stop: &AtomicBool,
+) -> Result<(), String> {
+    // Fresh containers, as with Docker's (see `start_into`).
+    remove_by_labels(host, stack.engine, &stack.name, false, stop)?;
+    let file = stack.file.to_string_lossy();
+    let args = ["compose", "-p", &stack.name, "-f", &file, "up", "-d"];
+    let cut = AtomicBool::new(false);
+    let done = AtomicBool::new(false);
+    let (up, failed) = std::thread::scope(|scope| {
+        let watch = scope.spawn(|| {
+            let mut last = Instant::now();
+            while !done.load(Ordering::Relaxed) {
+                if stop.load(Ordering::Relaxed) {
+                    cut.store(true, Ordering::Relaxed);
+                    return None;
+                }
+                if last.elapsed() >= Duration::from_secs(2) {
+                    last = Instant::now();
+                    let ready = ready_by_labels(host, stack, services, stop);
+                    if let Ok(Ready::Failed(why)) = ready {
+                        cut.store(true, Ordering::Relaxed);
+                        return Some(why);
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            None
+        });
+        let up = tool(host, stack.engine, &args, &cut);
+        done.store(true, Ordering::Relaxed);
+        (up, watch.join().ok().flatten())
+    });
+    if let Some(why) = failed {
+        return Err(why);
+    }
+    up?;
+    let started = Instant::now();
+    loop {
+        match ready_by_labels(host, stack, services, stop)? {
+            Ready::Yes => return Ok(()),
+            Ready::Failed(why) => return Err(why),
+            Ready::Waiting(service) if started.elapsed() >= READY_TIMEOUT => {
+                return Err(format!("{service} didn't come up in time"));
+            }
+            Ready::Waiting(_) => {}
+        }
+        if stop.load(Ordering::Relaxed) {
+            return Err("Stopped".to_owned());
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+}
+
+/// The filter for what compose project `stack` made.
+fn project_filter(stack: &str) -> String {
+    format!("label={}={stack}", sandbox::LABEL_PROJECT)
+}
+
+/// How the containers of `stack` stand, read from their labels: for a compose
+/// that can't say.
+fn ready_by_labels(
+    host: &Host,
+    stack: &StackRun,
+    services: &[String],
+    stop: &AtomicBool,
+) -> Result<Ready, String> {
+    let filter = project_filter(&stack.name);
+    let ids = tool(
+        host,
+        stack.engine,
+        &["ps", "-a", "-q", "--filter", &filter],
+        stop,
+    )?;
+    let ids: Vec<&str> = ids.split_whitespace().collect();
+    if ids.is_empty() {
+        return Ok(Ready::Waiting("its containers".to_owned()));
+    }
+    let mut args = vec!["inspect"];
+    args.extend(&ids);
+    let text = tool(host, stack.engine, &args, stop)?;
+    Ok(ready_of_inspect(&text, services, stack.engine.program()))
+}
+
+/// Read `<engine> inspect` of a compose project's containers, which should
+/// run `services`. A one-off that ended well counts as ready. `program` names
+/// what shows a container's logs.
+fn ready_of_inspect(text: &str, services: &[String], program: &str) -> Ready {
+    let Ok(list) = serde_json::from_str::<Vec<Value>>(text) else {
+        return Ready::Waiting("reading its containers".to_owned());
+    };
+    let mut seen = std::collections::BTreeSet::new();
+    let mut waiting = None;
+    for item in &list {
+        let service = item["Config"]["Labels"][sandbox::LABEL_SERVICE]
+            .as_str()
+            .unwrap_or("a service")
+            .to_owned();
+        seen.insert(service.clone());
+        let name = item["Name"]
+            .as_str()
+            .unwrap_or_default()
+            .trim_start_matches('/');
+        let state = &item["State"];
+        let status = state["Status"].as_str().unwrap_or_default();
+        let health = state["Health"]["Status"].as_str().unwrap_or_default();
+        let code = state["ExitCode"].as_i64().unwrap_or(0);
+        let error = state["Error"].as_str().unwrap_or_default();
+        match (status, health) {
+            ("exited" | "stopped" | "dead", _) if code != 0 => {
+                return Ready::Failed(format!(
+                    "{service} exited with {code} ({program} logs {name})"
+                ));
+            }
+            (status, _) if !error.is_empty() && status != "running" => {
+                return Ready::Failed(format!("{service} didn't start: {error}"));
+            }
+            (_, "unhealthy") => {
+                return Ready::Failed(format!("{service} is unhealthy ({program} logs {name})"));
+            }
+            ("exited" | "stopped", _) | ("running", "" | "healthy") => {}
+            _ => waiting = Some(service),
+        }
+    }
+    let missing = || {
+        services
+            .iter()
+            .find(|service| !seen.contains(*service))
+            .cloned()
+    };
+    waiting.or_else(missing).map_or(Ready::Yes, Ready::Waiting)
+}
+
+/// Remove the containers of compose project `stack` with their anonymous
+/// volumes, as `compose rm -f -s -v` does, and with `all` also its networks
+/// and the pod podman-compose put them in: for when its file is gone, or the
+/// compose has no `rm`. Named volumes stay.
+fn remove_by_labels(
+    host: &Host,
+    engine: Engine,
+    stack: &str,
+    all: bool,
+    stop: &AtomicBool,
+) -> Result<(), String> {
+    let filter = project_filter(stack);
+    let ids = tool(host, engine, &["ps", "-a", "-q", "--filter", &filter], stop)?;
+    let ids: Vec<&str> = ids.split_whitespace().collect();
+    if !ids.is_empty() {
+        let mut args = vec!["rm", "-f", "-v"];
+        args.extend(&ids);
+        tool(host, engine, &args, stop)?;
+    }
+    if engine == Engine::PodmanCompose {
+        let pod = format!("pod_{stack}");
+        tool(host, engine, &["pod", "rm", "-f", "--ignore", &pod], stop)?;
+    }
+    if all {
+        let ids = tool(
+            host,
+            engine,
+            &["network", "ls", "-q", "--filter", &filter],
+            stop,
+        )?;
+        for id in ids.split_whitespace() {
+            tool(host, engine, &["network", "rm", id], stop)?;
+        }
+    }
+    Ok(())
+}
+
+/// Stop the containers of compose project `stack`, by their labels.
+fn stop_by_labels(
+    host: &Host,
+    engine: Engine,
+    stack: &str,
+    stop: &AtomicBool,
+) -> Result<(), String> {
+    let filter = project_filter(stack);
+    let ids = tool(host, engine, &["ps", "-q", "--filter", &filter], stop)?;
+    let ids: Vec<&str> = ids.split_whitespace().collect();
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let mut args = vec!["stop"];
+    args.extend(&ids);
+    tool(host, engine, &args, stop).map(drop)
 }
 
 /// Start `command` in a session of its own, so it outlives a gerdr restart and
@@ -1536,8 +1876,9 @@ pub fn stop(run: &SandboxRun, dir: &Path, remove: bool, host: &Host) -> Result<(
             Host::There(_) => file,
         };
         let shown = file.to_string_lossy();
+        let has_file = host.exists(&file);
         let mut args = vec!["compose", "-p", &stack.name];
-        if host.exists(&file) {
+        if has_file {
             args.extend(["-f", &shown]);
         }
         if remove {
@@ -1545,9 +1886,20 @@ pub fn stop(run: &SandboxRun, dir: &Path, remove: bool, host: &Host) -> Result<(
         } else {
             args.push("stop");
         }
-        if let Err(why) = host.output("docker", &args, STOP_TIMEOUT, &never) {
+        let engine = stack.engine;
+        // podman-compose takes no command without a file.
+        let done = match (engine, has_file) {
+            (Engine::PodmanCompose, false) if remove => {
+                remove_by_labels(host, engine, &stack.name, true, &never)
+            }
+            (Engine::PodmanCompose, false) => stop_by_labels(host, engine, &stack.name, &never),
+            _ => host
+                .output(engine.program(), &args, STOP_TIMEOUT, &never)
+                .map(drop),
+        };
+        if let Err(why) = done {
             problems.push(format!("{}: {why}", stack.name));
-        } else if remove && let Err(why) = remove_copies(host, &stack.name, &never) {
+        } else if remove && let Err(why) = remove_copies(host, engine, &stack.name, &never) {
             problems.push(format!("{}: {why}", stack.name));
         }
     }
@@ -1567,52 +1919,224 @@ pub fn stop(run: &SandboxRun, dir: &Path, remove: bool, host: &Host) -> Result<(
 /// Remove compose project `stack`, whose file may be gone, with its volumes.
 /// Volumes made for a copy before compose ran go by name, which holds a hash
 /// of the feature's, so nothing else has it.
-pub fn remove_stack(stack: &str) -> Result<(), String> {
+///
+/// `dir` is the sandbox's folder on a machine, where nothing else takes it away.
+pub fn remove_stack(
+    stack: &str,
+    engine: Engine,
+    dir: Option<&Path>,
+    host: &Host,
+) -> Result<(), String> {
     let never = AtomicBool::new(false);
-    let args = ["compose", "-p", stack, "down", "-v", "--remove-orphans"];
-    output("docker", &args, STOP_TIMEOUT, &never)?;
-    remove_copies(&Host::Here, stack, &never)
+    if engine == Engine::PodmanCompose {
+        remove_by_labels(host, engine, stack, true, &never)?;
+    } else {
+        let args = ["compose", "-p", stack, "down", "-v", "--remove-orphans"];
+        host.output(engine.program(), &args, STOP_TIMEOUT, &never)?;
+    }
+    remove_copies(host, engine, stack, &never)?;
+    dir.map_or(Ok(()), |dir| host.remove_dir(dir))
 }
 
 /// Remove the volumes of compose project `stack` that made it through its going
 /// down. Their names hold a hash of the feature's, so nothing else has them.
-fn remove_copies(host: &Host, stack: &str, stop: &AtomicBool) -> Result<(), String> {
+fn remove_copies(
+    host: &Host,
+    engine: Engine,
+    stack: &str,
+    stop: &AtomicBool,
+) -> Result<(), String> {
     let filter = format!("name=^{stack}_");
-    let names = docker(host, &["volume", "ls", "-q", "--filter", &filter], stop)?;
+    let names = tool(
+        host,
+        engine,
+        &["volume", "ls", "-q", "--filter", &filter],
+        stop,
+    )?;
     for name in names.split_whitespace() {
-        docker(host, &["volume", "rm", name], stop)?;
+        tool(host, engine, &["volume", "rm", name], stop)?;
     }
     Ok(())
 }
 
-/// The compose project names of the containers and volumes carrying `LABEL`,
-/// with the feature each is of: what a removed feature could leave behind.
-pub fn labelled(stop: &AtomicBool) -> Result<Vec<(String, String)>, String> {
+/// A compose project carrying `LABEL`.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Labelled {
+    /// What `LABEL` says.
+    pub feature: String,
+    pub stack: String,
+    /// What `OWNER` says. Empty for what started before there was one.
+    pub owner: String,
+    /// The day its first container was made, like "2026-11-07".
+    pub started: String,
+    /// What runs it.
+    pub engine: Engine,
+}
+
+/// The compose projects whose containers on `host` carry `LABEL`: what a removed
+/// feature could leave behind.
+pub fn labelled(host: &Host, stop: &AtomicBool) -> Result<Vec<Labelled>, String> {
     let filter = format!("label={}", sandbox::LABEL);
     let format = format!(
-        "{{{{.Label \"{}\"}}}}\t{{{{.Label \"com.docker.compose.project\"}}}}",
-        sandbox::LABEL
+        "{{{{.Label \"{}\"}}}}\t{{{{.Label \"{}\"}}}}\t{{{{.Label \"{}\"}}}}\t{{{{.CreatedAt}}}}",
+        sandbox::LABEL,
+        sandbox::LABEL_PROJECT,
+        sandbox::OWNER
     );
-    let text = docker(
-        &Host::Here,
-        &["ps", "-a", "--filter", &filter, "--format", &format],
-        stop,
-    )?;
-    let mut found: Vec<(String, String)> = text
+    let mut found = Vec::new();
+    let mut failed = None;
+    let engines = engines(host)?;
+    for &engine in &engines {
+        let args = ["ps", "-a", "--filter", &filter, "--format", &format];
+        match tool(host, engine, &args, stop) {
+            Ok(text) => found.extend(read_labelled(&text, engine)),
+            Err(why) => failed = Some(format!("{}: {why}", engine.name())),
+        }
+    }
+    match failed {
+        // What one of them has is still worth telling.
+        Some(why) if engines.len() == 1 => Err(why),
+        Some(why) => {
+            tracing::warn!("looking for sandboxes left behind: {why}");
+            Ok(found)
+        }
+        None => Ok(found),
+    }
+}
+
+/// What `<engine> ps` said in the format `labelled` asks.
+fn read_labelled(text: &str, engine: Engine) -> Vec<Labelled> {
+    let mut found: Vec<Labelled> = text
         .lines()
         .filter_map(|line| {
-            let (feature, stack) = line.split_once('\t')?;
-            Some((feature.to_owned(), stack.to_owned()))
+            let mut parts = line.split('\t');
+            Some(Labelled {
+                feature: parts.next()?.to_owned(),
+                stack: parts.next()?.to_owned(),
+                owner: parts.next().unwrap_or_default().to_owned(),
+                started: (parts.next().unwrap_or_default())
+                    .split(' ')
+                    .next()
+                    .unwrap_or_default()
+                    .to_owned(),
+                engine,
+            })
         })
         .collect();
+    // A stack a line per container: the earliest says when it started.
     found.sort();
-    found.dedup();
-    Ok(found)
+    found.dedup_by(|later, first| {
+        let key = |l: &Labelled| {
+            (
+                l.engine,
+                l.feature.clone(),
+                l.stack.clone(),
+                l.owner.clone(),
+            )
+        };
+        key(later) == key(first)
+    });
+    found
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn what_carries_the_label_is_read_with_or_without_an_owner() {
+        let found = read_labelled(
+            "p/a\tgerdr-a\tme\t2026-11-08 10:00:00 +0200 EET\n\
+             p/a\tgerdr-a\tme\t2026-11-07 09:00:00 +0200 EET\n\
+             p/old\tgerdr-old\t\t2026-01-02 03:04:05 +0000 UTC\n",
+            Engine::Podman,
+        );
+        let of = |feature: &str, stack: &str, owner: &str, started: &str| Labelled {
+            feature: feature.into(),
+            stack: stack.into(),
+            owner: owner.into(),
+            started: started.into(),
+            engine: Engine::Podman,
+        };
+        assert_eq!(
+            found,
+            [
+                of("p/a", "gerdr-a", "me", "2026-11-07"),
+                of("p/old", "gerdr-old", "", "2026-01-02")
+            ]
+        );
+    }
+
+    fn podman_container(
+        service: &str,
+        status: &str,
+        code: i64,
+        health: &str,
+        error: &str,
+    ) -> Value {
+        serde_json::json!({
+            "Name": format!("s_{service}_1"),
+            "Config": {"Labels": {"com.docker.compose.service": service}},
+            "State": {"Status": status, "ExitCode": code, "Health": {"Status": health}, "Error": error},
+        })
+    }
+
+    #[test]
+    fn readiness_is_read_from_the_containers_themselves() {
+        let services = ["db".to_owned(), "web".to_owned(), "migrate".to_owned()];
+        let read = |items: Vec<Value>| {
+            ready_of_inspect(&Value::Array(items).to_string(), &services, "podman")
+        };
+        let db = podman_container("db", "running", 0, "healthy", "");
+        let web = podman_container("web", "running", 0, "", "");
+        let migrate = podman_container("migrate", "exited", 0, "", "");
+        assert_eq!(
+            read(vec![db.clone(), web.clone(), migrate.clone()]),
+            Ready::Yes
+        );
+        assert_eq!(
+            read(vec![db.clone(), web.clone()]),
+            Ready::Waiting("migrate".to_owned())
+        );
+        let starting = podman_container("db", "running", 0, "starting", "");
+        assert_eq!(
+            read(vec![starting, web.clone(), migrate.clone()]),
+            Ready::Waiting("db".to_owned())
+        );
+        let crashed = podman_container("migrate", "exited", 3, "", "");
+        assert_eq!(
+            read(vec![db.clone(), web.clone(), crashed]),
+            Ready::Failed("migrate exited with 3 (podman logs s_migrate_1)".to_owned())
+        );
+        let refused = podman_container("web", "created", 0, "", "port 80 is taken");
+        assert_eq!(
+            read(vec![db.clone(), refused, migrate.clone()]),
+            Ready::Failed("web didn't start: port 80 is taken".to_owned())
+        );
+        let sick = podman_container("db", "running", 0, "unhealthy", "");
+        assert_eq!(
+            read(vec![sick, web, migrate]),
+            Ready::Failed("db is unhealthy (podman logs s_db_1)".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_stack_of_docker_keeps_its_old_record() {
+        let docker = StackRun {
+            name: "s".into(),
+            file: "/f".into(),
+            engine: Engine::Docker,
+        };
+        let text = serde_json::to_string(&docker).unwrap();
+        assert_eq!(text, r#"{"name":"s","file":"/f"}"#);
+        let podman = StackRun {
+            engine: Engine::PodmanCompose,
+            ..docker
+        };
+        let text = serde_json::to_string(&podman).unwrap();
+        assert!(text.contains(r#""engine":"podman-compose""#), "{text}");
+        assert_eq!(serde_json::from_str::<StackRun>(&text).unwrap(), podman);
+    }
 
     fn repo(main: &str, worktree: &str) -> Repo {
         Repo {
@@ -1956,6 +2480,7 @@ django.db.utils.OperationalError: connection refused\n\
             host: &Host::Here,
             project: "spike",
             slug: "test",
+            owner: "me",
             repos: &[],
             roots: std::slice::from_ref(&root),
             dir: &dir,
@@ -1990,12 +2515,13 @@ django.db.utils.OperationalError: connection refused\n\
                 "-c",
                 &probe,
             ];
-            let said = output("nsenter", &args, Duration::from_secs(5), &stop)?;
+            let said = output(None, "nsenter", &args, Duration::from_secs(5), &stop)?;
             assert_eq!(said.trim(), "up");
             let name = &run.stacks[0].name;
             let container = format!("{name}-db-1");
-            let mounts = docker(
+            let mounts = tool(
                 &Host::Here,
+                Engine::Docker,
                 &[
                     "inspect",
                     &container,
@@ -2005,8 +2531,9 @@ django.db.utils.OperationalError: connection refused\n\
                 &stop,
             )?;
             assert!(!mounts.contains("gerdr-spike-src_pgdata"), "{mounts}");
-            let rows = docker(
+            let rows = tool(
                 &Host::Here,
+                Engine::Docker,
                 &[
                     "exec",
                     &container,
@@ -2026,7 +2553,110 @@ django.db.utils.OperationalError: connection refused\n\
         let stopped = stop_for_test(&run, &dir);
         result.unwrap();
         stopped.unwrap();
-        let left = docker(&Host::Here, &["volume", "ls", "-q"], &AtomicBool::new(false)).unwrap();
+        let never = AtomicBool::new(false);
+        let left = tool(&Host::Here, Engine::Docker, &["volume", "ls", "-q"], &never).unwrap();
+        assert!(!left.contains("gerdr-test"), "{left}");
+        assert!(!dir.exists());
+        assert!(!run.holder.unwrap().alive());
+    }
+
+    /// Against real podman with podman-compose, on a stack in folder
+    /// `$GERDR_PODMAN_STACK` that podman compose runs there: a service `db`
+    /// publishing a port, with file `x` in its volume at `/data` and file `b`
+    /// in its bind mount at `/bind`. Set
+    /// `PODMAN_COMPOSE_PROVIDER` to try podman-compose when Docker's compose
+    /// would be found first.
+    /// Leaves nothing of the copy behind; never touches another stack.
+    #[test]
+    #[ignore = "needs podman, podman-compose, pasta and the stack running"]
+    fn real_podman_sandbox_copies_data_and_leads_ports_to_it() {
+        let root = PathBuf::from(std::env::var("GERDR_PODMAN_STACK").unwrap());
+        let home = PathBuf::from(std::env::var("HOME").unwrap());
+        let dir = home.join(".cache/gerdr-podman-sandbox-test");
+        let stop = AtomicBool::new(false);
+        let found = engines(&Host::Here).unwrap();
+        assert!(found.iter().any(|e| !e.is_docker()), "{found:?}");
+        let job = Job {
+            host: &Host::Here,
+            project: "podman",
+            slug: "test",
+            owner: "me",
+            repos: &[],
+            roots: std::slice::from_ref(&root),
+            dir: &dir,
+            prepare: &[],
+            env: &[],
+            taken: &[],
+            stop: &stop,
+        };
+        let run = start(&job, &mut |what| eprintln!("{what}"));
+        eprintln!("{run:#?}");
+        let podman = |args: &[&str]| tool(&Host::Here, Engine::Podman, args, &stop);
+        let result = (|| -> Result<(), String> {
+            if let Some(why) = &run.failed {
+                return Err(why.clone());
+            }
+            assert!(run.alive());
+            let engine = run.stacks[0].engine;
+            assert!(!engine.is_docker());
+            let db = (run.forwards.iter())
+                .find(|f| f.service == "db" && !f.udp)
+                .ok_or("no forward for the database")?;
+            let pid = run.holder.as_ref().unwrap().pid.to_string();
+            let probe = format!("exec 3<>/dev/tcp/127.0.0.1/{} && echo up", db.main_port);
+            let args = [
+                "--user",
+                "--net",
+                "--preserve-credentials",
+                "-t",
+                &pid,
+                "--",
+                "bash",
+                "-c",
+                &probe,
+            ];
+            let said = output(None, "nsenter", &args, Duration::from_secs(5), &stop);
+            // Nothing listens in the container: a refusal from it still
+            // shows the way there is open, a timeout that it isn't.
+            eprintln!("probe: {said:?}");
+            let filter = project_filter(&run.stacks[0].name);
+            let db = format!("label={}=db", sandbox::LABEL_SERVICE);
+            let container = podman(&["ps", "-q", "--filter", &filter, "--filter", &db])?;
+            let container = container.trim();
+            let mounts = podman(&[
+                "inspect",
+                container,
+                "--format",
+                "{{range .Mounts}}{{.Name}} {{end}}",
+            ])?;
+            assert!(
+                mounts.contains(&format!("{}_pgdata", run.stacks[0].name)),
+                "{mounts}"
+            );
+            let data = podman(&["exec", container, "cat", "/data/x", "/bind/b"])?;
+            assert_eq!(data, "hi\ndata\n");
+            let left = labelled(&Host::Here, &stop)?;
+            assert!(
+                (left.iter()).any(|l| l.stack == run.stacks[0].name
+                    && l.engine == engine
+                    && l.feature == "podman/test"),
+                "{left:?}"
+            );
+            // Stopped with its file gone, it goes by its labels.
+            fs::remove_file(&run.stacks[0].file).map_err(|e| e.to_string())?;
+            super::stop(&run, &dir, false, &Host::Here)?;
+            let running = podman(&["ps", "-q", "--filter", &project_filter(&run.stacks[0].name)])?;
+            assert!(running.trim().is_empty(), "{running}");
+            Ok(())
+        })();
+        let stopped = stop_for_test(&run, &dir);
+        result.unwrap();
+        stopped.unwrap();
+        let left = podman(&["volume", "ls", "-q"]).unwrap();
+        assert!(!left.contains("gerdr-test"), "{left}");
+        let left = podman(&["ps", "-a", "--format", "{{.Names}}"]).unwrap();
+        assert!(!left.contains("gerdr-test"), "{left}");
+        let left = podman(&["pod", "ls", "--format", "{{.Name}}"]).unwrap();
         assert!(!left.contains("gerdr-test"), "{left}");
         assert!(!dir.exists());
         assert!(!run.holder.unwrap().alive());

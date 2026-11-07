@@ -1697,6 +1697,9 @@ mod tests {
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
+        // Named the same in a run before, as in a namespace where every run is
+        // pid 1, it can hold what a script of that run wrote late.
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }

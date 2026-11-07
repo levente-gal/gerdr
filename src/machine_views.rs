@@ -109,7 +109,16 @@ pub fn watch_views(
         tracing::warn!("machine {}: bringing code here: {err}", place.id);
     }
     let mut rounds = Rounds::default();
+    // Connecting just left word of this gerdr there.
+    let mut touched = Instant::now();
     while !stop.load(Ordering::Relaxed) {
+        if touched.elapsed() >= crate::machine_reach::TOUCH_EVERY {
+            touched = Instant::now();
+            let touch = own_id().and_then(|own| crate::machine_reach::touch_script(&place.there.data, &own));
+            if let Some(Err(why)) = touch.map(|script| place.reach.script(&script, &stop)) {
+                tracing::warn!("machine {}: touching what says this gerdr is around: {why:?}", place.id);
+            }
+        }
         let asked = ask.lock().map(|a| a.clone()).unwrap_or_default();
         if asked.project.is_some() {
             match view_round(&place, &asked, &mut rounds, &latest, &stop, &tell) {
@@ -933,6 +942,7 @@ impl Gerdr {
             .map(|(id, _)| id.clone())
             .collect();
         for id in ids {
+            self.left_there_forgotten(&id);
             self.machines.names.remove(&id);
             self.forget_viewed(&id);
         }
@@ -948,7 +958,7 @@ impl Gerdr {
         let root = view::root(&crate::projects::data_dir(), id);
         let spawned = std::thread::Builder::new()
             .name("forget a machine".into())
-            .spawn(move || view::forget_machine(&root, &AtomicBool::new(false)));
+            .spawn(move || view::forget_machine(&root, &[crate::machine_sandbox::LEFT], &AtomicBool::new(false)));
         if let Err(err) = spawned {
             tracing::warn!("removing what's kept of a machine: {err}");
         }

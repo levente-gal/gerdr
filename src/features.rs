@@ -158,6 +158,9 @@ pub struct Features {
     busy: Vec<Busy>,
     /// The latest probe of each feature, by project and slug.
     probes: BTreeMap<(String, String), Probed>,
+    /// Features whose Ship was pressed before their code was read: it asks once
+    /// the read is back.
+    ship_waits: BTreeSet<(String, String)>,
     /// The feature folders whose docs link was seen to this run:
     /// `link_feature_docs` goes once for each.
     pub(crate) docs_linked: BTreeSet<PathBuf>,
@@ -338,9 +341,16 @@ pub(crate) enum Done {
         result: Result<(), String>,
     },
     /// The compose projects of sandboxes whose feature is gone.
-    SandboxLeftovers { stacks: Vec<String> },
+    SandboxLeftovers {
+        /// Where they were looked for: none, here.
+        machine: Option<String>,
+        stacks: Vec<crate::feature_sandbox::LeftStack>,
+    },
     /// Removing those ended.
-    SandboxLeftoversRemoved { problems: Vec<String> },
+    SandboxLeftoversRemoved {
+        removed: Vec<crate::feature_sandbox::LeftStack>,
+        problems: Vec<String>,
+    },
     /// `t3 thread send` to `thread` ended.
     T3Told {
         thread: String,
@@ -5494,9 +5504,9 @@ impl Gerdr {
                 name,
                 result,
             } => self.sandbox_left_gone(&file, &title, &name, result),
-            Done::SandboxLeftovers { stacks } => self.sandbox_leftovers(stacks),
-            Done::SandboxLeftoversRemoved { problems } => {
-                self.sandbox_leftovers_removed(problems);
+            Done::SandboxLeftovers { machine, stacks } => self.sandbox_leftovers(machine, stacks),
+            Done::SandboxLeftoversRemoved { removed, problems } => {
+                self.sandbox_leftovers_removed(removed, problems);
             }
             Done::CommandsFound {
                 serial,
@@ -6197,7 +6207,7 @@ impl Gerdr {
         // Written elsewhere, what its code says is for its writer to act on.
         let open = (self.feature(project, slug))
             .is_some_and(|f| f.status == Status::Open && f.writer.is_none());
-        let probed = self.features.probes.entry(key).or_default();
+        let probed = self.features.probes.entry(key.clone()).or_default();
         probed.running = false;
         let docs = std::mem::take(&mut probe.docs);
         probe.docs = docs.keeping(probed.last.as_ref().map(|last| &last.docs));
@@ -6205,6 +6215,7 @@ impl Gerdr {
         if !open {
             probed.again = false;
             probed.last = Some(probe);
+            self.features.ship_waits.remove(&key);
             self.reselect_review_card(selected);
             return;
         }
@@ -6230,6 +6241,8 @@ impl Gerdr {
         }
         if again {
             self.probe_feature(project, slug);
+        } else if self.features.ship_waits.remove(&key) {
+            self.ask_ship_checked(project, slug, true);
         }
     }
 
@@ -8398,8 +8411,14 @@ impl Gerdr {
     }
 
     /// Ship was asked for on feature `slug`: say what stops it, or ask
-    /// with what shipping does, as its latest Ship check has it.
+    /// with what shipping does, as its latest Ship check has it. With none
+    /// yet, as just after it moved here, it asks once there is one.
     fn ask_ship_feature(&mut self, project: &str, slug: &str) {
+        self.ask_ship_checked(project, slug, false);
+    }
+
+    /// `ask_ship_feature`, `waited` for the check it lacked.
+    fn ask_ship_checked(&mut self, project: &str, slug: &str, waited: bool) {
         let Some(feature) = self.feature(project, slug).cloned() else {
             return;
         };
@@ -8412,9 +8431,13 @@ impl Gerdr {
         let key = (project.to_owned(), slug.to_owned());
         let probe = self.features.probes.get(&key).and_then(|p| p.last.as_ref());
         match ship_ask(&feature, probe) {
+            ShipAsk::Checking if waited => self.show_warning(format!(
+                "Couldn't check \u{201c}{title}\u{201d}; try again in a moment"
+            )),
             ShipAsk::Checking => {
-                self.show_warning(format!(
-                    "Still checking \u{201c}{title}\u{201d}; try again in a moment"
+                self.features.ship_waits.insert(key);
+                self.show_notice(format!(
+                    "Checking \u{201c}{title}\u{201d}: Ship asks once that is done"
                 ));
                 self.probe_feature(project, slug);
             }
@@ -8875,6 +8898,16 @@ impl Gerdr {
         let outcome = match hit {
             FeatureTabHit::Tab | FeatureTabHit::Column(_) | FeatureTabHit::AgentPickOff(_) => None,
             FeatureTabHit::MilestoneMode(i) => Some(PanelOutcome::FreshMilestones(i == 1)),
+            // The review's own: pressed as on its title row in the popup.
+            FeatureTabHit::ReviewButton(i) => {
+                let button = (self.feature_tab_parts())
+                    .and_then(|(view, _)| Some(view.review_switch?.buttons.get(i)?.button));
+                if let Some(button) = button {
+                    let hit = chrome::ReposHit::Button(button);
+                    self.worktree_diff_hit(hit, false, false, false);
+                }
+                return;
+            }
             FeatureTabHit::ReviewView(i) => Some(PanelOutcome::ReviewView(match i {
                 0 => chrome::ReviewView::Code,
                 _ => chrome::ReviewView::Fixes,
@@ -9245,6 +9278,17 @@ impl Gerdr {
                     _ => "The fixes the comments asked for, and their plan (Alt+2)",
                 };
                 Some(Tooltip::new(text, spot))
+            }
+            // What holds it up, else what it does and its key.
+            FeatureTabHit::ReviewButton(i) => {
+                let spot = (*layout.review_switch.as_ref()?.buttons.get(i)?)?;
+                let b = view.review_switch.as_ref()?.buttons.get(i)?;
+                let text = match (&b.disabled, b.key.is_empty()) {
+                    (Some(why), _) => why.clone(),
+                    (None, true) => b.label.clone(),
+                    (None, false) => format!("{} ({})", b.label, b.key),
+                };
+                Some(Tooltip::new(&text, spot))
             }
             FeatureTabHit::MilestoneMode(i) => {
                 let (_, segments) = layout.milestone_mode.as_ref()?;
@@ -11569,6 +11613,47 @@ fn comment_sections(
     sections
 }
 
+/// What Code review's line says to do next, and its buttons: those of the
+/// review laid into the page (`panel.review`), while its code shows. Approve
+/// is the one to press once nothing holds it up, Plan fixes while comments
+/// wait for it.
+fn review_toolbar(
+    panel: &FeaturePanel,
+    feature: &Feature,
+    files: Option<chrome::ReviewFiles>,
+) -> (Option<(String, bool)>, Vec<chrome::ReviewButton>) {
+    use crate::chrome::ReposButton as B;
+    let wd = (panel.review.as_deref())
+        .filter(|_| crate::feature_diff::review_page(panel, feature))
+        .filter(|wd| {
+            (wd.feature.as_ref())
+                .is_some_and(|fe| fe.project == feature.project && fe.slug == feature.slug)
+        });
+    let Some((wd, gate)) = wd.and_then(|wd| Some((wd, wd.approve_gate(feature.current())?))) else {
+        return (None, Vec::new());
+    };
+    let (total, changed) = files.map_or((0, 0), |f| (f.total, f.changed));
+    let next = crate::feature_diff::next_step(&gate, total, changed);
+    let buttons = (wd.feature_hints().into_iter())
+        .map(|hint| {
+            let style = match (&hint.disabled, hint.button) {
+                (Some(_), _) => ButtonStyle::Off,
+                (None, B::Approve) => ButtonStyle::Primary,
+                (None, B::PlanFixes) if gate.comments > 0 => ButtonStyle::Primary,
+                _ => ButtonStyle::Plain,
+            };
+            chrome::ReviewButton {
+                button: hint.button,
+                label: hint.label,
+                style,
+                key: hint.key,
+                disabled: hint.disabled,
+            }
+        })
+        .collect();
+    (Some(next), buttons)
+}
+
 /// The files of `feature`'s code review, as the switch counts them: by its last
 /// read once there was one, else by what the probe found and the viewed marks.
 fn review_files(feature: &Feature, state: &PanelState) -> Option<chrome::ReviewFiles> {
@@ -12518,10 +12603,16 @@ fn tab_view(
     let review_switch = (stage == Stage::CodeReview
         && !panel.keys
         && crate::feature_diff::review_views(feature))
-    .then(|| chrome::ReviewSwitch {
-        view: panel.review_view_of(feature),
-        files: review_files(feature, state),
-        fixes: fixes_word(feature, notes_of(state.probe)),
+    .then(|| {
+        let files = review_files(feature, state);
+        let (next, buttons) = review_toolbar(panel, feature, files);
+        chrome::ReviewSwitch {
+            view: panel.review_view_of(feature),
+            files,
+            fixes: fixes_word(feature, notes_of(state.probe)),
+            next,
+            buttons,
+        }
     });
     let mut view = FeatureTabView {
         review_page: crate::feature_diff::review_page(panel, feature),

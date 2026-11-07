@@ -757,7 +757,68 @@ pub fn state(feature: &Feature) -> String {
     }
 }
 
+/// What to do next on Code review's page with `gate`, as its toolbar says it,
+/// and whether that is Approve. The review has `total` files, `changed` of
+/// them changed since viewed.
+pub fn next_step(gate: &Gate, total: usize, changed: usize) -> (String, bool) {
+    let all = || format!("All {} viewed", plural(total, "file"));
+    let text = if let Some(why) = stage_refusal(gate.stage) {
+        why
+    } else if !gate.read {
+        "Reading the diff\u{2026}".into()
+    } else if let Some(why) = gate.errors.first() {
+        why.clone()
+    } else if !gate.dirty.is_empty() {
+        format!("Commit the changes in {} first", gate.dirty.join(", "))
+    } else if !gate.unviewed.is_empty() {
+        let left = gate.unviewed.len();
+        let files = plural(total.max(left), "file");
+        match changed {
+            0 => format!("{left} of {files} left"),
+            n => format!("{left} of {files} left \u{b7} {n} changed since viewed"),
+        }
+    } else if gate.comments > 0 {
+        let them = if gate.comments == 1 { "it" } else { "them" };
+        format!(
+            "{} \u{b7} {}: Plan fixes sends {them} to Build",
+            all(),
+            plural(gate.comments, "comment")
+        )
+    } else if gate.holding > 0 {
+        let open = match gate.holding {
+            1 => "1 finding still open".to_owned(),
+            n => format!("{n} findings still open"),
+        };
+        format!("{} \u{b7} {open}", all())
+    } else if gate.draft {
+        DRAFT_OPEN.into()
+    } else {
+        let next = Stage::CodeReview.next().map_or("the next stage", Stage::label);
+        return (format!("{} \u{b7} Approve to go on to {next}", all()), true);
+    };
+    (text, false)
+}
+
 impl WorktreeDiff {
+    /// What Approve looks at, for the feature at `stage`: none for a diff of
+    /// no feature.
+    pub fn approve_gate(&self, stage: Option<Stage>) -> Option<Gate> {
+        let fe = self.feature.as_ref()?;
+        Some(Gate {
+            stage,
+            draft: self.diff.editing.is_some(),
+            read: self.read && !self.reading,
+            errors: fe.repos.iter().filter_map(|r| r.error.clone()).collect(),
+            dirty: (fe.repos.iter())
+                .filter(|r| !r.dirty.is_empty())
+                .map(|r| r.shown().to_owned())
+                .collect(),
+            unviewed: fe.unviewed(),
+            comments: self.diff.review.own(),
+            holding: fe.holding(),
+        })
+    }
+
     /// Feature code review `fe`, in workspace `workspace`; the user's
     /// comments `review`. Shown once read.
     pub fn of_feature(fe: FeatureOf, root: PathBuf, workspace: usize, review: Review) -> Self {
@@ -1521,18 +1582,8 @@ impl Gerdr {
         let stage = self
             .feature(&fe.project, &fe.slug)
             .and_then(Feature::current);
-        let gate = Gate {
-            stage,
-            draft: wd.diff.editing.is_some(),
-            read: wd.read && !wd.reading,
-            errors: fe.repos.iter().filter_map(|r| r.error.clone()).collect(),
-            dirty: (fe.repos.iter())
-                .filter(|r| !r.dirty.is_empty())
-                .map(|r| r.shown().to_owned())
-                .collect(),
-            unviewed: fe.unviewed(),
-            comments: wd.diff.review.own(),
-            holding: fe.holding(),
+        let Some(gate) = wd.approve_gate(stage) else {
+            return;
         };
         if let Some(why) = approve_refusal(&gate) {
             return self.show_warning(why);
@@ -2417,6 +2468,39 @@ mod tests {
     }
 
     #[test]
+    fn the_lists_toolbar_goes_to_the_next_and_previous_file_not_viewed() {
+        use crate::chrome::TreeTool;
+        let mut wd = listed(&["src/a.rs", "src/b.rs", "top.rs"]);
+        let selected = |wd: &WorktreeDiff| {
+            wd.tree
+                .as_ref()
+                .unwrap()
+                .selected_file()
+                .map(|(_, p)| p.to_owned())
+        };
+        assert_eq!(wd.repos_view(POPUP_ENV).tree_nav, Some(true));
+        // From the list, which keeps the keyboard.
+        assert_eq!(wd.click(ReposHit::Line(2), POPUP_ENV), None);
+        assert_eq!(selected(&wd).as_deref(), Some("src/a.rs"));
+        let next = wd.click(ReposHit::Tool(TreeTool::NextUnviewed), POPUP_ENV);
+        assert_eq!(next, None);
+        wd.follow_diff(POPUP_ENV);
+        assert_eq!(selected(&wd).as_deref(), Some("src/b.rs"));
+        assert!(wd.tree.as_ref().unwrap().focused);
+        wd.click(ReposHit::Tool(TreeTool::PrevUnviewed), POPUP_ENV);
+        wd.follow_diff(POPUP_ENV);
+        assert_eq!(selected(&wd).as_deref(), Some("src/a.rs"));
+        // Round past the start, as Alt+Shift+Up goes.
+        let up = smithay::input::keyboard::ModifiersState {
+            shift: true,
+            ..alt()
+        };
+        press(&mut wd, up, Keysym::Up);
+        assert_eq!(selected(&wd).as_deref(), Some("top.rs"));
+        assert!(wd.tree.as_ref().unwrap().focused);
+    }
+
+    #[test]
     fn with_no_room_for_it_the_list_is_gone_and_the_diff_keeps_the_keys() {
         let mut wd = listed(&["src/a.rs", "top.rs"]);
         let narrow = Env {
@@ -2683,6 +2767,80 @@ mod tests {
         assert!(text.contains("### C1: General comment\n"), "{text}");
         assert!(text.contains("The whole of it reads badly"), "{text}");
         assert!(!text.contains("the whole file"), "{text}");
+    }
+
+    #[test]
+    fn approve_says_what_holds_it_up_where_it_shows() {
+        use ReposButton as B;
+        let mut wd = popup(Stage::CodeReview, Vec::new(), Review::default());
+        let gate = wd.approve_gate(Some(Stage::CodeReview)).unwrap();
+        let why = approve_refusal(&gate);
+        assert!(why.as_deref().is_some_and(|w| w.contains("not viewed")), "{why:?}");
+        // The popup's title row and the footer both grey it, saying why.
+        let approve = |hints: Vec<Hint>| hints.into_iter().find(|h| h.button == B::Approve);
+        assert_eq!(approve(wd.view(POPUP_ENV).title_buttons).unwrap().disabled, why);
+        assert_eq!(approve(wd.hints()).unwrap().disabled, why);
+        // Laid into its page, they leave the title row for the page's line;
+        // the footer keeps their keys.
+        wd.feature.as_mut().unwrap().inline = true;
+        let (title, hints) = offered(&wd);
+        for gone in [B::AddComment, B::PlanFixes, B::Approve] {
+            assert!(!title.contains(&gone), "{gone:?} in {title:?}");
+            assert!(hints.contains(&gone), "{gone:?} not in {hints:?}");
+        }
+    }
+
+    #[test]
+    fn the_page_line_says_what_comes_next() {
+        let ready = Gate {
+            stage: Some(Stage::CodeReview),
+            read: true,
+            ..Gate::default()
+        };
+        let next = |gate: &Gate| next_step(gate, 8, 1);
+        assert_eq!(
+            next(&ready),
+            (
+                "All 8 files viewed \u{b7} Approve to go on to Manual test".to_owned(),
+                true
+            )
+        );
+        let with = |f: &dyn Fn(&mut Gate)| {
+            let mut gate = ready.clone();
+            f(&mut gate);
+            next(&gate)
+        };
+        let not = |text: &str| (text.to_owned(), false);
+        assert_eq!(
+            with(&|g| g.unviewed = vec!["api/a.rs".into(), "api/b.rs".into()]),
+            not("2 of 8 files left \u{b7} 1 changed since viewed")
+        );
+        assert_eq!(
+            with(&|g| g.comments = 2),
+            not("All 8 files viewed \u{b7} 2 comments: Plan fixes sends them to Build")
+        );
+        assert_eq!(
+            with(&|g| g.comments = 1),
+            not("All 8 files viewed \u{b7} 1 comment: Plan fixes sends it to Build")
+        );
+        assert_eq!(
+            with(&|g| g.holding = 1),
+            not("All 8 files viewed \u{b7} 1 finding still open")
+        );
+        assert_eq!(
+            with(&|g| g.dirty = vec!["api".into()]),
+            not("Commit the changes in api first")
+        );
+        assert_eq!(with(&|g| g.read = false), not("Reading the diff\u{2026}"));
+        assert_eq!(with(&|g| g.draft = true), not(DRAFT_OPEN));
+        assert_eq!(
+            with(&|g| g.stage = Some(Stage::ManualTest)),
+            not("Code review is done")
+        );
+        // Whatever it says, Approve is ready exactly when nothing refuses it.
+        for gate in [ready.clone(), Gate { comments: 1, ..ready.clone() }] {
+            assert_eq!(next(&gate).1, approve_refusal(&gate).is_none());
+        }
     }
 
     #[test]

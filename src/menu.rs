@@ -59,6 +59,8 @@ pub enum MenuAction {
     StopKept(String),
     /// The dialog connecting another machine (see `machines`).
     AddMachine,
+    /// The connect dialog, filled in for a gerdr that reached this machine.
+    AddMachineFrom { target: String, name: String },
     /// Connect, disconnect or forget the machine of this name.
     ConnectMachine(String),
     DisconnectMachine(String),
@@ -217,7 +219,7 @@ pub enum MenuAction {
         tab: crate::chrome::CommandsTab,
     },
     /// Ask before removing what sandboxes of gone features left.
-    AskRemoveSandboxLeftovers(Vec<String>),
+    AskRemoveSandboxLeftovers(Vec<crate::feature_sandbox::LeftStack>),
     /// Read the project files again, after one was edited by hand.
     ReloadProjects,
     /// Join project `id`, open in another gerdr, here (see
@@ -456,12 +458,13 @@ impl Gerdr {
             MenuAction::ShowLog(path) => self.show_log(path),
             MenuAction::StopKept(id) => self.ask_stop_kept(&id),
             MenuAction::AddMachine => self.open_machine_dialog(),
+            MenuAction::AddMachineFrom { target, name } => self.add_machine_from(target, name),
             MenuAction::ConnectMachine(name) => self.connect_machine(&name),
             MenuAction::DisconnectMachine(name) => self.disconnect_machine(&name),
             MenuAction::StopTakeOver(project, slug) => self.stop_take(&project, &slug),
             MenuAction::StopAiWork => self.ai_work.stop_busy(),
             MenuAction::StopAiWorkPull(project, slug) => self.ai_work.stop_pull(&project, &slug),
-            MenuAction::RemoveMachine(name) => self.remove_machine(&name),
+            MenuAction::RemoveMachine(name) => self.ask_remove_machine(&name),
             MenuAction::UpdateT3(version) => self.update_t3(version),
             MenuAction::NewTab(w) => {
                 self.switch_workspace(w);

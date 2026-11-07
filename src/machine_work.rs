@@ -444,16 +444,19 @@ impl Work {
     }
 
     /// The line attaching a terminal here to `terminal` there, taking it from
-    /// any other client. It says what ending means: the agent goes on.
+    /// any other client. It says what ending means: the agent goes on; and, when
+    /// another machine took the view, which.
     pub(crate) fn attach_line(&self, terminal: &str, name: &str) -> String {
         let site = &self.info.site;
         let herdr = site.herdr.as_deref().unwrap_or("herdr");
-        let there = format!(
+        let attach = format!(
             "env HERDR_SOCKET_PATH={} {} terminal attach {} --takeover",
             shell_quote(&site.socket()),
             shell_quote(herdr),
             shell_quote(terminal),
         );
+        let views = format!("{}/gerdr/{VIEWS}", site.data);
+        let there = viewed_by(&views, terminal, &crate::machine_lease::this_machines_name(), &attach);
         let said = format!("This view ended. What runs there keeps running on {name}.");
         format!(
             "ssh -t -S {} -o BatchMode=yes -o ControlMaster=no {} {}; echo {}",
@@ -465,14 +468,37 @@ impl Work {
     }
 }
 
+/// The folder, in gerdr's folder of a machine, saying which machine last opened a
+/// view of each terminal there.
+const VIEWS: &str = "views";
+
+/// `attach`, a view of `terminal` taking it from any other, run by shell where the
+/// terminal is: it first says there that machine `me` has it, in folder `views`,
+/// and once it ends, says which machine took it, if one did; if none did, what
+/// it said goes.
+fn viewed_by(views: &str, terminal: &str, me: &str, attach: &str) -> String {
+    let file = shell_quote(&format!("{views}/{}", terminal.replace('/', "_")));
+    let me = shell_quote(me);
+    format!(
+        r#"mkdir -p {views} 2>/dev/null; printf %s {me} > {file} 2>/dev/null; {attach}; s=$?; w=$(cat {file} 2>/dev/null); if [ "$w" = {me} ]; then rm -f {file}; elif [ -n "$w" ]; then printf '\nOpened on %s.\n' "$w"; fi; exit $s"#,
+        views = shell_quote(views),
+    )
+}
+
 /// The line attaching a terminal here to `terminal` of this machine's own worker
 /// session: work another gerdr put here.
 pub(crate) fn attach_here(terminal: &str) -> String {
     let socket = crate::machines::worker_socket_here();
-    format!(
-        "env HERDR_SOCKET_PATH={} herdr terminal attach {} --takeover; echo {}",
+    let attach = format!(
+        "env HERDR_SOCKET_PATH={} herdr terminal attach {} --takeover",
         shell_quote(&socket.to_string_lossy()),
         shell_quote(terminal),
+    );
+    let views = crate::projects::data_dir().join(VIEWS);
+    let me = crate::machine_lease::this_machines_name();
+    format!(
+        "sh -c {}; echo {}",
+        shell_quote(&viewed_by(&views.to_string_lossy(), terminal, &me, &attach)),
         shell_quote("This view ended. What runs here keeps running."),
     )
 }
@@ -851,6 +877,7 @@ impl Gerdr {
                     self.adopt_checks(&project);
                 }
                 self.clean_left_there(&place_id);
+                self.look_for_sandbox_leftovers_there(&place_id);
             }
             Err(err) => {
                 tracing::warn!("machine {name}: starting its work: {err}");
@@ -1505,6 +1532,7 @@ impl Gerdr {
     /// more until it is told to, and a file taken away here must not come
     /// back from there.
     pub(crate) fn machine_work_tick(&mut self) {
+        self.reach_tick();
         self.publish_live();
         // Asked over another machine's link to this one: this one may have none.
         self.lease_tick();
@@ -1973,5 +2001,24 @@ mod tests {
         assert!(line.contains("--takeover"), "{line}");
         assert!(line.contains("gerdr-worker/herdr.sock"), "{line}");
         assert!(line.contains("keeps running on box"), "{line}");
+    }
+
+    #[test]
+    fn a_view_taken_by_another_machine_says_which() {
+        let views = std::env::temp_dir().join(format!("gerdr-views-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&views);
+        let views = views.to_string_lossy().into_owned();
+        let run = |attach: &str| {
+            let script = viewed_by(&views, "w1/t1", "my box", attach);
+            let out = std::process::Command::new("sh").args(["-c", &script]).output().unwrap();
+            (out.status.code(), String::from_utf8_lossy(&out.stdout).into_owned())
+        };
+        // Ended here, by closing: nothing to say, nor left there.
+        assert_eq!(run("true"), (Some(0), String::new()));
+        assert!(!std::path::Path::new(&format!("{views}/w1_t1")).exists());
+        // Another machine opened it meanwhile, which ends this one.
+        let taken = format!("printf %s desk > '{views}/w1_t1'; false");
+        assert_eq!(run(&taken), (Some(1), "\nOpened on desk.\n".to_owned()));
+        let _ = std::fs::remove_dir_all(&views);
     }
 }

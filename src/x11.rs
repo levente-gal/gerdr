@@ -212,7 +212,14 @@ mod tests {
     fn a_socket_left_by_a_crashed_server_frees_its_display() {
         let tmp = scratch("dead");
         std::fs::create_dir_all(tmp.join(".X11-unix")).unwrap();
-        drop(std::os::unix::net::UnixListener::bind(tmp.join(".X11-unix/X100")).unwrap());
+        let socket = tmp.join(".X11-unix/X100");
+        drop(std::os::unix::net::UnixListener::bind(&socket).unwrap());
+        // A process starting on another thread holds a copy until it has started.
+        let started = std::time::Instant::now();
+        while UnixStream::connect(&socket).is_ok() {
+            assert!(started.elapsed().as_secs() < 5, "still answers");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
         assert_eq!(free_display(&tmp, OsStr::new("gerdr-0")), Some(100));
     }
 

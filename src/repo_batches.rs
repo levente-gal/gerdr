@@ -2593,6 +2593,8 @@ fn tool_tip(layout: &chrome::ReposLayout, tool: TreeTool) -> Option<Tooltip> {
         TreeTool::Collapse => ("Fold every repository and folder", "Alt+Left"),
         TreeTool::List => ("List the changed files flat, by path", "Alt+F"),
         TreeTool::Folders => ("List the changed files by folder", "Alt+F"),
+        TreeTool::PrevUnviewed => ("Go to the previous file not viewed", "Alt+Shift+Up"),
+        TreeTool::NextUnviewed => ("Go to the next file not viewed", "Alt+Shift+Down"),
     };
     Some(Tooltip::new(text, *rect).key(key))
 }

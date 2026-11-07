@@ -594,7 +594,8 @@ impl ReviewFiles {
 }
 
 /// The line under Code review's rail: the two views to go between, with how far
-/// each has come, and the files left to review.
+/// each has come, the files left to review or what to do next, and the
+/// stage's actions at its right.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReviewSwitch {
     pub view: ReviewView,
@@ -602,9 +603,36 @@ pub struct ReviewSwitch {
     pub files: Option<ReviewFiles>,
     /// How the fixes stand: "2 of 3 made", "planning fixes".
     pub fixes: String,
+    /// What to do next, and whether that is all done but Approve; none says
+    /// only how many files are left.
+    pub next: Option<(String, bool)>,
+    /// The review's actions, from the left: on the code's view alone.
+    pub buttons: Vec<ReviewButton>,
+}
+
+/// An action on Code review's line: what the review's own title row has in
+/// its popup.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReviewButton {
+    pub button: super::ReposButton,
+    pub label: String,
+    /// `Primary` for the one to press next, `Off` while it can't be pressed.
+    pub style: ButtonStyle,
+    /// Its key, for its tooltip: the footer lists it too.
+    pub key: String,
+    /// Why it can't be pressed now.
+    pub disabled: Option<String>,
 }
 
 impl ReviewSwitch {
+    /// What the line says after the bar, and whether that is the good news.
+    fn said(&self) -> Option<(String, bool)> {
+        match &self.next {
+            Some(next) => Some(next.clone()),
+            None => (self.files.filter(|f| f.total > 0)).map(ReviewFiles::left),
+        }
+    }
+
     /// What each segment says.
     fn labels(&self) -> [String; 2] {
         let code = match self.files {
@@ -879,6 +907,9 @@ pub enum FeatureTabHit {
     MilestoneMode(usize),
     /// A segment of Code review's switch: 0 its code, 1 its fixes.
     ReviewView(usize),
+    /// A button at the right of Code review's line, by its index in
+    /// `ReviewSwitch::buttons`.
+    ReviewButton(usize),
     /// A segment of a repository's way on the Ship page: its row, then 0
     /// pull request, 1 merge only, 2 nothing.
     ShipRoute(usize, usize),
@@ -1013,10 +1044,13 @@ impl FeatureTabLayout {
         if let Some(n) = self.nodes.iter().position(on) {
             return Some(FeatureTabHit::Node(n));
         }
-        if let Some(spots) = &self.review_switch
-            && let Some(i) = spots.segments.iter().position(on)
-        {
-            return Some(FeatureTabHit::ReviewView(i));
+        if let Some(spots) = &self.review_switch {
+            if let Some(i) = spots.segments.iter().position(on) {
+                return Some(FeatureTabHit::ReviewView(i));
+            }
+            if let Some(i) = (spots.buttons.iter()).position(|b| b.as_ref().is_some_and(on)) {
+                return Some(FeatureTabHit::ReviewButton(i));
+            }
         }
         if on(&self.repos_toggle) {
             return Some(FeatureTabHit::ToggleRepos);
@@ -2666,21 +2700,51 @@ pub struct ReviewSwitchSpots {
     pub left: Rect,
     /// The segments say their figures: there is room.
     pub full: bool,
+    /// Where each of `ReviewSwitch::buttons` goes; none for one the row has
+    /// no room for, the leftmost going first.
+    pub buttons: Vec<Option<Rect>>,
 }
 
 /// Where `switch` goes in the row at `(x, y)`, `width` wide: the choice at its
-/// left, its figures cut if they wouldn't fit, then the bar and what is left.
+/// left, its figures cut if they wouldn't fit, then the bar and what is left,
+/// the buttons at the right.
 fn review_switch_spots(switch: &ReviewSwitch, x: i32, y: i32, width: i32) -> ReviewSwitchSpots {
     let measure = |label: &str| width_of(label, SMALL_FONT_SIZE).ceil() as i32 + 2 * CHIP_PAD;
     let [code, fixes] = switch.labels();
     let widths = [measure(&code), measure(&fixes)];
+    let h = REVIEW_SWITCH_H;
+    // The buttons first: the least of the switch and its words is all they
+    // leave. The rightmost, the one to press next, stays longest.
+    let least = measure("Code review") + measure("Fixes") + 2 * PICK_TRACK_PAD + COLUMN_GAP;
+    let mut sizes: Vec<i32> = (switch.buttons.iter())
+        .map(|b| button_width(&b.label))
+        .collect();
+    let mut dropped = 0;
+    while sizes.len() > 1 && row_width(&sizes) > width - least - REVIEW_LEFT_MIN {
+        sizes.remove(0);
+        dropped += 1;
+    }
+    let fits = !sizes.is_empty() && row_width(&sizes) <= width - least;
+    let end = x + width;
+    let mut buttons = vec![None; switch.buttons.len()];
+    let by = y + (h - ROW_BUTTON) / 2;
+    if fits {
+        for (i, (bx, _)) in rows_from_right(&sizes, x, end).into_iter().enumerate() {
+            let rect = Rectangle::new((bx, by).into(), (sizes[i], ROW_BUTTON).into());
+            buttons[dropped + i] = Some(rect);
+        }
+    }
+    let end = match buttons.iter().flatten().next() {
+        Some(first) => first.loc.x - COLUMN_GAP,
+        None => end,
+    };
+    let width = end - x;
     let room = width - 2 * PICK_TRACK_PAD;
     let full = widths[0] + widths[1] <= room;
     let widths = match full {
         true => widths,
         false => [measure("Code review"), measure("Fixes")],
     };
-    let h = REVIEW_SWITCH_H;
     let inner = h - 2 * PICK_TRACK_PAD;
     let first = Rectangle::new(
         (x + PICK_TRACK_PAD, y + PICK_TRACK_PAD).into(),
@@ -2693,7 +2757,6 @@ fn review_switch_spots(switch: &ReviewSwitch, x: i32, y: i32, width: i32) -> Rev
     let track_w = widths[0] + widths[1] + 2 * PICK_TRACK_PAD;
     let track = Rectangle::new((x, y).into(), (track_w, h).into());
     let from = x + track_w + COLUMN_GAP;
-    let end = x + width;
     let has_bar = switch.files.is_some() && end - from >= REVIEW_BAR_W + 2 * COLUMN_GAP + REVIEW_LEFT_MIN;
     let bar = has_bar.then(|| {
         Rectangle::new(
@@ -2709,6 +2772,7 @@ fn review_switch_spots(switch: &ReviewSwitch, x: i32, y: i32, width: i32) -> Rev
         bar,
         left,
         full,
+        buttons,
     }
 }
 
@@ -3349,7 +3413,13 @@ fn slice_view(view: &FeatureTabView, slice: TabSlice) -> FeatureTabView {
         TabSlice::Head => {
             matches!(
                 hit,
-                H::Prev | H::Next | H::Button(_) | H::Node(_) | H::ToggleRepos | H::ReviewView(_)
+                H::Prev
+                    | H::Next
+                    | H::Button(_)
+                    | H::Node(_)
+                    | H::ToggleRepos
+                    | H::ReviewView(_)
+                    | H::ReviewButton(_)
             ) || strip && matches!(hit, H::Repo(_) | H::MoreRepos(_))
         }
         TabSlice::Column(TabColumn::Repos) => {
@@ -4251,12 +4321,17 @@ impl Painter {
         let on = usize::from(switch.view == ReviewView::Fixes);
         let labelled = [(labels[0], spots.segments[0]), (labels[1], spots.segments[1])];
         self.segmented(c, spots.track, &labelled, on, hover, scale, p);
-        let Some(files) = switch.files.filter(|files| files.total > 0) else {
-            return;
-        };
-        let (left, done) = files.left();
-        let tone = if done { p.success } else { p.warning };
-        if let Some(bar) = spots.bar {
+        for (i, (b, rect)) in switch.buttons.iter().zip(&spots.buttons).enumerate() {
+            let Some(rect) = rect else {
+                continue;
+            };
+            let lit = view.hover == Some(FeatureTabHit::ReviewButton(i));
+            self.button(c, &b.label, *rect, (lit, false), b.style, scale, p);
+        }
+        if let Some(files) = switch.files.filter(|files| files.total > 0)
+            && let Some(bar) = spots.bar
+        {
+            let tone = if files.left().1 { p.success } else { p.warning };
             let (x, y, w, h) = rect_px(bar, scale);
             c.rounded(x, y, w, h, h / 2.0, p.border);
             if files.viewed > 0 {
@@ -4264,10 +4339,14 @@ impl Painter {
                 c.rounded(x, y, (w * f).max(h), h, h / 2.0, tone);
             }
         }
+        let Some((said, good)) = switch.said() else {
+            return;
+        };
+        let tone = if good { p.success } else { p.warning };
         let (x, end) = phys(spots.left, scale);
         self.bold_text(
             c,
-            &left,
+            &said,
             FONT_SIZE,
             x,
             end,

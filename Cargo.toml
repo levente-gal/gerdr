@@ -25,6 +25,7 @@ regex = "1"
 comrak = { version = "0.59.0", default-features = false }
 sha2 = "0.10.9"
 zstd = { version = "0.13", default-features = false }
+serde_norway = "0.9.42"
 
 # For trying a change: a one-file rebuild takes about a quarter of what
 # --release does, with paint about twice as slow. install.sh stays on release.
