@@ -4183,6 +4183,8 @@ impl Panel {
                 TreeTool::Collapse => self.fold_all(false, ctx),
                 TreeTool::List => return self.set_grouping(Grouping::List, ctx),
                 TreeTool::Folders => return self.set_grouping(Grouping::Folders, ctx),
+                // Laid out only over a feature's code review.
+                TreeTool::PrevUnviewed | TreeTool::NextUnviewed => {}
             },
             ReposHit::Field => self.focus = Focus::Field,
             ReposHit::Button(button) => return self.act(button, ctx),
@@ -5218,6 +5220,7 @@ impl Panel {
             grouping: self.grouping,
             diff_only: false,
             diff_tree: false,
+            tree_nav: None,
             flat: false,
             detail_share: 1.0,
             modes: None,

@@ -5777,9 +5777,10 @@ fn listed_review(flat: bool) -> super::ReposView {
     let total = lines.len();
     super::ReposView {
         diff_tree: true,
+        tree_nav: Some(true),
+        tree_note: Some(("12 of 31 files left".into(), super::Tone::Warning)),
         flat,
         tree_share: super::REVIEW_TREE_SHARE,
-        tree_note: None,
         grouping: crate::repos::Grouping::Folders,
         lines,
         total,
@@ -5843,8 +5844,8 @@ const GOLDEN_DOC_TAB: [[u64; 16]; 4] = [
         0x6f1041c7f50aca45, // popup_code_review_850
         0x07ad73f54e3e101c, // popup_no_comments_1180
         0x08ab19690c613d25, // popup_no_comments_850
-        0xad881c43d2b80952, // popup_listed_1180
-        0x74ec422f94dccc42, // inline_listed_1180
+        0xd21560c9a783804d, // popup_listed_1180
+        0x3b5db476e7b52529, // inline_listed_1180
     ],
     // Dark at 2
     [
@@ -5862,8 +5863,8 @@ const GOLDEN_DOC_TAB: [[u64; 16]; 4] = [
         0x2ebeec0af5c2ef1b, // popup_code_review_850
         0x04f0f9c1258af57a, // popup_no_comments_1180
         0x654aa94035b7bbae, // popup_no_comments_850
-        0x1d52e3abf66dfd6d, // popup_listed_1180
-        0x094a7588f08fc1d1, // inline_listed_1180
+        0x8f448f5322832f16, // popup_listed_1180
+        0x9a0d83469e09aac2, // inline_listed_1180
     ],
     // Light at 1
     [
@@ -5881,8 +5882,8 @@ const GOLDEN_DOC_TAB: [[u64; 16]; 4] = [
         0xdc7251d500deedf7, // popup_code_review_850
         0x078b0def98e11797, // popup_no_comments_1180
         0x0f750109c62c42b8, // popup_no_comments_850
-        0xef0c1db60fab9ed4, // popup_listed_1180
-        0xc6754a4ffff0c0b4, // inline_listed_1180
+        0xa16b5b7e08cc2dc7, // popup_listed_1180
+        0xad31f141b1186eb7, // inline_listed_1180
     ],
     // Light at 2
     [
@@ -5900,8 +5901,8 @@ const GOLDEN_DOC_TAB: [[u64; 16]; 4] = [
         0x648afae740203419, // popup_code_review_850
         0x2435e6adfbb4e6b8, // popup_no_comments_1180
         0x958a852299d3f6a4, // popup_no_comments_850
-        0xbef0592f947c975e, // popup_listed_1180
-        0x25bb1306909649ca, // inline_listed_1180
+        0x34dfd6786e24cd23, // popup_listed_1180
+        0xff75249516f27ec3, // inline_listed_1180
     ],
 ];
 

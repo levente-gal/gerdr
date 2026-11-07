@@ -168,7 +168,7 @@ pub const DOC_NO_RESTORE: &str = "There's nothing to restore in a file under rev
 pub const EVIDENCE_READ_ONLY: &str = "The evidence is only read";
 /// Why going to the current stage does nothing.
 pub const ALL_DONE: &str = "Every stage is done";
-/// Why Alt+Shift+Down did nothing.
+/// Why Alt+Shift+Down or Up did nothing.
 pub const ALL_VIEWED: &str = "Every file is viewed";
 /// Why Send back does nothing yet.
 pub const NO_COMMENT: &str = "Add a comment first";
@@ -180,7 +180,7 @@ pub const FEATURE_READ_ONLY: &str = "A feature's code review can't edit the code
 pub const APPROVE_KEY: &str = "Ctrl+Enter";
 pub const SEND_BACK_KEY: &str = "Ctrl+Shift+Enter";
 /// The key going to the next file not viewed in a feature's code review.
-pub const NEXT_UNVIEWED_KEY: &str = "Alt+Shift+Down";
+pub const NEXT_UNVIEWED_KEY: &str = "Alt+Shift+Down / Up";
 
 /// The commit a diff shows (`WorktreeDiff::commit`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -342,6 +342,8 @@ impl WorktreeDiff {
             view.tree_share = env.tree_share;
             view.empty = fe.empty(self.read).into();
             view.tree_note = fe.tree_note(self.read);
+            let counts = fe.counts(0);
+            view.tree_nav = Some(counts.viewed < counts.files);
             let check = |root: &Path, path: &str| fe.check(root, path);
             tree.fill(&mut view, &fe.sections(), &self.diff, &check, env.tree_page);
         }
@@ -397,12 +399,24 @@ impl WorktreeDiff {
                 tree.fold_all(open, &fe.sections(), env.tree_page);
                 return None;
             }
+            TreeTool::PrevUnviewed | TreeTool::NextUnviewed => {
+                return self.jump_unviewed(tool == TreeTool::NextUnviewed, env);
+            }
         };
         if self.tree.as_ref()?.grouping == grouping {
             return None;
         }
         self.set_grouping(grouping, env);
         Some(Done::Grouping(grouping))
+    }
+
+    /// Go to the next file not viewed, else the one before: the diff at its
+    /// header, its line selected in the file list, the keyboard left where
+    /// it was. A toast says when every file is viewed.
+    fn jump_unviewed(&mut self, next: bool, env: Env) -> Option<Done> {
+        let by = if next { 1 } else { -1 };
+        let found = self.with_diff(env, |diff, ctx| diff.jump_unchecked(by, ctx));
+        (!found).then_some(Done::Diff(Outcome::Notice(ALL_VIEWED)))
     }
 
     /// What the file list asked: the diff goes to its line, or a file is
@@ -1227,8 +1241,7 @@ impl WorktreeDiff {
             && mods.shift
             && !(mods.ctrl || mods.logo)
         {
-            let found = self.with_diff(env, |diff, ctx| diff.jump_unchecked(by, ctx));
-            return (!found).then_some(Done::Diff(Outcome::Notice(ALL_VIEWED)));
+            return self.jump_unviewed(by > 0, env);
         }
         if !typing && let Some(done) = self.tree_key(mods, sym, env) {
             return done;
@@ -1321,6 +1334,7 @@ impl WorktreeDiff {
                     }
                     B::Close if self.feature.as_ref().is_some_and(|f| f.back) => "back".into(),
                     B::Close => "close".into(),
+                    B::NextUnviewed => "next, previous unviewed".into(),
                     B::NextComment => match self.diff.comments_to_visit() {
                         Some("finding") => "next, previous finding".into(),
                         _ => "next, previous comment".into(),
@@ -1386,8 +1400,7 @@ impl WorktreeDiff {
                         .map(Done::Diff);
                 }
                 ReposHit::Button(ReposButton::NextUnviewed) => {
-                    let found = self.with_diff(env, |diff, ctx| diff.jump_unchecked(1, ctx));
-                    return (!found).then_some(Done::Diff(Outcome::Notice(ALL_VIEWED)));
+                    return self.jump_unviewed(true, env);
                 }
                 ReposHit::DiffRestore(_) => {
                     return Some(Done::Diff(Outcome::Notice(FEATURE_READ_ONLY)));

@@ -254,6 +254,9 @@ pub struct ReposView {
     /// With `diff_only`: the tree beside the diff all the same, its lines
     /// and toolbar (a feature's code review).
     pub diff_tree: bool,
+    /// The tree's toolbar going to the previous and the next file not
+    /// viewed (a feature's code review): whether one is left to go to.
+    pub tree_nav: Option<bool>,
     /// Laid flat into a tab rather than floating over the app: no shadow,
     /// border or rounded corners.
     pub flat: bool,
@@ -313,6 +316,7 @@ impl ReposView {
             grouping: Default::default(),
             diff_only: true,
             diff_tree: false,
+            tree_nav: None,
             flat: false,
             detail_share: 1.0,
             modes: None,
@@ -387,6 +391,10 @@ pub enum TreeTool {
     /// List the files flat, or by folder.
     List,
     Folders,
+    /// Go to the file not viewed before the one shown, or after it (a
+    /// feature's code review).
+    PrevUnviewed,
+    NextUnviewed,
 }
 
 /// A line of the tree.
@@ -1611,21 +1619,23 @@ fn line_rects(line: &TreeLine, rect: Rect) -> (Rect, Rect, Option<Rect>) {
 }
 
 /// The tree's toolbar over its lines, in `tree`: its buttons at its
-/// right, those unfolding and folding everything, then apart from them
-/// one per way of listing the files.
-fn tree_tools(tree: Rect) -> Vec<(TreeTool, Rect)> {
+/// right, with `nav` first those going to the previous and the next file
+/// not viewed, then apart from them those unfolding and folding
+/// everything, then apart again one per way of listing the files.
+fn tree_tools(tree: Rect, nav: bool) -> Vec<(TreeTool, Rect)> {
     use TreeTool::*;
     let y = tree.loc.y + (REPOS_DETAIL_TITLE - ROW_BUTTON) / 2;
     let mut x = tree.loc.x + tree.size.w - HELP_PADDING;
     let mut tools = Vec::new();
-    for tool in [Folders, List, Collapse, Expand] {
+    let all = [Folders, List, Collapse, Expand, NextUnviewed, PrevUnviewed];
+    for tool in &all[..if nav { all.len() } else { 4 }] {
         x -= ROW_BUTTON;
         tools.push((
-            tool,
+            *tool,
             Rectangle::new((x, y).into(), (ROW_BUTTON, ROW_BUTTON).into()),
         ));
         x -= match tool {
-            List => REPOS_TOOL_GAP,
+            List | Expand => REPOS_TOOL_GAP,
             _ => REPOS_TAB_GAP,
         };
     }
@@ -2380,7 +2390,7 @@ fn parts(view: &ReposView, panel: Rect) -> Parts {
             tree_tools: if no_tree {
                 Vec::new()
             } else {
-                tree_tools(tree)
+                tree_tools(tree, view.tree_nav.is_some())
             },
             lines,
             tree_list,
@@ -4710,19 +4720,28 @@ impl Painter {
         let on = match tool {
             TreeTool::List => view.grouping == Grouping::List,
             TreeTool::Folders => view.grouping == Grouping::Folders,
-            TreeTool::Expand | TreeTool::Collapse => false,
+            _ => false,
         };
+        // With every file viewed there is nowhere to go.
+        let off = matches!(tool, TreeTool::PrevUnviewed | TreeTool::NextUnviewed)
+            && view.tree_nav == Some(false);
         let fill = if on {
             p.selected
-        } else if view.hover == Some(ReposHit::Tool(tool)) {
+        } else if !off && view.hover == Some(ReposHit::Tool(tool)) {
             mix(p.element, p.selected, 0.5)
         } else {
             p.element
         };
         c.rounded(x, y, w, h, r, p.border);
         c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, r - b, fill);
-        let color = if on { p.text } else { p.muted };
+        let color = match (on, off) {
+            (true, _) => p.text,
+            (_, true) => p.placeholder,
+            _ => p.muted,
+        };
         match tool {
+            TreeTool::PrevUnviewed => icon_sdf(c, rect, scale, color, |x, y| arrow(true, x, y, s)),
+            TreeTool::NextUnviewed => icon_sdf(c, rect, scale, color, |x, y| arrow(false, x, y, s)),
             TreeTool::Expand => {
                 icon_sdf(c, rect, scale, color, |x, y| fold_all_mark(true, x, y, s))
             }
@@ -5357,6 +5376,7 @@ fn frame_view(view: &ReposView) -> ReposView {
         grouping: view.grouping,
         diff_only: view.diff_only,
         diff_tree: view.diff_tree,
+        tree_nav: view.tree_nav,
         flat: view.flat,
         detail_share: view.detail_share,
         modes: view.modes.clone(),
@@ -5961,6 +5981,7 @@ mod tests {
             tree_note: None,
             diff_only: false,
             diff_tree: false,
+            tree_nav: None,
             flat: false,
         }
     }
@@ -6218,6 +6239,23 @@ mod tests {
             let indent = REPOS_INDENT + REPOS_LEVEL;
             assert_eq!(check.loc.x - repo_check.loc.x, indent);
             assert!(expander.is_some());
+            // A feature's code review leads with going to the files not
+            // viewed, a group of its own.
+            view.tree_nav = Some(true);
+            let l = repos_layout(&view, repos_panel_rect(size));
+            let tools: Vec<_> = l.tree_tools.iter().map(|(t, _)| *t).collect();
+            assert_eq!(
+                tools,
+                [PrevUnviewed, NextUnviewed, Expand, Collapse, List, Folders]
+            );
+            let rects: Vec<Rect> = l.tree_tools.iter().map(|(_, r)| *r).collect();
+            let gap = |k: usize| rects[k + 1].loc.x - (rects[k].loc.x + rects[k].size.w);
+            assert_eq!((gap(0), gap(1)), (REPOS_TAB_GAP, REPOS_TOOL_GAP));
+            for (tool, rect) in &l.tree_tools {
+                assert!(inside(l.tree, *rect), "{size:?}");
+                let at = rect.loc.to_f64() + Point::from((4.0, 4.0));
+                assert_eq!(repos_hit(&l, at), Some(ReposHit::Tool(*tool)));
+            }
         }
     }
 

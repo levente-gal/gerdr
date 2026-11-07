@@ -2417,6 +2417,39 @@ mod tests {
     }
 
     #[test]
+    fn the_lists_toolbar_goes_to_the_next_and_previous_file_not_viewed() {
+        use crate::chrome::TreeTool;
+        let mut wd = listed(&["src/a.rs", "src/b.rs", "top.rs"]);
+        let selected = |wd: &WorktreeDiff| {
+            wd.tree
+                .as_ref()
+                .unwrap()
+                .selected_file()
+                .map(|(_, p)| p.to_owned())
+        };
+        assert_eq!(wd.repos_view(POPUP_ENV).tree_nav, Some(true));
+        // From the list, which keeps the keyboard.
+        assert_eq!(wd.click(ReposHit::Line(2), POPUP_ENV), None);
+        assert_eq!(selected(&wd).as_deref(), Some("src/a.rs"));
+        let next = wd.click(ReposHit::Tool(TreeTool::NextUnviewed), POPUP_ENV);
+        assert_eq!(next, None);
+        wd.follow_diff(POPUP_ENV);
+        assert_eq!(selected(&wd).as_deref(), Some("src/b.rs"));
+        assert!(wd.tree.as_ref().unwrap().focused);
+        wd.click(ReposHit::Tool(TreeTool::PrevUnviewed), POPUP_ENV);
+        wd.follow_diff(POPUP_ENV);
+        assert_eq!(selected(&wd).as_deref(), Some("src/a.rs"));
+        // Round past the start, as Alt+Shift+Up goes.
+        let up = smithay::input::keyboard::ModifiersState {
+            shift: true,
+            ..alt()
+        };
+        press(&mut wd, up, Keysym::Up);
+        assert_eq!(selected(&wd).as_deref(), Some("top.rs"));
+        assert!(wd.tree.as_ref().unwrap().focused);
+    }
+
+    #[test]
     fn with_no_room_for_it_the_list_is_gone_and_the_diff_keeps_the_keys() {
         let mut wd = listed(&["src/a.rs", "top.rs"]);
         let narrow = Env {
