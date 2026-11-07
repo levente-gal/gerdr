@@ -73,6 +73,10 @@ How to use it:
 - **K7** A button shows its label only. Its key goes in the footer, its tooltip
   and F1, never on the button or in its text. Footer hints and menu rows may
   show keys.
+- **K8** A key comes as its layout's unshifted sym, and `typed` has what Shift
+  made of it: Shift+E is `sym == e`, `typed == E`, and `$` is `sym == 4`. Match
+  capitals and symbols on `typed` or on both forms, and send a test the key as
+  input does. `Keysym::E` alone on `sym` passes its test and never fires.
 
 ## O. Overlays, popups, panels
 

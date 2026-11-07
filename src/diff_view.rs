@@ -3126,7 +3126,10 @@ impl DiffView {
             }
             Keysym::c if plain && ctx.read_only => return Some(Some(Outcome::Notice(READ_ONLY))),
             Keysym::c if plain => self.comment_here(ctx),
-            Keysym::C if self.plain && mods.shift && !(mods.ctrl || mods.alt || mods.logo) => {
+            // Shift+letter comes as the letter's own sym: `typed` has the capital.
+            Keysym::c | Keysym::C
+                if self.plain && mods.shift && !(mods.ctrl || mods.alt || mods.logo) =>
+            {
                 if ctx.read_only {
                     return Some(Some(Outcome::Notice(READ_ONLY)));
                 }
@@ -3143,7 +3146,7 @@ impl DiffView {
                     return None;
                 }
             }
-            Keysym::E if mods.shift && !(mods.ctrl || mods.alt || mods.logo) => {
+            Keysym::e | Keysym::E if mods.shift && !(mods.ctrl || mods.alt || mods.logo) => {
                 if !self.edit_fix() {
                     return None;
                 }
