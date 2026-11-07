@@ -15,6 +15,7 @@ use std::{
 
 use crate::{
     Gerdr,
+    ai_work::SendKind,
     confirm::Then,
     feature::{
         self, Feature, Stage, Status,
@@ -351,11 +352,11 @@ impl Gerdr {
             self.launch_stage_agent(project, slug, STAGE, &[("comments", notes)]);
             return;
         };
-        let pane = (run.pane.clone()).filter(|p| self.pane_there(p));
-        let Some(pane) = pane.filter(|_| !run.held) else {
+        let alive = (run.pane.as_deref()).is_some_and(|p| self.pane_there(p));
+        if !alive || run.held {
             self.launch_stage_agent(project, slug, STAGE, &[("comments", notes)]);
             return;
-        };
+        }
         let data = store::dir(None, project, slug);
         let back = run.sent_back + 1;
         let file = (data.join("prompts")).join(format!("plan-review-{}-back-{back}.md", run.n));
@@ -368,7 +369,9 @@ impl Gerdr {
             .and_then(|()| {
                 prompts::render_builtin("plan-review-back", &values).map_err(|e| e.to_string())
             })
-            .and_then(|line| self.tell_agent_pane(&pane, line.trim()));
+            .and_then(|line| {
+                self.tell_stage_agent(project, slug, STAGE, SendKind::PlanReviewBack, line.trim())
+            });
         if let Err(why) = sent {
             tracing::warn!("asking the reviewer of {project}/{slug}: {why}");
             return self.show_error(format!("Couldn't reach the reviewer: {why}"));
