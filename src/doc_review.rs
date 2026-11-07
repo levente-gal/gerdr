@@ -261,7 +261,7 @@ pub fn fix_plan_state(feature: Option<&Feature>, now: u64) -> String {
             Some(round) => {
                 let mut said = vec![label(round), round.made()];
                 let ago = |at| crate::projects::ago(now, at);
-                said.extend(round.ended.map(|at| format!("over {}", ago(at))));
+                said.extend(round.ended.map(|at| format!("finished {}", ago(at))));
                 said.join(" \u{b7} ")
             }
             None => "no fix plan open".into(),
@@ -656,7 +656,7 @@ mod tests {
         f.last_fix_round.as_mut().unwrap().ended = Some(880);
         assert_eq!(
             fix_plan_state(Some(&f), 1_000),
-            "Review 1 \u{b7} 2 of 2 made \u{b7} over 2m ago"
+            "Review 1 \u{b7} 2 of 2 made \u{b7} finished 2m ago"
         );
         assert_eq!(fix_plan_locked(Some(&f)), Some(FIXES_MADE));
     }

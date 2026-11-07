@@ -10181,7 +10181,7 @@ fn last_round_card(
     let mut said = vec![round.what.clone(), round.made()];
     let ago = |at| projects::ago(now, at);
     said.extend(round.ready.map(|at| format!("written {}", ago(at))));
-    said.extend(round.ended.map(|at| format!("over {}", ago(at))));
+    said.extend(round.ended.map(|at| format!("finished {}", ago(at))));
     PageSection::File {
         name: format!("Last fix plan: {}", round_label(feature, round)),
         state: line(said.join(" \u{b7} "), CheckTone::Note),
@@ -11085,7 +11085,7 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 5] = [
             ),
             (
                 "Ctrl+Enter",
-                "approve a brief or plan ready for review; make the fixes of a fix plan ready for review, or send them again; at AI review, send the findings to fix, with no plan unless you commented",
+                "approve a brief or plan ready for review; make the fixes of a fix plan ready for review, or again once its agent stopped with fixes left; at AI review, send the findings to fix, with no plan unless you commented; at Verify, send its failures with no plan (Ctrl+Shift+Enter plans them first)",
             ),
             (
                 "Ctrl+Shift+O",
@@ -14868,7 +14868,7 @@ pub(crate) mod tests {
         assert_eq!(name, format!("Last fix plan: Code review {}", round.n));
         assert_eq!(
             state.text,
-            "review comments \u{b7} 2 of 2 made \u{b7} written 16m ago \u{b7} over 1m ago"
+            "review comments \u{b7} 2 of 2 made \u{b7} written 16m ago \u{b7} finished 1m ago"
         );
         // One kept from before it was timed says what it knows.
         round.ended = None;
