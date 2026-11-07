@@ -965,10 +965,13 @@ fn start_into(
     job.host.make_dir(job.dir)?;
     let containers = running_containers(job.host, &engines, job.stop)?;
     let stacks = sandbox::stacks_under(&containers, job.roots);
-    run.not_copied = sandbox::loose(&containers)
-        .iter()
-        .map(|c| c.name.clone())
-        .collect();
+    run.not_copied = Vec::new();
+    for shown in sandbox::loose(&containers).iter().map(|c| c.shown()) {
+        // A pod's containers go by its name, once.
+        if !run.not_copied.contains(&shown) {
+            run.not_copied.push(shown);
+        }
+    }
     run.outward = outward_of(job);
     run.out_of_reach = out_of_reach_of(job, &containers);
     let mut taken: std::collections::BTreeSet<u16> = job.taken.iter().copied().collect();
@@ -1134,10 +1137,18 @@ pub fn running_containers(
         }
         let mut args = vec!["inspect"];
         args.extend(&ids);
-        all.extend(sandbox::containers_of(
-            &tool(host, engine, &args, stop)?,
-            engine,
-        )?);
+        let mut containers = sandbox::containers_of(&tool(host, engine, &args, stop)?, engine)?;
+        if containers.iter().any(|c| c.pod.is_some()) {
+            let format = ["pod", "ps", "--no-trunc", "--format", "{{.ID}} {{.Name}}"];
+            match tool(host, engine, &format, stop) {
+                Ok(pods) => sandbox::name_pods(&mut containers, &pods),
+                Err(why) => {
+                    tracing::warn!("sandbox: couldn't read pod names: {why}");
+                    sandbox::name_pods(&mut containers, "");
+                }
+            }
+        }
+        all.extend(containers);
     }
     Ok(all)
 }
