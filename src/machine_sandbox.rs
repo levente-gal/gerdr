@@ -67,7 +67,7 @@ const NOT_FOUND: i32 = 127;
 ///
 /// bash because of `/dev/tcp`: nothing else that can connect comes with every
 /// system. It only runs to its `exec`: `$$` is then the `cat` passing replies.
-fn relay_script(port: u16) -> String {
+pub(crate) fn relay_script(port: u16) -> String {
     format!(
         "exec 3<>/dev/tcp/localhost/{port} || exit 7\n\
          {{ cat >&3; kill $$; }} <&0 >/dev/null 2>&1 &\n\
@@ -353,7 +353,7 @@ impl AfarJob {
 
 /// `port` here, listening for connections to pass on. Dropped, it closes them all.
 #[derive(Debug)]
-struct Relay {
+pub(crate) struct Relay {
     stop: Arc<AtomicBool>,
 }
 
@@ -474,7 +474,7 @@ impl SandboxRemoval {
 
 /// What a relay of `port` found that says the whole thing can't work.
 #[derive(Clone, Debug, Default)]
-struct Missing(Arc<AtomicBool>);
+pub(crate) struct Missing(pub(crate) Arc<AtomicBool>);
 
 /// Start passing connections to `port` here on, each with the command `command`
 /// makes. An error says the port can't be had.
@@ -483,7 +483,16 @@ fn start_relay(
     command: impl Fn() -> Command + Send + 'static,
     missing: Missing,
 ) -> io::Result<Relay> {
-    let listeners = listen_on(port)?;
+    start_relay_on(listen_on(port)?, port, command, missing)
+}
+
+/// `start_relay` on `listeners`, which listen on `port`.
+pub(crate) fn start_relay_on(
+    listeners: Vec<TcpListener>,
+    port: u16,
+    command: impl Fn() -> Command + Send + 'static,
+    missing: Missing,
+) -> io::Result<Relay> {
     let stop = Arc::new(AtomicBool::new(false));
     let thread_stop = Arc::clone(&stop);
     std::thread::Builder::new()
@@ -662,7 +671,7 @@ pub struct SandboxSeen {
 
 /// What's said of `port` being taken: it goes on the badge too, for what it takes
 /// is for the user to do.
-fn taken_text(title: &str, port: u16) -> String {
+pub(crate) fn taken_text(title: &str, port: u16) -> String {
     format!(
         "Port {port} is taken here, so the sandbox of \u{201c}{title}\u{201d} can't be reached at it: stop what holds it"
     )
@@ -1192,19 +1201,28 @@ impl Gerdr {
 
     /// Open feature `slug`'s sandbox's app, which runs on machine `id`:
     /// its ports open here first, and a page opens on one that is really its own.
-    pub(crate) fn open_seen_sandbox_app(&mut self, project: &str, slug: &str, id: &str) {
+    pub(crate) fn open_seen_sandbox_app(
+        &mut self,
+        project: &str,
+        slug: &str,
+        id: &str,
+        page: usize,
+    ) {
         let name = self.machine_name(id);
         let Some(feature) = self.feature(project, slug) else {
             return;
         };
-        let Some(ports) = Self::seen_sandbox(feature).map(|(_, run)| run.listening()) else {
+        let Some(run) = Self::seen_sandbox(feature).map(|(_, run)| run.clone()) else {
             return self.show_warning(format!("The sandbox isn't running on {name}"));
         };
         if self.work_of(id).is_none() {
             return self.show_warning(format!("Connect {name} to open its sandbox's app"));
         }
-        let Some(url) = self.sandbox_url(project, &ports) else {
-            return self.show_warning("Nothing listens in the sandbox yet".into());
+        let ports = run.listening();
+        let set = self.set_sandbox_url(project);
+        let Some(url) = crate::feature_sandbox::sandbox_url(&run, page, &ports, set.as_deref())
+        else {
+            return self.show_warning(crate::feature_sandbox::nothing_listens(&run, page));
         };
         let said = self.follow_sandbox(project, slug);
         let key = (project.to_owned(), slug.to_owned());

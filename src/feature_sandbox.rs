@@ -36,6 +36,7 @@ use crate::{
     feature::{
         self, Feature, PerProject, Stage,
         sandbox::Engine,
+        sandbox_pages,
         sandbox_run::{self, Host, SandboxRun},
         store,
     },
@@ -182,6 +183,43 @@ fn has_commands(lists: &PerProject<BTreeMap<String, Vec<String>>>) -> bool {
         .any(|command| !command.trim().is_empty())
 }
 
+/// Where page `page` of `run`'s app is, with `ports` listening in it: as its
+/// record says, once that port listens, else as `set` says (the project's
+/// `sandbox_url`, for a sandbox started before pages were kept), else what
+/// looks most like an app.
+pub(crate) fn sandbox_url(
+    run: &SandboxRun,
+    page: usize,
+    ports: &[u16],
+    set: Option<&str>,
+) -> Option<String> {
+    if let (None, Some(set)) = (run.pages.get(page), set) {
+        return Some(set.to_owned());
+    }
+    match run.pages.get(page) {
+        // A port no one listens on yet would show the browser's error page.
+        Some(page) => match local_port(&page.url) {
+            Some(port) if !ports.contains(&port) => None,
+            _ => Some(page.url.clone()),
+        },
+        None => sandbox_run::app_port(ports).map(|port| format!("http://localhost:{port}")),
+    }
+}
+
+/// What the user hears when page `page` of `run`'s app has nothing listening.
+pub(crate) fn nothing_listens(run: &SandboxRun, page: usize) -> String {
+    match run.pages.get(page) {
+        Some(page) => match local_port(&page.url) {
+            Some(port) => format!(
+                "Nothing listens on port {port} in the sandbox yet, for {}",
+                page.name
+            ),
+            None => format!("Nothing listens in the sandbox yet, for {}", page.name),
+        },
+        None => "Nothing listens in the sandbox yet".to_owned(),
+    }
+}
+
 /// Whether `command` opens a page on this machine's `localhost`, which means
 /// the sandbox's own inside it. `*.localhost` isn't: T3 Code's pages are named
 /// that way, and its server runs outside.
@@ -322,6 +360,15 @@ impl Gerdr {
         }
         let key = (project.to_owned(), slug.to_owned());
         let prepares = self.projects.workflows(&feature, |w| w.prepare.clone());
+        let runs = self.projects.workflows(&feature, |w| w.run.clone());
+        let (set_pages, set_url) = (self.projects.project(project))
+            .map(|p| {
+                (
+                    p.workflow.sandbox_pages.clone(),
+                    p.workflow.sandbox_url.clone(),
+                )
+            })
+            .unwrap_or_default();
         let venv = self.feature_venv(project, slug);
         let mut env: BTreeMap<String, String> = BTreeMap::new();
         let envs = self.projects.workflows(&feature, |w| w.sandbox_env.clone());
@@ -329,6 +376,10 @@ impl Gerdr {
             env.extend(link.clone());
         }
         env.extend(envs.home.clone());
+        let ip = crate::sandbox_lan::lan_ip();
+        for value in env.values_mut() {
+            *value = crate::sandbox_lan::with_lan_ip(value, ip);
+        }
         // A port is only taken on the machine that holds it.
         let taken: Vec<u16> = (self.features.all.values().flatten())
             .filter(|f| !(f.project == project && f.slug == slug))
@@ -396,8 +447,22 @@ impl Gerdr {
                     what: format!("Sandbox of \u{201c}{title}\u{201d}: {what}"),
                 });
             };
+            // Read from the worktrees here, which a machine running it has a copy of.
+            let pages = {
+                let lines: Vec<SandboxLine> = (lines_of(&feature, &runs, false).into_iter())
+                    .filter(|l| l.on)
+                    .collect();
+                let ran: Vec<sandbox_pages::Ran> = (lines.iter())
+                    .map(|l| sandbox_pages::Ran {
+                        dir: &l.dir,
+                        command: &l.command,
+                    })
+                    .collect();
+                sandbox_pages::pages(&set_pages, set_url.as_deref(), &ran)
+            };
             if let Some(there) = there {
-                let (run, missing) = there.run(&stop, &mut progress);
+                let (mut run, missing) = there.run(&stop, &mut progress);
+                run.pages = pages;
                 return Done::Sandbox {
                     stopped: stop.load(Ordering::Relaxed),
                     project,
@@ -433,7 +498,8 @@ impl Gerdr {
                 taken: &taken,
                 stop: &stop,
             };
-            let run = sandbox_run::start(&job, &mut progress);
+            let mut run = sandbox_run::start(&job, &mut progress);
+            run.pages = pages;
             Done::Sandbox {
                 stopped: stop.load(Ordering::Relaxed),
                 project,
@@ -575,6 +641,10 @@ impl Gerdr {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         env.extend(envs.home.iter().map(|(k, v)| (k.clone(), v.clone())));
+        let ip = crate::sandbox_lan::lan_ip();
+        for (_, value) in &mut env {
+            *value = crate::sandbox_lan::with_lan_ip(value, ip);
+        }
         let lines: Vec<_> = lines_of(feature, &runs, false)
             .into_iter()
             .filter(|line| line.on)
@@ -630,28 +700,36 @@ impl Gerdr {
         }
     }
 
-    /// Open the sandbox's app, in the feature's workspace.
-    pub(crate) fn open_sandbox_app(&mut self, project: &str, slug: &str) {
+    /// Open page `page` of the sandbox's app (see `SandboxRun::pages`), in the
+    /// feature's workspace. `None` opens the one after the last opened.
+    pub(crate) fn open_sandbox_app(&mut self, project: &str, slug: &str, page: Option<usize>) {
         let Some(feature) = self.feature(project, slug) else {
             return;
         };
-        if let Some(id) = (feature.sandbox.as_ref()).and_then(|run| run.machine.clone()) {
-            return self.open_seen_sandbox_app(project, slug, &id);
+        let key = (project.to_owned(), slug.to_owned());
+        let count = (feature.sandbox.as_ref()).map_or(0, |run| run.pages.len());
+        let page = page.unwrap_or_else(|| {
+            let last = self.features.build.sandbox_pages.get(&key).copied();
+            last.map_or(1, |last| last + 1) % count.max(1)
+        });
+        let run = feature.sandbox.clone();
+        self.features.build.sandbox_pages.insert(key, page);
+        if let Some(id) = (run.as_ref()).and_then(|run| run.machine.clone()) {
+            return self.open_seen_sandbox_app(project, slug, &id, page);
         }
-        let Some(run) = feature.sandbox.as_ref().filter(|r| r.alive()) else {
+        let Some(run) = run.filter(SandboxRun::alive) else {
             return self.show_warning("The sandbox isn't running".into());
         };
         let ports = run.listening();
-        match self.sandbox_url(project, &ports) {
+        match sandbox_url(&run, page, &ports, self.set_sandbox_url(project).as_deref()) {
             Some(url) => self.open_feature_page(project, slug, url),
-            None => self.show_warning("Nothing listens in the sandbox yet".into()),
+            None => self.show_warning(nothing_listens(&run, page)),
         }
     }
 
-    /// Where the app of a sandbox of `project` is, with `ports` listening in it.
-    pub(crate) fn sandbox_url(&self, project: &str, ports: &[u16]) -> Option<String> {
-        let set = (self.projects.project(project)).and_then(|p| p.workflow.sandbox_url.clone());
-        set.or_else(|| sandbox_run::app_port(ports).map(|port| format!("http://localhost:{port}")))
+    /// The page the settings of `project` name for its sandbox's app.
+    pub(crate) fn set_sandbox_url(&self, project: &str) -> Option<String> {
+        (self.projects.project(project)).and_then(|p| p.workflow.sandbox_url.clone())
     }
 
     fn ask_sandbox(

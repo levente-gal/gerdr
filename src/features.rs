@@ -31,7 +31,8 @@
 //! Ctrl+Shift+U sets its worktrees up (Build and Verify: copies what they lack),
 //! Ctrl+Shift+I shows what the setup runs and printed,
 //! on Manual test Ctrl+Shift+T asks which commands its sandbox runs and starts
-//! it, or stops it (see `feature_sandbox`), Ctrl+Shift+Y opens its app, Ctrl+Shift+G restarts it and
+//! it, or stops it (see `feature_sandbox`), Ctrl+Shift+Y opens its app, Alt+Y
+//! its next page (see `feature::sandbox_pages`), Ctrl+Shift+G restarts it and
 //! Ctrl+Shift+X resets its data or removes it; a feature another machine writes
 //! has only its app, and Ctrl+Shift+T shows its terminals (see `machine_sandbox`),
 //! Ctrl+C copies its path, Ctrl+N starts a new one, Ctrl+Shift+L unfolds the
@@ -1434,8 +1435,15 @@ pub enum PanelOutcome {
     StopChecks,
     /// Start the sandbox.
     StartSandbox,
-    /// Open the sandbox's app.
+    /// Open the sandbox's app: the first of its pages.
     OpenSandbox,
+    /// Open this page of the sandbox's app, by its index in
+    /// `SandboxRun::pages`.
+    OpenSandboxPage(usize),
+    /// Open the page of the sandbox's app after the one last opened.
+    NextSandboxPage,
+    /// Open the sandbox to the network, for a phone, asking; or close it.
+    SandboxLan,
     /// Show the terminals of a sandbox on another machine.
     ShowSandbox,
     /// Start the sandbox again on the same data.
@@ -1605,6 +1613,9 @@ impl PanelOutcome {
             Self::ShowAgent(_)
                 | Self::ShowCheck(_)
                 | Self::OpenSandbox
+                | Self::OpenSandboxPage(_)
+                | Self::NextSandboxPage
+                | Self::SandboxLan
                 | Self::ShowSandbox
                 | Self::OpenDoc(_)
                 | Self::ReviewFixPlan
@@ -1815,6 +1826,8 @@ pub struct RowCtx {
     /// The comments the user left in its diff, as last read, or as its open
     /// diff has them: with any, AI review's fixes need a plan.
     pub comments: usize,
+    /// Its sandbox is open to the network (see `sandbox_lan`).
+    pub lan_open: bool,
 }
 
 impl RowCtx {
@@ -3244,6 +3257,8 @@ fn action_hint(action: &PanelOutcome) -> &'static str {
         PanelOutcome::SetupLog => "show setup log",
         PanelOutcome::StartSandbox => "start sandbox\u{2026}",
         PanelOutcome::OpenSandbox => "open app",
+        PanelOutcome::OpenSandboxPage(_) | PanelOutcome::NextSandboxPage => "open page",
+        PanelOutcome::SandboxLan => "network",
         PanelOutcome::ShowSandbox => "show terminals",
         PanelOutcome::RestartSandbox => "restart sandbox",
         PanelOutcome::ResetSandbox => "reset data\u{2026}",
@@ -4503,6 +4518,24 @@ impl FeaturePanel {
             {
                 return Some(PanelOutcome::OpenSandbox);
             }
+            Keysym::y | Keysym::Y
+                if mods.alt
+                    && !(mods.ctrl || mods.shift || mods.logo)
+                    && offers_sandbox(feature, stage)
+                    && sandbox_alive(feature)
+                    && sandbox_pages(feature).len() > 1 =>
+            {
+                return Some(PanelOutcome::NextSandboxPage);
+            }
+            Keysym::n | Keysym::N
+                if ctrl
+                    && mods.shift
+                    && offers_sandbox(feature, stage)
+                    && sandbox_alive(feature)
+                    && !sandbox_elsewhere(feature) =>
+            {
+                return Some(PanelOutcome::SandboxLan);
+            }
             Keysym::g | Keysym::G
                 if ctrl
                     && mods.shift
@@ -4997,6 +5030,20 @@ fn writers_page_actions(
                 button("Open app", ButtonStyle::Plain),
                 PanelOutcome::OpenSandbox,
             ));
+            for (i, page) in sandbox_pages(feature).iter().enumerate().skip(1) {
+                out.push((
+                    button(&page.name, ButtonStyle::Quiet),
+                    PanelOutcome::OpenSandboxPage(i),
+                ));
+            }
+            // A phone reaches only what runs on this machine.
+            if !sandbox_elsewhere(feature) {
+                let label = match ctx.lan_open {
+                    true => "Close to network",
+                    false => "Open to network\u{2026}",
+                };
+                out.push((button(label, ButtonStyle::Quiet), PanelOutcome::SandboxLan));
+            }
             // Here they are in a tab of their own already.
             if sandbox_elsewhere(feature) {
                 out.push((
@@ -5109,6 +5156,11 @@ fn offers_sandbox(feature: &Feature, stage: Stage) -> bool {
 /// Whether `feature`'s sandbox is on another machine, as far as its terminals go.
 fn sandbox_elsewhere(feature: &Feature) -> bool {
     feature.writer.is_some() || feature.sandbox.as_ref().is_some_and(|run| run.machine.is_some())
+}
+
+/// The pages of `feature`'s sandbox's app, the first the one Open app opens.
+fn sandbox_pages(feature: &Feature) -> &[feature::sandbox_pages::Page] {
+    feature.sandbox.as_ref().map_or(&[], |run| &run.pages)
 }
 
 /// Whether `feature`'s sandbox runs.
@@ -6021,6 +6073,8 @@ impl Gerdr {
             setting_up: self.setting_up(&feature.project, &feature.slug),
             feature_busy: self.feature_busy(&feature.project, &feature.slug),
             comments,
+            lan_open: (self.features.build.sandbox_lan)
+                .contains_key(&(feature.project.clone(), feature.slug.clone())),
         }
     }
 
@@ -7797,7 +7851,10 @@ impl Gerdr {
             PanelOutcome::SetUp => self.set_up_again(&project, &slug),
             PanelOutcome::SetupLog => self.open_setup_log(&project, &slug),
             PanelOutcome::StartSandbox => self.ask_start_sandbox(&project, &slug),
-            PanelOutcome::OpenSandbox => self.open_sandbox_app(&project, &slug),
+            PanelOutcome::OpenSandbox => self.open_sandbox_app(&project, &slug, Some(0)),
+            PanelOutcome::OpenSandboxPage(i) => self.open_sandbox_app(&project, &slug, Some(i)),
+            PanelOutcome::NextSandboxPage => self.open_sandbox_app(&project, &slug, None),
+            PanelOutcome::SandboxLan => self.ask_sandbox_lan(&project, &slug),
             PanelOutcome::ShowSandbox => self.show_sandbox_terminals(&project, &slug),
             PanelOutcome::RestartSandbox => {
                 let what = crate::feature_sandbox::StopFor::Restart;
@@ -9584,6 +9641,7 @@ impl Gerdr {
                 .and_then(|s| s.machine.as_deref())
                 .map(|id| self.machine_name(id)),
             sandbox_seen: self.sandbox_seen(feature),
+            sandbox_lan: self.sandbox_lan(&feature.project, &feature.slug),
             manual: manual_counts.map(crate::manual_test::counts_text),
             criteria: self.criterion_rows(feature),
             manual_gate: manual_counts.map(manual_gate),
@@ -10123,6 +10181,8 @@ struct PanelState<'a> {
     setup_on: Option<String>,
     /// How its sandbox stands here, when another machine has it.
     sandbox_seen: Option<crate::machine_sandbox::SandboxSeen>,
+    /// How its sandbox stands on the network, when open to it.
+    sandbox_lan: Option<crate::sandbox_lan::LanSeen>,
 }
 
 /// What the button picking a stage's model says.
@@ -10978,6 +11038,18 @@ fn sandbox_sections(feature: &Feature, state: &PanelState) -> Vec<PageSection> {
         if let Some(seen) = seen.filter(|seen| !seen.taken.is_empty()) {
             let text = format!("taken here, so not open: {}", ports_text(&seen.taken));
             out.push(line(text, CheckTone::Blocker));
+        }
+        // Anything on the network reaches it: said before the rest.
+        if let Some(lan) = &state.sandbox_lan {
+            let text = match lan.open.is_empty() {
+                true => format!("open to your network at {}, nothing listening yet", lan.ip),
+                false => format!("open to your network at {}: {}", lan.ip, ports_text(&lan.open)),
+            };
+            out.push(line(text, CheckTone::Blocker));
+            if !lan.taken.is_empty() {
+                let text = format!("taken here, so not on the network: {}", ports_text(&lan.taken));
+                out.push(line(text, CheckTone::Blocker));
+            }
         }
         let ports = run.listening();
         let here = seen.map_or(&[][..], |seen| seen.here.as_slice());
@@ -11966,6 +12038,14 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 6] = [
                 "Manual test: start or stop the sandbox, or show its terminals if on another machine (Ctrl+Shift+Q stops it there)",
             ),
             ("Ctrl+Shift+Y", "Manual test: open the sandbox's app"),
+            (
+                "Alt+Y",
+                "Manual test: open the sandbox's next page, as the buttons after Open app do",
+            ),
+            (
+                "Ctrl+Shift+N",
+                "Manual test: open the sandbox to your network, for a phone, or close it",
+            ),
             ("Ctrl+Shift+G", "Manual test: restart the sandbox"),
             (
                 "Ctrl+Shift+X",
@@ -12454,8 +12534,17 @@ fn writers_tab_hints(
                     hints.push(hint("Ctrl+Shift+T", "stop"));
                 } else if sandbox_alive(feature) {
                     hints.push(hint("Ctrl+Shift+Y", "open app"));
+                    if sandbox_pages(feature).len() > 1 {
+                        hints.push(hint("Alt+Y", "next page"));
+                    }
                     if sandbox_elsewhere(feature) {
                         hints.push(hint("Ctrl+Shift+T", "show terminals"));
+                    } else {
+                        let lan = match ctx.lan_open {
+                            true => "close to network",
+                            false => "open to network\u{2026}",
+                        };
+                        hints.push(hint("Ctrl+Shift+N", lan));
                     }
                     hints.push(hint("Ctrl+Shift+G", "restart"));
                     hints.push(hint("Ctrl+Shift+X", "reset data\u{2026}"));
@@ -18705,6 +18794,7 @@ pub(crate) mod tests {
                     o,
                     PanelOutcome::StartSandbox
                         | PanelOutcome::OpenSandbox
+                        | PanelOutcome::OpenSandboxPage(_)
                         | PanelOutcome::RestartSandbox
                         | PanelOutcome::ResetSandbox
                         | PanelOutcome::StopSandbox
@@ -18766,6 +18856,61 @@ pub(crate) mod tests {
         );
         f.status = Status::Abandoned;
         assert!(sandbox_labels(&f, Stage::ManualTest, none).is_empty());
+    }
+
+    #[test]
+    fn each_page_of_the_sandbox_has_its_button_and_alt_y_goes_on_through_them() {
+        use feature::sandbox_pages::Page;
+        let mut f = at_manual_test();
+        let page = |name: &str, url: &str| Page {
+            name: name.into(),
+            url: url.into(),
+        };
+        f.sandbox = Some(feature::sandbox_run::SandboxRun {
+            pages: vec![page("Web app", "http://localhost:9001/")],
+            ..running_run()
+        });
+        let mut panel = FeaturePanel {
+            slug: f.slug.clone(),
+            ..FeaturePanel::default()
+        };
+        let mods = ModifiersState {
+            alt: true,
+            ..ModifiersState::default()
+        };
+        let mut alt_y =
+            |f: &Feature| panel.key(&mods, Keysym::y, f, &[], RowCtx::default(), &[], &[], &[]);
+        // One page: Open app is all, and Alt+Y has nothing more to open.
+        let none = RowCtx::default();
+        assert_eq!(
+            sandbox_labels(&f, Stage::ManualTest, none),
+            ["Open app", "Restart", "Reset data\u{2026}", "Stop\u{2026}"]
+        );
+        assert_eq!(alt_y(&f), None);
+        if let Some(run) = f.sandbox.as_mut() {
+            run.pages
+                .push(page("Django admin", "http://localhost:9001/admin/"));
+            run.pages.push(page("Expo web", "http://localhost:8081/"));
+        }
+        assert_eq!(
+            sandbox_labels(&f, Stage::ManualTest, none),
+            [
+                "Open app",
+                "Django admin",
+                "Expo web",
+                "Restart",
+                "Reset data\u{2026}",
+                "Stop\u{2026}"
+            ]
+        );
+        let offered = page_outcomes(&f, Stage::ManualTest);
+        assert!(
+            offered.contains(&PanelOutcome::OpenSandboxPage(2)),
+            "{offered:?}"
+        );
+        assert_eq!(alt_y(&f), Some(PanelOutcome::NextSandboxPage));
+        assert!(PanelOutcome::NextSandboxPage.reads_only());
+        assert!(PanelOutcome::OpenSandboxPage(1).reads_only());
     }
 
     #[test]

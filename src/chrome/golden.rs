@@ -4720,8 +4720,32 @@ fn feature_tab_manual_test(note: bool) -> super::FeatureTabView {
     view
 }
 
+/// Manual test's page with its sandbox running, its app with three pages:
+/// a button for each past the first, all at the title.
+fn feature_tab_manual_pages() -> super::FeatureTabView {
+    use super::{ButtonStyle, PageButton};
+    let mut view = feature_tab_manual_test(false);
+    let button = |label: &str, style| PageButton {
+        label: label.into(),
+        style,
+    };
+    view.page.buttons[2] = button("Open app", ButtonStyle::Plain);
+    for (label, style) in [
+        ("Django admin", ButtonStyle::Quiet),
+        ("Expo web", ButtonStyle::Quiet),
+        ("Open to network\u{2026}", ButtonStyle::Quiet),
+        ("Restart", ButtonStyle::Quiet),
+        ("Reset data\u{2026}", ButtonStyle::Quiet),
+        ("Stop\u{2026}", ButtonStyle::Quiet),
+        ("Commands\u{2026}", ButtonStyle::Quiet),
+    ] {
+        view.page.buttons.push(button(label, style));
+    }
+    view
+}
+
 /// The feature tab's fixtures, by name.
-fn feature_tabs() -> [(&'static str, super::FeatureTabView); 39] {
+fn feature_tabs() -> [(&'static str, super::FeatureTabView); 40] {
     [
         ("tab_build", feature_tab()),
         ("tab_verify_fixes", feature_tab_verify_fixes()),
@@ -4770,12 +4794,13 @@ fn feature_tabs() -> [(&'static str, super::FeatureTabView); 39] {
         ("tab_plan_long", feature_tab_plan_long()),
         ("tab_manual_test", feature_tab_manual_test(false)),
         ("tab_manual_note", feature_tab_manual_test(true)),
+        ("tab_manual_pages", feature_tab_manual_pages()),
         ("tab_review_rounds", feature_tab_review_rounds()),
     ]
 }
 
 /// Each fixture at the width it shows best at, and Build at all three.
-const TAB_SURFACES: [(&str, i32); 50] = [
+const TAB_SURFACES: [(&str, i32); 51] = [
     ("tab_build", 860),
     ("tab_build", 1180),
     ("tab_build", 1920),
@@ -4826,9 +4851,10 @@ const TAB_SURFACES: [(&str, i32); 50] = [
     ("tab_review_page", 1180),
     ("tab_open_round", 1180),
     ("tab_open_round", 860),
+    ("tab_manual_pages", 860),
 ];
 
-const FEATURE_TAB: [&str; 50] = [
+const FEATURE_TAB: [&str; 51] = [
     "tab_build_860",
     "tab_build_1180",
     "tab_build_1920",
@@ -4879,10 +4905,11 @@ const FEATURE_TAB: [&str; 50] = [
     "tab_review_page_1180",
     "tab_open_round_1180",
     "tab_open_round_860",
+    "tab_manual_pages_860",
 ];
 
 /// The recorded hashes of `FEATURE_TAB`, per case in `CASES`.
-const GOLDEN_FEATURE_TAB: [[u64; 50]; 4] = [
+const GOLDEN_FEATURE_TAB: [[u64; 51]; 4] = [
     // Dark at 1
     [
         0xf9675552d233b10a, // tab_build_860
@@ -4935,6 +4962,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 50]; 4] = [
         0x991d1848f7033107, // tab_review_page_1180
         0xc4b722d8b35c09b2, // tab_open_round_1180
         0xa55646a352f29557, // tab_open_round_860
+        0x30ad567b0a45d46a, // tab_manual_pages_860
     ],
     // Dark at 2
     [
@@ -4988,6 +5016,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 50]; 4] = [
         0xa37c484a9e95f3ca, // tab_review_page_1180
         0x2cd07330c04ac653, // tab_open_round_1180
         0x10c9f9ce73220117, // tab_open_round_860
+        0x49b4d1096fa816ea, // tab_manual_pages_860
     ],
     // Light at 1
     [
@@ -5041,6 +5070,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 50]; 4] = [
         0xc80d83cdbecf59b3, // tab_review_page_1180
         0xbd227132ee696c72, // tab_open_round_1180
         0x31a745f74d2e8e52, // tab_open_round_860
+        0x8681b353f28beb8a, // tab_manual_pages_860
     ],
     // Light at 2
     [
@@ -5094,6 +5124,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 50]; 4] = [
         0xb7f9bee96811fb6a, // tab_review_page_1180
         0x752ec2845bdeb8a4, // tab_open_round_1180
         0xd75e42f004429c32, // tab_open_round_860
+        0x474ce52b74bbeaf7, // tab_manual_pages_860
     ],
 ];
 

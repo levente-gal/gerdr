@@ -372,6 +372,11 @@ pub struct Workflow {
     /// tell (see `sandbox_run::app_port`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox_url: Option<String>,
+    /// The sandbox's pages, each a button on Manual test's page, the first
+    /// the one Open app opens; over `sandbox_url` and what the commands tell
+    /// (see `feature::sandbox_pages`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sandbox_pages: Vec<crate::feature::sandbox_pages::Page>,
     /// Let AI review run with the same agent as Build; by default gerdr
     /// refuses, as a model reviewing its own code misses what it missed.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -392,6 +397,7 @@ impl Workflow {
             && self.prepare.is_empty()
             && self.sandbox_env.is_empty()
             && self.sandbox_url.is_none()
+            && self.sandbox_pages.is_empty()
             && !self.allow_same_reviewer
     }
 }
