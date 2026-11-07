@@ -314,6 +314,12 @@ const ACTIONS: &[(&str, Action, &str, &str)] = &[
     ("tasks", Action::Tasks, "Open background tasks", "b"),
     ("features", Action::Features, "Open features", "Shift+F"),
     ("ai-stats", Action::AiStats, "Open the AI work stats", "u"),
+    (
+        "criteria",
+        Action::Criteria,
+        "Try the criteria over the sandbox's app",
+        "Shift+C",
+    ),
     // tmux's copy-mode.
     (
         "scrollback",
@@ -427,6 +433,7 @@ const HELP_LINES: &[(&str, &[&str])] = &[
     ("Open background tasks", &["tasks"]),
     ("Open features, or start one", &["features"]),
     ("Open the AI work stats", &["ai-stats"]),
+    ("Try the criteria over the sandbox's app", &["criteria"]),
     ("Select and copy the scrollback", &["scrollback"]),
     ("Reload the project files", &["reload-projects"]),
     ("Quit…", &["quit"]),
@@ -1230,6 +1237,7 @@ mod tests {
                 "B: Open background tasks",
                 "Shift+F: Open features, or start one",
                 "U: Open the AI work stats",
+                "Shift+C: Try the criteria over the sandbox's app",
                 "[: Select and copy the scrollback",
                 "Alt+R: Reload the project files",
                 "Shift+Q: Quit…",
@@ -1257,7 +1265,10 @@ mod tests {
             keymap.action(&mods(false, true), Keysym::ISO_Left_Tab),
             Some(Action::CyclePane(-1))
         );
-        assert_eq!(keymap.action(&mods(false, true), Keysym::c), None);
+        assert_eq!(
+            keymap.action(&mods(false, true), Keysym::c),
+            Some(Action::Criteria)
+        );
         assert_eq!(
             keymap.action(&mods(false, false), Keysym::u),
             Some(Action::AiStats)

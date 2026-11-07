@@ -6,7 +6,8 @@
 // each pane's tab is whenever it changes, whether it can go back or
 // forward, and when it closes, over the native messaging host; it can send
 // a pane's tab to another page (in a single-page app by the app's own
-// router, see `goInApp`), back, forward, or load it again, keep T3
+// router, see `goInApp`), back, forward, or load it again, send back a
+// screenshot of it, keep T3
 // Code's app in it to the projects under some folders, and start a thread
 // there in one of them (see `inT3`). A pane's tab can be the extension's
 // preview page too, which shows a markdown file gerdr sends it.
@@ -608,6 +609,19 @@ async function command(message) {
       case "scroll":
         await chrome.tabs.sendMessage(tab, message);
         break;
+      // What the pane's tab shows, for a manual test's failure: a PNG,
+      // or why there is none, goes back either way.
+      case "capture": {
+        const pane = message.pane;
+        try {
+          const { windowId } = await chrome.tabs.get(tab);
+          const data = await chrome.tabs.captureVisibleTab(windowId, { format: "png" });
+          send({ type: "shot", pane, data });
+        } catch (err) {
+          send({ type: "shot", pane, error: String((err && err.message) || err) });
+        }
+        break;
+      }
       case "newthread":
         threads[tab] = { origin: message.origin, dirs: message.dirs, prompt: message.prompt, at: Date.now() };
         await save();

@@ -19,6 +19,7 @@ mod badge;
 mod canvas;
 mod checkout;
 mod confirm;
+mod criteria_strip;
 mod consts;
 mod drop;
 mod features;
@@ -74,6 +75,7 @@ pub use badge::*;
 use canvas::*;
 pub use checkout::*;
 pub use confirm::*;
+pub use criteria_strip::*;
 pub use consts::*;
 pub use drop::*;
 pub use features::*;
@@ -192,6 +194,8 @@ pub struct ChromeView {
     pub scrollback: Option<ScrollbackView>,
     /// Set while the AI work's stats panel is open.
     pub stats: Option<StatsView>,
+    /// Set while a sandbox's app shows with criteria to try over it.
+    pub criteria_strip: Option<CriteriaStripView>,
     /// The toasts showing, oldest first, such as "Switched to gerdr".
     pub toasts: Vec<ToastView>,
     /// The bars over the active tab's terminal panes.
@@ -249,6 +253,7 @@ pub struct Chrome {
     inbox: InboxLayers,
     scrollback: ScrollbackLayers,
     stats: Overlay<(StatsView, Size<i32, Logical>, Theme, f64)>,
+    criteria_strip: Overlay<(CriteriaStripView, Theme, f64)>,
     /// One per toast, by id, kept while it fades out.
     toasts: Vec<(u64, ToastOverlay)>,
     /// One per placeholder, and the spinner they share.
@@ -318,6 +323,7 @@ impl Chrome {
             inbox: InboxLayers::default(),
             scrollback: ScrollbackLayers::default(),
             stats: Overlay::default(),
+            criteria_strip: Overlay::default(),
             toasts: Vec::new(),
             placeholders: Vec::new(),
             spinner: Cached::default(),
@@ -736,6 +742,16 @@ impl Chrome {
                     now,
                     painter,
                 )),
+                // The criteria strip, at the bottom of the sandbox's app.
+                Kind::Criteria => {
+                    let strip = view.criteria_strip.take().map(|view| {
+                        let (loc, size) = shadowed(criteria_strip_layout(&view).panel);
+                        ((view, theme, scale), loc, size)
+                    });
+                    parts.extend(self.criteria_strip.part(strip, now, false, |(view, ..)| {
+                        painter.criteria_strip(view, scale, theme.palette())
+                    }));
+                }
                 // The switcher at the top of the app area.
                 Kind::Switcher => parts.extend(self.switcher.parts(
                     view.switcher.take(),
@@ -1218,6 +1234,9 @@ fn hit_rects(
         );
     }
     rects.extend(view.unzoom);
+    if let Some(strip) = &view.criteria_strip {
+        rects.extend(criteria_strip_layout(strip).controls());
+    }
     if let Some(menu) = &view.context_menu {
         rects.extend(menu_layout(menu.anchor, &menu.rows, output).1);
     }
