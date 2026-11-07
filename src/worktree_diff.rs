@@ -1064,7 +1064,11 @@ impl WorktreeDiff {
             return;
         }
         if let Some(fe) = &self.feature {
-            view.title_buttons.extend(self.feature_hints());
+            // Laid into its page, the review's actions are on the page's line
+            // over it (`ReviewSwitch::buttons`).
+            if !fe.inline {
+                view.title_buttons.extend(self.feature_hints());
+            }
             // Findings are decided at AI review alone: past it their buttons
             // would only refuse.
             if fe.role() != Role::Deciding {
@@ -1121,8 +1125,9 @@ impl WorktreeDiff {
         view.title_buttons.push(go);
     }
 
-    /// A feature's buttons as it stands, with their keys.
-    fn feature_hints(&self) -> Vec<Hint> {
+    /// A feature's buttons as it stands, with their keys; Approve with what
+    /// holds it up.
+    pub(crate) fn feature_hints(&self) -> Vec<Hint> {
         let Some(fe) = self.feature.as_ref() else {
             return Vec::new();
         };
@@ -1131,7 +1136,11 @@ impl WorktreeDiff {
                 button,
                 label: button.label().into(),
                 key: fe.key_of(button, self.diff.review.own()).into(),
-                disabled,
+                disabled: match button {
+                    ReposButton::Approve => (self.approve_gate(fe.stage))
+                        .and_then(|gate| crate::feature_diff::approve_refusal(&gate)),
+                    _ => disabled,
+                },
             })
             .collect()
     }

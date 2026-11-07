@@ -3868,13 +3868,62 @@ fn review_switch(view: super::ReviewView) -> super::ReviewSwitch {
             changed: 1,
         }),
         fixes: "1 of 2 made".into(),
+        next: None,
+        buttons: Vec::new(),
     }
 }
 
-/// Code review's page on its code: the switch over the review.
+/// Code review's actions on its line: Add comment… lit, Plan fixes and
+/// Approve in `plan` and `approve`, Approve held up by `why`.
+fn review_buttons(
+    plan: super::ButtonStyle,
+    approve: super::ButtonStyle,
+    why: Option<&str>,
+) -> Vec<super::ReviewButton> {
+    use super::{ButtonStyle, ReposButton as B, ReviewButton};
+    let button = |button: B, style, key: &str, disabled: Option<&str>| ReviewButton {
+        button,
+        label: button.label().into(),
+        style,
+        key: key.into(),
+        disabled: disabled.map(Into::into),
+    };
+    let plan_why = (plan == ButtonStyle::Off).then_some("Add a comment first");
+    vec![
+        button(B::AddComment, ButtonStyle::Plain, "Shift+C", None),
+        button(B::PlanFixes, plan, "Ctrl+Shift+Enter", plan_why),
+        button(B::Approve, approve, "Ctrl+Enter", why),
+    ]
+}
+
+/// Code review's page on its code: the switch over the review, files left
+/// and Approve held up.
 fn feature_tab_review_code() -> super::FeatureTabView {
+    use super::ButtonStyle;
     let mut view = feature_tab_review_page();
-    view.review_switch = Some(review_switch(super::ReviewView::Code));
+    let mut switch = review_switch(super::ReviewView::Code);
+    switch.next = Some(("5 of 8 files left \u{b7} 1 changed since viewed".into(), false));
+    let why = Some("5 files not viewed: api/src/a.rs, api/src/b.rs, web/c.ts, …");
+    switch.buttons = review_buttons(ButtonStyle::Off, ButtonStyle::Off, why);
+    view.review_switch = Some(switch);
+    view
+}
+
+/// Code review's page with every file viewed and nothing holding it up:
+/// Approve is the one to press.
+fn feature_tab_review_ready() -> super::FeatureTabView {
+    use super::ButtonStyle;
+    let mut view = feature_tab_review_page();
+    let mut switch = review_switch(super::ReviewView::Code);
+    switch.files = Some(super::ReviewFiles {
+        viewed: 8,
+        total: 8,
+        changed: 0,
+    });
+    let next = "All 8 files viewed \u{b7} Approve to go on to Manual test";
+    switch.next = Some((next.into(), true));
+    switch.buttons = review_buttons(ButtonStyle::Off, ButtonStyle::Primary, None);
+    view.review_switch = Some(switch);
     view
 }
 
@@ -5935,18 +5984,20 @@ fn dump_doc_tab() {
     }
 }
 
-const REVIEW_VIEWS: [&str; 3] = [
+const REVIEW_VIEWS: [&str; 5] = [
     "tab_review_code_1180",
     "tab_review_fixes_1180",
     "tab_review_fixes_860",
+    "tab_review_ready_1180",
+    "tab_review_code_860",
 ];
 
 /// The recorded hashes of `REVIEW_VIEWS`, per case in `CASES`.
-const GOLDEN_REVIEW_VIEWS: [[u64; 3]; 4] = [
-    [0x6123cd0724825735, 0x53782be2ddfac6ae, 0x1c4b9696edfa9956],
-    [0xf02b17481428981c, 0x9e2c86e8368e8bcc, 0x01830581ba18ebaf],
-    [0x666736936e66ab75, 0xe7910bcd2f7f1b7a, 0xf94989bf74da0e5d],
-    [0x0f9007445cc1bec2, 0x493b04a5cef37ada, 0xa534a15e44f8c25e],
+const GOLDEN_REVIEW_VIEWS: [[u64; 5]; 4] = [
+    [0x5323c659e50034f7, 0x53782be2ddfac6ae, 0x1c4b9696edfa9956, 0x24acb1e8ace2da24, 0xf0917b20816f4adb],
+    [0x4b0fb2ba3d4a34c3, 0x9e2c86e8368e8bcc, 0x01830581ba18ebaf, 0x93f2300e582d591d, 0xe69fca3f00a49764],
+    [0x946edcd054ac90e6, 0xe7910bcd2f7f1b7a, 0xf94989bf74da0e5d, 0xca34f6cc23928d23, 0x7b8487b3efde1433],
+    [0x9543d3aef5d02a5a, 0x493b04a5cef37ada, 0xa534a15e44f8c25e, 0x0622a7ecd43c5ef2, 0xeb0576cde1aac1b5],
 ];
 
 #[test]
@@ -5959,6 +6010,8 @@ fn code_reviews_views_paint_the_same_pixels() {
         (feature_tab_review_code(), 1180),
         (feature_tab_review_fixes(), 1180),
         (feature_tab_review_fixes(), 860),
+        (feature_tab_review_ready(), 1180),
+        (feature_tab_review_code(), 860),
     ];
     check_each(&REVIEW_VIEWS, &golden, |painter, theme, scale, surface| {
         let (view, w) = &views[surface];
@@ -5985,6 +6038,8 @@ fn dump_review_views() {
         (feature_tab_review_code(), 1180),
         (feature_tab_review_fixes(), 1180),
         (feature_tab_review_fixes(), 860),
+        (feature_tab_review_ready(), 1180),
+        (feature_tab_review_code(), 860),
     ];
     for (theme, scale) in CASES {
         for ((view, w), name) in views.iter().zip(REVIEW_VIEWS) {

@@ -8658,6 +8658,16 @@ impl Gerdr {
         let outcome = match hit {
             FeatureTabHit::Tab | FeatureTabHit::Column(_) | FeatureTabHit::AgentPickOff(_) => None,
             FeatureTabHit::MilestoneMode(i) => Some(PanelOutcome::FreshMilestones(i == 1)),
+            // The review's own: pressed as on its title row in the popup.
+            FeatureTabHit::ReviewButton(i) => {
+                let button = (self.feature_tab_parts())
+                    .and_then(|(view, _)| Some(view.review_switch?.buttons.get(i)?.button));
+                if let Some(button) = button {
+                    let hit = chrome::ReposHit::Button(button);
+                    self.worktree_diff_hit(hit, false, false, false);
+                }
+                return;
+            }
             FeatureTabHit::ReviewView(i) => Some(PanelOutcome::ReviewView(match i {
                 0 => chrome::ReviewView::Code,
                 _ => chrome::ReviewView::Fixes,
@@ -9027,6 +9037,17 @@ impl Gerdr {
                     _ => "The fixes the comments asked for, and their plan (Alt+2)",
                 };
                 Some(Tooltip::new(text, spot))
+            }
+            // What holds it up, else what it does and its key.
+            FeatureTabHit::ReviewButton(i) => {
+                let spot = (*layout.review_switch.as_ref()?.buttons.get(i)?)?;
+                let b = view.review_switch.as_ref()?.buttons.get(i)?;
+                let text = match (&b.disabled, b.key.is_empty()) {
+                    (Some(why), _) => why.clone(),
+                    (None, true) => b.label.clone(),
+                    (None, false) => format!("{} ({})", b.label, b.key),
+                };
+                Some(Tooltip::new(&text, spot))
             }
             FeatureTabHit::MilestoneMode(i) => {
                 let (_, segments) = layout.milestone_mode.as_ref()?;
@@ -11351,6 +11372,47 @@ fn comment_sections(
     sections
 }
 
+/// What Code review's line says to do next, and its buttons: those of the
+/// review laid into the page (`panel.review`), while its code shows. Approve
+/// is the one to press once nothing holds it up, Plan fixes while comments
+/// wait for it.
+fn review_toolbar(
+    panel: &FeaturePanel,
+    feature: &Feature,
+    files: Option<chrome::ReviewFiles>,
+) -> (Option<(String, bool)>, Vec<chrome::ReviewButton>) {
+    use crate::chrome::ReposButton as B;
+    let wd = (panel.review.as_deref())
+        .filter(|_| crate::feature_diff::review_page(panel, feature))
+        .filter(|wd| {
+            (wd.feature.as_ref())
+                .is_some_and(|fe| fe.project == feature.project && fe.slug == feature.slug)
+        });
+    let Some((wd, gate)) = wd.and_then(|wd| Some((wd, wd.approve_gate(feature.current())?))) else {
+        return (None, Vec::new());
+    };
+    let (total, changed) = files.map_or((0, 0), |f| (f.total, f.changed));
+    let next = crate::feature_diff::next_step(&gate, total, changed);
+    let buttons = (wd.feature_hints().into_iter())
+        .map(|hint| {
+            let style = match (&hint.disabled, hint.button) {
+                (Some(_), _) => ButtonStyle::Off,
+                (None, B::Approve) => ButtonStyle::Primary,
+                (None, B::PlanFixes) if gate.comments > 0 => ButtonStyle::Primary,
+                _ => ButtonStyle::Plain,
+            };
+            chrome::ReviewButton {
+                button: hint.button,
+                label: hint.label,
+                style,
+                key: hint.key,
+                disabled: hint.disabled,
+            }
+        })
+        .collect();
+    (Some(next), buttons)
+}
+
 /// The files of `feature`'s code review, as the switch counts them: by its last
 /// read once there was one, else by what the probe found and the viewed marks.
 fn review_files(feature: &Feature, state: &PanelState) -> Option<chrome::ReviewFiles> {
@@ -12299,10 +12361,16 @@ fn tab_view(
     let review_switch = (stage == Stage::CodeReview
         && !panel.keys
         && crate::feature_diff::review_views(feature))
-    .then(|| chrome::ReviewSwitch {
-        view: panel.review_view_of(feature),
-        files: review_files(feature, state),
-        fixes: fixes_word(feature, notes_of(state.probe)),
+    .then(|| {
+        let files = review_files(feature, state);
+        let (next, buttons) = review_toolbar(panel, feature, files);
+        chrome::ReviewSwitch {
+            view: panel.review_view_of(feature),
+            files,
+            fixes: fixes_word(feature, notes_of(state.probe)),
+            next,
+            buttons,
+        }
     });
     let mut view = FeatureTabView {
         review_page: crate::feature_diff::review_page(panel, feature),
