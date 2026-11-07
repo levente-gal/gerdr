@@ -96,6 +96,37 @@ pub struct Container {
     pub compose: Option<ComposeLabels>,
     /// The ports it publishes on this machine.
     pub ports: Vec<u16>,
+    /// The Podman pod it is in: its id as inspect gives it, its name once
+    /// `name_pods` has looked it up.
+    pub pod: Option<String>,
+}
+
+impl Container {
+    /// What the user knows it by. A pod's containers share its ports, and
+    /// the one that holds them is named after the pod's id, so a pod
+    /// compose didn't start goes by the pod's name.
+    pub fn shown(&self) -> String {
+        match (&self.pod, &self.compose) {
+            (Some(pod), None) => format!("pod {pod}"),
+            _ => self.name.clone(),
+        }
+    }
+}
+
+/// Put pod names over the pod ids of `containers`, from `pods`, what
+/// `podman pod ps --no-trunc --format '{{.ID}} {{.Name}}'` printed. An id it
+/// doesn't list stays, cut as Podman shows ids.
+pub fn name_pods(containers: &mut [Container], pods: &str) {
+    let names: std::collections::HashMap<&str, &str> = pods
+        .lines()
+        .filter_map(|line| line.trim().split_once(' '))
+        .collect();
+    for pod in containers.iter_mut().filter_map(|c| c.pod.as_mut()) {
+        *pod = match names.get(pod.as_str()) {
+            Some(name) => (*name).to_owned(),
+            None => pod.chars().take(12).collect(),
+        };
+    }
 }
 
 /// What compose wrote on a container it started.
@@ -165,6 +196,10 @@ fn container_of(item: &Value, engine: Engine) -> Container {
             .to_owned(),
         compose,
         ports,
+        pod: item["Pod"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned),
     }
 }
 
@@ -286,7 +321,7 @@ pub fn out_of_reach(
         }
         for port in ports {
             if let Some(container) = serving(port) {
-                found.push(format!("{key} ({}, port {port})", container.name));
+                found.push(format!("{key} ({}, port {port})", container.shown()));
             }
         }
     }
@@ -1697,6 +1732,7 @@ volumes:
                 env_file: None,
             }),
             ports: ports.to_vec(),
+            pod: None,
         }
     }
 
@@ -1750,6 +1786,58 @@ BIND=0.0.0.0:5433
             &[PathBuf::from("/app")],
         );
         assert_eq!(found, ["DB (plain, port 5433)"]);
+    }
+
+    /// Inspect of a container in pod `pod`, which shares the pod's ports.
+    fn in_pod(name: &str, pod: &str) -> Value {
+        json!({
+            "Name": name,
+            "Pod": pod,
+            "Config": {"Image": "postgres", "Labels": {}},
+            "NetworkSettings": {"Ports": {"5432/tcp": [{"HostIp": "0.0.0.0", "HostPort": "5432"}]}},
+        })
+    }
+
+    #[test]
+    fn a_pod_goes_by_its_name_not_its_holder() {
+        let id = "50be50f257083dfb51a097cc92358c50d36d5d55f1604651d0852bab5f6f52ec";
+        let inspect = json!([in_pod("50be50f25708-infra", id), in_pod("pg-db", id)]).to_string();
+        let mut containers = containers_of(&inspect, Engine::PodmanCompose).unwrap();
+        assert_eq!(containers[0].pod.as_deref(), Some(id));
+        name_pods(&mut containers, &format!("5f46 pod_asset-track\n{id} pg\n"));
+        let shown: Vec<String> = containers.iter().map(Container::shown).collect();
+        assert_eq!(shown, ["pod pg", "pod pg"]);
+        let found = out_of_reach(
+            &pairs("DATABASE_URL=psql://u:p@localhost:5432/postgres"),
+            &containers,
+            &[PathBuf::from("/app")],
+        );
+        assert_eq!(found, ["DATABASE_URL (pod pg, port 5432)"]);
+    }
+
+    #[test]
+    fn a_pod_not_listed_shows_its_id_cut() {
+        let id = "50be50f257083dfb51a097cc92358c50d36d5d55f1604651d0852bab5f6f52ec";
+        let inspect = json!([in_pod("pg-db", id)]).to_string();
+        let mut containers = containers_of(&inspect, Engine::Podman).unwrap();
+        name_pods(&mut containers, "");
+        assert_eq!(containers[0].shown(), "pod 50be50f25708");
+    }
+
+    #[test]
+    fn a_container_compose_started_in_a_pod_keeps_its_name() {
+        let mut item = inspected("asset-track_db_1", "db", "/app");
+        item["Pod"] = json!("5f46");
+        let mut containers =
+            containers_of(&json!([item]).to_string(), Engine::PodmanCompose).unwrap();
+        name_pods(&mut containers, "5f46 pod_asset-track\n");
+        assert_eq!(containers[0].shown(), "asset-track_db_1");
+        // Docker writes no pod.
+        let plain = containers_of(
+            &json!([inspected("a", "db", "/app")]).to_string(),
+            Engine::Docker,
+        );
+        assert_eq!(plain.unwrap()[0].pod, None);
     }
 
     #[test]
