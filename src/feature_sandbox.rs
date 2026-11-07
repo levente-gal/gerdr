@@ -930,18 +930,23 @@ impl Gerdr {
     /// Look for containers of sandboxes whose feature is gone, off the thread.
     pub(crate) fn look_for_sandbox_leftovers(&mut self) {
         self.report_left_there();
-        self.look_for_left(None, Host::Here);
+        // A gerdr that died copying left main's containers paused.
+        let paused_in = (self.features.all.values().flatten())
+            .filter(|f| (f.sandbox.as_ref()).is_none_or(|run| run.machine.is_none()))
+            .map(|f| sandbox_dir(&f.project, &f.slug))
+            .collect();
+        self.look_for_left(None, Host::Here, paused_in);
     }
 
     /// Machine `id` is back: look there too.
     pub(crate) fn look_for_sandbox_leftovers_there(&mut self, id: &str) {
         if let Some(work) = self.work_of(id) {
             let host = Host::There(work.reach());
-            self.look_for_left(Some(id.to_owned()), host);
+            self.look_for_left(Some(id.to_owned()), host, Vec::new());
         }
     }
 
-    fn look_for_left(&mut self, machine: Option<String>, host: Host) {
+    fn look_for_left(&mut self, machine: Option<String>, host: Host, paused_in: Vec<PathBuf>) {
         // A gerdr connected here answers for its own sandboxes.
         let up: Vec<String> = (self.machines.links.values())
             .filter_map(|link| link.work.as_ref().map(|work| work.id.clone()))
@@ -950,6 +955,9 @@ impl Gerdr {
             .and_then(|id| self.work_of(id))
             .map(|work| format!("{}/gerdr", work.info.site.data));
         self.feature_work(None, move |_| {
+            let still_paused: Vec<String> = (paused_in.iter())
+                .filter_map(|dir| sandbox_run::unpause_left(&host, dir).err())
+                .collect();
             let never = AtomicBool::new(false);
             let found = sandbox_run::labelled(&host, &never).unwrap_or_else(|why| {
                 // Mostly neither Docker nor Podman running: nothing to say to
@@ -987,8 +995,30 @@ impl Gerdr {
             let stacks = left_behind(found, at, own.as_deref(), &others, |project, slug| {
                 feature_known(project, slug, at)
             });
-            Done::SandboxLeftovers { machine, stacks }
+            Done::SandboxLeftovers {
+                machine,
+                stacks,
+                still_paused,
+            }
         });
+    }
+
+    /// What a launch's look `here` couldn't unpause, of what gerdrs that died
+    /// copying left paused: main's app waits on it meanwhile.
+    pub(crate) fn sandbox_still_paused(&mut self, here: bool, still_paused: Vec<String>) {
+        if !here {
+            return;
+        }
+        if still_paused.is_empty() {
+            crate::problems::clear(PAUSED_PROBLEMS);
+            return;
+        }
+        let text = format!(
+            "Containers of your main app stay paused after a sandbox copy was cut short: {}",
+            still_paused.join("; ")
+        );
+        crate::problems::report(PAUSED_PROBLEMS, text.clone());
+        self.show_warning(text);
     }
 
     /// What sandboxes of gone features left, as tasks: a row each, while its
@@ -1133,6 +1163,10 @@ impl Gerdr {
 
 /// The source of sandboxes' problems on the "!" badge.
 pub(crate) const PROBLEMS: &str = "sandbox";
+
+/// The source of what stays paused after a copy cut short, apart: a
+/// sandbox's own problems clear when it starts.
+const PAUSED_PROBLEMS: &str = "sandbox-paused";
 
 /// A compose project a sandbox of a feature that's gone left.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
