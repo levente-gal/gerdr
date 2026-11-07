@@ -4538,8 +4538,7 @@ fn writers_page_actions(
         if let Some(round) =
             last_round_on(feature, stage).filter(|_| sends_round_again(feature, stage, ctx))
         {
-            let label =
-                feature::fix_round::label(round.n, &feature.verify_fixes, &feature.fix_asked);
+            let label = round_label(feature, round);
             out.push((
                 button(&format!("Send {label} again"), ButtonStyle::Quiet),
                 PanelOutcome::ResendFixes,
@@ -10087,16 +10086,27 @@ fn file_card(
     }
 }
 
-/// The open fix round's card: what it fixes and how it stands, with the
-/// page's buttons in `actions` that act on the plan.
+/// What round `round` of `feature` is called, as Build's page has it.
+fn round_label(feature: &Feature, round: &FixRound) -> String {
+    feature::fix_round::label(round.n, &feature.verify_fixes, &feature.fix_asked)
+}
+
+/// The open fix round's card: which it is, what it fixes and how it stands,
+/// at `now`, with the page's buttons in `actions` that act on the plan.
 fn fix_round_card(
     feature: &Feature,
     round: &FixRound,
     actions: &[(PageButton, PanelOutcome)],
+    now: u64,
 ) -> PageSection {
+    let mut state = fix_round_state(feature, round);
+    if let Some(at) = round.ready.filter(|_| round.phase == FixPhase::Ready) {
+        let written = format!(" \u{b7} written {}", projects::ago(now, at));
+        state.text.push_str(&written);
+    }
     PageSection::File {
-        name: "Fix plan".to_owned(),
-        state: fix_round_state(feature, round),
+        name: format!("Fix plan: {}", round_label(feature, round)),
+        state,
         buttons: (actions.iter().enumerate())
             .filter(|(_, (_, o))| {
                 matches!(
@@ -10129,14 +10139,21 @@ fn fix_round_state(feature: &Feature, round: &FixRound) -> CheckLine {
     line(format!("{} \u{b7} {said}", round.what), tone)
 }
 
-/// The card of the last fix round: its plan and what it fixed stay at hand.
-fn last_round_card(round: &FixRound, actions: &[(PageButton, PanelOutcome)]) -> PageSection {
+/// The card of the last fix round: which it was, what it made and when, at
+/// `now`, its plan at hand.
+fn last_round_card(
+    feature: &Feature,
+    round: &FixRound,
+    actions: &[(PageButton, PanelOutcome)],
+    now: u64,
+) -> PageSection {
+    let mut said = vec![round.what.clone(), round.made()];
+    let ago = |at| projects::ago(now, at);
+    said.extend(round.ready.map(|at| format!("written {}", ago(at))));
+    said.extend(round.ended.map(|at| format!("over {}", ago(at))));
     PageSection::File {
-        name: "Fix plan".to_owned(),
-        state: line(
-            format!("{} \u{b7} {}", round.what, feature::fix_round::SENT),
-            CheckTone::Note,
-        ),
+        name: format!("Last fix plan: {}", round_label(feature, round)),
+        state: line(said.join(" \u{b7} "), CheckTone::Note),
         buttons: (actions.iter().enumerate())
             .filter(|(_, (_, o))| {
                 matches!(o, PanelOutcome::ReviewFixPlan | PanelOutcome::ResendFixes)
@@ -10667,6 +10684,7 @@ fn stage_page(
         }),
     };
     // A stage not reached yet may start by itself: its agent is picked ahead.
+    let mut last_after = None;
     if mark == StageMark::Later {
         sections.extend(agent_card(feature, stage, state, actions, now));
         // What it will run is there to see ahead too.
@@ -10679,8 +10697,16 @@ fn stage_page(
         }
     }
     if mark != StageMark::Later {
-        sections.extend(fix_round_on(feature, stage).map(|r| fix_round_card(feature, r, actions)));
-        sections.extend(last_round_on(feature, stage).map(|r| last_round_card(r, actions)));
+        let open = fix_round_on(feature, stage);
+        sections.extend(open.map(|r| fix_round_card(feature, r, actions, now)));
+        // Over, it goes under what the stage has new to send.
+        let last = last_round_on(feature, stage).map(|r| last_round_card(feature, r, actions, now));
+        let (first, after) = match has_new_fixes(feature, stage, state.ctx) {
+            true => (None, last),
+            false => (last, None),
+        };
+        sections.extend(first);
+        last_after = after;
         sections.extend(rework_card(feature, stage, state, actions));
         if let Some(m) = feature.marks.get(&stage).filter(|m| !m.note.is_empty()) {
             sections.push(lines("Note", vec![line(m.note.clone(), CheckTone::Note)]));
@@ -10799,6 +10825,7 @@ fn stage_page(
             Stage::CodeReview | Stage::ManualTest => {}
         }
     }
+    sections.extend(last_after);
     // The agent's card says what it does: the status line needn't again.
     let carded = |l: &CheckLine| {
         (sections.iter()).any(|s| {
@@ -14130,6 +14157,7 @@ pub(crate) mod tests {
             give_back: Default::default(),
             items: Vec::new(),
             done: 0,
+            ended: None,
         });
         f
     }
@@ -14634,8 +14662,11 @@ pub(crate) mod tests {
         else {
             panic!("the fix plan's card first: {:?}", page.sections);
         };
-        assert_eq!(name, "Fix plan");
-        assert_eq!(state.text, "Verify failures \u{b7} fix plan ready");
+        assert_eq!(name, "Fix plan: Review 1");
+        assert_eq!(
+            state.text,
+            "Verify failures \u{b7} fix plan ready \u{b7} written 15m ago"
+        );
         assert_eq!(state.tone, CheckTone::Ready);
         let held: Vec<&str> = buttons
             .iter()
@@ -14705,6 +14736,36 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_last_round_says_which_it_was_what_it_made_and_when() {
+        let fixing = in_round(verified(false), Stage::CodeReview, FixPhase::Fixing);
+        let mut f = fixing.clone();
+        let mut round = fixing.fix_round.clone().unwrap();
+        f.fix_round = None;
+        f.fix_asked.insert(round.n, Stage::CodeReview);
+        round.what = "review comments".into();
+        round.items = vec!["One".into(), "Two".into()];
+        round.done = 2;
+        round.ready = Some(1_000);
+        round.ended = Some(1_900);
+        let PageSection::File { name, state, .. } = last_round_card(&f, &round, &[], 2_000) else {
+            panic!("a file card");
+        };
+        assert_eq!(name, format!("Last fix plan: Code review {}", round.n));
+        assert_eq!(
+            state.text,
+            "review comments \u{b7} 2 of 2 made \u{b7} written 16m ago \u{b7} over 1m ago"
+        );
+        // One kept from before it was timed says what it knows.
+        round.ended = None;
+        round.ready = None;
+        round.items.clear();
+        let PageSection::File { state, .. } = last_round_card(&f, &round, &[], 2_000) else {
+            panic!("a file card");
+        };
+        assert_eq!(state.text, "review comments \u{b7} fixes made");
+    }
+
+    #[test]
     fn a_fix_plan_stays_on_the_page_once_its_fixes_went() {
         let mut f = verified(false);
         f.verify.as_mut().unwrap().finished = Some(1_100);
@@ -14717,7 +14778,9 @@ pub(crate) mod tests {
                     name,
                     state,
                     buttons,
-                } if name == "Fix plan" => Some((state.text, buttons)),
+                } if name.starts_with("Fix plan: ") || name.starts_with("Last fix plan: ") => {
+                    Some((state.text, buttons))
+                }
                 _ => None,
             });
             card.map(|(said, buttons)| {
@@ -18698,6 +18761,7 @@ pub(crate) mod tests {
             give_back: Default::default(),
             items: vec!["left from before".into()],
             done: 0,
+            ended: None,
         });
         let mut read = probe(None);
         read.docs.fix_rounds = vec![(1, vec![(true, "r1-1".to_owned())])];

@@ -141,6 +141,10 @@ pub struct FixRound {
     /// How many of them were ticked when last read.
     #[serde(default)]
     pub done: u32,
+    /// Unix seconds it was over, its fixes made: none while open, and on one
+    /// over before this was kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended: Option<u64>,
 }
 
 impl FixRound {
@@ -161,6 +165,14 @@ impl FixRound {
             (FixPhase::Fixing, false) => {
                 format!("making fixes \u{b7} {} of {total} made", self.done)
             }
+        }
+    }
+
+    /// How far its fixes got, once over, as its card says it: "2 of 2 made".
+    pub fn made(&self) -> String {
+        match self.items.len() {
+            0 => SENT.to_owned(),
+            total => format!("{} of {total} made", (self.done as usize).min(total)),
         }
     }
 
@@ -712,6 +724,7 @@ mod tests {
             give_back: GiveBack::Nothing,
             items: Vec::new(),
             done: 0,
+            ended: None,
         };
         let compacting = round(FixPhase::CompactingToFix);
         assert!(!compacting.before_fixing());
@@ -905,6 +918,7 @@ mod tests {
             },
             items: items.clone(),
             done: 0,
+            ended: None,
         };
         let made = |review: &AiReview| -> Vec<String> {
             (review.findings.iter())

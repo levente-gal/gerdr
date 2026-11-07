@@ -1083,7 +1083,7 @@ impl WorktreeDiff {
             return;
         }
         // Its agent stopped with fixes left: they go on, not back to be planned.
-        let stopped = |d: &DocOf| d.state.starts_with(crate::doc_review::STOPPED);
+        let stopped = |d: &DocOf| d.state.contains(crate::doc_review::STOPPED);
         let stopped = self.fix_plan() && self.doc.as_ref().is_some_and(stopped);
         let go = match self.fix_plan() {
             true => Hint {

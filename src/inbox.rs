@@ -869,6 +869,10 @@ fn detail_view(item: &InboxItem, actions: &[ItemAction], now: u64) -> InboxDetai
                     "Enter opens the feature: plan the fixes, or run the checks again",
                 ),
                 K::FixPlan => ("Ready", "Enter opens it to make the fixes or send it back"),
+                K::FixesStopped => (
+                    "Stopped",
+                    "Enter opens the feature: make the fixes again, or settle it with the agent",
+                ),
                 K::Findings { open: 0, .. } => {
                     ("Read", "Enter opens the feature to plan the fixes")
                 }

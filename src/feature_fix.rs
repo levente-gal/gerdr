@@ -231,6 +231,7 @@ impl Gerdr {
             give_back: GiveBack::Nothing,
             items: Vec::new(),
             done: 0,
+            ended: None,
         });
         f.log(now, format!("Fix round {n} started: {what}"));
         self.save_feature(project, slug);
@@ -633,6 +634,10 @@ impl Gerdr {
                 tracing::warn!("writing {}: {err}", path.display());
                 self.show_error(format!("Couldn't tidy {}: {err}", path.display()));
             }
+        }
+        // Each is ticked: the count read last may be from before the last.
+        if let Some(round) = (self.feature_mut(project, slug)).and_then(|f| f.fix_round.as_mut()) {
+            round.done = round.items.len() as u32;
         }
         self.end_fix_round(project, slug, false);
         self.probe_feature(project, slug);
@@ -1101,7 +1106,10 @@ impl Gerdr {
             }
             false => {
                 f.log(now, format!("Fix round {n} over"));
-                f.last_fix_round = Some(round.clone());
+                f.last_fix_round = Some(FixRound {
+                    ended: Some(now),
+                    ..round.clone()
+                });
             }
         }
         self.save_feature(project, slug);
