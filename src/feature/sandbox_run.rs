@@ -1599,6 +1599,8 @@ pub struct Labelled {
     pub stack: String,
     /// What `OWNER` says. Empty for what started before there was one.
     pub owner: String,
+    /// The day its first container was made, like "2026-11-07".
+    pub started: String,
 }
 
 /// The compose projects whose containers on `host` carry `LABEL`: what a removed
@@ -1606,7 +1608,7 @@ pub struct Labelled {
 pub fn labelled(host: &Host, stop: &AtomicBool) -> Result<Vec<Labelled>, String> {
     let filter = format!("label={}", sandbox::LABEL);
     let format = format!(
-        "{{{{.Label \"{}\"}}}}\t{{{{.Label \"com.docker.compose.project\"}}}}\t{{{{.Label \"{}\"}}}}",
+        "{{{{.Label \"{}\"}}}}\t{{{{.Label \"com.docker.compose.project\"}}}}\t{{{{.Label \"{}\"}}}}\t{{{{.CreatedAt}}}}",
         sandbox::LABEL,
         sandbox::OWNER
     );
@@ -1628,11 +1630,19 @@ fn read_labelled(text: &str) -> Vec<Labelled> {
                 feature: parts.next()?.to_owned(),
                 stack: parts.next()?.to_owned(),
                 owner: parts.next().unwrap_or_default().to_owned(),
+                started: (parts.next().unwrap_or_default())
+                    .split(' ')
+                    .next()
+                    .unwrap_or_default()
+                    .to_owned(),
             })
         })
         .collect();
+    // A stack a line per container: the earliest says when it started.
     found.sort();
-    found.dedup();
+    found.dedup_by(|later, first| {
+        (&later.feature, &later.stack, &later.owner) == (&first.feature, &first.stack, &first.owner)
+    });
     found
 }
 
@@ -1642,13 +1652,24 @@ mod tests {
 
     #[test]
     fn what_carries_the_label_is_read_with_or_without_an_owner() {
-        let found = read_labelled("p/a\tgerdr-a\tme\np/a\tgerdr-a\tme\np/old\tgerdr-old\t\n");
-        let of = |feature: &str, stack: &str, owner: &str| Labelled {
+        let found = read_labelled(
+            "p/a\tgerdr-a\tme\t2026-11-08 10:00:00 +0200 EET\n\
+             p/a\tgerdr-a\tme\t2026-11-07 09:00:00 +0200 EET\n\
+             p/old\tgerdr-old\t\t2026-01-02 03:04:05 +0000 UTC\n",
+        );
+        let of = |feature: &str, stack: &str, owner: &str, started: &str| Labelled {
             feature: feature.into(),
             stack: stack.into(),
             owner: owner.into(),
+            started: started.into(),
         };
-        assert_eq!(found, [of("p/a", "gerdr-a", "me"), of("p/old", "gerdr-old", "")]);
+        assert_eq!(
+            found,
+            [
+                of("p/a", "gerdr-a", "me", "2026-11-07"),
+                of("p/old", "gerdr-old", "", "2026-01-02")
+            ]
+        );
     }
 
     fn repo(main: &str, worktree: &str) -> Repo {

@@ -313,6 +313,7 @@ impl Gerdr {
         tasks.extend(kept_tasks(&self.kept));
         tasks.extend(self.feature_tasks());
         tasks.extend(self.machine_tasks());
+        tasks.extend(self.sandbox_left_tasks());
         tasks.extend(self.take_tasks());
         tasks
     }

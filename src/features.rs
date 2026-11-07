@@ -157,6 +157,9 @@ pub struct Features {
     busy: Vec<Busy>,
     /// The latest probe of each feature, by project and slug.
     probes: BTreeMap<(String, String), Probed>,
+    /// Features whose Ship was pressed before their code was read: it asks once
+    /// the read is back.
+    ship_waits: BTreeSet<(String, String)>,
     /// The feature folders whose docs link was seen to this run:
     /// `link_feature_docs` goes once for each.
     pub(crate) docs_linked: BTreeSet<PathBuf>,
@@ -338,10 +341,15 @@ pub(crate) enum Done {
     },
     /// The compose projects of sandboxes whose feature is gone.
     SandboxLeftovers {
+        /// Where they were looked for: none, here.
+        machine: Option<String>,
         stacks: Vec<crate::feature_sandbox::LeftStack>,
     },
     /// Removing those ended.
-    SandboxLeftoversRemoved { problems: Vec<String> },
+    SandboxLeftoversRemoved {
+        removed: Vec<crate::feature_sandbox::LeftStack>,
+        problems: Vec<String>,
+    },
     /// `t3 thread send` to `thread` ended.
     T3Told {
         thread: String,
@@ -5043,9 +5051,9 @@ impl Gerdr {
                 name,
                 result,
             } => self.sandbox_left_gone(&file, &title, &name, result),
-            Done::SandboxLeftovers { stacks } => self.sandbox_leftovers(stacks),
-            Done::SandboxLeftoversRemoved { problems } => {
-                self.sandbox_leftovers_removed(problems);
+            Done::SandboxLeftovers { machine, stacks } => self.sandbox_leftovers(machine, stacks),
+            Done::SandboxLeftoversRemoved { removed, problems } => {
+                self.sandbox_leftovers_removed(removed, problems);
             }
             Done::CommandsFound {
                 serial,
@@ -5741,7 +5749,7 @@ impl Gerdr {
         // Written elsewhere, what its code says is for its writer to act on.
         let open = (self.feature(project, slug))
             .is_some_and(|f| f.status == Status::Open && f.writer.is_none());
-        let probed = self.features.probes.entry(key).or_default();
+        let probed = self.features.probes.entry(key.clone()).or_default();
         probed.running = false;
         let docs = std::mem::take(&mut probe.docs);
         probe.docs = docs.keeping(probed.last.as_ref().map(|last| &last.docs));
@@ -5749,6 +5757,7 @@ impl Gerdr {
         if !open {
             probed.again = false;
             probed.last = Some(probe);
+            self.features.ship_waits.remove(&key);
             self.reselect_review_card(selected);
             return;
         }
@@ -5774,6 +5783,8 @@ impl Gerdr {
         }
         if again {
             self.probe_feature(project, slug);
+        } else if self.features.ship_waits.remove(&key) {
+            self.ask_ship_checked(project, slug, true);
         }
     }
 
@@ -7929,8 +7940,14 @@ impl Gerdr {
     }
 
     /// Ship was asked for on feature `slug`: say what stops it, or ask
-    /// with what shipping does, as its latest Ship check has it.
+    /// with what shipping does, as its latest Ship check has it. With none
+    /// yet, as just after it moved here, it asks once there is one.
     fn ask_ship_feature(&mut self, project: &str, slug: &str) {
+        self.ask_ship_checked(project, slug, false);
+    }
+
+    /// `ask_ship_feature`, `waited` for the check it lacked.
+    fn ask_ship_checked(&mut self, project: &str, slug: &str, waited: bool) {
         let Some(feature) = self.feature(project, slug).cloned() else {
             return;
         };
@@ -7943,9 +7960,13 @@ impl Gerdr {
         let key = (project.to_owned(), slug.to_owned());
         let probe = self.features.probes.get(&key).and_then(|p| p.last.as_ref());
         match ship_ask(&feature, probe) {
+            ShipAsk::Checking if waited => self.show_warning(format!(
+                "Couldn't check \u{201c}{title}\u{201d}; try again in a moment"
+            )),
             ShipAsk::Checking => {
-                self.show_warning(format!(
-                    "Still checking \u{201c}{title}\u{201d}; try again in a moment"
+                self.features.ship_waits.insert(key);
+                self.show_notice(format!(
+                    "Checking \u{201c}{title}\u{201d}: Ship asks once that is done"
                 ));
                 self.probe_feature(project, slug);
             }

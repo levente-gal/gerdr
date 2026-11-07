@@ -1000,6 +1000,7 @@ impl Gerdr {
             crate::problems::forget(feature_sandbox::PROBLEMS, &left_text(&feature.title, &name));
         }
         (self.machines.left_told).retain(|left| left.machine.as_deref() != Some(id));
+        self.machines.left.remove(&Some(id.to_owned()));
     }
 
     /// What a removed feature left on a machine went, or still can't.

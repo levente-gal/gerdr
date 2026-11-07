@@ -59,6 +59,8 @@ pub enum MenuAction {
     StopKept(String),
     /// The dialog connecting another machine (see `machines`).
     AddMachine,
+    /// The connect dialog, filled in for a gerdr that reached this machine.
+    AddMachineFrom { target: String, name: String },
     /// Connect, disconnect or forget the machine of this name.
     ConnectMachine(String),
     DisconnectMachine(String),
@@ -451,6 +453,7 @@ impl Gerdr {
             MenuAction::ShowLog(path) => self.show_log(path),
             MenuAction::StopKept(id) => self.ask_stop_kept(&id),
             MenuAction::AddMachine => self.open_machine_dialog(),
+            MenuAction::AddMachineFrom { target, name } => self.add_machine_from(target, name),
             MenuAction::ConnectMachine(name) => self.connect_machine(&name),
             MenuAction::DisconnectMachine(name) => self.disconnect_machine(&name),
             MenuAction::StopTakeOver(project, slug) => self.stop_take(&project, &slug),

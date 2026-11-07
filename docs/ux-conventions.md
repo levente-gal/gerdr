@@ -111,7 +111,8 @@ A key is written in one place, not on the button that does the same thing:
   machine shows until asked. Show agent opens one tab attached over SSH, as
   does Discover's Start agent once its agent is up, if the user stayed on the
   feature's page. That tab takes the terminal from any other view, and closing
-  it asks nothing, as it only ends the view. The agent's card says "on
+  it asks nothing, as it only ends the view. A view taken by another machine
+  ends saying which ("Opened on desk"). The agent's card says "on
   <machine>". A machine out of
   reach reads "<machine> can't be reached", and its runs wait: only a list of
   that machine's panes can say a pane is gone.
@@ -128,7 +129,9 @@ A key is written in one place, not on the button that does the same thing:
   with the machine away, as it last was.
 - A feature's page offers the same buttons on any machine. Pressing one that
   changes it moves the feature here first (Take over does only that), and then the
-  press goes on, or says the feature changed on the way. Its diff and files take no
+  press goes on, or says the feature changed on the way. Ship pressed before the
+  feature's code was read here, as just after a move, says so and asks once it
+  is. Its diff and files take no
   comments or ticks until then. While it moves, the page and a tasks row with Stop
   say so. Files and commits come, and what isn't committed there keeps it there
   until it is. Work on a worker goes on and is followed from here. What runs in the
@@ -149,10 +152,17 @@ A key is written in one place, not on the button that does the same thing:
   as those are what's copied, and its page says what it found none of. Its setup
   runs there first. It stays there until it is removed: its data is there.
 - A sandbox says which gerdr started it. Each time a machine connects, gerdr looks
-  there for sandboxes of its own whose feature is gone and offers to remove them.
-  It never offers another gerdr's. Removing a machine that holds this gerdr's
-  sandboxes asks first and names them; they stay there, and adding the machine
-  again reaches them, or removes those of features already removed.
+  there for sandboxes whose feature is gone. Each one stays as a row in the tasks
+  panel, with Remove, which asks; a toast offers this gerdr's own once as well.
+  Another gerdr's shows only when that gerdr isn't connected here and hasn't been
+  on that machine for two days, and the row and the question name it: it may still
+  want it. Removing a machine that holds this gerdr's sandboxes asks first and names
+  them; they stay there, and adding the machine again reaches them, or removes those
+  of features already removed.
+- A gerdr connecting to a machine leaves word there of who it is and where it came
+  from, and refreshes it hourly while connected. A gerdr open on that machine that
+  doesn't know it offers once, by a toast, to add it back: each shows only the
+  features of machines it added. Add opens the connect dialog filled in.
 - Any gerdr showing its feature says how it stands, and can open its app, show its
   terminals, and stop, restart, reset or remove it, with no need to take the feature
   over. A gerdr open on the writer does that, so its record says so. With none open,

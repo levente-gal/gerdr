@@ -66,6 +66,7 @@ mod layout;
 mod machine_checks;
 mod machine_lease;
 mod machine_load;
+mod machine_reach;
 mod machine_sandbox;
 mod machine_views;
 mod machine_work;
