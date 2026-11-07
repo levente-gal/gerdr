@@ -230,9 +230,32 @@ struct Run {
     chats: Vec<(String, String)>,
     transcript: Option<PathBuf>,
     kind: Option<AgentKind>,
+    /// When its chat last said anything, in ms.
+    last_message: Option<i64>,
 }
 
 impl Run {
+    /// When it ended, as far as can be told: told so, else ready, else
+    /// stopped or blocked, else its chat's last message. `None` for one
+    /// nothing tells the end of.
+    fn end(&self) -> Option<i64> {
+        let rested = (self.marks.iter())
+            .filter(|(_, work)| *work == Some(false))
+            .map(|(at, _)| *at)
+            .max();
+        self.ended.or(self.ready).or(rested).or(self.last_message)
+    }
+
+    /// Its agent, by one name whichever wrote it: the record's picker name
+    /// (`Claude Code`) and a backfill's (`claude`) are the same agent.
+    fn agent_key(&self) -> String {
+        match (AgentKind::of(&self.agent), self.kind) {
+            (AgentKind::Unknown, Some(kind)) if self.agent.is_empty() => kind.name().to_owned(),
+            (AgentKind::Unknown, _) => self.agent.clone(),
+            (kind, _) => kind.name().to_owned(),
+        }
+    }
+
     fn key(&self) -> RunKey {
         (
             self.project.clone(),
@@ -276,7 +299,8 @@ impl Run {
             }
         }
         if let Some(from) = since {
-            total += (self.ended.unwrap_or(last) - from).max(0);
+            let heard = last.max(self.last_message.unwrap_or(last));
+            total += (self.ended.unwrap_or(heard) - from).max(0);
         }
         total
     }
@@ -425,7 +449,7 @@ fn load_runs(
     {
         let mut stmt = conn.prepare(&format!(
             "SELECT project, slug, stage, n, started, agent, id, model, sidechain,
-                sum(input + cache_create + cache_read), sum(output)
+                sum(input + cache_create + cache_read), sum(output), max(last_at)
              FROM usage WHERE {OF}
              GROUP BY project, slug, stage, n, started, agent, id, model, sidechain"
         ))?;
@@ -445,6 +469,10 @@ fn load_runs(
             run.tokens_in += input.max(0) as u64;
             run.tokens_out += output.max(0) as u64;
             run.has_usage = true;
+            let last: i64 = r.get(11)?;
+            if last > 0 {
+                run.last_message = run.last_message.max(Some(last));
+            }
             if !sidechain {
                 *run.usage_models.entry(model).or_default() += output.max(0) as u64;
             }
@@ -564,7 +592,8 @@ fn agents(conn: &Connection, project: Option<&str>) -> rusqlite::Result<Vec<Agen
     let mut per_run: Vec<AgentSum> = (runs.all.iter())
         .map(|run| AgentSum {
             runs: 1,
-            spans: vec![secs(run.work_ms())],
+            // One nothing tells the end of says nothing of how long.
+            spans: run.end().map(|_| secs(run.work_ms())).into_iter().collect(),
             tokens: run.tokens_in + run.tokens_out,
             with_usage: u32::from(run.has_usage),
             nudged: u32::from(run.nudges() > 0),
@@ -662,7 +691,7 @@ fn agents(conn: &Connection, project: Option<&str>) -> rusqlite::Result<Vec<Agen
             continue;
         };
         let sum = groups
-            .entry((stage, run.agent.clone(), run.model()))
+            .entry((stage, run.agent_key(), run.model()))
             .or_default();
         sum.runs += one.runs;
         sum.spans.extend(one.spans);
@@ -768,7 +797,7 @@ fn detail(conn: &Connection, project: &str, slug: &str) -> rusqlite::Result<Opti
                 agent: run.kind.unwrap_or_else(|| AgentKind::of(&run.agent)),
                 model: run.model(),
                 started: secs(run.started),
-                ended: run.ended.map(secs),
+                ended: run.end().map(secs),
                 tokens_in: run.tokens_in,
                 tokens_out: run.tokens_out,
                 nudges: run.nudges(),
@@ -1171,7 +1200,7 @@ mod tests {
         let view = query(&conn, &scope(Tab::Agents, None)).unwrap();
         let plan = AgentRow {
             stage: Some(Stage::Plan),
-            agent: "Claude Code".into(),
+            agent: "claude".into(),
             model: "claude-opus".into(),
             runs: 1,
             median_secs: Some(150),
@@ -1182,7 +1211,7 @@ mod tests {
         };
         let build = AgentRow {
             stage: Some(Stage::Build),
-            agent: "Codex".into(),
+            agent: "codex".into(),
             model: "gpt-5".into(),
             runs: 3,
             median_secs: Some(200),
@@ -1193,7 +1222,7 @@ mod tests {
         };
         let review = AgentRow {
             stage: Some(Stage::AiReview),
-            agent: "Claude Code".into(),
+            agent: "claude".into(),
             model: "claude-sonnet".into(),
             runs: 1,
             median_secs: Some(60),
@@ -1292,10 +1321,19 @@ mod tests {
         assert_eq!(
             runs,
             vec![
-                (Stage::Plan, 1, AgentKind::Claude, 1000, None, 320, 1),
+                // With no end told, it was ready, or its agent stopped.
+                (Stage::Plan, 1, AgentKind::Claude, 1000, Some(1250), 320, 1),
                 (Stage::Build, 1, AgentKind::Codex, 2000, Some(2999), 0, 0),
-                (Stage::Build, 2, AgentKind::Codex, 3000, None, 0, 0),
-                (Stage::AiReview, 1, AgentKind::Claude, 4000, None, 0, 0),
+                (Stage::Build, 2, AgentKind::Codex, 3000, Some(3200), 0, 0),
+                (
+                    Stage::AiReview,
+                    1,
+                    AgentKind::Claude,
+                    4000,
+                    Some(4060),
+                    0,
+                    0
+                ),
             ]
         );
         let transcript = detail.runs[0].transcript.as_deref().unwrap();
@@ -1334,6 +1372,36 @@ mod tests {
             ..asked
         };
         assert_eq!(query(&conn, &unknown).unwrap().detail, None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A backfill names the agent as its folder does, the record as the
+    /// picker does: one agent all the same. A run nothing tells the end
+    /// of says nothing of how long runs take.
+    #[test]
+    fn an_agent_is_one_row_whoever_named_it() {
+        let root = root("agent-names");
+        let dir = root.join("p").join("a");
+        append(
+            &dir,
+            "here",
+            &[
+                started(1000, Stage::Plan, 1, run(1, "claude", "opus", 1000)),
+                changed(1100, Stage::Plan, 1, RunChange::Ready),
+                started(2000, Stage::Plan, 2, run(2, "Claude Code", "opus", 2000)),
+                changed(2300, Stage::Plan, 2, RunChange::Stop),
+                started(3000, Stage::Plan, 3, run(3, "Claude Code", "opus", 3000)),
+            ],
+        );
+        let mut conn = index::open(&root).unwrap();
+        index::ingest(&mut conn, std::slice::from_ref(&dir)).unwrap();
+        let view = query(&conn, &scope(Tab::Agents, None)).unwrap();
+        let [row] = view.agents.as_slice() else {
+            panic!("{:?}", view.agents)
+        };
+        assert_eq!((row.agent.as_str(), row.runs), ("claude", 3));
+        // 100 s and 300 s: the third, never ended, isn't a 0 s.
+        assert_eq!(row.median_secs, Some(200));
         let _ = std::fs::remove_dir_all(&root);
     }
 

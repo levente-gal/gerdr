@@ -357,17 +357,37 @@ pub fn split(
 /// before every run, or with no time, goes to the first run.
 pub fn split_at(messages: &[Message], starts: &[u64]) -> BTreeMap<(usize, String, bool), Usage> {
     let mut out: BTreeMap<(usize, String, bool), Usage> = BTreeMap::new();
-    let first = (0..starts.len()).min_by_key(|i| (starts[*i], *i));
     for m in messages {
-        let latest = (0..starts.len())
-            .filter(|i| starts[*i] <= m.at_ms)
-            .max_by_key(|i| (starts[*i], *i));
-        let Some(i) = latest.or(first) else {
+        let Some(i) = run_of(m, starts) else {
             continue;
         };
         (out.entry((i, m.model.clone(), m.sidechain)).or_default()).add(&m.usage);
     }
     out
+}
+
+/// When the last message timed went to each run of `starts`, as
+/// `split_at` shares them out, in ms since the epoch: what a run with no
+/// end said was heard of it last.
+pub fn last_at(messages: &[Message], starts: &[u64]) -> BTreeMap<usize, u64> {
+    let mut out: BTreeMap<usize, u64> = BTreeMap::new();
+    for m in messages.iter().filter(|m| m.at_ms > 0) {
+        if let Some(i) = run_of(m, starts) {
+            let last = out.entry(i).or_default();
+            *last = (*last).max(m.at_ms);
+        }
+    }
+    out
+}
+
+/// Which of the runs begun at `starts` message `m` goes to: the latest
+/// begun by then, else the first.
+fn run_of(m: &Message, starts: &[u64]) -> Option<usize> {
+    let first = (0..starts.len()).min_by_key(|i| (starts[*i], *i));
+    let latest = (0..starts.len())
+        .filter(|i| starts[*i] <= m.at_ms)
+        .max_by_key(|i| (starts[*i], *i));
+    latest.or(first)
 }
 
 #[cfg(test)]

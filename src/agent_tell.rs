@@ -149,15 +149,39 @@ impl Gerdr {
                 let files = keep_files(&dir, &files_named(&told.text, &data));
                 sent_event(told, via, files)
             }
-            Err(why) => failed_event(told, via, why),
+            Err(why) => failed_event(told, via, why, false),
         };
-        keep(&dir, event);
+        self.keep_told_line(told, &dir, event);
     }
 
     /// `told`, which went at once, didn't reach the agent `via`: `why`.
     pub(crate) fn told_failed(&self, told: &Told, via: Via, why: &str) {
         if let Some(dir) = self.ai_work.dir(&told.project, &told.slug) {
-            keep(&dir, failed_event(told, via, why));
+            self.keep_told_line(told, &dir, failed_event(told, via, why, true));
+        }
+    }
+
+    /// Append `event`, of `told`, to the AI work in feature folder `dir`,
+    /// for the stats soon. One that can't be kept is said as the feature's
+    /// problem, as the rest of its AI work says it.
+    fn keep_told_line(&self, told: &Told, dir: &Path, event: Event) {
+        let at = format!("{}/{}", told.project, told.slug);
+        match ai_work::write::append(dir, &Line::now(event)) {
+            Ok(()) => {
+                crate::problems::clear_at("ai-work", &at);
+                self.ai_work.send(ai_work::thread::Job::Index {
+                    project: told.project.clone(),
+                    slug: told.slug.clone(),
+                });
+            }
+            Err(err) => crate::problems::report_at(
+                "ai-work",
+                &at,
+                format!(
+                    "Couldn't keep a line typed into {}'s agent: {err}",
+                    told.stage.label()
+                ),
+            ),
         }
     }
 }
@@ -188,8 +212,8 @@ fn sent_event(told: &Told, via: Via, files: BTreeMap<String, BlobRef>) -> Event 
     }
 }
 
-/// `told` couldn't go `via`: `why`.
-fn failed_event(told: &Told, via: Via, why: &str) -> Event {
+/// `told` couldn't go `via`: `why`; `went`: it was taken at once first.
+fn failed_event(told: &Told, via: Via, why: &str, went: bool) -> Event {
     Event::SendFailed {
         stage: told.stage,
         n: told.n,
@@ -197,6 +221,7 @@ fn failed_event(told: &Told, via: Via, why: &str) -> Event {
         text: told.text.clone(),
         via,
         why: why.to_owned(),
+        went,
     }
 }
 
@@ -235,16 +260,6 @@ fn keep_files(dir: &Path, paths: &[PathBuf]) -> BTreeMap<String, BlobRef> {
         }
     }
     kept
-}
-
-/// Append `event` to the AI work in feature folder `dir`.
-fn keep(dir: &Path, event: Event) {
-    if let Err(err) = ai_work::write::append(dir, &Line::now(event)) {
-        tracing::warn!(
-            "keeping a line typed into an agent in {}: {err}",
-            dir.display()
-        );
-    }
 }
 
 #[cfg(test)]
@@ -302,6 +317,7 @@ mod tests {
             &told(SendKind::FixGo),
             Via::T3,
             "T3 Code's server isn't running",
+            true,
         );
         assert_eq!(
             event,
@@ -312,6 +328,7 @@ mod tests {
                 text: "FixGo line".into(),
                 via: Via::T3,
                 why: "T3 Code's server isn't running".into(),
+                went: true,
             }
         );
         let line = serde_json::to_string(&Line::now(event)).unwrap();

@@ -63,7 +63,12 @@ pub fn digest(feature: &Feature) -> Digest {
         fix_round: feature.fix_round.clone(),
         last_fix_round: feature.last_fix_round.as_ref().map(|r| r.n),
         fix_rounds: feature.fix_rounds,
-        review: (feature.review.as_ref()).map(|r| (r.n, r.findings.len())),
+        review: (feature.review.as_ref()).map(|r| {
+            (
+                r.n,
+                super::raised_by(r.n, r.findings.iter().map(|f| f.id.as_str())),
+            )
+        }),
         plan_review: (feature.plan_review.as_ref()).map(|r| (r.n, r.suggestions.len())),
         verify: feature.verify.clone(),
         setups: (feature.setup.iter().chain(&feature.setups_elsewhere))

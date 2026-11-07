@@ -27,7 +27,7 @@ use crate::feature::Stage;
 
 /// The version of the tables (see `schema.sql`); `user_version` is
 /// `SCHEMA * 1000 + FORMAT`.
-pub const SCHEMA: u32 = 1;
+pub const SCHEMA: u32 = 2;
 
 /// The tables, as made in a new index.
 pub const TABLES: &str = include_str!("schema.sql");
@@ -310,6 +310,11 @@ fn stat(path: &Path) -> Option<(i64, i64)> {
         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
         .map_or(0, |d| d.as_millis() as i64);
     Some((meta.len() as i64, mtime))
+}
+
+/// What `text` is known by in `sends`: the start of its SHA-256.
+fn text_sha(text: &str) -> String {
+    BlobRef::of(text.as_bytes()).sha[..16].to_owned()
 }
 
 /// A database error for what isn't one: a file that couldn't be read.
@@ -619,7 +624,7 @@ fn apply(tx: &Transaction, f: &Feature, line: &Line) -> rusqlite::Result<()> {
                  VALUES (?1, ?2, 'ai', ?3, ?4, ?5)",
                 params![p, s, n, at, *findings as i64],
             )?;
-            if let Some(counts) = review.as_ref().and_then(|b| severities_of_blob(f, b)) {
+            if let Some(counts) = review.as_ref().and_then(|b| severities_of_blob(f, b, *n)) {
                 put_findings(tx, f, *n, &counts, true)?;
             }
         }
@@ -730,12 +735,22 @@ fn apply(tx: &Transaction, f: &Feature, line: &Line) -> rusqlite::Result<()> {
             n,
             send,
             via,
+            text,
             ..
         } => {
             tx.execute(
-                "INSERT INTO sends (project, slug, stage, n, at, kind, via)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![p, s, stage_name(*stage), n, at, name_of(send), name_of(via)],
+                "INSERT INTO sends (project, slug, stage, n, at, kind, via, text_sha)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    p,
+                    s,
+                    stage_name(*stage),
+                    n,
+                    at,
+                    name_of(send),
+                    name_of(via),
+                    text_sha(text)
+                ],
             )?;
         }
         Event::SendFailed {
@@ -744,8 +759,34 @@ fn apply(tx: &Transaction, f: &Feature, line: &Line) -> rusqlite::Result<()> {
             send,
             via,
             why,
-            ..
+            text,
+            went,
         } => {
+            // Taken at once, then failed: the send it was, the latest of
+            // that text before, never went after all.
+            let marked = *went
+                && tx.execute(
+                    "UPDATE sends SET failed = ?9 WHERE rowid = (
+                        SELECT rowid FROM sends
+                        WHERE project = ?1 AND slug = ?2 AND stage = ?3 AND n = ?4
+                            AND kind = ?5 AND via = ?6 AND text_sha = ?7
+                            AND failed IS NULL AND at <= ?8
+                        ORDER BY at DESC LIMIT 1)",
+                    params![
+                        p,
+                        s,
+                        stage_name(*stage),
+                        n,
+                        name_of(send),
+                        name_of(via),
+                        text_sha(text),
+                        at,
+                        why
+                    ],
+                )? > 0;
+            if marked {
+                return Ok(());
+            }
             tx.execute(
                 "INSERT INTO sends (project, slug, stage, n, at, kind, via, failed)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -907,16 +948,17 @@ fn severities(review: &Value, only_run: Option<u32>) -> BTreeMap<u32, BTreeMap<S
     out
 }
 
-/// The findings by severity in kept blob `blob` of feature `f`, when it
-/// can be read.
-fn severities_of_blob(f: &Feature, blob: &BlobRef) -> Option<BTreeMap<String, i64>> {
+/// The findings AI review `n` raised, by severity, in kept blob `blob` of
+/// feature `f`, when it can be read: the blob holds those of earlier
+/// reviews too, and the user's own.
+fn severities_of_blob(f: &Feature, blob: &BlobRef, n: u32) -> Option<BTreeMap<String, i64>> {
     let packed = std::fs::read(blob.path(f.dir)).ok()?;
     let raw = zst::decompress(&packed)
         .inspect_err(|err| tracing::warn!("ai work: reading review {}: {err}", blob.sha))
         .ok()?;
     let review: Value = serde_json::from_slice(&raw).ok()?;
     review["findings"].is_array().then_some(())?;
-    Some(severities(&review, Some(0)).remove(&0).unwrap_or_default())
+    Some(severities(&review, None).remove(&n).unwrap_or_default())
 }
 
 /// Put review `review`'s findings `counts` of feature `f` in, from its
@@ -1115,12 +1157,16 @@ fn session(tx: &Transaction, f: &Feature, folder: &Path) -> rusqlite::Result<()>
         Ok(raw) if !runs.is_empty() => {
             let messages = usage::read(agent, &raw);
             let starts: Vec<u64> = runs.iter().map(|r| r.2.max(0) as u64).collect();
+            let last = usage::last_at(&messages, &starts);
             for ((i, model, sidechain), u) in usage::split_at(&messages, &starts) {
                 let (stage, n, started) = &runs[i];
+                let last_at = last.get(&i).copied().unwrap_or(0) as i64;
                 tx.execute(
                     "INSERT INTO usage (project, slug, agent, id, stage, n, started, model,
-                        sidechain, messages, tool_calls, input, output, cache_create, cache_read)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                        sidechain, messages, tool_calls, input, output, cache_create, cache_read,
+                        last_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
+                        ?16)",
                     params![
                         p,
                         s,
@@ -1136,7 +1182,8 @@ fn session(tx: &Transaction, f: &Feature, folder: &Path) -> rusqlite::Result<()>
                         u.input as i64,
                         u.output as i64,
                         u.cache_create as i64,
-                        u.cache_read as i64
+                        u.cache_read as i64,
+                        last_at
                     ],
                 )?;
             }
@@ -1348,6 +1395,106 @@ mod tests {
                 .collect()
         };
         assert_eq!(is, vec![8]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A review's file holds what earlier reviews raised, and the user's
+    /// own: only what it raised counts for it.
+    #[test]
+    fn a_review_counts_only_the_findings_it_raised() {
+        let root = root("raised");
+        let dir = root.join("p").join("a");
+        let finding = |id: &str, severity: &str| json!({"id": id, "severity": severity});
+        let review = json!({"n": 2, "findings": [
+            finding("r1-1", "high"),
+            finding("r2-1", "high"),
+            finding("r2-2", "low"),
+            finding("u1", "high"),
+        ]});
+        let blob = super::super::blobs::put(&dir, review.to_string().as_bytes()).unwrap();
+        let read = Event::ReviewRead {
+            n: 2,
+            findings: 2,
+            review: Some(blob),
+        };
+        append(&dir, "here", &[line(5, read)]);
+        let mut conn = open(&root).unwrap();
+        ingest(&mut conn, std::slice::from_ref(&dir)).unwrap();
+        let found: Vec<(u32, String, i64)> = conn
+            .prepare("SELECT review, severity, count FROM findings ORDER BY severity")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(found, [(2, "high".into(), 1), (2, "low".into(), 1)]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A send taken at once that failed after never went: only the latest
+    /// of its text before the failure is marked, and one that failed at
+    /// once is a row of its own.
+    #[test]
+    fn a_send_that_failed_after_it_went_is_marked() {
+        use crate::ai_work::{SendKind, Via};
+        let root = root("send-failed");
+        let dir = root.join("p").join("a");
+        let sent = |at, text: &str| {
+            line(
+                at,
+                Event::Sent {
+                    stage: Stage::Build,
+                    n: 1,
+                    send: SendKind::Nudge,
+                    text: text.into(),
+                    files: BTreeMap::new(),
+                    via: Via::Machine,
+                },
+            )
+        };
+        let failed = |at, went| {
+            line(
+                at,
+                Event::SendFailed {
+                    stage: Stage::Build,
+                    n: 1,
+                    send: SendKind::Nudge,
+                    text: "go on".into(),
+                    via: Via::Machine,
+                    why: "gone".into(),
+                    went,
+                },
+            )
+        };
+        append(
+            &dir,
+            "here",
+            &[
+                sent(1, "go on"),
+                sent(2, "go on"),
+                sent(3, "other"),
+                failed(4, true),
+                failed(5, false),
+            ],
+        );
+        let mut conn = open(&root).unwrap();
+        ingest(&mut conn, std::slice::from_ref(&dir)).unwrap();
+        let rows: Vec<(i64, Option<String>)> = conn
+            .prepare("SELECT at, failed FROM sends ORDER BY at")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            [
+                (1000, None),
+                (2000, Some("gone".into())),
+                (3000, None),
+                (5000, Some("gone".into())),
+            ]
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

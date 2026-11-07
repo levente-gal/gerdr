@@ -73,7 +73,10 @@ CREATE TABLE IF NOT EXISTS sends (
     at INTEGER NOT NULL,
     kind TEXT NOT NULL,
     via TEXT NOT NULL,
-    failed TEXT
+    failed TEXT,
+    -- The start of the SHA-256 of what was typed: a send that failed
+    -- after it went is found by it.
+    text_sha TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS sends_run ON sends (project, slug, stage, n);
 
@@ -119,6 +122,8 @@ CREATE TABLE IF NOT EXISTS usage (
     output INTEGER NOT NULL DEFAULT 0,
     cache_create INTEGER NOT NULL DEFAULT 0,
     cache_read INTEGER NOT NULL DEFAULT 0,
+    -- When the run's last message of this chat was, in ms; 0 untimed.
+    last_at INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (project, slug, agent, id, stage, n, started, model, sidechain)
 );
 CREATE INDEX IF NOT EXISTS usage_run ON usage (project, slug, stage, n, started);

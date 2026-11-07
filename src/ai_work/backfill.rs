@@ -698,10 +698,15 @@ fn from_record(
     };
     if let Some(review) = record.review.as_ref().filter(|r| r.n > 0) {
         let latest = json!({ "n": review.n, "findings": review.findings });
+        // Each round's file holds what earlier ones raised too: only its own
+        // count for it.
+        let raised = |n: u32, findings: &[crate::feature::review_import::Finding]| {
+            super::raised_by(n, findings.iter().map(|f| f.id.as_str()))
+        };
         let rounds = (review.rounds.iter())
             .filter(|round| round.n != review.n)
-            .map(|round| (round.n, round.findings.len(), value(round)))
-            .chain([(review.n, review.findings.len(), latest)]);
+            .map(|round| (round.n, raised(round.n, &round.findings), value(round)))
+            .chain([(review.n, raised(review.n, &review.findings), latest)]);
         for (n, findings, round) in rounds {
             let event = Event::ReviewRead {
                 n,

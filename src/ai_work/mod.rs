@@ -72,6 +72,14 @@ pub fn machine() -> String {
     crate::machine_views::own_id().unwrap_or_else(|| "here".to_owned())
 }
 
+/// How many of `ids`, the findings an AI review's file holds, AI review
+/// `n` raised: those named `r<n>-<k>`. Those carried from earlier reviews
+/// and the user's own (`u…`) aren't its.
+pub fn raised_by<'a>(n: u32, ids: impl IntoIterator<Item = &'a str>) -> usize {
+    let prefix = format!("r{n}-");
+    ids.into_iter().filter(|id| id.starts_with(&prefix)).count()
+}
+
 /// A file kept by its content: `blobs/<aa>/<sha>.zst` of a feature's
 /// folder, `aa` the first two digits of `sha`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -229,7 +237,8 @@ pub enum Event {
         files: BTreeMap<String, BlobRef>,
         via: Via,
     },
-    /// `text` couldn't be typed into run `n` of `stage`: `why`.
+    /// `text` couldn't be typed into run `n` of `stage`: `why`. `went`: it
+    /// was taken at once, its `Sent` kept, and failed after.
     SendFailed {
         stage: Stage,
         n: u32,
@@ -237,6 +246,8 @@ pub enum Event {
         text: String,
         via: Via,
         why: String,
+        #[serde(default, skip_serializing_if = "is_false")]
+        went: bool,
     },
 
     // From the thread (see `thread`).
