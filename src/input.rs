@@ -1467,7 +1467,18 @@ impl Gerdr {
             let (size, scale) = (self.output_size(), self.scale());
             return chrome::commands_field_at(&self.commands_view()?, size, scale, pos, held);
         }
-        Some((self.field_spot()?, 0))
+        let spot = self.field_spot()?;
+        // A card's note holds lines.
+        if self.text_overlay() == Some(Overlay::Features) {
+            return Some(chrome::field_line_spot(
+                spot.area,
+                spot.area,
+                &spot.line,
+                pos,
+                self.scale(),
+            ));
+        }
+        Some((spot, 0))
     }
 
     /// The text field with the keyboard, in the overlay that has it.

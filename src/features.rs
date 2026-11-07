@@ -11997,6 +11997,7 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 6] = [
             ("Home / End", "first or last criterion"),
             ("Space / Enter", "mark it passed, or not"),
             ("f", "mark it failed, saying what went wrong, or edit that"),
+            ("Shift+Enter", "writing what went wrong: start a new line"),
             ("Del", "clear its result"),
             ("Ctrl+Enter", "mark Manual test passed"),
             ("Ctrl+Shift+Enter", "plan the fixes of the failures"),
@@ -12013,6 +12014,7 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 6] = [
                 "c",
                 "write or edit your comment on it; off the cards, add a comment of your own",
             ),
+            ("Shift+Enter", "writing your comment: start a new line"),
             ("Shift+Del", "delete your comment on it"),
             ("Ctrl+E", "edit its fix, or a comment of your own"),
             (
@@ -12171,7 +12173,11 @@ fn writers_tab_hints(
             (CardNote::Finding(_), true) => "delete",
             _ => "save",
         };
-        return vec![hint("Enter", enter), hint("Esc", esc)];
+        return vec![
+            hint("Enter", enter),
+            hint("Shift+Enter", "new line"),
+            hint("Esc", esc),
+        ];
     }
     let mut hints = Vec::new();
     let entries = repo_entries(feature, &panel.sources, panel.expanded);
@@ -17915,6 +17921,7 @@ pub(crate) mod tests {
             hints,
             [
                 ("Enter".to_owned(), "save".to_owned()),
+                ("Shift+Enter".to_owned(), "new line".to_owned()),
                 ("Esc".to_owned(), "cancel".to_owned())
             ]
         );
