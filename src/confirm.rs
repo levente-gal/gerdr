@@ -58,6 +58,9 @@ pub enum Then {
     /// Stop this project's session and apps, then forget it (see
     /// `Gerdr::forget_project`).
     ForgetProject(String),
+    /// Stop this project's session and apps, then give it the second id
+    /// (see `Gerdr::change_project_id`).
+    ChangeProjectId(String, String),
     /// Restart T3 Code's server at the version waiting (see
     /// `Gerdr::restart_t3`).
     RestartT3,
@@ -453,7 +456,7 @@ impl Gerdr {
 
     /// Whether project `id`'s herdr session runs, as last found out, else
     /// asked now.
-    fn session_runs(&self, id: &str) -> bool {
+    pub(crate) fn session_runs(&self, id: &str) -> bool {
         if self.stopping.contains(id) {
             return false;
         }
@@ -770,6 +773,11 @@ impl Gerdr {
             }
             Then::ForgetProject(id) => {
                 self.forget_after_stop.insert(id.clone());
+                self.stop_project_now(&id, Stops::ALL);
+                self.refresh_project_menu();
+            }
+            Then::ChangeProjectId(id, new) => {
+                self.id_after_stop.insert(id.clone(), new);
                 self.stop_project_now(&id, Stops::ALL);
                 self.refresh_project_menu();
             }

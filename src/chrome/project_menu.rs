@@ -12,8 +12,8 @@ use super::{
     QUIT_BUTTON, QUIT_BUTTON_GAP, RADIO_SIZE, RENAME_FIELD, RENAME_INSET, ROW_BUTTON,
     ROW_BUTTON_GAP, ROW_BUTTON_INSET, ROW_HIGHLIGHT_RADIUS, ROW_INSET, Rect, SETTINGS_BUTTONS,
     SHADOW, SMALL_FONT_SIZE, SUGGESTION_ROW, band, commands_prompt, cross, field_text, file,
-    focus_ring, folder, footer_hint_spots, hint_at, hint_strs, icon_sdf, mix, pencil, phys, plus,
-    rect_px, search::query_text, stop,
+    focus_ring, folder, footer_hint_spots, hash_mark, hint_at, hint_strs, icon_sdf, mix, pencil,
+    phys, plus, rect_px, search::query_text, stop,
 };
 use crate::WorkspaceKind;
 use crate::project_list::RowTops;
@@ -135,6 +135,8 @@ pub enum RowButton {
     /// Its file, to edit.
     ProjectFile,
     Rename,
+    /// Its id, changed (see `project_rename`).
+    ChangeId,
     Stop,
     Forget,
 }
@@ -146,6 +148,7 @@ impl RowButton {
             RowButton::Settings => ("Start and stop commands", "Ctrl+E"),
             RowButton::ProjectFile => ("Edit the project file", "Ctrl+O"),
             RowButton::Rename => ("Rename", "F2"),
+            RowButton::ChangeId => ("Change the id", "Shift+F2"),
             RowButton::Stop => ("Stop its session", "Ctrl+Q"),
             RowButton::Forget => ("Forget the project", "Del"),
         }
@@ -433,14 +436,17 @@ impl EntryLook {
 
 /// The buttons a project row shows, selected or under the pointer, left
 /// to right:
-/// settings, its file and rename always; stop while its session may run,
-/// and forget, unless it is the current project.
+/// settings, its file and rename always; unless it is the current project,
+/// change its id, stop while its session may run, and forget.
 pub(super) fn row_buttons(row: &ProjectRow) -> Vec<RowButton> {
     let mut buttons = vec![
         RowButton::Settings,
         RowButton::ProjectFile,
         RowButton::Rename,
     ];
+    if !row.current {
+        buttons.push(RowButton::ChangeId);
+    }
     if !row.current && row.running != Some(false) {
         buttons.push(RowButton::Stop);
     }
@@ -1146,6 +1152,7 @@ impl Painter {
                 RowButton::Settings => commands_prompt(x, y, s),
                 RowButton::ProjectFile => file(x, y, s),
                 RowButton::Rename => pencil(x, y, s),
+                RowButton::ChangeId => hash_mark(x, y, s),
                 RowButton::Stop => stop(x, y, s),
                 RowButton::Forget => cross(x, y, s),
             });
@@ -1940,14 +1947,14 @@ mod tests {
 
         // Row buttons: on the hovered project row (and the selected one),
         // and which depend on whether it is current and runs.
-        use RowButton::{Forget, ProjectFile, Rename, Settings, Stop};
+        use RowButton::{ChangeId, Forget, ProjectFile, Rename, Settings, Stop};
         let expected: [&[RowButton]; 8] = [
             &[],
             &[Settings, ProjectFile, Rename],
             &[],
-            &[Settings, ProjectFile, Rename, Stop, Forget],
-            &[Settings, ProjectFile, Rename, Forget],
-            &[Settings, ProjectFile, Rename, Stop, Forget],
+            &[Settings, ProjectFile, Rename, ChangeId, Stop, Forget],
+            &[Settings, ProjectFile, Rename, ChangeId, Forget],
+            &[Settings, ProjectFile, Rename, ChangeId, Stop, Forget],
             &[],
             &[],
         ];
