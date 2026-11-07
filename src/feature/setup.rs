@@ -8,7 +8,8 @@
 //! - its ignored environments: `node_modules`, any folder with a
 //!   `pyvenv.cfg`. They copy with `cp -a --reflink=always`: on a
 //!   copy-on-write file system that is instant and takes no space. Where
-//!   the file system can't, the copy fails, its leftovers go, and it says so;
+//!   that fails, for the file system or for what `-a` keeps, `copy_tree`
+//!   copies it asking less, which takes its size on disk and some time;
 //! - the paths the project's store file adds (`"workflow": {"copy":
 //!   {"aft-backend": [".elasticbeanstalk"]}}`), however large.
 //!
@@ -342,7 +343,7 @@ fn lines_of<'a>(lists: &'a PerRepo, repo: &Repo) -> Vec<&'a str> {
 struct Item {
     /// Relative to the repository, with no slash at its end.
     path: String,
-    /// One too large to copy but by reflink, when the file system can.
+    /// A large one: by reflink when that works, and said in the progress.
     environment: bool,
 }
 
@@ -512,6 +513,62 @@ fn remove(path: &Path) {
     let _ = std::fs::remove_file(path);
 }
 
+/// Copy `from` to `to`, which isn't there, for a command in `dir`; its errors
+/// to `log`. Past a failure, whatever it was (no reflink here, an attribute
+/// the file system refuses with "Operation not permitted"), it tries a copy
+/// that asks less: a setup without its environment can't run tests at all.
+fn copy_tree(
+    from: &Path,
+    to: &Path,
+    environment: bool,
+    dir: &Path,
+    slug: &str,
+    log: &File,
+) -> Result<Exit, String> {
+    let (from_text, to_text) = (from.to_string_lossy(), to.to_string_lossy());
+    // The last keeps links and modes, and no times or owners: a Python
+    // compiles its files again once, and that's all it costs.
+    let ways: &[&str] = if environment {
+        &[
+            "-a --reflink=always",
+            "-a --reflink=auto",
+            "-dR --reflink=auto",
+        ]
+    } else {
+        &["-a --reflink=auto", "-dR --reflink=auto"]
+    };
+    let mut exit = Exit::Code(-1);
+    for (i, how) in ways.iter().enumerate() {
+        if i > 0 {
+            tracing::warn!("{from_text}: `cp {}` {}", ways[i - 1], exit.describe());
+            // Else the next would copy into what this one left, not to its name.
+            remove(to);
+            let mut note = log;
+            // The log is a help to read: see `run_into`.
+            let _ = writeln!(note, "== that copy failed, so trying `cp {how}`");
+        }
+        let command = format!(
+            "cp {how} -- {} {}",
+            crate::desktop::shell_quote(&from_text),
+            crate::desktop::shell_quote(&to_text),
+        );
+        let err = log.try_clone().map_err(|err| err.to_string())?;
+        exit = shell(
+            &command,
+            dir,
+            slug,
+            Stdio::null(),
+            Stdio::from(err),
+            TIMEOUT,
+        );
+        // Another try wouldn't be any quicker than the one out of time.
+        if exit.passed() || matches!(exit, Exit::TimedOut(_)) {
+            break;
+        }
+    }
+    Ok(exit)
+}
+
 /// Copy `item` into `repo`'s worktree; its errors to `log`. Why not, if it
 /// didn't.
 fn copy(repo: &Repo, item: &Item, slug: &str, log: &File) -> Result<(), String> {
@@ -519,21 +576,7 @@ fn copy(repo: &Repo, item: &Item, slug: &str, log: &File) -> Result<(), String> 
     if let Some(parent) = to.parent() {
         std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
     }
-    let command = format!(
-        "cp -a --reflink={} -- {} {}",
-        if item.environment { "always" } else { "auto" },
-        crate::desktop::shell_quote(&from.to_string_lossy()),
-        crate::desktop::shell_quote(&to.to_string_lossy()),
-    );
-    let err = log.try_clone().map_err(|err| err.to_string())?;
-    let exit = shell(
-        &command,
-        &repo.worktree,
-        slug,
-        Stdio::null(),
-        Stdio::from(err),
-        TIMEOUT,
-    );
+    let exit = copy_tree(&from, &to, item.environment, &repo.worktree, slug, log)?;
     let checked = if !exit.passed() {
         Err(exit.describe())
     } else if from.join(VENV_MARK).is_file() {
@@ -1184,18 +1227,42 @@ mod tests {
         assert_eq!(said, ["api: copying node_modules"]);
         let copied = api.worktree.join("node_modules/x/i.js");
         // Copy-on-write or not, depending on the file system under /tmp.
-        if report.not_copied.is_empty() {
-            assert_eq!(report.copied, ["api: node_modules"]);
-            assert_eq!(std::fs::read_to_string(copied).unwrap(), "1");
-        } else {
-            assert!(
-                report.not_copied[0].starts_with("api: node_modules (exited with"),
-                "{report:?}"
-            );
-            assert!(!api.worktree.join("node_modules").exists());
-        }
+        assert_eq!(report.not_copied, Vec::<String>::new());
+        assert_eq!(report.copied, ["api: node_modules"]);
+        assert_eq!(std::fs::read_to_string(copied).unwrap(), "1");
         assert!(web.worktree.join("node_modules/own").exists());
         assert!(!web.worktree.join("node_modules/x").exists());
+    }
+
+    /// A reflink from another file system always fails, whichever two.
+    #[test]
+    fn an_environment_copies_plainly_where_a_reflink_fails() {
+        use std::os::unix::fs::PermissionsExt;
+        let shm = Path::new("/dev/shm");
+        if !shm.is_dir() {
+            return;
+        }
+        let t = Temp::new();
+        let elsewhere = Temp(shm.join(format!("gerdr-setup-{}", std::process::id())));
+        let from = elsewhere.0.join(".venv");
+        put(&from, "pyvenv.cfg", "home = /usr\n");
+        put(&from, "bin/pytest", "#!/bin/sh\n");
+        let run = from.join("bin/pytest");
+        std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::os::unix::fs::symlink("/usr/bin/python3", from.join("bin/python")).unwrap();
+        let log_path = t.0.join("copy.log");
+        let log = File::create(&log_path).unwrap();
+        let to = t.0.join("copied");
+        let exit = copy_tree(&from, &to, true, &t.0, "s", &log).unwrap();
+        assert_eq!(exit, Exit::Code(0));
+        let meta = std::fs::metadata(to.join("bin/pytest")).unwrap();
+        assert_eq!(meta.permissions().mode() & 0o111, 0o111);
+        let link = std::fs::read_link(to.join("bin/python")).unwrap();
+        assert_eq!(link, Path::new("/usr/bin/python3"));
+        // Into it rather than to its name, were the first try's left there.
+        assert!(!to.join(".venv").exists());
+        let said = std::fs::read_to_string(&log_path).unwrap();
+        assert!(said.contains("so trying `cp -a --reflink=auto`"), "{said}");
     }
 
     #[test]
