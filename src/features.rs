@@ -10519,9 +10519,32 @@ fn findings_count(feature: &Feature) -> String {
 
 /// The milestones of `stage`'s file (Build's: nothing ticks a plan's) by
 /// name, as `probe` last read them; none while it has none.
-fn milestones_of(probe: Option<&Probe>, stage: Stage) -> Option<PageSection> {
-    let items = probe?.docs.milestones.get(&stage)?;
-    (!items.is_empty()).then(|| milestones_section(stage.label().to_owned(), items, None))
+fn milestones_of(probe: Option<&Probe>, stage: Stage, at_work: bool) -> Option<PageSection> {
+    let probe = probe?;
+    let items = probe.docs.milestones.get(&stage)?;
+    let running = items_running(items, &probe.docs.milestones_running, at_work);
+    (!items.is_empty())
+        .then(|| milestones_section(stage.label().to_owned(), items, None).running(running))
+}
+
+/// Which of `items` blink: with an agent `at_work`, those it says it is on
+/// (`marked`), else the first it hasn't done.
+fn items_running(items: &[(bool, String)], marked: &[usize], at_work: bool) -> Vec<usize> {
+    match (at_work, marked.is_empty()) {
+        (false, _) => Vec::new(),
+        (true, false) => marked.to_vec(),
+        (true, true) => items.iter().position(|(done, _)| !done).into_iter().collect(),
+    }
+}
+
+impl PageSection {
+    /// This group of Build's list with `items` in `running` blinking.
+    fn running(mut self, items: Vec<usize>) -> Self {
+        if let Self::Milestones { running, .. } = &mut self {
+            *running = items;
+        }
+        self
+    }
 }
 
 /// `items` as a group of Build's list, called `label`, saying `state` of how
@@ -10537,6 +10560,7 @@ fn milestones_section(
         done: items.iter().filter(|(done, _)| *done).count(),
         total: items.len(),
         items: items.to_vec(),
+        running: Vec::new(),
     }
 }
 
@@ -10544,8 +10568,9 @@ fn milestones_section(
 /// as `probe` last read it, under the open round if it isn't there yet: the
 /// log only lists its fixes once they go, and it is at work before that.
 /// How the open one stands shows here unless the page says so already, on
-/// the round's card or under "Verify failures".
-fn fix_rounds_of(feature: &Feature, probe: Option<&Probe>) -> Vec<PageSection> {
+/// the round's card or under "Verify failures". With the Build agent `at_work`
+/// on an open round's fixes, the first not ticked blinks.
+fn fix_rounds_of(feature: &Feature, probe: Option<&Probe>, at_work: bool) -> Vec<PageSection> {
     let label = |n| feature::fix_round::label(n, &feature.verify_fixes, &feature.fix_asked);
     let open = (feature.fix_round.as_ref()).filter(|_| feature.status == Status::Open);
     let state = open
@@ -10575,7 +10600,9 @@ fn fix_rounds_of(feature: &Feature, probe: Option<&Probe>) -> Vec<PageSection> {
     }
     out.extend(listed.iter().rev().map(|(n, items)| {
         let own = open.is_some_and(|round| round.n == *n);
+        let fixing = own && at_work && open.is_some_and(|r| r.phase == FixPhase::Fixing);
         milestones_section(label(*n), items, state.clone().filter(|_| own))
+            .running(items_running(items, &[], fixing))
     }));
     out
 }
@@ -10704,10 +10731,14 @@ fn stage_page(
                     done: stop.done as usize,
                     total: stop.total as usize,
                     items: Vec::new(),
+                    running: Vec::new(),
                 });
+                let at_work = feature.current() == Some(stage)
+                    && matches!(state.agent_status, Some(AgentStatus::Working));
+                let building = at_work && feature.fix_round.is_none();
                 sections.extend(verify_fixes_section(feature, now));
-                sections.extend(fix_rounds_of(feature, state.probe));
-                sections.extend(milestones_of(state.probe, stage).or(counted));
+                sections.extend(fix_rounds_of(feature, state.probe, at_work));
+                sections.extend(milestones_of(state.probe, stage, building).or(counted));
                 sections.extend(setup_section(feature, state));
             }
             Stage::Verify => {
@@ -14928,10 +14959,10 @@ pub(crate) mod tests {
             Some("setup failed: api: `npm ci` exited with 1")
         );
         // An agent started anyway: what it waits for comes first.
-        let stopped = Some("milestone 1 of 3 done \u{b7} Enter to continue");
+        let stopped = Some("stopped after milestone 1 of 3 \u{b7} Enter to continue");
         assert_eq!(
             build_line(&f, None, stopped).as_deref(),
-            Some("milestone 1 of 3 done \u{b7} Enter to continue \u{b7} setup failed")
+            Some("stopped after milestone 1 of 3 \u{b7} Enter to continue \u{b7} setup failed")
         );
         // On Build only; a done Build says when.
         let state = PanelState::default();
@@ -17226,7 +17257,8 @@ pub(crate) mod tests {
                 state: None,
                 done: 1,
                 total: 3,
-                items: Vec::new()
+                items: Vec::new(),
+                running: Vec::new(),
             })
         );
         let PageSection::Agent { buttons, .. } = &page.sections[0] else {
@@ -18560,7 +18592,8 @@ pub(crate) mod tests {
                 state: None,
                 done: 2,
                 total: 3,
-                items
+                items,
+                running: Vec::new(),
             })
         );
         let PageSection::Agent { tail: shown, .. } = &page.sections[0] else {
@@ -18607,6 +18640,20 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn what_blinks_on_builds_page_is_what_the_agent_is_at_work_on() {
+        let items: Vec<(bool, String)> = [(true, "a"), (false, "b"), (false, "c"), (false, "d")]
+            .map(|(d, t)| (d, t.to_owned()))
+            .into();
+        // Resting, it is on nothing, whatever the log says.
+        assert!(items_running(&items, &[2], false).is_empty());
+        // By its marks, several at once.
+        assert_eq!(items_running(&items, &[1, 3], true), [1, 3]);
+        // An agent that doesn't mark: the first it hasn't done.
+        assert_eq!(items_running(&items, &[], true), [1]);
+        assert!(items_running(&items[..1], &[], true).is_empty());
+    }
+
+    #[test]
     fn builds_page_shows_an_open_round_from_its_start_by_who_asked() {
         let mut f = feature("b", vec![repo("api", true)], 4);
         f.fix_asked.insert(1, Stage::AiReview);
@@ -18627,7 +18674,7 @@ pub(crate) mod tests {
         });
         let mut read = probe(None);
         read.docs.fix_rounds = vec![(1, vec![(true, "r1-1".to_owned())])];
-        let sections = |f: &Feature| fix_rounds_of(f, Some(&read));
+        let sections = |f: &Feature| fix_rounds_of(f, Some(&read), false);
         let state = |f: &Feature| Some(fix_round_state(f, f.fix_round.as_ref().unwrap()));
         // Nothing is in the build log yet, and the plan isn't written: an old
         // reading of it doesn't count.
@@ -18648,7 +18695,7 @@ pub(crate) mod tests {
         // The build log lists it now, and its ticks win; once over it stands alone.
         let ticked = vec![(true, "a.rs:1".to_owned())];
         read.docs.fix_rounds.push((2, ticked.clone()));
-        let sections = |f: &Feature| fix_rounds_of(f, Some(&read));
+        let sections = |f: &Feature| fix_rounds_of(f, Some(&read), false);
         let listed = milestones_section("Code review 2".into(), &ticked, state(&f));
         assert_eq!(sections(&f), [listed, review.clone()]);
         let over = milestones_section("Code review 2".into(), &ticked, None);
@@ -18665,7 +18712,7 @@ pub(crate) mod tests {
             ..f.last_fix_round.clone().unwrap()
         });
         verify.verify_fixes = vec![verify_fix(3, 2)];
-        assert_eq!(fix_rounds_of(&verify, Some(&read)).len(), 2);
+        assert_eq!(fix_rounds_of(&verify, Some(&read), false).len(), 2);
     }
 
     #[test]

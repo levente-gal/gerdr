@@ -603,12 +603,14 @@ pub enum PageSection {
     /// A group of Build's list, its `label` ("Build", "Review 1") with "done
     /// of total" and a bar, how it stands if it says (`state`), and each by
     /// name when known (`true` = done; empty until the build log is read).
+    /// Those in `running` blink: an agent is at work on them.
     Milestones {
         label: String,
         state: Option<CheckLine>,
         done: usize,
         total: usize,
         items: Vec<(bool, String)>,
+        running: Vec<usize>,
     },
 }
 
@@ -1294,10 +1296,12 @@ pub(super) enum Piece {
     },
     /// The milestones' progress.
     Bar { done: usize, total: usize },
-    /// A milestone: done, the next one, or one still to come.
+    /// A milestone: done, the next one, or one still to come. One `running`
+    /// blinks (see `feature_tab_blinkers`).
     Milestone {
         done: bool,
         next: bool,
+        running: bool,
         text: String,
     },
     /// The agent card of `StagePage::sections[i]`.
@@ -2508,6 +2512,7 @@ fn page_stack(
                 done,
                 total,
                 items,
+                running,
             } => {
                 s.caption(&format!("{label} \u{b7} {done} of {total}"));
                 s.y += 2;
@@ -2522,13 +2527,18 @@ fn page_stack(
                 if let Some(state) = state {
                     s.text(&state.text, Font::Body, Ink::Tone(state.tone), BODY_LINE);
                 }
-                let next = items.iter().position(|(d, _)| !d);
+                // What runs says where the work is; else what comes next.
+                let next = items
+                    .iter()
+                    .position(|(d, _)| !d)
+                    .filter(|_| running.is_empty());
                 for (i, (done, text)) in items.iter().enumerate() {
                     s.put(
                         MILESTONE_ROW,
                         Piece::Milestone {
                             done: *done,
                             next: next == Some(i),
+                            running: running.contains(&i),
                             text: text.clone(),
                         },
                     );
@@ -2962,6 +2972,11 @@ fn repo_chip_dot(chip: Rect) -> Rect {
     )
 }
 
+/// Where a milestone row's mark goes.
+fn milestone_mark(row: Rect) -> Rect {
+    Rectangle::new((row.loc.x, row.loc.y + 4).into(), (14, 14).into())
+}
+
 /// The blinking dot (`DOT` across) over a repository's still dot's
 /// `spot`.
 fn repo_blinker(spot: Rect) -> Rect {
@@ -2989,6 +3004,15 @@ pub fn feature_tab_blinkers(
             && dot.blinks()
         {
             dots.push((*rect, Some(TabColumn::Page)));
+        }
+        if let Piece::Milestone { running: true, .. } = piece {
+            let mark = milestone_mark(*rect);
+            let inset = (mark.size.w - DOT) / 2;
+            let spot = Rectangle::new(
+                (mark.loc.x + inset, mark.loc.y + inset).into(),
+                (DOT, DOT).into(),
+            );
+            dots.push((spot, Some(TabColumn::Page)));
         }
     }
     if view.repos_error.is_none() {
@@ -4309,14 +4333,21 @@ impl Painter {
                     p.border,
                 );
             }
-            Piece::Milestone { done, next, text } => {
-                let mark = Rectangle::new((rect.loc.x, rect.loc.y + 4).into(), (14, 14).into());
+            Piece::Milestone {
+                done,
+                next,
+                running,
+                text,
+            } => {
+                let mark = milestone_mark(rect);
                 let (stage, color) = match (done, next) {
                     (true, _) => (StageMark::Done, p.success),
                     (false, true) => (StageMark::Current, p.accent),
                     _ => (StageMark::Later, p.muted),
                 };
                 match stage {
+                    // At work it blinks: its dot is composed over the tab.
+                    _ if *running => {}
                     StageMark::Done => icon_sdf(c, mark, scale, color, |x, y| check(x, y, s)),
                     _ => icon_sdf(c, mark, scale, color, |x, y| {
                         stage_dot(stage, x, y, 9.0 * s)
@@ -4326,7 +4357,11 @@ impl Painter {
                     (rect.loc.x + DOT_ROOM + 4, rect.loc.y).into(),
                     (rect.size.w - DOT_ROOM - 4, rect.size.h).into(),
                 );
-                let color = if *done || *next { p.text } else { p.muted };
+                let color = if *done || *next || *running {
+                    p.text
+                } else {
+                    p.muted
+                };
                 line(c, text, text_rect, SMALL_FONT_SIZE, color);
             }
             Piece::MilestoneMode { fresh } => {
@@ -6210,6 +6245,24 @@ mod tests {
     #[test]
     fn the_blinking_dots_sit_on_what_is_at_work() {
         let mut view = tab_view();
+        // Build's list blinks where it says: all that are at work, in its rows.
+        let l = tab_at(&view, 1920);
+        let rows: Vec<Rect> = (l.pieces[TabColumn::Page as usize].iter())
+            .filter(|(_, piece)| matches!(piece, Piece::Milestone { running: true, .. }))
+            .map(|(rect, _)| *rect)
+            .collect();
+        assert_eq!(rows.len(), 2);
+        let dots = feature_tab_blinkers(&view, &l);
+        for row in rows {
+            assert!(dots.iter().any(|(dot, column)| {
+                *column == Some(TabColumn::Page) && row.contains_rect(*dot)
+            }));
+        }
+        for section in &mut view.page.sections {
+            if let PageSection::Milestones { running, .. } = section {
+                running.clear();
+            }
+        }
         let l = tab_at(&view, 1920);
         let dots = feature_tab_blinkers(&view, &l);
         let card = (l.pieces[TabColumn::Page as usize].iter())

@@ -72,8 +72,8 @@ pub enum GateKind {
     /// The stage's file is ready: Approve or Send back.
     #[default]
     Review,
-    /// The Build agent ticked `done` of `total` milestones and waits:
-    /// Continue.
+    /// The Build agent stopped with `done` of `total` milestones ticked, and
+    /// being told to go on didn't get it further: Continue.
     Milestone { done: u32, total: u32 },
     /// The Build agent stopped because the plan doesn't hold, and says what
     /// it needs: the user settles it with the agent.
@@ -110,6 +110,10 @@ const RECHECK: Duration = Duration::from_secs(10);
 /// How long a done agent rests before it is told its file isn't right. An
 /// agent just started can rest for a moment before its prompt reaches it.
 const REST: Duration = Duration::from_secs(30);
+/// How long a build log with milestones left must stay unchanged to count as
+/// its agent stopped when herdr can't say what it does: a milestone can take
+/// minutes between one line in the log and the next.
+const MILESTONE_QUIET: Duration = Duration::from_secs(600);
 
 /// A file's modification time (unix seconds) and length: whether it
 /// changed.
@@ -140,10 +144,12 @@ pub(crate) struct Watch {
     pub(crate) refused: Option<(Stamp, String)>,
     /// When the code was last read for the refused file.
     pub(crate) refused_at: Option<Instant>,
-    /// The Build agent was told to go on after this many milestones. A
-    /// build log still at that many is the stop it went on from: when
-    /// herdr can't say whether the agent rests, it isn't a stop again.
+    /// The Build agent was told to go on with this many milestones ticked.
+    /// Resting with no more than that, telling it again won't help: the
+    /// milestone gate is the user's.
     pub(crate) went_on: Option<u32>,
+    /// The build log as last seen, whatever it says.
+    log: Option<Stamp>,
     /// When it first looked done, for an agent on another machine: what it
     /// did by then has to come back first.
     seen_done: Option<Instant>,
@@ -165,8 +171,8 @@ impl Watch {
 }
 
 /// What's left of `watch` once its agent stops waiting for its prompt: a
-/// fresh Build agent's log still says the stop it goes on from until it
-/// ticks more (see `Watch::went_on`). Nothing else is worth keeping.
+/// fresh Build agent's log still says where it went on from until it ticks
+/// more (see `Watch::went_on`). Nothing else is worth keeping.
 fn after_waiting(watch: Watch) -> Option<Watch> {
     watch.went_on.map(|went_on| Watch {
         went_on: Some(went_on),
@@ -185,7 +191,7 @@ enum File {
     Old,
     Bad(Stamp, Vec<String>),
     /// A build log with `done` of `total` milestones ticked, some but not
-    /// all: the Build agent stops there.
+    /// all: the Build agent isn't through.
     Partial(Stamp, u32, u32),
     /// A build log whose agent stops because the plan doesn't hold: why.
     Blocked(Stamp, String),
@@ -229,7 +235,7 @@ enum Verdict {
     StillBad,
     /// Its pane is gone, and with it the agent.
     Gone,
-    /// A Build agent stopped after milestone `done` of `total`.
+    /// A Build agent stopped with `done` of `total` milestones ticked.
     Stop {
         done: u32,
         total: u32,
@@ -291,17 +297,16 @@ fn judge(
         };
     }
     watch.rested = None;
-    let went_on = match file {
-        File::Partial(_, done, _) => watch.went_on.is_some_and(|after| *done <= after),
-        _ => false,
-    };
     if matches!(status, None | Some(AgentStatus::Unknown))
-        && !went_on
         && let Some(stamp) = file.finished()
     {
+        let quiet = match file {
+            File::Partial(..) => MILESTONE_QUIET,
+            _ => STABLE,
+        };
         match watch.stable {
             Some((seen, since)) if seen == stamp => {
-                if now.duration_since(since) >= STABLE {
+                if now.duration_since(since) >= quiet {
                     return file.verdict().unwrap_or(Verdict::Wait);
                 }
             }
@@ -309,6 +314,28 @@ fn judge(
         }
     }
     Verdict::Wait
+}
+
+/// What comes of a Build agent resting with `done` of `total` milestones
+/// ticked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AtRest {
+    /// It goes on by itself: nobody checks between milestones.
+    GoOn,
+    /// It won't: the milestone gate is the user's.
+    Gate,
+    /// The gate waits for this already.
+    Waits,
+}
+
+/// `alive`: its tab is there. `stop`: the gate open now, `went_on`: how many
+/// were ticked when it was last told to go on.
+fn at_rest(alive: bool, stop: Option<Stop>, went_on: Option<u32>, done: u32, total: u32) -> AtRest {
+    match () {
+        () if !stop_is_new(stop, done, total) => AtRest::Waits,
+        () if !alive || went_on == Some(done) => AtRest::Gate,
+        () => AtRest::GoOn,
+    }
 }
 
 /// Whether `text` is a good `stage` file for `feature`; else what it
@@ -904,6 +931,10 @@ pub(crate) fn vars(
             "multi_repo",
             if feature.many_repos() { "yes" } else { "" }.to_owned(),
         ),
+        (
+            "fresh_milestones",
+            if feature.fresh_milestones { "yes" } else { "" }.to_owned(),
+        ),
         ("repos", repos),
         ("projects", projects),
         ("graphs", graphs),
@@ -947,7 +978,7 @@ pub(crate) fn agent_line(
         // Its `ready` says Build was marked done: never a review.
         if let Some(stop) = run.stop {
             return format!(
-                "milestone {} of {} done \u{b7} Enter to continue",
+                "stopped after milestone {} of {} \u{b7} Enter to continue",
                 stop.done, stop.total
             );
         }
@@ -1923,6 +1954,10 @@ impl Gerdr {
                 continue;
             }
             let file = read_file(&feature, stage, &path, watch.after);
+            // Build's page ticks them off as they are written.
+            let log = stamp(&path);
+            let log_moved = build && watch.log != log;
+            watch.log = log;
             // The `Blocked:` line is gone, by the agent's hand or the user's.
             let unblocked = run.blocked.is_some() && !matches!(file, File::Blocked(..));
             let verdict = judge(
@@ -1985,7 +2020,20 @@ impl Gerdr {
                 }
                 Verdict::Ready(_) => self.stage_ready(&project, &feature.slug, stage),
                 Verdict::Stop { done, total } => {
-                    self.milestone_stop(&project, &feature.slug, run.n, done, total);
+                    // A rest may only be one: it can be waiting on something.
+                    // One told to do a milestone and stop is through.
+                    let rested = *watch.rested.get_or_insert(now);
+                    let long = feature.fresh_milestones || now.duration_since(rested) >= REST;
+                    match at_rest(alive, run.stop, watch.went_on, done, total) {
+                        AtRest::Waits => {}
+                        AtRest::Gate => {
+                            self.milestone_stop(&project, &feature.slug, run.n, done, total);
+                        }
+                        AtRest::GoOn if long => {
+                            self.milestone_go_on(&project, &feature.slug, run.n, done, total);
+                        }
+                        AtRest::GoOn => {}
+                    }
                     if !alive && run.live() {
                         self.forget_pane(&project, &feature.slug, stage);
                     }
@@ -2011,6 +2059,9 @@ impl Gerdr {
                         self.forget_pane(&project, &feature.slug, stage);
                     }
                 }
+            }
+            if log_moved {
+                self.probe_feature(&project, &feature.slug);
             }
             if unblocked
                 && let Some(r) = self
@@ -2127,9 +2178,30 @@ impl Gerdr {
         }
     }
 
-    /// The Build agent of feature `slug` (run `n`) stopped after milestone
-    /// `done` of `total`: the milestone gate waits, and the user is told.
-    /// The same stop again is nothing new.
+    /// The Build agent of feature `slug` (run `n`) rests with `done` of
+    /// `total` milestones ticked: it goes on, with nobody asked.
+    fn milestone_go_on(&mut self, project: &str, slug: &str, n: u32, done: u32, total: u32) {
+        // A fresh agent waits on the setup to take over from this one (see
+        // `setup_before_build`).
+        let key = (project.to_owned(), slug.to_owned());
+        if self.features.build.pending.contains(&key) {
+            return;
+        }
+        let at = feature::now();
+        let current = self.feature(project, slug).is_some_and(|feature| {
+            feature.current() == Some(Stage::Build)
+                && feature.runs.get(&Stage::Build).is_some_and(|r| r.n == n)
+        });
+        if current {
+            let stop = Stop { done, total, at };
+            self.go_on_from(project, slug, Stage::Build, stop, false);
+        }
+    }
+
+    /// The Build agent of feature `slug` (run `n`) stopped with `done` of
+    /// `total` milestones ticked, and telling it to go on didn't get it
+    /// further: the milestone gate waits, and the user is told. The same stop
+    /// again is nothing new.
     fn milestone_stop(&mut self, project: &str, slug: &str, n: u32, done: u32, total: u32) {
         // A fresh agent waits on the setup to take over from this one: its
         // stop is over (see `setup_before_build`).
@@ -2158,7 +2230,8 @@ impl Gerdr {
         );
         let title = feature.title.clone();
         self.save_feature(project, slug);
-        let summary = format!("Build of \u{201c}{title}\u{201d}: milestone {done} of {total} done");
+        let summary =
+            format!("Build of \u{201c}{title}\u{201d} stopped after milestone {done} of {total}");
         self.notify_feature(project, slug, pane, &summary);
         self.show_success(summary);
     }
@@ -3631,6 +3704,10 @@ mod tests {
         );
         assert_eq!(
             judge(&mut w, None, true, &partial, false, false, t + STABLE),
+            Verdict::Wait
+        );
+        assert_eq!(
+            judge(&mut w, None, true, &partial, false, false, t + MILESTONE_QUIET),
             stop
         );
         // Its tab gone: stopped there too.
@@ -3654,24 +3731,35 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_agent_told_to_go_on_is_not_stopped_again() {
+    fn an_unknown_agent_is_stopped_only_by_a_long_quiet_log() {
         let t = Instant::now();
         let mut w = Watch {
             went_on: Some(2),
             ..watch()
         };
-        // Still at the milestone it went on from, however long.
         let partial = File::Partial((5, 9), 2, 4);
         judge(&mut w, None, true, &partial, false, false, t);
         assert_eq!(
             judge(&mut w, None, true, &partial, false, false, t + STABLE * 3),
             Verdict::Wait
         );
-        // The next one ticked: a stop.
+        // The next one ticked: quiet counts from there.
         let next = File::Partial((6, 9), 3, 4);
         judge(&mut w, None, true, &next, false, false, t + STABLE * 3);
         assert_eq!(
-            judge(&mut w, None, true, &next, false, false, t + STABLE * 4),
+            judge(&mut w, None, true, &next, false, false, t + MILESTONE_QUIET),
+            Verdict::Wait
+        );
+        assert_eq!(
+            judge(
+                &mut w,
+                None,
+                true,
+                &next,
+                false,
+                false,
+                t + STABLE * 3 + MILESTONE_QUIET
+            ),
             Verdict::Stop { done: 3, total: 4 }
         );
         // herdr seeing it rest after working still stops it where it is.
@@ -3692,6 +3780,24 @@ mod tests {
             ),
             Verdict::Stop { done: 2, total: 4 }
         );
+    }
+
+    #[test]
+    fn a_resting_build_goes_on_until_telling_it_gets_it_no_further() {
+        let stop = Some(Stop {
+            done: 2,
+            total: 4,
+            at: 5,
+        });
+        assert_eq!(at_rest(true, None, None, 1, 4), AtRest::GoOn);
+        // More ticked since it was told: told again.
+        assert_eq!(at_rest(true, None, Some(1), 2, 4), AtRest::GoOn);
+        assert_eq!(at_rest(true, None, Some(2), 2, 4), AtRest::Gate);
+        // Its tab gone, nothing can be told.
+        assert_eq!(at_rest(false, None, None, 2, 4), AtRest::Gate);
+        // The gate is open already; more ticked is news.
+        assert_eq!(at_rest(true, stop, Some(2), 2, 4), AtRest::Waits);
+        assert_eq!(at_rest(true, stop, Some(2), 3, 4), AtRest::GoOn);
     }
 
     #[test]
@@ -3820,7 +3926,7 @@ mod tests {
         });
         assert_eq!(
             agent_line(&r, Stage::Build, None, Some(&checking), now),
-            "milestone 2 of 4 done \u{b7} Enter to continue"
+            "stopped after milestone 2 of 4 \u{b7} Enter to continue"
         );
     }
 

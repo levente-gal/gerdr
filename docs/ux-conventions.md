@@ -179,6 +179,10 @@ A key is written in one place, not on the button that does the same thing:
   "Code review N" and "Manual test N". That list has the newest round on top
   and Build's own milestones under the rounds. A round shows in it from its
   start: how it stands at first, the plan's fixes unticked once the plan waits.
+  Build doesn't wait for the user between milestones: they tick off as their
+  commits land, and what the agent is at work on blinks while it works (several
+  at once when subagents build them). A milestone gate only opens for an agent
+  that stops with some left and gets no further when told to go on.
   Setup goes last on that page; a failed setup is still said by the status at
   its top.
 

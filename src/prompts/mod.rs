@@ -72,6 +72,7 @@ mod tests {
             ("fix_plan.path", ""),
             ("branch", "feature/bulk-edit"),
             ("multi_repo", if multi { "yes" } else { "" }),
+            ("fresh_milestones", ""),
             ("repos", "- api\n- web"),
             ("projects", ""),
             ("comments", comments),
@@ -197,21 +198,34 @@ mod tests {
             "/d/bulk-edit/build.md",
             "`## Milestones`",
             "go on from it",
-            "only that one",
+            "right through to the last",
+            "Do not stop between",
+            "`- [~] …`",
             "feature/bulk-edit, which is already checked out",
             "never push",
             "Leave nothing uncommitted and no untracked files",
-            "Then STOP.",
-            "gerdr waits for",
-            "do not start the next milestone on\n   your own",
+            "Stop only once every milestone is ticked",
         ] {
             assert!(one.contains(words), "{words}: {one}");
         }
+        assert!(!one.contains("subagents"));
+        assert!(!one.contains("only that one"));
         assert!(!one.contains("context only"));
         assert!(!one.contains("do not change any\n   code"));
         assert!(!one.contains("comments on the build"));
 
+        let fresh = {
+            let mut v = build_vars(false, "", "");
+            v.insert("artifact.path".into(), "/d/bulk-edit/build.md".into());
+            v.insert("fresh_milestones".into(), "yes".into());
+            render_builtin("build", &v).unwrap()
+        };
+        assert!(fresh.contains("and only that") && fresh.contains("`- [~] …`"));
+        assert!(fresh.contains("gerdr starts the\n   next one"));
+        assert!(!fresh.contains("right through"));
+
         let many = build(true, "Name the endpoint bulk.", "");
+        assert!(many.contains("subagents") && many.contains("You keep the build log"));
         assert!(many.contains("“context only” are there to read: never edit them"));
         assert!(many.contains("Name the endpoint bulk."));
     }
@@ -224,7 +238,7 @@ mod tests {
         assert!(text.contains("wants these 2 findings fixed"));
         assert!(text.contains("## r1-1: Off by one"));
         assert!(text.contains("/d/bulk-edit/prompts/build-1-findings-1.md"));
-        assert!(!text.contains("Build the first unticked milestone"));
+        assert!(!text.contains("Build the unticked milestones"));
         assert!(text.contains("`## Fix round 1`") && text.contains("every one is ticked"));
         let line = render_builtin("send-fixes", &v).unwrap();
         assert!(!line.trim_end().contains('\n'), "{line}");
@@ -280,7 +294,7 @@ mod tests {
         assert!(text.contains("`## Fixes`"));
         // Fixing and building are for later.
         assert!(!text.contains("Fix the cause of each one"));
-        assert!(!text.contains("Build the first unticked milestone"));
+        assert!(!text.contains("Build the unticked milestones"));
     }
 
     #[test]
@@ -310,8 +324,8 @@ mod tests {
         v.insert("artifact.path".into(), "/d/bulk-edit/build.md".into());
         let go = render_builtin("continue", &v).unwrap();
         assert!(!go.trim_end().contains('\n'), "{go}");
-        assert!(go.contains("next unticked milestone in /d/bulk-edit/build.md"));
-        assert!(go.contains("stop after it"));
+        assert!(go.contains("unticked milestones in /d/bulk-edit/build.md"));
+        assert!(go.contains("do not stop between them"));
         // A whole suite per milestone takes ages: Verify runs those once.
         assert!(go.contains("never a whole test suite"));
     }
