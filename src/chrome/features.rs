@@ -1368,6 +1368,9 @@ impl Ink {
 pub(super) enum Piece {
     /// A section's uppercase label.
     Caption(String),
+    /// A list of milestones' or fixes' uppercase label, with the buttons of
+    /// its section `k` at its right.
+    GroupCaption(usize, String),
     Text {
         text: String,
         font: Font,
@@ -2595,7 +2598,7 @@ fn page_stack(
                 buttons: held,
             } => {
                 let said = format!("{label} \u{b7} {done} of {total}").to_uppercase();
-                let caption = s.put(CAPTION, Piece::Caption(said));
+                let caption = s.put(CAPTION, Piece::GroupCaption(k, said));
                 // Its buttons from the caption's right, in their order.
                 let mut bx = caption.loc.x + caption.size.w;
                 let by = caption.loc.y + (CAPTION - ROW_BUTTON) / 2;
@@ -4449,6 +4452,18 @@ impl Painter {
         match piece {
             Piece::Caption(text) => {
                 line(c, text, rect, DETAIL_FONT_SIZE, p.muted);
+            }
+            Piece::GroupCaption(k, text) => {
+                line(c, text, rect, DETAIL_FONT_SIZE, p.muted);
+                let Some(PageSection::Milestones { buttons, .. }) = view.page.sections.get(*k)
+                else {
+                    return;
+                };
+                for &i in buttons {
+                    if let Some(r) = l.page_buttons.get(i).copied().flatten() {
+                        self.page_button(c, view, i, at(r), scale, p);
+                    }
+                }
             }
             Piece::Text {
                 text,
@@ -6888,6 +6903,32 @@ mod tests {
             let ratio = contrast(comment_stripe(p), ground);
             assert!(ratio >= 3.0, "its stripe is {ratio:.2}:1");
         }
+    }
+
+    #[test]
+    fn a_list_of_fixes_holds_its_button_at_its_captions_right() {
+        let area = Rectangle::new((0, 0).into(), (1000, 800).into());
+        let mut view = tab_view();
+        view.page.sections.clear();
+        view.page.buttons = vec![PageButton {
+            label: "Open plan".into(),
+            style: ButtonStyle::Plain,
+        }];
+        view.page.sections.push(PageSection::Milestones {
+            label: "Code review 1".into(),
+            state: None,
+            done: 1,
+            total: 1,
+            items: vec![(true, "a.rs:1".into())],
+            buttons: vec![0],
+        });
+        let l = feature_tab_layout(&view, area);
+        let button = l.page_buttons[0].expect("placed");
+        let caption = (l.pieces.iter().flatten())
+            .find_map(|(rect, piece)| matches!(piece, Piece::GroupCaption(0, _)).then_some(*rect))
+            .expect("its caption");
+        assert_eq!(button.loc.x + button.size.w, caption.loc.x + caption.size.w);
+        assert!((button.loc.y - caption.loc.y).abs() <= ROW_BUTTON - CAPTION);
     }
 
     #[test]
