@@ -41,6 +41,8 @@ pub enum Then {
     StopOnMachine(String, String, crate::feature::Stage),
     /// Take this feature over from a machine that can't be asked: project, feature.
     TakeOver(String, String),
+    /// Open this feature's sandbox to the network: project, feature.
+    OpenSandboxLan(String, String),
     /// Start this stage's agent afresh, ending the one on another machine.
     FreshOnMachine(String, String, crate::feature::Stage),
     /// Close the agent of this card (see `Gerdr::close_agent`).
@@ -698,6 +700,7 @@ impl Gerdr {
                 self.stop_on_machine(&project, &slug, stage);
             }
             Then::TakeOver(project, slug) => self.take_feature_anyway(&project, &slug),
+            Then::OpenSandboxLan(project, slug) => self.open_sandbox_lan(&project, &slug),
             Then::FreshOnMachine(project, slug, stage) => {
                 self.start_stage_agent_now(&project, &slug, stage, true);
             }

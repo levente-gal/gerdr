@@ -376,6 +376,10 @@ impl Gerdr {
             env.extend(link.clone());
         }
         env.extend(envs.home.clone());
+        let ip = crate::sandbox_lan::lan_ip();
+        for value in env.values_mut() {
+            *value = crate::sandbox_lan::with_lan_ip(value, ip);
+        }
         // A port is only taken on the machine that holds it.
         let taken: Vec<u16> = (self.features.all.values().flatten())
             .filter(|f| !(f.project == project && f.slug == slug))
@@ -637,6 +641,10 @@ impl Gerdr {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         env.extend(envs.home.iter().map(|(k, v)| (k.clone(), v.clone())));
+        let ip = crate::sandbox_lan::lan_ip();
+        for (_, value) in &mut env {
+            *value = crate::sandbox_lan::with_lan_ip(value, ip);
+        }
         let lines: Vec<_> = lines_of(feature, &runs, false)
             .into_iter()
             .filter(|line| line.on)

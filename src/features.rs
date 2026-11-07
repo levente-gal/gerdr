@@ -1442,6 +1442,8 @@ pub enum PanelOutcome {
     OpenSandboxPage(usize),
     /// Open the page of the sandbox's app after the one last opened.
     NextSandboxPage,
+    /// Open the sandbox to the network, for a phone, asking; or close it.
+    SandboxLan,
     /// Show the terminals of a sandbox on another machine.
     ShowSandbox,
     /// Start the sandbox again on the same data.
@@ -1613,6 +1615,7 @@ impl PanelOutcome {
                 | Self::OpenSandbox
                 | Self::OpenSandboxPage(_)
                 | Self::NextSandboxPage
+                | Self::SandboxLan
                 | Self::ShowSandbox
                 | Self::OpenDoc(_)
                 | Self::ReviewFixPlan
@@ -1823,6 +1826,8 @@ pub struct RowCtx {
     /// The comments the user left in its diff, as last read, or as its open
     /// diff has them: with any, AI review's fixes need a plan.
     pub comments: usize,
+    /// Its sandbox is open to the network (see `sandbox_lan`).
+    pub lan_open: bool,
 }
 
 impl RowCtx {
@@ -3253,6 +3258,7 @@ fn action_hint(action: &PanelOutcome) -> &'static str {
         PanelOutcome::StartSandbox => "start sandbox\u{2026}",
         PanelOutcome::OpenSandbox => "open app",
         PanelOutcome::OpenSandboxPage(_) | PanelOutcome::NextSandboxPage => "open page",
+        PanelOutcome::SandboxLan => "network",
         PanelOutcome::ShowSandbox => "show terminals",
         PanelOutcome::RestartSandbox => "restart sandbox",
         PanelOutcome::ResetSandbox => "reset data\u{2026}",
@@ -4521,6 +4527,15 @@ impl FeaturePanel {
             {
                 return Some(PanelOutcome::NextSandboxPage);
             }
+            Keysym::n | Keysym::N
+                if ctrl
+                    && mods.shift
+                    && offers_sandbox(feature, stage)
+                    && sandbox_alive(feature)
+                    && !sandbox_elsewhere(feature) =>
+            {
+                return Some(PanelOutcome::SandboxLan);
+            }
             Keysym::g | Keysym::G
                 if ctrl
                     && mods.shift
@@ -5020,6 +5035,14 @@ fn writers_page_actions(
                     button(&page.name, ButtonStyle::Quiet),
                     PanelOutcome::OpenSandboxPage(i),
                 ));
+            }
+            // A phone reaches only what runs on this machine.
+            if !sandbox_elsewhere(feature) {
+                let label = match ctx.lan_open {
+                    true => "Close to network",
+                    false => "Open to network\u{2026}",
+                };
+                out.push((button(label, ButtonStyle::Quiet), PanelOutcome::SandboxLan));
             }
             // Here they are in a tab of their own already.
             if sandbox_elsewhere(feature) {
@@ -6050,6 +6073,8 @@ impl Gerdr {
             setting_up: self.setting_up(&feature.project, &feature.slug),
             feature_busy: self.feature_busy(&feature.project, &feature.slug),
             comments,
+            lan_open: (self.features.build.sandbox_lan)
+                .contains_key(&(feature.project.clone(), feature.slug.clone())),
         }
     }
 
@@ -7829,6 +7854,7 @@ impl Gerdr {
             PanelOutcome::OpenSandbox => self.open_sandbox_app(&project, &slug, Some(0)),
             PanelOutcome::OpenSandboxPage(i) => self.open_sandbox_app(&project, &slug, Some(i)),
             PanelOutcome::NextSandboxPage => self.open_sandbox_app(&project, &slug, None),
+            PanelOutcome::SandboxLan => self.ask_sandbox_lan(&project, &slug),
             PanelOutcome::ShowSandbox => self.show_sandbox_terminals(&project, &slug),
             PanelOutcome::RestartSandbox => {
                 let what = crate::feature_sandbox::StopFor::Restart;
@@ -9615,6 +9641,7 @@ impl Gerdr {
                 .and_then(|s| s.machine.as_deref())
                 .map(|id| self.machine_name(id)),
             sandbox_seen: self.sandbox_seen(feature),
+            sandbox_lan: self.sandbox_lan(&feature.project, &feature.slug),
             manual: manual_counts.map(crate::manual_test::counts_text),
             criteria: self.criterion_rows(feature),
             manual_gate: manual_counts.map(manual_gate),
@@ -10154,6 +10181,8 @@ struct PanelState<'a> {
     setup_on: Option<String>,
     /// How its sandbox stands here, when another machine has it.
     sandbox_seen: Option<crate::machine_sandbox::SandboxSeen>,
+    /// How its sandbox stands on the network, when open to it.
+    sandbox_lan: Option<crate::sandbox_lan::LanSeen>,
 }
 
 /// What the button picking a stage's model says.
@@ -11009,6 +11038,18 @@ fn sandbox_sections(feature: &Feature, state: &PanelState) -> Vec<PageSection> {
         if let Some(seen) = seen.filter(|seen| !seen.taken.is_empty()) {
             let text = format!("taken here, so not open: {}", ports_text(&seen.taken));
             out.push(line(text, CheckTone::Blocker));
+        }
+        // Anything on the network reaches it: said before the rest.
+        if let Some(lan) = &state.sandbox_lan {
+            let text = match lan.open.is_empty() {
+                true => format!("open to your network at {}, nothing listening yet", lan.ip),
+                false => format!("open to your network at {}: {}", lan.ip, ports_text(&lan.open)),
+            };
+            out.push(line(text, CheckTone::Blocker));
+            if !lan.taken.is_empty() {
+                let text = format!("taken here, so not on the network: {}", ports_text(&lan.taken));
+                out.push(line(text, CheckTone::Blocker));
+            }
         }
         let ports = run.listening();
         let here = seen.map_or(&[][..], |seen| seen.here.as_slice());
@@ -12001,6 +12042,10 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 6] = [
                 "Alt+Y",
                 "Manual test: open the sandbox's next page, as the buttons after Open app do",
             ),
+            (
+                "Ctrl+Shift+N",
+                "Manual test: open the sandbox to your network, for a phone, or close it",
+            ),
             ("Ctrl+Shift+G", "Manual test: restart the sandbox"),
             (
                 "Ctrl+Shift+X",
@@ -12488,6 +12533,12 @@ fn writers_tab_hints(
                     }
                     if sandbox_elsewhere(feature) {
                         hints.push(hint("Ctrl+Shift+T", "show terminals"));
+                    } else {
+                        let lan = match ctx.lan_open {
+                            true => "close to network",
+                            false => "open to network\u{2026}",
+                        };
+                        hints.push(hint("Ctrl+Shift+N", lan));
                     }
                     hints.push(hint("Ctrl+Shift+G", "restart"));
                     hints.push(hint("Ctrl+Shift+X", "reset data\u{2026}"));

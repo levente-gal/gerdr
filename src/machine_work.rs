@@ -1539,6 +1539,7 @@ impl Gerdr {
         // Before anything that needs a link: losing the last closes what used it.
         self.sandbox_places_tick();
         self.sandbox_views_tick();
+        self.sandbox_lan_tick();
         if self.machines.links.values().all(|link| link.work.is_none()) {
             return;
         }

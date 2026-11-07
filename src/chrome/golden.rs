@@ -4733,6 +4733,7 @@ fn feature_tab_manual_pages() -> super::FeatureTabView {
     for (label, style) in [
         ("Django admin", ButtonStyle::Quiet),
         ("Expo web", ButtonStyle::Quiet),
+        ("Open to network\u{2026}", ButtonStyle::Quiet),
         ("Restart", ButtonStyle::Quiet),
         ("Reset data\u{2026}", ButtonStyle::Quiet),
         ("Stop\u{2026}", ButtonStyle::Quiet),
@@ -4961,7 +4962,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 51]; 4] = [
         0x991d1848f7033107, // tab_review_page_1180
         0xc4b722d8b35c09b2, // tab_open_round_1180
         0xa55646a352f29557, // tab_open_round_860
-        0x7d180e2a3721053b, // tab_manual_pages_860
+        0x30ad567b0a45d46a, // tab_manual_pages_860
     ],
     // Dark at 2
     [
@@ -5015,7 +5016,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 51]; 4] = [
         0xa37c484a9e95f3ca, // tab_review_page_1180
         0x2cd07330c04ac653, // tab_open_round_1180
         0x10c9f9ce73220117, // tab_open_round_860
-        0xa4f88b39cf735659, // tab_manual_pages_860
+        0x49b4d1096fa816ea, // tab_manual_pages_860
     ],
     // Light at 1
     [
@@ -5069,7 +5070,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 51]; 4] = [
         0xc80d83cdbecf59b3, // tab_review_page_1180
         0xbd227132ee696c72, // tab_open_round_1180
         0x31a745f74d2e8e52, // tab_open_round_860
-        0x82b880fb10a98179, // tab_manual_pages_860
+        0x8681b353f28beb8a, // tab_manual_pages_860
     ],
     // Light at 2
     [
@@ -5123,7 +5124,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 51]; 4] = [
         0xb7f9bee96811fb6a, // tab_review_page_1180
         0x752ec2845bdeb8a4, // tab_open_round_1180
         0xd75e42f004429c32, // tab_open_round_860
-        0x0ea015f2be290fc2, // tab_manual_pages_860
+        0x474ce52b74bbeaf7, // tab_manual_pages_860
     ],
 ];
 

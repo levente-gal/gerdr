@@ -67,7 +67,7 @@ const NOT_FOUND: i32 = 127;
 ///
 /// bash because of `/dev/tcp`: nothing else that can connect comes with every
 /// system. It only runs to its `exec`: `$$` is then the `cat` passing replies.
-fn relay_script(port: u16) -> String {
+pub(crate) fn relay_script(port: u16) -> String {
     format!(
         "exec 3<>/dev/tcp/localhost/{port} || exit 7\n\
          {{ cat >&3; kill $$; }} <&0 >/dev/null 2>&1 &\n\
@@ -353,7 +353,7 @@ impl AfarJob {
 
 /// `port` here, listening for connections to pass on. Dropped, it closes them all.
 #[derive(Debug)]
-struct Relay {
+pub(crate) struct Relay {
     stop: Arc<AtomicBool>,
 }
 
@@ -474,7 +474,7 @@ impl SandboxRemoval {
 
 /// What a relay of `port` found that says the whole thing can't work.
 #[derive(Clone, Debug, Default)]
-struct Missing(Arc<AtomicBool>);
+pub(crate) struct Missing(pub(crate) Arc<AtomicBool>);
 
 /// Start passing connections to `port` here on, each with the command `command`
 /// makes. An error says the port can't be had.
@@ -483,7 +483,16 @@ fn start_relay(
     command: impl Fn() -> Command + Send + 'static,
     missing: Missing,
 ) -> io::Result<Relay> {
-    let listeners = listen_on(port)?;
+    start_relay_on(listen_on(port)?, port, command, missing)
+}
+
+/// `start_relay` on `listeners`, which listen on `port`.
+pub(crate) fn start_relay_on(
+    listeners: Vec<TcpListener>,
+    port: u16,
+    command: impl Fn() -> Command + Send + 'static,
+    missing: Missing,
+) -> io::Result<Relay> {
     let stop = Arc::new(AtomicBool::new(false));
     let thread_stop = Arc::clone(&stop);
     std::thread::Builder::new()
@@ -662,7 +671,7 @@ pub struct SandboxSeen {
 
 /// What's said of `port` being taken: it goes on the badge too, for what it takes
 /// is for the user to do.
-fn taken_text(title: &str, port: u16) -> String {
+pub(crate) fn taken_text(title: &str, port: u16) -> String {
     format!(
         "Port {port} is taken here, so the sandbox of \u{201c}{title}\u{201d} can't be reached at it: stop what holds it"
     )

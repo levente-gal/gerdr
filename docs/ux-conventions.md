@@ -41,6 +41,7 @@ rules, for reviewing a branch before it merges.
 | Ctrl+Shift+T | Start a feature's sandbox on the feature tab's Manual test page, after a dialog asks which commands run in it (Space checks; the feature keeps the choice, and Ctrl+Shift+G and Ctrl+Shift+X go by it without asking); stop it, asking, once it runs (at once while it starts). With the sandbox on another machine it shows the sandbox's terminals instead, and Ctrl+Shift+Q stops it. |
 | Ctrl+Shift+Y | Open the running sandbox's app, in a tab inside it (feature tab, Manual test). With the sandbox on another machine, in a tab here, through ports opened on this machine. The app's first page: the project's `workflow.sandbox_pages` list them, else its commands do (a Django server: its site, then its admin; Expo with a web client last), else what listens. |
 | Alt+Y | On Manual test, with the sandbox's app having more than one page: open the one after the last opened (also a button for each, after Open app). |
+| Ctrl+Shift+N | Open the running sandbox to the network, for a phone, asking first; or close it at once (feature tab, Manual test; also its "Open to network…" / "Close to network" button). Only a sandbox on this machine. |
 | Ctrl+Shift+G | Start the sandbox again on the same data (feature tab, Manual test). |
 | Ctrl+Shift+X | Reset the sandbox's data from main's, or remove a stopped sandbox with its data, asking first (feature tab, Manual test). |
 | Ctrl+Shift+A | Pick the next agent on the feature tab's selected stage (the chips on its agent card). It applies from the agent's next start; one running goes on. |
@@ -180,6 +181,14 @@ A key is written in one place, not on the button that does the same thing:
   workspace and the link is up. A port taken here is said by name, on the "!" badge
   too, and a page never opens on it. Show terminals only looks, as above. Anything
   on this machine can reach those ports while they are open, as with `ssh -L`.
+- A sandbox on this machine opens to the network only when asked, and asks
+  first: anything on the network then reaches its app and its copy of the
+  data. Its app's ports open on this machine's network address under the same
+  numbers, so the addresses its commands print (Expo's QR code) work on a
+  phone. `{lan_ip}` in `workflow.sandbox_env` is that address, for an app's
+  API URL. A port something here holds is said by name, on the "!" badge too.
+  Its page says it is open in the warning colour. It closes when the sandbox
+  stops or starts again, and with gerdr.
 - A line gerdr types to an agent and finds still in its input box gets Enter
   again, up to six times over about four minutes. Only then is the user told.
 - Work the user sends to an agent (findings, review comments, failed tests)
