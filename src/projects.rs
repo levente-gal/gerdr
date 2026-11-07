@@ -74,6 +74,10 @@ pub struct Store {
     /// How the repositories panel lists changed files, as last picked.
     #[serde(default, skip_serializing_if = "Grouping::is_list")]
     pub repo_grouping: Grouping,
+    /// Whether the criteria strip over a sandbox's app was left folded to
+    /// its chip (see `criteria_strip`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub criteria_folded: bool,
     /// How wide the sidebar was left, in logical pixels.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sidebar_width: Option<i32>,
@@ -127,6 +131,8 @@ struct State {
     ci_watched: crate::ci::Watched,
     #[serde(default, skip_serializing_if = "Grouping::is_list")]
     repo_grouping: Grouping,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    criteria_folded: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     sidebar_width: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -581,6 +587,7 @@ impl Store {
         self.t3_finished = state.t3_finished;
         self.ci_watched = state.ci_watched;
         self.repo_grouping = state.repo_grouping;
+        self.criteria_folded = state.criteria_folded;
         self.sidebar_width = state.sidebar_width;
         self.dock_share = state.dock_share;
         self.window_size = state.window_size;
@@ -601,6 +608,7 @@ impl Store {
             t3_finished: self.t3_finished.clone(),
             ci_watched: self.ci_watched.clone(),
             repo_grouping: self.repo_grouping,
+            criteria_folded: self.criteria_folded,
             sidebar_width: self.sidebar_width,
             dock_share: self.dock_share,
             window_size: self.window_size,
@@ -1916,6 +1924,7 @@ mod tests {
             t3_finished: Default::default(),
             ci_watched: Default::default(),
             repo_grouping: Grouping::Folders,
+            criteria_folded: true,
             sidebar_width: Some(280),
             dock_share: Some(0.6),
             window_size: Some((1600, 1000)),

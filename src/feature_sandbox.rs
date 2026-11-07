@@ -643,7 +643,10 @@ impl Gerdr {
         };
         let ports = run.listening();
         match self.sandbox_url(project, &ports) {
-            Some(url) => self.open_feature_page(project, slug, url),
+            Some(url) => {
+                self.sandbox_shown(project, slug);
+                self.open_feature_page(project, slug, url);
+            }
             None => self.show_warning("Nothing listens in the sandbox yet".into()),
         }
     }
