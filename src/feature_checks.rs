@@ -76,6 +76,8 @@ pub(crate) struct HerdrPanes {
     /// It is reached over a link to another machine: no connection only says
     /// that machine is out of reach.
     pub(crate) over_link: bool,
+    /// The checks' whole logs are kept with the AI work.
+    pub(crate) keep_logs: bool,
 }
 
 impl HerdrPanes {
@@ -128,6 +130,51 @@ impl verify::Panes for HerdrPanes {
             // It's killed after a moment all the same.
             tracing::warn!("stopping the check in pane {pane}: {err}");
         }
+    }
+
+    fn keep_log(&mut self, pane: &str) -> Option<String> {
+        if !self.keep_logs {
+            return None;
+        }
+        match self.herdr.pane_scrollback(pane) {
+            Ok((text, _)) => Some(text),
+            Err(err) => {
+                // Its last lines are in the record all the same.
+                tracing::warn!("reading all the check's pane {pane} kept: {err}");
+                None
+            }
+        }
+    }
+}
+
+/// Keep what check `i` of Verify run `run` printed, `scrollback` all its
+/// terminal kept, in AI work folder `dir`, with how it ended.
+fn keep_check_log(dir: &Path, run: &str, i: usize, outcome: &Outcome, scrollback: &str) {
+    use crate::ai_work::{Event, Line, observe, write};
+    let kept = write::check_log(dir, scrollback, verify::HEAD).and_then(|(log, truncated)| {
+        let event = Event::CheckEnded {
+            run: run.to_owned(),
+            key: observe::check_key(&outcome.repo, &outcome.command),
+            i,
+            outcome: serde_json::to_value(outcome).unwrap_or_default(),
+            log: Some(log),
+            truncated,
+        };
+        write::append(dir, &Line::now(event))
+    });
+    // Each check's own: another kept doesn't clear it.
+    let at = format!(
+        "{}#{}",
+        dir.display(),
+        observe::check_key(&outcome.repo, &outcome.command)
+    );
+    match kept {
+        Ok(()) => crate::problems::clear_at("ai-work", &at),
+        Err(err) => crate::problems::report_at(
+            "ai-work",
+            &at,
+            format!("Couldn't keep the log of {}: {err}", outcome.command),
+        ),
     }
 }
 
@@ -482,10 +529,12 @@ impl Gerdr {
         let key = (project.to_owned(), slug.to_owned());
         self.features.build.stops.insert(key, Arc::clone(&stops));
         let data = store::dir(None, project, slug);
+        let kept = self.ai_work.dir(project, slug);
         let (project, slug) = (project.to_owned(), slug.to_owned());
         self.feature_work(busy, move |tx| {
             let mut run = run;
             let n = run.n;
+            let run_key = crate::ai_work::observe::verify_key(&run);
             verify::prune_runs(&data, n);
             let dir = verify::run_dir(&data, n);
             let begun = Begun {
@@ -532,6 +581,7 @@ impl Gerdr {
                 missed: HashMap::new(),
                 busy: false,
                 over_link: there.is_some(),
+                keep_logs: kept.is_some(),
             };
             let title = feature.title.clone();
             let total = outcomes.len();
@@ -549,10 +599,18 @@ impl Gerdr {
             };
             let back = there.as_ref().map(|remote| remote.paths.back());
             let mut ended = |index, mut outcome: Outcome| {
+                let log = outcome.log.take();
                 // What comes from there reads as it does here.
                 if let Some(back) = &back {
                     outcome.tail = back.text(&outcome.tail);
                     outcome.excerpt = (outcome.excerpt.iter()).map(|l| back.text(l)).collect();
+                }
+                if let (Some(dir), Some(log)) = (&kept, log) {
+                    let log = match &back {
+                        Some(back) => back.text(&log),
+                        None => log,
+                    };
+                    keep_check_log(dir, &run_key, index, &outcome, &log);
                 }
                 outcomes[index] = Some(outcome.clone());
                 let done = outcomes.iter().flatten().count();
@@ -871,6 +929,7 @@ mod tests {
             missed: HashMap::new(),
             busy: false,
             over_link: false,
+            keep_logs: false,
         }
     }
 

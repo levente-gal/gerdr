@@ -66,6 +66,11 @@ pub enum MenuAction {
     DisconnectMachine(String),
     /// Stop taking this feature over from another machine: project, slug.
     StopTakeOver(String, String),
+    /// Stop keeping earlier AI work, or drawing its stats again.
+    StopAiWork,
+    /// Stop bringing the AI work of a feature (project, slug) from the
+    /// machine it was taken over from.
+    StopAiWorkPull(String, String),
     RemoveMachine(String),
     /// T3 Code, updated to the newest version gerdr reads, or to this one
     /// (see `Gerdr::update_t3`).
@@ -457,6 +462,8 @@ impl Gerdr {
             MenuAction::ConnectMachine(name) => self.connect_machine(&name),
             MenuAction::DisconnectMachine(name) => self.disconnect_machine(&name),
             MenuAction::StopTakeOver(project, slug) => self.stop_take(&project, &slug),
+            MenuAction::StopAiWork => self.ai_work.stop_busy(),
+            MenuAction::StopAiWorkPull(project, slug) => self.ai_work.stop_pull(&project, &slug),
             MenuAction::RemoveMachine(name) => self.ask_remove_machine(&name),
             MenuAction::UpdateT3(version) => self.update_t3(version),
             MenuAction::NewTab(w) => {

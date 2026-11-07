@@ -71,6 +71,7 @@ use crate::manual_test::Row;
 use crate::{
     Gerdr,
     agent_icons::AgentIcon,
+    ai_work::{self, observe::Follow},
     chrome::{
         self, ActivityRow, AgentChip, ButtonStyle, CardStripe, CheckLine, CheckTone, CommandsTab,
         Dot, FeatureRepoRow, FeatureTabHit, FeatureTabView, FindingCard, FindingTag,
@@ -613,6 +614,13 @@ pub(crate) enum Done {
         n: u32,
         evidence: feature::verify::Evidence,
     },
+    /// The AI work's index was read for the stats panel.
+    AiStats {
+        scope: crate::ai_work::stats::Scope,
+        result: Result<crate::ai_work::stats::View, String>,
+    },
+    /// What the AI work's thread came to.
+    AiWork(crate::ai_work::Report),
 }
 
 /// An open feature of another project spanning the one shown.
@@ -1569,6 +1577,8 @@ pub enum PanelOutcome {
     /// worktree.
     Open(PathBuf),
     CopyPath,
+    /// Show what its AI work came to, in the stats panel.
+    Stats,
     /// Abandon it, or once done remove its worktrees, after asking.
     Remove,
     New,
@@ -1610,6 +1620,7 @@ impl PanelOutcome {
                 | Self::OpenPr(_)
                 | Self::GoToCurrent
                 | Self::CopyPath
+                | Self::Stats
                 | Self::Show(_)
         )
     }
@@ -5128,6 +5139,23 @@ fn mark_detail(mark: &feature::Mark, now: u64) -> String {
     }
 }
 
+/// Keep the prompt run `n` of `stage` of `feature` started on, in AI work
+/// folder `dir`; none when it can't be read.
+fn keep_prompt(dir: &Path, feature: &Feature, stage: Stage, n: u32) -> Option<ai_work::BlobRef> {
+    let (_, run) = ai_work::observe::runs_of(feature).find(|(s, r)| *s == stage && r.n == n)?;
+    let kept = std::fs::read(&run.prompt).and_then(|text| ai_work::blobs::put(dir, &text));
+    kept.inspect_err(|err| {
+        tracing::warn!("keeping the prompt {}: {err}", run.prompt.display());
+    })
+    .ok()
+}
+
+/// Keep the whole record of `feature`, as it is now, in AI work folder `dir`.
+fn snapshot(dir: &Path, feature: &Feature) -> std::io::Result<ai_work::BlobRef> {
+    let record = serde_json::to_vec_pretty(feature).map_err(std::io::Error::other)?;
+    ai_work::blobs::put(dir, &record)
+}
+
 impl Gerdr {
     // ------------------------------------------------------------ state
 
@@ -5158,6 +5186,28 @@ impl Gerdr {
             }
         }
         self.features.all = all;
+        match store::take_moved() {
+            0 => {}
+            1 => self.show_success("Moved the activity of 1 feature to files of its own".into()),
+            n => self.show_success(format!(
+                "Moved the activity of {n} features to files of their own"
+            )),
+        }
+        // What the records hold already happened: the AI work tells only
+        // what changes from here.
+        self.ai_work.seen.clear();
+        let keys: Vec<(String, String)> = (self.features.all.iter())
+            .flat_map(|(id, fs)| fs.iter().map(move |f| (id.clone(), f.slug.clone())))
+            .collect();
+        for (project, slug) in keys {
+            self.ai_work_seed(&project, &slug);
+        }
+        // Chats at work before gerdr started, or before the projects were
+        // read again, are kept again while they last.
+        if self.ai_work.is_on() {
+            let chats = self.ai_work_chats();
+            self.ai_work.send(ai_work::thread::Job::Watch { chats });
+        }
         self.seen_folders_changed();
         let all = &self.features.all;
         let viewed = &self.features.viewed;
@@ -5198,13 +5248,195 @@ impl Gerdr {
         let Some(feature) = self.feature(project, slug).filter(|f| f.writer.is_none()) else {
             return;
         };
-        if let Err(err) = store::save(None, feature) {
-            tracing::warn!("saving feature {project}/{slug}: {err}");
-            let title = feature.title.clone();
-            self.show_error(format!("Couldn't save \u{201c}{title}\u{201d}: {err}"));
+        match store::save(None, feature) {
+            Ok(()) => self.ai_work_saved(project, slug),
+            Err(err) => {
+                tracing::warn!("saving feature {project}/{slug}: {err}");
+                let title = feature.title.clone();
+                self.show_error(format!("Couldn't save \u{201c}{title}\u{201d}: {err}"));
+            }
         }
         self.plan_sheet_follows();
         self.feature_diff_stands(project, slug);
+    }
+
+    /// The AI work takes feature `slug` of `project` as it is now, telling
+    /// nothing of it: what it holds already happened. For a record read
+    /// from disk, or brought from another machine.
+    pub(crate) fn ai_work_seed(&mut self, project: &str, slug: &str) {
+        if !self.ai_work.is_on() {
+            return;
+        }
+        let feature =
+            (self.features.all.get(project)).and_then(|fs| fs.iter().find(|f| f.slug == slug));
+        if let Some(feature) = feature {
+            let digest = ai_work::observe::digest(feature);
+            (self.ai_work.seen).insert((project.to_owned(), slug.to_owned()), digest);
+        }
+    }
+
+    /// Feature `slug` of `project` was saved: what changed since the save
+    /// before goes to its AI work. One made since gerdr started is all new.
+    fn ai_work_saved(&mut self, project: &str, slug: &str) {
+        if !self.ai_work.is_on() {
+            return;
+        }
+        let key = (project.to_owned(), slug.to_owned());
+        let feature =
+            (self.features.all.get(project)).and_then(|fs| fs.iter().find(|f| f.slug == slug));
+        let Some(feature) = feature else {
+            return;
+        };
+        let prev = self.ai_work.seen.remove(&key).unwrap_or_default();
+        let diffed = ai_work::observe::diff(Some(&prev), feature);
+        self.ai_work_keep(feature, diffed.events, diffed.follow);
+        self.ai_work.seen.insert(key, diffed.digest);
+    }
+
+    /// Feature `slug` of `project` is closed for good, its worktrees gone:
+    /// its record and its chats are kept as they are now. Nothing of its
+    /// AI work goes with it.
+    fn ai_work_close(&self, project: &str, slug: &str) {
+        let Some(feature) = self.feature(project, slug).filter(|_| self.ai_work.is_on()) else {
+            return;
+        };
+        let mut follow: Vec<Follow> = (ai_work::observe::runs_of(feature))
+            .map(|(stage, run)| {
+                Follow::Capture(ai_work::observe::chat(feature, stage, run, run.session()))
+            })
+            .collect();
+        follow.push(Follow::Snapshot);
+        self.ai_work_keep(feature, Vec::new(), follow);
+    }
+
+    /// Append `events` of `feature` to its AI work, and give the thread what
+    /// `follow` asks. A failed write is said as a problem, gone once one
+    /// works again.
+    fn ai_work_keep(
+        &self,
+        feature: &Feature,
+        events: Vec<(Option<u64>, ai_work::Event)>,
+        follow: Vec<Follow>,
+    ) {
+        use ai_work::{Event, Line, thread::Job, write};
+        let (project, slug) = (feature.project.as_str(), feature.slug.as_str());
+        let Some(dir) = self.ai_work.dir(project, slug) else {
+            return;
+        };
+        let now = ai_work::now_ms();
+        let append = |event: Event, at: Option<u64>| {
+            let line = Line {
+                at_ms: at.unwrap_or(now),
+                ..Line::now(event)
+            };
+            write::append(&dir, &line)
+        };
+        let mut written = Vec::new();
+        for (at, mut event) in events {
+            if let Event::RunStarted {
+                stage, n, prompt, ..
+            } = &mut event
+            {
+                *prompt = keep_prompt(&dir, feature, *stage, *n);
+            }
+            written.push(append(event, at));
+        }
+        let data = store::dir(None, project, slug);
+        let (p, s) = (project.to_owned(), slug.to_owned());
+        for follow in follow {
+            match follow {
+                Follow::Capture(mut chat) => {
+                    let there = match chat.machine.as_deref() {
+                        Some(id) => match self.archive_reach(id) {
+                            Some(there) => {
+                                // Found there by its folders as that machine has them.
+                                if let Some(paths) = self.machine_paths(id, Some(feature)) {
+                                    chat.folders =
+                                        chat.folders.iter().map(|f| paths.map(f)).collect();
+                                }
+                                Some(there)
+                            }
+                            // Its chat stays there: it is kept once watched again.
+                            None => {
+                                tracing::info!(
+                                    "{project}/{slug}: {}'s chat isn't kept now: its machine can't be reached",
+                                    chat.stage.label()
+                                );
+                                continue;
+                            }
+                        },
+                        None => None,
+                    };
+                    self.ai_work.send(Job::Capture {
+                        project: p.clone(),
+                        slug: s.clone(),
+                        chat,
+                        there,
+                    });
+                }
+                Follow::Outputs { files, reason } => self.ai_work.send(Job::Outputs {
+                    project: p.clone(),
+                    slug: s.clone(),
+                    files: (files.into_iter())
+                        .map(|name| {
+                            let path = data.join(&name);
+                            (name, path)
+                        })
+                        .collect(),
+                    reason,
+                }),
+                Follow::SetupSlice { run } => self.ai_work.send(Job::SetupSlice {
+                    project: p.clone(),
+                    slug: s.clone(),
+                    run,
+                    log: feature::setup::log_path(&data),
+                }),
+                Follow::Snapshot => written.push(
+                    snapshot(&dir, feature)
+                        .and_then(|record| append(Event::Snapshot { record }, None)),
+                ),
+                Follow::Watch => self.ai_work.send(Job::Watch {
+                    chats: self.ai_work_chats(),
+                }),
+            }
+        }
+        let wrote = written.iter().any(Result::is_ok);
+        // Each feature's own: one that keeps failing keeps its problem.
+        let at = format!("{p}/{s}");
+        match written.into_iter().find_map(Result::err) {
+            Some(err) => crate::problems::report_at(
+                "ai-work",
+                &at,
+                format!(
+                    "Couldn't keep the AI work of \u{201c}{}\u{201d}: {err}",
+                    feature.title
+                ),
+            ),
+            None if wrote => crate::problems::clear_at("ai-work", &at),
+            None => {}
+        }
+        if wrote {
+            self.ai_work.send(Job::Index {
+                project: p,
+                slug: s,
+            });
+        }
+    }
+
+    /// The chats at work now, on every feature this machine writes: the
+    /// AI work keeps them again while they last.
+    fn ai_work_chats(&self) -> Vec<(String, String, ai_work::Chat)> {
+        let mut chats = Vec::new();
+        for (project, features) in &self.features.all {
+            for feature in features.iter().filter(|f| f.status == Status::Open) {
+                let live = ai_work::observe::runs_of(feature).filter(|(_, run)| run.live());
+                for (stage, run) in live {
+                    let chat = ai_work::observe::chat(feature, stage, run, run.session());
+                    chats.push((project.clone(), feature.slug.clone(), chat));
+                }
+            }
+        }
+        chats
     }
 
     /// The slugs of the features the panel lists for `project`.
@@ -5217,7 +5449,7 @@ impl Gerdr {
     }
 
     /// Where the threads send what they came to; set up the first time.
-    fn feature_sender(&mut self) -> Option<channel::Sender<Done>> {
+    pub(crate) fn feature_sender(&mut self) -> Option<channel::Sender<Done>> {
         if self.features.done.is_none() {
             let (tx, rx) = channel::channel::<Done>();
             let inserted = self
@@ -5653,6 +5885,8 @@ impl Gerdr {
                 index,
                 turn,
             } => self.check_turn(&project, &slug, n, index, turn),
+            Done::AiStats { scope, result } => self.ai_stats_read(scope, result),
+            Done::AiWork(report) => self.ai_work_done(report),
         }
     }
 
@@ -7642,6 +7876,8 @@ impl Gerdr {
                 }
             }
             PanelOutcome::Remove => self.check_remove_feature(&project, &slug),
+            // On this feature, as it is the one shown.
+            PanelOutcome::Stats => self.open_ai_stats(),
             PanelOutcome::New => self.open_new_feature(None),
             // In its own tab, its workspace opened if need be.
             PanelOutcome::Show(to) => self.open_feature(&project, &to),
@@ -8623,6 +8859,10 @@ impl Gerdr {
             feature.log(now, "worktrees removed");
         }
         self.save_feature(project, slug);
+        // Abandoned, it closed as it was saved.
+        if !abandon {
+            self.ai_work_close(project, slug);
+        }
         self.show_success(if abandon {
             format!("Abandoned \u{201c}{title}\u{201d}")
         } else {
@@ -8839,7 +9079,8 @@ impl Gerdr {
             }
             FeatureTabHit::Button(0) => Some(PanelOutcome::Open(feature.dir.clone())),
             FeatureTabHit::Button(1) => Some(PanelOutcome::CopyPath),
-            FeatureTabHit::Button(2) => Some(PanelOutcome::New),
+            FeatureTabHit::Button(2) => Some(PanelOutcome::Stats),
+            FeatureTabHit::Button(3) => Some(PanelOutcome::New),
             FeatureTabHit::Button(_) => Some(PanelOutcome::Remove),
         };
         self.sync_feature_page();
@@ -11686,6 +11927,7 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 6] = [
             ("Ctrl+PgUp / Ctrl+PgDn", "previous or next feature"),
             ("Ctrl+O", "open a tab in the feature's folder"),
             ("Ctrl+C", "copy the feature's path"),
+            ("Prefix, then U", "show the feature's AI work stats"),
             ("Ctrl+N", "new feature"),
             ("Ctrl+Shift+L", "show or hide all repositories"),
             (
@@ -13870,9 +14112,10 @@ pub(crate) mod tests {
     #[test]
     fn header_buttons_and_the_strip_wheel() {
         assert_eq!(header_label("Abandon", 0), Some("Open tab"));
-        assert_eq!(header_label("Abandon", 2), Some("New feature\u{2026}"));
-        assert_eq!(header_label("Abandon", 3), Some("Abandon"));
-        assert_eq!(header_label("Abandon", 4), None);
+        assert_eq!(header_label("Abandon", 2), Some("Stats"));
+        assert_eq!(header_label("Abandon", 3), Some("New feature\u{2026}"));
+        assert_eq!(header_label("Abandon", 4), Some("Abandon"));
+        assert_eq!(header_label("Abandon", 5), None);
         // The wheel over the chips steps the repositories, stopping at
         // the ends.
         assert_eq!(strip_step(0, 1, 3), 1);

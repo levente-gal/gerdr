@@ -287,6 +287,13 @@ pub(super) fn copy(x: f32, y: f32, s: f32) -> f32 {
     (front.abs() - STROKE * s).min(back)
 }
 
+/// Signed distance to three bars rising from left to right, centred on the
+/// origin: stats.
+pub(super) fn bars(x: f32, y: f32, s: f32) -> f32 {
+    let bar = |cx: f32, top: f32| segment(x, y, cx * s, 5.0 * s, cx * s, top * s) - 1.1 * s;
+    bar(-4.0, 1.5).min(bar(0.0, -1.5)).min(bar(4.0, -5.0))
+}
+
 /// Signed distance to a magnifying glass centred on the origin: a ring and
 /// its handle to the bottom right.
 pub(super) fn magnifier(x: f32, y: f32, s: f32) -> f32 {

@@ -8,7 +8,7 @@ license = "MIT"
 ab_glyph = "0.2"
 calloop-wayland-source = "0.4"
 dbus = { version = "0.9.12", features = ["vendored"] }
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled", "serialize"] }
 libc = "0.2.190"
 resvg = { version = "0.48.1", default-features = false }
 serde = { version = "1.0.229", features = ["derive"] }
@@ -23,6 +23,8 @@ wayland-protocols = { version = "0.32", features = ["client", "staging"] }
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 regex = "1"
 comrak = { version = "0.59.0", default-features = false }
+sha2 = "0.10.9"
+zstd = { version = "0.13", default-features = false }
 serde_norway = "0.9.42"
 
 # For trying a change: a one-file rebuild takes about a quarter of what

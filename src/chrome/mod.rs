@@ -46,6 +46,7 @@ mod scrollback;
 mod search;
 mod shapes;
 mod sidebar;
+mod stats;
 mod switcher;
 mod tabs;
 mod theme;
@@ -99,6 +100,7 @@ pub use scrollback::*;
 pub use search::*;
 use shapes::*;
 pub use sidebar::*;
+pub use stats::*;
 pub use switcher::*;
 pub use tabs::*;
 pub use theme::*;
@@ -188,6 +190,8 @@ pub struct ChromeView {
     pub inbox: Option<InboxView>,
     /// Set while the scrollback viewer is open over a terminal pane.
     pub scrollback: Option<ScrollbackView>,
+    /// Set while the AI work's stats panel is open.
+    pub stats: Option<StatsView>,
     /// The toasts showing, oldest first, such as "Switched to gerdr".
     pub toasts: Vec<ToastView>,
     /// The bars over the active tab's terminal panes.
@@ -244,6 +248,7 @@ pub struct Chrome {
     doc: ReposLayers,
     inbox: InboxLayers,
     scrollback: ScrollbackLayers,
+    stats: Overlay<(StatsView, Size<i32, Logical>, Theme, f64)>,
     /// One per toast, by id, kept while it fades out.
     toasts: Vec<(u64, ToastOverlay)>,
     /// One per placeholder, and the spinner they share.
@@ -312,6 +317,7 @@ impl Chrome {
             doc: ReposLayers::default(),
             inbox: InboxLayers::default(),
             scrollback: ScrollbackLayers::default(),
+            stats: Overlay::default(),
             toasts: Vec::new(),
             placeholders: Vec::new(),
             spinner: Cached::default(),
@@ -408,7 +414,10 @@ impl Chrome {
 
         // The hit rects, outlined for checking them against the drawing.
         if self.debug_hits {
-            let rects = hit_rects(&view, output, area, footer_h);
+            let mut rects = hit_rects(&view, output, area, footer_h);
+            if let Some(stats) = &view.stats {
+                rects.extend(stats_hit_rects(stats, output));
+            }
             let buffer = self.hits.get((rects, output, scale), |(rects, output, _)| {
                 hit_outlines(rects, *output, scale)
             });
@@ -709,6 +718,16 @@ impl Chrome {
                     painter,
                     Some((dot, blink)),
                 )),
+                // The stats panel on the AI work, centred on the output.
+                Kind::AiStats => {
+                    let stats = view.stats.take().map(|view| {
+                        let (loc, size) = shadowed(stats_layout(&view, output).panel);
+                        ((view, output, theme, scale), loc, size)
+                    });
+                    parts.extend(self.stats.part(stats, now, true, |(view, output, ..)| {
+                        painter.stats_panel(view, *output, scale, theme.palette())
+                    }));
+                }
                 // The scrollback viewer, over its pane.
                 Kind::Scrollback => parts.extend(self.scrollback.parts(
                     view.scrollback.take(),

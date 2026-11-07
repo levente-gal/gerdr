@@ -22,6 +22,7 @@ pub enum Bar {
     ReposTree,
     ReposDetail,
     Welcome,
+    AiStats,
 }
 
 /// A scrollbar's thumb held with the left button: which, and how far
@@ -44,6 +45,7 @@ impl Gerdr {
             Some(Overlay::Scrollback) => &[Bar::Scrollback],
             Some(Overlay::Switcher) => &[Bar::Switcher],
             Some(Overlay::Welcome) => &[Bar::Welcome],
+            Some(Overlay::AiStats) => &[Bar::AiStats],
             Some(_) => &[],
             None => &[Bar::Sidebar],
         };
@@ -85,6 +87,11 @@ impl Gerdr {
                 let view = self.inbox_view()?;
                 let layout = chrome::inbox_layout(&view, size);
                 chrome::inbox_thumb(&view, &layout, size)
+            }
+            Bar::AiStats => {
+                let view = self.ai_stats_view()?;
+                let layout = chrome::stats_layout(&view, size);
+                chrome::stats_thumb(&view, &layout)
             }
             Bar::Scrollback => {
                 let view = self.scrollback_view()?;
@@ -150,6 +157,7 @@ impl Gerdr {
             Bar::ReposTree => self.repos_scroll_to(at, false),
             Bar::ReposDetail => self.repos_scroll_to(at, true),
             Bar::Welcome => self.welcome_scroll_to(at),
+            Bar::AiStats => self.ai_stats_scroll_to(at),
         }
     }
 }

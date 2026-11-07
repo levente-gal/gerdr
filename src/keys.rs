@@ -313,6 +313,7 @@ const ACTIONS: &[(&str, Action, &str, &str)] = &[
     ("inbox", Action::Inbox, "Open inbox", "i"),
     ("tasks", Action::Tasks, "Open background tasks", "b"),
     ("features", Action::Features, "Open features", "Shift+F"),
+    ("ai-stats", Action::AiStats, "Open the AI work stats", "u"),
     // tmux's copy-mode.
     (
         "scrollback",
@@ -425,6 +426,7 @@ const HELP_LINES: &[(&str, &[&str])] = &[
     ("Open inbox", &["inbox"]),
     ("Open background tasks", &["tasks"]),
     ("Open features, or start one", &["features"]),
+    ("Open the AI work stats", &["ai-stats"]),
     ("Select and copy the scrollback", &["scrollback"]),
     ("Reload the project files", &["reload-projects"]),
     ("Quit…", &["quit"]),
@@ -1227,6 +1229,7 @@ mod tests {
                 "I: Open inbox",
                 "B: Open background tasks",
                 "Shift+F: Open features, or start one",
+                "U: Open the AI work stats",
                 "[: Select and copy the scrollback",
                 "Alt+R: Reload the project files",
                 "Shift+Q: Quit…",
@@ -1255,6 +1258,10 @@ mod tests {
             Some(Action::CyclePane(-1))
         );
         assert_eq!(keymap.action(&mods(false, true), Keysym::c), None);
+        assert_eq!(
+            keymap.action(&mods(false, false), Keysym::u),
+            Some(Action::AiStats)
+        );
         assert_eq!(
             keymap.action(&mods(false, false), Keysym::bracketleft),
             Some(Action::Scrollback)

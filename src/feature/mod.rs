@@ -58,8 +58,10 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-/// The record's format; bumped when a field changes meaning.
-pub const VERSION: u32 = 2;
+/// The record's format; bumped when a field changes meaning. 3: its history
+/// and its AI review's earlier rounds are kept in files of their own beside
+/// it (see `store`).
+pub const VERSION: u32 = 3;
 
 /// The stages, in order. Every one has to be done; only Plan review can be
 /// done by skipping it.
@@ -529,7 +531,10 @@ pub struct Feature {
     /// are again: they ran once, and the rail says so.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub ran_once: BTreeMap<Stage, u64>,
-    #[serde(default)]
+    /// What happened to it, oldest first. Kept in `store::HISTORY`, not in
+    /// `feature.json`: `store` takes it out when it saves and puts it back
+    /// when it reads. An older gerdr's record still has it here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub history: Vec<Event>,
     #[serde(default, skip_serializing_if = "Shipping::is_empty")]
     pub shipping: Shipping,
@@ -674,6 +679,7 @@ impl Feature {
     /// Bring a record of an older format up to this one; whether it was
     /// older. A feature that went past Plan before Plan review existed has
     /// that stage marked done, at Plan's time, so it stays where it was.
+    /// Nothing changes for 3: saving it moves its history out (see `store`).
     pub fn migrate(&mut self, now: u64) -> bool {
         if self.version >= VERSION {
             return false;

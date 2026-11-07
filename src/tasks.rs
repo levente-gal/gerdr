@@ -315,6 +315,7 @@ impl Gerdr {
         tasks.extend(self.machine_tasks());
         tasks.extend(self.sandbox_left_tasks());
         tasks.extend(self.take_tasks());
+        tasks.extend(self.ai_work_tasks());
         tasks
     }
 
