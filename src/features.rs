@@ -6583,6 +6583,16 @@ impl Gerdr {
                 self.show_warning(text);
             }
             Stage::AiReview => self.tick_feature(project, slug, Some(&reading.patch), "gerdr"),
+            // Fixes landed since the press: Verify runs on them first.
+            Stage::ManualTest
+                if (self.feature(project, slug)).is_some_and(|f| f.unverified.is_some()) =>
+            {
+                let title = self.feature(project, slug).map_or("", |f| f.title.as_str());
+                let text = format!(
+                    "Verify runs on the latest fixes of \u{201c}{title}\u{201d}: mark it passed once they pass"
+                );
+                self.show_warning(text);
+            }
             Stage::ManualTest if !self.criteria(project, slug).is_empty() => {
                 let criteria = self.criteria(project, slug).to_vec();
                 let passed = self.feature(project, slug).is_some_and(|f| {

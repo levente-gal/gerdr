@@ -777,6 +777,10 @@ impl Feature {
         self.ran_once
             .extend(cleared.into_iter().map(|(s, mark)| (s, mark.at)));
         self.ran_once.extend(was_at.map(|at| (at, now)));
+        // Verify to pass again as a stage: no fixes wait for it apart.
+        if stage <= Stage::Verify {
+            self.unverified = None;
+        }
     }
 
     /// The first bound stage marked on other code than `patch`'s: from it
@@ -1648,6 +1652,14 @@ pub(crate) mod tests {
         assert!(!kept.keep_marks("p3", 3));
         assert_eq!(kept.invalidate("p3", 3), Some(Stage::Build));
         assert_eq!(kept.carry, None);
+        // Verify done again as a stage, nothing waits on it apart.
+        let mut f = feature("a", 1);
+        while f.current() != Some(Stage::ManualTest) {
+            f.tick(1, "you", Some("p1"));
+        }
+        f.unverified = Some("p3".into());
+        assert!(f.untick(Stage::Verify, 4));
+        assert_eq!(f.unverified, None);
     }
 
     #[test]
