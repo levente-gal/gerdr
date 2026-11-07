@@ -40,14 +40,18 @@ use crate::{
         agents::program,
         patch::Reading,
         remote::{self, Paths, Place, Reach, Side, Trouble},
+        sandbox_run::{self, Elsewhere, SandboxRun},
         store,
     },
     feature_agents::WatchKey,
     herdr::{AgentStatus, Herdr},
+    machine_load::{LEAST_BUSY, Load},
     machines::{LinkInfo, LinkState},
     prepare,
 };
 
+/// How often a machine is asked how busy it is and how its sandboxes stand.
+const LOOK_EVERY: Duration = Duration::from_secs(3);
 /// How often the panes there are listed.
 const LIST_EVERY: Duration = Duration::from_secs(2);
 /// How often a feature's files and commits come back, its agent at work or
@@ -164,6 +168,8 @@ struct Shared {
     pull_now: AtomicBool,
     /// Agents' states, for the Enter pressed again on a line left in a box.
     statuses: Mutex<HashMap<String, AgentStatus>>,
+    /// The sandboxes to ask about there, by project and feature.
+    sandboxes: Mutex<Vec<(String, String, SandboxRun)>>,
 }
 
 /// What a link's threads tell.
@@ -171,6 +177,11 @@ struct Shared {
 pub enum WorkEvent {
     /// The panes there; `None`: they couldn't be listed.
     Panes(Option<HashMap<String, Listed>>),
+    /// How busy the machine is, and how the sandboxes asked of it stand.
+    Looked {
+        load: Option<Load>,
+        sandboxes: Vec<(String, String, Elsewhere)>,
+    },
     Started {
         project: String,
         slug: String,
@@ -237,6 +248,8 @@ pub struct Work {
     rested: HashMap<String, Instant>,
     /// What is wanted of its features (see `machine_views`).
     views: Arc<Mutex<crate::machine_views::ViewAsk>>,
+    /// How busy it last said it is.
+    pub load: Option<Load>,
 }
 
 impl Drop for Work {
@@ -268,6 +281,15 @@ impl Work {
         std::thread::Builder::new()
             .name("machine panes".into())
             .spawn(lister)?;
+        let looker = {
+            let reach = reach.clone();
+            let (stop, tx, id) = (stop.clone(), tx.clone(), id.clone());
+            let shared = shared.clone();
+            move || look_there(&reach, &stop, &shared, |event| send(&tx, &id, event))
+        };
+        std::thread::Builder::new()
+            .name("machine looks".into())
+            .spawn(looker)?;
         let worker = {
             let (socket, stop, id) = (info.socket.clone(), stop.clone(), id.clone());
             let shared = shared.clone();
@@ -316,7 +338,15 @@ impl Work {
             pulled: HashMap::new(),
             dirty: HashMap::new(),
             rested: HashMap::new(),
+            load: None,
         })
+    }
+
+    /// Have the sandboxes in `asked` asked about from now on.
+    pub(crate) fn ask_sandboxes(&self, asked: Vec<(String, String, SandboxRun)>) {
+        if let Ok(mut mine) = self.shared.sandboxes.lock() {
+            *mine = asked;
+        }
     }
 
     /// A new list of the panes there: note those whose agents came to rest.
@@ -496,6 +526,38 @@ fn list_panes(socket: PathBuf, stop: &AtomicBool, shared: &Shared, tell: impl Fn
 }
 
 /// Do what is asked and bring back what is due, until told to stop.
+/// Ask the machine how busy it is, and how the sandboxes `shared` names stand:
+/// one script, in a thread of its own, as the jobs can take minutes.
+fn look_there(reach: &Reach, stop: &AtomicBool, shared: &Shared, tell: impl Fn(WorkEvent)) {
+    while !stop.load(Ordering::Relaxed) {
+        let asked = shared.sandboxes.lock().map(|s| s.clone()).unwrap_or_default();
+        let names: Vec<(String, &SandboxRun)> = (asked.iter())
+            .map(|(project, slug, run)| (format!("{project}/{slug}"), run))
+            .collect();
+        let script = format!(
+            "{}{}",
+            crate::machine_load::LOAD_SCRIPT,
+            sandbox_run::there_script(names.iter().map(|(name, run)| (name.as_str(), *run))),
+        );
+        // Lost, the link says so itself, and what was known goes with it.
+        if let Ok(said) = reach.script(&script, stop) {
+            let sandboxes = (names.iter().zip(&asked))
+                .map(|((name, run), (project, slug, _))| {
+                    (project.clone(), slug.clone(), sandbox_run::read_there(&said, name, run))
+                })
+                .collect();
+            tell(WorkEvent::Looked {
+                load: crate::machine_load::parse_load(&said),
+                sandboxes,
+            });
+        }
+        let began = Instant::now();
+        while began.elapsed() < LOOK_EVERY && !stop.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+}
+
 fn do_work(
     reach: Reach,
     socket: PathBuf,
@@ -712,10 +774,10 @@ pub(crate) fn open_there(
     Ok((pane, terminal, info))
 }
 
-/// Whether what `stage` runs can go on another machine: its agent, or for
-/// Verify its checks.
+/// Whether what `stage` runs can go on another machine: its agent, for Verify
+/// its checks, for Manual test its sandbox.
 pub fn takes_a_place(stage: Stage) -> bool {
-    stage == Stage::Verify || feature::agents::needs(stage).is_some()
+    matches!(stage, Stage::Verify | Stage::ManualTest) || feature::agents::needs(stage).is_some()
 }
 
 /// Where a stage's next agent runs.
@@ -766,6 +828,7 @@ impl Gerdr {
         if let Err(err) = feature::view::write_place(&root, &place) {
             tracing::warn!("machine {name}: noting where things are there: {err}");
         }
+        let place_id = id.clone();
         match Work::start(id, target, info, tx) {
             Ok(work) => {
                 if let Some(link) = self.machines.links.get_mut(name) {
@@ -775,6 +838,7 @@ impl Gerdr {
                 if let Some(project) = self.project.clone() {
                     self.adopt_checks(&project);
                 }
+                self.clean_left_there(&place_id);
             }
             Err(err) => {
                 tracing::warn!("machine {name}: starting its work: {err}");
@@ -967,7 +1031,8 @@ impl Gerdr {
         let checks = (feature.verify.iter())
             .flat_map(|v| &v.checks)
             .filter_map(|c| c.pane.clone());
-        let mut panes: Vec<String> = (agents.chain(checks))
+        let sandbox = feature.sandbox.iter().flat_map(|run| run.panes.clone());
+        let mut panes: Vec<String> = (agents.chain(checks).chain(sandbox))
             .filter(|p| split_pane(p).is_some())
             .collect();
         panes.sort();
@@ -989,18 +1054,12 @@ impl Gerdr {
         ids.sort();
         ids.dedup();
         for id in ids {
-            let data = store::dir(None, &feature.project, &feature.slug);
-            let job = self.machine_paths(&id, Some(feature)).map(|paths| {
-                let script = remote::forget_script(
-                    &remote::places(feature, &paths),
-                    &remote::doc_dirs(feature, &paths),
-                    &paths.there(&data),
-                );
-                Job::Forget { script }
-            });
+            let job = self.forget_script(&id, feature).map(|script| Job::Forget { script });
             let sent =
                 (job.zip(self.work_of(&id))).is_some_and(|(job, w)| w.jobs.send(job).is_ok());
-            if !sent {
+            // What's kept for a sandbox there takes this along once that's back.
+            let waits = crate::machine_sandbox::left_file(&id, &feature.project, &feature.slug);
+            if !sent && !waits.exists() {
                 let name = self.machine_name(&id);
                 tracing::warn!("{name} is out of reach: {} stays there", feature.slug);
                 self.show_warning(format!(
@@ -1008,6 +1067,17 @@ impl Gerdr {
                 ));
             }
         }
+    }
+
+    /// The script taking what `feature` left off machine `id`.
+    pub(crate) fn forget_script(&self, id: &str, feature: &Feature) -> Option<String> {
+        let paths = self.machine_paths(id, Some(feature))?;
+        let data = store::dir(None, &feature.project, &feature.slug);
+        Some(remote::forget_script(
+            &remote::places(feature, &paths),
+            &remote::doc_dirs(feature, &paths),
+            &paths.there(&data),
+        ))
     }
 
     /// Show `pane` on another machine: its view's tab, or a new one attached
@@ -1136,6 +1206,12 @@ impl Gerdr {
                 if let Some(work) = self.work_of_mut(id) {
                     work.listed(panes, Instant::now());
                 }
+            }
+            WorkEvent::Looked { load, sandboxes } => {
+                if let Some(work) = self.work_of_mut(id) {
+                    work.load = load;
+                }
+                self.sandboxes_looked(id, sandboxes);
             }
             WorkEvent::Started {
                 project,
@@ -1407,6 +1483,7 @@ impl Gerdr {
         // Asked over another machine's link to this one: this one may have none.
         self.lease_tick();
         // Before anything that needs a link: losing the last closes what used it.
+        self.sandbox_places_tick();
         self.sandbox_views_tick();
         if self.machines.links.values().all(|link| link.work.is_none()) {
             return;
@@ -1500,6 +1577,9 @@ impl Gerdr {
     /// Where `stage`'s next agent of `feature` is to run, by its pick or else
     /// the project's file.
     pub(crate) fn placed(&self, feature: &Feature, stage: Stage) -> Placed {
+        if self.goes_to_least_busy(feature, stage) {
+            return self.least_busy(feature);
+        }
         if let Some(id) = feature.stage_machines.get(&stage) {
             if id == HERE {
                 return Placed::Here;
@@ -1527,9 +1607,15 @@ impl Gerdr {
     /// machine to place it on.
     pub(crate) fn place_label(&self, feature: &Feature, stage: Stage) -> Option<String> {
         let running = stage == Stage::Verify && crate::feature_checks::checks_running(feature);
+        // A sandbox's page offers it as long as there is no sandbox. It can be
+        // tried again once its stage is done, and has what it's on to say so.
+        let over = match stage {
+            Stage::ManualTest => feature.sandbox.is_some(),
+            _ => feature.is_done(stage),
+        };
         if feature.status != Status::Open
             || !takes_a_place(stage)
-            || feature.is_done(stage)
+            || over
             || running
             || !self.takes_a_machine(feature, stage)
         {
@@ -1539,6 +1625,9 @@ impl Gerdr {
         if self.machines.saved.is_empty() && !picked {
             return None;
         }
+        if self.goes_to_least_busy(feature, stage) {
+            return Some("Runs on the least busy".to_owned());
+        }
         Some(match self.placed(feature, stage) {
             Placed::Here => "Runs here".to_owned(),
             Placed::There(id) => format!("Runs on {}", self.machine_name(&id)),
@@ -1546,9 +1635,9 @@ impl Gerdr {
         })
     }
 
-    /// Run `stage`'s next agent on the next machine that is up, then here
-    /// again (Ctrl+Shift+W, the button on its agent card). One that runs goes
-    /// on where it is.
+    /// Run `stage`'s next agent on the next machine that is up, then on whichever
+    /// is least busy, then here again (Ctrl+Shift+W, the button on its agent
+    /// card). One that runs goes on where it is.
     pub(crate) fn cycle_stage_machine(&mut self, project: &str, slug: &str, stage: Stage) {
         let Some(feature) = self.feature(project, slug) else {
             return;
@@ -1557,6 +1646,16 @@ impl Gerdr {
             return self.show_warning(
                 "Its checks are running: pick their machine once they ended".to_owned(),
             );
+        }
+        if stage == Stage::ManualTest
+            && let Some(run) = &feature.sandbox
+        {
+            let on = run.machine.as_deref().map_or("here".to_owned(), |id| {
+                format!("on {}", self.machine_name(id))
+            });
+            return self.show_warning(format!(
+                "Its sandbox is {on}, and its data with it: remove it to start one elsewhere"
+            ));
         }
         if self.place_label(feature, stage).is_none() {
             let why = match self.takes_a_machine(feature, stage) {
@@ -1573,12 +1672,17 @@ impl Gerdr {
         let mut order = vec![HERE.to_owned()];
         order.extend(ids.into_iter().map(|(_, id)| id));
         let now = match self.placed(feature, stage) {
+            _ if self.goes_to_least_busy(feature, stage) => LEAST_BUSY.to_owned(),
             Placed::Here => HERE.to_owned(),
             Placed::There(id) => id,
             Placed::Away(_) => String::new(),
         };
         if order.len() == 1 && now == HERE {
             return self.show_warning("No machine is connected right now".to_owned());
+        }
+        // With a machine to choose from, or to get away from that choice.
+        if order.len() > 1 || now == LEAST_BUSY {
+            order.push(LEAST_BUSY.to_owned());
         }
         let at = order.iter().position(|id| *id == now);
         let next = at.map_or(0, |i| (i + 1) % order.len());
@@ -1600,9 +1704,10 @@ impl Gerdr {
             self.save_feature(project, slug);
         }
         if stays {
-            let place = match next == HERE {
-                true => "here".to_owned(),
-                false => format!("on {name}"),
+            let place = match next.as_str() {
+                HERE => "here".to_owned(),
+                LEAST_BUSY => "on the least busy".to_owned(),
+                _ => format!("on {name}"),
             };
             self.show_warning(format!(
                 "The agent already open stays where it is: the next one runs {place}"
@@ -1617,6 +1722,9 @@ impl Gerdr {
         let Some(name) = project.and_then(|p| p.workflow.machines.get(&stage)) else {
             return HERE.to_owned();
         };
+        if name == LEAST_BUSY {
+            return LEAST_BUSY.to_owned();
+        }
         (self.machines.links.get(name))
             .and_then(|link| link.work.as_ref())
             .map_or_else(String::new, |work| work.id.clone())
@@ -1787,6 +1895,7 @@ mod tests {
         let (jobs, _rx) = mpsc::channel();
         Work {
             views: Arc::default(),
+            load: None,
             id: "m".into(),
             target: "ana@box".into(),
             info: LinkInfo {

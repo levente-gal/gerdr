@@ -838,6 +838,10 @@ pub struct Machines {
     pub(crate) views: HashMap<String, String>,
     /// What's open here of sandboxes elsewhere, by project and slug.
     pub(crate) sandboxes: HashMap<(String, String), crate::machine_sandbox::SandboxView>,
+    /// How sandboxes on other machines stand, by the machine that said, for the
+    /// features whose record this gerdr holds apart from that machine.
+    pub(crate) sandboxes_there:
+        HashMap<(String, String), (String, crate::feature::sandbox_run::Elsewhere)>,
     /// When a line was last typed to a pane on a machine.
     pub(crate) lines: HashMap<String, Instant>,
     /// What keeps each feature's work from coming back.

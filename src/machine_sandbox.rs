@@ -1,8 +1,16 @@
-//! The sandbox of a feature another machine writes, from here (see `feature::view`).
+//! A sandbox on another machine, from here: that of a feature another machine
+//! writes (see `feature::view`), or of one written here that was placed on a
+//! machine (`SandboxRun::machine`).
 //!
-//! A sandbox runs on the machine that started it. All that takes its processes
-//! or containers stays there: this gerdr shows how it stands, its app and its
-//! terminals, and says to stop it there.
+//! All that takes its processes or containers runs there. This gerdr shows how it
+//! stands, opens its app and looks at its terminals, and can stop it: over the
+//! link when this gerdr writes the feature; else a gerdr open on the writer is
+//! asked to (`SandboxAsk`), so its record says so. With none open, or one that
+//! can't reach the sandbox's machine, that machine is told directly, and a note
+//! left on the writer has its record catch up (`SANDBOX_TOLD`).
+//!
+//! A sandbox on a machine out of reach when its feature is removed can't be taken
+//! down then: what's needed is kept (`LEFT`), and it goes when that machine is back.
 //!
 //! Its app listens inside its network namespace, which the machine's own
 //! `localhost` doesn't reach: pasta leads only the other way there, so `ssh -L`
@@ -32,8 +40,18 @@ use std::{
 use crate::{
     Gerdr,
     desktop::shell_quote,
-    feature::{Feature, Status, remote::Reach, sandbox_run::SandboxRun},
-    feature_sandbox::{self, is_local_page, local_port},
+    feature::{
+        Feature, Repo, Status, lease,
+        remote::{self, Paths, Reach},
+        sandbox,
+        sandbox_run::{self, Elsewhere, Host, SandboxRun},
+    },
+    feature_sandbox::{self, SandboxLine, StopFor, is_local_page, local_port},
+    features::{Busy, Done, Job},
+    herdr::Herdr,
+    machine_checks::Remote,
+    machine_work::{open_there, qualified},
+    prepare,
 };
 
 /// How long a look at the listening sockets waits before seeing whether to stop.
@@ -66,6 +84,270 @@ fn relay_command(holder: i32, port: u16) -> String {
     format!("sh -c {}", shell_quote(&enter))
 }
 
+/// Starting a sandbox on a machine.
+#[derive(Debug)]
+pub(crate) struct ThereJob {
+    remote: Remote,
+    feature: Feature,
+    /// What runs first, and in its terminals, by its folder here.
+    prepares: Vec<SandboxLine>,
+    runs: Vec<SandboxLine>,
+    env: Vec<(String, String)>,
+    /// Ports other sandboxes hold there, though stopped.
+    taken: Vec<u16>,
+}
+
+/// `repos`, as named on the machine `paths` lead to.
+fn repos_there(repos: &[Repo], paths: &Paths) -> Vec<Repo> {
+    (repos.iter())
+        .map(|repo| Repo {
+            main: paths.map(&repo.main),
+            worktree: paths.map(&repo.worktree),
+            ..repo.clone()
+        })
+        .collect()
+}
+
+/// The line entering `run`'s namespace for `command` in a terminal there: it
+/// takes up the folder's `.venv`, as a terminal here does.
+fn terminal_line(holder: i32, slug: &str, env: &[(String, String)], command: &str) -> String {
+    let command = format!("{}{command}", remote::ACTIVATE);
+    sandbox_run::enter_line(holder, slug, env, &command)
+}
+
+impl ThereJob {
+    /// Start it, with its terminals. The record, and the commands that got no
+    /// terminal.
+    pub(crate) fn run(
+        self,
+        stop: &AtomicBool,
+        progress: &mut dyn FnMut(String),
+    ) -> (SandboxRun, Vec<String>) {
+        let mut run = self.start(stop, progress);
+        run.machine = Some(self.remote.id.clone());
+        run.elsewhere = Some(Elsewhere {
+            asked: true,
+            alive: run.failed.is_none(),
+            ports: Vec::new(),
+        });
+        let mut missing = Vec::new();
+        if run.failed.is_some() {
+            return (run, missing);
+        }
+        run.not_there = self.not_there(&run, stop);
+        let Some(holder) = run.holder.as_ref().map(|h| h.pid) else {
+            return (run, missing);
+        };
+        let mut herdr = Herdr::on_socket(self.remote.socket.clone());
+        for line in &self.runs {
+            let cwd = self.remote.paths.there(&line.dir);
+            let command = self.remote.paths.text(&line.command);
+            let opened = open_there(&mut herdr, &self.feature.project, &cwd, stop).and_then(
+                |(pane, _, info)| {
+                    let line = terminal_line(holder, &self.feature.slug, &self.env, &command);
+                    let line = prepare::line_there(&info, &cwd, &line);
+                    (herdr.send_shell_line(&pane, &line))
+                        .map_err(remote::Trouble::Link)
+                        .map(|()| qualified(&self.remote.id, &pane))
+                },
+            );
+            match opened {
+                Ok(pane) => run.panes.push(pane),
+                Err(trouble) => {
+                    tracing::warn!("a sandbox's terminal there: {}", trouble.text());
+                    missing.push(format!("`{command}`"));
+                }
+            }
+        }
+        (run, missing)
+    }
+
+    fn start(&self, stop: &AtomicBool, progress: &mut dyn FnMut(String)) -> SandboxRun {
+        let Remote { paths, reach, .. } = &self.remote;
+        progress("Bringing its code there".to_owned());
+        if let Err(trouble) = self.remote.place_code(&self.feature, stop) {
+            return SandboxRun {
+                started: crate::feature::now(),
+                finished: Some(crate::feature::now()),
+                failed: Some(trouble.text().to_owned()),
+                ..SandboxRun::default()
+            };
+        }
+        let repos = repos_there(&self.feature.repos, paths);
+        let roots = self.roots_there();
+        let dir = feature_sandbox::sandbox_dir(&self.feature.project, &self.feature.slug);
+        let dir = paths.map(&dir);
+        let prepare: Vec<sandbox_run::PrepareStep> = (self.prepares.iter())
+            .map(|line| sandbox_run::PrepareStep {
+                line: format!("{}{}", remote::ACTIVATE, paths.text(&line.command)),
+                dir: paths.map(&line.dir),
+                shown: line.command.clone(),
+            })
+            .collect();
+        let host = Host::There(reach.clone());
+        let job = sandbox_run::Job {
+            host: &host,
+            project: &self.feature.project,
+            slug: &self.feature.slug,
+            repos: &repos,
+            roots: &roots,
+            dir: &dir,
+            prepare: &prepare,
+            env: &self.env,
+            taken: &self.taken,
+            stop,
+        };
+        sandbox_run::start(&job, progress)
+    }
+
+    fn roots_there(&self) -> Vec<std::path::PathBuf> {
+        let links = self.feature.links.iter().map(|l| &l.root);
+        (std::iter::once(&self.feature.root).chain(links))
+            .map(|root| self.remote.paths.map(root))
+            .collect()
+    }
+
+    /// What runs under the project here, that `run` found nothing of there: a
+    /// worker has no containers but those started on it. Not being able to ask
+    /// here means there's nothing to say.
+    fn not_there(&self, run: &SandboxRun, stop: &AtomicBool) -> Vec<String> {
+        let Ok(containers) = sandbox_run::running_containers(&Host::Here, stop) else {
+            return Vec::new();
+        };
+        let links = self.feature.links.iter().map(|l| l.root.clone());
+        let roots: Vec<std::path::PathBuf> =
+            std::iter::once(self.feature.root.clone()).chain(links).collect();
+        let feature = &self.feature;
+        (sandbox::stacks_under(&containers, &roots).into_iter())
+            .filter(|stack| {
+                let name = sandbox::compose_name(&feature.project, &feature.slug, &stack.project);
+                !run.stacks.iter().any(|mine| mine.name == name)
+            })
+            .map(|stack| stack.project)
+            .collect()
+    }
+}
+
+/// What became of asking a gerdr open on the writer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum AskEnd {
+    /// It took it on.
+    Taken,
+    /// It can't do that, and why.
+    Refused(String),
+    NoAnswer,
+}
+
+/// How a stop from another machine went.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StopAfar {
+    /// A gerdr open on the writer took it on: its record will say.
+    Asked,
+    /// The machine was told directly, with no gerdr to ask.
+    Told,
+}
+
+/// All a stop from another machine needs, off the UI thread.
+struct AfarJob {
+    what: StopFor,
+    /// The machine writing the feature, if it can be reached: its link and data
+    /// folder, and the feature's folder there.
+    writer: Option<(Reach, String, String)>,
+    project: String,
+    writer_name: String,
+    my_name: String,
+    run: SandboxRun,
+    /// Where it runs, or that machine's name, and its folder there.
+    host: Result<Host, String>,
+    dir: Option<std::path::PathBuf>,
+}
+
+impl AfarJob {
+    fn go(&self) -> Result<StopAfar, String> {
+        let never = AtomicBool::new(false);
+        if let Some((reach, data, dir)) = &self.writer {
+            let open = (reach.script(&lease::open_script(data, &self.project), &never))
+                .map_err(|t| t.text().to_owned())?;
+            if open.trim() == "HELD" {
+                match self.ask(reach, dir)? {
+                    AskEnd::Taken => return Ok(StopAfar::Asked),
+                    AskEnd::Refused(why) if self.what.starts_again() || self.host.is_err() => {
+                        return Err(why);
+                    }
+                    // This machine may reach what that one can't.
+                    AskEnd::Refused(_) | AskEnd::NoAnswer => {}
+                }
+            }
+        }
+        if self.what.starts_again() {
+            return Err(format!(
+                "gerdr isn't answering on {}: open it there, or stop the sandbox from here",
+                self.writer_name
+            ));
+        }
+        let host = (self.host.as_ref()).map_err(|name| format!("{name} can't be reached"))?;
+        let Some(dir) = &self.dir else {
+            return Err("its folder there isn't known".to_owned());
+        };
+        sandbox_run::stop(&self.run, dir, self.what.removes(), host)?;
+        self.leave_note();
+        Ok(StopAfar::Told)
+    }
+
+    /// What this asks of a gerdr on the writer, as JSON.
+    fn ask_json(&self) -> Result<String, String> {
+        serde_json::to_string(&lease::SandboxAsk {
+            what: self.what,
+            name: self.my_name.clone(),
+            started: self.run.started,
+        })
+        .map_err(|err| err.to_string())
+    }
+
+    /// Have the writer's record catch up with what was just done. It can't be told
+    /// when out of reach: its page then reads that the network ended, which is so.
+    fn leave_note(&self) {
+        let never = AtomicBool::new(false);
+        let Some((reach, _, dir)) = &self.writer else {
+            return;
+        };
+        let told = (self.ask_json())
+            .and_then(|json| {
+                let script = lease::sandbox_told_script(dir, &json);
+                reach.script(&script, &never).map_err(|t| t.text().to_owned())
+            });
+        if let Err(why) = told {
+            tracing::warn!("leaving word of a sandbox on its writer: {why}");
+        }
+    }
+
+    /// Ask a gerdr open on the writer, and wait to see what comes of it.
+    fn ask(&self, reach: &Reach, dir: &str) -> Result<AskEnd, String> {
+        let never = AtomicBool::new(false);
+        let json = self.ask_json()?;
+        (reach.script(&lease::sandbox_ask_script(dir, &json), &never))
+            .map_err(|t| t.text().to_owned())?;
+        let until = Instant::now() + lease::ASK_FOR;
+        while Instant::now() < until {
+            let said = (reach.script(&lease::sandbox_waits_script(dir), &never))
+                .map_err(|t| t.text().to_owned())?;
+            if said.trim().is_empty() {
+                let script = lease::record_script(dir, lease::SANDBOX_ANSWER);
+                let said = reach.script(&script, &never).map_err(|t| t.text().to_owned())?;
+                return Ok(match serde_json::from_str::<lease::SandboxRefusal>(&said) {
+                    Ok(refusal) => AskEnd::Refused(refusal.why),
+                    Err(_) => AskEnd::Taken,
+                });
+            }
+            std::thread::sleep(ASK_EVERY);
+        }
+        if let Err(trouble) = reach.script(&lease::sandbox_unask_script(dir), &never) {
+            tracing::warn!("taking back what was asked of a sandbox: {}", trouble.text());
+        }
+        Ok(AskEnd::NoAnswer)
+    }
+}
+
 /// `port` here, listening for connections to pass on. Dropped, it closes them all.
 #[derive(Debug)]
 struct Relay {
@@ -93,6 +375,78 @@ fn listen_on(port: u16) -> io::Result<Vec<TcpListener>> {
         listener.set_nonblocking(true)?;
     }
     Ok(out)
+}
+
+/// How often what was asked of a sandbox is looked at, to see it was taken.
+const ASK_EVERY: Duration = Duration::from_millis(400);
+/// Under what's kept of a machine: the records of features removed here whose
+/// sandboxes that machine still has.
+const LEFT: &str = "sandboxes-left";
+
+/// Where feature `slug`'s record waits for machine `id` to be back.
+pub(crate) fn left_file(id: &str, project: &str, slug: &str) -> std::path::PathBuf {
+    crate::feature::view::root(&crate::projects::data_dir(), id)
+        .join(LEFT)
+        .join(format!("{project}--{slug}.json"))
+}
+
+/// What the problems list says of a removed feature's sandbox on a machine.
+fn left_text(title: &str, name: &str) -> String {
+    format!("The sandbox of \u{201c}{title}\u{201d} stays on {name} until that can be reached")
+}
+
+/// Keep `feature` at `file`, for what it left to go later.
+fn keep_left(file: &std::path::Path, feature: &Feature) -> Result<(), String> {
+    let text = serde_json::to_vec(feature).map_err(|err| err.to_string())?;
+    if let Some(parent) = file.parent() {
+        std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+    }
+    std::fs::write(file, text).map_err(|err| err.to_string())
+}
+
+/// Taking down the sandbox of a feature that is removed, off the UI thread.
+#[derive(Debug)]
+pub(crate) struct SandboxRemoval {
+    run: SandboxRun,
+    /// Where it runs, or that machine's name.
+    host: Result<Host, String>,
+    dir: Option<std::path::PathBuf>,
+    /// What else the feature left on that machine.
+    forget: Option<String>,
+    /// On a machine: its name, and the record to keep if that can't be reached.
+    left: Option<(String, std::path::PathBuf, Box<Feature>)>,
+}
+
+impl SandboxRemoval {
+    fn remove(&self) -> Result<(), String> {
+        let host = (self.host.as_ref()).map_err(|name| format!("{name} can't be reached"))?;
+        let dir = (self.dir.as_ref()).ok_or_else(|| "its folder there isn't known".to_owned())?;
+        sandbox_run::stop(&self.run, dir, true, host)?;
+        if let (Host::There(reach), Some(script)) = (host, &self.forget) {
+            let never = AtomicBool::new(false);
+            reach.script(script, &never).map_err(|t| t.text().to_owned())?;
+        }
+        Ok(())
+    }
+
+    /// Take it down. On a machine that can't be reached now, it goes once it can.
+    pub(crate) fn go(&self) {
+        let Err(why) = self.remove() else {
+            return;
+        };
+        tracing::error!("removing a feature's sandbox: {why}");
+        let text = match &self.left {
+            Some((name, file, feature)) => match keep_left(file, feature) {
+                Ok(()) => left_text(&feature.title, name),
+                Err(err) => {
+                    tracing::error!("keeping {}: {err}", file.display());
+                    format!("A removed feature's sandbox stayed behind: {why}")
+                }
+            },
+            None => format!("A removed feature's sandbox stayed behind: {why}"),
+        };
+        crate::problems::report(feature_sandbox::PROBLEMS, text);
+    }
 }
 
 /// What a relay of `port` found that says the whole thing can't work.
@@ -363,10 +717,366 @@ fn has_local_page(ws: &crate::Workspace) -> bool {
 }
 
 impl Gerdr {
-    /// The machine writing `feature`, with its sandbox if that runs.
+    /// The machine `feature`'s sandbox runs on, if that's another and it runs.
     fn seen_sandbox(feature: &Feature) -> Option<(&str, &SandboxRun)> {
         let run = feature.sandbox.as_ref().filter(|r| r.alive())?;
-        Some((feature.writer.as_deref()?, run))
+        Some((run.machine.as_deref()?, run))
+    }
+
+    /// Where `run` runs. `Err`: on a machine with no link now, by that name.
+    pub(crate) fn sandbox_host(&self, run: &SandboxRun) -> Result<Host, String> {
+        let Some(id) = run.machine.as_deref() else {
+            return Ok(Host::Here);
+        };
+        (self.work_of(id))
+            .map(|work| Host::There(work.reach()))
+            .ok_or_else(|| self.machine_name(id))
+    }
+
+    /// The folder of feature `slug`'s sandbox on the machine `run` runs on.
+    pub(crate) fn sandbox_dir_of(
+        &self,
+        project: &str,
+        slug: &str,
+        run: &SandboxRun,
+    ) -> Option<std::path::PathBuf> {
+        let Some(id) = run.machine.as_deref() else {
+            return Some(feature_sandbox::sandbox_dir(project, slug));
+        };
+        Some(std::path::PathBuf::from(self.data_there(id, project, slug)?).join("sandbox"))
+    }
+
+    /// Feature `slug`'s data folder on machine `id`, whose data folder that machine
+    /// said. Not by this machine's path of it: for a feature another machine writes,
+    /// that is the copy kept here, under a folder only this machine has.
+    fn data_there(&self, id: &str, project: &str, slug: &str) -> Option<String> {
+        let data = &self.work_of(id)?.info.site.data;
+        Some(format!("{data}/gerdr/features/{project}/{slug}"))
+    }
+
+    /// What a thread needs to start `feature`'s sandbox on machine `id`, if that
+    /// is up.
+    pub(crate) fn sandbox_there_job(
+        &self,
+        feature: &Feature,
+        id: &str,
+        env: &BTreeMap<String, String>,
+        taken: Vec<u16>,
+    ) -> Option<ThereJob> {
+        let remote = self.machine_remote(id, feature)?;
+        let on = |lines: Vec<SandboxLine>| -> Vec<SandboxLine> {
+            lines.into_iter().filter(|line| line.on).collect()
+        };
+        let prepares = self.projects.workflows(feature, |w| w.prepare.clone());
+        let runs = self.projects.workflows(feature, |w| w.run.clone());
+        Some(ThereJob {
+            remote,
+            prepares: on(feature_sandbox::lines_of(feature, &prepares, true)),
+            runs: on(feature_sandbox::lines_of(feature, &runs, false)),
+            feature: feature.clone(),
+            env: env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+            taken,
+        })
+    }
+
+    /// Whether `feature`'s sandbox has to wait for a setup on machine `id`, as
+    /// each machine has its own worktrees: it starts by itself after that.
+    pub(crate) fn set_up_there_first(&mut self, feature: &Feature, id: &str) -> bool {
+        let (project, slug) = (feature.project.as_str(), feature.slug.as_str());
+        let key = (project.to_owned(), slug.to_owned());
+        let running = self.setting_up(project, slug);
+        let has = crate::feature::setup::has_work(feature);
+        let first = crate::feature_build::setup_first(has, feature.setup_at(Some(id)), running, false);
+        let waits = match first {
+            crate::feature_build::SetupFirst::No => false,
+            crate::feature_build::SetupFirst::Wait => true,
+            crate::feature_build::SetupFirst::Run => {
+                self.start_setup_on(project, slug, None, Some(id.to_owned()))
+            }
+        };
+        if waits {
+            self.features.build.pending_sandbox.insert(key);
+            self.show_warning(format!(
+                "Setting up \u{201c}{}\u{201d} on {}; its sandbox starts once that is done",
+                feature.title,
+                self.machine_name(id)
+            ));
+        }
+        waits
+    }
+
+    /// Feature `slug`, written on machine `writer`: do `what` to its sandbox from
+    /// here, off the thread.
+    pub(crate) fn stop_from_afar(&mut self, project: &str, slug: &str, what: StopFor, writer: &str) {
+        let Some(feature) = self.feature(project, slug) else {
+            return;
+        };
+        let Some(run) = feature.sandbox.clone() else {
+            return;
+        };
+        let job = AfarJob {
+            what,
+            writer: self.work_of(writer).and_then(|work| {
+                let data = format!("{}/gerdr", work.info.site.data);
+                Some((work.reach(), data, self.data_there(writer, project, slug)?))
+            }),
+            project: project.to_owned(),
+            writer_name: self.machine_name(writer),
+            my_name: crate::machine_lease::this_machines_name(),
+            host: self.sandbox_host(&run),
+            dir: self.sandbox_dir_of(project, slug, &run),
+            run,
+        };
+        let title = feature.title.clone();
+        let key = (project.to_owned(), slug.to_owned());
+        let stop = Arc::new(AtomicBool::new(false));
+        self.features.build.sandbox_stops.insert(key, stop);
+        let busy = Busy {
+            project: project.to_owned(),
+            slug: slug.to_owned(),
+            job: Job::Sandbox,
+            repo: None,
+            what: format!("Stopping the sandbox of \u{201c}{title}\u{201d}"),
+        };
+        let (project, slug) = (project.to_owned(), slug.to_owned());
+        self.feature_work(Some(busy), move |_| Done::SandboxAsked {
+            result: job.go(),
+            project,
+            slug,
+        });
+    }
+
+    /// A stop from here of a sandbox another machine's gerdr writes of ended.
+    pub(crate) fn sandbox_asked(
+        &mut self,
+        project: &str,
+        slug: &str,
+        result: Result<StopAfar, String>,
+    ) {
+        let key = (project.to_owned(), slug.to_owned());
+        self.features.build.sandbox_stops.remove(&key);
+        let writer = self.feature_writer(project, slug).map(str::to_owned);
+        let name = writer.map_or_else(String::new, |id| self.machine_name(&id));
+        match result {
+            Ok(StopAfar::Asked) => self.show_success(format!("gerdr on {name} is doing that")),
+            Ok(StopAfar::Told) => self.show_success(format!(
+                "That's done, and gerdr on {name} is told"
+            )),
+            Err(why) => {
+                tracing::warn!("a sandbox from another machine: {why}");
+                self.show_error(format!("The sandbox is as it was: {why}"));
+            }
+        }
+    }
+
+    /// Why feature `slug`'s sandbox can't have `ask` done to it from here now.
+    pub(crate) fn sandbox_refusal(
+        &self,
+        project: &str,
+        slug: &str,
+        ask: &lease::SandboxAsk,
+    ) -> Option<String> {
+        let key = (project.to_owned(), slug.to_owned());
+        if self.features.build.sandbox_stops.contains_key(&key) {
+            return (ask.what.starts_again()).then(|| "it is being started or stopped".to_owned());
+        }
+        let run = self.feature(project, slug)?.sandbox.as_ref()?;
+        (self.sandbox_host(run).err()).map(|name| format!("{name} can't be reached from there"))
+    }
+
+    /// Another machine did `ask` to feature `slug`'s sandbox while no gerdr could
+    /// be asked: the record catches up. One that started since is another sandbox.
+    pub(crate) fn sandbox_told(&mut self, project: &str, slug: &str, ask: &lease::SandboxAsk) {
+        let Some(feature) = self.feature(project, slug) else {
+            return;
+        };
+        if feature.sandbox.as_ref().is_none_or(|run| run.started != ask.started) {
+            return;
+        }
+        let name = ask.name.clone();
+        if let Some(f) = self.feature_mut(project, slug) {
+            let what = match ask.what {
+                StopFor::Remove => "Sandbox removed",
+                _ => "Sandbox stopped",
+            };
+            f.log(crate::feature::now(), format!("{what} from {name}"));
+        }
+        self.sandbox_stopped(project, slug, ask.what, Ok(()));
+    }
+
+    /// What it takes to take down the sandbox `run` of `feature`, which is removed.
+    pub(crate) fn sandbox_removal(&self, feature: &Feature, run: &SandboxRun) -> SandboxRemoval {
+        let (project, slug) = (&feature.project, &feature.slug);
+        let id = run.machine.as_deref();
+        SandboxRemoval {
+            run: run.clone(),
+            host: self.sandbox_host(run),
+            dir: self.sandbox_dir_of(project, slug, run),
+            forget: id.and_then(|id| self.forget_script(id, feature)),
+            left: id.map(|id| {
+                let file = left_file(id, project, slug);
+                (self.machine_name(id), file, Box::new(feature.clone()))
+            }),
+        }
+    }
+
+    /// Machine `id` is back: what removed features left on it goes.
+    pub(crate) fn clean_left_there(&mut self, id: &str) {
+        let dir = crate::feature::view::root(&crate::projects::data_dir(), id).join(LEFT);
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return;
+        };
+        for file in entries.flatten().map(|entry| entry.path()) {
+            let read = std::fs::read(&file).map_err(|err| err.to_string()).and_then(|raw| {
+                serde_json::from_slice::<Feature>(&raw).map_err(|err| err.to_string())
+            });
+            let feature = match read {
+                Ok(feature) => feature,
+                Err(why) => {
+                    tracing::warn!("reading {}: {why}", file.display());
+                    continue;
+                }
+            };
+            let Some(run) = feature.sandbox.clone() else {
+                continue;
+            };
+            let removal = self.sandbox_removal(&feature, &run);
+            let title = feature.title.clone();
+            let name = self.machine_name(id);
+            self.feature_work(None, move |_| Done::SandboxLeftGone {
+                result: removal.remove(),
+                file,
+                title,
+                name,
+            });
+        }
+    }
+
+    /// What a removed feature left on a machine went, or still can't.
+    pub(crate) fn sandbox_left_gone(
+        &mut self,
+        file: &std::path::Path,
+        title: &str,
+        name: &str,
+        result: Result<(), String>,
+    ) {
+        if let Err(why) = result {
+            // It is tried again when that machine is next back.
+            tracing::warn!("what the sandbox of {title} left on {name}: {why}");
+            return self.show_warning(format!(
+                "The sandbox of \u{201c}{title}\u{201d} is still on {name}: {why}"
+            ));
+        }
+        if let Err(err) = std::fs::remove_file(file) {
+            tracing::warn!("removing {}: {err}", file.display());
+        }
+        crate::problems::forget(feature_sandbox::PROBLEMS, &left_text(title, name));
+        self.show_success(format!(
+            "The sandbox of \u{201c}{title}\u{201d} is gone from {name}"
+        ));
+    }
+
+    /// Say what removed features left on machines, as a restart forgets having said.
+    pub(crate) fn report_left_there(&self) {
+        let data = crate::projects::data_dir();
+        for id in crate::feature::view::kept_ids(&data) {
+            let dir = crate::feature::view::root(&data, &id).join(LEFT);
+            for file in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+                let raw = std::fs::read(file.path()).unwrap_or_default();
+                if let Ok(feature) = serde_json::from_slice::<Feature>(&raw) {
+                    let text = left_text(&feature.title, &self.machine_name(&id));
+                    crate::problems::report(feature_sandbox::PROBLEMS, text);
+                }
+            }
+        }
+    }
+
+    /// Do what another machine asked of feature `slug`'s sandbox, as if pressed.
+    /// While it starts, it stops when that's the point.
+    pub(crate) fn answer_sandbox_ask(&mut self, project: &str, slug: &str, ask: &lease::SandboxAsk) {
+        let key = (project.to_owned(), slug.to_owned());
+        if let Some(stop) = self.features.build.sandbox_stops.get(&key) {
+            if matches!(ask.what, StopFor::Stop | StopFor::Remove) {
+                stop.store(true, Ordering::Relaxed);
+            }
+            return;
+        }
+        let name = ask.name.clone();
+        if let Some(f) = self.feature_mut(project, slug) {
+            let now = crate::feature::now();
+            let what = match ask.what {
+                StopFor::Stop => "Sandbox stopped",
+                StopFor::Remove => "Sandbox removed",
+                StopFor::Restart => "Sandbox restarted",
+                StopFor::Reset => "Sandbox data reset",
+            };
+            f.log(now, format!("{what} from {name}"));
+        }
+        self.save_feature(project, slug);
+        self.finish_stop(project, slug, ask.what);
+    }
+
+    /// Note how a sandbox just started on a machine stands, until that's asked.
+    pub(crate) fn note_sandbox_there(&mut self, project: &str, slug: &str, run: &SandboxRun) {
+        let (Some(id), Some(there)) = (&run.machine, &run.elsewhere) else {
+            return;
+        };
+        let key = (project.to_owned(), slug.to_owned());
+        self.machines.sandboxes_there.insert(key, (id.clone(), there.clone()));
+    }
+
+    /// A machine said how the sandboxes asked of it stand.
+    pub(crate) fn sandboxes_looked(&mut self, id: &str, said: Vec<(String, String, Elsewhere)>) {
+        for (project, slug, there) in said {
+            let key = (project, slug);
+            self.machines.sandboxes_there.insert(key, (id.to_owned(), there));
+        }
+    }
+
+    /// Ask each machine how the sandboxes on it stand, those not asked of through
+    /// the machine writing them, and put what's known in their records.
+    pub(crate) fn sandbox_places_tick(&mut self) {
+        let features = (self.features.all.values().flatten())
+            .chain(self.features.viewed.values().flatten());
+        let mut asked: BTreeMap<String, Vec<(String, String, SandboxRun)>> = BTreeMap::new();
+        let mut wanted: BTreeSet<(String, String)> = BTreeSet::new();
+        for feature in features.filter(|f| f.status == Status::Open) {
+            let Some(run) = feature.sandbox.as_ref() else {
+                continue;
+            };
+            let Some(id) = run.machine.as_deref() else {
+                continue;
+            };
+            if feature.writer.as_deref() == Some(id) {
+                continue;
+            }
+            let key = (feature.project.clone(), feature.slug.clone());
+            wanted.insert(key.clone());
+            if sandbox_run::to_ask_there(run) {
+                let (project, slug) = key;
+                asked.entry(id.to_owned()).or_default().push((project, slug, run.clone()));
+            }
+        }
+        let links = (self.machines.links.values()).filter_map(|link| link.work.as_ref());
+        let up: BTreeSet<String> = links.clone().map(|work| work.id.clone()).collect();
+        for work in links {
+            work.ask_sandboxes(asked.remove(&work.id).unwrap_or_default());
+        }
+        (self.machines.sandboxes_there)
+            .retain(|key, (id, _)| wanted.contains(key) && up.contains(id));
+        let known = &self.machines.sandboxes_there;
+        let features = (self.features.all.values_mut().flatten())
+            .chain(self.features.viewed.values_mut().flatten());
+        for feature in features {
+            let key = (feature.project.clone(), feature.slug.clone());
+            let Some(run) = feature.sandbox.as_mut().filter(|run| run.machine.is_some()) else {
+                continue;
+            };
+            if feature.writer.is_some() && feature.writer == run.machine {
+                continue;
+            }
+            run.elsewhere = Some(known.get(&key).map_or_else(Elsewhere::default, |(_, there)| there.clone()));
+        }
     }
 
     /// Open what's asked for of the sandboxes running elsewhere, and close what
@@ -374,6 +1084,7 @@ impl Gerdr {
     /// restart, with the page still there.
     pub(crate) fn sandbox_views_tick(&mut self) {
         let wanted: Vec<(String, String)> = (self.features.viewed.values().flatten())
+            .chain(self.features.all.values().flatten())
             .filter(|f| f.status == Status::Open)
             .filter(|f| {
                 Self::seen_sandbox(f).is_some_and(|(id, _)| self.work_of(id).is_some())
@@ -430,7 +1141,7 @@ impl Gerdr {
         newly
     }
 
-    /// Open feature `slug`'s sandbox's app, which runs on the machine writing it:
+    /// Open feature `slug`'s sandbox's app, which runs on machine `id`:
     /// its ports open here first, and a page opens on one that is really its own.
     pub(crate) fn open_seen_sandbox_app(&mut self, project: &str, slug: &str, id: &str) {
         let name = self.machine_name(id);
@@ -463,13 +1174,14 @@ impl Gerdr {
         self.open_feature_page(project, slug, url);
     }
 
-    /// Show the terminals of feature `slug`'s sandbox, which runs on the machine
-    /// writing it, each in a tab here. Those only look: they stay that machine's.
+    /// Show the terminals of feature `slug`'s sandbox, which runs on another
+    /// machine, each in a tab here. Closing those only ends the view.
     pub(crate) fn show_sandbox_terminals(&mut self, project: &str, slug: &str) {
         let Some(feature) = self.feature(project, slug) else {
             return;
         };
-        let Some(id) = feature.writer.clone() else {
+        let on = feature.sandbox.as_ref().and_then(|run| run.machine.clone());
+        let Some(id) = on.or_else(|| feature.writer.clone()) else {
             return;
         };
         let panes = (feature.sandbox.as_ref()).map_or_else(Vec::new, |run| run.panes.clone());
@@ -487,7 +1199,11 @@ impl Gerdr {
 
     /// What `feature`'s page says of its sandbox, when another machine has it.
     pub(crate) fn sandbox_seen(&self, feature: &Feature) -> Option<SandboxSeen> {
-        let name = self.machine_name(feature.writer.as_deref()?);
+        let id = match feature.sandbox.as_ref() {
+            Some(run) => run.machine.as_deref()?,
+            None => feature.writer.as_deref()?,
+        };
+        let name = self.machine_name(id);
         let key = (feature.project.clone(), feature.slug.clone());
         let view = self.machines.sandboxes.get(&key);
         Some(SandboxSeen {
@@ -642,6 +1358,23 @@ mod tests {
         let mut child = script_child(free_port());
         let status = wait_exit(&mut child).expect("still running");
         assert_eq!(status.code(), Some(7));
+    }
+
+    #[test]
+    fn a_record_kept_for_a_machine_says_what_to_take_down() {
+        let dir = std::env::temp_dir().join(format!("gerdr-left-{}", std::process::id()));
+        let file = dir.join("deep/p--s.json");
+        let mut feature = crate::feature::tests::feature("s", 1);
+        feature.sandbox = Some(SandboxRun {
+            machine: Some("w".into()),
+            started: 9,
+            ..SandboxRun::default()
+        });
+        keep_left(&file, &feature).unwrap();
+        let back: Feature = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        assert_eq!(back.sandbox, feature.sandbox);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(left_text("T", "box").contains("box"));
     }
 
     #[test]

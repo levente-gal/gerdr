@@ -305,7 +305,7 @@ impl Remote {
     }
 
     /// The code and files of `feature` there, and how its worktrees stand.
-    fn place_code(
+    pub(crate) fn place_code(
         &self,
         feature: &Feature,
         stop: &AtomicBool,

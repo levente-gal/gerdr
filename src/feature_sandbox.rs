@@ -9,9 +9,9 @@
 //! `localhost` opens inside too (`Gerdr::sandbox_for`), and so reaches this
 //! feature's app at the address the app expects.
 //!
-//! A sandbox runs on the machine that started it, the one writing its feature;
-//! another gerdr showing that feature opens its app and looks at its terminals
-//! (see `machine_sandbox`).
+//! A sandbox runs on the machine writing its feature, or on the one its page
+//! picked (`SandboxRun::machine`); a gerdr elsewhere opens its app, looks at its
+//! terminals and stops it from there (see `machine_sandbox`).
 //!
 //! Start asks first which of the project's commands run, in the restart
 //! dialog (see `restart`). What is checked stays with the feature
@@ -28,15 +28,18 @@ use std::{
     },
 };
 
+use serde::{Deserialize, Serialize};
+
 use crate::{
     Gerdr,
     chrome::CommandsTab,
     feature::{
-        self, Feature, PerProject,
-        sandbox_run::{self, SandboxRun},
+        self, Feature, PerProject, Stage,
+        sandbox_run::{self, Host, SandboxRun},
         store,
     },
     features::{Busy, Done, Job},
+    machine_work::Placed,
     menu::MenuAction,
     prepare::{Prep, Tools, background_command, spawn_prepare},
 };
@@ -45,7 +48,8 @@ use crate::{
 const TAB_LABEL: &str = "Sandbox";
 
 /// What stopping a sandbox is for.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum StopFor {
     /// It stops, its data kept.
     Stop,
@@ -58,11 +62,11 @@ pub enum StopFor {
 }
 
 impl StopFor {
-    fn removes(self) -> bool {
+    pub(crate) fn removes(self) -> bool {
         matches!(self, Self::Remove | Self::Reset)
     }
 
-    fn starts_again(self) -> bool {
+    pub(crate) fn starts_again(self) -> bool {
         matches!(self, Self::Restart | Self::Reset)
     }
 }
@@ -220,8 +224,14 @@ impl Gerdr {
             return None;
         }
         let same = |a: &Path, b: &Path| a == b || a.canonicalize().ok() == b.canonicalize().ok();
+        // Seen from a machine that runs it for another's feature, it is here too.
         let feature = (self.features.all.values().flatten())
-            .find(|f| same(&f.dir, dir) && f.sandbox.as_ref().is_some_and(SandboxRun::alive))?;
+            .chain(self.features.viewed.values().flatten())
+            .find(|f| {
+                same(&f.dir, dir)
+                    && (f.sandbox.as_ref())
+                        .is_some_and(|run| !run.on_another_machine() && run.alive())
+            })?;
         let holder = feature.sandbox.as_ref()?.holder.as_ref()?.pid;
         let profile = sandbox_dir(&feature.project, &feature.slug).join("browser");
         Some((holder, profile))
@@ -301,6 +311,14 @@ impl Gerdr {
         if !self.can_start_sandbox(&feature) {
             return;
         }
+        let Some(machine) = self.sandbox_place(&feature) else {
+            return;
+        };
+        if let Some(id) = &machine
+            && self.set_up_there_first(&feature, id)
+        {
+            return;
+        }
         let key = (project.to_owned(), slug.to_owned());
         let prepares = self.projects.workflows(&feature, |w| w.prepare.clone());
         let venv = self.feature_venv(project, slug);
@@ -310,9 +328,11 @@ impl Gerdr {
             env.extend(link.clone());
         }
         env.extend(envs.home.clone());
+        // A port is only taken on the machine that holds it.
         let taken: Vec<u16> = (self.features.all.values().flatten())
             .filter(|f| !(f.project == project && f.slug == slug))
             .filter_map(|f| f.sandbox.as_ref())
+            .filter(|run| run.machine == machine)
             .flat_map(|run| run.forwards.iter().map(|f| f.host_port))
             .collect();
         let stop = Arc::new(AtomicBool::new(false));
@@ -331,6 +351,7 @@ impl Gerdr {
             let now = feature::now();
             // Its panes go with the run they belonged to: none outlive a stop.
             f.sandbox = Some(SandboxRun {
+                machine: machine.clone(),
                 started: now,
                 ..SandboxRun::default()
             });
@@ -344,8 +365,46 @@ impl Gerdr {
             repo: None,
             what: format!("Starting the sandbox of \u{201c}{title}\u{201d}"),
         };
+        let there = machine.as_ref().and_then(|id| {
+            self.sandbox_there_job(&feature, id, &env, taken.clone())
+        });
+        if machine.is_some() && there.is_none() {
+            // The link went this moment: what it would have said comes next.
+            return self.sandbox_started(
+                project,
+                slug,
+                SandboxRun {
+                    machine,
+                    started: feature::now(),
+                    finished: Some(feature::now()),
+                    failed: Some("that machine can't be reached".to_owned()),
+                    ..SandboxRun::default()
+                },
+                false,
+                Some(Vec::new()),
+            );
+        }
         let (project, slug) = (project.to_owned(), slug.to_owned());
         self.feature_work(Some(busy), move |tx| {
+            let mut progress = |what: String| {
+                // It fails only once gerdr quits: nothing is left to show it.
+                let _ = tx.send(Done::Progress {
+                    project: project.clone(),
+                    slug: slug.clone(),
+                    job: Job::Sandbox,
+                    what: format!("Sandbox of \u{201c}{title}\u{201d}: {what}"),
+                });
+            };
+            if let Some(there) = there {
+                let (run, missing) = there.run(&stop, &mut progress);
+                return Done::Sandbox {
+                    stopped: stop.load(Ordering::Relaxed),
+                    project,
+                    slug,
+                    run,
+                    opened: Some(missing),
+                };
+            }
             let tools = Tools::detect();
             let prepare: Vec<sandbox_run::PrepareStep> = lines_of(&feature, &prepares, true)
                 .into_iter()
@@ -361,6 +420,7 @@ impl Gerdr {
             let env: Vec<(String, String)> = env.into_iter().collect();
             let dir = sandbox_dir(&project, &slug);
             let job = sandbox_run::Job {
+                host: &Host::Here,
                 project: &project,
                 slug: &slug,
                 repos: &feature.repos,
@@ -371,41 +431,68 @@ impl Gerdr {
                 taken: &taken,
                 stop: &stop,
             };
-            let mut progress = |what: String| {
-                // It fails only once gerdr quits: nothing is left to show it.
-                let _ = tx.send(Done::Progress {
-                    project: project.clone(),
-                    slug: slug.clone(),
-                    job: Job::Sandbox,
-                    what: format!("Sandbox of \u{201c}{title}\u{201d}: {what}"),
-                });
-            };
             let run = sandbox_run::start(&job, &mut progress);
             Done::Sandbox {
                 stopped: stop.load(Ordering::Relaxed),
                 project,
                 slug,
                 run,
+                opened: None,
             }
         });
     }
 
+    /// Where feature's sandbox starts: `None` for here, in the outer `None` when
+    /// it can't, which the user has heard. A sandbox that has a record stays on its
+    /// machine, for its data is there; removed, it goes where its page says.
+    fn sandbox_place(&mut self, feature: &Feature) -> Option<Option<String>> {
+        if let Some(run) = &feature.sandbox {
+            let Some(id) = &run.machine else {
+                return Some(None);
+            };
+            if self.work_of(id).is_some() {
+                return Some(Some(id.clone()));
+            }
+            let name = self.machine_name(id);
+            self.show_warning(format!(
+                "Its sandbox's data is on {name}: connect it, or remove the sandbox to start one elsewhere"
+            ));
+            return None;
+        }
+        match self.placed(feature, Stage::ManualTest) {
+            Placed::Here => Some(None),
+            Placed::There(id) => Some(Some(id)),
+            Placed::Away(name) => {
+                self.show_warning(format!(
+                    "{name} can't be reached: connect it, or pick another place for the sandbox"
+                ));
+                None
+            }
+        }
+    }
+
     /// Starting feature `slug`'s sandbox ended: its commands open, or what
-    /// went wrong is said and what it had started goes.
+    /// went wrong is said and what it had started goes. `opened`: its commands
+    /// opened where it runs, all but those named.
     pub(crate) fn sandbox_started(
         &mut self,
         project: &str,
         slug: &str,
         run: SandboxRun,
         stopped: bool,
+        opened: Option<Vec<String>>,
     ) {
         let key = (project.to_owned(), slug.to_owned());
         self.features.build.sandbox_stops.remove(&key);
+        let host = self.sandbox_host(&run);
         let Some(feature) = self.feature(project, slug) else {
             // The feature went meanwhile, and nothing else knows of these.
-            let dir = sandbox_dir(project, slug);
+            let dir = self.sandbox_dir_of(project, slug, &run);
+            let (Ok(host), Some(dir)) = (host, dir) else {
+                return tracing::error!("the sandbox of a removed feature stays where it runs");
+            };
             std::thread::spawn(move || {
-                if let Err(why) = sandbox_run::stop(&run, &dir, true) {
+                if let Err(why) = sandbox_run::stop(&run, &dir, true, &host) {
                     tracing::error!("removing the sandbox of a removed feature: {why}");
                 }
             });
@@ -415,7 +502,13 @@ impl Gerdr {
         if let Some(why) = run.failed.clone() {
             // Off the thread: it waits for what ran inside to end.
             let pieces = run.clone();
-            std::thread::spawn(move || pieces.kill_network());
+            if let Ok(host) = host {
+                std::thread::spawn(move || {
+                    if let Err(why) = pieces.kill_network(&host) {
+                        tracing::warn!("a sandbox that failed to start: {why}");
+                    }
+                });
+            }
             if let Some(f) = self.feature_mut(project, slug) {
                 f.sandbox = Some(run);
             }
@@ -439,11 +532,22 @@ impl Gerdr {
             crate::problems::report(PROBLEMS, text.clone());
             self.show_warning(text);
         }
+        if !run.not_there.is_empty() {
+            let name = run.machine.as_deref().map_or_else(String::new, |id| self.machine_name(id));
+            self.show_warning(format!(
+                "{} doesn't run on {name}, so the sandbox has no copy of it: start it there first",
+                run.not_there.join(", ")
+            ));
+        }
         let holder = run.holder.as_ref().map(|h| h.pid);
+        self.note_sandbox_there(project, slug, &run);
         if let Some(f) = self.feature_mut(project, slug) {
             f.sandbox = Some(run);
         }
         self.save_feature(project, slug);
+        if let Some(missing) = opened {
+            return self.say_sandbox_opened(&title, &missing);
+        }
         let (Some(holder), Some(feature)) = (holder, self.feature(project, slug).cloned()) else {
             return;
         };
@@ -509,11 +613,13 @@ impl Gerdr {
             run.panes = panes;
         }
         self.save_feature(project, slug);
+        self.say_sandbox_opened(&feature.title, &missing);
+    }
+
+    /// A sandbox is up, with all its terminals but those for `missing`.
+    fn say_sandbox_opened(&mut self, title: &str, missing: &[String]) {
         if missing.is_empty() {
-            self.show_success(format!(
-                "The sandbox of \u{201c}{}\u{201d} is running",
-                feature.title
-            ));
+            self.show_success(format!("The sandbox of \u{201c}{title}\u{201d} is running"));
         } else {
             self.show_error(format!(
                 "Couldn't open a terminal for {}",
@@ -527,7 +633,7 @@ impl Gerdr {
         let Some(feature) = self.feature(project, slug) else {
             return;
         };
-        if let Some(id) = feature.writer.clone() {
+        if let Some(id) = (feature.sandbox.as_ref()).and_then(|run| run.machine.clone()) {
             return self.open_seen_sandbox_app(project, slug, &id);
         }
         let Some(run) = feature.sandbox.as_ref().filter(|r| r.alive()) else {
@@ -633,6 +739,7 @@ impl Gerdr {
             return;
         };
         let title = feature.title.clone();
+        let writer = feature.writer.clone();
         let Some(run) = feature.sandbox.clone() else {
             return self.sandbox_stopped(project, slug, what, Ok(()));
         };
@@ -642,6 +749,20 @@ impl Gerdr {
                 "The sandbox of \u{201c}{title}\u{201d} is being started or stopped"
             ));
         }
+        if let Some(writer) = writer {
+            return self.stop_from_afar(project, slug, what, &writer);
+        }
+        let host = match self.sandbox_host(&run) {
+            Ok(host) => host,
+            Err(name) => {
+                return self.show_warning(format!(
+                    "{name} can't be reached: the sandbox keeps running there"
+                ));
+            }
+        };
+        let Some(dir) = self.sandbox_dir_of(project, slug, &run) else {
+            return;
+        };
         self.features
             .build
             .sandbox_stops
@@ -649,7 +770,6 @@ impl Gerdr {
         for pane in &run.panes {
             self.close_herdr_pane(pane);
         }
-        let dir = sandbox_dir(project, slug);
         let busy = Busy {
             project: project.to_owned(),
             slug: slug.to_owned(),
@@ -659,7 +779,7 @@ impl Gerdr {
         };
         let (project, slug) = (project.to_owned(), slug.to_owned());
         self.feature_work(Some(busy), move |_| Done::SandboxStopped {
-            result: sandbox_run::stop(&run, &dir, what.removes()),
+            result: sandbox_run::stop(&run, &dir, what.removes(), &host),
             project,
             slug,
             what,
@@ -678,13 +798,26 @@ impl Gerdr {
         self.features.build.sandbox_stops.remove(&key);
         if let Err(why) = result {
             tracing::warn!("stopping the sandbox of {slug}: {why}");
+            // On its page too, as the one who asked may be on another machine.
+            if let Some(f) = self.feature_mut(project, slug) {
+                f.log(feature::now(), format!("Sandbox couldn't stop: {why}"));
+            }
+            self.save_feature(project, slug);
             return self.show_error(format!("The sandbox didn't stop cleanly: {why}"));
         }
         if let Some(feature) = self.feature(project, slug) {
             forget_out_of_reach(feature);
         }
         if let Some(f) = self.feature_mut(project, slug) {
-            if what.removes() {
+            if what.starts_again() && what.removes() {
+                // It starts again where it was: only its data goes.
+                let machine = f.sandbox.take().and_then(|run| run.machine);
+                f.sandbox = Some(SandboxRun {
+                    machine,
+                    stopped: true,
+                    ..SandboxRun::default()
+                });
+            } else if what.removes() {
                 f.sandbox = None;
             } else if let Some(run) = f.sandbox.as_mut() {
                 run.stopped = true;
@@ -705,6 +838,7 @@ impl Gerdr {
 
     /// Look for containers of sandboxes whose feature is gone, off the thread.
     pub(crate) fn look_for_sandbox_leftovers(&mut self) {
+        self.report_left_there();
         self.feature_work(None, |_| {
             let never = AtomicBool::new(false);
             let found = sandbox_run::labelled(&never).unwrap_or_else(|why| {

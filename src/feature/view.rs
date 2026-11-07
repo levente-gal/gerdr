@@ -201,6 +201,7 @@ pub fn rebased(feature: &Feature, paths: &Paths, id: &str) -> Result<Feature, St
     if let Some(sandbox) = &mut out.sandbox {
         // Not known yet: never what those numbers happen to be here.
         sandbox.elsewhere = Some(Default::default());
+        sandbox.machine.get_or_insert_with(|| id.to_owned());
         for pane in &mut sandbox.panes {
             let mut one = Some(std::mem::take(pane));
             name(&mut one);
@@ -493,6 +494,23 @@ mod tests {
         );
         assert_eq!(run.pane.as_deref(), Some("m1/w1:p1"));
         assert_eq!(run.machine.as_deref(), Some("m1"));
+    }
+
+    #[test]
+    fn a_sandbox_read_from_there_says_which_machine_has_it() {
+        use crate::feature::sandbox_run::SandboxRun;
+        let mut f = there();
+        f.sandbox = Some(SandboxRun::default());
+        let on_writer = rebased(&f, &paths(), "w1").unwrap();
+        assert_eq!(on_writer.sandbox.unwrap().machine.as_deref(), Some("w1"));
+        f.sandbox = Some(SandboxRun {
+            machine: Some("w2".into()),
+            panes: vec!["w2/w1:p1".into()],
+            ..SandboxRun::default()
+        });
+        let on_worker = rebased(&f, &paths(), "w1").unwrap().sandbox.unwrap();
+        assert_eq!(on_worker.machine.as_deref(), Some("w2"));
+        assert_eq!(on_worker.panes, ["w2/w1:p1"]);
     }
 
     #[test]

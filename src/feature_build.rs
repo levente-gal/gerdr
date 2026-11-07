@@ -69,6 +69,8 @@ pub(crate) struct BuildState {
     pub(crate) pending: BTreeSet<Key>,
     /// Features whose Verify checks run once their setup ends.
     pending_verify: BTreeSet<Key>,
+    /// Features whose sandbox starts on another machine once its setup there ended.
+    pub(crate) pending_sandbox: BTreeSet<Key>,
     /// Features being set up now.
     setting_up: BTreeSet<Key>,
     /// Features whose Verify checks run now.
@@ -99,7 +101,7 @@ struct Fixing {
 
 /// Whether the Build agent's start waits for the feature's setup.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SetupFirst {
+pub(crate) enum SetupFirst {
     /// Start it now.
     No,
     /// The setup runs: the agent starts once it is done.
@@ -113,7 +115,7 @@ enum SetupFirst {
 /// any, `setup` where it stands, `running` whether it runs now. One never
 /// run, or cut short by gerdr quitting, runs first; a failed one runs
 /// again on a fresh start.
-fn setup_first(
+pub(crate) fn setup_first(
     has_commands: bool,
     setup: Option<&SetupRun>,
     running: bool,
@@ -584,6 +586,7 @@ impl Gerdr {
         self.features.build.setting_up.remove(&key);
         let pending = self.features.build.pending.remove(&key);
         let checks = self.features.build.pending_verify.remove(&key);
+        let sandbox = self.features.build.pending_sandbox.remove(&key);
         let now = feature::now();
         let Some(feature) = self.feature_mut(project, slug) else {
             return;
@@ -629,6 +632,9 @@ impl Gerdr {
         }
         if checks {
             self.run_verify(project, slug);
+        }
+        if sandbox {
+            self.start_sandbox(project, slug);
         }
         if !pending {
             return;
