@@ -149,9 +149,11 @@ A key is written in one place, not on the button that does the same thing:
   looks: that machine's gerdr keeps it, and keys go nowhere. A feature's code comes
   here once it is opened, by commits: what isn't committed there doesn't show.
 - A sandbox runs on the machine writing its feature, or on the one Manual test's
-  page picked: that one needs Docker, pasta and the project's containers running,
-  as those are what's copied, and its page says what it found none of. Its setup
-  runs there first. It stays there until it is removed: its data is there.
+  page picked: that one needs Docker or Podman, pasta and the project's containers
+  running, as those are what's copied, and its page says what it found none of.
+  Podman's compose can be Docker's or podman-compose; a sandbox's copy runs under
+  the same one as main's. Its setup runs there first. It stays there until it is
+  removed: its data is there.
 - A sandbox says which gerdr started it. Each time a machine connects, gerdr looks
   there for sandboxes whose feature is gone. Each one stays as a row in the tasks
   panel, with Remove, which asks; a toast offers this gerdr's own once as well.
