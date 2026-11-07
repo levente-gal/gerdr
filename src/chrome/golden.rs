@@ -2937,6 +2937,7 @@ pub(super) fn feature_tab() -> super::FeatureTabView {
     ];
     FeatureTabView {
         review_page: false,
+        review_switch: None,
         review_keys: false,
         title: "Bulk export of invoices".into(),
         sub: "bulk-export \u{b7} ~/Work/aft/.features/bulk-export \u{b7} started 3h ago".into(),
@@ -3813,6 +3814,129 @@ fn feature_tab_review_page() -> super::FeatureTabView {
     view.review_page = true;
     view.review_keys = true;
     view.hints.clear();
+    view
+}
+
+/// Code review's switch and its figures, in the given view.
+fn review_switch(view: super::ReviewView) -> super::ReviewSwitch {
+    super::ReviewSwitch {
+        view,
+        files: Some(super::ReviewFiles {
+            viewed: 3,
+            total: 8,
+            changed: 1,
+        }),
+        fixes: "1 of 2 made".into(),
+    }
+}
+
+/// Code review's page on its code: the switch over the review.
+fn feature_tab_review_code() -> super::FeatureTabView {
+    let mut view = feature_tab_review_page();
+    view.review_switch = Some(review_switch(super::ReviewView::Code));
+    view
+}
+
+/// Code review's page on its fixes: the plan's card, the comments as cards, an
+/// earlier round folded, and the plan to read.
+fn feature_tab_review_fixes() -> super::FeatureTabView {
+    use super::{
+        ButtonStyle, CardStripe, CheckTone, FindingCard, FindingTag, NodeMark, PageButton,
+        PageSection, StagePage,
+    };
+    let mut view = feature_tab();
+    at_stage(&mut view, 6, NodeMark::Waiting, "3 of 8 files");
+    select_node(&mut view, 6);
+    view.review_switch = Some(review_switch(super::ReviewView::Fixes));
+    let button = |label: &str, style| PageButton {
+        label: label.into(),
+        style,
+    };
+    let card = |state: &str, place: &str, title: &str, made, stripe, buttons: Vec<usize>| {
+        PageSection::Finding(FindingCard {
+            tag: FindingTag::Yours,
+            title: title.into(),
+            state: state.into(),
+            place: place.into(),
+            body: String::new(),
+            preview: Vec::new(),
+            fix: String::new(),
+            note: String::new(),
+            comment: String::new(),
+            comment_buttons: Vec::new(),
+            made,
+            faded: false,
+            collapsed: false,
+            stripe,
+            field: None,
+            field_hint: "",
+            selected: false,
+            buttons,
+        })
+    };
+    view.page = StagePage {
+        title: "Code review".into(),
+        about: "Read the change and comment on it".into(),
+        status: None,
+        buttons: vec![
+            button("Review", ButtonStyle::Primary),
+            button("Make fixes", ButtonStyle::Plain),
+            button("Drop plan\u{2026}", ButtonStyle::Quiet),
+            button("Edit\u{2026}", ButtonStyle::Plain),
+            button("Delete", ButtonStyle::Plain),
+            button("Show in diff", ButtonStyle::Quiet),
+            button("Show in diff", ButtonStyle::Quiet),
+            button("Show in diff", ButtonStyle::Quiet),
+            button("Show", ButtonStyle::Plain),
+        ],
+        sections: vec![
+            PageSection::File {
+                name: "Fix plan".into(),
+                state: tab_line("review comments \u{b7} fix plan ready", CheckTone::Ready),
+                buttons: vec![0, 1, 2],
+            },
+            PageSection::Lines {
+                label: "Comments \u{b7} 1 of 2 made".into(),
+                lines: Vec::new(),
+            },
+            card(
+                "goes with the fixes",
+                "src/new.rs:3",
+                "This should say what it waits for",
+                false,
+                None,
+                vec![3, 4, 5],
+            ),
+            card(
+                "sent to Build",
+                "C1 \u{b7} src/login.rs:12",
+                "Rename this to say it retries",
+                false,
+                Some(CardStripe::Sent),
+                vec![6],
+            ),
+            card(
+                "fix made",
+                "C2 \u{b7} src/retry.rs:40",
+                "Add a test for the last attempt",
+                true,
+                Some(CardStripe::Sent),
+                vec![7],
+            ),
+            PageSection::File {
+                name: "Round 1".into(),
+                state: tab_line("2 of 2 made", CheckTone::Note),
+                buttons: vec![8],
+            },
+            PageSection::Doc {
+                name: "fix-plan.md".into(),
+                blocks: std::sync::Arc::new(crate::md_blocks::blocks(
+                    "## Fixes\n\n### C1: Rename the loop\n\nIts name hides that it retries.\n\n\
+                     ### C2: Test the last attempt\n\nNothing checks the limit.\n",
+                )),
+            },
+        ],
+    };
     view
 }
 
@@ -5552,6 +5676,7 @@ fn listed_review(flat: bool) -> super::ReposView {
     use super::{Check, DirLine, FileLine, LineState, RepoLine, TreeLine};
     let file = |path: &str, check, depth, added, removed, comments| {
         TreeLine::File(FileLine {
+            viewed: check == Check::On,
             check,
             code: 'M',
             path: path.into(),
@@ -5600,6 +5725,7 @@ fn listed_review(flat: bool) -> super::ReposView {
         diff_tree: true,
         flat,
         tree_share: super::REVIEW_TREE_SHARE,
+        tree_note: None,
         grouping: crate::repos::Grouping::Folders,
         lines,
         total,
@@ -5663,8 +5789,8 @@ const GOLDEN_DOC_TAB: [[u64; 16]; 4] = [
         0x6f1041c7f50aca45, // popup_code_review_850
         0x07ad73f54e3e101c, // popup_no_comments_1180
         0x08ab19690c613d25, // popup_no_comments_850
-        0x6c93117995af7046, // popup_listed_1180
-        0x893c019f611419ee, // inline_listed_1180
+        0xad881c43d2b80952, // popup_listed_1180
+        0x74ec422f94dccc42, // inline_listed_1180
     ],
     // Dark at 2
     [
@@ -5682,8 +5808,8 @@ const GOLDEN_DOC_TAB: [[u64; 16]; 4] = [
         0x2ebeec0af5c2ef1b, // popup_code_review_850
         0x04f0f9c1258af57a, // popup_no_comments_1180
         0x654aa94035b7bbae, // popup_no_comments_850
-        0xe300ffa270cdca65, // popup_listed_1180
-        0xbb06c362572d0b69, // inline_listed_1180
+        0x1d52e3abf66dfd6d, // popup_listed_1180
+        0x094a7588f08fc1d1, // inline_listed_1180
     ],
     // Light at 1
     [
@@ -5701,8 +5827,8 @@ const GOLDEN_DOC_TAB: [[u64; 16]; 4] = [
         0xdc7251d500deedf7, // popup_code_review_850
         0x078b0def98e11797, // popup_no_comments_1180
         0x0f750109c62c42b8, // popup_no_comments_850
-        0xc9e494d0472d5184, // popup_listed_1180
-        0x51f3d2ac97eb79d4, // inline_listed_1180
+        0xef0c1db60fab9ed4, // popup_listed_1180
+        0xc6754a4ffff0c0b4, // inline_listed_1180
     ],
     // Light at 2
     [
@@ -5720,8 +5846,8 @@ const GOLDEN_DOC_TAB: [[u64; 16]; 4] = [
         0x648afae740203419, // popup_code_review_850
         0x2435e6adfbb4e6b8, // popup_no_comments_1180
         0x958a852299d3f6a4, // popup_no_comments_850
-        0x92e8143024b2758a, // popup_listed_1180
-        0x0ba0ca9eb3570a9e, // inline_listed_1180
+        0xbef0592f947c975e, // popup_listed_1180
+        0x25bb1306909649ca, // inline_listed_1180
     ],
 ];
 
@@ -5750,6 +5876,67 @@ fn dump_doc_tab() {
                 buffer,
                 width,
             );
+        }
+    }
+}
+
+const REVIEW_VIEWS: [&str; 3] = [
+    "tab_review_code_1180",
+    "tab_review_fixes_1180",
+    "tab_review_fixes_860",
+];
+
+/// The recorded hashes of `REVIEW_VIEWS`, per case in `CASES`.
+const GOLDEN_REVIEW_VIEWS: [[u64; 3]; 4] = [
+    [0x6123cd0724825735, 0x53782be2ddfac6ae, 0x1c4b9696edfa9956],
+    [0xf02b17481428981c, 0x9e2c86e8368e8bcc, 0x01830581ba18ebaf],
+    [0x666736936e66ab75, 0xe7910bcd2f7f1b7a, 0xf94989bf74da0e5d],
+    [0x0f9007445cc1bec2, 0x493b04a5cef37ada, 0xa534a15e44f8c25e],
+];
+
+#[test]
+fn code_reviews_views_paint_the_same_pixels() {
+    let golden: Vec<&[u64]> = GOLDEN_REVIEW_VIEWS
+        .iter()
+        .map(|row| row.as_slice())
+        .collect();
+    let views = [
+        (feature_tab_review_code(), 1180),
+        (feature_tab_review_fixes(), 1180),
+        (feature_tab_review_fixes(), 860),
+    ];
+    check_each(&REVIEW_VIEWS, &golden, |painter, theme, scale, surface| {
+        let (view, w) = &views[surface];
+        hash(super::feature_tab_composed(
+            painter,
+            view,
+            (*w, TAB_HEIGHT).into(),
+            theme,
+            scale,
+        ))
+    });
+}
+
+/// With `GERDR_DUMP_DIR` set, write Code review's views there.
+#[test]
+fn dump_review_views() {
+    let Some(dir) = std::env::var_os("GERDR_DUMP_DIR") else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    let _ = std::fs::create_dir_all(&dir);
+    let painter = Painter::new();
+    let views = [
+        (feature_tab_review_code(), 1180),
+        (feature_tab_review_fixes(), 1180),
+        (feature_tab_review_fixes(), 860),
+    ];
+    for (theme, scale) in CASES {
+        for ((view, w), name) in views.iter().zip(REVIEW_VIEWS) {
+            let width = (*w as f64 * scale).round() as usize;
+            let buffer =
+                super::feature_tab_composed(&painter, view, (*w, TAB_HEIGHT).into(), theme, scale);
+            dump(&dir, &format!("{name}_{}_{}", theme.name(), scale), buffer, width);
         }
     }
 }

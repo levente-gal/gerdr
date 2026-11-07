@@ -341,6 +341,7 @@ impl WorktreeDiff {
             view.diff_tree = true;
             view.tree_share = env.tree_share;
             view.empty = fe.empty(self.read).into();
+            view.tree_note = fe.tree_note(self.read);
             let check = |root: &Path, path: &str| fe.check(root, path);
             tree.fill(&mut view, &fe.sections(), &self.diff, &check, env.tree_page);
         }
@@ -652,7 +653,7 @@ impl WorktreeDiff {
             return Some(Done::Diff(Outcome::Notice(DRAFT_OPEN)));
         }
         if self.feature.is_some() {
-            return Some(match self.with_ctx(env, |ctx| self.diff.copy_review(ctx)) {
+            return Some(match self.with_ctx(env, |ctx| self.diff.send_review(ctx)) {
                 Ok(Outcome::Copy { text, .. }) => Done::SendBack(text),
                 _ => Done::Diff(Outcome::Notice(crate::feature_diff::NO_OWN_COMMENT)),
             });
@@ -837,6 +838,11 @@ impl WorktreeDiff {
             ],
             false => &[],
         };
+        let on_page: &[(&str, &str)] = match self.feature.as_ref().is_some_and(|fe| fe.inline) {
+            true => &[("Alt+1 / Alt+2", "show the code, or the fixes the comments asked for")],
+            false => &[],
+        };
+        let list = list.iter().chain(on_page);
         let own = own.iter().chain(list).map(|(key, what)| {
             (
                 key.to_string(),
@@ -2042,6 +2048,23 @@ impl crate::Gerdr {
             Keysym::Page_Up | Keysym::KP_Page_Up | Keysym::Page_Down | Keysym::KP_Page_Down
         );
         if only_ctrl && pages && self.on_inline_review() {
+            if let Some(outcome) = self.feature_panel_key(mods, sym, typed) {
+                self.apply_feature_panel(outcome);
+            }
+            return None;
+        }
+        // On Code review's page, Alt+1 and Alt+2 go between its code and its
+        // fixes; text being written takes them as any key.
+        let only_alt = mods.alt && !(mods.ctrl || mods.shift || mods.logo);
+        let views = matches!(
+            sym,
+            Keysym::_1 | Keysym::KP_1 | Keysym::_2 | Keysym::KP_2
+        );
+        if only_alt
+            && views
+            && self.on_inline_review()
+            && self.wd().is_some_and(|wd| wd.diff.editing.is_none())
+        {
             if let Some(outcome) = self.feature_panel_key(mods, sym, typed) {
                 self.apply_feature_panel(outcome);
             }

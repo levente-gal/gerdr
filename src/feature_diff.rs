@@ -67,13 +67,20 @@ pub fn decide_first(undecided: usize) -> String {
     format!("Decide the {} left first", plural(undecided, "finding"))
 }
 
-/// Whether `feature`'s code review is laid into its Code review page rather
-/// than opened over the app: while that stage waits on the user alone. With a
-/// fix plan open that page has its cards to show, and another machine writing
-/// the feature, what it says of that; those keep the popup.
-pub fn inline_review(feature: &Feature) -> bool {
-    feature.current() == Some(Stage::CodeReview)
-        && feature.fix_round.is_none()
+/// Whether Code review sent `feature` comments to fix, kept since or in a round
+/// open now.
+pub fn has_rounds(feature: &Feature) -> bool {
+    !feature.comment_fixes.is_empty()
+        || (feature.fix_round.as_ref()).is_some_and(|round| round.stage == Stage::CodeReview)
+}
+
+/// Whether `feature`'s Code review page goes between its code, laid into the
+/// page rather than opened over the app, and the fixes it asked for: while the
+/// stage is at hand, and once it sent any back, wherever the feature went for
+/// them. Another machine writing the feature keeps the popup, its page saying
+/// what it can.
+pub fn review_views(feature: &Feature) -> bool {
+    (feature.current() == Some(Stage::CodeReview) || has_rounds(feature))
         && feature.writer.is_none()
         && feature.status == Status::Open
         && feature.touched().next().is_some()
@@ -81,7 +88,10 @@ pub fn inline_review(feature: &Feature) -> bool {
 
 /// Whether `panel` shows `feature`'s Code review page with its review on it.
 pub fn review_page(panel: &crate::features::FeaturePanel, feature: &Feature) -> bool {
-    !panel.keys && panel.page_stage(feature) == Stage::CodeReview && inline_review(feature)
+    !panel.keys
+        && panel.page_stage(feature) == Stage::CodeReview
+        && review_views(feature)
+        && panel.review_view_of(feature) == crate::chrome::ReviewView::Code
 }
 
 /// What a feature's diff is for, as the feature stands now.
@@ -165,6 +175,9 @@ pub struct FeatureOf {
     pub focus: Option<String>,
     /// The comment of the user's to go to, if any (`focus` is for findings).
     pub focus_note: Option<Comment>,
+    /// The comments that went to Build in Code review's latest round: only
+    /// to see, its comments file holding them no longer.
+    pub sent_notes: Vec<Comment>,
 }
 
 /// What code review counts of a feature, for its panel row.
@@ -507,6 +520,20 @@ impl FeatureOf {
         }
     }
 
+    /// What the file list's title says once read: how many files are left.
+    pub fn tree_note(&self, read: bool) -> Option<(String, crate::chrome::Tone)> {
+        use crate::chrome::Tone;
+        let counts = self.counts(0);
+        if !read || counts.files == 0 {
+            return None;
+        }
+        let left = counts.files - counts.viewed;
+        Some(match left {
+            0 => (format!("All {} viewed", plural(counts.files, "file")), Tone::Success),
+            _ => (format!("{left} of {} left", plural(counts.files, "file")), Tone::Warning),
+        })
+    }
+
     /// The files not viewed as they are now, as `<repo>/<path>`.
     pub fn unviewed(&self) -> Vec<String> {
         let mut all = Vec::new();
@@ -587,6 +614,7 @@ pub fn finding_comment(f: &Finding, root: PathBuf, file: Option<&FileDiff>) -> C
             made: f.fix_made(),
             yours: f.yours,
             note: false,
+            sent: false,
         }),
     }
 }
@@ -605,6 +633,7 @@ fn finding_note(f: &Finding, comment: &Comment) -> Option<Comment> {
             made: f.fix_made(),
             yours: true,
             note: true,
+            sent: false,
         }),
     })
 }
@@ -799,7 +828,8 @@ impl WorktreeDiff {
         let Some(fe) = self.feature.as_mut() else {
             return;
         };
-        let comments = fe.finding_comments(&self.diff.diffs);
+        let mut comments = fe.finding_comments(&self.diff.diffs);
+        comments.extend(fe.sent_notes.iter().cloned());
         let focus = fe.focus.clone();
         let focus_note = fe.focus_note.clone();
         self.diff.notes_open = fe.role() == Role::Deciding;
@@ -849,7 +879,14 @@ impl Gerdr {
             );
             return self.show_warning(text);
         }
-        if inline_review(feature) && self.show_inline_review(project, slug, finding) {
+        // Elsewhere on the tab the popup leaves the page where it is.
+        let on_page = (self.features.panel.as_ref()).is_some_and(|panel| {
+            panel.project == project
+                && panel.slug == slug
+                && panel.page_stage(feature) == Stage::CodeReview
+        });
+        let at_hand = feature.current() == Some(Stage::CodeReview) || on_page;
+        if at_hand && review_views(feature) && self.show_inline_review(project, slug, finding) {
             return;
         }
         let Some(mut wd) = self.new_feature_diff(project, slug, finding) else {
@@ -891,14 +928,21 @@ impl Gerdr {
             return false;
         }
         self.sync_feature_panel();
+        let Some(feature) = self.feature(project, slug).cloned() else {
+            return false;
+        };
         let Some(panel) = (self.features.panel.as_mut())
             .filter(|panel| panel.project == project && panel.slug == slug)
         else {
             return false;
         };
-        panel.unpick();
+        match feature.current() == Some(Stage::CodeReview) {
+            true => panel.unpick(),
+            false => panel.pick(&feature, Stage::CodeReview),
+        }
         panel.keys = false;
         panel.rail_keys = false;
+        panel.review_view = Some(crate::chrome::ReviewView::Code);
         self.sync_inline_review();
         let env = self.worktree_env();
         let Some(wd) = self.inline_wd_mut() else {
@@ -959,6 +1003,7 @@ impl Gerdr {
                 .unwrap_or_default(),
             focus: finding.map(str::to_owned),
             focus_note: None,
+            sent_notes: Vec::new(),
         };
         let root = feature.root.clone();
         // A Zed opened from it goes to the feature's own workspace.
@@ -995,7 +1040,7 @@ impl Gerdr {
         let panel = self.features.panel.as_ref()?;
         let (project, slug) = (panel.project.clone(), panel.slug.clone());
         let feature = self.feature(&project, &slug)?;
-        let at_it = feature.current() == Some(Stage::CodeReview);
+        let at_it = review_views(feature);
         let wanted = review_page(panel, feature) && self.tab().is_some_and(crate::Tab::is_feature);
         let made = panel.review.is_some();
         if !wanted {
@@ -1032,6 +1077,7 @@ impl Gerdr {
         let grouping = self.projects.repo_grouping;
         let workspace = self.active_workspace;
         let env = self.inline_env();
+        let sent = self.sent_notes(&project, &slug);
         let wd = self.inline_wd_mut()?;
         wd.workspace = workspace;
         wd.set_grouping(grouping, env);
@@ -1045,6 +1091,9 @@ impl Gerdr {
                 if let Some(path) = path {
                     wd.diff.review = review::load_file(&path).without_findings();
                 }
+                if let Some(fe) = wd.feature.as_mut() {
+                    fe.sent_notes = sent;
+                }
                 if wd.read {
                     wd.place_findings(env);
                 }
@@ -1052,6 +1101,17 @@ impl Gerdr {
             self.worktree_diff_read();
         }
         self.inline_review_view()
+    }
+
+    /// Show `view` of Code review's page, the tab's own keys and all going to
+    /// it.
+    pub(crate) fn show_review_view(&mut self, view: crate::chrome::ReviewView) {
+        if let Some(panel) = self.features.panel.as_mut() {
+            panel.review_view = Some(view);
+            panel.keys = false;
+            panel.rail_keys = false;
+        }
+        self.refresh_pointer_focus();
     }
 
     /// What the feature tab's review needs of the chrome, wherever the keys
@@ -1496,10 +1556,16 @@ impl Gerdr {
         }
         // What is kept to give back must be all that was sent.
         self.feature_save_review();
-        if let Some(copy) = self.keep_comments(&project, &slug) {
-            let back = crate::feature::fix_round::GiveBack::Comments { copy };
+        let kept = self.keep_comments(&project, &slug);
+        let opened = kept.is_some();
+        if let Some(copy) = kept {
+            let ids = (0..review::load_file(&copy).comments.len())
+                .map(review::comment_id)
+                .collect();
+            let back = crate::feature::fix_round::GiveBack::Comments { copy, ids };
             self.fix_round_gives_back(&project, &slug, back);
         }
+        self.code_review_round_opened(&project, &slug, opened);
         if let Err(err) = review::save_file(&path, &Review::default()) {
             tracing::warn!("deleting {}: {err}", path.display());
             self.toast(format!("Couldn't delete the review: {err}"), Level::Error);
@@ -1511,6 +1577,26 @@ impl Gerdr {
         self.code_review_counted();
         self.close_feature_diff(false);
         self.show_build_agent(&project, &slug);
+    }
+
+    /// Feature `slug`'s Code review just started a fix round, its comments
+    /// `kept` for the page to show: the page goes to its fixes whatever view was
+    /// picked last, and they show at once.
+    fn code_review_round_opened(&mut self, project: &str, slug: &str, kept: bool) {
+        if kept && let Some(f) = self.feature_mut(project, slug) {
+            let round = f.fix_rounds;
+            f.comment_fixes.push(crate::feature::fix_round::CommentFix {
+                round,
+                made: Vec::new(),
+            });
+            self.save_feature(project, slug);
+        }
+        if let Some(panel) = (self.features.panel.as_mut())
+            .filter(|panel| panel.project == project && panel.slug == slug)
+        {
+            panel.review_view = None;
+        }
+        self.probe_feature(project, slug);
     }
 
     /// Save the user's comments in the open code review, if they changed:
@@ -2514,9 +2600,42 @@ mod tests {
         let Some(Done::SendBack(text)) = sent else {
             panic!("{sent:?}");
         };
-        assert!(text.contains("### General comment\n"), "{text}");
+        assert!(text.contains("### C1: General comment\n"), "{text}");
         assert!(text.contains("The whole of it reads badly"), "{text}");
         assert!(!text.contains("the whole file"), "{text}");
+    }
+
+    #[test]
+    fn a_comment_that_went_to_build_shows_in_the_diff_and_stays_as_it_was() {
+        use crate::diff_view::SENT_COMMENT;
+        let mut wd = popup(Stage::CodeReview, Vec::new(), Review::default());
+        let note = Comment {
+            root: wd.feature.as_ref().unwrap().repos[0].root.clone(),
+            path: "src/a.rs".into(),
+            text: "Rename it".into(),
+            flag: Some(Flag {
+                id: "C1".into(),
+                state: FindingState::Sent,
+                yours: true,
+                sent: true,
+                ..Flag::default()
+            }),
+            ..Comment::default()
+        };
+        wd.feature.as_mut().unwrap().sent_notes = vec![note.clone()];
+        wd.feature.as_mut().unwrap().focus = Some("C1".into());
+        wd.place_findings(POPUP_ENV);
+        assert!(wd.diff.review.comments.contains(&note));
+        assert!(!wd.diff.on_yours());
+        // Never saved or sent as the user's.
+        assert_eq!(wd.diff.review.own(), 0);
+        let none = mods(false, false);
+        for sym in [Keysym::f, Keysym::Delete] {
+            wd.key(&none, sym, sym, POPUP_ENV);
+            let said = wd.take_error().error;
+            assert_eq!(said.as_deref(), Some(SENT_COMMENT), "{sym:?}");
+        }
+        assert!(wd.diff.review.comments.contains(&note));
     }
 
     #[test]
@@ -2776,6 +2895,7 @@ mod tests {
             }],
             focus: Some("r1-1".into()),
             focus_note: None,
+            sent_notes: Vec::new(),
             ..FeatureOf::default()
         };
         let mut wd = WorktreeDiff::of_feature(fe, "/w".into(), 0, Review::default());
