@@ -1200,6 +1200,16 @@ impl Gerdr {
 
     /// Plan fixes for feature `slug`'s failed Verify run.
     pub(crate) fn plan_verify_fixes(&mut self, project: &str, slug: &str) {
+        self.verify_fixes_go(project, slug, false);
+    }
+
+    /// Make the fixes of feature `slug`'s failed Verify run with no plan:
+    /// nothing in them is the user's, so gerdr writes it.
+    pub(crate) fn make_verify_fixes(&mut self, project: &str, slug: &str) {
+        self.verify_fixes_go(project, slug, true);
+    }
+
+    fn verify_fixes_go(&mut self, project: &str, slug: &str, unplanned: bool) {
         let Some(feature) = self.feature(project, slug) else {
             return;
         };
@@ -1221,14 +1231,27 @@ impl Gerdr {
                 .join("\n"),
             evidence.display()
         );
-        if self.send_to_build(project, slug, Stage::Verify, "Verify failures", text) {
-            if let Some(f) = self.feature_mut(project, slug) {
-                let agent =
-                    (f.runs.get(&Stage::Build)).map_or_else(String::new, |r| r.agent.clone());
-                let fix = VerifyFix::new(f.fix_rounds, &run, agent);
-                f.verify_fixes.push(fix);
-                self.save_feature(project, slug);
+        let what = "Verify failures";
+        let started = match unplanned {
+            true => {
+                let plan = feature::verify::fixes_plan(&failures, &title, &evidence);
+                (self.fix_input(project, slug, what, &text)).is_some_and(|input| {
+                    self.start_unplanned_fix_round(project, slug, Stage::Verify, what, input, &plan)
+                })
             }
+            false => self.send_to_build(project, slug, Stage::Verify, what, text),
+        };
+        if !started {
+            return;
+        }
+        if let Some(f) = self.feature_mut(project, slug) {
+            let agent = (f.runs.get(&Stage::Build)).map_or_else(String::new, |r| r.agent.clone());
+            let fix = VerifyFix::new(f.fix_rounds, &run, agent);
+            f.verify_fixes.push(fix);
+            self.save_feature(project, slug);
+        }
+        // Not sent: its plan waits on the page, with what was said of why.
+        if !unplanned || self.make_unplanned_fixes(project, slug) {
             self.show_build_agent(project, slug);
         }
     }

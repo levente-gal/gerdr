@@ -1452,6 +1452,8 @@ pub enum PanelOutcome {
     /// The fixes of the last round, over, go once more, unticked
     /// (`Gerdr::resend_fixes`).
     ResendFixes,
+    /// Verify's failures go to the Build agent with no plan.
+    MakeVerifyFixes,
     /// Show round `n`'s fix plan, from Build's page: the latest in its tab,
     /// an earlier one only to read.
     OpenRoundPlan(u32),
@@ -3085,6 +3087,7 @@ fn action_hint(action: &PanelOutcome) -> &'static str {
         PanelOutcome::MakeFixes => "make fixes",
         PanelOutcome::ResendFixes => "send the fixes again",
         PanelOutcome::OpenRoundPlan(_) => "open the round's plan",
+        PanelOutcome::MakeVerifyFixes => "make fixes",
         PanelOutcome::AskFixPlan => "ask again",
         PanelOutcome::EditCommands(_) => "edit commands",
         PanelOutcome::CodeReview => "review code",
@@ -4129,6 +4132,15 @@ impl FeaturePanel {
                     false => sends_findings(feature, stage, ctx),
                 };
             }
+            // Verify's, the same way, off its check cards too.
+            Keysym::Return | Keysym::KP_Enter
+                if ctrl && self.focus != TabArea::Repos && verify_sends(feature, stage) =>
+            {
+                return Some(match mods.shift {
+                    true => PanelOutcome::PlanFixes,
+                    false => PanelOutcome::MakeVerifyFixes,
+                });
+            }
             // A locked stage's is refused when done, saying why; any other
             // stage has nothing to reopen.
             Keysym::Return | Keysym::KP_Enter
@@ -4393,6 +4405,16 @@ fn sends_round_again(feature: &Feature, stage: Stage, ctx: RowCtx) -> bool {
         && !has_new_fixes(feature, stage, ctx)
 }
 
+/// Whether `stage`'s page can send `feature`'s Verify failures to Build: at
+/// Verify, its last run failed, nothing running and no round open.
+fn verify_sends(feature: &Feature, stage: Stage) -> bool {
+    stage == Stage::Verify
+        && stage_mark(feature, stage) == StageMark::Current
+        && feature.fix_round.is_none()
+        && !checks_running(feature)
+        && (feature.verify.as_ref()).is_some_and(|v| feature::verify::to_fix(v).is_some())
+}
+
 /// Whether `stage` of `feature` has fixes of its own waiting to be sent, or
 /// to be decided: findings, failed checks or criteria, comments in the diff.
 fn has_new_fixes(feature: &Feature, stage: Stage, ctx: RowCtx) -> bool {
@@ -4549,14 +4571,16 @@ fn writers_page_actions(
             ));
         }
     }
-    let plan_fixes = stage == Stage::Verify
-        && mark == StageMark::Current
-        && feature.fix_round.is_none()
-        && !checks_running(feature)
-        && (feature.verify.as_ref()).is_some_and(|v| feature::verify::to_fix(v).is_some());
+    // Verify's failures hold no word of the user's: they need no plan, but
+    // one can still be wanted.
+    let plan_fixes = verify_sends(feature, stage);
     if plan_fixes {
         out.push((
-            button("Plan fixes", ButtonStyle::Primary),
+            button("Make fixes", ButtonStyle::Primary),
+            PanelOutcome::MakeVerifyFixes,
+        ));
+        out.push((
+            button("Plan fixes", ButtonStyle::Plain),
             PanelOutcome::PlanFixes,
         ));
     }
@@ -7308,6 +7332,7 @@ impl Gerdr {
             PanelOutcome::MakeFindingFixes => self.make_finding_fixes(&project, &slug),
             PanelOutcome::FixAllFindings => self.fix_all_findings(&project, &slug),
             PanelOutcome::PlanFixes => self.plan_verify_fixes(&project, &slug),
+            PanelOutcome::MakeVerifyFixes => self.make_verify_fixes(&project, &slug),
             PanelOutcome::ReviewFixPlan => self.open_doc_tab(&project, &slug, DocFile::FixPlan),
             PanelOutcome::MakeFixes => self.make_fixes_now(&project, &slug),
             PanelOutcome::ResendFixes => self.resend_fixes(&project, &slug),
@@ -11385,6 +11410,10 @@ fn writers_tab_hints(
             if can_stop_checks(feature) {
                 hints.push(hint("Shift+S", "stop all"));
             }
+            if verify_sends(feature, stage) {
+                hints.push(hint("Ctrl+Enter", "make fixes"));
+                hints.push(hint("Ctrl+Shift+Enter", "plan fixes"));
+            }
             hints.push(hint("Tab", if repos { "repositories" } else { "stages" }));
         }
         TabArea::Findings => {
@@ -11482,7 +11511,9 @@ fn writers_tab_hints(
             if offers_fix_all(feature, stage) {
                 hints.push(hint("Shift+F", "fix all open"));
             }
-            if sends_findings(feature, stage, ctx) == Some(PanelOutcome::MakeFindingFixes) {
+            if sends_findings(feature, stage, ctx) == Some(PanelOutcome::MakeFindingFixes)
+                || verify_sends(feature, stage)
+            {
                 hints.push(hint("Ctrl+Shift+Enter", "plan fixes"));
             }
             if earlier_reviews(feature, stage).next().is_some() {
@@ -14405,6 +14436,7 @@ pub(crate) mod tests {
         assert_eq!(
             verify_title_buttons(&failed, ctx),
             [
+                "Make fixes",
                 "Plan fixes",
                 "Run checks",
                 "Start over\u{2026}",
@@ -14654,7 +14686,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_failed_verify_waits_for_plan_fixes_on_enter() {
+    fn a_failed_verify_waits_for_its_fixes_on_enter() {
         let mut f = verified(false);
         // `verified` ran to its end, a check failing.
         f.verify.as_mut().unwrap().finished = Some(1_100);
@@ -14665,8 +14697,32 @@ pub(crate) mod tests {
         };
         assert_eq!(
             page_enter(&f, Stage::Verify, ctx),
-            Some(PanelOutcome::PlanFixes)
+            Some(PanelOutcome::MakeVerifyFixes)
         );
+        // Ctrl+Enter makes them too, Ctrl+Shift+Enter plans them, from the
+        // stages and the check cards alike.
+        let slugs = vec![f.slug.clone()];
+        let plan = [planned("lint", false, true)];
+        for focus in [TabArea::Stages, TabArea::Findings] {
+            let mut panel = FeaturePanel {
+                slug: f.slug.clone(),
+                stage: Some(Stage::Verify),
+                focus,
+                ..FeaturePanel::default()
+            };
+            let ctrl = |shift| ModifiersState {
+                ctrl: true,
+                shift,
+                ..ModifiersState::default()
+            };
+            let press = |panel: &mut FeaturePanel, shift| {
+                let mods = ctrl(shift);
+                panel.key(&mods, Keysym::Return, &f, &slugs, ctx, &plan, &[], &[])
+            };
+            let made = press(&mut panel, false);
+            assert_eq!(made, Some(PanelOutcome::MakeVerifyFixes));
+            assert_eq!(press(&mut panel, true), Some(PanelOutcome::PlanFixes));
+        }
         let plain = page_actions(&f, Stage::Verify, ctx);
         let run = plain.iter().find(|(_, o)| *o == PanelOutcome::RunChecks);
         assert_eq!(run.map(|(b, _)| b.style), Some(ButtonStyle::Plain));
@@ -17984,6 +18040,7 @@ pub(crate) mod tests {
         assert_eq!(
             labels(&actions),
             [
+                ("Make fixes", PanelOutcome::MakeVerifyFixes),
                 ("Plan fixes", PanelOutcome::PlanFixes),
                 ("Run checks", PanelOutcome::RunChecks),
                 ("Start over\u{2026}", PanelOutcome::StartOver(Stage::Verify)),

@@ -955,7 +955,13 @@ impl Gerdr {
 
     /// Where `text` went for a new fix round of feature `slug`: none if a
     /// round can't start now, as is said.
-    fn fix_input(&mut self, project: &str, slug: &str, what: &str, text: &str) -> Option<PathBuf> {
+    pub(crate) fn fix_input(
+        &mut self,
+        project: &str,
+        slug: &str,
+        what: &str,
+        text: &str,
+    ) -> Option<PathBuf> {
         let feature = self.feature(project, slug)?.clone();
         let title = &feature.title;
         if feature.status != Status::Open || !feature.is_done(Stage::Build) {

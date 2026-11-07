@@ -10,7 +10,13 @@
 //!
 //! AI review's findings taken as they are, with no word of the user's, skip
 //! the planning: gerdr writes the plan from them and the fixes go at once
-//! (`review_import::needs_plan`). The rest of the round is the same.
+//! (`review_import::needs_plan`). So do Verify's failures, which hold none
+//! (`verify::fixes_plan`); Plan fixes still asks for one. The rest of the
+//! round is the same.
+//!
+//! A round that is over keeps its plan to read, not to change. It can be
+//! sent again only by its name, with nothing new to send where the feature
+//! is: its boxes are unticked then, so it ends once the agent ticks them anew.
 //!
 //! The plan must speak of everything the round was sent. gerdr lists its
 //! fixes in the build log, apart from the milestones, and the round is over
