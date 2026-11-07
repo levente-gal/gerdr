@@ -1465,9 +1465,14 @@ impl Gerdr {
             )),
             // Its fields hold lines: it places their carets itself.
             Overlay::Tasks | Overlay::FindingDialog => None,
-            // A criterion's note, while one is written.
+            // A criterion's note, while one is written, or their search
+            // while it has the keys.
             Overlay::Features => {
-                self.features.panel.as_ref()?.note.as_ref()?;
+                let panel = self.features.panel.as_ref()?;
+                let typing = (panel.search.as_ref()).is_some_and(|s| s.typing);
+                if panel.note.is_none() && !typing {
+                    return None;
+                }
                 chrome::feature_tab_field(&self.feature_tab_view()?, self.content_rect(), scale)
             }
             Overlay::Criteria => {
@@ -1521,13 +1526,15 @@ impl Gerdr {
             Overlay::Scrollback => self.scrollback.as_mut()?.field_mut(),
             Overlay::Switcher(_) => Some(self.switcher.as_mut()?.field_mut()),
             Overlay::Tasks => None,
-            Overlay::Features => self
-                .features
-                .panel
-                .as_mut()?
-                .note
-                .as_mut()
-                .map(|(_, field)| field),
+            Overlay::Features => {
+                let panel = self.features.panel.as_mut()?;
+                match &mut panel.note {
+                    Some((_, field)) => Some(field),
+                    None => (panel.search.as_mut())
+                        .filter(|s| s.typing)
+                        .map(|s| &mut s.query),
+                }
+            }
             Overlay::Criteria => self.criteria_field_mut(),
             Overlay::NewFeature => Some(self.features.dialog.as_mut()?.field_mut()),
             Overlay::FindingDialog => self.finding_dialog_field_mut(),

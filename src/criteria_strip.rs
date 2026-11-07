@@ -774,6 +774,8 @@ mod tests {
             made: false,
             earlier: false,
             shots: Vec::new(),
+            open: false,
+            seen: false,
         }
     }
 
