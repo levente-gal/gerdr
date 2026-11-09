@@ -63,15 +63,19 @@ pub fn pages(set: &[Page], url: Option<&str>, ran: &[Ran]) -> Vec<Page> {
     let mut first = Vec::new();
     let mut last = Vec::new();
     for ran in ran {
-        if let Some(port) = django_port(ran.command) {
-            first.push(Page::new("Web app", port, "/"));
-            if let Some(path) = admin_path(ran.dir) {
-                first.push(Page::new("Django admin", port, &path));
+        let script = shell_script(ran.command, ran.dir).unwrap_or_default();
+        let lines = (script.lines()).filter(|line| !line.trim_start().starts_with('#'));
+        for command in std::iter::once(ran.command).chain(lines) {
+            if let Some(port) = django_port(command) {
+                first.push(Page::new("Web app", port, "/"));
+                if let Some(path) = admin_path(ran.dir) {
+                    first.push(Page::new("Django admin", port, &path));
+                }
+            } else if let Some(port) = expo_port(command, ran.dir)
+                && has_web(ran.dir)
+            {
+                last.push(Page::new("Expo web", port, "/"));
             }
-        } else if let Some(port) = expo_port(ran.command, ran.dir)
-            && has_web(ran.dir)
-        {
-            last.push(Page::new("Expo web", port, "/"));
         }
     }
     first.extend(last);
@@ -82,6 +86,29 @@ pub fn pages(set: &[Page], url: Option<&str>, ran: &[Ran]) -> Vec<Page> {
         new
     });
     first
+}
+
+/// The text of the shell script `command`, run in `dir`, runs: `bash
+/// ./runlocal.sh`, `sh run.sh`, `./run.sh`. Its servers are started inside,
+/// out of the command's sight.
+fn shell_script(command: &str, dir: &Path) -> Option<String> {
+    let words = words(command);
+    let mut rest = words.iter().copied().skip_while(|w| w.contains('='));
+    let first = rest.next()?;
+    let shell = Path::new(first).file_name()?.to_str()?;
+    let file = if matches!(shell, "bash" | "sh" | "zsh" | "dash") {
+        rest.find(|w| !w.starts_with('-'))?
+    } else if first.ends_with(".sh") {
+        first
+    } else {
+        return None;
+    };
+    let path = dir.join(file);
+    // A script is small; anything big is no script to read through.
+    if fs::metadata(&path).ok()?.len() > 64 * 1024 {
+        return None;
+    }
+    fs::read_to_string(path).ok()
 }
 
 /// The port a Django server `command` starts listens on, if it starts one.
@@ -302,6 +329,39 @@ mod tests {
                 ("Expo web".to_owned(), "http://localhost:8081/".to_owned()),
             ]
         );
+    }
+
+    #[test]
+    fn servers_a_shell_script_starts_give_pages() {
+        let api = scratch("script");
+        fs::write(
+            api.join("urls.py"),
+            "urlpatterns = [path('admin/', admin.site.urls)]\n",
+        )
+        .unwrap();
+        fs::write(
+            api.join("runlocal.sh"),
+            "#!/bin/bash\n\nsource .venv/bin/activate\n\npython manage.py runserver 0.0.0.0:9000\n# python manage.py runserver 9999\n",
+        )
+        .unwrap();
+        let web = [
+            Page::new("Web app", 9000, "/"),
+            Page::new("Django admin", 9000, "/admin/"),
+        ];
+        for command in [
+            "/bin/bash ./runlocal.sh",
+            "sh -e runlocal.sh",
+            "./runlocal.sh",
+            "X=1 bash runlocal.sh",
+        ] {
+            let ran = [Ran { dir: &api, command }];
+            assert_eq!(pages(&[], None, &ran), web, "{command}");
+        }
+        let ran = [Ran {
+            dir: &api,
+            command: "bash ./missing.sh",
+        }];
+        assert_eq!(pages(&[], None, &ran), []);
     }
 
     #[test]
