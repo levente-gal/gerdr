@@ -495,6 +495,8 @@ impl Gerdr {
                 }
             }
             ItemAct::Comment => self.write_suggestion_comment(project, slug, id),
+            // WAVE1-STUB(C): open the answer field with `accept: true`.
+            ItemAct::Answer => self.write_suggestion_comment(project, slug, id),
             ItemAct::DeleteComment => self.note_suggestion(project, slug, id, ""),
             ItemAct::OpenCode => self.open_suggestion_code(project, slug, id, 0),
             ItemAct::Show => self.review_in_plan(project, slug),
