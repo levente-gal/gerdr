@@ -90,6 +90,9 @@ pub struct Flag {
     /// It can't be decided or changed now, and this says why (the final plan
     /// is being written, the stage is done); none when it can.
     pub frozen: Option<&'static str>,
+    /// It is a question with no answer yet (`Suggestion::unanswered`): `f`
+    /// can't accept it, `c` writes the answer first.
+    pub unanswered: bool,
 }
 
 /// A project's review.

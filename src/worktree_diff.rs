@@ -43,6 +43,7 @@ use crate::{
     doc_tab::DocMode,
     feature::fix_round::FixPhase,
     feature::review_import::Decision,
+    feature::review_items::ItemOf,
     feature::{Stage, Standing},
     feature_diff::{FeatureOf, Role},
     file_tree::{Asked, FileTree},
@@ -130,6 +131,9 @@ pub struct DocOf {
     /// What it shows changes against, as last read: the plan, for the final
     /// plan's changes (`DocFile::PlanChanges`); none, it shows all added.
     pub base: Option<String>,
+    /// Plan review's suggestions flagged on the plan, as the record had them
+    /// last (`DocFile::Suggestions`); none for any other file.
+    pub suggestions: Option<crate::plan_doc::SuggestionsOf>,
 }
 
 impl DocOf {
@@ -157,6 +161,14 @@ impl DocOf {
     /// actions.
     pub fn closed(&self) -> bool {
         self.standing != Standing::Open
+    }
+
+    /// Why it changes nothing once closed: the suggestions' own reason when
+    /// it shows them, else why it can't be edited.
+    pub fn why_closed(&self) -> &'static str {
+        (self.suggestions.as_ref().and_then(|s| s.frozen))
+            .or(self.locked)
+            .unwrap_or(crate::doc_review::APPROVED_FILE)
     }
 
     /// The file's name: `brief.md`.
@@ -211,11 +223,12 @@ fn clear_buttons(outdated: bool) -> [ReposButton; 2] {
 pub struct Taken {
     /// Why the last key did nothing.
     pub error: Option<String>,
-    pub decided: Option<(String, Decision)>,
-    pub delete_own: Option<String>,
-    pub edit_finding: Option<String>,
-    /// A finding's id, and what the user's comment on it now says.
-    pub noted: Option<(String, String)>,
+    /// Each by the kind of item it is on (`diff_view::Signals`).
+    pub decided: Option<(ItemOf, String, Decision)>,
+    pub delete_own: Option<(ItemOf, String)>,
+    pub edit_finding: Option<(ItemOf, String)>,
+    /// An item's kind and id, and what the user's comment on it now says.
+    pub noted: Option<(ItemOf, String, String)>,
 }
 
 /// What the diff's views and keys need of the chrome.
@@ -559,6 +572,7 @@ impl WorktreeDiff {
         if doc.text.as_ref() == Some(&text) && self.error.is_none() {
             return;
         }
+        let flagged = doc.suggestions.is_some();
         let name = doc.name();
         let file = match &doc.base {
             Some(base) => crate::doc_review::changed_file(&name, base, &text),
@@ -575,10 +589,47 @@ impl WorktreeDiff {
             }],
         };
         self.set_read(Ok((since, vec![file])), env);
+        // Where the suggestions go follows the text.
+        if flagged {
+            self.place_suggestions(env);
+        }
+    }
+
+    /// Lay `comments`, the items flagged (AI review's findings, Plan
+    /// review's suggestions), in place of those laid before, after the
+    /// user's own; the cursor on the item `focus` (by id), else on
+    /// `focus_note` (one of the user's own), shown. Whether one was.
+    pub fn lay_flags(
+        &mut self,
+        comments: Vec<crate::review::Comment>,
+        focus: Option<&str>,
+        focus_note: Option<&crate::review::Comment>,
+        env: Env,
+    ) -> bool {
+        let review = &mut self.diff.review;
+        review.comments.retain(|c| c.flag.is_none());
+        let first = review.comments.len();
+        review.comments.extend(comments);
+        let at = focus.and_then(|id| {
+            let found = review.comments[first..]
+                .iter()
+                .position(|c| c.flag.as_ref().is_some_and(|f| f.id == id && !f.note));
+            found.map(|i| first + i)
+        });
+        let at = at.or_else(|| {
+            review.comments[..first]
+                .iter()
+                .position(|c| Some(c) == focus_note)
+        });
+        let branch = self.branch.as_deref();
+        let feature = self.feature.as_ref();
+        let sections = sections(&self.root, &self.label, branch, &self.since, feature);
+        self.diff.rebuild(&sections);
+        at.is_some_and(|at| self.with_diff(env, |diff, ctx| diff.show_comment(at, ctx)))
     }
 
     /// The file under review as the diff has it, if read.
-    fn doc_file(&self) -> Option<&FileDiff> {
+    pub(crate) fn doc_file(&self) -> Option<&FileDiff> {
         self.diff.diffs.get(&self.root)?.1.first()
     }
 
@@ -607,8 +658,13 @@ impl WorktreeDiff {
     /// Why a file whose stage is done changes nothing.
     fn closed_notice(&self) -> Option<Done> {
         let doc = self.doc.as_ref().filter(|d| d.closed())?;
-        let why = doc.locked.unwrap_or(crate::doc_review::APPROVED_FILE);
-        Some(Done::Diff(Outcome::Notice(why)))
+        Some(Done::Diff(Outcome::Notice(doc.why_closed())))
+    }
+
+    /// Whether it shows Plan review's suggestions on the plan: Write final
+    /// plan and Ask reviewer where others have Approve and Send back.
+    fn suggestions(&self) -> Option<&crate::plan_doc::SuggestionsOf> {
+        self.doc.as_ref()?.suggestions.as_ref()
     }
 
     /// Whether it shows the fix plan: Make fixes where others have Approve.
@@ -685,6 +741,11 @@ impl WorktreeDiff {
                 _ => Done::Diff(Outcome::Notice(crate::feature_diff::NO_OWN_COMMENT)),
             });
         }
+        // The comments on the suggestions are in their record: the host
+        // asks the reviewer about them.
+        if self.suggestions().is_some() {
+            return Some(Done::SendBack(String::new()));
+        }
         if self.diff.review.is_empty() {
             return Some(Done::Diff(Outcome::Notice(NO_COMMENT)));
         }
@@ -748,7 +809,8 @@ impl WorktreeDiff {
             }
             // Its comments and edits are refused as read-only: it says why.
             Some(Outcome::Notice(diff_view::READ_ONLY)) if self.closed() => {
-                locked.map(Outcome::Notice)
+                let frozen = self.suggestions().and_then(|s| s.frozen);
+                frozen.or(locked).map(Outcome::Notice)
             }
             Some(o) if restores(&o) => Some(Outcome::Notice(DOC_NO_RESTORE)),
             Some(o) if o.edits() && locked.is_some() => locked.map(Outcome::Notice),
@@ -778,6 +840,7 @@ impl WorktreeDiff {
         // A file under review is a page: no other file to go to, no header.
         let other_file = |what: &str| what.contains("the file before or after");
         let on_page = self.doc.is_some();
+        let flagged = self.suggestions().is_some();
         let diff = (diff_help_lines().into_iter())
             .filter(|(_, what, _)| {
                 !(read_only && edits(what))
@@ -814,6 +877,18 @@ impl WorktreeDiff {
                     tone,
                 ),
                 false => (key, what, tone),
+            })
+            // On the plan, comments go on the suggestions.
+            .map(|(key, what, tone)| match flagged {
+                true => (
+                    key,
+                    (what.replace("finding or comment", "suggestion")).replace(
+                        "comment on the lines or edit the comment; delete it",
+                        "comment on the suggestion, or answer its question; delete the comment",
+                    ),
+                    tone,
+                ),
+                false => (key, what, tone),
             });
         if self.doc.is_none() && self.feature.is_none() {
             return diff.collect();
@@ -835,6 +910,15 @@ impl WorktreeDiff {
                 ("Esc", "back to the feature"),
                 ("F1", "list the keys"),
                 (PREVIEW_KEY, "go to the next of Preview, Review and Split"),
+            ],
+            (false, _) if flagged => &[
+                ("Esc", "back to the feature"),
+                ("F1", "list the keys"),
+                (APPROVE_KEY, "write the final plan from what you decided"),
+                (SEND_BACK_KEY, "ask the reviewer about your comments"),
+                ("f", "accept the suggestion, or take that back"),
+                ("Del", "reject it, saying why, or reopen it"),
+                ("Shift+E", "write its change in your own words"),
             ],
             (false, _) if self.fix_plan() => &[
                 ("Esc", "back to the feature"),
@@ -1126,6 +1210,20 @@ impl WorktreeDiff {
             }
             return;
         }
+        // The suggestions come to the final plan, or go back to the reviewer.
+        if let Some(of) = self.suggestions() {
+            if of.asks() {
+                view.title_buttons.push(Hint {
+                    label: crate::plan_doc::ASK_REVIEWER.into(),
+                    ..hint(ReposButton::SendBack, SEND_BACK_KEY)
+                });
+            }
+            view.title_buttons.push(Hint {
+                label: of.approve_label().into(),
+                ..hint(ReposButton::Approve, APPROVE_KEY)
+            });
+            return;
+        }
         // Going to its agent already, or over: these would only refuse.
         let fixing = |d: &DocOf| {
             matches!(
@@ -1333,7 +1431,10 @@ impl WorktreeDiff {
     pub fn hints(&self) -> Vec<Hint> {
         use ReposButton as B;
         let mut buttons = Vec::new();
-        if !self.read_only() {
+        let flagged = self.suggestions();
+        // On the plan, comments go on the suggestions alone.
+        let on_flag = self.diff.on_finding();
+        if !self.read_only() && (flagged.is_none() || on_flag) {
             buttons.push(B::Comment);
         }
         buttons.push(B::CopyLines);
@@ -1344,7 +1445,10 @@ impl WorktreeDiff {
             buttons.push(B::NextComment);
         }
         if self.reviewed() {
-            buttons.extend([B::Approve, B::SendBack]);
+            buttons.push(B::Approve);
+            if flagged.is_none_or(|of| of.asks()) {
+                buttons.push(B::SendBack);
+            }
         }
         let feature_hints = self.feature_hints();
         buttons.extend(feature_hints.iter().map(|hint| hint.button));
@@ -1369,6 +1473,10 @@ impl WorktreeDiff {
                     B::Comment if self.diff.plain && self.diff.cursor.is_none() => {
                         "comment on the file".into()
                     }
+                    B::Comment if flagged.is_some() && self.diff.on_yours() => {
+                        "edit your suggestion".into()
+                    }
+                    B::Comment if flagged.is_some() => "comment on the suggestion".into(),
                     B::Comment if self.diff.on_yours() => "edit the comment".into(),
                     B::Comment if self.diff.on_finding() => "edit the finding".into(),
                     B::Comment => "comment on the lines".into(),
@@ -1380,7 +1488,9 @@ impl WorktreeDiff {
                     B::Close => "close".into(),
                     B::NextUnviewed => "next, previous unviewed".into(),
                     B::NextComment => match self.diff.comments_to_visit() {
-                        Some("finding") => "next, previous finding".into(),
+                        Some(noun @ ("finding" | "suggestion")) => {
+                            format!("next, previous {noun}")
+                        }
                         _ => "next, previous comment".into(),
                     },
                     B::GoOn => match (self.doc.as_ref().and_then(|d| d.current))
@@ -1390,6 +1500,12 @@ impl WorktreeDiff {
                         None => "go on".into(),
                     },
                     B::Approve if self.fix_plan() => "make fixes".into(),
+                    B::Approve if flagged.is_some() => (flagged)
+                        .map(|of| of.approve_label().to_lowercase())
+                        .unwrap_or_default(),
+                    B::SendBack if flagged.is_some() => {
+                        crate::plan_doc::ASK_REVIEWER.to_lowercase()
+                    }
                     button => button.label().to_lowercase(),
                 },
                 key: match button {
@@ -1524,6 +1640,9 @@ impl WorktreeDiff {
                         _ if self.feature.is_some() => "Keys in a feature's code review",
                         (Some(_), _) => "Keys in a commit's diff",
                         (_, Some(doc)) if doc.evidence() => "Keys in the evidence",
+                        (_, Some(doc)) if doc.suggestions.is_some() => {
+                            "Keys in the suggestions on the plan"
+                        }
                         (_, Some(_)) => "Keys in a file under review",
                         (None, None) => "Keys in a worktree's diff",
                     },
@@ -1993,17 +2112,26 @@ impl crate::Gerdr {
         if let Some(why) = error {
             self.show_warning(why);
         }
-        if let Some((id, decision)) = decided {
-            self.feature_decide(id, decision);
+        // A finding is the code review's; a suggestion, the plan's.
+        match decided {
+            Some((ItemOf::Finding, id, decision)) => self.feature_decide(id, decision),
+            Some((ItemOf::Suggestion, id, decision)) => self.plan_doc_decide(&id, decision),
+            None => {}
         }
-        if let Some(id) = delete_own {
-            self.feature_delete_own(&id);
+        match delete_own {
+            Some((ItemOf::Finding, id)) => self.feature_delete_own(&id),
+            Some((ItemOf::Suggestion, id)) => self.plan_doc_delete_own(&id),
+            None => {}
         }
-        if let Some(id) = edit_finding {
-            self.feature_edit_finding(&id);
+        match edit_finding {
+            Some((ItemOf::Finding, id)) => self.feature_edit_finding(&id),
+            Some((ItemOf::Suggestion, id)) => self.plan_doc_edit(&id),
+            None => {}
         }
-        if let Some((id, text)) = noted {
-            self.feature_note_finding(&id, &text);
+        match noted {
+            Some((ItemOf::Finding, id, text)) => self.feature_note_finding(&id, &text),
+            Some((ItemOf::Suggestion, id, text)) => self.plan_doc_note(&id, &text),
+            None => {}
         }
         let commit = self.wd().is_some_and(|wd| wd.commit.is_some());
         let doc = self.wd().is_some_and(|wd| wd.doc.is_some());
@@ -2281,7 +2409,7 @@ impl crate::Gerdr {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::{
         chrome::{DetailRow, ReposButton},
@@ -2290,7 +2418,7 @@ mod tests {
         git::Change,
     };
 
-    const ENV: Env = Env {
+    pub(crate) const ENV: Env = Env {
         sheet_rows: 10,
         page: 20,
         cols: 60,
@@ -2788,7 +2916,7 @@ mod tests {
     }
 
     /// Discover's brief of feature "Log in", read: three lines.
-    fn doc() -> WorktreeDiff {
+    pub(crate) fn doc() -> WorktreeDiff {
         let doc = DocOf {
             project: "p".into(),
             slug: "login".into(),
@@ -2802,6 +2930,7 @@ mod tests {
             standing: Standing::Open,
             current: Some(Stage::Discover),
             base: None,
+            suggestions: None,
         };
         let mut wd = WorktreeDiff::of_doc(doc, 2, Review::default());
         wd.set_doc(Ok("# Brief\nUsers log in.\nWith a password.\n".into()), ENV);
@@ -3549,6 +3678,7 @@ mod tests {
             standing: Standing::Open,
             current: Some(Stage::Verify),
             base: None,
+            suggestions: None,
         };
         let mut wd = WorktreeDiff::of_doc(doc, 2, Review::default());
         wd.set_doc(Ok("# Evidence\napi: npm test failed\n".into()), ENV);

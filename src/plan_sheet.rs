@@ -513,6 +513,8 @@ fn ask_refused(review: &PlanReview) -> Option<String> {
 
 impl Gerdr {
     /// Open the sheet on feature `slug` of `project`.
+    // Show in plan opens the Suggestions tab now; Wave 2 removes the sheet.
+    #[allow(dead_code)]
     pub(crate) fn open_plan_sheet(&mut self, project: &str, slug: &str) {
         let Some(feature) = self.feature(project, slug) else {
             return self.show_warning("That feature is gone".into());

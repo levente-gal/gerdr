@@ -197,15 +197,23 @@ fn suggestions_state(feature: Option<&Feature>) -> String {
     let Some(review) = feature.plan_review.as_ref() else {
         return "no suggestions yet".into();
     };
+    if feature.is_done(Stage::PlanReview) {
+        return "Plan review done \u{b7} only to read".into();
+    }
     if review.writing {
         return "the final plan is being written from these".into();
     }
-    if !crate::review_cards::can_decide(feature, Stage::PlanReview) {
+    if crate::plan_doc::frozen(Some(feature)).is_some() {
         return "only to read".into();
     }
     let open = review.open();
     let accepted = review.count(State::Accepted);
-    format!("{open} to decide \u{b7} {accepted} accepted")
+    let rejected = review.count(State::Rejected);
+    let mut said = vec![format!("{open} to decide"), format!("{accepted} accepted")];
+    if rejected > 0 {
+        said.push(format!("{rejected} rejected"));
+    }
+    said.join(" \u{b7} ")
 }
 
 /// The user's comments in `review`, as a draft's card lists them: where each
@@ -633,6 +641,9 @@ impl Gerdr {
             standing: stands.standing,
             current: stands.current,
             base,
+            // Laid on the plan once it is read (`place_suggestions`).
+            suggestions: (file == DocFile::Suggestions)
+                .then(|| crate::plan_doc::SuggestionsOf::of(Some(feature), None)),
         };
         Ok((doc, text))
     }
@@ -859,6 +870,61 @@ impl Gerdr {
 mod tests {
     use super::*;
     use crate::feature::agents::StageRun;
+
+    #[test]
+    fn the_suggestions_show_on_the_plan_only_read_decided_while_they_can_be() {
+        use crate::feature::plan_review::{PlanReview, State, Suggestion};
+        let file = DocFile::Suggestions;
+        let docs = Docs::default();
+        assert_eq!(file.stage(), Stage::PlanReview);
+        assert_eq!(file.name(), Some("plan.md"));
+        let dir = Path::new("/d");
+        assert_eq!(file.path(dir), Some(PathBuf::from("/d/plan.md")));
+        assert_eq!(file.comments(dir), dir.join(SUGGESTIONS_COMMENTS));
+        let mut f = crate::features::tests::feature("login", Vec::new(), 2);
+        // The plan is approved: never edited here.
+        assert_eq!(file.locked(Some(&f), &docs), Some(SUGGESTIONS_READ_ONLY));
+        assert_eq!(file.state(Some(&f), false, &docs, 0), "no suggestions yet");
+        let one = |id: &str, state| Suggestion {
+            id: id.into(),
+            state,
+            ..Suggestion::default()
+        };
+        f.plan_review = Some(PlanReview {
+            n: 1,
+            stamp: Some((1, 1)),
+            suggestions: vec![
+                one("r1-1", State::Open),
+                one("r1-2", State::Accepted),
+                one("r1-3", State::Rejected),
+            ],
+            ..PlanReview::default()
+        });
+        // Open, and said how they stand, only while the page decides them.
+        let open = crate::review_cards::can_decide(&f, Stage::PlanReview);
+        assert_eq!(file.standing(Some(&f), &docs) == Standing::Open, open);
+        let state = file.state(Some(&f), false, &docs, 0);
+        match open {
+            true => assert_eq!(state, "1 to decide \u{b7} 1 accepted \u{b7} 1 rejected"),
+            false => assert_eq!(state, "only to read"),
+        }
+        f.plan_review.as_mut().unwrap().writing = true;
+        assert_eq!(
+            file.standing(Some(&f), &docs),
+            Standing::Locked(Stage::PlanReview)
+        );
+        assert_eq!(
+            file.state(Some(&f), false, &docs, 0),
+            "the final plan is being written from these"
+        );
+        let mut done = crate::features::tests::feature("login", Vec::new(), 3);
+        done.plan_review = f.plan_review.clone();
+        assert_ne!(file.standing(Some(&done), &docs), Standing::Open);
+        assert_eq!(
+            file.state(Some(&done), false, &docs, 0),
+            "Plan review done \u{b7} only to read"
+        );
+    }
 
     #[test]
     fn the_last_fix_plan_is_only_read() {
