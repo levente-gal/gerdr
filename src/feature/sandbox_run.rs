@@ -19,6 +19,7 @@
 //! files and processes are that machine's, as are the paths in `Job`.
 
 use std::{
+    collections::HashMap,
     fs::{self, File},
     io::Read,
     os::unix::process::CommandExt,
@@ -194,21 +195,58 @@ impl SandboxRun {
         if self.on_another_machine() {
             return (self.elsewhere.iter()).flat_map(|there| there.ports.clone()).collect();
         }
-        let Some(holder) = self.holder.as_ref().filter(|h| h.alive()) else {
+        let Some(holder) = self.holder.as_ref() else {
             return Vec::new();
         };
-        let mut ports = Vec::new();
+        let mut ports = listening_of(holder);
+        ports.retain(|port| !self.forwards.iter().any(|f| f.main_port == *port));
+        ports
+    }
+}
+
+/// When `listening_of` read a holder's ports, and what they were.
+type SeenPorts = (Instant, Vec<u16>);
+
+/// How long `listening_of` goes by what it last read of a holder.
+const PORTS_FRESH: Duration = Duration::from_secs(1);
+
+thread_local! {
+    /// What `listening_of` last read, by holder, and when. The feature tab
+    /// asks every frame and for every pointer move, and a namespace with a
+    /// few hundred sockets takes over a millisecond to read.
+    static PORTS: std::cell::RefCell<HashMap<(i32, u64), SeenPorts>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+/// The ports listening in the network namespace of `holder`, sorted, as read
+/// within `PORTS_FRESH`; none once it is gone.
+fn listening_of(holder: &Proc) -> Vec<u16> {
+    let key = (holder.pid, holder.start);
+    let now = Instant::now();
+    let kept = PORTS.with_borrow(|seen| {
+        (seen.get(&key))
+            .filter(|(at, _)| now.duration_since(*at) < PORTS_FRESH)
+            .map(|(_, ports)| ports.clone())
+    });
+    if let Some(ports) = kept {
+        return ports;
+    }
+    let mut ports = Vec::new();
+    if holder.alive() {
         for table in ["tcp", "tcp6"] {
             let path = format!("/proc/{}/net/{table}", holder.pid);
             // Unreadable counts as nothing listening: the holder just ended.
             let text = fs::read_to_string(path).unwrap_or_default();
             ports.extend(listening_in(&text));
         }
-        ports.sort_unstable();
-        ports.dedup();
-        ports.retain(|port| !self.forwards.iter().any(|f| f.main_port == *port));
-        ports
     }
+    ports.sort_unstable();
+    ports.dedup();
+    PORTS.with_borrow_mut(|seen| {
+        seen.retain(|_, (at, _)| now.duration_since(*at) < PORTS_FRESH);
+        seen.insert(key, (now, ports.clone()));
+    });
+    ports
 }
 
 /// Whether what `run` names on its machine is worth asking about there.
