@@ -30,6 +30,7 @@
 
 pub mod agents;
 pub mod artifacts;
+pub mod drafts;
 pub mod fix_round;
 pub mod graph;
 pub mod hook;
@@ -618,6 +619,9 @@ pub struct Feature {
     /// (`fix_round::keep_past`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub past_rounds: Vec<fix_round::FixRound>,
+    /// Discover's and Plan's drafts, each as it went (see `drafts`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub drafts: Vec<drafts::Draft>,
     /// How many fix rounds it had: the next one's number goes on from it.
     #[serde(default)]
     pub fix_rounds: u32,
@@ -643,6 +647,11 @@ pub struct Feature {
     /// the higher goes on (see `lease`).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub epoch: u64,
+    /// The machine it was last taken over from by a press here, by id: the one
+    /// it can be handed back to (see `lease::HAND_BACK`). None once it was
+    /// handed back, or never moved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub came_from: Option<String>,
     /// The fix rounds Verify's failures started, oldest first: what Build's
     /// page says of them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1530,6 +1539,7 @@ pub(crate) mod tests {
             stage_agents: Default::default(),
             stage_machines: Default::default(),
             setups_elsewhere: Vec::new(),
+            came_from: None,
             epoch: 0,
             stage_models: Default::default(),
             fresh_milestones: false,
@@ -1551,6 +1561,7 @@ pub(crate) mod tests {
             ran_once: Default::default(),
             fix_rounds: 0,
             past_rounds: Vec::new(),
+            drafts: Vec::new(),
             carry: None,
             unverified: None,
             back_from: None,
@@ -1627,6 +1638,7 @@ pub(crate) mod tests {
             stage_agents: BTreeMap::new(),
             stage_machines: BTreeMap::new(),
             setups_elsewhere: Vec::new(),
+            came_from: None,
             epoch: 0,
             stage_models: Default::default(),
             fresh_milestones: false,
@@ -1648,6 +1660,7 @@ pub(crate) mod tests {
             ran_once: Default::default(),
             fix_rounds: 0,
             past_rounds: Vec::new(),
+            drafts: Vec::new(),
             carry: None,
             unverified: None,
             back_from: None,

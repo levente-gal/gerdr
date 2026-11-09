@@ -190,6 +190,11 @@ How to use it:
   back off a thread finds no feature to change (`feature_mut`) and stops there,
   and must not end what still runs on a worker: the new writer is following it.
   Whatever a record names that only one machine can reach goes in `lease::taken`.
+  A sandbox running on the old writer goes on there when the feature moves over a
+  link: the new writer follows it as one on a worker (`SandboxRun::kept`), and the
+  old writer keeps its tabs (`lease::KEPT`). Handing a feature back
+  (`machine_handback`) is that machine's own take, started by a request in its
+  folder of the feature: nothing is left there when no gerdr answers.
 
   A sandbox is on the machine `SandboxRun::machine` names, or on the writer with
   none. Anything acting on one goes through `sandbox_run::Host`, with paths that

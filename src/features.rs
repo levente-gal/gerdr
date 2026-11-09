@@ -137,6 +137,9 @@ pub struct Features {
     /// Sandboxes running here for features another machine writes now, by
     /// project and slug: this gerdr's tabs run their commands (`lease::KEPT`).
     pub(crate) kept: BTreeMap<(String, String), feature::lease::Kept>,
+    /// Features this gerdr takes back because the machine writing them handed
+    /// them back (`lease::HAND_BACK`): taken, they have nobody to hand back to.
+    pub(crate) taking_back: std::collections::BTreeSet<(String, String)>,
     /// When each machine was last told its record lost, by machine, project, slug.
     pub(crate) claims: HashMap<(String, String, String), Instant>,
     /// Cursor's models, for the picker of a stage's model.
@@ -298,6 +301,9 @@ pub(crate) enum Job {
     Graph,
     /// Starting or stopping its sandbox (see `feature::sandbox_run`).
     Sandbox,
+    /// Asking the machine it was taken over from to take it back
+    /// (see `machine_handback`).
+    HandBack,
 }
 
 /// Work on a feature running off the UI thread.
@@ -315,6 +321,12 @@ pub(crate) struct Busy {
 
 /// What the work off the thread came to.
 pub(crate) enum Done {
+    /// Asking the machine a feature came from to take it back ended.
+    HandBack {
+        project: String,
+        slug: String,
+        result: Result<(), String>,
+    },
     /// What was asked of a sandbox another machine's gerdr writes of ended.
     SandboxAsked {
         project: String,
@@ -1505,6 +1517,8 @@ pub enum PanelOutcome {
     OpenRoundPlan(u32),
     /// Show what the final plan changed in the plan, only to read.
     PlanChanges,
+    /// Show what draft `k` of the stage's file changed from the one before.
+    DraftChanges(Stage, u32),
     /// Show what round `n`'s fixes changed, in a diff only to read.
     RoundDiff(u32),
     /// Open fix round `n`'s card on its page, or fold it.
@@ -1587,6 +1601,9 @@ pub enum PanelOutcome {
     /// Make a feature another machine writes this machine's, with nothing else to
     /// do. Any other that changes it does that first.
     TakeOver,
+    /// Hand a feature written here back to the machine it was taken over from:
+    /// that machine's gerdr takes it (see `machine_handback`).
+    HandBack,
     /// Pick the next agent this agent stage's chips offer.
     CycleAgent(Stage),
     /// Build with a fresh agent per milestone, or one through them all.
@@ -1651,6 +1668,7 @@ impl PanelOutcome {
                 | Self::FoldFixRound(_)
                 | Self::RoundDiff(_)
                 | Self::PlanChanges
+                | Self::DraftChanges(..)
                 | Self::OpenRoundPlan(_)
                 | Self::FoldCriterion(..)
                 | Self::FoldCriteria(..)
@@ -2198,7 +2216,7 @@ fn lists_comments(feature: &Feature) -> bool {
 /// Whether `stage`'s page of `feature` takes a comment of the user's own.
 fn can_add_comment(feature: &Feature, stage: Stage) -> bool {
     can_decide(feature, stage)
-        || tries_criteria(feature, stage)
+        || marks_criteria(feature, stage)
         || (stage == Stage::CodeReview
             && feature.status == Status::Open
             && feature.current() == Some(stage)
@@ -2622,7 +2640,7 @@ fn stage_actions(
                 (PageButton { label, style }, outcome)
             }),
     );
-    if tries_criteria(feature, stage) {
+    if marks_criteria(feature, stage) {
         out.extend((criteria.iter().enumerate()).flat_map(|(i, row)| criterion_buttons(i, row)));
     }
     if shows_criteria(feature, stage) && !criteria.is_empty() {
@@ -2679,10 +2697,26 @@ pub(crate) fn tries_criteria(feature: &Feature, stage: Stage) -> bool {
         && stage_mark(feature, stage) == StageMark::Current
 }
 
+/// Whether `stage`'s page of `feature` lets its criteria be marked: Manual
+/// test's while the feature is open and got to it, also while Verify and the
+/// reviews go over its fixes, and once it is done. Only at it do marks move
+/// it on (`tries_criteria`): failures marked elsewhere wait for it.
+pub(crate) fn marks_criteria(feature: &Feature, stage: Stage) -> bool {
+    stage == Stage::ManualTest && feature.status == Status::Open && reached_manual(feature)
+}
+
 /// Whether `stage`'s page of `feature` shows its criteria: Manual test's, once
-/// the feature got to it. Once done they are what was found, not to change.
+/// the feature got to it, also when its fixes took it back to Verify.
 pub(crate) fn shows_criteria(feature: &Feature, stage: Stage) -> bool {
-    stage == Stage::ManualTest && stage_mark(feature, stage) != StageMark::Later
+    stage == Stage::ManualTest && reached_manual(feature)
+}
+
+/// Whether `feature` got to Manual test: at it or past it, or before it
+/// again with what it found kept.
+fn reached_manual(feature: &Feature) -> bool {
+    stage_mark(feature, Stage::ManualTest) != StageMark::Later
+        || feature.ran_once.contains_key(&Stage::ManualTest)
+        || feature.manual.is_some()
 }
 
 /// The buttons on criterion `i`'s card: Pass and Fail, always both and in
@@ -3448,6 +3482,7 @@ fn action_hint(action: &PanelOutcome) -> &'static str {
         PanelOutcome::ResendFixes => "send the fixes again",
         PanelOutcome::OpenRoundPlan(_) => "open the round's plan",
         PanelOutcome::PlanChanges => "show what the final plan changed",
+        PanelOutcome::DraftChanges(..) => "show what the draft changed",
         PanelOutcome::RoundDiff(_) => "show what the fixes changed",
         PanelOutcome::MakeVerifyFixes => "make fixes",
         PanelOutcome::AskFixPlan => "ask again",
@@ -4214,9 +4249,14 @@ impl FeaturePanel {
             true => ctx.criteria,
             false => 0,
         };
+        // Marked off it too, they wait for it: only at it do they move it on.
+        let marking = match marks_criteria(feature, stage) {
+            true => ctx.criteria,
+            false => 0,
+        };
         // The user's comments come after the brief's criteria.
-        let first_comment = criteria.saturating_sub(ctx.manual.comments());
-        let comment_at = |i: usize| (i >= first_comment && i < criteria).then_some(i);
+        let first_comment = marking.saturating_sub(ctx.manual.comments());
+        let comment_at = |i: usize| (i >= first_comment && i < marking).then_some(i);
         let shown = match shows_criteria(feature, stage) {
             true => ctx.criteria,
             false => 0,
@@ -4356,11 +4396,11 @@ impl FeaturePanel {
             // done for passed, and Del deletes it, the first press arming it
             // (checklist C4).
             Keysym::space | Keysym::Return | Keysym::KP_Enter
-                if bare && self.focus == TabArea::Findings && criteria > 0 =>
+                if bare && self.focus == TabArea::Findings && marking > 0 =>
             {
                 return Some(PanelOutcome::Manual(Outcome::Toggle(self.finding)));
             }
-            Keysym::f if bare && self.focus == TabArea::Findings && criteria > 0 => {
+            Keysym::f if bare && self.focus == TabArea::Findings && marking > 0 => {
                 return Some(PanelOutcome::Manual(match comment_at(self.finding) {
                     Some(_) => Outcome::Fail(self.finding, String::new()),
                     None => Outcome::Write(self.finding),
@@ -4375,7 +4415,7 @@ impl FeaturePanel {
                 return Some(PanelOutcome::Manual(Outcome::EditComment(self.finding)));
             }
             Keysym::Delete | Keysym::KP_Delete
-                if bare && self.focus == TabArea::Findings && criteria > 0 =>
+                if bare && self.focus == TabArea::Findings && marking > 0 =>
             {
                 let Some(at) = comment_at(self.finding) else {
                     return Some(PanelOutcome::Manual(Outcome::Clear(self.finding)));
@@ -4722,6 +4762,9 @@ impl FeaturePanel {
             {
                 return Some(PanelOutcome::TakeOver);
             }
+            Keysym::e | Keysym::E if ctrl && mods.shift && hands_back(feature) => {
+                return Some(PanelOutcome::HandBack);
+            }
             Keysym::b | Keysym::B if ctrl && mods.shift && milestone_switch(feature, stage) => {
                 return Some(PanelOutcome::FreshMilestones(!feature.fresh_milestones));
             }
@@ -5037,6 +5080,96 @@ pub fn page_actions(
             out.push((PageButton { label, style }, PanelOutcome::TakeOver));
         }
     }
+    if hands_back(feature) {
+        let label = "Hand back".to_owned();
+        let style = ButtonStyle::Plain;
+        out.push((PageButton { label, style }, PanelOutcome::HandBack));
+    }
+    out
+}
+
+/// Whether `feature`, written here, can go back to the machine it was taken
+/// over from (`Feature::came_from`).
+fn hands_back(feature: &Feature) -> bool {
+    feature.writer.is_none() && feature.came_from.is_some() && feature.status == Status::Open
+}
+
+/// The buttons of `feature`'s sandbox on `stage`'s page, where it offers
+/// one: on Manual test's whenever its criteria can be marked.
+fn sandbox_actions(
+    feature: &Feature,
+    stage: Stage,
+    ctx: RowCtx,
+) -> Vec<(PageButton, PanelOutcome)> {
+    let mut out = Vec::new();
+    if !offers_sandbox(feature, stage) {
+        return out;
+    }
+    let button = |label: &str, style| PageButton {
+        label: label.to_owned(),
+        style,
+    };
+    if ctx.sandbox_busy {
+        out.push((
+            button("Stop", ButtonStyle::Plain),
+            PanelOutcome::StopSandbox,
+        ));
+    } else if sandbox_alive(feature) {
+        out.push((
+            button("Open app", ButtonStyle::Plain),
+            PanelOutcome::OpenSandbox,
+        ));
+        for (i, page) in sandbox_pages(feature).iter().enumerate().skip(1) {
+            out.push((
+                button(&page.name, ButtonStyle::Quiet),
+                PanelOutcome::OpenSandboxPage(i),
+            ));
+        }
+        // A phone reaches only what runs on this machine.
+        if !sandbox_elsewhere(feature) {
+            let label = match ctx.lan_open {
+                true => "Close to network",
+                false => "Open to network\u{2026}",
+            };
+            out.push((button(label, ButtonStyle::Quiet), PanelOutcome::SandboxLan));
+        }
+        // Here they are in a tab of their own already.
+        if sandbox_elsewhere(feature) {
+            out.push((
+                button("Show terminals", ButtonStyle::Quiet),
+                PanelOutcome::ShowSandbox,
+            ));
+        }
+        out.extend([
+            (
+                button("Restart", ButtonStyle::Quiet),
+                PanelOutcome::RestartSandbox,
+            ),
+            (
+                button("Reset data\u{2026}", ButtonStyle::Quiet),
+                PanelOutcome::ResetSandbox,
+            ),
+            (
+                button("Stop\u{2026}", ButtonStyle::Quiet),
+                PanelOutcome::StopSandbox,
+            ),
+        ]);
+    } else {
+        out.push((
+            button("Start sandbox\u{2026}", ButtonStyle::Plain),
+            PanelOutcome::StartSandbox,
+        ));
+        if feature.sandbox.is_some() {
+            out.push((
+                button("Remove sandbox\u{2026}", ButtonStyle::Quiet),
+                PanelOutcome::RemoveSandbox,
+            ));
+        }
+    }
+    out.push((
+        button("Commands\u{2026}", ButtonStyle::Quiet),
+        PanelOutcome::EditCommands(commands_tab(stage)),
+    ));
     out
 }
 
@@ -5066,6 +5199,9 @@ fn writers_page_actions(
                 ));
             }
         }
+        // Manual test's sandbox stays to try more while its fixes are gone
+        // over: what fails waits for it.
+        out.extend(sandbox_actions(feature, stage, ctx));
         return out;
     }
     let row = PanelRow::Stage(stage);
@@ -5249,69 +5385,7 @@ fn writers_page_actions(
         let edit = PanelOutcome::EditCommands(commands_tab(stage));
         out.push((button("Commands\u{2026}", style), edit));
     }
-    if offers_sandbox(feature, stage) {
-        if ctx.sandbox_busy {
-            out.push((
-                button("Stop", ButtonStyle::Plain),
-                PanelOutcome::StopSandbox,
-            ));
-        } else if sandbox_alive(feature) {
-            out.push((
-                button("Open app", ButtonStyle::Plain),
-                PanelOutcome::OpenSandbox,
-            ));
-            for (i, page) in sandbox_pages(feature).iter().enumerate().skip(1) {
-                out.push((
-                    button(&page.name, ButtonStyle::Quiet),
-                    PanelOutcome::OpenSandboxPage(i),
-                ));
-            }
-            // A phone reaches only what runs on this machine.
-            if !sandbox_elsewhere(feature) {
-                let label = match ctx.lan_open {
-                    true => "Close to network",
-                    false => "Open to network\u{2026}",
-                };
-                out.push((button(label, ButtonStyle::Quiet), PanelOutcome::SandboxLan));
-            }
-            // Here they are in a tab of their own already.
-            if sandbox_elsewhere(feature) {
-                out.push((
-                    button("Show terminals", ButtonStyle::Quiet),
-                    PanelOutcome::ShowSandbox,
-                ));
-            }
-            out.extend([
-                (
-                    button("Restart", ButtonStyle::Quiet),
-                    PanelOutcome::RestartSandbox,
-                ),
-                (
-                    button("Reset data\u{2026}", ButtonStyle::Quiet),
-                    PanelOutcome::ResetSandbox,
-                ),
-                (
-                    button("Stop\u{2026}", ButtonStyle::Quiet),
-                    PanelOutcome::StopSandbox,
-                ),
-            ]);
-        } else {
-            out.push((
-                button("Start sandbox\u{2026}", ButtonStyle::Plain),
-                PanelOutcome::StartSandbox,
-            ));
-            if feature.sandbox.is_some() {
-                out.push((
-                    button("Remove sandbox\u{2026}", ButtonStyle::Quiet),
-                    PanelOutcome::RemoveSandbox,
-                ));
-            }
-        }
-        out.push((
-            button("Commands\u{2026}", ButtonStyle::Quiet),
-            PanelOutcome::EditCommands(commands_tab(stage)),
-        ));
-    }
+    out.extend(sandbox_actions(feature, stage, ctx));
     if offers_fix_all(feature, stage) {
         out.push((
             button("Fix all open", ButtonStyle::Plain),
@@ -5377,10 +5451,7 @@ fn commands_tab(stage: Stage) -> CommandsTab {
 /// Whether `stage`'s page of `feature` offers its sandbox: where it is tried
 /// by hand, once there.
 fn offers_sandbox(feature: &Feature, stage: Stage) -> bool {
-    stage == Stage::ManualTest
-        && feature.status == Status::Open
-        && !feature.repos.is_empty()
-        && stage_mark(feature, stage) != StageMark::Later
+    !feature.repos.is_empty() && marks_criteria(feature, stage)
 }
 
 /// Whether `feature`'s sandbox is on another machine, as far as its terminals go.
@@ -5849,6 +5920,11 @@ impl Gerdr {
                 self.unbusy(&project, &slug, Job::Sandbox);
                 self.sandbox_stopped(&project, &slug, what, result);
             }
+            Done::HandBack {
+                project,
+                slug,
+                result,
+            } => self.handed_back(&project, &slug, result),
             Done::SandboxAsked {
                 project,
                 slug,
@@ -7458,6 +7534,7 @@ impl Gerdr {
             stage_agents: Default::default(),
             stage_machines: Default::default(),
             setups_elsewhere: Vec::new(),
+            came_from: None,
             epoch: 0,
             stage_models: Default::default(),
             fresh_milestones: false,
@@ -7479,6 +7556,7 @@ impl Gerdr {
             ran_once: Default::default(),
             fix_rounds: 0,
             past_rounds: Vec::new(),
+            drafts: Vec::new(),
             carry: None,
             unverified: None,
             back_from: None,
@@ -8098,6 +8176,7 @@ impl Gerdr {
         match outcome {
             // Only offered on what another machine writes, above.
             PanelOutcome::TakeOver => {}
+            PanelOutcome::HandBack => self.hand_back(&project, &slug),
             PanelOutcome::Tick => match self.feature(&project, &slug).and_then(Feature::current) {
                 Some(stage) if needs(stage).is_some() => {
                     self.approve_stage(&project, &slug, stage);
@@ -8179,6 +8258,9 @@ impl Gerdr {
             PanelOutcome::OpenRoundPlan(n) => self.open_round_plan(&project, &slug, n),
             PanelOutcome::RoundDiff(n) => self.open_round_diff(&project, &slug, n),
             PanelOutcome::PlanChanges => self.open_doc_tab(&project, &slug, DocFile::PlanChanges),
+            PanelOutcome::DraftChanges(stage, k) => {
+                self.open_doc_tab(&project, &slug, DocFile::DraftChanges(stage, k));
+            }
             PanelOutcome::FoldFixRound(n) => {
                 if let Some(panel) = self.features.panel.as_mut() {
                     panel.toggle_fix_round(n);
@@ -10089,6 +10171,7 @@ fn task_of(busy: &Busy, title: Option<&str>, project: &str) -> Task {
         Job::Verify => "checks",
         Job::Graph => "graph",
         Job::Sandbox => "sandbox",
+        Job::HandBack => "hand back",
         _ => "feature",
     };
     let detail = match title {
@@ -11699,6 +11782,9 @@ fn card_numbers(feature: &Feature, stage: Stage) -> Vec<u32> {
             .flat_map(feature::plan_review::runs)
             .map(|r| r.n)
             .collect(),
+        Stage::Discover | Stage::Plan => (feature::drafts::of(&feature.drafts, stage).iter())
+            .map(|d| d.k)
+            .collect(),
         _ => card_rounds(feature, stage, None)
             .iter()
             .map(|r| r.n)
@@ -11753,7 +11839,7 @@ fn has_own_plan_button(feature: &Feature, round: &FixRound) -> bool {
 /// The fix round whose card `stage`'s page of `feature` shows open first:
 /// the open round if the page lists it, else the newest.
 fn newest_round(feature: &Feature, stage: Stage) -> Option<u32> {
-    if stage == Stage::PlanReview {
+    if matches!(stage, Stage::PlanReview | Stage::Discover | Stage::Plan) {
         return card_numbers(feature, stage).first().copied();
     }
     let rounds = card_rounds(feature, stage, None);
@@ -12159,6 +12245,9 @@ fn round_plan_actions(
     match ROUND_CARD_STAGES.contains(&stage) {
         true => round_card_actions(feature, stage, probe),
         false if stage == Stage::PlanReview => run_card_actions(feature, probe),
+        false if matches!(stage, Stage::Discover | Stage::Plan) => {
+            draft_card_actions(feature, stage)
+        }
         false => Vec::new(),
     }
 }
@@ -12178,6 +12267,116 @@ fn run_card_actions(feature: &Feature, probe: Option<&Probe>) -> Vec<(PageButton
     }
     if runs.len() > 1 {
         out.extend((runs.iter()).map(|n| (button("Show"), PanelOutcome::FoldFixRound(*n))));
+    }
+    out
+}
+
+/// The buttons of the draft cards on `stage`'s page of `feature`: what each
+/// but the first changed, and folding.
+fn draft_card_actions(feature: &Feature, stage: Stage) -> Vec<(PageButton, PanelOutcome)> {
+    let button = |label: &str| PageButton {
+        label: label.to_owned(),
+        style: ButtonStyle::Plain,
+    };
+    let ks = card_numbers(feature, stage);
+    let mut out = Vec::new();
+    for &k in &ks {
+        if k > 1 {
+            out.push((button("Diff"), PanelOutcome::DraftChanges(stage, k)));
+        }
+        if ks.len() > 1 {
+            out.push((button("Show"), PanelOutcome::FoldFixRound(k)));
+        }
+    }
+    out
+}
+
+/// The drafts of `stage`'s file in `feature` as cards, newest first, under a
+/// caption counting them: who wrote each and when, what it was sent back
+/// with or when it was approved, the newest saying where the review stands.
+fn draft_cards(
+    feature: &Feature,
+    stage: Stage,
+    state: &PanelState,
+    actions: &[(PageButton, PanelOutcome)],
+    now: u64,
+) -> Vec<PageSection> {
+    let drafts = feature::drafts::of(&feature.drafts, stage);
+    let Some(newest) = drafts.first().map(|d| d.k) else {
+        return Vec::new();
+    };
+    let caption = match drafts.len() {
+        1 => "Draft".to_owned(),
+        n => format!("Drafts \u{b7} {n}"),
+    };
+    let mut out = vec![lines(&caption, Vec::new())];
+    let run = feature.runs.get(&stage);
+    let current = feature.status == Status::Open && feature.current() == Some(stage);
+    for draft in drafts {
+        let latest = draft.k == newest;
+        let sent = match draft.comments.len() {
+            0 => "sent back".to_owned(),
+            n => format!("sent back with {}", plural(n, "comment")),
+        };
+        let (dot, state_line) = match (draft.approved, draft.sent_back) {
+            (Some(_), _) => (Dot::Done, line("approved", CheckTone::Ready)),
+            // Sent back and not written again yet: its agent is at it.
+            (None, Some(_)) if latest && current && run.is_some_and(|r| r.ready.is_none()) => (
+                Dot::Working,
+                line(
+                    format!("{sent} \u{b7} being written again"),
+                    CheckTone::Note,
+                ),
+            ),
+            (None, Some(_)) => (Dot::Done, line(sent, CheckTone::Note)),
+            (None, None) if latest && current => {
+                (Dot::Idle, line("ready for review", CheckTone::Ready))
+            }
+            (None, None) => (Dot::Done, line("written", CheckTone::Note)),
+        };
+        let mut meta = Vec::new();
+        if !draft.agent.is_empty() {
+            meta.push(match draft.model.is_empty() {
+                true => draft.agent.clone(),
+                false => format!("{} ({})", draft.agent, draft.model),
+            });
+        }
+        meta.push(format!("written {}", projects::ago(now, draft.written)));
+        if let Some(at) = draft.sent_back {
+            meta.push(format!("sent back {}", projects::ago(now, at)));
+        }
+        if let Some(at) = draft.approved {
+            meta.push(format!("approved {}", projects::ago(now, at)));
+        }
+        let held = |o: &PanelOutcome| match o {
+            PanelOutcome::DraftChanges(s, k) => *s == stage && *k == draft.k,
+            PanelOutcome::FoldFixRound(k) => *k == draft.k,
+            _ => false,
+        };
+        let buttons = (actions.iter().enumerate())
+            .filter(|(_, (_, o))| held(o))
+            .map(|(i, _)| i)
+            .collect();
+        out.push(PageSection::Round(chrome::RoundCard {
+            label: format!("Draft {}", draft.k),
+            dot,
+            state: state_line,
+            meta: meta.join(" \u{b7} "),
+            asked: (draft.comments.iter())
+                .map(|c| chrome::RoundAsked {
+                    id: c.id.clone(),
+                    title: c.title.clone(),
+                    note: c.note.clone(),
+                    now: None,
+                })
+                .collect(),
+            asked_caption: "Comments sent back",
+            fixes: Vec::new(),
+            running: Vec::new(),
+            changed: Vec::new(),
+            open: fix_round_open(Some(newest), draft.k, &state.fix_rounds_flipped),
+            buttons,
+        }));
     }
     out
 }
@@ -12317,6 +12516,27 @@ fn milestone_switch(feature: &Feature, stage: Stage) -> bool {
     stage == Stage::Build && feature.status == Status::Open && !feature.is_done(stage)
 }
 
+/// The line saying how many failures of Manual test's criteria in `state`
+/// are not sent yet, then `when`: none while all are.
+fn failures_waiting(state: &PanelState, when: &str) -> Option<CheckLine> {
+    let n = state.ctx.manual.failed.saturating_sub(state.ctx.manual.sent);
+    if n == 0 {
+        return None;
+    }
+    // The user's comments open and not sent wait the same way.
+    let comments = (state.criteria.iter())
+        .filter(|r| r.comment && r.found == Some(Verdict::Fail) && !r.sent)
+        .count()
+        .min(n);
+    let what = match (n - comments, comments) {
+        (_, 0) => plural(n, "failure"),
+        (0, _) => plural(n, "comment"),
+        (f, c) => format!("{} and {}", plural(f, "failure"), plural(c, "comment")),
+    };
+    let wait = if n == 1 { "waits" } else { "wait" };
+    Some(line(format!("{what} {wait} {when}"), CheckTone::Note))
+}
+
 /// `stage`'s page of `feature`, its buttons `actions`.
 fn stage_page(
     feature: &Feature,
@@ -12381,6 +12601,16 @@ fn stage_page(
         if stage == Stage::CodeReview && crate::feature_diff::has_rounds(feature) {
             sections.extend(comment_sections(feature, state, actions));
         }
+        // Its fixes took it back to Verify: what it found stays, and more
+        // can be tried meanwhile.
+        if shows_criteria(feature, stage) && !state.criteria.is_empty() {
+            let said = failures_waiting(state, "for Manual test");
+            sections.push(lines("Criteria", said.into_iter().collect()));
+            sections.extend(criterion_sections(state, actions, false));
+        }
+        if offers_sandbox(feature, stage) {
+            sections.extend(sandbox_sections(feature, state));
+        }
     }
     // Build's go under its agent, where its work is listed.
     if mark != StageMark::Later && stage == Stage::Build {
@@ -12435,6 +12665,7 @@ fn stage_page(
             Stage::Discover | Stage::Plan => {
                 sections.extend(card());
                 sections.push(file_card(feature, stage, state.ctx, actions));
+                sections.extend(draft_cards(feature, stage, state, actions, now));
                 sections.extend(doc_of(state.probe, stage));
             }
             Stage::Build => {
@@ -12502,21 +12733,8 @@ fn stage_page(
                     let mut said: Vec<CheckLine> =
                         said.map(|text| line(text, CheckTone::Note)).into_iter().collect();
                     // Found while a round is open: the next one takes them.
-                    let waiting = state.ctx.manual.failed - state.ctx.manual.sent;
-                    if waiting > 0 && feature.fix_round.is_some() {
-                        let comments = (state.criteria.iter())
-                            .filter(|r| r.comment && r.found == Some(Verdict::Fail) && !r.sent)
-                            .count();
-                        let what = match (waiting - comments.min(waiting), comments) {
-                            (_, 0) => plural(waiting, "failure"),
-                            (0, _) => plural(waiting, "comment"),
-                            (f, c) => {
-                                format!("{} and {}", plural(f, "failure"), plural(c, "comment"))
-                            }
-                        };
-                        let wait = if waiting == 1 { "waits" } else { "wait" };
-                        let text = format!("{what} {wait} for the current round");
-                        said.push(line(text, CheckTone::Note));
+                    if feature.fix_round.is_some() {
+                        said.extend(failures_waiting(state, "for the current round"));
                     }
                     if fixes_unverified(feature, stage) {
                         let text = "fixes changed the code: marking it passed goes back to Verify";
@@ -12527,12 +12745,17 @@ fn stage_page(
                 }
                 sections.extend(sandbox_sections(feature, state));
             }
-            // What was found, kept to see: reopening is what changes it.
+            // What was found, kept to see, and more can be tried: only
+            // reopening sends what fails.
             Stage::ManualTest if !state.criteria.is_empty() => {
                 let by_hand = state.criteria.iter().all(|row| row.found.is_none());
                 let said = by_hand.then(|| line("marked done by hand, not tried", CheckTone::Note));
-                sections.push(lines("Criteria", said.into_iter().collect()));
+                let waiting = failures_waiting(state, "since it was done: reopen it to send them");
+                sections.push(lines("Criteria", said.into_iter().chain(waiting).collect()));
                 sections.extend(criterion_sections(state, actions, false));
+                if offers_sandbox(feature, stage) {
+                    sections.extend(sandbox_sections(feature, state));
+                }
             }
             Stage::Ship => {
                 let check = check_lines(feature, state.probe, state.shipping, now);
@@ -12551,7 +12774,11 @@ fn stage_page(
                     sections.push(lines("Pull requests", prs));
                 }
             }
-            Stage::ManualTest => {}
+            Stage::ManualTest => {
+                if offers_sandbox(feature, stage) {
+                    sections.extend(sandbox_sections(feature, state));
+                }
+            }
         }
     }
     sections.extend(last_after);
@@ -12942,13 +13169,20 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 6] = [
             ("Ctrl+Shift+A", "pick the stage's next agent"),
             ("Ctrl+Shift+W", "pick the machine the stage's next agent or check run goes on"),
             ("Ctrl+Shift+Q", "stop the stage's agent on another machine"),
-            ("Ctrl+Shift+E", "make a feature another machine writes this machine's"),
+            (
+                "Ctrl+Shift+E",
+                "make a feature another machine writes this machine's, or hand one back to the machine it came from",
+            ),
             ("Ctrl+Shift+I", "pick the model of the stage's agent"),
             (
                 "Ctrl+Shift+B",
                 "Build: one agent, or a fresh agent per milestone",
             ),
             ("Ctrl+Shift+K", "skip Plan review"),
+            (
+                "Alt+E",
+                "Discover, Plan: fold the draft cards, or open them all",
+            ),
             (
                 "Alt+E",
                 "Plan review: fold the review run cards, or open them all",
@@ -13146,6 +13380,9 @@ fn tab_hints(
             hints.push(("Ctrl+Shift+E".to_owned(), "take over".to_owned()));
         }
     }
+    if hands_back(feature) && !panel.keys && panel.note.is_none() {
+        hints.push(("Ctrl+Shift+E".to_owned(), "hand back".to_owned()));
+    }
     hints
 }
 
@@ -13285,7 +13522,7 @@ fn writers_tab_hints(
             }
             hints.push(hint("Tab", if repos { "repositories" } else { "stages" }));
         }
-        TabArea::Findings if tries_criteria(feature, stage) && ctx.criteria > 0 => {
+        TabArea::Findings if marks_criteria(feature, stage) && ctx.criteria > 0 => {
             let first_comment = ctx.criteria.saturating_sub(ctx.manual.comments());
             let comment = panel.finding >= first_comment;
             hints.push(hint("Up / Down", "criterion"));
@@ -13305,12 +13542,16 @@ fn writers_tab_hints(
             }
             hints.push(hint("c", "add comment\u{2026}"));
             hints.extend(search_hints(panel));
-            if fix_round_on(feature, stage).is_none() {
+            if tries_criteria(feature, stage) && fix_round_on(feature, stage).is_none() {
                 match manual_sends(feature, ctx) {
                     true => hints.push(hint("Ctrl+Enter", "make fixes")),
                     false => hints.push(hint("Ctrl+Enter", "mark passed")),
                 }
                 hints.push(hint("Ctrl+Shift+Enter", "plan fixes"));
+            }
+            let row = PanelRow::Stage(stage);
+            if matches!(row_action(feature, row, ctx), Some(PanelOutcome::Untick(_))) {
+                hints.push(hint(REOPEN_KEY, "reopen"));
             }
             hints.push(hint("Tab", if repos { "repositories" } else { "stages" }));
         }
@@ -13809,7 +14050,7 @@ fn tab_view(
         match i {
             CardNote::Criterion(i) => {
                 let card = cards.nth(*i);
-                if let Some(card) = card.filter(|_| tries_criteria(feature, stage)) {
+                if let Some(card) = card.filter(|_| marks_criteria(feature, stage)) {
                     // Opened to write in, and shown, whatever the search says.
                     card.collapsed = false;
                     if let Some(sheet) = card.sheet.as_mut() {
@@ -13888,9 +14129,7 @@ fn tab_view(
             buttons,
         }
     });
-    let test_strip = (stage == Stage::ManualTest
-        && !panel.keys
-        && stage_mark(feature, stage) != StageMark::Later)
+    let test_strip = (!panel.keys && shows_criteria(feature, stage))
     .then(|| test_strip(&state.criteria))
     .flatten()
     .map(|mut strip| {
@@ -14037,6 +14276,7 @@ pub(crate) mod tests {
             stage_agents: Default::default(),
             stage_machines: Default::default(),
             setups_elsewhere: Vec::new(),
+            came_from: None,
             epoch: 0,
             stage_models: Default::default(),
             fresh_milestones: false,
@@ -14058,6 +14298,7 @@ pub(crate) mod tests {
             ran_once: Default::default(),
             fix_rounds: 0,
             past_rounds: Vec::new(),
+            drafts: Vec::new(),
             carry: None,
             unverified: None,
             back_from: None,
@@ -14211,6 +14452,38 @@ pub(crate) mod tests {
         let mut mine = f.clone();
         mine.writer = None;
         assert_eq!(press(&mut panel, &mine), None);
+    }
+
+    #[test]
+    fn a_feature_taken_over_here_offers_handing_it_back() {
+        let mut f = feature("f", vec![repo("api", true)], 1);
+        let offers = |f: &Feature| {
+            (page_actions(f, Stage::Plan, RowCtx::default()).iter())
+                .any(|(b, o)| *o == PanelOutcome::HandBack && b.label == "Hand back")
+        };
+        assert!(!offers(&f));
+        f.came_from = Some("m1".into());
+        assert!(offers(&f));
+        let mut panel = FeaturePanel {
+            slug: f.slug.clone(),
+            ..FeaturePanel::default()
+        };
+        let mods = ModifiersState {
+            ctrl: true,
+            shift: true,
+            ..ModifiersState::default()
+        };
+        let pressed = panel.key(&mods, Keysym::E, &f, &[], RowCtx::default(), &[], &[], &[]);
+        assert_eq!(pressed, Some(PanelOutcome::HandBack));
+        // Over, it stays here; shown from another machine, it is taken over.
+        let mut over = f.clone();
+        over.status = Status::Done;
+        assert!(!offers(&over));
+        let mut seen = f.clone();
+        seen.writer = Some("m1".into());
+        assert!(!offers(&seen));
+        let pressed = panel.key(&mods, Keysym::E, &seen, &[], RowCtx::default(), &[], &[], &[]);
+        assert_eq!(pressed, Some(PanelOutcome::TakeOver));
     }
 
     /// A feature another machine writes, at Manual test, with its sandbox as
@@ -19625,8 +19898,9 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn an_approved_manual_test_shows_its_criteria_with_nothing_to_press() {
+    fn an_approved_manual_test_keeps_its_criteria_to_try_more() {
         use crate::chrome::FindingTag;
+        use crate::manual_test::Outcome;
         let f = feature("m", vec![repo("api", true)], 8);
         assert_eq!(stage_mark(&f, Stage::ManualTest), StageMark::Done);
         let row = |found| Row {
@@ -19663,14 +19937,24 @@ pub(crate) mod tests {
             })
             .collect();
         assert_eq!(cards.len(), 2);
-        // Readable, not faded as on the way, and with no buttons.
+        // Readable, not faded as on the way, and still to try: Pass and Fail.
         assert!(cards.iter().all(|c| c.tag == FindingTag::Passed));
-        assert!(cards.iter().all(|c| !c.faded && c.buttons.is_empty()));
+        assert!(cards.iter().all(|c| !c.faded && c.buttons.len() == 2));
         assert!(matches!(
             (page.sections.iter()).find(|s| matches!(s, PageSection::Lines { .. })),
             Some(PageSection::Lines { label, lines, .. }) if label == "Criteria" && lines.is_empty()
         ));
-        // Tab and the arrows go through them; nothing changes a result.
+        // Its sandbox stays too.
+        assert!((actions.iter()).any(|(_, o)| *o == PanelOutcome::StartSandbox));
+        assert!((page.sections.iter()).any(
+            |s| matches!(s, PageSection::Lines { label, .. } if label == "Sandbox")
+        ));
+        // Nothing moves it on: only reopening sends what fails.
+        assert!(!(actions.iter()).any(|(_, o)| matches!(
+            o,
+            PanelOutcome::Manual(Outcome::MarkPassed | Outcome::SendFailures)
+        )));
+        // Tab and the arrows go through them; the keys mark them.
         let mut panel = FeaturePanel {
             project: "acme".into(),
             slug: "m".into(),
@@ -19688,9 +19972,15 @@ pub(crate) mod tests {
         };
         assert_eq!(go(Keysym::Tab), (None, TabArea::Findings, 0));
         assert_eq!(go(Keysym::Down), (None, TabArea::Findings, 1));
-        for sym in [Keysym::space, Keysym::f, Keysym::Delete] {
-            assert_eq!(go(sym).0, None);
-        }
+        assert_eq!(
+            go(Keysym::space).0,
+            Some(PanelOutcome::Manual(Outcome::Toggle(1)))
+        );
+        assert_eq!(go(Keysym::f).0, Some(PanelOutcome::Manual(Outcome::Write(1))));
+        assert_eq!(
+            go(Keysym::Delete).0,
+            Some(PanelOutcome::Manual(Outcome::Clear(1)))
+        );
         let hints = tab_hints(
             &panel,
             &f,
@@ -19704,11 +19994,30 @@ pub(crate) mod tests {
         );
         assert!(hints.iter().any(|(_, what)| what == "criterion"));
         assert!(hints.iter().any(|(key, _)| key == REOPEN_KEY));
+        assert!(hints.iter().any(|(_, what)| what == "pass"));
         assert!(
             !hints
                 .iter()
-                .any(|(_, what)| what == "pass" || what == "clear")
+                .any(|(_, what)| what == "mark passed" || what == "plan fixes")
         );
+        // Failed since, it says how to send them.
+        let failed = PanelState {
+            ctx: RowCtx {
+                manual: crate::feature::manual::Counts {
+                    failed: 1,
+                    ..Default::default()
+                },
+                ..ctx
+            },
+            criteria: vec![row(Some(Verdict::Pass)), row(Some(Verdict::Fail))],
+            ..PanelState::default()
+        };
+        let page = stage_page(&f, Stage::ManualTest, &failed, &actions, 2_060);
+        assert!(matches!(
+            (page.sections.iter()).find(|s| matches!(s, PageSection::Lines { .. })),
+            Some(PageSection::Lines { lines, .. }) if lines.first().is_some_and(|l| l.text
+                == "1 failure waits since it was done: reopen it to send them")
+        ));
         // What the footer says it reopens, from the cards too.
         let both = ModifiersState {
             ctrl: true,
@@ -19737,7 +20046,100 @@ pub(crate) mod tests {
         assert!(tries_criteria(&left, Stage::ManualTest));
         left.status = Status::Abandoned;
         assert!(!tries_criteria(&left, Stage::ManualTest));
+        assert!(!marks_criteria(&left, Stage::ManualTest));
         assert!(shows_criteria(&left, Stage::ManualTest));
+    }
+
+    #[test]
+    fn manual_test_back_at_verify_keeps_its_criteria_and_sandbox_to_try_more() {
+        use crate::manual_test::Outcome;
+        let row = |found| Row {
+            open: false,
+            seen: false,
+            id: "AC-1".into(),
+            title: "C".into(),
+            text: "Given a, when b, then c".into(),
+            found,
+            note: String::new(),
+            sent: false,
+            made: false,
+            earlier: false,
+            retest: None,
+            shots: Vec::new(),
+            comment: false,
+        };
+        let rows = vec![row(Some(Verdict::Pass)), row(Some(Verdict::Fail))];
+        let ctx = RowCtx {
+            criteria: 2,
+            manual: crate::feature::manual::Counts {
+                passed: 1,
+                failed: 1,
+                ..Default::default()
+            },
+            ..RowCtx::default()
+        };
+        let state = PanelState {
+            ctx,
+            criteria: rows.clone(),
+            ..PanelState::default()
+        };
+        // Never got there: nothing of it shows yet.
+        let mut f = feature("m", vec![repo("api", true)], stage_index(Stage::Verify));
+        assert_eq!(stage_mark(&f, Stage::ManualTest), StageMark::Later);
+        assert!(!shows_criteria(&f, Stage::ManualTest));
+        assert!(!marks_criteria(&f, Stage::ManualTest));
+        let actions = stage_actions(&f, Stage::ManualTest, ctx, &[], &rows, &[]);
+        assert!(actions.is_empty(), "{actions:?}");
+        let page = stage_page(&f, Stage::ManualTest, &state, &actions, 2_060);
+        assert!(!(page.sections.iter()).any(|s| matches!(s, PageSection::Finding(_))));
+        // Its fixes took it back to Verify: the sheet, its keys and the
+        // sandbox stay, and what fails waits for it.
+        f.ran_once.insert(Stage::ManualTest, 100);
+        assert!(shows_criteria(&f, Stage::ManualTest));
+        assert!(marks_criteria(&f, Stage::ManualTest));
+        assert!(!tries_criteria(&f, Stage::ManualTest));
+        let actions = stage_actions(&f, Stage::ManualTest, ctx, &[], &rows, &[]);
+        let outcomes: Vec<&PanelOutcome> = actions.iter().map(|(_, o)| o).collect();
+        assert!(outcomes.contains(&&PanelOutcome::Manual(Outcome::Toggle(0))));
+        assert!(outcomes.contains(&&PanelOutcome::StartSandbox));
+        assert!(!(outcomes.iter()).any(|o| matches!(
+            o,
+            PanelOutcome::Manual(Outcome::MarkPassed | Outcome::SendFailures)
+        )));
+        let page = stage_page(&f, Stage::ManualTest, &state, &actions, 2_060);
+        let cards = (page.sections.iter()).filter(|s| matches!(s, PageSection::Finding(_)));
+        assert_eq!(cards.count(), 2);
+        assert!((page.sections.iter()).any(|s| matches!(s, PageSection::Toolbar { .. })));
+        assert!((page.sections.iter()).any(|s| matches!(
+            s,
+            PageSection::Lines { label, lines, .. } if label == "Criteria"
+                && lines.first().is_some_and(|l| l.text == "1 failure waits for Manual test")
+        )));
+        assert!((page.sections.iter()).any(
+            |s| matches!(s, PageSection::Lines { label, .. } if label == "Sandbox")
+        ));
+        let mut panel = FeaturePanel {
+            project: "acme".into(),
+            slug: "m".into(),
+            focus: TabArea::Findings,
+            ..FeaturePanel::default()
+        };
+        panel.pick(&f, Stage::ManualTest);
+        panel.focus = TabArea::Findings;
+        let slugs = vec!["m".to_owned()];
+        let (mods, sym) = key(Keysym::space);
+        assert_eq!(
+            panel.key(&mods, sym, &f, &slugs, ctx, &[], &[], &[]),
+            Some(PanelOutcome::Manual(Outcome::Toggle(0)))
+        );
+        let ctrl = ModifiersState {
+            ctrl: true,
+            ..ModifiersState::default()
+        };
+        assert_eq!(
+            panel.key(&ctrl, Keysym::Return, &f, &slugs, ctx, &[], &[], &[]),
+            None
+        );
     }
 
     #[test]
@@ -22814,5 +23216,89 @@ pub(crate) mod tests {
         assert_eq!(panel.fix_rounds_flipped, BTreeSet::from([2]));
         panel.toggle_rounds(&f, stage);
         assert_eq!(panel.fix_rounds_flipped, BTreeSet::from([1]));
+    }
+
+    #[test]
+    fn discover_and_plan_list_their_drafts_as_cards() {
+        use crate::feature::{drafts::Draft, fix_round::Asked};
+        let stage = Stage::Plan;
+        let mut f = feature("p", vec![repo("api", true)], stage_index(stage));
+        assert_eq!(f.current(), Some(stage));
+        let draft = |k: u32, sent_back: Option<u64>| Draft {
+            stage,
+            k,
+            run: 1,
+            agent: "Claude Code".into(),
+            model: "opus".into(),
+            written: 1_000 * u64::from(k),
+            sent_back,
+            comments: Vec::new(),
+            approved: None,
+        };
+        let mut one = draft(1, Some(1_500));
+        one.comments = vec![Asked {
+            id: "C1".into(),
+            title: "line 3: Use a queue".into(),
+            note: "Why not cron?".into(),
+            shots: 0,
+        }];
+        f.drafts = vec![one, draft(2, None)];
+        f.runs.insert(
+            stage,
+            feature::agents::StageRun {
+                n: 1,
+                ready: Some(2_000),
+                ..Default::default()
+            },
+        );
+        let state = PanelState::default();
+        let mut actions = stage_actions(&f, stage, state.ctx, &[], &[], &[]);
+        actions.extend(round_plan_actions(&f, stage, None));
+        let page = stage_page(&f, stage, &state, &actions, 2_120);
+        let cards: Vec<&chrome::RoundCard> = (page.sections.iter())
+            .filter_map(|s| match s {
+                PageSection::Round(card) => Some(card),
+                _ => None,
+            })
+            .collect();
+        let labels: Vec<&str> = cards.iter().map(|c| c.label.as_str()).collect();
+        assert_eq!(labels, ["Draft 2", "Draft 1"]);
+        assert_eq!(cards[0].state.text, "ready for review");
+        assert_eq!(cards[0].dot, Dot::Idle);
+        assert_eq!(cards[1].state.text, "sent back with 1 comment");
+        assert_eq!(cards[1].asked_caption, "Comments sent back");
+        assert_eq!(cards[1].asked[0].note, "Why not cron?");
+        assert_eq!(cards[0].meta, "Claude Code (opus) \u{b7} written 2m ago");
+        let held = |card: &chrome::RoundCard| -> Vec<&str> {
+            (card.buttons.iter())
+                .map(|&i| page.buttons[i].label.as_str())
+                .collect()
+        };
+        // The first has nothing before it to show changes against.
+        assert_eq!(held(cards[0]), ["Diff", "Hide"]);
+        assert_eq!(held(cards[1]), ["Show"]);
+        assert!(
+            actions
+                .iter()
+                .any(|(_, o)| *o == PanelOutcome::DraftChanges(stage, 2))
+        );
+        // Sent back again and being rewritten: the newest says so.
+        let mut back = f.clone();
+        back.drafts[1].sent_back = Some(2_100);
+        back.runs.get_mut(&stage).unwrap().ready = None;
+        let page = stage_page(&back, stage, &state, &actions, 2_120);
+        let newest = page.sections.iter().find_map(|s| match s {
+            PageSection::Round(card) => Some(card),
+            _ => None,
+        });
+        assert_eq!(
+            newest.unwrap().state.text,
+            "sent back \u{b7} being written again"
+        );
+        assert_eq!(newest.unwrap().dot, Dot::Working);
+        // Alt+E folds them all, then opens them all.
+        let mut panel = FeaturePanel::default();
+        panel.toggle_rounds(&f, stage);
+        assert_eq!(panel.fix_rounds_flipped, BTreeSet::from([2]));
     }
 }

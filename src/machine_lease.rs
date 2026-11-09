@@ -116,6 +116,8 @@ struct TakeJob {
     /// The record as the user saw it.
     before: Feature,
     forced: bool,
+    /// Taken because its writer handed it back: it isn't to be handed back.
+    handed: bool,
 }
 
 impl TakeJob {
@@ -151,6 +153,9 @@ impl TakeJob {
         let (from, me) = (self.from.as_str(), self.me.as_str());
         let mut out = lease::taken(record, &paths, from, &self.from_name, me, keep, feature::now())
             .map_err(TakeEnd::Failed)?;
+        if self.handed {
+            out.came_from = None;
+        }
         if let Some(run) = out.sandbox.as_mut().filter(|run| run.machine.is_none())
             && let Some(kept) = lease::read_kept(&self.dir_here().join(SANDBOX))
             && kept.started == run.started
@@ -486,7 +491,7 @@ impl Gerdr {
     }
 
     /// Start the thread taking it over.
-    fn start_take(
+    pub(crate) fn start_take(
         &mut self,
         project: &str,
         slug: &str,
@@ -532,6 +537,7 @@ impl Gerdr {
             root,
             before,
             forced,
+            handed: self.features.taking_back.remove(&key),
         };
         self.features.taking.insert(
             key.clone(),
@@ -652,7 +658,7 @@ impl Gerdr {
         let started_here = (feature.sandbox.as_ref())
             .filter(|run| run.machine.is_none())
             .map(|run| run.started);
-        self.end_kept(project, slug, started_here);
+        let lan_again = self.end_kept(project, slug, started_here);
         let kept_there = (feature.sandbox.as_ref())
             .is_some_and(|run| run.kept && run.machine.as_deref() == Some(taking.from.as_str()));
         self.features.code_here.remove(&key);
@@ -671,6 +677,9 @@ impl Gerdr {
         self.probe_feature(project, slug);
         self.find_repo_sources();
         self.adopt_checks(project);
+        if lan_again {
+            self.open_sandbox_lan(project, slug);
+        }
         self.show_success(match kept_there {
             true => format!(
                 "\u{201c}{title}\u{201d} is written here now. Its sandbox keeps running on {name}"
@@ -777,7 +786,7 @@ impl Gerdr {
 
     /// Why `feature`, written on another machine, can't move now: something at
     /// work that nothing here could follow.
-    fn take_blocker(&self, feature: &Feature, me: &str) -> Option<Blocker> {
+    pub(crate) fn take_blocker(&self, feature: &Feature, me: &str) -> Option<Blocker> {
         let writer = feature.writer.as_deref()?;
         let name = self.machine_name(writer);
         // One running there goes on there, followed as one on a worker is: over
@@ -929,6 +938,7 @@ impl Gerdr {
         for (slug, request) in asked {
             self.answer_request(&project, &slug, &request);
         }
+        self.answer_hand_backs(&project);
         self.answer_sandbox_asks(&project);
         self.restore_handed();
         self.notice_moved(&project);
@@ -1075,7 +1085,7 @@ impl Gerdr {
 
     /// Why this gerdr keeps `feature`: something of it at work that only it can
     /// follow, or work of its own on it.
-    fn keeps_feature(&self, feature: &Feature) -> Option<String> {
+    pub(crate) fn keeps_feature(&self, feature: &Feature) -> Option<String> {
         let (project, slug) = (feature.project.as_str(), feature.slug.as_str());
         let name = this_machines_name();
         // A sandbox goes on where it is, whoever writes the feature: here too,
@@ -1245,7 +1255,7 @@ impl Gerdr {
         let started_here = (feature.sandbox.as_ref())
             .filter(|run| run.machine.is_none())
             .map(|run| run.started);
-        self.end_kept(project, slug, started_here);
+        let lan_again = self.end_kept(project, slug, started_here);
         // Shown from there meanwhile: it isn't written there.
         if let Some(list) = self.features.viewed.get_mut(project) {
             list.retain(|f| f.slug != slug);
@@ -1259,6 +1269,9 @@ impl Gerdr {
         self.sync_feature_panel();
         self.sync_feature_page();
         self.adopt_checks(project);
+        if lan_again {
+            self.open_sandbox_lan(project, slug);
+        }
         self.show_warning(format!(
             "\u{201c}{}\u{201d} stays here: {} didn't finish taking it over",
             handing.title, handing.to
@@ -1330,9 +1343,13 @@ impl Gerdr {
     /// them (`publish_live`) until the sandbox is gone (`kept_tick`).
     fn keep_sandbox(&mut self, feature: &Feature, to: &str) {
         let (project, slug) = (feature.project.clone(), feature.slug.clone());
-        let Some(kept) = lease::kept_of(feature) else {
+        let Some(mut kept) = lease::kept_of(feature) else {
             return;
         };
+        let key = (project.clone(), slug.clone());
+        // Only the writer opens one to the network: what reached it goes, and
+        // comes back with the feature (`end_kept`).
+        kept.lan = self.features.build.sandbox_lan.remove(&key).is_some();
         let dir = own_sandbox_dir(&project, &slug);
         if let Err(err) = lease::write_kept(&dir, &kept) {
             tracing::warn!("{project}/{slug}: noting that its sandbox goes on here: {err}");
@@ -1342,12 +1359,10 @@ impl Gerdr {
                 feature.title
             ));
         }
-        // Only the writer opens one to the network: what reached it goes.
-        let key = (project, slug);
-        if self.features.build.sandbox_lan.remove(&key).is_some() {
+        if kept.lan {
             let name = self.machine_name(to);
             self.show_notice(format!(
-                "The sandbox of \u{201c}{}\u{201d} is closed to the network: {name} writes it now",
+                "The sandbox of \u{201c}{}\u{201d} is closed to the network while {name} writes it",
                 feature.title
             ));
         }
@@ -1357,17 +1372,21 @@ impl Gerdr {
 
     /// Feature `slug`'s sandbox no longer runs here for another writer: its
     /// feature is back, and has the sandbox that started at `started_here` as its
-    /// own. Tabs of any other are closed.
-    fn end_kept(&mut self, project: &str, slug: &str, started_here: Option<u64>) {
+    /// own. Tabs of any other are closed. Whether the sandbox comes back open
+    /// to the network, as it was when the feature left: for the caller to open,
+    /// once the feature is here.
+    fn end_kept(&mut self, project: &str, slug: &str, started_here: Option<u64>) -> bool {
         let Some(kept) = self.features.kept.remove(&(project.to_owned(), slug.to_owned())) else {
-            return;
+            return false;
         };
-        if started_here != Some(kept.started) {
+        let same = started_here == Some(kept.started);
+        if !same {
             for pane in &kept.panes {
                 self.close_herdr_pane(pane);
             }
         }
         lease::forget_kept(&own_sandbox_dir(project, slug));
+        same && kept.lan
     }
 
     /// Close the tabs of the sandboxes kept here once they are gone: stopped,
@@ -1435,8 +1454,8 @@ impl Gerdr {
 }
 
 /// Something at work that keeps a feature from moving.
-struct Blocker {
-    why: String,
+pub(crate) struct Blocker {
+    pub(crate) why: String,
     /// It is what the machine last said, long ago: it may be over.
     stale: bool,
 }
@@ -1617,6 +1636,7 @@ mod tests {
             root,
             before,
             forced: false,
+            handed: false,
         };
         // What this machine had of it before, newer by its time.
         let mut stale = f.clone();
