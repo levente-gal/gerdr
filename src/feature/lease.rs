@@ -80,6 +80,10 @@ pub struct Kept {
     pub holder: Option<super::sandbox_run::Proc>,
     /// The panes of this gerdr's own session running its commands.
     pub panes: Vec<String>,
+    /// It was open to the network here when its feature left, which closed
+    /// that: it opens again when the feature comes back with it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub lan: bool,
 }
 
 /// What `KEPT` says of `feature`'s sandbox, written by the machine it runs on,
@@ -92,6 +96,7 @@ pub fn kept_of(feature: &Feature) -> Option<Kept> {
         started: run.started,
         holder: run.holder.clone(),
         panes: run.panes.clone(),
+        lan: false,
     })
 }
 
@@ -133,6 +138,54 @@ pub fn forget_kept(dir: &Path) {
     {
         tracing::warn!("removing {}: {err}", dir.join(KEPT).display());
     }
+}
+
+/// In a feature's folder on the machine it was taken over from: the machine
+/// writing it now asks that one's gerdr to take it back.
+pub const HAND_BACK: &str = ".hand-back.json";
+/// Beside `HAND_BACK`: what the gerdr there says to it.
+pub const HAND_BACK_ANSWER: &str = ".hand-back-answer.json";
+
+/// A machine writing a feature asks the one it took it from to take it back.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandBack {
+    /// The machine that writes it now, by id.
+    pub machine: String,
+    /// What that machine calls itself.
+    pub name: String,
+    /// The record's epoch as it asks: one moved since is another matter.
+    pub epoch: u64,
+}
+
+/// What a gerdr says to a `HandBack`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandBackAnswer {
+    /// Why it doesn't take it; none: it takes it now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refused: Option<String>,
+}
+
+/// The script asking the gerdr there to take a feature back: `json`, a
+/// `HandBack`. An answer to an earlier one goes first.
+pub fn hand_back_script(dir: &str, json: &str) -> String {
+    format!(
+        "cd {} || exit 3\nrm -f {HAND_BACK_ANSWER}\nprintf '%s' {} > {HAND_BACK}.tmp && mv {HAND_BACK}.tmp {HAND_BACK}\n",
+        shell_quote(dir),
+        shell_quote(json)
+    )
+}
+
+/// The script saying `WAITS` while a hand back isn't taken up there yet.
+pub fn hand_back_waits_script(dir: &str) -> String {
+    format!(
+        "cd {} || exit 3\nif [ -e {HAND_BACK} ]; then echo WAITS; fi\n",
+        shell_quote(dir)
+    )
+}
+
+/// The script taking a hand back back, nobody having taken it up.
+pub fn hand_back_unask_script(dir: &str) -> String {
+    format!("cd {} || exit 0\nrm -f {HAND_BACK}\nexit 0\n", shell_quote(dir))
 }
 
 /// How long a gerdr open on the writer gets to answer.
@@ -311,6 +364,7 @@ pub fn taken(
     }
     out.writer = None;
     out.epoch = record.epoch + 1;
+    out.came_from = Some(from.to_owned());
     out.log(now, log);
     Ok(out)
 }
@@ -523,6 +577,13 @@ mod tests {
     }
 
     #[test]
+    fn a_taken_feature_knows_where_it_came_from() {
+        let f = record();
+        assert_eq!(f.came_from, None);
+        assert_eq!(take(&f).came_from.as_deref(), Some("ana"));
+    }
+
+    #[test]
     fn a_sandbox_running_on_its_old_writer_goes_on_there_when_kept() {
         let mut f = record();
         f.sandbox = Some(sandbox(&["w1:p4"]));
@@ -605,6 +666,7 @@ mod tests {
             started: 7,
             holder: None,
             panes: vec!["w1:p4".into()],
+            lan: false,
         };
         let json = serde_json::to_string(&kept).unwrap();
         let script = kept_script(&dir.to_string_lossy(), &json);
@@ -624,6 +686,7 @@ mod tests {
             started: 7,
             holder: None,
             panes: vec!["w1:p4".into()],
+            lan: true,
         };
         write_kept(dir, &kept).unwrap();
         assert_eq!(read_kept(dir), Some(kept));

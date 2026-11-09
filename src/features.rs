@@ -137,6 +137,9 @@ pub struct Features {
     /// Sandboxes running here for features another machine writes now, by
     /// project and slug: this gerdr's tabs run their commands (`lease::KEPT`).
     pub(crate) kept: BTreeMap<(String, String), feature::lease::Kept>,
+    /// Features this gerdr takes back because the machine writing them handed
+    /// them back (`lease::HAND_BACK`): taken, they have nobody to hand back to.
+    pub(crate) taking_back: std::collections::BTreeSet<(String, String)>,
     /// When each machine was last told its record lost, by machine, project, slug.
     pub(crate) claims: HashMap<(String, String, String), Instant>,
     /// Cursor's models, for the picker of a stage's model.
@@ -298,6 +301,9 @@ pub(crate) enum Job {
     Graph,
     /// Starting or stopping its sandbox (see `feature::sandbox_run`).
     Sandbox,
+    /// Asking the machine it was taken over from to take it back
+    /// (see `machine_handback`).
+    HandBack,
 }
 
 /// Work on a feature running off the UI thread.
@@ -315,6 +321,12 @@ pub(crate) struct Busy {
 
 /// What the work off the thread came to.
 pub(crate) enum Done {
+    /// Asking the machine a feature came from to take it back ended.
+    HandBack {
+        project: String,
+        slug: String,
+        result: Result<(), String>,
+    },
     /// What was asked of a sandbox another machine's gerdr writes of ended.
     SandboxAsked {
         project: String,
@@ -1589,6 +1601,9 @@ pub enum PanelOutcome {
     /// Make a feature another machine writes this machine's, with nothing else to
     /// do. Any other that changes it does that first.
     TakeOver,
+    /// Hand a feature written here back to the machine it was taken over from:
+    /// that machine's gerdr takes it (see `machine_handback`).
+    HandBack,
     /// Pick the next agent this agent stage's chips offer.
     CycleAgent(Stage),
     /// Build with a fresh agent per milestone, or one through them all.
@@ -4662,6 +4677,9 @@ impl FeaturePanel {
             {
                 return Some(PanelOutcome::TakeOver);
             }
+            Keysym::e | Keysym::E if ctrl && mods.shift && hands_back(feature) => {
+                return Some(PanelOutcome::HandBack);
+            }
             Keysym::b | Keysym::B if ctrl && mods.shift && milestone_switch(feature, stage) => {
                 return Some(PanelOutcome::FreshMilestones(!feature.fresh_milestones));
             }
@@ -4977,7 +4995,18 @@ pub fn page_actions(
             out.push((PageButton { label, style }, PanelOutcome::TakeOver));
         }
     }
+    if hands_back(feature) {
+        let label = "Hand back".to_owned();
+        let style = ButtonStyle::Plain;
+        out.push((PageButton { label, style }, PanelOutcome::HandBack));
+    }
     out
+}
+
+/// Whether `feature`, written here, can go back to the machine it was taken
+/// over from (`Feature::came_from`).
+fn hands_back(feature: &Feature) -> bool {
+    feature.writer.is_none() && feature.came_from.is_some() && feature.status == Status::Open
 }
 
 /// The buttons of `feature`'s sandbox on `stage`'s page, where it offers
@@ -5802,6 +5831,11 @@ impl Gerdr {
                 self.unbusy(&project, &slug, Job::Sandbox);
                 self.sandbox_stopped(&project, &slug, what, result);
             }
+            Done::HandBack {
+                project,
+                slug,
+                result,
+            } => self.handed_back(&project, &slug, result),
             Done::SandboxAsked {
                 project,
                 slug,
@@ -7399,6 +7433,7 @@ impl Gerdr {
             stage_agents: Default::default(),
             stage_machines: Default::default(),
             setups_elsewhere: Vec::new(),
+            came_from: None,
             epoch: 0,
             stage_models: Default::default(),
             fresh_milestones: false,
@@ -8040,6 +8075,7 @@ impl Gerdr {
         match outcome {
             // Only offered on what another machine writes, above.
             PanelOutcome::TakeOver => {}
+            PanelOutcome::HandBack => self.hand_back(&project, &slug),
             PanelOutcome::Tick => match self.feature(&project, &slug).and_then(Feature::current) {
                 Some(stage) if needs(stage).is_some() => {
                     self.approve_stage(&project, &slug, stage);
@@ -10034,6 +10070,7 @@ fn task_of(busy: &Busy, title: Option<&str>, project: &str) -> Task {
         Job::Verify => "checks",
         Job::Graph => "graph",
         Job::Sandbox => "sandbox",
+        Job::HandBack => "hand back",
         _ => "feature",
     };
     let detail = match title {
@@ -13022,7 +13059,10 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 6] = [
             ("Ctrl+Shift+A", "pick the stage's next agent"),
             ("Ctrl+Shift+W", "pick the machine the stage's next agent or check run goes on"),
             ("Ctrl+Shift+Q", "stop the stage's agent on another machine"),
-            ("Ctrl+Shift+E", "make a feature another machine writes this machine's"),
+            (
+                "Ctrl+Shift+E",
+                "make a feature another machine writes this machine's, or hand one back to the machine it came from",
+            ),
             ("Ctrl+Shift+I", "pick the model of the stage's agent"),
             (
                 "Ctrl+Shift+B",
@@ -13229,6 +13269,9 @@ fn tab_hints(
         if feature.status == Status::Open && !panel.keys && panel.note.is_none() {
             hints.push(("Ctrl+Shift+E".to_owned(), "take over".to_owned()));
         }
+    }
+    if hands_back(feature) && !panel.keys && panel.note.is_none() {
+        hints.push(("Ctrl+Shift+E".to_owned(), "hand back".to_owned()));
     }
     hints
 }
@@ -14107,6 +14150,7 @@ pub(crate) mod tests {
             stage_agents: Default::default(),
             stage_machines: Default::default(),
             setups_elsewhere: Vec::new(),
+            came_from: None,
             epoch: 0,
             stage_models: Default::default(),
             fresh_milestones: false,
@@ -14282,6 +14326,38 @@ pub(crate) mod tests {
         let mut mine = f.clone();
         mine.writer = None;
         assert_eq!(press(&mut panel, &mine), None);
+    }
+
+    #[test]
+    fn a_feature_taken_over_here_offers_handing_it_back() {
+        let mut f = feature("f", vec![repo("api", true)], 1);
+        let offers = |f: &Feature| {
+            (page_actions(f, Stage::Plan, RowCtx::default()).iter())
+                .any(|(b, o)| *o == PanelOutcome::HandBack && b.label == "Hand back")
+        };
+        assert!(!offers(&f));
+        f.came_from = Some("m1".into());
+        assert!(offers(&f));
+        let mut panel = FeaturePanel {
+            slug: f.slug.clone(),
+            ..FeaturePanel::default()
+        };
+        let mods = ModifiersState {
+            ctrl: true,
+            shift: true,
+            ..ModifiersState::default()
+        };
+        let pressed = panel.key(&mods, Keysym::E, &f, &[], RowCtx::default(), &[], &[], &[]);
+        assert_eq!(pressed, Some(PanelOutcome::HandBack));
+        // Over, it stays here; shown from another machine, it is taken over.
+        let mut over = f.clone();
+        over.status = Status::Done;
+        assert!(!offers(&over));
+        let mut seen = f.clone();
+        seen.writer = Some("m1".into());
+        assert!(!offers(&seen));
+        let pressed = panel.key(&mods, Keysym::E, &seen, &[], RowCtx::default(), &[], &[], &[]);
+        assert_eq!(pressed, Some(PanelOutcome::TakeOver));
     }
 
     /// A feature another machine writes, at Manual test, with its sandbox as
