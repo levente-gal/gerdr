@@ -20,6 +20,11 @@
 //! What runs in the old writer's own session stays in its tabs: nothing else can
 //! reach those panes (`taken` forgets them). What runs on a worker goes on, and
 //! the new writer follows it.
+//!
+//! A sandbox running on the old writer goes on there too, when the feature moves
+//! over a link: the new writer follows it as one on a worker. Its terminals stay
+//! in the old writer's tabs, which that gerdr goes on telling of (`KEPT`), so the
+//! new writer shows them as a viewer shows a writer's own.
 
 use std::{path::Path, time::Duration};
 
@@ -59,6 +64,77 @@ pub const SANDBOX_ANSWER: &str = ".sandbox-answer.json";
 /// In a feature's folder there: what another machine did to its sandbox with no
 /// gerdr open there, for its record to catch up with when one opens.
 pub const SANDBOX_TOLD: &str = ".sandbox-told.json";
+/// In a sandbox's folder, on the machine it runs on: it went on running there
+/// when its feature moved to another writer, and this gerdr's own tabs run its
+/// commands.
+pub const KEPT: &str = "kept.json";
+
+/// A sandbox that went on running here when its feature moved (see `KEPT`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Kept {
+    pub project: String,
+    pub slug: String,
+    /// When it started: one started since is another.
+    pub started: u64,
+    /// What keeps its network: once that is gone, so is the sandbox.
+    pub holder: Option<super::sandbox_run::Proc>,
+    /// The panes of this gerdr's own session running its commands.
+    pub panes: Vec<String>,
+}
+
+/// What `KEPT` says of `feature`'s sandbox, written by the machine it runs on,
+/// if that one runs: what goes on there when the feature moves (`taken`).
+pub fn kept_of(feature: &Feature) -> Option<Kept> {
+    let run = feature.sandbox.as_ref()?;
+    (run.machine.is_none() && !run.stopped && run.failed.is_none()).then(|| Kept {
+        project: feature.project.clone(),
+        slug: feature.slug.clone(),
+        started: run.started,
+        holder: run.holder.clone(),
+        panes: run.panes.clone(),
+    })
+}
+
+/// The script saying `KEPT` (`json`) in sandbox folder `dir` there, for a gerdr
+/// that isn't open there now and finds it at its next start.
+pub fn kept_script(dir: &str, json: &str) -> String {
+    format!(
+        "mkdir -p {dir} && printf '%s' {json} > {dir}/{KEPT}.tmp && mv {dir}/{KEPT}.tmp {dir}/{KEPT}\n",
+        dir = shell_quote(dir),
+        json = shell_quote(json),
+    )
+}
+
+/// What `KEPT` in sandbox folder `dir` says, if it is there and reads.
+pub fn read_kept(dir: &Path) -> Option<Kept> {
+    let raw = match std::fs::read(dir.join(KEPT)) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(err) => {
+            tracing::warn!("reading {}: {err}", dir.join(KEPT).display());
+            return None;
+        }
+    };
+    serde_json::from_slice(&raw)
+        .inspect_err(|err| tracing::warn!("reading {}: {err}", dir.join(KEPT).display()))
+        .ok()
+}
+
+/// Say in sandbox folder `dir` that `kept` goes on running here.
+pub fn write_kept(dir: &Path, kept: &Kept) -> std::io::Result<()> {
+    let bytes = serde_json::to_vec_pretty(kept).map_err(std::io::Error::other)?;
+    crate::projects::write_atomic(&dir.join(KEPT), &bytes)
+}
+
+/// The sandbox in folder `dir` no longer runs here for another writer.
+pub fn forget_kept(dir: &Path) {
+    if let Err(err) = std::fs::remove_file(dir.join(KEPT))
+        && err.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!("removing {}: {err}", dir.join(KEPT).display());
+    }
+}
+
 /// How long a gerdr open on the writer gets to answer.
 pub const ASK_FOR: Duration = Duration::from_secs(12);
 /// How long a record may wait for its new writer before it goes back.
@@ -144,12 +220,16 @@ pub fn rival(mine: &Feature, me: &str, theirs: &Feature, them: &str) -> Rival {
 /// What ran in `from`'s own session, or on this machine's worker session, can't
 /// be followed from here: a pane is known only on the worker sessions of machines
 /// linked to. Its run stays, and a chat goes back on the machine it ran on.
+///
+/// A sandbox running on `from` goes on there with `keep_sandbox`, as one on a
+/// worker: `from` tells of its tabs. Without, it stays behind.
 pub fn taken(
     record: &Feature,
     paths: &Paths,
     from: &str,
     from_name: &str,
     me: &str,
+    keep_sandbox: bool,
     now: u64,
 ) -> Result<Feature, String> {
     let mut value = serde_json::to_value(record).map_err(|err| err.to_string())?;
@@ -196,14 +276,29 @@ pub fn taken(
     let latest = out.setup.as_ref().map(|s| s.machine.clone());
     out.setups_elsewhere
         .retain(|s| latest.as_ref() != Some(&s.machine));
-    // A sandbox on its old writer stays there. One on a worker goes on running:
-    // its record comes along, and so does what it left there.
+    // A sandbox on its old writer stays there, and goes on being followed only
+    // when asked. One on a worker goes on running: its record comes along, and
+    // so does what it left there.
+    let mut log = format!("Taken over from {from_name}");
     out.sandbox = out.sandbox.take().and_then(|mut run| {
-        let on = run.machine.take()?;
         run.elsewhere = None;
+        let Some(on) = run.machine.take() else {
+            if !keep_sandbox || run.stopped || run.failed.is_some() {
+                return None;
+            }
+            for pane in run.panes.iter_mut().filter(|p| !p.contains('/')) {
+                *pane = crate::machine_work::qualified(from, pane);
+            }
+            run.machine = Some(from.to_owned());
+            run.kept = true;
+            log = format!("Taken over from {from_name}, its sandbox still running there");
+            return Some(run);
+        };
         if on == me {
             // On this machine's worker session: not one of this gerdr's panes.
+            // One kept here has its tabs back from what was kept of them.
             run.panes.clear();
+            run.kept = false;
         } else {
             run.machine = Some(on);
         }
@@ -216,7 +311,7 @@ pub fn taken(
     }
     out.writer = None;
     out.epoch = record.epoch + 1;
-    out.log(now, format!("Taken over from {from_name}"));
+    out.log(now, log);
     Ok(out)
 }
 
@@ -370,6 +465,7 @@ mod tests {
         Stage,
         agents::{StageRun, T3Run},
         remote::Side,
+        sandbox_run::SandboxRun,
         setup::SetupRun,
         tests::{Temp, feature},
         verify::{CheckRun, VerifyRun},
@@ -410,7 +506,131 @@ mod tests {
     }
 
     fn take(f: &Feature) -> Feature {
-        taken(f, &paths(), "ana", "box", "me", 100).unwrap()
+        taken(f, &paths(), "ana", "box", "me", false, 100).unwrap()
+    }
+
+    fn take_keeping(f: &Feature) -> Feature {
+        taken(f, &paths(), "ana", "box", "me", true, 100).unwrap()
+    }
+
+    fn sandbox(panes: &[&str]) -> SandboxRun {
+        SandboxRun {
+            started: 7,
+            finished: Some(8),
+            panes: panes.iter().map(|p| (*p).to_owned()).collect(),
+            ..SandboxRun::default()
+        }
+    }
+
+    #[test]
+    fn a_sandbox_running_on_its_old_writer_goes_on_there_when_kept() {
+        let mut f = record();
+        f.sandbox = Some(sandbox(&["w1:p4"]));
+        let out = take_keeping(&f);
+        let run = out.sandbox.as_ref().unwrap();
+        assert_eq!(run.machine.as_deref(), Some("ana"));
+        assert_eq!(run.panes, ["ana/w1:p4"]);
+        assert!(run.kept);
+        assert_eq!(run.elsewhere, None);
+        let said = &out.history.last().unwrap().what;
+        assert_eq!(said, "Taken over from box, its sandbox still running there");
+    }
+
+    #[test]
+    fn a_sandbox_on_its_old_writer_stays_behind_unless_kept_and_running() {
+        let mut f = record();
+        f.sandbox = Some(sandbox(&["w1:p4"]));
+        assert_eq!(take(&f).sandbox, None);
+        let mut stopped = sandbox(&[]);
+        stopped.stopped = true;
+        f.sandbox = Some(stopped);
+        assert_eq!(take_keeping(&f).sandbox, None);
+        let mut failed = sandbox(&[]);
+        failed.failed = Some("no".into());
+        f.sandbox = Some(failed);
+        assert_eq!(take_keeping(&f).sandbox, None);
+    }
+
+    #[test]
+    fn a_sandbox_on_a_worker_goes_on_being_followed_either_way() {
+        let mut f = record();
+        let mut there = sandbox(&["w9/w1:p4"]);
+        there.machine = Some("w9".into());
+        f.sandbox = Some(there);
+        for out in [take(&f), take_keeping(&f)] {
+            let run = out.sandbox.as_ref().unwrap();
+            assert_eq!(run.machine.as_deref(), Some("w9"));
+            assert_eq!(run.panes, ["w9/w1:p4"]);
+            assert!(!run.kept);
+        }
+    }
+
+    #[test]
+    fn a_sandbox_kept_on_this_machine_comes_back_as_its_own() {
+        let mut f = record();
+        let mut here = sandbox(&["me/w1:p4"]);
+        here.machine = Some("me".into());
+        here.kept = true;
+        f.sandbox = Some(here);
+        let out = take_keeping(&f);
+        let run = out.sandbox.as_ref().unwrap();
+        assert_eq!(run.machine, None);
+        assert!(!run.kept);
+        // Its tabs come from what was kept of them here.
+        assert!(run.panes.is_empty());
+    }
+
+    #[test]
+    fn only_a_sandbox_running_on_the_writer_is_kept() {
+        let mut f = record();
+        assert_eq!(kept_of(&f), None);
+        f.sandbox = Some(sandbox(&["w1:p4"]));
+        let kept = kept_of(&f).unwrap();
+        assert_eq!((kept.started, kept.panes.as_slice()), (7, &["w1:p4".to_owned()][..]));
+        f.sandbox.as_mut().unwrap().machine = Some("w9".into());
+        assert_eq!(kept_of(&f), None);
+        let mut stopped = sandbox(&[]);
+        stopped.stopped = true;
+        f.sandbox = Some(stopped);
+        assert_eq!(kept_of(&f), None);
+    }
+
+    #[test]
+    fn the_kept_script_leaves_what_reads_back() {
+        let t = Temp::new();
+        let dir = t.0.join("it's/sandbox");
+        let kept = Kept {
+            project: "p".into(),
+            slug: "a".into(),
+            started: 7,
+            holder: None,
+            panes: vec!["w1:p4".into()],
+        };
+        let json = serde_json::to_string(&kept).unwrap();
+        let script = kept_script(&dir.to_string_lossy(), &json);
+        let ran = std::process::Command::new("sh").arg("-c").arg(&script).status().unwrap();
+        assert!(ran.success());
+        assert_eq!(read_kept(&dir), Some(kept));
+    }
+
+    #[test]
+    fn what_is_kept_of_a_sandbox_reads_back() {
+        let t = Temp::new();
+        let dir = t.0.as_path();
+        assert_eq!(read_kept(dir), None);
+        let kept = Kept {
+            project: "p".into(),
+            slug: "a".into(),
+            started: 7,
+            holder: None,
+            panes: vec!["w1:p4".into()],
+        };
+        write_kept(dir, &kept).unwrap();
+        assert_eq!(read_kept(dir), Some(kept));
+        forget_kept(dir);
+        assert_eq!(read_kept(dir), None);
+        // Already gone: nothing to say.
+        forget_kept(dir);
     }
 
     #[test]

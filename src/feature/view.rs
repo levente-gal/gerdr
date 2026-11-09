@@ -74,6 +74,10 @@ pub struct LivePane {
     /// How many rows it has, for a look at all of them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rows: Option<u32>,
+    /// The herdr session it is in, for a tab of another machine's own gerdr:
+    /// a sandbox's that went on there when its feature moved here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
 }
 
 /// A pane of a feature another machine writes, as last said by that machine.
@@ -235,6 +239,16 @@ pub fn seen_panes(
     live: Option<&Live>,
     id: &str,
 ) -> BTreeMap<String, SeenPane> {
+    seen_of(features.iter().flat_map(panes_of), live, id)
+}
+
+/// Panes `panes`, by what machine `id`'s `live` said of them: those of its
+/// records, or tabs of its own a feature written elsewhere names.
+pub fn seen_of<'a>(
+    panes: impl IntoIterator<Item = &'a str>,
+    live: Option<&Live>,
+    id: &str,
+) -> BTreeMap<String, SeenPane> {
     let mut seen = BTreeMap::new();
     let listed = live.map(|live| {
         (live.panes.iter())
@@ -248,14 +262,17 @@ pub fn seen_panes(
             })
             .collect::<BTreeMap<_, _>>()
     });
-    for pane in features.iter().flat_map(panes_of) {
+    for pane in panes {
         let found = listed.as_ref().and_then(|l| l.get(pane));
         let (terminal, status, alive, session, rows) = match found {
             Some((state, own)) => (
                 state.terminal.clone(),
                 state.status,
                 state.alive,
-                (*own).then(|| live.map(|l| l.session.clone()).unwrap_or_default()),
+                match *own {
+                    true => live.map(|l| l.session.clone()),
+                    false => state.session.clone(),
+                },
                 state.rows,
             ),
             None => (None, None, false, None, None),
@@ -589,6 +606,7 @@ mod tests {
                     status: Some(AgentStatus::Working),
                     alive: true,
                     rows: None,
+                    session: None,
                 },
             )]),
             ..Live::default()
@@ -620,6 +638,46 @@ mod tests {
         // Never heard of says nothing either.
         let never = seen_panes(&[rebased(&there(), &paths(), "m1").unwrap()], None, "m1");
         assert!(!never["m1/w1:p1"].stands(1000));
+    }
+
+    #[test]
+    fn a_tab_of_another_machines_gerdr_is_shown_by_its_session() {
+        // What this machine's own record names, as machine m1's gerdr tells of it.
+        let there = Live {
+            at: 100,
+            session: "gerdr-p".into(),
+            panes: BTreeMap::from([(
+                "w1:p4".to_owned(),
+                LivePane {
+                    terminal: Some("t4".into()),
+                    alive: true,
+                    ..LivePane::default()
+                },
+            )]),
+            ..Live::default()
+        };
+        let seen = seen_of(["m1/w1:p4", "m1/w1:p5"], Some(&there), "m1");
+        assert_eq!(seen["m1/w1:p4"].terminal.as_deref(), Some("t4"));
+        assert_eq!(seen["m1/w1:p4"].session.as_deref(), Some("gerdr-p"));
+        assert!(!seen["m1/w1:p5"].alive);
+        // The same, passed on by the gerdr that writes the feature now.
+        let passed = Live {
+            at: 101,
+            session: "gerdr-q".into(),
+            panes: BTreeMap::from([(
+                "m1/w1:p4".to_owned(),
+                LivePane {
+                    terminal: Some("t4".into()),
+                    alive: true,
+                    session: Some("gerdr-p".into()),
+                    ..LivePane::default()
+                },
+            )]),
+            ..Live::default()
+        };
+        let seen = seen_of(["m1/w1:p4"], Some(&passed), "m2");
+        assert_eq!(seen["m1/w1:p4"].session.as_deref(), Some("gerdr-p"));
+        assert_eq!(seen["m1/w1:p4"].writer, "m2");
     }
 
     #[test]

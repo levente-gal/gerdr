@@ -70,7 +70,8 @@ pub const SANDBOX_VAR: &str = "GERDR_SANDBOX";
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SandboxRun {
     /// The machine it runs on, by id, when that isn't the one writing this
-    /// record. Shown from another machine, it is never empty unless that is
+    /// record: a worker, or the writer it ran on before its feature moved
+    /// (`kept`). Shown from another machine, it is never empty unless that is
     /// this machine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub machine: Option<String>,
@@ -104,6 +105,12 @@ pub struct SandboxRun {
     /// The herdr panes running its commands.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub panes: Vec<String>,
+    /// Its panes are tabs of the gerdr on `machine`, in that gerdr's own
+    /// session, not of the worker session there: it went on running there when
+    /// its feature moved (see `lease::KEPT`). That gerdr says how they stand, and
+    /// closes them once the sandbox is gone; nothing else can reach them.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub kept: bool,
     /// It was stopped, its data kept for the next start.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub stopped: bool,

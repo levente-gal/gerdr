@@ -869,7 +869,9 @@ impl Gerdr {
             .build
             .sandbox_stops
             .insert(key, Arc::new(AtomicBool::new(false)));
-        for pane in &run.panes {
+        // The tabs of one kept on its old writer are that gerdr's: it closes them
+        // once the sandbox is gone.
+        for pane in run.panes.iter().filter(|_| !run.kept) {
             self.close_herdr_pane(pane);
         }
         let busy = Busy {
@@ -1224,6 +1226,11 @@ fn feature_known(project: &str, slug: &str, machine: Option<&str>) -> bool {
         store::dir(root, project, slug).join("feature.json").exists()
     };
     has(None)
+        // Running here for the machine that writes it now.
+        || (machine.is_none()
+            && (crate::machine_lease::own_sandbox_dir(project, slug))
+                .join(crate::feature::lease::KEPT)
+                .exists())
         || (crate::feature::view::kept_ids(&data).iter())
             .any(|id| has(Some(&crate::feature::view::root(&data, id))))
         || machine

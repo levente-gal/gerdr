@@ -134,6 +134,9 @@ pub struct Features {
     pub(crate) take_asked: BTreeMap<(String, String), Option<PanelOutcome>>,
     /// This gerdr's features another machine was told it can have, until it has.
     pub(crate) handing: BTreeMap<(String, String), crate::machine_lease::Handing>,
+    /// Sandboxes running here for features another machine writes now, by
+    /// project and slug: this gerdr's tabs run their commands (`lease::KEPT`).
+    pub(crate) kept: BTreeMap<(String, String), feature::lease::Kept>,
     /// When each machine was last told its record lost, by machine, project, slug.
     pub(crate) claims: HashMap<(String, String, String), Instant>,
     /// Cursor's models, for the picker of a stage's model.
@@ -5397,8 +5400,12 @@ impl Gerdr {
             .map(|p| (p.id.clone(), p.name.clone()))
             .collect();
         let mut all = BTreeMap::new();
+        self.features.kept.clear();
         for (id, name) in ids {
             crate::machine_lease::restore_left_records(&id);
+            for kept in crate::machine_lease::load_kept(&id) {
+                (self.features.kept).insert((kept.project.clone(), kept.slug.clone()), kept);
+            }
             match store::load_all(None, &id) {
                 Ok(features) => {
                     all.insert(id, features);

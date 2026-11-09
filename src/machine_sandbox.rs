@@ -19,6 +19,11 @@
 //! the bytes on (`relay_script`). Nothing stays there once it ends, and it holds
 //! nothing that would need to be taken back with the link down.
 //!
+//! A sandbox that ran on a feature's old writer and went on there when it moved
+//! (`SandboxRun::kept`) is followed the same way, but its terminals are tabs of
+//! the gerdr there: they show as a viewer shows a writer's own (`seen`), as that
+//! gerdr tells of them.
+//!
 //! The ports here have the numbers they have there, for the app's own addresses
 //! to work. They are open while the feature's workspace here shows a page on
 //! `localhost`, its sandbox runs and the link is up: a page closed, or a link
@@ -782,8 +787,9 @@ impl Gerdr {
         slug: &str,
         run: &SandboxRun,
     ) -> Option<std::path::PathBuf> {
+        // On this machine: in its own data, also for a feature another writes.
         let Some(id) = run.machine.as_deref() else {
-            return Some(feature_sandbox::sandbox_dir(project, slug));
+            return Some(crate::machine_lease::own_sandbox_dir(project, slug));
         };
         Some(std::path::PathBuf::from(self.data_there(id, project, slug)?).join("sandbox"))
     }
@@ -1261,9 +1267,19 @@ impl Gerdr {
             return;
         };
         let panes = (feature.sandbox.as_ref()).map_or_else(Vec::new, |run| run.panes.clone());
+        let kept = feature.sandbox.as_ref().is_some_and(|run| run.kept);
         let name = self.machine_name(&id);
         if panes.is_empty() {
             return self.show_warning(format!("The sandbox has no terminals on {name}"));
+        }
+        // Tabs of gerdr there, known only by what it says: never a pane of the
+        // worker session there that happens to have that name.
+        let now = crate::feature::now();
+        let told = |pane: &String| self.features.seen.get(pane).is_some_and(|s| s.stands(now));
+        if kept && !panes.iter().all(told) {
+            return self.show_warning(format!(
+                "gerdr on {name} isn't saying how the sandbox's terminals stand: open it there"
+            ));
         }
         for pane in panes {
             if !self.show_machine_pane(&pane) {

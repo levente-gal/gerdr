@@ -966,7 +966,7 @@ mod tests {
         let paths = Paths::new(&there, &here, &BTreeMap::new(), Some(&f));
         let shown = crate::feature::view::rebased(&f, &paths, "m1").unwrap();
         assert_eq!((&shown.history, &shown.review), (&f.history, &f.review));
-        let taken = crate::feature::lease::taken(&f, &paths, "m1", "ana", "me", 9).unwrap();
+        let taken = crate::feature::lease::taken(&f, &paths, "m1", "ana", "me", false, 9).unwrap();
         // Its own event added after.
         assert_eq!(taken.history[..f.history.len()], f.history);
         assert_eq!(taken.history.len(), f.history.len() + 1);

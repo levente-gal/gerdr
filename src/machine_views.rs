@@ -47,6 +47,9 @@ pub struct ViewAsk {
     /// The features being taken over: what's here of them isn't to be touched,
     /// even with their record gone there.
     pub holding: Vec<String>,
+    /// Tabs of the gerdr there that this machine's features name: those of
+    /// sandboxes that went on there when their features moved here.
+    pub panes: Vec<String>,
 }
 
 /// What the machine told, once it changed.
@@ -304,6 +307,15 @@ fn view_round(
         {
             tracing::warn!("removing {}: {err}", local.display());
         }
+        // Only what it says of its tabs, for sandboxes there of features here.
+        if !asked.panes.is_empty() {
+            std::fs::create_dir_all(&local).map_err(|err| Trouble::Work(err.to_string()))?;
+            let file = format!("{there}/{}", view::LIVE);
+            // Its gerdr may never have said: the page says that, by what's missing.
+            if let Err(trouble) = place.reach.pull_file(&local.join(view::LIVE), &file, cancel) {
+                tracing::debug!("{project}: what {file} says: {}", trouble.text());
+            }
+        }
     } else {
         std::fs::create_dir_all(&local).map_err(|err| Trouble::Work(err.to_string()))?;
         place.reach.mirror(&there, &local, &without, cancel)?;
@@ -347,7 +359,9 @@ fn view_round(
     features.sort_by(|a, b| a.created.cmp(&b.created).then_with(|| a.slug.cmp(&b.slug)));
     ask_sandboxes(place, &mut features, cancel)?;
     let live = view::read_live(&place.root, project);
-    let panes = view::seen_panes(&features, live.as_ref(), &place.id);
+    let mut panes = view::seen_panes(&features, live.as_ref(), &place.id);
+    let tabs = asked.panes.iter().map(String::as_str);
+    panes.extend(view::seen_of(tabs, live.as_ref(), &place.id));
     let news = (rounds.told.as_ref())
         .is_none_or(|(p, f, s)| (p.as_str(), f, s) != (project, &features, &panes));
     if news {
@@ -549,6 +563,14 @@ impl Gerdr {
             }) {
                 run.machine = None;
                 run.elsewhere = None;
+                // Kept here when it moved: its tabs are this gerdr's own.
+                if run.kept {
+                    for pane in &mut run.panes {
+                        if let Some(bare) = split_pane(pane).map(|(_, bare)| bare.to_owned()) {
+                            *pane = bare;
+                        }
+                    }
+                }
             }
         }
         let own: Vec<String> = (self.features.all.get(&project).into_iter().flatten())
@@ -620,11 +642,15 @@ impl Gerdr {
     ) {
         // While it is being taken over it shows as it was, whatever that machine
         // has of it by now, and so does one that moved to a machine connected here,
-        // until that one tells of it: its workspace would go with it.
+        // until that one tells of it: its workspace would go with it. Said to have
+        // moved here, it is what that machine kept from an earlier move, while it
+        // takes the feature back.
         let holds = |slug: &str| {
             let key = (project.to_owned(), slug.to_owned());
             self.features.taking.contains_key(&key)
-                || moved.get(slug).is_some_and(|to| self.work_of(to).is_some())
+                || moved.get(slug).is_some_and(|to| {
+                    self.work_of(to).is_some() || Self::is_this_machine(to)
+                })
         };
         let held: Vec<Feature> = (self.viewed_of(project).iter())
             .filter(|f| f.writer.as_deref() == Some(id) && holds(&f.slug))
@@ -843,11 +869,18 @@ impl Gerdr {
                     .entry((project.clone(), slug.clone()))
                     .or_insert(CodeHere::Coming);
             }
+            let panes: Vec<String> = (self.features.all.get(&project).into_iter().flatten())
+                .filter(|f| f.status == Status::Open)
+                .filter_map(|f| f.sandbox.as_ref())
+                .filter(|run| run.kept && run.machine.as_deref() == Some(id.as_str()))
+                .flat_map(|run| run.panes.clone())
+                .collect();
             let ask = ViewAsk {
                 project: Some(project.clone()),
                 folders: self.folders_from(&name, &project),
                 code,
                 holding,
+                panes,
             };
             if let Some(work) = self.machines.links.get(&name).and_then(|l| l.work.as_ref()) {
                 work.ask_views(ask);
@@ -862,46 +895,74 @@ impl Gerdr {
         let Some(project) = self.project.clone() else {
             return;
         };
-        let Some(all) = self.features.all.get(&project).filter(|all| !all.is_empty()) else {
+        let all = self.features.all.get(&project).map_or(&[][..], Vec::as_slice);
+        // Sandboxes running here for features written elsewhere now: their
+        // writers show the tabs by what this says.
+        let kept: Vec<&lease::Kept> =
+            (self.features.kept.values()).filter(|k| k.project == project).collect();
+        if all.is_empty() && kept.is_empty() {
             return;
-        };
+        }
         let local = |pane: &str| {
             (self.herdr_tabs.values())
                 .flat_map(|d| &d.panes)
                 .find(|p| p.pane_id == pane)
         };
+        let here = |pane: &str| {
+            let key = crate::agents::AgentKey::Herdr(pane.to_owned());
+            let (status, alive) = self.agent_key_state(&key);
+            let here = local(pane);
+            LivePane {
+                terminal: here.map(|p| p.terminal_id.clone()),
+                status,
+                alive,
+                rows: here
+                    .and_then(|p| p.scroll.as_ref())
+                    .map(|s| s.viewport_rows as u32),
+                session: None,
+            }
+        };
         let mut panes = BTreeMap::new();
         for feature in all.iter().filter(|f| f.status == Status::Open) {
+            let tabs_there = (feature.sandbox.as_ref())
+                .filter(|run| run.kept)
+                .map_or(&[][..], |run| run.panes.as_slice());
             for pane in view::panes_of(feature) {
-                let key = crate::agents::AgentKey::Herdr(pane.to_owned());
-                let (status, alive) = self.agent_key_state(&key);
-                let (terminal, rows) = match split_pane(pane) {
-                    Some((id, bare)) => (
-                        (self.work_of(id))
-                            .and_then(|w| w.panes.as_ref())
-                            .and_then(|p| p.get(bare))
-                            .map(|l| l.terminal.clone()),
-                        None,
-                    ),
-                    None => {
-                        let here = local(pane);
-                        (
-                            here.map(|p| p.terminal_id.clone()),
-                            here.and_then(|p| p.scroll.as_ref())
-                                .map(|s| s.viewport_rows as u32),
-                        )
+                // A tab of the gerdr its sandbox runs on, as that one says.
+                if tabs_there.iter().any(|tab| tab == pane) {
+                    let seen = self.features.seen.get(pane);
+                    let shown = LivePane {
+                        terminal: seen.and_then(|s| s.terminal.clone()),
+                        status: seen.and_then(|s| s.status),
+                        alive: seen.is_some_and(|s| s.alive),
+                        rows: seen.and_then(|s| s.rows),
+                        session: seen.and_then(|s| s.session.clone()),
+                    };
+                    panes.insert(pane.to_owned(), shown);
+                    continue;
+                }
+                let shown = match split_pane(pane) {
+                    Some((id, bare)) => {
+                        let key = crate::agents::AgentKey::Herdr(pane.to_owned());
+                        let (status, alive) = self.agent_key_state(&key);
+                        LivePane {
+                            terminal: (self.work_of(id))
+                                .and_then(|w| w.panes.as_ref())
+                                .and_then(|p| p.get(bare))
+                                .map(|l| l.terminal.clone()),
+                            status,
+                            alive,
+                            rows: None,
+                            session: None,
+                        }
                     }
+                    None => here(pane),
                 };
-                panes.insert(
-                    pane.to_owned(),
-                    LivePane {
-                        terminal,
-                        status,
-                        alive,
-                        rows,
-                    },
-                );
+                panes.insert(pane.to_owned(), shown);
             }
+        }
+        for pane in kept.iter().flat_map(|k| &k.panes) {
+            panes.insert(pane.clone(), here(pane));
         }
         let session = (self.projects.project(&project))
             .map(|p| p.session.clone())

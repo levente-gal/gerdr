@@ -1078,7 +1078,10 @@ impl Gerdr {
         let checks = (feature.verify.iter())
             .flat_map(|v| &v.checks)
             .filter_map(|c| c.pane.clone());
-        let sandbox = feature.sandbox.iter().flat_map(|run| run.panes.clone());
+        // A kept sandbox's tabs are its old writer's to close.
+        let sandbox = (feature.sandbox.iter())
+            .filter(|run| !run.kept)
+            .flat_map(|run| run.panes.clone());
         let mut panes: Vec<String> = (agents.chain(checks).chain(sandbox))
             .filter(|p| split_pane(p).is_some())
             .collect();
