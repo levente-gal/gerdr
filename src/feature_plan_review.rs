@@ -460,18 +460,6 @@ impl Gerdr {
         }
     }
 
-    /// Review feature `slug`'s suggestions where they apply in the plan (the
-    /// sheet, for now).
-    pub(crate) fn review_in_plan(&mut self, project: &str, slug: &str) {
-        self.open_plan_sheet(project, slug);
-    }
-
-    /// Bring what shows Plan review's suggestions in line with the record:
-    /// after a save, and as the watch reads a rewrite in.
-    pub(crate) fn plan_doc_follows(&mut self) {
-        self.plan_sheet_follows();
-    }
-
     /// Do `act` to suggestion `id` of feature `slug`, from its card or its
     /// keys.
     pub(crate) fn apply_suggestion(&mut self, project: &str, slug: &str, id: &str, act: ItemAct) {
