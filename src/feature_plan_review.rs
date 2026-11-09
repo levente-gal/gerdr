@@ -913,7 +913,7 @@ impl Gerdr {
             ItemAct::DeleteComment => self.delete_suggestion_comment(project, slug, id),
             ItemAct::DeleteOwn => self.delete_own_suggestion_said(project, slug, id),
             ItemAct::OpenCode => self.open_suggestion_code(project, slug, id, 0),
-            ItemAct::Show => self.review_in_plan(project, slug),
+            ItemAct::Show => self.show_in_plan(project, slug, id),
         }
     }
 
@@ -1253,10 +1253,7 @@ mod tests {
     fn suggestions_are_decided_only_at_plan_review_once_read_and_not_while_writing() {
         let mut f = at_plan_review();
         assert_eq!(f.current(), Some(STAGE));
-        assert_eq!(
-            decidable(&f).unwrap_err(),
-            "The suggestions aren't read yet"
-        );
+        assert!(decidable(&f).unwrap_err().contains("decide once it's read"));
         f.plan_review = Some(PlanReview {
             stamp: Some((1, 1)),
             ..PlanReview::default()
@@ -1269,10 +1266,14 @@ mod tests {
         );
         f.plan_review.as_mut().unwrap().writing = false;
         f.tick(2, "you", None);
-        assert!(decidable(&f).unwrap_err().contains("isn't at Plan review"));
+        assert_eq!(decidable(&f).unwrap_err(), review_cards::SUGGESTIONS_DONE);
+        assert_eq!(why_not_restore(&f).unwrap(), review_cards::SUGGESTIONS_DONE);
+        let api = crate::features::tests::repo("api", true);
+        let early = crate::features::tests::feature("b", vec![api], 1);
+        assert_eq!(early.current(), Some(Stage::Plan));
         assert!(
-            why_not_restore(&f)
-                .unwrap()
+            decidable(&early)
+                .unwrap_err()
                 .contains("isn't at Plan review")
         );
     }
