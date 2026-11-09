@@ -268,7 +268,13 @@ struct Probed {
     again: bool,
     /// The reading error last logged: a new one only goes to the log.
     logged: Option<String>,
+    /// When its pull requests were last asked of GitHub (`ship::read_prs`).
+    prs_at: Option<Instant>,
 }
+
+/// How often a feature's pull requests are asked of GitHub while its page
+/// shows.
+const PRS_EVERY: Duration = Duration::from_secs(60);
 
 /// What the Ship sheet asked to do.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -547,6 +553,8 @@ pub(crate) enum Done {
         squash: Vec<Action>,
         /// The repositories whose branch the steps push.
         pushed: Vec<String>,
+        /// Each step that ran, however it ended.
+        ran: Vec<feature::ShipDone>,
         result: Result<Vec<Pr>, (String, Vec<Pr>)>,
     },
     /// The bases a merged feature ticked to push, each by its
@@ -554,7 +562,9 @@ pub(crate) enum Done {
     BasesPushed {
         project: String,
         slug: String,
-        results: Vec<(String, String, Result<(), String>)>,
+        results: Vec<(String, String, Result<String, String>)>,
+        /// They are what finishes Ship: what follows it runs after.
+        finishing: bool,
     },
     /// What removing a shipped feature's worktrees loses, as ticked.
     ShippedLosses {
@@ -1862,6 +1872,8 @@ pub struct RowCtx {
     pub all_skipped: bool,
     /// At Ship, as last read, no step is ticked: it can only finish.
     pub ship_nothing: bool,
+    /// On Ship's page, as last read, how many steps are left to run.
+    pub ship_left: usize,
     /// Its checks are being started, or wait for a setup to end. Once their
     /// terminals are open `checks_running` says so too.
     pub checks_busy: bool,
@@ -3580,6 +3592,8 @@ enum ShipAsk {
     /// No step is ticked: it can finish, leaving these with uncommitted
     /// changes.
     Finish(Vec<String>),
+    /// Every step ticked ran already.
+    AllRan,
     Ready(Asked),
 }
 
@@ -3602,6 +3616,9 @@ fn ship_ask(feature: &Feature, probe: Option<&Probe>) -> ShipAsk {
             Ok(_) => ShipAsk::Checking,
         };
     };
+    if planned.nothing && feature.status == Status::Done {
+        return ShipAsk::Blocked(format!("Nothing ticked to ship in \u{201c}{title}\u{201d}"));
+    }
     if planned.nothing {
         let dirty = probe
             .reading
@@ -3611,6 +3628,9 @@ fn ship_ask(feature: &Feature, probe: Option<&Probe>) -> ShipAsk {
     }
     if !planned.blockers.is_empty() {
         return ShipAsk::Blocked(blocked_text(title, &planned.blockers));
+    }
+    if planned.all_done {
+        return ShipAsk::AllRan;
     }
     ShipAsk::Ready(Asked {
         actions: planned.actions,
@@ -3686,14 +3706,18 @@ fn check_lines(
     shipping: bool,
     now: u64,
 ) -> Vec<CheckLine> {
-    if feature.status != Status::Open || feature.current() != Some(Stage::Ship) {
+    if !feature.ships() {
         return Vec::new();
     }
     let line = |text: String, tone| CheckLine { text, tone };
     if shipping {
         return vec![line("shipping\u{2026}".into(), CheckTone::Note)];
     }
-    if let Some(at) = feature.shipping.squash_at {
+    if let Some(at) = feature
+        .shipping
+        .squash_at
+        .filter(|_| feature.squash_going())
+    {
         let when = projects::ago(now, at);
         let text = format!("Squash started {when}: done once it is merged");
         return vec![line(text, CheckTone::Note)];
@@ -3714,9 +3738,14 @@ fn check_lines(
             .collect();
         return capped(lines, CheckTone::Blocker);
     }
-    let first = match planned.nothing {
-        true => line(NOTHING_TICKED.into(), CheckTone::Note),
-        false => line("Ready to ship".into(), CheckTone::Ready),
+    let more = feature.status == Status::Done;
+    let first = match (planned.nothing, planned.all_done, more) {
+        (true, _, false) => line(NOTHING_TICKED.into(), CheckTone::Note),
+        (true, _, true) => line(TICK_MORE.into(), CheckTone::Note),
+        (false, true, false) => line(ALL_RAN.into(), CheckTone::Ready),
+        (false, true, true) => line(ALL_RAN_DONE.into(), CheckTone::Note),
+        (false, false, false) => line("Ready to ship".into(), CheckTone::Ready),
+        (false, false, true) => line(steps_left(planned.actions.len()), CheckTone::Ready),
     };
     let notes = check.notes.iter().map(|n| line(n.clone(), CheckTone::Note));
     capped(
@@ -3731,39 +3760,83 @@ const FINISHED_UNSHIPPED: &str = "Finished without shipping";
 /// What the Ship check says with no step ticked.
 const NOTHING_TICKED: &str = "No step ticked: Finish ends it without shipping";
 
+/// What it says of a shipped feature with no step ticked.
+const TICK_MORE: &str = "Shipped: tick a step to ship more";
+
+/// What it says when every step ticked ran already, before Ship is done.
+const ALL_RAN: &str = "Every step ticked ran: Ship marks it shipped";
+
+/// And once it is.
+const ALL_RAN_DONE: &str = "Shipped: every step ticked ran";
+
+/// What a Ship card says when a step of its can't run: the step says why.
+const HELD_UP: &str = "can't run yet";
+
+/// "1 step", "3 steps".
+fn steps_word(n: usize) -> String {
+    match n {
+        1 => "1 step".to_owned(),
+        n => format!("{n} steps"),
+    }
+}
+
+/// What it says of a shipped feature with `n` steps ticked left to run.
+fn steps_left(n: usize) -> String {
+    match n {
+        1 => "Shipped: 1 step ticked to run".to_owned(),
+        n => format!("Shipped: {n} steps ticked to run"),
+    }
+}
+
 /// The Ship page's rows the keyboard and pointer reach, in the order they
 /// show: none unless its ticks can still change, that is, with Ship the
 /// current stage and no squash under way.
 fn ship_rows(feature: &Feature, probe: Option<&Probe>) -> Vec<ShipRow> {
     let check = probe.and_then(|p| p.ship.as_ref());
-    let Some(check) = check.filter(|c| {
-        !c.unread
-            && feature.status == Status::Open
-            && feature.current() == Some(Stage::Ship)
-            && feature.shipping.squash_at.is_none()
-    }) else {
+    let Some(check) = check.filter(|c| !c.unread && feature.ships() && !feature.squash_going())
+    else {
         return Vec::new();
     };
     let mut rows = Vec::new();
+    // A merged repository has nothing left to choose: but its base to push.
     for repo in &check.repos {
         let route = ship::repo_plan(feature, repo).route;
-        rows.push(ShipRow::Route {
-            repo: repo.key.clone(),
-            route,
-        });
-        rows.extend(route.steps().iter().map(|step| ShipRow::Step {
-            repo: repo.key.clone(),
-            step: *step,
-        }));
+        if !repo.merged {
+            rows.push(ShipRow::Route {
+                repo: repo.key.clone(),
+                route,
+            });
+        }
+        rows.extend(
+            (route.steps().iter())
+                .filter(|step| ship_step_open(feature, repo, **step))
+                .map(|step| ShipRow::Step {
+                    repo: repo.key.clone(),
+                    step: *step,
+                }),
+        );
     }
-    rows.push(ShipRow::After(ShipAfter::Close));
-    rows.push(ShipRow::After(ShipAfter::Remove));
+    // Once shipped, what followed it is past.
+    if feature.status == Status::Open {
+        rows.push(ShipRow::After(ShipAfter::Close));
+        rows.push(ShipRow::After(ShipAfter::Remove));
+    }
     rows
 }
 
-/// What repository `repo`'s header says: "api \u{b7} 12 commits \u{b7} +420
-/// \u{2212}80 \u{b7} into main".
-fn ship_repo_head(repo: &ship::RepoCheck, stat: Option<feature::page::Stat>) -> String {
+/// Whether `step` of `repo` can still be ticked: it didn't run, and its
+/// repository isn't merged, but for pushing its base after its squash.
+fn ship_step_open(feature: &Feature, repo: &ship::RepoCheck, step: ShipStep) -> bool {
+    if ship::step_done(feature, repo, step).is_some() {
+        return false;
+    }
+    let squashed = feature.ship_done(&repo.key, ShipStep::Merge).is_some();
+    !repo.merged || (step == ShipStep::PushBase && squashed)
+}
+
+/// What repository `repo`'s card says under its name: "12 commits \u{b7}
+/// +420 \u{2212}80 \u{b7} into main".
+fn ship_repo_meta(repo: &ship::RepoCheck, stat: Option<feature::page::Stat>) -> String {
     let commits = match repo.commits {
         1 => "1 commit".to_owned(),
         n => format!("{n} commits"),
@@ -3771,10 +3844,88 @@ fn ship_repo_head(repo: &ship::RepoCheck, stat: Option<feature::page::Stat>) -> 
     let stat = stat.map_or(String::new(), |stat| {
         format!(" \u{b7} +{} \u{2212}{}", stat.added, stat.removed)
     });
-    format!(
-        "{} \u{b7} {commits}{stat} \u{b7} into {}",
-        repo.key, repo.base
-    )
+    format!("{commits}{stat} \u{b7} into {}", repo.base)
+}
+
+/// When a step ran and what it sent, for its row: "2h ago \u{b7} a1b2c3d".
+fn ran_when(done: &feature::ShipDone, now: u64) -> String {
+    let when = (done.at > 0).then(|| projects::ago(now, done.at));
+    let sha = (done.sha.as_deref()).map(|sha| sha.chars().take(7).collect::<String>());
+    let url = done.url.as_deref().map(pr_tail);
+    let parts: Vec<String> = when.into_iter().chain(sha).chain(url).collect();
+    parts.join(" \u{b7} ")
+}
+
+/// How repository `repo`'s card stands: its dot and words.
+fn ship_card_state(
+    feature: &Feature,
+    repo: &ship::RepoCheck,
+    shipping: bool,
+    pr_state: Option<&Result<ship::PrState, String>>,
+) -> (Dot, CheckLine) {
+    let plan = ship::repo_plan(feature, repo);
+    let squashing = feature.squash_going() && feature.shipping.squash_repos.contains(&repo.key);
+    if repo.merged {
+        let base = &repo.base;
+        let left = ship_step_open(feature, repo, ShipStep::PushBase);
+        return match left && plan.ticked(ShipStep::PushBase) {
+            true => (
+                Dot::Idle,
+                line(format!("merged into {base}: push it"), CheckTone::Note),
+            ),
+            false => (
+                Dot::Done,
+                line(format!("merged into {base}"), CheckTone::Ready),
+            ),
+        };
+    }
+    if squashing {
+        let text = "squash under way in a tab: done once merged";
+        return (Dot::Working, line(text, CheckTone::Note));
+    }
+    let open: Vec<ShipStep> = (plan.steps().into_iter())
+        .filter(|step| ship_step_open(feature, repo, *step))
+        .collect();
+    if shipping && !open.is_empty() {
+        return (Dot::Working, line("shipping\u{2026}", CheckTone::Note));
+    }
+    // Its step says why.
+    if open.iter().any(|step| repo.why_not(*step).is_some()) {
+        return (Dot::Blocked, line(HELD_UP, CheckTone::Blocker));
+    }
+    let pr = feature.ship_done(&repo.key, ShipStep::OpenPr).is_some();
+    let pushed = feature.ship_done(&repo.key, ShipStep::Push).is_some();
+    // Its pull request as GitHub has it, once read.
+    if let (0, Some(Ok(state))) = (open.len(), pr_state) {
+        let text = format!("pull request {}", state.words());
+        return match state.state.as_str() {
+            "MERGED" => (Dot::Done, line(text, CheckTone::Ready)),
+            "CLOSED" => (Dot::Unknown, line(text, CheckTone::Note)),
+            _ if state.failed > 0 || state.mergeable == "CONFLICTING" => {
+                (Dot::Failed, line(text, CheckTone::Blocker))
+            }
+            _ if state.running > 0 => (Dot::Working, line(text, CheckTone::Note)),
+            _ if state.review == "CHANGES_REQUESTED" => {
+                (Dot::Blocked, line(text, CheckTone::Blocker))
+            }
+            _ => (Dot::Done, line(text, CheckTone::Ready)),
+        };
+    }
+    if let (0, Some(Err(why))) = (open.len(), pr_state) {
+        let text = format!("pull request open; couldn't read it on GitHub: {why}");
+        return (Dot::Unknown, line(text, CheckTone::Note));
+    }
+    match (open.len(), plan.route) {
+        (0, _) if pr => (Dot::Done, line("pull request open", CheckTone::Ready)),
+        (0, _) if pushed => (Dot::Done, line("pushed", CheckTone::Ready)),
+        (0, Route::Nothing) => (Dot::Idle, line("stays as it is", CheckTone::Note)),
+        (0, _) => (Dot::Idle, line("no step ticked", CheckTone::Note)),
+        (1, _) => (Dot::Idle, line("1 step to run", CheckTone::Note)),
+        (n, _) => (
+            Dot::Idle,
+            line(format!("{n} steps to run"), CheckTone::Note),
+        ),
+    }
 }
 
 /// The row of `step` of `repo` on the Ship page.
@@ -3783,10 +3934,59 @@ fn ship_step_row(
     repo: &ship::RepoCheck,
     step: ShipStep,
     row: usize,
+    now: u64,
 ) -> chrome::ShipStepRow {
     let plan = ship::repo_plan(feature, repo);
     let base = &repo.base;
+    let branch = feature.branch();
+    // What ran says so, and when; it is no tick box any more.
+    let ran = ship::step_done(feature, repo, step).or_else(|| {
+        (step == ShipStep::Merge && repo.merged).then(|| feature::ShipDone {
+            at: 0,
+            repo: repo.key.clone(),
+            step,
+            sha: None,
+            url: None,
+        })
+    });
+    let ran = ran.filter(|_| !ship_step_open(feature, repo, step));
+    if let Some(done) = ran {
+        let label = match step {
+            ShipStep::Push | ShipStep::PushBranch => format!("Pushed {branch} to origin"),
+            ShipStep::OpenPr => format!("Opened a pull request into {base}"),
+            ShipStep::Merge => format!("Merged into {base}"),
+            ShipStep::PushBase => format!("Pushed {base} to origin"),
+        };
+        let when = ran_when(&done, now);
+        return chrome::ShipStepRow {
+            row,
+            label,
+            detail: (!when.is_empty()).then(|| line(when, CheckTone::Note)),
+            ticked: true,
+            off: false,
+            done: true,
+        };
+    }
+    // Merged some other way: what else it would do is past.
+    if repo.merged {
+        let label = match step {
+            ShipStep::PushBase => format!("Push {base} to origin"),
+            _ => String::new(),
+        };
+        return chrome::ShipStepRow {
+            row,
+            label,
+            detail: None,
+            ticked: plan.ticked(step),
+            off: false,
+            done: false,
+        };
+    }
+    let pushed = feature.ship_done(&repo.key, ShipStep::Push).is_some();
     let label = match step {
+        ShipStep::Push | ShipStep::PushBranch if pushed => {
+            format!("Push {branch} to origin again: it moved since")
+        }
         ShipStep::Push | ShipStep::PushBranch => format!("Push {} to origin", feature.branch()),
         ShipStep::OpenPr => match feature.shipping.prs.iter().find(|p| p.repo == repo.key) {
             Some(pr) => format!("Keep its pull request open: {}", pr_tail(&pr.url)),
@@ -3813,50 +4013,77 @@ fn ship_step_row(
         detail,
         ticked: plan.ticked(step),
         off: why.is_some(),
+        done: false,
     }
 }
 
 /// The Ship page's choices and tick boxes, as `ship_rows` numbers them.
-fn ship_sections(feature: &Feature, state: &PanelState) -> Vec<PageSection> {
+fn ship_sections(
+    feature: &Feature,
+    state: &PanelState,
+    actions: &[(PageButton, PanelOutcome)],
+    now: u64,
+) -> Vec<PageSection> {
     let probe = state.probe;
     let rows = ship_rows(feature, probe);
+    let going = feature.squash_going();
     let Some(check) = probe
         .and_then(|p| p.ship.as_ref())
-        .filter(|_| !rows.is_empty())
+        .filter(|c| !c.unread && (!rows.is_empty() || going))
     else {
         return Vec::new();
     };
-    let at = |wanted: &ShipRow| rows.iter().position(|r| r == wanted).unwrap_or(0);
+    let at = |wanted: &ShipRow| rows.iter().position(|r| r == wanted);
     let mut out = Vec::new();
     for repo in &check.repos {
         let plan = ship::repo_plan(feature, repo);
         let stat = probe.and_then(|p| p.stats.get(&repo.key)).copied();
+        // Every step of its way: those that ran, then those to tick. A
+        // merged repository shows only what ran, and its base to push.
         let steps = (plan.route.steps().iter())
-            .map(|step| {
-                let row = at(&ShipRow::Step {
+            .filter_map(|step| {
+                let wanted = ShipRow::Step {
                     repo: repo.key.clone(),
                     step: *step,
-                });
-                ship_step_row(feature, repo, *step, row)
+                };
+                let row = ship_step_row(feature, repo, *step, at(&wanted).unwrap_or(0), now);
+                let shown = row.done || at(&wanted).is_some();
+                shown.then_some(row)
             })
             .collect();
-        let pr_open = feature.shipping.prs.iter().any(|p| p.repo == repo.key);
-        let note = match (plan.route, pr_open) {
-            (Route::Nothing, false) => Some("Nothing gets pushed or merged"),
-            (Route::Nothing, true) => {
+        let pr = feature.ship_done(&repo.key, ShipStep::OpenPr);
+        let note = match (plan.route, pr.is_some(), repo.merged) {
+            (_, _, true) => None,
+            (Route::Nothing, false, _) => Some("Nothing gets pushed or merged"),
+            (Route::Nothing, true, _) => {
                 Some("Nothing gets pushed or merged; its pull request stays open on GitHub")
             }
-            (Route::Merge, true) => Some("Its pull request stays open on GitHub"),
+            (Route::Merge, true, _) => Some("Its pull request stays open on GitHub"),
             _ => None,
         };
+        let pr_state = (probe.and_then(|p| p.prs.as_ref())).and_then(|prs| prs.get(&repo.key));
+        let (dot, state_line) = ship_card_state(feature, repo, state.shipping, pr_state);
+        let buttons = (pr.and_then(|pr| pr.url))
+            .and_then(|url| {
+                (actions.iter()).position(|(_, o)| *o == PanelOutcome::OpenPr(url.clone()))
+            })
+            .into_iter()
+            .collect();
+        let route_row = at(&ShipRow::Route {
+            repo: repo.key.clone(),
+            route: plan.route,
+        });
         out.push(PageSection::ShipGroup(chrome::ShipGroup {
-            head: ship_repo_head(repo, stat),
+            head: repo.key.clone(),
             caption: false,
-            route: Some(chrome::ShipRouteRow {
-                row: at(&ShipRow::Route {
-                    repo: repo.key.clone(),
-                    route: plan.route,
-                }),
+            card: Some(chrome::ShipCard {
+                dot,
+                state: state_line,
+                meta: ship_repo_meta(repo, stat),
+                buttons,
+            }),
+            route: route_row.map(|row| chrome::ShipRouteRow {
+                row,
                 on: plan.route.index(),
             }),
             note: note.map(str::to_owned),
@@ -3864,6 +4091,11 @@ fn ship_sections(feature: &Feature, state: &PanelState) -> Vec<PageSection> {
             selected: None,
         }));
     }
+    // Once shipped, what followed is past: the cards are all there is.
+    if feature.status != Status::Open || rows.is_empty() {
+        return out;
+    }
+    let at = |wanted: &ShipRow| at(wanted).unwrap_or(0);
     let removable = ship::removable(feature, check);
     let remove = removable && feature.ship_plan.remove_worktrees;
     let after = |which, label: &str, ticked, why: Option<&str>| chrome::ShipStepRow {
@@ -3875,6 +4107,7 @@ fn ship_sections(feature: &Feature, state: &PanelState) -> Vec<PageSection> {
         }),
         ticked,
         off: why.is_some(),
+        done: false,
     };
     let remove_label = match feature.touched().count() > 1 {
         true => "Remove the worktrees and branches",
@@ -3883,6 +4116,7 @@ fn ship_sections(feature: &Feature, state: &PanelState) -> Vec<PageSection> {
     out.push(PageSection::ShipGroup(chrome::ShipGroup {
         head: "Afterwards".to_owned(),
         caption: true,
+        card: None,
         route: None,
         note: None,
         steps: vec![
@@ -3910,31 +4144,36 @@ const REMOVING_CLOSES: &str = "Removing the worktrees closes it";
 /// Why the worktrees can't go with what is ticked.
 const ONLY_ONCE_MERGING: &str = "Only when every repository merges into its base";
 
-/// What `feature`'s shipping did or goes on to do, by repository.
-fn ship_ran(feature: &Feature) -> Vec<CheckLine> {
-    let note = |text: String| CheckLine {
-        text,
-        tone: CheckTone::Note,
-    };
-    let shipping = &feature.shipping;
-    let mut out: Vec<CheckLine> = (shipping.pushed.iter())
-        .map(|key| note(format!("{key}: pushed {}", feature.branch())))
-        .collect();
-    out.extend((shipping.squash_repos.iter()).map(|key| {
-        let base = feature.repo(key).map_or("its base", |r| r.base.as_str());
-        note(match shipping.push_base.contains(key) {
-            true => format!("{key}: squash into {base}, then push it"),
-            false => format!("{key}: squash into {base}"),
+/// The steps `feature`'s shipping ran, newest first: "2h ago \u{b7} api:
+/// pushed feature/x \u{b7} a1b2c3d".
+fn ship_log_lines(feature: &Feature, now: u64) -> Vec<CheckLine> {
+    let branch = feature.branch();
+    (feature.ship_log().iter().rev())
+        .map(|done| {
+            let base = feature
+                .repo(&done.repo)
+                .map_or("its base", |r| r.base.as_str());
+            let said = format!("{}: {}", done.repo, done.said(&branch, base));
+            let when = (done.at > 0).then(|| projects::ago(now, done.at));
+            let sha = (done.sha.as_deref()).map(|sha| sha.chars().take(7).collect::<String>());
+            let url = done.url.as_deref().map(pr_tail);
+            let parts: Vec<String> = (when.into_iter())
+                .chain(std::iter::once(said))
+                .chain(sha)
+                .chain(url)
+                .collect();
+            line(parts.join(" \u{b7} "), CheckTone::Note)
         })
-    }));
-    out
+        .collect()
 }
 
 /// Whether the patch watch keeps an eye on `feature`: open, with a mark
 /// bound to its code or a squash under way.
 fn watched(feature: &Feature) -> bool {
-    feature.status == Status::Open
-        && (feature.marks.keys().any(|s| s.bound()) || feature.shipping.squash_at.is_some())
+    let open = feature.status == Status::Open
+        && (feature.marks.keys().any(|s| s.bound()) || feature.shipping.squash_at.is_some());
+    // A squash of a shipped one's is waited on as an open one's.
+    open || (feature.ships_more() && feature.squash_going())
 }
 
 /// How often the patch watch probes watched `feature` while the panel
@@ -3942,7 +4181,7 @@ fn watched(feature: &Feature) -> bool {
 /// way, as the user waits on it in its tab (and the panel closed to show
 /// that tab), else every `WATCH_EVERY`.
 fn watch_every(feature: &Feature) -> Duration {
-    if feature.shipping.squash_at.is_some() {
+    if feature.squash_going() {
         PANEL_EVERY
     } else {
         WATCH_EVERY
@@ -5255,6 +5494,12 @@ fn writers_page_actions(
             PanelOutcome::SendPrompt(Stage::Build),
         ));
     }
+    // Shipped, it can ship more: what is ticked and left to run.
+    if mark == StageMark::Done && stage == Stage::Ship && feature.ships_more() && ctx.ship_left > 0
+    {
+        let label = format!("Ship {}\u{2026}", steps_word(ctx.ship_left));
+        out.push((button(&label, ButtonStyle::Primary), PanelOutcome::Ship));
+    }
     if let (StageMark::Done, Some(current)) = (mark, feature.current()) {
         let label = format!("Go to {}", current.label());
         let style = match waits {
@@ -5424,7 +5669,8 @@ fn writers_page_actions(
         out.retain(|(_, outcome)| works_during_checks(outcome));
     }
     if stage == Stage::Ship {
-        let one = feature.shipping.prs.len() == 1;
+        // On its repository's card while it can ship; else listed by name.
+        let one = feature.shipping.prs.len() == 1 || feature.ships();
         for pr in &feature.shipping.prs {
             let label = match one {
                 true => "Open PR".to_owned(),
@@ -6206,17 +6452,20 @@ impl Gerdr {
                 squash,
                 pushed,
                 result,
+                ran,
             } => {
                 self.unbusy(&project, &slug, Job::Ship);
-                self.feature_shipped(&project, &slug, patch.as_deref(), &squash, pushed, result);
+                let patch = patch.as_deref();
+                self.feature_shipped(&project, &slug, patch, &squash, pushed, ran, result);
             }
             Done::BasesPushed {
                 project,
                 slug,
                 results,
+                finishing,
             } => {
                 self.unbusy(&project, &slug, Job::Ship);
-                self.bases_pushed(&project, &slug, results);
+                self.bases_pushed(&project, &slug, results, finishing);
             }
             Done::ShippedLosses {
                 project,
@@ -6386,6 +6635,7 @@ impl Gerdr {
                     })),
             all_skipped,
             ship_nothing: ship_planned(feature, last).is_some_and(|planned| planned.nothing),
+            ship_left: ship_planned(feature, last).map_or(0, |planned| planned.actions.len()),
             checks_busy: self.checks_busy(&feature.project, &feature.slug),
             setting_up: self.setting_up(&feature.project, &feature.slug),
             feature_busy: self.feature_busy(&feature.project, &feature.slug),
@@ -6567,7 +6817,7 @@ impl Gerdr {
         // The brief may have changed: its criteria are read again. A finished
         // feature's page shows them too.
         self.load_criteria(project, slug);
-        if feature.status != Status::Open {
+        if feature.status != Status::Open && !feature.ships_more() {
             self.probe_finished(project, slug, &feature);
             return;
         }
@@ -6585,7 +6835,17 @@ impl Gerdr {
             return;
         }
         probed.running = true;
-        probed.at = Some(Instant::now());
+        let now = Instant::now();
+        probed.at = Some(now);
+        // Its pull requests, once a while: gh asks GitHub.
+        let read_prs = feature.ships()
+            && (feature.ship_log().iter()).any(|d| d.step == ShipStep::OpenPr)
+            && probed
+                .prs_at
+                .is_none_or(|at| now.duration_since(at) >= PRS_EVERY);
+        if read_prs {
+            probed.prs_at = Some(now);
+        }
         let data = store::dir(None, project, slug);
         let (project, slug) = (project.to_owned(), slug.to_owned());
         self.feature_work(None, move |_| Done::Probed {
@@ -6597,6 +6857,7 @@ impl Gerdr {
                 None => Probe {
                     docs: feature::page::read_docs(&data).with_comment_fixes(&data, &feature),
                     models: feature::agents::read_models(&feature),
+                    prs: read_prs.then(|| ship::read_prs(&feature, "gh")),
                     ..ship::probe(&feature, &modes)
                 },
             },
@@ -6655,12 +6916,26 @@ impl Gerdr {
         probed.running = false;
         let docs = std::mem::take(&mut probe.docs);
         probe.docs = docs.keeping(probed.last.as_ref().map(|last| &last.docs));
-        // A finished feature's read is for its tab only.
+        // Not read this time: as last read.
+        if probe.prs.is_none() {
+            probe.prs = probed.last.as_ref().and_then(|last| last.prs.clone());
+        }
+        // A finished feature's read is for its tab only, and what it ships
+        // more.
         if !open {
             probed.again = false;
+            let merged = probe.merged;
+            let patch = probe.reading.as_ref().ok().map(|r| r.patch.clone());
             probed.last = Some(probe);
-            self.features.ship_waits.remove(&key);
+            let waited = self.features.ship_waits.remove(&key);
             self.reselect_review_card(selected);
+            let more = (self.feature(project, slug)).is_some_and(Feature::ships_more);
+            if more && merged {
+                self.feature_merged(project, slug, patch.as_deref());
+            }
+            if more && waited {
+                self.ask_ship_checked(project, slug, true);
+            }
             return;
         }
         let again = std::mem::take(&mut probed.again);
@@ -6782,13 +7057,28 @@ impl Gerdr {
         let Some(feature) = self.feature_mut(project, slug) else {
             return;
         };
-        let squashing = feature.status == Status::Open
-            && feature.current() == Some(Stage::Ship)
-            && feature.shipping.squash_at.is_some();
-        if !squashing {
+        // Shipped already, a later squash finishes nothing.
+        let finishing = feature.status == Status::Open && feature.current() == Some(Stage::Ship);
+        let later = feature.status == Status::Done;
+        if !feature.squash_going() || !(finishing || later) {
             return;
         }
-        feature.tick(feature::now(), "gerdr", patch);
+        let now = feature::now();
+        for key in feature.shipping.squash_repos.clone() {
+            feature.ship_ran(feature::ShipDone {
+                at: now,
+                repo: key,
+                step: ShipStep::Merge,
+                sha: None,
+                url: None,
+            });
+        }
+        feature.shipping.squash_at = None;
+        if finishing {
+            feature.tick(now, "gerdr", patch);
+        } else {
+            feature.log(now, "Squash merged");
+        }
         let title = feature.title.clone();
         let bases: Vec<feature::Repo> = (feature.shipping.push_base.iter())
             .filter_map(|key| feature.repo(key).cloned())
@@ -6812,11 +7102,12 @@ impl Gerdr {
                 results: (bases.iter())
                     .map(|repo| (repo.key(), repo.base.clone(), ship::push_base(repo)))
                     .collect(),
+                finishing,
                 project,
                 slug,
             });
         }
-        if let Some(kept) = self.after_ship(project, slug) {
+        if finishing && let Some(kept) = self.after_ship(project, slug) {
             text = format!("{text}; {kept}");
         }
         self.show_success(text);
@@ -6827,7 +7118,8 @@ impl Gerdr {
         &mut self,
         project: &str,
         slug: &str,
-        results: Vec<(String, String, Result<(), String>)>,
+        results: Vec<(String, String, Result<String, String>)>,
+        finishing: bool,
     ) {
         let Some(feature) = self.feature_mut(project, slug) else {
             return;
@@ -6838,8 +7130,15 @@ impl Gerdr {
         let mut went = Vec::new();
         for (key, base, result) in results {
             match result {
-                Ok(()) => {
+                Ok(sha) => {
                     feature.log(now, format!("Pushed {base} of {key}"));
+                    feature.ship_ran(feature::ShipDone {
+                        at: now,
+                        repo: key.clone(),
+                        step: ShipStep::PushBase,
+                        sha: Some(sha),
+                        url: None,
+                    });
                     went.push(format!("{base} of {key}"));
                 }
                 Err(why) => {
@@ -6851,7 +7150,7 @@ impl Gerdr {
             }
         }
         self.save_feature(project, slug);
-        let kept = self.after_ship(project, slug);
+        let kept = finishing.then(|| self.after_ship(project, slug)).flatten();
         if let Some(text) = failed {
             return self.show_error(format!("\u{201c}{title}\u{201d}: {text}"));
         }
@@ -8830,9 +9129,19 @@ impl Gerdr {
                 "\u{201c}{title}\u{201d} is busy; try again once it is done"
             ));
         }
-        let (squash, prs): (Vec<Action>, Vec<Action>) = actions
-            .into_iter()
-            .partition(|a| matches!(a, Action::Squash { .. } | Action::PushBase { .. }));
+        // A base waits for its squash; one merged already goes with the rest.
+        let squashing: Vec<String> = (actions.iter())
+            .filter_map(|a| match a {
+                Action::Squash { repo, .. } => Some(repo.clone()),
+                _ => None,
+            })
+            .collect();
+        let (squash, prs): (Vec<Action>, Vec<Action>) =
+            actions.into_iter().partition(|a| match a {
+                Action::Squash { .. } => true,
+                Action::PushBase { repo, .. } => squashing.contains(repo),
+                _ => false,
+            });
         let pushed: Vec<String> = (prs.iter())
             .filter_map(|a| match a {
                 Action::Push { repo } => Some(repo.clone()),
@@ -8851,17 +9160,18 @@ impl Gerdr {
         // The code is read again first: a commit since the Ship check
         // would ship what no gate saw.
         self.feature_work(Some(busy), move |_| {
-            let result = still_checked(&feature, patch.as_deref())
-                .map_err(|why| (why, Vec::new()))
-                .and_then(|()| {
-                    if prs.is_empty() {
-                        Ok(Vec::new())
-                    } else {
-                        ship::open_prs(&feature, &prs, "gh")
-                    }
-                });
+            let (ran, failed) = match still_checked(&feature, patch.as_deref()) {
+                Err(why) => (ship::Ran::default(), Some(why)),
+                Ok(()) if prs.is_empty() => (ship::Ran::default(), None),
+                Ok(()) => ship::run_steps(&feature, &prs, "gh", feature::now()),
+            };
+            let result = match failed {
+                None => Ok(ran.prs),
+                Some(why) => Err((why, ran.prs)),
+            };
             Done::Shipped {
                 result,
+                ran: ran.done,
                 project,
                 slug,
                 patch,
@@ -8869,6 +9179,32 @@ impl Gerdr {
                 pushed,
             }
         });
+    }
+
+    /// Every step ticked of feature `slug` ran already, Ship not done yet:
+    /// it is now, with nothing more to run.
+    fn ship_all_ran(&mut self, project: &str, slug: &str) {
+        self.settle_ship_plan(project, slug);
+        let Some(feature) = self.feature_mut(project, slug) else {
+            return;
+        };
+        if feature.status != Status::Open || feature.current() != Some(Stage::Ship) {
+            return;
+        }
+        let now = feature::now();
+        feature.tick(now, "you", None);
+        let mut text = format!(
+            "\u{201c}{}\u{201d} is shipped: every step ticked ran",
+            feature.title
+        );
+        feature.log(now, "Shipped: every step ticked ran");
+        self.save_feature(project, slug);
+        self.feature_cursor_to_current_of(project, slug);
+        if let Some(kept) = self.after_ship(project, slug) {
+            text = format!("{text}; {kept}");
+        }
+        self.show_success(text);
+        self.probe_feature(project, slug);
     }
 
     /// Start the squash of feature `slug` (`squash`, its Squash steps) in a
@@ -8963,6 +9299,10 @@ impl Gerdr {
                     &dirty,
                 );
             }
+            ShipAsk::AllRan if feature.status == Status::Done => self.show_notice(format!(
+                "Every step ticked of \u{201c}{title}\u{201d} ran already"
+            )),
+            ShipAsk::AllRan => self.ship_all_ran(project, slug),
             ShipAsk::Ready(asked) => {
                 let steps: Vec<String> = asked.actions.iter().map(Action::label).collect();
                 self.features.asked.insert(key, asked);
@@ -8974,6 +9314,7 @@ impl Gerdr {
     /// The pull requests of feature `slug` are open, or some are and the
     /// rest failed: they are kept, and once all are open, Ship is done
     /// (on the code whose patch-id is `patch`), unless a squash goes on.
+    #[allow(clippy::too_many_arguments)]
     fn feature_shipped(
         &mut self,
         project: &str,
@@ -8981,8 +9322,22 @@ impl Gerdr {
         patch: Option<&str>,
         squash: &[Action],
         pushed: Vec<String>,
+        ran: Vec<feature::ShipDone>,
         result: Result<Vec<Pr>, (String, Vec<Pr>)>,
     ) {
+        // What ran is kept, however it ended.
+        if let Some(feature) = self.feature_mut(project, slug)
+            && !ran.is_empty()
+        {
+            for done in &ran {
+                feature.ship_ran(done.clone());
+            }
+            self.save_feature(project, slug);
+        }
+        let bases: Vec<String> = (ran.iter())
+            .filter(|d| d.step == ShipStep::PushBase)
+            .map(|d| d.repo.clone())
+            .collect();
         if result.is_ok() && !squash.is_empty() {
             self.start_squash(project, slug, squash);
         }
@@ -9014,6 +9369,17 @@ impl Gerdr {
             self.show_error(format!("Couldn't ship \u{201c}{title}\u{201d}: {why}"));
             return self.probe_feature(project, slug);
         }
+        // Only a base merged already: it went.
+        if n == 0 && pushed.is_empty() && !bases.is_empty() {
+            let text = format!(
+                "Pushed the base of {} for \u{201c}{title}\u{201d}",
+                bases.join(", ")
+            );
+            feature.log(now, text.clone());
+            self.save_feature(project, slug);
+            self.show_success(text);
+            return self.probe_feature(project, slug);
+        }
         // Only a squash: it says so itself, once merged.
         if n == 0 && pushed.is_empty() {
             return self.probe_feature(project, slug);
@@ -9022,7 +9388,12 @@ impl Gerdr {
             0 => format!("Pushed {} for \u{201c}{title}\u{201d}", pushed.join(", ")),
             _ => opened_text(&title, n - updated, updated),
         };
-        feature.shipping.pushed = pushed;
+        // Those pushed before stay pushed.
+        for key in pushed {
+            if !feature.shipping.pushed.contains(&key) {
+                feature.shipping.pushed.push(key);
+            }
+        }
         feature.log(now, text.clone());
         let done = squash.is_empty()
             && feature.status == Status::Open
@@ -12762,16 +13133,21 @@ fn stage_page(
                 if !check.is_empty() {
                     sections.push(lines("Ship check", check));
                 }
-                sections.extend(ship_sections(feature, state));
-                let ran = ship_ran(feature);
-                if !ran.is_empty() {
-                    sections.push(lines("Shipped as", ran));
-                }
+                let cards = ship_sections(feature, state, actions, now);
+                let carded = !cards.is_empty();
+                sections.extend(cards);
+                // Without cards, as once its worktrees are gone, its pull
+                // requests are listed.
                 let prs: Vec<CheckLine> = (feature.shipping.prs.iter())
+                    .filter(|_| !carded)
                     .map(|pr| line(pr_tail(&pr.url), CheckTone::Note))
                     .collect();
                 if !prs.is_empty() {
                     sections.push(lines("Pull requests", prs));
+                }
+                let log = ship_log_lines(feature, now);
+                if !log.is_empty() {
+                    sections.push(lines("Ship log", log));
                 }
             }
             Stage::ManualTest => {
@@ -18091,6 +18467,7 @@ pub(crate) mod tests {
             }),
             guards: BTreeMap::new(),
             models: BTreeMap::new(),
+            prs: None,
             ship,
             merged: false,
             stats: BTreeMap::new(),
@@ -18109,6 +18486,8 @@ pub(crate) mod tests {
             route: Route::Pr,
             no_origin: None,
             no_merge: None,
+            merged: false,
+            head: None,
         };
         Some(ShipCheck {
             blockers: blockers.iter().map(|b| (*b).to_owned()).collect(),
@@ -18789,6 +19168,7 @@ pub(crate) mod tests {
                 ..feature::page::Docs::default()
             },
             models: BTreeMap::new(),
+            prs: None,
         }
     }
 
@@ -20272,7 +20652,12 @@ pub(crate) mod tests {
             _ => String::new(),
         };
         let labels: Vec<String> = view.page.sections.iter().map(label).collect();
-        assert_eq!(labels, ["Pull requests"], "no Ship check once shipped");
+        // Its worktree gone, it ships no more: its pull requests are listed.
+        assert_eq!(
+            labels,
+            ["Pull requests", "Ship log"],
+            "no Ship check once shipped"
+        );
         let buttons: Vec<&str> = view.page.buttons.iter().map(|b| b.label.as_str()).collect();
         assert_eq!(buttons, ["Reopen", "Open PR"]);
         assert_eq!(view.page.buttons[0].style, ButtonStyle::Plain);
@@ -21823,6 +22208,89 @@ pub(crate) mod tests {
         assert!(line.is_some_and(|l| l.starts_with("every check is skipped")));
     }
 
+    /// Shipped with only its push, a feature can open its pull request later:
+    /// the push shows as done on its card, the pull request as a tick box,
+    /// and the page offers to ship what is left.
+    #[test]
+    fn a_shipped_feature_ships_more_from_its_page() {
+        use crate::feature::{RepoPlan, ShipDone};
+        let dir = std::env::temp_dir().join(format!("gerdr-ship-more-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut api = repo("api", true);
+        api.worktree = dir.clone();
+        let mut f = feature("s", vec![api], Stage::ALL.len());
+        f.status = Status::Done;
+        f.ship_ran(ShipDone {
+            at: 1_900,
+            repo: "api".into(),
+            step: ShipStep::Push,
+            sha: Some("3f9c2a1deadbeef".into()),
+            url: None,
+        });
+        f.ship_plan
+            .repos
+            .insert("api".into(), RepoPlan::new(Route::Pr));
+        assert!(f.ships() && f.ships_more());
+        let mut found = check(&[], &["api"], &[]).unwrap();
+        found.repos[0].head = Some("3f9c2a1deadbeef".into());
+        let p = probe(Some(found));
+        let state = PanelState {
+            probe: Some(&p),
+            ..PanelState::default()
+        };
+        assert_eq!(
+            ship_rows(&f, Some(&p)).len(),
+            2,
+            "its way, and the pull request"
+        );
+        let ctx = RowCtx {
+            ship_left: 1,
+            ..RowCtx::default()
+        };
+        let actions = page_actions(&f, Stage::Ship, ctx);
+        assert_eq!(actions[0].0.label, "Ship 1 step\u{2026}");
+        assert_eq!(actions[0].1, PanelOutcome::Ship);
+        let page = stage_page(&f, Stage::Ship, &state, &actions, 2_000);
+        assert_eq!(
+            page.sections[0],
+            lines(
+                "Ship check",
+                vec![line("Shipped: 1 step ticked to run", CheckTone::Ready)]
+            )
+        );
+        let Some(PageSection::ShipGroup(group)) = page.sections.get(1) else {
+            panic!("no card: {:?}", page.sections);
+        };
+        let steps: Vec<(&str, bool)> = (group.steps.iter())
+            .map(|s| (s.label.as_str(), s.done))
+            .collect();
+        assert_eq!(
+            steps,
+            [
+                ("Pushed feature/s to origin", true),
+                ("Open a pull request into main", false)
+            ]
+        );
+        assert_eq!(
+            group.steps[0].detail.as_ref().map(|d| d.text.as_str()),
+            Some("1m ago \u{b7} 3f9c2a1")
+        );
+        let card = group.card.as_ref().unwrap();
+        assert_eq!(card.state.text, "1 step to run");
+        let last = page.sections.last().unwrap();
+        assert_eq!(
+            *last,
+            lines(
+                "Ship log",
+                vec![line(
+                    "1m ago \u{b7} api: pushed feature/s \u{b7} 3f9c2a1",
+                    CheckTone::Note
+                )]
+            )
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn a_blocked_ship_says_what_stops_it() {
         let f = feature("s", vec![repo("api", true)], 8);
@@ -21848,10 +22316,14 @@ pub(crate) mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(
-            heads,
-            ["api \u{b7} 1 commit \u{b7} into main", "Afterwards"]
-        );
+        assert_eq!(heads, ["api", "Afterwards"]);
+        let card = (page.sections.iter())
+            .find_map(|s| match s {
+                PageSection::ShipGroup(group) => group.card.clone(),
+                _ => None,
+            })
+            .expect("a card");
+        assert_eq!(card.meta, "1 commit \u{b7} into main");
         let node = rail_node(&f, Stage::Ship, &state, 2_000);
         assert_eq!(
             (node.mark, node.line.as_str()),

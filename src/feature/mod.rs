@@ -206,6 +206,11 @@ pub struct Shipping {
     /// Those of them whose base goes to origin once merged.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub push_base: Vec<String>,
+    /// Every step shipping ran, in the order it did: what Ship's page shows
+    /// done, and what a later ship leaves out. A record from before it was
+    /// kept has none: `Feature::ship_log` reads the fields above then.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<ShipDone>,
 }
 
 impl Shipping {
@@ -215,6 +220,37 @@ impl Shipping {
             && self.pushed.is_empty()
             && self.squash_repos.is_empty()
             && self.push_base.is_empty()
+            && self.steps.is_empty()
+    }
+}
+
+/// A step shipping ran for a repository.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShipDone {
+    /// Unix seconds; 0 when a record from before the log doesn't say.
+    pub at: u64,
+    /// The repository's `Repo::key`.
+    pub repo: String,
+    pub step: ShipStep,
+    /// The commit a push sent: the branch's for `Push`, the base's for
+    /// `PushBase`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha: Option<String>,
+    /// The pull request's address, for `OpenPr`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
+impl ShipDone {
+    /// What it did, in words for the page's log: "pushed feature/x",
+    /// "opened a pull request".
+    pub fn said(&self, branch: &str, base: &str) -> String {
+        match self.step {
+            ShipStep::Push | ShipStep::PushBranch => format!("pushed {branch}"),
+            ShipStep::OpenPr => "opened a pull request".to_owned(),
+            ShipStep::Merge => format!("squashed into {base}"),
+            ShipStep::PushBase => format!("pushed {base}"),
+        }
     }
 }
 
@@ -272,7 +308,8 @@ impl Route {
 }
 
 /// A tick box of a repository's steps on Ship's page.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum ShipStep {
     Push,
     OpenPr,
@@ -1067,6 +1104,79 @@ impl Feature {
     /// Its branch name: `feature/<slug>`.
     pub fn branch(&self) -> String {
         format!("feature/{}", self.slug)
+    }
+
+    /// Every step shipping ran, oldest first: `Shipping::steps`, or for a
+    /// record from before they were kept, what its other fields say, at the
+    /// time Ship was done (0 while it isn't).
+    pub fn ship_log(&self) -> Vec<ShipDone> {
+        let shipping = &self.shipping;
+        if !shipping.steps.is_empty() {
+            return shipping.steps.clone();
+        }
+        let at = self.marks.get(&Stage::Ship).map_or(0, |m| m.at);
+        let done = |repo: &str, step, url: Option<&str>| ShipDone {
+            at,
+            repo: repo.to_owned(),
+            step,
+            sha: None,
+            url: url.map(str::to_owned),
+        };
+        let mut out: Vec<ShipDone> = (shipping.pushed.iter())
+            .map(|key| done(key, ShipStep::Push, None))
+            .collect();
+        out.extend((shipping.prs.iter()).map(|pr| done(&pr.repo, ShipStep::OpenPr, Some(&pr.url))));
+        // A squash made Ship done once merged.
+        if self.status == Status::Done && shipping.squash_at.is_some() {
+            out.extend((shipping.squash_repos.iter()).map(|key| done(key, ShipStep::Merge, None)));
+            out.extend((shipping.push_base.iter()).map(|key| done(key, ShipStep::PushBase, None)));
+        }
+        out
+    }
+
+    /// The last time `step` ran for repository `repo`, if it did. Either
+    /// route's push of the branch counts for both.
+    pub fn ship_done(&self, repo: &str, step: ShipStep) -> Option<ShipDone> {
+        let push = |s: ShipStep| matches!(s, ShipStep::Push | ShipStep::PushBranch);
+        let same = |s: ShipStep| s == step || (push(s) && push(step));
+        (self.ship_log().into_iter().rev()).find(|d| d.repo == repo && same(d.step))
+    }
+
+    /// Note that shipping ran `done`. A record from before the log was kept
+    /// gets what it did before in it first.
+    pub fn ship_ran(&mut self, done: ShipDone) {
+        if self.shipping.steps.is_empty() {
+            self.shipping.steps = self.ship_log();
+        }
+        self.shipping.steps.push(done);
+    }
+
+    /// Whether its Ship page can still run steps: Ship is its current
+    /// stage, or it is done here with a worktree left to ship more from.
+    pub fn ships(&self) -> bool {
+        (self.status == Status::Open && self.current() == Some(Stage::Ship)) || self.ships_more()
+    }
+
+    /// Whether a squash of its started in a tab and isn't merged yet. One
+    /// from before the log was kept, of a shipped feature, was merged when
+    /// Ship was done.
+    pub fn squash_going(&self) -> bool {
+        let Some(at) = self.shipping.squash_at else {
+            return false;
+        };
+        match self.status {
+            Status::Open => true,
+            Status::Done => self.marks.get(&Stage::Ship).is_none_or(|m| at > m.at),
+            Status::Abandoned => false,
+        }
+    }
+
+    /// Whether it is done but can still ship more: done here, not on
+    /// another machine, with a worktree left.
+    pub fn ships_more(&self) -> bool {
+        self.status == Status::Done
+            && self.writer.is_none()
+            && self.touched().any(|r| r.worktree.is_dir())
     }
 
     /// The folders its agents are let into besides their working folder

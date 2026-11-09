@@ -385,6 +385,9 @@ pub struct ShipStepRow {
     pub ticked: bool,
     /// It can't run as things are: dim. It can still be ticked or unticked.
     pub off: bool,
+    /// It ran: a done dot in place of its tick box, `detail` saying when.
+    /// No key or click reaches it, and `row` means nothing.
+    pub done: bool,
 }
 
 /// A repository's choice of way on the Ship page.
@@ -402,11 +405,27 @@ pub struct ShipGroup {
     pub head: String,
     /// `head` reads as a caption over its rows, not a line of its own.
     pub caption: bool,
+    /// It is a repository's card: framed, `head` in bold after its dot.
+    pub card: Option<ShipCard>,
     pub route: Option<ShipRouteRow>,
     pub note: Option<String>,
     pub steps: Vec<ShipStepRow>,
     /// The row under the keyboard's cursor, of all the page's.
     pub selected: Option<usize>,
+}
+
+/// What a repository's card on the Ship page says besides its rows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShipCard {
+    /// How it stands: done once all it was to do ran.
+    pub dot: Dot,
+    /// After its name, in its tone: "merged into main", "ready".
+    pub state: CheckLine,
+    /// Under its name, muted: "12 commits · +420 −80 · into main".
+    pub meta: String,
+    /// The indices in `StagePage::buttons` of the buttons it holds, at its
+    /// end: its pull request's.
+    pub buttons: Vec<usize>,
 }
 
 /// Where the Ship page's rows go, unscrolled.
@@ -1893,6 +1912,9 @@ pub(super) enum Piece {
     /// The frame of the fix round card of `StagePage::sections[i]`, with
     /// its buttons; its text goes in pieces of its own.
     RoundCard(usize),
+    /// The frame of the Ship card of `StagePage::sections[i]`, with its
+    /// buttons; its text and rows go in pieces of their own.
+    ShipCard(usize),
     /// The chevron folding or opening the sheet row of
     /// `StagePage::sections[i]`.
     Fold(usize),
@@ -2494,6 +2516,141 @@ impl Stack {
     /// Its head says which round it is and how it stands, then who made the
     /// fixes and when; open, what it was asked, its fixes with a bar, and what
     /// they changed; its buttons last, from the right.
+    /// The tick boxes of Ship group `k`, and the done steps among them.
+    fn ship_steps(
+        &mut self,
+        k: usize,
+        group: &ShipGroup,
+        ship: &mut ShipSpots,
+        finding_cards: &mut Vec<Rect>,
+    ) {
+        for (j, step) in group.steps.iter().enumerate() {
+            let detail = step.detail.as_ref().map_or(0, |_| SMALL_LINE);
+            let row = self.put(CHECKBOX_ROW + detail, Piece::ShipStep(k, j));
+            if !step.done {
+                ship.rows.push((step.row, row));
+                finding_cards.push(row);
+            }
+        }
+    }
+
+    /// Ship group `k` as a repository's card: its dot, its name in bold and
+    /// how it stands, what it holds muted, then its choice of way, its note,
+    /// its steps, and its buttons at its end.
+    fn ship_card(
+        &mut self,
+        k: usize,
+        group: &ShipGroup,
+        page: &StagePage,
+        buttons: &mut [Option<Rect>],
+        ship: &mut ShipSpots,
+        finding_cards: &mut Vec<Rect>,
+    ) -> Rect {
+        let Some(card) = &group.card else {
+            return Rectangle::new((self.x, self.y).into(), (self.w, 0).into());
+        };
+        let frame_at = self.pieces.len();
+        let (x, w, top) = (self.x, self.w, self.y);
+        self.x += AGENT_PAD;
+        self.w = (w - 2 * AGENT_PAD).max(1);
+        self.y += AGENT_PAD;
+        let (left, width) = (self.x, self.w);
+        let held: Vec<usize> = (card.buttons.iter().copied())
+            .filter(|b| *b < page.buttons.len())
+            .collect();
+        let widths: Vec<i32> = (held.iter())
+            .map(|b| button_width(&page.buttons[*b].label))
+            .collect();
+        // Its buttons at the head's end, when they leave its name room.
+        let name_w = (width_of(&group.head, Font::Body.size()).ceil() as i32 + 1) * 9 / 8;
+        let beside = row_width(&widths) <= width - CHECK_DOT_ROOM - name_w - PAGE_GAP;
+        let head_end = match beside && !held.is_empty() {
+            true => left + width - row_width(&widths) - PAGE_GAP / 2,
+            false => left + width,
+        };
+        self.pieces.push((
+            Rectangle::new(
+                (left, self.y + (BODY_LINE - DOT) / 2).into(),
+                (DOT, DOT).into(),
+            ),
+            Piece::CheckDot(card.dot),
+        ));
+        let name_x = left + CHECK_DOT_ROOM;
+        let name_w = name_w.min((head_end - name_x).max(1));
+        self.pieces.push((
+            Rectangle::new((name_x, self.y).into(), (name_w, BODY_LINE).into()),
+            Piece::Text {
+                text: group.head.clone(),
+                font: Font::Body,
+                ink: Ink::Text,
+                bold: true,
+            },
+        ));
+        let state_x = name_x + name_w + PAGE_GAP / 2;
+        if state_x < head_end && !card.state.text.is_empty() {
+            self.join_next(false);
+            self.pieces.push((
+                Rectangle::new(
+                    (state_x, self.y).into(),
+                    (head_end - state_x, BODY_LINE).into(),
+                ),
+                Piece::Text {
+                    text: card.state.text.clone(),
+                    font: Font::Body,
+                    ink: Ink::Tone(card.state.tone),
+                    bold: false,
+                },
+            ));
+        }
+        if beside {
+            let by = self.y + (BODY_LINE - ROW_BUTTON) / 2;
+            for (b, (bx, _)) in held
+                .iter()
+                .zip(rows_from_right(&widths, left, left + width))
+            {
+                let w = button_width(&page.buttons[*b].label);
+                buttons[*b] = Some(Rectangle::new((bx, by).into(), (w, ROW_BUTTON).into()));
+            }
+        }
+        self.y += BODY_LINE;
+        if !card.meta.is_empty() {
+            (self.x, self.w) = (name_x, (left + width - name_x).max(1));
+            self.text(&card.meta, Font::Small, Ink::Muted, TAIL_LINE);
+            (self.x, self.w) = (left, width);
+        }
+        if let Some(route) = &group.route {
+            self.y += FINDING_GAP;
+            let row = self.put(PICK_TRACK, Piece::ShipRoute(k));
+            let (track, segments) = ship_route_rects(row);
+            ship.routes.push((route.row, track, segments));
+            ship.rows.push((route.row, row));
+            finding_cards.push(row);
+        }
+        if let Some(note) = &group.note {
+            self.y += 4;
+            self.text(note, Font::Small, Ink::Muted, SMALL_LINE);
+        }
+        if !group.steps.is_empty() {
+            self.y += FINDING_GAP;
+            self.ship_steps(k, group, ship, finding_cards);
+        }
+        if !beside && !held.is_empty() {
+            self.y += FINDING_GAP;
+            let placed = rows_from_right(&widths, left, left + width);
+            for (b, (bx, row)) in held.iter().zip(&placed) {
+                let by = self.y + row * (ROW_BUTTON + QUIT_BUTTON_GAP);
+                let w = button_width(&page.buttons[*b].label);
+                buttons[*b] = Some(Rectangle::new((*bx, by).into(), (w, ROW_BUTTON).into()));
+            }
+            self.y += rows_height(&placed);
+        }
+        self.y += AGENT_PAD;
+        (self.x, self.w) = (x, w);
+        let frame = Rectangle::new((x, top).into(), (w, self.y - top).into());
+        self.pieces.insert(frame_at, (frame, Piece::ShipCard(k)));
+        frame
+    }
+
     fn round(
         &mut self,
         k: usize,
@@ -3293,6 +3450,9 @@ fn page_stack(
                 .copied()
                 .collect(),
             PageSection::Round(card) => card.buttons.clone(),
+            PageSection::ShipGroup(ShipGroup {
+                card: Some(card), ..
+            }) => card.buttons.clone(),
             _ => Vec::new(),
         })
         .collect();
@@ -3448,6 +3608,9 @@ fn page_stack(
                 let row = s.put(PICK_TRACK, Piece::MilestoneMode { fresh: *fresh });
                 *milestone_mode = Some(milestone_mode_rects(row));
             }
+            PageSection::ShipGroup(group) if group.card.is_some() => {
+                s.ship_card(k, group, page, buttons, ship, finding_cards);
+            }
             PageSection::ShipGroup(group) => {
                 if group.caption {
                     s.caption(&group.head);
@@ -3466,12 +3629,7 @@ fn page_stack(
                 if let Some(note) = &group.note {
                     s.text(note, Font::Small, Ink::Muted, SMALL_LINE);
                 }
-                for (j, step) in group.steps.iter().enumerate() {
-                    let detail = step.detail.as_ref().map_or(0, |_| SMALL_LINE);
-                    let row = s.put(CHECKBOX_ROW + detail, Piece::ShipStep(k, j));
-                    ship.rows.push((step.row, row));
-                    finding_cards.push(row);
-                }
+                s.ship_steps(k, group, ship, finding_cards);
             }
             PageSection::File { buttons: held, .. } => {
                 let card = s.put(AGENT_PAD * 2 + AGENT_HEAD, Piece::File(k));
@@ -4557,6 +4715,7 @@ fn piece_section(piece: &Piece) -> Option<usize> {
         | Piece::Agent(k)
         | Piece::File(k)
         | Piece::FindingCard(k)
+        | Piece::ShipCard(k)
         | Piece::Fold(k)
         | Piece::CardField(k) => Some(*k),
         _ => None,
@@ -4572,6 +4731,12 @@ fn piece_buttons(view: &FeatureTabView, piece: &Piece) -> Vec<usize> {
         | (Piece::Agent(_), Some(PageSection::Agent { buttons, .. }))
         | (Piece::File(_), Some(PageSection::File { buttons, .. })) => buttons.clone(),
         (Piece::FindingCard(_), Some(PageSection::Finding(card))) => card.buttons.clone(),
+        (
+            Piece::ShipCard(_),
+            Some(PageSection::ShipGroup(ShipGroup {
+                card: Some(card), ..
+            })),
+        ) => card.buttons.clone(),
         _ => Vec::new(),
     }
 }
@@ -6094,16 +6259,29 @@ impl Painter {
                 let Some(step) = group.steps.get(*j) else {
                     return;
                 };
-                let hovered = view.hover == Some(FeatureTabHit::ShipRow(step.row));
-                let selected = group.selected == Some(step.row);
+                let hovered = !step.done && view.hover == Some(FeatureTabHit::ShipRow(step.row));
+                let selected = !step.done && group.selected == Some(step.row);
                 let lit = if hovered { 1.0 } else { 0.0 };
                 self.row_highlight(c, rect, (selected, lit), scale, p);
                 let tick = Rectangle::new(
                     (rect.loc.x + SHIP_STEP_INSET, rect.loc.y).into(),
                     (CHECKBOX_SIZE, CHECKBOX_ROW).into(),
                 );
-                let state = if step.ticked { Check::On } else { Check::Off };
-                self.checkbox(c, tick, state, hovered, scale, p);
+                if step.done {
+                    // Where the tick box would be, the size of a check's dot.
+                    let dot = Rectangle::new(
+                        (
+                            tick.loc.x + (CHECKBOX_SIZE - DOT) / 2,
+                            tick.loc.y + (CHECKBOX_ROW - DOT) / 2,
+                        )
+                            .into(),
+                        (DOT, DOT).into(),
+                    );
+                    status_dot(c, dot, Dot::Done, scale, p);
+                } else {
+                    let state = if step.ticked { Check::On } else { Check::Off };
+                    self.checkbox(c, tick, state, hovered, scale, p);
+                }
                 let text_x = tick.loc.x + CHECKBOX_SIZE + CHECKBOX_GAP;
                 let text_w = (rect.loc.x + rect.size.w - text_x - SHIP_STEP_INSET).max(1);
                 let label =
@@ -6380,6 +6558,20 @@ impl Painter {
                     let high = (h - 2.0 * inset).max(0.0);
                     c.rounded(x + edge, y + inset, bar, high, bar / 2.0, colour);
                 }
+                for &i in &card.buttons {
+                    if let Some(r) = l.page_buttons.get(i).copied().flatten() {
+                        self.page_button(c, view, i, at(r), scale, p);
+                    }
+                }
+            }
+            Piece::ShipCard(k) => {
+                let Some(PageSection::ShipGroup(ShipGroup {
+                    card: Some(card), ..
+                })) = view.page.sections.get(*k)
+                else {
+                    return;
+                };
+                card_frame(c, rect, scale, p);
                 for &i in &card.buttons {
                     if let Some(r) = l.page_buttons.get(i).copied().flatten() {
                         self.page_button(c, view, i, at(r), scale, p);

@@ -33,7 +33,7 @@ use std::{
 };
 
 use super::{
-    Feature, PerProject, Pr, Repo, RepoPlan, Route, ShipMode, ShipStep, Stage, Status,
+    Feature, PerProject, Pr, Repo, RepoPlan, Route, ShipDone, ShipMode, ShipStep, Stage, Status,
     hook::{self, Guard},
     layout::{git, merged_into_base, shown},
     page,
@@ -112,6 +112,11 @@ pub struct RepoCheck {
     pub no_origin: Option<String>,
     /// Why it can't merge into its base in its main worktree, if so.
     pub no_merge: Option<String>,
+    /// Its branch reads as merged into its base already: by a squash of
+    /// the feature's, or its pull request merged on GitHub.
+    pub merged: bool,
+    /// The commit its worktree is on, if read.
+    pub head: Option<String>,
 }
 
 impl RepoCheck {
@@ -135,6 +140,24 @@ pub struct Planned {
     pub blockers: Vec<String>,
     /// No step is ticked: shipping would do nothing.
     pub nothing: bool,
+    /// Steps are ticked, but every one of them ran already, on the code
+    /// as it is now: there is nothing left to run.
+    pub all_done: bool,
+}
+
+/// Whether `step` of `repo` ran already and needn't again: a push only while
+/// the branch is where it was pushed from, a squash only while it reads as
+/// merged.
+pub fn step_done(feature: &Feature, repo: &RepoCheck, step: ShipStep) -> Option<super::ShipDone> {
+    let done = feature.ship_done(&repo.key, step)?;
+    let holds = match step {
+        ShipStep::Push | ShipStep::PushBranch => {
+            done.sha.is_none() || done.sha.as_deref() == repo.head.as_deref()
+        }
+        ShipStep::Merge => repo.merged,
+        ShipStep::OpenPr | ShipStep::PushBase => true,
+    };
+    holds.then_some(done)
 }
 
 /// What `repo` of `feature` does, by the page's ticks.
@@ -161,8 +184,28 @@ pub fn plan_actions(feature: &Feature, check: &ShipCheck) -> Planned {
     let mut through_origin = Vec::new();
     let mut squashes = Vec::new();
     let mut prs = 0;
+    let mut fresh = 0;
+    let mut new_prs = 0;
     for (repo, plan) in &plans {
         for step in plan.steps() {
+            // What ran stays: only what is left runs. A pull request kept
+            // open still counts for linking the others to it.
+            if let Some(done) = step_done(feature, repo, step) {
+                if let (ShipStep::OpenPr, Some(url)) = (step, done.url) {
+                    prs += 1;
+                    through_origin.push(Action::KeepPr {
+                        repo: repo.key.clone(),
+                        url,
+                    });
+                }
+                continue;
+            }
+            // Merged, only its base is left to push, once its squash ran.
+            let squashed = feature.ship_done(&repo.key, ShipStep::Merge).is_some();
+            if repo.merged && !(step == ShipStep::PushBase && squashed) {
+                continue;
+            }
+            fresh += 1;
             if let Some(why) = repo.why_not(step) {
                 let why = why.to_owned();
                 if !out.blockers.contains(&why) {
@@ -177,6 +220,7 @@ pub fn plan_actions(feature: &Feature, check: &ShipCheck) -> Planned {
                 }
                 ShipStep::OpenPr => {
                     prs += 1;
+                    new_prs += 1;
                     let kept = feature.shipping.prs.iter().find(|p| p.repo == key);
                     through_origin.push(match kept {
                         Some(pr) => Action::KeepPr {
@@ -194,8 +238,13 @@ pub fn plan_actions(feature: &Feature, check: &ShipCheck) -> Planned {
     if !out.blockers.is_empty() {
         return out;
     }
+    if fresh == 0 {
+        out.all_done = true;
+        return out;
+    }
     out.actions = through_origin;
-    if prs >= 2 {
+    // Those linked already stay as they are.
+    if prs >= 2 && new_prs > 0 {
         out.actions.push(Action::LinkPrs);
     }
     out.actions.extend(squashes);
@@ -208,7 +257,7 @@ pub fn removable(feature: &Feature, check: &ShipCheck) -> bool {
     !check.unread
         && check.repos.iter().all(|repo| {
             let plan = repo_plan(feature, repo);
-            plan.route == Route::Merge && plan.merge
+            repo.merged || (plan.route == Route::Merge && plan.merge)
         })
 }
 
@@ -237,6 +286,112 @@ pub struct Probe {
     /// The models its stages' agents use, with the run each read was of
     /// (`agents::read_models`).
     pub models: BTreeMap<Stage, (u32, String)>,
+    /// Its pull requests as GitHub has them, by `Repo::key`, when read this
+    /// time (`read_prs`): read less often than the rest.
+    pub prs: Option<BTreeMap<String, Result<PrState, String>>>,
+}
+
+/// A pull request as GitHub has it now.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PrState {
+    pub number: u64,
+    /// `OPEN`, `MERGED` or `CLOSED`.
+    pub state: String,
+    pub draft: bool,
+    /// Its checks: passed, failed and running ones.
+    pub passed: usize,
+    pub failed: usize,
+    pub running: usize,
+    /// `APPROVED`, `CHANGES_REQUESTED`, `REVIEW_REQUIRED`, or empty.
+    pub review: String,
+    /// `MERGEABLE`, `CONFLICTING` or `UNKNOWN`.
+    pub mergeable: String,
+}
+
+impl PrState {
+    /// How it stands in a few words: "open \u{b7} 2 checks passed \u{b7}
+    /// approved".
+    pub fn words(&self) -> String {
+        let mut parts = vec![match self.state.as_str() {
+            "MERGED" => "merged".to_owned(),
+            "CLOSED" => "closed".to_owned(),
+            _ if self.draft => "draft".to_owned(),
+            _ => "open".to_owned(),
+        }];
+        if self.state == "OPEN" {
+            let checks = |n: usize, what: &str| match n {
+                1 => format!("1 check {what}"),
+                n => format!("{n} checks {what}"),
+            };
+            if self.failed > 0 {
+                parts.push(checks(self.failed, "failed"));
+            } else if self.running > 0 {
+                parts.push(checks(self.running, "running"));
+            } else if self.passed > 0 {
+                parts.push(checks(self.passed, "passed"));
+            }
+            match self.review.as_str() {
+                "APPROVED" => parts.push("approved".into()),
+                "CHANGES_REQUESTED" => parts.push("changes asked".into()),
+                "REVIEW_REQUIRED" => parts.push("review required".into()),
+                _ => {}
+            }
+            if self.mergeable == "CONFLICTING" {
+                parts.push("conflicts with its base".into());
+            }
+        }
+        parts.join(" \u{b7} ")
+    }
+}
+
+/// Read `feature`'s pull requests on GitHub with `gh`, by `Repo::key`: those
+/// shipping opened, of repositories whose worktree is still there.
+pub fn read_prs(feature: &Feature, gh: &str) -> BTreeMap<String, Result<PrState, String>> {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct View {
+        #[serde(default)]
+        number: u64,
+        #[serde(default)]
+        state: String,
+        #[serde(default)]
+        is_draft: bool,
+        #[serde(default)]
+        mergeable: String,
+        #[serde(default)]
+        review_decision: Option<String>,
+        #[serde(default)]
+        status_check_rollup: serde_json::Value,
+    }
+    let mut out = BTreeMap::new();
+    for repo in feature.touched().filter(|r| r.worktree.is_dir()) {
+        let Some(url) = (feature.ship_done(&repo.key(), ShipStep::OpenPr)).and_then(|d| d.url)
+        else {
+            continue;
+        };
+        let fields = "number,state,isDraft,mergeable,reviewDecision,statusCheckRollup";
+        let read = run_gh(gh, &repo.worktree, &["pr", "view", &url, "--json", fields])
+            .and_then(|out| serde_json::from_str::<View>(&out).map_err(|e| e.to_string()))
+            .map(|view| {
+                let states = crate::ci::rollup_states(view.status_check_rollup);
+                let count = |s| states.iter().filter(|x| **x == s).count();
+                PrState {
+                    number: view.number,
+                    state: view.state,
+                    draft: view.is_draft,
+                    passed: count(crate::ci::CiState::Passed),
+                    failed: count(crate::ci::CiState::Failed),
+                    running: count(crate::ci::CiState::Running),
+                    review: view.review_decision.unwrap_or_default(),
+                    mergeable: view.mergeable,
+                }
+            });
+        if let Err(why) = &read {
+            tracing::warn!("reading the pull request {url}: {why}");
+        }
+        out.insert(repo.key(), read);
+    }
+    out
 }
 
 /// Each project's ship mode setting, if it has one (`Workflow::ship`).
@@ -271,8 +426,7 @@ pub fn probe(feature: &Feature, modes: &Modes) -> Probe {
         .touched()
         .map(|repo| (repo.key(), guard_of(repo, &branch)))
         .collect();
-    let ship = (feature.status == Status::Open && feature.current() == Some(Stage::Ship))
-        .then(|| check(feature, &reading, modes));
+    let ship = feature.ships().then(|| check(feature, &reading, modes));
     let merged =
         feature.shipping.squash_at.is_some() && reading.as_ref().is_ok_and(|r| merged(feature, r));
     Probe {
@@ -284,6 +438,7 @@ pub fn probe(feature: &Feature, modes: &Modes) -> Probe {
         rounds: page::round_stats(feature),
         docs: page::Docs::default(),
         models: BTreeMap::new(),
+        prs: None,
     }
 }
 
@@ -300,6 +455,7 @@ pub fn probe_seen(feature: &Feature) -> Probe {
         rounds: page::round_stats(feature),
         docs: page::Docs::default(),
         models: BTreeMap::new(),
+        prs: None,
     }
 }
 
@@ -319,6 +475,7 @@ pub fn probe_finished(feature: &Feature) -> Probe {
         rounds: page::round_stats(feature),
         docs: page::Docs::default(),
         models: BTreeMap::new(),
+        prs: None,
     }
 }
 
@@ -405,25 +562,22 @@ fn check(feature: &Feature, reading: &Result<Reading, String>, modes: &Modes) ->
         if commits == 0 {
             out.notes
                 .push(format!("{} has no commits: left out", repo.key()));
-        } else if merged_into_base(repo, &branch) {
-            out.notes.push(format!(
-                "{} is merged into {} already: left out",
-                repo.key(),
-                repo.base
-            ));
-        } else {
-            out.repos.push(RepoCheck {
-                key: repo.key(),
-                base: repo.base.clone(),
-                main: repo.main.clone(),
-                commits,
-                route: Route::of_mode(mode_of(feature, &repo.key(), modes)),
-                no_origin: git(&repo.main, &["remote", "get-url", "origin"])
-                    .is_err()
-                    .then(|| format!("{} has no origin remote", repo.key())),
-                no_merge: squash_blocker(repo, &branch),
-            });
+            continue;
         }
+        let merged = merged_into_base(repo, &branch);
+        out.repos.push(RepoCheck {
+            key: repo.key(),
+            base: repo.base.clone(),
+            main: repo.main.clone(),
+            commits,
+            route: Route::of_mode(mode_of(feature, &repo.key(), modes)),
+            no_origin: git(&repo.main, &["remote", "get-url", "origin"])
+                .is_err()
+                .then(|| format!("{} has no origin remote", repo.key())),
+            no_merge: (!merged).then(|| squash_blocker(repo, &branch)).flatten(),
+            merged,
+            head: reading.heads.get(&repo.key()).cloned(),
+        });
     }
     out
 }
@@ -484,64 +638,136 @@ pub fn open_prs(
     actions: &[Action],
     gh: &str,
 ) -> Result<Vec<Pr>, (String, Vec<Pr>)> {
+    let (ran, failed) = run_steps(feature, actions, gh, super::now());
+    match failed {
+        None => Ok(ran.prs),
+        Some(why) => Err((why, ran.prs)),
+    }
+}
+
+/// What `run_steps` did: each step it ran, and the pull requests it opened or
+/// kept, in order.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Ran {
+    pub done: Vec<ShipDone>,
+    pub prs: Vec<Pr>,
+}
+
+/// Run `actions` of `feature` that go through origin, at unix seconds
+/// `now` (see `open_prs`): what ran, and why it stopped if it did. A
+/// `PushBase` here is of a repository merged already, as no squash of it
+/// comes first; one after a squash waits for it and isn't run here.
+pub fn run_steps(
+    feature: &Feature,
+    actions: &[Action],
+    gh: &str,
+    now: u64,
+) -> (Ran, Option<String>) {
     let branch = feature.branch();
-    let mut prs: Vec<Pr> = Vec::new();
+    let mut ran = Ran::default();
     let repo_of = |key: &str| feature.repo(key);
+    let squashing = |key: &str| {
+        (actions.iter()).any(|a| matches!(a, Action::Squash { repo, .. } if repo == key))
+    };
+    let done = |repo: &str, step, sha: Option<String>, url: Option<String>| ShipDone {
+        at: now,
+        repo: repo.to_owned(),
+        step,
+        sha,
+        url,
+    };
     for action in actions {
-        let fail = |why: String, prs: &Vec<Pr>| Err((why, prs.clone()));
+        let missing = || {
+            format!(
+                "{} has no repository {}",
+                feature.title,
+                action_repo(action)
+            )
+        };
         match action {
             Action::Push { repo } => {
                 let Some(r) = repo_of(repo) else {
-                    return fail(format!("{} has no repository {repo}", feature.title), &prs);
+                    return (ran, Some(missing()));
                 };
-                if let Err(why) = push(r, &branch) {
-                    return fail(format!("Couldn't push {branch} of {repo}: {why}"), &prs);
+                match push(r, &branch) {
+                    Ok(sha) => ran.done.push(done(repo, ShipStep::Push, Some(sha), None)),
+                    Err(why) => {
+                        return (
+                            ran,
+                            Some(format!("Couldn't push {branch} of {repo}: {why}")),
+                        );
+                    }
                 }
             }
-            Action::KeepPr { repo, url } => prs.push(Pr {
+            Action::KeepPr { repo, url } => ran.prs.push(Pr {
                 repo: repo.clone(),
                 url: url.clone(),
             }),
             Action::OpenPr { repo, base } => {
                 let Some(r) = repo_of(repo) else {
-                    return fail(format!("{} has no repository {repo}", feature.title), &prs);
+                    return (ran, Some(missing()));
                 };
                 match open_pr(feature, r, base, &branch, gh) {
-                    Ok(url) => prs.push(Pr {
-                        repo: repo.clone(),
-                        url,
-                    }),
+                    Ok(url) => {
+                        ran.done
+                            .push(done(repo, ShipStep::OpenPr, None, Some(url.clone())));
+                        ran.prs.push(Pr {
+                            repo: repo.clone(),
+                            url,
+                        });
+                    }
                     Err(why) => {
-                        return fail(
-                            format!("Couldn't open a pull request of {repo}: {why}"),
-                            &prs,
-                        );
+                        let why = format!("Couldn't open a pull request of {repo}: {why}");
+                        return (ran, Some(why));
                     }
                 }
             }
             Action::LinkPrs => {
-                if prs.len() < 2 {
+                if ran.prs.len() < 2 {
                     continue;
                 }
-                for pr in &prs {
+                for pr in &ran.prs {
                     let Some(r) = repo_of(&pr.repo) else { continue };
                     let mut body = format!("{}\n\nThe others:\n", pr_body(feature));
-                    for other in prs.iter().filter(|o| o.url != pr.url) {
+                    for other in ran.prs.iter().filter(|o| o.url != pr.url) {
                         body.push_str(&format!("- {}: {}\n", other.repo, other.url));
                     }
                     let args = ["pr", "edit", pr.url.as_str(), "--body", body.as_str()];
                     if let Err(why) = run_gh(gh, &r.worktree, &args) {
-                        return fail(
-                            format!("Couldn't link the pull request of {}: {why}", pr.repo),
-                            &prs,
-                        );
+                        let why = format!("Couldn't link the pull request of {}: {why}", pr.repo);
+                        return (ran, Some(why));
+                    }
+                }
+            }
+            Action::PushBase { repo, base } if !squashing(repo) => {
+                let Some(r) = repo_of(repo) else {
+                    return (ran, Some(missing()));
+                };
+                match push_base(r) {
+                    Ok(sha) => ran
+                        .done
+                        .push(done(repo, ShipStep::PushBase, Some(sha), None)),
+                    Err(why) => {
+                        return (ran, Some(format!("Couldn't push {base} of {repo}: {why}")));
                     }
                 }
             }
             Action::Squash { .. } | Action::PushBase { .. } => {}
         }
     }
-    Ok(prs)
+    (ran, None)
+}
+
+/// The repository `action` acts on, or "" for one on all.
+fn action_repo(action: &Action) -> &str {
+    match action {
+        Action::Push { repo }
+        | Action::OpenPr { repo, .. }
+        | Action::KeepPr { repo, .. }
+        | Action::Squash { repo, .. }
+        | Action::PushBase { repo, .. } => repo,
+        Action::LinkPrs => "",
+    }
 }
 
 /// The body a feature's pull request starts with.
@@ -550,16 +776,17 @@ fn pr_body(feature: &Feature) -> String {
 }
 
 /// Push `branch` of `repo` to origin with its upstream, allowed for its
-/// HEAD alone; guarded again after.
-fn push(repo: &Repo, branch: &str) -> Result<(), String> {
+/// HEAD alone; guarded again after. The commit pushed.
+fn push(repo: &Repo, branch: &str) -> Result<String, String> {
     let head = git(&repo.worktree, &["rev-parse", "HEAD"])?;
-    hook::allow(&repo.main, branch, head.trim())?;
+    let head = head.trim().to_owned();
+    hook::allow(&repo.main, branch, &head)?;
     let pushed = git_ops::push(&repo.worktree, Some("origin"), false);
     let guarded = hook::guard(&repo.main, branch);
     if let Err(err) = &guarded {
         tracing::warn!("guarding {branch} of {} again: {err}", repo.key());
     }
-    pushed.map(|_| ()).map_err(|failed| push_why(&failed))
+    pushed.map(|_| head).map_err(|failed| push_why(&failed))
 }
 
 /// One line on why a push failed: git's own last line only says "failed
@@ -698,8 +925,8 @@ fn run_gh(gh: &str, dir: &Path, args: &[&str]) -> Result<String, String> {
 
 /// Push the base of `repo` to origin from its main worktree, which a squash
 /// left on it, unless the user went elsewhere since: then that is what would
-/// go. What stops it, in a line.
-pub fn push_base(repo: &Repo) -> Result<(), String> {
+/// go. The commit pushed, or what stops it, in a line.
+pub fn push_base(repo: &Repo) -> Result<String, String> {
     let on = git(&repo.main, &["symbolic-ref", "-q", "--short", "HEAD"])
         .map(|b| b.trim().to_owned())
         .unwrap_or_default();
@@ -711,8 +938,9 @@ pub fn push_base(repo: &Repo) -> Result<(), String> {
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
     )?;
     let _turn = git_ops::Turn::take(Path::new(common.trim()), "the push");
+    let head = git(&repo.main, &["rev-parse", "HEAD"])?.trim().to_owned();
     git_ops::push(&repo.main, Some("origin"), false)
-        .map(|_| ())
+        .map(|_| head)
         .map_err(|failed| push_why(&failed))
 }
 
@@ -1296,7 +1524,7 @@ esac
     }
 
     #[test]
-    fn a_branch_merged_already_is_left_out() {
+    fn a_branch_merged_already_has_nothing_left_to_run() {
         let t = Temp::new();
         let mut f = feature_over(&t, &["api"], &[]);
         commit(&wt(&f, "api"), "a", "change");
@@ -1305,10 +1533,125 @@ esac
         run(&main, &["merge", "-q", "--squash", "feature/f"]);
         run(&main, &["commit", "-q", "-m", "by hand"]);
         let check = probe(&f, &Modes::default()).ship.unwrap();
-        assert!(check.repos.is_empty());
-        assert_eq!(check.notes, ["api is merged into main already: left out"]);
-        assert!(plan_actions(&f, &check).nothing);
+        assert!(check.repos[0].merged);
+        assert!(check.repos[0].no_merge.is_none());
+        assert!(check.notes.is_empty());
+        let planned = plan_actions(&f, &check);
+        assert!(planned.all_done && !planned.nothing);
+        assert!(planned.actions.is_empty());
         assert!(removable(&f, &check), "nothing is lost");
+    }
+
+    /// What ran is kept, and a later ship leaves it out: a push stays done
+    /// while the branch is where it went from.
+    #[test]
+    fn what_ran_is_left_out_until_the_branch_moves() {
+        let t = Temp::new();
+        let mut f = feature_over(&t, &["api"], &[]);
+        origins(&t, &f);
+        commit(&wt(&f, "api"), "a1", "api change");
+        mark_all(&mut f);
+        let gh = fake_gh(&t);
+        let modes = Modes::all(Some(ShipMode::Pr));
+        // Only the push ticked: the pull request comes later.
+        let check = probe(&f, &modes).ship.unwrap();
+        f.ship_plan
+            .repos
+            .insert("api".into(), RepoPlan::new(Route::Pr));
+        f.ship_plan
+            .repos
+            .get_mut("api")
+            .unwrap()
+            .toggle(ShipStep::OpenPr);
+        let planned = plan_actions(&f, &check);
+        assert_eq!(planned.actions, [Action::Push { repo: "api".into() }]);
+        let (ran, failed) = run_steps(&f, &planned.actions, &gh, 7);
+        assert_eq!(failed, None);
+        let head = run(&wt(&f, "api"), &["rev-parse", "HEAD"]);
+        assert_eq!(ran.done.len(), 1);
+        assert_eq!(ran.done[0].sha.as_deref(), Some(head.trim()));
+        assert_eq!(ran.done[0].at, 7);
+        for done in ran.done {
+            f.ship_ran(done);
+        }
+        f.tick(8, "gerdr", None);
+        assert!(f.ships_more());
+
+        // Shipped, the push ran: nothing is left until more is ticked.
+        let check = probe(&f, &modes)
+            .ship
+            .expect("a shipped feature is checked");
+        let planned = plan_actions(&f, &check);
+        assert!(planned.all_done, "{planned:?}");
+        f.ship_plan
+            .repos
+            .get_mut("api")
+            .unwrap()
+            .toggle(ShipStep::OpenPr);
+        let planned = plan_actions(&f, &check);
+        assert_eq!(
+            planned.actions,
+            [Action::OpenPr {
+                repo: "api".into(),
+                base: "main".into()
+            }]
+        );
+
+        // The branch moved: the push is to run again, once the code is
+        // gone over again.
+        commit(&wt(&f, "api"), "a2", "more");
+        let check = probe(&f, &modes).ship.unwrap();
+        assert!(step_done(&f, &check.repos[0], ShipStep::Push).is_none());
+        assert!(step_done(&f, &check.repos[0], ShipStep::PushBranch).is_none());
+        let planned = plan_actions(&f, &check);
+        assert!(
+            (planned.blockers.iter()).any(|b| b.starts_with("Code changed since")),
+            "{planned:?}"
+        );
+    }
+
+    /// A record from before the log was kept reads as one.
+    #[test]
+    fn an_old_record_reads_as_a_log() {
+        let t = Temp::new();
+        let mut f = feature_over(&t, &["api", "web"], &[]);
+        f.shipping.pushed = vec!["api".into()];
+        f.shipping.prs = vec![Pr {
+            repo: "api".into(),
+            url: "https://github.com/o/api/pull/3".into(),
+        }];
+        f.shipping.squash_at = Some(5);
+        f.shipping.squash_repos = vec!["web".into()];
+        f.shipping.push_base = vec!["web".into()];
+        // Not merged yet: the squash isn't in it.
+        let steps: Vec<ShipStep> = f.ship_log().iter().map(|d| d.step).collect();
+        assert_eq!(steps, [ShipStep::Push, ShipStep::OpenPr]);
+        assert!(f.squash_going());
+        while f.current().is_some() {
+            f.tick(9, "gerdr", None);
+        }
+        let steps: Vec<ShipStep> = f.ship_log().iter().map(|d| d.step).collect();
+        assert_eq!(
+            steps,
+            [
+                ShipStep::Push,
+                ShipStep::OpenPr,
+                ShipStep::Merge,
+                ShipStep::PushBase
+            ]
+        );
+        assert!(f.ship_log().iter().all(|d| d.at == 9));
+        assert!(!f.squash_going(), "merged when Ship was done");
+        assert!(f.ship_done("api", ShipStep::PushBranch).is_some());
+        // A step that runs now keeps those before it.
+        f.ship_ran(ShipDone {
+            at: 10,
+            repo: "web".into(),
+            step: ShipStep::Push,
+            sha: None,
+            url: None,
+        });
+        assert_eq!(f.shipping.steps.len(), 5);
     }
 
     #[test]

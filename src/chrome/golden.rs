@@ -3569,7 +3569,7 @@ fn feature_tab_ship_blocked() -> super::FeatureTabView {
                     tab_line("web is 3 commits behind dev", CheckTone::Blocker),
                 ],
             },
-            PageSection::ShipGroup(ship_group(
+            PageSection::ShipGroup(ship_blocked(ship_group(
                 "api \u{b7} 4 commits \u{b7} +120 \u{2212}8 \u{b7} into main",
                 1,
                 0,
@@ -3584,14 +3584,15 @@ fn feature_tab_ship_blocked() -> super::FeatureTabView {
                     ),
                     ship_row(3, "Push main to origin", None, false),
                 ],
-            )),
+            ))),
             PageSection::ShipGroup(ship_afterwards(4, false)),
         ],
     };
     view
 }
 
-/// A group of the Ship page: `row` its choice's row, `on` its way, if any.
+/// A repository's card on the Ship page, `head` its name then what it
+/// holds: `row` its choice's row, `on` its way, if any.
 fn ship_group(
     head: &str,
     on: usize,
@@ -3599,13 +3600,48 @@ fn ship_group(
     note: Option<&str>,
     steps: Vec<super::ShipStepRow>,
 ) -> super::ShipGroup {
+    use super::{CheckTone, Dot};
+    let (name, meta) = head.split_once(" \u{b7} ").unwrap_or((head, ""));
+    let left = steps.iter().filter(|s| s.ticked && !s.done).count();
+    let state = match left {
+        0 => tab_line("stays as it is", CheckTone::Note),
+        1 => tab_line("1 step to run", CheckTone::Note),
+        n => tab_line(&format!("{n} steps to run"), CheckTone::Note),
+    };
     super::ShipGroup {
-        head: head.into(),
+        head: name.into(),
         caption: false,
+        card: Some(super::ShipCard {
+            dot: Dot::Idle,
+            state,
+            meta: meta.into(),
+            buttons: Vec::new(),
+        }),
         route: Some(super::ShipRouteRow { row, on }),
         note: note.map(str::to_owned),
         steps,
         selected: None,
+    }
+}
+
+/// `group` held up by a step that can't run.
+fn ship_blocked(mut group: super::ShipGroup) -> super::ShipGroup {
+    if let Some(card) = group.card.as_mut() {
+        card.dot = super::Dot::Blocked;
+        card.state = tab_line("can't run yet", super::CheckTone::Blocker);
+    }
+    group
+}
+
+/// A step of a Ship card that ran, `when` it did.
+fn ship_ran(label: &str, when: &str) -> super::ShipStepRow {
+    super::ShipStepRow {
+        row: 0,
+        label: label.into(),
+        detail: Some(tab_line(when, super::CheckTone::Note)),
+        ticked: true,
+        off: false,
+        done: true,
     }
 }
 
@@ -3628,6 +3664,7 @@ fn ship_row(
         detail: detail.map(|(text, blocks)| tab_line(text, tone(blocks))),
         ticked,
         off: detail.is_some_and(|(_, blocks)| blocks),
+        done: false,
     }
 }
 
@@ -3643,6 +3680,7 @@ fn ship_afterwards(row: usize, removable: bool) -> super::ShipGroup {
     super::ShipGroup {
         head: "Afterwards".into(),
         caption: true,
+        card: None,
         route: None,
         note: None,
         steps: vec![ship_row(row, "Close the workspace", None, true), remove],
@@ -3761,6 +3799,90 @@ fn feature_tab_ship_finish() -> super::FeatureTabView {
         ],
     };
     view.hover = Some(super::FeatureTabHit::ShipRow(1));
+    view
+}
+
+/// A shipped feature that can ship more: api's pull request open, web
+/// merged with its base yet to push, and what ran in the Ship log.
+fn feature_tab_ship_live() -> super::FeatureTabView {
+    use super::{ButtonStyle, CheckTone, Dot, NodeMark, PageButton, PageSection, StagePage};
+    use crate::feature::Stage;
+    let mut view = feature_tab();
+    at_stage(&mut view, 8, NodeMark::Done, "2h ago");
+    let mut api = ship_group(
+        "api \u{b7} 12 commits \u{b7} +420 \u{2212}80 \u{b7} into main",
+        0,
+        0,
+        None,
+        vec![
+            ship_ran(
+                "Pushed feature/bulk-export to origin",
+                "2h ago \u{b7} 3f9c2a1",
+            ),
+            ship_ran(
+                "Opened a pull request into main",
+                "2h ago \u{b7} api/pull/10",
+            ),
+        ],
+    );
+    let card = api.card.as_mut().unwrap();
+    card.dot = Dot::Done;
+    card.state = tab_line("pull request open", CheckTone::Ready);
+    card.buttons = vec![1];
+    let mut web = ship_group(
+        "web \u{b7} 3 commits \u{b7} +40 \u{2212}2 \u{b7} into dev",
+        1,
+        0,
+        None,
+        vec![
+            ship_ran("Merged into dev", "2h ago"),
+            ship_row(1, "Push dev to origin", None, true),
+        ],
+    );
+    web.route = None;
+    web.card.as_mut().unwrap().state = tab_line("merged into dev: push it", CheckTone::Note);
+    web.selected = Some(1);
+    view.page = StagePage {
+        title: "Ship".into(),
+        about: Stage::Ship.about().into(),
+        status: Some(tab_line("Done 2h ago by gerdr", CheckTone::Ready)),
+        buttons: vec![
+            PageButton {
+                label: "Ship 1 step\u{2026}".into(),
+                style: ButtonStyle::Primary,
+            },
+            PageButton {
+                label: "Open PR".into(),
+                style: ButtonStyle::Plain,
+            },
+            PageButton {
+                label: "Reopen".into(),
+                style: ButtonStyle::Plain,
+            },
+        ],
+        sections: vec![
+            PageSection::Lines {
+                label: "Ship check".into(),
+                lines: vec![tab_line("Shipped: 1 step ticked to run", CheckTone::Ready)],
+            },
+            PageSection::ShipGroup(api),
+            PageSection::ShipGroup(web),
+            PageSection::Lines {
+                label: "Ship log".into(),
+                lines: vec![
+                    tab_line("2h ago \u{b7} web: squashed into dev", CheckTone::Note),
+                    tab_line(
+                        "2h ago \u{b7} api: opened a pull request \u{b7} api/pull/10",
+                        CheckTone::Note,
+                    ),
+                    tab_line(
+                        "2h ago \u{b7} api: pushed feature/bulk-export \u{b7} 3f9c2a1",
+                        CheckTone::Note,
+                    ),
+                ],
+            },
+        ],
+    };
     view
 }
 
@@ -5202,7 +5324,7 @@ fn round_card(
 }
 
 /// The feature tab's fixtures, by name.
-fn feature_tabs() -> [(&'static str, super::FeatureTabView); 45] {
+fn feature_tabs() -> [(&'static str, super::FeatureTabView); 46] {
     [
         ("tab_build", feature_tab()),
         ("tab_verify_fixes", feature_tab_verify_fixes()),
@@ -5214,6 +5336,7 @@ fn feature_tabs() -> [(&'static str, super::FeatureTabView); 45] {
         ("tab_ship_blocked", feature_tab_ship_blocked()),
         ("tab_ship_routes", feature_tab_ship_routes()),
         ("tab_ship_finish", feature_tab_ship_finish()),
+        ("tab_ship_live", feature_tab_ship_live()),
         ("tab_done", feature_tab_done()),
         ("tab_later", feature_tab_later()),
         ("tab_review_page", feature_tab_review_page()),
@@ -5262,7 +5385,7 @@ fn feature_tabs() -> [(&'static str, super::FeatureTabView); 45] {
 }
 
 /// Each fixture at the width it shows best at, and Build at all three.
-const TAB_SURFACES: [(&str, i32); 57] = [
+const TAB_SURFACES: [(&str, i32); 59] = [
     ("tab_build", 860),
     ("tab_build", 1180),
     ("tab_build", 1920),
@@ -5320,9 +5443,11 @@ const TAB_SURFACES: [(&str, i32); 57] = [
     ("tab_manual_rounds", 860),
     ("tab_manual_comment", 860),
     ("tab_manual_hand_back", 1180),
+    ("tab_ship_live", 1180),
+    ("tab_ship_live", 860),
 ];
 
-const FEATURE_TAB: [&str; 57] = [
+const FEATURE_TAB: [&str; 59] = [
     "tab_build_860",
     "tab_build_1180",
     "tab_build_1920",
@@ -5380,10 +5505,12 @@ const FEATURE_TAB: [&str; 57] = [
     "tab_manual_rounds_860",
     "tab_manual_comment_860",
     "tab_manual_hand_back_1180",
+    "tab_ship_live_1180",
+    "tab_ship_live_860",
 ];
 
 /// The recorded hashes of `FEATURE_TAB`, per case in `CASES`.
-const GOLDEN_FEATURE_TAB: [[u64; 57]; 4] = [
+const GOLDEN_FEATURE_TAB: [[u64; 59]; 4] = [
     // Dark at 1
     [
         0xb47edcf3deebfe55, // tab_build_860
@@ -5393,10 +5520,10 @@ const GOLDEN_FEATURE_TAB: [[u64; 57]; 4] = [
         0xe5c6b54fe50866d8, // tab_verify_failed_1920
         0x182a16a4819b681d, // tab_verify_running_1180
         0x82bb7f6171efd999, // tab_fix_plan_860
-        0x4712fed1398c3dd3, // tab_ship_blocked_1180
-        0x4a220ca15811f7f8, // tab_ship_routes_1180
-        0x55350a02ac657a44, // tab_ship_routes_860
-        0xad0003676bd9219f, // tab_ship_finish_1180
+        0xcba33f7cc08d8eb1, // tab_ship_blocked_1180
+        0xd5b4abfb64205d75, // tab_ship_routes_1180
+        0x70b954b5b486954d, // tab_ship_routes_860
+        0xa578b0f4a8f1b12e, // tab_ship_finish_1180
         0x426ec15d8a3d8d53, // tab_done_1920
         0xcc415c3a7a99a7ff, // tab_later_860
         0x675574c91a3b9277, // tab_repos_1180
@@ -5443,6 +5570,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 57]; 4] = [
         0x7f9a9d7d6b207fa8, // tab_manual_rounds_860
         0x3922ebde627997d0, // tab_manual_comment_860
         0x67311e08c4f41693, // tab_manual_hand_back_1180
+        0x86d00eead736e200, // tab_ship_live_1180
+        0xf075e8ee732362d3, // tab_ship_live_860
     ],
     // Dark at 2
     [
@@ -5453,10 +5582,10 @@ const GOLDEN_FEATURE_TAB: [[u64; 57]; 4] = [
         0xd1ad4571a21deadf, // tab_verify_failed_1920
         0xe95f15636a93b97f, // tab_verify_running_1180
         0x28fda7ee775f9d64, // tab_fix_plan_860
-        0xea03c7d9de484c16, // tab_ship_blocked_1180
-        0x69eba1d337a4bd66, // tab_ship_routes_1180
-        0x433376927c71c4fe, // tab_ship_routes_860
-        0xbbd5ef5f84b78c62, // tab_ship_finish_1180
+        0x64bbba562475b8c7, // tab_ship_blocked_1180
+        0x564a27492b6c6f2b, // tab_ship_routes_1180
+        0x3f98b6461d0eecbf, // tab_ship_routes_860
+        0x3679a275ae685061, // tab_ship_finish_1180
         0x90a36aaee3d0aa1f, // tab_done_1920
         0x6e2cb877e129791a, // tab_later_860
         0xbadbf0842555969e, // tab_repos_1180
@@ -5503,6 +5632,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 57]; 4] = [
         0x234251df2b1dba25, // tab_manual_rounds_860
         0x60ba07ab36204a0d, // tab_manual_comment_860
         0xa6b58fbbabbe2e65, // tab_manual_hand_back_1180
+        0x19f4c0def7c35702, // tab_ship_live_1180
+        0x2d900bee6596fd15, // tab_ship_live_860
     ],
     // Light at 1
     [
@@ -5513,10 +5644,10 @@ const GOLDEN_FEATURE_TAB: [[u64; 57]; 4] = [
         0x7c07bc659866d87e, // tab_verify_failed_1920
         0x4a8e336fe34d7a13, // tab_verify_running_1180
         0xf0f24acb3a4499c2, // tab_fix_plan_860
-        0xa17c69b449f457c2, // tab_ship_blocked_1180
-        0x117edf0631c78a95, // tab_ship_routes_1180
-        0xa2f2d1b733b884fb, // tab_ship_routes_860
-        0xce65a05e867740c3, // tab_ship_finish_1180
+        0x21a64da6beb2e85c, // tab_ship_blocked_1180
+        0xe28dcf17bde728f8, // tab_ship_routes_1180
+        0x9129f6559b8d3bb2, // tab_ship_routes_860
+        0x43ca5f1ceff3dae5, // tab_ship_finish_1180
         0xb2b62b674cb05405, // tab_done_1920
         0x94793a1c5513c298, // tab_later_860
         0x6042b0328faacb8a, // tab_repos_1180
@@ -5563,6 +5694,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 57]; 4] = [
         0xb5fc3742006aa677, // tab_manual_rounds_860
         0x5abbfbc7357ca166, // tab_manual_comment_860
         0x03cf422d6e9c38a1, // tab_manual_hand_back_1180
+        0xa5ed607a29a6c491, // tab_ship_live_1180
+        0x8d42dfc6a3939dc1, // tab_ship_live_860
     ],
     // Light at 2
     [
@@ -5573,10 +5706,10 @@ const GOLDEN_FEATURE_TAB: [[u64; 57]; 4] = [
         0x834e87d1b77bb685, // tab_verify_failed_1920
         0x82805a0d8a12c5b7, // tab_verify_running_1180
         0x0c25cafde96fceda, // tab_fix_plan_860
-        0x5ae0fcd98a994735, // tab_ship_blocked_1180
-        0x489cd2da7e02d2bb, // tab_ship_routes_1180
-        0xd855e4d620eab058, // tab_ship_routes_860
-        0x6f8069682d015e87, // tab_ship_finish_1180
+        0x932f711ff301e42d, // tab_ship_blocked_1180
+        0xafbcb09d60998def, // tab_ship_routes_1180
+        0x808caa5b6b0c75b8, // tab_ship_routes_860
+        0x5dd3cef84fcbacae, // tab_ship_finish_1180
         0x430e69f233dbc908, // tab_done_1920
         0x973f418bd020aecf, // tab_later_860
         0x064c4879c6222c88, // tab_repos_1180
@@ -5623,6 +5756,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 57]; 4] = [
         0x33196b42cbee501a, // tab_manual_rounds_860
         0x93dc6362a25253e5, // tab_manual_comment_860
         0x8391e750f3735fcf, // tab_manual_hand_back_1180
+        0xf161dc956d2637e2, // tab_ship_live_1180
+        0xc284a689789315b2, // tab_ship_live_860
     ],
 ];
 
