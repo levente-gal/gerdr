@@ -452,6 +452,8 @@ pub struct ShipCard {
     pub state: CheckLine,
     /// Under its name, muted: "12 commits · +420 −80 · into main".
     pub meta: String,
+    /// How its branch stands against its base, in its tone, under `meta`.
+    pub base: Option<CheckLine>,
     /// The indices in `StagePage::buttons` of the buttons it holds, at its
     /// end: its pull request's.
     pub buttons: Vec<usize>,
@@ -2781,6 +2783,11 @@ impl Stack {
         if !card.meta.is_empty() {
             (self.x, self.w) = (name_x, (left + width - name_x).max(1));
             self.text(&card.meta, Font::Small, Ink::Muted, TAIL_LINE);
+            (self.x, self.w) = (left, width);
+        }
+        if let Some(base) = &card.base {
+            (self.x, self.w) = (name_x, (left + width - name_x).max(1));
+            self.text(&base.text, Font::Small, Ink::Tone(base.tone), TAIL_LINE);
             (self.x, self.w) = (left, width);
         }
         if let Some(route) = &group.route {

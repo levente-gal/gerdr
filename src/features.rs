@@ -270,7 +270,12 @@ struct Probed {
     logged: Option<String>,
     /// When its pull requests were last asked of GitHub (`ship::read_prs`).
     prs_at: Option<Instant>,
+    /// When its bases were last fetched from origin (`ship::read_bases`).
+    fetch_at: Option<Instant>,
 }
+
+/// How often a feature's bases are fetched from origin while its page shows.
+const FETCH_EVERY: Duration = Duration::from_secs(300);
 
 /// How often a feature's pull requests are asked of GitHub while its page
 /// shows.
@@ -556,6 +561,12 @@ pub(crate) enum Done {
         /// Each step that ran, however it ended.
         ran: Vec<feature::ShipDone>,
         result: Result<Vec<Pr>, (String, Vec<Pr>)>,
+    },
+    /// Taking a base into a feature's branch ended.
+    BaseUpdated {
+        project: String,
+        slug: String,
+        result: Box<Result<(feature::BaseUpdate, Option<String>), String>>,
     },
     /// Undoing steps shipping ran ended: those undone, and why it stopped.
     ShipUndone {
@@ -1601,6 +1612,8 @@ pub enum PanelOutcome {
     WriteSummary,
     /// Undo step `.1` that shipping ran for repository `.0`, after asking.
     UndoShip(String, ShipStep),
+    /// Take repository `.0`'s base into its branch, `.1`, after asking.
+    UpdateBase(String, feature::UpdateWay),
     /// Open the feature's summary to edit.
     EditSummary,
     /// Reopen this done stage, once it isn't locked (see
@@ -3523,6 +3536,7 @@ fn action_hint(action: &PanelOutcome) -> &'static str {
         PanelOutcome::Ship => "ship\u{2026}",
         PanelOutcome::WriteSummary => "write the summary again",
         PanelOutcome::UndoShip(..) => "undo\u{2026}",
+        PanelOutcome::UpdateBase(..) => "update from the base\u{2026}",
         PanelOutcome::EditSummary => "edit the summary",
         PanelOutcome::Finish => "finish\u{2026}",
         PanelOutcome::Untick(_) => "reopen",
@@ -4094,11 +4108,14 @@ fn ship_sections(
         };
         let pr_state = (probe.and_then(|p| p.prs.as_ref())).and_then(|prs| prs.get(&repo.key));
         let (dot, state_line) = ship_card_state(feature, repo, state.shipping, pr_state);
-        let buttons = (pr.and_then(|pr| pr.url))
-            .and_then(|url| {
-                (actions.iter()).position(|(_, o)| *o == PanelOutcome::OpenPr(url.clone()))
-            })
-            .into_iter()
+        let open = (pr.and_then(|pr| pr.url)).and_then(|url| {
+            (actions.iter()).position(|(_, o)| *o == PanelOutcome::OpenPr(url.clone()))
+        });
+        // Taking its base in, then its pull request.
+        let buttons = (actions.iter().enumerate())
+            .filter(|(_, (_, o))| matches!(o, PanelOutcome::UpdateBase(r, _) if *r == repo.key))
+            .map(|(i, _)| i)
+            .chain(open)
             .collect();
         let route_row = at(&ShipRow::Route {
             repo: repo.key.clone(),
@@ -4111,6 +4128,9 @@ fn ship_sections(
                 dot,
                 state: state_line,
                 meta: ship_repo_meta(repo, stat),
+                base: (!repo.merged)
+                    .then(|| ship_base_line(probe, &repo.key))
+                    .flatten(),
                 buttons,
             }),
             route: route_row.map(|row| chrome::ShipRouteRow {
@@ -6734,6 +6754,14 @@ impl Gerdr {
                 let patch = patch.as_deref();
                 self.feature_shipped(&project, &slug, patch, &squash, pushed, ran, result);
             }
+            Done::BaseUpdated {
+                project,
+                slug,
+                result,
+            } => {
+                self.unbusy(&project, &slug, Job::Ship);
+                self.base_updated(&project, &slug, *result);
+            }
             Done::ShipUndone {
                 project,
                 slug,
@@ -7131,6 +7159,13 @@ impl Gerdr {
         if read_prs {
             probed.prs_at = Some(now);
         }
+        let fetch = feature.ships()
+            && probed
+                .fetch_at
+                .is_none_or(|at| now.duration_since(at) >= FETCH_EVERY);
+        if fetch {
+            probed.fetch_at = Some(now);
+        }
         let data = store::dir(None, project, slug);
         let (project, slug) = (project.to_owned(), slug.to_owned());
         self.feature_work(None, move |_| Done::Probed {
@@ -7143,6 +7178,10 @@ impl Gerdr {
                     docs: feature::page::read_docs(&data).with_comment_fixes(&data, &feature),
                     models: feature::agents::read_models(&feature),
                     prs: read_prs.then(|| ship::read_prs(&feature, "gh")),
+                    bases: match feature.ships() {
+                        true => ship::read_bases(&feature, fetch),
+                        false => BTreeMap::new(),
+                    },
                     ..ship::probe(&feature, &modes)
                 },
             },
@@ -8911,6 +8950,9 @@ impl Gerdr {
             PanelOutcome::OpenPr(url) => self.open_feature_page(&project, &slug, url),
             PanelOutcome::WriteSummary => self.write_ship_summary(&project, &slug, true),
             PanelOutcome::UndoShip(repo, step) => self.ask_undo_ship(&project, &slug, &repo, step),
+            PanelOutcome::UpdateBase(repo, way) => {
+                self.ask_update_base(&project, &slug, &repo, way)
+            }
             PanelOutcome::EditSummary => self.edit_ship_summary(&project, &slug),
             PanelOutcome::PickAgent(stage, name) => {
                 self.pick_stage_agent(&project, &slug, stage, &name);
@@ -12913,11 +12955,69 @@ fn round_plan_actions(
     match ROUND_CARD_STAGES.contains(&stage) {
         true => round_card_actions(feature, stage, probe),
         false if stage == Stage::PlanReview => run_card_actions(feature, probe),
+        false if stage == Stage::Ship => ship_base_actions(feature, probe),
         false if matches!(stage, Stage::Discover | Stage::Plan) => {
             draft_card_actions(feature, stage)
         }
         false => Vec::new(),
     }
+}
+
+/// The buttons of Ship's cards that go by how each branch stands against its
+/// base, as `probe` read it: taking a base in that went on, merged or
+/// rebased.
+fn ship_base_actions(feature: &Feature, probe: Option<&Probe>) -> Vec<(PageButton, PanelOutcome)> {
+    let mut out = Vec::new();
+    if !feature.ships() || feature.squash_going() {
+        return out;
+    }
+    for (key, state) in probe.map(|p| &p.bases).into_iter().flatten() {
+        if !state.clean() {
+            continue;
+        }
+        let base = feature.repo(key).map_or("the base", |r| r.base.as_str());
+        let merge = PageButton {
+            label: format!("Merge {base} in\u{2026}"),
+            style: ButtonStyle::Plain,
+        };
+        let rebase = PageButton {
+            label: "Rebase\u{2026}".to_owned(),
+            style: ButtonStyle::Quiet,
+        };
+        out.push((
+            merge,
+            PanelOutcome::UpdateBase(key.clone(), feature::UpdateWay::Merge),
+        ));
+        out.push((
+            rebase,
+            PanelOutcome::UpdateBase(key.clone(), feature::UpdateWay::Rebase),
+        ));
+    }
+    out
+}
+
+/// How repository `key`'s branch stands against its base, as `probe` read
+/// it, for its card.
+fn ship_base_line(probe: Option<&Probe>, key: &str) -> Option<CheckLine> {
+    let state = probe?.bases.get(key)?;
+    let onto = &state.onto;
+    let new = count_of(state.behind, "new commit", "new commits");
+    Some(match (state.behind, &state.why) {
+        (0, Some(why)) => line(why.clone(), CheckTone::Note),
+        (0, None) => line(format!("up to date with {onto}"), CheckTone::Note),
+        (_, _) if !state.conflicts.is_empty() => line(
+            format!(
+                "{onto} has {new} \u{b7} conflicts in {}",
+                state.conflicts.join(", ")
+            ),
+            CheckTone::Blocker,
+        ),
+        (_, Some(why)) => line(format!("{onto} has {new} \u{b7} {why}"), CheckTone::Note),
+        (_, None) => line(
+            format!("{onto} has {new} \u{b7} merges cleanly"),
+            CheckTone::Note,
+        ),
+    })
 }
 
 /// The buttons of Plan review's run cards of `feature`, by `probe`: what the
@@ -18773,6 +18873,7 @@ pub(crate) mod tests {
             guards: BTreeMap::new(),
             models: BTreeMap::new(),
             prs: None,
+            bases: BTreeMap::new(),
             ship,
             merged: false,
             stats: BTreeMap::new(),
@@ -19474,6 +19575,7 @@ pub(crate) mod tests {
             },
             models: BTreeMap::new(),
             prs: None,
+            bases: BTreeMap::new(),
         }
     }
 

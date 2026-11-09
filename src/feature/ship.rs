@@ -289,6 +289,9 @@ pub struct Probe {
     /// Its pull requests as GitHub has them, by `Repo::key`, when read this
     /// time (`read_prs`): read less often than the rest.
     pub prs: Option<BTreeMap<String, Result<PrState, String>>>,
+    /// How its repositories stand against their bases (`read_bases`), when
+    /// it can still ship.
+    pub bases: BTreeMap<String, BaseState>,
 }
 
 /// A pull request as GitHub has it now.
@@ -439,6 +442,7 @@ pub fn probe(feature: &Feature, modes: &Modes) -> Probe {
         docs: page::Docs::default(),
         models: BTreeMap::new(),
         prs: None,
+        bases: BTreeMap::new(),
     }
 }
 
@@ -456,6 +460,7 @@ pub fn probe_seen(feature: &Feature) -> Probe {
         docs: page::Docs::default(),
         models: BTreeMap::new(),
         prs: None,
+        bases: BTreeMap::new(),
     }
 }
 
@@ -476,6 +481,7 @@ pub fn probe_finished(feature: &Feature) -> Probe {
         docs: page::Docs::default(),
         models: BTreeMap::new(),
         prs: None,
+        bases: BTreeMap::new(),
     }
 }
 
@@ -690,7 +696,7 @@ pub fn run_steps(
                 let Some(r) = repo_of(repo) else {
                     return (ran, Some(missing()));
                 };
-                match push(r, &branch) {
+                match push(r, &branch, feature.rebased_since_push(repo)) {
                     Ok(sha) => ran.done.push(done(repo, ShipStep::Push, Some(sha), None)),
                     Err(why) => {
                         return (
@@ -757,6 +763,126 @@ pub fn run_steps(
         }
     }
     (ran, None)
+}
+
+/// How a repository's branch stands against its base on origin.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BaseState {
+    /// What it is held against: `origin/main`, else the local `main`.
+    pub onto: String,
+    /// The base's commits not in the branch.
+    pub behind: usize,
+    /// The files that conflict taking them in; none when it goes cleanly.
+    pub conflicts: Vec<String>,
+    /// Why it couldn't be told whether it conflicts, or fetched.
+    pub why: Option<String>,
+}
+
+impl BaseState {
+    /// It can take its base in by itself: behind, with no conflict known.
+    pub fn clean(&self) -> bool {
+        self.behind > 0 && self.conflicts.is_empty() && self.why.is_none()
+    }
+}
+
+/// How each of `feature`'s repositories stands against its base, by
+/// `Repo::key`: those with a worktree, not merged. `fetch`: ask origin
+/// for the base first (network: not every read).
+pub fn read_bases(feature: &Feature, fetch: bool) -> BTreeMap<String, BaseState> {
+    let branch = feature.branch();
+    let mut out = BTreeMap::new();
+    for repo in feature.touched().filter(|r| r.worktree.is_dir()) {
+        if merged_into_base(repo, &branch) {
+            continue;
+        }
+        let dir = &repo.worktree;
+        let mut state = BaseState::default();
+        if fetch && let Err(failed) = git_ops::fetch_branch(dir, "origin", &repo.base) {
+            state.why = Some(format!("couldn't fetch {}: {}", repo.base, failed.why));
+        }
+        let remote = format!("origin/{}", repo.base);
+        let has = |r: &str| git(dir, &["rev-parse", "--verify", "-q", r]).is_ok();
+        state.onto = if has(&remote) {
+            remote
+        } else {
+            repo.base.clone()
+        };
+        let range = format!("HEAD..{}", state.onto);
+        state.behind = git(dir, &["rev-list", "--count", &range])
+            .ok()
+            .and_then(|n| n.trim().parse().ok())
+            .unwrap_or(0);
+        if state.behind > 0 {
+            match git_ops::predict_merge(dir, "HEAD", &state.onto) {
+                git_ops::Verdict::Clean | git_ops::Verdict::Unmerged(_) => {}
+                git_ops::Verdict::Conflicts(files) => state.conflicts = files,
+                git_ops::Verdict::Blocked(why) => {
+                    state
+                        .why
+                        .get_or_insert(format!("couldn't tell what conflicts: {why}"));
+                }
+            }
+        }
+        out.insert(repo.key(), state);
+    }
+    out
+}
+
+/// Take `onto` into repository `key`'s branch of `feature`, `way`, in its
+/// worktree: what it was, what it is now, and the commit taken in; the
+/// feature's patch-id after, if it can be read. A merge or rebase that
+/// stops on conflicts is aborted, leaving all as it was.
+pub fn update_from_base(
+    feature: &Feature,
+    key: &str,
+    way: super::UpdateWay,
+    now: u64,
+) -> Result<(super::BaseUpdate, Option<String>), String> {
+    let repo =
+        (feature.repo(key)).ok_or_else(|| format!("{} has no repository {key}", feature.title))?;
+    let dir = &repo.worktree;
+    let status = git(dir, &["status", "--porcelain", "--untracked-files=no"])?;
+    if !status.trim().is_empty() {
+        return Err(format!("{key} has uncommitted changes: commit them first"));
+    }
+    let remote = format!("origin/{}", repo.base);
+    let onto = match git(dir, &["rev-parse", "--verify", "-q", &remote]) {
+        Ok(_) => remote,
+        Err(_) => repo.base.clone(),
+    };
+    let before = git(dir, &["rev-parse", "HEAD"])?.trim().to_owned();
+    let onto_sha = git(dir, &["rev-parse", &onto])?.trim().to_owned();
+    let how = match way {
+        super::UpdateWay::Merge => git_ops::Integrate::Merge,
+        super::UpdateWay::Rebase => git_ops::Integrate::Rebase,
+    };
+    if let Err(failed) = git_ops::integrate(dir, &onto, how) {
+        // Stopped part way: back to where it was.
+        let stopped = match way {
+            super::UpdateWay::Merge => crate::git::InProgress::Merge,
+            super::UpdateWay::Rebase => crate::git::InProgress::Rebase { step: 0, total: 0 },
+        };
+        if let Err(left) = git_ops::abort_op(dir, stopped) {
+            tracing::warn!("aborting the update of {key}: {}", left.why);
+            return Err(format!(
+                "{key}: couldn't take {onto} in: {}; nor stop it: {}",
+                failed.why, left.why
+            ));
+        }
+        return Err(format!("{key}: couldn't take {onto} in: {}", failed.why));
+    }
+    let after = git(dir, &["rev-parse", "HEAD"])?.trim().to_owned();
+    let patch = patch::read(feature).ok().map(|r| r.patch);
+    let update = super::BaseUpdate {
+        at: now,
+        repo: key.to_owned(),
+        way,
+        onto,
+        onto_sha,
+        before,
+        after,
+    };
+    Ok((update, patch))
 }
 
 /// What undoing a step that ran does.
@@ -963,12 +1089,14 @@ pub fn summary_text(feature: &Feature) -> Option<String> {
 }
 
 /// Push `branch` of `repo` to origin with its upstream, allowed for its
-/// HEAD alone; guarded again after. The commit pushed.
-fn push(repo: &Repo, branch: &str) -> Result<String, String> {
+/// HEAD alone; guarded again after. With `lease`, it replaces what origin
+/// has, as long as that is what was last fetched: after a rebase. The commit
+/// pushed.
+fn push(repo: &Repo, branch: &str, lease: bool) -> Result<String, String> {
     let head = git(&repo.worktree, &["rev-parse", "HEAD"])?;
     let head = head.trim().to_owned();
     hook::allow(&repo.main, branch, &head)?;
-    let pushed = git_ops::push(&repo.worktree, Some("origin"), false);
+    let pushed = git_ops::push(&repo.worktree, Some("origin"), lease);
     let guarded = hook::guard(&repo.main, branch);
     if let Err(err) = &guarded {
         tracing::warn!("guarding {branch} of {} again: {err}", repo.key());
@@ -1173,6 +1301,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     use super::*;
+    use crate::feature::UpdateWay;
     use crate::feature::tests::{Temp, commit, feature_over, link_over, run, try_run};
 
     /// Give each of `f`'s repositories a bare origin with main on it.
@@ -1872,6 +2001,80 @@ esac
             undone: None,
         });
         assert!(undo_of(&f, "api", ShipStep::PushBase).is_err());
+    }
+
+    /// A base that moved on reads as behind, and as conflicting where it
+    /// does; taking it in merges it, or leaves all as it was.
+    #[test]
+    fn a_base_that_moved_on_is_read_and_taken_in() {
+        let t = Temp::new();
+        let mut f = feature_over(&t, &["api"], &[]);
+        origins(&t, &f);
+        commit(&wt(&f, "api"), "a1", "api change");
+        mark_all(&mut f);
+        let main = f.repos[0].main.clone();
+        let bases = read_bases(&f, false);
+        assert_eq!(bases["api"].behind, 0);
+        assert!(!bases["api"].clean());
+
+        // The base moves on, elsewhere: fetched, it is behind, cleanly.
+        commit(&main, "m1", "on main");
+        run(&main, &["push", "-q", "origin", "main"]);
+        let bases = read_bases(&f, true);
+        assert_eq!(bases["api"].onto, "origin/main");
+        assert_eq!(bases["api"].behind, 1);
+        assert!(bases["api"].clean(), "{:?}", bases["api"]);
+
+        let (update, patch) = update_from_base(&f, "api", UpdateWay::Merge, 7).unwrap();
+        assert_eq!(update.onto, "origin/main");
+        assert_ne!(update.before, update.after);
+        assert!(patch.is_some());
+        assert_eq!(read_bases(&f, false)["api"].behind, 0);
+
+        // A change to the same file conflicts: read so, and refused as it was.
+        commit(&wt(&f, "api"), "c", "feature side");
+        commit(&main, "c", "base side");
+        run(&main, &["push", "-q", "origin", "main"]);
+        let bases = read_bases(&f, true);
+        assert_eq!(bases["api"].conflicts, ["c"]);
+        let head = run(&wt(&f, "api"), &["rev-parse", "HEAD"]);
+        let why = update_from_base(&f, "api", UpdateWay::Merge, 8).unwrap_err();
+        assert!(
+            why.starts_with("api: couldn't take origin/main in"),
+            "{why}"
+        );
+        assert_eq!(run(&wt(&f, "api"), &["rev-parse", "HEAD"]), head);
+        let status = run(&wt(&f, "api"), &["status", "--porcelain"]);
+        assert!(status.trim().is_empty(), "{status}");
+    }
+
+    /// Updated from its base, a shipped feature is open at Verify again,
+    /// Build's mark on the code as it is now.
+    #[test]
+    fn an_update_goes_back_to_verify() {
+        let t = Temp::new();
+        let mut f = feature_over(&t, &["api"], &[]);
+        commit(&wt(&f, "api"), "a1", "api change");
+        mark_all(&mut f);
+        f.tick(5, "gerdr", None);
+        assert_eq!(f.status, Status::Done);
+        let update = super::super::BaseUpdate {
+            at: 6,
+            repo: "api".into(),
+            way: UpdateWay::Rebase,
+            onto: "origin/main".into(),
+            onto_sha: "abc".into(),
+            before: "1".into(),
+            after: "2".into(),
+        };
+        f.updated_from_base(update, Some("new-patch"), 6);
+        assert_eq!(f.status, Status::Open);
+        assert_eq!(f.current(), Some(Stage::Verify));
+        assert_eq!(f.back_from, Some(Stage::Ship));
+        let build = f.marks.get(&Stage::Build).unwrap();
+        assert_eq!(build.patch.as_deref(), Some("new-patch"));
+        assert_eq!(f.stale("new-patch"), None);
+        assert!(f.rebased_since_push("api"), "a rebase pushes with lease");
     }
 
     /// A record from before the log was kept reads as one.

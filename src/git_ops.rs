@@ -1067,6 +1067,13 @@ pub fn push(dir: &Path, remote: Option<&str>, force_lease: bool) -> OpResult {
     op.done()
 }
 
+/// `fetch <remote> <branch>`: that branch's remote-tracking ref only.
+pub fn fetch_branch(dir: &Path, remote: &str, branch: &str) -> OpResult {
+    let mut op = Op::new(dir);
+    op.net(&["fetch", "--quiet", remote, branch])?;
+    op.done()
+}
+
 /// `fetch --all --prune`.
 pub fn fetch_all(dir: &Path) -> OpResult {
     let mut op = Op::new(dir);

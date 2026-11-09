@@ -214,6 +214,45 @@ pub struct Shipping {
     /// The agent last asked to write its summary (`SUMMARY_FILE`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<SummaryRun>,
+    /// Each time a repository's branch took its base in since it was
+    /// shipped or waited to be, oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub updates: Vec<BaseUpdate>,
+}
+
+/// How a branch takes its base in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum UpdateWay {
+    /// A merge commit on the branch: nothing is rewritten.
+    Merge,
+    /// The branch's commits replayed on the base: pushed again with lease.
+    Rebase,
+}
+
+impl UpdateWay {
+    /// "merged", "rebased onto".
+    pub fn done_word(self) -> &'static str {
+        match self {
+            Self::Merge => "merged",
+            Self::Rebase => "rebased onto",
+        }
+    }
+}
+
+/// A branch updated from its base.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BaseUpdate {
+    pub at: u64,
+    /// The repository's `Repo::key`.
+    pub repo: String,
+    pub way: UpdateWay,
+    /// What it took in: `origin/main`, and the commit that was.
+    pub onto: String,
+    pub onto_sha: String,
+    /// The branch's HEAD before and after.
+    pub before: String,
+    pub after: String,
 }
 
 /// The summary of a feature, in its data dir: the body of its pull requests
@@ -243,6 +282,7 @@ impl Shipping {
             && self.push_base.is_empty()
             && self.steps.is_empty()
             && self.summary.is_none()
+            && self.updates.is_empty()
     }
 }
 
@@ -1201,6 +1241,44 @@ impl Feature {
             self.shipping.steps = self.ship_log();
         }
         self.shipping.steps.push(done);
+    }
+
+    /// Repository `update.repo` took its base in, its code now `patch`'s (if
+    /// read): it goes through Verify again. What stood before Verify moves
+    /// onto that code, since the update changes nothing the feature did;
+    /// Verify and what follows it are to do again, AI review and Code review
+    /// on what changed, Manual test with what was found kept. A shipped
+    /// feature is open again for that.
+    pub fn updated_from_base(&mut self, update: BaseUpdate, patch: Option<&str>, now: u64) {
+        let what = format!(
+            "{}: {} {}",
+            update.repo,
+            update.way.done_word(),
+            update.onto
+        );
+        self.shipping.updates.push(update);
+        if let Some(patch) = patch {
+            for (stage, mark) in &mut self.marks {
+                if stage.bound() && *stage < Stage::Verify {
+                    mark.patch = Some(patch.to_owned());
+                }
+            }
+        }
+        self.untick(Stage::Verify, now);
+        // The rail shows the turn back from Ship.
+        self.back_from = Some(Stage::Ship);
+        self.log(
+            now,
+            format!("Updated from its base ({what}): back to Verify"),
+        );
+    }
+
+    /// Whether repository `repo`'s branch was rebased since it was last
+    /// pushed: the push then replaces what origin has, with lease.
+    pub fn rebased_since_push(&self, repo: &str) -> bool {
+        let pushed = self.ship_done(repo, ShipStep::Push).map_or(0, |d| d.at);
+        (self.shipping.updates.iter())
+            .any(|u| u.repo == repo && u.way == UpdateWay::Rebase && u.at >= pushed)
     }
 
     /// Whether its Ship page can still run steps: Ship is its current

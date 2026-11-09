@@ -155,6 +155,14 @@ pub enum Then {
         repo: String,
         step: crate::feature::ShipStep,
     },
+    /// Take this repository's base into this project's feature's branch
+    /// (see `Gerdr::update_base`).
+    UpdateBase {
+        project: String,
+        slug: String,
+        repo: String,
+        way: crate::feature::UpdateWay,
+    },
 }
 
 /// The confirm dialog's state, while it is open.
@@ -756,6 +764,12 @@ impl Gerdr {
                 repo,
                 step,
             } => self.undo_ship(&project, &slug, &repo, step),
+            Then::UpdateBase {
+                project,
+                slug,
+                repo,
+                way,
+            } => self.update_base(&project, &slug, &repo, way),
             Then::MakeFixes { project, slug } => self.make_fixes_now(&project, &slug),
             Then::DropFixPlan { project, slug } => self.drop_fix_plan(&project, &slug),
             Then::ApproveStage {

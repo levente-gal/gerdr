@@ -3615,6 +3615,7 @@ fn ship_group(
             dot: Dot::Idle,
             state,
             meta: meta.into(),
+            base: None,
             buttons: Vec::new(),
         }),
         route: Some(super::ShipRouteRow { row, on }),
@@ -3964,8 +3965,29 @@ fn feature_tab_ship_live() -> super::FeatureTabView {
 /// `feature_tab_ship_live` with its recap folded away: its cards, their
 /// Undo buttons, and the Ship log in view.
 fn feature_tab_ship_cards() -> super::FeatureTabView {
+    use super::{ButtonStyle, CheckTone, PageButton, PageSection};
     let mut view = feature_tab_ship_live();
-    (view.page.sections).retain(|s| !matches!(s, super::PageSection::Recap(_)));
+    (view.page.sections).retain(|s| !matches!(s, PageSection::Recap(_)));
+    // Its base moved on since the pull request opened.
+    let at = view.page.buttons.len();
+    for (label, style) in [
+        ("Merge main in\u{2026}", ButtonStyle::Plain),
+        ("Rebase\u{2026}", ButtonStyle::Quiet),
+    ] {
+        view.page.buttons.push(PageButton {
+            label: label.into(),
+            style,
+        });
+    }
+    if let Some(PageSection::ShipGroup(api)) = view.page.sections.get_mut(1)
+        && let Some(card) = api.card.as_mut()
+    {
+        card.base = Some(tab_line(
+            "origin/main has 3 new commits \u{b7} merges cleanly",
+            CheckTone::Note,
+        ));
+        card.buttons = vec![at, at + 1, 1];
+    }
     view
 }
 
@@ -5658,7 +5680,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 60]; 4] = [
         0x67311e08c4f41693, // tab_manual_hand_back_1180
         0x3d6752d6c8853c68, // tab_ship_live_1180
         0xb57d60723e2e914c, // tab_ship_live_860
-        0x077ea0199cfb659e, // tab_ship_cards_1180
+        0xe34314fbf0654a68, // tab_ship_cards_1180
     ],
     // Dark at 2
     [
@@ -5721,7 +5743,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 60]; 4] = [
         0xa6b58fbbabbe2e65, // tab_manual_hand_back_1180
         0x8cae3f392a28f277, // tab_ship_live_1180
         0x0714fb103dbedb21, // tab_ship_live_860
-        0x2a33d3b368d97d79, // tab_ship_cards_1180
+        0x9dd4ca4364fd852c, // tab_ship_cards_1180
     ],
     // Light at 1
     [
@@ -5784,7 +5806,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 60]; 4] = [
         0x03cf422d6e9c38a1, // tab_manual_hand_back_1180
         0xe218d2ce70539f23, // tab_ship_live_1180
         0x040c69c1c4ed2725, // tab_ship_live_860
-        0xf0f839c1697ef03c, // tab_ship_cards_1180
+        0xd2b253b0e845b093, // tab_ship_cards_1180
     ],
     // Light at 2
     [
@@ -5847,7 +5869,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 60]; 4] = [
         0x8391e750f3735fcf, // tab_manual_hand_back_1180
         0xa7dbc43951d8b435, // tab_ship_live_1180
         0x230520414df2c684, // tab_ship_live_860
-        0x5d6ef52228deece1, // tab_ship_cards_1180
+        0xc691dd63eb1f75c3, // tab_ship_cards_1180
     ],
 ];
 
