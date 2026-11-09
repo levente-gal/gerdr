@@ -879,7 +879,7 @@ fn share(of: f32) -> String {
 const NONE: &str = "–";
 
 /// How an agent named `agent` (as a run records it) is called here.
-fn agent_name(agent: &str) -> String {
+pub(crate) fn agent_name(agent: &str) -> String {
     match AgentKind::of(agent) {
         AgentKind::Claude => "Claude Code".into(),
         AgentKind::Cursor => "Cursor".into(),

@@ -1277,6 +1277,18 @@ impl Gerdr {
 
     /// Start `stage`'s agent for feature `slug` (`fresh`: a new one even
     /// when its last run's pane is still there).
+    /// The agent that writes `feature`'s summary: the one Build runs, its
+    /// name and command; why none can, if so.
+    pub(crate) fn summary_agent(&self, feature: &Feature) -> Result<(String, String), String> {
+        let workflow = self.projects.project(&feature.project).map(|p| &p.workflow);
+        match stage_pick(feature, Stage::Build, workflow, &self.cli_agents) {
+            Pick::Agent(agent, base) if Flavor::of(&base) != Flavor::T3 => Ok((agent, base)),
+            Pick::Agent(..) => Err("T3 Code can't write it: pick a CLI agent for Build".into()),
+            Pick::NoCli => Err("No coding agent CLI is installed".into()),
+            Pick::Refused(why) => Err(why),
+        }
+    }
+
     pub fn start_stage_agent(&mut self, project: &str, slug: &str, stage: Stage, fresh: bool) {
         if fresh && self.asks_before_fresh(project, slug, stage) {
             return;

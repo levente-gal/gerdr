@@ -414,6 +414,24 @@ pub struct ShipGroup {
     pub selected: Option<usize>,
 }
 
+/// What happened while a feature was made, as Ship's page sums it up.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RecapCard {
+    /// What an agent wrote of it, as paragraphs; empty without one.
+    pub summary: Vec<String>,
+    /// Under the summary, muted: where it comes from, or why there is none.
+    pub summary_note: Option<String>,
+    /// The big numbers, each a value over its caption: ("2d 4h", "made in").
+    pub figures: Vec<(String, String)>,
+    /// A line per stage: its name, then who did it and how it went.
+    pub stages: Vec<(String, String)>,
+    /// How each gate went, in its tone: "AI review: 9 findings, 7 fixed".
+    pub lines: Vec<CheckLine>,
+    /// The indices in `StagePage::buttons` of the buttons it holds, at its
+    /// caption's right.
+    pub buttons: Vec<usize>,
+}
+
 /// What a repository's card on the Ship page says besides its rows.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ShipCard {
@@ -842,6 +860,8 @@ pub enum PageSection {
     MilestoneMode { fresh: bool },
     /// Ship's choice and tick boxes for a repository, or what follows.
     ShipGroup(ShipGroup),
+    /// What happened while the feature was made, on Ship's page.
+    Recap(RecapCard),
     /// A group of Build's list, its `label` ("Build", "Review 1") with "done
     /// of total" and a bar, how it stands if it says (`state`), and each by
     /// name when known (`true` = done; empty until the build log is read).
@@ -1820,6 +1840,8 @@ const MODE_SEGMENTS: [&str; 2] = ["One agent", "Agent per milestone"];
 const SHIP_ROUTES: [&str; 3] = ["Pull request", "Merge only", "Nothing"];
 /// How far a Ship page tick box sits in from its row's left edge.
 const SHIP_STEP_INSET: i32 = 4;
+/// The room between the recap's figure tiles.
+const RECAP_TILE_GAP: i32 = 28;
 const AGENT_RADIUS: f32 = 6.0;
 /// A milestone's row, and the progress bar's height.
 const MILESTONE_ROW: i32 = 22;
@@ -1915,6 +1937,9 @@ pub(super) enum Piece {
     /// The frame of the Ship card of `StagePage::sections[i]`, with its
     /// buttons; its text and rows go in pieces of their own.
     ShipCard(usize),
+    /// The frame of the recap card of `StagePage::sections[i]`, with its
+    /// buttons; its text goes in pieces of its own.
+    RecapCard(usize),
     /// The chevron folding or opening the sheet row of
     /// `StagePage::sections[i]`.
     Fold(usize),
@@ -2516,6 +2541,127 @@ impl Stack {
     /// Its head says which round it is and how it stands, then who made the
     /// fixes and when; open, what it was asked, its fixes with a bar, and what
     /// they changed; its buttons last, from the right.
+    /// Recap card `k`: its caption and buttons, the summary, the figures in
+    /// tiles that wrap, a line per stage, then how the gates went.
+    fn recap(
+        &mut self,
+        k: usize,
+        card: &RecapCard,
+        page: &StagePage,
+        buttons: &mut [Option<Rect>],
+    ) -> Rect {
+        let frame_at = self.pieces.len();
+        let (x, w, top) = (self.x, self.w, self.y);
+        self.x += AGENT_PAD;
+        self.w = (w - 2 * AGENT_PAD).max(1);
+        self.y += AGENT_PAD;
+        let (left, width) = (self.x, self.w);
+        let caption = self.put(CAPTION, Piece::Caption("RECAP".into()));
+        let held: Vec<usize> = (card.buttons.iter().copied())
+            .filter(|b| *b < page.buttons.len())
+            .collect();
+        let widths: Vec<i32> = (held.iter())
+            .map(|b| toolbar_button_width(&page.buttons[*b].label))
+            .collect();
+        let by = caption.loc.y + (CAPTION - ROW_BUTTON) / 2;
+        for (b, (bx, _)) in held
+            .iter()
+            .zip(rows_from_right(&widths, left, left + width))
+        {
+            let w = toolbar_button_width(&page.buttons[*b].label);
+            buttons[*b] = Some(Rectangle::new((bx, by).into(), (w, ROW_BUTTON).into()));
+        }
+        self.y = self.y.max(by + ROW_BUTTON) + 4;
+        for para in &card.summary {
+            self.all_text(para, Font::Body, Ink::Text, false, BODY_LINE);
+            self.y += 4;
+        }
+        if let Some(note) = &card.summary_note {
+            self.text(note, Font::Small, Ink::Muted, SMALL_LINE);
+        }
+        if !card.figures.is_empty() {
+            self.y += FINDING_GAP;
+            // Tiles in rows, as wide as their words.
+            let tile = |(value, label): &(String, String)| {
+                let v = measure_bold(value, Font::Heading.size())
+                    .unwrap_or_else(|| width_of(value, Font::Heading.size()))
+                    .ceil() as i32;
+                let l = width_of(label, Font::Small.size()).ceil() as i32;
+                v.max(l) + RECAP_TILE_GAP
+            };
+            let (mut tx, mut row_top) = (left, self.y);
+            for figure in &card.figures {
+                let tw = tile(figure);
+                if tx > left && tx + tw > left + width {
+                    tx = left;
+                    row_top += TITLE_LINE + SMALL_LINE + 6;
+                }
+                let tw_in = (tw - RECAP_TILE_GAP).min(left + width - tx).max(1);
+                self.pieces.push((
+                    Rectangle::new((tx, row_top).into(), (tw_in, TITLE_LINE).into()),
+                    Piece::Text {
+                        text: figure.0.clone(),
+                        font: Font::Heading,
+                        ink: Ink::Text,
+                        bold: true,
+                    },
+                ));
+                self.pieces.push((
+                    Rectangle::new(
+                        (tx, row_top + TITLE_LINE).into(),
+                        (tw_in, SMALL_LINE).into(),
+                    ),
+                    Piece::Text {
+                        text: figure.1.clone(),
+                        font: Font::Small,
+                        ink: Ink::Muted,
+                        bold: false,
+                    },
+                ));
+                tx += tw;
+            }
+            self.y = row_top + TITLE_LINE + SMALL_LINE;
+        }
+        if !card.stages.is_empty() {
+            self.y += FINDING_GAP;
+            // The stages' names in a column as wide as the widest.
+            let name_w = (card.stages.iter())
+                .map(|(name, _)| (width_of(name, Font::Body.size()).ceil() as i32 + 1) * 9 / 8)
+                .max()
+                .unwrap_or(0)
+                .min(width / 3);
+            for (name, said) in &card.stages {
+                self.pieces.push((
+                    Rectangle::new((left, self.y).into(), (name_w, BODY_LINE).into()),
+                    Piece::Text {
+                        text: name.clone(),
+                        font: Font::Body,
+                        ink: Ink::Text,
+                        bold: true,
+                    },
+                ));
+                let said_x = left + name_w + PAGE_GAP / 2;
+                (self.x, self.w) = (said_x, (left + width - said_x).max(1));
+                self.join_next(false);
+                let start = self.y;
+                self.text(said, Font::Body, Ink::Muted, BODY_LINE);
+                self.y = self.y.max(start + BODY_LINE);
+                (self.x, self.w) = (left, width);
+            }
+        }
+        if !card.lines.is_empty() {
+            self.y += FINDING_GAP;
+            for line in &card.lines {
+                self.text(&line.text, Font::Body, Ink::Tone(line.tone), BODY_LINE);
+            }
+        }
+        self.y += AGENT_PAD;
+        (self.x, self.w) = (x, w);
+        let frame = Rectangle::new((x, top).into(), (w, self.y - top).into());
+        self.pieces.insert(frame_at, (frame, Piece::RecapCard(k)));
+        frame
+    }
+
     /// The tick boxes of Ship group `k`, and the done steps among them.
     fn ship_steps(
         &mut self,
@@ -3453,6 +3599,7 @@ fn page_stack(
             PageSection::ShipGroup(ShipGroup {
                 card: Some(card), ..
             }) => card.buttons.clone(),
+            PageSection::Recap(card) => card.buttons.clone(),
             _ => Vec::new(),
         })
         .collect();
@@ -3610,6 +3757,9 @@ fn page_stack(
             }
             PageSection::ShipGroup(group) if group.card.is_some() => {
                 s.ship_card(k, group, page, buttons, ship, finding_cards);
+            }
+            PageSection::Recap(card) => {
+                s.recap(k, card, page, buttons);
             }
             PageSection::ShipGroup(group) => {
                 if group.caption {
@@ -4716,6 +4866,7 @@ fn piece_section(piece: &Piece) -> Option<usize> {
         | Piece::File(k)
         | Piece::FindingCard(k)
         | Piece::ShipCard(k)
+        | Piece::RecapCard(k)
         | Piece::Fold(k)
         | Piece::CardField(k) => Some(*k),
         _ => None,
@@ -4737,6 +4888,7 @@ fn piece_buttons(view: &FeatureTabView, piece: &Piece) -> Vec<usize> {
                 card: Some(card), ..
             })),
         ) => card.buttons.clone(),
+        (Piece::RecapCard(_), Some(PageSection::Recap(card))) => card.buttons.clone(),
         _ => Vec::new(),
     }
 }
@@ -6558,6 +6710,17 @@ impl Painter {
                     let high = (h - 2.0 * inset).max(0.0);
                     c.rounded(x + edge, y + inset, bar, high, bar / 2.0, colour);
                 }
+                for &i in &card.buttons {
+                    if let Some(r) = l.page_buttons.get(i).copied().flatten() {
+                        self.page_button(c, view, i, at(r), scale, p);
+                    }
+                }
+            }
+            Piece::RecapCard(k) => {
+                let Some(PageSection::Recap(card)) = view.page.sections.get(*k) else {
+                    return;
+                };
+                card_frame(c, rect, scale, p);
                 for &i in &card.buttons {
                     if let Some(r) = l.page_buttons.get(i).copied().flatten() {
                         self.page_button(c, view, i, at(r), scale, p);

@@ -59,6 +59,9 @@ pub struct Docs {
     pub previews: BTreeMap<Stage, Arc<Vec<DocBlock>>>,
     /// How many comments the user left in the feature's diff (`notes`).
     pub comments: usize,
+    /// Its summary (`SUMMARY_FILE`) and when it was last written, once there;
+    /// why it couldn't be read, if so.
+    pub summary: Option<(Result<String, String>, u64)>,
     /// The comments the user left in the feature's diff: they go to Build
     /// with AI review's fixes, or wait for Code review. After them, flagged
     /// sent, those the latest of Code review's fix rounds took (`round_notes`).
@@ -194,6 +197,21 @@ fn archived_plans(data: &Path) -> BTreeSet<u32> {
         .collect()
 }
 
+/// The summary in data dir `data`, and when it was written (unix seconds), if
+/// there is one.
+pub fn read_summary(data: &Path) -> Option<(Result<String, String>, u64)> {
+    let path = data.join(super::SUMMARY_FILE);
+    let meta = std::fs::metadata(&path).ok()?;
+    let at = (meta.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_secs());
+    let text = std::fs::read_to_string(&path).map_err(|err| {
+        tracing::warn!("reading {}: {err}", path.display());
+        err.to_string()
+    });
+    Some((text, at))
+}
+
 /// Read the stage files in feature data dir `data`. A file that can't be
 /// read is still there: its stage's page shows why in its place, and Review
 /// says so too when pressed.
@@ -207,6 +225,7 @@ pub fn read_docs(data: &Path) -> Docs {
     };
     docs.plans = archived_plans(data);
     docs.plan = fix_round::path(data).exists();
+    docs.summary = read_summary(data);
     docs.changed = (docs.written.iter().copied())
         .filter(|stage| artifacts::changed_since_approved(data, *stage))
         .collect();

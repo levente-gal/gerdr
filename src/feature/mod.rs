@@ -211,6 +211,27 @@ pub struct Shipping {
     /// kept has none: `Feature::ship_log` reads the fields above then.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub steps: Vec<ShipDone>,
+    /// The agent last asked to write its summary (`SUMMARY_FILE`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<SummaryRun>,
+}
+
+/// The summary of a feature, in its data dir: the body of its pull requests
+/// and its squash's message, an agent's to write.
+pub const SUMMARY_FILE: &str = "summary.md";
+
+/// An agent asked to write a feature's summary.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SummaryRun {
+    /// Unix seconds.
+    pub at: u64,
+    /// The agent, as a stage run names it.
+    pub agent: String,
+    /// Its tab's pane, while known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane: Option<String>,
+    /// Which time it is asked: its prompt is `prompts/summary-<n>.md`.
+    pub n: u32,
 }
 
 impl Shipping {
@@ -221,6 +242,7 @@ impl Shipping {
             && self.squash_repos.is_empty()
             && self.push_base.is_empty()
             && self.steps.is_empty()
+            && self.summary.is_none()
     }
 }
 

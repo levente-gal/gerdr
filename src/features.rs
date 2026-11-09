@@ -1590,6 +1590,10 @@ pub enum PanelOutcome {
     Evidence,
     /// Open this pull request's page.
     OpenPr(String),
+    /// Ask an agent to write the feature's summary again.
+    WriteSummary,
+    /// Open the feature's summary to edit.
+    EditSummary,
     /// Reopen this done stage, once it isn't locked (see
     /// `Gerdr::reopen_stage`).
     Untick(Stage),
@@ -3508,6 +3512,8 @@ fn action_hint(action: &PanelOutcome) -> &'static str {
         PanelOutcome::WriteFinalPlan => "go on",
         PanelOutcome::Tick => "mark done",
         PanelOutcome::Ship => "ship\u{2026}",
+        PanelOutcome::WriteSummary => "write the summary again",
+        PanelOutcome::EditSummary => "edit the summary",
         PanelOutcome::Finish => "finish\u{2026}",
         PanelOutcome::Untick(_) => "reopen",
         PanelOutcome::GoToCurrent => "go to the current stage",
@@ -4165,6 +4171,210 @@ fn ship_log_lines(feature: &Feature, now: u64) -> Vec<CheckLine> {
             line(parts.join(" \u{b7} "), CheckTone::Note)
         })
         .collect()
+}
+
+/// A time span in words, its two largest units: "45s", "12m", "3h 10m",
+/// "2d 4h".
+fn span_words(secs: u64) -> String {
+    let (d, h, m) = (secs / 86_400, secs / 3_600 % 24, secs / 60 % 60);
+    match (d, h, m) {
+        (0, 0, 0) => format!("{secs}s"),
+        (0, 0, m) => format!("{m}m"),
+        (0, h, 0) => format!("{h}h"),
+        (0, h, m) => format!("{h}h {m}m"),
+        (d, 0, _) => format!("{d}d"),
+        (d, h, _) => format!("{d}d {h}h"),
+    }
+}
+
+/// "1 commit", "3 commits": `n` of `one`, `many` when not one.
+fn count_of(n: usize, one: &str, many: &str) -> String {
+    match n {
+        1 => format!("1 {one}"),
+        n => format!("{n} {many}"),
+    }
+}
+
+/// What happened while `feature` was made, for Ship's page: the big
+/// numbers, then a line per stage that ran, as its records keep it.
+fn recap_card(feature: &Feature, state: &PanelState, now: u64) -> chrome::RecapCard {
+    let probe = state.probe;
+    let end = (feature.marks.get(&Stage::Ship)).map_or(now, |m| m.at);
+    let mut figures = vec![(
+        span_words(end.saturating_sub(feature.created)),
+        match feature.status {
+            Status::Open => "so far".to_owned(),
+            _ => "start to ship".to_owned(),
+        },
+    )];
+    if let Some(Ok(reading)) = probe.map(|p| &p.reading) {
+        let commits: usize = reading.commits.values().sum();
+        if commits > 0 {
+            let word = if commits == 1 { "commit" } else { "commits" };
+            figures.push((commits.to_string(), word.to_owned()));
+        }
+    }
+    let stats: Vec<&feature::page::Stat> = probe.map_or(Vec::new(), |p| p.stats.values().collect());
+    if !stats.is_empty() {
+        let (added, removed, files) = stats.iter().fold((0, 0, 0), |(a, r, f), s| {
+            (a + s.added, r + s.removed, f + s.files)
+        });
+        figures.push((format!("+{added} \u{2212}{removed}"), "lines".to_owned()));
+        figures.push((
+            files.to_string(),
+            if files == 1 { "file" } else { "files" }.to_owned(),
+        ));
+    }
+    let touched = feature.touched().count();
+    if touched > 1 {
+        figures.push((touched.to_string(), "repositories".to_owned()));
+    }
+    let runs: u32 = feature.run_counts.values().sum();
+    if runs > 0 {
+        let word = if runs == 1 { "agent run" } else { "agent runs" };
+        figures.push((runs.to_string(), word.to_owned()));
+    }
+    figures.push((
+        feature.fix_rounds.to_string(),
+        if feature.fix_rounds == 1 {
+            "fix round"
+        } else {
+            "fix rounds"
+        }
+        .to_owned(),
+    ));
+    let mut stages = Vec::new();
+    let mut since = feature.created;
+    for stage in Stage::ALL.into_iter().filter(|s| *s != Stage::Ship) {
+        let Some(mark) = feature.marks.get(&stage) else {
+            continue;
+        };
+        let mut said = Vec::new();
+        if let Some(run) = feature.runs.get(&stage) {
+            let mut who = crate::stats_panel::agent_name(&run.agent);
+            if let Some(model) = run.model.as_deref() {
+                who = format!("{who} {}", short_model(model));
+            }
+            said.push(who);
+            if run.n > 1 {
+                said.push(format!("{} runs", run.n));
+            }
+        } else if mark.by != "gerdr" {
+            said.push(format!("by {}", mark.by));
+        }
+        said.extend(recap_stage_words(feature, stage, state));
+        said.push(format!(
+            "took {}",
+            span_words(mark.at.saturating_sub(since))
+        ));
+        since = since.max(mark.at);
+        stages.push((stage.label().to_owned(), said.join(" \u{b7} ")));
+    }
+    let (summary, summary_note) = recap_summary(feature, probe);
+    chrome::RecapCard {
+        summary,
+        summary_note,
+        figures,
+        stages,
+        lines: Vec::new(),
+        buttons: Vec::new(),
+    }
+}
+
+/// The summary's paragraphs and what to say under them: who wrote it, or
+/// that it is being written, or that there is none.
+fn recap_summary(feature: &Feature, probe: Option<&Probe>) -> (Vec<String>, Option<String>) {
+    let run = feature.shipping.summary.as_ref();
+    let who = run.map_or("an agent".to_owned(), |r| {
+        crate::stats_panel::agent_name(&r.agent)
+    });
+    let read = probe.and_then(|p| p.docs.summary.as_ref());
+    match read {
+        Some((Ok(text), at)) if !text.trim().is_empty() => {
+            let paragraphs = (text.split("\n\n"))
+                .map(|p| p.split_whitespace().collect::<Vec<_>>().join(" "))
+                .filter(|p| !p.is_empty())
+                .collect();
+            // Asked again since: the new one is on its way.
+            let note = match run.filter(|r| r.at > *at) {
+                Some(_) => format!("{who} is writing it again\u{2026}"),
+                None => "Goes in the pull requests and the squash's message".to_owned(),
+            };
+            (paragraphs, Some(note))
+        }
+        Some((Err(why), _)) => (
+            Vec::new(),
+            Some(format!("Couldn't read the summary: {why}")),
+        ),
+        _ => match run {
+            Some(_) => (
+                Vec::new(),
+                Some(format!("{who} is writing a summary\u{2026}")),
+            ),
+            None => (Vec::new(), Some("No summary yet".to_owned())),
+        },
+    }
+}
+
+/// How `stage` of `feature` went, in a few words each, for its recap line.
+fn recap_stage_words(feature: &Feature, stage: Stage, state: &PanelState) -> Vec<String> {
+    use feature::{plan_review::State as Taken, review_import::FindingState};
+    let drafts = |stage| feature.drafts.iter().filter(|d| d.stage == stage).count();
+    match stage {
+        Stage::Discover | Stage::Plan if drafts(stage) > 1 => {
+            vec![format!("{} drafts", drafts(stage))]
+        }
+        Stage::PlanReview => (feature.plan_review.as_ref())
+            .map(|review| {
+                let all = review.suggestions.len();
+                let taken = (review.suggestions.iter())
+                    .filter(|s| s.state == Taken::Accepted)
+                    .count();
+                vec![
+                    count_of(all, "suggestion", "suggestions"),
+                    format!("{taken} taken"),
+                ]
+            })
+            .unwrap_or_default(),
+        Stage::Verify => (feature.verify.as_ref())
+            .map(|run| {
+                let passed = (run.checks.iter())
+                    .filter(|c| c.outcome.as_ref().is_some_and(|o| o.passed()))
+                    .count();
+                let mut out = vec![format!("{passed} of {} checks passed", run.checks.len())];
+                if run.n > 1 {
+                    out.push(format!("{} runs", run.n));
+                }
+                out
+            })
+            .unwrap_or_default(),
+        Stage::AiReview => (feature.review.as_ref())
+            .map(|review| {
+                let of = |s: FindingState| review.findings.iter().filter(|f| f.state == s).count();
+                let mut out = vec![count_of(review.findings.len(), "finding", "findings")];
+                let fixed = of(FindingState::Fixed) + of(FindingState::Sent);
+                if fixed > 0 {
+                    out.push(format!("{fixed} fixed"));
+                }
+                if of(FindingState::Dismissed) > 0 {
+                    out.push(format!("{} dismissed", of(FindingState::Dismissed)));
+                }
+                out
+            })
+            .unwrap_or_default(),
+        Stage::CodeReview => {
+            let rounds = feature.comment_fixes.len();
+            match rounds {
+                0 => vec!["no comments".to_owned()],
+                n => vec![count_of(n, "round of comments", "rounds of comments")],
+            }
+        }
+        Stage::ManualTest if state.ctx.criteria > 0 => vec![format!(
+            "{} of {} criteria passed",
+            state.ctx.manual.passed, state.ctx.criteria
+        )],
+        _ => Vec::new(),
+    }
 }
 
 /// Whether the patch watch keeps an eye on `feature`: open, with a mark
@@ -5668,6 +5878,24 @@ fn writers_page_actions(
     if verify_going(feature, stage, ctx) {
         out.retain(|(_, outcome)| works_during_checks(outcome));
     }
+    // The recap's: its summary, written again or by hand, while there is a
+    // worktree to write it from.
+    if stage == Stage::Ship && feature.ships() {
+        let written = feature.shipping.summary.is_some();
+        let label = if written {
+            "Write again"
+        } else {
+            "Write summary"
+        };
+        out.push((
+            button(label, ButtonStyle::Quiet),
+            PanelOutcome::WriteSummary,
+        ));
+        out.push((
+            button("Edit", ButtonStyle::Quiet),
+            PanelOutcome::EditSummary,
+        ));
+    }
     if stage == Stage::Ship {
         // On its repository's card while it can ship; else listed by name.
         let one = feature.shipping.prs.len() == 1 || feature.ships();
@@ -6964,6 +7192,13 @@ impl Gerdr {
         }
         if merged {
             self.feature_merged(project, slug, patch.as_deref());
+        }
+        // At Ship: its summary is written, once.
+        let data = store::dir(None, project, slug);
+        if (self.feature(project, slug))
+            .is_some_and(|f| crate::ship_summary::wants_summary(f, &data))
+        {
+            self.write_ship_summary(project, slug, false);
         }
         if again {
             self.probe_feature(project, slug);
@@ -8615,6 +8850,8 @@ impl Gerdr {
             PanelOutcome::SkipPlanReview => self.ask_skip_plan_review(&project, &slug),
             PanelOutcome::ChangeDecisions => self.ask_change_decisions(&project, &slug),
             PanelOutcome::OpenPr(url) => self.open_feature_page(&project, &slug, url),
+            PanelOutcome::WriteSummary => self.write_ship_summary(&project, &slug, true),
+            PanelOutcome::EditSummary => self.edit_ship_summary(&project, &slug),
             PanelOutcome::PickAgent(stage, name) => {
                 self.pick_stage_agent(&project, &slug, stage, &name);
             }
@@ -13133,6 +13370,14 @@ fn stage_page(
                 if !check.is_empty() {
                     sections.push(lines("Ship check", check));
                 }
+                let mut recap = recap_card(feature, state, now);
+                recap.buttons = (actions.iter().enumerate())
+                    .filter(|(_, (_, o))| {
+                        matches!(o, PanelOutcome::WriteSummary | PanelOutcome::EditSummary)
+                    })
+                    .map(|(i, _)| i)
+                    .collect();
+                sections.push(PageSection::Recap(recap));
                 let cards = ship_sections(feature, state, actions, now);
                 let carded = !cards.is_empty();
                 sections.extend(cards);
@@ -20653,9 +20898,10 @@ pub(crate) mod tests {
         };
         let labels: Vec<String> = view.page.sections.iter().map(label).collect();
         // Its worktree gone, it ships no more: its pull requests are listed.
+        // The recap first, which has no label.
         assert_eq!(
             labels,
-            ["Pull requests", "Ship log"],
+            ["", "Pull requests", "Ship log"],
             "no Ship check once shipped"
         );
         let buttons: Vec<&str> = view.page.buttons.iter().map(|b| b.label.as_str()).collect();
@@ -22208,6 +22454,52 @@ pub(crate) mod tests {
         assert!(line.is_some_and(|l| l.starts_with("every check is skipped")));
     }
 
+    #[test]
+    fn spans_read_in_their_two_largest_units() {
+        assert_eq!(span_words(42), "42s");
+        assert_eq!(span_words(12 * 60 + 5), "12m");
+        assert_eq!(span_words(3 * 3_600), "3h");
+        assert_eq!(span_words(3 * 3_600 + 10 * 60), "3h 10m");
+        assert_eq!(span_words(2 * 86_400 + 4 * 3_600 + 59), "2d 4h");
+        assert_eq!(span_words(86_400 + 30), "1d");
+    }
+
+    /// The summary shows as its paragraphs, each on one line, with what is
+    /// known of who writes it.
+    #[test]
+    fn the_recap_shows_the_summary_and_who_writes_it() {
+        use crate::feature::SummaryRun;
+        let mut f = feature("s", vec![repo("api", true)], 8);
+        let mut p = probe(None);
+        assert_eq!(
+            recap_summary(&f, Some(&p)),
+            (Vec::new(), Some("No summary yet".to_owned()))
+        );
+        f.shipping.summary = Some(SummaryRun {
+            at: 100,
+            agent: "claude".into(),
+            pane: None,
+            n: 1,
+        });
+        assert_eq!(
+            recap_summary(&f, Some(&p)).1.as_deref(),
+            Some("Claude Code is writing a summary\u{2026}")
+        );
+        p.docs.summary = Some((Ok("One\nline.\n\nTwo.\n".into()), 200));
+        let (paragraphs, note) = recap_summary(&f, Some(&p));
+        assert_eq!(paragraphs, ["One line.", "Two."]);
+        assert_eq!(
+            note.as_deref(),
+            Some("Goes in the pull requests and the squash's message")
+        );
+        // Asked again since it was written: the new one is on its way.
+        f.shipping.summary.as_mut().unwrap().at = 300;
+        assert_eq!(
+            recap_summary(&f, Some(&p)).1.as_deref(),
+            Some("Claude Code is writing it again\u{2026}")
+        );
+    }
+
     /// Shipped with only its push, a feature can open its pull request later:
     /// the push shows as done on its card, the pull request as a tick box,
     /// and the page offers to ship what is left.
@@ -22258,7 +22550,8 @@ pub(crate) mod tests {
                 vec![line("Shipped: 1 step ticked to run", CheckTone::Ready)]
             )
         );
-        let Some(PageSection::ShipGroup(group)) = page.sections.get(1) else {
+        assert!(matches!(page.sections[1], PageSection::Recap(_)));
+        let Some(PageSection::ShipGroup(group)) = page.sections.get(2) else {
             panic!("no card: {:?}", page.sections);
         };
         let steps: Vec<(&str, bool)> = (group.steps.iter())
@@ -22300,7 +22593,14 @@ pub(crate) mod tests {
             ..PanelState::default()
         };
         let actions = page_actions(&f, Stage::Ship, RowCtx::default());
-        assert_eq!(labels(&actions), [("Ship\u{2026}", PanelOutcome::Ship)]);
+        assert_eq!(
+            labels(&actions),
+            [
+                ("Ship\u{2026}", PanelOutcome::Ship),
+                ("Write summary", PanelOutcome::WriteSummary),
+                ("Edit", PanelOutcome::EditSummary)
+            ]
+        );
         let page = stage_page(&f, Stage::Ship, &state, &actions, 2_000);
         assert_eq!(
             page.sections[0],

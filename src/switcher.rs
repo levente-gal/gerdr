@@ -1642,7 +1642,7 @@ impl Gerdr {
 
     /// Open `path` in the active workspace's Zed, shown, when it has one;
     /// else with `xdg-open`, in `place`. `what` names it in a toast.
-    fn open_in_zed(&mut self, path: &Path, place: Place, what: &str) {
+    pub(crate) fn open_in_zed(&mut self, path: &Path, place: Place, what: &str) {
         let zed = self.workspace().and_then(|ws| {
             ws.tabs.iter().enumerate().find_map(|(t, tab)| {
                 let pane = tab.panes.iter().find(|p| crate::is_zed(&p.window))?;

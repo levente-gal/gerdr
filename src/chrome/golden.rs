@@ -3802,6 +3802,55 @@ fn feature_tab_ship_finish() -> super::FeatureTabView {
     view
 }
 
+/// The recap of a feature made in two days, its summary written.
+fn recap() -> super::RecapCard {
+    let pair = |a: &str, b: &str| (a.to_owned(), b.to_owned());
+    super::RecapCard {
+        summary: vec![
+            "Invoices can now be exported in bulk: pick a date range and a format, and \
+             the export runs in the background, with a link mailed once it is ready."
+                .into(),
+            "The export job reuses the PDF renderer; CSV goes through a new streaming \
+             writer so large ranges stay within memory."
+                .into(),
+        ],
+        summary_note: Some("Goes in the pull requests and the squash's message".into()),
+        figures: vec![
+            pair("2d 4h", "start to ship"),
+            pair("15", "commits"),
+            pair("+460 \u{2212}82", "lines"),
+            pair("31", "files"),
+            pair("2", "repositories"),
+            pair("14", "agent runs"),
+            pair("3", "fix rounds"),
+        ],
+        stages: vec![
+            pair(
+                "Discover",
+                "Claude Code opus-4 \u{b7} 2 drafts \u{b7} took 40m",
+            ),
+            pair("Plan", "Claude Code opus-4 \u{b7} took 1h 5m"),
+            pair(
+                "Plan review",
+                "Codex gpt-5 \u{b7} 6 suggestions \u{b7} 4 taken \u{b7} took 20m",
+            ),
+            pair("Build", "Cursor \u{b7} 3 runs \u{b7} took 9h 30m"),
+            pair(
+                "Verify",
+                "12 of 12 checks passed \u{b7} 4 runs \u{b7} took 2h",
+            ),
+            pair(
+                "AI review",
+                "Codex gpt-5 \u{b7} 9 findings \u{b7} 7 fixed \u{b7} 2 dismissed \u{b7} took 3h",
+            ),
+            pair("Code review", "1 round of comments \u{b7} took 1d 2h"),
+            pair("Manual test", "8 of 8 criteria passed \u{b7} took 4h"),
+        ],
+        lines: Vec::new(),
+        buttons: vec![3, 4],
+    }
+}
+
 /// A shipped feature that can ship more: api's pull request open, web
 /// merged with its base yet to push, and what ran in the Ship log.
 fn feature_tab_ship_live() -> super::FeatureTabView {
@@ -3859,12 +3908,21 @@ fn feature_tab_ship_live() -> super::FeatureTabView {
                 label: "Reopen".into(),
                 style: ButtonStyle::Plain,
             },
+            PageButton {
+                label: "Edit".into(),
+                style: ButtonStyle::Quiet,
+            },
+            PageButton {
+                label: "Write again".into(),
+                style: ButtonStyle::Quiet,
+            },
         ],
         sections: vec![
             PageSection::Lines {
                 label: "Ship check".into(),
                 lines: vec![tab_line("Shipped: 1 step ticked to run", CheckTone::Ready)],
             },
+            PageSection::Recap(recap()),
             PageSection::ShipGroup(api),
             PageSection::ShipGroup(web),
             PageSection::Lines {
@@ -5570,8 +5628,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 59]; 4] = [
         0x7f9a9d7d6b207fa8, // tab_manual_rounds_860
         0x3922ebde627997d0, // tab_manual_comment_860
         0x67311e08c4f41693, // tab_manual_hand_back_1180
-        0x86d00eead736e200, // tab_ship_live_1180
-        0xf075e8ee732362d3, // tab_ship_live_860
+        0x3d6752d6c8853c68, // tab_ship_live_1180
+        0xb57d60723e2e914c, // tab_ship_live_860
     ],
     // Dark at 2
     [
@@ -5632,8 +5690,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 59]; 4] = [
         0x234251df2b1dba25, // tab_manual_rounds_860
         0x60ba07ab36204a0d, // tab_manual_comment_860
         0xa6b58fbbabbe2e65, // tab_manual_hand_back_1180
-        0x19f4c0def7c35702, // tab_ship_live_1180
-        0x2d900bee6596fd15, // tab_ship_live_860
+        0x8cae3f392a28f277, // tab_ship_live_1180
+        0x0714fb103dbedb21, // tab_ship_live_860
     ],
     // Light at 1
     [
@@ -5694,8 +5752,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 59]; 4] = [
         0xb5fc3742006aa677, // tab_manual_rounds_860
         0x5abbfbc7357ca166, // tab_manual_comment_860
         0x03cf422d6e9c38a1, // tab_manual_hand_back_1180
-        0xa5ed607a29a6c491, // tab_ship_live_1180
-        0x8d42dfc6a3939dc1, // tab_ship_live_860
+        0xe218d2ce70539f23, // tab_ship_live_1180
+        0x040c69c1c4ed2725, // tab_ship_live_860
     ],
     // Light at 2
     [
@@ -5756,8 +5814,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 59]; 4] = [
         0x33196b42cbee501a, // tab_manual_rounds_860
         0x93dc6362a25253e5, // tab_manual_comment_860
         0x8391e750f3735fcf, // tab_manual_hand_back_1180
-        0xf161dc956d2637e2, // tab_ship_live_1180
-        0xc284a689789315b2, // tab_ship_live_860
+        0xa7dbc43951d8b435, // tab_ship_live_1180
+        0x230520414df2c684, // tab_ship_live_860
     ],
 ];
 

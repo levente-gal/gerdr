@@ -42,6 +42,7 @@ mod feature_plan_review;
 mod feature_review;
 mod feature_sandbox;
 mod feature_workspace;
+mod ship_summary;
 mod features;
 mod file_tree;
 mod find;

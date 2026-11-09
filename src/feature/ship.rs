@@ -770,9 +770,22 @@ fn action_repo(action: &Action) -> &str {
     }
 }
 
-/// The body a feature's pull request starts with.
+/// The body a feature's pull request starts with: its summary, if written,
+/// then what feature it is part of.
 fn pr_body(feature: &Feature) -> String {
-    format!("Part of “{}”.", feature.title)
+    let part = format!("Part of “{}”.", feature.title);
+    match summary_text(feature) {
+        Some(summary) => format!("{summary}\n\n{part}"),
+        None => part,
+    }
+}
+
+/// `feature`'s summary (`SUMMARY_FILE`), trimmed, if one is written.
+pub fn summary_text(feature: &Feature) -> Option<String> {
+    let data = super::store::dir(None, &feature.project, &feature.slug);
+    let text = std::fs::read_to_string(data.join(super::SUMMARY_FILE)).ok()?;
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_owned())
 }
 
 /// Push `branch` of `repo` to origin with its upstream, allowed for its
@@ -959,11 +972,13 @@ pub fn squash_command(feature: &Feature, actions: &[Action]) -> (PathBuf, String
     let Some(first) = mains.first() else {
         return (feature.root.clone(), String::new());
     };
+    // The summary, if written, is the message's body, to edit with the rest.
+    let body = summary_text(feature).map_or(String::new(), |text| format!(" -m {}", quote(&text)));
     let command = mains
         .iter()
         .map(|main| {
             format!(
-                "cd {} && git merge --squash {} && git commit -e -m {}",
+                "cd {} && git merge --squash {} && git commit -e -m {}{body}",
                 quote(&main.to_string_lossy()),
                 quote(&branch),
                 quote(&feature.title)

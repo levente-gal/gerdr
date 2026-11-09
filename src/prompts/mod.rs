@@ -28,6 +28,7 @@ pub fn builtin(name: &str) -> Option<(&'static str, u32)> {
         "start" => (include_str!("../../assets/prompts/start.md"), 1),
         "rules" => (include_str!("../../assets/prompts/rules.md"), 1),
         "repos" => (include_str!("../../assets/prompts/repos.md"), 5),
+        "summary" => (include_str!("../../assets/prompts/summary.md"), 1),
         _ => return None,
     })
 }
@@ -94,6 +95,11 @@ mod tests {
             ("plan_review.rejected", ""),
             ("plan_review.open", ""),
             ("plan_review.accepted_ids", "r1-1"),
+            ("summary.path", "/d/bulk-edit/summary.md"),
+            (
+                "summary.diffs",
+                "- /w/bulk-edit/api: `git diff main...HEAD`",
+            ),
         ]
         .into_iter()
         .map(|(k, v)| (k.to_owned(), v.to_owned()))
@@ -120,6 +126,7 @@ mod tests {
             "repos",
             "ai-review",
             "send-fixes",
+            "summary",
         ] {
             for multi in [false, true] {
                 for comments in ["", "Fix the scope."] {
