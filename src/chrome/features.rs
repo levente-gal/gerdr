@@ -2886,8 +2886,9 @@ impl Stack {
         self.y += line;
     }
 
-    /// The user's comment on a finding, a card of its own inside the
-    /// finding's: "Your comment" and its buttons, then what it says.
+    /// The user's comment on a finding or suggestion, a card of its own
+    /// inside the item's: its word (`field_hint`, "Your comment" or a
+    /// question's "Your answer") and its buttons, then what it says.
     fn your_comment(&mut self, card: &FindingCard, page: &StagePage, buttons: &mut [Option<Rect>]) {
         let at = self.pieces.len();
         let (x, w, top) = (self.x, self.w, self.y);
@@ -2900,7 +2901,11 @@ impl Stack {
         let widths: Vec<i32> = (held.iter())
             .map(|b| button_width(&page.buttons[*b].label))
             .collect();
-        let word = "Your comment";
+        // A question's is its answer.
+        let word = match card.field_hint {
+            "" => "Your comment",
+            hint => hint,
+        };
         // Bold runs wider than it measures.
         let word_w = width_of(word, Font::Small.size()).ceil() as i32 * 9 / 8;
         let placed = rows_from_right(&widths, self.x + word_w + QUIT_BUTTON_GAP, self.x + self.w);

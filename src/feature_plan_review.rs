@@ -174,36 +174,27 @@ pub(crate) fn deciding(feature: &Feature) -> Option<&PlanReview> {
 }
 
 /// `feature`'s suggestions, when they can be decided, commented on and
-/// added to now: at Plan review, read, and no final plan being written.
-/// Else why not, for a toast.
+/// added to now (`review_cards::can_decide`): at Plan review, read, and no
+/// final plan being written. Else why not, for a toast, as the page says it.
 pub(crate) fn decidable(feature: &Feature) -> Result<&PlanReview, String> {
-    if feature.status != Status::Open || feature.current() != Some(STAGE) {
+    let before = feature.current().is_none_or(|stage| stage < STAGE);
+    if feature.status != Status::Open || before {
         let title = &feature.title;
         return Err(format!("\u{201c}{title}\u{201d} isn't at Plan review"));
     }
-    match feature.plan_review.as_ref() {
-        Some(review) if review.writing => {
-            Err("The final plan is being written: Change decisions to decide again".into())
+    match deciding(feature).filter(|_| review_cards::can_decide(feature, STAGE)) {
+        Some(review) => Ok(review),
+        None => {
+            let why = review_cards::why_not_decide(feature, STAGE);
+            Err(why.unwrap_or("The suggestions aren't read yet").to_owned())
         }
-        Some(review) if review.stamp.is_some() => Ok(review),
-        _ => Err("The suggestions aren't read yet".into()),
     }
 }
 
 /// Why something taken out of `feature`'s suggestions can't be put back:
-/// they can't be decided any more (`review_cards::can_decide`).
+/// they can't be decided any more.
 fn why_not_restore(feature: &Feature) -> Option<String> {
-    if let Err(why) = decidable(feature) {
-        return Some(why);
-    }
-    if !review_cards::can_decide(feature, STAGE) {
-        let why = review_cards::why_not_decide(feature, STAGE);
-        return Some(
-            why.unwrap_or("Its suggestions can't be decided now")
-                .to_owned(),
-        );
-    }
-    None
+    decidable(feature).err()
 }
 
 /// What a toast says of suggestion `id` once `decision` was made of it,
@@ -217,6 +208,15 @@ fn decided_text(id: &str, was: State, decision: &Decision) -> String {
         (Decision::Clear, _) => "reopened",
     };
     format!("Suggestion {id} {word}")
+}
+
+/// What a toast says of `n` questions accepting all left open: they wait
+/// for an answer.
+fn waiting_text(n: usize) -> String {
+    match n {
+        1 => "1 question waits for an answer".to_owned(),
+        n => format!("{n} questions wait for an answer"),
+    }
 }
 
 /// What a toast says once nothing of `review` is left to decide.
@@ -602,9 +602,9 @@ impl Gerdr {
         let mut accepted = 0;
         let done = self.change_plan_review(project, slug, |review| {
             accepted = plan_review::accept_all(review);
-            match (accepted, review.open()) {
+            match (accepted, review.waiting_answer()) {
                 (0, 0) => Err("No suggestion left to decide".to_owned()),
-                (0, open) => Err(format!("{} to answer first", plural(open, "question"))),
+                (0, waiting) => Err(waiting_text(waiting)),
                 (n, _) => Ok(format!("Accepted all open: {n}")),
             }
         });
@@ -615,12 +615,10 @@ impl Gerdr {
             return;
         };
         let text = format!("{} accepted", plural(accepted, "suggestion"));
-        match review.open() {
-            0 => self.offer_final_plan(project, slug, text),
-            open => self.show_success(format!(
-                "{text}; {} still to answer",
-                plural(open, "question")
-            )),
+        match (review.open(), review.waiting_answer()) {
+            (0, _) => self.offer_final_plan(project, slug, text),
+            (_, 0) => self.show_success(text),
+            (_, waiting) => self.show_success(format!("{text}; {}", waiting_text(waiting))),
         }
     }
 
@@ -910,6 +908,8 @@ impl Gerdr {
             ItemAct::AskRefuse => self.ask_reject_suggestion(project, slug, id),
             ItemAct::Edit => self.ask_edit_suggestion(project, slug, id),
             ItemAct::Comment => self.write_suggestion_comment(project, slug, id, false),
+            // A question with no answer: accepted once its answer is saved.
+            ItemAct::Answer => self.write_suggestion_comment(project, slug, id, true),
             ItemAct::DeleteComment => self.delete_suggestion_comment(project, slug, id),
             ItemAct::DeleteOwn => self.delete_own_suggestion_said(project, slug, id),
             ItemAct::OpenCode => self.open_suggestion_code(project, slug, id, 0),
@@ -952,20 +952,23 @@ impl Gerdr {
         let Some(review) = deciding(&feature) else {
             return self.show_warning("The suggestions aren't up for discussion now".into());
         };
-        // The notes, and what was rejected and why, not to be raised again.
+        // The live reviewer is told the notes, and what was rejected and why,
+        // not to be raised again; a fresh one reads the rejected in its prompt
+        // (`plan_review.rejected`), so only the notes go with it.
         let notes = plan_review::back_notes(review);
         if notes.is_empty() {
             return self.show_warning(
                 "Nothing to ask: comment on a suggestion or reject one first".into(),
             );
         }
+        let fresh = vec![("comments", plan_review::notes(review))];
         let Some(run) = feature.runs.get(&STAGE).cloned() else {
-            self.launch_stage_agent(project, slug, STAGE, &[("comments", notes)]);
+            self.launch_stage_agent(project, slug, STAGE, &fresh);
             return;
         };
         let alive = (run.pane.as_deref()).is_some_and(|p| self.pane_there(p));
         if !alive || run.held {
-            self.launch_stage_agent(project, slug, STAGE, &[("comments", notes)]);
+            self.launch_stage_agent(project, slug, STAGE, &fresh);
             return;
         }
         let data = store::dir(None, project, slug);
@@ -1260,7 +1263,10 @@ mod tests {
         });
         assert!(decidable(&f).is_ok());
         f.plan_review.as_mut().unwrap().writing = true;
-        assert!(decidable(&f).unwrap_err().contains("Change decisions"));
+        assert_eq!(
+            decidable(&f).unwrap_err(),
+            review_cards::SUGGESTIONS_WRITING
+        );
         f.plan_review.as_mut().unwrap().writing = false;
         f.tick(2, "you", None);
         assert!(decidable(&f).unwrap_err().contains("isn't at Plan review"));
@@ -1308,6 +1314,12 @@ mod tests {
             assert!(!text.ends_with('.'), "{text}");
             assert!(!text.to_lowercase().contains("fix"), "{text}");
         }
+    }
+
+    #[test]
+    fn questions_left_open_wait_for_an_answer() {
+        assert_eq!(waiting_text(1), "1 question waits for an answer");
+        assert_eq!(waiting_text(2), "2 questions wait for an answer");
     }
 
     #[test]
