@@ -990,6 +990,9 @@ impl Gerdr {
             .map(|k| dir.join(format!("build-{n}-{key}-{k}.md")))
             .find(|p| !p.exists())
             .unwrap_or_default();
+        // Its agent names the criteria its fixes change, from these.
+        let criteria = feature::manual::criteria_block(&crate::manual_test::criteria_in(&data));
+        let text = format!("{text}{criteria}");
         let written = std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&path, text));
         if let Err(err) = written {
             tracing::warn!("writing {}: {err}", path.display());
