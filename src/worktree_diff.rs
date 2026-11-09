@@ -343,7 +343,9 @@ impl WorktreeDiff {
             view.empty = fe.empty(self.read).into();
             view.tree_note = fe.tree_note(self.read);
             let counts = fe.counts(0);
-            view.tree_nav = Some(counts.viewed < counts.files);
+            // A fix round's files are only read: no ticks to go by.
+            view.unchecked = fe.span.is_some();
+            view.tree_nav = (!view.unchecked).then_some(counts.viewed < counts.files);
             let check = |root: &Path, path: &str| fe.check(root, path);
             tree.fill(&mut view, &fe.sections(), &self.diff, &check, env.tree_page);
         }
@@ -897,8 +899,8 @@ impl WorktreeDiff {
             |root: &Path, path: &str| feature.map(|f| f.check(root, path)).unwrap_or_default();
         let note = |root: &Path, path: &str| feature.and_then(|f| f.note(root, path));
         let marks: (Option<CheckOf>, Option<NoteOf>) = match feature {
-            Some(_) => (Some(&check), Some(&note)),
-            None => (None, None),
+            Some(fe) if fe.span.is_none() => (Some(&check), Some(&note)),
+            _ => (None, None),
         };
         let mut ctx = ctx(&sections, env, &lead, empty, read_only);
         ctx.no_edits = no_edits;
@@ -922,8 +924,8 @@ impl WorktreeDiff {
             |root: &Path, path: &str| feature.map(|f| f.check(root, path)).unwrap_or_default();
         let note = |root: &Path, path: &str| feature.and_then(|f| f.note(root, path));
         let marks: (Option<CheckOf>, Option<NoteOf>) = match feature {
-            Some(_) => (Some(&check), Some(&note)),
-            None => (None, None),
+            Some(fe) if fe.span.is_none() => (Some(&check), Some(&note)),
+            _ => (None, None),
         };
         let mut ctx = ctx(&sections, env, &lead, self.empty(), self.read_only());
         ctx.no_edits = self.no_edits();
@@ -952,8 +954,11 @@ impl WorktreeDiff {
 
     /// Over the diff, before its counts: what it is against.
     fn lead(&self) -> String {
-        if self.feature.is_some() {
-            return "Since its base".into();
+        if let Some(fe) = &self.feature {
+            return match fe.span {
+                Some(_) => "What its fixes changed".into(),
+                None => "Since its base".into(),
+            };
         }
         if self.commit.is_some() {
             return "This commit".into();

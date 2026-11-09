@@ -649,6 +649,7 @@ mod tests {
             items: Vec::new(),
             done: 0,
             ended: None,
+            trail: Default::default(),
         });
         assert_eq!(fix_plan_state(Some(&f), 100), "Review 1 \u{b7} fixes made");
         f.last_fix_round.as_mut().unwrap().items = vec!["One".into(), "Two".into()];

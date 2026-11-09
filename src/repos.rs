@@ -5220,6 +5220,7 @@ impl Panel {
             grouping: self.grouping,
             diff_only: false,
             diff_tree: false,
+            unchecked: false,
             tree_nav: None,
             flat: false,
             detail_share: 1.0,

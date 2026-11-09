@@ -15,7 +15,10 @@
 //! committed blob is still the one ticked. An untracked file has no
 //! committed blob at all: it can't be ticked either.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -152,6 +155,24 @@ pub fn read(repo: &Repo) -> Result<Read, String> {
         files,
         blobs,
         dirty,
+    })
+}
+
+/// What the commits of the repository at `dir` from `from` to `to` (HEAD for
+/// none) changed, as a fix round's diff shows it: no blobs to tick, nothing
+/// uncommitted. Slow, run it off the UI thread.
+pub fn read_span(dir: &Path, from: &str, to: Option<&str>) -> Result<Read, String> {
+    let to = to.unwrap_or("HEAD");
+    let (changes, files) = crate::git_ops::range_diff(dir, from, to)?;
+    let commits = crate::git_ops::count_commits(dir, &format!("{from}..{to}"));
+    Ok(Read {
+        since: Since {
+            base: from.to_owned(),
+            commits,
+            changes,
+        },
+        files,
+        ..Read::default()
     })
 }
 

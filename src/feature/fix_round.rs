@@ -156,9 +156,117 @@ pub struct FixRound {
     /// over before this was kept.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ended: Option<u64>,
+    /// What it leaves to show once over (see `Trail`).
+    #[serde(default, skip_serializing_if = "Trail::is_empty")]
+    pub trail: Trail,
+}
+
+/// What a round leaves for the page of the stage that asked, over or not:
+/// what it was asked to fix as that stage said it then, who made the fixes,
+/// and where each repository's code stood before and after them, for its
+/// diff.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Trail {
+    /// Unix seconds its fixes first went to the agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub went: Option<u64>,
+    /// The Build agent they went to, and its model; empty if not known.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub agent: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model: String,
+    /// Each touched repository's HEAD, by `Repo::key`, before the fixes: what
+    /// the round's diff starts from. Empty until read.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub from: BTreeMap<String, String>,
+    /// The same once the round is over: where its diff ends. Empty until
+    /// then, and its diff goes up to each HEAD.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub to: BTreeMap<String, String>,
+    /// What it was asked to fix: Manual test's failures.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub asked: Vec<Asked>,
+    /// Unix seconds the user dropped it, before its fixes were all made.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dropped: Option<u64>,
+}
+
+impl Trail {
+    pub fn is_empty(&self) -> bool {
+        *self == Trail::default()
+    }
+}
+
+/// One thing a round was asked to fix, as it was said then: a later word
+/// on it (a criterion tried again) doesn't change what the round was for.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Asked {
+    /// Its id: `AC-2`.
+    pub id: String,
+    /// What it is: the criterion's text.
+    pub title: String,
+    /// What went wrong, in the user's words.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub note: String,
+    /// How many screenshots went with it.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub shots: usize,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
+}
+
+/// How many rounds over a feature keeps (`Feature::past_rounds`): the oldest
+/// go first.
+pub const PAST_KEPT: usize = 40;
+
+/// Keep `round`, over or dropped, in `past`: in place of an earlier record of
+/// it (a round sent again ends again), the oldest past `PAST_KEPT` gone.
+pub fn keep_past(past: &mut Vec<FixRound>, round: FixRound) {
+    past.retain(|r| r.n != round.n);
+    past.push(round);
+    past.sort_by_key(|r| r.n);
+    let extra = past.len().saturating_sub(PAST_KEPT);
+    past.drain(..extra);
+}
+
+/// Where the code stood before and after the fixes of `round`, per
+/// repository: `(key, from, to)`, `to` none while it goes on (up to HEAD).
+/// Repositories whose code didn't move are left out once it is over.
+pub fn span(round: &FixRound) -> Vec<(String, String, Option<String>)> {
+    let trail = &round.trail;
+    let over = round.over_at().is_some();
+    (trail.from.iter())
+        .filter_map(|(key, from)| {
+            let to = trail.to.get(key).cloned();
+            match (over, &to) {
+                (true, None) if !trail.to.is_empty() => None,
+                (_, Some(to)) if to == from => None,
+                _ => Some((key.clone(), from.clone(), to)),
+            }
+        })
+        .collect()
 }
 
 impl FixRound {
+    /// Unix seconds it was over: its fixes made, or dropped.
+    pub fn over_at(&self) -> Option<u64> {
+        self.ended.or(self.trail.dropped)
+    }
+
+    /// The code reads `heads` (by `Repo::key`) at unix seconds `at`: where its
+    /// diff ends, once over, if not known yet and read since. Whether it took
+    /// them.
+    pub fn code_read(&mut self, heads: &BTreeMap<String, String>, at: u64) -> bool {
+        let over = self.over_at().is_some_and(|over| at >= over);
+        if !over || self.trail.from.is_empty() || !self.trail.to.is_empty() || heads.is_empty() {
+            return false;
+        }
+        self.trail.to = heads.clone();
+        true
+    }
+
     /// How the round stands, as a stage's card and rail say it: lowercase.
     pub fn line(&self) -> String {
         let total = self.items.len();
@@ -802,6 +910,7 @@ mod tests {
             items: items.clone(),
             done: 0,
             ended: None,
+            trail: Default::default(),
         };
         let mut fix = CommentFix {
             round: 1,
@@ -835,6 +944,7 @@ mod tests {
             items: Vec::new(),
             done: 0,
             ended: None,
+            trail: Default::default(),
         };
         let ids: Vec<String> = ["C1", "C10"].map(str::to_owned).into();
         let new = round(GiveBack::Comments {
@@ -866,6 +976,7 @@ mod tests {
             items: Vec::new(),
             done: 0,
             ended: None,
+            trail: Default::default(),
         };
         let compacting = round(FixPhase::CompactingToFix);
         assert!(!compacting.before_fixing());
@@ -1060,6 +1171,7 @@ mod tests {
             items: items.clone(),
             done: 0,
             ended: None,
+            trail: Default::default(),
         };
         let made = |review: &AiReview| -> Vec<String> {
             (review.findings.iter())
@@ -1132,6 +1244,7 @@ mod tests {
             items: items.clone(),
             done: 0,
             ended: None,
+            trail: Default::default(),
         };
         let made = |test: &ManualTest| -> Vec<String> {
             (test.checks.iter())
@@ -1293,5 +1406,91 @@ mod tests {
         assert_eq!(round.phase, FixPhase::Compacting);
         assert_eq!(round.give_back, GiveBack::Nothing);
         assert_eq!(round.line(), "compacting the agent's chat");
+    }
+
+    fn over(n: u32, from: &[(&str, &str)], to: &[(&str, &str)]) -> FixRound {
+        let heads = |pairs: &[(&str, &str)]| -> BTreeMap<String, String> {
+            pairs
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                .collect()
+        };
+        FixRound {
+            n,
+            what: "1 failure".into(),
+            input: "/i".into(),
+            stage: Stage::ManualTest,
+            phase: FixPhase::Fixing,
+            sent_back: 0,
+            asked: 0,
+            ready: None,
+            stalled: None,
+            give_back: GiveBack::Nothing,
+            items: Vec::new(),
+            done: 0,
+            ended: Some(100),
+            trail: Trail {
+                went: Some(50),
+                from: heads(from),
+                to: heads(to),
+                ..Trail::default()
+            },
+        }
+    }
+
+    #[test]
+    fn a_rounds_span_leaves_out_what_its_fixes_didnt_move() {
+        let round = over(
+            1,
+            &[("api", "a1"), ("web", "w1")],
+            &[("api", "a2"), ("web", "w1")],
+        );
+        assert_eq!(
+            span(&round),
+            [("api".to_owned(), "a1".to_owned(), Some("a2".to_owned()))]
+        );
+        // Going on, it goes up to each HEAD.
+        let going = FixRound {
+            ended: None,
+            trail: Trail {
+                to: BTreeMap::new(),
+                ..round.trail.clone()
+            },
+            ..round.clone()
+        };
+        assert_eq!(span(&going).len(), 2);
+        assert!(span(&going).iter().all(|(_, _, to)| to.is_none()));
+    }
+
+    #[test]
+    fn a_round_over_takes_where_its_code_ends_from_a_later_reading_once() {
+        let mut round = over(1, &[("api", "a1")], &[]);
+        let heads = BTreeMap::from([("api".to_owned(), "a2".to_owned())]);
+        // Read before it was over: not where it ends.
+        assert!(!round.code_read(&heads, 99));
+        assert!(round.code_read(&heads, 100));
+        assert_eq!(round.trail.to, heads);
+        let later = BTreeMap::from([("api".to_owned(), "a3".to_owned())]);
+        assert!(!round.code_read(&later, 200));
+        // One whose start wasn't read has no end either.
+        let mut blind = over(2, &[], &[]);
+        assert!(!blind.code_read(&heads, 200));
+    }
+
+    #[test]
+    fn past_rounds_keep_each_once_by_number_and_the_newest_few() {
+        let mut past = Vec::new();
+        keep_past(&mut past, over(2, &[], &[]));
+        keep_past(&mut past, over(1, &[], &[]));
+        let mut again = over(2, &[], &[]);
+        again.done = 5;
+        keep_past(&mut past, again);
+        let kept: Vec<(u32, u32)> = past.iter().map(|r| (r.n, r.done)).collect();
+        assert_eq!(kept, [(1, 0), (2, 5)]);
+        for n in 3..(PAST_KEPT as u32 + 5) {
+            keep_past(&mut past, over(n, &[], &[]));
+        }
+        assert_eq!(past.len(), PAST_KEPT);
+        assert_eq!(past.last().map(|r| r.n), Some(PAST_KEPT as u32 + 4));
     }
 }

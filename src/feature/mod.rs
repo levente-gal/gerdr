@@ -613,6 +613,11 @@ pub struct Feature {
     /// fixes were made. The next round starts afresh.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_fix_round: Option<fix_round::FixRound>,
+    /// Every round over or dropped, oldest first, as it last stood: the page
+    /// of the stage that asked lists them, with what each changed
+    /// (`fix_round::keep_past`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub past_rounds: Vec<fix_round::FixRound>,
     /// How many fix rounds it had: the next one's number goes on from it.
     #[serde(default)]
     pub fix_rounds: u32,
@@ -948,13 +953,75 @@ impl Feature {
         let current = self.current();
         self.fix_round = self.last_fix_round.take().map(|mut round| {
             round.stage = current.map_or(round.stage, |at| at.max(round.stage));
-            // Open again, it isn't over.
+            // Open again, it isn't over, and its diff goes on.
             round.ended = None;
+            round.trail.to.clear();
             round
         });
         if current == Some(Stage::ManualTest) {
             self.carry = self.fix_round.as_ref().map(|r| r.n).or(self.carry);
         }
+    }
+
+    /// The open round's fixes go to the Build agent at `now`, the code as
+    /// last read (`heads`, by `Repo::key`) if known: its trail keeps when the
+    /// first went and where the code stood then, and the agent they go to.
+    pub fn fixes_going(&mut self, now: u64, heads: Option<&BTreeMap<String, String>>) {
+        let run = self.runs.get(&Stage::Build);
+        let agent = run.map(|r| r.agent.clone()).unwrap_or_default();
+        let model = run.and_then(|r| r.model.clone()).unwrap_or_default();
+        let Some(round) = self.fix_round.as_mut() else {
+            return;
+        };
+        let trail = &mut round.trail;
+        trail.went.get_or_insert(now);
+        if !agent.is_empty() {
+            (trail.agent, trail.model) = (agent, model);
+        }
+        if trail.from.is_empty()
+            && let Some(heads) = heads
+        {
+            trail.from = heads.clone();
+        }
+    }
+
+    /// Its code reads `heads` (by `Repo::key`) at unix seconds `at`: the
+    /// rounds' diffs take where they start, for one whose fixes went with no
+    /// reading at hand (before any commit of theirs: the agent compacts
+    /// first), and where they end, for those over since. Whether any changed.
+    pub fn rounds_read(&mut self, heads: &BTreeMap<String, String>, at: u64) -> bool {
+        let mut changed = false;
+        if let Some(round) = self.fix_round.as_mut()
+            && round.trail.from.is_empty()
+            && !heads.is_empty()
+            && round.trail.went.is_some_and(|went| at >= went)
+            && (round.phase == fix_round::FixPhase::CompactingToFix || round.done == 0)
+        {
+            round.trail.from = heads.clone();
+            changed = true;
+        }
+        let rounds = (self.last_fix_round.iter_mut()).chain(self.past_rounds.iter_mut());
+        for round in rounds {
+            changed |= round.code_read(heads, at);
+        }
+        changed
+    }
+
+    /// Every fix round it had that `stage`'s page lists, newest first: the
+    /// open one, the last, then those before, each once as it last stood.
+    pub fn rounds_of(&self, stage: Stage) -> Vec<&fix_round::FixRound> {
+        let mut out: Vec<&fix_round::FixRound> = Vec::new();
+        let all = (self.fix_round.iter())
+            .chain(&self.last_fix_round)
+            .chain(self.past_rounds.iter().rev());
+        for round in all {
+            let asked = self.fix_asked.get(&round.n).copied().unwrap_or(round.stage);
+            if asked == stage && !out.iter().any(|r| r.n == round.n) {
+                out.push(round);
+            }
+        }
+        out.sort_by_key(|r| std::cmp::Reverse(r.n));
+        out
     }
 
     /// Add `what` to its history at `now`.
@@ -1223,6 +1290,50 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn fix_rounds_keep_where_the_code_stood_when_their_fixes_went_and_ended() {
+        let mut f = feature("x", 0);
+        f.fix_round = Some(fix_round::FixRound {
+            n: 1,
+            what: "1 failure".into(),
+            input: "/i".into(),
+            stage: Stage::ManualTest,
+            phase: fix_round::FixPhase::CompactingToFix,
+            sent_back: 0,
+            asked: 0,
+            ready: None,
+            stalled: None,
+            give_back: fix_round::GiveBack::Nothing,
+            items: Vec::new(),
+            done: 0,
+            ended: None,
+            trail: Default::default(),
+        });
+        f.fix_asked.insert(1, Stage::ManualTest);
+        let heads = |h: &str| BTreeMap::from([("api".to_owned(), h.to_owned())]);
+        // No reading at hand: the next one gives where they start.
+        f.fixes_going(100, None);
+        assert!(f.fix_round.as_ref().unwrap().trail.from.is_empty());
+        assert!(!f.rounds_read(&heads("a0"), 99));
+        assert!(f.rounds_read(&heads("a1"), 101));
+        // Sent again, it keeps where it started.
+        f.fixes_going(150, Some(&heads("a9")));
+        let trail = &f.fix_round.as_ref().unwrap().trail;
+        assert_eq!((trail.went, trail.from.clone()), (Some(100), heads("a1")));
+        // Over, the next reading gives where they end.
+        let mut round = f.fix_round.take().unwrap();
+        round.ended = Some(200);
+        fix_round::keep_past(&mut f.past_rounds, round.clone());
+        f.last_fix_round = Some(round);
+        assert!(f.rounds_read(&heads("a2"), 201));
+        assert_eq!(f.past_rounds[0].trail.to, heads("a2"));
+        assert_eq!(f.rounds_of(Stage::ManualTest).len(), 1);
+        assert!(f.rounds_of(Stage::CodeReview).is_empty());
+        // Reopened, it goes on to HEAD again.
+        f.reopen_fix_round();
+        assert!(f.fix_round.as_ref().unwrap().trail.to.is_empty());
+    }
+
+    #[test]
     fn the_last_fix_round_opens_again_on_the_stage_it_is_at() {
         let round = |stage| fix_round::FixRound {
             n: 1,
@@ -1238,6 +1349,7 @@ pub(crate) mod tests {
             items: Vec::new(),
             done: 0,
             ended: None,
+            trail: Default::default(),
         };
         let mut f = feature("a", 1);
         let at = f.current().unwrap();
@@ -1429,6 +1541,7 @@ pub(crate) mod tests {
             comment_fixes: Vec::new(),
             ran_once: Default::default(),
             fix_rounds: 0,
+            past_rounds: Vec::new(),
             carry: None,
             unverified: None,
         }
@@ -1524,6 +1637,7 @@ pub(crate) mod tests {
             comment_fixes: Vec::new(),
             ran_once: Default::default(),
             fix_rounds: 0,
+            past_rounds: Vec::new(),
             carry: None,
             unverified: None,
         }

@@ -224,6 +224,9 @@ pub struct Probe {
     /// changes against its base, uncommitted ones included; none for one
     /// that couldn't be read (see `page::stats`).
     pub stats: BTreeMap<String, page::Stat>,
+    /// Per fix round with its code read before its fixes, by number: what
+    /// its fixes changed in each repository (see `page::round_stats`).
+    pub rounds: BTreeMap<u32, Result<Vec<page::RoundStat>, String>>,
     /// The stage files in its data dir, and their milestones.
     pub docs: page::Docs,
     /// The models its stages' agents use, with the run each read was of
@@ -273,6 +276,7 @@ pub fn probe(feature: &Feature, modes: &Modes) -> Probe {
         ship,
         merged,
         stats: page::stats(feature.touched().filter(|r| r.worktree.is_dir())),
+        rounds: page::round_stats(feature),
         docs: page::Docs::default(),
         models: BTreeMap::new(),
     }
@@ -288,6 +292,7 @@ pub fn probe_seen(feature: &Feature) -> Probe {
         ship: None,
         merged: false,
         stats: page::stats(feature.touched().filter(|r| r.worktree.is_dir())),
+        rounds: page::round_stats(feature),
         docs: page::Docs::default(),
         models: BTreeMap::new(),
     }
@@ -306,6 +311,7 @@ pub fn probe_finished(feature: &Feature) -> Probe {
         ship: None,
         merged: false,
         stats: page::stats(feature.touched().filter(|r| r.worktree.is_dir())),
+        rounds: page::round_stats(feature),
         docs: page::Docs::default(),
         models: BTreeMap::new(),
     }

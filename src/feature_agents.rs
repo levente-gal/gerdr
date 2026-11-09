@@ -3893,6 +3893,7 @@ mod tests {
             items: Vec::new(),
             done: 0,
             ended: None,
+            trail: Default::default(),
         };
         let mut planning = failed("f");
         planning.fix_round = Some(round(FixPhase::Planning, None));

@@ -7,6 +7,7 @@
 //! takes the round on, as the plan and what it fixes are in files.
 
 use std::{
+    collections::BTreeMap,
     path::{Path, PathBuf},
     time::Instant,
 };
@@ -19,7 +20,7 @@ use crate::{
     feature::{
         self, Feature, Stage, Status,
         agents::Flavor,
-        fix_round::{self, Compact, FixPhase, FixRound, Fixes, GiveBack, Plan, VerifyFix},
+        fix_round::{self, Asked, Compact, FixPhase, FixRound, Fixes, GiveBack, Plan, VerifyFix},
         store,
     },
     feature_agents::{stamp, vars},
@@ -201,6 +202,23 @@ impl Gerdr {
         }
     }
 
+    /// Each touched repository's HEAD of feature `slug`, as its code was last
+    /// read, if it could be.
+    fn last_heads(&self, project: &str, slug: &str) -> Option<BTreeMap<String, String>> {
+        let reading = self.feature_reading(project, slug)?;
+        (!reading.heads.is_empty()).then(|| reading.heads.clone())
+    }
+
+    /// Say what the open round of feature `slug` was asked to fix, as the
+    /// stage asking says it now (see `fix_round::Trail::asked`).
+    pub(crate) fn fix_round_asked(&mut self, project: &str, slug: &str, asked: Vec<Asked>) {
+        let Some(round) = (self.feature_mut(project, slug)).and_then(|f| f.fix_round.as_mut())
+        else {
+            return;
+        };
+        round.trail.asked = asked;
+    }
+
     /// Record `feature`'s new round, sent by `asked`, at `phase`.
     fn open_fix_round(
         &mut self,
@@ -238,6 +256,7 @@ impl Gerdr {
             items: Vec::new(),
             done: 0,
             ended: None,
+            trail: Default::default(),
         });
         f.log(now, format!("Fix round {n} started: {what}"));
         self.save_feature(project, slug);
@@ -964,10 +983,12 @@ impl Gerdr {
     /// fixes: `said` goes in the log.
     fn fixes_compact(&mut self, project: &str, slug: &str, said: &str) {
         let now = feature::now();
+        let heads = self.last_heads(project, slug);
         let Some(f) = self.feature_mut(project, slug) else {
             return;
         };
         f.reopen_fix_round();
+        f.fixes_going(now, heads.as_ref());
         if let Some(round) = f.fix_round.as_mut() {
             round.phase = FixPhase::CompactingToFix;
             round.stalled = None;
@@ -1050,10 +1071,12 @@ impl Gerdr {
             to = FRESH_BUILD_AGENT;
         }
         let now = feature::now();
+        let heads = self.last_heads(project, slug);
         let Some(f) = self.feature_mut(project, slug) else {
             return false;
         };
         f.reopen_fix_round();
+        f.fixes_going(now, heads.as_ref());
         if let Some(round) = f.fix_round.as_mut() {
             round.phase = FixPhase::Fixing;
             round.stalled = None;
@@ -1113,6 +1136,12 @@ impl Gerdr {
         };
         let now = feature::now();
         let n = round.n;
+        let mut kept = round.clone();
+        match back {
+            true => kept.trail.dropped = Some(now),
+            false => kept.ended = Some(now),
+        }
+        fix_round::keep_past(&mut f.past_rounds, kept);
         match back {
             true => {
                 f.log(now, format!("Fix round {n} dropped"));

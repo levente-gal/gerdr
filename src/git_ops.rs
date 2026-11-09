@@ -1667,8 +1667,8 @@ fn log_commits(dir: &Path, args: &[&str]) -> Vec<Commit> {
         .collect()
 }
 
-/// How many commits `range` holds.
-fn count_commits(dir: &Path, range: &str) -> usize {
+/// How many commits `range` holds; none when it can't be read.
+pub fn count_commits(dir: &Path, range: &str) -> usize {
     query(dir, &["rev-list", "--count", range])
         .and_then(|n| n.trim().parse().ok())
         .unwrap_or(0)
@@ -1740,6 +1740,17 @@ pub fn commit_diff(dir: &Path, oid: &str) -> Result<(Vec<Change>, Vec<FileDiff>)
     )
     .map(|p| p.trim().to_owned())
     .unwrap_or_else(|| empty_tree(&top));
+    range_diff(&top, &from, oid)
+}
+
+/// What the commits from `from` to `to` changed: their files, each with
+/// its diff; else why they can't be read.
+pub fn range_diff(
+    dir: &Path,
+    from: &str,
+    to: &str,
+) -> Result<(Vec<Change>, Vec<FileDiff>), String> {
+    let top = top(dir);
     let diff = [
         "-c",
         "core.quotePath=false",
@@ -1749,18 +1760,14 @@ pub fn commit_diff(dir: &Path, oid: &str) -> Result<(Vec<Change>, Vec<FileDiff>)
     ];
     let out = exec(
         &top,
-        &[&diff[..], &["--name-status", "-z", "-M", &from, oid]].concat(),
+        &[&diff[..], &["--name-status", "-z", "-M", from, to]].concat(),
         Reach::Read,
     );
     if out.code != Some(0) {
         return Err(why(&out.stderr, &out.stdout));
     }
     let changes = parse_name_status(&out.stdout);
-    let out = exec(
-        &top,
-        &[&diff[..], &["-M", &from, oid]].concat(),
-        Reach::Read,
-    );
+    let out = exec(&top, &[&diff[..], &["-M", from, to]].concat(), Reach::Read);
     if out.code != Some(0) {
         return Err(why(&out.stderr, &out.stdout));
     }
@@ -3259,6 +3266,25 @@ mod tests {
         assert_eq!(files[1].added, 1);
         assert_eq!(files[2].path, "moved");
         assert!(commit_diff(dir, "no-such-commit").is_err());
+    }
+
+    #[test]
+    fn reads_what_commits_from_one_to_another_changed() {
+        let fx = Fx::local();
+        let dir = &fx.repo;
+        let from = rev(dir, "HEAD");
+        commit(dir, "a", "changed");
+        commit(dir, "b", "added");
+        let to = rev(dir, "HEAD");
+        // Uncommitted and later work isn't the range's.
+        commit(dir, "c", "later");
+        write(dir, "a", "dirty\n");
+        let (changes, files) = range_diff(dir, &from, &to).unwrap();
+        let paths: Vec<_> = changes.iter().map(|c| (c.path.as_str(), c.code)).collect();
+        assert_eq!(paths, [("a", 'M'), ("b", 'A')]);
+        assert_eq!(files.len(), 2);
+        assert_eq!(count_commits(dir, &format!("{from}..{to}")), 2);
+        assert!(range_diff(dir, "no-such", &to).is_err());
     }
 
     #[test]

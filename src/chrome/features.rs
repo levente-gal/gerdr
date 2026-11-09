@@ -797,6 +797,8 @@ pub enum PageSection {
     },
     /// An AI review finding, with what can be done of it.
     Finding(FindingCard),
+    /// A fix round of the stage, with what can be done of it.
+    Round(RoundCard),
     /// Words, each with the indices in `StagePage::buttons` of the buttons
     /// after it, in a row at the right of the caption before it if they fit,
     /// else on a line of their own: Manual test's "Collapse" and "Expand".
@@ -834,6 +836,47 @@ pub enum PageSection {
         /// The page's buttons it holds, at its caption's right.
         buttons: Vec<usize>,
     },
+}
+
+/// A fix round as the page of the stage that asked lists it: how it stands,
+/// who made its fixes and when, what it was asked, its fixes ticked as they
+/// are made, and what they changed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RoundCard {
+    /// What it is called: "Manual test 2".
+    pub label: String,
+    /// How it stands, as a check's dot says it: blinking while its fixes are
+    /// being made.
+    pub dot: Dot,
+    /// How it stands, in words and their tone: "fixes made".
+    pub state: CheckLine,
+    /// Who made the fixes and when, muted: "Claude Code · opus · sent 2h ago".
+    pub meta: String,
+    /// What it was asked to fix, each with how it stands now.
+    pub asked: Vec<RoundAsked>,
+    /// Its fixes as the build log ticks them (`true` = made).
+    pub fixes: Vec<(bool, String)>,
+    /// Those an agent is at work on: they blink.
+    pub running: Vec<usize>,
+    /// What its fixes changed, a line per repository: "api · 3 files · +40
+    /// −12".
+    pub changed: Vec<String>,
+    /// It shows all of that; folded, only its head and its buttons.
+    pub open: bool,
+    /// The indices in `StagePage::buttons` of the buttons it holds.
+    pub buttons: Vec<usize>,
+}
+
+/// One thing a fix round was asked to fix, on its card.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RoundAsked {
+    /// "AC-2".
+    pub id: String,
+    pub title: String,
+    /// What went wrong, as the user said it then.
+    pub note: String,
+    /// How it stands now: "passed since", "fix made: try again".
+    pub now: Option<CheckLine>,
 }
 
 /// What a finding's card says it is, by its colour.
@@ -1661,6 +1704,10 @@ const COMMENT_PAD: i32 = 8;
 const COMMENT_TINT: f32 = 0.1;
 /// How far a check card's text stands right of its dot's left edge.
 const CHECK_DOT_ROOM: i32 = DOT + 8;
+/// How far a round card's lines under one thing it was asked go in.
+const ROUND_INDENT: i32 = 12;
+/// The room after each thing a round card says it was asked.
+const ROUND_ITEM_GAP: i32 = 4;
 /// A sheet row's room above and below its text, its chevron's width, the
 /// least its title gets beside its buttons, and the gap after the words of
 /// its steps.
@@ -1840,6 +1887,9 @@ pub(super) enum Piece {
     /// buttons; its text goes in pieces of its own. A sheet's row has no
     /// frame: its ground when selected or hovered, and a rule under it.
     FindingCard(usize),
+    /// The frame of the fix round card of `StagePage::sections[i]`, with
+    /// its buttons; its text goes in pieces of its own.
+    RoundCard(usize),
     /// The chevron folding or opening the sheet row of
     /// `StagePage::sections[i]`.
     Fold(usize),
@@ -2404,6 +2454,142 @@ impl Stack {
         (self.x, self.w) = (x, w);
         let frame = Rectangle::new((x, top).into(), (w, self.y - top).into());
         self.pieces.insert(frame_at, (frame, Piece::FindingCard(k)));
+        frame
+    }
+
+    /// Fix round card `k`: its frame, its text, and `buttons`' places in it.
+    /// Its head says which round it is and how it stands, then who made the
+    /// fixes and when; open, what it was asked, its fixes with a bar, and what
+    /// they changed; its buttons last, from the right.
+    fn round(
+        &mut self,
+        k: usize,
+        card: &RoundCard,
+        page: &StagePage,
+        buttons: &mut [Option<Rect>],
+    ) -> Rect {
+        let frame_at = self.pieces.len();
+        let (x, w, top) = (self.x, self.w, self.y);
+        self.x += AGENT_PAD;
+        self.w = (w - 2 * AGENT_PAD).max(1);
+        self.y += AGENT_PAD;
+        let (left, width) = (self.x, self.w);
+        // Its dot, then its name in bold, then how it stands in its tone.
+        self.pieces.push((
+            Rectangle::new(
+                (self.x, self.y + (BODY_LINE - DOT) / 2).into(),
+                (DOT, DOT).into(),
+            ),
+            Piece::CheckDot(card.dot),
+        ));
+        let name_x = left + CHECK_DOT_ROOM;
+        // Bold runs wider than it measures.
+        let name_w = (width_of(&card.label, Font::Body.size()).ceil() as i32 + 1) * 9 / 8;
+        let name_w = name_w.min((left + width - name_x).max(1));
+        self.pieces.push((
+            Rectangle::new((name_x, self.y).into(), (name_w, BODY_LINE).into()),
+            Piece::Text {
+                text: card.label.clone(),
+                font: Font::Body,
+                ink: Ink::Text,
+                bold: true,
+            },
+        ));
+        let state_x = name_x + name_w + PAGE_GAP / 2;
+        if state_x < left + width && !card.state.text.is_empty() {
+            self.join_next(false);
+            self.pieces.push((
+                Rectangle::new(
+                    (state_x, self.y).into(),
+                    (left + width - state_x, BODY_LINE).into(),
+                ),
+                Piece::Text {
+                    text: card.state.text.clone(),
+                    font: Font::Body,
+                    ink: Ink::Tone(card.state.tone),
+                    bold: false,
+                },
+            ));
+        }
+        self.y += BODY_LINE;
+        if !card.meta.is_empty() {
+            (self.x, self.w) = (name_x, (left + width - name_x).max(1));
+            self.text(&card.meta, Font::Small, Ink::Muted, TAIL_LINE);
+            (self.x, self.w) = (left, width);
+        }
+        if card.open {
+            if !card.asked.is_empty() {
+                self.y += FINDING_GAP;
+                self.caption("Asked to fix");
+                for asked in &card.asked {
+                    let head = match asked.title.is_empty() {
+                        true => asked.id.clone(),
+                        false => format!("{} \u{b7} {}", asked.id, asked.title),
+                    };
+                    self.all_text(&head, Font::Body, Ink::Text, false, BODY_LINE);
+                    (self.x, self.w) = (left + ROUND_INDENT, (width - ROUND_INDENT).max(1));
+                    if !asked.note.is_empty() {
+                        let note = format!("\u{201c}{}\u{201d}", asked.note);
+                        self.all_text(&note, Font::Small, Ink::Muted, false, TAIL_LINE);
+                    }
+                    if let Some(now) = &asked.now {
+                        self.text(&now.text, Font::Small, Ink::Tone(now.tone), TAIL_LINE);
+                    }
+                    (self.x, self.w) = (left, width);
+                    self.y += ROUND_ITEM_GAP;
+                }
+            }
+            if !card.fixes.is_empty() {
+                self.y += FINDING_GAP;
+                let done = card.fixes.iter().filter(|(d, _)| *d).count();
+                let total = card.fixes.len();
+                self.caption(&format!("Fixes \u{b7} {done} of {total} made"));
+                self.y += 2;
+                self.put(PROGRESS, Piece::Bar { done, total });
+                self.y += 8;
+                let next = (card.fixes.iter())
+                    .position(|(d, _)| !d)
+                    .filter(|_| card.running.is_empty());
+                for (i, (done, text)) in card.fixes.iter().enumerate() {
+                    self.put(
+                        MILESTONE_ROW,
+                        Piece::Milestone {
+                            done: *done,
+                            next: next == Some(i),
+                            running: card.running.contains(&i),
+                            text: text.clone(),
+                        },
+                    );
+                }
+            }
+            if !card.changed.is_empty() {
+                self.y += FINDING_GAP;
+                self.caption("Changed");
+                for line in &card.changed {
+                    self.text(line, Font::Small, Ink::Text, TAIL_LINE);
+                }
+            }
+        }
+        let held: Vec<usize> = (card.buttons.iter().copied())
+            .filter(|b| *b < page.buttons.len())
+            .collect();
+        if !held.is_empty() {
+            self.y += FINDING_GAP;
+            let widths: Vec<i32> = (held.iter())
+                .map(|b| button_width(&page.buttons[*b].label))
+                .collect();
+            let placed = rows_from_right(&widths, self.x, self.x + self.w);
+            for (b, (bx, row)) in held.iter().zip(&placed) {
+                let by = self.y + row * (ROW_BUTTON + QUIT_BUTTON_GAP);
+                let w = button_width(&page.buttons[*b].label);
+                buttons[*b] = Some(Rectangle::new((*bx, by).into(), (w, ROW_BUTTON).into()));
+            }
+            self.y += rows_height(&placed);
+        }
+        self.y += AGENT_PAD;
+        (self.x, self.w) = (x, w);
+        let frame = Rectangle::new((x, top).into(), (w, self.y - top).into());
+        self.pieces.insert(frame_at, (frame, Piece::RoundCard(k)));
         frame
     }
 
@@ -3072,6 +3258,7 @@ fn page_stack(
             PageSection::Finding(card) => (card.buttons.iter().chain(&card.comment_buttons))
                 .copied()
                 .collect(),
+            PageSection::Round(card) => card.buttons.clone(),
             _ => Vec::new(),
         })
         .collect();
@@ -3267,6 +3454,9 @@ fn page_stack(
             PageSection::Finding(card) => {
                 let frame = s.finding(k, card, page, buttons);
                 finding_cards.push(frame);
+            }
+            PageSection::Round(card) => {
+                s.round(k, card, page, buttons);
             }
             PageSection::Lines { label, lines } => {
                 if !label.is_empty() {
@@ -5841,6 +6031,17 @@ impl Painter {
                     let high = (h - 2.0 * inset).max(0.0);
                     c.rounded(x + edge, y + inset, bar, high, bar / 2.0, colour);
                 }
+                for &i in &card.buttons {
+                    if let Some(r) = l.page_buttons.get(i).copied().flatten() {
+                        self.page_button(c, view, i, at(r), scale, p);
+                    }
+                }
+            }
+            Piece::RoundCard(k) => {
+                let Some(PageSection::Round(card)) = view.page.sections.get(*k) else {
+                    return;
+                };
+                card_frame(c, rect, scale, p);
                 for &i in &card.buttons {
                     if let Some(r) = l.page_buttons.get(i).copied().flatten() {
                         self.page_button(c, view, i, at(r), scale, p);

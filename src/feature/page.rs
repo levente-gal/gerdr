@@ -309,6 +309,79 @@ pub fn stats<'a>(repos: impl Iterator<Item = &'a Repo>) -> BTreeMap<String, Stat
         .collect()
 }
 
+/// What a fix round's fixes changed in one repository.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RoundStat {
+    /// `Repo::key`.
+    pub repo: String,
+    pub commits: usize,
+    pub stat: Stat,
+}
+
+/// How many of a feature's latest rounds `round_stats` reads.
+const ROUND_STATS: usize = 12;
+
+/// What the fixes of each of `feature`'s latest rounds changed, by round
+/// number: from where each repository stood before them to after them, or
+/// to its HEAD while they go on. A repository whose code didn't move is left
+/// out; one that can't be read makes the round's why.
+pub fn round_stats(feature: &Feature) -> BTreeMap<u32, Result<Vec<RoundStat>, String>> {
+    let mut rounds: Vec<&fix_round::FixRound> = (feature.fix_round.iter())
+        .chain(&feature.last_fix_round)
+        .chain(&feature.past_rounds)
+        .filter(|r| !r.trail.from.is_empty())
+        .collect();
+    rounds.sort_by_key(|r| std::cmp::Reverse(r.n));
+    rounds.dedup_by_key(|r| r.n);
+    let mut out = BTreeMap::new();
+    for round in rounds.into_iter().take(ROUND_STATS) {
+        let mut stats = Ok(Vec::new());
+        for (key, from, to) in fix_round::span(round) {
+            let Some(repo) = feature.repo(&key).filter(|r| r.worktree.is_dir()) else {
+                stats = Err(format!("{key} isn't there"));
+                break;
+            };
+            let to = to.unwrap_or_else(|| "HEAD".to_owned());
+            let args = [
+                "diff",
+                "--numstat",
+                "--no-ext-diff",
+                "--no-textconv",
+                &from,
+                &to,
+            ];
+            match git(&repo.worktree, &args) {
+                Ok(out) => {
+                    let (added, removed) = numstat(&out);
+                    let files = out.lines().filter(|l| !l.trim().is_empty()).count();
+                    let range = format!("{from}..{to}");
+                    let commits = crate::git_ops::count_commits(&repo.worktree, &range);
+                    if (files > 0 || commits > 0)
+                        && let Ok(stats) = stats.as_mut()
+                    {
+                        stats.push(RoundStat {
+                            repo: key,
+                            commits,
+                            stat: Stat {
+                                files,
+                                added,
+                                removed,
+                            },
+                        });
+                    }
+                }
+                // The card says so: the probe reads it again in a few seconds.
+                Err(why) => {
+                    stats = Err(format!("{key}: {why}"));
+                    break;
+                }
+            }
+        }
+        out.insert(round.n, stats);
+    }
+    out
+}
+
 /// The last `TAIL_LINES` lines of `text` worth showing: box drawing and
 /// block characters gone, runs of spaces one, lines with no letter left
 /// out (rules, prompts, spinners).
@@ -460,6 +533,7 @@ mod comment_fix_tests {
             items: Vec::new(),
             done: 0,
             ended: None,
+            trail: Default::default(),
         });
         let docs = Docs::default().with_comment_fixes(&data, &f);
         assert!(docs.notes.is_empty() && docs.comment_plan.is_some());

@@ -254,6 +254,9 @@ pub struct ReposView {
     /// With `diff_only`: the tree beside the diff all the same, its lines
     /// and toolbar (a feature's code review).
     pub diff_tree: bool,
+    /// With `diff_tree`: its files have no checkboxes (a fix round's diff,
+    /// only to read).
+    pub unchecked: bool,
     /// The tree's toolbar going to the previous and the next file not
     /// viewed (a feature's code review): whether one is left to go to.
     pub tree_nav: Option<bool>,
@@ -316,6 +319,7 @@ impl ReposView {
             grouping: Default::default(),
             diff_only: true,
             diff_tree: false,
+            unchecked: false,
             tree_nav: None,
             flat: false,
             detail_share: 1.0,
@@ -1907,6 +1911,8 @@ struct TreeRow {
     dim: bool,
     /// What the pointer is over on it, as on the first line.
     hover: Option<ReposHit>,
+    /// It has no checkbox (`ReposView::unchecked`).
+    unchecked: bool,
 }
 
 /// Tree line `i` of `view`, as drawn.
@@ -1927,6 +1933,7 @@ fn tree_row(view: &ReposView, i: usize) -> TreeRow {
         selected,
         dim: selected && view.field_focused,
         hover,
+        unchecked: view.unchecked,
     }
 }
 
@@ -2014,6 +2021,11 @@ fn parts(view: &ReposView, panel: Rect) -> Parts {
         let ly = (at as f64 - tree_shift).round() as i32;
         let rect = Rectangle::new((line_x, ly).into(), (line_w, row_h).into());
         let (_, check, expander) = line_rects(line, rect);
+        // Nothing to check: the box takes no clicks, its room stays.
+        let check = match view.unchecked {
+            true => Rectangle::new(check.loc, (0, 0).into()),
+            false => check,
+        };
         if let TreeLine::Repo(repo) = line {
             // Measured as the painter measures, at one pixel a pixel.
             let width = |text: &str, size: f32| measure(text, size).unwrap_or(0.0);
@@ -3395,7 +3407,9 @@ impl Painter {
                 );
             }
             TreeLine::Dir(dir) => {
-                self.checkbox(c, box_rect, dir.check, check_hovered, scale, p);
+                if !row.unchecked {
+                    self.checkbox(c, box_rect, dir.check, check_hovered, scale, p);
+                }
                 if let Some(rect) = expander {
                     icon_sdf(c, rect, scale, expander_color, |x, y| {
                         expander_mark(dir.open, x, y, s)
@@ -3419,7 +3433,9 @@ impl Painter {
                 );
             }
             TreeLine::File(file) => {
-                self.checkbox(c, box_rect, file.check, check_hovered, scale, p);
+                if !row.unchecked {
+                    self.checkbox(c, box_rect, file.check, check_hovered, scale, p);
+                }
                 // At the right its status letter, its counts before it.
                 let code_w = px(REPOS_CODE) as f32;
                 let code_x = right - code_w;
@@ -5376,6 +5392,7 @@ fn frame_view(view: &ReposView) -> ReposView {
         grouping: view.grouping,
         diff_only: view.diff_only,
         diff_tree: view.diff_tree,
+        unchecked: view.unchecked,
         tree_nav: view.tree_nav,
         flat: view.flat,
         detail_share: view.detail_share,
@@ -5981,6 +5998,7 @@ mod tests {
             tree_note: None,
             diff_only: false,
             diff_tree: false,
+            unchecked: false,
             tree_nav: None,
             flat: false,
         }

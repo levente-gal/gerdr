@@ -28,7 +28,7 @@
 //! nothing uncommitted and no finding holding up.
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     path::{Path, PathBuf},
 };
 
@@ -65,6 +65,8 @@ pub const NO_OWN_COMMENT: &str = "Add a comment first";
 pub const REVIEW_DONE: &str = "Code review is done: reopen it first";
 /// Why a closed feature's diff takes no comments or viewed ticks.
 pub const FEATURE_CLOSED: &str = "The feature is closed";
+/// Why a fix round's diff takes no comments or viewed ticks.
+pub const ROUND_ONLY_READ: &str = "This shows what a fix round changed, only to read";
 
 /// What Plan fixes waits for at AI review.
 pub fn decide_first(undecided: usize) -> String {
@@ -115,6 +117,23 @@ pub enum Role {
     Review,
     /// Past Code review, or the feature closed.
     Done,
+    /// What one fix round changed (`FeatureOf::span`): only read.
+    Span,
+}
+
+/// The fix round whose code a feature's diff shows instead of all the
+/// feature's (`FeatureOf::span`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SpanOf {
+    /// `FixRound::n`.
+    pub n: u32,
+    /// What it is called: "Manual test 2".
+    pub label: String,
+    /// How it stands, lowercase: "fixes made 12m ago".
+    pub state: String,
+    /// Per repository by `Repo::key`: the HEAD before its fixes, and after
+    /// them, none while they go on (up to HEAD).
+    pub ends: BTreeMap<String, (String, Option<String>)>,
 }
 
 /// A touched repository as its code review last read it.
@@ -184,6 +203,9 @@ pub struct FeatureOf {
     /// The comments that went to Build in Code review's latest round: only
     /// to see, its comments file holding them no longer.
     pub sent_notes: Vec<Comment>,
+    /// Only what this fix round changed, to read: no ticks, findings or
+    /// comments.
+    pub span: Option<SpanOf>,
 }
 
 /// What code review counts of a feature, for its panel row.
@@ -234,6 +256,9 @@ impl Standing {
 impl FeatureOf {
     /// What it is for now.
     pub fn role(&self) -> Role {
+        if self.span.is_some() {
+            return Role::Span;
+        }
         if self.closed {
             return Role::Done;
         }
@@ -251,6 +276,9 @@ impl FeatureOf {
 
     /// Its heading: what the feature is at.
     pub fn heading(&self) -> String {
+        if let Some(span) = &self.span {
+            return format!("{} of \u{201c}{}\u{201d}", span.label, self.title);
+        }
         let what = match self.stage.filter(|_| !self.closed) {
             Some(Stage::AiReview) => "AI review",
             Some(stage) if stage < Stage::AiReview => "Code",
@@ -313,6 +341,9 @@ impl FeatureOf {
     /// Why its code takes no comments or viewed ticks, if it doesn't: another
     /// machine writes it, Code review is done, or the feature closed.
     pub fn locked(&self) -> Option<&'static str> {
+        if self.span.is_some() {
+            return Some(ROUND_ONLY_READ);
+        }
         if self.seen {
             return Some(crate::doc_review::WRITTEN_ELSEWHERE);
         }
@@ -372,6 +403,7 @@ impl FeatureOf {
             Role::Review => "Code review has no findings to decide",
             Role::Done if self.closed => FEATURE_CLOSED,
             Role::Done => REVIEW_DONE,
+            Role::Span => ROUND_ONLY_READ,
         }
     }
 
@@ -529,6 +561,7 @@ impl FeatureOf {
         match (read, self.repos.iter().any(|r| r.error.is_some())) {
             (false, _) => "Reading…",
             (true, true) => "Its changes couldn't be read",
+            (true, false) if self.span.is_some() => "Its fixes changed no file",
             (true, false) => "No changes since its base",
         }
     }
@@ -554,6 +587,9 @@ impl FeatureOf {
 
     /// The header's summary: where the stage stands, then its counts.
     pub fn summary(&self, own: usize) -> String {
+        if let Some(span) = &self.span {
+            return self.span_summary(span);
+        }
         let head = match self.role() {
             Role::Deciding => self.decisions(),
             _ => self.state.clone(),
@@ -564,9 +600,24 @@ impl FeatureOf {
         }
     }
 
+    /// The header's summary of a fix round's diff: how the round stands,
+    /// its commits and files.
+    fn span_summary(&self, span: &SpanOf) -> String {
+        let commits: usize = self.repos.iter().map(|r| r.since.commits).sum();
+        let files: usize = self.repos.iter().map(|r| r.since.changes.len()).sum();
+        let mut parts = vec![span.state.clone(), plural(commits, "commit")];
+        if files > 0 {
+            parts.push(plural(files, "file"));
+        }
+        parts.join(" \u{b7} ")
+    }
+
     /// What the file list's title says once read: how many files are left.
     pub fn tree_note(&self, read: bool) -> Option<(String, crate::chrome::Tone)> {
         use crate::chrome::Tone;
+        if self.span.is_some() {
+            return None;
+        }
         let counts = self.counts(0);
         if !read || counts.files == 0 {
             return None;
@@ -994,9 +1045,68 @@ impl Gerdr {
         if at_hand && review_views(feature) && self.show_inline_review(project, slug, finding) {
             return;
         }
-        let Some(mut wd) = self.new_feature_diff(project, slug, finding) else {
+        let Some(wd) = self.new_feature_diff(project, slug, finding) else {
             return;
         };
+        self.show_feature_diff(wd);
+    }
+
+    /// Show what fix round `n` of feature `slug` changed, across the
+    /// repositories panel as its code review shows, only to read: from where
+    /// each repository's code stood before its fixes to after them, or to now
+    /// while they go on. Esc goes back to the feature panel.
+    pub fn open_round_diff(&mut self, project: &str, slug: &str, n: u32) {
+        let Some(feature) = self.feature(project, slug) else {
+            return self.show_warning("That feature is gone".into());
+        };
+        let found = (feature.fix_round.iter())
+            .chain(&feature.last_fix_round)
+            .chain(feature.past_rounds.iter().rev())
+            .find(|r| r.n == n)
+            .cloned();
+        let label = crate::feature::fix_round::label(n, &feature.verify_fixes, &feature.fix_asked);
+        let Some(round) = found else {
+            return self.show_warning(format!("{label} is gone"));
+        };
+        if round.trail.went.is_none() {
+            return self.show_warning(format!(
+                "The fixes of {label} haven't gone to the agent yet"
+            ));
+        }
+        if round.trail.from.is_empty() {
+            return self.show_warning(format!(
+                "gerdr didn't read the code before the fixes of {label}: it can't tell what they changed"
+            ));
+        }
+        let ends: BTreeMap<String, (String, Option<String>)> =
+            (crate::feature::fix_round::span(&round).into_iter())
+                .map(|(key, from, to)| (key, (from, to)))
+                .collect();
+        if ends.is_empty() {
+            return self.show_warning(format!("The fixes of {label} changed no code"));
+        }
+        let state = crate::features::round_state_words(&round, crate::feature::now());
+        let Some(mut wd) = self.new_feature_diff(project, slug, None) else {
+            return;
+        };
+        wd.diff.review = Review::default();
+        if let Some(fe) = wd.feature.as_mut() {
+            fe.findings.clear();
+            fe.viewed = Viewed::default();
+            fe.comments = PathBuf::new();
+            fe.repos.retain(|r| ends.contains_key(&r.name));
+            fe.span = Some(SpanOf {
+                n,
+                label,
+                state,
+                ends,
+            });
+        }
+        self.show_feature_diff(wd);
+    }
+
+    /// Show `wd`, a feature's diff, across the repositories panel.
+    fn show_feature_diff(&mut self, mut wd: WorktreeDiff) {
         wd.tree = Some(FileTree::new(self.projects.repo_grouping));
         // It covers the other panels: they close, the repositories panel
         // kept as it was.
@@ -1109,6 +1219,7 @@ impl Gerdr {
             focus: finding.map(str::to_owned),
             focus_note: None,
             sent_notes: Vec::new(),
+            span: None,
         };
         let root = feature.root.clone();
         // A Zed opened from it goes to the feature's own workspace.
@@ -1281,11 +1392,19 @@ impl Gerdr {
         let Some(feature) = self.feature(&project, &slug) else {
             return;
         };
-        let repos: Vec<Repo> = feature.touched().cloned().collect();
-        let (standing, viewed) = (Standing::of(feature), feature.viewed.clone());
-        let findings = (feature.review.as_ref())
+        let span = fe.span.as_ref().map(|span| span.ends.clone());
+        let repos: Vec<Repo> = (feature.touched())
+            .filter(|r| span.as_ref().is_none_or(|ends| ends.contains_key(&r.key())))
+            .cloned()
+            .collect();
+        let (standing, mut viewed) = (Standing::of(feature), feature.viewed.clone());
+        let mut findings = (feature.review.as_ref())
             .map(|r| r.findings.clone())
             .unwrap_or_default();
+        // A fix round's diff has none of the review's.
+        if span.is_some() {
+            (viewed, findings) = (Viewed::default(), Vec::new());
+        }
         let Some(tx) = self.repos_sender() else {
             return;
         };
@@ -1303,9 +1422,12 @@ impl Gerdr {
             }
         }
         std::thread::spawn(move || {
-            let repos = repos
-                .iter()
-                .map(|r| (r.key(), r.worktree.clone(), viewed::read(r)))
+            let read = |r: &Repo| match span.as_ref().and_then(|ends| ends.get(&r.key())) {
+                Some((from, to)) => viewed::read_span(&r.worktree, from, to.as_deref()),
+                None => viewed::read(r),
+            };
+            let repos = (repos.iter())
+                .map(|r| (r.key(), r.worktree.clone(), read(r)))
                 .collect();
             let read = Read {
                 project,
@@ -1369,7 +1491,7 @@ impl Gerdr {
         let Some(wd) = self.wd().filter(|wd| wd.read) else {
             return;
         };
-        let Some(fe) = &wd.feature else {
+        let Some(fe) = wd.feature.as_ref().filter(|fe| fe.span.is_none()) else {
             return;
         };
         let counts = fe.counts(wd.diff.review.own());
@@ -1694,7 +1816,8 @@ impl Gerdr {
     /// only then does `code_reviews` know more than its file does.
     pub(crate) fn diff_open_of(&self, project: &str, slug: &str) -> bool {
         let of = |wd: &crate::worktree_diff::WorktreeDiff| {
-            (wd.feature.as_ref()).is_some_and(|fe| fe.project == project && fe.slug == slug)
+            (wd.feature.as_ref())
+                .is_some_and(|fe| fe.project == project && fe.slug == slug && fe.span.is_none())
         };
         self.repos.worktree.as_ref().is_some_and(of)
             || (self.features.panel.as_ref())
@@ -1725,10 +1848,9 @@ impl Gerdr {
     /// Save the user's comments in the open code review, if they changed:
     /// the findings left out; a failure says so.
     pub(crate) fn feature_save_review(&mut self) {
-        let Some(wd) = self
-            .wd_mut()
-            .filter(|wd| wd.diff.review_dirty && wd.feature.is_some())
-        else {
+        let Some(wd) = self.wd_mut().filter(|wd| {
+            wd.diff.review_dirty && (wd.feature.as_ref()).is_some_and(|fe| fe.span.is_none())
+        }) else {
             return;
         };
         wd.diff.review_dirty = false;
@@ -3354,5 +3476,48 @@ mod tests {
         assert_eq!(labels, ["ui", "Admin: ui"]);
         let comments = fe.finding_comments(&HashMap::new());
         assert_eq!(comments[0].root, Path::new("/w/admin:ui"));
+    }
+
+    #[test]
+    fn a_fix_rounds_diff_only_reads_and_says_what_round_it_is() {
+        let mut fe = FeatureOf {
+            title: "Export".into(),
+            stage: Some(Stage::ManualTest),
+            repos: vec![RepoOf {
+                name: "api".into(),
+                root: "/w/api".into(),
+                since: Since {
+                    base: "a1".into(),
+                    commits: 2,
+                    changes: vec![crate::git::Change {
+                        path: "a.rs".into(),
+                        orig: None,
+                        code: 'M',
+                    }],
+                },
+                ..RepoOf::default()
+            }],
+            round: Some((FixPhase::Ready, "fix plan ready".into())),
+            span: Some(SpanOf {
+                n: 2,
+                label: "Manual test 2".into(),
+                state: "fixes made 12m ago".into(),
+                ends: BTreeMap::from([("api".into(), ("a1".into(), Some("a3".into())))]),
+            }),
+            ..FeatureOf::default()
+        };
+        assert_eq!(fe.role(), Role::Span);
+        assert_eq!(fe.heading(), "Manual test 2 of \u{201c}Export\u{201d}");
+        assert_eq!(
+            fe.summary(0),
+            "fixes made 12m ago \u{b7} 2 commits \u{b7} 1 file"
+        );
+        assert_eq!(fe.locked(), Some(ROUND_ONLY_READ));
+        assert!(fe.buttons(0).is_empty());
+        assert_eq!(fe.tree_note(true), None);
+        // Only Esc and F1 of its own: no ticks.
+        assert_eq!(fe.keys(0).len(), 2);
+        fe.span = None;
+        assert_eq!(fe.role(), Role::Round(FixPhase::Ready));
     }
 }

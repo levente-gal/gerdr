@@ -907,6 +907,7 @@ impl Gerdr {
                     return;
                 };
                 let (n, text) = manual::failures_markdown(feature.manual.as_ref(), &criteria, &title);
+                let asked = manual::asked(feature.manual.as_ref(), &criteria);
                 if n == 0 {
                     return self.show_warning("No failures to send: mark one failed first".into());
                 }
@@ -923,6 +924,7 @@ impl Gerdr {
                     let checks = manual::mark_sent(&mut f.manual, &criteria);
                     let back = crate::feature::fix_round::GiveBack::Manual { checks };
                     self.fix_round_gives_back(&project, &slug, back);
+                    self.fix_round_asked(&project, &slug, asked);
                 }
                 tracing::info!("sent {n} manual test failures of {project}/{slug} to Build");
                 self.save_feature(&project, &slug);

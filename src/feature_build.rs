@@ -1407,6 +1407,7 @@ mod tests {
             dirty: dirty.iter().map(|s| (*s).to_owned()).collect(),
             stray: stray.iter().map(|s| (*s).to_owned()).collect(),
             commits: commits.iter().map(|(r, n)| ((*r).to_owned(), *n)).collect(),
+            ..Reading::default()
         }
     }
 

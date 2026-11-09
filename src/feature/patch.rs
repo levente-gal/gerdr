@@ -33,6 +33,11 @@ pub struct Reading {
     pub stray: Vec<String>,
     /// Per touched repository by `Repo::key`, its commits not in its base.
     pub commits: BTreeMap<String, usize>,
+    /// Per touched repository by `Repo::key`, its HEAD: where a fix round's
+    /// diff starts and ends (`fix_round::Trail`).
+    pub heads: BTreeMap<String, String>,
+    /// Unix seconds it was read, before the first git call.
+    pub at: u64,
 }
 
 /// Read `feature`'s worktrees: its patch-id, and what isn't committed. An
@@ -42,7 +47,10 @@ pub struct Reading {
 /// the patch-id, so the id of a feature without commits is always the
 /// same.
 pub fn read(feature: &Feature) -> Result<Reading, String> {
-    let mut reading = Reading::default();
+    let mut reading = Reading {
+        at: super::now(),
+        ..Reading::default()
+    };
     let mut lines = String::new();
     for repo in feature.repos_by_key() {
         let name = &repo.key();
@@ -60,6 +68,9 @@ pub fn read(feature: &Feature) -> Result<Reading, String> {
             lines.push_str(&format!("{name} {id}\n"));
         }
         reading.commits.insert(name.clone(), commits);
+        let head = git(&repo.worktree, &["rev-parse", "HEAD"])
+            .map_err(|err| format!("{name}: couldn't read its HEAD: {err}"))?;
+        reading.heads.insert(name.clone(), head.trim().to_owned());
         if changed(repo)? {
             reading.dirty.push(name.clone());
         }

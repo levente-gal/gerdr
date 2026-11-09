@@ -4913,8 +4913,102 @@ fn feature_tab_manual_pages() -> super::FeatureTabView {
     view
 }
 
+/// Manual test's page with its fix rounds: one making its fixes, open, one
+/// over and open, and one dropped, folded.
+fn feature_tab_manual_rounds() -> super::FeatureTabView {
+    use super::{ButtonStyle, CheckTone, Dot, PageButton, PageSection, RoundAsked, RoundCard};
+    let mut view = feature_tab_manual_test(false);
+    let first = view.page.buttons.len();
+    for (label, style) in [
+        ("Open", ButtonStyle::Plain),
+        ("Diff", ButtonStyle::Plain),
+        ("Hide", ButtonStyle::Plain),
+        ("Diff", ButtonStyle::Plain),
+        ("Open plan", ButtonStyle::Plain),
+        ("Hide", ButtonStyle::Plain),
+        ("Open plan", ButtonStyle::Plain),
+        ("Show", ButtonStyle::Plain),
+    ] {
+        view.page.buttons.push(PageButton {
+            label: label.into(),
+            style,
+        });
+    }
+    let asked = |id: &str, title: &str, note: &str, now: Option<(&str, CheckTone)>| RoundAsked {
+        id: id.into(),
+        title: title.into(),
+        note: note.into(),
+        now: now.map(|(text, tone)| tab_line(text, tone)),
+    };
+    let cards = [
+        RoundCard {
+            label: "Manual test 3".into(),
+            dot: Dot::Working,
+            state: tab_line("making fixes \u{b7} 1 of 2 made", CheckTone::Note),
+            meta: "Claude Code (opus) \u{b7} asked 20m ago \u{b7} fixes went 12m ago".into(),
+            asked: vec![
+                asked(
+                    "AC-2",
+                    "Export off with no invoices",
+                    "The button stays on and exports an empty file",
+                    Some(("being fixed", CheckTone::Note)),
+                ),
+                asked("AC-4", "Totals in the footer", "", Some(("not tried since", CheckTone::Note))),
+            ],
+            fixes: vec![
+                (true, "Disable Export with no invoices".into()),
+                (false, "Footer sums the shown rows".into()),
+            ],
+            running: vec![1],
+            changed: vec!["2 commits \u{b7} 3 files \u{b7} +48 \u{2212}9".into()],
+            open: true,
+            buttons: vec![first, first + 1, first + 2],
+        },
+        RoundCard {
+            label: "Manual test 2".into(),
+            dot: Dot::Done,
+            state: tab_line("2 of 2 made", CheckTone::Ready),
+            meta: "Cursor \u{b7} asked 2h ago \u{b7} fixes went 2h ago \u{b7} finished 1h ago \u{b7} took 34 min".into(),
+            asked: vec![asked(
+                "AC-3",
+                "CSV keeps the currency",
+                "Amounts lose their symbol (2 screenshots)",
+                Some(("passed since", CheckTone::Ready)),
+            )],
+            fixes: vec![
+                (true, "Write the currency column".into()),
+                (true, "Test the CSV header".into()),
+            ],
+            running: Vec::new(),
+            changed: vec!["1 commit \u{b7} 2 files \u{b7} +31 \u{2212}4".into()],
+            open: true,
+            buttons: vec![first + 3, first + 4, first + 5],
+        },
+        RoundCard {
+            label: "Manual test 1".into(),
+            dot: Dot::Unknown,
+            state: tab_line("dropped", CheckTone::Note),
+            meta: "Claude Code \u{b7} asked 1d ago".into(),
+            asked: Vec::new(),
+            fixes: Vec::new(),
+            running: Vec::new(),
+            changed: Vec::new(),
+            open: false,
+            buttons: vec![first + 6, first + 7],
+        },
+    ];
+    let mut sections = vec![PageSection::Lines {
+        label: "Fix rounds \u{b7} 3".into(),
+        lines: Vec::new(),
+    }];
+    sections.extend(cards.into_iter().map(PageSection::Round));
+    sections.append(&mut view.page.sections);
+    view.page.sections = sections;
+    view
+}
+
 /// The feature tab's fixtures, by name.
-fn feature_tabs() -> [(&'static str, super::FeatureTabView); 42] {
+fn feature_tabs() -> [(&'static str, super::FeatureTabView); 43] {
     [
         ("tab_build", feature_tab()),
         ("tab_verify_fixes", feature_tab_verify_fixes()),
@@ -4967,11 +5061,12 @@ fn feature_tabs() -> [(&'static str, super::FeatureTabView); 42] {
         ("tab_manual_search", feature_tab_manual_search()),
         ("tab_manual_select", feature_tab_manual_select()),
         ("tab_review_rounds", feature_tab_review_rounds()),
+        ("tab_manual_rounds", feature_tab_manual_rounds()),
     ]
 }
 
 /// Each fixture at the width it shows best at, and Build at all three.
-const TAB_SURFACES: [(&str, i32); 53] = [
+const TAB_SURFACES: [(&str, i32); 55] = [
     ("tab_build", 860),
     ("tab_build", 1180),
     ("tab_build", 1920),
@@ -5025,9 +5120,11 @@ const TAB_SURFACES: [(&str, i32); 53] = [
     ("tab_manual_pages", 860),
     ("tab_manual_search", 860),
     ("tab_manual_select", 860),
+    ("tab_manual_rounds", 1180),
+    ("tab_manual_rounds", 860),
 ];
 
-const FEATURE_TAB: [&str; 53] = [
+const FEATURE_TAB: [&str; 55] = [
     "tab_build_860",
     "tab_build_1180",
     "tab_build_1920",
@@ -5081,10 +5178,12 @@ const FEATURE_TAB: [&str; 53] = [
     "tab_manual_pages_860",
     "tab_manual_search_860",
     "tab_manual_select_860",
+    "tab_manual_rounds_1180",
+    "tab_manual_rounds_860",
 ];
 
 /// The recorded hashes of `FEATURE_TAB`, per case in `CASES`.
-const GOLDEN_FEATURE_TAB: [[u64; 53]; 4] = [
+const GOLDEN_FEATURE_TAB: [[u64; 55]; 4] = [
     // Dark at 1
     [
         0xa1cb47fc387244fb, // tab_build_860
@@ -5140,6 +5239,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 53]; 4] = [
         0x3ca562e56cb5ac79, // tab_manual_pages_860
         0xf439e283f4cafda2, // tab_manual_search_860
         0x010ec66c0954969d, // tab_manual_select_860
+        0x1aad80bb7aa1c5ad, // tab_manual_rounds_1180
+        0x7f9a9d7d6b207fa8, // tab_manual_rounds_860
     ],
     // Dark at 2
     [
@@ -5196,6 +5297,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 53]; 4] = [
         0x638d93fbc6e1f713, // tab_manual_pages_860
         0x15a2d69adf802796, // tab_manual_search_860
         0x9a471d9cc1895e23, // tab_manual_select_860
+        0xafed5987e588048a, // tab_manual_rounds_1180
+        0x234251df2b1dba25, // tab_manual_rounds_860
     ],
     // Light at 1
     [
@@ -5252,6 +5355,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 53]; 4] = [
         0x3d753e7555e243d8, // tab_manual_pages_860
         0x31b855efdeeab544, // tab_manual_search_860
         0xc85de47f1e15da39, // tab_manual_select_860
+        0x0734f6120bb9baa5, // tab_manual_rounds_1180
+        0xb5fc3742006aa677, // tab_manual_rounds_860
     ],
     // Light at 2
     [
@@ -5308,6 +5413,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 53]; 4] = [
         0xcba476b8512b8cc8, // tab_manual_pages_860
         0x085ecd92e9b0d5f2, // tab_manual_search_860
         0xc5481c04265fbb04, // tab_manual_select_860
+        0xee1fd2fcf94c4e4b, // tab_manual_rounds_1180
+        0x33196b42cbee501a, // tab_manual_rounds_860
     ],
 ];
 

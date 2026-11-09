@@ -434,6 +434,18 @@ pub fn failures_markdown(
     (fails.len(), md)
 }
 
+/// The failures not sent yet, as a fix round keeps what it was asked.
+pub fn asked(test: Option<&ManualTest>, criteria: &[Criterion]) -> Vec<super::fix_round::Asked> {
+    (unsent(test, criteria).into_iter())
+        .map(|(c, k)| super::fix_round::Asked {
+            id: c.id.clone(),
+            title: c.title.clone(),
+            note: k.note.clone(),
+            shots: k.shots.len(),
+        })
+        .collect()
+}
+
 /// Mark the failures not sent yet as sent: which, by id and text.
 pub fn mark_sent(test: &mut Option<ManualTest>, criteria: &[Criterion]) -> Vec<(String, String)> {
     let ids: Vec<(String, String)> = unsent(test.as_ref(), criteria)
