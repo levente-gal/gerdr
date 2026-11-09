@@ -7698,24 +7698,6 @@ impl Gerdr {
         }
     }
 
-    /// Accept every open suggestion of feature `slug`'s plan review that can
-    /// be (a question waits for its answer), and save.
-    // WAVE1-STUB(C): `feature_plan_review`'s `accept_all_suggestions` takes
-    // this over, with its toast.
-    fn accept_all_open_suggestions(&mut self, project: &str, slug: &str) {
-        let accepted = (self.feature_mut(project, slug))
-            .and_then(|f| f.plan_review.as_mut())
-            .map(feature::plan_review::accept_all);
-        match accepted {
-            Some(0) | None => self.show_warning("No suggestion left to accept".into()),
-            Some(n) => {
-                self.save_feature(project, slug);
-                self.show_success(format!("{} accepted", plural(n, "suggestion")));
-            }
-        }
-        self.plan_doc_follows();
-    }
-
     /// The feature the panel is on.
     fn panel_feature(&self) -> Option<&Feature> {
         let panel = self.features.panel.as_ref()?;
@@ -8053,7 +8035,7 @@ impl Gerdr {
             PanelOutcome::ReviewInPlan => self.review_in_plan(&project, &slug),
             PanelOutcome::OnSuggestion(id, act) => self.apply_suggestion(&project, &slug, &id, act),
             PanelOutcome::AcceptAllSuggestions => {
-                self.accept_all_open_suggestions(&project, &slug);
+                self.accept_all_suggestions(&project, &slug);
             }
             PanelOutcome::AskReviewer => self.ask_reviewer(&project, &slug),
             PanelOutcome::WriteFinalPlan => self.write_final_plan(&project, &slug),

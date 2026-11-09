@@ -30,7 +30,7 @@ use crate::{
     features::{CardNote, Done, plural},
     menu::MenuAction,
     prompts,
-    review_cards::{self, CardId, ItemAct},
+    review_cards::{self, ItemAct},
     text_field::TextField,
     toast::Level,
 };
@@ -547,7 +547,7 @@ impl Gerdr {
     ) -> bool {
         let done = self.decide_suggestion_said(project, slug, id, Decision::Reject(why.to_owned()));
         if done {
-            self.select_next_open_after(id);
+            self.select_next_open_item(ItemOf::Suggestion, id);
         }
         done
     }
@@ -595,9 +595,6 @@ impl Gerdr {
 
     /// Accept every open suggestion of feature `slug` but the questions
     /// still to answer.
-    // WAVE1-STUB(E): the page's Accept all open (Shift+F) calls it; Wave 2
-    // drops this allow.
-    #[allow(dead_code)]
     pub(crate) fn accept_all_suggestions(&mut self, project: &str, slug: &str) {
         let mut accepted = 0;
         let done = self.change_plan_review(project, slug, |review| {
@@ -715,7 +712,7 @@ impl Gerdr {
         });
         if done {
             // It lands at the top of the page's list.
-            self.select_review_item(ItemOf::Suggestion, &added);
+            self.select_panel_item(ItemOf::Suggestion, &added);
             self.show_success(format!(
                 "Suggestion {added} added, to go into the final plan"
             ));
@@ -841,19 +838,6 @@ impl Gerdr {
         }
     }
 
-    /// Item `id` of kind `of` has the keyboard on its review page, and
-    /// shows; whether it is there.
-    fn select_review_item(&mut self, of: ItemOf, id: &str) -> bool {
-        let want = CardId::Item(of, id.to_owned());
-        self.reselect_review_card(Some(want.clone()));
-        if self.selected_review_card() != Some(want) {
-            return false;
-        }
-        let at = self.features.panel.as_ref().map_or(0, |p| p.finding);
-        self.select_criterion(at);
-        true
-    }
-
     /// Where citation `i` of suggestion `id` of feature `slug` is; else why
     /// it can't be opened.
     pub(crate) fn suggestion_citation(
@@ -940,7 +924,7 @@ impl Gerdr {
         };
         panel.note = Some((on, field));
         self.stop_key_repeat();
-        self.select_review_item(ItemOf::Suggestion, id);
+        self.select_panel_item(ItemOf::Suggestion, id);
     }
 
     /// Send the notes on the suggestions to the reviewer's chat, or to a

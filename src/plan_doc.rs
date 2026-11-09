@@ -251,9 +251,6 @@ impl Gerdr {
 
     /// Show suggestion `id` of feature `slug` where it applies in the plan,
     /// the cursor on it.
-    // WAVE1-STUB(C): `apply_suggestion`'s Show calls this in place of
-    // `review_in_plan` once Wave 2 merges.
-    #[allow(dead_code)]
     pub(crate) fn show_in_plan(&mut self, project: &str, slug: &str, id: &str) {
         self.open_suggestions(project, slug, Some(id.to_owned()));
     }

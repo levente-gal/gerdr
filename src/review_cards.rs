@@ -88,14 +88,6 @@ impl<'a> Item<'a> {
         }
     }
 
-    #[allow(dead_code)] // WAVE1-STUB(B): unused since features.rs goes by `item` (E)
-    pub(crate) fn finding(self) -> Option<&'a ReviewFinding> {
-        match self {
-            Self::Finding(f) => Some(f),
-            Self::Suggestion(_) => None,
-        }
-    }
-
     pub(crate) fn suggestion(self) -> Option<&'a Suggestion> {
         match self {
             Self::Finding(_) => None,
@@ -183,11 +175,6 @@ impl<'a> ReviewCard<'a> {
             Self::Item(item) => Some(item),
             Self::DiffNote(_) => None,
         }
-    }
-
-    #[allow(dead_code)] // WAVE1-STUB(B): unused since features.rs goes by `item` (E)
-    pub(crate) fn finding(self) -> Option<&'a ReviewFinding> {
-        self.item().and_then(Item::finding)
     }
 
     pub(crate) fn diff_note(self) -> Option<&'a Comment> {

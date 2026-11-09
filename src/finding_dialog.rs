@@ -77,32 +77,6 @@ pub struct FindingDialog {
 /// A finding of the user's own, or a comment in the diff, with nothing typed.
 const FINDING_SAY_WHAT: &str = "Say what to fix.";
 
-/// What the dialog says of an item of the user's own, by its kind: the
-/// words `review_items::Words` has no field for.
-struct OwnWords {
-    /// Its field's label.
-    label: &'static str,
-    /// Its field with nothing typed.
-    placeholder: &'static str,
-    /// The dialog adding one.
-    add_title: &'static str,
-}
-
-fn own_words(of: ItemOf) -> OwnWords {
-    match of {
-        ItemOf::Finding => OwnWords {
-            label: "Comment",
-            placeholder: "What should change",
-            add_title: "Add a comment",
-        },
-        ItemOf::Suggestion => OwnWords {
-            label: "Suggestion",
-            placeholder: "Its title on the first line, then the change",
-            add_title: "Add a suggestion",
-        },
-    }
-}
-
 /// An item a dialog or a card's comment is on, as it was when asked.
 #[derive(Clone, Debug)]
 pub(crate) enum Asked {
@@ -231,7 +205,6 @@ impl FindingDialog {
         let w = self.words();
         let id = &self.id;
         let save = if self.marks_fix { w.save_want } else { "Save" };
-        let own = own_words(self.of);
         let (title, labels, action): (String, [(&str, &str, i32); 1], &str) = match self.ask {
             Ask::Dismiss => (
                 format!("{} {id}", w.refuse_verb),
@@ -245,7 +218,7 @@ impl FindingDialog {
             ),
             Ask::EditOwn => (
                 format!("Edit {id}"),
-                [(own.label, own.placeholder, 6)],
+                [(w.own_label, w.own_placeholder, 6)],
                 save,
             ),
             Ask::EditDiffNote => (
@@ -254,8 +227,8 @@ impl FindingDialog {
                 "Save",
             ),
             Ask::Add => (
-                own.add_title.to_owned(),
-                [(own.label, own.placeholder, 6)],
+                w.add_title.to_owned(),
+                [(w.own_label, w.own_placeholder, 6)],
                 "Add",
             ),
             Ask::EditComment => (

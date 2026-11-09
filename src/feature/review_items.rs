@@ -84,6 +84,12 @@ pub struct Words {
     pub say_what: &'static str,
     /// The button wanting every open one: "Fix all open".
     pub want_all: &'static str,
+    /// The field of one of the user's own, in its dialog: "Comment".
+    pub own_label: &'static str,
+    /// That field with nothing typed: "What should change".
+    pub own_placeholder: &'static str,
+    /// The dialog adding one of the user's own: "Add a comment".
+    pub add_title: &'static str,
     /// The user's comment on one, over it: "Your comment".
     pub comment: &'static str,
     /// The user's comment on a question, over it: "Your answer".
@@ -118,6 +124,9 @@ const FINDING: Words = Words {
     save_want: "Save and fix",
     say_what: "Say what to fix.",
     want_all: "Fix all open",
+    own_label: "Comment",
+    own_placeholder: "What should change",
+    add_title: "Add a comment",
     comment: "Your comment",
     answer: "Your comment",
     own_goes: "It goes to the Build agent with the fixes",
@@ -140,13 +149,16 @@ const SUGGESTION: Words = Words {
     change: "Change",
     my_change: "Your change",
     not_placed: "not placed in the plan",
-    why_hint: "Why the plan shouldn't take it",
+    why_hint: "Why the plan doesn't need this",
     say_why: "Say why you reject it.",
     edit_title: "Edit the change of",
     edit_label: "Change",
     save_want: "Save and accept",
     say_what: "Say what the plan should change.",
     want_all: "Accept all open",
+    own_label: "Suggestion",
+    own_placeholder: "Its title on the first line, then the change",
+    add_title: "Add a suggestion",
     comment: "Your comment",
     answer: "Your answer",
     own_goes: "It goes into the final plan",
@@ -278,6 +290,9 @@ mod tests {
             s.save_want,
             s.say_what,
             s.want_all,
+            s.own_label,
+            s.own_placeholder,
+            s.add_title,
             s.comment,
             s.answer,
             s.own_goes,
