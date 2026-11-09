@@ -84,7 +84,7 @@ use crate::{
     feature::{
         self, Event, Feature, Pr, Repo, Route, ShipStep, Stage, Status,
         agents::needs,
-        fix_round::{CommentFix, FixPhase, FixRound, VerifyFix},
+        fix_round::{FixPhase, FixRound, VerifyFix},
         graph,
         hook::Guard,
         layout::{self, AddSpec, Created, Found, LinkSpec, Root},
@@ -1353,8 +1353,6 @@ pub struct FeaturePanel {
     pub collapse_to: TabArea,
     /// The earlier AI reviews showing their findings, by run.
     pub rounds_open: BTreeSet<u32>,
-    /// Code review's earlier fix rounds showing their comments, by round.
-    pub comment_rounds_open: BTreeSet<u32>,
     /// The fix round cards the user opened or folded, by round: a card shows
     /// open when it is the newest, unless it is here (see `fix_round_open`).
     pub fix_rounds_flipped: BTreeSet<u32>,
@@ -1538,8 +1536,6 @@ pub enum PanelOutcome {
     FindingRefused(&'static str),
     /// Show this earlier review's findings on its page, or fold them.
     FoldRound(u32),
-    /// Show Code review's earlier fix round `n`'s comments, or fold them.
-    FoldCommentRound(u32),
     /// Show Code review's code, or the fixes it asked for.
     ReviewView(chrome::ReviewView),
     /// Review the feature's diff (Code review).
@@ -1647,7 +1643,6 @@ impl PanelOutcome {
                 | Self::ShowFinding(_)
                 | Self::ShowDiffNote(_)
                 | Self::FoldRound(_)
-                | Self::FoldCommentRound(_)
                 | Self::FoldFixRound(_)
                 | Self::RoundDiff(_)
                 | Self::OpenRoundPlan(_)
@@ -2213,11 +2208,6 @@ fn why_not_edit_note(feature: &Feature, stage: Stage, c: &Comment) -> Option<&'s
     })
 }
 
-/// Code review's fix rounds of `feature` before its latest, the newest first.
-fn earlier_comment_rounds(feature: &Feature) -> impl Iterator<Item = &CommentFix> {
-    feature.comment_fixes.iter().rev().skip(1)
-}
-
 /// The cards of `stage`'s page of `feature`, as `FeaturePanel::finding`
 /// counts them: the user's own items, the comments they left in the diff,
 /// then the reviewer's findings.
@@ -2588,15 +2578,6 @@ fn stage_actions(
 ) -> Vec<(PageButton, PanelOutcome)> {
     let mut out = page_actions(feature, stage, ctx);
     out.extend(note_actions(feature, stage, notes));
-    if stage == Stage::CodeReview {
-        out.extend(earlier_comment_rounds(feature).map(|fix| {
-            let button = PageButton {
-                label: "Show".to_owned(),
-                style: ButtonStyle::Plain,
-            };
-            (button, PanelOutcome::FoldCommentRound(fix.round))
-        }));
-    }
     let entries = check_entries(feature, stage, plan);
     // What it skips doesn't run, once or at all.
     out.retain(|(_, outcome)| {
@@ -3988,13 +3969,6 @@ impl FeaturePanel {
             })
     }
 
-    /// Show the comments of Code review's earlier round `n`, or fold them.
-    pub fn toggle_comment_round(&mut self, n: u32) {
-        if !self.comment_rounds_open.remove(&n) {
-            self.comment_rounds_open.insert(n);
-        }
-    }
-
     /// Open fix round `n`'s card, or fold it.
     pub fn toggle_fix_round(&mut self, n: u32) {
         if !self.fix_rounds_flipped.remove(&n) {
@@ -4012,31 +3986,28 @@ impl FeaturePanel {
     /// Fold the earlier reviews of `stage`'s page of `feature` if any shows,
     /// else show them all.
     fn toggle_rounds(&mut self, feature: &Feature, stage: Stage) {
-        if stage == Stage::ManualTest {
-            let all: Vec<u32> = feature.rounds_of(stage).iter().map(|r| r.n).collect();
-            let newest = all.first().copied();
-            let any_open =
-                (all.iter()).any(|&n| fix_round_open(newest, n, &self.fix_rounds_flipped));
+        let cards: Vec<u32> = card_rounds(feature, stage).iter().map(|r| r.n).collect();
+        let newest = cards.first().copied();
+        let reviews: BTreeSet<u32> = earlier_reviews(feature, stage).map(|r| r.n).collect();
+        // Anything open folds all; else all open, the fix rounds and the
+        // earlier reviews alike.
+        let any_open = (cards.len() > 1
+            && (cards.iter()).any(|&n| fix_round_open(newest, n, &self.fix_rounds_flipped)))
+            || reviews.iter().any(|n| self.rounds_open.contains(n));
+        if cards.len() > 1 {
             // Folded, the newest is the one flipped; opened, the older ones.
             self.fix_rounds_flipped = match any_open {
                 true => newest.into_iter().collect(),
-                false => all.iter().copied().filter(|n| Some(*n) != newest).collect(),
+                false => cards
+                    .iter()
+                    .copied()
+                    .filter(|n| Some(*n) != newest)
+                    .collect(),
             };
-            return;
         }
-        if stage == Stage::CodeReview {
-            let all: BTreeSet<u32> = earlier_comment_rounds(feature).map(|r| r.round).collect();
-            self.comment_rounds_open =
-                match all.iter().any(|n| self.comment_rounds_open.contains(n)) {
-                    true => BTreeSet::new(),
-                    false => all,
-                };
-            return;
-        }
-        let all: BTreeSet<u32> = earlier_reviews(feature, stage).map(|r| r.n).collect();
-        self.rounds_open = match all.iter().any(|n| self.rounds_open.contains(n)) {
+        self.rounds_open = match any_open {
             true => BTreeSet::new(),
-            false => all,
+            false => reviews,
         };
     }
 
@@ -4378,9 +4349,7 @@ impl FeaturePanel {
                     && !(mods.ctrl || mods.shift || mods.logo)
                     && !self.expanded
                     && (earlier_reviews(feature, stage).next().is_some()
-                        || (stage == Stage::CodeReview
-                            && earlier_comment_rounds(feature).next().is_some())
-                        || (stage == Stage::ManualTest && feature.rounds_of(stage).len() > 1)) =>
+                        || folds_round_cards(feature, stage)) =>
             {
                 self.toggle_rounds(feature, stage);
                 return None;
@@ -8131,11 +8100,6 @@ impl Gerdr {
             }
             PanelOutcome::FindingRefused(why) => self.show_warning(why.to_owned()),
             PanelOutcome::ReviewView(view) => self.show_review_view(view),
-            PanelOutcome::FoldCommentRound(n) => {
-                if let Some(panel) = self.features.panel.as_mut() {
-                    panel.toggle_comment_round(n);
-                }
-            }
             PanelOutcome::FoldRound(n) => {
                 if let Some(panel) = self.features.panel.as_mut() {
                     panel.toggle_round(n);
@@ -9882,7 +9846,6 @@ impl Gerdr {
             criteria: self.criterion_rows(feature),
             manual_gate: manual_counts.map(manual_gate),
             rounds_open: panel.rounds_open.clone(),
-            comment_rounds_open: panel.comment_rounds_open.clone(),
             fix_rounds_flipped: panel.fix_rounds_flipped.clone(),
         };
         let mut view = tab_view(panel, feature, &slugs, &state, now);
@@ -10411,9 +10374,6 @@ struct PanelState<'a> {
     /// The earlier AI reviews showing their findings (see
     /// `FeaturePanel::rounds_open`).
     rounds_open: BTreeSet<u32>,
-    /// Code review's earlier fix rounds showing their comments (see
-    /// `FeaturePanel::comment_rounds_open`).
-    comment_rounds_open: BTreeSet<u32>,
     /// The fix round cards flipped from how they show by default (see
     /// `FeaturePanel::fix_rounds_flipped`).
     fix_rounds_flipped: BTreeSet<u32>,
@@ -11616,6 +11576,49 @@ fn round_plans(feature: &Feature, probe: Option<&Probe>) -> Vec<u32> {
     out
 }
 
+/// The stages whose pages list the fix rounds they asked for as cards.
+const ROUND_CARD_STAGES: [Stage; 3] = [Stage::AiReview, Stage::CodeReview, Stage::ManualTest];
+
+/// The fix rounds `stage`'s page of `feature` shows as cards, newest first:
+/// none but on `ROUND_CARD_STAGES`. Code review's rounds from before rounds
+/// were kept whole stand in by their number, from the comments they took.
+fn card_rounds(feature: &Feature, stage: Stage) -> Vec<FixRound> {
+    if !ROUND_CARD_STAGES.contains(&stage) {
+        return Vec::new();
+    }
+    let mut out: Vec<FixRound> = feature.rounds_of(stage).into_iter().cloned().collect();
+    if stage == Stage::CodeReview {
+        for fix in &feature.comment_fixes {
+            if !out.iter().any(|r| r.n == fix.round) {
+                out.push(FixRound {
+                    n: fix.round,
+                    what: "Code review's comments".into(),
+                    input: PathBuf::new(),
+                    stage,
+                    phase: FixPhase::Fixing,
+                    sent_back: 0,
+                    asked: 0,
+                    ready: None,
+                    stalled: None,
+                    give_back: Default::default(),
+                    items: Vec::new(),
+                    done: 0,
+                    ended: None,
+                    trail: Default::default(),
+                });
+            }
+        }
+    }
+    out.sort_by_key(|r| std::cmp::Reverse(r.n));
+    out
+}
+
+/// Whether `stage`'s page of `feature` has more than one fix round card: Alt+E
+/// folds them.
+fn folds_round_cards(feature: &Feature, stage: Stage) -> bool {
+    card_rounds(feature, stage).len() > 1
+}
+
 /// The buttons of the fix round cards on `stage`'s page of `feature`, by
 /// `probe`, newest round first: what each changed, the plan of one over (the
 /// open and the last have theirs on their own buttons), and folding.
@@ -11628,7 +11631,7 @@ fn round_card_actions(
         label: label.to_owned(),
         style: ButtonStyle::Plain,
     };
-    let rounds = feature.rounds_of(stage);
+    let rounds = card_rounds(feature, stage);
     let plans = round_plans(feature, probe);
     let mut out = Vec::new();
     for round in &rounds {
@@ -11662,7 +11665,7 @@ fn has_own_plan_button(feature: &Feature, round: &FixRound) -> bool {
 
 /// The newest fix round `stage`'s page of `feature` lists, if any.
 fn newest_round(feature: &Feature, stage: Stage) -> Option<u32> {
-    feature.rounds_of(stage).first().map(|r| r.n)
+    card_rounds(feature, stage).first().map(|r| r.n)
 }
 
 /// Whether round `n`'s card shows open: the newest's does, the others are
@@ -11700,7 +11703,7 @@ fn round_cards(
     actions: &[(PageButton, PanelOutcome)],
     now: u64,
 ) -> Vec<PageSection> {
-    let rounds = feature.rounds_of(stage);
+    let rounds = card_rounds(feature, stage);
     let Some(newest) = rounds.first().map(|r| r.n) else {
         return Vec::new();
     };
@@ -11709,13 +11712,17 @@ fn round_cards(
         n => format!("Fix rounds \u{b7} {n}"),
     };
     let mut out = vec![lines(&caption, Vec::new())];
-    // A criterion says how it stands now on the newest round that asked it.
-    let mut told: BTreeSet<&str> = BTreeSet::new();
+    // A criterion or a finding says how it stands now on the newest round
+    // that asked it. Code review's comments are each round's own.
+    let mut told: BTreeSet<String> = BTreeSet::new();
     for round in &rounds {
         let open = fix_round_open(Some(newest), round.n, &state.fix_rounds_flipped);
-        let mut card = fix_card(feature, round, state, actions, now, &told);
+        let asked = asked_of(feature, round, state.probe);
+        let mut card = fix_card(feature, round, state, actions, now, &asked, &told);
         card.open = open;
-        told.extend(round.trail.asked.iter().map(|a| a.id.as_str()));
+        if stage != Stage::CodeReview {
+            told.extend(asked.into_iter().map(|a| a.id));
+        }
         out.push(PageSection::Round(card));
     }
     out
@@ -11731,7 +11738,8 @@ fn fix_card(
     state: &PanelState,
     actions: &[(PageButton, PanelOutcome)],
     now: u64,
-    told: &BTreeSet<&str>,
+    asked: &[feature::fix_round::Asked],
+    told: &BTreeSet<String>,
 ) -> chrome::RoundCard {
     let is_open = feature.status == Status::Open
         && feature.fix_round.as_ref().is_some_and(|r| r.n == round.n);
@@ -11756,10 +11764,13 @@ fn fix_card(
             false => format!("{} ({})", round.trail.agent, round.trail.model),
         });
     }
-    if round.trail.asked.is_empty() {
+    if asked.is_empty() {
         meta.push(round.what.clone());
     }
-    meta.push(format!("asked {}", projects::ago(now, round.asked)));
+    // A round kept only by its number has no times.
+    if round.asked > 0 {
+        meta.push(format!("asked {}", projects::ago(now, round.asked)));
+    }
     if let Some(at) = round.ready.filter(|_| round.trail.went.is_none()) {
         meta.push(format!("plan written {}", projects::ago(now, at)));
     }
@@ -11774,7 +11785,7 @@ fn fix_card(
             meta.push(format!("took {}", took(went, over)));
         }
     }
-    let asked = (round.trail.asked.iter())
+    let asked = (asked.iter())
         .map(|a| chrome::RoundAsked {
             id: a.id.clone(),
             title: a.title.clone(),
@@ -11782,7 +11793,7 @@ fn fix_card(
                 0 => a.note.clone(),
                 n => format!("{} ({})", a.note, plural(n, "screenshot")),
             },
-            now: (!told.contains(a.id.as_str()))
+            now: (!told.contains(&a.id))
                 .then(|| asked_now(feature, round, &a.id, is_open))
                 .flatten(),
         })
@@ -11841,8 +11852,13 @@ fn fix_card(
         .map(|(i, _)| i)
         .collect();
     buttons.sort_by_key(|&i| (rank(&actions[i].1), i));
+    // "Review N" names the reviews themselves on AI review's page.
+    let label = match feature.fix_asked.get(&round.n) {
+        Some(Stage::AiReview) => format!("{} {}", Stage::AiReview.label(), round.n),
+        _ => round_label(feature, round),
+    };
     chrome::RoundCard {
-        label: round_label(feature, round),
+        label,
         dot,
         state: state_line,
         meta: meta.join(" \u{b7} "),
@@ -11855,9 +11871,109 @@ fn fix_card(
     }
 }
 
+/// What fix round `round` of `feature` was asked to fix: as it kept it when
+/// sent, else, for a round from before that, Code review's comments it took
+/// as `probe` read them, or AI review's findings it took by their ids.
+fn asked_of(
+    feature: &Feature,
+    round: &FixRound,
+    probe: Option<&Probe>,
+) -> Vec<feature::fix_round::Asked> {
+    use feature::fix_round::{Asked, GiveBack};
+    if !round.trail.asked.is_empty() {
+        return round.trail.asked.clone();
+    }
+    match feature
+        .fix_asked
+        .get(&round.n)
+        .copied()
+        .unwrap_or(round.stage)
+    {
+        Stage::CodeReview => (round_comments(feature, round.n, probe).iter())
+            .map(|c| Asked {
+                id: c.flag.as_ref().map(|f| f.id.clone()).unwrap_or_default(),
+                title: note_card(c, feature.many_repos(), &[]).place,
+                note: c.text.clone(),
+                shots: 0,
+            })
+            .collect(),
+        Stage::AiReview => match &round.give_back {
+            GiveBack::Findings { ids, .. } => review_import::asked(feature.review.as_ref(), ids),
+            _ => Vec::new(),
+        },
+        _ => Vec::new(),
+    }
+}
+
+/// The comments Code review's fix round `n` of `feature` took, as `probe` last
+/// read them: the latest round's are with the diff's, flagged sent.
+fn round_comments<'a>(feature: &Feature, n: u32, probe: Option<&'a Probe>) -> &'a [Comment] {
+    let Some(docs) = probe.map(|p| &p.docs) else {
+        return &[];
+    };
+    match docs.old_notes.get(&n) {
+        Some(old) => old,
+        None if latest_comment_round(feature) == Some(n) => {
+            let own = docs.notes.iter().take_while(|c| c.flag.is_none()).count();
+            &docs.notes[own..]
+        }
+        None => &[],
+    }
+}
+
+/// Code review's latest fix round in `feature`, as `Docs::with_comment_fixes`
+/// takes it.
+fn latest_comment_round(feature: &Feature) -> Option<u32> {
+    (feature.comment_fixes.last().map(|fix| fix.round)).or_else(|| {
+        (feature.fix_round.as_ref())
+            .filter(|round| round.stage == Stage::CodeReview)
+            .map(|round| round.n)
+    })
+}
+
+/// How `id`, which fix round `round` of `feature` was asked to fix, stands
+/// now, by the stage that asked: a criterion tried again, a finding the next
+/// review saw, a comment whose fix was made.
+fn asked_now(feature: &Feature, round: &FixRound, id: &str, open: bool) -> Option<CheckLine> {
+    match feature
+        .fix_asked
+        .get(&round.n)
+        .copied()
+        .unwrap_or(round.stage)
+    {
+        Stage::ManualTest => criterion_now(feature, round, id, open),
+        Stage::AiReview => {
+            let review = feature.review.as_ref()?;
+            let found = review.find(id)?;
+            Some(match found.state {
+                FindingState::Fixed => line("fixed", CheckTone::Ready),
+                FindingState::Dismissed => line("dismissed", CheckTone::Note),
+                FindingState::Sent if found.fix_made() => line("fix made", CheckTone::Ready),
+                FindingState::Sent if open => line("being fixed", CheckTone::Note),
+                FindingState::Sent => line("sent to Build", CheckTone::Note),
+                FindingState::Open | FindingState::Fix => line("raised again", CheckTone::Blocker),
+            })
+        }
+        Stage::CodeReview => {
+            let fix = feature
+                .comment_fixes
+                .iter()
+                .find(|fix| fix.round == round.n);
+            Some(
+                match fix.is_some_and(|fix| fix.made.iter().any(|m| m == id)) {
+                    true => line("fix made", CheckTone::Ready),
+                    false if open => line("being fixed", CheckTone::Note),
+                    false => line("not marked made", CheckTone::Note),
+                },
+            )
+        }
+        _ => None,
+    }
+}
+
 /// How criterion `id`, which fix round `round` of `feature` was asked to fix,
 /// stands now: tried again since, its fix made, or not tried since.
-fn asked_now(feature: &Feature, round: &FixRound, id: &str, open: bool) -> Option<CheckLine> {
+fn criterion_now(feature: &Feature, round: &FixRound, id: &str, open: bool) -> Option<CheckLine> {
     let check =
         (feature.manual.as_ref()).and_then(|test| test.checks.iter().rev().find(|k| k.id == id));
     let since = |k: &feature::manual::Check| round.over_at().is_some_and(|over| k.at >= over);
@@ -11879,7 +11995,7 @@ fn round_plan_actions(
     stage: Stage,
     probe: Option<&Probe>,
 ) -> Vec<(PageButton, PanelOutcome)> {
-    if stage == Stage::ManualTest {
+    if ROUND_CARD_STAGES.contains(&stage) {
         return round_card_actions(feature, stage, probe);
     }
     if stage != Stage::Build || stage_mark(feature, stage) == StageMark::Later {
@@ -12024,20 +12140,20 @@ fn stage_page(
         if !check_entries(feature, stage, &state.plan).is_empty() {
             sections.extend(verify_sections(feature, state, actions, now));
         }
-        // Fixes sent back the feature: the review they came from stays.
+        // Fixes sent back the feature: the rounds that sent them stay.
+        if ROUND_CARD_STAGES.contains(&stage) {
+            sections.extend(round_cards(feature, stage, state, actions, now));
+        }
+        // So does the review they came from.
         if stage == Stage::AiReview && feature.review.is_some() {
             sections.extend(review_sections(feature, stage, mark, state, actions));
         }
-        // So do the comments, whose fixes this came back for.
+        // And the comments, whose fixes this came back for.
         if stage == Stage::CodeReview && crate::feature_diff::has_rounds(feature) {
-            let open = fix_round_on(feature, stage);
-            sections.extend(open.map(|r| fix_round_card(feature, r, actions, now)));
-            let last = last_round_on(feature, stage);
-            sections.extend(last.map(|r| last_round_card(feature, r, actions, now)));
             sections.extend(comment_sections(feature, state, actions));
         }
     }
-    if mark != StageMark::Later && stage == Stage::ManualTest {
+    if mark != StageMark::Later && ROUND_CARD_STAGES.contains(&stage) {
         // Every round it asked for, as cards: on top while one is open or
         // nothing new waits to be sent, else under what does.
         let cards = round_cards(feature, stage, state, actions, now);
@@ -12229,12 +12345,6 @@ fn stage_page(
             label: "Hide".to_owned(),
             ..b.clone()
         },
-        (_, PanelOutcome::FoldCommentRound(n)) if state.comment_rounds_open.contains(n) => {
-            PageButton {
-                label: "Hide".to_owned(),
-                ..b.clone()
-            }
-        }
         (_, PanelOutcome::FoldFixRound(n))
             if fix_round_open(newest_round(feature, stage), *n, &state.fix_rounds_flipped) =>
         {
@@ -12323,9 +12433,8 @@ fn review_sections(
     sections
 }
 
-/// Code review's page of `feature` below its fix plan's card: the comments as
-/// AI review's findings are, those not sent yet first; each earlier round's,
-/// folded unless `state` shows it; and the plan to read.
+/// Code review's page of `feature` below its fix round cards: the comments as
+/// AI review's findings are, those not sent yet first, and the plan to read.
 fn comment_sections(
     feature: &Feature,
     state: &PanelState,
@@ -12357,33 +12466,6 @@ fn comment_sections(
             false => note_card(c, multi, actions),
         })
     }));
-    let old = state.probe.map(|p| &p.docs.old_notes);
-    for fix in earlier_comment_rounds(feature) {
-        let notes = old.and_then(|old| old.get(&fix.round));
-        let notes = notes.map_or(&[][..], Vec::as_slice);
-        let count = |c: &&Comment| note_made(c, &fix.made);
-        let text = format!(
-            "{} of {} made",
-            notes.iter().filter(count).count(),
-            notes.len()
-        );
-        sections.push(PageSection::File {
-            name: format!("Round {}", fix.round),
-            state: line(text, CheckTone::Note),
-            buttons: (actions.iter().enumerate())
-                .filter(|(_, (_, o))| *o == PanelOutcome::FoldCommentRound(fix.round))
-                .map(|(i, _)| i)
-                .collect(),
-        });
-        if state.comment_rounds_open.contains(&fix.round) {
-            sections.extend(notes.iter().map(|c| {
-                let mut card = sent_note_card(c, multi, note_made(c, &fix.made), &[]);
-                card.faded = true;
-                card.stripe = None;
-                PageSection::Finding(card)
-            }));
-        }
-    }
     sections.extend(comment_plan(feature, state.probe));
     sections
 }
@@ -12681,7 +12763,10 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 6] = [
                 "dismiss it, saying why, or reopen it; a comment of your own: press twice to delete",
             ),
             ("Enter", "show it in the diff"),
-            ("Alt+E", "show or hide the earlier reviews"),
+            (
+                "Alt+E",
+                "fold the earlier reviews and the fix round cards, or open them all",
+            ),
         ],
     ),
     (
@@ -12692,7 +12777,7 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 6] = [
             ("Enter", "fixes: show the comment in the diff"),
             ("c / Del", "fixes: edit or delete a comment not sent yet"),
             ("c", "fixes: off the cards, add a comment of your own"),
-            ("Alt+E", "fixes: show or hide the earlier rounds"),
+            ("Alt+E", "fixes: fold the fix round cards, or open them all"),
         ],
     ),
     (
@@ -13086,6 +13171,8 @@ fn writers_tab_hints(
             }
             if earlier_reviews(feature, stage).next().is_some() {
                 hints.push(hint("Alt+E", "earlier reviews"));
+            } else if folds_round_cards(feature, stage) {
+                hints.push(hint("Alt+E", "fix rounds"));
             }
             hints.push(hint("Tab", if repos { "repositories" } else { "stages" }));
         }
@@ -13112,7 +13199,7 @@ fn writers_tab_hints(
             }
             if earlier_reviews(feature, stage).next().is_some() {
                 hints.push(hint("Alt+E", "earlier reviews"));
-            } else if stage == Stage::ManualTest && feature.rounds_of(stage).len() > 1 {
+            } else if folds_round_cards(feature, stage) {
                 hints.push(hint("Alt+E", "fix rounds"));
             }
             if matches!(row_action(feature, row, ctx), Some(PanelOutcome::Untick(_))) {
@@ -13635,7 +13722,7 @@ fn tab_bounds(layout: &chrome::FeatureTabLayout, col: TabColumn) -> Bounds {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::feature::{Mark, ship::ShipCheck};
+    use crate::feature::{Mark, fix_round::CommentFix, ship::ShipCheck};
 
     pub(crate) fn repo(name: &str, touched: bool) -> Repo {
         Repo {
@@ -16079,12 +16166,13 @@ pub(crate) mod tests {
             notes,
         );
         let page = stage_page(&f, Stage::CodeReview, &state, &actions, 2_000);
-        // The plan's card holds what acts on it, as ever.
-        let Some(PageSection::File { name, buttons, .. }) = page.sections.first() else {
+        // The round's card holds what acts on its plan, as ever.
+        let Some(PageSection::Round(card)) = page.sections.get(1) else {
             panic!("{:?}", page.sections);
         };
-        assert!(name.starts_with("Fix plan: "), "{name}");
-        let held: Vec<&str> = buttons.iter().map(|i| page.buttons[*i].label.as_str()).collect();
+        let held: Vec<&str> = (card.buttons.iter())
+            .map(|i| page.buttons[*i].label.as_str())
+            .collect();
         assert_eq!(held[..2], ["Review", "Make fixes"]);
         assert!(page.sections.iter().any(|s| matches!(s,
             PageSection::Lines { label, .. } if label == "Comments \u{b7} 1 of 2 made")));
@@ -16159,9 +16247,7 @@ pub(crate) mod tests {
         );
         let page = stage_page(&f, Stage::CodeReview, &state, &actions, 2_000);
         let has = |what: fn(&PageSection) -> bool| page.sections.iter().any(what);
-        assert!(has(
-            |s| matches!(s, PageSection::File { name, .. } if name.contains("ix plan: "))
-        ));
+        assert!(has(|s| matches!(s, PageSection::Round(_))));
         assert!(has(|s| matches!(s, PageSection::Finding(_))));
         assert!(has(|s| matches!(s, PageSection::Doc { .. })));
         let labels: Vec<&str> = page.buttons.iter().map(|b| b.label.as_str()).collect();
@@ -16215,13 +16301,16 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn earlier_rounds_fold_to_a_card_of_how_they_went() {
+    fn code_reviews_rounds_show_as_cards_with_the_comments_they_took() {
         let code_review = stage_index(Stage::CodeReview);
         let mut f = comment_round(
             feature("f", vec![repo("api", true)], code_review),
-            FixPhase::Ready,
+            FixPhase::Fixing,
         );
         f.fix_round.as_mut().unwrap().n = 2;
+        f.fix_rounds = 2;
+        f.fix_asked = BTreeMap::from([(1, Stage::CodeReview), (2, Stage::CodeReview)]);
+        // Round 1 is from before rounds were kept whole: only its comments.
         f.comment_fixes = vec![
             CommentFix {
                 round: 1,
@@ -16237,33 +16326,111 @@ pub(crate) mod tests {
             sent("C1", "src/a.rs", "Old"),
             sent("C2", "src/a.rs", "Older"),
         ])]);
-        let cards = |open: BTreeSet<u32>| {
-            let state = PanelState {
-                probe: Some(&probe),
-                comment_rounds_open: open,
-                ..PanelState::default()
-            };
-            comment_sections(&f, &state, &[])
+        let state = PanelState {
+            probe: Some(&probe),
+            ..PanelState::default()
         };
-        let folded = cards(BTreeSet::new());
-        assert!(folded.iter().any(|s| matches!(s, PageSection::File { name, state, .. }
-            if name == "Round 1" && state.text == "1 of 2 made")));
-        let count = |sections: &[PageSection]| {
-            (sections.iter())
-                .filter(|s| matches!(s, PageSection::Finding(_)))
-                .count()
+        let cards: Vec<chrome::RoundCard> =
+            (round_cards(&f, Stage::CodeReview, &state, &[], 4_000).into_iter())
+                .filter_map(|s| match s {
+                    PageSection::Round(card) => Some(card),
+                    _ => None,
+                })
+                .collect();
+        let labels: Vec<&str> = cards.iter().map(|c| c.label.as_str()).collect();
+        assert_eq!(labels, ["Code review 2", "Code review 1"]);
+        let asked = |card: &chrome::RoundCard| -> Vec<(String, String, Option<String>)> {
+            (card.asked.iter())
+                .map(|a| {
+                    (
+                        a.id.clone(),
+                        a.note.clone(),
+                        a.now.as_ref().map(|l| l.text.clone()),
+                    )
+                })
+                .collect()
         };
-        assert_eq!(count(&folded), 1);
-        assert_eq!(count(&cards(BTreeSet::from([1]))), 3);
-        // Alt+E shows and folds them all, on this page.
+        assert_eq!(
+            asked(&cards[0]),
+            [("C1".into(), "Latest".into(), Some("being fixed".into()))]
+        );
+        assert_eq!(
+            asked(&cards[1]),
+            [
+                ("C1".into(), "Old".into(), Some("fix made".into())),
+                ("C2".into(), "Older".into(), Some("not marked made".into())),
+            ]
+        );
+        assert_eq!(cards[0].asked[0].title, "src/b.rs:3");
+        // Kept only by its number, it has no times to say.
+        assert_eq!(cards[1].meta, "");
+        assert_eq!(cards[1].dot, Dot::Done);
+        // The cards take the place of the folded rows of earlier rounds.
+        let sections = comment_sections(&f, &state, &[]);
+        assert!(
+            !sections
+                .iter()
+                .any(|s| matches!(s, PageSection::File { .. }))
+        );
+        // Alt+E folds them all, then opens them all, on this page.
         let mut panel = FeaturePanel {
             review_view: Some(chrome::ReviewView::Fixes),
             ..FeaturePanel::default()
         };
         assert_eq!(press(&mut panel, &f, alt(Keysym::e)), None);
-        assert_eq!(panel.comment_rounds_open, BTreeSet::from([1]));
+        assert_eq!(panel.fix_rounds_flipped, BTreeSet::from([2]));
         assert_eq!(press(&mut panel, &f, alt(Keysym::e)), None);
-        assert!(panel.comment_rounds_open.is_empty());
+        assert_eq!(panel.fix_rounds_flipped, BTreeSet::from([1]));
+    }
+
+    #[test]
+    fn ai_reviews_rounds_say_how_each_finding_they_took_stands() {
+        use crate::feature::review_import::{AiReview, Finding};
+        let mut f = feature("g", vec![repo("api", true)], stage_index(Stage::AiReview));
+        let finding = |id: &str, state| Finding {
+            id: id.into(),
+            title: format!("Finding {id}"),
+            file: "src/a.rs".into(),
+            line: Some(4),
+            state,
+            ..Finding::default()
+        };
+        f.review = Some(AiReview {
+            findings: vec![
+                finding("r1-1", FindingState::Fixed),
+                finding("r1-2", FindingState::Open),
+            ],
+            ..AiReview::default()
+        });
+        let mut round = manual_round(1, Some(2_000), Some("a1"));
+        round.stage = Stage::AiReview;
+        round.trail.asked = Vec::new();
+        round.give_back = feature::fix_round::GiveBack::Findings {
+            ids: vec!["r1-1".into(), "r1-2".into()],
+            comments: None,
+        };
+        f.fix_asked.insert(1, Stage::AiReview);
+        f.past_rounds = vec![round.clone()];
+        f.fix_rounds = 1;
+        let asked = asked_of(&f, &round, None);
+        let titles: Vec<&str> = asked.iter().map(|a| a.title.as_str()).collect();
+        assert_eq!(
+            titles,
+            ["Finding r1-1 (src/a.rs:4)", "Finding r1-2 (src/a.rs:4)"]
+        );
+        let now = |id| asked_now(&f, &round, id, false).map(|l| l.text);
+        assert_eq!(now("r1-1").as_deref(), Some("fixed"));
+        assert_eq!(now("r1-2").as_deref(), Some("raised again"));
+        // On AI review's page, whatever its mark.
+        let state = PanelState::default();
+        let mut actions = stage_actions(&f, Stage::AiReview, state.ctx, &[], &[], &[]);
+        actions.extend(round_plan_actions(&f, Stage::AiReview, None));
+        let page = stage_page(&f, Stage::AiReview, &state, &actions, 4_000);
+        assert!(
+            page.sections
+                .iter()
+                .any(|s| matches!(s, PageSection::Round(c) if c.label == "AI review 1"))
+        );
     }
 
     #[test]

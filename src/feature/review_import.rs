@@ -258,6 +258,14 @@ impl AiReview {
             .collect()
     }
 
+    /// Finding `id`, as the latest review has it, else the latest earlier one
+    /// that does.
+    pub fn find(&self, id: &str) -> Option<&Finding> {
+        (self.findings.iter().find(|f| f.id == id)).or_else(|| {
+            (self.rounds.iter().rev()).find_map(|round| round.findings.iter().find(|f| f.id == id))
+        })
+    }
+
     /// What `shown` lists, as the page does: the user's own first, then by
     /// severity, each group in the order raised. A decision doesn't move a
     /// finding.
@@ -1030,6 +1038,35 @@ fn hunks(diff: &str) -> BTreeMap<String, Vec<(usize, usize)>> {
         }
     }
     out
+}
+
+/// The findings `ids` of `review`, as a fix round keeps what it was asked:
+/// each its title and place, and the user's word on it if any.
+pub fn asked(review: Option<&AiReview>, ids: &[String]) -> Vec<super::fix_round::Asked> {
+    let Some(review) = review else {
+        return Vec::new();
+    };
+    (ids.iter())
+        .filter_map(|id| review.find(id))
+        .map(|f| {
+            let place = match (f.file.is_empty(), f.line) {
+                (true, _) => String::new(),
+                (false, Some(line)) => format!(" ({}:{line})", f.file),
+                (false, None) => format!(" ({})", f.file),
+            };
+            let note = match (&f.my_fix, f.note.is_empty()) {
+                (_, false) => f.note.clone(),
+                (Some(fix), true) => format!("Your fix: {fix}"),
+                (None, true) => String::new(),
+            };
+            super::fix_round::Asked {
+                id: f.id.clone(),
+                title: format!("{}{place}", f.title),
+                note,
+                shots: 0,
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]

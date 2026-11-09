@@ -4055,11 +4055,47 @@ fn feature_tab_review_fixes() -> super::FeatureTabView {
             button("Show", ButtonStyle::Plain),
         ],
         sections: vec![
-            PageSection::File {
-                name: "Fix plan".into(),
-                state: tab_line("review comments \u{b7} fix plan ready", CheckTone::Ready),
-                buttons: vec![0, 1, 2],
+            PageSection::Lines {
+                label: "Fix rounds \u{b7} 2".into(),
+                lines: Vec::new(),
             },
+            PageSection::Round(super::RoundCard {
+                label: "Code review 2".into(),
+                dot: super::Dot::Idle,
+                state: tab_line("review comments \u{b7} fix plan ready", CheckTone::Ready),
+                meta: "asked 6m ago \u{b7} plan written 2m ago".into(),
+                asked: vec![
+                    super::RoundAsked {
+                        id: "C1".into(),
+                        title: "src/login.rs:12".into(),
+                        note: "Rename this to say it retries".into(),
+                        now: None,
+                    },
+                    super::RoundAsked {
+                        id: "C2".into(),
+                        title: "src/retry.rs:40".into(),
+                        note: "Add a test for the last attempt".into(),
+                        now: None,
+                    },
+                ],
+                fixes: Vec::new(),
+                running: Vec::new(),
+                changed: Vec::new(),
+                open: true,
+                buttons: vec![0, 1, 2],
+            }),
+            PageSection::Round(super::RoundCard {
+                label: "Code review 1".into(),
+                dot: super::Dot::Done,
+                state: tab_line("2 of 2 made", CheckTone::Ready),
+                meta: "Claude Code \u{b7} asked 1h ago \u{b7} finished 40m ago".into(),
+                asked: Vec::new(),
+                fixes: Vec::new(),
+                running: Vec::new(),
+                changed: Vec::new(),
+                open: false,
+                buttons: vec![8],
+            }),
             PageSection::Lines {
                 label: "Comments \u{b7} 1 of 2 made".into(),
                 lines: Vec::new(),
@@ -4088,11 +4124,6 @@ fn feature_tab_review_fixes() -> super::FeatureTabView {
                 Some(CardStripe::Sent),
                 vec![7],
             ),
-            PageSection::File {
-                name: "Round 1".into(),
-                state: tab_line("2 of 2 made", CheckTone::Note),
-                buttons: vec![8],
-            },
             PageSection::Doc {
                 name: "fix-plan.md".into(),
                 blocks: std::sync::Arc::new(crate::md_blocks::blocks(
@@ -6433,10 +6464,10 @@ const REVIEW_VIEWS: [&str; 6] = [
 
 /// The recorded hashes of `REVIEW_VIEWS`, per case in `CASES`.
 const GOLDEN_REVIEW_VIEWS: [[u64; 6]; 4] = [
-    [0xc079d4a47dfb8f07, 0x54dd901fa2a70abe, 0xc1545fdb81fe7fd2, 0x60ced7661f313794, 0xaae0e6667caf58df, 0xc51714381cece119],
-    [0xfcf48c5be95bbf79, 0x59cae7d81cf2cf1e, 0x05aa91649802c5af, 0xc4f6953a672794c3, 0xeac75621de8e7164, 0xecd0cd1d777ac778],
-    [0xae786b051cb842b1, 0x0d41cf897de24c29, 0x65af65532294c589, 0xef1bc3ecb1d7efb8, 0xc337cdceb0414f87, 0x992052e127fa1b18],
-    [0xf66d26606fa40b14, 0xd45dc034c427728c, 0xb72af0e7cce0522e, 0x8c892e5a6b0924f8, 0xdc3053ee5331a665, 0xb52e5a4e08ebfe8c],
+    [0xc079d4a47dfb8f07, 0xefd8b8037b7dcd17, 0x1239688b3cf9b06b, 0x60ced7661f313794, 0xaae0e6667caf58df, 0xc51714381cece119],
+    [0xfcf48c5be95bbf79, 0x0aecf918a5c52e4a, 0xc98fd3aa06ee01f5, 0xc4f6953a672794c3, 0xeac75621de8e7164, 0xecd0cd1d777ac778],
+    [0xae786b051cb842b1, 0x847be91157e70d0b, 0xbb353af65ba856c6, 0xef1bc3ecb1d7efb8, 0xc337cdceb0414f87, 0x992052e127fa1b18],
+    [0xf66d26606fa40b14, 0x179fff5d2fbf7b9f, 0x31e3bb7cd38f055b, 0x8c892e5a6b0924f8, 0xdc3053ee5331a665, 0xb52e5a4e08ebfe8c],
 ];
 
 #[test]

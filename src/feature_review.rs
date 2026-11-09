@@ -856,6 +856,11 @@ impl Gerdr {
         let kept = (comments > 0)
             .then(|| self.keep_comments(project, slug))
             .flatten();
+        let asked = review_import::asked(
+            self.feature(project, slug).and_then(|f| f.review.as_ref()),
+            &ids,
+        );
+        self.fix_round_asked(project, slug, asked);
         self.fix_round_gives_back(
             project,
             slug,
