@@ -1140,7 +1140,7 @@ mod tests {
         tried.manual = Some(ManualTest {
             patch: "p".into(),
             checks: Vec::new(),
-            retest: Default::default(),
+            ..ManualTest::default()
         });
         assert_eq!(
             events(&step(&f, &tried)),

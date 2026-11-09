@@ -2198,6 +2198,7 @@ fn lists_comments(feature: &Feature) -> bool {
 /// Whether `stage`'s page of `feature` takes a comment of the user's own.
 fn can_add_comment(feature: &Feature, stage: Stage) -> bool {
     can_decide(feature, stage)
+        || tries_criteria(feature, stage)
         || (stage == Stage::CodeReview
             && feature.status == Status::Open
             && feature.current() == Some(stage)
@@ -2697,6 +2698,9 @@ pub(crate) fn criterion_buttons(i: usize, row: &Row) -> Vec<(PageButton, PanelOu
         };
         (button, PanelOutcome::Manual(outcome))
     };
+    if row.comment {
+        return comment_buttons(i, row);
+    }
     let (pass, fail) = match row.found {
         None => (ButtonStyle::Plain, ButtonStyle::Plain),
         Some(Verdict::Pass) => (ButtonStyle::Passed, ButtonStyle::Plain),
@@ -2718,10 +2722,42 @@ pub(crate) fn criterion_buttons(i: usize, row: &Row) -> Vec<(PageButton, PanelOu
     out
 }
 
+/// The buttons on comment `i`'s card: editing and deleting it, then Done and
+/// Not done, always both and in that order, the one it stands at filled.
+/// Done again opens it again; Not done on one whose fix is made says the fix
+/// didn't do it, to send again.
+fn comment_buttons(i: usize, row: &Row) -> Vec<(PageButton, PanelOutcome)> {
+    use crate::manual_test::Outcome;
+    let button = |label: &str, style, outcome| {
+        let button = PageButton {
+            label: label.to_owned(),
+            style,
+        };
+        (button, PanelOutcome::Manual(outcome))
+    };
+    let (done, open) = match row.found {
+        None => (ButtonStyle::Plain, ButtonStyle::Plain),
+        Some(Verdict::Pass) => (ButtonStyle::Passed, ButtonStyle::Plain),
+        Some(Verdict::Fail) => (ButtonStyle::Plain, ButtonStyle::Failed),
+    };
+    vec![
+        button("Edit\u{2026}", ButtonStyle::Quiet, Outcome::EditComment(i)),
+        button("Delete", ButtonStyle::Quiet, Outcome::DeleteComment(i)),
+        button("Done", done, Outcome::Toggle(i)),
+        button("Not done", open, Outcome::Fail(i, String::new())),
+    ]
+}
+
 /// What criterion `row` checks, step by step, for its card while open: a
 /// line each for its Given, When and Then, or its text as the brief has it
-/// when it doesn't split.
+/// when it doesn't split. A comment's, a line each of its text.
 fn criterion_steps(row: &Row) -> Vec<(&'static str, String)> {
+    if row.comment {
+        return (row.text.lines())
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| ("", line.to_owned()))
+            .collect();
+    }
     match crate::feature::manual::split_gwt(&row.text) {
         Some([given, when, then]) => vec![
             ("Given", given.to_owned()),
@@ -2772,10 +2808,17 @@ fn criterion_card(
         Some(Verdict::Pass) => FindingTag::Passed,
         Some(Verdict::Fail) => FindingTag::Failed,
     };
+    let again = match row.comment {
+        true => "look again",
+        false => "try again",
+    };
     let state = match (row.made, row.sent, row.retest) {
-        (true, _, _) => "fix made: try again".to_owned(),
+        (true, _, _) => format!("fix made: {again}"),
         (false, true, _) => "sent to Build".to_owned(),
-        (false, false, Some(n)) => format!("changed by fix round {n}: try again"),
+        (false, false, Some(n)) => format!("changed by fix round {n}: {again}"),
+        (false, false, None) if row.comment && row.found == Some(Verdict::Fail) => {
+            "open".to_owned()
+        }
         (false, false, None) => String::new(),
     };
     FindingCard {
@@ -2793,11 +2836,19 @@ fn criterion_card(
         })),
         preview: Vec::new(),
         fix: String::new(),
-        note: match (row.note.is_empty(), row.shots.len()) {
-            (true, _) => String::new(),
-            (false, 0) => format!("What went wrong: {}", row.note),
-            (false, 1) => format!("What went wrong: {} (1 screenshot)", row.note),
-            (false, n) => format!("What went wrong: {} ({n} screenshots)", row.note),
+        note: {
+            let label = match row.comment {
+                true => "Note",
+                false => "What went wrong",
+            };
+            match (row.note.is_empty(), row.shots.len()) {
+                (true, 0) => String::new(),
+                (true, 1) => "1 screenshot".to_owned(),
+                (true, n) => format!("{n} screenshots"),
+                (false, 0) => format!("{label}: {}", row.note),
+                (false, 1) => format!("{label}: {} (1 screenshot)", row.note),
+                (false, n) => format!("{label}: {} ({n} screenshots)", row.note),
+            }
         },
         comment: String::new(),
         comment_buttons: Vec::new(),
@@ -2855,6 +2906,12 @@ fn check_buttons(
         out.push((plain("Run again"), PanelOutcome::RerunCheck(i)));
     }
     out
+}
+
+/// Whether Manual test's page of `feature` has failures or comments to send
+/// to Build now: none waits for a round to end.
+fn manual_sends(feature: &Feature, ctx: RowCtx) -> bool {
+    ctx.manual.failed > ctx.manual.sent && feature.fix_round.is_none()
 }
 
 /// Whether some check of `feature` runs that hasn't been told to stop.
@@ -3399,6 +3456,7 @@ fn action_hint(action: &PanelOutcome) -> &'static str {
         PanelOutcome::ManualTest => "try the criteria",
         PanelOutcome::Manual(crate::manual_test::Outcome::MarkPassed) => "mark passed",
         PanelOutcome::Manual(crate::manual_test::Outcome::SendFailures) => "plan fixes",
+        PanelOutcome::Manual(crate::manual_test::Outcome::MakeFixes) => "make fixes",
         PanelOutcome::PlanSuggestions => "decide",
         PanelOutcome::WriteFinalPlan => "go on",
         PanelOutcome::Tick => "mark done",
@@ -4156,6 +4214,9 @@ impl FeaturePanel {
             true => ctx.criteria,
             false => 0,
         };
+        // The user's comments come after the brief's criteria.
+        let first_comment = criteria.saturating_sub(ctx.manual.comments());
+        let comment_at = |i: usize| (i >= first_comment && i < criteria).then_some(i);
         let shown = match shows_criteria(feature, stage) {
             true => ctx.criteria,
             false => 0,
@@ -4291,22 +4352,45 @@ impl FeaturePanel {
             {
                 return page_enter(feature, stage, ctx);
             }
-            // A criterion's card with the keyboard.
+            // A criterion's card with the keyboard; a comment's the same,
+            // done for passed, and Del deletes it, the first press arming it
+            // (checklist C4).
             Keysym::space | Keysym::Return | Keysym::KP_Enter
                 if bare && self.focus == TabArea::Findings && criteria > 0 =>
             {
                 return Some(PanelOutcome::Manual(Outcome::Toggle(self.finding)));
             }
             Keysym::f if bare && self.focus == TabArea::Findings && criteria > 0 => {
-                return Some(PanelOutcome::Manual(Outcome::Write(self.finding)));
+                return Some(PanelOutcome::Manual(match comment_at(self.finding) {
+                    Some(_) => Outcome::Fail(self.finding, String::new()),
+                    None => Outcome::Write(self.finding),
+                }));
+            }
+            Keysym::e | Keysym::E
+                if ctrl
+                    && !mods.shift
+                    && self.focus == TabArea::Findings
+                    && comment_at(self.finding).is_some() =>
+            {
+                return Some(PanelOutcome::Manual(Outcome::EditComment(self.finding)));
             }
             Keysym::Delete | Keysym::KP_Delete
                 if bare && self.focus == TabArea::Findings && criteria > 0 =>
             {
-                return Some(PanelOutcome::Manual(Outcome::Clear(self.finding)));
+                let Some(at) = comment_at(self.finding) else {
+                    return Some(PanelOutcome::Manual(Outcome::Clear(self.finding)));
+                };
+                let key = format!("comment:{at}");
+                if armed.as_ref() != Some(&key) {
+                    self.armed = Some(key);
+                    return None;
+                }
+                return Some(PanelOutcome::Manual(Outcome::DeleteComment(self.finding)));
             }
             // From anywhere on the page. Reopen and a fix plan's keys are
             // for when it has one: then these are not its keys.
+            // With failures or comments to send, Ctrl+Enter makes their
+            // fixes, as on AI review's and Verify's pages.
             Keysym::Return | Keysym::KP_Enter
                 if ctrl
                     && criteria > 0
@@ -4315,6 +4399,7 @@ impl FeaturePanel {
             {
                 return Some(PanelOutcome::Manual(match mods.shift {
                     true => Outcome::SendFailures,
+                    false if manual_sends(feature, ctx) => Outcome::MakeFixes,
                     false => Outcome::MarkPassed,
                 }));
             }
@@ -5071,9 +5156,13 @@ fn writers_page_actions(
             false => ButtonStyle::Plain,
         };
         // Found while a round is open, they wait for the next one.
-        if ctx.manual.failed > ctx.manual.sent && feature.fix_round.is_none() {
+        if manual_sends(feature, ctx) {
             out.push((
-                button("Plan fixes", style(true)),
+                button("Make fixes", style(true)),
+                PanelOutcome::Manual(Outcome::MakeFixes),
+            ));
+            out.push((
+                button("Plan fixes", ButtonStyle::Plain),
                 PanelOutcome::Manual(Outcome::SendFailures),
             ));
         }
@@ -6803,20 +6892,32 @@ impl Gerdr {
                 });
                 let fixed = (self.feature(project, slug)).is_some_and(|f| f.unverified.is_some());
                 if !passed {
-                    self.show_warning("Not every criterion passed yet; try them first".into());
+                    let comments = criteria.iter().any(|c| c.comment);
+                    self.show_warning(match comments {
+                        true => "Not every criterion passed and comment is done yet".into(),
+                        false => "Not every criterion passed yet; try them first".into(),
+                    });
                 } else if fixed {
                     // Fixes landed while it was tried: the stages after
                     // Build go over them again first.
                     self.back_to_verify(project, slug);
                 } else {
                     self.tick_feature(project, slug, Some(&reading.patch), "you");
-                    let n = criteria.len();
+                    let comments = criteria.iter().filter(|c| c.comment).count();
+                    let n = criteria.len() - comments;
                     if let Some(f) = self.feature_mut(project, slug) {
-                        let all = if n == 1 {
-                            "its 1 criterion".to_owned()
-                        } else {
-                            format!("all {n} criteria")
+                        let mut all = match n {
+                            0 => String::new(),
+                            1 => "its 1 criterion".to_owned(),
+                            n => format!("all {n} criteria"),
                         };
+                        if comments > 0 {
+                            let done = format!("{} done", plural(comments, "comment"));
+                            all = match all.is_empty() {
+                                true => done,
+                                false => format!("{all}, {done}"),
+                            };
+                        }
                         f.log(feature::now(), format!("Manual test passed: {all}"));
                     }
                     self.save_feature(project, slug);
@@ -12403,13 +12504,18 @@ fn stage_page(
                     // Found while a round is open: the next one takes them.
                     let waiting = state.ctx.manual.failed - state.ctx.manual.sent;
                     if waiting > 0 && feature.fix_round.is_some() {
-                        let text = format!(
-                            "{} for the current round",
-                            match waiting {
-                                1 => "1 failure waits".to_owned(),
-                                n => format!("{n} failures wait"),
+                        let comments = (state.criteria.iter())
+                            .filter(|r| r.comment && r.found == Some(Verdict::Fail) && !r.sent)
+                            .count();
+                        let what = match (waiting - comments.min(waiting), comments) {
+                            (_, 0) => plural(waiting, "failure"),
+                            (0, _) => plural(waiting, "comment"),
+                            (f, c) => {
+                                format!("{} and {}", plural(f, "failure"), plural(c, "comment"))
                             }
-                        );
+                        };
+                        let wait = if waiting == 1 { "waits" } else { "wait" };
+                        let text = format!("{what} {wait} for the current round");
                         said.push(line(text, CheckTone::Note));
                     }
                     if fixes_unverified(feature, stage) {
@@ -13180,14 +13286,30 @@ fn writers_tab_hints(
             hints.push(hint("Tab", if repos { "repositories" } else { "stages" }));
         }
         TabArea::Findings if tries_criteria(feature, stage) && ctx.criteria > 0 => {
+            let first_comment = ctx.criteria.saturating_sub(ctx.manual.comments());
+            let comment = panel.finding >= first_comment;
             hints.push(hint("Up / Down", "criterion"));
             hints.push(hint("Left / Right", "fold / open"));
-            hints.push(hint("Space", "pass"));
-            hints.push(hint("f", "fail\u{2026}"));
-            hints.push(hint("Del", "clear"));
+            if comment {
+                hints.push(hint("Space", "done"));
+                hints.push(hint("f", "not done"));
+                hints.push(hint("Ctrl+E", "edit\u{2026}"));
+                hints.push(match panel.armed.is_some() {
+                    true => hint("Del", "again to delete"),
+                    false => hint("Del", "delete"),
+                });
+            } else {
+                hints.push(hint("Space", "pass"));
+                hints.push(hint("f", "fail\u{2026}"));
+                hints.push(hint("Del", "clear"));
+            }
+            hints.push(hint("c", "add comment\u{2026}"));
             hints.extend(search_hints(panel));
             if fix_round_on(feature, stage).is_none() {
-                hints.push(hint("Ctrl+Enter", "mark passed"));
+                match manual_sends(feature, ctx) {
+                    true => hints.push(hint("Ctrl+Enter", "make fixes")),
+                    false => hints.push(hint("Ctrl+Enter", "mark passed")),
+                }
                 hints.push(hint("Ctrl+Shift+Enter", "plan fixes"));
             }
             hints.push(hint("Tab", if repos { "repositories" } else { "stages" }));
@@ -18866,23 +18988,29 @@ pub(crate) mod tests {
                 sent,
                 made: 0,
                 untested,
+                ..Default::default()
             },
             ..RowCtx::default()
         };
         let enter = |ctx| page_enter(&f, Stage::ManualTest, ctx);
         // Nothing tried: Enter goes to the criteria.
         assert_eq!(enter(ctx(0, 0, 0, 3)), Some(PanelOutcome::ManualTest));
-        // A failure not sent: its fixes come next.
+        // A failure not sent: its fixes come next, made at once or
+        // through a plan.
         assert_eq!(
             enter(ctx(2, 1, 0, 0)),
-            Some(PanelOutcome::Manual(Outcome::SendFailures))
+            Some(PanelOutcome::Manual(Outcome::MakeFixes))
         );
-        // All sent: nothing to send, back to the criteria.
         let labels = |ctx| -> Vec<String> {
             (page_actions(&f, Stage::ManualTest, ctx).into_iter())
                 .map(|(b, _)| b.label)
                 .collect()
         };
+        assert_eq!(
+            labels(ctx(2, 1, 0, 0))[..3],
+            ["Make fixes", "Plan fixes", "Mark passed"]
+        );
+        // All sent: nothing to send, back to the criteria.
         assert!(!labels(ctx(2, 1, 1, 0)).contains(&"Plan fixes".to_owned()));
         assert_eq!(enter(ctx(2, 1, 1, 0)), Some(PanelOutcome::ManualTest));
         // All passed: it can be marked.
@@ -18890,6 +19018,143 @@ pub(crate) mod tests {
             enter(ctx(3, 0, 0, 0)),
             Some(PanelOutcome::Manual(Outcome::MarkPassed))
         );
+    }
+
+    #[test]
+    fn a_comment_is_done_or_not_and_its_keys_edit_and_delete_it() {
+        use crate::{feature::manual::Counts, manual_test::Outcome};
+        let f = feature("m", vec![repo("api", true)], 7);
+        let comment = |found| Row {
+            id: "C1".into(),
+            title: "Make the settings page look better".into(),
+            text: "Make the settings page look better\nCards, not a table".into(),
+            found,
+            note: String::new(),
+            sent: false,
+            made: false,
+            earlier: false,
+            retest: None,
+            open: true,
+            seen: false,
+            shots: Vec::new(),
+            comment: true,
+        };
+        let buttons = |row: &Row| -> Vec<(String, ButtonStyle, PanelOutcome)> {
+            (criterion_buttons(2, row).into_iter())
+                .map(|(b, o)| (b.label, b.style, o))
+                .collect()
+        };
+        let on = |o| PanelOutcome::Manual(o);
+        let open = buttons(&comment(Some(Verdict::Fail)));
+        assert_eq!(
+            open,
+            [
+                (
+                    "Edit\u{2026}".into(),
+                    ButtonStyle::Quiet,
+                    on(Outcome::EditComment(2))
+                ),
+                (
+                    "Delete".into(),
+                    ButtonStyle::Quiet,
+                    on(Outcome::DeleteComment(2))
+                ),
+                ("Done".into(), ButtonStyle::Plain, on(Outcome::Toggle(2))),
+                (
+                    "Not done".into(),
+                    ButtonStyle::Failed,
+                    on(Outcome::Fail(2, String::new()))
+                ),
+            ]
+        );
+        let done = buttons(&comment(Some(Verdict::Pass)));
+        assert_eq!(done[2].1, ButtonStyle::Passed);
+        // Its card: its lines as its steps, "open" until it goes to Build.
+        let row = comment(Some(Verdict::Fail));
+        let card = criterion_card(2, &row, &[], true);
+        assert_eq!(card.state, "open");
+        assert_eq!(
+            card.sheet.as_ref().unwrap().steps,
+            [
+                ("", "Make the settings page look better".to_owned()),
+                ("", "Cards, not a table".to_owned()),
+            ]
+        );
+        let made = Row {
+            sent: true,
+            made: true,
+            ..row
+        };
+        assert_eq!(
+            criterion_card(2, &made, &[], true).state,
+            "fix made: look again"
+        );
+        // Its keys: two criteria and the comment, open and not sent.
+        let ctx = RowCtx {
+            criteria: 3,
+            manual: Counts {
+                passed: 2,
+                failed: 1,
+                comments_open: 1,
+                ..Counts::default()
+            },
+            ..RowCtx::default()
+        };
+        let mut panel = FeaturePanel {
+            project: "acme".into(),
+            slug: "m".into(),
+            focus: TabArea::Findings,
+            finding: 2,
+            ..FeaturePanel::default()
+        };
+        let slugs = vec!["m".to_owned()];
+        let go = |p: &mut FeaturePanel, mods: ModifiersState, sym| {
+            p.key(&mods, sym, &f, &slugs, ctx, &[], &[], &[])
+        };
+        let bare = ModifiersState::default();
+        let ctrl = ModifiersState {
+            ctrl: true,
+            ..ModifiersState::default()
+        };
+        assert_eq!(
+            go(&mut panel, bare, Keysym::f),
+            Some(on(Outcome::Fail(2, String::new())))
+        );
+        assert_eq!(
+            go(&mut panel, ctrl, Keysym::e),
+            Some(on(Outcome::EditComment(2)))
+        );
+        // Del arms first.
+        assert_eq!(go(&mut panel, bare, Keysym::Delete), None);
+        assert_eq!(
+            go(&mut panel, bare, Keysym::Delete),
+            Some(on(Outcome::DeleteComment(2)))
+        );
+        assert_eq!(
+            go(&mut panel, bare, Keysym::c),
+            Some(PanelOutcome::AddComment)
+        );
+        // It is to send: Ctrl+Enter makes the fixes, Ctrl+Shift+Enter plans.
+        assert_eq!(
+            go(&mut panel, ctrl, Keysym::Return),
+            Some(on(Outcome::MakeFixes))
+        );
+        let shift = ModifiersState {
+            shift: true,
+            ..ctrl
+        };
+        assert_eq!(
+            go(&mut panel, shift, Keysym::Return),
+            Some(on(Outcome::SendFailures))
+        );
+        // On a criterion the keys are as ever.
+        panel.finding = 0;
+        assert_eq!(go(&mut panel, bare, Keysym::f), Some(on(Outcome::Write(0))));
+        assert_eq!(
+            go(&mut panel, bare, Keysym::Delete),
+            Some(on(Outcome::Clear(0)))
+        );
+        assert_eq!(go(&mut panel, ctrl, Keysym::e), None);
     }
 
     /// Manual test's rows: one not tried, open; one passed, folded; one
@@ -18909,6 +19174,7 @@ pub(crate) mod tests {
             open,
             seen: false,
             shots: Vec::new(),
+            comment: false,
         };
         let rows = vec![
             row("AC-1", "Saves", "Given a draft, when I save, then it lists", None, true),
@@ -19090,6 +19356,7 @@ pub(crate) mod tests {
             earlier: false,
             retest: None,
             shots: Vec::new(),
+            comment: false,
         };
         let rows = vec![
             row(None, ""),
@@ -19240,6 +19507,7 @@ pub(crate) mod tests {
             earlier: true,
             retest: None,
             shots: Vec::new(),
+            comment: false,
         };
         let rows = vec![
             row(Some(Verdict::Fail), true, true),
@@ -19255,6 +19523,7 @@ pub(crate) mod tests {
                 sent: 1,
                 made: 1,
                 untested: 1,
+                ..Default::default()
             },
             ..RowCtx::default()
         };
@@ -19373,6 +19642,7 @@ pub(crate) mod tests {
             earlier: false,
             retest: None,
             shots: Vec::new(),
+            comment: false,
         };
         let rows = vec![row(Some(Verdict::Pass)), row(Some(Verdict::Pass))];
         let ctx = RowCtx {
@@ -22284,7 +22554,7 @@ pub(crate) mod tests {
             f.manual = Some(ManualTest {
                 patch: String::new(),
                 checks: vec![k],
-                retest: Default::default(),
+                ..ManualTest::default()
             });
             now(&f)
         };

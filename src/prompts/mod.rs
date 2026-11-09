@@ -249,7 +249,7 @@ mod tests {
         for name in ["fix-go", "fix-on"] {
             let line = render_builtin(name, &v).unwrap();
             assert!(!line.trim_end().contains('\n'), "{line}");
-            assert!(line.contains("`Criteria: AC-1, AC-3`"), "{line}");
+            assert!(line.contains("`Criteria: AC-1, AC-3, C1`"), "{line}");
         }
         v.insert("fixes.criteria".into(), String::new());
         let line = render_builtin("send-fixes", &v).unwrap();

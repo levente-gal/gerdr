@@ -17,6 +17,11 @@
 //! is now. Once done the cards stay on the page, to read: reopening the stage
 //! is what changes them.
 //!
+//! The user's own comments, on no criterion, are rows of the same sheet after
+//! the criteria (`manual::Comment`): added and edited in the comment dialog
+//! (`finding_dialog`), sent with the failures, made done or not done as a
+//! criterion is passed or failed, and deleted with an Undo.
+//!
 //! The cards' keys are in `features`, with the rest of the tab's. This holds
 //! what they do, and the note being written.
 
@@ -50,16 +55,27 @@ pub enum Outcome {
     Clear(usize),
     /// Mark Manual test done.
     MarkPassed,
-    /// Send the failures to the Build agent.
+    /// Send the failures and comments to the Build agent, through a plan.
     SendFailures,
+    /// The same with no plan: the Build agent makes them at once.
+    MakeFixes,
+    /// Edit comment `i` (counted as the criteria are) in the comment dialog.
+    EditComment(usize),
+    /// Delete comment `i`.
+    DeleteComment(usize),
 }
 
 impl Outcome {
     /// The criterion it is about, if one.
     pub(crate) fn criterion(&self) -> Option<usize> {
         match self {
-            Self::Toggle(i) | Self::Write(i) | Self::Fail(i, _) | Self::Clear(i) => Some(*i),
-            Self::MarkPassed | Self::SendFailures => None,
+            Self::Toggle(i)
+            | Self::Write(i)
+            | Self::Fail(i, _)
+            | Self::Clear(i)
+            | Self::EditComment(i)
+            | Self::DeleteComment(i) => Some(*i),
+            Self::MarkPassed | Self::SendFailures | Self::MakeFixes => None,
         }
     }
 }
@@ -92,6 +108,9 @@ pub struct Row {
     pub seen: bool,
     /// The screenshots of a failure, by file name (see `manual::SHOTS_DIR`).
     pub shots: Vec<String>,
+    /// It is a comment of the user's own: its text is what should change,
+    /// passed means done.
+    pub comment: bool,
 }
 
 impl Row {
@@ -214,6 +233,7 @@ fn rows(
                 shots: check
                     .filter(|k| k.state == Verdict::Fail)
                     .map_or_else(Vec::new, |k| k.shots.clone()),
+                comment: c.comment,
             }
         })
         .collect()
@@ -221,26 +241,48 @@ fn rows(
 
 /// How far the manual test of `criteria` went, in words: "2 of 3
 /// criteria passed · 1 failed", "1 of 3 criteria passed · 1 failure
-/// sent to Build", "… · 1 fix made: try again".
+/// sent to Build", "… · 1 fix made: try again", "… · 1 comment open".
 pub(crate) fn counts_text(n: manual::Counts) -> String {
-    let total = n.total();
+    let total = n.total() - n.comments();
     let what = if total == 1 { "criterion" } else { "criteria" };
-    let passed = format!("{} of {total} {what} passed", n.passed);
-    if n.made > 0 {
-        format!(
-            "{passed} \u{b7} {} made: try again",
-            fixes(n.made)
-        )
-    } else if n.failed > 0 && n.sent == n.failed {
-        format!(
-            "{passed} \u{b7} {} sent to Build",
-            plural(n.sent, "failure")
-        )
-    } else if n.failed > 0 {
-        format!("{passed} \u{b7} {} failed", n.failed)
-    } else {
-        passed
+    let mut parts = Vec::new();
+    if total > 0 || n.comments() == 0 {
+        parts.push(format!(
+            "{} of {total} {what} passed",
+            n.passed - n.comments_done
+        ));
     }
+    let failed = n.failed - n.comments_open;
+    // What is sent or made counts failures and comments alike.
+    let sent_what = match (failed, n.comments_open) {
+        (_, 0) => "failure",
+        (0, _) => "comment",
+        _ => "",
+    };
+    if n.made > 0 {
+        parts.push(format!("{} made: try again", fixes(n.made)));
+    } else if n.failed > 0 && n.sent == n.failed {
+        parts.push(match sent_what {
+            "" => format!("{} sent to Build", n.sent),
+            what => format!("{} sent to Build", plural(n.sent, what)),
+        });
+    } else {
+        if failed > 0 {
+            parts.push(format!("{failed} failed"));
+        }
+        if n.comments_open > 0 {
+            parts.push(format!("{} open", plural(n.comments_open, "comment")));
+        }
+    }
+    let looks = n.comments_untested;
+    if looks > 0 {
+        parts.push(format!("{} to look at", plural(looks, "comment")));
+    }
+    // Only comments, all done.
+    if parts.is_empty() {
+        parts.push(format!("{} done", plural(n.comments_done, "comment")));
+    }
+    parts.join(" \u{b7} ")
 }
 
 /// "1 fix", "2 fixes".
@@ -256,8 +298,14 @@ fn fixes(n: usize) -> String {
 pub(crate) fn strip_text(n: manual::Counts) -> String {
     let mut text = format!(
         "{} passed \u{b7} {} failed \u{b7} {} untested",
-        n.passed, n.failed, n.untested
+        n.passed - n.comments_done,
+        n.failed - n.comments_open,
+        n.untested - n.comments_untested
     );
+    let open = n.comments_open + n.comments_untested;
+    if open > 0 {
+        text.push_str(&format!(" \u{b7} {} open", plural(open, "comment")));
+    }
     if n.made > 0 {
         text.push_str(&format!(" \u{b7} {} made", fixes(n.made)));
     }
@@ -268,10 +316,12 @@ pub(crate) fn strip_text(n: manual::Counts) -> String {
 /// tried".
 fn left_text(rows: &[Row]) -> String {
     rows.iter()
-        .filter_map(|r| match r.found {
-            Some(Verdict::Pass) => None,
-            Some(Verdict::Fail) => Some(format!("{} failed", r.id)),
-            None => Some(format!("{} not tried", r.id)),
+        .filter_map(|r| match (r.found, r.comment) {
+            (Some(Verdict::Pass), _) => None,
+            (Some(Verdict::Fail), false) => Some(format!("{} failed", r.id)),
+            (Some(Verdict::Fail), true) => Some(format!("{} open", r.id)),
+            (None, false) => Some(format!("{} not tried", r.id)),
+            (None, true) => Some(format!("{} to look at", r.id)),
         })
         .collect::<Vec<_>>()
         .join(", ")
@@ -300,9 +350,11 @@ pub(crate) fn criteria_in(data: &std::path::Path) -> Vec<Criterion> {
 
 impl Gerdr {
     /// Read the criteria of feature `slug` of `project` from its brief
-    /// again: the page and the inbox show them.
+    /// again, its comments after them: the page and the inbox show them.
     pub(crate) fn load_criteria(&mut self, project: &str, slug: &str) {
-        let criteria = read_criteria(project, slug);
+        let mut criteria = read_criteria(project, slug);
+        let manual = self.feature(project, slug).and_then(|f| f.manual.as_ref());
+        criteria.extend(manual::comment_criteria(manual));
         let key = (project.to_owned(), slug.to_owned());
         if criteria.is_empty() {
             self.features.criteria.remove(&key);
@@ -857,6 +909,11 @@ impl Gerdr {
                             feature::now(),
                         );
                     }
+                    // A comment done is open again, not untried.
+                    _ if passed && c.comment => {
+                        let now = feature::now();
+                        manual::set(&mut f.manual, c, &patch, Verdict::Fail, "", now);
+                    }
                     _ if passed => _ = manual::clear(&mut f.manual, &c.id),
                     _ => manual::set(&mut f.manual, c, &patch, Verdict::Pass, "", feature::now()),
                 }
@@ -911,35 +968,247 @@ impl Gerdr {
                 }
                 self.read_and_tick(&project, &slug, Stage::ManualTest);
             }
-            Outcome::SendFailures => {
-                let Some(feature) = self.feature(&project, &slug) else {
+            Outcome::SendFailures => self.send_manual_fixes(&project, &slug, false),
+            Outcome::MakeFixes => self.send_manual_fixes(&project, &slug, true),
+            Outcome::EditComment(i) => {
+                let Some(c) = criteria.get(i).filter(|c| c.comment) else {
                     return;
                 };
-                let (n, text) = manual::failures_markdown(feature.manual.as_ref(), &criteria, &title);
-                let asked = manual::asked(feature.manual.as_ref(), &criteria);
-                if n == 0 {
-                    return self.show_warning("No failures to send: mark one failed first".into());
+                if done {
+                    return self.show_warning(format!(
+                        "{} is done: reopen it to change its comments",
+                        Stage::ManualTest.label()
+                    ));
                 }
-                if !self.send_to_build(
-                    &project,
-                    &slug,
-                    Stage::ManualTest,
-                    "manual test failures",
-                    text,
-                ) {
+                self.ask_edit_manual_comment(&project, &slug, &c.id, &c.text);
+            }
+            Outcome::DeleteComment(i) => {
+                let Some(c) = criteria.get(i).filter(|c| c.comment) else {
                     return;
+                };
+                if done {
+                    return self.show_warning(format!(
+                        "{} is done: reopen it to change its comments",
+                        Stage::ManualTest.label()
+                    ));
                 }
-                if let Some(f) = self.feature_mut(&project, &slug) {
-                    let checks = manual::mark_sent(&mut f.manual, &criteria);
-                    let back = crate::feature::fix_round::GiveBack::Manual { checks };
-                    self.fix_round_gives_back(&project, &slug, back);
-                    self.fix_round_asked(&project, &slug, asked);
-                }
-                tracing::info!("sent {n} manual test failures of {project}/{slug} to Build");
-                self.save_feature(&project, &slug);
-                self.show_build_agent(&project, &slug);
+                self.delete_manual_comment(&project, &slug, &c.id.clone());
             }
         }
+    }
+
+    /// Send feature `slug`'s failures and comments not sent yet to its Build
+    /// agent: through a fix plan, or with none (`unplanned`), the plan gerdr
+    /// writes of them waiting as an agent's would until it is told to make
+    /// it (see `findings_go`).
+    fn send_manual_fixes(&mut self, project: &str, slug: &str, unplanned: bool) {
+        let Some(feature) = self.feature(project, slug) else {
+            return;
+        };
+        let title = feature.title.clone();
+        let criteria = self.criteria(project, slug).to_vec();
+        let test = feature.manual.as_ref();
+        let (n, text) = manual::failures_markdown(test, &criteria, &title);
+        let asked = manual::asked(test, &criteria);
+        if n == 0 {
+            return self.show_warning(
+                "Nothing to send: mark a criterion failed or add a comment first".into(),
+            );
+        }
+        let comments = (criteria.iter())
+            .filter(|c| c.comment && asked.iter().any(|a| a.id == c.id))
+            .count();
+        let what = match (n - comments, comments) {
+            (_, 0) => "manual test failures",
+            (0, _) => "manual test comments",
+            _ => "manual test failures and comments",
+        };
+        let started = match unplanned {
+            false => self.send_to_build(project, slug, Stage::ManualTest, what, text),
+            true => {
+                let plan = manual::fixes_plan(test, &criteria, &title);
+                self.fix_input(project, slug, what, &text)
+                    .is_some_and(|input| {
+                        let asked = Stage::ManualTest;
+                        self.start_unplanned_fix_round(project, slug, asked, what, input, &plan)
+                    })
+            }
+        };
+        if !started {
+            return;
+        }
+        if let Some(f) = self.feature_mut(project, slug) {
+            let checks = manual::mark_sent(&mut f.manual, &criteria);
+            let back = crate::feature::fix_round::GiveBack::Manual { checks };
+            self.fix_round_gives_back(project, slug, back);
+            self.fix_round_asked(project, slug, asked);
+        }
+        tracing::info!("sent {n} {what} of {project}/{slug} to Build");
+        self.save_feature(project, slug);
+        if !unplanned || self.make_unplanned_fixes(project, slug) {
+            self.show_build_agent(project, slug);
+        }
+    }
+
+    /// Whether comments can be added to feature `slug`'s manual test now; if
+    /// not, says why.
+    fn comments_open_to(&mut self, project: &str, slug: &str) -> bool {
+        let Some(feature) = self.feature(project, slug) else {
+            self.show_warning("That feature is gone".into());
+            return false;
+        };
+        if !crate::features::tries_criteria(feature, Stage::ManualTest) {
+            let title = feature.title.clone();
+            self.show_warning(format!("\u{201c}{title}\u{201d} isn't at Manual test"));
+            return false;
+        }
+        true
+    }
+
+    /// The patch-id of feature `slug`'s code as last read, to try a comment
+    /// on; `None` says it is still being read.
+    fn comment_patch(&mut self, project: &str, slug: &str) -> Option<String> {
+        let patch = self.manual_patch(project, slug);
+        if patch.is_none() {
+            let title = self
+                .feature(project, slug)
+                .map_or(String::new(), |f| f.title.clone());
+            self.probe_feature(project, slug);
+            self.show_warning(format!(
+                "Still reading the code of \u{201c}{title}\u{201d}; try again in a moment"
+            ));
+        }
+        patch
+    }
+
+    /// Add a comment of the user's own saying `text` to feature `slug`'s
+    /// manual test: open, to go to Build with the failures. False when it
+    /// wasn't, as said, and the dialog keeps what was typed.
+    pub(crate) fn add_manual_comment(&mut self, project: &str, slug: &str, text: &str) -> bool {
+        if !self.comments_open_to(project, slug) {
+            return false;
+        }
+        let Some(patch) = self.comment_patch(project, slug) else {
+            return false;
+        };
+        let Some(f) = self.feature_mut(project, slug) else {
+            return false;
+        };
+        let id = manual::add_comment(&mut f.manual, text.trim(), &patch, feature::now());
+        self.comments_changed(project, slug);
+        // It lands at the end of the sheet, selected.
+        let at = (self.criteria(project, slug).iter()).position(|c| c.id == id);
+        if let Some(at) = at.filter(|_| self.panel_on(project, slug)) {
+            self.select_criterion(at);
+        }
+        self.show_success(format!(
+            "Comment {id} added, to go to Build with the failures"
+        ));
+        true
+    }
+
+    /// Ask what comment `id` of feature `slug`'s manual test, saying `text`,
+    /// should say.
+    fn ask_edit_manual_comment(&mut self, project: &str, slug: &str, id: &str, text: &str) {
+        if self.comments_open_to(project, slug) {
+            self.ask_edit_comment(project, slug, id, text);
+        }
+    }
+
+    /// Make comment `id` of feature `slug`'s manual test say `text`: open
+    /// again, as it asks for something new. False when it wasn't, as said.
+    pub(crate) fn edit_manual_comment(
+        &mut self,
+        project: &str,
+        slug: &str,
+        id: &str,
+        text: &str,
+    ) -> bool {
+        if !self.comments_open_to(project, slug) {
+            return false;
+        }
+        let Some(patch) = self.comment_patch(project, slug) else {
+            return false;
+        };
+        let Some(f) = self.feature_mut(project, slug) else {
+            return false;
+        };
+        let now = feature::now();
+        let Some(was) = manual::edit_comment(&mut f.manual, id, text.trim(), &patch, now) else {
+            return true;
+        };
+        // It stays open or folded, and read, as it was.
+        let key = folds_key(project, slug);
+        if let Some(folds) = self.projects.criteria_folds.get_mut(&key) {
+            let new = text.trim().to_owned();
+            if folds.open.remove(&was) {
+                folds.open.insert(new.clone());
+            }
+            if folds.seen.remove(&was) {
+                folds.seen.insert(new);
+            }
+            self.projects.save();
+        }
+        self.comments_changed(project, slug);
+        self.show_success(format!("Comment {id} changed: open again"));
+        true
+    }
+
+    /// Delete comment `id` of feature `slug`'s manual test; the toast can
+    /// bring it back (checklist C4).
+    pub(crate) fn delete_manual_comment(&mut self, project: &str, slug: &str, id: &str) {
+        if !self.comments_open_to(project, slug) {
+            return;
+        }
+        let Some(f) = self.feature_mut(project, slug) else {
+            return;
+        };
+        let Some(removed) = manual::delete_comment(&mut f.manual, id) else {
+            return self.show_warning(format!("There's no comment {id}"));
+        };
+        self.comments_changed(project, slug);
+        let undo = crate::menu::MenuAction::RestoreManualComment {
+            project: project.to_owned(),
+            slug: slug.to_owned(),
+            removed: Box::new(removed),
+        };
+        self.toast_with(
+            format!("Comment {id} deleted"),
+            crate::toast::Level::Success,
+            Some(("Undo".to_owned(), undo)),
+        );
+    }
+
+    /// Undo `delete_manual_comment`.
+    pub(crate) fn restore_manual_comment(
+        &mut self,
+        project: &str,
+        slug: &str,
+        removed: manual::Removed,
+    ) {
+        if !self.comments_open_to(project, slug) {
+            return;
+        }
+        let id = removed.comment.id.clone();
+        let Some(f) = self.feature_mut(project, slug) else {
+            return self.show_warning("That feature is gone".into());
+        };
+        if !manual::restore_comment(&mut f.manual, removed) {
+            return self.show_warning(format!("Comment {id} is there already"));
+        }
+        self.comments_changed(project, slug);
+        let at = (self.criteria(project, slug).iter()).position(|c| c.id == id);
+        if let Some(at) = at.filter(|_| self.panel_on(project, slug)) {
+            self.select_criterion(at);
+        }
+        self.show_success(format!("Comment {id} is back"));
+    }
+
+    /// Feature `slug`'s comments changed: saved, and its sheet reads them.
+    fn comments_changed(&mut self, project: &str, slug: &str) {
+        self.save_feature(project, slug);
+        self.load_criteria(project, slug);
+        self.sync_feature_page();
     }
 
     /// Start writing criterion `i`'s note, from `note`, on its card.
@@ -975,6 +1244,7 @@ mod tests {
             open: false,
             seen: false,
             shots: Vec::new(),
+            comment: false,
         }
     }
 
@@ -986,6 +1256,7 @@ mod tests {
             sent,
             made: 0,
             untested,
+            ..Default::default()
         };
         assert_eq!(
             counts_text(n(2, 1, 0, 0)),
@@ -1019,6 +1290,50 @@ mod tests {
                 row("AC-3", None),
             ]),
             "AC-2 failed, AC-3 not tried"
+        );
+    }
+
+    #[test]
+    fn comments_are_counted_apart_from_the_criteria() {
+        let n = |passed, failed, sent, untested, done, open| manual::Counts {
+            passed,
+            failed,
+            sent,
+            untested,
+            comments_done: done,
+            comments_open: open,
+            ..Default::default()
+        };
+        // Two criteria passed, a comment open.
+        assert_eq!(
+            counts_text(n(2, 1, 0, 0, 0, 1)),
+            "2 of 2 criteria passed \u{b7} 1 comment open"
+        );
+        assert_eq!(
+            counts_text(n(1, 2, 0, 0, 0, 1)),
+            "1 of 2 criteria passed \u{b7} 1 failed \u{b7} 1 comment open"
+        );
+        assert_eq!(
+            counts_text(n(2, 1, 1, 0, 0, 1)),
+            "2 of 2 criteria passed \u{b7} 1 comment sent to Build"
+        );
+        assert_eq!(
+            counts_text(n(1, 2, 2, 0, 0, 1)),
+            "1 of 2 criteria passed \u{b7} 2 sent to Build"
+        );
+        // Only comments, all done.
+        assert_eq!(counts_text(n(2, 0, 0, 0, 2, 0)), "2 comments done");
+        assert_eq!(
+            strip_text(n(2, 1, 0, 1, 1, 1)),
+            "1 passed \u{b7} 0 failed \u{b7} 1 untested \u{b7} 1 comment open"
+        );
+        let mut c = row("C1", Some(Verdict::Fail));
+        c.comment = true;
+        let mut again = row("C2", None);
+        again.comment = true;
+        assert_eq!(
+            left_text(&[row("AC-1", Some(Verdict::Pass)), c, again]),
+            "C1 open, C2 to look at"
         );
     }
 

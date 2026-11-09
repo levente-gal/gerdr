@@ -978,7 +978,10 @@ pub(crate) fn vars(
         // those again.
         (
             "fixes.criteria",
-            match stage == Stage::Build && !crate::manual_test::criteria_in(data).is_empty() {
+            match stage == Stage::Build
+                && (!crate::manual_test::criteria_in(data).is_empty()
+                    || (feature.manual.as_ref()).is_some_and(|m| !m.comments.is_empty()))
+            {
                 true => "yes".to_owned(),
                 false => String::new(),
             },
@@ -2508,7 +2511,9 @@ impl Gerdr {
         let manual = |f: &Feature| {
             let n = self.manual_counts(f)?;
             let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
-            Some((count(n.passed), count(n.total())))
+            // Criteria, as the gate says: the comments are on the page.
+            let passed = n.passed - n.comments_done;
+            Some((count(passed), count(n.total() - n.comments())))
         };
         gates(&self.features.all, manual)
     }

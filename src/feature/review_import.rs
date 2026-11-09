@@ -909,7 +909,7 @@ pub fn plan_why<'a>(
 }
 
 /// `text` with no line a Markdown heading: a plan's sections go by those.
-fn no_headings(text: &str) -> String {
+pub(crate) fn no_headings(text: &str) -> String {
     let heading = |line: &str| {
         let bare = line.trim_start_matches('#');
         bare.len() < line.len() && bare.starts_with(' ')

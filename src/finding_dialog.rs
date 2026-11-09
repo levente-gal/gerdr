@@ -1,7 +1,8 @@
 //! The dialog asking for a finding's text, from AI review's page or its
-//! diff: why it is dismissed, its fix, or a comment of the user's own. Esc closes it and keeps what was typed for the
-//! next opening on the same thing; nothing here loses anything, since a
-//! dismissed finding can be reopened.
+//! diff: why it is dismissed, its fix, or a comment of the user's own; on
+//! Manual test's page, a comment of theirs on no criterion. Esc closes it and
+//! keeps what was typed for the next opening on the same thing; nothing here
+//! loses anything, since a dismissed finding can be reopened.
 
 use std::collections::HashMap;
 
@@ -33,6 +34,8 @@ pub enum Ask {
     Add,
     /// What a comment the user left in the diff says.
     EditDiffNote,
+    /// What a comment of the user's own on the manual test says.
+    EditComment,
 }
 
 /// What was typed and left: by project, slug, what was asked and the finding.
@@ -74,6 +77,7 @@ impl FindingDialog {
         match self.ask {
             Ask::Dismiss if empty => Some("Say why you dismiss it."),
             Ask::Add | Ask::EditOwn | Ask::EditDiffNote if empty => Some("Say what to fix."),
+            Ask::EditComment if empty => Some("Say what should change."),
             _ => None,
         }
     }
@@ -166,6 +170,11 @@ impl FindingDialog {
                 "Add a comment".to_owned(),
                 &[("Comment", "What should change", 6)],
                 "Add",
+            ),
+            Ask::EditComment => (
+                format!("Edit comment {}", self.id),
+                &[("Comment", "What should change", 6)],
+                "Save",
             ),
         };
         let fields = (self.fields.iter().zip(labels))
@@ -321,6 +330,14 @@ impl Gerdr {
         }
     }
 
+    /// Ask what comment `id` of the user's own on feature `slug`'s manual
+    /// test, saying `text`, should say.
+    pub(crate) fn ask_edit_comment(&mut self, project: &str, slug: &str, id: &str, text: &str) {
+        let about = "Changed, it is open again, to go to the Build agent".to_owned();
+        let from = vec![text.to_owned()];
+        self.open_finding_dialog(project, slug, Ask::EditComment, id, about, from, false);
+    }
+
     /// Ask for a comment of the user's own, to go with the fixes.
     pub fn ask_add_comment(&mut self, project: &str, slug: &str) {
         let stage = self
@@ -328,6 +345,9 @@ impl Gerdr {
             .and_then(crate::feature::Feature::current);
         let about = match stage {
             Some(Stage::CodeReview) => "It goes to the Build agent when you plan fixes",
+            Some(Stage::ManualTest) => {
+                "It goes to the Build agent with the failures, and stays open until you mark it done"
+            }
             _ => "It goes to the Build agent with the fixes, and the next review checks it",
         };
         let from = vec![String::new()];
@@ -366,7 +386,11 @@ impl Gerdr {
         }
         self.features.finding_drafts.remove(&key);
         let (project, slug, id) = (&dialog.project, &dialog.slug, &dialog.id);
-        let first = texts.first().map_or("", String::as_str);
+        let first = texts.first().map_or("", String::as_str).to_owned();
+        let first = first.as_str();
+        let stage = self
+            .feature(project, slug)
+            .and_then(crate::feature::Feature::current);
         match dialog.ask {
             Ask::Dismiss => {
                 let why = Decision::Dismiss(first.to_owned());
@@ -382,7 +406,17 @@ impl Gerdr {
                     self.edit_diff_note(project, slug, note, first);
                 }
             }
+            Ask::Add if stage == Some(Stage::ManualTest) => {
+                if !self.add_manual_comment(project, slug, first) {
+                    self.features.finding_drafts.insert(key, texts);
+                }
+            }
             Ask::Add => self.add_finding_comment(project, slug, first),
+            Ask::EditComment => {
+                if !self.edit_manual_comment(project, slug, id, first) {
+                    self.features.finding_drafts.insert(key, texts);
+                }
+            }
         }
     }
 

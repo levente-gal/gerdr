@@ -197,6 +197,12 @@ pub enum MenuAction {
         at: usize,
         finding: Box<crate::feature::review_import::Finding>,
     },
+    /// Undo deleting a comment of the user's own from a feature's manual test.
+    RestoreManualComment {
+        project: String,
+        slug: String,
+        removed: Box<crate::feature::manual::Removed>,
+    },
     /// Undo deleting a comment the user left in a feature's diff: put it back
     /// at index `at` of their comments.
     RestoreDiffNote {
@@ -582,6 +588,11 @@ impl Gerdr {
                 at,
                 finding,
             } => self.restore_own_finding(&project, &slug, at, *finding),
+            MenuAction::RestoreManualComment {
+                project,
+                slug,
+                removed,
+            } => self.restore_manual_comment(&project, &slug, *removed),
             MenuAction::RestoreDiffNote {
                 project,
                 slug,

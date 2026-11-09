@@ -77,8 +77,9 @@ How to work, every time:
    `Blocked: …` under `## Milestones` saying why, and stop.
 {{#if fixes.criteria}}
    Once every one is ticked, add one line under `## {{fixes.section}}`
-   naming the acceptance criteria of the brief whose behaviour your fixes
-   change, like `Criteria: AC-1, AC-3`, or `Criteria: none`.
+   naming the acceptance criteria of the brief, and the user's comments
+   (`C1`…), whose behaviour your fixes change, like
+   `Criteria: AC-1, AC-3, C1`, or `Criteria: none`.
 {{/if}}
 {{else}}
 {{#if fresh_milestones}}

@@ -22,6 +22,10 @@
 //! page, Alt+Down folds it. Writing a note, Enter or Esc saves it (with
 //! nothing written, Esc leaves the criterion as it was), Shift+Enter breaks
 //! the line, as on the card, and Alt+C adds a screenshot.
+//!
+//! The user's own comments are rows of it too, after the criteria: Done and
+//! Not done (Space, F) as on the page, Edit… opens the comment dialog. Add
+//! comment… (C) adds one from any row. Deleting one is on the page.
 
 use std::{
     collections::HashMap,
@@ -47,6 +51,21 @@ use crate::{
     text_field::TextField,
     tooltip::Tooltip,
 };
+
+/// The buttons on the strip for row `i`, as `strip_buttons` lists them:
+/// those of its card, but deleting a comment, which the page does, and then
+/// adding one.
+fn strip_buttons(i: usize, row: &Row) -> Vec<(chrome::PageButton, PanelOutcome)> {
+    let mut out: Vec<_> = (criterion_buttons(i, row).into_iter())
+        .filter(|(_, o)| !matches!(o, PanelOutcome::Manual(Outcome::DeleteComment(_))))
+        .collect();
+    let add = chrome::PageButton {
+        label: "Add comment\u{2026}".to_owned(),
+        style: chrome::ButtonStyle::Quiet,
+    };
+    out.push((add, PanelOutcome::AddComment));
+    out
+}
 
 /// How long a screenshot is waited for before the page is said not to send
 /// it.
@@ -149,6 +168,9 @@ fn shots_text(n: usize) -> String {
 /// What a button of a criterion's strip says it does, and its key.
 fn button_tip(outcome: &Outcome, label: &str) -> (&'static str, &'static str) {
     match outcome {
+        Outcome::Toggle(_) if label == "Done" => ("Mark the comment done", "Space"),
+        Outcome::Fail(..) => ("Mark the comment not done: it goes to Build", "F"),
+        Outcome::EditComment(_) => ("Edit the comment", ""),
         Outcome::Toggle(_) if label == "Pass" => ("Mark it passed, and go to the next", "Space"),
         Outcome::Toggle(_) => ("Take the pass back", "Space"),
         Outcome::Write(_) if label.starts_with("Edit") => ("Edit what went wrong", "F"),
@@ -247,7 +269,7 @@ impl Gerdr {
             note: row.note.clone(),
             field: draft.map(|d| d.field.line()),
             shots,
-            buttons: (criterion_buttons(i, row).into_iter())
+            buttons: (strip_buttons(i, row).into_iter())
                 .map(|(button, _)| (button.label, button.style))
                 .collect(),
             steps_through: rows.len() > 1,
@@ -333,9 +355,12 @@ impl Gerdr {
             StripHit::Button(b) => {
                 let target = self.criteria_target()?;
                 let (rows, i) = self.strip_rows(&target)?;
-                let (button, outcome) = criterion_buttons(i, &rows[i]).into_iter().nth(b)?;
+                let (button, outcome) = strip_buttons(i, &rows[i]).into_iter().nth(b)?;
                 let PanelOutcome::Manual(outcome) = outcome else {
-                    return None;
+                    let mut tip =
+                        Tooltip::new("Add a comment of your own: what should change", rect);
+                    tip.key = Some("C".to_owned());
+                    return Some(tip);
                 };
                 let (text, key) = button_tip(&outcome, &button.label);
                 (text.into(), key)
@@ -371,10 +396,15 @@ impl Gerdr {
                 let Some((rows, i)) = self.strip_rows(&target) else {
                     return;
                 };
-                let Some((_, PanelOutcome::Manual(outcome))) =
-                    criterion_buttons(i, &rows[i]).into_iter().nth(b)
-                else {
-                    return;
+                let outcome = match strip_buttons(i, &rows[i]).into_iter().nth(b) {
+                    Some((_, PanelOutcome::Manual(outcome))) => outcome,
+                    Some((_, PanelOutcome::AddComment)) => {
+                        if self.keep_strip_note(&target) {
+                            self.ask_add_comment(&target.project, &target.slug);
+                        }
+                        return;
+                    }
+                    _ => return,
                 };
                 // A note being written is saved before what changes the
                 // criterion's result; Fail… goes on with it.
@@ -483,7 +513,16 @@ impl Gerdr {
                     self.apply_manual_test_on(&target.project, &target.slug, Outcome::Clear(i));
                 }
             }
-            Outcome::Fail(..) | Outcome::MarkPassed | Outcome::SendFailures => {}
+            // A comment's Not done; editing it opens its dialog.
+            outcome @ (Outcome::Fail(..) | Outcome::EditComment(_)) => {
+                if self.strip_writes(target) {
+                    self.apply_manual_test_on(&target.project, &target.slug, outcome);
+                }
+            }
+            Outcome::MarkPassed
+            | Outcome::SendFailures
+            | Outcome::MakeFixes
+            | Outcome::DeleteComment(_) => {}
         }
     }
 
@@ -698,11 +737,17 @@ impl Gerdr {
         };
         let bare = !mods.ctrl && !mods.alt && !mods.shift && !mods.logo;
         let outcome = |o: fn(usize) -> Outcome| Some(o(i));
+        let comment = rows[i].comment;
         let pressed = match sym {
             Keysym::space | Keysym::Return | Keysym::KP_Enter if bare => outcome(Outcome::Toggle),
+            Keysym::f if bare && comment => Some(Outcome::Fail(i, String::new())),
             Keysym::f if bare => outcome(Outcome::Write),
-            Keysym::Delete | Keysym::KP_Delete if bare && rows[i].found.is_some() => {
+            Keysym::Delete | Keysym::KP_Delete if bare && rows[i].found.is_some() && !comment => {
                 outcome(Outcome::Clear)
+            }
+            Keysym::c if bare => {
+                self.ask_add_comment(&target.project, &target.slug);
+                None
             }
             Keysym::Escape => {
                 self.drop_criteria_keys();
@@ -781,6 +826,7 @@ mod tests {
             earlier: false,
             retest: None,
             shots: Vec::new(),
+            comment: false,
             open: false,
             seen: false,
         }

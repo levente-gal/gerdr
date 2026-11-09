@@ -1255,7 +1255,7 @@ mod tests {
                 check("AC-2", Verdict::Fail, true),
                 check("AC-3", Verdict::Fail, false),
             ],
-            retest: Default::default(),
+            ..ManualTest::default()
         };
         let sent = |id: &str| (id.to_owned(), format!("Given {id}, when b, then c."));
         let items: Vec<String> = ["AC-1: save the form", "AC-2: its test", "AC-3: not sent"]

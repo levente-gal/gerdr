@@ -4823,6 +4823,89 @@ fn feature_tab_manual_test(note: bool) -> super::FeatureTabView {
     view
 }
 
+/// Manual test's page with a comment of the user's own after the criteria,
+/// open and selected: Make fixes and Plan fixes over them, Add comment….
+fn feature_tab_manual_comment() -> super::FeatureTabView {
+    use super::{ButtonStyle, FindingCard, FindingTag, PageButton, PageSection};
+    let mut view = feature_tab_manual_test(false);
+    let button = |label: &str, style| PageButton {
+        label: label.into(),
+        style,
+    };
+    let page = &mut view.page;
+    page.buttons[0] = button("Make fixes", ButtonStyle::Primary);
+    page.buttons
+        .insert(1, button("Plan fixes", ButtonStyle::Plain));
+    page.buttons
+        .insert(3, button("Add comment\u{2026}", ButtonStyle::Plain));
+    // What the cards and the toolbar name moved on by the two.
+    for section in &mut page.sections {
+        let ids = match section {
+            // Folded, so the comment shows.
+            PageSection::Finding(card) => {
+                card.selected = false;
+                card.collapsed = true;
+                if let Some(sheet) = card.sheet.as_mut() {
+                    sheet.open = false;
+                }
+                &mut card.buttons
+            }
+            PageSection::Toolbar { groups } => {
+                for (_, ids) in groups.iter_mut() {
+                    ids.iter_mut().for_each(|b| *b += 2);
+                }
+                continue;
+            }
+            _ => continue,
+        };
+        ids.iter_mut().for_each(|b| *b += 2);
+    }
+    let at = page.buttons.len();
+    page.buttons.extend([
+        button("Edit\u{2026}", ButtonStyle::Quiet),
+        button("Delete", ButtonStyle::Quiet),
+        button("Done", ButtonStyle::Plain),
+        button("Not done", ButtonStyle::Failed),
+    ]);
+    page.sections.push(PageSection::Finding(FindingCard {
+        sheet: Some(Box::new(super::SheetRow {
+            open: true,
+            steps: vec![
+                ("", "Make the settings page look better".to_owned()),
+                ("", "Cards for each group, not one long table".to_owned()),
+            ],
+            hidden: false,
+            needle: String::new(),
+            whole: false,
+        })),
+        tag: FindingTag::Failed,
+        title: "Make the settings page look better\u{2026}".into(),
+        state: "open".into(),
+        place: "C1".into(),
+        body: String::new(),
+        preview: Vec::new(),
+        fix: String::new(),
+        note: String::new(),
+        comment: String::new(),
+        comment_buttons: Vec::new(),
+        made: false,
+        faded: false,
+        collapsed: false,
+        stripe: None,
+        field: None,
+        field_hint: "",
+        selected: true,
+        buttons: (at..at + 4).collect(),
+    }));
+    if let Some(strip) = view.test_strip.as_mut() {
+        strip.failed = 3;
+        strip.text =
+            "1 passed \u{b7} 2 failed \u{b7} 1 untested \u{b7} 1 comment open \u{b7} 1 fix made"
+                .into();
+    }
+    view
+}
+
 /// Manual test's page searching its criteria for "total": only the one
 /// saying it shows, open, the places tinted, the field with the keys.
 fn feature_tab_manual_search() -> super::FeatureTabView {
@@ -5105,7 +5188,7 @@ fn round_card(
 }
 
 /// The feature tab's fixtures, by name.
-fn feature_tabs() -> [(&'static str, super::FeatureTabView); 43] {
+fn feature_tabs() -> [(&'static str, super::FeatureTabView); 44] {
     [
         ("tab_build", feature_tab()),
         ("tab_verify_fixes", feature_tab_verify_fixes()),
@@ -5159,11 +5242,12 @@ fn feature_tabs() -> [(&'static str, super::FeatureTabView); 43] {
         ("tab_manual_select", feature_tab_manual_select()),
         ("tab_review_rounds", feature_tab_review_rounds()),
         ("tab_manual_rounds", feature_tab_manual_rounds()),
+        ("tab_manual_comment", feature_tab_manual_comment()),
     ]
 }
 
 /// Each fixture at the width it shows best at, and Build at all three.
-const TAB_SURFACES: [(&str, i32); 55] = [
+const TAB_SURFACES: [(&str, i32); 56] = [
     ("tab_build", 860),
     ("tab_build", 1180),
     ("tab_build", 1920),
@@ -5219,9 +5303,10 @@ const TAB_SURFACES: [(&str, i32); 55] = [
     ("tab_manual_select", 860),
     ("tab_manual_rounds", 1180),
     ("tab_manual_rounds", 860),
+    ("tab_manual_comment", 860),
 ];
 
-const FEATURE_TAB: [&str; 55] = [
+const FEATURE_TAB: [&str; 56] = [
     "tab_build_860",
     "tab_build_1180",
     "tab_build_1920",
@@ -5277,10 +5362,11 @@ const FEATURE_TAB: [&str; 55] = [
     "tab_manual_select_860",
     "tab_manual_rounds_1180",
     "tab_manual_rounds_860",
+    "tab_manual_comment_860",
 ];
 
 /// The recorded hashes of `FEATURE_TAB`, per case in `CASES`.
-const GOLDEN_FEATURE_TAB: [[u64; 55]; 4] = [
+const GOLDEN_FEATURE_TAB: [[u64; 56]; 4] = [
     // Dark at 1
     [
         0xb47edcf3deebfe55, // tab_build_860
@@ -5338,6 +5424,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 55]; 4] = [
         0x010ec66c0954969d, // tab_manual_select_860
         0x1aad80bb7aa1c5ad, // tab_manual_rounds_1180
         0x7f9a9d7d6b207fa8, // tab_manual_rounds_860
+        0x3922ebde627997d0, // tab_manual_comment_860
     ],
     // Dark at 2
     [
@@ -5396,6 +5483,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 55]; 4] = [
         0x9a471d9cc1895e23, // tab_manual_select_860
         0xafed5987e588048a, // tab_manual_rounds_1180
         0x234251df2b1dba25, // tab_manual_rounds_860
+        0x60ba07ab36204a0d, // tab_manual_comment_860
     ],
     // Light at 1
     [
@@ -5454,6 +5542,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 55]; 4] = [
         0xc85de47f1e15da39, // tab_manual_select_860
         0x0734f6120bb9baa5, // tab_manual_rounds_1180
         0xb5fc3742006aa677, // tab_manual_rounds_860
+        0x5abbfbc7357ca166, // tab_manual_comment_860
     ],
     // Light at 2
     [
@@ -5512,6 +5601,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 55]; 4] = [
         0xc5481c04265fbb04, // tab_manual_select_860
         0xee1fd2fcf94c4e4b, // tab_manual_rounds_1180
         0x33196b42cbee501a, // tab_manual_rounds_860
+        0x93dc6362a25253e5, // tab_manual_comment_860
     ],
 ];
 
