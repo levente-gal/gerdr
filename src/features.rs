@@ -70,9 +70,9 @@ use crate::feature::manual::Verdict;
 use crate::machine_work::takes_a_place;
 use crate::manual_test::Row;
 pub(crate) use crate::review_cards::{
-    CardId, CardKey, Item, ItemAct, ReviewCard, can_decide, card_key, item_buttons, item_card,
-    items, items_count, next_open_card, note_actions, offers_fix_all, outcome_note, review_cards,
-    why_not_decide,
+    CardId, CardKey, Item, ItemAct, ReviewCard, SUGGESTIONS_WRITING, can_decide, card_key,
+    item_buttons, item_card, item_hints, items, items_count, next_open_card, note_actions,
+    offers_fix_all, outcome_note, review_cards, why_not_decide,
 };
 use crate::{
     Gerdr,
@@ -94,11 +94,10 @@ use crate::{
         hook::Guard,
         layout::{self, AddSpec, Created, Found, LinkSpec, Root},
         patch::{self, Reading},
-        plan_review::{Kind, Suggestion},
         review_import::{
             self, CodeRead, Decision, Finding as ReviewFinding, FindingState, ReviewRound,
         },
-        review_items::{self, ItemOf, words},
+        review_items::{ItemOf, words},
         ship::{self, Action, Planned, Probe},
         store,
         verify::PlannedCheck,
@@ -9356,7 +9355,7 @@ impl Gerdr {
                     }),
                 ) => id == at,
                 (
-                    Some(PanelOutcome::OnSuggestion(id, ItemAct::Comment)),
+                    Some(PanelOutcome::OnSuggestion(id, ItemAct::Comment | ItemAct::Answer)),
                     Some(CardNote::Item {
                         of: ItemOf::Suggestion,
                         id: at,
@@ -11339,16 +11338,10 @@ fn suggestion_sections(
         count if count.is_empty() => "Suggestions".to_owned(),
         count => format!("Suggestions \u{b7} {count}"),
     };
+    // The count says how many citations weren't found.
     let mut notes = Vec::new();
-    let not_found = review.not_found();
-    if not_found > 0 {
-        let text = format!("{} not found in the code", plural(not_found, "citation"));
-        notes.push(line(text, CheckTone::Blocker));
-    }
     if review.writing && plan_review_open(feature, stage) {
-        let text =
-            "The final plan is being written from these: Change decisions\u{2026} to change them";
-        notes.push(line(text, CheckTone::Note));
+        notes.push(line(SUGGESTIONS_WRITING, CheckTone::Note));
     }
     let multi = feature.many_repos();
     let mut sections = vec![lines(&label, notes)];
@@ -13465,7 +13458,7 @@ fn writers_tab_hints(
             let edits = diff_note.is_some_and(|c| can_edit_note(feature, stage, c));
             if edits {
                 hints.push(hint("c", "edit\u{2026}"));
-                hints.push(del.clone());
+                hints.push(del);
             }
             if let Some(c) = diff_note {
                 match (crate::review::is_general(c), edits) {
@@ -13474,54 +13467,8 @@ fn writers_tab_hints(
                     (true, false) => {}
                 }
             }
-            if let Some(i) = item.filter(|_| decides) {
-                let (yours, standing) = (i.yours(), i.standing());
-                let question = i.suggestion().is_some_and(|s| s.kind == Kind::Question);
-                match review_items::want_key(i.of(), standing) {
-                    // A question with no answer takes one first.
-                    Ok(Decision::Fix) if i.suggestion().is_some_and(Suggestion::unanswered) => {
-                        hints.push(hint("f", "answer"));
-                    }
-                    Ok(Decision::Fix) => hints.push(hint("f", &low(w.want))),
-                    Ok(_) => hints.push(hint("f", &low(w.unwant))),
-                    Err(_) => {}
-                }
-                let undecided = matches!(standing, FindingState::Open | FindingState::Fix);
-                if undecided {
-                    let edit = if yours { w.edit_own } else { w.edit };
-                    hints.push(hint("Ctrl+E", &low(edit)));
-                }
-                if !yours && (undecided || standing == FindingState::Dismissed) {
-                    hints.push(hint("c", if question { "answer" } else { "comment" }));
-                    if !i.note().is_empty() {
-                        let what = if question {
-                            "delete answer"
-                        } else {
-                            "delete comment"
-                        };
-                        hints.push(hint("Shift+Del", what));
-                    }
-                }
-                match (yours, standing) {
-                    (true, FindingState::Open | FindingState::Fix | FindingState::Dismissed) => {
-                        hints.push(del);
-                    }
-                    (false, FindingState::Open | FindingState::Fix) => {
-                        hints.push(hint("Del", &low(w.refuse)));
-                    }
-                    (false, FindingState::Dismissed) => hints.push(hint("Del", &low(w.reopen))),
-                    _ => {}
-                }
-            }
             if let Some(i) = item {
-                if i.shows() {
-                    hints.push(hint("Enter", &low(w.show)));
-                } else if decides {
-                    hints.push(hint("Enter", "edit\u{2026}"));
-                }
-                if i.suggestion().is_some_and(|s| !s.evidence.is_empty()) {
-                    hints.push(hint("Ctrl+O", "open code"));
-                }
+                hints.extend(item_hints(i, decides, panel.armed.is_some()));
             }
             // Off a reviewer's card, `c` adds a comment of the user's own.
             if decides && diff_note.is_none() && item.is_none_or(Item::yours) {
@@ -16079,17 +16026,17 @@ pub(crate) mod tests {
     /// citing code; `r1-2`, a question; `u1`, one of the user's own,
     /// accepted. The page lists them `u1`, `r1-1`, `r1-2`.
     fn suggesting() -> Feature {
-        use crate::feature::plan_review::{Evidence, PlanReview, Source, State};
+        use crate::feature::plan_review::{Evidence, Kind, PlanReview, Source, State};
         use crate::feature::review_import::Severity;
         let mut f = feature("p", vec![repo("api", true)], 2);
-        let s = |id: &str, kind, severity, source| Suggestion {
+        let s = |id: &str, kind, severity, source| crate::feature::plan_review::Suggestion {
             id: id.into(),
             title: format!("Title {id}"),
             kind,
             severity,
             source,
             run: 1,
-            ..Suggestion::default()
+            ..Default::default()
         };
         let mut gap = s("r1-1", Kind::Gap, Severity::High, Source::Reviewer);
         gap.change = "Add a rollback".into();
@@ -16235,14 +16182,24 @@ pub(crate) mod tests {
         );
         // No comment to delete.
         assert_eq!(press(&mut panel, &f, shifted(Keysym::Delete)), None);
-        // Citing nothing, Ctrl+O opens the folder as anywhere.
+        // Citing nothing, Ctrl+O opens the folder as anywhere; a question
+        // with no answer is accepted by answering it.
         panel.finding = 2;
+        assert_eq!(
+            press(&mut panel, &f, key(Keysym::f)),
+            on_suggestion("r1-2", ItemAct::Answer)
+        );
         assert_eq!(
             press(&mut panel, &f, ctrl(Keysym::o)),
             Some(PanelOutcome::Open(f.dir.clone()))
         );
-        // One of the user's own: Del arms, then deletes; `c` adds another.
+        // One of the user's own: nothing to take back, Del arms, then
+        // deletes; `c` adds another.
         panel.finding = 0;
+        assert!(matches!(
+            press(&mut panel, &f, key(Keysym::f)),
+            Some(PanelOutcome::FindingRefused(_))
+        ));
         assert_eq!(press(&mut panel, &f, key(Keysym::Delete)), None);
         assert_eq!(panel.armed.as_deref(), Some("own-suggestion:u1"));
         let view = tab_view(&panel, &f, &["p".to_owned()], &PanelState::default(), 2_000);
@@ -16423,7 +16380,7 @@ pub(crate) mod tests {
         // One of the user's own, accepted.
         panel.finding = 0;
         let hints = hints_on(&panel);
-        assert!(has(&hints, "f", "don't accept") && has(&hints, "Ctrl+E", "edit\u{2026}"));
+        assert!(!hints.iter().any(|(k, _)| k == "f") && has(&hints, "Ctrl+E", "edit\u{2026}"));
         assert!(has(&hints, "Del", "delete") && has(&hints, "c", "add suggestion\u{2026}"));
         // On the stages, Tab goes to them, and Enter shows them in the plan.
         panel.focus = TabArea::Stages;
