@@ -11824,10 +11824,9 @@ fn fix_card(
         PanelOutcome::RoundDiff(n)
         | PanelOutcome::OpenRoundPlan(n)
         | PanelOutcome::FoldFixRound(n) => *n == round.n,
-        PanelOutcome::ReviewFixPlan
-        | PanelOutcome::MakeFixes
-        | PanelOutcome::AskFixPlan
-        | PanelOutcome::DropFixPlan => is_open,
+        PanelOutcome::MakeFixes | PanelOutcome::AskFixPlan | PanelOutcome::DropFixPlan => is_open,
+        // Open, or over and the last: its plan.
+        PanelOutcome::ReviewFixPlan => is_open || is_last,
         PanelOutcome::ResendFixes => is_last,
         _ => false,
     };
@@ -22041,8 +22040,31 @@ pub(crate) mod tests {
             ..PanelState::default()
         };
         let cards = round_cards_of(&f, &state);
-        assert_eq!(cards[0].1, ["Send Manual test 2 again", "Diff", "Hide"]);
+        assert_eq!(
+            cards[0].1,
+            ["Open", "Send Manual test 2 again", "Diff", "Hide"]
+        );
         assert_eq!(cards[1].1, ["Diff", "Hide"]);
+        // Nothing of theirs is left for the title row.
+        let actions = stage_actions(&f, Stage::ManualTest, state.ctx, &[], &[], &[]);
+        let page = stage_page(&f, Stage::ManualTest, &state, &actions, 4_000);
+        let held: Vec<usize> = (page.sections.iter())
+            .filter_map(|s| match s {
+                PageSection::Round(card) => Some(card.buttons.clone()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        for (i, (_, outcome)) in actions.iter().enumerate() {
+            if matches!(
+                outcome,
+                PanelOutcome::ReviewFixPlan
+                    | PanelOutcome::ResendFixes
+                    | PanelOutcome::RoundDiff(_)
+            ) {
+                assert!(held.contains(&i), "{outcome:?} isn't on a card");
+            }
+        }
     }
 
     #[test]
