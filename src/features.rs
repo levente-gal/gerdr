@@ -1503,6 +1503,8 @@ pub enum PanelOutcome {
     /// Show round `n`'s fix plan, from Build's page: the latest in its tab,
     /// an earlier one only to read.
     OpenRoundPlan(u32),
+    /// Show what the final plan changed in the plan, only to read.
+    PlanChanges,
     /// Show what round `n`'s fixes changed, in a diff only to read.
     RoundDiff(u32),
     /// Open fix round `n`'s card on its page, or fold it.
@@ -1648,6 +1650,7 @@ impl PanelOutcome {
                 | Self::FoldRound(_)
                 | Self::FoldFixRound(_)
                 | Self::RoundDiff(_)
+                | Self::PlanChanges
                 | Self::OpenRoundPlan(_)
                 | Self::FoldCriterion(..)
                 | Self::FoldCriteria(..)
@@ -3368,6 +3371,7 @@ fn action_hint(action: &PanelOutcome) -> &'static str {
         PanelOutcome::MakeFixes => "make fixes",
         PanelOutcome::ResendFixes => "send the fixes again",
         PanelOutcome::OpenRoundPlan(_) => "open the round's plan",
+        PanelOutcome::PlanChanges => "show what the final plan changed",
         PanelOutcome::RoundDiff(_) => "show what the fixes changed",
         PanelOutcome::MakeVerifyFixes => "make fixes",
         PanelOutcome::AskFixPlan => "ask again",
@@ -3993,10 +3997,7 @@ impl FeaturePanel {
     /// Fold the earlier reviews of `stage`'s page of `feature` if any shows,
     /// else show them all.
     fn toggle_rounds(&mut self, feature: &Feature, stage: Stage) {
-        let cards: Vec<u32> = card_rounds(feature, stage, None)
-            .iter()
-            .map(|r| r.n)
-            .collect();
+        let cards = card_numbers(feature, stage);
         let newest = newest_round(feature, stage);
         let reviews: BTreeSet<u32> = earlier_reviews(feature, stage).map(|r| r.n).collect();
         // Anything open folds all; else all open, the fix rounds and the
@@ -8056,6 +8057,7 @@ impl Gerdr {
             PanelOutcome::ResendFixes => self.resend_fixes(&project, &slug),
             PanelOutcome::OpenRoundPlan(n) => self.open_round_plan(&project, &slug, n),
             PanelOutcome::RoundDiff(n) => self.open_round_diff(&project, &slug, n),
+            PanelOutcome::PlanChanges => self.open_doc_tab(&project, &slug, DocFile::PlanChanges),
             PanelOutcome::FoldFixRound(n) => {
                 if let Some(panel) = self.features.panel.as_mut() {
                     panel.toggle_fix_round(n);
@@ -11565,7 +11567,22 @@ fn card_rounds(feature: &Feature, stage: Stage, probe: Option<&Probe>) -> Vec<Fi
 /// Whether `stage`'s page of `feature` has more than one fix round card: Alt+E
 /// folds them.
 fn folds_round_cards(feature: &Feature, stage: Stage) -> bool {
-    card_rounds(feature, stage, None).len() > 1
+    card_numbers(feature, stage).len() > 1
+}
+
+/// The numbers of the cards of rounds `stage`'s page of `feature` lists,
+/// newest first: its fix rounds, or Plan review's runs.
+fn card_numbers(feature: &Feature, stage: Stage) -> Vec<u32> {
+    match stage {
+        Stage::PlanReview => (feature.plan_review.iter())
+            .flat_map(feature::plan_review::runs)
+            .map(|r| r.n)
+            .collect(),
+        _ => card_rounds(feature, stage, None)
+            .iter()
+            .map(|r| r.n)
+            .collect(),
+    }
 }
 
 /// The buttons of the fix round cards on `stage`'s page of `feature`, by
@@ -11615,6 +11632,9 @@ fn has_own_plan_button(feature: &Feature, round: &FixRound) -> bool {
 /// The fix round whose card `stage`'s page of `feature` shows open first:
 /// the open round if the page lists it, else the newest.
 fn newest_round(feature: &Feature, stage: Stage) -> Option<u32> {
+    if stage == Stage::PlanReview {
+        return card_numbers(feature, stage).first().copied();
+    }
     let rounds = card_rounds(feature, stage, None);
     let open = feature.fix_round.as_ref().map(|r| r.n);
     (open.filter(|n| rounds.iter().any(|r| r.n == *n))).or(rounds.first().map(|r| r.n))
@@ -11841,6 +11861,7 @@ fn fix_card(
         state: state_line,
         meta: meta.join(" \u{b7} "),
         asked,
+        asked_caption: "Asked to fix",
         fixes,
         running,
         changed,
@@ -12016,8 +12037,147 @@ fn round_plan_actions(
 ) -> Vec<(PageButton, PanelOutcome)> {
     match ROUND_CARD_STAGES.contains(&stage) {
         true => round_card_actions(feature, stage, probe),
+        false if stage == Stage::PlanReview => run_card_actions(feature, probe),
         false => Vec::new(),
     }
+}
+
+/// The buttons of Plan review's run cards of `feature`, by `probe`: what the
+/// final plan changed, on the newest, once there is one; folding.
+fn run_card_actions(feature: &Feature, probe: Option<&Probe>) -> Vec<(PageButton, PanelOutcome)> {
+    let button = |label: &str| PageButton {
+        label: label.to_owned(),
+        style: ButtonStyle::Plain,
+    };
+    let runs = card_numbers(feature, Stage::PlanReview);
+    let written = probe.is_some_and(|p| p.docs.written.contains(&Stage::PlanReview));
+    let mut out = Vec::new();
+    if written && !runs.is_empty() {
+        out.push((button("Diff"), PanelOutcome::PlanChanges));
+    }
+    if runs.len() > 1 {
+        out.extend((runs.iter()).map(|n| (button("Show"), PanelOutcome::FoldFixRound(*n))));
+    }
+    out
+}
+
+/// Plan review's runs of `feature` as cards, newest first, under a caption
+/// counting them: who reviewed and when, what each raised and how the user
+/// decided it, the newest saying where the final plan stands.
+fn run_cards(
+    feature: &Feature,
+    state: &PanelState,
+    actions: &[(PageButton, PanelOutcome)],
+    now: u64,
+) -> Vec<PageSection> {
+    use feature::plan_review::State;
+    let Some(review) = feature.plan_review.as_ref() else {
+        return Vec::new();
+    };
+    let runs = feature::plan_review::runs(review);
+    let Some(newest) = runs.first().map(|r| r.n) else {
+        return Vec::new();
+    };
+    let caption = match runs.len() {
+        1 => "Review run".to_owned(),
+        n => format!("Review runs \u{b7} {n}"),
+    };
+    let mut out = vec![lines(&caption, Vec::new())];
+    let mut told: BTreeSet<&str> = BTreeSet::new();
+    for run in &runs {
+        let latest = run.n == newest;
+        let (dot, state_line) = match () {
+            _ if !latest => {
+                let said = [
+                    (run.new, "new"),
+                    (run.again, "raised again"),
+                    (run.dropped, "left out"),
+                ];
+                let words: Vec<String> = (said.iter())
+                    .filter(|(n, _)| *n > 0)
+                    .map(|(n, what)| format!("{n} {what}"))
+                    .collect();
+                let text = match words.is_empty() {
+                    true => "nothing to change".to_owned(),
+                    false => words.join(" \u{b7} "),
+                };
+                (Dot::Done, line(text, CheckTone::Note))
+            }
+            _ if review.writing => (
+                Dot::Working,
+                line("final plan being written", CheckTone::Note),
+            ),
+            _ if feature.is_done(Stage::PlanReview) => (
+                Dot::Done,
+                line(
+                    match state.ctx.wrote(Stage::PlanReview) {
+                        true => "final plan approved",
+                        false => "done: the plan stands",
+                    },
+                    CheckTone::Ready,
+                ),
+            ),
+            _ if review.open() > 0 => (
+                Dot::Idle,
+                line(format!("{} to decide", review.open()), CheckTone::Blocker),
+            ),
+            _ => (Dot::Done, line("all decided", CheckTone::Ready)),
+        };
+        let mut meta = Vec::new();
+        if !run.agent.is_empty() {
+            meta.push(match run.model.is_empty() {
+                true => run.agent.clone(),
+                false => format!("{} ({})", run.agent, run.model),
+            });
+        }
+        if run.at > 0 {
+            meta.push(format!("read {}", projects::ago(now, run.at)));
+        }
+        if latest {
+            let (yes, no) = (review.count(State::Accepted), review.count(State::Rejected));
+            if yes + no > 0 {
+                meta.push(format!("{yes} accepted \u{b7} {no} rejected"));
+            }
+        }
+        let asked = (run.raised.iter())
+            .filter_map(|id| review.suggestion(id))
+            .map(|sug| chrome::RoundAsked {
+                id: sug.id.clone(),
+                title: sug.title.clone(),
+                note: sug.change.clone(),
+                now: (!told.contains(sug.id.as_str())).then(|| match (sug.state, sug.dropped) {
+                    (State::Accepted, _) => line("accepted", CheckTone::Ready),
+                    (State::Rejected, _) => line("rejected", CheckTone::Note),
+                    (State::Open, true) => line("left out by a later run", CheckTone::Note),
+                    (State::Open, false) => line("to decide", CheckTone::Blocker),
+                }),
+            })
+            .collect();
+        told.extend(run.raised.iter().map(String::as_str));
+        let held = |o: &PanelOutcome| match o {
+            PanelOutcome::PlanChanges => latest,
+            PanelOutcome::FoldFixRound(n) => *n == run.n,
+            _ => false,
+        };
+        let buttons = (actions.iter().enumerate())
+            .filter(|(_, (_, o))| held(o))
+            .map(|(i, _)| i)
+            .collect();
+        out.push(PageSection::Round(chrome::RoundCard {
+            label: format!("Review run {}", run.n),
+            dot,
+            state: state_line,
+            meta: meta.join(" \u{b7} "),
+            asked,
+            asked_caption: "Suggestions",
+            fixes: Vec::new(),
+            running: Vec::new(),
+            changed: Vec::new(),
+            open: fix_round_open(Some(newest), run.n, &state.fix_rounds_flipped),
+            buttons,
+        }));
+    }
+    out
 }
 
 /// `stage`'s file to read on its page, as `probe` last read it; none while
@@ -12145,6 +12305,7 @@ fn stage_page(
                 if let Some(section) = suggestions_section(feature) {
                     sections.push(section);
                 }
+                sections.extend(run_cards(feature, state, actions, now));
                 if state.ctx.wrote(stage) {
                     sections.push(file_card(feature, stage, state.ctx, actions));
                     sections.extend(doc_of(state.probe, stage));
@@ -12662,6 +12823,10 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 6] = [
                 "Build: one agent, or a fresh agent per milestone",
             ),
             ("Ctrl+Shift+K", "skip Plan review"),
+            (
+                "Alt+E",
+                "Plan review: fold the review run cards, or open them all",
+            ),
             ("Ctrl+Shift+D", "change the decisions on a final plan"),
         ],
     ),
@@ -15532,12 +15697,17 @@ pub(crate) mod tests {
         assert_eq!(rail_node(&f, stage, &state, 2_000).line, "2 to decide");
         let page = stage_page(&f, stage, &state, &[], 2_000);
         assert_eq!(
-            page.sections,
-            [lines(
-                "Suggestions",
-                vec![line("2 to decide", CheckTone::Blocker)]
-            )]
+            page.sections[0],
+            lines("Suggestions", vec![line("2 to decide", CheckTone::Blocker)])
         );
+        // Its run shows as a card, what it raised waiting.
+        let Some(PageSection::Round(run)) = page.sections.get(2) else {
+            panic!("{:?}", page.sections);
+        };
+        assert_eq!(run.label, "Review run 1");
+        assert_eq!(run.state.text, "2 to decide");
+        assert_eq!(run.asked_caption, "Suggestions");
+        assert_eq!(run.asked.len(), 2);
         assert_eq!(
             crate::feature_agents::gate_of(&f, |_| None).map(|g| g.2),
             Some(crate::feature_agents::GateKind::Suggestions { open: 2 })
@@ -22238,5 +22408,86 @@ pub(crate) mod tests {
         let page = stage_page(&f, Stage::AiReview, &state, &[], 4_000);
         assert!(page.sections.iter().any(|s| matches!(s,
             PageSection::Round(c) if c.label == "AI review 1")));
+    }
+
+    #[test]
+    fn plan_reviews_runs_show_as_cards_with_what_each_raised() {
+        use crate::feature::plan_review::{self, PlanReview, RunRecord};
+        let stage = Stage::PlanReview;
+        let mut f = feature("p", vec![repo("api", true)], stage_index(stage));
+        assert_eq!(f.current(), Some(stage));
+        let mut review = PlanReview::default();
+        let raws = |text: &str| plan_review::parse(text).unwrap();
+        plan_review::import(
+            &mut review,
+            1,
+            raws(
+                r#"{"suggestions": [{"kind": "question", "plan": "M1", "title": "A?", "why": "w"}]}"#,
+            ),
+        );
+        let got = plan_review::import(
+            &mut review,
+            2,
+            raws(
+                r#"{"suggestions": [{"id": "r1-1", "kind": "question", "plan": "M1",
+                "title": "A again?", "why": "w"},
+                {"kind": "question", "plan": "M2", "title": "B?", "why": "w"}]}"#,
+            ),
+        );
+        plan_review::keep_run(
+            &mut review,
+            RunRecord {
+                n: 2,
+                at: 1_000,
+                agent: "Codex".into(),
+                raised: got.ids.clone(),
+                new: got.new,
+                again: got.again,
+                ..RunRecord::default()
+            },
+        );
+        review.writing = true;
+        f.plan_review = Some(review);
+        let mut read = probe(None);
+        read.docs.written.insert(stage);
+        let state = PanelState {
+            probe: Some(&read),
+            ..PanelState::default()
+        };
+        let actions = round_plan_actions(&f, stage, state.probe);
+        let page = stage_page(&f, stage, &state, &actions, 1_120);
+        let cards: Vec<&chrome::RoundCard> = (page.sections.iter())
+            .filter_map(|s| match s {
+                PageSection::Round(card) => Some(card),
+                _ => None,
+            })
+            .collect();
+        let labels: Vec<&str> = cards.iter().map(|c| c.label.as_str()).collect();
+        assert_eq!(labels, ["Review run 2", "Review run 1"]);
+        assert_eq!(cards[0].state.text, "final plan being written");
+        assert_eq!(cards[0].dot, Dot::Working);
+        assert_eq!(cards[0].meta, "Codex \u{b7} read 2m ago");
+        let titles: Vec<&str> = cards[0].asked.iter().map(|a| a.title.as_str()).collect();
+        assert_eq!(titles, ["A again?", "B?"]);
+        // How one stands is said on the newest run raising it.
+        assert!(cards[1].asked.is_empty() || cards[1].asked[0].now.is_none());
+        assert!(!cards[1].open);
+        let held = |card: &chrome::RoundCard| -> Vec<&str> {
+            (card.buttons.iter())
+                .map(|&i| page.buttons[i].label.as_str())
+                .collect()
+        };
+        assert_eq!(held(cards[0]), ["Diff", "Hide"]);
+        assert_eq!(held(cards[1]), ["Show"]);
+        assert_eq!(actions[0].1, PanelOutcome::PlanChanges);
+        // No final plan yet: no Diff.
+        let none = round_plan_actions(&f, stage, None);
+        assert!(!none.iter().any(|(_, o)| *o == PanelOutcome::PlanChanges));
+        // Alt+E folds them, then opens them all.
+        let mut panel = FeaturePanel::default();
+        panel.toggle_rounds(&f, stage);
+        assert_eq!(panel.fix_rounds_flipped, BTreeSet::from([2]));
+        panel.toggle_rounds(&f, stage);
+        assert_eq!(panel.fix_rounds_flipped, BTreeSet::from([1]));
     }
 }

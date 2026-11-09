@@ -127,6 +127,9 @@ pub struct DocOf {
     pub standing: Standing,
     /// The stage the feature is at.
     pub current: Option<Stage>,
+    /// What it shows changes against, as last read: the plan, for the final
+    /// plan's changes (`DocFile::PlanChanges`); none, it shows all added.
+    pub base: Option<String>,
 }
 
 impl DocOf {
@@ -135,6 +138,7 @@ impl DocOf {
         match self.file {
             DocFile::Evidence => "Evidence",
             DocFile::FixPlan => "Fix plan",
+            DocFile::PlanChanges => "Plan changes",
             DocFile::Stage(Stage::Plan) => "Plan",
             DocFile::Stage(Stage::PlanReview) => "Final plan",
             DocFile::Stage(_) => "Brief",
@@ -310,7 +314,8 @@ impl WorktreeDiff {
     pub fn of_doc(doc: DocOf, workspace: usize, review: Review) -> Self {
         let mut diff = DiffView::default();
         diff.review = review;
-        diff.plain = true;
+        // Changes show as changes; a file under review reads as a page.
+        diff.plain = doc.file != DocFile::PlanChanges;
         let root = doc.path.parent().map(Path::to_path_buf).unwrap_or_default();
         WorktreeDiff {
             root,
@@ -553,7 +558,10 @@ impl WorktreeDiff {
             return;
         }
         let name = doc.name();
-        let file = crate::doc_review::added_file(&name, &text);
+        let file = match &doc.base {
+            Some(base) => crate::doc_review::changed_file(&name, base, &text),
+            None => crate::doc_review::added_file(&name, &text),
+        };
         doc.text = Some(text);
         let since = Since {
             base: String::new(),
@@ -561,7 +569,7 @@ impl WorktreeDiff {
             changes: vec![Change {
                 path: name,
                 orig: None,
-                code: 'A',
+                code: file.code,
             }],
         };
         self.set_read(Ok((since, vec![file])), env);
@@ -583,9 +591,10 @@ impl WorktreeDiff {
         crate::review::doc_markdown(&self.diff.review, &name, outdated)
     }
 
-    /// Whether it shows Verify's evidence.
+    /// Whether it shows a file only to read whatever its stage: Verify's
+    /// evidence, the final plan's changes.
     fn evidence(&self) -> bool {
-        self.doc.as_ref().is_some_and(|d| d.evidence())
+        (self.doc.as_ref()).is_some_and(|d| d.evidence() || d.file == DocFile::PlanChanges)
     }
 
     /// Whether it shows a file whose stage is done.
@@ -732,7 +741,9 @@ impl WorktreeDiff {
         let restores = |o: &Outcome| matches!(o, Outcome::Cut(e) if e.cut.restored().is_some());
         let locked = self.doc.as_ref().and_then(|d| d.locked);
         match outcome {
-            Some(o) if self.evidence() && refused(&o) => Some(Outcome::Notice(EVIDENCE_READ_ONLY)),
+            Some(o) if self.evidence() && refused(&o) => {
+                Some(Outcome::Notice(locked.unwrap_or(EVIDENCE_READ_ONLY)))
+            }
             // Its comments and edits are refused as read-only: it says why.
             Some(Outcome::Notice(diff_view::READ_ONLY)) if self.closed() => {
                 locked.map(Outcome::Notice)
@@ -999,6 +1010,9 @@ impl WorktreeDiff {
         if let Some(doc) = &self.doc {
             if doc.evidence() {
                 return format!("Evidence of \u{201c}{}\u{201d}", doc.title);
+            }
+            if doc.file == DocFile::PlanChanges {
+                return format!("Plan review \u{b7} what {} changed", doc.name());
             }
             return format!("{} · {}", doc.file.stage().label(), doc.name());
         }
@@ -2778,6 +2792,7 @@ mod tests {
             locked: None,
             standing: Standing::Open,
             current: Some(Stage::Discover),
+            base: None,
         };
         let mut wd = WorktreeDiff::of_doc(doc, 2, Review::default());
         wd.set_doc(Ok("# Brief\nUsers log in.\nWith a password.\n".into()), ENV);
@@ -3524,6 +3539,7 @@ mod tests {
             locked: None,
             standing: Standing::Open,
             current: Some(Stage::Verify),
+            base: None,
         };
         let mut wd = WorktreeDiff::of_doc(doc, 2, Review::default());
         wd.set_doc(Ok("# Evidence\napi: npm test failed\n".into()), ENV);

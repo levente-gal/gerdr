@@ -261,6 +261,19 @@ impl Gerdr {
         let first = review.stamp.is_none();
         let got = plan_review::import(review, n, raws);
         review.stamp = Some(stamp);
+        let reviewer = f.runs.get(&STAGE);
+        let record = plan_review::RunRecord {
+            n,
+            at: now,
+            agent: reviewer.map(|r| r.agent.clone()).unwrap_or_default(),
+            model: reviewer.and_then(|r| r.model.clone()).unwrap_or_default(),
+            raised: got.ids.clone(),
+            new: got.new,
+            again: got.again,
+            dropped: got.dropped,
+        };
+        let review = f.plan_review.get_or_insert_with(PlanReview::default);
+        plan_review::keep_run(review, record);
         let open = review.open();
         let not_found = review.not_found();
         let total = review.suggestions.len();

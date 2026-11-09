@@ -852,8 +852,10 @@ pub struct RoundCard {
     pub state: CheckLine,
     /// Who made the fixes and when, muted: "Claude Code · opus · sent 2h ago".
     pub meta: String,
-    /// What it was asked to fix, each with how it stands now.
+    /// What it was asked to fix, each with how it stands now, under
+    /// `asked_caption`: "Asked to fix", a review run's "Suggestions".
     pub asked: Vec<RoundAsked>,
+    pub asked_caption: &'static str,
     /// Its fixes as the build log ticks them (`true` = made).
     pub fixes: Vec<(bool, String)>,
     /// Those an agent is at work on: they blink.
@@ -2550,7 +2552,7 @@ impl Stack {
         if card.open {
             if !card.asked.is_empty() {
                 self.y += FINDING_GAP;
-                self.caption("Asked to fix");
+                self.caption(card.asked_caption);
                 for asked in &card.asked {
                     let head = match (asked.id.is_empty(), asked.title.is_empty()) {
                         (_, true) => asked.id.clone(),

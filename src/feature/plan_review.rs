@@ -190,6 +190,64 @@ pub struct PlanReview {
     /// The user's own suggestion as far as it was written, not added yet.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub draft: String,
+    /// Each run read in, oldest first (see `RunRecord`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runs: Vec<RunRecord>,
+}
+
+/// One run of the reviewer as read in: who ran it, when, and what it raised,
+/// for the page's card of it. A run read again (its file rewritten) keeps one
+/// record, the last.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunRecord {
+    pub n: u32,
+    /// Unix seconds it was read in; 0 for a run from before records.
+    #[serde(default)]
+    pub at: u64,
+    /// The reviewer and its model; empty if not known.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub agent: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model: String,
+    /// The ids of the suggestions it raised, new and again, in its order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub raised: Vec<String>,
+    #[serde(default)]
+    pub new: usize,
+    #[serde(default)]
+    pub again: usize,
+    /// Earlier suggestions it left out.
+    #[serde(default)]
+    pub dropped: usize,
+}
+
+/// The runs of `review`, newest first: as recorded, and those read before
+/// records were kept by their number, with what they raised last.
+pub fn runs(review: &PlanReview) -> Vec<RunRecord> {
+    let mut out: Vec<RunRecord> = review.runs.clone();
+    for n in 1..=review.n {
+        if !out.iter().any(|r| r.n == n) {
+            let raised: Vec<String> = (review.suggestions.iter())
+                .filter(|s| s.source == Source::Reviewer && s.run == n)
+                .map(|s| s.id.clone())
+                .collect();
+            out.push(RunRecord {
+                n,
+                new: raised.len(),
+                raised,
+                ..RunRecord::default()
+            });
+        }
+    }
+    out.sort_by_key(|r| std::cmp::Reverse(r.n));
+    out
+}
+
+/// Keep `record` in `review`, in place of an earlier record of its run.
+pub fn keep_run(review: &mut PlanReview, record: RunRecord) {
+    review.runs.retain(|r| r.n != record.n);
+    review.runs.push(record);
+    review.runs.sort_by_key(|r| r.n);
 }
 
 impl PlanReview {
@@ -360,7 +418,7 @@ fn evidence_of(value: Option<&Value>, k: usize, lacks: &mut Vec<String>) -> Vec<
 }
 
 /// What reading a run's suggestions in came to.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Imported {
     /// Raised for the first time.
     pub new: usize,
@@ -368,6 +426,8 @@ pub struct Imported {
     pub again: usize,
     /// Earlier ones this run left out.
     pub dropped: usize,
+    /// The ids it raised, new and again, in its order.
+    pub ids: Vec<String>,
 }
 
 /// Read run `run`'s suggestions (`raws`) into `review`:
@@ -400,6 +460,7 @@ pub fn import(review: &mut PlanReview, run: u32, raws: Vec<Raw>) -> Imported {
             s.run = run;
             s.dropped = false;
             out.again += 1;
+            out.ids.push(s.id.clone());
             continue;
         }
         let id = loop {
@@ -409,6 +470,7 @@ pub fn import(review: &mut PlanReview, run: u32, raws: Vec<Raw>) -> Imported {
                 break id;
             }
         };
+        out.ids.push(id.clone());
         review.suggestions.push(Suggestion {
             id,
             severity: raw.severity,
@@ -746,14 +808,9 @@ mod tests {
             {"id": "u1", "kind": "question", "plan": "p", "title": "Takes the id of yours", "why": "w"}
         ]}"#;
         let again = import(&mut review, 1, raws(rewrite));
-        assert_eq!(
-            again,
-            Imported {
-                new: 1,
-                again: 1,
-                dropped: 1
-            }
-        );
+        assert_eq!((again.new, again.again, again.dropped), (1, 1, 1));
+        assert_eq!(again.ids.len(), 2);
+        assert_eq!(again.ids[0], "r1-1");
         let kept = review.suggestion("r1-1").unwrap();
         assert_eq!(kept.title, "Reworded");
         assert_eq!(kept.state, State::Accepted);
@@ -967,5 +1024,47 @@ mod tests {
         assert_eq!(unmapped(&review, text), ["r1-2"]);
         let both = "## Review changes\n- r1-1: Milestone 2\n- r1-2: Milestone 1\n";
         assert!(unmapped(&review, both).is_empty());
+    }
+
+    #[test]
+    fn runs_list_newest_first_those_before_records_by_what_they_raised() {
+        let mut review = PlanReview::default();
+        let raws = |text: &str| parse(text).unwrap();
+        let one = r#"{"suggestions": [{"kind": "question", "plan": "M1", "title": "A?", "why": "w"},
+            {"kind": "question", "plan": "M1", "title": "B?", "why": "w"}]}"#;
+        import(&mut review, 1, raws(one));
+        let two = r#"{"suggestions": [{"id": "r1-1", "kind": "question", "plan": "M1",
+            "title": "A again?", "why": "w"}]}"#;
+        let got = import(&mut review, 2, raws(two));
+        keep_run(
+            &mut review,
+            RunRecord {
+                n: 2,
+                at: 50,
+                raised: got.ids.clone(),
+                again: got.again,
+                dropped: got.dropped,
+                ..RunRecord::default()
+            },
+        );
+        let runs = runs(&review);
+        let ns: Vec<u32> = runs.iter().map(|r| r.n).collect();
+        assert_eq!(ns, [2, 1]);
+        assert_eq!(runs[0].raised, ["r1-1"]);
+        assert_eq!((runs[0].again, runs[0].dropped), (1, 1));
+        // Run 1 has no record: what it raised last stands for it.
+        assert_eq!(runs[1].raised, ["r1-2"]);
+        assert_eq!(runs[1].at, 0);
+        // Read again, a run keeps one record.
+        keep_run(
+            &mut review,
+            RunRecord {
+                n: 2,
+                at: 60,
+                ..RunRecord::default()
+            },
+        );
+        assert_eq!(review.runs.len(), 1);
+        assert_eq!(review.runs[0].at, 60);
     }
 }
