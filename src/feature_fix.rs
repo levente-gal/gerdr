@@ -1128,6 +1128,23 @@ impl Gerdr {
 
     /// End the round of feature `slug`, giving back what it took if `back`.
     fn end_fix_round(&mut self, project: &str, slug: &str, back: bool) {
+        // The criteria its agent says its fixes changed: Manual test tries
+        // them again.
+        let changed = match back {
+            true => Vec::new(),
+            false => {
+                let n = (self.feature(project, slug)).and_then(|f| f.fix_round.as_ref());
+                let path = build_log(&store::dir(None, project, slug));
+                match (n.map(|r| r.n), std::fs::read_to_string(&path)) {
+                    (Some(n), Ok(log)) => fix_round::criteria_named(&log, n),
+                    (_, Err(err)) => {
+                        tracing::warn!("reading {}: {err}", path.display());
+                        Vec::new()
+                    }
+                    (None, _) => Vec::new(),
+                }
+            }
+        };
         let Some(f) = self.feature_mut(project, slug) else {
             return;
         };
@@ -1152,6 +1169,12 @@ impl Gerdr {
             }
             false => {
                 f.log(now, format!("Fix round {n} over"));
+                let again = feature::manual::retest(&mut f.manual, &changed, n, now);
+                if !again.is_empty() {
+                    let ids = again.join(", ");
+                    let what = format!("Fix round {n} changed {ids}: Manual test to try again");
+                    f.log(now, what);
+                }
                 f.last_fix_round = Some(FixRound {
                     ended: Some(now),
                     ..round.clone()

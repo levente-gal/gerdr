@@ -348,6 +348,13 @@ pub fn items_under(text: &str, heading: &str) -> Vec<(bool, String)> {
         .collect()
 }
 
+/// The lines of section `heading` of `text`, trimmed, blank ones and those
+/// in code fences left out: none when it isn't there.
+pub fn lines_under(text: &str, heading: &str) -> Vec<String> {
+    let body = Sections::of(text).get(heading).unwrap_or_default();
+    body.into_iter().map(str::to_owned).collect()
+}
+
 /// Where in `milestone_items(text)` the items its agent says it is at work
 /// on (`- [~] …`) are.
 pub fn milestones_running(text: &str) -> Vec<usize> {

@@ -83,6 +83,9 @@ pub struct Row {
     pub made: bool,
     /// It was tried on other code than the feature's now.
     pub earlier: bool,
+    /// Untested as the fix round of this number changed it after it passed
+    /// (see `ManualTest::retest`).
+    pub retest: Option<u32>,
     /// It shows its steps, as the user left it (see `manual::Folds`).
     pub open: bool,
     /// The user read it: opened it, or marked it.
@@ -204,6 +207,8 @@ fn rows(
                 earlier: (test.zip(check)).zip(patch).is_some_and(|((t, k), p)| {
                     manual::tried_on(t, k) != p
                 }),
+                retest: (test.filter(|_| check.is_none()))
+                    .and_then(|t| t.retest.get(&c.id).copied()),
                 open: folds.is_some_and(|f| f.open.contains(&c.text)),
                 seen: folds.is_some_and(|f| f.seen.contains(&c.text)) || check.is_some(),
                 shots: check
@@ -275,8 +280,12 @@ fn left_text(rows: &[Row]) -> String {
 /// The acceptance criteria in the brief of feature `slug` of `project`,
 /// read from disk: none when it has no brief, or none in it.
 pub(crate) fn read_criteria(project: &str, slug: &str) -> Vec<Criterion> {
-    let data = store::dir(None, project, slug);
-    let Some(path) = artifacts::path(&data, Stage::Discover) else {
+    criteria_in(&store::dir(None, project, slug))
+}
+
+/// The acceptance criteria in the brief in feature data folder `data`.
+pub(crate) fn criteria_in(data: &std::path::Path) -> Vec<Criterion> {
+    let Some(path) = artifacts::path(data, Stage::Discover) else {
         return Vec::new();
     };
     match std::fs::read_to_string(&path) {
@@ -895,10 +904,10 @@ impl Gerdr {
                 if !left.is_empty() {
                     return self.show_warning(format!("Not passed yet: {left}"));
                 }
-                if let Some(fixed) = feature.unverified.clone()
-                    && self.fixes_hold_up(&project, &slug, &fixed)
-                {
-                    return;
+                // Fixes landed while it was tried: the stages after Build go
+                // over them again first.
+                if feature.unverified.is_some() {
+                    return self.back_to_verify(&project, &slug);
                 }
                 self.read_and_tick(&project, &slug, Stage::ManualTest);
             }
@@ -933,41 +942,6 @@ impl Gerdr {
         }
     }
 
-    /// Whether Manual test of feature `slug` can't be marked passed as
-    /// Verify hasn't passed on `fixed`, the code its fixes made. The toast
-    /// says why, and checks that never ran on it start.
-    fn fixes_hold_up(&mut self, project: &str, slug: &str, fixed: &str) -> bool {
-        let Some(feature) = self.feature(project, slug) else {
-            return true;
-        };
-        let title = feature.title.clone();
-        let run = (feature.verify.as_ref()).filter(|r| r.patch.as_deref() == Some(fixed));
-        if run.is_some_and(|r| r.passed == Some(true)) {
-            if let Some(f) = self.feature_mut(project, slug) {
-                f.unverified = None;
-                self.save_feature(project, slug);
-            }
-            return false;
-        }
-        let failed = run.and_then(feature::verify::to_fix);
-        if self.checks_under_way(project, slug) {
-            self.show_warning(format!(
-                "Verify is checking the fixes of \u{201c}{title}\u{201d}: mark it passed once they pass"
-            ));
-        } else if let Some(failed) = failed {
-            let first = failed.first().cloned().unwrap_or_default();
-            self.show_warning(format!(
-                "Verify failed on the fixes of \u{201c}{title}\u{201d}: {first}; Make Verify fixes sends it"
-            ));
-        } else {
-            self.recheck(project, slug);
-            self.show_warning(format!(
-                "Verify hadn't run on the fixes of \u{201c}{title}\u{201d}; it runs now: mark it passed once it passes"
-            ));
-        }
-        true
-    }
-
     /// Start writing criterion `i`'s note, from `note`, on its card.
     fn write_criterion_note(&mut self, i: usize, note: &str) {
         let field = TextField::multiline(note);
@@ -997,6 +971,7 @@ mod tests {
             sent: false,
             made: false,
             earlier: false,
+            retest: None,
             open: false,
             seen: false,
             shots: Vec::new(),

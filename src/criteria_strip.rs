@@ -779,6 +779,7 @@ mod tests {
             sent: false,
             made: false,
             earlier: false,
+            retest: None,
             shots: Vec::new(),
             open: false,
             seen: false,

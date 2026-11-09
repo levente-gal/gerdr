@@ -1773,8 +1773,12 @@ pub(crate) mod tests {
             f.tick(1, "you", Some("p1"));
         }
         f.unverified = Some("p3".into());
+        f.manual = Some(manual::ManualTest::default());
         assert!(f.untick(Stage::Verify, 4));
         assert_eq!(f.unverified, None);
+        // What Manual test found stays for when it is reached again.
+        assert_eq!(f.current(), Some(Stage::Verify));
+        assert!(f.manual.is_some());
     }
 
     #[test]

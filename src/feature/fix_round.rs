@@ -505,6 +505,29 @@ pub fn heading(n: u32) -> String {
     format!("{ROUND} {n}")
 }
 
+/// The acceptance criteria round `n`'s agent says its fixes changed the
+/// behaviour of, by id, from its `Criteria: AC-1, AC-3` line under the
+/// round's section of build log `log`: none when it wrote `none`, or no
+/// such line.
+pub fn criteria_named(log: &str, n: u32) -> Vec<String> {
+    let lines = artifacts::lines_under(log, &heading(n));
+    let Some(named) = lines.iter().rev().find_map(|line| {
+        let bare = line.trim_start_matches(['-', '*', ' ']).replace("**", "");
+        let (word, rest) = bare.split_once(':')?;
+        (word.trim().eq_ignore_ascii_case("criteria")).then(|| rest.to_owned())
+    }) else {
+        return Vec::new();
+    };
+    let mut ids: Vec<String> = Vec::new();
+    for word in named.split(|c: char| c == ',' || c == ';' || c.is_whitespace()) {
+        let id = word.trim_matches(|c: char| !(c.is_alphanumeric() || c == '-'));
+        if !id.is_empty() && !id.eq_ignore_ascii_case("none") && !ids.iter().any(|i| i == id) {
+            ids.push(id.to_owned());
+        }
+    }
+    ids
+}
+
 /// What round `n`'s list is called on Build's page, under the plan's own: by
 /// who asked, as `fixes` and `asked` say. AI review's read "Review N", and so
 /// does a round from before they were kept.
@@ -850,6 +873,15 @@ pub fn plan_next(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_round_names_the_criteria_its_fixes_changed() {
+        let log = "## Milestones\n\n- [x] Build it\n\n## Fix round 2\n\n- [x] One\nCriteria: none\n\n## Fix round 3\n\n- [x] Two\n- **Criteria:** `AC-1`, AC-3; AC-1.\n\n## Fix round 4\n\n- [x] Three\n";
+        assert!(criteria_named(log, 2).is_empty());
+        assert_eq!(criteria_named(log, 3), ["AC-1", "AC-3"]);
+        assert!(criteria_named(log, 4).is_empty());
+        assert!(criteria_named(log, 5).is_empty());
+    }
 
     #[test]
     fn a_round_sent_again_is_unticked_and_not_over() {
@@ -1223,6 +1255,7 @@ mod tests {
                 check("AC-2", Verdict::Fail, true),
                 check("AC-3", Verdict::Fail, false),
             ],
+            retest: Default::default(),
         };
         let sent = |id: &str| (id.to_owned(), format!("Given {id}, when b, then c."));
         let items: Vec<String> = ["AC-1: save the form", "AC-2: its test", "AC-3: not sent"]

@@ -75,6 +75,11 @@ How to work, every time:
    milestone. Stop only once every one is ticked. Do not skip, delete or
    weaken a check to do it, and run only the tests of what you change. If one can't be done as planned, write a line
    `Blocked: …` under `## Milestones` saying why, and stop.
+{{#if fixes.criteria}}
+   Once every one is ticked, add one line under `## {{fixes.section}}`
+   naming the acceptance criteria of the brief whose behaviour your fixes
+   change, like `Criteria: AC-1, AC-3`, or `Criteria: none`.
+{{/if}}
 {{else}}
 {{#if fresh_milestones}}
 3. Change the first unticked milestone's box in {{artifact.path}} to
