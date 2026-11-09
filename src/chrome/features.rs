@@ -484,8 +484,9 @@ impl NodeMark {
     }
 }
 
-/// The flow turned back to Build: the line on the feature tab's rail, from
-/// the stage that sent work back to Build's. Indices into the rail.
+/// The flow turned back: the line on the feature tab's rail, from the stage
+/// that sent work back to the one it went back to (Build, or Verify for
+/// Manual test's fixes). Indices into the rail.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct RailBack {
     pub from: usize,
@@ -4300,8 +4301,8 @@ pub fn feature_tab_blinkers(
     dots
 }
 
-/// The colour of the line back to Build follows who has the next move: the
-/// Build agent while it runs, else the user if something waits for them.
+/// The colour of the line back follows who has the next move: the Build
+/// agent while it runs, else the user if something waits for them.
 fn rail_back_color(view: &FeatureTabView, back: RailBack, p: &Palette) -> Rgb {
     let mark = |i: usize| view.rail.get(i).map(|n| n.mark);
     if mark(back.to) == Some(NodeMark::Fixing) {
@@ -4316,7 +4317,7 @@ fn rail_back_color(view: &FeatureTabView, back: RailBack, p: &Palette) -> Rgb {
     }
 }
 
-/// The line back to Build: up from node `from`, along over the rail, and
+/// The line back: up from node `from`, along over the rail, and
 /// down into node `to`, on its left, with an arrowhead.
 fn rail_back(c: &mut Canvas, from: Rect, to: Rect, scale: f64, color: Rgb) {
     let s = scale as f32;

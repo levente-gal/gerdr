@@ -630,6 +630,11 @@ pub struct Feature {
     /// on yet: Manual test can't be marked passed until it does.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unverified: Option<String>,
+    /// The stage whose fixes took the flow back to Verify (Manual test's,
+    /// see `back_to_verify`): the rail draws the line back from it until
+    /// Verify is marked done again, or the marks clear some other way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub back_from: Option<Stage>,
     /// The machine that writes it, when that isn't this one: it is only shown
     /// here (see `view`). Never saved: the record is its writer's.
     #[serde(skip)]
@@ -737,6 +742,9 @@ impl Feature {
     pub fn tick(&mut self, now: u64, by: &str, patch: Option<&str>) -> Option<Stage> {
         let stage = self.current()?;
         self.ran_once.remove(&stage);
+        if stage >= Stage::Verify {
+            self.back_from = None;
+        }
         self.marks.insert(
             stage,
             Mark {
@@ -780,6 +788,7 @@ impl Feature {
                     || self.fix_round.as_ref().is_some_and(|r| r.stage == *at))
         });
         let cleared = self.marks.split_off(&stage);
+        self.back_from = None;
         self.ran_once
             .extend(cleared.into_iter().map(|(s, mark)| (s, mark.at)));
         self.ran_once.extend(was_at.map(|at| (at, now)));
@@ -1544,6 +1553,7 @@ pub(crate) mod tests {
             past_rounds: Vec::new(),
             carry: None,
             unverified: None,
+            back_from: None,
         }
     }
 
@@ -1640,6 +1650,7 @@ pub(crate) mod tests {
             past_rounds: Vec::new(),
             carry: None,
             unverified: None,
+            back_from: None,
         }
     }
 
