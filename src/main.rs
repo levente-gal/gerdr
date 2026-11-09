@@ -108,6 +108,7 @@ mod repo_batches;
 mod repos;
 mod restart;
 mod review;
+mod review_cards;
 mod scroll;
 mod scrollback;
 mod scrollback_panel;
@@ -1445,6 +1446,8 @@ pub struct Gerdr {
     pub machines: machines::Machines,
     /// The features of every project, and the dialog and panel on them.
     pub features: features::Features,
+    /// The plan review's sheet, while it is open (see `plan_sheet`).
+    pub plan_sheet: Option<plan_sheet::PlanSheet>,
     /// Each feature's code review counts, once read (see `feature_diff`).
     pub code_reviews: feature_diff::Lines,
     /// The apps projects keep running, as last looked at (see `tasks`).
@@ -7144,6 +7147,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         tasks_panel: None,
         machines: machines::Machines::default(),
         features: features::Features::default(),
+        plan_sheet: None,
         code_reviews: Default::default(),
         kept: Vec::new(),
         t3_started: None,

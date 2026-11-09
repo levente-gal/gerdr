@@ -527,9 +527,10 @@ impl Gerdr {
         if !self.note_finding(project, slug, id, "") {
             return;
         }
-        let undo = MenuAction::RestoreFindingComment {
+        let undo = MenuAction::RestoreItemComment {
             project: project.to_owned(),
             slug: slug.to_owned(),
+            of: crate::feature::review_items::ItemOf::Finding,
             id: id.to_owned(),
             note,
         };
@@ -716,7 +717,12 @@ impl Gerdr {
         let Some(panel) = self.features.panel.as_mut() else {
             return;
         };
-        panel.note = Some((CardNote::Finding(id.to_owned()), field));
+        let on = CardNote::Item {
+            of: crate::feature::review_items::ItemOf::Finding,
+            id: id.to_owned(),
+            accept: false,
+        };
+        panel.note = Some((on, field));
         self.stop_key_repeat();
         self.select_panel_finding(id);
     }

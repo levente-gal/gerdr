@@ -232,7 +232,7 @@ impl Gerdr {
             Overlay::GitIdentity => self.repos.identity.is_some(),
             Overlay::Machines => self.machines.dialog.is_some(),
             Overlay::ProjectCommands => self.features.commands.is_some(),
-            Overlay::PlanSheet => self.features.plan_sheet.is_some(),
+            Overlay::PlanSheet => self.plan_sheet.is_some(),
             Overlay::Confirm => self.confirm.is_some(),
             Overlay::ContextMenu => self.context_menu.is_some(),
             Overlay::Toasts => {

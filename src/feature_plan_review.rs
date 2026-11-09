@@ -21,12 +21,17 @@ use crate::{
         self, Feature, Stage, Status,
         artifacts::{self},
         patch::{self, Reading},
-        plan_review::{self, Decision, PlanReview, Raw},
+        plan_review::{self, Decision, PlanReview, Raw, Suggestion},
+        review_items::ItemOf,
         store,
     },
     feature_agents::Stamp,
-    features::{Done, plural},
+    features::{CardNote, Done, plural},
+    menu::MenuAction,
     prompts,
+    review_cards::ItemAct,
+    text_field::TextField,
+    toast::Level,
 };
 
 const STAGE: Stage = Stage::PlanReview;
@@ -45,6 +50,39 @@ pub(crate) fn citable(feature: &Feature) -> Vec<(String, PathBuf)> {
     let repos = (feature.repos.iter()).map(|r| (r.key(), r.worktree.clone()));
     let context = (feature.context.iter()).map(|c| (c.key(), c.main.clone()));
     repos.chain(context).collect()
+}
+
+/// Where a citation of a suggestion is: its checkout, the file, and the
+/// line.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CitationPlace {
+    pub root: PathBuf,
+    pub file: PathBuf,
+    pub line: usize,
+}
+
+/// The file of `citation` of a feature with `feature`'s repositories: its
+/// checkout and the file itself, or why not, a citation being the agent's
+/// word. It only looks at the file system.
+pub(crate) fn citation_place(
+    feature: &Feature,
+    citation: &plan_review::Evidence,
+) -> Result<(PathBuf, PathBuf), String> {
+    let repos = citable(feature);
+    let Some(root) = plan_review::locate(citation, &repos) else {
+        return Err(match citation.repo.as_str() {
+            "" => format!("Can't tell which repository {} is in", citation.file),
+            repo => format!("This feature has no repository \u{201c}{repo}\u{201d}"),
+        });
+    };
+    let path = root.join(&citation.file);
+    let (Ok(top), Ok(real)) = (root.canonicalize(), path.canonicalize()) else {
+        return Err(format!("{} isn't there", citation.file));
+    };
+    if !real.starts_with(&top) {
+        return Err(format!("{} is outside its repository", citation.file));
+    }
+    Ok((root.to_path_buf(), path))
 }
 
 /// Read what the code is and, while reviewing, the suggestions in `path`.
@@ -331,21 +369,175 @@ impl Gerdr {
         let noted = self
             .feature_mut(project, slug)
             .and_then(|f| f.plan_review.as_mut())
-            .is_some_and(|r| plan_review::set_note(r, id, note));
+            .is_some_and(|r| plan_review::set_note(r, id, note).is_ok());
         if noted {
             self.save_feature(project, slug);
         }
     }
 
-    /// Add the user's own suggestion, and save.
+    /// Add the user's own suggestion, and save; say why when it can't be.
     pub(crate) fn add_suggestion(&mut self, project: &str, slug: &str, text: &str) {
         let added = self
             .feature_mut(project, slug)
             .and_then(|f| f.plan_review.as_mut())
             .map(|r| plan_review::add_own(r, text));
-        if added.is_some() {
-            self.save_feature(project, slug);
+        match added {
+            Some(Ok(_)) => self.save_feature(project, slug),
+            Some(Err(why)) => self.show_warning(why),
+            None => {}
         }
+    }
+
+    /// Delete suggestion `id` of the user's own, and save; why not when it
+    /// can't be. Undo is the caller's (`MenuAction::RestoreSuggestion`).
+    pub(crate) fn delete_own_suggestion(
+        &mut self,
+        project: &str,
+        slug: &str,
+        id: &str,
+    ) -> Result<(), String> {
+        let review = self
+            .feature_mut(project, slug)
+            .and_then(|f| f.plan_review.as_mut())
+            .ok_or("That review is gone")?;
+        plan_review::delete_own(review, id)?;
+        self.save_feature(project, slug);
+        Ok(())
+    }
+
+    /// Undo removing one of the user's own suggestions.
+    pub(crate) fn restore_suggestion(
+        &mut self,
+        project: &str,
+        slug: &str,
+        at: usize,
+        suggestion: Suggestion,
+    ) {
+        let restored = self
+            .feature_mut(project, slug)
+            .and_then(|f| f.plan_review.as_mut())
+            .is_some_and(|r| plan_review::restore(r, at, suggestion));
+        if !restored {
+            return self.show_warning("That suggestion can't be put back now".into());
+        }
+        self.save_feature(project, slug);
+    }
+
+    /// Where citation `i` of suggestion `id` of feature `slug` is; else why
+    /// it can't be opened.
+    pub(crate) fn suggestion_citation(
+        &self,
+        project: &str,
+        slug: &str,
+        id: &str,
+        i: usize,
+    ) -> Result<CitationPlace, String> {
+        let feature = self.feature(project, slug).ok_or("That feature is gone")?;
+        let citation = (feature.plan_review.as_ref())
+            .and_then(|r| r.suggestion(id))
+            .and_then(|s| s.evidence.get(i))
+            .ok_or("This suggestion cites no code")?;
+        let (root, file) = citation_place(feature, citation)?;
+        Ok(CitationPlace {
+            root,
+            file,
+            line: citation.line,
+        })
+    }
+
+    /// Open `place`, a citation of feature `slug`'s plan review, in Zed: in
+    /// the feature's own workspace, as its diff's Zed is.
+    pub(crate) fn open_citation(&mut self, project: &str, slug: &str, place: CitationPlace) {
+        let w = (self.feature_workspace(project, slug)).unwrap_or(self.active_workspace);
+        self.open_line_in_zed(w, &place.root, &place.file, place.line);
+    }
+
+    /// Open citation `i` of suggestion `id` in Zed, or say why not.
+    pub(crate) fn open_suggestion_code(&mut self, project: &str, slug: &str, id: &str, i: usize) {
+        match self.suggestion_citation(project, slug, id, i) {
+            Ok(place) => self.open_citation(project, slug, place),
+            Err(why) => self.show_warning(why),
+        }
+    }
+
+    /// Review feature `slug`'s suggestions where they apply in the plan (the
+    /// sheet, for now).
+    pub(crate) fn review_in_plan(&mut self, project: &str, slug: &str) {
+        self.open_plan_sheet(project, slug);
+    }
+
+    /// Bring what shows Plan review's suggestions in line with the record:
+    /// after a save, and as the watch reads a rewrite in.
+    pub(crate) fn plan_doc_follows(&mut self) {
+        self.plan_sheet_follows();
+    }
+
+    /// Do `act` to suggestion `id` of feature `slug`, from its card or its
+    /// keys.
+    pub(crate) fn apply_suggestion(&mut self, project: &str, slug: &str, id: &str, act: ItemAct) {
+        match act {
+            ItemAct::Decide(decision) => {
+                let decision = Decision::from_item(decision);
+                if let Err(why) = self.decide_suggestion(project, slug, id, decision) {
+                    self.show_warning(why);
+                }
+            }
+            ItemAct::DeleteOwn => {
+                let taken = (self.feature(project, slug))
+                    .and_then(|f| f.plan_review.as_ref())
+                    .and_then(|r| {
+                        let at = r.suggestions.iter().position(|s| s.id == id)?;
+                        Some((at, r.suggestions[at].clone()))
+                    });
+                if let Err(why) = self.delete_own_suggestion(project, slug, id) {
+                    return self.show_warning(why);
+                }
+                if let Some((at, suggestion)) = taken {
+                    let undo = MenuAction::RestoreSuggestion {
+                        project: project.to_owned(),
+                        slug: slug.to_owned(),
+                        at,
+                        suggestion: Box::new(suggestion),
+                    };
+                    self.toast_with(
+                        "Removed your suggestion".into(),
+                        Level::Success,
+                        Some(("Undo".to_owned(), undo)),
+                    );
+                }
+            }
+            ItemAct::Comment => self.write_suggestion_comment(project, slug, id),
+            ItemAct::DeleteComment => self.note_suggestion(project, slug, id, ""),
+            ItemAct::OpenCode => self.open_suggestion_code(project, slug, id, 0),
+            ItemAct::Show => self.review_in_plan(project, slug),
+            // The dialogs asking why and for the user's wording come with
+            // the cards.
+            ItemAct::AskRefuse | ItemAct::Edit => {
+                self.show_warning("Decide this one in the plan review for now".into());
+            }
+        }
+        self.plan_doc_follows();
+    }
+
+    /// Write or edit the user's comment on suggestion `id`, on its card on
+    /// the page: the keyboard goes to it there.
+    fn write_suggestion_comment(&mut self, project: &str, slug: &str, id: &str) {
+        let note = (self.feature(project, slug))
+            .and_then(|f| f.plan_review.as_ref()?.suggestion(id))
+            .map(|s| s.note.clone());
+        let Some(note) = note else {
+            return self.show_warning(format!("There's no suggestion {id}"));
+        };
+        let Some(panel) = self.features.panel.as_mut() else {
+            return;
+        };
+        let on = CardNote::Item {
+            of: ItemOf::Suggestion,
+            id: id.to_owned(),
+            accept: false,
+        };
+        panel.note = Some((on, TextField::multiline(&note)));
+        self.stop_key_repeat();
     }
 
     /// Send the notes on the suggestions to the reviewer's chat, or to a
@@ -642,6 +834,46 @@ mod tests {
         assert!(deciding(&f).is_some());
         f.plan_review.as_mut().unwrap().writing = true;
         assert!(deciding(&f).is_none());
+    }
+
+    #[test]
+    fn a_citation_opens_only_inside_its_repository() {
+        let dir = std::env::temp_dir().join(format!("gerdr-plan-sheet-{}", std::process::id()));
+        let repo = dir.join("api");
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src/a.rs"), "fn a() {}\n").unwrap();
+        std::fs::write(dir.join("secret"), "x").unwrap();
+        let mut f = crate::features::tests::feature(
+            "a",
+            vec![crate::features::tests::repo("api", true)],
+            2,
+        );
+        f.repos[0].worktree = repo.clone();
+        let cite = |file: &str, repo: &str| plan_review::Evidence {
+            repo: repo.into(),
+            file: file.into(),
+            line: 1,
+            quote: "q".into(),
+            found: None,
+        };
+        let (root, path) = citation_place(&f, &cite("src/a.rs", "")).unwrap();
+        assert_eq!((root, path), (repo.clone(), repo.join("src/a.rs")));
+        assert!(
+            citation_place(&f, &cite("src/none.rs", ""))
+                .unwrap_err()
+                .contains("isn't there")
+        );
+        assert!(
+            citation_place(&f, &cite("../secret", ""))
+                .unwrap_err()
+                .contains("outside")
+        );
+        assert!(
+            citation_place(&f, &cite("src/a.rs", "other"))
+                .unwrap_err()
+                .contains("other")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

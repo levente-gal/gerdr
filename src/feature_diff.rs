@@ -43,6 +43,7 @@ use crate::{
         Feature, Repo, Stage, Status,
         fix_round::FixPhase,
         review_import::{Decision, Finding, FindingState},
+        review_items::ItemOf,
         store,
         viewed::{self, Tick, Viewed},
     },
@@ -710,6 +711,8 @@ pub fn finding_comment(f: &Finding, root: PathBuf, file: Option<&FileDiff>) -> C
             yours: f.yours,
             note: false,
             sent: false,
+            of: ItemOf::Finding,
+            frozen: None,
         }),
     }
 }
@@ -729,6 +732,8 @@ fn finding_note(f: &Finding, comment: &Comment) -> Option<Comment> {
             yours: true,
             note: true,
             sent: false,
+            of: ItemOf::Finding,
+            frozen: None,
         }),
     })
 }

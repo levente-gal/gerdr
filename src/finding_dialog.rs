@@ -17,6 +17,7 @@ use crate::{
     feature::{
         Stage, Status,
         review_import::{self, Decision, Finding, FindingState},
+        review_items::ItemOf,
     },
     text_field::{Edit, TextField},
 };
@@ -38,8 +39,12 @@ pub enum Ask {
     EditComment,
 }
 
-/// What was typed and left: by project, slug, what was asked and the finding.
-pub type Drafts = HashMap<(String, String, Ask, String), Vec<String>>;
+/// What was typed and left: by project, slug, what was asked, and the item
+/// by its kind and id (`r1-2` is in both kinds).
+pub type Drafts = HashMap<DraftKey, Vec<String>>;
+
+/// What a draft is kept by (see `Drafts`).
+pub type DraftKey = (String, String, Ask, ItemOf, String);
 
 /// The dialog's state, while it is open.
 #[derive(Debug)]
@@ -47,6 +52,9 @@ pub struct FindingDialog {
     pub project: String,
     pub slug: String,
     pub ask: Ask,
+    /// Which kind of item it is on: its words, and its draft, are that
+    /// kind's.
+    pub of: ItemOf,
     /// The finding it is on; empty for a new item.
     pub id: String,
     /// The finding's title; for a new item, what it is for.
@@ -203,11 +211,12 @@ impl FindingDialog {
         }
     }
 
-    fn draft_key(&self) -> (String, String, Ask, String) {
+    fn draft_key(&self) -> DraftKey {
         (
             self.project.clone(),
             self.slug.clone(),
             self.ask,
+            self.of,
             self.id.clone(),
         )
     }
@@ -218,20 +227,21 @@ impl FindingDialog {
 }
 
 impl Gerdr {
-    /// Open the dialog asking `ask` of `id` with fields holding `from`,
-    /// or what was last left typed there.
+    /// Open the dialog asking `ask` of item `id` of kind `of` with fields
+    /// holding `from`, or what was last left typed there.
     #[allow(clippy::too_many_arguments)]
     fn open_finding_dialog(
         &mut self,
         project: &str,
         slug: &str,
         ask: Ask,
+        of: ItemOf,
         id: &str,
         about: String,
         from: Vec<String>,
         marks_fix: bool,
     ) {
-        let key = (project.to_owned(), slug.to_owned(), ask, id.to_owned());
+        let key = (project.to_owned(), slug.to_owned(), ask, of, id.to_owned());
         let shown = (self.features.finding_drafts.get(&key))
             .filter(|draft| draft.len() == from.len())
             .unwrap_or(&from);
@@ -245,6 +255,7 @@ impl Gerdr {
             project: project.to_owned(),
             slug: slug.to_owned(),
             ask,
+            of,
             id: id.to_owned(),
             about,
             fields,
@@ -284,7 +295,16 @@ impl Gerdr {
     pub fn ask_dismiss_finding(&mut self, project: &str, slug: &str, id: &str) {
         if let Some(f) = self.finding_to_ask(project, slug, id) {
             let from = vec![String::new()];
-            self.open_finding_dialog(project, slug, Ask::Dismiss, id, f.title, from, false);
+            self.open_finding_dialog(
+                project,
+                slug,
+                Ask::Dismiss,
+                ItemOf::Finding,
+                id,
+                f.title,
+                from,
+                false,
+            );
         }
     }
 
@@ -308,6 +328,7 @@ impl Gerdr {
                 project,
                 slug,
                 Ask::EditOwn,
+                ItemOf::Finding,
                 id,
                 about,
                 vec![text],
@@ -315,7 +336,16 @@ impl Gerdr {
             );
         } else {
             let from = vec![f.fix_text().to_owned()];
-            self.open_finding_dialog(project, slug, Ask::Edit, id, f.title, from, marks_fix);
+            self.open_finding_dialog(
+                project,
+                slug,
+                Ask::Edit,
+                ItemOf::Finding,
+                id,
+                f.title,
+                from,
+                marks_fix,
+            );
         }
     }
 
@@ -324,7 +354,16 @@ impl Gerdr {
         let about = "It goes to the Build agent with the fixes".to_owned();
         let id = crate::features::note_id(c);
         let from = vec![c.text.clone()];
-        self.open_finding_dialog(project, slug, Ask::EditDiffNote, &id, about, from, false);
+        self.open_finding_dialog(
+            project,
+            slug,
+            Ask::EditDiffNote,
+            ItemOf::Finding,
+            &id,
+            about,
+            from,
+            false,
+        );
         if let Some(dialog) = self.features.finding_dialog.as_mut() {
             dialog.note = Some(c.clone());
         }
@@ -335,7 +374,16 @@ impl Gerdr {
     pub(crate) fn ask_edit_comment(&mut self, project: &str, slug: &str, id: &str, text: &str) {
         let about = "Changed, it is open again, to go to the Build agent".to_owned();
         let from = vec![text.to_owned()];
-        self.open_finding_dialog(project, slug, Ask::EditComment, id, about, from, false);
+        self.open_finding_dialog(
+            project,
+            slug,
+            Ask::EditComment,
+            ItemOf::Finding,
+            id,
+            about,
+            from,
+            false,
+        );
     }
 
     /// Ask for a comment of the user's own, to go with the fixes.
@@ -351,7 +399,16 @@ impl Gerdr {
             _ => "It goes to the Build agent with the fixes, and the next review checks it",
         };
         let from = vec![String::new()];
-        self.open_finding_dialog(project, slug, Ask::Add, "", about.to_owned(), from, false);
+        self.open_finding_dialog(
+            project,
+            slug,
+            Ask::Add,
+            ItemOf::Finding,
+            "",
+            about.to_owned(),
+            from,
+            false,
+        );
     }
 
     /// A key while the dialog has the keyboard.
@@ -494,6 +551,7 @@ mod tests {
             project: "p".into(),
             slug: "s".into(),
             ask,
+            of: ItemOf::Finding,
             id: "r1-1".into(),
             about: "Off by one".into(),
             fields: from.iter().map(|t| TextField::multiline(t)).collect(),

@@ -83,7 +83,9 @@ impl DocMode {
         match file {
             DocFile::Stage(_) | DocFile::FixPlan => &[DocMode::Review, DocMode::Split],
             DocFile::Evidence => &DocMode::ALL,
-            DocFile::PlanChanges | DocFile::DraftChanges(..) => &[DocMode::Review],
+            DocFile::PlanChanges | DocFile::DraftChanges(..) | DocFile::Suggestions => {
+                &[DocMode::Review]
+            }
         }
     }
 
@@ -103,7 +105,9 @@ impl DocMode {
         match file {
             DocFile::Stage(_) | DocFile::FixPlan => DocMode::Review,
             DocFile::Evidence => DocMode::Preview,
-            DocFile::PlanChanges | DocFile::DraftChanges(..) => DocMode::Review,
+            DocFile::PlanChanges | DocFile::DraftChanges(..) | DocFile::Suggestions => {
+                DocMode::Review
+            }
         }
     }
 
@@ -520,9 +524,10 @@ impl Gerdr {
     fn insert_doc_tab(&mut self, w: usize, doc: DocOf, text: String, mode: DocMode) -> usize {
         let review = match doc.file {
             DocFile::Stage(_) | DocFile::FixPlan => review::load_file(&doc.comments),
-            DocFile::Evidence | DocFile::PlanChanges | DocFile::DraftChanges(..) => {
-                Review::default()
-            }
+            DocFile::Evidence
+            | DocFile::PlanChanges
+            | DocFile::DraftChanges(..)
+            | DocFile::Suggestions => Review::default(),
         };
         let mut wd = WorktreeDiff::of_doc(doc, w, review);
         wd.set_doc(Ok(text), self.doc_env(mode));

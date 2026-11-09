@@ -38,7 +38,8 @@ use serde_json::Value;
 
 use super::{
     agents::StageRun,
-    review_import::{Severity, clean, quoted},
+    review_import::{Severity, clean, own_text, quoted},
+    review_items::{self, ItemOf, Standing},
 };
 
 /// The file the reviewer writes, in the feature data dir.
@@ -49,6 +50,8 @@ pub const MAX_BYTES: u64 = 256 * 1024;
 pub const MAX_SUGGESTIONS: usize = 40;
 /// The most citations kept of one suggestion.
 pub const MAX_EVIDENCE: usize = 6;
+/// The most characters kept of a suggestion's `plan_quote`.
+pub const MAX_QUOTE: usize = 300;
 /// The most lacks listed of a bad file.
 const MAX_LACKS: usize = 8;
 /// How many lines either side of the one cited its quote may be on.
@@ -162,6 +165,54 @@ pub struct Suggestion {
     /// The last run left it out.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub dropped: bool,
+    /// Why the user rejected it; empty unless rejected.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reason: String,
+    /// The user's wording of `change`, in its place; `change` stays the
+    /// reviewer's, as a run raising it again rewrites that one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub my_change: Option<String>,
+    /// The exact text of the one plan line it applies to, as the reviewer
+    /// quoted it; empty when it gave none.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub plan_quote: String,
+    /// Where in `plan.md` it was last placed (`place`); none until it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placed: Option<Placed>,
+}
+
+/// Where a suggestion goes in the plan (`place`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Placed {
+    /// Its `plan_quote` is on this line, 1-based.
+    Quote(usize),
+    /// Its `plan` names the heading on this line, 1-based.
+    Heading(usize),
+    /// Neither: it shows on the file's header, "not placed in the plan".
+    Nowhere,
+}
+
+impl Suggestion {
+    /// The change to make: the user's wording, else the reviewer's.
+    pub fn change_text(&self) -> &str {
+        self.my_change.as_deref().unwrap_or(&self.change)
+    }
+
+    /// Where it stands, as the cards and flags shared with AI review's
+    /// findings say it: accepted is `Fix`, rejected is `Dismissed`.
+    pub fn standing(&self) -> Standing {
+        match self.state {
+            State::Open => Standing::Open,
+            State::Accepted => Standing::Fix,
+            State::Rejected => Standing::Dismissed,
+        }
+    }
+
+    /// Whether it is a question with no answer yet: it can't be accepted.
+    pub fn unanswered(&self) -> bool {
+        self.kind == Kind::Question && self.note.trim().is_empty()
+    }
 }
 
 /// The feature's plan review, kept in its record.
@@ -193,6 +244,14 @@ pub struct PlanReview {
     /// Each run read in, oldest first (see `RunRecord`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub runs: Vec<RunRecord>,
+    /// The highest `u<k>` given to a suggestion of the user's own: a deleted
+    /// one's id is never given again.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub own_made: u32,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 /// One run of the reviewer as read in: who ran it, when, and what it raised,
@@ -279,6 +338,20 @@ impl PlanReview {
             .filter(|e| e.found == Some(false))
             .count()
     }
+
+    /// The suggestions as the page lists them: the user's own first, then
+    /// by severity, each group in the order raised. A decision doesn't move
+    /// one.
+    pub fn in_order(&self) -> Vec<&Suggestion> {
+        let mut list: Vec<&Suggestion> = self.suggestions.iter().collect();
+        list.sort_by_key(|s| review_items::rank(s.source == Source::You, s.severity));
+        list
+    }
+
+    /// The first suggestion not decided yet, as the page lists them.
+    pub fn first_open(&self) -> Option<&Suggestion> {
+        (self.in_order().into_iter()).find(|s| s.state == State::Open)
+    }
 }
 
 /// One suggestion as the file has it, cleaned and capped.
@@ -293,6 +366,8 @@ pub struct Raw {
     pub why: String,
     pub change: String,
     pub evidence: Vec<Evidence>,
+    /// The plan line it applies to, as quoted; may be empty.
+    pub plan_quote: String,
 }
 
 /// The suggestions of `plan-review.json` reading `text`; else what it lacks,
@@ -352,6 +427,10 @@ pub fn parse(text: &str) -> Result<Vec<Raw>, Vec<String>> {
             why: clean(text_of("why"), true),
             change: clean(text_of("change"), true),
             evidence: evidence_of(obj.get("evidence"), k, &mut lacks),
+            plan_quote: quoted(text_of("plan_quote"))
+                .chars()
+                .take(MAX_QUOTE)
+                .collect(),
         };
         let mut lack = |what: &str| lacks.push(format!("suggestion {k} has no {what}"));
         for (text, what) in [
@@ -457,6 +536,7 @@ pub fn import(review: &mut PlanReview, run: u32, raws: Vec<Raw>) -> Imported {
             (s.plan, s.title) = (raw.plan, raw.title);
             (s.why, s.change) = (raw.why, raw.change);
             s.evidence = raw.evidence;
+            s.plan_quote = raw.plan_quote;
             s.run = run;
             s.dropped = false;
             out.again += 1;
@@ -480,6 +560,7 @@ pub fn import(review: &mut PlanReview, run: u32, raws: Vec<Raw>) -> Imported {
             why: raw.why,
             change: raw.change,
             evidence: raw.evidence,
+            plan_quote: raw.plan_quote,
             run,
             ..Suggestion::default()
         });
@@ -498,31 +579,59 @@ pub fn import(review: &mut PlanReview, run: u32, raws: Vec<Raw>) -> Imported {
 }
 
 /// What the user decides of a suggestion.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Decision {
     Accept,
-    Reject,
-    /// Back to undecided; one of the user's own goes.
+    /// Rejected, with the reason (not empty): it goes to the next reviewer
+    /// run.
+    Reject(String),
+    /// Back to undecided. One of the user's own has no undecided: it is
+    /// deleted instead (`delete_own`).
     Clear,
+}
+
+impl Decision {
+    /// A decision in the words the cards and keys shared with AI review
+    /// speak (`review_items`): Fix is accept, Dismiss is reject, Reopen is
+    /// clear.
+    pub fn from_item(decision: super::review_import::Decision) -> Self {
+        use super::review_import::Decision as D;
+        match decision {
+            D::Fix => Self::Accept,
+            D::Dismiss(why) => Self::Reject(why),
+            D::Reopen => Self::Clear,
+        }
+    }
 }
 
 /// Decide suggestion `id` of `review`; why not when it can't be. A question
 /// is accepted by answering it, so it needs its note first.
 pub fn decide(review: &mut PlanReview, id: &str, decision: Decision) -> Result<(), String> {
-    let Some(i) = review.suggestions.iter().position(|s| s.id == id) else {
+    let Some(s) = review.suggestions.iter_mut().find(|s| s.id == id) else {
         return Err("That suggestion is gone".into());
     };
-    let s = &mut review.suggestions[i];
     match decision {
-        Decision::Accept if s.kind == Kind::Question && s.note.trim().is_empty() => {
+        Decision::Accept if s.unanswered() => {
             return Err("Answer the question first: write it as a note".into());
         }
-        Decision::Accept => s.state = State::Accepted,
-        Decision::Reject => s.state = State::Rejected,
-        Decision::Clear if s.source == Source::You => {
-            review.suggestions.remove(i);
+        Decision::Accept => {
+            s.state = State::Accepted;
+            s.reason.clear();
         }
-        Decision::Clear => s.state = State::Open,
+        Decision::Reject(why) if why.trim().is_empty() => {
+            return Err(format!("Say why you reject {id}"));
+        }
+        Decision::Reject(why) => {
+            s.state = State::Rejected;
+            s.reason = own_text(&why);
+        }
+        Decision::Clear if s.source == Source::You => {
+            return Err("Delete it instead".into());
+        }
+        Decision::Clear => {
+            s.state = State::Open;
+            s.reason.clear();
+        }
     }
     Ok(())
 }
@@ -538,30 +647,167 @@ pub fn restore(review: &mut PlanReview, at: usize, suggestion: Suggestion) -> bo
     true
 }
 
-/// Set suggestion `id`'s note; whether it is there.
-pub fn set_note(review: &mut PlanReview, id: &str, note: &str) -> bool {
+/// Set the user's note on suggestion `id` to `note`, a question's answer;
+/// empty deletes it. What it did, for the log; else why it can't.
+pub fn set_note(review: &mut PlanReview, id: &str, note: &str) -> Result<String, String> {
     let Some(s) = review.suggestions.iter_mut().find(|s| s.id == id) else {
-        return false;
+        return Err(format!("There's no suggestion {id}"));
     };
-    s.note = note.trim().to_owned();
-    true
+    review_items::note_editable(ItemOf::Suggestion, &s.id, s.standing())?;
+    s.note = own_text(note);
+    Ok(match s.note.is_empty() {
+        true => "comment deleted",
+        false => "commented on",
+    }
+    .into())
 }
 
-/// Add the user's own suggestion, accepted: writing it is deciding it.
-/// Its id.
-pub fn add_own(review: &mut PlanReview, text: &str) -> String {
-    let id = (1..)
-        .map(|k| format!("u{k}"))
-        .find(|id| review.suggestion(id).is_none())
-        .unwrap_or_default();
+/// Reword suggestion `id`'s change to `text`: left as the reviewer's, or
+/// empty, it is theirs again. It accepts the suggestion too, as rewording a
+/// change means wanting it, unless it is a question still to answer. What it
+/// did, for the log; else why it can't.
+pub fn edit_change(review: &mut PlanReview, id: &str, text: &str) -> Result<String, String> {
+    let Some(s) = review.suggestions.iter_mut().find(|s| s.id == id) else {
+        return Err(format!("There's no suggestion {id}"));
+    };
+    review_items::editable(ItemOf::Suggestion, &s.id, s.standing())?;
+    let text = own_text(text);
+    s.my_change = (!text.is_empty() && text != s.change).then_some(text);
+    if s.unanswered() {
+        return Ok("edited".into());
+    }
+    s.state = State::Accepted;
+    s.reason.clear();
+    Ok("edited, accepted".into())
+}
+
+/// `text` as a suggestion's title (its first line) and change (the rest).
+fn title_and_change(text: &str) -> (String, String) {
+    let text = own_text(text);
+    match text.split_once('\n') {
+        Some((title, change)) => (title.trim().to_owned(), change.trim().to_owned()),
+        None => (text, String::new()),
+    }
+}
+
+/// The `k` of every `u<k>` in `review`.
+fn own_ids(review: &PlanReview) -> impl Iterator<Item = u32> + '_ {
+    (review.suggestions.iter()).filter_map(|s| s.id.strip_prefix('u')?.parse::<u32>().ok())
+}
+
+/// Add the user's own suggestion saying `text`, accepted: writing it is
+/// deciding it. Its first line is the title, the rest the change. Its id,
+/// `u<k>`, never given before; else why it can't.
+pub fn add_own(review: &mut PlanReview, text: &str) -> Result<String, String> {
+    let (title, change) = title_and_change(text);
+    if title.is_empty() {
+        return Err("Say what the plan should change".into());
+    }
+    let k = own_ids(review).max().unwrap_or(0).max(review.own_made) + 1;
+    review.own_made = k;
+    let id = format!("u{k}");
     review.suggestions.push(Suggestion {
         id: id.clone(),
-        title: clean(text, false),
+        title,
+        change,
         state: State::Accepted,
         source: Source::You,
         ..Suggestion::default()
     });
-    id
+    Ok(id)
+}
+
+/// Rewrite suggestion `id` of the user's own to say `text`. What it did, for
+/// the log; else why it can't.
+pub fn edit_own(review: &mut PlanReview, id: &str, text: &str) -> Result<String, String> {
+    let Some(s) = (review.suggestions.iter_mut()).find(|s| s.id == id && s.source == Source::You)
+    else {
+        return Err(format!("There's no suggestion {id} of yours"));
+    };
+    review_items::editable(ItemOf::Suggestion, &s.id, s.standing())?;
+    let (title, change) = title_and_change(text);
+    if title.is_empty() {
+        return Err("Say what the plan should change".into());
+    }
+    (s.title, s.change) = (title, change);
+    s.state = State::Accepted;
+    s.reason.clear();
+    Ok("edited".into())
+}
+
+/// Take suggestion `id` of the user's own out of `review`: where it was and
+/// what it was, to put it back (`restore`). Else why it can't.
+pub fn delete_own(review: &mut PlanReview, id: &str) -> Result<(usize, Suggestion), String> {
+    let Some(at) = (review.suggestions.iter()).position(|s| s.id == id && s.source == Source::You)
+    else {
+        return Err(format!("There's no suggestion {id} of yours"));
+    };
+    review.own_made = own_ids(review).max().unwrap_or(0).max(review.own_made);
+    Ok((at, review.suggestions.remove(at)))
+}
+
+/// Accept every open suggestion of the reviewer's but the questions still to
+/// answer. How many it accepted.
+pub fn accept_all(review: &mut PlanReview) -> usize {
+    let mut n = 0;
+    for s in &mut review.suggestions {
+        if s.state == State::Open && !s.unanswered() {
+            s.state = State::Accepted;
+            s.reason.clear();
+            n += 1;
+        }
+    }
+    n
+}
+
+/// A plan line as a quote of it compares: markdown marks at its start and
+/// around words out, spaces collapsed, lower case.
+fn plan_line(text: &str) -> String {
+    let text = text.trim_start();
+    let text = text.trim_start_matches(['#', '>', '-', '*', '+', ' ']);
+    let text = text
+        .strip_prefix("[ ]")
+        .or_else(|| text.strip_prefix("[x]"))
+        .unwrap_or(text);
+    let text: String = text
+        .chars()
+        .filter(|c| !matches!(c, '*' | '_' | '`'))
+        .collect();
+    normal(&text).to_lowercase()
+}
+
+/// Where suggestion `s` goes in the plan reading `plan_text`: the line its
+/// `plan_quote` is on, else the heading its `plan` names, else nowhere.
+pub fn place(s: &Suggestion, plan_text: &str) -> Placed {
+    let quote = plan_line(&s.plan_quote);
+    if !quote.is_empty() {
+        let at = plan_text
+            .lines()
+            .position(|line| plan_line(line).contains(&quote));
+        if let Some(at) = at {
+            return Placed::Quote(at + 1);
+        }
+    }
+    let wanted = plan_line(&s.plan);
+    if !wanted.is_empty() {
+        let at = plan_text.lines().position(|line| {
+            line.trim_start().starts_with('#') && {
+                let heading = plan_line(line);
+                !heading.is_empty() && (heading.contains(&wanted) || wanted.contains(&heading))
+            }
+        });
+        if let Some(at) = at {
+            return Placed::Heading(at + 1);
+        }
+    }
+    Placed::Nowhere
+}
+
+/// Place every suggestion of `review` in the plan reading `plan_text`.
+pub fn place_all(review: &mut PlanReview, plan_text: &str) {
+    for s in &mut review.suggestions {
+        s.placed = Some(place(s, plan_text));
+    }
 }
 
 /// A line of text as a citation compares it: cleaned as the file's quote
@@ -642,6 +888,24 @@ pub fn notes(review: &PlanReview) -> String {
     (review.suggestions.iter())
         .filter(|s| !s.note.is_empty() && s.source == Source::Reviewer)
         .map(|s| format!("- {}: {}: {}", s.id, s.title, s.note.replace('\n', " ")))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// What the reviewer is told when asked again: the user's notes, and the
+/// suggestions they rejected with why, not to be raised again.
+pub fn back_notes(review: &PlanReview) -> String {
+    let rejected = (review.suggestions.iter())
+        .filter(|s| s.state == State::Rejected && s.source == Source::Reviewer)
+        .map(|s| {
+            let why = match s.reason.is_empty() {
+                true => String::new(),
+                false => format!(": rejected because {}", s.reason.replace('\n', " ")),
+            };
+            format!("- {}: {}{why}", s.id, s.title)
+        });
+    let notes = notes(review);
+    (notes.lines().map(str::to_owned).chain(rejected))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -797,8 +1061,8 @@ mod tests {
         assert_eq!(review.n, 1);
         assert_eq!(review.suggestions[0].id, "r1-1");
         decide(&mut review, "r1-1", Decision::Accept).unwrap();
-        set_note(&mut review, "r1-1", " keep it short ");
-        let own = add_own(&mut review, "Add a metric");
+        set_note(&mut review, "r1-1", " keep it short ").unwrap();
+        let own = add_own(&mut review, "Add a metric").unwrap();
         assert_eq!(own, "u1");
         // A rewrite keeps r1-1, reworded, and leaves the question out.
         let rewrite = r#"{"suggestions": [
@@ -841,9 +1105,11 @@ mod tests {
                 .contains("Answer the question")
         );
         assert_eq!(review.open(), 2);
-        set_note(&mut review, "r1-2", "The new one");
+        set_note(&mut review, "r1-2", "The new one").unwrap();
         decide(&mut review, "r1-2", Decision::Accept).unwrap();
-        decide(&mut review, "r1-1", Decision::Reject).unwrap();
+        assert!(decide(&mut review, "r1-1", Decision::Reject(" ".into())).is_err());
+        decide(&mut review, "r1-1", Decision::Reject("Not needed".into())).unwrap();
+        assert_eq!(review.suggestion("r1-1").unwrap().reason, "Not needed");
         assert_eq!(review.open(), 0);
         decide(&mut review, "r1-1", Decision::Clear).unwrap();
         assert_eq!(review.open(), 1);
@@ -851,14 +1117,78 @@ mod tests {
     }
 
     #[test]
-    fn clearing_your_own_takes_it_away() {
+    fn your_own_is_deleted_not_cleared_and_its_id_never_comes_back() {
         let mut review = PlanReview::default();
-        let own = add_own(&mut review, "One <b>more</b>");
-        assert_eq!(review.suggestion(&own).unwrap().title, "One more");
+        let own = add_own(&mut review, "One more\nSay how").unwrap();
+        let s = review.suggestion(&own).unwrap();
+        assert_eq!(
+            (s.title.as_str(), s.change.as_str()),
+            ("One more", "Say how")
+        );
+        assert!(add_own(&mut review, " ").is_err());
         assert!(review.any_accepted());
-        decide(&mut review, &own, Decision::Clear).unwrap();
+        assert_eq!(
+            decide(&mut review, &own, Decision::Clear).unwrap_err(),
+            "Delete it instead"
+        );
+        let (at, taken) = delete_own(&mut review, &own).unwrap();
         assert!(review.suggestions.is_empty());
         assert!(!review.any_accepted());
+        assert_eq!(add_own(&mut review, "Next").unwrap(), "u2");
+        assert!(restore(&mut review, at, taken));
+        assert_eq!(review.in_order()[0].id, "u1");
+    }
+
+    #[test]
+    fn an_old_record_loads_with_the_new_fields_empty() {
+        let old = r#"{"n": 1, "suggestions": [{"id": "r1-1", "severity": "high",
+            "kind": "gap", "title": "t", "state": "rejected"}]}"#;
+        let review: PlanReview = serde_json::from_str(old).unwrap();
+        let s = &review.suggestions[0];
+        assert_eq!((s.reason.as_str(), s.my_change.as_ref()), ("", None));
+        assert_eq!((s.plan_quote.as_str(), s.placed), ("", None));
+        assert_eq!(s.standing(), Standing::Dismissed);
+        assert_eq!(review.own_made, 0);
+        let back = serde_json::to_string(&review).unwrap();
+        assert!(!back.contains("own_made") && !back.contains("placed"));
+    }
+
+    #[test]
+    fn a_suggestion_is_placed_by_its_quote_then_its_heading() {
+        let plan = "# Plan\n\n## Milestone 3: rollback\n- [ ] Write the **rows** back\n";
+        let mut s = Suggestion {
+            plan: "Milestone 3".into(),
+            plan_quote: "Write the rows   back".into(),
+            ..Suggestion::default()
+        };
+        assert_eq!(place(&s, plan), Placed::Quote(4));
+        s.plan_quote = "not there".into();
+        assert_eq!(place(&s, plan), Placed::Heading(3));
+        s.plan = "Milestone 9".into();
+        assert_eq!(place(&s, plan), Placed::Nowhere);
+    }
+
+    #[test]
+    fn editing_a_change_keeps_the_reviewers_and_accepts() {
+        let mut review = PlanReview::default();
+        import(&mut review, 1, raws(GOOD));
+        edit_change(&mut review, "r1-1", "Roll back twice").unwrap();
+        let s = review.suggestion("r1-1").unwrap();
+        assert_eq!(
+            (s.change.as_str(), s.change_text()),
+            ("Add a rollback", "Roll back twice")
+        );
+        assert_eq!(s.state, State::Accepted);
+        // A question still to answer isn't accepted by it.
+        edit_change(&mut review, "r1-2", "Use the new one").unwrap();
+        assert_eq!(review.suggestion("r1-2").unwrap().state, State::Open);
+        assert_eq!(
+            accept_all(&mut review),
+            0,
+            "the question waits for its answer"
+        );
+        set_note(&mut review, "r1-2", "The new one").unwrap();
+        assert_eq!(accept_all(&mut review), 1);
     }
 
     struct Temp(PathBuf);
@@ -978,18 +1308,28 @@ mod tests {
         assert_eq!(review.not_found(), 1);
         let evidence = &review.suggestion("r1-1").unwrap().evidence[0];
         assert_eq!(evidence.found, Some(false));
-        set_note(&mut review, "r1-1", "Which rows?");
-        add_own(&mut review, "Mine, with no note");
-        set_note(&mut review, "u1", "Not for the reviewer");
+        set_note(&mut review, "r1-1", "Which rows?").unwrap();
+        add_own(&mut review, "Mine, with no note").unwrap();
+        set_note(&mut review, "u1", "Not for the reviewer").unwrap();
         assert_eq!(notes(&review), "- r1-1: No rollback: Which rows?");
+        decide(
+            &mut review,
+            "r1-2",
+            Decision::Reject("Only one queue".into()),
+        )
+        .unwrap();
+        assert_eq!(
+            back_notes(&review),
+            "- r1-1: No rollback: Which rows?\n- r1-2: Which queue?: rejected because Only one queue"
+        );
     }
 
     #[test]
     fn prompts_are_told_what_was_decided() {
         let mut review = PlanReview::default();
         import(&mut review, 1, raws(GOOD));
-        set_note(&mut review, "r1-2", "The new one");
-        decide(&mut review, "r1-1", Decision::Reject).unwrap();
+        set_note(&mut review, "r1-2", "The new one").unwrap();
+        decide(&mut review, "r1-1", Decision::Reject("No".into())).unwrap();
         let [(_, accepted), (_, rejected), (_, open), (_, ids)] = prompt_vars(Some(&review));
         assert_eq!(accepted, "");
         assert_eq!(rejected, "- r1-1: No rollback (Milestone 3)");
@@ -997,7 +1337,7 @@ mod tests {
         assert_eq!(ids, "");
         decide(&mut review, "r1-1", Decision::Accept).unwrap();
         decide(&mut review, "r1-2", Decision::Accept).unwrap();
-        add_own(&mut review, "Add a metric");
+        add_own(&mut review, "Add a metric").unwrap();
         let [(_, accepted), (_, rejected), (_, open), (_, ids)] = prompt_vars(Some(&review));
         assert_eq!(
             accepted,
@@ -1014,7 +1354,7 @@ mod tests {
     fn a_final_plan_has_to_say_where_each_accepted_one_went() {
         let mut review = PlanReview::default();
         import(&mut review, 1, raws(GOOD));
-        set_note(&mut review, "r1-2", "Yes");
+        set_note(&mut review, "r1-2", "Yes").unwrap();
         decide(&mut review, "r1-1", Decision::Accept).unwrap();
         decide(&mut review, "r1-2", Decision::Accept).unwrap();
         assert_eq!(unmapped(&review, "# no section"), ["r1-1", "r1-2"]);

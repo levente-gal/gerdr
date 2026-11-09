@@ -8,8 +8,6 @@
 //!
 //! The model and its keys are here, the painting in `chrome::plan_sheet`.
 
-use std::path::PathBuf;
-
 use smithay::{
     input::keyboard::{Keysym, ModifiersState},
     utils::{Logical, Point},
@@ -22,10 +20,10 @@ use crate::{
         PlanMark, PlanRow, PlanSheetView,
     },
     feature::{
-        Feature, Stage, Status,
+        Stage, Status,
         plan_review::{self, Decision, Kind, PlanReview, Source, State, Suggestion},
     },
-    feature_plan_review::{citable, deciding},
+    feature_plan_review::deciding,
     features::plural,
     menu::MenuAction,
     scroll::Motion,
@@ -40,6 +38,8 @@ const NO_ANSWER: &str = "Answer the question first: write it as a note";
 /// What the add field says when Enter is pressed with nothing written.
 const NO_TEXT: &str = "Say what to change in the plan first";
 const WRITE_FINAL: &str = "Write final plan";
+/// The reason `r` rejects with: the sheet asks for none.
+const SHEET_REASON: &str = "Rejected on the review sheet";
 const USE_AS_IS: &str = "Use the plan as it is";
 
 /// What the sheet's text field is writing.
@@ -254,7 +254,10 @@ impl PlanSheet {
         let row = rows.get(i)?;
         let id = row.id.clone();
         if row.mark != PlanMark::Rejected {
-            return Some(Outcome::Decide(id, Decision::Reject));
+            return Some(Outcome::Decide(
+                id,
+                Decision::Reject(SHEET_REASON.to_owned()),
+            ));
         }
         if row.yours {
             self.notice = Some("Yours stays rejected until you accept it or remove it".into());
@@ -508,30 +511,6 @@ fn ask_refused(review: &PlanReview) -> Option<String> {
         .then(|| "Nothing to ask: write a note on a suggestion first".to_owned())
 }
 
-/// The file of `citation` of a feature with `feature`'s repositories: its
-/// checkout and the file itself, or why not, a citation being the agent's
-/// word. It only looks at the file system.
-fn citation_place(
-    feature: &Feature,
-    citation: &plan_review::Evidence,
-) -> Result<(PathBuf, PathBuf), String> {
-    let repos = citable(feature);
-    let Some(root) = plan_review::locate(citation, &repos) else {
-        return Err(match citation.repo.as_str() {
-            "" => format!("Can't tell which repository {} is in", citation.file),
-            repo => format!("This feature has no repository \u{201c}{repo}\u{201d}"),
-        });
-    };
-    let path = root.join(&citation.file);
-    let (Ok(top), Ok(real)) = (root.canonicalize(), path.canonicalize()) else {
-        return Err(format!("{} isn't there", citation.file));
-    };
-    if !real.starts_with(&top) {
-        return Err(format!("{} is outside its repository", citation.file));
-    }
-    Ok((root.to_path_buf(), path))
-}
-
 impl Gerdr {
     /// Open the sheet on feature `slug` of `project`.
     pub(crate) fn open_plan_sheet(&mut self, project: &str, slug: &str) {
@@ -549,7 +528,7 @@ impl Gerdr {
         self.close_menu();
         self.tooltip.hide();
         self.chrome.drop_tooltip();
-        self.features.plan_sheet = Some(PlanSheet {
+        self.plan_sheet = Some(PlanSheet {
             project: project.to_owned(),
             slug: slug.to_owned(),
             at,
@@ -563,13 +542,13 @@ impl Gerdr {
 
     /// Close the sheet.
     pub(crate) fn close_plan_sheet(&mut self) {
-        self.features.plan_sheet = None;
+        self.plan_sheet = None;
         self.refresh_pointer_focus();
     }
 
     /// The review of the sheet open, as it is now.
     fn plan_sheet_review(&self) -> Option<&PlanReview> {
-        let sheet = self.features.plan_sheet.as_ref()?;
+        let sheet = self.plan_sheet.as_ref()?;
         self.feature(&sheet.project, &sheet.slug)?
             .plan_review
             .as_ref()
@@ -582,7 +561,7 @@ impl Gerdr {
     /// kept in. A rewrite read in moves its rows: the cursor stays on its
     /// suggestion.
     pub(crate) fn plan_sheet_follows(&mut self) {
-        let Some(sheet) = &self.features.plan_sheet else {
+        let Some(sheet) = &self.plan_sheet else {
             return;
         };
         let (project, slug) = (sheet.project.clone(), sheet.slug.clone());
@@ -608,7 +587,7 @@ impl Gerdr {
     /// Bring the sheet's cursor and scrolling in line with what it shows.
     fn plan_sheet_fit(&mut self) {
         let rows = self.plan_sheet_review().map(rows).unwrap_or_default();
-        if let Some(sheet) = self.features.plan_sheet.as_mut() {
+        if let Some(sheet) = self.plan_sheet.as_mut() {
             sheet.settle(&rows);
         }
         let Some(view) = self.plan_sheet_view() else {
@@ -618,7 +597,7 @@ impl Gerdr {
         let reveal = chrome::plan_sheet_reveal(&view, output);
         let most = chrome::plan_sheet_most_top(&view, output);
         let layout = chrome::plan_sheet_layout(&view, output);
-        if let Some(sheet) = self.features.plan_sheet.as_mut() {
+        if let Some(sheet) = self.plan_sheet.as_mut() {
             if sheet.revealed == Some(sheet.cursor) {
                 sheet.top = sheet.top.min(most);
             } else {
@@ -645,7 +624,7 @@ impl Gerdr {
         let draft = review.map(|r| r.draft.clone()).unwrap_or_default();
         let view = self.plan_sheet_view();
         let layout = view.map(|v| chrome::plan_sheet_layout(&v, self.output_size()));
-        let sheet = self.features.plan_sheet.as_ref()?;
+        let sheet = self.plan_sheet.as_ref()?;
         let page = layout.map_or(1, |l| {
             if sheet.keys {
                 l.keys.len().saturating_sub(1).max(1)
@@ -658,7 +637,7 @@ impl Gerdr {
             draft: &draft,
             page,
         };
-        let sheet = self.features.plan_sheet.as_mut()?;
+        let sheet = self.plan_sheet.as_mut()?;
         // A key is for the row with the cursor, which should show.
         if !sym.is_modifier_key() {
             sheet.revealed = None;
@@ -673,7 +652,7 @@ impl Gerdr {
 
     /// Refuse what the sheet asked, saying why on it.
     fn plan_sheet_refuse(&mut self, why: String) {
-        if let Some(sheet) = self.features.plan_sheet.as_mut() {
+        if let Some(sheet) = self.plan_sheet.as_mut() {
             sheet.notice = Some(why);
         }
     }
@@ -694,7 +673,7 @@ impl Gerdr {
 
     /// Do what the sheet asked.
     pub(crate) fn apply_plan_sheet(&mut self, outcome: Outcome) {
-        let Some(sheet) = self.features.plan_sheet.as_ref() else {
+        let Some(sheet) = self.plan_sheet.as_ref() else {
             return;
         };
         let (project, slug) = (sheet.project.clone(), sheet.slug.clone());
@@ -705,7 +684,7 @@ impl Gerdr {
         match outcome {
             Outcome::Close => {
                 // A text being written is kept (see `closing` in `input`).
-                let kept = (self.features.plan_sheet.as_mut()).and_then(PlanSheet::take_text);
+                let kept = (self.plan_sheet.as_mut()).and_then(PlanSheet::take_text);
                 if let Some(kept) = kept {
                     self.apply_plan_sheet(kept);
                 }
@@ -727,7 +706,7 @@ impl Gerdr {
                 let last = self
                     .plan_sheet_review()
                     .and_then(|r| r.suggestions.last().map(|s| s.id.clone()));
-                if let Some(sheet) = self.features.plan_sheet.as_mut() {
+                if let Some(sheet) = self.plan_sheet.as_mut() {
                     sheet.at = last;
                     sheet.detail_top = 0;
                 }
@@ -762,7 +741,11 @@ impl Gerdr {
                 let s = &r.suggestions[at];
                 (s.source == Source::You).then(|| (at, s.clone()))
             });
-        if let Err(why) = self.decide_suggestion(project, slug, id, decision) {
+        let done = match removed {
+            Some(_) => self.delete_own_suggestion(project, slug, id),
+            None => self.decide_suggestion(project, slug, id, decision),
+        };
+        if let Err(why) = done {
             return self.plan_sheet_refuse(why);
         }
         if let Some((at, suggestion)) = removed {
@@ -778,24 +761,6 @@ impl Gerdr {
                 Some(("Undo".to_owned(), undo)),
             );
         }
-    }
-
-    /// Undo removing one of the user's own suggestions.
-    pub(crate) fn restore_suggestion(
-        &mut self,
-        project: &str,
-        slug: &str,
-        at: usize,
-        suggestion: Suggestion,
-    ) {
-        let restored = self
-            .feature_mut(project, slug)
-            .and_then(|f| f.plan_review.as_mut())
-            .is_some_and(|r| plan_review::restore(r, at, suggestion));
-        if !restored {
-            return self.show_warning("That suggestion can't be put back now".into());
-        }
-        self.save_feature(project, slug);
     }
 
     /// Save suggestion `id`'s note, and accept it if `accept`. A note whose
@@ -827,23 +792,11 @@ impl Gerdr {
     /// Open citation `i` of suggestion `id` in Zed, or say why not. The
     /// sheet makes way: Zed is what is worked in next.
     fn plan_sheet_citation(&mut self, project: &str, slug: &str, id: &str, i: usize) {
-        let Some(feature) = self.feature(project, slug) else {
-            return;
-        };
-        let citation = (feature.plan_review.as_ref())
-            .and_then(|r| r.suggestion(id))
-            .and_then(|s| s.evidence.get(i));
-        let Some(citation) = citation else {
-            return self.plan_sheet_refuse("This suggestion cites no code".into());
-        };
-        let line = citation.line;
-        match citation_place(feature, citation) {
+        match self.suggestion_citation(project, slug, id, i) {
             Err(why) => self.plan_sheet_refuse(why),
-            Ok((root, file)) => {
-                // In the feature's own workspace, as its diff's Zed is.
-                let w = (self.feature_workspace(project, slug)).unwrap_or(self.active_workspace);
+            Ok(place) => {
                 self.close_plan_sheet();
-                self.open_line_in_zed(w, &root, &file, line);
+                self.open_citation(project, slug, place);
             }
         }
     }
@@ -862,7 +815,7 @@ impl Gerdr {
             return;
         }
         let rows = view.rows;
-        let Some(sheet) = self.features.plan_sheet.as_mut() else {
+        let Some(sheet) = self.plan_sheet.as_mut() else {
             return;
         };
         let writing = sheet.editing.is_some();
@@ -901,7 +854,7 @@ impl Gerdr {
         if let Some(kept) = kept {
             self.apply_plan_sheet(kept);
             // Refused: the button waits.
-            if (self.features.plan_sheet.as_ref()).is_some_and(|s| s.notice.is_some()) {
+            if (self.plan_sheet.as_ref()).is_some_and(|s| s.notice.is_some()) {
                 return;
             }
         }
@@ -918,7 +871,7 @@ impl Gerdr {
         let size = self.output_size();
         let layout = chrome::plan_sheet_layout(&view, size);
         let hit = layout.hit(pos);
-        if let Some(sheet) = self.features.plan_sheet.as_mut() {
+        if let Some(sheet) = self.plan_sheet.as_mut() {
             sheet.hover = hit;
         }
         match hit? {
@@ -977,7 +930,7 @@ impl Gerdr {
             return;
         }
         let most = chrome::plan_sheet_most_top(&view, size);
-        let Some(sheet) = self.features.plan_sheet.as_mut() else {
+        let Some(sheet) = self.plan_sheet.as_mut() else {
             return;
         };
         if view.keys.is_some() {
@@ -1003,7 +956,7 @@ impl Gerdr {
     }
 
     pub(crate) fn plan_sheet_view(&self) -> Option<PlanSheetView> {
-        let sheet = self.features.plan_sheet.as_ref()?;
+        let sheet = self.plan_sheet.as_ref()?;
         let feature = self.feature(&sheet.project, &sheet.slug)?;
         let review = feature.plan_review.as_ref()?;
         Some(sheet_view(sheet, &feature.title, review))
@@ -1151,7 +1104,7 @@ mod tests {
         );
         assert_eq!(
             press(&mut s, &rows, key(Keysym::r)),
-            decide("a", Decision::Reject)
+            decide("a", Decision::Reject(SHEET_REASON.into()))
         );
         press(&mut s, &rows, key(Keysym::Down));
         assert_eq!(
@@ -1160,7 +1113,7 @@ mod tests {
         );
         assert_eq!(
             press(&mut s, &rows, key(Keysym::r)),
-            decide("b", Decision::Reject)
+            decide("b", Decision::Reject(SHEET_REASON.into()))
         );
         press(&mut s, &rows, key(Keysym::Down));
         assert_eq!(
@@ -1388,8 +1341,8 @@ mod tests {
         assert_eq!(s.armed, None);
     }
 
-    /// Clearing one of the user's own removes it (`plan_review::decide`), so
-    /// that must only ever be Del's, armed.
+    /// Clearing one of the user's own removes it (`plan_review::delete_own`),
+    /// so that must only ever be Del's, armed.
     #[test]
     fn neither_space_nor_r_removes_your_own() {
         let accepted = vec![yours("u1", PlanMark::Accepted)];
@@ -1398,7 +1351,7 @@ mod tests {
         assert!(s.notice.is_some(), "it says why");
         assert_eq!(
             press(&mut s, &accepted, key(Keysym::r)),
-            decide("u1", Decision::Reject)
+            decide("u1", Decision::Reject(SHEET_REASON.into()))
         );
         let rejected = vec![yours("u1", PlanMark::Rejected)];
         let mut s = sheet_on(&rejected, 0);
@@ -1538,12 +1491,12 @@ mod tests {
             finish_refused(&r).as_deref(),
             Some("1 suggestion still to decide")
         );
-        plan_review::decide(&mut r, "b", Decision::Reject).unwrap();
+        plan_review::decide(&mut r, "b", Decision::Reject("No".into())).unwrap();
         assert_eq!(finish_refused(&r), None);
         assert_eq!(finish_refused(&review(Vec::new())), None);
         // Only a note on the reviewer's own can be asked about.
         assert!(ask_refused(&r).is_some());
-        plan_review::set_note(&mut r, "a", "Why five?");
+        plan_review::set_note(&mut r, "a", "Why five?").unwrap();
         assert_eq!(ask_refused(&r), None);
     }
 
@@ -1634,46 +1587,6 @@ mod tests {
     }
 
     #[test]
-    fn a_citation_opens_only_inside_its_repository() {
-        let dir = std::env::temp_dir().join(format!("gerdr-plan-sheet-{}", std::process::id()));
-        let repo = dir.join("api");
-        std::fs::create_dir_all(repo.join("src")).unwrap();
-        std::fs::write(repo.join("src/a.rs"), "fn a() {}\n").unwrap();
-        std::fs::write(dir.join("secret"), "x").unwrap();
-        let mut f = crate::features::tests::feature(
-            "a",
-            vec![crate::features::tests::repo("api", true)],
-            2,
-        );
-        f.repos[0].worktree = repo.clone();
-        let cite = |file: &str, repo: &str| Evidence {
-            repo: repo.into(),
-            file: file.into(),
-            line: 1,
-            quote: "q".into(),
-            found: None,
-        };
-        let (root, path) = citation_place(&f, &cite("src/a.rs", "")).unwrap();
-        assert_eq!((root, path), (repo.clone(), repo.join("src/a.rs")));
-        assert!(
-            citation_place(&f, &cite("src/none.rs", ""))
-                .unwrap_err()
-                .contains("isn't there")
-        );
-        assert!(
-            citation_place(&f, &cite("../secret", ""))
-                .unwrap_err()
-                .contains("outside")
-        );
-        assert!(
-            citation_place(&f, &cite("src/a.rs", "other"))
-                .unwrap_err()
-                .contains("other")
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
     fn a_removed_suggestion_of_your_own_goes_back_where_it_was() {
         let mut r = review(vec![
             suggestion("a", State::Open),
@@ -1682,7 +1595,7 @@ mod tests {
         ]);
         r.suggestions[1].source = Source::You;
         let taken = r.suggestions[1].clone();
-        plan_review::decide(&mut r, "u1", Decision::Clear).unwrap();
+        plan_review::delete_own(&mut r, "u1").unwrap();
         assert_eq!(r.suggestions.len(), 2);
         assert!(plan_review::restore(&mut r, 1, taken.clone()));
         assert_eq!(r.suggestions[1].id, "u1");

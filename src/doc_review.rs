@@ -64,6 +64,10 @@ pub enum DocFile {
     /// Draft `k` of a stage's file, as changes to the draft before: only
     /// read, as the evidence is (see `feature::drafts`).
     DraftChanges(Stage, u32),
+    /// Plan review's suggestions, flagged where they apply in Plan's
+    /// `plan.md`: the plan is approved and only read, the suggestions are
+    /// decided on it.
+    Suggestions,
 }
 
 impl DocFile {
@@ -73,7 +77,7 @@ impl DocFile {
             DocFile::Stage(stage) => stage,
             DocFile::Evidence => Stage::Verify,
             DocFile::FixPlan => Stage::Build,
-            DocFile::PlanChanges => Stage::PlanReview,
+            DocFile::PlanChanges | DocFile::Suggestions => Stage::PlanReview,
             DocFile::DraftChanges(stage, _) => stage,
         }
     }
@@ -82,6 +86,8 @@ impl DocFile {
     pub fn comments(self, dir: &Path) -> PathBuf {
         match self {
             DocFile::FixPlan => fix_round::comments_path(dir),
+            // Its own: the final plan's review has Plan review's.
+            DocFile::Suggestions => dir.join(SUGGESTIONS_COMMENTS),
             _ => comments_path(dir, self.stage()),
         }
     }
@@ -94,6 +100,7 @@ impl DocFile {
             DocFile::FixPlan => Some(fix_round::FILE),
             DocFile::PlanChanges => artifacts::name(Stage::PlanReview),
             DocFile::DraftChanges(stage, _) => artifacts::name(stage),
+            DocFile::Suggestions => artifacts::name(Stage::Plan),
         }
     }
 
@@ -110,6 +117,7 @@ impl DocFile {
                 artifacts::name(Stage::Plan).unwrap_or("the plan"),
                 state(feature, Stage::PlanReview, docs, now)
             ),
+            DocFile::Suggestions => suggestions_state(feature),
         }
     }
 
@@ -123,6 +131,7 @@ impl DocFile {
             DocFile::Evidence => Some(EVIDENCE_READ_ONLY),
             DocFile::PlanChanges => Some(PLAN_CHANGES_READ_ONLY),
             DocFile::DraftChanges(..) => Some(DRAFT_CHANGES_READ_ONLY),
+            DocFile::Suggestions => Some(SUGGESTIONS_READ_ONLY),
             DocFile::FixPlan => fix_plan_locked(feature),
         }
     }
@@ -139,6 +148,16 @@ impl DocFile {
         match (self, feature) {
             (DocFile::Stage(stage), Some(feature)) => {
                 feature.standing(stage, |s| docs.written.contains(&s))
+            }
+            // Its suggestions are decided only while the page can decide
+            // them; else it is a record.
+            (DocFile::Suggestions, Some(feature))
+                if !crate::review_cards::can_decide(feature, Stage::PlanReview) =>
+            {
+                match feature.standing(Stage::PlanReview, |s| docs.written.contains(&s)) {
+                    Standing::Open => Standing::Locked(Stage::PlanReview),
+                    standing => standing,
+                }
             }
             _ => Standing::Open,
         }
@@ -157,6 +176,36 @@ impl DocFile {
     pub fn shows_changes(self) -> bool {
         matches!(self, DocFile::PlanChanges | DocFile::DraftChanges(..))
     }
+}
+
+/// Where the comments of `DocFile::Suggestions` would be kept: it takes
+/// none, as it is only read, but it has a file of its own.
+const SUGGESTIONS_COMMENTS: &str = "suggestions-comments.json";
+
+/// Why the plan shown with its suggestions takes no edit or comment.
+pub const SUGGESTIONS_READ_ONLY: &str =
+    "This shows the approved plan with the suggestions on it, only to read";
+
+/// How Plan review's suggestions stand, as the header of
+/// `DocFile::Suggestions` says it: "2 to decide · 1 accepted", or why they
+/// are only to read.
+fn suggestions_state(feature: Option<&Feature>) -> String {
+    use crate::feature::plan_review::State;
+    let Some(feature) = feature else {
+        return "feature gone".into();
+    };
+    let Some(review) = feature.plan_review.as_ref() else {
+        return "no suggestions yet".into();
+    };
+    if review.writing {
+        return "the final plan is being written from these".into();
+    }
+    if !crate::review_cards::can_decide(feature, Stage::PlanReview) {
+        return "only to read".into();
+    }
+    let open = review.open();
+    let accepted = review.count(State::Accepted);
+    format!("{open} to decide \u{b7} {accepted} accepted")
 }
 
 /// The user's comments in `review`, as a draft's card lists them: where each
@@ -549,6 +598,9 @@ impl Gerdr {
                     DocFile::PlanChanges => {
                         Failed::Warning(format!("No final plan yet for \u{201c}{title}\u{201d}"))
                     }
+                    DocFile::Suggestions => {
+                        Failed::Warning(format!("No plan yet for \u{201c}{title}\u{201d}"))
+                    }
                     DocFile::DraftChanges(_, k) => {
                         Failed::Warning(format!("Draft {k} of {name} wasn't kept"))
                     }
@@ -680,6 +732,11 @@ impl Gerdr {
             }
             return self.make_fixes_now(&doc.project, &doc.slug);
         }
+        // The plan is approved already: what its suggestions come to is the
+        // final plan.
+        if doc.file == DocFile::Suggestions {
+            return self.write_final_plan(&doc.project, &doc.slug);
+        }
         self.approve_doc(&doc.project, &doc.slug, doc.file.stage());
     }
 
@@ -741,6 +798,10 @@ impl Gerdr {
         };
         if doc.file == DocFile::FixPlan {
             return self.fix_plan_send_back(&doc.project, &doc.slug, comments);
+        }
+        // The suggestions' notes go back to their reviewer.
+        if doc.file == DocFile::Suggestions {
+            return self.ask_reviewer(&doc.project, &doc.slug);
         }
         // What goes back is kept with the draft it is on, for its card.
         let sent: Vec<crate::feature::fix_round::Asked> = (self.wd())

@@ -83,6 +83,13 @@ pub struct Flag {
     /// It isn't a finding but a comment of the user's that went to Build: to
     /// see, not to decide or change. Its id is what the agent has it by.
     pub sent: bool,
+    /// Which stage's item it is: AI review's finding, or Plan review's
+    /// suggestion flagged in the plan. Its words come from it
+    /// (`review_items::words`), and its signals carry it.
+    pub of: crate::feature::review_items::ItemOf,
+    /// It can't be decided or changed now, and this says why (the final plan
+    /// is being written, the stage is done); none when it can.
+    pub frozen: Option<&'static str>,
 }
 
 /// A project's review.

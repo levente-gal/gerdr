@@ -177,24 +177,14 @@ pub const FIXED: &str = "That finding is fixed";
 /// dismissed), or back to undecided (from to fix); else why it does
 /// nothing.
 pub fn fix_key(state: FindingState) -> Result<Decision, &'static str> {
-    match state {
-        FindingState::Open | FindingState::Dismissed => Ok(Decision::Fix),
-        FindingState::Fix => Ok(Decision::Reopen),
-        FindingState::Sent => Err(SENT),
-        FindingState::Fixed => Err(FIXED),
-    }
+    super::review_items::want_key(super::review_items::ItemOf::Finding, state)
 }
 
 /// What Del does to a finding in `state`: `None` to ask why and dismiss it
 /// (from undecided or to fix), `Some` back to undecided (from dismissed);
 /// else why it does nothing.
 pub fn dismiss_key(state: FindingState) -> Result<Option<Decision>, &'static str> {
-    match state {
-        FindingState::Open | FindingState::Fix => Ok(None),
-        FindingState::Dismissed => Ok(Some(Decision::Reopen)),
-        FindingState::Sent => Err(SENT),
-        FindingState::Fixed => Err(FIXED),
-    }
+    super::review_items::refuse_key(super::review_items::ItemOf::Finding, state)
 }
 
 /// A review as the user last saw it, kept when the next one is read: the
@@ -242,7 +232,7 @@ fn is_zero(n: &u32) -> bool {
 /// Where `f` goes in a review's list, the findings of a run being stable
 /// within this: the user's own first, then by severity.
 pub fn list_rank(f: &Finding) -> (bool, Severity) {
-    (!f.yours, f.severity)
+    super::review_items::rank(f.yours, f.severity)
 }
 
 impl AiReview {
@@ -677,22 +667,14 @@ pub fn editable(f: &Finding) -> Result<(), String> {
 /// Whether a finding `id` standing at `state` can be reworded or commented
 /// on; else why not.
 pub fn editable_state(id: &str, state: FindingState) -> Result<(), String> {
-    match state {
-        FindingState::Open | FindingState::Fix => Ok(()),
-        FindingState::Dismissed => Err(format!("{id} is dismissed: reopen it first")),
-        FindingState::Sent => Err(format!("{id} was sent to Build: the next review checks it")),
-        FindingState::Fixed => Err(format!("{id} is fixed already")),
-    }
+    super::review_items::editable(super::review_items::ItemOf::Finding, id, state)
 }
 
 /// Whether a comment of the user's on a finding standing at `state` can be
 /// written, changed or deleted: a dismissed finding keeps its own, as saying
 /// why is part of dismissing. Else why not.
 pub fn note_editable(id: &str, state: FindingState) -> Result<(), String> {
-    match state {
-        FindingState::Dismissed => Ok(()),
-        state => editable_state(id, state),
-    }
+    super::review_items::note_editable(super::review_items::ItemOf::Finding, id, state)
 }
 
 /// Reword finding `id`'s fix to `fix`: a fix left as the reviewer's, or

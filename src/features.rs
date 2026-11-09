@@ -69,6 +69,11 @@ use smithay::{
 use crate::feature::manual::Verdict;
 use crate::machine_work::takes_a_place;
 use crate::manual_test::Row;
+pub(crate) use crate::review_cards::{
+    CardId, CardKey, Item, ItemAct, ReviewCard, can_decide, card_key, item_buttons, item_card,
+    items, items_count, next_open_card, note_actions, offers_fix_all, outcome_note, review_cards,
+    why_not_decide,
+};
 use crate::{
     Gerdr,
     agent_icons::AgentIcon,
@@ -90,8 +95,9 @@ use crate::{
         layout::{self, AddSpec, Created, Found, LinkSpec, Root},
         patch::{self, Reading},
         review_import::{
-            self, CodeRead, Decision, Finding as ReviewFinding, FindingState, ReviewRound, Severity,
+            self, CodeRead, Decision, Finding as ReviewFinding, FindingState, ReviewRound,
         },
+        review_items::ItemOf,
         ship::{self, Action, Planned, Probe},
         store,
         verify::PlannedCheck,
@@ -197,8 +203,6 @@ pub struct Features {
     /// What Build and Verify keep while gerdr runs (see `feature_build`).
     #[allow(dead_code)] // read by `feature_build` (inc 4 contract)
     pub(crate) build: crate::feature_build::BuildState,
-    /// The plan review's sheet, while it is open (see `plan_sheet`).
-    pub(crate) plan_sheet: Option<crate::plan_sheet::PlanSheet>,
     /// The acceptance criteria of each open feature's brief, by project
     /// and slug, as last read: none kept for a brief without.
     pub(crate) criteria: BTreeMap<(String, String), Vec<feature::manual::Criterion>>,
@@ -1567,8 +1571,10 @@ pub enum PanelOutcome {
     FoldCriterion(usize, bool),
     /// Open the criteria `.0` names (true), or fold them.
     FoldCriteria(crate::feature::manual::FoldScope, bool),
-    /// Open Plan review's suggestions, to decide them.
-    PlanSuggestions,
+    /// Open Plan review's suggestions, to decide them (the sheet, for now).
+    ReviewInPlan,
+    /// Do `.1` to Plan review's suggestion `.0`, from its card.
+    OnSuggestion(String, ItemAct),
     /// The suggestions are decided: start the final plan, or with nothing
     /// accepted, go on with the plan as it is.
     WriteFinalPlan,
@@ -2131,69 +2137,20 @@ fn plan_review_action(feature: &Feature) -> PanelOutcome {
         return PanelOutcome::SendPrompt(stage);
     }
     match crate::feature_plan_review::deciding(feature) {
-        Some(review) if review.open() > 0 => PanelOutcome::PlanSuggestions,
+        Some(review) if review.open() > 0 => PanelOutcome::ReviewInPlan,
         Some(_) => PanelOutcome::WriteFinalPlan,
         None => agent_action(feature, stage),
     }
 }
 
-/// The latest AI review's findings on `stage`'s page of `feature`, in their
-/// order: a decision leaves a card where it is (`AiReview::in_order`). They
-/// stay once sent, while the code changes and while the next review runs;
-/// `can_decide` says when they can be acted on.
-pub(crate) fn finding_cards(feature: &Feature, stage: Stage) -> Vec<&ReviewFinding> {
-    if stage != Stage::AiReview {
-        return Vec::new();
-    }
-    let Some(review) = feature.review.as_ref() else {
-        return Vec::new();
-    };
-    review.in_order()
-}
-
-/// A card of AI review's page that takes the keyboard.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ReviewCard<'a> {
-    Finding(&'a ReviewFinding),
-    /// A comment the user left in the diff.
-    DiffNote(&'a Comment),
-}
-
-impl<'a> ReviewCard<'a> {
-    fn finding(self) -> Option<&'a ReviewFinding> {
-        match self {
-            Self::Finding(f) => Some(f),
-            Self::DiffNote(_) => None,
-        }
-    }
-
-    fn diff_note(self) -> Option<&'a Comment> {
-        match self {
-            Self::Finding(_) => None,
-            Self::DiffNote(c) => Some(c),
-        }
-    }
-
-    /// What finds this card again when the list around it changes.
-    fn id(self) -> CardId {
-        match self {
-            Self::Finding(f) => CardId::Finding(f.id.clone()),
-            Self::DiffNote(c) => CardId::DiffNote(c.clone()),
-        }
-    }
-}
-
-/// Which card of AI review's page, whatever its index.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum CardId {
-    Finding(String),
-    DiffNote(Comment),
-}
-
 /// `notes`, the comments left in the diff, as far as `stage`'s page of
 /// `feature` lists them: those going with AI review's fixes. Once it is done
 /// they wait for Code review instead.
-fn shown_notes<'a>(feature: &Feature, stage: Stage, notes: &'a [Comment]) -> &'a [Comment] {
+pub(crate) fn shown_notes<'a>(
+    feature: &Feature,
+    stage: Stage,
+    notes: &'a [Comment],
+) -> &'a [Comment] {
     // Those that went to Build come after, and only Code review lists them.
     let own = notes.iter().take_while(|c| c.flag.is_none()).count();
     match stage {
@@ -2224,7 +2181,7 @@ fn can_add_comment(feature: &Feature, stage: Stage) -> bool {
 }
 
 /// Whether comment `c` left in `feature`'s diff can change on `stage`'s page.
-fn can_edit_note(feature: &Feature, stage: Stage, c: &Comment) -> bool {
+pub(crate) fn can_edit_note(feature: &Feature, stage: Stage, c: &Comment) -> bool {
     c.flag.is_none()
         && match stage {
             Stage::CodeReview => {
@@ -2252,38 +2209,6 @@ fn why_not_edit_note(feature: &Feature, stage: Stage, c: &Comment) -> Option<&'s
     })
 }
 
-/// The cards of `stage`'s page of `feature`, as `FeaturePanel::finding`
-/// counts them: the user's own items, the comments they left in the diff,
-/// then the reviewer's findings.
-pub(crate) fn review_cards<'a>(
-    feature: &'a Feature,
-    stage: Stage,
-    notes: &'a [Comment],
-) -> Vec<ReviewCard<'a>> {
-    let findings = finding_cards(feature, stage);
-    let own = findings.iter().take_while(|f| f.yours).count();
-    let (mine, theirs) = findings.split_at(own);
-    (mine.iter().map(|f| ReviewCard::Finding(f)))
-        .chain(
-            shown_notes(feature, stage, notes)
-                .iter()
-                .map(ReviewCard::DiffNote),
-        )
-        .chain(theirs.iter().map(|f| ReviewCard::Finding(f)))
-        .collect()
-}
-
-/// The next card after `from` still to decide, coming round past the last:
-/// `from` when no other is.
-fn next_open_card(cards: &[ReviewCard], from: usize) -> usize {
-    let n = cards.len();
-    let open = |i: &usize| (cards[*i].finding()).is_some_and(|f| f.state == FindingState::Open);
-    (from + 1..n)
-        .chain(0..from.min(n))
-        .find(open)
-        .unwrap_or(from)
-}
-
 /// The comments the user left in `feature`'s diff, as `probe` last read them.
 fn notes_of(probe: Option<&Probe>) -> &[Comment] {
     probe.map_or(&[], |p| p.docs.notes.as_slice())
@@ -2298,36 +2223,6 @@ fn earlier_reviews(feature: &Feature, stage: Stage) -> impl Iterator<Item = &Rev
         .flat_map(|review| review.rounds.iter().rev())
 }
 
-/// Why `stage`'s findings in `feature` can't be decided now, when they can't.
-fn why_not_decide(feature: &Feature, stage: Stage) -> Option<&'static str> {
-    if can_decide(feature, stage) {
-        return None;
-    }
-    Some(match stage_mark(feature, stage) {
-        StageMark::Later => "The code changed since this review: the next one checks it",
-        StageMark::Current => "A new review hasn't finished: decide once it's read",
-        StageMark::Done => "AI review is done: reopen it to change its findings",
-    })
-}
-
-/// Whether the findings on `stage`'s page of `feature` can be decided, and a
-/// comment of the user's added: AI review, current, its latest run read.
-fn can_decide(feature: &Feature, stage: Stage) -> bool {
-    stage == Stage::AiReview
-        && feature.status == Status::Open
-        && feature.current() == Some(stage)
-        && (feature.runs.get(&stage)).is_some_and(|r| r.ready.is_some())
-        && feature.review.is_some()
-}
-
-/// Whether `stage`'s page of `feature` can mark every undecided finding to
-/// fix at once.
-fn offers_fix_all(feature: &Feature, stage: Stage) -> bool {
-    can_decide(feature, stage)
-        && feature.fix_round.is_none()
-        && (feature.review.as_ref()).is_some_and(|r| r.count(FindingState::Open) > 0)
-}
-
 /// What sending AI review's findings on `stage`'s page is now, if it can
 /// be: with a fix plan open, the keys are the plan's.
 fn sends_findings(feature: &Feature, stage: Stage, ctx: RowCtx) -> Option<PanelOutcome> {
@@ -2336,83 +2231,11 @@ fn sends_findings(feature: &Feature, stage: Stage, ctx: RowCtx) -> Option<PanelO
         .filter(|o| matches!(o, PanelOutcome::SendFixes | PanelOutcome::MakeFindingFixes))
 }
 
-/// What Del does on an item of the user's own: it goes, with nothing to tell
-/// themselves, unless it went to Build.
-fn delete_own_outcome(f: &ReviewFinding) -> PanelOutcome {
-    match f.state {
-        FindingState::Sent => PanelOutcome::FindingRefused(review_import::SENT),
-        FindingState::Fixed => PanelOutcome::FindingRefused(review_import::FIXED),
-        _ => PanelOutcome::DeleteOwnFinding(f.id.clone()),
-    }
-}
-
-/// The buttons on `f`'s card: what can be decided of it while AI review is
-/// `current`, and showing it in the diff when it has a file.
-fn finding_buttons(f: &ReviewFinding, current: bool) -> Vec<(PageButton, PanelOutcome)> {
-    let button = |label: &str, style| PageButton {
-        label: label.to_owned(),
-        style,
-    };
-    let plain = |label: &str| button(label, ButtonStyle::Plain);
-    let id = || f.id.clone();
-    let mut out = Vec::new();
-    let undecided = matches!(f.state, FindingState::Open | FindingState::Fix);
-    if current {
-        match f.state {
-            FindingState::Open => {
-                out.push((
-                    plain("Fix"),
-                    PanelOutcome::DecideFinding(id(), Decision::Fix),
-                ));
-            }
-            FindingState::Fix if !f.yours => {
-                let back = PanelOutcome::DecideFinding(id(), Decision::Reopen);
-                out.push((plain("Don't fix"), back));
-            }
-            FindingState::Dismissed => {
-                let back = PanelOutcome::DecideFinding(id(), Decision::Reopen);
-                out.push((plain("Reopen"), back));
-            }
-            _ => {}
-        }
-        // What the user says of it goes in a comment, on the card; a dismissed
-        // finding keeps that open too.
-        if !f.yours && (undecided || f.state == FindingState::Dismissed) {
-            let label = if f.note.is_empty() { "Comment" } else { "Edit" };
-            out.push((plain(label), PanelOutcome::CommentFinding(id())));
-            if !f.note.is_empty() {
-                out.push((plain("Delete"), PanelOutcome::DeleteFindingComment(id())));
-            }
-        }
-        if undecided {
-            let edit = if f.yours {
-                "Edit\u{2026}"
-            } else {
-                "Edit fix\u{2026}"
-            };
-            out.push((plain(edit), PanelOutcome::EditFinding(id())));
-            if !f.yours {
-                out.push((plain("Dismiss\u{2026}"), PanelOutcome::AskDismiss(id())));
-            }
-        }
-        if f.yours && (undecided || f.state == FindingState::Dismissed) {
-            out.push((plain("Delete"), delete_own_outcome(f)));
-        }
-    }
-    if !f.file.is_empty() {
-        out.push((
-            button("Show in diff", ButtonStyle::Quiet),
-            PanelOutcome::ShowFinding(id()),
-        ));
-    }
-    out
-}
-
 /// What `stage`'s page of `feature` offers of the reviews it shows: their
 /// findings' buttons, and showing each earlier one.
 fn review_actions(feature: &Feature, stage: Stage) -> Vec<(PageButton, PanelOutcome)> {
     let decides = can_decide(feature, stage);
-    let cards = finding_cards(feature, stage).into_iter();
+    let cards = items(feature, stage).into_iter();
     let shows = earlier_reviews(feature, stage).map(|round| {
         let label = "Show".to_owned();
         let style = ButtonStyle::Plain;
@@ -2421,66 +2244,9 @@ fn review_actions(feature: &Feature, stage: Stage) -> Vec<(PageButton, PanelOutc
             PanelOutcome::FoldRound(round.n),
         )
     });
-    (cards.flat_map(|f| finding_buttons(f, decides)))
+    (cards.flat_map(|item| item_buttons(item, decides)))
         .chain(shows)
         .collect()
-}
-
-/// The finding a card's button acts on.
-fn outcome_finding(outcome: &PanelOutcome) -> Option<&str> {
-    match outcome {
-        PanelOutcome::DecideFinding(id, _)
-        | PanelOutcome::AskDismiss(id)
-        | PanelOutcome::EditFinding(id)
-        | PanelOutcome::CommentFinding(id)
-        | PanelOutcome::DeleteFindingComment(id)
-        | PanelOutcome::DeleteOwnFinding(id)
-        | PanelOutcome::ShowFinding(id) => Some(id),
-        _ => None,
-    }
-}
-
-/// The comment in the diff a card's button acts on.
-fn outcome_note(outcome: &PanelOutcome) -> Option<&Comment> {
-    match outcome {
-        PanelOutcome::EditDiffNote(c)
-        | PanelOutcome::DeleteDiffNote(c)
-        | PanelOutcome::ShowDiffNote(c) => Some(c),
-        _ => None,
-    }
-}
-
-/// The buttons on the cards of `notes`, comments left in the diff: changing
-/// one as AI review's findings can be decided, showing one that has a place.
-fn note_actions(
-    feature: &Feature,
-    stage: Stage,
-    notes: &[Comment],
-) -> Vec<(PageButton, PanelOutcome)> {
-    let button = |label: &str, style| PageButton {
-        label: label.to_owned(),
-        style,
-    };
-    let mut out = Vec::new();
-    for c in shown_notes(feature, stage, notes) {
-        if can_edit_note(feature, stage, c) {
-            out.push((
-                button("Edit\u{2026}", ButtonStyle::Plain),
-                PanelOutcome::EditDiffNote(c.clone()),
-            ));
-            out.push((
-                button("Delete", ButtonStyle::Plain),
-                PanelOutcome::DeleteDiffNote(c.clone()),
-            ));
-        }
-        if !crate::review::is_general(c) {
-            out.push((
-                button("Show in diff", ButtonStyle::Quiet),
-                PanelOutcome::ShowDiffNote(c.clone()),
-            ));
-        }
-    }
-    out
 }
 
 /// The card a note is being written on (`FeaturePanel::note`).
@@ -2488,8 +2254,13 @@ fn note_actions(
 pub enum CardNote {
     /// A criterion, as `FeaturePanel::finding` counts them.
     Criterion(usize),
-    /// A finding, by its id: the user's comment on it.
-    Finding(String),
+    /// An item of a review stage, by its kind and id: the user's comment
+    /// on it, a question's answer; `accept`: accept it once saved.
+    Item {
+        of: ItemOf,
+        id: String,
+        accept: bool,
+    },
 }
 
 /// `stage`'s checks in `feature`, as its page lists them: Verify's only.
@@ -3110,85 +2881,6 @@ fn checks_heading(cards: &[FindingCard]) -> String {
     out
 }
 
-/// `f`'s card on AI review's page, its buttons those in `actions`.
-fn finding_card(
-    f: &ReviewFinding,
-    multi: bool,
-    actions: &[(PageButton, PanelOutcome)],
-) -> FindingCard {
-    let tag = match (f.yours, f.severity) {
-        (true, _) => FindingTag::Yours,
-        (_, Severity::High) => FindingTag::High,
-        (_, Severity::Medium) => FindingTag::Medium,
-        (_, Severity::Low) => FindingTag::Low,
-    };
-    let state = match f.state {
-        FindingState::Open => String::new(),
-        FindingState::Fix => "to fix".to_owned(),
-        FindingState::Sent if f.made => "fix made".to_owned(),
-        FindingState::Sent => "sent to Build".to_owned(),
-        FindingState::Fixed => "fixed".to_owned(),
-        FindingState::Dismissed => format!("dismissed: {}", f.reason),
-    };
-    let mut place = vec![f.id.clone()];
-    if !f.file.is_empty() {
-        place.push(review_import::location(f, multi));
-        if !f.placed {
-            place.push("not in the diff".to_owned());
-        }
-    }
-    let fix = match &f.my_fix {
-        Some(fix) => format!("Your fix: {fix}"),
-        None if f.fix.is_empty() => String::new(),
-        None => format!("Fix: {}", f.fix),
-    };
-    // Its card shows this much while closed: the comment is behind it.
-    let state = match f.state == FindingState::Dismissed && !f.note.is_empty() {
-        true => format!("{state} \u{b7} commented"),
-        false => state,
-    };
-    // With a comment, the buttons on it sit on its card.
-    let on_comment = |o: &PanelOutcome| {
-        !f.note.is_empty()
-            && matches!(
-                o,
-                PanelOutcome::CommentFinding(_) | PanelOutcome::DeleteFindingComment(_)
-            )
-    };
-    let held = |comment: bool| -> Vec<usize> {
-        (actions.iter().enumerate())
-            .filter(|(_, (_, o))| outcome_finding(o) == Some(f.id.as_str()))
-            .filter(|(_, (_, o))| on_comment(o) == comment)
-            .map(|(i, _)| i)
-            .collect()
-    };
-    FindingCard {
-        tag,
-        title: f.title.clone(),
-        state,
-        place: place.join(" \u{b7} "),
-        body: f.body.clone(),
-        preview: Vec::new(),
-        fix,
-        note: String::new(),
-        comment: f.note.clone(),
-        comment_buttons: held(true),
-        made: f.fix_made(),
-        faded: matches!(f.state, FindingState::Fixed | FindingState::Dismissed),
-        collapsed: matches!(f.state, FindingState::Fixed | FindingState::Dismissed),
-        stripe: match f.state {
-            FindingState::Fix => Some(CardStripe::ToFix),
-            FindingState::Sent => Some(CardStripe::Sent),
-            _ => None,
-        },
-        field: None,
-        field_hint: "Your comment",
-        selected: false,
-        sheet: None,
-        buttons: held(false),
-    }
-}
-
 /// Where comment `c` of the diff is, in a few words: `api/src/a.rs:12`; the
 /// repository left out for a feature over one (`multi` false).
 fn note_place(c: &Comment, multi: bool) -> String {
@@ -3291,7 +2983,7 @@ fn round_count(round: &ReviewRound) -> String {
 
 /// A finding of an earlier review: a record, with nothing to do on it.
 fn round_card(f: &ReviewFinding, multi: bool) -> FindingCard {
-    let mut card = finding_card(f, multi, &[]);
+    let mut card = item_card(Item::Finding(f), multi, &[]);
     card.faded = true;
     card.made = false;
     // Nothing can select it, so nothing could open it again.
@@ -3492,7 +3184,7 @@ fn action_hint(action: &PanelOutcome) -> &'static str {
         PanelOutcome::Manual(crate::manual_test::Outcome::MarkPassed) => "mark passed",
         PanelOutcome::Manual(crate::manual_test::Outcome::SendFailures) => "plan fixes",
         PanelOutcome::Manual(crate::manual_test::Outcome::MakeFixes) => "make fixes",
-        PanelOutcome::PlanSuggestions => "decide",
+        PanelOutcome::ReviewInPlan => "decide",
         PanelOutcome::WriteFinalPlan => "go on",
         PanelOutcome::Tick => "mark done",
         PanelOutcome::Ship => "ship\u{2026}",
@@ -3523,7 +3215,7 @@ fn stage_button(feature: &Feature, stage: Stage, ctx: RowCtx) -> Option<&'static
         PanelOutcome::SendFixes => Some("Plan fixes"),
         PanelOutcome::MakeFindingFixes => Some("Make fixes"),
         PanelOutcome::CodeReview => Some("Review code"),
-        PanelOutcome::PlanSuggestions => Some("Decide\u{2026}"),
+        PanelOutcome::ReviewInPlan => Some("Decide\u{2026}"),
         PanelOutcome::WriteFinalPlan => {
             let accepted = (feature.plan_review.as_ref()).is_some_and(|r| r.any_accepted());
             Some(if accepted {
@@ -4212,6 +3904,25 @@ impl FeaturePanel {
         }
     }
 
+    /// `key` on the item's card with the keyboard, of `cards` (see
+    /// `review_cards::card_key`): `armed` is what the last press armed.
+    fn card_key(
+        &mut self,
+        key: CardKey,
+        cards: &[ReviewCard],
+        refused: Option<&'static str>,
+        armed: Option<&str>,
+    ) -> Option<PanelOutcome> {
+        card_key(
+            key,
+            cards,
+            &mut self.finding,
+            refused,
+            armed,
+            &mut self.armed,
+        )
+    }
+
     /// Handle a key over `feature`, one of `slugs` listed.
     #[allow(clippy::too_many_arguments)]
     fn key(
@@ -4268,7 +3979,7 @@ impl FeaturePanel {
             self.focus = TabArea::Stages;
         }
         let on = cards.get(self.finding).copied();
-        let card = on.and_then(ReviewCard::finding);
+        let card = on.and_then(ReviewCard::item);
         let diff_note = on.and_then(ReviewCard::diff_note);
         let ctrl = mods.ctrl && !mods.alt && !mods.logo;
         let plain = !(mods.ctrl || mods.alt || mods.logo);
@@ -4520,18 +4231,7 @@ impl FeaturePanel {
                 ));
             }
             Keysym::f | Keysym::F if bare && self.focus == TabArea::Findings => {
-                let f = card?;
-                if let Some(why) = refused {
-                    return Some(PanelOutcome::FindingRefused(why));
-                }
-                // Decided, the keyboard goes on to what is left to decide.
-                if f.state == FindingState::Open {
-                    self.finding = next_open_card(&cards, self.finding);
-                }
-                return Some(match review_import::fix_key(f.state) {
-                    Ok(decision) => PanelOutcome::DecideFinding(f.id.clone(), decision),
-                    Err(why) => PanelOutcome::FindingRefused(why),
-                });
+                return self.card_key(CardKey::F, &cards, refused, armed.as_deref());
             }
             Keysym::e | Keysym::E
                 if ctrl
@@ -4580,61 +4280,25 @@ impl FeaturePanel {
                     (false, _) => PanelOutcome::ShowDiffNote(c.clone()),
                 });
             }
+            // An item's card: the same keys for either kind (`card_key`).
             Keysym::e | Keysym::E if ctrl && !mods.shift && self.focus == TabArea::Findings => {
-                let f = card?;
-                return Some(match refused {
-                    Some(why) => PanelOutcome::FindingRefused(why),
-                    None => PanelOutcome::EditFinding(f.id.clone()),
-                });
+                return self.card_key(CardKey::CtrlE, &cards, refused, armed.as_deref());
             }
             Keysym::c | Keysym::C
-                if bare && self.focus == TabArea::Findings && card.is_some_and(|f| !f.yours) =>
+                if bare && self.focus == TabArea::Findings && card.is_some_and(|i| !i.yours()) =>
             {
-                let f = card?;
-                return Some(match refused {
-                    Some(why) => PanelOutcome::FindingRefused(why),
-                    None => PanelOutcome::CommentFinding(f.id.clone()),
-                });
+                return self.card_key(CardKey::C, &cards, refused, armed.as_deref());
             }
             Keysym::Delete | Keysym::KP_Delete
                 if plain && mods.shift && self.focus == TabArea::Findings && card.is_some() =>
             {
-                let f = card.filter(|f| !f.note.is_empty())?;
-                return Some(match refused {
-                    Some(why) => PanelOutcome::FindingRefused(why),
-                    None => PanelOutcome::DeleteFindingComment(f.id.clone()),
-                });
+                return self.card_key(CardKey::ShiftDel, &cards, refused, armed.as_deref());
             }
             Keysym::Delete | Keysym::KP_Delete if bare && self.focus == TabArea::Findings => {
-                let f = card?;
-                if let Some(why) = refused {
-                    return Some(PanelOutcome::FindingRefused(why));
-                }
-                if f.yours {
-                    let outcome = delete_own_outcome(f);
-                    let key = format!("own:{}", f.id);
-                    // As a comment left in the diff: the first press arms it.
-                    if matches!(outcome, PanelOutcome::DeleteOwnFinding(_))
-                        && armed.as_ref() != Some(&key)
-                    {
-                        self.armed = Some(key);
-                        return None;
-                    }
-                    return Some(outcome);
-                }
-                return Some(match review_import::dismiss_key(f.state) {
-                    Ok(None) => PanelOutcome::AskDismiss(f.id.clone()),
-                    Ok(Some(decision)) => PanelOutcome::DecideFinding(f.id.clone(), decision),
-                    Err(why) => PanelOutcome::FindingRefused(why),
-                });
+                return self.card_key(CardKey::Del, &cards, refused, armed.as_deref());
             }
             Keysym::Return | Keysym::KP_Enter if plain && self.focus == TabArea::Findings => {
-                let f = card?;
-                return Some(match (f.file.is_empty(), refused) {
-                    (true, Some(why)) => PanelOutcome::FindingRefused(why),
-                    (true, None) => PanelOutcome::EditFinding(f.id.clone()),
-                    (false, _) => PanelOutcome::ShowFinding(f.id.clone()),
-                });
+                return self.card_key(CardKey::Enter, &cards, refused, armed.as_deref());
             }
             Keysym::c | Keysym::C
                 if bare && self.focus != TabArea::Repos && can_add_comment(feature, stage) =>
@@ -5336,7 +5000,7 @@ fn writers_page_actions(
         out.push((button("Approve", ButtonStyle::Plain), approve));
     }
     if plan_review_open(feature, stage) {
-        let suggestions = PanelOutcome::PlanSuggestions;
+        let suggestions = PanelOutcome::ReviewInPlan;
         let decided = crate::feature_plan_review::deciding(feature).is_some();
         if decided && !has(&out, &suggestions) {
             out.push((button("Decide\u{2026}", ButtonStyle::Plain), suggestions));
@@ -5664,7 +5328,7 @@ impl Gerdr {
                 self.show_error(format!("Couldn't save \u{201c}{title}\u{201d}: {err}"));
             }
         }
-        self.plan_sheet_follows();
+        self.plan_doc_follows();
         self.feature_diff_stands(project, slug);
     }
 
@@ -6530,7 +6194,7 @@ impl Gerdr {
 
     /// Probe what is due.
     fn feature_watch_tick(&mut self) {
-        self.plan_sheet_follows();
+        self.plan_doc_follows();
         let mut due = Vec::new();
         if let Some(panel) = &self.features.panel {
             due.push((panel.project.clone(), panel.slug.clone(), PANEL_EVERY));
@@ -7940,7 +7604,7 @@ impl Gerdr {
                 .and_then(crate::feature_plan_review::deciding)
                 .is_some_and(|r| r.open() > 0);
         if deciding {
-            self.open_plan_sheet(project, slug);
+            self.review_in_plan(project, slug);
         }
         let testing = stage == Stage::ManualTest
             && self
@@ -8311,7 +7975,8 @@ impl Gerdr {
             PanelOutcome::Manual(outcome) => self.apply_manual_test(outcome),
             PanelOutcome::FoldCriterion(i, open) => self.fold_criterion(i, open),
             PanelOutcome::FoldCriteria(scope, open) => self.fold_criteria(scope, open),
-            PanelOutcome::PlanSuggestions => self.open_plan_sheet(&project, &slug),
+            PanelOutcome::ReviewInPlan => self.review_in_plan(&project, &slug),
+            PanelOutcome::OnSuggestion(id, act) => self.apply_suggestion(&project, &slug, &id, act),
             PanelOutcome::WriteFinalPlan => self.write_final_plan(&project, &slug),
             PanelOutcome::SkipPlanReview => self.ask_skip_plan_review(&project, &slug),
             PanelOutcome::ChangeDecisions => self.ask_change_decisions(&project, &slug),
@@ -9602,7 +9267,22 @@ impl Gerdr {
                 (Some(PanelOutcome::Manual(Outcome::Write(i))), Some(CardNote::Criterion(at))) => {
                     i == at
                 }
-                (Some(PanelOutcome::CommentFinding(id)), Some(CardNote::Finding(at))) => id == at,
+                (
+                    Some(PanelOutcome::CommentFinding(id)),
+                    Some(CardNote::Item {
+                        of: ItemOf::Finding,
+                        id: at,
+                        ..
+                    }),
+                ) => id == at,
+                (
+                    Some(PanelOutcome::OnSuggestion(id, ItemAct::Comment)),
+                    Some(CardNote::Item {
+                        of: ItemOf::Suggestion,
+                        id: at,
+                        ..
+                    }),
+                ) => id == at,
                 _ => false,
             };
             let picked = (self.features.panel.as_ref()).map(|p| p.finding);
@@ -11599,31 +11279,6 @@ fn findings_lines(feature: &Feature) -> Vec<CheckLine> {
         .collect()
 }
 
-/// How AI review's findings in `feature` stand, in a few words: "4 to
-/// decide · 1 to fix".
-fn findings_count(feature: &Feature) -> String {
-    let Some(review) = feature.review.as_ref() else {
-        return String::new();
-    };
-    let shown = review.shown();
-    let count = |of: &dyn Fn(&ReviewFinding) -> bool| shown.iter().filter(|f| of(f)).count();
-    let state = |state| count(&|f| f.state == state);
-    let made = count(&|f| f.fix_made());
-    let said = |n: usize, what: &str| (n > 0).then(|| format!("{n} {what}"));
-    [
-        said(state(FindingState::Open), "to decide"),
-        said(state(FindingState::Fix), "to fix"),
-        said(state(FindingState::Sent) - made, "sent to Build"),
-        (made > 0).then(|| review_import::fixes_made_words(made)),
-        said(state(FindingState::Fixed), "fixed"),
-        said(state(FindingState::Dismissed), "dismissed"),
-    ]
-    .into_iter()
-    .flatten()
-    .collect::<Vec<_>>()
-    .join(" \u{b7} ")
-}
-
 /// The milestones of `stage`'s file (Build's: nothing ticks a plan's) by
 /// name, as `probe` last read them; none while it has none.
 fn milestones_of(probe: Option<&Probe>, stage: Stage, at_work: bool) -> Option<PageSection> {
@@ -12844,7 +12499,7 @@ fn review_sections(
         sections.push(lines("Findings", findings_lines(feature)));
     } else {
         // Only comments of the user's left: no finding to count.
-        let label = match findings_count(feature) {
+        let label = match items_count(feature, stage) {
             count if count.is_empty() => "Findings".to_owned(),
             count => format!("Findings \u{b7} {count}"),
         };
@@ -12870,7 +12525,7 @@ fn review_sections(
         sections.push(lines(&label, notes));
         sections.extend(cards.into_iter().map(|card| {
             PageSection::Finding(match card {
-                ReviewCard::Finding(f) => finding_card(f, multi, actions),
+                ReviewCard::Item(item) => item_card(item, multi, actions),
                 ReviewCard::DiffNote(c) => note_card(c, multi, actions),
             })
         }));
@@ -13443,7 +13098,7 @@ fn writers_tab_hints(
         let esc = if empty { "cancel" } else { "save" };
         // Emptied, a finding's comment goes.
         let enter = match (on, empty) {
-            (CardNote::Finding(_), true) => "delete",
+            (CardNote::Item { .. }, true) => "delete",
             _ => "save",
         };
         return vec![
@@ -14069,7 +13724,7 @@ fn tab_view(
                 }
             }
             // The live card, before those of earlier reviews with its id.
-            CardNote::Finding(id) => {
+            CardNote::Item { id, .. } => {
                 let card = cards.find(|c| c.place.split(" \u{b7} ").next() == Some(id.as_str()));
                 if let Some(card) = card.filter(|_| can_decide(feature, stage)) {
                     card.collapsed = false;
@@ -16099,10 +15754,7 @@ pub(crate) mod tests {
         };
         plan_review::import(&mut review, 1, plan_review::parse(text).unwrap());
         f.plan_review = Some(review);
-        assert_eq!(
-            page_enter(&f, stage, ctx),
-            Some(PanelOutcome::PlanSuggestions)
-        );
+        assert_eq!(page_enter(&f, stage, ctx), Some(PanelOutcome::ReviewInPlan));
         assert_eq!(
             names(&f),
             ["Decide\u{2026}", "Skip review", "Start over\u{2026}"]
@@ -16127,8 +15779,8 @@ pub(crate) mod tests {
         );
         // All rejected: nothing for a final plan to add.
         let review = f.plan_review.as_mut().unwrap();
-        plan_review::decide(review, "r1-1", Decision::Reject).unwrap();
-        plan_review::decide(review, "r1-2", Decision::Reject).unwrap();
+        plan_review::decide(review, "r1-1", Decision::Reject("No".into())).unwrap();
+        plan_review::decide(review, "r1-2", Decision::Reject("No".into())).unwrap();
         assert_eq!(
             page_enter(&f, stage, ctx),
             Some(PanelOutcome::WriteFinalPlan)
@@ -16145,7 +15797,7 @@ pub(crate) mod tests {
         assert_eq!(rail_node(&f, stage, &state, 2_000).line, "all decided");
         // One accepted: a final plan.
         let review = f.plan_review.as_mut().unwrap();
-        plan_review::set_note(review, "r1-1", "This one");
+        plan_review::set_note(review, "r1-1", "This one").unwrap();
         plan_review::decide(review, "r1-1", Decision::Accept).unwrap();
         assert_eq!(names(&f)[0], "Write final plan");
         // Being written: its agent's page, and a way back.
@@ -18697,9 +18349,12 @@ pub(crate) mod tests {
                 ("raised again", false),
             ]
         );
-        assert_eq!(findings_count(&f), "1 sent to Build \u{b7} 1 fix made");
+        assert_eq!(
+            items_count(&f, Stage::AiReview),
+            "1 sent to Build \u{b7} 1 fix made"
+        );
         f.review.as_mut().unwrap().findings[0].made = true;
-        assert_eq!(findings_count(&f), "2 fixes made");
+        assert_eq!(items_count(&f, Stage::AiReview), "2 fixes made");
         // Only the next review can call it fixed: it still holds AI review up.
         assert_eq!(f.review.as_ref().unwrap().open(), 2);
     }
@@ -18810,8 +18465,8 @@ pub(crate) mod tests {
         use FindingState as S;
         let mut f = carded(&[S::Open, S::Open, S::Open]);
         let review = f.review.as_mut().unwrap();
-        review.findings[0].severity = Severity::Low;
-        review.findings[1].severity = Severity::High;
+        review.findings[0].severity = review_import::Severity::Low;
+        review.findings[1].severity = review_import::Severity::High;
         review_import::add(review, "Mine").unwrap();
         let notes = [note("src/a.rs", "From the diff")];
         let probe = probe_with(notes.to_vec());

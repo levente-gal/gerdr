@@ -1551,7 +1551,6 @@ impl Gerdr {
             Overlay::Machine => self.machine_field_mut(),
             Overlay::Commands => self.commands_field_mut(),
             Overlay::PlanSheet => self
-                .features
                 .plan_sheet
                 .as_mut()?
                 .editing

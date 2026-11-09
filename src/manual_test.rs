@@ -33,6 +33,7 @@ use crate::{
     feature::{
         self, Feature, Stage, Status, artifacts,
         manual::{self, Criterion, Verdict},
+        review_items::ItemOf,
         store,
     },
     features::{CardNote, plural},
@@ -731,11 +732,17 @@ impl Gerdr {
             return false;
         };
         // A criterion's note is written wherever they can be marked.
-        let (stage, writes) = match panel.note {
-            Some((CardNote::Finding(_), _)) => (
-                Stage::AiReview,
-                feature.status == Status::Open && feature.current() == Some(Stage::AiReview),
-            ),
+        let (stage, writes) = match &panel.note {
+            Some((CardNote::Item { of, .. }, _)) => {
+                let stage = match of {
+                    ItemOf::Finding => Stage::AiReview,
+                    ItemOf::Suggestion => Stage::PlanReview,
+                };
+                (
+                    stage,
+                    feature.status == Status::Open && feature.current() == Some(stage),
+                )
+            }
             _ => (
                 Stage::ManualTest,
                 crate::features::marks_criteria(feature, Stage::ManualTest),
@@ -766,7 +773,7 @@ impl Gerdr {
             return false;
         };
         let finding = match on {
-            CardNote::Finding(id) => Some(id.clone()),
+            CardNote::Item { of, id, .. } => Some((*of, id.clone())),
             CardNote::Criterion(_) => None,
         };
         let enter = matches!(sym, Keysym::Return | Keysym::KP_Enter);
@@ -778,7 +785,7 @@ impl Gerdr {
         match sym {
             Keysym::Return | Keysym::KP_Enter if field.trim().is_empty() => match finding {
                 // Emptied, it goes; nothing there, there is nothing to do.
-                Some(id) => {
+                Some((of, id)) => {
                     let panel = self.features.panel.as_mut();
                     let Some((project, slug)) = panel.map(|p| {
                         p.note = None;
@@ -786,7 +793,10 @@ impl Gerdr {
                     }) else {
                         return true;
                     };
-                    self.delete_finding_comment(&project, &slug, &id);
+                    match of {
+                        ItemOf::Finding => self.delete_finding_comment(&project, &slug, &id),
+                        ItemOf::Suggestion => self.note_suggestion(&project, &slug, &id, ""),
+                    }
                 }
                 None => self.show_warning(NO_NOTE.into()),
             },
@@ -816,11 +826,18 @@ impl Gerdr {
         if !note.is_empty() {
             match on {
                 CardNote::Criterion(i) => self.apply_manual_test(Outcome::Fail(i, note)),
-                CardNote::Finding(id) => {
+                CardNote::Item { of, id, .. } => {
                     let names =
                         (self.features.panel.as_ref()).map(|p| (p.project.clone(), p.slug.clone()));
                     if let Some((project, slug)) = names {
-                        self.note_finding(&project, &slug, &id, &note);
+                        match of {
+                            ItemOf::Finding => {
+                                self.note_finding(&project, &slug, &id, &note);
+                            }
+                            ItemOf::Suggestion => {
+                                self.note_suggestion(&project, &slug, &id, &note);
+                            }
+                        }
                     }
                 }
             }

@@ -140,6 +140,7 @@ impl DocOf {
             DocFile::FixPlan => "Fix plan",
             DocFile::PlanChanges => "Plan changes",
             DocFile::DraftChanges(..) => "Draft changes",
+            DocFile::Suggestions => "Suggestions",
             DocFile::Stage(Stage::Plan) => "Plan",
             DocFile::Stage(Stage::PlanReview) => "Final plan",
             DocFile::Stage(_) => "Brief",
