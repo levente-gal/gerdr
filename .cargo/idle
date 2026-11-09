@@ -1,0 +1,18 @@
+#!/bin/sh
+# Runs a build or test step at SCHED_IDLE: it gets only CPU time nothing
+# else wants, so a build or test run on all cores leaves the desktop and
+# a live gerdr responsive, yet runs at full speed on an idle machine.
+# Children (the linker, LTO threads, test threads) inherit the policy.
+#
+# Cargo calls this as `rustc-wrapper` (first argument is rustc) and as the
+# target `runner` (first argument is the binary). Test binaries, under
+# `deps/`, run idle; `cargo run` of gerdr itself keeps normal priority.
+# GERDR_BUILD_PRIORITY=normal turns it off for one command.
+case "$1" in
+*/deps/*) ;;
+target/* | */target/*) exec "$@" ;;
+esac
+if [ "${GERDR_BUILD_PRIORITY:-idle}" = idle ] && command -v chrt >/dev/null; then
+	exec chrt --idle 0 "$@"
+fi
+exec "$@"

@@ -54,14 +54,20 @@ impl Canvas {
     pub(super) fn fill(&mut self, x: i32, y: i32, w: i32, h: i32, [r, g, b]: Rgb) {
         let [left, top, right, bottom] = self.bounds();
         let (x0, x1) = (x.max(left), (x + w).min(right));
-        if x0 >= x1 {
+        let (y0, y1) = (y.max(top), (y + h).min(bottom));
+        if x0 >= x1 || y0 >= y1 {
             return;
         }
-        for py in y.max(top)..(y + h).min(bottom) {
-            let row = ((py * self.w + x0) * 4) as usize..((py * self.w + x1) * 4) as usize;
-            for pixel in self.px[row].as_chunks_mut::<4>().0 {
-                pixel.copy_from_slice(&[b, g, r, 0xff]);
-            }
+        // The first row pixel by pixel, the others copied from it: a copy
+        // per pixel is a call to memmove each, slow over a whole buffer.
+        let at = |py: i32| ((py * self.w + x0) * 4) as usize;
+        let span = ((x1 - x0) * 4) as usize;
+        let first = at(y0);
+        for pixel in self.px[first..first + span].as_chunks_mut::<4>().0 {
+            *pixel = [b, g, r, 0xff];
+        }
+        for py in y0 + 1..y1 {
+            self.px.copy_within(first..first + span, at(py));
         }
     }
 

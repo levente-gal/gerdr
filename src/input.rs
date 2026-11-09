@@ -1508,8 +1508,8 @@ impl Gerdr {
             return chrome::commands_field_at(&self.commands_view()?, size, scale, pos, held);
         }
         let spot = self.field_spot()?;
-        // A card's note holds lines.
-        if self.text_overlay() == Some(Overlay::Features) {
+        // A card's note holds lines, as the criteria strip's does.
+        if matches!(self.text_overlay(), Some(Overlay::Features | Overlay::Criteria)) {
             return Some(chrome::field_line_spot(
                 spot.area,
                 spot.area,

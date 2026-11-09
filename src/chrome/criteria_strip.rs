@@ -10,8 +10,8 @@
 
 use super::{
     BUTTON_RADIUS, ButtonStyle, Canvas, FOCUS_RING, FONT_SIZE, FieldSpot, POPUP_RADIUS, Painter,
-    Palette, ROW_BUTTON, Rect, Rgb, SHADOW, SMALL_FONT_SIZE, band, button_width, chevron_down,
-    chevron_side, field_text, icon_sdf, measure, rect_px,
+    Palette, QUIT_BUTTON, ROW_BUTTON, Rect, Rgb, SHADOW, SMALL_FONT_SIZE, band, button_width,
+    chevron_down, chevron_side, field_lines_height, field_text, icon_sdf, measure, rect_px,
 };
 use crate::text_field::Line;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
@@ -27,9 +27,8 @@ const INSET: i32 = 8;
 /// The gap between buttons, and before the ones at the right end.
 const GAP: i32 = 6;
 const GROUP_GAP: i32 = 12;
-/// A line of its steps or note, and the field the note is written in.
+/// A line of its steps or note.
 const LINE: i32 = 20;
-const FIELD: i32 = 32;
 /// The room for the dot before the criterion's id.
 const DOT_ROOM: i32 = 14;
 /// The folded chip: its height, and the room for its chevron.
@@ -252,10 +251,10 @@ pub fn criteria_strip_layout(view: &CriteriaStripView) -> StripLayout {
             texts.push((line, true));
         }
     }
-    let field_h = match view.field {
-        Some(_) => FIELD + GAP,
-        None => 0,
-    };
+    // The note's field holds its lines, as a card's on the page does.
+    let field_lines =
+        (view.field.as_ref()).map(|line| field_lines_height(line.text.split('\n').count()));
+    let field_h = field_lines.map_or(0, |h| h + GAP);
     let lines_h = texts.len() as i32 * LINE;
     let top_room = match lines_h + field_h {
         0 => 0,
@@ -289,13 +288,15 @@ pub fn criteria_strip_layout(view: &CriteriaStripView) -> StripLayout {
     let mut hits = Vec::new();
     let mut field = None;
     let mut shots = None;
-    if view.field.is_some() {
-        let fy = bottom_row - FIELD - GAP / 2;
+    if let Some(fh) = field_lines {
+        let fy = bottom_row - fh - GAP / 2;
+        // The buttons and the count by its last line, over the row.
+        let last = fy + fh - QUIT_BUTTON;
         let done_w = button_width("Done");
         let shot_w = button_width("Screenshot");
         let bx = |w: i32, right: i32| {
             Rectangle::new(
-                (right - w, fy + (FIELD - ROW_BUTTON) / 2).into(),
+                (right - w, last + (QUIT_BUTTON - ROW_BUTTON) / 2).into(),
                 (w, ROW_BUTTON).into(),
             )
         };
@@ -307,11 +308,11 @@ pub fn criteria_strip_layout(view: &CriteriaStripView) -> StripLayout {
             true => 0,
             false => (width(&view.shots, SMALL_FONT_SIZE).ceil() as i32 + GAP).min(fw / 3),
         };
-        let f = Rectangle::new((x0, fy).into(), ((fw - label).max(0), FIELD).into());
+        let f = Rectangle::new((x0, fy).into(), ((fw - label).max(0), fh).into());
         if label > 0 {
             shots = Some(Rectangle::new(
-                (f.loc.x + f.size.w + GAP, fy).into(),
-                (label - GAP, FIELD).into(),
+                (f.loc.x + f.size.w + GAP, last).into(),
+                (label - GAP, QUIT_BUTTON).into(),
             ));
         }
         hits.push((StripHit::Done, done));
@@ -474,7 +475,7 @@ impl Painter {
             );
         }
         if let (Some(field), Some(line)) = (layout.field, &view.field) {
-            self.field(
+            self.field_of_lines(
                 &mut c,
                 line,
                 "What went wrong",
@@ -680,6 +681,29 @@ mod tests {
         assert!(field.loc.x + field.size.w < layout.shots.unwrap().loc.x);
         assert!(layout.shots.unwrap().loc.x < shot.loc.x && shot.loc.x < done.loc.x);
         assert!(criteria_strip_field(&v, 1.0).is_some());
+    }
+
+    #[test]
+    fn the_note_grows_a_line_at_a_time_with_its_buttons_by_the_last() {
+        let mut v = view(1200);
+        let line = |text: &str| Line {
+            text: text.into(),
+            caret: text.len(),
+            anchor: text.len(),
+        };
+        v.field = Some(line("one"));
+        let one = criteria_strip_layout(&v);
+        v.field = Some(line("one\ntwo\nthree"));
+        let three = criteria_strip_layout(&v);
+        let (f1, f3) = (one.field.unwrap(), three.field.unwrap());
+        assert_eq!(f1.size.h, field_lines_height(1));
+        assert_eq!(f3.size.h, field_lines_height(3));
+        assert_eq!(three.panel.size.h - one.panel.size.h, f3.size.h - f1.size.h);
+        let row = three.rect_of(StripHit::Title).unwrap();
+        assert!(f3.loc.y + f3.size.h <= row.loc.y);
+        let done = three.rect_of(StripHit::Done).unwrap();
+        assert!(done.loc.y > f3.loc.y + f3.size.h - QUIT_BUTTON);
+        assert!(done.loc.y + done.size.h <= f3.loc.y + f3.size.h);
     }
 
     #[test]

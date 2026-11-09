@@ -3,3 +3,13 @@
 # already in the environment wins: RUST_TEST_THREADS=24 cargo test.
 [env]
 RUST_TEST_THREADS = "8"
+
+# Every rustc (with the linker and LTO it starts) and every test binary runs
+# at SCHED_IDLE through `.cargo/idle`: builds by agents use the cores nobody
+# else wants instead of making the laptop unusable. Build scripts run by
+# cargo itself are not covered. GERDR_BUILD_PRIORITY=normal turns it off.
+[build]
+rustc-wrapper = ".cargo/idle"
+
+[target.x86_64-unknown-linux-gnu]
+runner = ".cargo/idle"
