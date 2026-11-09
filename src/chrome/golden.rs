@@ -5331,6 +5331,25 @@ fn the_feature_tab_paints_the_same_pixels() {
     });
 }
 
+/// The page column drawn in bands holds the pixels it would drawn whole, at
+/// fractional scales too, where a band's edge off a whole pixel would show.
+#[test]
+fn the_page_bands_paint_the_column_as_a_whole() {
+    let painter = Painter::new();
+    let mut banded = 0;
+    for (name, view) in feature_tabs() {
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            for w in [860, 1920] {
+                match super::bands_match_column(&painter, &view, (w, TAB_HEIGHT).into(), scale) {
+                    Ok(n) => banded += n,
+                    Err(why) => panic!("{name} at {w} wide, scale {scale}: {why}"),
+                }
+            }
+        }
+    }
+    assert!(banded > 0);
+}
+
 /// With `GERDR_DUMP_DIR` set, write every feature tab fixture there at
 /// each of `TAB_WIDTHS`.
 #[test]

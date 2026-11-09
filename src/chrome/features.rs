@@ -4283,6 +4283,246 @@ fn slice_view(view: &FeatureTabView, slice: TabSlice) -> FeatureTabView {
     v
 }
 
+/// A run of the page column's pieces drawn in a buffer of its own: a card,
+/// a row or a line, and what of its neighbours reaches into it. A hover or
+/// a selection then draws again only the bands it changes, not the whole
+/// column (a long Manual test sheet took a tenth of a second each).
+pub(super) struct PageBand {
+    /// Where it goes, unscrolled, in output coordinates: across the column,
+    /// its edges on whole physical pixels.
+    pub(super) rect: Rect,
+    /// Its pieces, as `FeatureTabLayout::pieces` has them, in their order.
+    pub(super) pieces: Vec<usize>,
+}
+
+/// The page section piece `piece` paints from, if one.
+fn piece_section(piece: &Piece) -> Option<usize> {
+    match piece {
+        Piece::GroupCaption(k, _)
+        | Piece::ShipRoute(k)
+        | Piece::ShipStep(k, _)
+        | Piece::Agent(k)
+        | Piece::File(k)
+        | Piece::FindingCard(k)
+        | Piece::Fold(k)
+        | Piece::CardField(k) => Some(*k),
+        _ => None,
+    }
+}
+
+/// The page buttons piece `piece` paints (see `Painter::tab_piece`).
+fn piece_buttons(view: &FeatureTabView, piece: &Piece) -> Vec<usize> {
+    let section = piece_section(piece).and_then(|k| view.page.sections.get(k));
+    match (piece, section) {
+        (Piece::Button(i), _) => vec![*i],
+        (Piece::GroupCaption(..), Some(PageSection::Milestones { buttons, .. }))
+        | (Piece::Agent(_), Some(PageSection::Agent { buttons, .. }))
+        | (Piece::File(_), Some(PageSection::File { buttons, .. })) => buttons.clone(),
+        (Piece::FindingCard(_), Some(PageSection::Finding(card))) => card.buttons.clone(),
+        _ => Vec::new(),
+    }
+}
+
+/// The places of the layout besides its own and its buttons' that piece
+/// `piece` paints at.
+fn piece_spots(view: &FeatureTabView, l: &FeatureTabLayout, piece: &Piece) -> Vec<Rect> {
+    let section = piece_section(piece).and_then(|k| view.page.sections.get(k));
+    match (piece, section) {
+        (Piece::MilestoneMode { .. }, _) => (l.milestone_mode.iter())
+            .flat_map(|(track, segments)| [*track, segments[0], segments[1]])
+            .collect(),
+        (Piece::ShipRoute(_), Some(PageSection::ShipGroup(group))) => {
+            let row = group.route.as_ref().map(|r| r.row);
+            let pad = PICK_TRACK_PAD;
+            (l.ship.routes.iter())
+                .filter(|r| Some(r.0) == row)
+                .flat_map(|(_, track, segments)| {
+                    let around = Rectangle::new(
+                        (track.loc.x - pad, track.loc.y - pad).into(),
+                        (track.size.w + 2 * pad, track.size.h + 2 * pad).into(),
+                    );
+                    [around, *track, segments[0], segments[1], segments[2]]
+                })
+                .collect()
+        }
+        (Piece::Agent(_), _) => (l.agent_picks.iter())
+            .flat_map(|(track, chips)| std::iter::once(*track).chain(chips.iter().copied()))
+            .chain(l.agent_model)
+            .collect(),
+        (Piece::Repo(i), _) => (l.repo_buttons.get(*i).into_iter().flatten().copied())
+            .chain(l.repo_removes.get(*i).copied().flatten())
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Whether piece `piece`, painting `buttons`, looks otherwise with the
+/// pointer over `hit`.
+fn piece_hovered(
+    view: &FeatureTabView,
+    piece: &Piece,
+    buttons: &[usize],
+    hit: FeatureTabHit,
+) -> bool {
+    use FeatureTabHit as H;
+    // Which finding card a section is, as hits count them.
+    let finding = |k: usize| {
+        (view.page.sections.iter().take(k))
+            .filter(|s| matches!(s, PageSection::Finding(_)))
+            .count()
+    };
+    match (piece, hit) {
+        (_, H::PageButton(i)) => buttons.contains(&i),
+        (Piece::MilestoneMode { .. }, H::MilestoneMode(_))
+        | (Piece::ShipRoute(_), H::ShipRoute(..))
+        | (Piece::ShipStep(..), H::ShipRow(_))
+        | (Piece::Agent(_), H::AgentPick(_) | H::AgentModel) => true,
+        (Piece::FindingCard(k) | Piece::Fold(k), H::Finding(n) | H::Fold(n)) => finding(*k) == n,
+        (Piece::Repo(i), H::Repo(r) | H::RepoButton(r, _) | H::RepoRemove(r)) => r == *i,
+        _ => false,
+    }
+}
+
+/// The page column's pieces in bands (see `PageBand`), the column's
+/// contents starting at `top`; `None` when they don't split on whole
+/// physical pixels at `scale`, or one is too tall for a buffer, when the
+/// column is drawn whole.
+fn page_bands(
+    view: &FeatureTabView,
+    l: &FeatureTabLayout,
+    (x, top, w): (i32, i32, i32),
+    scale: f64,
+) -> Option<Vec<PageBand>> {
+    let pieces = &l.pieces[TabColumn::Page as usize];
+    // Each piece's extent down the column: its own and what it paints at.
+    let mut spans: Vec<(i32, i32, usize)> = (pieces.iter().enumerate())
+        .map(|(k, (rect, piece))| {
+            let buttons = piece_buttons(view, piece);
+            let around = (buttons.iter())
+                .filter_map(|i| l.page_buttons.get(*i).copied().flatten())
+                .chain(piece_spots(view, l, piece));
+            let (y0, y1) = around.fold((rect.loc.y, rect.loc.y + rect.size.h), |(a, b), r| {
+                (a.min(r.loc.y), b.max(r.loc.y + r.size.h))
+            });
+            (y0, y1, k)
+        })
+        .filter(|(y0, y1, _)| y1 > y0)
+        .collect();
+    spans.sort_unstable();
+    // Whether `y` falls on a whole physical pixel of the column's buffer.
+    let whole = |y: i32| {
+        let px = f64::from(y - top) * scale;
+        (px - px.round()).abs() < 1e-6
+    };
+    const REACH: i32 = 16;
+    let down = |y: i32| (0..REACH).map(|d| y - d).find(|y| whole(*y));
+    let up = |y: i32| (0..REACH).map(|d| y + d).find(|y| whole(*y));
+    // Pieces reaching over one another go in a band together.
+    let mut groups: Vec<(i32, i32)> = Vec::new();
+    for (y0, y1, _) in &spans {
+        match groups.last_mut() {
+            Some((_, b)) if *y0 < *b => *b = (*b).max(*y1),
+            _ => groups.push((*y0, *y1)),
+        }
+    }
+    // Its edges go out to whole pixels, over the next band's edge when that
+    // isn't on one: a band paints every piece reaching into it, so where two
+    // overlap both hold the same pixels.
+    let mut bands: Vec<(i32, i32, Vec<usize>)> = Vec::new();
+    for (y0, y1) in groups {
+        let (y0, y1) = (down(y0)?, up(y1)?);
+        let pieces = (spans.iter())
+            .filter(|(a, b, _)| *a < y1 && *b > y0)
+            .map(|(.., k)| *k)
+            .collect();
+        bands.push((y0, y1, pieces));
+    }
+    let tall = |h: i32| f64::from(h) * scale > TALL_COLUMN;
+    if bands.iter().any(|(y0, y1, _)| tall(y1 - y0)) {
+        return None;
+    }
+    Some(
+        (bands.into_iter())
+            .map(|(y0, y1, mut pieces)| {
+                pieces.sort_unstable();
+                PageBand {
+                    rect: Rectangle::new((x, y0).into(), (w, y1 - y0).into()),
+                    pieces,
+                }
+            })
+            .collect(),
+    )
+}
+
+/// What a band of the page column is drawn from: its pieces where they go
+/// in it, and what of the view and the layout they paint from.
+#[derive(PartialEq)]
+struct BandKey {
+    size: Size<i32, Logical>,
+    theme: super::Theme,
+    scale: f64,
+    pieces: Vec<(Rect, Piece)>,
+    sections: Vec<PageSection>,
+    buttons: Vec<(Option<PageButton>, Option<Rect>)>,
+    spots: Vec<Rect>,
+    activity: Vec<Option<ActivityRow>>,
+    repos: Vec<Option<FeatureRepoRow>>,
+    /// The repositories' focus, selected row and picked button, with any.
+    repo_state: Option<(TabArea, usize, Option<usize>)>,
+    hover: Option<FeatureTabHit>,
+}
+
+fn band_key(
+    view: &FeatureTabView,
+    l: &FeatureTabLayout,
+    band: &PageBand,
+    theme: super::Theme,
+    scale: f64,
+) -> BandKey {
+    let pieces = &l.pieces[TabColumn::Page as usize];
+    let at = |r: Rect| Rectangle::new(r.loc - band.rect.loc, r.size);
+    let mut key = BandKey {
+        size: band.rect.size,
+        theme,
+        scale,
+        pieces: Vec::new(),
+        sections: Vec::new(),
+        buttons: Vec::new(),
+        spots: Vec::new(),
+        activity: Vec::new(),
+        repos: Vec::new(),
+        repo_state: None,
+        hover: None,
+    };
+    for &k in &band.pieces {
+        let (rect, piece) = &pieces[k];
+        key.pieces.push((at(*rect), piece.clone()));
+        if let Some(section) = piece_section(piece).and_then(|k| view.page.sections.get(k)) {
+            key.sections.push(section.clone());
+        }
+        let buttons = piece_buttons(view, piece);
+        key.buttons.extend(buttons.iter().map(|i| {
+            let spot = l.page_buttons.get(*i).copied().flatten().map(at);
+            (view.page.buttons.get(*i).cloned(), spot)
+        }));
+        let spots = piece_spots(view, l, piece);
+        key.spots.extend(spots.into_iter().map(at));
+        match piece {
+            Piece::Activity { row, .. } => key.activity.push(view.activity.get(*row).cloned()),
+            Piece::Repo(i) => {
+                key.repos.push(view.repos.get(*i).cloned());
+                key.repo_state = Some((view.focus, view.repo, view.picked));
+            }
+            _ => {}
+        }
+        let hovered = |hit: &FeatureTabHit| piece_hovered(view, piece, &buttons, *hit);
+        if let Some(hit) = view.hover.filter(hovered) {
+            key.hover = Some(hit);
+        }
+    }
+    key
+}
+
 /// What a feature tab's ground is drawn from: the tab's size, its
 /// columns' places, the theme and the scale.
 type BackKey = (Size<i32, Logical>, [Option<Rect>; 3], super::Theme, f64);
@@ -4303,6 +4543,8 @@ pub(super) struct FeatureTabLayers {
     overlay: super::Overlay<BackKey>,
     head: super::Cached<SliceKey>,
     columns: [super::Cached<SliceKey>; 3],
+    /// The page column's bands (see `PageBand`).
+    bands: super::layers::RowCache<BandKey>,
     hints: super::Cached<SliceKey>,
     /// The thumbs, by their size.
     thumbs: [super::Cached<ThumbKey>; 3],
@@ -4339,9 +4581,10 @@ impl FeatureTabLayers {
             .as_ref()
             .map(|l| ((output, l.columns, theme, scale), area.loc, output));
         let drawn = &self.drawn;
-        let (head, columns, hints, thumbs, glow) = (
+        let (head, columns, bands, hints, thumbs, glow) = (
             &mut self.head,
             &mut self.columns,
+            &mut self.bands,
             &mut self.hints,
             &mut self.thumbs,
             &mut self.pulse,
@@ -4410,11 +4653,33 @@ impl FeatureTabLayers {
                     );
                 }
                 let inside = inside(place);
-                if let Some(part) = slice(&mut columns[i], TabSlice::Column(column), down) {
+                let region = l.slice_rect(TabSlice::Column(column), 0.0, scale);
+                let banded = (region.filter(|_| column == TabColumn::Page))
+                    .and_then(|r| page_bands(view, l, (r.loc.x, r.loc.y, r.size.w), scale));
+                if let Some(banded) = banded {
+                    for band in &banded {
+                        let rect = band.rect;
+                        let (y0, y1) = (rect.loc.y, rect.loc.y + rect.size.h);
+                        let shown = f64::from(y1) - down > f64::from(place.loc.y)
+                            && f64::from(y0) - down < f64::from(place.loc.y + place.size.h);
+                        if !shown {
+                            continue;
+                        }
+                        let key = band_key(view, l, band, theme, scale);
+                        let buffer = bands.get(key, rect.size, scale, |_| {
+                            drawn.set(drawn.get() + 1);
+                            painter.feature_tab_band(view, l, band, scale, p)
+                        });
+                        let part = Part::new(&buffer, at(rect), rect.size, 1.0);
+                        let loc = (part.loc.x, part.loc.y - down).into();
+                        parts.push(part.at(loc).clipped(inside));
+                    }
+                } else if let Some(part) = slice(&mut columns[i], TabSlice::Column(column), down) {
                     let loc = (part.loc.x, part.loc.y - down).into();
                     parts.push(part.at(loc).clipped(inside));
                 }
             }
+            bands.sweep();
             parts.extend(slice(hints, TabSlice::Hints, 0.0));
             parts.extend(slice(head, TabSlice::Head, 0.0));
             parts
@@ -4716,13 +4981,34 @@ impl Painter {
                     if rect.loc.y > tall.size.h || rect.loc.y + rect.size.h < 0 {
                         continue;
                     }
-                    self.tab_piece(&mut c, view, &l, *rect, piece, 0, scale, p);
+                    self.tab_piece(&mut c, view, &l, *rect, piece, Point::default(), scale, p);
                 }
             }
             TabSlice::Hints => {
                 c.fill(0, 0, c.w, c.h, p.background);
                 self.tab_hints(&mut c, view, &l, scale, p);
             }
+        }
+        c.into_buffer(true)
+    }
+
+    /// Band `band` of the page column (see `page_bands`) of the tab laid
+    /// out as `l`, in output coordinates: its pieces on the column's ground.
+    pub(super) fn feature_tab_band(
+        &self,
+        view: &FeatureTabView,
+        l: &FeatureTabLayout,
+        band: &PageBand,
+        scale: f64,
+        p: &Palette,
+    ) -> MemoryRenderBuffer {
+        let mut c = Canvas::new(physical(band.rect.size, scale));
+        c.fill(0, 0, c.w, c.h, p.panel);
+        let pieces = &l.pieces[TabColumn::Page as usize];
+        for &k in &band.pieces {
+            let (rect, piece) = &pieces[k];
+            let rect = Rectangle::new(rect.loc - band.rect.loc, rect.size);
+            self.tab_piece(&mut c, view, l, rect, piece, band.rect.loc, scale, p);
         }
         c.into_buffer(true)
     }
@@ -5368,12 +5654,12 @@ impl Painter {
         l: &FeatureTabLayout,
         rect: Rect,
         piece: &Piece,
-        dy: i32,
+        off: Point<i32, Logical>,
         scale: f64,
         p: &Palette,
     ) {
         let s = scale as f32;
-        let at = |r: Rect| Rectangle::new((r.loc.x, r.loc.y - dy).into(), r.size);
+        let at = |r: Rect| Rectangle::new(r.loc - off, r.size);
         let line = |c: &mut Canvas, text: &str, r: Rect, size: f32, color: Rgb| {
             let (x, end) = phys(r, scale);
             self.text(c, text, size, x, end, band(r, scale), scale, color)
@@ -6265,6 +6551,66 @@ pub(super) fn stage_blink_dot(scale: f64, p: &Palette) -> MemoryRenderBuffer {
         stage_dot(StageMark::Current, x, y, stage_dot_across(spot, scale))
     });
     c.into_buffer(false)
+}
+
+/// Whether each band of `view`'s page column (see `page_bands`) holds the
+/// pixels the whole column has there at `scale`, and the column has only
+/// its ground between them; for the goldens.
+#[cfg(test)]
+pub(super) fn bands_match_column(
+    painter: &Painter,
+    view: &FeatureTabView,
+    output: Size<i32, Logical>,
+    scale: f64,
+) -> Result<usize, String> {
+    let bytes = |mut buffer: MemoryRenderBuffer| {
+        let mut out = Vec::new();
+        let _ = buffer.render().draw(|mem| {
+            out.extend_from_slice(mem);
+            Ok::<_, ()>(Vec::new())
+        });
+        out
+    };
+    let p = super::Theme::Dark.page_palette();
+    let l = feature_tab_layout(view, Rectangle::from_size(output));
+    let slice = TabSlice::Column(TabColumn::Page);
+    let Some(region) = l.slice_rect(slice, 0.0, scale) else {
+        return Ok(0);
+    };
+    let Some(bands) = page_bands(view, &l, (region.loc.x, region.loc.y, region.size.w), scale)
+    else {
+        return Ok(0);
+    };
+    let whole = bytes(painter.feature_tab_slice(view, output, slice, region, scale, p));
+    let row = (physical(region.size, scale).w * 4) as usize;
+    let rows = whole.len() / row;
+    let [r, g, b] = p.panel;
+    let ground: Vec<u8> = [b, g, r, 0xff].repeat(row / 4);
+    let mut covered = vec![false; rows];
+    for band in &bands {
+        let got = bytes(painter.feature_tab_band(view, &l, band, scale, p));
+        let from = (f64::from(band.rect.loc.y - region.loc.y) * scale).round() as usize;
+        for (i, line) in got.chunks(row).enumerate() {
+            let at = from + i;
+            // A tall column is drawn whole only as far as it shows.
+            if at >= rows && region.size.h < l.content[TabColumn::Page as usize] {
+                break;
+            }
+            let want = whole.get(at * row..(at + 1) * row).unwrap_or(&ground);
+            if line != want {
+                return Err(format!("band at {:?}, its row {i}", band.rect));
+            }
+            if let Some(c) = covered.get_mut(at) {
+                *c = true;
+            }
+        }
+    }
+    for (at, _) in covered.iter().enumerate().filter(|(_, c)| !**c) {
+        if whole[at * row..(at + 1) * row] != ground[..] {
+            return Err(format!("row {at} between bands"));
+        }
+    }
+    Ok(bands.len())
 }
 
 #[cfg(test)]
@@ -7163,8 +7509,9 @@ mod tests {
     fn a_long_file_scrolls_and_draws_only_its_slice() {
         use crate::chrome::Theme;
         use std::time::{Duration, Instant};
-        let line = DocBlock::Para("a line of the plan".to_owned());
-        let view = with_doc(tab_view(), vec![line; 500]);
+        // Each line its own: a band like one drawn already is not drawn.
+        let lines = (0..500).map(|i| DocBlock::Para(format!("line {i} of the plan")));
+        let view = with_doc(tab_view(), lines.collect());
         let plain = tab_at(&tab_view(), 1920);
         let l = tab_at(&view, 1920);
         assert!(l.scroll_room(TabColumn::Page) > plain.scroll_room(TabColumn::Page) + 5_000);
@@ -7193,28 +7540,64 @@ mod tests {
         let mut hovered = view.clone();
         hovered.hover = Some(FeatureTabHit::Node(3));
         assert_eq!(step(&mut layers, &hovered, 3), 1);
-        // Scrolled, its buffer holds what shows now, and stays at the
-        // column: it doesn't go down the tab by as much.
+        // Scrolled, what shows now is drawn, and only that: the bands
+        // shown already are kept.
         let mut scrolled = hovered.clone();
         scrolled.scroll[TabColumn::Page as usize] = 4000.4;
-        assert_eq!(step(&mut layers, &scrolled, 4), 1);
+        let shown = shown_bands(&scrolled, area, 4000.4);
+        assert_eq!(step(&mut layers, &scrolled, 4), shown);
         assert_eq!(step(&mut layers, &scrolled, 5), 0);
+        scrolled.scroll[TabColumn::Page as usize] = 4040.4;
+        let more = step(&mut layers, &scrolled, 6);
+        assert!(more > 0 && more < shown_bands(&scrolled, area, 4040.4));
+        scrolled.scroll[TabColumn::Page as usize] = 4000.4;
         let place = feature_tab_layout(&scrolled, area).columns[TabColumn::Page as usize].unwrap();
         let parts = layers.parts(
             Some(scrolled),
             area,
             Theme::Dark,
             1.0,
-            t0 + Duration::from_secs(6),
+            t0 + Duration::from_secs(7),
             &painter,
             0.5,
             None,
         );
-        let page = parts
-            .iter()
-            .find(|p| p.clip.is_some_and(|c| c.loc.x == place.loc.x + 1))
-            .unwrap();
-        assert!((page.loc.y - f64::from(place.loc.y)).abs() <= 0.5);
+        // Each band where it shows, in the column, at its place in the page
+        // as scrolled: the first at the column's top or across it.
+        let page: Vec<_> = (parts.iter())
+            .filter(|p| p.clip.is_some_and(|c| c.loc.x == place.loc.x + 1))
+            .filter(|p| p.size.w < place.size.w - 2)
+            .collect();
+        let shown = shown_bands(&scrolled_again(&view), area, 4000.4);
+        assert_eq!(page.len(), shown);
+        let top = f64::from(place.loc.y);
+        let bottom = f64::from(place.loc.y + place.size.h);
+        let inside = |y: f64, h: i32| y < bottom && y + f64::from(h) > top;
+        assert!(page.iter().all(|p| inside(p.loc.y, p.size.h)));
+        assert!(page.iter().any(|p| p.loc.y <= top + 0.5));
+    }
+
+    /// `view` scrolled down its page by 4000.4.
+    fn scrolled_again(view: &FeatureTabView) -> FeatureTabView {
+        let mut v = view.clone();
+        v.scroll[TabColumn::Page as usize] = 4000.4;
+        v
+    }
+
+    /// How many bands of `view`'s page show in `area`, its page scrolled
+    /// `down`.
+    fn shown_bands(view: &FeatureTabView, area: Rect, down: f64) -> usize {
+        let l = feature_tab_layout(view, area);
+        let place = l.columns[TabColumn::Page as usize].unwrap();
+        let slice = TabSlice::Column(TabColumn::Page);
+        let r = l.slice_rect(slice, 0.0, 1.0).unwrap();
+        let bands = page_bands(view, &l, (r.loc.x, r.loc.y, r.size.w), 1.0).unwrap();
+        (bands.iter())
+            .filter(|b| {
+                f64::from(b.rect.loc.y + b.rect.size.h) - down > f64::from(place.loc.y)
+                    && f64::from(b.rect.loc.y) - down < f64::from(place.loc.y + place.size.h)
+            })
+            .count()
     }
 
     /// How long drawing the tab's parts takes at 2810x1856, scale 1:
@@ -7360,15 +7743,19 @@ mod tests {
             );
             (layers.drawn.get() - before, parts)
         };
-        // The head, the hints and the two columns, then the ground once
-        // it starts to show.
-        assert_eq!(step(&mut layers, &view, 0).0, 4);
+        // The head, the hints, the activity and each band of the page that
+        // shows, then the ground once it starts to show.
+        let bands = shown_bands(&view, area, 0.0);
+        assert!(bands > 1);
+        assert_eq!(step(&mut layers, &view, 0).0, 3 + bands);
         assert_eq!(step(&mut layers, &view, 1).0, 1);
         assert_eq!(step(&mut layers, &view, 2).0, 0);
+        // The band with the button, then the head; the band as it was
+        // without the hover is kept.
         view.hover = Some(FeatureTabHit::PageButton(0));
         assert_eq!(step(&mut layers, &view, 2).0, 1);
         view.hover = Some(FeatureTabHit::Node(3));
-        assert_eq!(step(&mut layers, &view, 3).0, 2);
+        assert_eq!(step(&mut layers, &view, 3).0, 1);
         view.hover = Some(FeatureTabHit::Column(TabColumn::Page));
         assert_eq!(step(&mut layers, &view, 4).0, 1);
         let (_, at_top) = step(&mut layers, &view, 5);
