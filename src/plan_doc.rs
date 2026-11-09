@@ -27,11 +27,9 @@ use crate::{
     worktree_diff::{Env, WorktreeDiff},
 };
 
-/// Why the suggestions can't be decided while the final plan is written.
-pub const WRITING: &str =
-    "The final plan is being written from these: Change decisions\u{2026} to change them";
-/// Why they can't be once Plan review is done.
-pub const DONE: &str = "Plan review is done: only to read";
+/// Why the suggestions can't be decided while the final plan is written,
+/// and once Plan review is done: the page's words.
+pub(crate) use crate::review_cards::{SUGGESTIONS_DONE as DONE, SUGGESTIONS_WRITING as WRITING};
 /// Why they can't be on a feature another machine writes.
 const ELSEWHERE: &str = "This feature is written on another machine: decide on its page there";
 /// Why they can't be on a closed feature.

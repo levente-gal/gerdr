@@ -661,8 +661,12 @@ impl Gerdr {
             id: id.to_owned(),
             note,
         };
+        let what = match self.suggestion_of(project, slug, id) {
+            Some(s) if s.kind == plan_review::Kind::Question => "Answer",
+            _ => "Comment",
+        };
         self.toast_with(
-            format!("Comment on {id} deleted"),
+            format!("{what} on {id} deleted"),
             Level::Success,
             Some(("Undo".to_owned(), undo)),
         );

@@ -40,14 +40,6 @@ impl<'a> Item<'a> {
         }
     }
 
-    #[allow(dead_code)] // for the Suggestions doc's flags (wave 1, D)
-    pub(crate) fn title(self) -> &'a str {
-        match self {
-            Self::Finding(f) => &f.title,
-            Self::Suggestion(s) => &s.title,
-        }
-    }
-
     /// The user added it.
     pub(crate) fn yours(self) -> bool {
         match self {
@@ -392,7 +384,6 @@ pub(crate) fn item_buttons(item: Item, current: bool) -> Vec<(PageButton, PanelO
 /// `decides` while its stage can decide, `armed` while a first Del armed
 /// it. The page's own keys (Up / Down, `c` off the card, wanting all) are
 /// the page's.
-#[allow(dead_code)] // the page's footer hints call it (wave 1, E)
 pub(crate) fn item_hints(item: Item, decides: bool, armed: bool) -> Vec<(String, String)> {
     let w = words(item.of());
     let lower = |text: &str| text.to_lowercase();
@@ -756,7 +747,6 @@ pub(crate) enum CardKey {
     /// Enter: show it, or reword one with nowhere to show.
     Enter,
     /// Ctrl+O: open its citation.
-    #[allow(dead_code)] // decoded by the page's keys (wave 1, E)
     CtrlO,
 }
 
