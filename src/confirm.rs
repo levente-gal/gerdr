@@ -155,6 +155,9 @@ pub enum Then {
         repo: String,
         step: crate::feature::ShipStep,
     },
+    /// Stop the conflicts this project's feature's agent takes on (see
+    /// `Gerdr::stop_resolving`).
+    StopResolving { project: String, slug: String },
     /// Take this repository's base into this project's feature's branch
     /// (see `Gerdr::update_base`).
     UpdateBase {
@@ -770,6 +773,7 @@ impl Gerdr {
                 repo,
                 way,
             } => self.update_base(&project, &slug, &repo, way),
+            Then::StopResolving { project, slug } => self.stop_resolving(&project, &slug),
             Then::MakeFixes { project, slug } => self.make_fixes_now(&project, &slug),
             Then::DropFixPlan { project, slug } => self.drop_fix_plan(&project, &slug),
             Then::ApproveStage {

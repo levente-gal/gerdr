@@ -218,6 +218,48 @@ pub struct Shipping {
     /// shipped or waited to be, oldest first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub updates: Vec<BaseUpdate>,
+    /// The conflicts an agent resolves, or plans to, taking a base in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolving: Option<Resolving>,
+}
+
+/// An agent at work on the conflicts of taking a repository's base into the
+/// feature's branch: planning how (no merge under way yet), or resolving a
+/// merge gerdr started in the worktree.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Resolving {
+    /// When it was asked, unix seconds.
+    pub at: u64,
+    /// The repository's `Repo::key`.
+    pub repo: String,
+    /// What is taken in: `origin/main`, and the commit that was.
+    pub onto: String,
+    pub onto_sha: String,
+    /// The branch's HEAD before the merge.
+    pub before: String,
+    /// The files that conflict.
+    pub files: Vec<String>,
+    /// The agent, as a stage run names it, and its tab's pane.
+    pub agent: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane: Option<String>,
+    /// Which time conflicts were taken on: its files are
+    /// `conflicts-<n>.md` (the plan) and `conflicts-<n>-questions.md`.
+    pub n: u32,
+    /// It plans; no merge is under way.
+    pub planning: bool,
+}
+
+impl Resolving {
+    /// Its plan, in data dir `data`.
+    pub fn plan(&self, data: &Path) -> PathBuf {
+        data.join(format!("conflicts-{}.md", self.n))
+    }
+
+    /// Where its agent writes what the user must settle, in data dir `data`.
+    pub fn questions(&self, data: &Path) -> PathBuf {
+        data.join(format!("conflicts-{}-questions.md", self.n))
+    }
 }
 
 /// How a branch takes its base in.
@@ -283,6 +325,7 @@ impl Shipping {
             && self.steps.is_empty()
             && self.summary.is_none()
             && self.updates.is_empty()
+            && self.resolving.is_none()
     }
 }
 

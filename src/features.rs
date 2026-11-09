@@ -568,6 +568,21 @@ pub(crate) enum Done {
         slug: String,
         result: Box<Result<(feature::BaseUpdate, Option<String>), String>>,
     },
+    /// The merge for an agent to resolve began, or the plan of it is to be
+    /// written; or why not.
+    ConflictsBegun {
+        project: String,
+        slug: String,
+        repo: String,
+        planning: bool,
+        result: Result<ship::MergeBegun, String>,
+    },
+    /// The merge an agent resolved was stopped, or wasn't.
+    ResolvingStopped {
+        project: String,
+        slug: String,
+        result: Result<(), String>,
+    },
     /// Undoing steps shipping ran ended: those undone, and why it stopped.
     ShipUndone {
         project: String,
@@ -1614,6 +1629,13 @@ pub enum PanelOutcome {
     UndoShip(String, ShipStep),
     /// Take repository `.0`'s base into its branch, `.1`, after asking.
     UpdateBase(String, feature::UpdateWay),
+    /// Have an agent take on repository `.0`'s conflicts with its base:
+    /// plan their resolution (`.1`), or resolve them.
+    ResolveConflicts(String, bool),
+    /// Open the plan of the conflicts' resolution.
+    ReviewConflictPlan,
+    /// Stop the conflicts an agent takes on, after asking.
+    StopResolving,
     /// Open the feature's summary to edit.
     EditSummary,
     /// Reopen this done stage, once it isn't locked (see
@@ -3537,6 +3559,10 @@ fn action_hint(action: &PanelOutcome) -> &'static str {
         PanelOutcome::WriteSummary => "write the summary again",
         PanelOutcome::UndoShip(..) => "undo\u{2026}",
         PanelOutcome::UpdateBase(..) => "update from the base\u{2026}",
+        PanelOutcome::ResolveConflicts(_, true) => "plan the resolution",
+        PanelOutcome::ResolveConflicts(_, false) => "resolve with an agent",
+        PanelOutcome::ReviewConflictPlan => "review the plan",
+        PanelOutcome::StopResolving => "stop\u{2026}",
         PanelOutcome::EditSummary => "edit the summary",
         PanelOutcome::Finish => "finish\u{2026}",
         PanelOutcome::Untick(_) => "reopen",
@@ -4113,7 +4139,15 @@ fn ship_sections(
         });
         // Taking its base in, then its pull request.
         let buttons = (actions.iter().enumerate())
-            .filter(|(_, (_, o))| matches!(o, PanelOutcome::UpdateBase(r, _) if *r == repo.key))
+            .filter(|(_, (_, o))| match o {
+                PanelOutcome::UpdateBase(r, _) | PanelOutcome::ResolveConflicts(r, _) => {
+                    *r == repo.key
+                }
+                PanelOutcome::ReviewConflictPlan | PanelOutcome::StopResolving => {
+                    (feature.shipping.resolving.as_ref()).is_some_and(|r| r.repo == repo.key)
+                }
+                _ => false,
+            })
             .map(|(i, _)| i)
             .chain(open)
             .collect();
@@ -4129,7 +4163,7 @@ fn ship_sections(
                 state: state_line,
                 meta: ship_repo_meta(repo, stat),
                 base: (!repo.merged)
-                    .then(|| ship_base_line(probe, &repo.key))
+                    .then(|| ship_base_line(feature, probe, &repo.key))
                     .flatten(),
                 buttons,
             }),
@@ -6754,6 +6788,24 @@ impl Gerdr {
                 let patch = patch.as_deref();
                 self.feature_shipped(&project, &slug, patch, &squash, pushed, ran, result);
             }
+            Done::ConflictsBegun {
+                project,
+                slug,
+                repo,
+                planning,
+                result,
+            } => {
+                self.unbusy(&project, &slug, Job::Ship);
+                self.conflicts_begun(&project, &slug, (&repo, planning), result);
+            }
+            Done::ResolvingStopped {
+                project,
+                slug,
+                result,
+            } => {
+                self.unbusy(&project, &slug, Job::Ship);
+                self.resolving_stopped(&project, &slug, result);
+            }
             Done::BaseUpdated {
                 project,
                 slug,
@@ -7182,6 +7234,7 @@ impl Gerdr {
                         true => ship::read_bases(&feature, fetch),
                         false => BTreeMap::new(),
                     },
+                    resolution: ship::read_resolution(&feature, &data),
                     ..ship::probe(&feature, &modes)
                 },
             }),
@@ -7246,11 +7299,15 @@ impl Gerdr {
         }
         // A finished feature's read is for its tab only, and what it ships
         // more.
+        let resolution = probe.resolution.clone();
         if !open {
             probed.again = false;
             let merged = probe.merged;
             let patch = probe.reading.as_ref().ok().map(|r| r.patch.clone());
             probed.last = Some(probe);
+            if let Some(found) = &resolution {
+                self.resolution_read(project, slug, found, patch.as_deref());
+            }
             let waited = self.features.ship_waits.remove(&key);
             self.reselect_review_card(selected);
             let more = (self.feature(project, slug)).is_some_and(Feature::ships_more);
@@ -7276,6 +7333,10 @@ impl Gerdr {
         let merged = probe.merged;
         probed.last = Some(probe);
         self.reselect_review_card(selected);
+        // The conflicts resolved, the code is the update's: its marks hold.
+        if let Some(found) = &resolution {
+            self.resolution_read(project, slug, found, patch.as_deref());
+        }
         // The fix rounds' diffs take where the code stands.
         if let Some((heads, at)) = heads
             && (self.feature_mut(project, slug)).is_some_and(|f| f.rounds_read(&heads, at))
@@ -8953,6 +9014,11 @@ impl Gerdr {
             PanelOutcome::UpdateBase(repo, way) => {
                 self.ask_update_base(&project, &slug, &repo, way)
             }
+            PanelOutcome::ResolveConflicts(repo, planning) => {
+                self.resolve_conflicts(&project, &slug, &repo, planning);
+            }
+            PanelOutcome::ReviewConflictPlan => self.review_conflict_plan(&project, &slug),
+            PanelOutcome::StopResolving => self.ask_stop_resolving(&project, &slug),
             PanelOutcome::EditSummary => self.edit_ship_summary(&project, &slug),
             PanelOutcome::PickAgent(stage, name) => {
                 self.pick_stage_agent(&project, &slug, stage, &name);
@@ -9592,6 +9658,12 @@ impl Gerdr {
             feature.log(now, "Squash started");
         }
         self.save_feature(project, slug);
+    }
+
+    /// The latest read of feature `slug` of `project`, if one came back.
+    pub(crate) fn last_probe(&self, project: &str, slug: &str) -> Option<&Probe> {
+        let key = (project.to_owned(), slug.to_owned());
+        self.features.probes.get(&key)?.last.as_ref()
     }
 
     /// Ship was asked for on feature `slug`: say what stops it, or ask
@@ -12971,7 +13043,41 @@ fn ship_base_actions(feature: &Feature, probe: Option<&Probe>) -> Vec<(PageButto
     if !feature.ships() || feature.squash_going() {
         return out;
     }
+    let button = |label: &str, style| PageButton {
+        label: label.to_owned(),
+        style,
+    };
+    // An agent at work on conflicts: its plan, and stopping it.
+    if let Some(r) = feature.shipping.resolving.as_ref() {
+        let found = probe.and_then(|p| p.resolution.as_ref());
+        if r.planning && found.is_some_and(|f| f.plan) {
+            out.push((
+                button("Review plan", ButtonStyle::Plain),
+                PanelOutcome::ReviewConflictPlan,
+            ));
+            out.push((
+                button("Resolve as planned", ButtonStyle::Primary),
+                PanelOutcome::ResolveConflicts(r.repo.clone(), false),
+            ));
+        }
+        out.push((
+            button("Stop\u{2026}", ButtonStyle::Quiet),
+            PanelOutcome::StopResolving,
+        ));
+        return out;
+    }
     for (key, state) in probe.map(|p| &p.bases).into_iter().flatten() {
+        if !state.conflicts.is_empty() {
+            out.push((
+                button("Resolve with agent", ButtonStyle::Plain),
+                PanelOutcome::ResolveConflicts(key.clone(), false),
+            ));
+            out.push((
+                button("Plan resolution", ButtonStyle::Quiet),
+                PanelOutcome::ResolveConflicts(key.clone(), true),
+            ));
+            continue;
+        }
         if !state.clean() {
             continue;
         }
@@ -12998,7 +13104,43 @@ fn ship_base_actions(feature: &Feature, probe: Option<&Probe>) -> Vec<(PageButto
 
 /// How repository `key`'s branch stands against its base, as `probe` read
 /// it, for its card.
-fn ship_base_line(probe: Option<&Probe>, key: &str) -> Option<CheckLine> {
+fn ship_base_line(feature: &Feature, probe: Option<&Probe>, key: &str) -> Option<CheckLine> {
+    // Its conflicts taken on: how that goes.
+    if let Some(r) = feature
+        .shipping
+        .resolving
+        .as_ref()
+        .filter(|r| r.repo == key)
+    {
+        let who = crate::stats_panel::agent_name(&r.agent);
+        let found = probe.and_then(|p| p.resolution.as_ref());
+        let files = r.files.join(", ");
+        return Some(match (r.planning, found) {
+            (_, Some(f)) if f.questions => line(
+                format!(
+                    "{who} has questions on the conflicts: see conflicts-{}-questions.md",
+                    r.n
+                ),
+                CheckTone::Blocker,
+            ),
+            (true, Some(f)) if f.plan => line(
+                "The resolution's plan is written: review it",
+                CheckTone::Ready,
+            ),
+            (true, _) => line(
+                format!("{who} plans how to resolve {files}\u{2026}"),
+                CheckTone::Note,
+            ),
+            (false, Some(f)) if !f.left.is_empty() => line(
+                format!("{who} resolves {}\u{2026}", f.left.join(", ")),
+                CheckTone::Note,
+            ),
+            (false, _) => line(
+                format!("{who} finishes the merge of {}\u{2026}", r.onto),
+                CheckTone::Note,
+            ),
+        });
+    }
     let state = probe?.bases.get(key)?;
     let onto = &state.onto;
     let new = count_of(state.behind, "new commit", "new commits");
@@ -18874,6 +19016,7 @@ pub(crate) mod tests {
             models: BTreeMap::new(),
             prs: None,
             bases: BTreeMap::new(),
+            resolution: None,
             ship,
             merged: false,
             stats: BTreeMap::new(),
@@ -19576,6 +19719,7 @@ pub(crate) mod tests {
             models: BTreeMap::new(),
             prs: None,
             bases: BTreeMap::new(),
+            resolution: None,
         }
     }
 

@@ -1067,6 +1067,28 @@ pub fn push(dir: &Path, remote: Option<&str>, force_lease: bool) -> OpResult {
     op.done()
 }
 
+/// Start merging `base` into the checked-out branch, `--no-edit`: the files
+/// it stops on, empty when it merged cleanly. Uncommitted changes in the
+/// way make git refuse.
+pub fn begin_merge(dir: &Path, base: &str) -> Result<Vec<String>, Failed> {
+    let mut op = Op::new(dir);
+    if head_oid(dir).is_none() {
+        return Err(op.blocked("no commits yet"));
+    }
+    if op
+        .run(&["merge", "--no-edit", "--no-autostash", base])
+        .is_ok()
+    {
+        return Ok(Vec::new());
+    }
+    let unmerged = query(dir, &["diff", "--name-only", "--diff-filter=U"]).unwrap_or_default();
+    let files: Vec<String> = unmerged.lines().map(str::to_owned).collect();
+    if files.is_empty() {
+        return Err(op.blocked("the merge stopped, but on no conflicted file"));
+    }
+    Ok(files)
+}
+
 /// `fetch <remote> <branch>`: that branch's remote-tracking ref only.
 pub fn fetch_branch(dir: &Path, remote: &str, branch: &str) -> OpResult {
     let mut op = Op::new(dir);
