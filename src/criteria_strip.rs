@@ -42,7 +42,7 @@ use crate::{
         manual::{self, Criterion, Verdict},
         store,
     },
-    features::{PanelOutcome, criterion_buttons, criterion_details, tries_criteria},
+    features::{PanelOutcome, criterion_buttons, criterion_details, marks_criteria},
     manual_test::{Outcome, Row},
     text_field::TextField,
     tooltip::Tooltip,
@@ -169,7 +169,7 @@ impl Gerdr {
         }
         let project = self.project.clone()?;
         let feature = self.workspace_feature(self.active_workspace)?;
-        if !tries_criteria(feature, Stage::ManualTest)
+        if !marks_criteria(feature, Stage::ManualTest)
             || self.criteria(&project, &feature.slug).is_empty()
         {
             return None;
