@@ -832,6 +832,8 @@ impl Gerdr {
         }
         // The fixes it carried are over: what comes now is the usual way.
         feature.carry = None;
+        // The rail shows the turn, as it does for fixes sent back to Build.
+        feature.back_from = Some(Stage::ManualTest);
         feature.log(now, "Manual test fixes changed the code: back to Verify");
         let title = feature.title.clone();
         self.save_feature(project, slug);

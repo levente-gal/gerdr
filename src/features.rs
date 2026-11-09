@@ -2044,6 +2044,25 @@ fn turned_back(feature: &Feature, ctx: RowCtx) -> Option<Stage> {
     from.filter(|stage| *stage > Stage::Build)
 }
 
+/// The line back on `feature`'s rail: into Build while the flow is turned
+/// back there (`turned_back`), else into Verify while it is back there for
+/// fixes Manual test asked for (`Feature::back_from`).
+fn rail_back(feature: &Feature, ctx: RowCtx) -> Option<RailBack> {
+    let line = |from: Stage, to: Stage| RailBack {
+        from: stage_index(from),
+        to: stage_index(to),
+    };
+    if let Some(from) = turned_back(feature, ctx) {
+        return Some(line(from, Stage::Build));
+    }
+    let from = feature.back_from.filter(|from| {
+        feature.status == Status::Open
+            && feature.current() == Some(Stage::Verify)
+            && *from > Stage::Verify
+    })?;
+    Some(line(from, Stage::Verify))
+}
+
 /// `rework`, on the page of `stage` when `stage` is where the feature is at.
 fn rework_on(feature: &Feature, stage: Stage, ctx: RowCtx) -> Option<Rework> {
     (stage > Stage::Build && stage_mark(feature, stage) == StageMark::Current)
@@ -7360,6 +7379,7 @@ impl Gerdr {
             past_rounds: Vec::new(),
             carry: None,
             unverified: None,
+            back_from: None,
         };
         self.features
             .all
@@ -13427,10 +13447,7 @@ fn tab_view(
             ..rail_node(feature, *s, state, now)
         })
         .collect();
-    let back = turned_back(feature, state.ctx).map(|from| RailBack {
-        from: stage_index(from),
-        to: stage_index(Stage::Build),
-    });
+    let back = rail_back(feature, state.ctx);
     let mut page = match panel.keys {
         true => keys_page(),
         false => {
@@ -13756,6 +13773,7 @@ pub(crate) mod tests {
             past_rounds: Vec::new(),
             carry: None,
             unverified: None,
+            back_from: None,
         }
     }
 
@@ -16572,6 +16590,43 @@ pub(crate) mod tests {
         let mut closed = in_round(f, Stage::AiReview, FixPhase::Planning);
         closed.status = Status::Abandoned;
         assert_eq!(turned_back(&closed, at_rest), None);
+    }
+
+    #[test]
+    fn manual_tests_fixes_draw_the_line_back_into_verify() {
+        use NodeMark::{Current, Done, Later, Paused, Ran};
+        let at_rest = RowCtx::default();
+        let verify = stage_index(Stage::Verify);
+        // At Manual test, its fixes made: no line yet.
+        let mut f = feature("b", vec![repo("api", true)], stage_index(Stage::ManualTest));
+        assert_eq!(rail_back(&f, at_rest), None);
+        // Marked passed, it goes back to Verify as `back_to_verify` does.
+        assert!(f.untick(Stage::Verify, 3_000));
+        // Its results make it a stage that ran; the fixture has none.
+        f.ran_once.insert(Stage::ManualTest, 3_000);
+        f.back_from = Some(Stage::ManualTest);
+        let back = rail_back(&f, at_rest);
+        assert_eq!(
+            back,
+            Some(RailBack {
+                from: stage_index(Stage::ManualTest),
+                to: verify,
+            })
+        );
+        assert_eq!(
+            rail_marks(&f, at_rest),
+            [Done, Done, Done, Done, Current, Ran, Ran, Paused, Later]
+        );
+        // Work sent back to Build from there draws its own line.
+        let round = in_round(f.clone(), Stage::Verify, FixPhase::Planning);
+        assert_eq!(
+            rail_back(&round, at_rest).map(|b| b.to),
+            Some(stage_index(Stage::Build))
+        );
+        // Verify passes: the flow goes on, and the line goes.
+        f.tick(3_100, "you", Some("p1"));
+        assert_eq!(f.back_from, None);
+        assert_eq!(rail_back(&f, at_rest), None);
     }
 
     #[test]

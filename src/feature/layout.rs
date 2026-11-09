@@ -1569,6 +1569,7 @@ mod tests {
             past_rounds: Vec::new(),
             carry: None,
             unverified: None,
+            back_from: None,
             epoch: 0,
             history: Vec::new(),
         }
