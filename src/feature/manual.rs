@@ -9,7 +9,7 @@
 //! fixes they asked for land, and what they found stays. An edited
 //! criterion drops its result.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -256,6 +256,11 @@ pub struct ManualTest {
     pub patch: String,
     #[serde(default)]
     pub checks: Vec<Check>,
+    /// The criteria whose pass a later fix round took back, as its agent
+    /// said its fixes changed them: by id, with that round's number. They
+    /// are to try again; trying one drops it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub retest: BTreeMap<String, u32>,
 }
 
 /// The result of criterion `c` that still counts: one given on its current
@@ -343,6 +348,7 @@ pub fn set(
         .map(|k| k.shots.clone())
         .unwrap_or_default();
     t.checks.retain(|k| k.id != c.id);
+    t.retest.remove(&c.id);
     t.checks.push(Check {
         id: c.id.clone(),
         text: c.text.clone(),
@@ -387,10 +393,53 @@ pub fn clear(test: &mut Option<ManualTest>, id: &str) -> bool {
     let before = t.checks.len();
     t.checks.retain(|k| k.id != id);
     let gone = t.checks.len() != before;
-    if t.checks.is_empty() {
+    let tagged = t.retest.remove(id).is_some();
+    if t.checks.is_empty() && t.retest.is_empty() {
         *test = None;
     }
-    gone
+    gone || tagged
+}
+
+/// Take back the passes of criteria `ids` given before `ended`, when fix
+/// round `round` that changed them ended: they are untested again, tagged
+/// with the round. Failures keep their own way (`Check::made`). Returns the
+/// ids taken back.
+pub fn retest(
+    test: &mut Option<ManualTest>,
+    ids: &[String],
+    round: u32,
+    ended: u64,
+) -> Vec<String> {
+    let Some(t) = test else {
+        return Vec::new();
+    };
+    let mut back = Vec::new();
+    t.checks.retain(|k| {
+        let old = k.state == Verdict::Pass && k.at < ended && ids.contains(&k.id);
+        if old {
+            back.push(k.id.clone());
+        }
+        !old
+    });
+    for id in &back {
+        t.retest.insert(id.clone(), round);
+    }
+    back
+}
+
+/// The acceptance criteria as a fix round's file lists them, for its agent
+/// to name those its fixes change: none when there are none.
+pub fn criteria_block(criteria: &[Criterion]) -> String {
+    if criteria.is_empty() {
+        return String::new();
+    }
+    let mut md = String::from(
+        "\n# Acceptance criteria\n\nThe feature's acceptance criteria, which the user tries by hand. Once the fixes are committed, add one line under this round's `## Fix round …` section of the build log naming those whose behaviour your fixes change, like `Criteria: AC-1, AC-3`, or `Criteria: none`.\n\n",
+    );
+    for c in criteria {
+        md.push_str(&format!("- {}: {}\n", c.id, c.title));
+    }
+    md
 }
 
 /// The failures of `criteria` not yet sent to Build.
@@ -673,6 +722,39 @@ mod tests {
         assert!(check(t.as_ref(), &a).unwrap().shots.is_empty());
         assert_eq!(shot_name("AC-1", &[]), "AC-1-1.png");
         assert_eq!(shot_name("AC-1", &["AC-1-1.png".into()]), "AC-1-2.png");
+    }
+
+    #[test]
+    fn a_fix_that_changed_a_passed_criterion_takes_its_pass_back() {
+        let [a, b, c] = [1, 2, 3].map(|n| crit(n, &format!("Given {n}, when b, then c.")));
+        let all = vec![a.clone(), b.clone(), c.clone()];
+        let mut t = None;
+        set(&mut t, &a, "p", Verdict::Pass, "", 10);
+        set(&mut t, &b, "p", Verdict::Fail, "broke", 10);
+        set(&mut t, &c, "p", Verdict::Pass, "", 30);
+        let named = ["AC-1", "AC-2", "AC-3", "AC-9"].map(str::to_owned);
+        // Only passes from before the round ended go; a failure keeps its own way.
+        assert_eq!(retest(&mut t, &named, 4, 20), ["AC-1"]);
+        let test = t.as_ref().unwrap();
+        assert_eq!(test.retest.get("AC-1"), Some(&4));
+        assert_eq!(check(t.as_ref(), &b).unwrap().state, Verdict::Fail);
+        assert!(check(t.as_ref(), &c).is_some());
+        assert_eq!(counts(t.as_ref(), &all).untested, 1);
+        // Tried again, it drops the tag.
+        set(&mut t, &a, "q", Verdict::Pass, "", 40);
+        assert!(t.as_ref().unwrap().retest.is_empty());
+        // The only thing left, a tag keeps the record; clearing drops it.
+        let mut only = None;
+        set(&mut only, &a, "p", Verdict::Pass, "", 1);
+        assert_eq!(retest(&mut only, &named, 5, 2), ["AC-1"]);
+        assert!(only.as_ref().is_some_and(|t| t.checks.is_empty()));
+        assert!(clear(&mut only, "AC-1"));
+        assert!(only.is_none());
+        assert!(retest(&mut None, &named, 5, 2).is_empty());
+        // The criteria list for a fix round's agent.
+        assert_eq!(criteria_block(&[]), "");
+        let block = criteria_block(&all);
+        assert!(block.contains("- AC-1: C\n") && block.contains("`Criteria: none`"));
     }
 
     #[test]

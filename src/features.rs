@@ -2727,6 +2727,9 @@ pub(crate) fn criterion_details(row: &Row) -> String {
     if row.earlier && row.found.is_some() && !row.made {
         text.push_str("\n\nTried before the latest fixes");
     }
+    if let Some(n) = row.retest {
+        text.push_str(&format!("\n\nChanged by fix round {n}: try it again"));
+    }
     text
 }
 
@@ -2744,15 +2747,16 @@ fn criterion_card(
         Some(Verdict::Pass) => FindingTag::Passed,
         Some(Verdict::Fail) => FindingTag::Failed,
     };
-    let state = match (row.made, row.sent) {
-        (true, _) => "fix made: try again",
-        (false, true) => "sent to Build",
-        (false, false) => "",
+    let state = match (row.made, row.sent, row.retest) {
+        (true, _, _) => "fix made: try again".to_owned(),
+        (false, true, _) => "sent to Build".to_owned(),
+        (false, false, Some(n)) => format!("changed by fix round {n}: try again"),
+        (false, false, None) => String::new(),
     };
     FindingCard {
         tag,
         title: row.title.clone(),
-        state: state.to_owned(),
+        state,
         place: row.id.clone(),
         body: criterion_earlier(row),
         sheet: Some(Box::new(chrome::SheetRow {
@@ -4792,26 +4796,18 @@ fn sends_round_again(feature: &Feature, stage: Stage, ctx: RowCtx) -> bool {
 }
 
 /// Whether `stage`'s page can send `feature`'s Verify failures to Build: at
-/// Verify, its last run failed, nothing running and no round open. So can
-/// Manual test's, of the checks of the fixes it asked for (see
-/// `Feature::unverified`).
+/// Verify, its last run failed, nothing running and no round open.
 fn verify_sends(feature: &Feature, stage: Stage) -> bool {
-    stage_mark(feature, stage) == StageMark::Current
+    stage == Stage::Verify
+        && stage_mark(feature, stage) == StageMark::Current
         && feature.fix_round.is_none()
         && !checks_running(feature)
-        && (feature.verify.as_ref()).is_some_and(|v| {
-            feature::verify::to_fix(v).is_some()
-                && match stage {
-                    Stage::Verify => true,
-                    // On the code the fixes made, not before them.
-                    _ => verifies_fixes(feature, stage) && v.patch == feature.unverified,
-                }
-        })
+        && (feature.verify.as_ref()).is_some_and(|v| feature::verify::to_fix(v).is_some())
 }
 
-/// Whether `stage`'s page has Verify's checks of the fixes Manual test asked
-/// for: at Manual test, until they pass on the code those made.
-fn verifies_fixes(feature: &Feature, stage: Stage) -> bool {
+/// Whether Manual test of `feature` (`stage`) has fixes in its code that
+/// Verify hasn't run on: marking it passed takes it back to Verify.
+fn fixes_unverified(feature: &Feature, stage: Stage) -> bool {
     stage == Stage::ManualTest
         && feature.status == Status::Open
         && feature.current() == Some(stage)
@@ -4992,16 +4988,11 @@ fn writers_page_actions(
     // one can still be wanted.
     let plan_fixes = verify_sends(feature, stage);
     if plan_fixes {
-        // Beside the criteria's own, they say whose they are.
-        let (make, plan) = match stage {
-            Stage::Verify => ("Make fixes", "Plan fixes"),
-            _ => ("Make Verify fixes", "Plan Verify fixes"),
-        };
         out.push((
-            button(make, ButtonStyle::Primary),
+            button("Make fixes", ButtonStyle::Primary),
             PanelOutcome::MakeVerifyFixes,
         ));
-        out.push((button(plan, ButtonStyle::Plain), PanelOutcome::PlanFixes));
+        out.push((button("Plan fixes", ButtonStyle::Plain), PanelOutcome::PlanFixes));
     }
     let waits = feature.status == Status::Open
         && (feature.runs.get(&stage)).is_some_and(|run| run.waits_to_send());
@@ -6775,23 +6766,18 @@ impl Gerdr {
                 self.show_warning(text);
             }
             Stage::AiReview => self.tick_feature(project, slug, Some(&reading.patch), "gerdr"),
-            // Fixes landed since the press: Verify runs on them first.
-            Stage::ManualTest
-                if (self.feature(project, slug)).is_some_and(|f| f.unverified.is_some()) =>
-            {
-                let title = self.feature(project, slug).map_or("", |f| f.title.as_str());
-                let text = format!(
-                    "Verify runs on the latest fixes of \u{201c}{title}\u{201d}: mark it passed once they pass"
-                );
-                self.show_warning(text);
-            }
             Stage::ManualTest if !self.criteria(project, slug).is_empty() => {
                 let criteria = self.criteria(project, slug).to_vec();
                 let passed = self.feature(project, slug).is_some_and(|f| {
                     feature::manual::all_passed(f.manual.as_ref(), &criteria)
                 });
+                let fixed = (self.feature(project, slug)).is_some_and(|f| f.unverified.is_some());
                 if !passed {
                     self.show_warning("Not every criterion passed yet; try them first".into());
+                } else if fixed {
+                    // Fixes landed while it was tried: the stages after
+                    // Build go over them again first.
+                    self.back_to_verify(project, slug);
                 } else {
                     self.tick_feature(project, slug, Some(&reading.patch), "you");
                     let n = criteria.len();
@@ -11153,31 +11139,6 @@ fn verify_sections(
     out
 }
 
-/// How Verify's checks of the fixes Manual test asked for go, on its page
-/// (see `verifies_fixes`): Verify's own page has a card for each.
-fn fixes_checks(feature: &Feature, state: &PanelState) -> Vec<CheckLine> {
-    if let Some(what) = state.verify {
-        return vec![line(inline(what), CheckTone::Note)];
-    }
-    let fixed = feature.unverified.as_deref();
-    match &feature.verify {
-        Some(run) if run.patch.as_deref() != fixed || run.finished.is_none() => {
-            vec![line("waits to run on the fixes", CheckTone::Note)]
-        }
-        Some(run) if run.passed == Some(false) => {
-            let mut out = vec![line(
-                format!("run {} failed on the fixes", run.n),
-                CheckTone::Blocker,
-            )];
-            let failures = (run.failures.iter()).map(|f| line(f.clone(), CheckTone::Blocker));
-            out.extend(capped(failures.collect(), CheckTone::Blocker));
-            out
-        }
-        Some(run) => vec![line(format!("run {} passed", run.n), CheckTone::Ready)],
-        None => vec![line("waits to run on the fixes", CheckTone::Note)],
-    }
-}
-
 /// How Verify's checks last went in `feature`.
 fn last_checks(feature: &Feature, state: &PanelState) -> Vec<CheckLine> {
     match &feature.verify {
@@ -12373,8 +12334,9 @@ fn stage_page(
                         );
                         said.push(line(text, CheckTone::Note));
                     }
-                    if verifies_fixes(feature, stage) {
-                        sections.push(lines("Verify of the fixes", fixes_checks(feature, state)));
+                    if fixes_unverified(feature, stage) {
+                        let text = "fixes changed the code: marking it passed goes back to Verify";
+                        said.push(line(text, CheckTone::Note));
                     }
                     sections.push(lines("Criteria", said));
                     sections.extend(criterion_sections(state, actions, true));
@@ -18820,6 +18782,7 @@ pub(crate) mod tests {
             sent: false,
             made: false,
             earlier: false,
+            retest: None,
             open,
             seen: false,
             shots: Vec::new(),
@@ -19002,6 +18965,7 @@ pub(crate) mod tests {
             sent: false,
             made: false,
             earlier: false,
+            retest: None,
             shots: Vec::new(),
         };
         let rows = vec![
@@ -19151,6 +19115,7 @@ pub(crate) mod tests {
             sent,
             made,
             earlier: true,
+            retest: None,
             shots: Vec::new(),
         };
         let rows = vec![
@@ -19232,7 +19197,18 @@ pub(crate) mod tests {
         // says to try again instead.
         assert!(criterion_details(&rows[2]).ends_with("Tried before the latest fixes"));
         assert!(!criterion_details(&rows[0]).contains("Tried before"));
-        // Verify failed on the fixes: its section, and its own buttons first.
+        // A pass a later fix round changed: untested, saying so.
+        let changed = Row {
+            retest: Some(3),
+            ..row(None, false, false)
+        };
+        assert!(criterion_details(&changed).ends_with("Changed by fix round 3: try it again"));
+        assert_eq!(
+            criterion_card(0, &changed, &[], true).state,
+            "changed by fix round 3: try again"
+        );
+        // Fixes landed that Verify hasn't run on: the page says marking it
+        // passed goes back there, and Verify's failures aren't its to send.
         let mut checked = f.clone();
         checked.unverified = Some("p2".into());
         checked.verify = Some(feature::verify::VerifyRun {
@@ -19244,26 +19220,16 @@ pub(crate) mod tests {
             failures: vec!["api: `make` exited 2".into()],
             ..Default::default()
         });
-        let verify = said(&checked).into_iter().find(|(l, _)| l == "Verify of the fixes");
-        assert_eq!(
-            verify.unwrap().1,
-            ["run 2 failed on the fixes", "api: `make` exited 2"]
-        );
+        let criteria = said(&checked).into_iter().find(|(l, _)| l == "Criteria");
+        let note = "fixes changed the code: marking it passed goes back to Verify";
+        assert!(criteria.unwrap().1.contains(&note.to_owned()));
+        assert!((said(&checked).iter()).all(|(l, _)| l != "Verify of the fixes"));
         let actions = page_actions(&checked, Stage::ManualTest, ctx);
-        let primary: Vec<&PanelOutcome> = (actions.iter())
-            .filter(|(b, _)| b.style == ButtonStyle::Primary)
-            .map(|(_, o)| o)
-            .collect();
-        assert_eq!(primary, [&PanelOutcome::MakeVerifyFixes]);
-        assert!(labels(&checked).contains(&"Plan Verify fixes".to_owned()));
+        assert!(!(actions.iter()).any(|(_, o)| *o == PanelOutcome::MakeVerifyFixes));
+        assert!(!labels(&checked).contains(&"Plan Verify fixes".to_owned()));
         assert!(
             (actions.iter()).any(|(_, o)| *o == PanelOutcome::Manual(Outcome::SendFailures))
         );
-        // Still running on older code: it waits.
-        checked.verify.as_mut().unwrap().patch = Some("p1".into());
-        let verify = said(&checked).into_iter().find(|(l, _)| l == "Verify of the fixes");
-        assert_eq!(verify.unwrap().1, ["waits to run on the fixes"]);
-        assert!(!labels(&checked).contains(&"Plan Verify fixes".to_owned()));
     }
 
     #[test]
@@ -19282,6 +19248,7 @@ pub(crate) mod tests {
             sent: false,
             made: false,
             earlier: false,
+            retest: None,
             shots: Vec::new(),
         };
         let rows = vec![row(Some(Verdict::Pass)), row(Some(Verdict::Pass))];
@@ -22342,6 +22309,7 @@ pub(crate) mod tests {
             f.manual = Some(ManualTest {
                 patch: String::new(),
                 checks: vec![k],
+                retest: Default::default(),
             });
             now(&f)
         };

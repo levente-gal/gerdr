@@ -16,12 +16,12 @@ pub fn builtin(name: &str) -> Option<(&'static str, u32)> {
         "plan-review" => (include_str!("../../assets/prompts/plan-review.md"), 1),
         "plan-review-back" => (include_str!("../../assets/prompts/plan-review-back.md"), 1),
         "plan-final" => (include_str!("../../assets/prompts/plan-final.md"), 1),
-        "build" => (include_str!("../../assets/prompts/build.md"), 6),
+        "build" => (include_str!("../../assets/prompts/build.md"), 7),
         "ai-review" => (include_str!("../../assets/prompts/ai-review.md"), 3),
         "send-fixes" => (include_str!("../../assets/prompts/send-fixes.md"), 2),
         "fix-plan" => (include_str!("../../assets/prompts/fix-plan.md"), 2),
-        "fix-go" => (include_str!("../../assets/prompts/fix-go.md"), 2),
-        "fix-on" => (include_str!("../../assets/prompts/fix-on.md"), 1),
+        "fix-go" => (include_str!("../../assets/prompts/fix-go.md"), 3),
+        "fix-on" => (include_str!("../../assets/prompts/fix-on.md"), 2),
         "continue" => (include_str!("../../assets/prompts/continue.md"), 3),
         "nudge" => (include_str!("../../assets/prompts/nudge.md"), 1),
         "send-back" => (include_str!("../../assets/prompts/send-back.md"), 1),
@@ -85,6 +85,7 @@ mod tests {
             ("fixes.what", "2 findings"),
             ("fixes.section", "Fix round 1"),
             ("fixes.left", "r1-2: Off by one; r1-3"),
+            ("fixes.criteria", ""),
             ("review.diffs", "- api: `git diff abc123...HEAD`"),
             ("review.sent", ""),
             ("review.dismissed", ""),
@@ -240,6 +241,17 @@ mod tests {
         assert!(text.contains("/d/bulk-edit/prompts/build-1-findings-1.md"));
         assert!(!text.contains("Build the unticked milestones"));
         assert!(text.contains("`## Fix round 1`") && text.contains("every one is ticked"));
+        assert!(!text.contains("Criteria:"));
+        // With acceptance criteria, it names those its fixes change.
+        v.insert("fixes.criteria".into(), "yes".into());
+        let named = render_builtin("build", &v).unwrap();
+        assert!(named.contains("under `## Fix round 1`") && named.contains("`Criteria: none`"));
+        for name in ["fix-go", "fix-on"] {
+            let line = render_builtin(name, &v).unwrap();
+            assert!(!line.trim_end().contains('\n'), "{line}");
+            assert!(line.contains("`Criteria: AC-1, AC-3`"), "{line}");
+        }
+        v.insert("fixes.criteria".into(), String::new());
         let line = render_builtin("send-fixes", &v).unwrap();
         assert!(!line.trim_end().contains('\n'), "{line}");
         assert!(line.contains("2 findings") && line.contains("build-1-findings-1.md"));

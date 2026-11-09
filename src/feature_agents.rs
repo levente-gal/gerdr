@@ -974,6 +974,15 @@ pub(crate) fn vars(
         ("fixes.what", String::new()),
         ("fixes.section", String::new()),
         ("fixes.left", String::new()),
+        // Fixes say which acceptance criteria they change: Manual test tries
+        // those again.
+        (
+            "fixes.criteria",
+            match stage == Stage::Build && !crate::manual_test::criteria_in(data).is_empty() {
+                true => "yes".to_owned(),
+                false => String::new(),
+            },
+        ),
         ("fix_plan.path", String::new()),
         ("review.diffs", String::new()),
         ("review.sent", String::new()),
