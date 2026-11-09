@@ -4981,6 +4981,18 @@ fn feature_tab_manual_pages() -> super::FeatureTabView {
     view
 }
 
+/// Manual test's page of a feature taken over from another machine, its
+/// sandbox still running there: Hand back last at the title.
+fn feature_tab_manual_hand_back() -> super::FeatureTabView {
+    use super::{ButtonStyle, PageButton};
+    let mut view = feature_tab_manual_test(false);
+    view.page.buttons.push(PageButton {
+        label: "Hand back".into(),
+        style: ButtonStyle::Plain,
+    });
+    view
+}
+
 /// Manual test's page with its fix rounds: one making its fixes, open, one
 /// over and open, and one dropped, folded.
 fn feature_tab_manual_rounds() -> super::FeatureTabView {
@@ -5099,7 +5111,7 @@ fn round_card(
 }
 
 /// The feature tab's fixtures, by name.
-fn feature_tabs() -> [(&'static str, super::FeatureTabView); 43] {
+fn feature_tabs() -> [(&'static str, super::FeatureTabView); 44] {
     [
         ("tab_build", feature_tab()),
         ("tab_verify_fixes", feature_tab_verify_fixes()),
@@ -5153,11 +5165,12 @@ fn feature_tabs() -> [(&'static str, super::FeatureTabView); 43] {
         ("tab_manual_select", feature_tab_manual_select()),
         ("tab_review_rounds", feature_tab_review_rounds()),
         ("tab_manual_rounds", feature_tab_manual_rounds()),
+        ("tab_manual_hand_back", feature_tab_manual_hand_back()),
     ]
 }
 
 /// Each fixture at the width it shows best at, and Build at all three.
-const TAB_SURFACES: [(&str, i32); 55] = [
+const TAB_SURFACES: [(&str, i32); 56] = [
     ("tab_build", 860),
     ("tab_build", 1180),
     ("tab_build", 1920),
@@ -5213,9 +5226,10 @@ const TAB_SURFACES: [(&str, i32); 55] = [
     ("tab_manual_select", 860),
     ("tab_manual_rounds", 1180),
     ("tab_manual_rounds", 860),
+    ("tab_manual_hand_back", 1180),
 ];
 
-const FEATURE_TAB: [&str; 55] = [
+const FEATURE_TAB: [&str; 56] = [
     "tab_build_860",
     "tab_build_1180",
     "tab_build_1920",
@@ -5271,10 +5285,11 @@ const FEATURE_TAB: [&str; 55] = [
     "tab_manual_select_860",
     "tab_manual_rounds_1180",
     "tab_manual_rounds_860",
+    "tab_manual_hand_back_1180",
 ];
 
 /// The recorded hashes of `FEATURE_TAB`, per case in `CASES`.
-const GOLDEN_FEATURE_TAB: [[u64; 55]; 4] = [
+const GOLDEN_FEATURE_TAB: [[u64; 56]; 4] = [
     // Dark at 1
     [
         0xb47edcf3deebfe55, // tab_build_860
@@ -5332,6 +5347,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 55]; 4] = [
         0x010ec66c0954969d, // tab_manual_select_860
         0x1aad80bb7aa1c5ad, // tab_manual_rounds_1180
         0x7f9a9d7d6b207fa8, // tab_manual_rounds_860
+        0x67311e08c4f41693, // tab_manual_hand_back_1180
     ],
     // Dark at 2
     [
@@ -5390,6 +5406,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 55]; 4] = [
         0x9a471d9cc1895e23, // tab_manual_select_860
         0xafed5987e588048a, // tab_manual_rounds_1180
         0x234251df2b1dba25, // tab_manual_rounds_860
+        0xa6b58fbbabbe2e65, // tab_manual_hand_back_1180
     ],
     // Light at 1
     [
@@ -5448,6 +5465,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 55]; 4] = [
         0xc85de47f1e15da39, // tab_manual_select_860
         0x0734f6120bb9baa5, // tab_manual_rounds_1180
         0xb5fc3742006aa677, // tab_manual_rounds_860
+        0x03cf422d6e9c38a1, // tab_manual_hand_back_1180
     ],
     // Light at 2
     [
@@ -5506,6 +5524,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 55]; 4] = [
         0xc5481c04265fbb04, // tab_manual_select_860
         0xee1fd2fcf94c4e4b, // tab_manual_rounds_1180
         0x33196b42cbee501a, // tab_manual_rounds_860
+        0x8391e750f3735fcf, // tab_manual_hand_back_1180
     ],
 ];
 
