@@ -11577,36 +11577,65 @@ fn round_plans(feature: &Feature, probe: Option<&Probe>) -> Vec<u32> {
 }
 
 /// The stages whose pages list the fix rounds they asked for as cards.
-const ROUND_CARD_STAGES: [Stage; 3] = [Stage::AiReview, Stage::CodeReview, Stage::ManualTest];
+const ROUND_CARD_STAGES: [Stage; 4] = [
+    Stage::Verify,
+    Stage::AiReview,
+    Stage::CodeReview,
+    Stage::ManualTest,
+];
 
 /// The fix rounds `stage`'s page of `feature` shows as cards, newest first:
-/// none but on `ROUND_CARD_STAGES`. Code review's rounds from before rounds
-/// were kept whole stand in by their number, from the comments they took.
+/// none but on `ROUND_CARD_STAGES`. Code review's and Verify's rounds from
+/// before rounds were kept whole stand in by their number, from the comments
+/// or the failures they took.
 fn card_rounds(feature: &Feature, stage: Stage) -> Vec<FixRound> {
     if !ROUND_CARD_STAGES.contains(&stage) {
         return Vec::new();
     }
     let mut out: Vec<FixRound> = feature.rounds_of(stage).into_iter().cloned().collect();
-    if stage == Stage::CodeReview {
-        for fix in &feature.comment_fixes {
-            if !out.iter().any(|r| r.n == fix.round) {
-                out.push(FixRound {
-                    n: fix.round,
-                    what: "Code review's comments".into(),
-                    input: PathBuf::new(),
-                    stage,
-                    phase: FixPhase::Fixing,
-                    sent_back: 0,
-                    asked: 0,
-                    ready: None,
-                    stalled: None,
-                    give_back: Default::default(),
-                    items: Vec::new(),
-                    done: 0,
-                    ended: None,
-                    trail: Default::default(),
-                });
-            }
+    // A round another stage asked for that this page holds the buttons of:
+    // Verify's fixes sent from Manual test, a round the feature came back for.
+    let held = fix_round_on(feature, stage).or_else(|| last_round_on(feature, stage));
+    if let Some(round) = held.filter(|r| !out.iter().any(|o| o.n == r.n)) {
+        out.push(round.clone());
+    }
+    let stub = |n: u32, what: &str, dropped: Option<u64>| FixRound {
+        n,
+        what: what.into(),
+        input: PathBuf::new(),
+        stage,
+        phase: FixPhase::Fixing,
+        sent_back: 0,
+        asked: 0,
+        ready: None,
+        stalled: None,
+        give_back: Default::default(),
+        items: Vec::new(),
+        done: 0,
+        ended: None,
+        trail: feature::fix_round::Trail {
+            dropped,
+            ..Default::default()
+        },
+    };
+    let kept: Vec<(u32, &str, Option<u64>)> = match stage {
+        Stage::CodeReview => (feature.comment_fixes.iter())
+            .map(|fix| (fix.round, "Code review's comments", None))
+            .collect(),
+        Stage::Verify => (feature.verify_fixes.iter())
+            .map(|fix| {
+                (
+                    fix.round,
+                    "Verify's failures",
+                    fix.dropped.then_some(fix.at),
+                )
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    for (n, what, dropped) in kept {
+        if !out.iter().any(|r| r.n == n) {
+            out.push(stub(n, what, dropped));
         }
     }
     out.sort_by_key(|r| std::cmp::Reverse(r.n));
@@ -11721,7 +11750,8 @@ fn round_cards(
         let mut card = fix_card(feature, round, state, actions, now, &asked, &told);
         card.open = open;
         if stage != Stage::CodeReview {
-            told.extend(asked.into_iter().map(|a| a.id));
+            let key = |a: feature::fix_round::Asked| if a.id.is_empty() { a.title } else { a.id };
+            told.extend(asked.into_iter().map(key));
         }
         out.push(PageSection::Round(card));
     }
@@ -11767,6 +11797,17 @@ fn fix_card(
     if asked.is_empty() {
         meta.push(round.what.clone());
     }
+    let verify = (feature.verify_fixes.iter()).find(|fix| fix.round == round.n);
+    if let Some(fix) = verify {
+        if round.trail.agent.is_empty() && !fix.agent.is_empty() {
+            meta.push(fix.agent.clone());
+        }
+        meta.push(format!(
+            "run {} failed {}",
+            fix.run,
+            projects::ago(now, fix.at)
+        ));
+    }
     // A round kept only by its number has no times.
     if round.asked > 0 {
         meta.push(format!("asked {}", projects::ago(now, round.asked)));
@@ -11785,6 +11826,11 @@ fn fix_card(
             meta.push(format!("took {}", took(went, over)));
         }
     }
+    // Verify's next run says whether the fixes did it.
+    if let Some((n, passed)) = verify.and_then(|fix| fix.next) {
+        let how = if passed { "passed" } else { "failed" };
+        meta.push(format!("run {n} {how}"));
+    }
     let asked = (asked.iter())
         .map(|a| chrome::RoundAsked {
             id: a.id.clone(),
@@ -11793,9 +11839,13 @@ fn fix_card(
                 0 => a.note.clone(),
                 n => format!("{} ({})", a.note, plural(n, "screenshot")),
             },
-            now: (!told.contains(&a.id))
-                .then(|| asked_now(feature, round, &a.id, is_open))
-                .flatten(),
+            now: {
+                // A check's failure has no id: its words say which.
+                let key = if a.id.is_empty() { &a.title } else { &a.id };
+                (!told.contains(key))
+                    .then(|| asked_now(feature, round, key, is_open))
+                    .flatten()
+            },
         })
         .collect();
     let listed = (state.probe.map(|p| &p.docs.fix_rounds))
@@ -11901,6 +11951,22 @@ fn asked_of(
             GiveBack::Findings { ids, .. } => review_import::asked(feature.review.as_ref(), ids),
             _ => Vec::new(),
         },
+        // What failed, the first with why: one has no id but its check.
+        Stage::Verify => (feature.verify_fixes.iter().find(|fix| fix.round == round.n))
+            .map(|fix| {
+                (fix.failures.iter().enumerate())
+                    .map(|(i, failure)| Asked {
+                        id: String::new(),
+                        title: failure.clone(),
+                        note: match i {
+                            0 => fix.why.join(" "),
+                            _ => String::new(),
+                        },
+                        shots: 0,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
         _ => Vec::new(),
     }
 }
@@ -11967,8 +12033,33 @@ fn asked_now(feature: &Feature, round: &FixRound, id: &str, open: bool) -> Optio
                 },
             )
         }
+        Stage::Verify => check_now(feature, round, id, open),
         _ => None,
     }
+}
+
+/// How the check whose failure `failure` (`VerifyRun::failures`' words)
+/// fix round `round` of `feature` was asked to fix stands now: as a run of
+/// Verify since that round failed says it.
+fn check_now(feature: &Feature, round: &FixRound, failure: &str, open: bool) -> Option<CheckLine> {
+    let fix = feature
+        .verify_fixes
+        .iter()
+        .find(|fix| fix.round == round.n)?;
+    let run = feature.verify.as_ref()?;
+    let check = (run.checks.iter())
+        .find(|c| failure.starts_with(&format!("{}: `{}`", c.repo, c.command)))?;
+    if run.n <= fix.run || check.run <= fix.run {
+        return open.then(|| line("being fixed", CheckTone::Note));
+    }
+    Some(match &check.outcome {
+        None => line(format!("running in run {}", check.run), CheckTone::Note),
+        Some(o) if o.passed() => line(format!("passed in run {}", check.run), CheckTone::Ready),
+        Some(_) => line(
+            format!("failed again in run {}", check.run),
+            CheckTone::Blocker,
+        ),
+    })
 }
 
 /// How criterion `id`, which fix round `round` of `feature` was asked to fix,
@@ -12666,6 +12757,10 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 6] = [
             ("r / s", "a check: run it again, stop it"),
             ("Space", "a check: skip it, or stop skipping it"),
             ("Shift+R / Shift+S", "Verify: run the failed ones, stop all"),
+            (
+                "Alt+E",
+                "Verify: fold the fix round cards, or open them all",
+            ),
             (
                 "Ctrl+Shift+U",
                 "copy what the worktrees lack: Build and Verify",
@@ -17014,21 +17109,14 @@ pub(crate) mod tests {
         let actions = page_actions(&ready, Stage::Verify, RowCtx::default());
         let state = PanelState::default();
         let page = stage_page(&ready, Stage::Verify, &state, &actions, 2_000);
-        let Some(PageSection::File {
-            name,
-            state,
-            buttons,
-        }) = page.sections.first()
-        else {
-            panic!("the fix plan's card first: {:?}", page.sections);
+        let Some(PageSection::Round(card)) = page.sections.get(1) else {
+            panic!("the round's card first: {:?}", page.sections);
         };
-        assert_eq!(name, "Fix plan: Review 1");
-        assert_eq!(
-            state.text,
-            "Verify failures \u{b7} fix plan ready \u{b7} written 15m ago"
-        );
-        assert_eq!(state.tone, CheckTone::Ready);
-        let held: Vec<&str> = buttons
+        assert_eq!(card.label, "Review 1");
+        assert_eq!(card.state.text, "Verify failures \u{b7} fix plan ready");
+        assert!(card.meta.ends_with("plan written 15m ago"), "{}", card.meta);
+        assert_eq!(card.state.tone, CheckTone::Ready);
+        let held: Vec<&str> = (card.buttons)
             .iter()
             .map(|i| actions[*i].0.label.as_str())
             .collect();
@@ -17141,6 +17229,7 @@ pub(crate) mod tests {
                 } if name.starts_with("Fix plan: ") || name.starts_with("Last fix plan: ") => {
                     Some((state.text, buttons))
                 }
+                PageSection::Round(card) => Some((card.state.text, card.buttons)),
                 _ => None,
             });
             card.map(|(said, buttons)| {
@@ -17176,10 +17265,7 @@ pub(crate) mod tests {
         over.last_fix_round = fixing.fix_round.clone();
         assert_eq!(
             held(&over, Stage::Verify),
-            Some((
-                "Verify failures \u{b7} fixes made".to_owned(),
-                vec!["Open".to_owned()]
-            ))
+            Some(("fixes made".to_owned(), vec!["Open".to_owned()]))
         );
         // With nothing new it can go again, by its name, if one turned out
         // not made.
@@ -22285,5 +22371,91 @@ pub(crate) mod tests {
         assert_eq!(took(0, 30), "1 min");
         assert_eq!(took(0, 3_600), "1 h");
         assert_eq!(took(0, 3_900), "1 h 5 min");
+    }
+
+    #[test]
+    fn verifys_rounds_say_how_each_failed_check_did_since() {
+        let mut f = verified(false);
+        assert_eq!(f.current(), Some(Stage::Verify));
+        let failed = |c: &str| format!("api: `{c}` exited with 1");
+        f.verify_fixes = vec![VerifyFix {
+            round: 1,
+            run: 1,
+            at: 1_500,
+            agent: "Claude Code".into(),
+            failures: vec![failed("test"), failed("lint")],
+            why: vec!["boom".into()],
+            dropped: false,
+            next: Some((2, false)),
+        }];
+        f.fix_asked.insert(1, Stage::Verify);
+        let mut round = manual_round(1, Some(2_000), Some("a1"));
+        round.stage = Stage::Verify;
+        round.trail.asked = Vec::new();
+        round.trail.agent = String::new();
+        f.past_rounds = vec![round];
+        f.fix_rounds = 1;
+        let state = PanelState::default();
+        let mut actions = stage_actions(&f, Stage::Verify, state.ctx, &[], &[], &[]);
+        actions.extend(round_plan_actions(&f, Stage::Verify, None));
+        let page = stage_page(&f, Stage::Verify, &state, &actions, 4_000);
+        let cards: Vec<&chrome::RoundCard> = (page.sections.iter())
+            .filter_map(|s| match s {
+                PageSection::Round(card) => Some(card),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].label, "Verify 1");
+        let asked: Vec<(&str, &str, Option<&str>)> = (cards[0].asked.iter())
+            .map(|a| {
+                (
+                    a.title.as_str(),
+                    a.note.as_str(),
+                    a.now.as_ref().map(|l| l.text.as_str()),
+                )
+            })
+            .collect();
+        assert_eq!(
+            asked,
+            [
+                (
+                    failed("test").as_str(),
+                    "boom",
+                    Some("failed again in run 2")
+                ),
+                (failed("lint").as_str(), "", Some("passed in run 2")),
+            ]
+        );
+        let meta = &cards[0].meta;
+        assert!(
+            meta.starts_with("Claude Code \u{b7} run 1 failed "),
+            "{meta}"
+        );
+        assert!(meta.ends_with("run 2 failed"), "{meta}");
+        // One from before rounds were kept stands in by its number.
+        f.past_rounds.clear();
+        f.verify_fixes[0].dropped = true;
+        let rounds = card_rounds(&f, Stage::Verify);
+        assert_eq!(rounds.len(), 1);
+        assert_eq!(rounds[0].trail.dropped, Some(1_500));
+    }
+
+    #[test]
+    fn a_round_held_on_a_page_it_wasnt_asked_by_still_gets_a_card() {
+        // Verify's failures sent from Manual test: the round is Verify's, its
+        // buttons Manual test's.
+        let f = feature("g", vec![repo("api", true)], Stage::ManualTest as usize);
+        let mut f = in_round(f, Stage::ManualTest, FixPhase::Ready);
+        f.fix_asked.insert(1, Stage::Verify);
+        f.fix_rounds = 1;
+        let state = PanelState::default();
+        let cards = round_cards_of(&f, &state);
+        assert_eq!(cards.len(), 1);
+        assert!(
+            cards[0].1.contains(&"Review".to_owned()),
+            "{:?}",
+            cards[0].1
+        );
     }
 }

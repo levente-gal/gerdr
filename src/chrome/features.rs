@@ -2552,9 +2552,10 @@ impl Stack {
                 self.y += FINDING_GAP;
                 self.caption("Asked to fix");
                 for asked in &card.asked {
-                    let head = match asked.title.is_empty() {
-                        true => asked.id.clone(),
-                        false => format!("{} \u{b7} {}", asked.id, asked.title),
+                    let head = match (asked.id.is_empty(), asked.title.is_empty()) {
+                        (_, true) => asked.id.clone(),
+                        (true, false) => asked.title.clone(),
+                        (false, false) => format!("{} \u{b7} {}", asked.id, asked.title),
                     };
                     self.all_text(&head, Font::Body, Ink::Text, false, BODY_LINE);
                     (self.x, self.w) = (left + ROUND_INDENT, (width - ROUND_INDENT).max(1));
