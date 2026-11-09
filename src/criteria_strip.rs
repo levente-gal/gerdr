@@ -20,8 +20,8 @@
 //! Space or Enter passes, F fails, Del clears, Ctrl+PgUp / Ctrl+PgDn (or Up /
 //! Down) step through the criteria, Alt+C takes a screenshot, Ctrl+O shows the
 //! page, Alt+Down folds it. Writing a note, Enter or Esc saves it (with
-//! nothing written, Esc leaves the criterion as it was) and Alt+C adds a
-//! screenshot.
+//! nothing written, Esc leaves the criterion as it was), Shift+Enter breaks
+//! the line, as on the card, and Alt+C adds a screenshot.
 
 use std::{
     collections::HashMap,
@@ -504,8 +504,7 @@ impl Gerdr {
             .filter(|k| k.state == Verdict::Fail)
             .map(|k| k.note.clone())
             .unwrap_or_default();
-        let mut field = TextField::default();
-        field.set(&note);
+        let field = TextField::multiline(&note);
         let had_keys = self.criteria_strip_has_keys();
         self.criteria_strip.drafts.insert(
             key,
@@ -672,6 +671,13 @@ impl Gerdr {
         };
         let alt_c = mods.alt && !mods.ctrl && !mods.shift && sym == Keysym::c;
         if self.criteria_strip.drafts.contains_key(&target.key()) {
+            let enter = matches!(sym, Keysym::Return | Keysym::KP_Enter);
+            if enter && mods.shift && !(mods.ctrl || mods.alt || mods.logo) {
+                if let Some(field) = self.criteria_field_mut() {
+                    field.newline();
+                }
+                return;
+            }
             match sym {
                 Keysym::Return | Keysym::KP_Enter | Keysym::Escape
                     if !mods.ctrl && !mods.alt && !mods.shift =>
