@@ -3787,7 +3787,7 @@ fn ship_step_row(
     let plan = ship::repo_plan(feature, repo);
     let base = &repo.base;
     let label = match step {
-        ShipStep::Push => format!("Push {} to origin", feature.branch()),
+        ShipStep::Push | ShipStep::PushBranch => format!("Push {} to origin", feature.branch()),
         ShipStep::OpenPr => match feature.shipping.prs.iter().find(|p| p.repo == repo.key) {
             Some(pr) => format!("Keep its pull request open: {}", pr_tail(&pr.url)),
             None => format!("Open a pull request into {base}"),

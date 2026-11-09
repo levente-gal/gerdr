@@ -224,8 +224,8 @@ impl Shipping {
 pub enum Route {
     /// Through origin: `RepoPlan::push`, `RepoPlan::open_pr`.
     Pr,
-    /// Into the base in its main worktree: `RepoPlan::merge`,
-    /// `RepoPlan::push_base`.
+    /// Into the base in its main worktree: `RepoPlan::push_branch`,
+    /// `RepoPlan::merge`, `RepoPlan::push_base`.
     Merge,
     /// It stays as it is.
     Nothing,
@@ -247,7 +247,7 @@ impl Route {
     pub fn steps(self) -> &'static [ShipStep] {
         match self {
             Self::Pr => &[ShipStep::Push, ShipStep::OpenPr],
-            Self::Merge => &[ShipStep::Merge, ShipStep::PushBase],
+            Self::Merge => &[ShipStep::PushBranch, ShipStep::Merge, ShipStep::PushBase],
             Self::Nothing => &[],
         }
     }
@@ -276,6 +276,9 @@ impl Route {
 pub enum ShipStep {
     Push,
     OpenPr,
+    /// Push `feature/<slug>` to origin on the merge route: the same push as
+    /// `Push`, ticked apart from it.
+    PushBranch,
     Merge,
     PushBase,
 }
@@ -289,6 +292,9 @@ pub struct RepoPlan {
     pub push: bool,
     /// Open a pull request into the base: needs `push`.
     pub open_pr: bool,
+    /// Push `feature/<slug>` to origin too when it merges.
+    #[serde(default)]
+    pub push_branch: bool,
     /// Squash `feature/<slug>` into the base in its main worktree.
     pub merge: bool,
     /// Push the base to origin after: needs `merge`.
@@ -302,6 +308,7 @@ impl RepoPlan {
             route,
             push: true,
             open_pr: true,
+            push_branch: false,
             merge: true,
             push_base: false,
         }
@@ -312,6 +319,7 @@ impl RepoPlan {
         match step {
             ShipStep::Push => self.push,
             ShipStep::OpenPr => self.push && self.open_pr,
+            ShipStep::PushBranch => self.push_branch,
             ShipStep::Merge => self.merge,
             ShipStep::PushBase => self.merge && self.push_base,
         }
@@ -333,6 +341,7 @@ impl RepoPlan {
                     self.push = true;
                 }
             }
+            ShipStep::PushBranch => self.push_branch = on,
             ShipStep::Merge => {
                 self.merge = on;
                 if !on {

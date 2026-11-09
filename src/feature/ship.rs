@@ -15,7 +15,8 @@
 //! - squash (`squash_command`): a command for a tab that goes to each
 //!   repository's own main worktree in turn (a linked project's too) and
 //!   squashes the branch into the base and commits, the message
-//!   prefilled with the title, for the user to edit. The feature is done
+//!   prefilled with the title, for the user to edit. When ticked,
+//!   `feature/<slug>` goes to origin first, as through origin. The feature is done
 //!   once every such branch reads as merged (`Probe::merged`), then those
 //!   ticked go to origin (`push_base`).
 //! - nothing: it stays as it is. With no step ticked anywhere, the feature
@@ -117,7 +118,9 @@ impl RepoCheck {
     /// Why `step` can't run, if so.
     pub fn why_not(&self, step: ShipStep) -> Option<&str> {
         match step {
-            ShipStep::Push | ShipStep::OpenPr | ShipStep::PushBase => self.no_origin.as_deref(),
+            ShipStep::Push | ShipStep::OpenPr | ShipStep::PushBranch | ShipStep::PushBase => {
+                self.no_origin.as_deref()
+            }
             ShipStep::Merge => self.no_merge.as_deref(),
         }
     }
@@ -169,7 +172,9 @@ pub fn plan_actions(feature: &Feature, check: &ShipCheck) -> Planned {
             }
             let (key, base) = (repo.key.clone(), repo.base.clone());
             match step {
-                ShipStep::Push => through_origin.push(Action::Push { repo: key }),
+                ShipStep::Push | ShipStep::PushBranch => {
+                    through_origin.push(Action::Push { repo: key })
+                }
                 ShipStep::OpenPr => {
                     prs += 1;
                     let kept = feature.shipping.prs.iter().find(|p| p.repo == key);
@@ -1184,6 +1189,24 @@ esac
         assert_eq!(
             check.actions,
             [
+                merge.clone(),
+                Action::PushBase {
+                    repo: api(),
+                    base: "main".into()
+                }
+            ]
+        );
+        let (_, command) = squash_command(&f, &check.actions);
+        assert!(!command.contains("git push"), "{command}");
+
+        // Push the feature's branch too: through origin, before the squash.
+        let plan = f.ship_plan.repos.get_mut("api").unwrap();
+        plan.toggle(ShipStep::PushBranch);
+        let check = planned(&f, &modes);
+        assert_eq!(
+            check.actions,
+            [
+                Action::Push { repo: api() },
                 merge,
                 Action::PushBase {
                     repo: api(),
@@ -1358,6 +1381,11 @@ esac
         assert!(plan.ticked(ShipStep::Push) && plan.ticked(ShipStep::OpenPr));
         plan.route = Route::Merge;
         assert_eq!(plan.steps(), [ShipStep::Merge]);
+        // Its own push, not the pull request route's.
+        plan.toggle(ShipStep::PushBranch);
+        assert_eq!(plan.steps(), [ShipStep::PushBranch, ShipStep::Merge]);
+        plan.toggle(ShipStep::PushBranch);
+        assert!(plan.ticked(ShipStep::Push));
         plan.toggle(ShipStep::PushBase);
         assert_eq!(plan.steps(), [ShipStep::Merge, ShipStep::PushBase]);
         plan.toggle(ShipStep::Merge);

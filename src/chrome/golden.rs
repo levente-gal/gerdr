@@ -3575,16 +3575,17 @@ fn feature_tab_ship_blocked() -> super::FeatureTabView {
                 0,
                 None,
                 vec![
+                    ship_row(1, "Push feature/bulk-export to origin", None, false),
                     ship_row(
-                        1,
+                        2,
                         "Merge into main in ~/code/api",
                         Some(("api's main worktree is on dev: switch it to main", true)),
                         true,
                     ),
-                    ship_row(2, "Push main to origin", None, false),
+                    ship_row(3, "Push main to origin", None, false),
                 ],
             )),
-            PageSection::ShipGroup(ship_afterwards(3, false)),
+            PageSection::ShipGroup(ship_afterwards(4, false)),
         ],
     };
     view
@@ -3673,20 +3674,21 @@ fn feature_tab_ship_routes() -> super::FeatureTabView {
         3,
         None,
         vec![
+            ship_row(4, "Push feature/bulk-export to origin", None, true),
             ship_row(
-                4,
+                5,
                 "Merge into dev in ~/code/web",
                 Some(("Squash; you edit the message in a tab", false)),
                 true,
             ),
-            ship_row(5, "Push dev to origin", None, true),
+            ship_row(6, "Push dev to origin", None, true),
         ],
     );
     web.selected = Some(3);
     let mut docs = ship_group(
         "docs \u{b7} 1 commit \u{b7} +4 \u{2212}0 \u{b7} into main",
         2,
-        6,
+        7,
         Some("Nothing gets pushed or merged"),
         Vec::new(),
     );
@@ -3716,7 +3718,7 @@ fn feature_tab_ship_routes() -> super::FeatureTabView {
             PageSection::ShipGroup(api),
             PageSection::ShipGroup(web),
             PageSection::ShipGroup(docs),
-            PageSection::ShipGroup(ship_afterwards(7, false)),
+            PageSection::ShipGroup(ship_afterwards(8, false)),
         ],
     };
     view.hover = Some(super::FeatureTabHit::ShipRoute(3, 2));
@@ -5391,9 +5393,9 @@ const GOLDEN_FEATURE_TAB: [[u64; 57]; 4] = [
         0xe5c6b54fe50866d8, // tab_verify_failed_1920
         0x182a16a4819b681d, // tab_verify_running_1180
         0x82bb7f6171efd999, // tab_fix_plan_860
-        0x5a50ecfcc094d3ce, // tab_ship_blocked_1180
-        0x47bcafcac87dbe34, // tab_ship_routes_1180
-        0x3f86b0346bf552cb, // tab_ship_routes_860
+        0x4712fed1398c3dd3, // tab_ship_blocked_1180
+        0x4a220ca15811f7f8, // tab_ship_routes_1180
+        0x55350a02ac657a44, // tab_ship_routes_860
         0xad0003676bd9219f, // tab_ship_finish_1180
         0x426ec15d8a3d8d53, // tab_done_1920
         0xcc415c3a7a99a7ff, // tab_later_860
@@ -5451,9 +5453,9 @@ const GOLDEN_FEATURE_TAB: [[u64; 57]; 4] = [
         0xd1ad4571a21deadf, // tab_verify_failed_1920
         0xe95f15636a93b97f, // tab_verify_running_1180
         0x28fda7ee775f9d64, // tab_fix_plan_860
-        0x41161f008a5bd7ae, // tab_ship_blocked_1180
-        0x0edbde3fc83da971, // tab_ship_routes_1180
-        0xd2a819bf55a73af0, // tab_ship_routes_860
+        0xea03c7d9de484c16, // tab_ship_blocked_1180
+        0x69eba1d337a4bd66, // tab_ship_routes_1180
+        0x433376927c71c4fe, // tab_ship_routes_860
         0xbbd5ef5f84b78c62, // tab_ship_finish_1180
         0x90a36aaee3d0aa1f, // tab_done_1920
         0x6e2cb877e129791a, // tab_later_860
@@ -5511,9 +5513,9 @@ const GOLDEN_FEATURE_TAB: [[u64; 57]; 4] = [
         0x7c07bc659866d87e, // tab_verify_failed_1920
         0x4a8e336fe34d7a13, // tab_verify_running_1180
         0xf0f24acb3a4499c2, // tab_fix_plan_860
-        0x8f1d878a66cd4e33, // tab_ship_blocked_1180
-        0x2083802d8d04668a, // tab_ship_routes_1180
-        0x79aa1577f500bb1e, // tab_ship_routes_860
+        0xa17c69b449f457c2, // tab_ship_blocked_1180
+        0x117edf0631c78a95, // tab_ship_routes_1180
+        0xa2f2d1b733b884fb, // tab_ship_routes_860
         0xce65a05e867740c3, // tab_ship_finish_1180
         0xb2b62b674cb05405, // tab_done_1920
         0x94793a1c5513c298, // tab_later_860
@@ -5571,9 +5573,9 @@ const GOLDEN_FEATURE_TAB: [[u64; 57]; 4] = [
         0x834e87d1b77bb685, // tab_verify_failed_1920
         0x82805a0d8a12c5b7, // tab_verify_running_1180
         0x0c25cafde96fceda, // tab_fix_plan_860
-        0xf9b724da9768cf8e, // tab_ship_blocked_1180
-        0xd891c3261b8c5337, // tab_ship_routes_1180
-        0xd0a0f2ea13ee735a, // tab_ship_routes_860
+        0x5ae0fcd98a994735, // tab_ship_blocked_1180
+        0x489cd2da7e02d2bb, // tab_ship_routes_1180
+        0xd855e4d620eab058, // tab_ship_routes_860
         0x6f8069682d015e87, // tab_ship_finish_1180
         0x430e69f233dbc908, // tab_done_1920
         0x973f418bd020aecf, // tab_later_860
