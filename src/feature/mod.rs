@@ -30,6 +30,7 @@
 
 pub mod agents;
 pub mod artifacts;
+pub mod drafts;
 pub mod fix_round;
 pub mod graph;
 pub mod hook;
@@ -618,6 +619,9 @@ pub struct Feature {
     /// (`fix_round::keep_past`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub past_rounds: Vec<fix_round::FixRound>,
+    /// Discover's and Plan's drafts, each as it went (see `drafts`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub drafts: Vec<drafts::Draft>,
     /// How many fix rounds it had: the next one's number goes on from it.
     #[serde(default)]
     pub fix_rounds: u32,
@@ -1551,6 +1555,7 @@ pub(crate) mod tests {
             ran_once: Default::default(),
             fix_rounds: 0,
             past_rounds: Vec::new(),
+            drafts: Vec::new(),
             carry: None,
             unverified: None,
             back_from: None,
@@ -1648,6 +1653,7 @@ pub(crate) mod tests {
             ran_once: Default::default(),
             fix_rounds: 0,
             past_rounds: Vec::new(),
+            drafts: Vec::new(),
             carry: None,
             unverified: None,
             back_from: None,

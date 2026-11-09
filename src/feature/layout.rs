@@ -1567,6 +1567,7 @@ mod tests {
             ran_once: Default::default(),
             fix_rounds: 0,
             past_rounds: Vec::new(),
+            drafts: Vec::new(),
             carry: None,
             unverified: None,
             back_from: None,

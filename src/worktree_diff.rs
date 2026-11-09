@@ -139,6 +139,7 @@ impl DocOf {
             DocFile::Evidence => "Evidence",
             DocFile::FixPlan => "Fix plan",
             DocFile::PlanChanges => "Plan changes",
+            DocFile::DraftChanges(..) => "Draft changes",
             DocFile::Stage(Stage::Plan) => "Plan",
             DocFile::Stage(Stage::PlanReview) => "Final plan",
             DocFile::Stage(_) => "Brief",
@@ -315,7 +316,7 @@ impl WorktreeDiff {
         let mut diff = DiffView::default();
         diff.review = review;
         // Changes show as changes; a file under review reads as a page.
-        diff.plain = doc.file != DocFile::PlanChanges;
+        diff.plain = !doc.file.shows_changes();
         let root = doc.path.parent().map(Path::to_path_buf).unwrap_or_default();
         WorktreeDiff {
             root,
@@ -594,7 +595,7 @@ impl WorktreeDiff {
     /// Whether it shows a file only to read whatever its stage: Verify's
     /// evidence, the final plan's changes.
     fn evidence(&self) -> bool {
-        (self.doc.as_ref()).is_some_and(|d| d.evidence() || d.file == DocFile::PlanChanges)
+        (self.doc.as_ref()).is_some_and(|d| d.evidence() || d.file.shows_changes())
     }
 
     /// Whether it shows a file whose stage is done.
@@ -1013,6 +1014,13 @@ impl WorktreeDiff {
             }
             if doc.file == DocFile::PlanChanges {
                 return format!("Plan review \u{b7} what {} changed", doc.name());
+            }
+            if let DocFile::DraftChanges(stage, k) = doc.file {
+                return format!(
+                    "{} \u{b7} what draft {k} of {} changed",
+                    stage.label(),
+                    doc.name()
+                );
             }
             return format!("{} · {}", doc.file.stage().label(), doc.name());
         }

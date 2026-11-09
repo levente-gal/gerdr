@@ -1505,6 +1505,8 @@ pub enum PanelOutcome {
     OpenRoundPlan(u32),
     /// Show what the final plan changed in the plan, only to read.
     PlanChanges,
+    /// Show what draft `k` of the stage's file changed from the one before.
+    DraftChanges(Stage, u32),
     /// Show what round `n`'s fixes changed, in a diff only to read.
     RoundDiff(u32),
     /// Open fix round `n`'s card on its page, or fold it.
@@ -1651,6 +1653,7 @@ impl PanelOutcome {
                 | Self::FoldFixRound(_)
                 | Self::RoundDiff(_)
                 | Self::PlanChanges
+                | Self::DraftChanges(..)
                 | Self::OpenRoundPlan(_)
                 | Self::FoldCriterion(..)
                 | Self::FoldCriteria(..)
@@ -3391,6 +3394,7 @@ fn action_hint(action: &PanelOutcome) -> &'static str {
         PanelOutcome::ResendFixes => "send the fixes again",
         PanelOutcome::OpenRoundPlan(_) => "open the round's plan",
         PanelOutcome::PlanChanges => "show what the final plan changed",
+        PanelOutcome::DraftChanges(..) => "show what the draft changed",
         PanelOutcome::RoundDiff(_) => "show what the fixes changed",
         PanelOutcome::MakeVerifyFixes => "make fixes",
         PanelOutcome::AskFixPlan => "ask again",
@@ -7378,6 +7382,7 @@ impl Gerdr {
             ran_once: Default::default(),
             fix_rounds: 0,
             past_rounds: Vec::new(),
+            drafts: Vec::new(),
             carry: None,
             unverified: None,
             back_from: None,
@@ -8078,6 +8083,9 @@ impl Gerdr {
             PanelOutcome::OpenRoundPlan(n) => self.open_round_plan(&project, &slug, n),
             PanelOutcome::RoundDiff(n) => self.open_round_diff(&project, &slug, n),
             PanelOutcome::PlanChanges => self.open_doc_tab(&project, &slug, DocFile::PlanChanges),
+            PanelOutcome::DraftChanges(stage, k) => {
+                self.open_doc_tab(&project, &slug, DocFile::DraftChanges(stage, k));
+            }
             PanelOutcome::FoldFixRound(n) => {
                 if let Some(panel) = self.features.panel.as_mut() {
                     panel.toggle_fix_round(n);
@@ -11598,6 +11606,9 @@ fn card_numbers(feature: &Feature, stage: Stage) -> Vec<u32> {
             .flat_map(feature::plan_review::runs)
             .map(|r| r.n)
             .collect(),
+        Stage::Discover | Stage::Plan => (feature::drafts::of(&feature.drafts, stage).iter())
+            .map(|d| d.k)
+            .collect(),
         _ => card_rounds(feature, stage, None)
             .iter()
             .map(|r| r.n)
@@ -11652,7 +11663,7 @@ fn has_own_plan_button(feature: &Feature, round: &FixRound) -> bool {
 /// The fix round whose card `stage`'s page of `feature` shows open first:
 /// the open round if the page lists it, else the newest.
 fn newest_round(feature: &Feature, stage: Stage) -> Option<u32> {
-    if stage == Stage::PlanReview {
+    if matches!(stage, Stage::PlanReview | Stage::Discover | Stage::Plan) {
         return card_numbers(feature, stage).first().copied();
     }
     let rounds = card_rounds(feature, stage, None);
@@ -12058,6 +12069,9 @@ fn round_plan_actions(
     match ROUND_CARD_STAGES.contains(&stage) {
         true => round_card_actions(feature, stage, probe),
         false if stage == Stage::PlanReview => run_card_actions(feature, probe),
+        false if matches!(stage, Stage::Discover | Stage::Plan) => {
+            draft_card_actions(feature, stage)
+        }
         false => Vec::new(),
     }
 }
@@ -12077,6 +12091,116 @@ fn run_card_actions(feature: &Feature, probe: Option<&Probe>) -> Vec<(PageButton
     }
     if runs.len() > 1 {
         out.extend((runs.iter()).map(|n| (button("Show"), PanelOutcome::FoldFixRound(*n))));
+    }
+    out
+}
+
+/// The buttons of the draft cards on `stage`'s page of `feature`: what each
+/// but the first changed, and folding.
+fn draft_card_actions(feature: &Feature, stage: Stage) -> Vec<(PageButton, PanelOutcome)> {
+    let button = |label: &str| PageButton {
+        label: label.to_owned(),
+        style: ButtonStyle::Plain,
+    };
+    let ks = card_numbers(feature, stage);
+    let mut out = Vec::new();
+    for &k in &ks {
+        if k > 1 {
+            out.push((button("Diff"), PanelOutcome::DraftChanges(stage, k)));
+        }
+        if ks.len() > 1 {
+            out.push((button("Show"), PanelOutcome::FoldFixRound(k)));
+        }
+    }
+    out
+}
+
+/// The drafts of `stage`'s file in `feature` as cards, newest first, under a
+/// caption counting them: who wrote each and when, what it was sent back
+/// with or when it was approved, the newest saying where the review stands.
+fn draft_cards(
+    feature: &Feature,
+    stage: Stage,
+    state: &PanelState,
+    actions: &[(PageButton, PanelOutcome)],
+    now: u64,
+) -> Vec<PageSection> {
+    let drafts = feature::drafts::of(&feature.drafts, stage);
+    let Some(newest) = drafts.first().map(|d| d.k) else {
+        return Vec::new();
+    };
+    let caption = match drafts.len() {
+        1 => "Draft".to_owned(),
+        n => format!("Drafts \u{b7} {n}"),
+    };
+    let mut out = vec![lines(&caption, Vec::new())];
+    let run = feature.runs.get(&stage);
+    let current = feature.status == Status::Open && feature.current() == Some(stage);
+    for draft in drafts {
+        let latest = draft.k == newest;
+        let sent = match draft.comments.len() {
+            0 => "sent back".to_owned(),
+            n => format!("sent back with {}", plural(n, "comment")),
+        };
+        let (dot, state_line) = match (draft.approved, draft.sent_back) {
+            (Some(_), _) => (Dot::Done, line("approved", CheckTone::Ready)),
+            // Sent back and not written again yet: its agent is at it.
+            (None, Some(_)) if latest && current && run.is_some_and(|r| r.ready.is_none()) => (
+                Dot::Working,
+                line(
+                    format!("{sent} \u{b7} being written again"),
+                    CheckTone::Note,
+                ),
+            ),
+            (None, Some(_)) => (Dot::Done, line(sent, CheckTone::Note)),
+            (None, None) if latest && current => {
+                (Dot::Idle, line("ready for review", CheckTone::Ready))
+            }
+            (None, None) => (Dot::Done, line("written", CheckTone::Note)),
+        };
+        let mut meta = Vec::new();
+        if !draft.agent.is_empty() {
+            meta.push(match draft.model.is_empty() {
+                true => draft.agent.clone(),
+                false => format!("{} ({})", draft.agent, draft.model),
+            });
+        }
+        meta.push(format!("written {}", projects::ago(now, draft.written)));
+        if let Some(at) = draft.sent_back {
+            meta.push(format!("sent back {}", projects::ago(now, at)));
+        }
+        if let Some(at) = draft.approved {
+            meta.push(format!("approved {}", projects::ago(now, at)));
+        }
+        let held = |o: &PanelOutcome| match o {
+            PanelOutcome::DraftChanges(s, k) => *s == stage && *k == draft.k,
+            PanelOutcome::FoldFixRound(k) => *k == draft.k,
+            _ => false,
+        };
+        let buttons = (actions.iter().enumerate())
+            .filter(|(_, (_, o))| held(o))
+            .map(|(i, _)| i)
+            .collect();
+        out.push(PageSection::Round(chrome::RoundCard {
+            label: format!("Draft {}", draft.k),
+            dot,
+            state: state_line,
+            meta: meta.join(" \u{b7} "),
+            asked: (draft.comments.iter())
+                .map(|c| chrome::RoundAsked {
+                    id: c.id.clone(),
+                    title: c.title.clone(),
+                    note: c.note.clone(),
+                    now: None,
+                })
+                .collect(),
+            asked_caption: "Comments sent back",
+            fixes: Vec::new(),
+            running: Vec::new(),
+            changed: Vec::new(),
+            open: fix_round_open(Some(newest), draft.k, &state.fix_rounds_flipped),
+            buttons,
+        }));
     }
     out
 }
@@ -12334,6 +12458,7 @@ fn stage_page(
             Stage::Discover | Stage::Plan => {
                 sections.extend(card());
                 sections.push(file_card(feature, stage, state.ctx, actions));
+                sections.extend(draft_cards(feature, stage, state, actions, now));
                 sections.extend(doc_of(state.probe, stage));
             }
             Stage::Build => {
@@ -12843,6 +12968,10 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 6] = [
                 "Build: one agent, or a fresh agent per milestone",
             ),
             ("Ctrl+Shift+K", "skip Plan review"),
+            (
+                "Alt+E",
+                "Discover, Plan: fold the draft cards, or open them all",
+            ),
             (
                 "Alt+E",
                 "Plan review: fold the review run cards, or open them all",
@@ -13936,6 +14065,7 @@ pub(crate) mod tests {
             ran_once: Default::default(),
             fix_rounds: 0,
             past_rounds: Vec::new(),
+            drafts: Vec::new(),
             carry: None,
             unverified: None,
             back_from: None,
@@ -22544,5 +22674,89 @@ pub(crate) mod tests {
         assert_eq!(panel.fix_rounds_flipped, BTreeSet::from([2]));
         panel.toggle_rounds(&f, stage);
         assert_eq!(panel.fix_rounds_flipped, BTreeSet::from([1]));
+    }
+
+    #[test]
+    fn discover_and_plan_list_their_drafts_as_cards() {
+        use crate::feature::{drafts::Draft, fix_round::Asked};
+        let stage = Stage::Plan;
+        let mut f = feature("p", vec![repo("api", true)], stage_index(stage));
+        assert_eq!(f.current(), Some(stage));
+        let draft = |k: u32, sent_back: Option<u64>| Draft {
+            stage,
+            k,
+            run: 1,
+            agent: "Claude Code".into(),
+            model: "opus".into(),
+            written: 1_000 * u64::from(k),
+            sent_back,
+            comments: Vec::new(),
+            approved: None,
+        };
+        let mut one = draft(1, Some(1_500));
+        one.comments = vec![Asked {
+            id: "C1".into(),
+            title: "line 3: Use a queue".into(),
+            note: "Why not cron?".into(),
+            shots: 0,
+        }];
+        f.drafts = vec![one, draft(2, None)];
+        f.runs.insert(
+            stage,
+            feature::agents::StageRun {
+                n: 1,
+                ready: Some(2_000),
+                ..Default::default()
+            },
+        );
+        let state = PanelState::default();
+        let mut actions = stage_actions(&f, stage, state.ctx, &[], &[], &[]);
+        actions.extend(round_plan_actions(&f, stage, None));
+        let page = stage_page(&f, stage, &state, &actions, 2_120);
+        let cards: Vec<&chrome::RoundCard> = (page.sections.iter())
+            .filter_map(|s| match s {
+                PageSection::Round(card) => Some(card),
+                _ => None,
+            })
+            .collect();
+        let labels: Vec<&str> = cards.iter().map(|c| c.label.as_str()).collect();
+        assert_eq!(labels, ["Draft 2", "Draft 1"]);
+        assert_eq!(cards[0].state.text, "ready for review");
+        assert_eq!(cards[0].dot, Dot::Idle);
+        assert_eq!(cards[1].state.text, "sent back with 1 comment");
+        assert_eq!(cards[1].asked_caption, "Comments sent back");
+        assert_eq!(cards[1].asked[0].note, "Why not cron?");
+        assert_eq!(cards[0].meta, "Claude Code (opus) \u{b7} written 2m ago");
+        let held = |card: &chrome::RoundCard| -> Vec<&str> {
+            (card.buttons.iter())
+                .map(|&i| page.buttons[i].label.as_str())
+                .collect()
+        };
+        // The first has nothing before it to show changes against.
+        assert_eq!(held(cards[0]), ["Diff", "Hide"]);
+        assert_eq!(held(cards[1]), ["Show"]);
+        assert!(
+            actions
+                .iter()
+                .any(|(_, o)| *o == PanelOutcome::DraftChanges(stage, 2))
+        );
+        // Sent back again and being rewritten: the newest says so.
+        let mut back = f.clone();
+        back.drafts[1].sent_back = Some(2_100);
+        back.runs.get_mut(&stage).unwrap().ready = None;
+        let page = stage_page(&back, stage, &state, &actions, 2_120);
+        let newest = page.sections.iter().find_map(|s| match s {
+            PageSection::Round(card) => Some(card),
+            _ => None,
+        });
+        assert_eq!(
+            newest.unwrap().state.text,
+            "sent back \u{b7} being written again"
+        );
+        assert_eq!(newest.unwrap().dot, Dot::Working);
+        // Alt+E folds them all, then opens them all.
+        let mut panel = FeaturePanel::default();
+        panel.toggle_rounds(&f, stage);
+        assert_eq!(panel.fix_rounds_flipped, BTreeSet::from([2]));
     }
 }
