@@ -4,8 +4,11 @@
 //! being the one Open app opens). Without, they come from the commands the
 //! sandbox runs: a Django server gives its site, then its admin when it has
 //! one; Expo gives its web client, which never comes first, as the backend's
-//! own site is what is tried by hand. With neither, Open app guesses from what
-//! listens (`sandbox_run::app_port`).
+//! own site is what is tried by hand. A JavaScript dev server (Vite, Nx, `npm
+//! run dev`) comes before them all: it is the app, Django its API then. Its port
+//! is guessed from what listens as it opens (`sandbox_run::app_port`), as Open
+//! app does with no pages at all. A command running a shell script is read
+//! through it.
 //!
 //! They are found as a sandbox starts and kept in its record, so a gerdr on
 //! another machine shows the same buttons.
@@ -25,12 +28,16 @@ const EXPO_PORT: u16 = 8081;
 const URLS_DEPTH: usize = 4;
 
 /// A page of a sandbox's app.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Page {
     /// What its button says.
     pub name: String,
     /// Where it is, on the sandbox's `localhost`.
     pub url: String,
+    /// Its port is what looks most like an app of what listens as it opens,
+    /// past the other pages' ports; `url` says no port then.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub guess: bool,
 }
 
 impl Page {
@@ -38,11 +45,22 @@ impl Page {
         Page {
             name: name.to_owned(),
             url: format!("http://localhost:{port}{path}"),
+            guess: false,
+        }
+    }
+
+    /// The page of a dev server whose port only listening tells.
+    fn guessed(name: &str) -> Self {
+        Page {
+            name: name.to_owned(),
+            url: "http://localhost/".to_owned(),
+            guess: true,
         }
     }
 }
 
 /// A command the sandbox runs, in the folder it runs in.
+#[derive(Clone, Copy)]
 pub struct Ran<'a> {
     pub dir: &'a Path,
     pub command: &'a str,
@@ -58,21 +76,32 @@ pub fn pages(set: &[Page], url: Option<&str>, ran: &[Ran]) -> Vec<Page> {
         return vec![Page {
             name: "App".to_owned(),
             url: url.to_owned(),
+            guess: false,
         }];
     }
     let mut first = Vec::new();
     let mut last = Vec::new();
+    let mut app = false;
     for ran in ran {
-        if let Some(port) = django_port(ran.command) {
-            first.push(Page::new("Web app", port, "/"));
-            if let Some(path) = admin_path(ran.dir) {
-                first.push(Page::new("Django admin", port, &path));
+        let script = shell_script(ran.command, ran.dir).unwrap_or_default();
+        let lines = (script.lines()).filter(|line| !line.trim_start().starts_with('#'));
+        for command in std::iter::once(ran.command).chain(lines) {
+            if let Some(port) = django_port(command) {
+                first.push(Page::new("Web app", port, "/"));
+                if let Some(path) = admin_path(ran.dir) {
+                    first.push(Page::new("Django admin", port, &path));
+                }
+            } else if let Some(port) = expo_port(command, ran.dir)
+                && has_web(ran.dir)
+            {
+                last.push(Page::new("Expo web", port, "/"));
+            } else if js_dev_server(command, ran.dir) {
+                app = true;
             }
-        } else if let Some(port) = expo_port(ran.command, ran.dir)
-            && has_web(ran.dir)
-        {
-            last.push(Page::new("Expo web", port, "/"));
         }
+    }
+    if app {
+        first.insert(0, Page::guessed("App"));
     }
     first.extend(last);
     let mut seen = Vec::new();
@@ -82,6 +111,68 @@ pub fn pages(set: &[Page], url: Option<&str>, ran: &[Ran]) -> Vec<Page> {
         new
     });
     first
+}
+
+/// The text of the shell script `command`, run in `dir`, runs: `bash
+/// ./runlocal.sh`, `sh run.sh`, `./run.sh`. Its servers are started inside,
+/// out of the command's sight.
+fn shell_script(command: &str, dir: &Path) -> Option<String> {
+    let words = words(command);
+    let mut rest = words.iter().copied().skip_while(|w| w.contains('='));
+    let first = rest.next()?;
+    let shell = Path::new(first).file_name()?.to_str()?;
+    let file = if matches!(shell, "bash" | "sh" | "zsh" | "dash") {
+        rest.find(|w| !w.starts_with('-'))?
+    } else if first.ends_with(".sh") {
+        first
+    } else {
+        return None;
+    };
+    let path = dir.join(file);
+    // A script is small; anything big is no script to read through.
+    if fs::metadata(&path).ok()?.len() > 64 * 1024 {
+        return None;
+    }
+    fs::read_to_string(path).ok()
+}
+
+/// Whether `command`, run in `dir`, starts a JavaScript dev server: itself, or
+/// through a script of `dir`'s `package.json`.
+fn js_dev_server(command: &str, dir: &Path) -> bool {
+    let starts = |words: &[&str]| {
+        let tool = |w: &str| {
+            Path::new(w)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(w)
+                .to_owned()
+        };
+        let names: Vec<String> = words.iter().map(|w| tool(w)).collect();
+        let has = |name: &str| names.iter().any(|n| n == name);
+        let then = |name: &str, next: &[&str]| {
+            (names.windows(2)).any(|pair| pair[0] == name && next.contains(&pair[1].as_str()))
+        };
+        has("vite")
+            || has("webpack-dev-server")
+            || then("webpack", &["serve"])
+            || then("ng", &["serve"])
+            || then("nx", &["serve"])
+            || (has("nx") && names.iter().any(|n| n.contains(":serve")))
+            || then("next", &["dev"])
+            || then("nuxt", &["dev"])
+            || then("astro", &["dev"])
+            || then("react-scripts", &["start"])
+    };
+    let words = words(command);
+    if starts(&words) {
+        return true;
+    }
+    let Some(script) = script_name(&words) else {
+        return false;
+    };
+    (read_manifest(dir).as_ref())
+        .and_then(|m| m.get("scripts")?.get(script)?.as_str().map(str::to_owned))
+        .is_some_and(|text| starts(&self::words(&text)))
 }
 
 /// The port a Django server `command` starts listens on, if it starts one.
@@ -305,10 +396,84 @@ mod tests {
     }
 
     #[test]
+    fn servers_a_shell_script_starts_give_pages() {
+        let api = scratch("script");
+        fs::write(
+            api.join("urls.py"),
+            "urlpatterns = [path('admin/', admin.site.urls)]\n",
+        )
+        .unwrap();
+        fs::write(
+            api.join("runlocal.sh"),
+            "#!/bin/bash\n\nsource .venv/bin/activate\n\npython manage.py runserver 0.0.0.0:9000\n# python manage.py runserver 9999\n",
+        )
+        .unwrap();
+        let web = [
+            Page::new("Web app", 9000, "/"),
+            Page::new("Django admin", 9000, "/admin/"),
+        ];
+        for command in [
+            "/bin/bash ./runlocal.sh",
+            "sh -e runlocal.sh",
+            "./runlocal.sh",
+            "X=1 bash runlocal.sh",
+        ] {
+            let ran = [Ran { dir: &api, command }];
+            assert_eq!(pages(&[], None, &ran), web, "{command}");
+        }
+        let ran = [Ran {
+            dir: &api,
+            command: "bash ./missing.sh",
+        }];
+        assert_eq!(pages(&[], None, &ran), []);
+    }
+
+    #[test]
+    fn a_js_dev_server_is_the_app_before_django() {
+        let api = scratch("js-api");
+        fs::write(
+            api.join("urls.py"),
+            "urlpatterns = [path('admin/', admin.site.urls)]\n",
+        )
+        .unwrap();
+        let web = scratch("js-web");
+        fs::write(
+            web.join("package.json"),
+            r#"{"scripts":{"dev":"vite --host"}}"#,
+        )
+        .unwrap();
+        let django = Ran {
+            dir: &api,
+            command: "python manage.py runserver 0.0.0.0:9000",
+        };
+        let after = [
+            Page::new("Web app", 9000, "/"),
+            Page::new("Django admin", 9000, "/admin/"),
+        ];
+        for command in [
+            "npx nx run ao-app:serve:local",
+            "npm run dev",
+            "npx vite",
+            "ng serve --port 4300",
+            "npx next dev",
+        ] {
+            let ran = [django, Ran { dir: &web, command }];
+            let mut want = vec![Page::guessed("App")];
+            want.extend(after.clone());
+            assert_eq!(pages(&[], None, &ran), want, "{command}");
+        }
+        for command in ["npm run lint", "npx nx run ao-app:test", "node server.js"] {
+            let ran = [django, Ran { dir: &web, command }];
+            assert_eq!(pages(&[], None, &ran), after, "{command}");
+        }
+    }
+
+    #[test]
     fn settings_come_before_what_commands_tell() {
         let set = [Page {
             name: "Home".into(),
             url: "http://localhost:3/".into(),
+            guess: false,
         }];
         let dir = scratch("set");
         let ran = [Ran {
@@ -321,7 +486,8 @@ mod tests {
             one,
             [Page {
                 name: "App".into(),
-                url: "http://localhost:4".into()
+                url: "http://localhost:4".into(),
+                guess: false,
             }]
         );
         assert_eq!(pages(&[], None, &ran), [Page::new("Web app", 8000, "/")]);

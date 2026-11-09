@@ -19402,6 +19402,7 @@ pub(crate) mod tests {
         let page = |name: &str, url: &str| Page {
             name: name.into(),
             url: url.into(),
+            guess: false,
         };
         f.sandbox = Some(feature::sandbox_run::SandboxRun {
             pages: vec![page("Web app", "http://localhost:9001/")],

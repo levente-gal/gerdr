@@ -196,19 +196,30 @@ pub(crate) fn sandbox_url(
     if let (None, Some(set)) = (run.pages.get(page), set) {
         return Some(set.to_owned());
     }
+    let guess = |ports: &[u16]| sandbox_run::app_port(ports).map(|port| format!("http://localhost:{port}"));
     match run.pages.get(page) {
+        // The other pages' ports are theirs: a dev server's is among the rest.
+        Some(page) if page.guess => {
+            let theirs: Vec<u16> = (run.pages.iter())
+                .filter(|p| !p.guess)
+                .filter_map(|p| local_port(&p.url))
+                .collect();
+            let rest: Vec<u16> = (ports.iter()).copied().filter(|p| !theirs.contains(p)).collect();
+            guess(&rest)
+        }
         // A port no one listens on yet would show the browser's error page.
         Some(page) => match local_port(&page.url) {
             Some(port) if !ports.contains(&port) => None,
             _ => Some(page.url.clone()),
         },
-        None => sandbox_run::app_port(ports).map(|port| format!("http://localhost:{port}")),
+        None => guess(ports),
     }
 }
 
 /// What the user hears when page `page` of `run`'s app has nothing listening.
 pub(crate) fn nothing_listens(run: &SandboxRun, page: usize) -> String {
     match run.pages.get(page) {
+        Some(page) if page.guess => format!("Nothing listens in the sandbox yet, for {}", page.name),
         Some(page) => match local_port(&page.url) {
             Some(port) => format!(
                 "Nothing listens on port {port} in the sandbox yet, for {}",
@@ -1407,6 +1418,29 @@ mod tests {
         assert!(!is_local_page("https://github.com"));
         assert!(!is_local_page("chromium http://localhost:1"));
         assert!(!is_local_page("zed"));
+    }
+
+    #[test]
+    fn a_guessed_page_opens_what_listens_past_the_other_pages() {
+        use crate::feature::sandbox_pages::Page;
+        let page = |name: &str, url: &str, guess: bool| Page {
+            name: name.into(),
+            url: url.into(),
+            guess,
+        };
+        let run = SandboxRun {
+            pages: vec![
+                page("App", "http://localhost/", true),
+                page("Web app", "http://localhost:9000/", false),
+                page("Django admin", "http://localhost:9000/admin/", false),
+            ],
+            ..SandboxRun::default()
+        };
+        let url = |page, ports: &[u16]| sandbox_url(&run, page, ports, None);
+        assert_eq!(url(0, &[9000, 6379, 4200]).as_deref(), Some("http://localhost:4200"));
+        assert_eq!(url(2, &[9000, 4200]).as_deref(), Some("http://localhost:9000/admin/"));
+        assert_eq!(url(0, &[9000]), None);
+        assert_eq!(nothing_listens(&run, 0), "Nothing listens in the sandbox yet, for App");
     }
 
     #[test]
