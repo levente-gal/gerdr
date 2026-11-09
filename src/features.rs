@@ -494,7 +494,7 @@ pub(crate) enum Done {
     Probed {
         project: String,
         slug: String,
-        probe: Probe,
+        probe: Box<Probe>,
     },
     /// The last lines of herdr pane `pane`, the shown feature's current
     /// stage agent's (see `page::read_tail`).
@@ -6698,7 +6698,7 @@ impl Gerdr {
                 project,
                 slug,
                 probe,
-            } => self.feature_probed(&project, &slug, probe),
+            } => self.feature_probed(&project, &slug, *probe),
             Done::Tail { pane, lines } => self.feature_tail_read(&pane, lines),
             Done::CheckTail { pane, lines } => {
                 if let Some(tail) = self.features.check_tails.get_mut(&pane) {
@@ -7169,7 +7169,7 @@ impl Gerdr {
         let data = store::dir(None, project, slug);
         let (project, slug) = (project.to_owned(), slug.to_owned());
         self.feature_work(None, move |_| Done::Probed {
-            probe: match feature.writer {
+            probe: Box::new(match feature.writer {
                 Some(_) => Probe {
                     docs: feature::page::read_docs(&data).with_comment_fixes(&data, &feature),
                     ..ship::probe_seen(&feature)
@@ -7184,7 +7184,7 @@ impl Gerdr {
                     },
                     ..ship::probe(&feature, &modes)
                 },
-            },
+            }),
             project,
             slug,
         });
@@ -7210,11 +7210,11 @@ impl Gerdr {
         let data = store::dir(None, project, slug);
         let (project, slug, feature) = (project.to_owned(), slug.to_owned(), feature.clone());
         self.feature_work(None, move |_| Done::Probed {
-            probe: Probe {
+            probe: Box::new(Probe {
                 docs: feature::page::read_docs(&data).with_comment_fixes(&data, &feature),
                 models: feature::agents::read_models(&feature),
                 ..ship::probe_finished(&feature)
-            },
+            }),
             project,
             slug,
         });
