@@ -357,9 +357,12 @@ pub fn taken(
         }
         Some(run)
     });
+    // Picks name machines as `from` saw them: its "here" is `from` now.
     for machine in out.stage_machines.values_mut() {
         if machine == me {
             *machine = HERE.to_owned();
+        } else if machine == HERE {
+            *machine = from.to_owned();
         }
     }
     out.writer = None;
@@ -754,12 +757,14 @@ mod tests {
         f.runs.insert(Stage::Plan, run(Some("me/w1:p1"), Some("me")));
         f.stage_machines.insert(Stage::Build, "me".into());
         f.stage_machines.insert(Stage::Plan, "w9".into());
+        f.stage_machines.insert(Stage::Verify, HERE.into());
         let out = take(&f);
         let plan = &out.runs[&Stage::Plan];
         assert_eq!(plan.pane, None);
         assert_eq!(plan.machine, None);
         assert_eq!(out.stage_machines[&Stage::Build], HERE);
         assert_eq!(out.stage_machines[&Stage::Plan], "w9");
+        assert_eq!(out.stage_machines[&Stage::Verify], "ana");
     }
 
     #[test]

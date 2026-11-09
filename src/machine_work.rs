@@ -906,13 +906,14 @@ impl Gerdr {
     }
 
     /// What the user calls machine `id`.
+    /// This one is "this machine", whatever others call it.
     pub(crate) fn machine_name(&self, id: &str) -> String {
-        if let Some(name) = self.machines.names.get(id) {
-            return name.clone();
+        if Self::is_this_machine(id) {
+            return "this machine".to_owned();
         }
-        match Self::is_this_machine(id) {
-            true => "this machine".to_owned(),
-            false => "another machine".to_owned(),
+        match self.machines.names.get(id) {
+            Some(name) => name.clone(),
+            None => "another machine".to_owned(),
         }
     }
 
@@ -1639,11 +1640,18 @@ impl Gerdr {
             return self.least_busy(feature);
         }
         if let Some(id) = feature.stage_machines.get(&stage) {
-            if id == HERE {
+            // A feature another machine writes says "here" for that machine,
+            // and may name this one by its id.
+            let id = match (id.as_str(), feature.writer.as_deref()) {
+                (HERE, Some(writer)) => writer,
+                (HERE, None) => return Placed::Here,
+                (id, _) => id,
+            };
+            if Self::is_this_machine(id) {
                 return Placed::Here;
             }
             return match self.work_of(id) {
-                Some(_) => Placed::There(id.clone()),
+                Some(_) => Placed::There(id.to_owned()),
                 None => Placed::Away(self.machine_name(id)),
             };
         }
