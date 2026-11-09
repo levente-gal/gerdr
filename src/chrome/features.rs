@@ -8123,9 +8123,19 @@ mod tests {
                 *column == Some(TabColumn::Page) && row.contains_rect(*dot)
             }));
         }
+        // A round card's dot blinks while its fixes are made.
+        let l = tab_at(&view, 1920);
+        let round = (l.pieces[TabColumn::Page as usize].iter())
+            .find(|(_, piece)| matches!(piece, Piece::RoundCard(_)))
+            .map(|(rect, _)| *rect)
+            .unwrap();
+        let dots = feature_tab_blinkers(&view, &l);
+        assert!(dots.iter().any(|(dot, _)| round.contains_rect(*dot)));
         for section in &mut view.page.sections {
-            if let PageSection::Milestones { running, .. } = section {
-                running.clear();
+            match section {
+                PageSection::Milestones { running, .. } => running.clear(),
+                PageSection::Round(card) => card.dot = Dot::Done,
+                _ => {}
             }
         }
         let l = tab_at(&view, 1920);

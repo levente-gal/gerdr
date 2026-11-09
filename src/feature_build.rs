@@ -795,8 +795,9 @@ impl Gerdr {
     }
 
     /// The fixes Manual test asked for made feature `slug`'s code `patch`'s,
-    /// its marks kept (see `Feature::keep_marks`): Verify runs on it, and
-    /// Manual test can't be marked passed until it passes there.
+    /// its marks kept (see `Feature::keep_marks`): the user goes on trying
+    /// it, and marking Manual test passed takes it back to Verify (see
+    /// `back_to_verify`).
     pub(crate) fn fixes_landed(&mut self, project: &str, slug: &str, patch: &str) {
         let config = match self.feature(project, slug) {
             Some(feature) => self.projects.workflows(feature, |w| w.verify.clone()),
@@ -806,18 +807,40 @@ impl Gerdr {
             return;
         };
         let checks = verify::checks(feature, &config).len();
+        let first = feature.unverified.is_none();
         feature.unverified = (checks > 0).then(|| patch.to_owned());
         let title = feature.title.clone();
         self.save_feature(project, slug);
-        if checks == 0 {
-            return self.show_notice(format!(
-                "\u{201c}{title}\u{201d} changed by its fixes; no checks to run on them"
+        if checks > 0 && first {
+            self.show_notice(format!(
+                "\u{201c}{title}\u{201d} changed by its fixes; marking Manual test passed takes it back to Verify"
             ));
         }
+    }
+
+    /// Manual test of feature `slug` passed, but fixes it asked for changed
+    /// the code since Verify passed: Verify runs on it again, then AI review
+    /// and Code review look at what changed, and Manual test comes back with
+    /// what was found kept.
+    pub(crate) fn back_to_verify(&mut self, project: &str, slug: &str) {
+        let now = feature::now();
+        let Some(feature) = self.feature_mut(project, slug) else {
+            return;
+        };
+        if !feature.untick(Stage::Verify, now) {
+            return;
+        }
+        // The fixes it carried are over: what comes now is the usual way.
+        feature.carry = None;
+        feature.log(now, "Manual test fixes changed the code: back to Verify");
+        let title = feature.title.clone();
+        self.save_feature(project, slug);
+        tracing::info!("feature {project}/{slug}: Manual test fixes go back to Verify");
         self.show_notice(format!(
-            "\u{201c}{title}\u{201d} changed by its fixes; verifying"
+            "Fixes changed \u{201c}{title}\u{201d}: back to Verify, then AI review and Code review of them, then Manual test"
         ));
-        // Checks running already run again on this code once they end.
+        self.feature_cursor_to_current_of(project, slug);
+        self.show_stage_page(project, slug);
         let key = (project.to_owned(), slug.to_owned());
         if !self.features.build.verifying.contains(&key) {
             self.recheck(project, slug);
@@ -1114,12 +1137,6 @@ impl Gerdr {
         let title = feature.title.clone();
         let snapshot = feature.clone();
         self.save_feature(project, slug);
-        // The checks of fixes Manual test asked for: the feature stays there.
-        if let Some(fixed) = (snapshot.unverified.as_deref())
-            .filter(|_| snapshot.status == Status::Open && snapshot.current() > Some(Stage::Verify))
-        {
-            return self.fixes_verified(project, slug, fixed, &evidence, &first);
-        }
         if outdated(&snapshot, &evidence) {
             // Build was marked done on other code while the checks ran:
             // they run again on it.
@@ -1151,52 +1168,6 @@ impl Gerdr {
             ));
         }
         self.show_warning(format!("Verify of \u{201c}{title}\u{201d} failed: {first}"));
-    }
-
-    /// Verify's checks of feature `slug`, kept at Manual test while its fixes
-    /// land, ended with `evidence` (`first`: what failed first), Verify not to
-    /// pass until they ran on `fixed`, the code as the fixes left it: once
-    /// they pass there, Manual test can be marked passed.
-    fn fixes_verified(
-        &mut self,
-        project: &str,
-        slug: &str,
-        fixed: &str,
-        evidence: &Evidence,
-        first: &str,
-    ) {
-        let Some(title) = self.feature(project, slug).map(|f| f.title.clone()) else {
-            return;
-        };
-        if evidence.patch.is_empty() {
-            return self.show_warning(format!(
-                "The checks of \u{201c}{title}\u{201d} ran, but its code couldn't be read; run them again"
-            ));
-        }
-        // They ran on code from before the last fix: again, on that.
-        if evidence.patch != fixed {
-            tracing::info!("feature {project}/{slug}: Verify ran on older fixes; again");
-            return self.recheck(project, slug);
-        }
-        if let Some(cut) = evidence.outcomes.iter().find(|o| o.interrupted) {
-            let (command, how) = (&cut.command, cut.how());
-            return self.show_warning(format!(
-                "The checks of \u{201c}{title}\u{201d} didn't all run: `{command}` {how}"
-            ));
-        }
-        if !evidence.passed() {
-            return self.show_warning(format!(
-                "Verify of \u{201c}{title}\u{201d} failed on its fixes: {first}"
-            ));
-        }
-        if let Some(f) = self.feature_mut(project, slug) {
-            f.unverified = None;
-            f.log(feature::now(), "Verify passed on the fixes");
-            self.save_feature(project, slug);
-        }
-        self.show_success(format!(
-            "\u{201c}{title}\u{201d} passed Verify on its fixes"
-        ));
     }
 
     /// Verify of feature `slug` (`title`) passed: AI review's page shows and
