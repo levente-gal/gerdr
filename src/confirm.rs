@@ -147,6 +147,14 @@ pub enum Then {
     /// Finish this project's feature with nothing shipped (see
     /// `Gerdr::finish_unshipped`).
     FinishFeature { project: String, slug: String },
+    /// Undo this step shipping ran for this repository of this project's
+    /// feature (see `Gerdr::undo_ship`).
+    UndoShip {
+        project: String,
+        slug: String,
+        repo: String,
+        step: crate::feature::ShipStep,
+    },
 }
 
 /// The confirm dialog's state, while it is open.
@@ -742,6 +750,12 @@ impl Gerdr {
             } => self.remove_repos(&project, &slug, &keys, force, to_context),
             Then::ShipFeature { project, slug } => self.ship_feature(&project, &slug),
             Then::FinishFeature { project, slug } => self.finish_unshipped(&project, &slug),
+            Then::UndoShip {
+                project,
+                slug,
+                repo,
+                step,
+            } => self.undo_ship(&project, &slug, &repo, step),
             Then::MakeFixes { project, slug } => self.make_fixes_now(&project, &slug),
             Then::DropFixPlan { project, slug } => self.drop_fix_plan(&project, &slug),
             Then::ApproveStage {

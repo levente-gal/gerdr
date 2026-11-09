@@ -675,6 +675,7 @@ pub fn run_steps(
         step,
         sha,
         url,
+        undone: None,
     };
     for action in actions {
         let missing = || {
@@ -756,6 +757,179 @@ pub fn run_steps(
         }
     }
     (ran, None)
+}
+
+/// What undoing a step that ran does.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Undo {
+    /// Close `repo`'s pull request.
+    ClosePr { repo: String, url: String },
+    /// Delete `feature/<slug>` of `repo` on origin.
+    DeleteBranch { repo: String },
+    /// Take the squash off `base` of `repo` in its main worktree, before it
+    /// went to origin.
+    ResetSquash { repo: String, base: String },
+}
+
+impl Undo {
+    /// In words, for the sheet asking first.
+    pub fn label(&self, branch: &str) -> String {
+        match self {
+            Self::ClosePr { repo, url } => {
+                format!("Close the pull request of {repo}: {url}")
+            }
+            Self::DeleteBranch { repo } => format!("Delete {branch} of {repo} on origin"),
+            Self::ResetSquash { repo, base } => {
+                format!("Take the squash off {base} in {repo}'s main worktree")
+            }
+        }
+    }
+
+    /// The repository it acts on, and the step it undoes.
+    pub fn step(&self) -> (&str, ShipStep) {
+        match self {
+            Self::ClosePr { repo, .. } => (repo, ShipStep::OpenPr),
+            Self::DeleteBranch { repo } => (repo, ShipStep::Push),
+            Self::ResetSquash { repo, .. } => (repo, ShipStep::Merge),
+        }
+    }
+}
+
+/// What undoing `step` of repository `repo` of `feature` does, in order, or
+/// why it can't be undone. Undoing a push closes its pull request too: an
+/// open one can't stay without its branch.
+pub fn undo_of(feature: &Feature, repo: &str, step: ShipStep) -> Result<Vec<Undo>, String> {
+    let ran = feature.ship_done(repo, step);
+    if ran.is_none() {
+        return Err(format!("{repo} has nothing of that to undo"));
+    }
+    let pr = || {
+        (feature.ship_done(repo, ShipStep::OpenPr))
+            .and_then(|d| d.url)
+            .map(|url| Undo::ClosePr {
+                repo: repo.to_owned(),
+                url,
+            })
+    };
+    let base = feature.repo(repo).map_or("its base", |r| r.base.as_str());
+    match step {
+        ShipStep::Push | ShipStep::PushBranch => Ok((pr().into_iter())
+            .chain([Undo::DeleteBranch {
+                repo: repo.to_owned(),
+            }])
+            .collect()),
+        ShipStep::OpenPr => Ok(pr().into_iter().collect()),
+        ShipStep::Merge if feature.ship_done(repo, ShipStep::PushBase).is_some() => Err(format!(
+            "{base} of {repo} went to origin since: that can't be undone here"
+        )),
+        ShipStep::Merge => Ok(vec![Undo::ResetSquash {
+            repo: repo.to_owned(),
+            base: base.to_owned(),
+        }]),
+        ShipStep::PushBase => Err(format!(
+            "{base} of {repo} is on origin: that can't be undone here"
+        )),
+    }
+}
+
+/// Run `undos` of `feature`, with `gh` the program to run as gh: the steps
+/// undone, and why it stopped if it did.
+pub fn run_undo(
+    feature: &Feature,
+    undos: &[Undo],
+    gh: &str,
+) -> (Vec<(String, ShipStep)>, Option<String>) {
+    let branch = feature.branch();
+    let mut undone = Vec::new();
+    for undo in undos {
+        let (key, step) = undo.step();
+        let Some(repo) = feature.repo(key) else {
+            return (
+                undone,
+                Some(format!("{} has no repository {key}", feature.title)),
+            );
+        };
+        let result = match undo {
+            Undo::ClosePr { url, .. } => close_pr(repo, url, gh),
+            Undo::DeleteBranch { .. } => delete_branch(repo, &branch),
+            Undo::ResetSquash { base, .. } => reset_squash(repo, base, &branch),
+        };
+        match result {
+            Ok(()) => undone.push((key.to_owned(), step)),
+            Err(why) => return (undone, Some(why)),
+        }
+    }
+    (undone, None)
+}
+
+/// Close the pull request at `url` of `repo`: one closed already is fine, a
+/// merged one can't be.
+fn close_pr(repo: &Repo, url: &str, gh: &str) -> Result<(), String> {
+    match run_gh(gh, &repo.worktree, &["pr", "close", url]) {
+        Ok(_) => Ok(()),
+        Err(why) if why.contains("already closed") => Ok(()),
+        Err(why) if why.contains("merged") => Err(format!(
+            "the pull request of {} is merged: that can't be undone here",
+            repo.key()
+        )),
+        Err(why) => Err(format!(
+            "Couldn't close the pull request of {}: {why}",
+            repo.key()
+        )),
+    }
+}
+
+/// Delete `branch` of `repo` on origin: one gone already is fine.
+fn delete_branch(repo: &Repo, branch: &str) -> Result<(), String> {
+    let dir = if repo.worktree.is_dir() {
+        &repo.worktree
+    } else {
+        &repo.main
+    };
+    match git(dir, &["push", "origin", "--delete", branch]) {
+        Ok(_) => Ok(()),
+        Err(why) if why.contains("remote ref does not exist") => Ok(()),
+        Err(why) => Err(format!(
+            "Couldn't delete {branch} of {} on origin: {why}",
+            repo.key()
+        )),
+    }
+}
+
+/// Take the squash of `branch` off `base` in `repo`'s main worktree: only
+/// while it is the last commit there, on `base`, not on origin, the
+/// worktree clean.
+fn reset_squash(repo: &Repo, base: &str, branch: &str) -> Result<(), String> {
+    let name = repo.key();
+    let main = &repo.main;
+    let on = git(main, &["symbolic-ref", "-q", "--short", "HEAD"]).unwrap_or_default();
+    if on.trim() != base {
+        return Err(format!(
+            "{name}'s main worktree isn't on {base}: switch it back to undo"
+        ));
+    }
+    let status = git(main, &["status", "--porcelain", "--untracked-files=no"])?;
+    if !status.trim().is_empty() {
+        return Err(format!("{name}'s main worktree has uncommitted changes"));
+    }
+    // The last commit is the squash: it changes what the branch does.
+    let not_squash = || format!("{base}'s last commit in {name} isn't the feature's squash");
+    if git(main, &["rev-parse", "--verify", "-q", "HEAD~1"]).is_err() {
+        return Err(not_squash());
+    }
+    let fork = git(main, &["merge-base", "HEAD~1", branch])?;
+    let squash = patch::diff_id(main, "HEAD~1", "HEAD")?;
+    let feature = patch::diff_id(main, fork.trim(), branch)?;
+    if squash.is_empty() || squash != feature {
+        return Err(not_squash());
+    }
+    let remote = git(main, &["branch", "-r", "--contains", "HEAD"])?;
+    if !remote.trim().is_empty() {
+        return Err(format!(
+            "{base} of {name} is on origin with the squash: that can't be undone here"
+        ));
+    }
+    git(main, &["reset", "-q", "--keep", "HEAD~1"]).map(|_| ())
 }
 
 /// The repository `action` acts on, or "" for one on all.
@@ -1625,6 +1799,81 @@ esac
         );
     }
 
+    /// A squash not on origin comes off its base, a pushed branch off
+    /// origin; a base pushed stays.
+    #[test]
+    fn undo_takes_back_what_isnt_on_origins_base() {
+        let t = Temp::new();
+        let mut f = feature_over(&t, &["api"], &[]);
+        origins(&t, &f);
+        commit(&wt(&f, "api"), "a1", "api change");
+        mark_all(&mut f);
+        let gh = fake_gh(&t);
+        let (ran, failed) = run_steps(&f, &[Action::Push { repo: "api".into() }], &gh, 5);
+        assert_eq!(failed, None);
+        for done in ran.done {
+            f.ship_ran(done);
+        }
+        let main = f.repos[0].main.clone();
+        let before = run(&main, &["rev-parse", "HEAD"]);
+        run(&main, &["merge", "-q", "--squash", "feature/f"]);
+        run(&main, &["commit", "-q", "-m", "squashed"]);
+        f.ship_ran(ShipDone {
+            at: 6,
+            repo: "api".into(),
+            step: ShipStep::Merge,
+            sha: None,
+            url: None,
+            undone: None,
+        });
+
+        assert!(undo_of(&f, "api", ShipStep::PushBase).is_err(), "never ran");
+        let undos = undo_of(&f, "api", ShipStep::Merge).unwrap();
+        assert_eq!(
+            undos,
+            [Undo::ResetSquash {
+                repo: "api".into(),
+                base: "main".into()
+            }]
+        );
+        let (undone, failed) = run_undo(&f, &undos, &gh);
+        assert_eq!(failed, None);
+        assert_eq!(undone, [("api".to_owned(), ShipStep::Merge)]);
+        assert_eq!(run(&main, &["rev-parse", "HEAD"]), before);
+        // Gone already, it isn't taken off again.
+        let (_, failed) = run_undo(&f, &undos, &gh);
+        assert_eq!(
+            failed.as_deref(),
+            Some("main's last commit in api isn't the feature's squash")
+        );
+
+        let undos = undo_of(&f, "api", ShipStep::PushBranch).unwrap();
+        assert_eq!(undos, [Undo::DeleteBranch { repo: "api".into() }]);
+        let (_, failed) = run_undo(&f, &undos, &gh);
+        assert_eq!(failed, None);
+        let origin = t.0.join("api.git");
+        assert!(try_run(&origin, &["rev-parse", "--verify", "-q", "feature/f"]).is_err());
+        f.ship_undid("api", ShipStep::Push, 9);
+        assert!(f.ship_done("api", ShipStep::PushBranch).is_none());
+        assert!(
+            f.shipping
+                .steps
+                .iter()
+                .all(|d| d.step != ShipStep::Push || d.undone == Some(9))
+        );
+
+        // A base on origin stays.
+        f.ship_ran(ShipDone {
+            at: 10,
+            repo: "api".into(),
+            step: ShipStep::PushBase,
+            sha: None,
+            url: None,
+            undone: None,
+        });
+        assert!(undo_of(&f, "api", ShipStep::PushBase).is_err());
+    }
+
     /// A record from before the log was kept reads as one.
     #[test]
     fn an_old_record_reads_as_a_log() {
@@ -1665,6 +1914,7 @@ esac
             step: ShipStep::Push,
             sha: None,
             url: None,
+            undone: None,
         });
         assert_eq!(f.shipping.steps.len(), 5);
     }

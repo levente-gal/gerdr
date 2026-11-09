@@ -557,6 +557,13 @@ pub(crate) enum Done {
         ran: Vec<feature::ShipDone>,
         result: Result<Vec<Pr>, (String, Vec<Pr>)>,
     },
+    /// Undoing steps shipping ran ended: those undone, and why it stopped.
+    ShipUndone {
+        project: String,
+        slug: String,
+        undone: Vec<(String, ShipStep)>,
+        failed: Option<String>,
+    },
     /// The bases a merged feature ticked to push, each by its
     /// `Repo::key`, its name and how it went.
     BasesPushed {
@@ -1592,6 +1599,8 @@ pub enum PanelOutcome {
     OpenPr(String),
     /// Ask an agent to write the feature's summary again.
     WriteSummary,
+    /// Undo step `.1` that shipping ran for repository `.0`, after asking.
+    UndoShip(String, ShipStep),
     /// Open the feature's summary to edit.
     EditSummary,
     /// Reopen this done stage, once it isn't locked (see
@@ -3513,6 +3522,7 @@ fn action_hint(action: &PanelOutcome) -> &'static str {
         PanelOutcome::Tick => "mark done",
         PanelOutcome::Ship => "ship\u{2026}",
         PanelOutcome::WriteSummary => "write the summary again",
+        PanelOutcome::UndoShip(..) => "undo\u{2026}",
         PanelOutcome::EditSummary => "edit the summary",
         PanelOutcome::Finish => "finish\u{2026}",
         PanelOutcome::Untick(_) => "reopen",
@@ -3940,7 +3950,7 @@ fn ship_step_row(
     repo: &ship::RepoCheck,
     step: ShipStep,
     row: usize,
-    now: u64,
+    (actions, now): (&[(PageButton, PanelOutcome)], u64),
 ) -> chrome::ShipStepRow {
     let plan = ship::repo_plan(feature, repo);
     let base = &repo.base;
@@ -3953,6 +3963,7 @@ fn ship_step_row(
             step,
             sha: None,
             url: None,
+            undone: None,
         })
     });
     let ran = ran.filter(|_| !ship_step_open(feature, repo, step));
@@ -3964,6 +3975,16 @@ fn ship_step_row(
             ShipStep::PushBase => format!("Pushed {base} to origin"),
         };
         let when = ran_when(&done, now);
+        let undo = (actions.iter()).position(|(_, o)| {
+            matches!(o, PanelOutcome::UndoShip(r, s) if *r == repo.key && feature::same_step(*s, step))
+        });
+        // What can't be undone says so.
+        let when = match (undo, step) {
+            (None, ShipStep::PushBase) if !when.is_empty() => {
+                format!("{when} \u{b7} on origin: no undo")
+            }
+            _ => when,
+        };
         return chrome::ShipStepRow {
             row,
             label,
@@ -3971,6 +3992,7 @@ fn ship_step_row(
             ticked: true,
             off: false,
             done: true,
+            button: undo,
         };
     }
     // Merged some other way: what else it would do is past.
@@ -3986,6 +4008,7 @@ fn ship_step_row(
             ticked: plan.ticked(step),
             off: false,
             done: false,
+            button: None,
         };
     }
     let pushed = feature.ship_done(&repo.key, ShipStep::Push).is_some();
@@ -4020,6 +4043,7 @@ fn ship_step_row(
         ticked: plan.ticked(step),
         off: why.is_some(),
         done: false,
+        button: None,
     }
 }
 
@@ -4052,7 +4076,8 @@ fn ship_sections(
                     repo: repo.key.clone(),
                     step: *step,
                 };
-                let row = ship_step_row(feature, repo, *step, at(&wanted).unwrap_or(0), now);
+                let row = at(&wanted).unwrap_or(0);
+                let row = ship_step_row(feature, repo, *step, row, (actions, now));
                 let shown = row.done || at(&wanted).is_some();
                 shown.then_some(row)
             })
@@ -4114,6 +4139,7 @@ fn ship_sections(
         ticked,
         off: why.is_some(),
         done: false,
+        button: None,
     };
     let remove_label = match feature.touched().count() > 1 {
         true => "Remove the worktrees and branches",
@@ -4163,10 +4189,12 @@ fn ship_log_lines(feature: &Feature, now: u64) -> Vec<CheckLine> {
             let when = (done.at > 0).then(|| projects::ago(now, done.at));
             let sha = (done.sha.as_deref()).map(|sha| sha.chars().take(7).collect::<String>());
             let url = done.url.as_deref().map(pr_tail);
+            let undone = (done.undone).map(|at| format!("undone {}", projects::ago(now, at)));
             let parts: Vec<String> = (when.into_iter())
                 .chain(std::iter::once(said))
                 .chain(sha)
                 .chain(url)
+                .chain(undone)
                 .collect();
             line(parts.join(" \u{b7} "), CheckTone::Note)
         })
@@ -5896,6 +5924,26 @@ fn writers_page_actions(
             PanelOutcome::EditSummary,
         ));
     }
+    // Each step that ran and can be undone, on its row.
+    if stage == Stage::Ship && feature.ships() {
+        let mut seen: Vec<(String, ShipStep)> = Vec::new();
+        for done in feature.ship_log().iter().rev() {
+            let step = done.step;
+            let known = (seen.iter()).any(|(r, s)| *r == done.repo && feature::same_step(*s, step));
+            if known {
+                continue;
+            }
+            seen.push((done.repo.clone(), step));
+            let undoable =
+                done.undone.is_none() && ship::undo_of(feature, &done.repo, step).is_ok();
+            if undoable {
+                out.push((
+                    button("Undo\u{2026}", ButtonStyle::Quiet),
+                    PanelOutcome::UndoShip(done.repo.clone(), step),
+                ));
+            }
+        }
+    }
     if stage == Stage::Ship {
         // On its repository's card while it can ship; else listed by name.
         let one = feature.shipping.prs.len() == 1 || feature.ships();
@@ -6686,6 +6734,15 @@ impl Gerdr {
                 let patch = patch.as_deref();
                 self.feature_shipped(&project, &slug, patch, &squash, pushed, ran, result);
             }
+            Done::ShipUndone {
+                project,
+                slug,
+                undone,
+                failed,
+            } => {
+                self.unbusy(&project, &slug, Job::Ship);
+                self.ship_undone(&project, &slug, undone, failed);
+            }
             Done::BasesPushed {
                 project,
                 slug,
@@ -7306,6 +7363,7 @@ impl Gerdr {
                 step: ShipStep::Merge,
                 sha: None,
                 url: None,
+                undone: None,
             });
         }
         feature.shipping.squash_at = None;
@@ -7373,6 +7431,7 @@ impl Gerdr {
                         step: ShipStep::PushBase,
                         sha: Some(sha),
                         url: None,
+                        undone: None,
                     });
                     went.push(format!("{base} of {key}"));
                 }
@@ -8851,6 +8910,7 @@ impl Gerdr {
             PanelOutcome::ChangeDecisions => self.ask_change_decisions(&project, &slug),
             PanelOutcome::OpenPr(url) => self.open_feature_page(&project, &slug, url),
             PanelOutcome::WriteSummary => self.write_ship_summary(&project, &slug, true),
+            PanelOutcome::UndoShip(repo, step) => self.ask_undo_ship(&project, &slug, &repo, step),
             PanelOutcome::EditSummary => self.edit_ship_summary(&project, &slug),
             PanelOutcome::PickAgent(stage, name) => {
                 self.pick_stage_agent(&project, &slug, stage, &name);
@@ -22518,6 +22578,7 @@ pub(crate) mod tests {
             step: ShipStep::Push,
             sha: Some("3f9c2a1deadbeef".into()),
             url: None,
+            undone: None,
         });
         f.ship_plan
             .repos

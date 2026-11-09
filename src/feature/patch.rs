@@ -85,6 +85,30 @@ pub fn read(feature: &Feature) -> Result<Reading, String> {
     Ok(reading)
 }
 
+/// The patch-id of the change from `from` to `to` in `dir`: empty when it
+/// changes nothing.
+pub(super) fn diff_id(dir: &std::path::Path, from: &str, to: &str) -> Result<String, String> {
+    let args = [
+        "diff",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-color",
+        "--binary",
+        from,
+        to,
+    ];
+    let diff = git_bytes(dir, &args, None)?;
+    if diff.is_empty() {
+        return Ok(String::new());
+    }
+    let out = git_bytes(dir, &["patch-id", "--stable"], Some(diff))?;
+    Ok(String::from_utf8_lossy(&out)
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_owned())
+}
+
 /// The patch-id of `repo`'s committed change against its base (empty when
 /// it changes nothing), and its commits not in the base.
 fn committed(repo: &Repo) -> Result<(String, usize), String> {

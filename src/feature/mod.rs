@@ -261,6 +261,9 @@ pub struct ShipDone {
     /// The pull request's address, for `OpenPr`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    /// When it was undone (unix seconds): it counts as never run since.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub undone: Option<u64>,
 }
 
 impl ShipDone {
@@ -448,6 +451,13 @@ impl ShipPlan {
     pub fn repo(&self, key: &str, default: Route) -> RepoPlan {
         (self.repos.get(key).cloned()).unwrap_or_else(|| RepoPlan::new(default))
     }
+}
+
+/// Whether a record of step `a` is one of step `b`: either route's push of
+/// the branch is the same push.
+pub fn same_step(a: ShipStep, b: ShipStep) -> bool {
+    let push = |s: ShipStep| matches!(s, ShipStep::Push | ShipStep::PushBranch);
+    a == b || (push(a) && push(b))
 }
 
 /// What names a repository among all a feature's: its `name` for a home
@@ -1143,6 +1153,7 @@ impl Feature {
             step,
             sha: None,
             url: url.map(str::to_owned),
+            undone: None,
         };
         let mut out: Vec<ShipDone> = (shipping.pushed.iter())
             .map(|key| done(key, ShipStep::Push, None))
@@ -1156,12 +1167,31 @@ impl Feature {
         out
     }
 
-    /// The last time `step` ran for repository `repo`, if it did. Either
-    /// route's push of the branch counts for both.
+    /// The last time `step` ran for repository `repo`, if it did and that
+    /// wasn't undone. Either route's push of the branch counts for both.
     pub fn ship_done(&self, repo: &str, step: ShipStep) -> Option<ShipDone> {
-        let push = |s: ShipStep| matches!(s, ShipStep::Push | ShipStep::PushBranch);
-        let same = |s: ShipStep| s == step || (push(s) && push(step));
-        (self.ship_log().into_iter().rev()).find(|d| d.repo == repo && same(d.step))
+        (self.ship_log().into_iter().rev())
+            .find(|d| d.repo == repo && same_step(d.step, step))
+            .filter(|d| d.undone.is_none())
+    }
+
+    /// Note that `step` of repository `repo` was undone at `now`: it counts
+    /// as never run, and the record's other fields forget it too.
+    pub fn ship_undid(&mut self, repo: &str, step: ShipStep, now: u64) {
+        if self.shipping.steps.is_empty() {
+            self.shipping.steps = self.ship_log();
+        }
+        for done in &mut self.shipping.steps {
+            if done.repo == repo && same_step(done.step, step) && done.undone.is_none() {
+                done.undone = Some(now);
+            }
+        }
+        match step {
+            ShipStep::Push | ShipStep::PushBranch => self.shipping.pushed.retain(|r| r != repo),
+            ShipStep::OpenPr => self.shipping.prs.retain(|pr| pr.repo != repo),
+            ShipStep::Merge => self.shipping.squash_repos.retain(|r| r != repo),
+            ShipStep::PushBase => self.shipping.push_base.retain(|r| r != repo),
+        }
     }
 
     /// Note that shipping ran `done`. A record from before the log was kept

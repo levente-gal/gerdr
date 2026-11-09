@@ -3642,6 +3642,7 @@ fn ship_ran(label: &str, when: &str) -> super::ShipStepRow {
         ticked: true,
         off: false,
         done: true,
+        button: None,
     }
 }
 
@@ -3665,6 +3666,7 @@ fn ship_row(
         ticked,
         off: detail.is_some_and(|(_, blocks)| blocks),
         done: false,
+        button: None,
     }
 }
 
@@ -3874,6 +3876,8 @@ fn feature_tab_ship_live() -> super::FeatureTabView {
             ),
         ],
     );
+    api.steps[0].button = Some(5);
+    api.steps[1].button = Some(6);
     let card = api.card.as_mut().unwrap();
     card.dot = Dot::Done;
     card.state = tab_line("pull request open", CheckTone::Ready);
@@ -3889,6 +3893,7 @@ fn feature_tab_ship_live() -> super::FeatureTabView {
         ],
     );
     web.route = None;
+    web.steps[0].button = Some(7);
     web.card.as_mut().unwrap().state = tab_line("merged into dev: push it", CheckTone::Note);
     web.selected = Some(1);
     view.page = StagePage {
@@ -3916,6 +3921,18 @@ fn feature_tab_ship_live() -> super::FeatureTabView {
                 label: "Write again".into(),
                 style: ButtonStyle::Quiet,
             },
+            PageButton {
+                label: "Undo\u{2026}".into(),
+                style: ButtonStyle::Quiet,
+            },
+            PageButton {
+                label: "Undo\u{2026}".into(),
+                style: ButtonStyle::Quiet,
+            },
+            PageButton {
+                label: "Undo\u{2026}".into(),
+                style: ButtonStyle::Quiet,
+            },
         ],
         sections: vec![
             PageSection::Lines {
@@ -3941,6 +3958,14 @@ fn feature_tab_ship_live() -> super::FeatureTabView {
             },
         ],
     };
+    view
+}
+
+/// `feature_tab_ship_live` with its recap folded away: its cards, their
+/// Undo buttons, and the Ship log in view.
+fn feature_tab_ship_cards() -> super::FeatureTabView {
+    let mut view = feature_tab_ship_live();
+    (view.page.sections).retain(|s| !matches!(s, super::PageSection::Recap(_)));
     view
 }
 
@@ -5382,7 +5407,7 @@ fn round_card(
 }
 
 /// The feature tab's fixtures, by name.
-fn feature_tabs() -> [(&'static str, super::FeatureTabView); 46] {
+fn feature_tabs() -> [(&'static str, super::FeatureTabView); 47] {
     [
         ("tab_build", feature_tab()),
         ("tab_verify_fixes", feature_tab_verify_fixes()),
@@ -5395,6 +5420,7 @@ fn feature_tabs() -> [(&'static str, super::FeatureTabView); 46] {
         ("tab_ship_routes", feature_tab_ship_routes()),
         ("tab_ship_finish", feature_tab_ship_finish()),
         ("tab_ship_live", feature_tab_ship_live()),
+        ("tab_ship_cards", feature_tab_ship_cards()),
         ("tab_done", feature_tab_done()),
         ("tab_later", feature_tab_later()),
         ("tab_review_page", feature_tab_review_page()),
@@ -5443,7 +5469,7 @@ fn feature_tabs() -> [(&'static str, super::FeatureTabView); 46] {
 }
 
 /// Each fixture at the width it shows best at, and Build at all three.
-const TAB_SURFACES: [(&str, i32); 59] = [
+const TAB_SURFACES: [(&str, i32); 60] = [
     ("tab_build", 860),
     ("tab_build", 1180),
     ("tab_build", 1920),
@@ -5503,9 +5529,10 @@ const TAB_SURFACES: [(&str, i32); 59] = [
     ("tab_manual_hand_back", 1180),
     ("tab_ship_live", 1180),
     ("tab_ship_live", 860),
+    ("tab_ship_cards", 1180),
 ];
 
-const FEATURE_TAB: [&str; 59] = [
+const FEATURE_TAB: [&str; 60] = [
     "tab_build_860",
     "tab_build_1180",
     "tab_build_1920",
@@ -5565,10 +5592,11 @@ const FEATURE_TAB: [&str; 59] = [
     "tab_manual_hand_back_1180",
     "tab_ship_live_1180",
     "tab_ship_live_860",
+    "tab_ship_cards_1180",
 ];
 
 /// The recorded hashes of `FEATURE_TAB`, per case in `CASES`.
-const GOLDEN_FEATURE_TAB: [[u64; 59]; 4] = [
+const GOLDEN_FEATURE_TAB: [[u64; 60]; 4] = [
     // Dark at 1
     [
         0xb47edcf3deebfe55, // tab_build_860
@@ -5630,6 +5658,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 59]; 4] = [
         0x67311e08c4f41693, // tab_manual_hand_back_1180
         0x3d6752d6c8853c68, // tab_ship_live_1180
         0xb57d60723e2e914c, // tab_ship_live_860
+        0x077ea0199cfb659e, // tab_ship_cards_1180
     ],
     // Dark at 2
     [
@@ -5692,6 +5721,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 59]; 4] = [
         0xa6b58fbbabbe2e65, // tab_manual_hand_back_1180
         0x8cae3f392a28f277, // tab_ship_live_1180
         0x0714fb103dbedb21, // tab_ship_live_860
+        0x2a33d3b368d97d79, // tab_ship_cards_1180
     ],
     // Light at 1
     [
@@ -5754,6 +5784,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 59]; 4] = [
         0x03cf422d6e9c38a1, // tab_manual_hand_back_1180
         0xe218d2ce70539f23, // tab_ship_live_1180
         0x040c69c1c4ed2725, // tab_ship_live_860
+        0xf0f839c1697ef03c, // tab_ship_cards_1180
     ],
     // Light at 2
     [
@@ -5816,6 +5847,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 59]; 4] = [
         0x8391e750f3735fcf, // tab_manual_hand_back_1180
         0xa7dbc43951d8b435, // tab_ship_live_1180
         0x230520414df2c684, // tab_ship_live_860
+        0x5d6ef52228deece1, // tab_ship_cards_1180
     ],
 ];
 
