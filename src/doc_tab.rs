@@ -37,7 +37,7 @@ use crate::{
         self, DOCK_MIN_WIDTH, DOCK_SHARE_MAX, DOCK_SHARE_MIN, DetailView, ModeSwitch, Rect,
         ReposButton, ReposView,
     },
-    doc_review::DocFile,
+    doc_review::{DocFile, Failed},
     md_preview::{self, NO_EXTENSION},
     review::{self, Review},
     worktree_diff::{DRAFT_OPEN, DocOf, Env, WorktreeDiff},
@@ -556,8 +556,17 @@ impl Gerdr {
         ) else {
             return false;
         };
-        let Ok((doc, text)) = self.read_doc(&project, &slug, saved.file) else {
-            return false;
+        let (doc, text) = match self.read_doc(&project, &slug, saved.file) {
+            Ok(read) => read,
+            // Its file gone or unreadable, the tab goes: nothing to show.
+            Err(failed) => {
+                let why = match failed {
+                    Failed::Warning(why) | Failed::Error(why) => why,
+                };
+                let file = saved.file;
+                tracing::info!("not bringing back the {file:?} tab of {project}/{slug}: {why}");
+                return false;
+            }
         };
         let at = self.insert_doc_tab(w, doc, text, saved.mode.of(saved.file));
         // In the place it was saved at, among the others.

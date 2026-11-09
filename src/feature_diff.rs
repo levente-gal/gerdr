@@ -713,6 +713,7 @@ pub fn finding_comment(f: &Finding, root: PathBuf, file: Option<&FileDiff>) -> C
             sent: false,
             of: ItemOf::Finding,
             frozen: None,
+            unanswered: false,
         }),
     }
 }
@@ -734,6 +735,7 @@ fn finding_note(f: &Finding, comment: &Comment) -> Option<Comment> {
             sent: false,
             of: ItemOf::Finding,
             frozen: None,
+            unanswered: false,
         }),
     })
 }
@@ -994,28 +996,7 @@ impl WorktreeDiff {
         let focus = fe.focus.clone();
         let focus_note = fe.focus_note.clone();
         self.diff.notes_open = fe.role() == Role::Deciding;
-        let review = &mut self.diff.review;
-        review.comments.retain(|c| c.flag.is_none());
-        let first = review.comments.len();
-        review.comments.extend(comments);
-        let at = focus.and_then(|id| {
-            let found = review.comments[first..]
-                .iter()
-                .position(|c| c.flag.as_ref().is_some_and(|f| f.id == id));
-            found.map(|i| first + i)
-        });
-        let at = at.or_else(|| {
-            let note = focus_note.as_ref()?;
-            review.comments[..first].iter().position(|c| c == note)
-        });
-        let sections = self
-            .feature
-            .as_ref()
-            .map(FeatureOf::sections)
-            .unwrap_or_default();
-        self.diff.rebuild(&sections);
-        if let Some(at) = at
-            && self.with_diff(env, |diff, ctx| diff.show_comment(at, ctx))
+        if self.lay_flags(comments, focus.as_deref(), focus_note.as_ref(), env)
             && let Some(fe) = self.feature.as_mut()
         {
             fe.focus = None;
@@ -2144,7 +2125,7 @@ mod tests {
         wd.key(&none, enter, enter, POPUP_ENV);
         assert_eq!(
             wd.take_error().noted,
-            Some(("r1-1".to_owned(), "c".to_owned()))
+            Some((ItemOf::Finding, "r1-1".to_owned(), "c".to_owned()))
         );
         // It decides nothing, and none of it is saved with the user's own.
         assert_eq!(wd.diff.review.own(), 0);
@@ -2215,7 +2196,7 @@ mod tests {
         wd.key(&none, f, f, POPUP_ENV);
         assert_eq!(
             wd.take_error().decided,
-            Some(("r1-1".to_owned(), Decision::Fix))
+            Some((ItemOf::Finding, "r1-1".to_owned(), Decision::Fix))
         );
         // Del arms, Del deletes, and the finding isn't dismissed.
         let del = Keysym::Delete;
@@ -2226,7 +2207,7 @@ mod tests {
         wd.key(&none, del, del, POPUP_ENV);
         assert_eq!(
             wd.take_error().noted,
-            Some(("r1-1".to_owned(), String::new()))
+            Some((ItemOf::Finding, "r1-1".to_owned(), String::new()))
         );
         // The cursor stays with the finding once the record says so.
         noted(&mut wd, "");
@@ -2254,13 +2235,13 @@ mod tests {
         wd.key(&none, enter, enter, POPUP_ENV);
         assert_eq!(
             wd.take_error().noted,
-            Some(("r1-1".to_owned(), "Careful".to_owned()))
+            Some((ItemOf::Finding, "r1-1".to_owned(), "Careful".to_owned()))
         );
         wd.key(&none, c, c, POPUP_ENV);
         wd.click(ReposHit::Button(ReposButton::DeleteComment), POPUP_ENV);
         assert_eq!(
             wd.take_error().noted,
-            Some(("r1-1".to_owned(), String::new()))
+            Some((ItemOf::Finding, "r1-1".to_owned(), String::new()))
         );
     }
 
@@ -2308,7 +2289,10 @@ mod tests {
         wd.key(&mods(false, false), right, right, POPUP_ENV);
         // As input sends it: the letter's own sym, the capital as typed.
         wd.key(&mods(false, true), Keysym::e, Keysym::E, POPUP_ENV);
-        assert_eq!(wd.take_error().edit_finding.as_deref(), Some("r1-1"));
+        assert_eq!(
+            wd.take_error().edit_finding,
+            Some((ItemOf::Finding, "r1-1".to_owned()))
+        );
     }
 
     #[test]
@@ -3200,7 +3184,7 @@ mod tests {
         wd.key(&none, del, del, POPUP_ENV);
         let taken = wd.take_error();
         assert_eq!(taken.decided, None);
-        assert_eq!(taken.delete_own.as_deref(), Some("u1"));
+        assert_eq!(taken.delete_own, Some((ItemOf::Finding, "u1".to_owned())));
         assert!(wd.diff.editing.is_none());
     }
 

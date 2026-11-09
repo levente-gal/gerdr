@@ -28,7 +28,8 @@ use crate::{
     },
     diff::{FILE_LINES, FileDiff, LineKind},
     diff_edit::{FileEdit, Put, Register},
-    feature::review_import::{self, Decision, FindingState},
+    feature::review_import::{Decision, FindingState},
+    feature::review_items::{self, ItemOf},
     find,
     git::Change,
     review::{self, Comment, Quoted, Review},
@@ -47,8 +48,6 @@ pub const NO_REVIEW: &str = "No review comments: in the diff, press c on a line"
 pub const READ_ONLY: &str = "A commit's diff can't be edited";
 /// Why a copy did nothing with no cursor.
 pub(crate) const NOWHERE: &str = "Move the cursor to a line first";
-/// Why `f` did nothing off a finding.
-pub const NO_FINDING: &str = "Move the cursor to a finding first";
 /// Why a comment that went to the Build agent can't be changed.
 pub const SENT_COMMENT: &str = "That comment went to the Build agent to fix";
 /// Why `f` does nothing on a comment of the user's own.
@@ -57,6 +56,14 @@ pub const YOUR_COMMENT: &str = "This is your comment: c edits it, Del deletes it
 pub const NO_REASON: &str = "Not dismissed: say why first";
 /// Why a finding can't be commented on or reworded now.
 const NOTES_CLOSED: &str = "A finding changes only while AI review decides";
+/// The same of a suggestion shown in the plan.
+const SUGGESTION_NOTES_CLOSED: &str = "A suggestion changes only while Plan review decides";
+/// Why `f` does nothing on a suggestion of the user's own.
+pub const YOUR_SUGGESTION: &str = "This is your suggestion: c edits it, Del deletes it";
+/// Why a rejection did nothing.
+pub const NO_REJECT_REASON: &str = "Not rejected: say why first";
+/// Why `f` does nothing on a question with no answer yet.
+pub const UNANSWERED: &str = "Answer the question first: c writes the answer, then f accepts";
 /// Why `]` and `[` did nothing.
 pub const NO_COMMENTS: &str = "No findings or comments here";
 
@@ -89,15 +96,50 @@ fn finding_tone(flag: &review::Flag) -> Tone {
 }
 
 /// What a finding's card says of where it stands; none while undecided.
+/// A suggestion's words are its own: accepted, rejected.
 fn finding_state_word(flag: &review::Flag) -> Option<&'static str> {
-    match flag.state {
-        FindingState::Open => None,
-        FindingState::Fix => Some("to fix"),
-        FindingState::Sent if flag.made => Some("fix made"),
-        FindingState::Sent if flag.sent => Some("sent to Build"),
-        FindingState::Sent => Some("sent to fix"),
-        FindingState::Fixed => Some("fixed"),
-        FindingState::Dismissed => Some("dismissed"),
+    let words = review_items::words(flag.of);
+    match (flag.of, flag.state) {
+        (_, FindingState::Open) => None,
+        (_, FindingState::Fix) => Some(words.wanted),
+        (_, FindingState::Dismissed) => Some(words.refused),
+        (ItemOf::Suggestion, FindingState::Sent | FindingState::Fixed) => None,
+        (ItemOf::Finding, FindingState::Sent) if flag.made => Some("fix made"),
+        (ItemOf::Finding, FindingState::Sent) if flag.sent => Some("sent to Build"),
+        (ItemOf::Finding, FindingState::Sent) => Some("sent to fix"),
+        (ItemOf::Finding, FindingState::Fixed) => Some("fixed"),
+    }
+}
+
+/// Why `f` does nothing on an item `of` of the user's own.
+fn yours_refused(of: ItemOf) -> &'static str {
+    match of {
+        ItemOf::Finding => YOUR_COMMENT,
+        ItemOf::Suggestion => YOUR_SUGGESTION,
+    }
+}
+
+/// Why a refusal of an item `of` with no reason did nothing.
+fn no_reason(of: ItemOf) -> &'static str {
+    match of {
+        ItemOf::Finding => NO_REASON,
+        ItemOf::Suggestion => NO_REJECT_REASON,
+    }
+}
+
+/// What a flag's decide button says on an item `of`: a finding's are the
+/// buttons' own, a suggestion's its words. `button` is one of
+/// `FixFinding`, `DismissFinding` or `ReopenFinding`; `state` where the item
+/// stands.
+fn decide_label(of: ItemOf, button: ReposButton, state: FindingState) -> String {
+    let words = review_items::words(of);
+    match (of, button, state) {
+        (ItemOf::Finding, ..) => button.label().into(),
+        (_, ReposButton::FixFinding, _) => words.want.into(),
+        (_, ReposButton::DismissFinding, _) => words.refuse.into(),
+        (_, ReposButton::ReopenFinding, FindingState::Fix) => words.unwant.into(),
+        (_, ReposButton::ReopenFinding, _) => words.reopen.into(),
+        _ => button.label().into(),
     }
 }
 
@@ -254,18 +296,20 @@ pub struct Signals {
     /// Why the last key did nothing, or `Some(None)` to clear what was
     /// said.
     pub error: Option<Option<String>>,
-    /// What the user decided of an AI review finding shown as a comment,
-    /// by its id (see `review::Flag`).
-    pub decided: Option<(String, Decision)>,
-    /// The user's own item to delete, by its id: their comment kept as a
-    /// finding (`review::Flag::yours`).
-    pub delete_own: Option<String>,
-    /// The AI review finding to edit, by its id: its fix, or what the user's
-    /// own item says, is asked for in a dialog.
-    pub edit_finding: Option<String>,
-    /// What the user's comment on an AI review finding now says, by the
-    /// finding's id: empty, it is deleted.
-    pub noted: Option<(String, String)>,
+    /// What the user decided of an item shown as a comment, by its kind
+    /// and id (see `review::Flag`): an AI review finding, or a suggestion
+    /// in the plan. The decision is in the findings' words: Fix is accept,
+    /// Dismiss reject, Reopen clear.
+    pub decided: Option<(ItemOf, String, Decision)>,
+    /// The user's own item to delete, by its kind and id: their comment
+    /// kept as a finding, or their own suggestion (`review::Flag::yours`).
+    pub delete_own: Option<(ItemOf, String)>,
+    /// The item to edit, by its kind and id: its fix or change, or what the
+    /// user's own item says, is asked for in a dialog.
+    pub edit_finding: Option<(ItemOf, String)>,
+    /// What the user's comment on an item now says, by the item's kind and
+    /// id: empty, it is deleted.
+    pub noted: Option<(ItemOf, String, String)>,
 }
 
 /// What the diff scrolls to: a checkout's header, a file's, or the first
@@ -314,6 +358,9 @@ pub struct DiffView {
     /// The user's comments on AI review's findings can change: the feature
     /// is at AI review, its findings read in.
     pub(crate) notes_open: bool,
+    /// The user's own comments are refused, and this says why: only the
+    /// flagged items take comments (Plan review's suggestions in the plan).
+    pub(crate) flags_only: Option<&'static str>,
     /// Each comment's rows (by index into `review.comments`) and the
     /// editor's, as byte ranges into their text, wrapped at `cols`.
     comment_wraps: Vec<Vec<Range<usize>>>,
@@ -1436,15 +1483,19 @@ impl DiffView {
     /// whole file from its header (a page with no cursor: it has none),
     /// or edit the comment the cursor is on.
     fn comment_here(&mut self, ctx: &Ctx) {
-        if self.plain && self.cursor.is_none() {
-            return self.comment_file(ctx);
-        }
         if let Some(c) = self
             .cursor
             .as_ref()
             .and_then(|cur| self.comment_at(cur.row))
         {
             return self.edit_comment(c, ctx);
+        }
+        if let Some(why) = self.flags_only {
+            self.signals.error = Some(Some(why.into()));
+            return;
+        }
+        if self.plain && self.cursor.is_none() {
+            return self.comment_file(ctx);
         }
         // On a file's header alone, a comment on the whole file.
         let on_header = self.cursor.as_ref().is_some_and(|cur| {
@@ -1478,6 +1529,10 @@ impl DiffView {
     /// Write a comment on the whole of the file a page shows, over its
     /// first line.
     fn comment_file(&mut self, ctx: &Ctx) {
+        if let Some(why) = self.flags_only {
+            self.signals.error = Some(Some(why.into()));
+            return;
+        }
         let file = self.roots.iter().find_map(|root| {
             let file = self.diffs.get(root)?.1.first()?;
             Some((root.clone(), file.path.clone()))
@@ -1505,13 +1560,17 @@ impl DiffView {
             return;
         };
         if let Some(flag) = &comment.flag {
+            if let Some(why) = flag.frozen {
+                self.signals.error = Some(Some(why.into()));
+                return;
+            }
             if flag.sent {
                 self.signals.error = Some(Some(SENT_COMMENT.into()));
                 return;
             }
             // The user's own item is reworded where it was written.
             if flag.yours && !flag.note {
-                self.signals.edit_finding = Some(flag.id.clone());
+                self.signals.edit_finding = Some((flag.of, flag.id.clone()));
             } else {
                 self.write_note(c, ctx);
             }
@@ -1532,12 +1591,22 @@ impl DiffView {
         self.follow_editor(ctx);
     }
 
-    /// Why the user's comment on finding `flag` can't change now, if so.
+    /// Why the user's comment on item `flag` can't change now, if so: a
+    /// frozen one says why first.
     fn note_refused(&self, flag: &review::Flag) -> Option<String> {
-        if !self.notes_open {
-            return Some(NOTES_CLOSED.into());
+        if let Some(why) = flag.frozen {
+            return Some(why.into());
         }
-        review_import::note_editable(&flag.id, flag.state).err()
+        if !self.notes_open {
+            return Some(
+                match flag.of {
+                    ItemOf::Finding => NOTES_CLOSED,
+                    ItemOf::Suggestion => SUGGESTION_NOTES_CLOSED,
+                }
+                .into(),
+            );
+        }
+        review_items::note_editable(flag.of, &flag.id, flag.state).err()
     }
 
     /// Open the editor on the user's comment on the finding comment `c` is,
@@ -1586,12 +1655,20 @@ impl DiffView {
         let Some((_, flag)) = self.finding_here() else {
             return false;
         };
-        let id = flag.id.clone();
+        let id = (flag.of, flag.id.clone());
         match self.note_refused(flag) {
             Some(why) => self.signals.error = Some(Some(why)),
             None => self.signals.edit_finding = Some(id),
         }
         true
+    }
+
+    /// Which kind of item the comment being written is on: a finding when
+    /// it is on none.
+    fn editing_of(&self) -> ItemOf {
+        (self.editing.as_ref())
+            .and_then(|e| self.review.comments.get(e.at?)?.flag.as_ref())
+            .map_or(ItemOf::Finding, |f| f.of)
     }
 
     /// Whether a finding's dismissal is being written with no reason yet.
@@ -1606,7 +1683,8 @@ impl DiffView {
     /// written, or what is typed next would go to the diff as keys.
     fn submit_comment(&mut self, ctx: &Ctx) {
         if self.reason_missing() {
-            self.signals.error = Some(Some(NO_REASON.into()));
+            let of = self.editing_of();
+            self.signals.error = Some(Some(no_reason(of).into()));
             return;
         }
         self.save_comment(ctx);
@@ -1619,23 +1697,24 @@ impl DiffView {
             return;
         };
         let text = editing.field.trim().to_owned();
+        let comment = editing.at.and_then(|c| self.review.comments.get(c));
+        let of = (comment.and_then(|c| c.flag.as_ref())).map_or(ItemOf::Finding, |f| f.of);
         if let Some(id) = editing.note_on {
             // The record has it, and shows it again from there. Nothing
             // written where there was nothing: nothing to do.
-            let comment = editing.at.and_then(|c| self.review.comments.get(c));
             if comment.is_some_and(is_note) || !text.is_empty() {
-                self.signals.noted = Some((id, text));
+                self.signals.noted = Some((of, id, text));
             }
             return self.build_rows(ctx.sections, self.diff_anchor());
         }
         if let Some(id) = editing.dismiss {
             // No reason, no dismissal.
             self.signals.error = Some(match text.is_empty() {
-                true => Some(NO_REASON.into()),
+                true => Some(no_reason(of).into()),
                 false => None,
             });
             if !text.is_empty() {
-                self.signals.decided = Some((id, Decision::Dismiss(text)));
+                self.signals.decided = Some((of, id, Decision::Dismiss(text)));
             }
             return self.build_rows(ctx.sections, self.diff_anchor());
         }
@@ -1721,11 +1800,11 @@ impl DiffView {
         let Some((c, flag)) = self.note_here() else {
             return false;
         };
-        let id = flag.id.clone();
+        let (of, id) = (flag.of, flag.id.clone());
         if let Some(first) = self.find_row(&RowKey::Comment(c - 1)) {
             self.set_cursor(first, None);
         }
-        self.signals.noted = Some((id, String::new()));
+        self.signals.noted = Some((of, id, String::new()));
         true
     }
 
@@ -1794,22 +1873,32 @@ impl DiffView {
     /// are findings; else it isn't the diff's key.
     fn fix_finding(&mut self) -> bool {
         let Some((_, flag)) = self.finding_here() else {
-            let any = self.review.comments.iter().any(|c| c.flag.is_some());
-            if any {
-                self.signals.error = Some(Some(NO_FINDING.into()));
+            let any = self.review.comments.iter().find_map(|c| c.flag.as_ref());
+            if let Some(flag) = any {
+                let why = review_items::words(flag.of).none_here;
+                self.signals.error = Some(Some(why.into()));
             }
-            return any;
+            return any.is_some();
         };
+        if let Some(why) = flag.frozen {
+            self.signals.error = Some(Some(why.into()));
+            return true;
+        }
         if flag.sent {
             self.signals.error = Some(Some(SENT_COMMENT.into()));
             return true;
         }
         if flag.yours {
-            self.signals.error = Some(Some(YOUR_COMMENT.into()));
+            self.signals.error = Some(Some(yours_refused(flag.of).into()));
             return true;
         }
-        match review_import::fix_key(flag.state) {
-            Ok(decision) => self.signals.decided = Some((flag.id.clone(), decision)),
+        // A question is accepted by answering it: f waits for the answer.
+        if flag.unanswered && flag.state != FindingState::Fix {
+            self.signals.error = Some(Some(UNANSWERED.into()));
+            return true;
+        }
+        match review_items::want_key(flag.of, flag.state) {
+            Ok(decision) => self.signals.decided = Some((flag.of, flag.id.clone(), decision)),
             Err(why) => self.signals.error = Some(Some(why.into())),
         }
         true
@@ -1826,16 +1915,20 @@ impl DiffView {
         let Some((c, flag)) = self.finding_here() else {
             return false;
         };
+        if let Some(why) = flag.frozen {
+            self.signals.error = Some(Some(why.into()));
+            return true;
+        }
         if flag.sent {
             self.signals.error = Some(Some(SENT_COMMENT.into()));
             return true;
         }
         // The user's own: nothing to tell themselves, so it just goes.
         if flag.yours {
-            self.signals.delete_own = Some(flag.id.clone());
+            self.signals.delete_own = Some((flag.of, flag.id.clone()));
             return true;
         }
-        match review_import::dismiss_key(flag.state) {
+        match review_items::refuse_key(flag.of, flag.state) {
             Ok(None) => {
                 let (id, comment) = (flag.id.clone(), &self.review.comments[c]);
                 self.signals.error = Some(None);
@@ -1852,7 +1945,9 @@ impl DiffView {
                 self.build_rows(ctx.sections, self.diff_anchor());
                 self.follow_editor(ctx);
             }
-            Ok(Some(decision)) => self.signals.decided = Some((flag.id.clone(), decision)),
+            Ok(Some(decision)) => {
+                self.signals.decided = Some((flag.of, flag.id.clone(), decision));
+            }
             Err(why) => self.signals.error = Some(Some(why.into())),
         }
         true
@@ -1986,10 +2081,12 @@ impl DiffView {
         finding && (self.has_note(c) || writing)
     }
 
-    /// What `]` and `[` go through: findings when all are, else comments.
+    /// What `]` and `[` go through: findings (or suggestions) when all
+    /// are, else comments.
     fn comment_noun(&self) -> &'static str {
+        let of = (self.review.comments.iter()).find_map(|c| c.flag.as_ref().map(|f| f.of));
         match self.review.own() == 0 {
-            true => "finding",
+            true => review_items::words(of.unwrap_or_default()).item,
             false => "comment",
         }
     }
@@ -2528,10 +2625,10 @@ impl DiffView {
                 let within = note_tone(comment);
                 let (at, of) = self.comment_place(c);
                 let reviewer = (comment.flag.as_ref()).filter(|flag| !flag.yours);
-                let noun = if reviewer.is_some() {
-                    "finding"
-                } else {
-                    "comment"
+                let noun = match comment.flag.as_ref().map(|flag| (flag.of, flag.yours)) {
+                    Some((ItemOf::Suggestion, true)) => "your suggestion",
+                    Some((of, false)) => review_items::words(of).item,
+                    _ => "comment",
                 };
                 DetailRow::CommentHead {
                     finding: reviewer.map(|flag| FindingHead {
@@ -2595,6 +2692,9 @@ impl DiffView {
             }
             (DiffRow::EditorHint { .. }, _) => DetailRow::Note(
                 match self.editing.as_ref().is_some_and(|e| e.dismiss.is_some()) {
+                    true if self.editing_of() == ItemOf::Suggestion => {
+                        "Why reject it? Enter rejects it · Esc with no reason keeps it"
+                    }
                     true => "Why dismiss it? Enter dismisses it · Esc with no reason keeps it",
                     false => "Shift+Enter breaks the line · Enter or Esc keeps it",
                 }
@@ -2695,7 +2795,7 @@ impl DiffView {
             if editing.dismiss.is_some() {
                 let dismiss = Hint {
                     key: "Enter".into(),
-                    label: "Dismiss".into(),
+                    label: review_items::words(self.editing_of()).refuse_verb.into(),
                     ..hint(B::DismissFinding)
                 };
                 return vec![(i, dismiss), (i, hint(B::DiscardComment))];
@@ -2746,12 +2846,16 @@ impl DiffView {
             let first = self.find_row(&RowKey::Comment(c)).and_then(at);
             let keyed = |button: B, key: &str| Hint {
                 key: key.into(),
+                label: decide_label(flag.of, button, flag.state),
                 ..hint(button)
             };
+            let words = review_items::words(flag.of);
             let choices = match flag.state {
+                // Frozen, it is only read: nothing on it would be taken.
+                _ if flag.frozen.is_some() => Vec::new(),
                 FindingState::Fix if flag.yours => vec![
                     Hint {
-                        label: "Edit\u{2026}".into(),
+                        label: words.edit_own.into(),
                         ..keyed(B::Comment, "c")
                     },
                     Hint {
@@ -2760,6 +2864,8 @@ impl DiffView {
                     },
                 ],
                 _ if flag.yours => Vec::new(),
+                // A question is accepted by answering it.
+                FindingState::Open if flag.unanswered => vec![keyed(B::DismissFinding, "Del")],
                 FindingState::Open => {
                     vec![keyed(B::FixFinding, "f"), keyed(B::DismissFinding, "Del")]
                 }
@@ -2775,17 +2881,26 @@ impl DiffView {
                 FindingState::Sent | FindingState::Fixed => Vec::new(),
             };
             // What the user can say of a reviewer's finding.
-            let words = (!flag.yours && self.note_refused(flag).is_none()).then(|| {
-                let comment = (!self.has_note(c)).then(|| keyed(B::Comment, "c"));
+            let say = (!flag.yours && self.note_refused(flag).is_none()).then(|| {
+                let comment = (!self.has_note(c)).then(|| Hint {
+                    label: match flag.unanswered {
+                        true => "Answer".into(),
+                        false => B::Comment.label().into(),
+                    },
+                    ..keyed(B::Comment, "c")
+                });
                 // A dismissed finding's fix waits for it to be reopened.
-                let fix = review_import::editable_state(&flag.id, flag.state)
+                let fix = review_items::editable(flag.of, &flag.id, flag.state)
                     .is_ok()
-                    .then(|| keyed(B::EditFix, "Shift+E"));
+                    .then(|| Hint {
+                        label: words.edit.into(),
+                        ..keyed(B::EditFix, "Shift+E")
+                    });
                 comment.into_iter().chain(fix)
             });
             if let Some(i) = first {
                 buttons.extend(choices.into_iter().map(|h| (i, h)));
-                buttons.extend(words.into_iter().flatten().map(|h| (i, h)));
+                buttons.extend(say.into_iter().flatten().map(|h| (i, h)));
             }
             return buttons;
         }
@@ -2797,7 +2912,9 @@ impl DiffView {
             && lines
             && self.comment_at(cursor.row).is_none()
         {
-            buttons.push((i, hint(B::Comment)));
+            if self.flags_only.is_none() {
+                buttons.push((i, hint(B::Comment)));
+            }
             buttons.push((i, hint(B::CopyLines)));
             if self.changed_row(cursor.row) {
                 buttons.push((i, hint(B::Restore)));
