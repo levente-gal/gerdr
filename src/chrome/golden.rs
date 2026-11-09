@@ -3041,20 +3041,24 @@ pub(super) fn feature_tab() -> super::FeatureTabView {
                     picks: Vec::new(),
                     model: None,
                 },
-                PageSection::Milestones {
-                    label: "Review 1".into(),
-                    state: None,
-                    done: 1,
-                    total: 2,
-                    items: [
+                PageSection::Lines {
+                    label: "Fix round".into(),
+                    lines: Vec::new(),
+                },
+                round_card(
+                    "Review 1",
+                    Dot::Working,
+                    (
+                        "2 findings \u{b7} making fixes \u{b7} 1 of 2 made",
+                        CheckTone::Note,
+                    ),
+                    "Claude Code \u{b7} asked 30m ago \u{b7} fixes went 20m ago",
+                    &[
                         (true, "r1-1: Export drops the last row"),
                         (false, "r1-2: Long jobs lose their progress"),
-                    ]
-                    .map(|(d, t)| (d, t.to_owned()))
-                    .into(),
-                    running: Vec::new(),
-                    buttons: Vec::new(),
-                },
+                    ],
+                    true,
+                ),
                 PageSection::Milestones {
                     label: "Build".into(),
                     state: None,
@@ -3430,37 +3434,59 @@ fn feature_tab_fix_plan() -> super::FeatureTabView {
 
 /// Build's page after Verify's failures came back to it twice, and a setup.
 fn feature_tab_verify_fixes() -> super::FeatureTabView {
-    use super::{CheckTone, PageSection};
+    use super::{CheckTone, Dot, PageSection, RoundAsked};
     let mut view = feature_tab();
-    view.page.sections.insert(
-        1,
-        PageSection::Lines {
-            label: "Verify failures".into(),
-            lines: vec![
-                tab_line(
-                    "Verify 2 \u{b7} run 3 failed 12m ago \u{b7} Claude Code \u{b7} making fixes \u{b7} 1 of 3 made",
-                    CheckTone::Blocker,
-                ),
-                tab_line("api: `cargo test export::` exited with 101", CheckTone::Blocker),
-                tab_line(
-                    "error[E0599]: no method named `stream` found for struct `Export` in the current scope, which is long enough to reach the side of the page at the narrow width",
-                    CheckTone::Note,
-                ),
-                tab_line("web: `npm run lint` exited with 2", CheckTone::Blocker),
-                tab_line(
-                    "Verify 1 \u{b7} run 2 failed 2h ago \u{b7} Cursor \u{b7} fixes made \u{b7} run 3 failed",
-                    CheckTone::Note,
-                ),
-            ],
-        },
-    );
     for section in &mut view.page.sections {
-        if let PageSection::Milestones { label, .. } = section
-            && label == "Review 1"
-        {
-            *label = "Verify 1".into();
+        match section {
+            PageSection::Lines { label, .. } if label == "Fix round" => {
+                *label = "Fix rounds \u{b7} 2".into();
+            }
+            PageSection::Round(card) if card.label == "Review 1" => {
+                card.label = "Verify 1".into();
+                card.dot = Dot::Done;
+                card.state = tab_line("fixes made", CheckTone::Ready);
+                card.meta =
+                    "Cursor \u{b7} run 2 failed 2h ago \u{b7} finished 1h ago \u{b7} run 3 failed"
+                        .into();
+                card.open = false;
+            }
+            _ => {}
         }
     }
+    let PageSection::Round(newest) = round_card(
+        "Verify 2",
+        Dot::Working,
+        (
+            "Verify's failures \u{b7} making fixes \u{b7} 1 of 3 made",
+            CheckTone::Note,
+        ),
+        "Claude Code \u{b7} run 3 failed 12m ago \u{b7} fixes went 8m ago",
+        &[
+            (true, "Export streams its rows"),
+            (false, "api: `cargo test export::` passes"),
+            (false, "web: `npm run lint` passes"),
+        ],
+        true,
+    ) else {
+        unreachable!()
+    };
+    let asked = |title: &str, note: &str| RoundAsked {
+        id: String::new(),
+        title: title.into(),
+        note: note.into(),
+        now: Some(tab_line("being fixed", CheckTone::Note)),
+    };
+    let newest = super::RoundCard {
+        asked: vec![
+            asked(
+                "api: `cargo test export::` exited with 101",
+                "error[E0599]: no method named `stream` found for struct `Export` in the current scope, which is long enough to reach the side of the page at the narrow width",
+            ),
+            asked("web: `npm run lint` exited with 2", ""),
+        ],
+        ..newest
+    };
+    view.page.sections.insert(2, PageSection::Round(newest));
     view.page.sections.push(PageSection::Lines {
         label: "Setup".into(),
         lines: vec![
@@ -3474,37 +3500,48 @@ fn feature_tab_verify_fixes() -> super::FeatureTabView {
 /// Build's page with Code review's round open: its plan waits, so nothing is
 /// in the build log yet, and another round is still being planned above it.
 fn feature_tab_open_round() -> super::FeatureTabView {
-    use super::{CheckTone, PageSection};
+    use super::{CheckTone, Dot, PageSection};
     let mut view = feature_tab();
-    view.page.sections.insert(
-        1,
-        PageSection::Lines {
-            label: "Manual test 3".into(),
-            lines: vec![tab_line(
-                "manual test failures \u{b7} planning fixes",
-                CheckTone::Note,
-            )],
-        },
-    );
+    for section in &mut view.page.sections {
+        match section {
+            PageSection::Lines { label, .. } if label == "Fix round" => {
+                *label = "Fix rounds \u{b7} 3".into();
+            }
+            PageSection::Round(card) if card.label == "Review 1" => {
+                card.dot = Dot::Done;
+                card.state = tab_line("2 of 2 made", CheckTone::Ready);
+                card.open = false;
+            }
+            _ => {}
+        }
+    }
     view.page.sections.insert(
         2,
-        PageSection::Milestones {
-            label: "Code review 2".into(),
-            state: Some(tab_line(
-                "review comments \u{b7} fix plan ready",
-                CheckTone::Ready,
-            )),
-            done: 0,
-            total: 2,
-            items: [
+        round_card(
+            "Manual test 3",
+            Dot::Working,
+            (
+                "manual test failures \u{b7} planning fixes",
+                CheckTone::Note,
+            ),
+            "asked 2m ago",
+            &[],
+            true,
+        ),
+    );
+    view.page.sections.insert(
+        3,
+        round_card(
+            "Code review 2",
+            Dot::Idle,
+            ("review comments \u{b7} fix plan ready", CheckTone::Ready),
+            "asked 20m ago \u{b7} plan written 5m ago",
+            &[
                 (false, "api/src/export/csv.rs:32-38"),
                 (false, "All the fixes of the plan"),
-            ]
-            .map(|(d, t)| (d, t.to_owned()))
-            .into(),
-            running: Vec::new(),
-            buttons: Vec::new(),
-        },
+            ],
+            false,
+        ),
     );
     view
 }
@@ -5038,6 +5075,29 @@ fn feature_tab_manual_rounds() -> super::FeatureTabView {
     view
 }
 
+/// A fix round's card on a fixture's page, open or folded, with no buttons.
+fn round_card(
+    label: &str,
+    dot: super::Dot,
+    state: (&str, super::CheckTone),
+    meta: &str,
+    fixes: &[(bool, &str)],
+    open: bool,
+) -> super::PageSection {
+    super::PageSection::Round(super::RoundCard {
+        label: label.into(),
+        dot,
+        state: tab_line(state.0, state.1),
+        meta: meta.into(),
+        asked: Vec::new(),
+        fixes: fixes.iter().map(|(d, t)| (*d, (*t).to_owned())).collect(),
+        running: Vec::new(),
+        changed: Vec::new(),
+        open,
+        buttons: Vec::new(),
+    })
+}
+
 /// The feature tab's fixtures, by name.
 fn feature_tabs() -> [(&'static str, super::FeatureTabView); 43] {
     [
@@ -5217,9 +5277,9 @@ const FEATURE_TAB: [&str; 55] = [
 const GOLDEN_FEATURE_TAB: [[u64; 55]; 4] = [
     // Dark at 1
     [
-        0xa1cb47fc387244fb, // tab_build_860
-        0xe439bc6e843af18f, // tab_build_1180
-        0x5e841e6e2835a33f, // tab_build_1920
+        0xb47edcf3deebfe55, // tab_build_860
+        0xca6c108ab52056a0, // tab_build_1180
+        0x9c264956301aa808, // tab_build_1920
         0xe189a91009663b5f, // tab_plan_ready_1180
         0xe5c6b54fe50866d8, // tab_verify_failed_1920
         0x182a16a4819b681d, // tab_verify_running_1180
@@ -5230,29 +5290,29 @@ const GOLDEN_FEATURE_TAB: [[u64; 55]; 4] = [
         0xad0003676bd9219f, // tab_ship_finish_1180
         0x426ec15d8a3d8d53, // tab_done_1920
         0xcc415c3a7a99a7ff, // tab_later_860
-        0x976a61eaa755274e, // tab_repos_1180
-        0xeb30a9a866fdf824, // tab_unfolded_860
-        0xa9a0b346455ef4a5, // tab_unfolded_1920
+        0x675574c91a3b9277, // tab_repos_1180
+        0x5d047ed808e584b1, // tab_unfolded_860
+        0xad330f7d9a83e9a8, // tab_unfolded_1920
         0x04e5e35642817215, // tab_shipped_1180
-        0x81472ba0294ba9a3, // tab_repos_failed_1180
-        0x7bd54bcba61e72c5, // tab_repos_error_860
-        0xef44c914ca5fffc7, // tab_more_repos_850
-        0xb5a3233ac93c9508, // tab_more_repos_mid_850
-        0x60ded0b28fb6bee3, // tab_rail_wrap_500
-        0x716b40ef5a012cb0, // tab_rail_wrap_1180
+        0x556855562b732ede, // tab_repos_failed_1180
+        0x41e5b8f3d720b38f, // tab_repos_error_860
+        0x59ef9c312c931cc1, // tab_more_repos_850
+        0x3bccd51bfc8c6a8e, // tab_more_repos_mid_850
+        0x54175d5f1bccfbc3, // tab_rail_wrap_500
+        0x37a219337afc6093, // tab_rail_wrap_1180
         0xd82dd2c9a82f222d, // tab_picks_later_1180
-        0x523374f3503f6b33, // tab_picks_running_860
+        0x77200a37f756c4dd, // tab_picks_running_860
         0x5b4ea1e7416a2668, // tab_model_later_1180
-        0x5a5068350321a55e, // tab_model_long_860
+        0xf3098420783950d4, // tab_model_long_860
         0x1b190673f5a76dea, // tab_t3_draft_860
-        0x399e4a5edb3d0e41, // tab_milestone_mode_1180
-        0x357b66d29749d302, // tab_milestone_mode_860
+        0xe6f677143326164a, // tab_milestone_mode_1180
+        0x8d52a746f8ccb913, // tab_milestone_mode_860
         0x3daadf48429854b9, // tab_held_860
         0xdd57288e450f32e2, // tab_resume_1180
         0x1d3b7ea983d73226, // tab_resume_860
         0x37ef3c6e3ca8a6a0, // tab_fixing_1180
-        0x8321e646c7b94f9a, // tab_fixed_code_1180
-        0xd2b31d606f880bab, // tab_fixed_code_860
+        0x596b073f735ad49d, // tab_fixed_code_1180
+        0xfc1b4d7fa2e1f265, // tab_fixed_code_860
         0x9b367d320c5201f4, // tab_approved_1180
         0xf2b01358173773fd, // tab_locked_1180
         0x7561d1ebf47b39af, // tab_start_over_1180
@@ -5262,11 +5322,11 @@ const GOLDEN_FEATURE_TAB: [[u64; 55]; 4] = [
         0xda3254659545ff6d, // tab_manual_test_1180
         0xd356fc844361740e, // tab_manual_note_860
         0xaae0ccef435a4695, // tab_review_rounds_1180
-        0x1cdf599525fd2195, // tab_verify_fixes_1180
-        0x1f9c87379eb46eac, // tab_verify_fixes_860
+        0x81505a410da083b3, // tab_verify_fixes_1180
+        0x4625fc13e9c36d62, // tab_verify_fixes_860
         0x991d1848f7033107, // tab_review_page_1180
-        0x1ab3028834af4e64, // tab_open_round_1180
-        0xae6244bc63e11d4d, // tab_open_round_860
+        0x2dd9da03e5832c3c, // tab_open_round_1180
+        0xb5f93f894fcc0cc5, // tab_open_round_860
         0x3ca562e56cb5ac79, // tab_manual_pages_860
         0xf439e283f4cafda2, // tab_manual_search_860
         0x010ec66c0954969d, // tab_manual_select_860
@@ -5275,9 +5335,9 @@ const GOLDEN_FEATURE_TAB: [[u64; 55]; 4] = [
     ],
     // Dark at 2
     [
-        0x1813f1afbef89404, // tab_build_860
-        0x791a3739a7050d68, // tab_build_1180
-        0x4efdc144802d38f8, // tab_build_1920
+        0xc2ea94b29f651192, // tab_build_860
+        0x26c6c04b9dfb1f96, // tab_build_1180
+        0x50fe8934c5dd77a6, // tab_build_1920
         0xd84ef3781722f490, // tab_plan_ready_1180
         0xd1ad4571a21deadf, // tab_verify_failed_1920
         0xe95f15636a93b97f, // tab_verify_running_1180
@@ -5288,29 +5348,29 @@ const GOLDEN_FEATURE_TAB: [[u64; 55]; 4] = [
         0xbbd5ef5f84b78c62, // tab_ship_finish_1180
         0x90a36aaee3d0aa1f, // tab_done_1920
         0x6e2cb877e129791a, // tab_later_860
-        0x4d3e881637bfd165, // tab_repos_1180
-        0x779aaef05b6597ec, // tab_unfolded_860
-        0x93365c790b704686, // tab_unfolded_1920
+        0xbadbf0842555969e, // tab_repos_1180
+        0xf1e9485ba0732337, // tab_unfolded_860
+        0xa7ba72079320f385, // tab_unfolded_1920
         0x0a0e10a081f275bb, // tab_shipped_1180
-        0x2ffda56703f0873f, // tab_repos_failed_1180
-        0xcc7d7b883c120c03, // tab_repos_error_860
-        0xdbc07eeaf469deff, // tab_more_repos_850
-        0x9a5aa192d13b756b, // tab_more_repos_mid_850
-        0x5f4b22f7e4ddefbb, // tab_rail_wrap_500
-        0x55856d90dae1dbb3, // tab_rail_wrap_1180
+        0x88603a6976cde930, // tab_repos_failed_1180
+        0xffca267670c293f9, // tab_repos_error_860
+        0x8032c0fea8db8455, // tab_more_repos_850
+        0x5a5c3e13187b6a31, // tab_more_repos_mid_850
+        0xd3914f92488d4c7a, // tab_rail_wrap_500
+        0xab1ae19ad2f2ab01, // tab_rail_wrap_1180
         0x8baf7d92f24cc865, // tab_picks_later_1180
-        0xd858b4b6a497511c, // tab_picks_running_860
+        0xa1e3ae31e119d46a, // tab_picks_running_860
         0x289abf81f924a67e, // tab_model_later_1180
-        0xeea191097b6c58e3, // tab_model_long_860
+        0x85a0595411690559, // tab_model_long_860
         0x13b24120dc0e0e14, // tab_t3_draft_860
-        0x25e2289954f2fd82, // tab_milestone_mode_1180
-        0x2521a8778015a78d, // tab_milestone_mode_860
+        0x1014c59c212547f8, // tab_milestone_mode_1180
+        0xe516174034f84704, // tab_milestone_mode_860
         0x32729d0f0b9d7adf, // tab_held_860
         0x5e8649fc158bfc2e, // tab_resume_1180
         0x30c2ac05c31f179a, // tab_resume_860
         0x8687d8dffc051930, // tab_fixing_1180
-        0xe5309f5ebcaf5328, // tab_fixed_code_1180
-        0xe2ca6f4bc7252cb4, // tab_fixed_code_860
+        0x0313a6ac813cb556, // tab_fixed_code_1180
+        0x4f375879897ef522, // tab_fixed_code_860
         0xb003336ceee49767, // tab_approved_1180
         0xc4a02e8c5e16bf27, // tab_locked_1180
         0xd146cd83aa7b15e4, // tab_start_over_1180
@@ -5320,11 +5380,11 @@ const GOLDEN_FEATURE_TAB: [[u64; 55]; 4] = [
         0xd9c655ce9a75a8df, // tab_manual_test_1180
         0xa6da4ebd7e0ae33f, // tab_manual_note_860
         0x696373a9ac9ae597, // tab_review_rounds_1180
-        0xf6449d4a64d596b8, // tab_verify_fixes_1180
-        0x28d00b565d38589e, // tab_verify_fixes_860
+        0x2dd771800b3640b9, // tab_verify_fixes_1180
+        0x543d950cc782e769, // tab_verify_fixes_860
         0xa37c484a9e95f3ca, // tab_review_page_1180
-        0xb6c596e311face93, // tab_open_round_1180
-        0x3f93d48fbc514097, // tab_open_round_860
+        0xed7b6c4cc54b05ea, // tab_open_round_1180
+        0xfa847fd64c3ebea2, // tab_open_round_860
         0x638d93fbc6e1f713, // tab_manual_pages_860
         0x15a2d69adf802796, // tab_manual_search_860
         0x9a471d9cc1895e23, // tab_manual_select_860
@@ -5333,9 +5393,9 @@ const GOLDEN_FEATURE_TAB: [[u64; 55]; 4] = [
     ],
     // Light at 1
     [
-        0x9fe5226d7f54bfe8, // tab_build_860
-        0x9bb2694db8c65bdd, // tab_build_1180
-        0x9e1efe8b0cb41b26, // tab_build_1920
+        0xcc93820a9444ad60, // tab_build_860
+        0x80144628ff77ad97, // tab_build_1180
+        0xb761367cbc399bdc, // tab_build_1920
         0xbd427b01de8543f6, // tab_plan_ready_1180
         0x7c07bc659866d87e, // tab_verify_failed_1920
         0x4a8e336fe34d7a13, // tab_verify_running_1180
@@ -5346,29 +5406,29 @@ const GOLDEN_FEATURE_TAB: [[u64; 55]; 4] = [
         0xce65a05e867740c3, // tab_ship_finish_1180
         0xb2b62b674cb05405, // tab_done_1920
         0x94793a1c5513c298, // tab_later_860
-        0x283dffaf193a122b, // tab_repos_1180
-        0x1c519fda445b0165, // tab_unfolded_860
-        0x20dbf102ddafdfa1, // tab_unfolded_1920
+        0x6042b0328faacb8a, // tab_repos_1180
+        0xca1a6e6fdade0d8c, // tab_unfolded_860
+        0x32d0a14248d39ea4, // tab_unfolded_1920
         0x5b330bf0d9c30f69, // tab_shipped_1180
-        0x96a55c04b91c96ae, // tab_repos_failed_1180
-        0x4b827bc5d4a22378, // tab_repos_error_860
-        0x286417632bb9751e, // tab_more_repos_850
-        0x18c7a26f85b1fcec, // tab_more_repos_mid_850
-        0x70a81da1b6817435, // tab_rail_wrap_500
-        0x1a5e937548fa7f50, // tab_rail_wrap_1180
+        0x132551d9d89f750b, // tab_repos_failed_1180
+        0x778de4b33f229650, // tab_repos_error_860
+        0x1bb6173baa5466ba, // tab_more_repos_850
+        0x8b1675c74ce8a25c, // tab_more_repos_mid_850
+        0x53506b45b74398e1, // tab_rail_wrap_500
+        0x6f93518c75bed572, // tab_rail_wrap_1180
         0x9cbfe325692a158e, // tab_picks_later_1180
-        0xeebeaeef72d99d78, // tab_picks_running_860
+        0x1aca17dcdd5a1050, // tab_picks_running_860
         0x57c74b45fd9d3840, // tab_model_later_1180
-        0x1875a99afb819f1c, // tab_model_long_860
+        0x5075640333ec6bb4, // tab_model_long_860
         0xfc9fc69cee351bb5, // tab_t3_draft_860
-        0xb5ee209b2e91e529, // tab_milestone_mode_1180
-        0x2028b1f71ea7076e, // tab_milestone_mode_860
+        0xbfb3c8b9841f170b, // tab_milestone_mode_1180
+        0xf8de4ca07ffeb9b7, // tab_milestone_mode_860
         0x2da12a0b77b87f7d, // tab_held_860
         0x06e5930e69a1bf8d, // tab_resume_1180
         0xa3c3da37be3f43ac, // tab_resume_860
         0x25a49252fee1fa58, // tab_fixing_1180
-        0x83816428fbbefe7c, // tab_fixed_code_1180
-        0x5a22cd3eb219f9be, // tab_fixed_code_860
+        0x4008805a7c38d0c6, // tab_fixed_code_1180
+        0xcd790e15ae9d5802, // tab_fixed_code_860
         0xf19adff484ee2b2a, // tab_approved_1180
         0x7f803f198678b403, // tab_locked_1180
         0x7b90aece3880d81f, // tab_start_over_1180
@@ -5378,11 +5438,11 @@ const GOLDEN_FEATURE_TAB: [[u64; 55]; 4] = [
         0xa3e0ebbd2a4604b0, // tab_manual_test_1180
         0x5673f5d1da0365bf, // tab_manual_note_860
         0x29372c9287bd44bf, // tab_review_rounds_1180
-        0x6d347c11e8a9dfb7, // tab_verify_fixes_1180
-        0x490ed3d87f30d272, // tab_verify_fixes_860
+        0xb75f19733879a5fd, // tab_verify_fixes_1180
+        0xfb4a780837534c55, // tab_verify_fixes_860
         0xc80d83cdbecf59b3, // tab_review_page_1180
-        0xcf3c025a23ff89a8, // tab_open_round_1180
-        0xa5b2c702e3dcfd64, // tab_open_round_860
+        0x6c700d27ddec3aa3, // tab_open_round_1180
+        0x1e36b6c42c8b87c7, // tab_open_round_860
         0x3d753e7555e243d8, // tab_manual_pages_860
         0x31b855efdeeab544, // tab_manual_search_860
         0xc85de47f1e15da39, // tab_manual_select_860
@@ -5391,9 +5451,9 @@ const GOLDEN_FEATURE_TAB: [[u64; 55]; 4] = [
     ],
     // Light at 2
     [
-        0x7f27ddfbd3ee1cca, // tab_build_860
-        0x6d7f9ad149916b76, // tab_build_1180
-        0x77a01303162dca9a, // tab_build_1920
+        0xbfea088f607ff676, // tab_build_860
+        0xa17c6bafdd552c80, // tab_build_1180
+        0x728895e2aefa19d4, // tab_build_1920
         0x765df7bc08d22fb0, // tab_plan_ready_1180
         0x834e87d1b77bb685, // tab_verify_failed_1920
         0x82805a0d8a12c5b7, // tab_verify_running_1180
@@ -5404,29 +5464,29 @@ const GOLDEN_FEATURE_TAB: [[u64; 55]; 4] = [
         0x6f8069682d015e87, // tab_ship_finish_1180
         0x430e69f233dbc908, // tab_done_1920
         0x973f418bd020aecf, // tab_later_860
-        0xcb423e520618727d, // tab_repos_1180
-        0x2723014455f0ac97, // tab_unfolded_860
-        0xeb7e4df37f643511, // tab_unfolded_1920
+        0x064c4879c6222c88, // tab_repos_1180
+        0x1f25aa1d48d6bbee, // tab_unfolded_860
+        0xdfed50539f53e860, // tab_unfolded_1920
         0x287d19ae79556ac4, // tab_shipped_1180
-        0x1bf86e4e01f7dfe7, // tab_repos_failed_1180
-        0xbf1bb5086a68b5b2, // tab_repos_error_860
-        0xa727912a15f49241, // tab_more_repos_850
-        0x5101d91b272b6165, // tab_more_repos_mid_850
-        0x6363e3b4c300bab7, // tab_rail_wrap_500
-        0x7417ef85da3d7fa7, // tab_rail_wrap_1180
+        0xcd74d91b15d204c6, // tab_repos_failed_1180
+        0x08d76750e47fe50e, // tab_repos_error_860
+        0x5da5ba24487fb1cd, // tab_more_repos_850
+        0x252268f736131459, // tab_more_repos_mid_850
+        0x2ecf4a5cae051767, // tab_rail_wrap_500
+        0x37e61299547465a9, // tab_rail_wrap_1180
         0xf7066df5c259ecf7, // tab_picks_later_1180
-        0x61baf4140acc772e, // tab_picks_running_860
+        0xafbcd65890c85f32, // tab_picks_running_860
         0xe21cfcfdfbe96e55, // tab_model_later_1180
-        0x83de7249a97db3c9, // tab_model_long_860
+        0x7867b4cbd5bcf63d, // tab_model_long_860
         0x59cc00aad601ffe0, // tab_t3_draft_860
-        0xb5503f8cd4b47c38, // tab_milestone_mode_1180
-        0x7a752d7c956977ca, // tab_milestone_mode_860
+        0x5d3461f75684af86, // tab_milestone_mode_1180
+        0xb12654dff37e63b8, // tab_milestone_mode_860
         0x3d244f2c3d21f79d, // tab_held_860
         0x02071bcc4b2b9ced, // tab_resume_1180
         0xb0d99250844e1321, // tab_resume_860
         0xe86e179b29262da5, // tab_fixing_1180
-        0xfefd74873e1b308b, // tab_fixed_code_1180
-        0x6f50a852c4a3c270, // tab_fixed_code_860
+        0xe5d00753a768c1f5, // tab_fixed_code_1180
+        0x92a7b8de454086a0, // tab_fixed_code_860
         0x094c66e22d9bdfdb, // tab_approved_1180
         0xf689681c2eec0052, // tab_locked_1180
         0xba74f3edaf07f8ca, // tab_start_over_1180
@@ -5436,11 +5496,11 @@ const GOLDEN_FEATURE_TAB: [[u64; 55]; 4] = [
         0x3ede05e76054f570, // tab_manual_test_1180
         0x474d8c1cfa1394f7, // tab_manual_note_860
         0x18a3b0870e7a6ac2, // tab_review_rounds_1180
-        0x975a0edb5a888f19, // tab_verify_fixes_1180
-        0x06334814357ca080, // tab_verify_fixes_860
+        0xfb21e0a676237f1f, // tab_verify_fixes_1180
+        0x450720c7c0073c89, // tab_verify_fixes_860
         0xb7f9bee96811fb6a, // tab_review_page_1180
-        0x05be9740c8c25364, // tab_open_round_1180
-        0xfafa8c8fa68aecb2, // tab_open_round_860
+        0x5769fb9c77de25f9, // tab_open_round_1180
+        0x760e3f7544418fa3, // tab_open_round_860
         0xcba476b8512b8cc8, // tab_manual_pages_860
         0x085ecd92e9b0d5f2, // tab_manual_search_860
         0xc5481c04265fbb04, // tab_manual_select_860
