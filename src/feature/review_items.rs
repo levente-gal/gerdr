@@ -44,6 +44,10 @@ pub struct Words {
     pub item: &'static str,
     /// More than one: "findings".
     pub items: &'static str,
+    /// Who raised the reviewer's, on its flag: "AI review".
+    pub by: &'static str,
+    /// One of the user's own, on its flag: "Your comment".
+    pub own_head: &'static str,
     /// The button wanting it: "Fix".
     pub want: &'static str,
     /// The button taking that back, on one of the reviewer's: "Don't fix".
@@ -104,6 +108,8 @@ pub struct Words {
 const FINDING: Words = Words {
     item: "finding",
     items: "findings",
+    by: "AI review",
+    own_head: "Your comment",
     want: "Fix",
     unwant: "Don't fix",
     refuse: "Dismiss\u{2026}",
@@ -136,6 +142,8 @@ const FINDING: Words = Words {
 const SUGGESTION: Words = Words {
     item: "suggestion",
     items: "suggestions",
+    by: "Plan review",
+    own_head: "Your suggestion",
     want: "Accept",
     unwant: "Don't accept",
     refuse: "Reject\u{2026}",
@@ -270,6 +278,8 @@ mod tests {
         let all = [
             s.item,
             s.items,
+            s.by,
+            s.own_head,
             s.want,
             s.unwant,
             s.refuse,

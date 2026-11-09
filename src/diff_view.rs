@@ -2630,7 +2630,13 @@ impl DiffView {
                     Some((of, false)) => review_items::words(of).item,
                     _ => "comment",
                 };
+                let who = match comment.flag.as_ref() {
+                    Some(flag) if !flag.yours => review_items::words(flag.of).by,
+                    Some(flag) if !flag.note => review_items::words(flag.of).own_head,
+                    _ => "Your comment",
+                };
                 DetailRow::CommentHead {
+                    who,
                     finding: reviewer.map(|flag| FindingHead {
                         severity: flag.severity.label().into(),
                         state: finding_state_word(flag).map(Into::into),
