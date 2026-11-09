@@ -203,7 +203,7 @@ fn container_of(item: &Value, engine: Engine) -> Container {
     }
 }
 
-/// A compose project running in main.
+/// A compose project of main's, running or stopped.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Stack {
     pub project: String,
@@ -242,6 +242,23 @@ pub fn stacks_under(containers: &[Container], roots: &[PathBuf]) -> Vec<Stack> {
             .insert(compose.service.clone(), container.clone());
     }
     stacks.into_values().collect()
+}
+
+/// The compose projects under `roots` among `stopped` containers that have
+/// nothing running in `running`: main stopped them, or a reboot left them so.
+/// Their data is still there to copy. With no service running, all of them
+/// start in the copy.
+pub fn stopped_stacks(stopped: &[Container], running: &[Stack], roots: &[PathBuf]) -> Vec<Stack> {
+    let up = |stack: &Stack| {
+        (running.iter()).any(|r| r.engine == stack.engine && r.project == stack.project)
+    };
+    (stacks_under(stopped, roots).into_iter())
+        .filter(|stack| !up(stack))
+        .map(|stack| Stack {
+            services: BTreeMap::new(),
+            ..stack
+        })
+        .collect()
 }
 
 /// The containers among `containers` compose didn't start. Nothing tells which
@@ -1555,6 +1572,32 @@ mod tests {
             ]
         );
         assert_eq!(containers[0].engine, Engine::PodmanCompose);
+    }
+
+    #[test]
+    fn a_stack_stopped_in_main_is_copied_with_nothing_running() {
+        let of = |name: &str, service: &str, project: &str| {
+            let mut item = inspected(name, service, &format!("/ao/{project}"));
+            item["Config"]["Labels"]["com.docker.compose.project"] = json!(project);
+            item
+        };
+        let roots = [PathBuf::from("/ao")];
+        let running = json!([of("x_db_1", "db", "x")]).to_string();
+        let running = stacks_under(&containers_of(&running, Engine::Podman).unwrap(), &roots);
+        let stopped = json!([
+            // Left from before it ran again: it is running.
+            of("x_db_1", "db", "x"),
+            of("asset_db_1", "db", "asset"),
+            of("asset_cache_1", "cache", "asset"),
+            inspected("other_db_1", "db", "/elsewhere"),
+        ])
+        .to_string();
+        let stopped = containers_of(&stopped, Engine::Podman).unwrap();
+        let stacks = stopped_stacks(&stopped, &running, &roots);
+        let projects: Vec<&str> = stacks.iter().map(|s| s.project.as_str()).collect();
+        assert_eq!(projects, ["asset"]);
+        assert!(stacks[0].services.is_empty());
+        assert_eq!(stacks[0].working_dir, PathBuf::from("/ao/asset"));
     }
 
     #[test]

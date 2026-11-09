@@ -972,7 +972,19 @@ fn start_into(
     // Paused, main's containers would be left out of the copy.
     unpause_left(job.host, job.dir)?;
     let containers = running_containers(job.host, &engines, job.stop)?;
-    let stacks = sandbox::stacks_under(&containers, job.roots);
+    let mut stacks = sandbox::stacks_under(&containers, job.roots);
+    // Main's stack needn't run for its data to be copied: after a reboot it
+    // mostly doesn't, and without it the sandbox has no database.
+    let stopped = stopped_containers(job.host, &engines, job.stop)?;
+    let stopped = sandbox::stopped_stacks(&stopped, &stacks, job.roots);
+    for stack in &stopped {
+        tracing::info!(
+            "sandbox of {}: {} isn't running in main, copying it as it was left",
+            job.slug,
+            stack.project
+        );
+    }
+    stacks.extend(stopped);
     run.not_copied = Vec::new();
     for shown in sandbox::loose(&containers).iter().map(|c| c.shown()) {
         // A pod's containers go by its name, once.
@@ -1136,17 +1148,33 @@ pub fn running_containers(
     engines: &[Engine],
     stop: &AtomicBool,
 ) -> Result<Vec<sandbox::Container>, String> {
+    // Podman leaves paused ones out unless asked, Docker lists them.
+    containers_in(host, engines, &["running", "paused"], stop)
+}
+
+/// The stopped containers of `engines`: exited, or made and never started.
+fn stopped_containers(
+    host: &Host,
+    engines: &[Engine],
+    stop: &AtomicBool,
+) -> Result<Vec<sandbox::Container>, String> {
+    containers_in(host, engines, &["exited", "created"], stop)
+}
+
+/// The containers of `engines` in one of `states`.
+fn containers_in(
+    host: &Host,
+    engines: &[Engine],
+    states: &[&str],
+    stop: &AtomicBool,
+) -> Result<Vec<sandbox::Container>, String> {
+    let filters: Vec<String> = states.iter().map(|s| format!("status={s}")).collect();
     let mut all = Vec::new();
     for &engine in engines {
-        // Podman leaves paused ones out unless asked, Docker lists them.
-        let ps = [
-            "ps",
-            "-q",
-            "--filter",
-            "status=running",
-            "--filter",
-            "status=paused",
-        ];
+        let mut ps = vec!["ps", "-a", "-q"];
+        for filter in &filters {
+            ps.extend(["--filter", filter.as_str()]);
+        }
         let ids = tool(host, engine, &ps, stop)?;
         let ids: Vec<&str> = ids.split_whitespace().collect();
         if ids.is_empty() {
