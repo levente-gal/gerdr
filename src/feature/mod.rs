@@ -1288,10 +1288,10 @@ impl Feature {
 
     /// Repository `update.repo` took its base in, its code now `patch`'s (if
     /// read): it goes through Verify again. What stood before Verify moves
-    /// onto that code, since the update changes nothing the feature did;
-    /// Verify and what follows it are to do again, AI review and Code review
-    /// on what changed, Manual test with what was found kept. A shipped
-    /// feature is open again for that.
+    /// onto that code, so it doesn't go back to Build; Verify and what follows
+    /// it are to do again, AI review and Code review on what changed (an
+    /// agent's resolution of conflicts included), Manual test with what was
+    /// found kept. A shipped feature is open again for that.
     pub fn updated_from_base(&mut self, update: BaseUpdate, patch: Option<&str>, now: u64) {
         let what = format!(
             "{}: {} {}",

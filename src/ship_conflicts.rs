@@ -19,6 +19,24 @@ use crate::{
     prompts,
 };
 
+/// The next turn at conflicts in data dir `data`: past any whose files are
+/// there, so an old plan is never taken for this one's.
+fn next_turn(data: &std::path::Path) -> u32 {
+    let taken = std::fs::read_dir(data)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let rest = name.strip_prefix("conflicts-")?;
+            let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+            digits.parse::<u32>().ok()
+        })
+        .max()
+        .unwrap_or(0);
+    taken + 1
+}
+
 /// The files as a prompt lists them.
 fn listed(files: &[String]) -> String {
     files
@@ -112,10 +130,10 @@ impl Gerdr {
             }
         };
         let data = store::dir(None, project, slug);
-        // Resolving as planned stays the plan's turn.
+        // Resolving as planned stays the plan's turn; else a new one.
         let n = match feature.shipping.resolving.as_ref() {
             Some(r) if r.planning && !planning => r.n,
-            _ => feature.shipping.updates.len() as u32 + 1,
+            _ => next_turn(&data),
         };
         let mut resolving = Resolving {
             at: feature::now(),
@@ -132,6 +150,15 @@ impl Gerdr {
         // It merged cleanly after all: the next read finds it done.
         if begun.files.is_empty() && !planning {
             return self.set_resolving(project, slug, resolving, "Merged cleanly");
+        }
+        // The merge is under way: kept now, so it can be stopped whatever
+        // comes of the agent.
+        if !planning {
+            let what = format!(
+                "Merge of {} into {repo} started for its conflicts",
+                begun.onto
+            );
+            self.set_resolving(project, slug, resolving.clone(), &what);
         }
         let (agent, base) = match self.summary_agent(&feature) {
             Ok(pick) => pick,
@@ -186,6 +213,7 @@ impl Gerdr {
         };
         resolving.agent = agent.clone();
         resolving.pane = Some(pane);
+        // Its agent too, now.
         let what = match planning {
             true => format!("{agent} plans the resolution of the conflicts in {repo}"),
             false => format!("{agent} resolves the conflicts in {repo}"),
@@ -223,7 +251,9 @@ impl Gerdr {
         let Some(resolving) = feature.shipping.resolving.clone() else {
             return false;
         };
-        if resolving.planning || found.merging {
+        // Read for another take: old by now.
+        let other = found.at != resolving.at || found.planning != resolving.planning;
+        if other || resolving.planning || found.merging {
             return false;
         }
         let title = feature.title.clone();

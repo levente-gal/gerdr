@@ -117,6 +117,9 @@ pub struct RepoCheck {
     pub merged: bool,
     /// The commit its worktree is on, if read.
     pub head: Option<String>,
+    /// The commit origin's `feature/<slug>` was at when last fetched, if
+    /// known.
+    pub pushed: Option<String>,
 }
 
 impl RepoCheck {
@@ -151,9 +154,12 @@ pub struct Planned {
 pub fn step_done(feature: &Feature, repo: &RepoCheck, step: ShipStep) -> Option<super::ShipDone> {
     let done = feature.ship_done(&repo.key, step)?;
     let holds = match step {
-        ShipStep::Push | ShipStep::PushBranch => {
-            done.sha.is_none() || done.sha.as_deref() == repo.head.as_deref()
-        }
+        // A push from before the log kept its commit holds while origin
+        // has the branch where the worktree is.
+        ShipStep::Push | ShipStep::PushBranch => match done.sha.as_deref() {
+            Some(sha) => Some(sha) == repo.head.as_deref(),
+            None => repo.pushed.is_some() && repo.pushed == repo.head,
+        },
         ShipStep::Merge => repo.merged,
         ShipStep::OpenPr | ShipStep::PushBase => true,
     };
@@ -588,9 +594,17 @@ fn check(feature: &Feature, reading: &Result<Reading, String>, modes: &Modes) ->
             no_merge: (!merged).then(|| squash_blocker(repo, &branch)).flatten(),
             merged,
             head: reading.heads.get(&repo.key()).cloned(),
+            pushed: tracking(repo, &branch),
         });
     }
     out
+}
+
+/// The commit origin's `branch` of `repo` was at when last fetched.
+fn tracking(repo: &Repo, branch: &str) -> Option<String> {
+    let name = format!("refs/remotes/origin/{branch}");
+    let sha = git(&repo.main, &["rev-parse", "-q", "--verify", &name]).ok()?;
+    Some(sha.trim().to_owned())
 }
 
 /// What stops squashing `branch` into `repo`'s base in its main worktree.
@@ -950,6 +964,10 @@ pub fn conflict_ends(feature: &Feature, key: &str) -> Result<MergeBegun, String>
 /// How the conflicts an agent takes on stand (see `super::Resolving`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Resolution {
+    /// The `Resolving` it was read for: its `at` and `planning`. A read of
+    /// another is old by the time it is back.
+    pub at: u64,
+    pub planning: bool,
     /// A merge is under way in the worktree.
     pub merging: bool,
     /// The files still conflicted.
@@ -981,6 +999,8 @@ pub fn read_resolution(feature: &Feature, data: &Path) -> Option<Resolution> {
         )
         .is_ok();
     Some(Resolution {
+        at: resolving.at,
+        planning: resolving.planning,
         merging,
         left,
         head,
@@ -998,12 +1018,22 @@ pub fn abort_conflict_merge(feature: &Feature) -> Result<(), String> {
     };
     let repo = (feature.repo(&resolving.repo))
         .ok_or_else(|| format!("{} has no repository {}", feature.title, resolving.repo))?;
-    if git(
-        &repo.worktree,
-        &["rev-parse", "-q", "--verify", "MERGE_HEAD"],
-    )
-    .is_err()
-    {
+    let dir = &repo.worktree;
+    if git(dir, &["rev-parse", "-q", "--verify", "MERGE_HEAD"]).is_err() {
+        // Committed already: it goes back to Verify, not as it was.
+        let head = git(dir, &["rev-parse", "HEAD"]).map_or(String::new(), |h| h.trim().to_owned());
+        let took_in = !resolving.onto_sha.is_empty()
+            && git(
+                dir,
+                &["merge-base", "--is-ancestor", &resolving.onto_sha, "HEAD"],
+            )
+            .is_ok();
+        if took_in && head != resolving.before && !resolving.planning {
+            return Err(format!(
+                "The merge in {} is committed already: it goes back to Verify",
+                resolving.repo
+            ));
+        }
         return Ok(());
     }
     git_ops::abort_op(&repo.worktree, crate::git::InProgress::Merge)
@@ -1022,7 +1052,7 @@ pub enum Undo {
     /// Close `repo`'s pull request.
     ClosePr { repo: String, url: String },
     /// Delete `feature/<slug>` of `repo` on origin.
-    DeleteBranch { repo: String },
+    DeleteBranch { repo: String, sha: Option<String> },
     /// Take the squash off `base` of `repo` in its main worktree, before it
     /// went to origin.
     ResetSquash { repo: String, base: String },
@@ -1035,7 +1065,7 @@ impl Undo {
             Self::ClosePr { repo, url } => {
                 format!("Close the pull request of {repo}: {url}")
             }
-            Self::DeleteBranch { repo } => format!("Delete {branch} of {repo} on origin"),
+            Self::DeleteBranch { repo, .. } => format!("Delete {branch} of {repo} on origin"),
             Self::ResetSquash { repo, base } => {
                 format!("Take the squash off {base} in {repo}'s main worktree")
             }
@@ -1046,7 +1076,7 @@ impl Undo {
     pub fn step(&self) -> (&str, ShipStep) {
         match self {
             Self::ClosePr { repo, .. } => (repo, ShipStep::OpenPr),
-            Self::DeleteBranch { repo } => (repo, ShipStep::Push),
+            Self::DeleteBranch { repo, .. } => (repo, ShipStep::Push),
             Self::ResetSquash { repo, .. } => (repo, ShipStep::Merge),
         }
     }
@@ -1073,6 +1103,7 @@ pub fn undo_of(feature: &Feature, repo: &str, step: ShipStep) -> Result<Vec<Undo
         ShipStep::Push | ShipStep::PushBranch => Ok((pr().into_iter())
             .chain([Undo::DeleteBranch {
                 repo: repo.to_owned(),
+                sha: ran.and_then(|d| d.sha),
             }])
             .collect()),
         ShipStep::OpenPr => Ok(pr().into_iter().collect()),
@@ -1108,7 +1139,7 @@ pub fn run_undo(
         };
         let result = match undo {
             Undo::ClosePr { url, .. } => close_pr(repo, url, gh),
-            Undo::DeleteBranch { .. } => delete_branch(repo, &branch),
+            Undo::DeleteBranch { sha, .. } => delete_branch(repo, &branch, sha.as_deref()),
             Undo::ResetSquash { base, .. } => reset_squash(repo, base, &branch),
         };
         match result {
@@ -1137,15 +1168,19 @@ fn close_pr(repo: &Repo, url: &str, gh: &str) -> Result<(), String> {
 }
 
 /// Delete `branch` of `repo` on origin: one gone already is fine.
-fn delete_branch(repo: &Repo, branch: &str) -> Result<(), String> {
+fn delete_branch(repo: &Repo, branch: &str, sha: Option<&str>) -> Result<(), String> {
     let dir = if repo.worktree.is_dir() {
         &repo.worktree
     } else {
         &repo.main
     };
-    match git(dir, &["push", "origin", "--delete", branch]) {
+    match git_ops::delete_remote_branch(dir, "origin", branch, sha).map_err(|f| push_why(&f)) {
         Ok(_) => Ok(()),
         Err(why) if why.contains("remote ref does not exist") => Ok(()),
+        Err(why) if why.contains("stale info") => Err(format!(
+            "{branch} of {} moved on origin since it was pushed from here: left as it is",
+            repo.key()
+        )),
         Err(why) => Err(format!(
             "Couldn't delete {branch} of {} on origin: {why}",
             repo.key()
@@ -1179,6 +1214,13 @@ fn reset_squash(repo: &Repo, base: &str, branch: &str) -> Result<(), String> {
     let feature = patch::diff_id(main, fork.trim(), branch)?;
     if squash.is_empty() || squash != feature {
         return Err(not_squash());
+    }
+    // Origin as it is now: a push from another clone counts too.
+    if let Err(failed) = git_ops::fetch_branch(main, "origin", base) {
+        return Err(format!(
+            "couldn't ask origin whether {base} of {name} has the squash: {}",
+            failed.why
+        ));
     }
     let remote = git(main, &["branch", "-r", "--contains", "HEAD"])?;
     if !remote.trim().is_empty() {
@@ -1214,7 +1256,12 @@ fn pr_body(feature: &Feature) -> String {
 /// `feature`'s summary (`SUMMARY_FILE`), trimmed, if one is written.
 pub fn summary_text(feature: &Feature) -> Option<String> {
     let data = super::store::dir(None, &feature.project, &feature.slug);
-    let text = std::fs::read_to_string(data.join(super::SUMMARY_FILE)).ok()?;
+    let (text, at) = page::read_summary(&data)?;
+    // Asked again since: the old one, or half the new one, isn't it.
+    if (feature.shipping.summary.as_ref()).is_some_and(|run| at < run.at) {
+        return None;
+    }
+    let text = text.ok()?;
     let text = text.trim();
     (!text.is_empty()).then(|| text.to_owned())
 }
@@ -2108,11 +2155,22 @@ esac
         );
 
         let undos = undo_of(&f, "api", ShipStep::PushBranch).unwrap();
-        assert_eq!(undos, [Undo::DeleteBranch { repo: "api".into() }]);
+        let pushed = f.ship_done("api", ShipStep::Push).and_then(|d| d.sha);
+        assert!(pushed.is_some());
+        assert_eq!(
+            undos,
+            [Undo::DeleteBranch {
+                repo: "api".into(),
+                sha: pushed
+            }]
+        );
         let (_, failed) = run_undo(&f, &undos, &gh);
         assert_eq!(failed, None);
         let origin = t.0.join("api.git");
         assert!(try_run(&origin, &["rev-parse", "--verify", "-q", "feature/f"]).is_err());
+        // Gone already: nothing to undo, nothing fails.
+        let (_, failed) = run_undo(&f, &undos, &gh);
+        assert_eq!(failed, None);
         f.ship_undid("api", ShipStep::Push, 9);
         assert!(f.ship_done("api", ShipStep::PushBranch).is_none());
         assert!(
@@ -2255,6 +2313,40 @@ esac
         assert_eq!(build.patch.as_deref(), Some("new-patch"));
         assert_eq!(f.stale("new-patch"), None);
         assert!(f.rebased_since_push("api"), "a rebase pushes with lease");
+    }
+
+    /// A push from before the log kept its commit holds only while origin's
+    /// branch is where the worktree is.
+    #[test]
+    fn an_old_push_holds_only_while_origin_has_the_head() {
+        let t = Temp::new();
+        let mut f = feature_over(&t, &["api"], &[]);
+        f.shipping.pushed = vec!["api".into()];
+        let repo = |head: &str, pushed: Option<&str>| RepoCheck {
+            key: "api".into(),
+            base: "main".into(),
+            main: PathBuf::from("/m"),
+            commits: 1,
+            route: Route::Pr,
+            no_origin: None,
+            no_merge: None,
+            merged: false,
+            head: Some(head.into()),
+            pushed: pushed.map(str::to_owned),
+        };
+        assert!(step_done(&f, &repo("a", Some("a")), ShipStep::Push).is_some());
+        assert!(step_done(&f, &repo("b", Some("a")), ShipStep::Push).is_none());
+        assert!(step_done(&f, &repo("a", None), ShipStep::Push).is_none());
+        f.shipping.steps.clear();
+        f.ship_ran(ShipDone {
+            at: 3,
+            repo: "api".into(),
+            step: ShipStep::Push,
+            sha: Some("c".into()),
+            url: None,
+            undone: None,
+        });
+        assert!(step_done(&f, &repo("c", None), ShipStep::Push).is_some());
     }
 
     /// A record from before the log was kept reads as one.

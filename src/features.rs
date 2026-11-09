@@ -165,6 +165,9 @@ pub struct Features {
     busy: Vec<Busy>,
     /// The latest probe of each feature, by project and slug.
     probes: BTreeMap<(String, String), Probed>,
+    /// The features whose summary was started on its own this run: once,
+    /// whatever came of it.
+    pub(crate) summary_tried: BTreeSet<(String, String)>,
     /// Features whose Ship was pressed before their code was read: it asks once
     /// the read is back.
     ship_waits: BTreeSet<(String, String)>,
@@ -7352,9 +7355,12 @@ impl Gerdr {
         }
         // At Ship: its summary is written, once.
         let data = store::dir(None, project, slug);
-        if (self.feature(project, slug))
-            .is_some_and(|f| crate::ship_summary::wants_summary(f, &data))
+        let key = (project.to_owned(), slug.to_owned());
+        if !self.features.summary_tried.contains(&key)
+            && (self.feature(project, slug))
+                .is_some_and(|f| crate::ship_summary::wants_summary(f, &data))
         {
+            self.features.summary_tried.insert(key.clone());
             self.write_ship_summary(project, slug, false);
         }
         if again {
@@ -19037,6 +19043,7 @@ pub(crate) mod tests {
             no_merge: None,
             merged: false,
             head: None,
+            pushed: None,
         };
         Some(ShipCheck {
             blockers: blockers.iter().map(|b| (*b).to_owned()).collect(),

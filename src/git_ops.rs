@@ -1089,6 +1089,25 @@ pub fn begin_merge(dir: &Path, base: &str) -> Result<Vec<String>, Failed> {
     Ok(files)
 }
 
+/// `push <remote> --delete <branch>`: the branch goes off the remote, with
+/// `expect` only while it is at that commit.
+pub fn delete_remote_branch(
+    dir: &Path,
+    remote: &str,
+    branch: &str,
+    expect: Option<&str>,
+) -> OpResult {
+    let mut op = Op::new(dir);
+    let lease = expect.map(|sha| format!("--force-with-lease={branch}:{sha}"));
+    let args: Vec<&str> = ["push"]
+        .into_iter()
+        .chain(lease.as_deref())
+        .chain([remote, "--delete", branch])
+        .collect();
+    op.net(&args)?;
+    op.done()
+}
+
 /// `fetch <remote> <branch>`: that branch's remote-tracking ref only.
 pub fn fetch_branch(dir: &Path, remote: &str, branch: &str) -> OpResult {
     let mut op = Op::new(dir);
