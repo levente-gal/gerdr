@@ -456,33 +456,27 @@ impl Gerdr {
 
     /// Change feature `slug`'s suggestions by `change` and keep them:
     /// `change` says what it did, for the log, else why it can't. Why not
-    /// when they can't be changed now (`decidable`).
-    fn try_change_plan_review(
-        &mut self,
-        project: &str,
-        slug: &str,
-        change: impl FnOnce(&mut PlanReview) -> Result<String, String>,
-    ) -> Result<(), String> {
-        let f = self
-            .feature_mut(project, slug)
-            .ok_or("That feature is gone")?;
-        decidable(f).map(|_| ())?;
-        let review = (f.plan_review.as_mut()).ok_or("The suggestions aren't read yet")?;
-        let what = change(review)?;
-        f.log(feature::now(), what);
-        self.save_feature(project, slug);
-        Ok(())
-    }
-
-    /// The same, saying why it can't; whether it did.
+    /// is said, as when they can't be changed now (`decidable`). Whether it
+    /// did.
     fn change_plan_review(
         &mut self,
         project: &str,
         slug: &str,
         change: impl FnOnce(&mut PlanReview) -> Result<String, String>,
     ) -> bool {
-        match self.try_change_plan_review(project, slug, change) {
-            Ok(()) => true,
+        let changed = (|| {
+            let f = (self.feature_mut(project, slug)).ok_or("That feature is gone")?;
+            decidable(f).map(|_| ())?;
+            let review = (f.plan_review.as_mut()).ok_or("The suggestions aren't read yet")?;
+            let what = change(review)?;
+            f.log(feature::now(), what);
+            Ok::<(), String>(())
+        })();
+        match changed {
+            Ok(()) => {
+                self.save_feature(project, slug);
+                true
+            }
             Err(why) => {
                 self.show_warning(why);
                 false
@@ -498,27 +492,9 @@ impl Gerdr {
             .suggestion(id)
     }
 
-    /// Decide suggestion `id`, log it and save; why not when it can't be.
-    pub(crate) fn decide_suggestion(
-        &mut self,
-        project: &str,
-        slug: &str,
-        id: &str,
-        decision: Decision,
-    ) -> Result<(), String> {
-        let was = (self.suggestion_of(project, slug, id)).map_or(State::Open, |s| s.state);
-        let mut what = decided_text(id, was, &decision);
-        if let Decision::Reject(why) = &decision {
-            what = format!("{what}: {}", why.trim());
-        }
-        self.try_change_plan_review(project, slug, |review| {
-            plan_review::decide(review, id, decision)?;
-            Ok(what)
-        })
-    }
-
-    /// Decide suggestion `id` and say so, offering what comes next once
-    /// nothing is left to decide; why not when it can't be. Whether it was.
+    /// Decide suggestion `id`, log it, save and say so, offering what comes
+    /// next once nothing is left to decide; why not when it can't be.
+    /// Whether it was.
     fn decide_suggestion_said(
         &mut self,
         project: &str,
@@ -528,12 +504,18 @@ impl Gerdr {
     ) -> bool {
         let was = (self.suggestion_of(project, slug, id)).map_or(State::Open, |s| s.state);
         let done = decided_text(id, was, &decision);
-        if let Err(why) = self.decide_suggestion(project, slug, id, decision) {
-            self.show_warning(why);
-            return false;
+        let logged = match &decision {
+            Decision::Reject(why) => format!("{done}: {}", why.trim()),
+            _ => done.clone(),
+        };
+        let decided = self.change_plan_review(project, slug, |review| {
+            plan_review::decide(review, id, decision)?;
+            Ok(logged)
+        });
+        if decided {
+            self.after_suggestion_decision(project, slug, done, None);
         }
-        self.after_suggestion_decision(project, slug, done, None);
-        true
+        decided
     }
 
     /// Reject suggestion `id` for `why`, from the dialog asking it: the
@@ -769,20 +751,6 @@ impl Gerdr {
             self.show_success(format!("Suggestion {id} edited"));
         }
         done
-    }
-
-    /// Delete suggestion `id` of the user's own, and save; why not when it
-    /// can't be. Undo is the caller's (`MenuAction::RestoreSuggestion`).
-    pub(crate) fn delete_own_suggestion(
-        &mut self,
-        project: &str,
-        slug: &str,
-        id: &str,
-    ) -> Result<(), String> {
-        self.try_change_plan_review(project, slug, |review| {
-            plan_review::delete_own(review, id)?;
-            Ok(format!("You deleted suggestion {id}"))
-        })
     }
 
     /// Delete suggestion `id` of the user's own: it goes for good, not
@@ -1340,7 +1308,7 @@ mod tests {
 
     #[test]
     fn a_citation_opens_only_inside_its_repository() {
-        let dir = std::env::temp_dir().join(format!("gerdr-plan-sheet-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("gerdr-plan-citation-{}", std::process::id()));
         let repo = dir.join("api");
         std::fs::create_dir_all(repo.join("src")).unwrap();
         std::fs::write(repo.join("src/a.rs"), "fn a() {}\n").unwrap();

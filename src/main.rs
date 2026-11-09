@@ -90,7 +90,6 @@ mod pane_drag;
 mod pane_moves;
 mod paths;
 mod plan_doc;
-mod plan_sheet;
 mod port_holder;
 mod prepare;
 mod problems;
@@ -1447,8 +1446,6 @@ pub struct Gerdr {
     pub machines: machines::Machines,
     /// The features of every project, and the dialog and panel on them.
     pub features: features::Features,
-    /// The plan review's sheet, while it is open (see `plan_sheet`).
-    pub plan_sheet: Option<plan_sheet::PlanSheet>,
     /// Each feature's code review counts, once read (see `feature_diff`).
     pub code_reviews: feature_diff::Lines,
     /// The apps projects keep running, as last looked at (see `tasks`).
@@ -6787,7 +6784,6 @@ impl Gerdr {
             identity: self.identity_view(),
             machine: self.machine_view(),
             commands: self.commands_view(),
-            plan_sheet: self.plan_sheet_view(),
             features: self.feature_tab_view(),
             project_menu: self.project_menu_view(),
             worktrees: self.worktrees_view(),
@@ -7148,7 +7144,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         tasks_panel: None,
         machines: machines::Machines::default(),
         features: features::Features::default(),
-        plan_sheet: None,
         code_reviews: Default::default(),
         kept: Vec::new(),
         t3_started: None,

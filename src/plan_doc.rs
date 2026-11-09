@@ -265,7 +265,6 @@ impl Gerdr {
     /// Bring what shows Plan review's suggestions in line with the record:
     /// after a save, and as the watch reads a rewrite in.
     pub(crate) fn plan_doc_follows(&mut self) {
-        self.plan_sheet_follows();
         self.suggestions_follow(None, None);
     }
 

@@ -37,7 +37,6 @@ mod menu;
 mod painter;
 mod pane_bar;
 mod placeholder;
-mod plan_sheet;
 mod project_commands;
 mod project_menu;
 mod quit;
@@ -92,7 +91,6 @@ pub use menu::*;
 pub use painter::*;
 pub use pane_bar::*;
 pub use placeholder::*;
-pub use plan_sheet::*;
 pub use project_commands::*;
 pub use project_menu::*;
 pub use quit::*;
@@ -178,8 +176,6 @@ pub struct ChromeView {
     pub machine: Option<MachineView>,
     /// Set while the project commands dialog is open.
     pub commands: Option<CommandsView>,
-    /// Set while the plan review's sheet is open.
-    pub plan_sheet: Option<PlanSheetView>,
     /// Set while the feature panel is open.
     pub features: Option<FeatureTabView>,
     /// Set while the project menu is open.
@@ -244,7 +240,6 @@ pub struct Chrome {
     identity: Overlay<(IdentityView, Size<i32, Logical>, Theme, f64)>,
     machine: Overlay<(MachineView, Size<i32, Logical>, Theme, f64)>,
     commands: Overlay<(CommandsView, Size<i32, Logical>, Theme, f64)>,
-    plan_sheet: Overlay<(PlanSheetView, Size<i32, Logical>, Theme, f64)>,
     features: FeatureTabLayers,
     project_menu: ProjectMenuLayers,
     worktrees: WorktreesLayers,
@@ -314,7 +309,6 @@ impl Chrome {
             identity: Overlay::default(),
             machine: Overlay::default(),
             commands: Overlay::default(),
-            plan_sheet: Overlay::default(),
             features: FeatureTabLayers::default(),
             project_menu: ProjectMenuLayers::default(),
             worktrees: WorktreesLayers::default(),
@@ -538,16 +532,6 @@ impl Chrome {
                     });
                     let part = self.commands.part(dialog, now, true, |(v, output, ..)| {
                         painter.commands_dialog(v, *output, scale, theme.palette())
-                    });
-                    parts.extend(scrimmed(part, output, theme.palette()));
-                }
-                Kind::PlanSheet => {
-                    let sheet = view.plan_sheet.take().map(|v| {
-                        let (loc, size) = shadowed(plan_sheet_layout(&v, output).panel);
-                        ((v, output, theme, scale), loc, size)
-                    });
-                    let part = self.plan_sheet.part(sheet, now, true, |(v, output, ..)| {
-                        painter.plan_sheet(v, *output, scale, theme.palette())
                     });
                     parts.extend(scrimmed(part, output, theme.palette()));
                 }

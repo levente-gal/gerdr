@@ -19180,7 +19180,7 @@ pub(crate) mod tests {
         sent_back(&mut done);
         let cards = review_cards(&done, Stage::AiReview, &notes);
         assert_eq!(cards.len(), 1);
-        assert!(cards[0].finding().is_some());
+        assert!(cards[0].item().is_some_and(|i| i.of() == ItemOf::Finding));
         // One on the whole change has nowhere to show.
         let mut general = note("", "All of it");
         general.lines.clear();

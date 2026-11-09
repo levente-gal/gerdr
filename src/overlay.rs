@@ -47,9 +47,6 @@ pub enum Overlay {
     /// A project's Verify checks and setup commands (see
     /// `project_commands`).
     ProjectCommands,
-    /// The plan review's sheet: a feature's suggestions to decide (see
-    /// `plan_sheet`).
-    PlanSheet,
     Confirm,
     ContextMenu,
     Toasts,
@@ -78,7 +75,7 @@ pub enum Overlay {
 
 impl Overlay {
     /// Every overlay, top first.
-    pub const ORDER: [Self; 26] = [
+    pub const ORDER: [Self; 25] = [
         Self::Tooltip,
         Self::Quit,
         Self::Restart,
@@ -91,9 +88,6 @@ impl Overlay {
         Self::Confirm,
         Self::ContextMenu,
         Self::Toasts,
-        // A sheet worked in for a while: the toasts of what it does (and
-        // of all else going on) show over it.
-        Self::PlanSheet,
         Self::Welcome,
         Self::Help,
         Self::Tasks,
@@ -126,7 +120,6 @@ impl Overlay {
                 | Self::GitIdentity
                 | Self::Machines
                 | Self::ProjectCommands
-                | Self::PlanSheet
                 | Self::Confirm
         )
     }
@@ -197,7 +190,6 @@ impl Overlay {
             Self::GitIdentity => "the name and email dialog",
             Self::Machines => "the connect a machine dialog",
             Self::ProjectCommands => "the project commands dialog",
-            Self::PlanSheet => "the plan review's sheet",
             Self::Confirm => "the dialog",
             Self::ContextMenu => "the menu",
             Self::Toasts => "the notices",
@@ -232,7 +224,6 @@ impl Gerdr {
             Overlay::GitIdentity => self.repos.identity.is_some(),
             Overlay::Machines => self.machines.dialog.is_some(),
             Overlay::ProjectCommands => self.features.commands.is_some(),
-            Overlay::PlanSheet => self.plan_sheet.is_some(),
             Overlay::Confirm => self.confirm.is_some(),
             Overlay::ContextMenu => self.context_menu.is_some(),
             Overlay::Toasts => {
@@ -323,7 +314,6 @@ impl Gerdr {
             Overlay::GitIdentity => self.identity_hover(pos),
             Overlay::Machines => self.machine_hover(pos),
             Overlay::ProjectCommands => self.commands_hover(pos),
-            Overlay::PlanSheet => return self.plan_sheet_hover(pos),
             Overlay::Features => return self.feature_panel_hover(pos),
             Overlay::Doc => return self.repos_hover(pos),
             Overlay::ContextMenu => self.menu_motion(pos),
@@ -380,7 +370,6 @@ impl Gerdr {
                     self.new_feature_scroll(rows);
                 }
             }
-            Overlay::PlanSheet => self.plan_sheet_scroll(motion),
             Overlay::ProjectCommands => self.commands_scroll(motion),
             Overlay::Features => self.feature_panel_scroll(motion),
             Overlay::Doc => self.repos_scroll(motion),
@@ -430,10 +419,6 @@ mod tests {
         assert!(Overlay::Confirm.is_above(Overlay::ContextMenu));
         assert!(Overlay::ContextMenu.is_above(Overlay::Toasts));
         assert!(Overlay::Toasts.is_above(Overlay::Help));
-        assert!(Overlay::Toasts.is_above(Overlay::PlanSheet));
-        assert!(Overlay::PlanSheet.is_above(Overlay::Welcome));
-        assert!(Overlay::Toasts.is_above(Overlay::PlanSheet));
-        assert!(Overlay::PlanSheet.is_above(Overlay::Welcome));
         for panel in Overlay::ORDER.into_iter().filter(|o| o.is_panel()) {
             assert!(Overlay::Toasts.is_above(panel));
             assert!(Overlay::Help.is_above(panel));
