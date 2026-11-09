@@ -88,6 +88,7 @@ impl<'a> Item<'a> {
         }
     }
 
+    #[allow(dead_code)] // WAVE1-STUB(B): unused since features.rs goes by `item` (E)
     pub(crate) fn finding(self) -> Option<&'a ReviewFinding> {
         match self {
             Self::Finding(f) => Some(f),
@@ -184,6 +185,7 @@ impl<'a> ReviewCard<'a> {
         }
     }
 
+    #[allow(dead_code)] // WAVE1-STUB(B): unused since features.rs goes by `item` (E)
     pub(crate) fn finding(self) -> Option<&'a ReviewFinding> {
         self.item().and_then(Item::finding)
     }
