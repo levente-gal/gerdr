@@ -1965,8 +1965,38 @@ fn cut_to_width(text: &str, size: f32, width: i32) -> String {
     "\u{2026}".to_owned()
 }
 
+/// What `wrap_to` gave lately, by its text, size, width and line limit.
+type WrapKey = (String, u32, i32, usize);
+
+/// How many wraps `WRAPS` keeps before it starts over: a tab's worth, many
+/// times over.
+const WRAPS_MAX: usize = 8192;
+
+thread_local! {
+    /// The tab is laid out every frame and for every pointer move, and
+    /// measuring a line word by word is most of that: a feature's long
+    /// activity took 8 ms a layout, and the pointer lagged seconds behind.
+    static WRAPS: RefCell<HashMap<WrapKey, Vec<String>>> = RefCell::new(HashMap::new());
+}
+
 /// `wrap` to at most `max` lines.
 fn wrap_to(text: &str, size: f32, width: i32, max: usize) -> Vec<String> {
+    let key = (text.to_owned(), size.to_bits(), width, max);
+    if let Some(lines) = WRAPS.with_borrow(|w| w.get(&key).cloned()) {
+        return lines;
+    }
+    let lines = wrap_measured(text, size, width, max);
+    WRAPS.with_borrow_mut(|w| {
+        if w.len() >= WRAPS_MAX {
+            w.clear();
+        }
+        w.insert(key, lines.clone());
+    });
+    lines
+}
+
+/// `wrap_to`, measuring.
+fn wrap_measured(text: &str, size: f32, width: i32, max: usize) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
     let mut line = String::new();
     for word in words(text) {
@@ -3451,6 +3481,35 @@ fn review_switch_spots(switch: &ReviewSwitch, x: i32, y: i32, width: i32) -> Rev
 /// the stages' rail, then the repositories', page's and activity's
 /// columns, and the hints at the foot.
 pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayout {
+    // A pointer move hit-tests the tab several times over the same view,
+    // and the frame lays it out again: the last few layouts are kept.
+    let found = TAB_LAYOUTS.with_borrow(|memo| {
+        (memo.iter())
+            .find(|(v, f, _)| *f == frame && v == view)
+            .map(|(.., l)| l.clone())
+    });
+    if let Some(l) = found {
+        return l;
+    }
+    let l = lay_out_tab(view, frame);
+    TAB_LAYOUTS.with_borrow_mut(|memo| {
+        memo.insert(0, (view.clone(), frame, l.clone()));
+        memo.truncate(TAB_LAYOUTS_MAX);
+    });
+    l
+}
+
+/// How many layouts `TAB_LAYOUTS` keeps: the frame's, and the slices' laid
+/// out at their own origins.
+const TAB_LAYOUTS_MAX: usize = 4;
+
+thread_local! {
+    static TAB_LAYOUTS: RefCell<Vec<(FeatureTabView, Rect, FeatureTabLayout)>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+/// `feature_tab_layout`, laying out.
+fn lay_out_tab(view: &FeatureTabView, frame: Rect) -> FeatureTabLayout {
     let width = frame.size.w;
     let x = frame.loc.x + TAB_PAD;
     let inner = (width - 2 * TAB_PAD).max(1);
