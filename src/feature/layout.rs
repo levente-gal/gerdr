@@ -1568,8 +1568,10 @@ mod tests {
             ran_once: Default::default(),
             fix_rounds: 0,
             past_rounds: Vec::new(),
+            drafts: Vec::new(),
             carry: None,
             unverified: None,
+            back_from: None,
             epoch: 0,
             history: Vec::new(),
         }
@@ -1643,7 +1645,15 @@ mod tests {
         let feature = feature_of(&root, created, "login");
         let with_link = crate::feature::patch::read(&feature).unwrap();
         std::fs::remove_file(dir.join(DOCS_LINK)).unwrap();
-        assert_eq!(crate::feature::patch::read(&feature).unwrap(), with_link);
+        let without = crate::feature::patch::read(&feature).unwrap();
+        // When it was read says nothing of the code.
+        assert_eq!(
+            crate::feature::patch::Reading {
+                at: with_link.at,
+                ..without
+            },
+            with_link
+        );
         assert!(data.join("brief.md").is_file());
     }
 

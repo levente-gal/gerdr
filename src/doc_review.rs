@@ -58,6 +58,12 @@ pub enum DocFile {
     /// The fix round's plan, open or the last: reviewed as a stage's file
     /// is, and Make fixes where that has Approve.
     FixPlan,
+    /// The final plan Plan review wrote, as changes to the plan: only read,
+    /// as the evidence is.
+    PlanChanges,
+    /// Draft `k` of a stage's file, as changes to the draft before: only
+    /// read, as the evidence is (see `feature::drafts`).
+    DraftChanges(Stage, u32),
 }
 
 impl DocFile {
@@ -67,6 +73,8 @@ impl DocFile {
             DocFile::Stage(stage) => stage,
             DocFile::Evidence => Stage::Verify,
             DocFile::FixPlan => Stage::Build,
+            DocFile::PlanChanges => Stage::PlanReview,
+            DocFile::DraftChanges(stage, _) => stage,
         }
     }
 
@@ -84,6 +92,8 @@ impl DocFile {
             DocFile::Stage(stage) => artifacts::name(stage),
             DocFile::Evidence => Some(EVIDENCE),
             DocFile::FixPlan => Some(fix_round::FILE),
+            DocFile::PlanChanges => artifacts::name(Stage::PlanReview),
+            DocFile::DraftChanges(stage, _) => artifacts::name(stage),
         }
     }
 
@@ -94,6 +104,12 @@ impl DocFile {
             DocFile::Stage(stage) => state(feature, stage, docs, now),
             DocFile::Evidence => evidence_state(feature, running),
             DocFile::FixPlan => fix_plan_state(feature, now),
+            DocFile::DraftChanges(_, k) => format!("draft {k} against draft {}", k - 1),
+            DocFile::PlanChanges => format!(
+                "against {} \u{b7} {}",
+                artifacts::name(Stage::Plan).unwrap_or("the plan"),
+                state(feature, Stage::PlanReview, docs, now)
+            ),
         }
     }
 
@@ -105,6 +121,8 @@ impl DocFile {
         match self {
             DocFile::Stage(stage) => locked(feature, stage, docs),
             DocFile::Evidence => Some(EVIDENCE_READ_ONLY),
+            DocFile::PlanChanges => Some(PLAN_CHANGES_READ_ONLY),
+            DocFile::DraftChanges(..) => Some(DRAFT_CHANGES_READ_ONLY),
             DocFile::FixPlan => fix_plan_locked(feature),
         }
     }
@@ -113,7 +131,7 @@ impl DocFile {
     /// however Verify stands, and has no actions to change.
     pub fn standing(self, feature: Option<&Feature>, docs: &Docs) -> Standing {
         // Written elsewhere, it is only read here, whichever stage it is at.
-        if self != DocFile::Evidence
+        if !(self == DocFile::Evidence || self.shows_changes())
             && let Some(feature) = feature.filter(|f| f.writer.is_some())
         {
             return Standing::Locked(feature.current().unwrap_or(Stage::Ship));
@@ -128,8 +146,34 @@ impl DocFile {
 
     /// Where it is, under feature data dir `dir`.
     pub fn path(self, dir: &Path) -> Option<PathBuf> {
-        Some(dir.join(self.name()?))
+        match self {
+            DocFile::DraftChanges(stage, k) => crate::feature::drafts::path(dir, stage, k),
+            _ => Some(dir.join(self.name()?)),
+        }
     }
+
+    /// Whether it shows a file as changes to another, only to read: the
+    /// final plan's to the plan, a draft's to the one before.
+    pub fn shows_changes(self) -> bool {
+        matches!(self, DocFile::PlanChanges | DocFile::DraftChanges(..))
+    }
+}
+
+/// The user's comments in `review`, as a draft's card lists them: where each
+/// is, by its first line quoted, and what it says.
+pub fn drafts_comments(review: &Review) -> Vec<crate::feature::fix_round::Asked> {
+    (review.comments.iter())
+        .filter(|c| c.flag.is_none())
+        .enumerate()
+        .map(|(i, c)| crate::feature::fix_round::Asked {
+            id: format!("C{}", i + 1),
+            title: (c.lines.first())
+                .map(|q| format!("line {}: {}", q.number, q.text.trim()))
+                .unwrap_or_default(),
+            note: c.text.clone(),
+            shots: 0,
+        })
+        .collect()
 }
 
 /// Why a file can't be opened: what is said about it, and how loudly.
@@ -179,6 +223,95 @@ pub fn added_file(name: &str, text: &str) -> FileDiff {
 }
 
 pub use crate::feature::artifacts::comments_path;
+
+/// Why the final plan's changes take no edit or comment.
+pub const PLAN_CHANGES_READ_ONLY: &str =
+    "This shows what the final plan changed in the plan, only to read";
+
+/// The plan as approved, under feature data dir `dir`: what the final plan's
+/// changes are against.
+pub fn read_base(dir: &Path) -> Result<String, Failed> {
+    let Some(path) = artifacts::path(dir, Stage::Plan) else {
+        return Err(Failed::Warning("Plan has no file".into()));
+    };
+    std::fs::read_to_string(&path).map_err(|err| {
+        tracing::warn!("reading {}: {err}", path.display());
+        Failed::Error(format!("Couldn't read the plan: {err}"))
+    })
+}
+
+/// Why a draft's changes take no edit or comment.
+pub const DRAFT_CHANGES_READ_ONLY: &str = "This shows what a draft changed, only to read";
+
+/// Draft `k` of `stage`'s file, under feature data dir `dir`.
+fn read_draft(dir: &Path, stage: Stage, k: u32) -> Result<String, Failed> {
+    let Some(path) = crate::feature::drafts::path(dir, stage, k) else {
+        return Err(Failed::Warning(format!("{} has no file", stage.label())));
+    };
+    std::fs::read_to_string(&path).map_err(|err| match err.kind() {
+        ErrorKind::NotFound => Failed::Warning(format!("Draft {k} wasn't kept")),
+        _ => {
+            tracing::warn!("reading {}: {err}", path.display());
+            Failed::Error(format!("Couldn't read draft {k}: {err}"))
+        }
+    })
+}
+
+/// The lines `new` has against `old`, the file `name`, as one diff: every line
+/// of `new` in one hunk, those not in `old` added, those gone from it removed,
+/// as the longest run of lines in common leaves them. Past `MAX_CELLS` of
+/// work, `old` is all removed and `new` all added.
+pub fn changed_file(name: &str, old: &str, new: &str) -> FileDiff {
+    const MAX_CELLS: usize = 4_000_000;
+    let (a, b): (Vec<&str>, Vec<&str>) = (old.lines().collect(), new.lines().collect());
+    let (n, m) = (a.len(), b.len());
+    let mut ops: Vec<(char, &str)> = Vec::with_capacity(n + m);
+    if n.saturating_mul(m) <= MAX_CELLS {
+        // lcs[i][j]: the longest run in common of a[i..] and b[j..].
+        let mut lcs = vec![0u32; (n + 1) * (m + 1)];
+        let at = |i: usize, j: usize| i * (m + 1) + j;
+        for i in (0..n).rev() {
+            for j in (0..m).rev() {
+                lcs[at(i, j)] = match a[i] == b[j] {
+                    true => lcs[at(i + 1, j + 1)] + 1,
+                    false => lcs[at(i + 1, j)].max(lcs[at(i, j + 1)]),
+                };
+            }
+        }
+        let (mut i, mut j) = (0, 0);
+        while i < n && j < m {
+            if a[i] == b[j] {
+                ops.push((' ', a[i]));
+                (i, j) = (i + 1, j + 1);
+            } else if lcs[at(i + 1, j)] >= lcs[at(i, j + 1)] {
+                ops.push(('-', a[i]));
+                i += 1;
+            } else {
+                ops.push(('+', b[j]));
+                j += 1;
+            }
+        }
+        ops.extend(a[i..].iter().map(|l| ('-', *l)));
+        ops.extend(b[j..].iter().map(|l| ('+', *l)));
+    } else {
+        ops.extend(a.iter().map(|l| ('-', *l)));
+        ops.extend(b.iter().map(|l| ('+', *l)));
+    }
+    let mut text = format!("diff --git a/{name} b/{name}\n--- a/{name}\n+++ b/{name}\n");
+    if !ops.is_empty() {
+        text.push_str(&format!("@@ -1,{n} +1,{m} @@\n"));
+        for (op, line) in ops {
+            text.push(op);
+            text.push_str(line);
+            text.push('\n');
+        }
+    }
+    let mut file = diff::parse(&text).pop().unwrap_or_default();
+    file.path = name.to_owned();
+    file.code = 'M';
+    diff::colour_file(&mut file);
+    file
+}
 
 /// Why an edit, a comment or Send back do nothing on an approved file.
 pub const APPROVED_FILE: &str = "An approved file can't be edited: reopen it first";
@@ -413,6 +546,12 @@ impl Gerdr {
                     DocFile::Evidence => {
                         Failed::Warning("No evidence yet: Run checks first".into())
                     }
+                    DocFile::PlanChanges => {
+                        Failed::Warning(format!("No final plan yet for \u{201c}{title}\u{201d}"))
+                    }
+                    DocFile::DraftChanges(_, k) => {
+                        Failed::Warning(format!("Draft {k} of {name} wasn't kept"))
+                    }
                     DocFile::Stage(_) | DocFile::FixPlan => {
                         Failed::Error(format!("No {name} yet for \u{201c}{title}\u{201d}"))
                     }
@@ -424,6 +563,11 @@ impl Gerdr {
             }
         };
         let stands = self.doc_stands(project, slug, file);
+        let base = match file {
+            DocFile::PlanChanges => Some(read_base(&dir)?),
+            DocFile::DraftChanges(stage, k) => Some(read_draft(&dir, stage, k - 1)?),
+            _ => None,
+        };
         let doc = DocOf {
             project: project.to_owned(),
             slug: slug.to_owned(),
@@ -436,6 +580,7 @@ impl Gerdr {
             locked: stands.locked,
             standing: stands.standing,
             current: stands.current,
+            base,
         };
         Ok((doc, text))
     }
@@ -466,7 +611,19 @@ impl Gerdr {
             return;
         };
         let read = read(&doc.path, &doc.name());
+        // The plan the changes are against may have changed too.
+        let base = (doc.file == DocFile::PlanChanges).then(|| {
+            let dir = store::dir(None, &doc.project, &doc.slug);
+            read_base(&dir).ok()
+        });
         self.doc_stand();
+        if let Some(Some(base)) = base
+            && let Some(doc) = self.wd_mut().and_then(|wd| wd.doc.as_mut())
+            && doc.base.as_ref() != Some(&base)
+        {
+            doc.base = Some(base);
+            doc.text = None;
+        }
         let env = self.worktree_env();
         let Some(wd) = self.wd_mut() else {
             return;
@@ -585,6 +742,10 @@ impl Gerdr {
         if doc.file == DocFile::FixPlan {
             return self.fix_plan_send_back(&doc.project, &doc.slug, comments);
         }
+        // What goes back is kept with the draft it is on, for its card.
+        let sent: Vec<crate::feature::fix_round::Asked> = (self.wd())
+            .map(|wd| drafts_comments(&wd.diff.review))
+            .unwrap_or_default();
         // One no longer waiting is refused there: the comments stay.
         let waiting = self
             .feature(&doc.project, &doc.slug)
@@ -593,6 +754,14 @@ impl Gerdr {
             self.doc_done(&doc.project, &doc.slug, doc.file);
         }
         self.send_back_stage(&doc.project, &doc.slug, doc.file.stage(), comments);
+        let stage = doc.file.stage();
+        if let Some(f) = self.feature_mut(&doc.project, &doc.slug)
+            && let Some(draft) = crate::feature::drafts::latest(&mut f.drafts, stage)
+                .filter(|d| d.sent_back.is_some() && d.comments.is_empty())
+        {
+            draft.comments = sent;
+            self.save_feature(&doc.project, &doc.slug);
+        }
     }
 
     /// `file` of feature `slug` is approved or sent back: its comments
@@ -794,5 +963,71 @@ mod tests {
         );
         f.verify.as_mut().unwrap().passed = Some(true);
         assert_eq!(evidence_state(Some(&f), false), "run 2 passed");
+    }
+
+    #[test]
+    fn the_final_plans_changes_show_against_the_plan() {
+        let old = "# Plan\nKeep\nGone\nAlso kept\n";
+        let new = "# Plan\nKeep\nNew line\nAlso kept\nAt the end\n";
+        let file = changed_file("final-plan.md", old, new);
+        let kinds: Vec<(LineKind, &str)> = (file.hunks.iter())
+            .flat_map(|h| &h.lines)
+            .map(|l| (l.kind, l.text.as_str()))
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                (LineKind::Context, "# Plan"),
+                (LineKind::Context, "Keep"),
+                (LineKind::Removed, "Gone"),
+                (LineKind::Added, "New line"),
+                (LineKind::Context, "Also kept"),
+                (LineKind::Added, "At the end"),
+            ]
+        );
+        assert_eq!((file.added, file.removed), (2, 1));
+        assert_eq!(file.path, "final-plan.md");
+        // The same text has no change to show.
+        let same = changed_file("final-plan.md", old, old);
+        assert_eq!((same.added, same.removed), (0, 0));
+    }
+
+    #[test]
+    fn a_drafts_changes_are_against_the_draft_before_only_to_read() {
+        let file = DocFile::DraftChanges(Stage::Plan, 3);
+        let dir = Path::new("/d");
+        assert_eq!(file.path(dir), Some(PathBuf::from("/d/drafts/plan-3.md")));
+        assert_eq!(file.name(), Some("plan.md"));
+        assert_eq!(file.stage(), Stage::Plan);
+        assert!(file.shows_changes() && DocFile::PlanChanges.shows_changes());
+        assert!(!DocFile::Stage(Stage::Plan).shows_changes());
+        assert_eq!(
+            file.locked(None, &Docs::default()),
+            Some(DRAFT_CHANGES_READ_ONLY)
+        );
+        assert_eq!(
+            file.state(None, false, &Docs::default(), 0),
+            "draft 3 against draft 2"
+        );
+        // What goes back is listed by where it is and what it says.
+        let review = Review {
+            comments: vec![review::Comment {
+                lines: vec![review::Quoted {
+                    number: 4,
+                    text: "  Run nightly ".into(),
+                    ..Default::default()
+                }],
+                text: "Hourly?".into(),
+                ..Default::default()
+            }],
+            ..Review::default()
+        };
+        let sent = drafts_comments(&review);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(
+            (sent[0].id.as_str(), sent[0].title.as_str()),
+            ("C1", "line 4: Run nightly")
+        );
+        assert_eq!(sent[0].note, "Hourly?");
     }
 }

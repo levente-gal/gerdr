@@ -678,15 +678,18 @@ impl Gerdr {
         let Some(feature) = self.feature(&panel.project, &panel.slug) else {
             return false;
         };
-        let stage = match panel.note {
-            Some((CardNote::Finding(_), _)) => Stage::AiReview,
-            _ => Stage::ManualTest,
+        // A criterion's note is written wherever they can be marked.
+        let (stage, writes) = match panel.note {
+            Some((CardNote::Finding(_), _)) => (
+                Stage::AiReview,
+                feature.status == Status::Open && feature.current() == Some(Stage::AiReview),
+            ),
+            _ => (
+                Stage::ManualTest,
+                crate::features::marks_criteria(feature, Stage::ManualTest),
+            ),
         };
-        !panel.keys
-            && !panel.expanded
-            && panel.page_stage(feature) == stage
-            && feature.status == Status::Open
-            && feature.current() == Some(stage)
+        !panel.keys && !panel.expanded && panel.page_stage(feature) == stage && writes
     }
 
     /// A key while the note of a criterion is being written; false when none
@@ -797,7 +800,7 @@ impl Gerdr {
             return self.show_warning("That feature is gone".into());
         };
         let title = feature.title.clone();
-        let done = feature.is_done(Stage::ManualTest);
+        let marks = crate::features::marks_criteria(feature, Stage::ManualTest);
         let criteria = self.criteria(&project, &slug).to_vec();
         let reading = self.feature_reading(&project, &slug).cloned();
         let patch = reading.as_ref().map(|r| r.patch.clone());
@@ -822,11 +825,14 @@ impl Gerdr {
                 let Some(c) = criteria.get(i) else {
                     return;
                 };
-                if done {
-                    return self.show_warning(format!(
-                        "{} is done: reopen it to change what it found",
-                        Stage::ManualTest.label()
-                    ));
+                // Done, or gone back to Verify with its fixes, it still
+                // takes marks: what fails waits for it to send.
+                if !marks {
+                    let why = match self.feature(&project, &slug).map(|f| f.status) {
+                        Some(Status::Open) => "hasn't got to Manual test yet",
+                        _ => "isn't open",
+                    };
+                    return self.show_warning(format!("\u{201c}{title}\u{201d} {why}"));
                 }
                 let Some(patch) = patch else {
                     // The note goes back in its field, not thrown away.

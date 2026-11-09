@@ -2396,8 +2396,30 @@ impl Gerdr {
         feature.log(now, format!("{} ready for review", doc_word(stage)));
         // As written, to tell the agent at send back whether the user
         // edited it in the review.
-        if let Err(err) = artifacts::keep_written(&store::dir(None, project, slug), stage) {
+        let data = store::dir(None, project, slug);
+        if let Err(err) = artifacts::keep_written(&data, stage) {
             tracing::warn!("keeping {project}/{slug}'s file as written: {err}");
+        }
+        // Each draft is kept, for its card and what the next one changed.
+        if matches!(stage, Stage::Discover | Stage::Plan) {
+            let k = feature::drafts::next(&feature.drafts, stage);
+            let (run, agent, model) = (feature.runs.get(&stage))
+                .map(|r| (r.n, r.agent.clone(), r.model.clone().unwrap_or_default()))
+                .unwrap_or_default();
+            if let Err(err) = feature::drafts::keep(&data, stage, k) {
+                tracing::warn!("keeping {project}/{slug}'s draft {k}: {err}");
+            }
+            feature.drafts.push(feature::drafts::Draft {
+                stage,
+                k,
+                run,
+                agent,
+                model,
+                written: now,
+                sent_back: None,
+                comments: Vec::new(),
+                approved: None,
+            });
         }
         let title = feature.title.clone();
         self.save_feature(project, slug);
@@ -2564,6 +2586,9 @@ impl Gerdr {
             return false;
         };
         feature.tick(now, "you", None);
+        if let Some(draft) = feature::drafts::latest(&mut feature.drafts, stage) {
+            draft.approved = Some(now);
+        }
         let done = format!("{} approved", doc_word(stage));
         feature.log(now, done.clone());
         self.save_feature(project, slug);
@@ -2626,6 +2651,12 @@ impl Gerdr {
         r.sent_back = back;
         r.ready = None;
         r.nudged = false;
+        if let Some(draft) = feature::drafts::latest(&mut f.drafts, stage) {
+            draft.sent_back = Some(now);
+        }
+        let Some(r) = f.runs.get_mut(&stage) else {
+            return;
+        };
         let agent = r.agent.clone();
         let what = doc_word(stage).to_lowercase();
         f.log(now, format!("{} sent back ({back})", doc_word(stage)));
