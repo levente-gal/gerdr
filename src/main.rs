@@ -89,6 +89,7 @@ mod pane_drag;
 mod pane_moves;
 mod paths;
 mod plan_sheet;
+mod port_holder;
 mod prepare;
 mod problems;
 mod profile_import;
@@ -6705,13 +6706,10 @@ impl Gerdr {
         self.t3_seen();
         let doc_tab = self.sync_doc_tab();
         let flat = doc_tab.is_some();
-        let tab_strip = self.tab_hover_tick(now);
-        let workspaces: Vec<_> = self
-            .workspace_views()
-            .into_iter()
-            .map(|(ws, _)| ws)
-            .collect();
+        // Worked out once for the strip, the sidebar and the inbox.
+        let (workspaces, tabs) = self.workspace_views_and_tabs();
         let agents = self.agent_views();
+        let tab_strip = self.tab_hover_tick(now, &workspaces, tabs, &agents);
         let sidebar_state = self.sidebar_state(now, &workspaces, &agents);
         let inbox = self.inbox_view_with(&workspaces, &agents);
         let ws = self.workspace();
