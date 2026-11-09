@@ -9,7 +9,6 @@ use super::{
     POPUP_RADIUS, Painter, Palette, QUIT_BODY, QUIT_BUTTON, QUIT_BUTTON_GAP, QUIT_LINE_GAP,
     QUIT_PADDING, QUIT_TITLE, Rect, Rgb, SHADOW, SMALL_FONT_SIZE, Thumb, band, button_width,
     dialog_buttons, field_line_spot, field_lines_height, field_text, gutter_track, phys, rect_px,
-    sub_lines,
 };
 use crate::text_field::Line;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
@@ -740,6 +739,7 @@ impl Painter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chrome::sub_lines;
 
     fn row(label: &str, text: &str) -> CommandsRow {
         CommandsRow {
