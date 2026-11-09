@@ -89,6 +89,7 @@ mod pane_drag;
 mod pane_moves;
 mod paths;
 mod plan_sheet;
+mod port_holder;
 mod prepare;
 mod problems;
 mod profile_import;

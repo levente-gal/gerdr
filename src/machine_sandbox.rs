@@ -51,6 +51,7 @@ use crate::{
     herdr::Herdr,
     machine_checks::Remote,
     machine_work::{open_there, qualified},
+    port_holder::{self, Holder},
     prepare,
 };
 
@@ -651,8 +652,8 @@ pub struct SandboxView {
     /// The sandbox it reaches: a new one has other numbers.
     holder: i32,
     relays: BTreeMap<u16, Relay>,
-    /// Ports it listens on that can't be had here.
-    taken: BTreeSet<u16>,
+    /// Ports it listens on that can't be had here, each with what was said of it.
+    taken: BTreeMap<u16, String>,
     missing: Missing,
     /// `missing` was said.
     said_missing: bool,
@@ -669,12 +670,18 @@ pub struct SandboxSeen {
     pub taken: Vec<u16>,
 }
 
-/// What's said of `port` being taken: it goes on the badge too, for what it takes
-/// is for the user to do.
-pub(crate) fn taken_text(title: &str, port: u16) -> String {
-    format!(
-        "Port {port} is taken here, so the sandbox of \u{201c}{title}\u{201d} can't be reached at it: stop what holds it"
-    )
+/// What's said of `port` being taken, by `holder` when it can be told: it goes
+/// on the badge too, for what it takes is for the user to do.
+pub(crate) fn taken_text(title: &str, port: u16, holder: Option<&Holder>) -> String {
+    match holder {
+        Some(holder) => format!(
+            "Port {port} is taken here by {}: stop it to reach the sandbox of \u{201c}{title}\u{201d}",
+            holder.named()
+        ),
+        None => format!(
+            "Port {port} is taken here, so the sandbox of \u{201c}{title}\u{201d} can't be reached at it: stop what holds it"
+        ),
+    }
 }
 
 impl SandboxView {
@@ -683,27 +690,29 @@ impl SandboxView {
             title: title.to_owned(),
             holder,
             relays: BTreeMap::new(),
-            taken: BTreeSet::new(),
+            taken: BTreeMap::new(),
             missing: Missing::default(),
             said_missing: false,
         }
     }
 
     /// The sandbox listens on `ports`: what isn't open here opens, and what it no
-    /// longer listens on closes. The ports found taken just now.
+    /// longer listens on closes. The ports found taken just now, with what to say
+    /// of each.
     fn follow(
         &mut self,
         reach: &Reach,
         ports: &[u16],
         start: &impl Fn(&Reach, i32, u16, Missing) -> io::Result<Relay>,
-    ) -> Vec<u16> {
+    ) -> Vec<(u16, String)> {
         self.relays.retain(|port, _| ports.contains(port));
-        for port in self.taken.clone() {
-            if !ports.contains(&port) {
-                self.taken.remove(&port);
-                crate::problems::forget(feature_sandbox::PROBLEMS, &taken_text(&self.title, port));
+        self.taken.retain(|port, text| {
+            let kept = ports.contains(port);
+            if !kept {
+                crate::problems::forget(feature_sandbox::PROBLEMS, text);
             }
-        }
+            kept
+        });
         let mut newly = Vec::new();
         for &port in ports {
             if self.relays.contains_key(&port) {
@@ -712,15 +721,16 @@ impl SandboxView {
             match start(reach, self.holder, port, self.missing.clone()) {
                 Ok(relay) => {
                     self.relays.insert(port, relay);
-                    if self.taken.remove(&port) {
-                        let text = taken_text(&self.title, port);
+                    if let Some(text) = self.taken.remove(&port) {
                         crate::problems::forget(feature_sandbox::PROBLEMS, &text);
                     }
                 }
                 Err(err) => {
-                    if self.taken.insert(port) {
+                    if !self.taken.contains_key(&port) {
                         tracing::warn!("port {port} for the sandbox here: {err}");
-                        newly.push(port);
+                        let text = taken_text(&self.title, port, port_holder::of(port).as_ref());
+                        self.taken.insert(port, text.clone());
+                        newly.push((port, text));
                     }
                 }
             }
@@ -731,8 +741,8 @@ impl SandboxView {
 
 impl Drop for SandboxView {
     fn drop(&mut self) {
-        for &port in &self.taken {
-            crate::problems::forget(feature_sandbox::PROBLEMS, &taken_text(&self.title, port));
+        for text in self.taken.values() {
+            crate::problems::forget(feature_sandbox::PROBLEMS, text);
         }
     }
 }
@@ -1160,7 +1170,7 @@ impl Gerdr {
 
     /// Bring the ports open here of feature `slug`'s sandbox elsewhere in line.
     /// Those just said to be taken.
-    fn follow_sandbox(&mut self, project: &str, slug: &str) -> Vec<u16> {
+    fn follow_sandbox(&mut self, project: &str, slug: &str) -> Vec<(u16, String)> {
         let Some(feature) = self.feature(project, slug) else {
             return Vec::new();
         };
@@ -1184,10 +1194,9 @@ impl Gerdr {
         let newly = view.follow(&reach, &ports, &relay_over);
         let missing = view.missing.0.load(Ordering::Relaxed) && !view.said_missing;
         view.said_missing |= missing;
-        for &port in &newly {
-            let text = taken_text(&title, port);
+        for (_, text) in &newly {
             crate::problems::report(feature_sandbox::PROBLEMS, text.clone());
-            self.show_warning(text);
+            self.show_warning(text.clone());
         }
         if missing {
             let text = format!(
@@ -1226,15 +1235,14 @@ impl Gerdr {
         };
         let said = self.follow_sandbox(project, slug);
         let key = (project.to_owned(), slug.to_owned());
-        let taken = local_port(&url).filter(|port| {
-            (self.machines.sandboxes.get(&key)).is_some_and(|view| view.taken.contains(port))
+        let taken = local_port(&url).and_then(|port| {
+            let view = self.machines.sandboxes.get(&key)?;
+            Some((port, view.taken.get(&port)?.clone()))
         });
         // It would show what holds that port here, as if it were the sandbox.
-        if let Some(port) = taken {
-            if !said.contains(&port)
-                && let Some(title) = self.feature(project, slug).map(|f| f.title.clone())
-            {
-                self.show_warning(taken_text(&title, port));
+        if let Some((port, text)) = taken {
+            if !said.iter().any(|(p, _)| *p == port) {
+                self.show_warning(text);
             }
             return;
         }
@@ -1277,7 +1285,7 @@ impl Gerdr {
         Some(SandboxSeen {
             name,
             here: view.map_or_else(Vec::new, |v| v.relays.keys().copied().collect()),
-            taken: view.map_or_else(Vec::new, |v| v.taken.iter().copied().collect()),
+            taken: view.map_or_else(Vec::new, |v| v.taken.keys().copied().collect()),
         })
     }
 }
@@ -1491,7 +1499,8 @@ mod tests {
             })
         };
         let mut view = SandboxView::new("t", 1);
-        assert_eq!(view.follow(&reach(), &[1, 2], &start), [2]);
+        let newly: Vec<u16> = view.follow(&reach(), &[1, 2], &start).into_iter().map(|(p, _)| p).collect();
+        assert_eq!(newly, [2]);
         assert_eq!(view.relays.keys().copied().collect::<Vec<_>>(), [1]);
         // Still taken: said once.
         assert!(view.follow(&reach(), &[1, 2], &start).is_empty());

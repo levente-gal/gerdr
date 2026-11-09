@@ -15,7 +15,7 @@
 //! this machine: one elsewhere has its own network.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     io,
     net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, UdpSocket},
     process::Command,
@@ -25,6 +25,7 @@ use crate::{
     Gerdr,
     feature::Status,
     feature_sandbox,
+    port_holder,
     machine_sandbox::{Missing, Relay, relay_script, start_relay_on},
 };
 
@@ -62,8 +63,9 @@ pub struct LanOpen {
     holder: i32,
     ip: Ipv4Addr,
     relays: BTreeMap<u16, Relay>,
-    /// Ports it listens on that something here holds already.
-    taken: BTreeSet<u16>,
+    /// Ports it listens on that something here holds already, each with what
+    /// was said of it.
+    taken: BTreeMap<u16, String>,
     missing: Missing,
     said_missing: bool,
 }
@@ -81,20 +83,22 @@ impl LanOpen {
         LanSeen {
             ip: self.ip.to_string(),
             open: self.relays.keys().copied().collect(),
-            taken: self.taken.iter().copied().collect(),
+            taken: self.taken.keys().copied().collect(),
         }
     }
 
     /// The sandbox listens on `ports`: open what isn't, close what it no
-    /// longer listens on. The ports found taken just now.
-    fn follow(&mut self, ports: &[u16]) -> Vec<u16> {
+    /// longer listens on. The ports found taken just now, with what to say of
+    /// each.
+    fn follow(&mut self, ports: &[u16]) -> Vec<(u16, String)> {
         self.relays.retain(|port, _| ports.contains(port));
-        for port in self.taken.clone() {
-            if !ports.contains(&port) {
-                self.taken.remove(&port);
-                crate::problems::forget(feature_sandbox::PROBLEMS, &taken_text(&self.title, port));
+        self.taken.retain(|port, text| {
+            let kept = ports.contains(port);
+            if !kept {
+                crate::problems::forget(feature_sandbox::PROBLEMS, text);
             }
-        }
+            kept
+        });
         let mut newly = Vec::new();
         for &port in ports {
             if self.relays.contains_key(&port) {
@@ -103,17 +107,16 @@ impl LanOpen {
             match relay_into(self.ip, self.holder, port, self.missing.clone()) {
                 Ok(relay) => {
                     self.relays.insert(port, relay);
-                    if self.taken.remove(&port) {
-                        crate::problems::forget(
-                            feature_sandbox::PROBLEMS,
-                            &taken_text(&self.title, port),
-                        );
+                    if let Some(text) = self.taken.remove(&port) {
+                        crate::problems::forget(feature_sandbox::PROBLEMS, &text);
                     }
                 }
                 Err(err) => {
-                    if self.taken.insert(port) {
+                    if !self.taken.contains_key(&port) {
                         tracing::warn!("port {port} on the network for the sandbox: {err}");
-                        newly.push(port);
+                        let text = taken_text(&self.title, port, port_holder::of(port).as_ref());
+                        self.taken.insert(port, text.clone());
+                        newly.push((port, text));
                     }
                 }
             }
@@ -124,18 +127,24 @@ impl LanOpen {
 
 impl Drop for LanOpen {
     fn drop(&mut self) {
-        for &port in &self.taken {
-            crate::problems::forget(feature_sandbox::PROBLEMS, &taken_text(&self.title, port));
+        for text in self.taken.values() {
+            crate::problems::forget(feature_sandbox::PROBLEMS, text);
         }
     }
 }
 
-/// What's said of `port` being held here: it goes on the badge too, as what
-/// holds it is for the user to stop.
-fn taken_text(title: &str, port: u16) -> String {
-    format!(
-        "Port {port} is taken here, so a phone can't reach the sandbox of \u{201c}{title}\u{201d} at it: stop what holds it"
-    )
+/// What's said of `port` being held here, by `holder` when it can be told: it
+/// goes on the badge too, as what holds it is for the user to stop.
+fn taken_text(title: &str, port: u16, holder: Option<&port_holder::Holder>) -> String {
+    match holder {
+        Some(holder) => format!(
+            "Port {port} is taken here by {}: stop it so a phone can reach the sandbox of \u{201c}{title}\u{201d}",
+            holder.named()
+        ),
+        None => format!(
+            "Port {port} is taken here, so a phone can't reach the sandbox of \u{201c}{title}\u{201d} at it: stop what holds it"
+        ),
+    }
 }
 
 /// `port` on `ip` here, passing each connection into the namespace `holder`
@@ -220,7 +229,7 @@ impl Gerdr {
             holder,
             ip,
             relays: BTreeMap::new(),
-            taken: BTreeSet::new(),
+            taken: BTreeMap::new(),
             missing: Missing::default(),
             said_missing: false,
         };
@@ -276,9 +285,7 @@ impl Gerdr {
         let missing =
             open.missing.0.load(std::sync::atomic::Ordering::Relaxed) && !open.said_missing;
         open.said_missing |= missing;
-        let title = open.title.clone();
-        for &port in &newly {
-            let text = taken_text(&title, port);
+        for (_, text) in newly {
             crate::problems::report(feature_sandbox::PROBLEMS, text.clone());
             self.show_warning(text);
         }
@@ -357,12 +364,15 @@ mod tests {
             holder: std::process::id() as i32,
             ip: Ipv4Addr::LOCALHOST,
             relays: BTreeMap::new(),
-            taken: BTreeSet::new(),
+            taken: BTreeMap::new(),
             missing: Missing::default(),
             said_missing: false,
         };
-        assert_eq!(open.follow(&[port]), [port]);
-        assert_eq!(open.follow(&[port]), Vec::<u16>::new(), "said once");
+        let newly = open.follow(&[port]);
+        assert_eq!(newly.iter().map(|(p, _)| *p).collect::<Vec<_>>(), [port]);
+        // This test holds it, so it is named.
+        assert!(newly[0].1.contains(&format!("(pid {}", std::process::id())), "{}", newly[0].1);
+        assert!(open.follow(&[port]).is_empty(), "said once");
         assert_eq!(open.seen().taken, [port]);
         // No longer listened on in the sandbox: no longer said.
         assert!(open.follow(&[]).is_empty());

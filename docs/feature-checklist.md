@@ -200,7 +200,8 @@ How to use it:
   kept for when that machine is back (`machine_sandbox`). Its
   app's ports open here while the feature's workspace shows a page on `localhost`,
   each connection a command of its own that enters the namespace there
-  (`machine_sandbox`). A port taken here says so, and a page never opens on it, as
+  (`machine_sandbox`). A port taken here says so, naming the process that holds it
+  when it is the user's own (`port_holder`), and a page never opens on it, as
   that would show what holds it as if it were the sandbox.
 
 ## X. State across places
