@@ -9,7 +9,7 @@ use std::time::Instant;
 
 use crate::{
     Action, Gerdr, Reorderable, Tab,
-    chrome::{self, TabHit, TabLayout, TabStripView, TabView, ThemeMode},
+    chrome::{self, AgentView, TabHit, TabLayout, TabStripView, TabView, ThemeMode, WorkspaceView},
     input::{BTN_LEFT, BTN_MIDDLE},
     layout::Dir,
     menu::{MenuAction, MenuItem, MenuSpec},
@@ -337,21 +337,44 @@ impl Gerdr {
     /// covers the strip, the other workspaces with a blocked agent, and the
     /// inbox's count.
     pub(crate) fn tab_strip_view(&self) -> TabStripView {
-        let views = self.workspace_views();
-        let tabs: Vec<TabView> = self
-            .workspace()
-            .map(|ws| self.tab_views(ws))
-            .unwrap_or_default();
-        let others = views
-            .iter()
-            .enumerate()
+        let (workspaces, tabs) = self.workspace_views_and_tabs();
+        self.tab_strip_view_with(&workspaces, tabs, &self.agent_views())
+    }
+
+    /// The views of the workspaces (`workspace_views`), and the active one's
+    /// tabs.
+    pub(crate) fn workspace_views_and_tabs(&self) -> (Vec<WorkspaceView>, Vec<TabView>) {
+        let mut tabs = Vec::new();
+        let mut workspaces = Vec::new();
+        for (w, (ws, ws_tabs)) in self.workspace_views().into_iter().enumerate() {
+            if w == self.active_workspace {
+                tabs = ws_tabs;
+            }
+            workspaces.push(ws);
+        }
+        (workspaces, tabs)
+    }
+
+    /// `tab_strip_view` from the views of the workspaces (`workspace_views`),
+    /// the active one's tabs and the agents (`agent_views`) as they are now:
+    /// the frame works them out once for the sidebar too.
+    pub(crate) fn tab_strip_view_with(
+        &self,
+        workspaces: &[WorkspaceView],
+        tabs: Vec<TabView>,
+        agents: &[Vec<AgentView>],
+    ) -> TabStripView {
+        let tabs = match self.workspace() {
+            Some(_) => tabs,
+            None => Vec::new(),
+        };
+        let others = (workspaces.iter().enumerate())
             .filter(|(w, _)| self.workspace().is_none() || *w != self.active_workspace);
-        let elsewhere = others.fold((0, 0), |(n, blocked), (_, (ws, _))| {
+        let elsewhere = others.fold((0, 0), |(n, blocked), (_, ws)| {
             let is_blocked = ws.status == Some(crate::herdr::AgentStatus::Blocked);
             (n + 1, blocked + usize::from(is_blocked))
         });
-        let workspaces: Vec<_> = views.into_iter().map(|(ws, _)| ws).collect();
-        let inbox = self.inbox_count(&workspaces, &self.agent_views());
+        let inbox = self.inbox_count(workspaces, agents);
         let renaming = self.rename.as_ref().and_then(|r| match r.target {
             RenameTarget::Tab(w, t) if w == self.active_workspace => Some((t, r.field.line())),
             _ => None,
@@ -393,8 +416,14 @@ impl Gerdr {
     /// Move the strip's hover on, once a frame: what the pointer is over
     /// fades in, what it left fades out and is forgotten once gone. The
     /// strip's view as it then is, for the frame to draw.
-    pub(crate) fn tab_hover_tick(&mut self, now: Instant) -> TabStripView {
-        let mut view = self.tab_strip_view();
+    pub(crate) fn tab_hover_tick(
+        &mut self,
+        now: Instant,
+        workspaces: &[WorkspaceView],
+        tabs: Vec<TabView>,
+        agents: &[Vec<AgentView>],
+    ) -> TabStripView {
+        let mut view = self.tab_strip_view_with(workspaces, tabs, agents);
         let hit = if self.tab_strip_covered() {
             None
         } else {
