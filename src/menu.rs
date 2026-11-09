@@ -590,7 +590,7 @@ impl Gerdr {
                     self.note_finding(&project, &slug, &id, &note);
                 }
                 crate::feature::review_items::ItemOf::Suggestion => {
-                    self.note_suggestion(&project, &slug, &id, &note);
+                    self.restore_suggestion_comment(&project, &slug, &id, &note);
                 }
             },
             MenuAction::WriteFinalPlan(project, slug) => self.write_final_plan(&project, &slug),

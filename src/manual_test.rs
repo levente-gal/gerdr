@@ -795,7 +795,7 @@ impl Gerdr {
                     };
                     match of {
                         ItemOf::Finding => self.delete_finding_comment(&project, &slug, &id),
-                        ItemOf::Suggestion => self.note_suggestion(&project, &slug, &id, ""),
+                        ItemOf::Suggestion => self.delete_suggestion_comment(&project, &slug, &id),
                     }
                 }
                 None => self.show_warning(NO_NOTE.into()),
@@ -826,7 +826,7 @@ impl Gerdr {
         if !note.is_empty() {
             match on {
                 CardNote::Criterion(i) => self.apply_manual_test(Outcome::Fail(i, note)),
-                CardNote::Item { of, id, .. } => {
+                CardNote::Item { of, id, accept } => {
                     let names =
                         (self.features.panel.as_ref()).map(|p| (p.project.clone(), p.slug.clone()));
                     if let Some((project, slug)) = names {
@@ -834,8 +834,9 @@ impl Gerdr {
                             ItemOf::Finding => {
                                 self.note_finding(&project, &slug, &id, &note);
                             }
+                            // A question answered to accept it is accepted.
                             ItemOf::Suggestion => {
-                                self.note_suggestion(&project, &slug, &id, &note);
+                                self.keep_suggestion_note(&project, &slug, &id, &note, accept);
                             }
                         }
                     }

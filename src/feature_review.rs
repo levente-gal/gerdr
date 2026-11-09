@@ -707,7 +707,9 @@ impl Gerdr {
     /// Write or edit the user's comment on finding `id`, on its card on the
     /// page: the keyboard goes to it there.
     pub(crate) fn write_finding_comment(&mut self, project: &str, slug: &str, id: &str) {
-        let Some(f) = self.finding_to_ask(project, slug, id) else {
+        let of = crate::feature::review_items::ItemOf::Finding;
+        let Some(f) = (self.item_to_ask(project, slug, of, id)).and_then(|f| f.into_finding())
+        else {
             return;
         };
         if let Err(why) = review_import::note_editable(&f.id, f.state) {

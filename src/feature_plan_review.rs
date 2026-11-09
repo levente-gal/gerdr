@@ -9,6 +9,7 @@
 //! plan: that goes as Plan's file does, up for review, approve or send back.
 
 use std::{
+    collections::BTreeMap,
     path::{Path, PathBuf},
     time::Instant,
 };
@@ -21,15 +22,15 @@ use crate::{
         self, Feature, Stage, Status,
         artifacts::{self},
         patch::{self, Reading},
-        plan_review::{self, Decision, PlanReview, Raw, Suggestion},
-        review_items::ItemOf,
+        plan_review::{self, Decision, Placed, PlanReview, Raw, State, Suggestion},
+        review_items::{ItemOf, words},
         store,
     },
     feature_agents::Stamp,
     features::{CardNote, Done, plural},
     menu::MenuAction,
     prompts,
-    review_cards::ItemAct,
+    review_cards::{self, CardId, ItemAct},
     text_field::TextField,
     toast::Level,
 };
@@ -42,6 +43,10 @@ pub struct PlanRead {
     pub reading: Reading,
     /// The suggestions, their citations checked, while reviewing.
     pub raws: Option<Result<Vec<Raw>, String>>,
+    /// Where each suggestion goes in the plan once the run is read in, by
+    /// id: the earlier ones too, an old record's never placed among them.
+    /// Empty when the plan couldn't be read: then they stay where they were.
+    pub placed: BTreeMap<String, Placed>,
 }
 
 /// The repositories a citation may name: those of the feature, and those
@@ -85,23 +90,66 @@ pub(crate) fn citation_place(
     Ok((root.to_path_buf(), path))
 }
 
-/// Read what the code is and, while reviewing, the suggestions in `path`.
-/// Reads git and files: not for the UI thread.
+/// Read what the code is and, while reviewing, the suggestions in `path`,
+/// placed in the plan at `plan` as `review` comes to be once they are read
+/// in as run `n`. Reads git and files: not for the UI thread.
 fn read_plan(
     feature: &Feature,
     path: &Path,
+    plan: Option<&Path>,
     repos: &[(String, PathBuf)],
-    writing: bool,
+    n: u32,
 ) -> Result<PlanRead, String> {
     let reading = patch::read(feature)?;
+    let review = feature.plan_review.as_ref();
+    let writing = review.is_some_and(|r| r.writing);
+    let mut placed = BTreeMap::new();
     let raws = (!writing).then(|| {
         let text = std::fs::read_to_string(path)
             .map_err(|e| format!("reading {}: {e}", plan_review::FILE))?;
         let mut raws = plan_review::parse(&text).map_err(|lacks| lacks.join("; "))?;
         plan_review::check_citations(&mut raws, repos);
+        match plan.map(|p| (p, std::fs::read_to_string(p))) {
+            Some((_, Ok(plan_text))) => {
+                placed = placements(review, n, &raws, &plan_text);
+            }
+            // Only less to go on: the cards and the plan doc say where.
+            Some((p, Err(e))) => tracing::warn!("reading {}: {e}", p.display()),
+            None => {}
+        }
         Ok(raws)
     });
-    Ok(PlanRead { reading, raws })
+    Ok(PlanRead {
+        reading,
+        raws,
+        placed,
+    })
+}
+
+/// Where each suggestion of `review`, once `raws` are read in as run `n`,
+/// goes in the plan reading `plan_text`, by id.
+fn placements(
+    review: Option<&PlanReview>,
+    n: u32,
+    raws: &[Raw],
+    plan_text: &str,
+) -> BTreeMap<String, Placed> {
+    let mut review = review.cloned().unwrap_or_default();
+    plan_review::import(&mut review, n, raws.to_vec());
+    plan_review::place_all(&mut review, plan_text);
+    (review.suggestions.into_iter())
+        .filter_map(|s| Some((s.id, s.placed?)))
+        .collect()
+}
+
+/// Give the suggestions of `review` their places of `placed`; one not
+/// there (added since the read) keeps its own.
+fn take_places(review: &mut PlanReview, placed: &BTreeMap<String, Placed>) {
+    for s in &mut review.suggestions {
+        if let Some(at) = placed.get(&s.id) {
+            s.placed = Some(*at);
+        }
+    }
 }
 
 /// What `reading` shows the agent changed: uncommitted work anywhere, or
@@ -123,6 +171,60 @@ fn changed_code(reading: &Reading, baseline: Option<&str>) -> Vec<String> {
 /// waiting for the final plan.
 pub(crate) fn deciding(feature: &Feature) -> Option<&PlanReview> {
     (feature.plan_review.as_ref()).filter(|r| r.stamp.is_some() && !r.writing)
+}
+
+/// `feature`'s suggestions, when they can be decided, commented on and
+/// added to now: at Plan review, read, and no final plan being written.
+/// Else why not, for a toast.
+pub(crate) fn decidable(feature: &Feature) -> Result<&PlanReview, String> {
+    if feature.status != Status::Open || feature.current() != Some(STAGE) {
+        let title = &feature.title;
+        return Err(format!("\u{201c}{title}\u{201d} isn't at Plan review"));
+    }
+    match feature.plan_review.as_ref() {
+        Some(review) if review.writing => {
+            Err("The final plan is being written: Change decisions to decide again".into())
+        }
+        Some(review) if review.stamp.is_some() => Ok(review),
+        _ => Err("The suggestions aren't read yet".into()),
+    }
+}
+
+/// Why something taken out of `feature`'s suggestions can't be put back:
+/// they can't be decided any more (`review_cards::can_decide`).
+fn why_not_restore(feature: &Feature) -> Option<String> {
+    if let Err(why) = decidable(feature) {
+        return Some(why);
+    }
+    if !review_cards::can_decide(feature, STAGE) {
+        let why = review_cards::why_not_decide(feature, STAGE);
+        return Some(
+            why.unwrap_or("Its suggestions can't be decided now")
+                .to_owned(),
+        );
+    }
+    None
+}
+
+/// What a toast says of suggestion `id` once `decision` was made of it,
+/// where it stood at `was`.
+fn decided_text(id: &str, was: State, decision: &Decision) -> String {
+    let w = words(ItemOf::Suggestion);
+    let word = match (decision, was) {
+        (Decision::Accept, _) => w.wanted,
+        (Decision::Reject(_), _) => w.refused,
+        (Decision::Clear, State::Accepted) => "no longer accepted",
+        (Decision::Clear, _) => "reopened",
+    };
+    format!("Suggestion {id} {word}")
+}
+
+/// What a toast says once nothing of `review` is left to decide.
+fn all_decided_text(review: &PlanReview) -> String {
+    match review.count(State::Accepted) {
+        0 => "All suggestions decided: none accepted".to_owned(),
+        n => format!("All suggestions decided: {n} accepted"),
+    }
 }
 
 impl Gerdr {
@@ -185,13 +287,14 @@ impl Gerdr {
         let Some(feature) = self.feature(project, slug).cloned() else {
             return;
         };
-        let writing = feature.plan_review.as_ref().is_some_and(|r| r.writing);
         let repos = citable(&feature);
-        let path = store::dir(None, project, slug).join(plan_review::FILE);
+        let dir = store::dir(None, project, slug);
+        let path = dir.join(plan_review::FILE);
+        let plan = artifacts::path(&dir, Stage::Plan);
         let (project, slug) = (project.to_owned(), slug.to_owned());
         let there = self.machine_dirt(&project, &slug);
         self.feature_work(None, move |_| Done::PlanReviewRead {
-            result: read_plan(&feature, &path, &repos, writing).map(|mut read| {
+            result: read_plan(&feature, &path, plan.as_deref(), &repos, n).map(|mut read| {
                 crate::machine_work::with_dirt(&feature, &mut read.reading, &there);
                 Box::new(read)
             }),
@@ -292,12 +395,15 @@ impl Gerdr {
             watch.refused = None;
         }
         let now = feature::now();
+        // The cards come and go around the one the user is on: it stays theirs.
+        let selected = self.selected_review_card();
         let Some(f) = self.feature_mut(project, slug) else {
             return;
         };
         let review = f.plan_review.get_or_insert_with(PlanReview::default);
         let first = review.stamp.is_none();
         let got = plan_review::import(review, n, raws);
+        take_places(review, &read.placed);
         review.stamp = Some(stamp);
         let reviewer = f.runs.get(&STAGE);
         let record = plan_review::RunRecord {
@@ -327,6 +433,7 @@ impl Gerdr {
             ),
         );
         self.save_feature(project, slug);
+        self.reselect_review_card(selected);
         let summary = match (first, open, total) {
             (_, _, 0) => format!("Plan review of \u{201c}{title}\u{201d} found nothing to change"),
             (_, 0, _) => format!("Plan review of \u{201c}{title}\u{201d} read again: all decided"),
@@ -347,7 +454,51 @@ impl Gerdr {
         }
     }
 
-    /// Decide suggestion `id`, and save; why not when it can't be.
+    /// Change feature `slug`'s suggestions by `change` and keep them:
+    /// `change` says what it did, for the log, else why it can't. Why not
+    /// when they can't be changed now (`decidable`).
+    fn try_change_plan_review(
+        &mut self,
+        project: &str,
+        slug: &str,
+        change: impl FnOnce(&mut PlanReview) -> Result<String, String>,
+    ) -> Result<(), String> {
+        let f = self
+            .feature_mut(project, slug)
+            .ok_or("That feature is gone")?;
+        decidable(f).map(|_| ())?;
+        let review = (f.plan_review.as_mut()).ok_or("The suggestions aren't read yet")?;
+        let what = change(review)?;
+        f.log(feature::now(), what);
+        self.save_feature(project, slug);
+        Ok(())
+    }
+
+    /// The same, saying why it can't; whether it did.
+    fn change_plan_review(
+        &mut self,
+        project: &str,
+        slug: &str,
+        change: impl FnOnce(&mut PlanReview) -> Result<String, String>,
+    ) -> bool {
+        match self.try_change_plan_review(project, slug, change) {
+            Ok(()) => true,
+            Err(why) => {
+                self.show_warning(why);
+                false
+            }
+        }
+    }
+
+    /// Suggestion `id` of feature `slug`, as it is now.
+    fn suggestion_of(&self, project: &str, slug: &str, id: &str) -> Option<&Suggestion> {
+        self.feature(project, slug)?
+            .plan_review
+            .as_ref()?
+            .suggestion(id)
+    }
+
+    /// Decide suggestion `id`, log it and save; why not when it can't be.
     pub(crate) fn decide_suggestion(
         &mut self,
         project: &str,
@@ -355,37 +506,274 @@ impl Gerdr {
         id: &str,
         decision: Decision,
     ) -> Result<(), String> {
-        let review = self
-            .feature_mut(project, slug)
-            .and_then(|f| f.plan_review.as_mut())
-            .ok_or("That review is gone")?;
-        plan_review::decide(review, id, decision)?;
-        self.save_feature(project, slug);
-        Ok(())
+        let was = (self.suggestion_of(project, slug, id)).map_or(State::Open, |s| s.state);
+        let mut what = decided_text(id, was, &decision);
+        if let Decision::Reject(why) = &decision {
+            what = format!("{what}: {}", why.trim());
+        }
+        self.try_change_plan_review(project, slug, |review| {
+            plan_review::decide(review, id, decision)?;
+            Ok(what)
+        })
     }
 
-    /// Set suggestion `id`'s note, and save.
-    pub(crate) fn note_suggestion(&mut self, project: &str, slug: &str, id: &str, note: &str) {
-        let noted = self
-            .feature_mut(project, slug)
-            .and_then(|f| f.plan_review.as_mut())
-            .is_some_and(|r| plan_review::set_note(r, id, note).is_ok());
-        if noted {
-            self.save_feature(project, slug);
+    /// Decide suggestion `id` and say so, offering what comes next once
+    /// nothing is left to decide; why not when it can't be. Whether it was.
+    fn decide_suggestion_said(
+        &mut self,
+        project: &str,
+        slug: &str,
+        id: &str,
+        decision: Decision,
+    ) -> bool {
+        let was = (self.suggestion_of(project, slug, id)).map_or(State::Open, |s| s.state);
+        let done = decided_text(id, was, &decision);
+        if let Err(why) = self.decide_suggestion(project, slug, id, decision) {
+            self.show_warning(why);
+            return false;
+        }
+        self.after_suggestion_decision(project, slug, done, None);
+        true
+    }
+
+    /// Reject suggestion `id` for `why`, from the dialog asking it: the
+    /// keyboard goes on to the next card left to decide.
+    pub(crate) fn reject_suggestion(
+        &mut self,
+        project: &str,
+        slug: &str,
+        id: &str,
+        why: &str,
+    ) -> bool {
+        let done = self.decide_suggestion_said(project, slug, id, Decision::Reject(why.to_owned()));
+        if done {
+            self.select_next_open_after(id);
+        }
+        done
+    }
+
+    /// What comes of a change to feature `slug`'s suggestions, said in
+    /// `done`, with `undo` on its toast; once nothing is left to decide, the
+    /// final plan is offered instead. An offer has its own button, so only
+    /// the toast that says `done` can undo (as AI review's `after_decision`).
+    fn after_suggestion_decision(
+        &mut self,
+        project: &str,
+        slug: &str,
+        done: String,
+        undo: Option<MenuAction>,
+    ) {
+        let Some(review) = self
+            .feature(project, slug)
+            .and_then(|f| f.plan_review.as_ref())
+        else {
+            return;
+        };
+        if review.open() == 0 && !review.suggestions.is_empty() && undo.is_none() {
+            let text = all_decided_text(review);
+            return self.offer_final_plan(project, slug, text);
+        }
+        let button = undo.map(|undo| ("Undo".to_owned(), undo));
+        self.toast_with(done, Level::Success, button);
+    }
+
+    /// Say `text`, with a button for what comes next now that nothing of
+    /// feature `slug`'s suggestions is left to decide: write the final plan,
+    /// or with nothing accepted go on with the plan as it is. Nothing starts
+    /// by itself.
+    fn offer_final_plan(&mut self, project: &str, slug: &str, text: String) {
+        let accepted = (self.feature(project, slug))
+            .and_then(|f| f.plan_review.as_ref())
+            .is_some_and(PlanReview::any_accepted);
+        let label = match accepted {
+            true => "Write final plan",
+            false => "Use the plan as it is",
+        };
+        let then = MenuAction::WriteFinalPlan(project.to_owned(), slug.to_owned());
+        self.toast_with(text, Level::Success, Some((label.to_owned(), then)));
+    }
+
+    /// Accept every open suggestion of feature `slug` but the questions
+    /// still to answer.
+    // WAVE1-STUB(E): the page's Accept all open (Shift+F) calls it; Wave 2
+    // drops this allow.
+    #[allow(dead_code)]
+    pub(crate) fn accept_all_suggestions(&mut self, project: &str, slug: &str) {
+        let mut accepted = 0;
+        let done = self.change_plan_review(project, slug, |review| {
+            accepted = plan_review::accept_all(review);
+            match (accepted, review.open()) {
+                (0, 0) => Err("No suggestion left to decide".to_owned()),
+                (0, open) => Err(format!("{} to answer first", plural(open, "question"))),
+                (n, _) => Ok(format!("Accepted all open: {n}")),
+            }
+        });
+        let Some(review) = (self.feature(project, slug))
+            .and_then(|f| f.plan_review.as_ref())
+            .filter(|_| done)
+        else {
+            return;
+        };
+        let text = format!("{} accepted", plural(accepted, "suggestion"));
+        match review.open() {
+            0 => self.offer_final_plan(project, slug, text),
+            open => self.show_success(format!(
+                "{text}; {} still to answer",
+                plural(open, "question")
+            )),
         }
     }
 
-    /// Add the user's own suggestion, and save; say why when it can't be.
-    pub(crate) fn add_suggestion(&mut self, project: &str, slug: &str, text: &str) {
-        let added = self
-            .feature_mut(project, slug)
-            .and_then(|f| f.plan_review.as_mut())
-            .map(|r| plan_review::add_own(r, text));
-        match added {
-            Some(Ok(_)) => self.save_feature(project, slug),
-            Some(Err(why)) => self.show_warning(why),
-            None => {}
+    /// Set suggestion `id`'s note, a question's answer; empty deletes it.
+    /// Whether it was set: why not is said.
+    pub(crate) fn note_suggestion(
+        &mut self,
+        project: &str,
+        slug: &str,
+        id: &str,
+        note: &str,
+    ) -> bool {
+        // Left as it was: nothing to save or log.
+        let s = self.suggestion_of(project, slug, id);
+        if s.is_some_and(|s| s.note == note.trim()) {
+            return true;
         }
+        let answered =
+            s.is_some_and(|s| s.kind == plan_review::Kind::Question && s.state == State::Accepted);
+        if note.trim().is_empty() && answered {
+            self.show_warning(
+                "An accepted question keeps its answer: take the decision back first".into(),
+            );
+            return false;
+        }
+        self.change_plan_review(project, slug, |review| {
+            let what = plan_review::set_note(review, id, note)?;
+            Ok(format!("Suggestion {id}: {what}"))
+        })
+    }
+
+    /// Keep what the user wrote on suggestion `id`'s card, and accept it
+    /// when they wrote it to (`accept`: a question answered to accept it).
+    pub(crate) fn keep_suggestion_note(
+        &mut self,
+        project: &str,
+        slug: &str,
+        id: &str,
+        note: &str,
+        accept: bool,
+    ) {
+        if self.note_suggestion(project, slug, id, note) && accept {
+            self.decide_suggestion_said(project, slug, id, Decision::Accept);
+        }
+    }
+
+    /// Delete the user's comment on suggestion `id`: the toast can bring it
+    /// back (checklist C4).
+    pub(crate) fn delete_suggestion_comment(&mut self, project: &str, slug: &str, id: &str) {
+        let note = (self.suggestion_of(project, slug, id)).map(|s| s.note.clone());
+        let Some(note) = note.filter(|note| !note.is_empty()) else {
+            return;
+        };
+        if !self.note_suggestion(project, slug, id, "") {
+            return;
+        }
+        let undo = MenuAction::RestoreItemComment {
+            project: project.to_owned(),
+            slug: slug.to_owned(),
+            of: ItemOf::Suggestion,
+            id: id.to_owned(),
+            note,
+        };
+        self.toast_with(
+            format!("Comment on {id} deleted"),
+            Level::Success,
+            Some(("Undo".to_owned(), undo)),
+        );
+    }
+
+    /// Undo `delete_suggestion_comment`: refused, and why, once the
+    /// suggestions can't be decided any more.
+    pub(crate) fn restore_suggestion_comment(
+        &mut self,
+        project: &str,
+        slug: &str,
+        id: &str,
+        note: &str,
+    ) {
+        let why = self.feature(project, slug).map(why_not_restore);
+        if let Some(why) = why.flatten() {
+            return self.show_warning(format!("Can't put the comment on {id} back: {why}"));
+        }
+        self.note_suggestion(project, slug, id, note);
+    }
+
+    /// Add the user's own suggestion saying `text`, and select it; say why
+    /// when it can't be. Whether it was added.
+    pub(crate) fn add_suggestion(&mut self, project: &str, slug: &str, text: &str) -> bool {
+        let mut added = String::new();
+        let done = self.change_plan_review(project, slug, |review| {
+            added = plan_review::add_own(review, text)?;
+            Ok(format!("You added suggestion {added}"))
+        });
+        if done {
+            // It lands at the top of the page's list.
+            self.select_review_item(ItemOf::Suggestion, &added);
+            self.show_success(format!(
+                "Suggestion {added} added, to go into the final plan"
+            ));
+        }
+        done
+    }
+
+    /// Reword suggestion `id`'s change, accepting it unless it is a question
+    /// still to answer. Whether it was.
+    pub(crate) fn edit_suggestion_change(
+        &mut self,
+        project: &str,
+        slug: &str,
+        id: &str,
+        text: &str,
+    ) -> bool {
+        let done = self.change_plan_review(project, slug, |review| {
+            let what = plan_review::edit_change(review, id, text)?;
+            Ok(format!("Suggestion {id}: {what}"))
+        });
+        let Some(review) = (self.feature(project, slug))
+            .and_then(|f| f.plan_review.as_ref())
+            .filter(|_| done)
+        else {
+            return done;
+        };
+        let accepted = review
+            .suggestion(id)
+            .is_some_and(|s| s.state == State::Accepted);
+        let text = match accepted {
+            true => format!("Suggestion {id} edited and accepted"),
+            false => format!("Suggestion {id} edited"),
+        };
+        match review.open() {
+            0 => self.offer_final_plan(project, slug, text),
+            _ => self.show_success(text),
+        }
+        true
+    }
+
+    /// Rewrite suggestion `id` of the user's own. Whether it was.
+    pub(crate) fn edit_own_suggestion(
+        &mut self,
+        project: &str,
+        slug: &str,
+        id: &str,
+        text: &str,
+    ) -> bool {
+        let done = self.change_plan_review(project, slug, |review| {
+            let what = plan_review::edit_own(review, id, text)?;
+            Ok(format!("Your suggestion {id}: {what}"))
+        });
+        if done {
+            self.show_success(format!("Suggestion {id} edited"));
+        }
+        done
     }
 
     /// Delete suggestion `id` of the user's own, and save; why not when it
@@ -396,16 +784,41 @@ impl Gerdr {
         slug: &str,
         id: &str,
     ) -> Result<(), String> {
-        let review = self
-            .feature_mut(project, slug)
-            .and_then(|f| f.plan_review.as_mut())
-            .ok_or("That review is gone")?;
-        plan_review::delete_own(review, id)?;
-        self.save_feature(project, slug);
-        Ok(())
+        self.try_change_plan_review(project, slug, |review| {
+            plan_review::delete_own(review, id)?;
+            Ok(format!("You deleted suggestion {id}"))
+        })
     }
 
-    /// Undo removing one of the user's own suggestions.
+    /// Delete suggestion `id` of the user's own: it goes for good, not
+    /// rejected. The toast can bring it back (checklist C4).
+    fn delete_own_suggestion_said(&mut self, project: &str, slug: &str, id: &str) {
+        let selected = self.selected_review_card();
+        let mut gone = None;
+        let done = self.change_plan_review(project, slug, |review| {
+            gone = Some(plan_review::delete_own(review, id)?);
+            Ok(format!("You deleted suggestion {id}"))
+        });
+        let Some((at, suggestion)) = gone.filter(|_| done) else {
+            return;
+        };
+        self.reselect_review_card(selected);
+        let undo = MenuAction::RestoreSuggestion {
+            project: project.to_owned(),
+            slug: slug.to_owned(),
+            at,
+            suggestion: Box::new(suggestion),
+        };
+        self.after_suggestion_decision(
+            project,
+            slug,
+            format!("Suggestion {id} deleted"),
+            Some(undo),
+        );
+    }
+
+    /// Undo removing one of the user's own suggestions: refused, and why,
+    /// once the suggestions can't be decided any more.
     pub(crate) fn restore_suggestion(
         &mut self,
         project: &str,
@@ -413,14 +826,34 @@ impl Gerdr {
         at: usize,
         suggestion: Suggestion,
     ) {
-        let restored = self
-            .feature_mut(project, slug)
-            .and_then(|f| f.plan_review.as_mut())
-            .is_some_and(|r| plan_review::restore(r, at, suggestion));
-        if !restored {
-            return self.show_warning("That suggestion can't be put back now".into());
+        let id = suggestion.id.clone();
+        let why = self.feature(project, slug).map(why_not_restore);
+        if let Some(why) = why.flatten() {
+            return self.show_warning(format!("Can't put {id} back: {why}"));
         }
-        self.save_feature(project, slug);
+        let selected = self.selected_review_card();
+        let done = self.change_plan_review(project, slug, |review| {
+            match plan_review::restore(review, at, suggestion) {
+                true => Ok(format!("You brought back suggestion {id}")),
+                false => Err(format!("Can't put {id} back: its id is taken")),
+            }
+        });
+        if done {
+            self.reselect_review_card(selected);
+        }
+    }
+
+    /// Item `id` of kind `of` has the keyboard on its review page, and
+    /// shows; whether it is there.
+    fn select_review_item(&mut self, of: ItemOf, id: &str) -> bool {
+        let want = CardId::Item(of, id.to_owned());
+        self.reselect_review_card(Some(want.clone()));
+        if self.selected_review_card() != Some(want) {
+            return false;
+        }
+        let at = self.features.panel.as_ref().map_or(0, |p| p.finding);
+        self.select_criterion(at);
+        true
     }
 
     /// Where citation `i` of suggestion `id` of feature `slug` is; else why
@@ -466,66 +899,48 @@ impl Gerdr {
         match act {
             ItemAct::Decide(decision) => {
                 let decision = Decision::from_item(decision);
-                if let Err(why) = self.decide_suggestion(project, slug, id, decision) {
-                    self.show_warning(why);
+                // A question is accepted by answering it: the field opens.
+                let unanswered =
+                    (self.suggestion_of(project, slug, id)).is_some_and(Suggestion::unanswered);
+                if decision == Decision::Accept && unanswered {
+                    return self.write_suggestion_comment(project, slug, id, true);
                 }
+                self.decide_suggestion_said(project, slug, id, decision);
             }
-            ItemAct::DeleteOwn => {
-                let taken = (self.feature(project, slug))
-                    .and_then(|f| f.plan_review.as_ref())
-                    .and_then(|r| {
-                        let at = r.suggestions.iter().position(|s| s.id == id)?;
-                        Some((at, r.suggestions[at].clone()))
-                    });
-                if let Err(why) = self.delete_own_suggestion(project, slug, id) {
-                    return self.show_warning(why);
-                }
-                if let Some((at, suggestion)) = taken {
-                    let undo = MenuAction::RestoreSuggestion {
-                        project: project.to_owned(),
-                        slug: slug.to_owned(),
-                        at,
-                        suggestion: Box::new(suggestion),
-                    };
-                    self.toast_with(
-                        "Removed your suggestion".into(),
-                        Level::Success,
-                        Some(("Undo".to_owned(), undo)),
-                    );
-                }
-            }
-            ItemAct::Comment => self.write_suggestion_comment(project, slug, id),
-            ItemAct::DeleteComment => self.note_suggestion(project, slug, id, ""),
+            ItemAct::AskRefuse => self.ask_reject_suggestion(project, slug, id),
+            ItemAct::Edit => self.ask_edit_suggestion(project, slug, id),
+            ItemAct::Comment => self.write_suggestion_comment(project, slug, id, false),
+            ItemAct::DeleteComment => self.delete_suggestion_comment(project, slug, id),
+            ItemAct::DeleteOwn => self.delete_own_suggestion_said(project, slug, id),
             ItemAct::OpenCode => self.open_suggestion_code(project, slug, id, 0),
             ItemAct::Show => self.review_in_plan(project, slug),
-            // The dialogs asking why and for the user's wording come with
-            // the cards.
-            ItemAct::AskRefuse | ItemAct::Edit => {
-                self.show_warning("Decide this one in the plan review for now".into());
-            }
         }
-        self.plan_doc_follows();
     }
 
-    /// Write or edit the user's comment on suggestion `id`, on its card on
-    /// the page: the keyboard goes to it there.
-    fn write_suggestion_comment(&mut self, project: &str, slug: &str, id: &str) {
-        let note = (self.feature(project, slug))
-            .and_then(|f| f.plan_review.as_ref()?.suggestion(id))
-            .map(|s| s.note.clone());
-        let Some(note) = note else {
-            return self.show_warning(format!("There's no suggestion {id}"));
+    /// Write or edit the user's comment on suggestion `id`, a question's
+    /// answer, on its card on the page: the keyboard goes to it there.
+    /// `accept`: saving it accepts the suggestion too.
+    fn write_suggestion_comment(&mut self, project: &str, slug: &str, id: &str, accept: bool) {
+        let Some(s) = self.item_to_ask(project, slug, ItemOf::Suggestion, id) else {
+            return;
         };
+        if let Err(why) =
+            crate::feature::review_items::note_editable(ItemOf::Suggestion, id, s.standing())
+        {
+            return self.show_warning(why);
+        }
+        let field = TextField::multiline(s.note());
         let Some(panel) = self.features.panel.as_mut() else {
             return;
         };
         let on = CardNote::Item {
             of: ItemOf::Suggestion,
             id: id.to_owned(),
-            accept: false,
+            accept,
         };
-        panel.note = Some((on, TextField::multiline(&note)));
+        panel.note = Some((on, field));
         self.stop_key_repeat();
+        self.select_review_item(ItemOf::Suggestion, id);
     }
 
     /// Send the notes on the suggestions to the reviewer's chat, or to a
@@ -537,9 +952,12 @@ impl Gerdr {
         let Some(review) = deciding(&feature) else {
             return self.show_warning("The suggestions aren't up for discussion now".into());
         };
-        let notes = plan_review::notes(review);
+        // The notes, and what was rejected and why, not to be raised again.
+        let notes = plan_review::back_notes(review);
         if notes.is_empty() {
-            return self.show_warning("Nothing to ask: write a note on a suggestion first".into());
+            return self.show_warning(
+                "Nothing to ask: comment on a suggestion or reject one first".into(),
+            );
         }
         let Some(run) = feature.runs.get(&STAGE).cloned() else {
             self.launch_stage_agent(project, slug, STAGE, &[("comments", notes)]);
@@ -822,6 +1240,105 @@ mod tests {
         assert!(deciding(&f).is_some());
         f.plan_review.as_mut().unwrap().writing = true;
         assert!(deciding(&f).is_none());
+    }
+
+    fn at_plan_review() -> Feature {
+        crate::features::tests::feature("a", vec![crate::features::tests::repo("api", true)], 2)
+    }
+
+    #[test]
+    fn suggestions_are_decided_only_at_plan_review_once_read_and_not_while_writing() {
+        let mut f = at_plan_review();
+        assert_eq!(f.current(), Some(STAGE));
+        assert_eq!(
+            decidable(&f).unwrap_err(),
+            "The suggestions aren't read yet"
+        );
+        f.plan_review = Some(PlanReview {
+            stamp: Some((1, 1)),
+            ..PlanReview::default()
+        });
+        assert!(decidable(&f).is_ok());
+        f.plan_review.as_mut().unwrap().writing = true;
+        assert!(decidable(&f).unwrap_err().contains("Change decisions"));
+        f.plan_review.as_mut().unwrap().writing = false;
+        f.tick(2, "you", None);
+        assert!(decidable(&f).unwrap_err().contains("isn't at Plan review"));
+        assert!(
+            why_not_restore(&f)
+                .unwrap()
+                .contains("isn't at Plan review")
+        );
+    }
+
+    #[test]
+    fn a_decision_is_said_in_a_suggestions_words() {
+        let reject = Decision::Reject("no".into());
+        assert_eq!(
+            decided_text("r1-2", State::Open, &Decision::Accept),
+            "Suggestion r1-2 accepted"
+        );
+        assert_eq!(
+            decided_text("r1-2", State::Open, &reject),
+            "Suggestion r1-2 rejected"
+        );
+        assert_eq!(
+            decided_text("r1-2", State::Accepted, &Decision::Clear),
+            "Suggestion r1-2 no longer accepted"
+        );
+        assert_eq!(
+            decided_text("r1-2", State::Rejected, &Decision::Clear),
+            "Suggestion r1-2 reopened"
+        );
+        let mut review = PlanReview::default();
+        plan_review::add_own(&mut review, "Mine").unwrap();
+        assert_eq!(
+            all_decided_text(&review),
+            "All suggestions decided: 1 accepted"
+        );
+        review.suggestions[0].state = State::Rejected;
+        assert_eq!(
+            all_decided_text(&review),
+            "All suggestions decided: none accepted"
+        );
+        for text in [
+            decided_text("r1-2", State::Accepted, &Decision::Clear),
+            all_decided_text(&review),
+        ] {
+            assert!(!text.ends_with('.'), "{text}");
+            assert!(!text.to_lowercase().contains("fix"), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_run_read_in_places_every_suggestion_an_old_one_too() {
+        let plan = "# Plan\n## Storage\nKeep rows in SQLite.\n## Sync\nPush on save.\n";
+        let mut review = PlanReview {
+            n: 1,
+            ..PlanReview::default()
+        };
+        // An old record's: never placed.
+        review.suggestions.push(Suggestion {
+            id: "r1-1".into(),
+            plan: "Sync".into(),
+            run: 1,
+            ..Suggestion::default()
+        });
+        let text = r#"{"suggestions": [{"kind": "question", "plan": "Storage", "title": "t",
+            "why": "w", "change": "c", "plan_quote": "keep rows in **SQLite**"}]}"#;
+        let raws = plan_review::parse(text).unwrap();
+        let placed = placements(Some(&review), 2, &raws, plan);
+        assert_eq!(placed.get("r1-1"), Some(&Placed::Heading(4)));
+        assert_eq!(placed.get("r2-1"), Some(&Placed::Quote(3)));
+        // The record takes them as it is when read in; one added since keeps
+        // its own.
+        plan_review::add_own(&mut review, "Mine").unwrap();
+        plan_review::import(&mut review, 2, raws);
+        take_places(&mut review, &placed);
+        let at = |id: &str| review.suggestion(id).unwrap().placed;
+        assert_eq!(at("r1-1"), Some(Placed::Heading(4)));
+        assert_eq!(at("r2-1"), Some(Placed::Quote(3)));
+        assert_eq!(at("u1"), None);
     }
 
     #[test]
