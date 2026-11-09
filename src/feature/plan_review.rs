@@ -6,13 +6,17 @@
 //!
 //! ```json
 //! {"suggestions": [{"id": "r1-2", "severity": "high", "kind": "gap",
-//!   "plan": "Milestone 3", "title": "…", "why": "…", "change": "…",
+//!   "plan": "Milestone 3", "plan_quote": "…", "title": "…", "why": "…",
+//!   "change": "…",
 //!   "evidence": [{"repo": "api", "file": "src/a.rs", "line": 12,
 //!                 "quote": "…"}]}]}
 //! ```
 //!
 //! - `kind`: `gap`, `risk`, `edge-case`, `simplify` or `question`.
 //! - `plan`: where in the plan it applies.
+//! - `plan_quote`: the exact text of the one plan line it applies to; left
+//!   out for the plan as a whole. Where a suggestion shows in the plan
+//!   comes from it, else from `plan` naming a heading (`place`).
 //! - `why`: what goes wrong, as a concrete case.
 //! - `change`: what to change in the plan. A question may leave it out.
 //! - `evidence`: where the code says so. Only a question may have none.
@@ -348,6 +352,14 @@ impl PlanReview {
         list
     }
 
+    /// How many open suggestions are questions with no answer yet: what
+    /// `accept_all` leaves.
+    pub fn waiting_answer(&self) -> usize {
+        (self.suggestions.iter())
+            .filter(|s| s.state == State::Open && s.unanswered())
+            .count()
+    }
+
     /// The first suggestion not decided yet, as the page lists them.
     pub fn first_open(&self) -> Option<&Suggestion> {
         (self.in_order().into_iter()).find(|s| s.state == State::Open)
@@ -512,7 +524,8 @@ pub struct Imported {
 /// Read run `run`'s suggestions (`raws`) into `review`:
 ///
 /// - one naming an earlier one's id raises it again: its text and run
-///   follow, its decision and note stay;
+///   follow; its decision, reason, note and the user's wording of its change
+///   (`my_change`) stay. Its place is to find again (`placed` none);
 /// - any other is new, its id `r<run>-<k>`;
 /// - an earlier one of the reviewer's not raised again stays, `dropped`;
 /// - the user's own are left alone.
@@ -537,6 +550,7 @@ pub fn import(review: &mut PlanReview, run: u32, raws: Vec<Raw>) -> Imported {
             (s.why, s.change) = (raw.why, raw.change);
             s.evidence = raw.evidence;
             s.plan_quote = raw.plan_quote;
+            s.placed = None;
             s.run = run;
             s.dropped = false;
             out.again += 1;
@@ -608,11 +622,11 @@ impl Decision {
 /// is accepted by answering it, so it needs its note first.
 pub fn decide(review: &mut PlanReview, id: &str, decision: Decision) -> Result<(), String> {
     let Some(s) = review.suggestions.iter_mut().find(|s| s.id == id) else {
-        return Err("That suggestion is gone".into());
+        return Err(format!("There's no suggestion {id}"));
     };
     match decision {
         Decision::Accept if s.unanswered() => {
-            return Err("Answer the question first: write it as a note".into());
+            return Err(format!("Answer {id} first: it is a question"));
         }
         Decision::Accept => {
             s.state = State::Accepted;
@@ -663,17 +677,23 @@ pub fn set_note(review: &mut PlanReview, id: &str, note: &str) -> Result<String,
 }
 
 /// Reword suggestion `id`'s change to `text`: left as the reviewer's, or
-/// empty, it is theirs again. It accepts the suggestion too, as rewording a
-/// change means wanting it, unless it is a question still to answer. What it
-/// did, for the log; else why it can't.
+/// empty, it is theirs again (`my_change` none). One of the user's own has
+/// its change rewritten, as all of it is theirs. It accepts an undecided
+/// suggestion too, as rewording a change means wanting it, unless it is a
+/// question still to answer. What it did, for the log; else why it can't.
 pub fn edit_change(review: &mut PlanReview, id: &str, text: &str) -> Result<String, String> {
     let Some(s) = review.suggestions.iter_mut().find(|s| s.id == id) else {
         return Err(format!("There's no suggestion {id}"));
     };
     review_items::editable(ItemOf::Suggestion, &s.id, s.standing())?;
     let text = own_text(text);
-    s.my_change = (!text.is_empty() && text != s.change).then_some(text);
-    if s.unanswered() {
+    if s.source == Source::You {
+        s.change = text;
+        s.my_change = None;
+    } else {
+        s.my_change = (!text.is_empty() && text != s.change).then_some(text);
+    }
+    if s.state != State::Open || s.unanswered() {
         return Ok("edited".into());
     }
     s.state = State::Accepted;
@@ -746,8 +766,8 @@ pub fn delete_own(review: &mut PlanReview, id: &str) -> Result<(usize, Suggestio
     Ok((at, review.suggestions.remove(at)))
 }
 
-/// Accept every open suggestion of the reviewer's but the questions still to
-/// answer. How many it accepted.
+/// Accept every open suggestion but the questions still to answer (see
+/// `PlanReview::waiting_answer`). How many it accepted.
 pub fn accept_all(review: &mut PlanReview) -> usize {
     let mut n = 0;
     for s in &mut review.suggestions {
@@ -760,14 +780,21 @@ pub fn accept_all(review: &mut PlanReview) -> usize {
     n
 }
 
-/// A plan line as a quote of it compares: markdown marks at its start and
-/// around words out, spaces collapsed, lower case.
+/// A plan line as a quote of it compares: cleaned and spaces collapsed as
+/// `normal`, markdown marks at its start (`#`, `>`, `-`, `*`, `+`, a list's
+/// number, a task box) and around words (`*`, `_`, backticks) out, lower
+/// case.
 fn plan_line(text: &str) -> String {
     let text = text.trim_start();
     let text = text.trim_start_matches(['#', '>', '-', '*', '+', ' ']);
-    let text = text
-        .strip_prefix("[ ]")
-        .or_else(|| text.strip_prefix("[x]"))
+    let digits = text.len() - text.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    let text = match text[digits..].strip_prefix(['.', ')']) {
+        Some(rest) if digits > 0 => rest.trim_start(),
+        _ => text,
+    };
+    let text = ["[ ]", "[x]", "[X]", "[~]"]
+        .iter()
+        .find_map(|mark| text.strip_prefix(mark))
         .unwrap_or(text);
     let text: String = text
         .chars()
@@ -776,31 +803,99 @@ fn plan_line(text: &str) -> String {
     normal(&text).to_lowercase()
 }
 
+/// The shortest `plan_quote` believed: a word or two could be anywhere.
+const MIN_QUOTE: usize = 4;
+/// How many plan lines a quote may run over, as a plan's paragraphs are
+/// wrapped.
+const QUOTE_LINES: usize = 3;
+
+/// The words of `text`, lower case: letters and digits, the rest breaks.
+fn words_of(text: &str) -> Vec<String> {
+    (text.split(|c: char| !c.is_alphanumeric()))
+        .filter(|w| !w.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
+/// The 1-based line of `lines` that `quote` (as `plan_line` has it) is on:
+/// a line that is the quote, else the first one holding it, else the line
+/// it starts on, running on over a few lines of one paragraph.
+fn quote_line(lines: &[String], quote: &str) -> Option<usize> {
+    if let Some(at) = lines.iter().position(|line| line == quote) {
+        return Some(at + 1);
+    }
+    if let Some(at) = lines.iter().position(|line| line.contains(quote)) {
+        return Some(at + 1);
+    }
+    (0..lines.len()).find_map(|at| {
+        let first = &lines[at];
+        let mut joined = first.clone();
+        for next in lines.iter().skip(at + 1).take(QUOTE_LINES - 1) {
+            if first.is_empty() || next.is_empty() {
+                break;
+            }
+            joined.push(' ');
+            joined.push_str(next);
+            if joined.find(quote).is_some_and(|pos| pos < first.len()) {
+                return Some(at + 1);
+            }
+        }
+        None
+    })
+}
+
+/// The 1-based line of the heading in `plan_text` that `plan` names, best
+/// first: one whose words start with `plan`'s, then one holding them in a
+/// row, then one holding them all, then the longest of two words or more
+/// that `plan`'s start with ("Milestone 3" for "Milestone 3, step 2").
+/// "Milestone 1" never names "Milestone 10": words match whole, and a `#`
+/// line in a fenced block is no heading.
+fn heading_line(plan_text: &str, plan: &str) -> Option<usize> {
+    let wanted = words_of(plan);
+    if wanted.is_empty() {
+        return None;
+    }
+    let mut fenced = false;
+    let headings: Vec<(usize, Vec<String>)> = (plan_text.lines().enumerate())
+        .filter(|(_, line)| {
+            let line = line.trim_start();
+            if line.starts_with("```") || line.starts_with("~~~") {
+                fenced = !fenced;
+            }
+            !fenced && line.starts_with('#')
+        })
+        .map(|(at, line)| (at + 1, words_of(line)))
+        .filter(|(_, words)| !words.is_empty())
+        .collect();
+    let first = |holds: &dyn Fn(&[String]) -> bool| {
+        (headings.iter()).find_map(|(at, words)| holds(words).then_some(*at))
+    };
+    first(&|words| words.starts_with(&wanted))
+        .or_else(|| first(&|words| words.windows(wanted.len()).any(|w| w == wanted)))
+        .or_else(|| first(&|words| wanted.iter().all(|w| words.contains(w))))
+        .or_else(|| {
+            (headings.iter())
+                .filter(|(_, words)| words.len() >= 2 && wanted.starts_with(words))
+                .max_by_key(|(at, words)| (words.len(), std::cmp::Reverse(*at)))
+                .map(|(at, _)| *at)
+        })
+}
+
 /// Where suggestion `s` goes in the plan reading `plan_text`: the line its
 /// `plan_quote` is on, else the heading its `plan` names, else nowhere.
+/// Pure, to run where the plan was read: not on the UI thread for a big one.
 pub fn place(s: &Suggestion, plan_text: &str) -> Placed {
     let quote = plan_line(&s.plan_quote);
-    if !quote.is_empty() {
-        let at = plan_text
-            .lines()
-            .position(|line| plan_line(line).contains(&quote));
-        if let Some(at) = at {
-            return Placed::Quote(at + 1);
+    if quote.chars().count() >= MIN_QUOTE {
+        let lines: Vec<String> = plan_text.lines().map(plan_line).collect();
+        if let Some(at) = quote_line(&lines, &quote) {
+            return Placed::Quote(at);
         }
     }
-    let wanted = plan_line(&s.plan);
-    if !wanted.is_empty() {
-        let at = plan_text.lines().position(|line| {
-            line.trim_start().starts_with('#') && {
-                let heading = plan_line(line);
-                !heading.is_empty() && (heading.contains(&wanted) || wanted.contains(&heading))
-            }
-        });
-        if let Some(at) = at {
-            return Placed::Heading(at + 1);
-        }
+    match heading_line(plan_text, &s.plan) {
+        Some(at) => Placed::Heading(at),
+        None => Placed::Nowhere,
     }
-    Placed::Nowhere
 }
 
 /// Place every suggestion of `review` in the plan reading `plan_text`.
@@ -892,26 +987,33 @@ pub fn notes(review: &PlanReview) -> String {
         .join("\n")
 }
 
-/// What the reviewer is told when asked again: the user's notes, and the
-/// suggestions they rejected with why, not to be raised again.
+/// What the reviewer is told when asked again: the user's notes, then the
+/// suggestions they rejected with why, not to be raised again. Empty when
+/// there is neither.
 pub fn back_notes(review: &PlanReview) -> String {
-    let rejected = (review.suggestions.iter())
-        .filter(|s| s.state == State::Rejected && s.source == Source::Reviewer)
-        .map(|s| {
-            let why = match s.reason.is_empty() {
-                true => String::new(),
-                false => format!(": rejected because {}", s.reason.replace('\n', " ")),
-            };
-            format!("- {}: {}{why}", s.id, s.title)
-        });
     let notes = notes(review);
-    (notes.lines().map(str::to_owned).chain(rejected))
-        .collect::<Vec<_>>()
-        .join("\n")
+    let rejected = listed(review, State::Rejected, false);
+    match (notes.is_empty(), rejected.is_empty()) {
+        (_, true) => notes,
+        (true, false) => format!("{REJECTED_HEAD}\n\n{rejected}"),
+        (false, false) => format!("{notes}\n\n{REJECTED_HEAD}\n\n{rejected}"),
+    }
 }
 
-/// The suggestions with state `state` as a list for an agent: id, title,
-/// what to change, and the user's note.
+/// Over the rejected suggestions in `back_notes`, as the reviewer's prompt
+/// says it.
+const REJECTED_HEAD: &str = "The user rejected these and said why. Do not raise them again, \
+     in these words or others:";
+
+/// `text` on one line, for a list item.
+fn one_line(text: &str) -> String {
+    text.replace('\n', " ")
+}
+
+/// The suggestions with state `state` as a list for an agent: id, title and
+/// where it applies; with `change`, where in the plan, what to change (the
+/// user's wording, said so, when they gave one) and the citations; why a
+/// rejected one was; and the user's note.
 fn listed(review: &PlanReview, state: State, change: bool) -> String {
     let mut out = String::new();
     for s in (review.suggestions.iter()).filter(|s| s.state == state) {
@@ -920,8 +1022,17 @@ fn listed(review: &PlanReview, state: State, change: bool) -> String {
             out.push_str(&format!(" ({})", s.plan));
         }
         out.push('\n');
-        if change && !s.change.is_empty() {
-            out.push_str(&format!("  Change: {}\n", s.change.replace('\n', " ")));
+        if change && !s.plan_quote.is_empty() {
+            let quote = one_line(&s.plan_quote);
+            out.push_str(&format!("  In the plan at: \u{201c}{quote}\u{201d}\n"));
+        }
+        let text = s.change_text();
+        if change && !text.is_empty() {
+            let whose = match s.my_change.is_some() || s.source == Source::You {
+                true => "Change (the user's words)",
+                false => "Change",
+            };
+            out.push_str(&format!("  {whose}: {}\n", one_line(text)));
         }
         if change {
             for e in &s.evidence {
@@ -933,8 +1044,11 @@ fn listed(review: &PlanReview, state: State, change: bool) -> String {
                 out.push_str(&format!("  Cited: {repo}{}:{}\n", e.file, e.line));
             }
         }
+        if s.state == State::Rejected && !s.reason.is_empty() {
+            out.push_str(&format!("  Rejected because: {}\n", one_line(&s.reason)));
+        }
         if !s.note.is_empty() {
-            out.push_str(&format!("  The user said: {}\n", s.note.replace('\n', " ")));
+            out.push_str(&format!("  The user said: {}\n", one_line(&s.note)));
         }
     }
     out.trim_end().to_owned()
@@ -1102,7 +1216,7 @@ mod tests {
         assert!(
             decide(&mut review, "r1-2", Decision::Accept)
                 .unwrap_err()
-                .contains("Answer the question")
+                .contains("Answer r1-2 first")
         );
         assert_eq!(review.open(), 2);
         set_note(&mut review, "r1-2", "The new one").unwrap();
@@ -1153,42 +1267,314 @@ mod tests {
         assert!(!back.contains("own_made") && !back.contains("placed"));
     }
 
+    fn at(plan: &str, quote: &str, heading: &str) -> Placed {
+        let s = Suggestion {
+            plan: heading.into(),
+            plan_quote: quote.into(),
+            ..Suggestion::default()
+        };
+        place(&s, plan)
+    }
+
     #[test]
     fn a_suggestion_is_placed_by_its_quote_then_its_heading() {
         let plan = "# Plan\n\n## Milestone 3: rollback\n- [ ] Write the **rows** back\n";
-        let mut s = Suggestion {
-            plan: "Milestone 3".into(),
-            plan_quote: "Write the rows   back".into(),
-            ..Suggestion::default()
-        };
-        assert_eq!(place(&s, plan), Placed::Quote(4));
-        s.plan_quote = "not there".into();
-        assert_eq!(place(&s, plan), Placed::Heading(3));
-        s.plan = "Milestone 9".into();
-        assert_eq!(place(&s, plan), Placed::Nowhere);
+        assert_eq!(
+            at(plan, "Write the rows   back", "Milestone 3"),
+            Placed::Quote(4)
+        );
+        assert_eq!(at(plan, "not there", "Milestone 3"), Placed::Heading(3));
+        assert_eq!(at(plan, "not there", "Milestone 9"), Placed::Nowhere);
+        assert_eq!(at(plan, "", ""), Placed::Nowhere);
+    }
+
+    #[test]
+    fn a_quote_reads_past_markdown_marks_spacing_and_wrapping() {
+        let plan = "# Plan\n\
+            \n\
+            ## Milestone 1\n\
+            1. Run `cargo   test` on _every_ crate\n\
+            > Keep the **old** rows\n\
+            The worker reads the queue and\n\
+            writes each row back.\n\
+            - [x] Done already\n";
+        // The reviewer quotes the line with its marks or without them.
+        assert_eq!(
+            at(plan, "Run cargo test on every crate", ""),
+            Placed::Quote(4)
+        );
+        assert_eq!(at(plan, "1. Run `cargo test`", ""), Placed::Quote(4));
+        assert_eq!(at(plan, "> Keep the **old** rows", ""), Placed::Quote(5));
+        assert_eq!(at(plan, "KEEP THE OLD ROWS", ""), Placed::Quote(5));
+        assert_eq!(at(plan, "- [x] Done already", ""), Placed::Quote(8));
+        // A sentence over a wrapped line is placed on its first line.
+        assert_eq!(
+            at(plan, "reads the queue and writes each row", ""),
+            Placed::Quote(6)
+        );
+        // A line that is the quote wins over one only holding it.
+        let plan = "- Rows are kept, and more\n- Rows are kept\n";
+        assert_eq!(at(plan, "Rows are kept", ""), Placed::Quote(2));
+        // A word or two could be anywhere: not believed, the heading is used.
+        let plan = "# Plan\n## Queue\nthe a\n";
+        assert_eq!(at(plan, "a", "Queue"), Placed::Heading(2));
+    }
+
+    #[test]
+    fn a_heading_is_named_by_whole_words_best_first() {
+        let plan = "# Plan\n\
+            ## Milestone 10: later\n\
+            ## Milestone 1: the start\n\
+            ## Data model (plan_review.rs)\n\
+            ## Keys\n\
+            ## Milestone 3\n";
+        // "Milestone 1" never names "Milestone 10".
+        assert_eq!(at(plan, "", "Milestone 1"), Placed::Heading(3));
+        assert_eq!(at(plan, "", "milestone 10"), Placed::Heading(2));
+        // Its words in a row, then all of them in any order.
+        assert_eq!(at(plan, "", "Data model"), Placed::Heading(4));
+        assert_eq!(
+            at(plan, "", "plan_review.rs data model"),
+            Placed::Heading(4)
+        );
+        // A place inside a heading's part is placed on the heading.
+        assert_eq!(at(plan, "", "Milestone 3, step 2"), Placed::Heading(6));
+        // One word of a heading is not enough to name it from a longer place.
+        assert_eq!(at(plan, "", "Keys of the page"), Placed::Nowhere);
+        assert_eq!(at(plan, "", "Plan review page"), Placed::Nowhere);
+        // Only headings count.
+        assert_eq!(at("Milestone 1 text\n", "", "Milestone 1"), Placed::Nowhere);
+        let fenced = "```sh\n# Milestone 1 setup\n```\n## Milestone 1\n";
+        assert_eq!(at(fenced, "", "Milestone 1"), Placed::Heading(4));
+    }
+
+    #[test]
+    fn placing_all_marks_each_and_a_rewrite_finds_its_place_again() {
+        let mut review = PlanReview::default();
+        import(&mut review, 1, raws(GOOD));
+        place_all(&mut review, "# Plan\n## Milestone 3\n## Milestone 1\n");
+        let placed: Vec<_> = review.suggestions.iter().map(|s| s.placed).collect();
+        assert_eq!(placed, [Some(Placed::Heading(2)), Some(Placed::Heading(3))]);
+        import(
+            &mut review,
+            2,
+            raws(
+                GOOD.replace(
+                    "\"severity\": \"high\"",
+                    "\"id\": \"r1-1\", \"severity\": \"high\"",
+                )
+                .as_str(),
+            ),
+        );
+        assert_eq!(review.suggestion("r1-1").unwrap().placed, None);
+        assert_eq!(
+            review.suggestion("r1-2").unwrap().placed,
+            Some(Placed::Heading(3))
+        );
+    }
+
+    #[test]
+    fn the_file_may_say_which_plan_line_and_its_cleaned_and_capped() {
+        let text = format!(
+            r#"{{"suggestions": [
+            {{"kind": "question", "plan": "M1", "title": "T", "why": "w",
+              "plan_quote": "  Write the rows\tback \u202e"}},
+            {{"kind": "question", "plan": "M1", "title": "T", "why": "w",
+              "plan_quote": "{}"}},
+            {{"kind": "question", "plan": "M1", "title": "T", "why": "w"}}]}}"#,
+            "x".repeat(400)
+        );
+        let all = raws(&text);
+        assert_eq!(all[0].plan_quote, "Write the rows back");
+        assert_eq!(all[1].plan_quote.chars().count(), MAX_QUOTE);
+        assert_eq!(all[2].plan_quote, "");
+        let mut review = PlanReview::default();
+        import(&mut review, 1, all);
+        assert_eq!(review.suggestions[0].plan_quote, "Write the rows back");
+        let saved = serde_json::to_string(&review.suggestions[2]).unwrap();
+        assert!(!saved.contains("plan_quote"), "{saved}");
     }
 
     #[test]
     fn editing_a_change_keeps_the_reviewers_and_accepts() {
         let mut review = PlanReview::default();
         import(&mut review, 1, raws(GOOD));
-        edit_change(&mut review, "r1-1", "Roll back twice").unwrap();
+        assert_eq!(
+            edit_change(&mut review, "r1-1", "Roll back twice").unwrap(),
+            "edited, accepted"
+        );
         let s = review.suggestion("r1-1").unwrap();
         assert_eq!(
             (s.change.as_str(), s.change_text()),
             ("Add a rollback", "Roll back twice")
         );
         assert_eq!(s.state, State::Accepted);
+        assert_eq!(edit_change(&mut review, "r1-1", "Again").unwrap(), "edited");
+        // Empty, or back to the reviewer's words, it is theirs again.
+        edit_change(&mut review, "r1-1", "  ").unwrap();
+        assert_eq!(review.suggestion("r1-1").unwrap().my_change, None);
+        edit_change(&mut review, "r1-1", "Mine").unwrap();
+        edit_change(&mut review, "r1-1", " Add a rollback ").unwrap();
+        assert_eq!(review.suggestion("r1-1").unwrap().my_change, None);
+        assert_eq!(review.suggestion("r1-1").unwrap().state, State::Accepted);
+        // A rejected one is reopened first.
+        decide(&mut review, "r1-1", Decision::Reject("No".into())).unwrap();
+        assert!(
+            edit_change(&mut review, "r1-1", "x")
+                .unwrap_err()
+                .contains("reopen it first")
+        );
+        assert!(edit_change(&mut review, "gone", "x").is_err());
         // A question still to answer isn't accepted by it.
         edit_change(&mut review, "r1-2", "Use the new one").unwrap();
-        assert_eq!(review.suggestion("r1-2").unwrap().state, State::Open);
+        let q = review.suggestion("r1-2").unwrap();
+        assert_eq!((q.state, q.change_text()), (State::Open, "Use the new one"));
+        assert_eq!(review.waiting_answer(), 1);
+        decide(&mut review, "r1-1", Decision::Clear).unwrap();
         assert_eq!(
             accept_all(&mut review),
-            0,
+            1,
             "the question waits for its answer"
         );
+        assert_eq!(review.suggestion("r1-1").unwrap().state, State::Accepted);
+        assert_eq!(review.suggestion("r1-2").unwrap().state, State::Open);
         set_note(&mut review, "r1-2", "The new one").unwrap();
+        assert_eq!(review.waiting_answer(), 0);
         assert_eq!(accept_all(&mut review), 1);
+        assert_eq!(accept_all(&mut review), 0);
+    }
+
+    #[test]
+    fn a_rewrite_keeps_what_the_user_said_and_decided() {
+        let mut review = PlanReview::default();
+        import(&mut review, 1, raws(GOOD));
+        edit_change(&mut review, "r1-1", "Mine").unwrap();
+        set_note(&mut review, "r1-1", "Keep it").unwrap();
+        decide(&mut review, "r1-2", Decision::Reject("One queue".into())).unwrap();
+        let again = r#"{"suggestions": [
+            {"id": "r1-1", "kind": "gap", "plan": "M3", "title": "T", "why": "w",
+             "change": "The reviewer's new words",
+             "evidence": [{"file": "a", "line": 1, "quote": "q"}]},
+            {"id": "r1-2", "kind": "question", "plan": "M1", "title": "Q", "why": "w"}]}"#;
+        import(&mut review, 2, raws(again));
+        let s = review.suggestion("r1-1").unwrap();
+        assert_eq!(s.change, "The reviewer's new words");
+        assert_eq!(s.my_change.as_deref(), Some("Mine"));
+        assert_eq!((s.state, s.note.as_str()), (State::Accepted, "Keep it"));
+        let q = review.suggestion("r1-2").unwrap();
+        assert_eq!((q.state, q.reason.as_str()), (State::Rejected, "One queue"));
+        assert_eq!(q.run, 2);
+    }
+
+    #[test]
+    fn rejecting_needs_a_reason_and_deciding_again_clears_it() {
+        let mut review = PlanReview::default();
+        import(&mut review, 1, raws(GOOD));
+        assert_eq!(
+            decide(&mut review, "r1-1", Decision::Reject("  ".into())).unwrap_err(),
+            "Say why you reject r1-1"
+        );
+        assert_eq!(review.open(), 2);
+        decide(
+            &mut review,
+            "r1-1",
+            Decision::Reject(" Not\nneeded ".into()),
+        )
+        .unwrap();
+        let s = review.suggestion("r1-1").unwrap();
+        assert_eq!(
+            (s.standing(), s.reason.as_str()),
+            (Standing::Dismissed, "Not\nneeded")
+        );
+        // The comment stays open on a rejected one: saying why is part of it.
+        set_note(&mut review, "r1-1", "See the brief").unwrap();
+        decide(&mut review, "r1-1", Decision::Accept).unwrap();
+        let s = review.suggestion("r1-1").unwrap();
+        assert_eq!((s.standing(), s.reason.as_str()), (Standing::Fix, ""));
+        assert_eq!(s.note, "See the brief");
+        decide(&mut review, "r1-1", Decision::Reject("No".into())).unwrap();
+        decide(&mut review, "r1-1", Decision::Clear).unwrap();
+        assert_eq!(review.suggestion("r1-1").unwrap().reason, "");
+        assert_eq!(
+            decide(&mut review, "r1-2", Decision::Accept).unwrap_err(),
+            "Answer r1-2 first: it is a question"
+        );
+        assert_eq!(set_note(&mut review, "r1-2", "x").unwrap(), "commented on");
+        assert_eq!(
+            set_note(&mut review, "r1-2", " ").unwrap(),
+            "comment deleted"
+        );
+        assert!(set_note(&mut review, "gone", "x").is_err());
+    }
+
+    #[test]
+    fn your_own_are_edited_restored_where_they_were_and_listed_first() {
+        let mut review = PlanReview::default();
+        import(&mut review, 1, raws(GOOD));
+        let first = add_own(&mut review, "First\nDo one").unwrap();
+        let second = add_own(&mut review, "Second").unwrap();
+        assert_eq!((first.as_str(), second.as_str()), ("u1", "u2"));
+        assert_eq!(review.own_made, 2);
+        edit_own(&mut review, "u2", " Second, reworded \n Do two \n").unwrap();
+        let s = review.suggestion("u2").unwrap();
+        assert_eq!(
+            (s.title.as_str(), s.change.as_str()),
+            ("Second, reworded", "Do two")
+        );
+        assert!(edit_own(&mut review, "u2", "\n").is_err());
+        assert!(
+            edit_own(&mut review, "r1-1", "x")
+                .unwrap_err()
+                .contains("of yours")
+        );
+        assert!(delete_own(&mut review, "r1-1").is_err());
+        // The reviewer's and the user's own, as the page lists them.
+        let order =
+            |r: &PlanReview| -> Vec<String> { r.in_order().iter().map(|s| s.id.clone()).collect() };
+        assert_eq!(order(&review), ["u1", "u2", "r1-1", "r1-2"]);
+        // Taken out and put back, it is where it was.
+        let (at, taken) = delete_own(&mut review, "u1").unwrap();
+        assert_eq!(at, 2);
+        assert!(restore(&mut review, at, taken.clone()));
+        assert_eq!(review.suggestions[2].id, "u1");
+        assert!(!restore(&mut review, at, taken), "not twice");
+        // Past the end, it goes last.
+        let (_, taken) = delete_own(&mut review, "u2").unwrap();
+        assert!(restore(&mut review, 99, taken));
+        assert_eq!(review.suggestions.last().unwrap().id, "u2");
+        // Ids are never given twice, even with every one of them deleted.
+        delete_own(&mut review, "u1").unwrap();
+        delete_own(&mut review, "u2").unwrap();
+        assert_eq!(add_own(&mut review, "Third").unwrap(), "u3");
+        // An old record with no count still doesn't give one again.
+        let mut old = PlanReview::default();
+        add_own(&mut old, "A").unwrap();
+        old.own_made = 0;
+        assert_eq!(add_own(&mut old, "B").unwrap(), "u2");
+    }
+
+    #[test]
+    fn the_order_is_stable_and_a_decision_doesnt_move_one() {
+        let mut review = PlanReview::default();
+        let text = r#"{"suggestions": [
+            {"severity": "low", "kind": "question", "plan": "p", "title": "a", "why": "w"},
+            {"severity": "high", "kind": "question", "plan": "p", "title": "b", "why": "w"},
+            {"severity": "low", "kind": "question", "plan": "p", "title": "c", "why": "w"},
+            {"severity": "high", "kind": "question", "plan": "p", "title": "d", "why": "w"}]}"#;
+        import(&mut review, 1, raws(text));
+        let titles =
+            |r: &PlanReview| -> String { r.in_order().iter().map(|s| s.title.as_str()).collect() };
+        assert_eq!(titles(&review), "bdac");
+        assert_eq!(review.first_open().unwrap().title, "b");
+        decide(&mut review, "r1-2", Decision::Reject("No".into())).unwrap();
+        set_note(&mut review, "r1-4", "Yes").unwrap();
+        decide(&mut review, "r1-4", Decision::Accept).unwrap();
+        assert_eq!(titles(&review), "bdac");
+        assert_eq!(review.first_open().unwrap().title, "a");
+        for id in ["r1-1", "r1-3"] {
+            decide(&mut review, id, Decision::Reject("No".into())).unwrap();
+        }
+        assert_eq!(review.first_open(), None);
     }
 
     struct Temp(PathBuf);
@@ -1320,8 +1706,14 @@ mod tests {
         .unwrap();
         assert_eq!(
             back_notes(&review),
-            "- r1-1: No rollback: Which rows?\n- r1-2: Which queue?: rejected because Only one queue"
+            "- r1-1: No rollback: Which rows?\n\n\
+             The user rejected these and said why. Do not raise them again, in these words or others:\n\n\
+             - r1-2: Which queue? (Milestone 1)\n  Rejected because: Only one queue"
         );
+        set_note(&mut review, "r1-1", "").unwrap();
+        assert!(back_notes(&review).starts_with("The user rejected these"));
+        decide(&mut review, "r1-2", Decision::Clear).unwrap();
+        assert_eq!(back_notes(&review), "");
     }
 
     #[test]
@@ -1332,21 +1724,34 @@ mod tests {
         decide(&mut review, "r1-1", Decision::Reject("No".into())).unwrap();
         let [(_, accepted), (_, rejected), (_, open), (_, ids)] = prompt_vars(Some(&review));
         assert_eq!(accepted, "");
-        assert_eq!(rejected, "- r1-1: No rollback (Milestone 3)");
+        assert_eq!(
+            rejected,
+            "- r1-1: No rollback (Milestone 3)\n  Rejected because: No"
+        );
         assert_eq!(open, "- r1-2: Which queue?");
         assert_eq!(ids, "");
         decide(&mut review, "r1-1", Decision::Accept).unwrap();
         decide(&mut review, "r1-2", Decision::Accept).unwrap();
-        add_own(&mut review, "Add a metric").unwrap();
+        add_own(&mut review, "Add a metric\nCount the runs").unwrap();
+        review.suggestions[0].plan_quote = "Write the rows back".into();
         let [(_, accepted), (_, rejected), (_, open), (_, ids)] = prompt_vars(Some(&review));
         assert_eq!(
             accepted,
-            "- r1-1: No rollback (Milestone 3)\n  Change: Add a rollback\n  Cited: api: src/a.rs:2\n\
+            "- r1-1: No rollback (Milestone 3)\n  In the plan at: \u{201c}Write the rows back\u{201d}\n\
+             \x20 Change: Add a rollback\n  Cited: api: src/a.rs:2\n\
              - r1-2: Which queue? (Milestone 1)\n  The user said: The new one\n\
-             - u1: Add a metric"
+             - u1: Add a metric\n  Change (the user's words): Count the runs"
         );
         assert_eq!((rejected.as_str(), open.as_str()), ("", ""));
         assert_eq!(ids, "r1-1, r1-2, u1");
+        // The user's wording goes in place of the reviewer's, said so.
+        edit_change(&mut review, "r1-1", "Roll back\nin one go").unwrap();
+        let accepted = prompt_vars(Some(&review))[0].1.clone();
+        assert!(
+            accepted.contains("  Change (the user's words): Roll back in one go\n"),
+            "{accepted}"
+        );
+        assert!(!accepted.contains("Add a rollback"), "{accepted}");
         assert_eq!(prompt_vars(None)[0].1, "");
     }
 

@@ -19,7 +19,8 @@ any code is written. The user decides what to do with what you find.
    answer: do not invent suggestions to have some.
 {{#if plan_review.rejected}}
 
-The user rejected these. Do not raise them again:
+The user rejected these and said why. Do not raise them again, in these words
+or others:
 
 {{plan_review.rejected}}
 {{/if}}
@@ -53,6 +54,7 @@ The user has these notes on your suggestions. Take each one into account:
 
    {"suggestions": [
      {"id": "r1-2", "severity": "high", "kind": "gap", "plan": "Milestone 3",
+      "plan_quote": "the exact text of the plan line it applies to",
       "title": "…", "why": "…", "change": "…",
       "evidence": [{"repo": "api", "file": "src/a.rs", "line": 12,
                     "quote": "the exact text on that line"}]}
@@ -61,6 +63,9 @@ The user has these notes on your suggestions. Take each one into account:
    - `severity`: `high`, `medium` or `low`.
    - `kind`: `gap`, `risk`, `edge-case`, `simplify` or `question`.
    - `plan`: where in the plan it applies, such as a milestone's name.
+   - `plan_quote`: the exact text of the one plan line it applies to, copied
+     from the plan, so gerdr can show it there. Leave it out when it applies
+     to the plan as a whole.
    - `title`: one short line.
    - `why`: what goes wrong, as a concrete case: given what, what happens.
    - `change`: what to change in the plan, in a sentence or two. A question
