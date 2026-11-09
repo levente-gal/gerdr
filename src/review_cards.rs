@@ -89,6 +89,7 @@ impl<'a> Item<'a> {
         }
     }
 
+    #[allow(dead_code)] // WAVE1-STUB(B): features.rs goes by `item` now
     pub(crate) fn finding(self) -> Option<&'a ReviewFinding> {
         match self {
             Self::Finding(f) => Some(f),
@@ -156,6 +157,11 @@ pub(crate) fn items(feature: &Feature, stage: Stage) -> Vec<Item<'_>> {
         Stage::AiReview => (feature.review.as_ref())
             .map(|review| review.in_order().into_iter().map(Item::Finding).collect())
             .unwrap_or_default(),
+        // WAVE1-STUB(B): Plan review's suggestions as cards, once read.
+        Stage::PlanReview => (feature.plan_review.as_ref())
+            .filter(|r| r.stamp.is_some())
+            .map(|r| r.in_order().into_iter().map(Item::Suggestion).collect())
+            .unwrap_or_default(),
         _ => Vec::new(),
     }
 }
@@ -176,6 +182,7 @@ impl<'a> ReviewCard<'a> {
         }
     }
 
+    #[allow(dead_code)] // WAVE1-STUB(B): features.rs goes by `item` now
     pub(crate) fn finding(self) -> Option<&'a ReviewFinding> {
         self.item().and_then(Item::finding)
     }
@@ -241,6 +248,15 @@ pub(crate) fn why_not_decide(feature: &Feature, stage: Stage) -> Option<&'static
     if can_decide(feature, stage) {
         return None;
     }
+    // WAVE1-STUB(B): Plan review's words of why not.
+    if stage == Stage::PlanReview {
+        let writing = (feature.plan_review.as_ref()).is_some_and(|r| r.writing);
+        return Some(match stage_mark(feature, stage) {
+            StageMark::Done => "Plan review is done: reopen it to change its suggestions",
+            _ if writing => "The final plan is being written: change the decisions first",
+            _ => "The review hasn't finished: decide once it's read",
+        });
+    }
     Some(match stage_mark(feature, stage) {
         StageMark::Later => "The code changed since this review: the next one checks it",
         StageMark::Current => "A new review hasn't finished: decide once it's read",
@@ -251,6 +267,12 @@ pub(crate) fn why_not_decide(feature: &Feature, stage: Stage) -> Option<&'static
 /// Whether the items on `stage`'s page of `feature` can be decided, and a
 /// comment of the user's added: AI review, current, its latest run read.
 pub(crate) fn can_decide(feature: &Feature, stage: Stage) -> bool {
+    // WAVE1-STUB(B): Plan review's suggestions, while read and not written.
+    if stage == Stage::PlanReview {
+        return feature.status == Status::Open
+            && feature.current() == Some(stage)
+            && crate::feature_plan_review::deciding(feature).is_some();
+    }
     stage == Stage::AiReview
         && feature.status == Status::Open
         && feature.current() == Some(stage)
@@ -261,6 +283,14 @@ pub(crate) fn can_decide(feature: &Feature, stage: Stage) -> bool {
 /// Whether `stage`'s page of `feature` can mark every undecided finding to
 /// fix at once.
 pub(crate) fn offers_fix_all(feature: &Feature, stage: Stage) -> bool {
+    // WAVE1-STUB(B): Accept all open, while one open can be accepted.
+    if stage == Stage::PlanReview {
+        return can_decide(feature, stage)
+            && (feature.plan_review.as_ref()).is_some_and(|r| {
+                (r.suggestions.iter())
+                    .any(|s| s.state == crate::feature::plan_review::State::Open && !s.unanswered())
+            });
+    }
     can_decide(feature, stage)
         && feature.fix_round.is_none()
         && (feature.review.as_ref()).is_some_and(|r| r.count(FindingState::Open) > 0)
@@ -492,6 +522,26 @@ fn suggestion_card(s: &Suggestion) -> FindingCard {
 /// How the items on `stage`'s page of `feature` stand, in a few words: "4 to
 /// decide · 1 to fix".
 pub(crate) fn items_count(feature: &Feature, stage: Stage) -> String {
+    // WAVE1-STUB(B): how Plan review's suggestions stand.
+    if stage == Stage::PlanReview {
+        use crate::feature::plan_review::State;
+        let Some(review) = feature.plan_review.as_ref() else {
+            return String::new();
+        };
+        let said = |state, what: &str| match review.count(state) {
+            0 => None,
+            n => Some(format!("{n} {what}")),
+        };
+        return [
+            said(State::Open, "to decide"),
+            said(State::Accepted, "accepted"),
+            said(State::Rejected, "rejected"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" \u{b7} ");
+    }
     if stage != Stage::AiReview {
         return String::new();
     }
