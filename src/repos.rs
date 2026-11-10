@@ -2089,6 +2089,26 @@ impl Panel {
         }
     }
 
+    /// Select the line of the repository at `root`, in view and with the
+    /// keys on the tree: the clean ones' heading unfolded when it is under
+    /// it, the diff on it even when it was selected already.
+    pub fn select_repo(&mut self, root: &Path, ctx: &Ctx) {
+        let items = ctx.items;
+        let Some(k) = items.iter().position(|item| item.root == root) else {
+            return;
+        };
+        if self.is_clean(&items[k]) {
+            self.clean_folded = false;
+        }
+        let rows = self.rows(items);
+        let Some(r) = rows.iter().position(|row| *row == Row::Repo(k)) else {
+            return;
+        };
+        self.focus = Focus::Tree;
+        self.selected = None;
+        self.select(&rows, r, items, ctx.page.0.max(1));
+    }
+
     /// Select line `k` of `rows`, scrolling it into a view of `page`.
     fn select(&mut self, rows: &[Row], k: usize, items: &[RepoItem], page: usize) {
         let Some(&row) = rows.get(k) else { return };
@@ -5890,6 +5910,25 @@ mod tests {
                 Tone::Normal
             )
         );
+    }
+
+    #[test]
+    fn a_repository_asked_for_is_selected_even_under_the_clean_heading() {
+        let items = items();
+        let ctx = ctx(&items, None);
+        let mut panel = Panel::new(&items);
+        panel.clean_folded = true;
+        panel.focus = Focus::Detail;
+        // herdr, clean, sits under the folded heading: it unfolds.
+        panel.select_repo(&root("herdr"), &ctx);
+        assert_eq!(panel.selected, Some(Selected::Repo(root("herdr"))));
+        assert!(!panel.clean_folded);
+        assert_eq!(panel.focus, Focus::Tree);
+        // One with changes selects as it is; one not listed changes nothing.
+        panel.select_repo(&root("zed"), &ctx);
+        assert_eq!(panel.selected, Some(Selected::Repo(root("zed"))));
+        panel.select_repo(&root("nowhere"), &ctx);
+        assert_eq!(panel.selected, Some(Selected::Repo(root("zed"))));
     }
 
     #[test]

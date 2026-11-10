@@ -646,6 +646,42 @@ impl Gerdr {
         self.refresh_pointer_focus();
     }
 
+    /// Open the repositories panel on the repository at `root`, selected.
+    pub fn open_repos_at(&mut self, root: &Path) {
+        self.open_repos();
+        let page = self.repos_page();
+        let (density, tree_share, cols, sheet_rows) = self.repos_env();
+        let Repos {
+            panel,
+            batch,
+            items,
+            same_branches,
+            top_branches,
+            fetches,
+            background,
+            ..
+        } = &mut self.repos;
+        let Some(panel) = panel.as_mut() else {
+            return;
+        };
+        let ctx = Ctx {
+            items,
+            batch: batch.as_ref(),
+            page,
+            now: SystemTime::now(),
+            fetching: *fetches > 0,
+            same: same_branches,
+            top: top_branches,
+            density,
+            tree_share,
+            cols,
+            sheet_rows,
+            background,
+        };
+        panel.select_repo(root, &ctx);
+        self.repos_detail();
+    }
+
     /// The agent the review goes to, by its pane and what it is called:
     /// one in the workspace of a repository commented on (working in that
     /// repository first), else in the workspace shown.
