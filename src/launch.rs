@@ -663,7 +663,7 @@ impl Gerdr {
         let (Some(key), Some(home)) = (program_name(command), home_dir()) else {
             return;
         };
-        if !profile.starts_with(&self.instance_dir) {
+        if !profile.starts_with(home.join(INSTANCES)) {
             return;
         }
         if VS_CODES.contains(&key.as_str()) {
@@ -934,7 +934,42 @@ const ZED_SHARED: &[&str] = &["config", "extensions"];
 /// logins, extensions) comes from gerdr's shared profile of each, see
 /// `zed_data_dir`, `ready_vs_code_profile` and `seed_browser_profile`.
 pub fn instance_dir(home: &Path, instance: &str) -> PathBuf {
-    home.join(".local/share/gerdr/instances").join(instance)
+    home.join(INSTANCES).join(instance)
+}
+
+const INSTANCES: &str = ".local/share/gerdr/instances";
+/// The folder in a project's instance folder of its sandboxes' browsers.
+const SANDBOXES: &str = "sandboxes";
+
+/// Where the browser for the pages of feature `slug`'s sandbox keeps its
+/// profiles: apart from the project's, as its logins are on the sandbox's
+/// app, and outside the sandbox's folder, so Reset data and Remove sandbox
+/// keep them. It starts as a copy of the project's (see
+/// `seed_browser_profile`) and goes with the feature (see
+/// `remove_sandbox_profiles`).
+pub fn sandbox_profiles(home: &Path, project: &str, slug: &str) -> PathBuf {
+    instance_dir(home, project).join(SANDBOXES).join(slug)
+}
+
+/// Remove the browser profiles of feature `slug`'s sandbox, unless a
+/// browser still runs on one.
+pub fn remove_sandbox_profiles(project: &str, slug: &str) {
+    let Some(home) = home_dir() else {
+        return;
+    };
+    let dir = sandbox_profiles(&home, project, slug);
+    let mut entries = std::fs::read_dir(&dir).into_iter().flatten().flatten();
+    if entries.any(|e| crate::profile_import::running(&e.path())) {
+        // shortcut: left in place while its browser runs, until the user removes it.
+        let shown = dir.display();
+        return tracing::warn!("{shown}: a browser still runs on it, left in place");
+    }
+    match std::fs::remove_dir_all(&dir) {
+        Err(err) if err.kind() != std::io::ErrorKind::NotFound => {
+            tracing::warn!("removing {}: {err}", dir.display());
+        }
+        _ => {}
+    }
 }
 
 /// The data dir of gerdr's Zed in instance folder `instance` (see
@@ -1129,14 +1164,37 @@ fn leave_out_web_apps(profile: &Path) {
 /// databases while it runs, so profiles can't share them: from then on
 /// each is its own. Copied beside it first, so a copy cut short isn't
 /// taken for one.
+///
+/// A sandbox's profile (see `sandbox_profiles`) starts as a copy of its
+/// project's instead, with the project's logins, and without the browser's
+/// first-run pages.
 fn seed_browser_profile(home: &Path, key: &str, dir: &Path) {
-    let shared = profile_dir(home, key);
-    if dir.exists() || !shared.is_dir() {
+    if dir.exists() {
         return;
     }
-    if let Err(err) = copy_browser_profile(&shared, dir) {
-        tracing::warn!("copying {} to {}: {err}", shared.display(), dir.display());
+    let from = match project_profile_of_sandbox(dir, key) {
+        Some(project) => {
+            seed_browser_profile(home, key, &project);
+            project
+        }
+        None => profile_dir(home, key),
+    };
+    if !from.is_dir() {
+        return;
     }
+    if let Err(err) = copy_browser_profile(&from, dir) {
+        tracing::warn!("copying {} to {}: {err}", from.display(), dir.display());
+    }
+}
+
+/// For profile `dir` of browser `key` of a sandbox, at
+/// `<instance>/sandboxes/<slug>/<key>`, the project's: `<instance>/<key>`.
+fn project_profile_of_sandbox(dir: &Path, key: &str) -> Option<PathBuf> {
+    let sandboxes = dir.ancestors().nth(2)?;
+    if sandboxes.file_name()? != SANDBOXES {
+        return None;
+    }
+    Some(sandboxes.parent()?.join(key))
 }
 
 /// See `seed_browser_profile`.
@@ -1606,9 +1664,10 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        alacritty_command, cmdline_args, copy_browser_profile, ghostty_command, lineage,
-        link_vs_code_shared, link_zed_shared, log_path, opens_nothing_in_zed, own_instance,
-        user_data_dir, vs_code_of, web_app, with_profile_of,
+        alacritty_command, cmdline_args, copy_browser_profile, ghostty_command, instance_dir,
+        lineage, link_vs_code_shared, link_zed_shared, log_path, opens_nothing_in_zed,
+        own_instance, profile_dir, project_profile_of_sandbox, sandbox_profiles,
+        seed_browser_profile, user_data_dir, vs_code_of, web_app, with_profile_of,
     };
     use crate::home_dir;
 
@@ -1939,6 +1998,32 @@ mod tests {
         );
         assert!(!root.join("aft.new").exists());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_sandboxs_browser_starts_from_its_projects_and_that_from_gerdrs() {
+        let home =
+            std::env::temp_dir().join(format!("gerdr-sandbox-browser-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let shared = profile_dir(&home, "chromium");
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::write(shared.join("EULA Accepted"), "").unwrap();
+        let sandbox = sandbox_profiles(&home, "p", "f").join("chromium");
+        let project = instance_dir(&home, "p").join("chromium");
+        assert_eq!(
+            project_profile_of_sandbox(&sandbox, "chromium"),
+            Some(project.clone())
+        );
+        assert_eq!(project_profile_of_sandbox(&project, "chromium"), None);
+        seed_browser_profile(&home, "chromium", &sandbox);
+        assert!(project.join("EULA Accepted").exists());
+        assert!(sandbox.join("EULA Accepted").exists());
+        // The project's own goes on, and a sandbox's then starts from it.
+        std::fs::write(project.join("Login Data"), "app").unwrap();
+        let other = sandbox_profiles(&home, "p", "g").join("chromium");
+        seed_browser_profile(&home, "chromium", &other);
+        assert!(other.join("Login Data").exists());
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     /// The paths under `dir`, relative to it.

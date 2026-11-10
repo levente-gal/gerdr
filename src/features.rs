@@ -10411,6 +10411,7 @@ impl Gerdr {
         if feature.sandbox.is_some() {
             self.finish_stop(project, slug, crate::feature_sandbox::StopFor::Remove);
         }
+        crate::launch::remove_sandbox_profiles(project, slug);
         if plan.remove_worktrees {
             self.check_removing_after_ship(project, slug);
             return None;
@@ -10717,6 +10718,7 @@ impl Gerdr {
         if abandon {
             feature.status = Status::Abandoned;
             feature.log(now, "abandoned");
+            crate::launch::remove_sandbox_profiles(project, slug);
         } else {
             feature.log(now, "worktrees removed");
         }

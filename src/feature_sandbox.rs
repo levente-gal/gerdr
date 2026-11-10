@@ -155,7 +155,8 @@ pub fn lines_of(
                 let command = command.trim();
                 let words = command.trim_start_matches('#').trim();
                 // Listed under both names, a command runs once.
-                if words.is_empty() || out.iter().any(|l: &SandboxLine| l.dir == dir && l.words == words) {
+                let twice = out.iter().any(|l: &SandboxLine| l.dir == dir && l.words == words);
+                if words.is_empty() || twice {
                     continue;
                 }
                 let picked = picks.and_then(|p| p.get(words)).copied();
@@ -289,7 +290,8 @@ impl Gerdr {
                         .is_some_and(|run| !run.on_another_machine() && run.alive())
             })?;
         let holder = feature.sandbox.as_ref()?.holder.as_ref()?.pid;
-        let profile = sandbox_dir(&feature.project, &feature.slug).join("browser");
+        let home = crate::home_dir()?;
+        let profile = crate::launch::sandbox_profiles(&home, &feature.project, &feature.slug);
         Some((holder, profile))
     }
 
