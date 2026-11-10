@@ -348,6 +348,12 @@ pub(crate) struct Busy {
 
 /// What the work off the thread came to.
 pub(crate) enum Done {
+    /// Looking for the open project's repositories on machine `id` ended.
+    SameRepos {
+        id: String,
+        project: String,
+        result: Result<crate::machine_repos::Paired, String>,
+    },
     /// Asking the machine a feature came from to take it back ended.
     HandBack {
         project: String,
@@ -6348,6 +6354,11 @@ impl Gerdr {
                 slug,
                 result,
             } => self.handed_back(&project, &slug, result),
+            Done::SameRepos {
+                id,
+                project,
+                result,
+            } => self.same_repos_found(&id, &project, result),
             Done::SandboxAsked {
                 project,
                 slug,
