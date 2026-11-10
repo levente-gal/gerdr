@@ -691,13 +691,14 @@ fn trouble(what: &str, out: &std::process::Output) -> Trouble {
 /// What of a feature's folder isn't its files, and stays on each machine: its
 /// record, one that moved or lost and what was kept beside that, and what its
 /// gerdrs say to each other.
-const RECORDS: [&str; 10] = [
+const RECORDS: [&str; 11] = [
     store::FILE,
     "feature.json.*",
     "*.aside-*",
     super::lease::REQUEST,
     super::lease::ANSWER,
     super::lease::HANDED_TO,
+    super::lease::TOLD,
     super::lease::SANDBOX_ASK,
     super::lease::SANDBOX_ANSWER,
     super::lease::SANDBOX_TOLD,

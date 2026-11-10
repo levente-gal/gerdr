@@ -1010,6 +1010,12 @@ impl Gerdr {
         clear_leftovers();
         self.set_saved_machines(saved);
         self.load_viewed();
+        let projects: Vec<String> = (self.projects.projects.iter())
+            .map(|p| p.id.clone())
+            .collect();
+        for project in projects {
+            self.show_left(&project);
+        }
     }
 
     /// The settings say these machines: start what is new or changed, and

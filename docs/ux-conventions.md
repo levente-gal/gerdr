@@ -171,7 +171,10 @@ press and drag pick whole rows and a double click opens the line in Zed.
   writer's own tabs stays there, so while it works the press says to wait; at rest,
   its tab stays there, and its chat goes back on that machine. A sandbox running
   there keeps the feature there too; one on a worker goes on, and comes along. The old writer shows the feature from the new
-  one if connected to it, and otherwise says so.
+  one if connected to it. With the new one saved but out of reach, it shows the
+  feature as it left, written there, until that machine is back and tells of it;
+  with that one not saved, it says so. A move made while gerdr was closed is told
+  once, at the next start, the same way.
 - A gerdr open on the writer has to agree. When it doesn't answer, or the machine
   can't be reached, a dialog asks, as what happens there from then on is kept aside
   (a toast, the "!" badge and the file named there), its commits staying on its

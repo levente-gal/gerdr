@@ -12,6 +12,9 @@
 //!   record goes back (`RESTORE_AFTER`): a feature is never left with no writer.
 //! - `HANDED_TO` stays, saying where it went: a third gerdr looking there tells a
 //!   feature that moved from one that is over.
+//! - `LEFT` is the record as it left, kept by the old writer: with the new one out
+//!   of reach, the feature shows from it, written there, until that machine tells
+//!   of it (`machine_lease::show_left`). `TOLD` says the move was told of here.
 //!
 //! With the writer out of reach a feature can be taken from the copy kept here. It
 //! may have gone on there, so once both can be seen the higher epoch wins
@@ -46,6 +49,12 @@ pub const ANSWER: &str = ".take-answer.json";
 pub const HANDED: &str = "feature.json.handed";
 /// In a feature's folder there: the machine it moved to.
 pub const HANDED_TO: &str = ".handed-to";
+/// In a feature's folder there: the record as it left, while the machine it went
+/// to hasn't told of it yet.
+pub const LEFT: &str = "feature.json.left";
+/// In a feature's folder there: the move `HANDED_TO` says was told of, as that
+/// file was then.
+pub const TOLD: &str = ".handed-told";
 /// What starts the name of a record that lost, kept beside the others. What
 /// was kept beside it (`SIDES`) goes aside with it, named by `aside_name`:
 /// the winner's, coming later, has the names to itself.
@@ -57,6 +66,56 @@ pub const SIDES: [&str; 2] = [store::HISTORY, store::ROUNDS];
 pub fn aside_name(file: &str, at: u64) -> String {
     format!("{file}.aside-{at}")
 }
+/// The record kept in folder `dir` of a feature that left this machine, and the
+/// machine it went to: there is none in its place, and that machine is named.
+pub fn left_here(dir: &Path) -> Option<(Vec<u8>, String)> {
+    if dir.join(store::FILE).exists() {
+        return None;
+    }
+    let to = std::fs::read_to_string(dir.join(HANDED_TO)).ok()?;
+    let to = to.trim();
+    if to.is_empty() {
+        return None;
+    }
+    match std::fs::read(dir.join(LEFT)) {
+        Ok(raw) => Some((raw, to.to_owned())),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        Err(err) => {
+            tracing::warn!("reading {}: {err}", dir.join(LEFT).display());
+            None
+        }
+    }
+}
+
+/// Whether the move `HANDED_TO` says in folder `dir` was told of here already.
+pub fn told(dir: &Path) -> bool {
+    let read = |file| std::fs::read_to_string(dir.join(file)).ok();
+    let at = |file| std::fs::metadata(dir.join(file)).and_then(|m| m.modified()).ok();
+    read(TOLD).is_some_and(|said| Some(said) == read(HANDED_TO)) && at(TOLD) >= at(HANDED_TO)
+}
+
+/// Say in folder `dir` that the move `HANDED_TO` says was told of, if it says one.
+pub fn mark_told(dir: &Path) {
+    let Ok(to) = std::fs::read_to_string(dir.join(HANDED_TO)) else {
+        return;
+    };
+    if let Err(err) = crate::projects::write_atomic(&dir.join(TOLD), to.as_bytes()) {
+        tracing::warn!("writing {}: {err}", dir.join(TOLD).display());
+    }
+}
+
+/// The record kept in folder `dir` as it left is of no more use: the machine it
+/// went to told of it, or it came back.
+pub fn forget_left(dir: &Path) {
+    for file in [LEFT, TOLD] {
+        if let Err(err) = std::fs::remove_file(dir.join(file))
+            && err.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!("removing {}: {err}", dir.join(file).display());
+        }
+    }
+}
+
 /// In a feature's folder there: what another machine asks of its sandbox.
 pub const SANDBOX_ASK: &str = ".sandbox-ask.json";
 /// In a feature's folder there: why a gerdr open there didn't do what was asked.
@@ -440,6 +499,7 @@ pub fn yield_script(dir: &str, to: &str) -> String {
         r#"cd {} || exit 3
 [ -e {file} ] || {{ echo GONE; exit 0; }}
 printf '%s' {} > {HANDED_TO}
+cp {file} {LEFT}.tmp && mv {LEFT}.tmp {LEFT}
 mv {file} {HANDED} && touch {HANDED} && echo YIELDED
 "#,
         shell_quote(dir),
@@ -453,7 +513,7 @@ mv {file} {HANDED} && touch {HANDED} && echo YIELDED
 pub fn undo_script(dir: &str) -> String {
     format!(
         r#"cd {} || exit 0
-if [ -e {HANDED} ] && [ ! -e {file} ]; then mv {HANDED} {file}; rm -f {HANDED_TO}; fi
+if [ -e {HANDED} ] && [ ! -e {file} ]; then mv {HANDED} {file}; rm -f {HANDED_TO} {LEFT} {TOLD}; fi
 rm -f {REQUEST} {ANSWER}
 exit 0
 "#,
@@ -943,6 +1003,52 @@ mod tests {
         // Undoing after that finds nothing to put back.
         sh(&undo_script(&dir));
         assert!(!t.0.join(store::FILE).exists());
+    }
+
+    #[test]
+    fn a_record_left_shows_until_it_comes_back() {
+        let t = Temp::new();
+        let dir = t.0.to_string_lossy().into_owned();
+        std::fs::write(t.0.join(store::FILE), "{\"a\":1}").unwrap();
+        assert_eq!(left_here(&t.0), None);
+        sh(&yield_script(&dir, "m9"));
+        sh(&done_script(&dir));
+        let (raw, to) = left_here(&t.0).unwrap();
+        assert_eq!((raw.as_slice(), to.as_str()), (&b"{\"a\":1}"[..], "m9"));
+        // Put back, it is this machine's again.
+        std::fs::write(t.0.join(store::FILE), "{}").unwrap();
+        assert_eq!(left_here(&t.0), None);
+        std::fs::remove_file(t.0.join(store::FILE)).unwrap();
+        forget_left(&t.0);
+        assert_eq!(left_here(&t.0), None);
+        assert!(t.0.join(HANDED_TO).exists());
+    }
+
+    #[test]
+    fn a_record_given_back_before_it_was_taken_keeps_nothing_left() {
+        let t = Temp::new();
+        let dir = t.0.to_string_lossy().into_owned();
+        std::fs::write(t.0.join(store::FILE), "{}").unwrap();
+        sh(&yield_script(&dir, "m9"));
+        mark_told(&t.0);
+        sh(&undo_script(&dir));
+        assert!(t.0.join(store::FILE).exists());
+        assert!(!t.0.join(LEFT).exists());
+        assert!(!t.0.join(TOLD).exists());
+    }
+
+    #[test]
+    fn a_move_is_told_once_until_it_moves_again() {
+        let t = Temp::new();
+        assert!(!told(&t.0));
+        mark_told(&t.0);
+        assert!(!t.0.join(TOLD).exists());
+        std::fs::write(t.0.join(HANDED_TO), "m9").unwrap();
+        assert!(!told(&t.0));
+        mark_told(&t.0);
+        assert!(told(&t.0));
+        std::fs::write(t.0.join(HANDED_TO), "m8").unwrap();
+        assert!(!told(&t.0));
     }
 
     #[test]

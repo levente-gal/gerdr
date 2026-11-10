@@ -669,7 +669,7 @@ impl Gerdr {
             .collect();
         for (slug, title) in gone {
             match moved.get(&slug) {
-                Some(to) => self.say_moved(project, &slug, &title, to),
+                Some(to) => self.say_moved(project, &slug, &title, to, false),
                 None => self.close_gone_workspace(id, project, &slug, &title),
             }
             (self.features.code_here).remove(&(project.to_owned(), slug));
