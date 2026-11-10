@@ -112,6 +112,11 @@ pub struct Store {
     /// `machines::try_order`).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub machine_last: BTreeMap<String, String>,
+    /// The gerdr machine ids each machine answered as, by its name: who it
+    /// is, even while away (an address answering as another is passed
+    /// over; two names sharing one are one machine).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub machine_ids: BTreeMap<String, Vec<String>>,
     #[serde(skip)]
     books: Books,
 }
@@ -160,6 +165,8 @@ struct State {
     criteria_folds: BTreeMap<String, crate::feature::manual::Folds>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     machine_last: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    machine_ids: BTreeMap<String, Vec<String>>,
 }
 
 /// Where the store lives and what gerdr last read or wrote of its files.
@@ -631,6 +638,7 @@ impl Store {
         self.nav = state.nav;
         self.criteria_folds = state.criteria_folds;
         self.machine_last = state.machine_last;
+        self.machine_ids = state.machine_ids;
     }
 
     fn state(&self) -> State {
@@ -654,6 +662,7 @@ impl Store {
             nav: self.nav.clone(),
             criteria_folds: self.criteria_folds.clone(),
             machine_last: self.machine_last.clone(),
+            machine_ids: self.machine_ids.clone(),
         }
     }
 
@@ -1997,6 +2006,7 @@ mod tests {
             ignored_errors: Vec::new(),
             criteria_folds: BTreeMap::new(),
             machine_last: BTreeMap::from([("ZenBook".into(), "lga@zenbook-home".into())]),
+            machine_ids: BTreeMap::from([("ZenBook".into(), vec!["18e5".into()])]),
             nav: {
                 let mut nav = NavHistory::default();
                 nav.visit(

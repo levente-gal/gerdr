@@ -827,6 +827,12 @@ impl Gerdr {
             .collect();
         known.sort();
         ids.extend(known.into_iter().cloned());
+        // And those it answered as before, kept while it is away.
+        for id in self.projects.machine_ids.get(name).into_iter().flatten() {
+            if !ids.contains(id) {
+                ids.push(id.clone());
+            }
+        }
         ids.retain(|id| !id.is_empty());
         ids
     }

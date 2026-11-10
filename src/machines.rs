@@ -1419,7 +1419,7 @@ impl Gerdr {
                 link.connected_since = Some(Instant::now());
                 link.last_seen = link.connected_since;
                 let link_was_lost = std::mem::take(&mut link.lost);
-                self.answered_at(&name, &target);
+                self.answered_at(&name, &target, &info.site.id);
                 self.start_work(&name, target.clone(), info);
                 if let Some(tried) = kept {
                     self.edit_kept(tried);
@@ -1469,22 +1469,41 @@ impl Gerdr {
 
     /// Machine `name` answered at address `target`: tried first next time
     /// (`try_order`), in `state.json`.
-    fn answered_at(&mut self, name: &str, target: &str) {
+    fn answered_at(&mut self, name: &str, target: &str, id: &str) {
         let last = &mut self.projects.machine_last;
-        if last.get(name).is_some_and(|t| t == target) {
-            return;
-        }
+        let mut changed = last.get(name).is_none_or(|t| t != target);
         last.insert(name.to_owned(), target.to_owned());
-        self.projects.save();
+        let ids = self.projects.machine_ids.entry(name.to_owned()).or_default();
+        if !id.is_empty() && !ids.iter().any(|i| i == id) {
+            ids.push(id.to_owned());
+            changed = true;
+        }
+        if changed {
+            self.projects.save();
+        }
     }
 
     /// Machine `old` is called `new` now: the address it answered at last
-    /// moves with it.
-    // Called by `rename_machine` (machine_edit.rs), wired where the
-    // branches meet.
-    #[allow(dead_code)]
+    /// and the ids it answered as move with it.
     pub(crate) fn rename_last(&mut self, old: &str, new: &str) {
-        if moved_last(&mut self.projects.machine_last, old, new) {
+        let ids = moved_last(&mut self.projects.machine_ids, old, new);
+        if moved_last(&mut self.projects.machine_last, old, new) || ids {
+            self.projects.save();
+        }
+    }
+
+    /// Machine `drop` was merged into `keep`: the ids it answered as are
+    /// `keep`'s too, and its last address goes (`keep`'s own stays first).
+    pub(crate) fn merge_remembered(&mut self, keep: &str, drop: &str) {
+        let had_last = self.projects.machine_last.remove(drop).is_some();
+        let dropped = self.projects.machine_ids.remove(drop).unwrap_or_default();
+        let ids = self.projects.machine_ids.entry(keep.to_owned()).or_default();
+        for id in &dropped {
+            if !ids.contains(id) {
+                ids.push(id.clone());
+            }
+        }
+        if had_last || !dropped.is_empty() {
             self.projects.save();
         }
     }
@@ -1859,7 +1878,7 @@ fn remove_machine_body(titles: &[String]) -> String {
 
 /// `last`, the address each machine answered at last by its name, with
 /// machine `old`'s under `new`: whether it changed.
-fn moved_last(last: &mut BTreeMap<String, String>, old: &str, new: &str) -> bool {
+fn moved_last<T>(last: &mut BTreeMap<String, T>, old: &str, new: &str) -> bool {
     if old == new {
         return false;
     }
@@ -2020,6 +2039,14 @@ mod tests {
         assert!(!valid_target("-J"));
         assert!(!valid_target("ana@h extra"));
         assert!(!valid_target(""));
+    }
+
+    #[test]
+    fn a_rename_moves_what_was_remembered_of_a_machine() {
+        let mut ids = BTreeMap::from([("old".to_owned(), vec!["id1".to_owned()])]);
+        assert!(moved_last(&mut ids, "old", "new"));
+        assert_eq!(ids.get("new"), Some(&vec!["id1".to_owned()]));
+        assert!(!moved_last(&mut ids, "gone", "other"), "nothing to move");
     }
 
     #[test]

@@ -624,6 +624,7 @@ impl Gerdr {
         // Written here: the settings read back don't take the old name out.
         self.settings_modified = crate::config::modified();
         let ids = self.machines.rename(old, new);
+        self.rename_last(old, new);
         let mut trouble = false;
         let data = crate::projects::data_dir();
         for id in &ids {
@@ -745,6 +746,7 @@ impl Gerdr {
             link.addresses = joined.clone();
         }
         let ids = move_names(&mut self.machines.names, keep, drop);
+        self.merge_remembered(keep, drop);
         let mut trouble = false;
         let data = crate::projects::data_dir();
         for id in &ids {
