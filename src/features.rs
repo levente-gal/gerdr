@@ -354,6 +354,15 @@ pub(crate) enum Done {
     PrRead {
         reads: Vec<(String, String, Result<feature::pr::Remote, String>)>,
     },
+    /// A pull request's failed runs were asked to run again on GitHub:
+    /// how many went, and why the others didn't.
+    CiRerun {
+        project: String,
+        slug: String,
+        number: u64,
+        ran: usize,
+        failed: Vec<String>,
+    },
     /// A pull request's review moved to its new head, or not.
     PrMoved {
         project: String,
@@ -1684,6 +1693,9 @@ pub enum PanelOutcome {
     /// A pull request's review whose pull request ended: finish it, after
     /// asking.
     FinishReview,
+    /// A pull request's review: run its failed GitHub Actions runs again on
+    /// GitHub (see `pr_watch::rerun_ci`).
+    RerunCi,
     /// Ask an agent to write the feature's summary again.
     WriteSummary,
     /// Undo step `.1` that shipping ran for repository `.0`, after asking.
@@ -2003,6 +2015,10 @@ pub struct RowCtx {
     pub comments: usize,
     /// Its sandbox is open to the network (see `sandbox_lan`).
     pub lan_open: bool,
+    /// A pull request's review whose worktree is at the head reviewed,
+    /// nothing changed, as its code was last read: Verify goes by GitHub's
+    /// checks (see `pr_watch`).
+    pub on_head: bool,
 }
 
 impl RowCtx {
@@ -2071,6 +2087,8 @@ pub fn row_action(feature: &Feature, row: PanelRow, ctx: RowCtx) -> Option<Panel
             }
             StageMark::Current if stage == Stage::Ship && ctx.ship_nothing => PanelOutcome::Finish,
             StageMark::Current if stage == Stage::Ship => PanelOutcome::Ship,
+            // At the head reviewed, GitHub's checks are its Verify.
+            StageMark::Current if stage == Stage::Verify && ctx.on_head => ci_action(feature),
             StageMark::Current if stage == Stage::Verify && ctx.checks => PanelOutcome::RunChecks,
             StageMark::Current if stage == Stage::PlanReview => plan_review_action(feature),
             StageMark::Current if stage == Stage::AiReview => review_action(feature, ctx),
@@ -3341,6 +3359,8 @@ fn action_hint(action: &PanelOutcome) -> &'static str {
         PanelOutcome::EditSummary => "edit the summary",
         PanelOutcome::Finish => "finish\u{2026}",
         PanelOutcome::UpdatePrHead => "update to new head",
+        PanelOutcome::RerunCi => "rerun on GitHub",
+        PanelOutcome::OpenPr(_) => "open on GitHub",
         PanelOutcome::FinishReview => "finish\u{2026}",
         PanelOutcome::Untick(_) => "reopen",
         PanelOutcome::GoToCurrent => "go to the current stage",
@@ -3357,6 +3377,8 @@ fn stage_button(feature: &Feature, stage: Stage, ctx: RowCtx) -> Option<&'static
         PanelOutcome::Ship => Some("Ship\u{2026}"),
         PanelOutcome::Finish => Some("Finish\u{2026}"),
         PanelOutcome::UpdatePrHead => Some(UPDATE_HEAD),
+        PanelOutcome::RerunCi => Some("Rerun failed on GitHub"),
+        PanelOutcome::OpenPr(_) => Some("Open checks"),
         PanelOutcome::FinishReview => Some("Finish\u{2026}"),
         PanelOutcome::Untick(_) => Some("Reopen"),
         PanelOutcome::StartAgent(..) => Some("Start agent"),
@@ -4901,6 +4923,18 @@ impl FeaturePanel {
                     && has_failed_checks(feature, stage) =>
             {
                 return Some(PanelOutcome::RunFailed);
+            }
+            // A review at its head: the project's checks, here.
+            Keysym::r | Keysym::R
+                if plain
+                    && mods.shift
+                    && self.focus != TabArea::Repos
+                    && stage == Stage::Verify
+                    && ctx.on_head
+                    && ctx.checks
+                    && feature.current() == Some(Stage::Verify) =>
+            {
+                return Some(PanelOutcome::RunChecks);
             }
             Keysym::s | Keysym::S
                 if plain
@@ -6557,6 +6591,13 @@ impl Gerdr {
                 self.feature_linked(&project, &slug, &names, result);
             }
             Done::PrRead { reads } => self.pr_reviews_read(reads),
+            Done::CiRerun {
+                project,
+                slug,
+                number,
+                ran,
+                failed,
+            } => self.ci_rerun(&project, &slug, number, ran, failed),
             Done::PrMoved {
                 project,
                 slug,
@@ -6920,6 +6961,7 @@ impl Gerdr {
             comments,
             lan_open: (self.features.build.sandbox_lan)
                 .contains_key(&(feature.project.clone(), feature.slug.clone())),
+            on_head: on_head(feature, last.map(|p| &p.reading)),
         }
     }
 
@@ -8945,6 +8987,7 @@ impl Gerdr {
             PanelOutcome::ChangeDecisions => self.ask_change_decisions(&project, &slug),
             PanelOutcome::OpenPr(url) => self.open_feature_page(&project, &slug, url),
             PanelOutcome::UpdatePrHead => self.update_pr_head(&project, &slug),
+            PanelOutcome::RerunCi => self.rerun_ci(&project, &slug),
             PanelOutcome::FinishReview => self.ask_finish_pr_review(&project, &slug),
             PanelOutcome::WriteSummary => self.write_ship_summary(&project, &slug, true),
             PanelOutcome::UndoShip(repo, step) => self.ask_undo_ship(&project, &slug, &repo, step),
@@ -10525,7 +10568,7 @@ impl Gerdr {
         let place = self.place_label(feature, stage);
         actions.extend(place_action(place.as_deref(), stage));
         actions.extend(stop_action(feature, stage));
-        with_pull_actions(&mut actions, feature);
+        with_pull_actions(&mut actions, feature, stage, ctx);
         actions
     }
 
@@ -11489,6 +11532,12 @@ fn verify_line(feature: &Feature, ctx: RowCtx, running: Option<&str>) -> Option<
     if let Some(what) = running {
         return Some(inline(what));
     }
+    if feature.status == Status::Open
+        && feature.current() == Some(Stage::Verify)
+        && let Some(said) = ci_line(feature, ctx)
+    {
+        return Some(said);
+    }
     let current = feature.status == Status::Open && feature.current() == Some(Stage::Verify);
     if current && !ctx.checks {
         return Some(match ctx.all_skipped {
@@ -11872,15 +11921,147 @@ const UPDATE_HEAD: &str = "Update to new head";
 /// request's review (Ctrl+Shift+O). Moving to its new head and finishing
 /// once it ended are what Enter does on its current stage's page, so they
 /// are there already (`row_action`), and the card holds them.
-fn with_pull_actions(actions: &mut Vec<(PageButton, PanelOutcome)>, feature: &Feature) {
+///
+/// At Verify, at the head reviewed, the project's checks run here only
+/// when asked: "Run checks here" (Shift+R), as GitHub's are its Verify.
+fn with_pull_actions(
+    actions: &mut Vec<(PageButton, PanelOutcome)>,
+    feature: &Feature,
+    stage: Stage,
+    ctx: RowCtx,
+) {
     let Some(pull) = feature.pull() else {
         return;
     };
-    let open = PanelOutcome::OpenPr(pull.url.clone());
-    if !actions.iter().any(|(_, o)| *o == open) {
-        let label = OPEN_PULL.to_owned();
-        actions.push((PageButton { label, style: ButtonStyle::Quiet }, open));
+    let mut more = vec![(OPEN_PULL, ButtonStyle::Quiet, PanelOutcome::OpenPr(pull.url.clone()))];
+    if stage == Stage::Verify
+        && ctx.on_head
+        && ctx.checks
+        && feature.current() == Some(Stage::Verify)
+        && feature.status == Status::Open
+    {
+        more.push((RUN_HERE, ButtonStyle::Plain, PanelOutcome::RunChecks));
     }
+    for (label, style, outcome) in more {
+        if !actions.iter().any(|(_, o)| *o == outcome) {
+            let label = label.to_owned();
+            actions.push((PageButton { label, style }, outcome));
+        }
+    }
+}
+
+/// The label of the button running a review's checks here at its head.
+const RUN_HERE: &str = "Run checks here";
+
+/// Whether `feature`, a pull request's review, is at the head reviewed with
+/// nothing changed, as `reading` found its code: every worktree at it,
+/// clean.
+fn on_head(feature: &Feature, reading: Option<&Result<feature::patch::Reading, String>>) -> bool {
+    let (Some(pull), Some(Ok(reading))) = (feature.pull(), reading) else {
+        return false;
+    };
+    reading.dirty.is_empty()
+        && !reading.heads.is_empty()
+        && reading.heads.values().all(|head| *head == pull.head_sha)
+}
+
+/// What Enter does at Verify of `feature`, a pull request's review at the
+/// head reviewed: run the failed checks again on GitHub, open them there
+/// while they go (or when they can't run again from here), or mark it done
+/// by hand when GitHub has none (it is marked by itself once they pass).
+fn ci_action(feature: &Feature) -> PanelOutcome {
+    let Some(pull) = feature.pull() else {
+        return PanelOutcome::Tick;
+    };
+    let open = PanelOutcome::OpenPr(pull.checks_url());
+    let Some(checks) = pull.checks() else {
+        return open;
+    };
+    match feature::pr::Ci::of(checks).verdict() {
+        feature::pr::Verdict::Failed if !feature::pr::rerun_ids(checks).is_empty() => {
+            PanelOutcome::RerunCi
+        }
+        feature::pr::Verdict::Failed | feature::pr::Verdict::Running => open,
+        feature::pr::Verdict::None | feature::pr::Verdict::Passed => PanelOutcome::Tick,
+    }
+}
+
+/// What Verify's line says of `feature`'s checks on GitHub, a pull
+/// request's review at the head reviewed.
+fn ci_line(feature: &Feature, ctx: RowCtx) -> Option<String> {
+    let pull = feature.pull().filter(|_| ctx.on_head)?;
+    let Some(checks) = pull.checks() else {
+        return Some("reading its checks on GitHub".into());
+    };
+    let ci = feature::pr::Ci::of(checks);
+    Some(match ci.verdict() {
+        feature::pr::Verdict::None => {
+            "no checks on GitHub: Mark done by hand, or run checks here".into()
+        }
+        feature::pr::Verdict::Running => format!(
+            "GitHub's checks running: {} of {} done",
+            ci.total - ci.running,
+            ci.total
+        ),
+        feature::pr::Verdict::Failed => {
+            let first = (checks.iter())
+                .find(|c| c.state != crate::ci::CiState::Passed)
+                .map_or("", |c| c.name.as_str());
+            format!("{} of {} failed on GitHub: {first}", ci.failed, ci.total)
+        }
+        feature::pr::Verdict::Passed => format!("all {} passed on GitHub", ci.total),
+    })
+}
+
+/// GitHub's checks of `feature`'s head, a pull request's review, on
+/// Verify's page: each with how it stands, and the button opening them
+/// there. Once code changed here, they say nothing of it.
+fn ci_sections(
+    feature: &Feature,
+    ctx: RowCtx,
+    actions: &[(PageButton, PanelOutcome)],
+) -> Vec<PageSection> {
+    let Some(pull) = feature.pull() else {
+        return Vec::new();
+    };
+    let mut said: Vec<CheckLine> = match pull.checks() {
+        None => vec![line("not read yet", CheckTone::Note)],
+        Some([]) => vec![line("none ran", CheckTone::Note)],
+        Some(checks) => (checks.iter())
+            .map(|c| {
+                let (word, tone) = match c.state {
+                    crate::ci::CiState::Passed => ("passed", CheckTone::Ready),
+                    crate::ci::CiState::Failed => ("failed", CheckTone::Blocker),
+                    crate::ci::CiState::Running => ("running", CheckTone::Note),
+                    crate::ci::CiState::Unknown => ("no result", CheckTone::Blocker),
+                };
+                line(format!("{}: {word}", c.name), tone)
+            })
+            .collect(),
+    };
+    if !ctx.on_head {
+        let text = format!(
+            "of #{} at {}: the code here isn't that, so its checks run here",
+            pull.number,
+            pull.short_head()
+        );
+        said.insert(0, line(text, CheckTone::Note));
+    }
+    let mut out = vec![lines("GitHub checks", said)];
+    let held: Vec<usize> = (actions.iter().enumerate())
+        .filter(|(_, (b, o))| match o {
+            PanelOutcome::OpenPr(url) => *url == pull.checks_url() && b.style != ButtonStyle::Primary,
+            PanelOutcome::RunChecks => b.label == RUN_HERE,
+            _ => false,
+        })
+        .map(|(i, _)| i)
+        .collect();
+    if !held.is_empty() {
+        out.push(PageSection::Toolbar {
+            groups: vec![(String::new(), held)],
+        });
+    }
+    out
 }
 
 /// The label of the button opening a pull request's review's pull request.
@@ -13772,6 +13953,7 @@ fn stage_page(
                 sections.extend(setup_section(feature, state));
             }
             Stage::Verify => {
+                sections.extend(ci_sections(feature, state.ctx, actions));
                 sections.extend(verify_sections(feature, state, actions, now));
                 sections.extend(setup_section(feature, state));
             }
@@ -14143,7 +14325,10 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 7] = [
             ("Enter", "a check: show its terminal"),
             ("r / s", "a check: run it again, stop it"),
             ("Space", "a check: skip it, or stop skipping it"),
-            ("Shift+R / Shift+S", "Verify: run the failed ones, stop all"),
+            (
+                "Shift+R / Shift+S",
+                "Verify: run the failed ones, stop all; reviewing a pull request at its head, run the checks here",
+            ),
             (
                 "Alt+E",
                 "Verify: fold the fix round cards, or open them all",
@@ -14803,6 +14988,13 @@ fn writers_tab_hints(
             }
             if has_failed_checks(feature, stage) && feature.current() == Some(stage) && !going {
                 hints.push(hint("Shift+R", "run failed"));
+            } else if stage == Stage::Verify
+                && ctx.on_head
+                && ctx.checks
+                && feature.current() == Some(stage)
+                && !going
+            {
+                hints.push(hint("Shift+R", "run here"));
             }
             if stage == Stage::Verify && can_stop_checks(feature) {
                 hints.push(hint("Shift+S", "stop all"));
@@ -15069,7 +15261,7 @@ fn tab_view(
             actions.extend(round_plan_actions(feature, stage, state.probe));
             actions.extend(place_action(state.place.as_deref(), stage));
             actions.extend(stop_action(feature, stage));
-            with_pull_actions(&mut actions, feature);
+            with_pull_actions(&mut actions, feature, stage, state.ctx);
             stage_page(feature, stage, state, &actions, now)
         }
     };
@@ -25460,6 +25652,7 @@ mod pr_page_tests {
             head_sha: head.into(),
             base_ref: "main".into(),
             state: state.into(),
+            checks: Vec::new(),
         });
     }
 
@@ -25480,7 +25673,7 @@ mod pr_page_tests {
 
     fn page_of(f: &Feature, stage: Stage) -> chrome::StagePage {
         let mut actions = page_actions(f, stage, RowCtx::default());
-        with_pull_actions(&mut actions, f);
+        with_pull_actions(&mut actions, f, stage, RowCtx::default());
         stage_page(f, stage, &PanelState::default(), &actions, 2_000)
     }
 
@@ -25538,6 +25731,83 @@ mod pr_page_tests {
                 crate::feature_agents::GateKind::PrEnded { merged: true }
             ))
         );
+    }
+
+    fn with_checks(f: &mut Feature, states: &[crate::ci::CiState]) {
+        let Kind::PrReview(pull) = &mut f.kind else {
+            unreachable!()
+        };
+        let checks = (states.iter().enumerate())
+            .map(|(k, state)| crate::feature::pr::CiCheck {
+                name: format!("job {k}"),
+                state: *state,
+                link: Some(format!("https://github.com/o/api/actions/runs/5/job/{k}")),
+            })
+            .collect();
+        pull.take_remote(Remote {
+            at: 1_900,
+            head_sha: "abc1234567".into(),
+            base_ref: "main".into(),
+            state: "OPEN".into(),
+            checks,
+        });
+    }
+
+    #[test]
+    fn at_its_head_verify_goes_by_githubs_checks() {
+        use crate::ci::CiState::{Failed, Passed, Running};
+        let mut f = review();
+        let here = RowCtx {
+            checks: true,
+            ..RowCtx::default()
+        };
+        // Not read at its head: its checks run here, as for a feature.
+        assert_eq!(page_enter(&f, Stage::Verify, here), Some(PanelOutcome::RunChecks));
+        let ctx = RowCtx {
+            on_head: true,
+            ..here
+        };
+        let checks = PanelOutcome::OpenPr("https://github.com/o/api/pull/12/checks".into());
+        assert_eq!(page_enter(&f, Stage::Verify, ctx), Some(checks.clone()));
+        assert_eq!(ci_line(&f, ctx).as_deref(), Some("reading its checks on GitHub"));
+        with_checks(&mut f, &[Passed, Running]);
+        assert_eq!(page_enter(&f, Stage::Verify, ctx), Some(checks));
+        assert_eq!(
+            verify_line(&f, ctx, None).as_deref(),
+            Some("GitHub's checks running: 1 of 2 done")
+        );
+        with_checks(&mut f, &[Passed, Failed]);
+        assert_eq!(page_enter(&f, Stage::Verify, ctx), Some(PanelOutcome::RerunCi));
+        assert_eq!(ci_line(&f, ctx).as_deref(), Some("1 of 2 failed on GitHub: job 1"));
+        // Its checks can run here too, asked: held over its list.
+        let mut actions = page_actions(&f, Stage::Verify, ctx);
+        with_pull_actions(&mut actions, &f, Stage::Verify, ctx);
+        let run = actions.iter().position(|(b, _)| b.label == RUN_HERE).unwrap();
+        assert_eq!(actions[run].1, PanelOutcome::RunChecks);
+        let sections = ci_sections(&f, ctx, &actions);
+        assert!(matches!(&sections[0], PageSection::Lines { label, lines }
+            if label == "GitHub checks" && lines[1].text == "job 1: failed"));
+        assert!(matches!(&sections[1], PageSection::Toolbar { groups } if groups[0].1 == vec![run]));
+        with_checks(&mut f, &[]);
+        assert_eq!(page_enter(&f, Stage::Verify, ctx), Some(PanelOutcome::Tick));
+    }
+
+    #[test]
+    fn only_its_head_clean_counts_as_at_it() {
+        let f = review();
+        let reading = |head: &str, dirty: &[&str]| {
+            Ok(crate::feature::patch::Reading {
+                heads: [("api".to_owned(), head.to_owned())].into(),
+                dirty: dirty.iter().map(|d| (*d).to_owned()).collect(),
+                ..Default::default()
+            })
+        };
+        assert!(on_head(&f, Some(&reading("abc1234567", &[]))));
+        assert!(!on_head(&f, Some(&reading("abc1234567", &["api"]))));
+        assert!(!on_head(&f, Some(&reading("fff", &[]))));
+        assert!(!on_head(&f, None));
+        let plain = feature("x", vec![repo("api", true)], 4);
+        assert!(!on_head(&plain, Some(&reading("abc1234567", &[]))));
     }
 
     fn feature_agents_gate(f: &Feature) -> Option<(Stage, u64, crate::feature_agents::GateKind)> {

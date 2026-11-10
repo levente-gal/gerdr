@@ -1394,7 +1394,7 @@ fn open_pr(
 const GH_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// What `gh args`, run in `dir`, prints, or one line on why it failed.
-fn run_gh(gh: &str, dir: &Path, args: &[&str]) -> Result<String, String> {
+pub(crate) fn run_gh(gh: &str, dir: &Path, args: &[&str]) -> Result<String, String> {
     let what = args.get(..2).unwrap_or(args).join(" ");
     let mut command = Command::new(gh);
     // The real gh, not a test's.

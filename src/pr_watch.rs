@@ -5,6 +5,12 @@
 //! base raise the `NewHead` gate, and the review moves to them only when
 //! the user says so (`update_pr_head`); a merged or closed one raises
 //! `PrEnded`, and the review can be finished (`finish_pr_review`).
+//!
+//! Its checks on the head reviewed are Verify's while the worktree is at
+//! that head, nothing changed (`RowCtx::on_head`): once they all passed,
+//! Verify is marked done by "GitHub CI" (`verify_from_ci`); failed ones run
+//! again on GitHub from its page (`rerun_ci`). Local checks run only on
+//! code changed here, or when asked to ("Run checks here").
 
 use std::{path::PathBuf, time::Duration};
 
@@ -19,8 +25,13 @@ use crate::{
     toast::Level,
 };
 
-/// How often the pull requests under review are read.
+/// How often the pull requests under review are read; while checks of one
+/// at Verify run, `BUSY`.
 const INTERVAL: Duration = Duration::from_secs(60);
+const BUSY: Duration = Duration::from_secs(20);
+
+/// Who marks Verify done once GitHub's checks passed.
+pub const BY_CI: &str = "GitHub CI";
 
 /// Where a pull request watch can't read GitHub goes (see `problems`).
 pub const PROBLEMS: &str = "pull requests";
@@ -36,11 +47,24 @@ impl Gerdr {
             .loop_handle
             .insert_source(Timer::immediate(), |_, _, state| {
                 state.refresh_pr_reviews();
-                TimeoutAction::ToDuration(INTERVAL)
+                TimeoutAction::ToDuration(state.pr_interval())
             });
         if let Err(err) = timer {
             tracing::warn!("watching pull requests: {err}");
         }
+    }
+
+    /// How long until the pull requests under review are read again: soon
+    /// while one at Verify waits for its checks.
+    fn pr_interval(&self) -> Duration {
+        let waits = (self.features.all.values().flatten()).any(|f| {
+            f.status == Status::Open
+                && f.current() == Some(feature::Stage::Verify)
+                && f.pull()
+                    .and_then(pr::PullRef::ci)
+                    .is_some_and(|ci| ci.verdict() == pr::Verdict::Running)
+        });
+        if waits { BUSY } else { INTERVAL }
     }
 
     /// Read how the pull request of each open review written here stands on
@@ -102,8 +126,17 @@ impl Gerdr {
             let feature::Kind::PrReview(pull) = &mut f.kind else {
                 continue;
             };
-            if !pull.take_remote(read) {
-                continue;
+            match pull.take_remote(read) {
+                pr::Change::Nothing => {
+                    self.verify_from_ci(&project, &slug);
+                    continue;
+                }
+                pr::Change::Checks => {
+                    self.save_feature(&project, &slug);
+                    self.verify_from_ci(&project, &slug);
+                    continue;
+                }
+                pr::Change::Pull => {}
             }
             let number = pull.number;
             let (what, tell) = match (pull.ended(), pull.moved()) {
@@ -122,6 +155,7 @@ impl Gerdr {
             let moved = pull.moved().is_some();
             f.log(feature::now(), what);
             self.save_feature(&project, &slug);
+            self.verify_from_ci(&project, &slug);
             let Some(text) = tell else { continue };
             let button = match moved {
                 true => ("Update".to_owned(), MenuAction::UpdatePrHead(project, slug)),
@@ -135,6 +169,130 @@ impl Gerdr {
                 format!("Couldn't read the pull requests under review: {why}"),
             ),
             None => crate::problems::clear(PROBLEMS),
+        }
+    }
+
+    /// Mark Verify of review `slug` done once GitHub's checks of the head
+    /// reviewed all passed, while its worktree is at that head, nothing
+    /// changed, as its code was last read; then AI review starts, as after
+    /// checks passing here.
+    pub(crate) fn verify_from_ci(&mut self, project: &str, slug: &str) {
+        let Some(f) = self.feature(project, slug) else {
+            return;
+        };
+        if f.status != Status::Open
+            || f.writer.is_some()
+            || f.current() != Some(feature::Stage::Verify)
+            || self.feature_busy(project, slug)
+            || !self.row_ctx(f).on_head
+        {
+            return;
+        }
+        let Some(pull) = f.pull() else {
+            return;
+        };
+        let Some(ci) = pull.ci().filter(|ci| ci.verdict() == pr::Verdict::Passed) else {
+            return;
+        };
+        let patch = (f.marks.get(&feature::Stage::Build)).and_then(|m| m.patch.clone());
+        let Some(patch) = patch else {
+            return;
+        };
+        let note = format!(
+            "{} checks passed on GitHub at {}",
+            ci.total,
+            pull.short_head()
+        );
+        let title = f.title.clone();
+        let now = feature::now();
+        let Some(f) = self.feature_mut(project, slug) else {
+            return;
+        };
+        if f.tick(now, BY_CI, Some(&patch)).is_none() {
+            return;
+        }
+        if let Some(mark) = f.marks.get_mut(&feature::Stage::Verify) {
+            mark.note = note.clone();
+        }
+        f.log(now, format!("Verify: {note}"));
+        self.save_feature(project, slug);
+        self.feature_cursor_to_current_of(project, slug);
+        self.start_reviewer(project, slug, &title);
+    }
+
+    /// Run the GitHub Actions runs whose checks failed on the head of review
+    /// `slug` again, on GitHub, off the thread. Other checks can't be.
+    pub(crate) fn rerun_ci(&mut self, project: &str, slug: &str) {
+        let Some(f) = self.feature(project, slug) else {
+            return;
+        };
+        let Some(pull) = f.pull() else {
+            return;
+        };
+        let ids = pull.checks().map(pr::rerun_ids).unwrap_or_default();
+        if ids.is_empty() {
+            return self.show_warning(format!(
+                "The failed checks of #{} aren't GitHub Actions runs: run them again where they ran",
+                pull.number
+            ));
+        }
+        let Some(dir) = f.repos.first().map(|r| r.main.clone()) else {
+            return;
+        };
+        let (number, arg) = (pull.number, pull.repo_arg());
+        let busy = Busy {
+            project: project.to_owned(),
+            slug: slug.to_owned(),
+            job: Job::PrHead,
+            repo: None,
+            what: format!("Running the failed checks of #{number} again on GitHub"),
+        };
+        let (project, slug) = (project.to_owned(), slug.to_owned());
+        self.feature_work(Some(busy), move |_| {
+            let mut ran = 0;
+            let mut failed = Vec::new();
+            for id in ids {
+                let id = id.to_string();
+                let args = ["run", "rerun", &id, "--failed", "--repo", &arg];
+                match feature::ship::run_gh("gh", &dir, &args) {
+                    Ok(_) => ran += 1,
+                    Err(why) => failed.push(format!("run {id}: {why}")),
+                }
+            }
+            Done::CiRerun {
+                project,
+                slug,
+                number,
+                ran,
+                failed,
+            }
+        });
+    }
+
+    /// The failed runs of review `slug` were asked to run again: say so, and
+    /// read how its checks stand soon.
+    pub(crate) fn ci_rerun(
+        &mut self,
+        project: &str,
+        slug: &str,
+        number: u64,
+        ran: usize,
+        failed: Vec<String>,
+    ) {
+        self.unbusy(project, slug, Job::PrHead);
+        if let Some(why) = failed.first() {
+            tracing::warn!(
+                "running the checks of #{number} again: {}",
+                failed.join("; ")
+            );
+            self.show_error(format!("Couldn't run the checks of #{number} again: {why}"));
+        }
+        if ran > 0 {
+            let runs = if ran == 1 { "run" } else { "runs" };
+            self.show_success(format!(
+                "#{number}: {ran} failed {runs} going again on GitHub"
+            ));
+            self.refresh_pr_reviews();
         }
     }
 

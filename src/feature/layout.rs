@@ -2001,6 +2001,7 @@ mod tests {
             head_sha: new.clone(),
             base_ref: "main".into(),
             state: "OPEN".into(),
+            checks: Vec::new(),
         };
         // Changes of the user's hold it.
         std::fs::write(repo.worktree.join("a"), "edited").unwrap();

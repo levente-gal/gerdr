@@ -18,6 +18,8 @@ use std::{collections::BTreeMap, path::Path, sync::Mutex};
 
 use serde::{Deserialize, Serialize};
 
+use crate::ci::CiState;
+
 use super::{
     Event, Feature, Kind, Mark, Stage, VERSION,
     layout::{Created, Root},
@@ -79,10 +81,96 @@ pub struct Remote {
     pub base_ref: String,
     /// `OPEN`, `CLOSED`, `MERGED`.
     pub state: String,
+    /// Its checks on `head_sha`, each once (`ci::rollup_checks`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checks: Vec<CiCheck>,
+}
+
+/// One check GitHub ran on a pull request's head: a check run of GitHub
+/// Actions or of an app, or a commit status.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CiCheck {
+    pub name: String,
+    pub state: CiState,
+    /// Its page, if GitHub gives one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<String>,
+}
+
+/// What reading a pull request again changed of what was kept.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Change {
+    Nothing,
+    /// Only how its checks stand.
+    Checks,
+    /// Its head, base or state.
+    Pull,
+}
+
+/// How a pull request's checks on the head reviewed stand, all told.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Verdict {
+    /// None ran, or none was reported.
+    None,
+    /// Some haven't finished.
+    Running,
+    /// All finished, some not passed.
+    Failed,
+    Passed,
+}
+
+/// The checks `checks` counted: how many there are, passed and failed (or
+/// of an unknown end), the rest still running.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Ci {
+    pub total: usize,
+    pub passed: usize,
+    pub failed: usize,
+    pub running: usize,
+}
+
+impl Ci {
+    pub fn of(checks: &[CiCheck]) -> Self {
+        let count =
+            |want: &dyn Fn(CiState) -> bool| checks.iter().filter(|c| want(c.state)).count();
+        Self {
+            total: checks.len(),
+            passed: count(&|s| s == CiState::Passed),
+            failed: count(&|s| matches!(s, CiState::Failed | CiState::Unknown)),
+            running: count(&|s| s == CiState::Running),
+        }
+    }
+
+    pub fn verdict(&self) -> Verdict {
+        match () {
+            _ if self.total == 0 => Verdict::None,
+            _ if self.running > 0 => Verdict::Running,
+            _ if self.failed > 0 => Verdict::Failed,
+            _ => Verdict::Passed,
+        }
+    }
+}
+
+/// The GitHub Actions runs of `checks` that didn't pass, by id, from their
+/// pages (`…/actions/runs/<id>/job/…`): those `gh run rerun --failed` takes.
+/// Other checks (an app's, a status) can't be run again from here.
+pub fn rerun_ids(checks: &[CiCheck]) -> Vec<u64> {
+    let mut ids: Vec<u64> = (checks.iter())
+        .filter(|c| matches!(c.state, CiState::Failed | CiState::Unknown))
+        .filter_map(|c| {
+            let link = c.link.as_deref()?;
+            let (_, after) = link.split_once("/actions/runs/")?;
+            after.split(['/', '?', '#']).next()?.parse().ok()
+        })
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    ids
 }
 
 impl Remote {
-    /// Whether `other` says the same of it, whenever read.
+    /// Whether `other` says the same of it, whenever read, but for its
+    /// checks.
     pub fn same(&self, other: &Remote) -> bool {
         self.head_sha == other.head_sha
             && self.base_ref == other.base_ref
@@ -150,14 +238,40 @@ impl PullRef {
         (self.remote.as_ref()).filter(|r| !r.is_open())
     }
 
-    /// Keep `read`, what GitHub has of it now, unless it says what was kept
-    /// already; whether it did change.
-    pub fn take_remote(&mut self, read: Remote) -> bool {
-        if self.remote.as_ref().is_some_and(|r| r.same(&read)) {
-            return false;
+    /// Keep `read`, what GitHub has of it now, but what it says the same of
+    /// (when that first was so stays): what changed.
+    pub fn take_remote(&mut self, read: Remote) -> Change {
+        match &mut self.remote {
+            Some(kept) if kept.same(&read) => match kept.checks == read.checks {
+                true => Change::Nothing,
+                false => {
+                    kept.checks = read.checks;
+                    Change::Checks
+                }
+            },
+            _ => {
+                self.remote = Some(read);
+                Change::Pull
+            }
         }
-        self.remote = Some(read);
-        true
+    }
+
+    /// GitHub's checks of the head its worktree is on, once read: none
+    /// known of another head.
+    pub fn checks(&self) -> Option<&[CiCheck]> {
+        (self.remote.as_ref())
+            .filter(|r| r.head_sha == self.head_sha)
+            .map(|r| r.checks.as_slice())
+    }
+
+    /// How those checks stand, all told.
+    pub fn ci(&self) -> Option<Ci> {
+        self.checks().map(Ci::of)
+    }
+
+    /// Its checks' page.
+    pub fn checks_url(&self) -> String {
+        format!("{}/checks", self.url.trim_end_matches('/'))
     }
 
     /// It is on the head and base `remote` has now.
@@ -289,13 +403,15 @@ struct RemoteView {
     base_ref_name: String,
     #[serde(default)]
     state: String,
+    #[serde(default)]
+    status_check_rollup: serde_json::Value,
 }
 
 /// How GitHub has `pull` now, read with gh in `dir` at `now`.
 pub fn read_remote(dir: &Path, pull: &PullRef, now: u64) -> Result<Remote, String> {
     let n = pull.number.to_string();
     let arg = pull.repo_arg();
-    let fields = "headRefOid,baseRefName,state";
+    let fields = "headRefOid,baseRefName,state,statusCheckRollup";
     let view: RemoteView =
         crate::ci::gh_json(dir, &["pr", "view", &n, "--repo", &arg, "--json", fields])?;
     if view.head_ref_oid.is_empty() {
@@ -306,6 +422,13 @@ pub fn read_remote(dir: &Path, pull: &PullRef, now: u64) -> Result<Remote, Strin
         head_sha: view.head_ref_oid,
         base_ref: view.base_ref_name,
         state: view.state,
+        checks: (crate::ci::rollup_checks(view.status_check_rollup).into_iter())
+            .map(|c| CiCheck {
+                name: c.name,
+                state: c.state,
+                link: c.link,
+            })
+            .collect(),
     })
 }
 
@@ -458,22 +581,82 @@ mod tests {
             head_sha: head.into(),
             base_ref: base.into(),
             state: state.into(),
+            checks: Vec::new(),
         };
-        assert!(pull.take_remote(read("abcdef1234", "main", "OPEN", 1)));
+        assert_eq!(
+            Change::Pull,
+            pull.take_remote(read("abcdef1234", "main", "OPEN", 1))
+        );
         assert_eq!(pull.moved(), None);
         // Read again the same later: kept from when it was first so.
-        assert!(!pull.take_remote(read("abcdef1234", "main", "OPEN", 2)));
+        assert_eq!(
+            Change::Nothing,
+            pull.take_remote(read("abcdef1234", "main", "OPEN", 2))
+        );
         assert_eq!(pull.remote.as_ref().map(|r| r.at), Some(1));
-        assert!(pull.take_remote(read("ffff", "main", "OPEN", 3)));
+        assert_eq!(
+            Change::Pull,
+            pull.take_remote(read("ffff", "main", "OPEN", 3))
+        );
         assert_eq!(pull.moved().map(|r| r.head_sha.as_str()), Some("ffff"));
         pull.moved_to("ffff", "main");
         assert_eq!(pull.moved(), None);
         // Retargeted is moved too.
-        assert!(pull.take_remote(read("ffff", "dev", "OPEN", 4)));
+        assert_eq!(
+            Change::Pull,
+            pull.take_remote(read("ffff", "dev", "OPEN", 4))
+        );
         assert!(pull.moved().is_some());
-        assert!(pull.take_remote(read("ffff", "dev", "MERGED", 5)));
+        assert_eq!(
+            Change::Pull,
+            pull.take_remote(read("ffff", "dev", "MERGED", 5))
+        );
         assert_eq!(pull.moved(), None);
         assert!(pull.ended().is_some_and(Remote::merged));
+    }
+
+    #[test]
+    fn its_checks_say_how_verify_goes() {
+        let check = |state, link: Option<&str>| CiCheck {
+            name: "test".into(),
+            state,
+            link: link.map(str::to_owned),
+        };
+        let mut pull = details_of(view("bob", false), "github.com", "o/r", "ann").pull;
+        assert_eq!(pull.ci(), None);
+        let mut remote = Remote {
+            at: 1,
+            head_sha: "abcdef1234".into(),
+            base_ref: "main".into(),
+            state: "OPEN".into(),
+            checks: vec![check(CiState::Running, None)],
+        };
+        assert_eq!(pull.take_remote(remote.clone()), Change::Pull);
+        assert_eq!(pull.ci().map(|c| c.verdict()), Some(Verdict::Running));
+        let run = "https://github.com/o/r/actions/runs/77/job/9";
+        remote.checks = vec![
+            check(CiState::Passed, None),
+            check(CiState::Failed, Some(run)),
+            check(
+                CiState::Failed,
+                Some("https://github.com/o/r/actions/runs/77/job/10"),
+            ),
+            check(CiState::Failed, Some("https://ci.example/build/5")),
+        ];
+        assert_eq!(pull.take_remote(remote.clone()), Change::Checks);
+        let ci = pull.ci().unwrap();
+        assert_eq!((ci.total, ci.passed, ci.failed), (4, 1, 3));
+        assert_eq!(ci.verdict(), Verdict::Failed);
+        assert_eq!(rerun_ids(pull.checks().unwrap()), vec![77]);
+        remote.checks = vec![check(CiState::Passed, None)];
+        pull.take_remote(remote.clone());
+        assert_eq!(pull.ci().map(|c| c.verdict()), Some(Verdict::Passed));
+        assert_eq!(Ci::of(&[]).verdict(), Verdict::None);
+        // Checks of a head not reviewed say nothing of it.
+        remote.head_sha = "ffff".into();
+        pull.take_remote(remote);
+        assert_eq!(pull.ci(), None);
+        assert_eq!(pull.checks_url(), "https://github.com/o/r/pull/12/checks");
     }
 
     #[test]

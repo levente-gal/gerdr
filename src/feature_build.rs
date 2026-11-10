@@ -1176,7 +1176,7 @@ impl Gerdr {
     /// its agent starts on it behind that, and the toast says so. A reviewer
     /// that can't start says why itself, and the panel's Enter starts it
     /// later.
-    fn start_reviewer(&mut self, project: &str, slug: &str, title: &str) {
+    pub(crate) fn start_reviewer(&mut self, project: &str, slug: &str, title: &str) {
         let reviewing = self
             .feature(project, slug)
             .is_some_and(|f| f.status == Status::Open && f.current() == Some(Stage::AiReview));
