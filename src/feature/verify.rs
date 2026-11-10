@@ -1037,9 +1037,33 @@ fn failure_lines(raw: &str) -> Vec<String> {
     let Some(at) = first(&STRONG).or_else(|| first(&WEAK)) else {
         return Vec::new();
     };
-    (lines[at..].iter().take(PREVIEW_LINES))
+    (lines[traceback_end(&lines, at)..].iter())
+        // Python's `~~~^^^` marks under the code say nothing on a card.
+        .filter(|line| !line.trim().chars().all(|c| matches!(c, '~' | '^')))
+        .take(PREVIEW_LINES)
         .map(|line| untabbed(line))
         .collect()
+}
+
+/// Where the excerpt of a failure saying so at `lines[at]` starts. A Python
+/// traceback's own lines (`Traceback (most recent call last):`, then
+/// indented frames) say what was running; its first line not indented is
+/// the error. That goes with the frame it came from, the last `File` line.
+fn traceback_end(lines: &[String], at: usize) -> usize {
+    if !lines[at]
+        .trim_start()
+        .starts_with("Traceback (most recent call last)")
+    {
+        return at;
+    }
+    let Some(error) = (at + 1..lines.len()).find(|&i| !lines[i].starts_with(char::is_whitespace))
+    else {
+        return at;
+    };
+    (at + 1..error)
+        .rev()
+        .find(|&i| lines[i].trim_start().starts_with("File "))
+        .unwrap_or(error)
 }
 
 /// Whether `line` has one of `words` (in lower case) as a word of its own,
@@ -2023,6 +2047,17 @@ mod tests {
         let pytest =
             "tests/a.py F\n=== FAILURES ===\nE   AssertionError: no\n=== 1 failed in 0.1s ===\n";
         assert_eq!(failure_lines(pytest)[0], "E   AssertionError: no");
+        // Python's traceback: where it was, then what it was.
+        let unittest = "F\n======\nFAIL: test_two (test_x.T.test_two)\n------\nTraceback (most recent call last):\n  File \"/a/test_x.py\", line 3, in helper\n    check()\n  File \"/a/test_x.py\", line 20, in test_two\n    self.assertEqual(got, \"10.50\")\n    ~~~~~~~~^^^^^\nAssertionError: '10.5' != '10.50'\n- 10.5\n+ 10.50\n\n------\nRan 1 test in 0.001s\n\nFAILED (failures=1)\n";
+        assert_eq!(
+            failure_lines(unittest),
+            [
+                "  File \"/a/test_x.py\", line 20, in test_two",
+                "    self.assertEqual(got, \"10.50\")",
+                "AssertionError: '10.5' != '10.50'",
+                "- 10.5"
+            ]
+        );
         let jest = "PASS src/a.test.js\nFAIL src/b.test.js\n  \u{25cf} b works\n";
         assert_eq!(failure_lines(jest)[0], "FAIL src/b.test.js");
         // What says none, and what only names one.
