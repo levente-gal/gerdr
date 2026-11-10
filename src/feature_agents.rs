@@ -178,6 +178,13 @@ impl Watch {
             ..Self::default()
         }
     }
+
+    /// gerdr, not the user, is what the agent's work waits on: its file is
+    /// written and left to settle before it is read, or the code is read
+    /// for it.
+    pub(crate) fn reads(&self) -> bool {
+        self.checking.is_some() || (self.stable.is_some() && self.refused.is_none())
+    }
 }
 
 /// What's left of `watch` once its agent stops waiting for its prompt: a
@@ -307,9 +314,9 @@ fn judge(
         };
     }
     watch.rested = None;
-    if matches!(status, None | Some(AgentStatus::Unknown))
-        && let Some(stamp) = file.finished()
-    {
+    // herdr doesn't say, or the agent rests never seen at work (done too
+    // fast for it): its file is read once it stays as it is.
+    if let Some(stamp) = file.finished() {
         let quiet = match file {
             File::Partial(..) => MILESTONE_QUIET,
             _ => STABLE,
@@ -324,6 +331,18 @@ fn judge(
         }
     }
     Verdict::Wait
+}
+
+/// Whether the agent taking on conflicts `r`, its files in data dir `data`,
+/// is through: planning, its plan or questions are written; resolving, its
+/// questions are, or the merge is committed (`took_in`).
+fn conflicts_done(r: &feature::Resolving, data: &Path, took_in: bool) -> bool {
+    let written = if r.planning {
+        r.plan(data).exists()
+    } else {
+        took_in
+    };
+    written || r.questions(data).exists()
 }
 
 /// What comes of a Build agent resting with `done` of `total` milestones
@@ -1031,6 +1050,16 @@ pub(crate) fn vars(
     .collect()
 }
 
+/// How many seconds after its start a stage agent herdr sees no agent in
+/// reads as exited (see `agent_line`).
+const GONE_AFTER: u64 = 30;
+
+/// The name a stage agent's tab goes by, and so its sidebar row: its agent
+/// and its stage ("claude · Plan"), as each stage often runs the same agent.
+pub(crate) fn agent_tab_label(agent: &str, stage: Stage) -> String {
+    format!("{agent} \u{b7} {}", stage.label())
+}
+
 /// What the feature panel says of `run` under its stage: its agent's state,
 /// as herdr has it (`status`) and the watch saw it (`watch`).
 pub(crate) fn agent_line(
@@ -1092,11 +1121,17 @@ pub(crate) fn agent_line(
             None => format!("nudged to write {file}"),
         };
     }
+    if watch.is_some_and(Watch::reads) && status != Some(AgentStatus::Working) {
+        return format!("{} done \u{b7} reading {file}", run.agent);
+    }
     let doing = match status {
         Some(AgentStatus::Working) if stage == Stage::AiReview => "reviewing",
         Some(AgentStatus::Working) => "working",
         Some(AgentStatus::Blocked) => "needs you",
         Some(AgentStatus::Idle | AgentStatus::Done) => "waiting for you",
+        // Its tab is there but herdr sees no agent in it, past the time it
+        // takes one to start: it exited, its shell left.
+        None if run.t3.is_none() && now >= run.started + GONE_AFTER => "exited",
         _ => "running",
     };
     format!("{} {doing} \u{b7} {started}", run.agent)
@@ -1251,6 +1286,14 @@ impl Gerdr {
         stage_model_slot(feature, stage, workflow, &self.cli_agents)
     }
 
+    /// Name the tab holding herdr pane `pane` after its agent and `stage`
+    /// (see `agent_tab_label`), as a rename would.
+    pub(crate) fn label_agent_tab(&mut self, pane: &str, agent: &str, stage: Stage) {
+        if let Some((w, t)) = self.herdr_pane_place(pane) {
+            self.rename_tab(w, t, agent_tab_label(agent, stage));
+        }
+    }
+
     /// Open the picker of `stage`'s model (its card's button, Ctrl+Shift+I).
     /// An agent gerdr can't tell a model is said so: the key does nothing
     /// else there.
@@ -1331,6 +1374,8 @@ impl Gerdr {
         let chips = self.chips_of(project, slug, stage);
         if let Some(next) = next_chip(&chips) {
             self.pick_stage_agent(project, slug, stage, &next.name);
+            // Only its chip's tooltip names it: the key says which it lit.
+            self.show_success(format!("Next {} agent: {}", stage.label(), next.name));
         }
     }
 
@@ -1485,6 +1530,7 @@ impl Gerdr {
             tracing::warn!("no tab for {agent}, waiting on {}", stage.label());
             return self.show_error(format!("Couldn't open a tab for {agent}"));
         };
+        self.label_agent_tab(&pane, &agent, stage);
         let Some(f) = self.feature_mut(project, slug) else {
             return;
         };
@@ -1670,6 +1716,7 @@ impl Gerdr {
             tracing::warn!("no tab for {agent}'s chat on {}", stage.label());
             return self.show_error(format!("Couldn't open a tab for {agent}'s chat"));
         };
+        self.label_agent_tab(&pane, &agent, stage);
         let Some(f) = self.feature_mut(project, slug) else {
             return;
         };
@@ -1910,6 +1957,9 @@ impl Gerdr {
             held: !in_t3 && !sent,
         };
         let opened = run.pane.clone();
+        if let Some(pane) = &opened {
+            self.label_agent_tab(pane, &agent, stage);
+        }
         let Some(feature) = self.feature_mut(project, slug) else {
             return false;
         };
@@ -1969,6 +2019,7 @@ impl Gerdr {
         self.fixing_tick(&project);
         self.fix_rounds_tick(&project);
         self.adopt_checks(&project);
+        self.conflicts_agents_tick(&project);
         let Some(all) = self.features.all.get(&project) else {
             return;
         };
@@ -2384,6 +2435,103 @@ impl Gerdr {
         self.show_warning(summary);
     }
 
+    /// Watch the agents taking on shipping features' conflicts like stage
+    /// agents: one that rests with its work not done (no plan or questions
+    /// written; the merge not committed) is told once (`Resolving::nudged`).
+    fn conflicts_agents_tick(&mut self, project: &str) {
+        let Some(all) = self.features.all.get(project) else {
+            return;
+        };
+        let taking: Vec<(String, feature::Resolving)> = (all.iter())
+            .filter_map(|f| {
+                let r = f.shipping.resolving.as_ref()?;
+                (!r.nudged && r.pane.is_some()).then(|| (f.slug.clone(), r.clone()))
+            })
+            .collect();
+        let now = Instant::now();
+        for (slug, r) in taking {
+            let Some(pane) = r.pane.clone() else {
+                continue;
+            };
+            // shortcut: only a local tab is nudged, as one on another
+            // machine would need its own way in; add it if conflicts run there.
+            if crate::machine_work::split_pane(&pane).is_some() {
+                continue;
+            }
+            let (status, alive) = self.agent_key_state(&agents::AgentKey::Herdr(pane.clone()));
+            let data = store::dir(None, project, &slug);
+            let found = (self.last_probe(project, &slug))
+                .and_then(|p| p.resolution.as_ref())
+                .filter(|f| f.at == r.at && f.planning == r.planning);
+            let done = conflicts_done(&r, &data, found.is_some_and(|f| f.took_in));
+            let file = if done {
+                File::Good((0, 0))
+            } else {
+                File::Absent
+            };
+            let key = (project.to_owned(), slug.clone(), Stage::Ship);
+            let watch = self.features.agents.entry(key).or_default();
+            if watch.n != r.n || watch.after != r.at {
+                *watch = Watch {
+                    n: r.n,
+                    after: r.at,
+                    ..Watch::default()
+                };
+            }
+            if !matches!(
+                judge(watch, status, alive, &file, false, false, now),
+                Verdict::Nudge { .. }
+            ) {
+                continue;
+            }
+            let text = if r.planning {
+                let values = Vars::from([
+                    ("absent".to_owned(), "yes".to_owned()),
+                    (
+                        "artifact.path".to_owned(),
+                        r.plan(&data).display().to_string(),
+                    ),
+                ]);
+                match prompts::render_builtin("nudge", &values) {
+                    Ok(text) => text.trim().to_owned(),
+                    Err(err) => {
+                        tracing::warn!("rendering the nudge: {err}");
+                        continue;
+                    }
+                }
+            } else {
+                format!(
+                    "The merge of {} isn't committed yet. Please resolve what is left and commit it, \
+                     or write what the user must settle to {}.",
+                    r.onto,
+                    r.questions(&data).display()
+                )
+            };
+            let sent = match self.herdr.as_mut() {
+                Some(herdr) => herdr.send_agent_line(&pane, &text),
+                None => Err("herdr isn't connected".into()),
+            };
+            let Some(f) = self.feature_mut(project, &slug) else {
+                continue;
+            };
+            let Some(going) = f.shipping.resolving.as_mut().filter(|g| g.at == r.at) else {
+                continue;
+            };
+            // Once, sent or not: a failure isn't tried again every round.
+            going.nudged = true;
+            let what = match sent {
+                Ok(()) if r.planning => "Conflicts agent nudged: no plan".to_owned(),
+                Ok(()) => "Conflicts agent nudged: the merge isn't committed".to_owned(),
+                Err(err) => {
+                    tracing::warn!("nudging the conflicts agent of {project}/{slug}: {err}");
+                    format!("Conflicts agent couldn't be nudged: {err}")
+                }
+            };
+            f.log(feature::now(), what);
+            self.save_feature(project, &slug);
+        }
+    }
+
     /// Tell `run`'s agent once that its file isn't there (`absent`) or
     /// lacks `missing`.
     fn nudge_stage_agent(
@@ -2684,6 +2832,7 @@ impl Gerdr {
             .agents
             .remove(&(project.to_owned(), slug.to_owned(), stage));
         self.feature_cursor_to_current_of(project, slug);
+        self.close_done_doc_tabs(project, slug, |file| file.stage() == stage);
         self.show_success(done);
         true
     }
@@ -3386,6 +3535,18 @@ mod tests {
     }
 
     #[test]
+    fn an_agent_herdr_no_longer_sees_reads_as_exited_once_it_had_time_to_start() {
+        let r = run(None);
+        let line = |now| agent_line(&r, Stage::Plan, None, None, now);
+        assert_eq!(line(1_010), "Claude Code running \u{b7} started just now");
+        assert_eq!(line(1_120), "Claude Code exited \u{b7} started 2m ago");
+        assert_eq!(
+            agent_tab_label("claude", Stage::PlanReview),
+            "claude \u{b7} Plan review"
+        );
+    }
+
+    #[test]
     fn the_reviewer_line_says_it_reviews_then_reads() {
         let now = 1_000 + 120;
         let mut r = run(None);
@@ -3514,6 +3675,36 @@ mod tests {
         );
     }
 
+    /// A conflicts agent is through once its plan or questions are written,
+    /// or, resolving, once the merge is committed.
+    #[test]
+    fn a_conflicts_agent_is_through_by_its_files_or_commit() {
+        let dir = std::env::temp_dir().join(format!("gerdr-conflicts-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut r = crate::feature::Resolving {
+            at: 1,
+            repo: "api".into(),
+            onto: "origin/main".into(),
+            onto_sha: "b".into(),
+            before: "a".into(),
+            files: vec!["a.rs".into()],
+            agent: "claude".into(),
+            pane: None,
+            n: 7,
+            planning: true,
+            nudged: false,
+        };
+        assert!(!conflicts_done(&r, &dir, true), "a commit isn't a plan");
+        std::fs::write(r.plan(&dir), "plan").unwrap();
+        assert!(conflicts_done(&r, &dir, false));
+        r.planning = false;
+        assert!(!conflicts_done(&r, &dir, false), "a plan isn't a merge");
+        assert!(conflicts_done(&r, &dir, true));
+        std::fs::write(r.questions(&dir), "?").unwrap();
+        assert!(conflicts_done(&r, &dir, false));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn an_agent_resting_a_moment_before_its_prompt_is_not_nudged() {
         let t = Instant::now();
@@ -3528,6 +3719,26 @@ mod tests {
         // Rest starts over: only a rest that lasts counts.
         assert_eq!(at(idle, t + REST * 2), Verdict::Wait);
         assert_eq!(at(idle, t + REST * 3), Verdict::Nudge { absent: true });
+    }
+
+    #[test]
+    fn an_agent_done_too_fast_to_be_seen_working_is_read_once_its_file_settles() {
+        let t = Instant::now();
+        let mut w = watch();
+        let idle = Some(AgentStatus::Idle);
+        let good = File::Good((5, 9));
+        assert_eq!(
+            judge(&mut w, idle, true, &good, false, false, t),
+            Verdict::Wait
+        );
+        // Meanwhile gerdr, not the user, is what it waits on.
+        assert!(w.reads() && !w.worked);
+        let line = agent_line(&run(None), Stage::Plan, idle, Some(&w), 5_000);
+        assert_eq!(line, "Claude Code done \u{b7} reading plan.md");
+        assert_eq!(
+            judge(&mut w, idle, true, &good, false, false, t + STABLE),
+            Verdict::Ready((5, 9))
+        );
     }
 
     #[test]

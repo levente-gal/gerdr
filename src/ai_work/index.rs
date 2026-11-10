@@ -867,10 +867,20 @@ fn apply(tx: &Transaction, f: &Feature, line: &Line) -> rusqlite::Result<()> {
                 session_run(tx, f, *agent, session, *stage, *n)?;
             }
         }
-        Event::StartedOver { .. }
-        | Event::Snapshot { .. }
-        | Event::Output { .. }
-        | Event::TranscriptMissing { .. } => {}
+        // The record as a feature closed: its title and age, which no other
+        // event has (`record.json` is only a backfill's).
+        Event::Snapshot { record } => {
+            if let Some(rec) = json_of_blob(f, record, "record") {
+                tx.execute(
+                    "UPDATE features SET
+                        title = coalesce(?3, title),
+                        created = coalesce(?4, created)
+                     WHERE project = ?1 AND slug = ?2",
+                    params![p, s, rec["title"].as_str(), ms(&rec["created"])],
+                )?;
+            }
+        }
+        Event::StartedOver { .. } | Event::Output { .. } | Event::TranscriptMissing { .. } => {}
     }
     Ok(())
 }
@@ -999,13 +1009,19 @@ fn severities(review: &Value, only_run: Option<u32>) -> BTreeMap<u32, BTreeMap<S
 /// feature `f`, when it can be read: the blob holds those of earlier
 /// reviews too, and the user's own.
 fn severities_of_blob(f: &Feature, blob: &BlobRef, n: u32) -> Option<BTreeMap<String, i64>> {
-    let packed = std::fs::read(blob.path(f.dir)).ok()?;
-    let raw = zst::decompress(&packed)
-        .inspect_err(|err| tracing::warn!("ai work: reading review {}: {err}", blob.sha))
-        .ok()?;
-    let review: Value = serde_json::from_slice(&raw).ok()?;
+    let review = json_of_blob(f, blob, "review")?;
     review["findings"].is_array().then_some(())?;
     Some(severities(&review, None).remove(&n).unwrap_or_default())
+}
+
+/// The JSON in kept blob `blob` of feature `f` (`what` it is, for the log),
+/// when it can be read.
+fn json_of_blob(f: &Feature, blob: &BlobRef, what: &str) -> Option<Value> {
+    let packed = std::fs::read(blob.path(f.dir)).ok()?;
+    let raw = zst::decompress(&packed)
+        .inspect_err(|err| tracing::warn!("ai work: reading {what} {}: {err}", blob.sha))
+        .ok()?;
+    serde_json::from_slice(&raw).ok()
 }
 
 /// Put review `review`'s findings `counts` of feature `f` in, from its
@@ -1484,6 +1500,26 @@ mod tests {
             .unwrap();
         assert_eq!(read, 0);
         assert_eq!(count(&conn, "ingest"), 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A feature with no `record.json` (not backfilled) takes its title and
+    /// age from the snapshot kept as it closed.
+    #[test]
+    fn a_snapshot_gives_the_title_and_age() {
+        let root = root("snapshot");
+        let dir = root.join("p").join("a");
+        let record = json!({"title": "Export invoices", "created": 90, "status": "done"});
+        let blob = super::super::blobs::put(&dir, record.to_string().as_bytes()).unwrap();
+        append(&dir, "here", &[line(5, Event::Snapshot { record: blob })]);
+        let mut conn = open(&root).unwrap();
+        ingest(&mut conn, std::slice::from_ref(&dir)).unwrap();
+        let got: (String, Option<i64>) = conn
+            .query_row("SELECT title, created FROM features", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(got, ("Export invoices".to_owned(), Some(90_000)));
         let _ = std::fs::remove_dir_all(&root);
     }
 

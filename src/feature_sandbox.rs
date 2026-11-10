@@ -322,9 +322,66 @@ impl Gerdr {
         true
     }
 
+    /// Start feature `slug`'s sandbox, asking for its commands, once what it
+    /// needs here (pasta, Docker or Podman with compose) is there: missing,
+    /// that is said before any command is asked for. One on another machine
+    /// finds out there.
+    pub(crate) fn ask_start_sandbox(&mut self, project: &str, slug: &str) {
+        let Some(feature) = self.feature(project, slug).cloned() else {
+            return;
+        };
+        let here = match &feature.sandbox {
+            Some(run) => run.machine.is_none(),
+            None => matches!(self.placed(&feature, Stage::ManualTest), Placed::Here),
+        };
+        let busy_now = self.busy_with(project, slug, Job::Sandbox).is_some();
+        if !here || busy_now {
+            return self.ask_sandbox_commands(project, slug);
+        }
+        let busy = Busy {
+            project: project.to_owned(),
+            slug: slug.to_owned(),
+            job: Job::Sandbox,
+            repo: None,
+            what: format!(
+                "Checking what the sandbox of \u{201c}{}\u{201d} needs",
+                feature.title
+            ),
+        };
+        let (project, slug) = (project.to_owned(), slug.to_owned());
+        self.feature_work(Some(busy), move |_| {
+            let missing = sandbox_run::tools_missing(&Host::Here)
+                .or_else(|| sandbox_run::engines(&Host::Here).err());
+            Done::SandboxTools {
+                project,
+                slug,
+                missing,
+            }
+        });
+    }
+
+    /// What feature `slug`'s sandbox needs here was looked for: missing, it
+    /// says so and stays on the problems list until a later look finds it;
+    /// there, its commands are asked for.
+    pub(crate) fn sandbox_tools_found(
+        &mut self,
+        project: &str,
+        slug: &str,
+        missing: Option<String>,
+    ) {
+        let title = (self.feature(project, slug)).map_or_else(String::new, |f| f.title.clone());
+        let Some(why) = missing else {
+            crate::problems::clear(TOOLS_PROBLEMS);
+            return self.ask_sandbox_commands(project, slug);
+        };
+        let text = failed_text(&title, &why);
+        crate::problems::report(TOOLS_PROBLEMS, text.clone());
+        self.show_error(text);
+    }
+
     /// Ask which commands feature `slug`'s sandbox runs, then start it. What
     /// runs first is listed first, as it runs.
-    pub(crate) fn ask_start_sandbox(&mut self, project: &str, slug: &str) {
+    pub(crate) fn ask_sandbox_commands(&mut self, project: &str, slug: &str) {
         let Some(feature) = self.feature(project, slug).cloned() else {
             return;
         };
@@ -1184,6 +1241,10 @@ impl Gerdr {
 
 /// The source of sandboxes' problems on the "!" badge.
 pub(crate) const PROBLEMS: &str = "sandbox";
+
+/// The source of what a sandbox needs here and isn't: its own, so a look
+/// that finds it clears that only.
+const TOOLS_PROBLEMS: &str = "sandbox-tools";
 
 /// The source of what stays paused after a copy cut short, apart: a
 /// sandbox's own problems clear when it starts.

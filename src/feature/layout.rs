@@ -1147,24 +1147,57 @@ fn commit_of(main: &Path, base: &str) -> Result<String, String> {
     Err(format!("its base branch {base} isn't there"))
 }
 
-/// The ref `losses` and `remove` count commits from for `repo`: its base
-/// branch if it is there, else origin's, else the commit it started at.
+/// What `repo`'s change is counted from (its commits, diffs and patch-id):
+/// where its branch last met its base, the local one or origin's, whichever
+/// it shares more with; else its base branch if it is there, else origin's,
+/// else the commit it started at.
 pub(super) fn base_ref(repo: &Repo) -> String {
+    let (first, names) = base_names(repo);
+    if names.is_empty() {
+        return first;
+    }
+    // A branch that took origin's base in while the local base stayed behind
+    // counts from what it took in: origin's commits aren't its change, and
+    // pulling the local base after changes nothing.
+    if let Some(branch) = repo.branch.as_deref().filter(|_| repo.touched) {
+        let mut args = vec!["merge-base", branch];
+        args.extend(names.iter().map(String::as_str));
+        if let Ok(fork) = git(&repo.main, &args) {
+            return fork.trim().to_owned();
+        }
+    }
+    first
+}
+
+/// `repo`'s base itself, not where its branch met it: the ref shown from
+/// another machine, else its base branch if it is there, else origin's, else
+/// the commit it started at.
+pub(super) fn base_tip(repo: &Repo) -> String {
+    base_names(repo).0
+}
+
+/// `base_tip`, with the base branch names that are there (none when the tip
+/// is the ref from another machine or the start commit).
+fn base_names(repo: &Repo) -> (String, Vec<String>) {
     // Shown here, written on another machine: where it left off there, whatever
     // the same branch here is at.
     if let Some(seen) = repo.branch.as_deref().map(super::remote::view_base_ref) {
         let spec = format!("{seen}^{{commit}}");
         if git(&repo.main, &["rev-parse", "--verify", "--quiet", &spec]).is_ok() {
-            return seen;
+            return (seen, Vec::new());
         }
     }
-    for name in [repo.base.clone(), format!("origin/{}", repo.base)] {
-        let spec = format!("{name}^{{commit}}");
-        if git(&repo.main, &["rev-parse", "--verify", "--quiet", &spec]).is_ok() {
-            return name;
-        }
+    let names: Vec<String> = [repo.base.clone(), format!("origin/{}", repo.base)]
+        .into_iter()
+        .filter(|name| {
+            let spec = format!("{name}^{{commit}}");
+            git(&repo.main, &["rev-parse", "--verify", "--quiet", &spec]).is_ok()
+        })
+        .collect();
+    match names.first() {
+        Some(first) => (first.clone(), names),
+        None => (repo.base_commit.clone(), Vec::new()),
     }
-    repo.base_commit.clone()
 }
 
 /// Root entries a multi-repository feature folder links to: not
@@ -1561,12 +1594,32 @@ fn commits_of(repo: &Repo, pull: Option<&PullRef>) -> Result<usize, String> {
         .trim()
         .parse()
         .map_err(|err| format!("couldn't read a commit count: {err}"))?;
-    let merged = |branch: &String| merged_into_base(repo, branch);
+    let merged = |branch: &String| merged_into_base(repo, branch) || merged_on_origin(repo, branch);
     Ok(if n > 0 && repo.branch.as_ref().is_some_and(merged) {
         0
     } else {
         n
     })
+}
+
+/// Whether `branch` of `repo` is merged into origin's base once that is
+/// fetched: a pull request merged on GitHub, its base here not pulled yet.
+/// Off the network, it isn't: then the commits count as lost.
+fn merged_on_origin(repo: &Repo, branch: &str) -> bool {
+    if let Err(failed) = crate::git_ops::fetch_branch(&repo.main, "origin", &repo.base) {
+        tracing::info!(
+            "fetching {} of {} to count what removing loses: {}",
+            repo.base,
+            repo.main.display(),
+            failed.why
+        );
+        return false;
+    }
+    let spec = format!("refs/remotes/origin/{}^{{commit}}", repo.base);
+    let Ok(base) = git(&repo.main, &["rev-parse", "--verify", "--quiet", &spec]) else {
+        return false;
+    };
+    crate::git::merged(&repo.main, branch, &[base.trim()])
 }
 
 /// Whether `branch` of `repo` is merged into its base, squashed or not.

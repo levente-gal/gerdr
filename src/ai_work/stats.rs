@@ -239,15 +239,24 @@ struct Run {
 }
 
 impl Run {
-    /// When it ended, as far as can be told: told so, else ready, else
-    /// stopped or blocked, else its chat's last message. `None` for one
+    /// When its work ended, as far as can be told: the last time its file
+    /// was ready or its agent stopped or blocked, unless it went back to
+    /// work after that; else when it was told to end, else its chat's last
+    /// message. Told to end often comes much later (the feature closed, a
+    /// new run took its place), its agent idle meanwhile. `None` for one
     /// nothing tells the end of.
     fn end(&self) -> Option<i64> {
         let rested = (self.marks.iter())
             .filter(|(_, work)| *work == Some(false))
             .map(|(at, _)| *at)
             .max();
-        self.ended.or(self.ready).or(rested).or(self.last_message)
+        let worked = self.ready.max(rested);
+        let back_at_work = (self.marks.iter())
+            .any(|(at, work)| *work == Some(true) && worked.is_some_and(|w| *at > w));
+        match worked {
+            Some(at) if !back_at_work => Some(at),
+            _ => self.ended.or(worked).or(self.last_message),
+        }
     }
 
     /// Its agent, by one name whichever wrote it: the record's picker name
@@ -1162,6 +1171,30 @@ mod tests {
     }
 
     #[test]
+    fn a_run_ends_when_its_work_did() {
+        // Ready long before the feature closed and told it to end.
+        let run = Run {
+            ready: Some(100),
+            ended: Some(5000),
+            ..Run::default()
+        };
+        assert_eq!(run.end(), Some(100));
+        // Back at work after it was ready: what told it to end ends it.
+        let mut again = run.clone();
+        again.marks = vec![(200, Some(true))];
+        assert_eq!(again.end(), Some(5000));
+        // Stopped later than it was ready.
+        let mut stopped = run.clone();
+        stopped.marks = vec![(200, Some(true)), (300, Some(false))];
+        assert_eq!(stopped.end(), Some(300));
+        let told = Run {
+            ended: Some(300),
+            ..Run::default()
+        };
+        assert_eq!(told.end(), Some(300));
+    }
+
+    #[test]
     fn features_tab_sums_each_features_runs() {
         let (root, conn) = fixture("features");
         let view = query(&conn, &scope(Tab::Features, None)).unwrap();
@@ -1328,9 +1361,10 @@ mod tests {
         assert_eq!(
             runs,
             vec![
-                // With no end told, it was ready, or its agent stopped.
+                // It was ready, or its agent stopped: not when it was told to
+                // end, later (run 2 took its place at 2999).
                 (Stage::Plan, 1, AgentKind::Claude, 1000, Some(1250), 320, 1),
-                (Stage::Build, 1, AgentKind::Codex, 2000, Some(2999), 0, 0),
+                (Stage::Build, 1, AgentKind::Codex, 2000, Some(2300), 0, 0),
                 (Stage::Build, 2, AgentKind::Codex, 3000, Some(3200), 0, 0),
                 (
                     Stage::AiReview,

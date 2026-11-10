@@ -438,6 +438,13 @@ pub(crate) enum Done {
         slug: String,
         result: Result<crate::machine_sandbox::StopAfar, String>,
     },
+    /// What a sandbox needs here was looked for before asking for its
+    /// commands: what is missing, in words.
+    SandboxTools {
+        project: String,
+        slug: String,
+        missing: Option<String>,
+    },
     /// Starting a feature's sandbox ended; `stopped`: because it was asked to.
     Sandbox {
         project: String,
@@ -671,6 +678,14 @@ pub(crate) enum Done {
         project: String,
         slug: String,
         result: Box<Result<(feature::BaseUpdate, Option<String>), String>>,
+    },
+    /// A repository's base moved on to origin's, by that many commits, or
+    /// didn't (see `ship::pull_base`).
+    BasePulled {
+        project: String,
+        slug: String,
+        repo: String,
+        result: Result<usize, String>,
     },
     /// The merge for an agent to resolve began, or the plan of it is to be
     /// written; or why not.
@@ -2111,6 +2126,11 @@ pub enum PanelOutcome {
     UndoAfter(feature::AfterStep),
     /// Take repository `.0`'s base into its branch, `.1`, after asking.
     UpdateBase(String, feature::UpdateWay),
+    /// Move repository `.0`'s base on to origin's, which its branch took
+    /// in already: what its squash waits for.
+    PullBase(String),
+    /// Close the workspace that shipping left open (see `close_left`).
+    CloseShipped,
     /// Have an agent take on repository `.0`'s conflicts with its base:
     /// plan their resolution (`.1`), or resolve them.
     ResolveConflicts(String, bool),
@@ -2410,6 +2430,9 @@ pub struct RowCtx {
     /// Ship's check is read: its repositories' cards show, with the
     /// buttons that go on them.
     pub ship_read: bool,
+    /// At Ship, as last read, something stops shipping: Ship… is no
+    /// default then.
+    pub ship_blocked: bool,
     /// Its checks are being started, or wait for a setup to end. Once their
     /// terminals are open `checks_running` says so too.
     pub checks_busy: bool,
@@ -2692,6 +2715,19 @@ fn approves_doc(feature: &Feature, stage: Stage, ctx: RowCtx) -> bool {
         && ctx.wrote(stage)
         && row_action(feature, PanelRow::Stage(stage), ctx) == Some(PanelOutcome::OpenDoc(stage))
 }
+
+/// Whether Discover's or Plan's file, at `stage` of `feature`, is written
+/// while its agent still runs on it: not read yet, so not to approve.
+fn doc_unread(feature: &Feature, stage: Stage, ctx: RowCtx) -> bool {
+    feature.status == Status::Open
+        && matches!(stage, Stage::Discover | Stage::Plan)
+        && feature.current() == Some(stage)
+        && ctx.wrote(stage)
+        && (feature.runs.get(&stage)).is_some_and(|r| r.ready.is_none() && r.live())
+}
+
+/// Why Ctrl+Enter doesn't approve a file `doc_unread` says isn't read yet.
+const DOC_UNREAD: &str = "Not read yet: the agent may still change it";
 
 /// What Plan review's row does: as any agent stage's while its agent
 /// reviews or writes the final plan; in between, the suggestions to decide,
@@ -3763,6 +3799,8 @@ fn action_hint(action: &PanelOutcome) -> &'static str {
         PanelOutcome::UndoShip(..) => "undo\u{2026}",
         PanelOutcome::UndoAfter(step) => after_undo_words(*step),
         PanelOutcome::UpdateBase(..) => "update from the base\u{2026}",
+        PanelOutcome::PullBase(_) => "pull the base",
+        PanelOutcome::CloseShipped => "close the workspace",
         PanelOutcome::ResolveConflicts(_, true) => "plan the resolution",
         PanelOutcome::ResolveConflicts(_, false) => "resolve with an agent",
         PanelOutcome::ReviewConflictPlan => "review the plan",
@@ -4025,11 +4063,29 @@ fn check_lines(
         (false, false, false) => line("Ready to ship".into(), CheckTone::Ready),
         (false, false, true) => line(steps_left(planned.steps()), CheckTone::Ready),
     };
+    // Ready but for origin's base: its new commits conflict, so a pull
+    // request would, and so would its base once pulled.
+    let conflicts: Vec<CheckLine> = (check.repos.iter())
+        .filter(|_| !planned.nothing && !planned.all_done)
+        .filter(|repo| !repo.merged)
+        .filter_map(|repo| {
+            let state = probe?.bases.get(&repo.key)?;
+            let new = count_of(state.behind, "new commit", "new commits");
+            (!state.conflicts.is_empty()).then(|| {
+                let text = format!(
+                    "{}: {} has {new} that conflict: take them in first",
+                    repo.key, state.onto
+                );
+                line(text, CheckTone::Blocker)
+            })
+        })
+        .collect();
+    let first: Vec<CheckLine> = match conflicts.is_empty() {
+        true => vec![first],
+        false => conflicts,
+    };
     let notes = check.notes.iter().map(|n| line(n.clone(), CheckTone::Note));
-    capped(
-        std::iter::once(first).chain(notes).collect(),
-        CheckTone::Note,
-    )
+    capped(first.into_iter().chain(notes).collect(), CheckTone::Note)
 }
 
 /// What Ship's mark and the history say of a feature finished unshipped.
@@ -4364,9 +4420,9 @@ fn ship_sections(
         // Taking its base in, then its pull request.
         let buttons = (actions.iter().enumerate())
             .filter(|(_, (_, o))| match o {
-                PanelOutcome::UpdateBase(r, _) | PanelOutcome::ResolveConflicts(r, _) => {
-                    *r == repo.key
-                }
+                PanelOutcome::UpdateBase(r, _)
+                | PanelOutcome::ResolveConflicts(r, _)
+                | PanelOutcome::PullBase(r) => *r == repo.key,
                 PanelOutcome::ReviewConflictPlan | PanelOutcome::StopResolving => {
                     (feature.shipping.resolving.as_ref()).is_some_and(|r| r.repo == repo.key)
                 }
@@ -4448,6 +4504,17 @@ fn ship_sections(
     out
 }
 
+/// Whether shipped `feature`'s Afterwards tick to close its workspace never
+/// ran, as something ran in it when it shipped: its Ship page offers it then.
+/// What shows the page has its workspace open.
+fn close_left(feature: &Feature) -> bool {
+    feature.status == Status::Done
+        && feature.writer.is_none()
+        && feature.dir.exists()
+        && !feature.ship_plan.keep_workspace
+        && feature.shipping.after.is_empty()
+}
+
 /// What followed shipping `feature`, once it is done: when its workspace
 /// closed and its worktrees went, and when that was undone; each with its
 /// Undo while it can be.
@@ -4460,6 +4527,16 @@ fn shipped_after_group(
     if feature.status == Status::Open {
         return None;
     }
+    // Ticked, it didn't close for what ran in it: it still can.
+    let left = close_left(feature).then(|| chrome::ShipStepRow {
+        row: 0,
+        label: "Close the workspace".to_owned(),
+        detail: Some(line("Shipping left it open".to_owned(), CheckTone::Note)),
+        ticked: true,
+        off: false,
+        done: false,
+        button: (actions.iter()).position(|(_, o)| *o == PanelOutcome::CloseShipped),
+    });
     let steps: Vec<chrome::ShipStepRow> = [AfterStep::Close, AfterStep::Remove]
         .into_iter()
         .filter_map(|step| {
@@ -4490,6 +4567,7 @@ fn shipped_after_group(
                 button,
             })
         })
+        .chain(left)
         .collect();
     (!steps.is_empty()).then(|| {
         PageSection::ShipGroup(chrome::ShipGroup {
@@ -4510,6 +4588,37 @@ fn after_undo_words(step: feature::AfterStep) -> &'static str {
         feature::AfterStep::Close => "bring back its tabs",
         feature::AfterStep::Remove => "restore the worktrees",
     }
+}
+
+/// What the Ship confirm says follows shipping `feature`, as its Afterwards
+/// ticks have it (`removable`: what is ticked merges everything); none when
+/// nothing does, or it is shipped already and ships more.
+fn ship_after_line(feature: &Feature, removable: bool) -> Option<String> {
+    if feature.status != Status::Open {
+        return None;
+    }
+    let plan = &feature.ship_plan;
+    if plan.remove_worktrees && removable {
+        return Some(match feature.touched().count() > 1 {
+            true => "Then its worktrees and branches go".to_owned(),
+            false => "Then its worktree and branch go".to_owned(),
+        });
+    }
+    (!plan.keep_workspace).then(|| "Then its workspace closes".to_owned())
+}
+
+/// The one repository whose base is to be pulled when that alone stops
+/// shipping `feature`, as `probe` read it: its key, its base, and what stops
+/// it in words.
+fn pull_first_of(feature: &Feature, probe: Option<&Probe>) -> Option<(String, String, String)> {
+    let check = probe?.ship.as_ref()?;
+    let planned = ship::plan_actions(feature, check);
+    let [said] = planned.blockers.as_slice() else {
+        return None;
+    };
+    let repo =
+        (check.repos.iter()).find(|r| r.pulls_base() && r.no_merge.as_ref() == Some(said))?;
+    Some((repo.key.clone(), repo.base.clone(), said.clone()))
 }
 
 /// Why the workspace's tick can't go with the worktrees' on.
@@ -4631,7 +4740,10 @@ fn recap_card(feature: &Feature, state: &PanelState, now: u64) -> chrome::RecapC
     if touched > 1 {
         figures.push((touched.to_string(), "repositories".to_owned()));
     }
-    let runs: u32 = feature.run_counts.values().sum();
+    // Every stage's runs, those a start over forgot too.
+    let runs: u32 = (Stage::ALL.into_iter())
+        .map(|stage| feature.next_run(stage) - 1)
+        .sum();
     if runs > 0 {
         let word = if runs == 1 { "agent run" } else { "agent runs" };
         figures.push((runs.to_string(), word.to_owned()));
@@ -4653,7 +4765,8 @@ fn recap_card(feature: &Feature, state: &PanelState, now: u64) -> chrome::RecapC
         };
         let mut said = Vec::new();
         if let Some(run) = feature.runs.get(&stage) {
-            let mut who = crate::stats_panel::agent_name(&run.agent);
+            // As the rail and its tab name it.
+            let mut who = run.agent.clone();
             if let Some(model) = run.model.as_deref() {
                 who = format!("{who} {}", short_model(model));
             }
@@ -4687,9 +4800,7 @@ fn recap_card(feature: &Feature, state: &PanelState, now: u64) -> chrome::RecapC
 /// that it is being written, or that there is none.
 fn recap_summary(feature: &Feature, probe: Option<&Probe>) -> (Vec<String>, Option<String>) {
     let run = feature.shipping.summary.as_ref();
-    let who = run.map_or("an agent".to_owned(), |r| {
-        crate::stats_panel::agent_name(&r.agent)
-    });
+    let who = run.map_or("an agent".to_owned(), |r| r.agent.clone());
     let read = probe.and_then(|p| p.docs.summary.as_ref());
     match read {
         Some((Ok(text), at)) if !text.trim().is_empty() => {
@@ -4771,10 +4882,10 @@ fn recap_stage_words(feature: &Feature, stage: Stage, state: &PanelState) -> Vec
                 n => vec![count_of(n, "round of comments", "rounds of comments")],
             }
         }
-        Stage::ManualTest if state.ctx.criteria > 0 => vec![format!(
-            "{} of {} criteria passed",
-            state.ctx.manual.passed, state.ctx.criteria
-        )],
+        // Its general comments are no criteria: as its page counts them.
+        Stage::ManualTest if state.ctx.criteria > 0 => {
+            vec![crate::manual_test::counts_text(state.ctx.manual)]
+        }
         _ => Vec::new(),
     }
 }
@@ -5552,6 +5663,15 @@ impl FeaturePanel {
             {
                 return Some(PanelOutcome::ApproveDoc(stage));
             }
+            // Written, but not read yet: say why it can't be approved.
+            Keysym::Return | Keysym::KP_Enter
+                if ctrl
+                    && !mods.shift
+                    && self.focus == TabArea::Stages
+                    && doc_unread(feature, stage, ctx) =>
+            {
+                return Some(PanelOutcome::FindingRefused(DOC_UNREAD));
+            }
             // With a fix plan under way a criterion's card has no use for it.
             Keysym::Return | Keysym::KP_Enter
                 if ctrl && self.focus == TabArea::Findings && criteria > 0 =>
@@ -6162,6 +6282,8 @@ fn writers_page_actions(
         // Reopen is no default: Enter leaves a done stage be.
         let style = match main {
             PanelOutcome::Untick(_) => ButtonStyle::Plain,
+            // What stops it is to be done first: pressed, it only says so.
+            PanelOutcome::Ship if ctx.ship_blocked => ButtonStyle::Plain,
             _ if back == Some(Rework::Waits) || round.is_some() || plan_fixes => ButtonStyle::Plain,
             _ => ButtonStyle::Primary,
         };
@@ -6288,10 +6410,15 @@ fn writers_page_actions(
     let current = mark == StageMark::Current;
     out.extend(review_actions(feature, stage));
     if current && has_failed_checks(feature, stage) {
-        out.push((
-            button("Run failed", ButtonStyle::Plain),
-            PanelOutcome::RunFailed,
-        ));
+        // Before Run checks: after a failure it is the one wanted.
+        let at = (out.iter().position(|(_, o)| *o == PanelOutcome::RunChecks)).unwrap_or(out.len());
+        out.insert(
+            at,
+            (
+                button("Run failed", ButtonStyle::Plain),
+                PanelOutcome::RunFailed,
+            ),
+        );
     }
     if stage == Stage::Verify && can_stop_checks(feature) {
         // First, as Run checks is when none runs. Not the primary: Enter
@@ -6368,6 +6495,12 @@ fn writers_page_actions(
     }
     undos.sort_by_key(|(at, ..)| std::cmp::Reverse(*at));
     out.extend(undos.into_iter().map(|(_, b, o)| (b, o)));
+    if stage == Stage::Ship && close_left(feature) {
+        out.push((
+            button("Close", ButtonStyle::Plain),
+            PanelOutcome::CloseShipped,
+        ));
+    }
     if stage == Stage::Ship {
         // On its repository's card while it can ship, once the cards show;
         // else listed by name.
@@ -6971,6 +7104,14 @@ impl Gerdr {
                 project,
                 result,
             } => self.same_repos_found(&id, &project, result),
+            Done::SandboxTools {
+                project,
+                slug,
+                missing,
+            } => {
+                self.unbusy(&project, &slug, Job::Sandbox);
+                self.sandbox_tools_found(&project, &slug, missing);
+            }
             Done::SandboxAsked {
                 project,
                 slug,
@@ -7367,6 +7508,15 @@ impl Gerdr {
                 self.unbusy(&project, &slug, Job::Ship);
                 self.base_updated(&project, &slug, *result);
             }
+            Done::BasePulled {
+                project,
+                slug,
+                repo,
+                result,
+            } => {
+                self.unbusy(&project, &slug, Job::Ship);
+                self.base_pulled(&project, &slug, &repo, result);
+            }
             Done::ShipUndone {
                 project,
                 slug,
@@ -7560,6 +7710,7 @@ impl Gerdr {
             ship_read: last
                 .and_then(|p| p.ship.as_ref())
                 .is_some_and(|c| !c.unread),
+            ship_blocked: ship_planned(feature, last).is_some_and(|p| !p.blockers.is_empty()),
             checks_busy: self.checks_busy(&feature.project, &feature.slug),
             setting_up: self.setting_up(&feature.project, &feature.slug),
             feature_busy: self.feature_busy(&feature.project, &feature.slug),
@@ -9139,6 +9290,8 @@ impl Gerdr {
         let last = self.features.shown.get(&project).map(String::as_str);
         match pick_feature(&slugs, open, last) {
             Some(slug) => self.open_feature(&project, &slug),
+            // None open: a shipped one whose worktrees went can come back.
+            None if self.open_feature_picker() => {}
             None => self.open_new_feature(None),
         }
     }
@@ -9524,6 +9677,22 @@ impl Gerdr {
         }
     }
 
+    /// Mark feature `slug`'s current stage done, as its page's Ctrl+Enter
+    /// does: a file approved, a stage bound to its output read first.
+    pub(crate) fn tick_current(&mut self, project: &str, slug: &str) {
+        match self.feature(project, slug).and_then(Feature::current) {
+            Some(stage) if needs(stage).is_some() => {
+                self.approve_stage(project, slug, stage);
+            }
+            Some(stage) if stage.bound() => self.read_and_tick(project, slug, stage),
+            Some(_) => {
+                self.tick_feature(project, slug, None, "you");
+                self.probe_feature(project, slug);
+            }
+            None => self.show_warning("Nothing left to mark done".into()),
+        }
+    }
+
     /// Do what the feature panel asked.
     pub fn apply_feature_panel(&mut self, outcome: PanelOutcome) {
         let Some((project, slug)) = self
@@ -9545,17 +9714,7 @@ impl Gerdr {
             // Only offered on what another machine writes, above.
             PanelOutcome::TakeOver => {}
             PanelOutcome::HandBack => self.hand_back(&project, &slug),
-            PanelOutcome::Tick => match self.feature(&project, &slug).and_then(Feature::current) {
-                Some(stage) if needs(stage).is_some() => {
-                    self.approve_stage(&project, &slug, stage);
-                }
-                Some(stage) if stage.bound() => self.read_and_tick(&project, &slug, stage),
-                Some(_) => {
-                    self.tick_feature(&project, &slug, None, "you");
-                    self.probe_feature(&project, &slug);
-                }
-                None => self.show_warning("Nothing left to mark done".into()),
-            },
+            PanelOutcome::Tick => self.tick_current(&project, &slug),
             PanelOutcome::Ship | PanelOutcome::Finish => self.ask_ship_feature(&project, &slug),
             PanelOutcome::ShipRoute(repo, route) => {
                 self.set_ship_route(&project, &slug, &repo, route);
@@ -9703,6 +9862,8 @@ impl Gerdr {
             PanelOutcome::UpdateBase(repo, way) => {
                 self.ask_update_base(&project, &slug, &repo, way)
             }
+            PanelOutcome::PullBase(repo) => self.pull_base(&project, &slug, &repo),
+            PanelOutcome::CloseShipped => self.ask_close_shipped(&project, &slug),
             PanelOutcome::ResolveConflicts(repo, planning) => {
                 self.resolve_conflicts(&project, &slug, &repo, planning);
             }
@@ -10391,7 +10552,19 @@ impl Gerdr {
                 ));
                 self.probe_feature(project, slug);
             }
-            ShipAsk::Blocked(why) => self.show_warning(why),
+            // Held up only by a base to pull: that is offered.
+            ShipAsk::Blocked(why) => match pull_first_of(&feature, probe) {
+                Some((repo, base, said)) => {
+                    let then = crate::confirm::Then::PullBase {
+                        project: project.to_owned(),
+                        slug: slug.to_owned(),
+                        repo: repo.clone(),
+                    };
+                    let body = format!("{said}\nIt moves on to origin/{base}, only fast-forward");
+                    self.ask(format!("Pull {base} of {repo} first?"), body, "Pull", then);
+                }
+                None => self.show_warning(why),
+            },
             ShipAsk::Finish(dirty) => {
                 let check = probe.and_then(|p| p.ship.as_ref());
                 let removing = feature.ship_plan.remove_worktrees
@@ -10409,7 +10582,10 @@ impl Gerdr {
             )),
             ShipAsk::AllRan => self.ship_all_ran(project, slug),
             ShipAsk::Ready(asked) => {
-                let steps: Vec<String> = asked.actions.iter().map(Action::label).collect();
+                let mut steps: Vec<String> = asked.actions.iter().map(Action::label).collect();
+                let check = probe.and_then(|p| p.ship.as_ref());
+                let removing = check.is_some_and(|c| ship::removable(&feature, c));
+                steps.extend(ship_after_line(&feature, removing));
                 self.features.asked.insert(key, asked);
                 self.ask_ship(project.to_owned(), slug.to_owned(), &title, &branch, &steps);
             }
@@ -10725,16 +10901,17 @@ impl Gerdr {
                 "Remove worktrees",
             )
         };
-        let mut body = removal_body(&losses);
-        // On a line of its own: the dialog cuts a line to its width, and
-        // both together don't fit.
+        // Each on a line of its own: the dialog cuts a line to its width.
+        let mut lines = vec![removal_body(&losses)];
         if let Some(w) = self.feature_workspace(&project, &slug) {
             let running = self.workspace_running(w);
-            body = format!(
-                "{body}.\n{}.",
-                crate::feature_workspace::closing_text(&running)
-            );
+            lines.push(crate::feature_workspace::closing_text(&running));
         }
+        // Unlike removing a shipped feature's worktrees, nothing brings it back.
+        if abandon {
+            lines.push("Abandoning can't be undone".to_owned());
+        }
+        let body = format!("{}.", lines.join(".\n"));
         let force = !losses.is_empty();
         let then = crate::confirm::Then::RemoveFeature {
             project,
@@ -11334,6 +11511,7 @@ impl Gerdr {
         let probe = (self.features.probes.get(&key)).and_then(|p| p.last.as_ref());
         let notes = notes_of(probe);
         let mut actions = stage_actions(feature, stage, ctx, &plan, &rows, notes);
+        actions.retain(|(_, o)| !undoes_merged(o, probe));
         actions.extend(round_plan_actions(feature, stage, probe));
         let place = self.place_label(feature, stage);
         actions.extend(place_action(place.as_deref(), stage));
@@ -11661,9 +11839,11 @@ impl Gerdr {
         let current = feature.current().filter(|s| needs(*s).is_some());
         let run = current.and_then(|stage| Some((stage, feature.runs.get(&stage)?)));
         let agent_status = run.and_then(|(_, run)| self.stage_run_state(run).0);
+        let mut agent_read = false;
         let agent = run.map(|(stage, run)| {
             let watch_key = (panel.project.clone(), panel.slug.clone(), stage);
             let watch = self.features.agents.get(&watch_key);
+            agent_read = watch.is_some_and(crate::feature_agents::Watch::reads);
             crate::feature_agents::agent_line(run, stage, agent_status, watch, now)
         });
         let manual_counts = self.manual_counts(feature);
@@ -11678,6 +11858,7 @@ impl Gerdr {
             shipping,
             agent,
             agent_status,
+            agent_read,
             tail,
             ctx: self.row_ctx(feature),
             setup: doing(Job::Setup),
@@ -11712,6 +11893,10 @@ impl Gerdr {
         let (running, more) = self.running_of(&panel.project, &panel.slug, &feature.title);
         view.running = running.into_iter().map(|(row, _)| row).collect();
         view.running_more = more;
+        // Under a dialog the page takes no keys: its footer offers none.
+        if self.open_overlays().any(crate::overlay::Overlay::is_dialog) {
+            view.hints.clear();
+        }
         // The search counts the places it found as the page shows them.
         let typed = (panel.search.as_ref()).is_some_and(|s| !s.needle().is_empty());
         if typed {
@@ -12453,6 +12638,9 @@ struct PanelState<'a> {
     agent: Option<String>,
     /// Its current stage's agent's status, while its tab is there.
     agent_status: Option<AgentStatus>,
+    /// gerdr reads what that agent wrote (`feature_agents::Watch::reads`):
+    /// it waits on gerdr, not on the user.
+    agent_read: bool,
     /// The last lines of its current stage's agent's pane, as last read.
     tail: &'a [String],
     /// What its rows need besides it.
@@ -12876,6 +13064,10 @@ fn current_line(feature: &Feature, stage: Stage, state: &LineState, now: u64) ->
                 "blocked".into()
             } else if planned.as_ref().is_some_and(|p| p.nothing) {
                 "nothing ticked".into()
+            } else if (state.probe)
+                .is_some_and(|p| p.bases.values().any(|b| !b.conflicts.is_empty()))
+            {
+                "base conflicts".into()
             } else if planned.is_some() {
                 "ready to ship".into()
             } else {
@@ -13605,6 +13797,7 @@ fn agent_card(
     // Asked something, held for its prompt, or idle with its work undone.
     let waits = match back {
         Some(back) => back.waits_on_you(),
+        None if current && state.agent_read => false,
         None if current => crate::feature_agents::waits_on_you(run, stage, state.agent_status),
         None => run.waits_to_send(),
     };
@@ -14008,6 +14201,29 @@ fn sandbox_sections(feature: &Feature, state: &PanelState) -> Vec<PageSection> {
         sections.push(lines("Containers", out));
     }
     sections
+}
+
+/// The setup's section with its own buttons (Set up again, Setup log) beside
+/// its caption, off the page's title, which holds what acts on the stage.
+fn setup_sections(
+    feature: &Feature,
+    state: &PanelState,
+    actions: &[(PageButton, PanelOutcome)],
+) -> Vec<PageSection> {
+    let Some(section) = setup_section(feature, state) else {
+        return Vec::new();
+    };
+    let held: Vec<usize> = (actions.iter().enumerate())
+        .filter(|(_, (_, o))| matches!(o, PanelOutcome::SetUp | PanelOutcome::SetupLog))
+        .map(|(i, _)| i)
+        .collect();
+    let mut out = vec![section];
+    if !held.is_empty() {
+        out.push(PageSection::Toolbar {
+            groups: vec![(String::new(), held)],
+        });
+    }
+    out
 }
 
 fn setup_section(feature: &Feature, state: &PanelState) -> Option<PageSection> {
@@ -14662,6 +14878,21 @@ fn round_plan_actions(
     }
 }
 
+/// Whether repository `repo`'s pull request was merged on GitHub, as `probe`
+/// last read it.
+pub(crate) fn pr_merged(probe: Option<&Probe>, repo: &str) -> bool {
+    (probe.and_then(|p| p.prs.as_ref()))
+        .and_then(|prs| prs.get(repo))
+        .is_some_and(|state| state.as_ref().is_ok_and(|s| s.state == "MERGED"))
+}
+
+/// Whether `outcome` undoes a push or pull request whose pull request was
+/// merged on GitHub: closing it then undoes nothing, so it isn't offered.
+fn undoes_merged(outcome: &PanelOutcome, probe: Option<&Probe>) -> bool {
+    matches!(outcome, PanelOutcome::UndoShip(repo, step)
+        if *step != ShipStep::Merge && *step != ShipStep::PushBase && pr_merged(probe, repo))
+}
+
 /// The buttons of Ship's cards that go by how each branch stands against its
 /// base, as `probe` read it: taking a base in that went on, merged or
 /// rebased.
@@ -14692,6 +14923,16 @@ fn ship_base_actions(feature: &Feature, probe: Option<&Probe>) -> Vec<(PageButto
             PanelOutcome::StopResolving,
         ));
         return out;
+    }
+    // Its squash waits for its base to be pulled: that, first.
+    let repos = (probe.and_then(|p| p.ship.as_ref())).map_or(&[][..], |c| c.repos.as_slice());
+    for repo in repos {
+        if repo.pulls_base() && ship::repo_plan(feature, repo).ticked(ShipStep::Merge) {
+            out.push((
+                button(&format!("Pull {}", repo.base), ButtonStyle::Primary),
+                PanelOutcome::PullBase(repo.key.clone()),
+            ));
+        }
     }
     for (key, state) in probe.map(|p| &p.bases).into_iter().flatten() {
         if !state.conflicts.is_empty() {
@@ -14837,6 +15078,7 @@ fn ship_keys(
     repo: Option<&str>,
 ) -> Vec<ShipKey> {
     let mut offered = page_actions(feature, Stage::Ship, ctx);
+    offered.retain(|(_, o)| !undoes_merged(o, probe));
     offered.extend(ship_base_actions(feature, probe));
     let find = |want: &dyn Fn(&PanelOutcome) -> bool| {
         (offered.iter())
@@ -14972,7 +15214,7 @@ fn ship_base_line(feature: &Feature, probe: Option<&Probe>, key: &str) -> Option
         .as_ref()
         .filter(|r| r.repo == key)
     {
-        let who = crate::stats_panel::agent_name(&r.agent);
+        let who = r.agent.clone();
         let found = probe.and_then(|p| p.resolution.as_ref());
         let files = r.files.join(", ");
         return Some(match (r.planning, found) {
@@ -14986,6 +15228,15 @@ fn ship_base_line(feature: &Feature, probe: Option<&Probe>, key: &str) -> Option
             (true, Some(f)) if f.plan => line(
                 "The resolution's plan is written: review it",
                 CheckTone::Ready,
+            ),
+            // Told once and still not through: the user's to look at.
+            (true, _) if r.nudged => line(
+                format!("{who} was nudged to write its plan: see its tab if none comes"),
+                CheckTone::Blocker,
+            ),
+            (false, _) if r.nudged => line(
+                format!("{who} was nudged to commit the merge: see its tab if it doesn't"),
+                CheckTone::Blocker,
             ),
             (true, _) => line(
                 format!("{who} plans how to resolve {files}\u{2026}"),
@@ -15093,7 +15344,8 @@ fn draft_cards(
                     CheckTone::Note,
                 ),
             ),
-            (None, Some(_)) => (Dot::Done, line(sent, CheckTone::Note)),
+            // Sent back: not done, only over, as a dropped round reads.
+            (None, Some(_)) => (Dot::Unknown, line(sent, CheckTone::Note)),
             (None, None) if latest && current => {
                 (Dot::Idle, line("ready for review", CheckTone::Ready))
             }
@@ -15348,12 +15600,12 @@ fn stage_page(
                 let building = at_work && feature.fix_round.is_none();
                 sections.extend(round_cards(feature, stage, state, actions, now));
                 sections.extend(milestones_of(state.probe, stage, building).or(counted));
-                sections.extend(setup_section(feature, state));
+                sections.extend(setup_sections(feature, state, actions));
             }
             Stage::Verify => {
                 sections.extend(ci_sections(feature, state.ctx, actions));
                 sections.extend(verify_sections(feature, state, actions, now));
-                sections.extend(setup_section(feature, state));
+                sections.extend(setup_sections(feature, state, actions));
             }
             Stage::CodeReview => {
                 // The switcher above says it, where there is one.
@@ -15725,7 +15977,7 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 7] = [
             ),
             (
                 "Ctrl+Shift+Del",
-                "start the current stage over, or drop its fix plan, after asking",
+                "start the current stage over, or drop its fix plan, after asking (not Discover: Ctrl+R starts its agent afresh)",
             ),
             (
                 "Ctrl+Enter",
@@ -16095,6 +16347,10 @@ fn fold_tip(page: &chrome::StagePage, i: usize) -> Option<String> {
             .map(|(word, _)| word.as_str()),
         _ => None,
     })?;
+    // Other toolbars' buttons (the setup's, Ship's) fold nothing.
+    if word != "Collapse" && word != "Expand" {
+        return None;
+    }
     let open = word == "Expand";
     let label = &page.buttons.get(i)?.label;
     let (what, key) = match label.as_str() {
@@ -16736,6 +16992,7 @@ fn tab_view(
                 &state.criteria,
                 notes_of(state.probe),
             );
+            actions.retain(|(_, o)| !undoes_merged(o, state.probe));
             actions.extend(round_plan_actions(feature, stage, state.probe));
             actions.extend(place_action(state.place.as_deref(), stage));
             actions.extend(stop_action(feature, stage));
@@ -18772,6 +19029,43 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_recap_counts_every_run_names_agents_as_the_rail_and_leaves_comments_out() {
+        let mut f = feature("r", vec![repo("api", true)], 8);
+        let run = |n| feature::agents::StageRun {
+            agent: "claude".into(),
+            n,
+            ..Default::default()
+        };
+        f.runs.insert(Stage::Discover, run(1));
+        f.runs.insert(Stage::AiReview, run(4));
+        // Started over twice: forgotten, still counted.
+        f.run_counts.insert(Stage::Build, 2);
+        let manual = feature::manual::Counts {
+            passed: 5,
+            comments_done: 1,
+            ..Default::default()
+        };
+        let state = PanelState {
+            ctx: RowCtx {
+                criteria: 5,
+                manual,
+                ..RowCtx::default()
+            },
+            ..PanelState::default()
+        };
+        let recap = recap_card(&f, &state, 3_000);
+        let runs = ("7".to_owned(), "agent runs".to_owned());
+        assert!(recap.figures.contains(&runs));
+        let said = |label: &str| {
+            let (_, said) = recap.stages.iter().find(|(l, _)| l == label).unwrap();
+            said.clone()
+        };
+        assert!(said("Discover").starts_with("claude \u{b7} "), "{}", said("Discover"));
+        assert!(said("AI review").starts_with("claude \u{b7} 4 runs"));
+        assert!(said("Manual test").contains("4 of 4 criteria passed \u{b7} took"));
+    }
+
+    #[test]
     fn enter_sends_the_prompt_of_an_agent_waiting_for_it() {
         let mut f = feature("b", vec![repo("api", true)], 1);
         f.runs.insert(Stage::Plan, held_run(Some("p1")));
@@ -18903,6 +19197,21 @@ pub(crate) mod tests {
         assert_eq!(card(&f, Some(AgentStatus::Blocked)), waits);
         assert_eq!(card(&f, Some(AgentStatus::Idle)), waits);
         assert_eq!(card(&f, Some(AgentStatus::Working)), working);
+        // Idle while gerdr reads what it wrote: that waits on gerdr.
+        let state = PanelState {
+            agent_status: Some(AgentStatus::Idle),
+            agent_read: true,
+            ..PanelState::default()
+        };
+        let page = stage_page(&f, Stage::Plan, &state, &[], 2_000);
+        assert!(page.sections.iter().any(|s| matches!(
+            s,
+            PageSection::Agent {
+                waits: false,
+                dot: Dot::Idle,
+                ..
+            }
+        )));
         // Its file ready, it waits on nothing.
         f.runs.insert(Stage::Plan, agent_run(Some("p1"), Some(1)));
         assert_eq!(card(&f, Some(AgentStatus::Idle)).map(|c| c.0), Some(false));
@@ -20658,12 +20967,12 @@ pub(crate) mod tests {
             [
                 "Make fixes",
                 "Plan fixes",
+                "Run failed",
                 "Run checks",
                 "Start over\u{2026}",
                 "Evidence",
                 "Set up",
-                "Commands\u{2026}",
-                "Run failed"
+                "Commands\u{2026}"
             ]
         );
     }
@@ -21566,6 +21875,73 @@ pub(crate) mod tests {
             rounds: BTreeMap::new(),
             docs: feature::page::Docs::default(),
         }
+    }
+
+    #[test]
+    fn a_pull_request_merged_on_github_offers_no_undo() {
+        let mut p = probe(None);
+        let undo = |step| PanelOutcome::UndoShip("api".into(), step);
+        assert!(!undoes_merged(&undo(ShipStep::OpenPr), Some(&p)));
+        let merged = ship::PrState {
+            state: "MERGED".into(),
+            ..Default::default()
+        };
+        p.prs = Some(BTreeMap::from([("api".to_owned(), Ok(merged))]));
+        assert!(undoes_merged(&undo(ShipStep::OpenPr), Some(&p)));
+        assert!(undoes_merged(&undo(ShipStep::Push), Some(&p)));
+        assert!(!undoes_merged(&undo(ShipStep::Merge), Some(&p)));
+        let other = PanelOutcome::UndoShip("web".into(), ShipStep::OpenPr);
+        assert!(!undoes_merged(&other, Some(&p)));
+    }
+
+    #[test]
+    fn the_ship_confirm_says_what_follows_shipping() {
+        let mut f = feature("s", vec![repo("api", true)], 8);
+        let said = |f: &Feature, removable| ship_after_line(f, removable);
+        let closes = Some("Then its workspace closes".to_owned());
+        assert_eq!(said(&f, true), closes);
+        f.ship_plan.remove_worktrees = true;
+        let go = Some("Then its worktree and branch go".to_owned());
+        assert_eq!(said(&f, true), go);
+        // What is ticked no longer merges everything: they stay.
+        assert_eq!(said(&f, false), closes);
+        f.ship_plan = Default::default();
+        f.ship_plan.keep_workspace = true;
+        assert_eq!(said(&f, true), None);
+        f.ship_plan.keep_workspace = false;
+        f.status = Status::Done;
+        assert_eq!(said(&f, true), None);
+    }
+
+    #[test]
+    fn a_base_to_pull_is_offered_and_ship_is_no_default_while_it_holds_up() {
+        let f = feature("s", vec![repo("api", true)], 8);
+        let why = "api: feature/s has 8 commits of origin/main that main lacks: pull main first";
+        let mut c = check(&[], &["api"], &[]).unwrap();
+        c.repos[0].route = Route::Merge;
+        c.repos[0].no_merge = Some(why.to_owned());
+        let p = probe(Some(c));
+        assert_eq!(
+            pull_first_of(&f, Some(&p)),
+            Some(("api".into(), "main".into(), why.into()))
+        );
+        let pull = (PanelOutcome::PullBase("api".into()), ButtonStyle::Primary);
+        let offered: Vec<_> = (ship_base_actions(&f, Some(&p)).into_iter())
+            .map(|(b, o)| (o, b.style))
+            .collect();
+        assert!(offered.contains(&pull), "{offered:?}");
+        let ctx = RowCtx {
+            ship_blocked: true,
+            ..RowCtx::default()
+        };
+        let ship = (page_actions(&f, Stage::Ship, ctx).into_iter())
+            .find(|(_, o)| *o == PanelOutcome::Ship)
+            .unwrap();
+        assert_eq!(ship.0.style, ButtonStyle::Plain);
+        // Something else holding it up: no pull asked.
+        let mut c = check(&["api is dirty"], &["api"], &[]).unwrap();
+        c.repos[0].route = Route::Merge;
+        assert_eq!(pull_first_of(&f, Some(&probe(Some(c)))), None);
     }
 
     /// A check finding `repos` to ship through origin, each with commits.
@@ -23918,6 +24294,25 @@ pub(crate) mod tests {
                 ("api pushes to origin", CheckTone::Note)
             ]
         );
+        // Origin's base moved on in a way that conflicts: not ready.
+        let mut behind = ready.clone();
+        let state = ship::BaseState {
+            onto: "origin/main".into(),
+            behind: 8,
+            conflicts: vec!["export.py".into()],
+            ..Default::default()
+        };
+        behind.bases.insert("api".into(), state);
+        assert_eq!(
+            texts(&check_lines(&f, Some(&behind), false, 2_060)),
+            [
+                (
+                    "api: origin/main has 8 new commits that conflict: take them in first",
+                    CheckTone::Blocker
+                ),
+                ("api pushes to origin", CheckTone::Note)
+            ]
+        );
         // Nothing to do: what would stop shipping stops nothing.
         let nothing = probe(check(
             &["api is dirty"],
@@ -24456,6 +24851,32 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_setup_holds_its_own_buttons() {
+        let mut f = feature("b", vec![repo("api", true)], 3);
+        let state = PanelState::default();
+        let button = |label: &str| PageButton {
+            label: label.to_owned(),
+            style: ButtonStyle::Quiet,
+        };
+        let actions = vec![
+            (button("Run checks"), PanelOutcome::RunChecks),
+            (button("Set up again"), PanelOutcome::SetUp),
+            (button("Setup log"), PanelOutcome::SetupLog),
+        ];
+        // No setup ran: they stay at the title.
+        assert!(setup_sections(&f, &state, &actions).is_empty());
+        f.setup = Some(feature::setup::SetupRun {
+            finished: Some(2),
+            ..Default::default()
+        });
+        let sections = setup_sections(&f, &state, &actions);
+        assert!(matches!(&sections[0], PageSection::Lines { label, .. } if label == "Setup"));
+        assert!(
+            matches!(&sections[1], PageSection::Toolbar { groups } if groups[0].1 == vec![1, 2])
+        );
+    }
+
+    #[test]
     fn the_setup_section_says_what_went_wrong_then_what_it_copied() {
         let mut f = feature("b", vec![repo("api", true)], 3);
         let state = PanelState::default();
@@ -24606,7 +25027,8 @@ pub(crate) mod tests {
             (node.mark, node.line.as_str()),
             (NodeMark::Waiting, "milestone 1/3")
         );
-        // Its setup goes last, its failure said by the status at the top.
+        // Its setup goes last, with its own buttons beside it, its failure
+        // said by the status at the top.
         f.setup = Some(feature::setup::SetupRun {
             started: 1_000,
             finished: Some(1_100),
@@ -24614,8 +25036,12 @@ pub(crate) mod tests {
             ..Default::default()
         });
         let page = stage_page(&f, Stage::Build, &state, &actions, 2_000);
+        let n = page.sections.len();
+        assert!(matches!(&page.sections[n - 1], PageSection::Toolbar { groups }
+            if groups[0].1.iter().all(|&b| matches!(actions[b].1,
+                PanelOutcome::SetUp | PanelOutcome::SetupLog))));
         assert_eq!(
-            page.sections.last(),
+            page.sections.get(n - 2),
             Some(&lines(
                 "Setup",
                 vec![line(
@@ -25035,6 +25461,23 @@ pub(crate) mod tests {
             CheckTone::Note,
         );
         assert_eq!(card, Some(kept));
+        // Ctrl+Enter can't approve it yet, and says why.
+        let ctrl = ModifiersState {
+            ctrl: true,
+            ..ModifiersState::default()
+        };
+        let slugs = [f.slug.clone()];
+        let got = FeaturePanel::default().key(
+            &ctrl,
+            Keysym::Return,
+            &f,
+            &slugs,
+            written,
+            &[],
+            &[],
+            &[],
+        );
+        assert_eq!(got, Some(PanelOutcome::FindingRefused(DOC_UNREAD)));
         // Nothing there yet: it is being written, as before.
         assert_eq!(
             file_line(&f, Stage::Discover, RowCtx::default()),
@@ -25451,7 +25894,7 @@ pub(crate) mod tests {
         });
         assert_eq!(
             recap_summary(&f, Some(&p)).1.as_deref(),
-            Some("Claude Code is writing a summary\u{2026}")
+            Some("claude is writing a summary\u{2026}")
         );
         p.docs.summary = Some((Ok("One\nline.\n\nTwo.\n".into()), 200));
         let (paragraphs, note) = recap_summary(&f, Some(&p));
@@ -25464,7 +25907,7 @@ pub(crate) mod tests {
         f.shipping.summary.as_mut().unwrap().at = 300;
         assert_eq!(
             recap_summary(&f, Some(&p)).1.as_deref(),
-            Some("Claude Code is writing it again\u{2026}")
+            Some("claude is writing it again\u{2026}")
         );
     }
 
@@ -25637,6 +26080,42 @@ pub(crate) mod tests {
             )
         );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_workspace_shipping_left_open_can_still_close() {
+        let mut f = feature("s", vec![repo("api", true)], Stage::ALL.len());
+        f.status = Status::Done;
+        f.dir = std::env::temp_dir().join(format!("gerdr-close-left-{}", std::process::id()));
+        std::fs::create_dir_all(&f.dir).unwrap();
+        let close = |f: &Feature| {
+            let actions = page_actions(f, Stage::Ship, RowCtx::default());
+            let page = stage_page(f, Stage::Ship, &PanelState::default(), &actions, 2_000);
+            let row = page.sections.iter().find_map(|s| match s {
+                PageSection::ShipGroup(g) if g.head == "Afterwards" => {
+                    g.steps.iter().find(|r| r.label == "Close the workspace").cloned()
+                }
+                _ => None,
+            });
+            row.map(|row| actions[row.button.expect("its button")].1.clone())
+        };
+        assert_eq!(close(&f), Some(PanelOutcome::CloseShipped));
+        // Kept open by its tick, or closed once already: nothing to offer.
+        f.ship_plan.keep_workspace = true;
+        assert_eq!(close(&f), None);
+        f.ship_plan.keep_workspace = false;
+        f.after_ran(crate::feature::AfterDone {
+            at: 1_950,
+            step: crate::feature::AfterStep::Close,
+            tabs: Vec::new(),
+            heads: Vec::new(),
+            undone: Some(1_960),
+        });
+        assert_eq!(close(&f), None);
+        f.shipping.after.clear();
+        std::fs::remove_dir_all(&f.dir).unwrap();
+        // Its folder gone: no workspace to close.
+        assert_eq!(close(&f), None);
     }
 
     #[test]
@@ -25913,6 +26392,7 @@ pub(crate) mod tests {
             pane: None,
             n: 1,
             planning: false,
+            nudged: false,
         });
         let keys = ship_keys(&f, ctx, Some(&p), None);
         assert!(
@@ -26436,7 +26916,7 @@ pub(crate) mod tests {
         // A round known only by the build log has its card all the same.
         assert_eq!(
             groups,
-            [("Verify 3", 0, 1), ("Review 1", 2, 2), ("Build", 2, 3)]
+            [("Verify 1", 0, 1), ("Review 1", 2, 2), ("Build", 2, 3)]
         );
     }
 
@@ -27239,9 +27719,10 @@ pub(crate) mod tests {
                 _ => None,
             })
             .collect();
-        // Newest first, by who asked; Build keeps "Review N" for AI review's.
+        // Newest first, by who asked, each counted in its stage; Build keeps
+        // "Review N" for AI review's.
         let labels: Vec<&str> = cards.iter().map(|c| c.label.as_str()).collect();
-        assert_eq!(labels, ["Verify 3", "Code review 2", "Review 1"]);
+        assert_eq!(labels, ["Verify 1", "Code review 1", "Review 1"]);
         // The open one shows open whatever its number.
         let opened: Vec<bool> = cards.iter().map(|c| c.open).collect();
         assert_eq!(opened, [false, true, false]);
@@ -27384,6 +27865,8 @@ pub(crate) mod tests {
         assert_eq!(cards[0].state.text, "ready for review");
         assert_eq!(cards[0].dot, Dot::Idle);
         assert_eq!(cards[1].state.text, "sent back with 1 comment");
+        // Sent back is over, not done: no green dot.
+        assert_eq!(cards[1].dot, Dot::Unknown);
         assert_eq!(cards[1].asked_caption, "Comments sent back");
         assert_eq!(cards[1].asked[0].note, "Why not cron?");
         assert_eq!(cards[0].meta, "Claude Code (opus) \u{b7} written 2m ago");

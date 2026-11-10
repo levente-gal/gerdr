@@ -15,6 +15,8 @@ const MENU_HINT_ROOM: i32 = 80;
 const MENU_GAP: i32 = 2;
 /// The gap between a row's label and its key hint.
 const MENU_HINT_GAP: i32 = 16;
+/// How tall a row of a message is: its lines close, as a paragraph's.
+const MENU_NOTE_HEIGHT: i32 = 20;
 
 /// One row of a menu.
 #[derive(Clone, Debug, PartialEq)]
@@ -23,6 +25,16 @@ pub struct MenuRow {
     /// The key that does the same, at the right.
     pub hint: Option<String>,
     pub enabled: bool,
+    /// A line of a message, not a choice: shorter, its lines read as one.
+    pub note: bool,
+}
+
+/// How tall `row` is in its menu.
+fn row_height(row: &MenuRow) -> i32 {
+    match row.note {
+        true => MENU_NOTE_HEIGHT,
+        false => MENU_ITEM_HEIGHT,
+    }
 }
 
 /// What a menu shows: its rows, under `anchor` (window coordinates), and
@@ -61,7 +73,7 @@ pub fn menu_layout(
     output: Size<i32, Logical>,
 ) -> (Rect, Vec<Rect>) {
     let w = menu_width(rows);
-    let h = 2 * MENU_PADDING + rows.len() as i32 * MENU_ITEM_HEIGHT;
+    let h = 2 * MENU_PADDING + rows.iter().map(row_height).sum::<i32>();
     let below = anchor.loc.y + anchor.size.h + MENU_GAP;
     let above = anchor.loc.y - MENU_GAP - h;
     let room_below = output.h - below;
@@ -76,13 +88,15 @@ pub fn menu_layout(
     };
     let x = anchor.loc.x.min((output.w - w).max(0));
     let panel = Rectangle::new((x, top).into(), (w, h).into());
-    let items = (0..rows.len() as i32)
-        .map(|i| {
-            let y = panel.loc.y + MENU_PADDING + i * MENU_ITEM_HEIGHT;
-            Rectangle::new(
+    let mut y = panel.loc.y + MENU_PADDING;
+    let items = (rows.iter())
+        .map(|row| {
+            let item = Rectangle::new(
                 (x + MENU_PADDING, y).into(),
-                (w - 2 * MENU_PADDING, MENU_ITEM_HEIGHT).into(),
-            )
+                (w - 2 * MENU_PADDING, row_height(row)).into(),
+            );
+            y += row_height(row);
+            item
         })
         .collect();
     (panel, items)
@@ -158,8 +172,32 @@ mod tests {
                 label: format!("Item {i}"),
                 hint: hint.then(|| "Ctrl+B x".into()),
                 enabled: true,
+                note: false,
             })
             .collect()
+    }
+
+    #[test]
+    fn a_messages_lines_sit_closer_than_rows() {
+        let anchor = Rect::new((150, 0).into(), (28, BAR_HEIGHT).into());
+        let mut menu = rows(1, false);
+        let note = |label: &str| MenuRow {
+            label: label.into(),
+            hint: None,
+            enabled: false,
+            note: true,
+        };
+        menu.splice(0..0, [note("one line"), note("and the next")]);
+        let (panel, items) = menu_layout(anchor, &menu, (1200, 800).into());
+        let (a, b, row) = (items[0], items[1], items[2]);
+        assert_eq!(b.loc.y, a.loc.y + a.size.h);
+        assert_eq!(row.loc.y, b.loc.y + b.size.h);
+        assert!(a.size.h < row.size.h);
+        assert_eq!(row.size.h, MENU_ITEM_HEIGHT);
+        assert_eq!(
+            panel.size.h,
+            2 * MENU_PADDING + 2 * a.size.h + MENU_ITEM_HEIGHT
+        );
     }
 
     #[test]

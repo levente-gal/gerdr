@@ -934,7 +934,11 @@ fn feature_line(f: &stats::FeatureRow, all: bool, now: u64) -> Line {
             vec![
                 title,
                 f.status.clone(),
-                ago(now, f.created),
+                // Nothing kept says when: not 1970.
+                match f.created {
+                    0 => NONE.into(),
+                    at => ago(now, at),
+                },
                 span(f.ai_secs),
                 f.runs.to_string(),
                 f.fix_rounds.to_string(),
@@ -1342,6 +1346,19 @@ impl Gerdr {
         if let Err(err) = &result {
             tracing::warn!("reading the AI work's stats: {err}");
         }
+        // The index has a feature's title and age only once it closed (its
+        // snapshot): one still here says them as everywhere else.
+        let result = result.map(|mut view| {
+            for f in &mut view.features {
+                if let Some(live) = self.feature(&f.project, &f.slug) {
+                    f.title.clone_from(&live.title);
+                    if f.created == 0 {
+                        f.created = live.created;
+                    }
+                }
+            }
+            view
+        });
         let page = self.ai_stats_page();
         // The index is made but still being filled: what it lacks is on the
         // way, not missing.

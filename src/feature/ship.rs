@@ -132,6 +132,29 @@ impl RepoCheck {
             ShipStep::Merge => self.no_merge.as_deref(),
         }
     }
+
+    /// Its squash waits for its base to be pulled: its branch took in
+    /// commits of origin's base that the base here lacks (`pull_base`).
+    pub fn pulls_base(&self) -> bool {
+        (self.no_merge.as_deref()).is_some_and(|why| why.ends_with(&pull_first(&self.base)))
+    }
+}
+
+/// How the squash's blocker ends when `base` lacks what origin's has.
+fn pull_first(base: &str) -> String {
+    format!(": pull {base} first")
+}
+
+/// Move `repo`'s base on to origin's in its main worktree, as a pull does,
+/// only fast-forward: what its squash waits for (`RepoCheck::pulls_base`).
+/// How many commits it took.
+pub fn pull_base(repo: &Repo) -> Result<usize, String> {
+    let remote = format!("origin/{}", repo.base);
+    let range = format!("{}..{remote}", repo.base);
+    let count = git(&repo.main, &["rev-list", "--count", &range])?;
+    let n = (count.trim().parse()).map_err(|err| format!("couldn't read a commit count: {err}"))?;
+    git(&repo.main, &["merge", "-q", "--ff-only", &remote])?;
+    Ok(n)
 }
 
 /// What the ticks ask of a feature, given its `ShipCheck`.
@@ -670,7 +693,8 @@ fn squash_blocker(repo: &Repo, branch: &str) -> Option<String> {
             n => format!("{n} commits"),
         };
         return Some(format!(
-            "{name}: {branch} has {commits} of {remote} that {base} lacks: pull {base} first"
+            "{name}: {branch} has {commits} of {remote} that {base} lacks{}",
+            pull_first(base)
         ));
     }
     match git_ops::predict_merge(&repo.main, base, branch) {
@@ -2289,8 +2313,22 @@ esac
             squash_blocker(&f.repos[0], &f.branch()).as_deref(),
             Some("api: feature/f has a commit of origin/main that main lacks: pull main first")
         );
-        run(&main, &["merge", "-q", "--ff-only", "origin/main"]);
+        let check = |no_merge: Option<String>| RepoCheck {
+            key: "api".into(),
+            base: "main".into(),
+            main: main.clone(),
+            commits: 1,
+            route: Route::Merge,
+            no_origin: None,
+            no_merge,
+            merged: false,
+            head: None,
+            pushed: None,
+        };
+        assert!(check(squash_blocker(&f.repos[0], &f.branch())).pulls_base());
+        assert_eq!(pull_base(&f.repos[0]), Ok(1));
         assert_eq!(squash_blocker(&f.repos[0], &f.branch()), None);
+        assert!(!check(Some("api: squashing into main conflicts in c".into())).pulls_base());
 
         // A change to the same file conflicts: read so, and refused as it was.
         commit(&wt(&f, "api"), "c", "feature side");
@@ -2338,6 +2376,7 @@ esac
             pane: None,
             n: 1,
             planning: false,
+            nudged: false,
         });
         let data = t.0.join("data");
         let found = read_resolution(&f, &data).unwrap();
@@ -2385,6 +2424,45 @@ esac
         assert_eq!(build.patch.as_deref(), Some("new-patch"));
         assert_eq!(f.stale("new-patch"), None);
         assert!(f.rebased_since_push("api"), "a rebase pushes with lease");
+    }
+
+    /// Origin's base taken in while the local base stays behind isn't the
+    /// feature's change: not in its diff, line count or patch-id, and
+    /// pulling the local base after changes none of them.
+    #[test]
+    fn a_base_taken_in_is_not_the_features_change() {
+        let t = Temp::new();
+        let mut f = feature_over(&t, &["api"], &[]);
+        origins(&t, &f);
+        commit(&wt(&f, "api"), "a1", "api change");
+        let own = patch::read(&f).unwrap().patch;
+        // Origin's main moves on by two commits; the local main stays behind.
+        let main = f.repos[0].main.clone();
+        commit(&main, "m1", "on main");
+        commit(&main, "m2", "more on main");
+        run(&main, &["push", "-q", "origin", "main"]);
+        run(&main, &["reset", "-q", "--hard", "HEAD~2"]);
+
+        let (update, patch) = update_from_base(&f, "api", UpdateWay::Merge, 7).unwrap();
+        assert_eq!(patch.as_deref(), Some(own.as_str()));
+        f.updated_from_base(update.clone(), patch.as_deref(), 7);
+        assert_eq!(f.repos[0].base_commit, update.onto_sha);
+        let reading = patch::read(&f).unwrap();
+        assert_eq!(reading.patch, own);
+        assert_eq!(reading.commits["api"], 2, "a1 and the merge");
+        let stat = super::super::page::stat(&f.repos[0]).unwrap();
+        assert_eq!((stat.files, stat.added), (1, 1));
+        let read = super::super::viewed::read(&f.repos[0]).unwrap();
+        let paths: Vec<_> = read.blobs.keys().collect();
+        assert_eq!(paths, ["a1"]);
+
+        // Pulling the local main changes nothing of the feature's.
+        run(&main, &["merge", "-q", "--ff-only", "origin/main"]);
+        let pulled = patch::read(&f).unwrap();
+        assert_eq!(pulled.patch, own);
+        assert_eq!(pulled.commits, reading.commits);
+        let stat = super::super::page::stat(&f.repos[0]).unwrap();
+        assert_eq!((stat.files, stat.added), (1, 1));
     }
 
     /// A push from before the log kept its commit holds only while origin's
@@ -2483,6 +2561,31 @@ esac
         crate::feature::layout::remove(&f, false).unwrap();
         assert!(!wt(&f, "api").exists());
         assert!(try_run(&main, &["rev-parse", "--verify", "-q", "feature/f"]).is_err());
+    }
+
+    #[test]
+    fn a_branch_merged_on_origin_loses_nothing_before_main_is_pulled() {
+        let t = Temp::new();
+        let mut f = feature_over(&t, &["api"], &[]);
+        origins(&t, &f);
+        commit(&wt(&f, "api"), "a", "change");
+        mark_all(&mut f);
+        let main = f.repos[0].main.clone();
+        // Merged on GitHub: squashed into origin's main from elsewhere.
+        let other = t.0.join("other");
+        let origin = t.0.join("api.git");
+        let (origin, other_dir) = (origin.to_str().unwrap(), other.to_str().unwrap());
+        run(&t.0, &["clone", "-q", origin, other_dir]);
+        run(&main, &["push", "-q", "origin", "feature/f"]);
+        run(&other, &["fetch", "-q", "origin", "feature/f"]);
+        run(&other, &["merge", "-q", "--squash", "FETCH_HEAD"]);
+        let who = ["-c", "user.name=t", "-c", "user.email=t@t"];
+        run(
+            &other,
+            &[&who[..], &["commit", "-q", "-m", "squashed"]].concat(),
+        );
+        run(&other, &["push", "-q", "origin", "main"]);
+        assert!(crate::feature::layout::losses(&f).is_empty());
     }
 
     #[test]

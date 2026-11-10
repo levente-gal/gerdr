@@ -3645,12 +3645,14 @@ impl Stack {
     /// `text` as a file's text: all of its lines, a line `h` high each.
     fn doc_text(&mut self, text: &str, font: Font, ink: Ink, bold: bool, h: i32) {
         let size = font.size();
-        let lines = match bold {
-            true => doc_lines(text, self.w, |t| {
+        // A hard break (`md_blocks`) starts a line of its own.
+        let w = self.w;
+        let lines = text.split('\n').flat_map(|text| match bold {
+            true => doc_lines(text, w, |t| {
                 measure_bold(t, size).unwrap_or_else(|| width_of(t, size))
             }),
-            false => doc_lines(text, self.w, |t| width_of(t, size)),
-        };
+            false => doc_lines(text, w, |t| width_of(t, size)),
+        });
         for text in lines {
             self.put(
                 h,

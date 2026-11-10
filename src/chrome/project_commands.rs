@@ -515,16 +515,9 @@ impl Painter {
             let (x, end) = phys(rect, scale);
             self.text(c, text, size, x, end, band(rect, scale), scale, color)
         };
-        line(
-            &mut c,
-            match view.tab {
-                CommandsTab::Feature => "Feature checks",
-                _ => "Project commands",
-            },
-            layout.title,
-            LABEL_FONT_SIZE,
-            p.text,
-        );
+        // As its button says: the tabs leave no room for more, and the one
+        // picked says whose they are.
+        line(&mut c, "Commands", layout.title, LABEL_FONT_SIZE, p.text);
         let tabs: Vec<_> = (layout.tabs.iter())
             .map(|(tab, rect)| (tab.label(), shift(*rect)))
             .collect();

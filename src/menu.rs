@@ -45,6 +45,9 @@ pub enum MenuAction {
     PlanFixes(String, String),
     /// The same with no fix plan (see `Gerdr::make_finding_fixes`).
     MakeFindingFixes(String, String),
+    /// Reopen a done stage of a project's feature (see
+    /// `Gerdr::reopen_stage`): a toast's Undo of finishing it.
+    ReopenStage(String, String, crate::feature::Stage),
     /// T3 Code's server, started in the background (see
     /// `Gerdr::spawn_t3`).
     StartT3,
@@ -179,6 +182,13 @@ pub enum MenuAction {
     ReviewPulls(Option<usize>),
     /// The feature panel on feature `.1` of project `.0`.
     OpenFeature(String, String),
+    /// A toast's "Undo" after stage `stage` of feature `slug` was reopened:
+    /// mark it done again, as its page would, while it is the current one.
+    Redone {
+        project: String,
+        slug: String,
+        stage: crate::feature::Stage,
+    },
     /// A toast's "Undo" after inbox items were dismissed or snoozed: list
     /// the items (by `inbox::ItemId`) of project `project` (by id) again,
     /// and mark the service errors `unsee` as not looked at again.
@@ -298,6 +308,8 @@ pub struct MenuItem {
     pub hint: Option<String>,
     pub action: MenuAction,
     pub enabled: bool,
+    /// A line of text, not a choice (see `note`).
+    pub note: bool,
 }
 
 impl MenuItem {
@@ -307,6 +319,17 @@ impl MenuItem {
             hint: None,
             action,
             enabled: true,
+            note: false,
+        }
+    }
+
+    /// A line of a message the menu says (`text`): it can't be picked, and
+    /// its lines sit as close as a paragraph's.
+    pub fn note(text: &str) -> Self {
+        Self {
+            enabled: false,
+            note: true,
+            ..Self::new(text, MenuAction::OpenLog)
         }
     }
 
@@ -360,6 +383,7 @@ impl ContextMenu {
                 label: item.label.clone(),
                 hint: item.hint.clone(),
                 enabled: item.enabled,
+                note: item.note,
             })
             .collect()
     }
@@ -594,9 +618,23 @@ impl Gerdr {
             MenuAction::NewFeature(at) => self.open_new_feature(at),
             MenuAction::ReviewPulls(at) => self.open_review_pulls(at),
             MenuAction::OpenFeature(project, slug) => self.open_linked_feature(&project, &slug),
+            MenuAction::Redone {
+                project,
+                slug,
+                stage,
+            } => {
+                let current = self.feature(&project, &slug).and_then(|f| f.current());
+                match current == Some(stage) {
+                    true => self.tick_current(&project, &slug),
+                    false => self.show_warning(format!("{} isn't open any more", stage.label())),
+                }
+            }
             MenuAction::PlanFixes(project, slug) => self.send_findings(&project, &slug),
             MenuAction::MakeFindingFixes(project, slug) => {
                 self.make_finding_fixes(&project, &slug);
+            }
+            MenuAction::ReopenStage(project, slug, stage) => {
+                self.reopen_stage(&project, &slug, stage);
             }
             MenuAction::InboxRestore {
                 project,

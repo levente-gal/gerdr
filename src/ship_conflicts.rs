@@ -149,6 +149,7 @@ impl Gerdr {
             pane: None,
             n,
             planning,
+            nudged: false,
         };
         // It merged cleanly after all: the next read finds it done.
         if begun.files.is_empty() && !planning {
