@@ -187,6 +187,7 @@ pub fn suggestion_comments(
             of: ItemOf::Suggestion,
             frozen,
             unanswered: s.unanswered(),
+            question: s.kind == crate::feature::plan_review::Kind::Question,
             pr: false,
             ..Flag::default()
         };
@@ -582,6 +583,31 @@ mod tests {
     fn labels(wd: &WorktreeDiff) -> Vec<String> {
         let view = wd.view(crate::worktree_diff::tests::ENV);
         view.row_buttons.into_iter().map(|(_, h)| h.label).collect()
+    }
+
+    #[test]
+    fn an_answer_reads_your_answer_as_on_its_card() {
+        use crate::chrome::DetailRow;
+        let answered = Suggestion {
+            kind: Kind::Question,
+            note: "Yes, both".into(),
+            ..suggestion("r1-1")
+        };
+        let commented = Suggestion {
+            note: "Careful".into(),
+            ..suggestion("r1-2")
+        };
+        let wd = flagged(vec![answered, commented], None);
+        let view = wd.view(crate::worktree_diff::tests::ENV);
+        let mine: Vec<&str> = (view.rows.iter())
+            .filter_map(|row| match row {
+                DetailRow::CommentHead {
+                    who, finding: None, ..
+                } => Some(*who),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(mine, ["Your answer", "Your comment"]);
     }
 
     #[test]

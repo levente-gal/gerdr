@@ -128,14 +128,13 @@ fn no_reason(of: ItemOf) -> &'static str {
     }
 }
 
-/// What a flag's decide button says on an item `of`: a finding's are the
-/// buttons' own, but on a review that posts to GitHub (`pr`), and a
-/// suggestion's its words. `button` is one of `FixFinding`,
-/// `DismissFinding` or `ReopenFinding`; `state` where the item stands.
+/// What a flag's decide button says on an item `of`: its kind's words, as
+/// its card on the page says them (on a review that posts to GitHub, `pr`,
+/// those of a comment). `button` is one of `FixFinding`, `DismissFinding`
+/// or `ReopenFinding`; `state` where the item stands.
 fn decide_label(of: ItemOf, pr: bool, button: ReposButton, state: FindingState) -> String {
     let words = review_items::words_in(of, pr);
     match (of, button, state) {
-        (ItemOf::Finding, ..) if !pr => button.label().into(),
         (_, ReposButton::FixFinding, _) => words.want.into(),
         (_, ReposButton::DismissFinding, _) => words.refuse.into(),
         (_, ReposButton::ReopenFinding, FindingState::Fix) => words.unwant.into(),
@@ -2740,6 +2739,8 @@ impl DiffView {
                 let who = match comment.flag.as_ref() {
                     Some(flag) if !flag.yours => review_items::words(flag.of).by,
                     Some(flag) if !flag.note => review_items::words(flag.of).own_head,
+                    // As the item's card on the page calls it.
+                    Some(flag) if flag.question => review_items::words(flag.of).answer,
                     _ => "Your comment",
                 };
                 DetailRow::CommentHead {

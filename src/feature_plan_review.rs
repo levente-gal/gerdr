@@ -417,6 +417,8 @@ impl Gerdr {
             dropped: got.dropped,
         };
         let review = f.plan_review.get_or_insert_with(PlanReview::default);
+        // The same run's file rewritten, as after Ask reviewer: read again.
+        let again = review.runs.iter().any(|r| r.n == n);
         plan_review::keep_run(review, record);
         let open = review.open();
         let not_found = review.not_found();
@@ -428,8 +430,11 @@ impl Gerdr {
         f.log(
             now,
             format!(
-                "Plan review run {n} read: {} new, {} raised again, {} left out",
-                got.new, got.again, got.dropped
+                "Plan review run {n} read{}: {} new, {} raised again, {} left out",
+                if again { " again" } else { "" },
+                got.new,
+                got.again,
+                got.dropped
             ),
         );
         self.save_feature(project, slug);
@@ -1018,7 +1023,13 @@ impl Gerdr {
         let key = (project.to_owned(), slug.to_owned(), STAGE);
         self.features.agents.remove(&key);
         self.feature_cursor_to_current_of(project, slug);
-        self.show_success(format!("Plan review done: {note}"));
+        // Done by one press, with nothing asked: Undo reopens it, as Reopen does.
+        let undo = MenuAction::ReopenStage(project.to_owned(), slug.to_owned(), STAGE);
+        self.toast_with(
+            format!("Plan review done: {note}"),
+            Level::Success,
+            Some(("Undo".to_owned(), undo)),
+        );
     }
 
     /// The panes of this review's agents still there: the stage's run, and

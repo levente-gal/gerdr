@@ -183,6 +183,11 @@ pub struct Suggestion {
     /// Where in `plan.md` it was last placed (`place`); none until it was.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placed: Option<Placed>,
+    /// The user's note or change was written on an earlier text: a later
+    /// run raised its id again under another title. Writing the note again
+    /// clears it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub yours_earlier: bool,
 }
 
 /// Where a suggestion goes in the plan (`place`).
@@ -545,6 +550,10 @@ pub fn import(review: &mut PlanReview, run: u32, raws: Vec<Raw>) -> Imported {
         if let Some(i) = earlier {
             let s = &mut review.suggestions[i];
             raised.insert(s.id.clone());
+            let yours = !s.note.is_empty() || s.my_change.is_some();
+            if yours && raw.title.trim() != s.title.trim() {
+                s.yours_earlier = true;
+            }
             (s.severity, s.kind) = (raw.severity, raw.kind);
             (s.plan, s.title) = (raw.plan, raw.title);
             (s.why, s.change) = (raw.why, raw.change);
@@ -669,6 +678,7 @@ pub fn set_note(review: &mut PlanReview, id: &str, note: &str) -> Result<String,
     };
     review_items::note_editable(ItemOf::Suggestion, &s.id, s.standing())?;
     s.note = own_text(note);
+    s.yours_earlier = false;
     Ok(match s.note.is_empty() {
         true => "comment deleted",
         false => "commented on",
@@ -1194,6 +1204,10 @@ mod tests {
         assert_eq!(kept.state, State::Accepted);
         assert_eq!(kept.note, "keep it short");
         assert!(!kept.dropped);
+        // Its note was written on the old title, and says so until written again.
+        assert!(kept.yours_earlier);
+        set_note(&mut review, "r1-1", "still short").unwrap();
+        assert!(!review.suggestion("r1-1").unwrap().yours_earlier);
         assert!(review.suggestion("r1-2").unwrap().dropped);
         // An agent can't overwrite the user's own by its id.
         let yours = review.suggestion("u1").unwrap();

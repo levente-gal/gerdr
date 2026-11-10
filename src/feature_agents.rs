@@ -178,6 +178,13 @@ impl Watch {
             ..Self::default()
         }
     }
+
+    /// gerdr, not the user, is what the agent's work waits on: its file is
+    /// written and left to settle before it is read, or the code is read
+    /// for it.
+    pub(crate) fn reads(&self) -> bool {
+        self.checking.is_some() || (self.stable.is_some() && self.refused.is_none())
+    }
 }
 
 /// What's left of `watch` once its agent stops waiting for its prompt: a
@@ -307,9 +314,9 @@ fn judge(
         };
     }
     watch.rested = None;
-    if matches!(status, None | Some(AgentStatus::Unknown))
-        && let Some(stamp) = file.finished()
-    {
+    // herdr doesn't say, or the agent rests never seen at work (done too
+    // fast for it): its file is read once it stays as it is.
+    if let Some(stamp) = file.finished() {
         let quiet = match file {
             File::Partial(..) => MILESTONE_QUIET,
             _ => STABLE,
@@ -1091,6 +1098,9 @@ pub(crate) fn agent_line(
             Some(lack) => format!("nudged: {lack}"),
             None => format!("nudged to write {file}"),
         };
+    }
+    if watch.is_some_and(Watch::reads) && status != Some(AgentStatus::Working) {
+        return format!("{} done \u{b7} reading {file}", run.agent);
     }
     let doing = match status {
         Some(AgentStatus::Working) if stage == Stage::AiReview => "reviewing",
@@ -3528,6 +3538,26 @@ mod tests {
         // Rest starts over: only a rest that lasts counts.
         assert_eq!(at(idle, t + REST * 2), Verdict::Wait);
         assert_eq!(at(idle, t + REST * 3), Verdict::Nudge { absent: true });
+    }
+
+    #[test]
+    fn an_agent_done_too_fast_to_be_seen_working_is_read_once_its_file_settles() {
+        let t = Instant::now();
+        let mut w = watch();
+        let idle = Some(AgentStatus::Idle);
+        let good = File::Good((5, 9));
+        assert_eq!(
+            judge(&mut w, idle, true, &good, false, false, t),
+            Verdict::Wait
+        );
+        // Meanwhile gerdr, not the user, is what it waits on.
+        assert!(w.reads() && !w.worked);
+        let line = agent_line(&run(None), Stage::Plan, idle, Some(&w), 5_000);
+        assert_eq!(line, "Claude Code done \u{b7} reading plan.md");
+        assert_eq!(
+            judge(&mut w, idle, true, &good, false, false, t + STABLE),
+            Verdict::Ready((5, 9))
+        );
     }
 
     #[test]
