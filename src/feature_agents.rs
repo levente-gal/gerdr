@@ -1069,6 +1069,32 @@ pub(crate) fn agent_line(
     format!("{} {doing} \u{b7} {started}", run.agent)
 }
 
+/// Whether `stage`'s agent in `run`, at `status`, waits on the user, as
+/// `agent_line` says it: asked something, held for its prompt, a T3 Code
+/// draft, stopped at a milestone, or idle with its work not done. Its
+/// card on the stage's page stands out for it.
+pub(crate) fn waits_on_you(run: &StageRun, stage: Stage, status: Option<AgentStatus>) -> bool {
+    if run.t3 == Some(T3Run::Draft) {
+        return true;
+    }
+    if !run.live() {
+        return false;
+    }
+    // Told something in its tab: it is at work, its prompt still to send.
+    if run.held {
+        return status != Some(AgentStatus::Working);
+    }
+    if stage == Stage::Build && run.stop.is_some() {
+        return true;
+    }
+    match status {
+        Some(AgentStatus::Blocked) => true,
+        // Its file ready, or Build marked done, it waits on nothing.
+        Some(AgentStatus::Idle | AgentStatus::Done) => run.ready.is_none(),
+        _ => false,
+    }
+}
+
 /// The stamp of the file at `path`, if it is there.
 pub(crate) fn stamp(path: &Path) -> Option<Stamp> {
     let meta = std::fs::metadata(path).ok()?;

@@ -2090,8 +2090,18 @@ impl Rework {
             Rework::Waits => "waiting for you \u{b7} send the prompt",
             Rework::Closed => "its tab closed \u{b7} Start agent opens it again",
             Rework::Draft => "draft in T3 Code \u{b7} pick a model and send it",
+            Rework::Runs(Dot::Blocked) => "running again \u{b7} needs you",
             Rework::Runs(_) => "running again",
         }
+    }
+
+    /// Whether its agent waits on the user: its card stands out for it.
+    /// A closed tab waits on nobody's answer.
+    fn waits_on_you(self) -> bool {
+        matches!(
+            self,
+            Rework::Waits | Rework::Draft | Rework::Runs(Dot::Blocked)
+        )
     }
 }
 
@@ -11642,6 +11652,7 @@ fn agent_card(
             buttons,
             picks,
             model: state.model.clone(),
+            waits: false,
         });
     };
     let mark = stage_mark(feature, stage);
@@ -11683,15 +11694,22 @@ fn agent_card(
         true => state.tail.to_vec(),
         false => Vec::new(),
     };
+    // Asked something, held for its prompt, or idle with its work undone.
+    let waits = match back {
+        Some(back) => back.waits_on_you(),
+        None if current => crate::feature_agents::waits_on_you(run, stage, state.agent_status),
+        None => run.waits_to_send(),
+    };
     Some(PageSection::Agent {
         icon: AgentIcon::from_agent(&run.agent),
         name: run.agent.clone(),
-        dot,
+        dot: if waits { Dot::Blocked } else { dot },
         status,
         tail,
         buttons,
         picks,
         model: state.model.clone(),
+        waits,
     })
 }
 
@@ -11710,6 +11728,7 @@ fn rework_card(
         icon: AgentIcon::from_agent(&run.agent),
         name: run.agent.clone(),
         dot: match back {
+            _ if back.waits_on_you() => Dot::Blocked,
             Rework::Runs(dot) => dot,
             _ => Dot::Unknown,
         },
@@ -11718,6 +11737,7 @@ fn rework_card(
         buttons: agent_buttons(Stage::Build, actions),
         picks: Vec::new(),
         model: None,
+        waits: back.waits_on_you(),
     })
 }
 
@@ -16671,7 +16691,7 @@ pub(crate) mod tests {
         let page = stage_page(&f, Stage::Build, &PanelState::default(), &actions, 2_000);
         assert!(page.sections.iter().any(|s| matches!(
             s,
-            PageSection::Agent { status, .. } if status.starts_with("waiting for you")
+            PageSection::Agent { status, waits: true, .. } if status.starts_with("waiting for you")
         )));
         // Its tab closed: it can still open again from there.
         f.runs.insert(Stage::Build, held_run(None));
@@ -16679,6 +16699,40 @@ pub(crate) mod tests {
             page_outcomes(&f, Stage::Build)
                 .contains(&PanelOutcome::StartAgent(Stage::Build, false))
         );
+    }
+
+    #[test]
+    fn an_agent_waiting_on_you_has_its_card_stand_out() {
+        let mut f = feature("b", vec![repo("api", true)], 1);
+        assert_eq!(f.current(), Some(Stage::Plan));
+        let card = |f: &Feature, status| {
+            let state = PanelState {
+                agent_status: status,
+                ..PanelState::default()
+            };
+            let page = stage_page(f, Stage::Plan, &state, &[], 2_000);
+            page.sections.iter().find_map(|s| match s {
+                PageSection::Agent { waits, dot, .. } => Some((*waits, *dot)),
+                _ => None,
+            })
+        };
+        // Held for its prompt, or told something in its tab and at work.
+        f.runs.insert(Stage::Plan, held_run(Some("p1")));
+        assert_eq!(card(&f, None), Some((true, Dot::Blocked)));
+        let working = Some((false, Dot::Working));
+        assert_eq!(card(&f, Some(AgentStatus::Working)), working);
+        // Running: asked something, idle with plan.md not ready, at work.
+        f.runs.insert(Stage::Plan, agent_run(Some("p1"), None));
+        let waits = Some((true, Dot::Blocked));
+        assert_eq!(card(&f, Some(AgentStatus::Blocked)), waits);
+        assert_eq!(card(&f, Some(AgentStatus::Idle)), waits);
+        assert_eq!(card(&f, Some(AgentStatus::Working)), working);
+        // Its file ready, it waits on nothing.
+        f.runs.insert(Stage::Plan, agent_run(Some("p1"), Some(1)));
+        assert_eq!(card(&f, Some(AgentStatus::Idle)).map(|c| c.0), Some(false));
+        // Its tab closed: no answer to wait for.
+        f.runs.insert(Stage::Plan, agent_run(None, None));
+        assert_eq!(card(&f, None).map(|c| c.0), Some(false));
     }
 
     #[test]
@@ -22097,6 +22151,7 @@ pub(crate) mod tests {
                     buttons: vec![0, 1],
                     picks: Vec::new(),
                     model: None,
+                    waits: false,
                 },
                 PageSection::MilestoneMode { fresh: false }
             ]

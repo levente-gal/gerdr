@@ -2741,6 +2741,7 @@ pub(super) fn feature_tab() -> super::FeatureTabView {
                     buttons: vec![1, 2],
                     picks: Vec::new(),
                     model: None,
+                    waits: false,
                 },
                 PageSection::Lines {
                     label: "Fix round".into(),
@@ -2841,6 +2842,7 @@ fn feature_tab_plan_ready() -> super::FeatureTabView {
                 buttons: vec![1],
                 picks: Vec::new(),
                 model: None,
+                waits: false,
             },
             PageSection::File {
                 name: "plan.md".into(),
@@ -2944,6 +2946,7 @@ fn feature_tab_discover_brief() -> super::FeatureTabView {
                 buttons: vec![1],
                 picks: Vec::new(),
                 model: None,
+                waits: false,
             },
             PageSection::File {
                 name: "brief.md".into(),
@@ -3004,6 +3007,7 @@ fn feature_tab_resume() -> super::FeatureTabView {
             buttons: vec![1],
             picks: Vec::new(),
             model: None,
+            waits: false,
         }],
     };
     view
@@ -3813,6 +3817,7 @@ fn feature_tab_start_over() -> super::FeatureTabView {
                 buttons: vec![1],
                 picks: Vec::new(),
                 model: None,
+                waits: false,
             },
             PageSection::File {
                 name: "plan.md".into(),
@@ -4180,6 +4185,7 @@ fn feature_tab_picks_later() -> super::FeatureTabView {
             buttons: Vec::new(),
             picks: agent_chips(1, true),
             model: None,
+            waits: false,
         }],
     };
     view
@@ -4260,12 +4266,13 @@ fn feature_tab_held() -> super::FeatureTabView {
         sections: vec![PageSection::Agent {
             icon: AgentIcon::from_agent("Claude Code"),
             name: "Claude Code".into(),
-            dot: Dot::Unknown,
+            dot: Dot::Blocked,
             status: "waiting for you \u{b7} send the prompt".into(),
             tail: Vec::new(),
             buttons: vec![0, 1],
             picks,
             model: None,
+            waits: true,
         }],
     };
     view
@@ -4417,6 +4424,7 @@ fn feature_tab_fixing() -> super::FeatureTabView {
                 buttons: vec![0],
                 picks: Vec::new(),
                 model: None,
+                waits: false,
             },
             super::PageSection::Lines {
                 label: "Findings".into(),
@@ -4450,12 +4458,13 @@ fn feature_tab_t3_draft() -> super::FeatureTabView {
         sections: vec![PageSection::Agent {
             icon: AgentIcon::T3,
             name: "T3 Code".into(),
-            dot: Dot::Unknown,
+            dot: Dot::Blocked,
             status: "draft in T3 Code \u{b7} pick a model and send it".into(),
             tail: Vec::new(),
             buttons: Vec::new(),
             picks,
             model: None,
+            waits: true,
         }],
     };
     view
@@ -5372,10 +5381,10 @@ const GOLDEN_FEATURE_TAB: [[u64; 61]; 4] = [
         0x77200a37f756c4dd, // tab_picks_running_860
         0x5b4ea1e7416a2668, // tab_model_later_1180
         0xf3098420783950d4, // tab_model_long_860
-        0x1b190673f5a76dea, // tab_t3_draft_860
+        0xb26db5d5ef4fe144, // tab_t3_draft_860
         0xe6f677143326164a, // tab_milestone_mode_1180
         0x8d52a746f8ccb913, // tab_milestone_mode_860
-        0x3daadf48429854b9, // tab_held_860
+        0x8fe24ae322b3cfd9, // tab_held_860
         0xdd57288e450f32e2, // tab_resume_1180
         0x1d3b7ea983d73226, // tab_resume_860
         0x37ef3c6e3ca8a6a0, // tab_fixing_1180
@@ -5436,10 +5445,10 @@ const GOLDEN_FEATURE_TAB: [[u64; 61]; 4] = [
         0xa1e3ae31e119d46a, // tab_picks_running_860
         0x289abf81f924a67e, // tab_model_later_1180
         0x85a0595411690559, // tab_model_long_860
-        0x13b24120dc0e0e14, // tab_t3_draft_860
+        0x7040b1cbbb20a27a, // tab_t3_draft_860
         0x1014c59c212547f8, // tab_milestone_mode_1180
         0xe516174034f84704, // tab_milestone_mode_860
-        0x32729d0f0b9d7adf, // tab_held_860
+        0xbd23501b70c404ee, // tab_held_860
         0x5e8649fc158bfc2e, // tab_resume_1180
         0x30c2ac05c31f179a, // tab_resume_860
         0x8687d8dffc051930, // tab_fixing_1180
@@ -5500,10 +5509,10 @@ const GOLDEN_FEATURE_TAB: [[u64; 61]; 4] = [
         0x1aca17dcdd5a1050, // tab_picks_running_860
         0x57c74b45fd9d3840, // tab_model_later_1180
         0x5075640333ec6bb4, // tab_model_long_860
-        0xfc9fc69cee351bb5, // tab_t3_draft_860
+        0x37bc390552f6fcbf, // tab_t3_draft_860
         0xbfb3c8b9841f170b, // tab_milestone_mode_1180
         0xf8de4ca07ffeb9b7, // tab_milestone_mode_860
-        0x2da12a0b77b87f7d, // tab_held_860
+        0x54af97faefd8cf76, // tab_held_860
         0x06e5930e69a1bf8d, // tab_resume_1180
         0xa3c3da37be3f43ac, // tab_resume_860
         0x25a49252fee1fa58, // tab_fixing_1180
@@ -5564,10 +5573,10 @@ const GOLDEN_FEATURE_TAB: [[u64; 61]; 4] = [
         0xafbcd65890c85f32, // tab_picks_running_860
         0xe21cfcfdfbe96e55, // tab_model_later_1180
         0x7867b4cbd5bcf63d, // tab_model_long_860
-        0x59cc00aad601ffe0, // tab_t3_draft_860
+        0xf1503603cca9fe25, // tab_t3_draft_860
         0x5d3461f75684af86, // tab_milestone_mode_1180
         0xb12654dff37e63b8, // tab_milestone_mode_860
-        0x3d244f2c3d21f79d, // tab_held_860
+        0xf7f4178225a5592c, // tab_held_860
         0x02071bcc4b2b9ced, // tab_resume_1180
         0xb0d99250844e1321, // tab_resume_860
         0xe86e179b29262da5, // tab_fixing_1180
@@ -6167,6 +6176,7 @@ fn tab_plan_review(writing: bool) -> super::FeatureTabView {
         buttons: vec![if writing { 0 } else { 1 }],
         picks: Vec::new(),
         model: None,
+        waits: false,
     });
     let (heading, lines) = match writing {
         true => (
