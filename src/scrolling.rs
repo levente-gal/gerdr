@@ -128,6 +128,7 @@ impl Gerdr {
             self.repos_scroll_tick(now),
             self.repos_drag_edge_tick(now),
             self.field_edge_tick(now),
+            self.page_text_edge_tick(now),
             self.inbox_scroll_tick(now),
             self.scrollback_scroll_tick(now),
             self.feature_tab_scroll_tick(now),

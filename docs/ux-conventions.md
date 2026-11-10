@@ -70,7 +70,7 @@ rules, for reviewing a branch before it merges.
 | Alt+F / Alt+Left / Alt+Right | The repos panel's file tree and a feature's code review's file list: list the files flat or by folder (kept in `state.json`, one for both) / fold everything / unfold everything (also the buttons on the list's toolbar). On a feature's Manual test page, Alt+Left / Alt+Right fold every criterion / open every one (the Collapse and Expand row's All). |
 | Alt+D / Alt+Shift+D, Alt+S / Alt+Shift+S | On a feature's Manual test page: fold / open the criteria passed (Done), and those seen: opened or marked (Seen). Also the Collapse and Expand row over them. A feature's criteria start folded; what is open and seen is kept in `state.json`, per feature, and a criterion folds when it passes. |
 | F1 | Every key of the focused panel, when its footer can't show them all. |
-| Ctrl+C | Copy. Never closes anything. On the feature tab's page, text dragged over with the pointer (a double click takes a word) is selected, and Ctrl+C or `y` copies it, lines side by side or wrapped joined by a space; Esc lets it go. With nothing selected, Ctrl+C there copies the feature's path. In any diff (repos panel, worktree, a commit, code review, a file under review, evidence) it copies what the cursor is on, as `y` yanks it: the selection, else the line (a removed one too), a file's path, a hunk's lines, a comment or finding's text. A read-only diff refuses edits and pastes, never yanks. The cursor's row has the same as a Copy button. |
+| Ctrl+C | Copy. Never closes anything. On the feature tab's page, text dragged over with the pointer (a double click takes a word, a triple a line) is selected, and Ctrl+C or `y` copies it, lines side by side or wrapped joined by a space; Esc lets it go. With nothing selected, Ctrl+C there copies the feature's path. In any diff (repos panel, worktree, a commit, code review, a file under review, evidence) it copies what the cursor is on, as `y` yanks it: the selection, else the line (a removed one too), a file's path, a hunk's lines, a comment or finding's text. A read-only diff refuses edits and pastes, never yanks. The cursor's row has the same as a Copy button. |
 
 A chord means one thing across all panels. A verb with direction says it in
 the label ("Merge main into branch", "Squash into main").
@@ -100,6 +100,14 @@ overlay, a dialog, a rename or a diff's comment:
 - A field too small for its text scrolls only as far as its caret needs
   (`Line::scroll`): the text under the pointer stays put while the caret
   moves in view.
+
+Text that is only read and can be selected (the feature tab's page, the
+scrollback viewer) takes the pointer the same way: a press and drag select
+by chars, a double click a word (or the gap between two) and a triple click
+a line, and a drag on from either goes by whole words or lines, keeping the
+first. Shift+click reaches the selection there by the same. Held past the
+text's top or bottom it scrolls on, moving or not. Diffs differ: their
+press and drag pick whole rows and a double click opens the line in Zed.
 
 ## Destructive actions
 

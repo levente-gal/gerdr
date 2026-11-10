@@ -11,10 +11,42 @@ use smithay::utils::{Logical, Point};
 use std::time::Instant;
 
 use crate::{
-    Gerdr,
+    Gerdr, chrome,
     chrome::{FeatureTabHit, TabArea, TabColumn, TextPick, TextSpot},
-    input::{MULTI_CLICK, MULTI_CLICK_SLOP},
+    scrollback::Grain,
 };
+
+/// What `grain` takes of `text` (the line at `at`) at `at`: the place
+/// itself, the word or the gap between words there, or the whole line.
+fn span(text: &str, at: TextSpot, grain: Grain) -> (TextSpot, TextSpot) {
+    let spot = |ch| TextSpot { line: at.line, ch };
+    let cs: Vec<char> = text.chars().collect();
+    match grain {
+        Grain::Char => (at, at),
+        Grain::Line => (spot(0), spot(cs.len())),
+        Grain::Word => {
+            let Some(&c) = cs.get(at.ch).or(cs.last()) else {
+                return (at, at);
+            };
+            let i = at.ch.min(cs.len() - 1);
+            let word = |d: char| d.is_alphanumeric() || d == '_';
+            let same = |d: char| word(d) == word(c) && d.is_whitespace() == c.is_whitespace();
+            let start = (0..i).rev().find(|&j| !same(cs[j])).map_or(0, |j| j + 1);
+            let end = (i..cs.len()).find(|&j| !same(cs[j])).unwrap_or(cs.len());
+            (spot(start), spot(end))
+        }
+    }
+}
+
+/// A selection's anchor and cursor, from the span its press took (`home`)
+/// to the span the pointer is on: that one's end after it, else its start.
+fn reach(home: (TextSpot, TextSpot), to: (TextSpot, TextSpot)) -> (TextSpot, TextSpot) {
+    if to.0 < home.0 {
+        (home.1, to.0)
+    } else {
+        (home.0, to.1.max(home.1))
+    }
+}
 
 /// What a selection copied says it copied.
 fn copied_note(text: &str) -> String {
@@ -45,60 +77,52 @@ impl Gerdr {
     }
 
     /// A press on the feature tab at `pos`, after it did what it does:
-    /// on the page's text, it starts selecting there; twice, it selects
-    /// the word. Anywhere else, what was selected goes.
+    /// on the page's text, it starts selecting there, by chars; a second
+    /// in a row by words and a third by lines, from the one it is on; with
+    /// Shift, what was selected reaches there instead. Anywhere else, what
+    /// was selected goes.
     pub(crate) fn press_page_text(&mut self, pos: Point<f64, Logical>) {
         let spot = self.on_page_text(pos).then(|| self.feature_tab_parts()).flatten();
         let spot = spot.and_then(|(view, layout)| {
             let at = layout.text_at(&view, pos.to_i32_round(), false)?;
             Some((at, layout.line_text(at.line)?.to_owned()))
         });
+        let shift = self.seat.get_keyboard().is_some_and(|k| k.modifier_state().shift);
+        let count = self.press_count.max(1);
         let Some(panel) = self.features.panel.as_mut() else {
             return;
         };
-        let had = panel.pick.take().is_some();
-        panel.picking = false;
+        let had = panel.pick.take();
+        (panel.picking, panel.pick_edge) = (false, None);
         let Some((at, text)) = spot else {
-            panel.pick_clicks = None;
-            if had {
+            panel.pick_by = None;
+            if had.is_some() {
                 self.sync_feature_page();
             }
             return;
         };
-        let now = Instant::now();
-        let count = match panel.pick_clicks {
-            Some((when, from, count))
-                if now.duration_since(when) < MULTI_CLICK
-                    && (from.x - pos.x).abs() < MULTI_CLICK_SLOP
-                    && (from.y - pos.y).abs() < MULTI_CLICK_SLOP =>
-            {
-                count + 1
+        panel.picking = true;
+        match (shift, had, panel.pick_by) {
+            (true, Some(mut pick), Some((grain, home))) => {
+                pick.said[1] = text.clone();
+                (pick.anchor, pick.cursor) = reach(home, span(&text, at, grain));
+                panel.pick = Some(pick);
             }
-            _ => 1,
-        };
-        panel.pick_clicks = Some((now, pos, count));
-        let said = [text.clone(), text.clone()];
-        panel.pick = match count {
-            1 => {
-                panel.picking = true;
-                Some(TextPick {
-                    anchor: at,
-                    cursor: at,
-                    said,
-                })
+            _ => {
+                let grain = match count {
+                    1 => Grain::Char,
+                    2 => Grain::Word,
+                    _ => Grain::Line,
+                };
+                let home = span(&text, at, grain);
+                panel.pick_by = Some((grain, home));
+                panel.pick = Some(TextPick {
+                    anchor: home.0,
+                    cursor: home.1,
+                    said: [text.clone(), text],
+                });
             }
-            _ => crate::find::word_at(&text, at.ch).map(|word| TextPick {
-                anchor: TextSpot {
-                    line: at.line,
-                    ch: word.start,
-                },
-                cursor: TextSpot {
-                    line: at.line,
-                    ch: word.end,
-                },
-                said,
-            }),
-        };
+        }
         self.sync_feature_page();
     }
 
@@ -108,40 +132,69 @@ impl Gerdr {
     }
 
     /// The pointer moved to `pos` holding a press on the page's text: the
-    /// selection reaches the char nearest it. Past the page's top or
-    /// bottom, the page scrolls that way.
+    /// selection reaches the char nearest it in view, by what the press
+    /// selected by (see `press_page_text`). Past the page's top or bottom
+    /// the page scrolls on (`page_text_edge_tick`), not the selection.
     pub(crate) fn drag_page_text(&mut self, pos: Point<f64, Logical>) {
         let Some((view, layout)) = self.feature_tab_parts() else {
             return;
         };
-        let at = pos.to_i32_round();
-        let place = layout.columns[TabColumn::Page as usize];
-        let spot = layout.text_at(&view, at, true);
-        let said = spot.and_then(|s| layout.line_text(s.line)).map(str::to_owned);
-        let room = f64::from(layout.scroll_room(TabColumn::Page));
+        let mut at: Point<i32, Logical> = pos.to_i32_round();
+        if let Some(place) = layout.columns[TabColumn::Page as usize] {
+            at.y = at.y.clamp(place.loc.y, place.loc.y + place.size.h - 1);
+        }
+        let Some(spot) = layout.text_at(&view, at, true) else {
+            return;
+        };
+        let Some(said) = layout.line_text(spot.line).map(str::to_owned) else {
+            return;
+        };
         let Some(panel) = self.features.panel.as_mut() else {
             return;
         };
-        if let (Some(spot), Some(said)) = (spot, said)
-            && let Some(pick) = panel.pick.as_mut()
+        if let Some(pick) = panel.pick.as_mut()
+            && let Some((grain, home)) = panel.pick_by
         {
-            pick.cursor = spot;
+            (pick.anchor, pick.cursor) = reach(home, span(&said, spot, grain));
             pick.said[1] = said;
         }
-        if let Some(place) = place {
-            let (top, bottom) = (place.loc.y, place.loc.y + place.size.h);
-            let past = match at.y {
-                y if y < top => f64::from(y - top),
-                y if y > bottom => f64::from(y - bottom),
+        self.sync_feature_page();
+    }
+
+    /// Every frame: a press selecting the page's text held past the page's
+    /// top or bottom scrolls it on that way, moving or not, faster the
+    /// further past, and the selection with it. Whether it is past.
+    pub(crate) fn page_text_edge_tick(&mut self, now: Instant) -> bool {
+        if !self.picking_page_text() {
+            return false;
+        }
+        let Some((_, layout)) = self.feature_tab_parts() else {
+            return false;
+        };
+        let col = TabColumn::Page as usize;
+        let room = f64::from(layout.scroll_room(TabColumn::Page));
+        let y: f64 = self.pointer.y;
+        let edge = layout.columns[col].map_or(0.0, |place| {
+            let (top, bottom) = (f64::from(place.loc.y), f64::from(place.loc.y + place.size.h));
+            match y {
+                y if y < top => y - top,
+                y if y > bottom => y - bottom,
                 _ => 0.0,
-            };
-            let scroll = &mut panel.scroll[TabColumn::Page as usize];
-            let to = (scroll.pos() + past).clamp(0.0, room);
-            if past != 0.0 && to != scroll.pos() {
+            }
+        });
+        let Some(panel) = self.features.panel.as_mut() else {
+            return false;
+        };
+        let by = crate::scrolling::edge_steps(&mut panel.pick_edge, now, edge);
+        if by != 0 {
+            let scroll = &mut panel.scroll[col];
+            let to = (scroll.pos() + (by * i64::from(chrome::BODY_LINE)) as f64).clamp(0.0, room);
+            if to != scroll.pos() {
                 scroll.jump(to);
+                self.drag_page_text(self.pointer);
             }
         }
-        self.sync_feature_page();
+        edge != 0.0
     }
 
     /// The press selecting the page's text is let go: a click that went
@@ -150,9 +203,9 @@ impl Gerdr {
         if let Some(panel) = self.features.panel.as_mut()
             && panel.picking
         {
-            panel.picking = false;
+            (panel.picking, panel.pick_edge) = (false, None);
             if panel.pick.as_ref().is_some_and(|p| p.anchor == p.cursor) {
-                panel.pick = None;
+                (panel.pick, panel.pick_by) = (None, None);
             }
         }
     }
@@ -275,6 +328,36 @@ impl Gerdr {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_double_click_drags_on_by_words_and_a_triple_one_by_lines() {
+        let at = |line, ch| TextSpot { line, ch };
+        let text = "fix the  login_page now";
+        // A word, the gap between two, the whole line.
+        assert_eq!(span(text, at(0, 5), Grain::Word), (at(0, 4), at(0, 7)));
+        assert_eq!(span(text, at(0, 7), Grain::Word), (at(0, 7), at(0, 9)));
+        assert_eq!(span(text, at(0, 12), Grain::Word), (at(0, 9), at(0, 19)));
+        assert_eq!(span(text, at(0, 99), Grain::Word), (at(0, 20), at(0, 23)));
+        assert_eq!(span(text, at(0, 5), Grain::Line), (at(0, 0), at(0, 23)));
+        assert_eq!(span(text, at(0, 5), Grain::Char), (at(0, 5), at(0, 5)));
+        assert_eq!(span("", at(0, 0), Grain::Word), (at(0, 0), at(0, 0)));
+        // "the" double clicked, dragged on to "now": both words whole.
+        let home = span(text, at(0, 5), Grain::Word);
+        let to = span(text, at(0, 21), Grain::Word);
+        assert_eq!(reach(home, to), (at(0, 4), at(0, 23)));
+        // Dragged back to "fix": from its start to the end of "the".
+        let to = span(text, at(0, 1), Grain::Word);
+        assert_eq!(reach(home, to), (at(0, 7), at(0, 0)));
+        // Back within "the", it alone.
+        assert_eq!(reach(home, home), (at(0, 4), at(0, 7)));
+        // By lines, to a line below: the first whole, to the other's end.
+        let home = span(text, at(0, 5), Grain::Line);
+        assert_eq!(reach(home, span("two", at(2, 1), Grain::Line)), (at(0, 0), at(2, 3)));
+        // By chars, as the pointer goes.
+        let home = (at(1, 3), at(1, 3));
+        assert_eq!(reach(home, (at(0, 2), at(0, 2))), (at(1, 3), at(0, 2)));
+        assert_eq!(reach(home, (at(1, 5), at(1, 5))), (at(1, 3), at(1, 5)));
+    }
 
     #[test]
     fn a_copy_says_how_many_lines_it_took() {

@@ -104,7 +104,7 @@ struct Row {
 /// What a press and its drag select by: characters, or the words or
 /// lines they reach into (a double or triple click).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Grain {
+pub(crate) enum Grain {
     Char,
     Word,
     Line,

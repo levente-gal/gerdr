@@ -98,6 +98,11 @@ How to use it:
   and the finding dialog do), and is drawn by `edit_line` or keeps a
   `Line::scroll`: click, word and line clicks, drag and held-edge scrolling
   then work as in every other field.
+- **O7** New read-only selectable text selects by chars, words (double
+  click) and lines (triple click), drags on by the same, Shift+clicks to
+  extend, and scrolls while held past its edge, as the feature page
+  (`page_text.rs`) and the scrollback viewer do; it gets `y`, Ctrl+C and
+  `*`/`#` too.
 
 ## L. Look
 

@@ -1433,9 +1433,13 @@ pub struct FeaturePanel {
     pub pick: Option<chrome::TextPick>,
     /// The pointer holds a press selecting text on the page.
     pub picking: bool,
-    /// The last press on the page's text: when, where and how many in a
-    /// row, for a double click.
-    pub pick_clicks: Option<(std::time::Instant, Point<f64, Logical>, u32)>,
+    /// What the selection on the page goes by (chars, or the words or
+    /// lines a double or triple click took) and the span its press took,
+    /// which it keeps whichever way it is dragged or Shift+clicked on.
+    pub(crate) pick_by: Option<(crate::scrollback::Grain, (chrome::TextSpot, chrome::TextSpot))>,
+    /// A press selecting the page's text held past its top or bottom:
+    /// when the page last went on by it (see `scrolling::edge_steps`).
+    pub pick_edge: Option<(std::time::Instant, f64)>,
 }
 
 /// What follows shipping, as the Ship page ticks it.

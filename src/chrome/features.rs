@@ -1749,7 +1749,7 @@ const REPO_LINE_MIN: i32 = 40;
 const DOT_ROOM: i32 = 18;
 /// A line of small text, of body text, and of an agent's pane.
 const SMALL_LINE: i32 = 20;
-const BODY_LINE: i32 = 22;
+pub(crate) const BODY_LINE: i32 = 22;
 /// How high a stage page's title is.
 const TITLE_LINE: i32 = BODY_LINE + 6;
 const TAIL_LINE: i32 = 18;
