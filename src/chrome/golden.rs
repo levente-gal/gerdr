@@ -2416,31 +2416,31 @@ fn paint_machines_panel(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64>
 const GOLDEN_MACHINES_PANEL: [[u64; 4]; 4] = [
     // Dark at 1
     [
-        0x84dbd2059771acac, // machines_connected
-        0x8c45d1fb7cd55c6d, // machines_failed
+        0xb3bbd7c00f663678, // machines_connected
+        0x9881840348789585, // machines_failed
         0x2148dc185bdafe72, // machines_add
-        0x6c3af2436e4019fa, // machines_armed
+        0x26c0bcd36540a9f6, // machines_armed
     ],
     // Dark at 2
     [
-        0x306acddc2c58fec3, // machines_connected
-        0x9d68e2f1977d9612, // machines_failed
+        0xdce2e1724a45eb2c, // machines_connected
+        0xfe3c1043f9ae1011, // machines_failed
         0x6b739219f9cf9d3d, // machines_add
-        0x056e0e0d290759a3, // machines_armed
+        0x458acde34e5587a0, // machines_armed
     ],
     // Light at 1
     [
-        0x4ce673c7780120cf, // machines_connected
-        0xea34c11e2a0407e0, // machines_failed
+        0xfb5ad4bb74402307, // machines_connected
+        0x7d5db1c15a7b6154, // machines_failed
         0xd0389130753a9a3a, // machines_add
-        0x3c124a2b2990344f, // machines_armed
+        0xdbd24e06c3f789f7, // machines_armed
     ],
     // Light at 2
     [
-        0xdbfd57689e77d4b5, // machines_connected
-        0x2ea8c74f80259e94, // machines_failed
+        0xeddfee79f851d8a7, // machines_connected
+        0xfbd557aaeda5a316, // machines_failed
         0x65fb658e8be22c6b, // machines_add
-        0x2739e1a716f40316, // machines_armed
+        0x466f7a9c4ff722c8, // machines_armed
     ],
 ];
 

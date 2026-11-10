@@ -507,11 +507,10 @@ impl MachinesLayout {
 }
 
 /// How a machine's button labelled `label`, `i` of `n`, is painted: the
-/// last primary, Remove destructive (never the primary one).
+/// last primary, the rest plain. Remove is plain too, and never the
+/// primary one: it offers Undo, or asks first.
 fn button_style(label: &str, i: usize, n: usize) -> ButtonStyle {
-    if label == "Remove" {
-        ButtonStyle::Destructive
-    } else if i + 1 == n {
+    if i + 1 == n && label != "Remove" {
         ButtonStyle::Primary
     } else {
         ButtonStyle::Plain
@@ -1075,9 +1074,9 @@ mod tests {
     }
 
     #[test]
-    fn remove_is_destructive_and_never_the_primary() {
-        assert_eq!(button_style("Remove", 0, 2), ButtonStyle::Destructive);
-        assert_eq!(button_style("Remove", 1, 2), ButtonStyle::Destructive);
+    fn remove_is_plain_and_never_the_primary() {
+        assert_eq!(button_style("Remove", 0, 2), ButtonStyle::Plain);
+        assert_eq!(button_style("Remove", 1, 2), ButtonStyle::Plain);
         assert_eq!(button_style("Connect", 1, 2), ButtonStyle::Primary);
         assert_eq!(button_style("Edit", 0, 2), ButtonStyle::Plain);
     }

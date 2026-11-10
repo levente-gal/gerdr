@@ -93,6 +93,9 @@ struct Content {
     run_presses: Vec<Vec<Press>>,
     /// What the machine's buttons press, as `detail.buttons` has them.
     buttons: Vec<Press>,
+    /// Removing the selected machine asks first, as sandboxes this gerdr
+    /// answers for stay on it: Del asks at once, without arming.
+    asks_remove: bool,
 }
 
 impl Content {
@@ -287,7 +290,12 @@ fn hints(
         hints.push(hint("Enter", &label.to_lowercase()));
     }
     if content.name(selected).is_some() {
-        hints.push(hint("Del", if armed { "remove now" } else { "remove" }));
+        let what = match (armed, content.asks_remove) {
+            (true, _) => "remove now",
+            (false, true) => "remove\u{2026}",
+            (false, false) => "remove",
+        };
+        hints.push(hint("Del", what));
     }
     hints.push(hint("Esc", "close"));
     hints
@@ -376,7 +384,7 @@ impl MachinesPanel {
             }
             Keysym::Delete | Keysym::KP_Delete => {
                 let name = content.name(row)?;
-                if armed.as_deref() == Some(name) {
+                if content.asks_remove || armed.as_deref() == Some(name) {
                     return Some(Outcome::Press(Press::Remove(name.to_owned())));
                 }
                 self.armed = Some(name.to_owned());
@@ -593,6 +601,7 @@ impl Gerdr {
             };
         };
         let name = row.name.clone();
+        let row_name = name.clone();
         let target = row.address.clone();
         let dot = row.dot;
         let link = self.machines.links.get(&name);
@@ -628,11 +637,13 @@ impl Gerdr {
             },
             buttons: labels,
         };
+        let asks_remove = !self.sandboxes_on(&row_name).is_empty();
         Content {
             rows,
             detail: Some(detail),
             run_presses,
             buttons,
+            asks_remove,
         }
     }
 
@@ -911,6 +922,7 @@ mod tests {
             }),
             run_presses: vec![presses],
             buttons,
+            asks_remove: false,
         }
     }
 
@@ -1096,6 +1108,18 @@ mod tests {
             None
         );
         assert_eq!(panel.armed, None);
+    }
+
+    #[test]
+    fn del_asks_at_once_when_sandboxes_stay() {
+        let mut panel = MachinesPanel::default();
+        let c = Content {
+            asks_remove: true,
+            ..content()
+        };
+        let removed = key(&mut panel, &c, Keysym::Delete, false);
+        assert_eq!(removed, Some(Outcome::Press(Press::Remove("a".into()))));
+        assert_eq!(hints(&c, 0, MachinesFocus::List, false)[3].1, "remove\u{2026}");
     }
 
     #[test]
