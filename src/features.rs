@@ -8959,7 +8959,7 @@ impl Gerdr {
 
     /// Show the tab of `stage`'s agent; one gone is forgotten, and Enter
     /// starts a new one.
-    fn show_stage_agent(&mut self, project: &str, slug: &str, stage: Stage) {
+    pub(crate) fn show_stage_agent(&mut self, project: &str, slug: &str, stage: Stage) {
         let in_t3 = (self.feature(project, slug))
             .and_then(|f| f.runs.get(&stage))
             .is_some_and(|run| run.t3.is_some());

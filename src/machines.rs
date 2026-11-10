@@ -813,11 +813,20 @@ pub(crate) struct Link {
     lost: bool,
     /// What runs on the machine, while the link is up.
     pub(crate) work: Option<Work>,
+    /// When the link came up, while it is.
+    pub(crate) connected_since: Option<Instant>,
+    /// When the machine last said how it is: up, or a look around it.
+    pub(crate) last_seen: Option<Instant>,
 }
 
 impl Link {
     fn stop(&self) {
         self.cancel.store(true, Ordering::Relaxed);
+    }
+
+    /// The address it connects to.
+    pub(crate) fn target(&self) -> &str {
+        &self.target
     }
 }
 
@@ -1077,6 +1086,7 @@ impl Gerdr {
         self.machines.next_serial += 1;
         let serial = self.machines.next_serial;
         let cancel = Arc::new(AtomicBool::new(false));
+        let last_seen = self.machines.links.get(&name).and_then(|l| l.last_seen);
         let link = Link {
             target: target.clone(),
             serial,
@@ -1084,6 +1094,8 @@ impl Gerdr {
             state: LinkState::Connecting("connecting\u{2026}".into()),
             lost: false,
             work: None,
+            connected_since: None,
+            last_seen,
         };
         if let Some(old) = self.machines.links.insert(name.clone(), link) {
             old.stop();
@@ -1130,6 +1142,8 @@ impl Gerdr {
             LinkEvent::Up(info) => {
                 tracing::info!("machine {name} connected: herdr {}", info.site.version);
                 link.state = LinkState::Up(info.clone());
+                link.connected_since = Some(Instant::now());
+                link.last_seen = link.connected_since;
                 let link_was_lost = std::mem::take(&mut link.lost);
                 self.start_work(&name, target.clone(), info);
                 if asked {
@@ -1142,6 +1156,7 @@ impl Gerdr {
                 tracing::warn!("machine {name}: {failure:?}");
                 link.lost |= was_up;
                 link.work = None;
+                link.connected_since = None;
                 link.state = if retrying {
                     LinkState::Retrying(failure.clone())
                 } else {
@@ -1254,16 +1269,22 @@ impl Gerdr {
             }
             MachineOutcome::Connect => self.connect_from_dialog(),
             MachineOutcome::Fix => {
-                let fix = self.machines.dialog.as_ref().and_then(MachineDialog::fix);
-                match fix {
-                    Some(Fix::Copy(command)) => {
-                        self.show_success(format!("Copied: {command}"));
-                        self.copy_text(command);
-                    }
-                    Some(Fix::Terminal(command)) => self.run_in_new_tab(command),
-                    None => {}
+                if let Some(fix) = self.machines.dialog.as_ref().and_then(MachineDialog::fix) {
+                    self.run_fix(fix);
                 }
             }
+        }
+    }
+
+    /// Press the button fixing what failed: copy its command, or run it in a
+    /// new tab.
+    pub(crate) fn run_fix(&mut self, fix: Fix) {
+        match fix {
+            Fix::Copy(command) => {
+                self.show_success(format!("Copied: {command}"));
+                self.copy_text(command);
+            }
+            Fix::Terminal(command) => self.run_in_new_tab(command),
         }
     }
 
@@ -1404,6 +1425,7 @@ impl Gerdr {
         };
         link.stop();
         link.work = None;
+        link.connected_since = None;
         link.state = LinkState::Off;
         self.starts_lost();
         self.report_machines();
@@ -1427,8 +1449,10 @@ impl Gerdr {
         );
     }
 
-    /// Forget a machine, from its task. What runs there keeps running.
+    /// Forget a machine, from its task or the machines panel, with an Undo
+    /// toast. What runs there keeps running.
     pub fn remove_machine(&mut self, name: &str) {
+        let target = self.machines.saved.get(name).cloned();
         if let Some(link) = self.machines.links.remove(name) {
             link.stop();
         }
@@ -1439,7 +1463,18 @@ impl Gerdr {
         match crate::config::write_machine(name, None) {
             Ok(()) => {
                 self.settings_modified = crate::config::modified();
-                self.show_success(format!("Removed {name}; its herdr keeps running there"));
+                let undo = target.map(|target| {
+                    let name = name.to_owned();
+                    (
+                        "Undo".to_owned(),
+                        MenuAction::RestoreMachine { name, target },
+                    )
+                });
+                self.toast_with(
+                    format!("Removed {name}; its herdr keeps running there"),
+                    crate::toast::Level::Success,
+                    undo,
+                );
             }
             Err(why) => {
                 tracing::warn!("machines: removing {name}: {why}");
@@ -1447,6 +1482,33 @@ impl Gerdr {
                     "gerdr couldn't take {name} out of the settings: {why}"
                 ));
             }
+        }
+    }
+
+    /// Undo removing machine `name`: back in the settings at `target`, and
+    /// connecting.
+    pub(crate) fn restore_machine(&mut self, name: &str, target: &str) {
+        if self.machines.saved.contains_key(name) {
+            return self.show_warning(format!("{name} is there already"));
+        }
+        if let Err(why) = crate::config::write_machine(name, Some(target)) {
+            tracing::warn!("machines: restoring {name}: {why}");
+            return self.show_error(format!(
+                "gerdr couldn't put {name} back in the settings: {why}"
+            ));
+        }
+        self.settings_modified = crate::config::modified();
+        (self.machines.saved).insert(name.to_owned(), target.to_owned());
+        self.start_link(name.to_owned(), target.to_owned(), true);
+        self.report_machines();
+    }
+
+    /// Machine `id` said how it is: seen now.
+    pub(crate) fn machine_seen(&mut self, id: &str) {
+        let link = (self.machines.links.values_mut())
+            .find(|l| l.work.as_ref().is_some_and(|w| w.id == id));
+        if let Some(link) = link {
+            link.last_seen = Some(Instant::now());
         }
     }
 

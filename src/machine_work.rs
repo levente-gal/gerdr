@@ -1267,6 +1267,7 @@ impl Gerdr {
                 if let Some(work) = self.work_of_mut(id) {
                     work.load = load;
                 }
+                self.machine_seen(id);
                 self.sandboxes_looked(id, sandboxes);
             }
             WorkEvent::Started {

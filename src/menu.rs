@@ -77,6 +77,12 @@ pub enum MenuAction {
     /// machine it was taken over from.
     StopAiWorkPull(String, String),
     RemoveMachine(String),
+    /// A toast's "Undo" after a machine was removed: back in the settings,
+    /// connecting.
+    RestoreMachine {
+        name: String,
+        target: String,
+    },
     /// T3 Code, updated to the newest version gerdr reads, or to this one
     /// (see `Gerdr::update_t3`).
     UpdateT3(Option<String>),
@@ -489,6 +495,7 @@ impl Gerdr {
             MenuAction::StopAiWork => self.ai_work.stop_busy(),
             MenuAction::StopAiWorkPull(project, slug) => self.ai_work.stop_pull(&project, &slug),
             MenuAction::RemoveMachine(name) => self.ask_remove_machine(&name),
+            MenuAction::RestoreMachine { name, target } => self.restore_machine(&name, &target),
             MenuAction::UpdateT3(version) => self.update_t3(version),
             MenuAction::NewTab(w) => {
                 self.switch_workspace(w);
