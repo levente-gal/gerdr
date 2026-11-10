@@ -1673,6 +1673,18 @@ impl WorktreeDiff {
         self.with_diff(env, |diff, ctx| diff.extend_detail_row(i, ctx));
     }
 
+    /// A press on row `i` of the diff, if it is on the comment being
+    /// written: see `DiffView::press_editor`.
+    pub fn press_editor(&mut self, i: usize, extend: bool, count: u32, env: Env) -> bool {
+        self.with_diff(env, |diff, ctx| diff.press_editor(i, extend, count, ctx))
+    }
+
+    /// A press on the comment being written dragged to char `col` of row
+    /// `i` of the diff: see `DiffView::drag_editor`.
+    pub fn drag_editor(&mut self, i: usize, col: usize, env: Env) {
+        self.with_diff(env, |diff, ctx| diff.drag_editor(i, col, ctx));
+    }
+
     /// The pointer dragged past the diff's rows, `by` (up negative).
     pub fn drag_past_rows(&mut self, by: i64, env: Env) {
         self.with_diff(env, |diff, ctx| diff.drag_past_rows(by, ctx));
@@ -2319,10 +2331,17 @@ impl crate::Gerdr {
         let Some(wd) = self.wd_mut() else {
             return;
         };
-        let mut drags = false;
+        let (mut drags, mut editor_drag) = (false, false);
         let done = match (hit, shift, double) {
             (ReposHit::Button(button), ..) => wd.press(button, env),
             (ReposHit::DiffRow(i), _, _) if ctrl => wd.goto_row(i, env),
+            // On the comment being written, the caret goes there.
+            (ReposHit::DiffRow(i), _, _)
+                if wd.press_editor(i, shift, if double { 2 } else { 1 }, env) =>
+            {
+                editor_drag = !double;
+                None
+            }
             // Twice on a file of the list, it opens in Zed.
             (ReposHit::Line(i), _, true) => {
                 wd.click(hit, env);
@@ -2344,6 +2363,7 @@ impl crate::Gerdr {
             }
         };
         self.repos_rows_drag = drags;
+        self.repos_editor_drag = editor_drag;
         if let Some(outcome) = self.worktree_done(done) {
             self.apply_repos(outcome);
         }
@@ -3249,6 +3269,54 @@ pub(crate) mod tests {
         };
         wd.key(&shift, Keysym::c, Keysym::C, ENV);
         assert!(wd.diff.editing.is_some());
+    }
+
+    #[test]
+    fn a_click_on_the_comment_being_written_moves_its_caret() {
+        let mut wd = doc();
+        let shift = ModifiersState {
+            shift: true,
+            ..Default::default()
+        };
+        wd.key(&shift, Keysym::c, Keysym::C, ENV);
+        typed(&mut wd, "hello world");
+        let editor = |wd: &WorktreeDiff| {
+            let rows = wd.view(ENV).rows;
+            let i = (rows.iter()).position(|r| matches!(r, DetailRow::Editor { .. }));
+            let i = i.expect("an editor row");
+            let DetailRow::Editor {
+                caret, selection, ..
+            } = rows[i].clone()
+            else {
+                unreachable!()
+            };
+            (i, caret, selection)
+        };
+        let (row, caret, _) = editor(&wd);
+        assert_eq!(caret, Some(11));
+        // On a char, the caret goes before it; typing goes there.
+        wd.diff.pointer_char = Some((row, 5));
+        assert!(wd.press_editor(row, false, 1, ENV));
+        assert_eq!(editor(&wd).1, Some(5));
+        typed(&mut wd, ",");
+        assert_eq!(editor(&wd).1, Some(6));
+        // Twice, the word there; past the end, the end.
+        wd.diff.pointer_char = Some((row, 2));
+        wd.press_editor(row, false, 2, ENV);
+        assert_eq!(editor(&wd).2, 0..5);
+        wd.diff.pointer_char = Some((row, 99));
+        wd.press_editor(row, false, 1, ENV);
+        assert_eq!(editor(&wd).1, Some(12));
+        // Pressed and dragged, the selection reaches the char there.
+        wd.diff.pointer_char = Some((row, 1));
+        wd.press_editor(row, false, 1, ENV);
+        wd.drag_editor(row, 4, ENV);
+        assert_eq!(editor(&wd).2, 1..4);
+        assert_eq!(editor(&wd).1, Some(4));
+        wd.drag_editor(row, 99, ENV);
+        assert_eq!(editor(&wd).2, 1..12);
+        // Off it (its hint under it), nothing taken.
+        assert!(!wd.press_editor(row + 1, false, 1, ENV));
     }
 
     #[test]

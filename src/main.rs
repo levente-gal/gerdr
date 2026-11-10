@@ -1687,6 +1687,9 @@ pub struct Gerdr {
     /// The left button went down on the repositories panel's diff and is
     /// held: moving drags the diff cursor's range on.
     pub repos_rows_drag: bool,
+    /// The left button went down on the comment being written in the
+    /// diff and is held: moving selects its text.
+    pub repos_editor_drag: bool,
     /// The file's tab showing as of the last frame, by id: one coming to
     /// show reads its file again (see `doc_tab`).
     pub doc_tab_shown: Option<u64>,
@@ -7252,6 +7255,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         field_clicks: None,
         field_drag: false,
         repos_rows_drag: false,
+        repos_editor_drag: false,
         doc_tab_shown: None,
         scrollback: None,
         criteria_strip: Default::default(),

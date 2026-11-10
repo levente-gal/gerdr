@@ -499,6 +499,7 @@ impl Gerdr {
                 if state == ButtonState::Released {
                     self.field_drag = false;
                     self.repos_rows_drag = false;
+                    self.repos_editor_drag = false;
                     self.scrollback_release();
                     self.release_page_text();
                     if self.thumb_drag.take().is_some() {
@@ -1144,7 +1145,7 @@ impl Gerdr {
         if self.field_drag {
             self.drag_field(pos);
         }
-        if self.repos_rows_drag {
+        if self.repos_rows_drag || self.repos_editor_drag {
             self.repos_drag_rows(pos);
         }
         if self.scrollback_dragging() {

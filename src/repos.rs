@@ -4276,6 +4276,26 @@ impl Panel {
         self.follow_diff(ctx);
     }
 
+    /// A press on row `i` of the diff, if it is on the comment being
+    /// written: see `DiffView::press_editor`.
+    pub fn press_editor(&mut self, i: usize, extend: bool, count: u32, ctx: &Ctx) -> bool {
+        if self.tab() != DetailTab::Diff {
+            return false;
+        }
+        diff_ctx!(self, ctx, dctx);
+        self.diff.press_editor(i, extend, count, &dctx)
+    }
+
+    /// A press on the comment being written dragged to char `col` of row
+    /// `i` of the diff: see `DiffView::drag_editor`.
+    pub fn drag_editor(&mut self, i: usize, col: usize, ctx: &Ctx) {
+        if self.tab() != DetailTab::Diff {
+            return;
+        }
+        diff_ctx!(self, ctx, dctx);
+        self.diff.drag_editor(i, col, &dctx);
+    }
+
     /// Open the file shown as row `i` of the diff in Zed, at that line.
     pub fn open_detail_row(&mut self, i: usize, ctx: &Ctx) -> Option<Outcome> {
         if self.tab() != DetailTab::Diff {

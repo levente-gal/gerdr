@@ -2646,19 +2646,56 @@ pub fn repos_diff_char(
     let Some(ReposHit::DiffRow(i)) = repos_hit(&layout, pos) else {
         return None;
     };
-    let DetailRow::Line(_) = view.detail.rows.get(i)? else {
-        return None;
-    };
-    let gutter = gutter_width(view.detail.gutter, view.detail.plain);
-    let start = layout.detail_rows.get(i)?.loc.x + DIFF_INSET + gutter;
-    let x = pos.x - start as f64;
+    let x0 = layout.detail_rows.get(i)?.loc.x + DIFF_INSET;
     let advance = measure_mono("0", REPOS_MONO_SIZE).filter(|a| *a > 0.0)? as f64;
+    let start = match view.detail.rows.get(i)? {
+        DetailRow::Line(_) => x0 + gutter_width(view.detail.gutter, view.detail.plain),
+        DetailRow::Editor { .. } => return editor_char(view, &layout, i, pos.x),
+        _ => return None,
+    };
+    let x = pos.x - start as f64;
     // A row shown from a char on: chars of the line, not of the row.
     let skip = match view.detail.skipped {
         Some((j, skip)) if j == i => skip,
         _ => 0,
     };
     (x >= 0.0).then(|| (i, (x / advance).floor() as usize + skip))
+}
+
+/// The row of the comment being written (by index into `DetailView::rows`)
+/// nearest `pos`, in `panel`, and the caret's place at `pos.x` on it: for
+/// a press there dragged on, above its rows the first, below the last.
+pub fn repos_editor_char(
+    view: &ReposView,
+    panel: Rect,
+    pos: Point<f64, Logical>,
+) -> Option<(usize, usize)> {
+    let layout = repos_layout(view, panel);
+    let rows = (layout.detail_rows.iter().enumerate())
+        .filter(|&(i, _)| matches!(view.detail.rows.get(i), Some(DetailRow::Editor { .. })));
+    let mut nearest = None;
+    for (i, rect) in rows {
+        nearest = Some(i);
+        if pos.y < (rect.loc.y + rect.size.h) as f64 {
+            break;
+        }
+    }
+    editor_char(view, &layout, nearest?, pos.x)
+}
+
+/// On row `i`, of the comment being written, the caret's place at output x
+/// `x`: the char boundary nearest, as `detail_row` lays its text out
+/// (inside a finding's card, a step further in).
+fn editor_char(view: &ReposView, layout: &ReposLayout, i: usize, x: f64) -> Option<(usize, usize)> {
+    let DetailRow::Editor { within, .. } = view.detail.rows.get(i)? else {
+        return None;
+    };
+    let advance = measure_mono("0", REPOS_MONO_SIZE).filter(|a| *a > 0.0)? as f64;
+    let card = layout.detail_rows.get(i)?.loc.x
+        + DIFF_INSET
+        + if within.is_some() { COMMENT_INDENT } else { 0 };
+    let x = x - (card + 1 + COMMENT_INDENT) as f64;
+    Some((i, (x / advance).round().max(0.0) as usize))
 }
 
 /// The panel's field, for the caret and selection, in `panel`.
@@ -7070,6 +7107,48 @@ mod tests {
                 None
             );
         }
+    }
+
+    #[test]
+    fn the_pointer_on_the_comment_being_written_is_a_place_of_its_caret() {
+        // Only rows 2 and 3 of its own.
+        let mut view = full();
+        let blank = || DetailRow::Text(detail_line("", DiffTone::Plain));
+        for row in &mut view.detail.rows {
+            if matches!(row, DetailRow::Editor { .. }) {
+                *row = blank();
+            }
+        }
+        let none = view.clone();
+        let editor = |first: bool| DetailRow::Editor {
+            text: "hello ".into(),
+            caret: None,
+            selection: 0..0,
+            first,
+            last: !first,
+            within: None,
+        };
+        view.detail.rows[2] = editor(true);
+        view.detail.rows[3] = editor(false);
+        let size: Size<i32, Logical> = (1280, 800).into();
+        let panel = repos_panel_rect(size);
+        let layout = repos_layout(&view, panel);
+        let advance = measure_mono("0", REPOS_MONO_SIZE).unwrap() as f64;
+        let (top, bottom) = (layout.detail_rows[2], layout.detail_rows[3]);
+        let x0 = (top.loc.x + DIFF_INSET + 1 + COMMENT_INDENT) as f64;
+        let mid = |r: Rect| r.loc.y as f64 + r.size.h as f64 / 2.0;
+        // A press: the char boundary nearest, none left of the text.
+        let at = |x: f64, y: f64| repos_diff_char(&view, panel, (x, y).into());
+        assert_eq!(at(x0 + 2.4 * advance, mid(top)), Some((2, 2)));
+        assert_eq!(at(x0 + 2.6 * advance, mid(top)), Some((2, 3)));
+        assert_eq!(at(x0 - 20.0, mid(bottom)), Some((3, 0)));
+        // Dragged on: its row there, above its rows the first, below the
+        // last.
+        let drag = |x: f64, y: f64| repos_editor_char(&view, panel, (x, y).into());
+        assert_eq!(drag(x0 + advance, mid(bottom)), Some((3, 1)));
+        assert_eq!(drag(x0, top.loc.y as f64 - 100.0), Some((2, 0)));
+        assert_eq!(drag(x0, mid(bottom) + 300.0), Some((3, 0)));
+        assert_eq!(repos_editor_char(&none, panel, (x0, mid(top)).into()), None);
     }
 
     #[test]

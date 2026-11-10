@@ -1077,10 +1077,17 @@ impl Gerdr {
             sheet_rows,
             background,
         };
-        let mut drags = false;
+        let (mut drags, mut editor_drag) = (false, false);
         let outcome = panel.as_mut().and_then(|p| {
             if let (ReposHit::DiffRow(i), true) = (hit, ctrl) {
                 return p.goto_detail_row(i, &ctx);
+            }
+            // On the comment being written, the caret goes there.
+            if let ReposHit::DiffRow(i) = hit
+                && p.press_editor(i, shift, if double { 2 } else { 1 }, &ctx)
+            {
+                editor_drag = !double;
+                return None;
             }
             if let (ReposHit::DiffRow(i), true, false) = (hit, shift, double) {
                 p.extend_detail_row(i, &ctx);
@@ -1097,8 +1104,10 @@ impl Gerdr {
                 _ => outcome,
             }
         });
-        // Held, the press drags the cursor's range on.
+        // Held, the press drags the cursor's range on, or the selection of
+        // the comment being written.
         self.repos_rows_drag = drags;
+        self.repos_editor_drag = editor_drag;
         self.repos_detail();
         self.repos_save_review();
         if let Some(outcome) = outcome {
@@ -1224,11 +1233,20 @@ impl Gerdr {
 
     /// The pointer dragged to `pos` from a press on the diff: the
     /// cursor's range reaches the row under it, the diff scrolling a row
-    /// on when it is above or below the rows.
+    /// on when it is above or below the rows; from a press on the comment
+    /// being written, its selection reaches the char there.
     pub fn repos_drag_rows(&mut self, pos: Point<f64, Logical>) {
         let Some(view) = self.repos_view() else {
             self.repos_rows_drag = false;
+            self.repos_editor_drag = false;
             return;
+        };
+        let editor = match self.repos_editor_drag {
+            true => match chrome::repos_editor_char(&view, self.repos_rect(), pos) {
+                Some(at) => Some(at),
+                None => return,
+            },
+            false => None,
         };
         let layout = chrome::repos_layout(&view, self.repos_rect());
         let list = layout.detail_list;
@@ -1243,6 +1261,15 @@ impl Gerdr {
             .detail_rows
             .iter()
             .position(|r| (r.loc.y as f64..(r.loc.y + r.size.h) as f64).contains(&pos.y));
+        if let Some((i, col)) = editor
+            && self.wd().is_some()
+        {
+            let env = self.worktree_env();
+            if let Some(wd) = self.wd_mut() {
+                wd.drag_editor(i, col, env);
+            }
+            return;
+        }
         if self.wd().is_some() {
             return self.worktree_diff_drag(by, row);
         }
@@ -1275,10 +1302,11 @@ impl Gerdr {
         let Some(p) = panel.as_mut() else {
             return;
         };
-        match (by, row) {
-            (0, Some(i)) => p.extend_detail_row(i, &ctx),
-            (0, None) => {}
-            (by, _) => p.drag_past_rows(by, &ctx),
+        match (editor, by, row) {
+            (Some((i, col)), ..) => p.drag_editor(i, col, &ctx),
+            (None, 0, Some(i)) => p.extend_detail_row(i, &ctx),
+            (None, 0, None) => {}
+            (None, by, _) => p.drag_past_rows(by, &ctx),
         }
         self.repos_detail();
     }
