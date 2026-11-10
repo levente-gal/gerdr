@@ -182,13 +182,18 @@ pub enum MenuAction {
         slug: String,
         repo: Box<crate::feature::ContextRepo>,
     },
-    /// Undo deleting the user's comment on an AI review finding.
-    RestoreFindingComment {
+    /// Undo deleting the user's comment on a review item: an AI review
+    /// finding, or a Plan review suggestion (`of`).
+    RestoreItemComment {
         project: String,
         slug: String,
+        of: crate::feature::review_items::ItemOf,
         id: String,
         note: String,
     },
+    /// Write feature `slug`'s final plan from its decided suggestions, or go
+    /// on with the plan as it is (see `Gerdr::write_final_plan`).
+    WriteFinalPlan(String, String),
     /// Undo deleting an item of the user's own from an AI review: put it back
     /// at index `at`.
     RestoreOwnFinding {
@@ -574,14 +579,21 @@ impl Gerdr {
                 slug,
                 repo,
             } => self.restore_context_repo(&project, &slug, *repo),
-            MenuAction::RestoreFindingComment {
+            MenuAction::RestoreItemComment {
                 project,
                 slug,
+                of,
                 id,
                 note,
-            } => {
-                self.note_finding(&project, &slug, &id, &note);
-            }
+            } => match of {
+                crate::feature::review_items::ItemOf::Finding => {
+                    self.note_finding(&project, &slug, &id, &note);
+                }
+                crate::feature::review_items::ItemOf::Suggestion => {
+                    self.restore_suggestion_comment(&project, &slug, &id, &note);
+                }
+            },
+            MenuAction::WriteFinalPlan(project, slug) => self.write_final_plan(&project, &slug),
             MenuAction::RestoreOwnFinding {
                 project,
                 slug,

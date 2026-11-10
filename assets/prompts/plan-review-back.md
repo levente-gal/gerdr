@@ -1,1 +1,1 @@
-The user has notes and questions on your suggestions, written in {{comments.path}}. Please read them and answer here. If a suggestion changes, write {{artifact.path}} again, keeping each suggestion's id, and say so in one line.
+The user has notes and questions on your suggestions, and the ones they rejected with why, written in {{comments.path}}. Please read them and answer here; do not raise a rejected one again. If a suggestion changes, write {{artifact.path}} again, keeping each suggestion's id, and say so in one line.

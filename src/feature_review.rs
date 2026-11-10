@@ -527,9 +527,10 @@ impl Gerdr {
         if !self.note_finding(project, slug, id, "") {
             return;
         }
-        let undo = MenuAction::RestoreFindingComment {
+        let undo = MenuAction::RestoreItemComment {
             project: project.to_owned(),
             slug: slug.to_owned(),
+            of: crate::feature::review_items::ItemOf::Finding,
             id: id.to_owned(),
             note,
         };
@@ -706,7 +707,9 @@ impl Gerdr {
     /// Write or edit the user's comment on finding `id`, on its card on the
     /// page: the keyboard goes to it there.
     pub(crate) fn write_finding_comment(&mut self, project: &str, slug: &str, id: &str) {
-        let Some(f) = self.finding_to_ask(project, slug, id) else {
+        let of = crate::feature::review_items::ItemOf::Finding;
+        let Some(f) = (self.item_to_ask(project, slug, of, id)).and_then(|f| f.into_finding())
+        else {
             return;
         };
         if let Err(why) = review_import::note_editable(&f.id, f.state) {
@@ -716,7 +719,12 @@ impl Gerdr {
         let Some(panel) = self.features.panel.as_mut() else {
             return;
         };
-        panel.note = Some((CardNote::Finding(id.to_owned()), field));
+        let on = CardNote::Item {
+            of: crate::feature::review_items::ItemOf::Finding,
+            id: id.to_owned(),
+            accept: false,
+        };
+        panel.note = Some((on, field));
         self.stop_key_repeat();
         self.select_panel_finding(id);
     }

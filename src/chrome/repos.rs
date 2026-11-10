@@ -653,6 +653,9 @@ pub enum DetailRow {
     /// A review comment's heading: who wrote it and where it is among
     /// those of its kind (`place`: `finding 2 of 5`). The first of its card.
     CommentHead {
+        /// Who wrote it, in a word: "AI review" on a reviewer's (a tag),
+        /// "Your comment" or "Your suggestion" on the user's.
+        who: &'static str,
         /// What the AI reviewer found; none for the user's own.
         finding: Option<FindingHead>,
         place: String,
@@ -4342,6 +4345,7 @@ impl Painter {
                 );
             }
             DetailRow::CommentHead {
+                who,
                 finding,
                 place,
                 within,
@@ -4360,7 +4364,7 @@ impl Painter {
                     c,
                     room,
                     row_band,
-                    (finding.as_ref(), place),
+                    (who, finding.as_ref(), place),
                     lit.is_some(),
                     scale,
                     p,
@@ -4569,16 +4573,16 @@ impl Painter {
     }
 
     /// A review comment's heading, the first row of its card, says whose
-    /// it is at a glance: on a finding, a band in its severity's colour, a
-    /// solid "AI review" tag, the severity and where it stands; on the
-    /// user's own, the plain card and "Your comment". Then its `place`.
+    /// it is at a glance (`who`): on a finding, a band in its severity's
+    /// colour, a solid "AI review" tag, the severity and where it stands; on
+    /// the user's own, the plain card and "Your comment". Then its `place`.
     #[allow(clippy::too_many_arguments)]
     fn comment_head(
         &self,
         c: &mut Canvas,
         (x0, x1): (f32, f32),
         row_band: (i32, i32),
-        (finding, place): (Option<&FindingHead>, &str),
+        (who, finding, place): (&str, Option<&FindingHead>, &str),
         lit: bool,
         scale: f64,
         p: &Palette,
@@ -4602,14 +4606,13 @@ impl Painter {
             h,
             mix(p.elevated, accent, 0.7),
         );
+        let word = who;
         let Some(finding) = finding else {
-            let word = "Your comment";
             self.bold_text(c, word, SMALL_FONT_SIZE, pen, x1, row_band, scale, p.text);
             pen += self.bold_width(word, SMALL_FONT_SIZE, scale) + COMMENT_HEAD_GAP as f32 * s;
             self.mixed_text(c, place, SMALL_FONT_SIZE, pen, x1, row_band, scale, p.muted);
             return;
         };
-        let word = "AI review";
         let pad = (COMMENT_TAG_PAD as f32 * s).round();
         let w = self.bold_width(word, SMALL_FONT_SIZE, scale) + 2.0 * pad;
         let tag_h = (h as f32 - 2.0 * s.round()).max(1.0);
@@ -5906,6 +5909,7 @@ mod tests {
                         &[],
                     ),
                     DetailRow::CommentHead {
+                        who: "Your comment",
                         finding: None,
                         place: "comment 1 of 1".into(),
                         within: None,

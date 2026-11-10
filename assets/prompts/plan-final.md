@@ -16,8 +16,11 @@ Your job: write the plan again with what the user accepted, and nothing else.
    - Start from the plan and keep all of it that these don't change: every
      section, every milestone and every field. The Build agent reads only this
      file, so it must stand alone: no “as in the plan”.
-   - Apply each suggestion where it belongs, and follow what the user said
-     where it differs from the suggestion.
+   - Apply each suggestion where it belongs. Where it gives In the plan at,
+     that names the line it belongs to.
+   - Where a suggestion gives Change (the user's words), apply that wording,
+     not the reviewer's or your own.
+   - Follow what the user said where it differs from the suggestion.
    - Change nothing else. Don't improve the plan on your own, and don't bring
      back anything the user didn't accept.
    - Don't study the code again: open only the lines cited above, when you need

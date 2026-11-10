@@ -42,6 +42,7 @@ pub mod patch;
 pub mod plan_review;
 pub mod remote;
 pub mod review_import;
+pub mod review_items;
 pub mod sandbox;
 pub mod sandbox_pages;
 pub mod sandbox_run;

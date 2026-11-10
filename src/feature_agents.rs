@@ -2973,7 +2973,7 @@ mod tests {
         let names = |f: &Feature| run_needs(f, stage).map(|n| (n.artifact, n.template));
         assert_eq!(names(&f), Some((Some("plan-review.json"), "plan-review")));
         let mut review = PlanReview::default();
-        plan_review::add_own(&mut review, "Add a metric");
+        plan_review::add_own(&mut review, "Add a metric").unwrap();
         review.writing = true;
         f.plan_review = Some(review);
         assert_eq!(names(&f), Some((Some("plan-final.md"), "plan-final")));

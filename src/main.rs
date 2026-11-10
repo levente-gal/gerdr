@@ -93,7 +93,7 @@ mod pane_control;
 mod pane_drag;
 mod pane_moves;
 mod paths;
-mod plan_sheet;
+mod plan_doc;
 mod port_holder;
 mod prepare;
 mod problems;
@@ -112,6 +112,7 @@ mod repo_batches;
 mod repos;
 mod restart;
 mod review;
+mod review_cards;
 mod scroll;
 mod scrollback;
 mod scrollback_panel;
@@ -6787,7 +6788,6 @@ impl Gerdr {
             identity: self.identity_view(),
             machine: self.machine_view(),
             commands: self.commands_view(),
-            plan_sheet: self.plan_sheet_view(),
             features: self.feature_tab_view(),
             project_menu: self.project_menu_view(),
             worktrees: self.worktrees_view(),

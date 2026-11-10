@@ -1864,12 +1864,6 @@ fn paint_features(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
         hash(painter.new_feature_dialog(&new_feature(), size, scale, p)),
         hash(painter.new_feature_dialog(&new_feature_bases(), size, scale, p)),
         hash(painter.sidebar_view(&features_sidebar(), (SIDEBAR_W, 520).into(), scale, p)),
-        hash(painter.plan_sheet(&plan_sheet(false), size, scale, p)),
-        hash(painter.plan_sheet(&plan_sheet(true), size, scale, p)),
-        hash(painter.plan_sheet(&plan_sheet_narrow(), PLAN_NARROW.into(), scale, p)),
-        hash(painter.plan_sheet(&plan_sheet_own(), size, scale, p)),
-        hash(painter.plan_sheet(&plan_sheet_keys(), PLAN_NARROW.into(), scale, p)),
-        hash(painter.plan_sheet(&plan_sheet_empty(), size, scale, p)),
         hash(painter.sidebar_view(
             &feature_workspace_sidebar(),
             (SIDEBAR_W, 520).into(),
@@ -1881,281 +1875,22 @@ fn paint_features(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
     ]
 }
 
-/// A small output, for the plan review's sheet to fit.
-const PLAN_NARROW: (i32, i32) = (480, 420);
-
-/// The plan review's sheet: a suggestion of each state and kind, one of the
-/// user's own, one left out, long text, a citation not found; `note`: a note
-/// being written, else the last refusal said.
-fn plan_sheet(note: bool) -> super::PlanSheetView {
-    use super::{PlanCitation, PlanDetail, PlanField, PlanMark, PlanRow};
-    use crate::feature::{plan_review::Kind, review_import::Severity};
-    let row = |id: &str, mark, severity, kind, title: &str, plan: &str| PlanRow {
-        id: id.into(),
-        mark,
-        severity,
-        kind,
-        title: title.into(),
-        plan: plan.into(),
-        yours: false,
-        dropped: false,
-        note: String::new(),
-    };
-    let rows = vec![
-        row(
-            "r1-1",
-            PlanMark::Accepted,
-            Severity::High,
-            Kind::Gap,
-            "Exports aren't limited per user",
-            "Milestone 2",
-        ),
-        row(
-            "r1-2",
-            PlanMark::Open,
-            Severity::High,
-            Kind::Risk,
-            "The retry loop has no cap, so a server that stays down keeps a worker busy for ever",
-            "Milestone 3: the export worker and its queue",
-        ),
-        row(
-            "r1-3",
-            PlanMark::Rejected,
-            Severity::Low,
-            Kind::Simplify,
-            "The CSV writer could be the one reports use",
-            "Milestone 1",
-        ),
-        row(
-            "r1-4",
-            PlanMark::Open,
-            Severity::Medium,
-            Kind::EdgeCase,
-            "An invoice cancelled during the export",
-            "Milestone 3",
-        ),
-        row(
-            "r1-5",
-            PlanMark::Open,
-            Severity::Medium,
-            Kind::Question,
-            "Should a cancelled invoice count in the total?",
-            "Milestone 4",
-        ),
-        PlanRow {
-            dropped: true,
-            ..row(
-                "r1-6",
-                PlanMark::Accepted,
-                Severity::Low,
-                Kind::Gap,
-                "The empty state has no words",
-                "Milestone 5",
-            )
-        },
-        PlanRow {
-            yours: true,
-            ..row(
-                "u1",
-                PlanMark::Accepted,
-                Severity::Medium,
-                Kind::Gap,
-                "Keep the old export for a release",
-                "",
-            )
-        },
-        row(
-            "r1-7",
-            PlanMark::Open,
-            Severity::Low,
-            Kind::Gap,
-            "Past the fold",
-            "Milestone 6",
-        ),
-    ];
-    let hints: &[(&str, &str)] = if note {
-        &[("Enter", "save"), ("Esc", "save")]
-    } else {
-        &[
-            ("Space", "accept"),
-            ("r", "reject"),
-            ("n", "note\u{2026}"),
-            ("a", "add\u{2026}"),
-            ("Del", "clear"),
-            ("Ctrl+Enter", "final plan"),
-            ("Ctrl+Shift+Enter", "ask"),
-            ("F1", "keys"),
-            ("Esc", "close"),
-        ]
-    };
-    super::PlanSheetView {
-        title: "Plan review of \u{201c}Bulk export of invoices\u{201d}".into(),
-        sub: "4 to decide \u{b7} 3 accepted \u{b7} 1 rejected".into(),
-        missing: Some("1 citation not found".into()),
-        rows,
-        cursor: 1,
-        top: 0,
-        detail: Some(PlanDetail {
-            title: "The retry loop has no cap, so a server that stays down keeps a worker busy for ever".into(),
-            plan: "Milestone 3: the export worker and its queue".into(),
-            dropped: false,
-            question: false,
-            why: "When the mail server is down, every export retries at once and goes on doing so: \
-                  the queue fills, and nobody else's export starts until the server is back. \
-                  With 500 invoices that is hours of a busy worker for nothing."
-                .into(),
-            change: "Say in Milestone 3 that a send is tried at most five times, with a pause that doubles, and that it then fails with a message the user sees."
-                .into(),
-            evidence: vec![
-                PlanCitation {
-                    place: "api: src/export/worker.rs:88".into(),
-                    quote: "loop { if send(&mail).is_ok() { break; } }".into(),
-                    not_found: false,
-                },
-                PlanCitation {
-                    place: "api: src/export/queue.rs:12".into(),
-                    quote: "const MAX_RETRIES: u32 = 5;".into(),
-                    not_found: true,
-                },
-            ],
-            note: "Five is fine, but not for the nightly run".into(),
-        }),
-        // Down to the citations, the note's sheet from the start.
-        detail_top: if note { 0 } else { 6 },
-        editing: note.then(|| PlanField {
-            label: "Your note on this suggestion",
-            placeholder: "What you say of it",
-            line: Line::from("Five is fine, but not for the nightly run"),
-        }),
-        armed: None,
-        notice: (!note).then(|| "4 suggestions still to decide".into()),
-        hover: (!note).then_some(super::PlanHit::Row(3)),
-        finish: "Write final plan",
-        primary: None,
-        keys: None,
-        keys_top: 0,
-        hints: hints
-            .iter()
-            .map(|(k, w)| ((*k).to_owned(), (*w).to_owned()))
-            .collect(),
-    }
-}
-
-/// The sheet on a small output, the cursor's row scrolled into view.
-fn plan_sheet_narrow() -> super::PlanSheetView {
-    let mut view = plan_sheet(false);
-    view.top = super::plan_sheet_reveal(&view, PLAN_NARROW.into());
-    view
-}
-
-/// The sheet on one of the user's own, Del pressed on it once, down where
-/// the one left out by the reviewer shows too.
-fn plan_sheet_own() -> super::PlanSheetView {
-    let mut view = plan_sheet(false);
-    view.cursor = 6;
-    view.top = super::plan_sheet_reveal(&view, FEATURE_OUTPUT.into());
-    view.armed = Some(6);
-    view.notice = None;
-    view.hover = None;
-    view.detail = Some(super::PlanDetail {
-        title: "Keep the old export for a release".into(),
-        plan: String::new(),
-        dropped: false,
-        question: false,
-        why: String::new(),
-        change: String::new(),
-        evidence: Vec::new(),
-        note: String::new(),
-    });
-    view.detail_top = 0;
-    view.primary = Some(super::PLAN_FINISH);
-    view.hints = vec![
-        ("Del".to_owned(), "remove".to_owned()),
-        ("Esc".to_owned(), "keep it".to_owned()),
-    ];
-    view
-}
-
-/// The keys list on a small output, past what fits.
-fn plan_sheet_keys() -> super::PlanSheetView {
-    let keys = [
-        ("Up / Down", "move between the suggestions"),
-        ("Ctrl+J / Ctrl+K", "move between the suggestions"),
-        ("Home / End", "go to the first or last suggestion"),
-        ("PgUp / PgDn", "scroll what the suggestion says"),
-        (
-            "Space",
-            "accept it, or clear that; a question wants its answer",
-        ),
-        ("r", "reject it, or clear that"),
-        ("n", "write a note on it"),
-        ("a", "add a suggestion of your own"),
-        ("Del", "clear its decision, or remove one of your own"),
-    ];
-    let mut view = plan_sheet(false);
-    view.notice = None;
-    view.hover = None;
-    view.keys = Some(
-        keys.iter()
-            .map(|(k, w)| ((*k).to_owned(), (*w).to_owned()))
-            .collect(),
-    );
-    view.hints = vec![("Esc".to_owned(), "back".to_owned())];
-    view
-}
-
-/// The sheet of a review that found nothing.
-fn plan_sheet_empty() -> super::PlanSheetView {
-    let mut view = plan_sheet(false);
-    view.sub = "no suggestions".into();
-    view.missing = None;
-    view.rows = Vec::new();
-    view.cursor = 0;
-    view.detail = None;
-    view.notice = None;
-    view.hover = None;
-    view.finish = "Use the plan as it is";
-    view.primary = Some(super::PLAN_FINISH);
-    view.hints = [
-        ("a", "add\u{2026}"),
-        ("Ctrl+Enter", "use the plan"),
-        ("F1", "keys"),
-        ("Esc", "close"),
-    ]
-    .iter()
-    .map(|(k, w)| ((*k).to_owned(), (*w).to_owned()))
-    .collect();
-    view
-}
-
-const FEATURES: [&str; 12] = [
+const FEATURES: [&str; 6] = [
     "new_feature",
     "new_feature_bases",
     "sidebar_features",
-    "plan_sheet",
-    "plan_sheet_note",
-    "plan_sheet_narrow",
-    "plan_sheet_own",
-    "plan_sheet_keys",
-    "plan_sheet_empty",
     "sidebar_feature_workspace",
     "sidebar_needs_you",
     "sidebar_no_features",
 ];
 
 /// The recorded hashes of `FEATURES`, per case in `CASES`.
-const GOLDEN_FEATURES: [[u64; 12]; 4] = [
+const GOLDEN_FEATURES: [[u64; 6]; 4] = [
     // Dark at 1
     [
         0x8374c9414949fa5b, // new_feature
         0xc87c6c9be76cea36, // new_feature_bases
         0xa77cf538d219f4ef, // sidebar_features
-        0xce73d235eada39de, // plan_sheet
-        0xf0ef6e28af47b05c, // plan_sheet_note
-        0x444a60ab9e0f4abf, // plan_sheet_narrow
-        0x86b4df03a4af9916, // plan_sheet_own
-        0xe472df71a44ddf16, // plan_sheet_keys
-        0x93dd44d0af75ae63, // plan_sheet_empty
         0x4f489a294fd6cfe9, // sidebar_feature_workspace
         0x42f966c250e9899d, // sidebar_needs_you
         0x0cbbecc8e276c3fc, // sidebar_no_features
@@ -2165,12 +1900,6 @@ const GOLDEN_FEATURES: [[u64; 12]; 4] = [
         0x62ad1d17fcbe8faa, // new_feature
         0xe00bb64532ae6b5f, // new_feature_bases
         0x21105ece42c0dd0e, // sidebar_features
-        0x354b777d647b74ae, // plan_sheet
-        0x49003f081deb3c2e, // plan_sheet_note
-        0x77de8b18241bb4b7, // plan_sheet_narrow
-        0x645f1307207f69db, // plan_sheet_own
-        0x6ad99a47f32750f1, // plan_sheet_keys
-        0xf4f48a436676b8ed, // plan_sheet_empty
         0x25a6c3532952ab77, // sidebar_feature_workspace
         0x7f5b07bc5817daa7, // sidebar_needs_you
         0xf97a94d1cbc468b6, // sidebar_no_features
@@ -2180,12 +1909,6 @@ const GOLDEN_FEATURES: [[u64; 12]; 4] = [
         0x461f595ad7da5726, // new_feature
         0x569469f7ecfe02c8, // new_feature_bases
         0xaf41feb3e3003f04, // sidebar_features
-        0x6da7e766b94ea319, // plan_sheet
-        0x6900962e338f6172, // plan_sheet_note
-        0x5d1256e75161f348, // plan_sheet_narrow
-        0xa3d45cd4852074e7, // plan_sheet_own
-        0x60c2fae25b1a30c4, // plan_sheet_keys
-        0x6b284b7ef20e69aa, // plan_sheet_empty
         0x8c099eb3525e36fa, // sidebar_feature_workspace
         0x0f94ad20e6efe803, // sidebar_needs_you
         0xb97e2bad7455858d, // sidebar_no_features
@@ -2195,12 +1918,6 @@ const GOLDEN_FEATURES: [[u64; 12]; 4] = [
         0x785a91256084024b, // new_feature
         0x465dcd5a19cbedc5, // new_feature_bases
         0x690bf93cbdab10ee, // sidebar_features
-        0x5a9fa2f0a7a81443, // plan_sheet
-        0x8bc60f688ce6245b, // plan_sheet_note
-        0xf99dc433f41c1492, // plan_sheet_narrow
-        0x676f86f8aa7b2284, // plan_sheet_own
-        0x64823c62e6db84ec, // plan_sheet_keys
-        0x13fb250de721df9f, // plan_sheet_empty
         0x3653c34b3b5ea64a, // sidebar_feature_workspace
         0xe73df09db1908db1, // sidebar_needs_you
         0x7ae57ba63db05473, // sidebar_no_features
@@ -2241,22 +1958,6 @@ fn dump_features() {
             painter.new_feature_dialog(&new_feature_bases(), size, scale, p),
             px(dialog.size.w + shadow),
         );
-        for (name, view, output) in [
-            ("plan_sheet", plan_sheet(false), FEATURE_OUTPUT),
-            ("plan_sheet_note", plan_sheet(true), FEATURE_OUTPUT),
-            ("plan_sheet_narrow", plan_sheet_narrow(), PLAN_NARROW),
-            ("plan_sheet_own", plan_sheet_own(), FEATURE_OUTPUT),
-            ("plan_sheet_keys", plan_sheet_keys(), PLAN_NARROW),
-            ("plan_sheet_empty", plan_sheet_empty(), FEATURE_OUTPUT),
-        ] {
-            let panel = super::plan_sheet_layout(&view, output.into()).panel;
-            dump(
-                &dir,
-                &format!("{name}_{tag}"),
-                painter.plan_sheet(&view, output.into(), scale, p),
-                px(panel.size.w + shadow),
-            );
-        }
         dump(
             &dir,
             &format!("sidebar_features_{tag}"),
@@ -6328,6 +6029,698 @@ fn dump_findings() {
     }
 }
 
+// ------------------------------------------------ Plan review's suggestions
+
+/// A suggestion's card on a fixture's page: its buttons (`labels`, the
+/// last `quiet` of them quiet) and, but for one only to read (`quiet` all
+/// of them), those on its comment added to `page`.
+#[allow(clippy::too_many_arguments)]
+fn suggestion_card(
+    page: &mut super::StagePage,
+    labels: &[&str],
+    quiet: usize,
+    tag: super::FindingTag,
+    title: &str,
+    state: &str,
+    place: &str,
+    body: &str,
+    change: &str,
+    comment: &str,
+) -> super::FindingCard {
+    use super::{ButtonStyle, PageButton};
+    let at = page.buttons.len();
+    for (i, label) in labels.iter().enumerate() {
+        let style = match i + quiet >= labels.len() {
+            true => ButtonStyle::Quiet,
+            false => ButtonStyle::Plain,
+        };
+        page.buttons.push(PageButton {
+            label: (*label).to_owned(),
+            style,
+        });
+    }
+    let end = page.buttons.len();
+    let comment_buttons: Vec<usize> = match comment.is_empty() || quiet == labels.len() {
+        true => Vec::new(),
+        false => {
+            for label in ["Edit", "Delete"] {
+                page.buttons.push(PageButton {
+                    label: label.to_owned(),
+                    style: ButtonStyle::Plain,
+                });
+            }
+            (end..end + 2).collect()
+        }
+    };
+    let rejected = state.starts_with("rejected");
+    super::FindingCard {
+        tag,
+        title: title.into(),
+        state: state.into(),
+        place: place.into(),
+        body: body.into(),
+        preview: Vec::new(),
+        fix: change.into(),
+        note: String::new(),
+        comment: comment.into(),
+        comment_buttons,
+        made: false,
+        faded: rejected,
+        collapsed: rejected,
+        stripe: (state == "accepted").then_some(super::CardStripe::ToFix),
+        field: None,
+        field_hint: "Your comment",
+        selected: false,
+        buttons: (at..end).collect(),
+        sheet: None,
+    }
+}
+
+/// The feature tab on Plan review with the reviewer done and a card of each
+/// kind, in the page's order: the user's own (accepted), one to decide
+/// citing code (one citation not found), one accepted in the user's words
+/// with a comment, one rejected and closed, and a question being answered
+/// with the keyboard on its field. `writing`: all decided, the final plan
+/// being written from them, so the cards are only to read.
+fn tab_plan_review(writing: bool) -> super::FeatureTabView {
+    use super::{
+        ButtonStyle, CheckTone, Dot, FindingTag, NodeMark, PageButton, PageSection, RoundAsked,
+        RoundCard, StagePage,
+    };
+    use crate::{agent_icons::AgentIcon, feature::Stage};
+    let mut view = feature_tab();
+    let line = match writing {
+        true => "writing the final plan",
+        false => "2 to decide",
+    };
+    at_stage(&mut view, 2, NodeMark::Current, line);
+    view.focus = super::TabArea::Findings;
+    let button = |label: &str, style| PageButton {
+        label: label.into(),
+        style,
+    };
+    let mut page = StagePage {
+        title: "Plan review".into(),
+        about: Stage::PlanReview.about().into(),
+        status: None,
+        buttons: Vec::new(),
+        sections: Vec::new(),
+    };
+    let (agent, status, dot) = match writing {
+        true => (
+            "claude",
+            "writing the final plan \u{b7} tab 3",
+            Dot::Working,
+        ),
+        false => ("codex", "done \u{b7} tab 3", Dot::Idle),
+    };
+    let page_buttons: &[(&str, ButtonStyle)] = match writing {
+        true => &[
+            ("Show agent", ButtonStyle::Plain),
+            ("Change decisions\u{2026}", ButtonStyle::Plain),
+            ("Skip review", ButtonStyle::Plain),
+            ("Start over\u{2026}", ButtonStyle::Quiet),
+        ],
+        false => &[
+            ("Review in plan", ButtonStyle::Primary),
+            ("Show agent", ButtonStyle::Plain),
+            ("Ask reviewer", ButtonStyle::Plain),
+            ("Accept all open", ButtonStyle::Plain),
+            ("Add suggestion\u{2026}", ButtonStyle::Plain),
+            ("Skip review", ButtonStyle::Plain),
+            ("Start over\u{2026}", ButtonStyle::Quiet),
+        ],
+    };
+    for (label, style) in page_buttons {
+        page.buttons.push(button(label, *style));
+    }
+    page.sections.push(PageSection::Agent {
+        icon: if writing {
+            AgentIcon::Claude
+        } else {
+            AgentIcon::Codex
+        },
+        name: agent.into(),
+        dot,
+        status: status.into(),
+        tail: Vec::new(),
+        buttons: vec![if writing { 0 } else { 1 }],
+        picks: Vec::new(),
+        model: None,
+    });
+    let (heading, lines) = match writing {
+        true => (
+            "Suggestions \u{b7} 4 accepted \u{b7} 1 rejected \u{b7} 1 citation not found in the code",
+            vec![tab_line(
+                crate::review_cards::SUGGESTIONS_WRITING,
+                CheckTone::Note,
+            )],
+        ),
+        false => (
+            "Suggestions \u{b7} 2 to decide \u{b7} 2 accepted \u{b7} 1 rejected \u{b7} 1 citation not found in the code",
+            Vec::new(),
+        ),
+    };
+    page.sections.push(PageSection::Lines {
+        label: heading.into(),
+        lines,
+    });
+    // What each card offers: while deciding, by where it stands; while the
+    // final plan is written, only to look.
+    let offers = |deciding: &'static [&'static str], quiet: usize| -> (&[&str], usize) {
+        match writing {
+            true => (&deciding[deciding.len() - quiet..], quiet),
+            false => (deciding, quiet),
+        }
+    };
+    let own = offers(&["Edit\u{2026}", "Delete", "Show in plan"], 1);
+    let gap = offers(
+        &[
+            "Accept",
+            "Comment",
+            "Edit change\u{2026}",
+            "Reject\u{2026}",
+            "Open code",
+            "Show in plan",
+        ],
+        2,
+    );
+    let risk = offers(
+        &[
+            "Don't accept",
+            "Edit change\u{2026}",
+            "Reject\u{2026}",
+            "Show in plan",
+        ],
+        1,
+    );
+    let gone = offers(&["Reopen", "Comment", "Show in plan"], 1);
+    let question = match writing {
+        true => offers(&["Show in plan"], 1),
+        false => offers(
+            &[
+                "Accept",
+                "Answer",
+                "Edit change\u{2026}",
+                "Reject\u{2026}",
+                "Show in plan",
+            ],
+            1,
+        ),
+    };
+    let mut cards = vec![
+        suggestion_card(
+            &mut page,
+            own.0,
+            own.1,
+            FindingTag::Yours,
+            "Say how a locked account is told apart from a wrong password",
+            "accepted",
+            "u1 \u{b7} gap",
+            "",
+            "Change: Milestone 2 says the lockout message names the wait, not the reason.",
+            "",
+        ),
+        suggestion_card(
+            &mut page,
+            gap.0,
+            gap.1,
+            FindingTag::High,
+            "No milestone moves the old sessions over",
+            if writing { "accepted" } else { "" },
+            "r1-1 \u{b7} gap \u{b7} Milestone 1 \u{b7} Sign in",
+            "Everyone signed in before the change is signed out at once, and the sessions \
+             table keeps rows nobody reads.\nCited: api/src/session.rs:42\nCited: \
+             api/src/store.rs:118 \u{b7} not found in the code",
+            "Change: Add a step to Milestone 1 that carries the old sessions over, with a test.",
+            "",
+        ),
+        suggestion_card(
+            &mut page,
+            risk.0,
+            risk.1,
+            FindingTag::Medium,
+            "The lockout clock lives in memory",
+            "accepted",
+            "r1-2 \u{b7} risk \u{b7} Milestone 2 \u{b7} Lock out",
+            "A restart forgets every count, so five tries become five per restart.",
+            "Your change: Keep the count in the users table, cleared on a good sign-in.",
+            "Only the count: the timestamps can stay in memory.",
+        ),
+        suggestion_card(
+            &mut page,
+            gone.0,
+            gone.1,
+            FindingTag::Low,
+            "Name the hash in the plan",
+            "rejected: the code picks it, the plan needn't",
+            "r1-3 \u{b7} edge case \u{b7} Milestone 1 \u{b7} Sign in",
+            "",
+            "",
+            "",
+        ),
+        suggestion_card(
+            &mut page,
+            question.0,
+            question.1,
+            FindingTag::Low,
+            "Should a locked account get an email?",
+            if writing {
+                "accepted"
+            } else {
+                "not answered yet"
+            },
+            "r1-4 \u{b7} question \u{b7} Milestone 2 \u{b7} Lock out",
+            "The plan doesn't say, and the mailer isn't set up in this repository.",
+            "",
+            if writing {
+                "Not yet: a line in the log is enough for now."
+            } else {
+                ""
+            },
+        ),
+    ];
+    // A question's comment is its answer: being written, the field is
+    // empty and says so.
+    let answering = &mut cards[4];
+    answering.field_hint = "Your answer";
+    if !writing {
+        answering.field = Some(crate::text_field::Line::default());
+        answering.selected = true;
+    }
+    page.sections
+        .extend(cards.into_iter().map(PageSection::Finding));
+    let asked = |id: &str, title: &str, now: &str, tone| RoundAsked {
+        id: id.into(),
+        title: title.into(),
+        note: String::new(),
+        now: Some(tab_line(now, tone)),
+    };
+    page.sections.push(PageSection::Lines {
+        label: "Review run".into(),
+        lines: Vec::new(),
+    });
+    page.sections.push(PageSection::Round(RoundCard {
+        label: "Review run 1".into(),
+        dot: Dot::Idle,
+        state: match writing {
+            true => tab_line("all decided", CheckTone::Ready),
+            false => tab_line("2 to decide", CheckTone::Blocker),
+        },
+        meta: "codex \u{b7} 20m ago".into(),
+        asked: vec![
+            asked(
+                "r1-1",
+                "No milestone moves the old sessions over",
+                if writing { "accepted" } else { "to decide" },
+                if writing {
+                    CheckTone::Ready
+                } else {
+                    CheckTone::Blocker
+                },
+            ),
+            asked(
+                "r1-2",
+                "The lockout clock lives in memory",
+                "accepted",
+                CheckTone::Ready,
+            ),
+            asked(
+                "r1-3",
+                "Name the hash in the plan",
+                "rejected: the code picks it, the plan needn't",
+                CheckTone::Note,
+            ),
+        ],
+        asked_caption: "Suggestions",
+        fixes: Vec::new(),
+        running: Vec::new(),
+        changed: Vec::new(),
+        open: !writing,
+        buttons: Vec::new(),
+    }));
+    view.page = page;
+    view.hints = match writing {
+        true => vec![
+            ("Up / Down", "suggestion"),
+            ("Enter", "show in plan"),
+            ("Esc", "back"),
+        ],
+        false => vec![
+            ("Enter", "save and accept"),
+            ("Shift+Enter", "new line"),
+            ("Esc", "save"),
+        ],
+    }
+    .into_iter()
+    .map(|(k, w)| (k.to_owned(), w.to_owned()))
+    .collect();
+    if writing {
+        let first = view.page.sections.iter_mut().find_map(|s| match s {
+            PageSection::Finding(card) => Some(card),
+            _ => None,
+        });
+        if let Some(card) = first {
+            card.selected = true;
+        }
+    }
+    view
+}
+
+/// The finding dialog rejecting a suggestion, nothing typed yet.
+fn finding_dialog_reject() -> super::FindingDialogView {
+    let w = crate::feature::review_items::words(crate::feature::review_items::ItemOf::Suggestion);
+    super::FindingDialogView {
+        title: format!("{} r1-1", w.refuse_verb),
+        about: "No milestone moves the old sessions over".into(),
+        fields: vec![super::FindingFieldView {
+            label: "Why?",
+            line: crate::text_field::Line::default(),
+            placeholder: w.why_hint,
+            rows: 4,
+        }],
+        focus: 0,
+        action: w.refuse_verb,
+        error: None,
+        hover: None,
+        keys: vec![("Shift+Enter", "new line"), ("Esc", "close")],
+    }
+}
+
+/// The approved plan in its Suggestions tab, each suggestion flagged on the
+/// line it applies to: one to decide with the cursor on it (its buttons in
+/// the suggestion's words), one accepted in the user's words with their
+/// comment under it, one rejected, and the user's own over the whole file.
+fn doc_suggestions() -> super::ReposView {
+    use super::{DetailRow, FindingHead, Hint, ReposButton, RowMark, Tone};
+    use crate::diff::LineKind::Added;
+    let mut view = doc_tab(1, 1.0, Vec::new(), false);
+    // Only Review: the plan is approved, and only read here.
+    view.modes = None;
+    let hint = |button: ReposButton, label: &str, key: &str| Hint {
+        button,
+        label: label.into(),
+        key: key.into(),
+        disabled: None,
+    };
+    let text = |number: usize, text: &str| {
+        DetailRow::Line(crate::diff::Line {
+            kind: Added,
+            text: text.into(),
+            raw: None,
+            number,
+            old: 0,
+            words: Vec::new(),
+            syntax: Vec::new(),
+        })
+    };
+    let head = |severity: &str, state: Option<&str>, tone, place: &str| DetailRow::CommentHead {
+        who: "Plan review",
+        finding: Some(FindingHead {
+            severity: severity.into(),
+            state: state.map(Into::into),
+            tone,
+        }),
+        place: place.into(),
+        within: None,
+    };
+    let said = |text: &str, last, tone| DetailRow::Comment {
+        text: text.into(),
+        first: false,
+        last,
+        tone,
+        within: None,
+    };
+    view.title = "Plan review \u{b7} plan.md".into();
+    view.summary =
+        "\u{201c}Log in with a password\u{201d} \u{b7} 1 to decide \u{b7} 2 accepted \u{b7} 1 rejected"
+            .into();
+    view.hints = vec![
+        hint(ReposButton::Comment, "comment on the suggestion", "c"),
+        hint(ReposButton::CopyLines, "copy", "Ctrl+C"),
+        hint(
+            ReposButton::NextComment,
+            "next, previous suggestion",
+            "] / [",
+        ),
+        hint(ReposButton::Approve, "write final plan", "Ctrl+Enter"),
+        hint(ReposButton::Help, "keys", "F1"),
+        hint(ReposButton::Close, "back", "Esc"),
+    ];
+    view.detail.title = "plan.md \u{b7} 8 lines".into();
+    view.detail.title_buttons = vec![
+        hint(ReposButton::PrevComment, "Previous suggestion", ""),
+        hint(ReposButton::NextComment, "Next suggestion", ""),
+        hint(ReposButton::Approve, "Write final plan", "Ctrl+Enter"),
+    ];
+    view.detail.rows = vec![
+        DetailRow::CommentHead {
+            who: "Your suggestion",
+            finding: None,
+            place: "your suggestion 1 of 1".into(),
+            within: None,
+        },
+        said(
+            "Say how a locked account is told apart from a wrong password",
+            false,
+            None,
+        ),
+        said("Gap \u{b7} not placed in the plan", false, None),
+        said(
+            "Change: Milestone 2 says the lockout message names the wait, not the reason.",
+            true,
+            None,
+        ),
+        text(1, "# Plan: log in with a password"),
+        text(2, ""),
+        text(3, "## Milestone 1 \u{b7} Sign in"),
+        text(
+            4,
+            "Add the login form, and check the password against the stored hash.",
+        ),
+        head("high", None, Tone::Error, "suggestion 1 of 3"),
+        said(
+            "No milestone moves the old sessions over",
+            false,
+            Some(Tone::Error),
+        ),
+        said(
+            "Gap \u{b7} Milestone 1 \u{b7} Sign in",
+            false,
+            Some(Tone::Error),
+        ),
+        said(
+            "Everyone signed in before the change is signed out at once.",
+            false,
+            Some(Tone::Error),
+        ),
+        said(
+            "Change: Add a step to Milestone 1 that carries the old sessions over, with a test.",
+            false,
+            Some(Tone::Error),
+        ),
+        said(
+            "api/src/store.rs:118 sessions.clear() (not found in the code)",
+            true,
+            Some(Tone::Error),
+        ),
+        text(5, ""),
+        text(6, "## Milestone 2 \u{b7} Lock out"),
+        text(
+            7,
+            "After five tries the account waits a minute, and says for how long.",
+        ),
+        head(
+            "medium",
+            Some("accepted"),
+            Tone::Warning,
+            "suggestion 2 of 3",
+        ),
+        said(
+            "The lockout clock lives in memory",
+            false,
+            Some(Tone::Warning),
+        ),
+        said(
+            "Your change: Keep the count in the users table, cleared on a good sign-in.",
+            true,
+            Some(Tone::Warning),
+        ),
+        DetailRow::CommentHead {
+            who: "Your comment",
+            finding: None,
+            place: String::new(),
+            within: Some(Tone::Warning),
+        },
+        DetailRow::Comment {
+            text: "Only the count: the timestamps can stay in memory.".into(),
+            first: false,
+            last: true,
+            tone: None,
+            within: Some(Tone::Warning),
+        },
+        head("low", Some("rejected"), Tone::Muted, "suggestion 3 of 3"),
+        said("Name the hash in the plan", false, Some(Tone::Muted)),
+        said(
+            "Rejected: the code picks it, the plan needn't",
+            true,
+            Some(Tone::Muted),
+        ),
+        text(8, "Tests cover both milestones."),
+    ];
+    let on = 8;
+    view.detail.marks = (0..view.detail.rows.len())
+        .map(|r| RowMark {
+            selected: r == on,
+            top: r == on,
+            bottom: r == on,
+            noted: false,
+        })
+        .collect();
+    view.detail.row_buttons = vec![
+        (on, hint(ReposButton::FixFinding, "Accept", "f")),
+        (
+            on,
+            hint(ReposButton::DismissFinding, "Reject\u{2026}", "Del"),
+        ),
+        (on, hint(ReposButton::Comment, "Comment", "c")),
+        (
+            on,
+            hint(ReposButton::EditFix, "Edit change\u{2026}", "Shift+E"),
+        ),
+    ];
+    view.detail.ticks = vec![(0.0, false), (0.3, true), (0.66, false), (0.86, false)];
+    view.detail.part = 0.0;
+    view.detail.first = 0;
+    view.detail.total = view.detail.rows.len();
+    view.detail.caret = None;
+    view
+}
+
+const PLAN_REVIEW: [&str; 6] = [
+    "tab_plan_review_cards_1180",
+    "tab_plan_review_cards_860",
+    "tab_plan_review_writing_1180",
+    "doc_suggestions_1180",
+    "doc_suggestions_850",
+    "finding_dialog_reject",
+];
+
+/// The recorded hashes of `PLAN_REVIEW`, per case in `CASES`.
+const GOLDEN_PLAN_REVIEW: [[u64; 6]; 4] = [
+    // Dark at 1
+    [
+        0xfe55826e4659fa28, // tab_plan_review_cards_1180
+        0x07a6fc309bb51444, // tab_plan_review_cards_860
+        0xd38712f8888ca013, // tab_plan_review_writing_1180
+        0x154aeb3cfd9938e1, // doc_suggestions_1180
+        0x6f63128edd4069b1, // doc_suggestions_850
+        0x519b46994bcca395, // finding_dialog_reject
+    ],
+    // Dark at 2
+    [
+        0xbb1a5ba187af766e, // tab_plan_review_cards_1180
+        0x0afe98f2b96ac8af, // tab_plan_review_cards_860
+        0x0e82a6bb467343c6, // tab_plan_review_writing_1180
+        0x6ba33ef2efa93199, // doc_suggestions_1180
+        0xacac000bf593cb0b, // doc_suggestions_850
+        0x5db40a98428d92d3, // finding_dialog_reject
+    ],
+    // Light at 1
+    [
+        0x173479b4e20ecd53, // tab_plan_review_cards_1180
+        0x1582796e2cf4198c, // tab_plan_review_cards_860
+        0x28929dfdab81dbac, // tab_plan_review_writing_1180
+        0xc004c28ecddd8216, // doc_suggestions_1180
+        0xb929e644bd3059f9, // doc_suggestions_850
+        0x89ae995f2bf62070, // finding_dialog_reject
+    ],
+    // Light at 2
+    [
+        0x98bbade750dc1bb0, // tab_plan_review_cards_1180
+        0x6791b61137ac588a, // tab_plan_review_cards_860
+        0x12d99351f7f72792, // tab_plan_review_writing_1180
+        0xe94c049f4569a3a6, // doc_suggestions_1180
+        0x9aa0c21f07ff7aef, // doc_suggestions_850
+        0xe2cb1d9d401ab9c4, // finding_dialog_reject
+    ],
+];
+
+/// Plan review's surface `i` of `PLAN_REVIEW`, and how wide it is.
+fn plan_review_surface(
+    painter: &Painter,
+    theme: Theme,
+    scale: f64,
+    i: usize,
+) -> (MemoryRenderBuffer, i32) {
+    let tab = |view: &super::FeatureTabView, w: i32| {
+        let buffer =
+            super::feature_tab_composed(painter, view, (w, TAB_HEIGHT).into(), theme, scale);
+        (buffer, w)
+    };
+    match i {
+        0 => tab(&tab_plan_review(false), 1180),
+        // Scrolled to the question being answered, and the run's card.
+        1 => {
+            let mut view = tab_plan_review(false);
+            view.scroll[super::TabColumn::Page as usize] = 560.0;
+            tab(&view, 860)
+        }
+        2 => tab(&tab_plan_review(true), 1180),
+        3 => (
+            doc_tab_buffer(painter, &doc_suggestions(), 1180, theme, scale),
+            1180 + 2 * super::SHADOW,
+        ),
+        4 => (
+            doc_tab_buffer(painter, &doc_suggestions(), 850, theme, scale),
+            850 + 2 * super::SHADOW,
+        ),
+        _ => {
+            let size = IDENTITY_OUTPUT.into();
+            let shown = finding_dialog_reject();
+            let panel = super::finding_dialog_layout(&shown, size).panel;
+            (
+                painter.finding_dialog(&shown, size, scale, theme.palette()),
+                panel.size.w + 2 * super::SHADOW,
+            )
+        }
+    }
+}
+
+#[test]
+fn plan_reviews_suggestions_paint_the_same_pixels() {
+    let golden: Vec<&[u64]> = GOLDEN_PLAN_REVIEW
+        .iter()
+        .map(|row| row.as_slice())
+        .collect();
+    check_each(&PLAN_REVIEW, &golden, |painter, theme, scale, i| {
+        hash(plan_review_surface(painter, theme, scale, i).0)
+    });
+}
+
+/// With `GERDR_DUMP_DIR` set, write Plan review's suggestions there.
+#[test]
+fn dump_plan_review() {
+    let Some(dir) = std::env::var_os("GERDR_DUMP_DIR") else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    let _ = std::fs::create_dir_all(&dir);
+    let painter = Painter::new();
+    for (theme, scale) in CASES {
+        for (i, name) in PLAN_REVIEW.iter().enumerate() {
+            let (buffer, w) = plan_review_surface(&painter, theme, scale, i);
+            let px = (w as f64 * scale).round() as usize;
+            dump(
+                &dir,
+                &format!("{name}_{}_{}", theme.name(), scale),
+                buffer,
+                px,
+            );
+        }
+    }
+}
+
 /// A feature's brief in its tab, as `doc_tab_view` lays it out: the mode
 /// switch on the title row, the finishing actions at the foot.
 fn doc_tab(on: usize, share: f64, off: Vec<usize>, wide: bool) -> super::ReposView {
@@ -6450,6 +6843,7 @@ fn findings_view() -> super::ReposView {
         disabled: None,
     };
     let head = |severity: &str, state: Option<&str>, tone, place: &str| DetailRow::CommentHead {
+        who: "AI review",
         finding: Some(FindingHead {
             severity: severity.into(),
             state: state.map(Into::into),
@@ -6473,6 +6867,7 @@ fn findings_view() -> super::ReposView {
     ];
     view.detail.rows = vec![
         DetailRow::CommentHead {
+            who: "Your comment",
             finding: None,
             place: "comment 1 of 1".into(),
             within: None,
@@ -6484,6 +6879,7 @@ fn findings_view() -> super::ReposView {
         head("medium", Some("to fix"), Tone::Warning, "finding 2 of 4"),
         line("No timeout on the status read", false, Some(Tone::Warning)),
         DetailRow::CommentHead {
+            who: "Your comment",
             finding: None,
             place: String::new(),
             within: Some(Tone::Warning),
@@ -6646,6 +7042,7 @@ fn findings_popup(at: u8) -> super::ReposView {
                 number: 0,
             },
             DetailRow::CommentHead {
+                who: "Your comment",
                 finding: None,
                 place: "comment 1 of 1".into(),
                 within: None,

@@ -1,8 +1,10 @@
-//! The dialog asking for a finding's text, from AI review's page or its
-//! diff: why it is dismissed, its fix, or a comment of the user's own; on
-//! Manual test's page, a comment of theirs on no criterion. Esc closes it and
-//! keeps what was typed for the next opening on the same thing; nothing here
-//! loses anything, since a dismissed finding can be reopened.
+//! The dialog asking for a review item's text, from AI review's page or its
+//! diff: why a finding is dismissed, its fix, or a comment of the user's own;
+//! from Plan review's page, the same of a suggestion in its own words (why it
+//! is rejected, its change, one of the user's own); on Manual test's page, a
+//! comment of theirs on no criterion. Esc closes it and keeps what was typed
+//! for the next opening on the same thing; nothing here loses anything, since
+//! a dismissed finding or rejected suggestion can be reopened.
 
 use std::collections::HashMap;
 
@@ -16,7 +18,9 @@ use crate::{
     chrome::{self, FINDING_DIALOG_ACTION, FindingDialogHit, FindingDialogView, FindingFieldView},
     feature::{
         Stage, Status,
+        plan_review::Suggestion,
         review_import::{self, Decision, Finding, FindingState},
+        review_items::{self, ItemOf, Standing, Words, words},
     },
     text_field::{Edit, TextField},
 };
@@ -24,9 +28,9 @@ use crate::{
 /// What the dialog asks for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Ask {
-    /// Why a finding is dismissed.
+    /// Why a finding is dismissed, a suggestion rejected.
     Dismiss,
-    /// A finding's fix.
+    /// A finding's fix, a suggestion's change.
     Edit,
     /// What an item of the user's own says.
     EditOwn,
@@ -38,8 +42,12 @@ pub enum Ask {
     EditComment,
 }
 
-/// What was typed and left: by project, slug, what was asked and the finding.
-pub type Drafts = HashMap<(String, String, Ask, String), Vec<String>>;
+/// What was typed and left: by project, slug, what was asked, and the item
+/// by its kind and id (`r1-2` is in both kinds).
+pub type Drafts = HashMap<DraftKey, Vec<String>>;
+
+/// What a draft is kept by (see `Drafts`).
+pub type DraftKey = (String, String, Ask, ItemOf, String);
 
 /// The dialog's state, while it is open.
 #[derive(Debug)]
@@ -47,6 +55,9 @@ pub struct FindingDialog {
     pub project: String,
     pub slug: String,
     pub ask: Ask,
+    /// Which kind of item it is on: its words, and its draft, are that
+    /// kind's.
+    pub of: ItemOf,
     /// The finding it is on; empty for a new item.
     pub id: String,
     /// The finding's title; for a new item, what it is for.
@@ -63,6 +74,53 @@ pub struct FindingDialog {
     pub note: Option<crate::review::Comment>,
 }
 
+/// A finding of the user's own, or a comment in the diff, with nothing typed.
+const FINDING_SAY_WHAT: &str = "Say what to fix.";
+
+/// An item a dialog or a card's comment is on, as it was when asked.
+#[derive(Clone, Debug)]
+pub(crate) enum Asked {
+    Finding(Finding),
+    Suggestion(Suggestion),
+}
+
+impl Asked {
+    pub(crate) fn title(&self) -> &str {
+        match self {
+            Self::Finding(f) => &f.title,
+            Self::Suggestion(s) => &s.title,
+        }
+    }
+
+    pub(crate) fn standing(&self) -> Standing {
+        match self {
+            Self::Finding(f) => f.state,
+            Self::Suggestion(s) => s.standing(),
+        }
+    }
+
+    pub(crate) fn note(&self) -> &str {
+        match self {
+            Self::Finding(f) => &f.note,
+            Self::Suggestion(s) => &s.note,
+        }
+    }
+
+    pub(crate) fn into_finding(self) -> Option<Finding> {
+        match self {
+            Self::Finding(f) => Some(f),
+            Self::Suggestion(_) => None,
+        }
+    }
+
+    pub(crate) fn into_suggestion(self) -> Option<Suggestion> {
+        match self {
+            Self::Suggestion(s) => Some(s),
+            Self::Finding(_) => None,
+        }
+    }
+}
+
 /// What the dialog asks gerdr to do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FindingDialogOutcome {
@@ -71,12 +129,19 @@ pub enum FindingDialogOutcome {
 }
 
 impl FindingDialog {
+    /// What its item's kind is called and says.
+    fn words(&self) -> &'static Words {
+        words(self.of)
+    }
+
     /// Why it can't be saved, as a sentence.
     fn problem(&self) -> Option<&'static str> {
         let empty = self.fields.first().is_none_or(|f| f.trim().is_empty());
+        let w = self.words();
         match self.ask {
-            Ask::Dismiss if empty => Some("Say why you dismiss it."),
-            Ask::Add | Ask::EditOwn | Ask::EditDiffNote if empty => Some("Say what to fix."),
+            Ask::Dismiss if empty => Some(w.say_why),
+            Ask::Add | Ask::EditOwn if empty => Some(w.say_what),
+            Ask::EditDiffNote if empty => Some(FINDING_SAY_WHAT),
             Ask::EditComment if empty => Some("Say what should change."),
             _ => None,
         }
@@ -137,47 +202,42 @@ impl FindingDialog {
     }
 
     fn view(&self) -> FindingDialogView {
-        let (title, labels, action): (String, &[(&str, &str, i32)], &str) = match self.ask {
+        let w = self.words();
+        let id = &self.id;
+        let save = if self.marks_fix { w.save_want } else { "Save" };
+        let (title, labels, action): (String, [(&str, &str, i32); 1], &str) = match self.ask {
             Ask::Dismiss => (
-                format!("Dismiss {}", self.id),
-                &[("Why?", "Why this doesn't need fixing", 4)],
-                "Dismiss",
+                format!("{} {id}", w.refuse_verb),
+                [("Why?", w.why_hint, 4)],
+                w.refuse_verb,
             ),
             Ask::Edit => (
-                format!("Edit the fix of {}", self.id),
-                &[("Fix", "What should change", 6)],
-                if self.marks_fix {
-                    "Save and fix"
-                } else {
-                    "Save"
-                },
+                format!("{} {id}", w.edit_title),
+                [(w.edit_label, "What should change", 6)],
+                save,
             ),
             Ask::EditOwn => (
-                format!("Edit {}", self.id),
-                &[("Comment", "What should change", 6)],
-                if self.marks_fix {
-                    "Save and fix"
-                } else {
-                    "Save"
-                },
+                format!("Edit {id}"),
+                [(w.own_label, w.own_placeholder, 6)],
+                save,
             ),
             Ask::EditDiffNote => (
-                format!("Edit your comment on {}", self.id),
-                &[("Comment", "What should change", 6)],
+                format!("Edit your comment on {id}"),
+                [("Comment", "What should change", 6)],
                 "Save",
             ),
             Ask::Add => (
-                "Add a comment".to_owned(),
-                &[("Comment", "What should change", 6)],
+                w.add_title.to_owned(),
+                [(w.own_label, w.own_placeholder, 6)],
                 "Add",
             ),
             Ask::EditComment => (
-                format!("Edit comment {}", self.id),
-                &[("Comment", "What should change", 6)],
+                format!("Edit comment {id}"),
+                [("Comment", "What should change", 6)],
                 "Save",
             ),
         };
-        let fields = (self.fields.iter().zip(labels))
+        let fields = (self.fields.iter().zip(&labels))
             .map(|(field, (label, placeholder, rows))| FindingFieldView {
                 label,
                 line: field.line(),
@@ -203,11 +263,12 @@ impl FindingDialog {
         }
     }
 
-    fn draft_key(&self) -> (String, String, Ask, String) {
+    fn draft_key(&self) -> DraftKey {
         (
             self.project.clone(),
             self.slug.clone(),
             self.ask,
+            self.of,
             self.id.clone(),
         )
     }
@@ -218,20 +279,21 @@ impl FindingDialog {
 }
 
 impl Gerdr {
-    /// Open the dialog asking `ask` of `id` with fields holding `from`,
-    /// or what was last left typed there.
+    /// Open the dialog asking `ask` of item `id` of kind `of` with fields
+    /// holding `from`, or what was last left typed there.
     #[allow(clippy::too_many_arguments)]
     fn open_finding_dialog(
         &mut self,
         project: &str,
         slug: &str,
         ask: Ask,
+        of: ItemOf,
         id: &str,
         about: String,
         from: Vec<String>,
         marks_fix: bool,
     ) {
-        let key = (project.to_owned(), slug.to_owned(), ask, id.to_owned());
+        let key = (project.to_owned(), slug.to_owned(), ask, of, id.to_owned());
         let shown = (self.features.finding_drafts.get(&key))
             .filter(|draft| draft.len() == from.len())
             .unwrap_or(&from);
@@ -245,6 +307,7 @@ impl Gerdr {
             project: project.to_owned(),
             slug: slug.to_owned(),
             ask,
+            of,
             id: id.to_owned(),
             about,
             fields,
@@ -259,39 +322,67 @@ impl Gerdr {
         self.refresh_pointer_focus();
     }
 
-    /// Finding `id` of `slug`, while its AI review is current; else says why
-    /// not.
-    pub(crate) fn finding_to_ask(
+    /// Item `id` of kind `of` of `slug`, while its stage is current and its
+    /// items can be decided (for a suggestion, `feature_plan_review::
+    /// decidable`); else says why not.
+    pub(crate) fn item_to_ask(
         &mut self,
         project: &str,
         slug: &str,
+        of: ItemOf,
         id: &str,
-    ) -> Option<Finding> {
+    ) -> Option<Asked> {
         let feature = self.feature(project, slug)?;
         let title = feature.title.clone();
-        if feature.status != Status::Open || feature.current() != Some(Stage::AiReview) {
-            self.show_warning(format!("\u{201c}{title}\u{201d} isn't at AI review"));
-            return None;
-        }
-        let found = feature.review.as_ref().and_then(|r| r.finding(id)).cloned();
+        let found = match of {
+            ItemOf::Finding => {
+                if feature.status != Status::Open || feature.current() != Some(Stage::AiReview) {
+                    self.show_warning(format!("\u{201c}{title}\u{201d} isn't at AI review"));
+                    return None;
+                }
+                let found = feature.review.as_ref().and_then(|r| r.finding(id));
+                found.cloned().map(Asked::Finding)
+            }
+            ItemOf::Suggestion => match crate::feature_plan_review::decidable(feature) {
+                Ok(review) => review.suggestion(id).cloned().map(Asked::Suggestion),
+                Err(why) => {
+                    self.show_warning(why);
+                    return None;
+                }
+            },
+        };
         if found.is_none() {
-            self.show_warning(format!("There's no finding {id}"));
+            self.show_warning(format!("There's no {} {id}", words(of).item));
         }
         found
     }
 
     /// Ask why finding `id` is dismissed.
     pub fn ask_dismiss_finding(&mut self, project: &str, slug: &str, id: &str) {
-        if let Some(f) = self.finding_to_ask(project, slug, id) {
+        self.ask_refuse_item(project, slug, ItemOf::Finding, id);
+    }
+
+    /// Ask why suggestion `id` is rejected.
+    pub(crate) fn ask_reject_suggestion(&mut self, project: &str, slug: &str, id: &str) {
+        self.ask_refuse_item(project, slug, ItemOf::Suggestion, id);
+    }
+
+    /// Ask why item `id` of kind `of` is refused: a finding dismissed, a
+    /// suggestion rejected.
+    fn ask_refuse_item(&mut self, project: &str, slug: &str, of: ItemOf, id: &str) {
+        if let Some(item) = self.item_to_ask(project, slug, of, id) {
             let from = vec![String::new()];
-            self.open_finding_dialog(project, slug, Ask::Dismiss, id, f.title, from, false);
+            let about = item.title().to_owned();
+            self.open_finding_dialog(project, slug, Ask::Dismiss, of, id, about, from, false);
         }
     }
 
     /// Ask for finding `id`'s fix; for an item of the user's own, for what it
     /// says.
     pub fn ask_edit_finding(&mut self, project: &str, slug: &str, id: &str) {
-        let Some(f) = self.finding_to_ask(project, slug, id) else {
+        let Some(f) =
+            (self.item_to_ask(project, slug, ItemOf::Finding, id)).and_then(Asked::into_finding)
+        else {
             return;
         };
         if let Err(why) = review_import::editable(&f) {
@@ -303,11 +394,12 @@ impl Gerdr {
                 true => f.title.clone(),
                 false => format!("{}\n{}", f.title, f.body),
             };
-            let about = "It goes to the Build agent with the fixes".to_owned();
+            let about = words(ItemOf::Finding).own_goes.to_owned();
             self.open_finding_dialog(
                 project,
                 slug,
                 Ask::EditOwn,
+                ItemOf::Finding,
                 id,
                 about,
                 vec![text],
@@ -315,8 +407,45 @@ impl Gerdr {
             );
         } else {
             let from = vec![f.fix_text().to_owned()];
-            self.open_finding_dialog(project, slug, Ask::Edit, id, f.title, from, marks_fix);
+            self.open_finding_dialog(
+                project,
+                slug,
+                Ask::Edit,
+                ItemOf::Finding,
+                id,
+                f.title,
+                from,
+                marks_fix,
+            );
         }
+    }
+
+    /// Ask for suggestion `id`'s change in the user's words; for one of
+    /// their own, for what it says. Saving accepts an open one, unless it is
+    /// a question still to answer.
+    pub(crate) fn ask_edit_suggestion(&mut self, project: &str, slug: &str, id: &str) {
+        let of = ItemOf::Suggestion;
+        let Some(s) = (self.item_to_ask(project, slug, of, id)).and_then(Asked::into_suggestion)
+        else {
+            return;
+        };
+        if let Err(why) = review_items::editable(of, id, s.standing()) {
+            return self.show_warning(why);
+        }
+        let marks_fix = s.standing() == Standing::Open && !s.unanswered();
+        let (ask, about, text) = match s.source {
+            crate::feature::plan_review::Source::You => {
+                let text = match s.change.is_empty() {
+                    true => s.title.clone(),
+                    false => format!("{}\n{}", s.title, s.change),
+                };
+                (Ask::EditOwn, words(of).own_goes.to_owned(), text)
+            }
+            crate::feature::plan_review::Source::Reviewer => {
+                (Ask::Edit, s.title.clone(), s.change_text().to_owned())
+            }
+        };
+        self.open_finding_dialog(project, slug, ask, of, id, about, vec![text], marks_fix);
     }
 
     /// Ask what comment `c` the user left in the diff should say.
@@ -324,7 +453,16 @@ impl Gerdr {
         let about = "It goes to the Build agent with the fixes".to_owned();
         let id = crate::features::note_id(c);
         let from = vec![c.text.clone()];
-        self.open_finding_dialog(project, slug, Ask::EditDiffNote, &id, about, from, false);
+        self.open_finding_dialog(
+            project,
+            slug,
+            Ask::EditDiffNote,
+            ItemOf::Finding,
+            &id,
+            about,
+            from,
+            false,
+        );
         if let Some(dialog) = self.features.finding_dialog.as_mut() {
             dialog.note = Some(c.clone());
         }
@@ -335,15 +473,26 @@ impl Gerdr {
     pub(crate) fn ask_edit_comment(&mut self, project: &str, slug: &str, id: &str, text: &str) {
         let about = "Changed, it is open again, to go to the Build agent".to_owned();
         let from = vec![text.to_owned()];
-        self.open_finding_dialog(project, slug, Ask::EditComment, id, about, from, false);
+        self.open_finding_dialog(
+            project,
+            slug,
+            Ask::EditComment,
+            ItemOf::Finding,
+            id,
+            about,
+            from,
+            false,
+        );
     }
 
-    /// Ask for a comment of the user's own, to go with the fixes.
+    /// Ask for a comment of the user's own, to go with the fixes; at Plan
+    /// review, for a suggestion of their own.
     pub fn ask_add_comment(&mut self, project: &str, slug: &str) {
         let stage = self
             .feature(project, slug)
             .and_then(crate::feature::Feature::current);
         let about = match stage {
+            Some(Stage::PlanReview) => return self.ask_add_suggestion(project, slug),
             Some(Stage::CodeReview) => "It goes to the Build agent when you plan fixes",
             Some(Stage::ManualTest) => {
                 "It goes to the Build agent with the failures, and stays open until you mark it done"
@@ -351,7 +500,30 @@ impl Gerdr {
             _ => "It goes to the Build agent with the fixes, and the next review checks it",
         };
         let from = vec![String::new()];
-        self.open_finding_dialog(project, slug, Ask::Add, "", about.to_owned(), from, false);
+        self.open_finding_dialog(
+            project,
+            slug,
+            Ask::Add,
+            ItemOf::Finding,
+            "",
+            about.to_owned(),
+            from,
+            false,
+        );
+    }
+
+    /// Ask for a suggestion of the user's own, to go into the final plan.
+    pub(crate) fn ask_add_suggestion(&mut self, project: &str, slug: &str) {
+        let Some(feature) = self.feature(project, slug) else {
+            return;
+        };
+        if let Err(why) = crate::feature_plan_review::decidable(feature) {
+            return self.show_warning(why);
+        }
+        let of = ItemOf::Suggestion;
+        let about = words(of).own_goes.to_owned();
+        let from = vec![String::new()];
+        self.open_finding_dialog(project, slug, Ask::Add, of, "", about, from, false);
     }
 
     /// A key while the dialog has the keyboard.
@@ -391,32 +563,49 @@ impl Gerdr {
         let stage = self
             .feature(project, slug)
             .and_then(crate::feature::Feature::current);
-        match dialog.ask {
-            Ask::Dismiss => {
+        let kept = match (dialog.ask, dialog.of) {
+            (Ask::Dismiss, ItemOf::Suggestion) => self.reject_suggestion(project, slug, id, first),
+            (Ask::Edit, ItemOf::Suggestion) => {
+                self.edit_suggestion_change(project, slug, id, first)
+            }
+            (Ask::EditOwn, ItemOf::Suggestion) => {
+                self.edit_own_suggestion(project, slug, id, first)
+            }
+            (Ask::Add, ItemOf::Suggestion) => self.add_suggestion(project, slug, first),
+            (Ask::Dismiss, _) => {
                 let why = Decision::Dismiss(first.to_owned());
                 self.decide_finding(project, slug, id, why);
                 self.feature_findings_changed(project, slug);
                 // Its card closes: the keyboard goes on to what is left.
                 self.select_next_open_after(id);
+                true
             }
-            Ask::Edit => self.edit_finding(project, slug, id, first),
-            Ask::EditOwn => self.edit_own_finding(project, slug, id, first),
-            Ask::EditDiffNote => {
+            (Ask::Edit, _) => {
+                self.edit_finding(project, slug, id, first);
+                true
+            }
+            (Ask::EditOwn, _) => {
+                self.edit_own_finding(project, slug, id, first);
+                true
+            }
+            (Ask::EditDiffNote, _) => {
                 if let Some(note) = &dialog.note {
                     self.edit_diff_note(project, slug, note, first);
                 }
+                true
             }
-            Ask::Add if stage == Some(Stage::ManualTest) => {
-                if !self.add_manual_comment(project, slug, first) {
-                    self.features.finding_drafts.insert(key, texts);
-                }
+            (Ask::Add, _) if stage == Some(Stage::ManualTest) => {
+                self.add_manual_comment(project, slug, first)
             }
-            Ask::Add => self.add_finding_comment(project, slug, first),
-            Ask::EditComment => {
-                if !self.edit_manual_comment(project, slug, id, first) {
-                    self.features.finding_drafts.insert(key, texts);
-                }
+            (Ask::Add, _) => {
+                self.add_finding_comment(project, slug, first);
+                true
             }
+            (Ask::EditComment, _) => self.edit_manual_comment(project, slug, id, first),
+        };
+        // Not taken: what was typed waits for the next opening.
+        if !kept {
+            self.features.finding_drafts.insert(key, texts);
         }
     }
 
@@ -494,6 +683,7 @@ mod tests {
             project: "p".into(),
             slug: "s".into(),
             ask,
+            of: ItemOf::Finding,
             id: "r1-1".into(),
             about: "Off by one".into(),
             fields: from.iter().map(|t| TextField::multiline(t)).collect(),
@@ -574,6 +764,60 @@ mod tests {
             press(&mut d, &none(), Keysym::Escape),
             Some(FindingDialogOutcome::Cancel)
         );
+    }
+
+    fn suggestion(ask: Ask, from: &[&str]) -> FindingDialog {
+        FindingDialog {
+            of: ItemOf::Suggestion,
+            ..dialog(ask, from)
+        }
+    }
+
+    #[test]
+    fn a_suggestion_is_asked_in_its_own_words() {
+        let mut d = suggestion(Ask::Dismiss, &[" "]);
+        assert_eq!(press(&mut d, &none(), Keysym::Return), None);
+        assert_eq!(d.error.as_deref(), Some("Say why you reject it."));
+        let view = d.view();
+        assert_eq!(
+            (view.title.as_str(), view.action),
+            ("Reject r1-1", "Reject")
+        );
+        let w = words(ItemOf::Suggestion);
+        assert_eq!(view.fields[0].placeholder, w.why_hint);
+        let view = suggestion(Ask::Edit, &["c"]).view();
+        assert_eq!(view.action, "Save and accept");
+        assert_eq!(view.fields[0].label, "Change");
+        assert_eq!(view.title, "Edit the change of r1-1");
+        let mut own = suggestion(Ask::Add, &[""]);
+        assert_eq!(own.view().title, "Add a suggestion");
+        assert_eq!(press(&mut own, &none(), Keysym::Return), None);
+        assert_eq!(own.error.as_deref(), Some(w.say_what));
+        // Nothing a suggestion's dialog says speaks of fixing.
+        for ask in [Ask::Dismiss, Ask::Edit, Ask::EditOwn, Ask::Add] {
+            let mut d = suggestion(ask, &[""]);
+            d.save();
+            let view = d.view();
+            let fields = view.fields.iter().flat_map(|f| [f.label, f.placeholder]);
+            let all = [&view.title, view.action, d.error.as_deref().unwrap_or("")];
+            for text in all.into_iter().chain(fields) {
+                let lower = text.to_lowercase();
+                assert!(
+                    !lower.contains("fix") && !lower.contains("dismiss"),
+                    "{text}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn drafts_of_a_finding_and_a_suggestion_with_one_id_are_kept_apart() {
+        let finding = dialog(Ask::Dismiss, &["typed"]);
+        let suggestion = suggestion(Ask::Dismiss, &["typed"]);
+        assert_ne!(finding.draft_key(), suggestion.draft_key());
+        let mut drafts = Drafts::new();
+        drafts.insert(finding.draft_key(), finding.texts());
+        assert!(!drafts.contains_key(&suggestion.draft_key()));
     }
 
     #[test]
