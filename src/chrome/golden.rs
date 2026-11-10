@@ -1350,6 +1350,34 @@ fn dump_overlays() {
             ),
             px(260),
         );
+        // A header under the pointer, on its git marks: lit, as they open
+        // the repositories panel.
+        dump(
+            &dir,
+            &format!("sidebar_git_marks_{tag}"),
+            painter.sidebar_view(
+                &SidebarView {
+                    workspaces: workspaces(),
+                    agents: many_agents(),
+                    active: Some(0),
+                    project: Some("aft".into()),
+                    header_lit: false,
+                    features: Vec::new(),
+                    state: SidebarState {
+                        rows: vec![RowState {
+                            hover: 16,
+                            git: true,
+                            ..RowState::default()
+                        }],
+                        ..SidebarState::default()
+                    },
+                },
+                (260, 520).into(),
+                scale,
+                p,
+            ),
+            px(260),
+        );
         // A header under the pointer, on its agent button.
         let hovered = RowState {
             hover: 16,

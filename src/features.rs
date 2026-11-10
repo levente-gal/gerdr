@@ -8469,6 +8469,17 @@ impl Gerdr {
         let key = (feature.project.clone(), feature.slug.clone());
         let probe = (self.features.probes.get(&key)).and_then(|p| p.last.as_ref());
         let ships = ship_rows(&feature, probe);
+        // Ship's buttons, by their keys, while the keys list and notes are
+        // away and the page has the keyboard.
+        let on = self.features.panel.as_ref()?;
+        let quiet = on.keys || on.note.is_some() || on.focus == TabArea::Repos;
+        if !quiet && on.page_stage(&feature) == Stage::Ship {
+            let repo = ship_row_repo(on, &ships);
+            let keys = ship_keys(&feature, ctx, probe, repo.as_deref());
+            if let Some(key) = keys.into_iter().find(|k| k.pressed(mods, sym)) {
+                return Some(key.outcome);
+            }
+        }
         let notes = notes_of(probe).to_vec();
         let panel = self.features.panel.as_mut()?;
         let before = (panel.focus, panel.repo, panel.expanded);
@@ -10110,16 +10121,7 @@ impl Gerdr {
                     .filter(|p| !p.keys)
                     .map(|p| p.page_stage(&feature));
                 stage.and_then(|stage| {
-                    let plan = self.planned_checks(&feature);
-                    let rows = self.criterion_rows(&feature);
-                    let key = (feature.project.clone(), feature.slug.clone());
-                    let probe = (self.features.probes.get(&key)).and_then(|p| p.last.as_ref());
-                    let notes = notes_of(probe);
-                    let mut actions = stage_actions(&feature, stage, ctx, &plan, &rows, notes);
-                    actions.extend(round_plan_actions(&feature, stage, probe));
-                    let place = self.place_label(&feature, stage);
-                    actions.extend(place_action(place.as_deref(), stage));
-                    actions.extend(stop_action(&feature, stage));
+                    let mut actions = self.page_button_actions(&feature, stage, ctx);
                     (i < actions.len()).then(|| actions.swap_remove(i).1)
                 })
             }
@@ -10303,6 +10305,51 @@ impl Gerdr {
 
     /// The pointer moved while the feature tab shows: what is under it
     /// lights up, and a stage's node tells what is done in it.
+    /// The buttons of `stage`'s page of `feature`, in the order the page
+    /// lays them out, with what each asks.
+    fn page_button_actions(
+        &self,
+        feature: &Feature,
+        stage: Stage,
+        ctx: RowCtx,
+    ) -> Vec<(PageButton, PanelOutcome)> {
+        let plan = self.planned_checks(feature);
+        let rows = self.criterion_rows(feature);
+        let key = (feature.project.clone(), feature.slug.clone());
+        let probe = (self.features.probes.get(&key)).and_then(|p| p.last.as_ref());
+        let notes = notes_of(probe);
+        let mut actions = stage_actions(feature, stage, ctx, &plan, &rows, notes);
+        actions.extend(round_plan_actions(feature, stage, probe));
+        let place = self.place_label(feature, stage);
+        actions.extend(place_action(place.as_deref(), stage));
+        actions.extend(stop_action(feature, stage));
+        actions
+    }
+
+    /// What page button `i` of Ship's page does and its key, while a key
+    /// presses it as things stand.
+    fn ship_button_tip(&self, i: usize) -> Option<String> {
+        let panel = self.features.panel.as_ref()?;
+        let feature = self.feature(&panel.project, &panel.slug)?;
+        if panel.keys || panel.page_stage(feature) != Stage::Ship {
+            return None;
+        }
+        let ctx = self.row_ctx(feature);
+        let outcome = self
+            .page_button_actions(feature, Stage::Ship, ctx)
+            .get(i)?
+            .1
+            .clone();
+        let key = (feature.project.clone(), feature.slug.clone());
+        let probe = (self.features.probes.get(&key)).and_then(|p| p.last.as_ref());
+        let repo = ship_row_repo(panel, &ship_rows(feature, probe));
+        let keys = ship_keys(feature, ctx, probe, repo.as_deref());
+        let key = keys.into_iter().find(|k| k.outcome == outcome)?;
+        let mut what = key.what.chars();
+        let first = what.next()?.to_uppercase();
+        Some(format!("{}{} ({})", first, what.as_str(), key.chord))
+    }
+
     pub fn feature_panel_hover(&mut self, pos: Point<f64, Logical>) -> Option<Tooltip> {
         if let Some(wd) = self.inline_wd_mut() {
             wd.hover = None;
@@ -10365,7 +10412,7 @@ impl Gerdr {
             }
             // The fold buttons over the criteria: what they fold, and the key.
             FeatureTabHit::PageButton(i) => {
-                let text = fold_tip(&view.page, i)?;
+                let text = fold_tip(&view.page, i).or_else(|| self.ship_button_tip(i))?;
                 let mut spot = (*layout.page_buttons.get(i)?)?;
                 spot.loc.y -= view.scroll[TabColumn::Page as usize].round() as i32;
                 Some(Tooltip::new(&text, spot))
@@ -12838,6 +12885,186 @@ fn ship_base_actions(feature: &Feature, probe: Option<&Probe>) -> Vec<(PageButto
     out
 }
 
+/// A key of a button on Ship's page (checklist K4): the chord, as the
+/// footer shows it, what it does in the footer's words, and what the button
+/// it presses asks.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ShipKey {
+    chord: &'static str,
+    what: String,
+    outcome: PanelOutcome,
+}
+
+impl ShipKey {
+    /// Whether the key `mods` and `sym` (its own symbol) is this one.
+    fn pressed(&self, mods: &ModifiersState, sym: Keysym) -> bool {
+        let Some((want, key)) = crate::keys::hint_key(self.chord) else {
+            return false;
+        };
+        let sym = match sym {
+            Keysym::KP_Delete => Keysym::Delete,
+            Keysym::KP_Enter => Keysym::Return,
+            sym => sym,
+        };
+        want.ctrl == mods.ctrl
+            && want.shift == mods.shift
+            && want.alt == mods.alt
+            && !mods.logo
+            && sym == key
+    }
+}
+
+/// The repository of Ship's row the keyboard is on, if it is one's.
+fn ship_row_repo(panel: &FeaturePanel, ships: &[ShipRow]) -> Option<String> {
+    if panel.focus != TabArea::Findings {
+        return None;
+    }
+    match ships.get(panel.finding)? {
+        ShipRow::Route { repo, .. } | ShipRow::Step { repo, .. } => Some(repo.clone()),
+        ShipRow::After(_) => None,
+    }
+}
+
+/// The repository button `outcome` of Ship's page acts on; none for the
+/// page's own.
+fn ship_outcome_repo(feature: &Feature, outcome: &PanelOutcome) -> Option<String> {
+    match outcome {
+        PanelOutcome::UpdateBase(repo, _)
+        | PanelOutcome::ResolveConflicts(repo, _)
+        | PanelOutcome::UndoShip(repo, _) => Some(repo.clone()),
+        PanelOutcome::OpenPr(url) => (feature.shipping.prs.iter())
+            .find(|pr| pr.url == *url)
+            .map(|pr| pr.repo.clone()),
+        PanelOutcome::ReviewConflictPlan | PanelOutcome::StopResolving => {
+            (feature.shipping.resolving.as_ref()).map(|r| r.repo.clone())
+        }
+        _ => None,
+    }
+}
+
+/// The keys of Ship's page's buttons, in the footer's order.
+const SHIP_CHORDS: [&str; 8] = [
+    "Ctrl+M",
+    "Ctrl+Shift+M",
+    "Alt+M",
+    "Ctrl+Shift+O",
+    "Ctrl+Shift+Del",
+    "Alt+Z",
+    "Ctrl+R",
+    "Ctrl+E",
+];
+
+/// Whether `chord` of Ship's page presses a button asking `outcome`.
+fn ship_chord_does(chord: &str, outcome: &PanelOutcome) -> bool {
+    use feature::UpdateWay::{Merge, Rebase};
+    match chord {
+        "Ctrl+M" => matches!(
+            outcome,
+            PanelOutcome::UpdateBase(_, Merge) | PanelOutcome::ResolveConflicts(_, false)
+        ),
+        "Ctrl+Shift+M" => matches!(outcome, PanelOutcome::UpdateBase(_, Rebase)),
+        "Alt+M" => matches!(outcome, PanelOutcome::ResolveConflicts(_, true)),
+        "Ctrl+Shift+O" => matches!(
+            outcome,
+            PanelOutcome::ReviewConflictPlan | PanelOutcome::OpenPr(_)
+        ),
+        "Ctrl+Shift+Del" => matches!(outcome, PanelOutcome::StopResolving),
+        "Alt+Z" => matches!(outcome, PanelOutcome::UndoShip(..)),
+        "Ctrl+R" => matches!(outcome, PanelOutcome::WriteSummary),
+        "Ctrl+E" => matches!(outcome, PanelOutcome::EditSummary),
+        _ => false,
+    }
+}
+
+/// The keys of the buttons Ship's page offers now, as `ctx` and `probe` have
+/// it. One acting on a repository goes by the repository of the row the
+/// keyboard is on, `repo`; with none, by the first that offers it: the
+/// latest step to undo, the card's way to take its base in.
+fn ship_keys(
+    feature: &Feature,
+    ctx: RowCtx,
+    probe: Option<&Probe>,
+    repo: Option<&str>,
+) -> Vec<ShipKey> {
+    let mut offered = page_actions(feature, Stage::Ship, ctx);
+    offered.extend(ship_base_actions(feature, probe));
+    let find = |want: &dyn Fn(&PanelOutcome) -> bool| {
+        (offered.iter())
+            .filter(|(_, o)| want(o))
+            .find(|(_, o)| match (repo, ship_outcome_repo(feature, o)) {
+                (Some(on), Some(of)) => on == of,
+                _ => true,
+            })
+            .cloned()
+    };
+    let lower = |label: &str| {
+        let mut chars = label.chars();
+        chars.next().map_or(String::new(), |c| {
+            c.to_lowercase().chain(chars).collect::<String>()
+        })
+    };
+    let mut keys = Vec::new();
+    for chord in SHIP_CHORDS {
+        // A plan to review comes before a pull request to open.
+        let found = match chord {
+            "Ctrl+Shift+O" => find(&|o| matches!(o, PanelOutcome::ReviewConflictPlan))
+                .or_else(|| find(&|o| ship_chord_does(chord, o))),
+            _ => find(&|o| ship_chord_does(chord, o)),
+        };
+        let Some((button, outcome)) = found else {
+            continue;
+        };
+        let what = match &outcome {
+            PanelOutcome::WriteSummary => match feature.shipping.summary.is_some() {
+                true => "write the summary again".to_owned(),
+                false => "write the summary".to_owned(),
+            },
+            PanelOutcome::EditSummary => "edit the summary".to_owned(),
+            PanelOutcome::OpenPr(_) => "open pull request".to_owned(),
+            PanelOutcome::UndoShip(_, step) => match step {
+                ShipStep::Push | ShipStep::PushBranch => "undo the push\u{2026}".to_owned(),
+                ShipStep::OpenPr => "close the pull request\u{2026}".to_owned(),
+                ShipStep::Merge => "undo the squash\u{2026}".to_owned(),
+                ShipStep::PushBase => "undo\u{2026}".to_owned(),
+            },
+            _ => lower(&button.label),
+        };
+        keys.push(ShipKey {
+            chord,
+            what,
+            outcome,
+        });
+    }
+    keys
+}
+
+/// `hints` with the keys of Ship's buttons in, before the tab's own, in
+/// place of any the page had on the same chord.
+fn with_ship_hints(
+    mut hints: Vec<(String, String)>,
+    panel: &FeaturePanel,
+    feature: &Feature,
+    stage: Stage,
+    (ctx, probe): (RowCtx, Option<&Probe>),
+    ships: &[ShipRow],
+) -> Vec<(String, String)> {
+    let quiet = panel.keys || panel.note.is_some() || panel.focus == TabArea::Repos;
+    if stage != Stage::Ship || quiet {
+        return hints;
+    }
+    let repo = ship_row_repo(panel, ships);
+    let keys = ship_keys(feature, ctx, probe, repo.as_deref());
+    hints.retain(|(chord, _)| !keys.iter().any(|k| k.chord == chord));
+    let at = (hints.iter())
+        .position(|(chord, _)| chord == "Ctrl+O")
+        .unwrap_or(hints.len());
+    hints.splice(
+        at..at,
+        keys.into_iter().map(|k| (k.chord.to_owned(), k.what)),
+    );
+    hints
+}
+
 /// How repository `key`'s branch stands against its base, as `probe` read
 /// it, for its card.
 fn ship_base_line(feature: &Feature, probe: Option<&Probe>, key: &str) -> Option<CheckLine> {
@@ -13643,6 +13870,32 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 7] = [
                 "Discover, Plan: fold the draft cards, or open them all",
             ),
             ("Ctrl+Shift+D", "change the decisions on a final plan"),
+            (
+                "Ctrl+M",
+                "Ship: merge the base into the selected repository's branch; with conflicts, have an agent resolve them, as planned once a plan is written",
+            ),
+            (
+                "Ctrl+Shift+M",
+                "Ship: rebase the selected repository's branch onto its base",
+            ),
+            (
+                "Alt+M",
+                "Ship: have an agent plan how to resolve the conflicts first",
+            ),
+            (
+                "Ctrl+Shift+O",
+                "Ship: review the plan of a resolution, or open the selected repository's pull request",
+            ),
+            (
+                "Ctrl+Shift+Del",
+                "Ship: stop an agent's merge and abort it, after asking",
+            ),
+            (
+                "Alt+Z",
+                "Ship: undo the selected repository's last step, after asking",
+            ),
+            ("Ctrl+R", "Ship: write the summary again"),
+            ("Ctrl+E", "Ship: edit the summary"),
         ],
     ),
     (
@@ -14673,20 +14926,27 @@ fn tab_view(
             s.map_or(0.0, |s| s.pos() - s.overscroll())
         }),
         hover: panel.tab_hover,
-        hints: tab_hints(
+        hints: with_ship_hints(
+            tab_hints(
+                panel,
+                feature,
+                stage,
+                slugs,
+                state.ctx,
+                AgentChoices {
+                    picks: &state.picks,
+                    model: state.model.is_some(),
+                    place: state.place.is_some(),
+                },
+                &state.plan,
+                &ships,
+                notes_of(state.probe),
+            ),
             panel,
             feature,
             stage,
-            slugs,
-            state.ctx,
-            AgentChoices {
-                picks: &state.picks,
-                model: state.model.is_some(),
-                place: state.place.is_some(),
-            },
-            &state.plan,
+            (state.ctx, state.probe),
             &ships,
-            notes_of(state.probe),
         ),
         marks: chrome::PageMarks {
             found_at: search.and_then(|s| s.at).filter(|_| needle.is_some()),
@@ -23062,6 +23322,171 @@ pub(crate) mod tests {
             )
         );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn ships_buttons_have_keys_that_follow_the_selected_repository() {
+        use crate::feature::{Pr, RepoPlan, ShipDone, UpdateWay};
+        let root = std::env::temp_dir().join(format!("gerdr-ship-keys-{}", std::process::id()));
+        let mut repos = Vec::new();
+        for name in ["api", "web"] {
+            let mut r = repo(name, true);
+            r.worktree = root.join(name);
+            std::fs::create_dir_all(&r.worktree).unwrap();
+            repos.push(r);
+        }
+        let mut f = feature("s", repos, Stage::ALL.len());
+        f.status = Status::Done;
+        for name in ["api", "web"] {
+            f.ship_ran(ShipDone {
+                at: 1_900,
+                repo: name.into(),
+                step: ShipStep::Push,
+                sha: Some(format!("{name}-head")),
+                url: None,
+                undone: None,
+            });
+            f.ship_plan
+                .repos
+                .insert(name.into(), RepoPlan::new(Route::Pr));
+        }
+        f.shipping.prs.push(Pr {
+            repo: "web".into(),
+            url: "https://github.com/o/web/pull/7".into(),
+        });
+        let mut found = check(&[], &["api", "web"], &[]).unwrap();
+        found.repos[0].head = Some("api-head".into());
+        found.repos[1].head = Some("web-head".into());
+        let mut p = probe(Some(found));
+        // api's base conflicts, web's merges cleanly.
+        p.bases.insert(
+            "api".into(),
+            ship::BaseState {
+                onto: "origin/main".into(),
+                behind: 2,
+                conflicts: vec!["a.rs".into()],
+                ..ship::BaseState::default()
+            },
+        );
+        p.bases.insert(
+            "web".into(),
+            ship::BaseState {
+                onto: "origin/main".into(),
+                behind: 1,
+                ..ship::BaseState::default()
+            },
+        );
+        let ctx = RowCtx {
+            ship_read: true,
+            ..RowCtx::default()
+        };
+        let of = |repo: Option<&str>| -> Vec<(&'static str, PanelOutcome)> {
+            (ship_keys(&f, ctx, Some(&p), repo).into_iter())
+                .map(|k| (k.chord, k.outcome))
+                .collect()
+        };
+        // No row: the first card's, api's conflicts.
+        assert_eq!(
+            of(None),
+            [
+                (
+                    "Ctrl+M",
+                    PanelOutcome::ResolveConflicts("api".into(), false)
+                ),
+                (
+                    "Ctrl+Shift+M",
+                    PanelOutcome::UpdateBase("web".into(), UpdateWay::Rebase)
+                ),
+                ("Alt+M", PanelOutcome::ResolveConflicts("api".into(), true)),
+                (
+                    "Ctrl+Shift+O",
+                    PanelOutcome::OpenPr("https://github.com/o/web/pull/7".into())
+                ),
+                // The latest step: web's push ran after api's.
+                (
+                    "Alt+Z",
+                    PanelOutcome::UndoShip("web".into(), ShipStep::Push)
+                ),
+                ("Ctrl+R", PanelOutcome::WriteSummary),
+                ("Ctrl+E", PanelOutcome::EditSummary),
+            ]
+        );
+        let undo = ship_keys(&f, ctx, Some(&p), None);
+        let undo = undo.iter().find(|k| k.chord == "Alt+Z").unwrap();
+        assert_eq!(undo.what, "undo the push\u{2026}");
+        // On web's rows: web's merge, its pull request, its push.
+        let web = of(Some("web"));
+        assert!(web.contains(&(
+            "Ctrl+M",
+            PanelOutcome::UpdateBase("web".into(), UpdateWay::Merge)
+        )));
+        assert!(web.contains(&(
+            "Alt+Z",
+            PanelOutcome::UndoShip("web".into(), ShipStep::Push)
+        )));
+        let api = of(Some("api"));
+        assert!(api.contains(&(
+            "Alt+Z",
+            PanelOutcome::UndoShip("api".into(), ShipStep::Push)
+        )));
+        assert!(
+            !web.iter().any(|(chord, _)| *chord == "Alt+M"),
+            "web has no conflicts"
+        );
+        // Keys come as their own symbol (checklist K8).
+        let keys = ship_keys(&f, ctx, Some(&p), None);
+        let pressed = |ctrl, shift, alt, sym| {
+            let mods = ModifiersState {
+                ctrl,
+                shift,
+                alt,
+                ..ModifiersState::default()
+            };
+            (keys.iter())
+                .find(|k| k.pressed(&mods, sym))
+                .map(|k| k.chord)
+        };
+        assert_eq!(pressed(true, false, false, Keysym::m), Some("Ctrl+M"));
+        assert_eq!(pressed(true, true, false, Keysym::m), Some("Ctrl+Shift+M"));
+        assert_eq!(pressed(false, false, true, Keysym::m), Some("Alt+M"));
+        assert_eq!(pressed(false, false, true, Keysym::z), Some("Alt+Z"));
+        assert_eq!(pressed(false, false, false, Keysym::m), None);
+        assert_eq!(pressed(true, false, false, Keysym::z), None);
+        // While an agent resolves: stop it by the key that abandons, and the
+        // footer says so in place of starting over.
+        f.shipping.resolving = Some(crate::feature::Resolving {
+            at: 1,
+            repo: "api".into(),
+            onto: "origin/main".into(),
+            onto_sha: "b".into(),
+            before: "a".into(),
+            files: vec!["a.rs".into()],
+            agent: "claude".into(),
+            pane: None,
+            n: 1,
+            planning: false,
+        });
+        let keys = ship_keys(&f, ctx, Some(&p), None);
+        assert!(
+            keys.iter()
+                .any(|k| k.chord == "Ctrl+Shift+Del" && k.outcome == PanelOutcome::StopResolving)
+        );
+        let panel = FeaturePanel::default();
+        let hints = vec![
+            ("Ctrl+Shift+Del".to_owned(), "start over\u{2026}".to_owned()),
+            ("Ctrl+O".to_owned(), "open tab".to_owned()),
+        ];
+        let ships = ship_rows(&f, Some(&p));
+        let hints = with_ship_hints(hints, &panel, &f, Stage::Ship, (ctx, Some(&p)), &ships);
+        let stop = (hints.iter())
+            .filter(|(k, _)| k == "Ctrl+Shift+Del")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            stop,
+            [&("Ctrl+Shift+Del".to_owned(), "stop\u{2026}".to_owned())]
+        );
+        assert_eq!(hints.last().unwrap().0, "Ctrl+O", "before the tab's own");
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
