@@ -875,7 +875,7 @@ const TEMPLATE: &str = "\
 # prefix = \"Ctrl+A\"
 # new-tab = \"t\"
 # toggle-theme = [\"Alt+T\", \"F12\"]
-# open-workspace = \"o\"
+# open-workspace = \"q\"
 # rename-tab = [\",\", \"F2\"]
 #
 # [apps]
