@@ -1915,13 +1915,17 @@ fn take_down_repo(
     if let Err(err) = hook::unguard(&repo.main, branch) {
         tracing::warn!("unguarding {branch} of {name}: {err}");
     }
-    // What its head was fetched into goes with it.
-    if let Some(pull) = pull
-        && let Err(err) = git(&repo.main, &["update-ref", "-d", &pull.fetch_ref()])
-    {
-        tracing::warn!("removing {} of {name}: {err}", pull.fetch_ref());
-    }
+    // What its head was fetched into goes with it, once the branch was
+    // checked against it: a branch kept keeps it.
+    let drop_fetched = || {
+        if let Some(pull) = pull
+            && let Err(err) = git(&repo.main, &["update-ref", "-d", &pull.fetch_ref()])
+        {
+            tracing::warn!("removing {} of {name}: {err}", pull.fetch_ref());
+        }
+    };
     if !branch_exists(&repo.main, branch) || pull.is_some_and(PullRef::own) {
+        drop_fetched();
         return true;
     }
     if !force {
@@ -1941,6 +1945,7 @@ fn take_down_repo(
     if let Err(err) = git(&repo.main, &["branch", "-D", branch]) {
         failed.push(format!("{name}: {err}"));
     }
+    drop_fetched();
     true
 }
 
@@ -2292,6 +2297,11 @@ mod tests {
         assert!(add_review(&feature, &[add(&gone)]).is_err());
         assert!(!feature.dir.join("web").exists());
         let (linked, repos) = add_review(&feature, &[add(&web)]).unwrap();
+        let mut whole = feature.clone();
+        whole.repos.extend(repos.clone());
+        if let super::super::Kind::PrReview(pulls) = &mut whole.kind {
+            pulls.push(web.clone());
+        }
         assert!(linked.is_empty());
         assert_eq!(repos[0].worktree, feature.dir.join("web"));
         assert_eq!(repos[0].branch.as_deref(), Some("gerdr/pr-8"));
@@ -2300,6 +2310,13 @@ mod tests {
         // Twice is refused: it is there.
         let again = add_review(&feature, &[add(&web)]).unwrap_err();
         assert!(again.contains("already has web"), "{again}");
+        // Left out with nothing of the user's on it: its branch and the
+        // head fetched for it go, unforced.
+        let gone = remove_repos(&whole, &["web".to_owned()], false);
+        assert_eq!(gone, vec![("web".to_owned(), Ok(()))]);
+        assert!(!branch_exists(&dirs[1], "gerdr/pr-8"));
+        assert!(git(&dirs[1], &["rev-parse", "--verify", "-q", "refs/gerdr/pr/8"]).is_err());
+        assert!(branch_exists(&dirs[0], "gerdr/pr-7"));
     }
 
     #[test]

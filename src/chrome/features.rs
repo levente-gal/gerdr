@@ -51,6 +51,8 @@ pub const TITLE_HINT: &str = "What it does, in a few words";
 /// The review dialog's Create button while it changes an open review's
 /// pull requests.
 pub const SAVE_PULLS: &str = "Save";
+/// The review dialog's title field while empty, changing an open review.
+pub const RETITLE_HINT: &str = "A new title, or empty to keep it";
 /// The review dialog's title field while empty.
 pub const REVIEW_TITLE_HINT: &str = "Its title; empty takes the first pull request's";
 /// How wide a repository row's base branch button is: the same on all, so

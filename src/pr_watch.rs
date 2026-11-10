@@ -133,12 +133,19 @@ impl Gerdr {
             let Some(pull) = f.pulls_mut().iter_mut().find(|p| p.repo == key) else {
                 continue;
             };
+            let first = pull.remote.is_none();
             match pull.take_remote(read) {
                 pr::Change::Nothing => {
                     self.verify_from_ci(&project, &slug);
                     continue;
                 }
                 pr::Change::Checks => {
+                    self.save_feature(&project, &slug);
+                    self.verify_from_ci(&project, &slug);
+                    continue;
+                }
+                // Read the first time as it was reviewed: nothing to tell.
+                pr::Change::Pull if first && pull.ended().is_none() && pull.moved().is_none() => {
                     self.save_feature(&project, &slug);
                     self.verify_from_ci(&project, &slug);
                     continue;

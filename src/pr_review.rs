@@ -142,7 +142,7 @@ impl Gerdr {
     /// `picks`, of the repositories of `root` and linked projects `links`,
     /// as the review dialog has them: those new are added off the thread,
     /// then those left out go (see `check_remove_repos`), asking first when
-    /// that would lose work.
+    /// that would lose work. A `title` given titles it so.
     pub(crate) fn change_pulls(
         &mut self,
         project: String,
@@ -150,22 +150,42 @@ impl Gerdr {
         root: layout::Root,
         links: Vec<layout::LinkSpec>,
         picks: Vec<Pick>,
+        title: String,
     ) {
-        let Some(f) = self.feature(&project, &slug).cloned() else {
+        let Some(mut f) = self.feature(&project, &slug).cloned() else {
             return self.show_warning("That review is gone".into());
         };
         if let Some(why) = self.review_refusal(&f) {
             return self.show_warning(why);
+        }
+        let title = title.trim();
+        let retitled = !title.is_empty() && title != f.title;
+        if retitled && let Some(kept) = self.feature_mut(&project, &slug) {
+            kept.log(feature::now(), format!("titled \u{201c}{title}\u{201d}"));
+            kept.title = title.to_owned();
+            self.save_feature(&project, &slug);
+            // Its workspace follows, unless the user named it.
+            let named: Vec<usize> = (0..self.workspaces.len())
+                .filter(|&w| self.workspaces[w].name == f.title)
+                .filter(|&w| self.workspace_feature(w).is_some_and(|g| g.slug == slug))
+                .collect();
+            for w in named {
+                self.rename_workspace(w, title.to_owned());
+            }
+            f.title = title.to_owned();
         }
         let (adds, drops) = match pull_changes(&f, &picks) {
             Ok(changes) => changes,
             Err(why) => return self.show_warning(why),
         };
         if adds.is_empty() && drops.is_empty() {
-            return self.show_notice(format!(
-                "\u{201c}{}\u{201d} holds those pull requests already",
-                f.title
-            ));
+            return match retitled {
+                true => self.show_success(format!("The review is \u{201c}{}\u{201d} now", f.title)),
+                false => self.show_notice(format!(
+                    "\u{201c}{}\u{201d} holds those pull requests already",
+                    f.title
+                )),
+            };
         }
         if adds.is_empty() {
             return self.check_remove_repos(project, slug, drops, false);
@@ -244,13 +264,21 @@ impl Gerdr {
         let data = store::dir(None, project, slug);
         let brief = feature::artifacts::path(&data, feature::Stage::Discover)
             .unwrap_or_else(|| data.join("brief.md"));
-        let more = format!("\n{}", pr::briefs(&all));
-        let appended = std::fs::OpenOptions::new()
-            .append(true)
-            .open(&brief)
-            .and_then(|mut file| std::io::Write::write_all(&mut file, more.as_bytes()));
-        if let Err(err) = appended {
-            tracing::warn!("adding to the brief {}: {err}", brief.display());
+        // One left out and picked again is in it already.
+        let had = std::fs::read_to_string(&brief).unwrap_or_default();
+        let new: Vec<pr::Details> = (all.iter())
+            .filter(|d| !had.contains(&format!("]({})", d.pull.url)))
+            .cloned()
+            .collect();
+        if !new.is_empty() {
+            let more = format!("\n{}", pr::briefs(&new));
+            let appended = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&brief)
+                .and_then(|mut file| std::io::Write::write_all(&mut file, more.as_bytes()));
+            if let Err(err) = appended {
+                tracing::warn!("adding to the brief {}: {err}", brief.display());
+            }
         }
         self.save_feature(project, slug);
         let numbers: Vec<String> = all.iter().map(|d| format!("#{}", d.pull.number)).collect();

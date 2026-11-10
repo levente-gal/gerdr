@@ -1271,7 +1271,9 @@ impl NewFeatureDialog {
             review.wanted = None;
             return self.pick_pull_of(key, number);
         }
-        if entry.chosen || entry.picked.is_some() {
+        // Changing a review, a repository it doesn't hold stays out unless
+        // picked: it may have just been left out.
+        if entry.chosen || entry.picked.is_some() || review.into.is_some() {
             return;
         }
         let heads: Vec<String> = (review.pulls.values())
@@ -1280,12 +1282,14 @@ impl NewFeatureDialog {
         let Some(entry) = review.pulls.get_mut(key) else {
             return;
         };
-        let same = heads
-            .iter()
-            .find_map(|head| same_branch(entry.listed(), head));
-        if let Some(number) = same.map(|p| p.number) {
+        let same =
+            (heads.iter()).find_map(|head| Some((same_branch(entry.listed(), head)?.number, head)));
+        if let Some((number, head)) = same {
             entry.picked = Some(number);
-            review.note = Some(format!("#{number} of {} picked too: same branch", key.1));
+            review.note = Some(format!(
+                "#{number} of {} picked too: same branch {head}",
+                key.1
+            ));
         }
     }
 
@@ -1435,12 +1439,21 @@ impl NewFeatureDialog {
     }
 
     /// The row Alt+B acts on: the one with the keyboard, else the first
-    /// repository ticked, else the first.
+    /// repository ticked (in a review: with a pull request picked), else
+    /// the first.
     fn base_row(&self) -> Option<usize> {
         let rows = self.rows();
         let is_repo = |i: &usize| rows.get(*i).is_some_and(|r| self.row_repo(*r).is_some());
         self.focus.filter(is_repo).or_else(|| {
+            // A review's are those with a pull request picked.
+            let picked = |row: DialogRow| {
+                let key = self.row_repo(row);
+                let review = self.review.as_ref();
+                key.and_then(|k| review?.pulls.get(&k))
+                    .is_some_and(|e| e.picked.is_some())
+            };
             let ticked = |i: &usize| match rows[*i] {
+                row if self.review.is_some() => picked(row),
                 DialogRow::Home(n) => self.touched.get(n) == Some(&true),
                 DialogRow::Linked(k, n) => self.others[k].touched.get(n) == Some(&true),
                 _ => false,
@@ -8635,12 +8648,12 @@ impl Gerdr {
                 links,
             } => (title, root, touched, links),
             DialogOutcome::Review {
+                title,
                 root,
                 links,
                 picks,
                 into: Some(slug),
-                ..
-            } => return self.change_pulls(dialog.project, slug, root, links, picks),
+            } => return self.change_pulls(dialog.project, slug, root, links, picks, title),
             DialogOutcome::Review {
                 title,
                 root,
@@ -12072,6 +12085,7 @@ fn new_feature_view(dialog: &NewFeatureDialog, project: String) -> NewFeatureVie
         hint: match (&dialog.choosing, review) {
             (Some(_), Some(_)) => "Filter pull requests",
             (Some(_), None) => "Filter branches",
+            (None, Some(r)) if r.into.is_some() => chrome::RETITLE_HINT,
             (None, Some(_)) => chrome::REVIEW_TITLE_HINT,
             (None, None) => chrome::TITLE_HINT,
         },
@@ -16801,6 +16815,16 @@ pub(crate) mod tests {
         let view = new_feature_view(&d, "Acme".into());
         assert_eq!(view.heading, "Review pull requests in \u{201c}Acme\u{201d}");
         assert_eq!(view.root, "#30 of web picked too: same branch fix");
+        // web listed after api's pick: the same.
+        let mut later = NewFeatureDialog::new("acme".into(), 1, "/work/api".into());
+        later.review = Some(Reviewing::default());
+        later.found(Ok(root(&["api", "web"])));
+        later.unlisted();
+        later.pulls_listed(&repo("api"), Ok(vec![pull(12, "fix")]));
+        later.pick_pull_of(&repo("api"), 12);
+        later.pulls_listed(&repo("web"), Ok(vec![pull(30, "fix")]));
+        let root_line = new_feature_view(&later, "Acme".into()).root;
+        assert_eq!(root_line, "#30 of web picked too: same branch fix");
         let rows: Vec<(&str, bool, Option<&str>)> = (view.repos.iter())
             .map(|r| (r.place.as_str(), r.touched, r.base.as_deref()))
             .collect();
@@ -16861,8 +16885,22 @@ pub(crate) mod tests {
         d.review = Some(Reviewing::default());
         d.edit(&f);
         d.found(Ok(root(&["api", "web"])));
-        // Picked before its list is in, and listed all the same.
+        // Picked before its list is in, and listed all the same; web, which
+        // it doesn't hold, isn't picked for its branch.
         assert_eq!(d.unlisted().len(), 2);
+        let pull = |number: u64| feature::pr::OpenPull {
+            number,
+            author: "bob".into(),
+            head_ref: "fix".into(),
+            url: format!("https://github.com/o/r/pull/{number}"),
+            ..Default::default()
+        };
+        d.pulls_listed(&(None, "api".into()), Ok(vec![pull(12)]));
+        d.pulls_listed(&(None, "web".into()), Ok(vec![pull(30)]));
+        assert_eq!(
+            new_feature_view(&d, "Acme".into()).repos[1].place,
+            "left out"
+        );
         let view = new_feature_view(&d, "Acme".into());
         assert_eq!(view.heading, "Pull requests of \u{201c}#12 Fix\u{201d}");
         assert_eq!(view.create, chrome::SAVE_PULLS);
