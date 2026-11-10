@@ -399,6 +399,31 @@ fn pull_changes(f: &Feature, picks: &[Pick]) -> Result<(Vec<Pick>, Vec<String>),
     Ok((adds, drops))
 }
 
+/// Take the sections of the pull requests whose pages are `urls` out of
+/// review `slug`'s brief: they were left out of it.
+pub(crate) fn brief_drops(project: &str, slug: &str, urls: &[String]) {
+    if urls.is_empty() {
+        return;
+    }
+    let data = store::dir(None, project, slug);
+    let brief = feature::artifacts::path(&data, feature::Stage::Discover)
+        .unwrap_or_else(|| data.join("brief.md"));
+    let Ok(mut text) = std::fs::read_to_string(&brief) else {
+        return;
+    };
+    let had = text.clone();
+    for url in urls {
+        if let Some(less) = pr::brief_without(&text, url) {
+            text = less;
+        }
+    }
+    if text != had
+        && let Err(err) = std::fs::write(&brief, text)
+    {
+        tracing::warn!("taking pull requests out of {}: {err}", brief.display());
+    }
+}
+
 /// What adding pull requests to a review made, and what was read of them.
 pub(crate) type Added = (layout::MoreLinked, Vec<pr::Details>);
 

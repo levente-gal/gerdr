@@ -10013,8 +10013,10 @@ impl Gerdr {
         };
         let now = feature::now();
         let title = feature.title.clone();
+        let mut left_out = Vec::new();
         for key in &gone {
             let held = feature.repo(key).cloned().filter(|_| to_context);
+            left_out.extend(feature.pull_of(key).map(|p| p.url.clone()));
             drop_repo(feature, key, now);
             match held {
                 Some(repo) => {
@@ -10030,6 +10032,7 @@ impl Gerdr {
         }
         if !gone.is_empty() {
             self.save_feature(project, slug);
+            crate::pr_review::brief_drops(project, slug, &left_out);
             self.show_success(match to_context {
                 true => context_text(&named.join(", ")),
                 false => format!(
