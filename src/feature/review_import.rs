@@ -223,6 +223,11 @@ pub struct AiReview {
     /// ids.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub own_made: u32,
+    /// Its findings go to GitHub as a review's comments, someone else's
+    /// pull request's (`Feature::posts_review`): one wanted waits for the
+    /// review to be submitted, not for AI review.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub posts: bool,
 }
 
 fn is_zero(n: &u32) -> bool {
@@ -267,7 +272,9 @@ impl AiReview {
 
     /// How many findings AI review still waits on.
     pub fn open(&self) -> usize {
-        self.findings.iter().filter(|f| f.state.holds_up()).count()
+        (self.findings.iter())
+            .filter(|f| f.state.holds_up() && !(self.posts && f.state == FindingState::Fix))
+            .count()
     }
 
     /// The finding `id`.

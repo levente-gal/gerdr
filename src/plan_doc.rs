@@ -187,6 +187,7 @@ pub fn suggestion_comments(
             of: ItemOf::Suggestion,
             frozen,
             unanswered: s.unanswered(),
+            pr: false,
             ..Flag::default()
         };
         let comment = Comment {

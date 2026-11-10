@@ -93,6 +93,9 @@ pub struct Flag {
     /// It is a question with no answer yet (`Suggestion::unanswered`): `f`
     /// can't accept it, `c` writes the answer first.
     pub unanswered: bool,
+    /// Its review posts to GitHub (`Feature::posts_review`): wanting it
+    /// comments, in those words (`review_items::words_in`).
+    pub pr: bool,
 }
 
 /// A project's review.

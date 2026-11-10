@@ -286,6 +286,15 @@ impl PullRef {
     }
 }
 
+impl Feature {
+    /// What its reviews want goes to GitHub, as comments of the review the
+    /// user submits: a review of someone else's pull request (or of one of
+    /// the user's own from a fork). The user's own gets fixed by an agent.
+    pub fn posts_review(&self) -> bool {
+        self.pull().is_some_and(|p| !p.own())
+    }
+}
+
 /// The slug of pull request `number`'s review: `pr-12`.
 pub fn slug_of(number: u64) -> String {
     format!("pr-{number}")

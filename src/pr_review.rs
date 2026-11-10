@@ -112,8 +112,21 @@ impl Gerdr {
         if self.project.as_deref() == Some(project.as_str()) {
             self.open_feature(&project, &slug);
         }
-        self.show_success(text);
-        self.start_setup(&project, &slug);
+        // Someone else's code runs only when asked: a setup runs its install
+        // scripts, as its checks run its tests.
+        let theirs = self
+            .feature(&project, &slug)
+            .is_some_and(Feature::posts_review);
+        match theirs {
+            true => self.toast(
+                format!("{text} \u{b7} not set up: that would run #{number}'s own code; set it up (Ctrl+Shift+U) once you trust it"),
+                crate::toast::Level::Success,
+            ),
+            false => {
+                self.show_success(text);
+                self.start_setup(&project, &slug);
+            }
+        }
         self.refresh_feature_graphs(&project, &slug, true);
     }
 }

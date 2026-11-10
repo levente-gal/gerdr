@@ -499,7 +499,8 @@ pub(crate) fn gate_of(
             let review = f.review.as_ref()?;
             let count = |state| u32::try_from(review.count(state)).unwrap_or(u32::MAX);
             let open = count(FindingState::Open);
-            let fix = count(FindingState::Fix);
+            // Those to comment on GitHub wait for the review, not for AI review.
+            let fix = if review.posts { 0 } else { count(FindingState::Fix) };
             (open > 0 || fix > 0).then_some((stage, since, GateKind::Findings { open, fix }))
         }
         Stage::CodeReview => {
@@ -926,6 +927,10 @@ pub(crate) fn vars(
     } else {
         String::new()
     };
+    // A pull request's review says what it is of; a feature has none.
+    let pull = |of: &dyn Fn(&crate::feature::pr::PullRef) -> String| {
+        feature.pull().map(of).unwrap_or_default()
+    };
     let graphs = (graph::folders(feature).iter())
         .map(|folder| format!("- {}", graph::file(&folder.dir).display()))
         .collect::<Vec<_>>()
@@ -1004,6 +1009,12 @@ pub(crate) fn vars(
             },
         ),
         ("fix_plan.path", String::new()),
+        ("pr.number", pull(&|p| p.number.to_string())),
+        ("pr.author", pull(&|p| p.author.clone())),
+        ("pr.url", pull(&|p| p.url.clone())),
+        ("pr.head", pull(&|p| p.head_ref.clone())),
+        ("pr.base", pull(&|p| p.base_ref.clone())),
+        ("pr.checks", pull(&pull_checks)),
         ("review.diffs", String::new()),
         ("review.sent", String::new()),
         ("review.dismissed", String::new()),
@@ -2840,6 +2851,28 @@ fn startable(feature: &Feature, stage: Stage) -> Result<(), String> {
         Some(current) => Err(format!("Mark {} done first", current.label())),
         None => Err("Nothing left to do".into()),
     }
+}
+
+/// How GitHub's checks of a pull request's head stand, for its reviewer's
+/// prompt: "4 of 5 passed, 1 failed (lint)"; none before they are read.
+fn pull_checks(pull: &crate::feature::pr::PullRef) -> String {
+    use crate::ci::CiState;
+    let Some(checks) = pull.checks().filter(|c| !c.is_empty()) else {
+        return String::new();
+    };
+    let ci = crate::feature::pr::Ci::of(checks);
+    let mut text = format!("{} of {} passed", ci.passed, ci.total);
+    if ci.running > 0 {
+        text.push_str(&format!(", {} still running", ci.running));
+    }
+    let failed: Vec<&str> = (checks.iter())
+        .filter(|c| matches!(c.state, CiState::Failed | CiState::Unknown))
+        .map(|c| c.name.as_str())
+        .collect();
+    if !failed.is_empty() {
+        text.push_str(&format!(", {} failed ({})", failed.len(), failed.join(", ")));
+    }
+    text
 }
 
 #[cfg(test)]

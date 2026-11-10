@@ -207,6 +207,9 @@ pub struct FeatureOf {
     /// Only what this fix round changed, to read: no ticks, findings or
     /// comments.
     pub span: Option<SpanOf>,
+    /// What its reviews want goes to GitHub with the review the user
+    /// submits, not to a Build agent (`Feature::posts_review`).
+    pub posts: bool,
 }
 
 /// What code review counts of a feature, for its panel row.
@@ -302,6 +305,9 @@ impl FeatureOf {
             self.count(FindingState::Fix),
         );
         match self.role() {
+            // Wanted ones wait for the review to be submitted: nothing to send.
+            Role::Deciding if self.posts => vec![(B::AddComment, None)],
+            Role::Review if self.posts => vec![(B::AddComment, None), (B::Approve, None)],
             Role::Deciding => {
                 let mut buttons = vec![(B::AddComment, None)];
                 if open > 0 {
@@ -483,7 +489,8 @@ impl FeatureOf {
 
     /// Where its findings stand, as AI review's summary says it.
     fn decisions(&self) -> String {
-        let mut parts = vec![format!("{} to fix", self.count(FindingState::Fix))];
+        let wanted = crate::feature::review_items::words_in(ItemOf::Finding, self.posts).wanted;
+        let mut parts = vec![format!("{} {wanted}", self.count(FindingState::Fix))];
         match self.count(FindingState::Dismissed) {
             0 => {}
             n => parts.push(format!("{n} dismissed")),
@@ -645,7 +652,9 @@ impl FeatureOf {
 
     /// How many findings hold Code review up.
     pub fn holding(&self) -> usize {
-        self.findings.iter().filter(|f| f.state.holds_up()).count()
+        (self.findings.iter())
+            .filter(|f| f.state.holds_up() && !(self.posts && f.state == FindingState::Fix))
+            .count()
     }
 
     /// The findings as comments, placed in the diff read (`diffs`).
@@ -662,8 +671,13 @@ impl FeatureOf {
                 let file = diffs
                     .get(&root)
                     .and_then(|(_, files)| files.iter().find(|d| d.path == f.file));
-                let comment = finding_comment(f, root, file);
-                let note = finding_note(f, &comment);
+                let mut comment = finding_comment(f, root, file);
+                let mut note = finding_note(f, &comment);
+                for c in std::iter::once(&mut comment).chain(note.as_mut()) {
+                    if let Some(flag) = c.flag.as_mut() {
+                        flag.pr = self.posts;
+                    }
+                }
                 std::iter::once(comment).chain(note)
             })
             .collect()
@@ -714,6 +728,7 @@ pub fn finding_comment(f: &Finding, root: PathBuf, file: Option<&FileDiff>) -> C
             of: ItemOf::Finding,
             frozen: None,
             unanswered: false,
+            pr: false,
         }),
     }
 }
@@ -736,6 +751,7 @@ fn finding_note(f: &Finding, comment: &Comment) -> Option<Comment> {
             of: ItemOf::Finding,
             frozen: None,
             unanswered: false,
+            pr: false,
         }),
     })
 }
@@ -1206,6 +1222,7 @@ impl Gerdr {
             focus_note: None,
             sent_notes: Vec::new(),
             span: None,
+            posts: feature.posts_review(),
         };
         let root = feature.root.clone();
         // A Zed opened from it goes to the feature's own workspace.
@@ -3508,5 +3525,49 @@ mod tests {
         assert_eq!(fe.keys(0).len(), 2);
         fe.span = None;
         assert_eq!(fe.role(), Role::Round(FixPhase::Ready));
+    }
+}
+
+#[cfg(test)]
+mod posts_tests {
+    use super::*;
+    use crate::chrome::ReposButton as B;
+
+    fn finding(id: &str, state: FindingState) -> Finding {
+        Finding {
+            id: id.into(),
+            repo: "api".into(),
+            file: "a.rs".into(),
+            title: format!("Finding {id}"),
+            state,
+            ..Finding::default()
+        }
+    }
+
+    #[test]
+    fn someone_elses_pull_request_sends_nothing_to_fix() {
+        let fe = |stage, posts| FeatureOf {
+            stage: Some(stage),
+            ready: true,
+            posts,
+            findings: vec![
+                finding("r1-1", FindingState::Fix),
+                finding("r1-2", FindingState::Open),
+            ],
+            ..FeatureOf::default()
+        };
+        let buttons = |fe: &FeatureOf| fe.buttons(0).into_iter().map(|(b, _)| b).collect::<Vec<_>>();
+        assert_eq!(buttons(&fe(Stage::AiReview, true)), vec![B::AddComment]);
+        assert!(buttons(&fe(Stage::AiReview, false)).contains(&B::MakeFixes));
+        assert_eq!(
+            buttons(&fe(Stage::CodeReview, true)),
+            vec![B::AddComment, B::Approve]
+        );
+        // One to comment waits for the review, not for AI review.
+        assert_eq!(fe(Stage::AiReview, true).holding(), 1);
+        assert_eq!(fe(Stage::AiReview, false).holding(), 2);
+        assert!(fe(Stage::AiReview, true).decisions().starts_with("1 to comment"));
+        let comments = fe(Stage::AiReview, true).finding_comments(&HashMap::new());
+        assert!(comments.iter().all(|c| c.flag.as_ref().is_some_and(|f| f.pr)));
     }
 }

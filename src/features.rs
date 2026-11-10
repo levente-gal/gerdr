@@ -103,7 +103,7 @@ use crate::{
         review_import::{
             self, CodeRead, Decision, Finding as ReviewFinding, FindingState, ReviewRound,
         },
-        review_items::{ItemOf, words},
+        review_items::{ItemOf, words, words_in},
         ship::{self, Action, Planned, Probe},
         store,
         verify::PlannedCheck,
@@ -2402,7 +2402,8 @@ fn review_actions(feature: &Feature, stage: Stage) -> Vec<(PageButton, PanelOutc
             PanelOutcome::FoldRound(round.n),
         )
     });
-    (cards.flat_map(|item| item_buttons(item, decides)))
+    let posts = feature.posts_review();
+    (cards.flat_map(|item| item_buttons(item, decides, posts)))
         .chain(shows)
         .collect()
 }
@@ -3141,7 +3142,7 @@ fn round_count(round: &ReviewRound) -> String {
 
 /// A finding of an earlier review: a record, with nothing to do on it.
 fn round_card(f: &ReviewFinding, multi: bool) -> FindingCard {
-    let mut card = item_card(Item::Finding(f), multi, &[]);
+    let mut card = item_card(Item::Finding(f), multi, &[], false);
     card.faded = true;
     card.made = false;
     // Nothing can select it, so nothing could open it again.
@@ -3227,10 +3228,11 @@ fn review_line(feature: &Feature, agent: Option<&str>) -> Option<String> {
     let open = review.count(FindingState::Open);
     let fix = review.count(FindingState::Fix);
     let sent = review.count(FindingState::Sent);
+    let wanted = words_in(ItemOf::Finding, review.posts).wanted;
     Some(if open > 0 {
         format!("{} to decide", plural(open, "finding"))
     } else if fix > 0 {
-        format!("{} to fix", plural(fix, "finding"))
+        format!("{} {wanted}", plural(fix, "finding"))
     } else if sent > 0 {
         let sent = format!("{} sent to Build", plural(sent, "finding"));
         match review.fixes_made() {
@@ -5412,8 +5414,10 @@ fn fixes_unverified(feature: &Feature, stage: Stage) -> bool {
 /// to be decided: findings, failed checks or criteria, comments in the diff.
 fn has_new_fixes(feature: &Feature, stage: Stage, ctx: RowCtx) -> bool {
     match stage {
-        Stage::AiReview => (feature.review.as_ref())
-            .is_some_and(|r| r.count(FindingState::Open) > 0 || r.count(FindingState::Fix) > 0),
+        // Those to comment on GitHub go with the review, not to a fix round.
+        Stage::AiReview => (feature.review.as_ref()).is_some_and(|r| {
+            r.count(FindingState::Open) > 0 || (!r.posts && r.count(FindingState::Fix) > 0)
+        }),
         Stage::Verify => {
             (feature.verify.as_ref()).is_some_and(|v| feature::verify::to_fix(v).is_some())
         }
@@ -11805,7 +11809,8 @@ fn current_line(feature: &Feature, stage: Stage, state: &LineState, now: u64) ->
                     format!("{} to decide", r.count(FindingState::Open))
                 }
                 Some(r) if r.count(FindingState::Fix) > 0 => {
-                    format!("{} to fix", r.count(FindingState::Fix))
+                    let wanted = words_in(ItemOf::Finding, r.posts).wanted;
+                    format!("{} {wanted}", r.count(FindingState::Fix))
                 }
                 Some(_) => "findings read".into(),
                 None => agent(),
@@ -14915,7 +14920,7 @@ fn writers_tab_hints(
                 }
             }
             if let Some(i) = item {
-                hints.extend(item_hints(i, decides, panel.armed.is_some()));
+                hints.extend(item_hints(i, decides, panel.armed.is_some(), feature.posts_review()));
             }
             // Off a reviewer's card, `c` adds a comment of the user's own.
             if decides && diff_note.is_none() && item.is_none_or(Item::yours) {
@@ -25808,6 +25813,42 @@ mod pr_page_tests {
         assert!(!on_head(&f, None));
         let plain = feature("x", vec![repo("api", true)], 4);
         assert!(!on_head(&plain, Some(&reading("abc1234567", &[]))));
+    }
+
+    #[test]
+    fn its_findings_are_to_comment_on_github() {
+        use crate::feature::review_import::{AiReview, Finding as F};
+        let mut f = review();
+        assert_eq!(
+            crate::feature::agents::run_needs(&f, Stage::AiReview).map(|n| n.template),
+            Some("pr-review")
+        );
+        let finding = |id: &str, state| F {
+            id: id.into(),
+            title: id.into(),
+            state,
+            ..F::default()
+        };
+        f.review = Some(AiReview {
+            n: 1,
+            posts: true,
+            findings: vec![finding("r1-1", FindingState::Open), finding("r1-2", FindingState::Fix)],
+            ..AiReview::default()
+        });
+        assert!(f.posts_review());
+        assert_eq!(f.review.as_ref().unwrap().open(), 1);
+        let items = items(&f, Stage::AiReview);
+        let open = items.iter().find(|i| i.id() == "r1-1").copied().unwrap();
+        let labels: Vec<String> = (item_buttons(open, true, true).into_iter())
+            .map(|(b, _)| b.label)
+            .collect();
+        assert!(labels.contains(&"Comment".to_owned()), "{labels:?}");
+        let wanted = items.iter().find(|i| i.id() == "r1-2").copied().unwrap();
+        assert_eq!(item_card(wanted, false, &[], true).state, "to comment");
+        // Its own: fixed by an agent, as a feature's.
+        let Kind::PrReview(pull) = &mut f.kind else { unreachable!() };
+        pull.mine = true;
+        assert!(!f.posts_review());
     }
 
     fn feature_agents_gate(f: &Feature) -> Option<(Stage, u64, crate::feature_agents::GateKind)> {

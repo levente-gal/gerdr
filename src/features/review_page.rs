@@ -11,6 +11,7 @@
 //! `review_cards`'. AI review's fix round cards stay where every stage with
 //! rounds has them (`ROUND_CARD_STAGES`).
 
+use crate::feature::review_items::words_in;
 use super::*;
 use crate::{chrome::ReviewSummary, feature::review_items::Standing, review_cards::card_tag};
 
@@ -131,7 +132,7 @@ fn item_sections(
             last = Some(tag);
         }
         sections.push(PageSection::Finding(match card {
-            ReviewCard::Item(item) => item_card(item, multi, actions),
+            ReviewCard::Item(item) => item_card(item, multi, actions, feature.posts_review()),
             ReviewCard::DiffNote(c) => note_card(c, multi, actions),
         }));
     }
@@ -237,7 +238,7 @@ pub(super) fn review_page_actions(
     if !is_review_stage(stage) {
         return Vec::new();
     }
-    let w = words(stage_items(stage));
+    let w = words_in(stage_items(stage), feature.posts_review());
     let button = |label: &str| PageButton {
         label: label.to_owned(),
         style: ButtonStyle::Plain,

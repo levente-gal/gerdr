@@ -185,6 +185,29 @@ const SUGGESTION: Words = Words {
     none_here: "Move the cursor to a suggestion first",
 };
 
+/// AI review's findings on someone else's pull request: what is wanted of
+/// one goes to GitHub as a comment of the review, not to an agent to fix.
+const PR_FINDING: Words = Words {
+    want: "Comment",
+    unwant: "Don't comment",
+    wanted: "to comment",
+    save_want: "Save and comment",
+    say_what: "Say what to comment.",
+    want_all: "Comment on all open",
+    why_hint: "Why this needs no comment",
+    own_goes: "It goes to GitHub with the review",
+    ..FINDING
+};
+
+/// `words(of)`, for a review that `posts` its findings to GitHub (someone
+/// else's pull request, `Feature::posts_review`).
+pub fn words_in(of: ItemOf, posts: bool) -> &'static Words {
+    match (of, posts) {
+        (ItemOf::Finding, true) => &PR_FINDING,
+        _ => words(of),
+    }
+}
+
 /// What items `of` are called and what their cards and keys say.
 pub fn words(of: ItemOf) -> &'static Words {
     match of {
