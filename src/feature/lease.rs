@@ -552,7 +552,8 @@ exit 0
 /// The script putting a worktree here on its branch, at what came (`head`, a ref).
 /// A branch of that name that went another way is kept under another name, and one
 /// ahead of what came is left as it is: it holds what this machine did for the
-/// feature as its worker. Changes in the way end it, saying `INWAY <folder>`.
+/// feature as its worker. What keeps git from it ends it, saying `INWAY <folder>`
+/// and git's lines, each as `WHY <line>` (see `remote::in_way`).
 pub fn branch_script(main: &Path, worktree: &Path, branch: &str, head: &str, at: u64) -> String {
     let main = shell_quote(&main.to_string_lossy());
     let worktree = shell_quote(&worktree.to_string_lossy());
@@ -563,14 +564,14 @@ pub fn branch_script(main: &Path, worktree: &Path, branch: &str, head: &str, at:
 t=$(git -C "$m" rev-parse -q --verify "$r") || exit 7
 if c=$(git -C "$m" rev-parse -q --verify "refs/heads/$b"); then
   if git -C "$m" merge-base --is-ancestor "$t" "$c"; then
-    git -C "$w" checkout -q "$b" || {{ echo "INWAY $w"; exit 6; }}
+    o=$(git -C "$w" checkout -q "$b" 2>&1) || {{ echo "INWAY $w"; printf '%s\n' "$o" | sed 's/^/WHY /'; exit 6; }}
     exit 0
   fi
   if ! git -C "$m" merge-base --is-ancestor "$c" "$t"; then
     git -C "$m" branch -m "$b" "$b-aside-{at}" || exit 7
   fi
 fi
-git -C "$w" checkout -q -B "$b" "$t" || {{ echo "INWAY $w"; exit 6; }}
+o=$(git -C "$w" checkout -q -B "$b" "$t" 2>&1) || {{ echo "INWAY $w"; printf '%s\n' "$o" | sed 's/^/WHY /'; exit 6; }}
 "#
     )
 }
@@ -1178,5 +1179,20 @@ mod tests {
         sh(&branch_script(&main, &wt, "feature/x", "refs/gerdr/head", 9));
         assert_eq!(git(&wt, &["rev-parse", "HEAD"]), two);
         assert_eq!(git(&main, &["rev-parse", "feature/x-aside-9"]), other);
+    }
+
+    #[test]
+    fn a_lock_left_in_the_worktree_is_said_as_one() {
+        let t = Temp::new();
+        let (main, wt, _, _) = placed(&t);
+        let gitdir = git(&wt, &["rev-parse", "--absolute-git-dir"]);
+        let lock = std::path::Path::new(&gitdir).join("index.lock");
+        std::fs::write(&lock, "").unwrap();
+        let script = branch_script(&main, &wt, "feature/x", "refs/gerdr/head", 9);
+        let never = std::sync::atomic::AtomicBool::new(false);
+        let why = crate::feature::remote::local_script(&script, &never).unwrap_err().text().to_owned();
+        assert!(why.contains(&lock.display().to_string()), "{why}");
+        assert!(why.starts_with("A git lock file is in the way"), "{why}");
+        assert!(!why.contains("changes"), "{why}");
     }
 }

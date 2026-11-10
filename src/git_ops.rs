@@ -628,7 +628,7 @@ fn checked_out_at(text: &str) -> Option<PathBuf> {
 /// refused a push, else the last line git marked as an error, else the
 /// last line, with `fatal: `, `error: ` or `hint: ` stripped; from
 /// stderr, else stdout.
-fn why(stderr: &str, stdout: &str) -> String {
+pub(crate) fn why(stderr: &str, stdout: &str) -> String {
     let text = if stderr.trim().is_empty() {
         stdout
     } else {

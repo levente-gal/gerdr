@@ -25,7 +25,7 @@ use std::{
 };
 
 use super::{Feature, hook, store};
-use crate::{desktop::shell_quote, machines};
+use crate::{desktop::shell_quote, git_ops, machines};
 
 /// How long pushing or fetching code may take: a first push sends all of a
 /// repository's history.
@@ -322,7 +322,7 @@ pub fn parse_heads(text: &str) -> BTreeMap<String, (String, String)> {
 /// The script placing a worktree here at commit ref `name`, for a look at a
 /// feature written on another machine: it is on no branch, as nothing is to be
 /// committed in it. Changes made in it are the user's: what's in their way ends
-/// it, saying `INWAY <folder>`.
+/// it, saying `INWAY <folder>` and git's lines, each as `WHY <line>` (see `in_way`).
 pub fn view_worktree_script(main: &Path, worktree: &Path, name: &str) -> String {
     let main = shell_quote(&main.to_string_lossy());
     let worktree = shell_quote(&worktree.to_string_lossy());
@@ -339,7 +339,7 @@ else
   h=$(git -C "$w" rev-parse -q --verify HEAD)
   t=$(git -C "$m" rev-parse -q --verify "$r")
   if [ "$h" != "$t" ]; then
-    git -C "$w" checkout -q --detach "$t" || {{ echo "INWAY $w"; exit 6; }}
+    o=$(git -C "$w" checkout -q --detach "$t" 2>&1) || {{ echo "INWAY $w"; printf '%s\n' "$o" | sed 's/^/WHY /'; exit 6; }}
   fi
 fi
 "#
@@ -364,12 +364,35 @@ pub fn local_script(script: &str, cancel: &AtomicBool) -> Result<String, Trouble
             "{folder} holds something else: name a folder for it under machine_folders in the project's file"
         )));
     }
-    if let Some(folder) = said.lines().find_map(|l| l.strip_prefix("INWAY ")) {
-        return Err(Trouble::Work(format!(
-            "changes in {folder} are in the way of what came"
-        )));
+    if let Some(why) = in_way(&said) {
+        return Err(Trouble::Work(why));
     }
     Err(trouble("A command here failed", &out))
+}
+
+/// What a script that couldn't put a worktree at what came says of it: the
+/// folder after `INWAY `, then git's lines, each after `WHY `. A lock git left
+/// is named, for the user to delete when no git runs there; changes in the
+/// way are said as that; anything else in git's words.
+pub fn in_way(said: &str) -> Option<String> {
+    let folder = said.lines().find_map(|l| l.strip_prefix("INWAY "))?;
+    let git = (said.lines())
+        .filter_map(|l| l.strip_prefix("WHY "))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if git_ops::classify(&git, "") == git_ops::Failure::Locked {
+        return Some(match git.split('\'').find(|part| part.ends_with(".lock")) {
+            Some(lock) => format!(
+                "A git lock file is in the way in {folder}: if no git command runs there, delete {lock} and try again"
+            ),
+            None => format!("Another git command holds a lock in {folder}: try again once it is done"),
+        });
+    }
+    let changes = ["would be overwritten", "Your local changes", "untracked working tree files"];
+    if git.trim().is_empty() || changes.iter().any(|c| git.contains(c)) {
+        return Some(format!("changes in {folder} are in the way of what came"));
+    }
+    Some(format!("{folder} couldn't be put at what came: {}", git_ops::why(&git, "")))
 }
 
 /// The script setting up the worktrees there once the code is pushed: each on
@@ -1389,6 +1412,32 @@ mod tests {
         assert_eq!(listed, [".env", "link", "local.py", "my file.txt"]);
         let out = sh_c(&ignored_files_script("/no/such/worktree", 16));
         assert!(out.status.success() && out.stdout.is_empty(), "{out:?}");
+    }
+
+    #[test]
+    fn a_worktree_kept_from_what_came_says_what_kept_it() {
+        let said = |git: &str| {
+            let lines: String = git.lines().map(|l| format!("WHY {l}\n")).collect();
+            in_way(&format!("INWAY /w\n{lines}")).unwrap()
+        };
+        assert_eq!(
+            said("fatal: Unable to create '/r/.git/worktrees/w/index.lock': File exists.\n\nAnother git process seems to be running in this repository"),
+            "A git lock file is in the way in /w: if no git command runs there, delete /r/.git/worktrees/w/index.lock and try again"
+        );
+        assert_eq!(
+            said("error: Your local changes to the following files would be overwritten by checkout:\n\ta.py"),
+            "changes in /w are in the way of what came"
+        );
+        assert_eq!(
+            said("error: The following untracked working tree files would be overwritten by checkout:\n\tb.py"),
+            "changes in /w are in the way of what came"
+        );
+        assert_eq!(said(""), "changes in /w are in the way of what came");
+        assert_eq!(
+            said("fatal: reference is not a tree: 1234"),
+            "/w couldn't be put at what came: reference is not a tree: 1234"
+        );
+        assert_eq!(in_way("OCCUPIED /m\n"), None);
     }
 
     #[test]
