@@ -6113,8 +6113,7 @@ fn suggestion_card(
 /// being written from them, so the cards are only to read.
 fn tab_plan_review(writing: bool) -> super::FeatureTabView {
     use super::{
-        ButtonStyle, CheckTone, Dot, FindingTag, NodeMark, PageButton, PageSection, RoundAsked,
-        RoundCard, StagePage,
+        ButtonStyle, CheckTone, Dot, FindingTag, NodeMark, PageButton, PageSection, StagePage,
     };
     use crate::{agent_icons::AgentIcon, feature::Stage};
     let mut view = feature_tab();
@@ -6320,55 +6319,6 @@ fn tab_plan_review(writing: bool) -> super::FeatureTabView {
     }
     page.sections
         .extend(cards.into_iter().map(PageSection::Finding));
-    let asked = |id: &str, title: &str, now: &str, tone| RoundAsked {
-        id: id.into(),
-        title: title.into(),
-        note: String::new(),
-        now: Some(tab_line(now, tone)),
-    };
-    page.sections.push(PageSection::Lines {
-        label: "Review run".into(),
-        lines: Vec::new(),
-    });
-    page.sections.push(PageSection::Round(RoundCard {
-        label: "Review run 1".into(),
-        dot: Dot::Idle,
-        state: match writing {
-            true => tab_line("all decided", CheckTone::Ready),
-            false => tab_line("2 to decide", CheckTone::Blocker),
-        },
-        meta: "codex \u{b7} 20m ago".into(),
-        asked: vec![
-            asked(
-                "r1-1",
-                "No milestone moves the old sessions over",
-                if writing { "accepted" } else { "to decide" },
-                if writing {
-                    CheckTone::Ready
-                } else {
-                    CheckTone::Blocker
-                },
-            ),
-            asked(
-                "r1-2",
-                "The lockout clock lives in memory",
-                "accepted",
-                CheckTone::Ready,
-            ),
-            asked(
-                "r1-3",
-                "Name the hash in the plan",
-                "rejected: the code picks it, the plan needn't",
-                CheckTone::Note,
-            ),
-        ],
-        asked_caption: "Suggestions",
-        fixes: Vec::new(),
-        running: Vec::new(),
-        changed: Vec::new(),
-        open: !writing,
-        buttons: Vec::new(),
-    }));
     view.page = page;
     view.hints = match writing {
         true => vec![
@@ -6620,36 +6570,36 @@ const PLAN_REVIEW: [&str; 6] = [
 const GOLDEN_PLAN_REVIEW: [[u64; 6]; 4] = [
     // Dark at 1
     [
-        0xfe55826e4659fa28, // tab_plan_review_cards_1180
-        0x07a6fc309bb51444, // tab_plan_review_cards_860
-        0xd38712f8888ca013, // tab_plan_review_writing_1180
+        0x65b07cddacb18c00, // tab_plan_review_cards_1180
+        0x3ecba2ff9f61f42e, // tab_plan_review_cards_860
+        0x9fc0db3c976af9cb, // tab_plan_review_writing_1180
         0x154aeb3cfd9938e1, // doc_suggestions_1180
         0x6f63128edd4069b1, // doc_suggestions_850
         0x519b46994bcca395, // finding_dialog_reject
     ],
     // Dark at 2
     [
-        0xbb1a5ba187af766e, // tab_plan_review_cards_1180
-        0x0afe98f2b96ac8af, // tab_plan_review_cards_860
-        0x0e82a6bb467343c6, // tab_plan_review_writing_1180
+        0xa80a14e186b42036, // tab_plan_review_cards_1180
+        0x4c06ff37b46aedf8, // tab_plan_review_cards_860
+        0xea249cba06ba8fde, // tab_plan_review_writing_1180
         0x6ba33ef2efa93199, // doc_suggestions_1180
         0xacac000bf593cb0b, // doc_suggestions_850
         0x5db40a98428d92d3, // finding_dialog_reject
     ],
     // Light at 1
     [
-        0x173479b4e20ecd53, // tab_plan_review_cards_1180
-        0x1582796e2cf4198c, // tab_plan_review_cards_860
-        0x28929dfdab81dbac, // tab_plan_review_writing_1180
+        0x98a0cc9eceb86913, // tab_plan_review_cards_1180
+        0x6fcb5286d652ac00, // tab_plan_review_cards_860
+        0x95116a3fa04e6dfc, // tab_plan_review_writing_1180
         0xc004c28ecddd8216, // doc_suggestions_1180
         0xb929e644bd3059f9, // doc_suggestions_850
         0x89ae995f2bf62070, // finding_dialog_reject
     ],
     // Light at 2
     [
-        0x98bbade750dc1bb0, // tab_plan_review_cards_1180
-        0x6791b61137ac588a, // tab_plan_review_cards_860
-        0x12d99351f7f72792, // tab_plan_review_writing_1180
+        0x19438ee056d49548, // tab_plan_review_cards_1180
+        0xd2bdc558b9410425, // tab_plan_review_cards_860
+        0x628a1246427b99a2, // tab_plan_review_writing_1180
         0xe94c049f4569a3a6, // doc_suggestions_1180
         0x9aa0c21f07ff7aef, // doc_suggestions_850
         0xe2cb1d9d401ab9c4, // finding_dialog_reject
