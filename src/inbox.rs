@@ -267,6 +267,8 @@ pub enum ItemAction {
     OpenLink,
     /// Its link, to the clipboard: Ctrl+C.
     CopyLink,
+    /// A pull request, reviewed in gerdr (see `pr_review`): Ctrl+Shift+O.
+    Review,
     /// A service's error, kept in sight but never told of again: Ctrl+I.
     Ignore,
     /// An ignored error, told of again: Ctrl+I.
@@ -289,6 +291,7 @@ impl ItemAction {
             ItemAction::Delete => "Delete",
             ItemAction::OpenLink => "Open",
             ItemAction::CopyLink => "Copy link",
+            ItemAction::Review => "Review",
             ItemAction::Ignore => "Ignore",
             ItemAction::Unignore => "Stop ignoring",
             ItemAction::Forget => "Forget",
@@ -308,6 +311,7 @@ impl ItemAction {
             ItemAction::Delete => "Shift+Del",
             ItemAction::OpenLink => "Ctrl+O",
             ItemAction::CopyLink => "Ctrl+C",
+            ItemAction::Review => "Ctrl+Shift+O",
             ItemAction::Ignore | ItemAction::Unignore => "Ctrl+I",
         }
     }
@@ -884,6 +888,9 @@ fn detail_view(item: &InboxItem, actions: &[ItemAction], now: u64) -> InboxDetai
                 K::CodeReview => ("Waiting", "Enter shows the diff to review"),
                 K::ManualTest { .. } => ("Waiting", "Enter opens its criteria to try"),
                 K::SendPrompt => ("Waiting", "Enter opens the feature to send the prompt"),
+                K::NewHead => ("Pushed", "Enter opens the review to update it to the new head"),
+                K::PrEnded { merged: true } => ("Merged", "Enter opens the review to finish it"),
+                K::PrEnded { merged: false } => ("Closed", "Enter opens the review to finish it"),
             };
             field(when, crate::projects::ago(now, *since));
             field("Next", next.to_owned());
@@ -917,6 +924,7 @@ fn action_hint(action: ItemAction) -> (&'static str, &'static str) {
         A::Delete => ("Shift+Del", "delete"),
         A::OpenLink => ("Ctrl+O", "open link"),
         A::CopyLink => ("Ctrl+C", "copy link"),
+        A::Review => ("Ctrl+Shift+O", "review"),
         A::Ignore => ("Ctrl+I", "ignore"),
         A::Unignore => ("Ctrl+I", "stop ignoring"),
         A::Forget => ("Del", "forget"),
@@ -1677,6 +1685,7 @@ impl Panel {
             Keysym::h | Keysym::H if ctrl && shift => ItemAction::SnoozeLong,
             Keysym::h | Keysym::H if ctrl => ItemAction::Snooze,
             Keysym::e | Keysym::E if ctrl => ItemAction::Edit,
+            Keysym::o | Keysym::O if ctrl && shift => ItemAction::Review,
             Keysym::o | Keysym::O if ctrl => ItemAction::OpenLink,
             Keysym::c | Keysym::C if ctrl => ItemAction::CopyLink,
             // One key both ways: the item has one of them.

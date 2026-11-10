@@ -443,11 +443,16 @@ pub fn mode_of(feature: &Feature, repo: &str, modes: &Modes) -> ShipMode {
 pub fn probe(feature: &Feature, modes: &Modes) -> Probe {
     let reading = patch::read(feature);
     let branch = feature.branch();
-    let guards = feature
-        .touched()
-        .map(|repo| (repo.key(), guard_of(repo, &branch)))
+    // The user's own pull request's branch is theirs to push from anywhere.
+    let guards = (feature.touched())
+        .filter(|repo| !feature.pull_of(&repo.key()).is_some_and(super::pr::PullRef::own))
+        .map(|repo| {
+            let branch = repo.branch.clone().unwrap_or_else(|| branch.clone());
+            (repo.key(), guard_of(repo, &branch))
+        })
         .collect();
-    let ship = feature.ships().then(|| check(feature, &reading, modes));
+    // A pull request's review submits it instead (`pr_post`).
+    let ship = (feature.ships() && feature.pull().is_none()).then(|| check(feature, &reading, modes));
     let merged =
         feature.shipping.squash_at.is_some() && reading.as_ref().is_ok_and(|r| merged(feature, r));
     Probe {
@@ -1391,7 +1396,7 @@ fn open_pr(
 const GH_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// What `gh args`, run in `dir`, prints, or one line on why it failed.
-fn run_gh(gh: &str, dir: &Path, args: &[&str]) -> Result<String, String> {
+pub(crate) fn run_gh(gh: &str, dir: &Path, args: &[&str]) -> Result<String, String> {
     let what = args.get(..2).unwrap_or(args).join(" ");
     let mut command = Command::new(gh);
     // The real gh, not a test's.

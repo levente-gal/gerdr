@@ -46,7 +46,12 @@ pub(crate) fn review_vars(feature: &Feature) -> Vec<(String, String)> {
     let diffs = feature
         .touched()
         .map(|repo| {
-            let whole = format!("git diff {}...HEAD", repo.base_commit);
+            // A pull request's is against origin's base, as GitHub shows it.
+            let from = match feature.pull() {
+                Some(_) => &repo.base,
+                None => &repo.base_commit,
+            };
+            let whole = format!("git diff {from}...HEAD");
             let at = repo.worktree.display();
             let key = repo.key();
             match review.and_then(|r| r.reviewed.get(&key)) {
@@ -145,7 +150,8 @@ fn file_key(what: &str) -> String {
 /// notification; `None` once nothing does.
 fn waiting_text(title: &str, review: &AiReview) -> Option<String> {
     let open = review.count(FindingState::Open);
-    let fix = review.count(FindingState::Fix);
+    // Those to comment on GitHub wait for the review, not for AI review.
+    let fix = if review.posts { 0 } else { review.count(FindingState::Fix) };
     let what = if open > 0 {
         format!("{} to decide", plural(open, "finding"))
     } else if fix > 0 {
@@ -314,7 +320,9 @@ impl Gerdr {
         let Some(f) = self.feature_mut(project, slug) else {
             return;
         };
+        let posts = f.posts_review();
         let review = f.review.get_or_insert_with(AiReview::default);
+        review.posts = posts;
         let got = review_import::import(review, n, raws, &repos, &read.diff);
         review.reviewed = read.heads.clone();
         review.patch = Some(patch.clone());
@@ -369,8 +377,10 @@ impl Gerdr {
             Err(why) => return self.show_warning(why),
         };
         f.log(feature::now(), format!("Finding {id}: {what}"));
+        let posts = f.posts_review();
         self.save_feature(project, slug);
         let word = match decision {
+            Decision::Fix if posts => "marked to comment on GitHub",
             Decision::Fix => "marked to fix",
             Decision::Dismiss(_) => "dismissed",
             Decision::Reopen => "reopened",
@@ -403,7 +413,8 @@ impl Gerdr {
             said(self, done, undo);
             return self.read_and_tick(project, slug, Stage::AiReview);
         }
-        if undecided == 0 && fix > 0 && undo.is_none() {
+        // On someone else's pull request they wait for the review instead.
+        if undecided == 0 && fix > 0 && undo.is_none() && !review.posts {
             return self.offer_fixes(
                 project,
                 slug,
@@ -458,6 +469,11 @@ impl Gerdr {
             Ok(format!("Marked to fix: {}", open.join(", ")))
         });
         if done {
+            let posts = self.feature(project, slug).is_some_and(Feature::posts_review);
+            if posts {
+                let text = format!("{} marked to comment on GitHub", plural(marked, "finding"));
+                return self.after_decision(project, slug, text, None);
+            }
             let text = format!("{} marked to fix", plural(marked, "finding"));
             self.offer_fixes(project, slug, text);
         }
@@ -810,6 +826,12 @@ impl Gerdr {
         let title = f.title.clone();
         if f.status != Status::Open || f.current() != Some(Stage::AiReview) {
             return self.show_warning(format!("\u{201c}{title}\u{201d} isn't at AI review"));
+        }
+        if f.posts_review() {
+            return self.show_warning(
+                "On someone else's pull request, findings go to GitHub when you submit the review"
+                    .into(),
+            );
         }
         let Some(review) = f.review.as_ref() else {
             return self.show_warning(format!("\u{201c}{title}\u{201d} has no findings to fix"));

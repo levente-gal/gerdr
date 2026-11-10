@@ -470,7 +470,10 @@ pub fn ci_items(src: &Sources) -> Vec<InboxItem> {
                     workspace: w,
                     url: row.link.clone(),
                 },
-                actions: LINKED.to_vec(),
+                actions: match row.subject {
+                    Subject::Pr(_) => [&LINKED[..], &[ItemAction::Review]].concat(),
+                    Subject::Branch(_) => LINKED.to_vec(),
+                },
                 detail: Detail::Ci {
                     title: row.title.clone(),
                     subject,
@@ -827,6 +830,19 @@ fn gate_words(gate: &Gate) -> (String, String, Option<&'static str>) {
         GateKind::SendPrompt => (
             format!("{} of “{title}”: send the prompt", gate.stage.label()),
             "send prompt".to_owned(),
+            None,
+        ),
+        GateKind::NewHead => (
+            format!("“{title}” has new commits on GitHub"),
+            "update to its new head".to_owned(),
+            None,
+        ),
+        GateKind::PrEnded { merged } => (
+            format!(
+                "“{title}” was {} on GitHub",
+                if merged { "merged" } else { "closed" }
+            ),
+            "finish its review".to_owned(),
             None,
         ),
         GateKind::Suggestions { open: 0 } => (

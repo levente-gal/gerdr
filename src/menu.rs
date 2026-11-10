@@ -99,6 +99,12 @@ pub enum MenuAction {
     /// Stop watching the CI of a pull request, by repository key and
     /// number (see `ci_watch`).
     Unwatch(String, u64),
+    /// Review the pull request whose page is `.1` (see `pr_review`), the
+    /// project's repositories found from workspace `.0`.
+    ReviewPr(usize, String),
+    /// Move this project's pull request review to its new head (see
+    /// `pr_watch`).
+    UpdatePrHead(String, String),
     OpenFolder,
     NewProject,
     CloseWorkspace(usize),
@@ -168,6 +174,9 @@ pub enum MenuAction {
     /// The new feature dialog, from the folder of workspace `.0` (else the
     /// active one's; see `Gerdr::open_new_feature`).
     NewFeature(Option<usize>),
+    /// The new feature dialog picking pull requests to review, from the
+    /// folder of workspace `.0` (see `Gerdr::open_review_pulls`).
+    ReviewPulls(Option<usize>),
     /// The feature panel on feature `.1` of project `.0`.
     OpenFeature(String, String),
     /// A toast's "Undo" after inbox items were dismissed or snoozed: list
@@ -478,6 +487,8 @@ impl Gerdr {
             MenuAction::OpenPage(w, url) => self.open_page(w, url),
             MenuAction::OpenPageInNewTab(w, url) => self.open_page_in_new_tab(w, url),
             MenuAction::Unwatch(key, n) => self.unwatch(&key, n),
+            MenuAction::ReviewPr(w, url) => self.start_pr_review(Some(w), &url),
+            MenuAction::UpdatePrHead(project, slug) => self.update_pr_head(&project, &slug),
             MenuAction::OpenFolder => self.pick_workspace(WorkspaceKind::Terminal),
             MenuAction::NewProject => self.run_action(Action::NewProject),
             MenuAction::CloseWorkspace(w) => self.close_workspace(w),
@@ -572,6 +583,7 @@ impl Gerdr {
             MenuAction::Inbox => self.open_inbox(None),
             MenuAction::Features => self.open_features(),
             MenuAction::NewFeature(at) => self.open_new_feature(at),
+            MenuAction::ReviewPulls(at) => self.open_review_pulls(at),
             MenuAction::OpenFeature(project, slug) => self.open_linked_feature(&project, &slug),
             MenuAction::PlanFixes(project, slug) => self.send_findings(&project, &slug),
             MenuAction::MakeFindingFixes(project, slug) => {

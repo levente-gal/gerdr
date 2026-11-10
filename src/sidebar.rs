@@ -1187,6 +1187,10 @@ impl Gerdr {
                     MenuItem::new("Unfold all workspaces", MenuAction::FoldAll(Some(false))),
                     MenuItem::new("Fold each while quiet", MenuAction::FoldAll(None)),
                     MenuItem::new("New feature\u{2026}", MenuAction::NewFeature(None)),
+                    MenuItem::new(
+                        "Review pull requests\u{2026}",
+                        MenuAction::ReviewPulls(None),
+                    ),
                 ],
             }),
             SidebarHit::Ci(i) | SidebarHit::CiPrs(i) | SidebarHit::CiMark(i) => {
@@ -1215,6 +1219,16 @@ impl Gerdr {
                         MenuAction::OpenPageInNewTab(i, row.link.clone()),
                     ),
                 ];
+                if let Subject::Pr(n) = &row.subject {
+                    let open = (self.project.as_deref()).and_then(|id| {
+                        self.pr_review_of(id, &repo.host, &repo.slug, *n)
+                    });
+                    let label = match open {
+                        Some(_) => "Open review",
+                        None => "Start review",
+                    };
+                    items.push(MenuItem::new(label, MenuAction::ReviewPr(i, row.link.clone())));
+                }
                 if let (true, Subject::Pr(n)) = (row.watched, &row.subject) {
                     let key = ci::key(&repo.host, &repo.slug);
                     items.push(MenuItem::new("Unwatch", MenuAction::Unwatch(key, *n)));
@@ -1256,6 +1270,10 @@ impl Gerdr {
                     items: vec![
                         MenuItem::new("Open features", MenuAction::Features),
                         MenuItem::new("New feature\u{2026}", MenuAction::NewFeature(None)),
+                        MenuItem::new(
+                            "Review pull requests\u{2026}",
+                            MenuAction::ReviewPulls(None),
+                        ),
                     ],
                 })
             }

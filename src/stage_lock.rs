@@ -20,6 +20,19 @@ use crate::{
 /// What refusing to change locked `stage` of `feature` says: why, and what
 /// frees it. The later stage `by` reopens first when it is done, else it
 /// starts over.
+/// Why `stage` of a pull request's review can't change: its author did
+/// it, and the review starts after it (`Feature::stages`).
+pub(crate) fn authors_stage(feature: &Feature, stage: Stage) -> Option<String> {
+    let pull = feature.pull()?;
+    (!feature.stages().contains(&stage)).then(|| {
+        format!(
+            "{} is done in #{} itself: its review starts at Verify",
+            stage.label(),
+            pull.number
+        )
+    })
+}
+
 pub(crate) fn locked_warning(feature: &Feature, stage: Stage, by: Stage) -> String {
     let what = match feature.is_done(by) {
         true => "reopen",
@@ -83,8 +96,12 @@ impl Gerdr {
         slug: &str,
         stage: Stage,
     ) -> Option<String> {
+        let feature = self.feature(project, slug)?;
+        if let Some(why) = authors_stage(feature, stage) {
+            return Some(why);
+        }
         let by = self.stage_locked_by(project, slug, stage)?;
-        Some(locked_warning(self.feature(project, slug)?, stage, by))
+        Some(locked_warning(feature, stage, by))
     }
 
     /// `stage`'s agent pane of feature `slug`, if it is still there.

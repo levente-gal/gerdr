@@ -588,6 +588,16 @@ impl Gerdr {
                 self.close_inbox();
                 self.open_page(self.active_workspace, url);
             }
+            ItemAction::Review => {
+                let (Target::Page { workspace, url }, Detail::Ci { .. }) =
+                    (&item.target, &item.detail)
+                else {
+                    return;
+                };
+                let (workspace, url) = (*workspace, url.clone());
+                self.close_inbox();
+                self.start_pr_review(Some(workspace), &url);
+            }
             ItemAction::CopyLink => {
                 let Some(url) = link else { return };
                 self.copy_text(url);

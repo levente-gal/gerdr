@@ -98,7 +98,7 @@ fn finding_tone(flag: &review::Flag) -> Tone {
 /// What a finding's card says of where it stands; none while undecided.
 /// A suggestion's words are its own: accepted, rejected.
 fn finding_state_word(flag: &review::Flag) -> Option<&'static str> {
-    let words = review_items::words(flag.of);
+    let words = review_items::words_in(flag.of, flag.pr);
     match (flag.of, flag.state) {
         (_, FindingState::Open) => None,
         (_, FindingState::Fix) => Some(words.wanted),
@@ -108,6 +108,7 @@ fn finding_state_word(flag: &review::Flag) -> Option<&'static str> {
         (ItemOf::Finding, FindingState::Sent) if flag.sent => Some("sent to Build"),
         (ItemOf::Finding, FindingState::Sent) => Some("sent to fix"),
         (ItemOf::Finding, FindingState::Fixed) => Some("fixed"),
+        (_, FindingState::Posted) => Some("on GitHub"),
     }
 }
 
@@ -128,13 +129,13 @@ fn no_reason(of: ItemOf) -> &'static str {
 }
 
 /// What a flag's decide button says on an item `of`: a finding's are the
-/// buttons' own, a suggestion's its words. `button` is one of
-/// `FixFinding`, `DismissFinding` or `ReopenFinding`; `state` where the item
-/// stands.
-fn decide_label(of: ItemOf, button: ReposButton, state: FindingState) -> String {
-    let words = review_items::words(of);
+/// buttons' own, but on a review that posts to GitHub (`pr`), and a
+/// suggestion's its words. `button` is one of `FixFinding`,
+/// `DismissFinding` or `ReopenFinding`; `state` where the item stands.
+fn decide_label(of: ItemOf, pr: bool, button: ReposButton, state: FindingState) -> String {
+    let words = review_items::words_in(of, pr);
     match (of, button, state) {
-        (ItemOf::Finding, ..) => button.label().into(),
+        (ItemOf::Finding, ..) if !pr => button.label().into(),
         (_, ReposButton::FixFinding, _) => words.want.into(),
         (_, ReposButton::DismissFinding, _) => words.refuse.into(),
         (_, ReposButton::ReopenFinding, FindingState::Fix) => words.unwant.into(),
@@ -2958,10 +2959,10 @@ impl DiffView {
             let first = self.find_row(&RowKey::Comment(c)).and_then(at);
             let keyed = |button: B, key: &str| Hint {
                 key: key.into(),
-                label: decide_label(flag.of, button, flag.state),
+                label: decide_label(flag.of, flag.pr, button, flag.state),
                 ..hint(button)
             };
-            let words = review_items::words(flag.of);
+            let words = review_items::words_in(flag.of, flag.pr);
             let choices = match flag.state {
                 // Frozen, it is only read: nothing on it would be taken.
                 _ if flag.frozen.is_some() => Vec::new(),
@@ -2990,7 +2991,7 @@ impl DiffView {
                 FindingState::Dismissed => {
                     vec![keyed(B::FixFinding, "f"), keyed(B::ReopenFinding, "Del")]
                 }
-                FindingState::Sent | FindingState::Fixed => Vec::new(),
+                FindingState::Sent | FindingState::Fixed | FindingState::Posted => Vec::new(),
             };
             // What the user can say of a reviewer's finding.
             let say = (!flag.yours && self.note_refused(flag).is_none()).then(|| {

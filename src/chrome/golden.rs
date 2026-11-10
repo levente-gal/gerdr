@@ -1703,6 +1703,7 @@ fn new_feature() -> super::NewFeatureView {
             ("Ctrl+Shift+L", "link project"),
             ("Esc", "clear"),
         ],
+        create: super::NEW_FEATURE_BUTTONS[super::CREATE],
     }
 }
 
@@ -1734,6 +1735,76 @@ fn new_feature_bases() -> super::NewFeatureView {
             ("Esc", "clear"),
         ],
         ..new_feature()
+    }
+}
+
+/// The new feature dialog picking pull requests to review: two picked, the
+/// same branch's suggested, one repository with none.
+fn new_review() -> super::NewFeatureView {
+    let repo = |name: &str, place: &str, button: &str, touched| super::NewFeatureRepo {
+        name: name.into(),
+        place: place.into(),
+        touched,
+        fixed: false,
+        base: Some(button.into()),
+    };
+    super::NewFeatureView {
+        heading: "Review pull requests in \u{201c}aft\u{201d}".into(),
+        title: Line::default(),
+        hint: super::REVIEW_TITLE_HINT,
+        root: "#31 of web picked too: same branch fix-login".into(),
+        repos: vec![
+            repo("api", "Fix the login redirect \u{b7} @bob", "#12", true),
+            repo("shared", "no open pull request", "Pick\u{2026}", false),
+            repo("web", "Login page shows the error \u{b7} @bob", "#31", true),
+            repo("billing: ledger", "left out", "Pick\u{2026}", false),
+        ],
+        keys: vec![
+            ("Tab", "next"),
+            ("Space", "pick or leave out"),
+            ("Alt+B", "pull request"),
+            ("Ctrl+Shift+L", "link project"),
+            ("Esc", "close"),
+        ],
+        ..new_feature()
+    }
+}
+
+/// The review dialog's list of a repository's open pull requests, the
+/// keyboard on the one picked.
+fn new_review_pulls() -> super::NewFeatureView {
+    let row = |name: &str, place: &str, touched| super::NewFeatureRepo {
+        name: name.into(),
+        place: place.into(),
+        touched,
+        fixed: false,
+        base: None,
+    };
+    super::NewFeatureView {
+        title: Line::default(),
+        hint: "Filter pull requests",
+        focus: Some(0),
+        root: "Open pull requests of web".into(),
+        repos: vec![
+            row(
+                "#31 Login page shows the error",
+                "@bob \u{b7} fix-login",
+                true,
+            ),
+            row(
+                "#29 Bump the date library",
+                "@renovate \u{b7} renovate/date-fns \u{b7} draft",
+                false,
+            ),
+        ],
+        hover: None,
+        keys: vec![
+            ("Tab", "next"),
+            ("Enter", "pick"),
+            ("Ctrl+Shift+L", "link project"),
+            ("Esc", "back"),
+        ],
+        ..new_review()
     }
 }
 
@@ -1900,20 +1971,24 @@ fn paint_features(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
         )),
         hash(painter.sidebar_view(&needs_you_sidebar(), (SIDEBAR_W, 520).into(), scale, p)),
         hash(painter.sidebar_view(&no_features_sidebar(), (SIDEBAR_W, 520).into(), scale, p)),
+        hash(painter.new_feature_dialog(&new_review(), size, scale, p)),
+        hash(painter.new_feature_dialog(&new_review_pulls(), size, scale, p)),
     ]
 }
 
-const FEATURES: [&str; 6] = [
+const FEATURES: [&str; 8] = [
     "new_feature",
     "new_feature_bases",
     "sidebar_features",
     "sidebar_feature_workspace",
     "sidebar_needs_you",
     "sidebar_no_features",
+    "new_review",
+    "new_review_pulls",
 ];
 
 /// The recorded hashes of `FEATURES`, per case in `CASES`.
-const GOLDEN_FEATURES: [[u64; 6]; 4] = [
+const GOLDEN_FEATURES: [[u64; 8]; 4] = [
     // Dark at 1
     [
         0x8374c9414949fa5b, // new_feature
@@ -1922,6 +1997,8 @@ const GOLDEN_FEATURES: [[u64; 6]; 4] = [
         0x4f489a294fd6cfe9, // sidebar_feature_workspace
         0x42f966c250e9899d, // sidebar_needs_you
         0x0cbbecc8e276c3fc, // sidebar_no_features
+        0x54cfa28809678460, // new_review
+        0xe608d8f7932ec25c, // new_review_pulls
     ],
     // Dark at 2
     [
@@ -1931,6 +2008,8 @@ const GOLDEN_FEATURES: [[u64; 6]; 4] = [
         0x25a6c3532952ab77, // sidebar_feature_workspace
         0x7f5b07bc5817daa7, // sidebar_needs_you
         0xf97a94d1cbc468b6, // sidebar_no_features
+        0xc4f74b048c71b636, // new_review
+        0x2cb2e4ca6f379930, // new_review_pulls
     ],
     // Light at 1
     [
@@ -1940,6 +2019,8 @@ const GOLDEN_FEATURES: [[u64; 6]; 4] = [
         0x8c099eb3525e36fa, // sidebar_feature_workspace
         0x0f94ad20e6efe803, // sidebar_needs_you
         0xb97e2bad7455858d, // sidebar_no_features
+        0xebbbbe15533c85e7, // new_review
+        0x603f26244a925622, // new_review_pulls
     ],
     // Light at 2
     [
@@ -1949,6 +2030,8 @@ const GOLDEN_FEATURES: [[u64; 6]; 4] = [
         0x3653c34b3b5ea64a, // sidebar_feature_workspace
         0xe73df09db1908db1, // sidebar_needs_you
         0x7ae57ba63db05473, // sidebar_no_features
+        0xe78c007083a4debd, // new_review
+        0x42d486817798b12c, // new_review_pulls
     ],
 ];
 
@@ -1986,6 +2069,17 @@ fn dump_features() {
             painter.new_feature_dialog(&new_feature_bases(), size, scale, p),
             px(dialog.size.w + shadow),
         );
+        for (name, view) in [
+            ("new_review", new_review()),
+            ("new_review_pulls", new_review_pulls()),
+        ] {
+            dump(
+                &dir,
+                &format!("{name}_{tag}"),
+                painter.new_feature_dialog(&view, size, scale, p),
+                px(dialog.size.w + shadow),
+            );
+        }
         dump(
             &dir,
             &format!("sidebar_features_{tag}"),

@@ -131,6 +131,13 @@ pub const FINAL_PLAN: &str = "plan-final.md";
 /// review's reviewer writes its suggestions until the final plan is due.
 pub fn run_needs(feature: &super::Feature, stage: Stage) -> Option<Needs> {
     let need = needs(stage)?;
+    // A pull request's review has no brief or plan of its own to go by.
+    if stage == Stage::AiReview && feature.pull().is_some() {
+        return Some(Needs {
+            template: "pr-review",
+            ..need
+        });
+    }
     let writing = feature.plan_review.as_ref().is_some_and(|r| r.writing);
     if stage == Stage::PlanReview && !writing {
         return Some(Needs {

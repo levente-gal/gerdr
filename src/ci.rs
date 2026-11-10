@@ -37,7 +37,10 @@ pub const IDLE_INTERVAL: Duration = Duration::from_secs(90);
 pub const LONG_LIVED: &[&str] = &["main", "master", "dev", "develop"];
 
 /// Where a run, a check or a whole row stands.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "kebab-case")]
 pub enum CiState {
     /// Queued, waiting or in progress.
     Running,
@@ -627,7 +630,7 @@ fn some_text(text: &str) -> Option<String> {
 
 /// The host and `owner/repo` of a repository's web page `web`, when on
 /// GitHub (or a GitHub Enterprise host).
-fn github_repository(web: &str) -> Option<(String, String)> {
+pub(crate) fn github_repository(web: &str) -> Option<(String, String)> {
     let (host, path) = web.strip_prefix("https://")?.split_once('/')?;
     let host = host.to_ascii_lowercase();
     let (owner, repo) = path.split_once('/')?;
@@ -975,6 +978,16 @@ fn pull_row(pull: &Pull, web: &str, group: Group, watched: bool) -> CiRow {
         watched,
         group,
     }
+}
+
+/// A pull request's checks from the `statusCheckRollup` gh gives, each
+/// once: one run again in place of the one before it.
+pub fn rollup_checks(rollup: serde_json::Value) -> Vec<Check> {
+    let pull = Pull {
+        status_check_rollup: serde_json::from_value(rollup).unwrap_or_default(),
+        ..Pull::default()
+    };
+    pull_row(&pull, "", Group::Mine, false).checks
 }
 
 /// The states of a pull request's checks from the `statusCheckRollup` gh

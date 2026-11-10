@@ -91,6 +91,9 @@ pub enum FindingState {
     Fixed,
     /// The user dismissed it (`Finding::reason` says why).
     Dismissed,
+    /// It went to GitHub as a comment of a review the user submitted, of
+    /// someone else's pull request (see `pr_submit`).
+    Posted,
 }
 
 impl FindingState {
@@ -172,6 +175,8 @@ pub enum Decision {
 pub const SENT: &str = "That finding went to the Build agent to fix";
 /// Why a fixed finding isn't decided again.
 pub const FIXED: &str = "That finding is fixed";
+/// Why a finding posted to GitHub isn't decided again.
+pub const POSTED: &str = "That finding is on GitHub, in the review you submitted";
 
 /// What `f` does to a finding in `state`: to fix (from undecided or
 /// dismissed), or back to undecided (from to fix); else why it does
@@ -223,6 +228,11 @@ pub struct AiReview {
     /// ids.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub own_made: u32,
+    /// Its findings go to GitHub as a review's comments, someone else's
+    /// pull request's (`Feature::posts_review`): one wanted waits for the
+    /// review to be submitted, not for AI review.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub posts: bool,
 }
 
 fn is_zero(n: &u32) -> bool {
@@ -267,7 +277,9 @@ impl AiReview {
 
     /// How many findings AI review still waits on.
     pub fn open(&self) -> usize {
-        self.findings.iter().filter(|f| f.state.holds_up()).count()
+        (self.findings.iter())
+            .filter(|f| f.state.holds_up() && !(self.posts && f.state == FindingState::Fix))
+            .count()
     }
 
     /// The finding `id`.
@@ -635,6 +647,7 @@ pub fn decide(review: &mut AiReview, id: &str, decision: &Decision) -> Result<St
             Err(format!("Say why you dismiss {id}"))
         }
         (_, S::Fixed) => Err(format!("{id} is fixed already")),
+        (_, S::Posted) => Err(format!("{id} is on GitHub already")),
         (Decision::Fix, S::Open | S::Dismissed) => {
             f.state = S::Fix;
             f.reason.clear();

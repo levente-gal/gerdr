@@ -12,7 +12,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::review_import::{Decision, FIXED, FindingState, SENT, Severity};
+use super::review_import::{Decision, FIXED, FindingState, POSTED, SENT, Severity};
 
 /// Which stage's item it is. Ids like `r1-2` and `u1` are in both, so this
 /// goes in every key of one: card, armed key, draft, Undo and signal.
@@ -185,6 +185,29 @@ const SUGGESTION: Words = Words {
     none_here: "Move the cursor to a suggestion first",
 };
 
+/// AI review's findings on someone else's pull request: what is wanted of
+/// one goes to GitHub as a comment of the review, not to an agent to fix.
+const PR_FINDING: Words = Words {
+    want: "Comment",
+    unwant: "Don't comment",
+    wanted: "to comment",
+    save_want: "Save and comment",
+    say_what: "Say what to comment.",
+    want_all: "Comment on all open",
+    why_hint: "Why this needs no comment",
+    own_goes: "It goes to GitHub with the review",
+    ..FINDING
+};
+
+/// `words(of)`, for a review that `posts` its findings to GitHub (someone
+/// else's pull request, `Feature::posts_review`).
+pub fn words_in(of: ItemOf, posts: bool) -> &'static Words {
+    match (of, posts) {
+        (ItemOf::Finding, true) => &PR_FINDING,
+        _ => words(of),
+    }
+}
+
 /// What items `of` are called and what their cards and keys say.
 pub fn words(of: ItemOf) -> &'static Words {
     match of {
@@ -208,6 +231,7 @@ pub fn want_key(of: ItemOf, standing: Standing) -> Result<Decision, &'static str
         (_, Standing::Fix) => Ok(Decision::Reopen),
         (ItemOf::Finding, Standing::Sent) => Err(SENT),
         (ItemOf::Finding, Standing::Fixed) => Err(FIXED),
+        (_, Standing::Posted) => Err(POSTED),
         (ItemOf::Suggestion, Standing::Sent | Standing::Fixed) => Err(SUGGESTION_DONE),
     }
 }
@@ -221,6 +245,7 @@ pub fn refuse_key(of: ItemOf, standing: Standing) -> Result<Option<Decision>, &'
         (_, Standing::Dismissed) => Ok(Some(Decision::Reopen)),
         (ItemOf::Finding, Standing::Sent) => Err(SENT),
         (ItemOf::Finding, Standing::Fixed) => Err(FIXED),
+        (_, Standing::Posted) => Err(POSTED),
         (ItemOf::Suggestion, Standing::Sent | Standing::Fixed) => Err(SUGGESTION_DONE),
     }
 }
@@ -237,6 +262,7 @@ pub fn editable(of: ItemOf, id: &str, standing: Standing) -> Result<(), String> 
             Err(format!("{id} was sent to Build: the next review checks it"))
         }
         (ItemOf::Finding, Standing::Fixed) => Err(format!("{id} is fixed already")),
+        (_, Standing::Posted) => Err(format!("{id} is on GitHub already")),
         (ItemOf::Suggestion, Standing::Dismissed) => {
             Err(format!("{id} is rejected: reopen it first"))
         }

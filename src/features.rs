@@ -103,7 +103,7 @@ use crate::{
         review_import::{
             self, CodeRead, Decision, Finding as ReviewFinding, FindingState, ReviewRound,
         },
-        review_items::{ItemOf, words},
+        review_items::{ItemOf, words, words_in},
         ship::{self, Action, Planned, Probe},
         store,
         verify::PlannedCheck,
@@ -334,6 +334,8 @@ pub(crate) enum Job {
     /// Asking the machine it was taken over from to take it back
     /// (see `machine_handback`).
     HandBack,
+    /// Moving a pull request's review to its new head (see `pr_watch`).
+    PrHead,
 }
 
 /// Work on a feature running off the UI thread.
@@ -351,6 +353,73 @@ pub(crate) struct Busy {
 
 /// What the work off the thread came to.
 pub(crate) enum Done {
+    /// How the pull requests under review stand on GitHub (see `pr_watch`).
+    PrRead {
+        reads: Vec<(String, String, String, Result<feature::pr::Remote, String>)>,
+    },
+    /// A pull request's review was submitted to GitHub, or not.
+    ReviewPosted {
+        project: String,
+        slug: String,
+        results: Vec<(u64, Result<Box<crate::pr_post::Submitted>, String>)>,
+    },
+    /// Whether the user can push to each pull request's branch was read:
+    /// by number, its repository, or why not.
+    PushAccess {
+        project: String,
+        slug: String,
+        results: Vec<(String, u64, feature::pr::Access)>,
+    },
+    /// The user's own pull request's commits were pushed, or not: the head.
+    PrPushed {
+        project: String,
+        slug: String,
+        results: Vec<(String, u64, Result<String, String>)>,
+    },
+    /// A pull request's failed runs were asked to run again on GitHub:
+    /// how many went, and why the others didn't.
+    CiRerun {
+        project: String,
+        slug: String,
+        number: String,
+        ran: usize,
+        failed: Vec<String>,
+    },
+    /// A pull request's review moved to its new head, or not.
+    PrMoved {
+        project: String,
+        slug: String,
+        results: Vec<(String, Result<feature::layout::MovedPr, String>)>,
+    },
+    /// Pull requests were added to a review, or not; `drops` go next.
+    ReviewAdded {
+        project: String,
+        slug: String,
+        drops: Vec<String>,
+        result: Result<Box<crate::pr_review::Added>, String>,
+    },
+    /// The open pull requests of a repository of the review dialog of
+    /// `serial` were listed, or not.
+    OpenPulls {
+        serial: u64,
+        repo: RepoKey,
+        result: Result<Vec<feature::pr::OpenPull>, String>,
+    },
+    /// A pull request to review is of a project of several repositories:
+    /// the dialog picks the others with it.
+    ReviewPick {
+        project: String,
+        slug: String,
+        from: PathBuf,
+        wanted: (String, String, u64),
+    },
+    /// A pull request's review was made, or not (see `pr_review`).
+    PrReview {
+        project: String,
+        slug: String,
+        numbers: String,
+        result: Result<Box<(Feature, Vec<PathBuf>)>, String>,
+    },
     /// Looking for the open project's repositories on machine `id` ended.
     SameRepos {
         id: String,
@@ -812,6 +881,70 @@ pub struct NewFeatureDialog {
     choosing: Option<Choosing>,
     /// What filters those branches.
     query: TextField,
+    /// It picks pull requests to review, not repositories to change.
+    pub review: Option<Reviewing>,
+    /// Projects to link as soon as the store's others are listed: those
+    /// the review it changes spans.
+    link_first: Vec<String>,
+}
+
+/// The new feature dialog picking pull requests to review together: one per
+/// repository, the rest left out.
+#[derive(Debug, Default)]
+pub struct Reviewing {
+    pulls: BTreeMap<RepoKey, RepoPulls>,
+    /// The pull request it was opened for (host, slug, number): picked once
+    /// its repository's list is in.
+    wanted: Option<(String, String, u64)>,
+    /// What picking did besides, said where the root is: the same branch
+    /// picked in other repositories.
+    note: Option<String>,
+    /// The open review it changes the pull requests of: its slug and title.
+    into: Option<(String, String)>,
+}
+
+/// What the review dialog knows of a repository's open pull requests.
+#[derive(Debug, Default)]
+struct RepoPulls {
+    /// Once listed.
+    list: Option<Result<Vec<feature::pr::OpenPull>, String>>,
+    picked: Option<u64>,
+    /// The user picked or cleared it: same-branch suggestions leave it be.
+    chosen: bool,
+    /// Its list was asked for.
+    asked: bool,
+    /// The one the review holds, as it has it, until listed.
+    known: Option<feature::pr::OpenPull>,
+}
+
+impl RepoPulls {
+    fn listed(&self) -> &[feature::pr::OpenPull] {
+        match &self.list {
+            Some(Ok(all)) => all,
+            _ => &[],
+        }
+    }
+
+    fn picked_pull(&self) -> Option<&feature::pr::OpenPull> {
+        let n = self.picked?;
+        (self.listed().iter().find(|p| p.number == n))
+            .or(self.known.as_ref().filter(|p| p.number == n))
+    }
+}
+
+/// The one pull request of `listed` on branch `head`, if only one is.
+fn same_branch<'a>(
+    listed: &'a [feature::pr::OpenPull],
+    head: &str,
+) -> Option<&'a feature::pr::OpenPull> {
+    match listed
+        .iter()
+        .filter(|p| p.head_ref == head)
+        .collect::<Vec<_>>()[..]
+    {
+        [one] => Some(one),
+        _ => None,
+    }
 }
 
 /// What a row of the new feature dialog is.
@@ -839,6 +972,16 @@ pub enum DialogOutcome {
         touched: Vec<String>,
         links: Vec<LinkSpec>,
     },
+    /// Review these pull requests together, of the root found and these
+    /// linked projects; titled so, or after the first if empty.
+    Review {
+        title: String,
+        root: Root,
+        links: Vec<LinkSpec>,
+        picks: Vec<crate::pr_review::Pick>,
+        /// The open review whose pull requests become these, by slug.
+        into: Option<String>,
+    },
 }
 
 impl NewFeatureDialog {
@@ -859,6 +1002,8 @@ impl NewFeatureDialog {
             bases: BTreeMap::new(),
             choosing: None,
             query: TextField::default(),
+            review: None,
+            link_first: Vec::new(),
         }
     }
 
@@ -901,9 +1046,11 @@ impl NewFeatureDialog {
     /// root's.
     fn rows(&self) -> Vec<DialogRow> {
         if self.choosing.is_some() {
-            return (0..self.branch_rows().len())
-                .map(DialogRow::Branch)
-                .collect();
+            let n = match self.review {
+                Some(_) => self.pull_rows().len(),
+                None => self.branch_rows().len(),
+            };
+            return (0..n).map(DialogRow::Branch).collect();
         }
         if self.picking {
             return (0..self.others.len()).map(DialogRow::Project).collect();
@@ -925,6 +1072,7 @@ impl NewFeatureDialog {
     fn multi(&self) -> bool {
         self.picking
             || self.choosing.is_some()
+            || self.review.is_some()
             || matches!(&self.root, Finding::Found(root) if root.multi)
             || self.others.iter().any(|o| o.linked)
     }
@@ -936,9 +1084,10 @@ impl NewFeatureDialog {
     /// The row slots it makes room for: a filter narrowing the branches
     /// doesn't resize it, or the field being typed in would move.
     fn slots(&self) -> usize {
-        match &self.choosing {
-            Some(_) => self.branches_offered().len(),
-            None => self.repos(),
+        match (&self.choosing, &self.review) {
+            (Some(_), Some(_)) => self.pulls_offered().len(),
+            (Some(_), None) => self.branches_offered().len(),
+            (None, _) => self.repos(),
         }
     }
 
@@ -1065,13 +1214,255 @@ impl NewFeatureDialog {
         all
     }
 
+    /// The open pull requests of the repository being chosen for.
+    fn pulls_offered(&self) -> &[feature::pr::OpenPull] {
+        let of = |c: &Choosing| self.review.as_ref()?.pulls.get(&c.repo);
+        self.choosing
+            .as_ref()
+            .and_then(of)
+            .map_or(&[], RepoPulls::listed)
+    }
+
+    /// `pulls_offered` the filter lets through: by number, title, branch or
+    /// author.
+    fn pull_rows(&self) -> Vec<&feature::pr::OpenPull> {
+        let query = self.query.trim().to_lowercase();
+        (self.pulls_offered().iter())
+            .filter(|p| {
+                let text = format!("#{} {} {} {}", p.number, p.title, p.head_ref, p.author);
+                text.to_lowercase().contains(&query)
+            })
+            .collect()
+    }
+
+    /// The repositories it shows whose pull requests nobody listed yet,
+    /// with their main worktrees. Noted as listed.
+    fn unlisted(&mut self) -> Vec<(RepoKey, PathBuf)> {
+        let rows = self.rows();
+        let keys: Vec<RepoKey> = rows.into_iter().filter_map(|r| self.row_repo(r)).collect();
+        let Some(review) = self.review.as_ref() else {
+            return Vec::new();
+        };
+        let new: Vec<(RepoKey, PathBuf)> = (keys.into_iter())
+            .filter(|key| !review.pulls.get(key).is_some_and(|e| e.asked))
+            .filter_map(|key| {
+                let main = self.repo_found(&key)?.main.clone();
+                Some((key, main))
+            })
+            .collect();
+        if let Some(review) = self.review.as_mut() {
+            for (key, _) in &new {
+                review.pulls.entry(key.clone()).or_default().asked = true;
+            }
+        }
+        new
+    }
+
+    /// The open pull requests of repository `key` were listed, or not: the
+    /// one it was opened for is picked, else one on a branch picked
+    /// elsewhere.
+    fn pulls_listed(&mut self, key: &RepoKey, result: Result<Vec<feature::pr::OpenPull>, String>) {
+        let Some(review) = self.review.as_mut() else {
+            return;
+        };
+        let Some(entry) = review.pulls.get_mut(key) else {
+            return;
+        };
+        entry.list = Some(result);
+        let wanted = (review.wanted.as_ref()).and_then(|(host, slug, number)| {
+            entry.listed().iter().find(|p| {
+                crate::ci::pull_request_of(&p.url).is_some_and(|(h, s, n)| {
+                    n == *number && h.eq_ignore_ascii_case(host) && s.eq_ignore_ascii_case(slug)
+                })
+            })
+        });
+        if let Some(number) = wanted.map(|p| p.number) {
+            review.wanted = None;
+            return self.pick_pull_of(key, number);
+        }
+        // Changing a review, a repository it doesn't hold stays out unless
+        // picked: it may have just been left out.
+        if entry.chosen || entry.picked.is_some() || review.into.is_some() {
+            return;
+        }
+        let heads: Vec<String> = (review.pulls.values())
+            .filter_map(|e| e.picked_pull().map(|p| p.head_ref.clone()))
+            .collect();
+        let Some(entry) = review.pulls.get_mut(key) else {
+            return;
+        };
+        let same =
+            (heads.iter()).find_map(|head| Some((same_branch(entry.listed(), head)?.number, head)));
+        if let Some((number, head)) = same {
+            entry.picked = Some(number);
+            review.note = Some(format!(
+                "#{number} of {} picked too: same branch {head}",
+                key.1
+            ));
+        }
+    }
+
+    /// Pick pull request `number` of repository `key`, and in each
+    /// repository nobody chose for, its one open pull request on the same
+    /// branch.
+    fn pick_pull_of(&mut self, key: &RepoKey, number: u64) {
+        let Some(review) = self.review.as_mut() else {
+            return;
+        };
+        let Some(entry) = review.pulls.get_mut(key) else {
+            return;
+        };
+        entry.picked = Some(number);
+        entry.chosen = true;
+        let Some(head) = entry.picked_pull().map(|p| p.head_ref.clone()) else {
+            return;
+        };
+        let mut also = Vec::new();
+        for (other, entry) in review.pulls.iter_mut().filter(|(k, _)| *k != key) {
+            if entry.chosen || entry.picked.is_some() {
+                continue;
+            }
+            if let Some(number) = same_branch(entry.listed(), &head).map(|p| p.number) {
+                entry.picked = Some(number);
+                also.push(format!("#{number} of {}", other.1));
+            }
+        }
+        review.note = (!also.is_empty())
+            .then(|| format!("{} picked too: same branch {head}", also.join(", ")));
+    }
+
+    /// Pick pull request row `i` for the repository being chosen for.
+    fn pick_pull(&mut self, i: usize) {
+        let Some(number) = self.pull_rows().get(i).map(|p| p.number) else {
+            return;
+        };
+        let Some(repo) = self.choosing.as_ref().map(|c| c.repo.clone()) else {
+            return;
+        };
+        self.pick_pull_of(&repo, number);
+        self.close_bases();
+    }
+
+    /// Leave repository row `i` out of the review, or pick its pull
+    /// request when none is.
+    fn toggle_pull(&mut self, i: usize) {
+        let Some(key) = self.rows().get(i).and_then(|r| self.row_repo(*r)) else {
+            return;
+        };
+        let entry = self.review.as_mut().and_then(|r| r.pulls.get_mut(&key));
+        match entry {
+            Some(entry) if entry.picked.is_some() => {
+                entry.picked = None;
+                entry.chosen = true;
+                self.error = None;
+            }
+            _ => self.open_bases(i),
+        }
+    }
+
+    /// Change the pull requests of review `f`: each it holds picked, the
+    /// projects it spans linked once listed.
+    fn edit(&mut self, f: &Feature) {
+        self.link_first = f.links.iter().map(|l| l.project.clone()).collect();
+        let Some(review) = self.review.as_mut() else {
+            return;
+        };
+        review.into = Some((f.slug.clone(), f.title.clone()));
+        for repo in &f.repos {
+            let Some(pull) = f.pull_of(&repo.key()) else {
+                continue;
+            };
+            let known = feature::pr::OpenPull {
+                number: pull.number,
+                title: String::new(),
+                head_ref: pull.head_ref.clone(),
+                author: pull.author.clone(),
+                draft: false,
+                url: pull.url.clone(),
+                mine: pull.mine,
+            };
+            let entry = RepoPulls {
+                picked: Some(pull.number),
+                chosen: true,
+                known: Some(known),
+                ..RepoPulls::default()
+            };
+            review
+                .pulls
+                .insert((repo.project.clone(), repo.name.clone()), entry);
+        }
+    }
+
+    /// What reviewing would do, or why it can't, as a sentence.
+    fn create_review(&self) -> Result<DialogOutcome, String> {
+        let root = match &self.root {
+            Finding::Looking => {
+                return Err("Still finding the repositories; try again in a moment.".into());
+            }
+            Finding::Failed(why) => return Err(format!("No repositories to start from: {why}.")),
+            Finding::Found(root) => root,
+        };
+        let review = self.review.as_ref().ok_or("Not a review.")?;
+        let mut picks = Vec::new();
+        for row in self.rows() {
+            let Some(key) = self.row_repo(row) else {
+                continue;
+            };
+            let Some(pull) = review.pulls.get(&key).and_then(RepoPulls::picked_pull) else {
+                continue;
+            };
+            let (Some(found), Some((host, slug, number))) =
+                (self.repo_found(&key), crate::ci::pull_request_of(&pull.url))
+            else {
+                return Err(format!(
+                    "Can't tell where #{} of {} is.",
+                    pull.number, key.1
+                ));
+            };
+            picks.push(crate::pr_review::Pick {
+                project: key.0.clone(),
+                repo: key.1.clone(),
+                main: found.main.clone(),
+                host,
+                slug,
+                number,
+                head_ref: pull.head_ref.clone(),
+            });
+        }
+        if picks.is_empty() {
+            return Err("Pick a pull request of a repository (Space).".into());
+        }
+        if !root.multi && !picks.iter().any(|p| p.project.is_none()) {
+            let name = root.repos.first().map_or("", |r| r.name.as_str());
+            return Err(format!(
+                "Pick a pull request of {name}: the project's only repository."
+            ));
+        }
+        Ok(DialogOutcome::Review {
+            title: self.title.trim().to_owned(),
+            root: root.clone(),
+            links: self.links(),
+            picks,
+            into: review.into.as_ref().map(|(slug, _)| slug.clone()),
+        })
+    }
+
     /// The row Alt+B acts on: the one with the keyboard, else the first
-    /// repository ticked, else the first.
+    /// repository ticked (in a review: with a pull request picked), else
+    /// the first.
     fn base_row(&self) -> Option<usize> {
         let rows = self.rows();
         let is_repo = |i: &usize| rows.get(*i).is_some_and(|r| self.row_repo(*r).is_some());
         self.focus.filter(is_repo).or_else(|| {
+            // A review's are those with a pull request picked.
+            let picked = |row: DialogRow| {
+                let key = self.row_repo(row);
+                let review = self.review.as_ref();
+                key.and_then(|k| review?.pulls.get(&k))
+                    .is_some_and(|e| e.picked.is_some())
+            };
             let ticked = |i: &usize| match rows[*i] {
+                row if self.review.is_some() => picked(row),
                 DialogRow::Home(n) => self.touched.get(n) == Some(&true),
                 DialogRow::Linked(k, n) => self.others[k].touched.get(n) == Some(&true),
                 _ => false,
@@ -1089,17 +1480,19 @@ impl NewFeatureDialog {
             return;
         };
         let current = self.repo_found(&repo).map(|r| r.base.clone());
+        let picked = (self.review.as_ref())
+            .and_then(|r| r.pulls.get(&repo))
+            .and_then(|e| e.picked);
         self.choosing = Some(Choosing {
             repo,
             back: (self.focus, self.top),
         });
         self.query.clear();
-        let rows = self.branch_rows();
-        self.focus = Some(
-            current
-                .and_then(|c| rows.iter().position(|b| *b == c))
-                .unwrap_or(0),
-        );
+        let at = match self.review {
+            Some(_) => picked.and_then(|n| self.pull_rows().iter().position(|p| p.number == n)),
+            None => current.and_then(|c| self.branch_rows().iter().position(|b| *b == c)),
+        };
+        self.focus = Some(at.unwrap_or(0));
         self.top = 0;
         self.error = None;
     }
@@ -1153,11 +1546,18 @@ impl NewFeatureDialog {
             Keysym::b | Keysym::B if alt => self.close_bases(),
             Keysym::l | Keysym::L if ctrl && mods.shift => self.pick(),
             Keysym::Return | Keysym::KP_Enter if n == 0 => {
-                self.error = Some("No branch matches that.".into());
+                self.error = Some(match self.review {
+                    Some(_) => "No pull request matches that.".into(),
+                    None => "No branch matches that.".into(),
+                });
             }
             Keysym::Return | Keysym::KP_Enter => {
                 // A paste narrows the rows without moving the keyboard.
-                self.pick_base(self.focus.filter(|i| *i < n).unwrap_or(0));
+                let i = self.focus.filter(|i| *i < n).unwrap_or(0);
+                match self.review {
+                    Some(_) => self.pick_pull(i),
+                    None => self.pick_base(i),
+                }
             }
             Keysym::Tab if !mods.shift => self.focus = step(self.focus, false),
             Keysym::ISO_Left_Tab | Keysym::Tab => self.focus = step(self.focus, true),
@@ -1196,6 +1596,9 @@ impl NewFeatureDialog {
         let Some(row) = self.rows().get(i).copied() else {
             return;
         };
+        if self.review.is_some() && self.row_repo(row).is_some() {
+            return self.toggle_pull(i);
+        }
         if self.fixed(row) {
             return;
         }
@@ -1243,6 +1646,9 @@ impl NewFeatureDialog {
 
     /// What creating it would do, or why it can't, as a sentence.
     fn create(&self) -> Result<DialogOutcome, String> {
+        if self.review.is_some() {
+            return self.create_review();
+        }
         if let Some(why) = self.unpicked() {
             return Err(why);
         }
@@ -1464,7 +1870,10 @@ pub struct FeaturePanel {
     /// What the selection on the page goes by (chars, or the words or
     /// lines a double or triple click took) and the span its press took,
     /// which it keeps whichever way it is dragged or Shift+clicked on.
-    pub(crate) pick_by: Option<(crate::scrollback::Grain, (chrome::TextSpot, chrome::TextSpot))>,
+    pub(crate) pick_by: Option<(
+        crate::scrollback::Grain,
+        (chrome::TextSpot, chrome::TextSpot),
+    )>,
     /// A press selecting the page's text held past its top or bottom:
     /// when the page last went on by it (see `scrolling::edge_steps`).
     pub pick_edge: Option<(std::time::Instant, f64)>,
@@ -1668,6 +2077,26 @@ pub enum PanelOutcome {
     Evidence,
     /// Open this pull request's page.
     OpenPr(String),
+    /// A pull request's review: move its worktree to the head GitHub has
+    /// now (see `pr_watch`).
+    UpdatePrHead,
+    /// A pull request's review whose pull request ended: finish it, after
+    /// asking.
+    FinishReview,
+    /// A pull request's review: run its failed GitHub Actions runs again on
+    /// GitHub (see `pr_watch::rerun_ci`).
+    RerunCi,
+    /// A pull request's review: submit it to GitHub as this, after asking
+    /// (see `pr_post`).
+    SubmitReview(feature::pr_submit::Event),
+    /// The user's own pull request's review: push its commits, after asking.
+    PushPr,
+    /// Someone else's pull request's review: fix it here, after asking, or
+    /// comment on it again (see `pr_post::toggle_fix_here`).
+    FixHere,
+    /// Add pull requests to the review, or leave some out (see
+    /// `Gerdr::open_review_edit`).
+    EditPulls,
     /// Ask an agent to write the feature's summary again.
     WriteSummary,
     /// Undo step `.1` that shipping ran for repository `.0`, after asking.
@@ -1987,6 +2416,10 @@ pub struct RowCtx {
     pub comments: usize,
     /// Its sandbox is open to the network (see `sandbox_lan`).
     pub lan_open: bool,
+    /// A pull request's review whose worktree is at the head reviewed,
+    /// nothing changed, as its code was last read: Verify goes by GitHub's
+    /// checks (see `pr_watch`).
+    pub on_head: bool,
 }
 
 impl RowCtx {
@@ -2046,8 +2479,17 @@ pub fn row_action(feature: &Feature, row: PanelRow, ctx: RowCtx) -> Option<Panel
                 PanelOutcome::GoToCurrent
             }
             StageMark::Done => PanelOutcome::Untick(stage),
+            // A pull request's review goes by its pull request first.
+            StageMark::Current if feature.pr_ended().is_some() => PanelOutcome::FinishReview,
+            StageMark::Current if feature.pr_moved().is_some() => PanelOutcome::UpdatePrHead,
+            // A review's Ship submits it to GitHub.
+            StageMark::Current if stage == Stage::Ship && feature.pull().is_some() => {
+                submit_action(feature, ctx)
+            }
             StageMark::Current if stage == Stage::Ship && ctx.ship_nothing => PanelOutcome::Finish,
             StageMark::Current if stage == Stage::Ship => PanelOutcome::Ship,
+            // At the head reviewed, GitHub's checks are its Verify.
+            StageMark::Current if stage == Stage::Verify && ctx.on_head => ci_action(feature),
             StageMark::Current if stage == Stage::Verify && ctx.checks => PanelOutcome::RunChecks,
             StageMark::Current if stage == Stage::PlanReview => plan_review_action(feature),
             StageMark::Current if stage == Stage::AiReview => review_action(feature, ctx),
@@ -2301,9 +2743,7 @@ fn can_add_comment(feature: &Feature, stage: Stage) -> bool {
 pub(crate) fn can_edit_note(feature: &Feature, stage: Stage, c: &Comment) -> bool {
     c.flag.is_none()
         && match stage {
-            Stage::CodeReview => {
-                feature.status == Status::Open && feature.current() == Some(stage)
-            }
+            Stage::CodeReview => feature.status == Status::Open && feature.current() == Some(stage),
             _ => can_decide(feature, stage),
         }
 }
@@ -2361,7 +2801,8 @@ fn review_actions(feature: &Feature, stage: Stage) -> Vec<(PageButton, PanelOutc
             PanelOutcome::FoldRound(round.n),
         )
     });
-    (cards.flat_map(|item| item_buttons(item, decides)))
+    let posts = feature.posts_review();
+    (cards.flat_map(|item| item_buttons(item, decides, posts)))
         .chain(shows)
         .collect()
 }
@@ -2833,7 +3274,8 @@ fn check_buttons(
 /// Whether Manual test's page of `feature` has failures or comments to send
 /// to Build now: none waits for a round to end.
 fn manual_sends(feature: &Feature, ctx: RowCtx) -> bool {
-    ctx.manual.failed > ctx.manual.sent && feature.fix_round.is_none()
+    // Someone else's pull request's go to GitHub with the review.
+    ctx.manual.failed > ctx.manual.sent && feature.fix_round.is_none() && !feature.posts_review()
 }
 
 /// Whether some check of `feature` runs that hasn't been told to stop.
@@ -3100,7 +3542,7 @@ fn round_count(round: &ReviewRound) -> String {
 
 /// A finding of an earlier review: a record, with nothing to do on it.
 fn round_card(f: &ReviewFinding, multi: bool) -> FindingCard {
-    let mut card = item_card(Item::Finding(f), multi, &[]);
+    let mut card = item_card(Item::Finding(f), multi, &[], false);
     card.faded = true;
     card.made = false;
     // Nothing can select it, so nothing could open it again.
@@ -3186,10 +3628,11 @@ fn review_line(feature: &Feature, agent: Option<&str>) -> Option<String> {
     let open = review.count(FindingState::Open);
     let fix = review.count(FindingState::Fix);
     let sent = review.count(FindingState::Sent);
+    let wanted = words_in(ItemOf::Finding, review.posts).wanted;
     Some(if open > 0 {
         format!("{} to decide", plural(open, "finding"))
     } else if fix > 0 {
-        format!("{} to fix", plural(fix, "finding"))
+        format!("{} {wanted}", plural(fix, "finding"))
     } else if sent > 0 {
         let sent = format!("{} sent to Build", plural(sent, "finding"));
         match review.fixes_made() {
@@ -3317,6 +3760,18 @@ fn action_hint(action: &PanelOutcome) -> &'static str {
         PanelOutcome::StopResolving => "stop\u{2026}",
         PanelOutcome::EditSummary => "edit the summary",
         PanelOutcome::Finish => "finish\u{2026}",
+        PanelOutcome::UpdatePrHead => "update to new head",
+        PanelOutcome::RerunCi => "rerun on GitHub",
+        PanelOutcome::SubmitReview(feature::pr_submit::Event::Comment) => "comment\u{2026}",
+        PanelOutcome::SubmitReview(feature::pr_submit::Event::Approve) => "approve\u{2026}",
+        PanelOutcome::SubmitReview(feature::pr_submit::Event::RequestChanges) => {
+            "request changes\u{2026}"
+        }
+        PanelOutcome::PushPr => "push\u{2026}",
+        PanelOutcome::FixHere => "fix here or comment",
+        PanelOutcome::EditPulls => "change pull requests",
+        PanelOutcome::OpenPr(_) => "open on GitHub",
+        PanelOutcome::FinishReview => "finish\u{2026}",
         PanelOutcome::Untick(_) => "reopen",
         PanelOutcome::GoToCurrent => "go to the current stage",
         PanelOutcome::Touch(_) => "add to feature",
@@ -3331,6 +3786,12 @@ fn stage_button(feature: &Feature, stage: Stage, ctx: RowCtx) -> Option<&'static
         PanelOutcome::Tick => Some("Mark done"),
         PanelOutcome::Ship => Some("Ship\u{2026}"),
         PanelOutcome::Finish => Some("Finish\u{2026}"),
+        PanelOutcome::UpdatePrHead => Some(UPDATE_HEAD),
+        PanelOutcome::RerunCi => Some("Rerun failed on GitHub"),
+        PanelOutcome::SubmitReview(event) => Some(event.label()),
+        PanelOutcome::PushPr => Some("Push\u{2026}"),
+        PanelOutcome::OpenPr(_) => Some("Open checks"),
+        PanelOutcome::FinishReview => Some("Finish\u{2026}"),
         PanelOutcome::Untick(_) => Some("Reopen"),
         PanelOutcome::StartAgent(..) => Some("Start agent"),
         PanelOutcome::SendPrompt(_) => Some("Send prompt"),
@@ -4875,6 +5336,18 @@ impl FeaturePanel {
             {
                 return Some(PanelOutcome::RunFailed);
             }
+            // A review at its head: the project's checks, here.
+            Keysym::r | Keysym::R
+                if plain
+                    && mods.shift
+                    && self.focus != TabArea::Repos
+                    && stage == Stage::Verify
+                    && ctx.on_head
+                    && ctx.checks
+                    && feature.current() == Some(Stage::Verify) =>
+            {
+                return Some(PanelOutcome::RunChecks);
+            }
             Keysym::s | Keysym::S
                 if plain
                     && mods.shift
@@ -5085,10 +5558,20 @@ impl FeaturePanel {
                 let back = matches!(sym, Keysym::Prior | Keysym::KP_Prior);
                 return switch(slugs, &self.slug, back).map(PanelOutcome::Show);
             }
+            Keysym::w | Keysym::W
+                if mods.alt && !ctrl && !mods.shift && feature.pull().is_some_and(|p| !p.own()) =>
+            {
+                return Some(PanelOutcome::FixHere);
+            }
+            Keysym::n | Keysym::N if mods.alt && !ctrl && !mods.shift && changes_pulls(feature) => {
+                return Some(PanelOutcome::EditPulls);
+            }
             Keysym::o | Keysym::O if ctrl && mods.shift => {
-                return row_page(feature, row).or_else(|| {
-                    opens_fix_plan(feature, stage).then_some(PanelOutcome::ReviewFixPlan)
-                });
+                return row_page(feature, row)
+                    .or_else(|| {
+                        opens_fix_plan(feature, stage).then_some(PanelOutcome::ReviewFixPlan)
+                    })
+                    .or_else(|| feature.pull().map(|p| PanelOutcome::OpenPr(p.url.clone())));
             }
             // A suggestion's card opens the code it cites.
             Keysym::o | Keysym::O
@@ -5349,8 +5832,10 @@ fn fixes_unverified(feature: &Feature, stage: Stage) -> bool {
 /// to be decided: findings, failed checks or criteria, comments in the diff.
 fn has_new_fixes(feature: &Feature, stage: Stage, ctx: RowCtx) -> bool {
     match stage {
-        Stage::AiReview => (feature.review.as_ref())
-            .is_some_and(|r| r.count(FindingState::Open) > 0 || r.count(FindingState::Fix) > 0),
+        // Those to comment on GitHub go with the review, not to a fix round.
+        Stage::AiReview => (feature.review.as_ref()).is_some_and(|r| {
+            r.count(FindingState::Open) > 0 || (!r.posts && r.count(FindingState::Fix) > 0)
+        }),
         Stage::Verify => {
             (feature.verify.as_ref()).is_some_and(|v| feature::verify::to_fix(v).is_some())
         }
@@ -5616,7 +6101,10 @@ fn writers_page_actions(
             button("Make fixes", ButtonStyle::Primary),
             PanelOutcome::MakeVerifyFixes,
         ));
-        out.push((button("Plan fixes", ButtonStyle::Plain), PanelOutcome::PlanFixes));
+        out.push((
+            button("Plan fixes", ButtonStyle::Plain),
+            PanelOutcome::PlanFixes,
+        ));
     }
     let waits = feature.status == Status::Open
         && (feature.runs.get(&stage)).is_some_and(|run| run.waits_to_send());
@@ -5685,8 +6173,15 @@ fn writers_page_actions(
                 PanelOutcome::Manual(Outcome::SendFailures),
             ));
         }
+        // On someone else's pull request what failed goes with the review:
+        // it is done once every criterion is tried.
+        let (label, ready) = match feature.posts_review() {
+            true if ctx.manual.failed > 0 => ("Mark done", ctx.manual.untested == 0),
+            true => ("Mark passed", ctx.manual.untested == 0),
+            false => ("Mark passed", ctx.manual.passed == ctx.criteria),
+        };
         out.push((
-            button("Mark passed", style(ctx.manual.passed == ctx.criteria)),
+            button(label, style(ready)),
             PanelOutcome::Manual(Outcome::MarkPassed),
         ));
     }
@@ -5888,7 +6383,11 @@ fn offers_sandbox(feature: &Feature, stage: Stage) -> bool {
 
 /// Whether `feature`'s sandbox is on another machine, as far as its terminals go.
 fn sandbox_elsewhere(feature: &Feature) -> bool {
-    feature.writer.is_some() || feature.sandbox.as_ref().is_some_and(|run| run.machine.is_some())
+    feature.writer.is_some()
+        || feature
+            .sandbox
+            .as_ref()
+            .is_some_and(|run| run.machine.is_some())
 }
 
 /// The pages of `feature`'s sandbox's app, the first the one Open app opens.
@@ -6481,6 +6980,41 @@ impl Gerdr {
                     dialog.base_branches(&repo, result);
                 }
             }
+            Done::OpenPulls {
+                serial,
+                repo,
+                result,
+            } => {
+                if let Err(why) = &result {
+                    tracing::warn!("listing the pull requests of {}: {why}", repo.1);
+                }
+                // Dropped when the dialog it was for closed, as above.
+                if let Some(dialog) = self.features.dialog.as_mut()
+                    && dialog.serial == serial
+                {
+                    dialog.pulls_listed(&repo, result);
+                }
+            }
+            Done::ReviewAdded {
+                project,
+                slug,
+                drops,
+                result,
+            } => {
+                self.unbusy(&project, &slug, Job::Link);
+                self.review_added(&project, &slug, drops, result);
+            }
+            Done::ReviewPick {
+                project,
+                slug,
+                from,
+                wanted,
+            } => {
+                self.unbusy(&project, &slug, Job::Create);
+                if self.project.as_deref() == Some(project.as_str()) {
+                    self.open_dialog(Some(from), Some(wanted));
+                }
+            }
             Done::RemoteBase {
                 serial,
                 repo,
@@ -6535,6 +7069,43 @@ impl Gerdr {
             } => {
                 self.unbusy(&project, &slug, Job::Link);
                 self.feature_linked(&project, &slug, &names, result);
+            }
+            Done::PrRead { reads } => self.pr_reviews_read(reads),
+            Done::ReviewPosted {
+                project,
+                slug,
+                results,
+            } => self.review_posted(&project, &slug, results),
+            Done::PrPushed {
+                project,
+                slug,
+                results,
+            } => self.pr_pushed(&project, &slug, results),
+            Done::PushAccess {
+                project,
+                slug,
+                results,
+            } => self.push_access_read(&project, &slug, results),
+            Done::CiRerun {
+                project,
+                slug,
+                number,
+                ran,
+                failed,
+            } => self.ci_rerun(&project, &slug, number, ran, failed),
+            Done::PrMoved {
+                project,
+                slug,
+                results,
+            } => self.pr_head_moved(&project, &slug, results),
+            Done::PrReview {
+                project,
+                slug,
+                numbers,
+                result,
+            } => {
+                self.unbusy(&project, &slug, Job::Create);
+                self.pr_review_made(project, slug, numbers, result);
             }
             Done::Created {
                 project,
@@ -6775,7 +7346,9 @@ impl Gerdr {
                 slug,
                 pane,
             } => {
-                let run = self.feature_mut(&project, &slug).and_then(|f| f.setup.as_mut());
+                let run = self
+                    .feature_mut(&project, &slug)
+                    .and_then(|f| f.setup.as_mut());
                 if let Some(run) = run {
                     run.pane = Some(pane);
                     self.save_feature(&project, &slug);
@@ -6887,6 +7460,7 @@ impl Gerdr {
             comments,
             lan_open: (self.features.build.sandbox_lan)
                 .contains_key(&(feature.project.clone(), feature.slug.clone())),
+            on_head: on_head(feature, last.map(|p| &p.reading)),
         }
     }
 
@@ -7309,9 +7883,7 @@ impl Gerdr {
             return self.fixes_landed(project, slug, patch);
         }
         // The code is read after its round is over: its last commit counted.
-        if feature.carry.is_some()
-            && feature.fix_round.as_ref().map(|r| r.n) != feature.carry
-        {
+        if feature.carry.is_some() && feature.fix_round.as_ref().map(|r| r.n) != feature.carry {
             feature.carry = None;
             self.save_feature(project, slug);
         }
@@ -7540,9 +8112,9 @@ impl Gerdr {
             Stage::AiReview => self.tick_feature(project, slug, Some(&reading.patch), "gerdr"),
             Stage::ManualTest if !self.criteria(project, slug).is_empty() => {
                 let criteria = self.criteria(project, slug).to_vec();
-                let passed = self.feature(project, slug).is_some_and(|f| {
-                    feature::manual::all_passed(f.manual.as_ref(), &criteria)
-                });
+                let passed = self
+                    .feature(project, slug)
+                    .is_some_and(|f| feature::manual::all_passed(f.manual.as_ref(), &criteria));
                 let fixed = (self.feature(project, slug)).is_some_and(|f| f.unverified.is_some());
                 if !passed {
                     let comments = criteria.iter().any(|c| c.comment);
@@ -7638,27 +8210,78 @@ impl Gerdr {
     /// its repositories: the one workspace `at` is in, else the active
     /// one's, starts ticked.
     pub fn open_new_feature(&mut self, at: Option<usize>) {
-        let Some(id) = self.project.clone() else {
-            return self.show_warning("Open a project to start a feature in".into());
+        let from = self.dialog_from(at);
+        self.open_dialog(from, None);
+    }
+
+    /// Open the new feature dialog to pick pull requests to review, one per
+    /// repository, from the folder of workspace `at` as `open_new_feature`.
+    pub fn open_review_pulls(&mut self, at: Option<usize>) {
+        let from = self.dialog_from(at);
+        self.open_dialog(from, Some((String::new(), String::new(), 0)));
+    }
+
+    /// Open the review dialog on the pull requests review `slug` holds, to
+    /// add or leave out some (see `change_pulls`).
+    pub(crate) fn open_review_edit(&mut self, project: &str, slug: &str) {
+        let Some(f) = self.feature(project, slug).cloned() else {
+            return;
         };
-        let Some(project) = self.projects.project(&id) else {
-            return self.show_warning("Open a project to start a feature in".into());
+        if let Some(why) = self.review_refusal(&f) {
+            return self.show_warning(why);
+        }
+        if self.project.as_deref() != Some(project) {
+            return;
+        }
+        self.open_dialog(
+            Some(f.root.clone()),
+            Some((String::new(), String::new(), 0)),
+        );
+        let Some(dialog) = self.features.dialog.as_mut() else {
+            return;
         };
-        let workspace_dirs: Vec<PathBuf> =
-            project.workspaces.iter().map(|w| w.dir.clone()).collect();
-        let from = at
-            .and_then(|i| self.workspaces.get(i))
+        dialog.edit(&f);
+        self.find_others();
+    }
+
+    /// The folder the dialog opens from: workspace `at`'s, else the active
+    /// one's, else the project's first workspace's.
+    fn dialog_from(&self, at: Option<usize>) -> Option<PathBuf> {
+        let project = self.projects.project(self.project.as_deref()?)?;
+        at.and_then(|i| self.workspaces.get(i))
             .or_else(|| self.workspace())
             .map(|ws| ws.dir.clone())
-            .or_else(|| workspace_dirs.first().cloned());
+            .or_else(|| project.workspaces.first().map(|w| w.dir.clone()))
+    }
+
+    /// Open the new feature dialog from folder `from`; with `wanted`, to
+    /// review pull requests, that one (host, slug, number) picked once
+    /// listed (number 0: none).
+    pub(crate) fn open_dialog(
+        &mut self,
+        from: Option<PathBuf>,
+        wanted: Option<(String, String, u64)>,
+    ) {
+        let what = match wanted {
+            Some(_) => "review pull requests",
+            None => "start a feature",
+        };
+        let Some(id) = self.project.clone() else {
+            return self.show_warning(format!("Open a project to {what} in"));
+        };
         let Some(from) = from else {
-            return self.show_warning("Add a workspace with a folder to start a feature".into());
+            return self.show_warning(format!("Add a workspace with a folder to {what}"));
         };
         self.features.serial += 1;
         let serial = self.features.serial;
         self.context_menu = None;
         self.stop_key_repeat();
-        self.features.dialog = Some(NewFeatureDialog::new(id.clone(), serial, from.clone()));
+        let mut dialog = NewFeatureDialog::new(id.clone(), serial, from.clone());
+        dialog.review = wanted.map(|w| Reviewing {
+            wanted: (w.2 != 0).then_some(w),
+            ..Reviewing::default()
+        });
+        self.features.dialog = Some(dialog);
         self.find_home_root(&id, from, serial);
         // It takes the pointer from the client under it.
         self.refresh_pointer_focus();
@@ -7905,7 +8528,7 @@ impl Gerdr {
         let Some(dialog) = self.features.dialog.as_ref() else {
             return;
         };
-        if !dialog.picking || !dialog.others.is_empty() {
+        if (!dialog.picking && dialog.link_first.is_empty()) || !dialog.others.is_empty() {
             return;
         }
         let (home, serial) = (dialog.project.clone(), dialog.serial);
@@ -7932,12 +8555,13 @@ impl Gerdr {
                 project: p.id.clone(),
                 name: p.name.clone(),
                 root,
-                linked: false,
+                linked: dialog.link_first.contains(&p.id),
                 touched: Vec::new(),
             });
         }
         if let Some(dialog) = self.features.dialog.as_mut() {
             dialog.others = others;
+            dialog.link_first.clear();
         }
         for (project, from, dirs, theirs, ignore, bases) in finds {
             self.feature_work(None, move |_| Done::FoundOther {
@@ -7958,6 +8582,9 @@ impl Gerdr {
         let Some(dialog) = self.features.dialog.as_mut() else {
             return;
         };
+        if dialog.review.is_some() {
+            return self.find_pulls();
+        }
         let (home, serial) = (dialog.project.clone(), dialog.serial);
         for (repo, found) in dialog.unlooked() {
             let of = repo.0.as_deref().unwrap_or(&home);
@@ -7980,6 +8607,22 @@ impl Gerdr {
                     repo,
                     result: crate::git_ops::remote_default(&found.main),
                 }
+            });
+        }
+    }
+
+    /// List off the thread (checklist D3) the open pull requests of the
+    /// review dialog's repositories not listed yet.
+    fn find_pulls(&mut self) {
+        let Some(dialog) = self.features.dialog.as_mut() else {
+            return;
+        };
+        let serial = dialog.serial;
+        for (repo, main) in dialog.unlisted() {
+            self.feature_work(None, move |_| Done::OpenPulls {
+                serial,
+                result: feature::pr::open_pulls(&main),
+                repo,
             });
         }
     }
@@ -8024,6 +8667,20 @@ impl Gerdr {
                 touched,
                 links,
             } => (title, root, touched, links),
+            DialogOutcome::Review {
+                title,
+                root,
+                links,
+                picks,
+                into: Some(slug),
+            } => return self.change_pulls(dialog.project, slug, root, links, picks, title),
+            DialogOutcome::Review {
+                title,
+                root,
+                links,
+                picks,
+                into: None,
+            } => return self.start_review_of(dialog.project, root, links, picks, title),
         };
         let project = dialog.project;
         let all = self
@@ -8086,6 +8743,7 @@ impl Gerdr {
         }
         let feature = Feature {
             version: feature::VERSION,
+            kind: Default::default(),
             writer: None,
             slug: slug.clone(),
             title: title.clone(),
@@ -8274,7 +8932,10 @@ impl Gerdr {
                 None
             }
             Some(NewFeatureHit::Repo(i)) if dialog.choosing.is_some() => {
-                dialog.pick_base(i);
+                match dialog.review {
+                    Some(_) => dialog.pick_pull(i),
+                    None => dialog.pick_base(i),
+                }
                 None
             }
             Some(NewFeatureHit::Repo(i)) => {
@@ -8621,7 +9282,12 @@ impl Gerdr {
         // away and the page has the keyboard.
         let on = self.features.panel.as_ref()?;
         let quiet = on.keys || on.note.is_some() || on.focus == TabArea::Repos;
-        if !quiet && on.page_stage(&feature) == Stage::Ship {
+        let reviews = feature.pull().is_some();
+        if !quiet && on.page_stage(&feature) == Stage::Ship && reviews {
+            if let Some(outcome) = submit_key(&feature, mods, sym) {
+                return Some(outcome);
+            }
+        } else if !quiet && on.page_stage(&feature) == Stage::Ship {
             let repo = ship_row_repo(on, &ships);
             let keys = ship_keys(&feature, ctx, probe, repo.as_deref());
             if let Some(key) = keys.into_iter().find(|k| k.pressed(mods, sym)) {
@@ -8910,6 +9576,13 @@ impl Gerdr {
             PanelOutcome::SkipPlanReview => self.ask_skip_plan_review(&project, &slug),
             PanelOutcome::ChangeDecisions => self.ask_change_decisions(&project, &slug),
             PanelOutcome::OpenPr(url) => self.open_feature_page(&project, &slug, url),
+            PanelOutcome::UpdatePrHead => self.update_pr_head(&project, &slug),
+            PanelOutcome::RerunCi => self.rerun_ci(&project, &slug),
+            PanelOutcome::SubmitReview(event) => self.ask_submit_review(&project, &slug, event),
+            PanelOutcome::PushPr => self.ask_push_pr(&project, &slug),
+            PanelOutcome::FixHere => self.toggle_fix_here(&project, &slug),
+            PanelOutcome::EditPulls => self.open_review_edit(&project, &slug),
+            PanelOutcome::FinishReview => self.ask_finish_pr_review(&project, &slug),
             PanelOutcome::WriteSummary => self.write_ship_summary(&project, &slug, true),
             PanelOutcome::UndoShip(repo, step) => self.ask_undo_ship(&project, &slug, &repo, step),
             PanelOutcome::UndoAfter(step) => self.undo_after_ship(&project, &slug, step),
@@ -9727,7 +10400,7 @@ impl Gerdr {
     /// done its work and goes, or its tabs would keep the workspace open.
     /// Then its worktrees go, or its workspace closes, as its ticks say. What
     /// keeps the workspace open, if anything.
-    fn after_ship(&mut self, project: &str, slug: &str) -> Option<String> {
+    pub(crate) fn after_ship(&mut self, project: &str, slug: &str) -> Option<String> {
         let feature = self.feature(project, slug)?;
         let plan = feature.ship_plan.clone();
         if feature.sandbox.is_some() {
@@ -9975,7 +10648,9 @@ impl Gerdr {
         if sandbox.is_some() {
             self.save_feature(project, slug);
         }
-        let removal = sandbox.as_ref().map(|run| self.sandbox_removal(&feature, run));
+        let removal = sandbox
+            .as_ref()
+            .map(|run| self.sandbox_removal(&feature, run));
         self.t3_forget_project(&feature.dir);
         for stage in feature.runs.keys() {
             if let Some(left) = self.t3_left_running(project, slug, *stage) {
@@ -10398,7 +11073,9 @@ impl Gerdr {
     /// has them, to show in its diff.
     pub(crate) fn sent_notes(&self, project: &str, slug: &str) -> Vec<Comment> {
         let key = (project.to_owned(), slug.to_owned());
-        let made = self.feature(project, slug).and_then(|f| f.comment_fixes.last());
+        let made = self
+            .feature(project, slug)
+            .and_then(|f| f.comment_fixes.last());
         (self.features.probes.get(&key).and_then(|p| p.last.as_ref()))
             .map_or(&[][..], |p| p.docs.notes.as_slice())
             .iter()
@@ -10424,7 +11101,12 @@ impl Gerdr {
         if let Some(probe) = last {
             probe.docs.comments = notes.len();
             // Those that went to Build stay, after them.
-            let sent = probe.docs.notes.iter().filter(|c| c.flag.is_some()).cloned();
+            let sent = probe
+                .docs
+                .notes
+                .iter()
+                .filter(|c| c.flag.is_some())
+                .cloned();
             let sent: Vec<Comment> = sent.collect();
             probe.docs.notes = notes;
             probe.docs.notes.extend(sent);
@@ -10507,6 +11189,7 @@ impl Gerdr {
         let place = self.place_label(feature, stage);
         actions.extend(place_action(place.as_deref(), stage));
         actions.extend(stop_action(feature, stage));
+        with_pull_actions(&mut actions, feature, stage, ctx);
         actions
     }
 
@@ -10575,12 +11258,19 @@ impl Gerdr {
                 ))
             }
             FeatureTabHit::Fold(i) => {
-                let open = self.panel_feature().map(|f| self.criterion_rows(f))?.get(i)?.open;
+                let open = self
+                    .panel_feature()
+                    .map(|f| self.criterion_rows(f))?
+                    .get(i)?
+                    .open;
                 let text = match open {
                     true => "Fold it to its line (Left)",
                     false => "Open it to its steps (Right)",
                 };
-                Some(Tooltip::new(text, smithay::utils::Rectangle::new(pos.to_i32_round(), (1, 1).into())))
+                Some(Tooltip::new(
+                    text,
+                    smithay::utils::Rectangle::new(pos.to_i32_round(), (1, 1).into()),
+                ))
             }
             FeatureTabHit::Search(part) => {
                 let spots = layout.test_strip.as_ref()?;
@@ -10596,7 +11286,13 @@ impl Gerdr {
             }
             // The fold buttons over the criteria: what they fold, and the key.
             FeatureTabHit::PageButton(i) => {
-                let text = fold_tip(&view.page, i).or_else(|| self.ship_button_tip(i))?;
+                let text = fold_tip(&view.page, i)
+                    .or_else(|| self.ship_button_tip(i))
+                    .or_else(|| {
+                        let feature = self.panel_feature()?;
+                        let panel = self.features.panel.as_ref()?;
+                        pull_tip(feature, panel.page_stage(feature), &view.page, i)
+                    })?;
                 let mut spot = (*layout.page_buttons.get(i)?)?;
                 spot.loc.y -= view.scroll[TabColumn::Page as usize].round() as i32;
                 Some(Tooltip::new(&text, spot))
@@ -11066,6 +11762,7 @@ fn running_word(job: Job) -> &'static str {
         Job::Graph => "code graph",
         Job::Sandbox => "sandbox",
         Job::HandBack => "handing back",
+        Job::PrHead => "on GitHub",
     }
 }
 
@@ -11126,6 +11823,7 @@ fn task_of(busy: &Busy, title: Option<&str>, project: &str) -> Task {
         Job::Graph => "graph",
         Job::Sandbox => "sandbox",
         Job::HandBack => "hand back",
+        Job::PrHead => "update",
         _ => "feature",
     };
     let detail = match title {
@@ -11153,7 +11851,7 @@ fn task_of(busy: &Busy, title: Option<&str>, project: &str) -> Task {
 /// What the toast says once feature `title` is made under `root`, naming
 /// the files `.features` was added to (`ignores`) from the root: whole
 /// paths are long enough to cut the last ones off.
-fn created_text(title: &str, root: &Path, ignores: &[PathBuf]) -> String {
+pub(crate) fn created_text(title: &str, root: &Path, ignores: &[PathBuf]) -> String {
     if ignores.is_empty() {
         return format!("Created \u{201c}{title}\u{201d}");
     }
@@ -11223,6 +11921,12 @@ fn still_checked(feature: &Feature, patch: Option<&str>) -> Result<(), String> {
 
 /// Drop repository `key` from `feature`, and the link it was the last of.
 fn drop_repo(feature: &mut Feature, key: &str, now: u64) {
+    // A review's pull request goes with its repository.
+    // An unnamed one, of a record from before, is its first repository's.
+    let first = feature.repos.first().is_some_and(|r| r.key() == key);
+    if let feature::Kind::PrReview(pulls) = &mut feature.kind {
+        pulls.retain(|p| !(p.repo == key || p.repo.is_empty() && first));
+    }
     if let Some(repo) = feature.repo(key).cloned() {
         feature.note_removed(repo.project, repo.name, now);
     }
@@ -11335,7 +12039,30 @@ fn new_feature_view(dialog: &NewFeatureDialog, project: String) -> NewFeatureVie
     let chosen = dialog.choosing.as_ref().map(|c| &c.repo);
     let of_chosen = chosen.and_then(|repo| dialog.bases.get(repo));
     let chosen_name = chosen.map_or("", |repo| repo.1.as_str());
-    let (root, root_failed) = if chosen.is_some() {
+    let review = dialog.review.as_ref();
+    let pulls_of = |key: &RepoKey| review.and_then(|r| r.pulls.get(key));
+    let (root, root_failed) = if let (Some(repo), Some(_)) = (chosen, review) {
+        match pulls_of(repo).and_then(|e| e.list.as_ref()) {
+            None => (
+                format!("listing the pull requests of {chosen_name}\u{2026}"),
+                false,
+            ),
+            Some(Err(why)) => (
+                format!("Couldn't list the pull requests of {chosen_name}: {why}"),
+                true,
+            ),
+            Some(Ok(all)) if all.is_empty() => {
+                (format!("{chosen_name} has no open pull request"), true)
+            }
+            Some(Ok(_)) if dialog.repos() == 0 => ("No pull request matches that".to_owned(), true),
+            Some(Ok(_)) => (format!("Open pull requests of {chosen_name}"), false),
+        }
+    } else if let Some(note) = review
+        .and_then(|r| r.note.as_ref())
+        .filter(|_| !dialog.picking)
+    {
+        (note.clone(), false)
+    } else if chosen.is_some() {
         match of_chosen.and_then(|e| e.branches.as_ref()) {
             None => (
                 format!("listing the branches of {chosen_name}\u{2026}"),
@@ -11358,6 +12085,37 @@ fn new_feature_view(dialog: &NewFeatureDialog, project: String) -> NewFeatureVie
         }
     };
     let branches = dialog.branch_rows();
+    let pull_rows = dialog.pull_rows();
+    let picked = chosen.and_then(|repo| pulls_of(repo)?.picked);
+    // A repository's row in a review: its pull request picked, or why none.
+    let pull_row = |key: RepoKey, name: String| {
+        let entry = pulls_of(&key);
+        let pull = entry.and_then(RepoPulls::picked_pull);
+        let place = match (pull, entry.and_then(|e| e.list.as_ref())) {
+            (Some(p), _) => {
+                let by = (!p.author.is_empty()).then(|| format!("@{}", p.author));
+                let parts: Vec<String> = (!p.title.is_empty())
+                    .then(|| p.title.clone())
+                    .into_iter()
+                    .chain(by)
+                    .collect();
+                parts.join(" \u{b7} ")
+            }
+            (None, None) => "listing pull requests\u{2026}".to_owned(),
+            (None, Some(Err(why))) => format!("can't list: {why}"),
+            (None, Some(Ok(all))) if all.is_empty() => "no open pull request".to_owned(),
+            (None, Some(Ok(_))) => "left out".to_owned(),
+        };
+        NewFeatureRepo {
+            name,
+            place,
+            touched: pull.is_some(),
+            fixed: false,
+            base: Some(
+                pull.map_or_else(|| "Pick\u{2026}".to_owned(), |p| format!("#{}", p.number)),
+            ),
+        }
+    };
     let current = chosen.and_then(|repo| dialog.repo_found(repo).map(|r| r.base.clone()));
     let repos = dialog
         .rows()
@@ -11365,6 +12123,31 @@ fn new_feature_view(dialog: &NewFeatureDialog, project: String) -> NewFeatureVie
         .filter_map(|row| {
             let fixed = dialog.fixed(row);
             Some(match row {
+                DialogRow::Home(_) | DialogRow::Linked(..) if review.is_some() => {
+                    let key = dialog.row_repo(row)?;
+                    let name = match &key.0 {
+                        Some(p) => {
+                            let other = dialog.others.iter().find(|o| o.project == *p)?;
+                            format!("{}: {}", other.name, key.1)
+                        }
+                        None => key.1.clone(),
+                    };
+                    pull_row(key, name)
+                }
+                DialogRow::Branch(i) if review.is_some() => {
+                    let p = pull_rows.get(i)?;
+                    let mut place = vec![format!("@{}", p.author), p.head_ref.clone()];
+                    if p.draft {
+                        place.push("draft".into());
+                    }
+                    NewFeatureRepo {
+                        name: format!("#{} {}", p.number, p.title),
+                        place: place.join(" \u{b7} "),
+                        touched: picked == Some(p.number),
+                        fixed: false,
+                        base: None,
+                    }
+                }
                 DialogRow::Home(i) => {
                     let Finding::Found(root) = &dialog.root else {
                         return None;
@@ -11429,13 +12212,19 @@ fn new_feature_view(dialog: &NewFeatureDialog, project: String) -> NewFeatureVie
     for other in dialog.others.iter().filter(|o| o.linked) {
         projects.push_str(&format!(" \u{b7} {}", other.name));
     }
+    let reviewing = review.is_some() && !dialog.picking;
     let mut keys = match (dialog.choosing.is_some(), dialog.multi()) {
+        (true, _) if review.is_some() => vec![("Tab", "next"), ("Enter", "pick")],
         (true, _) => vec![("Tab", "next"), ("Enter", "use branch")],
+        (false, true) if reviewing => vec![("Tab", "next"), ("Space", "pick or leave out")],
         (false, true) => vec![("Tab", "next"), ("Space", "tick")],
         (false, false) => Vec::new(),
     };
     if !dialog.picking && dialog.choosing.is_none() && dialog.base_row().is_some() {
-        keys.push(("Alt+B", "base branch"));
+        keys.push(match reviewing {
+            true => ("Alt+B", "pull request"),
+            false => ("Alt+B", "base branch"),
+        });
     }
     keys.push(if dialog.choosing.is_some() {
         ("Ctrl+Shift+L", "link project")
@@ -11454,16 +12243,30 @@ fn new_feature_view(dialog: &NewFeatureDialog, project: String) -> NewFeatureVie
     } else {
         ("Esc", "close")
     });
-    let heading = format!("New feature in \u{201c}{project}\u{201d}");
+    let heading = match review {
+        Some(Reviewing {
+            into: Some((_, title)),
+            ..
+        }) => format!("Pull requests of \u{201c}{title}\u{201d}"),
+        Some(_) => format!("Review pull requests in \u{201c}{project}\u{201d}"),
+        None => format!("New feature in \u{201c}{project}\u{201d}"),
+    };
+    let create = match review.and_then(|r| r.into.as_ref()) {
+        Some(_) => chrome::SAVE_PULLS,
+        None => chrome::NEW_FEATURE_BUTTONS[chrome::CREATE],
+    };
     NewFeatureView {
         heading,
         title: match dialog.choosing {
             Some(_) => dialog.query.line(),
             None => dialog.title.line(),
         },
-        hint: match dialog.choosing {
-            Some(_) => "Filter branches",
-            None => chrome::TITLE_HINT,
+        hint: match (&dialog.choosing, review) {
+            (Some(_), Some(_)) => "Filter pull requests",
+            (Some(_), None) => "Filter branches",
+            (None, Some(r)) if r.into.is_some() => chrome::RETITLE_HINT,
+            (None, Some(_)) => chrome::REVIEW_TITLE_HINT,
+            (None, None) => chrome::TITLE_HINT,
         },
         // The filter takes the keys while a branch row is selected.
         field_focus: dialog.choosing.is_some() || dialog.focus.is_none(),
@@ -11478,6 +12281,7 @@ fn new_feature_view(dialog: &NewFeatureDialog, project: String) -> NewFeatureVie
         error: dialog.error.clone(),
         hover: dialog.hover,
         keys,
+        create,
     }
 }
 
@@ -11603,6 +12407,12 @@ fn verify_line(feature: &Feature, ctx: RowCtx, running: Option<&str>) -> Option<
     if let Some(what) = running {
         return Some(inline(what));
     }
+    if feature.status == Status::Open
+        && feature.current() == Some(Stage::Verify)
+        && let Some(said) = ci_line(feature, ctx)
+    {
+        return Some(said);
+    }
     let current = feature.status == Status::Open && feature.current() == Some(Stage::Verify);
     if current && !ctx.checks {
         return Some(match ctx.all_skipped {
@@ -11643,6 +12453,13 @@ fn repo_line(feature: &Feature, repo: &feature::Repo, probe: Option<&Probe>) -> 
 /// the current stage, what waits on AI review, Code review and Manual
 /// test.
 fn stage_line(feature: &Feature, stage: Stage, state: &PanelState) -> Option<String> {
+    if stage == Stage::Ship
+        && feature.pull().is_some()
+        && feature.status == Status::Open
+        && feature.current() == Some(Stage::Ship)
+    {
+        return submit_line(feature, state.ctx);
+    }
     let current = stage_mark(feature, stage) == StageMark::Current;
     let agent = state.agent.as_deref().filter(|_| current);
     match stage {
@@ -11870,7 +12687,8 @@ fn current_line(feature: &Feature, stage: Stage, state: &LineState, now: u64) ->
                     format!("{} to decide", r.count(FindingState::Open))
                 }
                 Some(r) if r.count(FindingState::Fix) > 0 => {
-                    format!("{} to fix", r.count(FindingState::Fix))
+                    let wanted = words_in(ItemOf::Finding, r.posts).wanted;
+                    format!("{} {wanted}", r.count(FindingState::Fix))
                 }
                 Some(_) => "findings read".into(),
                 None => agent(),
@@ -11883,6 +12701,10 @@ fn current_line(feature: &Feature, stage: Stage, state: &LineState, now: u64) ->
         Stage::ManualTest => match state.manual_gate {
             Some((passed, total)) if total > 0 => format!("{passed} of {total} passed"),
             _ => String::new(),
+        },
+        Stage::Ship if feature.pull().is_some() => match feature.shipping.reviews.last() {
+            Some(r) => r.event.done().to_owned(),
+            None => "to submit".into(),
         },
         Stage::Ship => {
             let planned = ship_planned(feature, state.probe);
@@ -11979,6 +12801,522 @@ fn short_model(model: &str) -> &str {
 }
 
 /// A line in `tone`.
+/// The label of the button moving a pull request's review to its new head.
+const UPDATE_HEAD: &str = "Update to new head";
+
+/// How many things a review of `feature` would post now, as `ctx` read
+/// them: findings to comment, comments of Code review, Manual test's.
+fn to_post(feature: &Feature, ctx: RowCtx) -> usize {
+    let findings = (feature.review.iter().flat_map(|r| &r.findings))
+        .filter(|f| f.state == FindingState::Fix)
+        .count();
+    findings + ctx.comments + ctx.manual.failed.saturating_sub(ctx.manual.sent)
+}
+
+/// What Enter does on Ship's page of `feature`, a pull request's review:
+/// push the user's own fixes, post what waits, finish once a review went,
+/// else approve someone else's.
+fn submit_action(feature: &Feature, ctx: RowCtx) -> PanelOutcome {
+    use feature::pr_submit::Event;
+    if feature.pull().is_none() {
+        return PanelOutcome::Tick;
+    }
+    let works = feature.pulls().iter().any(|p| p.works_here());
+    let waiting = to_post(feature, ctx) > 0;
+    match () {
+        _ if works && !ctx.on_head => PanelOutcome::PushPr,
+        _ if waiting => PanelOutcome::SubmitReview(Event::Comment),
+        // Pushed, a review is up to the user: Finish needs none.
+        _ if works || !feature.shipping.reviews.is_empty() => PanelOutcome::FinishReview,
+        _ => PanelOutcome::SubmitReview(Event::Approve),
+    }
+}
+
+/// The buttons of Ship's page of `feature`, a pull request's review, at
+/// it: each way to submit it GitHub takes of it, its text, pushing the
+/// user's own, finishing.
+fn submit_actions(feature: &Feature, ctx: RowCtx) -> Vec<(PageButton, PanelOutcome)> {
+    use feature::pr_submit::Event;
+    if feature.pull().is_none() {
+        return Vec::new();
+    }
+    let works = feature.pulls().iter().any(|p| p.works_here());
+    // GitHub takes neither an approval nor a change request of one's own.
+    let mine = feature.pulls().iter().all(|p| p.mine);
+    let button = |label: &str, style| PageButton {
+        label: label.to_owned(),
+        style,
+    };
+    let mut out = Vec::new();
+    if works {
+        out.push((
+            button("Push\u{2026}", ButtonStyle::Plain),
+            PanelOutcome::PushPr,
+        ));
+    }
+    let events: &[Event] = match mine {
+        true => &[Event::Comment],
+        false => &[Event::Comment, Event::Approve, Event::RequestChanges],
+    };
+    for event in events {
+        out.push((
+            button(event.label(), ButtonStyle::Plain),
+            PanelOutcome::SubmitReview(*event),
+        ));
+    }
+    out.push((
+        button("Edit text", ButtonStyle::Quiet),
+        PanelOutcome::EditSummary,
+    ));
+    if works || !feature.shipping.reviews.is_empty() || ctx.on_head && to_post(feature, ctx) == 0 {
+        out.push((
+            button("Finish\u{2026}", ButtonStyle::Plain),
+            PanelOutcome::FinishReview,
+        ));
+    }
+    out
+}
+
+/// What Ship's line says of `feature`, a pull request's review.
+fn submit_line(feature: &Feature, ctx: RowCtx) -> Option<String> {
+    feature.pull()?;
+    let works = feature.pulls().iter().any(|p| p.works_here());
+    let mine = feature.pulls().iter().all(|p| p.mine);
+    let n = to_post(feature, ctx);
+    let last = feature.shipping.reviews.last();
+    Some(match () {
+        _ if works && !ctx.on_head => "fixes here not on GitHub: push them".into(),
+        _ if n > 0 => format!("{} to post", plural(n, "comment")),
+        _ => match last {
+            Some(r) => format!(
+                "{} on GitHub; finish, or wait for new commits",
+                r.event.done()
+            ),
+            None if mine => "nothing to post: finish".into(),
+            None => "nothing to post: approve, or finish".into(),
+        },
+    })
+}
+
+/// Ship's page of `feature`, a pull request's review: what goes, where, and
+/// the reviews submitted, holding the buttons of `submit_actions`.
+fn submit_sections(
+    feature: &Feature,
+    state: &PanelState,
+    actions: &[(PageButton, PanelOutcome)],
+    now: u64,
+) -> Vec<PageSection> {
+    let Some(pull) = feature.pull() else {
+        return Vec::new();
+    };
+    let notes = crate::review::Review {
+        comments: notes_of(state.probe).to_vec(),
+        ..crate::review::Review::default()
+    };
+    let items = feature::pr_submit::items(feature, &notes, &[]);
+    let mut said: Vec<CheckLine> = (items.iter())
+        .map(|item| {
+            let at = match &item.spot {
+                Some(feature::pr_submit::Spot {
+                    path,
+                    line: Some((_, n, _)),
+                }) => {
+                    format!("{path}:{n}")
+                }
+                Some(spot) => spot.path.clone(),
+                None => "in the text".to_owned(),
+            };
+            line(format!("{at} \u{b7} {}", item.title), CheckTone::Note)
+        })
+        .collect();
+    let manual = state
+        .ctx
+        .manual
+        .failed
+        .saturating_sub(state.ctx.manual.sent);
+    if manual > 0 {
+        let text = format!(
+            "in the text \u{b7} {} from Manual test",
+            plural(manual, "failure")
+        );
+        said.push(line(text, CheckTone::Note));
+    }
+    if said.is_empty() {
+        said.push(line("nothing to post yet", CheckTone::Note));
+    }
+    let mut out = vec![lines("To post", said)];
+    let held: Vec<usize> = (actions.iter().enumerate())
+        .filter(|(_, (b, o))| {
+            b.style != ButtonStyle::Primary
+                && matches!(o, PanelOutcome::SubmitReview(_) | PanelOutcome::EditSummary)
+        })
+        .map(|(i, _)| i)
+        .collect();
+    if !held.is_empty() {
+        out.push(PageSection::Toolbar {
+            groups: vec![(String::new(), held)],
+        });
+    }
+    let done: Vec<CheckLine> = (feature.shipping.reviews.iter().rev())
+        .map(|r| {
+            let short = r.commit.get(..7).unwrap_or(&r.commit);
+            let mut text = format!("{} {} at {short}", r.event.done(), projects::ago(now, r.at));
+            if r.inline + r.in_body > 0 {
+                text.push_str(&format!(
+                    " \u{b7} {}",
+                    plural(r.inline + r.in_body, "comment")
+                ));
+            }
+            line(text, CheckTone::Ready)
+        })
+        .collect();
+    if !done.is_empty() {
+        out.push(lines("Submitted", done));
+    }
+    if pull.works_here() && !state.ctx.on_head {
+        let text = format!("commits here not on {} yet", pull.head_ref);
+        out.push(lines("Branch", vec![line(text, CheckTone::Blocker)]));
+    }
+    out
+}
+
+/// `actions` with the button opening `feature`'s pull request in, for a pull
+/// request's review (Ctrl+Shift+O). Moving to its new head and finishing
+/// once it ended are what Enter does on its current stage's page, so they
+/// are there already (`row_action`), and the card holds them.
+///
+/// At Verify, at the head reviewed, the project's checks run here only
+/// when asked: "Run checks here" (Shift+R), as GitHub's are its Verify.
+fn with_pull_actions(
+    actions: &mut Vec<(PageButton, PanelOutcome)>,
+    feature: &Feature,
+    stage: Stage,
+    ctx: RowCtx,
+) {
+    if feature.pull().is_none() {
+        return;
+    }
+    if stage == Stage::Ship
+        && feature.current() == Some(Stage::Ship)
+        && feature.status == Status::Open
+        && feature.writer.is_none()
+    {
+        // No summary of an agent's: the review's text is the user's.
+        actions.retain(|(_, o)| *o != PanelOutcome::WriteSummary);
+        for (button, outcome) in submit_actions(feature, ctx) {
+            match actions.iter_mut().find(|(_, o)| *o == outcome) {
+                Some((had, _)) => had.label = button.label,
+                None => actions.push((button, outcome)),
+            }
+        }
+    }
+    let mut more = Vec::new();
+    let theirs = feature.pulls().iter().any(|p| !p.own());
+    if theirs
+        && feature.pr_ended().is_none()
+        && feature.status == Status::Open
+        && feature.writer.is_none()
+    {
+        let fixing = feature.pulls().iter().any(|p| p.fix_here);
+        let label = if fixing { COMMENT_INSTEAD } else { FIX_HERE };
+        more.push((label, ButtonStyle::Plain, PanelOutcome::FixHere));
+    }
+    if changes_pulls(feature) {
+        more.push((EDIT_PULLS, ButtonStyle::Plain, PanelOutcome::EditPulls));
+    }
+    for p in feature.pulls() {
+        more.push((
+            OPEN_PULL,
+            ButtonStyle::Quiet,
+            PanelOutcome::OpenPr(p.url.clone()),
+        ));
+    }
+    if stage == Stage::Verify
+        && ctx.on_head
+        && ctx.checks
+        && feature.current() == Some(Stage::Verify)
+        && feature.status == Status::Open
+    {
+        more.push((RUN_HERE, ButtonStyle::Plain, PanelOutcome::RunChecks));
+    }
+    for (label, style, outcome) in more {
+        if !actions.iter().any(|(_, o)| *o == outcome) {
+            let label = label.to_owned();
+            actions.push((PageButton { label, style }, outcome));
+        }
+    }
+}
+
+/// The label of the button running a review's checks here at its head.
+const RUN_HERE: &str = "Run checks here";
+
+/// Whether `feature`, a pull request's review, is at the head reviewed with
+/// nothing changed, as `reading` found its code: every worktree at it,
+/// clean.
+fn on_head(feature: &Feature, reading: Option<&Result<feature::patch::Reading, String>>) -> bool {
+    let (true, Some(Ok(reading))) = (feature.pull().is_some(), reading) else {
+        return false;
+    };
+    reading.dirty.is_empty()
+        && (feature.repos.iter()).all(|repo| {
+            let head = reading.heads.get(&repo.key());
+            feature
+                .pull_of(&repo.key())
+                .is_some_and(|p| head == Some(&p.head_sha))
+        })
+}
+
+/// What Enter does at Verify of `feature`, a pull request's review at the
+/// head reviewed: run the failed checks again on GitHub, open them there
+/// while they go (or when they can't run again from here), or mark it done
+/// by hand when GitHub has none (it is marked by itself once they pass).
+fn ci_action(feature: &Feature) -> PanelOutcome {
+    use crate::ci::CiState;
+    let Some(first) = feature.pull() else {
+        return PanelOutcome::Tick;
+    };
+    // The checks page of the first pull request whose checks hold it up.
+    let held = (feature.pulls().iter()).find(|p| {
+        p.checks()
+            .is_none_or(|c| c.iter().any(|c| c.state != CiState::Passed))
+    });
+    let open = PanelOutcome::OpenPr(held.unwrap_or(first).checks_url());
+    let Some(ci) = feature.pr_ci() else {
+        return open;
+    };
+    let rerun = (feature.pulls().iter())
+        .any(|p| !feature::pr::rerun_ids(p.checks().unwrap_or_default()).is_empty());
+    match ci.verdict() {
+        feature::pr::Verdict::Failed if rerun => PanelOutcome::RerunCi,
+        feature::pr::Verdict::Failed | feature::pr::Verdict::Running => open,
+        feature::pr::Verdict::None | feature::pr::Verdict::Passed => PanelOutcome::Tick,
+    }
+}
+
+/// What Verify's line says of `feature`'s checks on GitHub, a pull
+/// request's review at the head reviewed.
+fn ci_line(feature: &Feature, ctx: RowCtx) -> Option<String> {
+    feature.pull().filter(|_| ctx.on_head)?;
+    let Some(ci) = feature.pr_ci() else {
+        return Some("reading its checks on GitHub".into());
+    };
+    let checks: Vec<&feature::pr::CiCheck> =
+        feature.pr_checks().into_iter().map(|(_, c)| c).collect();
+    Some(match ci.verdict() {
+        feature::pr::Verdict::None => {
+            "no checks on GitHub: Mark done by hand, or run checks here".into()
+        }
+        feature::pr::Verdict::Running => format!(
+            "GitHub's checks running: {} of {} done",
+            ci.total - ci.running,
+            ci.total
+        ),
+        feature::pr::Verdict::Failed => {
+            let first = (checks.iter())
+                .find(|c| c.state != crate::ci::CiState::Passed)
+                .map_or("", |c| c.name.as_str());
+            format!("{} of {} failed on GitHub: {first}", ci.failed, ci.total)
+        }
+        feature::pr::Verdict::Passed => format!("all {} passed on GitHub", ci.total),
+    })
+}
+
+/// GitHub's checks of `feature`'s head, a pull request's review, on
+/// Verify's page: each with how it stands, and the button opening them
+/// there. Once code changed here, they say nothing of it.
+fn ci_sections(
+    feature: &Feature,
+    ctx: RowCtx,
+    actions: &[(PageButton, PanelOutcome)],
+) -> Vec<PageSection> {
+    let Some(pull) = feature.pull() else {
+        return Vec::new();
+    };
+    // With several pull requests, each check says whose it is.
+    let several = feature.pulls().len() > 1;
+    let mut said: Vec<CheckLine> = Vec::new();
+    for p in feature.pulls() {
+        let of = if several {
+            format!("#{} ", p.number)
+        } else {
+            String::new()
+        };
+        match p.checks() {
+            None => said.push(line(format!("{of}not read yet"), CheckTone::Note)),
+            Some([]) => said.push(line(format!("{of}none ran"), CheckTone::Note)),
+            Some(checks) => said.extend(checks.iter().map(|c| {
+                let (word, tone) = match c.state {
+                    crate::ci::CiState::Passed => ("passed", CheckTone::Ready),
+                    crate::ci::CiState::Failed => ("failed", CheckTone::Blocker),
+                    crate::ci::CiState::Running => ("running", CheckTone::Note),
+                    crate::ci::CiState::Unknown => ("no result", CheckTone::Blocker),
+                };
+                line(format!("{of}{}: {word}", c.name), tone)
+            })),
+        }
+    }
+    if !ctx.on_head {
+        let text = format!(
+            "of #{} at {}: the code here isn't that, so its checks run here",
+            pull.number,
+            pull.short_head()
+        );
+        said.insert(0, line(text, CheckTone::Note));
+    }
+    let mut out = vec![lines("GitHub checks", said)];
+    let held: Vec<usize> = (actions.iter().enumerate())
+        .filter(|(_, (b, o))| match o {
+            PanelOutcome::OpenPr(url) => {
+                *url == pull.checks_url() && b.style != ButtonStyle::Primary
+            }
+            PanelOutcome::RunChecks => b.label == RUN_HERE,
+            _ => false,
+        })
+        .map(|(i, _)| i)
+        .collect();
+    if !held.is_empty() {
+        out.push(PageSection::Toolbar {
+            groups: vec![(String::new(), held)],
+        });
+    }
+    out
+}
+
+/// The label of the button opening a pull request's review's pull request.
+const OPEN_PULL: &str = "Open pull request";
+/// The label of the button adding pull requests to a review, or leaving
+/// some out.
+const EDIT_PULLS: &str = "Pull requests\u{2026}";
+
+/// Whether review `feature` can add or leave out pull requests now: open
+/// here, not shipped, and not all ended.
+fn changes_pulls(feature: &Feature) -> bool {
+    !feature.pulls().is_empty()
+        && feature.pr_ended().is_none()
+        && feature.status == Status::Open
+        && feature.writer.is_none()
+        && linkable(feature)
+}
+/// The labels of the button fixing someone else's pull request here, and
+/// going back to commenting on it.
+const FIX_HERE: &str = "Fix here\u{2026}";
+const COMMENT_INSTEAD: &str = "Comment instead";
+
+/// What hovering button `i` of a pull request review's page says, with its
+/// key: one its pull request's card holds.
+fn pull_tip(feature: &Feature, stage: Stage, page: &chrome::StagePage, i: usize) -> Option<String> {
+    feature.pull()?;
+    let held = page.sections.iter().any(|s| {
+        matches!(s, PageSection::File { name, buttons, .. }
+            if name.starts_with("Pull request #") && buttons.contains(&i))
+    });
+    if !held {
+        return None;
+    }
+    let label = page.buttons.get(i)?.label.as_str();
+    Some(match label {
+        UPDATE_HEAD => "Fetch the new commits and review them, from Verify on (Enter)".to_owned(),
+        OPEN_PULL => {
+            // Verify's evidence and a fix plan take the key where they are.
+            let theirs =
+                opens_fix_plan(feature, stage) || (stage == Stage::Verify && has_evidence(feature));
+            match theirs {
+                true => "Open the pull request on GitHub".to_owned(),
+                false => "Open the pull request on GitHub (Ctrl+Shift+O)".to_owned(),
+            }
+        }
+        FIX_HERE => {
+            "Fix it here and push the fixes to its branch, instead of commenting (Alt+W)".to_owned()
+        }
+        COMMENT_INSTEAD => "Comment on it on GitHub instead of fixing it here (Alt+W)".to_owned(),
+        EDIT_PULLS => {
+            "Add pull requests of other repositories to the review, or leave some out (Alt+N)"
+                .to_owned()
+        }
+        _ => "Finish the review: nothing is posted (Enter)".to_owned(),
+    })
+}
+
+/// The card of `feature`'s pull request, for a pull request's review, at
+/// the top of each of its pages: whose it is, and how it stands on GitHub
+/// against its worktree, holding the buttons `with_pull_actions` gave.
+fn pull_card(
+    feature: &Feature,
+    pull: &feature::pr::PullRef,
+    actions: &[(PageButton, PanelOutcome)],
+    now: u64,
+) -> PageSection {
+    // The review's own buttons sit on its first pull request's card.
+    let first = feature
+        .pull()
+        .is_some_and(|p| p.number == pull.number && p.repo == pull.repo);
+    let state = if let Some(end) = pull.ended() {
+        let how = if end.merged() { "merged" } else { "closed" };
+        line(
+            format!("{how} on GitHub {}", projects::ago(now, end.at)),
+            CheckTone::Note,
+        )
+    } else if let Some(moved) = pull.moved() {
+        let text = match moved.base_ref == pull.base_ref {
+            true => format!(
+                "new commits on GitHub {}: at {}, reviewed at {}",
+                projects::ago(now, moved.at),
+                moved.head_sha.get(..7).unwrap_or(&moved.head_sha),
+                pull.short_head()
+            ),
+            false => format!(
+                "now into {} on GitHub, reviewed into {}",
+                moved.base_ref, pull.base_ref
+            ),
+        };
+        line(text, CheckTone::Blocker)
+    } else {
+        let by = match pull.author.is_empty() {
+            true => String::new(),
+            false => format!("by @{} \u{b7} ", pull.author),
+        };
+        let mine = match (pull.mine, pull.fix_here) {
+            (true, _) => " \u{b7} yours",
+            (false, true) => " \u{b7} fixing here",
+            (false, false) => "",
+        };
+        line(
+            format!(
+                "{by}{} into {} \u{b7} at {}{mine}",
+                pull.head_ref,
+                pull.base_ref,
+                pull.short_head()
+            ),
+            CheckTone::Note,
+        )
+    };
+    let buttons = (actions.iter().enumerate())
+        .filter(|(_, (_, o))| match o {
+            PanelOutcome::OpenPr(url) => *url == pull.url,
+            PanelOutcome::UpdatePrHead
+            | PanelOutcome::FinishReview
+            | PanelOutcome::FixHere
+            | PanelOutcome::EditPulls => first,
+            _ => false,
+        })
+        .map(|(i, _)| i)
+        .collect();
+    let name = match feature.pulls().len() > 1 {
+        true => {
+            let repo = feature
+                .repo(&pull.repo)
+                .map_or(pull.repo.as_str(), |r| r.name.as_str());
+            format!("Pull request #{} \u{b7} {repo}", pull.number)
+        }
+        false => format!("Pull request #{}", pull.number),
+    };
+    PageSection::File {
+        name,
+        state,
+        buttons,
+    }
+}
+
 fn line(text: impl Into<String>, tone: CheckTone) -> CheckLine {
     CheckLine {
         text: text.into(),
@@ -11999,7 +13337,10 @@ fn lines(label: &str, lines: Vec<CheckLine>) -> PageSection {
 fn place_action(label: Option<&str>, stage: Stage) -> Option<(PageButton, PanelOutcome)> {
     let label = label?.to_owned();
     let style = ButtonStyle::Plain;
-    Some((PageButton { label, style }, PanelOutcome::CycleMachine(stage)))
+    Some((
+        PageButton { label, style },
+        PanelOutcome::CycleMachine(stage),
+    ))
 }
 
 /// Whether `stage`'s agent runs on another machine: only there does it need
@@ -12013,7 +13354,10 @@ fn stop_action(feature: &Feature, stage: Stage) -> Option<(PageButton, PanelOutc
     stops_on_machine(feature, stage).then(|| {
         let label = "Stop agent".to_owned();
         let style = ButtonStyle::Plain;
-        (PageButton { label, style }, PanelOutcome::StopOnMachine(stage))
+        (
+            PageButton { label, style },
+            PanelOutcome::StopOnMachine(stage),
+        )
     })
 }
 
@@ -12365,9 +13709,16 @@ fn sandbox_sections(feature: &Feature, state: &PanelState) -> Vec<PageSection> {
     let seen = state.sandbox_seen.as_ref();
     let Some(run) = feature.sandbox.as_ref() else {
         let text = match seen {
-            Some(seen) => format!("none on {}: starting one brings the feature here", seen.name),
+            Some(seen) => format!(
+                "none on {}: starting one brings the feature here",
+                seen.name
+            ),
             // It goes where the page's button says, and copies what runs there.
-            None if state.place.as_deref().is_some_and(|place| place != "Runs here") => {
+            None if state
+                .place
+                .as_deref()
+                .is_some_and(|place| place != "Runs here") =>
+            {
                 "the project, on a copy of the containers and data of the machine it runs on"
                     .to_owned()
             }
@@ -12400,11 +13751,18 @@ fn sandbox_sections(feature: &Feature, state: &PanelState) -> Vec<PageSection> {
         if let Some(lan) = &state.sandbox_lan {
             let text = match lan.open.is_empty() {
                 true => format!("open to your network at {}, nothing listening yet", lan.ip),
-                false => format!("open to your network at {}: {}", lan.ip, ports_text(&lan.open)),
+                false => format!(
+                    "open to your network at {}: {}",
+                    lan.ip,
+                    ports_text(&lan.open)
+                ),
             };
             out.push(line(text, CheckTone::Blocker));
             if !lan.taken.is_empty() {
-                let text = format!("taken here, so not on the network: {}", ports_text(&lan.taken));
+                let text = format!(
+                    "taken here, so not on the network: {}",
+                    ports_text(&lan.taken)
+                );
                 out.push(line(text, CheckTone::Blocker));
             }
         }
@@ -12530,7 +13888,11 @@ fn items_running(items: &[(bool, String)], marked: &[usize], at_work: bool) -> V
     match (at_work, marked.is_empty()) {
         (false, _) => Vec::new(),
         (true, false) => marked.to_vec(),
-        (true, true) => items.iter().position(|(done, _)| !done).into_iter().collect(),
+        (true, true) => items
+            .iter()
+            .position(|(done, _)| !done)
+            .into_iter()
+            .collect(),
     }
 }
 
@@ -13060,6 +14422,7 @@ fn asked_now(feature: &Feature, round: &FixRound, id: &str, open: bool) -> Optio
                 FindingState::Sent if open => line("being fixed", CheckTone::Note),
                 FindingState::Sent => line("sent to Build", CheckTone::Note),
                 FindingState::Open | FindingState::Fix => line("raised again", CheckTone::Blocker),
+                FindingState::Posted => line("on GitHub", CheckTone::Note),
             })
         }
         Stage::CodeReview => {
@@ -13368,6 +14731,29 @@ fn ship_keys(
     keys
 }
 
+/// What a key does on Ship's page of `feature`, a pull request's review:
+/// Ctrl+Enter approves someone else's, Ctrl+Shift+Enter requests changes,
+/// Ctrl+E edits the review's text. Enter is the page's primary, as on any.
+fn submit_key(feature: &Feature, mods: &ModifiersState, sym: Keysym) -> Option<PanelOutcome> {
+    use feature::pr_submit::Event;
+    let pull = feature.pull()?;
+    if feature.status != Status::Open || feature.current() != Some(Stage::Ship) {
+        return None;
+    }
+    match sym {
+        Keysym::Return | Keysym::KP_Enter if mods.ctrl && !mods.alt && !pull.mine => {
+            Some(PanelOutcome::SubmitReview(match mods.shift {
+                true => Event::RequestChanges,
+                false => Event::Approve,
+            }))
+        }
+        Keysym::e | Keysym::E if mods.ctrl && !mods.shift && !mods.alt => {
+            Some(PanelOutcome::EditSummary)
+        }
+        _ => None,
+    }
+}
+
 /// `hints` with the keys of Ship's buttons in, before the tab's own, in
 /// place of any the page had on the same chord.
 fn with_ship_hints(
@@ -13380,6 +14766,27 @@ fn with_ship_hints(
 ) -> Vec<(String, String)> {
     let quiet = panel.keys || panel.note.is_some() || panel.focus == TabArea::Repos;
     if stage != Stage::Ship || quiet {
+        return hints;
+    }
+    // A pull request's review submits instead: its own keys.
+    if let Some(pull) = feature.pull() {
+        if feature.status != Status::Open || feature.current() != Some(Stage::Ship) {
+            return hints;
+        }
+        let mut keys = Vec::new();
+        if !pull.mine {
+            keys.push(("Ctrl+Enter".to_owned(), "approve\u{2026}".to_owned()));
+            keys.push((
+                "Ctrl+Shift+Enter".to_owned(),
+                "request changes\u{2026}".to_owned(),
+            ));
+        }
+        keys.push(("Ctrl+E".to_owned(), "edit text".to_owned()));
+        hints.retain(|(chord, _)| !keys.iter().any(|(k, _)| k == chord));
+        let at = (hints.iter())
+            .position(|(chord, _)| chord == "Ctrl+O")
+            .unwrap_or(hints.len());
+        hints.splice(at..at, keys);
         return hints;
     }
     let repo = ship_row_repo(panel, ships);
@@ -13599,7 +15006,11 @@ fn milestone_switch(feature: &Feature, stage: Stage) -> bool {
 /// The line saying how many failures of Manual test's criteria in `state`
 /// are not sent yet, then `when`: none while all are.
 fn failures_waiting(state: &PanelState, when: &str) -> Option<CheckLine> {
-    let n = state.ctx.manual.failed.saturating_sub(state.ctx.manual.sent);
+    let n = state
+        .ctx
+        .manual
+        .failed
+        .saturating_sub(state.ctx.manual.sent);
     if n == 0 {
         return None;
     }
@@ -13628,9 +15039,14 @@ fn stage_page(
     let mark = stage_mark(feature, stage);
     let mut sections = Vec::new();
     if let Some((text, wrong)) = &state.seen_note {
-        let tone = if *wrong { CheckTone::Blocker } else { CheckTone::Note };
+        let tone = if *wrong {
+            CheckTone::Blocker
+        } else {
+            CheckTone::Note
+        };
         sections.push(lines("Another machine", vec![line(text.clone(), tone)]));
     }
+    sections.extend((feature.pulls().iter()).map(|pull| pull_card(feature, pull, actions, now)));
     let status = match mark {
         StageMark::Later => {
             let before = Stage::ALL[stage_index(stage).saturating_sub(1)];
@@ -13775,6 +15191,7 @@ fn stage_page(
                 sections.extend(setup_section(feature, state));
             }
             Stage::Verify => {
+                sections.extend(ci_sections(feature, state.ctx, actions));
                 sections.extend(verify_sections(feature, state, actions, now));
                 sections.extend(setup_section(feature, state));
             }
@@ -13789,7 +15206,12 @@ fn stage_page(
             }
             Stage::ManualTest if mark == StageMark::Current => {
                 if state.criteria.is_empty() {
-                    let text = "no criteria in the brief: Mark done by hand";
+                    let text = match feature.pull() {
+                        Some(_) => {
+                            "no criteria in the pull request's description: Mark done by hand"
+                        }
+                        None => "no criteria in the brief: Mark done by hand",
+                    };
                     sections.push(lines("Criteria", vec![line(text, CheckTone::Note)]));
                 } else {
                     // Its status says how far they went; this, what holds it up.
@@ -13801,11 +15223,16 @@ fn stage_page(
                         )),
                         Some(_) => None,
                     };
-                    let mut said: Vec<CheckLine> =
-                        said.map(|text| line(text, CheckTone::Note)).into_iter().collect();
+                    let mut said: Vec<CheckLine> = said
+                        .map(|text| line(text, CheckTone::Note))
+                        .into_iter()
+                        .collect();
                     // Found while a round is open: the next one takes them.
                     if feature.fix_round.is_some() {
                         said.extend(failures_waiting(state, "for the current round"));
+                    }
+                    if feature.posts_review() {
+                        said.extend(failures_waiting(state, "for the review on GitHub"));
                     }
                     if fixes_unverified(feature, stage) {
                         let text = "fixes changed the code: marking it passed goes back to Verify";
@@ -13827,6 +15254,9 @@ fn stage_page(
                 if offers_sandbox(feature, stage) {
                     sections.extend(sandbox_sections(feature, state));
                 }
+            }
+            Stage::Ship if feature.pull().is_some() => {
+                sections.extend(submit_sections(feature, state, actions, now));
             }
             Stage::Ship => {
                 let check = check_lines(feature, state.probe, state.shipping, now);
@@ -13980,7 +15410,10 @@ fn review_toolbar(
                 format!("Approved \u{b7} locked: {}", lock_why(feature, by)),
                 true,
             ),
-            None => ("Approved \u{b7} only to read: Reopen to change it".to_owned(), true),
+            None => (
+                "Approved \u{b7} only to read: Reopen to change it".to_owned(),
+                true,
+            ),
         },
         false => crate::feature_diff::next_step(&gate, total, changed),
     };
@@ -14139,14 +15572,29 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 7] = [
                 "approve a brief or plan ready for review; make the fixes of a fix plan ready for review, or again once its agent stopped with fixes left; at AI review, send the findings to fix, with no plan unless you commented; at Verify, send its failures with no plan (Ctrl+Shift+Enter plans them first); at Plan review, write the final plan or use the plan as it is once every suggestion is decided (Ctrl+Shift+Enter asks the reviewer)",
             ),
             (
+                "Alt+W",
+                "reviewing someone else's pull request: fix it here and push the fixes from Ship, asking first, or comment on it again",
+            ),
+            (
+                "Alt+N",
+                "reviewing pull requests: add those of other repositories, or leave some out, in the review dialog",
+            ),
+            (
+                "Ctrl+Enter / Ctrl+Shift+Enter",
+                "reviewing someone else's pull request, on Ship's page: approve it, or request changes, after asking (Enter comments, or approves with nothing to post; Ctrl+E edits the review's text)",
+            ),
+            (
                 "Ctrl+Shift+O",
-                "Verify's evidence, or a fix plan already sent",
+                "Verify's evidence, or a fix plan already sent; else, reviewing a pull request, its page on GitHub",
             ),
             ("Tab", "Verify: to the checks, then Up / Down through them"),
             ("Enter", "a check: show its terminal"),
             ("r / s", "a check: run it again, stop it"),
             ("Space", "a check: skip it, or stop skipping it"),
-            ("Shift+R / Shift+S", "Verify: run the failed ones, stop all"),
+            (
+                "Shift+R / Shift+S",
+                "Verify: run the failed ones, stop all; reviewing a pull request at its head, run the checks here",
+            ),
             (
                 "Alt+E",
                 "Verify: fold the fix round cards, or open them all",
@@ -14184,7 +15632,10 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 7] = [
             ("Ctrl+R", "start the stage's agent afresh"),
             ("Ctrl+Shift+R", "show the stage's agent, or resume its chat"),
             ("Ctrl+Shift+A", "pick the stage's next agent"),
-            ("Ctrl+Shift+W", "pick the machine the stage's next agent or check run goes on"),
+            (
+                "Ctrl+Shift+W",
+                "pick the machine the stage's next agent or check run goes on",
+            ),
             ("Ctrl+Shift+Q", "stop the stage's agent on another machine"),
             (
                 "Ctrl+Shift+E",
@@ -14238,7 +15689,10 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 7] = [
             ),
             ("Up / Down", "previous or next criterion"),
             ("Home / End", "first or last criterion"),
-            ("Left / Right", "fold it to its line, or open it to its steps"),
+            (
+                "Left / Right",
+                "fold it to its line, or open it to its steps",
+            ),
             ("Alt+Left / Alt+Right", "fold all, or open all"),
             ("Alt+D / Alt+Shift+D", "fold those passed, or open them"),
             ("Alt+S / Alt+Shift+S", "fold those seen, or open them"),
@@ -14247,7 +15701,10 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 7] = [
                 "/ or Ctrl+F",
                 "search them: only those saying it show, open; Enter goes to them",
             ),
-            ("n / Shift+N", "go to the next place found, or the one before"),
+            (
+                "n / Shift+N",
+                "go to the next place found, or the one before",
+            ),
             (
                 "* / #",
                 "search for the text selected, else the word under the pointer",
@@ -14324,7 +15781,10 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 7] = [
     (
         "Code review",
         &[
-            ("Alt+1 / Alt+2", "show the code, or the fixes the comments asked for"),
+            (
+                "Alt+1 / Alt+2",
+                "show the code, or the fixes the comments asked for",
+            ),
             ("Up / Down", "fixes: previous or next comment"),
             ("Enter", "fixes: show the comment in the diff"),
             ("c / Del", "fixes: edit or delete a comment not sent yet"),
@@ -14470,8 +15930,14 @@ fn fold_tip(page: &chrome::StagePage, i: usize) -> Option<String> {
     let open = word == "Expand";
     let label = &page.buttons.get(i)?.label;
     let (what, key) = match label.as_str() {
-        "All" => ("every criterion", if open { "Alt+Right" } else { "Alt+Left" }),
-        "Done" => ("the criteria passed", if open { "Alt+Shift+D" } else { "Alt+D" }),
+        "All" => (
+            "every criterion",
+            if open { "Alt+Right" } else { "Alt+Left" },
+        ),
+        "Done" => (
+            "the criteria passed",
+            if open { "Alt+Shift+D" } else { "Alt+D" },
+        ),
         _ => (
             "the criteria seen: opened or marked",
             if open { "Alt+Shift+S" } else { "Alt+S" },
@@ -14566,7 +16032,11 @@ fn writers_tab_hints(
     }
     let searching = (panel.search.as_ref()).filter(|s| s.typing && shows_criteria(feature, stage));
     if let Some(search) = searching {
-        let esc = if search.query.is_empty() { "close" } else { "clear" };
+        let esc = if search.query.is_empty() {
+            "close"
+        } else {
+            "clear"
+        };
         return vec![hint("Enter", "to the criteria"), hint("Esc", esc)];
     }
     let mut hints = Vec::new();
@@ -14733,7 +16203,12 @@ fn writers_tab_hints(
                 }
             }
             if let Some(i) = item {
-                hints.extend(item_hints(i, decides, panel.armed.is_some()));
+                hints.extend(item_hints(
+                    i,
+                    decides,
+                    panel.armed.is_some(),
+                    feature.posts_review(),
+                ));
             }
             // Off a reviewer's card, `c` adds a comment of the user's own.
             if decides && diff_note.is_none() && item.is_none_or(Item::yours) {
@@ -14806,6 +16281,13 @@ fn writers_tab_hints(
             }
             if has_failed_checks(feature, stage) && feature.current() == Some(stage) && !going {
                 hints.push(hint("Shift+R", "run failed"));
+            } else if stage == Stage::Verify
+                && ctx.on_head
+                && ctx.checks
+                && feature.current() == Some(stage)
+                && !going
+            {
+                hints.push(hint("Shift+R", "run here"));
             }
             if stage == Stage::Verify && can_stop_checks(feature) {
                 hints.push(hint("Shift+S", "stop all"));
@@ -14825,6 +16307,22 @@ fn writers_tab_hints(
                 hints.push(hint("Ctrl+Shift+O", "evidence"));
             } else if opens_fix_plan(feature, stage) {
                 hints.push(hint("Ctrl+Shift+O", "fix plan"));
+            } else if feature.pull().is_some() {
+                hints.push(hint("Ctrl+Shift+O", "pull request"));
+            }
+            if let Some(pull) = feature
+                .pull()
+                .filter(|p| !p.own() && feature.status == Status::Open)
+            {
+                let what = if pull.fix_here {
+                    "comment instead"
+                } else {
+                    "fix here\u{2026}"
+                };
+                hints.push(hint("Alt+W", what));
+            }
+            if changes_pulls(feature) {
+                hints.push(hint("Alt+N", "pull requests\u{2026}"));
             }
             if offers_setup(feature, stage) {
                 if can_set_up(feature, ctx) {
@@ -15070,6 +16568,7 @@ fn tab_view(
             actions.extend(round_plan_actions(feature, stage, state.probe));
             actions.extend(place_action(state.place.as_deref(), stage));
             actions.extend(stop_action(feature, stage));
+            with_pull_actions(&mut actions, feature, stage, state.ctx);
             stage_page(feature, stage, state, &actions, now)
         }
     };
@@ -15198,36 +16697,35 @@ fn tab_view(
     let picked = (entries.get(at))
         .filter(|_| panel.expanded && focus == TabArea::Repos)
         .and_then(|e| panel.picked(feature, *e));
-    let review_switch = (stage == Stage::CodeReview
-        && !panel.keys
-        && crate::feature_diff::review_views(feature))
-    .then(|| {
-        let files = review_files(feature, state);
-        let (next, buttons) = review_toolbar(panel, feature, files, state.ctx);
-        chrome::ReviewSwitch {
-            view: panel.review_view_of(feature),
-            files,
-            fixes: fixes_word(feature, notes_of(state.probe)),
-            next,
-            buttons,
-        }
-    });
+    let review_switch =
+        (stage == Stage::CodeReview && !panel.keys && crate::feature_diff::review_views(feature))
+            .then(|| {
+                let files = review_files(feature, state);
+                let (next, buttons) = review_toolbar(panel, feature, files, state.ctx);
+                chrome::ReviewSwitch {
+                    view: panel.review_view_of(feature),
+                    files,
+                    fixes: fixes_word(feature, notes_of(state.probe)),
+                    next,
+                    buttons,
+                }
+            });
     let test_strip = (!panel.keys && shows_criteria(feature, stage))
-    .then(|| test_strip(&state.criteria))
-    .flatten()
-    .map(|mut strip| {
-        // Its count is of the places found, as the page lays them out:
-        // `Gerdr::feature_tab_view` gives it.
-        strip.search = panel.search.as_ref().map(|search| chrome::SearchBar {
-            query: search.query.line(),
-            placeholder: "Search the criteria".into(),
-            count: String::new(),
-            found: needle.is_none(),
-            focused: search.typing,
-            whole: search.whole,
+        .then(|| test_strip(&state.criteria))
+        .flatten()
+        .map(|mut strip| {
+            // Its count is of the places found, as the page lays them out:
+            // `Gerdr::feature_tab_view` gives it.
+            strip.search = panel.search.as_ref().map(|search| chrome::SearchBar {
+                query: search.query.line(),
+                placeholder: "Search the criteria".into(),
+                count: String::new(),
+                found: needle.is_none(),
+                focused: search.typing,
+                whole: search.whole,
+            });
+            strip
         });
-        strip
-    });
     let mut view = FeatureTabView {
         review_page: crate::feature_diff::review_page(panel, feature),
         review_switch,
@@ -15335,6 +16833,7 @@ pub(crate) mod tests {
     pub(crate) fn feature(slug: &str, repos: Vec<Repo>, done: usize) -> Feature {
         Feature {
             version: feature::VERSION,
+            kind: Default::default(),
             writer: None,
             slug: slug.into(),
             title: format!("Feature {slug}"),
@@ -15472,6 +16971,131 @@ pub(crate) mod tests {
         d
     }
 
+    #[test]
+    fn a_review_picks_a_pull_request_per_repository() {
+        let pull = |number: u64, head: &str| feature::pr::OpenPull {
+            number,
+            title: format!("Change {number}"),
+            head_ref: head.into(),
+            author: "bob".into(),
+            url: format!("https://github.com/o/r/pull/{number}"),
+            ..Default::default()
+        };
+        let repo = |name: &str| (None, name.to_owned());
+        let mut d = NewFeatureDialog::new("acme".into(), 1, "/work/api".into());
+        d.review = Some(Reviewing {
+            wanted: Some(("github.com".into(), "o/r".into(), 12)),
+            ..Reviewing::default()
+        });
+        d.found(Ok(root(&["api", "docs", "web"])));
+        assert_eq!(d.unlisted().len(), 3);
+        assert!(d.unlisted().is_empty());
+        d.pulls_listed(&repo("web"), Ok(vec![pull(30, "fix"), pull(31, "other")]));
+        // The one it was opened for, and the same branch's elsewhere.
+        d.pulls_listed(&repo("api"), Ok(vec![pull(12, "fix")]));
+        d.pulls_listed(&repo("docs"), Ok(Vec::new()));
+        let view = new_feature_view(&d, "Acme".into());
+        assert_eq!(view.heading, "Review pull requests in \u{201c}Acme\u{201d}");
+        assert_eq!(view.root, "#30 of web picked too: same branch fix");
+        // web listed after api's pick: the same.
+        let mut later = NewFeatureDialog::new("acme".into(), 1, "/work/api".into());
+        later.review = Some(Reviewing::default());
+        later.found(Ok(root(&["api", "web"])));
+        later.unlisted();
+        later.pulls_listed(&repo("api"), Ok(vec![pull(12, "fix")]));
+        later.pick_pull_of(&repo("api"), 12);
+        later.pulls_listed(&repo("web"), Ok(vec![pull(30, "fix")]));
+        let root_line = new_feature_view(&later, "Acme".into()).root;
+        assert_eq!(root_line, "#30 of web picked too: same branch fix");
+        let rows: Vec<(&str, bool, Option<&str>)> = (view.repos.iter())
+            .map(|r| (r.place.as_str(), r.touched, r.base.as_deref()))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("Change 12 \u{b7} @bob", true, Some("#12")),
+                ("no open pull request", false, Some("Pick\u{2026}")),
+                ("Change 30 \u{b7} @bob", true, Some("#30")),
+            ]
+        );
+        // Space leaves web out; again, it lists web's to pick from.
+        d.focus = Some(2);
+        dkey(&mut d, key(Keysym::space));
+        assert_eq!(
+            new_feature_view(&d, "Acme".into()).repos[2].place,
+            "left out"
+        );
+        dkey(&mut d, key(Keysym::space));
+        assert_eq!(d.rows().len(), 2);
+        dkey(&mut d, key(Keysym::Down));
+        dkey(&mut d, key(Keysym::Return));
+        assert!(d.choosing.is_none());
+        let Some(DialogOutcome::Review { picks, title, .. }) = dkey(&mut d, key(Keysym::Return))
+        else {
+            panic!("a review")
+        };
+        assert!(title.is_empty());
+        let picked: Vec<(&str, u64)> = picks.iter().map(|p| (p.repo.as_str(), p.number)).collect();
+        assert_eq!(picked, vec![("api", 12), ("web", 31)]);
+        assert_eq!(picks[0].main, PathBuf::from("/work/api"));
+        // None picked: nothing to review.
+        d.focus = Some(0);
+        dkey(&mut d, key(Keysym::space));
+        d.focus = Some(2);
+        dkey(&mut d, key(Keysym::space));
+        assert_eq!(dkey(&mut d, key(Keysym::Return)), None);
+        assert!(
+            d.error
+                .as_deref()
+                .is_some_and(|e| e.starts_with("Pick a pull request"))
+        );
+    }
+
+    #[test]
+    fn a_review_changes_its_pull_requests_in_the_dialog() {
+        let mut f = feature("pr-12", vec![repo("api", true)], 4);
+        f.title = "#12 Fix".into();
+        f.kind = feature::Kind::PrReview(vec![feature::pr::PullRef {
+            repo: "api".into(),
+            number: 12,
+            author: "bob".into(),
+            head_ref: "fix".into(),
+            url: "https://github.com/o/r/pull/12".into(),
+            ..Default::default()
+        }]);
+        let mut d = NewFeatureDialog::new("acme".into(), 1, "/work".into());
+        d.review = Some(Reviewing::default());
+        d.edit(&f);
+        d.found(Ok(root(&["api", "web"])));
+        // Picked before its list is in, and listed all the same; web, which
+        // it doesn't hold, isn't picked for its branch.
+        assert_eq!(d.unlisted().len(), 2);
+        let pull = |number: u64| feature::pr::OpenPull {
+            number,
+            author: "bob".into(),
+            head_ref: "fix".into(),
+            url: format!("https://github.com/o/r/pull/{number}"),
+            ..Default::default()
+        };
+        d.pulls_listed(&(None, "api".into()), Ok(vec![pull(12)]));
+        d.pulls_listed(&(None, "web".into()), Ok(vec![pull(30)]));
+        assert_eq!(
+            new_feature_view(&d, "Acme".into()).repos[1].place,
+            "left out"
+        );
+        let view = new_feature_view(&d, "Acme".into());
+        assert_eq!(view.heading, "Pull requests of \u{201c}#12 Fix\u{201d}");
+        assert_eq!(view.create, chrome::SAVE_PULLS);
+        assert_eq!(view.repos[0].place, "@bob");
+        assert_eq!(view.repos[0].base.as_deref(), Some("#12"));
+        let Some(DialogOutcome::Review { picks, into, .. }) = dkey(&mut d, key(Keysym::Return))
+        else {
+            panic!("a change")
+        };
+        assert_eq!(into.as_deref(), Some("pr-12"));
+        assert_eq!(picks.iter().map(|p| p.number).collect::<Vec<_>>(), vec![12]);
+    }
+
     /// A feature at Plan with an agent at work, written on another machine.
     fn written_elsewhere() -> Feature {
         let mut f = feature("f", vec![repo("api", true)], 1);
@@ -15497,7 +17121,10 @@ pub(crate) mod tests {
         let mut mine = f.clone();
         mine.writer = None;
         let own = page_actions(&mine, Stage::Plan, RowCtx::default());
-        assert!(own.iter().all(|(_, o)| *o != PanelOutcome::TakeOver), "{own:?}");
+        assert!(
+            own.iter().all(|(_, o)| *o != PanelOutcome::TakeOver),
+            "{own:?}"
+        );
         // All else is the same: a press on it moves the feature here first.
         let without: Vec<_> = (actions.iter())
             .filter(|(_, o)| *o != PanelOutcome::TakeOver)
@@ -15514,7 +17141,10 @@ pub(crate) mod tests {
         let entry = RepoEntry::Held(0);
         let mut mine = f.clone();
         mine.writer = None;
-        assert_eq!(entry_buttons(&f, &[], entry), entry_buttons(&mine, &[], entry));
+        assert_eq!(
+            entry_buttons(&f, &[], entry),
+            entry_buttons(&mine, &[], entry)
+        );
     }
 
     #[test]
@@ -15523,7 +17153,10 @@ pub(crate) mod tests {
         f.status = Status::Done;
         assert_eq!(remove_label(&f), "");
         let actions = page_actions(&f, Stage::Plan, RowCtx::default());
-        assert!(actions.iter().all(|(_, o)| *o != PanelOutcome::TakeOver), "{actions:?}");
+        assert!(
+            actions.iter().all(|(_, o)| *o != PanelOutcome::TakeOver),
+            "{actions:?}"
+        );
     }
 
     #[test]
@@ -15575,7 +17208,16 @@ pub(crate) mod tests {
         let mut seen = f.clone();
         seen.writer = Some("m1".into());
         assert!(!offers(&seen));
-        let pressed = panel.key(&mods, Keysym::E, &seen, &[], RowCtx::default(), &[], &[], &[]);
+        let pressed = panel.key(
+            &mods,
+            Keysym::E,
+            &seen,
+            &[],
+            RowCtx::default(),
+            &[],
+            &[],
+            &[],
+        );
         assert_eq!(pressed, Some(PanelOutcome::TakeOver));
     }
 
@@ -15611,8 +17253,14 @@ pub(crate) mod tests {
         ] {
             assert!(offered.contains(&yes), "{offered:?}");
         }
-        assert!(!offered.contains(&PanelOutcome::StartSandbox), "{offered:?}");
-        assert!(!offered.contains(&PanelOutcome::RemoveSandbox), "{offered:?}");
+        assert!(
+            !offered.contains(&PanelOutcome::StartSandbox),
+            "{offered:?}"
+        );
+        assert!(
+            !offered.contains(&PanelOutcome::RemoveSandbox),
+            "{offered:?}"
+        );
         // Not running there: nothing to show. A new one starts where it is pressed.
         let off = page_outcomes(&sandbox_elsewhere(false), Stage::ManualTest);
         assert!(!off.contains(&PanelOutcome::OpenSandbox), "{off:?}");
@@ -17277,7 +18925,12 @@ pub(crate) mod tests {
             .collect();
         assert_eq!(titles, ["Which?", "How?"]);
         // Its run shows as no card of its own: the suggestions say it.
-        assert!(!page.sections.iter().any(|s| matches!(s, PageSection::Round(_))));
+        assert!(
+            !page
+                .sections
+                .iter()
+                .any(|s| matches!(s, PageSection::Round(_)))
+        );
         assert_eq!(
             crate::feature_agents::gate_of(&f, |_| None).map(|g| g.2),
             Some(crate::feature_agents::GateKind::Suggestions { open: 2 })
@@ -18258,14 +19911,7 @@ pub(crate) mod tests {
             ..PanelState::default()
         };
         let notes = notes_of(state.probe);
-        let actions = stage_actions(
-            &f,
-            Stage::CodeReview,
-            RowCtx::default(),
-            &[],
-            &[],
-            notes,
-        );
+        let actions = stage_actions(&f, Stage::CodeReview, RowCtx::default(), &[], &[], notes);
         let page = stage_page(&f, Stage::CodeReview, &state, &actions, 2_000);
         // The round's card holds what acts on its plan, as ever.
         let Some(PageSection::Round(card)) = page.sections.get(1) else {
@@ -18288,7 +19934,11 @@ pub(crate) mod tests {
         assert_eq!(cards[0].stripe, None);
         assert_eq!(cards[1].state, "sent to Build");
         assert_eq!(cards[1].stripe, Some(CardStripe::Sent));
-        assert!(cards[1].place.starts_with("C1 \u{b7} "), "{}", cards[1].place);
+        assert!(
+            cards[1].place.starts_with("C1 \u{b7} "),
+            "{}",
+            cards[1].place
+        );
         assert_eq!(cards[2].state, "fix made");
         assert!(cards[2].made);
         // Last, whatever comes before it, the plan to read.
@@ -18423,10 +20073,13 @@ pub(crate) mod tests {
             },
         ];
         let mut probe = fixes_probe(vec![sent("C1", "src/b.rs", "Latest")], false);
-        probe.docs.old_notes = BTreeMap::from([(1, vec![
-            sent("C1", "src/a.rs", "Old"),
-            sent("C2", "src/a.rs", "Older"),
-        ])]);
+        probe.docs.old_notes = BTreeMap::from([(
+            1,
+            vec![
+                sent("C1", "src/a.rs", "Old"),
+                sent("C2", "src/a.rs", "Older"),
+            ],
+        )]);
         let state = PanelState {
             probe: Some(&probe),
             ..PanelState::default()
@@ -21130,7 +22783,13 @@ pub(crate) mod tests {
             comment: false,
         };
         let rows = vec![
-            row("AC-1", "Saves", "Given a draft, when I save, then it lists", None, true),
+            row(
+                "AC-1",
+                "Saves",
+                "Given a draft, when I save, then it lists",
+                None,
+                true,
+            ),
             row(
                 "AC-2",
                 "Exports",
@@ -21182,7 +22841,11 @@ pub(crate) mod tests {
                 ("Then", "it lists".to_owned()),
             ]
         );
-        assert!(cards.iter().all(|c| c.sheet.as_ref().is_some_and(|s| !s.hidden)));
+        assert!(
+            cards
+                .iter()
+                .all(|c| c.sheet.as_ref().is_some_and(|s| !s.hidden))
+        );
         // The row over them: Collapse and Expand, each all, done and seen.
         let groups = (page.sections.iter())
             .find_map(|s| match s {
@@ -21213,7 +22876,9 @@ pub(crate) mod tests {
         done.tick(100, "you", None);
         assert_eq!(stage_mark(&done, Stage::ManualTest), StageMark::Done);
         let actions = stage_actions(&done, Stage::ManualTest, ctx, &[], &rows, &[]);
-        let folds = actions.iter().filter(|(_, o)| matches!(o, PanelOutcome::FoldCriteria(..)));
+        let folds = actions
+            .iter()
+            .filter(|(_, o)| matches!(o, PanelOutcome::FoldCriteria(..)));
         assert_eq!(folds.count(), 6);
     }
 
@@ -21227,20 +22892,19 @@ pub(crate) mod tests {
             ..FeaturePanel::default()
         };
         let slugs = vec!["m".to_owned()];
-        let mut hit = |mods: ModifiersState, sym| {
-            panel.key(&mods, sym, &f, &slugs, ctx, &[], &[], &[])
-        };
+        let mut hit =
+            |mods: ModifiersState, sym| panel.key(&mods, sym, &f, &slugs, ctx, &[], &[], &[]);
         let none = ModifiersState::default();
-        assert_eq!(hit(none, Keysym::Left), Some(PanelOutcome::FoldCriterion(2, false)));
-        assert_eq!(hit(none, Keysym::Right), Some(PanelOutcome::FoldCriterion(2, true)));
-        let alt = ModifiersState {
-            alt: true,
-            ..none
-        };
-        let alt_shift = ModifiersState {
-            shift: true,
-            ..alt
-        };
+        assert_eq!(
+            hit(none, Keysym::Left),
+            Some(PanelOutcome::FoldCriterion(2, false))
+        );
+        assert_eq!(
+            hit(none, Keysym::Right),
+            Some(PanelOutcome::FoldCriterion(2, true))
+        );
+        let alt = ModifiersState { alt: true, ..none };
+        let alt_shift = ModifiersState { shift: true, ..alt };
         let fold = PanelOutcome::FoldCriteria;
         assert_eq!(hit(alt, Keysym::Left), Some(fold(FoldScope::All, false)));
         assert_eq!(hit(alt, Keysym::Right), Some(fold(FoldScope::All, true)));
@@ -21354,7 +23018,10 @@ pub(crate) mod tests {
         assert_eq!(labels(cards[1]), ["Pass", "Fail\u{2026}"]);
         assert_eq!(labels(cards[2]), ["Edit note\u{2026}", "Pass", "Fail"]);
         let styles = |card: &FindingCard| -> Vec<ButtonStyle> {
-            card.buttons.iter().map(|b| page.buttons[*b].style).collect()
+            card.buttons
+                .iter()
+                .map(|b| page.buttons[*b].style)
+                .collect()
         };
         assert_eq!(styles(cards[0]), [ButtonStyle::Plain, ButtonStyle::Plain]);
         assert_eq!(styles(cards[1]), [ButtonStyle::Passed, ButtonStyle::Plain]);
@@ -21372,7 +23039,11 @@ pub(crate) mod tests {
         );
         assert_eq!(
             outcomes(cards[2]),
-            [on(Outcome::Write(2)), on(Outcome::Toggle(2)), on(Outcome::Clear(2))]
+            [
+                on(Outcome::Write(2)),
+                on(Outcome::Toggle(2)),
+                on(Outcome::Clear(2))
+            ]
         );
         // The title alone, until selected.
         assert_eq!(cards[0].title, "C");
@@ -21529,10 +23200,7 @@ pub(crate) mod tests {
         // The counts go in the bar over the page, not its status.
         assert!(page.status.is_none());
         let strip = test_strip(&rows).unwrap();
-        assert_eq!(
-            (strip.passed, strip.failed, strip.untested),
-            (1, 2, 1)
-        );
+        assert_eq!((strip.passed, strip.failed, strip.untested), (1, 2, 1));
         assert_eq!(
             strip.text,
             "1 passed \u{b7} 2 failed \u{b7} 1 untested \u{b7} 1 fix made"
@@ -21572,9 +23240,7 @@ pub(crate) mod tests {
         let actions = page_actions(&checked, Stage::ManualTest, ctx);
         assert!(!(actions.iter()).any(|(_, o)| *o == PanelOutcome::MakeVerifyFixes));
         assert!(!labels(&checked).contains(&"Plan Verify fixes".to_owned()));
-        assert!(
-            (actions.iter()).any(|(_, o)| *o == PanelOutcome::Manual(Outcome::SendFailures))
-        );
+        assert!((actions.iter()).any(|(_, o)| *o == PanelOutcome::Manual(Outcome::SendFailures)));
     }
 
     #[test]
@@ -21626,9 +23292,10 @@ pub(crate) mod tests {
         ));
         // Its sandbox stays too.
         assert!((actions.iter()).any(|(_, o)| *o == PanelOutcome::StartSandbox));
-        assert!((page.sections.iter()).any(
-            |s| matches!(s, PageSection::Lines { label, .. } if label == "Sandbox")
-        ));
+        assert!(
+            (page.sections.iter())
+                .any(|s| matches!(s, PageSection::Lines { label, .. } if label == "Sandbox"))
+        );
         // Nothing moves it on: only reopening sends what fails.
         assert!(!(actions.iter()).any(|(_, o)| matches!(
             o,
@@ -21656,7 +23323,10 @@ pub(crate) mod tests {
             go(Keysym::space).0,
             Some(PanelOutcome::Manual(Outcome::Toggle(1)))
         );
-        assert_eq!(go(Keysym::f).0, Some(PanelOutcome::Manual(Outcome::Write(1))));
+        assert_eq!(
+            go(Keysym::f).0,
+            Some(PanelOutcome::Manual(Outcome::Write(1)))
+        );
         assert_eq!(
             go(Keysym::Delete).0,
             Some(PanelOutcome::Manual(Outcome::Clear(1)))
@@ -21795,9 +23465,10 @@ pub(crate) mod tests {
             PageSection::Lines { label, lines, .. } if label == "Criteria"
                 && lines.first().is_some_and(|l| l.text == "1 failure waits for Manual test")
         )));
-        assert!((page.sections.iter()).any(
-            |s| matches!(s, PageSection::Lines { label, .. } if label == "Sandbox")
-        ));
+        assert!(
+            (page.sections.iter())
+                .any(|s| matches!(s, PageSection::Lines { label, .. } if label == "Sandbox"))
+        );
         let mut panel = FeaturePanel {
             project: "acme".into(),
             slug: "m".into(),
@@ -24923,7 +26594,10 @@ pub(crate) mod tests {
             card_line(&f, Some(Stage::Plan), &state, 2_000)
         };
         let on = line(Some(("on box".to_owned(), false)));
-        assert!(on.starts_with("Plan \u{b7} ") && on.ends_with(" \u{b7} on box"), "{on}");
+        assert!(
+            on.starts_with("Plan \u{b7} ") && on.ends_with(" \u{b7} on box"),
+            "{on}"
+        );
         assert_eq!(
             line(Some(("box can't be reached".to_owned(), true))),
             "Plan \u{b7} box can't be reached"
@@ -25362,7 +27036,9 @@ pub(crate) mod tests {
         let got = plan_review::import(
             &mut review,
             1,
-            raws(r#"{"suggestions": [{"kind": "question", "plan": "M1", "title": "A?", "why": "w"}]}"#),
+            raws(
+                r#"{"suggestions": [{"kind": "question", "plan": "M1", "title": "A?", "why": "w"}]}"#,
+            ),
         );
         plan_review::keep_run(
             &mut review,
@@ -25379,7 +27055,9 @@ pub(crate) mod tests {
         f.plan_review = Some(review);
         let mut read = probe(None);
         read.docs.written.insert(stage);
-        read.docs.previews.insert(stage, std::sync::Arc::new(Vec::new()));
+        read.docs
+            .previews
+            .insert(stage, std::sync::Arc::new(Vec::new()));
         let state = PanelState {
             probe: Some(&read),
             ctx: wrote(&[stage]),
@@ -25390,7 +27068,12 @@ pub(crate) mod tests {
         assert_eq!(actions[0].1, PanelOutcome::PlanChanges);
         let page = stage_page(&f, stage, &state, &actions, 1_120);
         // The suggestion cards say it all: no card per review run.
-        assert!(!page.sections.iter().any(|s| matches!(s, PageSection::Round(_))));
+        assert!(
+            !page
+                .sections
+                .iter()
+                .any(|s| matches!(s, PageSection::Round(_)))
+        );
         let Some(PageSection::File { buttons, .. }) =
             (page.sections.iter()).find(|s| matches!(s, PageSection::File { .. }))
         else {
@@ -25494,5 +27177,543 @@ pub(crate) mod tests {
         let mut panel = FeaturePanel::default();
         panel.toggle_rounds(&f, stage);
         assert_eq!(panel.fix_rounds_flipped, BTreeSet::from([2]));
+    }
+}
+
+#[cfg(test)]
+mod pr_page_tests {
+    use super::{tests::feature, tests::repo, *};
+    use crate::feature::{
+        Kind,
+        pr::{PullRef, Remote},
+    };
+
+    /// A review of pull request 12 at Verify, its worktree at `abc1234…`.
+    fn review() -> Feature {
+        let mut f = feature("pr-12", vec![repo("api", true)], 4);
+        f.kind = Kind::PrReview(vec![PullRef {
+            repo: "api".into(),
+            host: "github.com".into(),
+            slug: "o/api".into(),
+            number: 12,
+            url: "https://github.com/o/api/pull/12".into(),
+            author: "bob".into(),
+            base_ref: "main".into(),
+            head_ref: "fix".into(),
+            head_sha: "abc1234567".into(),
+            ..PullRef::default()
+        }]);
+        f
+    }
+
+    fn github(f: &mut Feature, head: &str, state: &str) {
+        let Some(pull) = f.pulls_mut().first_mut() else {
+            unreachable!()
+        };
+        pull.take_remote(Remote {
+            at: 1_900,
+            head_sha: head.into(),
+            base_ref: "main".into(),
+            state: state.into(),
+            checks: Vec::new(),
+        });
+    }
+
+    fn card(page: &chrome::StagePage) -> (&CheckLine, Vec<&str>) {
+        page.sections
+            .iter()
+            .find_map(|s| match s {
+                PageSection::File {
+                    name,
+                    state,
+                    buttons,
+                } if name == "Pull request #12" => {
+                    let labels = (buttons.iter())
+                        .map(|i| page.buttons[*i].label.as_str())
+                        .collect();
+                    Some((state, labels))
+                }
+                _ => None,
+            })
+            .expect("the pull request's card")
+    }
+
+    fn page_of(f: &Feature, stage: Stage) -> chrome::StagePage {
+        let mut actions = page_actions(f, stage, RowCtx::default());
+        with_pull_actions(&mut actions, f, stage, RowCtx::default());
+        stage_page(f, stage, &PanelState::default(), &actions, 2_000)
+    }
+
+    #[test]
+    fn its_card_says_whose_it_is_and_opens_it() {
+        let f = review();
+        let page = page_of(&f, Stage::Verify);
+        let (state, buttons) = card(&page);
+        assert_eq!(state.text, "by @bob · fix into main · at abc1234");
+        assert_eq!(buttons, vec![FIX_HERE, EDIT_PULLS, OPEN_PULL]);
+        let ctx = RowCtx::default();
+        assert_ne!(
+            page_enter(&f, Stage::Verify, ctx),
+            Some(PanelOutcome::UpdatePrHead)
+        );
+        assert_eq!(feature_agents_gate(&f), None);
+    }
+
+    #[test]
+    fn each_pull_request_has_its_card() {
+        let mut f = review();
+        f.repos.push(repo("web", true));
+        let Kind::PrReview(pulls) = &mut f.kind else {
+            unreachable!()
+        };
+        pulls.push(PullRef {
+            repo: "web".into(),
+            number: 13,
+            url: "https://github.com/o/web/pull/13".into(),
+            author: "bob".into(),
+            head_sha: "abc1234567".into(),
+            ..PullRef::default()
+        });
+        let page = page_of(&f, Stage::Verify);
+        let cards: Vec<(&str, Vec<&str>)> = (page.sections.iter())
+            .filter_map(|s| match s {
+                PageSection::File { name, buttons, .. } if name.starts_with("Pull request") => {
+                    let labels = buttons.iter().map(|i| page.buttons[*i].label.as_str());
+                    Some((name.as_str(), labels.collect()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            cards,
+            vec![
+                (
+                    "Pull request #12 \u{b7} api",
+                    vec![FIX_HERE, EDIT_PULLS, OPEN_PULL]
+                ),
+                ("Pull request #13 \u{b7} web", vec![OPEN_PULL]),
+            ]
+        );
+        // The second moving is new commits for the whole review.
+        let Some(pull) = f.pulls_mut().get_mut(1) else {
+            unreachable!()
+        };
+        pull.take_remote(Remote {
+            at: 1_900,
+            head_sha: "fff0000999".into(),
+            state: "OPEN".into(),
+            ..Remote::default()
+        });
+        let ctx = RowCtx::default();
+        assert_eq!(
+            page_enter(&f, Stage::Verify, ctx),
+            Some(PanelOutcome::UpdatePrHead)
+        );
+    }
+
+    #[test]
+    fn new_commits_on_github_wait_for_enter() {
+        let mut f = review();
+        github(&mut f, "fff0000999", "OPEN");
+        let ctx = RowCtx::default();
+        assert_eq!(
+            page_enter(&f, Stage::Verify, ctx),
+            Some(PanelOutcome::UpdatePrHead)
+        );
+        let page = page_of(&f, Stage::Verify);
+        let (state, buttons) = card(&page);
+        assert_eq!(state.tone, CheckTone::Blocker);
+        assert!(
+            state.text.contains("at fff0000, reviewed at abc1234"),
+            "{}",
+            state.text
+        );
+        assert_eq!(buttons, vec![UPDATE_HEAD, FIX_HERE, EDIT_PULLS, OPEN_PULL]);
+        assert_eq!(
+            pull_tip(&f, Stage::Verify, &page, 0).as_deref(),
+            Some("Fetch the new commits and review them, from Verify on (Enter)")
+        );
+        // A done stage's page only says so: Enter there goes elsewhere.
+        let page = page_of(&f, Stage::Build);
+        assert_eq!(card(&page).1, vec![FIX_HERE, EDIT_PULLS, OPEN_PULL]);
+        assert_eq!(
+            feature_agents_gate(&f),
+            Some((
+                Stage::Verify,
+                1_900,
+                crate::feature_agents::GateKind::NewHead
+            ))
+        );
+    }
+
+    #[test]
+    fn a_merged_one_is_to_finish() {
+        let mut f = review();
+        github(&mut f, "fff0000999", "MERGED");
+        let ctx = RowCtx::default();
+        assert_eq!(
+            page_enter(&f, Stage::Verify, ctx),
+            Some(PanelOutcome::FinishReview)
+        );
+        let page = page_of(&f, Stage::Verify);
+        let (state, buttons) = card(&page);
+        assert!(state.text.starts_with("merged on GitHub"), "{}", state.text);
+        assert_eq!(buttons, vec!["Finish\u{2026}", OPEN_PULL]);
+        assert_eq!(
+            feature_agents_gate(&f),
+            Some((
+                Stage::Verify,
+                1_900,
+                crate::feature_agents::GateKind::PrEnded { merged: true }
+            ))
+        );
+    }
+
+    fn with_checks(f: &mut Feature, states: &[crate::ci::CiState]) {
+        let Some(pull) = f.pulls_mut().first_mut() else {
+            unreachable!()
+        };
+        let checks = (states.iter().enumerate())
+            .map(|(k, state)| crate::feature::pr::CiCheck {
+                name: format!("job {k}"),
+                state: *state,
+                link: Some(format!("https://github.com/o/api/actions/runs/5/job/{k}")),
+            })
+            .collect();
+        pull.take_remote(Remote {
+            at: 1_900,
+            head_sha: "abc1234567".into(),
+            base_ref: "main".into(),
+            state: "OPEN".into(),
+            checks,
+        });
+    }
+
+    #[test]
+    fn at_its_head_verify_goes_by_githubs_checks() {
+        use crate::ci::CiState::{Failed, Passed, Running};
+        let mut f = review();
+        let here = RowCtx {
+            checks: true,
+            ..RowCtx::default()
+        };
+        // Not read at its head: its checks run here, as for a feature.
+        assert_eq!(
+            page_enter(&f, Stage::Verify, here),
+            Some(PanelOutcome::RunChecks)
+        );
+        let ctx = RowCtx {
+            on_head: true,
+            ..here
+        };
+        let checks = PanelOutcome::OpenPr("https://github.com/o/api/pull/12/checks".into());
+        assert_eq!(page_enter(&f, Stage::Verify, ctx), Some(checks.clone()));
+        assert_eq!(
+            ci_line(&f, ctx).as_deref(),
+            Some("reading its checks on GitHub")
+        );
+        with_checks(&mut f, &[Passed, Running]);
+        assert_eq!(page_enter(&f, Stage::Verify, ctx), Some(checks));
+        assert_eq!(
+            verify_line(&f, ctx, None).as_deref(),
+            Some("GitHub's checks running: 1 of 2 done")
+        );
+        with_checks(&mut f, &[Passed, Failed]);
+        assert_eq!(
+            page_enter(&f, Stage::Verify, ctx),
+            Some(PanelOutcome::RerunCi)
+        );
+        assert_eq!(
+            ci_line(&f, ctx).as_deref(),
+            Some("1 of 2 failed on GitHub: job 1")
+        );
+        // Its checks can run here too, asked: held over its list.
+        let mut actions = page_actions(&f, Stage::Verify, ctx);
+        with_pull_actions(&mut actions, &f, Stage::Verify, ctx);
+        let run = actions
+            .iter()
+            .position(|(b, _)| b.label == RUN_HERE)
+            .unwrap();
+        assert_eq!(actions[run].1, PanelOutcome::RunChecks);
+        let sections = ci_sections(&f, ctx, &actions);
+        assert!(matches!(&sections[0], PageSection::Lines { label, lines }
+            if label == "GitHub checks" && lines[1].text == "job 1: failed"));
+        assert!(
+            matches!(&sections[1], PageSection::Toolbar { groups } if groups[0].1 == vec![run])
+        );
+        with_checks(&mut f, &[]);
+        assert_eq!(page_enter(&f, Stage::Verify, ctx), Some(PanelOutcome::Tick));
+    }
+
+    #[test]
+    fn only_its_head_clean_counts_as_at_it() {
+        let f = review();
+        let reading = |head: &str, dirty: &[&str]| {
+            Ok(crate::feature::patch::Reading {
+                heads: [("api".to_owned(), head.to_owned())].into(),
+                dirty: dirty.iter().map(|d| (*d).to_owned()).collect(),
+                ..Default::default()
+            })
+        };
+        assert!(on_head(&f, Some(&reading("abc1234567", &[]))));
+        assert!(!on_head(&f, Some(&reading("abc1234567", &["api"]))));
+        assert!(!on_head(&f, Some(&reading("fff", &[]))));
+        assert!(!on_head(&f, None));
+        let plain = feature("x", vec![repo("api", true)], 4);
+        assert!(!on_head(&plain, Some(&reading("abc1234567", &[]))));
+    }
+
+    #[test]
+    fn its_findings_are_to_comment_on_github() {
+        use crate::feature::review_import::{AiReview, Finding as F};
+        let mut f = review();
+        assert_eq!(
+            crate::feature::agents::run_needs(&f, Stage::AiReview).map(|n| n.template),
+            Some("pr-review")
+        );
+        let finding = |id: &str, state| F {
+            id: id.into(),
+            title: id.into(),
+            state,
+            ..F::default()
+        };
+        f.review = Some(AiReview {
+            n: 1,
+            posts: true,
+            findings: vec![
+                finding("r1-1", FindingState::Open),
+                finding("r1-2", FindingState::Fix),
+            ],
+            ..AiReview::default()
+        });
+        assert!(f.posts_review());
+        assert_eq!(f.review.as_ref().unwrap().open(), 1);
+        let items = items(&f, Stage::AiReview);
+        let open = items.iter().find(|i| i.id() == "r1-1").copied().unwrap();
+        let labels: Vec<String> = (item_buttons(open, true, true).into_iter())
+            .map(|(b, _)| b.label)
+            .collect();
+        assert!(labels.contains(&"Comment".to_owned()), "{labels:?}");
+        let wanted = items.iter().find(|i| i.id() == "r1-2").copied().unwrap();
+        assert_eq!(item_card(wanted, false, &[], true).state, "to comment");
+        // Its own: fixed by an agent, as a feature's.
+        let Some(pull) = f.pulls_mut().first_mut() else {
+            unreachable!()
+        };
+        pull.mine = true;
+        assert!(!f.posts_review());
+    }
+
+    #[test]
+    fn its_manual_test_failures_go_with_the_review() {
+        use crate::manual_test::Outcome;
+        let mut f = review();
+        for stage in [Stage::Verify, Stage::AiReview, Stage::CodeReview] {
+            f.tick(1, "you", None);
+            assert!(f.is_done(stage));
+        }
+        let ctx = RowCtx {
+            criteria: 2,
+            manual: feature::manual::Counts {
+                passed: 1,
+                failed: 1,
+                ..Default::default()
+            },
+            ..RowCtx::default()
+        };
+        let actions = page_actions(&f, Stage::ManualTest, ctx);
+        let labels: Vec<&str> = actions.iter().map(|(b, _)| b.label.as_str()).collect();
+        assert!(
+            !labels.contains(&"Make fixes") && !labels.contains(&"Plan fixes"),
+            "{labels:?}"
+        );
+        let done = actions
+            .iter()
+            .find(|(b, _)| b.label == "Mark done")
+            .unwrap();
+        assert_eq!(done.1, PanelOutcome::Manual(Outcome::MarkPassed));
+        assert_eq!(done.0.style, ButtonStyle::Primary);
+        // Its own goes to Build to fix, as a feature's does.
+        let Some(pull) = f.pulls_mut().first_mut() else {
+            unreachable!()
+        };
+        pull.mine = true;
+        let labels: Vec<String> = (page_actions(&f, Stage::ManualTest, ctx).into_iter())
+            .map(|(b, _)| b.label)
+            .collect();
+        assert!(labels.contains(&"Make fixes".to_owned()), "{labels:?}");
+    }
+
+    /// `review()` at Ship, its review stages done.
+    fn at_ship() -> Feature {
+        let mut f = review();
+        while f.current() != Some(Stage::Ship) {
+            f.tick(1, "you", None);
+        }
+        f
+    }
+
+    #[test]
+    fn ship_submits_the_review() {
+        use crate::feature::pr_submit::{Event, Posted};
+        let mut f = at_ship();
+        let head = RowCtx {
+            on_head: true,
+            ..RowCtx::default()
+        };
+        // Nothing to post: approve it.
+        assert_eq!(
+            page_enter(&f, Stage::Ship, head),
+            Some(PanelOutcome::SubmitReview(Event::Approve))
+        );
+        assert_eq!(
+            submit_line(&f, head).as_deref(),
+            Some("nothing to post: approve, or finish")
+        );
+        let with = RowCtx {
+            comments: 2,
+            ..head
+        };
+        assert_eq!(
+            page_enter(&f, Stage::Ship, with),
+            Some(PanelOutcome::SubmitReview(Event::Comment))
+        );
+        assert_eq!(submit_line(&f, with).as_deref(), Some("2 comments to post"));
+        let mut actions = page_actions(&f, Stage::Ship, with);
+        with_pull_actions(&mut actions, &f, Stage::Ship, with);
+        let labels: Vec<&str> = actions.iter().map(|(b, _)| b.label.as_str()).collect();
+        for want in [
+            "Comment\u{2026}",
+            "Approve\u{2026}",
+            "Request changes\u{2026}",
+            "Edit text",
+        ] {
+            assert!(labels.contains(&want), "{want}: {labels:?}");
+        }
+        assert!(!labels.contains(&"Push\u{2026}"));
+        let ctrl = |shift| ModifiersState {
+            ctrl: true,
+            shift,
+            ..ModifiersState::default()
+        };
+        assert_eq!(
+            submit_key(&f, &ctrl(false), Keysym::Return),
+            Some(PanelOutcome::SubmitReview(Event::Approve))
+        );
+        assert_eq!(
+            submit_key(&f, &ctrl(true), Keysym::Return),
+            Some(PanelOutcome::SubmitReview(Event::RequestChanges))
+        );
+        assert_eq!(
+            submit_key(&f, &ctrl(false), Keysym::e),
+            Some(PanelOutcome::EditSummary)
+        );
+        // Submitted, nothing new: finish.
+        f.shipping.reviews.push(Posted {
+            repo: "api".into(),
+            at: 1,
+            event: Event::RequestChanges,
+            url: "https://github.com/o/api/pull/12#pullrequestreview-1".into(),
+            commit: "abc1234567".into(),
+            inline: 2,
+            in_body: 1,
+            flattened: false,
+        });
+        assert_eq!(
+            page_enter(&f, Stage::Ship, head),
+            Some(PanelOutcome::FinishReview)
+        );
+        let page = page_of(&f, Stage::Ship);
+        assert!(
+            page.sections
+                .iter()
+                .any(|s| matches!(s, PageSection::Lines { label, lines }
+            if label == "Submitted" && lines[0].text.starts_with("requested changes")))
+        );
+    }
+
+    #[test]
+    fn ones_own_is_pushed_then_finished() {
+        let mut f = at_ship();
+        let Some(pull) = f.pulls_mut().first_mut() else {
+            unreachable!()
+        };
+        pull.mine = true;
+        let moved = RowCtx::default();
+        assert_eq!(
+            page_enter(&f, Stage::Ship, moved),
+            Some(PanelOutcome::PushPr)
+        );
+        let head = RowCtx {
+            on_head: true,
+            ..RowCtx::default()
+        };
+        assert_eq!(
+            page_enter(&f, Stage::Ship, head),
+            Some(PanelOutcome::FinishReview)
+        );
+        let mut actions = page_actions(&f, Stage::Ship, head);
+        with_pull_actions(&mut actions, &f, Stage::Ship, head);
+        let labels: Vec<&str> = actions.iter().map(|(b, _)| b.label.as_str()).collect();
+        assert!(!labels.contains(&"Approve\u{2026}"), "{labels:?}");
+        assert!(labels.contains(&"Comment\u{2026}"));
+        let ctrl = ModifiersState {
+            ctrl: true,
+            ..ModifiersState::default()
+        };
+        // GitHub takes no approval of one's own.
+        assert_eq!(submit_key(&f, &ctrl, Keysym::Return), None);
+    }
+
+    #[test]
+    fn someone_elses_can_be_fixed_here_and_pushed() {
+        let mut f = at_ship();
+        let head = RowCtx {
+            on_head: true,
+            ..RowCtx::default()
+        };
+        // Commented: the card offers to fix it here.
+        let mut actions = page_actions(&f, Stage::Verify, head);
+        with_pull_actions(&mut actions, &f, Stage::Verify, head);
+        assert!(
+            actions
+                .iter()
+                .any(|(b, o)| b.label == FIX_HERE && *o == PanelOutcome::FixHere)
+        );
+        assert!(f.posts_review());
+        let Some(pull) = f.pulls_mut().first_mut() else {
+            unreachable!()
+        };
+        pull.fix_here = true;
+        pull.head_repo = "o/api".into();
+        assert!(!f.posts_review());
+        let page = page_of(&f, Stage::Verify);
+        let (state, buttons) = card(&page);
+        assert!(state.text.ends_with("fixing here"), "{}", state.text);
+        assert_eq!(buttons, vec![COMMENT_INSTEAD, EDIT_PULLS, OPEN_PULL]);
+        // Fixed here: Ship pushes, then finishes without a review.
+        assert_eq!(
+            page_enter(&f, Stage::Ship, RowCtx::default()),
+            Some(PanelOutcome::PushPr)
+        );
+        assert_eq!(
+            page_enter(&f, Stage::Ship, head),
+            Some(PanelOutcome::FinishReview)
+        );
+        assert_eq!(
+            submit_line(&f, RowCtx::default()).as_deref(),
+            Some("fixes here not on GitHub: push them")
+        );
+        let mut actions = page_actions(&f, Stage::Ship, head);
+        with_pull_actions(&mut actions, &f, Stage::Ship, head);
+        let labels: Vec<&str> = actions.iter().map(|(b, _)| b.label.as_str()).collect();
+        assert!(
+            labels.contains(&"Push\u{2026}") && labels.contains(&"Approve\u{2026}"),
+            "{labels:?}"
+        );
+    }
+
+    fn feature_agents_gate(f: &Feature) -> Option<(Stage, u64, crate::feature_agents::GateKind)> {
+        crate::feature_agents::gate_of(f, |_| None)
     }
 }

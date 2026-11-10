@@ -11,7 +11,7 @@ use crate::{
         Feature, Stage, Status,
         plan_review::{Kind, Placed, Source, State, Suggestion},
         review_import::{self, Decision, Finding as ReviewFinding, FindingState, Severity},
-        review_items::{self, ItemOf, Standing, words},
+        review_items::{self, ItemOf, Standing, words, words_in},
     },
     features::{PanelOutcome, can_edit_note, shown_notes, stage_mark},
     review::Comment,
@@ -308,9 +308,14 @@ pub(crate) fn delete_own_outcome(item: Item) -> PanelOutcome {
 }
 
 /// The buttons on `item`'s card: what can be decided of it while its stage
-/// is `current`, and showing it where it is when it has a place.
-pub(crate) fn item_buttons(item: Item, current: bool) -> Vec<(PageButton, PanelOutcome)> {
-    let w = words(item.of());
+/// is `current`, and showing it where it is when it has a place; in the
+/// words of a review that `posts` to GitHub when it does.
+pub(crate) fn item_buttons(
+    item: Item,
+    current: bool,
+    posts: bool,
+) -> Vec<(PageButton, PanelOutcome)> {
+    let w = words_in(item.of(), posts);
     let button = |label: &str, style| PageButton {
         label: label.to_owned(),
         style,
@@ -383,9 +388,14 @@ pub(crate) fn item_buttons(item: Item, current: bool) -> Vec<(PageButton, PanelO
 /// does, in the words of its kind (`card_key` says what each does);
 /// `decides` while its stage can decide, `armed` while a first Del armed
 /// it. The page's own keys (Up / Down, `c` off the card, wanting all) are
-/// the page's.
-pub(crate) fn item_hints(item: Item, decides: bool, armed: bool) -> Vec<(String, String)> {
-    let w = words(item.of());
+/// the page's. A review that `posts` to GitHub has its words.
+pub(crate) fn item_hints(
+    item: Item,
+    decides: bool,
+    armed: bool,
+    posts: bool,
+) -> Vec<(String, String)> {
+    let w = words_in(item.of(), posts);
     let lower = |text: &str| text.to_lowercase();
     let mut out: Vec<(String, String)> = Vec::new();
     let mut hint = |key: &str, what: String| out.push((key.to_owned(), what));
@@ -490,10 +500,11 @@ pub(crate) fn item_card(
     item: Item,
     multi: bool,
     actions: &[(PageButton, PanelOutcome)],
+    posts: bool,
 ) -> FindingCard {
     let tag = item_tag(item);
     let mut card = match item {
-        Item::Finding(f) => finding_card(f, multi),
+        Item::Finding(f) => finding_card(f, multi, posts),
         Item::Suggestion(s) => suggestion_card(s),
     };
     card.tag = tag;
@@ -511,15 +522,17 @@ pub(crate) fn item_card(
     card
 }
 
-/// The card of finding `f`, its tag and buttons left to `item_card`.
-fn finding_card(f: &ReviewFinding, multi: bool) -> FindingCard {
+/// The card of finding `f`, its tag and buttons left to `item_card`; of a
+/// review that `posts` to GitHub, one wanted is to comment.
+fn finding_card(f: &ReviewFinding, multi: bool, posts: bool) -> FindingCard {
     let state = match f.state {
         FindingState::Open => String::new(),
-        FindingState::Fix => "to fix".to_owned(),
+        FindingState::Fix => words_in(ItemOf::Finding, posts).wanted.to_owned(),
         FindingState::Sent if f.made => "fix made".to_owned(),
         FindingState::Sent => "sent to Build".to_owned(),
         FindingState::Fixed => "fixed".to_owned(),
         FindingState::Dismissed => format!("dismissed: {}", f.reason),
+        FindingState::Posted => "on GitHub".to_owned(),
     };
     let mut place = vec![f.id.clone()];
     if !f.file.is_empty() {
@@ -661,7 +674,7 @@ pub(crate) fn items_count(feature: &Feature, stage: Stage) -> String {
     let said = |n: usize, what: &str| (n > 0).then(|| format!("{n} {what}"));
     [
         said(state(FindingState::Open), "to decide"),
-        said(state(FindingState::Fix), "to fix"),
+        said(state(FindingState::Fix), words_in(ItemOf::Finding, review.posts).wanted),
         said(state(FindingState::Sent) - made, "sent to Build"),
         (made > 0).then(|| review_import::fixes_made_words(made)),
         said(state(FindingState::Fixed), "fixed"),
@@ -889,7 +902,7 @@ mod tests {
     }
 
     fn labels(item: Item) -> Vec<String> {
-        (item_buttons(item, true).into_iter())
+        (item_buttons(item, true, false).into_iter())
             .map(|(b, _)| b.label)
             .collect()
     }
@@ -932,7 +945,7 @@ mod tests {
     #[test]
     fn a_suggestions_buttons_say_what_it_is() {
         let s = suggestion("r1-1", State::Open, Source::Reviewer);
-        let outcomes: Vec<PanelOutcome> = (item_buttons(Item::Suggestion(&s), true).into_iter())
+        let outcomes: Vec<PanelOutcome> = (item_buttons(Item::Suggestion(&s), true, false).into_iter())
             .map(|(_, o)| o)
             .collect();
         assert_eq!(
@@ -941,20 +954,20 @@ mod tests {
         );
         assert!((outcomes.iter()).all(|o| outcome_item(o) == Some((ItemOf::Suggestion, "r1-1"))));
         let f = finding("r1-1", FindingState::Open, false);
-        let first = item_buttons(Item::Finding(&f), true).remove(0).1;
+        let first = item_buttons(Item::Finding(&f), true, false).remove(0).1;
         assert_eq!(outcome_item(&first), Some((ItemOf::Finding, "r1-1")));
     }
 
     #[test]
     fn a_rejected_suggestion_card_says_why_and_folds() {
         let s = suggestion("r1-1", State::Rejected, Source::Reviewer);
-        let card = item_card(Item::Suggestion(&s), false, &[]);
+        let card = item_card(Item::Suggestion(&s), false, &[], false);
         assert_eq!(card.state, "rejected: Not needed");
         assert!(card.collapsed && card.faded);
         assert_eq!(card.place, "r1-1 \u{b7} gap");
         let mut q = suggestion("r1-2", State::Open, Source::Reviewer);
         q.kind = Kind::Question;
-        let card = item_card(Item::Suggestion(&q), false, &[]);
+        let card = item_card(Item::Suggestion(&q), false, &[], false);
         assert_eq!(card.field_hint, "Your answer");
     }
 
@@ -1069,7 +1082,7 @@ mod tests {
     }
 
     fn outcomes(item: Item) -> Vec<(String, PanelOutcome)> {
-        (item_buttons(item, true).into_iter())
+        (item_buttons(item, true, false).into_iter())
             .map(|(b, o)| (b.label, o))
             .collect()
     }
@@ -1217,7 +1230,7 @@ mod tests {
             ]
         );
         // Not decidable: only reading.
-        let only: Vec<String> = (item_buttons(Item::Suggestion(&s), false).into_iter())
+        let only: Vec<String> = (item_buttons(Item::Suggestion(&s), false, false).into_iter())
             .map(|(b, _)| b.label)
             .collect();
         assert_eq!(only, ["Open code", "Show in plan"]);
@@ -1236,7 +1249,7 @@ mod tests {
             e
         }];
         s.placed = Some(Placed::Nowhere);
-        let card = item_card(Item::Suggestion(&s), false, &[]);
+        let card = item_card(Item::Suggestion(&s), false, &[], false);
         assert_eq!(card.tag, FindingTag::High);
         assert_eq!(card.state, "");
         assert_eq!(
@@ -1254,7 +1267,7 @@ mod tests {
         (s.placed, s.plan_quote, s.dropped) = (Some(Placed::Heading(3)), "x".into(), true);
         s.my_change = Some("Keep it in SQLite".into());
         s.state = State::Accepted;
-        let card = item_card(Item::Suggestion(&s), false, &[]);
+        let card = item_card(Item::Suggestion(&s), false, &[], false);
         assert_eq!(
             card.place,
             "r1-1 \u{b7} gap \u{b7} M2 \u{b7} plan quote not found \u{b7} left out by a later run"
@@ -1265,12 +1278,12 @@ mod tests {
         // Placed on its quote: nothing to say.
         s.placed = Some(Placed::Quote(3));
         s.dropped = false;
-        let card = item_card(Item::Suggestion(&s), false, &[]);
+        let card = item_card(Item::Suggestion(&s), false, &[], false);
         assert_eq!(card.place, "r1-1 \u{b7} gap \u{b7} M2");
         // Your own.
         let own = suggestion("u1", State::Accepted, Source::You);
         assert_eq!(
-            item_card(Item::Suggestion(&own), false, &[]).tag,
+            item_card(Item::Suggestion(&own), false, &[], false).tag,
             FindingTag::Yours
         );
     }
@@ -1279,8 +1292,8 @@ mod tests {
     fn a_rejected_suggestion_folds_and_its_comment_holds_its_buttons() {
         let mut s = suggestion("r1-1", State::Rejected, Source::Reviewer);
         s.note = "Later".into();
-        let actions = item_buttons(Item::Suggestion(&s), true);
-        let card = item_card(Item::Suggestion(&s), false, &actions);
+        let actions = item_buttons(Item::Suggestion(&s), true, false);
+        let card = item_card(Item::Suggestion(&s), false, &actions, false);
         assert_eq!(card.state, "rejected: Not needed \u{b7} commented");
         assert!(card.collapsed && card.faded);
         assert_eq!(card.comment, "Later");
@@ -1292,12 +1305,12 @@ mod tests {
         assert_eq!(on(&card.comment_buttons), ["Edit", "Delete"]);
         // A question: its answer.
         let q = question("r1-2", "");
-        let card = item_card(Item::Suggestion(&q), false, &[]);
+        let card = item_card(Item::Suggestion(&q), false, &[], false);
         assert_eq!(card.state, "not answered yet");
         assert_eq!(card.field_hint, "Your answer");
         let mut q = question("r1-2", "Postgres");
         q.state = State::Rejected;
-        let card = item_card(Item::Suggestion(&q), false, &[]);
+        let card = item_card(Item::Suggestion(&q), false, &[], false);
         assert_eq!(card.state, "rejected: Not needed \u{b7} answered");
     }
 
@@ -1327,14 +1340,14 @@ mod tests {
         for s in &all {
             let item = Item::Suggestion(s);
             for decides in [true, false] {
-                for (b, _) in item_buttons(item, decides) {
+                for (b, _) in item_buttons(item, decides, false) {
                     assert!(!bad(&b.label), "{}", b.label);
                 }
-                for (_, what) in item_hints(item, decides, false) {
+                for (_, what) in item_hints(item, decides, false, false) {
                     assert!(!bad(&what), "{what}");
                 }
             }
-            let card = item_card(item, false, &[]);
+            let card = item_card(item, false, &[], false);
             for text in [&card.state, &card.place, &card.body, &card.fix, &card.title] {
                 assert!(!bad(text), "{text}");
             }
@@ -1467,7 +1480,7 @@ mod tests {
     #[test]
     fn the_hints_speak_the_kinds_words() {
         let hints = |item: Item, decides, armed| -> Vec<String> {
-            (item_hints(item, decides, armed).into_iter())
+            (item_hints(item, decides, armed, false).into_iter())
                 .map(|(k, what)| format!("{k} {what}"))
                 .collect()
         };

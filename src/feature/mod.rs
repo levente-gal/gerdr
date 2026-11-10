@@ -40,6 +40,8 @@ pub mod manual;
 pub mod page;
 pub mod patch;
 pub mod plan_review;
+pub mod pr;
+pub mod pr_submit;
 pub mod remote;
 pub mod review_import;
 pub mod review_items;
@@ -226,6 +228,9 @@ pub struct Shipping {
     /// removed), in the order it did: what undoing it brings back.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub after: Vec<AfterDone>,
+    /// A pull request's review: each submitted to GitHub, oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reviews: Vec<pr_submit::Posted>,
 }
 
 /// A step that follows shipping, as Ship's "Afterwards" ticks it.
@@ -371,6 +376,7 @@ impl Shipping {
             && self.updates.is_empty()
             && self.resolving.is_none()
             && self.after.is_empty()
+            && self.reviews.is_empty()
     }
 }
 
@@ -697,11 +703,34 @@ pub struct Event {
     pub what: String,
 }
 
+/// What a record is of: a feature gerdr builds, or a pull request it
+/// reviews (see `pr`).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Kind {
+    #[default]
+    Feature,
+    /// Pull requests on GitHub, one per repository, the user's own or
+    /// someone else's: born with the stages up to Build marked, as their
+    /// authors built them. A record of one keeps reading as one.
+    #[serde(deserialize_with = "pr::one_or_many")]
+    PrReview(Vec<pr::PullRef>),
+}
+
+impl Kind {
+    pub fn is_feature(&self) -> bool {
+        matches!(self, Self::Feature)
+    }
+}
+
 /// A feature: its record, `feature.json`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Feature {
     #[serde(default)]
     pub version: u32,
+    /// What it is of; a feature unless it says so.
+    #[serde(default, skip_serializing_if = "Kind::is_feature")]
+    pub kind: Kind,
     /// Unique within the project; names its folders and branches.
     pub slug: String,
     pub title: String,
@@ -1055,7 +1084,17 @@ impl Feature {
         if matches!(self.status, Status::Done | Status::Abandoned) {
             return None;
         }
-        let stage = self.stale(patch)?;
+        let mut stage = self.stale(patch)?;
+        // A pull request's author built it: its marks up to Build go with
+        // the code, and its review goes back no further than Verify.
+        if self.pull().is_some() && stage <= Stage::Build {
+            for (s, mark) in self.marks.range_mut(..=Stage::Build) {
+                if s.bound() {
+                    mark.patch = Some(patch.to_owned());
+                }
+            }
+            stage = Stage::Verify;
+        }
         self.clear_marks_from(stage, now);
         // The code went its own way: what Manual test fixed is gone over again.
         self.carry = None;
@@ -1088,6 +1127,10 @@ impl Feature {
     pub fn locked_by(&self, stage: Stage, wrote: impl Fn(Stage) -> bool) -> Option<Stage> {
         if !self.is_done(stage) {
             return None;
+        }
+        // A pull request's author did it: its review starts after it.
+        if !self.stages().contains(&stage) {
+            return self.stages().first().copied();
         }
         let next = stage.next()?;
         if self.is_done(next) {
@@ -1261,9 +1304,54 @@ impl Feature {
         self.repos.iter().filter(|r| r.touched)
     }
 
-    /// Its branch name: `feature/<slug>`.
+    /// Its branch name: `feature/<slug>`; a pull request's review has the
+    /// first pull request's (`pr::PullRef::branch`): each repository's is
+    /// its own `Repo::branch`.
     pub fn branch(&self) -> String {
-        format!("feature/{}", self.slug)
+        match self.pull() {
+            None => format!("feature/{}", self.slug),
+            Some(pull) => pull.branch(),
+        }
+    }
+
+    /// The pull requests it reviews, one per repository, in the order they
+    /// were picked; none for a feature.
+    pub fn pulls(&self) -> &[pr::PullRef] {
+        match &self.kind {
+            Kind::Feature => &[],
+            Kind::PrReview(pulls) => pulls,
+        }
+    }
+
+    /// The same, to change.
+    pub fn pulls_mut(&mut self) -> &mut [pr::PullRef] {
+        match &mut self.kind {
+            Kind::Feature => &mut [],
+            Kind::PrReview(pulls) => pulls,
+        }
+    }
+
+    /// The first pull request it reviews, if that is what it is: what goes
+    /// for the review as a whole.
+    pub fn pull(&self) -> Option<&pr::PullRef> {
+        self.pulls().first()
+    }
+
+    /// The pull request of repository `key` (`Repo::key`), if it has one.
+    pub fn pull_of(&self, key: &str) -> Option<&pr::PullRef> {
+        // A record of one from before has it unnamed: its first repository's.
+        let first = self.repos.first().is_some_and(|r| r.key() == key);
+        (self.pulls().iter()).find(|p| p.repo == key || (p.repo.is_empty() && first))
+    }
+
+    /// The stages it goes through, in order: all of them for a feature;
+    /// from Verify on for a pull request's review, the others marked when
+    /// it was made.
+    pub fn stages(&self) -> &'static [Stage] {
+        match self.kind {
+            Kind::Feature => &Stage::ALL,
+            Kind::PrReview(_) => &pr::STAGES,
+        }
     }
 
     /// Every step shipping ran, oldest first: `Shipping::steps`, or for a
@@ -1874,6 +1962,7 @@ pub(crate) mod tests {
             .collect();
         Feature {
             version: VERSION,
+            kind: Default::default(),
             writer: None,
             slug: "f".into(),
             title: "Log in".into(),
@@ -1973,6 +2062,7 @@ pub(crate) mod tests {
     pub(crate) fn feature(slug: &str, created: u64) -> Feature {
         Feature {
             version: VERSION,
+            kind: Default::default(),
             writer: None,
             slug: slug.into(),
             title: format!("Feature {slug}"),

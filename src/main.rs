@@ -86,6 +86,9 @@ mod machines;
 mod machines_panel;
 mod manual_test;
 mod page_text;
+mod pr_review;
+mod pr_post;
+mod pr_watch;
 mod md_blocks;
 mod md_preview;
 mod menu;
@@ -7498,6 +7501,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     state.watch_web_control();
     state.watch_web_pages();
     state.watch_ci();
+    state.watch_pr_reviews();
     state.watch_issues();
     if state.notify {
         state.connect_notifier();
