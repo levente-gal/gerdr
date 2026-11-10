@@ -2486,6 +2486,26 @@ esac
     }
 
     #[test]
+    fn a_branch_merged_on_origin_loses_nothing_before_main_is_pulled() {
+        let t = Temp::new();
+        let mut f = feature_over(&t, &["api"], &[]);
+        origins(&t, &f);
+        commit(&wt(&f, "api"), "a", "change");
+        mark_all(&mut f);
+        let main = f.repos[0].main.clone();
+        // Merged on GitHub: squashed into origin's main from elsewhere.
+        let other = t.0.join("other");
+        let origin = t.0.join("api.git");
+        run(&t.0, &["clone", "-q", origin.to_str().unwrap(), other.to_str().unwrap()]);
+        run(&main, &["push", "-q", "origin", "feature/f"]);
+        run(&other, &["fetch", "-q", "origin", "feature/f"]);
+        run(&other, &["merge", "-q", "--squash", "FETCH_HEAD"]);
+        run(&other, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "squashed"]);
+        run(&other, &["push", "-q", "origin", "main"]);
+        assert!(crate::feature::layout::losses(&f).is_empty());
+    }
+
+    #[test]
     fn removing_goes_only_with_every_repository_merging() {
         let t = Temp::new();
         let mut f = feature_over(&t, &["api", "web"], &[]);

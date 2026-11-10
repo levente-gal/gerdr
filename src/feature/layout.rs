@@ -1561,12 +1561,32 @@ fn commits_of(repo: &Repo, pull: Option<&PullRef>) -> Result<usize, String> {
         .trim()
         .parse()
         .map_err(|err| format!("couldn't read a commit count: {err}"))?;
-    let merged = |branch: &String| merged_into_base(repo, branch);
+    let merged = |branch: &String| merged_into_base(repo, branch) || merged_on_origin(repo, branch);
     Ok(if n > 0 && repo.branch.as_ref().is_some_and(merged) {
         0
     } else {
         n
     })
+}
+
+/// Whether `branch` of `repo` is merged into origin's base once that is
+/// fetched: a pull request merged on GitHub, its base here not pulled yet.
+/// Off the network, it isn't: then the commits count as lost.
+fn merged_on_origin(repo: &Repo, branch: &str) -> bool {
+    if let Err(failed) = crate::git_ops::fetch_branch(&repo.main, "origin", &repo.base) {
+        tracing::info!(
+            "fetching {} of {} to count what removing loses: {}",
+            repo.base,
+            repo.main.display(),
+            failed.why
+        );
+        return false;
+    }
+    let spec = format!("refs/remotes/origin/{}^{{commit}}", repo.base);
+    let Ok(base) = git(&repo.main, &["rev-parse", "--verify", "--quiet", &spec]) else {
+        return false;
+    };
+    crate::git::merged(&repo.main, branch, &[base.trim()])
 }
 
 /// Whether `branch` of `repo` is merged into its base, squashed or not.
