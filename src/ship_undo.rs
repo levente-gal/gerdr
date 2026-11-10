@@ -34,8 +34,10 @@ impl Gerdr {
             ));
         }
         let probe = self.last_probe(project, slug);
-        if matches!(step, ShipStep::Push | ShipStep::PushBranch | ShipStep::OpenPr)
-            && crate::features::pr_merged(probe, repo)
+        if matches!(
+            step,
+            ShipStep::Push | ShipStep::PushBranch | ShipStep::OpenPr
+        ) && crate::features::pr_merged(probe, repo)
         {
             return self.show_warning(format!(
                 "The pull request of {repo} was merged on GitHub: that can't be undone here"

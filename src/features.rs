@@ -2117,6 +2117,8 @@ pub enum PanelOutcome {
     /// Move repository `.0`'s base on to origin's, which its branch took
     /// in already: what its squash waits for.
     PullBase(String),
+    /// Close the workspace that shipping left open (see `close_left`).
+    CloseShipped,
     /// Have an agent take on repository `.0`'s conflicts with its base:
     /// plan their resolution (`.1`), or resolve them.
     ResolveConflicts(String, bool),
@@ -3769,6 +3771,7 @@ fn action_hint(action: &PanelOutcome) -> &'static str {
         PanelOutcome::UndoAfter(step) => after_undo_words(*step),
         PanelOutcome::UpdateBase(..) => "update from the base\u{2026}",
         PanelOutcome::PullBase(_) => "pull the base",
+        PanelOutcome::CloseShipped => "close the workspace",
         PanelOutcome::ResolveConflicts(_, true) => "plan the resolution",
         PanelOutcome::ResolveConflicts(_, false) => "resolve with an agent",
         PanelOutcome::ReviewConflictPlan => "review the plan",
@@ -4472,6 +4475,17 @@ fn ship_sections(
     out
 }
 
+/// Whether shipped `feature`'s Afterwards tick to close its workspace never
+/// ran, as something ran in it when it shipped: its Ship page offers it then.
+/// What shows the page has its workspace open.
+fn close_left(feature: &Feature) -> bool {
+    feature.status == Status::Done
+        && feature.writer.is_none()
+        && feature.dir.exists()
+        && !feature.ship_plan.keep_workspace
+        && feature.shipping.after.is_empty()
+}
+
 /// What followed shipping `feature`, once it is done: when its workspace
 /// closed and its worktrees went, and when that was undone; each with its
 /// Undo while it can be.
@@ -4484,6 +4498,16 @@ fn shipped_after_group(
     if feature.status == Status::Open {
         return None;
     }
+    // Ticked, it didn't close for what ran in it: it still can.
+    let left = close_left(feature).then(|| chrome::ShipStepRow {
+        row: 0,
+        label: "Close the workspace".to_owned(),
+        detail: Some(line("Shipping left it open".to_owned(), CheckTone::Note)),
+        ticked: true,
+        off: false,
+        done: false,
+        button: (actions.iter()).position(|(_, o)| *o == PanelOutcome::CloseShipped),
+    });
     let steps: Vec<chrome::ShipStepRow> = [AfterStep::Close, AfterStep::Remove]
         .into_iter()
         .filter_map(|step| {
@@ -4514,6 +4538,7 @@ fn shipped_after_group(
                 button,
             })
         })
+        .chain(left)
         .collect();
     (!steps.is_empty()).then(|| {
         PageSection::ShipGroup(chrome::ShipGroup {
@@ -4562,7 +4587,8 @@ fn pull_first_of(feature: &Feature, probe: Option<&Probe>) -> Option<(String, St
     let [said] = planned.blockers.as_slice() else {
         return None;
     };
-    let repo = (check.repos.iter()).find(|r| r.pulls_base() && r.no_merge.as_ref() == Some(said))?;
+    let repo =
+        (check.repos.iter()).find(|r| r.pulls_base() && r.no_merge.as_ref() == Some(said))?;
     Some((repo.key.clone(), repo.base.clone(), said.clone()))
 }
 
@@ -6414,6 +6440,12 @@ fn writers_page_actions(
     }
     undos.sort_by_key(|(at, ..)| std::cmp::Reverse(*at));
     out.extend(undos.into_iter().map(|(_, b, o)| (b, o)));
+    if stage == Stage::Ship && close_left(feature) {
+        out.push((
+            button("Close", ButtonStyle::Plain),
+            PanelOutcome::CloseShipped,
+        ));
+    }
     if stage == Stage::Ship {
         // On its repository's card while it can ship, once the cards show;
         // else listed by name.
@@ -9669,6 +9701,7 @@ impl Gerdr {
                 self.ask_update_base(&project, &slug, &repo, way)
             }
             PanelOutcome::PullBase(repo) => self.pull_base(&project, &slug, &repo),
+            PanelOutcome::CloseShipped => self.ask_close_shipped(&project, &slug),
             PanelOutcome::ResolveConflicts(repo, planning) => {
                 self.resolve_conflicts(&project, &slug, &repo, planning);
             }
@@ -12819,7 +12852,8 @@ fn current_line(feature: &Feature, stage: Stage, state: &LineState, now: u64) ->
                 "blocked".into()
             } else if planned.as_ref().is_some_and(|p| p.nothing) {
                 "nothing ticked".into()
-            } else if (state.probe).is_some_and(|p| p.bases.values().any(|b| !b.conflicts.is_empty()))
+            } else if (state.probe)
+                .is_some_and(|p| p.bases.values().any(|b| !b.conflicts.is_empty()))
             {
                 "base conflicts".into()
             } else if planned.is_some() {
@@ -18746,7 +18780,8 @@ pub(crate) mod tests {
             ..PanelState::default()
         };
         let recap = recap_card(&f, &state, 3_000);
-        assert!(recap.figures.contains(&("7".to_owned(), "agent runs".to_owned())));
+        let runs = ("7".to_owned(), "agent runs".to_owned());
+        assert!(recap.figures.contains(&runs));
         let said = |label: &str| {
             let (_, said) = recap.stages.iter().find(|(l, _)| l == label).unwrap();
             said.clone()
@@ -21574,11 +21609,13 @@ pub(crate) mod tests {
     fn the_ship_confirm_says_what_follows_shipping() {
         let mut f = feature("s", vec![repo("api", true)], 8);
         let said = |f: &Feature, removable| ship_after_line(f, removable);
-        assert_eq!(said(&f, true).as_deref(), Some("Then its workspace closes"));
+        let closes = Some("Then its workspace closes".to_owned());
+        assert_eq!(said(&f, true), closes);
         f.ship_plan.remove_worktrees = true;
-        assert_eq!(said(&f, true).as_deref(), Some("Then its worktree and branch go"));
+        let go = Some("Then its worktree and branch go".to_owned());
+        assert_eq!(said(&f, true), go);
         // What is ticked no longer merges everything: they stay.
-        assert_eq!(said(&f, false).as_deref(), Some("Then its workspace closes"));
+        assert_eq!(said(&f, false), closes);
         f.ship_plan = Default::default();
         f.ship_plan.keep_workspace = true;
         assert_eq!(said(&f, true), None);
@@ -25463,7 +25500,7 @@ pub(crate) mod tests {
         });
         assert_eq!(
             recap_summary(&f, Some(&p)).1.as_deref(),
-            Some("Claude Code is writing a summary\u{2026}")
+            Some("claude is writing a summary\u{2026}")
         );
         p.docs.summary = Some((Ok("One\nline.\n\nTwo.\n".into()), 200));
         let (paragraphs, note) = recap_summary(&f, Some(&p));
@@ -25476,7 +25513,7 @@ pub(crate) mod tests {
         f.shipping.summary.as_mut().unwrap().at = 300;
         assert_eq!(
             recap_summary(&f, Some(&p)).1.as_deref(),
-            Some("Claude Code is writing it again\u{2026}")
+            Some("claude is writing it again\u{2026}")
         );
     }
 
@@ -25649,6 +25686,42 @@ pub(crate) mod tests {
             )
         );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_workspace_shipping_left_open_can_still_close() {
+        let mut f = feature("s", vec![repo("api", true)], Stage::ALL.len());
+        f.status = Status::Done;
+        f.dir = std::env::temp_dir().join(format!("gerdr-close-left-{}", std::process::id()));
+        std::fs::create_dir_all(&f.dir).unwrap();
+        let close = |f: &Feature| {
+            let actions = page_actions(f, Stage::Ship, RowCtx::default());
+            let page = stage_page(f, Stage::Ship, &PanelState::default(), &actions, 2_000);
+            let row = page.sections.iter().find_map(|s| match s {
+                PageSection::ShipGroup(g) if g.head == "Afterwards" => {
+                    g.steps.iter().find(|r| r.label == "Close the workspace").cloned()
+                }
+                _ => None,
+            });
+            row.map(|row| actions[row.button.expect("its button")].1.clone())
+        };
+        assert_eq!(close(&f), Some(PanelOutcome::CloseShipped));
+        // Kept open by its tick, or closed once already: nothing to offer.
+        f.ship_plan.keep_workspace = true;
+        assert_eq!(close(&f), None);
+        f.ship_plan.keep_workspace = false;
+        f.after_ran(crate::feature::AfterDone {
+            at: 1_950,
+            step: crate::feature::AfterStep::Close,
+            tabs: Vec::new(),
+            heads: Vec::new(),
+            undone: Some(1_960),
+        });
+        assert_eq!(close(&f), None);
+        f.shipping.after.clear();
+        std::fs::remove_dir_all(&f.dir).unwrap();
+        // Its folder gone: no workspace to close.
+        assert_eq!(close(&f), None);
     }
 
     #[test]

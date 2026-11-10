@@ -195,6 +195,9 @@ pub enum Then {
         slug: String,
         repo: String,
     },
+    /// Close this project's shipped feature's workspace, kept to reopen
+    /// (see `Gerdr::ask_close_shipped`).
+    CloseShipped { project: String, slug: String },
 }
 
 /// The confirm dialog's state, while it is open.
@@ -462,6 +465,26 @@ impl Gerdr {
         };
         let (title, body) = close_many_question("workspace", &name, running);
         self.ask(title, body, "Close workspace", Then::CloseWorkspace(panes));
+    }
+
+    /// Ask before closing workspace `w` of shipped feature `slug`, with
+    /// `running` running in it (see `Gerdr::ask_close_shipped`).
+    pub fn ask_close_shipped_workspace(
+        &mut self,
+        project: &str,
+        slug: &str,
+        w: usize,
+        running: &[String],
+    ) {
+        let Some(name) = self.workspaces.get(w).map(|ws| ws.name.clone()) else {
+            return;
+        };
+        let (title, body) = close_many_question("workspace", &name, running);
+        let then = Then::CloseShipped {
+            project: project.to_owned(),
+            slug: slug.to_owned(),
+        };
+        self.ask(title, body, "Close workspace", then);
     }
 
     /// Stop what `stops` says of project `id` (see `stop_project_now`):
@@ -820,6 +843,7 @@ impl Gerdr {
                 slug,
                 repo,
             } => self.pull_base(&project, &slug, &repo),
+            Then::CloseShipped { project, slug } => self.close_shipped_said(&project, &slug),
             Then::StopResolving { project, slug } => self.stop_resolving(&project, &slug),
             Then::MakeFixes { project, slug } => self.make_fixes_now(&project, &slug),
             Then::DropFixPlan { project, slug } => self.drop_fix_plan(&project, &slug),

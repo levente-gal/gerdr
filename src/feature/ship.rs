@@ -2534,11 +2534,16 @@ esac
         // Merged on GitHub: squashed into origin's main from elsewhere.
         let other = t.0.join("other");
         let origin = t.0.join("api.git");
-        run(&t.0, &["clone", "-q", origin.to_str().unwrap(), other.to_str().unwrap()]);
+        let (origin, other_dir) = (origin.to_str().unwrap(), other.to_str().unwrap());
+        run(&t.0, &["clone", "-q", origin, other_dir]);
         run(&main, &["push", "-q", "origin", "feature/f"]);
         run(&other, &["fetch", "-q", "origin", "feature/f"]);
         run(&other, &["merge", "-q", "--squash", "FETCH_HEAD"]);
-        run(&other, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "squashed"]);
+        let who = ["-c", "user.name=t", "-c", "user.email=t@t"];
+        run(
+            &other,
+            &[&who[..], &["commit", "-q", "-m", "squashed"]].concat(),
+        );
         run(&other, &["push", "-q", "origin", "main"]);
         assert!(crate::feature::layout::losses(&f).is_empty());
     }
