@@ -3496,15 +3496,22 @@ impl Stack {
             ));
             left += w + PILL_GAP;
         }
-        let mut text = card.title.clone();
-        if !card.state.is_empty() {
-            text.push_str(&format!(" \u{b7} {}", card.state));
-        }
         let room = (right - left).max(1);
+        // How it stands keeps up to half the line: a long title can't hide
+        // "dismissed: why".
+        let state = match card.state.is_empty() {
+            true => String::new(),
+            false => format!(" \u{b7} {}", card.state),
+        };
+        let size = Font::Small.size();
+        let state_w = (width_of(&state, size).ceil() as i32 + 1).min(room / 2);
+        let mut text = cut_to_width(&card.title, size, (room - state_w).max(1));
+        let title_w = width_of(&text, size).ceil() as i32 + 1;
+        text.push_str(&cut_to_width(&state, size, (room - title_w).max(1)));
         self.pieces.push((
             Rectangle::new((left, text_y).into(), (room, TAIL_LINE).into()),
             Piece::Text {
-                text: cut_to_width(&text, Font::Small.size(), room),
+                text,
                 font: Font::Small,
                 ink: Ink::Muted,
                 bold: false,
@@ -9942,6 +9949,12 @@ mod tests {
         assert_eq!(frame.size.h, 2 * AGENT_PAD + ROW_BUTTON);
         assert!(closed.page_buttons[0].is_some());
         assert!(closed.page_buttons[1].is_none() && closed.page_buttons[2].is_none());
+        // A title past the line leaves room for how the card stands.
+        assert!(
+            (closed.pieces.iter().flatten())
+                .any(|(_, p)| matches!(p, Piece::Text { text, .. } if text.ends_with("dismissed: why"))),
+            "state shown"
+        );
         let button = closed.page_buttons[0].unwrap();
         assert!(button.loc.x + button.size.w <= frame.loc.x + frame.size.w);
         // Its text stays clear of the button.
