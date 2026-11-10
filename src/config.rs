@@ -42,8 +42,11 @@
 //! # the launcher adds them here. gerdr connects with your SSH keys. A
 //! # feature stage's page picks the machine it runs on; a project's
 //! # file gives its stages one under "machines", and folders under
-//! # "machine_folders".
+//! # "machine_folders". A machine with several addresses (the office's and
+//! # home's) has them as a list, tried in their order, the one that
+//! # answered last first.
 //! build-box = "ana@10.0.0.5"
+//! ZenBook = ["lga@zenbook-office", "lga@192.168.1.14"]
 //!
 //! [keep]
 //! # Apps that keep running when gerdr quits, as terminals do, by program:
@@ -256,7 +259,14 @@ fn with_value(
         }
     }
     match value {
-        Some(value) => doc[table][key] = value,
+        Some(mut value) => {
+            // A comment after the old value stays after the new one.
+            let old = doc[table].get(key).and_then(toml_edit::Item::as_value);
+            if let (Some(new), Some(old)) = (value.as_value_mut(), old) {
+                *new.decor_mut() = old.decor().clone();
+            }
+            doc[table][key] = value;
+        }
         None => {
             if let Some(table) = doc[table].as_table_like_mut() {
                 table.remove(key);
@@ -301,7 +311,11 @@ impl Addresses {
     fn item(&self) -> toml_edit::Item {
         match self.0.as_slice() {
             [one] => toml_edit::value(one.as_str()),
-            many => toml_edit::value(many.iter().map(String::as_str).collect::<toml_edit::Array>()),
+            many => toml_edit::value(
+                many.iter()
+                    .map(String::as_str)
+                    .collect::<toml_edit::Array>(),
+            ),
         }
     }
 }
@@ -343,8 +357,14 @@ pub fn write_machine(name: &str, addresses: Option<&Addresses>) -> Result<(), St
     let path = config_file();
     ensure_file(&path).map_err(|err| err.to_string())?;
     let text = std::fs::read_to_string(&path).map_err(|err| err.to_string())?;
-    let text = with_value(&text, "machines", name, addresses.map(Addresses::item))?;
+    let text = with_machine(&text, name, addresses)?;
     crate::projects::write_atomic(&path, text.as_bytes()).map_err(|err| err.to_string())
+}
+
+/// `text` with machine `name` at `addresses` in `[machines]`, or taken
+/// out: what `write_machine` writes.
+fn with_machine(text: &str, name: &str, addresses: Option<&Addresses>) -> Result<String, String> {
+    with_value(text, "machines", name, addresses.map(Addresses::item))
 }
 
 /// Rename machine `old` to `new` in `[machines]` of the config file: its
@@ -1025,8 +1045,11 @@ const TEMPLATE: &str = "\
 # # the launcher adds them here. gerdr connects with your SSH keys. A
 # # feature stage's page picks the machine it runs on; a project's
 # # file gives its stages one under \"machines\", and folders under
-# # \"machine_folders\".
+# # \"machine_folders\". A machine with several addresses (the office's
+# # and home's) has them as a list, tried in their order, the one that
+# # answered last first.
 # build-box = \"ana@10.0.0.5\"
+# ZenBook = [\"lga@zenbook-office\", \"lga@192.168.1.14\"]
 #
 # [keep]
 # # Apps that keep running when gerdr quits, as terminals do, by program:
@@ -1244,6 +1267,9 @@ mod tests {
         assert!(!services.patterns.is_error("a 500 FATAL"));
         assert!(!super::t3_from_text(&examples).updates);
         assert!(super::t3_from_text(TEMPLATE).updates);
+        let machines = super::Config::read(&examples, &mut Vec::new()).machines;
+        assert_eq!(machines["build-box"], "ana@10.0.0.5".into());
+        assert_eq!(machines["ZenBook"].0.len(), 2);
     }
 
     #[test]
@@ -1570,5 +1596,74 @@ other = 1
         assert!(with_machine_renamed(text, "gone", "x").is_err());
         assert!(with_machine_renamed(text, "fedora", "z").is_err());
         assert!(with_machine_renamed("[ui]\n", "a", "b").is_err());
+    }
+
+    use super::{Addresses, BTreeMap};
+
+    /// `[machines]` of `text`, and what was wrong in it.
+    fn machines_of(text: &str) -> (BTreeMap<String, Addresses>, Vec<String>) {
+        let mut problems = Vec::new();
+        let machines = super::Config::read(text, &mut problems).machines;
+        (machines, problems)
+    }
+
+    #[test]
+    fn a_machine_has_one_address_or_a_list() {
+        let (machines, problems) = machines_of(
+            "[machines]\nbox = \"me@box\"\nzen = [\"me@zen-office\", \"me@10.0.0.4\"]\n",
+        );
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(machines["box"], Addresses::one("me@box"));
+        let zen = &machines["zen"];
+        assert_eq!(zen.0, ["me@zen-office", "me@10.0.0.4"]);
+        assert_eq!(zen.first(), "me@zen-office");
+        assert!(zen.contains("me@10.0.0.4") && !zen.contains("me@box"));
+        assert_eq!(zen.to_string(), "me@zen-office, me@10.0.0.4");
+        // An empty list is no address: that machine is refused, said so,
+        // and the others are read.
+        let (machines, problems) = machines_of("[machines]\nbox = \"me@box\"\nzen = []\n");
+        assert_eq!(machines.keys().collect::<Vec<_>>(), ["box"]);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].starts_with("[machines] zen"), "{problems:?}");
+        let (machines, problems) = machines_of("[machines]\nzen = 4\n");
+        assert!(machines.is_empty() && problems.len() == 1);
+    }
+
+    #[test]
+    fn a_machine_written_keeps_the_rest_of_the_file() {
+        use super::with_machine;
+        let text = "# mine\n[ui]\ntheme = \"dark\"\n\n[machines]\n# the desk one\nbox = \"me@box\"\nzen = \"me@zen\"  # at home\n";
+        let two = Addresses(vec!["me@zen-office".into(), "me@zen".into()]);
+        let out = with_machine(text, "zen", Some(&two)).unwrap();
+        assert_eq!(
+            out,
+            "# mine\n[ui]\ntheme = \"dark\"\n\n[machines]\n# the desk one\nbox = \"me@box\"\nzen = [\"me@zen-office\", \"me@zen\"]  # at home\n"
+        );
+        let (machines, problems) = machines_of(&out);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(
+            (&machines["zen"], &machines["box"]),
+            (&two, &"me@box".into())
+        );
+        // One address goes back to a string.
+        let back = with_machine(&out, "zen", Some(&"me@zen".into())).unwrap();
+        assert_eq!(back, text);
+        // None takes it out, the rest as it was.
+        let gone = with_machine(text, "box", None).unwrap();
+        assert!(!gone.contains("me@box") && gone.contains("zen = \"me@zen\"  # at home"));
+        assert!(gone.starts_with("# mine\n[ui]\ntheme = \"dark\"\n"));
+    }
+
+    #[test]
+    fn a_machine_renamed_keeps_its_list() {
+        use super::with_machine_renamed;
+        let text = "[machines]\nzen = [\"me@zen-office\", \"me@zen\"]  # two\nz = \"me@z\"\n";
+        let renamed = with_machine_renamed(text, "zen", "ZenBook").unwrap();
+        assert_eq!(
+            renamed,
+            "[machines]\nZenBook = [\"me@zen-office\", \"me@zen\"]  # two\nz = \"me@z\"\n"
+        );
+        let (machines, _) = machines_of(&renamed);
+        assert_eq!(machines["ZenBook"].0, ["me@zen-office", "me@zen"]);
     }
 }

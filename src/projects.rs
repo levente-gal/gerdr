@@ -6,7 +6,7 @@
 //! `~/.local/share/gerdr/projects/<id>.json`; the rest (the project shown
 //! last, the quit choice, which of Cursor's idle chats stay shown, how the
 //! repositories panel lists files, the tabs to go back and forward
-//! through) in
+//! through, the address each machine answered at last) in
 //! `~/.local/share/gerdr/state.json`.
 
 use std::{
@@ -107,6 +107,11 @@ pub struct Store {
     /// and which the user read, by `<project>/<slug>` (see `manual::Folds`).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub criteria_folds: BTreeMap<String, crate::feature::manual::Folds>,
+    /// The address of each machine that answered last, by its name: tried
+    /// first next time, while it is still one of the machine's (see
+    /// `machines::try_order`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub machine_last: BTreeMap<String, String>,
     #[serde(skip)]
     books: Books,
 }
@@ -153,6 +158,8 @@ struct State {
     nav: NavHistory<Visit>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     criteria_folds: BTreeMap<String, crate::feature::manual::Folds>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    machine_last: BTreeMap<String, String>,
 }
 
 /// Where the store lives and what gerdr last read or wrote of its files.
@@ -347,10 +354,8 @@ pub struct Workflow {
     /// `[machines]`, then this machine's folder: without one, a folder goes to
     /// the same place under the home there.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub machine_folders: std::collections::BTreeMap<
-        String,
-        std::collections::BTreeMap<String, String>,
-    >,
+    pub machine_folders:
+        std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
     /// The commands that set up a new feature's worktree, by repository
     /// folder name (see `feature::setup`).
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -625,6 +630,7 @@ impl Store {
         self.ignored_errors = state.ignored_errors;
         self.nav = state.nav;
         self.criteria_folds = state.criteria_folds;
+        self.machine_last = state.machine_last;
     }
 
     fn state(&self) -> State {
@@ -647,6 +653,7 @@ impl Store {
             ignored_errors: self.ignored_errors.clone(),
             nav: self.nav.clone(),
             criteria_folds: self.criteria_folds.clone(),
+            machine_last: self.machine_last.clone(),
         }
     }
 
@@ -1989,6 +1996,7 @@ mod tests {
             service_errors: Vec::new(),
             ignored_errors: Vec::new(),
             criteria_folds: BTreeMap::new(),
+            machine_last: BTreeMap::from([("ZenBook".into(), "lga@zenbook-home".into())]),
             nav: {
                 let mut nav = NavHistory::default();
                 nav.visit(
