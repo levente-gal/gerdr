@@ -38,6 +38,9 @@ pub struct Reading {
     pub heads: BTreeMap<String, String>,
     /// Unix seconds it was read, before the first git call.
     pub at: u64,
+    /// Per touched repository by `Repo::key` whose code was built on another
+    /// branch than its base (`sits_on`): that branch and the commit it is at.
+    pub sits_on: BTreeMap<String, (String, String)>,
 }
 
 /// Read `feature`'s worktrees: its patch-id, and what isn't committed. An
@@ -63,11 +66,14 @@ pub fn read(feature: &Feature) -> Result<Reading, String> {
         if !repo.worktree.is_dir() {
             return Err(format!("{name}: {} isn't there", shown(&repo.worktree)));
         }
-        let (id, commits) = committed(repo)?;
+        let (id, commits, mb) = committed(repo)?;
         if !id.is_empty() {
             lines.push_str(&format!("{name} {id}\n"));
         }
         reading.commits.insert(name.clone(), commits);
+        if let Some(found) = sits_on(repo, &mb)? {
+            reading.sits_on.insert(name.clone(), found);
+        }
         let head = git(&repo.worktree, &["rev-parse", "HEAD"])
             .map_err(|err| format!("{name}: couldn't read its HEAD: {err}"))?;
         reading.heads.insert(name.clone(), head.trim().to_owned());
@@ -110,8 +116,9 @@ pub(super) fn diff_id(dir: &std::path::Path, from: &str, to: &str) -> Result<Str
 }
 
 /// The patch-id of `repo`'s committed change against its base (empty when
-/// it changes nothing), and its commits not in the base.
-fn committed(repo: &Repo) -> Result<(String, usize), String> {
+/// it changes nothing), its commits not in the base, and where it left the
+/// base.
+fn committed(repo: &Repo) -> Result<(String, usize, String), String> {
     let name = &repo.key();
     let dir = &repo.worktree;
     let base = base_ref(repo);
@@ -149,7 +156,50 @@ fn committed(repo: &Repo) -> Result<(String, usize), String> {
         .trim()
         .parse()
         .unwrap_or(0);
-    Ok((id, commits))
+    Ok((id, commits, mb.to_owned()))
+}
+
+/// The branch `repo`'s code was built on in place of its base, and the
+/// commit it is at: a branch in the worktree's history past `mb`, where it
+/// left the base, that isn't the base gone further. Of those, the one
+/// furthest from `mb`, as the branches merged into it count too; the
+/// feature's own branch, pushed or not, doesn't count.
+// shortcut: a copy of the feature's own branch under another name counts as
+// the furthest, upgrade if one shows up in practice.
+fn sits_on(repo: &Repo, mb: &str) -> Result<Option<(String, String)>, String> {
+    let name = repo.key();
+    let base = base_ref(repo);
+    let refs = git(
+        &repo.worktree,
+        &[
+            "for-each-ref",
+            "--format=%(objectname) %(refname:short)",
+            "--merged=HEAD",
+            &format!("--no-merged={mb}"),
+            &format!("--no-contains={base}"),
+            "refs/heads",
+            "refs/remotes",
+        ],
+    )
+    .map_err(|err| format!("{name}: couldn't list the branches it holds: {err}"))?;
+    let own = repo.branch.as_deref().unwrap_or_default();
+    let mut furthest: Option<(usize, String, String)> = None;
+    for (oid, branch) in refs.lines().filter_map(|l| l.split_once(' ')) {
+        let ours = branch == own || branch.ends_with(&format!("/{own}"));
+        if ours || branch.ends_with("/HEAD") {
+            continue;
+        }
+        let past = git(
+            &repo.worktree,
+            &["rev-list", "--count", &format!("{mb}..{oid}")],
+        )
+        .map_err(|err| format!("{name}: couldn't count the commits of {branch}: {err}"))?;
+        let past = past.trim().parse().unwrap_or(0);
+        if furthest.as_ref().is_none_or(|(n, _, _)| past > *n) {
+            furthest = Some((past, branch.to_owned(), oid.to_owned()));
+        }
+    }
+    Ok(furthest.map(|(_, branch, oid)| (branch, oid)))
 }
 
 /// Whether `repo`'s worktree has uncommitted changes, untracked files
@@ -239,6 +289,36 @@ mod tests {
         let r = read(&f).unwrap();
         assert_eq!(r.stray, ["other:docs"]);
         assert_eq!(r.dirty, ["other:api"]);
+    }
+
+    #[test]
+    fn a_branch_built_on_another_than_its_base_says_which() {
+        let t = Temp::new();
+        let mut f = feature_over(&t, &["api"], &[]);
+        let (main, w) = (f.repos[0].main.clone(), wt(&f, "api"));
+        commit(&w, "login", "log in");
+        // Its base going on, a pushed copy of its own branch, a backup of it:
+        // none of them is another base.
+        commit(&main, "other", "elsewhere");
+        run(&w, &["rebase", "-q", "main"]);
+        run(&main, &["update-ref", "refs/remotes/origin/main", "main"]);
+        run(&w, &["update-ref", "refs/remotes/origin/feature/f", "HEAD"]);
+        assert!(read(&f).unwrap().sits_on.is_empty());
+
+        // Rebased onto another branch: that one, not one merged into it.
+        run(&main, &["checkout", "-qb", "port", "main~1"]);
+        commit(&main, "fix", "fix work");
+        run(&main, &["branch", "fix"]);
+        commit(&main, "port", "port work");
+        run(&main, &["checkout", "-q", "main"]);
+        run(&w, &["rebase", "-q", "--onto", "port", "main"]);
+        let port = run(&main, &["rev-parse", "port"]).trim().to_owned();
+        let r = read(&f).unwrap();
+        assert_eq!(r.sits_on["api"], ("port".to_owned(), port.clone()));
+
+        // With that branch its base, all is well.
+        (f.repos[0].base, f.repos[0].base_commit) = ("port".into(), port);
+        assert!(read(&f).unwrap().sits_on.is_empty());
     }
 
     #[test]

@@ -6599,6 +6599,91 @@ impl Gerdr {
         self.feature_diff_stands(project, slug);
     }
 
+    /// What the read of feature `slug` found of repositories built on another
+    /// branch than their base, `sits` by `Repo::key`, where `was` is what the
+    /// read before found: kept as a problem, and a repository newly found so
+    /// gets a warning with a button to make that branch its base.
+    fn feature_bases_read(
+        &mut self,
+        project: &str,
+        slug: &str,
+        was: &BTreeMap<String, (String, String)>,
+        sits: &BTreeMap<String, (String, String)>,
+    ) {
+        let at = format!("{project}/{slug}");
+        let Some(feature) = self.feature(project, slug) else {
+            return;
+        };
+        let title = feature.title.clone();
+        let mut lines = Vec::new();
+        let mut fresh = Vec::new();
+        for (key, (branch, oid)) in sits {
+            let Some(repo) = feature.repo(key) else {
+                continue;
+            };
+            let text = format!(
+                "{key} of \u{201c}{title}\u{201d} is built on {branch}, not on its base {}",
+                repo.base
+            );
+            // The branch moving on isn't news.
+            if was.get(key).is_none_or(|(b, _)| b != branch) {
+                fresh.push((key.clone(), branch.clone(), oid.clone(), text.clone()));
+            }
+            lines.push(text);
+        }
+        if lines.is_empty() {
+            return crate::problems::clear_at(BASE_PROBLEM, &at);
+        }
+        crate::problems::report_at(BASE_PROBLEM, &at, lines.join("; "));
+        for (repo, branch, oid, text) in fresh {
+            let then = MenuAction::SetFeatureBase {
+                project: project.to_owned(),
+                slug: slug.to_owned(),
+                repo,
+                to: (branch, oid),
+                undoing: false,
+            };
+            self.toast_with(text, Level::Warning, Some(("Use as base".into(), then)));
+        }
+    }
+
+    /// Make branch `to.0`, at commit `to.1`, the base of repository `key` of
+    /// feature `slug`, with an Undo unless `undoing` already. Its diff and
+    /// patch-id are taken against it from now on.
+    pub(crate) fn set_feature_base(
+        &mut self,
+        project: &str,
+        slug: &str,
+        key: &str,
+        to: (String, String),
+        undoing: bool,
+    ) {
+        let repo = (self.feature_mut(project, slug))
+            .and_then(|f| f.repos.iter_mut().find(|r| r.key() == key));
+        let Some(repo) = repo else {
+            return self.show_warning(format!("{key} isn't in that feature any more"));
+        };
+        let branch = to.0.clone();
+        let old = (
+            std::mem::replace(&mut repo.base, to.0),
+            std::mem::replace(&mut repo.base_commit, to.1),
+        );
+        self.save_feature(project, slug);
+        let text = format!("{key} now has base {branch}");
+        let undo = (!undoing).then(|| {
+            let then = MenuAction::SetFeatureBase {
+                project: project.to_owned(),
+                slug: slug.to_owned(),
+                repo: key.to_owned(),
+                to: old,
+                undoing: true,
+            };
+            ("Undo".to_owned(), then)
+        });
+        self.toast_with(text, Level::Success, undo);
+        self.probe_feature(project, slug);
+    }
+
     /// The AI work takes feature `slug` of `project` as it is now, telling
     /// nothing of it: what it holds already happened. For a record read
     /// from disk, or brought from another machine.
@@ -7755,6 +7840,7 @@ impl Gerdr {
         // more.
         let resolution = probe.resolution.clone();
         if !open {
+            crate::problems::clear_at(BASE_PROBLEM, &format!("{project}/{slug}"));
             probed.again = false;
             let merged = probe.merged;
             let patch = probe.reading.as_ref().ok().map(|r| r.patch.clone());
@@ -7785,8 +7871,14 @@ impl Gerdr {
         let patch = probe.reading.as_ref().ok().map(|r| r.patch.clone());
         let heads = (probe.reading.as_ref().ok()).map(|r| (r.heads.clone(), r.at));
         let merged = probe.merged;
+        let sits_on = |p: &Probe| (p.reading.as_ref().ok()).map(|r| r.sits_on.clone());
+        let was = (probed.last.as_ref()).and_then(sits_on).unwrap_or_default();
+        let sits = sits_on(&probe);
         probed.last = Some(probe);
         self.reselect_review_card(selected);
+        if let Some(sits) = &sits {
+            self.feature_bases_read(project, slug, &was, sits);
+        }
         // The conflicts resolved, the code is the update's: its marks hold.
         if let Some(found) = &resolution {
             self.resolution_read(project, slug, found, patch.as_deref());
@@ -12452,8 +12544,19 @@ fn repo_line(feature: &Feature, repo: &feature::Repo, probe: Option<&Probe>) -> 
     if let Some(Guard::Off(why)) = probe.and_then(|p| p.guards.get(&repo.key())) {
         line.push_str(&format!(" \u{b7} push not guarded: {why}"));
     }
+    let reading = probe.and_then(|p| p.reading.as_ref().ok());
+    if let Some((branch, _)) = reading.and_then(|r| r.sits_on.get(&repo.key())) {
+        line.push_str(&format!(
+            " \u{b7} built on {branch}, not on its base {}",
+            repo.base
+        ));
+    }
     line
 }
+
+/// The "!" problems of features whose repositories are built on another
+/// branch than their base, one per feature.
+const BASE_PROBLEM: &str = "feature-base";
 
 /// What a stage of `feature` not marked done says of where it stands,
 /// as `state` has it: what setup or the checks do, the agent's line on
@@ -23656,6 +23759,23 @@ pub(crate) mod tests {
         assert_eq!(
             repo_line(&f, &f.repos[1], Some(&p)),
             "feature/bulk \u{b7} push not guarded: hooks path is set"
+        );
+    }
+
+    #[test]
+    fn a_repository_built_on_another_branch_says_so() {
+        let f = feature("b", vec![repo("api", true), repo("web", true)], 4);
+        let mut p = probe(None);
+        if let Ok(r) = p.reading.as_mut() {
+            r.sits_on.insert("web".into(), ("port".into(), "c1".into()));
+        }
+        assert_eq!(repo_line(&f, &f.repos[0], Some(&p)), "feature/bulk");
+        assert_eq!(
+            repo_line(&f, &f.repos[1], Some(&p)),
+            format!(
+                "feature/bulk \u{b7} built on port, not on its base {}",
+                f.repos[1].base
+            )
         );
     }
 
