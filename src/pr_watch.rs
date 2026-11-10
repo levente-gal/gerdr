@@ -60,9 +60,9 @@ impl Gerdr {
         let waits = (self.features.all.values().flatten()).any(|f| {
             f.status == Status::Open
                 && f.current() == Some(feature::Stage::Verify)
-                && f.pull()
-                    .and_then(pr::PullRef::ci)
-                    .is_some_and(|ci| ci.verdict() == pr::Verdict::Running)
+                && (f.pulls().iter())
+                    .filter_map(pr::PullRef::ci)
+                    .any(|ci| ci.verdict() == pr::Verdict::Running)
         });
         if waits { BUSY } else { INTERVAL }
     }
@@ -194,21 +194,17 @@ impl Gerdr {
         {
             return;
         }
-        let Some(pull) = f.pull() else {
-            return;
-        };
-        let Some(ci) = pull.ci().filter(|ci| ci.verdict() == pr::Verdict::Passed) else {
+        let Some(ci) = f.pr_ci().filter(|ci| ci.verdict() == pr::Verdict::Passed) else {
             return;
         };
         let patch = (f.marks.get(&feature::Stage::Build)).and_then(|m| m.patch.clone());
         let Some(patch) = patch else {
             return;
         };
-        let note = format!(
-            "{} checks passed on GitHub at {}",
-            ci.total,
-            pull.short_head()
-        );
+        let heads: Vec<String> = (f.pulls().iter())
+            .map(|p| format!("#{} at {}", p.number, p.short_head()))
+            .collect();
+        let note = format!("{} checks passed on GitHub: {}", ci.total, heads.join(", "));
         let title = f.title.clone();
         let now = feature::now();
         let Some(f) = self.feature_mut(project, slug) else {
@@ -232,37 +228,46 @@ impl Gerdr {
         let Some(f) = self.feature(project, slug) else {
             return;
         };
+        // Each pull request's runs, in its own repository.
+        let runs: Vec<(u64, String, std::path::PathBuf, Vec<u64>)> = (f.pulls().iter())
+            .filter_map(|p| {
+                let ids = p.checks().map(pr::rerun_ids).unwrap_or_default();
+                let dir = f.repo(&p.repo).or(f.repos.first())?.main.clone();
+                (!ids.is_empty()).then(|| (p.number, p.repo_arg(), dir, ids))
+            })
+            .collect();
         let Some(pull) = f.pull() else {
             return;
         };
-        let ids = pull.checks().map(pr::rerun_ids).unwrap_or_default();
-        if ids.is_empty() {
+        if runs.is_empty() {
             return self.show_warning(format!(
                 "The failed checks of #{} aren't GitHub Actions runs: run them again where they ran",
                 pull.number
             ));
         }
-        let Some(dir) = f.repos.first().map(|r| r.main.clone()) else {
-            return;
-        };
-        let (number, arg) = (pull.number, pull.repo_arg());
+        let number = (runs.iter())
+            .map(|(n, ..)| format!("#{n}"))
+            .collect::<Vec<_>>()
+            .join(", ");
         let busy = Busy {
             project: project.to_owned(),
             slug: slug.to_owned(),
             job: Job::PrHead,
             repo: None,
-            what: format!("Running the failed checks of #{number} again on GitHub"),
+            what: format!("Running the failed checks of {number} again on GitHub"),
         };
         let (project, slug) = (project.to_owned(), slug.to_owned());
         self.feature_work(Some(busy), move |_| {
             let mut ran = 0;
             let mut failed = Vec::new();
-            for id in ids {
-                let id = id.to_string();
-                let args = ["run", "rerun", &id, "--failed", "--repo", &arg];
-                match feature::ship::run_gh("gh", &dir, &args) {
-                    Ok(_) => ran += 1,
-                    Err(why) => failed.push(format!("run {id}: {why}")),
+            for (n, arg, dir, ids) in runs {
+                for id in ids {
+                    let id = id.to_string();
+                    let args = ["run", "rerun", &id, "--failed", "--repo", &arg];
+                    match feature::ship::run_gh("gh", &dir, &args) {
+                        Ok(_) => ran += 1,
+                        Err(why) => failed.push(format!("#{n} run {id}: {why}")),
+                    }
                 }
             }
             Done::CiRerun {
@@ -281,22 +286,22 @@ impl Gerdr {
         &mut self,
         project: &str,
         slug: &str,
-        number: u64,
+        number: String,
         ran: usize,
         failed: Vec<String>,
     ) {
         self.unbusy(project, slug, Job::PrHead);
         if let Some(why) = failed.first() {
             tracing::warn!(
-                "running the checks of #{number} again: {}",
+                "running the checks of {number} again: {}",
                 failed.join("; ")
             );
-            self.show_error(format!("Couldn't run the checks of #{number} again: {why}"));
+            self.show_error(format!("Couldn't run the checks of {number} again: {why}"));
         }
         if ran > 0 {
             let runs = if ran == 1 { "run" } else { "runs" };
             self.show_success(format!(
-                "#{number}: {ran} failed {runs} going again on GitHub"
+                "{number}: {ran} failed {runs} going again on GitHub"
             ));
             self.refresh_pr_reviews();
         }
@@ -308,12 +313,11 @@ impl Gerdr {
         let Some(f) = self.feature(project, slug) else {
             return self.show_warning("That review is gone".into());
         };
-        let Some(pull) = f.pull() else {
-            return;
+        let Some((first, _)) = f.pr_moved() else {
+            let n = f.pull().map_or(0, |p| p.number);
+            return self.show_warning(format!("#{n} is on its head already"));
         };
-        let Some(to) = pull.moved().cloned() else {
-            return self.show_warning(format!("#{} is on its head already", pull.number));
-        };
+        let number = first.number;
         if f.status != Status::Open || f.writer.is_some() {
             return self.show_warning(format!(
                 "“{}” is done or open on another machine: nothing to update here",
@@ -323,20 +327,26 @@ impl Gerdr {
         if self.feature_busy(project, slug) {
             return self.show_warning(format!("“{}” has work running: wait for it", f.title));
         }
-        let Some(repo) = f.repos.first().cloned() else {
-            return;
-        };
-        let pull = pull.clone();
+        // Every pull request GitHub moved, each in its repository.
+        let moves: Vec<(feature::Repo, pr::PullRef, pr::Remote)> = (f.pulls().iter())
+            .filter_map(|p| {
+                let to = p.moved()?.clone();
+                let repo = f.repo(&p.repo).or(f.repos.first())?.clone();
+                Some((repo, p.clone(), to))
+            })
+            .collect();
         let busy = Busy {
             project: project.to_owned(),
             slug: slug.to_owned(),
             job: Job::PrHead,
             repo: None,
-            what: format!("Updating #{} to its new head", pull.number),
+            what: format!("Updating #{number} to its new head"),
         };
         let (project, slug) = (project.to_owned(), slug.to_owned());
         self.feature_work(Some(busy), move |_| Done::PrMoved {
-            result: layout::update_pr(&repo, &pull, &to),
+            results: (moves.iter())
+                .map(|(repo, pull, to)| (repo.key(), layout::update_pr(repo, pull, to)))
+                .collect(),
             project,
             slug,
         });
@@ -348,32 +358,42 @@ impl Gerdr {
         &mut self,
         project: &str,
         slug: &str,
-        result: Result<layout::MovedPr, String>,
+        results: Vec<(String, Result<layout::MovedPr, String>)>,
     ) {
         self.unbusy(project, slug, Job::PrHead);
-        let moved = match result {
-            Ok(moved) => moved,
-            Err(why) => {
-                tracing::warn!("updating {project}/{slug} to its new head: {why}");
-                return self.show_error(format!("Couldn't update to the new head: {why}"));
+        let mut done = Vec::new();
+        for (key, result) in results {
+            let moved = match result {
+                Ok(moved) => moved,
+                Err(why) => {
+                    tracing::warn!("updating {key} of {project}/{slug} to its new head: {why}");
+                    self.show_error(format!("Couldn't update {key} to its new head: {why}"));
+                    continue;
+                }
+            };
+            let Some(f) = self.feature_mut(project, slug) else {
+                return;
+            };
+            if let Some(repo) = f.repos.iter_mut().find(|r| r.key() == key) {
+                repo.base = moved.base.clone();
+                repo.base_commit = moved.base_commit.clone();
             }
-        };
-        let Some(f) = self.feature_mut(project, slug) else {
-            return;
-        };
-        if let Some(repo) = f.repos.first_mut() {
-            repo.base = moved.base.clone();
-            repo.base_commit = moved.base_commit.clone();
+            let first = f.repos.first().is_some_and(|r| r.key() == key);
+            let Some(pull) =
+                (f.pulls_mut().iter_mut()).find(|p| p.repo == key || (p.repo.is_empty() && first))
+            else {
+                continue;
+            };
+            pull.moved_to(&moved.head_sha, &moved.base_ref);
+            let text = format!("#{} updated to {}", pull.number, pull.short_head());
+            f.log(feature::now(), text.clone());
+            done.push(text);
         }
-        // shortcut: the first pull request only, until increment B moves each.
-        let Some(pull) = f.pulls_mut().first_mut() else {
+        if done.is_empty() {
             return;
-        };
-        pull.moved_to(&moved.head_sha, &moved.base_ref);
-        let text = format!("#{} updated to {}", pull.number, pull.short_head());
-        f.log(feature::now(), text.clone());
+        }
         self.save_feature(project, slug);
-        self.show_success(text);
+        self.show_success(done.join(", "));
         // Its code is read: new code sends it back to Verify.
         self.probe_feature(project, slug);
         self.feature_cursor_to_current_of(project, slug);
@@ -385,8 +405,8 @@ impl Gerdr {
             return;
         };
         let submitted = (f.shipping.reviews.last()).map(|r| r.event.done());
-        let ended = f.pull().and_then(pr::PullRef::ended);
-        let own_at_ship = f.pull().is_some_and(pr::PullRef::works_here)
+        let ended = f.pr_ended();
+        let own_at_ship = f.pulls().iter().any(pr::PullRef::works_here)
             && f.current() == Some(feature::Stage::Ship);
         let how = match (ended, submitted) {
             (Some(end), _) if end.merged() => "It was merged on GitHub".to_owned(),
@@ -418,13 +438,10 @@ impl Gerdr {
         let Some(f) = self.feature_mut(project, slug) else {
             return;
         };
-        let Some(pull) = f.pull() else {
-            return;
-        };
-        if f.status != Status::Open {
+        if f.pull().is_none() || f.status != Status::Open {
             return;
         }
-        let how = match (pull.ended(), f.shipping.reviews.last()) {
+        let how = match (f.pr_ended(), f.shipping.reviews.last()) {
             (Some(end), _) if end.merged() => "merged on GitHub".to_owned(),
             (Some(_), _) => "closed on GitHub".to_owned(),
             (None, Some(r)) => format!("{} on GitHub", r.event.done()),

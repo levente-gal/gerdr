@@ -441,12 +441,18 @@ pub(crate) fn gate_of(
     }
     // A pull request's review goes by its pull request first: new code is
     // to be reviewed, and one that ended has nothing to review.
-    if let Some(pull) = f.pull() {
+    if f.pull().is_some() {
         let at = f.current().unwrap_or(Stage::Ship);
-        if let Some(ended) = pull.ended() {
-            return Some((at, ended.at, GateKind::PrEnded { merged: ended.merged() }));
+        if let Some(ended) = f.pr_ended() {
+            return Some((
+                at,
+                ended.at,
+                GateKind::PrEnded {
+                    merged: ended.merged(),
+                },
+            ));
         }
-        if let Some(moved) = pull.moved() {
+        if let Some((_, moved)) = f.pr_moved() {
             return Some((at, moved.at, GateKind::NewHead));
         }
     }
@@ -500,7 +506,11 @@ pub(crate) fn gate_of(
             let count = |state| u32::try_from(review.count(state)).unwrap_or(u32::MAX);
             let open = count(FindingState::Open);
             // Those to comment on GitHub wait for the review, not for AI review.
-            let fix = if review.posts { 0 } else { count(FindingState::Fix) };
+            let fix = if review.posts {
+                0
+            } else {
+                count(FindingState::Fix)
+            };
             (open > 0 || fix > 0).then_some((stage, since, GateKind::Findings { open, fix }))
         }
         Stage::CodeReview => {
@@ -752,10 +762,7 @@ pub(crate) fn stage_model_slot(
     workflow: Option<&Workflow>,
     installed: &[CliAgent],
 ) -> Option<ModelSlot> {
-    if feature.status != Status::Open
-        || needs(stage).is_none()
-        || feature.is_done(stage)
-    {
+    if feature.status != Status::Open || needs(stage).is_none() || feature.is_done(stage) {
         return None;
     }
     let Pick::Agent(agent, base) = stage_pick(feature, stage, workflow, installed) else {
@@ -778,10 +785,7 @@ pub(crate) fn stage_chips(
     workflow: Option<&Workflow>,
     installed: &[CliAgent],
 ) -> Vec<AgentChip> {
-    if feature.status != Status::Open
-        || needs(stage).is_none()
-        || feature.is_done(stage)
-    {
+    if feature.status != Status::Open || needs(stage).is_none() || feature.is_done(stage) {
         return Vec::new();
     }
     let mut agents: Vec<(String, String)> = installed
@@ -1015,6 +1019,7 @@ pub(crate) fn vars(
         ("pr.head", pull(&|p| p.head_ref.clone())),
         ("pr.base", pull(&|p| p.base_ref.clone())),
         ("pr.checks", pull(&pull_checks)),
+        ("pr.others", pull_others(feature)),
         ("review.diffs", String::new()),
         ("review.sent", String::new()),
         ("review.dismissed", String::new()),
@@ -1733,7 +1738,11 @@ impl Gerdr {
             self.log_not_started(project, slug, stage, &why);
             return false;
         }
-        let machine = match if in_t3 { Placed::Here } else { self.placed(&feature, stage) } {
+        let machine = match if in_t3 {
+            Placed::Here
+        } else {
+            self.placed(&feature, stage)
+        } {
             Placed::Here => None,
             Placed::There(id) => Some(id),
             Placed::Away(name) => {
@@ -1858,7 +1867,11 @@ impl Gerdr {
             .and_then(|r| r.pane.clone());
         let job = match (machine.as_deref(), waiting) {
             (Some(id), None) => {
-                let kind = if at_once { StartKind::Sent } else { StartKind::Held };
+                let kind = if at_once {
+                    StartKind::Sent
+                } else {
+                    StartKind::Held
+                };
                 let job = self.machine_start_job(id, &feature, (stage, n, kind), &base, &command);
                 let Some(job) = job else {
                     let why = format!("{} can't be reached", self.machine_name(id));
@@ -2853,6 +2866,31 @@ fn startable(feature: &Feature, stage: Stage) -> Result<(), String> {
     }
 }
 
+/// The pull requests of `feature` reviewed with its first, a line each,
+/// for its reviewer's prompt; none for a review of one.
+fn pull_others(feature: &Feature) -> String {
+    (feature.pulls().iter().skip(1))
+        .map(|p| {
+            let repo = feature
+                .repo(&p.repo)
+                .map_or(p.repo.as_str(), |r| r.name.as_str());
+            let by = match p.author.is_empty() {
+                true => String::new(),
+                false => format!(" by @{}", p.author),
+            };
+            let checks = match pull_checks(p) {
+                checks if checks.is_empty() => String::new(),
+                checks => format!("; GitHub's checks: {checks}"),
+            };
+            format!(
+                "- {repo}: #{}{by}, `{}` into `{}`: {}{checks}",
+                p.number, p.head_ref, p.base_ref, p.url
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// How GitHub's checks of a pull request's head stand, for its reviewer's
 /// prompt: "4 of 5 passed, 1 failed (lint)"; none before they are read.
 fn pull_checks(pull: &crate::feature::pr::PullRef) -> String {
@@ -2870,7 +2908,11 @@ fn pull_checks(pull: &crate::feature::pr::PullRef) -> String {
         .map(|c| c.name.as_str())
         .collect();
     if !failed.is_empty() {
-        text.push_str(&format!(", {} failed ({})", failed.len(), failed.join(", ")));
+        text.push_str(&format!(
+            ", {} failed ({})",
+            failed.len(),
+            failed.join(", ")
+        ));
     }
     text
 }
@@ -3854,7 +3896,15 @@ mod tests {
             Verdict::Wait
         );
         assert_eq!(
-            judge(&mut w, None, true, &partial, false, false, t + MILESTONE_QUIET),
+            judge(
+                &mut w,
+                None,
+                true,
+                &partial,
+                false,
+                false,
+                t + MILESTONE_QUIET
+            ),
             stop
         );
         // Its tab gone: stopped there too.

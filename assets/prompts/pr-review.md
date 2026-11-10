@@ -5,6 +5,12 @@ review its code with fresh eyes, before a person does.
 {{> repos}}
 
 The pull request takes `{{pr.head}}` into `{{pr.base}}`: {{pr.url}}
+{{#if pr.others}}
+
+It is one change with these, each in its repository, reviewed together:
+
+{{pr.others}}
+{{/if}}
 
 Your job: find what is wrong with the change.
 

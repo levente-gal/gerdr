@@ -59,7 +59,7 @@ impl Gerdr {
                 f.title
             ));
         }
-        if pull.mine && event != Event::Comment {
+        if f.pulls().iter().all(|p| p.mine) && event != Event::Comment {
             return Some(
                 "GitHub doesn't take an approval or a change request of your own pull request"
                     .into(),
@@ -83,9 +83,9 @@ impl Gerdr {
         let Some(f) = self.feature(project, slug) else {
             return;
         };
-        let Some(pull) = f.pull() else {
+        if f.pulls().is_empty() {
             return;
-        };
+        }
         if let Some(why) = self.submit_refusal(f, event) {
             return self.show_warning(why);
         }
@@ -103,9 +103,21 @@ impl Gerdr {
             1 => "1 comment goes, on its line where GitHub shows it".to_owned(),
             n => format!("{n} comments go, each on its line where GitHub shows it"),
         };
-        let body = format!("{what}\nIt is posted as you and can't be taken back from gerdr");
+        let mut body = format!("{what}\nIt is posted as you and can't be taken back from gerdr");
+        // GitHub refuses Approve and Request changes on your own pull request.
+        let yours: Vec<String> = (f.pulls().iter())
+            .filter(|p| p.mine && event != Event::Comment)
+            .map(|p| format!("#{}", p.number))
+            .collect();
+        if !yours.is_empty() {
+            body.push_str(&format!(
+                "\n{} is yours: it gets a comment",
+                yours.join(", ")
+            ));
+        }
         let verb = event.label().trim_end_matches('\u{2026}');
-        let title = format!("{verb} on #{}?", pull.number);
+        let numbers: Vec<String> = f.pulls().iter().map(|p| format!("#{}", p.number)).collect();
+        let title = format!("{verb} on {}?", numbers.join(" and "));
         let then = Then::SubmitReview {
             project: project.to_owned(),
             slug: slug.to_owned(),
@@ -124,26 +136,62 @@ impl Gerdr {
         if let Some(why) = self.submit_refusal(f, event) {
             return self.show_warning(why);
         }
-        let (Some(pull), Some(repo)) = (f.pull().cloned(), f.repos.first().cloned()) else {
+        let Some(first) = f.pull().cloned() else {
             return;
         };
         let items = self.submit_items(f);
         let data = store::dir(None, project, slug);
         let n = f.shipping.reviews.len() + 1;
+        let text = std::fs::read_to_string(data.join(BODY_FILE)).unwrap_or_default();
+        // One review per pull request: its own items; the first takes the
+        // rest and the user's words, naming the others. GitHub takes only a
+        // comment on one's own.
+        let others: Vec<String> = (f.pulls().iter().skip(1))
+            .map(|p| format!("#{}", p.number))
+            .collect();
+        let mut jobs = Vec::new();
+        for (k, pull) in f.pulls().iter().enumerate() {
+            let Some(repo) = f.repo(&pull.repo).or(f.repos.first()).cloned() else {
+                continue;
+            };
+            let mine = pr_submit::of_pull(f, &items, &pull.repo, k == 0);
+            let ev = if pull.mine { Event::Comment } else { event };
+            let own = match (k, others.is_empty()) {
+                (0, true) => text.clone(),
+                (0, false) => format!(
+                    "{}\n\nReviewed together with {}.",
+                    text.trim(),
+                    others.join(", ")
+                )
+                .trim()
+                .to_owned(),
+                _ => String::new(),
+            };
+            // Nothing to say on it: left out.
+            if ev == Event::Comment && mine.is_empty() && own.trim().is_empty() && k > 0 {
+                continue;
+            }
+            jobs.push((repo, pull.clone(), mine, ev, own));
+        }
         let busy = Busy {
             project: project.to_owned(),
             slug: slug.to_owned(),
             job: Job::PrHead,
             repo: None,
-            what: format!("Submitting the review of #{}", pull.number),
+            what: format!("Submitting the review of #{}", first.number),
         };
         let (project, slug) = (project.to_owned(), slug.to_owned());
         self.feature_work(Some(busy), move |_| {
-            let result = post(&repo, &pull, &data, n, event, items).map(Box::new);
+            let results = (jobs.into_iter())
+                .map(|(repo, pull, items, ev, own)| {
+                    let done = post(&repo, &pull, &data, n, ev, items, &own).map(Box::new);
+                    (pull.number, done)
+                })
+                .collect();
             Done::ReviewPosted {
                 project,
                 slug,
-                result,
+                results,
             }
         });
     }
@@ -154,16 +202,43 @@ impl Gerdr {
         &mut self,
         project: &str,
         slug: &str,
-        result: Result<Box<Submitted>, String>,
+        results: Vec<(u64, Result<Box<Submitted>, String>)>,
     ) {
         self.unbusy(project, slug, Job::PrHead);
-        let done = match result {
-            Ok(done) => *done,
-            Err(why) => {
-                tracing::warn!("submitting the review of {project}/{slug}: {why}");
-                return self.show_error(format!("Couldn't submit the review: {why}"));
+        let mut went = false;
+        for (number, result) in results {
+            match result {
+                Ok(done) => {
+                    went = true;
+                    self.one_posted(project, slug, *done);
+                }
+                Err(why) => {
+                    tracing::warn!("submitting the review of #{number} of {project}/{slug}: {why}");
+                    self.show_error(format!("Couldn't submit the review of #{number}: {why}"));
+                }
             }
-        };
+        }
+        if !went {
+            return;
+        }
+        // The review's text went with it: the next starts empty.
+        let data = store::dir(None, project, slug);
+        let n = self
+            .feature(project, slug)
+            .map_or(1, |f| f.shipping.reviews.len());
+        let body = data.join(BODY_FILE);
+        if body.exists()
+            && let Err(err) = std::fs::rename(&body, data.join(format!("review-{n}.md")))
+        {
+            tracing::warn!("keeping {}: {err}", body.display());
+        }
+        self.probe_feature(project, slug);
+        self.refresh_pr_reviews();
+    }
+
+    /// One pull request's review went (`done`): mark what went as posted and
+    /// keep the review.
+    fn one_posted(&mut self, project: &str, slug: &str, done: Submitted) {
         let data = store::dir(None, project, slug);
         let n = self
             .feature(project, slug)
@@ -193,13 +268,6 @@ impl Gerdr {
                 ));
             }
         }
-        // The review's text went with it: the next starts empty.
-        let body = data.join(BODY_FILE);
-        if body.exists()
-            && let Err(err) = std::fs::rename(&body, data.join(format!("review-{n}.md")))
-        {
-            tracing::warn!("keeping {}: {err}", body.display());
-        }
         let criteria = self.criteria(project, slug).to_vec();
         let Some(f) = self.feature_mut(project, slug) else {
             return;
@@ -218,11 +286,8 @@ impl Gerdr {
             manual::mark_sent(&mut f.manual, &criteria);
         }
         let posted = done.posted;
-        let mut text = format!(
-            "Review of #{} submitted: {}",
-            f.pull().map_or(0, |p| p.number),
-            posted.event.done()
-        );
+        let number = f.pull_of(&posted.repo).map_or(0, |p| p.number);
+        let mut text = format!("Review of #{number} submitted: {}", posted.event.done());
         match (posted.inline, posted.in_body) {
             (0, 0) => {}
             (i, 0) => text.push_str(&format!(", {i} on lines")),
@@ -241,8 +306,6 @@ impl Gerdr {
             .unwrap_or(self.active_workspace);
         let open = ("Open".to_owned(), MenuAction::OpenPage(w, url));
         self.toast_with(text, Level::Success, Some(open));
-        self.probe_feature(project, slug);
-        self.refresh_pr_reviews();
     }
 
     /// Ask before pushing the commits of the user's own pull request
@@ -251,26 +314,53 @@ impl Gerdr {
         let Some(f) = self.feature(project, slug) else {
             return;
         };
-        let Some(pull) = f.pull().filter(|p| p.works_here()) else {
-            return self
-                .show_warning("Only your own pull request's branch is pushed from here".into());
-        };
         if self.feature_busy(project, slug) {
             return self.show_warning(format!(
                 "\u{201c}{}\u{201d} has work running: wait for it",
                 f.title
             ));
         }
-        let body = format!(
-            "Its fixes go to GitHub, onto {}\nOnly while GitHub's branch is still at {}",
-            pull.head_ref,
-            pull.short_head()
-        );
+        let pushes = self.to_push(f);
+        if pushes.is_empty() {
+            return self.show_warning("Nothing fixed here to push".into());
+        }
+        let lines: Vec<String> = (pushes.iter())
+            .map(|(_, p)| {
+                format!(
+                    "#{} onto {}, while still at {}",
+                    p.number,
+                    p.head_ref,
+                    p.short_head()
+                )
+            })
+            .collect();
+        let body = format!("Its fixes go to GitHub:\n{}", lines.join("\n"));
         let then = Then::PushPr {
             project: project.to_owned(),
             slug: slug.to_owned(),
         };
-        self.ask(format!("Push to {}?", pull.head_ref), body, "Push", then);
+        let to = match pushes.as_slice() {
+            [(_, one)] => one.head_ref.clone(),
+            many => format!("{} branches", many.len()),
+        };
+        self.ask(format!("Push to {to}?"), body, "Push", then);
+    }
+
+    /// The pull requests of `f` worked on here whose repository's head, as
+    /// its code was last read, isn't theirs on GitHub; all worked on here
+    /// before it was read.
+    fn to_push(&self, f: &Feature) -> Vec<(feature::Repo, feature::pr::PullRef)> {
+        let heads = (self.last_probe(&f.project, &f.slug))
+            .and_then(|p| p.reading.as_ref().ok())
+            .map(|r| &r.heads);
+        (f.pulls().iter())
+            .filter(|p| p.works_here())
+            .filter_map(|p| {
+                let repo = f.repo(&p.repo).or(f.repos.first())?;
+                let moved = heads.is_none_or(|h| h.get(&repo.key()) != Some(&p.head_sha));
+                moved.then(|| (repo.clone(), p.clone()))
+            })
+            .collect()
     }
 
     /// Push the commits of the user's own pull request review `slug`, off
@@ -279,10 +369,8 @@ impl Gerdr {
         let Some(f) = self.feature(project, slug) else {
             return;
         };
-        let (Some(pull), Some(repo)) = (
-            f.pull().filter(|p| p.works_here()).cloned(),
-            f.repos.first().cloned(),
-        ) else {
+        let pushes = self.to_push(f);
+        let Some((_, first)) = pushes.first() else {
             return;
         };
         let busy = Busy {
@@ -290,11 +378,13 @@ impl Gerdr {
             slug: slug.to_owned(),
             job: Job::PrHead,
             repo: None,
-            what: format!("Pushing to {}", pull.head_ref),
+            what: format!("Pushing to {}", first.head_ref),
         };
         let (project, slug) = (project.to_owned(), slug.to_owned());
         self.feature_work(Some(busy), move |_| Done::PrPushed {
-            result: push(&repo, &pull),
+            results: (pushes.iter())
+                .map(|(repo, pull)| (pull.number, push(repo, pull)))
+                .collect(),
             project,
             slug,
         });
@@ -302,28 +392,40 @@ impl Gerdr {
 
     /// The user's own pull request review `slug` was pushed, or not: its
     /// worktree's head is the pull request's now.
-    pub(crate) fn pr_pushed(&mut self, project: &str, slug: &str, result: Result<String, String>) {
+    pub(crate) fn pr_pushed(
+        &mut self,
+        project: &str,
+        slug: &str,
+        results: Vec<(u64, Result<String, String>)>,
+    ) {
         self.unbusy(project, slug, Job::PrHead);
-        let head = match result {
-            Ok(head) => head,
-            Err(why) => {
-                tracing::warn!("pushing {project}/{slug}: {why}");
-                return self.show_error(format!("Couldn't push: {why}"));
-            }
-        };
-        let Some(f) = self.feature_mut(project, slug) else {
+        let mut done = Vec::new();
+        for (number, result) in results {
+            let head = match result {
+                Ok(head) => head,
+                Err(why) => {
+                    tracing::warn!("pushing #{number} of {project}/{slug}: {why}");
+                    self.show_error(format!("Couldn't push #{number}: {why}"));
+                    continue;
+                }
+            };
+            let Some(f) = self.feature_mut(project, slug) else {
+                return;
+            };
+            let Some(pull) = f.pulls_mut().iter_mut().find(|p| p.number == number) else {
+                continue;
+            };
+            let base = pull.base_ref.clone();
+            pull.moved_to(&head, &base);
+            let text = format!("Pushed to {} at {}", pull.head_ref, pull.short_head());
+            f.log(feature::now(), text.clone());
+            done.push(text);
+        }
+        if done.is_empty() {
             return;
-        };
-        // shortcut: the first pull request only, until increment B pushes each.
-        let Some(pull) = f.pulls_mut().first_mut() else {
-            return;
-        };
-        let base = pull.base_ref.clone();
-        pull.moved_to(&head, &base);
-        let text = format!("Pushed to {} at {}", pull.head_ref, pull.short_head());
-        f.log(feature::now(), text.clone());
+        }
         self.save_feature(project, slug);
-        self.show_success(text);
+        self.show_success(done.join(", "));
         self.probe_feature(project, slug);
         self.refresh_pr_reviews();
     }
@@ -338,7 +440,8 @@ impl Gerdr {
         let Some(f) = self.feature(project, slug) else {
             return;
         };
-        let Some(pull) = f.pull().filter(|p| !p.own()).cloned() else {
+        let others: Vec<_> = (f.pulls().iter()).filter(|p| !p.own()).cloned().collect();
+        let Some(pull) = others.first() else {
             return self.show_warning("Your own pull request is fixed here already".into());
         };
         if f.status != Status::Open || f.writer.is_some() {
@@ -358,9 +461,9 @@ impl Gerdr {
             }
             return self.set_fix_here(project, slug, None);
         }
-        let Some(dir) = f.repos.first().map(|r| r.main.clone()) else {
-            return;
-        };
+        let asks: Vec<_> = (others.iter())
+            .filter_map(|p| Some((f.repo(&p.repo).or(f.repos.first())?.main.clone(), p.clone())))
+            .collect();
         let busy = Busy {
             project: project.to_owned(),
             slug: slug.to_owned(),
@@ -370,60 +473,82 @@ impl Gerdr {
         };
         let (project, slug) = (project.to_owned(), slug.to_owned());
         self.feature_work(Some(busy), move |_| Done::PushAccess {
-            result: feature::pr::push_access(&dir, &pull),
+            results: (asks.iter())
+                .map(|(dir, pull)| (pull.number, feature::pr::push_access(dir, pull)))
+                .collect(),
             project,
             slug,
         });
     }
 
-    /// Whether the user can push to review `slug`'s pull request is known:
-    /// ask before fixing it here, or say why it can't be.
+    /// Whether the user can push to each of review `slug`'s pull requests
+    /// is known: ask before fixing them here, or say why one can't be.
     pub(crate) fn push_access_read(
         &mut self,
         project: &str,
         slug: &str,
-        result: Result<Result<String, String>, String>,
+        results: Vec<(u64, feature::pr::Access)>,
     ) {
         self.unbusy(project, slug, Job::PrHead);
-        let head_repo = match result {
-            Ok(Ok(head_repo)) => head_repo,
-            Ok(Err(why)) => return self.show_warning(format!("Can't fix it here: {why}")),
-            Err(why) => {
-                tracing::warn!("reading who can push to {project}/{slug}: {why}");
-                return self.show_error(format!("Couldn't tell whether you can push to it: {why}"));
+        let mut head_repos = Vec::new();
+        for (number, result) in results {
+            match result {
+                Ok(Ok(head_repo)) => head_repos.push((number, head_repo)),
+                Ok(Err(why)) => {
+                    return self.show_warning(format!("Can't fix #{number} here: {why}"));
+                }
+                Err(why) => {
+                    tracing::warn!("reading who can push to #{number} of {project}/{slug}: {why}");
+                    return self.show_error(format!(
+                        "Couldn't tell whether you can push to #{number}: {why}"
+                    ));
+                }
             }
-        };
-        let Some(pull) = self.feature(project, slug).and_then(Feature::pull) else {
+        }
+        let Some(f) = self.feature(project, slug) else {
             return;
         };
+        let lines: Vec<String> = (head_repos.iter())
+            .filter_map(|(n, at)| {
+                let pull = f.pulls().iter().find(|p| p.number == *n)?;
+                Some(format!("#{n} to {} on {at}", pull.head_ref))
+            })
+            .collect();
         let body = format!(
-            "Its code runs here: setup, its checks, and an agent fixing it\nIts fixes go to {} on {head_repo} when you push them from Ship",
-            pull.head_ref
+            "Its code runs here: setup, its checks, and an agent fixing it\nIts fixes go out when you push them from Ship:\n{}",
+            lines.join("\n")
         );
+        let numbers: Vec<String> = head_repos.iter().map(|(n, _)| format!("#{n}")).collect();
         let then = Then::FixHere {
             project: project.to_owned(),
             slug: slug.to_owned(),
-            head_repo,
+            head_repos,
         };
         self.ask(
-            format!("Fix #{} here?", pull.number),
+            format!("Fix {} here?", numbers.join(", ")),
             body,
             "Fix here",
             then,
         );
     }
 
-    /// Review `slug` fixes its pull request here (`head_repo` its branch's
-    /// repository), or comments again (`None`).
-    pub(crate) fn set_fix_here(&mut self, project: &str, slug: &str, head_repo: Option<String>) {
+    /// Review `slug` fixes its pull requests here (`head_repos` their
+    /// branches' repositories, by number), or comments again (`None`).
+    pub(crate) fn set_fix_here(
+        &mut self,
+        project: &str,
+        slug: &str,
+        head_repos: Option<Vec<(u64, String)>>,
+    ) {
         let Some(f) = self.feature_mut(project, slug) else {
             return;
         };
-        let on = head_repo.is_some();
+        let on = head_repos.is_some();
         // The switch is the review's: every pull request of someone else's.
         for pull in f.pulls_mut().iter_mut().filter(|p| !p.own()) {
             pull.fix_here = on;
-            if let Some(head_repo) = &head_repo {
+            let to = (head_repos.iter().flatten()).find(|(n, _)| *n == pull.number);
+            if let Some((_, head_repo)) = to {
                 pull.head_repo = head_repo.clone();
             }
         }
@@ -466,6 +591,7 @@ fn post(
     n: usize,
     event: Event,
     items: Vec<pr_submit::Item>,
+    own: &str,
 ) -> Result<Submitted, String> {
     let range = format!("{}...{}", repo.base, pull.head_sha);
     let diff = run_git(
@@ -473,12 +599,11 @@ fn post(
         &["diff", "-U3", "--no-color", "--no-ext-diff", &range],
     )?;
     let hunks = pr_submit::Hunks::of(&diff);
-    let own = std::fs::read_to_string(data.join(BODY_FILE)).unwrap_or_default();
     let from: Vec<From> = items.iter().map(|i| i.from.clone()).collect();
     let path = format!("repos/{}/pulls/{}/reviews", pull.slug, pull.number);
     let send = |placed: &pr_submit::Placed| -> Result<String, String> {
-        let payload = pr_submit::payload(&pull.head_sha, event, &own, placed);
-        let file = data.join(format!("review-post-{n}.json"));
+        let payload = pr_submit::payload(&pull.head_sha, event, own, placed);
+        let file = data.join(format!("review-post-{n}-{}.json", pull.number));
         write(&file, &payload)?;
         let file = file.to_string_lossy();
         let args = [
@@ -513,6 +638,7 @@ fn post(
         .unwrap_or_else(|| pull.url.clone());
     Ok(Submitted {
         posted: Posted {
+            repo: repo.key(),
             at: feature::now(),
             event,
             url,

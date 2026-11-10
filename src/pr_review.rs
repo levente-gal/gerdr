@@ -25,7 +25,7 @@ impl Gerdr {
         (all.iter())
             .filter(|f| f.status == Status::Open)
             .find(|f| {
-                f.pull().is_some_and(|p| {
+                f.pulls().iter().any(|p| {
                     p.number == number
                         && p.host.eq_ignore_ascii_case(host)
                         && p.slug.eq_ignore_ascii_case(slug)

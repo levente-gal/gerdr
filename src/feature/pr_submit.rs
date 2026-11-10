@@ -107,6 +107,9 @@ pub enum From {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Item {
     pub from: From,
+    /// The repository it is in, by `Repo::key`: its pull request's review
+    /// takes it. None goes to the first pull request's.
+    pub repo: Option<String>,
     /// Where it is, if anywhere.
     pub spot: Option<Spot>,
     /// What it says, as Markdown.
@@ -141,6 +144,7 @@ pub fn items(
             line: f.line.map(|n| (Side::Right, n, None)),
         });
         out.push(Item {
+            repo: (!f.repo.is_empty()).then(|| f.repo.clone()),
             from: From::Finding(f.id.clone()),
             spot,
             body,
@@ -158,6 +162,9 @@ pub fn items(
         });
         let first = c.text.trim().lines().next().unwrap_or_default().to_owned();
         out.push(Item {
+            repo: (feature.repos.iter())
+                .find(|r| r.worktree == c.root)
+                .map(super::Repo::key),
             from: From::Comment(c.clone()),
             spot,
             body: c.text.trim().to_owned(),
@@ -181,6 +188,7 @@ pub fn items(
             ),
         };
         out.push(Item {
+            repo: None,
             from: From::Manual(criterion.id.clone()),
             spot: None,
             title: match criterion.comment {
@@ -333,9 +341,28 @@ pub fn payload(commit: &str, event: Event, own: &str, placed: &Placed) -> serde_
     })
 }
 
+/// `items` of the review of pull request `n` of `feature`'s (`pull.repo`,
+/// its first or not): those of its repository, and for its first, those of
+/// none or of a repository without one.
+pub fn of_pull(feature: &Feature, items: &[Item], repo: &str, first: bool) -> Vec<Item> {
+    let has = |key: &str| feature.pulls().iter().any(|p| p.repo == key);
+    (items.iter())
+        .filter(|item| match &item.repo {
+            Some(key) if key == repo => true,
+            Some(key) => first && !has(key),
+            None => first,
+        })
+        .cloned()
+        .collect()
+}
+
 /// A review submitted, kept in the record (`Shipping::reviews`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Posted {
+    /// The repository of the pull request it was on, by `Repo::key`; empty
+    /// in a review of one.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub repo: String,
     /// Unix seconds.
     pub at: u64,
     pub event: Event,
@@ -476,6 +503,40 @@ mod tests {
         // Refused lines: all of it in the text.
         let flat = place(all, &Hunks::of(DIFF), false);
         assert!(flat.inline.is_empty() && flat.in_body.len() == 6);
+    }
+
+    #[test]
+    fn each_pull_request_gets_what_is_on_its_repository() {
+        let item = |repo: Option<&str>, title: &str| Item {
+            from: From::Manual(title.into()),
+            repo: repo.map(str::to_owned),
+            spot: None,
+            body: String::new(),
+            title: title.into(),
+        };
+        let pull = |repo: &str| crate::feature::pr::PullRef {
+            repo: repo.into(),
+            ..Default::default()
+        };
+        let feature = Feature {
+            kind: crate::feature::Kind::PrReview(vec![pull("api"), pull("web")]),
+            ..Feature::default()
+        };
+        let all = vec![
+            item(Some("api"), "in api"),
+            item(Some("web"), "in web"),
+            item(Some("docs"), "in a repo with no pull request"),
+            item(None, "general"),
+        ];
+        let titles = |items: Vec<Item>| items.into_iter().map(|i| i.title).collect::<Vec<_>>();
+        assert_eq!(
+            titles(of_pull(&feature, &all, "api", true)),
+            vec!["in api", "in a repo with no pull request", "general"]
+        );
+        assert_eq!(
+            titles(of_pull(&feature, &all, "web", false)),
+            vec!["in web"]
+        );
     }
 
     #[test]

@@ -327,6 +327,44 @@ impl Feature {
     }
 }
 
+impl Feature {
+    /// A pull request of it GitHub has another head or base of than its
+    /// worktree is on, while open: the first, and what GitHub has.
+    pub fn pr_moved(&self) -> Option<(&PullRef, &Remote)> {
+        self.pulls().iter().find_map(|p| Some((p, p.moved()?)))
+    }
+
+    /// How its pull requests ended, once all of them did: the last to.
+    pub fn pr_ended(&self) -> Option<&Remote> {
+        let ended: Option<Vec<&Remote>> = self.pulls().iter().map(PullRef::ended).collect();
+        ended
+            .filter(|all| !all.is_empty())?
+            .into_iter()
+            .max_by_key(|r| r.at)
+    }
+
+    /// GitHub's checks of the heads reviewed, all its pull requests' told
+    /// together: none until each is read.
+    pub fn pr_ci(&self) -> Option<Ci> {
+        let mut all = Ci::default();
+        for pull in self.pulls() {
+            let ci = pull.ci()?;
+            all.total += ci.total;
+            all.passed += ci.passed;
+            all.failed += ci.failed;
+            all.running += ci.running;
+        }
+        (!self.pulls().is_empty()).then_some(all)
+    }
+
+    /// Its pull requests' checks, each with the pull request it is of.
+    pub fn pr_checks(&self) -> Vec<(&PullRef, &CiCheck)> {
+        (self.pulls().iter())
+            .flat_map(|p| p.checks().unwrap_or_default().iter().map(move |c| (p, c)))
+            .collect()
+    }
+}
+
 /// A review's pull requests as a record has them: a list, or one alone, as
 /// a record from before reviews held several kept it.
 pub fn one_or_many<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<PullRef>, D::Error> {
@@ -384,9 +422,13 @@ struct Permission {
     viewer_permission: String,
 }
 
+/// Whether the user can push to a pull request's branch: its repository,
+/// or why not; or why GitHub couldn't be asked.
+pub type Access = Result<Result<String, String>, String>;
+
 /// Whether the user can push to `pull`'s branch, read with gh in `dir`: its
 /// head repository (`owner/repo`), or why not.
-pub fn push_access(dir: &Path, pull: &PullRef) -> Result<Result<String, String>, String> {
+pub fn push_access(dir: &Path, pull: &PullRef) -> Access {
     let n = pull.number.to_string();
     let arg = pull.repo_arg();
     let fields = "maintainerCanModify,isCrossRepository,headRepository,headRepositoryOwner";
@@ -912,5 +954,48 @@ mod tests {
         let read: Feature = serde_json::from_value(old).unwrap();
         assert_eq!(read.pulls().len(), 1);
         assert_eq!(read.pull_of("r").map(|p| p.number), Some(12));
+    }
+
+    #[test]
+    fn several_pull_requests_are_told_together() {
+        let remote = |head: &str, state: &str, at, checks| Remote {
+            at,
+            head_sha: head.into(),
+            base_ref: "main".into(),
+            state: state.into(),
+            checks,
+        };
+        let check = |state| CiCheck {
+            name: "test".into(),
+            state,
+            link: None,
+        };
+        let pull = |repo: &str, number| PullRef {
+            repo: repo.into(),
+            number,
+            head_sha: "aaa".into(),
+            base_ref: "main".into(),
+            ..PullRef::default()
+        };
+        let mut f = Feature {
+            kind: Kind::PrReview(vec![pull("api", 12), pull("web", 13)]),
+            ..Feature::default()
+        };
+        // CI waits for both to be read.
+        f.pulls_mut()[0].take_remote(remote("aaa", "OPEN", 1, vec![check(CiState::Passed)]));
+        assert_eq!(f.pr_ci(), None);
+        f.pulls_mut()[1].take_remote(remote("aaa", "OPEN", 1, vec![check(CiState::Failed)]));
+        let ci = f.pr_ci().unwrap();
+        assert_eq!((ci.total, ci.passed, ci.failed), (2, 1, 1));
+        assert_eq!(f.pr_checks().len(), 2);
+        // Either moving is new commits.
+        assert_eq!(f.pr_moved(), None);
+        f.pulls_mut()[1].take_remote(remote("bbb", "OPEN", 2, Vec::new()));
+        assert_eq!(f.pr_moved().map(|(p, _)| p.number), Some(13));
+        // Ended only once both did: the later.
+        f.pulls_mut()[0].take_remote(remote("aaa", "MERGED", 3, Vec::new()));
+        assert_eq!(f.pr_ended(), None);
+        f.pulls_mut()[1].take_remote(remote("bbb", "CLOSED", 4, Vec::new()));
+        assert_eq!(f.pr_ended().map(|r| r.at), Some(4));
     }
 }

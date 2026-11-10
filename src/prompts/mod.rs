@@ -18,7 +18,7 @@ pub fn builtin(name: &str) -> Option<(&'static str, u32)> {
         "plan-final" => (include_str!("../../assets/prompts/plan-final.md"), 1),
         "build" => (include_str!("../../assets/prompts/build.md"), 7),
         "ai-review" => (include_str!("../../assets/prompts/ai-review.md"), 3),
-        "pr-review" => (include_str!("../../assets/prompts/pr-review.md"), 1),
+        "pr-review" => (include_str!("../../assets/prompts/pr-review.md"), 2),
         "send-fixes" => (include_str!("../../assets/prompts/send-fixes.md"), 2),
         "fix-plan" => (include_str!("../../assets/prompts/fix-plan.md"), 2),
         "fix-go" => (include_str!("../../assets/prompts/fix-go.md"), 3),
@@ -67,6 +67,7 @@ mod tests {
             ("pr.head", ""),
             ("pr.base", ""),
             ("pr.checks", ""),
+            ("pr.others", ""),
             ("feature.slug", "bulk-edit"),
             ("feature.dir", "/w/bulk-edit"),
             ("feature.data", "/d/bulk-edit"),
@@ -186,7 +187,11 @@ mod tests {
         assert!(text.contains("Do not post anything to GitHub"));
         // Unknown checks say nothing of them.
         v.insert("pr.checks".into(), String::new());
-        assert!(!render_builtin("pr-review", &v).unwrap().contains("GitHub's checks"));
+        assert!(
+            !render_builtin("pr-review", &v)
+                .unwrap()
+                .contains("GitHub's checks")
+        );
     }
 
     #[test]

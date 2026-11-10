@@ -123,11 +123,12 @@ pub enum Then {
     },
     /// Push the user's own pull request review's commits to GitHub.
     PushPr { project: String, slug: String },
-    /// Fix someone else's pull request here, pushing to `head_repo`.
+    /// Fix someone else's pull requests here, each pushing to its
+    /// `head_repos` entry (number, repository).
     FixHere {
         project: String,
         slug: String,
-        head_repo: String,
+        head_repos: Vec<(u64, String)>,
     },
     /// Approve this stage of this project's feature, its review comments
     /// deleted unsent (see `Gerdr::approve_doc_now`).
@@ -787,8 +788,8 @@ impl Gerdr {
             Then::FixHere {
                 project,
                 slug,
-                head_repo,
-            } => self.set_fix_here(&project, &slug, Some(head_repo)),
+                head_repos,
+            } => self.set_fix_here(&project, &slug, Some(head_repos)),
             Then::FinishFeature { project, slug } => self.finish_unshipped(&project, &slug),
             Then::FinishPrReview { project, slug } => self.finish_pr_review(&project, &slug),
             Then::UndoShip {
