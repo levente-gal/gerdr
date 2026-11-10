@@ -2279,7 +2279,9 @@ fn dump_machine() {
 /// on a run's button; a failed one with what to do and its fix; the add
 /// row; a machine Del was pressed on once; then the connected one's edit
 /// form: open with the keyboard in its address, trying the new address,
-/// and the address reaching another machine.
+/// the address reaching another machine, and two addresses with the
+/// keyboard in the second and the pointer on its ×; then the connected one
+/// found to be the same machine as another saved one.
 fn machines_panel(case: usize) -> super::MachinesPanelView {
     use super::{Dot, MachineDetailView, MachineEditView, MachineRowView, MachineRunView};
     use super::{MachinesFocus, MachinesHit, MachinesPanelView};
@@ -2292,7 +2294,7 @@ fn machines_panel(case: usize) -> super::MachinesPanelView {
         dot,
         armed,
     };
-    let rows = vec![
+    let mut rows = vec![
         row(
             "ZenBook",
             "lga@zenbook-office",
@@ -2380,11 +2382,32 @@ fn machines_panel(case: usize) -> super::MachinesPanelView {
         ),
         2 => (2, None, MachinesFocus::List, Some(MachinesHit::Hint(0))),
         3 => (1, Some(build_box), MachinesFocus::List, None),
+        8 => {
+            rows.push(row(
+                "ZenBook Office",
+                "lga-asset@zenbook-office",
+                "connected",
+                Dot::Done,
+                false,
+            ));
+            let mut zenbook = zenbook;
+            zenbook.facts.push("Same machine as ZenBook Office".into());
+            zenbook.buttons = strings(&["Merge ZenBook Office", "Remove", "Edit", "Disconnect"]);
+            (0, Some(zenbook), MachinesFocus::List, None)
+        }
         _ => {
             let (busy, failed) = (case == 5, case == 6);
+            let addresses = if case == 7 {
+                vec![
+                    Line::from("lga-asset@zenbook-office"),
+                    Line::from("lga-asset@192.168.101.14"),
+                ]
+            } else {
+                vec![Line::from("lga@zenbook-home")]
+            };
             let edit = MachineEditView {
                 name: Line::from("ZenBook"),
-                addresses: vec![Line::from("lga@zenbook-home")],
+                addresses,
                 error: failed
                     .then(|| "That address reaches another machine, not ZenBook".to_owned()),
                 how: failed.then(|| {
@@ -2406,6 +2429,10 @@ fn machines_panel(case: usize) -> super::MachinesPanelView {
             let (focus, hover) = match case {
                 4 => (MachinesFocus::EditAddress(0), Some(MachinesHit::EditButton(0))),
                 5 => (MachinesFocus::EditAddress(0), None),
+                7 => (
+                    MachinesFocus::EditAddress(1),
+                    Some(MachinesHit::EditRemoveAddress(1)),
+                ),
                 _ => (MachinesFocus::EditButton(2), None),
             };
             (0, Some(zenbook), focus, hover)
@@ -2431,7 +2458,7 @@ fn machines_panel(case: usize) -> super::MachinesPanelView {
     }
 }
 
-const MACHINES_PANEL: [&str; 7] = [
+const MACHINES_PANEL: [&str; 9] = [
     "machines_connected",
     "machines_failed",
     "machines_add",
@@ -2439,6 +2466,8 @@ const MACHINES_PANEL: [&str; 7] = [
     "machines_edit",
     "machines_edit_trying",
     "machines_edit_failed",
+    "machines_edit_addresses",
+    "machines_same_machine",
 ];
 
 fn paint_machines_panel(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
@@ -2450,16 +2479,18 @@ fn paint_machines_panel(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64>
 }
 
 /// The recorded hashes of `MACHINES_PANEL`, per case in `CASES`.
-const GOLDEN_MACHINES_PANEL: [[u64; 7]; 4] = [
+const GOLDEN_MACHINES_PANEL: [[u64; 9]; 4] = [
     // Dark at 1
     [
         0xb3bbd7c00f663678, // machines_connected
         0x9881840348789585, // machines_failed
         0x2148dc185bdafe72, // machines_add
         0x26c0bcd36540a9f6, // machines_armed
-        0x7bd04a1a564c373f, // machines_edit
+        0x7e530bb4def3f8d3, // machines_edit
         0xb8764ccc0974206b, // machines_edit_trying
-        0xb0e28cebacf474fd, // machines_edit_failed
+        0xe7eb48d4d04e0ffd, // machines_edit_failed
+        0x1ab1723f02ddde57, // machines_edit_addresses
+        0x6b6326bbcb46cad2, // machines_same_machine
     ],
     // Dark at 2
     [
@@ -2467,9 +2498,11 @@ const GOLDEN_MACHINES_PANEL: [[u64; 7]; 4] = [
         0xfe3c1043f9ae1011, // machines_failed
         0x6b739219f9cf9d3d, // machines_add
         0x458acde34e5587a0, // machines_armed
-        0x2f7178f82bf8bf77, // machines_edit
+        0x7a3edb1c49674ff3, // machines_edit
         0xab5dc903d00147e0, // machines_edit_trying
-        0xd0d24075ebcf8388, // machines_edit_failed
+        0x8bd171022e12398c, // machines_edit_failed
+        0xf666985e4fee7839, // machines_edit_addresses
+        0x962163292c81676a, // machines_same_machine
     ],
     // Light at 1
     [
@@ -2477,9 +2510,11 @@ const GOLDEN_MACHINES_PANEL: [[u64; 7]; 4] = [
         0x7d5db1c15a7b6154, // machines_failed
         0xd0389130753a9a3a, // machines_add
         0xdbd24e06c3f789f7, // machines_armed
-        0xd86ba4cf2317a364, // machines_edit
+        0xbe9d8f25a5302ea0, // machines_edit
         0x69dbccb0746eda1d, // machines_edit_trying
-        0x381819bb66bb9b7d, // machines_edit_failed
+        0x90f6b00560ff2e95, // machines_edit_failed
+        0x10b8f0db2c615625, // machines_edit_addresses
+        0x23305368e435aec2, // machines_same_machine
     ],
     // Light at 2
     [
@@ -2487,9 +2522,11 @@ const GOLDEN_MACHINES_PANEL: [[u64; 7]; 4] = [
         0xfbd557aaeda5a316, // machines_failed
         0x65fb658e8be22c6b, // machines_add
         0x466f7a9c4ff722c8, // machines_armed
-        0xff4e448402f86f4a, // machines_edit
+        0x98fcc8b7dab8b031, // machines_edit
         0xdcc5a29ece1add73, // machines_edit_trying
-        0x6ac9ee69a468eb63, // machines_edit_failed
+        0x7b72421495074318, // machines_edit_failed
+        0x9020420a35940657, // machines_edit_addresses
+        0x9481d59f2bbdba7b, // machines_same_machine
     ],
 ];
 

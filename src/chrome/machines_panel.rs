@@ -10,7 +10,7 @@ use super::{
     ButtonStyle, Canvas, DETAIL_FONT_SIZE, DOT, Dot, FONT_SIZE, HELP_MARGIN, HELP_PADDING,
     HELP_TITLE_HEIGHT, HINTS_HEIGHT, LABEL_FONT_SIZE, ListBar, POPUP_RADIUS, Painter, Palette,
     QUIT_BUTTON, QUIT_BUTTON_GAP, QUIT_LINE_GAP, Rect, Rgb, SHADOW, SMALL_FONT_SIZE, Thumb, band,
-    button_width, dot_shape, hint_spots, hint_strs, icon_sdf, measure, phys,
+    button_width, cross, dot_shape, hint_spots, hint_strs, icon_sdf, measure, phys, rect_px,
 };
 
 /// How wide the panel is, at the most; it shrinks with the output, keeping
@@ -61,7 +61,19 @@ const MOST_LINES: usize = 3;
 /// `QUIT_LINE_GAP` apart).
 const EDIT_TOP: i32 = 4;
 const EDIT_LABEL_W: i32 = 80;
-const EDIT_LABELS: [&str; 2] = ["Name", "Address"];
+/// The labels left of the name and the first address; the first says
+/// "Addresses" when there are several, the next ones have none.
+const NAME_LABEL: &str = "Name";
+const ADDRESS_LABEL: &str = "Address";
+const ADDRESSES_LABEL: &str = "Addresses";
+/// The × taking an address out, at the right end of its row (on two
+/// addresses or more), and the room between it and the field.
+const REMOVE_W: i32 = 28;
+const REMOVE_GAP: i32 = 4;
+/// The "+ Add address" row under the addresses, in the field column.
+const ADD_GAP: i32 = 6;
+const ADD_H: i32 = 28;
+const ADD_ADDRESS: &str = "Add address";
 const NAME_HINT: &str = "What to call it";
 const ADDRESS_HINT: &str = "user@host";
 
@@ -338,10 +350,17 @@ fn buttons_h(buttons: &[String]) -> i32 {
     }
 }
 
+/// How high the edit form's rows are: the name, an address each, the add
+/// row (none while the address is tried).
+fn edit_rows_h(e: &MachineEditView) -> i32 {
+    let add = if e.busy { 0 } else { ADD_GAP + ADD_H };
+    QUIT_BUTTON + e.addresses.len() as i32 * (QUIT_LINE_GAP + QUIT_BUTTON) + add
+}
+
 /// How high the edit form is, under the heading.
 fn edit_h(e: &MachineEditView, width: i32) -> i32 {
     let lines: usize = edit_lines(e, width).iter().map(Vec::len).sum();
-    EDIT_TOP + 2 * QUIT_BUTTON + QUIT_LINE_GAP + lines_h(lines) + buttons_h(&e.buttons)
+    EDIT_TOP + edit_rows_h(e) + lines_h(lines) + buttons_h(&e.buttons)
 }
 
 /// How high the detail is without its runs (or its empty line).
@@ -506,7 +525,9 @@ pub fn machines_layout(view: &MachinesPanelView, output: Size<i32, Logical>) -> 
     let mut runs_track = None;
     let mut buttons = Vec::new();
     let mut edit_name = None;
-    let mut edit_address = None;
+    let mut edit_addresses = Vec::new();
+    let mut edit_removes = Vec::new();
+    let mut edit_add = None;
     let mut edit_buttons = Vec::new();
     let mut edit_labels = Vec::new();
     let mut edit_progress = Vec::new();
@@ -515,19 +536,51 @@ pub fn machines_layout(view: &MachinesPanelView, output: Size<i32, Logical>) -> 
     if let Some(d) = &view.detail {
         let (texts, outs) = if let Some(e) = &d.edit {
             // The form, its rows as the connect dialog's: a label, then a
-            // field.
+            // field; the addresses' after the name's, each with its × on
+            // two or more, then the row adding one.
             top += EDIT_TOP;
-            for (k, field) in [&mut edit_name, &mut edit_address].into_iter().enumerate() {
-                if k > 0 {
-                    top += QUIT_LINE_GAP;
+            let field_x = dx + EDIT_LABEL_W;
+            let field_w = (inner - EDIT_LABEL_W).max(1);
+            let label =
+                |top: i32| Rectangle::new((dx, top).into(), (EDIT_LABEL_W, QUIT_BUTTON).into());
+            edit_labels.push(label(top));
+            edit_name = Some(Rectangle::new(
+                (field_x, top).into(),
+                (field_w, QUIT_BUTTON).into(),
+            ));
+            top += QUIT_BUTTON;
+            // Shortened for the × on two or more, while tried too: the
+            // fields stay where they were.
+            let several = e.addresses.len() > 1;
+            let address_w = if several {
+                (field_w - REMOVE_W - REMOVE_GAP).max(1)
+            } else {
+                field_w
+            };
+            for i in 0..e.addresses.len() {
+                top += QUIT_LINE_GAP;
+                if i == 0 {
+                    edit_labels.push(label(top));
                 }
-                let row = line(top, QUIT_BUTTON);
-                edit_labels.push(Rectangle::new(row.loc, (EDIT_LABEL_W, QUIT_BUTTON).into()));
-                *field = Some(Rectangle::new(
-                    (dx + EDIT_LABEL_W, top).into(),
-                    ((inner - EDIT_LABEL_W).max(1), QUIT_BUTTON).into(),
+                edit_addresses.push(Rectangle::new(
+                    (field_x, top).into(),
+                    (address_w, QUIT_BUTTON).into(),
                 ));
+                edit_removes.push((several && !e.busy).then(|| {
+                    Rectangle::new(
+                        (field_x + field_w - REMOVE_W, top).into(),
+                        (REMOVE_W, QUIT_BUTTON).into(),
+                    )
+                }));
                 top += QUIT_BUTTON;
+            }
+            if !e.busy {
+                top += ADD_GAP;
+                edit_add = Some(Rectangle::new(
+                    (field_x, top).into(),
+                    (field_w, ADD_H).into(),
+                ));
+                top += ADD_H;
             }
             let [progress_lines, error_lines, how_lines] = edit_lines(e, inner);
             (
@@ -589,9 +642,9 @@ pub fn machines_layout(view: &MachinesPanelView, output: Size<i32, Logical>) -> 
     );
     MachinesLayout {
         edit_name,
-        edit_addresses: edit_address.into_iter().collect(),
-        edit_removes: Vec::new(),
-        edit_add: None,
+        edit_addresses,
+        edit_removes,
+        edit_add,
         edit_buttons,
         edit_labels,
         edit_progress,
@@ -640,15 +693,35 @@ impl MachinesLayout {
         if let Some(b) = self.edit_buttons.iter().position(on) {
             return Some(MachinesHit::EditButton(b));
         }
-        // A click on a label goes to its field, as on a form.
-        let fields = [
-            (self.edit_name, MachinesHit::EditName),
-            (self.edit_addresses.first().copied(), MachinesHit::EditAddress(0)),
-        ];
-        for ((field, hit), label) in fields.into_iter().zip(&self.edit_labels) {
-            if field.is_some_and(|f| on(&label.merge(f))) {
-                return Some(hit);
+        // The × before the field it takes out, should they ever meet.
+        let remove = self
+            .edit_removes
+            .iter()
+            .position(|r| r.is_some_and(|r| on(&r)));
+        if let Some(i) = remove {
+            return Some(MachinesHit::EditRemoveAddress(i));
+        }
+        // A click on a label goes to its field, as on a form: the name's
+        // is the first label, the first address's the second.
+        let with_label =
+            |field: Rect, label: Option<&Rect>| label.map_or(field, |l| l.merge(field));
+        for (i, field) in self.edit_addresses.iter().enumerate() {
+            let label = if i == 0 {
+                self.edit_labels.get(1)
+            } else {
+                None
+            };
+            if on(&with_label(*field, label)) {
+                return Some(MachinesHit::EditAddress(i));
             }
+        }
+        if self.edit_add.is_some_and(|r| on(&r)) {
+            return Some(MachinesHit::EditAddAddress);
+        }
+        if let Some(name) = self.edit_name
+            && on(&with_label(name, self.edit_labels.first()))
+        {
+            return Some(MachinesHit::EditName);
         }
         if let Some(k) = self.runs.iter().position(on) {
             return Some(MachinesHit::Run(self.runs_first + k));
@@ -665,6 +738,8 @@ impl MachinesLayout {
             .chain(&self.edit_buttons)
             .chain(self.edit_name.iter())
             .chain(self.edit_addresses.iter())
+            .chain(self.edit_removes.iter().flatten())
+            .chain(self.edit_add.iter())
             .chain(self.run_buttons.iter().flatten())
             .chain(self.rows.iter())
             .copied()
@@ -1053,24 +1128,31 @@ impl Painter {
         scale: f64,
         p: &Palette,
     ) {
-        for (label, rect) in EDIT_LABELS.iter().zip(&layout.edit_labels) {
+        let address_label = if e.addresses.len() > 1 {
+            ADDRESSES_LABEL
+        } else {
+            ADDRESS_LABEL
+        };
+        for (label, rect) in [NAME_LABEL, address_label].iter().zip(&layout.edit_labels) {
             self.line_in(c, label, FONT_SIZE, shift(*rect), false, scale, p.muted);
         }
-        let fields = [
-            (
-                layout.edit_name,
-                &e.name,
-                NAME_HINT,
-                MachinesFocus::EditName,
-            ),
-            (
-                layout.edit_addresses.first().copied(),
-                &e.addresses[0],
-                ADDRESS_HINT,
-                MachinesFocus::EditAddress(0),
-            ),
-        ];
-        for (rect, line, hint, focus) in fields {
+        let name = (
+            layout.edit_name,
+            &e.name,
+            NAME_HINT,
+            MachinesFocus::EditName,
+        );
+        let addresses = (layout.edit_addresses.iter().zip(&e.addresses).enumerate()).map(
+            |(i, (rect, line))| {
+                (
+                    Some(*rect),
+                    line,
+                    ADDRESS_HINT,
+                    MachinesFocus::EditAddress(i),
+                )
+            },
+        );
+        for (rect, line, hint, focus) in std::iter::once(name).chain(addresses) {
             let Some(rect) = rect.map(shift) else {
                 continue;
             };
@@ -1094,6 +1176,51 @@ impl Painter {
                 let focused = !e.busy && view.focus == focus;
                 self.field(c, line, hint, rect, focused, scale, p);
             }
+        }
+        let s = scale as f32;
+        for (i, rect) in layout.edit_removes.iter().enumerate() {
+            let Some(rect) = rect.map(shift) else {
+                continue;
+            };
+            // As a pane bar's ×: muted, lit in a round pill under the
+            // pointer.
+            let hovered = view.hover == Some(MachinesHit::EditRemoveAddress(i));
+            if hovered {
+                let side = (rect.size.w.min(rect.size.h) - 4).max(0);
+                let pill = Rectangle::new(
+                    (
+                        rect.loc.x + (rect.size.w - side) / 2,
+                        rect.loc.y + (rect.size.h - side) / 2,
+                    )
+                        .into(),
+                    (side, side).into(),
+                );
+                let (x, y, w, h) = rect_px(pill, scale);
+                c.rounded(x, y, w, h, w.min(h) / 2.0, p.selected);
+            }
+            let color = if hovered { p.text } else { p.muted };
+            icon_sdf(c, rect, scale, color, |x, y| cross(x, y, 0.8 * s));
+        }
+        if let Some(row) = layout.edit_add.map(shift) {
+            // As the list's add row: muted, lit under the pointer.
+            let lit = view.hover == Some(MachinesHit::EditAddAddress);
+            self.row_highlight(c, row, (false, if lit { 1.0 } else { 0.0 }), scale, p);
+            let plus = Rectangle::new(
+                (row.loc.x + ROW_INSET, row.loc.y).into(),
+                (ROW_DOT, row.size.h).into(),
+            );
+            self.centered(c, "+", FONT_SIZE, plus, scale, p.muted);
+            let text_x = row.loc.x + ROW_INSET + ROW_DOT + DOT_GAP;
+            let label = Rectangle::new(
+                (text_x, row.loc.y).into(),
+                (
+                    (row.loc.x + row.size.w - ROW_INSET - text_x).max(1),
+                    row.size.h,
+                )
+                    .into(),
+            );
+            let color = if lit { p.text } else { p.muted };
+            self.line_in(c, ADD_ADDRESS, FONT_SIZE, label, false, scale, color);
         }
         let lines = [
             (&layout.edit_progress, FONT_SIZE, p.muted),
@@ -1366,11 +1493,21 @@ mod tests {
     }
 
     fn editing(runs: usize, busy: bool, error: bool) -> MachinesPanelView {
+        addresses(runs, busy, error, 1)
+    }
+
+    /// The form with `n` addresses: "ana@box-0", "ana@box-0-1"...
+    fn addresses(runs: usize, busy: bool, error: bool, n: usize) -> MachinesPanelView {
         let mut v = view(3, runs);
         if let Some(d) = v.detail.as_mut() {
             d.edit = Some(MachineEditView {
                 name: "box-0".into(),
-                addresses: vec!["ana@box-0".into()],
+                addresses: (0..n)
+                    .map(|i| match i {
+                        0 => "ana@box-0".into(),
+                        _ => format!("ana@box-0-{i}").as_str().into(),
+                    })
+                    .collect(),
                 error: error.then(|| "That address reaches another machine. ".repeat(4)),
                 how: error.then(|| "Check the address.".to_owned()),
                 progress: busy.then(|| "SSH reached, looking around\u{2026}".to_owned()),
@@ -1390,8 +1527,11 @@ mod tests {
     /// buttons, then the runs.
     fn form_fits(l: &MachinesLayout) {
         let (name, address) = (l.edit_name.unwrap(), l.edit_addresses[0]);
-        let parts = [name, address]
-            .into_iter()
+        let last = *l.edit_addresses.last().unwrap();
+        let parts = (std::iter::once(name))
+            .chain(l.edit_addresses.iter().copied())
+            .chain(l.edit_removes.iter().flatten().copied())
+            .chain(l.edit_add)
             .chain(l.edit_labels.iter().copied())
             .chain(l.edit_buttons.iter().copied())
             .chain(
@@ -1406,11 +1546,31 @@ mod tests {
         assert!(l.heading.loc.y + l.heading.size.h <= name.loc.y);
         assert!(name.loc.y + name.size.h <= address.loc.y);
         assert_eq!((name.size.h, address.size.h), (QUIT_BUTTON, QUIT_BUTTON));
-        assert_eq!(name.loc.x, address.loc.x);
+        assert_eq!(l.edit_removes.len(), l.edit_addresses.len());
+        // The addresses one under the other in the name's column, each ×
+        // right of its field, at the name's right end.
+        let mut above = name.loc.y + name.size.h;
+        for (field, remove) in l.edit_addresses.iter().zip(&l.edit_removes) {
+            assert_eq!(field.loc.x, name.loc.x);
+            assert!(field.loc.y >= above);
+            above = field.loc.y + field.size.h;
+            match remove {
+                Some(x) => {
+                    assert!(field.loc.x + field.size.w <= x.loc.x);
+                    assert_eq!(x.loc.x + x.size.w, name.loc.x + name.size.w);
+                    assert_eq!((x.loc.y, x.size.h), (field.loc.y, field.size.h));
+                }
+                None => assert!(field.loc.x + field.size.w <= name.loc.x + name.size.w),
+            }
+        }
+        if let Some(add) = l.edit_add {
+            assert!(add.loc.y >= last.loc.y + last.size.h);
+            assert_eq!(add.loc.x, name.loc.x);
+            above = add.loc.y + add.size.h;
+        }
         let lines = (l.edit_progress.iter())
             .chain(&l.edit_error)
             .chain(&l.edit_how);
-        let mut above = address.loc.y + address.size.h;
         for (_, r) in lines {
             assert!(r.loc.y >= above);
             above = r.loc.y + r.size.h;
@@ -1421,7 +1581,7 @@ mod tests {
         }
         // Right-aligned with the fields.
         if let Some(last) = l.edit_buttons.last() {
-            assert_eq!(last.loc.x + last.size.w, address.loc.x + address.size.w);
+            assert_eq!(last.loc.x + last.size.w, name.loc.x + name.size.w);
         }
         // The form takes the place of the facts, the problem and the
         // machine's buttons.
@@ -1469,7 +1629,10 @@ mod tests {
         assert_eq!(l.hit(mid(address)), Some(MachinesHit::EditAddress(0)));
         // A label goes to its field.
         assert_eq!(l.hit(mid(l.edit_labels[0])), Some(MachinesHit::EditName));
-        assert_eq!(l.hit(mid(l.edit_labels[1])), Some(MachinesHit::EditAddress(0)));
+        assert_eq!(
+            l.hit(mid(l.edit_labels[1])),
+            Some(MachinesHit::EditAddress(0))
+        );
         assert_eq!(
             l.hit(mid(l.edit_buttons[1])),
             Some(MachinesHit::EditButton(1))
@@ -1508,6 +1671,131 @@ mod tests {
         // Shut: none.
         let mut v = view(1, 1);
         v.focus = MachinesFocus::EditName;
+        assert!(machines_panel_field(&v, output, 1.0).is_none());
+    }
+
+    #[test]
+    fn one_two_and_five_addresses_fit_a_small_output_and_a_large_one() {
+        let outputs: [Size<i32, Logical>; 2] = [(870, 600).into(), (1920, 1080).into()];
+        for output in outputs {
+            let mut tall = 0;
+            for n in [1, 2, 5] {
+                for (busy, error) in [(false, false), (true, false), (false, true)] {
+                    // Five addresses under a three-line error and its how
+                    // leave no room for a run 600 high.
+                    if n == 5 && error && output.h < 1000 {
+                        continue;
+                    }
+                    let v = addresses(1, busy, error, n);
+                    let l = machines_layout(&v, output);
+                    fits(&l, output);
+                    form_fits(&l);
+                    assert_eq!(l.edit_addresses.len(), n);
+                    assert_eq!(l.edit_labels.len(), 2);
+                    assert_eq!(l.runs.len(), 1);
+                    let removes = l.edit_removes.iter().flatten().count();
+                    assert_eq!(removes, if n > 1 && !busy { n } else { 0 });
+                    assert_eq!(l.edit_add.is_some(), !busy);
+                    // The runs stay under the form, inside the detail.
+                    let run = l.runs[0];
+                    assert!(inside(l.detail, run), "{n} addresses on {output:?}");
+                    if !busy && !error {
+                        // The panel grows with the rows.
+                        assert!(l.panel.size.h > tall);
+                        tall = l.panel.size.h;
+                    }
+                }
+            }
+        }
+        // Six fit 600 high with nothing running there.
+        let small = (870, 600).into();
+        let l = machines_layout(&addresses(0, false, false, 6), small);
+        fits(&l, small);
+        form_fits(&l);
+        assert!(inside(l.detail, l.no_runs.unwrap()));
+        // "Addresses" fits its label column.
+        assert!(text_w(ADDRESSES_LABEL, FONT_SIZE) < EDIT_LABEL_W);
+    }
+
+    #[test]
+    fn hits_map_each_address_its_remove_and_the_add_row() {
+        let output = (870, 600).into();
+        let l = machines_layout(&addresses(1, false, false, 3), output);
+        for i in 0..3 {
+            let field = l.edit_addresses[i];
+            assert_eq!(l.hit(mid(field)), Some(MachinesHit::EditAddress(i)));
+            let x = l.edit_removes[i].unwrap();
+            assert_eq!(l.hit(mid(x)), Some(MachinesHit::EditRemoveAddress(i)));
+        }
+        // The first address's label goes to it; the room left of the next
+        // ones is no field's.
+        assert_eq!(
+            l.hit(mid(l.edit_labels[1])),
+            Some(MachinesHit::EditAddress(0))
+        );
+        let next = l.edit_addresses[1];
+        let off = Point::from((next.loc.x as f64 - 20.0, next.loc.y as f64 + 10.0));
+        assert_eq!(l.hit(off), Some(MachinesHit::Panel));
+        let add = l.edit_add.unwrap();
+        assert_eq!(l.hit(mid(add)), Some(MachinesHit::EditAddAddress));
+        assert_eq!(
+            l.hit(mid(l.edit_name.unwrap())),
+            Some(MachinesHit::EditName)
+        );
+        let controls = l.controls();
+        for r in (l.edit_addresses.iter())
+            .chain(l.edit_removes.iter().flatten())
+            .chain([&add])
+        {
+            assert!(controls.contains(r));
+        }
+
+        // One address: no ×, the field full width.
+        let l = machines_layout(&addresses(1, false, false, 1), output);
+        assert_eq!(l.edit_removes, vec![None]);
+        let name = l.edit_name.unwrap();
+        assert_eq!(l.edit_addresses[0].size.w, name.size.w);
+        let end = Point::from((
+            (name.loc.x + name.size.w) as f64 - 4.0,
+            l.edit_addresses[0].loc.y as f64 + 10.0,
+        ));
+        assert_eq!(l.hit(end), Some(MachinesHit::EditAddress(0)));
+
+        // While tried: no × and no add row, the fields where they were.
+        let busy = machines_layout(&addresses(1, true, false, 3), output);
+        let idle = machines_layout(&addresses(1, false, false, 3), output);
+        assert!(busy.edit_removes.iter().all(Option::is_none));
+        assert!(busy.edit_add.is_none());
+        assert_eq!(busy.edit_addresses.len(), 3);
+        for (b, i) in busy.edit_addresses.iter().zip(&idle.edit_addresses) {
+            assert_eq!(b.size, i.size);
+        }
+        let x = idle.edit_removes[1].unwrap();
+        let shifted = Point::from((
+            mid(x).x,
+            mid(x).y + (busy.edit_addresses[1].loc.y - idle.edit_addresses[1].loc.y) as f64,
+        ));
+        assert_ne!(busy.hit(shifted), Some(MachinesHit::EditRemoveAddress(1)));
+        let x = Rectangle::new((x.loc.x, busy.edit_addresses[1].loc.y).into(), x.size);
+        assert!(!busy.controls().contains(&x));
+    }
+
+    #[test]
+    fn the_caret_goes_in_the_third_address_shortened_for_its_remove() {
+        let output: Size<i32, Logical> = (870, 600).into();
+        let mut v = addresses(1, false, false, 3);
+        v.focus = MachinesFocus::EditAddress(2);
+        let l = machines_layout(&v, output);
+        for scale in [1.0, 2.0] {
+            let spot = machines_panel_field(&v, output, scale).unwrap();
+            assert_eq!(spot.area, l.edit_addresses[2]);
+            assert_eq!(spot.line, "ana@box-0-2");
+            assert_eq!(spot.text, super::super::field_text(spot.area, scale));
+            // Its text ends left of the ×.
+            let x = l.edit_removes[2].unwrap();
+            assert!(spot.text.1 <= (x.loc.x as f64 * scale) as f32);
+        }
+        v.focus = MachinesFocus::EditAddress(3);
         assert!(machines_panel_field(&v, output, 1.0).is_none());
     }
 
