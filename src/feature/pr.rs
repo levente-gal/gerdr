@@ -673,6 +673,33 @@ pub fn title(details: &Details) -> String {
     format!("#{} {}", details.pull.number, details.title.trim())
 }
 
+/// `text`, a review's brief (see `briefs`), without the section of the
+/// pull request whose page is `url`; `None` when it has none. A section
+/// runs from its `# ` title, followed by its `Pull request [#` line, to
+/// the next one's.
+pub fn brief_without(text: &str, url: &str) -> Option<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let opens = |i: usize| {
+        lines[i].starts_with("# ")
+            && (lines[i + 1..].iter())
+                .find(|l| !l.trim().is_empty())
+                .is_some_and(|l| l.starts_with("Pull request [#"))
+    };
+    let starts: Vec<usize> = (0..lines.len()).filter(|&i| opens(i)).collect();
+    let link = format!("]({url})");
+    let at = starts.iter().position(|&s| {
+        (lines[s..].iter())
+            .find(|l| l.starts_with("Pull request [#"))
+            .is_some_and(|l| l.contains(&link))
+    })?;
+    let end = starts.get(at + 1).copied().unwrap_or(lines.len());
+    let kept: Vec<&str> = (lines[..starts[at]].iter())
+        .chain(&lines[end..])
+        .copied()
+        .collect();
+    Some(format!("{}\n", kept.join("\n").trim_end()))
+}
+
 /// The brief of a review of several: each one's, in turn.
 pub fn briefs(all: &[Details]) -> String {
     all.iter().map(brief).collect::<Vec<_>>().join("\n")
@@ -1123,5 +1150,34 @@ mod tests {
         assert_eq!(order, vec![(5, true), (9, false), (3, false)]);
         assert_eq!(all[2].title, "Old");
         assert!(all[1].draft);
+    }
+
+    #[test]
+    fn a_pull_requests_section_leaves_the_brief() {
+        let details = |n: u64, body: &str| Details {
+            pull: PullRef {
+                number: n,
+                url: format!("https://github.com/o/r/pull/{n}"),
+                head_ref: "fix".into(),
+                base_ref: "main".into(),
+                ..PullRef::default()
+            },
+            title: format!("Change {n}"),
+            body: body.into(),
+            ..Details::default()
+        };
+        // The middle one's body has a heading of its own.
+        let all = [
+            details(1, "One."),
+            details(2, "# Steps\n\nTwo."),
+            details(3, "Three."),
+        ];
+        let text = briefs(&all);
+        let url = |n| format!("https://github.com/o/r/pull/{n}");
+        let without = brief_without(&text, &url(2)).unwrap();
+        assert_eq!(without, briefs(&[all[0].clone(), all[2].clone()]));
+        assert_eq!(brief_without(&text, &url(3)).unwrap(), briefs(&all[..2]));
+        assert_eq!(brief_without(&text, &url(1)).unwrap(), briefs(&all[1..]));
+        assert_eq!(brief_without(&text, &url(9)), None);
     }
 }
