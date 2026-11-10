@@ -114,6 +114,27 @@ pub struct MachineDetailView {
     /// The buttons acting on the machine, left to right; the last is the
     /// primary one.
     pub buttons: Vec<String>,
+    /// The form editing its name and address, while it is open: it takes
+    /// the place of the facts, the problem and the machine's buttons (the
+    /// runs stay under it).
+    pub edit: Option<MachineEditView>,
+}
+
+/// The form editing a machine's name and address, in its detail.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MachineEditView {
+    pub name: crate::text_field::Line,
+    pub address: crate::text_field::Line,
+    /// What is wrong with the form, or why the address didn't connect.
+    pub error: Option<String>,
+    /// What to do about it, when gerdr knows.
+    pub how: Option<String>,
+    /// How far trying the new address got, while it is tried.
+    pub progress: Option<String>,
+    /// The form's buttons, left to right; the last is the primary one.
+    pub buttons: Vec<String>,
+    /// While the new address is tried: the fields wait.
+    pub busy: bool,
 }
 
 /// A run on the machine: an agent, a feature's checks, a sandbox, what a
@@ -138,6 +159,12 @@ pub enum MachinesFocus {
     Run(usize, usize),
     /// The machine's button `.0`.
     Button(usize),
+    /// The edit form's name field.
+    EditName,
+    /// The edit form's address field.
+    EditAddress,
+    /// The edit form's button `.0`.
+    EditButton(usize),
 }
 
 /// What the pointer is over in the machines panel.
@@ -152,6 +179,11 @@ pub enum MachinesHit {
     RunButton(usize, usize),
     /// The machine's button `.0`.
     Button(usize),
+    /// The edit form's name or address field.
+    EditName,
+    EditAddress,
+    /// The edit form's button `.0`.
+    EditButton(usize),
     /// Key hint `.0`: a click presses its key.
     Hint(usize),
 }
@@ -159,6 +191,10 @@ pub enum MachinesHit {
 /// Where the machines panel's parts go, in output coordinates.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MachinesLayout {
+    /// The edit form's fields and buttons, while it is open.
+    pub edit_name: Option<Rect>,
+    pub edit_address: Option<Rect>,
+    pub edit_buttons: Vec<Rect>,
     pub panel: Rect,
     pub title: Rect,
     /// The list's column.
@@ -446,6 +482,9 @@ pub fn machines_layout(view: &MachinesPanelView, output: Size<i32, Logical>) -> 
         (width - 2 * PAD, HINTS_HEIGHT).into(),
     );
     MachinesLayout {
+        edit_name: None,
+        edit_address: None,
+        edit_buttons: Vec::new(),
         panel,
         title,
         list,
@@ -895,6 +934,7 @@ mod tests {
                 runs: (0..runs).map(run).collect(),
                 no_runs: "Nothing runs there".to_owned(),
                 buttons: vec!["Remove".to_owned(), "Disconnect".to_owned()],
+                edit: None,
             }),
             focus: MachinesFocus::List,
             runs_first: 0,
@@ -1080,4 +1120,27 @@ mod tests {
         assert_eq!(button_style("Connect", 1, 2), ButtonStyle::Primary);
         assert_eq!(button_style("Edit", 0, 2), ButtonStyle::Plain);
     }
+}
+
+/// The edit form's field with the keyboard, as the caret and the pointer care;
+/// none while the form is shut, its address is tried, or the keyboard is on
+/// one of its buttons.
+pub fn machines_panel_field(
+    view: &MachinesPanelView,
+    size: Size<i32, Logical>,
+    scale: f64,
+) -> Option<super::FieldSpot> {
+    let edit = view.detail.as_ref()?.edit.as_ref().filter(|e| !e.busy)?;
+    let layout = machines_layout(view, size);
+    let (area, line) = match view.focus {
+        MachinesFocus::EditName => (layout.edit_name?, &edit.name),
+        MachinesFocus::EditAddress => (layout.edit_address?, &edit.address),
+        _ => return None,
+    };
+    Some(super::FieldSpot {
+        area,
+        text: super::field_text(area, scale),
+        size: FONT_SIZE,
+        line: line.clone(),
+    })
 }

@@ -198,7 +198,7 @@ pub enum Overlay {
     /// The background tasks, which has no field: only its key hints come
     /// this way.
     Tasks,
-    /// The machines panel: no field yet, only its key hints.
+    /// The machines panel, with its edit form's two fields.
     MachinesPanel,
     /// The new feature dialog, with its title field.
     NewFeature,
@@ -1407,7 +1407,7 @@ impl Gerdr {
                 .map(|(target, place)| Intercepted::Switch(target, place)),
             Overlay::Tasks => self.tasks_key(mods, sym).map(Intercepted::Tasks),
             Overlay::MachinesPanel => self
-                .machines_panel_key(mods, sym)
+                .machines_panel_key(mods, sym, typed)
                 .map(Intercepted::Machines),
             Overlay::NewFeature => self
                 .new_feature_key(mods, sym, typed)
@@ -1479,7 +1479,10 @@ impl Gerdr {
                 scale,
             )),
             // Its fields hold lines: it places their carets itself.
-            Overlay::Tasks | Overlay::MachinesPanel | Overlay::FindingDialog => None,
+            Overlay::MachinesPanel => {
+                chrome::machines_panel_field(&self.machines_panel_view()?, size, scale)
+            }
+            Overlay::Tasks | Overlay::FindingDialog => None,
             // A criterion's note, while one is written, or their search
             // while it has the keys.
             Overlay::Features => {
@@ -1549,7 +1552,8 @@ impl Gerdr {
             Overlay::AiStats => self.ai_stats_field_mut(),
             Overlay::Scrollback => self.scrollback.as_mut()?.field_mut(),
             Overlay::Switcher(_) => Some(self.switcher.as_mut()?.field_mut()),
-            Overlay::Tasks | Overlay::MachinesPanel => None,
+            Overlay::MachinesPanel => self.machines_panel_field_mut(),
+            Overlay::Tasks => None,
             Overlay::Features => {
                 if (self.inline_wd()).is_some_and(|wd| wd.diff.search_focused()) {
                     return self.inline_wd_mut()?.diff.search_field_mut();

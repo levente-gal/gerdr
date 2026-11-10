@@ -2344,6 +2344,7 @@ fn machines_panel(case: usize) -> super::MachinesPanelView {
         ],
         no_runs: "Nothing runs there".into(),
         buttons: strings(&["Remove", "Disconnect"]),
+        edit: None,
     };
     let build_box = MachineDetailView {
         name: "Build box".into(),
@@ -2360,6 +2361,7 @@ fn machines_panel(case: usize) -> super::MachinesPanelView {
         } else {
             strings(&["Remove", "Connect"])
         },
+        edit: None,
     };
     let (selected, detail, focus, hover) = match case {
         0 => (

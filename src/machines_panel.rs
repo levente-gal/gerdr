@@ -73,6 +73,16 @@ pub enum Press {
     Stop(RunRef),
     /// Open the feature's tab: project, slug.
     OpenFeature(String, String),
+    /// Open the form editing the machine of this name (Ctrl+E, its Edit
+    /// button; F2 opens it on the name).
+    Edit(String),
+    /// The form's buttons: save (trying a new address first), save without
+    /// trying, stop trying, leave the form, press the fix of what failed.
+    Save,
+    SaveAnyway,
+    StopTrying,
+    CancelEdit,
+    EditFix,
 }
 
 /// What the machines panel asks gerdr to do.
@@ -129,6 +139,8 @@ impl Content {
             MachinesFocus::List => self.buttons.last().cloned(),
             MachinesFocus::Run(r, b) => self.run_presses.get(r)?.get(b).cloned(),
             MachinesFocus::Button(b) => self.buttons.get(b).cloned(),
+            // The edit form (increment 2): stubbed in the contract.
+            MachinesFocus::EditName | MachinesFocus::EditAddress | MachinesFocus::EditButton(_) => None,
         }
     }
 
@@ -140,6 +152,7 @@ impl Content {
             MachinesFocus::List => detail?.buttons.last().cloned(),
             MachinesFocus::Run(r, b) => detail?.runs.get(r)?.buttons.get(b).cloned(),
             MachinesFocus::Button(b) => detail?.buttons.get(b).cloned(),
+            MachinesFocus::EditName | MachinesFocus::EditAddress | MachinesFocus::EditButton(_) => None,
         }
     }
 }
@@ -636,6 +649,7 @@ impl Gerdr {
                 false => "Connect it to see what runs there".to_owned(),
             },
             buttons: labels,
+            edit: None,
         };
         let asks_remove = !self.sandboxes_on(&row_name).is_empty();
         Content {
@@ -689,7 +703,13 @@ impl Gerdr {
     /// Ctrl+K/J), PgUp/PgDn, Home/End move through the machines; Tab/Shift+Tab
     /// through the runs' buttons, then the machine's; Enter presses the
     /// focused button; Del arms, and again removes; Esc closes.
-    pub fn machines_panel_key(&mut self, mods: &ModifiersState, sym: Keysym) -> Option<Outcome> {
+    pub fn machines_panel_key(
+        &mut self,
+        mods: &ModifiersState,
+        sym: Keysym,
+        typed: Keysym,
+    ) -> Option<Outcome> {
+        let _ = typed;
         let (content, view) = self.machines_panel_parts()?;
         let pages = self.machines_pages(&view);
         self.machines_panel
@@ -758,6 +778,13 @@ impl Gerdr {
                 self.close_machines();
                 self.open_feature(&project, &slug);
             }
+            // The edit form (increment 2): stubbed in the contract.
+            Press::Edit(_)
+            | Press::Save
+            | Press::SaveAnyway
+            | Press::StopTrying
+            | Press::CancelEdit
+            | Press::EditFix => {}
         }
     }
 
@@ -821,6 +848,10 @@ impl Gerdr {
                 }
                 content.press(view.selected, focus).map(Outcome::Press)
             }
+            // The edit form (increment 2): stubbed in the contract.
+            Some(MachinesHit::EditName | MachinesHit::EditAddress | MachinesHit::EditButton(_)) => {
+                None
+            }
         };
         if let Some(outcome) = outcome {
             self.apply_machines_panel(outcome);
@@ -863,6 +894,12 @@ impl Gerdr {
         (self.machines_panel_view()).map_or_else(Vec::new, |v| {
             chrome::machines_layout(&v, self.output_size()).rows
         })
+    }
+
+    /// The edit form's focused field, for the pointer and pastes; none while
+    /// the form is shut or its address is tried.
+    pub(crate) fn machines_panel_field_mut(&mut self) -> Option<&mut crate::text_field::TextField> {
+        None
     }
 
     /// What the pointer can press in the machines panel, while it is open.
@@ -919,6 +956,7 @@ mod tests {
                 runs: vec![run],
                 no_runs: String::new(),
                 buttons: labels,
+                edit: None,
             }),
             run_presses: vec![presses],
             buttons,
