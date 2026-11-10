@@ -22,6 +22,8 @@ const PAD: i32 = HELP_PADDING;
 const TITLE_H: i32 = HELP_TITLE_HEIGHT;
 /// The list's column, at the most a third of the panel.
 const LIST_W: i32 = 240;
+/// Room either side of a tab's label in the title row.
+const TAB_PAD: i32 = 10;
 /// Room around the list's rows.
 const LIST_PAD: i32 = 8;
 /// A list row or a run row: its title line and its detail line.
@@ -81,11 +83,15 @@ const ADDRESS_HINT: &str = "user@host";
 const ADD_NOTE: &str = "Connect a machine over SSH to run agents and checks there";
 const ADD_LABEL: &str = "Add machine\u{2026}";
 const RUNS_HEAD: &str = "Runs there";
+const STAGES_HEAD: &str = "Stages";
 
 /// What the machines panel shows.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MachinesPanelView {
+    /// The page shown: the machines, or where the open project's stages run.
+    pub tab: MachinesTab,
     /// The machines saved, by name. The row adding one comes after them.
+    /// None on the Placement page, which has no list.
     pub rows: Vec<MachineRowView>,
     /// The row under the keyboard's cursor: `rows.len()` is the add row.
     pub selected: usize,
@@ -188,10 +194,34 @@ pub enum MachinesFocus {
     EditButton(usize),
 }
 
+/// The machines panel's pages, as tabs in its title row.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MachinesTab {
+    /// The machines, with what runs on the one selected.
+    #[default]
+    Machines,
+    /// Where the open project's stages run by default: the detail's runs
+    /// are its stages, each with a button choosing its machine.
+    Placement,
+}
+
+impl MachinesTab {
+    pub const ALL: [Self; 2] = [Self::Machines, Self::Placement];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Machines => "Machines",
+            Self::Placement => "Placement",
+        }
+    }
+}
+
 /// What the pointer is over in the machines panel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MachinesHit {
     Panel,
+    /// The tab `.0` of `MachinesTab::ALL`, in the title row.
+    Tab(usize),
     /// The list's row `.0`; `rows.len()` is the add row.
     Row(usize),
     /// Run `.0`, off its buttons.
@@ -271,12 +301,30 @@ pub struct MachinesLayout {
     pub footer: Rect,
     /// The key hints, as (index into the view's hints, rect).
     pub hints: Vec<(usize, Rect)>,
+    /// The tabs in the title row, as `MachinesTab::ALL` has them.
+    pub tabs: Vec<Rect>,
 }
 
 fn text_w(text: &str, size: f32) -> i32 {
     measure(text, size)
         .unwrap_or(text.chars().count() as f32 * size * 0.6)
         .ceil() as i32
+}
+
+/// The tabs' rects in the title row `title`, from its left.
+fn tab_rects(title: Rect) -> Vec<Rect> {
+    let mut x = title.loc.x;
+    MachinesTab::ALL
+        .iter()
+        .map(|tab| {
+            // As wide as its bold label: the tab shown is in bold.
+            let bold = super::measure_bold(tab.label(), LABEL_FONT_SIZE).map(|w| w.ceil() as i32);
+            let w = bold.unwrap_or_else(|| text_w(tab.label(), LABEL_FONT_SIZE)) + 2 * TAB_PAD;
+            let rect = Rectangle::new((x - TAB_PAD, title.loc.y).into(), (w, title.size.h).into());
+            x += w;
+            rect
+        })
+        .collect()
 }
 
 /// The panel's width on an output `w` wide, and its list column's.
@@ -447,12 +495,16 @@ fn stack_h(count: usize) -> i32 {
 /// as tall as its list or its detail needs, at most the output's height;
 /// the rows and runs past that scroll.
 pub fn machines_layout(view: &MachinesPanelView, output: Size<i32, Logical>) -> MachinesLayout {
+    let placing = view.tab == MachinesTab::Placement;
     let (width, list_w) = widths(output.w);
-    let inner = detail_inner(width);
-    let total = view.rows.len() + 1;
-    let shown = machines_shown(total, output);
+    let (list_w, inner) = match placing {
+        true => (0, (width - 2 * PAD).max(1)),
+        false => (list_w, detail_inner(width)),
+    };
+    let total = if placing { 0 } else { view.rows.len() + 1 };
+    let shown = if placing { 0 } else { machines_shown(total, output) };
     let first = view.first.min(total - shown);
-    let list_h = 2 * LIST_PAD + stack_h(shown);
+    let list_h = if placing { 0 } else { 2 * LIST_PAD + stack_h(shown) };
     let (runs_total, runs_shown) = view.detail.as_ref().map_or((0, 0), |d| {
         let n = d.runs.len();
         (
@@ -670,6 +722,7 @@ pub fn machines_layout(view: &MachinesPanelView, output: Size<i32, Logical>) -> 
         buttons,
         footer,
         hints: hint_spots(&hint_strs(&view.hints), hints_rect),
+        tabs: tab_rects(title),
     }
 }
 
@@ -681,6 +734,9 @@ impl MachinesLayout {
         }
         if let Some((i, _)) = self.hints.iter().find(|(_, r)| on(r)) {
             return Some(MachinesHit::Hint(*i));
+        }
+        if let Some(i) = self.tabs.iter().position(on) {
+            return Some(MachinesHit::Tab(i));
         }
         for (k, buttons) in self.run_buttons.iter().enumerate() {
             if let Some(b) = buttons.iter().position(on) {
@@ -864,15 +920,19 @@ impl Painter {
         let px = |v: i32| (v as f64 * scale).round() as i32;
         let border = px(1).max(1);
 
-        self.line_in(
-            &mut c,
-            "Machines",
-            LABEL_FONT_SIZE,
-            shift(layout.title),
-            true,
-            scale,
-            p.text,
-        );
+        // The tabs: the one shown in the text colour, the other muted until
+        // the pointer is on it.
+        for (i, (tab, rect)) in MachinesTab::ALL.iter().zip(&layout.tabs).enumerate() {
+            let shown = *tab == view.tab;
+            let lit = view.hover == Some(MachinesHit::Tab(i));
+            let rect = shift(*rect);
+            let label = Rectangle::new(
+                (rect.loc.x + TAB_PAD, rect.loc.y).into(),
+                ((rect.size.w - 2 * TAB_PAD).max(1), rect.size.h).into(),
+            );
+            let colour = if shown || lit { p.text } else { p.muted };
+            self.line_in(&mut c, tab.label(), LABEL_FONT_SIZE, label, shown, scale, colour);
+        }
         // The lines under the title, over the hints, and between the list
         // and the detail.
         let across = |c: &mut Canvas, y: i32| {
@@ -887,13 +947,15 @@ impl Painter {
         let list = shift(layout.list);
         across(&mut c, px(list.loc.y) - border);
         across(&mut c, px(shift(layout.footer).loc.y));
-        c.fill(
-            px(list.loc.x + list.size.w) - border,
-            px(list.loc.y),
-            border,
-            px(list.size.h),
-            p.border_variant,
-        );
+        if list.size.w > 0 {
+            c.fill(
+                px(list.loc.x + list.size.w) - border,
+                px(list.loc.y),
+                border,
+                px(list.size.h),
+                p.border_variant,
+            );
+        }
 
         let hints: Vec<(usize, Rect)> = layout.hints.iter().map(|(i, r)| (*i, shift(*r))).collect();
         let hint_hover = match view.hover {
@@ -1018,8 +1080,13 @@ impl Painter {
                 .into(),
             (DOT, DOT).into(),
         );
-        paint_dot(c, spot, d.dot, scale, p);
-        let name_x = heading.loc.x + ROW_DOT + DOT_GAP;
+        let name_x = match view.tab {
+            MachinesTab::Machines => {
+                paint_dot(c, spot, d.dot, scale, p);
+                heading.loc.x + ROW_DOT + DOT_GAP
+            }
+            MachinesTab::Placement => heading.loc.x,
+        };
         let name = Rectangle::new(
             (name_x, heading.loc.y).into(),
             ((heading.loc.x + heading.size.w - name_x).max(1), HEAD_H).into(),
@@ -1047,7 +1114,11 @@ impl Painter {
             );
         }
         let head = shift(layout.runs_head);
-        self.line_in(c, RUNS_HEAD, SMALL_FONT_SIZE, head, true, scale, p.muted);
+        let head_text = match view.tab {
+            MachinesTab::Machines => RUNS_HEAD,
+            MachinesTab::Placement => STAGES_HEAD,
+        };
+        self.line_in(c, head_text, SMALL_FONT_SIZE, head, true, scale, p.muted);
         if let Some(rect) = layout.no_runs {
             self.line_in(c, &d.no_runs, FONT_SIZE, shift(rect), false, scale, p.muted);
         }
@@ -1298,6 +1369,7 @@ mod tests {
 
     fn view(machines: usize, runs: usize) -> MachinesPanelView {
         MachinesPanelView {
+            tab: MachinesTab::Machines,
             rows: (0..machines).map(|i| row(&format!("box-{i}"))).collect(),
             selected: 0,
             first: 0,

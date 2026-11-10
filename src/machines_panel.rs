@@ -22,7 +22,7 @@ use crate::{
     Gerdr,
     chrome::{
         self, Dot, MachineDetailView, MachineEditView, MachineRowView, MachineRunView,
-        MachinesFocus, MachinesHit, MachinesPanelView,
+        MachinesFocus, MachinesHit, MachinesPanelView, MachinesTab,
     },
     feature::{Feature, Stage},
     herdr::AgentStatus,
@@ -36,6 +36,8 @@ use crate::{
 /// The machines panel's state, while it is open.
 #[derive(Debug, Default)]
 pub struct MachinesPanel {
+    /// The page shown (Ctrl+PgUp / Ctrl+PgDn, or a tab in the title row).
+    pub tab: MachinesTab,
     /// The list row selected: past the machines is the add row.
     pub selected: usize,
     pub first: usize,
@@ -105,6 +107,9 @@ pub enum Press {
         keep: String,
         drop: String,
     },
+    /// On the Placement page: the open project's `stage` goes to the next
+    /// machine, or the one before with `back`.
+    Place { stage: Stage, back: bool },
 }
 
 /// What the machines panel asks gerdr to do.
@@ -422,6 +427,84 @@ fn edit_parts(form: &EditForm, trying: Option<&str>) -> (MachineEditView, EditCo
     (view, content)
 }
 
+/// Where a stage goes after `now` (none: this machine), among this
+/// machine, the machines named `names` in their order, and least busy;
+/// the one before with `back`.
+fn next_place(names: &[String], now: Option<&str>, back: bool) -> Option<String> {
+    use crate::machine_load::LEAST_BUSY;
+    let mut order: Vec<Option<&str>> = vec![None];
+    order.extend(names.iter().map(|n| Some(n.as_str())));
+    order.push(Some(LEAST_BUSY));
+    // A machine no longer saved goes on from this one.
+    let at = order.iter().position(|o| *o == now).unwrap_or(0);
+    let next = match back {
+        true => (at + order.len() - 1) % order.len(),
+        false => (at + 1) % order.len(),
+    };
+    order[next].map(str::to_owned)
+}
+
+/// The Placement page's detail: the project `name`, its stages `runs`.
+fn placement_detail(name: String, runs: Vec<MachineRunView>, no_runs: &str) -> MachineDetailView {
+    MachineDetailView {
+        name,
+        dot: Dot::Idle,
+        facts: vec![
+            "Where each stage runs when a feature doesn't choose its own (Ctrl+Shift+W on its page)"
+                .to_owned(),
+        ],
+        problem: None,
+        how: None,
+        runs,
+        no_runs: no_runs.to_owned(),
+        buttons: Vec::new(),
+        edit: None,
+    }
+}
+
+/// The Placement page's key hints.
+fn placement_hints() -> Vec<(String, String)> {
+    [
+        ("Up / Down", "move"),
+        ("Left / Right", "machine"),
+        ("Ctrl+PgUp", "machines"),
+        ("Esc", "close"),
+    ]
+    .map(|(k, w)| (k.to_owned(), w.to_owned()))
+    .to_vec()
+}
+
+/// A key on the Placement page, the keyboard on `focus` of `content`: Up /
+/// Down go between the stages, Right or Enter gives the selected one the
+/// next machine, Left the one before, Esc closes.
+fn placement_key(
+    content: &Content,
+    focus: MachinesFocus,
+    panel: &mut MachinesPanel,
+    mods: &ModifiersState,
+    sym: Keysym,
+) -> Option<Outcome> {
+    let plain = !mods.ctrl && !mods.alt && !mods.logo;
+    let rows = content.run_presses.len();
+    let row = match focus {
+        MachinesFocus::Run(r, _) => r,
+        _ => 0,
+    };
+    let stage = |back| match content.run_presses.get(row)?.first()? {
+        Press::Place { stage, .. } => Some(Outcome::Press(Press::Place { stage: *stage, back })),
+        _ => None,
+    };
+    match sym {
+        Keysym::Escape => return Some(Outcome::Close),
+        Keysym::Return | Keysym::KP_Enter | Keysym::Right if plain => return stage(false),
+        Keysym::Left if plain => return stage(true),
+        Keysym::Up | Keysym::k if rows > 0 => panel.focus = MachinesFocus::Run(row.saturating_sub(1), 0),
+        Keysym::Down | Keysym::j if rows > 0 => panel.focus = MachinesFocus::Run((row + 1).min(rows - 1), 0),
+        _ => {}
+    }
+    None
+}
+
 /// The key hints for list row `selected` of `content`, the keyboard on
 /// `focus`, Del armed or not.
 fn hints(
@@ -462,6 +545,7 @@ fn hints(
         hints.push(hint("Del", what));
         hints.push(hint("Ctrl+E", "edit"));
     }
+    hints.push(hint("Ctrl+PgDn", "placement"));
     hints.push(hint("Esc", "close"));
     hints
 }
@@ -480,6 +564,14 @@ fn reveal(first: usize, at: usize, page: usize, count: usize) -> usize {
 }
 
 impl MachinesPanel {
+    /// Show page `tab`, the keyboard on its first stop.
+    fn show_tab(&mut self, tab: MachinesTab) {
+        self.tab = tab;
+        self.focus = MachinesFocus::List;
+        self.runs_first = 0;
+        self.armed = None;
+    }
+
     /// Keep what it points at in `content`: a machine gone moves the
     /// selection back, a button gone the keyboard to the list.
     fn settle(&mut self, content: &Content) {
@@ -1032,6 +1124,25 @@ impl Gerdr {
     /// The panel's content, and the view of it for its state now.
     fn machines_panel_parts(&self) -> Option<(Content, MachinesPanelView)> {
         let panel = self.machines_panel.as_ref()?;
+        if panel.tab == MachinesTab::Placement {
+            let content = self.placement_content();
+            let focus = match content.stops().contains(&panel.focus) {
+                true => panel.focus,
+                false => (content.stops().get(1).copied()).unwrap_or(MachinesFocus::List),
+            };
+            let view = MachinesPanelView {
+                tab: MachinesTab::Placement,
+                rows: Vec::new(),
+                selected: 0,
+                first: 0,
+                detail: content.detail.clone(),
+                focus,
+                runs_first: (panel.runs_first).min(content.run_presses.len().saturating_sub(1)),
+                hover: panel.hover,
+                hints: placement_hints(),
+            };
+            return Some((content, view));
+        }
         let selected = panel.selected.min(self.machines.saved.len());
         let mut content = self.machines_content(selected);
         let form = (panel.edit.as_ref()).filter(|f| content.name(selected) == Some(&f.machine));
@@ -1051,6 +1162,7 @@ impl Gerdr {
         }
         let runs = content.run_presses.len();
         let view = MachinesPanelView {
+            tab: MachinesTab::Machines,
             rows: content.rows.clone(),
             selected,
             first: panel.first.min(content.add_row()),
@@ -1086,9 +1198,91 @@ impl Gerdr {
     ) -> Option<Outcome> {
         let (content, view) = self.machines_panel_parts()?;
         let pages = self.machines_pages(&view);
-        self.machines_panel
-            .as_mut()?
-            .key(&content, mods, (sym, typed), pages)
+        let panel = self.machines_panel.as_mut()?;
+        let ctrl = mods.ctrl && !mods.alt && !mods.logo && !mods.shift;
+        if ctrl && matches!(sym, Keysym::Page_Up | Keysym::Page_Down) {
+            panel.show_tab(match panel.tab {
+                MachinesTab::Machines => MachinesTab::Placement,
+                MachinesTab::Placement => MachinesTab::Machines,
+            });
+            return None;
+        }
+        match view.tab {
+            MachinesTab::Placement => placement_key(&content, view.focus, panel, mods, sym),
+            MachinesTab::Machines => panel.key(&content, mods, (sym, typed), pages),
+        }
+    }
+
+    /// Where each placeable stage of the open project runs, as rows of the
+    /// detail: its stage, how many features choose their own, and a button
+    /// naming its machine, which goes to the next.
+    fn placement_content(&self) -> Content {
+        use crate::{machine_load::LEAST_BUSY, machine_work::takes_a_place};
+        let project = self.project.as_deref().and_then(|id| self.projects.project(id));
+        let Some(project) = project else {
+            return Content {
+                detail: Some(placement_detail(
+                    "No project open".to_owned(),
+                    Vec::new(),
+                    "Open a project to choose where its stages run",
+                )),
+                ..Content::default()
+            };
+        };
+        let features = (self.features.all.get(&project.id)).map_or(&[][..], Vec::as_slice);
+        let up = |name: &str| {
+            (self.machines.links.get(name)).is_some_and(|l| matches!(l.state, LinkState::Up(_)))
+        };
+        let (mut runs, mut presses) = (Vec::new(), Vec::new());
+        for stage in Stage::ALL.into_iter().filter(|s| takes_a_place(*s)) {
+            let (label, dot) = match project.workflow.machines.get(&stage).map(String::as_str) {
+                None => ("Runs here".to_owned(), Dot::Done),
+                Some(LEAST_BUSY) => ("Least busy".to_owned(), Dot::Done),
+                Some(name) if up(name) => (format!("Runs on {name}"), Dot::Done),
+                Some(name) => (format!("Runs on {name}"), Dot::Blocked),
+            };
+            let own = (features.iter())
+                .filter(|f| f.stage_machines.contains_key(&stage))
+                .count();
+            let detail = match own {
+                0 => "Every feature follows this".to_owned(),
+                1 => "1 feature chooses its own".to_owned(),
+                n => format!("{n} features choose their own"),
+            };
+            runs.push(MachineRunView {
+                title: stage.label().to_owned(),
+                detail,
+                dot,
+                buttons: vec![label],
+            });
+            presses.push(vec![Press::Place { stage, back: false }]);
+        }
+        Content {
+            detail: Some(placement_detail(project.name.clone(), runs, "")),
+            run_presses: presses,
+            ..Content::default()
+        }
+    }
+
+    /// The open project's `stage` goes to the next machine (`back`: the one
+    /// before): this one, each saved machine by name, then least busy. Kept
+    /// in the project's file, under `workflow.machines`.
+    fn place_stage(&mut self, stage: Stage, back: bool) {
+        let Some(id) = self.project.clone() else {
+            return;
+        };
+        let names: Vec<String> = self.machines.saved.keys().cloned().collect();
+        let Some(project) = self.projects.projects.iter_mut().find(|p| p.id == id) else {
+            return;
+        };
+        let machines = &mut project.workflow.machines;
+        match next_place(&names, machines.get(&stage).map(String::as_str), back) {
+            None => machines.remove(&stage),
+            Some(to) => machines.insert(stage, to),
+        };
+        if !self.projects.save_projects(&[id]) {
+            self.show_error("gerdr couldn't write the project's file".to_owned());
+        }
     }
 
     /// Open the edit form on machine `name`, the keyboard on its name with
@@ -1223,6 +1417,7 @@ impl Gerdr {
                 }
             }
             Press::Merge { keep, drop } => self.ask_merge_machines(&keep, &drop),
+            Press::Place { stage, back } => self.place_stage(stage, back),
         }
     }
 
@@ -1260,6 +1455,12 @@ impl Gerdr {
         let outcome = match hit {
             None => Some(Outcome::Close),
             Some(MachinesHit::Panel | MachinesHit::Run(_)) => None,
+            Some(MachinesHit::Tab(i)) => {
+                if let (Some(panel), Some(tab)) = (self.machines_panel.as_mut(), MachinesTab::ALL.get(i)) {
+                    panel.show_tab(*tab);
+                }
+                None
+            }
             Some(MachinesHit::Hint(i)) => {
                 if let Some((keys, _)) = view.hints.get(i) {
                     self.press_hint(crate::input::Overlay::MachinesPanel, keys, pos);
@@ -1658,6 +1859,37 @@ mod tests {
     }
 
     #[test]
+    fn a_stage_goes_through_this_machine_each_saved_one_then_least_busy() {
+        let names = ["b".to_owned(), "c".to_owned()];
+        let next = |now, back| next_place(&names, now, back);
+        assert_eq!(next(None, false).as_deref(), Some("b"));
+        assert_eq!(next(Some("b"), false).as_deref(), Some("c"));
+        assert_eq!(next(Some("c"), false).as_deref(), Some("least busy"));
+        assert_eq!(next(Some("least busy"), false), None, "back to this machine");
+        assert_eq!(next(None, true).as_deref(), Some("least busy"));
+        assert_eq!(next(Some("gone"), false).as_deref(), Some("b"), "an unsaved name goes on");
+    }
+
+    #[test]
+    fn placement_keys_move_and_choose() {
+        let place = |stage| vec![Press::Place { stage, back: false }];
+        let c = Content {
+            run_presses: vec![place(Stage::Build), place(Stage::Verify)],
+            ..Content::default()
+        };
+        let mut panel = MachinesPanel::default();
+        let key = |panel: &mut MachinesPanel, focus, sym| {
+            placement_key(&c, focus, panel, &ModifiersState::default(), sym)
+        };
+        assert_eq!(key(&mut panel, MachinesFocus::Run(0, 0), Keysym::Down), None);
+        assert_eq!(panel.focus, MachinesFocus::Run(1, 0));
+        let left = key(&mut panel, MachinesFocus::Run(1, 0), Keysym::Left);
+        let back = Press::Place { stage: Stage::Verify, back: true };
+        assert_eq!(left, Some(Outcome::Press(back)));
+        assert_eq!(key(&mut panel, MachinesFocus::Run(1, 0), Keysym::Escape), Some(Outcome::Close));
+    }
+
+    #[test]
     fn del_asks_at_once_when_sandboxes_stay() {
         let mut panel = MachinesPanel::default();
         let c = Content {
@@ -1717,6 +1949,7 @@ mod tests {
                 "Enter: disconnect",
                 "Del: remove",
                 "Ctrl+E: edit",
+                "Ctrl+PgDn: placement",
                 "Esc: close"
             ]
         );
@@ -1725,7 +1958,12 @@ mod tests {
         assert!(armed.contains(&"Del: remove now".to_owned()));
         assert_eq!(
             keys(hints(&on_add_row(&c), 2, MachinesFocus::List, false)),
-            ["Up / Down: move", "Enter: add machine", "Esc: close"]
+            [
+                "Up / Down: move",
+                "Enter: add machine",
+                "Ctrl+PgDn: placement",
+                "Esc: close"
+            ]
         );
     }
 

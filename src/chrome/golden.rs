@@ -2439,6 +2439,7 @@ fn machines_panel(case: usize) -> super::MachinesPanelView {
         }
     };
     MachinesPanelView {
+        tab: crate::chrome::MachinesTab::Machines,
         rows,
         selected,
         first: 0,
@@ -2458,7 +2459,7 @@ fn machines_panel(case: usize) -> super::MachinesPanelView {
     }
 }
 
-const MACHINES_PANEL: [&str; 9] = [
+const MACHINES_PANEL: [&str; 10] = [
     "machines_connected",
     "machines_failed",
     "machines_add",
@@ -2468,65 +2469,127 @@ const MACHINES_PANEL: [&str; 9] = [
     "machines_edit_failed",
     "machines_edit_addresses",
     "machines_same_machine",
+    "machines_placement",
 ];
+
+/// The Placement page: the open project's stages, the second focused, the
+/// pointer over the first's button.
+fn machines_placement() -> super::MachinesPanelView {
+    use super::{Dot, MachineDetailView, MachineRunView, MachinesFocus, MachinesHit};
+    use super::MachinesPanelView;
+    let stage = |title: &str, detail: &str, dot, button: &str| MachineRunView {
+        title: title.into(),
+        detail: detail.into(),
+        dot,
+        buttons: vec![button.into()],
+    };
+    MachinesPanelView {
+        tab: crate::chrome::MachinesTab::Placement,
+        rows: Vec::new(),
+        selected: 0,
+        first: 0,
+        detail: Some(MachineDetailView {
+            name: "asset-tag".into(),
+            dot: Dot::Idle,
+            facts: vec![
+                "Where each stage runs when a feature doesn't choose its own (Ctrl+Shift+W on its page)"
+                    .into(),
+            ],
+            problem: None,
+            how: None,
+            runs: vec![
+                stage("Discover", "Every feature follows this", Dot::Done, "Runs here"),
+                stage("Build", "2 features choose their own", Dot::Done, "Runs on ZenBook"),
+                stage("Verify", "Every feature follows this", Dot::Done, "Least busy"),
+                stage("Manual test", "1 feature chooses its own", Dot::Blocked, "Runs on Build box"),
+            ],
+            no_runs: String::new(),
+            buttons: Vec::new(),
+            edit: None,
+        }),
+        focus: MachinesFocus::Run(1, 0),
+        runs_first: 0,
+        hover: Some(MachinesHit::RunButton(0, 0)),
+        hints: [
+            ("Up / Down", "move"),
+            ("Left / Right", "machine"),
+            ("Ctrl+PgUp", "machines"),
+            ("Esc", "close"),
+        ]
+        .map(|(k, a)| (k.to_owned(), a.to_owned()))
+        .into(),
+    }
+}
+
+/// Case `case` of `MACHINES_PANEL`.
+fn machines_case(case: usize) -> super::MachinesPanelView {
+    match case {
+        9 => machines_placement(),
+        _ => machines_panel(case),
+    }
+}
 
 fn paint_machines_panel(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
     let p = theme.palette();
     let size = IDENTITY_OUTPUT.into();
     (0..MACHINES_PANEL.len())
-        .map(|case| hash(painter.machines_panel(&machines_panel(case), size, scale, p)))
+        .map(|case| hash(painter.machines_panel(&machines_case(case), size, scale, p)))
         .collect()
 }
 
 /// The recorded hashes of `MACHINES_PANEL`, per case in `CASES`.
-const GOLDEN_MACHINES_PANEL: [[u64; 9]; 4] = [
+const GOLDEN_MACHINES_PANEL: [[u64; 10]; 4] = [
     // Dark at 1
     [
-        0xb3bbd7c00f663678, // machines_connected
-        0x9881840348789585, // machines_failed
-        0x2148dc185bdafe72, // machines_add
-        0x26c0bcd36540a9f6, // machines_armed
-        0x7e530bb4def3f8d3, // machines_edit
-        0xb8764ccc0974206b, // machines_edit_trying
-        0xe7eb48d4d04e0ffd, // machines_edit_failed
-        0x1ab1723f02ddde57, // machines_edit_addresses
-        0x6b6326bbcb46cad2, // machines_same_machine
+        0x6c76be76ec20a202, // machines_connected
+        0x5c0c9f30c41b9cb7, // machines_failed
+        0x68acdee60a479840, // machines_add
+        0x666b38884d9bc834, // machines_armed
+        0x3522e3e42ae77895, // machines_edit
+        0xe147ca1a8d60d161, // machines_edit_trying
+        0xb3742748a6e26b27, // machines_edit_failed
+        0xf28bbcfa548b5af9, // machines_edit_addresses
+        0x3ab2c25dd1809018, // machines_same_machine
+        0x2e8cf5f40c751fbf, // machines_placement
     ],
     // Dark at 2
     [
-        0xdce2e1724a45eb2c, // machines_connected
-        0xfe3c1043f9ae1011, // machines_failed
-        0x6b739219f9cf9d3d, // machines_add
-        0x458acde34e5587a0, // machines_armed
-        0x7a3edb1c49674ff3, // machines_edit
-        0xab5dc903d00147e0, // machines_edit_trying
-        0x8bd171022e12398c, // machines_edit_failed
-        0xf666985e4fee7839, // machines_edit_addresses
-        0x962163292c81676a, // machines_same_machine
+        0xb96159c2b6529985, // machines_connected
+        0xbab4c3d6dc450180, // machines_failed
+        0x94ee851048cd8d54, // machines_add
+        0x93844adae99b927d, // machines_armed
+        0x8927c9460ce801d2, // machines_edit
+        0xbdaef3c424e78bd1, // machines_edit_trying
+        0xa053c85ab76c2985, // machines_edit_failed
+        0x992b29897c0025c0, // machines_edit_addresses
+        0x3ee6dbac3f3333cf, // machines_same_machine
+        0x1565c18353768b79, // machines_placement
     ],
     // Light at 1
     [
-        0xfb5ad4bb74402307, // machines_connected
-        0x7d5db1c15a7b6154, // machines_failed
-        0xd0389130753a9a3a, // machines_add
-        0xdbd24e06c3f789f7, // machines_armed
-        0xbe9d8f25a5302ea0, // machines_edit
-        0x69dbccb0746eda1d, // machines_edit_trying
-        0x90f6b00560ff2e95, // machines_edit_failed
-        0x10b8f0db2c615625, // machines_edit_addresses
-        0x23305368e435aec2, // machines_same_machine
+        0xd0a0e9feb8489792, // machines_connected
+        0x73288713d1a4714d, // machines_failed
+        0xe47c7533e6423ea3, // machines_add
+        0x47ddbe0bf898b316, // machines_armed
+        0x401c95bc5b66f959, // machines_edit
+        0x581dfff2fb0aee78, // machines_edit_trying
+        0x63f0c7dbf7e76a68, // machines_edit_failed
+        0x97d7f2eb69f1b468, // machines_edit_addresses
+        0x485d000c3271921f, // machines_same_machine
+        0xc8b04619599ab347, // machines_placement
     ],
     // Light at 2
     [
-        0xeddfee79f851d8a7, // machines_connected
-        0xfbd557aaeda5a316, // machines_failed
-        0x65fb658e8be22c6b, // machines_add
-        0x466f7a9c4ff722c8, // machines_armed
-        0x98fcc8b7dab8b031, // machines_edit
-        0xdcc5a29ece1add73, // machines_edit_trying
-        0x7b72421495074318, // machines_edit_failed
-        0x9020420a35940657, // machines_edit_addresses
-        0x9481d59f2bbdba7b, // machines_same_machine
+        0x6e7293ad4820aa9d, // machines_connected
+        0x312bbbff08715dfc, // machines_failed
+        0x5ae080c087afd891, // machines_add
+        0xcbdf16e5f21074ee, // machines_armed
+        0x874ae6f06f83f96b, // machines_edit
+        0xd96e98c60d264a75, // machines_edit_trying
+        0x4e852a04cf2a0e42, // machines_edit_failed
+        0xf90b63f66f91ca0d, // machines_edit_addresses
+        0x5b390d8b84deb325, // machines_same_machine
+        0x4aaa6202859e537f, // machines_placement
     ],
 ];
 
@@ -2554,7 +2617,7 @@ fn dump_machines_panel() {
         let px = |v: i32| (v as f64 * scale).round() as usize;
         let tag = format!("{}_{}", theme.name(), scale);
         for (case, name) in MACHINES_PANEL.iter().enumerate() {
-            let view = machines_panel(case);
+            let view = machines_case(case);
             let panel = super::machines_layout(&view, size).panel;
             dump(
                 &dir,
