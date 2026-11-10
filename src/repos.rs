@@ -2411,20 +2411,31 @@ impl Panel {
     fn button_label(&self, button: ReposButton, ctx: &Ctx) -> String {
         use ReposButton as B;
         let items = ctx.items;
-        // How many repositories it runs on, after its name: `push 3`.
+        // How many repositories it runs on, after its name: `commit 2`.
         let over = |what: &str, n: usize| match n {
             0 => what.to_owned(),
             n => format!("{what} {n}"),
         };
-        let targets = self.targets(items).len();
         let committing = items
             .iter()
             .filter(|i| i.status.changes.iter().any(|c| self.file_checked(i, c)))
             .count();
+        // One repository's push or pull says its commits, as its row's ↑ / ↓
+        // marks do; several's, how many repositories.
+        let moves = |what: &str, arrow: char, of: fn(&GitStatus) -> u32| {
+            let picked = self.targets(items);
+            match picked[..] {
+                [k] if of(&items[k].status) > 0 => {
+                    format!("{what} {arrow}{}", of(&items[k].status))
+                }
+                [_, _, ..] => format!("{what} {} repos", picked.len()),
+                _ => what.to_owned(),
+            }
+        };
         match button {
-            B::Push => over("push", targets),
-            B::ForcePush => over("force push", targets),
-            B::Pull => over("pull", targets),
+            B::Push => moves("push", '\u{2191}', |s| s.ahead),
+            B::ForcePush => moves("force push", '\u{2191}', |s| s.ahead),
+            B::Pull => moves("pull", '\u{2193}', |s| s.behind),
             B::Commit => over("commit", committing),
             B::CommitPush => over("commit and push", committing.max(self.picked(items).len())),
             B::StashPop | B::StashDrop if self.tab() == DetailTab::Stashes => {
@@ -2445,6 +2456,15 @@ impl Panel {
                 let base = self.one_name(ctx, |s| s.default_branch.as_deref());
                 let base = base.unwrap_or_else(|| "base".into());
                 let current = self.current_name(ctx);
+                // On the default branch itself, what comes in is its remote's.
+                let remote = self.one_name(ctx, |s| s.remote.as_deref());
+                let base = match remote {
+                    Some(remote) if base == current => (base.split(" / "))
+                        .map(|b| format!("{remote}/{b}"))
+                        .collect::<Vec<_>>()
+                        .join(" / "),
+                    _ => base,
+                };
                 match button {
                     B::Merge => format!("merge {base} into {current}"),
                     B::Rebase => format!("rebase {current} onto {base}"),
@@ -6635,18 +6655,22 @@ mod tests {
 
     #[test]
     fn labels_say_how_many_they_run_on() {
-        let items = items();
+        let mut items = items();
+        for item in &mut items {
+            (item.status.ahead, item.status.behind) = (3, 8);
+        }
         let ctx = ctx(&items, None);
         let mut panel = Panel::new(&items);
         let label = |panel: &Panel, button| panel.button_label(button, &ctx);
-        // The selected one alone, nothing checked.
-        assert_eq!(label(&panel, ReposButton::Push), "push 1");
+        // The selected one alone, nothing checked: its commits.
+        assert_eq!(label(&panel, ReposButton::Push), "push \u{2191}3");
+        assert_eq!(label(&panel, ReposButton::Pull), "pull \u{2193}8");
         assert_eq!(label(&panel, ReposButton::Fetch), "fetch all");
         assert_eq!(label(&panel, ReposButton::Commit), "commit");
         assert_eq!(label(&panel, ReposButton::OpenInZed), "open in Zed");
         check_repo(&mut panel, "gerdr", &ctx);
         check_repo(&mut panel, "herdr", &ctx);
-        assert_eq!(label(&panel, ReposButton::Push), "push 2");
+        assert_eq!(label(&panel, ReposButton::Push), "push 2 repos");
         assert_eq!(label(&panel, ReposButton::Fetch), "fetch 2");
         // Only gerdr has files checked; herdr is pushed with it.
         assert_eq!(label(&panel, ReposButton::Commit), "commit 1");
@@ -8588,6 +8612,15 @@ mod tests {
             "rebase feat/x onto main"
         );
         assert_eq!(label(&items, &[], ReposButton::Fetch), "fetch all");
+        // On the default branch, its remote's comes in.
+        let mut on_main = items.clone();
+        on_main[2].status.branch = Some("main".into());
+        on_main[2].status.remote = Some("origin".into());
+        assert_eq!(label(&on_main, &[], merge), "merge origin/main into main");
+        assert_eq!(
+            label(&on_main, &[], ReposButton::Rebase),
+            "rebase main onto origin/main"
+        );
         // main and master are one branch.
         let both = ["gerdr", "herdr"];
         assert_eq!(
