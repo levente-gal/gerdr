@@ -54,6 +54,10 @@ pub struct PullRef {
     /// `owner/repo`.
     pub slug: String,
     pub number: u64,
+    /// Its title, as read when the review took it; empty in a record from
+    /// before that was kept.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub title: String,
     /// Its page.
     pub url: String,
     /// Its author's login.
@@ -334,6 +338,22 @@ impl Feature {
         self.pulls().iter().find_map(|p| Some((p, p.moved()?)))
     }
 
+    /// The title a review of its pull requests gets by itself (`title_of`):
+    /// `#12 Fix the login +1`; `None` when the first one's title wasn't kept.
+    pub fn auto_title(&self) -> Option<String> {
+        let [first, rest @ ..] = self.pulls() else {
+            return None;
+        };
+        if first.title.is_empty() {
+            return None;
+        }
+        let one = format!("#{} {}", first.number, first.title);
+        Some(match rest.len() {
+            0 => one,
+            n => format!("{one} +{n}"),
+        })
+    }
+
     /// How its pull requests ended, once all of them did: the last to.
     pub fn pr_ended(&self) -> Option<&Remote> {
         let ended: Option<Vec<&Remote>> = self.pulls().iter().map(PullRef::ended).collect();
@@ -542,6 +562,7 @@ fn details_of(view: View, host: &str, slug: &str, me: &str) -> Details {
             host: host.to_owned(),
             slug: slug.to_owned(),
             number: view.number,
+            title: view.title.trim().to_owned(),
             url,
             author,
             mine,
@@ -1179,5 +1200,38 @@ mod tests {
         assert_eq!(brief_without(&text, &url(3)).unwrap(), briefs(&all[..2]));
         assert_eq!(brief_without(&text, &url(1)).unwrap(), briefs(&all[1..]));
         assert_eq!(brief_without(&text, &url(9)), None);
+    }
+
+    #[test]
+    fn a_reviews_own_title_follows_its_pull_requests() {
+        let view = |n: u64, title: &str| {
+            let mut d = details_of(view("bob", false), "github.com", "o/r", "ann");
+            d.pull.number = n;
+            d.pull.title = title.into();
+            d.title = title.into();
+            d
+        };
+        let all = [view(12, "Fix login"), view(14, "Show the error")];
+        let mut f = Feature {
+            kind: Kind::PrReview(all.iter().map(|d| d.pull.clone()).collect()),
+            ..Feature::default()
+        };
+        assert_eq!(f.auto_title().as_deref(), Some("#12 Fix login +1"));
+        assert_eq!(f.auto_title(), Some(title_of(&all)));
+        f.pulls_mut()[0].title.clear();
+        assert_eq!(f.auto_title(), None);
+        // Read from GitHub, it keeps the title, trimmed.
+        assert_eq!(
+            details_of(view_of(" Fix "), "github.com", "o/r", "")
+                .pull
+                .title,
+            "Fix"
+        );
+    }
+
+    fn view_of(title: &str) -> View {
+        let mut v = view("bob", false);
+        v.title = title.into();
+        v
     }
 }

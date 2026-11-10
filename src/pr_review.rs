@@ -160,18 +160,8 @@ impl Gerdr {
         }
         let title = title.trim();
         let retitled = !title.is_empty() && title != f.title;
-        if retitled && let Some(kept) = self.feature_mut(&project, &slug) {
-            kept.log(feature::now(), format!("titled \u{201c}{title}\u{201d}"));
-            kept.title = title.to_owned();
-            self.save_feature(&project, &slug);
-            // Its workspace follows, unless the user named it.
-            let named: Vec<usize> = (0..self.workspaces.len())
-                .filter(|&w| self.workspaces[w].name == f.title)
-                .filter(|&w| self.workspace_feature(w).is_some_and(|g| g.slug == slug))
-                .collect();
-            for w in named {
-                self.rename_workspace(w, title.to_owned());
-            }
+        if retitled {
+            self.set_review_title(&project, &slug, title);
             f.title = title.to_owned();
         }
         let (adds, drops) = match pull_changes(&f, &picks) {
@@ -209,6 +199,38 @@ impl Gerdr {
         });
     }
 
+    /// Title review `slug` `title`, logged and saved; its workspace follows,
+    /// unless the user named it.
+    pub(crate) fn set_review_title(&mut self, project: &str, slug: &str, title: &str) {
+        let Some(f) = self.feature_mut(project, slug) else {
+            return;
+        };
+        let old = std::mem::replace(&mut f.title, title.to_owned());
+        f.log(feature::now(), format!("titled \u{201c}{title}\u{201d}"));
+        self.save_feature(project, slug);
+        let named: Vec<usize> = (0..self.workspaces.len())
+            .filter(|&w| self.workspaces[w].name == old)
+            .filter(|&w| self.workspace_feature(w).is_some_and(|g| g.slug == slug))
+            .collect();
+        for w in named {
+            self.rename_workspace(w, title.to_owned());
+        }
+    }
+
+    /// Retitle review `slug` after its pull requests changed, when its
+    /// title was the one they gave it (`auto`, from before): it went stale.
+    pub(crate) fn follow_auto_title(&mut self, project: &str, slug: &str, auto: Option<String>) {
+        let Some(f) = self.feature(project, slug) else {
+            return;
+        };
+        let new = f.auto_title();
+        if auto.is_some_and(|a| a == f.title)
+            && let Some(new) = new.filter(|n| *n != f.title)
+        {
+            self.set_review_title(project, slug, &new);
+        }
+    }
+
     /// Why review `f`'s pull requests can't change now, if they can't.
     pub(crate) fn review_refusal(&self, f: &Feature) -> Option<String> {
         let title = &f.title;
@@ -243,6 +265,7 @@ impl Gerdr {
         let Some(f) = self.feature_mut(project, slug) else {
             return;
         };
+        let auto = f.auto_title();
         let now = feature::now();
         let mut joined = repos;
         for (link, created) in made {
@@ -260,7 +283,8 @@ impl Gerdr {
                 format!("added #{} at {}", d.pull.number, d.pull.short_head()),
             );
         }
-        let title = f.title.clone();
+        self.follow_auto_title(project, slug, auto);
+        let title = (self.feature(project, slug)).map_or_else(String::new, |f| f.title.clone());
         let data = store::dir(None, project, slug);
         let brief = feature::artifacts::path(&data, feature::Stage::Discover)
             .unwrap_or_else(|| data.join("brief.md"));

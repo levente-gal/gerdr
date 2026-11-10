@@ -10011,6 +10011,7 @@ impl Gerdr {
         let Some(feature) = self.feature_mut(project, slug) else {
             return;
         };
+        let auto = feature.auto_title();
         let now = feature::now();
         let title = feature.title.clone();
         let mut left_out = Vec::new();
@@ -10033,6 +10034,7 @@ impl Gerdr {
         if !gone.is_empty() {
             self.save_feature(project, slug);
             crate::pr_review::brief_drops(project, slug, &left_out);
+            self.follow_auto_title(project, slug, auto);
             self.show_success(match to_context {
                 true => context_text(&named.join(", ")),
                 false => format!(
