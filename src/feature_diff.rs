@@ -657,15 +657,29 @@ impl FeatureOf {
             .count()
     }
 
+    /// Whether the finding at `i` is dismissed and only repeats another one
+    /// listed (the same title on the same file): raised again run after run,
+    /// it would pile up in the diff. The one gone to Build, else the latest
+    /// dismissed, stands for them; the one to show stays.
+    fn repeats(&self, i: usize) -> bool {
+        let f = &self.findings[i];
+        let same = |g: &Finding| g.repo == f.repo && g.file == f.file && g.title == f.title;
+        f.state == FindingState::Dismissed
+            && self.focus.as_deref() != Some(f.id.as_str())
+            && (self.findings.iter().enumerate()).any(|(j, g)| {
+                j != i && !g.yours && same(g) && (g.state != FindingState::Dismissed || j > i)
+            })
+    }
+
     /// The findings as comments, placed in the diff read (`diffs`).
     pub fn finding_comments(&self, diffs: &HashMap<PathBuf, (u64, Vec<FileDiff>)>) -> Vec<Comment> {
         let single = (self.repos.len() == 1).then(|| &self.repos[0]);
-        self.findings
-            .iter()
+        (self.findings.iter().enumerate())
             // Those an older gerdr dropped: gone from here, on the page until
             // deleted.
-            .filter(|f| !(f.yours && f.state == FindingState::Dismissed))
-            .flat_map(|f| {
+            .filter(|(_, f)| !(f.yours && f.state == FindingState::Dismissed))
+            .filter(|&(i, _)| !self.repeats(i))
+            .flat_map(|(_, f)| {
                 let repo = (self.repos.iter().find(|r| r.name == f.repo)).or(single);
                 let root = repo.map(|r| r.root.clone()).unwrap_or_default();
                 let file = diffs
@@ -728,6 +742,7 @@ pub fn finding_comment(f: &Finding, root: PathBuf, file: Option<&FileDiff>) -> C
             of: ItemOf::Finding,
             frozen: None,
             unanswered: false,
+            question: false,
             pr: false,
         }),
     }
@@ -751,6 +766,7 @@ fn finding_note(f: &Finding, comment: &Comment) -> Option<Comment> {
             of: ItemOf::Finding,
             frozen: None,
             unanswered: false,
+            question: false,
             pr: false,
         }),
     })
@@ -2408,6 +2424,40 @@ mod tests {
             state,
             ..Finding::default()
         }
+    }
+
+    #[test]
+    fn a_finding_dismissed_again_and_again_shows_once() {
+        let same = |id: &str, state| Finding {
+            title: "Same".into(),
+            ..finding(id, state)
+        };
+        let ids = |findings: Vec<Finding>, focus: Option<&str>| -> Vec<String> {
+            let fe = FeatureOf {
+                findings,
+                focus: focus.map(str::to_owned),
+                ..FeatureOf::default()
+            };
+            (fe.finding_comments(&HashMap::new()).into_iter())
+                .filter_map(|c| c.flag.map(|f| f.id))
+                .collect()
+        };
+        // The fixed one stands for the repeats dismissed since.
+        let fixed = vec![
+            same("r1-1", FindingState::Fixed),
+            same("r3-1", FindingState::Dismissed),
+            same("r4-1", FindingState::Dismissed),
+            finding("r4-2", FindingState::Dismissed),
+        ];
+        assert_eq!(ids(fixed.clone(), None), ["r1-1", "r4-2"]);
+        // Shown on purpose, a repeat stays.
+        assert_eq!(ids(fixed, Some("r3-1")), ["r1-1", "r3-1", "r4-2"]);
+        // Only dismissed: the latest says it.
+        let dismissed = vec![
+            same("r3-1", FindingState::Dismissed),
+            same("r4-1", FindingState::Dismissed),
+        ];
+        assert_eq!(ids(dismissed, None), ["r4-1"]);
     }
 
     /// A feature's diff at `stage`, its findings read, with `own` comments.

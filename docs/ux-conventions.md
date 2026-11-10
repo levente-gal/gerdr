@@ -56,7 +56,7 @@ rules, for reviewing a branch before it merges.
 | Ctrl+Shift+W | Pick the machine the selected stage's next agent, Verify's next run or the next sandbox goes on, on the feature tab: this one, then each connected machine, then whichever is least busy (the "Runs here" or "Runs on" button on its agent card, or on Verify's and Manual test's page). It applies from the next start; what runs stays where it is. The project's file can give each stage a machine under `machines`, or `least busy`. Not offered with no machine saved, while Verify's checks run, for T3 Code, or while a sandbox has a record: its data is on its machine, so it is removed first. |
 | Ctrl+Shift+I | Pick the model of the selected stage's agent on the feature tab (the "Model:" button on its agent card), for Claude Code and Cursor. It applies from the agent's next start; one already open keeps its own. Default leaves it to the CLI. Cursor also keeps a picked model as its default for all its chats, as its own `/model` does, and its picker says so. |
 | Ctrl+Shift+B | On the feature tab's Build page: go between one agent through all milestones and a fresh agent per milestone (also the "Agents" choice on the page). It applies from the next milestone; an agent at work goes on. |
-| Ctrl+Shift+K | Skip Plan review on the feature tab, asking only when something would be lost. |
+| Ctrl+Shift+K | Skip Plan review on the feature tab, asking only when something would be lost. Its toast's Undo reopens Plan review, as Reopen does. |
 | Ctrl+Shift+D | On the feature tab: from a final plan back to the decisions. |
 | Ctrl+Shift+L | In the new feature dialog, the project picker (again: back to the repositories; also its "Link project…" button). On the feature tab, show or hide all repositories: the strip unfolds into rows of what the feature holds, its context, those removed and those not added, each with the buttons of what it can become (also the strip's end button). |
 | Ctrl+Q | Stop a project's session (project menu). |
@@ -246,7 +246,8 @@ press and drag pick whole rows and a double click opens the line in Zed.
   one (its run, its agent, how it stands, how the next run went). It only
   reads: the full output is on Verify's page, the ticks in the list below it
   under the same "Verify N". The other rounds read "Review N" for AI review,
-  "Code review N" and "Manual test N". That list has the newest round on top
+  "Code review N" and "Manual test N", N counting that stage's own rounds
+  (Code review's first is "Code review 1"). That list has the newest round on top
   and Build's own milestones under the rounds. A round shows in it from its
   start: how it stands at first, the plan's fixes unticked once the plan waits.
   Build doesn't wait for the user between milestones: they tick off as their

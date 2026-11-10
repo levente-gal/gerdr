@@ -45,6 +45,9 @@ pub enum MenuAction {
     PlanFixes(String, String),
     /// The same with no fix plan (see `Gerdr::make_finding_fixes`).
     MakeFindingFixes(String, String),
+    /// Reopen a done stage of a project's feature (see
+    /// `Gerdr::reopen_stage`): a toast's Undo of finishing it.
+    ReopenStage(String, String, crate::feature::Stage),
     /// T3 Code's server, started in the background (see
     /// `Gerdr::spawn_t3`).
     StartT3,
@@ -597,6 +600,9 @@ impl Gerdr {
             MenuAction::PlanFixes(project, slug) => self.send_findings(&project, &slug),
             MenuAction::MakeFindingFixes(project, slug) => {
                 self.make_finding_fixes(&project, &slug);
+            }
+            MenuAction::ReopenStage(project, slug, stage) => {
+                self.reopen_stage(&project, &slug, stage);
             }
             MenuAction::InboxRestore {
                 project,

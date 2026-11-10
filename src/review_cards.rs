@@ -610,6 +610,9 @@ fn suggestion_card(s: &Suggestion) -> FindingCard {
     if s.dropped {
         place.push("left out by a later run".to_owned());
     }
+    if s.yours_earlier {
+        place.push("what you wrote was on an earlier text".to_owned());
+    }
     let mut body: Vec<String> = (!s.why.is_empty())
         .then(|| s.why.clone())
         .into_iter()

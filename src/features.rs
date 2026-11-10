@@ -2693,6 +2693,19 @@ fn approves_doc(feature: &Feature, stage: Stage, ctx: RowCtx) -> bool {
         && row_action(feature, PanelRow::Stage(stage), ctx) == Some(PanelOutcome::OpenDoc(stage))
 }
 
+/// Whether Discover's or Plan's file, at `stage` of `feature`, is written
+/// while its agent still runs on it: not read yet, so not to approve.
+fn doc_unread(feature: &Feature, stage: Stage, ctx: RowCtx) -> bool {
+    feature.status == Status::Open
+        && matches!(stage, Stage::Discover | Stage::Plan)
+        && feature.current() == Some(stage)
+        && ctx.wrote(stage)
+        && (feature.runs.get(&stage)).is_some_and(|r| r.ready.is_none() && r.live())
+}
+
+/// Why Ctrl+Enter doesn't approve a file `doc_unread` says isn't read yet.
+const DOC_UNREAD: &str = "Not read yet: the agent may still change it";
+
 /// What Plan review's row does: as any agent stage's while its agent
 /// reviews or writes the final plan; in between, the suggestions to decide,
 /// then what comes of them.
@@ -5551,6 +5564,15 @@ impl FeaturePanel {
                     && approves_doc(feature, stage, ctx) =>
             {
                 return Some(PanelOutcome::ApproveDoc(stage));
+            }
+            // Written, but not read yet: say why it can't be approved.
+            Keysym::Return | Keysym::KP_Enter
+                if ctrl
+                    && !mods.shift
+                    && self.focus == TabArea::Stages
+                    && doc_unread(feature, stage, ctx) =>
+            {
+                return Some(PanelOutcome::FindingRefused(DOC_UNREAD));
             }
             // With a fix plan under way a criterion's card has no use for it.
             Keysym::Return | Keysym::KP_Enter
@@ -11661,9 +11683,11 @@ impl Gerdr {
         let current = feature.current().filter(|s| needs(*s).is_some());
         let run = current.and_then(|stage| Some((stage, feature.runs.get(&stage)?)));
         let agent_status = run.and_then(|(_, run)| self.stage_run_state(run).0);
+        let mut agent_read = false;
         let agent = run.map(|(stage, run)| {
             let watch_key = (panel.project.clone(), panel.slug.clone(), stage);
             let watch = self.features.agents.get(&watch_key);
+            agent_read = watch.is_some_and(crate::feature_agents::Watch::reads);
             crate::feature_agents::agent_line(run, stage, agent_status, watch, now)
         });
         let manual_counts = self.manual_counts(feature);
@@ -11678,6 +11702,7 @@ impl Gerdr {
             shipping,
             agent,
             agent_status,
+            agent_read,
             tail,
             ctx: self.row_ctx(feature),
             setup: doing(Job::Setup),
@@ -12453,6 +12478,9 @@ struct PanelState<'a> {
     agent: Option<String>,
     /// Its current stage's agent's status, while its tab is there.
     agent_status: Option<AgentStatus>,
+    /// gerdr reads what that agent wrote (`feature_agents::Watch::reads`):
+    /// it waits on gerdr, not on the user.
+    agent_read: bool,
     /// The last lines of its current stage's agent's pane, as last read.
     tail: &'a [String],
     /// What its rows need besides it.
@@ -13605,6 +13633,7 @@ fn agent_card(
     // Asked something, held for its prompt, or idle with its work undone.
     let waits = match back {
         Some(back) => back.waits_on_you(),
+        None if current && state.agent_read => false,
         None if current => crate::feature_agents::waits_on_you(run, stage, state.agent_status),
         None => run.waits_to_send(),
     };
@@ -15102,7 +15131,8 @@ fn draft_cards(
                     CheckTone::Note,
                 ),
             ),
-            (None, Some(_)) => (Dot::Done, line(sent, CheckTone::Note)),
+            // Sent back: not done, only over, as a dropped round reads.
+            (None, Some(_)) => (Dot::Unknown, line(sent, CheckTone::Note)),
             (None, None) if latest && current => {
                 (Dot::Idle, line("ready for review", CheckTone::Ready))
             }
@@ -18912,6 +18942,21 @@ pub(crate) mod tests {
         assert_eq!(card(&f, Some(AgentStatus::Blocked)), waits);
         assert_eq!(card(&f, Some(AgentStatus::Idle)), waits);
         assert_eq!(card(&f, Some(AgentStatus::Working)), working);
+        // Idle while gerdr reads what it wrote: that waits on gerdr.
+        let state = PanelState {
+            agent_status: Some(AgentStatus::Idle),
+            agent_read: true,
+            ..PanelState::default()
+        };
+        let page = stage_page(&f, Stage::Plan, &state, &[], 2_000);
+        assert!(page.sections.iter().any(|s| matches!(
+            s,
+            PageSection::Agent {
+                waits: false,
+                dot: Dot::Idle,
+                ..
+            }
+        )));
         // Its file ready, it waits on nothing.
         f.runs.insert(Stage::Plan, agent_run(Some("p1"), Some(1)));
         assert_eq!(card(&f, Some(AgentStatus::Idle)).map(|c| c.0), Some(false));
@@ -25044,6 +25089,23 @@ pub(crate) mod tests {
             CheckTone::Note,
         );
         assert_eq!(card, Some(kept));
+        // Ctrl+Enter can't approve it yet, and says why.
+        let ctrl = ModifiersState {
+            ctrl: true,
+            ..ModifiersState::default()
+        };
+        let slugs = [f.slug.clone()];
+        let got = FeaturePanel::default().key(
+            &ctrl,
+            Keysym::Return,
+            &f,
+            &slugs,
+            written,
+            &[],
+            &[],
+            &[],
+        );
+        assert_eq!(got, Some(PanelOutcome::FindingRefused(DOC_UNREAD)));
         // Nothing there yet: it is being written, as before.
         assert_eq!(
             file_line(&f, Stage::Discover, RowCtx::default()),
@@ -26446,7 +26508,7 @@ pub(crate) mod tests {
         // A round known only by the build log has its card all the same.
         assert_eq!(
             groups,
-            [("Verify 3", 0, 1), ("Review 1", 2, 2), ("Build", 2, 3)]
+            [("Verify 1", 0, 1), ("Review 1", 2, 2), ("Build", 2, 3)]
         );
     }
 
@@ -27249,9 +27311,10 @@ pub(crate) mod tests {
                 _ => None,
             })
             .collect();
-        // Newest first, by who asked; Build keeps "Review N" for AI review's.
+        // Newest first, by who asked, each counted in its stage; Build keeps
+        // "Review N" for AI review's.
         let labels: Vec<&str> = cards.iter().map(|c| c.label.as_str()).collect();
-        assert_eq!(labels, ["Verify 3", "Code review 2", "Review 1"]);
+        assert_eq!(labels, ["Verify 1", "Code review 1", "Review 1"]);
         // The open one shows open whatever its number.
         let opened: Vec<bool> = cards.iter().map(|c| c.open).collect();
         assert_eq!(opened, [false, true, false]);
@@ -27394,6 +27457,8 @@ pub(crate) mod tests {
         assert_eq!(cards[0].state.text, "ready for review");
         assert_eq!(cards[0].dot, Dot::Idle);
         assert_eq!(cards[1].state.text, "sent back with 1 comment");
+        // Sent back is over, not done: no green dot.
+        assert_eq!(cards[1].dot, Dot::Unknown);
         assert_eq!(cards[1].asked_caption, "Comments sent back");
         assert_eq!(cards[1].asked[0].note, "Why not cron?");
         assert_eq!(cards[0].meta, "Claude Code (opus) \u{b7} written 2m ago");

@@ -171,8 +171,11 @@ impl DocOf {
             .unwrap_or(crate::doc_review::APPROVED_FILE)
     }
 
-    /// The file's name: `brief.md`.
+    /// The file's name: `brief.md`, also for a draft kept as `brief-2.md`.
     pub fn name(&self) -> String {
+        if let Some(name) = self.file.name() {
+            return name.into();
+        }
         let name = self.path.file_name().unwrap_or(self.path.as_os_str());
         name.to_string_lossy().into()
     }
@@ -1162,9 +1165,11 @@ impl WorktreeDiff {
             self.doc_file().filter(|_| self.feature.is_none()),
         ) && self.diff.mode_title(false).is_none()
         {
-            view.title = match file.added {
-                1 => format!("{} · 1 line", doc.name()),
-                n => format!("{} · {n} lines", doc.name()),
+            view.title = match (doc.file.shows_changes(), file.added) {
+                // Changes to another file: what was added and taken out.
+                (true, _) => format!("{} · +{} \u{2212}{}", doc.name(), file.added, file.removed),
+                (false, 1) => format!("{} · 1 line", doc.name()),
+                (false, n) => format!("{} · {n} lines", doc.name()),
             };
         }
         (view.row_buttons).retain(|(_, hint)| hint.button != ReposButton::Restore);
@@ -2961,6 +2966,32 @@ pub(crate) mod tests {
         let mut wd = WorktreeDiff::of_doc(doc, 2, Review::default());
         wd.set_doc(Ok("# Brief\nUsers log in.\nWith a password.\n".into()), ENV);
         wd
+    }
+
+    #[test]
+    fn a_draft_shows_by_its_file_name_and_counts_both_ways() {
+        let doc = DocOf {
+            project: "p".into(),
+            slug: "login".into(),
+            file: DocFile::DraftChanges(Stage::Discover, 2),
+            path: "/data/features/p/login/drafts/brief-2.md".into(),
+            comments: "/data/features/p/login/discover-comments.json".into(),
+            title: "Log in".into(),
+            state: "draft 2 against draft 1".into(),
+            text: None,
+            locked: None,
+            standing: Standing::Open,
+            current: Some(Stage::Discover),
+            base: Some("# Brief\nOld.\nGone.\n".into()),
+            suggestions: None,
+        };
+        let mut wd = WorktreeDiff::of_doc(doc, 2, Review::default());
+        wd.set_doc(Ok("# Brief\nNew.\n".into()), ENV);
+        assert_eq!(
+            wd.heading(),
+            "Discover \u{b7} what draft 2 of brief.md changed"
+        );
+        assert_eq!(wd.view(ENV).title, "brief.md · +1 \u{2212}2");
     }
 
     #[test]

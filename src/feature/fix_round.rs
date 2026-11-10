@@ -388,11 +388,6 @@ pub struct VerifyFix {
 }
 
 impl VerifyFix {
-    /// What it is called on Build's page.
-    pub fn label(&self) -> String {
-        format!("Verify {}", self.round)
-    }
-
     /// What round `round` keeps of failed run `run`, going to `agent`.
     pub fn new(round: u32, run: &VerifyRun, agent: String) -> VerifyFix {
         let mut failures = run.failures.clone();
@@ -529,17 +524,22 @@ pub fn criteria_named(log: &str, n: u32) -> Vec<String> {
 }
 
 /// What round `n`'s list is called on Build's page, under the plan's own: by
-/// who asked, as `fixes` and `asked` say. AI review's read "Review N", and so
-/// does a round from before they were kept.
+/// who asked, as `fixes` and `asked` say, and counted among that stage's
+/// rounds: Code review's first is "Code review 1" whatever came before it. AI
+/// review's read "Review N", and so does a round from before they were kept.
 pub fn label(n: u32, fixes: &[VerifyFix], asked: &BTreeMap<u32, Stage>) -> String {
-    if let Some(fix) = fixes.iter().find(|fix| fix.round == n) {
-        return fix.label();
-    }
-    match asked.get(&n) {
-        Some(stage @ (Stage::Verify | Stage::CodeReview | Stage::ManualTest)) => {
-            format!("{} {n}", stage.label())
-        }
-        _ => format!("Review {n}"),
+    let by = |m: u32| match fixes.iter().any(|fix| fix.round == m) {
+        true => Some(Stage::Verify),
+        false => asked
+            .get(&m)
+            .copied()
+            .filter(|s| matches!(s, Stage::Verify | Stage::CodeReview | Stage::ManualTest)),
+    };
+    let stage = by(n);
+    let k = (1..=n).filter(|&m| by(m) == stage).count();
+    match stage {
+        Some(stage) => format!("{} {k}", stage.label()),
+        None => format!("Review {k}"),
     }
 }
 
@@ -906,17 +906,18 @@ mod tests {
             (4, Stage::Verify),
         ]);
         let label = |n, fixes: &[VerifyFix]| label(n, fixes, &asked);
+        // Each counts its own stage's rounds.
         assert_eq!(label(1, &[]), "Review 1");
-        assert_eq!(label(2, &[]), "Code review 2");
-        assert_eq!(label(3, &[]), "Manual test 3");
-        assert_eq!(label(4, &[]), "Verify 4");
-        // From before they were kept.
-        assert_eq!(label(9, &[]), "Review 9");
+        assert_eq!(label(2, &[]), "Code review 1");
+        assert_eq!(label(3, &[]), "Manual test 1");
+        assert_eq!(label(4, &[]), "Verify 1");
+        // From before they were kept: AI review's, as 5 to 8 are.
+        assert_eq!(label(9, &[]), "Review 6");
         let kept = VerifyFix {
             round: 9,
             ..VerifyFix::default()
         };
-        assert_eq!(label(9, &[kept]), "Verify 9");
+        assert_eq!(label(9, &[kept]), "Verify 2");
     }
 
     #[test]
@@ -1141,7 +1142,7 @@ mod tests {
             ..VerifyFix::default()
         }];
         assert_eq!(label(2, &fixes, &BTreeMap::new()), "Review 2");
-        assert_eq!(label(3, &fixes, &BTreeMap::new()), "Verify 3");
+        assert_eq!(label(3, &fixes, &BTreeMap::new()), "Verify 1");
     }
 
     #[test]
