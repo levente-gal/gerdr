@@ -7,6 +7,7 @@
 use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    time::Duration,
 };
 
 use super::{Feature, KeptHead, Link, Repo, hook, pr::PullRef};
@@ -1028,6 +1029,9 @@ pub fn update_pr(repo: &Repo, pull: &PullRef, to: &super::pr::Remote) -> Result<
 /// Fetch pull request `pull`'s head into its `fetch_ref`, and its base (and
 /// for one of the user's own, its branch) into origin's branches; then make
 /// sure its head commit came.
+/// How long fetching a pull request may take.
+const FETCH_TIME: Duration = Duration::from_secs(120);
+
 fn fetch_pull(main: &Path, pull: &PullRef) -> Result<(), String> {
     let head = format!("+refs/pull/{}/head:{}", pull.number, pull.fetch_ref());
     let base = format!(
@@ -1042,7 +1046,8 @@ fn fetch_pull(main: &Path, pull: &PullRef) -> Result<(), String> {
     if pull.own() {
         args.push(&own);
     }
-    git(main, &args).map_err(|err| format!("couldn't fetch #{}: {err}", pull.number))?;
+    git_within(main, &args, FETCH_TIME)
+        .map_err(|err| format!("couldn't fetch #{}: {err}", pull.number))?;
     let spec = format!("{}^{{commit}}", pull.head_sha);
     git(main, &["rev-parse", "--verify", "--quiet", &spec]).map_err(|_| {
         format!(
@@ -2027,31 +2032,14 @@ pub(super) fn git_bytes(
     args: &[&str],
     input: Option<Vec<u8>>,
 ) -> Result<Vec<u8>, String> {
-    let mut cmd = Command::new("git");
-    cmd.arg("-C")
-        .arg(dir)
-        .args(args)
-        .stdin(if input.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .env("LC_ALL", "C")
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_EDITOR", "true")
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE")
-        .env_remove("GIT_COMMON_DIR");
-    #[cfg(test)]
-    cmd.env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_AUTHOR_NAME", "t")
-        .env("GIT_AUTHOR_EMAIL", "t@t")
-        .env("GIT_COMMITTER_NAME", "t")
-        .env("GIT_COMMITTER_EMAIL", "t@t");
+    let mut cmd = git_command(dir, args);
+    cmd.stdin(if input.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    })
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
     let mut child = cmd
         .spawn()
         .map_err(|err| format!("couldn't run git: {err}"))?;
@@ -2071,10 +2059,50 @@ pub(super) fn git_bytes(
         // A feeder that panicked fed less: git said so already.
         let _ = feed.join();
     }
-    if out.status.success() {
-        return Ok(out.stdout);
+    match out.status.success() {
+        true => Ok(out.stdout),
+        false => Err(why_failed(args, &out.stderr)),
     }
-    let err = String::from_utf8_lossy(&out.stderr);
+}
+
+/// `git`, stopped with what it started after `limit`: one that goes over
+/// the network.
+fn git_within(dir: &Path, args: &[&str], limit: Duration) -> Result<String, String> {
+    let out = crate::t3_update::output_within(git_command(dir, args), limit)
+        .map_err(|err| format!("git {}: {err}", args.first().unwrap_or(&"")))?;
+    match out.status.success() {
+        true => Ok(String::from_utf8_lossy(&out.stdout).into_owned()),
+        false => Err(why_failed(args, &out.stderr)),
+    }
+}
+
+/// A git of `args` in `dir`, on its own settings: never prompting, nothing
+/// of the git that runs gerdr's.
+fn git_command(dir: &Path, args: &[&str]) -> Command {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("LC_ALL", "C")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_EDITOR", "true")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_COMMON_DIR");
+    #[cfg(test)]
+    cmd.env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_AUTHOR_NAME", "t")
+        .env("GIT_AUTHOR_EMAIL", "t@t")
+        .env("GIT_COMMITTER_NAME", "t")
+        .env("GIT_COMMITTER_EMAIL", "t@t");
+    cmd
+}
+
+/// Why a git of `args` failed, from what it printed on `stderr`.
+fn why_failed(args: &[&str], stderr: &[u8]) -> String {
+    let err = String::from_utf8_lossy(stderr);
     // The last line says why; the ones before it are hints.
     let why = err
         .lines()
@@ -2084,11 +2112,11 @@ pub(super) fn git_bytes(
         .unwrap_or("")
         .trim_start_matches("fatal: ")
         .trim_start_matches("error: ");
-    Err(if why.is_empty() {
+    if why.is_empty() {
         format!("git {} failed", args.first().unwrap_or(&""))
     } else {
         why.to_owned()
-    })
+    }
 }
 
 #[cfg(test)]
@@ -2165,6 +2193,21 @@ mod tests {
             head_sha: sha.into(),
             ..PullRef::default()
         }
+    }
+
+    #[test]
+    fn a_fetch_that_hangs_is_stopped() {
+        let t = Temp::new();
+        let (app, _) = pull_seed(&t);
+        run(&app, &["config", "remote.origin.uploadpack", "sleep 30; git-upload-pack"]);
+        let start = std::time::Instant::now();
+        let stopped = git_within(&app, &["fetch", "-q", "origin"], Duration::from_secs(1));
+        assert_eq!(stopped, Err("git fetch: no answer in 1s".into()));
+        assert!(start.elapsed() < Duration::from_secs(10));
+        // Answering, it fetches as `git` does.
+        run(&app, &["config", "--unset", "remote.origin.uploadpack"]);
+        assert_eq!(git_within(&app, &["fetch", "-q", "origin"], FETCH_TIME), Ok(String::new()));
+        assert!(git_within(&app, &["fetch", "-q", "nowhere"], FETCH_TIME).is_err());
     }
 
     #[test]
