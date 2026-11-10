@@ -3379,6 +3379,12 @@ pub(crate) mod tests {
         let (_, last, caret) = shown(&wd);
         assert!(last.is_some(), "its end in view");
         assert_eq!(caret, Some(("l39".into(), 3)));
+        // Held far past, many rows a frame: as far as there are.
+        wd.drag_editor_past(-5, 0, ENV);
+        let (_, _, five) = shown(&wd);
+        wd.drag_editor_past(-1000, 0, ENV);
+        assert_eq!(shown(&wd).2, Some(("l00".into(), 0)));
+        assert_ne!(five, Some(("l00".into(), 0)), "five rows up is not the start");
     }
 
     #[test]

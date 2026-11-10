@@ -1694,6 +1694,9 @@ pub struct Gerdr {
     /// The left button went down on the comment being written in the
     /// diff and is held: moving selects its text.
     pub repos_editor_drag: bool,
+    /// While that press is held past the diff's rows: when they last
+    /// scrolled for it, and the part of a row carried to the next frame.
+    pub repos_editor_edge: Option<(std::time::Instant, f64)>,
     /// The file's tab showing as of the last frame, by id: one coming to
     /// show reads its file again (see `doc_tab`).
     pub doc_tab_shown: Option<u64>,
@@ -7260,6 +7263,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         field_drag: false,
         repos_rows_drag: false,
         repos_editor_drag: false,
+        repos_editor_edge: None,
         doc_tab_shown: None,
         scrollback: None,
         criteria_strip: Default::default(),

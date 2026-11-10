@@ -1234,8 +1234,54 @@ impl Gerdr {
     /// The pointer dragged to `pos` from a press on the diff: the
     /// cursor's range reaches the row under it, the diff scrolling a row
     /// on when it is above or below the rows; from a press on the comment
-    /// being written, its selection reaches the char there.
+    /// being written, its selection reaches the char there (its row
+    /// nearest, held past the rows: `repos_editor_edge_tick` scrolls).
     pub fn repos_drag_rows(&mut self, pos: Point<f64, Logical>) {
+        self.repos_diff_drag(pos, 0);
+    }
+
+    /// While a press on the comment being written is held past the
+    /// diff's rows, scroll on to `now` by rows as fast as the pointer is
+    /// far past them (see `scrollback::edge_speed`), the selection going
+    /// on with them, the pointer moving or not. Whether it scrolls.
+    pub fn repos_editor_edge_tick(&mut self, now: std::time::Instant) -> bool {
+        let edge = match self.repos_editor_drag {
+            true => self.repos_view().map_or(0.0, |view| {
+                let list = chrome::repos_layout(&view, self.repos_rect()).detail_list;
+                let (top, bottom) = (list.loc.y as f64, (list.loc.y + list.size.h) as f64);
+                match self.pointer.y {
+                    y if y < top => y - top,
+                    y if y >= bottom => y - bottom + 1.0,
+                    _ => 0.0,
+                }
+            }),
+            false => 0.0,
+        };
+        if edge == 0.0 {
+            self.repos_editor_edge = None;
+            return false;
+        }
+        let rows = match self.repos_editor_edge {
+            Some((at, carried)) => {
+                carried + crate::scrollback::edge_speed(edge) * now.duration_since(at).as_secs_f64()
+            }
+            None => 0.0,
+        };
+        // The whole rows, as many as a page at most.
+        let steps = rows.trunc();
+        self.repos_editor_edge = Some((now, rows - steps));
+        let (list, diff) = self.repos_page();
+        let page = list.max(diff).max(1) as f64;
+        if steps != 0.0 {
+            self.repos_diff_drag(self.pointer, steps.clamp(-page, page) as i64);
+        }
+        true
+    }
+
+    /// A drag on the diff as `repos_drag_rows` has it; with `step`, a held
+    /// press on the comment being written scrolls that many rows (up
+    /// negative) instead, its selection going on with them.
+    fn repos_diff_drag(&mut self, pos: Point<f64, Logical>, step: i64) {
         let Some(view) = self.repos_view() else {
             self.repos_rows_drag = false;
             self.repos_editor_drag = false;
@@ -1261,17 +1307,17 @@ impl Gerdr {
             .detail_rows
             .iter()
             .position(|r| (r.loc.y as f64..(r.loc.y + r.size.h) as f64).contains(&pos.y));
-        // Past the rows, the comment's selection takes its next row out of
-        // view, the diff scrolling to it.
+        // A step takes the comment's selection to its next row out of view,
+        // the diff scrolling to it.
         if let Some((i, col)) = editor
             && self.wd().is_some()
         {
             let env = self.worktree_env();
             if let Some(wd) = self.wd_mut() {
-                match (by, i) {
+                match (step, i) {
                     (0, Some(i)) => wd.drag_editor(i, col, env),
                     (0, None) => {}
-                    (by, _) => wd.drag_editor_past(by, col, env),
+                    (step, _) => wd.drag_editor_past(step, col, env),
                 }
             }
             return;
@@ -1309,9 +1355,9 @@ impl Gerdr {
             return;
         };
         match (editor, by, row) {
-            (Some((Some(i), col)), 0, _) => p.drag_editor(i, col, &ctx),
-            (Some((None, _)), 0, _) => {}
-            (Some((_, col)), by, _) => p.drag_editor_past(by, col, &ctx),
+            (Some((_, col)), ..) if step != 0 => p.drag_editor_past(step, col, &ctx),
+            (Some((Some(i), col)), ..) => p.drag_editor(i, col, &ctx),
+            (Some((None, _)), ..) => {}
             (None, 0, Some(i)) => p.extend_detail_row(i, &ctx),
             (None, 0, None) => {}
             (None, by, _) => p.drag_past_rows(by, &ctx),
