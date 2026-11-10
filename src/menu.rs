@@ -83,6 +83,12 @@ pub enum MenuAction {
         name: String,
         target: String,
     },
+    /// A toast's "Undo" after a machine was renamed: machine `from` is
+    /// called `to` again.
+    RenameMachine {
+        from: String,
+        to: String,
+    },
     /// T3 Code, updated to the newest version gerdr reads, or to this one
     /// (see `Gerdr::update_t3`).
     UpdateT3(Option<String>),
@@ -496,6 +502,7 @@ impl Gerdr {
             MenuAction::StopAiWorkPull(project, slug) => self.ai_work.stop_pull(&project, &slug),
             MenuAction::RemoveMachine(name) => self.ask_remove_machine(&name),
             MenuAction::RestoreMachine { name, target } => self.restore_machine(&name, &target),
+            MenuAction::RenameMachine { from, to } => self.rename_machine_back(&from, &to),
             MenuAction::UpdateT3(version) => self.update_t3(version),
             MenuAction::NewTab(w) => {
                 self.switch_workspace(w);

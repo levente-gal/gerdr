@@ -188,7 +188,15 @@ impl Gerdr {
                 if let Err(why) = self.rename_machine(&machine, &name) {
                     return self.edit_error(why, MachinesFocus::EditName);
                 }
-                self.show_success(format!("Renamed {machine} to {name}"));
+                let undo = MenuAction::RenameMachine {
+                    from: name.clone(),
+                    to: machine.clone(),
+                };
+                self.toast_with(
+                    format!("Renamed {machine} to {name}"),
+                    crate::toast::Level::Success,
+                    Some(("Undo".to_owned(), undo)),
+                );
             }
             return self.edit_closed(Some(&name));
         }
@@ -360,6 +368,24 @@ impl Gerdr {
         }
         self.show_success(format!("Saved {called}"));
         self.edit_closed(Some(&called));
+    }
+
+    /// The rename toast's Undo: machine `from` is called `to` again.
+    pub(crate) fn rename_machine_back(&mut self, from: &str, to: &str) {
+        match self.rename_machine(from, to) {
+            Ok(()) => {
+                if let Some(panel) = self.machines_panel.as_mut()
+                    && let Some(row) = self.machines.saved.keys().position(|n| n == to)
+                {
+                    panel.selected = row;
+                }
+                self.show_success(format!("{from} is called {to} again"));
+            }
+            Err(why) => {
+                let why = why.trim_end_matches('.');
+                self.show_error(format!("gerdr couldn't call {from} {to} again: {why}"));
+            }
+        }
     }
 
     /// Call machine `old` `new`, keeping its link up and all gerdr keeps of
