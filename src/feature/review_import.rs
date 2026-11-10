@@ -91,6 +91,9 @@ pub enum FindingState {
     Fixed,
     /// The user dismissed it (`Finding::reason` says why).
     Dismissed,
+    /// It went to GitHub as a comment of a review the user submitted, of
+    /// someone else's pull request (see `pr_submit`).
+    Posted,
 }
 
 impl FindingState {
@@ -172,6 +175,8 @@ pub enum Decision {
 pub const SENT: &str = "That finding went to the Build agent to fix";
 /// Why a fixed finding isn't decided again.
 pub const FIXED: &str = "That finding is fixed";
+/// Why a finding posted to GitHub isn't decided again.
+pub const POSTED: &str = "That finding is on GitHub, in the review you submitted";
 
 /// What `f` does to a finding in `state`: to fix (from undecided or
 /// dismissed), or back to undecided (from to fix); else why it does
@@ -642,6 +647,7 @@ pub fn decide(review: &mut AiReview, id: &str, decision: &Decision) -> Result<St
             Err(format!("Say why you dismiss {id}"))
         }
         (_, S::Fixed) => Err(format!("{id} is fixed already")),
+        (_, S::Posted) => Err(format!("{id} is on GitHub already")),
         (Decision::Fix, S::Open | S::Dismissed) => {
             f.state = S::Fix;
             f.reason.clear();

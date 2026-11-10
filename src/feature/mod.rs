@@ -41,6 +41,7 @@ pub mod page;
 pub mod patch;
 pub mod plan_review;
 pub mod pr;
+pub mod pr_submit;
 pub mod remote;
 pub mod review_import;
 pub mod review_items;
@@ -227,6 +228,9 @@ pub struct Shipping {
     /// removed), in the order it did: what undoing it brings back.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub after: Vec<AfterDone>,
+    /// A pull request's review: each submitted to GitHub, oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reviews: Vec<pr_submit::Posted>,
 }
 
 /// A step that follows shipping, as Ship's "Afterwards" ticks it.
@@ -372,6 +376,7 @@ impl Shipping {
             && self.updates.is_empty()
             && self.resolving.is_none()
             && self.after.is_empty()
+            && self.reviews.is_empty()
     }
 }
 

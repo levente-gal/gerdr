@@ -108,7 +108,12 @@ impl Gerdr {
 
     /// Open feature `slug`'s summary to edit, written or not yet.
     pub(crate) fn edit_ship_summary(&mut self, project: &str, slug: &str) {
-        let path = store::dir(None, project, slug).join(SUMMARY_FILE);
+        // A pull request's review has its own words over its comments.
+        let file = match self.feature(project, slug).and_then(|f| f.pull()) {
+            Some(_) => crate::feature::pr_submit::BODY_FILE,
+            None => SUMMARY_FILE,
+        };
+        let path = store::dir(None, project, slug).join(file);
         if !path.exists()
             && let Err(err) = std::fs::write(&path, "")
         {

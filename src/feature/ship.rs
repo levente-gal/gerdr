@@ -450,7 +450,8 @@ pub fn probe(feature: &Feature, modes: &Modes) -> Probe {
             .map(|repo| (repo.key(), guard_of(repo, &branch)))
             .collect(),
     };
-    let ship = feature.ships().then(|| check(feature, &reading, modes));
+    // A pull request's review submits it instead (`pr_post`).
+    let ship = (feature.ships() && feature.pull().is_none()).then(|| check(feature, &reading, modes));
     let merged =
         feature.shipping.squash_at.is_some() && reading.as_ref().is_ok_and(|r| merged(feature, r));
     Probe {

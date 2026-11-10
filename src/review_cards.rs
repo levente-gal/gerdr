@@ -532,6 +532,7 @@ fn finding_card(f: &ReviewFinding, multi: bool, posts: bool) -> FindingCard {
         FindingState::Sent => "sent to Build".to_owned(),
         FindingState::Fixed => "fixed".to_owned(),
         FindingState::Dismissed => format!("dismissed: {}", f.reason),
+        FindingState::Posted => "on GitHub".to_owned(),
     };
     let mut place = vec![f.id.clone()];
     if !f.file.is_empty() {

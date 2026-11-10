@@ -354,6 +354,18 @@ pub(crate) enum Done {
     PrRead {
         reads: Vec<(String, String, Result<feature::pr::Remote, String>)>,
     },
+    /// A pull request's review was submitted to GitHub, or not.
+    ReviewPosted {
+        project: String,
+        slug: String,
+        result: Result<Box<crate::pr_post::Submitted>, String>,
+    },
+    /// The user's own pull request's commits were pushed, or not: the head.
+    PrPushed {
+        project: String,
+        slug: String,
+        result: Result<String, String>,
+    },
     /// A pull request's failed runs were asked to run again on GitHub:
     /// how many went, and why the others didn't.
     CiRerun {
@@ -1696,6 +1708,11 @@ pub enum PanelOutcome {
     /// A pull request's review: run its failed GitHub Actions runs again on
     /// GitHub (see `pr_watch::rerun_ci`).
     RerunCi,
+    /// A pull request's review: submit it to GitHub as this, after asking
+    /// (see `pr_post`).
+    SubmitReview(feature::pr_submit::Event),
+    /// The user's own pull request's review: push its commits, after asking.
+    PushPr,
     /// Ask an agent to write the feature's summary again.
     WriteSummary,
     /// Undo step `.1` that shipping ran for repository `.0`, after asking.
@@ -2084,6 +2101,10 @@ pub fn row_action(feature: &Feature, row: PanelRow, ctx: RowCtx) -> Option<Panel
             }
             StageMark::Current if feature.pull().is_some_and(|p| p.moved().is_some()) => {
                 PanelOutcome::UpdatePrHead
+            }
+            // A review's Ship submits it to GitHub.
+            StageMark::Current if stage == Stage::Ship && feature.pull().is_some() => {
+                submit_action(feature, ctx)
             }
             StageMark::Current if stage == Stage::Ship && ctx.ship_nothing => PanelOutcome::Finish,
             StageMark::Current if stage == Stage::Ship => PanelOutcome::Ship,
@@ -3363,6 +3384,12 @@ fn action_hint(action: &PanelOutcome) -> &'static str {
         PanelOutcome::Finish => "finish\u{2026}",
         PanelOutcome::UpdatePrHead => "update to new head",
         PanelOutcome::RerunCi => "rerun on GitHub",
+        PanelOutcome::SubmitReview(feature::pr_submit::Event::Comment) => "comment\u{2026}",
+        PanelOutcome::SubmitReview(feature::pr_submit::Event::Approve) => "approve\u{2026}",
+        PanelOutcome::SubmitReview(feature::pr_submit::Event::RequestChanges) => {
+            "request changes\u{2026}"
+        }
+        PanelOutcome::PushPr => "push\u{2026}",
         PanelOutcome::OpenPr(_) => "open on GitHub",
         PanelOutcome::FinishReview => "finish\u{2026}",
         PanelOutcome::Untick(_) => "reopen",
@@ -3381,6 +3408,8 @@ fn stage_button(feature: &Feature, stage: Stage, ctx: RowCtx) -> Option<&'static
         PanelOutcome::Finish => Some("Finish\u{2026}"),
         PanelOutcome::UpdatePrHead => Some(UPDATE_HEAD),
         PanelOutcome::RerunCi => Some("Rerun failed on GitHub"),
+        PanelOutcome::SubmitReview(event) => Some(event.label()),
+        PanelOutcome::PushPr => Some("Push\u{2026}"),
         PanelOutcome::OpenPr(_) => Some("Open checks"),
         PanelOutcome::FinishReview => Some("Finish\u{2026}"),
         PanelOutcome::Untick(_) => Some("Reopen"),
@@ -6603,6 +6632,16 @@ impl Gerdr {
                 self.feature_linked(&project, &slug, &names, result);
             }
             Done::PrRead { reads } => self.pr_reviews_read(reads),
+            Done::ReviewPosted {
+                project,
+                slug,
+                result,
+            } => self.review_posted(&project, &slug, result),
+            Done::PrPushed {
+                project,
+                slug,
+                result,
+            } => self.pr_pushed(&project, &slug, result),
             Done::CiRerun {
                 project,
                 slug,
@@ -8709,7 +8748,12 @@ impl Gerdr {
         // away and the page has the keyboard.
         let on = self.features.panel.as_ref()?;
         let quiet = on.keys || on.note.is_some() || on.focus == TabArea::Repos;
-        if !quiet && on.page_stage(&feature) == Stage::Ship {
+        let reviews = feature.pull().is_some();
+        if !quiet && on.page_stage(&feature) == Stage::Ship && reviews {
+            if let Some(outcome) = submit_key(&feature, mods, sym) {
+                return Some(outcome);
+            }
+        } else if !quiet && on.page_stage(&feature) == Stage::Ship {
             let repo = ship_row_repo(on, &ships);
             let keys = ship_keys(&feature, ctx, probe, repo.as_deref());
             if let Some(key) = keys.into_iter().find(|k| k.pressed(mods, sym)) {
@@ -9000,6 +9044,8 @@ impl Gerdr {
             PanelOutcome::OpenPr(url) => self.open_feature_page(&project, &slug, url),
             PanelOutcome::UpdatePrHead => self.update_pr_head(&project, &slug),
             PanelOutcome::RerunCi => self.rerun_ci(&project, &slug),
+            PanelOutcome::SubmitReview(event) => self.ask_submit_review(&project, &slug, event),
+            PanelOutcome::PushPr => self.ask_push_pr(&project, &slug),
             PanelOutcome::FinishReview => self.ask_finish_pr_review(&project, &slug),
             PanelOutcome::WriteSummary => self.write_ship_summary(&project, &slug, true),
             PanelOutcome::UndoShip(repo, step) => self.ask_undo_ship(&project, &slug, &repo, step),
@@ -11590,6 +11636,13 @@ fn repo_line(feature: &Feature, repo: &feature::Repo, probe: Option<&Probe>) -> 
 /// the current stage, what waits on AI review, Code review and Manual
 /// test.
 fn stage_line(feature: &Feature, stage: Stage, state: &PanelState) -> Option<String> {
+    if stage == Stage::Ship
+        && feature.pull().is_some()
+        && feature.status == Status::Open
+        && feature.current() == Some(Stage::Ship)
+    {
+        return submit_line(feature, state.ctx);
+    }
     let current = stage_mark(feature, stage) == StageMark::Current;
     let agent = state.agent.as_deref().filter(|_| current);
     match stage {
@@ -11832,6 +11885,10 @@ fn current_line(feature: &Feature, stage: Stage, state: &LineState, now: u64) ->
             Some((passed, total)) if total > 0 => format!("{passed} of {total} passed"),
             _ => String::new(),
         },
+        Stage::Ship if feature.pull().is_some() => match feature.shipping.reviews.last() {
+            Some(r) => r.event.done().to_owned(),
+            None => "to submit".into(),
+        },
         Stage::Ship => {
             let planned = ship_planned(feature, state.probe);
             if state.shipping {
@@ -11930,6 +11987,147 @@ fn short_model(model: &str) -> &str {
 /// The label of the button moving a pull request's review to its new head.
 const UPDATE_HEAD: &str = "Update to new head";
 
+/// How many things a review of `feature` would post now, as `ctx` read
+/// them: findings to comment, comments of Code review, Manual test's.
+fn to_post(feature: &Feature, ctx: RowCtx) -> usize {
+    let findings = (feature.review.iter().flat_map(|r| &r.findings))
+        .filter(|f| f.state == FindingState::Fix)
+        .count();
+    findings + ctx.comments + ctx.manual.failed.saturating_sub(ctx.manual.sent)
+}
+
+/// What Enter does on Ship's page of `feature`, a pull request's review:
+/// push the user's own fixes, post what waits, finish once a review went,
+/// else approve someone else's.
+fn submit_action(feature: &Feature, ctx: RowCtx) -> PanelOutcome {
+    use feature::pr_submit::Event;
+    let Some(pull) = feature.pull() else {
+        return PanelOutcome::Tick;
+    };
+    let waiting = to_post(feature, ctx) > 0;
+    match () {
+        _ if pull.own() && !ctx.on_head => PanelOutcome::PushPr,
+        _ if waiting => PanelOutcome::SubmitReview(Event::Comment),
+        _ if pull.mine || !feature.shipping.reviews.is_empty() => PanelOutcome::FinishReview,
+        _ => PanelOutcome::SubmitReview(Event::Approve),
+    }
+}
+
+/// The buttons of Ship's page of `feature`, a pull request's review, at
+/// it: each way to submit it GitHub takes of it, its text, pushing the
+/// user's own, finishing.
+fn submit_actions(feature: &Feature, ctx: RowCtx) -> Vec<(PageButton, PanelOutcome)> {
+    use feature::pr_submit::Event;
+    let Some(pull) = feature.pull() else {
+        return Vec::new();
+    };
+    let button = |label: &str, style| PageButton {
+        label: label.to_owned(),
+        style,
+    };
+    let mut out = Vec::new();
+    if pull.own() {
+        out.push((button("Push\u{2026}", ButtonStyle::Plain), PanelOutcome::PushPr));
+    }
+    let events: &[Event] = match pull.mine {
+        true => &[Event::Comment],
+        false => &[Event::Comment, Event::Approve, Event::RequestChanges],
+    };
+    for event in events {
+        out.push((button(event.label(), ButtonStyle::Plain), PanelOutcome::SubmitReview(*event)));
+    }
+    out.push((button("Edit text", ButtonStyle::Quiet), PanelOutcome::EditSummary));
+    if pull.mine || !feature.shipping.reviews.is_empty() || ctx.on_head && to_post(feature, ctx) == 0 {
+        out.push((button("Finish\u{2026}", ButtonStyle::Plain), PanelOutcome::FinishReview));
+    }
+    out
+}
+
+/// What Ship's line says of `feature`, a pull request's review.
+fn submit_line(feature: &Feature, ctx: RowCtx) -> Option<String> {
+    let pull = feature.pull()?;
+    let n = to_post(feature, ctx);
+    let last = feature.shipping.reviews.last();
+    Some(match () {
+        _ if pull.own() && !ctx.on_head => "fixes here not on GitHub: push them".into(),
+        _ if n > 0 => format!("{} to post", plural(n, "comment")),
+        _ => match last {
+            Some(r) => format!("{} on GitHub; finish, or wait for new commits", r.event.done()),
+            None if pull.mine => "nothing to post: finish".into(),
+            None => "nothing to post: approve, or finish".into(),
+        },
+    })
+}
+
+/// Ship's page of `feature`, a pull request's review: what goes, where, and
+/// the reviews submitted, holding the buttons of `submit_actions`.
+fn submit_sections(
+    feature: &Feature,
+    state: &PanelState,
+    actions: &[(PageButton, PanelOutcome)],
+    now: u64,
+) -> Vec<PageSection> {
+    let Some(pull) = feature.pull() else {
+        return Vec::new();
+    };
+    let notes = crate::review::Review {
+        comments: notes_of(state.probe).to_vec(),
+        ..crate::review::Review::default()
+    };
+    let items = feature::pr_submit::items(feature, &notes, &[]);
+    let mut said: Vec<CheckLine> = (items.iter())
+        .map(|item| {
+            let at = match &item.spot {
+                Some(feature::pr_submit::Spot { path, line: Some((_, n, _)) }) => {
+                    format!("{path}:{n}")
+                }
+                Some(spot) => spot.path.clone(),
+                None => "in the text".to_owned(),
+            };
+            line(format!("{at} \u{b7} {}", item.title), CheckTone::Note)
+        })
+        .collect();
+    let manual = state.ctx.manual.failed.saturating_sub(state.ctx.manual.sent);
+    if manual > 0 {
+        let text = format!("in the text \u{b7} {} from Manual test", plural(manual, "failure"));
+        said.push(line(text, CheckTone::Note));
+    }
+    if said.is_empty() {
+        said.push(line("nothing to post yet", CheckTone::Note));
+    }
+    let mut out = vec![lines("To post", said)];
+    let held: Vec<usize> = (actions.iter().enumerate())
+        .filter(|(_, (b, o))| {
+            b.style != ButtonStyle::Primary
+                && matches!(o, PanelOutcome::SubmitReview(_) | PanelOutcome::EditSummary)
+        })
+        .map(|(i, _)| i)
+        .collect();
+    if !held.is_empty() {
+        out.push(PageSection::Toolbar {
+            groups: vec![(String::new(), held)],
+        });
+    }
+    let done: Vec<CheckLine> = (feature.shipping.reviews.iter().rev())
+        .map(|r| {
+            let short = r.commit.get(..7).unwrap_or(&r.commit);
+            let mut text = format!("{} {} at {short}", r.event.done(), projects::ago(now, r.at));
+            if r.inline + r.in_body > 0 {
+                text.push_str(&format!(" \u{b7} {}", plural(r.inline + r.in_body, "comment")));
+            }
+            line(text, CheckTone::Ready)
+        })
+        .collect();
+    if !done.is_empty() {
+        out.push(lines("Submitted", done));
+    }
+    if pull.own() && !state.ctx.on_head {
+        let text = format!("commits here not on {} yet", pull.head_ref);
+        out.push(lines("Branch", vec![line(text, CheckTone::Blocker)]));
+    }
+    out
+}
+
 /// `actions` with the button opening `feature`'s pull request in, for a pull
 /// request's review (Ctrl+Shift+O). Moving to its new head and finishing
 /// once it ended are what Enter does on its current stage's page, so they
@@ -11946,6 +12144,20 @@ fn with_pull_actions(
     let Some(pull) = feature.pull() else {
         return;
     };
+    if stage == Stage::Ship
+        && feature.current() == Some(Stage::Ship)
+        && feature.status == Status::Open
+        && feature.writer.is_none()
+    {
+        // No summary of an agent's: the review's text is the user's.
+        actions.retain(|(_, o)| *o != PanelOutcome::WriteSummary);
+        for (button, outcome) in submit_actions(feature, ctx) {
+            match actions.iter_mut().find(|(_, o)| *o == outcome) {
+                Some((had, _)) => had.label = button.label,
+                None => actions.push((button, outcome)),
+            }
+        }
+    }
     let mut more = vec![(OPEN_PULL, ButtonStyle::Quiet, PanelOutcome::OpenPr(pull.url.clone()))];
     if stage == Stage::Verify
         && ctx.on_head
@@ -13250,6 +13462,7 @@ fn asked_now(feature: &Feature, round: &FixRound, id: &str, open: bool) -> Optio
                 FindingState::Sent if open => line("being fixed", CheckTone::Note),
                 FindingState::Sent => line("sent to Build", CheckTone::Note),
                 FindingState::Open | FindingState::Fix => line("raised again", CheckTone::Blocker),
+                FindingState::Posted => line("on GitHub", CheckTone::Note),
             })
         }
         Stage::CodeReview => {
@@ -13558,6 +13771,27 @@ fn ship_keys(
     keys
 }
 
+/// What a key does on Ship's page of `feature`, a pull request's review:
+/// Ctrl+Enter approves someone else's, Ctrl+Shift+Enter requests changes,
+/// Ctrl+E edits the review's text. Enter is the page's primary, as on any.
+fn submit_key(feature: &Feature, mods: &ModifiersState, sym: Keysym) -> Option<PanelOutcome> {
+    use feature::pr_submit::Event;
+    let pull = feature.pull()?;
+    if feature.status != Status::Open || feature.current() != Some(Stage::Ship) {
+        return None;
+    }
+    match sym {
+        Keysym::Return | Keysym::KP_Enter if mods.ctrl && !mods.alt && !pull.mine => {
+            Some(PanelOutcome::SubmitReview(match mods.shift {
+                true => Event::RequestChanges,
+                false => Event::Approve,
+            }))
+        }
+        Keysym::e | Keysym::E if mods.ctrl && !mods.shift && !mods.alt => Some(PanelOutcome::EditSummary),
+        _ => None,
+    }
+}
+
 /// `hints` with the keys of Ship's buttons in, before the tab's own, in
 /// place of any the page had on the same chord.
 fn with_ship_hints(
@@ -13570,6 +13804,22 @@ fn with_ship_hints(
 ) -> Vec<(String, String)> {
     let quiet = panel.keys || panel.note.is_some() || panel.focus == TabArea::Repos;
     if stage != Stage::Ship || quiet {
+        return hints;
+    }
+    // A pull request's review submits instead: its own keys.
+    if let Some(pull) = feature.pull() {
+        if feature.status != Status::Open || feature.current() != Some(Stage::Ship) {
+            return hints;
+        }
+        let mut keys = Vec::new();
+        if !pull.mine {
+            keys.push(("Ctrl+Enter".to_owned(), "approve\u{2026}".to_owned()));
+            keys.push(("Ctrl+Shift+Enter".to_owned(), "request changes\u{2026}".to_owned()));
+        }
+        keys.push(("Ctrl+E".to_owned(), "edit text".to_owned()));
+        hints.retain(|(chord, _)| !keys.iter().any(|(k, _)| k == chord));
+        let at = (hints.iter()).position(|(chord, _)| chord == "Ctrl+O").unwrap_or(hints.len());
+        hints.splice(at..at, keys);
         return hints;
     }
     let repo = ship_row_repo(panel, ships);
@@ -14026,6 +14276,9 @@ fn stage_page(
                     sections.extend(sandbox_sections(feature, state));
                 }
             }
+            Stage::Ship if feature.pull().is_some() => {
+                sections.extend(submit_sections(feature, state, actions, now));
+            }
             Stage::Ship => {
                 let check = check_lines(feature, state.probe, state.shipping, now);
                 if !check.is_empty() {
@@ -14335,6 +14588,10 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 7] = [
             (
                 "Ctrl+Enter",
                 "approve a brief or plan ready for review; make the fixes of a fix plan ready for review, or again once its agent stopped with fixes left; at AI review, send the findings to fix, with no plan unless you commented; at Verify, send its failures with no plan (Ctrl+Shift+Enter plans them first); at Plan review, write the final plan or use the plan as it is once every suggestion is decided (Ctrl+Shift+Enter asks the reviewer)",
+            ),
+            (
+                "Ctrl+Enter / Ctrl+Shift+Enter",
+                "reviewing someone else's pull request, on Ship's page: approve it, or request changes, after asking (Enter comments, or approves with nothing to post; Ctrl+E edits the review's text)",
             ),
             (
                 "Ctrl+Shift+O",
@@ -25895,6 +26152,100 @@ mod pr_page_tests {
             .map(|(b, _)| b.label)
             .collect();
         assert!(labels.contains(&"Make fixes".to_owned()), "{labels:?}");
+    }
+
+    /// `review()` at Ship, its review stages done.
+    fn at_ship() -> Feature {
+        let mut f = review();
+        while f.current() != Some(Stage::Ship) {
+            f.tick(1, "you", None);
+        }
+        f
+    }
+
+    #[test]
+    fn ship_submits_the_review() {
+        use crate::feature::pr_submit::{Event, Posted};
+        let mut f = at_ship();
+        let head = RowCtx {
+            on_head: true,
+            ..RowCtx::default()
+        };
+        // Nothing to post: approve it.
+        assert_eq!(
+            page_enter(&f, Stage::Ship, head),
+            Some(PanelOutcome::SubmitReview(Event::Approve))
+        );
+        assert_eq!(submit_line(&f, head).as_deref(), Some("nothing to post: approve, or finish"));
+        let with = RowCtx {
+            comments: 2,
+            ..head
+        };
+        assert_eq!(
+            page_enter(&f, Stage::Ship, with),
+            Some(PanelOutcome::SubmitReview(Event::Comment))
+        );
+        assert_eq!(submit_line(&f, with).as_deref(), Some("2 comments to post"));
+        let mut actions = page_actions(&f, Stage::Ship, with);
+        with_pull_actions(&mut actions, &f, Stage::Ship, with);
+        let labels: Vec<&str> = actions.iter().map(|(b, _)| b.label.as_str()).collect();
+        for want in ["Comment\u{2026}", "Approve\u{2026}", "Request changes\u{2026}", "Edit text"] {
+            assert!(labels.contains(&want), "{want}: {labels:?}");
+        }
+        assert!(!labels.contains(&"Push\u{2026}"));
+        let ctrl = |shift| ModifiersState {
+            ctrl: true,
+            shift,
+            ..ModifiersState::default()
+        };
+        assert_eq!(
+            submit_key(&f, &ctrl(false), Keysym::Return),
+            Some(PanelOutcome::SubmitReview(Event::Approve))
+        );
+        assert_eq!(
+            submit_key(&f, &ctrl(true), Keysym::Return),
+            Some(PanelOutcome::SubmitReview(Event::RequestChanges))
+        );
+        assert_eq!(submit_key(&f, &ctrl(false), Keysym::e), Some(PanelOutcome::EditSummary));
+        // Submitted, nothing new: finish.
+        f.shipping.reviews.push(Posted {
+            at: 1,
+            event: Event::RequestChanges,
+            url: "https://github.com/o/api/pull/12#pullrequestreview-1".into(),
+            commit: "abc1234567".into(),
+            inline: 2,
+            in_body: 1,
+            flattened: false,
+        });
+        assert_eq!(page_enter(&f, Stage::Ship, head), Some(PanelOutcome::FinishReview));
+        let page = page_of(&f, Stage::Ship);
+        assert!(page.sections.iter().any(|s| matches!(s, PageSection::Lines { label, lines }
+            if label == "Submitted" && lines[0].text.starts_with("requested changes"))));
+    }
+
+    #[test]
+    fn ones_own_is_pushed_then_finished() {
+        let mut f = at_ship();
+        let Kind::PrReview(pull) = &mut f.kind else { unreachable!() };
+        pull.mine = true;
+        let moved = RowCtx::default();
+        assert_eq!(page_enter(&f, Stage::Ship, moved), Some(PanelOutcome::PushPr));
+        let head = RowCtx {
+            on_head: true,
+            ..RowCtx::default()
+        };
+        assert_eq!(page_enter(&f, Stage::Ship, head), Some(PanelOutcome::FinishReview));
+        let mut actions = page_actions(&f, Stage::Ship, head);
+        with_pull_actions(&mut actions, &f, Stage::Ship, head);
+        let labels: Vec<&str> = actions.iter().map(|(b, _)| b.label.as_str()).collect();
+        assert!(!labels.contains(&"Approve\u{2026}"), "{labels:?}");
+        assert!(labels.contains(&"Comment\u{2026}"));
+        let ctrl = ModifiersState {
+            ctrl: true,
+            ..ModifiersState::default()
+        };
+        // GitHub takes no approval of one's own.
+        assert_eq!(submit_key(&f, &ctrl, Keysym::Return), None);
     }
 
     fn feature_agents_gate(f: &Feature) -> Option<(Stage, u64, crate::feature_agents::GateKind)> {

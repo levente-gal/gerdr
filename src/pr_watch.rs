@@ -377,15 +377,27 @@ impl Gerdr {
         let Some(f) = self.feature(project, slug) else {
             return;
         };
-        let Some(end) = f.pull().and_then(pr::PullRef::ended) else {
-            return self.show_warning(format!("“{}” is still open on GitHub", f.title));
+        let submitted = (f.shipping.reviews.last()).map(|r| r.event.done());
+        let ended = f.pull().and_then(pr::PullRef::ended);
+        let own_at_ship =
+            f.pull().is_some_and(pr::PullRef::own) && f.current() == Some(feature::Stage::Ship);
+        let how = match (ended, submitted) {
+            (Some(end), _) if end.merged() => "It was merged on GitHub".to_owned(),
+            (Some(_), _) => "It was closed on GitHub".to_owned(),
+            (None, Some(done)) => format!("You {done} on GitHub; new commits won't come up here"),
+            (None, None) if own_at_ship => "Your pull request stays open on GitHub".to_owned(),
+            (None, None) => {
+                return self.show_warning(format!(
+                    "“{}” is still open on GitHub: submit its review first",
+                    f.title
+                ));
+            }
         };
-        let how = if end.merged() { "merged" } else { "closed" };
         let then = match f.ship_plan.keep_workspace {
             true => "Its workspace stays open",
             false => "Its workspace closes",
         };
-        let body = format!("It was {how} on GitHub. Nothing is posted\n{then}; its worktree stays");
+        let body = format!("{how}\n{then}; its worktree stays");
         let then = Then::FinishPrReview {
             project: project.to_owned(),
             slug: slug.to_owned(),
@@ -399,15 +411,20 @@ impl Gerdr {
         let Some(f) = self.feature_mut(project, slug) else {
             return;
         };
-        let Some(end) = f.pull().and_then(pr::PullRef::ended).cloned() else {
+        let Some(pull) = f.pull() else {
             return;
         };
         if f.status != Status::Open {
             return;
         }
-        let how = if end.merged() { "merged" } else { "closed" };
+        let how = match (pull.ended(), f.shipping.reviews.last()) {
+            (Some(end), _) if end.merged() => "merged on GitHub".to_owned(),
+            (Some(_), _) => "closed on GitHub".to_owned(),
+            (None, Some(r)) => format!("{} on GitHub", r.event.done()),
+            (None, None) => "nothing posted".to_owned(),
+        };
         f.status = Status::Done;
-        f.log(feature::now(), format!("Finished: {how} on GitHub"));
+        f.log(feature::now(), format!("Finished: {how}"));
         let mut text = format!("“{}” finished", f.title);
         self.save_feature(project, slug);
         if let Some(kept) = self.after_ship(project, slug) {

@@ -641,7 +641,7 @@ pub fn criteria_block(criteria: &[Criterion]) -> String {
 }
 
 /// The failures of `criteria` not yet sent to Build.
-fn unsent<'a>(
+pub fn unsent<'a>(
     test: Option<&'a ManualTest>,
     criteria: &'a [Criterion],
 ) -> Vec<(&'a Criterion, &'a Check)> {

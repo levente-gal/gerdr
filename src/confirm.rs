@@ -114,6 +114,15 @@ pub enum Then {
     /// Ship this project's feature as its Ship check said (see
     /// `Gerdr::ship_feature`).
     ShipFeature { project: String, slug: String },
+    /// Submit this project's pull request review to GitHub as `event` (see
+    /// `pr_post`).
+    SubmitReview {
+        project: String,
+        slug: String,
+        event: crate::feature::pr_submit::Event,
+    },
+    /// Push the user's own pull request review's commits to GitHub.
+    PushPr { project: String, slug: String },
     /// Approve this stage of this project's feature, its review comments
     /// deleted unsent (see `Gerdr::approve_doc_now`).
     /// Make the fixes of this feature's plan, its comments unsent (see
@@ -763,6 +772,12 @@ impl Gerdr {
                 to_context,
             } => self.remove_repos(&project, &slug, &keys, force, to_context),
             Then::ShipFeature { project, slug } => self.ship_feature(&project, &slug),
+            Then::SubmitReview {
+                project,
+                slug,
+                event,
+            } => self.submit_review(&project, &slug, event),
+            Then::PushPr { project, slug } => self.push_pr(&project, &slug),
             Then::FinishFeature { project, slug } => self.finish_unshipped(&project, &slug),
             Then::FinishPrReview { project, slug } => self.finish_pr_review(&project, &slug),
             Then::UndoShip {

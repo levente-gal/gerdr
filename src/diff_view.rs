@@ -108,6 +108,7 @@ fn finding_state_word(flag: &review::Flag) -> Option<&'static str> {
         (ItemOf::Finding, FindingState::Sent) if flag.sent => Some("sent to Build"),
         (ItemOf::Finding, FindingState::Sent) => Some("sent to fix"),
         (ItemOf::Finding, FindingState::Fixed) => Some("fixed"),
+        (_, FindingState::Posted) => Some("on GitHub"),
     }
 }
 
@@ -2990,7 +2991,7 @@ impl DiffView {
                 FindingState::Dismissed => {
                     vec![keyed(B::FixFinding, "f"), keyed(B::ReopenFinding, "Del")]
                 }
-                FindingState::Sent | FindingState::Fixed => Vec::new(),
+                FindingState::Sent | FindingState::Fixed | FindingState::Posted => Vec::new(),
             };
             // What the user can say of a reviewer's finding.
             let say = (!flag.yours && self.note_refused(flag).is_none()).then(|| {

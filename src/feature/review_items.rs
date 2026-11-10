@@ -12,7 +12,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::review_import::{Decision, FIXED, FindingState, SENT, Severity};
+use super::review_import::{Decision, FIXED, FindingState, POSTED, SENT, Severity};
 
 /// Which stage's item it is. Ids like `r1-2` and `u1` are in both, so this
 /// goes in every key of one: card, armed key, draft, Undo and signal.
@@ -231,6 +231,7 @@ pub fn want_key(of: ItemOf, standing: Standing) -> Result<Decision, &'static str
         (_, Standing::Fix) => Ok(Decision::Reopen),
         (ItemOf::Finding, Standing::Sent) => Err(SENT),
         (ItemOf::Finding, Standing::Fixed) => Err(FIXED),
+        (_, Standing::Posted) => Err(POSTED),
         (ItemOf::Suggestion, Standing::Sent | Standing::Fixed) => Err(SUGGESTION_DONE),
     }
 }
@@ -244,6 +245,7 @@ pub fn refuse_key(of: ItemOf, standing: Standing) -> Result<Option<Decision>, &'
         (_, Standing::Dismissed) => Ok(Some(Decision::Reopen)),
         (ItemOf::Finding, Standing::Sent) => Err(SENT),
         (ItemOf::Finding, Standing::Fixed) => Err(FIXED),
+        (_, Standing::Posted) => Err(POSTED),
         (ItemOf::Suggestion, Standing::Sent | Standing::Fixed) => Err(SUGGESTION_DONE),
     }
 }
@@ -260,6 +262,7 @@ pub fn editable(of: ItemOf, id: &str, standing: Standing) -> Result<(), String> 
             Err(format!("{id} was sent to Build: the next review checks it"))
         }
         (ItemOf::Finding, Standing::Fixed) => Err(format!("{id} is fixed already")),
+        (_, Standing::Posted) => Err(format!("{id} is on GitHub already")),
         (ItemOf::Suggestion, Standing::Dismissed) => {
             Err(format!("{id} is rejected: reopen it first"))
         }

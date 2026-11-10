@@ -84,6 +84,7 @@ mod machines;
 mod manual_test;
 mod page_text;
 mod pr_review;
+mod pr_post;
 mod pr_watch;
 mod md_blocks;
 mod md_preview;
