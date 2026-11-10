@@ -16,6 +16,27 @@ use crate::{
 /// How many logical pixels a list moves for each a touchpad's fingers move.
 const FINGER_SPEED: f64 = 1.5;
 
+/// The whole steps (rows, characters) a press held `edge` logical pixels
+/// past a list's or a field's start (negative) or end goes on by at `now`
+/// (see `scrollback::edge_speed`), counted from the frame `held` says it
+/// last went on at, with the part of a step it carried; none while it is
+/// within (`edge` 0), which forgets them.
+pub(crate) fn edge_steps(held: &mut Option<(Instant, f64)>, now: Instant, edge: f64) -> i64 {
+    if edge == 0.0 {
+        *held = None;
+        return 0;
+    }
+    let steps = match *held {
+        Some((at, carried)) => {
+            carried + crate::scrollback::edge_speed(edge) * now.duration_since(at).as_secs_f64()
+        }
+        None => 0.0,
+    };
+    let whole = steps.trunc();
+    *held = Some((now, steps - whole));
+    whole as i64
+}
+
 thread_local! {
     /// What the motions so far moved a list of whole rows short of
     /// another row, in rows (see `whole_rows`).
@@ -106,12 +127,14 @@ impl Gerdr {
             self.worktrees_scroll_tick(now),
             self.repos_scroll_tick(now),
             self.repos_drag_edge_tick(now),
+            self.field_edge_tick(now),
             self.inbox_scroll_tick(now),
             self.scrollback_scroll_tick(now),
             self.feature_tab_scroll_tick(now),
             self.sidebar_scroll_tick(now),
         ]
         .contains(&true);
+        self.keep_field_scroll();
         if self.scrolling && !moving {
             let time = self.start_time.elapsed().as_millis() as u32;
             self.pointer_moved(self.pointer, time);

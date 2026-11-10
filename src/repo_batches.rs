@@ -1051,6 +1051,7 @@ impl Gerdr {
         if self.wd().is_some() {
             return self.worktree_diff_hit(hit, double, shift, ctrl);
         }
+        let count = self.press_count.max(1);
         let page = self.repos_page();
         let (density, tree_share, cols, sheet_rows) = self.repos_env();
         let Repos {
@@ -1084,9 +1085,9 @@ impl Gerdr {
             }
             // On the comment being written, the caret goes there.
             if let ReposHit::DiffRow(i) = hit
-                && p.press_editor(i, shift, if double { 2 } else { 1 }, &ctx)
+                && p.press_editor(i, shift, count, &ctx)
             {
-                editor_drag = !double;
+                editor_drag = count == 1;
                 return None;
             }
             if let (ReposHit::DiffRow(i), true, false) = (hit, shift, double) {
@@ -1257,25 +1258,14 @@ impl Gerdr {
             }),
             false => 0.0,
         };
-        if edge == 0.0 {
-            self.repos_drag_edge = None;
-            return false;
-        }
-        let rows = match self.repos_drag_edge {
-            Some((at, carried)) => {
-                carried + crate::scrollback::edge_speed(edge) * now.duration_since(at).as_secs_f64()
-            }
-            None => 0.0,
-        };
         // The whole rows, as many as a page at most.
-        let steps = rows.trunc();
-        self.repos_drag_edge = Some((now, rows - steps));
+        let steps = crate::scrolling::edge_steps(&mut self.repos_drag_edge, now, edge);
         let (list, diff) = self.repos_page();
-        let page = list.max(diff).max(1) as f64;
-        if steps != 0.0 {
-            self.repos_diff_drag(self.pointer, steps.clamp(-page, page) as i64);
+        let page = list.max(diff).max(1) as i64;
+        if steps != 0 {
+            self.repos_diff_drag(self.pointer, steps.clamp(-page, page));
         }
-        true
+        edge != 0.0
     }
 
     /// A drag on the diff as `repos_drag_rows` has it; with `step`, the

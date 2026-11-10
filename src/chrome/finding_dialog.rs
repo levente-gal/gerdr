@@ -216,10 +216,67 @@ pub fn finding_field_step(line: &Line, up: bool, size: Size<i32, Logical>) -> Op
     Some(byte_at(line, row, x))
 }
 
-/// The first of `rows` a field showing `shown` of them shows: the caret's
-/// is always among them.
-fn first_shown(rows: &[Range<usize>], caret: usize, shown: i32) -> usize {
-    row_of(rows, caret).saturating_sub(shown.max(1) as usize - 1)
+/// The first of `rows` a field showing `shown` of them shows: the one its
+/// view started at (`Line::scroll`), moved only as far as the caret's row
+/// needs to be among them, and back for the last row to fill the field.
+fn first_shown(rows: &[Range<usize>], line: &Line, shown: i32) -> usize {
+    let shown = shown.max(1) as usize;
+    let caret = row_of(rows, line.caret);
+    let from = row_of(rows, line.scroll);
+    let fill = rows.len().saturating_sub(shown);
+    from.clamp(caret.saturating_sub(shown - 1), caret).min(fill)
+}
+
+/// The byte field `i`'s view starts at as it is drawn (see `Line::scroll`):
+/// the field keeps it for the next frame.
+pub fn finding_field_first(
+    view: &FindingDialogView,
+    i: usize,
+    size: Size<i32, Logical>,
+) -> Option<usize> {
+    let field = view.fields.get(i)?;
+    let rows = soft_rows(&field.line, text_width(size));
+    Some(rows.get(first_shown(&rows, &field.line, field.rows))?.start)
+}
+
+/// A press in field `i` held `by` rows past its shown ones (up negative),
+/// the pointer at output x `x`: the byte the selection reaches, on the row
+/// `by` from the caret's, as far as there are.
+pub fn finding_field_past(
+    view: &FindingDialogView,
+    i: usize,
+    size: Size<i32, Logical>,
+    by: i64,
+    x: f64,
+) -> Option<usize> {
+    let layout = finding_dialog_layout(view, size);
+    let (field, rect) = (view.fields.get(i)?, *layout.fields.get(i)?);
+    let rows = soft_rows(&field.line, text_width(size));
+    let at = row_of(&rows, field.line.caret) as i64;
+    let to = (at + by).clamp(0, rows.len() as i64 - 1) as usize;
+    let x = x as f32 - (rect.loc.x as f32 + PADDING);
+    Some(byte_at(&field.line, rows.get(to)?, x.max(0.0)))
+}
+
+/// How far `pos` is past field `i`'s shown rows, in logical pixels: above
+/// them negative, below positive, none within.
+pub fn finding_field_edge(
+    view: &FindingDialogView,
+    i: usize,
+    size: Size<i32, Logical>,
+    pos: Point<f64, Logical>,
+) -> f64 {
+    let layout = finding_dialog_layout(view, size);
+    let (Some(field), Some(rect)) = (view.fields.get(i), layout.fields.get(i)) else {
+        return 0.0;
+    };
+    let top = (rect.loc.y + FIELD_PAD) as f64;
+    let bottom = top + (field.rows.max(1) * ROW) as f64;
+    match pos.y {
+        y if y < top => y - top,
+        y if y >= bottom => y - bottom + 1.0,
+        _ => 0.0,
+    }
 }
 
 /// The byte a click at `pos` falls on in field `i` of the dialog.
@@ -232,8 +289,11 @@ pub fn finding_field_at(
     let layout = finding_dialog_layout(view, size);
     let (field, rect) = (view.fields.get(i)?, *layout.fields.get(i)?);
     let rows = soft_rows(&field.line, text_width(size));
-    let first = first_shown(&rows, field.line.caret, field.rows);
+    let first = first_shown(&rows, &field.line, field.rows);
+    // Off its shown rows, the nearest: a press held past them scrolls by
+    // `finding_field_past`.
     let down = ((pos.y as i32 - rect.loc.y - FIELD_PAD).max(0) / ROW) as usize;
+    let down = down.min(field.rows.max(1) as usize - 1);
     let row = rows.get(first + down).or(rows.last())?;
     let x = pos.x as f32 - (rect.loc.x as f32 + PADDING);
     Some(byte_at(&field.line, row, x.max(0.0)))
@@ -269,7 +329,7 @@ impl Painter {
         );
         let line = &field.line;
         let rows = soft_rows(line, text_width(size));
-        let first = first_shown(&rows, line.caret, field.rows);
+        let first = first_shown(&rows, line, field.rows);
         let caret_row = row_of(&rows, line.caret);
         let text_x = x + PADDING * s;
         let end = x + w - PADDING * s;
@@ -441,10 +501,58 @@ mod tests {
 
     #[test]
     fn the_caret_stays_among_the_lines_shown() {
-        let rows = soft_rows("a\nb\nc\nd\ne", 10_000.0);
-        assert_eq!(first_shown(&rows, 0, 3), 0);
-        assert_eq!(first_shown(&rows, 4, 3), 0);
-        assert_eq!(first_shown(&rows, 8, 3), 2);
+        let text = "a\nb\nc\nd\ne";
+        let rows = soft_rows(text, 10_000.0);
+        let at = |caret: usize, scroll: usize| Line {
+            text: text.into(),
+            caret,
+            anchor: caret,
+            scroll,
+        };
+        assert_eq!(first_shown(&rows, &at(0, 0), 3), 0);
+        assert_eq!(first_shown(&rows, &at(4, 0), 3), 0);
+        assert_eq!(first_shown(&rows, &at(8, 0), 3), 2);
+        // Started from "c": with the caret on "c" it stays there, on "b"
+        // it goes one row up, no further.
+        assert_eq!(first_shown(&rows, &at(4, 4), 3), 2);
+        assert_eq!(first_shown(&rows, &at(2, 4), 3), 1);
+        // Never past the last row's filling the field.
+        assert_eq!(first_shown(&rows, &at(8, 8), 3), 2);
+    }
+
+    #[test]
+    fn a_press_held_past_a_fields_rows_goes_on_a_row_at_a_time() {
+        let size: Size<i32, Logical> = (1200, 800).into();
+        let text = "a\nb\nc\nd\ne";
+        let with = |caret: usize| FindingDialogView {
+            fields: vec![FindingFieldView {
+                label: "Why",
+                line: Line {
+                    text: text.into(),
+                    caret,
+                    anchor: caret,
+                    scroll: 0,
+                },
+                placeholder: "",
+                rows: 2,
+            }],
+            ..view(&[2], false)
+        };
+        let rect = finding_dialog_layout(&with(0), size).fields[0];
+        let x = rect.loc.x as f64 + 200.0;
+        // From "a", two rows down, then far past the end: "c", then "e".
+        assert_eq!(finding_field_past(&with(0), 0, size, 2, x), Some(5));
+        assert_eq!(finding_field_past(&with(4), 0, size, 99, x), Some(9));
+        assert_eq!(finding_field_past(&with(4), 0, size, -99, x), Some(1));
+        // Past its shown rows, by how far.
+        let y = (rect.loc.y + FIELD_PAD) as f64;
+        let edge = |dy: f64| finding_field_edge(&with(0), 0, size, (x, y + dy).into());
+        assert_eq!(edge(-10.0), -10.0);
+        assert_eq!(edge(5.0), 0.0);
+        assert!(edge((2 * ROW) as f64 + 4.0) > 0.0);
+        // A press below its rows lands on the last shown, not past it.
+        let below = (x, y + (5 * ROW) as f64).into();
+        assert_eq!(finding_field_at(&with(0), 0, size, below), Some(3));
     }
 
     #[test]
@@ -454,6 +562,7 @@ mod tests {
             text: text.into(),
             caret,
             anchor: caret,
+            scroll: 0,
         };
         assert_eq!(finding_field_step(&line("ab\ncd", 1), false, size), Some(4));
         assert_eq!(finding_field_step(&line("ab\ncd", 4), true, size), Some(1));

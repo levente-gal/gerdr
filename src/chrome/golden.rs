@@ -5912,6 +5912,7 @@ fn finding_dialog(error: bool) -> super::FindingDialogView {
                 text: text.to_owned(),
                 caret: at,
                 anchor: at,
+                scroll: 0,
             },
             placeholder,
             rows,

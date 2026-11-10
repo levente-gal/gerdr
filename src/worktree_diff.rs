@@ -2334,6 +2334,7 @@ impl crate::Gerdr {
         ctrl: bool,
     ) {
         let env = self.worktree_env();
+        let count = self.press_count.max(1);
         let Some(wd) = self.wd_mut() else {
             return;
         };
@@ -2342,10 +2343,8 @@ impl crate::Gerdr {
             (ReposHit::Button(button), ..) => wd.press(button, env),
             (ReposHit::DiffRow(i), _, _) if ctrl => wd.goto_row(i, env),
             // On the comment being written, the caret goes there.
-            (ReposHit::DiffRow(i), _, _)
-                if wd.press_editor(i, shift, if double { 2 } else { 1 }, env) =>
-            {
-                editor_drag = !double;
+            (ReposHit::DiffRow(i), _, _) if wd.press_editor(i, shift, count, env) => {
+                editor_drag = count == 1;
                 None
             }
             // Twice on a file of the list, it opens in Zed.

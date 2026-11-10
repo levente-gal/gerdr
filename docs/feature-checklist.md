@@ -93,6 +93,11 @@ How to use it:
   can't see.
 - **O5** Hover and tooltip don't swallow keys or clicks. Pointer focus leaves
   the client under the popup.
+- **O6** A new text field reaches `field_spot`/`field_mut` in `input.rs` (or
+  goes through `press_count`, `field_drag` and `field_edge_tick` as rename
+  and the finding dialog do), and is drawn by `edit_line` or keeps a
+  `Line::scroll`: click, word and line clicks, drag and held-edge scrolling
+  then work as in every other field.
 
 ## L. Look
 

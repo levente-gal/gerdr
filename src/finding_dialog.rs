@@ -628,7 +628,8 @@ impl Gerdr {
                 if let Some(at) = chrome::finding_field_at(&view, i, size, pos)
                     && let Some(field) = dialog.fields.get_mut(i)
                 {
-                    field.click(at, shift, 1);
+                    field.click(at, shift, self.press_count);
+                    self.field_drag = self.press_count == 1;
                 }
                 None
             }
@@ -638,6 +639,61 @@ impl Gerdr {
         };
         if let Some(outcome) = outcome {
             self.apply_finding_dialog(outcome);
+        }
+    }
+
+    /// The pointer dragged to `pos` from a press in the field with the
+    /// keyboard: the selection reaches the char there, on its nearest row
+    /// shown (held past them, `finding_dialog_past` scrolls).
+    pub fn finding_dialog_drag(&mut self, pos: Point<f64, Logical>) {
+        let size = self.output_size();
+        let Some(view) = self.finding_dialog_view() else {
+            self.field_drag = false;
+            return;
+        };
+        let i = view.focus;
+        if let Some(at) = chrome::finding_field_at(&view, i, size, pos)
+            && let Some(field) = self.finding_dialog_field_mut()
+        {
+            field.drag_to(at);
+        }
+    }
+
+    /// How far the pointer at `pos` is past the shown rows of the field
+    /// with the keyboard, in logical pixels: above them negative.
+    pub fn finding_dialog_edge(&self, pos: Point<f64, Logical>) -> f64 {
+        self.finding_dialog_view().map_or(0.0, |view| {
+            chrome::finding_field_edge(&view, view.focus, self.output_size(), pos)
+        })
+    }
+
+    /// A press in the field with the keyboard held past its shown rows:
+    /// the selection goes `by` rows on (up negative), at the pointer's x.
+    pub fn finding_dialog_past(&mut self, by: i64) {
+        let Some(view) = self.finding_dialog_view() else {
+            return;
+        };
+        let size = self.output_size();
+        let at = chrome::finding_field_past(&view, view.focus, size, by, self.pointer.x);
+        if let (Some(at), Some(field)) = (at, self.finding_dialog_field_mut()) {
+            field.drag_to(at);
+        }
+    }
+
+    /// Keep where each field's view starts as drawn, for the next frame
+    /// (see `Line::scroll`).
+    pub fn finding_dialog_keep_scroll(&mut self) {
+        let Some(view) = self.finding_dialog_view() else {
+            return;
+        };
+        let size = self.output_size();
+        let Some(dialog) = self.features.finding_dialog.as_mut() else {
+            return;
+        };
+        for (i, field) in dialog.fields.iter_mut().enumerate() {
+            if let Some(at) = chrome::finding_field_first(&view, i, size) {
+                field.set_scroll(at);
+            }
         }
     }
 

@@ -68,8 +68,10 @@ impl Gerdr {
     }
 
     /// A press at `pos` while renaming: a left press inside the field puts
-    /// the caret there (Shift: the selection reaches there). Whether the
-    /// press landed in the field; any other press commits the name.
+    /// the caret there (Shift: the selection reaches there), the second in
+    /// a row selects a word, the third all; held, it drags a selection.
+    /// Whether the press landed in the field; any other press commits the
+    /// name.
     pub fn rename_press(&mut self, pos: Point<f64, Logical>, button: u32) -> bool {
         if button != BTN_LEFT {
             return false;
@@ -84,8 +86,9 @@ impl Gerdr {
         let at = self.chrome.caret_at(&field, pos.x, scale);
         let extend = self.seat.get_keyboard().unwrap().modifier_state().shift;
         if let Some(rename) = self.rename.as_mut() {
-            rename.field.click(at, extend, 1);
+            rename.field.click(at, extend, self.press_count);
         }
+        self.field_drag = self.press_count == 1;
         true
     }
 

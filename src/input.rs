@@ -306,6 +306,8 @@ impl Gerdr {
     pub fn process_input_event<I: InputBackend>(&mut self, event: InputEvent<I>) {
         match event {
             InputEvent::Keyboard { event, .. } => {
+                // A key may move a field's caret: its view follows.
+                self.field_scroll_due = true;
                 let serial = SERIAL_COUNTER.next_serial();
                 let time = Event::time_msec(&event);
                 let code = event.key_code();
@@ -565,6 +567,8 @@ impl Gerdr {
                 }
                 if state == ButtonState::Pressed && !pointer.is_grabbed() {
                     let button = event.button_code();
+                    self.press_count = self.count_press(location, button);
+                    self.field_scroll_due = true;
                     let taken = self.press(location, button);
                     self.last_press = Some((Instant::now(), location, button));
                     if taken {
@@ -865,7 +869,7 @@ impl Gerdr {
             self.press_page_text(pos);
         }
         // A click on a field focuses it, and puts the caret there.
-        let takes_field = matches!(overlay, O::Features | O::Criteria)
+        let takes_field = matches!(overlay, O::Features | O::Criteria | O::Doc)
             || overlay.grabs()
                 && (!overlay.is_dialog()
                     || matches!(
@@ -1351,6 +1355,7 @@ impl Gerdr {
         if self.text_overlay() != Some(into) {
             return;
         }
+        self.field_scroll_due = true;
         let mods = ModifiersState::default();
         let out = text_field::pasting(text, |key| self.overlay_key(into, &mods, key, key));
         if let Some(out) = out {
@@ -1460,6 +1465,11 @@ impl Gerdr {
             // A criterion's note, while one is written, or their search
             // while it has the keys.
             Overlay::Features => {
+                // Code review's diff, its search while it has the keys.
+                if (self.inline_wd()).is_some_and(|wd| wd.diff.search_focused()) {
+                    let view = self.repos_view()?;
+                    return Some(chrome::repos_field(&view, self.repos_rect(), scale));
+                }
                 let panel = self.features.panel.as_ref()?;
                 let typing = (panel.search.as_ref()).is_some_and(|s| s.typing);
                 if panel.note.is_none() && !typing {
@@ -1490,8 +1500,13 @@ impl Gerdr {
             return chrome::commands_field_at(&self.commands_view()?, size, scale, pos, held);
         }
         let spot = self.field_spot()?;
-        // A card's note holds lines, as the criteria strip's does.
-        if matches!(self.text_overlay(), Some(Overlay::Features | Overlay::Criteria)) {
+        // A card's note holds lines, as the criteria strip's does; one line,
+        // as Code review's search, is the field as it is.
+        if matches!(
+            self.text_overlay(),
+            Some(Overlay::Features | Overlay::Criteria)
+        ) && spot.line.contains('\n')
+        {
             return Some(chrome::field_line_spot(
                 spot.area,
                 spot.area,
@@ -1518,6 +1533,9 @@ impl Gerdr {
             Overlay::Switcher(_) => Some(self.switcher.as_mut()?.field_mut()),
             Overlay::Tasks => None,
             Overlay::Features => {
+                if (self.inline_wd()).is_some_and(|wd| wd.diff.search_focused()) {
+                    return self.inline_wd_mut()?.diff.search_field_mut();
+                }
                 let panel = self.features.panel.as_mut()?;
                 match &mut panel.note {
                     Some((_, field)) => Some(field),
@@ -1545,22 +1563,10 @@ impl Gerdr {
             .field_line_at(pos, false)
             .filter(|(field, _)| field.area.to_f64().contains(pos))
         else {
-            self.field_clicks = None;
             return;
         };
         let at = base + self.chrome.caret_at(&field, pos.x, self.scale());
-        let now = Instant::now();
-        let count = match self.field_clicks {
-            Some((when, from, count))
-                if now.duration_since(when) < MULTI_CLICK
-                    && (from.x - pos.x).abs() < MULTI_CLICK_SLOP
-                    && (from.y - pos.y).abs() < MULTI_CLICK_SLOP =>
-            {
-                count + 1
-            }
-            _ => 1,
-        };
-        self.field_clicks = Some((now, pos, count));
+        let count = self.press_count;
         let extend = self.seat.get_keyboard().unwrap().modifier_state().shift;
         if let Some(field) = self.field_mut() {
             field.click(at, extend, count);
@@ -1568,16 +1574,134 @@ impl Gerdr {
         self.field_drag = count == 1;
     }
 
+    /// How many left presses in a row the one at `pos` is, a moment apart
+    /// and in about one place: the second selects a word in a text field,
+    /// the third all of it.
+    fn count_press(&self, pos: Point<f64, Logical>, button: u32) -> u32 {
+        match self.last_press {
+            Some((when, from, b))
+                if b == button
+                    && when.elapsed() < MULTI_CLICK
+                    && (from.x - pos.x).abs() < MULTI_CLICK_SLOP
+                    && (from.y - pos.y).abs() < MULTI_CLICK_SLOP =>
+            {
+                self.press_count + 1
+            }
+            _ => 1,
+        }
+    }
+
+    /// The text field a held press drags in, as the pointer at `pos` finds
+    /// it, and the byte of its text that starts at (see `field_line_at`):
+    /// the name being typed, else the overlay's field with the keyboard.
+    fn held_field_at(&self, pos: Point<f64, Logical>) -> Option<(FieldSpot, usize)> {
+        if self.rename.is_some() {
+            return self.rename_field_spot().map(|spot| (spot, 0));
+        }
+        self.field_line_at(pos, true)
+    }
+
+    /// The text field a held press drags in: see `held_field_at`.
+    fn held_field_mut(&mut self) -> Option<&mut TextField> {
+        if self.rename.is_none() {
+            return self.field_mut();
+        }
+        self.rename.as_mut().map(|rename| &mut rename.field)
+    }
+
+    /// Whether a held press drags in the finding dialog's field.
+    fn holds_finding_field(&self) -> bool {
+        self.rename.is_none() && self.text_overlay() == Some(Overlay::FindingDialog)
+    }
+
     /// The pointer moved to `pos` holding a press in a text field: the
-    /// selection reaches the character there.
+    /// selection reaches the character there, of the text in view (held
+    /// past it, `field_edge_tick` scrolls).
     fn drag_field(&mut self, pos: Point<f64, Logical>) {
-        let Some((field, base)) = self.field_line_at(pos, true) else {
+        self.field_scroll_due = true;
+        if self.holds_finding_field() {
+            return self.finding_dialog_drag(pos);
+        }
+        let Some((field, base)) = self.held_field_at(pos) else {
             self.field_drag = false;
             return;
         };
-        let at = base + self.chrome.caret_at(&field, pos.x, self.scale());
-        if let Some(field) = self.field_mut() {
+        let scale = self.scale();
+        let (from, to) = (field.text.0 as f64 / scale, field.text.1 as f64 / scale);
+        let x = pos.x.clamp(from, to.max(from));
+        let at = base + self.chrome.caret_at(&field, x, scale);
+        if let Some(field) = self.held_field_mut() {
             field.drag_to(at);
+        }
+    }
+
+    /// How far the pointer at `pos` is past the text of the field a press
+    /// is held in, in logical pixels: left or above it negative, none
+    /// within. A field of lines that doesn't scroll is past only to the
+    /// left or right, on the line there.
+    fn field_edge(&self, pos: Point<f64, Logical>) -> f64 {
+        if self.holds_finding_field() {
+            return self.finding_dialog_edge(pos);
+        }
+        let Some((field, _)) = self.held_field_at(pos) else {
+            return 0.0;
+        };
+        let scale = self.scale();
+        let (from, to) = (field.text.0 as f64 / scale, field.text.1 as f64 / scale);
+        match pos.x {
+            x if x < from => x - from,
+            x if x > to => x - to,
+            _ => 0.0,
+        }
+    }
+
+    /// While a press is held in a text field past its text, scroll on to
+    /// `now`, the pointer moving or not, as fast as the pointer is far past
+    /// (see `scrollback::edge_speed`): the selection goes on a character a
+    /// step along the line there, or a row a step in the finding dialog.
+    /// Whether it scrolls.
+    pub(crate) fn field_edge_tick(&mut self, now: Instant) -> bool {
+        let edge = match self.field_drag {
+            true => self.field_edge(self.pointer),
+            false => 0.0,
+        };
+        let by = crate::scrolling::edge_steps(&mut self.field_edge, now, edge);
+        if by != 0 {
+            self.field_scroll_due = true;
+            if self.holds_finding_field() {
+                self.finding_dialog_past(by);
+            } else if let Some((field, base)) = self.held_field_at(self.pointer) {
+                let line = &field.line;
+                let at = base + text_field::chars_from(line, line.caret.min(line.len()), by);
+                if let Some(field) = self.held_field_mut() {
+                    field.drag_to(at);
+                }
+            }
+        }
+        edge != 0.0
+    }
+
+    /// Keep where the view of the field with the keyboard starts as it is
+    /// drawn, for the next frame (see `Line::scroll`): after a key, a paste
+    /// or a press may have moved its caret (`field_scroll_due`), not every
+    /// frame, as the views it takes are not cheap.
+    pub(crate) fn keep_field_scroll(&mut self) {
+        if !std::mem::take(&mut self.field_scroll_due) {
+            return;
+        }
+        let scale = self.scale();
+        if self.rename.is_some() {
+            let at = (self.rename_field_spot()).map(|spot| self.chrome.field_first(&spot, scale));
+            if let (Some(at), Some(rename)) = (at, self.rename.as_mut()) {
+                rename.field.set_scroll(at);
+            }
+        }
+        if self.text_overlay() == Some(Overlay::FindingDialog) {
+            return self.finding_dialog_keep_scroll();
+        }
+        let at = (self.field_spot()).map(|spot| self.chrome.field_first(&spot, scale));
+        if let (Some(at), Some(field)) = (at, self.field_mut()) {
+            field.set_scroll(at);
         }
     }
 
@@ -1626,6 +1750,7 @@ impl Gerdr {
         let interval = Duration::from_millis(1000 / u64::from(REPEAT_RATE));
         let timer = Timer::from_duration(Duration::from_millis(REPEAT_DELAY.into()));
         let repeat = self.loop_handle.insert_source(timer, move |_, _, state| {
+            state.field_scroll_due = true;
             if state.text_overlay() != Some(overlay) {
                 state.key_repeat = None;
                 return TimeoutAction::Drop;
@@ -1662,6 +1787,7 @@ impl Gerdr {
         let interval = Duration::from_millis(1000 / u64::from(REPEAT_RATE));
         let timer = Timer::from_duration(Duration::from_millis(REPEAT_DELAY.into()));
         let repeat = self.loop_handle.insert_source(timer, move |_, _, state| {
+            state.field_scroll_due = true;
             if state.rename.is_none() {
                 state.key_repeat = None;
                 return TimeoutAction::Drop;

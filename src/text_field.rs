@@ -82,6 +82,18 @@ fn many_lines(text: &str) -> String {
         .collect()
 }
 
+/// The byte of `text` `by` characters on from byte `at` (back for
+/// negative), as far as there are: where a press held past a field's end
+/// or start drags the selection.
+pub fn chars_from(text: &str, at: usize, by: i64) -> usize {
+    let at = at.min(text.len());
+    let n = by.unsigned_abs() as usize;
+    match by < 0 {
+        true => (text[..at].char_indices().rev().nth(n.saturating_sub(1))).map_or(0, |(i, _)| i),
+        false => (text[at..].char_indices().nth(n)).map_or(text.len(), |(i, _)| at + i),
+    }
+}
+
 /// The text a field copied or cut since this was last asked, for the
 /// clipboard.
 pub fn take_copied() -> Option<String> {
@@ -112,12 +124,15 @@ impl Edit {
 
 /// What a text field shows: its text, where the caret is in it, and where
 /// the selection reaches from the caret to (the caret itself for none), as
-/// byte offsets.
+/// byte offsets; and the byte its view started at as last shown, for a
+/// field too small for its text: the view moves from there only as far as
+/// the caret needs to stay in it, so text under the pointer stays put.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Line {
     pub text: String,
     pub caret: usize,
     pub anchor: usize,
+    pub scroll: usize,
 }
 
 impl Line {
@@ -152,6 +167,7 @@ impl From<&str> for Line {
             text: text.to_owned(),
             caret: text.len(),
             anchor: text.len(),
+            scroll: 0,
         }
     }
 }
@@ -270,6 +286,16 @@ impl TextField {
     pub fn drag_to(&mut self, at: usize) {
         self.line.caret = at.min(self.line.text.len());
         self.typing = false;
+    }
+
+    /// Where its view starts, as `chrome` last showed it: see `Line`.
+    pub fn set_scroll(&mut self, at: usize) {
+        self.line.scroll = at.min(self.line.text.len());
+    }
+
+    /// Whether it holds lines.
+    pub fn is_multiline(&self) -> bool {
+        self.multiline
     }
 
     /// Edit it with a key: `sym` is the key's own symbol, `typed` the one
@@ -595,6 +621,16 @@ fn word_around(text: &str, at: usize) -> Range<usize> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn chars_from_steps_by_characters_as_far_as_there_are() {
+        let text = "aé b";
+        assert_eq!(chars_from(text, 0, 2), 3);
+        assert_eq!(chars_from(text, 3, -1), 1);
+        assert_eq!(chars_from(text, 3, -9), 0);
+        assert_eq!(chars_from(text, 1, 99), text.len());
+        assert_eq!(chars_from(text, 4, 0), 4);
+    }
+
     fn none() -> ModifiersState {
         ModifiersState::default()
     }
@@ -624,6 +660,7 @@ mod tests {
             text,
             caret,
             anchor,
+            ..
         } = field.line();
         let mut marks = vec![(caret, '|')];
         if caret != anchor {

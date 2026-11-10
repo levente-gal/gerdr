@@ -84,6 +84,23 @@ A key is written in one place, not on the button that does the same thing:
 - F1 lists every key, including those the footer can't fit.
 - A menu row may show its key at its right end, since a menu has no footer.
 
+## Text fields and the pointer
+
+Every text field takes the pointer the same way, one line or many, in an
+overlay, a dialog, a rename or a diff's comment:
+
+- A click puts the caret by the nearest character, Shift+click reaches the
+  selection there, a second click in a row selects the word, a third all of
+  it.
+- A press held and moved selects. It picks only text in view: moving past the
+  field never jumps the selection on.
+- A press held past the field's text scrolls it, moving or not, faster the
+  further past (`scrollback::edge_speed`, `scrolling::edge_steps`). A diff's
+  row range does the same past its rows.
+- A field too small for its text scrolls only as far as its caret needs
+  (`Line::scroll`): the text under the pointer stays put while the caret
+  moves in view.
+
 ## Destructive actions
 
 - Ask before anything that stops a running process, deletes unmerged work or

@@ -8937,6 +8937,7 @@ mod tests {
                     text: text.into(),
                     caret: text.len(),
                     anchor: text.len(),
+                    scroll: 0,
                 });
             }
         };
@@ -8953,6 +8954,7 @@ mod tests {
             text: "first\nsecond\nthird".into(),
             caret: 0,
             anchor: 0,
+            scroll: 0,
         };
         let at = |y: i32| Point::from((three.loc.x as f64 + 5.0, (three.loc.y + y) as f64));
         let line_at = |y: i32| {

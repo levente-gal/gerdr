@@ -1054,6 +1054,7 @@ mod tests {
                 text: "app.py".into(),
                 caret: 6,
                 anchor: 6,
+                scroll: 0,
             },
             placeholder: "Find in the scrollback".into(),
             count: "2 of 9".into(),

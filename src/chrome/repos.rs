@@ -6223,6 +6223,7 @@ mod tests {
                 text: "git".into(),
                 caret: 3,
                 anchor: 3,
+                scroll: 0,
             },
             placeholder: "Find in the diff".into(),
             count: "2 of 3".into(),
