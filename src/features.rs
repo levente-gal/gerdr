@@ -2875,7 +2875,8 @@ fn check_buttons(
 /// Whether Manual test's page of `feature` has failures or comments to send
 /// to Build now: none waits for a round to end.
 fn manual_sends(feature: &Feature, ctx: RowCtx) -> bool {
-    ctx.manual.failed > ctx.manual.sent && feature.fix_round.is_none()
+    // Someone else's pull request's go to GitHub with the review.
+    ctx.manual.failed > ctx.manual.sent && feature.fix_round.is_none() && !feature.posts_review()
 }
 
 /// Whether some check of `feature` runs that hasn't been told to stop.
@@ -5752,8 +5753,15 @@ fn writers_page_actions(
                 PanelOutcome::Manual(Outcome::SendFailures),
             ));
         }
+        // On someone else's pull request what failed goes with the review:
+        // it is done once every criterion is tried.
+        let (label, ready) = match feature.posts_review() {
+            true if ctx.manual.failed > 0 => ("Mark done", ctx.manual.untested == 0),
+            true => ("Mark passed", ctx.manual.untested == 0),
+            false => ("Mark passed", ctx.manual.passed == ctx.criteria),
+        };
         out.push((
-            button("Mark passed", style(ctx.manual.passed == ctx.criteria)),
+            button(label, style(ready)),
             PanelOutcome::Manual(Outcome::MarkPassed),
         ));
     }
@@ -13973,7 +13981,10 @@ fn stage_page(
             }
             Stage::ManualTest if mark == StageMark::Current => {
                 if state.criteria.is_empty() {
-                    let text = "no criteria in the brief: Mark done by hand";
+                    let text = match feature.pull() {
+                        Some(_) => "no criteria in the pull request's description: Mark done by hand",
+                        None => "no criteria in the brief: Mark done by hand",
+                    };
                     sections.push(lines("Criteria", vec![line(text, CheckTone::Note)]));
                 } else {
                     // Its status says how far they went; this, what holds it up.
@@ -13990,6 +14001,9 @@ fn stage_page(
                     // Found while a round is open: the next one takes them.
                     if feature.fix_round.is_some() {
                         said.extend(failures_waiting(state, "for the current round"));
+                    }
+                    if feature.posts_review() {
+                        said.extend(failures_waiting(state, "for the review on GitHub"));
                     }
                     if fixes_unverified(feature, stage) {
                         let text = "fixes changed the code: marking it passed goes back to Verify";
@@ -25849,6 +25863,38 @@ mod pr_page_tests {
         let Kind::PrReview(pull) = &mut f.kind else { unreachable!() };
         pull.mine = true;
         assert!(!f.posts_review());
+    }
+
+    #[test]
+    fn its_manual_test_failures_go_with_the_review() {
+        use crate::manual_test::Outcome;
+        let mut f = review();
+        for stage in [Stage::Verify, Stage::AiReview, Stage::CodeReview] {
+            f.tick(1, "you", None);
+            assert!(f.is_done(stage));
+        }
+        let ctx = RowCtx {
+            criteria: 2,
+            manual: feature::manual::Counts {
+                passed: 1,
+                failed: 1,
+                ..Default::default()
+            },
+            ..RowCtx::default()
+        };
+        let actions = page_actions(&f, Stage::ManualTest, ctx);
+        let labels: Vec<&str> = actions.iter().map(|(b, _)| b.label.as_str()).collect();
+        assert!(!labels.contains(&"Make fixes") && !labels.contains(&"Plan fixes"), "{labels:?}");
+        let done = actions.iter().find(|(b, _)| b.label == "Mark done").unwrap();
+        assert_eq!(done.1, PanelOutcome::Manual(Outcome::MarkPassed));
+        assert_eq!(done.0.style, ButtonStyle::Primary);
+        // Its own goes to Build to fix, as a feature's does.
+        let Kind::PrReview(pull) = &mut f.kind else { unreachable!() };
+        pull.mine = true;
+        let labels: Vec<String> = (page_actions(&f, Stage::ManualTest, ctx).into_iter())
+            .map(|(b, _)| b.label)
+            .collect();
+        assert!(labels.contains(&"Make fixes".to_owned()), "{labels:?}");
     }
 
     fn feature_agents_gate(f: &Feature) -> Option<(Stage, u64, crate::feature_agents::GateKind)> {

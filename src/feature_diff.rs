@@ -806,7 +806,15 @@ pub struct Gate {
     pub comments: usize,
     /// The findings holding it up.
     pub holding: usize,
+    /// The comments go to GitHub with the review the user submits, someone
+    /// else's pull request's (`FeatureOf::posts`): they don't hold it up.
+    pub posts: bool,
 }
+
+/// Why comments of someone else's pull request's review aren't sent to an
+/// agent.
+pub const POSTED_LATER: &str =
+    "On someone else's pull request, comments go to GitHub when you submit the review";
 
 /// Why Approve is refused, in the order to fix it; none to approve.
 pub fn approve_refusal(gate: &Gate) -> Option<String> {
@@ -839,6 +847,7 @@ pub fn approve_refusal(gate: &Gate) -> Option<String> {
         ));
     }
     match gate.comments {
+        _ if gate.posts => {}
         0 => {}
         1 => return Some("1 comment left: plan fixes for it or delete it".into()),
         n => {
@@ -895,7 +904,7 @@ pub fn next_step(gate: &Gate, total: usize, changed: usize) -> (String, bool) {
             0 => format!("{left} of {files} left"),
             n => format!("{left} of {files} left \u{b7} {n} changed since viewed"),
         }
-    } else if gate.comments > 0 {
+    } else if gate.comments > 0 && !gate.posts {
         let them = if gate.comments == 1 { "it" } else { "them" };
         format!(
             "{} \u{b7} {}: Plan fixes sends {them} to Build",
@@ -912,7 +921,13 @@ pub fn next_step(gate: &Gate, total: usize, changed: usize) -> (String, bool) {
         DRAFT_OPEN.into()
     } else {
         let next = Stage::CodeReview.next().map_or("the next stage", Stage::label);
-        return (format!("{} \u{b7} Approve to go on to {next}", all()), true);
+        // Its comments wait for the review on GitHub.
+        let kept = match gate.comments {
+            0 => String::new(),
+            n if gate.posts => format!(" \u{b7} {} for GitHub", plural(n, "comment")),
+            _ => String::new(),
+        };
+        return (format!("{}{kept} \u{b7} Approve to go on to {next}", all()), true);
     };
     (text, false)
 }
@@ -934,6 +949,7 @@ impl WorktreeDiff {
             unviewed: fe.unviewed(),
             comments: self.diff.review.own(),
             holding: fe.holding(),
+            posts: fe.posts,
         })
     }
 
@@ -1611,6 +1627,9 @@ impl Gerdr {
     /// Plan fixes in the open diff, at AI review: the findings to fix go to
     /// a fix plan, or it says what they wait for.
     pub(crate) fn feature_plan_fixes(&mut self) {
+        if self.feature_of().is_some_and(|fe| fe.posts) {
+            return self.show_warning(POSTED_LATER.into());
+        }
         if let Some((project, slug)) = self.feature_open() {
             self.send_findings(&project, &slug);
         }
@@ -1619,6 +1638,9 @@ impl Gerdr {
     /// Make fixes in the open diff, at AI review: the findings to fix go to
     /// the Build agent, or it says what they wait for.
     pub(crate) fn feature_make_fixes(&mut self) {
+        if self.feature_of().is_some_and(|fe| fe.posts) {
+            return self.show_warning(POSTED_LATER.into());
+        }
         if let Some((project, slug)) = self.feature_open() {
             self.make_finding_fixes(&project, &slug);
         }
@@ -1768,6 +1790,9 @@ impl Gerdr {
         let Some(fe) = self.feature_of() else {
             return;
         };
+        if fe.posts {
+            return self.show_warning(POSTED_LATER.into());
+        }
         let (project, slug, path) = (fe.project.clone(), fe.slug.clone(), fe.comments.clone());
         let stage = self.feature(&project, &slug).and_then(Feature::current);
         if let Some(why) = stage_refusal(stage) {
@@ -3569,5 +3594,21 @@ mod posts_tests {
         assert!(fe(Stage::AiReview, true).decisions().starts_with("1 to comment"));
         let comments = fe(Stage::AiReview, true).finding_comments(&HashMap::new());
         assert!(comments.iter().all(|c| c.flag.as_ref().is_some_and(|f| f.pr)));
+    }
+
+    #[test]
+    fn its_comments_wait_for_github_not_for_approve() {
+        let gate = Gate {
+            stage: Some(Stage::CodeReview),
+            read: true,
+            comments: 2,
+            ..Gate::default()
+        };
+        assert!(approve_refusal(&gate).is_some_and(|why| why.contains("plan fixes")));
+        let posts = Gate { posts: true, ..gate };
+        assert_eq!(approve_refusal(&posts), None);
+        let (text, ready) = next_step(&posts, 3, 0);
+        assert!(ready);
+        assert_eq!(text, "All 3 files viewed \u{b7} 2 comments for GitHub \u{b7} Approve to go on to Manual test");
     }
 }

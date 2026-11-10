@@ -315,6 +315,15 @@ pub(crate) fn strip_text(n: manual::Counts) -> String {
 
 /// What is left before every criterion passed: "AC-2 failed, AC-3 not
 /// tried".
+/// The criteria of `rows` not tried yet, in words: "AC-2 not tried".
+fn untried_text(rows: &[Row]) -> String {
+    (rows.iter())
+        .filter(|r| r.found.is_none() && !r.comment)
+        .map(|r| format!("{} not tried", r.id))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn left_text(rows: &[Row]) -> String {
     rows.iter()
         .filter_map(|r| match (r.found, r.comment) {
@@ -981,7 +990,12 @@ impl Gerdr {
                     ));
                 }
                 let rows = rows(feature.manual.as_ref(), &criteria, Some(&reading.patch), None);
-                let left = left_text(&rows);
+                // On someone else's pull request what failed goes with the
+                // review: only what wasn't tried holds it up.
+                let left = match feature.posts_review() {
+                    true => untried_text(&rows),
+                    false => left_text(&rows),
+                };
                 if !left.is_empty() {
                     return self.show_warning(format!("Not passed yet: {left}"));
                 }
@@ -1017,6 +1031,12 @@ impl Gerdr {
         let Some(feature) = self.feature(project, slug) else {
             return;
         };
+        if feature.posts_review() {
+            return self.show_warning(
+                "On someone else's pull request, failures go to GitHub when you submit the review"
+                    .into(),
+            );
+        }
         let title = feature.title.clone();
         let criteria = self.criteria(project, slug).to_vec();
         let test = feature.manual.as_ref();
