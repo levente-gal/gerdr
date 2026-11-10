@@ -13057,6 +13057,7 @@ fn doc_of(probe: Option<&Probe>, stage: Stage) -> Option<PageSection> {
     Some(PageSection::Doc {
         name: crate::feature::artifacts::name(stage)?.to_owned(),
         blocks: blocks.clone(),
+        here: false,
     })
 }
 
@@ -13207,7 +13208,12 @@ fn stage_page(
                 // goes first, the suggestions it came from under it.
                 if state.ctx.wrote(stage) {
                     sections.push(file_card(feature, stage, state.ctx, actions));
-                    sections.extend(doc_of(state.probe, stage));
+                    sections.extend(doc_of(state.probe, stage).map(|mut doc| {
+                        if let PageSection::Doc { here, .. } = &mut doc {
+                            *here = true;
+                        }
+                        doc
+                    }));
                 }
                 sections.extend(suggestion_sections(feature, stage, state, actions));
             }
@@ -13606,6 +13612,7 @@ fn comment_plan(feature: &Feature, probe: Option<&Probe>) -> Option<PageSection>
     Some(PageSection::Doc {
         name: feature::fix_round::FILE.to_owned(),
         blocks: blocks.clone(),
+        here: false,
     })
 }
 
@@ -23360,6 +23367,7 @@ pub(crate) mod tests {
         let doc = PageSection::Doc {
             name: "plan.md".to_owned(),
             blocks,
+            here: false,
         };
         let has_doc =
             |page: &StagePage| (page.sections.iter()).any(|s| matches!(s, PageSection::Doc { .. }));
@@ -24354,6 +24362,7 @@ pub(crate) mod tests {
         f.plan_review = Some(review);
         let mut read = probe(None);
         read.docs.written.insert(stage);
+        read.docs.previews.insert(stage, std::sync::Arc::new(Vec::new()));
         let state = PanelState {
             probe: Some(&read),
             ctx: wrote(&[stage]),
@@ -24374,11 +24383,13 @@ pub(crate) mod tests {
             .map(|&i| page.buttons[i].label.as_str())
             .collect();
         assert!(held.contains(&"Diff"), "{held:?}");
-        // The final plan comes first, the suggestions under it.
+        // The final plan comes first, its text too, the suggestions under
+        // it.
         let at = |is: fn(&PageSection) -> bool| page.sections.iter().position(is);
         let file = at(|s| matches!(s, PageSection::File { .. })).unwrap();
+        let text = at(|s| matches!(s, PageSection::Doc { here: true, .. })).unwrap();
         let card = at(|s| matches!(s, PageSection::Finding(_))).unwrap();
-        assert!(file < card, "{:?}", page.sections);
+        assert!(file < text && text < card, "{:?}", page.sections);
         // No final plan yet: no Diff, and nothing for Alt+E to fold.
         assert!(round_plan_actions(&f, stage, None).is_empty());
         assert!(card_numbers(&f, stage).is_empty());

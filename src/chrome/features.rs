@@ -870,6 +870,9 @@ pub enum PageSection {
     Doc {
         name: String,
         blocks: Arc<Vec<DocBlock>>,
+        /// Drawn where it stands among the sections, not last: Plan
+        /// review's final plan, above the suggestions it came from.
+        here: bool,
     },
     /// Build's choice: one agent through all milestones, or a fresh one
     /// per milestone (`fresh`).
@@ -3694,7 +3697,7 @@ fn page_stack(
         matches!(page.sections.get(k), Some(PageSection::Finding(c)) if c.sheet.is_some())
     };
     for (k, section) in page.sections.iter().enumerate() {
-        if matches!(section, PageSection::Doc { .. }) || beside == Some(k) {
+        if matches!(section, PageSection::Doc { here: false, .. }) || beside == Some(k) {
             continue;
         }
         // A sheet's rows go one under the other, a rule between them.
@@ -3702,7 +3705,7 @@ fn page_stack(
             s.y += PAGE_GAP;
         }
         match section {
-            PageSection::Doc { .. } => {}
+            PageSection::Doc { blocks, .. } => s.doc(blocks),
             PageSection::Toolbar { groups } => {
                 let row = s.put(ROW_BUTTON, Piece::Caption(String::new()));
                 s.toolbar(groups, page, buttons, row);
@@ -3920,7 +3923,12 @@ fn page_stack(
     }
     // Last: however long it is, what else the page says stays near its top.
     for section in &page.sections {
-        if let PageSection::Doc { name, blocks } = section {
+        if let PageSection::Doc {
+            name,
+            blocks,
+            here: false,
+        } = section
+        {
             s.y += PAGE_GAP;
             // Away from its file's card, it says what it is.
             if inline {
@@ -8126,6 +8134,7 @@ mod tests {
         view.page.sections.push(PageSection::Doc {
             name: "brief.md".to_owned(),
             blocks: Arc::new(blocks),
+            here: false,
         });
         view
     }

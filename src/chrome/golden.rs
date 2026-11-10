@@ -2956,6 +2956,7 @@ fn feature_tab_discover_brief() -> super::FeatureTabView {
             PageSection::Doc {
                 name: "brief.md".into(),
                 blocks: std::sync::Arc::new(doc_blocks()),
+                here: false,
             },
         ],
     };
@@ -2971,6 +2972,7 @@ fn feature_tab_plan_long() -> super::FeatureTabView {
     view.page.sections.push(PageSection::Doc {
         name: "plan.md".into(),
         blocks: std::sync::Arc::new(blocks),
+        here: false,
     });
     view.page.status = Some(tab_line("plan.md is ready for review", CheckTone::Blocker));
     view.scroll[TabColumn::Page as usize] = 300.0;
@@ -3766,6 +3768,7 @@ fn feature_tab_brief(locked: bool) -> super::FeatureTabView {
             PageSection::Doc {
                 name: "brief.md".into(),
                 blocks: std::sync::Arc::new(doc_blocks()),
+                here: false,
             },
         ],
     };
@@ -3827,6 +3830,7 @@ fn feature_tab_start_over() -> super::FeatureTabView {
             PageSection::Doc {
                 name: "plan.md".into(),
                 blocks: std::sync::Arc::new(doc_blocks()),
+                here: false,
             },
         ],
     };
@@ -4124,6 +4128,7 @@ fn feature_tab_review_fixes() -> super::FeatureTabView {
                     "## Fixes\n\n### C1: Rename the loop\n\nIts name hides that it retries.\n\n\
                      ### C2: Test the last attempt\n\nNothing checks the limit.\n",
                 )),
+                here: false,
             },
         ],
     };
@@ -6348,6 +6353,30 @@ fn tab_plan_review(writing: bool) -> super::FeatureTabView {
     view
 }
 
+/// Plan review once the final plan is written: its card and text first,
+/// the suggestions it came from under them.
+fn tab_plan_review_final() -> super::FeatureTabView {
+    use super::{CheckTone, PageSection};
+    let mut view = tab_plan_review(true);
+    let agent = (view.page.sections.iter())
+        .position(|s| matches!(s, PageSection::Agent { .. }))
+        .map_or(0, |i| i + 1);
+    let plan = [
+        PageSection::File {
+            name: "plan-final.md".into(),
+            state: tab_line("ready for review", CheckTone::Ready),
+            buttons: Vec::new(),
+        },
+        PageSection::Doc {
+            name: "plan-final.md".into(),
+            blocks: std::sync::Arc::new(doc_blocks()),
+            here: true,
+        },
+    ];
+    view.page.sections.splice(agent..agent, plan);
+    view
+}
+
 /// The finding dialog rejecting a suggestion, nothing typed yet.
 fn finding_dialog_reject() -> super::FindingDialogView {
     let w = crate::feature::review_items::words(crate::feature::review_items::ItemOf::Suggestion);
@@ -6558,17 +6587,18 @@ fn doc_suggestions() -> super::ReposView {
     view
 }
 
-const PLAN_REVIEW: [&str; 6] = [
+const PLAN_REVIEW: [&str; 7] = [
     "tab_plan_review_cards_1180",
     "tab_plan_review_cards_860",
     "tab_plan_review_writing_1180",
     "doc_suggestions_1180",
     "doc_suggestions_850",
     "finding_dialog_reject",
+    "tab_plan_review_final_1180",
 ];
 
 /// The recorded hashes of `PLAN_REVIEW`, per case in `CASES`.
-const GOLDEN_PLAN_REVIEW: [[u64; 6]; 4] = [
+const GOLDEN_PLAN_REVIEW: [[u64; 7]; 4] = [
     // Dark at 1
     [
         0x65b07cddacb18c00, // tab_plan_review_cards_1180
@@ -6577,6 +6607,7 @@ const GOLDEN_PLAN_REVIEW: [[u64; 6]; 4] = [
         0x154aeb3cfd9938e1, // doc_suggestions_1180
         0x6f63128edd4069b1, // doc_suggestions_850
         0x519b46994bcca395, // finding_dialog_reject
+        0x74d96bd7a5d920fd, // tab_plan_review_final_1180
     ],
     // Dark at 2
     [
@@ -6586,6 +6617,7 @@ const GOLDEN_PLAN_REVIEW: [[u64; 6]; 4] = [
         0x6ba33ef2efa93199, // doc_suggestions_1180
         0xacac000bf593cb0b, // doc_suggestions_850
         0x5db40a98428d92d3, // finding_dialog_reject
+        0x3b842b340c15b67c, // tab_plan_review_final_1180
     ],
     // Light at 1
     [
@@ -6595,6 +6627,7 @@ const GOLDEN_PLAN_REVIEW: [[u64; 6]; 4] = [
         0xc004c28ecddd8216, // doc_suggestions_1180
         0xb929e644bd3059f9, // doc_suggestions_850
         0x89ae995f2bf62070, // finding_dialog_reject
+        0xd74a518e721e8324, // tab_plan_review_final_1180
     ],
     // Light at 2
     [
@@ -6604,6 +6637,7 @@ const GOLDEN_PLAN_REVIEW: [[u64; 6]; 4] = [
         0xe94c049f4569a3a6, // doc_suggestions_1180
         0x9aa0c21f07ff7aef, // doc_suggestions_850
         0xe2cb1d9d401ab9c4, // finding_dialog_reject
+        0xb5ce3fcaa9fe699c, // tab_plan_review_final_1180
     ],
 ];
 
@@ -6628,6 +6662,7 @@ fn plan_review_surface(
             tab(&view, 860)
         }
         2 => tab(&tab_plan_review(true), 1180),
+        6 => tab(&tab_plan_review_final(), 1180),
         3 => (
             doc_tab_buffer(painter, &doc_suggestions(), 1180, theme, scale),
             1180 + 2 * super::SHADOW,
