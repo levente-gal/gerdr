@@ -389,10 +389,25 @@ pub(crate) enum Done {
         results: Vec<(String, Result<feature::layout::MovedPr, String>)>,
     },
     /// A pull request's review was made, or not (see `pr_review`).
+    /// The open pull requests of a repository of the review dialog of
+    /// `serial` were listed, or not.
+    OpenPulls {
+        serial: u64,
+        repo: RepoKey,
+        result: Result<Vec<feature::pr::OpenPull>, String>,
+    },
+    /// A pull request to review is of a project of several repositories:
+    /// the dialog picks the others with it.
+    ReviewPick {
+        project: String,
+        slug: String,
+        from: PathBuf,
+        wanted: (String, String, u64),
+    },
     PrReview {
         project: String,
         slug: String,
-        number: u64,
+        numbers: String,
         result: Result<Box<(Feature, Vec<PathBuf>)>, String>,
     },
     /// Asking the machine a feature came from to take it back ended.
@@ -850,6 +865,60 @@ pub struct NewFeatureDialog {
     choosing: Option<Choosing>,
     /// What filters those branches.
     query: TextField,
+    /// It picks pull requests to review, not repositories to change.
+    pub review: Option<Reviewing>,
+}
+
+/// The new feature dialog picking pull requests to review together: one per
+/// repository, the rest left out.
+#[derive(Debug, Default)]
+pub struct Reviewing {
+    pulls: BTreeMap<RepoKey, RepoPulls>,
+    /// The pull request it was opened for (host, slug, number): picked once
+    /// its repository's list is in.
+    wanted: Option<(String, String, u64)>,
+    /// What picking did besides, said where the root is: the same branch
+    /// picked in other repositories.
+    note: Option<String>,
+}
+
+/// What the review dialog knows of a repository's open pull requests.
+#[derive(Debug, Default)]
+struct RepoPulls {
+    /// Once listed.
+    list: Option<Result<Vec<feature::pr::OpenPull>, String>>,
+    picked: Option<u64>,
+    /// The user picked or cleared it: same-branch suggestions leave it be.
+    chosen: bool,
+}
+
+impl RepoPulls {
+    fn listed(&self) -> &[feature::pr::OpenPull] {
+        match &self.list {
+            Some(Ok(all)) => all,
+            _ => &[],
+        }
+    }
+
+    fn picked_pull(&self) -> Option<&feature::pr::OpenPull> {
+        let n = self.picked?;
+        self.listed().iter().find(|p| p.number == n)
+    }
+}
+
+/// The one pull request of `listed` on branch `head`, if only one is.
+fn same_branch<'a>(
+    listed: &'a [feature::pr::OpenPull],
+    head: &str,
+) -> Option<&'a feature::pr::OpenPull> {
+    match listed
+        .iter()
+        .filter(|p| p.head_ref == head)
+        .collect::<Vec<_>>()[..]
+    {
+        [one] => Some(one),
+        _ => None,
+    }
 }
 
 /// What a row of the new feature dialog is.
@@ -877,6 +946,14 @@ pub enum DialogOutcome {
         touched: Vec<String>,
         links: Vec<LinkSpec>,
     },
+    /// Review these pull requests together, of the root found and these
+    /// linked projects; titled so, or after the first if empty.
+    Review {
+        title: String,
+        root: Root,
+        links: Vec<LinkSpec>,
+        picks: Vec<crate::pr_review::Pick>,
+    },
 }
 
 impl NewFeatureDialog {
@@ -897,6 +974,7 @@ impl NewFeatureDialog {
             bases: BTreeMap::new(),
             choosing: None,
             query: TextField::default(),
+            review: None,
         }
     }
 
@@ -939,9 +1017,11 @@ impl NewFeatureDialog {
     /// root's.
     fn rows(&self) -> Vec<DialogRow> {
         if self.choosing.is_some() {
-            return (0..self.branch_rows().len())
-                .map(DialogRow::Branch)
-                .collect();
+            let n = match self.review {
+                Some(_) => self.pull_rows().len(),
+                None => self.branch_rows().len(),
+            };
+            return (0..n).map(DialogRow::Branch).collect();
         }
         if self.picking {
             return (0..self.others.len()).map(DialogRow::Project).collect();
@@ -963,6 +1043,7 @@ impl NewFeatureDialog {
     fn multi(&self) -> bool {
         self.picking
             || self.choosing.is_some()
+            || self.review.is_some()
             || matches!(&self.root, Finding::Found(root) if root.multi)
             || self.others.iter().any(|o| o.linked)
     }
@@ -974,9 +1055,10 @@ impl NewFeatureDialog {
     /// The row slots it makes room for: a filter narrowing the branches
     /// doesn't resize it, or the field being typed in would move.
     fn slots(&self) -> usize {
-        match &self.choosing {
-            Some(_) => self.branches_offered().len(),
-            None => self.repos(),
+        match (&self.choosing, &self.review) {
+            (Some(_), Some(_)) => self.pulls_offered().len(),
+            (Some(_), None) => self.branches_offered().len(),
+            (None, _) => self.repos(),
         }
     }
 
@@ -1103,6 +1185,201 @@ impl NewFeatureDialog {
         all
     }
 
+    /// The open pull requests of the repository being chosen for.
+    fn pulls_offered(&self) -> &[feature::pr::OpenPull] {
+        let of = |c: &Choosing| self.review.as_ref()?.pulls.get(&c.repo);
+        self.choosing
+            .as_ref()
+            .and_then(of)
+            .map_or(&[], RepoPulls::listed)
+    }
+
+    /// `pulls_offered` the filter lets through: by number, title, branch or
+    /// author.
+    fn pull_rows(&self) -> Vec<&feature::pr::OpenPull> {
+        let query = self.query.trim().to_lowercase();
+        (self.pulls_offered().iter())
+            .filter(|p| {
+                let text = format!("#{} {} {} {}", p.number, p.title, p.head_ref, p.author);
+                text.to_lowercase().contains(&query)
+            })
+            .collect()
+    }
+
+    /// The repositories it shows whose pull requests nobody listed yet,
+    /// with their main worktrees. Noted as listed.
+    fn unlisted(&mut self) -> Vec<(RepoKey, PathBuf)> {
+        let rows = self.rows();
+        let keys: Vec<RepoKey> = rows.into_iter().filter_map(|r| self.row_repo(r)).collect();
+        let Some(review) = self.review.as_ref() else {
+            return Vec::new();
+        };
+        let new: Vec<(RepoKey, PathBuf)> = (keys.into_iter())
+            .filter(|key| !review.pulls.contains_key(key))
+            .filter_map(|key| {
+                let main = self.repo_found(&key)?.main.clone();
+                Some((key, main))
+            })
+            .collect();
+        if let Some(review) = self.review.as_mut() {
+            for (key, _) in &new {
+                review.pulls.insert(key.clone(), RepoPulls::default());
+            }
+        }
+        new
+    }
+
+    /// The open pull requests of repository `key` were listed, or not: the
+    /// one it was opened for is picked, else one on a branch picked
+    /// elsewhere.
+    fn pulls_listed(&mut self, key: &RepoKey, result: Result<Vec<feature::pr::OpenPull>, String>) {
+        let Some(review) = self.review.as_mut() else {
+            return;
+        };
+        let Some(entry) = review.pulls.get_mut(key) else {
+            return;
+        };
+        entry.list = Some(result);
+        let wanted = (review.wanted.as_ref()).and_then(|(host, slug, number)| {
+            entry.listed().iter().find(|p| {
+                crate::ci::pull_request_of(&p.url).is_some_and(|(h, s, n)| {
+                    n == *number && h.eq_ignore_ascii_case(host) && s.eq_ignore_ascii_case(slug)
+                })
+            })
+        });
+        if let Some(number) = wanted.map(|p| p.number) {
+            review.wanted = None;
+            return self.pick_pull_of(key, number);
+        }
+        if entry.chosen || entry.picked.is_some() {
+            return;
+        }
+        let heads: Vec<String> = (review.pulls.values())
+            .filter_map(|e| e.picked_pull().map(|p| p.head_ref.clone()))
+            .collect();
+        let Some(entry) = review.pulls.get_mut(key) else {
+            return;
+        };
+        let same = heads
+            .iter()
+            .find_map(|head| same_branch(entry.listed(), head));
+        if let Some(number) = same.map(|p| p.number) {
+            entry.picked = Some(number);
+            review.note = Some(format!("#{number} of {} picked too: same branch", key.1));
+        }
+    }
+
+    /// Pick pull request `number` of repository `key`, and in each
+    /// repository nobody chose for, its one open pull request on the same
+    /// branch.
+    fn pick_pull_of(&mut self, key: &RepoKey, number: u64) {
+        let Some(review) = self.review.as_mut() else {
+            return;
+        };
+        let Some(entry) = review.pulls.get_mut(key) else {
+            return;
+        };
+        entry.picked = Some(number);
+        entry.chosen = true;
+        let Some(head) = entry.picked_pull().map(|p| p.head_ref.clone()) else {
+            return;
+        };
+        let mut also = Vec::new();
+        for (other, entry) in review.pulls.iter_mut().filter(|(k, _)| *k != key) {
+            if entry.chosen || entry.picked.is_some() {
+                continue;
+            }
+            if let Some(number) = same_branch(entry.listed(), &head).map(|p| p.number) {
+                entry.picked = Some(number);
+                also.push(format!("#{number} of {}", other.1));
+            }
+        }
+        review.note = (!also.is_empty())
+            .then(|| format!("{} picked too: same branch {head}", also.join(", ")));
+    }
+
+    /// Pick pull request row `i` for the repository being chosen for.
+    fn pick_pull(&mut self, i: usize) {
+        let Some(number) = self.pull_rows().get(i).map(|p| p.number) else {
+            return;
+        };
+        let Some(repo) = self.choosing.as_ref().map(|c| c.repo.clone()) else {
+            return;
+        };
+        self.pick_pull_of(&repo, number);
+        self.close_bases();
+    }
+
+    /// Leave repository row `i` out of the review, or pick its pull
+    /// request when none is.
+    fn toggle_pull(&mut self, i: usize) {
+        let Some(key) = self.rows().get(i).and_then(|r| self.row_repo(*r)) else {
+            return;
+        };
+        let entry = self.review.as_mut().and_then(|r| r.pulls.get_mut(&key));
+        match entry {
+            Some(entry) if entry.picked.is_some() => {
+                entry.picked = None;
+                entry.chosen = true;
+                self.error = None;
+            }
+            _ => self.open_bases(i),
+        }
+    }
+
+    /// What reviewing would do, or why it can't, as a sentence.
+    fn create_review(&self) -> Result<DialogOutcome, String> {
+        let root = match &self.root {
+            Finding::Looking => {
+                return Err("Still finding the repositories; try again in a moment.".into());
+            }
+            Finding::Failed(why) => return Err(format!("No repositories to start from: {why}.")),
+            Finding::Found(root) => root,
+        };
+        let review = self.review.as_ref().ok_or("Not a review.")?;
+        let mut picks = Vec::new();
+        for row in self.rows() {
+            let Some(key) = self.row_repo(row) else {
+                continue;
+            };
+            let Some(pull) = review.pulls.get(&key).and_then(RepoPulls::picked_pull) else {
+                continue;
+            };
+            let (Some(found), Some((host, slug, number))) =
+                (self.repo_found(&key), crate::ci::pull_request_of(&pull.url))
+            else {
+                return Err(format!(
+                    "Can't tell where #{} of {} is.",
+                    pull.number, key.1
+                ));
+            };
+            picks.push(crate::pr_review::Pick {
+                project: key.0.clone(),
+                repo: key.1.clone(),
+                main: found.main.clone(),
+                host,
+                slug,
+                number,
+                head_ref: pull.head_ref.clone(),
+            });
+        }
+        if picks.is_empty() {
+            return Err("Pick a pull request of a repository (Space).".into());
+        }
+        if !root.multi && !picks.iter().any(|p| p.project.is_none()) {
+            let name = root.repos.first().map_or("", |r| r.name.as_str());
+            return Err(format!(
+                "Pick a pull request of {name}: the project's only repository."
+            ));
+        }
+        Ok(DialogOutcome::Review {
+            title: self.title.trim().to_owned(),
+            root: root.clone(),
+            links: self.links(),
+            picks,
+        })
+    }
+
     /// The row Alt+B acts on: the one with the keyboard, else the first
     /// repository ticked, else the first.
     fn base_row(&self) -> Option<usize> {
@@ -1127,17 +1404,19 @@ impl NewFeatureDialog {
             return;
         };
         let current = self.repo_found(&repo).map(|r| r.base.clone());
+        let picked = (self.review.as_ref())
+            .and_then(|r| r.pulls.get(&repo))
+            .and_then(|e| e.picked);
         self.choosing = Some(Choosing {
             repo,
             back: (self.focus, self.top),
         });
         self.query.clear();
-        let rows = self.branch_rows();
-        self.focus = Some(
-            current
-                .and_then(|c| rows.iter().position(|b| *b == c))
-                .unwrap_or(0),
-        );
+        let at = match self.review {
+            Some(_) => picked.and_then(|n| self.pull_rows().iter().position(|p| p.number == n)),
+            None => current.and_then(|c| self.branch_rows().iter().position(|b| *b == c)),
+        };
+        self.focus = Some(at.unwrap_or(0));
         self.top = 0;
         self.error = None;
     }
@@ -1191,11 +1470,18 @@ impl NewFeatureDialog {
             Keysym::b | Keysym::B if alt => self.close_bases(),
             Keysym::l | Keysym::L if ctrl && mods.shift => self.pick(),
             Keysym::Return | Keysym::KP_Enter if n == 0 => {
-                self.error = Some("No branch matches that.".into());
+                self.error = Some(match self.review {
+                    Some(_) => "No pull request matches that.".into(),
+                    None => "No branch matches that.".into(),
+                });
             }
             Keysym::Return | Keysym::KP_Enter => {
                 // A paste narrows the rows without moving the keyboard.
-                self.pick_base(self.focus.filter(|i| *i < n).unwrap_or(0));
+                let i = self.focus.filter(|i| *i < n).unwrap_or(0);
+                match self.review {
+                    Some(_) => self.pick_pull(i),
+                    None => self.pick_base(i),
+                }
             }
             Keysym::Tab if !mods.shift => self.focus = step(self.focus, false),
             Keysym::ISO_Left_Tab | Keysym::Tab => self.focus = step(self.focus, true),
@@ -1234,6 +1520,9 @@ impl NewFeatureDialog {
         let Some(row) = self.rows().get(i).copied() else {
             return;
         };
+        if self.review.is_some() && self.row_repo(row).is_some() {
+            return self.toggle_pull(i);
+        }
         if self.fixed(row) {
             return;
         }
@@ -1281,6 +1570,9 @@ impl NewFeatureDialog {
 
     /// What creating it would do, or why it can't, as a sentence.
     fn create(&self) -> Result<DialogOutcome, String> {
+        if self.review.is_some() {
+            return self.create_review();
+        }
         if let Some(why) = self.unpicked() {
             return Err(why);
         }
@@ -6596,6 +6888,32 @@ impl Gerdr {
                     dialog.base_branches(&repo, result);
                 }
             }
+            Done::OpenPulls {
+                serial,
+                repo,
+                result,
+            } => {
+                if let Err(why) = &result {
+                    tracing::warn!("listing the pull requests of {}: {why}", repo.1);
+                }
+                // Dropped when the dialog it was for closed, as above.
+                if let Some(dialog) = self.features.dialog.as_mut()
+                    && dialog.serial == serial
+                {
+                    dialog.pulls_listed(&repo, result);
+                }
+            }
+            Done::ReviewPick {
+                project,
+                slug,
+                from,
+                wanted,
+            } => {
+                self.unbusy(&project, &slug, Job::Create);
+                if self.project.as_deref() == Some(project.as_str()) {
+                    self.open_dialog(Some(from), Some(wanted));
+                }
+            }
             Done::RemoteBase {
                 serial,
                 repo,
@@ -6682,11 +7000,11 @@ impl Gerdr {
             Done::PrReview {
                 project,
                 slug,
-                number,
+                numbers,
                 result,
             } => {
                 self.unbusy(&project, &slug, Job::Create);
-                self.pr_review_made(project, slug, number, result);
+                self.pr_review_made(project, slug, numbers, result);
             }
             Done::Created {
                 project,
@@ -7789,27 +8107,55 @@ impl Gerdr {
     /// its repositories: the one workspace `at` is in, else the active
     /// one's, starts ticked.
     pub fn open_new_feature(&mut self, at: Option<usize>) {
-        let Some(id) = self.project.clone() else {
-            return self.show_warning("Open a project to start a feature in".into());
-        };
-        let Some(project) = self.projects.project(&id) else {
-            return self.show_warning("Open a project to start a feature in".into());
-        };
-        let workspace_dirs: Vec<PathBuf> =
-            project.workspaces.iter().map(|w| w.dir.clone()).collect();
-        let from = at
-            .and_then(|i| self.workspaces.get(i))
+        let from = self.dialog_from(at);
+        self.open_dialog(from, None);
+    }
+
+    /// Open the new feature dialog to pick pull requests to review, one per
+    /// repository, from the folder of workspace `at` as `open_new_feature`.
+    pub fn open_review_pulls(&mut self, at: Option<usize>) {
+        let from = self.dialog_from(at);
+        self.open_dialog(from, Some((String::new(), String::new(), 0)));
+    }
+
+    /// The folder the dialog opens from: workspace `at`'s, else the active
+    /// one's, else the project's first workspace's.
+    fn dialog_from(&self, at: Option<usize>) -> Option<PathBuf> {
+        let project = self.projects.project(self.project.as_deref()?)?;
+        at.and_then(|i| self.workspaces.get(i))
             .or_else(|| self.workspace())
             .map(|ws| ws.dir.clone())
-            .or_else(|| workspace_dirs.first().cloned());
+            .or_else(|| project.workspaces.first().map(|w| w.dir.clone()))
+    }
+
+    /// Open the new feature dialog from folder `from`; with `wanted`, to
+    /// review pull requests, that one (host, slug, number) picked once
+    /// listed (number 0: none).
+    pub(crate) fn open_dialog(
+        &mut self,
+        from: Option<PathBuf>,
+        wanted: Option<(String, String, u64)>,
+    ) {
+        let what = match wanted {
+            Some(_) => "review pull requests",
+            None => "start a feature",
+        };
+        let Some(id) = self.project.clone() else {
+            return self.show_warning(format!("Open a project to {what} in"));
+        };
         let Some(from) = from else {
-            return self.show_warning("Add a workspace with a folder to start a feature".into());
+            return self.show_warning(format!("Add a workspace with a folder to {what}"));
         };
         self.features.serial += 1;
         let serial = self.features.serial;
         self.context_menu = None;
         self.stop_key_repeat();
-        self.features.dialog = Some(NewFeatureDialog::new(id.clone(), serial, from.clone()));
+        let mut dialog = NewFeatureDialog::new(id.clone(), serial, from.clone());
+        dialog.review = wanted.map(|w| Reviewing {
+            wanted: (w.2 != 0).then_some(w),
+            ..Reviewing::default()
+        });
+        self.features.dialog = Some(dialog);
         self.find_home_root(&id, from, serial);
         // It takes the pointer from the client under it.
         self.refresh_pointer_focus();
@@ -8109,6 +8455,9 @@ impl Gerdr {
         let Some(dialog) = self.features.dialog.as_mut() else {
             return;
         };
+        if dialog.review.is_some() {
+            return self.find_pulls();
+        }
         let (home, serial) = (dialog.project.clone(), dialog.serial);
         for (repo, found) in dialog.unlooked() {
             let of = repo.0.as_deref().unwrap_or(&home);
@@ -8131,6 +8480,22 @@ impl Gerdr {
                     repo,
                     result: crate::git_ops::remote_default(&found.main),
                 }
+            });
+        }
+    }
+
+    /// List off the thread (checklist D3) the open pull requests of the
+    /// review dialog's repositories not listed yet.
+    fn find_pulls(&mut self) {
+        let Some(dialog) = self.features.dialog.as_mut() else {
+            return;
+        };
+        let serial = dialog.serial;
+        for (repo, main) in dialog.unlisted() {
+            self.feature_work(None, move |_| Done::OpenPulls {
+                serial,
+                result: feature::pr::open_pulls(&main),
+                repo,
             });
         }
     }
@@ -8175,6 +8540,12 @@ impl Gerdr {
                 touched,
                 links,
             } => (title, root, touched, links),
+            DialogOutcome::Review {
+                title,
+                root,
+                links,
+                picks,
+            } => return self.start_review_of(dialog.project, root, links, picks, title),
         };
         let project = dialog.project;
         let all = self
@@ -8426,7 +8797,10 @@ impl Gerdr {
                 None
             }
             Some(NewFeatureHit::Repo(i)) if dialog.choosing.is_some() => {
-                dialog.pick_base(i);
+                match dialog.review {
+                    Some(_) => dialog.pick_pull(i),
+                    None => dialog.pick_base(i),
+                }
                 None
             }
             Some(NewFeatureHit::Repo(i)) => {
@@ -11364,7 +11738,30 @@ fn new_feature_view(dialog: &NewFeatureDialog, project: String) -> NewFeatureVie
     let chosen = dialog.choosing.as_ref().map(|c| &c.repo);
     let of_chosen = chosen.and_then(|repo| dialog.bases.get(repo));
     let chosen_name = chosen.map_or("", |repo| repo.1.as_str());
-    let (root, root_failed) = if chosen.is_some() {
+    let review = dialog.review.as_ref();
+    let pulls_of = |key: &RepoKey| review.and_then(|r| r.pulls.get(key));
+    let (root, root_failed) = if let (Some(repo), Some(_)) = (chosen, review) {
+        match pulls_of(repo).and_then(|e| e.list.as_ref()) {
+            None => (
+                format!("listing the pull requests of {chosen_name}\u{2026}"),
+                false,
+            ),
+            Some(Err(why)) => (
+                format!("Couldn't list the pull requests of {chosen_name}: {why}"),
+                true,
+            ),
+            Some(Ok(all)) if all.is_empty() => {
+                (format!("{chosen_name} has no open pull request"), true)
+            }
+            Some(Ok(_)) if dialog.repos() == 0 => ("No pull request matches that".to_owned(), true),
+            Some(Ok(_)) => (format!("Open pull requests of {chosen_name}"), false),
+        }
+    } else if let Some(note) = review
+        .and_then(|r| r.note.as_ref())
+        .filter(|_| !dialog.picking)
+    {
+        (note.clone(), false)
+    } else if chosen.is_some() {
         match of_chosen.and_then(|e| e.branches.as_ref()) {
             None => (
                 format!("listing the branches of {chosen_name}\u{2026}"),
@@ -11387,6 +11784,32 @@ fn new_feature_view(dialog: &NewFeatureDialog, project: String) -> NewFeatureVie
         }
     };
     let branches = dialog.branch_rows();
+    let pull_rows = dialog.pull_rows();
+    let picked = chosen.and_then(|repo| pulls_of(repo)?.picked);
+    // A repository's row in a review: its pull request picked, or why none.
+    let pull_row = |key: RepoKey, name: String| {
+        let entry = pulls_of(&key);
+        let pull = entry.and_then(RepoPulls::picked_pull);
+        let place = match (pull, entry.and_then(|e| e.list.as_ref())) {
+            (Some(p), _) => match p.author.is_empty() {
+                true => p.title.clone(),
+                false => format!("{} \u{b7} @{}", p.title, p.author),
+            },
+            (None, None) => "listing pull requests\u{2026}".to_owned(),
+            (None, Some(Err(why))) => format!("can't list: {why}"),
+            (None, Some(Ok(all))) if all.is_empty() => "no open pull request".to_owned(),
+            (None, Some(Ok(_))) => "left out".to_owned(),
+        };
+        NewFeatureRepo {
+            name,
+            place,
+            touched: pull.is_some(),
+            fixed: false,
+            base: Some(
+                pull.map_or_else(|| "Pick\u{2026}".to_owned(), |p| format!("#{}", p.number)),
+            ),
+        }
+    };
     let current = chosen.and_then(|repo| dialog.repo_found(repo).map(|r| r.base.clone()));
     let repos = dialog
         .rows()
@@ -11394,6 +11817,31 @@ fn new_feature_view(dialog: &NewFeatureDialog, project: String) -> NewFeatureVie
         .filter_map(|row| {
             let fixed = dialog.fixed(row);
             Some(match row {
+                DialogRow::Home(_) | DialogRow::Linked(..) if review.is_some() => {
+                    let key = dialog.row_repo(row)?;
+                    let name = match &key.0 {
+                        Some(p) => {
+                            let other = dialog.others.iter().find(|o| o.project == *p)?;
+                            format!("{}: {}", other.name, key.1)
+                        }
+                        None => key.1.clone(),
+                    };
+                    pull_row(key, name)
+                }
+                DialogRow::Branch(i) if review.is_some() => {
+                    let p = pull_rows.get(i)?;
+                    let mut place = vec![format!("@{}", p.author), p.head_ref.clone()];
+                    if p.draft {
+                        place.push("draft".into());
+                    }
+                    NewFeatureRepo {
+                        name: format!("#{} {}", p.number, p.title),
+                        place: place.join(" \u{b7} "),
+                        touched: picked == Some(p.number),
+                        fixed: false,
+                        base: None,
+                    }
+                }
                 DialogRow::Home(i) => {
                     let Finding::Found(root) = &dialog.root else {
                         return None;
@@ -11458,13 +11906,19 @@ fn new_feature_view(dialog: &NewFeatureDialog, project: String) -> NewFeatureVie
     for other in dialog.others.iter().filter(|o| o.linked) {
         projects.push_str(&format!(" \u{b7} {}", other.name));
     }
+    let reviewing = review.is_some() && !dialog.picking;
     let mut keys = match (dialog.choosing.is_some(), dialog.multi()) {
+        (true, _) if review.is_some() => vec![("Tab", "next"), ("Enter", "pick")],
         (true, _) => vec![("Tab", "next"), ("Enter", "use branch")],
+        (false, true) if reviewing => vec![("Tab", "next"), ("Space", "pick or leave out")],
         (false, true) => vec![("Tab", "next"), ("Space", "tick")],
         (false, false) => Vec::new(),
     };
     if !dialog.picking && dialog.choosing.is_none() && dialog.base_row().is_some() {
-        keys.push(("Alt+B", "base branch"));
+        keys.push(match reviewing {
+            true => ("Alt+B", "pull request"),
+            false => ("Alt+B", "base branch"),
+        });
     }
     keys.push(if dialog.choosing.is_some() {
         ("Ctrl+Shift+L", "link project")
@@ -11483,16 +11937,21 @@ fn new_feature_view(dialog: &NewFeatureDialog, project: String) -> NewFeatureVie
     } else {
         ("Esc", "close")
     });
-    let heading = format!("New feature in \u{201c}{project}\u{201d}");
+    let heading = match review {
+        Some(_) => format!("Review pull requests in \u{201c}{project}\u{201d}"),
+        None => format!("New feature in \u{201c}{project}\u{201d}"),
+    };
     NewFeatureView {
         heading,
         title: match dialog.choosing {
             Some(_) => dialog.query.line(),
             None => dialog.title.line(),
         },
-        hint: match dialog.choosing {
-            Some(_) => "Filter branches",
-            None => chrome::TITLE_HINT,
+        hint: match (&dialog.choosing, review) {
+            (Some(_), Some(_)) => "Filter pull requests",
+            (Some(_), None) => "Filter branches",
+            (None, Some(_)) => chrome::REVIEW_TITLE_HINT,
+            (None, None) => chrome::TITLE_HINT,
         },
         // The filter takes the keys while a branch row is selected.
         field_focus: dialog.choosing.is_some() || dialog.focus.is_none(),
@@ -16163,6 +16622,76 @@ pub(crate) mod tests {
             d.base_branches(&key, Ok(all));
         }
         d
+    }
+
+    #[test]
+    fn a_review_picks_a_pull_request_per_repository() {
+        let pull = |number: u64, head: &str| feature::pr::OpenPull {
+            number,
+            title: format!("Change {number}"),
+            head_ref: head.into(),
+            author: "bob".into(),
+            url: format!("https://github.com/o/r/pull/{number}"),
+            ..Default::default()
+        };
+        let repo = |name: &str| (None, name.to_owned());
+        let mut d = NewFeatureDialog::new("acme".into(), 1, "/work/api".into());
+        d.review = Some(Reviewing {
+            wanted: Some(("github.com".into(), "o/r".into(), 12)),
+            ..Reviewing::default()
+        });
+        d.found(Ok(root(&["api", "docs", "web"])));
+        assert_eq!(d.unlisted().len(), 3);
+        assert!(d.unlisted().is_empty());
+        d.pulls_listed(&repo("web"), Ok(vec![pull(30, "fix"), pull(31, "other")]));
+        // The one it was opened for, and the same branch's elsewhere.
+        d.pulls_listed(&repo("api"), Ok(vec![pull(12, "fix")]));
+        d.pulls_listed(&repo("docs"), Ok(Vec::new()));
+        let view = new_feature_view(&d, "Acme".into());
+        assert_eq!(view.heading, "Review pull requests in \u{201c}Acme\u{201d}");
+        assert_eq!(view.root, "#30 of web picked too: same branch fix");
+        let rows: Vec<(&str, bool, Option<&str>)> = (view.repos.iter())
+            .map(|r| (r.place.as_str(), r.touched, r.base.as_deref()))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("Change 12 \u{b7} @bob", true, Some("#12")),
+                ("no open pull request", false, Some("Pick\u{2026}")),
+                ("Change 30 \u{b7} @bob", true, Some("#30")),
+            ]
+        );
+        // Space leaves web out; again, it lists web's to pick from.
+        d.focus = Some(2);
+        dkey(&mut d, key(Keysym::space));
+        assert_eq!(
+            new_feature_view(&d, "Acme".into()).repos[2].place,
+            "left out"
+        );
+        dkey(&mut d, key(Keysym::space));
+        assert_eq!(d.rows().len(), 2);
+        dkey(&mut d, key(Keysym::Down));
+        dkey(&mut d, key(Keysym::Return));
+        assert!(d.choosing.is_none());
+        let Some(DialogOutcome::Review { picks, title, .. }) = dkey(&mut d, key(Keysym::Return))
+        else {
+            panic!("a review")
+        };
+        assert!(title.is_empty());
+        let picked: Vec<(&str, u64)> = picks.iter().map(|p| (p.repo.as_str(), p.number)).collect();
+        assert_eq!(picked, vec![("api", 12), ("web", 31)]);
+        assert_eq!(picks[0].main, PathBuf::from("/work/api"));
+        // None picked: nothing to review.
+        d.focus = Some(0);
+        dkey(&mut d, key(Keysym::space));
+        d.focus = Some(2);
+        dkey(&mut d, key(Keysym::space));
+        assert_eq!(dkey(&mut d, key(Keysym::Return)), None);
+        assert!(
+            d.error
+                .as_deref()
+                .is_some_and(|e| e.starts_with("Pick a pull request"))
+        );
     }
 
     /// A feature at Plan with an agent at work, written on another machine.

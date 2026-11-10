@@ -1187,6 +1187,10 @@ impl Gerdr {
                     MenuItem::new("Unfold all workspaces", MenuAction::FoldAll(Some(false))),
                     MenuItem::new("Fold each while quiet", MenuAction::FoldAll(None)),
                     MenuItem::new("New feature\u{2026}", MenuAction::NewFeature(None)),
+                    MenuItem::new(
+                        "Review pull requests\u{2026}",
+                        MenuAction::ReviewPulls(None),
+                    ),
                 ],
             }),
             SidebarHit::Ci(i) | SidebarHit::CiPrs(i) | SidebarHit::CiMark(i) => {
@@ -1266,6 +1270,10 @@ impl Gerdr {
                     items: vec![
                         MenuItem::new("Open features", MenuAction::Features),
                         MenuItem::new("New feature\u{2026}", MenuAction::NewFeature(None)),
+                        MenuItem::new(
+                            "Review pull requests\u{2026}",
+                            MenuAction::ReviewPulls(None),
+                        ),
                     ],
                 })
             }

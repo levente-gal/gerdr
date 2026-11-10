@@ -48,6 +48,8 @@ const MARGIN: i32 = 40;
 pub const NEW_FEATURE_BUTTONS: [&str; 2] = ["Cancel", "Create"];
 /// What the new feature dialog's field says while empty.
 pub const TITLE_HINT: &str = "What it does, in a few words";
+/// The review dialog's title field while empty.
+pub const REVIEW_TITLE_HINT: &str = "Its title; empty takes the first pull request's";
 /// How wide a repository row's base branch button is: the same on all, so
 /// they line up, whatever the branch.
 const BASE_BUTTON_W: i32 = 168;

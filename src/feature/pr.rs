@@ -673,6 +673,106 @@ pub fn title(details: &Details) -> String {
     format!("#{} {}", details.pull.number, details.title.trim())
 }
 
+/// The brief of a review of several: each one's, in turn.
+pub fn briefs(all: &[Details]) -> String {
+    all.iter().map(brief).collect::<Vec<_>>().join("\n")
+}
+
+/// The title of a review of several: the first one's, `+N` for the rest.
+pub fn title_of(all: &[Details]) -> String {
+    match all {
+        [] => String::new(),
+        [one] => title(one),
+        [first, rest @ ..] => format!("{} +{}", title(first), rest.len()),
+    }
+}
+
+/// The slug of a review of pull requests `all` (numbers and head
+/// branches): `pr-12`, `pr-<branch>` when all are on one branch name, else
+/// `pr-12-14`.
+pub fn slug_for(all: &[(u64, &str)]) -> String {
+    let [(first, branch), rest @ ..] = all else {
+        return "pr".into();
+    };
+    if rest.is_empty() {
+        return slug_of(*first);
+    }
+    if rest.iter().all(|(_, b)| b == branch) && !branch.is_empty() {
+        return format!("pr-{}", crate::projects::slugify(branch, &[]));
+    }
+    let numbers: Vec<String> = all.iter().map(|(n, _)| n.to_string()).collect();
+    format!("pr-{}", numbers.join("-"))
+}
+
+/// An open pull request of a repository, as `open_pulls` lists it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct OpenPull {
+    pub number: u64,
+    pub title: String,
+    pub head_ref: String,
+    pub author: String,
+    pub draft: bool,
+    pub url: String,
+    /// The user wrote it.
+    pub mine: bool,
+}
+
+/// What `gh pr list --json LIST_FIELDS` prints of one.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ListView {
+    number: u64,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    head_ref_name: String,
+    #[serde(default)]
+    author: Option<Login>,
+    #[serde(default)]
+    is_draft: bool,
+    #[serde(default)]
+    url: String,
+}
+
+/// The open pull requests of the repository whose main worktree is `main`,
+/// the user's own first, then the newest; at most 100.
+pub fn open_pulls(main: &Path) -> Result<Vec<OpenPull>, String> {
+    let (host, slug) = (crate::git::web_url(main).as_deref())
+        .and_then(crate::ci::github_repository)
+        .ok_or_else(|| "its origin isn't on GitHub".to_owned())?;
+    let arg = repo_arg(&host, &slug);
+    let fields = "number,title,headRefName,author,isDraft,url";
+    let args = [
+        "pr", "list", "--repo", &arg, "--state", "open", "-L", "100", "--json", fields,
+    ];
+    let listed: Vec<ListView> = crate::ci::gh_json(main, &args)?;
+    let me = viewer(main, &host).unwrap_or_else(|err| {
+        tracing::warn!("couldn't tell who is signed in to {host}: {err}");
+        String::new()
+    });
+    Ok(listed_pulls(listed, &me))
+}
+
+/// `listed`, the user being `me`, in `open_pulls`' order.
+fn listed_pulls(listed: Vec<ListView>, me: &str) -> Vec<OpenPull> {
+    let mut all: Vec<OpenPull> = (listed.into_iter())
+        .map(|v| {
+            let author = v.author.map(|a| a.login).unwrap_or_default();
+            OpenPull {
+                mine: !me.is_empty() && author.eq_ignore_ascii_case(me),
+                number: v.number,
+                title: v.title.trim().to_owned(),
+                head_ref: v.head_ref_name,
+                author,
+                draft: v.is_draft,
+                url: v.url,
+            }
+        })
+        .collect();
+    all.sort_by_key(|p| (!p.mine, std::cmp::Reverse(p.number)));
+    all
+}
+
 /// The record of the review of `details` in project `project`, its folder
 /// `created` in `root`, made at `now`. The stages before `STAGES` are
 /// marked done by `BY`, the bound ones on `patch`: the code's patch-id
@@ -682,11 +782,10 @@ pub fn record(
     project: &str,
     root: &Root,
     created: Created,
-    details: &Details,
+    all: &[Details],
     patch: Option<&str>,
     now: u64,
 ) -> Feature {
-    let pull = &details.pull;
     let marks = (Stage::ALL.into_iter())
         .filter(|s| !STAGES.contains(s))
         .map(|stage| {
@@ -699,18 +798,30 @@ pub fn record(
             (stage, mark)
         })
         .collect();
-    let short = pull.head_sha.get(..7).unwrap_or(&pull.head_sha);
-    let mut pull = pull.clone();
-    pull.repo = created
-        .repos
-        .first()
-        .map(super::Repo::key)
-        .unwrap_or_default();
+    // One alone is its folder's first repository's, unless it says.
+    let pulls: Vec<PullRef> = (all.iter().zip(0..))
+        .map(|(d, i)| {
+            let mut pull = d.pull.clone();
+            if pull.repo.is_empty() {
+                pull.repo = (created.repos.get(i))
+                    .map(super::Repo::key)
+                    .unwrap_or_default();
+            }
+            pull
+        })
+        .collect();
+    let started: Vec<String> = (pulls.iter())
+        .map(|p| format!("#{} at {}", p.number, p.short_head()))
+        .collect();
     Feature {
         version: VERSION,
-        kind: Kind::PrReview(vec![pull.clone()]),
-        slug: pull.feature_slug(),
-        title: title(details),
+        kind: Kind::PrReview(pulls),
+        slug: slug_for(
+            &(all.iter())
+                .map(|d| (d.pull.number, d.pull.head_ref.as_str()))
+                .collect::<Vec<_>>(),
+        ),
+        title: title_of(all),
         project: project.to_owned(),
         created: now,
         root: root.path.clone(),
@@ -720,7 +831,7 @@ pub fn record(
         marks,
         history: vec![Event {
             at: now,
-            what: format!("review of #{} started at {short}", pull.number),
+            what: format!("review of {} started", started.join(", ")),
         }],
         ..Feature::default()
     }
@@ -916,7 +1027,7 @@ mod tests {
             ignores: Vec::new(),
             links: Vec::new(),
         };
-        let mut f = record("p", &root, created, &d, Some("p1"), 5);
+        let mut f = record("p", &root, created, std::slice::from_ref(&d), Some("p1"), 5);
         assert_eq!(f.slug, "pr-12");
         assert_eq!(f.branch(), "gerdr/pr-12");
         assert_eq!(f.current(), Some(Stage::Verify));
@@ -997,5 +1108,20 @@ mod tests {
         assert_eq!(f.pr_ended(), None);
         f.pulls_mut()[1].take_remote(remote("bbb", "CLOSED", 4, Vec::new()));
         assert_eq!(f.pr_ended().map(|r| r.at), Some(4));
+    }
+
+    #[test]
+    fn lists_yours_first_then_the_newest() {
+        let listed: Vec<ListView> = serde_json::from_str(
+            r#"[{"number":3,"title":" Old ","headRefName":"a","author":{"login":"bob"}},
+               {"number":9,"title":"New","headRefName":"b","author":{"login":"bob"},"isDraft":true},
+               {"number":5,"title":"Mine","headRefName":"c","author":{"login":"Ann"}}]"#,
+        )
+        .unwrap();
+        let all = listed_pulls(listed, "ann");
+        let order: Vec<(u64, bool)> = all.iter().map(|p| (p.number, p.mine)).collect();
+        assert_eq!(order, vec![(5, true), (9, false), (3, false)]);
+        assert_eq!(all[2].title, "Old");
+        assert!(all[1].draft);
     }
 }

@@ -160,6 +160,9 @@ pub enum MenuAction {
     /// The new feature dialog, from the folder of workspace `.0` (else the
     /// active one's; see `Gerdr::open_new_feature`).
     NewFeature(Option<usize>),
+    /// The new feature dialog picking pull requests to review, from the
+    /// folder of workspace `.0` (see `Gerdr::open_review_pulls`).
+    ReviewPulls(Option<usize>),
     /// The feature panel on feature `.1` of project `.0`.
     OpenFeature(String, String),
     /// A toast's "Undo" after inbox items were dismissed or snoozed: list
@@ -561,6 +564,7 @@ impl Gerdr {
             MenuAction::Inbox => self.open_inbox(None),
             MenuAction::Features => self.open_features(),
             MenuAction::NewFeature(at) => self.open_new_feature(at),
+            MenuAction::ReviewPulls(at) => self.open_review_pulls(at),
             MenuAction::OpenFeature(project, slug) => self.open_linked_feature(&project, &slug),
             MenuAction::PlanFixes(project, slug) => self.send_findings(&project, &slug),
             MenuAction::MakeFindingFixes(project, slug) => {
