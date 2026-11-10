@@ -64,6 +64,38 @@ pub struct PullRef {
     /// It comes from a fork.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub cross_repo: bool,
+    /// How GitHub had it when last read (see `pr_watch`), kept from when
+    /// that last changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<Remote>,
+}
+
+/// A pull request as GitHub had it when last read.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Remote {
+    /// Unix seconds it was first read so.
+    pub at: u64,
+    pub head_sha: String,
+    pub base_ref: String,
+    /// `OPEN`, `CLOSED`, `MERGED`.
+    pub state: String,
+}
+
+impl Remote {
+    /// Whether `other` says the same of it, whenever read.
+    pub fn same(&self, other: &Remote) -> bool {
+        self.head_sha == other.head_sha
+            && self.base_ref == other.base_ref
+            && self.state.eq_ignore_ascii_case(&other.state)
+    }
+
+    pub fn is_open(&self) -> bool {
+        self.state.eq_ignore_ascii_case("open")
+    }
+
+    pub fn merged(&self) -> bool {
+        self.state.eq_ignore_ascii_case("merged")
+    }
 }
 
 impl PullRef {
@@ -104,6 +136,39 @@ impl PullRef {
     /// How `gh --repo` names its repository.
     pub fn repo_arg(&self) -> String {
         repo_arg(&self.host, &self.slug)
+    }
+
+    /// GitHub has another head or base for it than its worktree is on,
+    /// while it is open: what it has.
+    pub fn moved(&self) -> Option<&Remote> {
+        (self.remote.as_ref())
+            .filter(|r| r.is_open() && (r.head_sha != self.head_sha || r.base_ref != self.base_ref))
+    }
+
+    /// It was merged or closed on GitHub: how it ended.
+    pub fn ended(&self) -> Option<&Remote> {
+        (self.remote.as_ref()).filter(|r| !r.is_open())
+    }
+
+    /// Keep `read`, what GitHub has of it now, unless it says what was kept
+    /// already; whether it did change.
+    pub fn take_remote(&mut self, read: Remote) -> bool {
+        if self.remote.as_ref().is_some_and(|r| r.same(&read)) {
+            return false;
+        }
+        self.remote = Some(read);
+        true
+    }
+
+    /// It is on the head and base `remote` has now.
+    pub fn moved_to(&mut self, head_sha: &str, base_ref: &str) {
+        self.head_sha = head_sha.to_owned();
+        self.base_ref = base_ref.to_owned();
+    }
+
+    /// Its head, short: `abc1234`.
+    pub fn short_head(&self) -> &str {
+        self.head_sha.get(..7).unwrap_or(&self.head_sha)
     }
 }
 
@@ -189,6 +254,7 @@ fn details_of(view: View, host: &str, slug: &str, me: &str) -> Details {
             head_ref: view.head_ref_name,
             head_sha: view.head_ref_oid,
             cross_repo: view.is_cross_repository,
+            remote: None,
         },
         title: view.title,
         body: view.body,
@@ -213,6 +279,34 @@ pub fn read(dir: &Path, host: &str, slug: &str, number: u64) -> Result<Details, 
         String::new()
     });
     Ok(details_of(view, host, slug, &me))
+}
+
+/// What `gh pr view --json REMOTE_FIELDS` prints.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteView {
+    head_ref_oid: String,
+    base_ref_name: String,
+    #[serde(default)]
+    state: String,
+}
+
+/// How GitHub has `pull` now, read with gh in `dir` at `now`.
+pub fn read_remote(dir: &Path, pull: &PullRef, now: u64) -> Result<Remote, String> {
+    let n = pull.number.to_string();
+    let arg = pull.repo_arg();
+    let fields = "headRefOid,baseRefName,state";
+    let view: RemoteView =
+        crate::ci::gh_json(dir, &["pr", "view", &n, "--repo", &arg, "--json", fields])?;
+    if view.head_ref_oid.is_empty() {
+        return Err(format!("gh gave no head of #{}", pull.number));
+    }
+    Ok(Remote {
+        at: now,
+        head_sha: view.head_ref_oid,
+        base_ref: view.base_ref_name,
+        state: view.state,
+    })
 }
 
 /// The logins gh is signed in as, by host, once read.
@@ -302,7 +396,7 @@ pub fn record(
     let short = pull.head_sha.get(..7).unwrap_or(&pull.head_sha);
     Feature {
         version: VERSION,
-        kind: Kind::PrReview(pull.clone()),
+        kind: Kind::PrReview(Box::new(pull.clone())),
         slug: pull.feature_slug(),
         title: title(details),
         project: project.to_owned(),
@@ -354,6 +448,32 @@ mod tests {
                 .pull
                 .mine
         );
+    }
+
+    #[test]
+    fn tells_new_commits_and_its_end() {
+        let mut pull = details_of(view("bob", false), "github.com", "o/r", "ann").pull;
+        let read = |head: &str, base: &str, state: &str, at| Remote {
+            at,
+            head_sha: head.into(),
+            base_ref: base.into(),
+            state: state.into(),
+        };
+        assert!(pull.take_remote(read("abcdef1234", "main", "OPEN", 1)));
+        assert_eq!(pull.moved(), None);
+        // Read again the same later: kept from when it was first so.
+        assert!(!pull.take_remote(read("abcdef1234", "main", "OPEN", 2)));
+        assert_eq!(pull.remote.as_ref().map(|r| r.at), Some(1));
+        assert!(pull.take_remote(read("ffff", "main", "OPEN", 3)));
+        assert_eq!(pull.moved().map(|r| r.head_sha.as_str()), Some("ffff"));
+        pull.moved_to("ffff", "main");
+        assert_eq!(pull.moved(), None);
+        // Retargeted is moved too.
+        assert!(pull.take_remote(read("ffff", "dev", "OPEN", 4)));
+        assert!(pull.moved().is_some());
+        assert!(pull.take_remote(read("ffff", "dev", "MERGED", 5)));
+        assert_eq!(pull.moved(), None);
+        assert!(pull.ended().is_some_and(Remote::merged));
     }
 
     #[test]

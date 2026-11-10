@@ -888,6 +888,9 @@ fn detail_view(item: &InboxItem, actions: &[ItemAction], now: u64) -> InboxDetai
                 K::CodeReview => ("Waiting", "Enter shows the diff to review"),
                 K::ManualTest { .. } => ("Waiting", "Enter opens its criteria to try"),
                 K::SendPrompt => ("Waiting", "Enter opens the feature to send the prompt"),
+                K::NewHead => ("Pushed", "Enter opens the review to update it to the new head"),
+                K::PrEnded { merged: true } => ("Merged", "Enter opens the review to finish it"),
+                K::PrEnded { merged: false } => ("Closed", "Enter opens the review to finish it"),
             };
             field(when, crate::projects::ago(now, *since));
             field("Next", next.to_owned());

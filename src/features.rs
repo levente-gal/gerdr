@@ -331,6 +331,8 @@ pub(crate) enum Job {
     /// Asking the machine it was taken over from to take it back
     /// (see `machine_handback`).
     HandBack,
+    /// Moving a pull request's review to its new head (see `pr_watch`).
+    PrHead,
 }
 
 /// Work on a feature running off the UI thread.
@@ -348,6 +350,16 @@ pub(crate) struct Busy {
 
 /// What the work off the thread came to.
 pub(crate) enum Done {
+    /// How the pull requests under review stand on GitHub (see `pr_watch`).
+    PrRead {
+        reads: Vec<(String, String, Result<feature::pr::Remote, String>)>,
+    },
+    /// A pull request's review moved to its new head, or not.
+    PrMoved {
+        project: String,
+        slug: String,
+        result: Result<feature::layout::MovedPr, String>,
+    },
     /// A pull request's review was made, or not (see `pr_review`).
     PrReview {
         project: String,
@@ -1666,6 +1678,12 @@ pub enum PanelOutcome {
     Evidence,
     /// Open this pull request's page.
     OpenPr(String),
+    /// A pull request's review: move its worktree to the head GitHub has
+    /// now (see `pr_watch`).
+    UpdatePrHead,
+    /// A pull request's review whose pull request ended: finish it, after
+    /// asking.
+    FinishReview,
     /// Ask an agent to write the feature's summary again.
     WriteSummary,
     /// Undo step `.1` that shipping ran for repository `.0`, after asking.
@@ -2044,6 +2062,13 @@ pub fn row_action(feature: &Feature, row: PanelRow, ctx: RowCtx) -> Option<Panel
                 PanelOutcome::GoToCurrent
             }
             StageMark::Done => PanelOutcome::Untick(stage),
+            // A pull request's review goes by its pull request first.
+            StageMark::Current if feature.pull().is_some_and(|p| p.ended().is_some()) => {
+                PanelOutcome::FinishReview
+            }
+            StageMark::Current if feature.pull().is_some_and(|p| p.moved().is_some()) => {
+                PanelOutcome::UpdatePrHead
+            }
             StageMark::Current if stage == Stage::Ship && ctx.ship_nothing => PanelOutcome::Finish,
             StageMark::Current if stage == Stage::Ship => PanelOutcome::Ship,
             StageMark::Current if stage == Stage::Verify && ctx.checks => PanelOutcome::RunChecks,
@@ -3315,6 +3340,8 @@ fn action_hint(action: &PanelOutcome) -> &'static str {
         PanelOutcome::StopResolving => "stop\u{2026}",
         PanelOutcome::EditSummary => "edit the summary",
         PanelOutcome::Finish => "finish\u{2026}",
+        PanelOutcome::UpdatePrHead => "update to new head",
+        PanelOutcome::FinishReview => "finish\u{2026}",
         PanelOutcome::Untick(_) => "reopen",
         PanelOutcome::GoToCurrent => "go to the current stage",
         PanelOutcome::Touch(_) => "add to feature",
@@ -3329,6 +3356,8 @@ fn stage_button(feature: &Feature, stage: Stage, ctx: RowCtx) -> Option<&'static
         PanelOutcome::Tick => Some("Mark done"),
         PanelOutcome::Ship => Some("Ship\u{2026}"),
         PanelOutcome::Finish => Some("Finish\u{2026}"),
+        PanelOutcome::UpdatePrHead => Some(UPDATE_HEAD),
+        PanelOutcome::FinishReview => Some("Finish\u{2026}"),
         PanelOutcome::Untick(_) => Some("Reopen"),
         PanelOutcome::StartAgent(..) => Some("Start agent"),
         PanelOutcome::SendPrompt(_) => Some("Send prompt"),
@@ -5084,9 +5113,11 @@ impl FeaturePanel {
                 return switch(slugs, &self.slug, back).map(PanelOutcome::Show);
             }
             Keysym::o | Keysym::O if ctrl && mods.shift => {
-                return row_page(feature, row).or_else(|| {
-                    opens_fix_plan(feature, stage).then_some(PanelOutcome::ReviewFixPlan)
-                });
+                return row_page(feature, row)
+                    .or_else(|| {
+                        opens_fix_plan(feature, stage).then_some(PanelOutcome::ReviewFixPlan)
+                    })
+                    .or_else(|| feature.pull().map(|p| PanelOutcome::OpenPr(p.url.clone())));
             }
             // A suggestion's card opens the code it cites.
             Keysym::o | Keysym::O
@@ -6525,6 +6556,12 @@ impl Gerdr {
                 self.unbusy(&project, &slug, Job::Link);
                 self.feature_linked(&project, &slug, &names, result);
             }
+            Done::PrRead { reads } => self.pr_reviews_read(reads),
+            Done::PrMoved {
+                project,
+                slug,
+                result,
+            } => self.pr_head_moved(&project, &slug, result),
             Done::PrReview {
                 project,
                 slug,
@@ -8907,6 +8944,8 @@ impl Gerdr {
             PanelOutcome::SkipPlanReview => self.ask_skip_plan_review(&project, &slug),
             PanelOutcome::ChangeDecisions => self.ask_change_decisions(&project, &slug),
             PanelOutcome::OpenPr(url) => self.open_feature_page(&project, &slug, url),
+            PanelOutcome::UpdatePrHead => self.update_pr_head(&project, &slug),
+            PanelOutcome::FinishReview => self.ask_finish_pr_review(&project, &slug),
             PanelOutcome::WriteSummary => self.write_ship_summary(&project, &slug, true),
             PanelOutcome::UndoShip(repo, step) => self.ask_undo_ship(&project, &slug, &repo, step),
             PanelOutcome::UndoAfter(step) => self.undo_after_ship(&project, &slug, step),
@@ -9724,7 +9763,7 @@ impl Gerdr {
     /// done its work and goes, or its tabs would keep the workspace open.
     /// Then its worktrees go, or its workspace closes, as its ticks say. What
     /// keeps the workspace open, if anything.
-    fn after_ship(&mut self, project: &str, slug: &str) -> Option<String> {
+    pub(crate) fn after_ship(&mut self, project: &str, slug: &str) -> Option<String> {
         let feature = self.feature(project, slug)?;
         let plan = feature.ship_plan.clone();
         if feature.sandbox.is_some() {
@@ -10486,6 +10525,7 @@ impl Gerdr {
         let place = self.place_label(feature, stage);
         actions.extend(place_action(place.as_deref(), stage));
         actions.extend(stop_action(feature, stage));
+        with_pull_actions(&mut actions, feature);
         actions
     }
 
@@ -10575,7 +10615,13 @@ impl Gerdr {
             }
             // The fold buttons over the criteria: what they fold, and the key.
             FeatureTabHit::PageButton(i) => {
-                let text = fold_tip(&view.page, i).or_else(|| self.ship_button_tip(i))?;
+                let text = fold_tip(&view.page, i)
+                    .or_else(|| self.ship_button_tip(i))
+                    .or_else(|| {
+                        let feature = self.panel_feature()?;
+                        let panel = self.features.panel.as_ref()?;
+                        pull_tip(feature, panel.page_stage(feature), &view.page, i)
+                    })?;
                 let mut spot = (*layout.page_buttons.get(i)?)?;
                 spot.loc.y -= view.scroll[TabColumn::Page as usize].round() as i32;
                 Some(Tooltip::new(&text, spot))
@@ -10965,6 +11011,7 @@ fn task_of(busy: &Busy, title: Option<&str>, project: &str) -> Task {
         Job::Graph => "graph",
         Job::Sandbox => "sandbox",
         Job::HandBack => "hand back",
+        Job::PrHead => "update",
         _ => "feature",
     };
     let detail = match title {
@@ -11818,6 +11865,116 @@ fn short_model(model: &str) -> &str {
 }
 
 /// A line in `tone`.
+/// The label of the button moving a pull request's review to its new head.
+const UPDATE_HEAD: &str = "Update to new head";
+
+/// `actions` with the button opening `feature`'s pull request in, for a pull
+/// request's review (Ctrl+Shift+O). Moving to its new head and finishing
+/// once it ended are what Enter does on its current stage's page, so they
+/// are there already (`row_action`), and the card holds them.
+fn with_pull_actions(actions: &mut Vec<(PageButton, PanelOutcome)>, feature: &Feature) {
+    let Some(pull) = feature.pull() else {
+        return;
+    };
+    let open = PanelOutcome::OpenPr(pull.url.clone());
+    if !actions.iter().any(|(_, o)| *o == open) {
+        let label = OPEN_PULL.to_owned();
+        actions.push((PageButton { label, style: ButtonStyle::Quiet }, open));
+    }
+}
+
+/// The label of the button opening a pull request's review's pull request.
+const OPEN_PULL: &str = "Open pull request";
+
+/// What hovering button `i` of a pull request review's page says, with its
+/// key: one its pull request's card holds.
+fn pull_tip(feature: &Feature, stage: Stage, page: &chrome::StagePage, i: usize) -> Option<String> {
+    feature.pull()?;
+    let held = page.sections.iter().any(|s| {
+        matches!(s, PageSection::File { name, buttons, .. }
+            if name.starts_with("Pull request #") && buttons.contains(&i))
+    });
+    if !held {
+        return None;
+    }
+    let label = page.buttons.get(i)?.label.as_str();
+    Some(match label {
+        UPDATE_HEAD => {
+            "Fetch the new commits and review them, from Verify on (Enter)".to_owned()
+        }
+        OPEN_PULL => {
+            // Verify's evidence and a fix plan take the key where they are.
+            let theirs = opens_fix_plan(feature, stage)
+                || (stage == Stage::Verify && has_evidence(feature));
+            match theirs {
+                true => "Open the pull request on GitHub".to_owned(),
+                false => "Open the pull request on GitHub (Ctrl+Shift+O)".to_owned(),
+            }
+        }
+        _ => "Finish the review: nothing is posted (Enter)".to_owned(),
+    })
+}
+
+/// The card of `feature`'s pull request, for a pull request's review, at
+/// the top of each of its pages: whose it is, and how it stands on GitHub
+/// against its worktree, holding the buttons `with_pull_actions` gave.
+fn pull_card(
+    feature: &Feature,
+    actions: &[(PageButton, PanelOutcome)],
+    now: u64,
+) -> Option<PageSection> {
+    let pull = feature.pull()?;
+    let state = if let Some(end) = pull.ended() {
+        let how = if end.merged() { "merged" } else { "closed" };
+        line(
+            format!("{how} on GitHub {}", projects::ago(now, end.at)),
+            CheckTone::Note,
+        )
+    } else if let Some(moved) = pull.moved() {
+        let text = match moved.base_ref == pull.base_ref {
+            true => format!(
+                "new commits on GitHub {}: at {}, reviewed at {}",
+                projects::ago(now, moved.at),
+                moved.head_sha.get(..7).unwrap_or(&moved.head_sha),
+                pull.short_head()
+            ),
+            false => format!(
+                "now into {} on GitHub, reviewed into {}",
+                moved.base_ref, pull.base_ref
+            ),
+        };
+        line(text, CheckTone::Blocker)
+    } else {
+        let by = match pull.author.is_empty() {
+            true => String::new(),
+            false => format!("by @{} \u{b7} ", pull.author),
+        };
+        let mine = if pull.mine { " \u{b7} yours" } else { "" };
+        line(
+            format!(
+                "{by}{} into {} \u{b7} at {}{mine}",
+                pull.head_ref,
+                pull.base_ref,
+                pull.short_head()
+            ),
+            CheckTone::Note,
+        )
+    };
+    let buttons = (actions.iter().enumerate())
+        .filter(|(_, (_, o))| match o {
+            PanelOutcome::OpenPr(url) => *url == pull.url,
+            PanelOutcome::UpdatePrHead | PanelOutcome::FinishReview => true,
+            _ => false,
+        })
+        .map(|(i, _)| i)
+        .collect();
+    Some(PageSection::File {
+        name: format!("Pull request #{}", pull.number),
+        state,
+        buttons,
+    })
+}
+
 fn line(text: impl Into<String>, tone: CheckTone) -> CheckLine {
     CheckLine {
         text: text.into(),
@@ -13470,6 +13627,7 @@ fn stage_page(
         let tone = if *wrong { CheckTone::Blocker } else { CheckTone::Note };
         sections.push(lines("Another machine", vec![line(text.clone(), tone)]));
     }
+    sections.extend(pull_card(feature, actions, now));
     let status = match mark {
         StageMark::Later => {
             let before = Stage::ALL[stage_index(stage).saturating_sub(1)];
@@ -13979,7 +14137,7 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 7] = [
             ),
             (
                 "Ctrl+Shift+O",
-                "Verify's evidence, or a fix plan already sent",
+                "Verify's evidence, or a fix plan already sent; else, reviewing a pull request, its page on GitHub",
             ),
             ("Tab", "Verify: to the checks, then Up / Down through them"),
             ("Enter", "a check: show its terminal"),
@@ -14664,6 +14822,8 @@ fn writers_tab_hints(
                 hints.push(hint("Ctrl+Shift+O", "evidence"));
             } else if opens_fix_plan(feature, stage) {
                 hints.push(hint("Ctrl+Shift+O", "fix plan"));
+            } else if feature.pull().is_some() {
+                hints.push(hint("Ctrl+Shift+O", "pull request"));
             }
             if offers_setup(feature, stage) {
                 if can_set_up(feature, ctx) {
@@ -14909,6 +15069,7 @@ fn tab_view(
             actions.extend(round_plan_actions(feature, stage, state.probe));
             actions.extend(place_action(state.place.as_deref(), stage));
             actions.extend(stop_action(feature, stage));
+            with_pull_actions(&mut actions, feature);
             stage_page(feature, stage, state, &actions, now)
         }
     };
@@ -25262,5 +25423,124 @@ pub(crate) mod tests {
         let mut panel = FeaturePanel::default();
         panel.toggle_rounds(&f, stage);
         assert_eq!(panel.fix_rounds_flipped, BTreeSet::from([2]));
+    }
+}
+
+#[cfg(test)]
+mod pr_page_tests {
+    use super::{tests::feature, tests::repo, *};
+    use crate::feature::{
+        Kind,
+        pr::{PullRef, Remote},
+    };
+
+    /// A review of pull request 12 at Verify, its worktree at `abc1234…`.
+    fn review() -> Feature {
+        let mut f = feature("pr-12", vec![repo("api", true)], 4);
+        f.kind = Kind::PrReview(Box::new(PullRef {
+            host: "github.com".into(),
+            slug: "o/api".into(),
+            number: 12,
+            url: "https://github.com/o/api/pull/12".into(),
+            author: "bob".into(),
+            base_ref: "main".into(),
+            head_ref: "fix".into(),
+            head_sha: "abc1234567".into(),
+            ..PullRef::default()
+        }));
+        f
+    }
+
+    fn github(f: &mut Feature, head: &str, state: &str) {
+        let Kind::PrReview(pull) = &mut f.kind else {
+            unreachable!()
+        };
+        pull.take_remote(Remote {
+            at: 1_900,
+            head_sha: head.into(),
+            base_ref: "main".into(),
+            state: state.into(),
+        });
+    }
+
+    fn card(page: &chrome::StagePage) -> (&CheckLine, Vec<&str>) {
+        page.sections
+            .iter()
+            .find_map(|s| match s {
+                PageSection::File { name, state, buttons } if name == "Pull request #12" => {
+                    let labels = (buttons.iter())
+                        .map(|i| page.buttons[*i].label.as_str())
+                        .collect();
+                    Some((state, labels))
+                }
+                _ => None,
+            })
+            .expect("the pull request's card")
+    }
+
+    fn page_of(f: &Feature, stage: Stage) -> chrome::StagePage {
+        let mut actions = page_actions(f, stage, RowCtx::default());
+        with_pull_actions(&mut actions, f);
+        stage_page(f, stage, &PanelState::default(), &actions, 2_000)
+    }
+
+    #[test]
+    fn its_card_says_whose_it_is_and_opens_it() {
+        let f = review();
+        let page = page_of(&f, Stage::Verify);
+        let (state, buttons) = card(&page);
+        assert_eq!(state.text, "by @bob · fix into main · at abc1234");
+        assert_eq!(buttons, vec![OPEN_PULL]);
+        let ctx = RowCtx::default();
+        assert_ne!(page_enter(&f, Stage::Verify, ctx), Some(PanelOutcome::UpdatePrHead));
+        assert_eq!(feature_agents_gate(&f), None);
+    }
+
+    #[test]
+    fn new_commits_on_github_wait_for_enter() {
+        let mut f = review();
+        github(&mut f, "fff0000999", "OPEN");
+        let ctx = RowCtx::default();
+        assert_eq!(page_enter(&f, Stage::Verify, ctx), Some(PanelOutcome::UpdatePrHead));
+        let page = page_of(&f, Stage::Verify);
+        let (state, buttons) = card(&page);
+        assert_eq!(state.tone, CheckTone::Blocker);
+        assert!(state.text.contains("at fff0000, reviewed at abc1234"), "{}", state.text);
+        assert_eq!(buttons, vec![UPDATE_HEAD, OPEN_PULL]);
+        assert_eq!(
+            pull_tip(&f, Stage::Verify, &page, 0).as_deref(),
+            Some("Fetch the new commits and review them, from Verify on (Enter)")
+        );
+        // A done stage's page only says so: Enter there goes elsewhere.
+        let page = page_of(&f, Stage::Build);
+        assert_eq!(card(&page).1, vec![OPEN_PULL]);
+        assert_eq!(
+            feature_agents_gate(&f),
+            Some((Stage::Verify, 1_900, crate::feature_agents::GateKind::NewHead))
+        );
+    }
+
+    #[test]
+    fn a_merged_one_is_to_finish() {
+        let mut f = review();
+        github(&mut f, "fff0000999", "MERGED");
+        let ctx = RowCtx::default();
+        assert_eq!(page_enter(&f, Stage::Verify, ctx), Some(PanelOutcome::FinishReview));
+        let page = page_of(&f, Stage::Verify);
+        let (state, buttons) = card(&page);
+        assert!(state.text.starts_with("merged on GitHub"), "{}", state.text);
+        assert_eq!(buttons, vec!["Finish\u{2026}", OPEN_PULL]);
+        assert_eq!(
+            feature_agents_gate(&f),
+            Some((
+                Stage::Verify,
+                1_900,
+                crate::feature_agents::GateKind::PrEnded { merged: true }
+            ))
+        );
+    }
+
+    fn feature_agents_gate(f: &Feature) -> Option<(Stage, u64, crate::feature_agents::GateKind)> {
+        crate::feature_agents::gate_of(f, |_| None)
     }
 }

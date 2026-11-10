@@ -88,6 +88,9 @@ pub enum MenuAction {
     /// Review the pull request whose page is `.1` (see `pr_review`), the
     /// project's repositories found from workspace `.0`.
     ReviewPr(usize, String),
+    /// Move this project's pull request review to its new head (see
+    /// `pr_watch`).
+    UpdatePrHead(String, String),
     OpenFolder,
     NewProject,
     CloseWorkspace(usize),
@@ -468,6 +471,7 @@ impl Gerdr {
             MenuAction::OpenPageInNewTab(w, url) => self.open_page_in_new_tab(w, url),
             MenuAction::Unwatch(key, n) => self.unwatch(&key, n),
             MenuAction::ReviewPr(w, url) => self.start_pr_review(Some(w), &url),
+            MenuAction::UpdatePrHead(project, slug) => self.update_pr_head(&project, &slug),
             MenuAction::OpenFolder => self.pick_workspace(WorkspaceKind::Terminal),
             MenuAction::NewProject => self.run_action(Action::NewProject),
             MenuAction::CloseWorkspace(w) => self.close_workspace(w),

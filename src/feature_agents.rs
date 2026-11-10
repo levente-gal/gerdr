@@ -102,6 +102,12 @@ pub enum GateKind {
     /// The stage's agent is open, waiting for its model to be picked and
     /// its prompt sent. Started by gerdr, it would sit there unseen.
     SendPrompt,
+    /// A pull request's review: GitHub has new commits on it, or another
+    /// base, than its worktree is on (any stage: the current one).
+    NewHead,
+    /// A pull request's review: it was merged (or closed) on GitHub, and the
+    /// review can be finished.
+    PrEnded { merged: bool },
 }
 
 /// How long a file must stay good and unchanged to count as done when
@@ -432,6 +438,17 @@ pub(crate) fn gate_of(
 ) -> Option<(Stage, u64, GateKind)> {
     if f.status != Status::Open {
         return None;
+    }
+    // A pull request's review goes by its pull request first: new code is
+    // to be reviewed, and one that ended has nothing to review.
+    if let Some(pull) = f.pull() {
+        let at = f.current().unwrap_or(Stage::Ship);
+        if let Some(ended) = pull.ended() {
+            return Some((at, ended.at, GateKind::PrEnded { merged: ended.merged() }));
+        }
+        if let Some(moved) = pull.moved() {
+            return Some((at, moved.at, GateKind::NewHead));
+        }
     }
     // Any stage's: a fresh Build agent for fixes waits on a done Build.
     if let Some((stage, run)) = f.runs.iter().find(|(_, run)| run.waits_to_send()) {

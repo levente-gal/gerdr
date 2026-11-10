@@ -707,7 +707,7 @@ pub enum Kind {
     Feature,
     /// A pull request on GitHub, its own or someone else's: born with the
     /// stages up to Build marked, as its author built it.
-    PrReview(pr::PullRef),
+    PrReview(Box<pr::PullRef>),
 }
 
 impl Kind {
@@ -1310,7 +1310,7 @@ impl Feature {
     pub fn pull(&self) -> Option<&pr::PullRef> {
         match &self.kind {
             Kind::Feature => None,
-            Kind::PrReview(pull) => Some(pull),
+            Kind::PrReview(pull) => Some(pull.as_ref()),
         }
     }
 

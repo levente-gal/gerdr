@@ -745,6 +745,73 @@ pub fn create_pr(root: &Root, repo: &str, pull: &PullRef, slug: &str) -> Result<
     built
 }
 
+/// Where a review's worktree went once moved to its pull request's head on
+/// GitHub (`update_pr`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MovedPr {
+    pub head_sha: String,
+    /// `origin/<base>`, as `Repo::base` has it.
+    pub base: String,
+    pub base_ref: String,
+    pub base_commit: String,
+}
+
+/// Move `repo`, the worktree of pull request `pull`'s review, to the head
+/// and base `to` says GitHub has now. It is fetched first. Nothing of the
+/// user's is lost: uncommitted changes refuse it, as do commits of theirs
+/// on someone else's pull request (its branch then moves even when the
+/// author rewrote theirs); the user's own goes on only by fast-forward.
+pub fn update_pr(repo: &Repo, pull: &PullRef, to: &super::pr::Remote) -> Result<MovedPr, String> {
+    let dir = &repo.worktree;
+    let name = repo.key();
+    if !dir.is_dir() {
+        return Err(format!("{name}: {} isn't there", shown(dir)));
+    }
+    let status = git(dir, &["status", "--porcelain", "--untracked-files=no"])?;
+    if !status.trim().is_empty() {
+        return Err(format!("{name} has uncommitted changes: commit or drop them first"));
+    }
+    if !pull.own() {
+        let range = format!("{}..HEAD", pull.head_sha);
+        let mine = git(dir, &["rev-list", "--count", &range])?;
+        let mine: usize = mine.trim().parse().unwrap_or(0);
+        if mine > 0 {
+            return Err(format!(
+                "{name} has {mine} {} of yours not in #{}",
+                plural(mine, "commit"),
+                pull.number
+            ));
+        }
+    }
+    let mut next = pull.clone();
+    next.moved_to(&to.head_sha, &to.base_ref);
+    fetch_pull(&repo.main, &next).map_err(|err| format!("{name}: {err}"))?;
+    match pull.own() {
+        true => {
+            let theirs = format!("origin/{}", next.head_ref);
+            git(dir, &["merge", "-q", "--ff-only", &theirs]).map_err(|_| {
+                format!(
+                    "{} went its own way from GitHub's: merge or rebase {theirs} in its worktree",
+                    next.head_ref
+                )
+            })?;
+        }
+        false => {
+            git(dir, &["reset", "-q", "--keep", &next.head_sha])
+                .map_err(|err| format!("{name}: {err}"))?;
+        }
+    }
+    let head = git(dir, &["rev-parse", "HEAD"])?.trim().to_owned();
+    let base = format!("origin/{}", next.base_ref);
+    let base_commit = commit_of(&repo.main, &base).map_err(|err| format!("{name}: {err}"))?;
+    Ok(MovedPr {
+        head_sha: head,
+        base,
+        base_ref: next.base_ref,
+        base_commit,
+    })
+}
+
 /// Fetch pull request `pull`'s head into its `fetch_ref`, and its base (and
 /// for one of the user's own, its branch) into origin's branches; then make
 /// sure its head commit came.
@@ -1911,6 +1978,45 @@ mod tests {
         remove(&feature, true).unwrap();
         assert!(!branch_exists(&app, "gerdr/pr-7"));
         assert!(git(&app, &["rev-parse", "--verify", "-q", "refs/gerdr/pr/7"]).is_err());
+    }
+
+    #[test]
+    fn a_review_moves_to_new_commits_and_keeps_yours() {
+        let t = Temp::new();
+        let (app, sha) = pull_seed(&t);
+        let root = find_root(&app, &[], &[], &[]).unwrap();
+        let pull = pull_of(&sha, false);
+        let created = create_pr(&root, "app", &pull, "pr-7").unwrap();
+        let repo = created.repos[0].clone();
+        // The author pushes a fix, rewriting what came before.
+        let origin = t.0.join("origin");
+        run(&origin, &["checkout", "-q", "fix"]);
+        run(&origin, &["commit", "-q", "--amend", "-m", "the fix, again"]);
+        commit(&origin, "c", "more");
+        let new = run(&origin, &["rev-parse", "HEAD"]).trim().to_owned();
+        run(&origin, &["update-ref", "refs/pull/7/head", &new]);
+        run(&origin, &["checkout", "-q", "main"]);
+        let to = super::super::pr::Remote {
+            at: 1,
+            head_sha: new.clone(),
+            base_ref: "main".into(),
+            state: "OPEN".into(),
+        };
+        // Changes of the user's hold it.
+        std::fs::write(repo.worktree.join("a"), "edited").unwrap();
+        let held = update_pr(&repo, &pull, &to).unwrap_err();
+        assert!(held.contains("uncommitted changes"), "{held}");
+        run(&repo.worktree, &["checkout", "-q", "--", "a"]);
+        let moved = update_pr(&repo, &pull, &to).unwrap();
+        assert_eq!(moved.head_sha, new);
+        assert_eq!(run(&repo.worktree, &["rev-parse", "HEAD"]).trim(), new);
+        assert_eq!(moved.base, "origin/main");
+        // A commit of the user's on it holds the next move.
+        let mut on = pull.clone();
+        on.moved_to(&new, "main");
+        commit(&repo.worktree, "d", "mine");
+        let held = update_pr(&repo, &on, &to).unwrap_err();
+        assert!(held.contains("1 commit of yours not in #7"), "{held}");
     }
 
     #[test]

@@ -832,6 +832,19 @@ fn gate_words(gate: &Gate) -> (String, String, Option<&'static str>) {
             "send prompt".to_owned(),
             None,
         ),
+        GateKind::NewHead => (
+            format!("“{title}” has new commits on GitHub"),
+            "update to its new head".to_owned(),
+            None,
+        ),
+        GateKind::PrEnded { merged } => (
+            format!(
+                "“{title}” was {} on GitHub",
+                if merged { "merged" } else { "closed" }
+            ),
+            "finish its review".to_owned(),
+            None,
+        ),
         GateKind::Suggestions { open: 0 } => (
             format!("Plan review of “{title}”: all decided"),
             "go on to the final plan".to_owned(),

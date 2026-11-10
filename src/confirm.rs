@@ -147,6 +147,9 @@ pub enum Then {
     /// Finish this project's feature with nothing shipped (see
     /// `Gerdr::finish_unshipped`).
     FinishFeature { project: String, slug: String },
+    /// Finish this project's pull request review, its pull request ended
+    /// (see `Gerdr::finish_pr_review`).
+    FinishPrReview { project: String, slug: String },
     /// Undo this step shipping ran for this repository of this project's
     /// feature (see `Gerdr::undo_ship`).
     UndoShip {
@@ -761,6 +764,7 @@ impl Gerdr {
             } => self.remove_repos(&project, &slug, &keys, force, to_context),
             Then::ShipFeature { project, slug } => self.ship_feature(&project, &slug),
             Then::FinishFeature { project, slug } => self.finish_unshipped(&project, &slug),
+            Then::FinishPrReview { project, slug } => self.finish_pr_review(&project, &slug),
             Then::UndoShip {
                 project,
                 slug,
