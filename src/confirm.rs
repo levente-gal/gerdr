@@ -124,11 +124,11 @@ pub enum Then {
     /// Push the user's own pull request review's commits to GitHub.
     PushPr { project: String, slug: String },
     /// Fix someone else's pull requests here, each pushing to its
-    /// `head_repos` entry (number, repository).
+    /// `head_repos` entry (its `PullRef::repo`, the repository on GitHub).
     FixHere {
         project: String,
         slug: String,
-        head_repos: Vec<(u64, String)>,
+        head_repos: Vec<(String, String)>,
     },
     /// Approve this stage of this project's feature, its review comments
     /// deleted unsent (see `Gerdr::approve_doc_now`).

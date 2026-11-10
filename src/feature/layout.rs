@@ -684,22 +684,9 @@ fn create_pr_in(
     if dir.symlink_metadata().is_ok() {
         return Err(format!("{} already exists", shown(&dir)));
     }
-    let mut chosen = Vec::new();
-    for (repo, pull) in picks {
-        let Some(found) = root.repos.iter().find(|r| r.name == *repo) else {
-            return Err(format!("{} has no repository {repo}", shown(&root.path)));
-        };
-        let branch = pull.branch();
-        let kept = branch_exists(&found.main, &branch);
-        if kept && !pull.own() {
-            return Err(format!("{repo} already has a branch {branch}"));
-        }
-        chosen.push((found, pull, branch, kept));
-    }
-    for (found, pull, ..) in &chosen {
-        fetch_pull(&found.main, pull).map_err(|err| format!("{}: {err}", found.name))?;
-    }
-    // Branches differ per repository: `Made` deletes none, this does.
+    let chosen = pr_chosen(root, picks)?;
+    // Branches differ per repository: `Made` deletes none, `pr_worktrees`
+    // notes those to.
     let mut made = Made {
         features: (!features.exists()).then(|| features.clone()),
         dir: Some(dir.clone()),
@@ -716,51 +703,7 @@ fn create_pr_in(
             std::fs::create_dir_all(parent)
                 .map_err(|err| format!("couldn't make {}: {err}", shown(parent)))?;
         }
-        let mut repos = Vec::new();
-        for (found, pull, branch, kept) in &chosen {
-            let name = &found.name;
-            let base = format!("origin/{}", pull.base_ref);
-            let base_commit =
-                commit_of(&found.main, &base).map_err(|err| format!("{name}: {err}"))?;
-            let path = if root.multi {
-                dir.join(name)
-            } else {
-                dir.clone()
-            };
-            let p = path.to_string_lossy();
-            let from = match pull.own() {
-                true => format!("origin/{}", pull.head_ref),
-                false => pull.head_sha.clone(),
-            };
-            let args: Vec<&str> = match kept {
-                true => vec!["worktree", "add", "-q", &p, branch],
-                false => vec!["worktree", "add", "-q", "-b", branch, &p, &from],
-            };
-            git(&found.main, &args).map_err(|err| format!("{name}: {err}"))?;
-            made.worktrees.push((found.main.clone(), path.clone()));
-            if !kept {
-                new_branches.push((found.main.clone(), branch.clone()));
-            }
-            // The user's branch here may be behind what they pushed; one gone
-            // its own way stays as it is, its commits theirs.
-            if *kept && let Err(err) = git(&path, &["merge", "-q", "--ff-only", &from]) {
-                tracing::warn!("{branch} of {name} stays where it was: {err}");
-            }
-            let repo = Repo {
-                name: name.clone(),
-                main: found.main.clone(),
-                base,
-                base_commit,
-                worktree: path,
-                touched: true,
-                branch: Some(branch.clone()),
-                project: project.map(str::to_owned),
-            };
-            if !pull.own() {
-                guard_worktree(&repo, branch);
-            }
-            repos.push(repo);
-        }
+        let repos = pr_worktrees(root, &dir, &chosen, project, &mut made, &mut new_branches)?;
         let links = match root.multi {
             true => link_root(&root.path, &dir)?,
             false => Vec::new(),
@@ -775,16 +718,189 @@ fn create_pr_in(
     })();
     if built.is_err() {
         made.undo();
-        for (main, branch) in &new_branches {
-            if let Err(err) = hook::unguard(main, branch) {
-                tracing::warn!("unguarding {branch} in {}: {err}", main.display());
-            }
-            if let Err(err) = git(main, &["branch", "-D", branch]) {
-                tracing::warn!("deleting {branch} in {}: {err}", main.display());
+        delete_branches(&new_branches);
+    }
+    built
+}
+
+/// A pull request to make a worktree of: the repository found, its
+/// branch, and whether that branch is there already.
+type PrChosen<'a> = (&'a Found, &'a PullRef, String, bool);
+
+/// The repositories of `root` that `picks` (repository name, pull request)
+/// name, once each pull request is fetched; or why one can't be had.
+fn pr_chosen<'a>(root: &'a Root, picks: &'a [(String, PullRef)]) -> Result<Vec<PrChosen<'a>>, String> {
+    let mut chosen = Vec::new();
+    for (repo, pull) in picks {
+        let Some(found) = root.repos.iter().find(|r| r.name == *repo) else {
+            return Err(format!("{} has no repository {repo}", shown(&root.path)));
+        };
+        let branch = pull.branch();
+        let kept = branch_exists(&found.main, &branch);
+        if kept && !pull.own() {
+            return Err(format!("{repo} already has a branch {branch}"));
+        }
+        chosen.push((found, pull, branch, kept));
+    }
+    for (found, pull, ..) in &chosen {
+        fetch_pull(&found.main, pull).map_err(|err| format!("{}: {err}", found.name))?;
+    }
+    Ok(chosen)
+}
+
+/// The worktrees of `chosen` in feature folder `dir` of `root`, each on its
+/// pull request's branch (see `create_pr`), in linked project `project` if
+/// one. What it makes goes into `made` and `new_branches`.
+fn pr_worktrees(
+    root: &Root,
+    dir: &Path,
+    chosen: &[PrChosen],
+    project: Option<&str>,
+    made: &mut Made,
+    new_branches: &mut Vec<(PathBuf, String)>,
+) -> Result<Vec<Repo>, String> {
+    let mut repos = Vec::new();
+    for (found, pull, branch, kept) in chosen {
+        let name = &found.name;
+        let base = format!("origin/{}", pull.base_ref);
+        let base_commit = commit_of(&found.main, &base).map_err(|err| format!("{name}: {err}"))?;
+        let path = if root.multi {
+            dir.join(name)
+        } else {
+            dir.to_owned()
+        };
+        let p = path.to_string_lossy();
+        let from = match pull.own() {
+            true => format!("origin/{}", pull.head_ref),
+            false => pull.head_sha.clone(),
+        };
+        let args: Vec<&str> = match kept {
+            true => vec!["worktree", "add", "-q", &p, branch],
+            false => vec!["worktree", "add", "-q", "-b", branch, &p, &from],
+        };
+        git(&found.main, &args).map_err(|err| format!("{name}: {err}"))?;
+        made.worktrees.push((found.main.clone(), path.clone()));
+        if !kept {
+            new_branches.push((found.main.clone(), branch.clone()));
+        }
+        // The user's branch here may be behind what they pushed; one gone
+        // its own way stays as it is, its commits theirs.
+        if *kept && let Err(err) = git(&path, &["merge", "-q", "--ff-only", &from]) {
+            tracing::warn!("{branch} of {name} stays where it was: {err}");
+        }
+        let repo = Repo {
+            name: name.clone(),
+            main: found.main.clone(),
+            base,
+            base_commit,
+            worktree: path,
+            touched: true,
+            branch: Some(branch.clone()),
+            project: project.map(str::to_owned),
+        };
+        if !pull.own() {
+            guard_worktree(&repo, branch);
+        }
+        repos.push(repo);
+    }
+    Ok(repos)
+}
+
+/// Delete `branches` (main worktree, name) made a moment ago.
+fn delete_branches(branches: &[(PathBuf, String)]) {
+    for (main, branch) in branches {
+        if let Err(err) = hook::unguard(main, branch) {
+            tracing::warn!("unguarding {branch} in {}: {err}", main.display());
+        }
+        if let Err(err) = git(main, &["branch", "-D", branch]) {
+            tracing::warn!("deleting {branch} in {}: {err}", main.display());
+        }
+    }
+}
+
+/// Worktrees of the pull requests `picks` of `root`'s repositories in a
+/// review's folder `dir` that is there already; on a failure, none.
+fn add_pr_repos(
+    root: &Root,
+    dir: &Path,
+    picks: &[(String, PullRef)],
+    project: Option<&str>,
+) -> Result<Vec<Repo>, String> {
+    if !root.multi {
+        return Err(format!("{} is a single repository's folder", shown(dir)));
+    }
+    if !dir.is_dir() {
+        return Err(format!("{} isn't there", shown(dir)));
+    }
+    if let Some((name, _)) = picks.iter().find(|(name, _)| dir.join(name).exists()) {
+        return Err(format!("{} already has {name}", shown(dir)));
+    }
+    let chosen = pr_chosen(root, picks)?;
+    let mut made = Made {
+        features: None,
+        dir: None,
+        branch: String::new(),
+        worktrees: Vec::new(),
+        kept_branch: true,
+    };
+    let mut new_branches = Vec::new();
+    let added = pr_worktrees(root, dir, &chosen, project, &mut made, &mut new_branches);
+    if added.is_err() {
+        made.undo();
+        delete_branches(&new_branches);
+    }
+    added
+}
+
+/// Pull requests to add to an open review, of one project's root.
+#[derive(Clone, Debug)]
+pub struct PrAdd {
+    /// The linked project's id; `None`: the home one.
+    pub project: Option<String>,
+    /// The project's name, for errors.
+    pub name: String,
+    pub root: Root,
+    /// By repository name, each `PullRef::repo` its key.
+    pub picks: Vec<(String, PullRef)>,
+}
+
+/// Add the pull requests `adds` to review `feature`: into its folders, or a
+/// new one for a project it doesn't span yet. On a failure, all that was
+/// added is taken down again.
+pub fn add_review(feature: &Feature, adds: &[PrAdd]) -> Result<MoreLinked, String> {
+    let mut made: Vec<(Link, Created)> = Vec::new();
+    let mut repos: Vec<Repo> = Vec::new();
+    for add in adds {
+        let link = (add.project.as_ref()).map(|p| feature.links.iter().find(|l| l.project == *p));
+        let result = match (&add.project, link.flatten()) {
+            (None, _) => add_pr_repos(&add.root, &feature.dir, &add.picks, None).map(Err),
+            (Some(p), Some(link)) => add_pr_repos(&add.root, &link.dir, &add.picks, Some(p)).map(Err),
+            (Some(p), None) => create_pr_in(&add.root, &add.picks, &feature.slug, Some(p))
+                .map(|created| Ok((link_of(p, &add.root, &created), created))),
+        };
+        match result {
+            Ok(Ok(linked)) => made.push(linked),
+            Ok(Err(added)) => repos.extend(added),
+            Err(err) => {
+                let pulls: Vec<PullRef> = (adds.iter())
+                    .flat_map(|a| a.picks.iter().map(|(_, p)| p.clone()))
+                    .collect();
+                let mut failed = Vec::new();
+                for repo in &repos {
+                    let pull = pulls.iter().find(|p| p.repo == repo.key());
+                    take_down_repo("", repo, true, &mut failed, pull);
+                }
+                if !failed.is_empty() {
+                    tracing::warn!("taking repositories out again: {}", failed.join("; "));
+                }
+                for (_, created) in &made {
+                    undo_review(created, &pulls);
+                }
+                return Err(format!("{}: {err}", add.name));
             }
         }
     }
-    built
+    Ok((made, repos))
 }
 
 /// A linked project's part of a review: its root, the pull requests picked
@@ -2133,6 +2249,57 @@ mod tests {
         assert!(failed.as_ref().is_err_and(|e| e.starts_with("Other: web: ")), "{failed:?}");
         assert!(!dirs[0].join(".features/pr-again").exists());
         assert!(!branch_exists(&dirs[0], "gerdr/pr-7"));
+    }
+
+    #[test]
+    fn adds_a_pull_request_to_an_open_review() {
+        let t = Temp::new();
+        std::fs::create_dir_all(t.0.join("work")).unwrap();
+        let seed = |name: &str, n: u64| {
+            let origin = t.repo(&format!("{name}-origin"), "main");
+            run(&origin, &["checkout", "-q", "-b", "fix"]);
+            commit(&origin, "b", "the fix");
+            let sha = run(&origin, &["rev-parse", "HEAD"]).trim().to_owned();
+            run(&origin, &["update-ref", &format!("refs/pull/{n}/head"), &sha]);
+            run(&origin, &["checkout", "-q", "main"]);
+            let to = format!("work/{name}");
+            run(&t.0, &["clone", "-q", &format!("{name}-origin"), &to]);
+            let mut pull = pull_of(&sha, false);
+            pull.number = n;
+            pull.repo = name.into();
+            pull
+        };
+        let (api, web) = (seed("api", 7), seed("web", 8));
+        let dirs = [t.0.join("work/api"), t.0.join("work/web")];
+        let root = find_root(&dirs[0], &dirs, &[], &[]).unwrap();
+        let (created, _) = create_review(&root, &[("api".into(), api.clone())], &[], "pr-7").unwrap();
+        let details = super::super::pr::Details {
+            pull: api.clone(),
+            state: "OPEN".into(),
+            ..Default::default()
+        };
+        let feature =
+            super::super::pr::record("p", &root, created, std::slice::from_ref(&details), None, 1);
+        let add = |pull: &PullRef| PrAdd {
+            project: None,
+            name: "p".into(),
+            root: root.clone(),
+            picks: vec![("web".into(), pull.clone())],
+        };
+        // One that can't be fetched leaves nothing behind.
+        let mut gone = web.clone();
+        gone.number = 9;
+        assert!(add_review(&feature, &[add(&gone)]).is_err());
+        assert!(!feature.dir.join("web").exists());
+        let (linked, repos) = add_review(&feature, &[add(&web)]).unwrap();
+        assert!(linked.is_empty());
+        assert_eq!(repos[0].worktree, feature.dir.join("web"));
+        assert_eq!(repos[0].branch.as_deref(), Some("gerdr/pr-8"));
+        let head = run(&repos[0].worktree, &["rev-parse", "HEAD"]);
+        assert_eq!(head.trim(), web.head_sha);
+        // Twice is refused: it is there.
+        let again = add_review(&feature, &[add(&web)]).unwrap_err();
+        assert!(again.contains("already has web"), "{again}");
     }
 
     #[test]

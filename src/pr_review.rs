@@ -138,6 +138,141 @@ impl Gerdr {
         });
     }
 
+    /// Change the pull requests review `slug` of project `project` holds to
+    /// `picks`, of the repositories of `root` and linked projects `links`,
+    /// as the review dialog has them: those new are added off the thread,
+    /// then those left out go (see `check_remove_repos`), asking first when
+    /// that would lose work.
+    pub(crate) fn change_pulls(
+        &mut self,
+        project: String,
+        slug: String,
+        root: layout::Root,
+        links: Vec<layout::LinkSpec>,
+        picks: Vec<Pick>,
+    ) {
+        let Some(f) = self.feature(&project, &slug).cloned() else {
+            return self.show_warning("That review is gone".into());
+        };
+        if let Some(why) = self.review_refusal(&f) {
+            return self.show_warning(why);
+        }
+        let (adds, drops) = match pull_changes(&f, &picks) {
+            Ok(changes) => changes,
+            Err(why) => return self.show_warning(why),
+        };
+        if adds.is_empty() && drops.is_empty() {
+            return self.show_notice(format!(
+                "\u{201c}{}\u{201d} holds those pull requests already",
+                f.title
+            ));
+        }
+        if adds.is_empty() {
+            return self.check_remove_repos(project, slug, drops, false);
+        }
+        let numbers = numbers_of(&adds);
+        let busy = Busy {
+            project: project.clone(),
+            slug: slug.clone(),
+            job: Job::Link,
+            repo: None,
+            what: format!("Adding {numbers} to \u{201c}{}\u{201d}", f.title),
+        };
+        self.feature_work(Some(busy), move |_| {
+            let added = add_pulls(&f, &root, &links, &adds);
+            Done::ReviewAdded {
+                project,
+                slug,
+                drops,
+                result: added.map(Box::new),
+            }
+        });
+    }
+
+    /// Why review `f`'s pull requests can't change now, if they can't.
+    pub(crate) fn review_refusal(&self, f: &Feature) -> Option<String> {
+        let title = &f.title;
+        if f.status != Status::Open
+            || f.writer.is_some()
+            || f.marks.contains_key(&feature::Stage::Ship)
+        {
+            return Some(format!(
+                "\u{201c}{title}\u{201d} can't change its pull requests now"
+            ));
+        }
+        self.feature_busy(&f.project, &f.slug)
+            .then(|| format!("\u{201c}{title}\u{201d} is busy; try again once it is done"))
+    }
+
+    /// Pull requests were added to review `slug`, or not: kept, its brief
+    /// told of them, those of the user's set up; then `drops` go.
+    pub(crate) fn review_added(
+        &mut self,
+        project: &str,
+        slug: &str,
+        drops: Vec<String>,
+        result: Result<Box<Added>, String>,
+    ) {
+        let ((made, repos), all) = match result {
+            Ok(added) => *added,
+            Err(why) => {
+                tracing::warn!("adding pull requests to {project}/{slug}: {why}");
+                return self.show_error(format!("Couldn't add the pull requests: {why}"));
+            }
+        };
+        let Some(f) = self.feature_mut(project, slug) else {
+            return;
+        };
+        let now = feature::now();
+        let mut joined = repos;
+        for (link, created) in made {
+            f.log(now, format!("linked project {}", link.project));
+            f.links.push(link);
+            joined.extend(created.repos);
+        }
+        f.insert_repos(joined);
+        if let feature::Kind::PrReview(pulls) = &mut f.kind {
+            pulls.extend(all.iter().map(|d| d.pull.clone()));
+        }
+        for d in &all {
+            f.log(
+                now,
+                format!("added #{} at {}", d.pull.number, d.pull.short_head()),
+            );
+        }
+        let title = f.title.clone();
+        let data = store::dir(None, project, slug);
+        let brief = feature::artifacts::path(&data, feature::Stage::Discover)
+            .unwrap_or_else(|| data.join("brief.md"));
+        let more = format!("\n{}", pr::briefs(&all));
+        let appended = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&brief)
+            .and_then(|mut file| std::io::Write::write_all(&mut file, more.as_bytes()));
+        if let Err(err) = appended {
+            tracing::warn!("adding to the brief {}: {err}", brief.display());
+        }
+        self.save_feature(project, slug);
+        let numbers: Vec<String> = all.iter().map(|d| format!("#{}", d.pull.number)).collect();
+        self.show_success(format!(
+            "\u{201c}{title}\u{201d} reviews {} too",
+            numbers.join(", ")
+        ));
+        self.probe_feature(project, slug);
+        self.rebuild_feature_graphs(project, slug);
+        // Someone else's code runs only when asked, as when it was made.
+        let ours: Vec<String> = (all.iter())
+            .filter(|d| d.pull.works_here())
+            .map(|d| d.pull.repo.clone())
+            .collect();
+        if !ours.is_empty() {
+            self.start_setup_of(project, slug, Some(ours));
+        }
+        if !drops.is_empty() {
+            self.check_remove_repos(project.to_owned(), slug.to_owned(), drops, false);
+        }
+    }
+
     /// The review of pull requests `numbers` (`#12, #14`) was made as
     /// `slug`, or not: keep it, show it and set it up.
     pub(crate) fn pr_review_made(
@@ -205,6 +340,87 @@ pub struct Pick {
     pub number: u64,
     /// Its head branch, as listed: for the review's slug.
     pub head_ref: String,
+}
+
+/// What turning review `f`'s pull requests into `picks` adds, and which
+/// repositories it takes out (by key); or why it can't in one go: a
+/// repository's pull request swapped for another.
+fn pull_changes(f: &Feature, picks: &[Pick]) -> Result<(Vec<Pick>, Vec<String>), String> {
+    let key_of = |p: &Pick| feature::repo_key(p.project.as_deref(), &p.repo);
+    let has = |key: &str, number: u64| f.pull_of(key).is_some_and(|p| p.number == number);
+    let adds: Vec<Pick> = (picks.iter())
+        .filter(|p| !has(&key_of(p), p.number))
+        .cloned()
+        .collect();
+    let drops: Vec<String> = (f.repos.iter())
+        .map(feature::Repo::key)
+        .filter(|key| f.pull_of(key).is_some())
+        .filter(|key| {
+            !picks
+                .iter()
+                .any(|p| key_of(p) == *key && has(key, p.number))
+        })
+        .collect();
+    if let Some(pick) = adds.iter().find(|p| drops.contains(&key_of(p))) {
+        let had = f.pull_of(&key_of(pick)).map_or(0, |p| p.number);
+        return Err(format!(
+            "{} is on #{had}: leave it out first, then pick #{}",
+            pick.repo, pick.number
+        ));
+    }
+    Ok((adds, drops))
+}
+
+/// What adding pull requests to a review made, and what was read of them.
+pub(crate) type Added = (layout::MoreLinked, Vec<pr::Details>);
+
+/// Add the pull requests `adds` to review `f`, of the repositories of
+/// `root` and linked projects `links`: read, each open, and their worktrees
+/// made. Off the thread.
+fn add_pulls(
+    f: &Feature,
+    root: &layout::Root,
+    links: &[layout::LinkSpec],
+    adds: &[Pick],
+) -> Result<Added, String> {
+    let mut all = Vec::new();
+    for pick in adds {
+        let mut details = pr::read(&pick.main, &pick.host, &pick.slug, pick.number)?;
+        if !details.is_open() {
+            let state = details.state.to_ascii_lowercase();
+            return Err(format!("#{} is {state}", pick.number));
+        }
+        details.pull.repo = feature::repo_key(pick.project.as_deref(), &pick.repo);
+        all.push(details);
+    }
+    let mut groups: Vec<layout::PrAdd> = Vec::new();
+    for (pick, details) in adds.iter().zip(&all) {
+        let at = groups.iter().position(|g| g.project == pick.project);
+        let at = match at {
+            Some(at) => at,
+            None => {
+                let (name, root) = match &pick.project {
+                    None => (f.project.clone(), root.clone()),
+                    Some(p) => {
+                        let spec = links.iter().find(|l| l.project == *p);
+                        let spec = spec.ok_or_else(|| format!("project {p} isn't linked"))?;
+                        (spec.name.clone(), spec.root.clone())
+                    }
+                };
+                groups.push(layout::PrAdd {
+                    project: pick.project.clone(),
+                    name,
+                    root,
+                    picks: Vec::new(),
+                });
+                groups.len() - 1
+            }
+        };
+        groups[at]
+            .picks
+            .push((pick.repo.clone(), details.pull.clone()));
+    }
+    Ok((layout::add_review(f, &groups)?, all))
 }
 
 /// `#12`, `#12 and #14`, `#12, #14 and #15`.
@@ -332,6 +548,53 @@ mod tests {
         assert_eq!(free_slug("pr-12", &[]), "pr-12");
         let taken = vec!["pr-12".to_owned(), "pr-12-2".to_owned()];
         assert_eq!(free_slug("pr-12", &taken), "pr-12-3");
+    }
+
+    #[test]
+    fn picks_say_what_to_add_and_what_to_take_out() {
+        let pick = |project: Option<&str>, repo: &str, number| Pick {
+            project: project.map(str::to_owned),
+            repo: repo.into(),
+            main: PathBuf::new(),
+            host: "github.com".into(),
+            slug: "o/r".into(),
+            number,
+            head_ref: "fix".into(),
+        };
+        let repo = |name: &str, project: Option<&str>| feature::Repo {
+            name: name.into(),
+            main: PathBuf::new(),
+            base: String::new(),
+            base_commit: String::new(),
+            worktree: PathBuf::new(),
+            touched: true,
+            branch: None,
+            project: project.map(str::to_owned),
+        };
+        let pull = |repo: &str, number| pr::PullRef {
+            repo: repo.into(),
+            number,
+            ..Default::default()
+        };
+        let f = Feature {
+            repos: vec![repo("api", None), repo("web", Some("shop"))],
+            kind: feature::Kind::PrReview(vec![pull("api", 12), pull("shop:web", 12)]),
+            ..Feature::default()
+        };
+        // web's #12 stays, api's goes, docs' #3 comes.
+        let picks = [pick(Some("shop"), "web", 12), pick(None, "docs", 3)];
+        let (adds, drops) = pull_changes(&f, &picks).unwrap();
+        assert_eq!(adds, vec![picks[1].clone()]);
+        assert_eq!(drops, vec!["api".to_owned()]);
+        // Nothing new, nothing gone.
+        let same = [pick(None, "api", 12), pick(Some("shop"), "web", 12)];
+        assert_eq!(pull_changes(&f, &same), Ok((Vec::new(), Vec::new())));
+        // Another of the same repository: one step at a time.
+        let swap = [pick(None, "api", 14), pick(Some("shop"), "web", 12)];
+        assert_eq!(
+            pull_changes(&f, &swap),
+            Err("api is on #12: leave it out first, then pick #14".into())
+        );
     }
 
     #[test]

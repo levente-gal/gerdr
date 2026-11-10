@@ -95,7 +95,7 @@ impl Gerdr {
                     .map(|(project, slug, dir, pull)| {
                         scope.spawn(move || {
                             let read = pr::read_remote(dir, pull, now);
-                            (project.clone(), slug.clone(), pull.number, read)
+                            (project.clone(), slug.clone(), pull.repo.clone(), read)
                         })
                     })
                     .collect();
@@ -110,10 +110,10 @@ impl Gerdr {
     /// can, as it is read again in a minute anyway.
     pub(crate) fn pr_reviews_read(
         &mut self,
-        reads: Vec<(String, String, u64, Result<pr::Remote, String>)>,
+        reads: Vec<(String, String, String, Result<pr::Remote, String>)>,
     ) {
         let mut failed = Vec::new();
-        for (project, slug, number, read) in reads {
+        for (project, slug, key, read) in reads {
             let read = match read {
                 Ok(read) => read,
                 Err(why) => {
@@ -129,7 +129,8 @@ impl Gerdr {
             if f.status != Status::Open {
                 continue;
             }
-            let Some(pull) = f.pulls_mut().iter_mut().find(|p| p.number == number) else {
+            // By repository: two can each have a #12.
+            let Some(pull) = f.pulls_mut().iter_mut().find(|p| p.repo == key) else {
                 continue;
             };
             match pull.take_remote(read) {

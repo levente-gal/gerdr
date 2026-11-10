@@ -1703,6 +1703,7 @@ fn new_feature() -> super::NewFeatureView {
             ("Ctrl+Shift+L", "link project"),
             ("Esc", "clear"),
         ],
+        create: super::NEW_FEATURE_BUTTONS[super::CREATE],
     }
 }
 

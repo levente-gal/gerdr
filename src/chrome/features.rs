@@ -48,6 +48,9 @@ const MARGIN: i32 = 40;
 pub const NEW_FEATURE_BUTTONS: [&str; 2] = ["Cancel", "Create"];
 /// What the new feature dialog's field says while empty.
 pub const TITLE_HINT: &str = "What it does, in a few words";
+/// The review dialog's Create button while it changes an open review's
+/// pull requests.
+pub const SAVE_PULLS: &str = "Save";
 /// The review dialog's title field while empty.
 pub const REVIEW_TITLE_HINT: &str = "Its title; empty takes the first pull request's";
 /// How wide a repository row's base branch button is: the same on all, so
@@ -140,6 +143,8 @@ pub struct NewFeatureView {
     pub hover: Option<NewFeatureHit>,
     /// The keys besides the buttons, said left of them.
     pub keys: Vec<(&'static str, &'static str)>,
+    /// Its Create button's label (`NEW_FEATURE_BUTTONS`, `SAVE_PULLS`).
+    pub create: &'static str,
 }
 
 /// What the pointer is over in the new feature dialog.
@@ -5792,7 +5797,9 @@ impl Painter {
                 self.dialog_keys(&mut c, &view.keys, row, end, scale, p);
             }
         }
-        for (i, (rect, label)) in layout.buttons.iter().zip(NEW_FEATURE_BUTTONS).enumerate() {
+        // Labels as short as Create's take its width (`BUTTON_MIN_WIDTH`).
+        let labels = [NEW_FEATURE_BUTTONS[0], view.create];
+        for (i, (rect, label)) in layout.buttons.iter().zip(labels).enumerate() {
             let style = if i == CREATE {
                 ButtonStyle::Primary
             } else {

@@ -352,7 +352,7 @@ pub(crate) struct Busy {
 pub(crate) enum Done {
     /// How the pull requests under review stand on GitHub (see `pr_watch`).
     PrRead {
-        reads: Vec<(String, String, u64, Result<feature::pr::Remote, String>)>,
+        reads: Vec<(String, String, String, Result<feature::pr::Remote, String>)>,
     },
     /// A pull request's review was submitted to GitHub, or not.
     ReviewPosted {
@@ -365,13 +365,13 @@ pub(crate) enum Done {
     PushAccess {
         project: String,
         slug: String,
-        results: Vec<(u64, feature::pr::Access)>,
+        results: Vec<(String, u64, feature::pr::Access)>,
     },
     /// The user's own pull request's commits were pushed, or not: the head.
     PrPushed {
         project: String,
         slug: String,
-        results: Vec<(u64, Result<String, String>)>,
+        results: Vec<(String, u64, Result<String, String>)>,
     },
     /// A pull request's failed runs were asked to run again on GitHub:
     /// how many went, and why the others didn't.
@@ -389,6 +389,13 @@ pub(crate) enum Done {
         results: Vec<(String, Result<feature::layout::MovedPr, String>)>,
     },
     /// A pull request's review was made, or not (see `pr_review`).
+    /// Pull requests were added to a review, or not; `drops` go next.
+    ReviewAdded {
+        project: String,
+        slug: String,
+        drops: Vec<String>,
+        result: Result<Box<crate::pr_review::Added>, String>,
+    },
     /// The open pull requests of a repository of the review dialog of
     /// `serial` were listed, or not.
     OpenPulls {
@@ -867,6 +874,9 @@ pub struct NewFeatureDialog {
     query: TextField,
     /// It picks pull requests to review, not repositories to change.
     pub review: Option<Reviewing>,
+    /// Projects to link as soon as the store's others are listed: those
+    /// the review it changes spans.
+    link_first: Vec<String>,
 }
 
 /// The new feature dialog picking pull requests to review together: one per
@@ -880,6 +890,8 @@ pub struct Reviewing {
     /// What picking did besides, said where the root is: the same branch
     /// picked in other repositories.
     note: Option<String>,
+    /// The open review it changes the pull requests of: its slug and title.
+    into: Option<(String, String)>,
 }
 
 /// What the review dialog knows of a repository's open pull requests.
@@ -890,6 +902,10 @@ struct RepoPulls {
     picked: Option<u64>,
     /// The user picked or cleared it: same-branch suggestions leave it be.
     chosen: bool,
+    /// Its list was asked for.
+    asked: bool,
+    /// The one the review holds, as it has it, until listed.
+    known: Option<feature::pr::OpenPull>,
 }
 
 impl RepoPulls {
@@ -902,7 +918,8 @@ impl RepoPulls {
 
     fn picked_pull(&self) -> Option<&feature::pr::OpenPull> {
         let n = self.picked?;
-        self.listed().iter().find(|p| p.number == n)
+        (self.listed().iter().find(|p| p.number == n))
+            .or(self.known.as_ref().filter(|p| p.number == n))
     }
 }
 
@@ -953,6 +970,8 @@ pub enum DialogOutcome {
         root: Root,
         links: Vec<LinkSpec>,
         picks: Vec<crate::pr_review::Pick>,
+        /// The open review whose pull requests become these, by slug.
+        into: Option<String>,
     },
 }
 
@@ -975,6 +994,7 @@ impl NewFeatureDialog {
             choosing: None,
             query: TextField::default(),
             review: None,
+            link_first: Vec::new(),
         }
     }
 
@@ -1215,7 +1235,7 @@ impl NewFeatureDialog {
             return Vec::new();
         };
         let new: Vec<(RepoKey, PathBuf)> = (keys.into_iter())
-            .filter(|key| !review.pulls.contains_key(key))
+            .filter(|key| !review.pulls.get(key).is_some_and(|e| e.asked))
             .filter_map(|key| {
                 let main = self.repo_found(&key)?.main.clone();
                 Some((key, main))
@@ -1223,7 +1243,7 @@ impl NewFeatureDialog {
             .collect();
         if let Some(review) = self.review.as_mut() {
             for (key, _) in &new {
-                review.pulls.insert(key.clone(), RepoPulls::default());
+                review.pulls.entry(key.clone()).or_default().asked = true;
             }
         }
         new
@@ -1327,6 +1347,39 @@ impl NewFeatureDialog {
         }
     }
 
+    /// Change the pull requests of review `f`: each it holds picked, the
+    /// projects it spans linked once listed.
+    fn edit(&mut self, f: &Feature) {
+        self.link_first = f.links.iter().map(|l| l.project.clone()).collect();
+        let Some(review) = self.review.as_mut() else {
+            return;
+        };
+        review.into = Some((f.slug.clone(), f.title.clone()));
+        for repo in &f.repos {
+            let Some(pull) = f.pull_of(&repo.key()) else {
+                continue;
+            };
+            let known = feature::pr::OpenPull {
+                number: pull.number,
+                title: String::new(),
+                head_ref: pull.head_ref.clone(),
+                author: pull.author.clone(),
+                draft: false,
+                url: pull.url.clone(),
+                mine: pull.mine,
+            };
+            let entry = RepoPulls {
+                picked: Some(pull.number),
+                chosen: true,
+                known: Some(known),
+                ..RepoPulls::default()
+            };
+            review
+                .pulls
+                .insert((repo.project.clone(), repo.name.clone()), entry);
+        }
+    }
+
     /// What reviewing would do, or why it can't, as a sentence.
     fn create_review(&self) -> Result<DialogOutcome, String> {
         let root = match &self.root {
@@ -1377,6 +1430,7 @@ impl NewFeatureDialog {
             root: root.clone(),
             links: self.links(),
             picks,
+            into: review.into.as_ref().map(|(slug, _)| slug.clone()),
         })
     }
 
@@ -2018,6 +2072,9 @@ pub enum PanelOutcome {
     /// Someone else's pull request's review: fix it here, after asking, or
     /// comment on it again (see `pr_post::toggle_fix_here`).
     FixHere,
+    /// Add pull requests to the review, or leave some out (see
+    /// `Gerdr::open_review_edit`).
+    EditPulls,
     /// Ask an agent to write the feature's summary again.
     WriteSummary,
     /// Undo step `.1` that shipping ran for repository `.0`, after asking.
@@ -3690,6 +3747,7 @@ fn action_hint(action: &PanelOutcome) -> &'static str {
         }
         PanelOutcome::PushPr => "push\u{2026}",
         PanelOutcome::FixHere => "fix here or comment",
+        PanelOutcome::EditPulls => "change pull requests",
         PanelOutcome::OpenPr(_) => "open on GitHub",
         PanelOutcome::FinishReview => "finish\u{2026}",
         PanelOutcome::Untick(_) => "reopen",
@@ -5483,6 +5541,9 @@ impl FeaturePanel {
             {
                 return Some(PanelOutcome::FixHere);
             }
+            Keysym::n | Keysym::N if mods.alt && !ctrl && !mods.shift && changes_pulls(feature) => {
+                return Some(PanelOutcome::EditPulls);
+            }
             Keysym::o | Keysym::O if ctrl && mods.shift => {
                 return row_page(feature, row)
                     .or_else(|| {
@@ -6903,6 +6964,15 @@ impl Gerdr {
                     dialog.pulls_listed(&repo, result);
                 }
             }
+            Done::ReviewAdded {
+                project,
+                slug,
+                drops,
+                result,
+            } => {
+                self.unbusy(&project, &slug, Job::Link);
+                self.review_added(&project, &slug, drops, result);
+            }
             Done::ReviewPick {
                 project,
                 slug,
@@ -8118,6 +8188,29 @@ impl Gerdr {
         self.open_dialog(from, Some((String::new(), String::new(), 0)));
     }
 
+    /// Open the review dialog on the pull requests review `slug` holds, to
+    /// add or leave out some (see `change_pulls`).
+    pub(crate) fn open_review_edit(&mut self, project: &str, slug: &str) {
+        let Some(f) = self.feature(project, slug).cloned() else {
+            return;
+        };
+        if let Some(why) = self.review_refusal(&f) {
+            return self.show_warning(why);
+        }
+        if self.project.as_deref() != Some(project) {
+            return;
+        }
+        self.open_dialog(
+            Some(f.root.clone()),
+            Some((String::new(), String::new(), 0)),
+        );
+        let Some(dialog) = self.features.dialog.as_mut() else {
+            return;
+        };
+        dialog.edit(&f);
+        self.find_others();
+    }
+
     /// The folder the dialog opens from: workspace `at`'s, else the active
     /// one's, else the project's first workspace's.
     fn dialog_from(&self, at: Option<usize>) -> Option<PathBuf> {
@@ -8402,7 +8495,7 @@ impl Gerdr {
         let Some(dialog) = self.features.dialog.as_ref() else {
             return;
         };
-        if !dialog.picking || !dialog.others.is_empty() {
+        if (!dialog.picking && dialog.link_first.is_empty()) || !dialog.others.is_empty() {
             return;
         }
         let (home, serial) = (dialog.project.clone(), dialog.serial);
@@ -8429,12 +8522,13 @@ impl Gerdr {
                 project: p.id.clone(),
                 name: p.name.clone(),
                 root,
-                linked: false,
+                linked: dialog.link_first.contains(&p.id),
                 touched: Vec::new(),
             });
         }
         if let Some(dialog) = self.features.dialog.as_mut() {
             dialog.others = others;
+            dialog.link_first.clear();
         }
         for (project, from, dirs, theirs, ignore, bases) in finds {
             self.feature_work(None, move |_| Done::FoundOther {
@@ -8541,10 +8635,18 @@ impl Gerdr {
                 links,
             } => (title, root, touched, links),
             DialogOutcome::Review {
+                root,
+                links,
+                picks,
+                into: Some(slug),
+                ..
+            } => return self.change_pulls(dialog.project, slug, root, links, picks),
+            DialogOutcome::Review {
                 title,
                 root,
                 links,
                 picks,
+                into: None,
             } => return self.start_review_of(dialog.project, root, links, picks, title),
         };
         let project = dialog.project;
@@ -9446,6 +9548,7 @@ impl Gerdr {
             PanelOutcome::SubmitReview(event) => self.ask_submit_review(&project, &slug, event),
             PanelOutcome::PushPr => self.ask_push_pr(&project, &slug),
             PanelOutcome::FixHere => self.toggle_fix_here(&project, &slug),
+            PanelOutcome::EditPulls => self.open_review_edit(&project, &slug),
             PanelOutcome::FinishReview => self.ask_finish_pr_review(&project, &slug),
             PanelOutcome::WriteSummary => self.write_ship_summary(&project, &slug, true),
             PanelOutcome::UndoShip(repo, step) => self.ask_undo_ship(&project, &slug, &repo, step),
@@ -11626,6 +11729,12 @@ fn still_checked(feature: &Feature, patch: Option<&str>) -> Result<(), String> {
 
 /// Drop repository `key` from `feature`, and the link it was the last of.
 fn drop_repo(feature: &mut Feature, key: &str, now: u64) {
+    // A review's pull request goes with its repository.
+    // An unnamed one, of a record from before, is its first repository's.
+    let first = feature.repos.first().is_some_and(|r| r.key() == key);
+    if let feature::Kind::PrReview(pulls) = &mut feature.kind {
+        pulls.retain(|p| !(p.repo == key || p.repo.is_empty() && first));
+    }
     if let Some(repo) = feature.repo(key).cloned() {
         feature.note_removed(repo.project, repo.name, now);
     }
@@ -11791,10 +11900,15 @@ fn new_feature_view(dialog: &NewFeatureDialog, project: String) -> NewFeatureVie
         let entry = pulls_of(&key);
         let pull = entry.and_then(RepoPulls::picked_pull);
         let place = match (pull, entry.and_then(|e| e.list.as_ref())) {
-            (Some(p), _) => match p.author.is_empty() {
-                true => p.title.clone(),
-                false => format!("{} \u{b7} @{}", p.title, p.author),
-            },
+            (Some(p), _) => {
+                let by = (!p.author.is_empty()).then(|| format!("@{}", p.author));
+                let parts: Vec<String> = (!p.title.is_empty())
+                    .then(|| p.title.clone())
+                    .into_iter()
+                    .chain(by)
+                    .collect();
+                parts.join(" \u{b7} ")
+            }
             (None, None) => "listing pull requests\u{2026}".to_owned(),
             (None, Some(Err(why))) => format!("can't list: {why}"),
             (None, Some(Ok(all))) if all.is_empty() => "no open pull request".to_owned(),
@@ -11938,8 +12052,16 @@ fn new_feature_view(dialog: &NewFeatureDialog, project: String) -> NewFeatureVie
         ("Esc", "close")
     });
     let heading = match review {
+        Some(Reviewing {
+            into: Some((_, title)),
+            ..
+        }) => format!("Pull requests of \u{201c}{title}\u{201d}"),
         Some(_) => format!("Review pull requests in \u{201c}{project}\u{201d}"),
         None => format!("New feature in \u{201c}{project}\u{201d}"),
+    };
+    let create = match review.and_then(|r| r.into.as_ref()) {
+        Some(_) => chrome::SAVE_PULLS,
+        None => chrome::NEW_FEATURE_BUTTONS[chrome::CREATE],
     };
     NewFeatureView {
         heading,
@@ -11966,6 +12088,7 @@ fn new_feature_view(dialog: &NewFeatureDialog, project: String) -> NewFeatureVie
         error: dialog.error.clone(),
         hover: dialog.hover,
         keys,
+        create,
     }
 }
 
@@ -12705,6 +12828,9 @@ fn with_pull_actions(
         let label = if fixing { COMMENT_INSTEAD } else { FIX_HERE };
         more.push((label, ButtonStyle::Plain, PanelOutcome::FixHere));
     }
+    if changes_pulls(feature) {
+        more.push((EDIT_PULLS, ButtonStyle::Plain, PanelOutcome::EditPulls));
+    }
     for p in feature.pulls() {
         more.push((
             OPEN_PULL,
@@ -12865,6 +12991,19 @@ fn ci_sections(
 
 /// The label of the button opening a pull request's review's pull request.
 const OPEN_PULL: &str = "Open pull request";
+/// The label of the button adding pull requests to a review, or leaving
+/// some out.
+const EDIT_PULLS: &str = "Pull requests\u{2026}";
+
+/// Whether review `feature` can add or leave out pull requests now: open
+/// here, not shipped, and not all ended.
+fn changes_pulls(feature: &Feature) -> bool {
+    !feature.pulls().is_empty()
+        && feature.pr_ended().is_none()
+        && feature.status == Status::Open
+        && feature.writer.is_none()
+        && linkable(feature)
+}
 /// The labels of the button fixing someone else's pull request here, and
 /// going back to commenting on it.
 const FIX_HERE: &str = "Fix here\u{2026}";
@@ -12897,6 +13036,10 @@ fn pull_tip(feature: &Feature, stage: Stage, page: &chrome::StagePage, i: usize)
             "Fix it here and push the fixes to its branch, instead of commenting (Alt+W)".to_owned()
         }
         COMMENT_INSTEAD => "Comment on it on GitHub instead of fixing it here (Alt+W)".to_owned(),
+        EDIT_PULLS => {
+            "Add pull requests of other repositories to the review, or leave some out (Alt+N)"
+                .to_owned()
+        }
         _ => "Finish the review: nothing is posted (Enter)".to_owned(),
     })
 }
@@ -12957,9 +13100,10 @@ fn pull_card(
     let buttons = (actions.iter().enumerate())
         .filter(|(_, (_, o))| match o {
             PanelOutcome::OpenPr(url) => *url == pull.url,
-            PanelOutcome::UpdatePrHead | PanelOutcome::FinishReview | PanelOutcome::FixHere => {
-                first
-            }
+            PanelOutcome::UpdatePrHead
+            | PanelOutcome::FinishReview
+            | PanelOutcome::FixHere
+            | PanelOutcome::EditPulls => first,
             _ => false,
         })
         .map(|(i, _)| i)
@@ -15239,6 +15383,10 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 7] = [
                 "reviewing someone else's pull request: fix it here and push the fixes from Ship, asking first, or comment on it again",
             ),
             (
+                "Alt+N",
+                "reviewing pull requests: add those of other repositories, or leave some out, in the review dialog",
+            ),
+            (
                 "Ctrl+Enter / Ctrl+Shift+Enter",
                 "reviewing someone else's pull request, on Ship's page: approve it, or request changes, after asking (Enter comments, or approves with nothing to post; Ctrl+E edits the review's text)",
             ),
@@ -15980,6 +16128,9 @@ fn writers_tab_hints(
                 };
                 hints.push(hint("Alt+W", what));
             }
+            if changes_pulls(feature) {
+                hints.push(hint("Alt+N", "pull requests\u{2026}"));
+            }
             if offers_setup(feature, stage) {
                 if can_set_up(feature, ctx) {
                     hints.push(hint("Ctrl+Shift+U", "set up"));
@@ -16692,6 +16843,37 @@ pub(crate) mod tests {
                 .as_deref()
                 .is_some_and(|e| e.starts_with("Pick a pull request"))
         );
+    }
+
+    #[test]
+    fn a_review_changes_its_pull_requests_in_the_dialog() {
+        let mut f = feature("pr-12", vec![repo("api", true)], 4);
+        f.title = "#12 Fix".into();
+        f.kind = feature::Kind::PrReview(vec![feature::pr::PullRef {
+            repo: "api".into(),
+            number: 12,
+            author: "bob".into(),
+            head_ref: "fix".into(),
+            url: "https://github.com/o/r/pull/12".into(),
+            ..Default::default()
+        }]);
+        let mut d = NewFeatureDialog::new("acme".into(), 1, "/work".into());
+        d.review = Some(Reviewing::default());
+        d.edit(&f);
+        d.found(Ok(root(&["api", "web"])));
+        // Picked before its list is in, and listed all the same.
+        assert_eq!(d.unlisted().len(), 2);
+        let view = new_feature_view(&d, "Acme".into());
+        assert_eq!(view.heading, "Pull requests of \u{201c}#12 Fix\u{201d}");
+        assert_eq!(view.create, chrome::SAVE_PULLS);
+        assert_eq!(view.repos[0].place, "@bob");
+        assert_eq!(view.repos[0].base.as_deref(), Some("#12"));
+        let Some(DialogOutcome::Review { picks, into, .. }) = dkey(&mut d, key(Keysym::Return))
+        else {
+            panic!("a change")
+        };
+        assert_eq!(into.as_deref(), Some("pr-12"));
+        assert_eq!(picks.iter().map(|p| p.number).collect::<Vec<_>>(), vec![12]);
     }
 
     /// A feature at Plan with an agent at work, written on another machine.
@@ -26779,7 +26961,7 @@ mod pr_page_tests {
         let page = page_of(&f, Stage::Verify);
         let (state, buttons) = card(&page);
         assert_eq!(state.text, "by @bob · fix into main · at abc1234");
-        assert_eq!(buttons, vec![FIX_HERE, OPEN_PULL]);
+        assert_eq!(buttons, vec![FIX_HERE, EDIT_PULLS, OPEN_PULL]);
         let ctx = RowCtx::default();
         assert_ne!(
             page_enter(&f, Stage::Verify, ctx),
@@ -26816,7 +26998,10 @@ mod pr_page_tests {
         assert_eq!(
             cards,
             vec![
-                ("Pull request #12 \u{b7} api", vec![FIX_HERE, OPEN_PULL]),
+                (
+                    "Pull request #12 \u{b7} api",
+                    vec![FIX_HERE, EDIT_PULLS, OPEN_PULL]
+                ),
                 ("Pull request #13 \u{b7} web", vec![OPEN_PULL]),
             ]
         );
@@ -26854,14 +27039,14 @@ mod pr_page_tests {
             "{}",
             state.text
         );
-        assert_eq!(buttons, vec![UPDATE_HEAD, FIX_HERE, OPEN_PULL]);
+        assert_eq!(buttons, vec![UPDATE_HEAD, FIX_HERE, EDIT_PULLS, OPEN_PULL]);
         assert_eq!(
             pull_tip(&f, Stage::Verify, &page, 0).as_deref(),
             Some("Fetch the new commits and review them, from Verify on (Enter)")
         );
         // A done stage's page only says so: Enter there goes elsewhere.
         let page = page_of(&f, Stage::Build);
-        assert_eq!(card(&page).1, vec![FIX_HERE, OPEN_PULL]);
+        assert_eq!(card(&page).1, vec![FIX_HERE, EDIT_PULLS, OPEN_PULL]);
         assert_eq!(
             feature_agents_gate(&f),
             Some((
@@ -27216,7 +27401,7 @@ mod pr_page_tests {
         let page = page_of(&f, Stage::Verify);
         let (state, buttons) = card(&page);
         assert!(state.text.ends_with("fixing here"), "{}", state.text);
-        assert_eq!(buttons, vec![COMMENT_INSTEAD, OPEN_PULL]);
+        assert_eq!(buttons, vec![COMMENT_INSTEAD, EDIT_PULLS, OPEN_PULL]);
         // Fixed here: Ship pushes, then finishes without a review.
         assert_eq!(
             page_enter(&f, Stage::Ship, RowCtx::default()),

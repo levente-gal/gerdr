@@ -383,7 +383,7 @@ impl Gerdr {
         let (project, slug) = (project.to_owned(), slug.to_owned());
         self.feature_work(Some(busy), move |_| Done::PrPushed {
             results: (pushes.iter())
-                .map(|(repo, pull)| (pull.number, push(repo, pull)))
+                .map(|(repo, pull)| (pull.repo.clone(), pull.number, push(repo, pull)))
                 .collect(),
             project,
             slug,
@@ -396,11 +396,11 @@ impl Gerdr {
         &mut self,
         project: &str,
         slug: &str,
-        results: Vec<(u64, Result<String, String>)>,
+        results: Vec<(String, u64, Result<String, String>)>,
     ) {
         self.unbusy(project, slug, Job::PrHead);
         let mut done = Vec::new();
-        for (number, result) in results {
+        for (key, number, result) in results {
             let head = match result {
                 Ok(head) => head,
                 Err(why) => {
@@ -412,7 +412,7 @@ impl Gerdr {
             let Some(f) = self.feature_mut(project, slug) else {
                 return;
             };
-            let Some(pull) = f.pulls_mut().iter_mut().find(|p| p.number == number) else {
+            let Some(pull) = f.pulls_mut().iter_mut().find(|p| p.repo == key) else {
                 continue;
             };
             let base = pull.base_ref.clone();
@@ -474,7 +474,13 @@ impl Gerdr {
         let (project, slug) = (project.to_owned(), slug.to_owned());
         self.feature_work(Some(busy), move |_| Done::PushAccess {
             results: (asks.iter())
-                .map(|(dir, pull)| (pull.number, feature::pr::push_access(dir, pull)))
+                .map(|(dir, pull)| {
+                    (
+                        pull.repo.clone(),
+                        pull.number,
+                        feature::pr::push_access(dir, pull),
+                    )
+                })
                 .collect(),
             project,
             slug,
@@ -487,13 +493,13 @@ impl Gerdr {
         &mut self,
         project: &str,
         slug: &str,
-        results: Vec<(u64, feature::pr::Access)>,
+        results: Vec<(String, u64, feature::pr::Access)>,
     ) {
         self.unbusy(project, slug, Job::PrHead);
         let mut head_repos = Vec::new();
-        for (number, result) in results {
+        for (key, number, result) in results {
             match result {
-                Ok(Ok(head_repo)) => head_repos.push((number, head_repo)),
+                Ok(Ok(head_repo)) => head_repos.push((key, head_repo)),
                 Ok(Err(why)) => {
                     return self.show_warning(format!("Can't fix #{number} here: {why}"));
                 }
@@ -509,16 +515,19 @@ impl Gerdr {
             return;
         };
         let lines: Vec<String> = (head_repos.iter())
-            .filter_map(|(n, at)| {
-                let pull = f.pulls().iter().find(|p| p.number == *n)?;
-                Some(format!("#{n} to {} on {at}", pull.head_ref))
+            .filter_map(|(key, at)| {
+                let pull = f.pulls().iter().find(|p| p.repo == *key)?;
+                Some(format!("#{} to {} on {at}", pull.number, pull.head_ref))
             })
             .collect();
         let body = format!(
             "Its code runs here: setup, its checks, and an agent fixing it\nIts fixes go out when you push them from Ship:\n{}",
             lines.join("\n")
         );
-        let numbers: Vec<String> = head_repos.iter().map(|(n, _)| format!("#{n}")).collect();
+        let numbers: Vec<String> = (head_repos.iter())
+            .filter_map(|(key, _)| f.pulls().iter().find(|p| p.repo == *key))
+            .map(|p| format!("#{}", p.number))
+            .collect();
         let then = Then::FixHere {
             project: project.to_owned(),
             slug: slug.to_owned(),
@@ -533,12 +542,12 @@ impl Gerdr {
     }
 
     /// Review `slug` fixes its pull requests here (`head_repos` their
-    /// branches' repositories, by number), or comments again (`None`).
+    /// branches' repositories, by `PullRef::repo`), or comments again (`None`).
     pub(crate) fn set_fix_here(
         &mut self,
         project: &str,
         slug: &str,
-        head_repos: Option<Vec<(u64, String)>>,
+        head_repos: Option<Vec<(String, String)>>,
     ) {
         let Some(f) = self.feature_mut(project, slug) else {
             return;
@@ -547,7 +556,7 @@ impl Gerdr {
         // The switch is the review's: every pull request of someone else's.
         for pull in f.pulls_mut().iter_mut().filter(|p| !p.own()) {
             pull.fix_here = on;
-            let to = (head_repos.iter().flatten()).find(|(n, _)| *n == pull.number);
+            let to = (head_repos.iter().flatten()).find(|(key, _)| *key == pull.repo);
             if let Some((_, head_repo)) = to {
                 pull.head_repo = head_repo.clone();
             }
