@@ -994,6 +994,22 @@ impl Gerdr {
         self.query_zoxide();
     }
 
+    /// Open the switcher on the shown project's feature rows (New feature,
+    /// and the shipped features whose worktrees can come back), when it has
+    /// such a shipped one: what opening its features offers with none open.
+    /// Whether it opened.
+    pub fn open_feature_picker(&mut self) -> bool {
+        let items = self.feature_entries();
+        if !(items.iter()).any(|item| matches!(item.target, Target::RestoreWorktrees(_))) {
+            return false;
+        }
+        self.make_room_for_switcher();
+        let mut switcher = Switcher::new(self.weighed(items), false, Place::Tab);
+        switcher.set_room(self.switcher_room());
+        self.switcher = Some(switcher);
+        true
+    }
+
     /// Open the switcher as the agent picker: a row per installed agent
     /// CLI, to start in a new tab of workspace `w`.
     pub fn open_agent_picker(&mut self, w: usize) {
@@ -1830,6 +1846,8 @@ impl Gerdr {
                 Target::RaiseInotifyLimit,
             ));
         }
+        // A shipped feature whose worktrees went is found here too.
+        items.extend(self.feature_entries());
         items.extend(project_file_items(self.project.as_deref(), home.as_deref()));
         self.weighed(items)
     }

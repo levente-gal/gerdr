@@ -4016,11 +4016,29 @@ fn check_lines(
         (false, false, false) => line("Ready to ship".into(), CheckTone::Ready),
         (false, false, true) => line(steps_left(planned.steps()), CheckTone::Ready),
     };
+    // Ready but for origin's base: its new commits conflict, so a pull
+    // request would, and so would its base once pulled.
+    let conflicts: Vec<CheckLine> = (check.repos.iter())
+        .filter(|_| !planned.nothing && !planned.all_done)
+        .filter(|repo| !repo.merged)
+        .filter_map(|repo| {
+            let state = probe?.bases.get(&repo.key)?;
+            let new = count_of(state.behind, "new commit", "new commits");
+            (!state.conflicts.is_empty()).then(|| {
+                let text = format!(
+                    "{}: {} has {new} that conflict: take them in first",
+                    repo.key, state.onto
+                );
+                line(text, CheckTone::Blocker)
+            })
+        })
+        .collect();
+    let first: Vec<CheckLine> = match conflicts.is_empty() {
+        true => vec![first],
+        false => conflicts,
+    };
     let notes = check.notes.iter().map(|n| line(n.clone(), CheckTone::Note));
-    capped(
-        std::iter::once(first).chain(notes).collect(),
-        CheckTone::Note,
-    )
+    capped(first.into_iter().chain(notes).collect(), CheckTone::Note)
 }
 
 /// What Ship's mark and the history say of a feature finished unshipped.
@@ -4501,6 +4519,23 @@ fn after_undo_words(step: feature::AfterStep) -> &'static str {
         feature::AfterStep::Close => "bring back its tabs",
         feature::AfterStep::Remove => "restore the worktrees",
     }
+}
+
+/// What the Ship confirm says follows shipping `feature`, as its Afterwards
+/// ticks have it (`removable`: what is ticked merges everything); none when
+/// nothing does, or it is shipped already and ships more.
+fn ship_after_line(feature: &Feature, removable: bool) -> Option<String> {
+    if feature.status != Status::Open {
+        return None;
+    }
+    let plan = &feature.ship_plan;
+    if plan.remove_worktrees && removable {
+        return Some(match feature.touched().count() > 1 {
+            true => "Then its worktrees and branches go".to_owned(),
+            false => "Then its worktree and branch go".to_owned(),
+        });
+    }
+    (!plan.keep_workspace).then(|| "Then its workspace closes".to_owned())
 }
 
 /// Why the workspace's tick can't go with the worktrees' on.
@@ -9028,6 +9063,8 @@ impl Gerdr {
         let last = self.features.shown.get(&project).map(String::as_str);
         match pick_feature(&slugs, open, last) {
             Some(slug) => self.open_feature(&project, &slug),
+            // None open: a shipped one whose worktrees went can come back.
+            None if self.open_feature_picker() => {}
             None => self.open_new_feature(None),
         }
     }
@@ -10297,7 +10334,10 @@ impl Gerdr {
             )),
             ShipAsk::AllRan => self.ship_all_ran(project, slug),
             ShipAsk::Ready(asked) => {
-                let steps: Vec<String> = asked.actions.iter().map(Action::label).collect();
+                let mut steps: Vec<String> = asked.actions.iter().map(Action::label).collect();
+                let check = probe.and_then(|p| p.ship.as_ref());
+                let removing = check.is_some_and(|c| ship::removable(&feature, c));
+                steps.extend(ship_after_line(&feature, removing));
                 self.features.asked.insert(key, asked);
                 self.ask_ship(project.to_owned(), slug.to_owned(), &title, &branch, &steps);
             }
@@ -12726,6 +12766,9 @@ fn current_line(feature: &Feature, stage: Stage, state: &LineState, now: u64) ->
                 "blocked".into()
             } else if planned.as_ref().is_some_and(|p| p.nothing) {
                 "nothing ticked".into()
+            } else if (state.probe).is_some_and(|p| p.bases.values().any(|b| !b.conflicts.is_empty()))
+            {
+                "base conflicts".into()
             } else if planned.is_some() {
                 "ready to ship".into()
             } else {
@@ -21464,6 +21507,23 @@ pub(crate) mod tests {
         assert!(!undoes_merged(&other, Some(&p)));
     }
 
+    #[test]
+    fn the_ship_confirm_says_what_follows_shipping() {
+        let mut f = feature("s", vec![repo("api", true)], 8);
+        let said = |f: &Feature, removable| ship_after_line(f, removable);
+        assert_eq!(said(&f, true).as_deref(), Some("Then its workspace closes"));
+        f.ship_plan.remove_worktrees = true;
+        assert_eq!(said(&f, true).as_deref(), Some("Then its worktree and branch go"));
+        // What is ticked no longer merges everything: they stay.
+        assert_eq!(said(&f, false).as_deref(), Some("Then its workspace closes"));
+        f.ship_plan = Default::default();
+        f.ship_plan.keep_workspace = true;
+        assert_eq!(said(&f, true), None);
+        f.ship_plan.keep_workspace = false;
+        f.status = Status::Done;
+        assert_eq!(said(&f, true), None);
+    }
+
     /// A check finding `repos` to ship through origin, each with commits.
     fn check(blockers: &[&str], repos: &[&str], notes: &[&str]) -> Option<ShipCheck> {
         let repo = |key: &&str| ship::RepoCheck {
@@ -23754,6 +23814,25 @@ pub(crate) mod tests {
             texts(&check_lines(&f, Some(&ready), false, 2_060)),
             [
                 ("Ready to ship", CheckTone::Ready),
+                ("api pushes to origin", CheckTone::Note)
+            ]
+        );
+        // Origin's base moved on in a way that conflicts: not ready.
+        let mut behind = ready.clone();
+        let state = ship::BaseState {
+            onto: "origin/main".into(),
+            behind: 8,
+            conflicts: vec!["export.py".into()],
+            ..Default::default()
+        };
+        behind.bases.insert("api".into(), state);
+        assert_eq!(
+            texts(&check_lines(&f, Some(&behind), false, 2_060)),
+            [
+                (
+                    "api: origin/main has 8 new commits that conflict: take them in first",
+                    CheckTone::Blocker
+                ),
                 ("api pushes to origin", CheckTone::Note)
             ]
         );
