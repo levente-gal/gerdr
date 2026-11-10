@@ -25,7 +25,7 @@ use std::{
 };
 
 use super::{Feature, hook, store};
-use crate::{desktop::shell_quote, machines};
+use crate::{desktop::shell_quote, git_ops, machines};
 
 /// How long pushing or fetching code may take: a first push sends all of a
 /// repository's history.
@@ -322,7 +322,7 @@ pub fn parse_heads(text: &str) -> BTreeMap<String, (String, String)> {
 /// The script placing a worktree here at commit ref `name`, for a look at a
 /// feature written on another machine: it is on no branch, as nothing is to be
 /// committed in it. Changes made in it are the user's: what's in their way ends
-/// it, saying `INWAY <folder>`.
+/// it, saying `INWAY <folder>` and git's lines, each as `WHY <line>` (see `in_way`).
 pub fn view_worktree_script(main: &Path, worktree: &Path, name: &str) -> String {
     let main = shell_quote(&main.to_string_lossy());
     let worktree = shell_quote(&worktree.to_string_lossy());
@@ -339,7 +339,7 @@ else
   h=$(git -C "$w" rev-parse -q --verify HEAD)
   t=$(git -C "$m" rev-parse -q --verify "$r")
   if [ "$h" != "$t" ]; then
-    git -C "$w" checkout -q --detach "$t" || {{ echo "INWAY $w"; exit 6; }}
+    o=$(git -C "$w" checkout -q --detach "$t" 2>&1) || {{ echo "INWAY $w"; printf '%s\n' "$o" | sed 's/^/WHY /'; exit 6; }}
   fi
 fi
 "#
@@ -364,12 +364,35 @@ pub fn local_script(script: &str, cancel: &AtomicBool) -> Result<String, Trouble
             "{folder} holds something else: name a folder for it under machine_folders in the project's file"
         )));
     }
-    if let Some(folder) = said.lines().find_map(|l| l.strip_prefix("INWAY ")) {
-        return Err(Trouble::Work(format!(
-            "changes in {folder} are in the way of what came"
-        )));
+    if let Some(why) = in_way(&said) {
+        return Err(Trouble::Work(why));
     }
     Err(trouble("A command here failed", &out))
+}
+
+/// What a script that couldn't put a worktree at what came says of it: the
+/// folder after `INWAY `, then git's lines, each after `WHY `. A lock git left
+/// is named, for the user to delete when no git runs there; changes in the
+/// way are said as that; anything else in git's words.
+pub fn in_way(said: &str) -> Option<String> {
+    let folder = said.lines().find_map(|l| l.strip_prefix("INWAY "))?;
+    let git = (said.lines())
+        .filter_map(|l| l.strip_prefix("WHY "))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if git_ops::classify(&git, "") == git_ops::Failure::Locked {
+        return Some(match git.split('\'').find(|part| part.ends_with(".lock")) {
+            Some(lock) => format!(
+                "A git lock file is in the way in {folder}: if no git command runs there, delete {lock} and try again"
+            ),
+            None => format!("Another git command holds a lock in {folder}: try again once it is done"),
+        });
+    }
+    let changes = ["would be overwritten", "Your local changes", "untracked working tree files"];
+    if git.trim().is_empty() || changes.iter().any(|c| git.contains(c)) {
+        return Some(format!("changes in {folder} are in the way of what came"));
+    }
+    Some(format!("{folder} couldn't be put at what came: {}", git_ops::why(&git, "")))
 }
 
 /// The script setting up the worktrees there once the code is pushed: each on
@@ -632,6 +655,22 @@ pub fn unignored_script(worktree: &str, items: &[String]) -> String {
     script
 }
 
+/// The script listing the ignored files of worktree `worktree` there that a
+/// setup copies from a main worktree, a line each: files and links of up to
+/// `max` bytes, not logs or bytecode. Folders aren't: environments in them
+/// are built for each machine. Nothing, with no such worktree.
+pub fn ignored_files_script(worktree: &str, max: u64) -> String {
+    format!(
+        r#"cd {} 2>/dev/null || exit 0
+git -c core.quotePath=false ls-files --others --ignored --exclude-standard --directory | while IFS= read -r f; do
+  case "$f" in */|*.log|*.pyc|\"*) continue ;; esac
+  if [ -L "$f" ] || {{ [ -f "$f" ] && [ "$(($(wc -c <"$f")))" -le {max} ]; }}; then printf '%s\n' "$f"; fi
+done
+"#,
+        shell_quote(worktree)
+    )
+}
+
 /// A worktree there, as `status_script` says it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Standing {
@@ -691,13 +730,14 @@ fn trouble(what: &str, out: &std::process::Output) -> Trouble {
 /// What of a feature's folder isn't its files, and stays on each machine: its
 /// record, one that moved or lost and what was kept beside that, and what its
 /// gerdrs say to each other.
-const RECORDS: [&str; 10] = [
+const RECORDS: [&str; 11] = [
     store::FILE,
     "feature.json.*",
     "*.aside-*",
     super::lease::REQUEST,
     super::lease::ANSWER,
     super::lease::HANDED_TO,
+    super::lease::TOLD,
     super::lease::SANDBOX_ASK,
     super::lease::SANDBOX_ANSWER,
     super::lease::SANDBOX_TOLD,
@@ -1232,6 +1272,39 @@ impl Reach {
         Err(trouble("Couldn't copy ignored files there", &out))
     }
 
+    /// Copy `items` (paths inside the worktree `there`) into the worktree
+    /// `local`, leaving what is here already: `push_ignored` the other way.
+    pub fn pull_ignored(
+        &self,
+        there: &str,
+        local: &Path,
+        items: &[String],
+        cancel: &AtomicBool,
+    ) -> Result<(), Trouble> {
+        let mut rsync = Command::new("rsync");
+        rsync
+            .args(["-rlpts", "--chmod=go-rwx", "--ignore-existing"])
+            .args(["--from0", "--files-from=-"])
+            .arg("-e")
+            .arg(self.ssh_line())
+            .arg(self.rsync_path(there))
+            .arg(format!("{}/", local.display()));
+        let list = items.join("\0");
+        let out = match machines::run_with_input(rsync, list.as_bytes(), DATA, cancel) {
+            Ok(out) => out,
+            Err(machines::Failure::NoSsh) => {
+                return Err(Trouble::Work(
+                    "rsync isn't installed on this machine".into(),
+                ));
+            }
+            Err(failure) => return Err(Trouble::Link(failure.why())),
+        };
+        if out.status.success() {
+            return Ok(());
+        }
+        Err(trouble("Couldn't copy ignored files here", &out))
+    }
+
     /// What's missing there for `program` to run, as what to say: git and
     /// rsync for commands, and `program` in a login shell's PATH.
     pub fn missing(&self, program: &str, cancel: &AtomicBool) -> Result<Option<String>, Trouble> {
@@ -1313,6 +1386,58 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&out.stdout), "local.py\n");
         assert!(t.0.as_path().join(".env").exists());
         assert!(!t.0.as_path().join("local.py").exists());
+    }
+
+    #[test]
+    fn a_takeover_lists_the_small_ignored_files_a_setup_copies() {
+        let t = crate::feature::tests::Temp::new();
+        let dir = t.0.as_path();
+        let run = |args: &[&str]| crate::feature::tests::run(dir, args);
+        run(&["init", "-q"]);
+        let ignore = ".env\nlocal.py\n*.log\nbig.bin\n.venv/\nlink\nmy file.txt\n";
+        std::fs::write(dir.join(".gitignore"), ignore).unwrap();
+        std::fs::write(dir.join(".env"), "A=1\n").unwrap();
+        std::fs::write(dir.join("local.py"), "b").unwrap();
+        std::fs::write(dir.join("my file.txt"), "c").unwrap();
+        std::fs::write(dir.join("run.log"), "d").unwrap();
+        std::fs::write(dir.join("big.bin"), vec![0u8; 64]).unwrap();
+        std::fs::create_dir(dir.join(".venv")).unwrap();
+        std::fs::write(dir.join(".venv/pyvenv.cfg"), "x").unwrap();
+        std::os::unix::fs::symlink("/no/such/place", dir.join("link")).unwrap();
+        std::fs::write(dir.join("tracked.txt"), "e").unwrap();
+        let wt = dir.to_string_lossy().into_owned();
+        let out = sh_c(&ignored_files_script(&wt, 16));
+        let mut listed: Vec<&str> = std::str::from_utf8(&out.stdout).unwrap().lines().collect();
+        listed.sort();
+        assert_eq!(listed, [".env", "link", "local.py", "my file.txt"]);
+        let out = sh_c(&ignored_files_script("/no/such/worktree", 16));
+        assert!(out.status.success() && out.stdout.is_empty(), "{out:?}");
+    }
+
+    #[test]
+    fn a_worktree_kept_from_what_came_says_what_kept_it() {
+        let said = |git: &str| {
+            let lines: String = git.lines().map(|l| format!("WHY {l}\n")).collect();
+            in_way(&format!("INWAY /w\n{lines}")).unwrap()
+        };
+        assert_eq!(
+            said("fatal: Unable to create '/r/.git/worktrees/w/index.lock': File exists.\n\nAnother git process seems to be running in this repository"),
+            "A git lock file is in the way in /w: if no git command runs there, delete /r/.git/worktrees/w/index.lock and try again"
+        );
+        assert_eq!(
+            said("error: Your local changes to the following files would be overwritten by checkout:\n\ta.py"),
+            "changes in /w are in the way of what came"
+        );
+        assert_eq!(
+            said("error: The following untracked working tree files would be overwritten by checkout:\n\tb.py"),
+            "changes in /w are in the way of what came"
+        );
+        assert_eq!(said(""), "changes in /w are in the way of what came");
+        assert_eq!(
+            said("fatal: reference is not a tree: 1234"),
+            "/w couldn't be put at what came: reference is not a tree: 1234"
+        );
+        assert_eq!(in_way("OCCUPIED /m\n"), None);
     }
 
     #[test]

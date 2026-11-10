@@ -1223,6 +1223,26 @@ pub struct ActivityRow {
     pub tone: CheckTone,
 }
 
+/// Work running on the feature off the thread, a row of the strip under
+/// the tab's header: its spinner, what it is and does, how far it got
+/// and how long it has run.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RunningRow {
+    /// "setting up", "checks": inline, lowercase.
+    pub word: &'static str,
+    /// What it does now: "api: npm ci".
+    pub what: String,
+    /// How many of its steps it is at, of how many, when it counts them.
+    pub steps: Option<(u32, u32)>,
+    /// How long it has run: "0:41".
+    pub took: String,
+    /// Its buttons' labels: "Log", "Stop".
+    pub buttons: Vec<&'static str>,
+    /// The rail's node of the stage whose page it shows on: a click goes
+    /// there.
+    pub node: Option<usize>,
+}
+
 /// What the feature tab shows: the whole tab area, not a centred card.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FeatureTabView {
@@ -1265,6 +1285,10 @@ pub struct FeatureTabView {
     /// That review has the keys: the rail shows no focus.
     pub review_keys: bool,
     pub activity: Vec<ActivityRow>,
+    /// What runs on the feature now, in the strip under the header.
+    pub running: Vec<RunningRow>,
+    /// How many more run than `running` shows.
+    pub running_more: usize,
     /// How far each column is scrolled down, in logical pixels, indexed
     /// by `TabColumn`.
     pub scroll: [f64; 3],
@@ -1338,6 +1362,10 @@ pub enum FeatureTabHit {
     Jump(FindingTag),
     /// A part of the criteria's search, on the line under the rail.
     Search(super::SearchPart),
+    /// A row of the strip of work running, as `FeatureTabView::running`.
+    Running(usize),
+    /// A button on such a row: the row, then which of its `buttons`.
+    RunningButton(usize, usize),
     Hint(usize),
 }
 
@@ -1375,6 +1403,13 @@ pub struct FeatureTabLayout {
     pub content: [i32; 3],
     /// The line of the repositories under the rail.
     pub strip: Rect,
+    /// The card of work running, under the header: none while nothing
+    /// runs.
+    pub running_card: Option<Rect>,
+    /// Its rows' parts, as `FeatureTabView::running`.
+    pub running: Vec<RunningSpots>,
+    /// The line counting the rows it has no room for.
+    pub running_more: Option<Rect>,
     /// Its label, naming the repositories.
     pub repos_label: Rect,
     /// The chevron at its end, with what is left to see before it.
@@ -1479,6 +1514,22 @@ impl FeatureTabLayout {
         }
         if let Some(b) = self.buttons.iter().position(on) {
             return Some(FeatureTabHit::Button(b));
+        }
+        for (i, spots) in self.running.iter().enumerate() {
+            if let Some(b) = spots.buttons.iter().position(on) {
+                return Some(FeatureTabHit::RunningButton(i, b));
+            }
+            // A row goes to its stage's page, when it shows on one.
+            if on(&spots.row) {
+                let goes = view.running.get(i).is_some_and(|r| r.node.is_some());
+                return Some(match goes {
+                    true => FeatureTabHit::Running(i),
+                    false => FeatureTabHit::Tab,
+                });
+            }
+        }
+        if self.running_card.as_ref().is_some_and(on) {
+            return Some(FeatureTabHit::Tab);
         }
         if let Some(n) = self.nodes.iter().position(on) {
             return Some(FeatureTabHit::Node(n));
@@ -1837,6 +1888,25 @@ const CARD_PAD: i32 = 12;
 const CARD_RADIUS: f32 = 8.0;
 /// How far in from a card's top and bottom its scrollbar runs.
 const BAR_INSET: i32 = 6;
+/// The card of work running under the header: a row's height, the room
+/// above and below the rows and at their ends, the gap between its parts,
+/// the spinner and the gap after it, the bar of steps and the gap before
+/// its count, and the gap under the card.
+const RUN_ROW: i32 = 28;
+const RUN_PAD: i32 = 4;
+const RUN_INSET: i32 = 12;
+const RUN_GAP: i32 = 10;
+const RUN_SPIN: i32 = 14;
+const RUN_SPIN_GAP: i32 = 10;
+const RUN_BAR_W: i32 = 72;
+const RUN_BAR_H: i32 = 6;
+const RUN_BAR_GAP: i32 = 8;
+const RUN_BELOW: i32 = 4;
+/// The line sweeping along the card's top: its height and how long one
+/// sweep takes, and its share of the card's width.
+pub(super) const SWEEP_H: i32 = 2;
+pub(super) const SWEEP_PERIOD: std::time::Duration = std::time::Duration::from_millis(1600);
+const SWEEP_SHARE: f64 = 0.3;
 /// The row of repository chips on a narrow tab, and a chip's height,
 /// inner room and the gap between two.
 const CHIP_ROW: i32 = 28;
@@ -4335,8 +4405,12 @@ fn lay_out_tab(view: &FeatureTabView, frame: Rect) -> FeatureTabLayout {
     let title = Rectangle::new((x, top).into(), (text_w, TAB_TITLE).into());
     let sub = Rectangle::new((x, top + TAB_TITLE).into(), (text_w, TAB_SUB).into());
 
-    // The rail: a slot per stage, its node at the slot's top middle.
-    let rail_top = top + header_h + RAIL_GAP + RAIL_BACK;
+    // The work running, under the header; then the rail: a slot per
+    // stage, its node at the slot's top middle.
+    let (running_card, running, running_more) =
+        running_spots(view, x, top + header_h + RAIL_GAP, inner);
+    let run_h = running_card.map_or(0, |c| c.size.h + RUN_BELOW);
+    let rail_top = top + header_h + run_h + RAIL_GAP + RAIL_BACK;
     let n = view.rail.len().max(1) as i32;
     let slot = |i: i32| (x + inner * i / n, x + inner * (i + 1) / n);
     // A label on two lines puts its node's short line under them: the
@@ -4580,6 +4654,9 @@ fn lay_out_tab(view: &FeatureTabView, frame: Rect) -> FeatureTabLayout {
         columns,
         content,
         strip,
+        running_card,
+        running,
+        running_more,
         repos_label,
         repos_toggle,
         repos,
@@ -4598,6 +4675,120 @@ fn lay_out_tab(view: &FeatureTabView, frame: Rect) -> FeatureTabLayout {
         texts,
         matches,
     }
+}
+
+/// The ground of the card of work running: the columns' cards' with a
+/// touch of the accent, so it stands out as live.
+fn running_ground(p: &Palette) -> Rgb {
+    mix(p.panel, p.accent, 0.06)
+}
+
+/// The edge of that card.
+fn running_edge(p: &Palette) -> Rgb {
+    mix(p.border, p.accent, 0.45)
+}
+
+/// Where a row of work running goes (see `RunningRow`), and its parts.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RunningSpots {
+    pub row: Rect,
+    pub spinner: Rect,
+    pub word: Rect,
+    pub what: Rect,
+    /// The bar of steps and its count, when it counts them.
+    pub bar: Option<(Rect, Rect)>,
+    pub took: Rect,
+    pub buttons: Vec<Rect>,
+}
+
+/// The card of work running under the tab's header, its top at `top` and
+/// from `x` `inner` wide, as `view` has it: the card, its rows and the
+/// line counting those left out.
+fn running_spots(
+    view: &FeatureTabView,
+    x: i32,
+    top: i32,
+    inner: i32,
+) -> (Option<Rect>, Vec<RunningSpots>, Option<Rect>) {
+    let lines = view.running.len() + usize::from(view.running_more > 0);
+    if lines == 0 {
+        return (None, Vec::new(), None);
+    }
+    let h = lines as i32 * RUN_ROW + 2 * RUN_PAD;
+    let card = Rectangle::new((x, top).into(), (inner, h).into());
+    let line = |i: usize| {
+        Rectangle::new(
+            (x, top + RUN_PAD + i as i32 * RUN_ROW).into(),
+            (inner, RUN_ROW).into(),
+        )
+    };
+    let mid = |row: Rect, h: i32| row.loc.y + (RUN_ROW - h) / 2;
+    let rows = (view.running.iter().enumerate())
+        .map(|(i, r)| {
+            let row = line(i);
+            let left = x + RUN_INSET;
+            let spinner = Rectangle::new(
+                (left, mid(row, RUN_SPIN)).into(),
+                (RUN_SPIN, RUN_SPIN).into(),
+            );
+            // From the right: the buttons, how long, the bar and its count.
+            let mut end = x + inner - RUN_INSET;
+            let mut buttons = vec![Rect::default(); r.buttons.len()];
+            for (b, label) in r.buttons.iter().enumerate().rev() {
+                let w = button_width(label);
+                end -= w;
+                buttons[b] =
+                    Rectangle::new((end, mid(row, ROW_BUTTON)).into(), (w, ROW_BUTTON).into());
+                end -= RUN_GAP;
+            }
+            let took_w = width_of("88:88", SMALL_FONT_SIZE).ceil() as i32;
+            end -= took_w;
+            let took = Rectangle::new((end, row.loc.y).into(), (took_w, RUN_ROW).into());
+            end -= RUN_GAP;
+            let bar = r.steps.map(|(i, n)| {
+                let count_w = width_of(&format!("{i} of {n}"), SMALL_FONT_SIZE).ceil() as i32;
+                end -= count_w;
+                let count = Rectangle::new((end, row.loc.y).into(), (count_w, RUN_ROW).into());
+                end -= RUN_BAR_GAP + RUN_BAR_W;
+                let bar = Rectangle::new(
+                    (end, mid(row, RUN_BAR_H)).into(),
+                    (RUN_BAR_W, RUN_BAR_H).into(),
+                );
+                end -= RUN_GAP;
+                (bar, count)
+            });
+            let word_x = left + RUN_SPIN + RUN_SPIN_GAP;
+            // Bold, as it is drawn.
+            let word_w = measure_bold(r.word, SMALL_FONT_SIZE)
+                .unwrap_or_else(|| width_of(r.word, SMALL_FONT_SIZE) * 9.0 / 8.0)
+                .ceil() as i32
+                + 1;
+            let word = Rectangle::new((word_x, row.loc.y).into(), (word_w, RUN_ROW).into());
+            let what_x = word_x + word_w + RUN_GAP;
+            let what = Rectangle::new(
+                (what_x, row.loc.y).into(),
+                ((end - what_x).max(0), RUN_ROW).into(),
+            );
+            RunningSpots {
+                row,
+                spinner,
+                word,
+                what,
+                bar,
+                took,
+                buttons,
+            }
+        })
+        .collect();
+    let more = (view.running_more > 0).then(|| {
+        let row = line(view.running.len());
+        let x = x + RUN_INSET + RUN_SPIN + RUN_SPIN_GAP;
+        Rectangle::new(
+            (x, row.loc.y).into(),
+            (inner - 2 * RUN_INSET, RUN_ROW).into(),
+        )
+    });
+    (Some(card), rows, more)
 }
 
 /// The page's `pieces` marked as `view` has it: each place the search
@@ -5065,6 +5256,8 @@ fn slice_view(view: &FeatureTabView, slice: TabSlice) -> FeatureTabView {
             sections: Vec::new(),
         },
         activity: Vec::new(),
+        running: Vec::new(),
+        running_more: 0,
         scroll: [0.0; 3],
         hover: None,
         hints: Vec::new(),
@@ -5089,6 +5282,8 @@ fn slice_view(view: &FeatureTabView, slice: TabSlice) -> FeatureTabView {
                     | H::ToggleRepos
                     | H::ReviewView(_)
                     | H::ReviewButton(_)
+                    | H::Running(_)
+                    | H::RunningButton(..)
             ) || strip && matches!(hit, H::Repo(_) | H::MoreRepos(_))
         }
         TabSlice::Column(TabColumn::Repos) => {
@@ -5120,6 +5315,8 @@ fn slice_view(view: &FeatureTabView, slice: TabSlice) -> FeatureTabView {
             v.more = view.more;
             v.review_switch = view.review_switch.clone();
             v.test_strip = view.test_strip.clone();
+            v.running = view.running.clone();
+            v.running_more = view.running_more;
             if strip {
                 repos(&mut v);
             }
@@ -5419,6 +5616,13 @@ pub(super) struct FeatureTabLayers {
     /// The glow round the current stage's node, composed over the head
     /// at the pulse's opacity, so the head isn't drawn again for it.
     pulse: super::Cached<(super::Theme, f64)>,
+    /// The spinner of work running, by how far it turned, and the line
+    /// sweeping its card's top, by its width: over the head, so it isn't
+    /// drawn again as they move.
+    spinner: super::Cached<(u32, super::Theme, f64)>,
+    sweep: super::Cached<(i32, super::Theme, f64)>,
+    /// What the spinner and the sweep move from: the first frame's time.
+    epoch: Option<std::time::Instant>,
     /// How many buffers were drawn, for tests.
     drawn: std::cell::Cell<usize>,
 }
@@ -5449,6 +5653,7 @@ impl FeatureTabLayers {
             .as_ref()
             .map(|l| ((output, l.columns, theme, scale), area.loc, output));
         let drawn = &self.drawn;
+        let epoch = *self.epoch.get_or_insert(now);
         let (head, columns, bands, hints, thumbs, glow) = (
             &mut self.head,
             &mut self.columns,
@@ -5457,6 +5662,7 @@ impl FeatureTabLayers {
             &mut self.thumbs,
             &mut self.pulse,
         );
+        let (spinner, sweep) = (&mut self.spinner, &mut self.sweep);
         let more = |_: &BackKey| {
             let (Some(view), Some(l)) = (&view, &layout) else {
                 return Vec::new();
@@ -5494,6 +5700,49 @@ impl FeatureTabLayers {
                     };
                     parts.push(part);
                 }
+            }
+            if let Some(card) = l.running_card {
+                use super::placeholder::{SPINNER_PERIOD, SPINNER_STEPS};
+                let turn = crate::anim::phase(epoch, SPINNER_PERIOD, now);
+                let step = (turn * SPINNER_STEPS as f32) as u32 % SPINNER_STEPS;
+                let buffer = spinner.get((step, theme, scale), |(step, ..)| {
+                    painter.running_spinner(*step, scale, p)
+                });
+                for spots in &l.running {
+                    parts.push(Part::new(
+                        buffer,
+                        at(spots.spinner),
+                        spots.spinner.size,
+                        1.0,
+                    ));
+                }
+                // Along the card's top inside its edge, between its corners;
+                // still at the left unless the chrome moves fully.
+                let r = CARD_RADIUS.round() as i32;
+                let track = Rectangle::new(
+                    at(card) + Point::from((r, 1)),
+                    ((card.size.w - 2 * r).max(1), SWEEP_H).into(),
+                );
+                let w = (f64::from(track.size.w) * SWEEP_SHARE).round() as i32;
+                let buffer = sweep.get((w, theme, scale), |(w, ..)| {
+                    painter.running_sweep(*w, scale, p)
+                });
+                let moving = crate::anim::motion() == crate::anim::Motion::Full;
+                let travel = f64::from(track.size.w + w);
+                let dx = match moving {
+                    true => {
+                        f64::from(crate::anim::phase(epoch, SWEEP_PERIOD, now)) * travel
+                            - f64::from(w)
+                    }
+                    false => 0.0,
+                };
+                let loc = track.loc.to_f64() + Point::from((dx, 0.0));
+                let size = Size::from((w, SWEEP_H));
+                parts.push(
+                    Part::new(buffer, track.loc, size, 1.0)
+                        .at(loc)
+                        .clipped(track),
+                );
             }
             let alpha = rail_pulse_alpha(pulse);
             if let Some(halo) = feature_tab_pulse(view, l).filter(|_| alpha > 0.0) {
@@ -5912,6 +6161,112 @@ impl Painter {
         c.into_buffer(true)
     }
 
+    /// The spinner on a row of work running, `RUN_SPIN` square on nothing,
+    /// turned `step` of `SPINNER_STEPS` of a full circle.
+    pub(super) fn running_spinner(&self, step: u32, scale: f64, p: &Palette) -> MemoryRenderBuffer {
+        let size = Size::from((RUN_SPIN, RUN_SPIN));
+        let mut c = Canvas::new(physical(size, scale));
+        let turn = step as f32 / super::placeholder::SPINNER_STEPS as f32;
+        let s = scale as f32 * 0.8;
+        icon_sdf(
+            &mut c,
+            Rectangle::from_size(size),
+            scale,
+            p.accent,
+            |x, y| super::spinner(turn, x, y, s),
+        );
+        c.into_buffer(false)
+    }
+
+    /// The line sweeping the top of the card of work running, `w` wide and
+    /// `SWEEP_H` high, on nothing.
+    pub(super) fn running_sweep(&self, w: i32, scale: f64, p: &Palette) -> MemoryRenderBuffer {
+        let size = Size::from((w.max(1), SWEEP_H));
+        let mut c = Canvas::new(physical(size, scale));
+        let (cw, ch) = (c.w as f32, c.h as f32);
+        c.rounded(0.0, 0.0, cw, ch, ch / 2.0, p.accent);
+        c.into_buffer(false)
+    }
+
+    /// The card of work running under the tab's header, on `c`: its rows
+    /// without their spinners and the line sweeping its top, which move
+    /// over it (see `running_parts`).
+    fn running_card(
+        &self,
+        c: &mut Canvas,
+        view: &FeatureTabView,
+        l: &FeatureTabLayout,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let Some(card) = l.running_card else {
+            return;
+        };
+        let s = scale as f32;
+        let (x, y, w, h) = rect_px(card, scale);
+        c.rounded(x, y, w, h, CARD_RADIUS * s, running_edge(p));
+        let b = s.round().max(1.0);
+        let r = (CARD_RADIUS * s - b).max(0.0);
+        c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, r, running_ground(p));
+        let small = |c: &mut Canvas, text: &str, rect: Rect, color: Rgb| {
+            let (tx, tend) = phys(rect, scale);
+            self.text(
+                c,
+                text,
+                SMALL_FONT_SIZE,
+                tx,
+                tend,
+                band(rect, scale),
+                scale,
+                color,
+            );
+        };
+        for (i, (row, spots)) in view.running.iter().zip(&l.running).enumerate() {
+            if view.hover == Some(FeatureTabHit::Running(i)) {
+                self.row_highlight(c, spots.row, (false, 1.0), scale, p);
+            }
+            let (wx, wend) = phys(spots.word, scale);
+            let word_band = band(spots.word, scale);
+            self.bold_text(
+                c,
+                row.word,
+                SMALL_FONT_SIZE,
+                wx,
+                wend,
+                word_band,
+                scale,
+                p.text,
+            );
+            small(c, &row.what, spots.what, p.muted);
+            if let (Some((bar, count)), Some((done, total))) = (spots.bar, row.steps) {
+                let (bx, by, bw, bh) = rect_px(bar, scale);
+                c.rounded(bx, by, bw, bh, bh / 2.0, p.border);
+                if total > 0 && done > 0 {
+                    let f = done.min(total) as f32 / total as f32;
+                    c.rounded(bx, by, (bw * f).max(bh), bh, bh / 2.0, p.accent);
+                }
+                small(c, &format!("{done} of {total}"), count, p.muted);
+            }
+            small(c, &row.took, spots.took, p.muted);
+            for (k, (rect, label)) in spots.buttons.iter().zip(&row.buttons).enumerate() {
+                let hovered = view.hover == Some(FeatureTabHit::RunningButton(i, k));
+                self.button(
+                    c,
+                    label,
+                    *rect,
+                    (hovered, false),
+                    ButtonStyle::Plain,
+                    scale,
+                    p,
+                );
+            }
+        }
+        if let Some(more) = l.running_more {
+            let text = format!("{} more running", view.running_more);
+            small(c, &text, more, p.muted);
+        }
+    }
+
     /// The tab's header, rail, the rule under it and, on a narrow tab, the
     /// strip of repository chips, on `c`.
     fn tab_head(
@@ -5989,6 +6344,8 @@ impl Painter {
                 _ => trash(x, y, s),
             });
         }
+
+        self.running_card(c, view, l, scale, p);
 
         // The rail: the lines joining the nodes, then each node with its
         // label and line under it.
@@ -8523,6 +8880,112 @@ mod tests {
         assert!(Rc::ptr_eq(&first, &doc_laid_out(&blocks, 300).0));
         let other = Arc::new(blocks.as_ref().clone());
         assert!(!Rc::ptr_eq(&first, &doc_laid_out(&other, 300).0));
+    }
+
+    fn running_view() -> FeatureTabView {
+        let mut view = tab_view();
+        let row = |word, steps, buttons: Vec<&'static str>, node| RunningRow {
+            word,
+            what: "api: npm ci".into(),
+            steps,
+            took: "0:41".into(),
+            buttons,
+            node,
+        };
+        view.running = vec![
+            row("setting up", Some((2, 3)), vec!["Log"], Some(3)),
+            row("code graph", None, Vec::new(), None),
+        ];
+        view.running_more = 1;
+        view
+    }
+
+    /// Work running gets a card under the header that moves the rail down;
+    /// a row goes to its stage's page and its buttons press; ticking time
+    /// draws only the head again.
+    #[test]
+    fn work_running_shows_under_the_header() {
+        use crate::chrome::Theme;
+        use std::time::{Duration, Instant};
+        let view = running_view();
+        let (plain, l) = (tab_at(&tab_view(), 1920), tab_at(&view, 1920));
+        let card = l.running_card.expect("a card while work runs");
+        assert!(plain.running_card.is_none() && plain.running.is_empty());
+        assert_eq!(
+            card.size.h,
+            3 * RUN_ROW + 2 * RUN_PAD,
+            "two rows and the count"
+        );
+        assert!(
+            l.nodes[0].loc.y >= card.loc.y + card.size.h,
+            "the rail goes under it"
+        );
+        assert_eq!(
+            l.nodes[0].loc.y - plain.nodes[0].loc.y,
+            card.size.h + RUN_BELOW
+        );
+        assert!(l.running_more.is_some());
+        let first = &l.running[0];
+        assert!(first.bar.is_some() && l.running[1].bar.is_none());
+        assert!(first.what.loc.x + first.what.size.w <= first.bar.unwrap().0.loc.x);
+        assert_eq!(
+            l.hit(&view, centre(first.word)),
+            Some(FeatureTabHit::Running(0))
+        );
+        assert_eq!(
+            l.hit(&view, centre(first.buttons[0])),
+            Some(FeatureTabHit::RunningButton(0, 0))
+        );
+        // The graph shows on no page: its row goes nowhere.
+        assert_eq!(
+            l.hit(&view, centre(l.running[1].word)),
+            Some(FeatureTabHit::Tab)
+        );
+
+        let painter = crate::chrome::Painter::new();
+        let area = Rectangle::from_size((1920, 900).into());
+        let mut layers = FeatureTabLayers::default();
+        let t0 = Instant::now();
+        let mut step = |view: &FeatureTabView, k: u64| {
+            let before = layers.drawn.get();
+            let parts = layers.parts(
+                Some(view.clone()),
+                area,
+                Theme::Dark,
+                1.0,
+                t0 + Duration::from_millis(k),
+                &painter,
+                0.5,
+                None,
+            );
+            (layers.drawn.get() - before, parts.len())
+        };
+        step(&view, 0);
+        step(&view, 300);
+        // The spinners and the sweep move over the slices: none drawn again.
+        let (drawn, parts) = step(&view, 600);
+        assert_eq!(drawn, 0);
+        let (_, without) = step(&tab_view(), 900);
+        assert!(parts >= without + 3, "two spinners and the sweep");
+        let mut later = view.clone();
+        later.running[0].took = "0:42".into();
+        step(&view, 1200);
+        assert_eq!(step(&later, 1500).0, 1, "only the head");
+    }
+
+    #[test]
+    fn the_running_card_reads_in_both_themes() {
+        use crate::chrome::{Theme, sidebar::contrast};
+        for p in [Theme::Dark.page_palette(), Theme::Light.page_palette()] {
+            let ground = running_ground(p);
+            for ink in [p.text, p.muted] {
+                let on = contrast(ink, ground);
+                assert!(on >= 4.5, "text {ink:?} on {ground:?}: {on}");
+            }
+            // The spinner, the sweep and the bar: marks, 3:1.
+            let on = contrast(p.accent, ground);
+            assert!(on >= 3.0, "accent on {ground:?}: {on}");
+        }
     }
 
     /// A long file scrolls its page, and painting it paints only what

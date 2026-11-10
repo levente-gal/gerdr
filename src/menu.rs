@@ -64,6 +64,8 @@ pub enum MenuAction {
     AddMachine,
     /// The connect dialog, filled in for a gerdr that reached this machine.
     AddMachineFrom { target: String, name: String },
+    /// The machines panel, on the machine of this name.
+    OpenMachines(String),
     /// Connect, disconnect or forget the machine of this name.
     ConnectMachine(String),
     DisconnectMachine(String),
@@ -75,6 +77,18 @@ pub enum MenuAction {
     /// machine it was taken over from.
     StopAiWorkPull(String, String),
     RemoveMachine(String),
+    /// A toast's "Undo" after a machine was removed: back in the settings,
+    /// connecting.
+    RestoreMachine {
+        name: String,
+        addresses: crate::config::Addresses,
+    },
+    /// A toast's "Undo" after a machine was renamed: machine `from` is
+    /// called `to` again.
+    RenameMachine {
+        from: String,
+        to: String,
+    },
     /// T3 Code, updated to the newest version gerdr reads, or to this one
     /// (see `Gerdr::update_t3`).
     UpdateT3(Option<String>),
@@ -491,12 +505,17 @@ impl Gerdr {
             MenuAction::StopKept(id) => self.ask_stop_kept(&id),
             MenuAction::AddMachine => self.open_machine_dialog(),
             MenuAction::AddMachineFrom { target, name } => self.add_machine_from(target, name),
+            MenuAction::OpenMachines(name) => self.open_machines(Some(&name)),
             MenuAction::ConnectMachine(name) => self.connect_machine(&name),
             MenuAction::DisconnectMachine(name) => self.disconnect_machine(&name),
             MenuAction::StopTakeOver(project, slug) => self.stop_take(&project, &slug),
             MenuAction::StopAiWork => self.ai_work.stop_busy(),
             MenuAction::StopAiWorkPull(project, slug) => self.ai_work.stop_pull(&project, &slug),
             MenuAction::RemoveMachine(name) => self.ask_remove_machine(&name),
+            MenuAction::RestoreMachine { name, addresses } => {
+                self.restore_machine(&name, addresses)
+            }
+            MenuAction::RenameMachine { from, to } => self.rename_machine_back(&from, &to),
             MenuAction::UpdateT3(version) => self.update_t3(version),
             MenuAction::NewTab(w) => {
                 self.switch_workspace(w);

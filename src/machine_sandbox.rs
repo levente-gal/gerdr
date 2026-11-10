@@ -224,8 +224,9 @@ impl ThereJob {
             return Vec::new();
         };
         let links = self.feature.links.iter().map(|l| l.root.clone());
+        let mains = self.feature.repos.iter().map(|r| r.main.clone());
         let roots: Vec<std::path::PathBuf> =
-            std::iter::once(self.feature.root.clone()).chain(links).collect();
+            (std::iter::once(self.feature.root.clone()).chain(links).chain(mains)).collect();
         let feature = &self.feature;
         (sandbox::stacks_under(&containers, &roots).into_iter())
             .filter(|stack| {
@@ -834,7 +835,7 @@ impl Gerdr {
         let key = (project.to_owned(), slug.to_owned());
         let running = self.setting_up(project, slug);
         let has = crate::feature::setup::has_work(feature);
-        let first = crate::feature_build::setup_first(has, feature.setup_at(Some(id)), running, false);
+        let first = crate::feature_build::setup_first(has, crate::feature::setup::standing(feature, Some(id)), running, false);
         let waits = match first {
             crate::feature_build::SetupFirst::No => false,
             crate::feature_build::SetupFirst::Wait => true,

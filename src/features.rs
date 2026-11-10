@@ -175,6 +175,9 @@ pub struct Features {
     parked: BTreeMap<(String, String), FeaturePanel>,
     /// What runs off the thread now, for the tasks panel.
     busy: Vec<Busy>,
+    /// When each of `busy`'s kinds of work on a feature started, for the
+    /// feature tab's strip of what runs.
+    since: HashMap<(String, String, Job), Instant>,
     /// The latest probe of each feature, by project and slug.
     probes: BTreeMap<(String, String), Probed>,
     /// The features whose summary was started on its own this run: once,
@@ -306,7 +309,7 @@ struct Asked {
 }
 
 /// What a feature's work off the thread is.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Job {
     Create,
     /// Linking projects to an open feature.
@@ -388,7 +391,6 @@ pub(crate) enum Done {
         slug: String,
         results: Vec<(String, Result<feature::layout::MovedPr, String>)>,
     },
-    /// A pull request's review was made, or not (see `pr_review`).
     /// Pull requests were added to a review, or not; `drops` go next.
     ReviewAdded {
         project: String,
@@ -411,11 +413,18 @@ pub(crate) enum Done {
         from: PathBuf,
         wanted: (String, String, u64),
     },
+    /// A pull request's review was made, or not (see `pr_review`).
     PrReview {
         project: String,
         slug: String,
         numbers: String,
         result: Result<Box<(Feature, Vec<PathBuf>)>, String>,
+    },
+    /// Looking for the open project's repositories on machine `id` ended.
+    SameRepos {
+        id: String,
+        project: String,
+        result: Result<crate::machine_repos::Paired, String>,
     },
     /// Asking the machine a feature came from to take it back ended.
     HandBack {
@@ -6810,6 +6819,10 @@ impl Gerdr {
         let Some(tx) = self.feature_sender() else {
             return;
         };
+        if let Some(b) = &busy {
+            let key = (b.project.clone(), b.slug.clone(), b.job);
+            self.features.since.entry(key).or_insert_with(Instant::now);
+        }
         self.features.busy.extend(busy);
         std::thread::spawn(move || {
             // It fails only once the loop is gone: gerdr is quitting, and
@@ -6847,6 +6860,11 @@ impl Gerdr {
                 slug,
                 result,
             } => self.handed_back(&project, &slug, result),
+            Done::SameRepos {
+                id,
+                project,
+                result,
+            } => self.same_repos_found(&id, &project, result),
             Done::SandboxAsked {
                 project,
                 slug,
@@ -7108,6 +7126,7 @@ impl Gerdr {
                 self.features.busy.retain(|b| {
                     !(b.project == project && b.slug == slug && b.repo.as_ref() == Some(&repo))
                 });
+                self.features.forget_ended();
                 self.feature_touched(&project, &slug, &repo, result);
             }
             Done::Losses {
@@ -7359,6 +7378,7 @@ impl Gerdr {
         self.features
             .busy
             .retain(|b| !(b.project == project && b.slug == slug && b.job == job));
+        self.features.forget_ended();
     }
 
     /// Whether feature `slug` of `project` has work running off the thread
@@ -9632,7 +9652,7 @@ impl Gerdr {
 
     /// Show the tab of `stage`'s agent; one gone is forgotten, and Enter
     /// starts a new one.
-    fn show_stage_agent(&mut self, project: &str, slug: &str, stage: Stage) {
+    pub(crate) fn show_stage_agent(&mut self, project: &str, slug: &str, stage: Stage) {
         let in_t3 = (self.feature(project, slug))
             .and_then(|f| f.runs.get(&stage))
             .is_some_and(|run| run.t3.is_some());
@@ -10894,6 +10914,24 @@ impl Gerdr {
                 self.toggle_feature_repos();
                 None
             }
+            // Work running goes to its stage's page.
+            FeatureTabHit::Running(i) => {
+                let (rows, _) = self.running_of(&feature.project, &feature.slug, &feature.title);
+                let stage = rows.get(i).and_then(|(row, _)| Stage::ALL.get(row.node?));
+                if let (Some(panel), Some(stage)) = (self.features.panel.as_mut(), stage) {
+                    panel.focus = TabArea::Stages;
+                    panel.keys = false;
+                    panel.pick(&feature, *stage);
+                }
+                None
+            }
+            FeatureTabHit::RunningButton(i, b) => {
+                let (rows, _) = self.running_of(&feature.project, &feature.slug, &feature.title);
+                rows.get(i).and_then(|(_, job)| {
+                    let mut buttons = running_buttons(*job);
+                    (b < buttons.len()).then(|| buttons.swap_remove(b).1)
+                })
+            }
             // A chip unfolds the rows, on its own.
             FeatureTabHit::Repo(i) => {
                 if (self.features.panel.as_ref()).is_some_and(|p| !p.expanded) {
@@ -11522,6 +11560,9 @@ impl Gerdr {
             fix_rounds_flipped: panel.fix_rounds_flipped.clone(),
         };
         let mut view = tab_view(panel, feature, &slugs, &state, now);
+        let (running, more) = self.running_of(&panel.project, &panel.slug, &feature.title);
+        view.running = running.into_iter().map(|(row, _)| row).collect();
+        view.running_more = more;
         // The search counts the places it found as the page shows them.
         let typed = (panel.search.as_ref()).is_some_and(|s| !s.needle().is_empty());
         if typed {
@@ -11534,6 +11575,26 @@ impl Gerdr {
             }
         }
         Some(view)
+    }
+
+    /// The feature tab's strip of what runs on feature `slug` of
+    /// `project`, called `title`, each row with its job (see
+    /// `running_rows`).
+    fn running_of(
+        &self,
+        project: &str,
+        slug: &str,
+        title: &str,
+    ) -> (Vec<(chrome::RunningRow, Job)>, usize) {
+        let since = |b: &Busy| {
+            let key = (b.project.clone(), b.slug.clone(), b.job);
+            self.features.since.get(&key).copied()
+        };
+        let busy: Vec<_> = (self.features.busy.iter())
+            .filter(|b| b.project == project && b.slug == slug)
+            .filter_map(|b| Some((b, since(b)?)))
+            .collect();
+        running_rows(&busy, title, Instant::now())
     }
 
     /// The sidebar's rows for the shown project's open features.
@@ -11632,6 +11693,124 @@ impl Gerdr {
         );
         listed
     }
+}
+
+impl Features {
+    /// Let go of the start times of work no longer running.
+    fn forget_ended(&mut self) {
+        let busy = &self.busy;
+        self.since.retain(|(project, slug, job), _| {
+            (busy.iter()).any(|b| &b.project == project && &b.slug == slug && b.job == *job)
+        });
+    }
+}
+
+/// How long work must have run before the feature tab's strip shows it:
+/// a quick read of the code doesn't flash there.
+const RUNNING_AFTER: Duration = Duration::from_millis(300);
+/// How many rows of work the strip shows; it counts the rest.
+const RUNNING_ROWS: usize = 3;
+
+/// The feature tab's strip of what runs on feature `title`: each of `busy`
+/// with when it started, shown once it ran `RUNNING_AFTER` at `now`, the
+/// first `RUNNING_ROWS` of them with their jobs, and how many more run.
+fn running_rows(
+    busy: &[(&Busy, Instant)],
+    title: &str,
+    now: Instant,
+) -> (Vec<(chrome::RunningRow, Job)>, usize) {
+    let shown: Vec<_> = (busy.iter())
+        .filter(|(_, since)| now.saturating_duration_since(*since) >= RUNNING_AFTER)
+        .collect();
+    let more = shown.len().saturating_sub(RUNNING_ROWS);
+    let rows = (shown.into_iter().take(RUNNING_ROWS))
+        .map(|(b, since)| {
+            let (what, steps) = steps_of(&running_what(&b.what, title));
+            let secs = now.saturating_duration_since(*since).as_secs();
+            let stage = match b.job {
+                Job::Setup => Some(Stage::Build),
+                Job::Verify => Some(Stage::Verify),
+                Job::Sandbox | Job::HandBack => Some(Stage::ManualTest),
+                Job::Ship => Some(Stage::Ship),
+                _ => None,
+            };
+            let row = chrome::RunningRow {
+                word: running_word(b.job),
+                what,
+                steps,
+                took: format!("{}:{:02}", secs / 60, secs % 60),
+                buttons: running_buttons(b.job).into_iter().map(|(l, _)| l).collect(),
+                node: stage.and_then(|s| Stage::ALL.iter().position(|a| *a == s)),
+            };
+            (row, b.job)
+        })
+        .collect();
+    (rows, more)
+}
+
+/// What the strip calls work of kind `job`, inline and so lowercase.
+fn running_word(job: Job) -> &'static str {
+    match job {
+        Job::Create => "creating",
+        Job::Link => "linking",
+        Job::Touch => "updating",
+        Job::Losses | Job::Read => "reading",
+        Job::Remove | Job::RemoveRepos => "removing",
+        Job::Ship => "shipping",
+        Job::Setup => "setting up",
+        Job::Verify => "checks",
+        Job::Graph => "code graph",
+        Job::Sandbox => "sandbox",
+        Job::HandBack => "handing back",
+        Job::PrHead => "on GitHub",
+    }
+}
+
+/// The buttons on the strip's row for work of kind `job`: what the
+/// stage's page offers for it too.
+fn running_buttons(job: Job) -> Vec<(&'static str, PanelOutcome)> {
+    match job {
+        Job::Setup => vec![("Log", PanelOutcome::SetupLog)],
+        Job::Verify => vec![("Stop", PanelOutcome::StopChecks)],
+        _ => Vec::new(),
+    }
+}
+
+/// `what` (the tasks panel's title) without the feature's quoted `title`
+/// and what goes before it, which the strip on its tab needn't say:
+/// "Setting up “Export”: api: npm ci" is "api: npm ci".
+fn running_what(what: &str, title: &str) -> String {
+    let quoted = format!("\u{201c}{title}\u{201d}");
+    match what.split_once(&quoted) {
+        Some((_, rest)) => rest.trim_start_matches(':').trim().to_owned(),
+        None => what.to_owned(),
+    }
+}
+
+/// `text` without the count of steps it ends on, and that count: "api: npm
+/// ci (2 of 3)" and "2 of 5 done" count, as setup, the sandbox and Verify
+/// say them.
+// shortcut: reads the count back from the progress text the workers write;
+// give `Done::Progress` a count of its own if they ever word it otherwise.
+fn steps_of(text: &str) -> (String, Option<(u32, u32)>) {
+    let none = || (text.to_owned(), None);
+    let Some(at) = text.rfind(" of ") else {
+        return none();
+    };
+    let (head, tail) = (&text[..at], &text[at + 4..]);
+    let before = head.trim_end_matches(|c: char| c.is_ascii_digit());
+    let n_len = tail.len() - tail.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    let (Ok(i), Ok(n)) = (head[before.len()..].parse(), tail[..n_len].parse()) else {
+        return none();
+    };
+    let before = before.trim_end_matches('(').trim_end();
+    let after = tail[n_len..].trim_start_matches(')');
+    let after = after.strip_prefix(" done").unwrap_or(after).trim();
+    let text: Vec<&str> = [before, after]
+        .into_iter()
+        .filter(|t| !t.is_empty())
+        .collect();
+    (text.join(" "), Some((i, n)))
 }
 
 /// The tasks panel's row for `busy`, work on the feature called `title`
@@ -16568,6 +16747,9 @@ fn tab_view(
         focus,
         page,
         activity: activity(feature, now),
+        // `Gerdr::feature_tab_view` says what runs.
+        running: Vec::new(),
+        running_more: 0,
         scroll: std::array::from_fn(|col| {
             let s = match col == TabColumn::Page as usize {
                 true => panel.page_scroll(feature),
@@ -21061,6 +21243,75 @@ pub(crate) mod tests {
             Stage::Verify.about()
         );
         assert_eq!(stage_button(&f, Stage::Verify, checks), Some("Run checks"));
+    }
+
+    #[test]
+    fn the_strip_says_what_runs_its_steps_and_for_how_long() {
+        let busy = |job: Job, what: &str| Busy {
+            project: "acme".into(),
+            slug: "b".into(),
+            job,
+            repo: None,
+            what: what.into(),
+        };
+        let now = Instant::now();
+        let ago = |ms: u64| now - Duration::from_millis(ms);
+        let setup = busy(
+            Job::Setup,
+            "Setting up \u{201c}Bulk\u{201d}: api: npm ci (2 of 3)",
+        );
+        let verify = busy(Job::Verify, "Verifying \u{201c}Bulk\u{201d}: 1 of 4 done");
+        let graph = busy(
+            Job::Graph,
+            "Building the code graph of \u{201c}Bulk\u{201d}",
+        );
+        let read = busy(Job::Read, "Reading \u{201c}Bulk\u{201d}");
+        let sandbox = busy(
+            Job::Sandbox,
+            "Sandbox of \u{201c}Bulk\u{201d}: Making its network",
+        );
+        let ship = busy(Job::Ship, "Shipping \u{201c}Bulk\u{201d}");
+        let all = [
+            (&setup, ago(61_000)),
+            (&verify, ago(5_000)),
+            (&graph, ago(400)),
+            // Too new to show: a quick read doesn't flash.
+            (&read, ago(100)),
+            (&sandbox, ago(2_000)),
+            (&ship, ago(1_000)),
+        ];
+        let (rows, more) = running_rows(&all, "Bulk", now);
+        assert_eq!(more, 2, "sandbox and ship are counted, not shown");
+        let row = |i: usize| &rows[i].0;
+        assert_eq!(
+            rows.iter().map(|(_, j)| *j).collect::<Vec<_>>(),
+            [Job::Setup, Job::Verify, Job::Graph]
+        );
+        assert_eq!(
+            (row(0).word, row(0).what.as_str(), row(0).steps),
+            ("setting up", "api: npm ci", Some((2, 3)))
+        );
+        assert_eq!(row(0).took, "1:01");
+        assert_eq!(row(0).buttons, ["Log"]);
+        assert_eq!(row(0).node, Some(3), "setup shows on Build's page");
+        assert_eq!((row(1).what.as_str(), row(1).steps), ("", Some((1, 4))));
+        assert_eq!(
+            (row(1).buttons.as_slice(), row(1).node),
+            (&["Stop"][..], Some(4))
+        );
+        assert_eq!(
+            (row(2).word, row(2).what.as_str(), row(2).steps, row(2).node),
+            ("code graph", "", None, None)
+        );
+        let (rows, _) = running_rows(&[(&sandbox, ago(2_000))], "Bulk", now);
+        assert_eq!(rows[0].0.what, "Making its network");
+        assert_eq!(rows[0].0.node, Some(7));
+        // Counts it can't read stay text.
+        assert_eq!(steps_of("2 of the files"), ("2 of the files".into(), None));
+        assert_eq!(
+            steps_of("web: pnpm i (3 of 3)"),
+            ("web: pnpm i".into(), Some((3, 3)))
+        );
     }
 
     #[test]

@@ -33,6 +33,7 @@ rules, for reviewing a branch before it merges.
 | Alt+Z | Undo, asking first: the last batch (repos panel); on the feature tab's Ship page, the selected repository's last step that ran (else the latest of all; also the Undo button on its row): close its pull request, delete its pushed branch, take its squash off the base. What went to origin's base has no undo. Off the rows, Alt+Z also undoes what followed shipping when that is the latest, as the Afterwards rows' Undo button does, without asking: a closed workspace opens again with its Zed, app and file tabs (terminals don't come back), and removed worktrees come back on the commits they had, set up again. The toast saying either happened has the same Reopen / Restore button, and the launcher lists "Restore the worktrees of …" while they can come back. |
 | Prefix, then Enter | Send the prompt of the stage agent waiting in the focused pane (also the arrow on its pane's bar, and Send prompt on the stage's page). A stage's agent starts on its prompt; one waits only when checks ran on the code as it opened, or its line couldn't be typed. |
 | Prefix, then U | Open the AI work stats, or close it again: what the features' AI work came to, by feature, by agent and model, and by check, for the open project or all of them. Over a feature's tab it opens on that feature in detail (also the tab's Stats button), and Esc goes to the Features list. Tab and Shift+Tab go between its tabs, its scope and its list, Left / Right pick the tab or scope that has focus, Enter on a feature shows its stages, runs, fix rounds and Verify runs (Esc goes back), its Kept column says what its AI work takes on disk, Del or its trash button deletes that after asking, and Ctrl+C copies the row. Nothing kept yet, stats still being built from what is kept, a read under way and a read that failed each say so in place of the rows; Enter during a read acts once the rows come. |
+| Prefix, then O | Open the machines panel, or close it again (also the launcher's "Machines" row, and a machine's chip in the footer or its "Open" button among the background tasks, which open it on that machine). The machines gerdr reaches are listed on the left, with a last row adding one (it opens the connect dialog); the selected one on the right: its address, how its link stands, herdr's version, its load, and what of this gerdr's features runs there, each with Show, Stop and Open feature buttons. Up / Down move through the machines, Tab and Shift+Tab through the buttons of the one selected, Enter presses the focused button (on the list: the machine's main one, Connect or Disconnect), Del arms the machine and a second Del removes it (asking at once when sandboxes this gerdr answers for stay on it), Ctrl+E (or its Edit button) edits its name and address in a form in place of its detail (F2: on the name), Esc closes. In the form Tab goes between its fields and buttons, Enter or Ctrl+Enter saves, Esc leaves it (a second Esc closes the panel). Saving a new address tries it first, as the connect dialog does, and keeps it only once that machine answers, and only if it is the same machine (its gerdr machine id): Esc or Stop stops trying, and Save anyway keeps it untried (not once it reached another machine). A new name moves what gerdr keeps under the old one (the settings, the projects' `machines` and `machine_folders`) and keeps the link up; its toast's Undo gives the old name back. A machine can have several addresses (the office's and home's), tried in their order, the one that answered last first; a lost link tries them all again. In the form each address is a field, with a × taking it out and "+ Add address" under them (Ctrl+N adds one, Ctrl+Shift+Up / Ctrl+Shift+Down move the focused one up or down the list, Del in an empty one takes it out); an address that answers as another gerdr machine id than the machine's is passed over, and said so if none other answers. Two saved machines that are one (the same gerdr machine id, as any of them answered at some time) say so on each other's detail, with a "Merge" button: the selected one keeps its name and gets the other's addresses after its own, and the other goes, what was kept under its name (the projects' `machines` and `machine_folders`) moving to the one kept; it asks first, as it can't be undone. Ctrl+PgUp / Ctrl+PgDn (or the tabs in its title row) go between Machines and Placement: where each of the open project's stages runs when a feature doesn't choose its own (its agent, Verify's checks, Manual test's sandbox), kept in the project's file under `machines`. Up / Down go between the stages, Right, Enter or the stage's button give it the next machine (this one, each saved machine, least busy), Left the one before; each row says how many features choose their own. A press that changes a feature another machine writes takes it over first, as on its page. |
 | Ctrl+Shift+U | Set a feature's worktrees up (feature tab, Build and Verify): copy the ignored files and environments they lack from main, then run the project's setup commands. Nothing there is overwritten. |
 | Ctrl+Shift+I | Show a feature's setup log (feature tab, Build and Verify, once a setup started; also the "Setup log" button, the setup's row in the tasks panel and a failure's toast): its last run in the select and copy viewer, followed live while it runs. Selecting holds the following until the selection goes. |
 | Shift+Enter | In a field of several lines: a new line, Enter being the panel's action (a diff's review comment, the project commands dialog, a Manual test criterion's note and the comment on an AI review finding, on their cards, and the note on the criteria strip). |
@@ -173,7 +174,10 @@ press and drag pick whole rows and a double click opens the line in Zed.
   writer's own tabs stays there, so while it works the press says to wait; at rest,
   its tab stays there, and its chat goes back on that machine. A sandbox running
   there keeps the feature there too; one on a worker goes on, and comes along. The old writer shows the feature from the new
-  one if connected to it, and otherwise says so.
+  one if connected to it. With the new one saved but out of reach, it shows the
+  feature as it left, written there, until that machine is back and tells of it;
+  with that one not saved, it says so. A move made while gerdr was closed is told
+  once, at the next start, the same way.
 - A gerdr open on the writer has to agree. When it doesn't answer, or the machine
   can't be reached, a dialog asks, as what happens there from then on is kept aside
   (a toast, the "!" badge and the file named there), its commits staying on its
@@ -226,9 +230,10 @@ press and drag pick whole rows and a double click opens the line in Zed.
   colour: it asked something, waits for its prompt, is a T3 Code draft, or
   sits idle with its stage's work not done. Its pane's last lines on the card
   are in the text colour then, as they hold what it asks.
-- Work the user sends to an agent (findings, review comments, failed tests)
-  shows that agent's tab, where it runs or waits for its prompt. Work gerdr
-  sends by itself doesn't take the screen. Either way the stage's node on the
+- Work sent to an agent (findings, review comments, failed tests, Make
+  fixes), by the user or by gerdr, doesn't take the screen: the agent is told
+  it in its tab behind the page. Only an agent that waits for the user to
+  send its prompt has its tab shown. Either way the stage's node on the
   rail and the page of the stage the feature is at say the agent runs again or
   waits, with a way to its tab. While that work is under way the rail reads as
   turned back: done stages from Build on go grey, as they ran once, and a line
@@ -250,6 +255,12 @@ press and drag pick whole rows and a double click opens the line in Zed.
   that stops with some left and gets no further when told to go on.
   Setup goes last on that page; a failed setup is still said by the status at
   its top.
+- Work running on a feature off the thread (setup, checks, code graph,
+  sandbox, ship…) shows on every page of its feature tab, in a card under the
+  header: a row each, with a spinner, a lowercase word, what it does now, a
+  bar when it counts steps, how long it has run, and the buttons its stage's
+  page has for it (Log, Stop). A row goes to that stage's page. Work shows
+  there only once it ran 300 ms; past three rows the card counts the rest.
 
 ## Words
 

@@ -85,6 +85,9 @@ pub enum Then {
     RemoveSandboxLeftovers(Vec<crate::feature_sandbox::LeftStack>),
     /// Forget machine `name`, whose sandboxes stay on it.
     RemoveMachine(String),
+    /// Merge machine `drop` into `keep`, the same machine (see
+    /// `Gerdr::merge_machines`).
+    MergeMachines { keep: String, drop: String },
     /// Delete the AI work kept of this project's feature, called `title`
     /// (see `Gerdr::delete_ai_work`).
     DeleteAiWork {
@@ -760,6 +763,7 @@ impl Gerdr {
             } => self.finish_stop(&project, &slug, what),
             Then::RemoveSandboxLeftovers(stacks) => self.remove_sandbox_leftovers(stacks),
             Then::RemoveMachine(name) => self.remove_machine(&name),
+            Then::MergeMachines { keep, drop } => self.merge_machines(&keep, &drop),
             Then::DeleteAiWork {
                 project,
                 slug,

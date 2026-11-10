@@ -980,6 +980,15 @@ pub struct Job<'a> {
     pub stop: &'a AtomicBool,
 }
 
+impl Job<'_> {
+    /// `roots` and each repository's main checkout: on a machine that pairs
+    /// repositories by remote, those can sit outside the feature's root.
+    fn roots(&self) -> Vec<PathBuf> {
+        let mains = self.repos.iter().map(|repo| repo.main.clone());
+        self.roots.iter().cloned().chain(mains).collect()
+    }
+}
+
 /// A command to run once in the namespace before its services.
 pub struct PrepareStep {
     pub dir: PathBuf,
@@ -1017,11 +1026,12 @@ fn start_into(
     // Paused, main's containers would be left out of the copy.
     unpause_left(job.host, job.dir)?;
     let containers = running_containers(job.host, &engines, job.stop)?;
-    let mut stacks = sandbox::stacks_under(&containers, job.roots);
+    let roots = job.roots();
+    let mut stacks = sandbox::stacks_under(&containers, &roots);
     // Main's stack needn't run for its data to be copied: after a reboot it
     // mostly doesn't, and without it the sandbox has no database.
     let stopped = stopped_containers(job.host, &engines, job.stop)?;
-    let stopped = sandbox::stopped_stacks(&stopped, &stacks, job.roots);
+    let stopped = sandbox::stopped_stacks(&stopped, &stacks, &roots);
     for stack in &stopped {
         tracing::info!(
             "sandbox of {}: {} isn't running in main, copying it as it was left",
@@ -1150,12 +1160,13 @@ fn outward_of(job: &Job) -> Vec<String> {
 /// What the `.env` files of the feature's repositories point at that the
 /// sandbox won't have, going by what the project set for sandboxes.
 fn out_of_reach_of(job: &Job, containers: &[sandbox::Container]) -> Vec<String> {
+    let roots = job.roots();
     let mut found: Vec<String> = job
         .repos
         .iter()
         .filter_map(|repo| job.host.read(&repo.worktree.join(".env")))
         .flat_map(|text| {
-            sandbox::out_of_reach(&sandbox_pairs(&text, job.env), containers, job.roots)
+            sandbox::out_of_reach(&sandbox_pairs(&text, job.env), containers, &roots)
         })
         .collect();
     found.sort();
@@ -2647,6 +2658,27 @@ django.db.utils.OperationalError: connection refused\n\
         assert!(overridden("EMAIL_HOST_PASSWORD", &env));
         assert!(!overridden("SMTP_PASSWORD", &env));
         assert!(!overridden("EMAIL_HOST", &[]));
+    }
+
+    #[test]
+    fn a_repository_outside_the_root_counts_as_the_projects() {
+        let root = PathBuf::from("/w/AssetTag");
+        let repos = [repo("/w/Asset-Track", "/w/AssetTag/.features/f/platform")];
+        let stop = AtomicBool::new(false);
+        let job = Job {
+            host: &Host::Here,
+            project: "p",
+            slug: "f",
+            owner: "",
+            repos: &repos,
+            roots: std::slice::from_ref(&root),
+            dir: Path::new("/w/sandbox"),
+            prepare: &[],
+            env: &[],
+            taken: &[],
+            stop: &stop,
+        };
+        assert_eq!(job.roots(), [root.clone(), PathBuf::from("/w/Asset-Track")]);
     }
 
     #[test]

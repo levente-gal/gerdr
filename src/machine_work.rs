@@ -905,6 +905,11 @@ impl Gerdr {
             .find(|work| work.id == id)
     }
 
+    /// Whether machine `id` is one saved in the settings, connected or not.
+    pub(crate) fn machine_saved(&self, id: &str) -> bool {
+        (self.machines.names.get(id)).is_some_and(|name| self.machines.saved.contains_key(name))
+    }
+
     /// What the user calls machine `id`.
     /// This one is "this machine", whatever others call it.
     pub(crate) fn machine_name(&self, id: &str) -> String {
@@ -1262,6 +1267,7 @@ impl Gerdr {
                 if let Some(work) = self.work_of_mut(id) {
                     work.load = load;
                 }
+                self.machine_seen(id);
                 self.sandboxes_looked(id, sandboxes);
             }
             WorkEvent::Started {
@@ -1288,7 +1294,11 @@ impl Gerdr {
                 };
                 self.show_warning(format!("The agent on {name} wasn't told: {why}{then}"));
             }
-            WorkEvent::Viewed(news) => self.machine_viewed(id, *news),
+            WorkEvent::Viewed(news) => {
+                let project = news.project.clone();
+                self.machine_viewed(id, *news);
+                self.forget_left_of(id, &project);
+            }
             WorkEvent::Take(event) => self.take_event(event),
             WorkEvent::ViewCode {
                 project,
@@ -1548,6 +1558,7 @@ impl Gerdr {
             return;
         }
         self.views_tick();
+        self.same_repos_tick();
         let mut pulls: HashMap<String, Vec<Pull>> = HashMap::new();
         let listed = self.project.iter().filter_map(|p| self.features.all.get(p));
         for feature in listed.flatten().filter(|f| f.status == Status::Open) {

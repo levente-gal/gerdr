@@ -72,15 +72,18 @@ mod keys;
 mod launch;
 mod layout;
 mod machine_checks;
+mod machine_edit;
 mod machine_handback;
 mod machine_lease;
 mod machine_load;
 mod machine_reach;
+mod machine_repos;
 mod machine_sandbox;
 mod sandbox_lan;
 mod machine_views;
 mod machine_work;
 mod machines;
+mod machines_panel;
 mod manual_test;
 mod page_text;
 mod pr_review;
@@ -1356,6 +1359,9 @@ pub enum Action {
     /// Open the background tasks (T3 Code's server, git operations, kept
     /// apps), or close them again.
     Tasks,
+    /// Open the machines panel, to see and manage the machines gerdr
+    /// reaches, or close it again.
+    Machines,
     /// Open the feature panel on the project's features, or the new
     /// feature dialog when it has none; close the panel again.
     Features,
@@ -1450,6 +1456,8 @@ pub struct Gerdr {
     pub footer_hover: Option<chrome::FooterHit>,
     /// The tasks panel, while it is open over the footer.
     pub tasks_panel: Option<tasks::TasksPanel>,
+    /// The machines panel, while it is open (see `machines_panel`).
+    pub machines_panel: Option<machines_panel::MachinesPanel>,
     /// Other machines, and the dialog connecting one (see `machines`).
     pub machines: machines::Machines,
     /// The features of every project, and the dialog and panel on them.
@@ -4595,6 +4603,8 @@ impl Gerdr {
             Action::Inbox => self.open_inbox(None),
             Action::Tasks if self.is_open(Overlay::Tasks) => self.close_tasks(),
             Action::Tasks => self.open_tasks(0),
+            Action::Machines if self.is_open(Overlay::Machines) => self.close_machines(),
+            Action::Machines => self.open_machines(None),
             Action::Features => self.open_features(),
             Action::Scrollback if self.is_open(Overlay::Scrollback) => self.close_scrollback(),
             Action::Scrollback => self.open_focused_scrollback(),
@@ -5949,6 +5959,7 @@ impl Gerdr {
         self.checkout = None;
         self.confirm = None;
         self.tasks_panel = None;
+        self.machines_panel = None;
         self.features.dialog = None;
         self.features.panel = None;
         self.project = Some(id.to_owned());
@@ -6822,6 +6833,7 @@ impl Gerdr {
             },
             footer: self.footer_view(&tasks),
             tasks: self.tasks_view(&tasks),
+            machines: self.machines_panel_view(),
             unzoom: self.unzoom_button().filter(|_| !flat).map(|(_, rect)| rect),
             theme: self.theme(),
             density: self.density,
@@ -7163,6 +7175,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         show_footer: ui.footer,
         footer_hover: None,
         tasks_panel: None,
+        machines_panel: None,
         machines: machines::Machines::default(),
         features: features::Features::default(),
         code_reviews: Default::default(),

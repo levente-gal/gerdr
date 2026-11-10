@@ -113,15 +113,22 @@ impl Tools {
         let pyenv_root = env_dir("PYENV_ROOT")
             .or_else(|| under_home(".pyenv"))
             .filter(|root| root.join("versions").is_dir());
-        let nvm_dir = env_dir("NVM_DIR").or_else(|| under_home(".nvm"));
+        // nvm's installer picks `$XDG_CONFIG_HOME/nvm` where that is set,
+        // and gerdr may not have the variable its shell had.
+        let nvm_dirs = [
+            env_dir("NVM_DIR"),
+            under_home(".nvm"),
+            env_dir("XDG_CONFIG_HOME").map(|config| config.join("nvm")),
+            under_home(".config/nvm"),
+        ];
         let fish_functions = env_dir("XDG_CONFIG_HOME")
             .or_else(|| under_home(".config"))
             .map(|config| config.join("fish/functions"));
         let mise_bin = find_program("mise");
         let fnm_bin = find_program("fnm");
-        let nvm_script = nvm_dir
+        let nvm_script = (nvm_dirs.into_iter().flatten())
             .map(|dir| dir.join("nvm.sh"))
-            .filter(|script| script.is_file());
+            .find(|script| script.is_file());
         Self {
             pyenv_root,
             poetry: find_program("poetry"),
@@ -568,18 +575,23 @@ pub fn background_command(
     let quoted = |path: &Path| shell_quote(&path.to_string_lossy());
     let hook = |bin: &Path, args: &str| format!("eval \"$({} {args})\"", quoted(bin));
     let mut first = Vec::new();
+    // fnm's or nvm's Node: the pinned version, else its default, as their
+    // hooks in a terminal's rc files give (`nvm.sh` uses its default alias).
+    let mut manager = Vec::new();
+    let version = (plan.node.as_ref()).map(|node| shell_quote(&node.version));
+    if let Some(fnm) = &tools.fnm_bin {
+        manager.push(hook(fnm, "env --shell bash"));
+        manager.extend(version.map(|v| format!("{} use {v}", quoted(fnm))));
+    } else if let Some(nvm) = &tools.nvm_script {
+        manager.push(format!(". {}", quoted(nvm)));
+        manager.extend(version.map(|v| format!("nvm use {v}")));
+    }
+    // As in a terminal with both hooks: mise's goes over fnm's or nvm's
+    // where it manages a Node, and leaves theirs where it doesn't.
+    first.extend(manager);
     if let Some(mise) = &tools.mise_bin {
         // Its hook reads the version files itself, and the rest it manages.
         first.push(hook(mise, "env -s bash"));
-    } else if let Some(node) = &plan.node {
-        let version = shell_quote(&node.version);
-        if let Some(fnm) = &tools.fnm_bin {
-            first.push(hook(fnm, "env --shell bash"));
-            first.push(format!("{} use {version}", quoted(fnm)));
-        } else if let Some(nvm) = &tools.nvm_script {
-            first.push(format!(". {}", quoted(nvm)));
-            first.push(format!("nvm use {version}"));
-        }
     }
     let venv = (plan.venv.as_ref())
         .map(|venv| venv.join("bin/activate"))
@@ -926,6 +938,26 @@ mod tests {
             run(&mise, &VenvSetting::Auto),
             format!("eval \"$(/m/mise env -s bash)\"; {activate}")
         );
+        // No pinned version: nvm's default, as a terminal's rc file loads it.
+        let nvm = Tools {
+            nvm_sh: true,
+            nvm_script: Some("/n/nvm.sh".into()),
+            ..NONE
+        };
+        assert_eq!(
+            run(&nvm, &VenvSetting::Off),
+            format!(". /n/nvm.sh; {inner}")
+        );
+        // nvm's Node first, for a mise that manages none.
+        let both = Tools {
+            mise: true,
+            mise_bin: Some("/m/mise".into()),
+            ..nvm.clone()
+        };
+        assert_eq!(
+            run(&both, &VenvSetting::Off),
+            format!(". /n/nvm.sh; eval \"$(/m/mise env -s bash)\"; {inner}")
+        );
         // A pinned version: fnm's or else nvm's, the venv after it.
         std::fs::write(dir.join(".nvmrc"), "20.1\n").unwrap();
         let fnm = Tools {
@@ -937,14 +969,14 @@ mod tests {
             run(&fnm, &VenvSetting::Off),
             format!("eval \"$(/f/fnm env --shell bash)\"; /f/fnm use 20.1; {inner}")
         );
-        let nvm = Tools {
-            nvm_sh: true,
-            nvm_script: Some("/n/nvm.sh".into()),
-            ..NONE
-        };
         assert_eq!(
             run(&nvm, &VenvSetting::Auto),
             format!(". /n/nvm.sh; nvm use 20.1; {activate}")
+        );
+        // With mise the pinned version is its to pick, as in a terminal.
+        assert_eq!(
+            run(&both, &VenvSetting::Off),
+            format!(". /n/nvm.sh; eval \"$(/m/mise env -s bash)\"; {inner}")
         );
     }
 

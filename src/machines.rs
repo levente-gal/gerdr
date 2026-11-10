@@ -60,6 +60,9 @@ const MIN_HERDR: (u32, u32) = (0, 9);
 const CLOCK_SKEW: i64 = 2;
 /// How long SSH gets to connect, and a command there to end.
 const CONNECT_SECS: u32 = 10;
+/// How long SSH gets to connect to each address of a machine that has
+/// several: the office's, away, mustn't hold up home's.
+const CONNECT_EACH_SECS: u32 = 5;
 const COMMAND: Duration = Duration::from_secs(20);
 /// How long a server just started gets to answer.
 const SERVER_START: Duration = Duration::from_secs(6);
@@ -99,6 +102,9 @@ pub enum Failure {
     TimedOut,
     /// Stopped by the user: nothing to say.
     Stopped,
+    /// A new address of the machine of this name answered as another
+    /// machine (another gerdr machine id): never tried again.
+    OtherMachine(String),
     Other(String),
 }
 
@@ -146,6 +152,9 @@ impl Failure {
             Self::HerdrDown => "herdr stopped answering there.".into(),
             Self::TimedOut => "It didn't answer in time.".into(),
             Self::Stopped => "Stopped.".into(),
+            Self::OtherMachine(name) => {
+                format!("That address reaches another machine, not {name}.")
+            }
             Self::Other(line) => format!("SSH said: {}.", line.trim_end_matches('.')),
         }
     }
@@ -164,6 +173,9 @@ impl Failure {
                 "Set AllowTcpForwarding yes in its sshd_config, then try again.".into()
             }
             Self::ServerStart(log) => format!("Its log there: {log}"),
+            Self::OtherMachine(_) => {
+                "Check the address, or add that machine as one of its own.".into()
+            }
             _ => return None,
         })
     }
@@ -180,7 +192,7 @@ impl Failure {
 
     /// Whether trying again by itself may help: the machine may just be
     /// away. What the user must fix isn't tried over and over.
-    fn retries(&self) -> bool {
+    pub(crate) fn retries(&self) -> bool {
         matches!(
             self,
             Self::Unreachable(_) | Self::LinkLost | Self::HerdrDown | Self::TimedOut
@@ -358,11 +370,14 @@ pub struct LinkInfo {
 /// What a link's thread tells.
 #[derive(Clone, Debug)]
 pub enum LinkEvent {
-    /// How far connecting got.
-    Step(String),
-    Up(LinkInfo),
-    /// It went down or couldn't come up; `retrying` if it keeps trying.
+    /// How far connecting to address `target` got.
+    Step { target: String, text: String },
+    /// Up at address `target`.
+    Up { target: String, info: LinkInfo },
+    /// It went down, or couldn't come up at any address: `target` is the
+    /// one `failure` is for. `retrying` if it keeps trying.
     Down {
+        target: String,
         failure: Failure,
         retrying: bool,
     },
@@ -380,16 +395,20 @@ fn links_dir() -> Option<PathBuf> {
     Some(crate::herdr::runtime_dir()?.join("gerdr/m"))
 }
 
-/// The start of this gerdr's socket names for `target`: a Unix socket's path
-/// must stay short, so it isn't the target itself.
+/// The start of this gerdr's socket names for a connection to `target`: a
+/// Unix socket's path must stay short, so it isn't the target itself. Each
+/// connection has its own: one ending removes its sockets after the next to
+/// the same machine started, and must not take that one's.
 fn link_stem(dir: &Path, target: &str) -> PathBuf {
     use std::hash::{Hash, Hasher};
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
     let mut hash = std::collections::hash_map::DefaultHasher::new();
     target.hash(&mut hash);
     dir.join(format!(
-        "{}-{:012x}",
+        "{}-{n}-{:08x}",
         std::process::id(),
-        hash.finish() & 0xffff_ffff_ffff
+        hash.finish() & 0xffff_ffff
     ))
 }
 
@@ -512,6 +531,24 @@ impl Drop for Connection {
     }
 }
 
+/// A link up, as its thread holds it: a `Connection`, or a stand-in in
+/// tests.
+trait Held {
+    fn info(&self) -> &LinkInfo;
+    /// Wait for the link to end, and say how.
+    fn hold(&mut self, cancel: &AtomicBool) -> Failure;
+}
+
+impl Held for Connection {
+    fn info(&self) -> &LinkInfo {
+        &self.info
+    }
+
+    fn hold(&mut self, cancel: &AtomicBool) -> Failure {
+        Connection::hold(self, cancel)
+    }
+}
+
 impl Connection {
     /// Wait for the link to end, and say how.
     fn hold(&mut self, cancel: &AtomicBool) -> Failure {
@@ -544,8 +581,13 @@ impl Connection {
 }
 
 /// Start the master connection to `target`, and wait for it to take
-/// commands.
-fn start_master(target: &str, control: &Path, cancel: &AtomicBool) -> Result<Child, Failure> {
+/// commands. SSH gets `secs` to connect.
+fn start_master(
+    target: &str,
+    control: &Path,
+    secs: u32,
+    cancel: &AtomicBool,
+) -> Result<Child, Failure> {
     let _ = std::fs::remove_file(control);
     let mut ssh = Command::new("ssh");
     ssh.args(["-N", "-M", "-S"])
@@ -563,7 +605,7 @@ fn start_master(target: &str, control: &Path, cancel: &AtomicBool) -> Result<Chi
             "ServerAliveCountMax=3",
             "-o",
         ])
-        .arg(format!("ConnectTimeout={CONNECT_SECS}"))
+        .arg(format!("ConnectTimeout={secs}"))
         .arg(target)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -590,7 +632,7 @@ fn start_master(target: &str, control: &Path, cancel: &AtomicBool) -> Result<Chi
         text
     });
     let start = Instant::now();
-    let limit = Duration::from_secs(CONNECT_SECS as u64 + 5);
+    let limit = Duration::from_secs(secs as u64 + 5);
     let fail = |master: &mut Child, failure: Failure| {
         let _ = master.kill();
         let _ = master.wait();
@@ -624,9 +666,20 @@ fn answers(socket: &Path) -> bool {
         .is_ok()
 }
 
-/// Connect to `target` all the way, telling each step.
+/// The first step connecting to `target` tells, and how long SSH gets to
+/// connect: one of `several` addresses is named, and given less time.
+fn first_step(target: &str, several: bool) -> (String, u32) {
+    match several {
+        true => (format!("trying {target}\u{2026}"), CONNECT_EACH_SECS),
+        false => ("reaching it over SSH\u{2026}".into(), CONNECT_SECS),
+    }
+}
+
+/// Connect to `target`, one of `several` addresses or not, all the way,
+/// telling each step.
 fn connect(
     target: &str,
+    several: bool,
     cancel: &AtomicBool,
     step: &mut dyn FnMut(String),
 ) -> Result<Connection, Failure> {
@@ -638,8 +691,9 @@ fn connect(
     let stem = link_stem(&dir, target);
     let control = stem.with_extension("ctl");
     let socket = stem.with_extension("sock");
-    step("reaching it over SSH\u{2026}".into());
-    let master = start_master(target, &control, cancel)?;
+    let (first, secs) = first_step(target, several);
+    step(first);
+    let master = start_master(target, &control, secs, cancel)?;
     let info = LinkInfo {
         site: Site::default(),
         socket,
@@ -751,27 +805,152 @@ fn create_private_dir(dir: &Path) -> std::io::Result<()> {
         .create(dir)
 }
 
-/// A link's thread: connect, hold it, and, if `retry` or it was ever up, try
-/// again while the machine may just be away.
-fn run_link(target: String, retry: bool, cancel: Arc<AtomicBool>, tx: impl Fn(LinkEvent)) {
+/// The addresses in the order a link tries them: as the machine has them,
+/// but the one that answered `last` first while it is still one of them.
+pub(crate) fn try_order(addresses: &[String], last: Option<&str>) -> Vec<String> {
+    let mut order = addresses.to_vec();
+    if let Some(at) = last.and_then(|last| order.iter().position(|a| a == last)) {
+        let last = order.remove(at);
+        order.insert(0, last);
+    }
+    order
+}
+
+/// How much `failure` says of why a machine can't be reached, of what
+/// several addresses came to: one away (timed out, refused) says least, as
+/// some address of a machine that has several usually is; another machine
+/// answering says most.
+fn telling(failure: &Failure) -> u8 {
+    match failure {
+        Failure::TimedOut => 0,
+        Failure::Unreachable(_) => 1,
+        Failure::OtherMachine(_) => 3,
+        _ => 2,
+    }
+}
+
+/// What a link says when none of its addresses came up, of what each came
+/// to (in the order tried): the first of those saying most, with its
+/// address. None for no address.
+fn most_telling(tries: Vec<(String, Failure)>) -> Option<(String, Failure)> {
+    let most = tries.iter().map(|(_, f)| telling(f)).max()?;
+    tries.into_iter().find(|(_, f)| telling(f) == most)
+}
+
+/// Try the addresses `order` of machine `name` in turn with `connect`,
+/// until one answers as that machine, one of the ids `known` (any, for a
+/// machine never seen: see `machine_edit::same_machine`), which `id` reads
+/// off what `connect` gave. That address and what it gave; an address
+/// answering as another machine is passed over, as `OtherMachine`. Else
+/// what each came to, in order; stopped, only that.
+fn try_addresses<C>(
+    name: &str,
+    order: &[String],
+    known: &[String],
+    mut connect: impl FnMut(&str) -> Result<C, Failure>,
+    id: impl Fn(&C) -> &str,
+) -> Result<(String, C), Vec<(String, Failure)>> {
+    let mut tries = Vec::new();
+    for target in order {
+        match connect(target) {
+            Ok(up) if crate::machine_edit::same_machine(known, id(&up)) => {
+                return Ok((target.clone(), up));
+            }
+            // Dropped, its connection ends.
+            Ok(up) => {
+                tracing::warn!(
+                    "machine {name}: {target} answers as machine {}, not as one of {known:?}: passed over",
+                    id(&up)
+                );
+                tries.push((target.clone(), Failure::OtherMachine(name.to_owned())));
+            }
+            Err(Failure::Stopped) => return Err(vec![(target.clone(), Failure::Stopped)]),
+            Err(failure) => {
+                tracing::info!("machine {name}: {target}: {failure:?}");
+                tries.push((target.clone(), failure));
+            }
+        }
+    }
+    Err(tries)
+}
+
+/// A link's thread to machine `name`: connect to the first of the
+/// addresses `order` that comes up as that machine (one of the ids `known`),
+/// hold it, and, if `retry` or it was ever up, try them all again while the
+/// machine may just be away, the one that answered last first.
+fn run_link(
+    name: String,
+    order: Vec<String>,
+    known: Vec<String>,
+    retry: bool,
+    cancel: Arc<AtomicBool>,
+    tx: impl Fn(LinkEvent),
+) {
+    run_link_with(name, order, known, retry, &cancel, tx, connect);
+}
+
+/// `run_link`, connecting with `connect` (see `connect`).
+fn run_link_with<H: Held>(
+    name: String,
+    mut order: Vec<String>,
+    mut known: Vec<String>,
+    retry: bool,
+    cancel: &AtomicBool,
+    tx: impl Fn(LinkEvent),
+    mut connect: impl FnMut(&str, bool, &AtomicBool, &mut dyn FnMut(String)) -> Result<H, Failure>,
+) {
     let mut wait = RETRY_FIRST;
     let mut was_up = false;
+    let several = order.len() > 1;
     loop {
-        let result = connect(&target, &cancel, &mut |text| tx(LinkEvent::Step(text)));
-        let failure = match result {
-            Ok(mut link) => {
-                tx(LinkEvent::Up(link.info.clone()));
+        let tried = try_addresses(
+            &name,
+            &order,
+            &known,
+            |target| {
+                connect(target, several, cancel, &mut |text| {
+                    let target = target.to_owned();
+                    tx(LinkEvent::Step { target, text });
+                })
+            },
+            |link: &H| link.info().site.id.as_str(),
+        );
+        let (target, failure, retries) = match tried {
+            Ok((target, mut link)) => {
+                let info = link.info().clone();
+                // Seen now: another machine at its addresses is never it.
+                if known.is_empty() && !info.site.id.is_empty() {
+                    known.push(info.site.id.clone());
+                }
+                tx(LinkEvent::Up {
+                    target: target.clone(),
+                    info,
+                });
                 was_up = true;
                 wait = RETRY_FIRST;
-                link.hold(&cancel)
+                order = try_order(&order, Some(&target));
+                let failure = link.hold(cancel);
+                let retries = failure.retries();
+                (target, failure, retries)
             }
-            Err(failure) => failure,
+            Err(tries) => {
+                // Any address may come back, whatever the others said.
+                let retries = tries.iter().any(|(_, f)| f.retries());
+                match most_telling(tries) {
+                    Some((target, failure)) => (target, failure, retries),
+                    None => (String::new(), Failure::BadTarget, false),
+                }
+            }
         };
         if failure == Failure::Stopped {
             return;
         }
-        let retrying = (retry || was_up) && failure.retries();
-        tx(LinkEvent::Down { failure, retrying });
+        let retrying = (retry || was_up) && retries;
+        tx(LinkEvent::Down {
+            target,
+            failure,
+            retrying,
+        });
         if !retrying {
             return;
         }
@@ -803,9 +982,14 @@ pub enum LinkState {
 /// A machine's link, while it has a thread.
 #[derive(Debug)]
 pub(crate) struct Link {
+    /// The address it uses: the one that answered while it is up, else the
+    /// one it is trying.
     target: String,
-    /// Which thread it is: what an older one says is stale.
-    serial: u64,
+    /// Every address of the machine, in the order they are tried.
+    pub(crate) addresses: crate::config::Addresses,
+    /// Which thread it is: what an older one says is stale. Its events find
+    /// it by this, not by its name, which a rename changes.
+    pub(crate) serial: u64,
     cancel: Arc<AtomicBool>,
     pub(crate) state: LinkState,
     /// It was up and went away: said, so its coming back is too. Away from
@@ -813,11 +997,20 @@ pub(crate) struct Link {
     lost: bool,
     /// What runs on the machine, while the link is up.
     pub(crate) work: Option<Work>,
+    /// When the link came up, while it is.
+    pub(crate) connected_since: Option<Instant>,
+    /// When the machine last said how it is: up, or a look around it.
+    pub(crate) last_seen: Option<Instant>,
 }
 
 impl Link {
     fn stop(&self) {
         self.cancel.store(true, Ordering::Relaxed);
+    }
+
+    /// The address it connects to.
+    pub(crate) fn target(&self) -> &str {
+        &self.target
     }
 }
 
@@ -825,7 +1018,7 @@ impl Link {
 #[derive(Debug, Default)]
 pub struct Machines {
     /// By name, as the settings file has them.
-    pub(crate) saved: BTreeMap<String, String>,
+    pub(crate) saved: BTreeMap<String, crate::config::Addresses>,
     pub(crate) links: HashMap<String, Link>,
     next_serial: u64,
     tx: Option<channel::Sender<(String, u64, LinkEvent)>>,
@@ -849,6 +1042,9 @@ pub struct Machines {
         HashMap<(String, String), (String, crate::feature::sandbox_run::Elsewhere)>,
     /// When this gerdr last looked for gerdrs that reached this machine.
     pub(crate) reach_looked: Option<Instant>,
+    /// The repositories looked for on each machine, by its id and the project:
+    /// a look goes again once the project uses others (see `machine_repos`).
+    pub(crate) repos_looked: HashMap<(String, String), Vec<std::path::PathBuf>>,
     /// What sandboxes of gone features left, by the machine they are on (none:
     /// here), as last looked for: the tasks panel offers to remove each.
     pub(crate) left: HashMap<Option<String>, Vec<crate::feature_sandbox::LeftStack>>,
@@ -858,6 +1054,51 @@ pub struct Machines {
     pub(crate) lines: HashMap<String, Instant>,
     /// What keeps each feature's work from coming back.
     pub(crate) troubles: HashMap<(String, String), String>,
+    /// The new address of a machine tried from the machines panel's edit
+    /// form, while it is: kept only once that machine answers there.
+    pub(crate) editing: Option<crate::machine_edit::EditTry>,
+}
+
+impl Machines {
+    /// The name of the machine whose link thread is `serial`, if it still has
+    /// that one.
+    pub(crate) fn link_named(&self, serial: u64) -> Option<String> {
+        (self.links.iter())
+            .find(|(_, link)| link.serial == serial)
+            .map(|(name, _)| name.clone())
+    }
+
+    /// The machine called `old` is called `new` now: its address, its link
+    /// (left running: its thread's events find it by serial) and the ids it
+    /// was seen by move over. The ids moved.
+    pub(crate) fn rename(&mut self, old: &str, new: &str) -> Vec<String> {
+        if let Some(target) = self.saved.remove(old) {
+            self.saved.insert(new.to_owned(), target);
+        }
+        if let Some(link) = self.links.remove(old) {
+            self.links.insert(new.to_owned(), link);
+        }
+        let mut ids = Vec::new();
+        for (id, name) in &mut self.names {
+            if name == old {
+                *name = new.to_owned();
+                ids.push(id.clone());
+            }
+        }
+        ids.sort();
+        ids
+    }
+
+    /// Stop machine `name`'s link and leave it disconnected, as the user
+    /// would: what it last said of itself stays.
+    pub(crate) fn link_off(&mut self, name: &str) {
+        if let Some(link) = self.links.get_mut(name) {
+            link.stop();
+            link.work = None;
+            link.connected_since = None;
+            link.state = LinkState::Off;
+        }
+    }
 }
 
 /// What the dialog asks gerdr to do.
@@ -1006,15 +1247,21 @@ impl MachineDialog {
 impl Gerdr {
     /// Connect the machines saved, and clear what gerdrs before this one
     /// left behind.
-    pub fn watch_machines(&mut self, saved: BTreeMap<String, String>) {
+    pub fn watch_machines(&mut self, saved: BTreeMap<String, crate::config::Addresses>) {
         clear_leftovers();
         self.set_saved_machines(saved);
         self.load_viewed();
+        let projects: Vec<String> = (self.projects.projects.iter())
+            .map(|p| p.id.clone())
+            .collect();
+        for project in projects {
+            self.show_left(&project);
+        }
     }
 
     /// The settings say these machines: start what is new or changed, and
     /// stop what is gone. A machine disconnected stays so while unchanged.
-    pub fn set_saved_machines(&mut self, saved: BTreeMap<String, String>) {
+    pub fn set_saved_machines(&mut self, saved: BTreeMap<String, crate::config::Addresses>) {
         let old = std::mem::replace(&mut self.machines.saved, saved.clone());
         for (name, target) in &old {
             if saved.get(name) != Some(target)
@@ -1062,8 +1309,20 @@ impl Gerdr {
         self.machines.tx.clone()
     }
 
-    /// Start the thread of machine `name`'s link.
-    fn start_link(&mut self, name: String, target: String, retry: bool) {
+    /// Start the thread of machine `name`'s link, to its addresses in turn:
+    /// the one that answered last first, and only as the machine it was
+    /// seen to be (`machine_ids`).
+    pub(crate) fn start_link(
+        &mut self,
+        name: String,
+        addresses: crate::config::Addresses,
+        retry: bool,
+    ) {
+        let last = self.projects.machine_last.get(&name).map(String::as_str);
+        let order = try_order(&addresses.0, last);
+        let target = order.first().cloned().unwrap_or_default();
+        // Before this link takes the old one's place: what it was up as.
+        let known = self.machine_ids(&name);
         let Some(tx) = self.machines_sender() else {
             self.show_error(format!("gerdr couldn't start connecting to {name}"));
             return;
@@ -1071,13 +1330,17 @@ impl Gerdr {
         self.machines.next_serial += 1;
         let serial = self.machines.next_serial;
         let cancel = Arc::new(AtomicBool::new(false));
+        let last_seen = self.machines.links.get(&name).and_then(|l| l.last_seen);
         let link = Link {
             target: target.clone(),
+            addresses,
             serial,
             cancel: cancel.clone(),
             state: LinkState::Connecting("connecting\u{2026}".into()),
             lost: false,
             work: None,
+            connected_since: None,
+            last_seen,
         };
         if let Some(old) = self.machines.links.insert(name.clone(), link) {
             old.stop();
@@ -1085,7 +1348,8 @@ impl Gerdr {
         let spawned = std::thread::Builder::new()
             .name(format!("machine {name}"))
             .spawn(move || {
-                run_link(target, retry, cancel, |event| {
+                let started_as = name.clone();
+                run_link(started_as, order, known, retry, cancel, |event| {
                     let _ = tx.send((name.clone(), serial, event));
                 });
             });
@@ -1095,13 +1359,35 @@ impl Gerdr {
         }
     }
 
-    /// What a link's thread came to.
-    fn link_event(&mut self, name: String, serial: u64, event: LinkEvent) {
-        let Some(link) = (self.machines.links.get_mut(&name)).filter(|l| l.serial == serial) else {
+    /// What a link's thread came to. The thread says the name it started
+    /// under, but the link is found by its serial: a machine renamed keeps its
+    /// link, under the new name.
+    fn link_event(&mut self, _started_as: String, serial: u64, event: LinkEvent) {
+        let Some(name) = self.machines.link_named(serial) else {
             // Stopped or replaced since it said so.
             return;
         };
-        let target = link.target.clone();
+        // A new address tried from the edit form: it isn't the machine's link
+        // coming, going or lost until it is kept.
+        let trying = (self.machines.editing.as_ref()).is_some_and(|t| t.serial == serial);
+        let mut kept = None;
+        if trying {
+            match &event {
+                LinkEvent::Step { text, .. } => self.edit_progress(text.clone()),
+                // Its thread passed over another machine at that address
+                // already; this checks it again, as the try's own say.
+                LinkEvent::Up { info, .. } => match self.edit_answered(&name, info) {
+                    Some(tried) => kept = Some(tried),
+                    None => return,
+                },
+                LinkEvent::Down { failure, .. } => {
+                    return self.edit_failed(&name, failure.clone());
+                }
+            }
+        }
+        let Some(link) = self.machines.links.get_mut(&name) else {
+            return;
+        };
         let was_up = matches!(link.state, LinkState::Up(_));
         let was_away = matches!(link.state, LinkState::Retrying(_));
         let asked = self
@@ -1111,31 +1397,53 @@ impl Gerdr {
             .and_then(|d| d.attempt.as_ref())
             == Some(&name);
         match event {
-            LinkEvent::Step(text) => {
+            LinkEvent::Step { target, text } => {
                 // Trying again, it stays away until it is back: a chip going
-                // back and forth says nothing.
+                // back and forth says nothing, and the address its failure
+                // is for stays with it.
                 if !was_away {
+                    link.target = target;
                     link.state = LinkState::Connecting(text.clone());
                 }
                 if asked && let Some(dialog) = &mut self.machines.dialog {
                     dialog.progress = Some(text);
                 }
             }
-            LinkEvent::Up(info) => {
-                tracing::info!("machine {name} connected: herdr {}", info.site.version);
+            LinkEvent::Up { target, info } => {
+                tracing::info!(
+                    "machine {name} connected at {target}: herdr {}",
+                    info.site.version
+                );
+                link.target = target.clone();
                 link.state = LinkState::Up(info.clone());
+                link.connected_since = Some(Instant::now());
+                link.last_seen = link.connected_since;
                 let link_was_lost = std::mem::take(&mut link.lost);
+                self.answered_at(&name, &target, &info.site.id);
                 self.start_work(&name, target.clone(), info);
-                if asked {
+                if let Some(tried) = kept {
+                    self.edit_kept(tried);
+                } else if asked {
                     self.machine_connected(name, target);
                 } else if link_was_lost {
                     self.show_success(format!("{name} is back"));
                 }
             }
-            LinkEvent::Down { failure, retrying } => {
-                tracing::warn!("machine {name}: {failure:?}");
+            LinkEvent::Down {
+                target,
+                mut failure,
+                retrying,
+            } => {
+                tracing::warn!("machine {name} at {target}: {failure:?}");
+                // Its thread says the name it started under: renamed since,
+                // the machine is called as it is now.
+                if let Failure::OtherMachine(called) = &mut failure {
+                    called.clone_from(&name);
+                }
+                link.target = target.clone();
                 link.lost |= was_up;
                 link.work = None;
+                link.connected_since = None;
                 link.state = if retrying {
                     LinkState::Retrying(failure.clone())
                 } else {
@@ -1159,9 +1467,50 @@ impl Gerdr {
         self.report_machines();
     }
 
+    /// Machine `name` answered at address `target`: tried first next time
+    /// (`try_order`), in `state.json`.
+    fn answered_at(&mut self, name: &str, target: &str, id: &str) {
+        let last = &mut self.projects.machine_last;
+        let mut changed = last.get(name).is_none_or(|t| t != target);
+        last.insert(name.to_owned(), target.to_owned());
+        let ids = self.projects.machine_ids.entry(name.to_owned()).or_default();
+        if !id.is_empty() && !ids.iter().any(|i| i == id) {
+            ids.push(id.to_owned());
+            changed = true;
+        }
+        if changed {
+            self.projects.save();
+        }
+    }
+
+    /// Machine `old` is called `new` now: the address it answered at last
+    /// and the ids it answered as move with it.
+    pub(crate) fn rename_last(&mut self, old: &str, new: &str) {
+        let ids = moved_last(&mut self.projects.machine_ids, old, new);
+        if moved_last(&mut self.projects.machine_last, old, new) || ids {
+            self.projects.save();
+        }
+    }
+
+    /// Machine `drop` was merged into `keep`: the ids it answered as are
+    /// `keep`'s too, and its last address goes (`keep`'s own stays first).
+    pub(crate) fn merge_remembered(&mut self, keep: &str, drop: &str) {
+        let had_last = self.projects.machine_last.remove(drop).is_some();
+        let dropped = self.projects.machine_ids.remove(drop).unwrap_or_default();
+        let ids = self.projects.machine_ids.entry(keep.to_owned()).or_default();
+        for id in &dropped {
+            if !ids.contains(id) {
+                ids.push(id.clone());
+            }
+        }
+        if had_last || !dropped.is_empty() {
+            self.projects.save();
+        }
+    }
+
     /// What needs the user goes on the "!" badge: a machine given up on.
     /// Away is what its dot says, and it keeps trying.
-    fn report_machines(&self) {
+    pub(crate) fn report_machines(&self) {
         let mut texts: Vec<String> = (self.machines.links.iter())
             .filter_map(|(name, link)| match &link.state {
                 LinkState::Failed(failure) => Some(format!("Machine {name}: {}", failure.why())),
@@ -1176,9 +1525,10 @@ impl Gerdr {
     fn machine_connected(&mut self, name: String, target: String) {
         self.machines.dialog = None;
         self.machines.draft = None;
-        self.machines.saved.insert(name.clone(), target.clone());
+        let addresses = crate::config::Addresses::one(&target);
+        self.machines.saved.insert(name.clone(), addresses.clone());
         self.refresh_pointer_focus();
-        match crate::config::write_machine(&name, Some(&target)) {
+        match crate::config::write_machine(&name, Some(&addresses)) {
             Ok(()) => {
                 // Written here: no need to read it back and say so.
                 self.settings_modified = crate::config::modified();
@@ -1248,16 +1598,22 @@ impl Gerdr {
             }
             MachineOutcome::Connect => self.connect_from_dialog(),
             MachineOutcome::Fix => {
-                let fix = self.machines.dialog.as_ref().and_then(MachineDialog::fix);
-                match fix {
-                    Some(Fix::Copy(command)) => {
-                        self.show_success(format!("Copied: {command}"));
-                        self.copy_text(command);
-                    }
-                    Some(Fix::Terminal(command)) => self.run_in_new_tab(command),
-                    None => {}
+                if let Some(fix) = self.machines.dialog.as_ref().and_then(MachineDialog::fix) {
+                    self.run_fix(fix);
                 }
             }
+        }
+    }
+
+    /// Press the button fixing what failed: copy its command, or run it in a
+    /// new tab.
+    pub(crate) fn run_fix(&mut self, fix: Fix) {
+        match fix {
+            Fix::Copy(command) => {
+                self.show_success(format!("Copied: {command}"));
+                self.copy_text(command);
+            }
+            Fix::Terminal(command) => self.run_in_new_tab(command),
         }
     }
 
@@ -1279,7 +1635,7 @@ impl Gerdr {
         } else {
             typed
         };
-        let already = saved.iter().find(|(_, t)| **t == target);
+        let already = saved.iter().find(|(_, t)| t.contains(&target));
         let problem = if target.is_empty() {
             dialog.focus = MachineFocus::Target;
             Some("Say which machine, as user@host.".to_owned())
@@ -1301,7 +1657,7 @@ impl Gerdr {
         dialog.error = None;
         dialog.attempt = Some(name.clone());
         dialog.progress = Some("connecting\u{2026}".into());
-        self.start_link(name, target, false);
+        self.start_link(name, crate::config::Addresses::one(&target), false);
     }
 
     /// Open a tab running `command` in the workspace shown, for what SSH
@@ -1393,11 +1749,16 @@ impl Gerdr {
 
     /// Stop a machine's link, from its task. What runs there keeps running.
     pub fn disconnect_machine(&mut self, name: &str) {
+        // A new address tried for it ends with it: its link says nothing more.
+        if (self.machines.editing.as_ref()).is_some_and(|t| t.name == name) {
+            self.machines.editing = None;
+        }
         let Some(link) = self.machines.links.get_mut(name) else {
             return;
         };
         link.stop();
         link.work = None;
+        link.connected_since = None;
         link.state = LinkState::Off;
         self.starts_lost();
         self.report_machines();
@@ -1421,8 +1782,10 @@ impl Gerdr {
         );
     }
 
-    /// Forget a machine, from its task. What runs there keeps running.
+    /// Forget a machine, from its task or the machines panel, with an Undo
+    /// toast. What runs there keeps running.
     pub fn remove_machine(&mut self, name: &str) {
+        let target = self.machines.saved.get(name).cloned();
         if let Some(link) = self.machines.links.remove(name) {
             link.stop();
         }
@@ -1433,7 +1796,18 @@ impl Gerdr {
         match crate::config::write_machine(name, None) {
             Ok(()) => {
                 self.settings_modified = crate::config::modified();
-                self.show_success(format!("Removed {name}; its herdr keeps running there"));
+                let undo = target.map(|addresses| {
+                    let name = name.to_owned();
+                    (
+                        "Undo".to_owned(),
+                        MenuAction::RestoreMachine { name, addresses },
+                    )
+                });
+                self.toast_with(
+                    format!("Removed {name}; its herdr keeps running there"),
+                    crate::toast::Level::Success,
+                    undo,
+                );
             }
             Err(why) => {
                 tracing::warn!("machines: removing {name}: {why}");
@@ -1441,6 +1815,33 @@ impl Gerdr {
                     "gerdr couldn't take {name} out of the settings: {why}"
                 ));
             }
+        }
+    }
+
+    /// Undo removing machine `name`: back in the settings at `addresses`, and
+    /// connecting.
+    pub(crate) fn restore_machine(&mut self, name: &str, addresses: crate::config::Addresses) {
+        if self.machines.saved.contains_key(name) {
+            return self.show_warning(format!("{name} is there already"));
+        }
+        if let Err(why) = crate::config::write_machine(name, Some(&addresses)) {
+            tracing::warn!("machines: restoring {name}: {why}");
+            return self.show_error(format!(
+                "gerdr couldn't put {name} back in the settings: {why}"
+            ));
+        }
+        self.settings_modified = crate::config::modified();
+        (self.machines.saved).insert(name.to_owned(), addresses.clone());
+        self.start_link(name.to_owned(), addresses, true);
+        self.report_machines();
+    }
+
+    /// Machine `id` said how it is: seen now.
+    pub(crate) fn machine_seen(&mut self, id: &str) {
+        let link = (self.machines.links.values_mut())
+            .find(|l| l.work.as_ref().is_some_and(|w| w.id == id));
+        if let Some(link) = link {
+            link.last_seen = Some(Instant::now());
         }
     }
 
@@ -1455,9 +1856,13 @@ impl Gerdr {
     /// show in the footer, those disconnected only in the panel.
     pub fn machine_tasks(&self) -> Vec<Task> {
         (self.machines.saved.iter())
-            .map(|(name, target)| {
-                let state = self.machines.links.get(name).map(|l| &l.state);
-                machine_task(name, target, state)
+            .map(|(name, saved)| match self.machines.links.get(name) {
+                // What it tries: a new address tried from the edit form is
+                // the link's before it is saved.
+                Some(link) => {
+                    machine_task(name, &link.addresses, Some((link.target(), &link.state)))
+                }
+                None => machine_task(name, saved, None),
             })
             .collect()
     }
@@ -1471,15 +1876,58 @@ fn remove_machine_body(titles: &[String]) -> String {
     )
 }
 
-/// Machine `name`'s task, its link in `state`.
-fn machine_task(name: &str, target: &str, state: Option<&LinkState>) -> Task {
+/// `last`, the address each machine answered at last by its name, with
+/// machine `old`'s under `new`: whether it changed.
+fn moved_last<T>(last: &mut BTreeMap<String, T>, old: &str, new: &str) -> bool {
+    if old == new {
+        return false;
+    }
+    let Some(target) = last.remove(old) else {
+        return false;
+    };
+    last.insert(new.to_owned(), target);
+    true
+}
+
+/// The address a machine's task names, and its others, which it has
+/// `addresses`, its link at an address in a state: where it is up, or
+/// what it tries, the one its failure is for; else its first.
+fn task_addresses<'a>(
+    addresses: &'a crate::config::Addresses,
+    link: Option<(&'a str, &LinkState)>,
+) -> (&'a str, Vec<&'a str>) {
+    let shown = match link {
+        Some((at, state)) if !matches!(state, LinkState::Off) && !at.is_empty() => at,
+        _ => addresses.first(),
+    };
+    let others = (addresses.0.iter())
+        .map(String::as_str)
+        .filter(|a| *a != shown)
+        .collect();
+    (shown, others)
+}
+
+/// Machine `name`'s task: it has `addresses`, and its link, if it has one,
+/// is at an address in a state.
+fn machine_task(
+    name: &str,
+    addresses: &crate::config::Addresses,
+    link: Option<(&str, &LinkState)>,
+) -> Task {
+    let (target, others) = task_addresses(addresses, link);
+    let also = match others.is_empty() {
+        true => String::new(),
+        false => format!(" · also: {}", others.join(", ")),
+    };
+    let state = link.map(|(_, state)| state);
+    let open = ("Open", MenuAction::OpenMachines(name.to_owned()));
     let connect = ("Connect", MenuAction::ConnectMachine(name.to_owned()));
     let disconnect = ("Disconnect", MenuAction::DisconnectMachine(name.to_owned()));
     let remove = ("Remove", MenuAction::RemoveMachine(name.to_owned()));
     let task = |chip: String, detail: String, dot, actions| Task {
         title: format!("Machine {name}"),
         chip,
-        detail,
+        detail: detail + &also,
         dot,
         actions,
     };
@@ -1488,31 +1936,31 @@ fn machine_task(name: &str, target: &str, state: Option<&LinkState>) -> Task {
             name.to_owned(),
             format!("{target} · herdr {}", info.site.version),
             Dot::Done,
-            vec![disconnect, remove],
+            vec![open, disconnect, remove],
         ),
         Some(LinkState::Connecting(step)) => task(
             format!("{name} connecting"),
             format!("{target} · {step}"),
             Dot::Working,
-            vec![disconnect, remove],
+            vec![open, disconnect, remove],
         ),
         Some(LinkState::Retrying(failure)) => task(
             format!("{name} away"),
             format!("{target} · {} Trying again", failure.why()),
             Dot::Blocked,
-            vec![disconnect, remove],
+            vec![open, disconnect, remove],
         ),
         Some(LinkState::Failed(failure)) => task(
             format!("{name}: can't connect"),
             format!("{target} · {}", failure.why()),
             Dot::Failed,
-            vec![connect, remove],
+            vec![open, connect, remove],
         ),
         Some(LinkState::Off) | None => task(
             format!("{name} disconnected"),
             format!("{target} · not connected"),
             Dot::Idle,
-            vec![connect, remove],
+            vec![open, connect, remove],
         ),
     }
 }
@@ -1520,6 +1968,47 @@ fn machine_task(name: &str, target: &str, state: Option<&LinkState>) -> Task {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_rename_moves_the_machine_and_keeps_its_link() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut machines = Machines::default();
+        machines.saved.insert("box".into(), "me@box".into());
+        machines.saved.insert("zen".into(), "me@zen".into());
+        let link = Link {
+            target: "me@box".into(),
+            addresses: "me@box".into(),
+            serial: 7,
+            cancel: cancel.clone(),
+            state: LinkState::Connecting("x".into()),
+            lost: false,
+            work: None,
+            connected_since: None,
+            last_seen: None,
+        };
+        machines.links.insert("box".into(), link);
+        machines.names.insert("id1".into(), "box".into());
+        machines.names.insert("id0".into(), "box".into());
+        machines.names.insert("id2".into(), "zen".into());
+        assert_eq!(machines.link_named(7).as_deref(), Some("box"));
+        let moved = machines.rename("box", "crate");
+        assert_eq!(moved, ["id0", "id1"]);
+        assert_eq!(machines.saved.keys().collect::<Vec<_>>(), ["crate", "zen"]);
+        assert_eq!(machines.saved["crate"], "me@box".into());
+        // The same link, still running, and what its thread says finds it.
+        assert!(!machines.links.contains_key("box"));
+        assert_eq!(machines.links["crate"].serial, 7);
+        assert!(!cancel.load(Ordering::Relaxed));
+        assert_eq!(machines.link_named(7).as_deref(), Some("crate"));
+        assert_eq!(machines.link_named(8), None);
+        assert_eq!(machines.names["id0"], "crate");
+        assert_eq!(machines.names["id1"], "crate");
+        assert_eq!(machines.names["id2"], "zen");
+        // Turned off, it is stopped and says so.
+        machines.link_off("crate");
+        assert!(cancel.load(Ordering::Relaxed));
+        assert_eq!(machines.links["crate"].state, LinkState::Off);
+    }
 
     #[test]
     fn what_ssh_says_is_told_apart() {
@@ -1550,6 +2039,28 @@ mod tests {
         assert!(!valid_target("-J"));
         assert!(!valid_target("ana@h extra"));
         assert!(!valid_target(""));
+    }
+
+    #[test]
+    fn a_rename_moves_what_was_remembered_of_a_machine() {
+        let mut ids = BTreeMap::from([("old".to_owned(), vec!["id1".to_owned()])]);
+        assert!(moved_last(&mut ids, "old", "new"));
+        assert_eq!(ids.get("new"), Some(&vec!["id1".to_owned()]));
+        assert!(!moved_last(&mut ids, "gone", "other"), "nothing to move");
+    }
+
+    #[test]
+    fn each_connection_has_sockets_of_its_own() {
+        let dir = Path::new("/run/user/1000/gerdr/m");
+        let (one, two) = (link_stem(dir, "me@box"), link_stem(dir, "me@box"));
+        assert_ne!(one, two, "a link ending would take the next one's sockets");
+        let name = one.file_name().unwrap().to_string_lossy().into_owned();
+        let pid = std::process::id().to_string();
+        assert_eq!(
+            name.split('-').next(),
+            Some(pid.as_str()),
+            "clear_leftovers reads the pid"
+        );
     }
 
     #[test]
@@ -1671,16 +2182,273 @@ mod tests {
     #[test]
     fn what_a_task_offers_goes_with_its_state() {
         let labels = |task: &Task| task.actions.iter().map(|(l, _)| *l).collect::<Vec<_>>();
-        let off = machine_task("b", "a@b", None);
+        let one = "a@b".into();
+        let off = machine_task("b", &one, None);
         assert_eq!(off.dot, Dot::Idle);
         assert!(!off.runs(), "a machine disconnected isn't in the footer");
-        assert_eq!(labels(&off), ["Connect", "Remove"]);
+        assert_eq!(labels(&off), ["Open", "Connect", "Remove"]);
+        assert_eq!(off.detail, "a@b · not connected");
         assert!(remove_machine_body(&["A".to_owned(), "B".to_owned()]).contains("\nA\nB\n"));
-        let failed = machine_task("b", "a@b", Some(&LinkState::Failed(Failure::Auth)));
+        let failed = machine_task("b", &one, Some(("a@b", &LinkState::Failed(Failure::Auth))));
         assert_eq!(failed.dot, Dot::Failed);
-        assert_eq!(labels(&failed), ["Connect", "Remove"]);
-        let away = machine_task("b", "a@b", Some(&LinkState::Retrying(Failure::LinkLost)));
-        assert_eq!(labels(&away), ["Disconnect", "Remove"]);
+        assert_eq!(labels(&failed), ["Open", "Connect", "Remove"]);
+        let lost = LinkState::Retrying(Failure::LinkLost);
+        let away = machine_task("b", &one, Some(("a@b", &lost)));
+        assert_eq!(labels(&away), ["Open", "Disconnect", "Remove"]);
+    }
+
+    #[test]
+    fn a_task_names_the_address_in_use_and_the_others() {
+        let two = crate::config::Addresses(vec!["a@office".into(), "a@home".into()]);
+        let up = LinkState::Up(LinkInfo {
+            site: Site {
+                version: "0.9.1".into(),
+                ..Site::default()
+            },
+            socket: PathBuf::new(),
+            control: PathBuf::new(),
+        });
+        let task = machine_task("b", &two, Some(("a@home", &up)));
+        assert_eq!(task.detail, "a@home · herdr 0.9.1 · also: a@office");
+        // Not connected: its first.
+        let task = machine_task("b", &two, Some(("a@home", &LinkState::Off)));
+        assert_eq!(task.detail, "a@office · not connected · also: a@home");
+        let task = machine_task("b", &two, None);
+        assert_eq!(task.detail, "a@office · not connected · also: a@home");
+        // Failed: the address its failure is for.
+        let failed = LinkState::Failed(Failure::Auth);
+        let (shown, others) = task_addresses(&two, Some(("a@home", &failed)));
+        assert_eq!((shown, others), ("a@home", vec!["a@office"]));
+    }
+
+    fn strings(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn the_address_that_answered_last_is_tried_first() {
+        let list = strings(&["a@office", "a@home", "a@vpn"]);
+        assert_eq!(try_order(&list, None), list);
+        assert_eq!(
+            try_order(&list, Some("a@vpn")),
+            strings(&["a@vpn", "a@office", "a@home"])
+        );
+        assert_eq!(try_order(&list, Some("a@office")), list);
+        // One no longer the machine's is no reason to change the order.
+        assert_eq!(try_order(&list, Some("a@gone")), list);
+        assert!(try_order(&[], Some("a@x")).is_empty());
+        // Renamed, it moves with the machine.
+        let mut last = BTreeMap::from([("box".to_owned(), "a@home".to_owned())]);
+        assert!(moved_last(&mut last, "box", "crate"));
+        assert_eq!(
+            last,
+            BTreeMap::from([("crate".to_owned(), "a@home".to_owned())])
+        );
+        assert!(!moved_last(&mut last, "box", "zen"));
+        assert!(!moved_last(&mut last, "crate", "crate"));
+        assert_eq!(last.len(), 1);
+    }
+
+    /// The address up and its id, or what each address came to.
+    type Tried = Result<(String, String), Vec<(String, Failure)>>;
+
+    /// What `try_addresses` comes to over addresses each answering as
+    /// `answers` says (`Ok(id)`, or a failure), and the addresses tried.
+    fn tried(known: &[&str], answers: &[(&str, Result<&str, Failure>)]) -> (Tried, Vec<String>) {
+        let order: Vec<String> = answers.iter().map(|(a, _)| (*a).to_owned()).collect();
+        let mut seen = Vec::new();
+        let result = try_addresses(
+            "box",
+            &order,
+            &strings(known),
+            |target| {
+                seen.push(target.to_owned());
+                let (_, answer) = answers.iter().find(|(a, _)| *a == target).unwrap();
+                answer.clone().map(str::to_owned)
+            },
+            |id: &String| id.as_str(),
+        );
+        (result, seen)
+    }
+
+    #[test]
+    fn addresses_are_tried_in_turn_until_one_answers() {
+        let (result, seen) = tried(
+            &["id1"],
+            &[
+                ("a@office", Err(Failure::TimedOut)),
+                ("a@home", Ok("id1")),
+                ("a@vpn", Ok("id1")),
+            ],
+        );
+        assert_eq!(result.unwrap(), ("a@home".to_owned(), "id1".to_owned()));
+        assert_eq!(seen, ["a@office", "a@home"], "none after the one up");
+        // Stopped, it tries no more.
+        let (result, seen) = tried(
+            &[],
+            &[("a@office", Err(Failure::Stopped)), ("a@home", Ok("id1"))],
+        );
+        assert_eq!(
+            result.unwrap_err(),
+            [("a@office".to_owned(), Failure::Stopped)]
+        );
+        assert_eq!(seen, ["a@office"]);
+    }
+
+    #[test]
+    fn an_address_answering_as_another_machine_is_passed_over() {
+        let (result, seen) = tried(
+            &["id1", "id0"],
+            &[("a@office", Ok("other")), ("a@home", Ok("id0"))],
+        );
+        assert_eq!(result.unwrap(), ("a@home".to_owned(), "id0".to_owned()));
+        assert_eq!(seen, ["a@office", "a@home"]);
+        // A machine never seen takes the first that answers.
+        let (result, _) = tried(&[], &[("a@office", Ok("other")), ("a@home", Ok("id0"))]);
+        assert_eq!(result.unwrap(), ("a@office".to_owned(), "other".to_owned()));
+        // None of them it: said so, over any address that was away.
+        let (result, _) = tried(
+            &["id1"],
+            &[
+                ("a@office", Err(Failure::TimedOut)),
+                ("a@home", Ok("other")),
+                ("a@vpn", Err(Failure::Auth)),
+            ],
+        );
+        let tries = result.unwrap_err();
+        assert_eq!(tries.len(), 3);
+        assert_eq!(
+            most_telling(tries),
+            Some(("a@home".to_owned(), Failure::OtherMachine("box".into())))
+        );
+    }
+
+    #[test]
+    fn what_no_address_came_to_is_the_most_telling() {
+        let at = |a: &str, f: Failure| (a.to_owned(), f);
+        let away = Failure::Unreachable("Connection refused".into());
+        // Away at one, refused its keys at the other: the keys.
+        let tries = vec![
+            at("a@office", Failure::TimedOut),
+            at("a@home", Failure::Auth),
+        ];
+        assert_eq!(most_telling(tries), Some(at("a@home", Failure::Auth)));
+        // What SSH said over a plain timeout.
+        let tries = vec![
+            at("a@office", Failure::TimedOut),
+            at("a@home", away.clone()),
+        ];
+        assert_eq!(most_telling(tries), Some(at("a@home", away.clone())));
+        // Alike, the first tried.
+        let tries = vec![
+            at("a@office", Failure::NoHerdr),
+            at("a@home", Failure::HostKey),
+        ];
+        assert_eq!(most_telling(tries), Some(at("a@office", Failure::NoHerdr)));
+        assert_eq!(most_telling(Vec::new()), None);
+        // Several are named as tried, and given less time each.
+        assert_eq!(
+            first_step("a@home", true),
+            ("trying a@home\u{2026}".into(), CONNECT_EACH_SECS)
+        );
+        assert_eq!(first_step("a@home", false).1, CONNECT_SECS);
+    }
+
+    /// A link up in a test: `hold` ends it as told.
+    struct Fake(LinkInfo, Failure);
+
+    impl Held for Fake {
+        fn info(&self) -> &LinkInfo {
+            &self.0
+        }
+
+        fn hold(&mut self, _: &AtomicBool) -> Failure {
+            self.1.clone()
+        }
+    }
+
+    /// What `run_link_with` tells, its addresses answering as `answers`
+    /// says, each link up ending in `ends`.
+    fn link_events(
+        known: &[&str],
+        answers: &[(&str, Result<&str, Failure>)],
+        ends: Failure,
+    ) -> Vec<LinkEvent> {
+        let events = std::cell::RefCell::new(Vec::new());
+        let order = answers.iter().map(|(a, _)| (*a).to_owned()).collect();
+        run_link_with(
+            "box".into(),
+            order,
+            strings(known),
+            false,
+            &AtomicBool::new(false),
+            |event| events.borrow_mut().push(event),
+            |target: &str, several, _: &AtomicBool, step: &mut dyn FnMut(String)| {
+                step(first_step(target, several).0);
+                let (_, answer) = answers.iter().find(|(a, _)| *a == target).unwrap();
+                let site = |id: &str| Site {
+                    id: id.to_owned(),
+                    ..Site::default()
+                };
+                let info = |id| LinkInfo {
+                    site: site(id),
+                    socket: PathBuf::new(),
+                    control: PathBuf::new(),
+                };
+                answer.clone().map(|id| Fake(info(id), ends.clone()))
+            },
+        );
+        events.into_inner()
+    }
+
+    #[test]
+    fn a_link_up_says_which_address_answered() {
+        let events = link_events(
+            &["id1"],
+            &[("a@office", Err(Failure::TimedOut)), ("a@home", Ok("id1"))],
+            Failure::Auth,
+        );
+        let said: Vec<String> = (events.iter())
+            .map(|e| match e {
+                LinkEvent::Step { target, text } => format!("step {target}: {text}"),
+                LinkEvent::Up { target, info } => format!("up {target} as {}", info.site.id),
+                LinkEvent::Down {
+                    target,
+                    failure,
+                    retrying,
+                } => format!("down {target}: {failure:?} {retrying}"),
+            })
+            .collect();
+        assert_eq!(
+            said,
+            [
+                "step a@office: trying a@office\u{2026}",
+                "step a@home: trying a@home\u{2026}",
+                "up a@home as id1",
+                "down a@home: Auth false",
+            ]
+        );
+        // None up: the most telling failure, with its address.
+        let events = link_events(
+            &["id1"],
+            &[("a@office", Err(Failure::TimedOut)), ("a@home", Ok("id9"))],
+            Failure::Stopped,
+        );
+        let Some(LinkEvent::Down {
+            target, failure, ..
+        }) = events.last()
+        else {
+            panic!("{events:?}");
+        };
+        assert_eq!(target, "a@home");
+        assert_eq!(failure, &Failure::OtherMachine("box".into()));
+        // Stopped while up: nothing more said.
+        let events = link_events(&[], &[("a@home", Ok("id1"))], Failure::Stopped);
+        assert!(
+            matches!(events.last(), Some(LinkEvent::Up { .. })),
+            "{events:?}"
+        );
+        assert_eq!(events.len(), 2);
     }
 
     fn press(dialog: &mut MachineDialog, sym: Keysym) -> Option<MachineOutcome> {

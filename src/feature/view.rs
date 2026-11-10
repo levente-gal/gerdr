@@ -150,6 +150,16 @@ pub fn read_place(root: &Path) -> Option<Place> {
     serde_json::from_slice(&raw).ok()
 }
 
+/// The machine kept under `root` is called `new` now, if it was `old`:
+/// whether its place said `old` and was written again.
+pub fn rename_place(root: &Path, old: &str, new: &str) -> std::io::Result<bool> {
+    let Some(mut place) = read_place(root).filter(|p| p.name == old) else {
+        return Ok(false);
+    };
+    place.name = new.to_owned();
+    write_place(root, &place).map(|()| true)
+}
+
 /// The folder paths here read as, for the copy of machine `id`: its data
 /// folder's are in the copy, its home's in the home here.
 pub fn side_here(home: &str, root: &Path) -> Side {
@@ -691,6 +701,16 @@ mod tests {
             home: "/home/ana".into(),
             data: "/home/ana/.local/share/gerdr".into(),
         };
+        write_place(&there, &place).unwrap();
+        // Renamed, it keeps the rest; another name is left be.
+        assert!(rename_place(&there, "box", "crate").unwrap());
+        assert!(!rename_place(&there, "box", "other").unwrap());
+        assert!(!rename_place(&root(data, "none"), "box", "x").unwrap());
+        let renamed = read_place(&there).unwrap();
+        assert_eq!(
+            (renamed.name.as_str(), renamed.home.as_str()),
+            ("crate", "/home/ana")
+        );
         write_place(&there, &place).unwrap();
         // A folder saying nothing of itself isn't one.
         std::fs::create_dir_all(root(data, "m2")).unwrap();

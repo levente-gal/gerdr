@@ -2367,6 +2367,362 @@ fn dump_machine() {
     }
 }
 
+// ------------------------------------------------------- machines panel
+
+/// The machines panel: a connected machine with three runs, the keyboard
+/// on a run's button; a failed one with what to do and its fix; the add
+/// row; a machine Del was pressed on once; then the connected one's edit
+/// form: open with the keyboard in its address, trying the new address,
+/// the address reaching another machine, and two addresses with the
+/// keyboard in the second and the pointer on its ×; then the connected one
+/// found to be the same machine as another saved one.
+fn machines_panel(case: usize) -> super::MachinesPanelView {
+    use super::{Dot, MachineDetailView, MachineEditView, MachineRowView, MachineRunView};
+    use super::{MachinesFocus, MachinesHit, MachinesPanelView};
+    let strings = |xs: &[&str]| xs.iter().map(|x| (*x).to_owned()).collect::<Vec<_>>();
+    let failed = case == 1;
+    let row = |name: &str, address: &str, state: &str, dot, armed| MachineRowView {
+        name: name.into(),
+        address: address.into(),
+        state: state.into(),
+        dot,
+        armed,
+    };
+    let mut rows = vec![
+        row(
+            "ZenBook",
+            "lga@zenbook-office",
+            "connected",
+            Dot::Done,
+            false,
+        ),
+        row(
+            "Build box",
+            "ana@build-box",
+            if failed { "failed" } else { "off" },
+            if failed { Dot::Failed } else { Dot::Idle },
+            case == 3,
+        ),
+    ];
+    let run = |title: &str, detail: &str, dot, buttons: &[&str]| MachineRunView {
+        title: title.into(),
+        detail: detail.into(),
+        dot,
+        buttons: strings(buttons),
+    };
+    let zenbook = MachineDetailView {
+        name: "ZenBook".into(),
+        dot: Dot::Done,
+        facts: strings(&[
+            "lga@zenbook-office",
+            "up 2 h \u{b7} herdr 0.9.3 \u{b7} load 1.2 / 8",
+            "id 4f2a9c",
+        ]),
+        problem: None,
+        how: None,
+        runs: vec![
+            run(
+                "asset-tag \u{b7} Build agent",
+                "Claude \u{b7} waiting \u{b7} 12m",
+                Dot::Blocked,
+                &["Show", "Stop"],
+            ),
+            run(
+                "asset-tag \u{b7} Verify checks",
+                "3 of 5 passed",
+                Dot::Done,
+                &["Show"],
+            ),
+            run(
+                "asset-tag \u{b7} sandbox",
+                "web, db \u{b7} up 40m",
+                Dot::Idle,
+                &["Show", "Stop"],
+            ),
+        ],
+        no_runs: "Nothing runs there".into(),
+        buttons: strings(&["Remove", "Disconnect"]),
+        edit: None,
+    };
+    let build_box = MachineDetailView {
+        name: "Build box".into(),
+        dot: if failed { Dot::Failed } else { Dot::Idle },
+        facts: strings(&["ana@build-box"]),
+        problem: failed.then(|| "It didn't accept any of your SSH keys.".to_owned()),
+        how: failed.then(|| {
+            "Add a key with ssh-copy-id ana@build-box. A locked key needs ssh-add.".to_owned()
+        }),
+        runs: Vec::new(),
+        no_runs: "Connect it to see what runs there".into(),
+        buttons: if failed {
+            strings(&["Remove", "Copy command", "Try again"])
+        } else {
+            strings(&["Remove", "Connect"])
+        },
+        edit: None,
+    };
+    let (selected, detail, focus, hover) = match case {
+        0 => (
+            0,
+            Some(zenbook),
+            MachinesFocus::Run(0, 1),
+            Some(MachinesHit::Row(1)),
+        ),
+        1 => (
+            1,
+            Some(build_box),
+            MachinesFocus::List,
+            Some(MachinesHit::Button(2)),
+        ),
+        2 => (2, None, MachinesFocus::List, Some(MachinesHit::Hint(0))),
+        3 => (1, Some(build_box), MachinesFocus::List, None),
+        8 => {
+            rows.push(row(
+                "ZenBook Office",
+                "lga-asset@zenbook-office",
+                "connected",
+                Dot::Done,
+                false,
+            ));
+            let mut zenbook = zenbook;
+            zenbook.facts.push("Same machine as ZenBook Office".into());
+            zenbook.buttons = strings(&["Merge ZenBook Office", "Remove", "Edit", "Disconnect"]);
+            (0, Some(zenbook), MachinesFocus::List, None)
+        }
+        _ => {
+            let (busy, failed) = (case == 5, case == 6);
+            let addresses = if case == 7 {
+                vec![
+                    Line::from("lga-asset@zenbook-office"),
+                    Line::from("lga-asset@192.168.101.14"),
+                ]
+            } else {
+                vec![Line::from("lga@zenbook-home")]
+            };
+            let edit = MachineEditView {
+                name: Line::from("ZenBook"),
+                addresses,
+                error: failed
+                    .then(|| "That address reaches another machine, not ZenBook".to_owned()),
+                how: failed.then(|| {
+                    "It calls itself fedora-home. Check the address, or save it anyway.".to_owned()
+                }),
+                progress: busy.then(|| "SSH reached, looking around\u{2026}".to_owned()),
+                buttons: if busy {
+                    strings(&["Stop"])
+                } else if failed {
+                    strings(&["Cancel", "Save anyway", "Try again"])
+                } else {
+                    strings(&["Cancel", "Save"])
+                },
+                busy,
+            };
+            let mut zenbook = zenbook;
+            zenbook.runs.truncate(1);
+            zenbook.edit = Some(edit);
+            let (focus, hover) = match case {
+                4 => (MachinesFocus::EditAddress(0), Some(MachinesHit::EditButton(0))),
+                5 => (MachinesFocus::EditAddress(0), None),
+                7 => (
+                    MachinesFocus::EditAddress(1),
+                    Some(MachinesHit::EditRemoveAddress(1)),
+                ),
+                _ => (MachinesFocus::EditButton(2), None),
+            };
+            (0, Some(zenbook), focus, hover)
+        }
+    };
+    MachinesPanelView {
+        tab: crate::chrome::MachinesTab::Machines,
+        rows,
+        selected,
+        first: 0,
+        detail,
+        focus,
+        runs_first: 0,
+        hover,
+        hints: [
+            ("Up / Down", "move"),
+            ("Tab", "next button"),
+            ("Enter", "press"),
+            ("Del", "remove"),
+            ("Esc", "close"),
+        ]
+        .map(|(k, a)| (k.to_owned(), a.to_owned()))
+        .into(),
+    }
+}
+
+const MACHINES_PANEL: [&str; 10] = [
+    "machines_connected",
+    "machines_failed",
+    "machines_add",
+    "machines_armed",
+    "machines_edit",
+    "machines_edit_trying",
+    "machines_edit_failed",
+    "machines_edit_addresses",
+    "machines_same_machine",
+    "machines_placement",
+];
+
+/// The Placement page: the open project's stages, the second focused, the
+/// pointer over the first's button.
+fn machines_placement() -> super::MachinesPanelView {
+    use super::{Dot, MachineDetailView, MachineRunView, MachinesFocus, MachinesHit};
+    use super::MachinesPanelView;
+    let stage = |title: &str, detail: &str, dot, button: &str| MachineRunView {
+        title: title.into(),
+        detail: detail.into(),
+        dot,
+        buttons: vec![button.into()],
+    };
+    MachinesPanelView {
+        tab: crate::chrome::MachinesTab::Placement,
+        rows: Vec::new(),
+        selected: 0,
+        first: 0,
+        detail: Some(MachineDetailView {
+            name: "asset-tag".into(),
+            dot: Dot::Idle,
+            facts: vec![
+                "Where each stage runs when a feature doesn't choose its own (Ctrl+Shift+W on its page)"
+                    .into(),
+            ],
+            problem: None,
+            how: None,
+            runs: vec![
+                stage("Discover", "Every feature follows this", Dot::Done, "Runs here"),
+                stage("Build", "2 features choose their own", Dot::Done, "Runs on ZenBook"),
+                stage("Verify", "Every feature follows this", Dot::Done, "Least busy"),
+                stage("Manual test", "1 feature chooses its own", Dot::Blocked, "Runs on Build box"),
+            ],
+            no_runs: String::new(),
+            buttons: Vec::new(),
+            edit: None,
+        }),
+        focus: MachinesFocus::Run(1, 0),
+        runs_first: 0,
+        hover: Some(MachinesHit::RunButton(0, 0)),
+        hints: [
+            ("Up / Down", "move"),
+            ("Left / Right", "machine"),
+            ("Ctrl+PgUp", "machines"),
+            ("Esc", "close"),
+        ]
+        .map(|(k, a)| (k.to_owned(), a.to_owned()))
+        .into(),
+    }
+}
+
+/// Case `case` of `MACHINES_PANEL`.
+fn machines_case(case: usize) -> super::MachinesPanelView {
+    match case {
+        9 => machines_placement(),
+        _ => machines_panel(case),
+    }
+}
+
+fn paint_machines_panel(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
+    let p = theme.palette();
+    let size = IDENTITY_OUTPUT.into();
+    (0..MACHINES_PANEL.len())
+        .map(|case| hash(painter.machines_panel(&machines_case(case), size, scale, p)))
+        .collect()
+}
+
+/// The recorded hashes of `MACHINES_PANEL`, per case in `CASES`.
+const GOLDEN_MACHINES_PANEL: [[u64; 10]; 4] = [
+    // Dark at 1
+    [
+        0x6c76be76ec20a202, // machines_connected
+        0x5c0c9f30c41b9cb7, // machines_failed
+        0x68acdee60a479840, // machines_add
+        0x666b38884d9bc834, // machines_armed
+        0x3522e3e42ae77895, // machines_edit
+        0xe147ca1a8d60d161, // machines_edit_trying
+        0xb3742748a6e26b27, // machines_edit_failed
+        0xf28bbcfa548b5af9, // machines_edit_addresses
+        0x3ab2c25dd1809018, // machines_same_machine
+        0x2e8cf5f40c751fbf, // machines_placement
+    ],
+    // Dark at 2
+    [
+        0xb96159c2b6529985, // machines_connected
+        0xbab4c3d6dc450180, // machines_failed
+        0x94ee851048cd8d54, // machines_add
+        0x93844adae99b927d, // machines_armed
+        0x8927c9460ce801d2, // machines_edit
+        0xbdaef3c424e78bd1, // machines_edit_trying
+        0xa053c85ab76c2985, // machines_edit_failed
+        0x992b29897c0025c0, // machines_edit_addresses
+        0x3ee6dbac3f3333cf, // machines_same_machine
+        0x1565c18353768b79, // machines_placement
+    ],
+    // Light at 1
+    [
+        0xd0a0e9feb8489792, // machines_connected
+        0x73288713d1a4714d, // machines_failed
+        0xe47c7533e6423ea3, // machines_add
+        0x47ddbe0bf898b316, // machines_armed
+        0x401c95bc5b66f959, // machines_edit
+        0x581dfff2fb0aee78, // machines_edit_trying
+        0x63f0c7dbf7e76a68, // machines_edit_failed
+        0x97d7f2eb69f1b468, // machines_edit_addresses
+        0x485d000c3271921f, // machines_same_machine
+        0xc8b04619599ab347, // machines_placement
+    ],
+    // Light at 2
+    [
+        0x6e7293ad4820aa9d, // machines_connected
+        0x312bbbff08715dfc, // machines_failed
+        0x5ae080c087afd891, // machines_add
+        0xcbdf16e5f21074ee, // machines_armed
+        0x874ae6f06f83f96b, // machines_edit
+        0xd96e98c60d264a75, // machines_edit_trying
+        0x4e852a04cf2a0e42, // machines_edit_failed
+        0xf90b63f66f91ca0d, // machines_edit_addresses
+        0x5b390d8b84deb325, // machines_same_machine
+        0x4aaa6202859e537f, // machines_placement
+    ],
+];
+
+#[test]
+fn the_machines_panel_paints_the_same_pixels() {
+    let golden: Vec<&[u64]> = GOLDEN_MACHINES_PANEL
+        .iter()
+        .map(|row| row.as_slice())
+        .collect();
+    check(&MACHINES_PANEL, &golden, paint_machines_panel);
+}
+
+/// With `GERDR_DUMP_DIR` set, write the machines panel there.
+#[test]
+fn dump_machines_panel() {
+    let Some(dir) = std::env::var_os("GERDR_DUMP_DIR") else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    let _ = std::fs::create_dir_all(&dir);
+    let painter = Painter::new();
+    let size = IDENTITY_OUTPUT.into();
+    for (theme, scale) in CASES {
+        let p = theme.palette();
+        let px = |v: i32| (v as f64 * scale).round() as usize;
+        let tag = format!("{}_{}", theme.name(), scale);
+        for (case, name) in MACHINES_PANEL.iter().enumerate() {
+            let view = machines_case(case);
+            let panel = super::machines_layout(&view, size).panel;
+            dump(
+                &dir,
+                &format!("{name}_{tag}"),
+                painter.machines_panel(&view, size, scale, p),
+                px(panel.size.w + 2 * super::SHADOW),
+            );
+        }
+    }
+}
+
 // ------------------------------------------------------- restart dialog
 
 /// The restart dialog: a workspace's commands, one exited and one unchecked,
@@ -2903,6 +3259,8 @@ pub(super) fn feature_tab() -> super::FeatureTabView {
             ],
         },
         activity: activity.into(),
+        running: Vec::new(),
+        running_more: 0,
         scroll: [0.0; 3],
         hover: None,
         hints: hints.map(|(k, a)| (k.to_owned(), a.to_owned())).into(),
@@ -3211,6 +3569,19 @@ fn feature_tab_verify_running() -> super::FeatureTabView {
             lines: Vec::new(),
         }],
     };
+    // The checks and the code graph run, shown under the header.
+    let row = |word, what: &str, steps, took: &str, buttons, node| super::RunningRow {
+        word,
+        what: what.into(),
+        steps,
+        took: took.into(),
+        buttons,
+        node,
+    };
+    view.running = vec![
+        row("checks", "", Some((1, 3)), "0:41", vec!["Stop"], Some(4)),
+        row("code graph", "", None, "0:07", Vec::new(), None),
+    ];
     view
 }
 
@@ -5544,7 +5915,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 62]; 4] = [
         0x9c264956301aa808, // tab_build_1920
         0xe189a91009663b5f, // tab_plan_ready_1180
         0xe5c6b54fe50866d8, // tab_verify_failed_1920
-        0x182a16a4819b681d, // tab_verify_running_1180
+        0x9e1fd8be91e7d60b, // tab_verify_running_1180
         0x82bb7f6171efd999, // tab_fix_plan_860
         0xcba33f7cc08d8eb1, // tab_ship_blocked_1180
         0xd5b4abfb64205d75, // tab_ship_routes_1180
@@ -5609,7 +5980,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 62]; 4] = [
         0x50fe8934c5dd77a6, // tab_build_1920
         0xd84ef3781722f490, // tab_plan_ready_1180
         0xd1ad4571a21deadf, // tab_verify_failed_1920
-        0xe95f15636a93b97f, // tab_verify_running_1180
+        0xb23a4ec0092115f5, // tab_verify_running_1180
         0x28fda7ee775f9d64, // tab_fix_plan_860
         0x64bbba562475b8c7, // tab_ship_blocked_1180
         0x564a27492b6c6f2b, // tab_ship_routes_1180
@@ -5674,7 +6045,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 62]; 4] = [
         0xb761367cbc399bdc, // tab_build_1920
         0xbd427b01de8543f6, // tab_plan_ready_1180
         0x7c07bc659866d87e, // tab_verify_failed_1920
-        0x4a8e336fe34d7a13, // tab_verify_running_1180
+        0xa69719dede91f5fc, // tab_verify_running_1180
         0xf0f24acb3a4499c2, // tab_fix_plan_860
         0x21a64da6beb2e85c, // tab_ship_blocked_1180
         0xe28dcf17bde728f8, // tab_ship_routes_1180
@@ -5739,7 +6110,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 62]; 4] = [
         0x728895e2aefa19d4, // tab_build_1920
         0x765df7bc08d22fb0, // tab_plan_ready_1180
         0x834e87d1b77bb685, // tab_verify_failed_1920
-        0x82805a0d8a12c5b7, // tab_verify_running_1180
+        0x369b6c154bbeb471, // tab_verify_running_1180
         0x0c25cafde96fceda, // tab_fix_plan_860
         0x932f711ff301e42d, // tab_ship_blocked_1180
         0xafbcb09d60998def, // tab_ship_routes_1180

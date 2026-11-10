@@ -789,8 +789,8 @@ impl Gerdr {
     }
 
     /// The fix plan of feature `slug` is approved: the fixes go, then its
-    /// comments are deleted, its review closed and the agent shown. A
-    /// refusal keeps them all.
+    /// comments are deleted and its review closed; the agent shows only if
+    /// it waits for its prompt (`show_build_agent`). A refusal keeps them all.
     pub(crate) fn make_fixes_now(&mut self, project: &str, slug: &str) {
         if let Some(why) = self.checks_refusal(project, slug) {
             return self.show_warning(why);

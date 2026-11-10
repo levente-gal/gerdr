@@ -530,6 +530,27 @@ pub fn started_line(at: u64) -> String {
     format!("{RUN_START} {}", super::verify::utc(at))
 }
 
+/// `feature`'s setup on `machine` (`None`: this one) as it stands for what
+/// waits on it: none once a worktree here was made after it started. What it
+/// set up went with the worktrees it was in, as when a takeover makes them
+/// anew, and it runs again.
+pub fn standing<'a>(feature: &'a Feature, machine: Option<&str>) -> Option<&'a SetupRun> {
+    let run = feature.setup_at(machine)?;
+    let anew = machine.is_none()
+        && (feature.repos.iter()).any(|repo| made_after(&repo.worktree, run.started));
+    (!anew).then_some(run)
+}
+
+/// Whether worktree `worktree` was made after unix second `at`: its `.git`
+/// file is written by `git worktree add`, and not by what goes on in it.
+fn made_after(worktree: &Path, at: u64) -> bool {
+    std::fs::symlink_metadata(worktree.join(".git"))
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|made| made.duration_since(std::time::UNIX_EPOCH).ok())
+        .is_some_and(|made| made.as_secs() > at)
+}
+
 /// Whether `feature` has a worktree to set up.
 pub fn has_work(feature: &Feature) -> bool {
     feature.repos.iter().any(|repo| repo.worktree.is_dir())
@@ -1683,6 +1704,34 @@ mod tests {
             with_expected(wt, Vec::new()),
             ["api/.venv", "app/.venv", "node_modules", "svc/node_modules"]
         );
+    }
+
+    #[test]
+    fn a_setup_stands_until_its_worktrees_are_made_anew() {
+        let t = Temp::new();
+        let mut f = feature_over(&t, &["api"], &[]);
+        let wt = f.repos[0].worktree.clone();
+        if !wt.join(".git").exists() {
+            std::fs::create_dir_all(&wt).unwrap();
+            std::fs::write(wt.join(".git"), "gitdir: /x\n").unwrap();
+        }
+        let now = crate::feature::now();
+        let run = |machine: Option<&str>, started: u64| SetupRun {
+            machine: machine.map(str::to_owned),
+            started,
+            finished: Some(started + 1),
+            ..SetupRun::default()
+        };
+        // Made before the setup started: it set them up.
+        f.begin_setup(run(None, now + 60));
+        assert!(standing(&f, None).is_some());
+        // Made after it: what it put there went with the old ones.
+        f.begin_setup(run(None, now - 3600));
+        assert!(standing(&f, None).is_none());
+        assert!(f.setup_at(None).is_some());
+        // Another machine's worktrees aren't the ones here.
+        f.begin_setup(run(Some("m1"), now - 3600));
+        assert!(standing(&f, Some("m1")).is_some());
     }
 
     #[test]

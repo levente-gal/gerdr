@@ -2,6 +2,8 @@
 //!
 //! The press is held (`Taking`) while a thread of its own brings the feature's
 //! files and commits, gets the writer to let go and makes the record this machine's.
+//! Small ignored files of its worktrees there, like `.env`, come too: a setup
+//! here copies only from the main worktree here, which may never have had them.
 //! Then the press goes on as if nothing happened, unless the feature changed on
 //! the way: what the user pressed on isn't there to press any more.
 //!
@@ -29,7 +31,7 @@ use crate::{
         lease::{self, Answer, Request},
         remote::{self, Paths, Reach, Side, Trouble},
         sandbox_run::{self, SandboxRun},
-        store, view,
+        setup, store, view,
     },
     feature_checks::checks_running,
     features::{Job, PanelOutcome},
@@ -78,6 +80,8 @@ pub struct Taken {
     pub feature: Feature,
     /// It is as it was when the user pressed.
     pub same: bool,
+    /// Ignored files of its worktrees there that didn't come, a line each.
+    pub missed: Vec<String>,
 }
 
 /// Why a feature stays where it is.
@@ -206,7 +210,7 @@ impl TakeJob {
             TakeEnd::Failed(format!("Couldn't save the record here: {err}"))
         })?;
         // From when it left here last.
-        for file in [lease::HANDED_TO, lease::REQUEST, lease::ANSWER] {
+        for file in [lease::HANDED_TO, lease::REQUEST, lease::ANSWER, lease::LEFT, lease::TOLD] {
             if let Err(err) = std::fs::remove_file(dir.join(file))
                 && err.kind() != std::io::ErrorKind::NotFound
             {
@@ -276,9 +280,12 @@ impl TakeJob {
             reach.view_code(&feature, &self.places(&feature), &mut known, cancel)?;
             stopped()?;
             self.settle(&feature, cancel)?;
+            step("bringing its ignored files".to_owned());
+            let missed = self.bring_ignored(reach, &feature, cancel);
             Ok(Taken {
                 same: self.same(&record),
                 feature,
+                missed,
             })
         })();
         match &finished {
@@ -300,6 +307,56 @@ impl TakeJob {
             }
         }
         finished
+    }
+
+    /// Copy the small ignored files of the feature's worktrees there, like
+    /// `.env`, into those here that lack them. The main worktree here may never
+    /// have had them, and a setup here copies only from it. What didn't come is
+    /// said a line each: the feature is here already.
+    fn bring_ignored(&self, reach: &Reach, feature: &Feature, cancel: &AtomicBool) -> Vec<String> {
+        let mut missed = Vec::new();
+        for place in self.places(feature) {
+            let (Some(there), Some(local)) = (&place.worktree, &place.local_worktree) else {
+                continue;
+            };
+            if !local.is_dir() {
+                continue;
+            }
+            let key = &place.key;
+            let script = remote::ignored_files_script(there, setup::MAX_FILE);
+            let listed = match reach.script(&script, cancel) {
+                Ok(out) => out,
+                Err(trouble) => {
+                    let why = trouble.text();
+                    tracing::warn!("{key}: listing its ignored files there: {why}");
+                    missed.push(format!("{key} (couldn't list them: {why})"));
+                    continue;
+                }
+            };
+            let items: Vec<String> = (listed.lines())
+                .filter(|item| local.join(item).symlink_metadata().is_err())
+                .map(str::to_owned)
+                .collect();
+            if items.is_empty() {
+                continue;
+            }
+            if let Err(trouble) = reach.pull_ignored(there, local, &items, cancel) {
+                let why = trouble.text();
+                tracing::warn!("{key}: bringing {items:?}: {why}");
+                missed.push(format!("{key}: {} ({why})", items.join(", ")));
+                continue;
+            }
+            // What this branch doesn't ignore would show as a change here.
+            let wt = local.to_string_lossy();
+            match remote::local_script(&remote::unignored_script(&wt, &items), cancel) {
+                Ok(out) => {
+                    let left: Vec<&str> = out.lines().collect();
+                    tracing::info!("{key}: brought {items:?}, not kept as not ignored: {left:?}");
+                }
+                Err(trouble) => tracing::warn!("{key}: ignored files brought: {}", trouble.text()),
+            }
+        }
+        missed
     }
 
     /// Get the writer to let go, as it has to with a gerdr open there.
@@ -402,6 +459,7 @@ impl TakeJob {
         Ok(Taken {
             same: self.same(&record),
             feature,
+            missed: Vec::new(),
         })
     }
 
@@ -452,6 +510,13 @@ impl Gerdr {
         if self.work_of(&id).is_none() {
             let root = view::root(&crate::projects::data_dir(), &id);
             if !view::placed_slugs(&root, project).iter().any(|s| s == slug) {
+                // Shown as it left here: what was done there since is there only.
+                let dir = store::project_dir(None, project).join(slug);
+                if lease::left_here(&dir).is_some_and(|(_, to)| to == id) {
+                    return self.show_warning(format!(
+                        "{name} can't be reached, and \u{201c}{title}\u{201d} went on there: it can change once {name} is back"
+                    ));
+                }
                 return self.show_warning(format!(
                     "{name} can't be reached, and the code of \u{201c}{title}\u{201d} never came here"
                 ));
@@ -639,7 +704,11 @@ impl Gerdr {
                 };
             }
         };
-        let Taken { feature, same } = *taken;
+        let Taken {
+            feature,
+            same,
+            missed,
+        } = *taken;
         // What it was seen as goes, what it names is asked of those machines now.
         // The tabs of a sandbox that went on on the writer are still told of there.
         let still: Vec<String> = view::panes_of(&feature).into_iter().map(str::to_owned).collect();
@@ -686,6 +755,12 @@ impl Gerdr {
             ),
             false => format!("\u{201c}{title}\u{201d} is written here now"),
         });
+        if !missed.is_empty() {
+            self.show_warning(format!(
+                "Ignored files like .env didn't come from {name}: {}. Copy them into the worktrees here",
+                missed.join("; ")
+            ));
+        }
         let Some(press) = taking.press else {
             return;
         };
@@ -1007,7 +1082,7 @@ impl Gerdr {
             .collect();
         for (feature, to) in moved {
             self.leave_feature(project, &feature.slug, &to, &feature, true);
-            self.say_moved(project, &feature.slug, &feature.title, &to);
+            self.say_moved(project, &feature.slug, &feature.title, &to, true);
         }
     }
 
@@ -1057,6 +1132,10 @@ impl Gerdr {
             });
         }
         let handed = dir.join(lease::HANDED);
+        // It shows by this while that machine can't be reached (`show_left`).
+        if let Err(err) = std::fs::copy(dir.join(store::FILE), dir.join(lease::LEFT)) {
+            tracing::warn!("keeping {slug} as it leaves: {err}");
+        }
         let moved = crate::projects::write_atomic(&dir.join(lease::HANDED_TO), request.machine.as_bytes())
             .and_then(|()| std::fs::rename(dir.join(store::FILE), &handed));
         if let Err(err) = moved {
@@ -1080,7 +1159,7 @@ impl Gerdr {
             },
         );
         self.leave_feature(project, slug, &request.machine, &feature, true);
-        self.say_moved(project, slug, &feature.title, &request.machine);
+        self.say_moved(project, slug, &feature.title, &request.machine, true);
     }
 
     /// Why this gerdr keeps `feature`: something of it at work that only it can
@@ -1143,8 +1222,9 @@ impl Gerdr {
         }
         // With that machine connected it shows from there in a moment. Until then
         // it shows as it was, or its workspace would go with it: its files are
-        // still here, and only what that machine tells replaces it.
-        if self.work_of(to).is_some() {
+        // still here, and only what that machine tells replaces it. So does one
+        // gone to a machine saved here and away: it tells once it is back.
+        if self.work_of(to).is_some() || self.machine_saved(to) {
             let mut shown = feature.clone();
             shown.writer = Some(to.to_owned());
             let list = self.features.viewed.entry(project.to_owned()).or_default();
@@ -1190,17 +1270,31 @@ impl Gerdr {
         self.sync_feature_page();
     }
 
-    /// Say that feature `title` went to machine `to`: with no link there, nothing
-    /// is left to show it by.
-    pub(crate) fn say_moved(&mut self, project: &str, slug: &str, title: &str, to: &str) {
+    /// Say that feature `title` went to machine `to`, from this one with
+    /// `from_here`: with no link there, nothing is left to show it by, but for
+    /// the record as it left here (`leave_feature`).
+    pub(crate) fn say_moved(
+        &mut self,
+        project: &str,
+        slug: &str,
+        title: &str,
+        to: &str,
+        from_here: bool,
+    ) {
         let name = self.machine_name(to);
         let kept = match self.features.kept.contains_key(&(project.to_owned(), slug.to_owned())) {
             true => ". Its sandbox keeps running here",
             false => "",
         };
+        lease::mark_told(&store::project_dir(None, project).join(slug));
         if self.work_of(to).is_some() {
             return self.show_notice(format!(
                 "\u{201c}{title}\u{201d} is written on {name} now{kept}"
+            ));
+        }
+        if from_here && self.machine_saved(to) {
+            return self.show_notice(format!(
+                "\u{201c}{title}\u{201d} is written on {name} now: until {name} is connected, it shows as it left here{kept}"
             ));
         }
         let running = format!(
@@ -1210,6 +1304,79 @@ impl Gerdr {
             "\u{201c}{title}\u{201d} is written on {name} now: connect it here to see it{kept}"
         );
         self.close_feature_workspace(project, slug, running, closed);
+    }
+
+    /// The features of `project` that left this machine, and that no machine
+    /// told of since, shown as they left (`lease::LEFT`), written by the machine
+    /// they went to, if it is saved here: that one replaces them once it tells.
+    /// A move that happened while gerdr was closed is told once.
+    pub(crate) fn show_left(&mut self, project: &str) {
+        let Ok(entries) = std::fs::read_dir(store::project_dir(None, project)) else {
+            return;
+        };
+        let mut dirs: Vec<PathBuf> = (entries.filter_map(Result::ok))
+            .map(|entry| entry.path())
+            .filter(|path| path.is_dir())
+            .collect();
+        dirs.sort();
+        let mut changed = false;
+        for dir in dirs {
+            let Some(slug) = dir.file_name().and_then(|n| n.to_str()).map(str::to_owned) else {
+                continue;
+            };
+            let Some((raw, to)) = lease::left_here(&dir) else {
+                continue;
+            };
+            if Self::is_this_machine(&to) {
+                continue;
+            }
+            // Its copy from there came before: that is newer.
+            if let Some(shown) = self.feature(project, &slug) {
+                if shown.writer.as_deref() == Some(to.as_str()) {
+                    lease::forget_left(&dir);
+                }
+                continue;
+            }
+            let mut feature: Feature = match serde_json::from_slice(&raw) {
+                Ok(feature) => feature,
+                Err(err) => {
+                    tracing::warn!("reading {}: {err}", dir.join(lease::LEFT).display());
+                    continue;
+                }
+            };
+            store::attach_sides(&dir, &mut feature);
+            feature.migrate(feature::now());
+            let title = feature.title.clone();
+            if self.machine_saved(&to) {
+                feature.writer = Some(to.clone());
+                let list = self.features.viewed.entry(project.to_owned()).or_default();
+                list.push(feature);
+                list.sort_by(|a, b| a.created.cmp(&b.created).then_with(|| a.slug.cmp(&b.slug)));
+                changed = true;
+            }
+            if !lease::told(&dir) {
+                self.say_moved(project, &slug, &title, &to, true);
+            }
+        }
+        if changed {
+            self.seen_folders_changed();
+            self.prune();
+            self.sync_feature_panel();
+            self.sync_feature_page();
+        }
+    }
+
+    /// Machine `id` told of `project`: what of it was kept here as it left for
+    /// that machine shows from there now, or is over there.
+    pub(crate) fn forget_left_of(&self, id: &str, project: &str) {
+        let Ok(entries) = std::fs::read_dir(store::project_dir(None, project)) else {
+            return;
+        };
+        for dir in entries.filter_map(Result::ok).map(|entry| entry.path()) {
+            if lease::left_here(&dir).is_some_and(|(_, to)| to == id) {
+                lease::forget_left(&dir);
+            }
+        }
     }
 
     /// Put back what was handed over and not taken in time, or was given back.
@@ -1512,7 +1679,7 @@ fn write_refusal(dir: &Path, why: String) {
 
 fn restore_record(dir: &Path) -> std::io::Result<()> {
     std::fs::rename(dir.join(lease::HANDED), dir.join(store::FILE))?;
-    for file in [lease::HANDED_TO, lease::ANSWER] {
+    for file in [lease::HANDED_TO, lease::ANSWER, lease::LEFT, lease::TOLD] {
         match std::fs::remove_file(dir.join(file)) {
             Err(err) if err.kind() != std::io::ErrorKind::NotFound => return Err(err),
             _ => {}
