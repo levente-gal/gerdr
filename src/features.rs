@@ -66,13 +66,19 @@ use smithay::{
     utils::{Logical, Point},
 };
 
+mod review_page;
+
+use review_page::{
+    is_review_stage, review_kept, review_page_actions, review_page_sections, want_all_outcome,
+};
+
 use crate::feature::manual::Verdict;
 use crate::machine_work::takes_a_place;
 use crate::manual_test::Row;
 pub(crate) use crate::review_cards::{
     CardId, CardKey, Item, ItemAct, ReviewCard, SUGGESTIONS_WRITING, can_decide, card_key,
-    item_buttons, item_card, item_hints, items, items_count, next_open_card, note_actions,
-    offers_fix_all, outcome_note, review_cards, why_not_decide,
+    card_tag, item_buttons, item_card, item_hints, items, items_count, next_open_card,
+    note_actions, offers_fix_all, outcome_note, review_cards, why_not_decide,
 };
 use crate::{
     Gerdr,
@@ -4870,10 +4876,7 @@ impl FeaturePanel {
                 return Some(PanelOutcome::StopChecks);
             }
             Keysym::f | Keysym::F if plain && mods.shift && offers_fix_all(feature, stage) => {
-                return Some(match stage {
-                    Stage::PlanReview => PanelOutcome::AcceptAllSuggestions,
-                    _ => PanelOutcome::FixAllFindings,
-                });
+                return Some(want_all_outcome(stage));
             }
             Keysym::_1 | Keysym::KP_1 | Keysym::_2 | Keysym::KP_2
                 if mods.alt
@@ -5712,35 +5715,9 @@ fn writers_page_actions(
         if deciding.is_some() && !has(&out, &suggestions) {
             out.push((button("Review in plan", ButtonStyle::Plain), suggestions));
         }
-        if deciding.is_some_and(|r| !feature::plan_review::notes(r).is_empty()) {
-            out.push((
-                button("Ask reviewer", ButtonStyle::Plain),
-                PanelOutcome::AskReviewer,
-            ));
-        }
-        // The cards' own: those of the page's, here with the stage's.
-        if offers_fix_all(feature, stage) {
-            out.push((
-                button(words(ItemOf::Suggestion).want_all, ButtonStyle::Plain),
-                PanelOutcome::AcceptAllSuggestions,
-            ));
-        }
-        if can_add_comment(feature, stage) {
-            out.push((
-                button("Add suggestion\u{2026}", ButtonStyle::Plain),
-                PanelOutcome::AddComment,
-            ));
-        }
-        if feature.plan_review.as_ref().is_some_and(|r| r.writing) {
-            let label = "Change decisions\u{2026}";
-            out.push((
-                button(label, ButtonStyle::Plain),
-                PanelOutcome::ChangeDecisions,
-            ));
-        }
-        let skip = PanelOutcome::SkipPlanReview;
-        out.push((button("Skip review", ButtonStyle::Plain), skip));
     }
+    // The review's own, in one order on both review pages.
+    out.extend(review_page_actions(feature, stage));
     if let Some(stage) = fresh_stage(feature, row) {
         let fresh = PanelOutcome::StartAgent(stage, true);
         out.push((button("Restart", ButtonStyle::Quiet), fresh));
@@ -5776,15 +5753,8 @@ fn writers_page_actions(
         out.push((button("Commands\u{2026}", style), edit));
     }
     out.extend(sandbox_actions(feature, stage, ctx));
-    // Plan review's are with its own, above.
-    let reviews_plan = stage == Stage::PlanReview;
-    if offers_fix_all(feature, stage) && !reviews_plan {
-        out.push((
-            button("Fix all open", ButtonStyle::Plain),
-            PanelOutcome::FixAllFindings,
-        ));
-    }
-    if can_add_comment(feature, stage) && !reviews_plan {
+    // The review pages' are with their own, above.
+    if can_add_comment(feature, stage) && !is_review_stage(stage) {
         out.push((
             button("Add comment\u{2026}", ButtonStyle::Plain),
             PanelOutcome::AddComment,
@@ -10164,6 +10134,23 @@ impl Gerdr {
                     at => Some(at.outcome()),
                 })
             }
+            // A summary's pill: its tag's first card takes the keys, in view.
+            FeatureTabHit::Jump(tag) => {
+                let key = (feature.project.clone(), feature.slug.clone());
+                let probe = (self.features.probes.get(&key)).and_then(|p| p.last.as_ref());
+                let notes = notes_of(probe).to_vec();
+                if let Some(panel) = self.features.panel.as_mut() {
+                    let stage = panel.page_stage(&feature);
+                    let cards = review_cards(&feature, stage, &notes);
+                    if let Some(i) = cards.iter().position(|c| card_tag(*c) == tag) {
+                        panel.focus = TabArea::Findings;
+                        panel.finding = i;
+                    }
+                }
+                self.sync_feature_page();
+                self.reveal_feature_finding();
+                None
+            }
             FeatureTabHit::Finding(i) => {
                 let key = (feature.project.clone(), feature.slug.clone());
                 let probe = (self.features.probes.get(&key)).and_then(|p| p.last.as_ref());
@@ -10532,6 +10519,22 @@ impl Gerdr {
             FeatureTabHit::Button(i) if layout.compact => {
                 let label = header_label(view.remove, i)?;
                 Some(Tooltip::new(label, *layout.buttons.get(i)?))
+            }
+            FeatureTabHit::Jump(tag) => {
+                let stage = self
+                    .features
+                    .panel
+                    .as_ref()?
+                    .page_stage(self.panel_feature()?);
+                let w = words(stage_items(stage));
+                let text = match tag.word()? {
+                    "yours" => format!("Go to your first {}", w.item),
+                    word => format!("Go to the first {word} {}", w.item),
+                };
+                Some(Tooltip::new(
+                    &text,
+                    smithay::utils::Rectangle::new(pos.to_i32_round(), (1, 1).into()),
+                ))
             }
             FeatureTabHit::Fold(i) => {
                 let open = self.panel_feature().map(|f| self.criterion_rows(f))?.get(i)?.open;
@@ -12333,70 +12336,6 @@ fn setup_section(feature: &Feature, state: &PanelState) -> Option<PageSection> {
     Some(lines("Setup", capped(out, CheckTone::Note)))
 }
 
-/// Plan review's page of `feature` below its agent's card, once a review
-/// is read: how its suggestions stand, then each as a card, as AI review's
-/// findings are.
-fn suggestion_sections(
-    feature: &Feature,
-    stage: Stage,
-    state: &PanelState,
-    actions: &[(PageButton, PanelOutcome)],
-) -> Vec<PageSection> {
-    let Some(review) = feature.plan_review.as_ref().filter(|r| r.stamp.is_some()) else {
-        return Vec::new();
-    };
-    if review.suggestions.is_empty() {
-        return vec![lines(
-            "Suggestions",
-            vec![line("nothing to change", CheckTone::Ready)],
-        )];
-    }
-    let label = match items_count(feature, stage) {
-        count if count.is_empty() => "Suggestions".to_owned(),
-        count => format!("Suggestions \u{b7} {count}"),
-    };
-    // The count says how many citations weren't found.
-    let mut notes = Vec::new();
-    if review.writing && plan_review_open(feature, stage) {
-        notes.push(line(SUGGESTIONS_WRITING, CheckTone::Note));
-    }
-    let multi = feature.many_repos();
-    let mut sections = vec![lines(&label, notes)];
-    sections.extend(
-        (review_cards(feature, stage, notes_of(state.probe)).into_iter()).map(|card| {
-            PageSection::Finding(match card {
-                ReviewCard::Item(item) => item_card(item, multi, actions),
-                ReviewCard::DiffNote(c) => note_card(c, multi, actions),
-            })
-        }),
-    );
-    sections
-}
-
-fn findings_lines(feature: &Feature) -> Vec<CheckLine> {
-    let ready = (feature.runs.get(&Stage::AiReview)).is_some_and(|r| r.ready.is_some());
-    let Some(review) = feature.review.as_ref().filter(|_| ready) else {
-        return vec![line("not read yet", CheckTone::Note)];
-    };
-    if review.findings.is_empty() {
-        return vec![line("no findings", CheckTone::Ready)];
-    }
-    let states = [
-        (FindingState::Open, "to decide", CheckTone::Blocker),
-        (FindingState::Fix, "to fix", CheckTone::Blocker),
-        (FindingState::Sent, "sent to Build", CheckTone::Note),
-        (FindingState::Fixed, "fixed", CheckTone::Ready),
-        (FindingState::Dismissed, "dismissed", CheckTone::Note),
-    ];
-    states
-        .into_iter()
-        .filter_map(|(state, what, tone)| match review.count(state) {
-            0 => None,
-            n => Some(line(format!("{} {what}", plural(n, "finding")), tone)),
-        })
-        .collect()
-}
-
 /// The milestones of `stage`'s file (Build's: nothing ticks a plan's) by
 /// name, as `probe` last read them; none while it has none.
 fn milestones_of(probe: Option<&Probe>, stage: Stage, at_work: bool) -> Option<PageSection> {
@@ -13556,9 +13495,9 @@ fn stage_page(
         if ROUND_CARD_STAGES.contains(&stage) {
             sections.extend(round_cards(feature, stage, state, actions, now));
         }
-        // So does the review they came from.
-        if stage == Stage::AiReview && feature.review.is_some() {
-            sections.extend(review_sections(feature, stage, mark, state, actions));
+        // So does the review they came from, or the plan's last.
+        if is_review_stage(stage) && review_kept(feature, stage) {
+            sections.extend(review_page_sections(feature, stage, mark, state, actions));
         }
         // And the comments, whose fixes this came back for.
         if stage == Stage::CodeReview && crate::feature_diff::has_rounds(feature) {
@@ -13614,20 +13553,11 @@ fn stage_page(
         }
         let card = || agent_card(feature, stage, state, actions, now);
         match stage {
-            Stage::PlanReview => {
+            // Both reviews' pages are laid out alike: Plan review's final
+            // plan, once written, goes over the suggestions it came from.
+            Stage::PlanReview | Stage::AiReview => {
                 sections.extend(card());
-                // Once written, the final plan is what the stage made: it
-                // goes first, the suggestions it came from under it.
-                if state.ctx.wrote(stage) {
-                    sections.push(file_card(feature, stage, state.ctx, actions));
-                    sections.extend(doc_of(state.probe, stage).map(|mut doc| {
-                        if let PageSection::Doc { here, .. } = &mut doc {
-                            *here = true;
-                        }
-                        doc
-                    }));
-                }
-                sections.extend(suggestion_sections(feature, stage, state, actions));
+                sections.extend(review_page_sections(feature, stage, mark, state, actions));
             }
             Stage::Discover | Stage::Plan => {
                 sections.extend(card());
@@ -13669,10 +13599,6 @@ fn stage_page(
             Stage::Verify => {
                 sections.extend(verify_sections(feature, state, actions, now));
                 sections.extend(setup_section(feature, state));
-            }
-            Stage::AiReview => {
-                sections.extend(card());
-                sections.extend(review_sections(feature, stage, mark, state, actions));
             }
             Stage::CodeReview => {
                 // The switcher above says it, where there is one.
@@ -13807,75 +13733,6 @@ fn stage_page(
         buttons: actions.iter().map(label).collect(),
         sections,
     }
-}
-
-/// AI review's page of `feature` below its agent's card: the latest review's
-/// findings, then each earlier review, folded unless `state` shows it.
-fn review_sections(
-    feature: &Feature,
-    stage: Stage,
-    mark: StageMark,
-    state: &PanelState,
-    actions: &[(PageButton, PanelOutcome)],
-) -> Vec<PageSection> {
-    let mut sections = Vec::new();
-    let multi = feature.many_repos();
-    let cards = review_cards(feature, stage, notes_of(state.probe));
-    if cards.is_empty() {
-        sections.push(lines("Findings", findings_lines(feature)));
-    } else {
-        // Only comments of the user's left: no finding to count.
-        let label = match items_count(feature, stage) {
-            count if count.is_empty() => "Findings".to_owned(),
-            count => format!("Findings \u{b7} {count}"),
-        };
-        let mut notes = Vec::new();
-        let ready = (feature.runs.get(&stage)).is_some_and(|r| r.ready.is_some());
-        match mark {
-            StageMark::Later => notes.push(line(
-                "From the last review. The code has changed since.",
-                CheckTone::Note,
-            )),
-            StageMark::Current if !ready => notes.push(line(
-                "From the last review. A new one hasn't finished.",
-                CheckTone::Note,
-            )),
-            _ => {}
-        }
-        // Make fixes is gone: not with no word of why.
-        if sends_findings(feature, stage, state.ctx) == Some(PanelOutcome::SendFixes) {
-            let findings = feature.review.iter().flat_map(|r| &r.findings);
-            let why = review_import::plan_why(findings, state.ctx.comments);
-            notes.extend(why.map(|why| line(why, CheckTone::Note)));
-        }
-        sections.push(lines(&label, notes));
-        sections.extend(cards.into_iter().map(|card| {
-            PageSection::Finding(match card {
-                ReviewCard::Item(item) => item_card(item, multi, actions),
-                ReviewCard::DiffNote(c) => note_card(c, multi, actions),
-            })
-        }));
-    }
-    for round in earlier_reviews(feature, stage) {
-        sections.push(PageSection::File {
-            name: format!("Review {}", round.n),
-            state: line(round_count(round), CheckTone::Note),
-            buttons: (actions.iter().enumerate())
-                .filter(|(_, (_, o))| *o == PanelOutcome::FoldRound(round.n))
-                .map(|(i, _)| i)
-                .collect(),
-        });
-        if state.rounds_open.contains(&round.n) {
-            let mut cards: Vec<&ReviewFinding> = round.findings.iter().collect();
-            cards.sort_by_key(|f| review_import::list_rank(f));
-            sections.extend(
-                cards
-                    .into_iter()
-                    .map(|f| PageSection::Finding(round_card(f, multi))),
-            );
-        }
-    }
-    sections
 }
 
 /// Code review's page of `feature` below its fix round cards: the comments as
@@ -14165,10 +14022,6 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 7] = [
                 "Alt+E",
                 "Discover, Plan: fold the draft cards, or open them all",
             ),
-            (
-                "Alt+E",
-                "Plan review: fold the review run cards, or open them all",
-            ),
             ("Ctrl+Shift+D", "change the decisions on a final plan"),
             (
                 "Ctrl+M",
@@ -14288,7 +14141,6 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 7] = [
                 "write the final plan, or use the plan as it is, once none is left to decide",
             ),
             ("Ctrl+Shift+Enter", "ask the reviewer about your comments"),
-            ("Alt+E", "fold the review run cards, or open them all"),
         ],
     ),
     (
@@ -14470,22 +14322,6 @@ fn stage_items(stage: Stage) -> ItemOf {
     match stage {
         Stage::PlanReview => ItemOf::Suggestion,
         _ => ItemOf::Finding,
-    }
-}
-
-/// What `c` off the cards of `stage`'s page adds: an item of the user's own.
-fn add_own_hint(stage: Stage) -> &'static str {
-    match stage {
-        Stage::PlanReview => "add suggestion\u{2026}",
-        _ => "add comment\u{2026}",
-    }
-}
-
-/// What Alt+E folds on `stage`'s page: its round cards.
-fn rounds_hint(stage: Stage) -> &'static str {
-    match stage {
-        Stage::PlanReview => "review runs",
-        _ => "fix rounds",
     }
 }
 
@@ -14723,7 +14559,7 @@ fn writers_tab_hints(
             }
             // Off a reviewer's card, `c` adds a comment of the user's own.
             if decides && diff_note.is_none() && item.is_none_or(Item::yours) {
-                hints.push(hint("c", add_own_hint(stage)));
+                hints.push(hint("c", &words(stage_items(stage)).add_own.to_lowercase()));
             }
             if offers_fix_all(feature, stage) {
                 hints.push(hint("Shift+F", &low(w.want_all)));
@@ -14738,7 +14574,7 @@ fn writers_tab_hints(
             if earlier_reviews(feature, stage).next().is_some() {
                 hints.push(hint("Alt+E", "earlier reviews"));
             } else if folds_round_cards(feature, stage) {
-                hints.push(hint("Alt+E", rounds_hint(stage)));
+                hints.push(hint("Alt+E", "fix rounds"));
             }
             hints.push(hint("Tab", if repos { "repositories" } else { "stages" }));
         }
@@ -14768,7 +14604,7 @@ fn writers_tab_hints(
             if earlier_reviews(feature, stage).next().is_some() {
                 hints.push(hint("Alt+E", "earlier reviews"));
             } else if folds_round_cards(feature, stage) {
-                hints.push(hint("Alt+E", rounds_hint(stage)));
+                hints.push(hint("Alt+E", "fix rounds"));
             }
             if matches!(row_action(feature, row, ctx), Some(PanelOutcome::Untick(_))) {
                 hints.push(hint(REOPEN_KEY, "reopen"));
@@ -14788,7 +14624,7 @@ fn writers_tab_hints(
                 hints.push(hint("Ctrl+Enter", "approve"));
             }
             if can_decide(feature, stage) {
-                hints.push(hint("c", add_own_hint(stage)));
+                hints.push(hint("c", &words(stage_items(stage)).add_own.to_lowercase()));
             }
             if has_failed_checks(feature, stage) && feature.current() == Some(stage) && !going {
                 hints.push(hint("Shift+R", "run failed"));
@@ -17176,6 +17012,21 @@ pub(crate) mod tests {
         );
     }
 
+    /// A review page's summary as one line: "Findings · 2 to decide", with
+    /// its notes.
+    fn summary_line(sections: &[PageSection]) -> Option<(String, Vec<CheckLine>)> {
+        sections.iter().find_map(|s| match s {
+            PageSection::Review(r) => {
+                let label = match r.words.is_empty() {
+                    true => r.label.clone(),
+                    false => format!("{} \u{b7} {}", r.label, r.words),
+                };
+                Some((label, r.notes.clone()))
+            }
+            _ => None,
+        })
+    }
+
     fn page_outcomes(f: &Feature, stage: Stage) -> Vec<PanelOutcome> {
         let actions = page_actions(f, stage, RowCtx::default());
         actions.into_iter().map(|(_, o)| o).collect()
@@ -17203,7 +17054,13 @@ pub(crate) mod tests {
             Some(PanelOutcome::StartAgent(stage, false))
         );
         let state = PanelState::default();
-        assert_eq!(stage_page(&f, stage, &state, &[], 2_000).sections.len(), 0);
+        // Its suggestions' line says none is read yet, as AI review's does.
+        let page = stage_page(&f, stage, &state, &[], 2_000);
+        assert!(matches!(
+            &page.sections[..],
+            [PageSection::Lines { label, lines }]
+                if label == "Suggestions" && lines[0].text == "not read yet"
+        ));
         // Read in with two to decide: they are cards, and shown in the plan.
         let text = r#"{"suggestions": [{"kind": "question", "plan": "M1", "title": "Which?",
             "why": "w"}, {"kind": "question", "plan": "M1", "title": "How?", "why": "w"}]}"#;
@@ -17226,9 +17083,10 @@ pub(crate) mod tests {
         );
         assert_eq!(rail_node(&f, stage, &state, 2_000).line, "2 to decide");
         let page = stage_page(&f, stage, &state, &[], 2_000);
+        assert!(matches!(page.sections[0], PageSection::Review(_)));
         assert_eq!(
-            page.sections[0],
-            lines("Suggestions \u{b7} 2 to decide", Vec::new())
+            summary_line(&page.sections),
+            Some(("Suggestions \u{b7} 2 to decide".to_owned(), Vec::new()))
         );
         let titles: Vec<&str> = (page.sections.iter())
             .filter_map(|s| match s {
@@ -17366,17 +17224,60 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn review_cards_go_under_a_heading_per_tag_the_summary_counts() {
+        let f = suggesting();
+        let panel = on_plan_review(&f);
+        let view = tab_view(&panel, &f, &["p".to_owned()], &PanelState::default(), 2_000);
+        let at = (view.page.sections.iter())
+            .position(|s| matches!(s, PageSection::Review(_)))
+            .expect("the summary");
+        let PageSection::Review(summary) = &view.page.sections[at] else {
+            unreachable!()
+        };
+        assert_eq!(
+            summary.counts,
+            [
+                (FindingTag::Yours, 1),
+                (FindingTag::High, 1),
+                (FindingTag::Low, 1)
+            ]
+        );
+        assert_eq!((summary.decided, summary.total), (1, 3));
+        // Under it: a heading, then its cards, for each tag in turn.
+        let shape: Vec<String> = (view.page.sections[at + 1..].iter())
+            .map(|s| match s {
+                PageSection::Heading(label) => label.clone(),
+                PageSection::Finding(c) => format!("card {:?}", c.tag),
+                _ => "other".into(),
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                "yours \u{b7} 1",
+                "card Yours",
+                "high \u{b7} 1",
+                "card High",
+                "low \u{b7} 1",
+                "card Low"
+            ]
+        );
+        // Accept all open goes with the summary, not the title.
+        let want = (view.page.buttons.iter())
+            .position(|b| b.label == "Accept all open")
+            .expect("accept all");
+        assert_eq!(summary.buttons, [want]);
+    }
+
+    #[test]
     fn plan_reviews_suggestions_show_as_cards_as_ai_reviews_findings_do() {
         use crate::feature::plan_review::{self, Decision};
         let mut f = suggesting();
         let panel = on_plan_review(&f);
         let view = tab_view(&panel, &f, &["p".to_owned()], &PanelState::default(), 2_000);
-        let heading = (view.page.sections.iter()).find_map(|s| match s {
-            PageSection::Lines { label, .. } if label.starts_with("Suggestions") => Some(label),
-            _ => None,
-        });
+        let heading = summary_line(&view.page.sections).map(|(label, _)| label);
         assert_eq!(
-            heading.map(String::as_str),
+            heading.as_deref(),
             Some("Suggestions \u{b7} 2 to decide \u{b7} 1 accepted")
         );
         let cards = cards_of(&view);
@@ -17552,12 +17453,9 @@ pub(crate) mod tests {
         );
         // The page says so, and how to go back.
         let view = tab_view(&panel, &f, &["p".to_owned()], &PanelState::default(), 2_000);
-        let said = (view.page.sections.iter()).any(|s| match s {
-            PageSection::Lines { label, lines } => {
-                label.starts_with("Suggestions")
-                    && lines.iter().any(|l| l.text.contains("Change decisions"))
-            }
-            _ => false,
+        let said = summary_line(&view.page.sections).is_some_and(|(label, lines)| {
+            label.starts_with("Suggestions")
+                && lines.iter().any(|l| l.text.contains("Change decisions"))
         });
         assert!(said, "{:?}", view.page.sections);
         // A comment field left open doesn't show on a card it can't change.
@@ -19744,20 +19642,30 @@ pub(crate) mod tests {
                 ..PanelState::default()
             };
             let actions = page_actions(f, Stage::AiReview, ctx);
-            let sections =
-                review_sections(f, Stage::AiReview, StageMark::Current, &state, &actions);
-            let why = sections.iter().find_map(|s| match s {
-                PageSection::Lines { lines, .. } => (lines.iter())
+            let sections = review_page::review_page_sections(
+                f,
+                Stage::AiReview,
+                StageMark::Current,
+                &state,
+                &actions,
+            );
+            let why = summary_line(&sections).and_then(|(_, lines)| {
+                (lines.iter())
                     .find(|l| l.text.starts_with("A plan comes first"))
-                    .map(|l| l.text.clone()),
-                _ => None,
+                    .map(|l| l.text.clone())
             });
             assert!(why.is_some(), "{sections:?}");
         }
         // With no word of the user's, nothing to say.
         let state = PanelState::default();
         let actions = page_actions(&fix, Stage::AiReview, none);
-        let sections = review_sections(&fix, Stage::AiReview, StageMark::Current, &state, &actions);
+        let sections = review_page::review_page_sections(
+            &fix,
+            Stage::AiReview,
+            StageMark::Current,
+            &state,
+            &actions,
+        );
         let says = |s: &PageSection| {
             matches!(s, PageSection::Lines { lines, .. }
                 if lines.iter().any(|l| l.text.starts_with("A plan comes first")))
@@ -19911,9 +19819,14 @@ pub(crate) mod tests {
             own.contains(&"Review in diff") && own.contains(&"Add comment\u{2026}"),
             "{own:?}"
         );
-        assert!(view.page.sections.iter().any(|s| matches!(s,
-            PageSection::Lines { label, .. }
-                if label == "Findings \u{b7} 1 to decide \u{b7} 1 to fix \u{b7} 1 sent to Build \u{b7} 1 fixed \u{b7} 1 dismissed")));
+        assert_eq!(
+            summary_line(&view.page.sections)
+                .map(|(label, _)| label)
+                .as_deref(),
+            Some(
+                "Findings \u{b7} 1 to decide \u{b7} 1 to fix \u{b7} 1 sent to Build \u{b7} 1 fixed \u{b7} 1 dismissed"
+            )
+        );
     }
 
     #[test]
@@ -20059,12 +19972,9 @@ pub(crate) mod tests {
         // Only to look at, and it says why.
         assert_eq!(labels_of(&view, cards[0]), ["Show in diff"]);
         assert_eq!(labels_of(&view, cards[1]), ["Show in diff"]);
-        let said = (view.page.sections.iter()).any(|s| match s {
-            PageSection::Lines { label, lines } => {
-                label.starts_with("Findings")
-                    && lines.iter().any(|l| l.text.contains("code has changed"))
-            }
-            _ => false,
+        let said = summary_line(&view.page.sections).is_some_and(|(label, lines)| {
+            label.starts_with("Findings")
+                && lines.iter().any(|l| l.text.contains("code has changed"))
         });
         assert!(said, "{:?}", view.page.sections);
     }
@@ -20081,12 +19991,8 @@ pub(crate) mod tests {
         let cards = cards_of(&view);
         assert_eq!(cards.len(), 2);
         assert_eq!(labels_of(&view, cards[0]), ["Show in diff"]);
-        let said = (view.page.sections.iter()).any(|s| match s {
-            PageSection::Lines { lines, .. } => {
-                lines.iter().any(|l| l.text.contains("hasn't finished"))
-            }
-            _ => false,
-        });
+        let said = summary_line(&view.page.sections)
+            .is_some_and(|(_, lines)| lines.iter().any(|l| l.text.contains("hasn't finished")));
         assert!(said, "{:?}", view.page.sections);
     }
 
@@ -20206,6 +20112,37 @@ pub(crate) mod tests {
         });
         let buttons = card.expect("the round's card");
         assert_eq!(view.page.buttons[buttons[0]].label, "Show");
+    }
+
+    #[test]
+    fn plan_review_shows_its_suggestions_before_it_is_reached() {
+        use crate::feature::plan_review::{self, PlanReview};
+        let stage = Stage::PlanReview;
+        let mut f = feature("p", vec![repo("api", true)], stage_index(stage));
+        let mut review = PlanReview::default();
+        let raws = plan_review::parse(
+            r#"{"suggestions": [{"kind": "question", "plan": "M1", "title": "A?", "why": "w"}]}"#,
+        )
+        .unwrap();
+        plan_review::import(&mut review, 1, raws);
+        review.stamp = Some((1, 1));
+        f.plan_review = Some(review);
+        // The feature went back to Plan: the review waits there, as AI
+        // review's does when it went back to Build.
+        f.marks.retain(|s, _| *s < Stage::Plan);
+        assert_eq!(stage_mark(&f, stage), StageMark::Later);
+        let page = stage_page(&f, stage, &PanelState::default(), &[], 1_120);
+        let (label, lines) = summary_line(&page.sections).expect("the suggestions' line");
+        assert_eq!(label, "Suggestions \u{b7} 1 to decide");
+        assert_eq!(
+            lines[0].text,
+            "From the last review. The plan has changed since."
+        );
+        assert!(
+            page.sections
+                .iter()
+                .any(|s| matches!(s, PageSection::Finding(_)))
+        );
     }
 
     #[test]

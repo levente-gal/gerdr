@@ -88,6 +88,12 @@ pub struct Words {
     pub say_what: &'static str,
     /// The button wanting every open one: "Fix all open".
     pub want_all: &'static str,
+    /// The page's button adding one of the user's own: "Add comment…".
+    pub add_own: &'static str,
+    /// Their list on the page, over them: "Findings".
+    pub heading: &'static str,
+    /// What a review reads, changing since: "code".
+    pub reads: &'static str,
     /// The field of one of the user's own, in its dialog: "Comment".
     pub own_label: &'static str,
     /// That field with nothing typed: "What should change".
@@ -130,6 +136,9 @@ const FINDING: Words = Words {
     save_want: "Save and fix",
     say_what: "Say what to fix.",
     want_all: "Fix all open",
+    add_own: "Add comment\u{2026}",
+    heading: "Findings",
+    reads: "code",
     own_label: "Comment",
     own_placeholder: "What should change",
     add_title: "Add a comment",
@@ -164,6 +173,9 @@ const SUGGESTION: Words = Words {
     save_want: "Save and accept",
     say_what: "Say what the plan should change.",
     want_all: "Accept all open",
+    add_own: "Add suggestion\u{2026}",
+    heading: "Suggestions",
+    reads: "plan",
     own_label: "Suggestion",
     own_placeholder: "Its title on the first line, then the change",
     add_title: "Add a suggestion",

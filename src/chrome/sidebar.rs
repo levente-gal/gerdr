@@ -26,6 +26,7 @@
 //! pulse on a blocked agent, a name being renamed) comes in through
 //! `SidebarState`.
 
+use super::consts::{GIT_MARK_GAP, GIT_MARK_WIDTH};
 use super::layers::{Part, RowCache};
 use super::{
     AGENT_ICON, BAR_HEIGHT, BRANCH_ICON_GAP, BRANCH_ICON_WIDTH, Badge, CARD_LINE, CHEVRON_WIDTH,
@@ -43,7 +44,7 @@ use crate::agents::AgentKey;
 use crate::app_icons::{AppIcon, github_icon};
 use crate::ci::{CiState, Group};
 use crate::cursor_agents::CursorChat;
-use crate::git::{GitStatus, Worktree};
+use crate::git::{Change, GitStatus, Worktree};
 use crate::herdr::{AgentInfo, AgentStatus, PaneState};
 use crate::paths::{repo_root, short_path, tidy_title};
 use crate::t3_agents::T3Thread;
@@ -849,6 +850,29 @@ pub fn group_label(group: Group) -> &'static str {
     }
 }
 
+/// Where `Painter::git_marks` draws `git`'s marks on `line` from `x`, the
+/// gap before the first left out: none when it has none, or when the
+/// first doesn't fit.
+fn git_marks_rect(git: &GitStatus, x: i32, line: Rect) -> Option<Rect> {
+    let end = line.loc.x + line.size.w;
+    let mark = GIT_MARK_GAP + GIT_MARK_WIDTH;
+    let stopped = git.op.is_some() || git.changes.iter().any(Change::conflicted);
+    let shapes = [stopped, git.dirty].into_iter().filter(|&on| on).count() as i32;
+    let arrows: i32 = [git.ahead, git.behind]
+        .into_iter()
+        .filter(|&n| n > 0)
+        .map(|n| mark + 1 + text_extent(&n.to_string(), DETAIL_FONT_SIZE))
+        .sum();
+    let w = shapes * mark + arrows;
+    let start = x + GIT_MARK_GAP;
+    (w > 0 && x + mark <= end).then(|| {
+        Rectangle::new(
+            (start, line.loc.y).into(),
+            ((x + w).min(end) - start, line.size.h).into(),
+        )
+    })
+}
+
 /// How wide `text` is at `size` in logical pixels, measured with the UI
 /// font; without one, a guess.
 fn text_extent(text: &str, size: f32) -> i32 {
@@ -1071,6 +1095,8 @@ pub struct RowState {
     pub worktrees: bool,
     pub fold: bool,
     pub ci: bool,
+    /// The pointer is on its git marks.
+    pub git: bool,
     /// Which of its feature's stage marks the pointer is on.
     pub stage: Option<usize>,
     /// Folded or unfolded by hand, not left to fold while quiet.
@@ -1283,6 +1309,9 @@ pub struct RowLayout {
     pub stage_big: Option<usize>,
     /// What of that line is free for its git marks, past the stage marks.
     pub git: Option<Rect>,
+    /// Its git marks, after its branch or on its feature's line, while it
+    /// shows any: they open the repositories panel on its repository.
+    pub marks: Option<Rect>,
     /// Its feature's count of repositories, when it holds several.
     pub repos: Option<Rect>,
     /// The line under the stage marks saying how its stage stands.
@@ -1451,6 +1480,8 @@ pub enum SidebarHit {
     Worktrees(usize),
     Fold(usize),
     CiMark(usize),
+    /// Its git marks: they open the repositories panel on its repository.
+    GitMarks(usize),
     /// Stage dot `k` of the feature it is the workspace of.
     Stage(usize, usize),
     /// Line `k` of workspace `i`'s worktrees needing a look: the worktree
@@ -1500,6 +1531,7 @@ impl SidebarHit {
             | Self::Worktrees(i)
             | Self::Fold(i)
             | Self::CiMark(i)
+            | Self::GitMarks(i)
             | Self::Stage(i, _)
             | Self::Attention(i, _) => Some(i),
             _ => None,
@@ -1617,6 +1649,8 @@ impl SidebarLayout {
             SidebarHit::Worktrees(i)
         } else if row.ci.is_some_and(inside) {
             SidebarHit::CiMark(i)
+        } else if row.marks.is_some_and(inside) {
+            SidebarHit::GitMarks(i)
         } else if let Some(dots) = row.stages.filter(|r| inside(*r)) {
             SidebarHit::Stage(i, super::stage_dot_at(dots, row.stage_big, pos.x))
         } else if let Some(lines) = row.attention.filter(|r| inside(*r)) {
@@ -1796,6 +1830,7 @@ impl SidebarLayout {
                 &mut row.worktrees,
                 &mut row.stages,
                 &mut row.git,
+                &mut row.marks,
                 &mut row.repos,
                 &mut row.info,
                 &mut row.attention,
@@ -2182,6 +2217,22 @@ pub fn sidebar_layout_at(
             // A feature's branch comes from its name: its tooltip says it.
             .filter(|_| ws.feature.is_none())
             .map(|_| below(NAME_X, (branch_end - NAME_GAP - NAME_X).max(0)));
+        // Its git marks, where they are drawn: after the branch's name,
+        // else where its feature's line leaves room for them.
+        let marks = ws.git.as_ref().and_then(|status| {
+            let (x, line) = match (branch, git) {
+                (Some(line), _) => {
+                    let name = text_extent(ws.branch.as_deref()?, DETAIL_FONT_SIZE);
+                    (
+                        line.loc.x + BRANCH_ICON_WIDTH + BRANCH_ICON_GAP + name,
+                        line,
+                    )
+                }
+                (None, Some(line)) => (line.loc.x, line),
+                (None, None) => return None,
+            };
+            git_marks_rect(status, x, line)
+        });
         let fold = foldable.then(|| slot(ROW_INSET, ICON_X - ROW_INSET));
         let attention = (attention_lines > 0).then(|| {
             Rectangle::new(
@@ -2206,6 +2257,7 @@ pub fn sidebar_layout_at(
             stages,
             stage_big: ws.feature.as_ref().and_then(|card| card.big_dot()),
             git,
+            marks,
             repos,
             info,
             attention,
@@ -2992,6 +3044,7 @@ impl Painter {
                         p.accent,
                     );
                     if let Some(git) = &ws.git {
+                        self.lit_git_marks(c, row, row_state, surface, scale, p);
                         self.git_marks(c, git, after, end, line_band, scale, p);
                     }
                 }
@@ -3047,6 +3100,7 @@ impl Painter {
             }
             if let (Some(line), Some(git)) = (row.git, &ws.git) {
                 let (x, end) = (px(line.loc.x) as f32, px(line.loc.x + line.size.w) as f32);
+                self.lit_git_marks(c, row, row_state, surface, scale, p);
                 self.git_marks(c, git, x, end, band(line, scale), scale, p);
             }
             if let Some(info) = row.info {
@@ -3208,6 +3262,23 @@ impl Painter {
         let (scale, p) = (key.scale, key.theme.palette());
         self.agent_strip(&key.picks, key.size, key.pick, scale, p)
             .into_buffer(false)
+    }
+
+    /// The pill behind `row`'s git marks while the pointer is on them, as
+    /// they open the repositories panel.
+    fn lit_git_marks(
+        &self,
+        c: &mut Canvas,
+        row: &RowLayout,
+        state: RowState,
+        surface: Rgb,
+        scale: f64,
+        p: &Palette,
+    ) {
+        if let Some(marks) = row.marks.filter(|_| state.git) {
+            let end = marks.loc.x + marks.size.w;
+            self.lit_pill(c, marks.loc.x, end, marks, surface, scale, p);
+        }
     }
 
     /// The pill lighting a header part from `x` to `end` under the
@@ -3868,7 +3939,7 @@ pub(super) fn contrast(a: Rgb, b: Rgb) -> f32 {
 
 /// Of `p.on_accent` and `p.text`, the one that reads best on `fill`, so
 /// a count or label on a coloured pill keeps its contrast in both themes.
-fn ink_on(fill: Rgb, p: &Palette) -> Rgb {
+pub(super) fn ink_on(fill: Rgb, p: &Palette) -> Rgb {
     if contrast(p.on_accent, fill) >= contrast(p.text, fill) {
         p.on_accent
     } else {
@@ -4756,6 +4827,39 @@ mod tests {
         let layout = sidebar_layout(&[workspace("gerdr", None, Some("main"))], &[], 240);
         let branch = layout.rows[0].branch.unwrap();
         assert_eq!(layout.hit(mid(branch)), Some(SidebarHit::Row(0)));
+    }
+
+    #[test]
+    fn git_marks_after_the_branch_are_their_own_hit() {
+        let mut ws = workspace("gerdr", None, Some("main"));
+        // Clean and even with its upstream: no marks.
+        ws.git = Some(GitStatus::default());
+        let layout = sidebar_layout(std::slice::from_ref(&ws), &[], 240);
+        assert_eq!(layout.rows[0].marks, None);
+        // Ahead and behind: the marks follow the branch's name on its line.
+        ws.git = Some(GitStatus {
+            ahead: 2,
+            behind: 1,
+            ..GitStatus::default()
+        });
+        let layout = sidebar_layout(std::slice::from_ref(&ws), &[], 240);
+        let row = layout.rows[0];
+        let (branch, marks) = (row.branch.unwrap(), row.marks.expect("marks"));
+        let name = text_extent("main", DETAIL_FONT_SIZE);
+        let after = branch.loc.x + super::BRANCH_ICON_WIDTH + super::BRANCH_ICON_GAP + name;
+        assert_eq!(marks.loc.x, after + super::GIT_MARK_GAP);
+        assert_eq!((marks.loc.y, marks.size.h), (branch.loc.y, branch.size.h));
+        assert!(marks.loc.x + marks.size.w <= branch.loc.x + branch.size.w);
+        assert_eq!(layout.hit(mid(marks)), Some(SidebarHit::GitMarks(0)));
+        assert_eq!(SidebarHit::GitMarks(0).pill(), SidebarHit::Row(0));
+        // Off them, the branch's line is still the row's.
+        let mut left = mid(branch);
+        left.x = branch.loc.x as f64 + 2.0;
+        assert_eq!(layout.hit(left), Some(SidebarHit::Row(0)));
+        // A branch name filling its line leaves them no room.
+        ws.branch = Some("a-branch-with-a-name-far-too-long-for-the-sidebar".into());
+        let layout = sidebar_layout(std::slice::from_ref(&ws), &[], 240);
+        assert_eq!(layout.rows[0].marks, None);
     }
 
     #[test]

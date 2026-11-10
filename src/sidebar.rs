@@ -25,7 +25,7 @@ use crate::{
     ci_watch::ci_state_word,
     cli_agents::CliAgent,
     feature::Stage,
-    git::Worktree,
+    git::{Change, GitStatus, Worktree},
     home_dir,
     inbox::Section,
     input::{BTN_LEFT, BTN_MIDDLE},
@@ -138,6 +138,35 @@ fn venv_word(venv: &VenvSetting) -> String {
 /// The tooltip of workspace `ws`'s header, about `anchor`: its name, then
 /// its branch, where its tabs are and what runs in them, and the venv its
 /// new shells activate (`venv`, for one with shells), each when known.
+/// What a workspace's git marks say, in words.
+fn git_marks_tip(git: &GitStatus) -> String {
+    let mut parts = Vec::new();
+    if git.op.is_some() {
+        parts.push("stopped half-way".to_owned());
+    } else if git.changes.iter().any(Change::conflicted) {
+        parts.push("conflicted files".to_owned());
+    }
+    if git.dirty {
+        parts.push("uncommitted changes".to_owned());
+    }
+    let commits = |n: u32| match n {
+        1 => "1 commit".to_owned(),
+        n => format!("{n} commits"),
+    };
+    if git.ahead > 0 {
+        parts.push(format!("{} to push", commits(git.ahead)));
+    }
+    if git.behind > 0 {
+        parts.push(format!("{} to pull", commits(git.behind)));
+    }
+    let text = parts.join(", ");
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => text,
+    }
+}
+
 fn workspace_tooltip(ws: &WorkspaceView, anchor: Rect, venv: Option<&VenvSetting>) -> Tooltip {
     let fields = [
         ("Branch", ws.branch.clone()),
@@ -382,6 +411,7 @@ impl Gerdr {
                 worktrees: hit == Some(SidebarHit::Worktrees(i)),
                 fold: hit == Some(SidebarHit::Fold(i)),
                 ci: hit == Some(SidebarHit::CiMark(i)),
+                git: hit == Some(SidebarHit::GitMarks(i)),
                 stage: match hit {
                     Some(SidebarHit::Stage(w, k)) if w == i => Some(k),
                     _ => None,
@@ -720,6 +750,17 @@ impl Gerdr {
             (SidebarHit::Worktrees(i), BTN_LEFT) => {
                 let dir = self.workspaces.get(i).map(|ws| ws.dir.clone());
                 self.open_worktrees(dir);
+            }
+            // Its git marks: the repositories panel on its repository.
+            (SidebarHit::GitMarks(i), BTN_LEFT) => {
+                let root = self
+                    .workspace_views()
+                    .get(i)
+                    .and_then(|ws| ws.0.git.as_ref()?.root.clone());
+                match root {
+                    Some(root) => self.open_repos_at(&root),
+                    None => self.open_repos(),
+                }
             }
             (SidebarHit::Attention(i, k), BTN_LEFT) => {
                 // The worktree on that line, else (on "+N more") the row's.
@@ -1064,6 +1105,11 @@ impl Gerdr {
                 // Below the whole row, clear of the lines it explains.
                 row.worktrees?;
                 Some(worktrees_tooltip(ws.0.worktrees(), root, row.rect))
+            }
+            SidebarHit::GitMarks(i) => {
+                let git = workspaces.get(i)?.0.git.as_ref()?;
+                let marks = layout.rows.get(i)?.marks?;
+                Some(Tooltip::new(&git_marks_tip(git), marks).key("click to open in Repositories"))
             }
             SidebarHit::Attention(i, _) => {
                 let lines = layout.rows.get(i)?.attention?;

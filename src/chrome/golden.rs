@@ -1350,6 +1350,34 @@ fn dump_overlays() {
             ),
             px(260),
         );
+        // A header under the pointer, on its git marks: lit, as they open
+        // the repositories panel.
+        dump(
+            &dir,
+            &format!("sidebar_git_marks_{tag}"),
+            painter.sidebar_view(
+                &SidebarView {
+                    workspaces: workspaces(),
+                    agents: many_agents(),
+                    active: Some(0),
+                    project: Some("aft".into()),
+                    header_lit: false,
+                    features: Vec::new(),
+                    state: SidebarState {
+                        rows: vec![RowState {
+                            hover: 16,
+                            git: true,
+                            ..RowState::default()
+                        }],
+                        ..SidebarState::default()
+                    },
+                },
+                (260, 520).into(),
+                scale,
+                p,
+            ),
+            px(260),
+        );
         // A header under the pointer, on its agent button.
         let hovered = RowState {
             hover: 16,
@@ -4383,13 +4411,19 @@ fn feature_tab_review_rounds() -> super::FeatureTabView {
             button("Hide", ButtonStyle::Plain),
         ],
         sections: vec![
-            PageSection::Lines {
-                label: "Findings \u{b7} 1 sent to Build \u{b7} 1 fix made".into(),
-                lines: vec![tab_line(
+            PageSection::Review(super::ReviewSummary {
+                label: "Findings".into(),
+                counts: vec![(FindingTag::High, 1), (FindingTag::Medium, 1)],
+                decided: 2,
+                total: 2,
+                words: "1 sent to Build \u{b7} 1 fix made".into(),
+                notes: vec![tab_line(
                     "From the last review. The code has changed since.",
                     CheckTone::Note,
                 )],
-            },
+                buttons: Vec::new(),
+            }),
+            PageSection::Heading("high \u{b7} 1".into()),
             card(
                 FindingTag::High,
                 "Retry stops one short",
@@ -4399,6 +4433,7 @@ fn feature_tab_review_rounds() -> super::FeatureTabView {
                 false,
                 vec![0],
             ),
+            PageSection::Heading("medium \u{b7} 1".into()),
             card(
                 FindingTag::Medium,
                 "Empty name logs in",
@@ -5454,7 +5489,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 62]; 4] = [
         0xcc41ad7a9ec091c0, // tab_plan_long_1180
         0xda3254659545ff6d, // tab_manual_test_1180
         0xd356fc844361740e, // tab_manual_note_860
-        0xaae0ccef435a4695, // tab_review_rounds_1180
+        0x78612bc1f4b06081, // tab_review_rounds_1180
         0x81505a410da083b3, // tab_verify_fixes_1180
         0x4625fc13e9c36d62, // tab_verify_fixes_860
         0x991d1848f7033107, // tab_review_page_1180
@@ -5519,7 +5554,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 62]; 4] = [
         0x371817eb8ef63723, // tab_plan_long_1180
         0xd9c655ce9a75a8df, // tab_manual_test_1180
         0xa6da4ebd7e0ae33f, // tab_manual_note_860
-        0x696373a9ac9ae597, // tab_review_rounds_1180
+        0x91425db770b9136b, // tab_review_rounds_1180
         0x2dd771800b3640b9, // tab_verify_fixes_1180
         0x543d950cc782e769, // tab_verify_fixes_860
         0xa37c484a9e95f3ca, // tab_review_page_1180
@@ -5584,7 +5619,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 62]; 4] = [
         0x09cb9855696f5c01, // tab_plan_long_1180
         0xa3e0ebbd2a4604b0, // tab_manual_test_1180
         0x5673f5d1da0365bf, // tab_manual_note_860
-        0x29372c9287bd44bf, // tab_review_rounds_1180
+        0xfbb7054252355dad, // tab_review_rounds_1180
         0xb75f19733879a5fd, // tab_verify_fixes_1180
         0xfb4a780837534c55, // tab_verify_fixes_860
         0xc80d83cdbecf59b3, // tab_review_page_1180
@@ -5649,7 +5684,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 62]; 4] = [
         0x22810cee688c087d, // tab_plan_long_1180
         0x3ede05e76054f570, // tab_manual_test_1180
         0x474d8c1cfa1394f7, // tab_manual_note_860
-        0x18a3b0870e7a6ac2, // tab_review_rounds_1180
+        0x6079ecaec6644449, // tab_review_rounds_1180
         0xfb21e0a676237f1f, // tab_verify_fixes_1180
         0x450720c7c0073c89, // tab_verify_fixes_860
         0xb7f9bee96811fb6a, // tab_review_page_1180
@@ -5744,8 +5779,64 @@ fn dump_feature_tab() {
 /// The feature tab on AI review with a card of each kind, in the page's order:
 /// the user's own, a finding to decide, one dismissed and closed, and one to
 /// fix with the keyboard.
+/// A review page's summary, then `cards` under a heading per tag, as
+/// `features::review_page` lays them out; `want_all` its button.
+fn review_sections(
+    page: &mut super::StagePage,
+    label: &str,
+    (decided, total): (usize, usize),
+    words: &str,
+    notes: Vec<super::CheckLine>,
+    want_all: Option<&str>,
+    cards: Vec<super::FindingCard>,
+) {
+    use super::{ButtonStyle, PageButton, PageSection, ReviewSummary};
+    let mut counts: Vec<(super::FindingTag, usize)> = Vec::new();
+    for card in &cards {
+        match counts.last_mut() {
+            Some((tag, n)) if *tag == card.tag => *n += 1,
+            _ => counts.push((card.tag, 1)),
+        }
+    }
+    // The page's own button, held by the summary: one already there moves.
+    let buttons = want_all
+        .map(|label| match page.buttons.iter().position(|b| b.label == label) {
+            Some(i) => i,
+            None => {
+                page.buttons.push(PageButton {
+                    label: label.into(),
+                    style: ButtonStyle::Plain,
+                });
+                page.buttons.len() - 1
+            }
+        })
+        .into_iter()
+        .collect();
+    page.sections.push(PageSection::Review(ReviewSummary {
+        label: label.into(),
+        counts: counts.clone(),
+        decided,
+        total,
+        words: words.into(),
+        notes,
+        buttons,
+    }));
+    let mut last = None;
+    for card in cards {
+        if last != Some(card.tag) {
+            let n = counts.iter().find(|(t, _)| *t == card.tag).map_or(0, |c| c.1);
+            page.sections.push(PageSection::Heading(format!(
+                "{} \u{b7} {n}",
+                card.tag.word().unwrap_or_default()
+            )));
+            last = Some(card.tag);
+        }
+        page.sections.push(PageSection::Finding(card));
+    }
+}
+
 fn tab_findings() -> super::FeatureTabView {
-    use super::{ButtonStyle, FindingCard, FindingTag, PageButton, PageSection};
+    use super::{ButtonStyle, FindingCard, FindingTag, PageButton};
     let mut view = feature_tab();
     view.focus = super::TabArea::Findings;
     view.page.title = "AI review".into();
@@ -5801,6 +5892,7 @@ fn tab_findings() -> super::FeatureTabView {
             "Mind the tests, and the greeting when the name is only spaces: it should fall back too.",
         ),
     ];
+    let mut made = Vec::new();
     for (i, (labels, tag, title, state, place, body, fix, note)) in cards.into_iter().enumerate() {
         let at = view.page.buttons.len();
         view.page
@@ -5822,7 +5914,7 @@ fn tab_findings() -> super::FeatureTabView {
                 }));
             (end..end + 2).collect()
         };
-        view.page.sections.push(PageSection::Finding(FindingCard {
+        made.push(FindingCard {
             sheet: None,
             tag,
             title: title.into(),
@@ -5842,8 +5934,17 @@ fn tab_findings() -> super::FeatureTabView {
             field_hint: "",
             selected: i == 3,
             buttons: (at..at + labels.len()).collect(),
-        }));
+        });
     }
+    review_sections(
+        &mut view.page,
+        "Findings",
+        (3, 4),
+        "1 to decide \u{b7} 2 to fix \u{b7} 1 dismissed",
+        Vec::new(),
+        Some("Fix all open"),
+        made,
+    );
     view
 }
 
@@ -6020,29 +6121,29 @@ const FINDINGS: [&str; 4] = [
 const GOLDEN_FINDINGS: [[u64; 4]; 4] = [
     // Dark at 1
     [
-        0x482d5f412c91dade, // tab_findings_1180
-        0x0fb25411cd881a52, // tab_findings_860
+        0x44ec2c207e76d822, // tab_findings_1180
+        0xc749c231bec9e936, // tab_findings_860
         0xc8e97861327a6f3d, // finding_dialog
         0x79e255ab5a829143, // finding_dialog_error
     ],
     // Dark at 2
     [
-        0xd2e5791549724869, // tab_findings_1180
-        0x350e8e60e528997c, // tab_findings_860
+        0x64f20049d900518b, // tab_findings_1180
+        0x7a131df3b9fc069e, // tab_findings_860
         0x43f1532742f932ff, // finding_dialog
         0xb736e6151427fb01, // finding_dialog_error
     ],
     // Light at 1
     [
-        0xcc394981314fee87, // tab_findings_1180
-        0x89128c839add7414, // tab_findings_860
+        0x0541038a1f08a244, // tab_findings_1180
+        0xcb100611c62c61cf, // tab_findings_860
         0x3af0633810888402, // finding_dialog
         0x2f19c19c900552df, // finding_dialog_error
     ],
     // Light at 2
     [
-        0x500881f99e44e624, // tab_findings_1180
-        0x84a2fd05fc3341e7, // tab_findings_860
+        0xb95d74b6a5f35889, // tab_findings_1180
+        0x8e74159f67212c4e, // tab_findings_860
         0xa9c6bc076a8eb05a, // finding_dialog
         0x1e721b2638489f69, // finding_dialog_error
     ],
@@ -6238,23 +6339,21 @@ fn tab_plan_review(writing: bool) -> super::FeatureTabView {
         model: None,
         waits: false,
     });
-    let (heading, lines) = match writing {
+    let (words, lines, decided) = match writing {
         true => (
-            "Suggestions \u{b7} 4 accepted \u{b7} 1 rejected \u{b7} 1 citation not found in the code",
+            "4 accepted \u{b7} 1 rejected \u{b7} 1 citation not found in the code",
             vec![tab_line(
                 crate::review_cards::SUGGESTIONS_WRITING,
                 CheckTone::Note,
             )],
+            5,
         ),
         false => (
-            "Suggestions \u{b7} 2 to decide \u{b7} 2 accepted \u{b7} 1 rejected \u{b7} 1 citation not found in the code",
+            "2 to decide \u{b7} 2 accepted \u{b7} 1 rejected \u{b7} 1 citation not found in the code",
             Vec::new(),
+            3,
         ),
     };
-    page.sections.push(PageSection::Lines {
-        label: heading.into(),
-        lines,
-    });
     // What each card offers: while deciding, by where it stands; while the
     // final plan is written, only to look.
     let offers = |deciding: &'static [&'static str], quiet: usize| -> (&[&str], usize) {
@@ -6378,8 +6477,8 @@ fn tab_plan_review(writing: bool) -> super::FeatureTabView {
         answering.field = Some(crate::text_field::Line::default());
         answering.selected = true;
     }
-    page.sections
-        .extend(cards.into_iter().map(PageSection::Finding));
+    let want_all = (!writing).then_some("Accept all open");
+    review_sections(&mut page, "Suggestions", (decided, 5), words, lines, want_all, cards);
     view.page = page;
     view.hints = match writing {
         true => vec![
@@ -6656,43 +6755,43 @@ const PLAN_REVIEW: [&str; 7] = [
 const GOLDEN_PLAN_REVIEW: [[u64; 7]; 4] = [
     // Dark at 1
     [
-        0x65b07cddacb18c00, // tab_plan_review_cards_1180
-        0x3ecba2ff9f61f42e, // tab_plan_review_cards_860
-        0x9fc0db3c976af9cb, // tab_plan_review_writing_1180
+        0xb34a1d0351ce306b, // tab_plan_review_cards_1180
+        0xc7075e5a383cfb98, // tab_plan_review_cards_860
+        0x0354ac1bff91b90c, // tab_plan_review_writing_1180
         0x154aeb3cfd9938e1, // doc_suggestions_1180
         0x6f63128edd4069b1, // doc_suggestions_850
         0x519b46994bcca395, // finding_dialog_reject
-        0x74d96bd7a5d920fd, // tab_plan_review_final_1180
+        0xe24c9b16b8b98f4d, // tab_plan_review_final_1180
     ],
     // Dark at 2
     [
-        0xa80a14e186b42036, // tab_plan_review_cards_1180
-        0x4c06ff37b46aedf8, // tab_plan_review_cards_860
-        0xea249cba06ba8fde, // tab_plan_review_writing_1180
+        0x0c471e62aeb9221b, // tab_plan_review_cards_1180
+        0x817b7334e5e72bf6, // tab_plan_review_cards_860
+        0x5e2c90d6593727d3, // tab_plan_review_writing_1180
         0x6ba33ef2efa93199, // doc_suggestions_1180
         0xacac000bf593cb0b, // doc_suggestions_850
         0x5db40a98428d92d3, // finding_dialog_reject
-        0x3b842b340c15b67c, // tab_plan_review_final_1180
+        0x278164c80eda00d4, // tab_plan_review_final_1180
     ],
     // Light at 1
     [
-        0x98a0cc9eceb86913, // tab_plan_review_cards_1180
-        0x6fcb5286d652ac00, // tab_plan_review_cards_860
-        0x95116a3fa04e6dfc, // tab_plan_review_writing_1180
+        0x715b761b9fb51d59, // tab_plan_review_cards_1180
+        0x357f8b4222e288dc, // tab_plan_review_cards_860
+        0xfc69b8c6c5eeba16, // tab_plan_review_writing_1180
         0xc004c28ecddd8216, // doc_suggestions_1180
         0xb929e644bd3059f9, // doc_suggestions_850
         0x89ae995f2bf62070, // finding_dialog_reject
-        0xd74a518e721e8324, // tab_plan_review_final_1180
+        0xbd88ac47a0d1607c, // tab_plan_review_final_1180
     ],
     // Light at 2
     [
-        0x19438ee056d49548, // tab_plan_review_cards_1180
-        0xd2bdc558b9410425, // tab_plan_review_cards_860
-        0x628a1246427b99a2, // tab_plan_review_writing_1180
+        0x4e17d1828765d2d5, // tab_plan_review_cards_1180
+        0x6655cf4c989d057d, // tab_plan_review_cards_860
+        0x3597face622e8678, // tab_plan_review_writing_1180
         0xe94c049f4569a3a6, // doc_suggestions_1180
         0x9aa0c21f07ff7aef, // doc_suggestions_850
         0xe2cb1d9d401ab9c4, // finding_dialog_reject
-        0xb5ce3fcaa9fe699c, // tab_plan_review_final_1180
+        0x705389e592848914, // tab_plan_review_final_1180
     ],
 ];
 
@@ -7363,10 +7462,42 @@ const REVIEW_VIEWS: [&str; 6] = [
 
 /// The recorded hashes of `REVIEW_VIEWS`, per case in `CASES`.
 const GOLDEN_REVIEW_VIEWS: [[u64; 6]; 4] = [
-    [0xc079d4a47dfb8f07, 0xefd8b8037b7dcd17, 0x1239688b3cf9b06b, 0x60ced7661f313794, 0xaae0e6667caf58df, 0xc51714381cece119],
-    [0xfcf48c5be95bbf79, 0x0aecf918a5c52e4a, 0xc98fd3aa06ee01f5, 0xc4f6953a672794c3, 0xeac75621de8e7164, 0xecd0cd1d777ac778],
-    [0xae786b051cb842b1, 0x847be91157e70d0b, 0xbb353af65ba856c6, 0xef1bc3ecb1d7efb8, 0xc337cdceb0414f87, 0x992052e127fa1b18],
-    [0xf66d26606fa40b14, 0x179fff5d2fbf7b9f, 0x31e3bb7cd38f055b, 0x8c892e5a6b0924f8, 0xdc3053ee5331a665, 0xb52e5a4e08ebfe8c],
+    // Dark at 1
+    [
+        0xc079d4a47dfb8f07, // tab_review_code_1180
+        0x0b613feab1c7e3ed, // tab_review_fixes_1180
+        0x4e58943ead4fef89, // tab_review_fixes_860
+        0x60ced7661f313794, // tab_review_ready_1180
+        0xaae0e6667caf58df, // tab_review_code_860
+        0xc51714381cece119, // tab_review_done_1180
+    ],
+    // Dark at 2
+    [
+        0xfcf48c5be95bbf79, // tab_review_code_1180
+        0x7ee2c89305d11cd1, // tab_review_fixes_1180
+        0xfba43262c7d63e06, // tab_review_fixes_860
+        0xc4f6953a672794c3, // tab_review_ready_1180
+        0xeac75621de8e7164, // tab_review_code_860
+        0xecd0cd1d777ac778, // tab_review_done_1180
+    ],
+    // Light at 1
+    [
+        0xae786b051cb842b1, // tab_review_code_1180
+        0x4e624d85c2fa3dff, // tab_review_fixes_1180
+        0xdaa2934455832dda, // tab_review_fixes_860
+        0xef1bc3ecb1d7efb8, // tab_review_ready_1180
+        0xc337cdceb0414f87, // tab_review_code_860
+        0x992052e127fa1b18, // tab_review_done_1180
+    ],
+    // Light at 2
+    [
+        0xf66d26606fa40b14, // tab_review_code_1180
+        0xabc9472b73446090, // tab_review_fixes_1180
+        0xd1477e9e94b494e4, // tab_review_fixes_860
+        0x8c892e5a6b0924f8, // tab_review_ready_1180
+        0xdc3053ee5331a665, // tab_review_code_860
+        0xb52e5a4e08ebfe8c, // tab_review_done_1180
+    ],
 ];
 
 #[test]

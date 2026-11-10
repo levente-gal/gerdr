@@ -76,15 +76,7 @@ fn node(dir: &Path, out: &mut Suggested) {
     let Ok(raw) = std::fs::read(dir.join("package.json")) else {
         return;
     };
-    let (test, install) = if dir.join("pnpm-lock.yaml").is_file() {
-        ("pnpm test", "pnpm install --frozen-lockfile")
-    } else if dir.join("yarn.lock").is_file() {
-        ("yarn test", "yarn install --immutable")
-    } else if dir.join("package-lock.json").is_file() {
-        ("npm test", "npm ci")
-    } else {
-        ("npm test", "npm install")
-    };
+    let (test, install) = node_tools(dir);
     out.setup.push(install.into());
     let package: Option<serde_json::Value> = serde_json::from_slice(&raw).ok();
     let runner = test.split(' ').next().unwrap_or("npm");
@@ -100,6 +92,20 @@ fn node(dir: &Path, out: &mut Suggested) {
     let script = package.as_ref().and_then(|p| p["scripts"]["test"].as_str());
     if script.is_some_and(|s| !s.contains(NO_TESTS)) {
         out.checks.push(test.into());
+    }
+}
+
+/// How the packages of the `package.json` in `dir` are tested and installed,
+/// by the lockfile there.
+pub fn node_tools(dir: &Path) -> (&'static str, &'static str) {
+    if dir.join("pnpm-lock.yaml").is_file() {
+        ("pnpm test", "pnpm install --frozen-lockfile")
+    } else if dir.join("yarn.lock").is_file() {
+        ("yarn test", "yarn install --immutable")
+    } else if dir.join("package-lock.json").is_file() {
+        ("npm test", "npm ci")
+    } else {
+        ("npm test", "npm install")
     }
 }
 

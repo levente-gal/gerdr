@@ -272,3 +272,12 @@ press and drag pick whole rows and a double click opens the line in Zed.
 - `[ui] motion = "full" | "reduced" | "off"`: blinking dots and pulses only
   with "full"; fades only with "full" or "reduced" (see `anim::motion`).
 - Text meets 4.5:1 contrast, marks and dots 3:1, in both themes.
+- Severity is a pill before the item's title (`pill_inks` / `pill_mark` in
+  `chrome/features.rs`): high and medium filled with their colour, low on the
+  element colour, the user's own tinted with the accent. Each severity has its
+  own mark (triangle, diamond, ring), so colour is never the only sign.
+- AI review's and Plan review's pages share one layout
+  (`features/review_page.rs`): the agent's card, what the stage made (Plan
+  review's final plan), a summary (a pill per severity that goes to its first
+  card, a bar of how many are decided, the "all open" button), then the cards
+  under a heading per severity, the user's own first, then earlier reviews.
