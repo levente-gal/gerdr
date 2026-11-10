@@ -8,8 +8,9 @@
 //! `transcript.jsonl.zst` (frames appended as it grows) or, for Cursor,
 //! `store.db.zst` (a snapshot taken again when the database moved), and
 //! the files that go with it are `extra/<rel>.zst`. A chat on another
-//! machine is pulled into `.staging/<host>/` first, on a thread of its own,
-//! and that copy goes once it is kept.
+//! machine is pulled into `.staging/<machine id>/` first, on a thread of
+//! its own, and that copy goes once it is kept. The id, not the address
+//! reaching it: a machine's addresses change, and it stays one machine.
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet, VecDeque},
@@ -130,7 +131,8 @@ const SETUP_START: &str = "== Setup started";
 pub struct Meta {
     pub agent: AgentKind,
     pub id: String,
-    /// Where it was copied from: a path here, or `<host>:<path>`.
+    /// Where it was copied from: a path here, or `<machine id>:<path>`
+    /// (before, `<ssh address>:<path>`).
     pub source: String,
     /// The machine it ran on.
     pub machine: String,
@@ -684,9 +686,11 @@ impl Worker {
     fn delete(&mut self, project: &str, slug: &str, title: String, going_on: Option<usize>) {
         let dir = self.dir(project, slug);
         let feature = (project.to_owned(), slug.to_owned());
-        self.watch.retain(|(p, s, _)| (p, s) != (&feature.0, &feature.1));
+        self.watch
+            .retain(|(p, s, _)| (p, s) != (&feature.0, &feature.1));
         self.pending.remove(&feature);
-        self.missing.retain(|(p, s, _, _)| (p, s) != (&feature.0, &feature.1));
+        self.missing
+            .retain(|(p, s, _, _)| (p, s) != (&feature.0, &feature.1));
         let result = self.delete_dir(project, slug, &dir, going_on);
         if let Err(why) = &result {
             tracing::warn!("ai work: deleting {}: {why}", dir.display());
@@ -1100,10 +1104,10 @@ impl Worker {
             return self.missing(project, slug, &chat, "not kept from another machine");
         };
         let claimed = claimed(&dir, &chat);
-        let staging = self
-            .root
-            .join(".staging")
-            .join(write::safe_name(&reach.target));
+        // A chat there always names its machine; the address is only what
+        // older gerdrs kept its copies by.
+        let from = chat.machine.clone().unwrap_or_else(|| reach.target.clone());
+        let staging = staging_dir(&self.root, &from, &reach.target);
         let (back, stop) = (self.back.clone(), self.stop.clone());
         let (project, slug) = (project.to_owned(), slug.to_owned());
         let spawned = std::thread::Builder::new()
@@ -1116,7 +1120,8 @@ impl Worker {
                         chat.stage.label(),
                         chat.n
                     );
-                    let back_with = match pull(&reach, &chat, &script, &claimed, &staging, &stop) {
+                    let pulled = pull(&reach, &from, &chat, &script, &claimed, &staging, &stop);
+                    let back_with = match pulled {
                         Ok(Some((id, staging))) => {
                             let chat = Chat {
                                 id: Some(id),
@@ -1370,11 +1375,58 @@ fn at(project: &str, slug: &str) -> String {
     format!("{project}/{slug}")
 }
 
-/// Pull `chat` with `script` from the machine `reach` reaches into its
-/// folder under `staging`: its id and that folder, or None when it isn't
-/// there.
+/// The staging folder of what is pulled from machine `id` under `root`,
+/// which `target` reaches: `.staging/<id>`. What older gerdrs pulled into
+/// `.staging/<target>` and didn't keep yet moves there once, chat by chat,
+/// never over one there already: a chat's copy goes only once kept.
+fn staging_dir(root: &Path, id: &str, target: &str) -> PathBuf {
+    let staging = root.join(".staging");
+    let new = staging.join(write::safe_name(id));
+    let old = staging.join(write::safe_name(target));
+    if old == new || !old.is_dir() {
+        return new;
+    }
+    let moved = match new.exists() {
+        false => std::fs::rename(&old, &new).map_err(|err| (old.clone(), err)),
+        true => move_children(&old, &new),
+    };
+    match moved {
+        Ok(()) => tracing::info!(
+            "ai-work: moved what was pulled from {target} to {}",
+            new.display()
+        ),
+        // It stays where it is, and is pulled again into the new folder.
+        Err((path, err)) => tracing::warn!(
+            "ai-work: moving {} to {}: {err}",
+            path.display(),
+            new.display()
+        ),
+    }
+    new
+}
+
+/// Move what is in `from` into `to`, but what `to` has already: that is
+/// left in `from`, which goes only once empty.
+fn move_children(from: &Path, to: &Path) -> Result<(), (PathBuf, io::Error)> {
+    let entries = std::fs::read_dir(from).map_err(|err| (from.to_owned(), err))?;
+    for entry in entries {
+        let entry = entry.map_err(|err| (from.to_owned(), err))?;
+        let there = to.join(entry.file_name());
+        if !there.exists() {
+            std::fs::rename(entry.path(), &there).map_err(|err| (entry.path(), err))?;
+        }
+    }
+    // Only an empty folder: what was left stays.
+    let _ = std::fs::remove_dir(from);
+    Ok(())
+}
+
+/// Pull `chat` with `script` from the machine `reach` reaches, machine id
+/// `from`, into its folder under `staging`: its id and that folder, or None
+/// when it isn't there.
 fn pull(
     reach: &Reach,
+    from: &str,
     chat: &Chat,
     script: &str,
     claimed: &HashSet<String>,
@@ -1420,7 +1472,7 @@ fn pull(
     for (rel, remote) in &listing.extra {
         get(&folder.join("extra").join(rel), &remote.path)?;
     }
-    let source = format!("{}:{}", reach.target, listing.main.path);
+    let source = format!("{from}:{}", listing.main.path);
     write::atomic(&folder.join(SOURCE), source.as_bytes())
         .map_err(|err| format!("{}: {err}", folder.display()))?;
     Ok(Some((listing.id, folder)))
@@ -1747,6 +1799,38 @@ mod tests {
         assert!(!w.cancel.load(Ordering::Relaxed));
         assert!(w.catch_up(&jobs, &mut queue));
         assert_eq!(reports(&dones), [Report::Indexed { lines: 2 }]);
+    }
+
+    #[test]
+    fn what_was_pulled_by_address_moves_to_the_machine_id() {
+        let root = scratch("thread-staging");
+        let old = root.join(".staging").join(write::safe_name("me@box"));
+        std::fs::create_dir_all(old.join("claude-c1")).unwrap();
+        std::fs::write(old.join("claude-c1/transcript.jsonl"), "a\n").unwrap();
+        // Moved whole, the first time.
+        let new = staging_dir(&root, "id1", "me@box");
+        assert_eq!(new, root.join(".staging/id1"));
+        assert!(!old.exists());
+        assert!(new.join("claude-c1/transcript.jsonl").is_file());
+        // Another address of it: what the new folder has stays as it is, the
+        // rest comes over, and what wasn't moved stays where it was.
+        let other = root
+            .join(".staging")
+            .join(write::safe_name("me@box-office"));
+        std::fs::create_dir_all(other.join("claude-c1")).unwrap();
+        std::fs::write(other.join("claude-c1/transcript.jsonl"), "b\n").unwrap();
+        std::fs::create_dir_all(other.join("codex-c2")).unwrap();
+        assert_eq!(staging_dir(&root, "id1", "me@box-office"), new);
+        let kept = std::fs::read_to_string(new.join("claude-c1/transcript.jsonl"));
+        assert_eq!(kept.unwrap(), "a\n");
+        assert!(new.join("codex-c2").is_dir());
+        assert!(other.join("claude-c1/transcript.jsonl").is_file());
+        // Nothing by its address: only the id's folder.
+        assert_eq!(
+            staging_dir(&root, "id2", "me@zen"),
+            root.join(".staging/id2")
+        );
+        assert!(!root.join(".staging/id2").exists());
     }
 
     #[test]
