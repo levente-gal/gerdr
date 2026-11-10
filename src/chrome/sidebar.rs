@@ -602,9 +602,10 @@ impl AgentView {
     }
 
     /// What its tooltip calls the agent: its kind, then its name and its
-    /// model.
+    /// model. A name starting with its kind ("claude · Plan") says it.
     pub fn label(&self) -> String {
-        [Some(&self.kind), self.name.as_ref(), self.model.as_ref()]
+        let named = (self.name.as_ref()).is_some_and(|n| n.starts_with(self.kind.as_str()));
+        [(!named).then_some(&self.kind), self.name.as_ref(), self.model.as_ref()]
             .into_iter()
             .flatten()
             .map(String::as_str)

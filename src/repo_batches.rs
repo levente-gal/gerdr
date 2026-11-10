@@ -2791,6 +2791,7 @@ fn above(button: chrome::Rect, spec: &MenuSpec, output: Size<i32, Logical>) -> c
             label: item.label.clone(),
             hint: item.hint.clone(),
             enabled: item.enabled,
+            note: item.note,
         })
         .collect();
     // Under a one-pixel anchor at the top: the gap it keeps, and its height.

@@ -3429,9 +3429,17 @@ impl Gerdr {
                         .iter()
                         .find(|p| p.pane_id == a.pane_id)
                 };
+                // Unnamed, it goes by its tab's name: a stage's agent says
+                // its stage ("claude · Plan").
                 cards
                     .into_iter()
-                    .map(|(_, a)| AgentView::new(a, pane_of(a)))
+                    .map(|(t, a)| {
+                        let mut view = AgentView::new(a, pane_of(a));
+                        if view.name.is_none() {
+                            view.name = t.and_then(|t| ws.tabs[t].label.clone());
+                        }
+                        view
+                    })
                     .collect()
             }
         }
@@ -4133,7 +4141,17 @@ impl Gerdr {
         };
         let running = self.workspace_running(idx);
         if running.is_empty() {
-            return self.close_workspace_now(idx);
+            // A feature's closes at once, nothing lost: saying so, with the
+            // way back, as its card stays and only looks quieter.
+            let feature = (self.workspace_feature(idx))
+                .map(|f| (f.project.clone(), f.slug.clone(), f.title.clone()));
+            self.close_workspace_now(idx);
+            if let Some((project, slug, title)) = feature {
+                let open = ("Open".to_owned(), MenuAction::OpenFeature(project, slug));
+                let text = format!("Closed the workspace of \u{201c}{title}\u{201d}");
+                self.toast_with(text, Level::Success, Some(open));
+            }
+            return;
         }
         let ids = ws
             .tabs
@@ -4419,12 +4437,17 @@ impl Gerdr {
 
     /// Close tab `idx` of the active workspace without asking.
     pub fn close_tab_now(&mut self, idx: usize) {
-        if let Some(tab) = self.workspace().and_then(|ws| ws.tabs.get(idx))
+        self.close_tab_in(self.active_workspace, idx);
+    }
+
+    /// Close tab `idx` of workspace `w` without asking.
+    pub(crate) fn close_tab_in(&mut self, w: usize, idx: usize) {
+        if let Some(tab) = self.workspaces.get(w).and_then(|ws| ws.tabs.get(idx))
             && tab.closes()
         {
             self.close_panes(Self::closing(tab));
-            self.doc_tab_closing(idx);
-            self.drop_unstarted(self.active_workspace, idx);
+            self.doc_tab_closing(w, idx);
+            self.drop_unstarted(w, idx);
             self.prune();
             self.arrange();
         }

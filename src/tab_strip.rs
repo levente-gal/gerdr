@@ -103,10 +103,14 @@ pub fn wrap_lines(text: &str, width: usize, most: usize) -> Vec<String> {
 /// picked, then where to fix them, the settings file and the log (named
 /// by the file names `settings` and `log`, at the right).
 pub fn problems_menu_items(problems: &[&str], settings: &str, log: &str) -> Vec<MenuItem> {
-    let mut items: Vec<MenuItem> = problems
-        .iter()
-        .flat_map(|text| wrap_lines(text, PROBLEM_LINE, PROBLEM_LINES))
-        .map(|line| MenuItem::new(&line, MenuAction::OpenLog).enabled(false))
+    // Each one's lines close together, an empty line between two.
+    let mut items: Vec<MenuItem> = (problems.iter().enumerate())
+        .flat_map(|(i, text)| {
+            let gap = (i > 0).then(String::new);
+            gap.into_iter()
+                .chain(wrap_lines(text, PROBLEM_LINE, PROBLEM_LINES))
+        })
+        .map(|line| MenuItem::note(&line))
         .collect();
     items.push(MenuItem::new("Open settings", MenuAction::OpenSettings).hint(settings));
     items.push(MenuItem::new("Open log", MenuAction::OpenLog).hint(log));
@@ -957,7 +961,13 @@ mod tests {
             labels,
             ["herdr isn't installed", "Open settings", "Open log"]
         );
-        assert!(!items[0].enabled);
+        assert!(!items[0].enabled && items[0].note);
+        assert!(!items[1].note);
+        // Two problems: an empty line between them.
+        let two = problems_menu_items(&["one", "two"], "config.toml", "gerdr.log");
+        let labels: Vec<&str> = two.iter().map(|i| i.label.as_str()).collect();
+        assert_eq!(labels[..3], ["one", "", "two"]);
+        assert!(two[..3].iter().all(|i| i.note));
         assert_eq!(items[1].action, MenuAction::OpenSettings);
         assert_eq!(items[1].hint.as_deref(), Some("config.toml"));
         assert_eq!(items[2].action, MenuAction::OpenLog);

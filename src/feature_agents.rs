@@ -1050,6 +1050,16 @@ pub(crate) fn vars(
     .collect()
 }
 
+/// How many seconds after its start a stage agent herdr sees no agent in
+/// reads as exited (see `agent_line`).
+const GONE_AFTER: u64 = 30;
+
+/// The name a stage agent's tab goes by, and so its sidebar row: its agent
+/// and its stage ("claude · Plan"), as each stage often runs the same agent.
+pub(crate) fn agent_tab_label(agent: &str, stage: Stage) -> String {
+    format!("{agent} \u{b7} {}", stage.label())
+}
+
 /// What the feature panel says of `run` under its stage: its agent's state,
 /// as herdr has it (`status`) and the watch saw it (`watch`).
 pub(crate) fn agent_line(
@@ -1119,6 +1129,9 @@ pub(crate) fn agent_line(
         Some(AgentStatus::Working) => "working",
         Some(AgentStatus::Blocked) => "needs you",
         Some(AgentStatus::Idle | AgentStatus::Done) => "waiting for you",
+        // Its tab is there but herdr sees no agent in it, past the time it
+        // takes one to start: it exited, its shell left.
+        None if run.t3.is_none() && now >= run.started + GONE_AFTER => "exited",
         _ => "running",
     };
     format!("{} {doing} \u{b7} {started}", run.agent)
@@ -1273,6 +1286,14 @@ impl Gerdr {
         stage_model_slot(feature, stage, workflow, &self.cli_agents)
     }
 
+    /// Name the tab holding herdr pane `pane` after its agent and `stage`
+    /// (see `agent_tab_label`), as a rename would.
+    pub(crate) fn label_agent_tab(&mut self, pane: &str, agent: &str, stage: Stage) {
+        if let Some((w, t)) = self.herdr_pane_place(pane) {
+            self.rename_tab(w, t, agent_tab_label(agent, stage));
+        }
+    }
+
     /// Open the picker of `stage`'s model (its card's button, Ctrl+Shift+I).
     /// An agent gerdr can't tell a model is said so: the key does nothing
     /// else there.
@@ -1353,6 +1374,8 @@ impl Gerdr {
         let chips = self.chips_of(project, slug, stage);
         if let Some(next) = next_chip(&chips) {
             self.pick_stage_agent(project, slug, stage, &next.name);
+            // Only its chip's tooltip names it: the key says which it lit.
+            self.show_success(format!("Next {} agent: {}", stage.label(), next.name));
         }
     }
 
@@ -1507,6 +1530,7 @@ impl Gerdr {
             tracing::warn!("no tab for {agent}, waiting on {}", stage.label());
             return self.show_error(format!("Couldn't open a tab for {agent}"));
         };
+        self.label_agent_tab(&pane, &agent, stage);
         let Some(f) = self.feature_mut(project, slug) else {
             return;
         };
@@ -1692,6 +1716,7 @@ impl Gerdr {
             tracing::warn!("no tab for {agent}'s chat on {}", stage.label());
             return self.show_error(format!("Couldn't open a tab for {agent}'s chat"));
         };
+        self.label_agent_tab(&pane, &agent, stage);
         let Some(f) = self.feature_mut(project, slug) else {
             return;
         };
@@ -1932,6 +1957,9 @@ impl Gerdr {
             held: !in_t3 && !sent,
         };
         let opened = run.pane.clone();
+        if let Some(pane) = &opened {
+            self.label_agent_tab(pane, &agent, stage);
+        }
         let Some(feature) = self.feature_mut(project, slug) else {
             return false;
         };
@@ -2804,6 +2832,7 @@ impl Gerdr {
             .agents
             .remove(&(project.to_owned(), slug.to_owned(), stage));
         self.feature_cursor_to_current_of(project, slug);
+        self.close_done_doc_tabs(project, slug, |file| file.stage() == stage);
         self.show_success(done);
         true
     }
@@ -3502,6 +3531,18 @@ mod tests {
         assert_eq!(
             approval(&testing, Stage::ManualTest, None),
             Err("Mark Manual test passed from its page".into())
+        );
+    }
+
+    #[test]
+    fn an_agent_herdr_no_longer_sees_reads_as_exited_once_it_had_time_to_start() {
+        let r = run(None);
+        let line = |now| agent_line(&r, Stage::Plan, None, None, now);
+        assert_eq!(line(1_010), "Claude Code running \u{b7} started just now");
+        assert_eq!(line(1_120), "Claude Code exited \u{b7} started 2m ago");
+        assert_eq!(
+            agent_tab_label("claude", Stage::PlanReview),
+            "claude \u{b7} Plan review"
         );
     }
 
