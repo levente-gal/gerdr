@@ -9,8 +9,8 @@ use smithay::utils::{Logical, Point, Rectangle, Size};
 use super::{
     ButtonStyle, Canvas, DETAIL_FONT_SIZE, DOT, Dot, FONT_SIZE, HELP_MARGIN, HELP_PADDING,
     HELP_TITLE_HEIGHT, HINTS_HEIGHT, LABEL_FONT_SIZE, ListBar, POPUP_RADIUS, Painter, Palette,
-    QUIT_BUTTON, QUIT_BUTTON_GAP, Rect, Rgb, SHADOW, SMALL_FONT_SIZE, Thumb, band, button_width,
-    dot_shape, hint_spots, hint_strs, icon_sdf, measure, phys,
+    QUIT_BUTTON, QUIT_BUTTON_GAP, QUIT_LINE_GAP, Rect, Rgb, SHADOW, SMALL_FONT_SIZE, Thumb, band,
+    button_width, dot_shape, hint_spots, hint_strs, icon_sdf, measure, phys,
 };
 
 /// How wide the panel is, at the most; it shrinks with the output, keeping
@@ -56,6 +56,14 @@ const FOOTER_H: i32 = 36;
 const BAR_ROOM: i32 = 8;
 /// The most lines the problem, or what to do about it, wraps to.
 const MOST_LINES: usize = 3;
+/// The edit form: room under the heading, then its rows as the connect
+/// dialog's (a label column, a field `QUIT_BUTTON` high per row,
+/// `QUIT_LINE_GAP` apart).
+const EDIT_TOP: i32 = 4;
+const EDIT_LABEL_W: i32 = 80;
+const EDIT_LABELS: [&str; 2] = ["Name", "Address"];
+const NAME_HINT: &str = "What to call it";
+const ADDRESS_HINT: &str = "user@host";
 
 /// What the detail says on the add row.
 const ADD_NOTE: &str = "Connect a machine over SSH to run agents and checks there";
@@ -114,6 +122,27 @@ pub struct MachineDetailView {
     /// The buttons acting on the machine, left to right; the last is the
     /// primary one.
     pub buttons: Vec<String>,
+    /// The form editing its name and address, while it is open: it takes
+    /// the place of the facts, the problem and the machine's buttons (the
+    /// runs stay under it).
+    pub edit: Option<MachineEditView>,
+}
+
+/// The form editing a machine's name and address, in its detail.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MachineEditView {
+    pub name: crate::text_field::Line,
+    pub address: crate::text_field::Line,
+    /// What is wrong with the form, or why the address didn't connect.
+    pub error: Option<String>,
+    /// What to do about it, when gerdr knows.
+    pub how: Option<String>,
+    /// How far trying the new address got, while it is tried.
+    pub progress: Option<String>,
+    /// The form's buttons, left to right; the last is the primary one.
+    pub buttons: Vec<String>,
+    /// While the new address is tried: the fields wait.
+    pub busy: bool,
 }
 
 /// A run on the machine: an agent, a feature's checks, a sandbox, what a
@@ -138,6 +167,12 @@ pub enum MachinesFocus {
     Run(usize, usize),
     /// The machine's button `.0`.
     Button(usize),
+    /// The edit form's name field.
+    EditName,
+    /// The edit form's address field.
+    EditAddress,
+    /// The edit form's button `.0`.
+    EditButton(usize),
 }
 
 /// What the pointer is over in the machines panel.
@@ -152,6 +187,11 @@ pub enum MachinesHit {
     RunButton(usize, usize),
     /// The machine's button `.0`.
     Button(usize),
+    /// The edit form's name or address field.
+    EditName,
+    EditAddress,
+    /// The edit form's button `.0`.
+    EditButton(usize),
     /// Key hint `.0`: a click presses its key.
     Hint(usize),
 }
@@ -159,6 +199,18 @@ pub enum MachinesHit {
 /// Where the machines panel's parts go, in output coordinates.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MachinesLayout {
+    /// The edit form's fields and buttons, while it is open.
+    pub edit_name: Option<Rect>,
+    pub edit_address: Option<Rect>,
+    pub edit_buttons: Vec<Rect>,
+    /// The edit form's labels left of its fields, name's then address's;
+    /// empty while it is shut.
+    pub edit_labels: Vec<Rect>,
+    /// Under the fields: how far trying the address got (while it is
+    /// tried), or what is wrong and what to do about it, wrapped.
+    pub edit_progress: Vec<(String, Rect)>,
+    pub edit_error: Vec<(String, Rect)>,
+    pub edit_how: Vec<(String, Rect)>,
     pub panel: Rect,
     pub title: Rect,
     /// The list's column.
@@ -241,28 +293,63 @@ fn detail_lines(d: &MachineDetailView, width: i32) -> (Vec<String>, Vec<String>)
     (problem, how)
 }
 
-/// How high the detail is without its runs (or its empty line).
-fn detail_fixed(d: &MachineDetailView, width: i32) -> i32 {
-    let (problem, how) = detail_lines(d, width);
-    let lines = (problem.len() + how.len()) as i32;
-    let problem_h = if lines > 0 {
-        SECTION_GAP / 2 + lines * LINE_H
+/// The edit form's lines under its fields: how far trying the address
+/// got while it is tried, else what is wrong and what to do about it.
+fn edit_lines(e: &MachineEditView, width: i32) -> [Vec<String>; 3] {
+    let lines = |text: &Option<String>, size| {
+        (text.as_deref()).map_or_else(Vec::new, |t| wrap(t, size, width))
+    };
+    if e.busy {
+        [lines(&e.progress, FONT_SIZE), Vec::new(), Vec::new()]
+    } else {
+        [
+            Vec::new(),
+            lines(&e.error, FONT_SIZE),
+            lines(&e.how, SMALL_FONT_SIZE),
+        ]
+    }
+}
+
+/// How high `lines` lines are under what comes before them: none, or a
+/// half gap and a `LINE_H` each.
+fn lines_h(lines: usize) -> i32 {
+    if lines > 0 {
+        SECTION_GAP / 2 + lines as i32 * LINE_H
     } else {
         0
-    };
-    let buttons = if d.buttons.is_empty() {
+    }
+}
+
+/// How high a row of buttons is under what comes before it.
+fn buttons_h(buttons: &[String]) -> i32 {
+    if buttons.is_empty() {
         0
     } else {
         BUTTONS_GAP + QUIT_BUTTON
+    }
+}
+
+/// How high the edit form is, under the heading.
+fn edit_h(e: &MachineEditView, width: i32) -> i32 {
+    let lines: usize = edit_lines(e, width).iter().map(Vec::len).sum();
+    EDIT_TOP + 2 * QUIT_BUTTON + QUIT_LINE_GAP + lines_h(lines) + buttons_h(&e.buttons)
+}
+
+/// How high the detail is without its runs (or its empty line).
+fn detail_fixed(d: &MachineDetailView, width: i32) -> i32 {
+    // The form takes the place of the facts, the problem and the
+    // machine's buttons.
+    let (upper, buttons) = match &d.edit {
+        Some(e) => (edit_h(e, width), 0),
+        None => {
+            let (problem, how) = detail_lines(d, width);
+            (
+                d.facts.len() as i32 * FACT_H + lines_h(problem.len() + how.len()),
+                buttons_h(&d.buttons),
+            )
+        }
     };
-    DETAIL_TOP
-        + HEAD_H
-        + d.facts.len() as i32 * FACT_H
-        + problem_h
-        + SECTION_GAP
-        + SUBHEAD_H
-        + buttons
-        + PAD
+    DETAIL_TOP + HEAD_H + upper + SECTION_GAP + SUBHEAD_H + buttons + PAD
 }
 
 /// How many list rows (machines and the add row) fit on an output of
@@ -299,6 +386,21 @@ fn run_buttons(row: Rect, buttons: &[String]) -> Vec<Rect> {
         .collect();
     rects.reverse();
     rects
+}
+
+/// Where `labels`' buttons go in a row at `y`, ending at `right`, each as
+/// wide as its label.
+fn button_row(right: i32, y: i32, labels: &[String]) -> Vec<Rect> {
+    let bw: Vec<i32> = labels.iter().map(|l| button_width(l)).collect();
+    let all = bw.iter().sum::<i32>() + (bw.len() as i32 - 1).max(0) * QUIT_BUTTON_GAP;
+    let mut bx = right - all;
+    (bw.into_iter())
+        .map(|w| {
+            let rect = Rectangle::new((bx, y).into(), (w, QUIT_BUTTON).into());
+            bx += w + QUIT_BUTTON_GAP;
+            rect
+        })
+        .collect()
 }
 
 /// Rows `h` high from `top`, `ROW_GAP` apart, `count` of them.
@@ -394,20 +496,56 @@ pub fn machines_layout(view: &MachinesPanelView, output: Size<i32, Logical>) -> 
     let mut runs_buttons = Vec::new();
     let mut runs_track = None;
     let mut buttons = Vec::new();
+    let mut edit_name = None;
+    let mut edit_address = None;
+    let mut edit_buttons = Vec::new();
+    let mut edit_labels = Vec::new();
+    let mut edit_progress = Vec::new();
+    let mut edit_error = Vec::new();
+    let mut edit_how = Vec::new();
     if let Some(d) = &view.detail {
-        for _ in &d.facts {
-            facts.push(line(top, FACT_H));
-            top += FACT_H;
-        }
-        let (problem_lines, how_lines) = detail_lines(d, inner);
-        if !problem_lines.is_empty() || !how_lines.is_empty() {
+        let (texts, outs) = if let Some(e) = &d.edit {
+            // The form, its rows as the connect dialog's: a label, then a
+            // field.
+            top += EDIT_TOP;
+            for (k, field) in [&mut edit_name, &mut edit_address].into_iter().enumerate() {
+                if k > 0 {
+                    top += QUIT_LINE_GAP;
+                }
+                let row = line(top, QUIT_BUTTON);
+                edit_labels.push(Rectangle::new(row.loc, (EDIT_LABEL_W, QUIT_BUTTON).into()));
+                *field = Some(Rectangle::new(
+                    (dx + EDIT_LABEL_W, top).into(),
+                    ((inner - EDIT_LABEL_W).max(1), QUIT_BUTTON).into(),
+                ));
+                top += QUIT_BUTTON;
+            }
+            let [progress_lines, error_lines, how_lines] = edit_lines(e, inner);
+            (
+                vec![progress_lines, error_lines, how_lines],
+                vec![&mut edit_progress, &mut edit_error, &mut edit_how],
+            )
+        } else {
+            for _ in &d.facts {
+                facts.push(line(top, FACT_H));
+                top += FACT_H;
+            }
+            let (problem_lines, how_lines) = detail_lines(d, inner);
+            (vec![problem_lines, how_lines], vec![&mut problem, &mut how])
+        };
+        if texts.iter().any(|t| !t.is_empty()) {
             top += SECTION_GAP / 2;
         }
-        for (lines, out) in [(problem_lines, &mut problem), (how_lines, &mut how)] {
+        for (lines, out) in texts.into_iter().zip(outs) {
             for text in lines {
                 out.push((text, line(top, LINE_H)));
                 top += LINE_H;
             }
+        }
+        if let Some(e) = d.edit.as_ref().filter(|e| !e.buttons.is_empty()) {
+            top += BUTTONS_GAP;
+            edit_buttons = button_row(dx + inner, top, &e.buttons);
+            top += QUIT_BUTTON;
         }
         top += SECTION_GAP;
         runs_head = line(top, SUBHEAD_H);
@@ -429,14 +567,9 @@ pub fn machines_layout(view: &MachinesPanelView, output: Size<i32, Logical>) -> 
                 )
             });
         }
-        let labels: Vec<&str> = d.buttons.iter().map(String::as_str).collect();
-        let bw: Vec<i32> = labels.iter().map(|l| button_width(l)).collect();
-        let all = bw.iter().sum::<i32>() + (bw.len() as i32 - 1).max(0) * QUIT_BUTTON_GAP;
-        let by = detail.loc.y + detail.size.h - PAD - QUIT_BUTTON;
-        let mut bx = dx + inner - all;
-        for w in bw {
-            buttons.push(Rectangle::new((bx, by).into(), (w, QUIT_BUTTON).into()));
-            bx += w + QUIT_BUTTON_GAP;
+        if d.edit.is_none() {
+            let by = detail.loc.y + detail.size.h - PAD - QUIT_BUTTON;
+            buttons = button_row(dx + inner, by, &d.buttons);
         }
     }
 
@@ -446,6 +579,13 @@ pub fn machines_layout(view: &MachinesPanelView, output: Size<i32, Logical>) -> 
         (width - 2 * PAD, HINTS_HEIGHT).into(),
     );
     MachinesLayout {
+        edit_name,
+        edit_address,
+        edit_buttons,
+        edit_labels,
+        edit_progress,
+        edit_error,
+        edit_how,
         panel,
         title,
         list,
@@ -486,6 +626,19 @@ impl MachinesLayout {
         if let Some(b) = self.buttons.iter().position(on) {
             return Some(MachinesHit::Button(b));
         }
+        if let Some(b) = self.edit_buttons.iter().position(on) {
+            return Some(MachinesHit::EditButton(b));
+        }
+        // A click on a label goes to its field, as on a form.
+        let fields = [
+            (self.edit_name, MachinesHit::EditName),
+            (self.edit_address, MachinesHit::EditAddress),
+        ];
+        for ((field, hit), label) in fields.into_iter().zip(&self.edit_labels) {
+            if field.is_some_and(|f| on(&label.merge(f))) {
+                return Some(hit);
+            }
+        }
         if let Some(k) = self.runs.iter().position(on) {
             return Some(MachinesHit::Run(self.runs_first + k));
         }
@@ -498,6 +651,9 @@ impl MachinesLayout {
     /// What the pointer can press.
     pub fn controls(&self) -> Vec<Rect> {
         (self.buttons.iter())
+            .chain(&self.edit_buttons)
+            .chain(self.edit_name.iter())
+            .chain(self.edit_address.iter())
             .chain(self.run_buttons.iter().flatten())
             .chain(self.rows.iter())
             .copied()
@@ -511,6 +667,17 @@ impl MachinesLayout {
 /// primary one: it offers Undo, or asks first.
 fn button_style(label: &str, i: usize, n: usize) -> ButtonStyle {
     if i + 1 == n && label != "Remove" {
+        ButtonStyle::Primary
+    } else {
+        ButtonStyle::Plain
+    }
+}
+
+/// How the edit form's button `i` of `n` is painted: the last primary, the
+/// rest plain; all plain while the address is tried (only "Stop" is
+/// there then), as the connect dialog's while it connects.
+fn edit_button_style(i: usize, n: usize, busy: bool) -> ButtonStyle {
+    if i + 1 == n && !busy {
         ButtonStyle::Primary
     } else {
         ButtonStyle::Plain
@@ -772,6 +939,9 @@ impl Painter {
             ((heading.loc.x + heading.size.w - name_x).max(1), HEAD_H).into(),
         );
         self.line_in(c, &d.name, LABEL_FONT_SIZE, name, true, scale, p.text);
+        if let Some(e) = &d.edit {
+            self.machine_edit(c, view, e, layout, shift, scale, p);
+        }
         for (i, (fact, rect)) in d.facts.iter().zip(&layout.facts).enumerate() {
             let color = if i == 0 { p.text } else { p.muted };
             self.line_in(c, fact, SMALL_FONT_SIZE, shift(*rect), false, scale, color);
@@ -837,6 +1007,9 @@ impl Painter {
                 self.button(c, label, shift(*rect), (hovered, on), false, scale, p);
             }
         }
+        if d.edit.is_some() {
+            return;
+        }
         let n = d.buttons.len();
         for (b, (rect, label)) in layout.buttons.iter().zip(&d.buttons).enumerate() {
             let hovered = view.hover == Some(MachinesHit::Button(b));
@@ -852,6 +1025,113 @@ impl Painter {
             );
         }
     }
+}
+
+impl Painter {
+    /// The form editing the machine's name and address, shifted into `c`
+    /// by `shift`: its rows as the connect dialog's, the lines under them,
+    /// its buttons.
+    #[allow(clippy::too_many_arguments)]
+    fn machine_edit(
+        &self,
+        c: &mut Canvas,
+        view: &MachinesPanelView,
+        e: &MachineEditView,
+        layout: &MachinesLayout,
+        shift: &dyn Fn(Rect) -> Rect,
+        scale: f64,
+        p: &Palette,
+    ) {
+        for (label, rect) in EDIT_LABELS.iter().zip(&layout.edit_labels) {
+            self.line_in(c, label, FONT_SIZE, shift(*rect), false, scale, p.muted);
+        }
+        let fields = [
+            (
+                layout.edit_name,
+                &e.name,
+                NAME_HINT,
+                MachinesFocus::EditName,
+            ),
+            (
+                layout.edit_address,
+                &e.address,
+                ADDRESS_HINT,
+                MachinesFocus::EditAddress,
+            ),
+        ];
+        for (rect, line, hint, focus) in fields {
+            let Some(rect) = rect.map(shift) else {
+                continue;
+            };
+            if e.busy && !line.is_empty() {
+                // Waiting while the address is tried: the field's text
+                // muted, no caret.
+                let empty = crate::text_field::Line::default();
+                self.field(c, &empty, "", rect, false, scale, p);
+                let (x, end) = super::field_text(rect, scale);
+                self.text(
+                    c,
+                    line,
+                    FONT_SIZE,
+                    x,
+                    end,
+                    band(rect, scale),
+                    scale,
+                    p.muted,
+                );
+            } else {
+                let focused = !e.busy && view.focus == focus;
+                self.field(c, line, hint, rect, focused, scale, p);
+            }
+        }
+        let lines = [
+            (&layout.edit_progress, FONT_SIZE, p.muted),
+            (&layout.edit_error, FONT_SIZE, p.error),
+            (&layout.edit_how, SMALL_FONT_SIZE, p.muted),
+        ];
+        for (lines, size, color) in lines {
+            for (text, rect) in lines {
+                self.line_in(c, text, size, shift(*rect), false, scale, color);
+            }
+        }
+        let n = e.buttons.len();
+        for (b, (rect, label)) in layout.edit_buttons.iter().zip(&e.buttons).enumerate() {
+            let hovered = view.hover == Some(MachinesHit::EditButton(b));
+            let on = view.focus == MachinesFocus::EditButton(b);
+            self.button(
+                c,
+                label,
+                shift(*rect),
+                (hovered, on),
+                edit_button_style(b, n, e.busy),
+                scale,
+                p,
+            );
+        }
+    }
+}
+
+/// The edit form's field with the keyboard, as the caret and the pointer care;
+/// none while the form is shut, its address is tried, or the keyboard is on
+/// one of its buttons.
+pub fn machines_panel_field(
+    view: &MachinesPanelView,
+    size: Size<i32, Logical>,
+    scale: f64,
+) -> Option<super::FieldSpot> {
+    let edit = view.detail.as_ref()?.edit.as_ref().filter(|e| !e.busy)?;
+    let layout = machines_layout(view, size);
+    let (area, line) = match view.focus {
+        MachinesFocus::EditName => (layout.edit_name?, &edit.name),
+        MachinesFocus::EditAddress => (layout.edit_address?, &edit.address),
+        _ => return None,
+    };
+    Some(super::FieldSpot {
+        area,
+        text: super::field_text(area, scale),
+        size: FONT_SIZE,
+        line: line.clone(),
+    })
 }
 
 #[cfg(test)]
@@ -895,6 +1175,7 @@ mod tests {
                 runs: (0..runs).map(run).collect(),
                 no_runs: "Nothing runs there".to_owned(),
                 buttons: vec!["Remove".to_owned(), "Disconnect".to_owned()],
+                edit: None,
             }),
             focus: MachinesFocus::List,
             runs_first: 0,
@@ -1071,6 +1352,159 @@ mod tests {
         let below = l.how[0].1.loc.y > l.problem.last().unwrap().1.loc.y;
         assert!(below && l.runs_head.loc.y > l.how[0].1.loc.y);
         fits(&l, output);
+    }
+
+    fn editing(runs: usize, busy: bool, error: bool) -> MachinesPanelView {
+        let mut v = view(3, runs);
+        if let Some(d) = v.detail.as_mut() {
+            d.edit = Some(MachineEditView {
+                name: "box-0".into(),
+                address: "ana@box-0".into(),
+                error: error.then(|| "That address reaches another machine. ".repeat(4)),
+                how: error.then(|| "Check the address.".to_owned()),
+                progress: busy.then(|| "SSH reached, looking around\u{2026}".to_owned()),
+                buttons: if busy {
+                    vec!["Stop".to_owned()]
+                } else {
+                    vec!["Cancel".to_owned(), "Save".to_owned()]
+                },
+                busy,
+            });
+        }
+        v.focus = MachinesFocus::EditAddress;
+        v
+    }
+
+    /// The form's parts inside the detail, top down: fields, lines,
+    /// buttons, then the runs.
+    fn form_fits(l: &MachinesLayout) {
+        let (name, address) = (l.edit_name.unwrap(), l.edit_address.unwrap());
+        let parts = [name, address]
+            .into_iter()
+            .chain(l.edit_labels.iter().copied())
+            .chain(l.edit_buttons.iter().copied())
+            .chain(
+                (l.edit_progress.iter())
+                    .chain(&l.edit_error)
+                    .map(|(_, r)| *r),
+            )
+            .chain(l.edit_how.iter().map(|(_, r)| *r));
+        for r in parts {
+            assert!(inside(l.detail, r), "{r:?} out of {:?}", l.detail);
+        }
+        assert!(l.heading.loc.y + l.heading.size.h <= name.loc.y);
+        assert!(name.loc.y + name.size.h <= address.loc.y);
+        assert_eq!((name.size.h, address.size.h), (QUIT_BUTTON, QUIT_BUTTON));
+        assert_eq!(name.loc.x, address.loc.x);
+        let lines = (l.edit_progress.iter())
+            .chain(&l.edit_error)
+            .chain(&l.edit_how);
+        let mut above = address.loc.y + address.size.h;
+        for (_, r) in lines {
+            assert!(r.loc.y >= above);
+            above = r.loc.y + r.size.h;
+        }
+        for b in &l.edit_buttons {
+            assert!(b.loc.y >= above);
+            assert!(b.loc.y + b.size.h <= l.runs_head.loc.y);
+        }
+        // Right-aligned with the fields.
+        if let Some(last) = l.edit_buttons.last() {
+            assert_eq!(last.loc.x + last.size.w, address.loc.x + address.size.w);
+        }
+        // The form takes the place of the facts, the problem and the
+        // machine's buttons.
+        assert!(l.facts.is_empty() && l.problem.is_empty() && l.how.is_empty());
+        assert!(l.buttons.is_empty());
+    }
+
+    #[test]
+    fn the_edit_form_fits_a_small_output_and_a_large_one() {
+        for output in [(870, 600).into(), (1920, 1080).into()] {
+            for (busy, error) in [(false, false), (true, false), (false, true)] {
+                let v = editing(3, busy, error);
+                let l = machines_layout(&v, output);
+                fits(&l, output);
+                form_fits(&l);
+                assert_eq!(l.runs.len(), 3);
+                assert_eq!(l.edit_buttons.len(), if busy { 1 } else { 2 });
+                assert_eq!(l.edit_progress.len(), usize::from(busy));
+                if error {
+                    assert!(l.edit_error.len() > 1 && l.edit_error.len() <= MOST_LINES);
+                    assert_eq!(l.edit_how.len(), 1);
+                } else {
+                    assert!(l.edit_error.is_empty() && l.edit_how.is_empty());
+                }
+            }
+            // The panel grows to fit the form, capped by the output.
+            let shut = machines_layout(&view(3, 3), output);
+            let open = machines_layout(&editing(3, false, true), output);
+            assert!(open.panel.size.h > shut.panel.size.h);
+            let many = machines_layout(&editing(40, false, true), output);
+            fits(&many, output);
+            form_fits(&many);
+            assert!(many.runs_track.is_some());
+            assert!(many.panel.size.h <= output.h - 2 * MARGIN);
+        }
+    }
+
+    #[test]
+    fn hits_map_the_edit_form() {
+        let output = (870, 600).into();
+        let l = machines_layout(&editing(2, false, true), output);
+        let name = l.edit_name.unwrap();
+        let address = l.edit_address.unwrap();
+        assert_eq!(l.hit(mid(name)), Some(MachinesHit::EditName));
+        assert_eq!(l.hit(mid(address)), Some(MachinesHit::EditAddress));
+        // A label goes to its field.
+        assert_eq!(l.hit(mid(l.edit_labels[0])), Some(MachinesHit::EditName));
+        assert_eq!(l.hit(mid(l.edit_labels[1])), Some(MachinesHit::EditAddress));
+        assert_eq!(
+            l.hit(mid(l.edit_buttons[1])),
+            Some(MachinesHit::EditButton(1))
+        );
+        assert_eq!(l.hit(mid(l.runs[0])), Some(MachinesHit::Run(0)));
+        assert_eq!(l.hit(mid(l.edit_error[0].1)), Some(MachinesHit::Panel));
+        let controls = l.controls();
+        for r in l.edit_buttons.iter().chain([&name, &address]) {
+            assert!(controls.contains(r));
+        }
+        // Shut, the form is nowhere.
+        let l = machines_layout(&view(2, 2), output);
+        assert!(l.edit_name.is_none() && l.edit_address.is_none());
+        assert!(l.edit_buttons.is_empty() && l.edit_labels.is_empty());
+    }
+
+    #[test]
+    fn the_caret_goes_in_the_focused_field_and_nowhere_while_busy() {
+        let output: Size<i32, Logical> = (870, 600).into();
+        let mut v = editing(1, false, false);
+        let l = machines_layout(&v, output);
+        let spot = machines_panel_field(&v, output, 2.0).unwrap();
+        assert_eq!(spot.area, l.edit_address.unwrap());
+        assert_eq!(spot.line, "ana@box-0");
+        assert_eq!(spot.text, super::super::field_text(spot.area, 2.0));
+        v.focus = MachinesFocus::EditName;
+        let spot = machines_panel_field(&v, output, 1.0).unwrap();
+        assert_eq!(spot.area, l.edit_name.unwrap());
+        assert_eq!(spot.line, "box-0");
+        v.focus = MachinesFocus::EditButton(0);
+        assert!(machines_panel_field(&v, output, 1.0).is_none());
+        let mut v = editing(1, true, false);
+        assert!(machines_panel_field(&v, output, 1.0).is_none());
+        v.focus = MachinesFocus::EditName;
+        assert!(machines_panel_field(&v, output, 1.0).is_none());
+        // Shut: none.
+        let mut v = view(1, 1);
+        v.focus = MachinesFocus::EditName;
+        assert!(machines_panel_field(&v, output, 1.0).is_none());
+    }
+
+    #[test]
+    fn the_forms_last_button_is_primary_unless_busy() {
+        assert_eq!(edit_button_style(0, 2, false), ButtonStyle::Plain);
+        assert_eq!(edit_button_style(1, 2, false), ButtonStyle::Primary);
+        assert_eq!(edit_button_style(0, 1, true), ButtonStyle::Plain);
     }
 
     #[test]

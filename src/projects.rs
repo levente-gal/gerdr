@@ -396,6 +396,23 @@ pub struct Workflow {
 }
 
 impl Workflow {
+    /// Machine `old` is called `new` now: the stages run on it and its
+    /// folders say so. Whether anything changed.
+    pub fn rename_machine(&mut self, old: &str, new: &str) -> bool {
+        let mut changed = false;
+        for name in self.machines.values_mut().filter(|name| *name == old) {
+            *name = new.to_owned();
+            changed = true;
+        }
+        // Folders kept under the new name were of a machine gone by that name:
+        // this machine's own go over them.
+        if let Some(folders) = self.machine_folders.remove(old) {
+            self.machine_folders.insert(new.to_owned(), folders);
+            changed = true;
+        }
+        changed
+    }
+
     pub fn is_empty(&self) -> bool {
         self.ignore.is_empty()
             && self.base.is_empty()
@@ -1873,6 +1890,32 @@ mod tests {
 
     // Above the kernel's pid limit, so `/proc` has nothing for them.
     const NO_PID: i32 = 2_000_000_000;
+
+    #[test]
+    fn a_machine_renamed_is_renamed_in_the_workflow() {
+        use crate::feature::Stage;
+        let mut workflow = Workflow::default();
+        workflow.machines.insert(Stage::Build, "box".into());
+        workflow.machines.insert(Stage::Verify, "box".into());
+        workflow.machines.insert(Stage::Plan, "other".into());
+        let folders = BTreeMap::from([("/here/app".to_owned(), "/there/app".to_owned())]);
+        workflow
+            .machine_folders
+            .insert("box".into(), folders.clone());
+        workflow
+            .machine_folders
+            .insert("other".into(), BTreeMap::new());
+        assert!(workflow.rename_machine("box", "crate"));
+        assert_eq!(workflow.machines[&Stage::Build], "crate");
+        assert_eq!(workflow.machines[&Stage::Verify], "crate");
+        assert_eq!(workflow.machines[&Stage::Plan], "other");
+        assert_eq!(workflow.machine_folders.get("crate"), Some(&folders));
+        assert!(!workflow.machine_folders.contains_key("box"));
+        assert!(workflow.machine_folders.contains_key("other"));
+        // A project that never named it is left be.
+        assert!(!workflow.rename_machine("box", "crate"));
+        assert!(!Workflow::default().rename_machine("box", "crate"));
+    }
 
     #[test]
     fn a_saved_github_workspace_opens_as_a_project() {

@@ -2277,10 +2277,12 @@ fn dump_machine() {
 
 /// The machines panel: a connected machine with three runs, the keyboard
 /// on a run's button; a failed one with what to do and its fix; the add
-/// row; and a machine Del was pressed on once.
+/// row; a machine Del was pressed on once; then the connected one's edit
+/// form: open with the keyboard in its address, trying the new address,
+/// and the address reaching another machine.
 fn machines_panel(case: usize) -> super::MachinesPanelView {
-    use super::{Dot, MachineDetailView, MachineRowView, MachineRunView, MachinesFocus};
-    use super::{MachinesHit, MachinesPanelView};
+    use super::{Dot, MachineDetailView, MachineEditView, MachineRowView, MachineRunView};
+    use super::{MachinesFocus, MachinesHit, MachinesPanelView};
     let strings = |xs: &[&str]| xs.iter().map(|x| (*x).to_owned()).collect::<Vec<_>>();
     let failed = case == 1;
     let row = |name: &str, address: &str, state: &str, dot, armed| MachineRowView {
@@ -2344,6 +2346,7 @@ fn machines_panel(case: usize) -> super::MachinesPanelView {
         ],
         no_runs: "Nothing runs there".into(),
         buttons: strings(&["Remove", "Disconnect"]),
+        edit: None,
     };
     let build_box = MachineDetailView {
         name: "Build box".into(),
@@ -2360,6 +2363,7 @@ fn machines_panel(case: usize) -> super::MachinesPanelView {
         } else {
             strings(&["Remove", "Connect"])
         },
+        edit: None,
     };
     let (selected, detail, focus, hover) = match case {
         0 => (
@@ -2375,7 +2379,37 @@ fn machines_panel(case: usize) -> super::MachinesPanelView {
             Some(MachinesHit::Button(2)),
         ),
         2 => (2, None, MachinesFocus::List, Some(MachinesHit::Hint(0))),
-        _ => (1, Some(build_box), MachinesFocus::List, None),
+        3 => (1, Some(build_box), MachinesFocus::List, None),
+        _ => {
+            let (busy, failed) = (case == 5, case == 6);
+            let edit = MachineEditView {
+                name: Line::from("ZenBook"),
+                address: Line::from("lga@zenbook-home"),
+                error: failed
+                    .then(|| "That address reaches another machine, not ZenBook".to_owned()),
+                how: failed.then(|| {
+                    "It calls itself fedora-home. Check the address, or save it anyway.".to_owned()
+                }),
+                progress: busy.then(|| "SSH reached, looking around\u{2026}".to_owned()),
+                buttons: if busy {
+                    strings(&["Stop"])
+                } else if failed {
+                    strings(&["Cancel", "Save anyway", "Try again"])
+                } else {
+                    strings(&["Cancel", "Save"])
+                },
+                busy,
+            };
+            let mut zenbook = zenbook;
+            zenbook.runs.truncate(1);
+            zenbook.edit = Some(edit);
+            let (focus, hover) = match case {
+                4 => (MachinesFocus::EditAddress, Some(MachinesHit::EditButton(0))),
+                5 => (MachinesFocus::EditAddress, None),
+                _ => (MachinesFocus::EditButton(2), None),
+            };
+            (0, Some(zenbook), focus, hover)
+        }
     };
     MachinesPanelView {
         rows,
@@ -2397,11 +2431,14 @@ fn machines_panel(case: usize) -> super::MachinesPanelView {
     }
 }
 
-const MACHINES_PANEL: [&str; 4] = [
+const MACHINES_PANEL: [&str; 7] = [
     "machines_connected",
     "machines_failed",
     "machines_add",
     "machines_armed",
+    "machines_edit",
+    "machines_edit_trying",
+    "machines_edit_failed",
 ];
 
 fn paint_machines_panel(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
@@ -2413,13 +2450,16 @@ fn paint_machines_panel(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64>
 }
 
 /// The recorded hashes of `MACHINES_PANEL`, per case in `CASES`.
-const GOLDEN_MACHINES_PANEL: [[u64; 4]; 4] = [
+const GOLDEN_MACHINES_PANEL: [[u64; 7]; 4] = [
     // Dark at 1
     [
         0xb3bbd7c00f663678, // machines_connected
         0x9881840348789585, // machines_failed
         0x2148dc185bdafe72, // machines_add
         0x26c0bcd36540a9f6, // machines_armed
+        0x7bd04a1a564c373f, // machines_edit
+        0xb8764ccc0974206b, // machines_edit_trying
+        0xb0e28cebacf474fd, // machines_edit_failed
     ],
     // Dark at 2
     [
@@ -2427,6 +2467,9 @@ const GOLDEN_MACHINES_PANEL: [[u64; 4]; 4] = [
         0xfe3c1043f9ae1011, // machines_failed
         0x6b739219f9cf9d3d, // machines_add
         0x458acde34e5587a0, // machines_armed
+        0x2f7178f82bf8bf77, // machines_edit
+        0xab5dc903d00147e0, // machines_edit_trying
+        0xd0d24075ebcf8388, // machines_edit_failed
     ],
     // Light at 1
     [
@@ -2434,6 +2477,9 @@ const GOLDEN_MACHINES_PANEL: [[u64; 4]; 4] = [
         0x7d5db1c15a7b6154, // machines_failed
         0xd0389130753a9a3a, // machines_add
         0xdbd24e06c3f789f7, // machines_armed
+        0xd86ba4cf2317a364, // machines_edit
+        0x69dbccb0746eda1d, // machines_edit_trying
+        0x381819bb66bb9b7d, // machines_edit_failed
     ],
     // Light at 2
     [
@@ -2441,6 +2487,9 @@ const GOLDEN_MACHINES_PANEL: [[u64; 4]; 4] = [
         0xfbd557aaeda5a316, // machines_failed
         0x65fb658e8be22c6b, // machines_add
         0x466f7a9c4ff722c8, // machines_armed
+        0xff4e448402f86f4a, // machines_edit
+        0xdcc5a29ece1add73, // machines_edit_trying
+        0x6ac9ee69a468eb63, // machines_edit_failed
     ],
 ];
 

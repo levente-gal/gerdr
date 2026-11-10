@@ -6,9 +6,11 @@
 //!
 //! Up/Down move through the machines, Tab/Shift+Tab through the buttons of
 //! the one selected, Enter presses the focused button (on the list: the
-//! machine's primary one), Del arms and then removes the machine, Esc closes.
+//! machine's primary one), Del arms and then removes the machine, Ctrl+E (F2:
+//! on the name) edits it in a form in place of its detail (see
+//! `machine_edit`), Esc closes.
 
-use std::time::Duration;
+use std::{collections::HashMap, time::Duration};
 
 use smithay::{
     input::keyboard::{Keysym, ModifiersState},
@@ -18,14 +20,16 @@ use smithay::{
 use crate::{
     Gerdr,
     chrome::{
-        self, Dot, MachineDetailView, MachineRowView, MachineRunView, MachinesFocus, MachinesHit,
-        MachinesPanelView,
+        self, Dot, MachineDetailView, MachineEditView, MachineRowView, MachineRunView,
+        MachinesFocus, MachinesHit, MachinesPanelView,
     },
     feature::{Feature, Stage},
     herdr::AgentStatus,
+    machine_edit::EditForm,
     machine_load::Load,
     machines::{Failure, LinkState},
     tasks::uptime,
+    text_field::Edit,
 };
 
 /// The machines panel's state, while it is open.
@@ -39,6 +43,11 @@ pub struct MachinesPanel {
     pub hover: Option<MachinesHit>,
     /// The machine Del was pressed on once: a second Del removes it.
     pub armed: Option<String>,
+    /// The form editing the selected machine, while it is open.
+    pub edit: Option<EditForm>,
+    /// What was typed in the form of each machine and left unsaved, by its
+    /// name: name, address. Kept while the panel is open.
+    pub drafts: HashMap<String, (String, String)>,
 }
 
 /// A run on a machine, as the panel's buttons act on it.
@@ -73,6 +82,16 @@ pub enum Press {
     Stop(RunRef),
     /// Open the feature's tab: project, slug.
     OpenFeature(String, String),
+    /// Open the form editing the machine of this name (Ctrl+E, its Edit
+    /// button; F2 opens it on the name).
+    Edit(String),
+    /// The form's buttons: save (trying a new address first), save without
+    /// trying, stop trying, leave the form, press the fix of what failed.
+    Save,
+    SaveAnyway,
+    StopTrying,
+    CancelEdit,
+    EditFix,
 }
 
 /// What the machines panel asks gerdr to do.
@@ -96,6 +115,19 @@ struct Content {
     /// Removing the selected machine asks first, as sandboxes this gerdr
     /// answers for stay on it: Del asks at once, without arming.
     asks_remove: bool,
+    /// The edit form, while it is open on the selected machine.
+    edit: Option<EditContent>,
+}
+
+/// What the edit form's buttons press, and how it stands.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct EditContent {
+    /// As `MachineEditView::buttons` has them.
+    buttons: Vec<Press>,
+    /// Its new address is tried: only Stop works.
+    busy: bool,
+    /// The last try failed with a fix to press.
+    fix: bool,
 }
 
 impl Content {
@@ -110,8 +142,19 @@ impl Content {
     }
 
     /// Where Tab goes, in order: the list, each run's buttons row by row,
-    /// then the machine's buttons.
+    /// then the machine's buttons. In the edit form: its name, its address,
+    /// then its buttons; while it tries, its buttons only.
     fn stops(&self) -> Vec<MachinesFocus> {
+        if let Some(edit) = &self.edit {
+            let buttons = (0..edit.buttons.len()).map(MachinesFocus::EditButton);
+            if edit.busy {
+                return buttons.collect();
+            }
+            return [MachinesFocus::EditName, MachinesFocus::EditAddress]
+                .into_iter()
+                .chain(buttons)
+                .collect();
+        }
         let runs = (self.run_presses.iter().enumerate())
             .flat_map(|(r, presses)| (0..presses.len()).map(move |b| MachinesFocus::Run(r, b)));
         let buttons = (0..self.buttons.len()).map(MachinesFocus::Button);
@@ -121,14 +164,33 @@ impl Content {
             .collect()
     }
 
+    /// Where the keyboard goes when it is on nothing there: the list, the
+    /// form's address, or Stop while it tries.
+    fn home(&self) -> MachinesFocus {
+        match &self.edit {
+            Some(edit) if edit.busy => MachinesFocus::EditButton(0),
+            Some(_) => MachinesFocus::EditAddress,
+            None => MachinesFocus::List,
+        }
+    }
+
     /// What focus `focus` presses on list row `selected`: on the list, the
-    /// machine's primary button, or Add on the add row.
+    /// machine's primary button, or Add on the add row; on a field of the
+    /// form, its primary button.
     fn press(&self, selected: usize, focus: MachinesFocus) -> Option<Press> {
         match focus {
             MachinesFocus::List if selected >= self.add_row() => Some(Press::Add),
             MachinesFocus::List => self.buttons.last().cloned(),
             MachinesFocus::Run(r, b) => self.run_presses.get(r)?.get(b).cloned(),
             MachinesFocus::Button(b) => self.buttons.get(b).cloned(),
+            MachinesFocus::EditName | MachinesFocus::EditAddress => self
+                .edit
+                .as_ref()
+                .filter(|e| !e.busy)?
+                .buttons
+                .last()
+                .cloned(),
+            MachinesFocus::EditButton(b) => self.edit.as_ref()?.buttons.get(b).cloned(),
         }
     }
 
@@ -140,6 +202,11 @@ impl Content {
             MachinesFocus::List => detail?.buttons.last().cloned(),
             MachinesFocus::Run(r, b) => detail?.runs.get(r)?.buttons.get(b).cloned(),
             MachinesFocus::Button(b) => detail?.buttons.get(b).cloned(),
+            MachinesFocus::EditName | MachinesFocus::EditAddress => {
+                let edit = detail?.edit.as_ref().filter(|e| !e.busy)?;
+                edit.buttons.last().cloned()
+            }
+            MachinesFocus::EditButton(b) => detail?.edit.as_ref()?.buttons.get(b).cloned(),
         }
     }
 }
@@ -166,7 +233,10 @@ fn link_failure(state: Option<&LinkState>) -> Option<&Failure> {
 /// The buttons of machine `name` at `target`, its link in `state`, left to
 /// right: the last is the primary one.
 fn machine_buttons(name: &str, target: &str, state: Option<&LinkState>) -> Vec<(String, Press)> {
-    let mut buttons = vec![("Remove".to_owned(), Press::Remove(name.to_owned()))];
+    let mut buttons = vec![
+        ("Remove".to_owned(), Press::Remove(name.to_owned())),
+        ("Edit".to_owned(), Press::Edit(name.to_owned())),
+    ];
     if let Some(fix) = link_failure(state).and_then(|f| f.fix(target)) {
         buttons.push((fix.label().to_owned(), Press::Fix(name.to_owned())));
     }
@@ -273,6 +343,52 @@ fn age(then: u64) -> String {
     uptime(crate::feature::now().saturating_sub(then))
 }
 
+/// The edit form `form` as it shows, and what its buttons press; `trying`:
+/// how far trying its new address got, while it is tried.
+fn edit_parts(form: &EditForm, trying: Option<&str>) -> (MachineEditView, EditContent) {
+    let busy = trying.is_some();
+    let fix = form.fix().filter(|_| !busy);
+    let buttons: Vec<(String, Press)> = match busy {
+        true => vec![("Stop".to_owned(), Press::StopTrying)],
+        false => {
+            let mut buttons = vec![("Cancel".to_owned(), Press::CancelEdit)];
+            if let Some(fix) = &fix {
+                buttons.push((fix.label().to_owned(), Press::EditFix));
+            }
+            if form.untried_offered() {
+                buttons.push(("Save anyway".to_owned(), Press::SaveAnyway));
+            }
+            let save = match form.failed.is_some() {
+                true => "Try again",
+                false => "Save",
+            };
+            buttons.push((save.to_owned(), Press::Save));
+            buttons
+        }
+    };
+    let (error, how) = match (&form.error, &form.failed) {
+        (Some(error), _) => (Some(error.clone()), None),
+        (None, Some((target, failure))) => (Some(failure.why()), failure.how(target)),
+        (None, None) => (None, None),
+    };
+    let (labels, presses) = buttons.into_iter().unzip();
+    let view = MachineEditView {
+        name: form.name.line(),
+        address: form.address.line(),
+        error,
+        how,
+        progress: trying.map(str::to_owned),
+        buttons: labels,
+        busy,
+    };
+    let content = EditContent {
+        buttons: presses,
+        busy,
+        fix: fix.is_some(),
+    };
+    (view, content)
+}
+
 /// The key hints for list row `selected` of `content`, the keyboard on
 /// `focus`, Del armed or not.
 fn hints(
@@ -282,6 +398,20 @@ fn hints(
     armed: bool,
 ) -> Vec<(String, String)> {
     let hint = |k: &str, what: &str| (k.to_owned(), what.to_owned());
+    if let Some(edit) = &content.edit {
+        if edit.busy {
+            return vec![hint("Esc", "stop")];
+        }
+        let mut hints = vec![hint("Tab", "next")];
+        if let Some(label) = content.label(selected, focus) {
+            hints.push(hint("Enter", &label.to_lowercase()));
+        }
+        if edit.fix {
+            hints.push(hint("Alt+X", "fix"));
+        }
+        hints.push(hint("Esc", "cancel"));
+        return hints;
+    }
     let mut hints = vec![hint("Up / Down", "move")];
     if content.stops().len() > 1 {
         hints.push(hint("Tab", "next button"));
@@ -296,6 +426,7 @@ fn hints(
             (false, false) => "remove",
         };
         hints.push(hint("Del", what));
+        hints.push(hint("Ctrl+E", "edit"));
     }
     hints.push(hint("Esc", "close"));
     hints
@@ -319,8 +450,12 @@ impl MachinesPanel {
     /// selection back, a button gone the keyboard to the list.
     fn settle(&mut self, content: &Content) {
         self.selected = self.selected.min(content.add_row());
+        // A form whose machine went from under it closes, what was typed kept.
+        if content.edit.is_none() && self.edit.is_some() {
+            self.close_edit();
+        }
         if !content.stops().contains(&self.focus) {
-            self.focus = MachinesFocus::List;
+            self.focus = content.home();
         }
         if self.armed.as_deref() != content.name(self.selected) {
             self.armed = None;
@@ -330,13 +465,120 @@ impl MachinesPanel {
     }
 
     /// Select list row `row`: the keyboard back on the list, Del unarmed.
+    /// Another row closes the form, what was typed kept.
     fn select(&mut self, row: usize) {
         if row != self.selected {
+            self.close_edit();
             self.selected = row;
             self.runs_first = 0;
         }
-        self.focus = MachinesFocus::List;
+        if self.edit.is_none() {
+            self.focus = MachinesFocus::List;
+        }
         self.armed = None;
+    }
+
+    /// Open the form on machine `machine`, saved at `address`: with what was
+    /// typed there before, the keyboard on its name with `on_name`, else on
+    /// its address.
+    fn open_edit(&mut self, machine: &str, address: &str, on_name: bool) {
+        if (self.edit.as_ref()).is_none_or(|f| f.machine != machine) {
+            self.close_edit();
+            let from = (machine.to_owned(), address.to_owned());
+            let typed = self.drafts.remove(machine).unwrap_or_else(|| from.clone());
+            let form = EditForm::new(machine, (&typed.0, &typed.1), from);
+            self.edit = Some(form);
+        }
+        self.focus = match on_name {
+            true => MachinesFocus::EditName,
+            false => MachinesFocus::EditAddress,
+        };
+        self.armed = None;
+    }
+
+    /// Close the form, keeping what was typed for when it opens again on its
+    /// machine; the keyboard back on the list.
+    fn close_edit(&mut self) {
+        if let Some(form) = self.edit.take() {
+            match form.draft() {
+                Some(draft) => _ = self.drafts.insert(form.machine, draft),
+                None => _ = self.drafts.remove(&form.machine),
+            }
+            self.focus = MachinesFocus::List;
+        }
+    }
+
+    /// Machine `old` is called `new` now: its form and draft follow it.
+    pub(crate) fn renamed(&mut self, old: &str, new: &str) {
+        if let Some(draft) = self.drafts.remove(old) {
+            self.drafts.insert(new.to_owned(), draft);
+        }
+        if let Some(form) = self.edit.as_mut().filter(|f| f.machine == old) {
+            form.machine = new.to_owned();
+        }
+        self.armed = None;
+    }
+
+    /// A key while the edit form is open: Tab/Shift+Tab go round its fields
+    /// and buttons, Up/Down (Ctrl+K/J) between its fields, Enter (Ctrl+Enter)
+    /// saves or presses the focused button, Alt+X presses the fix, Esc stops
+    /// trying or leaves the form; the rest goes to the focused field. While
+    /// it tries, only Stop works.
+    fn edit_key(
+        &mut self,
+        content: &Content,
+        mods: &ModifiersState,
+        sym: Keysym,
+        typed: Keysym,
+    ) -> Option<Outcome> {
+        let edit = content.edit.as_ref()?;
+        let ctrl = mods.ctrl && !mods.alt && !mods.logo;
+        let alt = mods.alt && !mods.ctrl && !mods.logo;
+        let up = |focus| match focus {
+            MachinesFocus::EditName | MachinesFocus::EditAddress => MachinesFocus::EditName,
+            _ => MachinesFocus::EditAddress,
+        };
+        match sym {
+            Keysym::Escape if edit.busy => return Some(Outcome::Press(Press::StopTrying)),
+            Keysym::Escape => return Some(Outcome::Press(Press::CancelEdit)),
+            Keysym::Return | Keysym::KP_Enter if ctrl && !edit.busy => {
+                return Some(Outcome::Press(Press::Save));
+            }
+            Keysym::Return | Keysym::KP_Enter => {
+                return content.press(self.selected, self.focus).map(Outcome::Press);
+            }
+            Keysym::Tab | Keysym::ISO_Left_Tab => {
+                let back = sym == Keysym::ISO_Left_Tab || mods.shift;
+                let stops = content.stops();
+                let at = stops.iter().position(|f| *f == self.focus).unwrap_or(0);
+                let next = match back {
+                    true => (at + stops.len() - 1) % stops.len(),
+                    false => (at + 1) % stops.len(),
+                };
+                self.focus = stops[next];
+            }
+            // The fields wait while the address is tried, as it shows.
+            _ if edit.busy => {}
+            Keysym::x | Keysym::X if alt && edit.fix => {
+                return Some(Outcome::Press(Press::EditFix));
+            }
+            Keysym::Up | Keysym::KP_Up => self.focus = up(self.focus),
+            Keysym::k | Keysym::K if ctrl => self.focus = up(self.focus),
+            Keysym::Down | Keysym::KP_Down => self.focus = MachinesFocus::EditAddress,
+            Keysym::j | Keysym::J if ctrl => self.focus = MachinesFocus::EditAddress,
+            _ => {
+                let form = self.edit.as_mut()?;
+                let field = match self.focus {
+                    MachinesFocus::EditName => &mut form.name,
+                    MachinesFocus::EditAddress => &mut form.address,
+                    _ => return None,
+                };
+                if field.key(mods, sym, typed) == Edit::Changed {
+                    form.error = None;
+                }
+            }
+        }
+        None
     }
 
     /// A key on `content`, `list_page` list rows and `runs_page` runs
@@ -345,14 +587,19 @@ impl MachinesPanel {
         &mut self,
         content: &Content,
         mods: &ModifiersState,
-        sym: Keysym,
+        (sym, typed): (Keysym, Keysym),
         (list_page, runs_page): (usize, usize),
     ) -> Option<Outcome> {
         self.settle(content);
+        if content.edit.is_some() {
+            self.armed = None;
+            return self.edit_key(content, mods, sym, typed);
+        }
         let row = self.selected;
         let last = content.add_row();
         let plain = !mods.ctrl && !mods.alt && !mods.logo;
-        let move_key = plain || (mods.ctrl && !mods.alt && !mods.logo);
+        let ctrl = mods.ctrl && !mods.alt && !mods.logo;
+        let move_key = plain || ctrl;
         let armed = self.armed.take();
         let mut to = None;
         match sym {
@@ -381,6 +628,17 @@ impl MachinesPanel {
             }
             Keysym::Return | Keysym::KP_Enter => {
                 return content.press(row, self.focus).map(Outcome::Press);
+            }
+            Keysym::e | Keysym::E if ctrl => {
+                let name = content.name(row)?;
+                return Some(Outcome::Press(Press::Edit(name.to_owned())));
+            }
+            // On the name: the press opening the form finds the keyboard
+            // there.
+            Keysym::F2 if plain => {
+                let name = content.name(row)?;
+                self.focus = MachinesFocus::EditName;
+                return Some(Outcome::Press(Press::Edit(name.to_owned())));
             }
             Keysym::Delete | Keysym::KP_Delete => {
                 let name = content.name(row)?;
@@ -441,15 +699,17 @@ impl Gerdr {
         self.refresh_pointer_focus();
     }
 
-    /// Close the machines panel.
+    /// Close the machines panel: a new address tried from its form stops
+    /// being tried.
     pub fn close_machines(&mut self) {
+        self.stop_edit_try();
         self.machines_panel = None;
         self.refresh_pointer_focus();
     }
 
     /// The ids machine `name` is known by: the one it said, connected, then
     /// those it said before.
-    fn machine_ids(&self, name: &str) -> Vec<String> {
+    pub(crate) fn machine_ids(&self, name: &str) -> Vec<String> {
         let mut ids = Vec::new();
         let link = self.machines.links.get(name);
         if let Some(work) = link.and_then(|l| l.work.as_ref()) {
@@ -636,6 +896,7 @@ impl Gerdr {
                 false => "Connect it to see what runs there".to_owned(),
             },
             buttons: labels,
+            edit: None,
         };
         let asks_remove = !self.sandboxes_on(&row_name).is_empty();
         Content {
@@ -644,6 +905,7 @@ impl Gerdr {
             run_presses,
             buttons,
             asks_remove,
+            edit: None,
         }
     }
 
@@ -652,9 +914,16 @@ impl Gerdr {
         let panel = self.machines_panel.as_ref()?;
         let selected = panel.selected.min(self.machines.saved.len());
         let mut content = self.machines_content(selected);
+        let form = (panel.edit.as_ref()).filter(|f| content.name(selected) == Some(&f.machine));
+        if let (Some(form), Some(detail)) = (form, content.detail.as_mut()) {
+            let trying = self.edit_try().filter(|t| t.name == form.machine);
+            let (view, edit) = edit_parts(form, trying.map(|t| t.progress.as_str()));
+            detail.edit = Some(view);
+            content.edit = Some(edit);
+        }
         let focus = match content.stops().contains(&panel.focus) {
             true => panel.focus,
-            false => MachinesFocus::List,
+            false => content.home(),
         };
         let armed = (panel.armed.as_deref()).is_some_and(|a| content.name(selected) == Some(a));
         if let Some(row) = content.rows.get_mut(selected) {
@@ -689,12 +958,50 @@ impl Gerdr {
     /// Ctrl+K/J), PgUp/PgDn, Home/End move through the machines; Tab/Shift+Tab
     /// through the runs' buttons, then the machine's; Enter presses the
     /// focused button; Del arms, and again removes; Esc closes.
-    pub fn machines_panel_key(&mut self, mods: &ModifiersState, sym: Keysym) -> Option<Outcome> {
+    pub fn machines_panel_key(
+        &mut self,
+        mods: &ModifiersState,
+        sym: Keysym,
+        typed: Keysym,
+    ) -> Option<Outcome> {
         let (content, view) = self.machines_panel_parts()?;
         let pages = self.machines_pages(&view);
         self.machines_panel
             .as_mut()?
-            .key(&content, mods, sym, pages)
+            .key(&content, mods, (sym, typed), pages)
+    }
+
+    /// Open the edit form on machine `name`, the keyboard on its name with
+    /// `on_name`.
+    fn open_edit(&mut self, name: &str, on_name: bool) {
+        let Some(address) = self.machines.saved.get(name).cloned() else {
+            return;
+        };
+        if let Some(panel) = self.machines_panel.as_mut() {
+            panel.open_edit(name, &address, on_name);
+        }
+    }
+
+    /// The edit form is done: closed with nothing kept of it, the selection
+    /// on machine `name` when given, as it may have a new name.
+    pub(crate) fn edit_closed(&mut self, name: Option<&str>) {
+        let row = name.and_then(|name| self.machines.saved.keys().position(|n| n == name));
+        let count = self.machines.saved.len() + 1;
+        let page = chrome::machines_shown(count, self.output_size());
+        let Some(panel) = self.machines_panel.as_mut() else {
+            return;
+        };
+        if let Some(form) = panel.edit.take() {
+            panel.drafts.remove(&form.machine);
+        }
+        if let Some(name) = name {
+            panel.drafts.remove(name);
+        }
+        panel.focus = MachinesFocus::List;
+        if let Some(row) = row {
+            panel.selected = row;
+            panel.first = reveal(panel.first, row, page, count);
+        }
     }
 
     /// Do what the machines panel asked. What opens a tab closes it first;
@@ -758,6 +1065,31 @@ impl Gerdr {
                 self.close_machines();
                 self.open_feature(&project, &slug);
             }
+            Press::Edit(name) => {
+                // F2 put the keyboard on the name already.
+                let on_name = (self.machines_panel.as_ref())
+                    .is_some_and(|p| p.focus == MachinesFocus::EditName);
+                self.open_edit(&name, on_name);
+            }
+            Press::Save => self.save_edit(false),
+            Press::SaveAnyway => self.save_edit(true),
+            Press::StopTrying => self.stop_edit_try(),
+            Press::CancelEdit => {
+                self.stop_edit_try();
+                if let Some(panel) = self.machines_panel.as_mut() {
+                    panel.close_edit();
+                }
+            }
+            Press::EditFix => {
+                let form = self.machines_panel.as_ref().and_then(|p| p.edit.as_ref());
+                let Some(fix) = form.and_then(EditForm::fix) else {
+                    return;
+                };
+                if matches!(fix, crate::machines::Fix::Terminal(_)) {
+                    self.close_machines();
+                }
+                self.run_fix(fix);
+            }
         }
     }
 
@@ -802,8 +1134,13 @@ impl Gerdr {
                 None
             }
             Some(MachinesHit::Row(i)) => {
+                let row = i.min(content.add_row());
+                // Another machine leaves the form: what it tried stops.
+                if row != view.selected {
+                    self.stop_edit_try();
+                }
                 if let Some(panel) = self.machines_panel.as_mut() {
-                    panel.select(i.min(content.add_row()));
+                    panel.select(row);
                 }
                 (i >= content.add_row()).then_some(Outcome::Press(Press::Add))
             }
@@ -816,6 +1153,24 @@ impl Gerdr {
             }
             Some(MachinesHit::Button(b)) => {
                 let focus = MachinesFocus::Button(b);
+                if let Some(panel) = self.machines_panel.as_mut() {
+                    panel.focus = focus;
+                }
+                content.press(view.selected, focus).map(Outcome::Press)
+            }
+            // A field takes the keyboard; `press_field` puts the caret.
+            Some(hit @ (MachinesHit::EditName | MachinesHit::EditAddress)) => {
+                let busy = content.edit.as_ref().is_none_or(|e| e.busy);
+                if let Some(panel) = self.machines_panel.as_mut().filter(|_| !busy) {
+                    panel.focus = match hit {
+                        MachinesHit::EditName => MachinesFocus::EditName,
+                        _ => MachinesFocus::EditAddress,
+                    };
+                }
+                None
+            }
+            Some(MachinesHit::EditButton(b)) => {
+                let focus = MachinesFocus::EditButton(b);
                 if let Some(panel) = self.machines_panel.as_mut() {
                     panel.focus = focus;
                 }
@@ -863,6 +1218,21 @@ impl Gerdr {
         (self.machines_panel_view()).map_or_else(Vec::new, |v| {
             chrome::machines_layout(&v, self.output_size()).rows
         })
+    }
+
+    /// The edit form's focused field, for the pointer and pastes; none while
+    /// the form is shut or its address is tried.
+    pub(crate) fn machines_panel_field_mut(&mut self) -> Option<&mut crate::text_field::TextField> {
+        if self.edit_try().is_some() {
+            return None;
+        }
+        let panel = self.machines_panel.as_mut()?;
+        let form = panel.edit.as_mut()?;
+        match panel.focus {
+            MachinesFocus::EditName => Some(&mut form.name),
+            MachinesFocus::EditAddress => Some(&mut form.address),
+            _ => None,
+        }
     }
 
     /// What the pointer can press in the machines panel, while it is open.
@@ -919,10 +1289,12 @@ mod tests {
                 runs: vec![run],
                 no_runs: String::new(),
                 buttons: labels,
+                edit: None,
             }),
             run_presses: vec![presses],
             buttons,
             asks_remove: false,
+            edit: None,
         }
     }
 
@@ -939,7 +1311,35 @@ mod tests {
             shift,
             ..ModifiersState::default()
         };
-        panel.key(c, &mods, sym, (10, 10))
+        panel.key(c, &mods, (sym, sym), (10, 10))
+    }
+
+    /// A key with Ctrl or Alt held, as input sends it.
+    fn chord(panel: &mut MachinesPanel, c: &Content, ctrl: bool, sym: Keysym) -> Option<Outcome> {
+        let mods = ModifiersState {
+            ctrl,
+            alt: !ctrl,
+            ..ModifiersState::default()
+        };
+        panel.key(c, &mods, (sym, sym), (10, 10))
+    }
+
+    /// `content()` with the form open on machine `a`, from `panel`'s form,
+    /// tried while `trying`.
+    fn editing(panel: &MachinesPanel, trying: bool) -> Content {
+        let mut c = content();
+        let form = panel.edit.as_ref().expect("the form is open");
+        let (view, edit) = edit_parts(form, trying.then_some("reaching it over SSH…"));
+        c.detail.as_mut().unwrap().edit = Some(view);
+        c.edit = Some(edit);
+        c
+    }
+
+    /// A panel with the form open on machine `a`, saved at `me@a`.
+    fn open_form() -> MachinesPanel {
+        let mut panel = MachinesPanel::default();
+        panel.open_edit("a", "me@a", false);
+        panel
     }
 
     #[test]
@@ -962,12 +1362,15 @@ mod tests {
                 .map(|(l, _)| l)
                 .collect()
         };
-        assert_eq!(labels(Some(&up())), ["Remove", "Disconnect"]);
-        assert_eq!(labels(None), ["Remove", "Connect"]);
+        assert_eq!(labels(Some(&up())), ["Remove", "Edit", "Disconnect"]);
+        assert_eq!(labels(None), ["Remove", "Edit", "Connect"]);
         let auth = LinkState::Failed(Failure::Auth);
-        assert_eq!(labels(Some(&auth)), ["Remove", "Copy command", "Connect"]);
+        assert_eq!(
+            labels(Some(&auth)),
+            ["Remove", "Edit", "Copy command", "Connect"]
+        );
         let away = LinkState::Retrying(Failure::TimedOut);
-        assert_eq!(labels(Some(&away)), ["Remove", "Disconnect"]);
+        assert_eq!(labels(Some(&away)), ["Remove", "Edit", "Disconnect"]);
         let presses: Vec<Press> = (machine_buttons("a", "me@a", Some(&auth)).into_iter())
             .map(|(_, p)| p)
             .collect();
@@ -975,6 +1378,7 @@ mod tests {
             presses,
             [
                 Press::Remove("a".into()),
+                Press::Edit("a".into()),
                 Press::Fix("a".into()),
                 Press::Connect("a".into())
             ]
@@ -1060,14 +1464,15 @@ mod tests {
                 MachinesFocus::Run(0, 2),
                 MachinesFocus::Button(0),
                 MachinesFocus::Button(1),
+                MachinesFocus::Button(2),
                 MachinesFocus::List,
             ]
         );
         key(&mut panel, &c, Keysym::ISO_Left_Tab, true);
-        assert_eq!(panel.focus, MachinesFocus::Button(1));
+        assert_eq!(panel.focus, MachinesFocus::Button(2));
         let pressed = key(&mut panel, &c, Keysym::Return, false);
         assert_eq!(pressed, Some(Outcome::Press(Press::Disconnect("a".into()))));
-        for _ in 0..3 {
+        for _ in 0..4 {
             key(&mut panel, &c, Keysym::Tab, true);
         }
         let stop = key(&mut panel, &c, Keysym::Return, false);
@@ -1119,7 +1524,10 @@ mod tests {
         };
         let removed = key(&mut panel, &c, Keysym::Delete, false);
         assert_eq!(removed, Some(Outcome::Press(Press::Remove("a".into()))));
-        assert_eq!(hints(&c, 0, MachinesFocus::List, false)[3].1, "remove\u{2026}");
+        assert_eq!(
+            hints(&c, 0, MachinesFocus::List, false)[3].1,
+            "remove\u{2026}"
+        );
     }
 
     #[test]
@@ -1166,6 +1574,7 @@ mod tests {
                 "Tab: next button",
                 "Enter: disconnect",
                 "Del: remove",
+                "Ctrl+E: edit",
                 "Esc: close"
             ]
         );
@@ -1190,5 +1599,177 @@ mod tests {
         assert_eq!(panel.first, 5);
         panel.scroll(-9, true, 4, 2);
         assert_eq!(panel.runs_first, 0);
+    }
+
+    #[test]
+    fn ctrl_e_and_f2_open_the_form_but_not_on_the_add_row() {
+        let c = content();
+        let mut panel = MachinesPanel::default();
+        let edit = chord(&mut panel, &c, true, Keysym::e);
+        assert_eq!(edit, Some(Outcome::Press(Press::Edit("a".into()))));
+        assert_eq!(panel.focus, MachinesFocus::List);
+        let f2 = key(&mut panel, &c, Keysym::F2, false);
+        assert_eq!(f2, Some(Outcome::Press(Press::Edit("a".into()))));
+        assert_eq!(panel.focus, MachinesFocus::EditName);
+        let mut panel = MachinesPanel {
+            selected: 2,
+            ..MachinesPanel::default()
+        };
+        let add = on_add_row(&c);
+        assert_eq!(chord(&mut panel, &add, true, Keysym::e), None);
+        assert_eq!(key(&mut panel, &add, Keysym::F2, false), None);
+        // Opened, it holds what is saved, the keyboard on the address.
+        let panel = open_form();
+        let form = panel.edit.as_ref().unwrap();
+        assert_eq!((&*form.name, &*form.address), ("a", "me@a"));
+        assert_eq!(panel.focus, MachinesFocus::EditAddress);
+    }
+
+    #[test]
+    fn tab_goes_round_the_forms_fields_and_buttons() {
+        let mut panel = open_form();
+        panel.focus = MachinesFocus::EditName;
+        let c = editing(&panel, false);
+        let labels = &c.detail.as_ref().unwrap().edit.as_ref().unwrap().buttons;
+        assert_eq!(labels, &["Cancel", "Save"]);
+        let mut seen = Vec::new();
+        for _ in 0..4 {
+            key(&mut panel, &c, Keysym::Tab, false);
+            seen.push(panel.focus);
+        }
+        assert_eq!(
+            seen,
+            [
+                MachinesFocus::EditAddress,
+                MachinesFocus::EditButton(0),
+                MachinesFocus::EditButton(1),
+                MachinesFocus::EditName,
+            ]
+        );
+        key(&mut panel, &c, Keysym::ISO_Left_Tab, true);
+        assert_eq!(panel.focus, MachinesFocus::EditButton(1));
+        // Up and Down, Ctrl+K and Ctrl+J, go between the fields.
+        key(&mut panel, &c, Keysym::Up, false);
+        assert_eq!(panel.focus, MachinesFocus::EditAddress);
+        key(&mut panel, &c, Keysym::Up, false);
+        assert_eq!(panel.focus, MachinesFocus::EditName);
+        chord(&mut panel, &c, true, Keysym::j);
+        assert_eq!(panel.focus, MachinesFocus::EditAddress);
+        chord(&mut panel, &c, true, Keysym::k);
+        assert_eq!(panel.focus, MachinesFocus::EditName);
+        // The list stays where it is, and Del is the field's.
+        key(&mut panel, &c, Keysym::Down, false);
+        key(&mut panel, &c, Keysym::Delete, false);
+        assert_eq!((panel.selected, panel.armed.as_ref()), (0, None));
+    }
+
+    #[test]
+    fn enter_saves_or_presses_the_focused_button() {
+        let mut panel = open_form();
+        let c = editing(&panel, false);
+        let save = key(&mut panel, &c, Keysym::Return, false);
+        assert_eq!(save, Some(Outcome::Press(Press::Save)));
+        panel.focus = MachinesFocus::EditButton(0);
+        let cancel = key(&mut panel, &c, Keysym::Return, false);
+        assert_eq!(cancel, Some(Outcome::Press(Press::CancelEdit)));
+        let save = chord(&mut panel, &c, true, Keysym::Return);
+        assert_eq!(save, Some(Outcome::Press(Press::Save)));
+        // After a failure with a fix: Alt+X presses it, and Enter tries again.
+        let form = panel.edit.as_mut().unwrap();
+        form.failed = Some(("me@a2".into(), Failure::Auth));
+        let c = editing(&panel, false);
+        let edit = c.detail.as_ref().unwrap().edit.clone().unwrap();
+        assert_eq!(
+            edit.buttons,
+            ["Cancel", "Copy command", "Save anyway", "Try again"]
+        );
+        assert_eq!(edit.error, Some(Failure::Auth.why()));
+        assert!(edit.how.is_some_and(|h| h.contains("ssh-copy-id me@a2")));
+        panel.focus = MachinesFocus::EditButton(2);
+        let anyway = key(&mut panel, &c, Keysym::Return, false);
+        assert_eq!(anyway, Some(Outcome::Press(Press::SaveAnyway)));
+        let fix = chord(&mut panel, &c, false, Keysym::x);
+        assert_eq!(fix, Some(Outcome::Press(Press::EditFix)));
+        let keys: Vec<String> = (hints(&c, 0, MachinesFocus::EditAddress, false).into_iter())
+            .map(|(k, w)| format!("{k}: {w}"))
+            .collect();
+        assert_eq!(
+            keys,
+            ["Tab: next", "Enter: try again", "Alt+X: fix", "Esc: cancel"]
+        );
+    }
+
+    #[test]
+    fn esc_stops_the_try_then_leaves_the_form_then_closes() {
+        let mut panel = open_form();
+        let busy = editing(&panel, true);
+        // While it tries, only Stop: the fields wait.
+        assert_eq!(busy.stops(), [MachinesFocus::EditButton(0)]);
+        assert_eq!(
+            busy.detail.as_ref().unwrap().edit.as_ref().unwrap().buttons,
+            ["Stop"]
+        );
+        let typed = key(&mut panel, &busy, Keysym::b, false);
+        assert_eq!(
+            (typed, &*panel.edit.as_ref().unwrap().address),
+            (None, "me@a")
+        );
+        assert_eq!(panel.focus, MachinesFocus::EditButton(0));
+        let enter = key(&mut panel, &busy, Keysym::Return, false);
+        assert_eq!(enter, Some(Outcome::Press(Press::StopTrying)));
+        let esc = key(&mut panel, &busy, Keysym::Escape, false);
+        assert_eq!(esc, Some(Outcome::Press(Press::StopTrying)));
+        assert_eq!(
+            keys_of(hints(&busy, 0, MachinesFocus::EditButton(0), false)),
+            ["Esc: stop"]
+        );
+        let idle = editing(&panel, false);
+        let esc = key(&mut panel, &idle, Keysym::Escape, false);
+        assert_eq!(esc, Some(Outcome::Press(Press::CancelEdit)));
+        panel.close_edit();
+        let esc = key(&mut panel, &content(), Keysym::Escape, false);
+        assert_eq!(esc, Some(Outcome::Close));
+    }
+
+    fn keys_of(h: Vec<(String, String)>) -> Vec<String> {
+        h.into_iter().map(|(k, w)| format!("{k}: {w}")).collect()
+    }
+
+    #[test]
+    fn typing_goes_to_the_field_and_clears_the_error() {
+        let mut panel = open_form();
+        panel.edit.as_mut().unwrap().error = Some("Say which machine, as user@host.".into());
+        let c = editing(&panel, false);
+        key(&mut panel, &c, Keysym::_2, false);
+        let form = panel.edit.as_ref().unwrap();
+        assert_eq!((&*form.address, form.error.as_ref()), ("me@a2", None));
+    }
+
+    #[test]
+    fn what_was_typed_waits_for_its_machine() {
+        let mut panel = open_form();
+        panel.edit.as_mut().unwrap().address.set("me@a.lan");
+        // Another row closes the form, keeping the draft.
+        panel.select(1);
+        assert!(panel.edit.is_none());
+        assert_eq!(panel.focus, MachinesFocus::List);
+        panel.open_edit("b", "me@b", true);
+        assert_eq!(&*panel.edit.as_ref().unwrap().address, "me@b");
+        assert_eq!(panel.focus, MachinesFocus::EditName);
+        panel.close_edit();
+        // Nothing typed on b: nothing kept of it.
+        assert!(!panel.drafts.contains_key("b"));
+        panel.select(0);
+        panel.open_edit("a", "me@a", false);
+        assert_eq!(&*panel.edit.as_ref().unwrap().address, "me@a.lan");
+        // A rename takes the draft along.
+        panel.close_edit();
+        panel.renamed("a", "z");
+        assert_eq!(panel.drafts["z"], ("a".to_owned(), "me@a.lan".to_owned()));
+        // A form whose machine is gone closes on the next key, kept too.
+        panel.open_edit("z", "me@a", false);
+        key(&mut panel, &content(), Keysym::Down, false);
+        assert!(panel.edit.is_none());
+        assert!(panel.drafts.contains_key("z"));
     }
 }

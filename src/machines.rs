@@ -99,6 +99,9 @@ pub enum Failure {
     TimedOut,
     /// Stopped by the user: nothing to say.
     Stopped,
+    /// A new address of the machine of this name answered as another
+    /// machine (another gerdr machine id): never tried again.
+    OtherMachine(String),
     Other(String),
 }
 
@@ -146,6 +149,9 @@ impl Failure {
             Self::HerdrDown => "herdr stopped answering there.".into(),
             Self::TimedOut => "It didn't answer in time.".into(),
             Self::Stopped => "Stopped.".into(),
+            Self::OtherMachine(name) => {
+                format!("That address reaches another machine, not {name}.")
+            }
             Self::Other(line) => format!("SSH said: {}.", line.trim_end_matches('.')),
         }
     }
@@ -164,6 +170,9 @@ impl Failure {
                 "Set AllowTcpForwarding yes in its sshd_config, then try again.".into()
             }
             Self::ServerStart(log) => format!("Its log there: {log}"),
+            Self::OtherMachine(_) => {
+                "Check the address, or add that machine as one of its own.".into()
+            }
             _ => return None,
         })
     }
@@ -808,8 +817,9 @@ pub enum LinkState {
 #[derive(Debug)]
 pub(crate) struct Link {
     target: String,
-    /// Which thread it is: what an older one says is stale.
-    serial: u64,
+    /// Which thread it is: what an older one says is stale. Its events find
+    /// it by this, not by its name, which a rename changes.
+    pub(crate) serial: u64,
     cancel: Arc<AtomicBool>,
     pub(crate) state: LinkState,
     /// It was up and went away: said, so its coming back is too. Away from
@@ -874,6 +884,51 @@ pub struct Machines {
     pub(crate) lines: HashMap<String, Instant>,
     /// What keeps each feature's work from coming back.
     pub(crate) troubles: HashMap<(String, String), String>,
+    /// The new address of a machine tried from the machines panel's edit
+    /// form, while it is: kept only once that machine answers there.
+    pub(crate) editing: Option<crate::machine_edit::EditTry>,
+}
+
+impl Machines {
+    /// The name of the machine whose link thread is `serial`, if it still has
+    /// that one.
+    pub(crate) fn link_named(&self, serial: u64) -> Option<String> {
+        (self.links.iter())
+            .find(|(_, link)| link.serial == serial)
+            .map(|(name, _)| name.clone())
+    }
+
+    /// The machine called `old` is called `new` now: its address, its link
+    /// (left running: its thread's events find it by serial) and the ids it
+    /// was seen by move over. The ids moved.
+    pub(crate) fn rename(&mut self, old: &str, new: &str) -> Vec<String> {
+        if let Some(target) = self.saved.remove(old) {
+            self.saved.insert(new.to_owned(), target);
+        }
+        if let Some(link) = self.links.remove(old) {
+            self.links.insert(new.to_owned(), link);
+        }
+        let mut ids = Vec::new();
+        for (id, name) in &mut self.names {
+            if name == old {
+                *name = new.to_owned();
+                ids.push(id.clone());
+            }
+        }
+        ids.sort();
+        ids
+    }
+
+    /// Stop machine `name`'s link and leave it disconnected, as the user
+    /// would: what it last said of itself stays.
+    pub(crate) fn link_off(&mut self, name: &str) {
+        if let Some(link) = self.links.get_mut(name) {
+            link.stop();
+            link.work = None;
+            link.connected_since = None;
+            link.state = LinkState::Off;
+        }
+    }
 }
 
 /// What the dialog asks gerdr to do.
@@ -1085,7 +1140,7 @@ impl Gerdr {
     }
 
     /// Start the thread of machine `name`'s link.
-    fn start_link(&mut self, name: String, target: String, retry: bool) {
+    pub(crate) fn start_link(&mut self, name: String, target: String, retry: bool) {
         let Some(tx) = self.machines_sender() else {
             self.show_error(format!("gerdr couldn't start connecting to {name}"));
             return;
@@ -1120,10 +1175,31 @@ impl Gerdr {
         }
     }
 
-    /// What a link's thread came to.
-    fn link_event(&mut self, name: String, serial: u64, event: LinkEvent) {
-        let Some(link) = (self.machines.links.get_mut(&name)).filter(|l| l.serial == serial) else {
+    /// What a link's thread came to. The thread says the name it started
+    /// under, but the link is found by its serial: a machine renamed keeps its
+    /// link, under the new name.
+    fn link_event(&mut self, _started_as: String, serial: u64, event: LinkEvent) {
+        let Some(name) = self.machines.link_named(serial) else {
             // Stopped or replaced since it said so.
+            return;
+        };
+        // A new address tried from the edit form: it isn't the machine's link
+        // coming, going or lost until it is kept.
+        let trying = (self.machines.editing.as_ref()).is_some_and(|t| t.serial == serial);
+        let mut kept = None;
+        if trying {
+            match &event {
+                LinkEvent::Step(text) => self.edit_progress(text.clone()),
+                LinkEvent::Up(info) => match self.edit_answered(&name, info) {
+                    Some(tried) => kept = Some(tried),
+                    None => return,
+                },
+                LinkEvent::Down { failure, .. } => {
+                    return self.edit_failed(&name, failure.clone());
+                }
+            }
+        }
+        let Some(link) = self.machines.links.get_mut(&name) else {
             return;
         };
         let target = link.target.clone();
@@ -1153,7 +1229,9 @@ impl Gerdr {
                 link.last_seen = link.connected_since;
                 let link_was_lost = std::mem::take(&mut link.lost);
                 self.start_work(&name, target.clone(), info);
-                if asked {
+                if let Some(tried) = kept {
+                    self.edit_kept(tried);
+                } else if asked {
                     self.machine_connected(name, target);
                 } else if link_was_lost {
                     self.show_success(format!("{name} is back"));
@@ -1189,7 +1267,7 @@ impl Gerdr {
 
     /// What needs the user goes on the "!" badge: a machine given up on.
     /// Away is what its dot says, and it keeps trying.
-    fn report_machines(&self) {
+    pub(crate) fn report_machines(&self) {
         let mut texts: Vec<String> = (self.machines.links.iter())
             .filter_map(|(name, link)| match &link.state {
                 LinkState::Failed(failure) => Some(format!("Machine {name}: {}", failure.why())),
@@ -1427,6 +1505,10 @@ impl Gerdr {
 
     /// Stop a machine's link, from its task. What runs there keeps running.
     pub fn disconnect_machine(&mut self, name: &str) {
+        // A new address tried for it ends with it: its link says nothing more.
+        if (self.machines.editing.as_ref()).is_some_and(|t| t.name == name) {
+            self.machines.editing = None;
+        }
         let Some(link) = self.machines.links.get_mut(name) else {
             return;
         };
@@ -1596,6 +1678,46 @@ fn machine_task(name: &str, target: &str, state: Option<&LinkState>) -> Task {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_rename_moves_the_machine_and_keeps_its_link() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut machines = Machines::default();
+        machines.saved.insert("box".into(), "me@box".into());
+        machines.saved.insert("zen".into(), "me@zen".into());
+        let link = Link {
+            target: "me@box".into(),
+            serial: 7,
+            cancel: cancel.clone(),
+            state: LinkState::Connecting("x".into()),
+            lost: false,
+            work: None,
+            connected_since: None,
+            last_seen: None,
+        };
+        machines.links.insert("box".into(), link);
+        machines.names.insert("id1".into(), "box".into());
+        machines.names.insert("id0".into(), "box".into());
+        machines.names.insert("id2".into(), "zen".into());
+        assert_eq!(machines.link_named(7).as_deref(), Some("box"));
+        let moved = machines.rename("box", "crate");
+        assert_eq!(moved, ["id0", "id1"]);
+        assert_eq!(machines.saved.keys().collect::<Vec<_>>(), ["crate", "zen"]);
+        assert_eq!(machines.saved["crate"], "me@box");
+        // The same link, still running, and what its thread says finds it.
+        assert!(!machines.links.contains_key("box"));
+        assert_eq!(machines.links["crate"].serial, 7);
+        assert!(!cancel.load(Ordering::Relaxed));
+        assert_eq!(machines.link_named(7).as_deref(), Some("crate"));
+        assert_eq!(machines.link_named(8), None);
+        assert_eq!(machines.names["id0"], "crate");
+        assert_eq!(machines.names["id1"], "crate");
+        assert_eq!(machines.names["id2"], "zen");
+        // Turned off, it is stopped and says so.
+        machines.link_off("crate");
+        assert!(cancel.load(Ordering::Relaxed));
+        assert_eq!(machines.links["crate"].state, LinkState::Off);
+    }
 
     #[test]
     fn what_ssh_says_is_told_apart() {
