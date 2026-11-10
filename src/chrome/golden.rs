@@ -3165,6 +3165,8 @@ pub(super) fn feature_tab() -> super::FeatureTabView {
             ],
         },
         activity: activity.into(),
+        running: Vec::new(),
+        running_more: 0,
         scroll: [0.0; 3],
         hover: None,
         hints: hints.map(|(k, a)| (k.to_owned(), a.to_owned())).into(),
@@ -3473,6 +3475,19 @@ fn feature_tab_verify_running() -> super::FeatureTabView {
             lines: Vec::new(),
         }],
     };
+    // The checks and the code graph run, shown under the header.
+    let row = |word, what: &str, steps, took: &str, buttons, node| super::RunningRow {
+        word,
+        what: what.into(),
+        steps,
+        took: took.into(),
+        buttons,
+        node,
+    };
+    view.running = vec![
+        row("checks", "", Some((1, 3)), "0:41", vec!["Stop"], Some(4)),
+        row("code graph", "", None, "0:07", Vec::new(), None),
+    ];
     view
 }
 
@@ -5806,7 +5821,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 62]; 4] = [
         0x9c264956301aa808, // tab_build_1920
         0xe189a91009663b5f, // tab_plan_ready_1180
         0xe5c6b54fe50866d8, // tab_verify_failed_1920
-        0x182a16a4819b681d, // tab_verify_running_1180
+        0x9e1fd8be91e7d60b, // tab_verify_running_1180
         0x82bb7f6171efd999, // tab_fix_plan_860
         0xcba33f7cc08d8eb1, // tab_ship_blocked_1180
         0xd5b4abfb64205d75, // tab_ship_routes_1180
@@ -5871,7 +5886,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 62]; 4] = [
         0x50fe8934c5dd77a6, // tab_build_1920
         0xd84ef3781722f490, // tab_plan_ready_1180
         0xd1ad4571a21deadf, // tab_verify_failed_1920
-        0xe95f15636a93b97f, // tab_verify_running_1180
+        0xb23a4ec0092115f5, // tab_verify_running_1180
         0x28fda7ee775f9d64, // tab_fix_plan_860
         0x64bbba562475b8c7, // tab_ship_blocked_1180
         0x564a27492b6c6f2b, // tab_ship_routes_1180
@@ -5936,7 +5951,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 62]; 4] = [
         0xb761367cbc399bdc, // tab_build_1920
         0xbd427b01de8543f6, // tab_plan_ready_1180
         0x7c07bc659866d87e, // tab_verify_failed_1920
-        0x4a8e336fe34d7a13, // tab_verify_running_1180
+        0xa69719dede91f5fc, // tab_verify_running_1180
         0xf0f24acb3a4499c2, // tab_fix_plan_860
         0x21a64da6beb2e85c, // tab_ship_blocked_1180
         0xe28dcf17bde728f8, // tab_ship_routes_1180
@@ -6001,7 +6016,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 62]; 4] = [
         0x728895e2aefa19d4, // tab_build_1920
         0x765df7bc08d22fb0, // tab_plan_ready_1180
         0x834e87d1b77bb685, // tab_verify_failed_1920
-        0x82805a0d8a12c5b7, // tab_verify_running_1180
+        0x369b6c154bbeb471, // tab_verify_running_1180
         0x0c25cafde96fceda, // tab_fix_plan_860
         0x932f711ff301e42d, // tab_ship_blocked_1180
         0xafbcb09d60998def, // tab_ship_routes_1180
