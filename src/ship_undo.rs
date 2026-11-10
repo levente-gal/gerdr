@@ -33,6 +33,14 @@ impl Gerdr {
                 "\u{201c}{title}\u{201d} is busy; try again once it is done"
             ));
         }
+        let probe = self.last_probe(project, slug);
+        if matches!(step, ShipStep::Push | ShipStep::PushBranch | ShipStep::OpenPr)
+            && crate::features::pr_merged(probe, repo)
+        {
+            return self.show_warning(format!(
+                "The pull request of {repo} was merged on GitHub: that can't be undone here"
+            ));
+        }
         let undos = match ship::undo_of(feature, repo, step) {
             Ok(undos) => undos,
             Err(why) => return self.show_warning(why),

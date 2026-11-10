@@ -11194,6 +11194,7 @@ impl Gerdr {
         let probe = (self.features.probes.get(&key)).and_then(|p| p.last.as_ref());
         let notes = notes_of(probe);
         let mut actions = stage_actions(feature, stage, ctx, &plan, &rows, notes);
+        actions.retain(|(_, o)| !undoes_merged(o, probe));
         actions.extend(round_plan_actions(feature, stage, probe));
         let place = self.place_label(feature, stage);
         actions.extend(place_action(place.as_deref(), stage));
@@ -14511,6 +14512,21 @@ fn round_plan_actions(
     }
 }
 
+/// Whether repository `repo`'s pull request was merged on GitHub, as `probe`
+/// last read it.
+pub(crate) fn pr_merged(probe: Option<&Probe>, repo: &str) -> bool {
+    (probe.and_then(|p| p.prs.as_ref()))
+        .and_then(|prs| prs.get(repo))
+        .is_some_and(|state| state.as_ref().is_ok_and(|s| s.state == "MERGED"))
+}
+
+/// Whether `outcome` undoes a push or pull request whose pull request was
+/// merged on GitHub: closing it then undoes nothing, so it isn't offered.
+fn undoes_merged(outcome: &PanelOutcome, probe: Option<&Probe>) -> bool {
+    matches!(outcome, PanelOutcome::UndoShip(repo, step)
+        if *step != ShipStep::Merge && *step != ShipStep::PushBase && pr_merged(probe, repo))
+}
+
 /// The buttons of Ship's cards that go by how each branch stands against its
 /// base, as `probe` read it: taking a base in that went on, merged or
 /// rebased.
@@ -14686,6 +14702,7 @@ fn ship_keys(
     repo: Option<&str>,
 ) -> Vec<ShipKey> {
     let mut offered = page_actions(feature, Stage::Ship, ctx);
+    offered.retain(|(_, o)| !undoes_merged(o, probe));
     offered.extend(ship_base_actions(feature, probe));
     let find = |want: &dyn Fn(&PanelOutcome) -> bool| {
         (offered.iter())
@@ -16574,6 +16591,7 @@ fn tab_view(
                 &state.criteria,
                 notes_of(state.probe),
             );
+            actions.retain(|(_, o)| !undoes_merged(o, state.probe));
             actions.extend(round_plan_actions(feature, stage, state.probe));
             actions.extend(place_action(state.place.as_deref(), stage));
             actions.extend(stop_action(feature, stage));
@@ -21427,6 +21445,23 @@ pub(crate) mod tests {
             rounds: BTreeMap::new(),
             docs: feature::page::Docs::default(),
         }
+    }
+
+    #[test]
+    fn a_pull_request_merged_on_github_offers_no_undo() {
+        let mut p = probe(None);
+        let undo = |step| PanelOutcome::UndoShip("api".into(), step);
+        assert!(!undoes_merged(&undo(ShipStep::OpenPr), Some(&p)));
+        let merged = ship::PrState {
+            state: "MERGED".into(),
+            ..Default::default()
+        };
+        p.prs = Some(BTreeMap::from([("api".to_owned(), Ok(merged))]));
+        assert!(undoes_merged(&undo(ShipStep::OpenPr), Some(&p)));
+        assert!(undoes_merged(&undo(ShipStep::Push), Some(&p)));
+        assert!(!undoes_merged(&undo(ShipStep::Merge), Some(&p)));
+        let other = PanelOutcome::UndoShip("web".into(), ShipStep::OpenPr);
+        assert!(!undoes_merged(&other, Some(&p)));
     }
 
     /// A check finding `repos` to ship through origin, each with commits.
