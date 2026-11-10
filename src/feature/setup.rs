@@ -23,6 +23,11 @@
 //! main's code, so tests would pass on the wrong code. `repoint` makes the
 //! copy name the worktree instead.
 //!
+//! A repository with no commands of its own then gets what its worktree still
+//! lacks built by what its tracked files name (`with_expected`,
+//! `builds_there`): main may never have had a `node_modules` or a venv, as on
+//! a machine that took the feature over.
+//!
 //! Then the repository's commands from the store file run, every time
 //! (`"workflow": {"setup": {"services-api": ["npm ci"]}}`), in its worktree.
 //! Every command runs with `sh -c`, on the Node and venv a new terminal
@@ -160,7 +165,90 @@ pub fn for_machine(repo: &Repo, extras: &PerRepo) -> ForMachine {
             false => out.send.push(item.path),
         }
     }
+    let base = match repo.worktree.is_dir() {
+        true => &repo.worktree,
+        false => &repo.main,
+    };
+    out.environments = with_expected(base, std::mem::take(&mut out.environments));
     out
+}
+
+/// Lockfiles that make a folder with a `package.json` a package of its own,
+/// not a workspace of one above it.
+const NODE_LOCKS: &[&str] = &["package-lock.json", "pnpm-lock.yaml", "yarn.lock"];
+/// Files that say what a Python environment holds, wherever they are.
+const PYTHON_LOCKS: &[&str] = &["uv.lock", "poetry.lock", "Pipfile.lock"];
+/// Files next to a `requirements.txt` that make it a project's, not a docs
+/// build's.
+const PYTHON_PROJECT: &[&str] = &["pyproject.toml", "setup.py", "manage.py"];
+
+/// `found` (environments by path, as `Item::path`) with those the tracked
+/// files of the checkout `dir` call for and nothing found stands for: a
+/// `node_modules` beside a `package.json` (below the top only with its own
+/// lockfile), a `.venv` beside a Python lockfile or a project's
+/// `requirements.txt` (at the top, beside a Python project too).
+pub fn with_expected(dir: &Path, mut found: Vec<String>) -> Vec<String> {
+    let mut names: Vec<&str> = vec!["package.json", "requirements.txt"];
+    names.extend(NODE_LOCKS.iter().chain(PYTHON_LOCKS).chain(PYTHON_PROJECT));
+    // A pathspec's `*` takes in slashes: each name in any folder.
+    let mut args = vec!["ls-files".to_owned(), "-z".to_owned(), "--".to_owned()];
+    args.extend(names.iter().map(|n| format!("*{n}")));
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let listing = match git(dir, &args) {
+        Ok(out) => out,
+        Err(err) => {
+            tracing::warn!("{}: couldn't list its files: {err}", shown(dir));
+            return found;
+        }
+    };
+    let mut folders: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for path in listing.split('\0').filter(|p| !p.is_empty()) {
+        let (folder, name) = path.rsplit_once('/').unwrap_or(("", path));
+        if names.contains(&name) && !folder.split('/').any(|c| c == NODE_MODULES) {
+            folders.entry(folder).or_default().push(name);
+        }
+    }
+    let at = |folder: &str, name: &str| match folder {
+        "" => name.to_owned(),
+        _ => format!("{folder}/{name}"),
+    };
+    for (folder, files) in folders {
+        let has = |name: &str| files.contains(&name);
+        let top = folder.is_empty();
+        if has("package.json") && (top || NODE_LOCKS.iter().any(|l| has(l))) {
+            let env = at(folder, NODE_MODULES);
+            if !found.contains(&env) {
+                found.push(env);
+            }
+        }
+        let project = PYTHON_PROJECT.iter().any(|p| has(p));
+        let python = PYTHON_LOCKS.iter().any(|l| has(l))
+            || (has("requirements.txt") && (top || project))
+            || (top && python_project(&dir.join("pyproject.toml")))
+            || (top && has("setup.py"));
+        // Any venv found there already is the one, whatever its name.
+        let has_venv = found.iter().any(|env| {
+            let (f, name) = env.rsplit_once('/').unwrap_or(("", env));
+            f == folder && name != NODE_MODULES
+        });
+        let made = [".venv", "venv"]
+            .iter()
+            .any(|v| dir.join(folder).join(v).join(VENV_MARK).is_file());
+        if python && !has_venv && !made {
+            found.push(at(folder, ".venv"));
+        }
+    }
+    found.sort();
+    found
+}
+
+/// Whether the `pyproject.toml` at `path` makes a package, not only tools'
+/// settings.
+fn python_project(path: &Path) -> bool {
+    std::fs::read_to_string(path).is_ok_and(|text| {
+        text.lines()
+            .any(|line| matches!(line.trim(), "[project]" | "[tool.poetry]"))
+    })
 }
 
 /// How an environment left out of a setup on another machine gets there.
@@ -818,13 +906,14 @@ fn run_into(
     repos.sort_by_key(|r| r.key());
     let total: usize = repos.iter().map(|r| lines_of(commands, r).len()).sum();
     // Asking poetry or pipenv takes a moment: only with something to run.
-    let tools = (total > 0).then(Tools::detect).unwrap_or_default();
+    let mut tools: Option<Tools> = None;
     let mut i = 0;
     for repo in repos {
         let name = &repo.key();
         let mut problems = Vec::new();
         let mut copied = Vec::new();
-        for item in to_copy(repo, &lines_of(extras, repo), &mut problems) {
+        let items = to_copy(repo, &lines_of(extras, repo), &mut problems);
+        for item in &items {
             let path = &item.path;
             if repo.worktree.join(path).symlink_metadata().is_ok() {
                 let _ = writeln!(file, "== {name}: kept {path}, already there");
@@ -833,7 +922,7 @@ fn run_into(
             if item.environment {
                 progress(format!("{name}: copying {path}"));
             }
-            let note = match copy(repo, &item, &feature.slug, &file) {
+            let note = match copy(repo, item, &feature.slug, &file) {
                 Ok(()) => {
                     copied.push(path.clone());
                     format!("copied {path} from {}", shown(&repo.main))
@@ -854,41 +943,100 @@ fn run_into(
         report
             .not_copied
             .extend(problems.iter().map(|what| format!("{name}: {what}")));
-        for command in lines_of(commands, repo) {
+        let own = lines_of(commands, repo);
+        // With no commands of its own, what the worktree still lacks is built
+        // by what its files name: main may never have had it.
+        let builds = match own.is_empty() {
+            true => {
+                let found: Vec<String> = (items.iter())
+                    .filter(|item| item.environment)
+                    .map(|item| item.path.clone())
+                    .collect();
+                let lacking: Vec<String> = with_expected(&repo.worktree, found)
+                    .into_iter()
+                    .filter(|env| repo.worktree.join(env).symlink_metadata().is_err())
+                    .collect();
+                builds_there(repo, &lacking)
+            }
+            false => Vec::new(),
+        };
+        let mut steps: Vec<(String, String)> = Vec::new();
+        for (env, built) in builds {
+            match built {
+                Built::By(command) => {
+                    let _ = writeln!(file, "== {name}: {env} isn't there: {command} builds it");
+                    steps.push((format!("{name}: building {env}"), command));
+                }
+                Built::With(other) => {
+                    let _ = writeln!(file, "== {name}: {env} isn't there: built with {other}");
+                }
+                Built::Not => {}
+            }
+        }
+        for command in own {
             i += 1;
-            progress(format!("{name}: {command} ({i} of {total})"));
-            // As above: a log line lost doesn't stop the setup.
-            let _ = writeln!(file, "== {} {name}: {command}", super::verify::utc(now()));
-            let _ = writeln!(file, "== in {}", shown(&repo.worktree));
-            let activated = background_command(command, &repo.worktree, &feature.dir, venv, &tools);
-            if activated != command {
-                let _ = writeln!(file, "== runs as: {activated}");
-            }
-            let _ = file.flush();
-            let out = file
-                .try_clone()
-                .map_err(|err| format!("couldn't write to {}: {err}", shown(log)))?;
-            let err = file
-                .try_clone()
-                .map_err(|err| format!("couldn't write to {}: {err}", shown(log)))?;
-            let started = Instant::now();
-            let exit = shell(
-                &activated,
-                &repo.worktree,
-                &feature.slug,
-                Stdio::from(out),
-                Stdio::from(err),
-                TIMEOUT,
-            );
-            let secs = started.elapsed().as_secs();
-            let _ = writeln!(file, "== {} after {secs} s\n", exit.describe());
-            if !exit.passed() {
-                return Err(format!("{name}: `{command}` {}", exit.describe()));
-            }
-            report.ran.push(format!("{name}: {command}"));
+            steps.push((
+                format!("{name}: {command} ({i} of {total})"),
+                command.to_owned(),
+            ));
+        }
+        for (said, command) in steps {
+            progress(said);
+            let tools = tools.get_or_insert_with(Tools::detect);
+            let ran = run_command(&command, repo, feature, venv, tools, &mut file, log)?;
+            report.ran.push(format!("{name}: {ran}"));
         }
     }
     Ok(())
+}
+
+/// Run setup command `command` in `repo`'s worktree, on the Node and venv a
+/// new terminal there gets, its output to `file`, the log at `log`. What ran,
+/// or why it failed: "api: `npm ci` exited with 1".
+fn run_command(
+    command: &str,
+    repo: &Repo,
+    feature: &Feature,
+    venv: &VenvSetting,
+    tools: &Tools,
+    file: &mut File,
+    log: &Path,
+) -> Result<String, String> {
+    let name = repo.key();
+    // As in `run_into`: a log line lost doesn't stop the setup.
+    let _ = writeln!(file, "== {} {name}: {command}", super::verify::utc(now()));
+    let _ = writeln!(file, "== in {}", shown(&repo.worktree));
+    let activated = background_command(command, &repo.worktree, &feature.dir, venv, tools);
+    if activated != command {
+        let _ = writeln!(file, "== runs as: {activated}");
+    }
+    let _ = file.flush();
+    let out = file
+        .try_clone()
+        .map_err(|err| format!("couldn't write to {}: {err}", shown(log)))?;
+    let err = file
+        .try_clone()
+        .map_err(|err| format!("couldn't write to {}: {err}", shown(log)))?;
+    let started = Instant::now();
+    let exit = shell(
+        &activated,
+        &repo.worktree,
+        &feature.slug,
+        Stdio::from(out),
+        Stdio::from(err),
+        TIMEOUT,
+    );
+    let secs = started.elapsed().as_secs();
+    let _ = writeln!(file, "== {} after {secs} s\n", exit.describe());
+    if !exit.passed() {
+        let how = match exit {
+            // What sh says of a command it can't find.
+            Exit::Code(127) => format!("{}: a command it runs isn't installed", exit.describe()),
+            _ => exit.describe(),
+        };
+        return Err(format!("{name}: `{command}` {how}"));
+    }
+    Ok(command.to_owned())
 }
 
 /// How a shell command ended.
@@ -1494,6 +1642,86 @@ mod tests {
             "{log}"
         );
         assert!(wt.join(".venv/pyvenv.cfg").is_file());
+    }
+
+    /// `path` of the checkout `dir` holding `text`, added to its index.
+    fn track(dir: &Path, path: &str, text: &str) {
+        put(dir, path, text);
+        git(dir, &["add", "--", path]).unwrap();
+    }
+
+    #[test]
+    fn the_files_call_for_environments_main_never_had() {
+        let t = Temp::new();
+        let f = feature_over(&t, &["api"], &[]);
+        let wt = &f.repos[0].worktree;
+        track(wt, "package.json", "{}");
+        // A workspace of the one at the top, and a package of its own.
+        track(wt, "web/package.json", "{}");
+        track(wt, "svc/package.json", "{}");
+        track(wt, "svc/yarn.lock", "");
+        track(wt, "docs/requirements.txt", "");
+        track(wt, "api/uv.lock", "");
+        track(wt, "app/requirements.txt", "");
+        track(wt, "app/manage.py", "");
+        track(wt, "pyproject.toml", "[project]\nname = 'x'\n");
+        // Untracked: not the branch's.
+        put(wt, "loose/uv.lock", "");
+        let found = vec!["node_modules".to_owned(), "app/venv".to_owned()];
+        assert_eq!(
+            with_expected(wt, found),
+            [
+                ".venv",
+                "api/.venv",
+                "app/venv",
+                "node_modules",
+                "svc/node_modules"
+            ]
+        );
+        put(wt, "venv/pyvenv.cfg", "");
+        assert_eq!(
+            with_expected(wt, Vec::new()),
+            ["api/.venv", "app/.venv", "node_modules", "svc/node_modules"]
+        );
+    }
+
+    #[test]
+    fn a_setup_here_builds_what_main_lacks_once() {
+        let t = Temp::new();
+        let f = feature_over(&t, &["api", "web"], &[]);
+        let (api, web) = (&f.repos[0].worktree, &f.repos[1].worktree);
+        track(api, "requirements.txt", "");
+        track(web, "requirements.txt", "");
+        let log = t.0.join("data/setup.log");
+        let commands = map(&[("web", &["touch own"])]);
+        let mut said = Vec::new();
+        let report = run(&f, &commands, &none(), &VenvSetting::Auto, &log, &mut |s| {
+            said.push(s)
+        });
+        let build = "python3 -m venv .venv && .venv/bin/pip install -r requirements.txt";
+        assert_eq!(
+            report.failed,
+            None,
+            "{}",
+            std::fs::read_to_string(&log).unwrap()
+        );
+        assert_eq!(
+            report.ran,
+            [format!("api: {build}"), "web: touch own".into()]
+        );
+        assert_eq!(said, ["api: building .venv", "web: touch own (1 of 1)"]);
+        assert!(api.join(".venv/pyvenv.cfg").is_file());
+        // The project's own commands build what they will.
+        assert!(!web.join(".venv").exists());
+        let again = run(
+            &f,
+            &commands,
+            &none(),
+            &VenvSetting::Auto,
+            &log,
+            &mut |_| {},
+        );
+        assert_eq!(again.ran, ["web: touch own"]);
     }
 
     #[test]
