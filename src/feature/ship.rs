@@ -2338,6 +2338,7 @@ esac
             pane: None,
             n: 1,
             planning: false,
+            nudged: false,
         });
         let data = t.0.join("data");
         let found = read_resolution(&f, &data).unwrap();
@@ -2385,6 +2386,45 @@ esac
         assert_eq!(build.patch.as_deref(), Some("new-patch"));
         assert_eq!(f.stale("new-patch"), None);
         assert!(f.rebased_since_push("api"), "a rebase pushes with lease");
+    }
+
+    /// Origin's base taken in while the local base stays behind isn't the
+    /// feature's change: not in its diff, line count or patch-id, and
+    /// pulling the local base after changes none of them.
+    #[test]
+    fn a_base_taken_in_is_not_the_features_change() {
+        let t = Temp::new();
+        let mut f = feature_over(&t, &["api"], &[]);
+        origins(&t, &f);
+        commit(&wt(&f, "api"), "a1", "api change");
+        let own = patch::read(&f).unwrap().patch;
+        // Origin's main moves on by two commits; the local main stays behind.
+        let main = f.repos[0].main.clone();
+        commit(&main, "m1", "on main");
+        commit(&main, "m2", "more on main");
+        run(&main, &["push", "-q", "origin", "main"]);
+        run(&main, &["reset", "-q", "--hard", "HEAD~2"]);
+
+        let (update, patch) = update_from_base(&f, "api", UpdateWay::Merge, 7).unwrap();
+        assert_eq!(patch.as_deref(), Some(own.as_str()));
+        f.updated_from_base(update.clone(), patch.as_deref(), 7);
+        assert_eq!(f.repos[0].base_commit, update.onto_sha);
+        let reading = patch::read(&f).unwrap();
+        assert_eq!(reading.patch, own);
+        assert_eq!(reading.commits["api"], 2, "a1 and the merge");
+        let stat = super::super::page::stat(&f.repos[0]).unwrap();
+        assert_eq!((stat.files, stat.added), (1, 1));
+        let read = super::super::viewed::read(&f.repos[0]).unwrap();
+        let paths: Vec<_> = read.blobs.keys().collect();
+        assert_eq!(paths, ["a1"]);
+
+        // Pulling the local main changes nothing of the feature's.
+        run(&main, &["merge", "-q", "--ff-only", "origin/main"]);
+        let pulled = patch::read(&f).unwrap();
+        assert_eq!(pulled.patch, own);
+        assert_eq!(pulled.commits, reading.commits);
+        let stat = super::super::page::stat(&f.repos[0]).unwrap();
+        assert_eq!((stat.files, stat.added), (1, 1));
     }
 
     /// A push from before the log kept its commit holds only while origin's

@@ -1767,7 +1767,8 @@ mod tests {
             branch: Some("feature/x".into()),
             project: None,
         };
-        assert_eq!(super::super::layout::base_ref(&repo), "main");
+        // Here: where its branch met main.
+        assert_eq!(super::super::layout::base_ref(&repo), root);
         git(&main, &format!("update-ref {} HEAD", view_base_ref("feature/x")));
         assert_eq!(
             super::super::layout::base_ref(&repo),
