@@ -1685,6 +1685,12 @@ impl WorktreeDiff {
         self.with_diff(env, |diff, ctx| diff.drag_editor(i, col, ctx));
     }
 
+    /// A press on the comment being written dragged past the diff's rows:
+    /// see `DiffView::drag_editor_past`.
+    pub fn drag_editor_past(&mut self, by: i64, col: usize, env: Env) {
+        self.with_diff(env, |diff, ctx| diff.drag_editor_past(by, col, ctx));
+    }
+
     /// The pointer dragged past the diff's rows, `by` (up negative).
     pub fn drag_past_rows(&mut self, by: i64, env: Env) {
         self.with_diff(env, |diff, ctx| diff.drag_past_rows(by, ctx));
@@ -3317,6 +3323,62 @@ pub(crate) mod tests {
         assert_eq!(editor(&wd).2, 1..12);
         // Off it (its hint under it), nothing taken.
         assert!(!wd.press_editor(row + 1, false, 1, ENV));
+    }
+
+    #[test]
+    fn dragging_the_comment_past_the_diff_scrolls_it_and_selects_on() {
+        let mut wd = doc();
+        let shift = ModifiersState {
+            shift: true,
+            ..Default::default()
+        };
+        wd.key(&shift, Keysym::c, Keysym::C, ENV);
+        // Twice the page's rows of it.
+        for n in 0..40 {
+            if n > 0 {
+                wd.key(&shift, Keysym::Return, Keysym::Return, ENV);
+            }
+            typed(&mut wd, &format!("l{n:02}"));
+        }
+        // Where its rows are in view, and the one with the caret.
+        let shown = |wd: &WorktreeDiff| {
+            let rows = wd.view(ENV).rows;
+            let at = |f: &dyn Fn(&DetailRow) -> bool| rows.iter().position(f);
+            let first = at(&|r| matches!(r, DetailRow::Editor { first: true, .. }));
+            let last = at(&|r| matches!(r, DetailRow::Editor { last: true, .. }));
+            let caret = rows.iter().find_map(|r| match r {
+                DetailRow::Editor {
+                    text, caret: Some(c), ..
+                } => Some((text.clone(), *c)),
+                _ => None,
+            });
+            (first, last, caret)
+        };
+        let (first, last, _) = shown(&wd);
+        assert_eq!(first, None, "its start is scrolled out of view");
+        assert!(last.is_some());
+        // Pressed on a row of it in view, then held above the diff: a row
+        // a move, until its first is in view.
+        let row = last.unwrap() - 5;
+        wd.diff.pointer_char = Some((row, 1));
+        assert!(wd.press_editor(row, false, 1, ENV));
+        let pressed = shown(&wd).2.unwrap();
+        wd.drag_editor_past(-1, 2, ENV);
+        let (_, _, caret) = shown(&wd);
+        assert_ne!(caret, Some(pressed.clone()), "one row on");
+        for _ in 0..60 {
+            wd.drag_editor_past(-1, 2, ENV);
+        }
+        let (first, _, caret) = shown(&wd);
+        assert!(first.is_some(), "its start in view");
+        assert_eq!(caret, Some(("l00".into(), 2)));
+        // Below it, on to its end.
+        for _ in 0..60 {
+            wd.drag_editor_past(1, 99, ENV);
+        }
+        let (_, last, caret) = shown(&wd);
+        assert!(last.is_some(), "its end in view");
+        assert_eq!(caret, Some(("l39".into(), 3)));
     }
 
     #[test]

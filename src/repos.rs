@@ -4296,6 +4296,16 @@ impl Panel {
         self.diff.drag_editor(i, col, &dctx);
     }
 
+    /// A press on the comment being written dragged past the diff's rows:
+    /// see `DiffView::drag_editor_past`.
+    pub fn drag_editor_past(&mut self, by: i64, col: usize, ctx: &Ctx) {
+        if self.tab() != DetailTab::Diff {
+            return;
+        }
+        diff_ctx!(self, ctx, dctx);
+        self.diff.drag_editor_past(by, col, &dctx);
+    }
+
     /// Open the file shown as row `i` of the diff in Zed, at that line.
     pub fn open_detail_row(&mut self, i: usize, ctx: &Ctx) -> Option<Outcome> {
         if self.tab() != DetailTab::Diff {

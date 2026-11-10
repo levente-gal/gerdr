@@ -1261,12 +1261,18 @@ impl Gerdr {
             .detail_rows
             .iter()
             .position(|r| (r.loc.y as f64..(r.loc.y + r.size.h) as f64).contains(&pos.y));
+        // Past the rows, the comment's selection takes its next row out of
+        // view, the diff scrolling to it.
         if let Some((i, col)) = editor
             && self.wd().is_some()
         {
             let env = self.worktree_env();
             if let Some(wd) = self.wd_mut() {
-                wd.drag_editor(i, col, env);
+                match (by, i) {
+                    (0, Some(i)) => wd.drag_editor(i, col, env),
+                    (0, None) => {}
+                    (by, _) => wd.drag_editor_past(by, col, env),
+                }
             }
             return;
         }
@@ -1303,7 +1309,9 @@ impl Gerdr {
             return;
         };
         match (editor, by, row) {
-            (Some((i, col)), ..) => p.drag_editor(i, col, &ctx),
+            (Some((Some(i), col)), 0, _) => p.drag_editor(i, col, &ctx),
+            (Some((None, _)), 0, _) => {}
+            (Some((_, col)), by, _) => p.drag_editor_past(by, col, &ctx),
             (None, 0, Some(i)) => p.extend_detail_row(i, &ctx),
             (None, 0, None) => {}
             (None, by, _) => p.drag_past_rows(by, &ctx),
