@@ -269,6 +269,13 @@ impl Gerdr {
         if live {
             self.restore_link(&tried);
         }
+        // The keyboard goes back to the address, as after a failed try:
+        // the only button it was on is gone.
+        if let Some(panel) = self.machines_panel.as_mut()
+            && panel.edit.is_some()
+        {
+            panel.focus = MachinesFocus::EditAddress;
+        }
         self.starts_lost();
         self.report_machines();
     }
