@@ -132,6 +132,29 @@ impl RepoCheck {
             ShipStep::Merge => self.no_merge.as_deref(),
         }
     }
+
+    /// Its squash waits for its base to be pulled: its branch took in
+    /// commits of origin's base that the base here lacks (`pull_base`).
+    pub fn pulls_base(&self) -> bool {
+        (self.no_merge.as_deref()).is_some_and(|why| why.ends_with(&pull_first(&self.base)))
+    }
+}
+
+/// How the squash's blocker ends when `base` lacks what origin's has.
+fn pull_first(base: &str) -> String {
+    format!(": pull {base} first")
+}
+
+/// Move `repo`'s base on to origin's in its main worktree, as a pull does,
+/// only fast-forward: what its squash waits for (`RepoCheck::pulls_base`).
+/// How many commits it took.
+pub fn pull_base(repo: &Repo) -> Result<usize, String> {
+    let remote = format!("origin/{}", repo.base);
+    let range = format!("{}..{remote}", repo.base);
+    let count = git(&repo.main, &["rev-list", "--count", &range])?;
+    let n = (count.trim().parse()).map_err(|err| format!("couldn't read a commit count: {err}"))?;
+    git(&repo.main, &["merge", "-q", "--ff-only", &remote])?;
+    Ok(n)
 }
 
 /// What the ticks ask of a feature, given its `ShipCheck`.
@@ -670,7 +693,8 @@ fn squash_blocker(repo: &Repo, branch: &str) -> Option<String> {
             n => format!("{n} commits"),
         };
         return Some(format!(
-            "{name}: {branch} has {commits} of {remote} that {base} lacks: pull {base} first"
+            "{name}: {branch} has {commits} of {remote} that {base} lacks{}",
+            pull_first(base)
         ));
     }
     match git_ops::predict_merge(&repo.main, base, branch) {
@@ -2289,8 +2313,22 @@ esac
             squash_blocker(&f.repos[0], &f.branch()).as_deref(),
             Some("api: feature/f has a commit of origin/main that main lacks: pull main first")
         );
-        run(&main, &["merge", "-q", "--ff-only", "origin/main"]);
+        let check = |no_merge: Option<String>| RepoCheck {
+            key: "api".into(),
+            base: "main".into(),
+            main: main.clone(),
+            commits: 1,
+            route: Route::Merge,
+            no_origin: None,
+            no_merge,
+            merged: false,
+            head: None,
+            pushed: None,
+        };
+        assert!(check(squash_blocker(&f.repos[0], &f.branch())).pulls_base());
+        assert_eq!(pull_base(&f.repos[0]), Ok(1));
         assert_eq!(squash_blocker(&f.repos[0], &f.branch()), None);
+        assert!(!check(Some("api: squashing into main conflicts in c".into())).pulls_base());
 
         // A change to the same file conflicts: read so, and refused as it was.
         commit(&wt(&f, "api"), "c", "feature side");

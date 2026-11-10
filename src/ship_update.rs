@@ -84,6 +84,66 @@ impl Gerdr {
         });
     }
 
+    /// Move repository `repo`'s base on to origin's off the thread, only
+    /// fast-forward: its squash into the base waits for that. Nothing is
+    /// lost, so it doesn't ask.
+    pub(crate) fn pull_base(&mut self, project: &str, slug: &str, repo: &str) {
+        let Some(feature) = self.feature(project, slug) else {
+            return;
+        };
+        let title = feature.title.clone();
+        if self.feature_busy(project, slug) {
+            return self.show_warning(format!(
+                "\u{201c}{title}\u{201d} is busy; try again once it is done"
+            ));
+        }
+        let Some(found) = feature.repo(repo).cloned() else {
+            return self.show_warning(format!("\u{201c}{title}\u{201d} has no {repo}"));
+        };
+        let busy = Busy {
+            project: project.to_owned(),
+            slug: slug.to_owned(),
+            job: Job::Ship,
+            repo: Some(repo.to_owned()),
+            what: format!("Pulling {} of {repo}", found.base),
+        };
+        let (project, slug, repo) = (project.to_owned(), slug.to_owned(), repo.to_owned());
+        self.feature_work(Some(busy), move |_| Done::BasePulled {
+            result: ship::pull_base(&found),
+            project,
+            slug,
+            repo,
+        });
+    }
+
+    /// Repository `repo`'s base of feature `slug` moved on to origin's, or
+    /// didn't: the Ship check reads it again.
+    pub(crate) fn base_pulled(
+        &mut self,
+        project: &str,
+        slug: &str,
+        repo: &str,
+        result: Result<usize, String>,
+    ) {
+        let base = (self.feature(project, slug))
+            .and_then(|f| f.repo(repo))
+            .map_or_else(|| "its base".to_owned(), |r| r.base.clone());
+        match result {
+            Ok(n) => {
+                let commits = match n {
+                    1 => "1 commit".to_owned(),
+                    n => format!("{n} commits"),
+                };
+                self.show_success(format!("Pulled {base} of {repo}: {commits}"));
+            }
+            Err(why) => {
+                tracing::warn!("pulling {base} of {repo} for feature {project}/{slug}: {why}");
+                self.show_error(format!("Couldn't pull {base} of {repo}: {why}"));
+            }
+        }
+        self.probe_feature(project, slug);
+    }
+
     /// Feature `slug`'s branch took its base in, or didn't: back to Verify
     /// with it, or why not.
     pub(crate) fn base_updated(

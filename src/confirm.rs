@@ -188,6 +188,13 @@ pub enum Then {
         repo: String,
         way: crate::feature::UpdateWay,
     },
+    /// Move this repository's base on to origin's, which this project's
+    /// feature's branch took in (see `Gerdr::pull_base`).
+    PullBase {
+        project: String,
+        slug: String,
+        repo: String,
+    },
 }
 
 /// The confirm dialog's state, while it is open.
@@ -808,6 +815,11 @@ impl Gerdr {
                 repo,
                 way,
             } => self.update_base(&project, &slug, &repo, way),
+            Then::PullBase {
+                project,
+                slug,
+                repo,
+            } => self.pull_base(&project, &slug, &repo),
             Then::StopResolving { project, slug } => self.stop_resolving(&project, &slug),
             Then::MakeFixes { project, slug } => self.make_fixes_now(&project, &slug),
             Then::DropFixPlan { project, slug } => self.drop_fix_plan(&project, &slug),

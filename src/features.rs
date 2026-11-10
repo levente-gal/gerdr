@@ -672,6 +672,14 @@ pub(crate) enum Done {
         slug: String,
         result: Box<Result<(feature::BaseUpdate, Option<String>), String>>,
     },
+    /// A repository's base moved on to origin's, by that many commits, or
+    /// didn't (see `ship::pull_base`).
+    BasePulled {
+        project: String,
+        slug: String,
+        repo: String,
+        result: Result<usize, String>,
+    },
     /// The merge for an agent to resolve began, or the plan of it is to be
     /// written; or why not.
     ConflictsBegun {
@@ -2106,6 +2114,9 @@ pub enum PanelOutcome {
     UndoAfter(feature::AfterStep),
     /// Take repository `.0`'s base into its branch, `.1`, after asking.
     UpdateBase(String, feature::UpdateWay),
+    /// Move repository `.0`'s base on to origin's, which its branch took
+    /// in already: what its squash waits for.
+    PullBase(String),
     /// Have an agent take on repository `.0`'s conflicts with its base:
     /// plan their resolution (`.1`), or resolve them.
     ResolveConflicts(String, bool),
@@ -2404,6 +2415,9 @@ pub struct RowCtx {
     /// Ship's check is read: its repositories' cards show, with the
     /// buttons that go on them.
     pub ship_read: bool,
+    /// At Ship, as last read, something stops shipping: Ship… is no
+    /// default then.
+    pub ship_blocked: bool,
     /// Its checks are being started, or wait for a setup to end. Once their
     /// terminals are open `checks_running` says so too.
     pub checks_busy: bool,
@@ -3754,6 +3768,7 @@ fn action_hint(action: &PanelOutcome) -> &'static str {
         PanelOutcome::UndoShip(..) => "undo\u{2026}",
         PanelOutcome::UndoAfter(step) => after_undo_words(*step),
         PanelOutcome::UpdateBase(..) => "update from the base\u{2026}",
+        PanelOutcome::PullBase(_) => "pull the base",
         PanelOutcome::ResolveConflicts(_, true) => "plan the resolution",
         PanelOutcome::ResolveConflicts(_, false) => "resolve with an agent",
         PanelOutcome::ReviewConflictPlan => "review the plan",
@@ -4373,9 +4388,9 @@ fn ship_sections(
         // Taking its base in, then its pull request.
         let buttons = (actions.iter().enumerate())
             .filter(|(_, (_, o))| match o {
-                PanelOutcome::UpdateBase(r, _) | PanelOutcome::ResolveConflicts(r, _) => {
-                    *r == repo.key
-                }
+                PanelOutcome::UpdateBase(r, _)
+                | PanelOutcome::ResolveConflicts(r, _)
+                | PanelOutcome::PullBase(r) => *r == repo.key,
                 PanelOutcome::ReviewConflictPlan | PanelOutcome::StopResolving => {
                     (feature.shipping.resolving.as_ref()).is_some_and(|r| r.repo == repo.key)
                 }
@@ -4536,6 +4551,19 @@ fn ship_after_line(feature: &Feature, removable: bool) -> Option<String> {
         });
     }
     (!plan.keep_workspace).then(|| "Then its workspace closes".to_owned())
+}
+
+/// The one repository whose base is to be pulled when that alone stops
+/// shipping `feature`, as `probe` read it: its key, its base, and what stops
+/// it in words.
+fn pull_first_of(feature: &Feature, probe: Option<&Probe>) -> Option<(String, String, String)> {
+    let check = probe?.ship.as_ref()?;
+    let planned = ship::plan_actions(feature, check);
+    let [said] = planned.blockers.as_slice() else {
+        return None;
+    };
+    let repo = (check.repos.iter()).find(|r| r.pulls_base() && r.no_merge.as_ref() == Some(said))?;
+    Some((repo.key.clone(), repo.base.clone(), said.clone()))
 }
 
 /// Why the workspace's tick can't go with the worktrees' on.
@@ -6178,6 +6206,8 @@ fn writers_page_actions(
         // Reopen is no default: Enter leaves a done stage be.
         let style = match main {
             PanelOutcome::Untick(_) => ButtonStyle::Plain,
+            // What stops it is to be done first: pressed, it only says so.
+            PanelOutcome::Ship if ctx.ship_blocked => ButtonStyle::Plain,
             _ if back == Some(Rework::Waits) || round.is_some() || plan_fixes => ButtonStyle::Plain,
             _ => ButtonStyle::Primary,
         };
@@ -7298,6 +7328,15 @@ impl Gerdr {
                 self.unbusy(&project, &slug, Job::Ship);
                 self.base_updated(&project, &slug, *result);
             }
+            Done::BasePulled {
+                project,
+                slug,
+                repo,
+                result,
+            } => {
+                self.unbusy(&project, &slug, Job::Ship);
+                self.base_pulled(&project, &slug, &repo, result);
+            }
             Done::ShipUndone {
                 project,
                 slug,
@@ -7491,6 +7530,7 @@ impl Gerdr {
             ship_read: last
                 .and_then(|p| p.ship.as_ref())
                 .is_some_and(|c| !c.unread),
+            ship_blocked: ship_planned(feature, last).is_some_and(|p| !p.blockers.is_empty()),
             checks_busy: self.checks_busy(&feature.project, &feature.slug),
             setting_up: self.setting_up(&feature.project, &feature.slug),
             feature_busy: self.feature_busy(&feature.project, &feature.slug),
@@ -9628,6 +9668,7 @@ impl Gerdr {
             PanelOutcome::UpdateBase(repo, way) => {
                 self.ask_update_base(&project, &slug, &repo, way)
             }
+            PanelOutcome::PullBase(repo) => self.pull_base(&project, &slug, &repo),
             PanelOutcome::ResolveConflicts(repo, planning) => {
                 self.resolve_conflicts(&project, &slug, &repo, planning);
             }
@@ -10316,7 +10357,19 @@ impl Gerdr {
                 ));
                 self.probe_feature(project, slug);
             }
-            ShipAsk::Blocked(why) => self.show_warning(why),
+            // Held up only by a base to pull: that is offered.
+            ShipAsk::Blocked(why) => match pull_first_of(&feature, probe) {
+                Some((repo, base, said)) => {
+                    let then = crate::confirm::Then::PullBase {
+                        project: project.to_owned(),
+                        slug: slug.to_owned(),
+                        repo: repo.clone(),
+                    };
+                    let body = format!("{said}\nIt moves on to origin/{base}, only fast-forward");
+                    self.ask(format!("Pull {base} of {repo} first?"), body, "Pull", then);
+                }
+                None => self.show_warning(why),
+            },
             ShipAsk::Finish(dirty) => {
                 let check = probe.and_then(|p| p.ship.as_ref());
                 let removing = feature.ship_plan.remove_worktrees
@@ -14600,6 +14653,16 @@ fn ship_base_actions(feature: &Feature, probe: Option<&Probe>) -> Vec<(PageButto
             PanelOutcome::StopResolving,
         ));
         return out;
+    }
+    // Its squash waits for its base to be pulled: that, first.
+    let repos = (probe.and_then(|p| p.ship.as_ref())).map_or(&[][..], |c| c.repos.as_slice());
+    for repo in repos {
+        if repo.pulls_base() && ship::repo_plan(feature, repo).ticked(ShipStep::Merge) {
+            out.push((
+                button(&format!("Pull {}", repo.base), ButtonStyle::Primary),
+                PanelOutcome::PullBase(repo.key.clone()),
+            ));
+        }
     }
     for (key, state) in probe.map(|p| &p.bases).into_iter().flatten() {
         if !state.conflicts.is_empty() {
@@ -21522,6 +21585,37 @@ pub(crate) mod tests {
         f.ship_plan.keep_workspace = false;
         f.status = Status::Done;
         assert_eq!(said(&f, true), None);
+    }
+
+    #[test]
+    fn a_base_to_pull_is_offered_and_ship_is_no_default_while_it_holds_up() {
+        let f = feature("s", vec![repo("api", true)], 8);
+        let why = "api: feature/s has 8 commits of origin/main that main lacks: pull main first";
+        let mut c = check(&[], &["api"], &[]).unwrap();
+        c.repos[0].route = Route::Merge;
+        c.repos[0].no_merge = Some(why.to_owned());
+        let p = probe(Some(c));
+        assert_eq!(
+            pull_first_of(&f, Some(&p)),
+            Some(("api".into(), "main".into(), why.into()))
+        );
+        let pull = (PanelOutcome::PullBase("api".into()), ButtonStyle::Primary);
+        let offered: Vec<_> = (ship_base_actions(&f, Some(&p)).into_iter())
+            .map(|(b, o)| (o, b.style))
+            .collect();
+        assert!(offered.contains(&pull), "{offered:?}");
+        let ctx = RowCtx {
+            ship_blocked: true,
+            ..RowCtx::default()
+        };
+        let ship = (page_actions(&f, Stage::Ship, ctx).into_iter())
+            .find(|(_, o)| *o == PanelOutcome::Ship)
+            .unwrap();
+        assert_eq!(ship.0.style, ButtonStyle::Plain);
+        // Something else holding it up: no pull asked.
+        let mut c = check(&["api is dirty"], &["api"], &[]).unwrap();
+        c.repos[0].route = Route::Merge;
+        assert_eq!(pull_first_of(&f, Some(&probe(Some(c)))), None);
     }
 
     /// A check finding `repos` to ship through origin, each with commits.
