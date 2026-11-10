@@ -524,18 +524,57 @@ impl Gerdr {
     /// now: it doesn't keep the workspace open.
     pub(crate) fn close_shipped_workspace(&mut self, project: &str, slug: &str) -> Option<String> {
         let w = self.feature_workspace(project, slug)?;
-        let summary = (self.feature(project, slug))
-            .and_then(|f| f.shipping.summary.as_ref())
-            .and_then(|run| run.pane.clone());
-        let running = self.workspace_running_but(w, summary.as_deref());
+        let running = self.shipped_running(project, slug, w);
         if running.is_empty() {
-            let tabs = self.kept_tabs(w);
-            self.close_workspace_now(w);
-            self.note_after_ship(project, slug, AfterStep::Close, tabs, Vec::new());
-            self.features.just_closed = Some((project.to_owned(), slug.to_owned()));
+            self.close_shipped_now(project, slug);
             return None;
         }
         Some(kept_text(&running))
+    }
+
+    /// What runs in feature `slug`'s workspace `w` but the agent writing
+    /// its summary.
+    fn shipped_running(&self, project: &str, slug: &str, w: usize) -> Vec<String> {
+        let summary = (self.feature(project, slug))
+            .and_then(|f| f.shipping.summary.as_ref())
+            .and_then(|run| run.pane.clone());
+        self.workspace_running_but(w, summary.as_deref())
+    }
+
+    /// Close shipped feature `slug`'s workspace now, kept to reopen with
+    /// its tabs (see `ship_after`).
+    pub(crate) fn close_shipped_now(&mut self, project: &str, slug: &str) {
+        let Some(w) = self.feature_workspace(project, slug) else {
+            return;
+        };
+        let tabs = self.kept_tabs(w);
+        self.close_workspace_now(w);
+        self.note_after_ship(project, slug, AfterStep::Close, tabs, Vec::new());
+        self.features.just_closed = Some((project.to_owned(), slug.to_owned()));
+    }
+
+    /// Close shipped feature `slug`'s workspace as its Afterwards tick
+    /// asked, which shipping left open as something ran in it: asking
+    /// first while something still does. The toast can reopen it.
+    pub(crate) fn ask_close_shipped(&mut self, project: &str, slug: &str) {
+        let Some(w) = self.feature_workspace(project, slug) else {
+            return self.show_warning("Its workspace is closed already".into());
+        };
+        let running = self.shipped_running(project, slug, w);
+        if running.is_empty() {
+            return self.close_shipped_said(project, slug);
+        }
+        self.ask_close_shipped_workspace(project, slug, w, &running);
+    }
+
+    /// `close_shipped_now`, saying so with a Reopen button.
+    pub(crate) fn close_shipped_said(&mut self, project: &str, slug: &str) {
+        let Some(title) = self.feature(project, slug).map(|f| f.title.clone()) else {
+            return;
+        };
+        self.close_shipped_now(project, slug);
+        let text = format!("Closed the workspace of \u{201c}{title}\u{201d}");
+        self.show_shipped(project, slug, text);
     }
 }
 
