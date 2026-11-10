@@ -1184,6 +1184,7 @@ impl Gerdr {
         self.save_feature(project, slug);
         (self.features.build.fix_watches).remove(&fix_key(project, slug));
         self.doc_done(project, slug, DocFile::FixPlan);
+        self.close_done_doc_tabs(project, slug, |file| file == DocFile::FixPlan);
         // Code review's page shows its fixes again, whatever was looked at
         // while they were made, or its code once there are none.
         if round.stage == Stage::CodeReview

@@ -9411,6 +9411,22 @@ impl Gerdr {
         }
     }
 
+    /// Mark feature `slug`'s current stage done, as its page's Ctrl+Enter
+    /// does: a file approved, a stage bound to its output read first.
+    pub(crate) fn tick_current(&mut self, project: &str, slug: &str) {
+        match self.feature(project, slug).and_then(Feature::current) {
+            Some(stage) if needs(stage).is_some() => {
+                self.approve_stage(project, slug, stage);
+            }
+            Some(stage) if stage.bound() => self.read_and_tick(project, slug, stage),
+            Some(_) => {
+                self.tick_feature(project, slug, None, "you");
+                self.probe_feature(project, slug);
+            }
+            None => self.show_warning("Nothing left to mark done".into()),
+        }
+    }
+
     /// Do what the feature panel asked.
     pub fn apply_feature_panel(&mut self, outcome: PanelOutcome) {
         let Some((project, slug)) = self
@@ -9432,17 +9448,7 @@ impl Gerdr {
             // Only offered on what another machine writes, above.
             PanelOutcome::TakeOver => {}
             PanelOutcome::HandBack => self.hand_back(&project, &slug),
-            PanelOutcome::Tick => match self.feature(&project, &slug).and_then(Feature::current) {
-                Some(stage) if needs(stage).is_some() => {
-                    self.approve_stage(&project, &slug, stage);
-                }
-                Some(stage) if stage.bound() => self.read_and_tick(&project, &slug, stage),
-                Some(_) => {
-                    self.tick_feature(&project, &slug, None, "you");
-                    self.probe_feature(&project, &slug);
-                }
-                None => self.show_warning("Nothing left to mark done".into()),
-            },
+            PanelOutcome::Tick => self.tick_current(&project, &slug),
             PanelOutcome::Ship | PanelOutcome::Finish => self.ask_ship_feature(&project, &slug),
             PanelOutcome::ShipRoute(repo, route) => {
                 self.set_ship_route(&project, &slug, &repo, route);
@@ -10611,16 +10617,17 @@ impl Gerdr {
                 "Remove worktrees",
             )
         };
-        let mut body = removal_body(&losses);
-        // On a line of its own: the dialog cuts a line to its width, and
-        // both together don't fit.
+        // Each on a line of its own: the dialog cuts a line to its width.
+        let mut lines = vec![removal_body(&losses)];
         if let Some(w) = self.feature_workspace(&project, &slug) {
             let running = self.workspace_running(w);
-            body = format!(
-                "{body}.\n{}.",
-                crate::feature_workspace::closing_text(&running)
-            );
+            lines.push(crate::feature_workspace::closing_text(&running));
         }
+        // Unlike removing a shipped feature's worktrees, nothing brings it back.
+        if abandon {
+            lines.push("Abandoning can't be undone".to_owned());
+        }
+        let body = format!("{}.", lines.join(".\n"));
         let force = !losses.is_empty();
         let then = crate::confirm::Then::RemoveFeature {
             project,
@@ -11570,6 +11577,10 @@ impl Gerdr {
         let (running, more) = self.running_of(&panel.project, &panel.slug, &feature.title);
         view.running = running.into_iter().map(|(row, _)| row).collect();
         view.running_more = more;
+        // Under a dialog the page takes no keys: its footer offers none.
+        if self.open_overlays().any(crate::overlay::Overlay::is_dialog) {
+            view.hints.clear();
+        }
         // The search counts the places it found as the page shows them.
         let typed = (panel.search.as_ref()).is_some_and(|s| !s.needle().is_empty());
         if typed {
@@ -15572,7 +15583,7 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 7] = [
             ),
             (
                 "Ctrl+Shift+Del",
-                "start the current stage over, or drop its fix plan, after asking",
+                "start the current stage over, or drop its fix plan, after asking (not Discover: Ctrl+R starts its agent afresh)",
             ),
             (
                 "Ctrl+Enter",

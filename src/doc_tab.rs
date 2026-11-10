@@ -579,11 +579,50 @@ impl Gerdr {
         true
     }
 
-    /// The file's tab `idx` of the active workspace is closed for good: it
-    /// goes once its page's window does, and what its vim edits could undo
-    /// goes with it, since its agent may write the file meanwhile.
-    pub(crate) fn doc_tab_closing(&mut self, idx: usize) {
-        let Some(review) = (self.workspaces.get_mut(self.active_workspace))
+    /// The tabs of feature `slug`'s files that `done` says are done with
+    /// close, but one with a comment being written: once its stage is
+    /// approved its files are only read, and the stage's page opens them
+    /// again. One shown leaves the feature's tab showing.
+    pub(crate) fn close_done_doc_tabs(
+        &mut self,
+        project: &str,
+        slug: &str,
+        done: impl Fn(DocFile) -> bool,
+    ) {
+        let Some(w) = self.feature_workspace(project, slug) else {
+            return;
+        };
+        let ws = &self.workspaces[w];
+        let ids: Vec<u64> = (ws.tabs.iter())
+            .filter(|tab| {
+                tab.review().is_some_and(|r| {
+                    r.wd.diff.editing.is_none() && r.wd.doc.as_ref().is_some_and(|d| done(d.file))
+                })
+            })
+            .map(|tab| tab.id)
+            .collect();
+        let shown = ws
+            .tabs
+            .get(ws.active_tab)
+            .is_some_and(|t| ids.contains(&t.id));
+        if shown {
+            self.workspaces[w].active_tab = 0;
+        }
+        for id in ids {
+            if let Some((w, t)) = self.tab_place(id) {
+                self.close_tab_in(w, t);
+            }
+        }
+        if shown && w == self.active_workspace {
+            self.switch_tab(0);
+        }
+    }
+
+    /// The file's tab `idx` of workspace `w` is closed for good: it goes
+    /// once its page's window does, and what its vim edits could undo goes
+    /// with it, since its agent may write the file meanwhile.
+    pub(crate) fn doc_tab_closing(&mut self, w: usize, idx: usize) {
+        let Some(review) = (self.workspaces.get_mut(w))
             .and_then(|ws| ws.tabs.get_mut(idx))
             .and_then(Tab::review_mut)
         else {

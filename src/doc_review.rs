@@ -797,6 +797,7 @@ impl Gerdr {
         }
         if self.make_fixes(project, slug) {
             self.doc_done(project, slug, DocFile::FixPlan);
+            self.close_done_doc_tabs(project, slug, |file| file == DocFile::FixPlan);
             self.show_build_agent(project, slug);
         }
     }

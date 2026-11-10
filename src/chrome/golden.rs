@@ -219,6 +219,7 @@ fn menu() -> MenuView {
             label: "Open folder…".into(),
             hint: None,
             enabled: true,
+            note: false,
         }],
         hover: Some(0),
     }
@@ -230,6 +231,7 @@ fn full_menu() -> MenuView {
         label: label.into(),
         hint: hint.map(str::to_owned),
         enabled,
+        note: false,
     };
     MenuView {
         anchor: Rect::new((40, 60).into(), (160, 32).into()),
@@ -2978,39 +2980,39 @@ const COMMANDS: [&str; 6] = [
 const GOLDEN_COMMANDS: [[u64; 6]; 4] = [
     // Dark at 1
     [
-        0xff031e5e6db3a64f, // commands
-        0x3fe63a0dbef9f070, // commands_setup
-        0x2aab5777643adee7, // commands_stale
-        0x9a123ac89261edc7, // commands_low
-        0x8f88e245d96bbcbc, // commands_run
-        0x5510179c6435358b, // commands_feature
+        0x01cc23970e73296a, // commands
+        0x6b7d149be6c8288d, // commands_setup
+        0x0a483d5105a303fe, // commands_stale
+        0x830a50896688ef92, // commands_low
+        0x2cf63245ef3936e1, // commands_run
+        0xa5b5119caa9366d1, // commands_feature
     ],
     // Dark at 2
     [
-        0xd5968b6e9a017058, // commands
-        0xcddedce03bc25a32, // commands_setup
-        0x4c08fe9429e83f07, // commands_stale
-        0x62f7f21243aa44c0, // commands_low
-        0x115701e19f38427d, // commands_run
-        0x9b521764fde307fe, // commands_feature
+        0x11353620cd8e90a1, // commands
+        0x92013e1d5769ef4f, // commands_setup
+        0x30f7b1cc1a8fea7e, // commands_stale
+        0xa86f011bbf2d499d, // commands_low
+        0x1d116468a1b70bfc, // commands_run
+        0xe75873f406eccc33, // commands_feature
     ],
     // Light at 1
     [
-        0x2164a43b0806ac61, // commands
-        0x46e153a554416741, // commands_setup
-        0x36e0025fe130b86d, // commands_stale
-        0x5c2304a89984beda, // commands_low
-        0xb45b5b87e9f4cc59, // commands_run
-        0xabb49a31021a1a6c, // commands_feature
+        0x5d176de8877ab12e, // commands
+        0x60ec0fe7d2016606, // commands_setup
+        0x785f172ecdbb2f6a, // commands_stale
+        0x54550cbdd7df38fd, // commands_low
+        0xaae77eb14b58cd0a, // commands_run
+        0x7fd675d3a73a2325, // commands_feature
     ],
     // Light at 2
     [
-        0xdf8703a23c5b1362, // commands
-        0xfad4cbca3289ece2, // commands_setup
-        0x05613c1913910cd0, // commands_stale
-        0xc13b51a13f012fdc, // commands_low
-        0x4853624b12a58330, // commands_run
-        0xf4cb147dcf114360, // commands_feature
+        0xbc0650139110115e, // commands
+        0x5069c85863815686, // commands_setup
+        0x5452bf47892f82f4, // commands_stale
+        0x73c7b2fc7a2170a8, // commands_low
+        0x3079bd27df35bedc, // commands_run
+        0xb40d1c696c74d96a, // commands_feature
     ],
 ];
 

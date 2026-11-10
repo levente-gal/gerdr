@@ -190,7 +190,14 @@ impl Gerdr {
         }
         artifacts::forget_approved(&store::dir(None, project, slug), stage);
         self.save_feature(project, slug);
-        self.show_success(format!("{} reopened", stage.label()));
+        // Nothing was lost, so it didn't ask: Undo marks it done again.
+        let undo = crate::menu::MenuAction::Redone {
+            project: project.to_owned(),
+            slug: slug.to_owned(),
+            stage,
+        };
+        let text = format!("{} reopened", stage.label());
+        self.toast_with(text, Level::Success, Some(("Undo".to_owned(), undo)));
         if let Some(left) = left {
             self.show_warning(left);
         }
