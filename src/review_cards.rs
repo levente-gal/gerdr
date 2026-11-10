@@ -565,6 +565,7 @@ fn finding_card(f: &ReviewFinding, multi: bool, posts: bool) -> FindingCard {
         made: f.fix_made(),
         faded: matches!(f.state, FindingState::Fixed | FindingState::Dismissed),
         collapsed: matches!(f.state, FindingState::Fixed | FindingState::Dismissed),
+        folds: false,
         stripe: match f.state {
             FindingState::Fix => Some(CardStripe::ToFix),
             FindingState::Sent => Some(CardStripe::Sent),
@@ -633,6 +634,7 @@ fn suggestion_card(s: &Suggestion) -> FindingCard {
         made: false,
         faded: rejected,
         collapsed: rejected,
+        folds: false,
         stripe: (s.state == State::Accepted).then_some(CardStripe::ToFix),
         field: None,
         field_hint: if question { w.answer } else { w.comment },

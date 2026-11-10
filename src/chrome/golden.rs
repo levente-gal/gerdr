@@ -4569,6 +4569,7 @@ fn feature_tab_review_fixes() -> super::FeatureTabView {
             made,
             faded: false,
             collapsed: false,
+            folds: false,
             stripe,
             field: None,
             field_hint: "",
@@ -4854,6 +4855,7 @@ fn feature_tab_review_rounds() -> super::FeatureTabView {
             made: state == "fix made",
             faded,
             collapsed: false,
+            folds: false,
             stripe: None,
             field: None,
             field_hint: "",
@@ -5304,6 +5306,7 @@ fn feature_tab_manual_test(note: bool) -> super::FeatureTabView {
             made: i == 1,
             faded: tag == FindingTag::Passed,
             collapsed: !open,
+            folds: false,
             stripe: None,
             field: writing.then(|| Line::from("Takes 4 seconds")),
             field_hint: "",
@@ -5403,6 +5406,7 @@ fn feature_tab_manual_comment() -> super::FeatureTabView {
         made: false,
         faded: false,
         collapsed: false,
+        folds: false,
         stripe: None,
         field: None,
         field_hint: "",
@@ -6287,7 +6291,9 @@ fn review_sections(
         buttons,
     }));
     let mut last = None;
-    for card in cards {
+    for mut card in cards {
+        // As `features::review_page` has them: each folds.
+        card.folds = true;
         if last != Some(card.tag) {
             let n = counts.iter().find(|(t, _)| *t == card.tag).map_or(0, |c| c.1);
             page.sections.push(PageSection::Heading(format!(
@@ -6394,6 +6400,7 @@ fn tab_findings() -> super::FeatureTabView {
             made: false,
             faded: state.starts_with("dismissed"),
             collapsed: state.starts_with("dismissed"),
+            folds: false,
             stripe: (state == "to fix").then_some(super::CardStripe::ToFix),
             field: None,
             field_hint: "",
@@ -6527,6 +6534,7 @@ fn tab_checks() -> super::FeatureTabView {
             made: false,
             faded: tag == FindingTag::Skipped,
             collapsed: false,
+            folds: false,
             stripe: None,
             field: None,
             field_hint: "",
@@ -6586,29 +6594,29 @@ const FINDINGS: [&str; 4] = [
 const GOLDEN_FINDINGS: [[u64; 4]; 4] = [
     // Dark at 1
     [
-        0x44ec2c207e76d822, // tab_findings_1180
-        0xc749c231bec9e936, // tab_findings_860
+        0xedac07f02b192c27, // tab_findings_1180
+        0x5c26486ece21e1b3, // tab_findings_860
         0xc8e97861327a6f3d, // finding_dialog
         0x79e255ab5a829143, // finding_dialog_error
     ],
     // Dark at 2
     [
-        0x64f20049d900518b, // tab_findings_1180
-        0x7a131df3b9fc069e, // tab_findings_860
+        0x036cebdd30aa093c, // tab_findings_1180
+        0x8f2c714b024e6765, // tab_findings_860
         0x43f1532742f932ff, // finding_dialog
         0xb736e6151427fb01, // finding_dialog_error
     ],
     // Light at 1
     [
-        0x0541038a1f08a244, // tab_findings_1180
-        0xcb100611c62c61cf, // tab_findings_860
+        0x83185b15c46e76e2, // tab_findings_1180
+        0x5d39c6d7bcf014c5, // tab_findings_860
         0x3af0633810888402, // finding_dialog
         0x2f19c19c900552df, // finding_dialog_error
     ],
     // Light at 2
     [
-        0xb95d74b6a5f35889, // tab_findings_1180
-        0x8e74159f67212c4e, // tab_findings_860
+        0xf9659bf7778231d8, // tab_findings_1180
+        0xe5150bea7924cbf7, // tab_findings_860
         0xa9c6bc076a8eb05a, // finding_dialog
         0x1e721b2638489f69, // finding_dialog_error
     ],
@@ -6723,6 +6731,7 @@ fn suggestion_card(
         made: false,
         faded: rejected,
         collapsed: rejected,
+        folds: false,
         stripe: (state == "accepted").then_some(super::CardStripe::ToFix),
         field: None,
         field_hint: "Your comment",
@@ -7220,9 +7229,9 @@ const PLAN_REVIEW: [&str; 7] = [
 const GOLDEN_PLAN_REVIEW: [[u64; 7]; 4] = [
     // Dark at 1
     [
-        0xb34a1d0351ce306b, // tab_plan_review_cards_1180
-        0xc7075e5a383cfb98, // tab_plan_review_cards_860
-        0x0354ac1bff91b90c, // tab_plan_review_writing_1180
+        0x0fd5410e0b70577b, // tab_plan_review_cards_1180
+        0x10ca0907cc93d570, // tab_plan_review_cards_860
+        0xc89c9716abfe9614, // tab_plan_review_writing_1180
         0x154aeb3cfd9938e1, // doc_suggestions_1180
         0x6f63128edd4069b1, // doc_suggestions_850
         0x519b46994bcca395, // finding_dialog_reject
@@ -7230,9 +7239,9 @@ const GOLDEN_PLAN_REVIEW: [[u64; 7]; 4] = [
     ],
     // Dark at 2
     [
-        0x0c471e62aeb9221b, // tab_plan_review_cards_1180
-        0x817b7334e5e72bf6, // tab_plan_review_cards_860
-        0x5e2c90d6593727d3, // tab_plan_review_writing_1180
+        0x10dd1bf45831b889, // tab_plan_review_cards_1180
+        0x9cbf2afa646b7dd2, // tab_plan_review_cards_860
+        0x80c356333ef68629, // tab_plan_review_writing_1180
         0x6ba33ef2efa93199, // doc_suggestions_1180
         0xacac000bf593cb0b, // doc_suggestions_850
         0x5db40a98428d92d3, // finding_dialog_reject
@@ -7240,9 +7249,9 @@ const GOLDEN_PLAN_REVIEW: [[u64; 7]; 4] = [
     ],
     // Light at 1
     [
-        0x715b761b9fb51d59, // tab_plan_review_cards_1180
-        0x357f8b4222e288dc, // tab_plan_review_cards_860
-        0xfc69b8c6c5eeba16, // tab_plan_review_writing_1180
+        0x329ae20a222ecaf9, // tab_plan_review_cards_1180
+        0x274b6911850ff2dc, // tab_plan_review_cards_860
+        0x505175ffcefadf32, // tab_plan_review_writing_1180
         0xc004c28ecddd8216, // doc_suggestions_1180
         0xb929e644bd3059f9, // doc_suggestions_850
         0x89ae995f2bf62070, // finding_dialog_reject
@@ -7250,9 +7259,9 @@ const GOLDEN_PLAN_REVIEW: [[u64; 7]; 4] = [
     ],
     // Light at 2
     [
-        0x4e17d1828765d2d5, // tab_plan_review_cards_1180
-        0x6655cf4c989d057d, // tab_plan_review_cards_860
-        0x3597face622e8678, // tab_plan_review_writing_1180
+        0x9321aa5a1b342df5, // tab_plan_review_cards_1180
+        0x1135bb3c2942c741, // tab_plan_review_cards_860
+        0x30f64acc59bb84a8, // tab_plan_review_writing_1180
         0xe94c049f4569a3a6, // doc_suggestions_1180
         0x9aa0c21f07ff7aef, // doc_suggestions_850
         0xe2cb1d9d401ab9c4, // finding_dialog_reject

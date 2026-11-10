@@ -131,10 +131,12 @@ fn item_sections(
             sections.push(PageSection::Heading(format!("{word} \u{b7} {n}")));
             last = Some(tag);
         }
-        sections.push(PageSection::Finding(match card {
+        let mut card = match card {
             ReviewCard::Item(item) => item_card(item, multi, actions, feature.posts_review()),
             ReviewCard::DiffNote(c) => note_card(c, multi, actions),
-        }));
+        };
+        card.folds = true;
+        sections.push(PageSection::Finding(card));
     }
     sections
 }

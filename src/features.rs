@@ -1852,6 +1852,9 @@ pub struct FeaturePanel {
     pub collapse_to: TabArea,
     /// The earlier AI reviews showing their findings, by run.
     pub rounds_open: BTreeSet<u32>,
+    /// The review cards the user opened (true) or folded: they stay so,
+    /// selected or not. The rest show as their decision has them.
+    pub(crate) cards_open: Vec<(CardId, bool)>,
     /// The fix round cards the user opened or folded, by round: a card shows
     /// open when it is the newest, unless it is here (see `fix_round_open`).
     pub fix_rounds_flipped: BTreeSet<u32>,
@@ -2056,6 +2059,8 @@ pub enum PanelOutcome {
     Manual(crate::manual_test::Outcome),
     /// Open Manual test's criterion `.0` to its steps (true), or fold it.
     FoldCriterion(usize, bool),
+    /// Open review card `.0` (true), or fold it to its line.
+    FoldCard(usize, bool),
     /// Open the criteria `.0` names (true), or fold them.
     FoldCriteria(crate::feature::manual::FoldScope, bool),
     /// Show Plan review's suggestions in the plan, to decide them there.
@@ -2208,6 +2213,7 @@ impl PanelOutcome {
                 | Self::DraftChanges(..)
                 | Self::OpenRoundPlan(_)
                 | Self::FoldCriterion(..)
+                | Self::FoldCard(..)
                 | Self::FoldCriteria(..)
                 | Self::ReviewView(_)
                 | Self::CodeReview
@@ -3218,6 +3224,7 @@ fn criterion_card(
         made: row.made,
         faded: trying && tag == FindingTag::Passed,
         collapsed: !row.open,
+        folds: false,
         stripe: None,
         field: None,
         field_hint: "What went wrong",
@@ -3383,6 +3390,7 @@ fn check_card(
         made: false,
         faded: tag == FindingTag::Skipped,
         collapsed: false,
+        folds: false,
         stripe: None,
         field: None,
         field_hint: "",
@@ -3483,6 +3491,7 @@ fn note_card(c: &Comment, multi: bool, actions: &[(PageButton, PanelOutcome)]) -
         made: false,
         faded: false,
         collapsed: false,
+        folds: false,
         stripe: None,
         field: None,
         field_hint: "",
@@ -5174,6 +5183,18 @@ impl FeaturePanel {
                 }
                 Keysym::Right | Keysym::KP_Right => {
                     return Some(PanelOutcome::FoldCriterion(self.finding, true));
+                }
+                _ => {}
+            }
+        }
+        // So does a review card.
+        if on.is_some() && self.focus == TabArea::Findings && bare {
+            match sym {
+                Keysym::Left | Keysym::KP_Left => {
+                    return Some(PanelOutcome::FoldCard(self.finding, false));
+                }
+                Keysym::Right | Keysym::KP_Right => {
+                    return Some(PanelOutcome::FoldCard(self.finding, true));
                 }
                 _ => {}
             }
@@ -9657,6 +9678,7 @@ impl Gerdr {
             PanelOutcome::ManualTest => self.focus_criteria(&project, &slug),
             PanelOutcome::Manual(outcome) => self.apply_manual_test(outcome),
             PanelOutcome::FoldCriterion(i, open) => self.fold_criterion(i, open),
+            PanelOutcome::FoldCard(i, open) => self.fold_card(i, open),
             PanelOutcome::FoldCriteria(scope, open) => self.fold_criteria(scope, open),
             PanelOutcome::ReviewInPlan => self.review_in_plan(&project, &slug),
             PanelOutcome::OnSuggestion(id, act) => self.apply_suggestion(&project, &slug, &id, act),
@@ -10888,8 +10910,23 @@ impl Gerdr {
         let outcome = match hit {
             FeatureTabHit::Tab | FeatureTabHit::Column(_) | FeatureTabHit::AgentPickOff(_) => None,
             FeatureTabHit::MilestoneMode(i) => Some(PanelOutcome::FreshMilestones(i == 1)),
-            FeatureTabHit::Fold(i) => (self.criterion_rows(&feature).get(i))
-                .map(|row| PanelOutcome::FoldCriterion(i, !row.open)),
+            FeatureTabHit::Fold(i) => {
+                let card = (self.feature_tab_parts()).and_then(|(view, _)| {
+                    (view.page.sections.into_iter())
+                        .filter_map(|s| match s {
+                            PageSection::Finding(card) => Some(card),
+                            _ => None,
+                        })
+                        .nth(i)
+                });
+                match card {
+                    Some(card) if card.sheet.is_none() => {
+                        Some(PanelOutcome::FoldCard(i, card.collapsed))
+                    }
+                    _ => (self.criterion_rows(&feature).get(i))
+                        .map(|row| PanelOutcome::FoldCriterion(i, !row.open)),
+                }
+            }
             FeatureTabHit::Search(part) => {
                 match part {
                     chrome::SearchPart::Close => self.close_criteria_search(),
@@ -11213,6 +11250,19 @@ impl Gerdr {
     }
 
     /// The card of AI review's page with the selection, to find it again.
+    /// Open review card `i` of the page (true), or fold it to its line; it
+    /// takes the keyboard.
+    fn fold_card(&mut self, i: usize, open: bool) {
+        let id = self.with_review_cards(|cards, _| cards.get(i).map(|c| c.id()));
+        let (Some(Some(id)), Some(panel)) = (id, self.features.panel.as_mut()) else {
+            return;
+        };
+        panel.cards_open.retain(|(c, _)| *c != id);
+        panel.cards_open.push((id, open));
+        panel.focus = TabArea::Findings;
+        panel.finding = i;
+    }
+
     pub(crate) fn selected_review_card(&self) -> Option<CardId> {
         self.with_review_cards(|cards, at| cards.get(at).map(|c| c.id()))
             .flatten()
@@ -15833,6 +15883,10 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 7] = [
         "AI review's findings",
         &[
             ("Up / Down", "previous or next finding"),
+            (
+                "Left / Right",
+                "fold the card to its line, or open it (also its chevron)",
+            ),
             ("Home / End", "first or last finding"),
             ("Ctrl+Shift+Enter", "plan the fixes of the findings first"),
             ("f", "fix the finding, or take that back"),
@@ -15862,6 +15916,10 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 7] = [
                 "to the suggestions; Enter on the page shows them in the plan",
             ),
             ("Up / Down", "previous or next suggestion"),
+            (
+                "Left / Right",
+                "fold the card to its line, or open it (also its chevron)",
+            ),
             ("Home / End", "first or last suggestion"),
             (
                 "f",
@@ -16295,6 +16353,9 @@ fn writers_tab_hints(
             let w = words(item.map_or(stage_items(stage), Item::of));
             let low = |text: &str| text.to_lowercase();
             hints.push(hint("Up / Down", w.item));
+            if on.is_some() {
+                hints.push(hint("Left / Right", "fold / open"));
+            }
             let decides = can_decide(feature, stage);
             let del = match panel.armed {
                 Some(_) => hint("Del", "again to delete"),
@@ -16723,6 +16784,19 @@ fn tab_view(
         for section in &mut page.sections {
             if let PageSection::ShipGroup(group) = section {
                 group.selected = Some(panel.finding);
+            }
+        }
+    }
+    // A review card the user opened or folded stays so, selected or not.
+    if !panel.cards_open.is_empty() {
+        let ids = review_cards(feature, stage, notes_of(state.probe));
+        let cards = (page.sections.iter_mut()).filter_map(|s| match s {
+            PageSection::Finding(card) if card.folds => Some(card),
+            _ => None,
+        });
+        for (card, id) in cards.zip(ids.iter().map(|c| c.id())) {
+            if let Some((_, open)) = panel.cards_open.iter().find(|(c, _)| *c == id) {
+                card.collapsed = !open;
             }
         }
     }
@@ -22304,6 +22378,46 @@ pub(crate) mod tests {
         panel.finding = 0;
         let open = view(&panel);
         assert!(!cards_of(&open)[0].collapsed && cards_of(&open)[0].selected);
+    }
+
+    /// Left folds any review card and Right opens it, as a criterion; what
+    /// the user chose holds over selection and the decision.
+    #[test]
+    fn a_review_card_folds_and_opens_by_key() {
+        use FindingState as S;
+        let f = carded(&[S::Dismissed, S::Open]);
+        let mut panel = FeaturePanel {
+            stage: Some(Stage::AiReview),
+            picked_at: f.current(),
+            focus: TabArea::Findings,
+            finding: 1,
+            ..FeaturePanel::default()
+        };
+        assert_eq!(
+            press(&mut panel, &f, key(Keysym::Left)),
+            Some(PanelOutcome::FoldCard(1, false))
+        );
+        assert_eq!(
+            press(&mut panel, &f, key(Keysym::Right)),
+            Some(PanelOutcome::FoldCard(1, true))
+        );
+        let view = |panel: &FeaturePanel| {
+            tab_view(panel, &f, &["r".to_owned()], &PanelState::default(), 2_060)
+        };
+        assert!(cards_of(&view(&panel)).iter().all(|c| c.folds));
+        let ids: Vec<CardId> = review_cards(&f, Stage::AiReview, &[])
+            .iter()
+            .map(|c| c.id())
+            .collect();
+        // The open one folds while selected; the dismissed one opens.
+        panel.cards_open = vec![(ids[1].clone(), false), (ids[0].clone(), true)];
+        let shown = view(&panel);
+        let cards = cards_of(&shown);
+        assert!(cards[1].collapsed && cards[1].selected);
+        assert!(!cards[0].collapsed);
+        panel.finding = 0;
+        panel.cards_open = vec![(ids[0].clone(), false)];
+        assert!(cards_of(&view(&panel))[0].collapsed);
     }
 
     #[test]

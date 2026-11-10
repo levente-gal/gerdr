@@ -1115,6 +1115,9 @@ pub struct FindingCard {
     pub faded: bool,
     /// It shows as one line, until selected: what it says and its first button.
     pub collapsed: bool,
+    /// It has a chevron at its left that folds it to its line and opens it
+    /// again: a review card.
+    pub folds: bool,
     /// The mark down its left edge: what it has been decided to be.
     pub stripe: Option<CardStripe>,
     /// The note or comment being written on it.
@@ -2271,6 +2274,12 @@ fn wrapped(text: &str, size: f32, width: i32) -> Rc<Vec<String>> {
 }
 
 /// `text` cut to fit `width` at `size`, with an ellipsis if it had to be.
+/// A card's state split into what was decided and why: "dismissed: not
+/// reachable" into "dismissed" and "not reachable"; "fixed" has no why.
+fn decision(state: &str) -> (&str, &str) {
+    state.split_once(": ").unwrap_or((state, ""))
+}
+
 fn cut_to_width(text: &str, size: f32, width: i32) -> String {
     let width = width as f32;
     if width_of(text, size) <= width {
@@ -2728,6 +2737,20 @@ impl Stack {
         self.x += AGENT_PAD;
         self.w = (w - 2 * AGENT_PAD).max(1);
         self.y += AGENT_PAD;
+        // A review card's chevron, lined up with its first line.
+        if card.folds {
+            let first = card.buttons.first().is_some_and(|b| *b < page.buttons.len());
+            let h = match card.collapsed && first {
+                true => ROW_BUTTON,
+                false => BODY_LINE,
+            };
+            self.pieces.push((
+                Rectangle::new((self.x, self.y).into(), (SHEET_FOLD, h).into()),
+                Piece::Fold(k),
+            ));
+            self.x += SHEET_FOLD;
+            self.w = (self.w - SHEET_FOLD).max(1);
+        }
         if card.collapsed {
             self.collapsed_card(card, page, buttons);
             self.y += AGENT_PAD;
@@ -2771,28 +2794,36 @@ impl Stack {
         }
         self.all_text(&card.title, Font::Body, body, true, BODY_LINE);
         (self.x, self.w) = (title_x, title_w);
-        // What the user decided stands out from the rest of the line, muted.
-        let marked = card.stripe == Some(CardStripe::ToFix) && !card.state.is_empty();
-        let mut rest = Vec::new();
-        rest.extend((!card.state.is_empty() && !marked).then(|| card.state.clone()));
-        rest.push(card.place.clone());
-        let mut rest = rest.join(" \u{b7} ");
-        if marked {
-            let text = &card.state;
-            // Bold runs wider than it measures.
-            let w = (width_of(text, Font::Small.size()).ceil() as i32 + 1) * 9 / 8;
-            self.pieces.push((
-                Rectangle::new((self.x, self.y).into(), (w, TAIL_LINE).into()),
-                Piece::Text {
-                    text: text.clone(),
-                    font: Font::Small,
-                    ink: Ink::Accent,
-                    bold: true,
-                },
-            ));
-            self.x += w;
-            self.w = (self.w - w).max(1);
-            rest = format!("\u{b7} {rest}");
+        // What the user decided stands out from the rest of the line, muted;
+        // why, on a line of its own, reads as plainly as the title.
+        // A check's state is no decision: it goes muted before its place.
+        let decided = card.folds || card.stripe == Some(CardStripe::ToFix);
+        let (word, why) = match decided {
+            true => decision(&card.state),
+            false => ("", ""),
+        };
+        let mut rest = match decided || card.state.is_empty() {
+            true => card.place.clone(),
+            false => format!("{} \u{b7} {}", card.state, card.place),
+        };
+        if !word.is_empty() {
+            let text = match why.is_empty() {
+                true => word.to_owned(),
+                false => format!("{word}:"),
+            };
+            let w = self.decision_word(&text, card.stripe, self.x, self.y);
+            match why.is_empty() {
+                true => {
+                    self.x += w;
+                    self.w = (self.w - w).max(1);
+                    rest = format!("\u{b7} {rest}");
+                }
+                false => {
+                    (self.x, self.w) = (title_x + w, (title_w - w).max(1));
+                    self.all_text(why, Font::Small, Ink::Text, false, TAIL_LINE);
+                    (self.x, self.w) = (title_x, title_w);
+                }
+            }
         }
         self.all_text(&rest, Font::Small, Ink::Muted, false, TAIL_LINE);
         (self.x, self.w) = (left, width);
@@ -3456,6 +3487,25 @@ impl Stack {
 
     /// A collapsed card's one line: tag, title and where it stands cut to fit,
     /// its first button at the right.
+    /// `text`, what a card was decided to be, bold at `x`, `y`: in the accent while to fix. How wide it ran.
+    fn decision_word(&mut self, text: &str, stripe: Option<CardStripe>, x: i32, y: i32) -> i32 {
+        // Bold runs wider than it measures.
+        let w = (width_of(text, Font::Small.size()).ceil() as i32 + 1) * 9 / 8;
+        self.pieces.push((
+            Rectangle::new((x, y).into(), (w, TAIL_LINE).into()),
+            Piece::Text {
+                text: text.to_owned(),
+                font: Font::Small,
+                ink: match stripe {
+                    Some(CardStripe::ToFix) => Ink::Accent,
+                    _ => Ink::Text,
+                },
+                bold: true,
+            },
+        ));
+        w
+    }
+
     fn collapsed_card(
         &mut self,
         card: &FindingCard,
@@ -3496,12 +3546,19 @@ impl Stack {
             ));
             left += w + PILL_GAP;
         }
+        // What the user decided, bold before the title; why keeps up to
+        // half the line after it, so a long title can't hide it.
+        let (word, why) = match card.folds {
+            true => decision(&card.state),
+            false => ("", card.state.as_str()),
+        };
+        if !word.is_empty() {
+            left += self.decision_word(word, card.stripe, left, text_y) + PILL_GAP;
+        }
         let room = (right - left).max(1);
-        // How it stands keeps up to half the line: a long title can't hide
-        // "dismissed: why".
-        let state = match card.state.is_empty() {
+        let state = match why.is_empty() {
             true => String::new(),
-            false => format!(" \u{b7} {}", card.state),
+            false => format!(" \u{b7} {why}"),
         };
         let size = Font::Small.size();
         let state_w = (width_of(&state, size).ceil() as i32 + 1).min(room / 2);
@@ -7486,7 +7543,10 @@ impl Painter {
                 let Some(PageSection::Finding(card)) = view.page.sections.get(*k) else {
                     return;
                 };
-                let open = card.sheet.as_ref().is_some_and(|sheet| sheet.open);
+                let open = match &card.sheet {
+                    Some(sheet) => sheet.open,
+                    None => !card.collapsed,
+                };
                 let n = (view.page.sections[..*k].iter())
                     .filter(|s| matches!(s, PageSection::Finding(_)))
                     .count();
@@ -9758,6 +9818,7 @@ mod tests {
                 made: false,
                 faded: false,
                 collapsed: false,
+                folds: false,
                 stripe: None,
                 field: None,
                 field_hint: "",
@@ -9937,6 +9998,7 @@ mod tests {
             made: false,
             faded: true,
             collapsed,
+            folds: true,
             stripe: None,
             field: None,
             field_hint: "",
@@ -9949,12 +10011,15 @@ mod tests {
         assert_eq!(frame.size.h, 2 * AGENT_PAD + ROW_BUTTON);
         assert!(closed.page_buttons[0].is_some());
         assert!(closed.page_buttons[1].is_none() && closed.page_buttons[2].is_none());
-        // A title past the line leaves room for how the card stands.
-        assert!(
-            (closed.pieces.iter().flatten())
-                .any(|(_, p)| matches!(p, Piece::Text { text, .. } if text.ends_with("dismissed: why"))),
-            "state shown"
-        );
+        // The decision bold, and why: a title past the line leaves it room.
+        let texts: Vec<(&str, bool)> = (closed.pieces.iter().flatten())
+            .filter_map(|(_, p)| match p {
+                Piece::Text { text, bold, .. } => Some((text.as_str(), *bold)),
+                _ => None,
+            })
+            .collect();
+        assert!(texts.contains(&("dismissed", true)), "{texts:?}");
+        assert!(texts.iter().any(|(t, _)| t.ends_with("\u{b7} why")), "{texts:?}");
         let button = closed.page_buttons[0].unwrap();
         assert!(button.loc.x + button.size.w <= frame.loc.x + frame.size.w);
         // Its text stays clear of the button.
@@ -9966,6 +10031,13 @@ mod tests {
         view.page.sections[0] = PageSection::Finding(card(false));
         let open = feature_tab_layout(&view, area);
         assert!(open.finding_cards[0].size.h > frame.size.h);
+        // Its chevron folds it, open or not.
+        for layout in [&closed, &open] {
+            let chevron = (layout.pieces.iter().flatten())
+                .find_map(|(r, p)| matches!(p, Piece::Fold(0)).then_some(*r))
+                .expect("a chevron");
+            assert_eq!(layout.hit(&view, chevron.loc), Some(FeatureTabHit::Fold(0)));
+        }
         assert!(open.page_buttons.iter().take(3).all(Option::is_some));
     }
 
