@@ -296,7 +296,13 @@ pub(crate) fn output_within(mut cmd: Command, limit: Duration) -> Result<Output,
         .stderr(Stdio::piped())
         .process_group(0)
         .spawn()
-        .map_err(|err| format!("{}: {err}", cmd.get_program().to_string_lossy()))?;
+        .map_err(|err| {
+            let program = cmd.get_program().to_string_lossy();
+            match err.kind() {
+                std::io::ErrorKind::NotFound => format!("{program} is not installed"),
+                _ => format!("{program}: {err}"),
+            }
+        })?;
     fn drain(pipe: Option<impl Read + Send + 'static>) -> std::thread::JoinHandle<Vec<u8>> {
         std::thread::spawn(move || {
             let mut buf = Vec::new();
@@ -796,6 +802,23 @@ impl crate::Gerdr {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_command_is_stopped_after_its_time_and_a_missing_one_named() {
+        let mut slow = Command::new("sleep");
+        slow.arg("30");
+        let start = Instant::now();
+        assert_eq!(
+            output_within(slow, Duration::from_secs(1)).map(|_| ()),
+            Err("no answer in 1s".into())
+        );
+        assert!(start.elapsed() < Duration::from_secs(10));
+        let missing = Command::new("gerdr-no-such-tool");
+        assert_eq!(
+            output_within(missing, Duration::from_secs(1)).map(|_| ()),
+            Err("gerdr-no-such-tool is not installed".into())
+        );
+    }
 
     #[test]
     fn versions_compare_by_number_then_release() {

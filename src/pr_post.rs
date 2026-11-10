@@ -704,15 +704,19 @@ fn push(repo: &feature::Repo, pull: &feature::pr::PullRef) -> Result<String, Str
     Ok(head)
 }
 
+/// How long a git of `run_git`, a push among them, may take.
+const GIT_TIME: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// What `git args` in `dir` prints, or why it failed.
 fn run_git(dir: &Path, args: &[&str]) -> Result<String, String> {
-    let out = std::process::Command::new("git")
+    let mut command = std::process::Command::new("git");
+    command
         .args(args)
         .current_dir(dir)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .stdin(std::process::Stdio::null())
-        .output()
-        .map_err(|err| format!("couldn't run git: {err}"))?;
+        .env("GIT_TERMINAL_PROMPT", "0");
+    // A push stuck on the network is stopped, its group with it.
+    let out = crate::t3_update::output_within(command, GIT_TIME)
+        .map_err(|err| format!("git {}: {err}", args[0]))?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
         let why = err.lines().map(str::trim).find(|l| !l.is_empty());
