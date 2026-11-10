@@ -78,6 +78,14 @@ impl HandBackJob {
     }
 }
 
+/// Where a hand back of feature `slug` is asked, under gerdr's data folder `data`
+/// on the machine asked: the folder of the feature's own record, which it left
+/// when it was taken over. Not `store::dir`, which finds the copy of what the
+/// machine handing it back writes, and that copy is the other machine's.
+fn asked_in(data: &Path, project: &str, slug: &str) -> std::path::PathBuf {
+    store::project_dir(Some(data), project).join(slug)
+}
+
 /// `script` run there, its trouble as text.
 fn reach_script(reach: &Reach, script: &str, cancel: &AtomicBool) -> Result<String, String> {
     reach.script(script, cancel).map_err(|trouble| trouble.text().to_owned())
@@ -150,7 +158,7 @@ impl Gerdr {
             .map_or_else(|| project.to_owned(), |p| p.name.clone());
         let job = HandBackJob {
             reach: work.reach(),
-            dir: format!("{data}/features/{project}/{slug}"),
+            dir: asked_in(Path::new(&data), project, slug).to_string_lossy().into_owned(),
             data,
             project: project.to_owned(),
             project_name,
@@ -193,7 +201,7 @@ impl Gerdr {
         let asked: Vec<(String, std::path::PathBuf, lease::HandBack)> = (self.viewed_of(project).iter())
             .filter(|f| f.status == Status::Open)
             .filter_map(|f| {
-                let dir = store::dir(None, project, &f.slug);
+                let dir = asked_in(&crate::projects::data_dir(), project, &f.slug);
                 let file = dir.join(lease::HAND_BACK);
                 let age = std::fs::metadata(&file).ok()?.modified().ok()?.elapsed().ok();
                 let raw = std::fs::read(&file).ok()?;
@@ -287,6 +295,17 @@ mod tests {
             stale(&request(2), Some("lap"), 3).as_deref(),
             Some("It changed just before: hand it back again")
         );
+    }
+
+    #[test]
+    fn a_hand_back_is_looked_for_where_it_is_asked() {
+        // As the machine handing it back names the folder there.
+        let data = "/home/ana/.local/share/gerdr";
+        let there = asked_in(Path::new(data), "web", "login");
+        assert_eq!(there, Path::new("/home/ana/.local/share/gerdr/features/web/login"));
+        // As the one asked looks for it: its own record's folder, not the copy.
+        let here = asked_in(&crate::projects::data_dir(), "web", "login");
+        assert_eq!(here, store::project_dir(None, "web").join("login"));
     }
 
     #[test]
