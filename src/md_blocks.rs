@@ -61,11 +61,30 @@ pub fn blocks(text: &str) -> Vec<DocBlock> {
     ext.footnotes = true;
     let arena = Arena::new();
     let root = parse_document(&arena, text, &options);
+    hard_item_breaks(root);
     let mut out = Vec::new();
     for node in root.children() {
         block(node, 0, &mut out);
     }
     out
+}
+
+/// Make each line break inside a list item a hard one, so lines like a plan
+/// milestone's `Files:`, `Covers:` and `Check:` under its `- [ ] Name` keep
+/// their own lines rather than running on into one. `md_preview` does the same.
+pub fn hard_item_breaks<'a>(root: &'a AstNode<'a>) {
+    for node in root.descendants() {
+        let soft = matches!(node.data.borrow().value, NodeValue::SoftBreak);
+        let in_item = (node.ancestors()).any(|a| {
+            matches!(
+                a.data.borrow().value,
+                NodeValue::Item(_) | NodeValue::TaskItem(_)
+            )
+        });
+        if soft && in_item {
+            node.data.borrow_mut().value = NodeValue::LineBreak;
+        }
+    }
 }
 
 /// `node`'s blocks onto `out`, `depth` lists in.
@@ -153,7 +172,9 @@ fn words<'a>(node: &'a AstNode<'a>, text: &mut String) {
         match &child.data.borrow().value {
             NodeValue::Text(t) => text.push_str(t),
             NodeValue::Code(code) => text.push_str(&code.literal),
-            NodeValue::SoftBreak | NodeValue::LineBreak => text.push(' '),
+            NodeValue::SoftBreak => text.push(' '),
+            // The page breaks its line there (`doc_text`).
+            NodeValue::LineBreak => text.push('\n'),
             NodeValue::FootnoteReference(note) => {
                 text.push_str(&format!("[{}]", note.name));
             }
@@ -217,6 +238,17 @@ mod tests {
                 item(0, ItemMark::Bullet, "c"),
                 item(0, ItemMark::Number(3), "d"),
                 item(0, ItemMark::Number(4), "e"),
+            ]
+        );
+    }
+
+    #[test]
+    fn lines_in_an_item_keep_their_own_lines() {
+        assert_eq!(
+            blocks("- [ ] M1\n  Files: a.py\n  Check: tests\n\nOne\nline.  \nTwo.\n"),
+            [
+                item(0, ItemMark::Task(false), "M1\nFiles: a.py\nCheck: tests"),
+                para("One line.\nTwo."),
             ]
         );
     }

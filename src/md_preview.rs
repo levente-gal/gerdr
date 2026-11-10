@@ -99,7 +99,13 @@ pub fn render(text: &str) -> String {
     ext.header_id_prefix = Some(String::new());
     options.render.sourcepos = true;
     options.render.github_pre_lang = true;
-    comrak::markdown_to_html(text, &options)
+    let arena = comrak::Arena::new();
+    let root = comrak::parse_document(&arena, text, &options);
+    crate::md_blocks::hard_item_breaks(root);
+    let mut html = String::new();
+    // Writing to a String can't fail.
+    let _ = comrak::format_html(root, &options, &mut html);
+    html
 }
 
 /// What a preview's page shows: the file rendered, or why it can't be.
@@ -391,6 +397,16 @@ mod tests {
         assert!(html.contains("data-sourcepos=\"1:1-1:6\""), "{html}");
         assert!(html.contains("data-sourcepos=\"3:1-5:9\""), "{html}");
         assert!(html.contains("id=\"goal\""), "{html}");
+    }
+
+    #[test]
+    fn lines_in_a_list_item_break_there() {
+        let html = render("- [ ] M1\n  Files: a.py\n  Check: tests\n\nOne\nline.\n");
+        assert!(
+            html.contains("M1<br data-sourcepos=\"1:9-1:9\" />\nFiles: a.py<br"),
+            "{html}"
+        );
+        assert!(html.contains("One\nline."), "{html}");
     }
 
     #[test]
