@@ -2219,6 +2219,61 @@ impl DiffView {
         true
     }
 
+    /// A press on detail row `i`, if it is a row of the comment being
+    /// written: its caret goes to the char pressed (`pointer_char`), the
+    /// selection reaching there when `extend`; a second press in a row
+    /// selects the word there, a third all of it. Whether it was on one.
+    pub fn press_editor(&mut self, i: usize, extend: bool, count: u32, ctx: &Ctx) -> bool {
+        self.rewrap(ctx);
+        if self.editor_wrap_at(i, ctx).is_none() {
+            return false;
+        }
+        self.signals.focus = true;
+        let at = (self.pointer_char)
+            .filter(|&(j, _)| j == i)
+            .and_then(|(_, col)| self.editor_byte(i, col, ctx));
+        if let (Some(at), Some(editing)) = (at, self.editing.as_mut()) {
+            editing.field.click(at, extend, count);
+        }
+        true
+    }
+
+    /// A press on the comment being written dragged to char `col` of
+    /// detail row `i`, one of its rows: the selection reaches there.
+    pub fn drag_editor(&mut self, i: usize, col: usize, ctx: &Ctx) {
+        self.rewrap(ctx);
+        if let (Some(at), Some(editing)) = (self.editor_byte(i, col, ctx), self.editing.as_mut()) {
+            editing.field.drag_to(at);
+        }
+    }
+
+    /// The row of the comment being written that detail row `i` shows, by
+    /// index into `editor_wrap`.
+    fn editor_wrap_at(&self, i: usize, ctx: &Ctx) -> Option<usize> {
+        self.editing.as_ref()?;
+        match self.rows.get(self.detail_row_at(i, ctx)?)? {
+            DiffRow::Editor { i: w, .. } => Some(*w),
+            _ => None,
+        }
+    }
+
+    /// The byte of the comment being written that char `col` of detail row
+    /// `i`, one of its rows, starts at: past its end, the end. A row
+    /// wrapped onto the next ends before its last char, since its end is
+    /// the next row's start, where the caret shows.
+    fn editor_byte(&self, i: usize, col: usize, ctx: &Ctx) -> Option<usize> {
+        let w = self.editor_wrap_at(i, ctx)?;
+        let line = self.editing.as_ref()?.field.line();
+        let range = self.editor_wrap.get(w).cloned().unwrap_or(0..0);
+        let row = &line.text[range.clone()];
+        let mut at = (row.char_indices().nth(col)).map_or(range.end, |(b, _)| range.start + b);
+        if (self.editor_wrap.get(w + 1)).is_some_and(|next| next.start == range.end) {
+            let last = row.char_indices().last().map_or(0, |(b, _)| b);
+            at = at.min(range.start + last);
+        }
+        Some(at)
+    }
+
     /// Whether a press on the diff, held, drags the cursor's range on:
     /// the cursor is on a row and no comment is being written.
     pub fn drags_rows(&self, ctx: &Ctx) -> bool {
