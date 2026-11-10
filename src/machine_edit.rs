@@ -16,16 +16,21 @@
 //! `place.json` of each id it was seen by, and the projects' `machines` and
 //! `machine_folders`. The rest of what gerdr keeps of it goes by its id.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::{
     Gerdr,
     chrome::MachinesFocus,
+    config::Addresses,
     feature::view,
     machines::{Failure, Fix, LinkInfo, LinkState, default_name, valid_target},
     menu::MenuAction,
+    projects::Workflow,
     text_field::TextField,
 };
+
+/// What the form holds, as a draft is kept: name, addresses.
+pub type Draft = (String, Vec<String>);
 
 /// The form editing a machine, while it is open in the machines panel.
 #[derive(Debug, Default)]
@@ -33,10 +38,11 @@ pub struct EditForm {
     /// The machine edited, by its name now.
     pub machine: String,
     pub name: TextField,
-    pub address: TextField,
+    /// Its addresses, in the order they are tried: at least one field.
+    pub addresses: Vec<TextField>,
     /// What the form held when it opened: a draft is kept only when it
     /// says something else.
-    pub from: (String, String),
+    pub from: Draft,
     /// What is wrong with the form.
     pub error: Option<String>,
     /// Why the last try of a new address failed: the address, and what
@@ -45,23 +51,73 @@ pub struct EditForm {
 }
 
 impl EditForm {
-    /// The form on machine `machine`, holding `name` and `address`, as saved
-    /// at `from`.
-    pub fn new(machine: &str, (name, address): (&str, &str), from: (String, String)) -> Self {
+    /// The form on machine `machine`, holding `name` and `addresses`, as
+    /// saved at `from`.
+    pub fn new(machine: &str, (name, addresses): (&str, &[String]), from: Draft) -> Self {
         let mut form = Self {
             machine: machine.to_owned(),
             from,
             ..Self::default()
         };
         form.name.set(name);
-        form.address.set(address);
+        form.addresses = addresses.iter().map(|a| a.as_str().into()).collect();
+        if form.addresses.is_empty() {
+            form.addresses.push(TextField::default());
+        }
         form
     }
 
-    /// What was typed, if it isn't what the form opened with: name, address.
-    pub fn draft(&self) -> Option<(String, String)> {
-        let typed = (self.name.to_string(), self.address.to_string());
+    /// The addresses as typed, empty fields too.
+    pub fn typed(&self) -> Vec<String> {
+        self.addresses.iter().map(|a| a.to_string()).collect()
+    }
+
+    /// What was typed, if it isn't what the form opened with: name,
+    /// addresses.
+    pub fn draft(&self) -> Option<Draft> {
+        let typed = (self.name.to_string(), self.typed());
         (typed != self.from).then_some(typed)
+    }
+
+    /// A new empty address field at the end: its index.
+    pub fn add_address(&mut self) -> usize {
+        self.addresses.push(TextField::default());
+        self.error = None;
+        self.addresses.len() - 1
+    }
+
+    /// Take address field `i` out, but never the last one left: whether
+    /// it went.
+    pub fn remove_address(&mut self, i: usize) -> bool {
+        if self.addresses.len() < 2 || i >= self.addresses.len() {
+            return false;
+        }
+        self.addresses.remove(i);
+        self.error = None;
+        true
+    }
+
+    /// Move address field `i` one place up, or down with `down`: where it
+    /// went, if it could.
+    pub fn move_address(&mut self, i: usize, down: bool) -> Option<usize> {
+        let to = match down {
+            true => i + 1,
+            false => i.checked_sub(1)?,
+        };
+        if to >= self.addresses.len() || i >= self.addresses.len() {
+            return None;
+        }
+        self.addresses.swap(i, to);
+        self.error = None;
+        Some(to)
+    }
+
+    /// The field holding `address`, trimmed as checked: where a failure
+    /// there puts the keyboard.
+    pub fn field_of(&self, address: &str) -> usize {
+        (self.addresses.iter())
+            .position(|a| a.trim() == address)
+            .unwrap_or(0)
     }
 
     /// The button fixing what the last try ran into, if one can help.
@@ -86,11 +142,11 @@ pub struct EditTry {
     pub serial: u64,
     /// Where it was, and whether its link was running there: put back as it
     /// was if the try fails.
-    pub old_target: crate::config::Addresses,
+    pub old_target: Addresses,
     pub was_live: bool,
     /// What the form asked for.
     pub new_name: String,
-    pub new_target: crate::config::Addresses,
+    pub new_target: Addresses,
     /// The ids it was seen by: the one answering must be one of them.
     pub known: Vec<String>,
     /// How far trying got.
@@ -99,28 +155,38 @@ pub struct EditTry {
 
 /// What the form says, checked against the machines saved, machine
 /// `machine` among them: the name and addresses to keep, or what is wrong
-/// and the field at fault.
+/// and the field at fault. Each address is trimmed, and empty ones are
+/// left out, but one must be left.
 pub fn check_edit(
-    saved: &BTreeMap<String, crate::config::Addresses>,
+    saved: &BTreeMap<String, Addresses>,
     machine: &str,
     name: &str,
     addresses: &[&str],
-) -> Result<(String, crate::config::Addresses), (String, MachinesFocus)> {
-    // Contract: one address; increment 3 checks each of a list.
+) -> Result<(String, Addresses), (String, MachinesFocus)> {
     let name = name.trim();
-    let address = addresses.first().copied().unwrap_or_default().trim();
-    let at_address = |why: String| Err((why, MachinesFocus::EditAddress(0)));
-    if address.is_empty() {
-        return at_address("Say which machine, as user@host.".to_owned());
+    let typed: Vec<(usize, &str)> = (addresses.iter().map(|a| a.trim()).enumerate())
+        .filter(|(_, a)| !a.is_empty())
+        .collect();
+    let at = |i: usize, why: String| Err((why, MachinesFocus::EditAddress(i)));
+    let Some(&(_, first)) = typed.first() else {
+        return at(0, "Say which machine, as user@host.".to_owned());
+    };
+    if let Some(&(i, _)) = typed.iter().find(|(_, a)| !valid_target(a)) {
+        return at(i, Failure::BadTarget.why());
     }
-    if !valid_target(address) {
-        return at_address(Failure::BadTarget.why());
+    for (n, &(i, address)) in typed.iter().enumerate() {
+        if typed[..n].iter().any(|(_, a)| *a == address) {
+            return at(i, format!("{address} is in the list twice."));
+        }
     }
-    if let Some((other, _)) = (saved.iter()).find(|(n, t)| t.contains(address) && *n != machine) {
-        return at_address(format!("It is here already, as {other}."));
+    for &(i, address) in &typed {
+        if let Some((other, _)) = (saved.iter()).find(|(n, t)| t.contains(address) && *n != machine)
+        {
+            return at(i, format!("It is here already, as {other}."));
+        }
     }
     let name = match name.is_empty() {
-        true => default_name(address),
+        true => default_name(first),
         false => name.to_owned(),
     };
     if name != machine && saved.contains_key(&name) {
@@ -129,7 +195,93 @@ pub fn check_edit(
             MachinesFocus::EditName,
         ));
     }
-    Ok((name, crate::config::Addresses::one(address)))
+    let addresses = typed.into_iter().map(|(_, a)| a.to_owned()).collect();
+    Ok((name, Addresses(addresses)))
+}
+
+/// Whether the new addresses `new` of a machine at `old` can be kept
+/// without trying them: only reordered or cut, its link not running, or
+/// its link up on an address still among them. `up_at`: where its link is
+/// up; `live`: whether it runs at all.
+pub fn keeps_without_try(
+    old: &Addresses,
+    new: &Addresses,
+    up_at: Option<&str>,
+    live: bool,
+) -> bool {
+    if up_at.is_some_and(|at| new.contains(at)) {
+        return true;
+    }
+    let nothing_new = new.0.iter().all(|a| old.contains(a));
+    nothing_new && !live
+}
+
+/// Machine `drop`'s addresses after `keep`'s, but for those `keep` has.
+pub fn joined_addresses(keep: &Addresses, drop: &Addresses) -> Addresses {
+    let mut joined = keep.clone();
+    for address in &drop.0 {
+        if !joined.contains(address) {
+            joined.0.push(address.clone());
+        }
+    }
+    joined
+}
+
+/// The ids seen under the name `drop` are seen under `keep` now: those
+/// moved, in order.
+pub fn move_names(names: &mut HashMap<String, String>, keep: &str, drop: &str) -> Vec<String> {
+    let mut moved = Vec::new();
+    for (id, name) in names.iter_mut().filter(|(_, n)| *n == drop) {
+        *name = keep.to_owned();
+        moved.push(id.clone());
+    }
+    moved.sort();
+    moved
+}
+
+/// A project's settings name machine `keep` where they named `drop`: its
+/// stages, and its folders there joining `keep`'s, `keep`'s own winning
+/// where both say one. Whether anything changed, and the folders where
+/// `drop`'s was left out.
+pub fn merge_workflow(workflow: &mut Workflow, keep: &str, drop: &str) -> (bool, Vec<String>) {
+    let mut changed = false;
+    for name in workflow.machines.values_mut().filter(|n| *n == drop) {
+        *name = keep.to_owned();
+        changed = true;
+    }
+    let mut clashes = Vec::new();
+    if let Some(folders) = workflow.machine_folders.remove(drop) {
+        changed = true;
+        let kept = workflow.machine_folders.entry(keep.to_owned()).or_default();
+        for (folder, there) in folders {
+            match kept.get(&folder) {
+                Some(own) if *own != there => clashes.push(folder),
+                Some(_) => {}
+                None => _ = kept.insert(folder, there),
+            }
+        }
+    }
+    (changed, clashes)
+}
+
+/// The machines among `ids` (each machine's ids, by its name) that are
+/// machine `name` too: one id is both's.
+pub fn same_machines(name: &str, ids: &BTreeMap<String, Vec<String>>) -> Vec<String> {
+    let Some(mine) = ids.get(name) else {
+        return Vec::new();
+    };
+    (ids.iter())
+        .filter(|(other, theirs)| *other != name && theirs.iter().any(|id| mine.contains(id)))
+        .map(|(other, _)| other.clone())
+        .collect()
+}
+
+/// What the confirm dialog merging `drop` into `keep` says under its title.
+pub fn merge_body(keep: &str, drop: &str) -> String {
+    format!(
+        "{drop}'s addresses join {keep}'s, after them, and {drop} goes. \
+         Projects that name {drop} name {keep} instead."
+    )
 }
 
 /// Whether the machine answering as `answered` is the one seen by the ids
@@ -162,8 +314,20 @@ impl Gerdr {
         }
     }
 
-    /// Save the form: a new name at once, a new address once tried, or
-    /// untried with `untried` ("Save anyway").
+    /// Whether machine `name` is connecting, or a new address of it is
+    /// tried: what moves its link waits for that.
+    fn machine_busy(&self, name: &str) -> bool {
+        let connecting = matches!(
+            self.machines.links.get(name).map(|l| &l.state),
+            Some(LinkState::Connecting(_))
+        );
+        connecting || self.edit_try().is_some_and(|t| t.name == name)
+    }
+
+    /// Save the form: a new name at once, new addresses once tried, or
+    /// untried with `untried` ("Save anyway"). Addresses only put in
+    /// another order, or added while the link is up on one still there,
+    /// are kept at once, the link left as it is.
     pub(crate) fn save_edit(&mut self, untried: bool) {
         if self.edit_try().is_some() {
             return;
@@ -176,7 +340,9 @@ impl Gerdr {
             self.edit_closed(None);
             return self.show_warning(format!("{machine} isn't in the settings any more"));
         };
-        let checked = check_edit(&self.machines.saved, &machine, &form.name, &[&form.address]);
+        let typed = form.typed();
+        let typed: Vec<&str> = typed.iter().map(String::as_str).collect();
+        let checked = check_edit(&self.machines.saved, &machine, &form.name, &typed);
         let (name, target) = match checked {
             Ok(checked) => checked,
             Err((why, field)) => return self.edit_error(why, field),
@@ -201,15 +367,21 @@ impl Gerdr {
             }
             return self.edit_closed(Some(&name));
         }
-        if untried {
-            return self.save_untried(&machine, &name, &target);
-        }
-        let known = self.machine_ids(&machine);
         let link = self.machines.links.get(&machine);
         let was_live = matches!(
             link.map(|l| &l.state),
             Some(LinkState::Up(_) | LinkState::Connecting(_) | LinkState::Retrying(_))
         );
+        let up_at = link
+            .filter(|l| matches!(l.state, LinkState::Up(_)))
+            .map(|l| l.target());
+        if !untried && keeps_without_try(&old_target, &target, up_at, was_live) {
+            return self.save_listed(&machine, &name, &target);
+        }
+        if untried {
+            return self.save_untried(&machine, &name, &target);
+        }
+        let known = self.machine_ids(&machine);
         let before = link.map(|l| l.serial);
         self.start_link(machine.clone(), target.clone(), false);
         let serial = (self.machines.links.get(&machine)).map(|l| l.serial);
@@ -238,9 +410,34 @@ impl Gerdr {
         self.report_machines();
     }
 
+    /// Machine `machine` called `name` and kept at `target` without a try,
+    /// as nothing there needs one: its link goes on as it is, and takes the
+    /// new list the next time it starts.
+    fn save_listed(&mut self, machine: &str, name: &str, target: &Addresses) {
+        if name != machine
+            && let Err(why) = self.rename_machine(machine, name)
+        {
+            return self.edit_error(why, MachinesFocus::EditName);
+        }
+        if let Err(why) = crate::config::write_machine(name, Some(target)) {
+            tracing::warn!("machines: saving {name} at {target:?}: {why}");
+            let why = format!("gerdr couldn't keep it in the settings: {why}.");
+            return self.edit_error(why, MachinesFocus::EditAddress(0));
+        }
+        self.settings_modified = crate::config::modified();
+        (self.machines.saved).insert(name.to_owned(), target.clone());
+        if let Some(link) = self.machines.links.get_mut(name) {
+            link.addresses = target.clone();
+        }
+        tracing::info!("machine {name}: addresses now {target}, its link kept");
+        self.report_machines();
+        self.show_success(format!("Saved {name}"));
+        self.edit_closed(Some(name));
+    }
+
     /// "Save anyway": machine `machine` called `name` and kept at `target`
     /// without trying it first, its link starting there.
-    fn save_untried(&mut self, machine: &str, name: &str, target: &crate::config::Addresses) {
+    fn save_untried(&mut self, machine: &str, name: &str, target: &Addresses) {
         if name != machine
             && let Err(why) = self.rename_machine(machine, name)
         {
@@ -312,29 +509,37 @@ impl Gerdr {
             tried.known
         );
         self.restore_link(&tried);
-        self.edit_not_kept(tried, Failure::OtherMachine(name.to_owned()));
+        self.edit_not_kept(tried, None, Failure::OtherMachine(name.to_owned()));
         None
     }
 
     /// The new address of machine `name` didn't connect: the old link goes
     /// back, and the form says why.
     pub(crate) fn edit_failed(&mut self, name: &str, failure: Failure) {
+        // The address it ran into trouble at: the last it tried.
+        let at = self.edit_try().map(|t| t.serial).and_then(|serial| {
+            let link = self.machines.links.get(name)?;
+            (link.serial == serial).then(|| link.target().to_owned())
+        });
         let Some(tried) = self.machines.editing.take() else {
             return;
         };
         tracing::warn!("machine {name}: trying {}: {failure:?}", tried.new_target);
         self.restore_link(&tried);
-        self.edit_not_kept(tried, failure);
+        self.edit_not_kept(tried, at, failure);
     }
 
-    /// What the try ran into, in the form; in a toast if it was closed.
-    fn edit_not_kept(&mut self, tried: EditTry, failure: Failure) {
+    /// What the try ran into at address `at` (else its first), in the
+    /// form, the keyboard on that address; in a toast if it was closed.
+    fn edit_not_kept(&mut self, tried: EditTry, at: Option<String>, failure: Failure) {
         let name = tried.name.clone();
+        let at = at.unwrap_or_else(|| tried.new_target.first().to_owned());
         match self.edit_form_mut(&name) {
             Some(form) => {
-                form.failed = Some((tried.new_target.first().to_owned(), failure));
+                let field = form.field_of(&at);
+                form.failed = Some((at, failure));
                 if let Some(panel) = self.machines_panel.as_mut() {
-                    panel.focus = MachinesFocus::EditAddress(0);
+                    panel.focus = MachinesFocus::EditAddress(field);
                 }
             }
             None => self.show_warning(format!(
@@ -409,11 +614,7 @@ impl Gerdr {
         if self.machines.saved.contains_key(new) || self.machines.links.contains_key(new) {
             return Err(format!("Another machine is called {new}."));
         }
-        let connecting = matches!(
-            self.machines.links.get(old).map(|l| &l.state),
-            Some(LinkState::Connecting(_))
-        );
-        if connecting || self.edit_try().is_some_and(|t| t.name == old) {
+        if self.machine_busy(old) {
             return Err(format!("Wait for {old} to connect first."));
         }
         crate::config::rename_machine(old, new).map_err(|why| {
@@ -457,13 +658,155 @@ impl Gerdr {
         self.report_machines();
         Ok(())
     }
+
+    /// The other saved machines that are machine `name` too, as the ids
+    /// each was seen by say.
+    pub(crate) fn same_machines_as(&self, name: &str) -> Vec<String> {
+        let ids: BTreeMap<String, Vec<String>> = (self.machines.saved.keys())
+            .map(|n| (n.clone(), self.machine_ids(n)))
+            .collect();
+        same_machines(name, &ids)
+    }
+
+    /// Why machine `drop` can't merge into `keep` now, as a toast says it.
+    fn merge_refused(&self, keep: &str, drop: &str) -> Option<String> {
+        if let Some(gone) = [keep, drop]
+            .into_iter()
+            .find(|n| !self.machines.saved.contains_key(*n))
+        {
+            return Some(format!("{gone} isn't in the settings any more"));
+        }
+        if keep == drop {
+            return Some(format!("{keep} is one machine already"));
+        }
+        let busy = [keep, drop].into_iter().find(|n| self.machine_busy(n))?;
+        Some(format!("Wait for {busy} to connect first"))
+    }
+
+    /// The Merge button of machine `keep`'s detail: asks first, as it has no
+    /// undo.
+    pub(crate) fn ask_merge_machines(&mut self, keep: &str, drop: &str) {
+        if let Some(why) = self.merge_refused(keep, drop) {
+            return self.show_warning(why);
+        }
+        self.ask(
+            format!("Merge {drop} into {keep}?"),
+            merge_body(keep, drop),
+            "Merge",
+            crate::confirm::Then::MergeMachines {
+                keep: keep.to_owned(),
+                drop: drop.to_owned(),
+            },
+        );
+    }
+
+    /// Machine `drop` is machine `keep`: its addresses join `keep`'s, after
+    /// them, and it goes, without its link and without forgetting what was
+    /// seen of it, as that is `keep`'s now. What was kept under its name
+    /// moves to `keep`: the ids it was seen by and their `place.json`, and
+    /// the projects' `machines` and `machine_folders`.
+    pub(crate) fn merge_machines(&mut self, keep: &str, drop: &str) {
+        if let Some(why) = self.merge_refused(keep, drop) {
+            return self.show_warning(why);
+        }
+        let (Some(kept), Some(dropped)) = (
+            self.machines.saved.get(keep).cloned(),
+            self.machines.saved.get(drop).cloned(),
+        ) else {
+            return;
+        };
+        let joined = joined_addresses(&kept, &dropped);
+        if let Err(why) = crate::config::write_machine(keep, Some(&joined)) {
+            tracing::warn!("machines: merging {drop} into {keep}: {why}");
+            return self.show_error(format!(
+                "gerdr couldn't merge {drop} into {keep} in the settings: {why}"
+            ));
+        }
+        let dropped_too = crate::config::write_machine(drop, None);
+        // Written here: the settings read back don't take it out again.
+        self.settings_modified = crate::config::modified();
+        if let Err(why) = dropped_too {
+            // `keep` has its addresses already: both stay, as the file says.
+            tracing::warn!("machines: taking {drop} out of the settings: {why}");
+            self.machines.saved.insert(keep.to_owned(), joined.clone());
+            if let Some(link) = self.machines.links.get_mut(keep) {
+                link.addresses = joined;
+            }
+            return self.show_error(format!(
+                "{keep} has {drop}'s addresses now, but gerdr couldn't take {drop} out of the settings: {why}"
+            ));
+        }
+        tracing::info!("machines: {drop} merged into {keep}, at {joined}");
+        self.machines.saved.insert(keep.to_owned(), joined.clone());
+        self.machines.saved.remove(drop);
+        self.machines.link_off(drop);
+        self.machines.links.remove(drop);
+        if let Some(link) = self.machines.links.get_mut(keep) {
+            link.addresses = joined.clone();
+        }
+        let ids = move_names(&mut self.machines.names, keep, drop);
+        let mut trouble = false;
+        let data = crate::projects::data_dir();
+        for id in &ids {
+            if let Err(err) = view::rename_place(&view::root(&data, id), drop, keep) {
+                tracing::warn!("machine {keep}: noting {id} under its name: {err}");
+                trouble = true;
+            }
+        }
+        let mut changed = Vec::new();
+        for project in &mut self.projects.projects {
+            let (moved, clashes) = merge_workflow(&mut project.workflow, keep, drop);
+            for folder in clashes {
+                tracing::warn!(
+                    "machines: {} keeps {keep}'s place of {folder}, not {drop}'s",
+                    project.id
+                );
+            }
+            if moved {
+                changed.push(project.id.clone());
+            }
+        }
+        if !changed.is_empty() {
+            tracing::info!(
+                "machines: {drop} merged into {keep} in the files of {}",
+                changed.join(", ")
+            );
+            if !self.projects.save_projects(&changed) {
+                tracing::warn!("machines: couldn't save the merge of {drop} in {changed:?}");
+                trouble = true;
+            }
+        }
+        let up = matches!(
+            self.machines.links.get(keep).map(|l| &l.state),
+            Some(LinkState::Up(_))
+        );
+        if !up {
+            self.start_link(keep.to_owned(), joined, true);
+        }
+        let row = self.machines.saved.keys().position(|n| n == keep);
+        let count = self.machines.saved.len() + 1;
+        let page = crate::chrome::machines_shown(count, self.output_size());
+        if let (Some(panel), Some(row)) = (self.machines_panel.as_mut(), row) {
+            panel.merged(drop, row, (page, count));
+        }
+        self.starts_lost();
+        self.report_machines();
+        match trouble {
+            true => self.toast_with(
+                format!("Merged {drop} into {keep}, but gerdr couldn't write all it keeps of it"),
+                crate::toast::Level::Warning,
+                Some(("Open log".to_owned(), MenuAction::OpenLog)),
+            ),
+            false => self.show_success(format!("Merged {drop} into {keep}")),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn saved() -> BTreeMap<String, crate::config::Addresses> {
+    fn saved() -> BTreeMap<String, Addresses> {
         BTreeMap::from([
             ("box".to_owned(), "me@box".into()),
             ("zen".to_owned(), "me@zen".into()),
@@ -523,11 +866,11 @@ mod tests {
 
     #[test]
     fn a_draft_is_what_differs_and_save_anyway_follows_the_failure() {
-        let from = ("box".to_owned(), "me@box".to_owned());
-        let mut form = EditForm::new("box", ("box", "me@box"), from.clone());
+        let from = ("box".to_owned(), vec!["me@box".to_owned()]);
+        let mut form = EditForm::new("box", ("box", &from.1), from.clone());
         assert_eq!(form.draft(), None);
-        form.address.set("me@box2");
-        assert_eq!(form.draft(), Some(("box".into(), "me@box2".into())));
+        form.addresses[0].set("me@box2");
+        assert_eq!(form.draft(), Some(("box".into(), vec!["me@box2".into()])));
         assert!(!form.untried_offered());
         form.failed = Some(("me@box2".into(), Failure::Auth));
         assert!(form.untried_offered());
@@ -535,5 +878,154 @@ mod tests {
         form.failed = Some(("me@box2".into(), Failure::OtherMachine("box".into())));
         assert!(!form.untried_offered());
         assert!(form.fix().is_none());
+        // A form with no address still has a field to type one in.
+        let empty = EditForm::new("box", ("box", &[]), from);
+        assert_eq!(empty.typed(), [""]);
+    }
+
+    #[test]
+    fn each_address_of_the_list_is_checked() {
+        let saved = saved();
+        let check = |addresses: &[&str]| check_edit(&saved, "box", "box", addresses);
+        let at = |why: &str, i| Err((why.to_owned(), MachinesFocus::EditAddress(i)));
+        // Trimmed, empty ones left out, in the order given.
+        assert_eq!(
+            check(&[" me@box.lan ", "", "me@box"]),
+            Ok((
+                "box".into(),
+                Addresses(vec!["me@box.lan".into(), "me@box".into()])
+            ))
+        );
+        assert_eq!(check(&["", " "]), at("Say which machine, as user@host.", 0));
+        // The one at fault is named by its field, empty ones counted.
+        assert_eq!(
+            check(&["me@box", "", "-oProxyCommand=x"]),
+            at(&Failure::BadTarget.why(), 2)
+        );
+        assert_eq!(
+            check(&["me@box", " me@box"]),
+            at("me@box is in the list twice.", 1)
+        );
+        assert_eq!(
+            check(&["me@box", "me@zen"]),
+            at("It is here already, as zen.", 1)
+        );
+        // No name is the first address's host.
+        assert_eq!(
+            check_edit(&saved, "box", "", &["", "me@new.lan", "me@x"]).map(|(n, _)| n),
+            Ok("new.lan".into())
+        );
+    }
+
+    #[test]
+    fn the_list_adds_moves_and_keeps_one() {
+        let from = ("box".to_owned(), vec!["a@1".to_owned(), "a@2".to_owned()]);
+        let mut form = EditForm::new("box", ("box", &from.1), from.clone());
+        form.error = Some("x".into());
+        assert_eq!(form.add_address(), 2);
+        assert_eq!(form.error, None);
+        assert_eq!(form.move_address(0, false), None);
+        assert_eq!(form.move_address(2, true), None);
+        assert_eq!(form.move_address(0, true), Some(1));
+        assert_eq!(form.typed(), ["a@2", "a@1", ""]);
+        assert_eq!(form.field_of("a@1"), 1);
+        assert_eq!(form.field_of("gone"), 0);
+        assert!(form.remove_address(2) && form.remove_address(0));
+        assert!(!form.remove_address(0));
+        assert_eq!(form.typed(), ["a@1"]);
+    }
+
+    #[test]
+    fn a_new_list_is_tried_only_when_it_needs_to_be() {
+        let old = Addresses(vec!["a@1".into(), "a@2".into()]);
+        let list = |a: &[&str]| Addresses(a.iter().map(|a| (*a).to_owned()).collect());
+        let reordered = list(&["a@2", "a@1"]);
+        let added = list(&["a@1", "a@2", "a@3"]);
+        let swapped = list(&["a@3"]);
+        // Up on an address still there: kept at once, the link left.
+        assert!(keeps_without_try(&old, &reordered, Some("a@1"), true));
+        assert!(keeps_without_try(&old, &added, Some("a@2"), true));
+        // Up on one taken out, or connecting: tried.
+        assert!(!keeps_without_try(&old, &list(&["a@2"]), Some("a@1"), true));
+        assert!(!keeps_without_try(&old, &reordered, None, true));
+        // Off: only what was there already goes untried.
+        assert!(keeps_without_try(&old, &reordered, None, false));
+        assert!(!keeps_without_try(&old, &added, None, false));
+        assert!(!keeps_without_try(&old, &swapped, Some("a@1"), true));
+    }
+
+    #[test]
+    fn a_merge_joins_addresses_names_and_folders() {
+        let keep = Addresses(vec!["me@zen-office".into(), "me@10.0.0.4".into()]);
+        let drop = Addresses(vec!["me@zen-home".into(), "me@10.0.0.4".into()]);
+        assert_eq!(
+            joined_addresses(&keep, &drop),
+            Addresses(vec![
+                "me@zen-office".into(),
+                "me@10.0.0.4".into(),
+                "me@zen-home".into()
+            ])
+        );
+        let mut names = HashMap::from([
+            ("id2".to_owned(), "home".to_owned()),
+            ("id1".to_owned(), "home".to_owned()),
+            ("id3".to_owned(), "office".to_owned()),
+        ]);
+        assert_eq!(move_names(&mut names, "office", "home"), ["id1", "id2"]);
+        assert!(names.values().all(|n| n == "office"));
+        let mut workflow = Workflow::default();
+        workflow
+            .machines
+            .insert(crate::feature::Stage::Build, "home".into());
+        workflow
+            .machines
+            .insert(crate::feature::Stage::Plan, "other".into());
+        let folders = |pairs: &[(&str, &str)]| -> BTreeMap<String, String> {
+            (pairs.iter())
+                .map(|(a, b)| ((*a).to_owned(), (*b).to_owned()))
+                .collect()
+        };
+        (workflow.machine_folders)
+            .insert("home".into(), folders(&[("/a", "/h/a"), ("/b", "/h/b")]));
+        (workflow.machine_folders).insert("office".into(), folders(&[("/a", "/o/a")]));
+        let (changed, clashes) = merge_workflow(&mut workflow, "office", "home");
+        assert!(changed);
+        assert_eq!(clashes, ["/a"]);
+        assert_eq!(workflow.machines[&crate::feature::Stage::Build], "office");
+        assert_eq!(workflow.machines[&crate::feature::Stage::Plan], "other");
+        assert_eq!(
+            workflow.machine_folders["office"],
+            folders(&[("/a", "/o/a"), ("/b", "/h/b")])
+        );
+        assert!(!workflow.machine_folders.contains_key("home"));
+        // Nothing of it there: nothing to save.
+        assert_eq!(
+            merge_workflow(&mut workflow, "office", "home"),
+            (false, vec![])
+        );
+    }
+
+    #[test]
+    fn machines_seen_by_one_id_are_the_same() {
+        let ids = BTreeMap::from([
+            ("home".to_owned(), vec!["id1".to_owned()]),
+            (
+                "office".to_owned(),
+                vec!["id0".to_owned(), "id1".to_owned()],
+            ),
+            ("box".to_owned(), vec!["id2".to_owned()]),
+            ("new".to_owned(), vec![]),
+        ]);
+        assert_eq!(same_machines("home", &ids), ["office"]);
+        assert_eq!(same_machines("office", &ids), ["home"]);
+        assert!(same_machines("box", &ids).is_empty());
+        assert!(same_machines("new", &ids).is_empty());
+        assert!(same_machines("gone", &ids).is_empty());
+        let body = merge_body("office", "home");
+        assert_eq!(
+            body,
+            "home's addresses join office's, after them, and home goes. \
+             Projects that name home name office instead."
+        );
     }
 }
