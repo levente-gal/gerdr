@@ -4622,7 +4622,10 @@ fn recap_card(feature: &Feature, state: &PanelState, now: u64) -> chrome::RecapC
     if touched > 1 {
         figures.push((touched.to_string(), "repositories".to_owned()));
     }
-    let runs: u32 = feature.run_counts.values().sum();
+    // Every stage's runs, those a start over forgot too.
+    let runs: u32 = (Stage::ALL.into_iter())
+        .map(|stage| feature.next_run(stage) - 1)
+        .sum();
     if runs > 0 {
         let word = if runs == 1 { "agent run" } else { "agent runs" };
         figures.push((runs.to_string(), word.to_owned()));
@@ -4644,7 +4647,8 @@ fn recap_card(feature: &Feature, state: &PanelState, now: u64) -> chrome::RecapC
         };
         let mut said = Vec::new();
         if let Some(run) = feature.runs.get(&stage) {
-            let mut who = crate::stats_panel::agent_name(&run.agent);
+            // As the rail and its tab name it.
+            let mut who = run.agent.clone();
             if let Some(model) = run.model.as_deref() {
                 who = format!("{who} {}", short_model(model));
             }
@@ -4678,9 +4682,7 @@ fn recap_card(feature: &Feature, state: &PanelState, now: u64) -> chrome::RecapC
 /// that it is being written, or that there is none.
 fn recap_summary(feature: &Feature, probe: Option<&Probe>) -> (Vec<String>, Option<String>) {
     let run = feature.shipping.summary.as_ref();
-    let who = run.map_or("an agent".to_owned(), |r| {
-        crate::stats_panel::agent_name(&r.agent)
-    });
+    let who = run.map_or("an agent".to_owned(), |r| r.agent.clone());
     let read = probe.and_then(|p| p.docs.summary.as_ref());
     match read {
         Some((Ok(text), at)) if !text.trim().is_empty() => {
@@ -4762,10 +4764,10 @@ fn recap_stage_words(feature: &Feature, stage: Stage, state: &PanelState) -> Vec
                 n => vec![count_of(n, "round of comments", "rounds of comments")],
             }
         }
-        Stage::ManualTest if state.ctx.criteria > 0 => vec![format!(
-            "{} of {} criteria passed",
-            state.ctx.manual.passed, state.ctx.criteria
-        )],
+        // Its general comments are no criteria: as its page counts them.
+        Stage::ManualTest if state.ctx.criteria > 0 => {
+            vec![crate::manual_test::counts_text(state.ctx.manual)]
+        }
         _ => Vec::new(),
     }
 }
@@ -14819,7 +14821,7 @@ fn ship_base_line(feature: &Feature, probe: Option<&Probe>, key: &str) -> Option
         .as_ref()
         .filter(|r| r.repo == key)
     {
-        let who = crate::stats_panel::agent_name(&r.agent);
+        let who = r.agent.clone();
         let found = probe.and_then(|p| p.resolution.as_ref());
         let files = r.files.join(", ");
         return Some(match (r.planning, found) {
@@ -18592,6 +18594,42 @@ pub(crate) mod tests {
             held: true,
             ..agent_run(pane, None)
         }
+    }
+
+    #[test]
+    fn the_recap_counts_every_run_names_agents_as_the_rail_and_leaves_comments_out() {
+        let mut f = feature("r", vec![repo("api", true)], 8);
+        let run = |n| feature::agents::StageRun {
+            agent: "claude".into(),
+            n,
+            ..Default::default()
+        };
+        f.runs.insert(Stage::Discover, run(1));
+        f.runs.insert(Stage::AiReview, run(4));
+        // Started over twice: forgotten, still counted.
+        f.run_counts.insert(Stage::Build, 2);
+        let manual = feature::manual::Counts {
+            passed: 5,
+            comments_done: 1,
+            ..Default::default()
+        };
+        let state = PanelState {
+            ctx: RowCtx {
+                criteria: 5,
+                manual,
+                ..RowCtx::default()
+            },
+            ..PanelState::default()
+        };
+        let recap = recap_card(&f, &state, 3_000);
+        assert!(recap.figures.contains(&("7".to_owned(), "agent runs".to_owned())));
+        let said = |label: &str| {
+            let (_, said) = recap.stages.iter().find(|(l, _)| l == label).unwrap();
+            said.clone()
+        };
+        assert!(said("Discover").starts_with("claude \u{b7} "), "{}", said("Discover"));
+        assert!(said("AI review").starts_with("claude \u{b7} 4 runs"));
+        assert!(said("Manual test").contains("4 of 4 criteria passed \u{b7} took"));
     }
 
     #[test]
