@@ -379,13 +379,13 @@ impl Gerdr {
         };
         let submitted = (f.shipping.reviews.last()).map(|r| r.event.done());
         let ended = f.pull().and_then(pr::PullRef::ended);
-        let own_at_ship =
-            f.pull().is_some_and(pr::PullRef::own) && f.current() == Some(feature::Stage::Ship);
+        let own_at_ship = f.pull().is_some_and(pr::PullRef::works_here)
+            && f.current() == Some(feature::Stage::Ship);
         let how = match (ended, submitted) {
             (Some(end), _) if end.merged() => "It was merged on GitHub".to_owned(),
             (Some(_), _) => "It was closed on GitHub".to_owned(),
             (None, Some(done)) => format!("You {done} on GitHub; new commits won't come up here"),
-            (None, None) if own_at_ship => "Your pull request stays open on GitHub".to_owned(),
+            (None, None) if own_at_ship => "The pull request stays open on GitHub".to_owned(),
             (None, None) => {
                 return self.show_warning(format!(
                     "“{}” is still open on GitHub: submit its review first",

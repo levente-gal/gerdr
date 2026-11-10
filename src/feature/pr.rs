@@ -70,6 +70,15 @@ pub struct PullRef {
     /// that last changed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote: Option<Remote>,
+    /// Someone else's, fixed here: what its review wants goes to an agent
+    /// here, and its fixes are pushed to its branch from Ship's page, as
+    /// for the user's own (`works_here`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fix_here: bool,
+    /// The repository its branch is in, `owner/repo`, when that isn't
+    /// `slug` (a fork's), as read when fixing it here was asked for.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub head_repo: String,
 }
 
 /// A pull request as GitHub had it when last read.
@@ -193,6 +202,21 @@ impl PullRef {
         self.mine && !self.cross_repo
     }
 
+    /// Its review's fixes are made here and pushed to its branch: the
+    /// user's own, or someone else's they chose to fix (`fix_here`).
+    pub fn works_here(&self) -> bool {
+        self.own() || self.fix_here
+    }
+
+    /// Where its fixes are pushed: `origin` for a branch of this repository,
+    /// else its fork's address, made from origin's (`origin`).
+    pub fn push_remote(&self, origin: &str) -> Option<String> {
+        match self.cross_repo && !self.head_repo.is_empty() {
+            false => Some("origin".to_owned()),
+            true => fork_url(origin, &self.slug, &self.head_repo),
+        }
+    }
+
     /// The slug of its review: `pr-12`.
     pub fn feature_slug(&self) -> String {
         slug_of(self.number)
@@ -291,8 +315,90 @@ impl Feature {
     /// user submits: a review of someone else's pull request (or of one of
     /// the user's own from a fork). The user's own gets fixed by an agent.
     pub fn posts_review(&self) -> bool {
-        self.pull().is_some_and(|p| !p.own())
+        self.pull().is_some_and(|p| !p.works_here())
     }
+}
+
+/// The address of fork `head_repo` (`owner/repo`) of repository `slug`,
+/// as origin's address `origin` names `slug`: `git@github.com:o/r.git`
+/// gives `git@github.com:f/r.git`, an https one likewise.
+pub fn fork_url(origin: &str, slug: &str, head_repo: &str) -> Option<String> {
+    let origin = origin.trim();
+    let at = origin
+        .to_ascii_lowercase()
+        .rfind(&slug.to_ascii_lowercase())?;
+    let tail = &origin[at + slug.len()..];
+    if !(tail.is_empty() || tail == ".git" || tail == "/") {
+        return None;
+    }
+    Some(format!("{}{head_repo}{tail}", &origin[..at]))
+}
+
+/// What `gh pr view --json PUSH_FIELDS` prints.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PushView {
+    #[serde(default)]
+    maintainer_can_modify: bool,
+    #[serde(default)]
+    is_cross_repository: bool,
+    #[serde(default)]
+    head_repository: Option<Named>,
+    #[serde(default)]
+    head_repository_owner: Option<Login>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct Named {
+    #[serde(default)]
+    name: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Permission {
+    #[serde(default)]
+    viewer_permission: String,
+}
+
+/// Whether the user can push to `pull`'s branch, read with gh in `dir`: its
+/// head repository (`owner/repo`), or why not.
+pub fn push_access(dir: &Path, pull: &PullRef) -> Result<Result<String, String>, String> {
+    let n = pull.number.to_string();
+    let arg = pull.repo_arg();
+    let fields = "maintainerCanModify,isCrossRepository,headRepository,headRepositoryOwner";
+    let view: PushView =
+        crate::ci::gh_json(dir, &["pr", "view", &n, "--repo", &arg, "--json", fields])?;
+    let owner = view
+        .head_repository_owner
+        .map(|o| o.login)
+        .unwrap_or_default();
+    let name = view.head_repository.map(|r| r.name).unwrap_or_default();
+    if view.is_cross_repository {
+        let me = viewer(dir, &pull.host).unwrap_or_default();
+        let theirs = format!("{owner}/{name}");
+        if owner.is_empty() || name.is_empty() {
+            return Ok(Err(format!(
+                "GitHub didn't say where #{}'s branch is",
+                pull.number
+            )));
+        }
+        return Ok(
+            match view.maintainer_can_modify || owner.eq_ignore_ascii_case(&me) {
+                true => Ok(theirs),
+                false => Err(format!(
+                    "#{} comes from {theirs}, whose author doesn't let maintainers push to it",
+                    pull.number
+                )),
+            },
+        );
+    }
+    let perm: Permission =
+        crate::ci::gh_json(dir, &["repo", "view", &arg, "--json", "viewerPermission"])?;
+    Ok(match perm.viewer_permission.as_str() {
+        "ADMIN" | "MAINTAIN" | "WRITE" => Ok(pull.slug.clone()),
+        _ => Err(format!("You can't push to {}", pull.slug)),
+    })
 }
 
 /// The slug of pull request `number`'s review: `pr-12`.
@@ -378,6 +484,8 @@ fn details_of(view: View, host: &str, slug: &str, me: &str) -> Details {
             head_sha: view.head_ref_oid,
             cross_repo: view.is_cross_repository,
             remote: None,
+            fix_here: false,
+            head_repo: String::new(),
         },
         title: view.title,
         body: view.body,
@@ -666,6 +774,35 @@ mod tests {
         pull.take_remote(remote);
         assert_eq!(pull.ci(), None);
         assert_eq!(pull.checks_url(), "https://github.com/o/r/pull/12/checks");
+    }
+
+    #[test]
+    fn a_forks_address_follows_origins() {
+        let fork = |origin| fork_url(origin, "o/r", "f/r");
+        assert_eq!(
+            fork("git@github.com:o/r.git").as_deref(),
+            Some("git@github.com:f/r.git")
+        );
+        assert_eq!(
+            fork("https://github.com/O/R").as_deref(),
+            Some("https://github.com/f/r")
+        );
+        assert_eq!(
+            fork("https://github.com/o/r/").as_deref(),
+            Some("https://github.com/f/r/")
+        );
+        assert_eq!(fork("https://github.com/o/other.git"), None);
+        let mut pull = details_of(view("bob", true), "github.com", "o/r", "ann").pull;
+        assert!(!pull.works_here());
+        pull.fix_here = true;
+        pull.head_repo = "bob/r".into();
+        assert!(pull.works_here());
+        assert_eq!(
+            pull.push_remote("git@github.com:o/r.git").as_deref(),
+            Some("git@github.com:bob/r.git")
+        );
+        pull.cross_repo = false;
+        assert_eq!(pull.push_remote("whatever").as_deref(), Some("origin"));
     }
 
     #[test]

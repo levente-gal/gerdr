@@ -66,7 +66,7 @@ impl Gerdr {
             );
         }
         if !self.row_ctx(f).on_head {
-            return Some(match pull.own() {
+            return Some(match pull.works_here() {
                 true => "The code here isn't on GitHub yet: push it first".into(),
                 false => format!(
                     "The code here isn't #{}'s head: update it first",
@@ -251,7 +251,7 @@ impl Gerdr {
         let Some(f) = self.feature(project, slug) else {
             return;
         };
-        let Some(pull) = f.pull().filter(|p| p.own()) else {
+        let Some(pull) = f.pull().filter(|p| p.works_here()) else {
             return self
                 .show_warning("Only your own pull request's branch is pushed from here".into());
         };
@@ -279,11 +279,12 @@ impl Gerdr {
         let Some(f) = self.feature(project, slug) else {
             return;
         };
-        let (Some(pull), Some(repo)) = (f.pull().filter(|p| p.own()).cloned(), f.repos.first())
-        else {
+        let (Some(pull), Some(repo)) = (
+            f.pull().filter(|p| p.works_here()).cloned(),
+            f.repos.first().cloned(),
+        ) else {
             return;
         };
-        let dir = repo.worktree.clone();
         let busy = Busy {
             project: project.to_owned(),
             slug: slug.to_owned(),
@@ -293,7 +294,7 @@ impl Gerdr {
         };
         let (project, slug) = (project.to_owned(), slug.to_owned());
         self.feature_work(Some(busy), move |_| Done::PrPushed {
-            result: push(&dir, &pull),
+            result: push(&repo, &pull),
             project,
             slug,
         });
@@ -324,6 +325,131 @@ impl Gerdr {
         self.show_success(text);
         self.probe_feature(project, slug);
         self.refresh_pr_reviews();
+    }
+}
+
+impl Gerdr {
+    /// Fix review `slug`, of someone else's pull request, here, or go back
+    /// to commenting. Fixing asks first, once gerdr read off the thread
+    /// that the user can push to its branch; going back is refused while
+    /// fixes made here aren't on GitHub.
+    pub(crate) fn toggle_fix_here(&mut self, project: &str, slug: &str) {
+        let Some(f) = self.feature(project, slug) else {
+            return;
+        };
+        let Some(pull) = f.pull().filter(|p| !p.own()).cloned() else {
+            return self.show_warning("Your own pull request is fixed here already".into());
+        };
+        if f.status != Status::Open || f.writer.is_some() {
+            return self.show_warning(format!("\u{201c}{}\u{201d} isn't open here", f.title));
+        }
+        if self.feature_busy(project, slug) || f.fix_round.is_some() {
+            return self.show_warning(format!(
+                "\u{201c}{}\u{201d} has work running: wait for it",
+                f.title
+            ));
+        }
+        if pull.fix_here {
+            if !self.row_ctx(f).on_head {
+                return self.show_warning(
+                    "Fixes made here aren't on GitHub: push them, or drop them, first".into(),
+                );
+            }
+            return self.set_fix_here(project, slug, None);
+        }
+        let Some(dir) = f.repos.first().map(|r| r.main.clone()) else {
+            return;
+        };
+        let busy = Busy {
+            project: project.to_owned(),
+            slug: slug.to_owned(),
+            job: Job::PrHead,
+            repo: None,
+            what: format!("Asking GitHub who can push to #{}", pull.number),
+        };
+        let (project, slug) = (project.to_owned(), slug.to_owned());
+        self.feature_work(Some(busy), move |_| Done::PushAccess {
+            result: feature::pr::push_access(&dir, &pull),
+            project,
+            slug,
+        });
+    }
+
+    /// Whether the user can push to review `slug`'s pull request is known:
+    /// ask before fixing it here, or say why it can't be.
+    pub(crate) fn push_access_read(
+        &mut self,
+        project: &str,
+        slug: &str,
+        result: Result<Result<String, String>, String>,
+    ) {
+        self.unbusy(project, slug, Job::PrHead);
+        let head_repo = match result {
+            Ok(Ok(head_repo)) => head_repo,
+            Ok(Err(why)) => return self.show_warning(format!("Can't fix it here: {why}")),
+            Err(why) => {
+                tracing::warn!("reading who can push to {project}/{slug}: {why}");
+                return self.show_error(format!("Couldn't tell whether you can push to it: {why}"));
+            }
+        };
+        let Some(pull) = self.feature(project, slug).and_then(Feature::pull) else {
+            return;
+        };
+        let body = format!(
+            "Its code runs here: setup, its checks, and an agent fixing it\nIts fixes go to {} on {head_repo} when you push them from Ship",
+            pull.head_ref
+        );
+        let then = Then::FixHere {
+            project: project.to_owned(),
+            slug: slug.to_owned(),
+            head_repo,
+        };
+        self.ask(
+            format!("Fix #{} here?", pull.number),
+            body,
+            "Fix here",
+            then,
+        );
+    }
+
+    /// Review `slug` fixes its pull request here (`head_repo` its branch's
+    /// repository), or comments again (`None`).
+    pub(crate) fn set_fix_here(&mut self, project: &str, slug: &str, head_repo: Option<String>) {
+        let Some(f) = self.feature_mut(project, slug) else {
+            return;
+        };
+        let feature::Kind::PrReview(pull) = &mut f.kind else {
+            return;
+        };
+        let on = head_repo.is_some();
+        pull.fix_here = on;
+        if let Some(head_repo) = head_repo {
+            pull.head_repo = head_repo;
+        }
+        let (number, head_ref) = (pull.number, pull.head_ref.clone());
+        if let Some(review) = f.review.as_mut() {
+            review.posts = !on;
+        }
+        let text = match on {
+            true => format!(
+                "Fixing #{number} here: its fixes go to an agent, and Push… on Ship sends them to {head_ref}"
+            ),
+            false => {
+                format!("#{number} is commented on again: what its review wants goes to GitHub")
+            }
+        };
+        f.log(feature::now(), text.clone());
+        self.save_feature(project, slug);
+        self.show_success(text);
+        // Trusted now: it can be set up for the agent and its checks.
+        if on
+            && self
+                .feature(project, slug)
+                .is_some_and(|f| f.setup.is_none())
+        {
+            self.start_setup(project, slug);
+        }
+        self.probe_feature(project, slug);
     }
 }
 
@@ -408,14 +534,35 @@ fn write(file: &PathBuf, payload: &serde_json::Value) -> Result<(), String> {
 
 /// Push `dir`'s HEAD to `pull`'s branch, only while GitHub's is at the head
 /// last seen of it: the head pushed.
-fn push(dir: &Path, pull: &feature::pr::PullRef) -> Result<String, String> {
+/// Someone else's goes to their branch, in a fork when it is one's, past
+/// the guard on gerdr's branch for it (`hook`) for this push only; what
+/// was fetched of it moves along, as it is GitHub's now.
+fn push(repo: &feature::Repo, pull: &feature::pr::PullRef) -> Result<String, String> {
+    let dir = &repo.worktree;
+    let origin = run_git(dir, &["remote", "get-url", "origin"])?;
+    let Some(remote) = pull.push_remote(&origin) else {
+        return Err(format!("couldn't tell the address of {}", pull.head_repo));
+    };
+    let head = run_git(dir, &["rev-parse", "HEAD"])?.trim().to_owned();
     let to = format!("HEAD:refs/heads/{}", pull.head_ref);
     let lease = format!(
         "--force-with-lease=refs/heads/{}:{}",
         pull.head_ref, pull.head_sha
     );
-    run_git(dir, &["push", "-q", &lease, "origin", &to])?;
-    Ok(run_git(dir, &["rev-parse", "HEAD"])?.trim().to_owned())
+    let branch = pull.branch();
+    let guarded = !pull.own();
+    if guarded {
+        feature::hook::allow(&repo.main, &branch, &head)?;
+    }
+    let pushed = run_git(dir, &["push", "-q", &lease, &remote, &to]);
+    if guarded && let Err(err) = feature::hook::guard(&repo.main, &branch) {
+        tracing::warn!("guarding {branch} again: {err}");
+    }
+    pushed?;
+    if guarded && let Err(err) = run_git(dir, &["update-ref", &pull.fetch_ref(), &head]) {
+        tracing::warn!("moving {}: {err}", pull.fetch_ref());
+    }
+    Ok(head)
 }
 
 /// What `git args` in `dir` prints, or why it failed.

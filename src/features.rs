@@ -360,6 +360,13 @@ pub(crate) enum Done {
         slug: String,
         result: Result<Box<crate::pr_post::Submitted>, String>,
     },
+    /// Whether the user can push to a pull request's branch was read: its
+    /// repository, or why not.
+    PushAccess {
+        project: String,
+        slug: String,
+        result: Result<Result<String, String>, String>,
+    },
     /// The user's own pull request's commits were pushed, or not: the head.
     PrPushed {
         project: String,
@@ -1713,6 +1720,9 @@ pub enum PanelOutcome {
     SubmitReview(feature::pr_submit::Event),
     /// The user's own pull request's review: push its commits, after asking.
     PushPr,
+    /// Someone else's pull request's review: fix it here, after asking, or
+    /// comment on it again (see `pr_post::toggle_fix_here`).
+    FixHere,
     /// Ask an agent to write the feature's summary again.
     WriteSummary,
     /// Undo step `.1` that shipping ran for repository `.0`, after asking.
@@ -3390,6 +3400,7 @@ fn action_hint(action: &PanelOutcome) -> &'static str {
             "request changes\u{2026}"
         }
         PanelOutcome::PushPr => "push\u{2026}",
+        PanelOutcome::FixHere => "fix here or comment",
         PanelOutcome::OpenPr(_) => "open on GitHub",
         PanelOutcome::FinishReview => "finish\u{2026}",
         PanelOutcome::Untick(_) => "reopen",
@@ -5178,6 +5189,11 @@ impl FeaturePanel {
                 let back = matches!(sym, Keysym::Prior | Keysym::KP_Prior);
                 return switch(slugs, &self.slug, back).map(PanelOutcome::Show);
             }
+            Keysym::w | Keysym::W
+                if mods.alt && !ctrl && !mods.shift && feature.pull().is_some_and(|p| !p.own()) =>
+            {
+                return Some(PanelOutcome::FixHere);
+            }
             Keysym::o | Keysym::O if ctrl && mods.shift => {
                 return row_page(feature, row)
                     .or_else(|| {
@@ -6642,6 +6658,11 @@ impl Gerdr {
                 slug,
                 result,
             } => self.pr_pushed(&project, &slug, result),
+            Done::PushAccess {
+                project,
+                slug,
+                result,
+            } => self.push_access_read(&project, &slug, result),
             Done::CiRerun {
                 project,
                 slug,
@@ -9046,6 +9067,7 @@ impl Gerdr {
             PanelOutcome::RerunCi => self.rerun_ci(&project, &slug),
             PanelOutcome::SubmitReview(event) => self.ask_submit_review(&project, &slug, event),
             PanelOutcome::PushPr => self.ask_push_pr(&project, &slug),
+            PanelOutcome::FixHere => self.toggle_fix_here(&project, &slug),
             PanelOutcome::FinishReview => self.ask_finish_pr_review(&project, &slug),
             PanelOutcome::WriteSummary => self.write_ship_summary(&project, &slug, true),
             PanelOutcome::UndoShip(repo, step) => self.ask_undo_ship(&project, &slug, &repo, step),
@@ -12006,9 +12028,10 @@ fn submit_action(feature: &Feature, ctx: RowCtx) -> PanelOutcome {
     };
     let waiting = to_post(feature, ctx) > 0;
     match () {
-        _ if pull.own() && !ctx.on_head => PanelOutcome::PushPr,
+        _ if pull.works_here() && !ctx.on_head => PanelOutcome::PushPr,
         _ if waiting => PanelOutcome::SubmitReview(Event::Comment),
-        _ if pull.mine || !feature.shipping.reviews.is_empty() => PanelOutcome::FinishReview,
+        // Pushed, a review is up to the user: Finish needs none.
+        _ if pull.works_here() || !feature.shipping.reviews.is_empty() => PanelOutcome::FinishReview,
         _ => PanelOutcome::SubmitReview(Event::Approve),
     }
 }
@@ -12026,7 +12049,7 @@ fn submit_actions(feature: &Feature, ctx: RowCtx) -> Vec<(PageButton, PanelOutco
         style,
     };
     let mut out = Vec::new();
-    if pull.own() {
+    if pull.works_here() {
         out.push((button("Push\u{2026}", ButtonStyle::Plain), PanelOutcome::PushPr));
     }
     let events: &[Event] = match pull.mine {
@@ -12037,7 +12060,10 @@ fn submit_actions(feature: &Feature, ctx: RowCtx) -> Vec<(PageButton, PanelOutco
         out.push((button(event.label(), ButtonStyle::Plain), PanelOutcome::SubmitReview(*event)));
     }
     out.push((button("Edit text", ButtonStyle::Quiet), PanelOutcome::EditSummary));
-    if pull.mine || !feature.shipping.reviews.is_empty() || ctx.on_head && to_post(feature, ctx) == 0 {
+    if pull.works_here()
+        || !feature.shipping.reviews.is_empty()
+        || ctx.on_head && to_post(feature, ctx) == 0
+    {
         out.push((button("Finish\u{2026}", ButtonStyle::Plain), PanelOutcome::FinishReview));
     }
     out
@@ -12049,7 +12075,7 @@ fn submit_line(feature: &Feature, ctx: RowCtx) -> Option<String> {
     let n = to_post(feature, ctx);
     let last = feature.shipping.reviews.last();
     Some(match () {
-        _ if pull.own() && !ctx.on_head => "fixes here not on GitHub: push them".into(),
+        _ if pull.works_here() && !ctx.on_head => "fixes here not on GitHub: push them".into(),
         _ if n > 0 => format!("{} to post", plural(n, "comment")),
         _ => match last {
             Some(r) => format!("{} on GitHub; finish, or wait for new commits", r.event.done()),
@@ -12121,7 +12147,7 @@ fn submit_sections(
     if !done.is_empty() {
         out.push(lines("Submitted", done));
     }
-    if pull.own() && !state.ctx.on_head {
+    if pull.works_here() && !state.ctx.on_head {
         let text = format!("commits here not on {} yet", pull.head_ref);
         out.push(lines("Branch", vec![line(text, CheckTone::Blocker)]));
     }
@@ -12158,7 +12184,16 @@ fn with_pull_actions(
             }
         }
     }
-    let mut more = vec![(OPEN_PULL, ButtonStyle::Quiet, PanelOutcome::OpenPr(pull.url.clone()))];
+    let mut more = Vec::new();
+    if !pull.own()
+        && pull.ended().is_none()
+        && feature.status == Status::Open
+        && feature.writer.is_none()
+    {
+        let label = if pull.fix_here { COMMENT_INSTEAD } else { FIX_HERE };
+        more.push((label, ButtonStyle::Plain, PanelOutcome::FixHere));
+    }
+    more.push((OPEN_PULL, ButtonStyle::Quiet, PanelOutcome::OpenPr(pull.url.clone())));
     if stage == Stage::Verify
         && ctx.on_head
         && ctx.checks
@@ -12291,6 +12326,10 @@ fn ci_sections(
 
 /// The label of the button opening a pull request's review's pull request.
 const OPEN_PULL: &str = "Open pull request";
+/// The labels of the button fixing someone else's pull request here, and
+/// going back to commenting on it.
+const FIX_HERE: &str = "Fix here\u{2026}";
+const COMMENT_INSTEAD: &str = "Comment instead";
 
 /// What hovering button `i` of a pull request review's page says, with its
 /// key: one its pull request's card holds.
@@ -12317,6 +12356,9 @@ fn pull_tip(feature: &Feature, stage: Stage, page: &chrome::StagePage, i: usize)
                 false => "Open the pull request on GitHub (Ctrl+Shift+O)".to_owned(),
             }
         }
+        FIX_HERE => "Fix it here and push the fixes to its branch, instead of commenting (Alt+W)"
+            .to_owned(),
+        COMMENT_INSTEAD => "Comment on it on GitHub instead of fixing it here (Alt+W)".to_owned(),
         _ => "Finish the review: nothing is posted (Enter)".to_owned(),
     })
 }
@@ -12355,7 +12397,11 @@ fn pull_card(
             true => String::new(),
             false => format!("by @{} \u{b7} ", pull.author),
         };
-        let mine = if pull.mine { " \u{b7} yours" } else { "" };
+        let mine = match (pull.mine, pull.fix_here) {
+            (true, _) => " \u{b7} yours",
+            (false, true) => " \u{b7} fixing here",
+            (false, false) => "",
+        };
         line(
             format!(
                 "{by}{} into {} \u{b7} at {}{mine}",
@@ -12369,7 +12415,7 @@ fn pull_card(
     let buttons = (actions.iter().enumerate())
         .filter(|(_, (_, o))| match o {
             PanelOutcome::OpenPr(url) => *url == pull.url,
-            PanelOutcome::UpdatePrHead | PanelOutcome::FinishReview => true,
+            PanelOutcome::UpdatePrHead | PanelOutcome::FinishReview | PanelOutcome::FixHere => true,
             _ => false,
         })
         .map(|(i, _)| i)
@@ -14590,6 +14636,10 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 7] = [
                 "approve a brief or plan ready for review; make the fixes of a fix plan ready for review, or again once its agent stopped with fixes left; at AI review, send the findings to fix, with no plan unless you commented; at Verify, send its failures with no plan (Ctrl+Shift+Enter plans them first); at Plan review, write the final plan or use the plan as it is once every suggestion is decided (Ctrl+Shift+Enter asks the reviewer)",
             ),
             (
+                "Alt+W",
+                "reviewing someone else's pull request: fix it here and push the fixes from Ship, asking first, or comment on it again",
+            ),
+            (
                 "Ctrl+Enter / Ctrl+Shift+Enter",
                 "reviewing someone else's pull request, on Ship's page: approve it, or request changes, after asking (Enter comments, or approves with nothing to post; Ctrl+E edits the review's text)",
             ),
@@ -15292,6 +15342,10 @@ fn writers_tab_hints(
                 hints.push(hint("Ctrl+Shift+O", "fix plan"));
             } else if feature.pull().is_some() {
                 hints.push(hint("Ctrl+Shift+O", "pull request"));
+            }
+            if let Some(pull) = feature.pull().filter(|p| !p.own() && feature.status == Status::Open) {
+                let what = if pull.fix_here { "comment instead" } else { "fix here\u{2026}" };
+                hints.push(hint("Alt+W", what));
             }
             if offers_setup(feature, stage) {
                 if can_set_up(feature, ctx) {
@@ -25959,7 +26013,7 @@ mod pr_page_tests {
         let page = page_of(&f, Stage::Verify);
         let (state, buttons) = card(&page);
         assert_eq!(state.text, "by @bob · fix into main · at abc1234");
-        assert_eq!(buttons, vec![OPEN_PULL]);
+        assert_eq!(buttons, vec![FIX_HERE, OPEN_PULL]);
         let ctx = RowCtx::default();
         assert_ne!(page_enter(&f, Stage::Verify, ctx), Some(PanelOutcome::UpdatePrHead));
         assert_eq!(feature_agents_gate(&f), None);
@@ -25975,14 +26029,14 @@ mod pr_page_tests {
         let (state, buttons) = card(&page);
         assert_eq!(state.tone, CheckTone::Blocker);
         assert!(state.text.contains("at fff0000, reviewed at abc1234"), "{}", state.text);
-        assert_eq!(buttons, vec![UPDATE_HEAD, OPEN_PULL]);
+        assert_eq!(buttons, vec![UPDATE_HEAD, FIX_HERE, OPEN_PULL]);
         assert_eq!(
             pull_tip(&f, Stage::Verify, &page, 0).as_deref(),
             Some("Fetch the new commits and review them, from Verify on (Enter)")
         );
         // A done stage's page only says so: Enter there goes elsewhere.
         let page = page_of(&f, Stage::Build);
-        assert_eq!(card(&page).1, vec![OPEN_PULL]);
+        assert_eq!(card(&page).1, vec![FIX_HERE, OPEN_PULL]);
         assert_eq!(
             feature_agents_gate(&f),
             Some((Stage::Verify, 1_900, crate::feature_agents::GateKind::NewHead))
@@ -26246,6 +26300,39 @@ mod pr_page_tests {
         };
         // GitHub takes no approval of one's own.
         assert_eq!(submit_key(&f, &ctrl, Keysym::Return), None);
+    }
+
+    #[test]
+    fn someone_elses_can_be_fixed_here_and_pushed() {
+        let mut f = at_ship();
+        let head = RowCtx {
+            on_head: true,
+            ..RowCtx::default()
+        };
+        // Commented: the card offers to fix it here.
+        let mut actions = page_actions(&f, Stage::Verify, head);
+        with_pull_actions(&mut actions, &f, Stage::Verify, head);
+        assert!(actions.iter().any(|(b, o)| b.label == FIX_HERE && *o == PanelOutcome::FixHere));
+        assert!(f.posts_review());
+        let Kind::PrReview(pull) = &mut f.kind else { unreachable!() };
+        pull.fix_here = true;
+        pull.head_repo = "o/api".into();
+        assert!(!f.posts_review());
+        let page = page_of(&f, Stage::Verify);
+        let (state, buttons) = card(&page);
+        assert!(state.text.ends_with("fixing here"), "{}", state.text);
+        assert_eq!(buttons, vec![COMMENT_INSTEAD, OPEN_PULL]);
+        // Fixed here: Ship pushes, then finishes without a review.
+        assert_eq!(page_enter(&f, Stage::Ship, RowCtx::default()), Some(PanelOutcome::PushPr));
+        assert_eq!(page_enter(&f, Stage::Ship, head), Some(PanelOutcome::FinishReview));
+        assert_eq!(
+            submit_line(&f, RowCtx::default()).as_deref(),
+            Some("fixes here not on GitHub: push them")
+        );
+        let mut actions = page_actions(&f, Stage::Ship, head);
+        with_pull_actions(&mut actions, &f, Stage::Ship, head);
+        let labels: Vec<&str> = actions.iter().map(|(b, _)| b.label.as_str()).collect();
+        assert!(labels.contains(&"Push\u{2026}") && labels.contains(&"Approve\u{2026}"), "{labels:?}");
     }
 
     fn feature_agents_gate(f: &Feature) -> Option<(Stage, u64, crate::feature_agents::GateKind)> {
