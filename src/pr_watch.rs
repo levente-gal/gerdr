@@ -73,10 +73,16 @@ impl Gerdr {
         let asked: Vec<Asked> = (self.features.all.iter())
             .flat_map(|(project, all)| all.iter().map(move |f| (project, f)))
             .filter(|(_, f)| f.status == Status::Open && f.writer.is_none())
-            .filter_map(|(project, f)| {
-                let pull = f.pull()?.clone();
-                let dir = f.repos.first().map(|r| r.main.clone())?;
-                Some((project.clone(), f.slug.clone(), dir, pull))
+            .flat_map(|(project, f)| {
+                f.pulls().iter().filter_map(move |pull| {
+                    let repo = f.repo(&pull.repo).or(f.repos.first())?;
+                    Some((
+                        project.clone(),
+                        f.slug.clone(),
+                        repo.main.clone(),
+                        pull.clone(),
+                    ))
+                })
             })
             .collect();
         if asked.is_empty() {
@@ -89,7 +95,7 @@ impl Gerdr {
                     .map(|(project, slug, dir, pull)| {
                         scope.spawn(move || {
                             let read = pr::read_remote(dir, pull, now);
-                            (project.clone(), slug.clone(), read)
+                            (project.clone(), slug.clone(), pull.number, read)
                         })
                     })
                     .collect();
@@ -104,10 +110,10 @@ impl Gerdr {
     /// can, as it is read again in a minute anyway.
     pub(crate) fn pr_reviews_read(
         &mut self,
-        reads: Vec<(String, String, Result<pr::Remote, String>)>,
+        reads: Vec<(String, String, u64, Result<pr::Remote, String>)>,
     ) {
         let mut failed = Vec::new();
-        for (project, slug, read) in reads {
+        for (project, slug, number, read) in reads {
             let read = match read {
                 Ok(read) => read,
                 Err(why) => {
@@ -123,7 +129,7 @@ impl Gerdr {
             if f.status != Status::Open {
                 continue;
             }
-            let feature::Kind::PrReview(pull) = &mut f.kind else {
+            let Some(pull) = f.pulls_mut().iter_mut().find(|p| p.number == number) else {
                 continue;
             };
             match pull.take_remote(read) {
@@ -359,7 +365,8 @@ impl Gerdr {
             repo.base = moved.base.clone();
             repo.base_commit = moved.base_commit.clone();
         }
-        let feature::Kind::PrReview(pull) = &mut f.kind else {
+        // shortcut: the first pull request only, until increment B moves each.
+        let Some(pull) = f.pulls_mut().first_mut() else {
             return;
         };
         pull.moved_to(&moved.head_sha, &moved.base_ref);

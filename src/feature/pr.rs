@@ -44,6 +44,11 @@ const FIELDS: &str = "number,title,body,author,baseRefName,headRefName,headRefOi
 /// A pull request a review is of, as it was last read.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PullRef {
+    /// The repository of the review it is of, by `Repo::key`; empty in a
+    /// record of one pull request, from before reviews held several: its
+    /// first repository's.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub repo: String,
     /// `github.com`, or a GitHub Enterprise host.
     pub host: String,
     /// `owner/repo`.
@@ -314,9 +319,27 @@ impl Feature {
     /// What its reviews want goes to GitHub, as comments of the review the
     /// user submits: a review of someone else's pull request (or of one of
     /// the user's own from a fork). The user's own gets fixed by an agent.
+    // shortcut: one say for the whole review; with the user's own and
+    // someone else's in one, all comment (nothing is fixed here that can't
+    // be pushed). Per repository once mixed reviews matter.
     pub fn posts_review(&self) -> bool {
-        self.pull().is_some_and(|p| !p.works_here())
+        self.pulls().iter().any(|p| !p.works_here())
     }
+}
+
+/// A review's pull requests as a record has them: a list, or one alone, as
+/// a record from before reviews held several kept it.
+pub fn one_or_many<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<PullRef>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Kept {
+        Many(Vec<PullRef>),
+        One(Box<PullRef>),
+    }
+    Ok(match Kept::deserialize(d)? {
+        Kept::Many(all) => all,
+        Kept::One(one) => vec![*one],
+    })
 }
 
 /// The address of fork `head_repo` (`owner/repo`) of repository `slug`,
@@ -473,6 +496,7 @@ fn details_of(view: View, host: &str, slug: &str, me: &str) -> Details {
     };
     Details {
         pull: PullRef {
+            repo: String::new(),
             host: host.to_owned(),
             slug: slug.to_owned(),
             number: view.number,
@@ -634,9 +658,15 @@ pub fn record(
         })
         .collect();
     let short = pull.head_sha.get(..7).unwrap_or(&pull.head_sha);
+    let mut pull = pull.clone();
+    pull.repo = created
+        .repos
+        .first()
+        .map(super::Repo::key)
+        .unwrap_or_default();
     Feature {
         version: VERSION,
-        kind: Kind::PrReview(Box::new(pull.clone())),
+        kind: Kind::PrReview(vec![pull.clone()]),
         slug: pull.feature_slug(),
         title: title(details),
         project: project.to_owned(),
@@ -867,5 +897,20 @@ mod tests {
         // A feature's record says nothing of it.
         let plain = serde_json::to_string(&Feature::default()).unwrap();
         assert!(!plain.contains("kind"));
+        assert_eq!(f.pull_of("r").map(|p| p.number), Some(12));
+        assert_eq!(f.pull_of("other"), None);
+        // A record of one from before: one alone, unnamed, its first
+        // repository's.
+        let mut old = serde_json::to_value(&f).unwrap();
+        let one = old["kind"]["pr-review"][0].clone();
+        old["kind"]["pr-review"] = one;
+        old["kind"]["pr-review"]["repo"] = serde_json::Value::Null;
+        old["kind"]["pr-review"]
+            .as_object_mut()
+            .unwrap()
+            .remove("repo");
+        let read: Feature = serde_json::from_value(old).unwrap();
+        assert_eq!(read.pulls().len(), 1);
+        assert_eq!(read.pull_of("r").map(|p| p.number), Some(12));
     }
 }

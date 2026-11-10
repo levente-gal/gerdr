@@ -444,12 +444,13 @@ pub fn probe(feature: &Feature, modes: &Modes) -> Probe {
     let reading = patch::read(feature);
     let branch = feature.branch();
     // The user's own pull request's branch is theirs to push from anywhere.
-    let guards = match feature.pull().is_some_and(super::pr::PullRef::own) {
-        true => BTreeMap::new(),
-        false => (feature.touched())
-            .map(|repo| (repo.key(), guard_of(repo, &branch)))
-            .collect(),
-    };
+    let guards = (feature.touched())
+        .filter(|repo| !feature.pull_of(&repo.key()).is_some_and(super::pr::PullRef::own))
+        .map(|repo| {
+            let branch = repo.branch.clone().unwrap_or_else(|| branch.clone());
+            (repo.key(), guard_of(repo, &branch))
+        })
+        .collect();
     // A pull request's review submits it instead (`pr_post`).
     let ship = (feature.ships() && feature.pull().is_none()).then(|| check(feature, &reading, modes));
     let merged =

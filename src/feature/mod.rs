@@ -710,9 +710,11 @@ pub struct Event {
 pub enum Kind {
     #[default]
     Feature,
-    /// A pull request on GitHub, its own or someone else's: born with the
-    /// stages up to Build marked, as its author built it.
-    PrReview(Box<pr::PullRef>),
+    /// Pull requests on GitHub, one per repository, the user's own or
+    /// someone else's: born with the stages up to Build marked, as their
+    /// authors built them. A record of one keeps reading as one.
+    #[serde(deserialize_with = "pr::one_or_many")]
+    PrReview(Vec<pr::PullRef>),
 }
 
 impl Kind {
@@ -1303,20 +1305,43 @@ impl Feature {
     }
 
     /// Its branch name: `feature/<slug>`; a pull request's review has the
-    /// one its worktree is on (`pr::PullRef::branch`).
+    /// first pull request's (`pr::PullRef::branch`): each repository's is
+    /// its own `Repo::branch`.
     pub fn branch(&self) -> String {
-        match &self.kind {
-            Kind::Feature => format!("feature/{}", self.slug),
-            Kind::PrReview(pull) => pull.branch(),
+        match self.pull() {
+            None => format!("feature/{}", self.slug),
+            Some(pull) => pull.branch(),
         }
     }
 
-    /// The pull request it reviews, if that is what it is.
-    pub fn pull(&self) -> Option<&pr::PullRef> {
+    /// The pull requests it reviews, one per repository, in the order they
+    /// were picked; none for a feature.
+    pub fn pulls(&self) -> &[pr::PullRef] {
         match &self.kind {
-            Kind::Feature => None,
-            Kind::PrReview(pull) => Some(pull.as_ref()),
+            Kind::Feature => &[],
+            Kind::PrReview(pulls) => pulls,
         }
+    }
+
+    /// The same, to change.
+    pub fn pulls_mut(&mut self) -> &mut [pr::PullRef] {
+        match &mut self.kind {
+            Kind::Feature => &mut [],
+            Kind::PrReview(pulls) => pulls,
+        }
+    }
+
+    /// The first pull request it reviews, if that is what it is: what goes
+    /// for the review as a whole.
+    pub fn pull(&self) -> Option<&pr::PullRef> {
+        self.pulls().first()
+    }
+
+    /// The pull request of repository `key` (`Repo::key`), if it has one.
+    pub fn pull_of(&self, key: &str) -> Option<&pr::PullRef> {
+        // A record of one from before has it unnamed: its first repository's.
+        let first = self.repos.first().is_some_and(|r| r.key() == key);
+        (self.pulls().iter()).find(|p| p.repo == key || (p.repo.is_empty() && first))
     }
 
     /// The stages it goes through, in order: all of them for a feature;

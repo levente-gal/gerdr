@@ -352,7 +352,7 @@ pub(crate) struct Busy {
 pub(crate) enum Done {
     /// How the pull requests under review stand on GitHub (see `pr_watch`).
     PrRead {
-        reads: Vec<(String, String, Result<feature::pr::Remote, String>)>,
+        reads: Vec<(String, String, u64, Result<feature::pr::Remote, String>)>,
     },
     /// A pull request's review was submitted to GitHub, or not.
     ReviewPosted {
@@ -25959,7 +25959,8 @@ mod pr_page_tests {
     /// A review of pull request 12 at Verify, its worktree at `abc1234…`.
     fn review() -> Feature {
         let mut f = feature("pr-12", vec![repo("api", true)], 4);
-        f.kind = Kind::PrReview(Box::new(PullRef {
+        f.kind = Kind::PrReview(vec![PullRef {
+            repo: "api".into(),
             host: "github.com".into(),
             slug: "o/api".into(),
             number: 12,
@@ -25969,12 +25970,12 @@ mod pr_page_tests {
             head_ref: "fix".into(),
             head_sha: "abc1234567".into(),
             ..PullRef::default()
-        }));
+        }]);
         f
     }
 
     fn github(f: &mut Feature, head: &str, state: &str) {
-        let Kind::PrReview(pull) = &mut f.kind else {
+        let Some(pull) = f.pulls_mut().first_mut() else {
             unreachable!()
         };
         pull.take_remote(Remote {
@@ -26064,7 +26065,7 @@ mod pr_page_tests {
     }
 
     fn with_checks(f: &mut Feature, states: &[crate::ci::CiState]) {
-        let Kind::PrReview(pull) = &mut f.kind else {
+        let Some(pull) = f.pulls_mut().first_mut() else {
             unreachable!()
         };
         let checks = (states.iter().enumerate())
@@ -26171,7 +26172,7 @@ mod pr_page_tests {
         let wanted = items.iter().find(|i| i.id() == "r1-2").copied().unwrap();
         assert_eq!(item_card(wanted, false, &[], true).state, "to comment");
         // Its own: fixed by an agent, as a feature's.
-        let Kind::PrReview(pull) = &mut f.kind else { unreachable!() };
+        let Some(pull) = f.pulls_mut().first_mut() else { unreachable!() };
         pull.mine = true;
         assert!(!f.posts_review());
     }
@@ -26200,7 +26201,7 @@ mod pr_page_tests {
         assert_eq!(done.1, PanelOutcome::Manual(Outcome::MarkPassed));
         assert_eq!(done.0.style, ButtonStyle::Primary);
         // Its own goes to Build to fix, as a feature's does.
-        let Kind::PrReview(pull) = &mut f.kind else { unreachable!() };
+        let Some(pull) = f.pulls_mut().first_mut() else { unreachable!() };
         pull.mine = true;
         let labels: Vec<String> = (page_actions(&f, Stage::ManualTest, ctx).into_iter())
             .map(|(b, _)| b.label)
@@ -26280,7 +26281,7 @@ mod pr_page_tests {
     #[test]
     fn ones_own_is_pushed_then_finished() {
         let mut f = at_ship();
-        let Kind::PrReview(pull) = &mut f.kind else { unreachable!() };
+        let Some(pull) = f.pulls_mut().first_mut() else { unreachable!() };
         pull.mine = true;
         let moved = RowCtx::default();
         assert_eq!(page_enter(&f, Stage::Ship, moved), Some(PanelOutcome::PushPr));
@@ -26314,7 +26315,7 @@ mod pr_page_tests {
         with_pull_actions(&mut actions, &f, Stage::Verify, head);
         assert!(actions.iter().any(|(b, o)| b.label == FIX_HERE && *o == PanelOutcome::FixHere));
         assert!(f.posts_review());
-        let Kind::PrReview(pull) = &mut f.kind else { unreachable!() };
+        let Some(pull) = f.pulls_mut().first_mut() else { unreachable!() };
         pull.fix_here = true;
         pull.head_repo = "o/api".into();
         assert!(!f.posts_review());

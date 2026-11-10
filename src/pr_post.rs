@@ -314,7 +314,8 @@ impl Gerdr {
         let Some(f) = self.feature_mut(project, slug) else {
             return;
         };
-        let feature::Kind::PrReview(pull) = &mut f.kind else {
+        // shortcut: the first pull request only, until increment B pushes each.
+        let Some(pull) = f.pulls_mut().first_mut() else {
             return;
         };
         let base = pull.base_ref.clone();
@@ -418,14 +419,17 @@ impl Gerdr {
         let Some(f) = self.feature_mut(project, slug) else {
             return;
         };
-        let feature::Kind::PrReview(pull) = &mut f.kind else {
+        let on = head_repo.is_some();
+        // The switch is the review's: every pull request of someone else's.
+        for pull in f.pulls_mut().iter_mut().filter(|p| !p.own()) {
+            pull.fix_here = on;
+            if let Some(head_repo) = &head_repo {
+                pull.head_repo = head_repo.clone();
+            }
+        }
+        let Some(pull) = f.pull() else {
             return;
         };
-        let on = head_repo.is_some();
-        pull.fix_here = on;
-        if let Some(head_repo) = head_repo {
-            pull.head_repo = head_repo;
-        }
         let (number, head_ref) = (pull.number, pull.head_ref.clone());
         if let Some(review) = f.review.as_mut() {
             review.posts = !on;

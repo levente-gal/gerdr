@@ -453,7 +453,7 @@ pub fn link_more(
             Err(err) => {
                 let mut failed = Vec::new();
                 for repo in &repos {
-                    take_down_repo(&feature.branch(), repo, true, &mut failed, feature.pull());
+                    take_down_repo(&feature.branch(), repo, true, &mut failed, feature.pull_of(&repo.key()));
                 }
                 if !failed.is_empty() {
                     tracing::warn!("taking repositories out again: {}", failed.join("; "));
@@ -514,7 +514,7 @@ fn undo_created(slug: &str, created: &Created) {
         &created.dir,
         true,
         &mut failed,
-        None,
+        &[],
     );
     if !failed.is_empty() {
         tracing::warn!(
@@ -1282,7 +1282,7 @@ fn guard_worktree(repo: &Repo, branch: &str) {
 /// spans. Empty when nothing is lost.
 pub fn losses(feature: &Feature) -> Vec<String> {
     (feature.repos.iter())
-        .filter_map(|r| loss(r, feature.pull()))
+        .filter_map(|r| loss(r, feature.pull_of(&r.key())))
         .collect()
 }
 
@@ -1388,7 +1388,7 @@ pub fn remove(feature: &Feature, force: bool) -> Result<(), String> {
     let mut failed = Vec::new();
     for (project, dir) in feature.folders() {
         let repos: Vec<&Repo> = feature.repos_of(project).collect();
-        take_down(&feature.branch(), &repos, dir, force, &mut failed, feature.pull());
+        take_down(&feature.branch(), &repos, dir, force, &mut failed, feature.pulls());
     }
     if failed.is_empty() {
         Ok(())
@@ -1581,17 +1581,17 @@ pub fn removal_losses(feature: &Feature, keys: &[String]) -> Result<Vec<String>,
         if !repo.touched || !repo.worktree.is_dir() {
             continue;
         }
-        let n = commits_of(repo, feature.pull()).map_err(|err| format!("{}: {err}", repo.key()))?;
+        let n = commits_of(repo, feature.pull_of(&repo.key())).map_err(|err| format!("{}: {err}", repo.key()))?;
         if n > 0 {
             return Err(format!(
                 "{} has {n} {} not in {}",
                 repo.key(),
                 plural(n, "commit"),
-                kept_in(repo, feature.pull())
+                kept_in(repo, feature.pull_of(&repo.key()))
             ));
         }
     }
-    Ok(repos.into_iter().filter_map(|r| loss(r, feature.pull())).collect())
+    Ok(repos.into_iter().filter_map(|r| loss(r, feature.pull_of(&r.key()))).collect())
 }
 
 /// Take repositories `keys` out of `feature`: their worktrees and branches
@@ -1609,11 +1609,11 @@ pub fn remove_repos(
     for key in keys {
         let result = match feature.repo(key) {
             None => Err(format!("{} has no repository {key}", feature.title)),
-            Some(repo) => match loss(repo, feature.pull()).filter(|_| !force) {
+            Some(repo) => match loss(repo, feature.pull_of(&repo.key())).filter(|_| !force) {
                 Some(lost) => Err(format!("it would lose work, so it was left: {lost}")),
                 None => {
                     let mut failed = Vec::new();
-                    take_down_repo(&branch, repo, force, &mut failed, feature.pull());
+                    take_down_repo(&branch, repo, force, &mut failed, feature.pull_of(&repo.key()));
                     if failed.is_empty() {
                         Ok(())
                     } else {
@@ -1655,10 +1655,11 @@ fn take_down(
     dir: &Path,
     force: bool,
     failed: &mut Vec<String>,
-    pull: Option<&PullRef>,
+    pulls: &[PullRef],
 ) {
     let mut left = false;
     for repo in repos {
+        let pull = pulls.iter().find(|p| p.repo == repo.key() || p.repo.is_empty());
         left |= !take_down_repo(branch, repo, force, failed, pull);
     }
     if !left {
@@ -1678,6 +1679,8 @@ fn take_down_repo(
     failed: &mut Vec<String>,
     pull: Option<&PullRef>,
 ) -> bool {
+    // Each repository is on its own: a review's pull requests' differ.
+    let branch = repo.branch.as_deref().unwrap_or(branch);
     let name = repo.key();
     if repo.worktree.symlink_metadata().is_ok() {
         let p = repo.worktree.to_string_lossy();
