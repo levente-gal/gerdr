@@ -14834,6 +14834,15 @@ fn ship_base_line(feature: &Feature, probe: Option<&Probe>, key: &str) -> Option
                 "The resolution's plan is written: review it",
                 CheckTone::Ready,
             ),
+            // Told once and still not through: the user's to look at.
+            (true, _) if r.nudged => line(
+                format!("{who} was nudged to write its plan: see its tab if none comes"),
+                CheckTone::Blocker,
+            ),
+            (false, _) if r.nudged => line(
+                format!("{who} was nudged to commit the merge: see its tab if it doesn't"),
+                CheckTone::Blocker,
+            ),
             (true, _) => line(
                 format!("{who} plans how to resolve {files}\u{2026}"),
                 CheckTone::Note,
@@ -25679,6 +25688,7 @@ pub(crate) mod tests {
             pane: None,
             n: 1,
             planning: false,
+            nudged: false,
         });
         let keys = ship_keys(&f, ctx, Some(&p), None);
         assert!(
