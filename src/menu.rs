@@ -220,6 +220,15 @@ pub enum MenuAction {
     /// Write feature `slug`'s final plan from its decided suggestions, or go
     /// on with the plan as it is (see `Gerdr::write_final_plan`).
     WriteFinalPlan(String, String),
+    /// Make branch `to.0`, at commit `to.1`, the base of repository `repo` of
+    /// feature `slug`; `undoing` when it puts back the one it had.
+    SetFeatureBase {
+        project: String,
+        slug: String,
+        repo: String,
+        to: (String, String),
+        undoing: bool,
+    },
     /// Undo deleting an item of the user's own from an AI review: put it back
     /// at index `at`.
     RestoreOwnFinding {
@@ -631,6 +640,13 @@ impl Gerdr {
                 }
             },
             MenuAction::WriteFinalPlan(project, slug) => self.write_final_plan(&project, &slug),
+            MenuAction::SetFeatureBase {
+                project,
+                slug,
+                repo,
+                to,
+                undoing,
+            } => self.set_feature_base(&project, &slug, &repo, to, undoing),
             MenuAction::RestoreOwnFinding {
                 project,
                 slug,
