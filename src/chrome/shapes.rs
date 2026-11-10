@@ -548,3 +548,28 @@ pub(super) fn segment(x: f32, y: f32, ax: f32, ay: f32, bx: f32, by: f32) -> f32
 pub(super) fn coverage(d: f32) -> f32 {
     (0.5 - d).clamp(0.0, 1.0)
 }
+
+/// Signed distance to a triangle pointing up, `r` from its centre to a
+/// corner's side, centred on the origin: a high severity's mark.
+pub(super) fn triangle_up(x: f32, y: f32, r: f32) -> f32 {
+    let k = 3f32.sqrt();
+    // The screen's y goes down; the field's up.
+    let (mut px, mut py) = (x.abs() - r, -y + r / k);
+    if px + k * py > 0.0 {
+        (px, py) = ((px - k * py) / 2.0, (-k * px - py) / 2.0);
+    }
+    px -= px.clamp(-2.0 * r, 0.0);
+    -px.hypot(py) * py.signum()
+}
+
+/// Signed distance to a diamond `r` from its centre to a corner, centred on
+/// the origin: a medium severity's mark.
+pub(super) fn diamond(x: f32, y: f32, r: f32) -> f32 {
+    (x.abs() + y.abs() - r) / std::f32::consts::SQRT_2
+}
+
+/// Signed distance to a ring of radius `r`, `t` thick, centred on the
+/// origin: a low severity's mark.
+pub(super) fn ring(x: f32, y: f32, r: f32, t: f32) -> f32 {
+    (x.hypot(y) - r).abs() - t / 2.0
+}

@@ -77,8 +77,8 @@ use crate::machine_work::takes_a_place;
 use crate::manual_test::Row;
 pub(crate) use crate::review_cards::{
     CardId, CardKey, Item, ItemAct, ReviewCard, SUGGESTIONS_WRITING, can_decide, card_key,
-    item_buttons, item_card, item_hints, items, items_count, next_open_card, note_actions,
-    offers_fix_all, outcome_note, review_cards, why_not_decide,
+    card_tag, item_buttons, item_card, item_hints, items, items_count, next_open_card,
+    note_actions, offers_fix_all, outcome_note, review_cards, why_not_decide,
 };
 use crate::{
     Gerdr,
@@ -9977,6 +9977,23 @@ impl Gerdr {
                     at => Some(at.outcome()),
                 })
             }
+            // A summary's pill: its tag's first card takes the keys, in view.
+            FeatureTabHit::Jump(tag) => {
+                let key = (feature.project.clone(), feature.slug.clone());
+                let probe = (self.features.probes.get(&key)).and_then(|p| p.last.as_ref());
+                let notes = notes_of(probe).to_vec();
+                if let Some(panel) = self.features.panel.as_mut() {
+                    let stage = panel.page_stage(&feature);
+                    let cards = review_cards(&feature, stage, &notes);
+                    if let Some(i) = cards.iter().position(|c| card_tag(*c) == tag) {
+                        panel.focus = TabArea::Findings;
+                        panel.finding = i;
+                    }
+                }
+                self.sync_feature_page();
+                self.reveal_feature_finding();
+                None
+            }
             FeatureTabHit::Finding(i) => {
                 let key = (feature.project.clone(), feature.slug.clone());
                 let probe = (self.features.probes.get(&key)).and_then(|p| p.last.as_ref());
@@ -10309,6 +10326,22 @@ impl Gerdr {
             FeatureTabHit::Button(i) if layout.compact => {
                 let label = header_label(view.remove, i)?;
                 Some(Tooltip::new(label, *layout.buttons.get(i)?))
+            }
+            FeatureTabHit::Jump(tag) => {
+                let stage = self
+                    .features
+                    .panel
+                    .as_ref()?
+                    .page_stage(self.panel_feature()?);
+                let w = words(stage_items(stage));
+                let text = match tag.word()? {
+                    "yours" => format!("Go to your first {}", w.item),
+                    word => format!("Go to the first {word} {}", w.item),
+                };
+                Some(Tooltip::new(
+                    &text,
+                    smithay::utils::Rectangle::new(pos.to_i32_round(), (1, 1).into()),
+                ))
             }
             FeatureTabHit::Fold(i) => {
                 let open = self.panel_feature().map(|f| self.criterion_rows(f))?.get(i)?.open;
@@ -16566,6 +16599,21 @@ pub(crate) mod tests {
         );
     }
 
+    /// A review page's summary as one line: "Findings · 2 to decide", with
+    /// its notes.
+    fn summary_line(sections: &[PageSection]) -> Option<(String, Vec<CheckLine>)> {
+        sections.iter().find_map(|s| match s {
+            PageSection::Review(r) => {
+                let label = match r.words.is_empty() {
+                    true => r.label.clone(),
+                    false => format!("{} \u{b7} {}", r.label, r.words),
+                };
+                Some((label, r.notes.clone()))
+            }
+            _ => None,
+        })
+    }
+
     fn page_outcomes(f: &Feature, stage: Stage) -> Vec<PanelOutcome> {
         let actions = page_actions(f, stage, RowCtx::default());
         actions.into_iter().map(|(_, o)| o).collect()
@@ -16622,9 +16670,10 @@ pub(crate) mod tests {
         );
         assert_eq!(rail_node(&f, stage, &state, 2_000).line, "2 to decide");
         let page = stage_page(&f, stage, &state, &[], 2_000);
+        assert!(matches!(page.sections[0], PageSection::Review(_)));
         assert_eq!(
-            page.sections[0],
-            lines("Suggestions \u{b7} 2 to decide", Vec::new())
+            summary_line(&page.sections),
+            Some(("Suggestions \u{b7} 2 to decide".to_owned(), Vec::new()))
         );
         let titles: Vec<&str> = (page.sections.iter())
             .filter_map(|s| match s {
@@ -16762,17 +16811,60 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn review_cards_go_under_a_heading_per_tag_the_summary_counts() {
+        let f = suggesting();
+        let panel = on_plan_review(&f);
+        let view = tab_view(&panel, &f, &["p".to_owned()], &PanelState::default(), 2_000);
+        let at = (view.page.sections.iter())
+            .position(|s| matches!(s, PageSection::Review(_)))
+            .expect("the summary");
+        let PageSection::Review(summary) = &view.page.sections[at] else {
+            unreachable!()
+        };
+        assert_eq!(
+            summary.counts,
+            [
+                (FindingTag::Yours, 1),
+                (FindingTag::High, 1),
+                (FindingTag::Low, 1)
+            ]
+        );
+        assert_eq!((summary.decided, summary.total), (1, 3));
+        // Under it: a heading, then its cards, for each tag in turn.
+        let shape: Vec<String> = (view.page.sections[at + 1..].iter())
+            .map(|s| match s {
+                PageSection::Heading(label) => label.clone(),
+                PageSection::Finding(c) => format!("card {:?}", c.tag),
+                _ => "other".into(),
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                "yours \u{b7} 1",
+                "card Yours",
+                "high \u{b7} 1",
+                "card High",
+                "low \u{b7} 1",
+                "card Low"
+            ]
+        );
+        // Accept all open goes with the summary, not the title.
+        let want = (view.page.buttons.iter())
+            .position(|b| b.label == "Accept all open")
+            .expect("accept all");
+        assert_eq!(summary.buttons, [want]);
+    }
+
+    #[test]
     fn plan_reviews_suggestions_show_as_cards_as_ai_reviews_findings_do() {
         use crate::feature::plan_review::{self, Decision};
         let mut f = suggesting();
         let panel = on_plan_review(&f);
         let view = tab_view(&panel, &f, &["p".to_owned()], &PanelState::default(), 2_000);
-        let heading = (view.page.sections.iter()).find_map(|s| match s {
-            PageSection::Lines { label, .. } if label.starts_with("Suggestions") => Some(label),
-            _ => None,
-        });
+        let heading = summary_line(&view.page.sections).map(|(label, _)| label);
         assert_eq!(
-            heading.map(String::as_str),
+            heading.as_deref(),
             Some("Suggestions \u{b7} 2 to decide \u{b7} 1 accepted")
         );
         let cards = cards_of(&view);
@@ -16948,12 +17040,9 @@ pub(crate) mod tests {
         );
         // The page says so, and how to go back.
         let view = tab_view(&panel, &f, &["p".to_owned()], &PanelState::default(), 2_000);
-        let said = (view.page.sections.iter()).any(|s| match s {
-            PageSection::Lines { label, lines } => {
-                label.starts_with("Suggestions")
-                    && lines.iter().any(|l| l.text.contains("Change decisions"))
-            }
-            _ => false,
+        let said = summary_line(&view.page.sections).is_some_and(|(label, lines)| {
+            label.starts_with("Suggestions")
+                && lines.iter().any(|l| l.text.contains("Change decisions"))
         });
         assert!(said, "{:?}", view.page.sections);
         // A comment field left open doesn't show on a card it can't change.
@@ -19147,11 +19236,10 @@ pub(crate) mod tests {
                 &state,
                 &actions,
             );
-            let why = sections.iter().find_map(|s| match s {
-                PageSection::Lines { lines, .. } => (lines.iter())
+            let why = summary_line(&sections).and_then(|(_, lines)| {
+                (lines.iter())
                     .find(|l| l.text.starts_with("A plan comes first"))
-                    .map(|l| l.text.clone()),
-                _ => None,
+                    .map(|l| l.text.clone())
             });
             assert!(why.is_some(), "{sections:?}");
         }
@@ -19318,9 +19406,14 @@ pub(crate) mod tests {
             own.contains(&"Review in diff") && own.contains(&"Add comment\u{2026}"),
             "{own:?}"
         );
-        assert!(view.page.sections.iter().any(|s| matches!(s,
-            PageSection::Lines { label, .. }
-                if label == "Findings \u{b7} 1 to decide \u{b7} 1 to fix \u{b7} 1 sent to Build \u{b7} 1 fixed \u{b7} 1 dismissed")));
+        assert_eq!(
+            summary_line(&view.page.sections)
+                .map(|(label, _)| label)
+                .as_deref(),
+            Some(
+                "Findings \u{b7} 1 to decide \u{b7} 1 to fix \u{b7} 1 sent to Build \u{b7} 1 fixed \u{b7} 1 dismissed"
+            )
+        );
     }
 
     #[test]
@@ -19466,12 +19559,9 @@ pub(crate) mod tests {
         // Only to look at, and it says why.
         assert_eq!(labels_of(&view, cards[0]), ["Show in diff"]);
         assert_eq!(labels_of(&view, cards[1]), ["Show in diff"]);
-        let said = (view.page.sections.iter()).any(|s| match s {
-            PageSection::Lines { label, lines } => {
-                label.starts_with("Findings")
-                    && lines.iter().any(|l| l.text.contains("code has changed"))
-            }
-            _ => false,
+        let said = summary_line(&view.page.sections).is_some_and(|(label, lines)| {
+            label.starts_with("Findings")
+                && lines.iter().any(|l| l.text.contains("code has changed"))
         });
         assert!(said, "{:?}", view.page.sections);
     }
@@ -19488,12 +19578,8 @@ pub(crate) mod tests {
         let cards = cards_of(&view);
         assert_eq!(cards.len(), 2);
         assert_eq!(labels_of(&view, cards[0]), ["Show in diff"]);
-        let said = (view.page.sections.iter()).any(|s| match s {
-            PageSection::Lines { lines, .. } => {
-                lines.iter().any(|l| l.text.contains("hasn't finished"))
-            }
-            _ => false,
-        });
+        let said = summary_line(&view.page.sections)
+            .is_some_and(|(_, lines)| lines.iter().any(|l| l.text.contains("hasn't finished")));
         assert!(said, "{:?}", view.page.sections);
     }
 
@@ -19633,13 +19719,7 @@ pub(crate) mod tests {
         f.marks.retain(|s, _| *s < Stage::Plan);
         assert_eq!(stage_mark(&f, stage), StageMark::Later);
         let page = stage_page(&f, stage, &PanelState::default(), &[], 1_120);
-        let label = (page.sections.iter()).find_map(|s| match s {
-            PageSection::Lines { label, lines } if label.starts_with("Suggestions") => {
-                Some((label.clone(), lines.clone()))
-            }
-            _ => None,
-        });
-        let (label, lines) = label.expect("the suggestions' line");
+        let (label, lines) = summary_line(&page.sections).expect("the suggestions' line");
         assert_eq!(label, "Suggestions \u{b7} 1 to decide");
         assert_eq!(
             lines[0].text,

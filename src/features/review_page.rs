@@ -12,6 +12,7 @@
 //! rounds has them (`ROUND_CARD_STAGES`).
 
 use super::*;
+use crate::{chrome::ReviewSummary, feature::review_items::Standing, review_cards::card_tag};
 
 /// Whether `stage` is a review stage whose page this lays out.
 pub(super) fn is_review_stage(stage: Stage) -> bool {
@@ -91,19 +92,49 @@ fn item_sections(
     if cards.is_empty() {
         return vec![lines(w.heading, review_empty(feature, stage))];
     }
-    // Only comments of the user's left: no item to count.
-    let label = match items_count(feature, stage) {
-        count if count.is_empty() => w.heading.to_owned(),
-        count => format!("{} \u{b7} {count}", w.heading),
+    let w_items = items(feature, stage);
+    let decided = (w_items.iter())
+        .filter(|i| i.standing() != Standing::Open)
+        .count();
+    let tags: Vec<FindingTag> = cards.iter().map(|c| card_tag(*c)).collect();
+    let mut counts: Vec<(FindingTag, usize)> = Vec::new();
+    for tag in &tags {
+        match counts.last_mut() {
+            Some((last, n)) if last == tag => *n += 1,
+            _ => counts.push((*tag, 1)),
+        }
+    }
+    let want_all = want_all_outcome(stage);
+    let summary = ReviewSummary {
+        label: w.heading.to_owned(),
+        counts: counts.clone(),
+        decided,
+        total: w_items.len(),
+        words: items_count(feature, stage),
+        notes: review_notes(feature, stage, mark, state),
+        buttons: (actions.iter().position(|(_, o)| *o == want_all))
+            .into_iter()
+            .collect(),
     };
-    let mut sections = vec![lines(&label, review_notes(feature, stage, mark, state))];
+    let mut sections = vec![PageSection::Review(summary)];
     let multi = feature.many_repos();
-    sections.extend(cards.into_iter().map(|card| {
-        PageSection::Finding(match card {
+    // A heading over each tag's cards, as the summary counts them.
+    let mut last = None;
+    for (card, tag) in cards.into_iter().zip(tags) {
+        if last != Some(tag) {
+            let n = counts
+                .iter()
+                .find(|(t, _)| *t == tag)
+                .map_or(0, |(_, n)| *n);
+            let word = tag.word().unwrap_or_default();
+            sections.push(PageSection::Heading(format!("{word} \u{b7} {n}")));
+            last = Some(tag);
+        }
+        sections.push(PageSection::Finding(match card {
             ReviewCard::Item(item) => item_card(item, multi, actions),
             ReviewCard::DiffNote(c) => note_card(c, multi, actions),
-        })
-    }));
+        }));
+    }
     sections
 }
 

@@ -895,6 +895,32 @@ pub enum PageSection {
         /// The page's buttons it holds, at its caption's right.
         buttons: Vec<usize>,
     },
+    /// How a review's items stand, over their cards.
+    Review(ReviewSummary),
+    /// The caption over a review's cards of one tag: "high · 2". The cards
+    /// go right under it.
+    Heading(String),
+}
+
+/// How AI review's findings or Plan review's suggestions stand, over their
+/// cards: their name with the page's buttons for all of them at its right,
+/// a pill for each severity that has any (a press goes to its first card),
+/// a bar of how many are decided, then in words, and why they can't be
+/// decided now if they can't.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReviewSummary {
+    /// "Findings".
+    pub label: String,
+    /// How many cards of each tag, those with any, in the cards' order.
+    pub counts: Vec<(FindingTag, usize)>,
+    /// How many items are decided, of how many.
+    pub decided: usize,
+    pub total: usize,
+    /// "4 to decide · 1 to fix".
+    pub words: String,
+    pub notes: Vec<CheckLine>,
+    /// The indices in `StagePage::buttons` of the buttons it holds.
+    pub buttons: Vec<usize>,
 }
 
 /// A fix round as the page of the stage that asked lists it: how it stands,
@@ -972,6 +998,75 @@ impl FindingTag {
             Self::Queued | Self::NotRun => Some(Dot::Idle),
             Self::Skipped => Some(Dot::Unknown),
         }
+    }
+}
+
+impl FindingTag {
+    /// The word on its pill: a finding's severity, or the user's own. A
+    /// check has its dot instead.
+    pub fn word(self) -> Option<&'static str> {
+        match self {
+            Self::High => Some("high"),
+            Self::Medium => Some("medium"),
+            Self::Low => Some("low"),
+            Self::Yours => Some("yours"),
+            _ => None,
+        }
+    }
+
+    /// Whether its pill has a mark left of its word: a severity's, so it
+    /// doesn't go by colour alone.
+    fn marked(self) -> bool {
+        matches!(self, Self::High | Self::Medium | Self::Low)
+    }
+}
+
+/// The room inside a tag pill either side of what it says.
+const PILL_PAD: i32 = 7;
+/// How wide a pill's mark is, and the room between it and the word.
+const PILL_MARK: i32 = 9;
+const PILL_MARK_GAP: i32 = 4;
+/// The room between a pill and the text right of it.
+const PILL_GAP: i32 = 8;
+
+/// How wide the pill of `tag` saying `text` is.
+pub(super) fn pill_width(tag: FindingTag, text: &str) -> i32 {
+    let size = Font::Small.size();
+    let word = measure_bold(text, size).unwrap_or_else(|| width_of(text, size) * 9.0 / 8.0);
+    let mark = if tag.marked() {
+        PILL_MARK + PILL_MARK_GAP
+    } else {
+        0
+    };
+    2 * PILL_PAD + mark + word.ceil() as i32
+}
+
+/// The ground and the ink of `tag`'s pill: high and medium filled with
+/// their colour, low on the element colour, the user's own tinted with the
+/// accent; any of them `faded` muted on the element colour.
+pub(super) fn pill_inks(tag: FindingTag, faded: bool, p: &Palette) -> (Rgb, Rgb) {
+    if faded {
+        return (p.element, p.muted);
+    }
+    match tag {
+        FindingTag::High => (p.error, super::sidebar::ink_on(p.error, p)),
+        FindingTag::Medium => (p.warning, super::sidebar::ink_on(p.warning, p)),
+        FindingTag::Yours => (mix(p.background, p.accent, PILL_TINT), p.text),
+        _ => (p.element, p.text),
+    }
+}
+
+/// How much of the accent tints the pill of an item of the user's own.
+const PILL_TINT: f32 = 0.22;
+
+/// Signed distance to the mark on `tag`'s pill, centred on the origin, `s`
+/// pixels per logical pixel: a triangle for high, a diamond for medium, a
+/// ring for low.
+fn pill_mark(tag: FindingTag, x: f32, y: f32, s: f32) -> f32 {
+    match tag {
+        FindingTag::High => super::shapes::triangle_up(x, y + 0.5 * s, 4.0 * s),
+        FindingTag::Medium => super::shapes::diamond(x, y, 4.2 * s),
+        _ => super::shapes::ring(x, y, 3.2 * s, 1.5 * s),
     }
 }
 
@@ -1230,6 +1325,8 @@ pub enum FeatureTabHit {
     Finding(usize),
     /// The chevron of a criterion's row, indexed as `Finding`.
     Fold(usize),
+    /// A review summary's pill: go to the first card with its tag.
+    Jump(FindingTag),
     /// A part of the criteria's search, on the line under the rail.
     Search(super::SearchPart),
     Hint(usize),
@@ -1434,6 +1531,16 @@ impl FeatureTabLayout {
                     .or_else(|| {
                         let on = (self.ship.rows.iter()).find(|(_, r)| r.contains(at))?;
                         Some(FeatureTabHit::ShipRow(on.0))
+                    })
+                    .or_else(|| {
+                        (self.pieces[TabColumn::Page as usize].iter()).find_map(|(r, piece)| {
+                            match piece {
+                                Piece::TagPill {
+                                    tag, jump: true, ..
+                                } if r.contains(at) => Some(FeatureTabHit::Jump(*tag)),
+                                _ => None,
+                            }
+                        })
                     })
                     .or_else(|| {
                         let k = self.pieces[TabColumn::Page as usize].iter().find_map(
@@ -1755,6 +1862,8 @@ const TITLE_LINE: i32 = BODY_LINE + 6;
 const TAIL_LINE: i32 = 18;
 /// The gap between the parts of a page.
 const PAGE_GAP: i32 = 16;
+/// The gap between a review's heading and the card under it.
+const HEADING_GAP: i32 = 2;
 /// An agent card's inner room and its header's height.
 const AGENT_PAD: i32 = 10;
 /// The room between the parts of a finding's card.
@@ -1901,7 +2010,6 @@ pub(super) enum Ink {
     Text,
     Muted,
     Error,
-    Warning,
     Accent,
     Tone(CheckTone),
 }
@@ -1912,7 +2020,6 @@ impl Ink {
             Self::Text => p.text,
             Self::Muted => p.muted,
             Self::Error => p.error,
-            Self::Warning => p.warning,
             Self::Accent => p.accent,
             Self::Tone(tone) => tone.color(p),
         }
@@ -1924,6 +2031,16 @@ impl Ink {
 pub(super) enum Piece {
     /// A section's uppercase label.
     Caption(String),
+    /// The ground under the fix a finding's card asks for.
+    FixGround,
+    /// A finding's severity, or the user's own, as a pill: `text` says it.
+    TagPill {
+        tag: FindingTag,
+        faded: bool,
+        text: String,
+        /// A review summary's: a press goes to the first card with its tag.
+        jump: bool,
+    },
     /// A list of milestones' or fixes' uppercase label, with the buttons of
     /// its section `k` at its right.
     GroupCaption(usize, String),
@@ -2422,6 +2539,100 @@ impl Stack {
         }
     }
 
+    /// Review summary `k`: its caption with its buttons at the right, a
+    /// pill per tag in rows, the bar of how many are decided, its words and
+    /// its notes.
+    fn review_summary(
+        &mut self,
+        k: usize,
+        summary: &ReviewSummary,
+        page: &StagePage,
+        buttons: &mut [Option<Rect>],
+    ) {
+        let caption = self.put(
+            CAPTION,
+            Piece::GroupCaption(k, summary.label.to_uppercase()),
+        );
+        let mut bx = caption.loc.x + caption.size.w;
+        let by = caption.loc.y + (CAPTION - ROW_BUTTON) / 2;
+        for &b in summary
+            .buttons
+            .iter()
+            .rev()
+            .filter(|b| **b < page.buttons.len())
+        {
+            let w = button_width(&page.buttons[b].label);
+            bx -= w;
+            buttons[b] = Some(Rectangle::new((bx, by).into(), (w, ROW_BUTTON).into()));
+            bx -= QUIT_BUTTON_GAP;
+        }
+        self.y = self.y.max(by + ROW_BUTTON) + FINDING_GAP;
+        // The pills in rows, as wide as their words.
+        let (left, right) = (self.x, self.x + self.w);
+        let mut x = left;
+        for (tag, n) in &summary.counts {
+            let Some(word) = tag.word() else {
+                continue;
+            };
+            let text = format!("{n} {word}");
+            let w = pill_width(*tag, &text);
+            if x > left && x + w > right {
+                (x, self.y) = (left, self.y + TAIL_LINE + FINDING_GAP);
+            }
+            self.pieces.push((
+                Rectangle::new((x, self.y).into(), (w, TAIL_LINE).into()),
+                Piece::TagPill {
+                    tag: *tag,
+                    faded: false,
+                    text,
+                    jump: true,
+                },
+            ));
+            x += w + PILL_GAP;
+        }
+        if !summary.counts.is_empty() {
+            self.y += TAIL_LINE + FINDING_GAP;
+        }
+        if summary.total > 0 {
+            self.put(
+                PROGRESS,
+                Piece::Bar {
+                    done: summary.decided,
+                    total: summary.total,
+                },
+            );
+            self.y += FINDING_GAP;
+        }
+        if !summary.words.is_empty() {
+            self.text(&summary.words, Font::Small, Ink::Muted, SMALL_LINE);
+        }
+        for line in &summary.notes {
+            self.text(&line.text, Font::Body, Ink::Tone(line.tone), BODY_LINE);
+        }
+    }
+
+    /// The fix a card asks for, "Fix: …", on a ground of its own: its
+    /// label small over what it says.
+    fn fix_block(&mut self, fix: &str, ink: Ink) {
+        let at = self.pieces.len();
+        let (x, w, top) = (self.x, self.w, self.y);
+        self.x += COMMENT_PAD;
+        self.w = (w - 2 * COMMENT_PAD).max(1);
+        self.y += COMMENT_PAD / 2;
+        let (label, text) = match fix.split_once(": ") {
+            Some((label, text)) if !label.is_empty() && label.len() <= 16 => (Some(label), text),
+            _ => (None, fix),
+        };
+        if let Some(label) = label {
+            self.text(label, Font::Small, Ink::Muted, TAIL_LINE);
+        }
+        self.all_text(text, Font::Body, ink, false, BODY_LINE);
+        self.y += COMMENT_PAD / 2;
+        (self.x, self.w) = (x, w);
+        let ground = Rectangle::new((x, top).into(), (w, self.y - top).into());
+        self.pieces.insert(at, (ground, Piece::FixGround));
+    }
+
     /// Finding card `k`: its frame, its text, and `buttons`' places in it.
     fn finding(
         &mut self,
@@ -2460,53 +2671,49 @@ impl Stack {
             self.x = left + CHECK_DOT_ROOM;
             self.w = (width - CHECK_DOT_ROOM).max(1);
         }
+        // A finding's severity as a pill, its title right of it.
+        let (title_x, title_w) = (self.x, self.w);
+        if let Some(word) = card.tag.word() {
+            let pw = pill_width(card.tag, word);
+            self.pieces.push((
+                Rectangle::new(
+                    (self.x, self.y + (BODY_LINE - TAIL_LINE) / 2).into(),
+                    (pw, TAIL_LINE).into(),
+                ),
+                Piece::TagPill {
+                    tag: card.tag,
+                    faded: card.faded,
+                    text: word.to_owned(),
+                    jump: false,
+                },
+            ));
+            self.x += pw + PILL_GAP;
+            self.w = (self.w - pw - PILL_GAP).max(1);
+        }
         self.all_text(&card.title, Font::Body, body, true, BODY_LINE);
-        // A finding's tag in its colour, then the rest of the line muted.
-        let tag = match card.tag {
-            FindingTag::High => Some(("high", Ink::Error)),
-            FindingTag::Medium => Some(("medium", Ink::Warning)),
-            FindingTag::Low => Some(("low", Ink::Muted)),
-            FindingTag::Yours => Some(("yours", Ink::Accent)),
-            _ => None,
-        };
-        // What the user decided stands out from the rest of the line.
+        (self.x, self.w) = (title_x, title_w);
+        // What the user decided stands out from the rest of the line, muted.
         let marked = card.stripe == Some(CardStripe::ToFix) && !card.state.is_empty();
         let mut rest = Vec::new();
         rest.extend((!card.state.is_empty() && !marked).then(|| card.state.clone()));
         rest.push(card.place.clone());
         let mut rest = rest.join(" \u{b7} ");
-        let word = |this: &mut Self, text: &str, ink: Ink, bold: bool| {
-            let w = width_of(text, Font::Small.size()).ceil() as i32 + 1;
+        if marked {
+            let text = &card.state;
             // Bold runs wider than it measures.
-            let w = if bold { w * 9 / 8 } else { w };
-            this.pieces.push((
-                Rectangle::new((this.x, this.y).into(), (w, TAIL_LINE).into()),
+            let w = (width_of(text, Font::Small.size()).ceil() as i32 + 1) * 9 / 8;
+            self.pieces.push((
+                Rectangle::new((self.x, self.y).into(), (w, TAIL_LINE).into()),
                 Piece::Text {
-                    text: text.to_owned(),
+                    text: text.clone(),
                     font: Font::Small,
-                    ink,
-                    bold,
+                    ink: Ink::Accent,
+                    bold: true,
                 },
             ));
-            // Past the dot too, if it has one.
-            this.x += w;
-            this.w = (this.w - w).max(1);
-        };
-        if let Some((tag, ink)) = tag {
-            let ink = if card.faded { Ink::Muted } else { ink };
-            word(self, tag, ink, false);
+            self.x += w;
+            self.w = (self.w - w).max(1);
             rest = format!("\u{b7} {rest}");
-        }
-        if marked {
-            let text = match tag {
-                Some(_) => format!("\u{b7} {}", card.state),
-                None => card.state.clone(),
-            };
-            word(self, &text, Ink::Accent, true);
-            rest = match tag {
-                Some(_) => rest,
-                None => format!("\u{b7} {rest}"),
-            };
         }
         self.all_text(&rest, Font::Small, Ink::Muted, false, TAIL_LINE);
         (self.x, self.w) = (left, width);
@@ -2523,11 +2730,17 @@ impl Stack {
             }
             line(self, DOC_CODE_PAD / 2, "");
         }
-        for text in [&card.body, &card.fix, &card.note] {
-            if !text.is_empty() {
-                self.y += FINDING_GAP;
-                self.all_text(text, Font::Body, body, false, BODY_LINE);
-            }
+        if !card.body.is_empty() {
+            self.y += FINDING_GAP;
+            self.all_text(&card.body, Font::Body, body, false, BODY_LINE);
+        }
+        if !card.fix.is_empty() {
+            self.y += FINDING_GAP;
+            self.fix_block(&card.fix, body);
+        }
+        if !card.note.is_empty() {
+            self.y += FINDING_GAP;
+            self.all_text(&card.note, Font::Body, body, false, BODY_LINE);
         }
         if !card.comment.is_empty() {
             self.y += FINDING_GAP;
@@ -3190,26 +3403,19 @@ impl Stack {
             ));
             right -= QUIT_BUTTON_GAP;
         }
-        let tag = match card.tag {
-            FindingTag::High => Some("high"),
-            FindingTag::Medium => Some("medium"),
-            FindingTag::Low => Some("low"),
-            FindingTag::Yours => Some("yours"),
-            _ => None,
-        };
         let text_y = self.y + (line - TAIL_LINE) / 2;
-        if let Some(tag) = tag {
-            let w = width_of(tag, Font::Small.size()).ceil() as i32 + 1;
+        if let Some(word) = card.tag.word() {
+            let w = pill_width(card.tag, word);
             self.pieces.push((
                 Rectangle::new((left, text_y).into(), (w, TAIL_LINE).into()),
-                Piece::Text {
-                    text: tag.to_owned(),
-                    font: Font::Small,
-                    ink: Ink::Muted,
-                    bold: false,
+                Piece::TagPill {
+                    tag: card.tag,
+                    faded: card.faded,
+                    text: word.to_owned(),
+                    jump: false,
                 },
             ));
-            left += w + QUIT_BUTTON_GAP;
+            left += w + PILL_GAP;
         }
         let mut text = card.title.clone();
         if !card.state.is_empty() {
@@ -3642,6 +3848,7 @@ fn page_stack(
             PageSection::Round(card) => card.buttons.clone(),
             PageSection::ShipGroup(group) => group.buttons(),
             PageSection::Recap(card) => card.buttons.clone(),
+            PageSection::Review(summary) => summary.buttons.clone(),
             _ => Vec::new(),
         })
         .collect();
@@ -3700,8 +3907,14 @@ fn page_stack(
         if matches!(section, PageSection::Doc { here: false, .. }) || beside == Some(k) {
             continue;
         }
-        // A sheet's rows go one under the other, a rule between them.
-        if !(sheet(k) && k > 0 && (sheet(k - 1) || beside == Some(k - 1))) {
+        // A sheet's rows go one under the other, a rule between them; a
+        // heading's cards go right under it.
+        let under_heading = k > 0
+            && matches!(section, PageSection::Finding(_))
+            && matches!(page.sections.get(k - 1), Some(PageSection::Heading(_)));
+        if under_heading {
+            s.y += HEADING_GAP;
+        } else if !(sheet(k) && k > 0 && (sheet(k - 1) || beside == Some(k - 1))) {
             s.y += PAGE_GAP;
         }
         match section {
@@ -3863,6 +4076,10 @@ fn page_stack(
                 for line in lines {
                     s.text(&line.text, Font::Body, Ink::Tone(line.tone), BODY_LINE);
                 }
+            }
+            PageSection::Review(summary) => s.review_summary(k, summary, page, buttons),
+            PageSection::Heading(label) => {
+                s.put(CAPTION, Piece::Caption(label.to_uppercase()));
             }
             PageSection::Milestones {
                 label,
@@ -4950,7 +5167,10 @@ fn piece_buttons(view: &FeatureTabView, piece: &Piece) -> Vec<usize> {
         (Piece::Button(i), _) => vec![*i],
         (Piece::GroupCaption(..), Some(PageSection::Milestones { buttons, .. }))
         | (Piece::Agent(_), Some(PageSection::Agent { buttons, .. }))
-        | (Piece::File(_), Some(PageSection::File { buttons, .. })) => buttons.clone(),
+        | (Piece::File(_), Some(PageSection::File { buttons, .. }))
+        | (Piece::GroupCaption(..), Some(PageSection::Review(ReviewSummary { buttons, .. }))) => {
+            buttons.clone()
+        }
         (Piece::FindingCard(_), Some(PageSection::Finding(card))) => card.buttons.clone(),
         (Piece::ShipCard(_), Some(PageSection::ShipGroup(group))) => group.buttons(),
         (Piece::RecapCard(_), Some(PageSection::Recap(card))) => card.buttons.clone(),
@@ -6305,9 +6525,12 @@ impl Painter {
             }
             Piece::GroupCaption(k, text) => {
                 line(c, text, rect, DETAIL_FONT_SIZE, p.muted);
-                let Some(PageSection::Milestones { buttons, .. }) = view.page.sections.get(*k)
-                else {
-                    return;
+                let buttons = match view.page.sections.get(*k) {
+                    Some(
+                        PageSection::Milestones { buttons, .. }
+                        | PageSection::Review(ReviewSummary { buttons, .. }),
+                    ) => buttons,
+                    _ => return,
                 };
                 for &i in buttons {
                     if let Some(r) = l.page_buttons.get(i).copied().flatten() {
@@ -6328,6 +6551,36 @@ impl Painter {
                 } else {
                     self.text(c, text, font.size(), x, end, b, scale, ink.color(p));
                 }
+            }
+            Piece::TagPill {
+                tag, faded, text, ..
+            } => {
+                let (ground, ink) = pill_inks(*tag, *faded, p);
+                let (x, y, w, h) = rect_px(rect, scale);
+                c.rounded(x, y, w, h, h / 2.0, ground);
+                let mut tx = rect.loc.x + PILL_PAD;
+                if tag.marked() {
+                    let spot =
+                        Rectangle::new((tx, rect.loc.y).into(), (PILL_MARK, rect.size.h).into());
+                    icon_sdf(c, spot, scale, ink, |x, y| pill_mark(*tag, x, y, s));
+                    tx += PILL_MARK + PILL_MARK_GAP;
+                }
+                let word = Rectangle::new(
+                    (tx, rect.loc.y).into(),
+                    ((rect.loc.x + rect.size.w - tx).max(1), rect.size.h).into(),
+                );
+                let (x, end) = phys(word, scale);
+                let size = Font::Small.size();
+                self.bold_text(
+                    c,
+                    text,
+                    size,
+                    x,
+                    end + PILL_PAD as f32,
+                    band(word, scale),
+                    scale,
+                    ink,
+                );
             }
             Piece::Bar { done, total } => {
                 let (x, y, w, h) = rect_px(rect, scale);
@@ -6373,6 +6626,11 @@ impl Painter {
                         c.rounded(x, y, w, h, r, comment_stripe(p));
                     },
                 );
+            }
+            Piece::FixGround => {
+                let (x, y, w, h) = rect_px(rect, scale);
+                let ground = mix(p.background, p.text, OUTPUT_GROUND);
+                c.rounded(x, y, w, h, AGENT_RADIUS * s, ground);
             }
             Piece::QuoteBar => {
                 let (x, y, w, h) = rect_px(rect, scale);
@@ -7320,6 +7578,29 @@ pub(super) fn bands_match_column(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tag_pills_read_in_both_themes() {
+        use super::{FindingTag, pill_inks};
+        use crate::chrome::{Theme, sidebar::contrast};
+        for p in [Theme::Dark.palette(), Theme::Light.palette()] {
+            for tag in [
+                FindingTag::High,
+                FindingTag::Medium,
+                FindingTag::Low,
+                FindingTag::Yours,
+            ] {
+                // Its word is small text: 4.5:1 on its ground.
+                let (ground, ink) = pill_inks(tag, false, p);
+                let on = contrast(ink, ground);
+                assert!(on >= 4.5, "{tag:?}: {on}");
+                // Faded, it is no longer asked about, but still reads.
+                let (ground, ink) = pill_inks(tag, true, p);
+                let on = contrast(ink, ground);
+                assert!(on >= 3.0, "{tag:?} faded: {on}");
+            }
+        }
+    }
+
     use super::*;
     use crate::chrome::sidebar::feature_dots_rect as feature_row_dots;
     use crate::chrome::{
@@ -9221,6 +9502,36 @@ mod tests {
                     assert!(card.contains_rect(r), "button {b} in {card:?} at {width}");
                 }
             }
+        }
+    }
+
+    #[test]
+    fn a_review_summarys_pill_is_hit_to_go_to_its_cards() {
+        let mut view = findings_view(2, "some words");
+        view.page.sections.insert(
+            0,
+            PageSection::Review(ReviewSummary {
+                label: "Findings".into(),
+                counts: vec![(FindingTag::High, 1), (FindingTag::Low, 1)],
+                decided: 1,
+                total: 2,
+                words: "1 to decide \u{b7} 1 to fix".into(),
+                notes: Vec::new(),
+                buttons: Vec::new(),
+            }),
+        );
+        let l = tab_at(&view, 1200);
+        let pills: Vec<(Rect, FindingTag)> = (l.pieces[TabColumn::Page as usize].iter())
+            .filter_map(|(r, p)| match p {
+                Piece::TagPill {
+                    tag, jump: true, ..
+                } => Some((*r, *tag)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(pills.len(), 2);
+        for (r, tag) in pills {
+            assert_eq!(l.hit(&view, centre(r)), Some(FeatureTabHit::Jump(tag)));
         }
     }
 

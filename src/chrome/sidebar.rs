@@ -3868,7 +3868,7 @@ pub(super) fn contrast(a: Rgb, b: Rgb) -> f32 {
 
 /// Of `p.on_accent` and `p.text`, the one that reads best on `fill`, so
 /// a count or label on a coloured pill keeps its contrast in both themes.
-fn ink_on(fill: Rgb, p: &Palette) -> Rgb {
+pub(super) fn ink_on(fill: Rgb, p: &Palette) -> Rgb {
     if contrast(p.on_accent, fill) >= contrast(p.text, fill) {
         p.on_accent
     } else {

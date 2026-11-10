@@ -470,18 +470,28 @@ fn on_comment(outcome: &PanelOutcome) -> bool {
     )
 }
 
+/// What `item`'s card says it is: the user's own, else its severity.
+pub(crate) fn item_tag(item: Item) -> FindingTag {
+    match (item.yours(), item.severity()) {
+        (true, _) => FindingTag::Yours,
+        (_, Severity::High) => FindingTag::High,
+        (_, Severity::Medium) => FindingTag::Medium,
+        (_, Severity::Low) => FindingTag::Low,
+    }
+}
+
+/// What `card` says it is: a comment left in the diff is the user's own.
+pub(crate) fn card_tag(card: ReviewCard) -> FindingTag {
+    card.item().map_or(FindingTag::Yours, item_tag)
+}
+
 /// `item`'s card on its stage's page, its buttons those in `actions`.
 pub(crate) fn item_card(
     item: Item,
     multi: bool,
     actions: &[(PageButton, PanelOutcome)],
 ) -> FindingCard {
-    let tag = match (item.yours(), item.severity()) {
-        (true, _) => FindingTag::Yours,
-        (_, Severity::High) => FindingTag::High,
-        (_, Severity::Medium) => FindingTag::Medium,
-        (_, Severity::Low) => FindingTag::Low,
-    };
+    let tag = item_tag(item);
     let mut card = match item {
         Item::Finding(f) => finding_card(f, multi),
         Item::Suggestion(s) => suggestion_card(s),
