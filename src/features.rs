@@ -13203,11 +13203,13 @@ fn stage_page(
         match stage {
             Stage::PlanReview => {
                 sections.extend(card());
-                sections.extend(suggestion_sections(feature, stage, state, actions));
+                // Once written, the final plan is what the stage made: it
+                // goes first, the suggestions it came from under it.
                 if state.ctx.wrote(stage) {
                     sections.push(file_card(feature, stage, state.ctx, actions));
                     sections.extend(doc_of(state.probe, stage));
                 }
+                sections.extend(suggestion_sections(feature, stage, state, actions));
             }
             Stage::Discover | Stage::Plan => {
                 sections.extend(card());
@@ -24325,7 +24327,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn plan_reviews_final_plan_card_holds_its_diff_and_no_run_cards_show() {
+    fn plan_reviews_final_plan_shows_first_holding_its_diff_and_no_run_cards() {
         use crate::feature::plan_review::{self, PlanReview, RunRecord};
         let stage = Stage::PlanReview;
         let mut f = feature("p", vec![repo("api", true)], stage_index(stage));
@@ -24348,6 +24350,7 @@ pub(crate) mod tests {
                 ..RunRecord::default()
             },
         );
+        review.stamp = Some((1, 1));
         f.plan_review = Some(review);
         let mut read = probe(None);
         read.docs.written.insert(stage);
@@ -24371,6 +24374,11 @@ pub(crate) mod tests {
             .map(|&i| page.buttons[i].label.as_str())
             .collect();
         assert!(held.contains(&"Diff"), "{held:?}");
+        // The final plan comes first, the suggestions under it.
+        let at = |is: fn(&PageSection) -> bool| page.sections.iter().position(is);
+        let file = at(|s| matches!(s, PageSection::File { .. })).unwrap();
+        let card = at(|s| matches!(s, PageSection::Finding(_))).unwrap();
+        assert!(file < card, "{:?}", page.sections);
         // No final plan yet: no Diff, and nothing for Alt+E to fold.
         assert!(round_plan_actions(&f, stage, None).is_empty());
         assert!(card_numbers(&f, stage).is_empty());
