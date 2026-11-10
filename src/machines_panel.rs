@@ -1126,9 +1126,10 @@ impl Gerdr {
         let panel = self.machines_panel.as_ref()?;
         if panel.tab == MachinesTab::Placement {
             let content = self.placement_content();
-            let focus = match content.stops().contains(&panel.focus) {
-                true => panel.focus,
-                false => (content.stops().get(1).copied()).unwrap_or(MachinesFocus::List),
+            // Always on a stage: the page has no list to be on.
+            let focus = match panel.focus {
+                MachinesFocus::Run(..) if content.stops().contains(&panel.focus) => panel.focus,
+                _ => (content.stops().get(1).copied()).unwrap_or(MachinesFocus::List),
             };
             let view = MachinesPanelView {
                 tab: MachinesTab::Placement,
