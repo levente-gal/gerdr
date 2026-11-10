@@ -348,6 +348,13 @@ pub(crate) struct Busy {
 
 /// What the work off the thread came to.
 pub(crate) enum Done {
+    /// A pull request's review was made, or not (see `pr_review`).
+    PrReview {
+        project: String,
+        slug: String,
+        number: u64,
+        result: Result<Box<(Feature, Vec<PathBuf>)>, String>,
+    },
     /// Asking the machine a feature came from to take it back ended.
     HandBack {
         project: String,
@@ -6518,6 +6525,15 @@ impl Gerdr {
                 self.unbusy(&project, &slug, Job::Link);
                 self.feature_linked(&project, &slug, &names, result);
             }
+            Done::PrReview {
+                project,
+                slug,
+                number,
+                result,
+            } => {
+                self.unbusy(&project, &slug, Job::Create);
+                self.pr_review_made(project, slug, number, result);
+            }
             Done::Created {
                 project,
                 title,
@@ -8066,6 +8082,7 @@ impl Gerdr {
         }
         let feature = Feature {
             version: feature::VERSION,
+            kind: Default::default(),
             writer: None,
             slug: slug.clone(),
             title: title.clone(),
@@ -10975,7 +10992,7 @@ fn task_of(busy: &Busy, title: Option<&str>, project: &str) -> Task {
 /// What the toast says once feature `title` is made under `root`, naming
 /// the files `.features` was added to (`ignores`) from the root: whole
 /// paths are long enough to cut the last ones off.
-fn created_text(title: &str, root: &Path, ignores: &[PathBuf]) -> String {
+pub(crate) fn created_text(title: &str, root: &Path, ignores: &[PathBuf]) -> String {
     if ignores.is_empty() {
         return format!("Created \u{201c}{title}\u{201d}");
     }
@@ -15154,6 +15171,7 @@ pub(crate) mod tests {
     pub(crate) fn feature(slug: &str, repos: Vec<Repo>, done: usize) -> Feature {
         Feature {
             version: feature::VERSION,
+            kind: Default::default(),
             writer: None,
             slug: slug.into(),
             title: format!("Feature {slug}"),

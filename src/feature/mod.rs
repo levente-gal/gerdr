@@ -40,6 +40,7 @@ pub mod manual;
 pub mod page;
 pub mod patch;
 pub mod plan_review;
+pub mod pr;
 pub mod remote;
 pub mod review_import;
 pub mod review_items;
@@ -697,11 +698,32 @@ pub struct Event {
     pub what: String,
 }
 
+/// What a record is of: a feature gerdr builds, or a pull request it
+/// reviews (see `pr`).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Kind {
+    #[default]
+    Feature,
+    /// A pull request on GitHub, its own or someone else's: born with the
+    /// stages up to Build marked, as its author built it.
+    PrReview(pr::PullRef),
+}
+
+impl Kind {
+    pub fn is_feature(&self) -> bool {
+        matches!(self, Self::Feature)
+    }
+}
+
 /// A feature: its record, `feature.json`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Feature {
     #[serde(default)]
     pub version: u32,
+    /// What it is of; a feature unless it says so.
+    #[serde(default, skip_serializing_if = "Kind::is_feature")]
+    pub kind: Kind,
     /// Unique within the project; names its folders and branches.
     pub slug: String,
     pub title: String,
@@ -1055,7 +1077,17 @@ impl Feature {
         if matches!(self.status, Status::Done | Status::Abandoned) {
             return None;
         }
-        let stage = self.stale(patch)?;
+        let mut stage = self.stale(patch)?;
+        // A pull request's author built it: its marks up to Build go with
+        // the code, and its review goes back no further than Verify.
+        if self.pull().is_some() && stage <= Stage::Build {
+            for (s, mark) in self.marks.range_mut(..=Stage::Build) {
+                if s.bound() {
+                    mark.patch = Some(patch.to_owned());
+                }
+            }
+            stage = Stage::Verify;
+        }
         self.clear_marks_from(stage, now);
         // The code went its own way: what Manual test fixed is gone over again.
         self.carry = None;
@@ -1088,6 +1120,10 @@ impl Feature {
     pub fn locked_by(&self, stage: Stage, wrote: impl Fn(Stage) -> bool) -> Option<Stage> {
         if !self.is_done(stage) {
             return None;
+        }
+        // A pull request's author did it: its review starts after it.
+        if !self.stages().contains(&stage) {
+            return self.stages().first().copied();
         }
         let next = stage.next()?;
         if self.is_done(next) {
@@ -1261,9 +1297,31 @@ impl Feature {
         self.repos.iter().filter(|r| r.touched)
     }
 
-    /// Its branch name: `feature/<slug>`.
+    /// Its branch name: `feature/<slug>`; a pull request's review has the
+    /// one its worktree is on (`pr::PullRef::branch`).
     pub fn branch(&self) -> String {
-        format!("feature/{}", self.slug)
+        match &self.kind {
+            Kind::Feature => format!("feature/{}", self.slug),
+            Kind::PrReview(pull) => pull.branch(),
+        }
+    }
+
+    /// The pull request it reviews, if that is what it is.
+    pub fn pull(&self) -> Option<&pr::PullRef> {
+        match &self.kind {
+            Kind::Feature => None,
+            Kind::PrReview(pull) => Some(pull),
+        }
+    }
+
+    /// The stages it goes through, in order: all of them for a feature;
+    /// from Verify on for a pull request's review, the others marked when
+    /// it was made.
+    pub fn stages(&self) -> &'static [Stage] {
+        match self.kind {
+            Kind::Feature => &Stage::ALL,
+            Kind::PrReview(_) => &pr::STAGES,
+        }
     }
 
     /// Every step shipping ran, oldest first: `Shipping::steps`, or for a
@@ -1874,6 +1932,7 @@ pub(crate) mod tests {
             .collect();
         Feature {
             version: VERSION,
+            kind: Default::default(),
             writer: None,
             slug: "f".into(),
             title: "Log in".into(),
@@ -1973,6 +2032,7 @@ pub(crate) mod tests {
     pub(crate) fn feature(slug: &str, created: u64) -> Feature {
         Feature {
             version: VERSION,
+            kind: Default::default(),
             writer: None,
             slug: slug.into(),
             title: format!("Feature {slug}"),

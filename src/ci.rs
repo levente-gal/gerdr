@@ -627,7 +627,7 @@ fn some_text(text: &str) -> Option<String> {
 
 /// The host and `owner/repo` of a repository's web page `web`, when on
 /// GitHub (or a GitHub Enterprise host).
-fn github_repository(web: &str) -> Option<(String, String)> {
+pub(crate) fn github_repository(web: &str) -> Option<(String, String)> {
     let (host, path) = web.strip_prefix("https://")?.split_once('/')?;
     let host = host.to_ascii_lowercase();
     let (owner, repo) = path.split_once('/')?;

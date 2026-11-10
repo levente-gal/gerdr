@@ -443,10 +443,13 @@ pub fn mode_of(feature: &Feature, repo: &str, modes: &Modes) -> ShipMode {
 pub fn probe(feature: &Feature, modes: &Modes) -> Probe {
     let reading = patch::read(feature);
     let branch = feature.branch();
-    let guards = feature
-        .touched()
-        .map(|repo| (repo.key(), guard_of(repo, &branch)))
-        .collect();
+    // The user's own pull request's branch is theirs to push from anywhere.
+    let guards = match feature.pull().is_some_and(super::pr::PullRef::own) {
+        true => BTreeMap::new(),
+        false => (feature.touched())
+            .map(|repo| (repo.key(), guard_of(repo, &branch)))
+            .collect(),
+    };
     let ship = feature.ships().then(|| check(feature, &reading, modes));
     let merged =
         feature.shipping.squash_at.is_some() && reading.as_ref().is_ok_and(|r| merged(feature, r));

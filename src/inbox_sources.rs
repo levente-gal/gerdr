@@ -470,7 +470,10 @@ pub fn ci_items(src: &Sources) -> Vec<InboxItem> {
                     workspace: w,
                     url: row.link.clone(),
                 },
-                actions: LINKED.to_vec(),
+                actions: match row.subject {
+                    Subject::Pr(_) => [&LINKED[..], &[ItemAction::Review]].concat(),
+                    Subject::Branch(_) => LINKED.to_vec(),
+                },
                 detail: Detail::Ci {
                     title: row.title.clone(),
                     subject,

@@ -83,6 +83,7 @@ mod machine_work;
 mod machines;
 mod manual_test;
 mod page_text;
+mod pr_review;
 mod md_blocks;
 mod md_preview;
 mod menu;

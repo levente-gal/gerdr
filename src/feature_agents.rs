@@ -1674,6 +1674,10 @@ impl Gerdr {
         let Some(feature) = self.feature(project, slug).cloned() else {
             return false;
         };
+        if let Some(why) = crate::stage_lock::authors_stage(&feature, stage) {
+            self.show_warning(why);
+            return false;
+        }
         let Some(need) = run_needs(&feature, stage) else {
             return false;
         };
