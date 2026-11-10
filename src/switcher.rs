@@ -125,6 +125,9 @@ pub enum Target {
     NewFeature,
     /// The feature panel on the project's features.
     Features,
+    /// The worktrees of the shown project's feature `.0`, removed once it
+    /// shipped, brought back (see `Gerdr::undo_after_ship`).
+    RestoreWorktrees(String),
     /// A model for a feature stage's agent, picked (see
     /// `Gerdr::open_model_picker`).
     StageModel(ModelPick),
@@ -166,6 +169,7 @@ impl Target {
             | Target::AiStats
             | Target::NewFeature
             | Target::Features
+            | Target::RestoreWorktrees(_)
             | Target::Settings
             | Target::ProjectFile(_)
             | Target::ReloadProjects
@@ -200,6 +204,7 @@ impl Target {
             | Target::AiStats
             | Target::NewFeature
             | Target::Features
+            | Target::RestoreWorktrees(_)
             | Target::Settings
             | Target::ProjectFile(_)
             | Target::ReloadProjects
@@ -880,6 +885,7 @@ fn frecency_key(
         | Target::AiStats
         | Target::NewFeature
         | Target::Features
+        | Target::RestoreWorktrees(_)
         | Target::ImportProfile(_) => return None,
     })
 }
@@ -1339,6 +1345,27 @@ impl Gerdr {
                 Target::Features,
             ));
         }
+        // A shipped feature's worktrees, removed, can come back.
+        let now = crate::feature::now();
+        let all = self
+            .features
+            .all
+            .get(project)
+            .map_or(&[][..], Vec::as_slice);
+        for feature in all {
+            let removed = (feature.after_done(crate::feature::AfterStep::Remove)).filter(|_| {
+                crate::ship_after::after_refusal(feature, crate::feature::AfterStep::Remove)
+                    .is_none()
+            });
+            if let Some(done) = removed {
+                items.push(Item::new(
+                    ItemIcon::Command,
+                    format!("Restore the worktrees of \u{201c}{}\u{201d}", feature.title),
+                    format!("removed {}", crate::projects::ago(now, done.at)),
+                    Target::RestoreWorktrees(feature.slug.clone()),
+                ));
+            }
+        }
         items
     }
 
@@ -1570,6 +1597,11 @@ impl Gerdr {
             Target::AiStats => self.open_ai_stats(),
             Target::NewFeature => self.open_new_feature(None),
             Target::Features => self.open_features(),
+            Target::RestoreWorktrees(slug) => {
+                if let Some(project) = self.project.clone() {
+                    self.undo_after_ship(&project, &slug, crate::feature::AfterStep::Remove);
+                }
+            }
             Target::StageModel(pick) => self.set_stage_model(
                 &pick.project,
                 &pick.slug,

@@ -9,7 +9,7 @@ use std::{
     process::{Command, Stdio},
 };
 
-use super::{Feature, Link, Repo, hook};
+use super::{Feature, KeptHead, Link, Repo, hook};
 
 /// The folder features' worktrees go in, under a root.
 pub const FEATURES_DIR: &str = ".features";
@@ -1180,6 +1180,164 @@ pub fn remove(feature: &Feature, force: bool) -> Result<(), String> {
     }
 }
 
+/// Each of `feature`'s worktrees that is there, with the commit it is on:
+/// what `restore` takes to bring them back once `remove` took them down.
+pub fn heads(feature: &Feature) -> Vec<KeptHead> {
+    (feature.repos.iter())
+        .filter(|r| r.worktree.is_dir())
+        .filter_map(|r| {
+            let sha = git(&r.worktree, &["rev-parse", "HEAD"]).ok()?;
+            Some(KeptHead {
+                repo: r.key(),
+                sha: sha.trim().to_owned(),
+            })
+        })
+        .collect()
+}
+
+/// Bring back the worktrees of `feature` that `heads` names, as `remove`
+/// took them down: their folders, each worktree at its commit (on the
+/// feature's branch again for a repository it changes, made there unless it
+/// stayed), and the root's links of a folder holding several. One there
+/// already is left as it is. On a failure, what was made goes again before
+/// the error returns.
+pub fn restore(feature: &Feature, heads: &[KeptHead]) -> Result<(), String> {
+    let branch = feature.branch();
+    let mut made = Restored::default();
+    let result = restore_into(feature, heads, &branch, &mut made);
+    if result.is_err() {
+        made.undo(&branch);
+    }
+    result
+}
+
+/// What `restore` made, to take down again when it fails.
+#[derive(Default)]
+struct Restored {
+    /// Folders it made, in order.
+    dirs: Vec<PathBuf>,
+    /// Each worktree it added: its main worktree, its folder, and whether
+    /// its branch was made with it.
+    worktrees: Vec<(PathBuf, PathBuf, bool)>,
+}
+
+impl Restored {
+    fn undo(self, branch: &str) {
+        for (main, path, branched) in self.worktrees.iter().rev() {
+            let p = path.to_string_lossy();
+            if let Err(err) = git(main, &["worktree", "remove", "--force", &p]) {
+                tracing::warn!("taking down {}: {err}", path.display());
+            }
+            if *branched && let Err(err) = git(main, &["branch", "-D", branch]) {
+                tracing::warn!("deleting {branch} in {}: {err}", main.display());
+            }
+        }
+        for dir in self.dirs.iter().rev() {
+            if let Err(err) = std::fs::remove_dir_all(dir)
+                && err.kind() != std::io::ErrorKind::NotFound
+            {
+                tracing::warn!("removing {}: {err}", dir.display());
+            }
+        }
+    }
+}
+
+/// `restore`'s work, noting in `made` what it makes.
+fn restore_into(
+    feature: &Feature,
+    heads: &[KeptHead],
+    branch: &str,
+    made: &mut Restored,
+) -> Result<(), String> {
+    for (project, dir) in feature.folders() {
+        let (root, multi) = match project {
+            None => (feature.root.as_path(), feature.multi),
+            Some(id) => match feature.links.iter().find(|l| l.project == id) {
+                Some(link) => (link.root.as_path(), link.multi),
+                None => continue,
+            },
+        };
+        let repos: Vec<(&Repo, &KeptHead)> = (feature.repos_of(project))
+            .filter_map(|r| heads.iter().find(|h| h.repo == r.key()).map(|h| (r, h)))
+            .collect();
+        if repos.is_empty() {
+            continue;
+        }
+        // `.features`, then the feature's folder when it holds several.
+        let new_dir = dir.symlink_metadata().is_err();
+        let mut wanted: Vec<&Path> = dir.parent().into_iter().collect();
+        if multi {
+            wanted.push(dir);
+        }
+        for folder in wanted {
+            if folder.symlink_metadata().is_ok() {
+                continue;
+            }
+            std::fs::create_dir(folder)
+                .map_err(|err| format!("couldn't make {}: {err}", shown(folder)))?;
+            made.dirs.push(folder.to_path_buf());
+        }
+        for (repo, head) in repos {
+            if repo.worktree.symlink_metadata().is_err() {
+                restore_worktree(repo, head, branch, made)?;
+            }
+        }
+        if multi && new_dir {
+            link_root(root, dir)?;
+        }
+    }
+    Ok(())
+}
+
+/// Add `repo`'s worktree back at `head`'s commit: on `branch` if the
+/// feature changes it, detached for a context repository.
+fn restore_worktree(
+    repo: &Repo,
+    head: &KeptHead,
+    branch: &str,
+    made: &mut Restored,
+) -> Result<(), String> {
+    let name = repo.key();
+    let short: String = head.sha.chars().take(7).collect();
+    let spec = format!("{}^{{commit}}", head.sha);
+    if git(&repo.main, &["cat-file", "-e", &spec]).is_err() {
+        return Err(format!("{name}: its commit {short} is gone"));
+    }
+    // A worktree that went by hand leaves its record behind.
+    if let Err(err) = git(&repo.main, &["worktree", "prune"]) {
+        tracing::warn!("pruning worktrees of {name}: {err}");
+    }
+    let p = repo.worktree.to_string_lossy();
+    let add = |args: &[&str]| {
+        let mut all = vec!["worktree", "add", "-q"];
+        all.extend_from_slice(args);
+        git(&repo.main, &all).map_err(|err| format!("{name}: {err}"))
+    };
+    let branched = if !repo.touched {
+        add(&["--detach", &p, &head.sha])?;
+        false
+    } else if branch_exists(&repo.main, branch) {
+        // Kept when it went (it had commits of its own): it must be where
+        // it was.
+        let full = format!("refs/heads/{branch}");
+        let at = git(&repo.main, &["rev-parse", &full]).map_err(|err| format!("{name}: {err}"))?;
+        if at.trim() != head.sha {
+            return Err(format!("{name}: {branch} is there again, not at {short}"));
+        }
+        add(&[&p, branch])?;
+        false
+    } else {
+        add(&["-b", branch, &p, &head.sha])?;
+        true
+    };
+    made.worktrees
+        .push((repo.main.clone(), repo.worktree.clone(), branched));
+    if repo.touched {
+        guard_worktree(repo, branch);
+    }
+    Ok(())
+}
+
 /// Why repositories `keys` can't leave `feature`, whatever they hold: the
 /// home project's single repository is the feature's folder, and a feature
 /// has to change one.
@@ -1841,6 +1999,82 @@ mod tests {
         remove(&f, true).unwrap();
         assert_eq!(std::fs::read_to_string(docs.join("draft")).unwrap(), "kept");
         assert!(docs.join(".git").exists());
+    }
+
+    #[test]
+    fn removed_worktrees_come_back_where_they_were() {
+        let t = Temp::new();
+        let repo = t.repo("app", "main");
+        let root = find_root(&repo, &[], &[], &[]).unwrap();
+        let created = create(&root, "x", &[]).unwrap();
+        let dir = created.dir.clone();
+        let f = feature_of(&root, created, "x");
+        commit(&dir, "b", "second");
+        let heads = heads(&f);
+        let head = run(&dir, &["rev-parse", "HEAD"]).trim().to_owned();
+        assert_eq!(
+            heads,
+            [KeptHead {
+                repo: "app".into(),
+                sha: head.clone()
+            }]
+        );
+        remove(&f, true).unwrap();
+        assert!(!dir.exists());
+
+        restore(&f, &heads).unwrap();
+        assert_eq!(run(&dir, &["rev-parse", "HEAD"]).trim(), head);
+        assert_eq!(run(&dir, &["branch", "--show-current"]).trim(), "feature/x");
+        assert!(hook::guarded(&repo, "feature/x"));
+        // Again: there already, it is left.
+        restore(&f, &heads).unwrap();
+
+        // A branch made again since, elsewhere, stops it, and nothing stays.
+        remove(&f, true).unwrap();
+        run(&repo, &["branch", "feature/x", "main"]);
+        let err = restore(&f, &heads).unwrap_err();
+        assert!(err.contains("feature/x is there again"), "{err}");
+        assert!(!repo.join(".features").exists());
+        assert!(branch_exists(&repo, "feature/x"));
+        // A commit git let go of can't come back.
+        run(&repo, &["branch", "-D", "feature/x"]);
+        let gone = [KeptHead {
+            repo: "app".into(),
+            sha: "0".repeat(40),
+        }];
+        let err = restore(&f, &gone).unwrap_err();
+        assert!(err.contains("is gone"), "{err}");
+    }
+
+    #[test]
+    fn a_multi_repository_folder_comes_back_with_its_links() {
+        let t = Temp::new();
+        let api = t.repo("api", "main");
+        let web = t.repo("web", "main");
+        std::fs::write(t.0.join("AGENTS.md"), "x").unwrap();
+        let root = find_root(&t.0, &[], &[], &[]).unwrap();
+        let created = create(&root, "auth", &["web".into(), "api".into()]).unwrap();
+        let dir = created.dir.clone();
+        let f = feature_of(&root, created, "auth");
+        let heads = heads(&f);
+        assert_eq!(heads.len(), 2);
+        remove(&f, true).unwrap();
+        assert!(!t.0.join(".features").exists());
+
+        restore(&f, &heads).unwrap();
+        for (repo, main) in [("api", &api), ("web", &web)] {
+            assert!(branch_exists(main, "feature/auth"), "{repo}");
+            assert_eq!(
+                run(&dir.join(repo), &["branch", "--show-current"]).trim(),
+                "feature/auth"
+            );
+        }
+        assert!(
+            dir.join("AGENTS.md")
+                .symlink_metadata()
+                .unwrap()
+                .is_symlink()
+        );
     }
 
     #[test]

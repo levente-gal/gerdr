@@ -3698,6 +3698,54 @@ fn feature_tab_ship_cards() -> super::FeatureTabView {
     view
 }
 
+/// `feature_tab_ship_cards` once its workspace closed after shipping and
+/// its worktrees were removed and restored: what followed, with the Undo
+/// bringing the workspace's tabs back, and in the Ship log.
+fn feature_tab_ship_after() -> super::FeatureTabView {
+    use super::{ButtonStyle, CheckTone, PageButton, PageSection, ShipGroup};
+    let mut view = feature_tab_ship_cards();
+    let at = view.page.buttons.len();
+    view.page.buttons.push(PageButton {
+        label: "Undo".into(),
+        style: ButtonStyle::Quiet,
+    });
+    let mut closed = ship_ran("Closed the workspace", "2h ago");
+    closed.button = Some(at);
+    let removed = ship_ran(
+        "Removed the worktrees and branches",
+        "2h ago \u{b7} restored 5m ago",
+    );
+    let group = ShipGroup {
+        head: "Afterwards".into(),
+        caption: true,
+        card: None,
+        route: None,
+        note: None,
+        steps: vec![closed, removed],
+        selected: None,
+    };
+    let log = (view.page.sections.iter())
+        .position(|s| matches!(s, PageSection::Lines { label, .. } if label == "Ship log"));
+    let log = log.unwrap_or(view.page.sections.len());
+    view.page
+        .sections
+        .insert(log, PageSection::ShipGroup(group));
+    if let Some(PageSection::Lines { lines, .. }) = view.page.sections.get_mut(log + 1) {
+        lines.insert(
+            0,
+            tab_line(
+                "2h ago \u{b7} removed the worktrees \u{b7} undone 5m ago",
+                CheckTone::Note,
+            ),
+        );
+        lines.insert(
+            1,
+            tab_line("2h ago \u{b7} closed the workspace", CheckTone::Note),
+        );
+    }
+    view
+}
+
 /// `feature_tab_ship_cards` with api's base conflicting: the agent's two
 /// ways to take that on.
 fn feature_tab_ship_conflicts() -> super::FeatureTabView {
@@ -5164,7 +5212,7 @@ fn round_card(
 }
 
 /// The feature tab's fixtures, by name.
-fn feature_tabs() -> [(&'static str, super::FeatureTabView); 48] {
+fn feature_tabs() -> [(&'static str, super::FeatureTabView); 49] {
     [
         ("tab_build", feature_tab()),
         ("tab_verify_fixes", feature_tab_verify_fixes()),
@@ -5179,6 +5227,7 @@ fn feature_tabs() -> [(&'static str, super::FeatureTabView); 48] {
         ("tab_ship_live", feature_tab_ship_live()),
         ("tab_ship_cards", feature_tab_ship_cards()),
         ("tab_ship_conflicts", feature_tab_ship_conflicts()),
+        ("tab_ship_after", feature_tab_ship_after()),
         ("tab_done", feature_tab_done()),
         ("tab_later", feature_tab_later()),
         ("tab_review_page", feature_tab_review_page()),
@@ -5227,7 +5276,7 @@ fn feature_tabs() -> [(&'static str, super::FeatureTabView); 48] {
 }
 
 /// Each fixture at the width it shows best at, and Build at all three.
-const TAB_SURFACES: [(&str, i32); 61] = [
+const TAB_SURFACES: [(&str, i32); 62] = [
     ("tab_build", 860),
     ("tab_build", 1180),
     ("tab_build", 1920),
@@ -5289,9 +5338,10 @@ const TAB_SURFACES: [(&str, i32); 61] = [
     ("tab_ship_live", 860),
     ("tab_ship_cards", 1180),
     ("tab_ship_conflicts", 860),
+    ("tab_ship_after", 1180),
 ];
 
-const FEATURE_TAB: [&str; 61] = [
+const FEATURE_TAB: [&str; 62] = [
     "tab_build_860",
     "tab_build_1180",
     "tab_build_1920",
@@ -5353,10 +5403,11 @@ const FEATURE_TAB: [&str; 61] = [
     "tab_ship_live_860",
     "tab_ship_cards_1180",
     "tab_ship_conflicts_860",
+    "tab_ship_after_1180",
 ];
 
 /// The recorded hashes of `FEATURE_TAB`, per case in `CASES`.
-const GOLDEN_FEATURE_TAB: [[u64; 61]; 4] = [
+const GOLDEN_FEATURE_TAB: [[u64; 62]; 4] = [
     // Dark at 1
     [
         0xb47edcf3deebfe55, // tab_build_860
@@ -5420,6 +5471,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 61]; 4] = [
         0xb57d60723e2e914c, // tab_ship_live_860
         0xe34314fbf0654a68, // tab_ship_cards_1180
         0x74df597c314fe9d0, // tab_ship_conflicts_860
+        0xd5db760b6970a8b8, // tab_ship_after_1180
     ],
     // Dark at 2
     [
@@ -5484,6 +5536,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 61]; 4] = [
         0x0714fb103dbedb21, // tab_ship_live_860
         0x9dd4ca4364fd852c, // tab_ship_cards_1180
         0x17d9364046f6e869, // tab_ship_conflicts_860
+        0x4e338059f3d706fb, // tab_ship_after_1180
     ],
     // Light at 1
     [
@@ -5548,6 +5601,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 61]; 4] = [
         0x040c69c1c4ed2725, // tab_ship_live_860
         0xd2b253b0e845b093, // tab_ship_cards_1180
         0xa5af8f745968904e, // tab_ship_conflicts_860
+        0xb3c1b8a0a72d595c, // tab_ship_after_1180
     ],
     // Light at 2
     [
@@ -5612,6 +5666,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 61]; 4] = [
         0x230520414df2c684, // tab_ship_live_860
         0xc691dd63eb1f75c3, // tab_ship_cards_1180
         0x78548434b2f6a5a6, // tab_ship_conflicts_860
+        0xafd7ea84d0219579, // tab_ship_after_1180
     ],
 ];
 

@@ -44,6 +44,7 @@ mod feature_sandbox;
 mod feature_workspace;
 mod ship_summary;
 mod ship_conflicts;
+mod ship_after;
 mod ship_undo;
 mod ship_update;
 mod features;

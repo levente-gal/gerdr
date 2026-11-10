@@ -18,7 +18,7 @@ use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
 
 use crate::{
     Gerdr, Tab, TabKind, Workspace, WorkspaceKind,
-    feature::{Feature, Status, layout, store},
+    feature::{AfterStep, Feature, Status, layout, store},
     features::Done,
 };
 
@@ -529,7 +529,10 @@ impl Gerdr {
             .and_then(|run| run.pane.clone());
         let running = self.workspace_running_but(w, summary.as_deref());
         if running.is_empty() {
+            let tabs = self.kept_tabs(w);
             self.close_workspace_now(w);
+            self.note_after_ship(project, slug, AfterStep::Close, tabs, Vec::new());
+            self.features.just_closed = Some((project.to_owned(), slug.to_owned()));
             return None;
         }
         Some(kept_text(&running))

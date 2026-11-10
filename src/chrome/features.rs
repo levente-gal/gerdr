@@ -4953,6 +4953,10 @@ fn piece_buttons(view: &FeatureTabView, piece: &Piece) -> Vec<usize> {
         | (Piece::File(_), Some(PageSection::File { buttons, .. })) => buttons.clone(),
         (Piece::FindingCard(_), Some(PageSection::Finding(card))) => card.buttons.clone(),
         (Piece::ShipCard(_), Some(PageSection::ShipGroup(group))) => group.buttons(),
+        // A step of a group with no card paints its own: no card does.
+        (Piece::ShipStep(_, j), Some(PageSection::ShipGroup(group))) if group.card.is_none() => {
+            (group.steps.get(*j).and_then(|s| s.button).into_iter()).collect()
+        }
         (Piece::RecapCard(_), Some(PageSection::Recap(card))) => card.buttons.clone(),
         _ => Vec::new(),
     }
@@ -6521,6 +6525,13 @@ impl Painter {
                         SMALL_FONT_SIZE,
                         detail.tone.color(p),
                     );
+                }
+                // With no card to paint it, its button is its own.
+                if group.card.is_none()
+                    && let Some(i) = step.button
+                    && let Some(r) = l.page_buttons.get(i).copied().flatten()
+                {
+                    self.page_button(c, view, i, at(r), scale, p);
                 }
             }
             Piece::Agent(k) => {

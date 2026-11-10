@@ -177,6 +177,9 @@ pub struct Features {
     /// Features whose Ship was pressed before their code was read: it asks once
     /// the read is back.
     ship_waits: BTreeSet<(String, String)>,
+    /// The feature whose workspace shipping closed just now, for the toast
+    /// saying it shipped to offer it back (see `Gerdr::show_shipped`).
+    pub(crate) just_closed: Option<(String, String)>,
     /// The feature folders whose docs link was seen to this run:
     /// `link_feature_docs` goes once for each.
     pub(crate) docs_linked: BTreeSet<PathBuf>,
@@ -480,6 +483,16 @@ pub(crate) enum Done {
         project: String,
         slug: String,
         abandon: bool,
+        result: Result<(), String>,
+        /// Its worktrees' commits before they went, and its workspace's
+        /// tabs: what restoring them takes.
+        heads: Vec<feature::KeptHead>,
+        tabs: Vec<serde_json::Value>,
+    },
+    /// Restoring feature `slug`'s worktrees, removed after it shipped, ended.
+    WorktreesRestored {
+        project: String,
+        slug: String,
         result: Result<(), String>,
     },
     /// What taking repositories `keys` out of feature `slug` would lose, or
@@ -1644,6 +1657,9 @@ pub enum PanelOutcome {
     WriteSummary,
     /// Undo step `.1` that shipping ran for repository `.0`, after asking.
     UndoShip(String, ShipStep),
+    /// Undo what followed shipping: bring back its workspace's tabs, or its
+    /// worktrees.
+    UndoAfter(feature::AfterStep),
     /// Take repository `.0`'s base into its branch, `.1`, after asking.
     UpdateBase(String, feature::UpdateWay),
     /// Have an agent take on repository `.0`'s conflicts with its base:
@@ -3278,6 +3294,7 @@ fn action_hint(action: &PanelOutcome) -> &'static str {
         PanelOutcome::Ship => "ship\u{2026}",
         PanelOutcome::WriteSummary => "write the summary again",
         PanelOutcome::UndoShip(..) => "undo\u{2026}",
+        PanelOutcome::UndoAfter(step) => after_undo_words(*step),
         PanelOutcome::UpdateBase(..) => "update from the base\u{2026}",
         PanelOutcome::ResolveConflicts(_, true) => "plan the resolution",
         PanelOutcome::ResolveConflicts(_, false) => "resolve with an agent",
@@ -3946,6 +3963,70 @@ fn ship_sections(
     out
 }
 
+/// What followed shipping `feature`, once it is done: when its workspace
+/// closed and its worktrees went, and when that was undone; each with its
+/// Undo while it can be.
+fn shipped_after_group(
+    feature: &Feature,
+    actions: &[(PageButton, PanelOutcome)],
+    now: u64,
+) -> Option<PageSection> {
+    use feature::AfterStep;
+    if feature.status == Status::Open {
+        return None;
+    }
+    let steps: Vec<chrome::ShipStepRow> = [AfterStep::Close, AfterStep::Remove]
+        .into_iter()
+        .filter_map(|step| {
+            let done = (feature.shipping.after.iter().rev()).find(|d| d.step == step)?;
+            let label = match step {
+                AfterStep::Close => "Closed the workspace",
+                AfterStep::Remove if feature.touched().count() > 1 => {
+                    "Removed the worktrees and branches"
+                }
+                AfterStep::Remove => "Removed the worktree and branch",
+            };
+            let mut when = projects::ago(now, done.at);
+            if let Some(at) = done.undone {
+                let word = match step {
+                    AfterStep::Close => "reopened",
+                    AfterStep::Remove => "restored",
+                };
+                when = format!("{when} \u{b7} {word} {}", projects::ago(now, at));
+            }
+            let button = (actions.iter()).position(|(_, o)| *o == PanelOutcome::UndoAfter(step));
+            Some(chrome::ShipStepRow {
+                row: 0,
+                label: label.to_owned(),
+                detail: Some(line(when, CheckTone::Note)),
+                ticked: true,
+                off: false,
+                done: true,
+                button,
+            })
+        })
+        .collect();
+    (!steps.is_empty()).then(|| {
+        PageSection::ShipGroup(chrome::ShipGroup {
+            head: "Afterwards".to_owned(),
+            caption: true,
+            card: None,
+            route: None,
+            note: None,
+            steps,
+            selected: None,
+        })
+    })
+}
+
+/// What undoing `step` does, for the footer and the button's tooltip.
+fn after_undo_words(step: feature::AfterStep) -> &'static str {
+    match step {
+        feature::AfterStep::Close => "bring back its tabs",
+        feature::AfterStep::Remove => "restore the worktrees",
+    }
+}
+
 /// Why the workspace's tick can't go with the worktrees' on.
 const REMOVING_CLOSES: &str = "Removing the worktrees closes it";
 
@@ -3986,7 +4067,23 @@ fn ship_log_lines(feature: &Feature, now: u64) -> Vec<CheckLine> {
         );
         (update.at, text)
     });
-    let mut all: Vec<(u64, String)> = steps.chain(updates).collect();
+    // And what followed it.
+    let after = feature.shipping.after.iter().map(|done| {
+        let said = match done.step {
+            feature::AfterStep::Close => "closed the workspace",
+            feature::AfterStep::Remove => "removed the worktrees",
+        };
+        let undone = (done.undone).map(|at| format!(" \u{b7} undone {}", projects::ago(now, at)));
+        let text = format!(
+            "{} \u{b7} {said}{}",
+            projects::ago(now, done.at),
+            undone.unwrap_or_default()
+        );
+        (done.at, text)
+    });
+    // What followed shipping comes after what it followed, in the same
+    // second too.
+    let mut all: Vec<(u64, String)> = after.chain(steps).chain(updates).collect();
     all.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
     (all.into_iter())
         .map(|(_, text)| line(text, CheckTone::Note))
@@ -5736,7 +5833,10 @@ fn writers_page_actions(
             PanelOutcome::EditSummary,
         ));
     }
-    // Each step that ran and can be undone, on its row: once the rows show.
+    // Each step that ran and can be undone, on its row (once the rows
+    // show), the latest first: those of the repositories, then what
+    // followed shipping.
+    let mut undos: Vec<(u64, PageButton, PanelOutcome)> = Vec::new();
     if stage == Stage::Ship && feature.ships() && ctx.ship_read {
         let mut seen: Vec<(String, ShipStep)> = Vec::new();
         for done in feature.ship_log().iter().rev() {
@@ -5749,13 +5849,30 @@ fn writers_page_actions(
             let undoable =
                 done.undone.is_none() && ship::undo_of(feature, &done.repo, step).is_ok();
             if undoable {
-                out.push((
+                undos.push((
+                    done.at,
                     button("Undo\u{2026}", ButtonStyle::Quiet),
                     PanelOutcome::UndoShip(done.repo.clone(), step),
                 ));
             }
         }
     }
+    if stage == Stage::Ship && feature.status != Status::Open {
+        for step in [feature::AfterStep::Close, feature::AfterStep::Remove] {
+            let Some(done) = feature.after_done(step) else {
+                continue;
+            };
+            if crate::ship_after::after_refusal(feature, step).is_none() {
+                undos.push((
+                    done.at,
+                    button("Undo", ButtonStyle::Quiet),
+                    PanelOutcome::UndoAfter(step),
+                ));
+            }
+        }
+    }
+    undos.sort_by_key(|(at, ..)| std::cmp::Reverse(*at));
+    out.extend(undos.into_iter().map(|(_, b, o)| (b, o)));
     if stage == Stage::Ship {
         // On its repository's card while it can ship, once the cards show;
         // else listed by name.
@@ -6484,9 +6601,19 @@ impl Gerdr {
                 slug,
                 abandon,
                 result,
+                heads,
+                tabs,
             } => {
                 self.unbusy(&project, &slug, Job::Remove);
-                self.feature_removed(&project, &slug, abandon, result);
+                self.feature_removed(&project, &slug, abandon, result, (heads, tabs));
+            }
+            Done::WorktreesRestored {
+                project,
+                slug,
+                result,
+            } => {
+                self.unbusy(&project, &slug, Job::Remove);
+                self.worktrees_restored(&project, &slug, result);
             }
             Done::Probed {
                 project,
@@ -7269,7 +7396,7 @@ impl Gerdr {
         if finishing && let Some(kept) = self.after_ship(project, slug) {
             text = format!("{text}; {kept}");
         }
-        self.show_success(text);
+        self.show_shipped(project, slug, text);
     }
 
     /// The bases feature `slug` merged into went to origin, or some didn't.
@@ -7312,13 +7439,14 @@ impl Gerdr {
         self.save_feature(project, slug);
         let kept = finishing.then(|| self.after_ship(project, slug)).flatten();
         if let Some(text) = failed {
+            self.features.just_closed = None;
             return self.show_error(format!("\u{201c}{title}\u{201d}: {text}"));
         }
         let mut text = format!("Pushed {} for \u{201c}{title}\u{201d}", went.join(", "));
         if let Some(kept) = kept {
             text = format!("{text}; {kept}");
         }
-        self.show_success(text);
+        self.show_shipped(project, slug, text);
     }
 
     /// Read the code of feature `slug` off the thread for run `n` of its
@@ -8794,6 +8922,7 @@ impl Gerdr {
             PanelOutcome::OpenPr(url) => self.open_feature_page(&project, &slug, url),
             PanelOutcome::WriteSummary => self.write_ship_summary(&project, &slug, true),
             PanelOutcome::UndoShip(repo, step) => self.ask_undo_ship(&project, &slug, &repo, step),
+            PanelOutcome::UndoAfter(step) => self.undo_after_ship(&project, &slug, step),
             PanelOutcome::UpdateBase(repo, way) => {
                 self.ask_update_base(&project, &slug, &repo, way)
             }
@@ -9391,7 +9520,7 @@ impl Gerdr {
         if let Some(kept) = self.after_ship(project, slug) {
             text = format!("{text}; {kept}");
         }
-        self.show_success(text);
+        self.show_shipped(project, slug, text);
         self.probe_feature(project, slug);
     }
 
@@ -9600,7 +9729,7 @@ impl Gerdr {
         if done && let Some(kept) = self.after_ship(project, slug) {
             text = format!("{text}; {kept}");
         }
-        self.show_success(text);
+        self.show_shipped(project, slug, text);
         self.probe_feature(project, slug);
     }
 
@@ -9702,7 +9831,7 @@ impl Gerdr {
         if let Some(kept) = self.after_ship(project, slug) {
             text = format!("{text}; {kept}");
         }
-        self.show_success(text);
+        self.show_shipped(project, slug, text);
         self.probe_feature(project, slug);
     }
 
@@ -9865,6 +9994,10 @@ impl Gerdr {
         }
         // Its agents on other machines go with its tabs.
         self.close_machine_panes_of(&feature);
+        // Removed, not abandoned, it can come back as it was: with these.
+        let tabs = (self.feature_workspace(project, slug))
+            .filter(|_| !abandon)
+            .map_or_else(Vec::new, |w| self.kept_tabs(w));
         let (project, slug) = (project.to_owned(), slug.to_owned());
         // Its workspace closes first, its terminals gone before its
         // worktrees go.
@@ -9876,11 +10009,17 @@ impl Gerdr {
                 if let Some(removal) = &removal {
                     removal.go();
                 }
+                let heads = match abandon {
+                    true => Vec::new(),
+                    false => layout::heads(&feature),
+                };
                 Done::Removed {
                     result: layout::remove(&feature, force),
                     project,
                     slug,
                     abandon,
+                    heads,
+                    tabs,
                 }
             });
         });
@@ -9892,6 +10031,7 @@ impl Gerdr {
         slug: &str,
         abandon: bool,
         result: Result<(), String>,
+        (heads, tabs): (Vec<feature::KeptHead>, Vec<serde_json::Value>),
     ) {
         let Some(feature) = self.feature_mut(project, slug) else {
             return;
@@ -9911,15 +10051,21 @@ impl Gerdr {
             feature.log(now, "worktrees removed");
         }
         self.save_feature(project, slug);
+        if !abandon && !heads.is_empty() {
+            self.note_after_ship(project, slug, feature::AfterStep::Remove, tabs, heads);
+        }
         // Abandoned, it closed as it was saved.
         if !abandon {
             self.ai_work_close(project, slug);
         }
-        self.show_success(if abandon {
-            format!("Abandoned \u{201c}{title}\u{201d}")
-        } else {
-            format!("Removed the worktrees of \u{201c}{title}\u{201d}")
-        });
+        match abandon {
+            true => self.show_success(format!("Abandoned \u{201c}{title}\u{201d}")),
+            false => self.show_removed(
+                project,
+                slug,
+                format!("Removed the worktrees of \u{201c}{title}\u{201d}"),
+            ),
+        }
         if let Some(feature) = self.feature(project, slug).cloned() {
             self.forget_on_machines(&feature);
         }
@@ -13030,7 +13176,10 @@ fn ship_chord_does(chord: &str, outcome: &PanelOutcome) -> bool {
             PanelOutcome::ReviewConflictPlan | PanelOutcome::OpenPr(_)
         ),
         "Ctrl+Shift+Del" => matches!(outcome, PanelOutcome::StopResolving),
-        "Alt+Z" => matches!(outcome, PanelOutcome::UndoShip(..)),
+        "Alt+Z" => matches!(
+            outcome,
+            PanelOutcome::UndoShip(..) | PanelOutcome::UndoAfter(_)
+        ),
         "Ctrl+R" => matches!(outcome, PanelOutcome::WriteSummary),
         "Ctrl+E" => matches!(outcome, PanelOutcome::EditSummary),
         _ => false,
@@ -13054,6 +13203,8 @@ fn ship_keys(
             .filter(|(_, o)| want(o))
             .find(|(_, o)| match (repo, ship_outcome_repo(feature, o)) {
                 (Some(on), Some(of)) => on == of,
+                // On a repository, Alt+Z undoes its step, not what followed.
+                (Some(_), None) => !matches!(o, PanelOutcome::UndoAfter(_)),
                 _ => true,
             })
             .cloned()
@@ -13088,6 +13239,7 @@ fn ship_keys(
                 ShipStep::Merge => "undo the squash\u{2026}".to_owned(),
                 ShipStep::PushBase => "undo\u{2026}".to_owned(),
             },
+            PanelOutcome::UndoAfter(step) => after_undo_words(*step).to_owned(),
             _ => lower(&button.label),
         };
         keys.push(ShipKey {
@@ -13588,6 +13740,7 @@ fn stage_page(
                 let cards = ship_sections(feature, state, actions, now);
                 let carded = !cards.is_empty();
                 sections.extend(cards);
+                sections.extend(shipped_after_group(feature, actions, now));
                 // Without cards, as once its worktrees are gone, its pull
                 // requests are listed.
                 let prs: Vec<CheckLine> = (feature.shipping.prs.iter())
@@ -14039,7 +14192,7 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 7] = [
             ),
             (
                 "Alt+Z",
-                "Ship: undo the selected repository's last step, after asking",
+                "Ship: undo the selected repository's last step, after asking; off the rows, the latest, or what followed shipping",
             ),
             ("Ctrl+R", "Ship: write the summary again"),
             ("Ctrl+E", "Ship: edit the summary"),
@@ -23384,6 +23537,139 @@ pub(crate) mod tests {
                 ]
             )
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn what_followed_shipping_shows_with_its_undo() {
+        use crate::feature::{AfterDone, AfterStep, KeptHead, RepoPlan, ShipDone};
+        let dir = std::env::temp_dir().join(format!("gerdr-ship-after-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut api = repo("api", true);
+        api.worktree = dir.clone();
+        let mut f = feature("s", vec![api], Stage::ALL.len());
+        f.status = Status::Done;
+        f.ship_ran(ShipDone {
+            at: 1_900,
+            repo: "api".into(),
+            step: ShipStep::Push,
+            sha: Some("3f9c2a1deadbeef".into()),
+            url: None,
+            undone: None,
+        });
+        f.ship_plan
+            .repos
+            .insert("api".into(), RepoPlan::new(Route::Pr));
+        let after = |at, step, heads: Vec<KeptHead>| AfterDone {
+            at,
+            step,
+            tabs: Vec::new(),
+            heads,
+            undone: None,
+        };
+        f.after_ran(after(1_950, AfterStep::Close, Vec::new()));
+        let mut found = check(&[], &["api"], &[]).unwrap();
+        found.repos[0].head = Some("3f9c2a1deadbeef".into());
+        let p = probe(Some(found));
+        let state = PanelState {
+            probe: Some(&p),
+            ..PanelState::default()
+        };
+        let ctx = RowCtx {
+            ship_read: true,
+            ..RowCtx::default()
+        };
+        let afterwards = |f: &Feature, actions: &[(PageButton, PanelOutcome)]| {
+            let page = stage_page(f, Stage::Ship, &state, actions, 2_000);
+            let group = page.sections.iter().find_map(|s| match s {
+                PageSection::ShipGroup(g) if g.head == "Afterwards" => Some(g.clone()),
+                _ => None,
+            });
+            (group.expect("an Afterwards group"), page)
+        };
+        // Its tabs come back first: the latest that can be undone.
+        let actions = page_actions(&f, Stage::Ship, ctx);
+        let undos: Vec<&PanelOutcome> = (actions.iter())
+            .map(|(_, o)| o)
+            .filter(|o| matches!(o, PanelOutcome::UndoShip(..) | PanelOutcome::UndoAfter(_)))
+            .collect();
+        assert_eq!(
+            undos,
+            [
+                &PanelOutcome::UndoAfter(AfterStep::Close),
+                &PanelOutcome::UndoShip("api".into(), ShipStep::Push)
+            ]
+        );
+        let (group, page) = afterwards(&f, &actions);
+        assert_eq!(group.steps.len(), 1);
+        assert_eq!(group.steps[0].label, "Closed the workspace");
+        assert!(group.steps[0].done);
+        let button = group.steps[0].button.expect("its undo");
+        assert_eq!(actions[button].1, PanelOutcome::UndoAfter(AfterStep::Close));
+        assert_eq!(actions[button].0.label, "Undo");
+        let Some(PageSection::Lines { lines: log, .. }) = page.sections.last() else {
+            panic!("no log: {:?}", page.sections);
+        };
+        assert_eq!(log[0].text, "just now \u{b7} closed the workspace");
+        // Alt+Z: off the rows, the latest; on api's, its push.
+        let alt_z = |repo: Option<&str>| {
+            let keys = ship_keys(&f, ctx, Some(&p), repo);
+            let key = keys.into_iter().find(|k| k.chord == "Alt+Z").unwrap();
+            (key.what, key.outcome)
+        };
+        assert_eq!(
+            alt_z(None),
+            (
+                "bring back its tabs".to_owned(),
+                PanelOutcome::UndoAfter(AfterStep::Close)
+            )
+        );
+        assert_eq!(
+            alt_z(Some("api")).1,
+            PanelOutcome::UndoShip("api".into(), ShipStep::Push)
+        );
+
+        // Its worktrees gone since, they come back first, then its tabs.
+        let head = KeptHead {
+            repo: "api".into(),
+            sha: "3f9c2a1deadbeef".into(),
+        };
+        f.after_ran(after(1_990, AfterStep::Remove, vec![head]));
+        let why = crate::ship_after::after_refusal(&f, AfterStep::Close).unwrap();
+        assert_eq!(
+            why,
+            "The worktrees of \u{201c}Feature s\u{201d} are gone: restore them first"
+        );
+        let actions = page_actions(&f, Stage::Ship, ctx);
+        assert!(
+            actions
+                .iter()
+                .any(|(_, o)| *o == PanelOutcome::UndoAfter(AfterStep::Remove))
+        );
+        assert!(
+            !actions
+                .iter()
+                .any(|(_, o)| *o == PanelOutcome::UndoAfter(AfterStep::Close))
+        );
+        f.after_undid(AfterStep::Remove, 1_995);
+        assert!(f.after_done(AfterStep::Remove).is_none());
+        let actions = page_actions(&f, Stage::Ship, ctx);
+        let (group, _) = afterwards(&f, &actions);
+        let labels: Vec<(&str, Option<&str>)> = (group.steps.iter())
+            .map(|s| (s.label.as_str(), s.detail.as_ref().map(|d| d.text.as_str())))
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                ("Closed the workspace", Some("just now")),
+                (
+                    "Removed the worktree and branch",
+                    Some("just now \u{b7} restored just now")
+                ),
+            ]
+        );
+        assert!(group.steps[1].button.is_none());
+        assert!(group.steps[0].button.is_some());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -176,6 +176,9 @@ pub enum MenuAction {
     /// A toast's "Undo" after a service's error was ignored, or ignored
     /// no more: put it back as it was.
     ServiceErrorsRestore(Box<crate::services::ErrorsSnapshot>),
+    /// A toast's button undoing what followed shipping feature `.1` of
+    /// project `.0`: its workspace closing, its worktrees going.
+    UndoAfterShip(String, String, crate::feature::AfterStep),
     /// Undo dropping a feature's context repository.
     RestoreContextRepo {
         project: String,
@@ -454,6 +457,9 @@ impl Gerdr {
         match action {
             MenuAction::NewTerminal => self.run_action(Action::NewTerminal),
             MenuAction::ChangeProjectId(id, new) => self.change_project_id(&id, &new),
+            MenuAction::UndoAfterShip(project, slug, step) => {
+                self.undo_after_ship(&project, &slug, step);
+            }
             MenuAction::NewCursor => self.open_cursor(None),
             MenuAction::OpenPage(w, url) => self.open_page(w, url),
             MenuAction::OpenPageInNewTab(w, url) => self.open_page_in_new_tab(w, url),

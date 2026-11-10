@@ -222,6 +222,49 @@ pub struct Shipping {
     /// The conflicts an agent resolves, or plans to, taking a base in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolving: Option<Resolving>,
+    /// What followed shipping (its workspace closed, its worktrees
+    /// removed), in the order it did: what undoing it brings back.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub after: Vec<AfterDone>,
+}
+
+/// A step that follows shipping, as Ship's "Afterwards" ticks it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AfterStep {
+    /// Its workspace closed.
+    Close,
+    /// Its worktrees and branches went (its workspace with them).
+    Remove,
+}
+
+/// A worktree of a feature as it was when it went: what restoring it takes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeptHead {
+    /// The repository's `Repo::key`.
+    pub repo: String,
+    /// The commit its worktree was on: the branch's head, or the detached
+    /// commit of a context repository.
+    pub sha: String,
+}
+
+/// A step that followed shipping a feature.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AfterDone {
+    /// Unix seconds.
+    pub at: u64,
+    pub step: AfterStep,
+    /// The tabs its workspace had, as gerdr saves a workspace's
+    /// (`projects::TabRecord`), kept as they were written: what undoing it
+    /// opens again. The feature's record knows nothing of layouts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tabs: Vec<serde_json::Value>,
+    /// For `Remove`: each worktree that went, with its commit.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub heads: Vec<KeptHead>,
+    /// When it was undone (unix seconds).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub undone: Option<u64>,
 }
 
 /// An agent at work on the conflicts of taking a repository's base into the
@@ -327,6 +370,7 @@ impl Shipping {
             && self.summary.is_none()
             && self.updates.is_empty()
             && self.resolving.is_none()
+            && self.after.is_empty()
     }
 }
 
@@ -1275,6 +1319,26 @@ impl Feature {
             ShipStep::OpenPr => self.shipping.prs.retain(|pr| pr.repo != repo),
             ShipStep::Merge => self.shipping.squash_repos.retain(|r| r != repo),
             ShipStep::PushBase => self.shipping.push_base.retain(|r| r != repo),
+        }
+    }
+
+    /// The last time `step` followed shipping, while it isn't undone.
+    pub fn after_done(&self, step: AfterStep) -> Option<&AfterDone> {
+        (self.shipping.after.iter().rev())
+            .find(|d| d.step == step)
+            .filter(|d| d.undone.is_none())
+    }
+
+    /// Note that `done` followed shipping, with what undoing it takes.
+    pub fn after_ran(&mut self, done: AfterDone) {
+        self.shipping.after.push(done);
+    }
+
+    /// Note that `step`, as it last followed shipping, was undone at `now`.
+    pub fn after_undid(&mut self, step: AfterStep, now: u64) {
+        let last = (self.shipping.after.iter_mut().rev()).find(|d| d.step == step);
+        if let Some(done) = last.filter(|d| d.undone.is_none()) {
+            done.undone = Some(now);
         }
     }
 
