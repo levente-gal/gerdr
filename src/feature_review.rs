@@ -898,8 +898,8 @@ impl Gerdr {
             }
         }
         self.save_feature(project, slug);
-        // From its diff: that closes, what it sent gone from it, as the
-        // Build agent's tab shows.
+        // From its diff: that closes, what it sent gone from it, back on
+        // the page.
         let open = (self.feature_of()).is_some_and(|fe| fe.project == project && fe.slug == slug);
         if open {
             if let Some(wd) = self.wd_mut() {
@@ -932,16 +932,18 @@ impl Gerdr {
         }
     }
 
-    /// Show feature `slug`'s Build agent, just sent work: its tab is where
-    /// it runs, or waits for its prompt. A T3 Code draft shows itself
-    /// (`t3_stage_drafted`).
+    /// Feature `slug`'s Build agent was just sent work: its tab comes up only
+    /// when the agent waits for the user to send its prompt. One told the
+    /// work by itself runs behind the page, where the rail and the stage's
+    /// card say so, and the user stays where they are. A T3 Code draft shows
+    /// itself (`t3_stage_drafted`).
     pub(crate) fn show_build_agent(&mut self, project: &str, slug: &str) {
         let Some(run) = (self.feature(project, slug)).and_then(|f| f.runs.get(&Stage::Build))
         else {
             return;
         };
-        if run.t3_thread().is_some() {
-            return self.show_t3_stage(project, slug, Stage::Build);
+        if !run.waits_to_send() {
+            return;
         }
         if let Some(pane) = (run.pane.clone()).filter(|p| self.pane_there(p)) {
             self.focus_agent(&crate::agents::AgentKey::Herdr(pane));

@@ -228,9 +228,10 @@ press and drag pick whole rows and a double click opens the line in Zed.
   colour: it asked something, waits for its prompt, is a T3 Code draft, or
   sits idle with its stage's work not done. Its pane's last lines on the card
   are in the text colour then, as they hold what it asks.
-- Work the user sends to an agent (findings, review comments, failed tests)
-  shows that agent's tab, where it runs or waits for its prompt. Work gerdr
-  sends by itself doesn't take the screen. Either way the stage's node on the
+- Work sent to an agent (findings, review comments, failed tests, Make
+  fixes), by the user or by gerdr, doesn't take the screen: the agent is told
+  it in its tab behind the page. Only an agent that waits for the user to
+  send its prompt has its tab shown. Either way the stage's node on the
   rail and the page of the stage the feature is at say the agent runs again or
   waits, with a way to its tab. While that work is under way the rail reads as
   turned back: done stages from Build on go grey, as they ran once, and a line
