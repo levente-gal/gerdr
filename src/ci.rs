@@ -18,7 +18,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::Command,
     sync::Mutex,
     time::Duration,
 };
@@ -694,17 +694,16 @@ pub(crate) fn gh_json<T: DeserializeOwned>(root: &Path, args: &[&str]) -> Result
     let what = args.get(..2).unwrap_or(args).join(" ");
     let mut command = Command::new("gh");
     signed_in(&mut command)?;
-    let out = command
+    command
         .args(args)
         .current_dir(root)
         .env("GH_PROMPT_DISABLED", "1")
-        .env("NO_COLOR", "1")
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|err| match err.kind() {
-            std::io::ErrorKind::NotFound => "gh is not installed".to_owned(),
-            _ => format!("gh: {err}"),
-        })?;
+        .env("NO_COLOR", "1");
+    // A gh stuck on the network is stopped, its group with it.
+    let out = crate::t3_update::output_within(command, GH_TIME).map_err(|err| match err {
+        missing if missing.starts_with("gh ") => missing,
+        err => format!("gh {what}: {err}"),
+    })?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
         if err.contains("Bad credentials") || err.contains("HTTP 401") {
@@ -715,6 +714,9 @@ pub(crate) fn gh_json<T: DeserializeOwned>(root: &Path, args: &[&str]) -> Result
     }
     serde_json::from_slice(&out.stdout).map_err(|err| format!("gh {what}: {err}"))
 }
+
+/// How long a `gh` of `gh_json` may take.
+const GH_TIME: Duration = Duration::from_secs(60);
 
 /// gh's token for github.com, once read (see `signed_in`).
 static GH_TOKEN: Mutex<Option<String>> = Mutex::new(None);
@@ -770,11 +772,12 @@ fn wait_for_keyring() -> Result<(), String> {
 
 /// gh's token for github.com, by `gh auth token`, if it has one.
 fn read_gh_token() -> Option<String> {
-    let out = Command::new("gh")
+    let mut command = Command::new("gh");
+    command
         .args(["auth", "token", "--hostname", "github.com"])
-        .env("GH_PROMPT_DISABLED", "1")
-        .stdin(Stdio::null())
-        .output()
+        .env("GH_PROMPT_DISABLED", "1");
+    // The keyring can hang it: stopped, the token is gh's to read itself.
+    let out = crate::t3_update::output_within(command, KEYRING_WAIT)
         .inspect_err(|err| tracing::debug!("gh auth token: {err}"))
         .ok()?;
     let token = String::from_utf8_lossy(&out.stdout).trim().to_owned();
