@@ -2273,6 +2273,213 @@ fn dump_machine() {
     }
 }
 
+// ------------------------------------------------------- machines panel
+
+/// The machines panel: a connected machine with three runs, the keyboard
+/// on a run's button; a failed one with what to do and its fix; the add
+/// row; and a machine Del was pressed on once.
+fn machines_panel(case: usize) -> super::MachinesPanelView {
+    use super::{Dot, MachineDetailView, MachineRowView, MachineRunView, MachinesFocus};
+    use super::{MachinesHit, MachinesPanelView};
+    let strings = |xs: &[&str]| xs.iter().map(|x| (*x).to_owned()).collect::<Vec<_>>();
+    let failed = case == 1;
+    let row = |name: &str, address: &str, state: &str, dot, armed| MachineRowView {
+        name: name.into(),
+        address: address.into(),
+        state: state.into(),
+        dot,
+        armed,
+    };
+    let rows = vec![
+        row(
+            "ZenBook",
+            "lga@zenbook-office",
+            "connected",
+            Dot::Done,
+            false,
+        ),
+        row(
+            "Build box",
+            "ana@build-box",
+            if failed { "failed" } else { "off" },
+            if failed { Dot::Failed } else { Dot::Idle },
+            case == 3,
+        ),
+    ];
+    let run = |title: &str, detail: &str, dot, buttons: &[&str]| MachineRunView {
+        title: title.into(),
+        detail: detail.into(),
+        dot,
+        buttons: strings(buttons),
+    };
+    let zenbook = MachineDetailView {
+        name: "ZenBook".into(),
+        dot: Dot::Done,
+        facts: strings(&[
+            "lga@zenbook-office",
+            "up 2 h \u{b7} herdr 0.9.3 \u{b7} load 1.2 / 8",
+            "id 4f2a9c",
+        ]),
+        problem: None,
+        how: None,
+        runs: vec![
+            run(
+                "asset-tag \u{b7} Build agent",
+                "Claude \u{b7} waiting \u{b7} 12m",
+                Dot::Blocked,
+                &["Show", "Stop"],
+            ),
+            run(
+                "asset-tag \u{b7} Verify checks",
+                "3 of 5 passed",
+                Dot::Done,
+                &["Show"],
+            ),
+            run(
+                "asset-tag \u{b7} sandbox",
+                "web, db \u{b7} up 40m",
+                Dot::Idle,
+                &["Show", "Stop"],
+            ),
+        ],
+        no_runs: "Nothing runs there".into(),
+        buttons: strings(&["Remove", "Disconnect"]),
+    };
+    let build_box = MachineDetailView {
+        name: "Build box".into(),
+        dot: if failed { Dot::Failed } else { Dot::Idle },
+        facts: strings(&["ana@build-box"]),
+        problem: failed.then(|| "It didn't accept any of your SSH keys.".to_owned()),
+        how: failed.then(|| {
+            "Add a key with ssh-copy-id ana@build-box. A locked key needs ssh-add.".to_owned()
+        }),
+        runs: Vec::new(),
+        no_runs: "Connect it to see what runs there".into(),
+        buttons: if failed {
+            strings(&["Remove", "Copy command", "Try again"])
+        } else {
+            strings(&["Remove", "Connect"])
+        },
+    };
+    let (selected, detail, focus, hover) = match case {
+        0 => (
+            0,
+            Some(zenbook),
+            MachinesFocus::Run(0, 1),
+            Some(MachinesHit::Row(1)),
+        ),
+        1 => (
+            1,
+            Some(build_box),
+            MachinesFocus::List,
+            Some(MachinesHit::Button(2)),
+        ),
+        2 => (2, None, MachinesFocus::List, Some(MachinesHit::Hint(0))),
+        _ => (1, Some(build_box), MachinesFocus::List, None),
+    };
+    MachinesPanelView {
+        rows,
+        selected,
+        first: 0,
+        detail,
+        focus,
+        runs_first: 0,
+        hover,
+        hints: [
+            ("Up / Down", "move"),
+            ("Tab", "next button"),
+            ("Enter", "press"),
+            ("Del", "remove"),
+            ("Esc", "close"),
+        ]
+        .map(|(k, a)| (k.to_owned(), a.to_owned()))
+        .into(),
+    }
+}
+
+const MACHINES_PANEL: [&str; 4] = [
+    "machines_connected",
+    "machines_failed",
+    "machines_add",
+    "machines_armed",
+];
+
+fn paint_machines_panel(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
+    let p = theme.palette();
+    let size = IDENTITY_OUTPUT.into();
+    (0..MACHINES_PANEL.len())
+        .map(|case| hash(painter.machines_panel(&machines_panel(case), size, scale, p)))
+        .collect()
+}
+
+/// The recorded hashes of `MACHINES_PANEL`, per case in `CASES`.
+const GOLDEN_MACHINES_PANEL: [[u64; 4]; 4] = [
+    // Dark at 1
+    [
+        0x84dbd2059771acac, // machines_connected
+        0x8c45d1fb7cd55c6d, // machines_failed
+        0x2148dc185bdafe72, // machines_add
+        0x6c3af2436e4019fa, // machines_armed
+    ],
+    // Dark at 2
+    [
+        0x306acddc2c58fec3, // machines_connected
+        0x9d68e2f1977d9612, // machines_failed
+        0x6b739219f9cf9d3d, // machines_add
+        0x056e0e0d290759a3, // machines_armed
+    ],
+    // Light at 1
+    [
+        0x4ce673c7780120cf, // machines_connected
+        0xea34c11e2a0407e0, // machines_failed
+        0xd0389130753a9a3a, // machines_add
+        0x3c124a2b2990344f, // machines_armed
+    ],
+    // Light at 2
+    [
+        0xdbfd57689e77d4b5, // machines_connected
+        0x2ea8c74f80259e94, // machines_failed
+        0x65fb658e8be22c6b, // machines_add
+        0x2739e1a716f40316, // machines_armed
+    ],
+];
+
+#[test]
+fn the_machines_panel_paints_the_same_pixels() {
+    let golden: Vec<&[u64]> = GOLDEN_MACHINES_PANEL
+        .iter()
+        .map(|row| row.as_slice())
+        .collect();
+    check(&MACHINES_PANEL, &golden, paint_machines_panel);
+}
+
+/// With `GERDR_DUMP_DIR` set, write the machines panel there.
+#[test]
+fn dump_machines_panel() {
+    let Some(dir) = std::env::var_os("GERDR_DUMP_DIR") else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    let _ = std::fs::create_dir_all(&dir);
+    let painter = Painter::new();
+    let size = IDENTITY_OUTPUT.into();
+    for (theme, scale) in CASES {
+        let p = theme.palette();
+        let px = |v: i32| (v as f64 * scale).round() as usize;
+        let tag = format!("{}_{}", theme.name(), scale);
+        for (case, name) in MACHINES_PANEL.iter().enumerate() {
+            let view = machines_panel(case);
+            let panel = super::machines_layout(&view, size).panel;
+            dump(
+                &dir,
+                &format!("{name}_{tag}"),
+                painter.machines_panel(&view, size, scale, p),
+                px(panel.size.w + 2 * super::SHADOW),
+            );
+        }
+    }
+}
+
 // ------------------------------------------------------- restart dialog
 
 /// The restart dialog: a workspace's commands, one exited and one unchecked,
