@@ -4255,7 +4255,7 @@ impl Panel {
         self.diff.drags_rows(&dctx)
     }
 
-    /// The pointer dragged past the diff's rows, `by` (up negative).
+    /// The press held past the diff's rows, `by` rows on (up negative).
     pub fn drag_past_rows(&mut self, by: i64, ctx: &Ctx) {
         if self.tab() != DetailTab::Diff {
             return;
@@ -8128,6 +8128,10 @@ mod tests {
         panel.click(ReposHit::DiffRow(3), &ctx);
         panel.drag_past_rows(1, &ctx);
         panel.drag_past_rows(1, &ctx);
+        assert_eq!(cursor(&panel), Some((5, 3)));
+        // Held far past, many rows a frame at once, the range kept.
+        panel.click(ReposHit::DiffRow(3), &ctx);
+        panel.drag_past_rows(2, &ctx);
         assert_eq!(cursor(&panel), Some((5, 3)));
     }
 

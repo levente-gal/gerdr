@@ -2247,11 +2247,11 @@ impl DiffView {
         }
     }
 
-    /// A press on the comment being written dragged past the diff's rows,
+    /// A press on the comment being written held past the diff's rows,
     /// above them (`by` negative) or below: the selection reaches char
-    /// `col` of the comment's next row out of view that way, the diff
-    /// scrolled to show it; with all of them in view that way, its first
-    /// or last.
+    /// `col` of the comment's `by`th row out of view that way (as far as
+    /// there are), the diff scrolled to show it; with all of them in view
+    /// that way, its first or last.
     pub fn drag_editor_past(&mut self, by: i64, col: usize, ctx: &Ctx) {
         self.rewrap(ctx);
         if self.editing.is_none() {
@@ -2268,9 +2268,16 @@ impl DiffView {
         let (sticky, shown, part) = self.diff_shown(page);
         let top = shown.start + usize::from(part > 0.0);
         let bottom = shown.start + page - usize::from(sticky.is_some());
+        let n = (by.unsigned_abs() as usize).max(1);
         let to = match by < 0 {
-            true => rows.iter().rev().find(|&&(r, _)| r < top),
-            false => rows.iter().find(|&&(r, _)| r >= bottom),
+            true => {
+                let above = rows.iter().filter(|&&(r, _)| r < top).count();
+                rows.get(above.saturating_sub(n)).filter(|_| above > 0)
+            }
+            false => {
+                let below = rows.iter().position(|&(r, _)| r >= bottom);
+                below.and_then(|k| rows.get((k + n - 1).min(rows.len() - 1)))
+            }
         };
         let edge = match by < 0 {
             true => rows.first(),
@@ -2324,8 +2331,8 @@ impl DiffView {
         ctx.keys == Keys::Diff && self.cursor.is_some() && self.editing.is_none()
     }
 
-    /// The pointer dragged past the diff's rows: the cursor goes on a
-    /// row `by` (up negative), its range kept, the diff scrolled along.
+    /// The press held past the diff's rows: the cursor goes `by` rows on
+    /// (up negative), its range kept, the diff scrolled along.
     pub fn drag_past_rows(&mut self, by: i64, ctx: &Ctx) {
         self.rewrap(ctx);
         if self.drags_rows(ctx) {

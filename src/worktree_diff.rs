@@ -1691,7 +1691,7 @@ impl WorktreeDiff {
         self.with_diff(env, |diff, ctx| diff.drag_editor_past(by, col, ctx));
     }
 
-    /// The pointer dragged past the diff's rows, `by` (up negative).
+    /// The press held past the diff's rows, `by` rows on (up negative).
     pub fn drag_past_rows(&mut self, by: i64, env: Env) {
         self.with_diff(env, |diff, ctx| diff.drag_past_rows(by, ctx));
     }
@@ -2376,7 +2376,8 @@ impl crate::Gerdr {
     }
 
     /// The pointer dragged from a press on the worktree's diff: over row
-    /// `row` (by index into those shown), or `by` rows past them.
+    /// `row` (by index into those shown); or the press held past them,
+    /// `by` rows on.
     pub(crate) fn worktree_diff_drag(&mut self, by: i64, row: Option<usize>) {
         let env = self.worktree_env();
         let Some(wd) = self.wd_mut() else {
@@ -3379,6 +3380,12 @@ pub(crate) mod tests {
         let (_, last, caret) = shown(&wd);
         assert!(last.is_some(), "its end in view");
         assert_eq!(caret, Some(("l39".into(), 3)));
+        // Held far past, many rows a frame: as far as there are.
+        wd.drag_editor_past(-5, 0, ENV);
+        let (_, _, five) = shown(&wd);
+        wd.drag_editor_past(-1000, 0, ENV);
+        assert_eq!(shown(&wd).2, Some(("l00".into(), 0)));
+        assert_ne!(five, Some(("l00".into(), 0)), "five rows up is not the start");
     }
 
     #[test]
