@@ -4255,7 +4255,7 @@ impl Panel {
         self.diff.drags_rows(&dctx)
     }
 
-    /// The pointer dragged past the diff's rows, `by` (up negative).
+    /// The press held past the diff's rows, `by` rows on (up negative).
     pub fn drag_past_rows(&mut self, by: i64, ctx: &Ctx) {
         if self.tab() != DetailTab::Diff {
             return;
@@ -4294,6 +4294,16 @@ impl Panel {
         }
         diff_ctx!(self, ctx, dctx);
         self.diff.drag_editor(i, col, &dctx);
+    }
+
+    /// A press on the comment being written dragged past the diff's rows:
+    /// see `DiffView::drag_editor_past`.
+    pub fn drag_editor_past(&mut self, by: i64, col: usize, ctx: &Ctx) {
+        if self.tab() != DetailTab::Diff {
+            return;
+        }
+        diff_ctx!(self, ctx, dctx);
+        self.diff.drag_editor_past(by, col, &dctx);
     }
 
     /// Open the file shown as row `i` of the diff in Zed, at that line.
@@ -8118,6 +8128,10 @@ mod tests {
         panel.click(ReposHit::DiffRow(3), &ctx);
         panel.drag_past_rows(1, &ctx);
         panel.drag_past_rows(1, &ctx);
+        assert_eq!(cursor(&panel), Some((5, 3)));
+        // Held far past, many rows a frame at once, the range kept.
+        panel.click(ReposHit::DiffRow(3), &ctx);
+        panel.drag_past_rows(2, &ctx);
         assert_eq!(cursor(&panel), Some((5, 3)));
     }
 

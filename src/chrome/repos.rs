@@ -2665,11 +2665,13 @@ pub fn repos_diff_char(
 /// The row of the comment being written (by index into `DetailView::rows`)
 /// nearest `pos`, in `panel`, and the caret's place at `pos.x` on it: for
 /// a press there dragged on, above its rows the first, below the last.
+/// With none of its rows in view, no row, and the place as on one of them
+/// outside a finding's card.
 pub fn repos_editor_char(
     view: &ReposView,
     panel: Rect,
     pos: Point<f64, Logical>,
-) -> Option<(usize, usize)> {
+) -> Option<(Option<usize>, usize)> {
     let layout = repos_layout(view, panel);
     let rows = (layout.detail_rows.iter().enumerate())
         .filter(|&(i, _)| matches!(view.detail.rows.get(i), Some(DetailRow::Editor { .. })));
@@ -2680,7 +2682,15 @@ pub fn repos_editor_char(
             break;
         }
     }
-    editor_char(view, &layout, nearest?, pos.x)
+    let within = match nearest.and_then(|i| view.detail.rows.get(i)) {
+        Some(DetailRow::Editor { within, .. }) => within.is_some(),
+        _ => false,
+    };
+    let rect = layout.detail_rows.get(nearest.unwrap_or(0))?;
+    let advance = measure_mono("0", REPOS_MONO_SIZE).filter(|a| *a > 0.0)? as f64;
+    let card = rect.loc.x + DIFF_INSET + if within { COMMENT_INDENT } else { 0 };
+    let x = pos.x - (card + 1 + COMMENT_INDENT) as f64;
+    Some((nearest, (x / advance).round().max(0.0) as usize))
 }
 
 /// On row `i`, of the comment being written, the caret's place at output x
@@ -6213,6 +6223,7 @@ mod tests {
                 text: "git".into(),
                 caret: 3,
                 anchor: 3,
+                scroll: 0,
             },
             placeholder: "Find in the diff".into(),
             count: "2 of 3".into(),
@@ -7145,10 +7156,12 @@ mod tests {
         // Dragged on: its row there, above its rows the first, below the
         // last.
         let drag = |x: f64, y: f64| repos_editor_char(&view, panel, (x, y).into());
-        assert_eq!(drag(x0 + advance, mid(bottom)), Some((3, 1)));
-        assert_eq!(drag(x0, top.loc.y as f64 - 100.0), Some((2, 0)));
-        assert_eq!(drag(x0, mid(bottom) + 300.0), Some((3, 0)));
-        assert_eq!(repos_editor_char(&none, panel, (x0, mid(top)).into()), None);
+        assert_eq!(drag(x0 + advance, mid(bottom)), Some((Some(3), 1)));
+        assert_eq!(drag(x0, top.loc.y as f64 - 100.0), Some((Some(2), 0)));
+        assert_eq!(drag(x0, mid(bottom) + 300.0), Some((Some(3), 0)));
+        // None of its rows in view: the place all the same.
+        let off = repos_editor_char(&none, panel, (x0 + 2.0 * advance, mid(top)).into());
+        assert_eq!(off, Some((None, 2)));
     }
 
     #[test]

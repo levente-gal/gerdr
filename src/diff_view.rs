@@ -2247,6 +2247,52 @@ impl DiffView {
         }
     }
 
+    /// A press on the comment being written held past the diff's rows,
+    /// above them (`by` negative) or below: the selection reaches char
+    /// `col` of the comment's `by`th row out of view that way (as far as
+    /// there are), the diff scrolled to show it; with all of them in view
+    /// that way, its first or last.
+    pub fn drag_editor_past(&mut self, by: i64, col: usize, ctx: &Ctx) {
+        self.rewrap(ctx);
+        if self.editing.is_none() {
+            return;
+        }
+        let rows = (self.rows.iter().enumerate()).filter_map(|(r, row)| match row {
+            DiffRow::Editor { i: w, .. } => Some((r, *w)),
+            _ => None,
+        });
+        let rows: Vec<(usize, usize)> = rows.collect();
+        // The rows wholly in view: not one scrolled partly past the top or
+        // the bottom, nor under the pinned file header.
+        let page = ctx.page.max(1);
+        let (sticky, shown, part) = self.diff_shown(page);
+        let top = shown.start + usize::from(part > 0.0);
+        let bottom = shown.start + page - usize::from(sticky.is_some());
+        let n = (by.unsigned_abs() as usize).max(1);
+        let to = match by < 0 {
+            true => {
+                let above = rows.iter().filter(|&&(r, _)| r < top).count();
+                rows.get(above.saturating_sub(n)).filter(|_| above > 0)
+            }
+            false => {
+                let below = rows.iter().position(|&(r, _)| r >= bottom);
+                below.and_then(|k| rows.get((k + n - 1).min(rows.len() - 1)))
+            }
+        };
+        let edge = match by < 0 {
+            true => rows.first(),
+            false => rows.last(),
+        };
+        let Some(&(r, w)) = to.or(edge) else {
+            return;
+        };
+        self.follow(r, ctx.page);
+        let at = self.wrap_byte(w, col);
+        if let (Some(at), Some(editing)) = (at, self.editing.as_mut()) {
+            editing.field.drag_to(at);
+        }
+    }
+
     /// The row of the comment being written that detail row `i` shows, by
     /// index into `editor_wrap`.
     fn editor_wrap_at(&self, i: usize, ctx: &Ctx) -> Option<usize> {
@@ -2262,7 +2308,12 @@ impl DiffView {
     /// wrapped onto the next ends before its last char, since its end is
     /// the next row's start, where the caret shows.
     fn editor_byte(&self, i: usize, col: usize, ctx: &Ctx) -> Option<usize> {
-        let w = self.editor_wrap_at(i, ctx)?;
+        self.wrap_byte(self.editor_wrap_at(i, ctx)?, col)
+    }
+
+    /// The byte of the comment being written that char `col` of its row
+    /// `w` (by index into `editor_wrap`) starts at: see `editor_byte`.
+    fn wrap_byte(&self, w: usize, col: usize) -> Option<usize> {
         let line = self.editing.as_ref()?.field.line();
         let range = self.editor_wrap.get(w).cloned().unwrap_or(0..0);
         let row = &line.text[range.clone()];
@@ -2280,8 +2331,8 @@ impl DiffView {
         ctx.keys == Keys::Diff && self.cursor.is_some() && self.editing.is_none()
     }
 
-    /// The pointer dragged past the diff's rows: the cursor goes on a
-    /// row `by` (up negative), its range kept, the diff scrolled along.
+    /// The press held past the diff's rows: the cursor goes `by` rows on
+    /// (up negative), its range kept, the diff scrolled along.
     pub fn drag_past_rows(&mut self, by: i64, ctx: &Ctx) {
         self.rewrap(ctx);
         if self.drags_rows(ctx) {

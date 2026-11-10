@@ -837,6 +837,9 @@ pub enum PageSection {
         /// What the button picking its model says, after `picks`, where
         /// gerdr can start that agent on a model.
         model: Option<String>,
+        /// Whether the agent waits on the user (asked something, its prompt
+        /// to send): the card stands out in the warning colour.
+        waits: bool,
     },
     /// A stage's file (`brief.md`, `plan.md`): its name, how it stands,
     /// and the indices in `StagePage::buttons` of the buttons it holds
@@ -867,6 +870,9 @@ pub enum PageSection {
     Doc {
         name: String,
         blocks: Arc<Vec<DocBlock>>,
+        /// Drawn where it stands among the sections, not last: Plan
+        /// review's final plan, above the suggestions it came from.
+        here: bool,
     },
     /// Build's choice: one agent through all milestones, or a fresh one
     /// per milestone (`fresh`).
@@ -1743,7 +1749,7 @@ const REPO_LINE_MIN: i32 = 40;
 const DOT_ROOM: i32 = 18;
 /// A line of small text, of body text, and of an agent's pane.
 const SMALL_LINE: i32 = 20;
-const BODY_LINE: i32 = 22;
+pub(crate) const BODY_LINE: i32 = 22;
 /// How high a stage page's title is.
 const TITLE_LINE: i32 = BODY_LINE + 6;
 const TAIL_LINE: i32 = 18;
@@ -1757,6 +1763,13 @@ const FINDING_GAP: i32 = 6;
 const COMMENT_PAD: i32 = 8;
 /// How much of the accent tints that card, as a comment's card in a diff.
 const COMMENT_TINT: f32 = 0.1;
+/// How thick a card's border is, logical pixels: a hairline.
+const CARD_BORDER: f32 = 1.0;
+/// How thick the border of an agent card waiting on the user is.
+const WAITS_BORDER: f32 = 2.0;
+/// How much of the warning colour tints the card of an agent that waits on
+/// the user, as a status pill's ground.
+const WAITS_TINT: f32 = 0.12;
 /// How far a check card's text stands right of its dot's left edge.
 const CHECK_DOT_ROOM: i32 = DOT + 8;
 /// How far a round card's lines under one thing it was asked go in.
@@ -3684,7 +3697,7 @@ fn page_stack(
         matches!(page.sections.get(k), Some(PageSection::Finding(c)) if c.sheet.is_some())
     };
     for (k, section) in page.sections.iter().enumerate() {
-        if matches!(section, PageSection::Doc { .. }) || beside == Some(k) {
+        if matches!(section, PageSection::Doc { here: false, .. }) || beside == Some(k) {
             continue;
         }
         // A sheet's rows go one under the other, a rule between them.
@@ -3692,7 +3705,7 @@ fn page_stack(
             s.y += PAGE_GAP;
         }
         match section {
-            PageSection::Doc { .. } => {}
+            PageSection::Doc { blocks, .. } => s.doc(blocks),
             PageSection::Toolbar { groups } => {
                 let row = s.put(ROW_BUTTON, Piece::Caption(String::new()));
                 s.toolbar(groups, page, buttons, row);
@@ -3910,7 +3923,12 @@ fn page_stack(
     }
     // Last: however long it is, what else the page says stays near its top.
     for section in &page.sections {
-        if let PageSection::Doc { name, blocks } = section {
+        if let PageSection::Doc {
+            name,
+            blocks,
+            here: false,
+        } = section
+        {
             s.y += PAGE_GAP;
             // Away from its file's card, it says what it is.
             if inline {
@@ -4524,17 +4542,40 @@ fn comment_stripe(p: &Palette) -> Rgb {
 }
 
 fn card_frame(c: &mut Canvas, rect: Rect, scale: f64, p: &Palette) -> Rect {
+    framed(c, rect, scale, (CARD_BORDER, p.border_variant, p.background))
+}
+
+/// The ground of the card of an agent that waits on the user.
+fn waits_ground(p: &Palette) -> Rgb {
+    mix(p.background, p.warning, WAITS_TINT)
+}
+
+/// The frame of the card of an agent that waits on the user: a border
+/// twice as thick in the warning colour round a ground tinted with it, so
+/// it shows from across the page.
+fn waits_frame(c: &mut Canvas, rect: Rect, scale: f64, p: &Palette) -> Rect {
+    framed(c, rect, scale, (WAITS_BORDER, p.warning, waits_ground(p)))
+}
+
+/// A card's frame on `c` at `rect`, its border `width` logical pixels in
+/// `border` round its `ground`. Gives the card's head row.
+fn framed(
+    c: &mut Canvas,
+    rect: Rect,
+    scale: f64,
+    (width, border, ground): (f32, Rgb, Rgb),
+) -> Rect {
     let s = scale as f32;
     let (x, y, w, h) = rect_px(rect, scale);
-    let b = s.round().max(1.0);
-    c.rounded(x, y, w, h, AGENT_RADIUS * s, p.border_variant);
+    let b = (width * s).round().max(1.0);
+    c.rounded(x, y, w, h, AGENT_RADIUS * s, border);
     c.rounded(
         x + b,
         y + b,
         w - 2.0 * b,
         h - 2.0 * b,
         AGENT_RADIUS * s - b,
-        p.background,
+        ground,
     );
     Rectangle::new(
         (rect.loc.x + AGENT_PAD, rect.loc.y + AGENT_PAD).into(),
@@ -6492,11 +6533,15 @@ impl Painter {
                     buttons,
                     picks,
                     model,
+                    waits,
                 }) = view.page.sections.get(*k)
                 else {
                     return;
                 };
-                let head = card_frame(c, rect, scale, p);
+                let head = match *waits {
+                    true => waits_frame(c, rect, scale, p),
+                    false => card_frame(c, rect, scale, p),
+                };
                 if let Some((track, chips)) = (!picks.is_empty())
                     .then_some(l.agent_picks.as_ref())
                     .flatten()
@@ -6567,16 +6612,32 @@ impl Painter {
                 let (tx, tend) = phys(text, scale);
                 let hb = band(text, scale);
                 let after = self.bold_text(c, name, FONT_SIZE, tx, tend, hb, scale, p.text);
-                self.text(
-                    c,
-                    status,
-                    SMALL_FONT_SIZE,
-                    after + (8.0 * s).round(),
-                    tend,
-                    hb,
-                    scale,
-                    p.muted,
-                );
+                let status_at = after + (8.0 * s).round();
+                match *waits {
+                    // What it waits for, in the colour of its frame.
+                    true => self.bold_text(
+                        c,
+                        status,
+                        SMALL_FONT_SIZE,
+                        status_at,
+                        tend,
+                        hb,
+                        scale,
+                        p.warning,
+                    ),
+                    false => self.text(
+                        c,
+                        status,
+                        SMALL_FONT_SIZE,
+                        status_at,
+                        tend,
+                        hb,
+                        scale,
+                        p.muted,
+                    ),
+                };
+                // What it asks is in its last lines: they read, on its tint.
+                let tail_ink = if *waits { p.text } else { p.muted };
                 // From the card's foot: rows of buttons may come before it.
                 let tail_top = rect.loc.y + rect.size.h - AGENT_PAD - tail.len() as i32 * TAIL_LINE;
                 for (j, tail_line) in tail.iter().enumerate() {
@@ -6593,7 +6654,7 @@ impl Painter {
                         lend,
                         band(r, scale),
                         scale,
-                        p.muted,
+                        tail_ink,
                     );
                 }
             }
@@ -7714,6 +7775,19 @@ mod tests {
     }
 
     #[test]
+    fn a_waiting_agent_cards_words_read_on_its_tint_in_both_themes() {
+        for p in [&ONE_DARK, &ONE_LIGHT_PAGE] {
+            let ground = waits_ground(p);
+            for (what, colour) in [("status", p.warning), ("name and tail", p.text)] {
+                let ratio = contrast(colour, ground);
+                assert!(ratio >= 4.5, "{what} at {ratio:.2}:1");
+            }
+            let ratio = contrast(p.warning, p.background);
+            assert!(ratio >= 3.0, "frame at {ratio:.2}:1");
+        }
+    }
+
+    #[test]
     fn a_checks_dot_and_output_read_on_its_card_in_both_themes() {
         for p in [&ONE_DARK, &ONE_LIGHT_PAGE] {
             for tag in [
@@ -8060,6 +8134,7 @@ mod tests {
         view.page.sections.push(PageSection::Doc {
             name: "brief.md".to_owned(),
             blocks: Arc::new(blocks),
+            here: false,
         });
         view
     }
@@ -8937,6 +9012,7 @@ mod tests {
                     text: text.into(),
                     caret: text.len(),
                     anchor: text.len(),
+                    scroll: 0,
                 });
             }
         };
@@ -8953,6 +9029,7 @@ mod tests {
             text: "first\nsecond\nthird".into(),
             caret: 0,
             anchor: 0,
+            scroll: 0,
         };
         let at = |y: i32| Point::from((three.loc.x as f64 + 5.0, (three.loc.y + y) as f64));
         let line_at = |y: i32| {

@@ -887,6 +887,7 @@ mod tests {
             text: "abc\ndef\nghi".into(),
             caret: 5,
             anchor: 2,
+            scroll: 0,
         };
         let lines = sub_lines(&whole);
         assert_eq!(lines.len(), 3);

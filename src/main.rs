@@ -1683,9 +1683,15 @@ pub struct Gerdr {
     /// The text copied from one of gerdr's own text fields, while gerdr
     /// owns the clipboard with it (see `clipboard`).
     pub copied: Option<String>,
-    /// The last presses in an overlay's text field (when, where, how many
-    /// in a row), to tell double and triple clicks.
-    pub field_clicks: Option<(std::time::Instant, Point<f64, Logical>, u32)>,
+    /// How many left presses in a row the last was, a moment apart and in
+    /// about one place (see `count_press`).
+    pub press_count: u32,
+    /// While a press in a text field is held past its text: when it last
+    /// went on for it, and the part of a step carried to the next frame.
+    pub field_edge: Option<(std::time::Instant, f64)>,
+    /// A key, a paste or a press may have moved a text field's caret since
+    /// the last frame: `keep_field_scroll` keeps where its view starts.
+    pub field_scroll_due: bool,
     /// A press in an overlay's text field is held: moving selects.
     pub field_drag: bool,
     /// The left button went down on the repositories panel's diff and is
@@ -1694,6 +1700,10 @@ pub struct Gerdr {
     /// The left button went down on the comment being written in the
     /// diff and is held: moving selects its text.
     pub repos_editor_drag: bool,
+    /// While a press on the diff (either of those) is held past its rows:
+    /// when they last scrolled for it, and the part of a row carried to
+    /// the next frame.
+    pub repos_drag_edge: Option<(std::time::Instant, f64)>,
     /// The file's tab showing as of the last frame, by id: one coming to
     /// show reads its file again (see `doc_tab`).
     pub doc_tab_shown: Option<u64>,
@@ -7256,10 +7266,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         pending_enter: None,
         paste: None,
         copied: None,
-        field_clicks: None,
+        press_count: 0,
+        field_edge: None,
+        field_scroll_due: false,
         field_drag: false,
         repos_rows_drag: false,
         repos_editor_drag: false,
+        repos_drag_edge: None,
         doc_tab_shown: None,
         scrollback: None,
         criteria_strip: Default::default(),

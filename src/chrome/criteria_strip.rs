@@ -690,6 +690,7 @@ mod tests {
             text: text.into(),
             caret: text.len(),
             anchor: text.len(),
+            scroll: 0,
         };
         v.field = Some(line("one"));
         let one = criteria_strip_layout(&v);

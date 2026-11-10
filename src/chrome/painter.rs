@@ -128,6 +128,12 @@ pub(super) fn sub_lines(whole: &Line) -> Vec<SubLine> {
                 text: text.to_owned(),
                 caret: inside(whole.caret),
                 anchor: inside(whole.anchor),
+                // The view's start is the caret's line's: the others start
+                // at their own.
+                scroll: match (start..=end).contains(&whole.caret) {
+                    true => inside(whole.scroll),
+                    false => 0,
+                },
             },
             start,
             has_caret: (start..=end).contains(&whole.caret),
@@ -840,7 +846,7 @@ impl Painter {
         let width = |text: &str| self.text_width(text, size, scale);
         let to_caret = width(&line[..line.caret]);
         // How far the text moves left for the caret to show.
-        let scrolled = (to_caret - (max_x - x)).max(0.0);
+        let scrolled = width(&line[..self.shown_from(line, max_x - x, size, scale)]);
         let start = x - scrolled;
         let selection = line.selection();
         if focused && !selection.is_empty() {
@@ -1344,6 +1350,36 @@ impl Painter {
         text_in(font, c, text, size, x, max_x, band, scale, color)
     }
 
+    /// The byte `line`'s view starts at in a field `room` physical pixels
+    /// wide: where it started (`Line::scroll`), moved only as far as the
+    /// caret needs to be in view, and back for the text's end to fill the
+    /// field when it can.
+    pub(super) fn shown_from(&self, line: &Line, room: f32, size: f32, scale: f64) -> usize {
+        let text = line.text.as_str();
+        let width = |from: usize, to: usize| self.text_width(&text[from..to], size, scale);
+        let caret = line.caret.min(text.len());
+        let mut first = line.scroll.min(caret);
+        while !text.is_char_boundary(first) {
+            first -= 1;
+        }
+        // The caret past the right edge: on until it shows.
+        let from = first;
+        for (i, c) in text[from..caret].char_indices() {
+            if width(first, caret) <= room {
+                break;
+            }
+            first = from + i + c.len_utf8();
+        }
+        // Room after the text's end: back while it still fits.
+        for (i, _) in text[..first].char_indices().rev() {
+            if width(i, text.len()) > room {
+                break;
+            }
+            first = i;
+        }
+        first
+    }
+
     /// The byte of `line`, drawn by `edit_line` between `x` and `max_x`,
     /// nearest `at` (physical pixels).
     pub(super) fn caret_at(
@@ -1355,7 +1391,7 @@ impl Painter {
         scale: f64,
     ) -> usize {
         let width = |text: &str| self.text_width(text, size, scale);
-        let scrolled = (width(&line[..line.caret]) - (max_x - x)).max(0.0);
+        let scrolled = width(&line[..self.shown_from(line, max_x - x, size, scale)]);
         let mut pen = x - scrolled;
         for (i, ch) in line.char_indices() {
             let advance = width(ch.encode_utf8(&mut [0; 4]));
@@ -1539,5 +1575,42 @@ mod tests {
         let end = painter.caret_at(&long, narrow, narrow.1, FONT_SIZE, 1.0);
         assert_eq!(end, long.len());
         assert!(painter.caret_at(&long, narrow, x, FONT_SIZE, 1.0) > 0);
+    }
+
+    #[test]
+    fn a_long_lines_view_moves_only_as_far_as_its_caret_needs() {
+        let painter = Painter::new();
+        if painter.font.is_none() {
+            return;
+        }
+        let width = |text: &str| painter.text_width(text, FONT_SIZE, 1.0);
+        let text = "one two three four five six seven";
+        let room = width("three four");
+        let at = |caret: usize, scroll: usize| {
+            let line = Line {
+                text: text.into(),
+                caret,
+                anchor: caret,
+                scroll,
+            };
+            painter.shown_from(&line, room, FONT_SIZE, 1.0)
+        };
+        let four = text.find("four").unwrap();
+        let three = text.find("three").unwrap();
+        // At the end, as far on as the caret needs.
+        let end = at(text.len(), 0);
+        assert!(end > 0 && width(&text[end..]) <= room);
+        // Back a word, the view stays where it was: no jump under the
+        // pointer.
+        assert_eq!(at(text.len() - 3, end), end);
+        // Left of the view, it starts at the caret.
+        assert_eq!(at(three, end), three);
+        // From "three", the caret on "four" is in view still.
+        assert_eq!(at(four, three), three);
+        // Past the end of the text, never: it fills the field from the end.
+        assert_eq!(at(text.len(), text.len()), end);
+        // Room for it all, from its start.
+        let short = Line::from("one");
+        assert_eq!(painter.shown_from(&short, room, FONT_SIZE, 1.0), 0);
     }
 }

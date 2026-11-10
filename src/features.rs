@@ -1433,9 +1433,13 @@ pub struct FeaturePanel {
     pub pick: Option<chrome::TextPick>,
     /// The pointer holds a press selecting text on the page.
     pub picking: bool,
-    /// The last press on the page's text: when, where and how many in a
-    /// row, for a double click.
-    pub pick_clicks: Option<(std::time::Instant, Point<f64, Logical>, u32)>,
+    /// What the selection on the page goes by (chars, or the words or
+    /// lines a double or triple click took) and the span its press took,
+    /// which it keeps whichever way it is dragged or Shift+clicked on.
+    pub(crate) pick_by: Option<(crate::scrollback::Grain, (chrome::TextSpot, chrome::TextSpot))>,
+    /// A press selecting the page's text held past its top or bottom:
+    /// when the page last went on by it (see `scrolling::edge_steps`).
+    pub pick_edge: Option<(std::time::Instant, f64)>,
 }
 
 /// What follows shipping, as the Ship page ticks it.
@@ -2093,8 +2097,18 @@ impl Rework {
             Rework::Waits => "waiting for you \u{b7} send the prompt",
             Rework::Closed => "its tab closed \u{b7} Start agent opens it again",
             Rework::Draft => "draft in T3 Code \u{b7} pick a model and send it",
+            Rework::Runs(Dot::Blocked) => "running again \u{b7} needs you",
             Rework::Runs(_) => "running again",
         }
+    }
+
+    /// Whether its agent waits on the user: its card stands out for it.
+    /// A closed tab waits on nobody's answer.
+    fn waits_on_you(self) -> bool {
+        matches!(
+            self,
+            Rework::Waits | Rework::Draft | Rework::Runs(Dot::Blocked)
+        )
     }
 }
 
@@ -11668,6 +11682,7 @@ fn agent_card(
             buttons,
             picks,
             model: state.model.clone(),
+            waits: false,
         });
     };
     let mark = stage_mark(feature, stage);
@@ -11709,15 +11724,22 @@ fn agent_card(
         true => state.tail.to_vec(),
         false => Vec::new(),
     };
+    // Asked something, held for its prompt, or idle with its work undone.
+    let waits = match back {
+        Some(back) => back.waits_on_you(),
+        None if current => crate::feature_agents::waits_on_you(run, stage, state.agent_status),
+        None => run.waits_to_send(),
+    };
     Some(PageSection::Agent {
         icon: AgentIcon::from_agent(&run.agent),
         name: run.agent.clone(),
-        dot,
+        dot: if waits { Dot::Blocked } else { dot },
         status,
         tail,
         buttons,
         picks,
         model: state.model.clone(),
+        waits,
     })
 }
 
@@ -11736,6 +11758,7 @@ fn rework_card(
         icon: AgentIcon::from_agent(&run.agent),
         name: run.agent.clone(),
         dot: match back {
+            _ if back.waits_on_you() => Dot::Blocked,
             Rework::Runs(dot) => dot,
             _ => Dot::Unknown,
         },
@@ -11744,19 +11767,24 @@ fn rework_card(
         buttons: agent_buttons(Stage::Build, actions),
         picks: Vec::new(),
         model: None,
+        waits: back.waits_on_you(),
     })
 }
 
-/// The card of Discover's or Plan's file in `feature`: how it stands, with
-/// the page's buttons on it in `actions`: to its tab, plain or the one to
-/// press next, and Approve while it waits for review.
+/// The card of a stage's file in `feature`: how it stands, with the page's
+/// buttons on it in `actions`: to its tab, plain or the one to press next,
+/// Approve while it waits for review, and the final plan's Diff.
 fn file_card(
     feature: &Feature,
     stage: Stage,
     ctx: RowCtx,
     actions: &[(PageButton, PanelOutcome)],
 ) -> PageSection {
-    let own = [PanelOutcome::OpenDoc(stage), PanelOutcome::ApproveDoc(stage)];
+    let own = [
+        PanelOutcome::OpenDoc(stage),
+        PanelOutcome::ApproveDoc(stage),
+        PanelOutcome::PlanChanges,
+    ];
     PageSection::File {
         name: crate::feature::artifacts::name(stage)
             .unwrap_or("file")
@@ -12327,13 +12355,9 @@ fn folds_round_cards(feature: &Feature, stage: Stage) -> bool {
 }
 
 /// The numbers of the cards of rounds `stage`'s page of `feature` lists,
-/// newest first: its fix rounds, or Plan review's runs.
+/// newest first: its fix rounds, or Discover's and Plan's drafts.
 fn card_numbers(feature: &Feature, stage: Stage) -> Vec<u32> {
     match stage {
-        Stage::PlanReview => (feature.plan_review.iter())
-            .flat_map(feature::plan_review::runs)
-            .map(|r| r.n)
-            .collect(),
         Stage::Discover | Stage::Plan => (feature::drafts::of(&feature.drafts, stage).iter())
             .map(|d| d.k)
             .collect(),
@@ -12796,7 +12820,7 @@ fn round_plan_actions(
 ) -> Vec<(PageButton, PanelOutcome)> {
     match ROUND_CARD_STAGES.contains(&stage) {
         true => round_card_actions(feature, stage, probe),
-        false if stage == Stage::PlanReview => run_card_actions(feature, probe),
+        false if stage == Stage::PlanReview => plan_changes_action(probe),
         false if stage == Stage::Ship => ship_base_actions(feature, probe),
         false if matches!(stage, Stage::Discover | Stage::Plan) => {
             draft_card_actions(feature, stage)
@@ -12935,23 +12959,18 @@ fn ship_base_line(feature: &Feature, probe: Option<&Probe>, key: &str) -> Option
     })
 }
 
-/// The buttons of Plan review's run cards of `feature`, by `probe`: what the
-/// final plan changed, on the newest, once there is one; folding.
-fn run_card_actions(feature: &Feature, probe: Option<&Probe>) -> Vec<(PageButton, PanelOutcome)> {
-    let button = |label: &str| PageButton {
-        label: label.to_owned(),
+/// The button on Plan review's final plan card, by `probe`: what the final
+/// plan changed, once there is one.
+fn plan_changes_action(probe: Option<&Probe>) -> Vec<(PageButton, PanelOutcome)> {
+    let written = probe.is_some_and(|p| p.docs.written.contains(&Stage::PlanReview));
+    let button = PageButton {
+        label: "Diff".to_owned(),
         style: ButtonStyle::Plain,
     };
-    let runs = card_numbers(feature, Stage::PlanReview);
-    let written = probe.is_some_and(|p| p.docs.written.contains(&Stage::PlanReview));
-    let mut out = Vec::new();
-    if written && !runs.is_empty() {
-        out.push((button("Diff"), PanelOutcome::PlanChanges));
+    match written {
+        true => vec![(button, PanelOutcome::PlanChanges)],
+        false => Vec::new(),
     }
-    if runs.len() > 1 {
-        out.extend((runs.iter()).map(|n| (button("Show"), PanelOutcome::FoldFixRound(*n))));
-    }
-    out
 }
 
 /// The buttons of the draft cards on `stage`'s page of `feature`: what each
@@ -13064,128 +13083,6 @@ fn draft_cards(
     out
 }
 
-/// Plan review's runs of `feature` as cards, newest first, under a caption
-/// counting them: who reviewed and when, what each raised and how the user
-/// decided it, the newest saying where the final plan stands.
-fn run_cards(
-    feature: &Feature,
-    state: &PanelState,
-    actions: &[(PageButton, PanelOutcome)],
-    now: u64,
-) -> Vec<PageSection> {
-    use feature::plan_review::State;
-    let Some(review) = feature.plan_review.as_ref() else {
-        return Vec::new();
-    };
-    let runs = feature::plan_review::runs(review);
-    let Some(newest) = runs.first().map(|r| r.n) else {
-        return Vec::new();
-    };
-    let caption = match runs.len() {
-        1 => "Review run".to_owned(),
-        n => format!("Review runs \u{b7} {n}"),
-    };
-    let mut out = vec![lines(&caption, Vec::new())];
-    let mut told: BTreeSet<&str> = BTreeSet::new();
-    for run in &runs {
-        let latest = run.n == newest;
-        let (dot, state_line) = match () {
-            _ if !latest => {
-                let said = [
-                    (run.new, "new"),
-                    (run.again, "raised again"),
-                    (run.dropped, "left out"),
-                ];
-                let words: Vec<String> = (said.iter())
-                    .filter(|(n, _)| *n > 0)
-                    .map(|(n, what)| format!("{n} {what}"))
-                    .collect();
-                let text = match words.is_empty() {
-                    true => "nothing to change".to_owned(),
-                    false => words.join(" \u{b7} "),
-                };
-                (Dot::Done, line(text, CheckTone::Note))
-            }
-            _ if review.writing => (
-                Dot::Working,
-                line("final plan being written", CheckTone::Note),
-            ),
-            _ if feature.is_done(Stage::PlanReview) => (
-                Dot::Done,
-                line(
-                    match state.ctx.wrote(Stage::PlanReview) {
-                        true => "final plan approved",
-                        false => "done: the plan stands",
-                    },
-                    CheckTone::Ready,
-                ),
-            ),
-            _ if review.open() > 0 => (
-                Dot::Idle,
-                line(format!("{} to decide", review.open()), CheckTone::Blocker),
-            ),
-            _ => (Dot::Done, line("all decided", CheckTone::Ready)),
-        };
-        let mut meta = Vec::new();
-        if !run.agent.is_empty() {
-            meta.push(match run.model.is_empty() {
-                true => run.agent.clone(),
-                false => format!("{} ({})", run.agent, run.model),
-            });
-        }
-        if run.at > 0 {
-            meta.push(format!("read {}", projects::ago(now, run.at)));
-        }
-        if latest {
-            let (yes, no) = (review.count(State::Accepted), review.count(State::Rejected));
-            if yes + no > 0 {
-                meta.push(format!("{yes} accepted \u{b7} {no} rejected"));
-            }
-        }
-        let asked = (run.raised.iter())
-            .filter_map(|id| review.suggestion(id))
-            .map(|sug| chrome::RoundAsked {
-                id: sug.id.clone(),
-                title: sug.title.clone(),
-                note: sug.change.clone(),
-                now: (!told.contains(sug.id.as_str())).then(|| match (sug.state, sug.dropped) {
-                    (State::Accepted, _) => line("accepted", CheckTone::Ready),
-                    (State::Rejected, _) if !sug.reason.is_empty() => {
-                        line(format!("rejected: {}", sug.reason), CheckTone::Note)
-                    }
-                    (State::Rejected, _) => line("rejected", CheckTone::Note),
-                    (State::Open, true) => line("left out by a later run", CheckTone::Note),
-                    (State::Open, false) => line("to decide", CheckTone::Blocker),
-                }),
-            })
-            .collect();
-        told.extend(run.raised.iter().map(String::as_str));
-        let held = |o: &PanelOutcome| match o {
-            PanelOutcome::PlanChanges => latest,
-            PanelOutcome::FoldFixRound(n) => *n == run.n,
-            _ => false,
-        };
-        let buttons = (actions.iter().enumerate())
-            .filter(|(_, (_, o))| held(o))
-            .map(|(i, _)| i)
-            .collect();
-        out.push(PageSection::Round(chrome::RoundCard {
-            label: format!("Review run {}", run.n),
-            dot,
-            state: state_line,
-            meta: meta.join(" \u{b7} "),
-            asked,
-            asked_caption: "Suggestions",
-            fixes: Vec::new(),
-            running: Vec::new(),
-            changed: Vec::new(),
-            open: fix_round_open(Some(newest), run.n, &state.fix_rounds_flipped),
-            buttons,
-        }));
-    }
-    out
-}
-
 /// `stage`'s file to read on its page, as `probe` last read it; none while
 /// it has none.
 fn doc_of(probe: Option<&Probe>, stage: Stage) -> Option<PageSection> {
@@ -13193,6 +13090,7 @@ fn doc_of(probe: Option<&Probe>, stage: Stage) -> Option<PageSection> {
     Some(PageSection::Doc {
         name: crate::feature::artifacts::name(stage)?.to_owned(),
         blocks: blocks.clone(),
+        here: false,
     })
 }
 
@@ -13339,12 +13237,18 @@ fn stage_page(
         match stage {
             Stage::PlanReview => {
                 sections.extend(card());
-                sections.extend(suggestion_sections(feature, stage, state, actions));
-                sections.extend(run_cards(feature, state, actions, now));
+                // Once written, the final plan is what the stage made: it
+                // goes first, the suggestions it came from under it.
                 if state.ctx.wrote(stage) {
                     sections.push(file_card(feature, stage, state.ctx, actions));
-                    sections.extend(doc_of(state.probe, stage));
+                    sections.extend(doc_of(state.probe, stage).map(|mut doc| {
+                        if let PageSection::Doc { here, .. } = &mut doc {
+                            *here = true;
+                        }
+                        doc
+                    }));
                 }
+                sections.extend(suggestion_sections(feature, stage, state, actions));
             }
             Stage::Discover | Stage::Plan => {
                 sections.extend(card());
@@ -13741,6 +13645,7 @@ fn comment_plan(feature: &Feature, probe: Option<&Probe>) -> Option<PageSection>
     Some(PageSection::Doc {
         name: feature::fix_round::FILE.to_owned(),
         blocks: blocks.clone(),
+        here: false,
     })
 }
 
@@ -16700,7 +16605,7 @@ pub(crate) mod tests {
         let page = stage_page(&f, Stage::Build, &PanelState::default(), &actions, 2_000);
         assert!(page.sections.iter().any(|s| matches!(
             s,
-            PageSection::Agent { status, .. } if status.starts_with("waiting for you")
+            PageSection::Agent { status, waits: true, .. } if status.starts_with("waiting for you")
         )));
         // Its tab closed: it can still open again from there.
         f.runs.insert(Stage::Build, held_run(None));
@@ -16708,6 +16613,40 @@ pub(crate) mod tests {
             page_outcomes(&f, Stage::Build)
                 .contains(&PanelOutcome::StartAgent(Stage::Build, false))
         );
+    }
+
+    #[test]
+    fn an_agent_waiting_on_you_has_its_card_stand_out() {
+        let mut f = feature("b", vec![repo("api", true)], 1);
+        assert_eq!(f.current(), Some(Stage::Plan));
+        let card = |f: &Feature, status| {
+            let state = PanelState {
+                agent_status: status,
+                ..PanelState::default()
+            };
+            let page = stage_page(f, Stage::Plan, &state, &[], 2_000);
+            page.sections.iter().find_map(|s| match s {
+                PageSection::Agent { waits, dot, .. } => Some((*waits, *dot)),
+                _ => None,
+            })
+        };
+        // Held for its prompt, or told something in its tab and at work.
+        f.runs.insert(Stage::Plan, held_run(Some("p1")));
+        assert_eq!(card(&f, None), Some((true, Dot::Blocked)));
+        let working = Some((false, Dot::Working));
+        assert_eq!(card(&f, Some(AgentStatus::Working)), working);
+        // Running: asked something, idle with plan.md not ready, at work.
+        f.runs.insert(Stage::Plan, agent_run(Some("p1"), None));
+        let waits = Some((true, Dot::Blocked));
+        assert_eq!(card(&f, Some(AgentStatus::Blocked)), waits);
+        assert_eq!(card(&f, Some(AgentStatus::Idle)), waits);
+        assert_eq!(card(&f, Some(AgentStatus::Working)), working);
+        // Its file ready, it waits on nothing.
+        f.runs.insert(Stage::Plan, agent_run(Some("p1"), Some(1)));
+        assert_eq!(card(&f, Some(AgentStatus::Idle)).map(|c| c.0), Some(false));
+        // Its tab closed: no answer to wait for.
+        f.runs.insert(Stage::Plan, agent_run(None, None));
+        assert_eq!(card(&f, None).map(|c| c.0), Some(false));
     }
 
     #[test]
@@ -16885,14 +16824,8 @@ pub(crate) mod tests {
             })
             .collect();
         assert_eq!(titles, ["Which?", "How?"]);
-        // Its run shows as a card, what it raised waiting.
-        let Some(PageSection::Round(run)) = page.sections.get(4) else {
-            panic!("{:?}", page.sections);
-        };
-        assert_eq!(run.label, "Review run 1");
-        assert_eq!(run.state.text, "2 to decide");
-        assert_eq!(run.asked_caption, "Suggestions");
-        assert_eq!(run.asked.len(), 2);
+        // Its run shows as no card of its own: the suggestions say it.
+        assert!(!page.sections.iter().any(|s| matches!(s, PageSection::Round(_))));
         assert_eq!(
             crate::feature_agents::gate_of(&f, |_| None).map(|g| g.2),
             Some(crate::feature_agents::GateKind::Suggestions { open: 2 })
@@ -17065,18 +16998,12 @@ pub(crate) mod tests {
                 "{label}"
             );
         }
-        // A rejected one says why on its run's card too.
+        // A rejected one says why on its card.
         let review = f.plan_review.as_mut().unwrap();
         plan_review::decide(review, "r1-1", Decision::Reject("Not needed".into())).unwrap();
         plan_review::set_note(review, "r1-2", "Both").unwrap();
         let view = tab_view(&panel, &f, &["p".to_owned()], &PanelState::default(), 2_000);
         assert_eq!(cards_of(&view)[1].state, "rejected: Not needed");
-        let run = (view.page.sections.iter()).find_map(|s| match s {
-            PageSection::Round(run) => Some(run),
-            _ => None,
-        });
-        let now = run.and_then(|r| r.asked.iter().find(|a| a.id == "r1-1")?.now.clone());
-        assert_eq!(now.map(|l| l.text), Some("rejected: Not needed".to_owned()));
         // A note to ask about: the reviewer can be.
         let asks = page_actions(&f, Stage::PlanReview, RowCtx::default());
         assert!(
@@ -22126,6 +22053,7 @@ pub(crate) mod tests {
                     buttons: vec![0, 1],
                     picks: Vec::new(),
                     model: None,
+                    waits: false,
                 },
                 PageSection::MilestoneMode { fresh: false }
             ]
@@ -23558,6 +23486,7 @@ pub(crate) mod tests {
         let doc = PageSection::Doc {
             name: "plan.md".to_owned(),
             blocks,
+            here: false,
         };
         let has_doc =
             |page: &StagePage| (page.sections.iter()).any(|s| matches!(s, PageSection::Doc { .. }));
@@ -24525,84 +24454,64 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn plan_reviews_runs_show_as_cards_with_what_each_raised() {
+    fn plan_reviews_final_plan_shows_first_holding_its_diff_and_no_run_cards() {
         use crate::feature::plan_review::{self, PlanReview, RunRecord};
         let stage = Stage::PlanReview;
         let mut f = feature("p", vec![repo("api", true)], stage_index(stage));
         assert_eq!(f.current(), Some(stage));
         let mut review = PlanReview::default();
         let raws = |text: &str| plan_review::parse(text).unwrap();
-        plan_review::import(
-            &mut review,
-            1,
-            raws(
-                r#"{"suggestions": [{"kind": "question", "plan": "M1", "title": "A?", "why": "w"}]}"#,
-            ),
-        );
         let got = plan_review::import(
             &mut review,
-            2,
-            raws(
-                r#"{"suggestions": [{"id": "r1-1", "kind": "question", "plan": "M1",
-                "title": "A again?", "why": "w"},
-                {"kind": "question", "plan": "M2", "title": "B?", "why": "w"}]}"#,
-            ),
+            1,
+            raws(r#"{"suggestions": [{"kind": "question", "plan": "M1", "title": "A?", "why": "w"}]}"#),
         );
         plan_review::keep_run(
             &mut review,
             RunRecord {
-                n: 2,
+                n: 1,
                 at: 1_000,
                 agent: "Codex".into(),
                 raised: got.ids.clone(),
                 new: got.new,
-                again: got.again,
                 ..RunRecord::default()
             },
         );
-        review.writing = true;
+        review.stamp = Some((1, 1));
         f.plan_review = Some(review);
         let mut read = probe(None);
         read.docs.written.insert(stage);
+        read.docs.previews.insert(stage, std::sync::Arc::new(Vec::new()));
         let state = PanelState {
             probe: Some(&read),
+            ctx: wrote(&[stage]),
             ..PanelState::default()
         };
         let actions = round_plan_actions(&f, stage, state.probe);
-        let page = stage_page(&f, stage, &state, &actions, 1_120);
-        let cards: Vec<&chrome::RoundCard> = (page.sections.iter())
-            .filter_map(|s| match s {
-                PageSection::Round(card) => Some(card),
-                _ => None,
-            })
-            .collect();
-        let labels: Vec<&str> = cards.iter().map(|c| c.label.as_str()).collect();
-        assert_eq!(labels, ["Review run 2", "Review run 1"]);
-        assert_eq!(cards[0].state.text, "final plan being written");
-        assert_eq!(cards[0].dot, Dot::Working);
-        assert_eq!(cards[0].meta, "Codex \u{b7} read 2m ago");
-        let titles: Vec<&str> = cards[0].asked.iter().map(|a| a.title.as_str()).collect();
-        assert_eq!(titles, ["A again?", "B?"]);
-        // How one stands is said on the newest run raising it.
-        assert!(cards[1].asked.is_empty() || cards[1].asked[0].now.is_none());
-        assert!(!cards[1].open);
-        let held = |card: &chrome::RoundCard| -> Vec<&str> {
-            (card.buttons.iter())
-                .map(|&i| page.buttons[i].label.as_str())
-                .collect()
-        };
-        assert_eq!(held(cards[0]), ["Diff", "Hide"]);
-        assert_eq!(held(cards[1]), ["Show"]);
+        assert_eq!(actions.len(), 1);
         assert_eq!(actions[0].1, PanelOutcome::PlanChanges);
-        // No final plan yet: no Diff.
-        let none = round_plan_actions(&f, stage, None);
-        assert!(!none.iter().any(|(_, o)| *o == PanelOutcome::PlanChanges));
-        // Alt+E folds them, then opens them all.
-        let mut panel = FeaturePanel::default();
-        panel.toggle_rounds(&f, stage);
-        assert_eq!(panel.fix_rounds_flipped, BTreeSet::from([2]));
-        panel.toggle_rounds(&f, stage);
-        assert_eq!(panel.fix_rounds_flipped, BTreeSet::from([1]));
+        let page = stage_page(&f, stage, &state, &actions, 1_120);
+        // The suggestion cards say it all: no card per review run.
+        assert!(!page.sections.iter().any(|s| matches!(s, PageSection::Round(_))));
+        let Some(PageSection::File { buttons, .. }) =
+            (page.sections.iter()).find(|s| matches!(s, PageSection::File { .. }))
+        else {
+            panic!("{:?}", page.sections);
+        };
+        let held: Vec<&str> = (buttons.iter())
+            .map(|&i| page.buttons[i].label.as_str())
+            .collect();
+        assert!(held.contains(&"Diff"), "{held:?}");
+        // The final plan comes first, its text too, the suggestions under
+        // it.
+        let at = |is: fn(&PageSection) -> bool| page.sections.iter().position(is);
+        let file = at(|s| matches!(s, PageSection::File { .. })).unwrap();
+        let text = at(|s| matches!(s, PageSection::Doc { here: true, .. })).unwrap();
+        let card = at(|s| matches!(s, PageSection::Finding(_))).unwrap();
+        assert!(file < text && text < card, "{:?}", page.sections);
+        // No final plan yet: no Diff, and nothing for Alt+E to fold.
+        assert!(round_plan_actions(&f, stage, None).is_empty());
+        assert!(card_numbers(&f, stage).is_empty());
     }
 
     #[test]

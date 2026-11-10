@@ -286,6 +286,18 @@ impl Chrome {
         )
     }
 
+    /// The byte `field`'s view starts at as it is drawn on an output of
+    /// `scale` (see `Line::scroll`); in a field of lines, its caret's
+    /// line's. The field keeps it for the next frame.
+    pub fn field_first(&self, field: &FieldSpot, scale: f64) -> usize {
+        let room = field.text.1 - field.text.0;
+        let lines = painter::sub_lines(&field.line);
+        let Some(sub) = lines.iter().find(|sub| sub.has_caret) else {
+            return 0;
+        };
+        sub.start + (self.painter).shown_from(&sub.line, room, field.size, scale)
+    }
+
     pub fn new() -> Self {
         Self {
             painter: Painter::new(),

@@ -2741,6 +2741,7 @@ pub(super) fn feature_tab() -> super::FeatureTabView {
                     buttons: vec![1, 2],
                     picks: Vec::new(),
                     model: None,
+                    waits: false,
                 },
                 PageSection::Lines {
                     label: "Fix round".into(),
@@ -2841,6 +2842,7 @@ fn feature_tab_plan_ready() -> super::FeatureTabView {
                 buttons: vec![1],
                 picks: Vec::new(),
                 model: None,
+                waits: false,
             },
             PageSection::File {
                 name: "plan.md".into(),
@@ -2944,6 +2946,7 @@ fn feature_tab_discover_brief() -> super::FeatureTabView {
                 buttons: vec![1],
                 picks: Vec::new(),
                 model: None,
+                waits: false,
             },
             PageSection::File {
                 name: "brief.md".into(),
@@ -2953,6 +2956,7 @@ fn feature_tab_discover_brief() -> super::FeatureTabView {
             PageSection::Doc {
                 name: "brief.md".into(),
                 blocks: std::sync::Arc::new(doc_blocks()),
+                here: false,
             },
         ],
     };
@@ -2968,6 +2972,7 @@ fn feature_tab_plan_long() -> super::FeatureTabView {
     view.page.sections.push(PageSection::Doc {
         name: "plan.md".into(),
         blocks: std::sync::Arc::new(blocks),
+        here: false,
     });
     view.page.status = Some(tab_line("plan.md is ready for review", CheckTone::Blocker));
     view.scroll[TabColumn::Page as usize] = 300.0;
@@ -3004,6 +3009,7 @@ fn feature_tab_resume() -> super::FeatureTabView {
             buttons: vec![1],
             picks: Vec::new(),
             model: None,
+            waits: false,
         }],
     };
     view
@@ -3762,6 +3768,7 @@ fn feature_tab_brief(locked: bool) -> super::FeatureTabView {
             PageSection::Doc {
                 name: "brief.md".into(),
                 blocks: std::sync::Arc::new(doc_blocks()),
+                here: false,
             },
         ],
     };
@@ -3813,6 +3820,7 @@ fn feature_tab_start_over() -> super::FeatureTabView {
                 buttons: vec![1],
                 picks: Vec::new(),
                 model: None,
+                waits: false,
             },
             PageSection::File {
                 name: "plan.md".into(),
@@ -3822,6 +3830,7 @@ fn feature_tab_start_over() -> super::FeatureTabView {
             PageSection::Doc {
                 name: "plan.md".into(),
                 blocks: std::sync::Arc::new(doc_blocks()),
+                here: false,
             },
         ],
     };
@@ -4119,6 +4128,7 @@ fn feature_tab_review_fixes() -> super::FeatureTabView {
                     "## Fixes\n\n### C1: Rename the loop\n\nIts name hides that it retries.\n\n\
                      ### C2: Test the last attempt\n\nNothing checks the limit.\n",
                 )),
+                here: false,
             },
         ],
     };
@@ -4180,6 +4190,7 @@ fn feature_tab_picks_later() -> super::FeatureTabView {
             buttons: Vec::new(),
             picks: agent_chips(1, true),
             model: None,
+            waits: false,
         }],
     };
     view
@@ -4260,12 +4271,13 @@ fn feature_tab_held() -> super::FeatureTabView {
         sections: vec![PageSection::Agent {
             icon: AgentIcon::from_agent("Claude Code"),
             name: "Claude Code".into(),
-            dot: Dot::Unknown,
+            dot: Dot::Blocked,
             status: "waiting for you \u{b7} send the prompt".into(),
             tail: Vec::new(),
             buttons: vec![0, 1],
             picks,
             model: None,
+            waits: true,
         }],
     };
     view
@@ -4417,6 +4429,7 @@ fn feature_tab_fixing() -> super::FeatureTabView {
                 buttons: vec![0],
                 picks: Vec::new(),
                 model: None,
+                waits: false,
             },
             super::PageSection::Lines {
                 label: "Findings".into(),
@@ -4450,12 +4463,13 @@ fn feature_tab_t3_draft() -> super::FeatureTabView {
         sections: vec![PageSection::Agent {
             icon: AgentIcon::T3,
             name: "T3 Code".into(),
-            dot: Dot::Unknown,
+            dot: Dot::Blocked,
             status: "draft in T3 Code \u{b7} pick a model and send it".into(),
             tail: Vec::new(),
             buttons: Vec::new(),
             picks,
             model: None,
+            waits: true,
         }],
     };
     view
@@ -5372,10 +5386,10 @@ const GOLDEN_FEATURE_TAB: [[u64; 61]; 4] = [
         0x77200a37f756c4dd, // tab_picks_running_860
         0x5b4ea1e7416a2668, // tab_model_later_1180
         0xf3098420783950d4, // tab_model_long_860
-        0x1b190673f5a76dea, // tab_t3_draft_860
+        0xb26db5d5ef4fe144, // tab_t3_draft_860
         0xe6f677143326164a, // tab_milestone_mode_1180
         0x8d52a746f8ccb913, // tab_milestone_mode_860
-        0x3daadf48429854b9, // tab_held_860
+        0x8fe24ae322b3cfd9, // tab_held_860
         0xdd57288e450f32e2, // tab_resume_1180
         0x1d3b7ea983d73226, // tab_resume_860
         0x37ef3c6e3ca8a6a0, // tab_fixing_1180
@@ -5436,10 +5450,10 @@ const GOLDEN_FEATURE_TAB: [[u64; 61]; 4] = [
         0xa1e3ae31e119d46a, // tab_picks_running_860
         0x289abf81f924a67e, // tab_model_later_1180
         0x85a0595411690559, // tab_model_long_860
-        0x13b24120dc0e0e14, // tab_t3_draft_860
+        0x7040b1cbbb20a27a, // tab_t3_draft_860
         0x1014c59c212547f8, // tab_milestone_mode_1180
         0xe516174034f84704, // tab_milestone_mode_860
-        0x32729d0f0b9d7adf, // tab_held_860
+        0xbd23501b70c404ee, // tab_held_860
         0x5e8649fc158bfc2e, // tab_resume_1180
         0x30c2ac05c31f179a, // tab_resume_860
         0x8687d8dffc051930, // tab_fixing_1180
@@ -5500,10 +5514,10 @@ const GOLDEN_FEATURE_TAB: [[u64; 61]; 4] = [
         0x1aca17dcdd5a1050, // tab_picks_running_860
         0x57c74b45fd9d3840, // tab_model_later_1180
         0x5075640333ec6bb4, // tab_model_long_860
-        0xfc9fc69cee351bb5, // tab_t3_draft_860
+        0x37bc390552f6fcbf, // tab_t3_draft_860
         0xbfb3c8b9841f170b, // tab_milestone_mode_1180
         0xf8de4ca07ffeb9b7, // tab_milestone_mode_860
-        0x2da12a0b77b87f7d, // tab_held_860
+        0x54af97faefd8cf76, // tab_held_860
         0x06e5930e69a1bf8d, // tab_resume_1180
         0xa3c3da37be3f43ac, // tab_resume_860
         0x25a49252fee1fa58, // tab_fixing_1180
@@ -5564,10 +5578,10 @@ const GOLDEN_FEATURE_TAB: [[u64; 61]; 4] = [
         0xafbcd65890c85f32, // tab_picks_running_860
         0xe21cfcfdfbe96e55, // tab_model_later_1180
         0x7867b4cbd5bcf63d, // tab_model_long_860
-        0x59cc00aad601ffe0, // tab_t3_draft_860
+        0xf1503603cca9fe25, // tab_t3_draft_860
         0x5d3461f75684af86, // tab_milestone_mode_1180
         0xb12654dff37e63b8, // tab_milestone_mode_860
-        0x3d244f2c3d21f79d, // tab_held_860
+        0xf7f4178225a5592c, // tab_held_860
         0x02071bcc4b2b9ced, // tab_resume_1180
         0xb0d99250844e1321, // tab_resume_860
         0xe86e179b29262da5, // tab_fixing_1180
@@ -5912,6 +5926,7 @@ fn finding_dialog(error: bool) -> super::FindingDialogView {
                 text: text.to_owned(),
                 caret: at,
                 anchor: at,
+                scroll: 0,
             },
             placeholder,
             rows,
@@ -6104,8 +6119,7 @@ fn suggestion_card(
 /// being written from them, so the cards are only to read.
 fn tab_plan_review(writing: bool) -> super::FeatureTabView {
     use super::{
-        ButtonStyle, CheckTone, Dot, FindingTag, NodeMark, PageButton, PageSection, RoundAsked,
-        RoundCard, StagePage,
+        ButtonStyle, CheckTone, Dot, FindingTag, NodeMark, PageButton, PageSection, StagePage,
     };
     use crate::{agent_icons::AgentIcon, feature::Stage};
     let mut view = feature_tab();
@@ -6167,6 +6181,7 @@ fn tab_plan_review(writing: bool) -> super::FeatureTabView {
         buttons: vec![if writing { 0 } else { 1 }],
         picks: Vec::new(),
         model: None,
+        waits: false,
     });
     let (heading, lines) = match writing {
         true => (
@@ -6310,55 +6325,6 @@ fn tab_plan_review(writing: bool) -> super::FeatureTabView {
     }
     page.sections
         .extend(cards.into_iter().map(PageSection::Finding));
-    let asked = |id: &str, title: &str, now: &str, tone| RoundAsked {
-        id: id.into(),
-        title: title.into(),
-        note: String::new(),
-        now: Some(tab_line(now, tone)),
-    };
-    page.sections.push(PageSection::Lines {
-        label: "Review run".into(),
-        lines: Vec::new(),
-    });
-    page.sections.push(PageSection::Round(RoundCard {
-        label: "Review run 1".into(),
-        dot: Dot::Idle,
-        state: match writing {
-            true => tab_line("all decided", CheckTone::Ready),
-            false => tab_line("2 to decide", CheckTone::Blocker),
-        },
-        meta: "codex \u{b7} 20m ago".into(),
-        asked: vec![
-            asked(
-                "r1-1",
-                "No milestone moves the old sessions over",
-                if writing { "accepted" } else { "to decide" },
-                if writing {
-                    CheckTone::Ready
-                } else {
-                    CheckTone::Blocker
-                },
-            ),
-            asked(
-                "r1-2",
-                "The lockout clock lives in memory",
-                "accepted",
-                CheckTone::Ready,
-            ),
-            asked(
-                "r1-3",
-                "Name the hash in the plan",
-                "rejected: the code picks it, the plan needn't",
-                CheckTone::Note,
-            ),
-        ],
-        asked_caption: "Suggestions",
-        fixes: Vec::new(),
-        running: Vec::new(),
-        changed: Vec::new(),
-        open: !writing,
-        buttons: Vec::new(),
-    }));
     view.page = page;
     view.hints = match writing {
         true => vec![
@@ -6384,6 +6350,30 @@ fn tab_plan_review(writing: bool) -> super::FeatureTabView {
             card.selected = true;
         }
     }
+    view
+}
+
+/// Plan review once the final plan is written: its card and text first,
+/// the suggestions it came from under them.
+fn tab_plan_review_final() -> super::FeatureTabView {
+    use super::{CheckTone, PageSection};
+    let mut view = tab_plan_review(true);
+    let agent = (view.page.sections.iter())
+        .position(|s| matches!(s, PageSection::Agent { .. }))
+        .map_or(0, |i| i + 1);
+    let plan = [
+        PageSection::File {
+            name: "plan-final.md".into(),
+            state: tab_line("ready for review", CheckTone::Ready),
+            buttons: Vec::new(),
+        },
+        PageSection::Doc {
+            name: "plan-final.md".into(),
+            blocks: std::sync::Arc::new(doc_blocks()),
+            here: true,
+        },
+    ];
+    view.page.sections.splice(agent..agent, plan);
     view
 }
 
@@ -6597,52 +6587,57 @@ fn doc_suggestions() -> super::ReposView {
     view
 }
 
-const PLAN_REVIEW: [&str; 6] = [
+const PLAN_REVIEW: [&str; 7] = [
     "tab_plan_review_cards_1180",
     "tab_plan_review_cards_860",
     "tab_plan_review_writing_1180",
     "doc_suggestions_1180",
     "doc_suggestions_850",
     "finding_dialog_reject",
+    "tab_plan_review_final_1180",
 ];
 
 /// The recorded hashes of `PLAN_REVIEW`, per case in `CASES`.
-const GOLDEN_PLAN_REVIEW: [[u64; 6]; 4] = [
+const GOLDEN_PLAN_REVIEW: [[u64; 7]; 4] = [
     // Dark at 1
     [
-        0xfe55826e4659fa28, // tab_plan_review_cards_1180
-        0x07a6fc309bb51444, // tab_plan_review_cards_860
-        0xd38712f8888ca013, // tab_plan_review_writing_1180
+        0x65b07cddacb18c00, // tab_plan_review_cards_1180
+        0x3ecba2ff9f61f42e, // tab_plan_review_cards_860
+        0x9fc0db3c976af9cb, // tab_plan_review_writing_1180
         0x154aeb3cfd9938e1, // doc_suggestions_1180
         0x6f63128edd4069b1, // doc_suggestions_850
         0x519b46994bcca395, // finding_dialog_reject
+        0x74d96bd7a5d920fd, // tab_plan_review_final_1180
     ],
     // Dark at 2
     [
-        0xbb1a5ba187af766e, // tab_plan_review_cards_1180
-        0x0afe98f2b96ac8af, // tab_plan_review_cards_860
-        0x0e82a6bb467343c6, // tab_plan_review_writing_1180
+        0xa80a14e186b42036, // tab_plan_review_cards_1180
+        0x4c06ff37b46aedf8, // tab_plan_review_cards_860
+        0xea249cba06ba8fde, // tab_plan_review_writing_1180
         0x6ba33ef2efa93199, // doc_suggestions_1180
         0xacac000bf593cb0b, // doc_suggestions_850
         0x5db40a98428d92d3, // finding_dialog_reject
+        0x3b842b340c15b67c, // tab_plan_review_final_1180
     ],
     // Light at 1
     [
-        0x173479b4e20ecd53, // tab_plan_review_cards_1180
-        0x1582796e2cf4198c, // tab_plan_review_cards_860
-        0x28929dfdab81dbac, // tab_plan_review_writing_1180
+        0x98a0cc9eceb86913, // tab_plan_review_cards_1180
+        0x6fcb5286d652ac00, // tab_plan_review_cards_860
+        0x95116a3fa04e6dfc, // tab_plan_review_writing_1180
         0xc004c28ecddd8216, // doc_suggestions_1180
         0xb929e644bd3059f9, // doc_suggestions_850
         0x89ae995f2bf62070, // finding_dialog_reject
+        0xd74a518e721e8324, // tab_plan_review_final_1180
     ],
     // Light at 2
     [
-        0x98bbade750dc1bb0, // tab_plan_review_cards_1180
-        0x6791b61137ac588a, // tab_plan_review_cards_860
-        0x12d99351f7f72792, // tab_plan_review_writing_1180
+        0x19438ee056d49548, // tab_plan_review_cards_1180
+        0xd2bdc558b9410425, // tab_plan_review_cards_860
+        0x628a1246427b99a2, // tab_plan_review_writing_1180
         0xe94c049f4569a3a6, // doc_suggestions_1180
         0x9aa0c21f07ff7aef, // doc_suggestions_850
         0xe2cb1d9d401ab9c4, // finding_dialog_reject
+        0xb5ce3fcaa9fe699c, // tab_plan_review_final_1180
     ],
 ];
 
@@ -6667,6 +6662,7 @@ fn plan_review_surface(
             tab(&view, 860)
         }
         2 => tab(&tab_plan_review(true), 1180),
+        6 => tab(&tab_plan_review_final(), 1180),
         3 => (
             doc_tab_buffer(painter, &doc_suggestions(), 1180, theme, scale),
             1180 + 2 * super::SHADOW,

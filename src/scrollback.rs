@@ -47,6 +47,12 @@ const EDGE_SPEED: f64 = 12.0;
 const EDGE_GAIN: f64 = 0.8;
 /// The most a drag past an edge scrolls, rows a second.
 const EDGE_MAX: f64 = 600.0;
+/// How fast a drag held `edge` logical pixels past a list's top (negative)
+/// or bottom scrolls it, rows a second (down positive).
+pub(crate) fn edge_speed(edge: f64) -> f64 {
+    (EDGE_SPEED + edge.abs() * EDGE_GAIN).min(EDGE_MAX) * edge.signum()
+}
+
 /// Characters a double click takes as part of a word, besides letters and
 /// digits: those of paths, flags and `file:line` places.
 const WORD_CHARS: &str = "_-./~:@+=%#$&?*!\\";
@@ -98,7 +104,7 @@ struct Row {
 /// What a press and its drag select by: characters, or the words or
 /// lines they reach into (a double or triple click).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Grain {
+pub(crate) enum Grain {
     Char,
     Word,
     Line,
@@ -1329,7 +1335,7 @@ impl Scrollback {
         let b = fit.bounds(self.rows.len());
         let mut moving = self.scroll.tick(now, b);
         if self.dragging && edge != 0.0 {
-            let speed = (EDGE_SPEED + edge.abs() * EDGE_GAIN).min(EDGE_MAX) * edge.signum();
+            let speed = edge_speed(edge);
             if let Some(at) = self.edge_at {
                 let by = speed * now.duration_since(at).as_secs_f64();
                 self.scroll.jump((self.scroll.pos() + by).clamp(0.0, b.max));
