@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 
 use super::{
     Feature, Repo,
-    layout::{base_ref, git, git_bytes, shown},
+    layout::{base_ref, base_tip, git, git_bytes, shown},
 };
 
 /// What reading a feature's worktrees found.
@@ -168,7 +168,7 @@ fn committed(repo: &Repo) -> Result<(String, usize, String), String> {
 // the furthest, upgrade if one shows up in practice.
 fn sits_on(repo: &Repo, mb: &str) -> Result<Option<(String, String)>, String> {
     let name = repo.key();
-    let base = base_ref(repo);
+    let base = base_tip(repo);
     let refs = git(
         &repo.worktree,
         &[
