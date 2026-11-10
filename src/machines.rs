@@ -1479,6 +1479,7 @@ fn remove_machine_body(titles: &[String]) -> String {
 
 /// Machine `name`'s task, its link in `state`.
 fn machine_task(name: &str, target: &str, state: Option<&LinkState>) -> Task {
+    let open = ("Open", MenuAction::OpenMachines(name.to_owned()));
     let connect = ("Connect", MenuAction::ConnectMachine(name.to_owned()));
     let disconnect = ("Disconnect", MenuAction::DisconnectMachine(name.to_owned()));
     let remove = ("Remove", MenuAction::RemoveMachine(name.to_owned()));
@@ -1494,31 +1495,31 @@ fn machine_task(name: &str, target: &str, state: Option<&LinkState>) -> Task {
             name.to_owned(),
             format!("{target} · herdr {}", info.site.version),
             Dot::Done,
-            vec![disconnect, remove],
+            vec![open, disconnect, remove],
         ),
         Some(LinkState::Connecting(step)) => task(
             format!("{name} connecting"),
             format!("{target} · {step}"),
             Dot::Working,
-            vec![disconnect, remove],
+            vec![open, disconnect, remove],
         ),
         Some(LinkState::Retrying(failure)) => task(
             format!("{name} away"),
             format!("{target} · {} Trying again", failure.why()),
             Dot::Blocked,
-            vec![disconnect, remove],
+            vec![open, disconnect, remove],
         ),
         Some(LinkState::Failed(failure)) => task(
             format!("{name}: can't connect"),
             format!("{target} · {}", failure.why()),
             Dot::Failed,
-            vec![connect, remove],
+            vec![open, connect, remove],
         ),
         Some(LinkState::Off) | None => task(
             format!("{name} disconnected"),
             format!("{target} · not connected"),
             Dot::Idle,
-            vec![connect, remove],
+            vec![open, connect, remove],
         ),
     }
 }
@@ -1680,13 +1681,13 @@ mod tests {
         let off = machine_task("b", "a@b", None);
         assert_eq!(off.dot, Dot::Idle);
         assert!(!off.runs(), "a machine disconnected isn't in the footer");
-        assert_eq!(labels(&off), ["Connect", "Remove"]);
+        assert_eq!(labels(&off), ["Open", "Connect", "Remove"]);
         assert!(remove_machine_body(&["A".to_owned(), "B".to_owned()]).contains("\nA\nB\n"));
         let failed = machine_task("b", "a@b", Some(&LinkState::Failed(Failure::Auth)));
         assert_eq!(failed.dot, Dot::Failed);
-        assert_eq!(labels(&failed), ["Connect", "Remove"]);
+        assert_eq!(labels(&failed), ["Open", "Connect", "Remove"]);
         let away = machine_task("b", "a@b", Some(&LinkState::Retrying(Failure::LinkLost)));
-        assert_eq!(labels(&away), ["Disconnect", "Remove"]);
+        assert_eq!(labels(&away), ["Open", "Disconnect", "Remove"]);
     }
 
     fn press(dialog: &mut MachineDialog, sym: Keysym) -> Option<MachineOutcome> {

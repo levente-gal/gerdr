@@ -166,6 +166,8 @@ enum Intercepted {
     CloseSwitcher,
     /// The tasks panel asked for this.
     Tasks(crate::tasks::Outcome),
+    /// The machines panel asked for this.
+    Machines(crate::machines_panel::Outcome),
     /// The new feature dialog asked for this.
     NewFeature(crate::features::DialogOutcome),
     FindingDialog(crate::finding_dialog::FindingDialogOutcome),
@@ -196,6 +198,8 @@ pub enum Overlay {
     /// The background tasks, which has no field: only its key hints come
     /// this way.
     Tasks,
+    /// The machines panel: no field yet, only its key hints.
+    MachinesPanel,
     /// The new feature dialog, with its title field.
     NewFeature,
     FindingDialog,
@@ -234,6 +238,7 @@ fn over_panel(action: &Action) -> bool {
             | Action::Inbox
             | Action::AiStats
             | Action::Tasks
+            | Action::Machines
             | Action::Features
             | Action::Repos
             | Action::Worktrees
@@ -265,6 +270,7 @@ fn opens_panel(action: &Action) -> bool {
             | Action::Switcher
             | Action::Scrollback
             | Action::Features
+            | Action::Machines
     )
 }
 
@@ -280,6 +286,7 @@ fn closing(over: overlay::Overlay) -> Option<Intercepted> {
         O::Scrollback => Intercepted::Scrollback(scrollback::Outcome::Close),
         O::Switcher => Intercepted::CloseSwitcher,
         O::Tasks => Intercepted::Tasks(crate::tasks::Outcome::Close),
+        O::Machines => Intercepted::Machines(crate::machines_panel::Outcome::Close),
         _ => return None,
     })
 }
@@ -356,7 +363,7 @@ impl Gerdr {
                                 overlay::Overlay::NewFeature => Some(Overlay::NewFeature),
                                 overlay::Overlay::FindingDialog => Some(Overlay::FindingDialog),
                                 overlay::Overlay::GitIdentity => Some(Overlay::Identity),
-                                overlay::Overlay::Machines => Some(Overlay::Machine),
+                                overlay::Overlay::ConnectMachine => Some(Overlay::Machine),
                                 overlay::Overlay::ProjectCommands => Some(Overlay::Commands),
                                 _ => None,
                             };
@@ -830,10 +837,11 @@ impl Gerdr {
             O::Checkout => _ = self.checkout_click(pos),
             O::Confirm => _ = self.confirm_click(pos),
             O::Tasks => self.tasks_click(pos),
+            O::Machines => self.machines_panel_click(pos),
             O::NewFeature => self.new_feature_click(pos),
             O::FindingDialog => self.finding_dialog_click(pos),
             O::GitIdentity => self.identity_click(pos),
-            O::Machines => self.machine_click(pos),
+            O::ConnectMachine => self.machine_click(pos),
             O::ProjectCommands => self.commands_click(pos),
             O::Features => self.feature_panel_click(pos),
             O::Criteria => self.criteria_strip_click(pos),
@@ -874,7 +882,7 @@ impl Gerdr {
                 && (!overlay.is_dialog()
                     || matches!(
                         overlay,
-                        O::NewFeature | O::GitIdentity | O::Machines | O::ProjectCommands
+                        O::NewFeature | O::GitIdentity | O::ConnectMachine | O::ProjectCommands
                     ));
         if takes_field {
             self.press_field(pos);
@@ -896,10 +904,11 @@ impl Gerdr {
             O::Checkout => self.checkout_controls().iter().any(on),
             O::Confirm => self.confirm_controls().iter().any(on),
             O::Tasks => self.tasks_controls().iter().any(on),
+            O::Machines => self.machines_panel_controls().iter().any(on),
             O::NewFeature => self.new_feature_controls().iter().any(on),
             O::FindingDialog => self.finding_dialog_controls().iter().any(on),
             O::GitIdentity => self.identity_controls().iter().any(on),
-            O::Machines => self.machine_controls().iter().any(on),
+            O::ConnectMachine => self.machine_controls().iter().any(on),
             O::ProjectCommands => self.commands_controls().iter().any(on),
             O::Features => self.feature_tab_control_at(pos),
             O::Criteria => !matches!(
@@ -1012,6 +1021,10 @@ impl Gerdr {
         // The tasks panel, over the others, makes way for the one asked.
         if over == overlay::Overlay::Tasks && opens_panel(&action) {
             self.close_tasks();
+        }
+        // So does the machines panel.
+        if over == overlay::Overlay::Machines && (opens_panel(&action) || action == Action::Tasks) {
+            self.close_machines();
         }
         Some(Intercepted::Action(action))
     }
@@ -1307,6 +1320,7 @@ impl Gerdr {
                 self.refresh_pointer_focus();
             }
             Intercepted::Tasks(outcome) => self.apply_tasks(outcome),
+            Intercepted::Machines(outcome) => self.apply_machines_panel(outcome),
             Intercepted::NewFeature(outcome) => self.apply_new_feature(outcome),
             Intercepted::FindingDialog(outcome) => self.apply_finding_dialog(outcome),
             Intercepted::Identity(outcome) => self.apply_identity(outcome),
@@ -1339,10 +1353,11 @@ impl Gerdr {
             O::Scrollback => Some(Overlay::Scrollback),
             O::Switcher => self.switcher.as_ref().map(|s| Overlay::Switcher(s.serial)),
             O::Tasks => Some(Overlay::Tasks),
+            O::Machines => Some(Overlay::MachinesPanel),
             O::NewFeature => Some(Overlay::NewFeature),
             O::FindingDialog => Some(Overlay::FindingDialog),
             O::GitIdentity => Some(Overlay::Identity),
-            O::Machines => Some(Overlay::Machine),
+            O::ConnectMachine => Some(Overlay::Machine),
             O::ProjectCommands => Some(Overlay::Commands),
             _ => None,
         }
@@ -1391,6 +1406,9 @@ impl Gerdr {
                 .switcher_key(mods, sym, typed)
                 .map(|(target, place)| Intercepted::Switch(target, place)),
             Overlay::Tasks => self.tasks_key(mods, sym).map(Intercepted::Tasks),
+            Overlay::MachinesPanel => self
+                .machines_panel_key(mods, sym)
+                .map(Intercepted::Machines),
             Overlay::NewFeature => self
                 .new_feature_key(mods, sym, typed)
                 .map(Intercepted::NewFeature),
@@ -1461,7 +1479,7 @@ impl Gerdr {
                 scale,
             )),
             // Its fields hold lines: it places their carets itself.
-            Overlay::Tasks | Overlay::FindingDialog => None,
+            Overlay::Tasks | Overlay::MachinesPanel | Overlay::FindingDialog => None,
             // A criterion's note, while one is written, or their search
             // while it has the keys.
             Overlay::Features => {
@@ -1531,7 +1549,7 @@ impl Gerdr {
             Overlay::AiStats => self.ai_stats_field_mut(),
             Overlay::Scrollback => self.scrollback.as_mut()?.field_mut(),
             Overlay::Switcher(_) => Some(self.switcher.as_mut()?.field_mut()),
-            Overlay::Tasks => None,
+            Overlay::Tasks | Overlay::MachinesPanel => None,
             Overlay::Features => {
                 if (self.inline_wd()).is_some_and(|wd| wd.diff.search_focused()) {
                     return self.inline_wd_mut()?.diff.search_field_mut();

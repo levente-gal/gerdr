@@ -374,12 +374,21 @@ impl Gerdr {
         chrome::footer_layout(&view, rect.size).hit(local)
     }
 
-    /// A press on the footer: a task or the count opens the tasks panel.
+    /// A press on the footer: a task or the count opens the tasks panel; a
+    /// machine's chip opens the machines panel on it.
     pub fn footer_press(&mut self, pos: Point<f64, Logical>) {
         match self.footer_hit(pos) {
             Some(FooterHit::Task(chip)) => {
-                let i = Self::footer_task(&self.tasks(), chip).unwrap_or(0);
-                self.open_tasks(i);
+                let tasks = self.tasks();
+                let i = Self::footer_task(&tasks, chip).unwrap_or(0);
+                let machine = tasks.get(i).and_then(|t| match t.actions.first() {
+                    Some((_, MenuAction::OpenMachines(name))) => Some(name.clone()),
+                    _ => None,
+                });
+                match machine {
+                    Some(name) => self.open_machines(Some(&name)),
+                    None => self.open_tasks(i),
+                }
             }
             Some(FooterHit::Count) => self.open_tasks(0),
             None => {}
@@ -564,6 +573,7 @@ impl Gerdr {
                         | MenuAction::ShowLog(_)
                         | MenuAction::SetupLog(..)
                         | MenuAction::Repos
+                        | MenuAction::OpenMachines(_)
                 ) {
                     self.close_tasks();
                 }

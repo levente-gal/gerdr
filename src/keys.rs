@@ -312,6 +312,7 @@ const ACTIONS: &[(&str, Action, &str, &str)] = &[
     ("repos", Action::Repos, "Open repositories", "g"),
     ("inbox", Action::Inbox, "Open inbox", "i"),
     ("tasks", Action::Tasks, "Open background tasks", "b"),
+    ("machines", Action::Machines, "Open machines", "o"),
     ("features", Action::Features, "Open features", "Shift+F"),
     ("ai-stats", Action::AiStats, "Open the AI work stats", "u"),
     (
@@ -431,6 +432,7 @@ const HELP_LINES: &[(&str, &[&str])] = &[
     ("Open repositories", &["repos"]),
     ("Open inbox", &["inbox"]),
     ("Open background tasks", &["tasks"]),
+    ("Open machines", &["machines"]),
     ("Open features, or start one", &["features"]),
     ("Open the AI work stats", &["ai-stats"]),
     ("Try the criteria over the sandbox's app", &["criteria"]),
@@ -1235,6 +1237,7 @@ mod tests {
                 "G: Open repositories",
                 "I: Open inbox",
                 "B: Open background tasks",
+                "O: Open machines",
                 "Shift+F: Open features, or start one",
                 "U: Open the AI work stats",
                 "Shift+C: Try the criteria over the sandbox's app",
@@ -1272,6 +1275,10 @@ mod tests {
         assert_eq!(
             keymap.action(&mods(false, false), Keysym::u),
             Some(Action::AiStats)
+        );
+        assert_eq!(
+            keymap.action(&mods(false, false), Keysym::o),
+            Some(Action::Machines)
         );
         assert_eq!(
             keymap.action(&mods(false, false), Keysym::bracketleft),
@@ -1399,14 +1406,14 @@ mod tests {
     #[test]
     fn old_names_still_bind_and_say_they_were_renamed() {
         let (keymap, problems) =
-            from_config("[keys]\nnew-cursor-agent = \"Alt+G\"\nopen-project = \"o\"\n");
+            from_config("[keys]\nnew-cursor-agent = \"Alt+G\"\nopen-project = \"q\"\n");
         let alt = ModifiersState {
             alt: true,
             ..Default::default()
         };
         assert_eq!(keymap.action(&alt, Keysym::g), Some(Action::NewAgent));
         assert_eq!(
-            keymap.action(&mods(false, false), Keysym::o),
+            keymap.action(&mods(false, false), Keysym::q),
             Some(Action::NewProject)
         );
         assert_eq!(problems.len(), 2, "{problems:?}");

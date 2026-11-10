@@ -43,7 +43,7 @@ pub enum Overlay {
     /// The name and email git wants to commit (see `git_identity`).
     GitIdentity,
     /// The dialog connecting another machine (see `machines`).
-    Machines,
+    ConnectMachine,
     /// A project's Verify checks and setup commands (see
     /// `project_commands`).
     ProjectCommands,
@@ -55,6 +55,9 @@ pub enum Overlay {
     Help,
     /// The background tasks, over the footer (see `tasks`).
     Tasks,
+    /// The machines gerdr reaches, and what runs on them (see
+    /// `machines_panel`).
+    Machines,
     /// The feature panel: a feature's stages, in the pinned first tab of
     /// its workspace (see `features`, `feature_workspace`).
     Features,
@@ -75,7 +78,7 @@ pub enum Overlay {
 
 impl Overlay {
     /// Every overlay, top first.
-    pub const ORDER: [Self; 25] = [
+    pub const ORDER: [Self; 26] = [
         Self::Tooltip,
         Self::Quit,
         Self::Restart,
@@ -83,7 +86,7 @@ impl Overlay {
         Self::NewFeature,
         Self::FindingDialog,
         Self::GitIdentity,
-        Self::Machines,
+        Self::ConnectMachine,
         Self::ProjectCommands,
         Self::Confirm,
         Self::ContextMenu,
@@ -91,6 +94,7 @@ impl Overlay {
         Self::Welcome,
         Self::Help,
         Self::Tasks,
+        Self::Machines,
         Self::ProjectMenu,
         Self::Worktrees,
         Self::Repos,
@@ -118,7 +122,7 @@ impl Overlay {
                 | Self::NewFeature
                 | Self::FindingDialog
                 | Self::GitIdentity
-                | Self::Machines
+                | Self::ConnectMachine
                 | Self::ProjectCommands
                 | Self::Confirm
         )
@@ -136,6 +140,7 @@ impl Overlay {
                 | Self::Scrollback
                 | Self::Switcher
                 | Self::Tasks
+                | Self::Machines
         )
     }
 
@@ -174,6 +179,7 @@ impl Overlay {
             Self::Switcher => Action::Switcher,
             Self::Help => Action::Shortcuts,
             Self::Tasks => Action::Tasks,
+            Self::Machines => Action::Machines,
             _ => return None,
         })
     }
@@ -188,7 +194,7 @@ impl Overlay {
             Self::NewFeature => "the new feature dialog",
             Self::FindingDialog => "the finding dialog",
             Self::GitIdentity => "the name and email dialog",
-            Self::Machines => "the connect a machine dialog",
+            Self::ConnectMachine => "the connect a machine dialog",
             Self::ProjectCommands => "the project commands dialog",
             Self::Confirm => "the dialog",
             Self::ContextMenu => "the menu",
@@ -196,6 +202,7 @@ impl Overlay {
             Self::Welcome => "the welcome screen",
             Self::Help => "the help",
             Self::Tasks => "the background tasks",
+            Self::Machines => "the machines panel",
             Self::Features => "the feature panel",
             Self::Doc => "the file's tab",
             Self::ProjectMenu => "the project menu",
@@ -222,7 +229,7 @@ impl Gerdr {
             Overlay::NewFeature => self.features.dialog.is_some(),
             Overlay::FindingDialog => self.features.finding_dialog.is_some(),
             Overlay::GitIdentity => self.repos.identity.is_some(),
-            Overlay::Machines => self.machines.dialog.is_some(),
+            Overlay::ConnectMachine => self.machines.dialog.is_some(),
             Overlay::ProjectCommands => self.features.commands.is_some(),
             Overlay::Confirm => self.confirm.is_some(),
             Overlay::ContextMenu => self.context_menu.is_some(),
@@ -233,6 +240,7 @@ impl Gerdr {
             Overlay::Welcome => self.welcome.is_some(),
             Overlay::Help => self.prefix_armed || self.help_pinned,
             Overlay::Tasks => self.tasks_panel.is_some(),
+            Overlay::Machines => self.machines_panel.is_some(),
             Overlay::Features => self.features.panel.is_some(),
             Overlay::Doc => self.review_tab().is_some() || self.inline_wd().is_some(),
             Overlay::ProjectMenu => self.project_menu.is_some(),
@@ -309,10 +317,11 @@ impl Gerdr {
             Overlay::Checkout => self.checkout_hover(pos),
             Overlay::Confirm => self.confirm_hover(pos),
             Overlay::Tasks => self.tasks_hover(pos),
+            Overlay::Machines => self.machines_panel_hover(pos),
             Overlay::NewFeature => self.new_feature_hover(pos),
             Overlay::FindingDialog => self.finding_dialog_hover(pos),
             Overlay::GitIdentity => self.identity_hover(pos),
-            Overlay::Machines => self.machine_hover(pos),
+            Overlay::ConnectMachine => self.machine_hover(pos),
             Overlay::ProjectCommands => self.commands_hover(pos),
             Overlay::Features => return self.feature_panel_hover(pos),
             Overlay::Doc => return self.repos_hover(pos),
@@ -377,6 +386,12 @@ impl Gerdr {
                 let rows = self.motion_rows(motion, row_pitch(&self.tasks_rows()));
                 if rows != 0 {
                     self.tasks_scroll(rows as i32);
+                }
+            }
+            Overlay::Machines => {
+                let rows = self.motion_rows(motion, row_pitch(&self.machines_panel_rows()));
+                if rows != 0 {
+                    self.machines_panel_scroll(rows as i32);
                 }
             }
             _ => {}

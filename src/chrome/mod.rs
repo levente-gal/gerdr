@@ -31,6 +31,7 @@ mod help;
 mod hints;
 mod identity;
 mod machines;
+mod machines_panel;
 mod inbox;
 mod layers;
 mod menu;
@@ -84,6 +85,7 @@ pub use help::*;
 pub use hints::*;
 pub use identity::*;
 pub use machines::*;
+pub use machines_panel::*;
 pub use inbox::*;
 pub use layers::ChromeElement;
 use layers::*;
@@ -200,6 +202,8 @@ pub struct ChromeView {
     pub footer: Option<FooterView>,
     /// Set while the tasks panel is open over the footer.
     pub tasks: Option<TasksView>,
+    /// Set while the machines panel is open.
+    pub machines: Option<MachinesPanelView>,
     /// Where the button unzooming the zoomed pane floats, if one is.
     pub unzoom: Option<Rect>,
     pub theme: Theme,
@@ -226,6 +230,7 @@ pub struct Chrome {
     tabs: Cached<(TabStripView, Theme, i32, f64)>,
     footer: Cached<(FooterView, Theme, i32, f64)>,
     tasks: Overlay<TasksKey>,
+    machines: Overlay<(MachinesPanelView, Size<i32, Logical>, Theme, f64)>,
     help: Overlay<(HelpLayout, Option<HelpHit>, Theme, f64)>,
     menu: Overlay<(MenuView, Theme, f64)>,
     tooltip: Overlay<(TooltipView, i32, Theme, f64)>,
@@ -307,6 +312,7 @@ impl Chrome {
             tabs: Cached::default(),
             footer: Cached::default(),
             tasks: Overlay::default(),
+            machines: Overlay::default(),
             help: Overlay::default(),
             menu: Overlay::default(),
             tooltip: Overlay::default(),
@@ -527,7 +533,7 @@ impl Chrome {
                     });
                     parts.extend(scrimmed(part, output, theme.palette()));
                 }
-                Kind::Machines => {
+                Kind::ConnectMachine => {
                     let dialog = view.machine.take().map(|v| {
                         let (loc, size) = shadowed(machine_layout(&v, output).panel);
                         ((v, output, theme, scale), loc, size)
@@ -720,6 +726,16 @@ impl Chrome {
                     painter,
                     Some((dot, blink)),
                 )),
+                // The machines panel, centred on the output.
+                Kind::Machines => {
+                    let machines = view.machines.take().map(|view| {
+                        let (loc, size) = shadowed(machines_layout(&view, output).panel);
+                        ((view, output, theme, scale), loc, size)
+                    });
+                    parts.extend(self.machines.part(machines, now, true, |(view, output, ..)| {
+                        painter.machines_panel(view, *output, scale, theme.palette())
+                    }));
+                }
                 // The stats panel on the AI work, centred on the output.
                 Kind::AiStats => {
                     let stats = view.stats.take().map(|view| {
@@ -1148,6 +1164,12 @@ fn hit_rects(
         let layout = tasks_layout(tasks, output, footer_h);
         rects.push(layout.panel);
         rects.extend(layout.rows.iter().copied());
+        rects.extend(layout.controls());
+    }
+    if let Some(machines) = &view.machines {
+        let layout = machines_layout(machines, output);
+        rects.push(layout.panel);
+        rects.extend(layout.runs.iter().copied());
         rects.extend(layout.controls());
     }
 
