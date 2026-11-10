@@ -20,15 +20,18 @@ use crate::{
 };
 
 /// The next turn at conflicts in data dir `data`: past any whose files are
-/// there, so an old plan is never taken for this one's.
+/// there, its plan and questions or its prompt (`conflicts-<n>.md`,
+/// `conflicts-plan-<n>.md`), so an old plan is never taken for this one's
+/// nor an old prompt, or its agent's chat, written over.
 fn next_turn(data: &std::path::Path) -> u32 {
-    let taken = std::fs::read_dir(data)
+    let names = [data.to_path_buf(), data.join("prompts")]
         .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|entry| {
-            let name = entry.file_name().to_string_lossy().into_owned();
+        .flat_map(|dir| std::fs::read_dir(dir).into_iter().flatten().flatten())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned());
+    let taken = names
+        .filter_map(|name| {
             let rest = name.strip_prefix("conflicts-")?;
+            let rest = rest.strip_prefix("plan-").unwrap_or(rest);
             let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
             digits.parse::<u32>().ok()
         })
@@ -386,5 +389,25 @@ impl Gerdr {
             return self.show_warning("The plan isn't written yet".to_owned());
         }
         self.open_in_zed(&plan, crate::launch::Place::Tab, "the plan");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::next_turn;
+
+    #[test]
+    fn a_turn_at_conflicts_comes_after_any_with_files_or_prompts() {
+        let data = std::env::temp_dir().join(format!("gerdr-turns-{}", std::process::id()));
+        std::fs::create_dir_all(data.join("prompts")).unwrap();
+        assert_eq!(next_turn(&data), 1);
+        // A turn that wrote no plan nor questions still left its prompt.
+        std::fs::write(data.join("prompts").join("conflicts-1.md"), "x").unwrap();
+        assert_eq!(next_turn(&data), 2);
+        std::fs::write(data.join("prompts").join("conflicts-plan-3.md"), "x").unwrap();
+        assert_eq!(next_turn(&data), 4);
+        std::fs::write(data.join("conflicts-4-questions.md"), "x").unwrap();
+        assert_eq!(next_turn(&data), 5);
+        std::fs::remove_dir_all(&data).unwrap();
     }
 }

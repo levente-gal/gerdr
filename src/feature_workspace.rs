@@ -159,11 +159,18 @@ impl Gerdr {
 
     /// What runs in workspace `w`'s panes, as their bars say it.
     pub(crate) fn workspace_running(&self, w: usize) -> Vec<String> {
+        self.workspace_running_but(w, None)
+    }
+
+    /// What runs in workspace `w`'s panes but herdr pane `but`.
+    fn workspace_running_but(&self, w: usize, but: Option<&str>) -> Vec<String> {
         let Some(ws) = self.workspaces.get(w) else {
             return Vec::new();
         };
         let panes = ws.tabs.iter().flat_map(|tab| &tab.panes);
-        panes.filter_map(|p| self.running_in(p)).collect()
+        let left =
+            panes.filter(|p| but.is_none() || p.herdr.as_ref().map(|h| h.pane_id.as_str()) != but);
+        left.filter_map(|p| self.running_in(p)).collect()
     }
 
     /// Feature `slug` of `project`'s workspace, opened on the feature's
@@ -513,9 +520,14 @@ impl Gerdr {
     /// Ship of feature `slug` of `project` is done: its workspace closes
     /// when nothing runs in it. What the success toast adds when it stays
     /// open, if anything.
+    /// The agent writing the summary is gerdr's own and its work is used by
+    /// now: it doesn't keep the workspace open.
     pub(crate) fn close_shipped_workspace(&mut self, project: &str, slug: &str) -> Option<String> {
         let w = self.feature_workspace(project, slug)?;
-        let running = self.workspace_running(w);
+        let summary = (self.feature(project, slug))
+            .and_then(|f| f.shipping.summary.as_ref())
+            .and_then(|run| run.pane.clone());
+        let running = self.workspace_running_but(w, summary.as_deref());
         if running.is_empty() {
             self.close_workspace_now(w);
             return None;

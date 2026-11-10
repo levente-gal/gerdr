@@ -1937,6 +1937,9 @@ pub struct RowCtx {
     pub ship_nothing: bool,
     /// On Ship's page, as last read, how many steps are left to run.
     pub ship_left: usize,
+    /// Ship's check is read: its repositories' cards show, with the
+    /// buttons that go on them.
+    pub ship_read: bool,
     /// Its checks are being started, or wait for a setup to end. Once their
     /// terminals are open `checks_running` says so too.
     pub checks_busy: bool,
@@ -3504,7 +3507,7 @@ fn check_lines(
         (false, true, false) => line(ALL_RAN.into(), CheckTone::Ready),
         (false, true, true) => line(ALL_RAN_DONE.into(), CheckTone::Note),
         (false, false, false) => line("Ready to ship".into(), CheckTone::Ready),
-        (false, false, true) => line(steps_left(planned.actions.len()), CheckTone::Ready),
+        (false, false, true) => line(steps_left(planned.steps()), CheckTone::Ready),
     };
     let notes = check.notes.iter().map(|n| line(n.clone(), CheckTone::Note));
     capped(
@@ -3710,6 +3713,11 @@ fn ship_step_row(
         })
     });
     let ran = ran.filter(|_| !ship_step_open(feature, repo, step));
+    // Undoing it, while it can be: also once it is to run again, as a
+    // branch that moved since its push still has that push on origin.
+    let undo = (actions.iter()).position(|(_, o)| {
+        matches!(o, PanelOutcome::UndoShip(r, s) if *r == repo.key && feature::same_step(*s, step))
+    });
     if let Some(done) = ran {
         let label = match step {
             ShipStep::Push | ShipStep::PushBranch => format!("Pushed {branch} to origin"),
@@ -3718,9 +3726,6 @@ fn ship_step_row(
             ShipStep::PushBase => format!("Pushed {base} to origin"),
         };
         let when = ran_when(&done, now);
-        let undo = (actions.iter()).position(|(_, o)| {
-            matches!(o, PanelOutcome::UndoShip(r, s) if *r == repo.key && feature::same_step(*s, step))
-        });
         // What can't be undone says so.
         let when = match (undo, step) {
             (None, ShipStep::PushBase) if !when.is_empty() => {
@@ -3786,7 +3791,7 @@ fn ship_step_row(
         ticked: plan.ticked(step),
         off: why.is_some(),
         done: false,
-        button: None,
+        button: undo,
     }
 }
 
@@ -3937,24 +3942,40 @@ const ONLY_ONCE_MERGING: &str = "Only when every repository merges into its base
 /// pushed feature/x \u{b7} a1b2c3d".
 fn ship_log_lines(feature: &Feature, now: u64) -> Vec<CheckLine> {
     let branch = feature.branch();
-    (feature.ship_log().iter().rev())
-        .map(|done| {
-            let base = feature
-                .repo(&done.repo)
-                .map_or("its base", |r| r.base.as_str());
-            let said = format!("{}: {}", done.repo, done.said(&branch, base));
-            let when = (done.at > 0).then(|| projects::ago(now, done.at));
-            let sha = (done.sha.as_deref()).map(|sha| sha.chars().take(7).collect::<String>());
-            let url = done.url.as_deref().map(pr_tail);
-            let undone = (done.undone).map(|at| format!("undone {}", projects::ago(now, at)));
-            let parts: Vec<String> = (when.into_iter())
-                .chain(std::iter::once(said))
-                .chain(sha)
-                .chain(url)
-                .chain(undone)
-                .collect();
-            line(parts.join(" \u{b7} "), CheckTone::Note)
-        })
+    let short = |sha: &str| sha.chars().take(7).collect::<String>();
+    let steps = (feature.ship_log().into_iter().rev()).map(|done| {
+        let base = feature
+            .repo(&done.repo)
+            .map_or("its base", |r| r.base.as_str());
+        let said = format!("{}: {}", done.repo, done.said(&branch, base));
+        let when = (done.at > 0).then(|| projects::ago(now, done.at));
+        let sha = done.sha.as_deref().map(short);
+        let url = done.url.as_deref().map(pr_tail);
+        let undone = (done.undone).map(|at| format!("undone {}", projects::ago(now, at)));
+        let parts: Vec<String> = (when.into_iter())
+            .chain(std::iter::once(said))
+            .chain(sha)
+            .chain(url)
+            .chain(undone)
+            .collect();
+        (done.at, parts.join(" \u{b7} "))
+    });
+    // Its updates from the base go in among them, by when.
+    let updates = feature.shipping.updates.iter().map(|update| {
+        let text = format!(
+            "{} \u{b7} {}: {} {} \u{b7} {}",
+            projects::ago(now, update.at),
+            update.repo,
+            update.way.done_word(),
+            update.onto,
+            short(&update.onto_sha)
+        );
+        (update.at, text)
+    });
+    let mut all: Vec<(u64, String)> = steps.chain(updates).collect();
+    all.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
+    (all.into_iter())
+        .map(|(_, text)| line(text, CheckTone::Note))
         .collect()
 }
 
@@ -5701,8 +5722,8 @@ fn writers_page_actions(
             PanelOutcome::EditSummary,
         ));
     }
-    // Each step that ran and can be undone, on its row.
-    if stage == Stage::Ship && feature.ships() {
+    // Each step that ran and can be undone, on its row: once the rows show.
+    if stage == Stage::Ship && feature.ships() && ctx.ship_read {
         let mut seen: Vec<(String, ShipStep)> = Vec::new();
         for done in feature.ship_log().iter().rev() {
             let step = done.step;
@@ -5722,9 +5743,11 @@ fn writers_page_actions(
         }
     }
     if stage == Stage::Ship {
-        // On its repository's card while it can ship; else listed by name.
+        // On its repository's card while it can ship, once the cards show;
+        // else listed by name.
         let one = feature.shipping.prs.len() == 1 || feature.ships();
-        for pr in &feature.shipping.prs {
+        let held = feature.ships() && !ctx.ship_read;
+        for pr in feature.shipping.prs.iter().filter(|_| !held) {
             let label = match one {
                 true => "Open PR".to_owned(),
                 false => format!("Open {}", pr_tail(&pr.url)),
@@ -6723,7 +6746,10 @@ impl Gerdr {
                     })),
             all_skipped,
             ship_nothing: ship_planned(feature, last).is_some_and(|planned| planned.nothing),
-            ship_left: ship_planned(feature, last).map_or(0, |planned| planned.actions.len()),
+            ship_left: ship_planned(feature, last).map_or(0, |planned| planned.steps()),
+            ship_read: last
+                .and_then(|p| p.ship.as_ref())
+                .is_some_and(|c| !c.unread),
             checks_busy: self.checks_busy(&feature.project, &feature.slug),
             setting_up: self.setting_up(&feature.project, &feature.slug),
             feature_busy: self.feature_busy(&feature.project, &feature.slug),
@@ -12838,10 +12864,13 @@ fn ship_base_actions(feature: &Feature, probe: Option<&Probe>) -> Vec<(PageButto
             merge,
             PanelOutcome::UpdateBase(key.clone(), feature::UpdateWay::Merge),
         ));
-        out.push((
-            rebase,
-            PanelOutcome::UpdateBase(key.clone(), feature::UpdateWay::Rebase),
-        ));
+        // Over merges it would stop on what they settled: merge again.
+        if !state.merges {
+            out.push((
+                rebase,
+                PanelOutcome::UpdateBase(key.clone(), feature::UpdateWay::Rebase),
+            ));
+        }
     }
     out
 }
@@ -23037,6 +23066,7 @@ pub(crate) mod tests {
         );
         let ctx = RowCtx {
             ship_left: 1,
+            ship_read: true,
             ..RowCtx::default()
         };
         let actions = page_actions(&f, Stage::Ship, ctx);
@@ -23079,6 +23109,91 @@ pub(crate) mod tests {
                     "1m ago \u{b7} api: pushed feature/s \u{b7} 3f9c2a1",
                     CheckTone::Note
                 )]
+            )
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_branch_moved_since_its_push_keeps_undo_and_logs_its_update() {
+        use crate::feature::{BaseUpdate, RepoPlan, ShipDone, UpdateWay};
+        let dir = std::env::temp_dir().join(format!("gerdr-ship-moved-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut api = repo("api", true);
+        api.worktree = dir.clone();
+        let mut f = feature("s", vec![api], Stage::ALL.len());
+        f.status = Status::Done;
+        f.ship_ran(ShipDone {
+            at: 1_900,
+            repo: "api".into(),
+            step: ShipStep::Push,
+            sha: Some("3f9c2a1deadbeef".into()),
+            url: None,
+            undone: None,
+        });
+        f.shipping.updates.push(BaseUpdate {
+            at: 1_950,
+            repo: "api".into(),
+            way: UpdateWay::Merge,
+            onto: "origin/main".into(),
+            onto_sha: "6496d98aaaa".into(),
+            before: "3f9c2a1deadbeef".into(),
+            after: "73462c1bbbb".into(),
+        });
+        f.ship_plan
+            .repos
+            .insert("api".into(), RepoPlan::new(Route::Pr));
+        // The branch took its base in: origin has the push from before.
+        let mut found = check(&[], &["api"], &[]).unwrap();
+        found.repos[0].head = Some("73462c1bbbb".into());
+        let p = probe(Some(found));
+        let state = PanelState {
+            probe: Some(&p),
+            ..PanelState::default()
+        };
+        // Read not yet, its card's buttons wait for it: none sits on the
+        // title's row meanwhile.
+        let unread = page_actions(&f, Stage::Ship, RowCtx::default());
+        assert!(
+            !unread
+                .iter()
+                .any(|(_, o)| matches!(o, PanelOutcome::UndoShip(..)))
+        );
+        let ctx = RowCtx {
+            ship_read: true,
+            ..RowCtx::default()
+        };
+        let actions = page_actions(&f, Stage::Ship, ctx);
+        let page = stage_page(&f, Stage::Ship, &state, &actions, 2_000);
+        let Some(PageSection::ShipGroup(group)) = page.sections.get(2) else {
+            panic!("no card: {:?}", page.sections);
+        };
+        let again = &group.steps[0];
+        assert_eq!(
+            again.label,
+            "Push feature/s to origin again: it moved since"
+        );
+        assert!(!again.done);
+        // Its undo is on its row, not left over for the page's title.
+        let undo = again.button.expect("an undo on the row");
+        assert_eq!(
+            actions[undo].1,
+            PanelOutcome::UndoShip("api".into(), ShipStep::Push)
+        );
+        assert_eq!(
+            *page.sections.last().unwrap(),
+            lines(
+                "Ship log",
+                vec![
+                    line(
+                        "just now \u{b7} api: merged origin/main \u{b7} 6496d98",
+                        CheckTone::Note
+                    ),
+                    line(
+                        "1m ago \u{b7} api: pushed feature/s \u{b7} 3f9c2a1",
+                        CheckTone::Note
+                    ),
+                ]
             )
         );
         std::fs::remove_dir_all(&dir).unwrap();

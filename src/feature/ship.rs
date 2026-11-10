@@ -148,6 +148,16 @@ pub struct Planned {
     pub all_done: bool,
 }
 
+impl Planned {
+    /// How many of its actions run a step: keeping a pull request open and
+    /// linking them come with those.
+    pub fn steps(&self) -> usize {
+        (self.actions.iter())
+            .filter(|a| !matches!(a, Action::KeepPr { .. } | Action::LinkPrs))
+            .count()
+    }
+}
+
 /// Whether `step` of `repo` ran already and needn't again: a push only while
 /// the branch is where it was pushed from, a squash only while it reads as
 /// merged.
@@ -639,6 +649,25 @@ fn squash_blocker(repo: &Repo, branch: &str) -> Option<String> {
             ));
         }
     }
+    // Taken in from origin's base, its commits would go into the squash
+    // when the local base lacks them: as the feature's own, once pushed.
+    let remote = format!("origin/{base}");
+    let taken = git(&repo.main, &["merge-base", branch, &remote])
+        .ok()
+        .map(|at| at.trim().to_owned())
+        .filter(|at| !at.is_empty())
+        .and_then(|at| git(&repo.main, &["rev-list", "--count", &at, "--not", base]).ok())
+        .and_then(|n| n.trim().parse::<usize>().ok())
+        .unwrap_or(0);
+    if taken > 0 {
+        let commits = match taken {
+            1 => "a commit".to_owned(),
+            n => format!("{n} commits"),
+        };
+        return Some(format!(
+            "{name}: {branch} has {commits} of {remote} that {base} lacks: pull {base} first"
+        ));
+    }
     match git_ops::predict_merge(&repo.main, base, branch) {
         git_ops::Verdict::Clean => None,
         git_ops::Verdict::Conflicts(files) => Some(format!(
@@ -795,6 +824,10 @@ pub struct BaseState {
     pub conflicts: Vec<String>,
     /// Why it couldn't be told whether it conflicts, or fetched.
     pub why: Option<String>,
+    /// The branch took its base in by merges before: a rebase would play
+    /// its commits again one by one, and stop where those merges settled
+    /// conflicts.
+    pub merges: bool,
 }
 
 impl BaseState {
@@ -831,6 +864,11 @@ pub fn read_bases(feature: &Feature, fetch: bool) -> BTreeMap<String, BaseState>
             .ok()
             .and_then(|n| n.trim().parse().ok())
             .unwrap_or(0);
+        let mine = format!("{}..HEAD", state.onto);
+        state.merges = git(dir, &["rev-list", "--merges", "--count", &mine])
+            .ok()
+            .and_then(|n| n.trim().parse::<usize>().ok())
+            .is_some_and(|n| n > 0);
         if state.behind > 0 {
             match git_ops::predict_merge(dir, "HEAD", &state.onto) {
                 git_ops::Verdict::Clean | git_ops::Verdict::Unmerged(_) => {}
@@ -2041,6 +2079,22 @@ esac
     /// What ran is kept, and a later ship leaves it out: a push stays done
     /// while the branch is where it went from.
     #[test]
+    fn keeping_a_pull_request_counts_as_no_step() {
+        let planned = Planned {
+            actions: vec![
+                Action::Push { repo: "api".into() },
+                Action::KeepPr {
+                    repo: "api".into(),
+                    url: "https://github.com/o/api/pull/7".into(),
+                },
+                Action::LinkPrs,
+            ],
+            ..Planned::default()
+        };
+        assert_eq!(planned.steps(), 1);
+    }
+
+    #[test]
     fn what_ran_is_left_out_until_the_branch_moves() {
         let t = Temp::new();
         let mut f = feature_over(&t, &["api"], &[]);
@@ -2213,12 +2267,25 @@ esac
         assert_eq!(bases["api"].onto, "origin/main");
         assert_eq!(bases["api"].behind, 1);
         assert!(bases["api"].clean(), "{:?}", bases["api"]);
+        assert!(!bases["api"].merges);
 
         let (update, patch) = update_from_base(&f, "api", UpdateWay::Merge, 7).unwrap();
         assert_eq!(update.onto, "origin/main");
         assert_ne!(update.before, update.after);
         assert!(patch.is_some());
-        assert_eq!(read_bases(&f, false)["api"].behind, 0);
+        let bases = read_bases(&f, false);
+        assert_eq!(bases["api"].behind, 0);
+        assert!(bases["api"].merges, "the merge is in its history now");
+        // A local main that lacks what was taken in: squashing waits for a
+        // pull, as the squash would take it in as the feature's own.
+        assert_eq!(squash_blocker(&f.repos[0], &f.branch()), None);
+        run(&main, &["reset", "-q", "--hard", "HEAD~1"]);
+        assert_eq!(
+            squash_blocker(&f.repos[0], &f.branch()).as_deref(),
+            Some("api: feature/f has a commit of origin/main that main lacks: pull main first")
+        );
+        run(&main, &["merge", "-q", "--ff-only", "origin/main"]);
+        assert_eq!(squash_blocker(&f.repos[0], &f.branch()), None);
 
         // A change to the same file conflicts: read so, and refused as it was.
         commit(&wt(&f, "api"), "c", "feature side");
