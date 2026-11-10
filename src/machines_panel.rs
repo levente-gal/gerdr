@@ -986,6 +986,14 @@ impl Gerdr {
             link.and_then(|l| l.work.as_ref()).and_then(|w| w.load),
             ids.first().map(String::as_str),
         );
+        // The addresses it isn't using, in the order they are tried.
+        let others: Vec<&str> = (self.machines.saved.get(&name).into_iter())
+            .flat_map(|a| a.0.iter().map(String::as_str))
+            .filter(|a| *a != target)
+            .collect();
+        if !others.is_empty() {
+            facts.insert(1, format!("Also: {}", others.join(", ")));
+        }
         facts.extend(same.iter().map(|other| format!("Same machine as {other}")));
         let failure = link_failure(state);
         let how = failure.and_then(|f| match (f.how(&target), state) {
