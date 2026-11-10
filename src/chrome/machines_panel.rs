@@ -132,7 +132,8 @@ pub struct MachineDetailView {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MachineEditView {
     pub name: crate::text_field::Line,
-    pub address: crate::text_field::Line,
+    /// Its addresses, in the order they are tried: at least one.
+    pub addresses: Vec<crate::text_field::Line>,
     /// What is wrong with the form, or why the address didn't connect.
     pub error: Option<String>,
     /// What to do about it, when gerdr knows.
@@ -169,8 +170,8 @@ pub enum MachinesFocus {
     Button(usize),
     /// The edit form's name field.
     EditName,
-    /// The edit form's address field.
-    EditAddress,
+    /// The edit form's address field `.0`.
+    EditAddress(usize),
     /// The edit form's button `.0`.
     EditButton(usize),
 }
@@ -187,9 +188,13 @@ pub enum MachinesHit {
     RunButton(usize, usize),
     /// The machine's button `.0`.
     Button(usize),
-    /// The edit form's name or address field.
+    /// The edit form's name field, or address field `.0`.
     EditName,
-    EditAddress,
+    EditAddress(usize),
+    /// The × taking address `.0` out of the form.
+    EditRemoveAddress(usize),
+    /// The "+ Add address" row under the addresses.
+    EditAddAddress,
     /// The edit form's button `.0`.
     EditButton(usize),
     /// Key hint `.0`: a click presses its key.
@@ -201,7 +206,11 @@ pub enum MachinesHit {
 pub struct MachinesLayout {
     /// The edit form's fields and buttons, while it is open.
     pub edit_name: Option<Rect>,
-    pub edit_address: Option<Rect>,
+    /// The address fields, in order, each with the × taking it out (none
+    /// on a single address), and the "+ Add address" row under them.
+    pub edit_addresses: Vec<Rect>,
+    pub edit_removes: Vec<Option<Rect>>,
+    pub edit_add: Option<Rect>,
     pub edit_buttons: Vec<Rect>,
     /// The edit form's labels left of its fields, name's then address's;
     /// empty while it is shut.
@@ -580,7 +589,9 @@ pub fn machines_layout(view: &MachinesPanelView, output: Size<i32, Logical>) -> 
     );
     MachinesLayout {
         edit_name,
-        edit_address,
+        edit_addresses: edit_address.into_iter().collect(),
+        edit_removes: Vec::new(),
+        edit_add: None,
         edit_buttons,
         edit_labels,
         edit_progress,
@@ -632,7 +643,7 @@ impl MachinesLayout {
         // A click on a label goes to its field, as on a form.
         let fields = [
             (self.edit_name, MachinesHit::EditName),
-            (self.edit_address, MachinesHit::EditAddress),
+            (self.edit_addresses.first().copied(), MachinesHit::EditAddress(0)),
         ];
         for ((field, hit), label) in fields.into_iter().zip(&self.edit_labels) {
             if field.is_some_and(|f| on(&label.merge(f))) {
@@ -653,7 +664,7 @@ impl MachinesLayout {
         (self.buttons.iter())
             .chain(&self.edit_buttons)
             .chain(self.edit_name.iter())
-            .chain(self.edit_address.iter())
+            .chain(self.edit_addresses.iter())
             .chain(self.run_buttons.iter().flatten())
             .chain(self.rows.iter())
             .copied()
@@ -1053,10 +1064,10 @@ impl Painter {
                 MachinesFocus::EditName,
             ),
             (
-                layout.edit_address,
-                &e.address,
+                layout.edit_addresses.first().copied(),
+                &e.addresses[0],
                 ADDRESS_HINT,
-                MachinesFocus::EditAddress,
+                MachinesFocus::EditAddress(0),
             ),
         ];
         for (rect, line, hint, focus) in fields {
@@ -1123,7 +1134,7 @@ pub fn machines_panel_field(
     let layout = machines_layout(view, size);
     let (area, line) = match view.focus {
         MachinesFocus::EditName => (layout.edit_name?, &edit.name),
-        MachinesFocus::EditAddress => (layout.edit_address?, &edit.address),
+        MachinesFocus::EditAddress(i) => (*layout.edit_addresses.get(i)?, edit.addresses.get(i)?),
         _ => return None,
     };
     Some(super::FieldSpot {
@@ -1359,7 +1370,7 @@ mod tests {
         if let Some(d) = v.detail.as_mut() {
             d.edit = Some(MachineEditView {
                 name: "box-0".into(),
-                address: "ana@box-0".into(),
+                addresses: vec!["ana@box-0".into()],
                 error: error.then(|| "That address reaches another machine. ".repeat(4)),
                 how: error.then(|| "Check the address.".to_owned()),
                 progress: busy.then(|| "SSH reached, looking around\u{2026}".to_owned()),
@@ -1371,14 +1382,14 @@ mod tests {
                 busy,
             });
         }
-        v.focus = MachinesFocus::EditAddress;
+        v.focus = MachinesFocus::EditAddress(0);
         v
     }
 
     /// The form's parts inside the detail, top down: fields, lines,
     /// buttons, then the runs.
     fn form_fits(l: &MachinesLayout) {
-        let (name, address) = (l.edit_name.unwrap(), l.edit_address.unwrap());
+        let (name, address) = (l.edit_name.unwrap(), l.edit_addresses[0]);
         let parts = [name, address]
             .into_iter()
             .chain(l.edit_labels.iter().copied())
@@ -1453,12 +1464,12 @@ mod tests {
         let output = (870, 600).into();
         let l = machines_layout(&editing(2, false, true), output);
         let name = l.edit_name.unwrap();
-        let address = l.edit_address.unwrap();
+        let address = l.edit_addresses[0];
         assert_eq!(l.hit(mid(name)), Some(MachinesHit::EditName));
-        assert_eq!(l.hit(mid(address)), Some(MachinesHit::EditAddress));
+        assert_eq!(l.hit(mid(address)), Some(MachinesHit::EditAddress(0)));
         // A label goes to its field.
         assert_eq!(l.hit(mid(l.edit_labels[0])), Some(MachinesHit::EditName));
-        assert_eq!(l.hit(mid(l.edit_labels[1])), Some(MachinesHit::EditAddress));
+        assert_eq!(l.hit(mid(l.edit_labels[1])), Some(MachinesHit::EditAddress(0)));
         assert_eq!(
             l.hit(mid(l.edit_buttons[1])),
             Some(MachinesHit::EditButton(1))
@@ -1471,7 +1482,7 @@ mod tests {
         }
         // Shut, the form is nowhere.
         let l = machines_layout(&view(2, 2), output);
-        assert!(l.edit_name.is_none() && l.edit_address.is_none());
+        assert!(l.edit_name.is_none() && l.edit_addresses.is_empty());
         assert!(l.edit_buttons.is_empty() && l.edit_labels.is_empty());
     }
 
@@ -1481,7 +1492,7 @@ mod tests {
         let mut v = editing(1, false, false);
         let l = machines_layout(&v, output);
         let spot = machines_panel_field(&v, output, 2.0).unwrap();
-        assert_eq!(spot.area, l.edit_address.unwrap());
+        assert_eq!(spot.area, l.edit_addresses[0]);
         assert_eq!(spot.line, "ana@box-0");
         assert_eq!(spot.text, super::super::field_text(spot.area, 2.0));
         v.focus = MachinesFocus::EditName;

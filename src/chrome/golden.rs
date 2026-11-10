@@ -2384,7 +2384,7 @@ fn machines_panel(case: usize) -> super::MachinesPanelView {
             let (busy, failed) = (case == 5, case == 6);
             let edit = MachineEditView {
                 name: Line::from("ZenBook"),
-                address: Line::from("lga@zenbook-home"),
+                addresses: vec![Line::from("lga@zenbook-home")],
                 error: failed
                     .then(|| "That address reaches another machine, not ZenBook".to_owned()),
                 how: failed.then(|| {
@@ -2404,8 +2404,8 @@ fn machines_panel(case: usize) -> super::MachinesPanelView {
             zenbook.runs.truncate(1);
             zenbook.edit = Some(edit);
             let (focus, hover) = match case {
-                4 => (MachinesFocus::EditAddress, Some(MachinesHit::EditButton(0))),
-                5 => (MachinesFocus::EditAddress, None),
+                4 => (MachinesFocus::EditAddress(0), Some(MachinesHit::EditButton(0))),
+                5 => (MachinesFocus::EditAddress(0), None),
                 _ => (MachinesFocus::EditButton(2), None),
             };
             (0, Some(zenbook), focus, hover)

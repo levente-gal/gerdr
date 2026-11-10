@@ -139,8 +139,8 @@ struct Config {
     inbox: InboxConfig,
     /// Agent CLI commands by name (see `cli_agents`).
     agents: BTreeMap<String, String>,
-    /// Other machines' SSH targets by name (see `machines`).
-    machines: BTreeMap<String, String>,
+    /// Other machines' SSH addresses by name (see `machines`).
+    machines: BTreeMap<String, Addresses>,
     services: ServicesConfig,
     t3: T3Config,
     terminal: TerminalConfig,
@@ -277,13 +277,73 @@ pub fn write_bool(table: &str, key: &str, value: bool) -> Result<(), String> {
     crate::projects::write_atomic(&path, text.as_bytes()).map_err(|err| err.to_string())
 }
 
-/// Keep machine `name`'s SSH target in `[machines]` of the config file, or
+/// A machine's SSH addresses, in the order they are tried: one is written as
+/// a string (`"ZenBook" = "me@zenbook"`), several as a list (`"ZenBook" =
+/// ["me@zenbook-office", "me@192.168.101.14"]`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Addresses(pub Vec<String>);
+
+impl Addresses {
+    pub fn one(address: &str) -> Self {
+        Self(vec![address.to_owned()])
+    }
+
+    /// The first address: the one tried first, and what one address is.
+    pub fn first(&self) -> &str {
+        self.0.first().map_or("", String::as_str)
+    }
+
+    pub fn contains(&self, address: &str) -> bool {
+        self.0.iter().any(|a| a == address)
+    }
+
+    /// As the config file has it: a string for one, a list for more.
+    fn item(&self) -> toml_edit::Item {
+        match self.0.as_slice() {
+            [one] => toml_edit::value(one.as_str()),
+            many => toml_edit::value(many.iter().map(String::as_str).collect::<toml_edit::Array>()),
+        }
+    }
+}
+
+impl std::fmt::Display for Addresses {
+    /// The addresses as the user reads them: "a, b".
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0.join(", "))
+    }
+}
+
+impl From<&str> for Addresses {
+    fn from(address: &str) -> Self {
+        Self::one(address)
+    }
+}
+
+impl<'de> Deserialize<'de> for Addresses {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Written {
+            One(String),
+            Many(Vec<String>),
+        }
+        match Written::deserialize(d)? {
+            Written::One(one) => Ok(Self(vec![one])),
+            Written::Many(many) if many.is_empty() => {
+                Err(serde::de::Error::custom("a machine needs an address"))
+            }
+            Written::Many(many) => Ok(Self(many)),
+        }
+    }
+}
+
+/// Keep machine `name`'s SSH addresses in `[machines]` of the config file, or
 /// take it out, keeping the rest of the file as it was (see `with_bool`).
-pub fn write_machine(name: &str, target: Option<&str>) -> Result<(), String> {
+pub fn write_machine(name: &str, addresses: Option<&Addresses>) -> Result<(), String> {
     let path = config_file();
     ensure_file(&path).map_err(|err| err.to_string())?;
     let text = std::fs::read_to_string(&path).map_err(|err| err.to_string())?;
-    let text = with_value(&text, "machines", name, target.map(toml_edit::value))?;
+    let text = with_value(&text, "machines", name, addresses.map(Addresses::item))?;
     crate::projects::write_atomic(&path, text.as_bytes()).map_err(|err| err.to_string())
 }
 
@@ -696,8 +756,8 @@ pub struct Settings {
     pub keep: Vec<String>,
     /// The agent CLI commands by name (see `cli_agents`).
     pub agents: BTreeMap<String, String>,
-    /// Other machines' SSH targets by name (see `machines`).
-    pub machines: BTreeMap<String, String>,
+    /// Other machines' SSH addresses by name (see `machines`).
+    pub machines: BTreeMap<String, Addresses>,
     /// How the services' errors are found and told (see `services`).
     pub services: Services,
     /// How T3 Code is kept up to date.

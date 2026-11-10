@@ -816,7 +816,11 @@ pub enum LinkState {
 /// A machine's link, while it has a thread.
 #[derive(Debug)]
 pub(crate) struct Link {
+    /// The address it uses: the one that answered while it is up, else the
+    /// one it is trying.
     target: String,
+    /// Every address of the machine, in the order they are tried.
+    pub(crate) addresses: crate::config::Addresses,
     /// Which thread it is: what an older one says is stale. Its events find
     /// it by this, not by its name, which a rename changes.
     pub(crate) serial: u64,
@@ -848,7 +852,7 @@ impl Link {
 #[derive(Debug, Default)]
 pub struct Machines {
     /// By name, as the settings file has them.
-    pub(crate) saved: BTreeMap<String, String>,
+    pub(crate) saved: BTreeMap<String, crate::config::Addresses>,
     pub(crate) links: HashMap<String, Link>,
     next_serial: u64,
     tx: Option<channel::Sender<(String, u64, LinkEvent)>>,
@@ -1074,7 +1078,7 @@ impl MachineDialog {
 impl Gerdr {
     /// Connect the machines saved, and clear what gerdrs before this one
     /// left behind.
-    pub fn watch_machines(&mut self, saved: BTreeMap<String, String>) {
+    pub fn watch_machines(&mut self, saved: BTreeMap<String, crate::config::Addresses>) {
         clear_leftovers();
         self.set_saved_machines(saved);
         self.load_viewed();
@@ -1088,7 +1092,7 @@ impl Gerdr {
 
     /// The settings say these machines: start what is new or changed, and
     /// stop what is gone. A machine disconnected stays so while unchanged.
-    pub fn set_saved_machines(&mut self, saved: BTreeMap<String, String>) {
+    pub fn set_saved_machines(&mut self, saved: BTreeMap<String, crate::config::Addresses>) {
         let old = std::mem::replace(&mut self.machines.saved, saved.clone());
         for (name, target) in &old {
             if saved.get(name) != Some(target)
@@ -1136,8 +1140,15 @@ impl Gerdr {
         self.machines.tx.clone()
     }
 
-    /// Start the thread of machine `name`'s link.
-    pub(crate) fn start_link(&mut self, name: String, target: String, retry: bool) {
+    /// Start the thread of machine `name`'s link, to its addresses in turn.
+    pub(crate) fn start_link(
+        &mut self,
+        name: String,
+        addresses: crate::config::Addresses,
+        retry: bool,
+    ) {
+        // Contract: the first address only; increment 3 tries them all.
+        let target = addresses.first().to_owned();
         let Some(tx) = self.machines_sender() else {
             self.show_error(format!("gerdr couldn't start connecting to {name}"));
             return;
@@ -1148,6 +1159,7 @@ impl Gerdr {
         let last_seen = self.machines.links.get(&name).and_then(|l| l.last_seen);
         let link = Link {
             target: target.clone(),
+            addresses,
             serial,
             cancel: cancel.clone(),
             state: LinkState::Connecting("connecting\u{2026}".into()),
@@ -1279,9 +1291,10 @@ impl Gerdr {
     fn machine_connected(&mut self, name: String, target: String) {
         self.machines.dialog = None;
         self.machines.draft = None;
-        self.machines.saved.insert(name.clone(), target.clone());
+        let addresses = crate::config::Addresses::one(&target);
+        self.machines.saved.insert(name.clone(), addresses.clone());
         self.refresh_pointer_focus();
-        match crate::config::write_machine(&name, Some(&target)) {
+        match crate::config::write_machine(&name, Some(&addresses)) {
             Ok(()) => {
                 // Written here: no need to read it back and say so.
                 self.settings_modified = crate::config::modified();
@@ -1388,7 +1401,7 @@ impl Gerdr {
         } else {
             typed
         };
-        let already = saved.iter().find(|(_, t)| **t == target);
+        let already = saved.iter().find(|(_, t)| t.contains(&target));
         let problem = if target.is_empty() {
             dialog.focus = MachineFocus::Target;
             Some("Say which machine, as user@host.".to_owned())
@@ -1410,7 +1423,7 @@ impl Gerdr {
         dialog.error = None;
         dialog.attempt = Some(name.clone());
         dialog.progress = Some("connecting\u{2026}".into());
-        self.start_link(name, target, false);
+        self.start_link(name, crate::config::Addresses::one(&target), false);
     }
 
     /// Open a tab running `command` in the workspace shown, for what SSH
@@ -1549,11 +1562,11 @@ impl Gerdr {
         match crate::config::write_machine(name, None) {
             Ok(()) => {
                 self.settings_modified = crate::config::modified();
-                let undo = target.map(|target| {
+                let undo = target.map(|addresses| {
                     let name = name.to_owned();
                     (
                         "Undo".to_owned(),
-                        MenuAction::RestoreMachine { name, target },
+                        MenuAction::RestoreMachine { name, addresses },
                     )
                 });
                 self.toast_with(
@@ -1571,21 +1584,21 @@ impl Gerdr {
         }
     }
 
-    /// Undo removing machine `name`: back in the settings at `target`, and
+    /// Undo removing machine `name`: back in the settings at `addresses`, and
     /// connecting.
-    pub(crate) fn restore_machine(&mut self, name: &str, target: &str) {
+    pub(crate) fn restore_machine(&mut self, name: &str, addresses: crate::config::Addresses) {
         if self.machines.saved.contains_key(name) {
             return self.show_warning(format!("{name} is there already"));
         }
-        if let Err(why) = crate::config::write_machine(name, Some(target)) {
+        if let Err(why) = crate::config::write_machine(name, Some(&addresses)) {
             tracing::warn!("machines: restoring {name}: {why}");
             return self.show_error(format!(
                 "gerdr couldn't put {name} back in the settings: {why}"
             ));
         }
         self.settings_modified = crate::config::modified();
-        (self.machines.saved).insert(name.to_owned(), target.to_owned());
-        self.start_link(name.to_owned(), target.to_owned(), true);
+        (self.machines.saved).insert(name.to_owned(), addresses.clone());
+        self.start_link(name.to_owned(), addresses, true);
         self.report_machines();
     }
 
@@ -1611,7 +1624,7 @@ impl Gerdr {
         (self.machines.saved.iter())
             .map(|(name, target)| {
                 let state = self.machines.links.get(name).map(|l| &l.state);
-                machine_task(name, target, state)
+                machine_task(name, target.first(), state)
             })
             .collect()
     }
@@ -1684,6 +1697,7 @@ mod tests {
         machines.saved.insert("zen".into(), "me@zen".into());
         let link = Link {
             target: "me@box".into(),
+            addresses: "me@box".into(),
             serial: 7,
             cancel: cancel.clone(),
             state: LinkState::Connecting("x".into()),
@@ -1700,7 +1714,7 @@ mod tests {
         let moved = machines.rename("box", "crate");
         assert_eq!(moved, ["id0", "id1"]);
         assert_eq!(machines.saved.keys().collect::<Vec<_>>(), ["crate", "zen"]);
-        assert_eq!(machines.saved["crate"], "me@box");
+        assert_eq!(machines.saved["crate"], "me@box".into());
         // The same link, still running, and what its thread says finds it.
         assert!(!machines.links.contains_key("box"));
         assert_eq!(machines.links["crate"].serial, 7);

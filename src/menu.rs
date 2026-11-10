@@ -81,7 +81,7 @@ pub enum MenuAction {
     /// connecting.
     RestoreMachine {
         name: String,
-        target: String,
+        addresses: crate::config::Addresses,
     },
     /// A toast's "Undo" after a machine was renamed: machine `from` is
     /// called `to` again.
@@ -501,7 +501,9 @@ impl Gerdr {
             MenuAction::StopAiWork => self.ai_work.stop_busy(),
             MenuAction::StopAiWorkPull(project, slug) => self.ai_work.stop_pull(&project, &slug),
             MenuAction::RemoveMachine(name) => self.ask_remove_machine(&name),
-            MenuAction::RestoreMachine { name, target } => self.restore_machine(&name, &target),
+            MenuAction::RestoreMachine { name, addresses } => {
+                self.restore_machine(&name, addresses)
+            }
             MenuAction::RenameMachine { from, to } => self.rename_machine_back(&from, &to),
             MenuAction::UpdateT3(version) => self.update_t3(version),
             MenuAction::NewTab(w) => {

@@ -86,11 +86,11 @@ pub struct EditTry {
     pub serial: u64,
     /// Where it was, and whether its link was running there: put back as it
     /// was if the try fails.
-    pub old_target: String,
+    pub old_target: crate::config::Addresses,
     pub was_live: bool,
     /// What the form asked for.
     pub new_name: String,
-    pub new_target: String,
+    pub new_target: crate::config::Addresses,
     /// The ids it was seen by: the one answering must be one of them.
     pub known: Vec<String>,
     /// How far trying got.
@@ -98,24 +98,25 @@ pub struct EditTry {
 }
 
 /// What the form says, checked against the machines saved, machine
-/// `machine` among them: the name and address to keep, or what is wrong
+/// `machine` among them: the name and addresses to keep, or what is wrong
 /// and the field at fault.
 pub fn check_edit(
-    saved: &BTreeMap<String, String>,
+    saved: &BTreeMap<String, crate::config::Addresses>,
     machine: &str,
     name: &str,
-    address: &str,
-) -> Result<(String, String), (String, MachinesFocus)> {
+    addresses: &[&str],
+) -> Result<(String, crate::config::Addresses), (String, MachinesFocus)> {
+    // Contract: one address; increment 3 checks each of a list.
     let name = name.trim();
-    let address = address.trim();
-    let at_address = |why: String| Err((why, MachinesFocus::EditAddress));
+    let address = addresses.first().copied().unwrap_or_default().trim();
+    let at_address = |why: String| Err((why, MachinesFocus::EditAddress(0)));
     if address.is_empty() {
         return at_address("Say which machine, as user@host.".to_owned());
     }
     if !valid_target(address) {
         return at_address(Failure::BadTarget.why());
     }
-    if let Some((other, _)) = (saved.iter()).find(|(n, t)| *t == address && *n != machine) {
+    if let Some((other, _)) = (saved.iter()).find(|(n, t)| t.contains(address) && *n != machine) {
         return at_address(format!("It is here already, as {other}."));
     }
     let name = match name.is_empty() {
@@ -128,7 +129,7 @@ pub fn check_edit(
             MachinesFocus::EditName,
         ));
     }
-    Ok((name, address.to_owned()))
+    Ok((name, crate::config::Addresses::one(address)))
 }
 
 /// Whether the machine answering as `answered` is the one seen by the ids
@@ -175,7 +176,7 @@ impl Gerdr {
             self.edit_closed(None);
             return self.show_warning(format!("{machine} isn't in the settings any more"));
         };
-        let checked = check_edit(&self.machines.saved, &machine, &form.name, &form.address);
+        let checked = check_edit(&self.machines.saved, &machine, &form.name, &[&form.address]);
         let (name, target) = match checked {
             Ok(checked) => checked,
             Err((why, field)) => return self.edit_error(why, field),
@@ -239,20 +240,20 @@ impl Gerdr {
 
     /// "Save anyway": machine `machine` called `name` and kept at `target`
     /// without trying it first, its link starting there.
-    fn save_untried(&mut self, machine: &str, name: &str, target: &str) {
+    fn save_untried(&mut self, machine: &str, name: &str, target: &crate::config::Addresses) {
         if name != machine
             && let Err(why) = self.rename_machine(machine, name)
         {
             return self.edit_error(why, MachinesFocus::EditName);
         }
         if let Err(why) = crate::config::write_machine(name, Some(target)) {
-            tracing::warn!("machines: saving {name} at {target}: {why}");
+            tracing::warn!("machines: saving {name} at {target:?}: {why}");
             let why = format!("gerdr couldn't keep it in the settings: {why}.");
-            return self.edit_error(why, MachinesFocus::EditAddress);
+            return self.edit_error(why, MachinesFocus::EditAddress(0));
         }
         self.settings_modified = crate::config::modified();
-        (self.machines.saved).insert(name.to_owned(), target.to_owned());
-        self.start_link(name.to_owned(), target.to_owned(), true);
+        (self.machines.saved).insert(name.to_owned(), target.clone());
+        self.start_link(name.to_owned(), target.clone(), true);
         self.starts_lost();
         self.report_machines();
         self.show_success(format!("Saved {name}, not connected yet"));
@@ -274,7 +275,7 @@ impl Gerdr {
         if let Some(panel) = self.machines_panel.as_mut()
             && panel.edit.is_some()
         {
-            panel.focus = MachinesFocus::EditAddress;
+            panel.focus = MachinesFocus::EditAddress(0);
         }
         self.starts_lost();
         self.report_machines();
@@ -331,9 +332,9 @@ impl Gerdr {
         let name = tried.name.clone();
         match self.edit_form_mut(&name) {
             Some(form) => {
-                form.failed = Some((tried.new_target, failure));
+                form.failed = Some((tried.new_target.first().to_owned(), failure));
                 if let Some(panel) = self.machines_panel.as_mut() {
-                    panel.focus = MachinesFocus::EditAddress;
+                    panel.focus = MachinesFocus::EditAddress(0);
                 }
             }
             None => self.show_warning(format!(
@@ -356,9 +357,10 @@ impl Gerdr {
             ..
         } = tried;
         if let Err(why) = crate::config::write_machine(&name, Some(&new_target)) {
-            tracing::warn!("machines: saving {name} at {new_target}: {why}");
+            tracing::warn!("machines: saving {name} at {new_target:?}: {why}");
+            let at = new_target.first();
             return self.show_error(format!(
-                "Connected to {name} at {new_target}, but gerdr couldn't keep it in the settings: {why}"
+                "Connected to {name} at {at}, but gerdr couldn't keep it in the settings: {why}"
             ));
         }
         self.settings_modified = crate::config::modified();
@@ -461,32 +463,32 @@ impl Gerdr {
 mod tests {
     use super::*;
 
-    fn saved() -> BTreeMap<String, String> {
+    fn saved() -> BTreeMap<String, crate::config::Addresses> {
         BTreeMap::from([
-            ("box".to_owned(), "me@box".to_owned()),
-            ("zen".to_owned(), "me@zen".to_owned()),
+            ("box".to_owned(), "me@box".into()),
+            ("zen".to_owned(), "me@zen".into()),
         ])
     }
 
     #[test]
     fn the_form_says_what_is_wrong_and_where() {
         let saved = saved();
-        let check = |name: &str, address: &str| check_edit(&saved, "box", name, address);
+        let check = |name: &str, address: &str| check_edit(&saved, "box", name, &[address]);
         let at = |why: &str, field| Err((why.to_owned(), field));
         assert_eq!(
             check("box", " "),
             at(
                 "Say which machine, as user@host.",
-                MachinesFocus::EditAddress
+                MachinesFocus::EditAddress(0)
             )
         );
         assert_eq!(
             check("box", "-oProxyCommand=x"),
-            at(&Failure::BadTarget.why(), MachinesFocus::EditAddress)
+            at(&Failure::BadTarget.why(), MachinesFocus::EditAddress(0))
         );
         assert_eq!(
             check("box", "me@zen"),
-            at("It is here already, as zen.", MachinesFocus::EditAddress)
+            at("It is here already, as zen.", MachinesFocus::EditAddress(0))
         );
         assert_eq!(
             check("zen", "me@box2"),

@@ -92,6 +92,15 @@ pub enum Press {
     StopTrying,
     CancelEdit,
     EditFix,
+    /// A new empty address field at the end of the form's list ("+ Add
+    /// address").
+    AddAddress,
+    /// Take address field `.0` out of the form's list (its ×).
+    RemoveAddress(usize),
+    /// Machine `drop` is the same machine as `keep` (the same gerdr machine
+    /// id): its addresses join `keep`'s, after them, and `drop` goes, all it
+    /// was for moving to `keep`.
+    Merge { keep: String, drop: String },
 }
 
 /// What the machines panel asks gerdr to do.
@@ -150,7 +159,7 @@ impl Content {
             if edit.busy {
                 return buttons.collect();
             }
-            return [MachinesFocus::EditName, MachinesFocus::EditAddress]
+            return [MachinesFocus::EditName, MachinesFocus::EditAddress(0)]
                 .into_iter()
                 .chain(buttons)
                 .collect();
@@ -169,7 +178,7 @@ impl Content {
     fn home(&self) -> MachinesFocus {
         match &self.edit {
             Some(edit) if edit.busy => MachinesFocus::EditButton(0),
-            Some(_) => MachinesFocus::EditAddress,
+            Some(_) => MachinesFocus::EditAddress(0),
             None => MachinesFocus::List,
         }
     }
@@ -183,7 +192,7 @@ impl Content {
             MachinesFocus::List => self.buttons.last().cloned(),
             MachinesFocus::Run(r, b) => self.run_presses.get(r)?.get(b).cloned(),
             MachinesFocus::Button(b) => self.buttons.get(b).cloned(),
-            MachinesFocus::EditName | MachinesFocus::EditAddress => self
+            MachinesFocus::EditName | MachinesFocus::EditAddress(_) => self
                 .edit
                 .as_ref()
                 .filter(|e| !e.busy)?
@@ -202,7 +211,7 @@ impl Content {
             MachinesFocus::List => detail?.buttons.last().cloned(),
             MachinesFocus::Run(r, b) => detail?.runs.get(r)?.buttons.get(b).cloned(),
             MachinesFocus::Button(b) => detail?.buttons.get(b).cloned(),
-            MachinesFocus::EditName | MachinesFocus::EditAddress => {
+            MachinesFocus::EditName | MachinesFocus::EditAddress(_) => {
                 let edit = detail?.edit.as_ref().filter(|e| !e.busy)?;
                 edit.buttons.last().cloned()
             }
@@ -374,7 +383,7 @@ fn edit_parts(form: &EditForm, trying: Option<&str>) -> (MachineEditView, EditCo
     let (labels, presses) = buttons.into_iter().unzip();
     let view = MachineEditView {
         name: form.name.line(),
-        address: form.address.line(),
+        addresses: vec![form.address.line()],
         error,
         how,
         progress: trying.map(str::to_owned),
@@ -491,7 +500,7 @@ impl MachinesPanel {
         }
         self.focus = match on_name {
             true => MachinesFocus::EditName,
-            false => MachinesFocus::EditAddress,
+            false => MachinesFocus::EditAddress(0),
         };
         self.armed = None;
     }
@@ -535,8 +544,8 @@ impl MachinesPanel {
         let ctrl = mods.ctrl && !mods.alt && !mods.logo;
         let alt = mods.alt && !mods.ctrl && !mods.logo;
         let up = |focus| match focus {
-            MachinesFocus::EditName | MachinesFocus::EditAddress => MachinesFocus::EditName,
-            _ => MachinesFocus::EditAddress,
+            MachinesFocus::EditName | MachinesFocus::EditAddress(_) => MachinesFocus::EditName,
+            _ => MachinesFocus::EditAddress(0),
         };
         match sym {
             Keysym::Escape if edit.busy => return Some(Outcome::Press(Press::StopTrying)),
@@ -564,13 +573,13 @@ impl MachinesPanel {
             }
             Keysym::Up | Keysym::KP_Up => self.focus = up(self.focus),
             Keysym::k | Keysym::K if ctrl => self.focus = up(self.focus),
-            Keysym::Down | Keysym::KP_Down => self.focus = MachinesFocus::EditAddress,
-            Keysym::j | Keysym::J if ctrl => self.focus = MachinesFocus::EditAddress,
+            Keysym::Down | Keysym::KP_Down => self.focus = MachinesFocus::EditAddress(0),
+            Keysym::j | Keysym::J if ctrl => self.focus = MachinesFocus::EditAddress(0),
             _ => {
                 let form = self.edit.as_mut()?;
                 let field = match self.focus {
                     MachinesFocus::EditName => &mut form.name,
-                    MachinesFocus::EditAddress => &mut form.address,
+                    MachinesFocus::EditAddress(_) => &mut form.address,
                     _ => return None,
                 };
                 if field.key(mods, sym, typed) == Edit::Changed {
@@ -847,7 +856,7 @@ impl Gerdr {
                 let (state, dot) = link_chip(link.map(|l| &l.state));
                 MachineRowView {
                     name: name.clone(),
-                    address: link.map_or(saved.as_str(), |l| l.target()).to_owned(),
+                    address: link.map_or(saved.first(), |l| l.target()).to_owned(),
                     state: state.to_owned(),
                     dot,
                     armed: false,
@@ -978,7 +987,7 @@ impl Gerdr {
             return;
         };
         if let Some(panel) = self.machines_panel.as_mut() {
-            panel.open_edit(name, &address, on_name);
+            panel.open_edit(name, address.first(), on_name);
         }
     }
 
@@ -1090,6 +1099,8 @@ impl Gerdr {
                 }
                 self.run_fix(fix);
             }
+            // Contract (increment 3).
+            Press::AddAddress | Press::RemoveAddress(_) | Press::Merge { .. } => {}
         }
     }
 
@@ -1158,13 +1169,15 @@ impl Gerdr {
                 }
                 content.press(view.selected, focus).map(Outcome::Press)
             }
+            // Contract: the address list's × and add row (increment 3).
+            Some(MachinesHit::EditRemoveAddress(_) | MachinesHit::EditAddAddress) => None,
             // A field takes the keyboard; `press_field` puts the caret.
-            Some(hit @ (MachinesHit::EditName | MachinesHit::EditAddress)) => {
+            Some(hit @ (MachinesHit::EditName | MachinesHit::EditAddress(_))) => {
                 let busy = content.edit.as_ref().is_none_or(|e| e.busy);
                 if let Some(panel) = self.machines_panel.as_mut().filter(|_| !busy) {
                     panel.focus = match hit {
                         MachinesHit::EditName => MachinesFocus::EditName,
-                        _ => MachinesFocus::EditAddress,
+                        _ => MachinesFocus::EditAddress(0),
                     };
                 }
                 None
@@ -1230,7 +1243,7 @@ impl Gerdr {
         let form = panel.edit.as_mut()?;
         match panel.focus {
             MachinesFocus::EditName => Some(&mut form.name),
-            MachinesFocus::EditAddress => Some(&mut form.address),
+            MachinesFocus::EditAddress(_) => Some(&mut form.address),
             _ => None,
         }
     }
@@ -1622,7 +1635,7 @@ mod tests {
         let panel = open_form();
         let form = panel.edit.as_ref().unwrap();
         assert_eq!((&*form.name, &*form.address), ("a", "me@a"));
-        assert_eq!(panel.focus, MachinesFocus::EditAddress);
+        assert_eq!(panel.focus, MachinesFocus::EditAddress(0));
     }
 
     #[test]
@@ -1640,7 +1653,7 @@ mod tests {
         assert_eq!(
             seen,
             [
-                MachinesFocus::EditAddress,
+                MachinesFocus::EditAddress(0),
                 MachinesFocus::EditButton(0),
                 MachinesFocus::EditButton(1),
                 MachinesFocus::EditName,
@@ -1650,11 +1663,11 @@ mod tests {
         assert_eq!(panel.focus, MachinesFocus::EditButton(1));
         // Up and Down, Ctrl+K and Ctrl+J, go between the fields.
         key(&mut panel, &c, Keysym::Up, false);
-        assert_eq!(panel.focus, MachinesFocus::EditAddress);
+        assert_eq!(panel.focus, MachinesFocus::EditAddress(0));
         key(&mut panel, &c, Keysym::Up, false);
         assert_eq!(panel.focus, MachinesFocus::EditName);
         chord(&mut panel, &c, true, Keysym::j);
-        assert_eq!(panel.focus, MachinesFocus::EditAddress);
+        assert_eq!(panel.focus, MachinesFocus::EditAddress(0));
         chord(&mut panel, &c, true, Keysym::k);
         assert_eq!(panel.focus, MachinesFocus::EditName);
         // The list stays where it is, and Del is the field's.
@@ -1690,7 +1703,7 @@ mod tests {
         assert_eq!(anyway, Some(Outcome::Press(Press::SaveAnyway)));
         let fix = chord(&mut panel, &c, false, Keysym::x);
         assert_eq!(fix, Some(Outcome::Press(Press::EditFix)));
-        let keys: Vec<String> = (hints(&c, 0, MachinesFocus::EditAddress, false).into_iter())
+        let keys: Vec<String> = (hints(&c, 0, MachinesFocus::EditAddress(0), false).into_iter())
             .map(|(k, w)| format!("{k}: {w}"))
             .collect();
         assert_eq!(
