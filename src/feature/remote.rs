@@ -632,6 +632,22 @@ pub fn unignored_script(worktree: &str, items: &[String]) -> String {
     script
 }
 
+/// The script listing the ignored files of worktree `worktree` there that a
+/// setup copies from a main worktree, a line each: files and links of up to
+/// `max` bytes, not logs or bytecode. Folders aren't: environments in them
+/// are built for each machine. Nothing, with no such worktree.
+pub fn ignored_files_script(worktree: &str, max: u64) -> String {
+    format!(
+        r#"cd {} 2>/dev/null || exit 0
+git -c core.quotePath=false ls-files --others --ignored --exclude-standard --directory | while IFS= read -r f; do
+  case "$f" in */|*.log|*.pyc|\"*) continue ;; esac
+  if [ -L "$f" ] || {{ [ -f "$f" ] && [ "$(($(wc -c <"$f")))" -le {max} ]; }}; then printf '%s\n' "$f"; fi
+done
+"#,
+        shell_quote(worktree)
+    )
+}
+
 /// A worktree there, as `status_script` says it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Standing {
@@ -1233,6 +1249,39 @@ impl Reach {
         Err(trouble("Couldn't copy ignored files there", &out))
     }
 
+    /// Copy `items` (paths inside the worktree `there`) into the worktree
+    /// `local`, leaving what is here already: `push_ignored` the other way.
+    pub fn pull_ignored(
+        &self,
+        there: &str,
+        local: &Path,
+        items: &[String],
+        cancel: &AtomicBool,
+    ) -> Result<(), Trouble> {
+        let mut rsync = Command::new("rsync");
+        rsync
+            .args(["-rlpts", "--chmod=go-rwx", "--ignore-existing"])
+            .args(["--from0", "--files-from=-"])
+            .arg("-e")
+            .arg(self.ssh_line())
+            .arg(self.rsync_path(there))
+            .arg(format!("{}/", local.display()));
+        let list = items.join("\0");
+        let out = match machines::run_with_input(rsync, list.as_bytes(), DATA, cancel) {
+            Ok(out) => out,
+            Err(machines::Failure::NoSsh) => {
+                return Err(Trouble::Work(
+                    "rsync isn't installed on this machine".into(),
+                ));
+            }
+            Err(failure) => return Err(Trouble::Link(failure.why())),
+        };
+        if out.status.success() {
+            return Ok(());
+        }
+        Err(trouble("Couldn't copy ignored files here", &out))
+    }
+
     /// What's missing there for `program` to run, as what to say: git and
     /// rsync for commands, and `program` in a login shell's PATH.
     pub fn missing(&self, program: &str, cancel: &AtomicBool) -> Result<Option<String>, Trouble> {
@@ -1314,6 +1363,32 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&out.stdout), "local.py\n");
         assert!(t.0.as_path().join(".env").exists());
         assert!(!t.0.as_path().join("local.py").exists());
+    }
+
+    #[test]
+    fn a_takeover_lists_the_small_ignored_files_a_setup_copies() {
+        let t = crate::feature::tests::Temp::new();
+        let dir = t.0.as_path();
+        let run = |args: &[&str]| crate::feature::tests::run(dir, args);
+        run(&["init", "-q"]);
+        let ignore = ".env\nlocal.py\n*.log\nbig.bin\n.venv/\nlink\nmy file.txt\n";
+        std::fs::write(dir.join(".gitignore"), ignore).unwrap();
+        std::fs::write(dir.join(".env"), "A=1\n").unwrap();
+        std::fs::write(dir.join("local.py"), "b").unwrap();
+        std::fs::write(dir.join("my file.txt"), "c").unwrap();
+        std::fs::write(dir.join("run.log"), "d").unwrap();
+        std::fs::write(dir.join("big.bin"), vec![0u8; 64]).unwrap();
+        std::fs::create_dir(dir.join(".venv")).unwrap();
+        std::fs::write(dir.join(".venv/pyvenv.cfg"), "x").unwrap();
+        std::os::unix::fs::symlink("/no/such/place", dir.join("link")).unwrap();
+        std::fs::write(dir.join("tracked.txt"), "e").unwrap();
+        let wt = dir.to_string_lossy().into_owned();
+        let out = sh_c(&ignored_files_script(&wt, 16));
+        let mut listed: Vec<&str> = std::str::from_utf8(&out.stdout).unwrap().lines().collect();
+        listed.sort();
+        assert_eq!(listed, [".env", "link", "local.py", "my file.txt"]);
+        let out = sh_c(&ignored_files_script("/no/such/worktree", 16));
+        assert!(out.status.success() && out.stdout.is_empty(), "{out:?}");
     }
 
     #[test]
