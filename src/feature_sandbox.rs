@@ -135,8 +135,12 @@ pub fn lines_of(
     let mut out = Vec::new();
     let mut add = |root: &Path, project: Option<&str>, list: &BTreeMap<String, Vec<String>>| {
         for (name, commands) in list {
-            let held =
-                (feature.repos.iter()).find(|r| r.name == *name && r.project.as_deref() == project);
+            // This machine's settings may name a repository by its folder here,
+            // which needn't be its name on the machine that made the feature.
+            let held = (feature.repos.iter()).find(|r| {
+                r.project.as_deref() == project
+                    && (r.name == *name || r.main.file_name().is_some_and(|f| f == name.as_str()))
+            });
             let dir = held
                 .map(|r| r.worktree.clone())
                 .or_else(|| main_folder(root, name));
@@ -144,12 +148,14 @@ pub fn lines_of(
                 tracing::warn!("no folder for repository {name}: its commands don't run");
                 continue;
             };
+            let name = held.map_or(name, |r| &r.name);
             let repo = feature::repo_key(project, name);
             let picks = feature.sandbox_picks.get(&repo);
             for command in commands {
                 let command = command.trim();
                 let words = command.trim_start_matches('#').trim();
-                if words.is_empty() {
+                // Listed under both names, a command runs once.
+                if words.is_empty() || out.iter().any(|l: &SandboxLine| l.dir == dir && l.words == words) {
                     continue;
                 }
                 let picked = picks.and_then(|p| p.get(words)).copied();
@@ -1504,6 +1510,22 @@ mod tests {
             ]
         );
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_repository_named_by_its_folder_here_runs_in_its_worktree_once() {
+        let root = PathBuf::from("/w/AssetTag");
+        let mut f = feature_with(&root);
+        f.repos[0].main = PathBuf::from("/w/Asset-Track");
+        let lists = PerProject::all(BTreeMap::from([
+            ("Asset-Track".to_owned(), vec!["runserver".to_owned()]),
+            ("api".to_owned(), vec!["runserver".to_owned()]),
+        ]));
+        let lines = lines_of(&f, &lists, false);
+        let runs: Vec<_> = (lines.iter())
+            .map(|l| (l.repo.as_str(), l.dir.clone(), l.words.as_str()))
+            .collect();
+        assert_eq!(runs, [("api", root.join(".features/x/api"), "runserver")]);
     }
 
     /// `f`'s lines of a repository `api`, written as `written`.
