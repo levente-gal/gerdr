@@ -2,6 +2,8 @@
 //!
 //! The press is held (`Taking`) while a thread of its own brings the feature's
 //! files and commits, gets the writer to let go and makes the record this machine's.
+//! Small ignored files of its worktrees there, like `.env`, come too: a setup
+//! here copies only from the main worktree here, which may never have had them.
 //! Then the press goes on as if nothing happened, unless the feature changed on
 //! the way: what the user pressed on isn't there to press any more.
 //!
@@ -29,7 +31,7 @@ use crate::{
         lease::{self, Answer, Request},
         remote::{self, Paths, Reach, Side, Trouble},
         sandbox_run::{self, SandboxRun},
-        store, view,
+        setup, store, view,
     },
     feature_checks::checks_running,
     features::{Job, PanelOutcome},
@@ -78,6 +80,8 @@ pub struct Taken {
     pub feature: Feature,
     /// It is as it was when the user pressed.
     pub same: bool,
+    /// Ignored files of its worktrees there that didn't come, a line each.
+    pub missed: Vec<String>,
 }
 
 /// Why a feature stays where it is.
@@ -276,9 +280,12 @@ impl TakeJob {
             reach.view_code(&feature, &self.places(&feature), &mut known, cancel)?;
             stopped()?;
             self.settle(&feature, cancel)?;
+            step("bringing its ignored files".to_owned());
+            let missed = self.bring_ignored(reach, &feature, cancel);
             Ok(Taken {
                 same: self.same(&record),
                 feature,
+                missed,
             })
         })();
         match &finished {
@@ -300,6 +307,56 @@ impl TakeJob {
             }
         }
         finished
+    }
+
+    /// Copy the small ignored files of the feature's worktrees there, like
+    /// `.env`, into those here that lack them. The main worktree here may never
+    /// have had them, and a setup here copies only from it. What didn't come is
+    /// said a line each: the feature is here already.
+    fn bring_ignored(&self, reach: &Reach, feature: &Feature, cancel: &AtomicBool) -> Vec<String> {
+        let mut missed = Vec::new();
+        for place in self.places(feature) {
+            let (Some(there), Some(local)) = (&place.worktree, &place.local_worktree) else {
+                continue;
+            };
+            if !local.is_dir() {
+                continue;
+            }
+            let key = &place.key;
+            let script = remote::ignored_files_script(there, setup::MAX_FILE);
+            let listed = match reach.script(&script, cancel) {
+                Ok(out) => out,
+                Err(trouble) => {
+                    let why = trouble.text();
+                    tracing::warn!("{key}: listing its ignored files there: {why}");
+                    missed.push(format!("{key} (couldn't list them: {why})"));
+                    continue;
+                }
+            };
+            let items: Vec<String> = (listed.lines())
+                .filter(|item| local.join(item).symlink_metadata().is_err())
+                .map(str::to_owned)
+                .collect();
+            if items.is_empty() {
+                continue;
+            }
+            if let Err(trouble) = reach.pull_ignored(there, local, &items, cancel) {
+                let why = trouble.text();
+                tracing::warn!("{key}: bringing {items:?}: {why}");
+                missed.push(format!("{key}: {} ({why})", items.join(", ")));
+                continue;
+            }
+            // What this branch doesn't ignore would show as a change here.
+            let wt = local.to_string_lossy();
+            match remote::local_script(&remote::unignored_script(&wt, &items), cancel) {
+                Ok(out) => {
+                    let left: Vec<&str> = out.lines().collect();
+                    tracing::info!("{key}: brought {items:?}, not kept as not ignored: {left:?}");
+                }
+                Err(trouble) => tracing::warn!("{key}: ignored files brought: {}", trouble.text()),
+            }
+        }
+        missed
     }
 
     /// Get the writer to let go, as it has to with a gerdr open there.
@@ -402,6 +459,7 @@ impl TakeJob {
         Ok(Taken {
             same: self.same(&record),
             feature,
+            missed: Vec::new(),
         })
     }
 
@@ -646,7 +704,11 @@ impl Gerdr {
                 };
             }
         };
-        let Taken { feature, same } = *taken;
+        let Taken {
+            feature,
+            same,
+            missed,
+        } = *taken;
         // What it was seen as goes, what it names is asked of those machines now.
         // The tabs of a sandbox that went on on the writer are still told of there.
         let still: Vec<String> = view::panes_of(&feature).into_iter().map(str::to_owned).collect();
@@ -693,6 +755,12 @@ impl Gerdr {
             ),
             false => format!("\u{201c}{title}\u{201d} is written here now"),
         });
+        if !missed.is_empty() {
+            self.show_warning(format!(
+                "Ignored files like .env didn't come from {name}: {}. Copy them into the worktrees here",
+                missed.join("; ")
+            ));
+        }
         let Some(press) = taking.press else {
             return;
         };
