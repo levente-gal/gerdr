@@ -438,6 +438,13 @@ pub(crate) enum Done {
         slug: String,
         result: Result<crate::machine_sandbox::StopAfar, String>,
     },
+    /// What a sandbox needs here was looked for before asking for its
+    /// commands: what is missing, in words.
+    SandboxTools {
+        project: String,
+        slug: String,
+        missing: Option<String>,
+    },
     /// Starting a feature's sandbox ended; `stopped`: because it was asked to.
     Sandbox {
         project: String,
@@ -6267,10 +6274,15 @@ fn writers_page_actions(
     let current = mark == StageMark::Current;
     out.extend(review_actions(feature, stage));
     if current && has_failed_checks(feature, stage) {
-        out.push((
-            button("Run failed", ButtonStyle::Plain),
-            PanelOutcome::RunFailed,
-        ));
+        // Before Run checks: after a failure it is the one wanted.
+        let at = (out.iter().position(|(_, o)| *o == PanelOutcome::RunChecks)).unwrap_or(out.len());
+        out.insert(
+            at,
+            (
+                button("Run failed", ButtonStyle::Plain),
+                PanelOutcome::RunFailed,
+            ),
+        );
     }
     if stage == Stage::Verify && can_stop_checks(feature) {
         // First, as Run checks is when none runs. Not the primary: Enter
@@ -6865,6 +6877,14 @@ impl Gerdr {
                 project,
                 result,
             } => self.same_repos_found(&id, &project, result),
+            Done::SandboxTools {
+                project,
+                slug,
+                missing,
+            } => {
+                self.unbusy(&project, &slug, Job::Sandbox);
+                self.sandbox_tools_found(&project, &slug, missing);
+            }
             Done::SandboxAsked {
                 project,
                 slug,
@@ -13857,6 +13877,29 @@ fn sandbox_sections(feature: &Feature, state: &PanelState) -> Vec<PageSection> {
     sections
 }
 
+/// The setup's section with its own buttons (Set up again, Setup log) beside
+/// its caption, off the page's title, which holds what acts on the stage.
+fn setup_sections(
+    feature: &Feature,
+    state: &PanelState,
+    actions: &[(PageButton, PanelOutcome)],
+) -> Vec<PageSection> {
+    let Some(section) = setup_section(feature, state) else {
+        return Vec::new();
+    };
+    let held: Vec<usize> = (actions.iter().enumerate())
+        .filter(|(_, (_, o))| matches!(o, PanelOutcome::SetUp | PanelOutcome::SetupLog))
+        .map(|(i, _)| i)
+        .collect();
+    let mut out = vec![section];
+    if !held.is_empty() {
+        out.push(PageSection::Toolbar {
+            groups: vec![(String::new(), held)],
+        });
+    }
+    out
+}
+
 fn setup_section(feature: &Feature, state: &PanelState) -> Option<PageSection> {
     if let Some(what) = state.setup {
         return Some(lines("Setup", vec![line(inline(what), CheckTone::Note)]));
@@ -15195,12 +15238,12 @@ fn stage_page(
                 let building = at_work && feature.fix_round.is_none();
                 sections.extend(round_cards(feature, stage, state, actions, now));
                 sections.extend(milestones_of(state.probe, stage, building).or(counted));
-                sections.extend(setup_section(feature, state));
+                sections.extend(setup_sections(feature, state, actions));
             }
             Stage::Verify => {
                 sections.extend(ci_sections(feature, state.ctx, actions));
                 sections.extend(verify_sections(feature, state, actions, now));
-                sections.extend(setup_section(feature, state));
+                sections.extend(setup_sections(feature, state, actions));
             }
             Stage::CodeReview => {
                 // The switcher above says it, where there is one.
@@ -15934,6 +15977,10 @@ fn fold_tip(page: &chrome::StagePage, i: usize) -> Option<String> {
             .map(|(word, _)| word.as_str()),
         _ => None,
     })?;
+    // Other toolbars' buttons (the setup's, Ship's) fold nothing.
+    if word != "Collapse" && word != "Expand" {
+        return None;
+    }
     let open = word == "Expand";
     let label = &page.buttons.get(i)?.label;
     let (what, key) = match label.as_str() {
@@ -20481,12 +20528,12 @@ pub(crate) mod tests {
             [
                 "Make fixes",
                 "Plan fixes",
+                "Run failed",
                 "Run checks",
                 "Start over\u{2026}",
                 "Evidence",
                 "Set up",
-                "Commands\u{2026}",
-                "Run failed"
+                "Commands\u{2026}"
             ]
         );
     }
@@ -24222,6 +24269,32 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_setup_holds_its_own_buttons() {
+        let mut f = feature("b", vec![repo("api", true)], 3);
+        let state = PanelState::default();
+        let button = |label: &str| PageButton {
+            label: label.to_owned(),
+            style: ButtonStyle::Quiet,
+        };
+        let actions = vec![
+            (button("Run checks"), PanelOutcome::RunChecks),
+            (button("Set up again"), PanelOutcome::SetUp),
+            (button("Setup log"), PanelOutcome::SetupLog),
+        ];
+        // No setup ran: they stay at the title.
+        assert!(setup_sections(&f, &state, &actions).is_empty());
+        f.setup = Some(feature::setup::SetupRun {
+            finished: Some(2),
+            ..Default::default()
+        });
+        let sections = setup_sections(&f, &state, &actions);
+        assert!(matches!(&sections[0], PageSection::Lines { label, .. } if label == "Setup"));
+        assert!(
+            matches!(&sections[1], PageSection::Toolbar { groups } if groups[0].1 == vec![1, 2])
+        );
+    }
+
+    #[test]
     fn the_setup_section_says_what_went_wrong_then_what_it_copied() {
         let mut f = feature("b", vec![repo("api", true)], 3);
         let state = PanelState::default();
@@ -24372,7 +24445,8 @@ pub(crate) mod tests {
             (node.mark, node.line.as_str()),
             (NodeMark::Waiting, "milestone 1/3")
         );
-        // Its setup goes last, its failure said by the status at the top.
+        // Its setup goes last, with its own buttons beside it, its failure
+        // said by the status at the top.
         f.setup = Some(feature::setup::SetupRun {
             started: 1_000,
             finished: Some(1_100),
@@ -24380,8 +24454,12 @@ pub(crate) mod tests {
             ..Default::default()
         });
         let page = stage_page(&f, Stage::Build, &state, &actions, 2_000);
+        let n = page.sections.len();
+        assert!(matches!(&page.sections[n - 1], PageSection::Toolbar { groups }
+            if groups[0].1.iter().all(|&b| matches!(actions[b].1,
+                PanelOutcome::SetUp | PanelOutcome::SetupLog))));
         assert_eq!(
-            page.sections.last(),
+            page.sections.get(n - 2),
             Some(&lines(
                 "Setup",
                 vec![line(
