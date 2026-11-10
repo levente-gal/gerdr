@@ -354,7 +354,7 @@ impl Gerdr {
         let has = setup::has_work(feature);
         let key = (project.to_owned(), slug.to_owned());
         let running = self.features.build.setting_up.contains(&key);
-        let first = setup_first(has, feature.setup_at(place.as_deref()), running, fresh);
+        let first = setup_first(has, setup::standing(feature, place.as_deref()), running, fresh);
         let title = feature.title.clone();
         if first == SetupFirst::No {
             return false;
@@ -1033,7 +1033,7 @@ impl Gerdr {
         // copied anything hasn't had one. Each machine has its own worktrees.
         let setting_up = self.features.build.setting_up.contains(&key);
         let has = setup::has_work(&feature);
-        let first = setup_first(has, feature.setup_at(machine.as_deref()), setting_up, false);
+        let first = setup_first(has, setup::standing(&feature, machine.as_deref()), setting_up, false);
         let waits = match first {
             SetupFirst::No => false,
             SetupFirst::Wait => true,

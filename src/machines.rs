@@ -1042,6 +1042,9 @@ pub struct Machines {
         HashMap<(String, String), (String, crate::feature::sandbox_run::Elsewhere)>,
     /// When this gerdr last looked for gerdrs that reached this machine.
     pub(crate) reach_looked: Option<Instant>,
+    /// The repositories looked for on each machine, by its id and the project:
+    /// a look goes again once the project uses others (see `machine_repos`).
+    pub(crate) repos_looked: HashMap<(String, String), Vec<std::path::PathBuf>>,
     /// What sandboxes of gone features left, by the machine they are on (none:
     /// here), as last looked for: the tasks panel offers to remove each.
     pub(crate) left: HashMap<Option<String>, Vec<crate::feature_sandbox::LeftStack>>,

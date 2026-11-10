@@ -77,6 +77,7 @@ mod machine_handback;
 mod machine_lease;
 mod machine_load;
 mod machine_reach;
+mod machine_repos;
 mod machine_sandbox;
 mod sandbox_lan;
 mod machine_views;

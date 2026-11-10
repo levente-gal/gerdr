@@ -1558,6 +1558,7 @@ impl Gerdr {
             return;
         }
         self.views_tick();
+        self.same_repos_tick();
         let mut pulls: HashMap<String, Vec<Pull>> = HashMap::new();
         let listed = self.project.iter().filter_map(|p| self.features.all.get(p));
         for feature in listed.flatten().filter(|f| f.status == Status::Open) {
