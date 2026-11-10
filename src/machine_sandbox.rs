@@ -224,8 +224,9 @@ impl ThereJob {
             return Vec::new();
         };
         let links = self.feature.links.iter().map(|l| l.root.clone());
+        let mains = self.feature.repos.iter().map(|r| r.main.clone());
         let roots: Vec<std::path::PathBuf> =
-            std::iter::once(self.feature.root.clone()).chain(links).collect();
+            (std::iter::once(self.feature.root.clone()).chain(links).chain(mains)).collect();
         let feature = &self.feature;
         (sandbox::stacks_under(&containers, &roots).into_iter())
             .filter(|stack| {
