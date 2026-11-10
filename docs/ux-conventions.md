@@ -192,6 +192,11 @@ A key is written in one place, not on the button that does the same thing:
   stops or starts again, and with gerdr.
 - A line gerdr types to an agent and finds still in its input box gets Enter
   again, up to six times over about four minutes. Only then is the user told.
+- A stage agent that waits on the user has its card on the stage's page
+  framed in the warning colour on a tint of it, its status bold in that
+  colour: it asked something, waits for its prompt, is a T3 Code draft, or
+  sits idle with its stage's work not done. Its pane's last lines on the card
+  are in the text colour then, as they hold what it asks.
 - Work the user sends to an agent (findings, review comments, failed tests)
   shows that agent's tab, where it runs or waits for its prompt. Work gerdr
   sends by itself doesn't take the screen. Either way the stage's node on the

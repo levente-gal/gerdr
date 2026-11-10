@@ -1760,6 +1760,10 @@ const FINDING_GAP: i32 = 6;
 const COMMENT_PAD: i32 = 8;
 /// How much of the accent tints that card, as a comment's card in a diff.
 const COMMENT_TINT: f32 = 0.1;
+/// How thick a card's border is, logical pixels: a hairline.
+const CARD_BORDER: f32 = 1.0;
+/// How thick the border of an agent card waiting on the user is.
+const WAITS_BORDER: f32 = 2.0;
 /// How much of the warning colour tints the card of an agent that waits on
 /// the user, as a status pill's ground.
 const WAITS_TINT: f32 = 0.12;
@@ -4530,7 +4534,7 @@ fn comment_stripe(p: &Palette) -> Rgb {
 }
 
 fn card_frame(c: &mut Canvas, rect: Rect, scale: f64, p: &Palette) -> Rect {
-    framed(c, rect, scale, (1.0, p.border_variant, p.background))
+    framed(c, rect, scale, (CARD_BORDER, p.border_variant, p.background))
 }
 
 /// The ground of the card of an agent that waits on the user.
@@ -4542,7 +4546,7 @@ fn waits_ground(p: &Palette) -> Rgb {
 /// twice as thick in the warning colour round a ground tinted with it, so
 /// it shows from across the page.
 fn waits_frame(c: &mut Canvas, rect: Rect, scale: f64, p: &Palette) -> Rect {
-    framed(c, rect, scale, (2.0, p.warning, waits_ground(p)))
+    framed(c, rect, scale, (WAITS_BORDER, p.warning, waits_ground(p)))
 }
 
 /// A card's frame on `c` at `rect`, its border `width` logical pixels in
