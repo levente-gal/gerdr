@@ -1746,7 +1746,8 @@ impl Gerdr {
     }
 
     /// Send the user's comments (`text`, Markdown) to the Build agent:
-    /// once sent, they are deleted, the review closed and the agent shown.
+    /// once sent, they are deleted and the review closed. The agent shows only
+    /// if it waits for its prompt (`show_build_agent`).
     pub(crate) fn feature_send_back(&mut self, text: String) {
         let Some(fe) = self.feature_of() else {
             return;
