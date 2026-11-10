@@ -326,6 +326,18 @@ fn judge(
     Verdict::Wait
 }
 
+/// Whether the agent taking on conflicts `r`, its files in data dir `data`,
+/// is through: planning, its plan or questions are written; resolving, its
+/// questions are, or the merge is committed (`took_in`).
+fn conflicts_done(r: &feature::Resolving, data: &Path, took_in: bool) -> bool {
+    let written = if r.planning {
+        r.plan(data).exists()
+    } else {
+        took_in
+    };
+    written || r.questions(data).exists()
+}
+
 /// What comes of a Build agent resting with `done` of `total` milestones
 /// ticked.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1969,6 +1981,7 @@ impl Gerdr {
         self.fixing_tick(&project);
         self.fix_rounds_tick(&project);
         self.adopt_checks(&project);
+        self.conflicts_agents_tick(&project);
         let Some(all) = self.features.all.get(&project) else {
             return;
         };
@@ -2382,6 +2395,103 @@ impl Gerdr {
         let summary = format!("Build of \u{201c}{title}\u{201d} is blocked: {why}");
         self.notify_feature(project, slug, pane, &summary);
         self.show_warning(summary);
+    }
+
+    /// Watch the agents taking on shipping features' conflicts like stage
+    /// agents: one that rests with its work not done (no plan or questions
+    /// written; the merge not committed) is told once (`Resolving::nudged`).
+    fn conflicts_agents_tick(&mut self, project: &str) {
+        let Some(all) = self.features.all.get(project) else {
+            return;
+        };
+        let taking: Vec<(String, feature::Resolving)> = (all.iter())
+            .filter_map(|f| {
+                let r = f.shipping.resolving.as_ref()?;
+                (!r.nudged && r.pane.is_some()).then(|| (f.slug.clone(), r.clone()))
+            })
+            .collect();
+        let now = Instant::now();
+        for (slug, r) in taking {
+            let Some(pane) = r.pane.clone() else {
+                continue;
+            };
+            // shortcut: only a local tab is nudged, as one on another
+            // machine would need its own way in; add it if conflicts run there.
+            if crate::machine_work::split_pane(&pane).is_some() {
+                continue;
+            }
+            let (status, alive) = self.agent_key_state(&agents::AgentKey::Herdr(pane.clone()));
+            let data = store::dir(None, project, &slug);
+            let found = (self.last_probe(project, &slug))
+                .and_then(|p| p.resolution.as_ref())
+                .filter(|f| f.at == r.at && f.planning == r.planning);
+            let done = conflicts_done(&r, &data, found.is_some_and(|f| f.took_in));
+            let file = if done {
+                File::Good((0, 0))
+            } else {
+                File::Absent
+            };
+            let key = (project.to_owned(), slug.clone(), Stage::Ship);
+            let watch = self.features.agents.entry(key).or_default();
+            if watch.n != r.n || watch.after != r.at {
+                *watch = Watch {
+                    n: r.n,
+                    after: r.at,
+                    ..Watch::default()
+                };
+            }
+            if !matches!(
+                judge(watch, status, alive, &file, false, false, now),
+                Verdict::Nudge { .. }
+            ) {
+                continue;
+            }
+            let text = if r.planning {
+                let values = Vars::from([
+                    ("absent".to_owned(), "yes".to_owned()),
+                    (
+                        "artifact.path".to_owned(),
+                        r.plan(&data).display().to_string(),
+                    ),
+                ]);
+                match prompts::render_builtin("nudge", &values) {
+                    Ok(text) => text.trim().to_owned(),
+                    Err(err) => {
+                        tracing::warn!("rendering the nudge: {err}");
+                        continue;
+                    }
+                }
+            } else {
+                format!(
+                    "The merge of {} isn't committed yet. Please resolve what is left and commit it, \
+                     or write what the user must settle to {}.",
+                    r.onto,
+                    r.questions(&data).display()
+                )
+            };
+            let sent = match self.herdr.as_mut() {
+                Some(herdr) => herdr.send_agent_line(&pane, &text),
+                None => Err("herdr isn't connected".into()),
+            };
+            let Some(f) = self.feature_mut(project, &slug) else {
+                continue;
+            };
+            let Some(going) = f.shipping.resolving.as_mut().filter(|g| g.at == r.at) else {
+                continue;
+            };
+            // Once, sent or not: a failure isn't tried again every round.
+            going.nudged = true;
+            let what = match sent {
+                Ok(()) if r.planning => "Conflicts agent nudged: no plan".to_owned(),
+                Ok(()) => "Conflicts agent nudged: the merge isn't committed".to_owned(),
+                Err(err) => {
+                    tracing::warn!("nudging the conflicts agent of {project}/{slug}: {err}");
+                    format!("Conflicts agent couldn't be nudged: {err}")
+                }
+            };
+            f.log(feature::now(), what);
+            self.save_feature(project, &slug);
+        }
     }
 
     /// Tell `run`'s agent once that its file isn't there (`absent`) or
@@ -3512,6 +3622,36 @@ mod tests {
             judge(&mut w, idle, true, &File::Old, true, false, t),
             Verdict::Wait
         );
+    }
+
+    /// A conflicts agent is through once its plan or questions are written,
+    /// or, resolving, once the merge is committed.
+    #[test]
+    fn a_conflicts_agent_is_through_by_its_files_or_commit() {
+        let dir = std::env::temp_dir().join(format!("gerdr-conflicts-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut r = crate::feature::Resolving {
+            at: 1,
+            repo: "api".into(),
+            onto: "origin/main".into(),
+            onto_sha: "b".into(),
+            before: "a".into(),
+            files: vec!["a.rs".into()],
+            agent: "claude".into(),
+            pane: None,
+            n: 7,
+            planning: true,
+            nudged: false,
+        };
+        assert!(!conflicts_done(&r, &dir, true), "a commit isn't a plan");
+        std::fs::write(r.plan(&dir), "plan").unwrap();
+        assert!(conflicts_done(&r, &dir, false));
+        r.planning = false;
+        assert!(!conflicts_done(&r, &dir, false), "a plan isn't a merge");
+        assert!(conflicts_done(&r, &dir, true));
+        std::fs::write(r.questions(&dir), "?").unwrap();
+        assert!(conflicts_done(&r, &dir, false));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

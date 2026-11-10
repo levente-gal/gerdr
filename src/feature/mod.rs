@@ -297,6 +297,9 @@ pub struct Resolving {
     pub n: u32,
     /// It plans; no merge is under way.
     pub planning: bool,
+    /// Its agent rested with its work not done and was told so, once.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub nudged: bool,
 }
 
 impl Resolving {
@@ -654,7 +657,8 @@ pub struct Repo {
     pub main: PathBuf,
     /// The branch the feature starts from and merges into: `dev`, `main`.
     pub base: String,
-    /// The commit `base` was at when the worktree was made.
+    /// The commit `base` was at when the worktree was made, or the one it
+    /// took in when it was last updated from its base.
     pub base_commit: String,
     /// Its worktree for the feature.
     pub worktree: PathBuf,
@@ -1452,6 +1456,12 @@ impl Feature {
             update.way.done_word(),
             update.onto
         );
+        // Its change now starts at what it took in, for diffs read from here.
+        if let Some(repo) = (self.repos.iter_mut()).find(|r| r.key() == update.repo)
+            && !update.onto_sha.is_empty()
+        {
+            repo.base_commit = update.onto_sha.clone();
+        }
         self.shipping.updates.push(update);
         if let Some(patch) = patch {
             for (stage, mark) in &mut self.marks {

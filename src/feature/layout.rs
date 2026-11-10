@@ -1147,8 +1147,10 @@ fn commit_of(main: &Path, base: &str) -> Result<String, String> {
     Err(format!("its base branch {base} isn't there"))
 }
 
-/// The ref `losses` and `remove` count commits from for `repo`: its base
-/// branch if it is there, else origin's, else the commit it started at.
+/// What `repo`'s change is counted from (its commits, diffs and patch-id):
+/// where its branch last met its base, the local one or origin's, whichever
+/// it shares more with; else its base branch if it is there, else origin's,
+/// else the commit it started at.
 pub(super) fn base_ref(repo: &Repo) -> String {
     // Shown here, written on another machine: where it left off there, whatever
     // the same branch here is at.
@@ -1158,13 +1160,27 @@ pub(super) fn base_ref(repo: &Repo) -> String {
             return seen;
         }
     }
-    for name in [repo.base.clone(), format!("origin/{}", repo.base)] {
-        let spec = format!("{name}^{{commit}}");
-        if git(&repo.main, &["rev-parse", "--verify", "--quiet", &spec]).is_ok() {
-            return name;
+    let names: Vec<String> = [repo.base.clone(), format!("origin/{}", repo.base)]
+        .into_iter()
+        .filter(|name| {
+            let spec = format!("{name}^{{commit}}");
+            git(&repo.main, &["rev-parse", "--verify", "--quiet", &spec]).is_ok()
+        })
+        .collect();
+    let Some(first) = names.first().cloned() else {
+        return repo.base_commit.clone();
+    };
+    // A branch that took origin's base in while the local base stayed behind
+    // counts from what it took in: origin's commits aren't its change, and
+    // pulling the local base after changes nothing.
+    if let Some(branch) = repo.branch.as_deref().filter(|_| repo.touched) {
+        let mut args = vec!["merge-base", branch];
+        args.extend(names.iter().map(String::as_str));
+        if let Ok(fork) = git(&repo.main, &args) {
+            return fork.trim().to_owned();
         }
     }
-    repo.base_commit.clone()
+    first
 }
 
 /// Root entries a multi-repository feature folder links to: not
