@@ -380,16 +380,20 @@ fn links_dir() -> Option<PathBuf> {
     Some(crate::herdr::runtime_dir()?.join("gerdr/m"))
 }
 
-/// The start of this gerdr's socket names for `target`: a Unix socket's path
-/// must stay short, so it isn't the target itself.
+/// The start of this gerdr's socket names for a connection to `target`: a
+/// Unix socket's path must stay short, so it isn't the target itself. Each
+/// connection has its own: one ending removes its sockets after the next to
+/// the same machine started, and must not take that one's.
 fn link_stem(dir: &Path, target: &str) -> PathBuf {
     use std::hash::{Hash, Hasher};
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
     let mut hash = std::collections::hash_map::DefaultHasher::new();
     target.hash(&mut hash);
     dir.join(format!(
-        "{}-{:012x}",
+        "{}-{n}-{:08x}",
         std::process::id(),
-        hash.finish() & 0xffff_ffff_ffff
+        hash.finish() & 0xffff_ffff
     ))
 }
 
@@ -1619,6 +1623,16 @@ mod tests {
         assert!(!valid_target("-J"));
         assert!(!valid_target("ana@h extra"));
         assert!(!valid_target(""));
+    }
+
+    #[test]
+    fn each_connection_has_sockets_of_its_own() {
+        let dir = Path::new("/run/user/1000/gerdr/m");
+        let (one, two) = (link_stem(dir, "me@box"), link_stem(dir, "me@box"));
+        assert_ne!(one, two, "a link ending would take the next one's sockets");
+        let name = one.file_name().unwrap().to_string_lossy().into_owned();
+        let pid = std::process::id().to_string();
+        assert_eq!(name.split('-').next(), Some(pid.as_str()), "clear_leftovers reads the pid");
     }
 
     #[test]
