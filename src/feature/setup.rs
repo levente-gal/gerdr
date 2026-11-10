@@ -37,9 +37,12 @@
 //!
 //! On another machine the same setup differs in what it copies: only what's
 //! small enough to send (`for_machine`). An environment isn't sent, as it is
-//! built for this machine and its paths: the commands build it there. They run
-//! in a terminal there, by a script (`script_there`), so they go on when the
-//! link drops; `machine_checks` waits for it.
+//! built for this machine and its paths: the commands build it there. A
+//! repository with no commands gets its environments built there by what its
+//! files name (`builds_there`): `npm ci` for a `package-lock.json`, `uv sync`
+//! for a `uv.lock`, a venv and pip for a `requirements.txt`. They run in a
+//! terminal there, by a script (`script_there`), so they go on when the link
+//! drops; `machine_checks` waits for it.
 //!
 //! Runs processes: call it off the UI thread (checklist D3).
 
@@ -158,6 +161,125 @@ pub fn for_machine(repo: &Repo, extras: &PerRepo) -> ForMachine {
         }
     }
     out
+}
+
+/// How an environment left out of a setup on another machine gets there.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Built {
+    /// By this command, run in the repository's top folder.
+    By(String),
+    /// By the command of this other environment: a `node_modules` above it
+    /// whose install takes in its workspaces.
+    With(String),
+    /// By nothing its files name.
+    Not,
+}
+
+/// How each of `repo`'s `environments` (as `ForMachine::environments`) is
+/// built on another machine when the project gives it no setup commands,
+/// read from the files of its worktree here, the code that goes there.
+pub fn builds_there(repo: &Repo, environments: &[String]) -> Vec<(String, Built)> {
+    let base = match repo.worktree.is_dir() {
+        true => &repo.worktree,
+        false => &repo.main,
+    };
+    let mut envs: Vec<&String> = environments.iter().collect();
+    // Those nearer the top first, as one there may build those below it.
+    envs.sort_by_key(|e| (e.matches('/').count(), e.as_str()));
+    let mut out: Vec<(String, Built)> = Vec::new();
+    for env in envs {
+        let (folder, name) = match env.rsplit_once('/') {
+            Some((folder, name)) => (folder, name),
+            None => ("", env.as_str()),
+        };
+        let dir = base.join(folder);
+        let built = if name == NODE_MODULES {
+            let above = out.iter().find(|(other, built)| {
+                // "" or ending with a slash, "web/", as the other is a path.
+                let Some(top) = other.strip_suffix(NODE_MODULES) else {
+                    return false;
+                };
+                (top.is_empty() || top.ends_with('/'))
+                    && env.starts_with(top)
+                    && matches!(built, Built::By(_))
+            });
+            match above {
+                Some((other, _)) => Built::With(other.clone()),
+                None if dir.join("package.json").is_file() => {
+                    Built::By(crate::feature::suggest::node_tools(&dir).1.to_owned())
+                }
+                None => Built::Not,
+            }
+        } else {
+            match venv_build(&dir, name, &repo.main.join(env)) {
+                Some(command) => Built::By(command),
+                None => Built::Not,
+            }
+        };
+        let built = match built {
+            Built::By(command) if !folder.is_empty() => Built::By(format!(
+                "cd {} && {command}",
+                crate::desktop::shell_quote(folder)
+            )),
+            built => built,
+        };
+        out.push((env.clone(), built));
+    }
+    out
+}
+
+/// The command building the virtual environment `name` in `dir`, by the tool
+/// that manages its packages there; `here` is the one in main, whose Python
+/// version a plain venv asks for.
+fn venv_build(dir: &Path, name: &str, here: &Path) -> Option<String> {
+    let q = crate::desktop::shell_quote;
+    let dotted = name == ".venv";
+    if dir.join("uv.lock").is_file() {
+        return Some(match dotted {
+            true => "uv sync".to_owned(),
+            false => format!("UV_PROJECT_ENVIRONMENT={} uv sync", q(name)),
+        });
+    }
+    if dotted && crate::prepare::is_poetry_project(dir) {
+        return Some("POETRY_VIRTUALENVS_IN_PROJECT=true poetry install".to_owned());
+    }
+    if dotted && dir.join("Pipfile.lock").is_file() {
+        return Some("PIPENV_VENV_IN_PROJECT=1 pipenv sync --dev".to_owned());
+    }
+    let install = if dir.join("requirements.txt").is_file() {
+        let mut args = "-r requirements.txt".to_owned();
+        if dir.join("requirements-dev.txt").is_file() {
+            args.push_str(" -r requirements-dev.txt");
+        }
+        args
+    } else if dir.join("pyproject.toml").is_file() || dir.join("setup.py").is_file() {
+        "-e .".to_owned()
+    } else {
+        return None;
+    };
+    let python = match venv_python(here) {
+        Some(minor) => format!("\"$(command -v python{minor} || command -v python3)\""),
+        None => "python3".to_owned(),
+    };
+    let venv = q(name);
+    Some(format!(
+        "{python} -m venv {venv} && {venv}/bin/pip install {install}"
+    ))
+}
+
+/// The Python version, "3.12", the virtual environment `venv` was made with.
+fn venv_python(venv: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(venv.join(VENV_MARK)).ok()?;
+    text.lines().find_map(|line| {
+        let (key, value) = line.split_once('=')?;
+        if !matches!(key.trim(), "version" | "version_info") {
+            return None;
+        }
+        let mut parts = value.trim().split('.');
+        let (major, minor) = (parts.next()?, parts.next()?);
+        let number = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+        (number(major) && number(minor)).then(|| format!("{major}.{minor}"))
+    })
 }
 
 /// A command of a setup on another machine.
@@ -1229,6 +1351,149 @@ mod tests {
         );
         assert!(text.contains("api: true\n== in "), "{text}");
         assert!(text.contains("== Setup finished after "), "{text}");
+    }
+
+    fn built(f: &Feature, envs: &[&str]) -> Vec<(String, Built)> {
+        let envs: Vec<String> = envs.iter().map(|e| (*e).to_owned()).collect();
+        builds_there(&f.repos[0], &envs)
+    }
+
+    fn by(command: &str) -> Built {
+        Built::By(command.to_owned())
+    }
+
+    #[test]
+    fn packages_are_built_there_by_their_lockfile() {
+        let t = Temp::new();
+        let f = feature_over(&t, &["api"], &[]);
+        let wt = &f.repos[0].worktree;
+        put(wt, "package.json", "{}");
+        put(wt, "package-lock.json", "{}");
+        put(wt, "web/package.json", "{}");
+        put(wt, "web/pnpm-lock.yaml", "");
+        put(wt, "loose/x", "");
+        let out = built(
+            &f,
+            &["web/node_modules", "node_modules", "loose/node_modules"],
+        );
+        assert_eq!(
+            out,
+            [
+                ("node_modules".into(), by("npm ci")),
+                // The install at the top takes in its workspaces.
+                (
+                    "loose/node_modules".into(),
+                    Built::With("node_modules".into())
+                ),
+                (
+                    "web/node_modules".into(),
+                    Built::With("node_modules".into())
+                ),
+            ]
+        );
+        std::fs::remove_file(wt.join("package.json")).unwrap();
+        let out = built(
+            &f,
+            &["node_modules", "web/node_modules", "loose/node_modules"],
+        );
+        assert_eq!(
+            out,
+            [
+                ("node_modules".into(), Built::Not),
+                ("loose/node_modules".into(), Built::Not),
+                (
+                    "web/node_modules".into(),
+                    by("cd web && pnpm install --frozen-lockfile")
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_venv_is_built_there_by_the_tool_that_manages_it() {
+        let t = Temp::new();
+        let f = feature_over(&t, &["api"], &[]);
+        let (main, wt) = (&f.repos[0].main, &f.repos[0].worktree);
+        put(main, "uvd/.venv/pyvenv.cfg", "version_info = 3.12.4\n");
+        put(wt, "uvd/uv.lock", "");
+        put(wt, "uvn/uv.lock", "");
+        put(wt, "po/pyproject.toml", "[tool.poetry]\n");
+        put(wt, "pipenv/Pipfile.lock", "{}");
+        put(
+            main,
+            "req/venv/pyvenv.cfg",
+            "home = /usr/bin\nversion = 3.11.9\n",
+        );
+        put(wt, "req/requirements.txt", "");
+        put(wt, "req/requirements-dev.txt", "");
+        put(wt, "pyproject.toml", "[project]\n");
+        put(wt, "none/x", "");
+        let out = built(
+            &f,
+            &[
+                "uvd/.venv",
+                "uvn/env",
+                "po/.venv",
+                "pipenv/.venv",
+                "req/venv",
+                ".venv",
+                "none/.venv",
+            ],
+        );
+        let py311 = "\"$(command -v python3.11 || command -v python3)\"";
+        assert_eq!(
+            out,
+            [
+                (
+                    ".venv".into(),
+                    by("python3 -m venv .venv && .venv/bin/pip install -e .")
+                ),
+                ("none/.venv".into(), Built::Not),
+                (
+                    "pipenv/.venv".into(),
+                    by("cd pipenv && PIPENV_VENV_IN_PROJECT=1 pipenv sync --dev")
+                ),
+                (
+                    "po/.venv".into(),
+                    by("cd po && POETRY_VIRTUALENVS_IN_PROJECT=true poetry install")
+                ),
+                (
+                    "req/venv".into(),
+                    by(&format!(
+                        "cd req && {py311} -m venv venv && venv/bin/pip install -r requirements.txt -r requirements-dev.txt"
+                    ))
+                ),
+                ("uvd/.venv".into(), by("cd uvd && uv sync")),
+                (
+                    "uvn/env".into(),
+                    by("cd uvn && UV_PROJECT_ENVIRONMENT=env uv sync")
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_built_venv_runs_in_a_setup_there() {
+        let t = Temp::new();
+        let f = feature_over(&t, &["api"], &[]);
+        let wt = &f.repos[0].worktree;
+        put(wt, "requirements.txt", "");
+        let Built::By(command) = built(&f, &[".venv"]).remove(0).1 else {
+            panic!("no build");
+        };
+        let steps = [StepThere {
+            repo: "api".into(),
+            dir: wt.to_string_lossy().into_owned(),
+            line: command.clone(),
+            command,
+        }];
+        let (dir, log) = run_there(&t, &steps);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("exit")).unwrap(),
+            "0\n",
+            "{log}"
+        );
+        assert!(wt.join(".venv/pyvenv.cfg").is_file());
     }
 
     #[test]

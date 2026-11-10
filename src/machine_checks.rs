@@ -13,7 +13,8 @@
 //! up in the evidence, as it does here. Nothing comes back but what they said.
 //!
 //! The setup there brings small ignored files like `.env` over, and runs the
-//! project's commands in a terminal; environments are for those to build. That
+//! project's commands in a terminal; environments are for those to build, or,
+//! for a repository with none, for what its lockfiles name. That
 //! terminal closes when it ends: the setup log says all, and it comes back as
 //! it grows.
 
@@ -498,6 +499,7 @@ impl Remote {
             .push_code(feature, &self.paths, &self.data, stop)
             .map_err(lost)?;
         let mut notes = Vec::new();
+        let mut builds_there = Vec::new();
         let mut repos: Vec<_> = feature.repos.iter().collect();
         repos.sort_by_key(|r| r.key());
         for repo in repos {
@@ -509,12 +511,37 @@ impl Remote {
             report
                 .not_copied
                 .extend((items.problems.iter()).map(|what| format!("{key}: {what}")));
-            for env in items.environments {
-                notes.push(format!("== {key}: left out {env}, built for this machine"));
-                if !has_commands {
-                    report.not_copied.push(format!(
-                        "{key}: {env} (it's built for this machine: add a setup command that builds it on {name})"
-                    ));
+            // The project's commands build what they will; with none, the
+            // files there say how.
+            let builds = match has_commands {
+                true => (items.environments.iter())
+                    .map(|env| (env.clone(), setup::Built::Not))
+                    .collect(),
+                false => setup::builds_there(repo, &items.environments),
+            };
+            for (env, built) in builds {
+                let left = format!("== {key}: left out {env}, built for this machine");
+                match built {
+                    setup::Built::By(command) => {
+                        notes.push(format!("{left}: {command} builds it there"));
+                        builds_there.push(StepThere {
+                            repo: key.clone(),
+                            dir: worktree.clone(),
+                            line: command.clone(),
+                            command,
+                        });
+                    }
+                    setup::Built::With(other) => {
+                        notes.push(format!("{left}: built with {other}"));
+                    }
+                    setup::Built::Not => {
+                        notes.push(left);
+                        if !has_commands {
+                            report.not_copied.push(format!(
+                                "{key}: {env} (it's built for this machine: add a setup command that builds it on {name})"
+                            ));
+                        }
+                    }
                 }
             }
             if items.send.is_empty() {
@@ -556,10 +583,13 @@ impl Remote {
                 report.copied.push(format!("{key}: {list}"));
             }
         }
-        let steps =
+        let mut steps =
             setup::steps_there(feature, commands, &|path| self.paths.there(path), &|line| {
                 self.paths.text(line)
             });
+        steps.extend(builds_there);
+        // A repository's commands together, in the order of a setup here.
+        steps.sort_by(|a, b| a.repo.cmp(&b.repo));
         self.run_steps(asked, &steps, &notes, report, &mut herdr, stop)
     }
 
@@ -675,6 +705,13 @@ impl Remote {
             if let Some(code) = look.number("exit") {
                 return match code {
                     0 => (at, Ok(())),
+                    // What sh says of a command it can't find.
+                    127 => (
+                        at,
+                        Err(format!(
+                            "exited with 127: a command it runs isn't installed on {name}"
+                        )),
+                    ),
                     code => (at, Err(format!("exited with {code}"))),
                 };
             }
