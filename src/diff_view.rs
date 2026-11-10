@@ -2331,8 +2331,8 @@ impl DiffView {
         ctx.keys == Keys::Diff && self.cursor.is_some() && self.editing.is_none()
     }
 
-    /// The pointer dragged past the diff's rows: the cursor goes on a
-    /// row `by` (up negative), its range kept, the diff scrolled along.
+    /// The press held past the diff's rows: the cursor goes `by` rows on
+    /// (up negative), its range kept, the diff scrolled along.
     pub fn drag_past_rows(&mut self, by: i64, ctx: &Ctx) {
         self.rewrap(ctx);
         if self.drags_rows(ctx) {

@@ -1232,20 +1232,20 @@ impl Gerdr {
     }
 
     /// The pointer dragged to `pos` from a press on the diff: the
-    /// cursor's range reaches the row under it, the diff scrolling a row
-    /// on when it is above or below the rows; from a press on the comment
-    /// being written, its selection reaches the char there (its row
-    /// nearest, held past the rows: `repos_editor_edge_tick` scrolls).
+    /// cursor's range reaches the row under it; from a press on the
+    /// comment being written, its selection reaches the char there (on its
+    /// row nearest). Held past the rows, `repos_drag_edge_tick` scrolls.
     pub fn repos_drag_rows(&mut self, pos: Point<f64, Logical>) {
         self.repos_diff_drag(pos, 0);
     }
 
-    /// While a press on the comment being written is held past the
-    /// diff's rows, scroll on to `now` by rows as fast as the pointer is
-    /// far past them (see `scrollback::edge_speed`), the selection going
-    /// on with them, the pointer moving or not. Whether it scrolls.
-    pub fn repos_editor_edge_tick(&mut self, now: std::time::Instant) -> bool {
-        let edge = match self.repos_editor_drag {
+    /// While a press on the diff is held past its rows, scroll on to
+    /// `now` by rows as fast as the pointer is far past them (see
+    /// `scrollback::edge_speed`), the pointer moving or not: the cursor's
+    /// range, or the selection of the comment being written, going on
+    /// with them. Whether it scrolls.
+    pub fn repos_drag_edge_tick(&mut self, now: std::time::Instant) -> bool {
+        let edge = match self.repos_rows_drag || self.repos_editor_drag {
             true => self.repos_view().map_or(0.0, |view| {
                 let list = chrome::repos_layout(&view, self.repos_rect()).detail_list;
                 let (top, bottom) = (list.loc.y as f64, (list.loc.y + list.size.h) as f64);
@@ -1258,10 +1258,10 @@ impl Gerdr {
             false => 0.0,
         };
         if edge == 0.0 {
-            self.repos_editor_edge = None;
+            self.repos_drag_edge = None;
             return false;
         }
-        let rows = match self.repos_editor_edge {
+        let rows = match self.repos_drag_edge {
             Some((at, carried)) => {
                 carried + crate::scrollback::edge_speed(edge) * now.duration_since(at).as_secs_f64()
             }
@@ -1269,7 +1269,7 @@ impl Gerdr {
         };
         // The whole rows, as many as a page at most.
         let steps = rows.trunc();
-        self.repos_editor_edge = Some((now, rows - steps));
+        self.repos_drag_edge = Some((now, rows - steps));
         let (list, diff) = self.repos_page();
         let page = list.max(diff).max(1) as f64;
         if steps != 0.0 {
@@ -1278,9 +1278,9 @@ impl Gerdr {
         true
     }
 
-    /// A drag on the diff as `repos_drag_rows` has it; with `step`, a held
-    /// press on the comment being written scrolls that many rows (up
-    /// negative) instead, its selection going on with them.
+    /// A drag on the diff as `repos_drag_rows` has it; with `step`, the
+    /// held press scrolls that many rows (up negative) instead, the
+    /// cursor's range or the comment's selection going on with them.
     fn repos_diff_drag(&mut self, pos: Point<f64, Logical>, step: i64) {
         let Some(view) = self.repos_view() else {
             self.repos_rows_drag = false;
@@ -1295,18 +1295,12 @@ impl Gerdr {
             false => None,
         };
         let layout = chrome::repos_layout(&view, self.repos_rect());
+        // The row under the pointer, within the rows' list only.
         let list = layout.detail_list;
-        let by = if pos.y < list.loc.y as f64 {
-            -1
-        } else if pos.y >= (list.loc.y + list.size.h) as f64 {
-            1
-        } else {
-            0
-        };
-        let row = layout
-            .detail_rows
-            .iter()
-            .position(|r| (r.loc.y as f64..(r.loc.y + r.size.h) as f64).contains(&pos.y));
+        let inside = (list.loc.y as f64..(list.loc.y + list.size.h) as f64).contains(&pos.y);
+        let row = (layout.detail_rows.iter())
+            .position(|r| (r.loc.y as f64..(r.loc.y + r.size.h) as f64).contains(&pos.y))
+            .filter(|_| inside);
         // A step takes the comment's selection to its next row out of view,
         // the diff scrolling to it.
         if let Some((i, col)) = editor
@@ -1323,7 +1317,7 @@ impl Gerdr {
             return;
         }
         if self.wd().is_some() {
-            return self.worktree_diff_drag(by, row);
+            return self.worktree_diff_drag(step, row);
         }
         let page = self.repos_page();
         let (density, tree_share, cols, sheet_rows) = self.repos_env();
@@ -1354,13 +1348,13 @@ impl Gerdr {
         let Some(p) = panel.as_mut() else {
             return;
         };
-        match (editor, by, row) {
-            (Some((_, col)), ..) if step != 0 => p.drag_editor_past(step, col, &ctx),
+        match (editor, step, row) {
+            (Some((_, col)), step, _) if step != 0 => p.drag_editor_past(step, col, &ctx),
             (Some((Some(i), col)), ..) => p.drag_editor(i, col, &ctx),
             (Some((None, _)), ..) => {}
             (None, 0, Some(i)) => p.extend_detail_row(i, &ctx),
             (None, 0, None) => {}
-            (None, by, _) => p.drag_past_rows(by, &ctx),
+            (None, step, _) => p.drag_past_rows(step, &ctx),
         }
         self.repos_detail();
     }
