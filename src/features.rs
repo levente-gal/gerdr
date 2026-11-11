@@ -24473,7 +24473,7 @@ pub(crate) mod tests {
             texts(&check_lines(&f, Some(&nothing), false, 2_060)),
             [
                 (NOTHING_TICKED, CheckTone::Note),
-                ("\u{2713} checks passed \u{b7} review done", CheckTone::Ready),
+                (passed, CheckTone::Ready),
                 ("web has no commits: left out", CheckTone::Note)
             ]
         );
@@ -26178,17 +26178,10 @@ pub(crate) mod tests {
         );
         let card = group.card.as_ref().unwrap();
         assert_eq!(card.state.text, "1 step to run");
-        let last = page.sections.last().unwrap();
-        assert_eq!(
-            *last,
-            lines(
-                "Ship log",
-                vec![line(
-                    "1m ago \u{b7} api: pushed feature/s \u{b7} 3f9c2a1",
-                    CheckTone::Note
-                )]
-            )
-        );
+        // Its rows say what ran: no log repeats them.
+        assert!(!page.sections.iter().any(|s| {
+            matches!(s, PageSection::Lines { label, .. } if label == "Ship log")
+        }));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -26258,21 +26251,19 @@ pub(crate) mod tests {
             actions[undo].1,
             PanelOutcome::UndoShip("api".into(), ShipStep::Push)
         );
+        // The log, with its update from the base, once no card shows.
         assert_eq!(
-            *page.sections.last().unwrap(),
-            lines(
-                "Ship log",
-                vec![
-                    line(
-                        "just now \u{b7} api: merged origin/main \u{b7} 6496d98",
-                        CheckTone::Note
-                    ),
-                    line(
-                        "1m ago \u{b7} api: pushed feature/s \u{b7} 3f9c2a1",
-                        CheckTone::Note
-                    ),
-                ]
-            )
+            ship_log_lines(&f, 2_000),
+            vec![
+                line(
+                    "just now \u{b7} api: merged origin/main \u{b7} 6496d98",
+                    CheckTone::Note
+                ),
+                line(
+                    "1m ago \u{b7} api: pushed feature/s \u{b7} 3f9c2a1",
+                    CheckTone::Note
+                ),
+            ]
         );
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -26380,9 +26371,11 @@ pub(crate) mod tests {
         let button = group.steps[0].button.expect("its undo");
         assert_eq!(actions[button].1, PanelOutcome::UndoAfter(AfterStep::Close));
         assert_eq!(actions[button].0.label, "Undo");
-        let Some(PageSection::Lines { lines: log, .. }) = page.sections.last() else {
-            panic!("no log: {:?}", page.sections);
-        };
+        // Its cards and Afterwards say what ran: the log isn't shown again.
+        assert!(!page.sections.iter().any(|s| {
+            matches!(s, PageSection::Lines { label, .. } if label == "Ship log")
+        }));
+        let log = ship_log_lines(&f, 2_000);
         assert_eq!(log[0].text, "just now \u{b7} closed the workspace");
         // Alt+Z: off the rows, the latest; on api's, its push.
         let alt_z = |repo: Option<&str>| {
@@ -26635,7 +26628,13 @@ pub(crate) mod tests {
             page.sections[0],
             lines(
                 "Ship check",
-                vec![line("api has uncommitted changes", CheckTone::Blocker)]
+                vec![
+                    line("api has uncommitted changes", CheckTone::Blocker),
+                    line(
+                        "\u{2713} checks passed \u{b7} review done \u{b7} no conflicts",
+                        CheckTone::Ready
+                    )
+                ]
             )
         );
         // Below it, what shipping would do, and what comes after.
