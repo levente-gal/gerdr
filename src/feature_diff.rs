@@ -611,10 +611,17 @@ impl FeatureOf {
             Role::Deciding => self.decisions(),
             _ => self.state.clone(),
         };
-        match line(&self.counts(own)) {
-            Some(line) => format!("{head} \u{b7} {line}"),
-            None => head,
+        // The files viewed are counted over the file list (`tree_note`) or
+        // on the page's line: not again here.
+        let counts = self.counts(own);
+        let mut parts = vec![head];
+        if counts.comments > 0 {
+            parts.push(plural(counts.comments, "comment"));
         }
+        if counts.changed > 0 {
+            parts.push(format!("{} changed since viewed", counts.changed));
+        }
+        parts.join(" \u{b7} ")
     }
 
     /// The header's summary of a fix round's diff: how the round stands,
@@ -714,6 +721,31 @@ impl FeatureOf {
     }
 }
 
+/// The files of `fe` to fold so its review opens on what changed since the
+/// user's last review: those viewed and unchanged, once some file viewed
+/// before changed since (a fix round's work); none otherwise, or on a fix
+/// round's own diff.
+fn since_review(fe: &FeatureOf) -> Vec<(PathBuf, String)> {
+    if fe.span.is_some() {
+        return Vec::new();
+    }
+    let files = (fe.repos.iter())
+        .flat_map(|r| r.since.changes.iter().map(move |c| (r.root.clone(), c.path.clone())));
+    let mut viewed = Vec::new();
+    let mut changed = false;
+    for (root, path) in files {
+        match fe.tick(&root, &path) {
+            Tick::Yes => viewed.push((root, path)),
+            Tick::Changed => changed = true,
+            Tick::No => {}
+        }
+    }
+    match changed {
+        true => viewed,
+        false => Vec::new(),
+    }
+}
+
 /// Finding `f` as a comment on the repository at `root`: on its line
 /// when `file` (its diff) shows it, else on the whole file.
 pub fn finding_comment(f: &Finding, root: PathBuf, file: Option<&FileDiff>) -> Comment {
@@ -761,6 +793,7 @@ pub fn finding_comment(f: &Finding, root: PathBuf, file: Option<&FileDiff>) -> C
             question: false,
             pr: false,
             planning: false,
+            fixed_in: None,
         }),
     }
 }
@@ -786,6 +819,7 @@ fn finding_note(f: &Finding, comment: &Comment) -> Option<Comment> {
             question: false,
             pr: false,
             planning: false,
+            fixed_in: None,
         }),
     })
 }
@@ -1035,8 +1069,16 @@ impl WorktreeDiff {
                 Err(why) => repo.error = Some(format!("{}: {why}", repo.shown())),
             }
         }
+        let first = !self.read;
         self.read = true;
         self.error = fe.repos.iter().find_map(|r| r.error.clone());
+        // Back after fixes changed files viewed before: what changed since
+        // the last review shows, the files viewed and unchanged folded
+        // (unfold all brings back all changes).
+        if first {
+            let fold = since_review(fe);
+            self.diff.folded.extend(fold);
+        }
         self.with_diff(env, |diff, ctx| {
             diff.refresh(ctx);
             let reads = diff.reads;
@@ -2026,6 +2068,23 @@ mod tests {
         assert_eq!(fe.check(api, "a.rs"), Check::Partial);
         assert_eq!(fe.note(api, "a.rs").as_deref(), Some("not committed"));
         assert_eq!(line(&Counts::default()), None);
+    }
+
+    #[test]
+    fn a_review_after_fixes_opens_on_what_changed_since_viewed() {
+        let mut fe = FeatureOf {
+            repos: vec![repo("api", &["a.rs", "b.rs", "c.rs"])],
+            ..FeatureOf::default()
+        };
+        // Nothing viewed changed yet: all of it shows.
+        fe.viewed.0.insert("api/a.rs".into(), "b-a.rs".into());
+        assert!(since_review(&fe).is_empty());
+        // A fix changed b.rs, viewed before: a.rs, viewed and the same, folds.
+        fe.viewed.0.insert("api/b.rs".into(), "old".into());
+        assert_eq!(since_review(&fe), [(PathBuf::from("/w/api"), "a.rs".to_owned())]);
+        // A fix round's own diff is only read: nothing folds.
+        fe.span = Some(SpanOf::default());
+        assert!(since_review(&fe).is_empty());
     }
 
     #[test]

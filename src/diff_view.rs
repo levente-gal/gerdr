@@ -748,9 +748,21 @@ impl DiffView {
         let cols = if self.cols == 0 { 80 } else { self.cols };
         let comments = &self.review.comments;
         let nested = cols.saturating_sub(NOTE_COLS).max(1);
+        // A decided finding or suggestion (and the comment on it) shows its
+        // first line only, as its card on the stage's page folds: those still
+        // to decide stand out, and the code isn't drowned under them.
+        let decided = |c: &Comment| {
+            (c.flag.as_ref()).is_some_and(|f| f.state != FindingState::Open && !f.unanswered)
+        };
         self.comment_wraps = comments
             .iter()
-            .map(|c| review::wrap(&c.text, if is_note(c) { nested } else { cols }))
+            .map(|c| {
+                let mut wrap = review::wrap(&c.text, if is_note(c) { nested } else { cols });
+                if decided(c) {
+                    wrap.truncate(1);
+                }
+                wrap
+            })
             .collect();
         self.editor_wrap = self
             .editing
@@ -2756,12 +2768,22 @@ impl DiffView {
                     // One that went to Build says so, by the id the agent has.
                     place: match (within, comment.flag.as_ref().filter(|flag| flag.sent)) {
                         (Some(_), _) => String::new(),
-                        (None, Some(flag)) => format!(
-                            "{} \u{b7} {} \u{b7} {noun} {at} of {of}",
-                            flag.id,
-                            finding_state_word(flag).unwrap_or_default()
-                        ),
-                        (None, None) => format!("{noun} {at} of {of}"),
+                        (None, Some(flag)) => {
+                            let word = finding_state_word(flag).unwrap_or_default();
+                            let word = match &flag.fixed_in {
+                                Some(sha) => format!("{word} in {sha}"),
+                                None => word.to_owned(),
+                            };
+                            format!("{} \u{b7} {word} \u{b7} {noun} {at} of {of}", flag.id)
+                        }
+                        // A finding or suggestion by its id, as its card on
+                        // the stage's page says it.
+                        (None, None) => match comment.flag.as_ref() {
+                            Some(flag) if !flag.id.is_empty() => {
+                                format!("{} \u{b7} {noun} {at} of {of}", flag.id)
+                            }
+                            _ => format!("{noun} {at} of {of}"),
+                        },
                     },
                     within,
                 }
@@ -3014,13 +3036,19 @@ impl DiffView {
                     });
                 comment.into_iter().chain(fix)
             });
+            // In its card's order on the stage's page: the decision, what
+            // the user says of it, then refusing it.
             if let Some(i) = first {
-                buttons.extend(choices.into_iter().map(|h| (i, h)));
+                let (refuse, want): (Vec<Hint>, Vec<Hint>) =
+                    choices.into_iter().partition(|h| h.key == "Del");
+                buttons.extend(want.into_iter().map(|h| (i, h)));
                 buttons.extend(say.into_iter().flatten().map(|h| (i, h)));
+                buttons.extend(refuse.into_iter().map(|h| (i, h)));
             }
             return buttons;
         }
-        let lines = self.cursor_lines().is_some_and(|(_, _, l)| !l.is_empty());
+        let picked = self.cursor_lines().map_or(0, |(_, _, l)| l.len());
+        let lines = picked > 0;
         // Under the line's last row: it covers text less there, and rows
         // of a line on many are what the chips would hide.
         let last = cursor.row + self.part_count(cursor.row) - 1;
@@ -3028,10 +3056,19 @@ impl DiffView {
             && lines
             && self.comment_at(cursor.row).is_none()
         {
+            // Over several lines they say how many: what the frame round
+            // them is for.
+            let many = |button: B, what: &str| Hint {
+                label: match picked {
+                    1 => button.label().into(),
+                    n => format!("{what} {n} lines"),
+                },
+                ..hint(button)
+            };
             if self.flags_only.is_none() {
-                buttons.push((i, hint(B::Comment)));
+                buttons.push((i, many(B::Comment, "Comment on")));
             }
-            buttons.push((i, hint(B::CopyLines)));
+            buttons.push((i, many(B::CopyLines, "Copy")));
             if self.changed_row(cursor.row) {
                 buttons.push((i, hint(B::Restore)));
             }
@@ -3057,7 +3094,8 @@ impl DiffView {
             disabled: None,
         };
         let mut buttons = Vec::new();
-        if let Some(noun) = self.comments_to_visit() {
+        // With one there is nowhere to go: `]` / `[` still show it.
+        if let Some(noun) = self.comments_to_visit().filter(|_| self.comment_order.len() > 1) {
             buttons.push(hint(ReposButton::PrevComment, format!("Previous {noun}")));
             buttons.push(hint(ReposButton::NextComment, format!("Next {noun}")));
         }

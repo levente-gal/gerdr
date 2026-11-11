@@ -1359,6 +1359,37 @@ fn chip_rects(row: Rect, widths: impl DoubleEndedIterator<Item = i32>) -> Vec<Re
     rects
 }
 
+/// `chip_rects` of diff row `row`, laid in `rect`: on a line of the diff
+/// (numbers of `gutter`'s digits and `plain` before it), right after its
+/// text when they fit there, so a line's actions sit beside what they act
+/// on, not across a wide pane.
+fn line_chip_rects(
+    rect: Rect,
+    row: Option<&DetailRow>,
+    (gutter, plain): (usize, bool),
+    widths: impl DoubleEndedIterator<Item = i32>,
+) -> Vec<Rect> {
+    let mut rects = chip_rects(rect, widths);
+    if let (Some(DetailRow::Line(line)), Some(first)) = (row, rects.first()) {
+        let advance = measure_mono("0", REPOS_MONO_SIZE)
+            .filter(|a| *a > 0.0)
+            .unwrap_or(REPOS_MONO_SIZE * 0.6);
+        let chars: usize = line.text.chars().map(|c| if c == '\t' { 4 } else { 1 }).sum();
+        let text_end = rect.loc.x
+            + DIFF_INSET
+            + gutter_width(gutter, plain)
+            + (chars as f32 * advance).ceil() as i32
+            + 3 * ROW_CHIP_GAP;
+        let by = text_end - first.loc.x;
+        if by < 0 {
+            for r in &mut rects {
+                r.loc.x += by;
+            }
+        }
+    }
+    rects
+}
+
 /// What the footer's "more" button says with `n` actions behind it.
 fn more_label(n: usize) -> String {
     format!("{n} more…")
@@ -1916,6 +1947,9 @@ struct TreeRow {
     hover: Option<ReposHit>,
     /// It has no checkbox (`ReposView::unchecked`).
     unchecked: bool,
+    /// It is the file list of a feature's code review (`ReposView::diff_tree`):
+    /// a file's half box there means changed since viewed, said by a tag.
+    review: bool,
 }
 
 /// Tree line `i` of `view`, as drawn.
@@ -1937,6 +1971,7 @@ fn tree_row(view: &ReposView, i: usize) -> TreeRow {
         dim: selected && view.field_focused,
         hover,
         unchecked: view.unchecked,
+        review: view.diff_tree,
     }
 }
 
@@ -2217,7 +2252,12 @@ fn parts(view: &ReposView, panel: Rect) -> Parts {
             .filter(|(j, _)| *j == i)
             .map(|(_, hint)| hint)
             .collect();
-        let rects = chip_rects(*row, hints.iter().map(|h| row_chip_width(h)));
+        let rects = line_chip_rects(
+            *row,
+            view.detail.rows.get(i),
+            (view.detail.gutter, view.detail.plain),
+            hints.iter().map(|h| row_chip_width(h)),
+        );
         for (hint, rect) in hints.iter().zip(rects) {
             detail_row_buttons.push((i, hint.button, rect));
         }
@@ -3521,6 +3561,10 @@ impl Painter {
                 if file.edited {
                     end = self.tree_tag(c, "edited", end - gap, line_band, p.warning, scale, p);
                 }
+                // Viewed once, changed since: the box alone is easy to miss.
+                if row.review && file.check == Check::Partial {
+                    end = self.tree_tag(c, "changed", end - gap, line_band, p.warning, scale, p);
+                }
                 let name = match file.code {
                     _ if file.conflicted => p.error,
                     _ if file.viewed => p.muted,
@@ -3862,7 +3906,12 @@ impl Painter {
         p: &Palette,
     ) {
         self.detail_row(c, look, rect, tint, scale, p);
-        let rects = chip_rects(rect, look.buttons.iter().map(row_chip_width));
+        let rects = line_chip_rects(
+            rect,
+            Some(&look.row),
+            (look.gutter, look.plain),
+            look.buttons.iter().map(row_chip_width),
+        );
         self.row_chips(c, look, &rects, scale, p);
     }
 
@@ -4978,14 +5027,27 @@ impl Painter {
             // No key: the label on a button of its own.
             let (bx, bw) = (cap_x, w - 2.0 * (HINT_PAD as f32 * s).round());
             let cr = CAP_RADIUS * s;
-            // What a feature's diff waits for, once it can be pressed.
-            let direct =
-                (view.detail.title_buttons.iter()).any(|h| h.button == ReposButton::MakeFixes);
-            let main = match direct {
-                true => ReposButton::MakeFixes,
-                false => ReposButton::PlanFixes,
+            // What a feature's diff waits for, once it can be pressed; else
+            // the rightmost of what goes on (a file's Approve or Send back,
+            // the plan's Write final plan): one filled button, at the right.
+            let title = &view.detail.title_buttons;
+            let enabled = |b: ReposButton| title.iter().any(|h| h.button == b && h.disabled.is_none());
+            let main = if title.iter().any(|h| h.button == ReposButton::MakeFixes) {
+                Some(ReposButton::MakeFixes)
+            } else if enabled(ReposButton::PlanFixes) {
+                Some(ReposButton::PlanFixes)
+            } else {
+                (title.iter().rev())
+                    .find(|h| {
+                        h.disabled.is_none()
+                            && matches!(
+                                h.button,
+                                ReposButton::Approve | ReposButton::SendBack | ReposButton::GoOn
+                            )
+                    })
+                    .map(|h| h.button)
             };
-            let primary = hint.button == main && !disabled;
+            let primary = main == Some(hint.button) && !disabled;
             let (edge, inner, label_color) = match (primary, view.hover == Some(hit)) {
                 (true, true) => {
                     let fill = mix(p.accent, p.text, 0.12);

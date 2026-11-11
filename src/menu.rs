@@ -227,6 +227,13 @@ pub enum MenuAction {
         id: String,
         note: String,
     },
+    /// Undo accepting every open suggestion of feature `slug`: those of
+    /// `ids` still accepted open again.
+    ReopenSuggestions {
+        project: String,
+        slug: String,
+        ids: Vec<String>,
+    },
     /// Write feature `slug`'s final plan from its decided suggestions, or go
     /// on with the plan as it is (see `Gerdr::write_final_plan`).
     WriteFinalPlan(String, String),
@@ -677,6 +684,9 @@ impl Gerdr {
                     self.restore_suggestion_comment(&project, &slug, &id, &note);
                 }
             },
+            MenuAction::ReopenSuggestions { project, slug, ids } => {
+                self.reopen_suggestions(&project, &slug, &ids);
+            }
             MenuAction::WriteFinalPlan(project, slug) => self.write_final_plan(&project, &slug),
             MenuAction::SetFeatureBase {
                 project,

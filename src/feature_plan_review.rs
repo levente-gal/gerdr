@@ -581,12 +581,13 @@ impl Gerdr {
     }
 
     /// Accept every open suggestion of feature `slug` but the questions
-    /// still to answer.
+    /// still to answer and those a later run left out; its toast's Undo
+    /// opens them again.
     pub(crate) fn accept_all_suggestions(&mut self, project: &str, slug: &str) {
-        let mut accepted = 0;
+        let mut accepted = Vec::new();
         let done = self.change_plan_review(project, slug, |review| {
             accepted = plan_review::accept_all(review);
-            match (accepted, review.waiting_answer()) {
+            match (accepted.len(), review.waiting_answer()) {
                 (0, 0) => Err("No suggestion left to decide".to_owned()),
                 (0, waiting) => Err(waiting_text(waiting)),
                 (n, _) => Ok(format!("Accepted all open: {n}")),
@@ -598,11 +599,37 @@ impl Gerdr {
         else {
             return;
         };
-        let text = format!("{} accepted", plural(accepted, "suggestion"));
-        match (review.open(), review.waiting_answer()) {
-            (0, _) => self.offer_final_plan(project, slug, text),
-            (_, 0) => self.show_success(text),
-            (_, waiting) => self.show_success(format!("{text}; {}", waiting_text(waiting))),
+        let mut text = format!("{} accepted", plural(accepted.len(), "suggestion"));
+        if let waiting @ 1.. = review.waiting_answer() {
+            text = format!("{text}; {}", waiting_text(waiting));
+        }
+        // The page offers what comes next: this toast only undoes.
+        let undo = MenuAction::ReopenSuggestions {
+            project: project.to_owned(),
+            slug: slug.to_owned(),
+            ids: accepted,
+        };
+        self.toast_with(text, Level::Success, Some(("Undo".to_owned(), undo)));
+    }
+
+    /// Undo `accept_all_suggestions`: open again those of `ids` still
+    /// accepted.
+    pub(crate) fn reopen_suggestions(&mut self, project: &str, slug: &str, ids: &[String]) {
+        let mut n = 0;
+        let done = self.change_plan_review(project, slug, |review| {
+            for id in ids {
+                if review.suggestion(id).is_some_and(|s| s.state == State::Accepted) {
+                    plan_review::decide(review, id, Decision::Clear)?;
+                    n += 1;
+                }
+            }
+            match n {
+                0 => Err("Nothing to undo: they were decided again since".to_owned()),
+                n => Ok(format!("Accept all open undone: {n}")),
+            }
+        });
+        if done {
+            self.show_success(format!("{} open again", plural(n, "suggestion")));
         }
     }
 
@@ -644,6 +671,11 @@ impl Gerdr {
         note: &str,
         accept: bool,
     ) {
+        // An answer to an open question is what accepting it asks for:
+        // answered, it is decided, not left counted to decide.
+        let question = (self.suggestion_of(project, slug, id))
+            .is_some_and(|s| s.kind == plan_review::Kind::Question && s.state == State::Open);
+        let accept = accept || (question && !note.trim().is_empty());
         if self.note_suggestion(project, slug, id, note) && accept {
             self.decide_suggestion_said(project, slug, id, Decision::Accept);
         }

@@ -77,6 +77,18 @@ impl SuggestionsOf {
         }
     }
 
+    /// Why the final plan can't be written yet, as the stage's page says it:
+    /// "2 suggestions still to decide"; none once all are decided.
+    pub fn to_decide(&self) -> Option<String> {
+        match self.list.iter().filter(|s| s.state == State::Open).count() {
+            0 => None,
+            n => Some(format!(
+                "{} still to decide",
+                crate::features::plural(n, "suggestion")
+            )),
+        }
+    }
+
     /// Whether there is anything to ask the reviewer: a comment on one of
     /// its suggestions.
     pub fn asks(&self) -> bool {
@@ -190,6 +202,7 @@ pub fn suggestion_comments(
             question: s.kind == crate::feature::plan_review::Kind::Question,
             pr: false,
             planning: false,
+            fixed_in: None,
             ..Flag::default()
         };
         let comment = Comment {

@@ -11371,11 +11371,21 @@ impl Gerdr {
                 if let (Some(flag), Some(fix)) = (c.flag.as_mut(), made) {
                     flag.made = fix.made.contains(&flag.id);
                 }
+                let feature = self.feature(project, slug);
                 if let Some(flag) = c.flag.as_mut() {
                     flag.planning = feature::fix_round::planning(
-                        (self.feature(project, slug)).and_then(|f| f.fix_round.as_ref()),
+                        feature.and_then(|f| f.fix_round.as_ref()),
                         Stage::CodeReview,
                     );
+                    // Where its round left the code: the fix is there.
+                    let round = (feature.and_then(|f| f.last_fix_round.as_ref()))
+                        .filter(|r| made.is_some_and(|fix| fix.round == r.n));
+                    let repo = (feature.into_iter().flat_map(|f| &f.repos))
+                        .find(|r| r.worktree == c.root);
+                    flag.fixed_in = (round.zip(repo))
+                        .filter(|_| flag.made)
+                        .and_then(|(round, repo)| round.trail.to.get(&repo.key()))
+                        .map(|sha| sha.chars().take(7).collect());
                 }
                 c
             })
@@ -15836,7 +15846,11 @@ fn review_toolbar(
                 disabled: hint.disabled,
             }
         })
-        .collect();
+        .collect::<Vec<_>>();
+    // The one to press goes rightmost, as in a dialog: Plan fixes past a
+    // greyed Approve while comments wait.
+    let mut buttons = buttons;
+    buttons.sort_by_key(|b| b.style == ButtonStyle::Primary);
     (Some(next), buttons)
 }
 

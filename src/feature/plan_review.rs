@@ -794,19 +794,19 @@ pub fn delete_own(review: &mut PlanReview, id: &str) -> Result<(usize, Suggestio
 }
 
 /// Accept every open suggestion but the questions still to answer (see
-/// `PlanReview::waiting_answer`) and those a later run left out. How many it
-/// accepted.
-pub fn accept_all(review: &mut PlanReview) -> usize {
-    let mut n = 0;
+/// `PlanReview::waiting_answer`) and those a later run left out. The ids it
+/// accepted, for its Undo.
+pub fn accept_all(review: &mut PlanReview) -> Vec<String> {
+    let mut ids = Vec::new();
     for s in &mut review.suggestions {
         // One a later run left out isn't the reviewer's word any more.
         if s.state == State::Open && !s.unanswered() && !s.dropped {
             s.state = State::Accepted;
             s.reason.clear();
-            n += 1;
+            ids.push(s.id.clone());
         }
     }
-    n
+    ids
 }
 
 /// A plan line as a quote of it compares: cleaned and spaces collapsed as
@@ -1466,15 +1466,20 @@ mod tests {
         decide(&mut review, "r1-1", Decision::Clear).unwrap();
         assert_eq!(
             accept_all(&mut review),
-            1,
+            ["r1-1"],
             "the question waits for its answer"
         );
         assert_eq!(review.suggestion("r1-1").unwrap().state, State::Accepted);
         assert_eq!(review.suggestion("r1-2").unwrap().state, State::Open);
         set_note(&mut review, "r1-2", "The new one").unwrap();
         assert_eq!(review.waiting_answer(), 0);
-        assert_eq!(accept_all(&mut review), 1);
-        assert_eq!(accept_all(&mut review), 0);
+        assert_eq!(accept_all(&mut review), ["r1-2"]);
+        assert!(accept_all(&mut review).is_empty());
+        // One a later run left out stays open: it isn't the reviewer's word.
+        decide(&mut review, "r1-1", Decision::Clear).unwrap();
+        review.suggestions[0].dropped = true;
+        assert!(accept_all(&mut review).is_empty());
+        assert_eq!(review.suggestion("r1-1").unwrap().state, State::Open);
     }
 
     #[test]
