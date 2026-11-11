@@ -810,7 +810,10 @@ mod tests {
             assert_eq!(DocMode::opens_on(file, false), DocMode::Review);
         }
         assert_eq!(DocMode::opens_on(DocFile::Evidence, true), DocMode::Preview);
-        assert_eq!(DocMode::opens_on(DocFile::Evidence, false), DocMode::Preview);
+        assert_eq!(
+            DocMode::opens_on(DocFile::Evidence, false),
+            DocMode::Preview
+        );
     }
 
     #[test]

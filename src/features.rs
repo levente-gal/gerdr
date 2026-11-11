@@ -13819,17 +13819,18 @@ fn agent_card(
         Some((line, false)) => format!("{status} \u{b7} {line}"),
         None => status,
     };
-    // The tail read is the current stage's agent's, while its pane is.
-    let tail = match current && run.pane.is_some() {
-        true => state.tail.to_vec(),
-        false => Vec::new(),
-    };
     // Asked something, held for its prompt, or idle with its work undone.
     let waits = match back {
         Some(back) => back.waits_on_you(),
         None if current && state.agent_read => false,
         None if current => crate::feature_agents::waits_on_you(run, stage, state.agent_status),
         None => run.waits_to_send(),
+    };
+    // The tail read is the current stage's agent's, while its pane is: what
+    // it said, not how gerdr launched it.
+    let tail = match current && run.pane.is_some() {
+        true => plain_tail(state.tail, waits),
+        false => Vec::new(),
     };
     Some(PageSection::Agent {
         icon: AgentIcon::from_agent(&run.agent),
@@ -13842,6 +13843,35 @@ fn agent_card(
         model: state.model.clone(),
         waits,
     })
+}
+
+/// What an agent card shows of its pane's last lines: none of the shell's
+/// prompt or the command gerdr launched it with (a path and flags, cut off),
+/// and while it doesn't wait on the user only its last line, a plain status;
+/// waiting, the lines that hold what it asks.
+fn plain_tail(lines: &[String], waits: bool) -> Vec<String> {
+    let launch = |l: &str| {
+        let l = l.trim();
+        [
+            "--add-dir",
+            "--session-id",
+            "$(tee ",
+            "/prompts/",
+            "random/uuid",
+            "% cd ",
+            "$ cd ",
+        ]
+        .iter()
+        .any(|bit| l.contains(bit))
+            || l.ends_with('%')
+            || l.ends_with('$')
+    };
+    let kept: Vec<String> = (lines.iter())
+        .filter(|l| !l.trim().is_empty() && !launch(l))
+        .cloned()
+        .collect();
+    let keep = if waits { kept.len() } else { 1 };
+    kept[kept.len().saturating_sub(keep)..].to_vec()
 }
 
 /// The Build agent's card on the page of the stage `feature` is at, while
@@ -15738,6 +15768,14 @@ fn stage_page(
             }
         }
     }
+    // A stage with nothing run yet says what happens on it: under its
+    // agent's card, where the page is otherwise empty.
+    if let Some(next) = next_section(feature, stage, mark) {
+        let at = (sections.iter())
+            .position(|s| matches!(s, PageSection::Agent { .. }))
+            .map_or(0, |i| i + 1);
+        sections.insert(at, next);
+    }
     sections.extend(last_after);
     sections.extend(after_cards);
     // The agent's card says what it does: the status line needn't again.
@@ -15790,6 +15828,53 @@ fn stage_page(
     };
     place_buttons(&mut page);
     page
+}
+
+/// "What happens next" on `stage`'s page of `feature`, while it is the
+/// current one and nothing ran on it yet: what its agent or the user does
+/// there, and what follows. One place for every stage's page to say it; a
+/// stage with more to say adds its lines here.
+fn next_section(feature: &Feature, stage: Stage, mark: StageMark) -> Option<PageSection> {
+    if mark != StageMark::Current || feature.status != Status::Open {
+        return None;
+    }
+    let fresh = !feature.runs.contains_key(&stage);
+    let says: &[&str] = match stage {
+        Stage::Discover if fresh => &[
+            "Start agent opens a chat with an agent: it asks what the feature is for, then writes brief.md",
+            "You then read the brief here, and approve it or send it back with comments",
+        ],
+        // It doesn't start by itself: the agent and its model are picked first.
+        Stage::Plan if fresh => &[
+            "Plan doesn't start by itself: pick its agent above, then Start agent",
+            "Its agent writes plan.md from the approved brief; you review it here and approve it",
+        ],
+        Stage::PlanReview if fresh && feature.plan_review.is_none() => &[
+            "Start agent has another agent check the plan",
+            "Its suggestions come here: accept or reject each, then write the final plan",
+        ],
+        Stage::Build if fresh && feature.fix_round.is_none() => &[
+            "Start agent has an agent build the plan's milestones, committing as it goes",
+            "They tick off here as they land; Verify runs the checks after",
+        ],
+        Stage::Verify if feature.verify.is_none() => &[
+            "Run checks runs the project's checks on the feature's worktrees",
+            "Failures can go back to Build as fixes; once they pass, AI review is next",
+        ],
+        Stage::AiReview if fresh && feature.review.is_none() => &[
+            "Start agent has another model review the feature's diff",
+            "You decide on each finding here: fix it, or dismiss it with a reason",
+        ],
+        _ => return None,
+    };
+    let lines = says
+        .iter()
+        .map(|text| line(*text, CheckTone::Note))
+        .collect();
+    Some(PageSection::Lines {
+        label: "What happens next".to_owned(),
+        lines,
+    })
 }
 
 /// Whether a page's button is a rare one, a row of the tab's `⋯` menu rather
@@ -18964,6 +19049,25 @@ pub(crate) mod tests {
         let view = tab_view(&panel, &f, &slugs, &PanelState::default(), 2_060);
         assert_eq!(view.repos.len(), 3);
         assert_eq!(view.more, 2);
+    }
+
+    #[test]
+    fn an_agent_card_shows_what_it_said_not_how_it_was_launched() {
+        let lines: Vec<String> = [
+            "[ana@box]/work/shop% cd /work/shop && claude --add-dir /run/x --session-id \"$(tee /run/x/prompts/discover-1.session",
+            "fake claude ready",
+            "",
+            "Which totals should it keep?",
+            "[ana@box]/work/shop%",
+        ]
+        .map(str::to_owned)
+        .to_vec();
+        assert_eq!(plain_tail(&lines, false), ["Which totals should it keep?"]);
+        assert_eq!(
+            plain_tail(&lines, true),
+            ["fake claude ready", "Which totals should it keep?"]
+        );
+        assert!(plain_tail(&[], false).is_empty());
     }
 
     #[test]
@@ -25313,8 +25417,14 @@ pub(crate) mod tests {
         let node = rail_node(&f, Stage::Plan, &PanelState::default(), 2_000);
         assert_eq!((node.mark, node.line.as_str()), (NodeMark::Current, ""));
         let page = stage_page(&f, Stage::Plan, &PanelState::default(), &[], 2_000);
+        // Nothing ran: it says what happens, and that it doesn't start itself.
+        let PageSection::Lines { label, lines: next } = &page.sections[0] else {
+            panic!("what happens next first");
+        };
+        assert_eq!(label, "What happens next");
+        assert!(next[0].text.starts_with("Plan doesn't start by itself"));
         assert_eq!(
-            page.sections,
+            page.sections[1..],
             [file(
                 "plan.md",
                 line("not written yet", CheckTone::Note),
@@ -26879,7 +26989,7 @@ pub(crate) mod tests {
             .filter(|(_, o)| *o == PanelOutcome::OpenDoc(Stage::Plan))
             .count();
         assert_eq!(reviews, 1);
-        // The primary Review stays on the file's card, as the plain one does.
+        // The primary Review goes to the header, Approve stays on the card.
         let held = actions
             .iter()
             .position(|(_, o)| *o == PanelOutcome::OpenDoc(Stage::Plan))
@@ -26899,9 +27009,10 @@ pub(crate) mod tests {
             Some(&file(
                 "plan.md",
                 line("ready for review", CheckTone::Ready),
-                &[held, approve]
+                &[approve]
             ))
         );
+        assert_eq!(page.primary, Some(held));
     }
 
     /// A file reads on its stage's page, under all else, once there is one
@@ -27018,7 +27129,8 @@ pub(crate) mod tests {
         let PageSection::Agent { tail: shown, .. } = &page.sections[0] else {
             panic!("the agent's card first");
         };
-        assert_eq!(shown, &tail);
+        // Its last lines, all of them while it waits on the user.
+        assert!(!shown.is_empty() && tail.ends_with(shown), "{shown:?}");
         // Another stage's card has no tail: it is the current agent's.
         let plan = stage_page(&f, Stage::Plan, &state, &[], 2_000);
         assert!(!plan.sections.iter().any(|s| matches!(
