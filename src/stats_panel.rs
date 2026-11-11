@@ -904,6 +904,38 @@ fn when(at: Option<u64>, now: u64) -> String {
     at.map_or_else(|| NONE.into(), |at| ago(now, at))
 }
 
+/// When `at` was (seconds since the epoch), as a clock reads it: "14:32"
+/// today, else "Nov 10 14:32": a feature's history reads by the clock.
+fn clock(at: Option<u64>, now: u64) -> String {
+    let Some(at) = at else {
+        return NONE.into();
+    };
+    let local = |secs: u64| {
+        let time = libc::time_t::try_from(secs).ok()?;
+        // SAFETY: `localtime_r` writes only to the `tm` it is given, and an
+        // all-zero `tm` is a valid one.
+        unsafe {
+            let mut tm: libc::tm = std::mem::zeroed();
+            (!libc::localtime_r(&time, &mut tm).is_null()).then_some(tm)
+        }
+    };
+    let (Some(tm), Some(today)) = (local(at), local(now)) else {
+        return ago(now, at);
+    };
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let hm = format!("{:02}:{:02}", tm.tm_hour, tm.tm_min);
+    let same_day = (tm.tm_year, tm.tm_yday) == (today.tm_year, today.tm_yday);
+    match same_day {
+        true => hm,
+        false => {
+            let month = MONTHS.get(tm.tm_mon as usize).copied().unwrap_or("");
+            format!("{month} {} {hm}", tm.tm_mday)
+        }
+    }
+}
+
 /// How long from `from` to `to`.
 fn took(from: Option<u64>, to: Option<u64>) -> String {
     match (from, to) {
@@ -1017,8 +1049,8 @@ fn detail_lines(d: &stats::Detail, now: u64) -> Vec<Line> {
                 0,
                 vec![
                     s.stage.label().to_owned(),
-                    when(s.started, now),
-                    when(s.ended, now),
+                    clock(s.started, now),
+                    clock(s.ended, now),
                     took(s.started, s.ended),
                 ],
             )
@@ -1062,13 +1094,13 @@ fn detail_lines(d: &stats::Detail, now: u64) -> Vec<Line> {
         lines.extend(d.fix_rounds.iter().map(|f| {
             let closed = match f.closed {
                 None if f.opened.is_some() => "open".into(),
-                closed => when(closed, now),
+                closed => clock(closed, now),
             };
             Line::row(
                 2,
                 vec![
                     format!("Round {}", f.n),
-                    when(f.opened, now),
+                    clock(f.opened, now),
                     closed,
                     f.fixes.to_string(),
                 ],
@@ -1086,7 +1118,7 @@ fn detail_lines(d: &stats::Detail, now: u64) -> Vec<Line> {
                 3,
                 vec![
                     format!("Verify {n}"),
-                    when(v.started, now),
+                    clock(v.started, now),
                     took(v.started, v.ended),
                     v.passed.to_string(),
                     v.failed.to_string(),
@@ -1441,11 +1473,13 @@ impl Gerdr {
     /// Ask before deleting the AI work kept of a feature: it can't be
     /// undone.
     fn ask_delete_ai_work(&mut self, kept: Kept) {
-        let going_on = (self.features.all.get(&kept.project))
-            .is_some_and(|fs| fs.iter().any(|f| f.slug == kept.slug));
-        let then = match going_on {
-            true => " What its agents do from now on is still kept.",
-            false => "",
+        let feature = (self.features.all.get(&kept.project))
+            .and_then(|fs| fs.iter().find(|f| f.slug == kept.slug));
+        // Its record isn't this: say where the feature itself stays.
+        let then = match feature.map(|f| f.status) {
+            Some(crate::feature::Status::Open) => " What its agents do from now on is still kept.",
+            Some(_) => " The feature itself stays, with its stage files.",
+            None => "",
         };
         let body = format!(
             "\u{201c}{}\u{201d}: its chats, prompts, check logs and stats on this machine, {}. This can't be undone.{then}",

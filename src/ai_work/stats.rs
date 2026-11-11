@@ -790,14 +790,14 @@ fn checks(conn: &Connection, project: Option<&str>) -> rusqlite::Result<Vec<Chec
 
 /// Feature `slug` of `project` in detail, if the index has it.
 fn detail(conn: &Connection, project: &str, slug: &str) -> rusqlite::Result<Option<Detail>> {
-    let title: Option<String> = conn
+    let found: Option<(String, Option<i64>)> = conn
         .query_row(
-            "SELECT title FROM features WHERE project = ?1 AND slug = ?2",
+            "SELECT title, created FROM features WHERE project = ?1 AND slug = ?2",
             params![project, slug],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;
-    let Some(title) = title else {
+    let Some((title, created)) = found else {
         return Ok(None);
     };
     let of = params![Some(project), Some(slug)];
@@ -856,6 +856,9 @@ fn detail(conn: &Connection, project: &str, slug: &str) -> rusqlite::Result<Opti
         }
     }
     let mut stages = Vec::new();
+    // A stage marked done began when the one before it was, as the Ship
+    // page's recap counts it: both say the same "took".
+    let mut since = created.map(secs);
     for stage in Stage::ALL {
         let name = stage_name(stage);
         let of_stage = || runs.all.iter().filter(|r| r.stage == name);
@@ -872,6 +875,8 @@ fn detail(conn: &Connection, project: &str, slug: &str) -> rusqlite::Result<Opti
         }
         if let Some(at) = marked.get(&name) {
             ended = Some(secs(*at));
+            started = since.or(started);
+            since = since.max(ended);
         }
         if started.is_some() || ended.is_some() {
             stages.push(StageSpan {
