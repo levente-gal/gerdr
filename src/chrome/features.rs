@@ -6674,8 +6674,31 @@ impl Painter {
         // The rail: the lines joining the nodes, then each node with its
         // label and line under it.
         let circle = node_circle;
-        // The hovered node's band first: the connectors run over it.
+        // The viewed stage's band first, down to the rule like a tab over
+        // its page: the connectors run over it.
+        let viewed = view.rail.iter().position(|n| n.selected);
+        let viewed_slot = viewed.and_then(|i| l.nodes.get(i)).copied();
+        if let Some(slot) = viewed_slot {
+            // A little over the node too, so its focus ring stays inside.
+            let band = Rectangle::new(
+                (slot.loc.x, slot.loc.y - NODE_GAP).into(),
+                (slot.size.w, NODE_GAP + slot.size.h + RAIL_GAP).into(),
+            );
+            self.row_highlight(c, band, (true, 1.0), scale, p);
+            // Square where it stands on the rule.
+            let (x, y, w, h) = rect_px(band, scale);
+            let half = (h / 2.0).round();
+            c.fill(
+                x as i32,
+                (y + half) as i32,
+                w as i32,
+                (h - half) as i32,
+                p.selected,
+            );
+        }
+        // The hovered node's band; the viewed one stays as it is.
         if let Some(FeatureTabHit::Node(i)) = view.hover
+            && Some(i) != viewed
             && let Some(slot) = l.nodes.get(i)
         {
             self.row_highlight(c, *slot, (false, 1.0), scale, p);
@@ -6718,20 +6741,15 @@ impl Painter {
         for (i, (slot, node)) in l.nodes.iter().zip(&view.rail).enumerate() {
             let hovered = view.hover == Some(FeatureTabHit::Node(i));
             let spot = circle(*slot);
-            if node.selected {
-                let ring = if view.focus == TabArea::Stages && !view.review_keys {
-                    p.accent
-                } else {
-                    p.border
-                };
-                let behind = if hovered {
-                    super::row_fill(p, false, 1.0).unwrap_or(p.background)
-                } else {
-                    p.background
-                };
-                focus_ring(c, spot, NODE as f32 / 2.0, behind, scale, ring);
+            // What the node stands on: its band when viewed or hovered.
+            let ground = super::row_fill(p, node.selected, if hovered { 1.0 } else { 0.0 })
+                .unwrap_or(p.background);
+            // The band says which stage is viewed; the ring only that the
+            // keys are on the rail.
+            if node.selected && view.focus == TabArea::Stages && !view.review_keys {
+                focus_ring(c, spot, NODE as f32 / 2.0, ground, scale, p.accent);
             }
-            self.rail_node(c, spot, i + 1, node.mark, scale, p);
+            self.rail_node(c, spot, i + 1, node.mark, ground, scale, p);
             let label = Rectangle::new(
                 (slot.loc.x + 2, spot.loc.y + NODE + NODE_GAP).into(),
                 (slot.size.w - 4, NODE_LABEL).into(),
@@ -6781,6 +6799,17 @@ impl Painter {
         if let Some(last) = l.nodes.first() {
             let y = last.loc.y + last.size.h + RAIL_GAP;
             c.fill(0, px(y), c.w, px(1).max(1), p.border_variant);
+            // The viewed stage's bar on the rule.
+            if let Some(slot) = viewed_slot {
+                let (from, to) = (px(slot.loc.x), px(slot.loc.x + slot.size.w));
+                c.fill(
+                    from,
+                    px(y + 1) - px(2).max(1),
+                    to - from,
+                    px(2).max(1),
+                    p.accent,
+                );
+            }
         }
 
         self.review_switch(c, view, l, scale, p);
@@ -6864,13 +6893,15 @@ impl Painter {
         );
     }
 
-    /// A rail node in `spot` for stage `number`, marked `mark`.
+    /// A rail node in `spot` for stage `number`, marked `mark`, on `ground`.
+    #[allow(clippy::too_many_arguments)]
     fn rail_node(
         &self,
         c: &mut Canvas,
         spot: Rect,
         number: usize,
         mark: NodeMark,
+        ground: Rgb,
         scale: f64,
         p: &Palette,
     ) {
@@ -6889,7 +6920,7 @@ impl Painter {
                     _ => p.muted,
                 };
                 disc(c, 0.0, color);
-                disc(c, ring, mix(p.background, color, 0.18));
+                disc(c, ring, mix(ground, color, 0.18));
                 icon_sdf(c, spot, scale, color, |x, y| check(x, y, s * 1.1));
             }
             NodeMark::Current | NodeMark::Waiting | NodeMark::Fixing | NodeMark::Failed => {
@@ -6899,12 +6930,12 @@ impl Painter {
             }
             NodeMark::Later => {
                 disc(c, 0.0, p.border);
-                disc(c, ring, p.background);
+                disc(c, ring, ground);
                 self.bold_centred(c, &number, spot, scale, p.muted);
             }
             NodeMark::Paused => {
                 disc(c, 0.0, p.accent);
-                disc(c, ring, p.background);
+                disc(c, ring, ground);
                 self.bold_centred(c, &number, spot, scale, p.text);
             }
         }
@@ -8885,6 +8916,34 @@ mod tests {
             l.hit(&view, centre(l.nodes[2])),
             Some(FeatureTabHit::Node(2))
         );
+    }
+
+    /// The viewed stage stands on a band in `selected` with the accent's
+    /// bar on the rule; no other stage does.
+    #[test]
+    fn the_viewed_stage_has_a_band_and_a_bar() {
+        let painter = crate::chrome::Painter::new();
+        let p = crate::chrome::Theme::Dark.palette();
+        let view = tab_view();
+        let l = tab_at(&view, 1180);
+        let mut c = Canvas::new((1180, 900).into());
+        c.fill(0, 0, c.w, c.h, p.background);
+        painter.tab_head(&mut c, &view, &l, 1.0, p);
+        let at = |x: i32, y: i32| {
+            let i = ((y * c.w + x) * 4) as usize;
+            [c.px[i + 2], c.px[i + 1], c.px[i]]
+        };
+        let viewed = view.rail.iter().position(|n| n.selected).unwrap();
+        let other = (viewed + 1) % l.nodes.len();
+        // Beside the node, clear of the connector, and on the rule.
+        let beside = |slot: Rect| (slot.loc.x + 6, slot.loc.y + 3);
+        let rule = l.nodes[0].loc.y + l.nodes[0].size.h + RAIL_GAP;
+        let (x, y) = beside(l.nodes[viewed]);
+        assert_eq!(at(x, y), p.selected);
+        assert_eq!(at(x, rule), p.accent);
+        let (x, y) = beside(l.nodes[other]);
+        assert_eq!(at(x, y), p.background);
+        assert_ne!(at(x, rule), p.accent);
     }
 
     fn tab_at(view: &FeatureTabView, w: i32) -> FeatureTabLayout {

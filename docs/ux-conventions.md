@@ -348,6 +348,10 @@ press and drag pick whole rows and a double click opens the line in Zed.
   `ROW_HIGHLIGHT_RADIUS` for list row highlights, `DIALOG_WIDTH` for modal
   dialogs. One hover style: the selected row in `selected`, a hovered row in
   `element`.
+- The stage viewed on a feature's rail stands on a band in `selected` that
+  runs down to the rule under the rail, with a bar in the accent on the rule,
+  like a tab over its page. The ring round its node shows only while the keys
+  are on the rail.
 - One scrollbar (`chrome/thumb.rs`), one button painter
   (`Painter::button`), one query field with the magnifier.
 - A feature page has one filled primary button, in the tab's header at its
