@@ -4944,6 +4944,7 @@ impl Panel {
                     Err(Why::Other(why)) => Some(why),
                     _ => None,
                 },
+                style: Default::default(),
             })
             .collect()
     }
@@ -5302,6 +5303,7 @@ impl Panel {
                         label: button.label().into(),
                         key: key_name(button).into(),
                         disabled: None,
+                        style: Default::default(),
                     })
                     .collect(),
             }

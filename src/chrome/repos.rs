@@ -541,6 +541,39 @@ pub struct Hint {
     /// `None` when it can be done now, else why not (in a tooltip-like
     /// muted line when hovered).
     pub disabled: Option<String>,
+    /// How it looks as a button of its own (a title button): `Primary` for
+    /// the one to press next, else `Plain`. Footer hints ignore it.
+    pub style: ButtonStyle,
+}
+
+/// Marks the title button to press next `Primary`, the rest `Plain`: what
+/// a feature's diff waits for (Make fixes, else Plan fixes once it can be
+/// pressed); else the rightmost of what goes on that can be pressed (a
+/// file's Approve or Send back, the fix plan's Make fixes, the plan's Write
+/// final plan). One filled button, at the right.
+pub fn mark_primary(title: &mut [Hint]) {
+    let enabled = |b: ReposButton| title.iter().any(|h| h.button == b && h.disabled.is_none());
+    let main = if title.iter().any(|h| h.button == ReposButton::MakeFixes) {
+        Some(ReposButton::MakeFixes)
+    } else if enabled(ReposButton::PlanFixes) {
+        Some(ReposButton::PlanFixes)
+    } else {
+        (title.iter().rev())
+            .find(|h| {
+                h.disabled.is_none()
+                    && matches!(
+                        h.button,
+                        ReposButton::Approve | ReposButton::SendBack | ReposButton::GoOn
+                    )
+            })
+            .map(|h| h.button)
+    };
+    for hint in title {
+        hint.style = match Some(hint.button) == main && hint.disabled.is_none() {
+            true => ButtonStyle::Primary,
+            false => ButtonStyle::Plain,
+        };
+    }
 }
 
 /// The right side: every change of every repository one after another,
@@ -3272,6 +3305,7 @@ impl Painter {
                 label: more_label(layout.overflow.len()),
                 key: String::new(),
                 disabled: None,
+                style: Default::default(),
             };
             self.hint_button(&mut c, view, &more, ReposHit::More, shift(rect), scale, p);
         }
@@ -5034,28 +5068,8 @@ impl Painter {
             // No key: the label on a button of its own.
             let (bx, bw) = (cap_x, w - 2.0 * (HINT_PAD as f32 * s).round());
             let cr = CAP_RADIUS * s;
-            // What a feature's diff waits for, once it can be pressed; else
-            // the rightmost of what goes on (a file's Approve or Send back,
-            // the plan's Write final plan): one filled button, at the right.
-            let title = &view.detail.title_buttons;
-            let enabled =
-                |b: ReposButton| title.iter().any(|h| h.button == b && h.disabled.is_none());
-            let main = if title.iter().any(|h| h.button == ReposButton::MakeFixes) {
-                Some(ReposButton::MakeFixes)
-            } else if enabled(ReposButton::PlanFixes) {
-                Some(ReposButton::PlanFixes)
-            } else {
-                (title.iter().rev())
-                    .find(|h| {
-                        h.disabled.is_none()
-                            && matches!(
-                                h.button,
-                                ReposButton::Approve | ReposButton::SendBack | ReposButton::GoOn
-                            )
-                    })
-                    .map(|h| h.button)
-            };
-            let primary = main == Some(hint.button) && !disabled;
+            // The one to press next, filled (`mark_primary`).
+            let primary = hint.style == ButtonStyle::Primary && !disabled;
             let (edge, inner, label_color) = match (primary, view.hover == Some(hit)) {
                 (true, true) => {
                     let fill = mix(p.accent, p.text, 0.12);
@@ -5857,6 +5871,7 @@ mod tests {
             label: button.label().to_lowercase(),
             key: key.into(),
             disabled: disabled.map(Into::into),
+            style: Default::default(),
         }
     }
 
@@ -5874,6 +5889,34 @@ mod tests {
                 .map(|lang| crate::syntax::highlight(lang, text, &mut Default::default()))
                 .unwrap_or_default(),
         })
+    }
+
+    #[test]
+    fn one_title_button_is_primary_the_one_to_press_next() {
+        use ReposButton::*;
+        let primary = |title: &mut Vec<Hint>| {
+            mark_primary(title);
+            (title.iter().filter(|h| h.style == ButtonStyle::Primary))
+                .map(|h| h.button)
+                .collect::<Vec<_>>()
+        };
+        // The fix plan: Make fixes, or Send back once a comment is written.
+        let mut plan = vec![
+            hint(CommentFile, "", None),
+            hint(SendBack, "", None),
+            hint(Approve, "", None),
+        ];
+        assert_eq!(primary(&mut plan), [Approve]);
+        plan.swap(1, 2);
+        assert_eq!(primary(&mut plan), [SendBack]);
+        // One that can't be pressed isn't it.
+        let mut waits = vec![
+            hint(SendBack, "", None),
+            hint(Approve, "", Some("Decide first")),
+        ];
+        assert_eq!(primary(&mut waits), [SendBack]);
+        let mut fixes = vec![hint(AddComment, "", None), hint(MakeFixes, "", None)];
+        assert_eq!(primary(&mut fixes), [MakeFixes]);
     }
 
     fn detail_line(text: &str, tone: DiffTone) -> DetailLine {
@@ -6623,6 +6666,7 @@ mod tests {
             label: button.label().into(),
             key: key.into(),
             disabled: None,
+            style: Default::default(),
         })
         .collect();
         view

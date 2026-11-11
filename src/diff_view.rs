@@ -2950,6 +2950,7 @@ impl DiffView {
             label: button.label().into(),
             key: key_name(button).into(),
             disabled: None,
+            style: Default::default(),
         };
         // On the user's comment on one, what is done is to that comment.
         let Some((c, flag)) = self.finding_here().filter(|_| self.note_here().is_none()) else {
@@ -3030,6 +3031,7 @@ impl DiffView {
             label: button.label().into(),
             key: key_name(button).into(),
             disabled: None,
+            style: Default::default(),
         };
         // Copying is all a read-only diff offers, on the cursor's line.
         if read_only {
@@ -3155,6 +3157,7 @@ impl DiffView {
             label,
             key: String::new(),
             disabled: None,
+            style: Default::default(),
         };
         let mut buttons = Vec::new();
         // With one comment there is nowhere else to go: ] and [ still work.

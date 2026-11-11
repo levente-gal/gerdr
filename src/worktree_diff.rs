@@ -1206,6 +1206,7 @@ impl WorktreeDiff {
         if self.doc.is_some() || self.feature.is_some() {
             self.doc_view(&mut view);
         }
+        crate::chrome::mark_primary(&mut view.title_buttons);
         view
     }
 
@@ -1230,6 +1231,7 @@ impl WorktreeDiff {
             label: button.label().into(),
             key: key.into(),
             disabled: None,
+            style: Default::default(),
         };
         if self.evidence() {
             return;
@@ -1336,6 +1338,7 @@ impl WorktreeDiff {
                         .and_then(|gate| crate::feature_diff::approve_refusal(&gate)),
                     _ => disabled,
                 },
+                style: Default::default(),
             })
             .collect()
     }
@@ -1595,6 +1598,7 @@ impl WorktreeDiff {
                 disabled: (feature_hints.iter())
                     .find(|hint| hint.button == button)
                     .and_then(|hint| hint.disabled.clone()),
+                style: Default::default(),
             })
             .collect();
         // On a finding or suggestion, what its buttons decide, by their

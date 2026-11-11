@@ -7028,6 +7028,7 @@ fn doc_suggestions() -> super::ReposView {
         label: label.into(),
         key: key.into(),
         disabled: None,
+        style: Default::default(),
     };
     let text = |number: usize, text: &str| {
         DetailRow::Line(crate::diff::Line {
@@ -7079,6 +7080,7 @@ fn doc_suggestions() -> super::ReposView {
         hint(ReposButton::NextComment, "Next suggestion", ""),
         hint(ReposButton::Approve, "Write final plan", "Ctrl+Enter"),
     ];
+    super::mark_primary(&mut view.detail.title_buttons);
     view.detail.rows = vec![
         DetailRow::CommentHead {
             who: "Your suggestion",
@@ -7343,6 +7345,7 @@ fn doc_tab(on: usize, share: f64, off: Vec<usize>, wide: bool) -> super::ReposVi
         label: button.label().into(),
         key: key.into(),
         disabled: None,
+        style: Default::default(),
     };
     let text = [
         "# Log in with a password",
@@ -7372,7 +7375,7 @@ fn doc_tab(on: usize, share: f64, off: Vec<usize>, wide: bool) -> super::ReposVi
         hint(ReposButton::Help, "F1"),
         hint(ReposButton::Close, "Esc"),
     ];
-    let detail = match on {
+    let mut detail = match on {
         // Preview: the page has it all, comments take a line to go on.
         0 => {
             hints.retain(|h| h.button != ReposButton::Comment);
@@ -7394,6 +7397,7 @@ fn doc_tab(on: usize, share: f64, off: Vec<usize>, wide: bool) -> super::ReposVi
             ..Default::default()
         },
     };
+    super::mark_primary(&mut detail.title_buttons);
     let mut labels = vec!["Preview".to_string(), "Review".to_string()];
     if wide {
         labels.push("Split".to_string());
@@ -7419,6 +7423,7 @@ fn doc_tab_closed(locked: bool) -> super::ReposView {
         label: label.into(),
         key: key.into(),
         disabled: None,
+        style: Default::default(),
     };
     let go_on = hint(ReposButton::GoOn, "Ctrl+Enter", "Go to Plan");
     let reopen = hint(ReposButton::Reopen, "Ctrl+Shift+Enter", "Reopen");
@@ -7431,6 +7436,7 @@ fn doc_tab_closed(locked: bool) -> super::ReposView {
     hints.push(hint(ReposButton::Close, "Esc", ReposButton::Close.label()));
     view.hints = hints;
     view.detail.title_buttons = buttons;
+    super::mark_primary(&mut view.detail.title_buttons);
     view.summary = match locked {
         true => "approved \u{b7} locked: Plan has plan.md".into(),
         false => "approved 1h ago by you".into(),
@@ -7453,6 +7459,7 @@ fn findings_view() -> super::ReposView {
         label: label.into(),
         key: String::new(),
         disabled: None,
+        style: Default::default(),
     };
     let head = |severity: &str, state: Option<&str>, tone, place: &str| DetailRow::CommentHead {
         who: "AI review",
@@ -7549,6 +7556,7 @@ fn findings_popup(at: u8) -> super::ReposView {
         label: button.label().into(),
         key: String::new(),
         disabled: disabled.map(Into::into),
+        style: Default::default(),
     };
     let keyed = |b: ReposButton, key: &str, disabled: Option<&str>| Hint {
         key: key.into(),
@@ -7644,6 +7652,7 @@ fn findings_popup(at: u8) -> super::ReposView {
     }
     .into();
     view.detail.title_buttons = nav.into_iter().chain(buttons).collect();
+    super::mark_primary(&mut view.detail.title_buttons);
     view.hints = hints;
     view.hints.push(keyed(ReposButton::Help, "F1", None));
     view.hints.push(keyed(ReposButton::Close, "Esc", None));
