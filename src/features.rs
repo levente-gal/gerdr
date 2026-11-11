@@ -25691,8 +25691,16 @@ pub(crate) mod tests {
             ..ModifiersState::default()
         };
         let slugs = [f.slug.clone()];
-        let got =
-            FeaturePanel::default().key(&ctrl, Keysym::Return, &f, &slugs, written, &[], &[], &[]);
+        let got = FeaturePanel::default().key(
+            &ctrl,
+            Keysym::Return,
+            &f,
+            &slugs,
+            written,
+            &[],
+            &[],
+            &[],
+        );
         assert_eq!(got, Some(PanelOutcome::FindingRefused(DOC_UNREAD)));
         // Nothing there yet: it is being written, as before.
         assert_eq!(
@@ -26308,11 +26316,9 @@ pub(crate) mod tests {
             let actions = page_actions(f, Stage::Ship, RowCtx::default());
             let page = stage_page(f, Stage::Ship, &PanelState::default(), &actions, 2_000);
             let row = page.sections.iter().find_map(|s| match s {
-                PageSection::ShipGroup(g) if g.head == "Afterwards" => g
-                    .steps
-                    .iter()
-                    .find(|r| r.label == "Close the workspace")
-                    .cloned(),
+                PageSection::ShipGroup(g) if g.head == "Afterwards" => {
+                    g.steps.iter().find(|r| r.label == "Close the workspace").cloned()
+                }
                 _ => None,
             });
             row.map(|row| actions[row.button.expect("its button")].1.clone())
