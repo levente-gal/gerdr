@@ -1516,7 +1516,7 @@ const FOCUS_KEYS: &[(&str, &str)] = &[
     ),
     (
         "Enter / Shift+Enter",
-        "in a comment, keep it; a new line (Esc keeps it too)",
+        "in a comment, save it; a new line (Esc keeps it as a draft, Ctrl+Shift+Del discards it)",
     ),
     (
         "g Space / Ctrl+click",
@@ -7950,7 +7950,7 @@ mod tests {
             [
                 "| why",
                 "| and b",
-                "~ Shift+Enter breaks the line · Enter or Esc keeps it",
+                "~ Enter saves · Shift+Enter breaks the line · Esc keeps a draft · Ctrl+Shift+Del discards",
                 "+c"
             ]
         );
@@ -8019,16 +8019,33 @@ mod tests {
         let rows = detail_rows(&panel.view("p", &ctx));
         assert_eq!(rows[3..9], ["+x", "+a", "+b", "> why", "> and b", "+c"]);
 
-        // c on it edits it; Esc keeps the edit, and doesn't close the
-        // panel.
+        // c on it edits it; Esc never saves the edit, nor throws it away:
+        // the next c goes on with it. It doesn't close the panel.
         panel.diff.set_cursor(6, None);
         press(&mut panel, none(), Keysym::c, &ctx);
         assert_eq!(panel.diff.editing.as_ref().map(|e| e.at), Some(Some(0)));
         type_text(&mut panel, "!", &ctx);
         assert_eq!(press(&mut panel, none(), Keysym::Escape, &ctx), None);
         assert!(panel.diff.editing.is_none());
-        assert_eq!(panel.diff.review.comments[0].text, "why\nand b!");
-        panel.diff.review.comments[0].text = "why\nand b".into();
+        assert_eq!(panel.diff.review.comments[0].text, "why\nand b");
+        press(&mut panel, none(), Keysym::c, &ctx);
+        let draft = panel
+            .diff
+            .editing
+            .as_ref()
+            .map(|e| e.field.trim().to_owned());
+        assert_eq!(draft.as_deref(), Some("why\nand b!"));
+        // Ctrl+Shift+Del discards it.
+        press(&mut panel, mods(true, true, false), Keysym::Delete, &ctx);
+        assert!(panel.diff.editing.is_none());
+        press(&mut panel, none(), Keysym::c, &ctx);
+        let edit = panel
+            .diff
+            .editing
+            .as_ref()
+            .map(|e| e.field.trim().to_owned());
+        assert_eq!(edit.as_deref(), Some("why\nand b"));
+        press(&mut panel, none(), Keysym::Escape, &ctx);
         panel.diff.rebuild(&sections(&items));
 
         // b gone, it is listed with those whose lines are gone.
