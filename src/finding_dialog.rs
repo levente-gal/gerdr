@@ -235,7 +235,7 @@ impl FindingDialog {
             Ask::Add => (
                 w.add_title.to_owned(),
                 [(w.own_label, w.own_placeholder, 6)],
-                "Add",
+                "Save",
             ),
             Ask::EditComment => (
                 format!("Edit comment {id}"),
@@ -270,9 +270,19 @@ impl FindingDialog {
             fields,
             focus: self.focus,
             action,
+            cancel: self.cancel_label(),
             error: self.error.clone(),
             hover: self.hover,
             keys,
+        }
+    }
+
+    /// A comment being written has Save and Discard, as a comment written
+    /// inline on a card or a line has; what decides an item has Cancel.
+    fn cancel_label(&self) -> &'static str {
+        match self.ask {
+            Ask::Add | Ask::EditComment | Ask::EditDiffNote => "Discard",
+            _ => "Cancel",
         }
     }
 
@@ -639,7 +649,10 @@ impl Gerdr {
         };
         let outcome = match layout.hit(pos) {
             Some(FindingDialogHit::Button(FINDING_DIALOG_ACTION)) => dialog.save(),
-            Some(FindingDialogHit::Button(_)) => Some(FindingDialogOutcome::Cancel),
+            Some(FindingDialogHit::Button(_)) => Some(match dialog.cancel_label() {
+                "Discard" => FindingDialogOutcome::Discard,
+                _ => FindingDialogOutcome::Cancel,
+            }),
             Some(FindingDialogHit::Field(i)) => {
                 dialog.focus = i;
                 if let Some(at) = chrome::finding_field_at(&view, i, size, pos)
@@ -900,7 +913,10 @@ mod tests {
         d.marks_fix = false;
         assert_eq!(d.view().action, "Save");
         assert_eq!(dialog(Ask::Dismiss, &[""]).view().action, "Dismiss");
-        assert_eq!(dialog(Ask::Add, &[""]).view().action, "Add");
+        // A comment being written: Save and Discard, as inline.
+        let add = dialog(Ask::Add, &[""]).view();
+        assert_eq!((add.cancel, add.action), ("Discard", "Save"));
+        assert_eq!(dialog(Ask::Dismiss, &[""]).view().cancel, "Cancel");
         assert_eq!(dialog(Ask::Edit, &["a"]).view().fields.len(), 1);
     }
 }

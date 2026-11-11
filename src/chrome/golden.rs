@@ -6560,6 +6560,7 @@ fn finding_dialog(error: bool) -> super::FindingDialogView {
         )],
         focus: 0,
         action: "Save and fix",
+        cancel: "Cancel",
         error: error.then(|| "Say what to fix.".to_owned()),
         hover: None,
         keys: vec![
@@ -7007,6 +7008,7 @@ fn finding_dialog_reject() -> super::FindingDialogView {
         }],
         focus: 0,
         action: w.refuse_verb,
+        cancel: "Cancel",
         error: None,
         hover: None,
         keys: vec![("Shift+Enter", "new line"), ("Esc", "close")],

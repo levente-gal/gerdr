@@ -43,6 +43,10 @@ pub struct FindingDialogView {
     pub focus: usize,
     /// What its main button says.
     pub action: &'static str,
+    /// What the button left of it says: "Cancel", which keeps what was
+    /// typed as a draft, or on a comment being written "Discard", which
+    /// throws it away as an inline comment's does.
+    pub cancel: &'static str,
     /// What is wrong with the form, as a sentence.
     pub error: Option<String>,
     pub hover: Option<FindingDialogHit>,
@@ -116,7 +120,7 @@ pub fn finding_dialog_layout(
         fields.push(next(field_h(f.rows)));
     }
     let error = view.error.as_ref().map(|_| next(QUIT_BODY));
-    let buttons = dialog_buttons(panel, &["Cancel", view.action]);
+    let buttons = dialog_buttons(panel, &[view.cancel, view.action]);
     FindingDialogLayout {
         panel,
         title,
@@ -433,7 +437,7 @@ impl Painter {
             scale,
             p,
         );
-        let labels = ["Cancel", view.action];
+        let labels = [view.cancel, view.action];
         for (i, (rect, label)) in layout.buttons.iter().zip(labels).enumerate() {
             let style = match i == FINDING_DIALOG_ACTION {
                 true => ButtonStyle::Primary,
@@ -473,6 +477,7 @@ mod tests {
                 .collect(),
             focus: 0,
             action: "Save",
+            cancel: "Cancel",
             error: error.then(|| "Say why.".to_owned()),
             hover: None,
             keys: Vec::new(),
