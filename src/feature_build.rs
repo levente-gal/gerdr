@@ -611,7 +611,7 @@ impl Gerdr {
         run.not_copied = report.not_copied.clone();
         run.ran = report.ran.clone();
         match &report.failed {
-            None => feature.log(now, "Set up"),
+            None => feature.log(now, "Setup done"),
             Some(why) => feature.log(now, format!("Setup failed: {why}")),
         }
         self.save_feature(project, slug);

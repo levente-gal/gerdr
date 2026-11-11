@@ -24,7 +24,8 @@ use super::{
     segment, segment_tint, status_dot, tab, trash,
 };
 use super::{
-    bars, code_mark, eye, flask, magnifier, plan_review_mark, ship_arrow, sparkle, text_lines,
+    Standing, bars, code_mark, eye, flask, magnifier, plan_review_mark, ship_arrow, sparkle,
+    text_lines,
 };
 use crate::text_field::Line;
 use crate::{
@@ -358,20 +359,24 @@ pub struct FeatureRepoRow {
 /// How a line of the Ship check reads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum CheckTone {
-    /// What stops shipping: in the warning colour.
+    /// The user's turn: something to review, decide or act on. In the
+    /// warning colour (`Standing::Yours`).
     Blocker,
-    /// It can ship: in the success colour.
+    /// Done, passed, it can ship: in the success colour.
     Ready,
     /// Worth knowing, or still being checked: muted.
     Note,
+    /// It failed, or something blocks it: in the error colour.
+    Failed,
 }
 
 impl CheckTone {
     pub(super) fn color(self, p: &Palette) -> Rgb {
         match self {
-            Self::Blocker => p.warning,
-            Self::Ready => p.success,
+            Self::Blocker => Standing::Yours.color(p),
+            Self::Ready => Standing::Done.color(p),
             Self::Note => p.muted,
+            Self::Failed => Standing::Failed.color(p),
         }
     }
 }
@@ -503,6 +508,9 @@ pub enum NodeMark {
     /// on its account and the next move not its own, or the one the flow has
     /// since gone back from. An accent ring round its number.
     Paused,
+    /// The current stage, failed or blocked: Verify's checks failed, setup
+    /// failed, Build blocked, a fix plan stalled, Ship blocked. A red dot.
+    Failed,
 }
 
 impl NodeMark {
@@ -511,9 +519,10 @@ impl NodeMark {
     /// mark: 3:1 at least).
     pub(super) fn dot_color(self, p: &Palette) -> Rgb {
         match self {
-            Self::Done => p.success,
-            Self::Current | Self::Fixing | Self::Paused => p.accent,
-            Self::Stale | Self::Waiting => p.warning,
+            Self::Done => Standing::Done.color(p),
+            Self::Current | Self::Fixing | Self::Paused => Standing::Working.color(p),
+            Self::Stale | Self::Waiting => Standing::Yours.color(p),
+            Self::Failed => Standing::Failed.color(p),
             Self::Ran => p.muted,
             Self::Later => p.placeholder,
         }
@@ -535,8 +544,9 @@ impl NodeMark {
             Self::Current => "current",
             Self::Later => "later",
             Self::Stale => "code changed",
-            Self::Waiting => "waiting for you",
-            Self::Fixing => "running again",
+            Self::Waiting => Standing::Yours.word(),
+            Self::Failed => Standing::Failed.word(),
+            Self::Fixing => "working again",
             Self::Ran => "ran once",
             Self::Paused => "last worked on",
         }
@@ -1059,7 +1069,7 @@ pub(super) fn pill_inks(tag: FindingTag, faded: bool, p: &Palette) -> (Rgb, Rgb)
     }
     match tag {
         FindingTag::High => (p.error, super::sidebar::ink_on(p.error, p)),
-        FindingTag::Medium => (p.warning, super::sidebar::ink_on(p.warning, p)),
+        FindingTag::Medium => (p.medium, super::sidebar::ink_on(p.medium, p)),
         FindingTag::Yours => (mix(p.background, p.accent, PILL_TINT), p.text),
         _ => (p.element, p.text),
     }
@@ -2092,7 +2102,6 @@ pub(super) enum Ink {
     Text,
     Muted,
     Error,
-    Accent,
     Tone(CheckTone),
 }
 
@@ -2102,7 +2111,6 @@ impl Ink {
             Self::Text => p.text,
             Self::Muted => p.muted,
             Self::Error => p.error,
-            Self::Accent => p.accent,
             Self::Tone(tone) => tone.color(p),
         }
     }
@@ -2392,7 +2400,7 @@ const STAT_NAME_MIN: i32 = 40;
 
 /// An activity row's dot in `spot`, by its `tone`: a tick in the success
 /// colour for what went through, a filled dot in the warning colour for
-/// what was sent back or failed, and a ring in the muted colour for the
+/// what was sent back, a cross in the error colour for what failed, and a ring in the muted colour for the
 /// rest. Told apart by their shapes too, not by colour alone.
 fn activity_dot(c: &mut Canvas, spot: Rect, tone: CheckTone, scale: f64, p: &Palette) {
     let s = scale as f32;
@@ -2401,6 +2409,7 @@ fn activity_dot(c: &mut Canvas, spot: Rect, tone: CheckTone, scale: f64, p: &Pal
     match tone {
         CheckTone::Ready => icon_sdf(c, spot, scale, color, |x, y| check(x, y, s * 0.95)),
         CheckTone::Blocker => icon_sdf(c, spot, scale, color, |x, y| x.hypot(y) - d / 2.0),
+        CheckTone::Failed => icon_sdf(c, spot, scale, color, |x, y| cross(x, y, s * 0.8)),
         CheckTone::Note => icon_sdf(c, spot, scale, color, |x, y| {
             stage_dot(StageMark::Later, x, y, d)
         }),
@@ -3487,7 +3496,7 @@ impl Stack {
 
     /// A collapsed card's one line: tag, title and where it stands cut to fit,
     /// its first button at the right.
-    /// `text`, what a card was decided to be, bold at `x`, `y`: in the accent while to fix. How wide it ran.
+    /// `text`, what a card was decided to be, bold at `x`, `y`: in the done colour while to fix. How wide it ran.
     fn decision_word(&mut self, text: &str, stripe: Option<CardStripe>, x: i32, y: i32) -> i32 {
         // Bold runs wider than it measures.
         let w = (width_of(text, Font::Small.size()).ceil() as i32 + 1) * 9 / 8;
@@ -3496,8 +3505,9 @@ impl Stack {
             Piece::Text {
                 text: text.to_owned(),
                 font: Font::Small,
+                // Decided: the done colour, apart from the selection's accent.
                 ink: match stripe {
-                    Some(CardStripe::ToFix) => Ink::Accent,
+                    Some(CardStripe::ToFix) => Ink::Tone(CheckTone::Ready),
                     _ => Ink::Text,
                 },
                 bold: true,
@@ -6500,8 +6510,12 @@ impl Painter {
                     (label.size.w, NODE_LINE).into(),
                 );
                 let color = match node.mark {
-                    NodeMark::Current | NodeMark::Fixing | NodeMark::Paused => p.accent,
-                    NodeMark::Waiting | NodeMark::Stale => p.warning,
+                    NodeMark::Current
+                    | NodeMark::Fixing
+                    | NodeMark::Paused
+                    | NodeMark::Waiting
+                    | NodeMark::Stale
+                    | NodeMark::Failed => node.mark.dot_color(p),
                     _ => p.muted,
                 };
                 self.centred_cut(c, &node.line, DETAIL_FONT_SIZE, line, false, scale, color);
@@ -6623,20 +6637,15 @@ impl Painter {
         match mark {
             NodeMark::Done | NodeMark::Stale | NodeMark::Ran => {
                 let color = match mark {
-                    NodeMark::Done => p.success,
-                    NodeMark::Stale => p.warning,
+                    NodeMark::Done | NodeMark::Stale => mark.dot_color(p),
                     _ => p.muted,
                 };
                 disc(c, 0.0, color);
                 disc(c, ring, mix(p.background, color, 0.18));
                 icon_sdf(c, spot, scale, color, |x, y| check(x, y, s * 1.1));
             }
-            NodeMark::Current | NodeMark::Waiting | NodeMark::Fixing => {
-                let color = if mark == NodeMark::Waiting {
-                    p.warning
-                } else {
-                    p.accent
-                };
+            NodeMark::Current | NodeMark::Waiting | NodeMark::Fixing | NodeMark::Failed => {
+                let color = mark.dot_color(p);
                 disc(c, 0.0, color);
                 self.bold_centred(c, &number, spot, scale, p.on_accent);
             }
@@ -7494,7 +7503,7 @@ impl Painter {
                     let (x, y, _, h) = rect_px(rect, scale);
                     let s = scale as f32;
                     let colour = match stripe {
-                        CardStripe::ToFix => p.accent,
+                        CardStripe::ToFix => Standing::Done.color(p),
                         CardStripe::Sent => p.muted,
                     };
                     let inset = AGENT_RADIUS * s;
@@ -7816,9 +7825,9 @@ impl CardTone {
     pub(super) fn mark_color(self, p: &Palette) -> Rgb {
         match self {
             Self::Idle => p.placeholder,
-            Self::Working => p.accent,
-            Self::Waits => p.warning,
-            Self::Failed => p.error,
+            Self::Working => Standing::Working.color(p),
+            Self::Waits => Standing::Yours.color(p),
+            Self::Failed => Standing::Failed.color(p),
         }
     }
 

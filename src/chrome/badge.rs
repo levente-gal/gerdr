@@ -4,7 +4,7 @@
 //! blinks: it is left out of the cached buffers and composed over them on
 //! its own (`blink_dot`, see `Chrome::elements`).
 
-use super::{Canvas, Palette, Rect, Rgb, flask, icon_sdf, physical, robot};
+use super::{Canvas, Palette, Rect, Rgb, Standing, flask, icon_sdf, physical, robot};
 use crate::agent_icons::AgentIcon;
 use crate::ci::CiState;
 use crate::herdr::AgentStatus;
@@ -57,12 +57,12 @@ impl Dot {
 
     pub(super) fn color(self, p: &Palette) -> Rgb {
         match self {
-            Self::Working => p.accent,
-            Self::Blocked => p.warning,
-            Self::Done => p.success,
-            Self::Idle => p.muted,
+            Self::Working => Standing::Working.color(p),
+            Self::Blocked => Standing::Yours.color(p),
+            Self::Done => Standing::Done.color(p),
+            Self::Idle => Standing::Idle.color(p),
             Self::Unknown => p.placeholder,
-            Self::Failed => p.error,
+            Self::Failed => Standing::Failed.color(p),
         }
     }
 }

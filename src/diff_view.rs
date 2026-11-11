@@ -90,7 +90,7 @@ fn finding_tone(flag: &review::Flag) -> Tone {
     match (flag.state, flag.severity) {
         (FindingState::Dismissed | FindingState::Fixed, _) => Tone::Muted,
         (_, Severity::High) => Tone::Error,
-        (_, Severity::Medium) => Tone::Warning,
+        (_, Severity::Medium) => Tone::Medium,
         (_, Severity::Low) => Tone::Normal,
     }
 }

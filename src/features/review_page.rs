@@ -141,12 +141,12 @@ fn item_sections(
     sections
 }
 
-/// What the items' line says while there are no cards: not read yet, none,
+/// What the items' line says while there are no cards: not written yet, none,
 /// or how many of each stand where (AI review's kept in earlier reviews).
 fn review_empty(feature: &Feature, stage: Stage) -> Vec<CheckLine> {
     let w = words(stage_items(stage));
     if !review_read(feature, stage) {
-        return vec![line("not read yet", CheckTone::Note)];
+        return vec![line("not written yet", CheckTone::Note)];
     }
     let review = feature.review.as_ref().filter(|_| stage == Stage::AiReview);
     let Some(review) = review.filter(|r| !r.findings.is_empty()) else {
