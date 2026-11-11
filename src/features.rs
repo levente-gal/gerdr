@@ -5973,20 +5973,15 @@ impl FeaturePanel {
             {
                 return Some(PanelOutcome::MakeFixes);
             }
+            // The gate passes from any focus on the page, cards included.
             Keysym::Return | Keysym::KP_Enter
-                if ctrl
-                    && !mods.shift
-                    && self.focus == TabArea::Stages
-                    && approves_doc(feature, stage, ctx) =>
+                if ctrl && !mods.shift && approves_doc(feature, stage, ctx) =>
             {
                 return Some(PanelOutcome::ApproveDoc(stage));
             }
             // Written, but not read yet: say why it can't be approved.
             Keysym::Return | Keysym::KP_Enter
-                if ctrl
-                    && !mods.shift
-                    && self.focus == TabArea::Stages
-                    && doc_unread(feature, stage, ctx) =>
+                if ctrl && !mods.shift && doc_unread(feature, stage, ctx) =>
             {
                 return Some(PanelOutcome::FindingRefused(DOC_UNREAD));
             }
@@ -6872,9 +6867,20 @@ fn writers_page_actions(
             let undoable =
                 done.undone.is_none() && ship::undo_of(feature, &done.repo, step).is_ok();
             if undoable {
+                // Named, as two can sit side by side off their rows.
+                let what = match step {
+                    ShipStep::Push | ShipStep::PushBranch => "push",
+                    ShipStep::OpenPr => "pull request",
+                    ShipStep::Merge => "merge",
+                    ShipStep::PushBase => "base push",
+                };
+                let label = match feature.many_repos() {
+                    true => format!("Undo {what} in {}\u{2026}", done.repo),
+                    false => format!("Undo {what}\u{2026}"),
+                };
                 undos.push((
                     done.at,
-                    button("Undo\u{2026}", ButtonStyle::Quiet),
+                    button(&label, ButtonStyle::Quiet),
                     PanelOutcome::UndoShip(done.repo.clone(), step),
                 ));
             }
@@ -6983,6 +6989,18 @@ fn header_key(i: usize) -> Option<&'static str> {
         .get(i)
         .copied()
 }
+/// The key of the `⋯` menu's row for a page button `in_menu` puts there,
+/// shown at its right as the feature rows show theirs.
+fn menu_key(outcome: &PanelOutcome) -> Option<&'static str> {
+    match outcome {
+        PanelOutcome::StartOver(_) => Some(START_OVER_KEY),
+        PanelOutcome::SetUp => Some("Ctrl+Shift+U"),
+        PanelOutcome::EditCommands(_) => Some("Ctrl+E"),
+        PanelOutcome::ResetSandbox | PanelOutcome::RemoveSandbox => Some("Ctrl+Shift+X"),
+        _ => None,
+    }
+}
+
 /// The repository `rows` on from `at`, of `len`: it stops at the ends.
 fn strip_step(at: usize, rows: isize, len: usize) -> usize {
     let last = len.saturating_sub(1);
@@ -11994,7 +12012,11 @@ impl Gerdr {
         for i in &view.page.menu {
             if let (Some(b), Some((_, outcome))) = (view.page.buttons.get(*i), actions.get(*i)) {
                 let on = b.style != ButtonStyle::Off;
-                items.push(item(&b.label, outcome.clone()).enabled(on));
+                let mut row = item(&b.label, outcome.clone()).enabled(on);
+                if let Some(key) = menu_key(outcome) {
+                    row = row.hint(key);
+                }
+                items.push(row);
             }
         }
         if !view.remove.is_empty() {
@@ -12437,8 +12459,9 @@ impl Gerdr {
         let (running, more) = self.running_of(&panel.project, &panel.slug, &feature.title);
         view.running = running.into_iter().map(|(row, _)| row).collect();
         view.running_more = more;
-        // Under a dialog the page takes no keys: its footer offers none.
-        if self.open_overlays().any(crate::overlay::Overlay::is_dialog) {
+        // Under a dialog or a panel the page takes no keys: its footer
+        // offers none.
+        if self.grabbing_overlay().is_some() {
             view.hints.clear();
         }
         // The search counts the places it found as the page shows them.
@@ -15358,6 +15381,7 @@ fn fix_card(
         .then(|| feature::fix_round::run_of(round, &feature.verify_fixes))
         .flatten();
     meta.extend(run.map(|k| format!("from run {k}")));
+    let verify = (feature.verify_fixes.iter()).find(|fix| fix.round == round.n);
     if !round.trail.agent.is_empty() {
         meta.push(match round.trail.model.is_empty() {
             true => format!("made by the Build agent ({})", round.trail.agent),
@@ -15366,11 +15390,14 @@ fn fix_card(
                 round.trail.agent, round.trail.model
             ),
         });
+    } else if is_open && verify.is_none() {
+        // Its plan still pending: the Build agent makes them all the same.
+        let build = (feature.runs.get(&Stage::Build)).filter(|r| !r.agent.is_empty());
+        meta.extend(build.map(|r| format!("made by the Build agent ({})", r.agent)));
     }
     if asked.is_empty() {
         meta.push(round.what.clone());
     }
-    let verify = (feature.verify_fixes.iter()).find(|fix| fix.round == round.n);
     if let Some(fix) = verify {
         if round.trail.agent.is_empty() && !fix.agent.is_empty() {
             meta.push(format!("made by the Build agent ({})", fix.agent));
@@ -15575,7 +15602,6 @@ fn latest_comment_round(feature: &Feature) -> Option<u32> {
 /// now, by the stage that asked: a criterion tried again, a finding the next
 /// review saw, a comment whose fix was made.
 fn asked_now(feature: &Feature, round: &FixRound, id: &str, open: bool) -> Option<CheckLine> {
-    let planning = |round: &FixRound| feature::fix_round::planning(Some(round), round.stage);
     match feature
         .fix_asked
         .get(&round.n)
@@ -15590,10 +15616,7 @@ fn asked_now(feature: &Feature, round: &FixRound, id: &str, open: bool) -> Optio
                 FindingState::Fixed => line("fixed", CheckTone::Ready),
                 FindingState::Dismissed => line("dismissed", CheckTone::Note),
                 FindingState::Sent if found.fix_made() => line("fix made", CheckTone::Ready),
-                FindingState::Sent if open => line(
-                    review_import::sent_word(false, planning(round)),
-                    CheckTone::Note,
-                ),
+                FindingState::Sent if open => line(sent_now(round), CheckTone::Note),
                 FindingState::Sent => line("not marked made", CheckTone::Note),
                 FindingState::Open | FindingState::Fix => line("raised again", CheckTone::Blocker),
                 FindingState::Posted => line("on GitHub", CheckTone::Note),
@@ -15607,10 +15630,7 @@ fn asked_now(feature: &Feature, round: &FixRound, id: &str, open: bool) -> Optio
             Some(
                 match fix.is_some_and(|fix| fix.made.iter().any(|m| m == id)) {
                     true => line("fix made", CheckTone::Ready),
-                    false if open => line(
-                        review_import::sent_word(false, planning(round)),
-                        CheckTone::Note,
-                    ),
+                    false if open => line(sent_now(round), CheckTone::Note),
                     false => line("not marked made", CheckTone::Note),
                 },
             )
@@ -15632,7 +15652,7 @@ fn check_now(feature: &Feature, round: &FixRound, failure: &str, open: bool) -> 
     let check = (run.checks.iter())
         .find(|c| failure.starts_with(&format!("{}: `{}`", c.repo, c.command)))?;
     if run.n <= fix.run || check.run <= fix.run {
-        return open.then(|| line("being fixed", CheckTone::Note));
+        return open.then(|| line(sent_now(round), CheckTone::Note));
     }
     Some(match &check.outcome {
         None => line(format!("running in run {}", check.run), CheckTone::Note),
@@ -15656,9 +15676,18 @@ fn criterion_now(feature: &Feature, round: &FixRound, id: &str, open: bool) -> O
         }
         Some(k) if k.fix_made() => line("fix made: try it again", CheckTone::Note),
         Some(k) if since(k) && !k.sent => line("failed again", CheckTone::Failed),
-        Some(_) if open => line("being fixed", CheckTone::Note),
+        Some(_) if open => line(sent_now(round), CheckTone::Note),
         _ => line("not tried since", CheckTone::Note),
     })
+}
+
+/// What an item open round `round` was asked to fix is while it goes: "in
+/// fix plan" while its plan is written or waits, then "being fixed".
+fn sent_now(round: &FixRound) -> &'static str {
+    review_import::sent_word(
+        false,
+        feature::fix_round::planning(Some(round), round.stage),
+    )
 }
 
 /// The buttons of the fix round cards on `stage`'s page, by `probe`: on the
@@ -17733,6 +17762,11 @@ fn writers_tab_hints(
             }
             hints.extend(send_hints(feature, stage, ctx, &said));
             hints.extend(plan_review_hints(feature, stage));
+            // The gate passes off the cards too, unless a send has the key.
+            let gated = hints.iter().any(|(k, _)| k == "Ctrl+Enter");
+            if !gated && approves_doc(feature, stage, ctx) {
+                hints.push(hint("Ctrl+Enter", &said(&PanelOutcome::ApproveDoc(stage))));
+            }
             hints.extend(fold_hint(feature, stage));
             hints.push(hint("Tab", if repos { "repositories" } else { "stages" }));
         }
@@ -26517,6 +26551,8 @@ pub(crate) mod tests {
             "{:?}",
             page.menu
         );
+        // Each of the menu's rows from the page shows its key.
+        assert!((page.menu.iter()).all(|&b| menu_key(&actions[b].1).is_some()));
         assert_eq!(
             page.sections.last(),
             Some(&lines(
@@ -26900,6 +26936,28 @@ pub(crate) mod tests {
         let slugs = ["a".to_owned()];
         let got = panel.key(&ctrl, Keysym::Return, &f, &slugs, ctx, &[], &[], &[]);
         assert_eq!(got, Some(approve.clone()));
+        // From the cards or the repositories too, not unfolding them.
+        for focus in [TabArea::Findings, TabArea::Repos] {
+            panel.focus = focus;
+            let got = panel.key(&ctrl, Keysym::Return, &f, &slugs, ctx, &[], &[], &[]);
+            assert_eq!(got, Some(approve.clone()));
+            assert!(!panel.expanded);
+        }
+        panel.focus = TabArea::Stages;
+        let hints = tab_hints(
+            &panel,
+            &f,
+            stage,
+            &[],
+            ctx,
+            AgentChoices::default(),
+            &[],
+            &[],
+            &[],
+        );
+        assert!(hints.contains(&("Ctrl+Enter".into(), "approve".into())));
+        // Off the cards too, as the key does.
+        panel.focus = TabArea::Findings;
         let hints = tab_hints(
             &panel,
             &f,
@@ -27660,6 +27718,10 @@ pub(crate) mod tests {
         let button = group.steps[0].button.expect("its undo");
         assert_eq!(actions[button].1, PanelOutcome::UndoAfter(AfterStep::Close));
         assert_eq!(actions[button].0.label, "Undo");
+        // A step's undo names it: two never read the same off their rows.
+        let push = PanelOutcome::UndoShip("api".into(), ShipStep::Push);
+        let named = actions.iter().find(|(_, o)| *o == push).unwrap();
+        assert_eq!(named.0.label, "Undo push\u{2026}");
         // Its cards and Afterwards say what ran: the log isn't shown again.
         assert!(!page.sections.iter().any(|s| {
             matches!(s, PageSection::Lines { label, .. } if label == "Ship log")
@@ -27816,8 +27878,8 @@ pub(crate) mod tests {
         );
         let undo = ship_keys(&f, ctx, Some(&p), None);
         let undo = undo.iter().find(|k| k.chord == "Alt+Z").unwrap();
-        // As its button says it.
-        assert_eq!(undo.what, "undo\u{2026}");
+        // As its button says it, naming the step and its repository.
+        assert_eq!(undo.what, "undo push in web\u{2026}");
         // On web's rows: web's merge, its pull request, its push.
         let web = of(Some("web"));
         assert!(web.contains(&(
@@ -28969,6 +29031,22 @@ pub(crate) mod tests {
 
     /// A Manual test round `n`, over at `ended` unless open, its fixes gone
     /// with the code read at `from` when given.
+    /// An item asked of an open round is "in fix plan" until its fixes go,
+    /// whichever stage asked it (Verify's checks, Manual test's criteria).
+    #[test]
+    fn asked_items_are_in_the_fix_plan_until_the_fixes_go() {
+        let mut round = manual_round(1, None, None);
+        for (phase, word) in [
+            (FixPhase::Compacting, "in fix plan"),
+            (FixPhase::Planning, "in fix plan"),
+            (FixPhase::Ready, "in fix plan"),
+            (FixPhase::Fixing, "being fixed"),
+        ] {
+            round.phase = phase;
+            assert_eq!(sent_now(&round), word, "{phase:?}");
+        }
+    }
+
     fn manual_round(n: u32, ended: Option<u64>, from: Option<&str>) -> FixRound {
         let mut trail = crate::feature::fix_round::Trail {
             went: Some(1_200),
@@ -29064,6 +29142,17 @@ pub(crate) mod tests {
             "{meta}"
         );
         assert!(meta.ends_with("took 14 min"), "{meta}");
+        // The open one, its plan pending, is the Build agent's too.
+        if let Some(open) = f.fix_round.as_mut() {
+            open.trail.agent.clear();
+        }
+        f.runs.insert(Stage::Build, agent_run(None, None));
+        let pending = round_cards_of(&f, &state);
+        let meta = &pending[0].0.meta;
+        assert!(
+            meta.contains("made by the Build agent (Claude Code)"),
+            "{meta}"
+        );
         let asked = &cards[0].0.asked[0];
         assert_eq!(asked.title, "Save keeps the title");
         assert_eq!(asked.note, "the title went back (1 screenshot)");

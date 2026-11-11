@@ -2740,7 +2740,8 @@ impl Stack {
             (self.x, self.w) = (what_x, (x + w - what_x).max(1));
             self.join_next(false);
             let start = self.y;
-            self.text(what, Font::Body, Ink::Tone(line.tone), BODY_LINE);
+            // All of it: the sheet scrolls, a cut key loses what it does.
+            self.all_text(what, Font::Body, Ink::Tone(line.tone), false, BODY_LINE);
             self.y = self.y.max(start + BODY_LINE);
             (self.x, self.w) = (x, w);
         }
@@ -5612,6 +5613,7 @@ fn slice_view(view: &FeatureTabView, slice: TabSlice) -> FeatureTabView {
                     | H::Running(_)
                     | H::RunningButton(..)
             ) || strip && matches!(hit, H::Repo(_) | H::MoreRepos(_))
+                || matches!(hit, H::PageButton(i) if header_primary(view) == Some(*i))
         }
         TabSlice::Column(TabColumn::Repos) => {
             matches!(hit, H::Repo(_) | H::RepoButton(..) | H::RepoRemove(_))
@@ -5644,6 +5646,14 @@ fn slice_view(view: &FeatureTabView, slice: TabSlice) -> FeatureTabView {
             v.test_strip = view.test_strip.clone();
             v.running = view.running.clone();
             v.running_more = view.running_more;
+            // The header's primary and `⋯`: a card taking the primary
+            // clears it there.
+            v.page.primary = header_primary(view);
+            v.page.buttons = (v.page.primary.and_then(|i| view.page.buttons.get(i)))
+                .cloned()
+                .into_iter()
+                .collect();
+            v.page.menu = view.page.menu.clone();
             if strip {
                 repos(&mut v);
             }
@@ -10070,6 +10080,48 @@ mod tests {
             assert!(RAIL_BACK_RISE < RAIL_GAP + RAIL_BACK);
             assert!(RAIL_BACK_CLEAR as f32 > crate::chrome::FOCUS_GAP + crate::chrome::FOCUS_RING);
         }
+    }
+
+    /// The keys sheet at 900 px: a long key's words wrap whole, none cut
+    /// with "…" (the sheet scrolls).
+    #[test]
+    fn a_long_key_on_the_keys_sheet_wraps_whole() {
+        let mut view = super::super::golden::feature_tab();
+        let what = "word ".repeat(80) + "end";
+        view.page.sections = vec![PageSection::Lines {
+            label: "Keys".into(),
+            lines: vec![CheckLine {
+                text: format!("Ctrl+Enter\t{what}"),
+                tone: CheckTone::Note,
+            }],
+        }];
+        let l = tab_at(&view, 900);
+        let texts: Vec<&str> = (l.pieces[TabColumn::Page as usize].iter())
+            .filter_map(|(_, p)| match p {
+                Piece::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(texts.len() > 5, "{texts:?}");
+        assert!(texts.iter().all(|t| !t.ends_with('\u{2026}')), "{texts:?}");
+        assert!(texts.last().is_some_and(|t| t.ends_with("end")));
+    }
+
+    /// A card taking the page's primary (keys on the review cards) clears
+    /// the header's: the head is drawn again, not left with a stale one.
+    #[test]
+    fn the_head_is_drawn_again_when_its_primary_goes() {
+        let mut view = super::super::golden::feature_tab();
+        view.page.buttons = vec![PageButton {
+            label: "Review in plan".into(),
+            style: ButtonStyle::Primary,
+        }];
+        view.page.primary = Some(0);
+        let with = slice_view(&view, TabSlice::Head);
+        assert_eq!(with.page.primary, Some(0));
+        view.page.primary = None;
+        view.page.buttons[0].style = ButtonStyle::Plain;
+        assert!(slice_view(&view, TabSlice::Head) != with);
     }
 
     #[test]
