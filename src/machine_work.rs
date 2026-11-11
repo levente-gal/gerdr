@@ -1417,9 +1417,9 @@ impl Gerdr {
         self.forget_pane(project, slug, stage);
     }
 
-    /// Whether a fresh start of `stage`'s agent would end an agent at work on
-    /// another machine: nothing here shows that one, or could. Then it asks,
-    /// and it starts if told to (`Then::FreshOnMachine`).
+    /// Whether a fresh start of `stage`'s agent would end an agent at work,
+    /// here or on another machine (nothing here shows that one, or could).
+    /// Then it asks, and it starts if told to (`Then::FreshOnMachine`).
     pub(crate) fn asks_before_fresh(&mut self, project: &str, slug: &str, stage: Stage) -> bool {
         let Some(run) = self.feature(project, slug).and_then(|f| f.runs.get(&stage)) else {
             return false;
@@ -1430,6 +1430,17 @@ impl Gerdr {
             .as_deref()
             .filter(|_| live && self.run_at_work(run))
         else {
+            // One at work here asks too: Restart would stop it mid-work.
+            if live && self.run_at_work(run) {
+                let agent = run.agent.clone();
+                self.ask(
+                    format!("Restart {}'s agent?", stage.label()),
+                    format!("{agent} is working: it stops, and a fresh one starts on the prompt"),
+                    "Restart",
+                    Then::FreshOnMachine(project.to_owned(), slug.to_owned(), stage),
+                );
+                return true;
+            }
             return false;
         };
         let name = self.machine_name(id);

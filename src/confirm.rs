@@ -43,7 +43,8 @@ pub enum Then {
     TakeOver(String, String),
     /// Open this feature's sandbox to the network: project, feature.
     OpenSandboxLan(String, String),
-    /// Start this stage's agent afresh, ending the one on another machine.
+    /// Start this stage's agent afresh, ending the one at work, here or on
+    /// another machine.
     FreshOnMachine(String, String, crate::feature::Stage),
     /// Close the agent of this card (see `Gerdr::close_agent`).
     CloseAgent(AgentKey),
