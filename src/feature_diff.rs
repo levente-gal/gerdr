@@ -512,6 +512,7 @@ impl FeatureOf {
                 if self.scope_button().is_some() {
                     keys.push(("Shift+A", "all changes, or only those since your last review"));
                 }
+                keys.push(("Shift+O", "on a comment whose fix is made, show its commit"));
             }
             Role::Round(FixPhase::Ready) => keys.push(("Ctrl+Enter", "review the fix plan")),
             Role::Done if !self.closed => {
