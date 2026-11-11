@@ -315,8 +315,11 @@ impl Gerdr {
         }
         let runs = self.projects.workflows(feature, |w| w.run.clone());
         if !has_commands(&runs) {
-            self.show_warning("Say what a sandbox runs first".into());
+            self.show_warning("Say what the sandbox runs: it starts once you save".into());
             self.open_project_commands(&key.0, Some(&key.1), CommandsTab::Run);
+            if let Some(dialog) = self.features.commands.as_mut() {
+                dialog.then_sandbox = true;
+            }
             return false;
         }
         true
