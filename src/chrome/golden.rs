@@ -8245,7 +8245,7 @@ const GOLDEN_STATS: [[u64; 6]; 4] = [
     [
         0x99966c3b2506d63d, // stats_empty
         0xe0fd68cfb391c1e1, // stats_loaded
-        0x773a2353141510e4, // stats_detail
+        0x3c65cf8dab92ca75, // stats_detail
         0xce6f6560e912d620, // stats_error
         0x964f17e94106c50b, // stats_agents
         0x126ad886e81bab7a, // stats_delete_hover
@@ -8254,7 +8254,7 @@ const GOLDEN_STATS: [[u64; 6]; 4] = [
     [
         0x70a4fd1990ba17c3, // stats_empty
         0x82796315c0ea2c7e, // stats_loaded
-        0x30034c1b981d9cdb, // stats_detail
+        0x5b2086bde5b455c1, // stats_detail
         0xea2f727ec24cecf2, // stats_error
         0xcd9ce23d4691ec39, // stats_agents
         0x1710f18060c55e46, // stats_delete_hover
@@ -8263,7 +8263,7 @@ const GOLDEN_STATS: [[u64; 6]; 4] = [
     [
         0x7fd4ab28632c785b, // stats_empty
         0x3eded72ab82d41fd, // stats_loaded
-        0xa64e0ab6f835378a, // stats_detail
+        0xd6f7685ff4fec16b, // stats_detail
         0x58f26e96381a3936, // stats_error
         0x175c69b53e482d08, // stats_agents
         0xe662914229435fc0, // stats_delete_hover
@@ -8272,7 +8272,7 @@ const GOLDEN_STATS: [[u64; 6]; 4] = [
     [
         0xe5834abec67891f5, // stats_empty
         0xeb0812fe2bb1f9b2, // stats_loaded
-        0xd90f76b857c1ca17, // stats_detail
+        0x72aa4162c6cdaf13, // stats_detail
         0x2d9933b9ca9b6bb8, // stats_error
         0x0b49475463e76c6b, // stats_agents
         0x76107a0bb1cd1b11, // stats_delete_hover

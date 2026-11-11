@@ -1105,7 +1105,7 @@ fn detail_lines(d: &stats::Detail, now: u64) -> Vec<Line> {
             Line::row(
                 2,
                 vec![
-                    format!("Round {}", f.n),
+                    crate::feature::fix_round::label(f.n),
                     clock(f.opened, now),
                     closed,
                     f.fixes.to_string(),
