@@ -2587,7 +2587,7 @@ impl Rework {
     fn status(self) -> &'static str {
         match self {
             Rework::Waits => "waiting for you \u{b7} send the prompt",
-            Rework::Closed => "its tab closed \u{b7} Start agent opens it again",
+            Rework::Closed => "its tab closed \u{b7} Start Build agent opens it again",
             Rework::Draft => "draft in T3 Code \u{b7} pick a model and send it",
             Rework::Runs(Dot::Blocked) => "running again \u{b7} needs you",
             Rework::Runs(_) => "running again",
@@ -6039,7 +6039,7 @@ fn fix_round_buttons(
     }
     if round.can_drop() {
         out.push((
-            button("Drop plan\u{2026}", ButtonStyle::Quiet),
+            button("Drop plan\u{2026}", ButtonStyle::Plain),
             PanelOutcome::DropFixPlan,
         ));
     }
@@ -6325,11 +6325,13 @@ fn writers_page_actions(
     {
         out.push((button(label, ButtonStyle::Plain), outcome));
     }
+    // Named apart from this stage's own agent's button on the same page.
     if back.is_some()
         && let Some((label, outcome)) =
             agent_button(feature, Stage::Build, ctx).filter(|(_, o)| !has(&out, o))
     {
-        out.push((button(label, ButtonStyle::Plain), outcome));
+        let label = label.replace("agent", "Build agent");
+        out.push((button(&label, ButtonStyle::Plain), outcome));
     }
     // The brief's or the plan's file, once there: the page shows it, its tab
     // works on it. What opens that tab already is that button.
@@ -6563,15 +6565,6 @@ fn can_set_up(feature: &Feature, ctx: RowCtx) -> bool {
 /// once one started.
 fn offers_setup_log(feature: &Feature, stage: Stage) -> bool {
     offers_setup(feature, stage) && feature.setup.is_some()
-}
-
-/// The name of the feature tab's header button `i`: `FEATURE_BUTTONS`,
-/// then `remove`.
-fn header_label(remove: &'static str, i: usize) -> Option<&'static str> {
-    chrome::FEATURE_BUTTONS
-        .get(i)
-        .copied()
-        .or((i == chrome::FEATURE_BUTTONS.len()).then_some(remove))
 }
 
 /// The repository `rows` on from `at`, of `len`: it stops at the ends.
@@ -11271,11 +11264,10 @@ impl Gerdr {
                     (i < actions.len()).then(|| actions.swap_remove(i).1)
                 })
             }
-            FeatureTabHit::Button(0) => Some(PanelOutcome::Open(feature.dir.clone())),
-            FeatureTabHit::Button(1) => Some(PanelOutcome::CopyPath),
-            FeatureTabHit::Button(2) => Some(PanelOutcome::Stats),
-            FeatureTabHit::Button(3) => Some(PanelOutcome::New),
-            FeatureTabHit::Button(_) => Some(PanelOutcome::Remove),
+            FeatureTabHit::Button(_) => {
+                self.open_feature_menu(&feature, ctx);
+                return;
+            }
         };
         self.sync_feature_page();
         // A note being written: a click in it goes on writing, as does its own
@@ -11469,6 +11461,46 @@ impl Gerdr {
         scroll.jump(to);
     }
 
+    /// The header's `⋯` menu: the page's rare buttons (`StagePage::menu`), then
+    /// what acts on the feature as a whole, removing it last.
+    fn open_feature_menu(&mut self, feature: &Feature, ctx: RowCtx) {
+        use crate::menu::{MenuAction, MenuItem, MenuSpec};
+        let Some((view, layout)) = self.feature_tab_parts() else {
+            return;
+        };
+        let Some(anchor) = layout.buttons.first().copied() else {
+            return;
+        };
+        let item = |label: &str, outcome: PanelOutcome| {
+            MenuItem::new(label, MenuAction::FeatureOutcome(Box::new(outcome)))
+        };
+        let mut items = Vec::new();
+        let stage = (self.features.panel.as_ref()).map(|p| p.page_stage(feature));
+        let actions = stage.map_or_else(Vec::new, |stage| {
+            self.page_button_actions(feature, stage, ctx)
+        });
+        for i in &view.page.menu {
+            if let (Some(b), Some((_, outcome))) = (view.page.buttons.get(*i), actions.get(*i)) {
+                let on = b.style != ButtonStyle::Off;
+                items.push(item(&b.label, outcome.clone()).enabled(on));
+            }
+        }
+        if !view.remove.is_empty() {
+            let outcomes = [
+                PanelOutcome::Open(feature.dir.clone()),
+                PanelOutcome::CopyPath,
+                PanelOutcome::Stats,
+                PanelOutcome::New,
+                PanelOutcome::Remove,
+            ];
+            let labels = chrome::FEATURE_BUTTONS.iter().copied().chain([view.remove]);
+            items.extend(labels.zip(outcomes).map(|(label, o)| item(label, o)));
+        }
+        if !items.is_empty() {
+            self.open_menu(MenuSpec { anchor, items });
+        }
+    }
+
     /// The pointer moved while the feature tab shows: what is under it
     /// lights up, and a stage's node tells what is done in it.
     /// The buttons of `stage`'s page of `feature`, in the order the page
@@ -11537,10 +11569,9 @@ impl Gerdr {
                 };
                 Some(Tooltip::new(&text, *layout.nodes.get(i)?))
             }
-            // Icons alone on a narrow tab: their names.
-            FeatureTabHit::Button(i) if layout.compact => {
-                let label = header_label(view.remove, i)?;
-                Some(Tooltip::new(label, *layout.buttons.get(i)?))
+            // An icon alone: what it opens.
+            FeatureTabHit::Button(i) => {
+                Some(Tooltip::new(chrome::MORE_ACTIONS, *layout.buttons.get(i)?))
             }
             FeatureTabHit::Jump(tag) => {
                 let stage = self
@@ -11594,8 +11625,14 @@ impl Gerdr {
                         let panel = self.features.panel.as_ref()?;
                         pull_tip(feature, panel.page_stage(feature), &view.page, i)
                     })?;
-                let mut spot = (*layout.page_buttons.get(i)?)?;
-                spot.loc.y -= view.scroll[TabColumn::Page as usize].round() as i32;
+                let spot = match layout.page_buttons.get(i).copied().flatten() {
+                    Some(mut spot) => {
+                        spot.loc.y -= view.scroll[TabColumn::Page as usize].round() as i32;
+                        spot
+                    }
+                    // The primary, in the header: not scrolled.
+                    None => layout.primary?,
+                };
                 Some(Tooltip::new(&text, spot))
             }
             FeatureTabHit::ToggleRepos => {
@@ -15720,12 +15757,113 @@ fn stage_page(
         }
         _ => b.clone(),
     };
-    StagePage {
+    let mut page = StagePage {
+        primary: None,
+        menu: (actions.iter().enumerate())
+            .filter(|(_, (b, o))| in_menu(b, o))
+            .map(|(i, _)| i)
+            .collect(),
         title: stage.label().to_owned(),
         about: stage.about().to_owned(),
         status,
         buttons: actions.iter().map(label).collect(),
         sections,
+    };
+    place_buttons(&mut page);
+    page
+}
+
+/// Whether a page's button is a rare one, a row of the tab's `⋯` menu rather
+/// than a button on the page: starting over, setting up again, the project's
+/// commands (unless the page wants them), a sandbox's reset and removal.
+fn in_menu(button: &PageButton, outcome: &PanelOutcome) -> bool {
+    match outcome {
+        PanelOutcome::StartOver(_)
+        | PanelOutcome::SetUp
+        | PanelOutcome::ResetSandbox
+        | PanelOutcome::RemoveSandbox => true,
+        PanelOutcome::EditCommands(_) => button.style == ButtonStyle::Quiet,
+        _ => false,
+    }
+}
+
+/// Where `page`'s buttons go: its one primary to the tab's header, unless a
+/// card of its own holds it (a finding's, a round's, a repository's on Ship),
+/// the rare ones (`StagePage::menu`) off the page; and each row of buttons
+/// in one style: a quiet one beside outlined ones is outlined too.
+fn place_buttons(page: &mut StagePage) {
+    let menu = page.menu.clone();
+    let local: Vec<usize> = (page.sections.iter())
+        .flat_map(|s| match s {
+            PageSection::Finding(card) => (card.buttons.iter().chain(&card.comment_buttons))
+                .copied()
+                .collect(),
+            PageSection::Round(card) => card.buttons.clone(),
+            PageSection::ShipGroup(group) => group.buttons(),
+            _ => Vec::new(),
+        })
+        .collect();
+    page.primary = (page.buttons.iter().enumerate())
+        .find(|(i, b)| b.style == ButtonStyle::Primary && !menu.contains(i) && !local.contains(i))
+        .map(|(i, _)| i);
+    let gone = |i: &usize| menu.contains(i) || page.primary == Some(*i);
+    let mut rows: Vec<Vec<usize>> = Vec::new();
+    for section in &mut page.sections {
+        match section {
+            PageSection::Agent { buttons, .. }
+            | PageSection::File { buttons, .. }
+            | PageSection::Milestones { buttons, .. } => {
+                buttons.retain(|i| !gone(i));
+                rows.push(buttons.clone());
+            }
+            PageSection::Review(summary) => {
+                summary.buttons.retain(|i| !gone(i));
+                rows.push(summary.buttons.clone());
+            }
+            PageSection::Recap(card) => {
+                card.buttons.retain(|i| !gone(i));
+                rows.push(card.buttons.clone());
+            }
+            PageSection::Toolbar { groups } => {
+                for (_, held) in groups.iter_mut() {
+                    held.retain(|i| !gone(i));
+                }
+                groups.retain(|(word, held)| !word.is_empty() || !held.is_empty());
+                rows.push(groups.iter().flat_map(|(_, h)| h.clone()).collect());
+            }
+            PageSection::Finding(card) => {
+                rows.push(card.buttons.clone());
+                rows.push(card.comment_buttons.clone());
+            }
+            PageSection::Round(card) => rows.push(card.buttons.clone()),
+            _ => {}
+        }
+    }
+    page.sections
+        .retain(|s| !matches!(s, PageSection::Toolbar { groups } if groups.is_empty()));
+    let held: Vec<usize> = rows.iter().flatten().copied().collect();
+    let held_ship: Vec<usize> = (page.sections.iter())
+        .flat_map(|s| match s {
+            PageSection::ShipGroup(group) => group.buttons(),
+            _ => Vec::new(),
+        })
+        .collect();
+    // What no card holds goes at the title's right: a row of its own.
+    rows.push(
+        (0..page.buttons.len())
+            .filter(|i| !gone(i) && !held.contains(i) && !held_ship.contains(i))
+            .collect(),
+    );
+    for row in rows {
+        let outlined = (row.iter())
+            .any(|i| (page.buttons.get(*i)).is_some_and(|b| b.style != ButtonStyle::Quiet));
+        for i in row.iter().filter(|_| outlined) {
+            if let Some(b) = page.buttons.get_mut(*i)
+                && b.style == ButtonStyle::Quiet
+            {
+                b.style = ButtonStyle::Plain;
+            }
+        }
     }
 }
 
@@ -16240,6 +16378,8 @@ fn keys_page() -> StagePage {
         })
         .collect();
     StagePage {
+        primary: None,
+        menu: Vec::new(),
         title: "Keys".to_owned(),
         about: "Every key of the feature tab. Press any key to go back.".to_owned(),
         status: None,
@@ -18809,11 +18949,6 @@ pub(crate) mod tests {
 
     #[test]
     fn header_buttons_and_the_strip_wheel() {
-        assert_eq!(header_label("Abandon", 0), Some("Open tab"));
-        assert_eq!(header_label("Abandon", 2), Some("Stats"));
-        assert_eq!(header_label("Abandon", 3), Some("New feature\u{2026}"));
-        assert_eq!(header_label("Abandon", 4), Some("Abandon"));
-        assert_eq!(header_label("Abandon", 5), None);
         // The wheel over the chips steps the repositories, stopping at
         // the ends.
         assert_eq!(strip_step(0, 1, 3), 1);
@@ -19034,7 +19169,11 @@ pub(crate) mod tests {
             let (_, said) = recap.stages.iter().find(|(l, _)| l == label).unwrap();
             said.clone()
         };
-        assert!(said("Discover").starts_with("claude \u{b7} "), "{}", said("Discover"));
+        assert!(
+            said("Discover").starts_with("claude \u{b7} "),
+            "{}",
+            said("Discover")
+        );
         assert!(said("AI review").starts_with("claude \u{b7} 4 runs"));
         assert!(said("Manual test").contains("4 of 4 criteria passed \u{b7} took"));
     }
@@ -19240,7 +19379,7 @@ pub(crate) mod tests {
             Some((
                 "Build agent \u{b7} running again".to_owned(),
                 Dot::Working,
-                vec!["Show agent".to_owned()]
+                vec!["Show Build agent".to_owned()]
             ))
         );
         assert_eq!(node, (NodeMark::Fixing, "running again".to_owned()));
@@ -19256,7 +19395,8 @@ pub(crate) mod tests {
         let (shown, node) = card(&f, at_rest);
         let (status, _, buttons) = shown.unwrap();
         assert!(status.starts_with("Build agent \u{b7} waiting for you"));
-        assert_eq!(buttons, ["Send prompt", "Show agent"]);
+        // Send prompt, the primary, is in the header.
+        assert_eq!(buttons, ["Show Build agent"]);
         assert_eq!(node, (NodeMark::Waiting, "waiting to send".to_owned()));
         assert_eq!(
             page_enter(&f, stage, at_rest),
@@ -19270,7 +19410,7 @@ pub(crate) mod tests {
         // Its tab closed: it can open again, and Enter is this page's again.
         f.runs.insert(Stage::Build, held_run(None));
         let (shown, node) = card(&f, at_rest);
-        assert_eq!(shown.unwrap().2, ["Start agent"]);
+        assert_eq!(shown.unwrap().2, ["Start Build agent"]);
         assert_eq!(node, (NodeMark::Waiting, "agent closed".to_owned()));
         assert_ne!(
             page_enter(&f, stage, at_rest),
@@ -23601,7 +23741,8 @@ pub(crate) mod tests {
         assert_eq!(styles(cards[1]), [ButtonStyle::Passed, ButtonStyle::Plain]);
         assert_eq!(
             styles(cards[2]),
-            [ButtonStyle::Quiet, ButtonStyle::Plain, ButtonStyle::Failed]
+            // One style to a row: the quiet Edit note… outlined like Pass.
+            [ButtonStyle::Plain, ButtonStyle::Plain, ButtonStyle::Failed]
         );
         let outcomes = |card: &FindingCard| -> Vec<PanelOutcome> {
             card.buttons.iter().map(|b| actions[*b].1.clone()).collect()
@@ -24957,13 +25098,18 @@ pub(crate) mod tests {
                     dot: Dot::Working,
                     status: "working \u{b7} started 16m ago".into(),
                     tail: Vec::new(),
-                    buttons: vec![0, 1],
+                    buttons: vec![1],
                     picks: Vec::new(),
                     model: None,
                     waits: false,
                 },
                 PageSection::MilestoneMode { fresh: false }
             ]
+        );
+        // Show agent, the primary, is in the header; the rare ones in `⋯`.
+        assert_eq!(
+            (page.primary, page.menu.as_slice()),
+            (Some(0), &[2, 3, 4][..])
         );
         let node = rail_node(&f, Stage::Build, &state, 2_000);
         assert_eq!(
@@ -24995,7 +25141,9 @@ pub(crate) mod tests {
         let PageSection::Agent { buttons, .. } = &page.sections[0] else {
             panic!("the agent's card first");
         };
-        assert_eq!(buttons[..2], [0, 1], "Continue, then Show agent");
+        // Continue, the primary, is in the header; Show agent on the card.
+        assert_eq!(page.primary, Some(0));
+        assert_eq!(buttons[..1], [1], "Show agent");
         let node = rail_node(&f, Stage::Build, &state, 2_000);
         assert_eq!(
             (node.mark, node.line.as_str()),
@@ -25011,9 +25159,11 @@ pub(crate) mod tests {
         });
         let page = stage_page(&f, Stage::Build, &state, &actions, 2_000);
         let n = page.sections.len();
-        assert!(matches!(&page.sections[n - 1], PageSection::Toolbar { groups }
+        assert!(
+            matches!(&page.sections[n - 1], PageSection::Toolbar { groups }
             if groups[0].1.iter().all(|&b| matches!(actions[b].1,
-                PanelOutcome::SetUp | PanelOutcome::SetupLog))));
+                PanelOutcome::SetUp | PanelOutcome::SetupLog)))
+        );
         assert_eq!(
             page.sections.get(n - 2),
             Some(&lines(
@@ -25182,14 +25332,16 @@ pub(crate) mod tests {
                 ..
             }
         ));
-        // Show agent and Restart are its card's, Start over the stage's.
+        // Show agent and Restart are its card's, Start over the `⋯` menu's,
+        // Review, the primary, the header's.
         let PageSection::Agent { buttons, .. } = &page.sections[0] else {
             panic!("the agent's card first");
         };
         assert_eq!(*buttons, [1, 2]);
+        assert_eq!((page.primary, page.menu.as_slice()), (Some(0), &[3][..]));
         assert_eq!(
             page.sections[1],
-            file("plan.md", line("ready for review", CheckTone::Ready), &[0])
+            file("plan.md", line("ready for review", CheckTone::Ready), &[])
         );
         let node = rail_node(&f, Stage::Plan, &state, 2_000);
         assert_eq!(
@@ -25370,7 +25522,12 @@ pub(crate) mod tests {
         let on_card: Vec<&str> = (held.unwrap().iter())
             .map(|i| actions[*i].0.label.as_str())
             .collect();
-        assert_eq!(on_card, ["Review", "Approve"]);
+        // Review, the primary, is in the header.
+        assert_eq!(on_card, ["Approve"]);
+        assert_eq!(
+            page.primary.map(|i| actions[i].0.label.as_str()),
+            Some("Review")
+        );
         assert_eq!(
             page_enter(&f, stage, ctx),
             Some(PanelOutcome::OpenDoc(stage))
@@ -25441,16 +25598,8 @@ pub(crate) mod tests {
             ..ModifiersState::default()
         };
         let slugs = [f.slug.clone()];
-        let got = FeaturePanel::default().key(
-            &ctrl,
-            Keysym::Return,
-            &f,
-            &slugs,
-            written,
-            &[],
-            &[],
-            &[],
-        );
+        let got =
+            FeaturePanel::default().key(&ctrl, Keysym::Return, &f, &slugs, written, &[], &[], &[]);
         assert_eq!(got, Some(PanelOutcome::FindingRefused(DOC_UNREAD)));
         // Nothing there yet: it is being written, as before.
         assert_eq!(
@@ -26066,9 +26215,11 @@ pub(crate) mod tests {
             let actions = page_actions(f, Stage::Ship, RowCtx::default());
             let page = stage_page(f, Stage::Ship, &PanelState::default(), &actions, 2_000);
             let row = page.sections.iter().find_map(|s| match s {
-                PageSection::ShipGroup(g) if g.head == "Afterwards" => {
-                    g.steps.iter().find(|r| r.label == "Close the workspace").cloned()
-                }
+                PageSection::ShipGroup(g) if g.head == "Afterwards" => g
+                    .steps
+                    .iter()
+                    .find(|r| r.label == "Close the workspace")
+                    .cloned(),
                 _ => None,
             });
             row.map(|row| actions[row.button.expect("its button")].1.clone())
