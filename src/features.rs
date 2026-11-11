@@ -6621,15 +6621,16 @@ fn writers_page_actions(
         }
     }
     // Verify's failures hold no word of the user's: they need no plan, but
-    // one can still be wanted.
+    // planning them is what comes next by default, so the user sees the
+    // fixes before they are made (Make fixes skips that).
     let plan_fixes = verify_sends(feature, stage);
     if plan_fixes {
         out.push((
-            button("Make fixes", ButtonStyle::Primary),
+            button("Make fixes", ButtonStyle::Plain),
             PanelOutcome::MakeVerifyFixes,
         ));
         out.push((
-            button("Plan fixes", ButtonStyle::Plain),
+            button("Plan fixes", ButtonStyle::Primary),
             PanelOutcome::PlanFixes,
         ));
     }
@@ -22365,9 +22366,10 @@ pub(crate) mod tests {
             checks: true,
             ..RowCtx::default()
         };
+        // Enter plans them: the plan shows what is to be fixed first.
         assert_eq!(
             page_enter(&f, Stage::Verify, ctx),
-            Some(PanelOutcome::MakeVerifyFixes)
+            Some(PanelOutcome::PlanFixes)
         );
         // Ctrl+Enter makes them too, Ctrl+Shift+Enter plans them, from the
         // stages and the check cards alike.
