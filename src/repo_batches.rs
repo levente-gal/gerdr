@@ -2614,14 +2614,20 @@ impl Gerdr {
     }
 
     /// Open `files` of the worktree at `root` in the Zed on it (launched
-    /// `zed --user-data-dir <launch::worktree_zed_dir> -n <root> …`), in
-    /// whichever workspace; else in a new tab with one, in workspace `w`.
+    /// `zed --user-data-dir <launch::worktree_zed_dir> -n <folder> …` on
+    /// its feature's folders, see `zed_folders`), in whichever workspace;
+    /// else in a new tab with one, in workspace `w`.
     fn open_in_worktree_zed(&mut self, w: usize, root: &Path, files: &[PathBuf]) {
         let home = crate::home_dir().unwrap_or_default();
         let data = crate::launch::worktree_zed_dir(&home, &self.instance_dir);
         let quote = |p: &Path| desktop::shell_quote(&p.to_string_lossy());
-        // Flags before the root: Zed takes every word after a path as a path.
-        let lead = format!("zed --user-data-dir {} -n {}", quote(&data), quote(root));
+        let folders = self.zed_folders(root);
+        // Flags before the folder: Zed takes every word after a path as a path.
+        let lead = format!(
+            "zed --user-data-dir {} -n {}",
+            quote(&data),
+            quote(&folders[0])
+        );
         let on_root = |command: Option<&str>| {
             command.is_some_and(|c| c == lead || c.starts_with(&format!("{lead} ")))
         };
@@ -2636,7 +2642,7 @@ impl Gerdr {
         });
         let Some((w, t, window)) = found else {
             let mut command = lead;
-            for file in files {
+            for file in folders[1..].iter().chain(files) {
                 command.push(' ');
                 command.push_str(&quote(file));
             }
@@ -2648,6 +2654,20 @@ impl Gerdr {
         self.switch_tab(t);
         self.focus(Some(window));
         self.zed_open_existing(&data, root, files);
+    }
+
+    /// The folders a Zed on the worktree at `root` opens: its feature's
+    /// (`Feature::folders`, the home one first), so a search covers every
+    /// repository of the feature; else `root` alone.
+    fn zed_folders(&self, root: &Path) -> Vec<PathBuf> {
+        let features = self.features.all.values().flatten();
+        let folders = features
+            .map(|f| f.folders())
+            .find(|folders| folders.iter().any(|(_, dir)| root.starts_with(dir)));
+        match folders {
+            Some(folders) => folders.into_iter().map(|(_, dir)| dir.to_owned()).collect(),
+            None => vec![root.to_owned()],
+        }
     }
 
     /// Open `file` of the checkout at `root`, at `line`, in the Zed on that
