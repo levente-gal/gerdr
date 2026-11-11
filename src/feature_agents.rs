@@ -1461,6 +1461,11 @@ impl Gerdr {
         let pane = (self.feature(project, slug)).and_then(|f| f.runs.get(&stage)?.pane.clone());
         if let Some(pane) = pane {
             self.focus_agent(&agents::AgentKey::Herdr(pane));
+            // Moved off the page: it says why, and the way back.
+            self.show_notice(format!(
+                "{}'s agent asks you first: answer it here, the feature's page is the first tab",
+                stage.label()
+            ));
         }
     }
 
@@ -2662,7 +2667,9 @@ impl Gerdr {
             doc_word(stage)
         );
         self.notify_feature(project, slug, pane, &summary);
-        self.show_success(summary);
+        let review = crate::menu::MenuAction::ReviewDoc(project.to_owned(), slug.to_owned(), stage);
+        let button = Some(("Review".into(), review));
+        self.toast_with(summary, crate::toast::Level::Success, button);
     }
 
     /// Notify `summary` of feature `slug`, unless its agent's tab (`pane`)

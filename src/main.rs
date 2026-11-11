@@ -2667,8 +2667,14 @@ impl Gerdr {
             if let channel::Event::Msg(round) = event
                 && state.herdr.is_some()
             {
+                let rooms = state.pill_rooms();
                 state.herdr_tabs = round.tabs;
                 state.capture_commands();
+                // A command started or ended: its terminal's pill comes or
+                // goes, and with it the room kept for it.
+                if state.pill_rooms() != rooms {
+                    state.arrange();
+                }
                 state.feed_services();
                 state.track_tests();
                 for id in state.projects.take_conflicts() {
@@ -5505,9 +5511,15 @@ impl Gerdr {
         let mut panes = Vec::new();
         for (w, ws) in self.workspaces.iter().enumerate() {
             for (t, tab) in ws.tabs.iter().enumerate() {
-                for (id, rect) in tab.shown_rects(area) {
+                for (id, mut rect) in tab.shown_rects(area) {
                     // The window takes its whole place; its bar floats
-                    // over its top.
+                    // over its top. A terminal's pill kept out over what
+                    // runs gets its room, not to cover the first line.
+                    if tab.panes.iter().any(|p| p.id == id && self.pill_room(p)) {
+                        let room = chrome::TERMINAL_PILL_ROOM.min(rect.size.h / 2);
+                        rect.loc.y += room;
+                        rect.size.h -= room;
+                    }
                     let window = tab.window(id).unwrap().clone();
                     panes.push((w, t, window, rect));
                 }

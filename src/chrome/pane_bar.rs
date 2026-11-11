@@ -10,9 +10,9 @@
 //! it needs, so the window's own header still shows either side of it.
 //! A bar out has all its buttons, faint until the pointer is over it.
 //!
-//! A terminal running a command keeps its pill out, floating over the
-//! top of the window like any other, so what runs, and its stop and
-//! restart, are always in sight without the window giving up any room.
+//! A terminal running a command keeps its pill out, so what runs, and its
+//! stop and restart, are always in sight; its window starts under the pill
+//! (`TERMINAL_PILL_ROOM`), so the pill covers no line of its output.
 //! An agent runs as such a command, but it only blinks while it works: at
 //! rest, its mark says where it stands, as its card's dot does.
 
@@ -50,6 +50,10 @@ const PILL_PAD: i32 = 4;
 /// How high a terminal's pill is: lower than the others, as it stays out
 /// over a running command's output.
 const PILL_TERMINAL_HEIGHT: i32 = 24;
+/// The room at the top of a terminal pane whose pill stays out (a command
+/// runs in it): its window starts under the pill, so the pill covers no
+/// line of its output.
+pub const TERMINAL_PILL_ROOM: i32 = 2 * PILL_TOP + PILL_TERMINAL_HEIGHT;
 /// How opaque a pill is while the pointer is away from it: what is under
 /// it (a running command's output, a page's or an app's own header)
 /// shows through a little. Under the pointer it fades to whole, for its
