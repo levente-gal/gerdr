@@ -272,7 +272,7 @@ impl StatsPanel {
                 col("Nudged", 52, true),
                 col("Sent back", 62, true),
                 col("Findings", 84, false),
-                col("Fixes", 36, true),
+                col("Fixes made", 70, true),
                 col("Verify passed", 86, true),
             ],
             Tab::Checks => vec![
