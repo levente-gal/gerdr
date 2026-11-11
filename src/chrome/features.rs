@@ -7476,6 +7476,12 @@ impl Painter {
                     let (x, y, w, h) = rect_px(rect, scale);
                     let b = (scale as f32).round().max(1.0);
                     c.rounded(x, y + h - b, w, b, 0.0, p.border);
+                    // The one with the keys says so plainly: a tint alone is
+                    // hard to see, so an accent bar runs down its left edge.
+                    if card.selected {
+                        let bar = (3.0 * scale as f32).round();
+                        c.rounded(x, y, bar, h - b, bar / 2.0, p.accent);
+                    }
                     for &i in &card.buttons {
                         if let Some(r) = l.page_buttons.get(i).copied().flatten() {
                             self.page_button(c, view, i, at(r), scale, p);
@@ -7547,10 +7553,9 @@ impl Painter {
                 let Some(PageSection::Finding(card)) = view.page.sections.get(*k) else {
                     return;
                 };
-                let open = match &card.sheet {
-                    Some(sheet) => sheet.open,
-                    None => !card.collapsed,
-                };
+                // What shows: a criterion opened to write its note in, or by
+                // a search, points down whatever the user left it as.
+                let open = !card.collapsed;
                 let n = (view.page.sections[..*k].iter())
                     .filter(|s| matches!(s, PageSection::Finding(_)))
                     .count();

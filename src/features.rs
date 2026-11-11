@@ -2068,6 +2068,10 @@ pub enum PanelOutcome {
     FoldCard(usize, bool),
     /// Open the criteria `.0` names (true), or fold them.
     FoldCriteria(crate::feature::manual::FoldScope, bool),
+    /// Save the note or comment being written on its card.
+    NoteSave,
+    /// Drop the note or comment being written: the card stays as it was.
+    NoteDiscard,
     /// Show Plan review's suggestions in the plan, to decide them there.
     ReviewInPlan,
     /// Do `.1` to Plan review's suggestion `.0`, from its card.
@@ -2225,6 +2229,7 @@ impl PanelOutcome {
                 | Self::FoldCriterion(..)
                 | Self::FoldCard(..)
                 | Self::FoldCriteria(..)
+                | Self::NoteDiscard
                 | Self::ReviewView(_)
                 | Self::CodeReview
                 | Self::OpenPr(_)
@@ -3073,6 +3078,34 @@ fn stage_actions(
     out
 }
 
+/// The buttons of the note or comment being written on a card, last of the
+/// page's: Save and Discard, as a comment on a line of the diff has. None
+/// while none is written.
+/// Where `editing_actions` put Save and Discard among the page's `buttons`.
+fn note_buttons(buttons: &[PageButton]) -> Vec<usize> {
+    let n = buttons.len();
+    (n >= 2 && buttons[n - 1].label == "Save" && buttons[n - 2].label == "Discard")
+        .then(|| vec![n - 2, n - 1])
+        .unwrap_or_default()
+}
+
+fn editing_actions(writing: bool) -> Vec<(PageButton, PanelOutcome)> {
+    let button = |label: &str, style| PageButton {
+        label: label.to_owned(),
+        style,
+    };
+    match writing {
+        true => vec![
+            (
+                button("Discard", ButtonStyle::Quiet),
+                PanelOutcome::NoteDiscard,
+            ),
+            (button("Save", ButtonStyle::Primary), PanelOutcome::NoteSave),
+        ],
+        false => Vec::new(),
+    }
+}
+
 /// The buttons folding Manual test's criteria to their lines, or opening
 /// them to their steps: all, those passed, those read.
 fn fold_actions() -> Vec<(PageButton, PanelOutcome)> {
@@ -3287,6 +3320,19 @@ fn criterion_card(
             "open".to_owned()
         }
         (false, false, None) => String::new(),
+    };
+    // Folded, its line still says what went wrong: the note isn't only
+    // behind its Edit button.
+    let first = row
+        .note
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .map(str::trim);
+    let first = first.filter(|_| row.found == Some(Verdict::Fail));
+    let state = match (row.open || row.comment, first) {
+        (false, Some(note)) if state.is_empty() => format!("\u{201c}{note}\u{201d}"),
+        (false, Some(note)) => format!("{state} \u{b7} \u{201c}{note}\u{201d}"),
+        _ => state,
     };
     FindingCard {
         tag,
@@ -9910,6 +9956,14 @@ impl Gerdr {
             PanelOutcome::FoldCriterion(i, open) => self.fold_criterion(i, open),
             PanelOutcome::FoldCard(i, open) => self.fold_card(i, open),
             PanelOutcome::FoldCriteria(scope, open) => self.fold_criteria(scope, open),
+            PanelOutcome::NoteSave => {
+                self.keep_criterion_note();
+            }
+            PanelOutcome::NoteDiscard => {
+                if let Some(panel) = self.features.panel.as_mut() {
+                    panel.note = None;
+                }
+            }
             PanelOutcome::ReviewInPlan => self.review_in_plan(&project, &slug),
             PanelOutcome::OnSuggestion(id, act) => self.apply_suggestion(&project, &slug, &id, act),
             PanelOutcome::AcceptAllSuggestions => {
@@ -11379,6 +11433,10 @@ impl Gerdr {
         // card's button; one anywhere else keeps it first, and if it can't be
         // kept yet it waits.
         if self.writing_criterion_note() {
+            // Its own Save and Discard act on it as they say.
+            if let Some(o @ (PanelOutcome::NoteSave | PanelOutcome::NoteDiscard)) = &outcome {
+                return self.apply_feature_panel(o.clone());
+            }
             let spot = self.feature_tab_view().and_then(|view| {
                 chrome::feature_tab_field(&view, self.content_rect(), self.scale())
             });
@@ -11588,6 +11646,8 @@ impl Gerdr {
         actions.extend(place_action(place.as_deref(), stage));
         actions.extend(stop_action(feature, stage));
         with_pull_actions(&mut actions, feature, stage, ctx);
+        let writing = (self.features.panel.as_ref()).is_some_and(|p| p.note.is_some() && !p.keys);
+        actions.extend(editing_actions(writing));
         actions
     }
 
@@ -17094,6 +17154,7 @@ fn tab_view(
             actions.extend(place_action(state.place.as_deref(), stage));
             actions.extend(stop_action(feature, stage));
             with_pull_actions(&mut actions, feature, stage, state.ctx);
+            actions.extend(editing_actions(panel.note.is_some()));
             stage_page(feature, stage, state, &actions, now)
         }
     };
@@ -17106,6 +17167,18 @@ fn tab_view(
         .filter(|n| !n.is_empty());
     if let Some(needle) = &needle {
         let shown = crate::manual_test::shown(&state.criteria, needle, whole);
+        // Over the list, how many of it show: the count by the field is of
+        // the places found, more than one in a criterion as may be.
+        let k = shown.iter().filter(|s| **s).count();
+        let said = format!(
+            "showing {k} of {} saying \u{201c}{needle}\u{201d}",
+            plural(shown.len(), "criterion").replace("criterions", "criteria")
+        );
+        if let Some(PageSection::Lines { lines, .. }) = (page.sections.iter_mut())
+            .find(|s| matches!(s, PageSection::Lines { label, .. } if label == "Criteria"))
+        {
+            lines.push(line(said, CheckTone::Note));
+        }
         let sheets = (page.sections.iter_mut()).filter_map(|s| match s {
             PageSection::Finding(card) if card.sheet.is_some() => Some(card),
             _ => None,
@@ -17175,6 +17248,7 @@ fn tab_view(
                     }
                     card.field = Some(field.line());
                     card.note = String::new();
+                    card.buttons.extend(note_buttons(&page.buttons));
                     // Its Fail shows chosen while what went wrong is written.
                     for b in &card.buttons {
                         if let Some(button) = page.buttons.get_mut(*b)
@@ -17196,6 +17270,7 @@ fn tab_view(
                     card.field = Some(field.line());
                     // Its buttons stay its own, unplaced, while it is written.
                     card.comment = String::new();
+                    card.buttons.extend(note_buttons(&page.buttons));
                 }
             }
         }
@@ -23907,9 +23982,13 @@ pub(crate) mod tests {
             })
             .collect();
         assert_eq!(cards[0].tag, FindingTag::Failed);
-        assert_eq!(cards[0].state, "fix made: try again");
+        // Folded, each says what went wrong too.
+        assert_eq!(
+            cards[0].state,
+            "fix made: try again \u{b7} \u{201c}x\u{201d}"
+        );
         assert!(cards[0].made);
-        assert_eq!(cards[1].state, "");
+        assert_eq!(cards[1].state, "\u{201c}x\u{201d}");
         // The counts go in the bar over the page, not its status.
         assert!(page.status.is_none());
         let strip = test_strip(&rows).unwrap();
