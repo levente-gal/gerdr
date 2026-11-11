@@ -1214,6 +1214,8 @@ impl WorktreeDiff {
             // over it (`ReviewSwitch::buttons`).
             if !fe.inline {
                 view.title_buttons.extend(self.feature_hints());
+                // A popup over the feature's page: a way out by the mouse too.
+                view.title_buttons.push(hint(ReposButton::Close, "Esc"));
             }
             // Findings are decided at AI review alone: past it their buttons
             // would only refuse.

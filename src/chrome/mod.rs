@@ -708,14 +708,25 @@ impl Chrome {
                     painter,
                 )),
                 // The repositories panel, over nearly everything.
-                Kind::Repos => parts.extend(self.repos.parts(
-                    view.repos.take(),
-                    view.repos_rect,
-                    theme,
-                    scale,
-                    now,
-                    painter,
-                )),
+                Kind::Repos => {
+                    // A diff popped up over a page dims it, as dialogs do:
+                    // the panel laid flat into a tab doesn't.
+                    let popup = (view.repos.as_ref()).is_some_and(|r| r.diff_only)
+                        && view.repos_rect == repos_panel_rect(output);
+                    let shown = self.repos.parts(
+                        view.repos.take(),
+                        view.repos_rect,
+                        theme,
+                        scale,
+                        now,
+                        painter,
+                    );
+                    let alpha = shown.iter().map(|part| part.alpha).fold(0.0, f32::max);
+                    parts.extend(shown);
+                    if popup && alpha > 0.0 {
+                        parts.push(scrim(Rectangle::from_size(output), alpha, theme.palette()));
+                    }
+                }
                 // The inbox panel, as high.
                 Kind::Inbox => parts.extend(self.inbox.parts(
                     view.inbox.take(),

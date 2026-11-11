@@ -15632,8 +15632,6 @@ fn stage_page(
         }),
     };
     // A stage not reached yet may start by itself: its agent is picked ahead.
-    let mut last_after = None;
-    let mut after_cards = Vec::new();
     if mark == StageMark::Later {
         sections.extend(agent_card(feature, stage, state, actions, now));
         // What it will run is there to see ahead too.
@@ -15666,24 +15664,14 @@ fn stage_page(
     // Build's go under its agent, where its work is listed.
     if mark != StageMark::Later && stage == Stage::Build {
     } else if mark != StageMark::Later && ROUND_CARD_STAGES.contains(&stage) {
-        // Every round it asked for, as cards: on top while one is open or
-        // nothing new waits to be sent, else under what does.
-        let cards = round_cards(feature, stage, state, actions, now);
-        match fix_round_on(feature, stage).is_none() && has_new_fixes(feature, stage, state.ctx) {
-            true => after_cards = cards,
-            false => sections.extend(cards),
-        }
+        // Every round it asked for, as cards, always in one place: on top,
+        // the newest open, the rest folded.
+        sections.extend(round_cards(feature, stage, state, actions, now));
     } else if mark != StageMark::Later {
         let open = fix_round_on(feature, stage);
         sections.extend(open.map(|r| fix_round_card(feature, r, actions, now)));
-        // Over, it goes under what the stage has new to send.
-        let last = last_round_on(feature, stage).map(|r| last_round_card(r, actions, now));
-        let (first, after) = match has_new_fixes(feature, stage, state.ctx) {
-            true => (None, last),
-            false => (last, None),
-        };
-        sections.extend(first);
-        last_after = after;
+        // Over, it stays in the same place.
+        sections.extend(last_round_on(feature, stage).map(|r| last_round_card(r, actions, now)));
     }
     if mark != StageMark::Later {
         sections.extend(rework_card(feature, stage, state, actions));
@@ -15863,8 +15851,6 @@ fn stage_page(
             }
         }
     }
-    sections.extend(last_after);
-    sections.extend(after_cards);
     // The agent's card says what it does: the status line needn't again.
     let carded = |l: &CheckLine| {
         (sections.iter()).any(|s| {

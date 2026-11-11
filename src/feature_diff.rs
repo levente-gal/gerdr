@@ -2782,7 +2782,12 @@ mod tests {
             .into_iter()
             .map(|h| h.button);
         let title =
-            title.filter(|b| !matches!(b, ReposButton::PrevComment | ReposButton::NextComment));
+            title.filter(|b| {
+                !matches!(
+                    b,
+                    ReposButton::PrevComment | ReposButton::NextComment | ReposButton::Close
+                )
+            });
         let hints = wd.hints().into_iter().map(|h| h.button).collect();
         (title.collect(), hints)
     }
