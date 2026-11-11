@@ -638,6 +638,17 @@ mod tests {
                 .iter()
                 .any(|l| l.contains("Fix") || l.contains("Dismiss"))
         );
+        // The footer lists them too, by the buttons' words.
+        let footer: Vec<(String, String)> =
+            (wd.hints().into_iter()).map(|h| (h.key, h.label)).collect();
+        for want in [
+            ("f", "accept"),
+            ("Del", "reject\u{2026}"),
+            ("Shift+E", "edit change\u{2026}"),
+        ] {
+            let want = (want.0.to_owned(), want.1.to_owned());
+            assert!(footer.contains(&want), "{want:?} in {footer:?}");
+        }
         press(&mut wd, false, Keysym::f);
         let taken = wd.take_error();
         assert_eq!(
