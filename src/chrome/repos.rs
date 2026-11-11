@@ -5031,7 +5031,8 @@ impl Painter {
             // the rightmost of what goes on (a file's Approve or Send back,
             // the plan's Write final plan): one filled button, at the right.
             let title = &view.detail.title_buttons;
-            let enabled = |b: ReposButton| title.iter().any(|h| h.button == b && h.disabled.is_none());
+            let enabled =
+                |b: ReposButton| title.iter().any(|h| h.button == b && h.disabled.is_none());
             let main = if title.iter().any(|h| h.button == ReposButton::MakeFixes) {
                 Some(ReposButton::MakeFixes)
             } else if enabled(ReposButton::PlanFixes) {
