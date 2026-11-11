@@ -983,6 +983,8 @@ pub struct RoundCard {
     pub changed: Vec<String>,
     /// It shows all of that; folded, only its head and its buttons.
     pub open: bool,
+    /// It goes in under the earlier review that asked it.
+    pub nested: bool,
     /// The indices in `StagePage::buttons` of the buttons it holds.
     pub buttons: Vec<usize>,
 }
@@ -4387,7 +4389,12 @@ fn page_stack(
                 finding_cards.push(frame);
             }
             PageSection::Round(card) => {
+                let (x, w) = (s.x, s.w);
+                if card.nested {
+                    (s.x, s.w) = (x + ROUND_INDENT, (w - ROUND_INDENT).max(1));
+                }
                 s.round(k, card, page, buttons);
+                (s.x, s.w) = (x, w);
             }
             PageSection::Lines { label, lines } => {
                 if !label.is_empty() {

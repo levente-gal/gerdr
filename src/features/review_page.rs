@@ -5,11 +5,12 @@
 //! - how its items stand, a line over them, with notes on why they can't
 //!   be decided now;
 //! - the items as cards (`review_cards`), the user's own first;
-//! - what came before (`archive`): AI review's earlier reviews.
+//!
+//! AI review's earlier reviews (`archive`) go in the page's history, each
+//! over the fix rounds it asked for (`round_sections`).
 //!
 //! Each kind's words are `review_items::Words`; the cards are
-//! `review_cards`'. AI review's fix round cards stay where every stage with
-//! rounds has them (`ROUND_CARD_STAGES`).
+//! `review_cards`'.
 
 use crate::feature::review_items::words_in;
 use super::*;
@@ -57,7 +58,6 @@ pub(super) fn review_page_sections(
 ) -> Vec<PageSection> {
     let mut sections = lead(feature, stage, mark, state, actions);
     sections.extend(item_sections(feature, stage, mark, state, actions));
-    sections.extend(archive(feature, stage, state, actions));
     sections
 }
 
@@ -242,31 +242,27 @@ fn review_notes(
 const FINAL_WRITTEN: &str =
     "The final plan above was written from these: Change decisions\u{2026} to change them";
 
-/// What came before the latest review: each of AI review's earlier ones, a
-/// file card folded unless `state` shows it.
-fn archive(
+/// An earlier AI review, `round`: a file card, its findings under it
+/// unless `state` folds them.
+pub(super) fn archive(
     feature: &Feature,
-    stage: Stage,
+    round: &ReviewRound,
     state: &PanelState,
     actions: &[(PageButton, PanelOutcome)],
 ) -> Vec<PageSection> {
-    let multi = feature.many_repos();
-    let mut sections = Vec::new();
-    for round in earlier_reviews(feature, stage) {
-        sections.push(PageSection::File {
-            name: format!("AI review run {}", round.n),
-            state: line(round_count(round), CheckTone::Note),
-            buttons: (actions.iter().enumerate())
-                .filter(|(_, (_, o))| *o == PanelOutcome::FoldRound(round.n))
-                .map(|(i, _)| i)
-                .collect(),
-        });
-        if state.rounds_open.contains(&round.n) {
-            let mut cards: Vec<&ReviewFinding> = round.findings.iter().collect();
-            cards.sort_by_key(|f| review_import::list_rank(f));
-            sections
-                .extend((cards.into_iter()).map(|f| PageSection::Finding(round_card(f, multi))));
-        }
+    let mut sections = vec![PageSection::File {
+        name: format!("AI review run {}", round.n),
+        state: line(round_count(round), CheckTone::Note),
+        buttons: (actions.iter().enumerate())
+            .filter(|(_, (_, o))| *o == PanelOutcome::FoldRound(round.n))
+            .map(|(i, _)| i)
+            .collect(),
+    }];
+    if state.rounds_open.contains(&round.n) {
+        let mut cards: Vec<&ReviewFinding> = round.findings.iter().collect();
+        cards.sort_by_key(|f| review_import::list_rank(f));
+        let multi = feature.many_repos();
+        sections.extend((cards.into_iter()).map(|f| PageSection::Finding(round_card(f, multi))));
     }
     sections
 }

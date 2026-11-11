@@ -4668,6 +4668,7 @@ fn feature_tab_review_fixes() -> super::FeatureTabView {
                 running: Vec::new(),
                 changed: Vec::new(),
                 open: true,
+                nested: false,
                 buttons: vec![0, 1, 2],
             }),
             PageSection::Round(super::RoundCard {
@@ -4683,6 +4684,7 @@ fn feature_tab_review_fixes() -> super::FeatureTabView {
                 running: Vec::new(),
                 changed: Vec::new(),
                 open: false,
+                nested: false,
                 buttons: vec![8],
             }),
             PageSection::Lines {
@@ -4881,7 +4883,7 @@ fn feature_tab_held() -> super::FeatureTabView {
 }
 
 /// On AI review with the code changed since: the last review to look at,
-/// and the earlier ones under it, the oldest shown.
+/// and the earlier ones in the history under it, the oldest shown.
 fn feature_tab_review_rounds() -> super::FeatureTabView {
     use super::{
         ButtonStyle, CheckTone, FindingCard, FindingTag, NodeMark, PageButton, PageSection,
@@ -4967,6 +4969,10 @@ fn feature_tab_review_rounds() -> super::FeatureTabView {
                 false,
                 Vec::new(),
             ),
+            PageSection::Lines {
+                label: "History".into(),
+                lines: Vec::new(),
+            },
             round("AI review run 2", "2 fixed", 1),
             round(
                 "AI review run 1",
@@ -5699,8 +5705,9 @@ fn feature_tab_manual_hand_back() -> super::FeatureTabView {
     view
 }
 
-/// Manual test's page with its fix rounds: one making its fixes, open, one
-/// over and open, and one dropped, folded.
+/// Manual test's page with its fix rounds: one making its fixes, open, on
+/// top; in the history under the criteria one over and shown, and one
+/// dropped, folded.
 fn feature_tab_manual_rounds() -> super::FeatureTabView {
     use super::{ButtonStyle, CheckTone, Dot, PageButton, PageSection, RoundAsked, RoundCard};
     let mut view = feature_tab_manual_test(false);
@@ -5754,6 +5761,7 @@ fn feature_tab_manual_rounds() -> super::FeatureTabView {
             running: vec![1],
             changed: vec!["2 commits \u{b7} 3 files \u{b7} +48 \u{2212}9".into()],
             open: true,
+            nested: false,
             buttons: vec![first, first + 1, first + 2],
         },
         RoundCard {
@@ -5777,6 +5785,7 @@ fn feature_tab_manual_rounds() -> super::FeatureTabView {
             running: Vec::new(),
             changed: vec!["1 commit \u{b7} 2 files \u{b7} +31 \u{2212}4".into()],
             open: true,
+            nested: false,
             buttons: vec![first + 3, first + 4, first + 5],
         },
         RoundCard {
@@ -5790,16 +5799,28 @@ fn feature_tab_manual_rounds() -> super::FeatureTabView {
             running: Vec::new(),
             changed: Vec::new(),
             open: false,
+            nested: false,
             buttons: vec![first + 6, first + 7],
         },
     ];
-    let mut sections = vec![PageSection::Lines {
-        label: "Fix rounds \u{b7} 3".into(),
+    let mut cards = cards.into_iter().map(PageSection::Round);
+    view.page
+        .sections
+        .insert(0, cards.next().expect("the open round"));
+    view.page.sections.push(PageSection::Lines {
+        label: "History".into(),
         lines: Vec::new(),
-    }];
-    sections.extend(cards.into_iter().map(PageSection::Round));
-    sections.append(&mut view.page.sections);
-    view.page.sections = sections;
+    });
+    view.page.sections.extend(cards);
+    view
+}
+
+/// AI review's page as `features::stage_page` lays it out at run 6: round 9
+/// open on top, scrolled down to the history of runs 5 to 1, each over the
+/// rounds it asked for.
+fn feature_tab_ai_review_history() -> super::FeatureTabView {
+    let mut view = crate::features::tests::history_view();
+    view.scroll[super::TabColumn::Page as usize] = 480.0;
     view
 }
 
@@ -5828,6 +5849,7 @@ fn round_card(
         running: Vec::new(),
         changed: Vec::new(),
         open,
+        nested: false,
         buttons: Vec::new(),
     })
 }
@@ -5877,7 +5899,7 @@ fn placed(mut view: super::FeatureTabView) -> super::FeatureTabView {
 }
 
 /// The feature tab's fixtures, by name.
-fn feature_tabs() -> [(&'static str, super::FeatureTabView); 49] {
+fn feature_tabs() -> [(&'static str, super::FeatureTabView); 50] {
     let views = [
         ("tab_build", feature_tab()),
         ("tab_verify_fixes", feature_tab_verify_fixes()),
@@ -5937,12 +5959,13 @@ fn feature_tabs() -> [(&'static str, super::FeatureTabView); 49] {
         ("tab_manual_rounds", feature_tab_manual_rounds()),
         ("tab_manual_comment", feature_tab_manual_comment()),
         ("tab_manual_hand_back", feature_tab_manual_hand_back()),
+        ("tab_ai_review_history", feature_tab_ai_review_history()),
     ];
     views.map(|(name, view)| (name, placed(view)))
 }
 
 /// Each fixture at the width it shows best at, and Build at all three.
-const TAB_SURFACES: [(&str, i32); 62] = [
+const TAB_SURFACES: [(&str, i32); 64] = [
     ("tab_build", 860),
     ("tab_build", 1180),
     ("tab_build", 1920),
@@ -6005,9 +6028,11 @@ const TAB_SURFACES: [(&str, i32); 62] = [
     ("tab_ship_cards", 1180),
     ("tab_ship_conflicts", 860),
     ("tab_ship_after", 1180),
+    ("tab_ai_review_history", 1920),
+    ("tab_ai_review_history", 860),
 ];
 
-const FEATURE_TAB: [&str; 62] = [
+const FEATURE_TAB: [&str; 64] = [
     "tab_build_860",
     "tab_build_1180",
     "tab_build_1920",
@@ -6070,10 +6095,12 @@ const FEATURE_TAB: [&str; 62] = [
     "tab_ship_cards_1180",
     "tab_ship_conflicts_860",
     "tab_ship_after_1180",
+    "tab_ai_review_history_1920",
+    "tab_ai_review_history_860",
 ];
 
 /// The recorded hashes of `FEATURE_TAB`, per case in `CASES`.
-const GOLDEN_FEATURE_TAB: [[u64; 62]; 4] = [
+const GOLDEN_FEATURE_TAB: [[u64; 64]; 4] = [
     // Dark at 1
     [
         0xf59c3564f0c82583, // tab_build_860
@@ -6120,7 +6147,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 62]; 4] = [
         0x488ee2f7493a9a28, // tab_plan_long_1180
         0x47ca89127188b84c, // tab_manual_test_1180
         0x5f07c108da9525f6, // tab_manual_note_860
-        0xc956b180dea68a89, // tab_review_rounds_1180
+        0x654a70d538f90e1a, // tab_review_rounds_1180
         0xbd0f9d4ef654cefd, // tab_verify_fixes_1180
         0x24f65baab12064e1, // tab_verify_fixes_860
         0x064cf27ed58e2866, // tab_review_page_1180
@@ -6129,8 +6156,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 62]; 4] = [
         0xa0f6484816ddbadc, // tab_manual_pages_860
         0xd51edcd58f851a61, // tab_manual_search_860
         0x62eb6b718c110cab, // tab_manual_select_860
-        0xc713e9189c682a95, // tab_manual_rounds_1180
-        0xd7c9f43be868de70, // tab_manual_rounds_860
+        0xc03ab571a4412dd9, // tab_manual_rounds_1180
+        0x66612a9849c7d630, // tab_manual_rounds_860
         0x20dee4f22a3e10a3, // tab_manual_comment_860
         0xef5f70aae81e933b, // tab_manual_hand_back_1180
         0x63ed977d1d407115, // tab_ship_live_1180
@@ -6138,6 +6165,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 62]; 4] = [
         0x758b1ac7052370f7, // tab_ship_cards_1180
         0x72b5a4cb5b324c63, // tab_ship_conflicts_860
         0xdd1a5ceec0f55936, // tab_ship_after_1180
+        0x86995660db7e46b8, // tab_ai_review_history_1920
+        0x03f77adebf2089de, // tab_ai_review_history_860
     ],
     // Dark at 2
     [
@@ -6185,7 +6214,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 62]; 4] = [
         0x5eec5c964437f195, // tab_plan_long_1180
         0x94a38044af03a742, // tab_manual_test_1180
         0x3ade3a1fbab932bf, // tab_manual_note_860
-        0xd4889f51e424e1f8, // tab_review_rounds_1180
+        0xcd7873e1c2ae6a09, // tab_review_rounds_1180
         0x236165d61e7bc216, // tab_verify_fixes_1180
         0x0a5f375eb2f25ddf, // tab_verify_fixes_860
         0x7d2c603c8c7abd4b, // tab_review_page_1180
@@ -6194,8 +6223,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 62]; 4] = [
         0xf8771ed20382ce3b, // tab_manual_pages_860
         0x8a19dfbf8ecaf937, // tab_manual_search_860
         0xcfc3aea6aedda77d, // tab_manual_select_860
-        0xf84431cae9a71278, // tab_manual_rounds_1180
-        0x938acff8f3a797e4, // tab_manual_rounds_860
+        0x6753708eb4fc6ad8, // tab_manual_rounds_1180
+        0x0c8a4145eaf216b8, // tab_manual_rounds_860
         0xd1f3747df54f3c40, // tab_manual_comment_860
         0xe00ae8b51fe74834, // tab_manual_hand_back_1180
         0x059cc0584be1df0f, // tab_ship_live_1180
@@ -6203,6 +6232,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 62]; 4] = [
         0xfb9ea8145be25303, // tab_ship_cards_1180
         0x580d897ec5bac8f1, // tab_ship_conflicts_860
         0x71f9eae45118365c, // tab_ship_after_1180
+        0x30f6982bcd0641bb, // tab_ai_review_history_1920
+        0xe0ea389b36ff3bdd, // tab_ai_review_history_860
     ],
     // Light at 1
     [
@@ -6250,7 +6281,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 62]; 4] = [
         0xed990f364d1f8ed9, // tab_plan_long_1180
         0xb5e80cc609a928cb, // tab_manual_test_1180
         0x4d0f8bdcbd8c2267, // tab_manual_note_860
-        0x2c4eac8ccb273dcf, // tab_review_rounds_1180
+        0x9199bb487672e7b8, // tab_review_rounds_1180
         0x5a5ee705079932d2, // tab_verify_fixes_1180
         0x651c7a440354ac43, // tab_verify_fixes_860
         0x4a87efc148a68718, // tab_review_page_1180
@@ -6259,8 +6290,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 62]; 4] = [
         0x852982f4f61144da, // tab_manual_pages_860
         0xeb41c107be0e46be, // tab_manual_search_860
         0xb071e6f5e564ae1b, // tab_manual_select_860
-        0xc6338df4f6727bbf, // tab_manual_rounds_1180
-        0x578328c8a27ea68b, // tab_manual_rounds_860
+        0xeba34c1e42605b22, // tab_manual_rounds_1180
+        0xc18cb629d9066886, // tab_manual_rounds_860
         0xf51b2846f1949007, // tab_manual_comment_860
         0x21f7f76e89193b64, // tab_manual_hand_back_1180
         0x2b2c121493a9445a, // tab_ship_live_1180
@@ -6268,6 +6299,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 62]; 4] = [
         0x5f4456243b17c3fb, // tab_ship_cards_1180
         0xa90663d10b44dc34, // tab_ship_conflicts_860
         0x23433599d58a2c20, // tab_ship_after_1180
+        0x06aa74604bca08ff, // tab_ai_review_history_1920
+        0xe43699b1ee8da748, // tab_ai_review_history_860
     ],
     // Light at 2
     [
@@ -6315,7 +6348,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 62]; 4] = [
         0xdd7b4e1b42c6de0e, // tab_plan_long_1180
         0x9382e209ca42f83f, // tab_manual_test_1180
         0x68aa015bb4e35b49, // tab_manual_note_860
-        0xb59976a574711740, // tab_review_rounds_1180
+        0x93149f29f206bd27, // tab_review_rounds_1180
         0x3880f9e87be098d7, // tab_verify_fixes_1180
         0xb8ebffba21c72cd5, // tab_verify_fixes_860
         0xca2398197433012d, // tab_review_page_1180
@@ -6324,8 +6357,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 62]; 4] = [
         0x696190c650513cfc, // tab_manual_pages_860
         0x376359b87d8a2172, // tab_manual_search_860
         0x365f437259b23570, // tab_manual_select_860
-        0x7848066b4f9f5302, // tab_manual_rounds_1180
-        0x2ed2f55674e2f371, // tab_manual_rounds_860
+        0xb4a155488318ebe0, // tab_manual_rounds_1180
+        0xdf2e37532714cfa7, // tab_manual_rounds_860
         0x2c77aba83f813a7b, // tab_manual_comment_860
         0x06cb976c5bd670a3, // tab_manual_hand_back_1180
         0x01cbf011946f9dd9, // tab_ship_live_1180
@@ -6333,6 +6366,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 62]; 4] = [
         0x3e0ef2571cf17463, // tab_ship_cards_1180
         0xce03c04855643b22, // tab_ship_conflicts_860
         0x4da27bec8fcaa12f, // tab_ship_after_1180
+        0xa6734e9ca05c8268, // tab_ai_review_history_1920
+        0x3834e676458928f8, // tab_ai_review_history_860
     ],
 ];
 
@@ -6399,6 +6434,45 @@ fn dump_feature_tab() {
                         scale,
                     ),
                     (w as f64 * scale).round() as usize,
+                );
+            }
+        }
+    }
+}
+
+/// With `GERDR_DUMP_DIR` set, write the pages with a history there, wide
+/// and narrow.
+#[test]
+fn dump_history() {
+    let Some(dir) = std::env::var_os("GERDR_DUMP_DIR") else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    let _ = std::fs::create_dir_all(&dir);
+    let painter = Painter::new();
+    let names = [
+        "tab_ai_review_history",
+        "tab_review_rounds",
+        "tab_manual_rounds",
+    ];
+    for (theme, scale) in CASES.into_iter().filter(|(_, scale)| *scale == 1.0) {
+        for (name, view) in feature_tabs()
+            .into_iter()
+            .filter(|(n, _)| names.contains(n))
+        {
+            for w in [1920, 860] {
+                let tab = super::feature_tab_composed(
+                    &painter,
+                    &view,
+                    (w, TAB_HEIGHT).into(),
+                    theme,
+                    scale,
+                );
+                dump(
+                    &dir,
+                    &format!("{name}_{w}_{}", theme.name()),
+                    tab,
+                    w as usize,
                 );
             }
         }

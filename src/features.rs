@@ -5386,10 +5386,11 @@ impl FeaturePanel {
         let reviews: BTreeSet<u32> = earlier_reviews(feature, stage).map(|r| r.n).collect();
         // Anything open folds all; else all open, the fix rounds and the
         // earlier reviews alike.
-        let any_open = (cards.len() > 1
+        let folds = folds_round_cards(feature, stage);
+        let any_open = (folds
             && (cards.iter()).any(|&n| fix_round_open(newest, n, &self.fix_rounds_flipped)))
             || reviews.iter().any(|n| self.rounds_open.contains(n));
-        if cards.len() > 1 {
+        if folds {
             // Folded, the newest is the one flipped; opened, the older ones.
             self.fix_rounds_flipped = match any_open {
                 true => newest.into_iter().collect(),
@@ -15074,10 +15075,14 @@ fn card_rounds(feature: &Feature, stage: Stage, probe: Option<&Probe>) -> Vec<Fi
     out
 }
 
-/// Whether `stage`'s page of `feature` has more than one fix round card: Alt+E
-/// folds them.
+/// Whether `stage`'s page of `feature` has fix round cards that fold: more
+/// than one, or one that isn't open. Alt+E folds them.
 fn folds_round_cards(feature: &Feature, stage: Stage) -> bool {
-    card_numbers(feature, stage).len() > 1
+    let cards = card_numbers(feature, stage);
+    cards.len() > 1
+        || cards
+            .first()
+            .is_some_and(|n| newest_round(feature, stage) != Some(*n))
 }
 
 /// The numbers of the cards of rounds `stage`'s page of `feature` lists,
@@ -15108,6 +15113,7 @@ fn round_card_actions(
     };
     let rounds = card_rounds(feature, stage, probe);
     let plans = round_plans(feature, probe);
+    let newest = newest_round(feature, stage);
     let mut out = Vec::new();
     for round in &rounds {
         if has_diff(round) {
@@ -15116,7 +15122,7 @@ fn round_card_actions(
         if plans.contains(&round.n) && !has_own_plan_button(feature, round) {
             out.push((button(OPEN_PLAN), PanelOutcome::OpenRoundPlan(round.n)));
         }
-        if rounds.len() > 1 {
+        if rounds.len() > 1 || newest != Some(round.n) {
             out.push((button("Show"), PanelOutcome::FoldFixRound(round.n)));
         }
     }
@@ -15139,14 +15145,19 @@ fn has_own_plan_button(feature: &Feature, round: &FixRound) -> bool {
 }
 
 /// The fix round whose card `stage`'s page of `feature` shows open first:
-/// the open round if the page lists it, else the newest.
+/// the open round if the page lists it, else on Build's the newest. The
+/// other pages keep rounds over in their history, folded.
 fn newest_round(feature: &Feature, stage: Stage) -> Option<u32> {
     if matches!(stage, Stage::PlanReview | Stage::Discover | Stage::Plan) {
         return card_numbers(feature, stage).first().copied();
     }
     let rounds = card_rounds(feature, stage, None);
     let open = feature.fix_round.as_ref().map(|r| r.n);
-    (open.filter(|n| rounds.iter().any(|r| r.n == *n))).or(rounds.first().map(|r| r.n))
+    let open = open.filter(|n| rounds.iter().any(|r| r.n == *n));
+    match stage {
+        Stage::Build => open.or(rounds.first().map(|r| r.n)),
+        _ => open,
+    }
 }
 
 /// Whether round `n`'s card shows open: the newest's does, the others are
@@ -15184,31 +15195,109 @@ fn round_cards(
     actions: &[(PageButton, PanelOutcome)],
     now: u64,
 ) -> Vec<PageSection> {
-    let rounds = card_rounds(feature, stage, state.probe);
-    let Some(newest) = newest_round(feature, stage).or(rounds.first().map(|r| r.n)) else {
-        return Vec::new();
-    };
-    let caption = match rounds.len() {
+    let cards = round_card_list(feature, stage, state, actions, now);
+    let caption = match cards.len() {
+        0 => return Vec::new(),
         1 => "Fix round".to_owned(),
         n => format!("Fix rounds \u{b7} {n}"),
     };
-    let mut out = vec![lines(&caption, Vec::new())];
+    let cards = cards.into_iter().map(|(_, card)| PageSection::Round(card));
+    std::iter::once(lines(&caption, Vec::new()))
+        .chain(cards)
+        .collect()
+}
+
+/// Each of `feature`'s fix rounds `stage` asked for, newest first, with its
+/// card.
+fn round_card_list(
+    feature: &Feature,
+    stage: Stage,
+    state: &PanelState,
+    actions: &[(PageButton, PanelOutcome)],
+    now: u64,
+) -> Vec<(FixRound, chrome::RoundCard)> {
+    let rounds = card_rounds(feature, stage, state.probe);
+    let newest = newest_round(feature, stage);
     // A criterion or a finding says how it stands now on the newest round
     // that asked it. Code review's comments are each round's own.
     let mut told: BTreeSet<String> = BTreeSet::new();
-    for round in &rounds {
-        let open = fix_round_open(Some(newest), round.n, &state.fix_rounds_flipped);
-        let asked = asked_of(feature, round, state.probe);
-        let mut card = fix_card(feature, round, state, actions, now, &asked, &told);
+    let mut out = Vec::new();
+    for round in rounds {
+        let open = fix_round_open(newest, round.n, &state.fix_rounds_flipped);
+        let asked = asked_of(feature, &round, state.probe);
+        let mut card = fix_card(feature, &round, state, actions, now, &asked, &told);
         card.open = open;
         // Build's page lists rounds of every stage: each its own.
         if stage != Stage::CodeReview && stage != Stage::Build {
             let key = |a: feature::fix_round::Asked| if a.id.is_empty() { a.title } else { a.id };
             told.extend(asked.into_iter().map(key));
         }
-        out.push(PageSection::Round(card));
+        out.push((round, card));
     }
     out
+}
+
+/// The run of `stage` that asked for fix round `round` of `feature`, if it
+/// asked it and that is known.
+fn round_run(feature: &Feature, stage: Stage, round: &FixRound) -> Option<u32> {
+    let asker = feature::fix_round::asker(round.n, &feature.verify_fixes, &feature.fix_asked)
+        .unwrap_or(round.stage);
+    (asker == stage)
+        .then(|| feature::fix_round::run_of(round, &feature.verify_fixes))
+        .flatten()
+}
+
+/// The fix round cards of `stage`'s page of `feature`, but Build's, in
+/// three places: the open round's, on top; those over that the run on the
+/// page asked for, under its work; and the history, newest first, each of
+/// AI review's earlier runs followed by the rounds it asked for, drawn in
+/// under it.
+fn round_sections(
+    feature: &Feature,
+    stage: Stage,
+    state: &PanelState,
+    actions: &[(PageButton, PanelOutcome)],
+    now: u64,
+) -> (Vec<PageSection>, Vec<PageSection>, Vec<PageSection>) {
+    let (mut top, mut under, mut over) = (Vec::new(), Vec::new(), Vec::new());
+    if stage == Stage::Build || !ROUND_CARD_STAGES.contains(&stage) {
+        return (top, under, Vec::new());
+    }
+    let open = feature.fix_round.as_ref().map(|r| r.n);
+    let current = match stage {
+        Stage::AiReview => feature.review.as_ref().map(|r| r.n),
+        Stage::Verify => feature.verify.as_ref().map(|r| r.n),
+        _ => None,
+    };
+    for (round, card) in round_card_list(feature, stage, state, actions, now) {
+        let run = round_run(feature, stage, &round);
+        match () {
+            _ if open == Some(round.n) => top.push(PageSection::Round(card)),
+            _ if run.is_some() && run == current => under.push(PageSection::Round(card)),
+            _ => over.push((run, card)),
+        }
+    }
+    // Newest run first, a run's rounds newest first; those of no known run
+    // after every run.
+    over.sort_by_key(|(run, _)| std::cmp::Reverse(run.unwrap_or(0)));
+    let mut runs = earlier_reviews(feature, stage).peekable();
+    let mut history = Vec::new();
+    let mut last = None;
+    for (run, mut card) in over {
+        while let Some(review) = runs.next_if(|r| r.n >= run.unwrap_or(0)) {
+            history.extend(review_page::archive(feature, review, state, actions));
+            last = Some(review.n);
+        }
+        card.nested = run.is_some() && run == last;
+        history.push(PageSection::Round(card));
+    }
+    for review in runs {
+        history.extend(review_page::archive(feature, review, state, actions));
+    }
+    if !history.is_empty() {
+        history.insert(0, lines("History", Vec::new()));
+    }
+    (top, under, history)
 }
 
 /// The card of fix round `round` of `feature`, at `now`: how it stands, who
@@ -15247,6 +15336,11 @@ fn fix_card(
     let asker = feature::fix_round::asker(round.n, &feature.verify_fixes, &feature.fix_asked)
         .unwrap_or(round.stage);
     let asked_by = Some(format!("asked by {}", asker.label()));
+    // Verify's says its run below.
+    let run = (asker == Stage::AiReview)
+        .then(|| feature::fix_round::run_of(round, &feature.verify_fixes))
+        .flatten();
+    meta.extend(run.map(|k| format!("from run {k}")));
     if !round.trail.agent.is_empty() {
         meta.push(match round.trail.model.is_empty() {
             true => format!("made by the Build agent ({})", round.trail.agent),
@@ -15379,6 +15473,7 @@ fn fix_card(
         running,
         changed,
         open: true,
+        nested: false,
         buttons,
     }
 }
@@ -16068,6 +16163,7 @@ fn draft_cards(
             running: Vec::new(),
             changed: Vec::new(),
             open: fix_round_open(Some(newest), draft.k, &state.fix_rounds_flipped),
+            nested: false,
             buttons,
         }));
     }
@@ -16175,15 +16271,18 @@ fn stage_page(
             line(text, tone)
         }),
     };
+    // The open fix round on top, the page's own work under its agent, then
+    // the rounds over (Build lists its own after its work).
+    let (mut round_top, round_under, history) = round_sections(feature, stage, state, actions, now);
     // A stage not reached yet may start by itself: its agent is picked ahead.
     if mark == StageMark::Later {
+        sections.append(&mut round_top);
         sections.extend(agent_card(feature, stage, state, actions, now));
         // What it will run is there to see ahead too.
         if !check_entries(feature, stage, &state.plan).is_empty() {
             sections.extend(verify_sections(feature, state, actions, now));
         }
-        // Fixes sent back the feature: the rounds that sent them stay.
-        if ROUND_CARD_STAGES.contains(&stage) {
+        if stage == Stage::Build {
             sections.extend(round_cards(feature, stage, state, actions, now));
         }
         // So does the review they came from, or the plan's last.
@@ -16208,9 +16307,7 @@ fn stage_page(
     // Build's go under its agent, where its work is listed.
     if mark != StageMark::Later && stage == Stage::Build {
     } else if mark != StageMark::Later && ROUND_CARD_STAGES.contains(&stage) {
-        // Every round it asked for, as cards, always in one place: on top,
-        // the newest open, the rest folded.
-        sections.extend(round_cards(feature, stage, state, actions, now));
+        sections.append(&mut round_top);
     } else if mark != StageMark::Later {
         let open = fix_round_on(feature, stage);
         sections.extend(open.map(|r| fix_round_card(feature, r, actions, now)));
@@ -16408,6 +16505,9 @@ fn stage_page(
             }
         }
     }
+    // Fixes sent back the feature: the rounds that sent them stay.
+    sections.extend(round_under);
+    sections.extend(history);
     // A stage with nothing run yet says what happens on it: under its
     // agent's card, where the page is otherwise empty.
     // A stage no agent runs has it last, under what its page already holds.
@@ -17865,16 +17965,19 @@ fn send_hints(
 }
 
 /// Alt+E on `stage`'s page of `feature`, named by what it folds: the
-/// earlier reviews, the drafts (Discover, Plan) or the fix rounds.
+/// history (earlier reviews and fix rounds over), the drafts (Discover,
+/// Plan) or Build's fix rounds.
 fn fold_hint(feature: &Feature, stage: Stage) -> Option<(String, String)> {
     let what = if earlier_reviews(feature, stage).next().is_some() {
-        "earlier reviews"
+        "history"
     } else if !folds_round_cards(feature, stage) {
         return None;
     } else if matches!(stage, Stage::Discover | Stage::Plan) {
         "drafts"
-    } else {
+    } else if stage == Stage::Build {
         "fix rounds"
+    } else {
+        "history"
     };
     Some(("Alt+E".to_owned(), what.to_owned()))
 }
@@ -21535,8 +21638,9 @@ pub(crate) mod tests {
         let notes = notes_of(state.probe);
         let actions = stage_actions(&f, Stage::CodeReview, RowCtx::default(), &[], &[], notes);
         let page = stage_page(&f, Stage::CodeReview, &state, &actions, 2_000);
-        // The round's card holds what acts on its plan, as ever.
-        let Some(PageSection::Round(card)) = page.sections.get(1) else {
+        // The round's card holds what acts on its plan, as ever: open, on
+        // top.
+        let Some(PageSection::Round(card)) = page.sections.first() else {
             panic!("{:?}", page.sections);
         };
         let held: Vec<&str> = (card.buttons.iter())
@@ -22441,7 +22545,7 @@ pub(crate) mod tests {
         let actions = page_actions(&ready, Stage::Verify, RowCtx::default());
         let state = PanelState::default();
         let page = stage_page(&ready, Stage::Verify, &state, &actions, 2_000);
-        let Some(PageSection::Round(card)) = page.sections.get(1) else {
+        let Some(PageSection::Round(card)) = page.sections.first() else {
             panic!("the round's card first: {:?}", page.sections);
         };
         assert_eq!(card.label, "Fix round 1");
@@ -23690,6 +23794,103 @@ pub(crate) mod tests {
         assert!(!cards[1].collapsed && !cards[2].collapsed);
         let label = (view.page.buttons.iter()).find(|b| b.label == "Hide");
         assert!(label.is_some(), "{:?}", view.page.buttons);
+    }
+
+    /// An AI review page at run 6 after five earlier runs: round 9 open and
+    /// 8 over from run 6, 7 from run 5, 4 from run 3, and 2 from run 1 by its
+    /// findings' ids.
+    pub(crate) fn history_feature() -> Feature {
+        use FindingState as S;
+        let mut f = carded(&[S::Open]);
+        let review = f.review.as_mut().unwrap();
+        review.rounds = (1..=5)
+            .map(|n| ReviewRound {
+                n,
+                findings: Vec::new(),
+            })
+            .collect();
+        review.n = 6;
+        let round = |n: u32, run: Option<u32>, ended: Option<u64>| {
+            let mut r = manual_round(n, ended, None);
+            r.stage = Stage::AiReview;
+            r.trail.asked.clear();
+            r.trail.run = run;
+            r
+        };
+        // Round 2 kept no run: its findings' ids say run 1.
+        let mut old = round(2, None, Some(1_500));
+        old.give_back = crate::feature::fix_round::GiveBack::Findings {
+            ids: vec!["r1-3".into()],
+            comments: None,
+        };
+        f.past_rounds = vec![
+            old,
+            round(4, Some(3), Some(1_600)),
+            round(7, Some(5), Some(1_700)),
+        ];
+        f.last_fix_round = Some(round(8, Some(6), Some(1_800)));
+        f.fix_round = Some(round(9, Some(6), None));
+        for n in [2, 4, 7, 8, 9] {
+            f.fix_asked.insert(n, Stage::AiReview);
+        }
+        f.fix_rounds = 9;
+        f
+    }
+
+    /// `history_feature`'s AI review page, for the golden fixture.
+    pub(crate) fn history_view() -> FeatureTabView {
+        view_of(&history_feature(), &PanelState::default())
+    }
+
+    #[test]
+    fn the_review_page_puts_its_open_round_on_top_and_pairs_the_history() {
+        let f = history_feature();
+        let view = view_of(&f, &PanelState::default());
+        let order: Vec<String> = (view.page.sections.iter())
+            .filter_map(|s| match s {
+                PageSection::Round(c) if c.nested => Some(format!("  {}", c.label)),
+                PageSection::Round(c) => Some(c.label.clone()),
+                PageSection::File { name, .. } => Some(name.clone()),
+                PageSection::Agent { .. } => Some("agent".into()),
+                PageSection::Review(_) => Some("summary".into()),
+                PageSection::Finding(c) => Some(c.title.clone()),
+                PageSection::Lines { label, .. } if label == "History" => Some(label.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            order,
+            [
+                "Fix round 9",
+                "agent",
+                "summary",
+                "Title 0",
+                "Fix round 8",
+                "History",
+                "AI review run 5",
+                "  Fix round 7",
+                "AI review run 4",
+                "AI review run 3",
+                "  Fix round 4",
+                "AI review run 2",
+                "AI review run 1",
+                "  Fix round 2",
+            ]
+        );
+        // The open round shows open, those over folded.
+        let open: Vec<bool> = (view.page.sections.iter())
+            .filter_map(|s| match s {
+                PageSection::Round(c) => Some(c.open),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(open, [true, false, false, false, false]);
+        assert!(view.page.sections.iter().any(|s| matches!(s,
+            PageSection::Round(c) if c.label == "Fix round 2" && c.meta.contains("from run 1"))));
+        assert_eq!(
+            fold_hint(&f, Stage::AiReview),
+            Some(("Alt+E".to_owned(), "history".to_owned()))
+        );
     }
 
     #[test]
@@ -28830,9 +29031,10 @@ pub(crate) mod tests {
                 .map(|(c, _)| c.open)
                 .collect()
         };
-        assert_eq!(open(&panel), [true, false]);
+        // Both over: folded in the history.
+        assert_eq!(open(&panel), [false, false]);
         panel.toggle_fix_round(1);
-        assert_eq!(open(&panel), [true, true]);
+        assert_eq!(open(&panel), [false, true]);
         panel.toggle_rounds(&f, Stage::ManualTest);
         assert_eq!(open(&panel), [false, false]);
         panel.toggle_rounds(&f, Stage::ManualTest);

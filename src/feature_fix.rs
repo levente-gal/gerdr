@@ -257,7 +257,14 @@ impl Gerdr {
             items: Vec::new(),
             done: 0,
             ended: None,
-            trail: Default::default(),
+            trail: feature::fix_round::Trail {
+                run: match asked {
+                    Stage::AiReview => feature.review.as_ref().map(|r| r.n),
+                    Stage::Verify => feature.verify.as_ref().map(|r| r.n),
+                    _ => None,
+                },
+                ..Default::default()
+            },
         });
         f.log(now, format!("Fix round {n} started: {what}"));
         self.save_feature(project, slug);

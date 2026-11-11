@@ -62,7 +62,7 @@ rules, for reviewing a branch before it merges.
 | Ctrl+Shift+L | In the new feature dialog, the project picker (again: back to the repositories; also its "Link project…" button). On the feature tab, show or hide all repositories: the strip unfolds into rows of what the feature holds, its context, those removed and those not added, each with the buttons of what it can become (also the strip's end button). |
 | Ctrl+Q | Stop a project's session (project menu). |
 | Alt+1 / Alt+2 | The repos panel's Diff and Log tabs (Alt+3 Stashes). On the feature tab's Code review page: show the code, or the fixes its comments asked for (also the switch under the rail). Text being written in the diff takes them as any key. |
-| Alt+E | On the feature tab's AI review page: show the findings of every earlier review, or fold them (also each review's Show and Hide buttons); on its Code review page, the comments of every earlier fix round the same way. Once the next review is read, the one before folds to a card with its name and how it went. Its findings are a record, as they stood then. Findings stay on the page once being fixed, while the code changes and while the next review runs: until that one is read they can only be looked at, and `f`, Ctrl+E and Del say why. |
+| Alt+E | On the feature tab's AI review page: show the history, the findings of every earlier review and the fix rounds over, or fold it (also each card's Show and Hide buttons; the footer names it "history"); on its Verify, Code review and Manual test pages, the fix rounds in the history the same way. Once the next review is read, the one before folds to a card with its name and how it went. Its findings are a record, as they stood then. Findings stay on the page once being fixed, while the code changes and while the next review runs: until that one is read they can only be looked at, and `f`, Ctrl+E and Del say why. |
 | Ctrl+H / Ctrl+Shift+H | Snooze / snooze until tomorrow; Alt+H shows the hidden items (inbox). |
 | Ctrl+F or / | Search within what has focus. On a feature's Manual test page, the search (also a press on its field, heading the list of criteria, with a line under it saying how many show) shows only the criteria saying what is typed, in their title, id, steps or note, open, the places tinted; Enter, Tab or Down give the keys to them, and Esc clears it, then closes it. With the keys on them, `n` / Shift+N go to the next place found or the one before, round the ends, the criterion holding it selected and the place tinted more (also the ↑ / ↓ buttons beside the field, whose count says "2 of 7"); after the selection moved, `n` goes on from the criterion selected, as vim's does. `*` / `#` search for the text selected with the pointer, else for the word under the pointer as a word of its own (the field says "Whole word"), and go to the place after it or before it; typing ends the whole word. A query with a capital letter finds only that case. |
 | Del | Delete the selected row: the first press arms it (row shows "Press Del again"), the second deletes; an Undo toast follows when it can be undone. On a repository of a feature with several, Del takes it out of the feature: one on the feature's branch asks at once (no arming, see "Destructive actions"), and is refused with commits; one kept only as context arms, and offers Undo. Del never abandons a feature: elsewhere on the feature tab it does nothing, and Alt+Shift+Del abandons it (or removes a done one's worktrees), asking first (also the Abandon button). On an AI review finding, on its stage's page (its card) or in a feature's code review, Del dismisses it and asks why first (no arming), or reopens a dismissed one (Reopen); `f` marks it to fix, and on one to fix takes that back (Reopen). On the page `f` on an undecided card and a confirmed dismissal move the keyboard to the next card left to decide; no card changes place, and dismissed or fixed ones close to a line until selected. An item the user added themselves, or a comment left in the diff shown as a card, is a row delete: the first Del arms it, the second deletes, and an Undo toast follows (not once it went to Build). Its Delete button goes at once, with the same Undo; in the diff an item of the user's own also goes on the first Del. On a criterion's card on a feature's Manual test page, Del clears its result at once (no arming: Space or `f` gives it again). Plan review's suggestions go the same way, on their cards and as flags in the plan (its Review in plan tab): Del rejects one and asks why first (no arming), or reopens a rejected one (Reopen); `f` accepts it, or takes that back (Reopen; a question not answered opens its answer field on the page, and is accepted once answered; in the plan it says to answer first). A rejected one folds to its first line, on the page and in the plan, as a dismissed finding does. One of the user's own is a row delete, armed first on the page, with an Undo toast. On a feature of the AI work stats' Features tab, Shift+Del (or the row's trash button), not Del, deletes the feature's kept AI work on this machine; it can't be undone, so it asks at once (no arming). |
@@ -305,8 +305,15 @@ press and drag pick whole rows and a double click opens the line in Zed.
   rounds: its card, its plan's tab, its buttons ("Send fix round N again"),
   the activity and the rows it changed. Its card's meta line says which stage
   asked it and that the Build agent makes it. Its plan opens by "Open plan",
-  shown only when an agent wrote one. Round cards are always on top of the page
-  that shows them. That list has the newest round on top
+  shown only when an agent wrote one. On Verify's, AI review's, Code
+  review's and Manual test's pages a round open (in progress) is on top,
+  unfolded, over the agent's card; then the page's own work (checks,
+  findings, comments, criteria); then the rounds over that the run on the
+  page asked for; then "History", newest first: each earlier AI review run
+  followed by the rounds it asked for, drawn in under it, or on the other
+  pages the rounds over. A round's meta says the AI review run it came from
+  ("from run 5"); Verify's says its failed run. What is in the history
+  starts folded. Build's page has the newest round on top
   and Build's own milestones under the rounds; until the build log lists any,
   the plan's milestones show there unticked, saying what happens to them. A round shows in it from its
   start: how it stands at first, the plan's fixes unticked once the plan waits.
@@ -387,7 +394,8 @@ press and drag pick whole rows and a double click opens the line in Zed.
   severity saying how many are still to decide, faded once none is, that
   goes to its first card; a bar of how many are decided, wanted in the done
   colour and refused muted after it; the "all open" button), then the cards,
-  the user's own first, then earlier reviews. No heading per severity: the
+  the user's own first, then the history (earlier reviews and their fix
+  rounds). No heading per severity: the
   pills and each card's pill say it.
 - A review card says where it stands in a word on every card ("to decide"
   too), and folds to its line once decided, whatever the decision, so what

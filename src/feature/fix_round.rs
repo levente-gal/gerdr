@@ -193,6 +193,10 @@ pub struct Trail {
     /// no plan to open.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unplanned: bool,
+    /// The run of the stage that asked it was asked from: AI review's or
+    /// Verify's. None on a round from before that was kept (`run_of`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<u32>,
 }
 
 impl Trail {
@@ -565,6 +569,24 @@ pub fn asker(n: u32, fixes: &[VerifyFix], asked: &BTreeMap<u32, Stage>) -> Optio
         true => Some(Stage::Verify),
         false => asked.get(&n).copied(),
     }
+}
+
+/// The run `round` was asked from: as it kept it, else Verify's failed run
+/// in `fixes`, else, for AI review's, the newest run among the ids of the
+/// findings it took (`r<run>-<k>`): a finding raised again keeps its first.
+pub fn run_of(round: &FixRound, fixes: &[VerifyFix]) -> Option<u32> {
+    let verify = fixes
+        .iter()
+        .find(|fix| fix.round == round.n)
+        .map(|fix| fix.run);
+    let ids = (round.trail.asked.iter().map(|a| a.id.as_str())).chain(match &round.give_back {
+        GiveBack::Findings { ids, .. } => ids.iter().map(String::as_str).collect(),
+        _ => Vec::new(),
+    });
+    let found = ids
+        .filter_map(|id| id.strip_prefix('r')?.split_once('-')?.0.parse::<u32>().ok())
+        .max();
+    round.trail.run.or(verify).or(found)
 }
 
 /// The number of round whose section `line` of a build log heads.
@@ -975,6 +997,47 @@ mod tests {
         assert!(!mark_comments_made(&mut fix, &round, &items[1..2]));
         assert!(mark_comments_made(&mut fix, &round, &[]));
         assert_eq!(fix.made, ["C1", "C2", "C10"]);
+    }
+
+    #[test]
+    fn a_round_finds_the_run_it_was_asked_from() {
+        let ids = |ids: &[&str]| GiveBack::Findings {
+            ids: ids.iter().map(|id| id.to_string()).collect(),
+            comments: None,
+        };
+        let mut round = FixRound {
+            n: 4,
+            what: String::new(),
+            input: PathBuf::new(),
+            stage: Stage::AiReview,
+            phase: FixPhase::Fixing,
+            sent_back: 0,
+            asked: 0,
+            ready: None,
+            stalled: None,
+            give_back: ids(&["r1-2", "r3-1", "u2"]),
+            items: Vec::new(),
+            done: 0,
+            ended: None,
+            trail: Default::default(),
+        };
+        // Not kept: the newest run among its findings' ids.
+        assert_eq!(run_of(&round, &[]), Some(3));
+        // Kept, that says it.
+        round.trail.run = Some(5);
+        assert_eq!(run_of(&round, &[]), Some(5));
+        // Verify's kept its failed run.
+        round.trail.run = None;
+        round.give_back = GiveBack::Nothing;
+        let fix = VerifyFix {
+            round: 4,
+            run: 11,
+            ..VerifyFix::default()
+        };
+        assert_eq!(run_of(&round, &[fix]), Some(11));
+        // Neither: not known.
+        round.give_back = ids(&["u1", "C2"]);
+        assert_eq!(run_of(&round, &[]), None);
     }
 
     #[test]
