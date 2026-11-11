@@ -14173,10 +14173,12 @@ fn pull_tip(feature: &Feature, stage: Stage, page: &chrome::StagePage, i: usize)
         matches!(s, PageSection::File { name, buttons, .. }
             if name.starts_with("Pull request #") && buttons.contains(&i))
     });
-    if !held {
+    let label = page.buttons.get(i)?.label.as_str();
+    // The card's primary (moving to the new head, finishing) is the header's.
+    let primary = page.primary == Some(i) && matches!(label, UPDATE_HEAD | "Finish\u{2026}");
+    if !held && !primary {
         return None;
     }
-    let label = page.buttons.get(i)?.label.as_str();
     Some(match label {
         UPDATE_HEAD => "Fetch the new commits and review them, from Verify on (Enter)".to_owned(),
         OPEN_PULL => {
@@ -20498,12 +20500,14 @@ pub(crate) mod tests {
             Some(PanelOutcome::StartAgent(stage, false))
         );
         let state = PanelState::default();
-        // Its suggestions' line says none is written yet, as a file's card does.
+        // Its suggestions' line says none is written yet, as a file's card
+        // does, under what happens next, as nothing ran yet.
         let page = stage_page(&f, stage, &state, &[], 2_000);
         assert!(matches!(
             &page.sections[..],
-            [PageSection::Lines { label, lines }]
-                if label == "Suggestions" && lines[0].text == "not written yet"
+            [PageSection::Lines { label: next, .. }, PageSection::Lines { label, lines }]
+                if next == "What happens next"
+                    && label == "Suggestions" && lines[0].text == "not written yet"
         ));
         // Read in with two to decide: they are cards, and shown in the plan.
         let text = r#"{"suggestions": [{"kind": "question", "plan": "M1", "title": "Which?",
@@ -21842,7 +21846,8 @@ pub(crate) mod tests {
         over.last_fix_round = over.fix_round.take();
         over.comment_fixes[0].made = vec!["C1".into()];
         let notes = [sent("C1", "a", "x"), sent("C2", "b", "y")];
-        assert_eq!(fixes_word(&over, &notes), "1 of 2 made");
+        // It names what it counts, as the Comments heading under it does.
+        assert_eq!(fixes_word(&over, &notes), "1 of 2 comments made");
         // Elsewhere, no switch.
         let build = feature("b", vec![repo("api", true)], stage_index(Stage::Build));
         let view = tab_view(&FeaturePanel::default(), &build, &[], &state, 2_000);
@@ -24194,9 +24199,10 @@ pub(crate) mod tests {
         panel.focus = TabArea::Repos;
         assert_eq!(press(&mut panel, &f, key(Keysym::c)), None);
         panel.focus = TabArea::Stages;
-        // Off the cards Del is the tab's, and f nothing.
+        // Off the cards Del does nothing, nor f: Alt+Shift+Del abandons.
+        assert_eq!(press(&mut panel, &f, key(Keysym::Delete)), None);
         assert_eq!(
-            press(&mut panel, &f, key(Keysym::Delete)),
+            press(&mut panel, &f, alt_shift(Keysym::Delete)),
             Some(PanelOutcome::Remove)
         );
         assert_eq!(press(&mut panel, &f, key(Keysym::f)), None);
@@ -24278,15 +24284,28 @@ pub(crate) mod tests {
         let actions = page_actions(&f, Stage::CodeReview, none);
         let page = stage_page(&f, Stage::CodeReview, &state, &actions, 2_060);
         assert_eq!(page.buttons[0].label, "Review code");
+        let next = |text: &str| line(text, CheckTone::Note);
         assert_eq!(
             page.sections,
-            [lines(
-                "Comments",
-                vec![line(
-                    "none yet: write them in Code review, then plan the fixes",
-                    CheckTone::Note
-                )]
-            )]
+            [
+                lines(
+                    "Comments",
+                    vec![line(
+                        "none yet: write them in Code review, then plan the fixes",
+                        CheckTone::Note
+                    )]
+                ),
+                lines(
+                    "What happens next",
+                    vec![
+                        next(
+                            "You read every changed file and mark it viewed; \
+                             comments go back to Build as fixes"
+                        ),
+                        next("Approve once every file is viewed: Manual test is next"),
+                    ]
+                )
+            ]
         );
         // Written elsewhere there is no switch to count the files: the page does.
         let mut elsewhere = f.clone();
@@ -24357,8 +24376,9 @@ pub(crate) mod tests {
             ..RowCtx::default()
         };
         let enter = |ctx| page_enter(&f, Stage::ManualTest, ctx);
-        // Nothing tried: Enter goes to the criteria.
-        assert_eq!(enter(ctx(0, 0, 0, 3)), Some(PanelOutcome::ManualTest));
+        // Nothing tried and no sandbox running: Enter starts the sandbox
+        // the criteria are tried in.
+        assert_eq!(enter(ctx(0, 0, 0, 3)), Some(PanelOutcome::StartSandbox));
         // A failure not sent: its fixes come next, made at once or
         // through a plan.
         assert_eq!(
@@ -24498,10 +24518,11 @@ pub(crate) mod tests {
             go(&mut panel, bare, Keysym::c),
             Some(PanelOutcome::AddComment)
         );
-        // It is to send: Ctrl+Enter makes the fixes, Ctrl+Shift+Enter plans.
+        // It is to send, and the user's own: Ctrl+Shift+Enter plans,
+        // Ctrl+Enter says a plan comes first.
         assert_eq!(
             go(&mut panel, ctrl, Keysym::Return),
-            Some(on(Outcome::MakeFixes))
+            Some(PanelOutcome::FindingRefused(PLAN_FIRST))
         );
         let shift = ModifiersState {
             shift: true,
@@ -25000,8 +25021,11 @@ pub(crate) mod tests {
             ..Default::default()
         });
         let criteria = said(&checked).into_iter().find(|(l, _)| l == "Criteria");
-        let note = "fixes changed the code: marking it passed goes back to Verify";
-        assert!(criteria.unwrap().1.contains(&note.to_owned()));
+        // The loop back is named, stage by stage.
+        let note = "Fixes changed the code: Mark passed first takes it through Verify, \
+                    AI review and Code review again, then back here";
+        let criteria = criteria.unwrap().1;
+        assert!(criteria.contains(&note.to_owned()), "{criteria:?}");
         assert!((said(&checked).iter()).all(|(l, _)| l != "Verify of the fixes"));
         let actions = page_actions(&checked, Stage::ManualTest, ctx);
         assert!(!(actions.iter()).any(|(_, o)| *o == PanelOutcome::MakeVerifyFixes));
@@ -25448,8 +25472,8 @@ pub(crate) mod tests {
         assert_eq!(
             texts(&check_lines(&f, Some(&blocked), false, 2_060)),
             [
-                ("api is dirty", CheckTone::Blocker),
-                ("web is behind", CheckTone::Blocker),
+                ("api is dirty", CheckTone::Failed),
+                ("web is behind", CheckTone::Failed),
                 (passed, CheckTone::Ready)
             ]
         );
@@ -26157,10 +26181,10 @@ pub(crate) mod tests {
             Some(lines(
                 "Setup",
                 vec![
-                    line("failed: api: `npm ci` exited with 1", CheckTone::Blocker),
+                    line("failed: api: `npm ci` exited with 1", CheckTone::Failed),
                     line(
                         "couldn't copy api: .venv (exited with 1)",
-                        CheckTone::Blocker
+                        CheckTone::Failed
                     ),
                     line("copied api: .env", CheckTone::Note),
                 ]
@@ -26259,8 +26283,8 @@ pub(crate) mod tests {
             (node.mark, node.line.as_str()),
             (NodeMark::Waiting, "milestone 1/3")
         );
-        // Its setup goes last, with its own buttons beside it, its failure
-        // said by the status at the top.
+        // Its setup goes last, its failure said by the status at the top;
+        // Set up again is a rare one, a row of the `⋯` menu.
         f.setup = Some(feature::setup::SetupRun {
             started: 1_000,
             finished: Some(1_100),
@@ -26268,14 +26292,13 @@ pub(crate) mod tests {
             ..Default::default()
         });
         let page = stage_page(&f, Stage::Build, &state, &actions, 2_000);
-        let n = page.sections.len();
         assert!(
-            matches!(&page.sections[n - 1], PageSection::Toolbar { groups }
-            if groups[0].1.iter().all(|&b| matches!(actions[b].1,
-                PanelOutcome::SetUp | PanelOutcome::SetupLog)))
+            (page.menu.iter()).any(|&b| actions[b].1 == PanelOutcome::SetUp),
+            "{:?}",
+            page.menu
         );
         assert_eq!(
-            page.sections.get(n - 2),
+            page.sections.last(),
             Some(&lines(
                 "Setup",
                 vec![line(
@@ -27429,12 +27452,10 @@ pub(crate) mod tests {
             let key = keys.into_iter().find(|k| k.chord == "Alt+Z").unwrap();
             (key.what, key.outcome)
         };
+        // The hint says what its button says.
         assert_eq!(
             alt_z(None),
-            (
-                "bring back its tabs".to_owned(),
-                PanelOutcome::UndoAfter(AfterStep::Close)
-            )
+            ("undo".to_owned(), PanelOutcome::UndoAfter(AfterStep::Close))
         );
         assert_eq!(
             alt_z(Some("api")).1,
@@ -27676,7 +27697,7 @@ pub(crate) mod tests {
             lines(
                 "Ship check",
                 vec![
-                    line("api has uncommitted changes", CheckTone::Blocker),
+                    line("api has uncommitted changes", CheckTone::Failed),
                     line(
                         "\u{2713} checks passed \u{b7} review done \u{b7} no conflicts",
                         CheckTone::Ready
@@ -28768,9 +28789,14 @@ pub(crate) mod tests {
             cards[1].0.changed,
             ["not known: the code wasn't read before the fixes went"]
         );
-        // Who made them and when, and what it was asked as said then.
+        // Who asked, who made them and when, and what it was asked as said
+        // then.
         let meta = &cards[2].0.meta;
-        assert!(meta.starts_with("Claude Code \u{b7} asked "), "{meta}");
+        assert!(meta.starts_with("asked by Manual test "), "{meta}");
+        assert!(
+            meta.contains("made by the Build agent (Claude Code)"),
+            "{meta}"
+        );
         assert!(meta.ends_with("took 14 min"), "{meta}");
         let asked = &cards[0].0.asked[0];
         assert_eq!(asked.title, "Save keeps the title");
@@ -29167,7 +29193,8 @@ pub(crate) mod tests {
         let labels: Vec<&str> = cards.iter().map(|c| c.label.as_str()).collect();
         assert_eq!(labels, ["Draft 2", "Draft 1"]);
         assert_eq!(cards[0].state.text, "ready for review");
-        assert_eq!(cards[0].dot, Dot::Idle);
+        // The user's turn: the yellow dot.
+        assert_eq!(cards[0].dot, Dot::Blocked);
         assert_eq!(cards[1].state.text, "sent back with 1 comment");
         // Sent back is over, not done: no green dot.
         assert_eq!(cards[1].dot, Dot::Unknown);
@@ -29356,7 +29383,10 @@ mod pr_page_tests {
             "{}",
             state.text
         );
-        assert_eq!(buttons, vec![UPDATE_HEAD, FIX_HERE, EDIT_PULLS, OPEN_PULL]);
+        // Update to new head, the primary, is in the header.
+        assert_eq!(buttons, vec![FIX_HERE, EDIT_PULLS, OPEN_PULL]);
+        assert_eq!(page.primary, Some(0));
+        assert_eq!(page.buttons[0].label, UPDATE_HEAD);
         assert_eq!(
             pull_tip(&f, Stage::Verify, &page, 0).as_deref(),
             Some("Fetch the new commits and review them, from Verify on (Enter)")
@@ -29386,7 +29416,14 @@ mod pr_page_tests {
         let page = page_of(&f, Stage::Verify);
         let (state, buttons) = card(&page);
         assert!(state.text.starts_with("merged on GitHub"), "{}", state.text);
-        assert_eq!(buttons, vec!["Finish\u{2026}", OPEN_PULL]);
+        // Finish, the primary, is in the header.
+        assert_eq!(buttons, vec![OPEN_PULL]);
+        let primary = page.primary.map(|i| page.buttons[i].label.as_str());
+        assert_eq!(primary, Some("Finish\u{2026}"));
+        assert_eq!(
+            pull_tip(&f, Stage::Verify, &page, page.primary.unwrap_or(0)).as_deref(),
+            Some("Finish the review: nothing is posted (Enter)")
+        );
         assert_eq!(
             feature_agents_gate(&f),
             Some((
