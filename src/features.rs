@@ -5909,6 +5909,9 @@ const DIFF_NOTE: &str = "This comment goes with the fixes: Del deletes it";
 /// Why a comment that went to Build can't change.
 const SENT_NOTE: &str = crate::diff_view::SENT_COMMENT;
 
+/// What opens a fix round's plan, on every round card.
+const OPEN_PLAN: &str = "Open plan";
+
 /// The open fix round of `feature`, on the page of the stage that asked.
 fn fix_round_on(feature: &Feature, stage: Stage) -> Option<&FixRound> {
     (feature.status == Status::Open)
@@ -6031,15 +6034,15 @@ fn fix_round_buttons(
         };
         out.push((button(label, style), outcome));
     }
-    if !round.before_fixing() {
+    if !round.before_fixing() && round.has_plan() {
         out.push((
-            button("Open", ButtonStyle::Plain),
+            button(OPEN_PLAN, ButtonStyle::Plain),
             PanelOutcome::ReviewFixPlan,
         ));
     }
     if round.can_drop() {
         out.push((
-            button("Drop plan\u{2026}", ButtonStyle::Quiet),
+            button(round.drop_label(), ButtonStyle::Quiet),
             PanelOutcome::DropFixPlan,
         ));
     }
@@ -6185,9 +6188,9 @@ fn writers_page_actions(
             if let Some(round) = fix_round_on(feature, stage) {
                 out.extend(fix_round_buttons(feature, round, ctx));
             }
-            if last_round_on(feature, stage).is_some() {
+            if last_round_on(feature, stage).is_some_and(FixRound::has_plan) {
                 out.push((
-                    button("Open", ButtonStyle::Plain),
+                    button(OPEN_PLAN, ButtonStyle::Plain),
                     PanelOutcome::ReviewFixPlan,
                 ));
             }
@@ -6209,15 +6212,17 @@ fn writers_page_actions(
         out.extend(fix_round_buttons(feature, round, ctx));
     }
     // Over, it asks nothing: Enter goes on with the stage.
-    if last_round_on(feature, stage).is_some() {
-        out.push((
-            button("Open", ButtonStyle::Plain),
-            PanelOutcome::ReviewFixPlan,
-        ));
+    if let Some(last) = last_round_on(feature, stage) {
+        if last.has_plan() {
+            out.push((
+                button(OPEN_PLAN, ButtonStyle::Plain),
+                PanelOutcome::ReviewFixPlan,
+            ));
+        }
         if let Some(round) =
             last_round_on(feature, stage).filter(|_| sends_round_again(feature, stage, ctx))
         {
-            let label = round_label(feature, round);
+            let label = round_label(round).to_lowercase();
             out.push((
                 button(&format!("Send {label} again"), ButtonStyle::Quiet),
                 PanelOutcome::ResendFixes,
@@ -13843,8 +13848,8 @@ fn file_card(
 }
 
 /// What round `round` of `feature` is called, as Build's page has it.
-fn round_label(feature: &Feature, round: &FixRound) -> String {
-    feature::fix_round::label(round.n, &feature.verify_fixes, &feature.fix_asked)
+fn round_label(round: &FixRound) -> String {
+    feature::fix_round::label(round.n)
 }
 
 /// The open fix round's card: which it is, what it fixes and how it stands,
@@ -13861,7 +13866,7 @@ fn fix_round_card(
         state.text.push_str(&written);
     }
     PageSection::File {
-        name: format!("Fix plan: {}", round_label(feature, round)),
+        name: format!("Fix plan: {}", round_label(round)),
         state,
         buttons: (actions.iter().enumerate())
             .filter(|(_, (_, o))| {
@@ -13889,7 +13894,8 @@ fn fix_round_state(feature: &Feature, round: &FixRound) -> CheckLine {
     };
     let said = match (waits, &round.stalled) {
         (true, _) => "waiting for you \u{b7} send the prompt".to_owned(),
-        (false, Some(why)) => why.clone(),
+        // One word for it everywhere, then why.
+        (false, Some(why)) => format!("{} \u{b7} {why}", round.line()),
         (false, None) => round.line(),
     };
     line(format!("{} \u{b7} {said}", round.what), tone)
@@ -13898,7 +13904,6 @@ fn fix_round_state(feature: &Feature, round: &FixRound) -> CheckLine {
 /// The card of the last fix round: which it was, what it made and when, at
 /// `now`, its plan at hand.
 fn last_round_card(
-    feature: &Feature,
     round: &FixRound,
     actions: &[(PageButton, PanelOutcome)],
     now: u64,
@@ -13908,7 +13913,7 @@ fn last_round_card(
     said.extend(round.ready.map(|at| format!("written {}", ago(at))));
     said.extend(round.ended.map(|at| format!("finished {}", ago(at))));
     PageSection::File {
-        name: format!("Last fix plan: {}", round_label(feature, round)),
+        name: format!("Last fix plan: {}", round_label(round)),
         state: line(said.join(" \u{b7} "), CheckTone::Note),
         buttons: (actions.iter().enumerate())
             .filter(|(_, (_, o))| {
@@ -14410,7 +14415,7 @@ fn round_card_actions(
             out.push((button("Diff"), PanelOutcome::RoundDiff(round.n)));
         }
         if plans.contains(&round.n) && !has_own_plan_button(feature, round) {
-            out.push((button("Open plan"), PanelOutcome::OpenRoundPlan(round.n)));
+            out.push((button(OPEN_PLAN), PanelOutcome::OpenRoundPlan(round.n)));
         }
         if rounds.len() > 1 {
             out.push((button("Show"), PanelOutcome::FoldFixRound(round.n)));
@@ -14495,7 +14500,7 @@ fn round_cards(
     for round in &rounds {
         let open = fix_round_open(Some(newest), round.n, &state.fix_rounds_flipped);
         let asked = asked_of(feature, round, state.probe);
-        let mut card = fix_card(feature, stage, round, state, actions, now, &asked, &told);
+        let mut card = fix_card(feature, round, state, actions, now, &asked, &told);
         card.open = open;
         // Build's page lists rounds of every stage: each its own.
         if stage != Stage::CodeReview && stage != Stage::Build {
@@ -14514,7 +14519,6 @@ fn round_cards(
 #[allow(clippy::too_many_arguments)]
 fn fix_card(
     feature: &Feature,
-    page: Stage,
     round: &FixRound,
     state: &PanelState,
     actions: &[(PageButton, PanelOutcome)],
@@ -14539,10 +14543,18 @@ fn fix_card(
         (false, None, _) => (Dot::Done, line(round.made(), CheckTone::Ready)),
     };
     let mut meta = Vec::new();
+    // Who asked it and who makes it: the round is followed on the asker's
+    // page, its fixes are the Build agent's work.
+    let asker = feature::fix_round::asker(round.n, &feature.verify_fixes, &feature.fix_asked)
+        .unwrap_or(round.stage);
+    let asked_by = Some(format!("asked by {}", asker.label()));
     if !round.trail.agent.is_empty() {
         meta.push(match round.trail.model.is_empty() {
-            true => round.trail.agent.clone(),
-            false => format!("{} ({})", round.trail.agent, round.trail.model),
+            true => format!("made by the Build agent ({})", round.trail.agent),
+            false => format!(
+                "made by the Build agent ({}, {})",
+                round.trail.agent, round.trail.model
+            ),
         });
     }
     if asked.is_empty() {
@@ -14551,7 +14563,7 @@ fn fix_card(
     let verify = (feature.verify_fixes.iter()).find(|fix| fix.round == round.n);
     if let Some(fix) = verify {
         if round.trail.agent.is_empty() && !fix.agent.is_empty() {
-            meta.push(fix.agent.clone());
+            meta.push(format!("made by the Build agent ({})", fix.agent));
         }
         meta.push(format!(
             "run {} failed {}",
@@ -14560,8 +14572,11 @@ fn fix_card(
         ));
     }
     // A round kept only by its number has no times.
-    if round.asked > 0 {
-        meta.push(format!("asked {}", projects::ago(now, round.asked)));
+    match (asked_by, round.asked > 0) {
+        (Some(by), true) => meta.insert(0, format!("{by} {}", projects::ago(now, round.asked))),
+        (Some(by), false) => meta.insert(0, by),
+        (None, true) => meta.push(format!("asked {}", projects::ago(now, round.asked))),
+        (None, false) => {}
     }
     if let Some(at) = round.ready.filter(|_| round.trail.went.is_none()) {
         meta.push(format!("plan written {}", projects::ago(now, at)));
@@ -14653,13 +14668,7 @@ fn fix_card(
         .map(|(i, _)| i)
         .collect();
     buttons.sort_by_key(|&i| (rank(&actions[i].1), i));
-    // "Review N" names the reviews themselves on AI review's page.
-    let label = match feature.fix_asked.get(&round.n) {
-        Some(Stage::AiReview) if page == Stage::AiReview => {
-            format!("{} {}", Stage::AiReview.label(), round.n)
-        }
-        _ => round_label(feature, round),
-    };
+    let label = round_label(round);
     chrome::RoundCard {
         label,
         dot,
@@ -15508,7 +15517,7 @@ fn stage_page(
         let open = fix_round_on(feature, stage);
         sections.extend(open.map(|r| fix_round_card(feature, r, actions, now)));
         // Over, it goes under what the stage has new to send.
-        let last = last_round_on(feature, stage).map(|r| last_round_card(feature, r, actions, now));
+        let last = last_round_on(feature, stage).map(|r| last_round_card(r, actions, now));
         let (first, after) = match has_new_fixes(feature, stage, state.ctx) {
             true => (None, last),
             false => (last, None),
@@ -16671,7 +16680,7 @@ fn writers_tab_hints(
                     hints.push(hint("Ctrl+Enter", "make fixes again"));
                 }
                 if round.can_drop() {
-                    hints.push(hint(START_OVER_KEY, "drop plan\u{2026}"));
+                    hints.push(hint(START_OVER_KEY, &round.drop_label().to_lowercase()));
                 }
             }
             if approves_doc(feature, stage, ctx) {
@@ -20469,7 +20478,7 @@ pub(crate) mod tests {
         assert!(has(|s| matches!(s, PageSection::Finding(_))));
         assert!(has(|s| matches!(s, PageSection::Doc { .. })));
         let labels: Vec<&str> = page.buttons.iter().map(|b| b.label.as_str()).collect();
-        assert!(labels.contains(&"Open"), "{labels:?}");
+        assert!(labels.contains(&OPEN_PLAN), "{labels:?}");
         assert!(labels.contains(&"Show in diff"), "{labels:?}");
     }
 
@@ -20559,7 +20568,7 @@ pub(crate) mod tests {
                 })
                 .collect();
         let labels: Vec<&str> = cards.iter().map(|c| c.label.as_str()).collect();
-        assert_eq!(labels, ["Code review 2", "Code review 1"]);
+        assert_eq!(labels, ["Fix round 2", "Fix round 1"]);
         let asked = |card: &chrome::RoundCard| -> Vec<(String, String, Option<String>)> {
             (card.asked.iter())
                 .map(|a| {
@@ -20583,8 +20592,8 @@ pub(crate) mod tests {
             ]
         );
         assert_eq!(cards[0].asked[0].title, "src/b.rs:3");
-        // Kept only by its number, it has no times to say.
-        assert_eq!(cards[1].meta, "");
+        // Kept only by its number, it has no times to say: only who asked.
+        assert_eq!(cards[1].meta, "asked by Code review");
         assert_eq!(cards[1].dot, Dot::Done);
         // The cards take the place of the folded rows of earlier rounds.
         let sections = comment_sections(&f, &state, &[]);
@@ -20650,7 +20659,7 @@ pub(crate) mod tests {
         assert!(
             page.sections
                 .iter()
-                .any(|s| matches!(s, PageSection::Round(c) if c.label == "AI review 1"))
+                .any(|s| matches!(s, PageSection::Round(c) if c.label == "Fix round 1"))
         );
     }
 
@@ -21275,7 +21284,7 @@ pub(crate) mod tests {
         let Some(PageSection::Round(card)) = page.sections.get(1) else {
             panic!("the round's card first: {:?}", page.sections);
         };
-        assert_eq!(card.label, "Review 1");
+        assert_eq!(card.label, "Fix round 1");
         assert_eq!(card.state.text, "Verify failures \u{b7} fix plan ready");
         assert!(card.meta.ends_with("plan written 15m ago"), "{}", card.meta);
         assert_eq!(card.state.tone, CheckTone::Ready);
@@ -21288,7 +21297,11 @@ pub(crate) mod tests {
         let planning = in_round(f.clone(), Stage::Verify, FixPhase::Planning);
         let shown = labels_of(&planning);
         assert!(!shown.contains(&"Make fixes".to_owned()), "{shown:?}");
-        assert!(shown.contains(&"Drop plan\u{2026}".to_owned()), "{shown:?}");
+        // No plan yet: what drops is the round.
+        assert!(
+            shown.contains(&"Drop fix round\u{2026}".to_owned()),
+            "{shown:?}"
+        );
         // A fresh agent held: its prompt goes first, and only one is primary.
         let mut held = in_round(f.clone(), Stage::Verify, FixPhase::Planning);
         held.runs.insert(
@@ -21358,10 +21371,10 @@ pub(crate) mod tests {
         round.done = 2;
         round.ready = Some(1_000);
         round.ended = Some(1_900);
-        let PageSection::File { name, state, .. } = last_round_card(&f, &round, &[], 2_000) else {
+        let PageSection::File { name, state, .. } = last_round_card(&round, &[], 2_000) else {
             panic!("a file card");
         };
-        assert_eq!(name, format!("Last fix plan: Code review {}", round.n));
+        assert_eq!(name, format!("Last fix plan: Fix round {}", round.n));
         assert_eq!(
             state.text,
             "review comments \u{b7} 2 of 2 made \u{b7} written 16m ago \u{b7} finished 1m ago"
@@ -21370,7 +21383,7 @@ pub(crate) mod tests {
         round.ended = None;
         round.ready = None;
         round.items.clear();
-        let PageSection::File { state, .. } = last_round_card(&f, &round, &[], 2_000) else {
+        let PageSection::File { state, .. } = last_round_card(&round, &[], 2_000) else {
             panic!("a file card");
         };
         assert_eq!(state.text, "review comments \u{b7} fixes made");
@@ -21409,7 +21422,7 @@ pub(crate) mod tests {
             held(&compacting, Stage::Verify),
             Some((
                 "Verify failures \u{b7} compacting the agent's chat".to_owned(),
-                vec!["Open".to_owned()]
+                vec![OPEN_PLAN.to_owned()]
             ))
         );
         // Making them: the plan can be read.
@@ -21418,7 +21431,7 @@ pub(crate) mod tests {
             held(&fixing, Stage::Verify),
             Some((
                 "Verify failures \u{b7} making fixes".to_owned(),
-                vec!["Open".to_owned()]
+                vec![OPEN_PLAN.to_owned()]
             ))
         );
         // Every fix ticked: read. With failures still to send, those go, not
@@ -21428,14 +21441,14 @@ pub(crate) mod tests {
         over.last_fix_round = fixing.fix_round.clone();
         assert_eq!(
             held(&over, Stage::Verify),
-            Some(("fixes made".to_owned(), vec!["Open".to_owned()]))
+            Some(("fixes made".to_owned(), vec![OPEN_PLAN.to_owned()]))
         );
         // With nothing new it can go again, by its name, if one turned out
         // not made.
         let mut quiet = over.clone();
         quiet.verify.as_mut().unwrap().passed = Some(true);
         let (_, labels) = held(&quiet, Stage::Verify).unwrap();
-        assert_eq!(labels, ["Open", "Send Review 1 again"]);
+        assert_eq!(labels, [OPEN_PLAN, "Send fix round 1 again"]);
         // Enter still does what the stage waits for.
         assert_eq!(page_enter(&over, Stage::Verify, RowCtx::default()), before);
         assert_ne!(
@@ -21473,7 +21486,7 @@ pub(crate) mod tests {
         assert!(at > Stage::Build);
         assert_eq!(
             held(&past, Stage::Build),
-            Some(("fixes made".to_owned(), vec!["Open".to_owned()]))
+            Some(("fixes made".to_owned(), vec![OPEN_PLAN.to_owned()]))
         );
         assert_eq!(held(&past, at), None);
         // Back on a stage before the one that asked, it comes along.
@@ -25090,8 +25103,8 @@ pub(crate) mod tests {
             names,
             [
                 "Fix rounds \u{b7} 2",
-                "Verify 2",
-                "Verify 1",
+                "Fix round 2",
+                "Fix round 1",
                 "Build",
                 "Setup"
             ]
@@ -25107,7 +25120,7 @@ pub(crate) mod tests {
         assert_eq!(cards[1].state.text, "fixes made");
         assert_eq!(
             cards[1].meta,
-            "Claude Code \u{b7} run 2 failed 16m ago \u{b7} run 3 failed"
+            "asked by Verify \u{b7} made by the Build agent (Claude Code) \u{b7} run 2 failed 16m ago \u{b7} run 3 failed"
         );
         let asked: Vec<(&str, &str)> = (cards[1].asked.iter())
             .map(|a| (a.title.as_str(), a.note.as_str()))
@@ -25441,16 +25454,8 @@ pub(crate) mod tests {
             ..ModifiersState::default()
         };
         let slugs = [f.slug.clone()];
-        let got = FeaturePanel::default().key(
-            &ctrl,
-            Keysym::Return,
-            &f,
-            &slugs,
-            written,
-            &[],
-            &[],
-            &[],
-        );
+        let got =
+            FeaturePanel::default().key(&ctrl, Keysym::Return, &f, &slugs, written, &[], &[], &[]);
         assert_eq!(got, Some(PanelOutcome::FindingRefused(DOC_UNREAD)));
         // Nothing there yet: it is being written, as before.
         assert_eq!(
@@ -26066,9 +26071,11 @@ pub(crate) mod tests {
             let actions = page_actions(f, Stage::Ship, RowCtx::default());
             let page = stage_page(f, Stage::Ship, &PanelState::default(), &actions, 2_000);
             let row = page.sections.iter().find_map(|s| match s {
-                PageSection::ShipGroup(g) if g.head == "Afterwards" => {
-                    g.steps.iter().find(|r| r.label == "Close the workspace").cloned()
-                }
+                PageSection::ShipGroup(g) if g.head == "Afterwards" => g
+                    .steps
+                    .iter()
+                    .find(|r| r.label == "Close the workspace")
+                    .cloned(),
                 _ => None,
             });
             row.map(|row| actions[row.button.expect("its button")].1.clone())
@@ -26890,7 +26897,11 @@ pub(crate) mod tests {
         // A round known only by the build log has its card all the same.
         assert_eq!(
             groups,
-            [("Verify 1", 0, 1), ("Review 1", 2, 2), ("Build", 2, 3)]
+            [
+                ("Fix round 3", 0, 1),
+                ("Fix round 1", 2, 2),
+                ("Build", 2, 3)
+            ]
         );
     }
 
@@ -27428,7 +27439,7 @@ pub(crate) mod tests {
         let state = PanelState::default();
         let cards = round_cards_of(&f, &state);
         let labels: Vec<&str> = cards.iter().map(|(c, _)| c.label.as_str()).collect();
-        assert_eq!(labels, ["Manual test 3", "Manual test 2", "Manual test 1"]);
+        assert_eq!(labels, ["Fix round 3", "Fix round 2", "Fix round 1"]);
         // The open one shows all of it, at work; the rest fold.
         let opened: Vec<bool> = cards.iter().map(|(c, _)| c.open).collect();
         assert_eq!(opened, [true, false, false]);
@@ -27492,7 +27503,7 @@ pub(crate) mod tests {
         let cards = round_cards_of(&f, &state);
         assert_eq!(
             cards[0].1,
-            ["Open", "Send Manual test 2 again", "Diff", "Hide"]
+            [OPEN_PLAN, "Send fix round 2 again", "Diff", "Hide"]
         );
         assert_eq!(cards[1].1, ["Diff", "Hide"]);
         // Nothing of theirs is left for the title row.
@@ -27604,7 +27615,7 @@ pub(crate) mod tests {
             })
             .collect();
         assert_eq!(cards.len(), 1);
-        assert_eq!(cards[0].label, "Verify 1");
+        assert_eq!(cards[0].label, "Fix round 1");
         let asked: Vec<(&str, &str, Option<&str>)> = (cards[0].asked.iter())
             .map(|a| {
                 (
@@ -27626,8 +27637,9 @@ pub(crate) mod tests {
             ]
         );
         let meta = &cards[0].meta;
+        assert!(meta.starts_with("asked by Verify"), "{meta}");
         assert!(
-            meta.starts_with("Claude Code \u{b7} run 1 failed "),
+            meta.contains("made by the Build agent (Claude Code) \u{b7} run 1 failed "),
             "{meta}"
         );
         assert!(meta.ends_with("run 2 failed"), "{meta}");
@@ -27693,10 +27705,14 @@ pub(crate) mod tests {
                 _ => None,
             })
             .collect();
-        // Newest first, by who asked, each counted in its stage; Build keeps
-        // "Review N" for AI review's.
+        // Newest first, each by its one name; who asked is on its meta line.
         let labels: Vec<&str> = cards.iter().map(|c| c.label.as_str()).collect();
-        assert_eq!(labels, ["Verify 1", "Code review 1", "Review 1"]);
+        assert_eq!(labels, ["Fix round 3", "Fix round 2", "Fix round 1"]);
+        assert!(
+            cards[2].meta.starts_with("asked by AI review"),
+            "{}",
+            cards[2].meta
+        );
         // The open one shows open whatever its number.
         let opened: Vec<bool> = cards.iter().map(|c| c.open).collect();
         assert_eq!(opened, [false, true, false]);
@@ -27715,10 +27731,10 @@ pub(crate) mod tests {
         // Nothing of the old lists is left.
         assert!(!page.sections.iter().any(|s| matches!(s,
             PageSection::Lines { label, .. } if label == "Verify failures")));
-        // On AI review's page the same round reads by that stage's name.
+        // On AI review's page the same round reads by the same name.
         let page = stage_page(&f, Stage::AiReview, &state, &[], 4_000);
         assert!(page.sections.iter().any(|s| matches!(s,
-            PageSection::Round(c) if c.label == "AI review 1")));
+            PageSection::Round(c) if c.label == "Fix round 1")));
     }
 
     #[test]

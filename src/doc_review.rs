@@ -443,8 +443,14 @@ pub fn fix_plan_state(feature: Option<&Feature>, now: u64) -> String {
     let Some(feature) = feature else {
         return "feature gone".into();
     };
+    // Which round, and who asked it: the Build agent makes every round's
+    // fixes, whichever stage's page it is followed on.
     let label = |round: &fix_round::FixRound| {
-        fix_round::label(round.n, &feature.verify_fixes, &feature.fix_asked)
+        let name = fix_round::label(round.n);
+        match fix_round::asker(round.n, &feature.verify_fixes, &feature.fix_asked) {
+            Some(stage) => format!("{name} \u{b7} asked by {}", stage.label()),
+            None => name,
+        }
     };
     let Some(round) = &feature.fix_round else {
         return match &feature.last_fix_round {
@@ -459,6 +465,7 @@ pub fn fix_plan_state(feature: Option<&Feature>, now: u64) -> String {
     };
     let state = match round.phase {
         FixPhase::Fixing if round.stalled.is_some() => STOPPED,
+        FixPhase::Planning if round.stalled.is_some() => "fix plan stalled",
         FixPhase::Ready => "ready for review",
         FixPhase::CompactingToFix => "agent compacting its chat before the fixes",
         FixPhase::Fixing => "agent making the fixes",
@@ -948,13 +955,16 @@ mod tests {
             ended: None,
             trail: Default::default(),
         });
-        assert_eq!(fix_plan_state(Some(&f), 100), "Review 1 \u{b7} fixes made");
+        assert_eq!(
+            fix_plan_state(Some(&f), 100),
+            "Fix round 1 \u{b7} fixes made"
+        );
         f.last_fix_round.as_mut().unwrap().items = vec!["One".into(), "Two".into()];
         f.last_fix_round.as_mut().unwrap().done = 2;
         f.last_fix_round.as_mut().unwrap().ended = Some(880);
         assert_eq!(
             fix_plan_state(Some(&f), 1_000),
-            "Review 1 \u{b7} 2 of 2 made \u{b7} finished 2m ago"
+            "Fix round 1 \u{b7} 2 of 2 made \u{b7} finished 2m ago"
         );
         assert_eq!(fix_plan_locked(Some(&f)), Some(FIXES_MADE));
     }

@@ -189,6 +189,10 @@ pub struct Trail {
     /// Unix seconds the user dropped it, before its fixes were all made.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dropped: Option<u64>,
+    /// Whether gerdr wrote its list of fixes, no agent planned them: it has
+    /// no plan to open.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unplanned: bool,
 }
 
 impl Trail {
@@ -270,7 +274,7 @@ impl FixRound {
             (FixPhase::Compacting | FixPhase::CompactingToFix, _) => {
                 "compacting the agent's chat".into()
             }
-            (FixPhase::Planning, true) => "no fix plan yet".into(),
+            (FixPhase::Planning, true) => "fix plan stalled".into(),
             (FixPhase::Planning, false) => "planning fixes".into(),
             (FixPhase::Ready, _) => "fix plan ready".into(),
             (FixPhase::Fixing, true) => {
@@ -319,6 +323,21 @@ impl FixRound {
     /// Whether the user can drop it now: not with the agent making fixes.
     pub fn can_drop(&self) -> bool {
         self.before_fixing() || self.fixes_stopped()
+    }
+
+    /// Whether an agent wrote it a plan by now: none while it plans, nor on
+    /// a round gerdr listed the fixes of.
+    pub fn has_plan(&self) -> bool {
+        !self.trail.unplanned && !matches!(self.phase, FixPhase::Compacting | FixPhase::Planning)
+    }
+
+    /// What dropping it is called: its plan once there is one, else the
+    /// round itself.
+    pub fn drop_label(&self) -> &'static str {
+        match self.has_plan() {
+            true => "Drop plan\u{2026}",
+            false => "Drop fix round\u{2026}",
+        }
     }
 
     /// The ids of what it was asked to fix, where those have ids: its plan
@@ -519,23 +538,18 @@ pub fn criteria_named(log: &str, n: u32) -> Vec<String> {
     ids
 }
 
-/// What round `n`'s list is called on Build's page, under the plan's own: by
-/// who asked, as `fixes` and `asked` say, and counted among that stage's
-/// rounds: Code review's first is "Code review 1" whatever came before it. AI
-/// review's read "Review N", and so does a round from before they were kept.
-pub fn label(n: u32, fixes: &[VerifyFix], asked: &BTreeMap<u32, Stage>) -> String {
-    let by = |m: u32| match fixes.iter().any(|fix| fix.round == m) {
+/// What round `n` is called everywhere: its card, its plan's tab, its
+/// buttons, the activity and the rows it changed all say "Fix round N".
+pub fn label(n: u32) -> String {
+    heading(n)
+}
+
+/// Which stage asked for round `n`, as `fixes` and `asked` keep it: none for
+/// a round from before that was kept.
+pub fn asker(n: u32, fixes: &[VerifyFix], asked: &BTreeMap<u32, Stage>) -> Option<Stage> {
+    match fixes.iter().any(|fix| fix.round == n) {
         true => Some(Stage::Verify),
-        false => asked
-            .get(&m)
-            .copied()
-            .filter(|s| matches!(s, Stage::Verify | Stage::CodeReview | Stage::ManualTest)),
-    };
-    let stage = by(n);
-    let k = (1..=n).filter(|&m| by(m) == stage).count();
-    match stage {
-        Some(stage) => format!("{} {k}", stage.label()),
-        None => format!("Review {k}"),
+        false => asked.get(&n).copied(),
     }
 }
 
@@ -895,26 +909,17 @@ mod tests {
     }
 
     #[test]
-    fn a_rounds_label_says_who_asked() {
-        let asked = BTreeMap::from([
-            (1, Stage::AiReview),
-            (2, Stage::CodeReview),
-            (3, Stage::ManualTest),
-            (4, Stage::Verify),
-        ]);
-        let label = |n, fixes: &[VerifyFix]| label(n, fixes, &asked);
-        // Each counts its own stage's rounds.
-        assert_eq!(label(1, &[]), "Review 1");
-        assert_eq!(label(2, &[]), "Code review 1");
-        assert_eq!(label(3, &[]), "Manual test 1");
-        assert_eq!(label(4, &[]), "Verify 1");
-        // From before they were kept: AI review's, as 5 to 8 are.
-        assert_eq!(label(9, &[]), "Review 6");
+    fn a_rounds_label_is_its_number_and_its_asker_kept_apart() {
+        let asked = BTreeMap::from([(1, Stage::AiReview), (2, Stage::CodeReview)]);
+        assert_eq!(label(2), "Fix round 2");
+        assert_eq!(asker(1, &[], &asked), Some(Stage::AiReview));
+        assert_eq!(asker(2, &[], &asked), Some(Stage::CodeReview));
+        assert_eq!(asker(9, &[], &asked), None);
         let kept = VerifyFix {
             round: 9,
             ..VerifyFix::default()
         };
-        assert_eq!(label(9, &[kept]), "Verify 2");
+        assert_eq!(asker(9, &[kept], &asked), Some(Stage::Verify));
     }
 
     #[test]
@@ -1143,8 +1148,8 @@ mod tests {
             round: 3,
             ..VerifyFix::default()
         }];
-        assert_eq!(label(2, &fixes, &BTreeMap::new()), "Review 2");
-        assert_eq!(label(3, &fixes, &BTreeMap::new()), "Verify 1");
+        assert_eq!(asker(2, &fixes, &BTreeMap::new()), None);
+        assert_eq!(asker(3, &fixes, &BTreeMap::new()), Some(Stage::Verify));
     }
 
     #[test]

@@ -1098,7 +1098,7 @@ impl Gerdr {
             .chain(feature.past_rounds.iter().rev())
             .find(|r| r.n == n)
             .cloned();
-        let label = crate::feature::fix_round::label(n, &feature.verify_fixes, &feature.fix_asked);
+        let label = crate::feature::fix_round::label(n);
         let Some(round) = found else {
             return self.show_warning(format!("{label} is gone"));
         };
