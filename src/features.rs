@@ -11083,7 +11083,14 @@ impl Gerdr {
                 // Abandoned, all it has is kept first: commits, changes.
                 let (heads, result) = match abandon {
                     true => match layout::keep(&feature) {
-                        Ok(heads) => (heads, layout::remove(&feature, force)),
+                        Ok(heads) => {
+                            let result = layout::remove(&feature, force);
+                            // Stopped on the way: what stays has its changes back.
+                            if result.is_err() {
+                                layout::unkeep(&feature, &heads);
+                            }
+                            (heads, result)
+                        }
                         Err(why) => (Vec::new(), Err(format!("nothing went: {why}"))),
                     },
                     false => (layout::heads(&feature), layout::remove(&feature, force)),

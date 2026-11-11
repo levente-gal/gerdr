@@ -1703,40 +1703,72 @@ fn kept_changes_ref(branch: &str) -> String {
 pub fn keep(feature: &Feature) -> Result<Vec<KeptHead>, String> {
     let branch = feature.branch();
     let mut heads = heads(feature);
-    for head in &mut heads {
-        let Some(repo) = feature.repo(&head.repo) else {
+    for i in 0..heads.len() {
+        let Some(repo) = feature.repo(&heads[i].repo) else {
             continue;
         };
-        let name = repo.key();
-        let branch = repo.branch.as_deref().unwrap_or(&branch);
-        git(&repo.main, &["update-ref", &kept_ref(branch), &head.sha])
-            .map_err(|err| format!("{name}: couldn't keep its commit: {err}"))?;
-        let status = git(
-            &repo.worktree,
-            &["status", "--porcelain", "--untracked-files=all"],
-        )
-        .map_err(|err| format!("{name}: {err}"))?;
-        if status.trim().is_empty() {
-            continue;
+        let own = repo.branch.as_deref().unwrap_or(&branch);
+        match keep_repo(repo, own, &heads[i].sha, &feature.title) {
+            Ok(changes) => heads[i].changes = changes,
+            Err(why) => {
+                // Nothing goes then: the changes kept so far go back.
+                unkeep(feature, &heads[..i]);
+                return Err(why);
+            }
         }
-        let message = format!("gerdr: {} abandoned", feature.title);
-        git(
-            &repo.worktree,
-            &["stash", "push", "-q", "--include-untracked", "-m", &message],
-        )
-        .map_err(|err| format!("{name}: couldn't keep its changes: {err}"))?;
-        let sha = git(&repo.worktree, &["rev-parse", "refs/stash"])
-            .map_err(|err| format!("{name}: couldn't keep its changes: {err}"))?;
-        let sha = sha.trim().to_owned();
-        git(&repo.main, &["update-ref", &kept_changes_ref(branch), &sha])
-            .map_err(|err| format!("{name}: couldn't keep its changes: {err}"))?;
-        // Kept by its own ref now: the user's stash list is as it was.
-        if let Err(err) = git(&repo.worktree, &["stash", "drop", "-q"]) {
-            tracing::warn!("dropping the stash keeping {name}'s changes: {err}");
-        }
-        head.changes = Some(sha);
     }
     Ok(heads)
+}
+
+/// Put back what `keep` took of `heads` into the worktrees still there:
+/// abandoning stopped before they went.
+pub fn unkeep(feature: &Feature, heads: &[KeptHead]) {
+    for head in heads {
+        let (Some(sha), Some(repo)) = (&head.changes, feature.repo(&head.repo)) else {
+            continue;
+        };
+        if repo.worktree.is_dir()
+            && let Err(err) = git(&repo.worktree, &["stash", "apply", "-q", "--index", sha])
+        {
+            tracing::warn!("putting back the changes of {}: {err}", head.repo);
+        }
+    }
+}
+
+/// `keep`'s work on `repo`, whose branch is `branch` at `sha`: its commit
+/// under a ref, and what it has uncommitted as a stash commit under another,
+/// whose commit it returns. A failure after the stash puts the changes back.
+fn keep_repo(repo: &Repo, branch: &str, sha: &str, title: &str) -> Result<Option<String>, String> {
+    let name = repo.key();
+    git(&repo.main, &["update-ref", &kept_ref(branch), sha])
+        .map_err(|err| format!("{name}: couldn't keep its commit: {err}"))?;
+    let status = git(&repo.worktree, &["status", "--porcelain", "--untracked-files=all"])
+        .map_err(|err| format!("{name}: {err}"))?;
+    if status.trim().is_empty() {
+        return Ok(None);
+    }
+    let message = format!("gerdr: {title} abandoned");
+    git(&repo.worktree, &["stash", "push", "-q", "--include-untracked", "-m", &message])
+        .map_err(|err| format!("{name}: couldn't keep its changes: {err}"))?;
+    let kept = git(&repo.worktree, &["rev-parse", "refs/stash"])
+        .map(|sha| sha.trim().to_owned())
+        .and_then(|sha| {
+            git(&repo.main, &["update-ref", &kept_changes_ref(branch), &sha]).map(|_| sha)
+        });
+    let sha = match kept {
+        Ok(sha) => sha,
+        Err(err) => {
+            if let Err(err) = git(&repo.worktree, &["stash", "pop", "-q", "--index"]) {
+                tracing::warn!("putting back the changes of {name}: {err}");
+            }
+            return Err(format!("{name}: couldn't keep its changes: {err}"));
+        }
+    };
+    // Kept by its own ref now: the user's stash list is as it was.
+    if let Err(err) = git(&repo.worktree, &["stash", "drop", "-q"]) {
+        tracing::warn!("dropping the stash keeping {name}'s changes: {err}");
+    }
+    Ok(Some(sha))
 }
 
 /// Bring back the worktrees of `feature` that `heads` names, as `remove`
