@@ -4070,6 +4070,10 @@ fn check_lines(
             line(text, CheckTone::Note)
         }
         (true, _, false) => line(NOTHING_TICKED.into(), CheckTone::Note),
+        // Its pull requests merged on GitHub: that is what shipped means.
+        (_, _, true) if !feature.shipping.prs.is_empty() && planned.steps() == 0 => {
+            line(MERGED_DONE.into(), CheckTone::Ready)
+        }
         (true, _, true) => line(TICK_MORE.into(), CheckTone::Note),
         (false, true, false) => line(ALL_RAN.into(), CheckTone::Ready),
         (false, true, true) => line(ALL_RAN_DONE.into(), CheckTone::Note),
@@ -4184,6 +4188,9 @@ const FINISHED_UNSHIPPED: &str = "Finished without shipping";
 
 /// What the Ship check says with no step ticked.
 const NOTHING_TICKED: &str = "No step ticked: Finish ends it without shipping";
+
+/// What it says once a shipped feature's pull requests all merged.
+const MERGED_DONE: &str = "Merged on GitHub: shipped";
 
 /// What it says of a shipped feature with no step ticked.
 const TICK_MORE: &str = "Shipped: tick a step to ship more";
