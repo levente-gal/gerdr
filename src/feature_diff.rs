@@ -2488,9 +2488,9 @@ mod tests {
         };
         assert_eq!(close(&wd), "close");
         wd.feature.as_mut().unwrap().inline = true;
-        assert_eq!(close(&wd), "go to the stages");
+        assert_eq!(close(&wd), "back");
         let keys = wd.feature.as_ref().unwrap().keys(0);
-        assert_eq!(keys[0], ("Esc", "go to the stages"));
+        assert_eq!(keys[0], ("Esc", "back to the stages"));
     }
 
     /// A feature's diff at Code review over these files of one repository,
@@ -2994,17 +2994,20 @@ mod tests {
             let title = offered(&wd).0;
             assert!(title.contains(&B::PlanFixes), "{title:?}");
             assert!(!title.contains(&B::MakeFixes), "{title:?}");
-            for shift in [false, true] {
-                assert_eq!(
-                    wd.key(&mods(true, shift), enter, enter, POPUP_ENV),
-                    Some(Done::PlanFixes)
-                );
-            }
-            let keys = wd.feature.as_ref().unwrap().keys(wd.diff.review.own());
-            assert!(keys.contains(&(
-                "Ctrl+Enter",
-                "plan the fixes, once every finding is decided"
-            )));
+            // Ctrl+Shift+Enter plans them, as on every page; Ctrl+Enter
+            // makes fixes only, so here it says a plan comes first.
+            assert_eq!(
+                wd.key(&mods(true, true), enter, enter, POPUP_ENV),
+                Some(Done::PlanFixes)
+            );
+            assert_eq!(
+                wd.key(&mods(true, false), enter, enter, POPUP_ENV),
+                Some(Done::Diff(crate::diff_view::Outcome::Notice(
+                    crate::worktree_diff::PLAN_FIRST
+                )))
+            );
+            let hint = |b| wd.hints().into_iter().find(|h| h.button == b).unwrap();
+            assert_eq!(hint(B::PlanFixes).key, "Ctrl+Shift+Enter");
         }
         // With nothing of theirs the plan is a choice, on the other chord.
         let mut wd = popup(Stage::AiReview, plain(), Review::default());

@@ -15184,8 +15184,8 @@ fn submit_key(feature: &Feature, mods: &ModifiersState, sym: Keysym) -> Option<P
     }
 }
 
-/// `hints` with the keys of Ship's buttons in, before the tab's own, in
-/// place of any the page had on the same chord.
+/// `hints` with the keys of Ship's buttons in, before F1, in place of any
+/// the page had on the same chord.
 fn with_ship_hints(
     mut hints: Vec<(String, String)>,
     panel: &FeaturePanel,
@@ -15214,7 +15214,7 @@ fn with_ship_hints(
         keys.push(("Ctrl+E".to_owned(), "edit text".to_owned()));
         hints.retain(|(chord, _)| !keys.iter().any(|(k, _)| k == chord));
         let at = (hints.iter())
-            .position(|(chord, _)| chord == "Ctrl+O")
+            .position(|(chord, _)| chord == "F1")
             .unwrap_or(hints.len());
         hints.splice(at..at, keys);
         return hints;
@@ -15223,7 +15223,7 @@ fn with_ship_hints(
     let keys = ship_keys(feature, ctx, probe, repo.as_deref());
     hints.retain(|(chord, _)| !keys.iter().any(|k| k.chord == chord));
     let at = (hints.iter())
-        .position(|(chord, _)| chord == "Ctrl+O")
+        .position(|(chord, _)| chord == "F1")
         .unwrap_or(hints.len());
     hints.splice(
         at..at,
@@ -18344,21 +18344,19 @@ pub(crate) mod tests {
         press(&mut panel, &old, key(Keysym::Delete));
         press(&mut panel, &old, key(Keysym::End));
         assert_eq!(panel.armed, None);
-        // On the stages it is the feature's, as it was.
+        // On the stages Del does nothing: Alt+Del abandons, asking.
         panel.focus = TabArea::Stages;
+        assert_eq!(press(&mut panel, &f, key(Keysym::Delete)), None);
         assert_eq!(
-            press(&mut panel, &f, key(Keysym::Delete)),
+            press(&mut panel, &f, alt(Keysym::Delete)),
             Some(PanelOutcome::Remove)
         );
-        // So on a feature's only repository.
+        // Nor on a feature's only repository.
         let mut one = feature("c", vec![repo("api", true)], 3);
         one.multi = false;
         panel.focus = TabArea::Repos;
         panel.repo = 0;
-        assert_eq!(
-            press(&mut panel, &one, key(Keysym::Delete)),
-            Some(PanelOutcome::Remove)
-        );
+        assert_eq!(press(&mut panel, &one, key(Keysym::Delete)), None);
     }
 
     #[test]
@@ -18479,7 +18477,7 @@ pub(crate) mod tests {
         );
         let focus = std::mem::replace(&mut panel.focus, TabArea::Stages);
         assert_eq!(
-            press(&mut panel, &f, key(Keysym::Delete)),
+            press(&mut panel, &f, alt(Keysym::Delete)),
             Some(PanelOutcome::Remove)
         );
         panel.focus = focus;
@@ -18595,7 +18593,7 @@ pub(crate) mod tests {
         // Each key offered, alone or among others ("Tab" in "Tab /
         // Shift+Tab").
         let listed_keys: Vec<&str> = (listed.iter())
-            .filter_map(|l| l.split_once(": ").map(|(k, _)| k))
+            .filter_map(|l| l.split_once('\t').map(|(k, _)| k))
             .flat_map(|k| k.split(" / "))
             .collect();
         for keys in &offered {
@@ -18873,9 +18871,27 @@ pub(crate) mod tests {
         let mut last = two.clone();
         last.repos.pop();
         assert_eq!(del(&last, 0), None);
-        // The only one a feature has: Del abandons it, and says so.
+        // The only one a feature has: Del never abandons it (Alt+Del does,
+        // asking), so it offers nothing there.
         let one = feature("b", vec![repo("api", true)], 3);
-        assert_eq!(del(&one, 0).as_deref(), Some("abandon"));
+        assert_eq!(del(&one, 0), None);
+        let mut panel = FeaturePanel {
+            focus: TabArea::Repos,
+            ..FeaturePanel::default()
+        };
+        let ctx = RowCtx::default();
+        let bare = ModifiersState::default();
+        let delete = |p: &mut FeaturePanel, mods: &ModifiersState| {
+            p.key(mods, Keysym::Delete, &one, &[], ctx, &[], &[], &[])
+        };
+        assert_eq!(delete(&mut panel, &bare), None);
+        panel.focus = TabArea::Stages;
+        assert_eq!(delete(&mut panel, &bare), None);
+        let alt = ModifiersState {
+            alt: true,
+            ..ModifiersState::default()
+        };
+        assert_eq!(delete(&mut panel, &alt), Some(PanelOutcome::Remove));
     }
 
     #[test]
@@ -19052,11 +19068,6 @@ pub(crate) mod tests {
                 "Tab",
                 "Ctrl+Shift+U",
                 "Ctrl+E",
-                "Ctrl+O",
-                "Ctrl+C",
-                "Ctrl+N",
-                "Ctrl+Shift+L",
-                "Del",
                 "F1",
             ]
         );
@@ -20094,7 +20105,7 @@ pub(crate) mod tests {
                 pair("Left / Right", "stage"),
                 pair("Enter", "start agent"),
                 pair("Tab", "repositories"),
-                pair("Ctrl+O", "open tab")
+                pair("F1", "keys")
             ]
         );
         assert_eq!(
@@ -20159,7 +20170,7 @@ pub(crate) mod tests {
                 pair("Left / Right", "stage"),
                 pair("Enter", "show agent"),
                 pair("Tab", "repositories"),
-                pair("Ctrl+R", "fresh agent")
+                pair("Ctrl+R", "restart")
             ]
         );
         assert_eq!(
@@ -20188,7 +20199,8 @@ pub(crate) mod tests {
             stage_button(&f, Stage::Plan, RowCtx::default()),
             Some("Review")
         );
-        assert_eq!(hints(&panel, &f, &state)[1], pair("Enter", "review plan"));
+        // As the file card's button says it.
+        assert_eq!(hints(&panel, &f, &state)[1], pair("Enter", "review"));
         // Ctrl+R only on the agent stage's own page.
         press(&mut panel, &f, key(Keysym::Up));
         assert_eq!(press(&mut panel, &f, ctrl(Keysym::r)), None);
@@ -22232,6 +22244,22 @@ pub(crate) mod tests {
             });
             assert!(why.is_some(), "{sections:?}");
         }
+        // There Ctrl+Enter makes no fixes and says why: Ctrl+Shift+Enter
+        // plans them, the one key for that on every page.
+        panel.focus = TabArea::Stages;
+        let gate = |shift| ModifiersState {
+            ctrl: true,
+            shift,
+            ..ModifiersState::default()
+        };
+        assert_eq!(
+            press(&mut panel, &noted, (gate(false), Keysym::Return)),
+            Some(PanelOutcome::FindingRefused(PLAN_FIRST))
+        );
+        assert_eq!(
+            press(&mut panel, &noted, (gate(true), Keysym::Return)),
+            Some(PanelOutcome::SendFixes)
+        );
         // With no word of the user's, nothing to say.
         let state = PanelState::default();
         let actions = page_actions(&fix, Stage::AiReview, none);
@@ -22284,10 +22312,7 @@ pub(crate) mod tests {
         assert_eq!(view.page.buttons[0].label, "Review in diff");
         assert_eq!(view.rail[5].mark, NodeMark::Waiting);
         assert_eq!(view.rail[5].line, "2 to decide");
-        assert!(
-            view.hints
-                .contains(&("Ctrl+R".into(), "fresh agent".into()))
-        );
+        assert!(view.hints.contains(&("Ctrl+R".into(), "restart".into())));
         assert!(
             view.hints
                 .contains(&("Enter".into(), "review in diff".into()))
@@ -25408,7 +25433,7 @@ pub(crate) mod tests {
                 &[],
             )
         };
-        let enter = ("Enter".to_owned(), "go to the current stage".to_owned());
+        let enter = ("Enter".to_owned(), "go to Plan".to_owned());
         let reopen = (REOPEN_KEY.to_owned(), "reopen".to_owned());
         assert!(hints(approved).contains(&enter));
         assert!(hints(approved).contains(&reopen));
@@ -26453,7 +26478,8 @@ pub(crate) mod tests {
         );
         let undo = ship_keys(&f, ctx, Some(&p), None);
         let undo = undo.iter().find(|k| k.chord == "Alt+Z").unwrap();
-        assert_eq!(undo.what, "undo the push\u{2026}");
+        // As its button says it.
+        assert_eq!(undo.what, "undo\u{2026}");
         // On web's rows: web's merge, its pull request, its push.
         let web = of(Some("web"));
         assert!(web.contains(&(
@@ -26515,7 +26541,7 @@ pub(crate) mod tests {
         let panel = FeaturePanel::default();
         let hints = vec![
             ("Ctrl+Shift+Del".to_owned(), "start over\u{2026}".to_owned()),
-            ("Ctrl+O".to_owned(), "open tab".to_owned()),
+            ("F1".to_owned(), "keys".to_owned()),
         ];
         let ships = ship_rows(&f, Some(&p));
         let hints = with_ship_hints(hints, &panel, &f, Stage::Ship, (ctx, Some(&p)), &ships);
@@ -26526,7 +26552,7 @@ pub(crate) mod tests {
             stop,
             [&("Ctrl+Shift+Del".to_owned(), "stop\u{2026}".to_owned())]
         );
-        assert_eq!(hints.last().unwrap().0, "Ctrl+O", "before the tab's own");
+        assert_eq!(hints.last().unwrap().0, "F1", "before F1");
         std::fs::remove_dir_all(&root).unwrap();
     }
 
