@@ -5318,10 +5318,14 @@ fn feature_tab_manual_test(note: bool) -> super::FeatureTabView {
         text: "1 passed \u{b7} 2 failed \u{b7} 1 untested \u{b7} 1 fix made".into(),
     });
     if note {
-        view.hints = [("Enter", "save"), ("Esc", "save")]
-            .iter()
-            .map(|(k, w)| ((*k).to_owned(), (*w).to_owned()))
-            .collect();
+        view.hints = [
+            ("Enter", "save"),
+            ("Ctrl+Shift+Del", "discard"),
+            ("Esc", "keep draft"),
+        ]
+        .iter()
+        .map(|(k, w)| ((*k).to_owned(), (*w).to_owned()))
+        .collect();
     }
     view
 }
@@ -6951,7 +6955,8 @@ fn tab_plan_review(writing: bool) -> super::FeatureTabView {
         false => vec![
             ("Enter", "save and accept"),
             ("Shift+Enter", "new line"),
-            ("Esc", "save"),
+            ("Ctrl+Shift+Del", "discard"),
+            ("Esc", "keep draft"),
         ],
     }
     .into_iter()

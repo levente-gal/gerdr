@@ -1519,6 +1519,10 @@ const FOCUS_KEYS: &[(&str, &str)] = &[
         "in a comment, save it; a new line (Esc keeps it as a draft, Ctrl+Shift+Del discards it)",
     ),
     (
+        "Ctrl+Del",
+        "in the diff, delete the review's comments, asking first (Clear review)",
+    ),
+    (
         "g Space / Ctrl+click",
         "in the diff, open the code in Zed at the caret; on a file's name, the file",
     ),
