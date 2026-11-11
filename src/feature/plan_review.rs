@@ -1399,10 +1399,12 @@ mod tests {
             &mut review,
             2,
             raws(
+                // A new title, or r1-2 would be raised again by it.
                 GOOD.replace(
                     "\"severity\": \"high\"",
                     "\"id\": \"r1-1\", \"severity\": \"high\"",
                 )
+                .replace("Which queue?", "Which worker?")
                 .as_str(),
             ),
         );

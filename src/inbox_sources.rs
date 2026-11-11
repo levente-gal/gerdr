@@ -1372,7 +1372,7 @@ mod tests {
     }
 
     #[test]
-    fn the_inbox_button_counts_agents_done_or_blocked_reviews_and_long_lived_failures() {
+    fn the_inbox_button_counts_blocked_agents_reviews_and_long_lived_failures() {
         let mut f = Fixture::default();
         f.workspace("a", "/r", Some(git("/r")));
         f.agents[0] = vec![
@@ -1400,9 +1400,9 @@ mod tests {
             .collect();
         assert_eq!(
             counted,
+            // A done agent is listed, not counted: it is not the user's turn.
             [
                 "agent:p1",
-                "agent:p2",
                 "ci:github.com/o/r:main",
                 "ci:github.com/o/r:master",
                 "ci:github.com/o/r:dev",

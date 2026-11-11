@@ -1601,7 +1601,8 @@ mod tests {
             [
                 "f reopen",
                 "Ctrl+E edit change\u{2026}",
-                "c comment",
+                // A written comment is edited in place, so `c` says so.
+                "c edit comment",
                 "Shift+Del delete comment",
                 "Del reject\u{2026}",
                 "Enter show in plan",
@@ -1611,7 +1612,12 @@ mod tests {
         let q = question("r1-2", "");
         assert_eq!(
             hints(Item::Suggestion(&q), true, false)[..3],
-            ["f answer", "Ctrl+E edit change\u{2026}", "c answer"]
+            [
+                // As its button says: Accept, opening the answer first.
+                "f accept\u{2026}",
+                "Ctrl+E edit change\u{2026}",
+                "c answer"
+            ]
         );
         let own = suggestion("u1", State::Accepted, Source::You);
         assert_eq!(

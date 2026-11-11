@@ -2423,7 +2423,7 @@ mod tests {
         assert!(view.title.ends_with("1 finding, open"), "{}", view.title);
         assert!(view.rows.iter().any(|row| matches!(
             row,
-            DetailRow::CommentHead { finding: Some(_), place, .. } if place == "finding 1 of 1"
+            DetailRow::CommentHead { finding: Some(_), place, .. } if place == "r1-1 \u{b7} finding 1 of 1"
         )));
         let none = mods(false, false);
         let right = Keysym::bracketright;
@@ -3500,7 +3500,7 @@ mod tests {
         assert!(
             view.rows.iter().any(|row| matches!(
                 row,
-                DetailRow::CommentHead { finding: None, place, .. } if place == "comment 1 of 1"
+                DetailRow::CommentHead { finding: None, place, .. } if place == "u1 \u{b7} comment 1 of 1"
             )),
             "{:?}",
             view.rows
@@ -3727,7 +3727,7 @@ mod tests {
         assert!(view.rows.iter().any(|row| matches!(
             row,
             DetailRow::CommentHead { finding: Some(f), place, .. }
-                if f.severity == "medium" && place == "finding 1 of 1"
+                if f.severity == "medium" && place == "r1-1 \u{b7} finding 1 of 1"
         )));
         let hint = wd
             .hints()

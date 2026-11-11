@@ -2188,11 +2188,16 @@ mod tests {
             ["alpha", "tablet", "beta", "gamma", "delta", "alphabet"]
         );
         assert_eq!(switcher.view().selected, Some(0));
-        // "abet" is whole in "alphabet" and scattered in "tablet": the
+        // "abe" is whole in "alphabet" and scattered in "tablet": the
         // better match in the later section is selected, though the
         // heavier workspace is listed first.
-        type_in(&mut switcher, "bet");
+        type_in(&mut switcher, "be");
         assert_eq!(labels(&switcher), ["tablet", "alphabet"]);
+        assert_eq!(switcher.picked(), Some(&Target::App("alphabet".into())));
+        // "abet" is four letters strewn in bits over "tablet", so only
+        // "alphabet" still matches it.
+        type_in(&mut switcher, "t");
+        assert_eq!(labels(&switcher), ["alphabet"]);
         assert_eq!(switcher.picked(), Some(&Target::App("alphabet".into())));
         // Equal matches ("et" whole in "tablet", "beta" and "alphabet"):
         // the weight picks the heaviest.

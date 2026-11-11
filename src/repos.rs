@@ -4219,8 +4219,13 @@ impl Panel {
         }
         // The diff's parts act on it; a click elsewhere takes the
         // keyboard from its search and keeps the comment being written.
-        // The log's or stashes' rows are no diff's.
-        let other_rows = self.tab() != DetailTab::Diff && matches!(hit, ReposHit::DiffRow(_));
+        // The log's or stashes' rows are no diff's, nor is the Log's Show
+        // commit (the diff's Show fix shares its button).
+        let other_rows = self.tab() != DetailTab::Diff
+            && matches!(
+                hit,
+                ReposHit::DiffRow(_) | ReposHit::Button(ReposButton::ShowCommit)
+            );
         if !other_rows {
             diff_ctx!(self, ctx, dctx);
             if let Some(outcome) = self.diff.click(hit, &dctx) {
@@ -8101,16 +8106,8 @@ mod tests {
         let title: Vec<String> = (panel.view("p", &ctx).detail.title_buttons.iter())
             .map(|h| h.label.clone())
             .collect();
-        assert_eq!(
-            title,
-            [
-                "Previous comment",
-                "Next comment",
-                "Copy 1 comment",
-                "Drop 1 outdated",
-                "Clear review"
-            ]
-        );
+        // One comment has no other to go to: no Previous / Next.
+        assert_eq!(title, ["Copy 1 comment", "Drop 1 outdated", "Clear review"]);
         assert_eq!(
             panel.click(ReposHit::Button(ReposButton::DropOutdated), &ctx),
             None

@@ -9339,15 +9339,23 @@ mod tests {
                 0.5,
                 None,
             );
-            (layers.drawn.get() - before, parts.len())
+            (layers.drawn.get() - before, parts)
         };
         step(&view, 0);
         step(&view, 300);
         // The spinners and the sweep move over the slices: none drawn again.
         let (drawn, parts) = step(&view, 600);
         assert_eq!(drawn, 0);
-        let (_, without) = step(&tab_view(), 900);
-        assert!(parts >= without + 3, "two spinners and the sweep");
+        // Counted by their sizes: the card under the rail moves the columns
+        // down, so fewer of the page's bands show than without it.
+        let spin = first.spinner.size;
+        let moving = |parts: &[crate::chrome::layers::Part]| {
+            let spinners = parts.iter().filter(|p| p.size == spin).count();
+            let sweeps = parts.iter().filter(|p| p.size.h == SWEEP_H).count();
+            (spinners, sweeps)
+        };
+        assert_eq!(moving(&parts), (2, 1), "two spinners and the sweep");
+        assert_eq!(moving(&step(&tab_view(), 900).1), (0, 0));
         let mut later = view.clone();
         later.running[0].took = "0:42".into();
         step(&view, 1200);
@@ -10016,7 +10024,7 @@ mod tests {
     }
 
     #[test]
-    fn the_rail_is_a_line_taller_once_it_says_what_ran_a_stage() {
+    fn the_rail_keeps_a_line_for_what_ran_a_stage_from_the_start() {
         let frame = Rectangle::from_size((1400, 800).into());
         let height = |view: &FeatureTabView| feature_tab_layout(view, frame).nodes[0].size.h;
         let mut view = super::super::golden::feature_tab();
@@ -10024,7 +10032,9 @@ mod tests {
         for node in &mut view.rail {
             node.agent = None;
         }
-        assert_eq!(with, height(&view) + NODE_LINE);
+        // No stage says what ran it yet: the page doesn't drop once one does.
+        assert_eq!(with, height(&view));
+        assert!(with >= NODE + NODE_GAP + NODE_LABEL + 2 * NODE_LINE);
     }
 
     /// `view` with its agent card's model button saying `label`.

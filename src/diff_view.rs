@@ -1047,6 +1047,13 @@ impl DiffView {
             DiffRow::CommentHead { c, .. }
             | DiffRow::Comment { c, .. }
             | DiffRow::Outdated(Some(c)) => RowKey::Comment(c),
+            // The editor in a comment's place stands for it.
+            DiffRow::Editor { .. } | DiffRow::EditorHint { .. } => {
+                match self.editing.as_ref().and_then(|e| e.at) {
+                    Some(c) => RowKey::Comment(c),
+                    None => RowKey::At(r),
+                }
+            }
             _ => RowKey::At(r),
         })
     }
@@ -1072,9 +1079,16 @@ impl DiffView {
                 });
                 line.or(head).or_else(|| self.header_row(root, None))
             }
-            RowKey::Comment(c) => self.rows.iter().position(|r| {
-                matches!(*r, DiffRow::CommentHead { c: x, .. } | DiffRow::Outdated(Some(x)) if x == *c)
-            }),
+            RowKey::Comment(c) => (self.rows.iter())
+                .position(|r| {
+                    matches!(*r, DiffRow::CommentHead { c: x, .. } | DiffRow::Outdated(Some(x)) if x == *c)
+                })
+                // Being edited, it is the editor in its place: the cursor
+                // stays on it, and is on it again once the editor closes.
+                .or_else(|| {
+                    (self.editing.as_ref()?.at == Some(*c))
+                        .then(|| self.rows.iter().position(|r| matches!(r, DiffRow::Editor { .. })))?
+                }),
             RowKey::At(r) => Some((*r).min(last)),
         }
     }
