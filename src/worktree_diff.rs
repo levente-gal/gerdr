@@ -1137,6 +1137,11 @@ impl WorktreeDiff {
                     doc.name()
                 );
             }
+            // A fix round's plan is the Build agent's, for the stage that
+            // asked: its state after the heading names both.
+            if doc.file == DocFile::FixPlan {
+                return format!("Build agent's fix plan · {}", doc.name());
+            }
             return format!("{} · {}", doc.file.stage().label(), doc.name());
         }
         let name = self.branch.clone().unwrap_or_else(|| {
@@ -2982,15 +2987,8 @@ pub(crate) mod tests {
             .iter()
             .map(|h| h.button)
             .collect();
-        assert_eq!(
-            buttons,
-            [
-                ReposButton::PrevComment,
-                ReposButton::NextComment,
-                ReposButton::CopyReview,
-                ReposButton::ClearReview
-            ]
-        );
+        // One comment: nowhere to go on to, so no Previous / Next.
+        assert_eq!(buttons, [ReposButton::CopyReview, ReposButton::ClearReview]);
         // Asked on a sheet, which takes the keys: Esc keeps it.
         let clear = ReposHit::Button(ReposButton::ClearReview);
         assert_eq!(wd.click(clear, ENV), None);

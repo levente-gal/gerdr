@@ -21607,7 +21607,7 @@ pub(crate) mod tests {
         assert_eq!(
             held(&compacting, Stage::Verify),
             Some((
-                "Verify failures \u{b7} compacting the agent's chat".to_owned(),
+                "Verify failures \u{b7} making fixes".to_owned(),
                 vec![OPEN_PLAN.to_owned()]
             ))
         );

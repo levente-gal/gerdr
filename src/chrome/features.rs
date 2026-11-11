@@ -3246,9 +3246,11 @@ impl Stack {
                 self.y += 2;
                 self.put(PROGRESS, Piece::Bar { done, total });
                 self.y += 8;
+                // The next one is marked only while its round is at work: a
+                // plan waiting has nothing going.
                 let next = (card.fixes.iter())
                     .position(|(d, _)| !d)
-                    .filter(|_| card.running.is_empty());
+                    .filter(|_| card.running.is_empty() && card.dot == Dot::Working);
                 for (i, (done, text)) in card.fixes.iter().enumerate() {
                     self.put(
                         MILESTONE_ROW,

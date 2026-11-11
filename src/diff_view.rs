@@ -3055,7 +3055,11 @@ impl DiffView {
             disabled: None,
         };
         let mut buttons = Vec::new();
-        if let Some(noun) = self.comments_to_visit() {
+        // With one comment there is nowhere else to go: ] and [ still work.
+        if let Some(noun) = self
+            .comments_to_visit()
+            .filter(|_| self.comment_order.len() > 1)
+        {
             buttons.push(hint(ReposButton::PrevComment, format!("Previous {noun}")));
             buttons.push(hint(ReposButton::NextComment, format!("Next {noun}")));
         }

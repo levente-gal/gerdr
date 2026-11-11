@@ -271,9 +271,10 @@ impl FixRound {
     pub fn line(&self) -> String {
         let total = self.items.len();
         match (self.phase, self.stalled.is_some()) {
-            (FixPhase::Compacting | FixPhase::CompactingToFix, _) => {
-                "compacting the agent's chat".into()
-            }
+            // Its chat compacted first is the agent's housekeeping: the
+            // activity says it, the stage's status says what it is for.
+            (FixPhase::Compacting, _) => "planning fixes".into(),
+            (FixPhase::CompactingToFix, _) => "making fixes".into(),
             (FixPhase::Planning, true) => "fix plan stalled".into(),
             (FixPhase::Planning, false) => "planning fixes".into(),
             (FixPhase::Ready, _) => "fix plan ready".into(),
@@ -1015,7 +1016,7 @@ mod tests {
         };
         let compacting = round(FixPhase::CompactingToFix);
         assert!(!compacting.before_fixing());
-        assert_eq!(compacting.line(), "compacting the agent's chat");
+        assert_eq!(compacting.line(), "making fixes");
         assert!(round(FixPhase::Compacting).before_fixing());
         // Kept in `feature.json`: a restart goes on from it.
         let kept = serde_json::to_string(&compacting).unwrap();
@@ -1452,7 +1453,7 @@ mod tests {
         .unwrap();
         assert_eq!(round.phase, FixPhase::Compacting);
         assert_eq!(round.give_back, GiveBack::Nothing);
-        assert_eq!(round.line(), "compacting the agent's chat");
+        assert_eq!(round.line(), "planning fixes");
     }
 
     fn over(n: u32, from: &[(&str, &str)], to: &[(&str, &str)]) -> FixRound {
