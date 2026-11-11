@@ -1863,8 +1863,7 @@ impl DiffView {
 
     /// Whether the cursor is on a comment of the user's kept as a finding.
     pub fn on_yours(&self) -> bool {
-        self.finding_here()
-            .is_some_and(|(_, flag)| flag.yours && !flag.sent)
+        self.finding_here().is_some_and(|(_, flag)| flag.yours && !flag.sent)
     }
 
     /// The next undecided finding after `id` in the diff's order, coming

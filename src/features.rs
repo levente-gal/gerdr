@@ -19101,11 +19101,7 @@ pub(crate) mod tests {
             let (_, said) = recap.stages.iter().find(|(l, _)| l == label).unwrap();
             said.clone()
         };
-        assert!(
-            said("Discover").starts_with("claude \u{b7} "),
-            "{}",
-            said("Discover")
-        );
+        assert!(said("Discover").starts_with("claude \u{b7} "), "{}", said("Discover"));
         assert!(said("AI review").starts_with("claude \u{b7} 4 runs"));
         assert!(said("Manual test").contains("4 of 4 criteria passed \u{b7} took"));
     }
@@ -25087,11 +25083,9 @@ pub(crate) mod tests {
         });
         let page = stage_page(&f, Stage::Build, &state, &actions, 2_000);
         let n = page.sections.len();
-        assert!(
-            matches!(&page.sections[n - 1], PageSection::Toolbar { groups }
+        assert!(matches!(&page.sections[n - 1], PageSection::Toolbar { groups }
             if groups[0].1.iter().all(|&b| matches!(actions[b].1,
-                PanelOutcome::SetUp | PanelOutcome::SetupLog)))
-        );
+                PanelOutcome::SetUp | PanelOutcome::SetupLog))));
         assert_eq!(
             page.sections.get(n - 2),
             Some(&lines(
@@ -25519,8 +25513,16 @@ pub(crate) mod tests {
             ..ModifiersState::default()
         };
         let slugs = [f.slug.clone()];
-        let got =
-            FeaturePanel::default().key(&ctrl, Keysym::Return, &f, &slugs, written, &[], &[], &[]);
+        let got = FeaturePanel::default().key(
+            &ctrl,
+            Keysym::Return,
+            &f,
+            &slugs,
+            written,
+            &[],
+            &[],
+            &[],
+        );
         assert_eq!(got, Some(PanelOutcome::FindingRefused(DOC_UNREAD)));
         // Nothing there yet: it is being written, as before.
         assert_eq!(
@@ -26136,11 +26138,9 @@ pub(crate) mod tests {
             let actions = page_actions(f, Stage::Ship, RowCtx::default());
             let page = stage_page(f, Stage::Ship, &PanelState::default(), &actions, 2_000);
             let row = page.sections.iter().find_map(|s| match s {
-                PageSection::ShipGroup(g) if g.head == "Afterwards" => g
-                    .steps
-                    .iter()
-                    .find(|r| r.label == "Close the workspace")
-                    .cloned(),
+                PageSection::ShipGroup(g) if g.head == "Afterwards" => {
+                    g.steps.iter().find(|r| r.label == "Close the workspace").cloned()
+                }
                 _ => None,
             });
             row.map(|row| actions[row.button.expect("its button")].1.clone())
