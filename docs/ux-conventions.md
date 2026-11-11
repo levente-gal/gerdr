@@ -264,7 +264,8 @@ press and drag pick whole rows and a double click opens the line in Zed.
   first: anything on the network then reaches its app and its copy of the
   data. Its app's ports open on this machine's network address under the same
   numbers, so the addresses its commands print (Expo's QR code) work on a
-  phone. `{lan_ip}` in `workflow.sandbox_env` is that address, for an app's
+  phone. A port bound to loopback only (a debugger on 127.0.0.1) stays off
+  the network, and an app listening only there is told to listen on 0.0.0.0. `{lan_ip}` in `workflow.sandbox_env` is that address, for an app's
   API URL. A port something here holds is said by name, on the "!" badge too.
   Its page says it is open in the warning colour. It closes when the sandbox
   stops or starts again, and with gerdr.

@@ -878,7 +878,7 @@ fn signal(herdr: &mut Herdr, pane_id: &str, phase: Phase, group: i32) {
 
 impl Gerdr {
     /// What herdr last said of pane `pane_id`.
-    fn pane_state(&self, pane_id: &str) -> Option<&PaneState> {
+    pub(crate) fn pane_state(&self, pane_id: &str) -> Option<&PaneState> {
         self.herdr_tabs
             .values()
             .flat_map(|detail| &detail.panes)

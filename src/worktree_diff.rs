@@ -309,19 +309,57 @@ pub enum Done {
 /// apart from its top (`root` isn't one).
 pub type Stamp = Option<(Since, Vec<Option<(u64, SystemTime)>>)>;
 
-/// The `Stamp` of the worktree at `root` with changes `since`.
-// shortcut: an untracked folder's time misses files added deeper in it,
-// so its listing waits for another change; stamp its files if that shows.
+/// The `Stamp` of the worktree at `root` with changes `since`. An
+/// untracked folder counts all it holds; `None` (read again) past
+/// `WALK_MAX` entries in one.
 fn stamp(root: &Path, since: &Since) -> Stamp {
     if !root.join(".git").exists() {
         return None;
     }
-    let meta = |path: &str| {
-        let meta = std::fs::symlink_metadata(root.join(path)).ok()?;
-        Some((meta.len(), meta.modified().ok()?))
-    };
-    let files = since.changes.iter().map(|c| meta(&c.path)).collect();
+    let mut files = Vec::with_capacity(since.changes.len());
+    for change in &since.changes {
+        let path = root.join(&change.path);
+        let meta = std::fs::symlink_metadata(&path).ok();
+        files.push(match meta {
+            Some(meta) if meta.is_dir() => Some(walk_meta(&path)?),
+            Some(meta) => meta.modified().ok().map(|at| (meta.len(), at)),
+            None => None,
+        });
+    }
     Some((since.clone(), files))
+}
+
+/// Most entries `walk_meta` looks at in one folder before giving up.
+const WALK_MAX: usize = 20_000;
+
+/// The size of all under folder `dir` and its newest time, its folders'
+/// times too: a file added deep inside changes its own folder's. `None`
+/// past `WALK_MAX` entries.
+fn walk_meta(dir: &Path) -> Option<(u64, SystemTime)> {
+    let at = |meta: &std::fs::Metadata| meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+    let mut newest = at(&std::fs::symlink_metadata(dir).ok()?);
+    let (mut size, mut seen, mut todo) = (0, 0, vec![dir.to_path_buf()]);
+    while let Some(folder) = todo.pop() {
+        let Ok(entries) = std::fs::read_dir(&folder) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            seen += 1;
+            if seen > WALK_MAX {
+                return None;
+            }
+            // Not followed: a link counts as itself.
+            let Ok(meta) = entry.metadata() else {
+                continue;
+            };
+            if meta.is_dir() {
+                todo.push(entry.path());
+            }
+            size += meta.len();
+            newest = newest.max(at(&meta));
+        }
+    }
+    Some((size, newest))
 }
 
 impl WorktreeDiff {
@@ -2645,6 +2683,22 @@ pub(crate) mod tests {
         assert!(first.is_some());
         assert_eq!(stamp(&dir, &since), first);
         std::fs::write(dir.join("a.txt"), "two!").unwrap();
+        assert_ne!(stamp(&dir, &since), first);
+        // An untracked folder: a file added deep inside counts.
+        let since = Since {
+            changes: vec![Change {
+                path: "new/".into(),
+                orig: None,
+                code: '?',
+            }],
+            ..Since::default()
+        };
+        std::fs::create_dir_all(dir.join("new/deep")).unwrap();
+        std::fs::write(dir.join("new/deep/a"), "a").unwrap();
+        let first = stamp(&dir, &since);
+        assert!(first.is_some());
+        assert_eq!(stamp(&dir, &since), first);
+        std::fs::write(dir.join("new/deep/b"), "b").unwrap();
         assert_ne!(stamp(&dir, &since), first);
         let _ = std::fs::remove_dir_all(&dir);
     }

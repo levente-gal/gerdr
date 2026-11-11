@@ -10,6 +10,8 @@
 //! - `HANDED` is the record, out of the way of that machine's own reading, until
 //!   the new writer has all of it and removes the file. If it never does, the
 //!   record goes back (`RESTORE_AFTER`): a feature is never left with no writer.
+//!   The new writer claims it by renaming it `TAKEN`, and the old one restores it
+//!   by renaming it too: one rename wins, so never both.
 //! - `HANDED_TO` stays, saying where it went: a third gerdr looking there tells a
 //!   feature that moved from one that is over.
 //! - `LEFT` is the record as it left, kept by the old writer: with the new one out
@@ -47,6 +49,9 @@ pub const REQUEST: &str = ".take.json";
 pub const ANSWER: &str = ".take-answer.json";
 /// In a feature's folder there: the record, while it moves.
 pub const HANDED: &str = "feature.json.handed";
+/// In a feature's folder there: the record handed, claimed by the new writer as
+/// it settles. Never restored by age, unlike `HANDED`.
+pub const TAKEN: &str = "feature.json.taken";
 /// In a feature's folder there: the machine it moved to.
 pub const HANDED_TO: &str = ".handed-to";
 /// In a feature's folder there: the record as it left, while the machine it went
@@ -508,12 +513,33 @@ mv {file} {HANDED} && touch {HANDED} && echo YIELDED
     )
 }
 
+/// The script claiming the record handed there, saying `CLAIMED` when it did:
+/// a rename, so the old writer can't put it back at the same time.
+pub fn claim_script(dir: &str) -> String {
+    format!(
+        "cd {} || exit 3\nmv {HANDED} {TAKEN} 2>/dev/null && echo CLAIMED\nexit 0\n",
+        shell_quote(dir)
+    )
+}
+
+/// Script `script` for folder `dir` there, run only while the record there was
+/// last handed to `to`: run late, it leaves a move since alone.
+pub fn guarded(dir: &str, to: &str, script: &str) -> String {
+    format!(
+        "cd {} || exit 0\n[ \"$(cat {HANDED_TO} 2>/dev/null)\" = {} ] || exit 0\n{script}",
+        shell_quote(dir),
+        shell_quote(to)
+    )
+}
+
 /// The script putting the record back there, as this machine won't take it after
 /// all. What's there by now stays.
 pub fn undo_script(dir: &str) -> String {
     format!(
         r#"cd {} || exit 0
-if [ -e {HANDED} ] && [ ! -e {file} ]; then mv {HANDED} {file}; rm -f {HANDED_TO} {LEFT} {TOLD}; fi
+for f in {TAKEN} {HANDED}; do
+if [ -e "$f" ] && [ ! -e {file} ]; then mv "$f" {file}; rm -f {HANDED_TO} {LEFT} {TOLD}; fi
+done
 rm -f {REQUEST} {ANSWER}
 exit 0
 "#,
@@ -525,7 +551,7 @@ exit 0
 /// The script clearing up there once the new writer has it all.
 pub fn done_script(dir: &str) -> String {
     format!(
-        "cd {} || exit 0\nrm -f {HANDED} {REQUEST} {ANSWER}\nexit 0\n",
+        "cd {} || exit 0\nrm -f {HANDED} {TAKEN} {REQUEST} {ANSWER}\nexit 0\n",
         shell_quote(dir)
     )
 }
@@ -535,7 +561,7 @@ pub fn aside_script(dir: &str, to: &str, at: u64) -> String {
     format!(
         r#"cd {} || exit 0
 [ -e {file} ] && mv {file} {ASIDE}{at}
-{sides}rm -f {HANDED}
+{sides}rm -f {HANDED} {TAKEN}
 printf '%s' {} > {HANDED_TO}
 exit 0
 "#,
@@ -984,6 +1010,39 @@ mod tests {
         assert!(t.0.join(store::FILE).exists());
         assert!(!t.0.join(HANDED).exists());
         assert!(!t.0.join(HANDED_TO).exists());
+    }
+
+    #[test]
+    fn a_record_is_claimed_once_and_given_back_or_cleared_from_there() {
+        let t = Temp::new();
+        let dir = t.0.to_string_lossy().into_owned();
+        std::fs::write(t.0.join(store::FILE), "{}").unwrap();
+        sh(&yield_script(&dir, "me"));
+        assert_eq!(sh(&claim_script(&dir)).trim(), "CLAIMED");
+        assert!(!t.0.join(HANDED).exists());
+        // Put back there meanwhile, or claimed already: no claim.
+        assert_eq!(sh(&claim_script(&dir)).trim(), "");
+        sh(&undo_script(&dir));
+        assert!(t.0.join(store::FILE).exists());
+        assert!(!t.0.join(TAKEN).exists());
+        sh(&yield_script(&dir, "me"));
+        sh(&claim_script(&dir));
+        sh(&done_script(&dir));
+        assert!(!t.0.join(TAKEN).exists());
+        assert!(!t.0.join(store::FILE).exists());
+    }
+
+    #[test]
+    fn a_late_undo_leaves_a_move_since_alone() {
+        let t = Temp::new();
+        let dir = t.0.to_string_lossy().into_owned();
+        std::fs::write(t.0.join(store::FILE), "{}").unwrap();
+        sh(&yield_script(&dir, "other"));
+        sh(&claim_script(&dir));
+        sh(&guarded(&dir, "me", &undo_script(&dir)));
+        assert!(t.0.join(TAKEN).exists());
+        sh(&guarded(&dir, "other", &undo_script(&dir)));
+        assert!(t.0.join(store::FILE).exists());
     }
 
     #[test]

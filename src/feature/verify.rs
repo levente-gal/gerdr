@@ -509,7 +509,23 @@ pub fn script_path(dir: &Path, i: usize) -> PathBuf {
     dir.join(format!("{SCRIPT}{i}"))
 }
 
-const SCRIPT: &str = "gerdr-check-";
+pub(crate) const SCRIPT: &str = "gerdr-check-";
+
+/// The variable a check's script exports to all it starts, set to
+/// `marker_of` its check: how its process group is told from another that
+/// took its pid since (see `group_ours`).
+pub(crate) const MARKER: &str = "GERDR_CHECK";
+
+/// What `MARKER` is set to for check `i` of the run in `dir`.
+fn marker_value(dir: &Path, i: usize) -> String {
+    format!("{}/{i}", dir.to_string_lossy())
+}
+
+/// `MARKER` of check `i` of the run in `dir`, as it reads in a process's
+/// environment.
+pub(crate) fn marker_of(dir: &Path, i: usize) -> String {
+    format!("{MARKER}={}", marker_value(dir, i))
+}
 
 /// Whether a command line is a check's script: what it runs ends by itself,
 /// and its card tells how it went.
@@ -564,6 +580,7 @@ pub fn script_with(dir: &Path, i: usize, check: &CheckRun, slug: &str, prelude: 
     // A lock that fails for any reason but a signal doesn't fail the check.
     format!(
         "trap : INT TERM\n{pid}printf '\\033[H\\033[2J%s\\n' {head}\nGERDR_FEATURE={slug}\nexport GERDR_FEATURE\n\
+         {MARKER}={marker}\nexport {MARKER}\n\
          if cd {cwd}; then\n  code=0\n  if [ -r . ] && command -v flock >/dev/null 2>&1; then\n    exec 9<.\n    \
          if ! flock -n 9; then\n      {queued}      printf '%s\\n' {waiting}\n      flock 9\n      code=$?\n      \
          if [ \"$code\" -le 128 ]; then\n        code=0\n        printf '\\033[H\\033[2J%s\\n' {head}\n      fi\n    fi\n  \
@@ -571,6 +588,7 @@ pub fn script_with(dir: &Path, i: usize, check: &CheckRun, slug: &str, prelude: 
          sh -c {command} </dev/null 9<&-\n    code=$?\n  fi\nelse\n  code=127\nfi\n\
          if [ \"$code\" -eq 0 ]; then\n  printf '%s\\n' {passed}\nelse\n  printf '%s\\n' \"{end}exited with $code\"\nfi\n{exit}",
         pid = leave("$$", "pid"),
+        marker = shell_quote(&marker_value(dir, i)),
         queued = leave("$$", "queued"),
         waiting = shell_quote(QUEUED),
         no_flock = shell_quote(NO_FLOCK),
@@ -613,10 +631,11 @@ pub trait Files {
     fn written(&self, i: usize, ext: &str) -> Option<SystemTime>;
     /// How long ago `at` was, by the clock of where the check runs.
     fn age(&self, at: SystemTime) -> Duration;
-    /// Send `signal` to process group `group`.
-    fn kill_group(&mut self, group: i32, signal: i32);
-    /// Send `signal` to the process group `pid` is in.
-    fn kill_group_of(&mut self, pid: i32, signal: i32);
+    /// Send `signal` to process group `group`, from check `i`'s pid file.
+    fn kill_group(&mut self, i: usize, group: i32, signal: i32);
+    /// Send `signal` to the process group `pid` is in, from check `i`'s pid
+    /// file.
+    fn kill_group_of(&mut self, i: usize, pid: i32, signal: i32);
     /// Whether `pid`, from check `i`'s pid file, may still be its script's,
     /// so its group can be signalled: a file left from before a reboot or a
     /// crash names whatever took the pid since.
@@ -655,21 +674,20 @@ impl Files for LocalFiles<'_> {
         at.elapsed().unwrap_or_default()
     }
 
-    fn kill_group(&mut self, group: i32, signal: i32) {
+    fn kill_group(&mut self, _i: usize, group: i32, signal: i32) {
         kill_group(group, signal);
     }
 
-    fn kill_group_of(&mut self, pid: i32, signal: i32) {
+    fn kill_group_of(&mut self, _i: usize, pid: i32, signal: i32) {
         // SAFETY: getpgid takes no pointers; a pid gone gives -1, which
         // `kill_group` leaves alone.
         kill_group(unsafe { libc::getpgid(pid) }, signal);
     }
 
     fn still_check(&self, i: usize, pid: i32) -> bool {
-        let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).ok();
-        let at = self.written(i, "pid");
-        at.zip(booted())
-            .is_some_and(|(at, booted)| ours(cmdline.as_deref(), at, booted))
+        // A pid file from before this boot names nothing of it.
+        let fresh = (self.written(i, "pid").zip(booted())).is_some_and(|(at, booted)| at >= booted);
+        fresh && group_ours(pid, &members(pid), &marker_of(self.0, i))
     }
 
     fn every(&self) -> Duration {
@@ -681,21 +699,65 @@ impl Files for LocalFiles<'_> {
     }
 }
 
-/// Whether a pid left at `at` still names a check's script, by what runs
-/// as it now (`cmdline`, `None` when nothing does): one left before this
-/// boot names nothing of it. One that ran its script ended and leaves its
-/// group, which nothing else can take while it has members.
-/// shortcut: a pid taken again in this boot by a group's leader that ended
-/// before it is signalled isn't told apart; check its members if it bites.
-fn ours(cmdline: Option<&[u8]>, at: SystemTime, booted: SystemTime) -> bool {
-    at >= booted
-        && match cmdline {
-            // Empty: a zombie, or a kernel thread with no group of that pid.
-            Some(cmdline) if !cmdline.is_empty() => {
-                runs_check(&String::from_utf8_lossy(cmdline))
-            }
-            _ => true,
+/// A process of a process group, as `/proc` showed it: what it holds is
+/// `None` when it couldn't be read.
+struct Member {
+    pid: i32,
+    zombie: bool,
+    environ: Option<Vec<u8>>,
+    cmdline: Option<Vec<u8>>,
+}
+
+/// Whether process group `group` is the one of the check whose `marker_of`
+/// is `marker`: a process of it alive is the check's, with the marker in its
+/// environment, or the leader running a check's script (which exports the
+/// marker after it starts). One is enough: a pid is never handed out again
+/// while a group of that id lives, so a group holding the check's process
+/// is the check's, its other members too (a server that cleared its
+/// environment). A zombie is passed over, as a signal does nothing to it.
+fn group_ours(group: i32, members: &[Member], marker: &str) -> bool {
+    (members.iter().filter(|m| !m.zombie)).any(|m| {
+        let marked = (m.environ.as_deref())
+            .is_some_and(|env| env.split(|&b| b == 0).any(|var| var == marker.as_bytes()));
+        let script = m.pid == group
+            && (m.cmdline.as_deref()).is_some_and(|c| runs_check(&String::from_utf8_lossy(c)));
+        marked || script
+    })
+}
+
+/// A process's state and process group, from its `/proc/<pid>/stat`.
+fn state_and_group(stat: &str) -> Option<(char, i32)> {
+    // Its name, in parentheses, may hold anything: the state, parent and
+    // group come right after the last.
+    let mut fields = stat.rsplit_once(')')?.1.split_whitespace();
+    let state = fields.next()?.chars().next()?;
+    Some((state, fields.nth(1)?.parse().ok()?))
+}
+
+/// The processes of process group `group` now; one gone while it is read
+/// is left out.
+fn members(group: i32) -> Vec<Member> {
+    let entries = std::fs::read_dir("/proc").into_iter().flatten().flatten();
+    let pids = entries.filter_map(|e| e.file_name().to_str()?.parse::<i32>().ok());
+    pids.filter_map(|pid| {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let (state, of) = state_and_group(&stat)?;
+        if of != group {
+            return None;
         }
+        let read = |what: &str| std::fs::read(format!("/proc/{pid}/{what}")).ok();
+        let (environ, cmdline) = (read("environ"), read("cmdline"));
+        if environ.is_none() && !Path::new(&format!("/proc/{pid}")).exists() {
+            return None;
+        }
+        Some(Member {
+            pid,
+            zombie: state == 'Z',
+            environ,
+            cmdline,
+        })
+    })
+    .collect()
 }
 
 /// When this machine booted, to the second.
@@ -893,14 +955,14 @@ pub fn watch_files(
                 // What it left running in the background goes with it, as
                 // nothing else would stop it: a server would hold its port.
                 if let Some(pid) = pid.filter(|&p| files.still_check(i, p)) {
-                    files.kill_group(pid, libc::SIGTERM);
+                    files.kill_group(i, pid, libc::SIGTERM);
                 }
                 ended(i, o);
                 return false;
             }
             if ask && panes.gone(&w.check.pane) {
                 if let Some(pid) = pid.filter(|&p| files.still_check(i, p)) {
-                    files.kill_group(pid, libc::SIGTERM);
+                    files.kill_group(i, pid, libc::SIGTERM);
                 }
                 ended(i, outcome(None, Some("its terminal was closed"), true, 0));
                 return false;
@@ -936,7 +998,7 @@ pub fn watch_files(
                 Some((at, _)) if !w.killed && at.elapsed() >= STOP_GRACE => {
                     w.killed = true;
                     if files.still_check(i, pid) {
-                        files.kill_group_of(pid, libc::SIGKILL);
+                        files.kill_group_of(i, pid, libc::SIGKILL);
                     }
                 }
                 Some((at, cut))
@@ -1574,11 +1636,11 @@ mod tests {
                 .unwrap_or_default()
         }
 
-        fn kill_group(&mut self, group: i32, signal: i32) {
+        fn kill_group(&mut self, _i: usize, group: i32, signal: i32) {
             self.kills.push((group, signal));
         }
 
-        fn kill_group_of(&mut self, pid: i32, signal: i32) {
+        fn kill_group_of(&mut self, _i: usize, pid: i32, signal: i32) {
             self.kills.push((pid, signal));
         }
 
@@ -1689,20 +1751,64 @@ mod tests {
     }
 
     #[test]
-    fn only_a_pid_still_running_its_check_is_signalled() {
-        let booted = UNIX_EPOCH + Duration::from_secs(1000);
-        let after = booted + Duration::from_secs(5);
-        let script = b"sh\0/data/checks/3/gerdr-check-0\0".as_slice();
-        assert!(ours(Some(script), after, booted));
-        // Its script ended: what it left in its group is signalled.
-        assert!(ours(None, after, booted));
-        assert!(ours(Some(b"".as_slice()), after, booted));
-        // The pid was taken by something else.
-        assert!(!ours(Some(b"firefox\0".as_slice()), after, booted));
-        // Left before this boot: nothing of it runs.
-        let before = booted - Duration::from_secs(5);
-        assert!(!ours(Some(script), before, booted));
-        assert!(!ours(None, before, booted));
+    fn only_a_group_holding_its_check_is_signalled() {
+        let marker = "GERDR_CHECK=/data/checks/3/0";
+        let member = |pid: i32, environ: &[u8], cmdline: &[u8]| Member {
+            pid,
+            zombie: false,
+            environ: Some(environ.to_vec()),
+            cmdline: Some(cmdline.to_vec()),
+        };
+        let script = member(40, b"HOME=/h\0", b"sh\0/data/checks/3/gerdr-check-0\0");
+        let marked = member(41, b"HOME=/h\0GERDR_CHECK=/data/checks/3/0\0", b"node\0");
+        assert!(group_ours(40, &[script, marked], marker));
+        // Its script ended: what it left is still the check's.
+        let left = member(41, b"GERDR_CHECK=/data/checks/3/0\0", b"node\0");
+        assert!(group_ours(40, &[left], marker));
+        // Its pid taken by a leader that ended, its group left behind.
+        let other = member(41, b"HOME=/h\0", b"vim\0");
+        assert!(!group_ours(40, &[other], marker));
+        // Another check's, or another run's.
+        let near = member(41, b"GERDR_CHECK=/data/checks/3/01\0", b"node\0");
+        assert!(!group_ours(40, &[near], marker));
+        // A member that cleared its environment, beside one of the check's:
+        // the group is still the check's.
+        let cleared = member(42, b"", b"postgres: writer\0");
+        let marked = member(41, b"GERDR_CHECK=/data/checks/3/0\0", b"node\0");
+        assert!(group_ours(40, &[cleared, marked], marker));
+        // A script's name on another than the leader isn't enough.
+        let named = member(41, b"", b"sh\0/x/gerdr-check-0\0");
+        assert!(!group_ours(40, &[named], marker));
+        // One that can't be read, alone, isn't the check's.
+        let unread = Member {
+            environ: None,
+            ..member(41, b"", b"")
+        };
+        assert!(!group_ours(40, &[unread], marker));
+        // Nothing alive: nothing to signal.
+        let zombie = Member {
+            zombie: true,
+            ..member(41, b"", b"")
+        };
+        assert!(!group_ours(40, &[zombie], marker));
+        assert!(!group_ours(40, &[], marker));
+    }
+
+    #[test]
+    fn a_process_state_and_group_are_read_after_its_name() {
+        let stat = "123 (a ) b) (c) S 1 456 456 0 -1 4194560 9";
+        assert_eq!(state_and_group(stat), Some(('S', 456)));
+        assert_eq!(state_and_group("7 (z) Z 1 7 7"), Some(('Z', 7)));
+        assert_eq!(state_and_group("garbage"), None);
+    }
+
+    #[test]
+    fn a_checks_script_marks_all_it_starts() {
+        let check = rows(&[check("a", Path::new("/r"), "make test")]).remove(0);
+        let dir = Path::new("/data/checks/3");
+        let script = script(dir, 0, &check, "slug");
+        assert!(script.contains("\nGERDR_CHECK=/data/checks/3/0\nexport GERDR_CHECK\n"));
+        assert_eq!(marker_of(dir, 0), "GERDR_CHECK=/data/checks/3/0");
     }
 
     #[test]

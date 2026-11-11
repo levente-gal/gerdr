@@ -233,7 +233,7 @@ impl Gerdr {
             tracing::warn!("scrollback of {pane_id}: {err}");
             return self.show_error(format!("Couldn't read the pane's output: {err}"));
         }
-        let label = self.pane_bar_content(&pane_id).label;
+        let label = self.scrollback_label(&pane_id);
         self.close_for_scrollback();
         // Empty until the read comes back (see `scrollback_read`).
         let mut viewer = Scrollback::new(id, pane_id, label, "", 0);
@@ -311,13 +311,28 @@ impl Gerdr {
         let Some((_, fit)) = self.scrollback_place() else {
             return;
         };
+        let label = self.scrollback_label(pane_id);
         if let Some(viewer) = self.scrollback.as_mut() {
+            viewer.label = label;
             viewer.reload(&text, fit);
             viewer.set_styles(&styled);
             let n = viewer.line_count();
             let s = if n == 1 { "" } else { "s" };
             self.show_success(format!("Snapshot read again: {n} line{s}"));
         }
+    }
+
+    /// What the scrollback of `pane_id` is titled by: what runs there, else
+    /// the pane's folder. Not the last command once it ended: a shell's own
+    /// loops and builtins start no process, so it may be long past.
+    fn scrollback_label(&self, pane_id: &str) -> String {
+        let content = self.pane_bar_content(pane_id);
+        if content.status.runs() {
+            return content.label;
+        }
+        (self.pane_state(pane_id).and_then(|p| p.cwd.as_deref()))
+            .map(|cwd| crate::paths::tilde(cwd, crate::home_dir().as_deref()))
+            .unwrap_or(content.label)
     }
 
     /// What the viewer takes the place of goes.

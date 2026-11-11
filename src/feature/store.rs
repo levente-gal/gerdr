@@ -81,12 +81,17 @@ pub fn load_all(root: Option<&Path>, project: &str) -> Result<Vec<Feature>, Stri
 
 /// `load_all` of folder `folder`, and how many features had their history moved
 /// out of their records.
+/// The source of the problems of feature files that aren't loaded.
+const FILE_PROBLEMS: &str = "feature files";
+
 fn load_dir(folder: &Path) -> Result<(Vec<Feature>, usize), String> {
     let entries = match std::fs::read_dir(folder) {
         Ok(entries) => entries,
         Err(err) if err.kind() == ErrorKind::NotFound => return Ok((Vec::new(), 0)),
         Err(err) => return Err(format!("couldn't list {}: {err}", folder.display())),
     };
+    // Read again: what is still wrong here is said again, the rest is gone.
+    crate::problems::clear_under(FILE_PROBLEMS, &format!("{}/", folder.display()));
     let mut features = Vec::new();
     let mut moved = 0;
     let mut written = Vec::new();
@@ -100,7 +105,9 @@ fn load_dir(folder: &Path) -> Result<(Vec<Feature>, usize), String> {
             Err(err) if err.kind() == ErrorKind::NotADirectory => continue,
             // Not set aside: the file may be fine, only out of reach now.
             Err(err) => {
-                tracing::warn!("reading {}: {err}", path.display());
+                let at = path.display().to_string();
+                let text = format!("gerdr can't read {at}: {err}; that feature isn't loaded");
+                crate::problems::report_at(FILE_PROBLEMS, &at, text);
                 continue;
             }
         };
@@ -108,19 +115,12 @@ fn load_dir(folder: &Path) -> Result<(Vec<Feature>, usize), String> {
             // A copied folder (`cp -r login login-old`): saving it would go
             // over the real one's.
             Ok(feature) if dir.file_name() != Some(feature.slug.as_ref()) => {
-                tracing::warn!(
-                    "{} is of feature {:?}: not loaded",
-                    path.display(),
+                let at = path.display().to_string();
+                let text = format!(
+                    "{at} is of feature {:?}, not of its folder: it isn't loaded",
                     feature.slug
                 );
-                crate::problems::report(
-                    "store",
-                    format!(
-                        "{} is of feature {:?}, not of its folder: it isn't loaded",
-                        path.display(),
-                        feature.slug
-                    ),
-                );
+                crate::problems::report_at(FILE_PROBLEMS, &at, text);
             }
             Ok(mut feature) => {
                 let inline = holds_sides(&feature);

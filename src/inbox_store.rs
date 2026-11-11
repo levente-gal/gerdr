@@ -108,19 +108,29 @@ pub fn load(root: Option<&Path>, project: &str) -> InboxFile {
         }
     };
     let mut frozen = FROZEN.lock().unwrap_or_else(|e| e.into_inner());
+    let at = path.display().to_string();
     match read {
         Ok(inbox) => {
-            frozen.remove(&path);
+            if frozen.remove(&path) {
+                crate::problems::clear_at(PROBLEMS, &at);
+            }
             inbox
         }
         Err(set_aside) => {
             if !set_aside {
+                let text = format!(
+                    "gerdr can't read {at}: snoozes and dismissals there aren't saved until it can"
+                );
+                crate::problems::report_at(PROBLEMS, &at, text);
                 frozen.insert(path);
             }
             InboxFile::default()
         }
     }
 }
+
+/// The source of the problem of an inbox file that can't be read.
+const PROBLEMS: &str = "inbox";
 
 /// Save project `project`'s inbox under `root`, atomically.
 pub fn save(root: Option<&Path>, project: &str, inbox: &InboxFile) -> std::io::Result<()> {

@@ -977,7 +977,19 @@ pub fn remove_sandbox_profiles(project: &str, slug: &str) {
 /// to `~/.local/share/gerdr/zed`, which also keeps Zed apart from one on
 /// the host.
 pub fn zed_data_dir(home: &Path, instance: &Path) -> PathBuf {
-    let dir = instance.join("zed");
+    ready_zed_dir(home, instance.join("zed"))
+}
+
+/// The data dir of the Zeds gerdr opens on worktrees, like `zed_data_dir`
+/// but a Zed process apart: the project's Zed on a multi-repository root
+/// holds the worktrees under `.features` too, and `zed --existing` hands
+/// a file to the first window that holds it (Zed 1.27), not the
+/// worktree's.
+pub fn worktree_zed_dir(home: &Path, instance: &Path) -> PathBuf {
+    ready_zed_dir(home, instance.join("zed-worktrees"))
+}
+
+fn ready_zed_dir(home: &Path, dir: PathBuf) -> PathBuf {
     if let Err(err) = link_zed_shared(&home.join(".local/share/gerdr/zed"), &dir) {
         tracing::warn!("making Zed's data dir {}: {err}", dir.display());
     }
@@ -1520,7 +1532,11 @@ fn own_instance(command: &str, instance: Option<&Path>) -> Option<(String, Optio
     .iter()
     .any(|flag| command.contains(flag))
     {
-        return None;
+        // A Zed given its data dir (see `worktree_zed_dir`) keeps it, and
+        // is still gerdr's Zed.
+        return ZEDS
+            .contains(&key.as_str())
+            .then(|| (command.to_owned(), None));
     }
     let home = home_dir()?;
     // A Flatpak app sees only its own folder.
@@ -1647,10 +1663,7 @@ pub fn append_log(path: &Path) -> Option<std::fs::File> {
     let open = || {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
-            let logs = std::fs::read_dir(dir).into_iter().flatten().flatten();
-            (logs.map(|e| e.path()))
-                .filter(|p| p.extension().is_some_and(|e| e == "log"))
-                .for_each(|log| cut_big_log(&log));
+            cut_logs_in(dir);
         }
         cut_big_log(path);
         std::fs::OpenOptions::new()
@@ -1661,6 +1674,22 @@ pub fn append_log(path: &Path) -> Option<std::fs::File> {
     open()
         .inspect_err(|err| tracing::warn!("opening {}: {err}", path.display()))
         .ok()
+}
+
+/// Start every log of gerdr's and its apps' over that grew past
+/// `LOG_MAX` since it was opened: the logs of programs that run for days.
+pub fn cut_big_logs() {
+    let state = state_dir();
+    cut_logs_in(&state);
+    cut_logs_in(&state.join("launch"));
+}
+
+/// Start each `*.log` in `dir` over that is bigger than `LOG_MAX`.
+fn cut_logs_in(dir: &Path) {
+    let logs = std::fs::read_dir(dir).into_iter().flatten().flatten();
+    (logs.map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|e| e == "log"))
+        .for_each(|log| cut_big_log(&log));
 }
 
 /// Start the log at `path` over if bigger than `LOG_MAX`. Its writers
@@ -2167,7 +2196,11 @@ mod tests {
             run("flatpak run dev.zed.Zed").unwrap(),
             "flatpak run dev.zed.Zed --user-data-dir=~/.var/app/dev.zed.Zed/gerdr-profile"
         );
-        assert_eq!(run("zed --user-data-dir /x"), None);
+        assert_eq!(
+            run("zed --user-data-dir /x").unwrap(),
+            "zed --user-data-dir /x"
+        );
+        assert_eq!(run("code --user-data-dir /x"), None);
         assert_eq!(own_instance("zed", None), None);
         assert_eq!(own_instance("cursor", None), None);
         assert_eq!(own_instance("chromium", None), None);

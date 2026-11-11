@@ -98,6 +98,17 @@ pub fn clear_at(source: &'static str, at: &str) {
     }
 }
 
+/// Let go of every problem from `source` at a place starting with `prefix`
+/// (a folder read again: what is still wrong there is said again).
+pub fn clear_under(source: &'static str, prefix: &str) {
+    let mut all = AT.lock().unwrap_or_else(|e| e.into_inner());
+    let before = all.len();
+    all.retain(|(s, at), _| *s != source || !at.starts_with(prefix));
+    if all.len() != before {
+        set_from(source, &all);
+    }
+}
+
 fn set_from(source: &'static str, all: &BTreeMap<(&'static str, String), String>) {
     let texts = (all.iter())
         .filter(|((s, _), _)| *s == source)
