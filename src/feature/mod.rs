@@ -249,6 +249,11 @@ pub struct KeptHead {
     /// The commit its worktree was on: the branch's head, or the detached
     /// commit of a context repository.
     pub sha: String,
+    /// What it had uncommitted, untracked files too, as a stash commit kept
+    /// under `refs/gerdr/kept-changes/<branch>`: an abandoned feature's, put
+    /// back once it is restored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changes: Option<String>,
 }
 
 /// A step that followed shipping a feature.

@@ -59,21 +59,30 @@ pub enum Action {
 }
 
 impl Action {
-    /// In words, for the Ship sheet: "Push services-api", "Open a pull
-    /// request into dev for services-api". `Action` doesn't carry the
-    /// branch: the sheet says it once, above the list.
-    pub fn label(&self) -> String {
+    /// In words, for the Ship sheet, as the Ship page's rows say it:
+    /// "Push feature/x to origin", "Open a pull request into dev". With
+    /// several repositories (`one` false) each names its own: "Push
+    /// feature/x of services-api to origin".
+    pub fn label(&self, branch: &str, one: bool) -> String {
+        let named = |word: &str, repo: &str| match one {
+            true => String::new(),
+            false => format!(" {word} {repo}"),
+        };
         match self {
-            Self::Push { repo } => format!("Push {repo}"),
+            Self::Push { repo } => format!("Push {branch}{} to origin", named("of", repo)),
             Self::OpenPr { repo, base } => {
-                format!("Open a pull request into {base} for {repo}")
+                format!("Open a pull request into {base}{}", named("for", repo))
             }
             Self::KeepPr { repo, url } => {
-                format!("Keep the pull request open for {repo}: {url}")
+                format!("Keep the pull request open{}: {url}", named("for", repo))
             }
             Self::LinkPrs => "Link the pull requests to each other".into(),
-            Self::Squash { repo, base } => format!("Squash the feature into {base} in {repo}"),
-            Self::PushBase { repo, base } => format!("Push {base} of {repo} to origin"),
+            Self::Squash { repo, base } => {
+                format!("Squash {branch} into {base}{}", named("in", repo))
+            }
+            Self::PushBase { repo, base } => {
+                format!("Push {base}{} to origin", named("of", repo))
+            }
         }
     }
 }
@@ -1131,15 +1140,14 @@ pub enum Undo {
 }
 
 impl Undo {
-    /// In words, for the sheet asking first.
+    /// What follows, in words, for the dialog asking first: a line under
+    /// its question, not the question again.
     pub fn label(&self, branch: &str) -> String {
         match self {
-            Self::ClosePr { repo, url } => {
-                format!("Close the pull request of {repo}: {url}")
-            }
-            Self::DeleteBranch { repo, .. } => format!("Delete {branch} of {repo} on origin"),
+            Self::ClosePr { url, .. } => format!("Its pull request closes on GitHub: {url}"),
+            Self::DeleteBranch { .. } => format!("{branch} goes off origin"),
             Self::ResetSquash { repo, base } => {
-                format!("Take the squash off {base} in {repo}'s main worktree")
+                format!("The squash comes off {base} in {repo}'s main worktree")
             }
         }
     }
@@ -1304,7 +1312,7 @@ fn reset_squash(repo: &Repo, base: &str, branch: &str) -> Result<(), String> {
 }
 
 /// The repository `action` acts on, or "" for one on all.
-fn action_repo(action: &Action) -> &str {
+pub(crate) fn action_repo(action: &Action) -> &str {
     match action {
         Action::Push { repo }
         | Action::OpenPr { repo, .. }
@@ -1680,7 +1688,7 @@ esac
         assert_eq!(check.actions.len(), 5);
         assert_eq!(check.actions[4], Action::LinkPrs);
         assert_eq!(
-            check.actions[4].label(),
+            check.actions[4].label("feature/x", false),
             "Link the pull requests to each other"
         );
 
@@ -2642,17 +2650,20 @@ esac
             },
         ]
         .iter()
-        .map(Action::label)
+        .map(|a| a.label("feature/x", false))
         .collect();
         assert_eq!(
             labels,
             [
-                "Push api",
+                "Push feature/x of api to origin",
                 "Open a pull request into dev for api",
                 "Keep the pull request open for api: https://x/1",
-                "Squash the feature into main in api",
+                "Squash feature/x into main in api",
                 "Push main of api to origin",
             ]
         );
+        // One repository: as the Ship page's rows say it.
+        let push = Action::Push { repo: api() };
+        assert_eq!(push.label("feature/x", true), "Push feature/x to origin");
     }
 }

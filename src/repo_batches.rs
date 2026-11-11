@@ -2764,6 +2764,24 @@ fn repos_menu_spec(hints: &[&Hint], path: Option<PathBuf>, anchor: chrome::Rect)
             item
         })
         .collect();
+    // Those deciding a file under review (Approve, Send back) go apart
+    // from the rest, a rule either side.
+    let decides = |i: &MenuItem| {
+        matches!(
+            i.action,
+            MenuAction::ReposAction(ReposButton::Approve | ReposButton::SendBack)
+        )
+    };
+    if let Some(first) = items.iter().position(decides).filter(|i| *i > 0) {
+        items.insert(first, MenuItem::separator());
+    }
+    if let Some(last) = items
+        .iter()
+        .rposition(decides)
+        .filter(|i| i + 1 < items.len())
+    {
+        items.insert(last + 1, MenuItem::separator());
+    }
     if let Some(path) = path {
         items.push(MenuItem::new("Copy path", MenuAction::CopyPath(path)));
     }

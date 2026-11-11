@@ -2,7 +2,8 @@
 //! back with its tabs (Zed and apps; terminals and what ran in them are
 //! gone), its worktrees removed come back on their commits, set up again,
 //! with its workspace. Offered by the toast saying it happened, Ship's page
-//! (Alt+Z), and, for worktrees, the launcher.
+//! (Alt+Z), and, for worktrees, the launcher. An abandoned feature comes back
+//! the same way, open again, with what it had uncommitted (`layout::keep`).
 
 use crate::{
     Gerdr, Tab,
@@ -188,10 +189,7 @@ impl Gerdr {
             slug: slug.to_owned(),
             job: Job::Remove,
             repo: None,
-            what: format!(
-                "Restoring the worktrees of \u{201c}{}\u{201d}",
-                feature.title
-            ),
+            what: format!("Restoring \u{201c}{}\u{201d}", feature.title),
         };
         let (project, slug) = (project.to_owned(), slug.to_owned());
         self.feature_work(Some(busy), move |_| Done::WorktreesRestored {
@@ -225,7 +223,19 @@ impl Gerdr {
         };
         let now = feature::now();
         feature.after_undid(AfterStep::Remove, now);
-        feature.log(now, "worktrees restored");
+        // Abandoned, it is open again, as it was.
+        let abandoned = feature.status == feature::Status::Abandoned;
+        if abandoned {
+            feature.status = feature::Status::Open;
+        }
+        feature.log(
+            now,
+            if abandoned {
+                "restored"
+            } else {
+                "worktrees restored"
+            },
+        );
         let dirs: Vec<std::path::PathBuf> = (feature.folders().into_iter())
             .map(|(_, dir)| dir.to_path_buf())
             .collect();
@@ -237,9 +247,13 @@ impl Gerdr {
         let setting_up = self.start_setup(project, slug);
         self.reopen_with_tabs(project, slug, &done);
         self.probe_feature(project, slug);
+        let what = match abandoned {
+            true => format!("\u{201c}{title}\u{201d}"),
+            false => format!("the worktrees of \u{201c}{title}\u{201d}"),
+        };
         self.show_success(match setting_up {
-            true => format!("Restored the worktrees of \u{201c}{title}\u{201d}; setting them up"),
-            false => format!("Restored the worktrees of \u{201c}{title}\u{201d}"),
+            true => format!("Restored {what}; setting it up"),
+            false => format!("Restored {what}"),
         });
     }
 }

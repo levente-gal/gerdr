@@ -4907,7 +4907,10 @@ pub fn remove_label(feature: &Feature) -> &'static str {
     if feature.writer.is_some() && feature.status != Status::Open {
         ""
     } else if feature.status == Status::Done {
-        "Remove worktrees"
+        match feature.touched().count() > 1 {
+            true => "Remove worktrees and branches",
+            false => "Remove worktree and branch",
+        }
     } else {
         "Abandon"
     }
@@ -10556,7 +10559,15 @@ impl Gerdr {
             )),
             ShipAsk::AllRan => self.ship_all_ran(project, slug),
             ShipAsk::Ready(asked) => {
-                let mut steps: Vec<String> = asked.actions.iter().map(Action::label).collect();
+                let mut repos: Vec<&str> = (asked.actions.iter())
+                    .map(ship::action_repo)
+                    .filter(|r| !r.is_empty())
+                    .collect();
+                repos.dedup();
+                let one = repos.len() <= 1;
+                let mut steps: Vec<String> = (asked.actions.iter())
+                    .map(|a| a.label(&branch, one))
+                    .collect();
                 let check = probe.and_then(|p| p.ship.as_ref());
                 let removing = check.is_some_and(|c| ship::removable(&feature, c));
                 steps.extend(ship_after_line(&feature, removing));
@@ -10867,24 +10878,26 @@ impl Gerdr {
         };
         let title = feature.title.clone();
         let abandon = feature.status != Status::Done;
+        let what = worktrees_words(feature);
         let (question, go) = if abandon {
             (format!("Abandon \u{201c}{title}\u{201d}?"), "Abandon")
         } else {
             (
-                format!("Remove the worktrees of \u{201c}{title}\u{201d}?"),
-                "Remove worktrees",
+                format!("Remove the {what} of \u{201c}{title}\u{201d}?"),
+                "Remove",
             )
         };
         // Each on a line of its own: the dialog cuts a line to its width.
-        let mut lines = vec![removal_body(&losses)];
+        // Abandoned, what they have is kept to come back with it.
+        let mut lines = match abandon {
+            true => vec![format!("Its {what} go; commits and changes are kept")],
+            false => vec![removal_body(&what, &losses)],
+        };
         if let Some(w) = self.feature_workspace(&project, &slug) {
             let running = self.workspace_running(w);
             lines.push(crate::feature_workspace::closing_text(&running));
         }
-        // Unlike removing a shipped feature's worktrees, nothing brings it back.
-        if abandon {
-            lines.push("Abandoning can't be undone".to_owned());
-        }
+        lines.push("Restore brings it back: its toast, or Find and switch".to_owned());
         let body = format!("{}.", lines.join(".\n"));
         let force = !losses.is_empty();
         let then = crate::confirm::Then::RemoveFeature {
@@ -10930,10 +10943,9 @@ impl Gerdr {
         }
         // Its agents on other machines go with its tabs.
         self.close_machine_panes_of(&feature);
-        // Removed, not abandoned, it can come back as it was: with these.
-        let tabs = (self.feature_workspace(project, slug))
-            .filter(|_| !abandon)
-            .map_or_else(Vec::new, |w| self.kept_tabs(w));
+        // It can come back as it was, abandoned too: with these.
+        let tabs =
+            (self.feature_workspace(project, slug)).map_or_else(Vec::new, |w| self.kept_tabs(w));
         let (project, slug) = (project.to_owned(), slug.to_owned());
         // Its workspace closes first, its terminals gone before its
         // worktrees go.
@@ -10945,12 +10957,16 @@ impl Gerdr {
                 if let Some(removal) = &removal {
                     removal.go();
                 }
-                let heads = match abandon {
-                    true => Vec::new(),
-                    false => layout::heads(&feature),
+                // Abandoned, all it has is kept first: commits, changes.
+                let (heads, result) = match abandon {
+                    true => match layout::keep(&feature) {
+                        Ok(heads) => (heads, layout::remove(&feature, force)),
+                        Err(why) => (Vec::new(), Err(format!("nothing went: {why}"))),
+                    },
+                    false => (layout::heads(&feature), layout::remove(&feature, force)),
                 };
                 Done::Removed {
-                    result: layout::remove(&feature, force),
+                    result,
                     project,
                     slug,
                     abandon,
@@ -10988,21 +11004,18 @@ impl Gerdr {
             feature.log(now, "worktrees removed");
         }
         self.save_feature(project, slug);
-        if !abandon && !heads.is_empty() {
+        if abandon || !heads.is_empty() {
             self.note_after_ship(project, slug, feature::AfterStep::Remove, tabs, heads);
         }
         // Abandoned, it closed as it was saved.
         if !abandon {
             self.ai_work_close(project, slug);
         }
-        match abandon {
-            true => self.show_success(format!("Abandoned \u{201c}{title}\u{201d}")),
-            false => self.show_removed(
-                project,
-                slug,
-                format!("Removed the worktrees of \u{201c}{title}\u{201d}"),
-            ),
-        }
+        let text = match abandon {
+            true => format!("Abandoned \u{201c}{title}\u{201d}"),
+            false => format!("Removed the worktrees of \u{201c}{title}\u{201d}"),
+        };
+        self.show_removed(project, slug, text);
         if let Some(feature) = self.feature(project, slug).cloned() {
             self.forget_on_machines(&feature);
         }
@@ -12277,11 +12290,20 @@ fn remove_repos_body(repos: usize, losses: &[String], to_context: bool) -> Strin
 
 /// What a confirm dialog about removing a feature's worktrees says of
 /// `losses`, what goes with them.
-fn removal_body(losses: &[String]) -> String {
+fn removal_body(what: &str, losses: &[String]) -> String {
     match losses {
-        [] => "Its worktrees go; nothing in them is lost".into(),
-        [one] => format!("Its worktrees go, and with them {one}"),
-        more => format!("Its worktrees go, and with them {}", more.join(", ")),
+        [] => format!("Its {what} go; nothing in them is lost"),
+        [one] => format!("Its {what} go, and with them {one}"),
+        more => format!("Its {what} go, and with them {}", more.join(", ")),
+    }
+}
+
+/// What removing `feature`'s worktrees takes, in words: "worktree and
+/// branch", or "worktrees and branches" with several repositories.
+fn worktrees_words(feature: &Feature) -> &'static str {
+    match feature.touched().count() > 1 {
+        true => "worktrees and branches",
+        false => "worktree and branch",
     }
 }
 
@@ -24524,7 +24546,7 @@ pub(crate) mod tests {
         // A done feature's folder is gone here: nothing to remove.
         let listed: Vec<&str> = listed(&all).iter().map(|f| f.slug.as_str()).collect();
         assert_eq!(listed, ["a"]);
-        assert_eq!(remove_label(&all[2]), "Remove worktrees");
+        assert_eq!(remove_label(&all[2]), "Remove worktree and branch");
     }
 
     #[test]
@@ -24575,12 +24597,12 @@ pub(crate) mod tests {
     #[test]
     fn removing_names_what_is_lost() {
         assert_eq!(
-            removal_body(&[]),
-            "Its worktrees go; nothing in them is lost"
+            removal_body("worktree and branch", &[]),
+            "Its worktree and branch go; nothing in them is lost"
         );
         assert_eq!(
-            removal_body(&["2 changed files in api".into()]),
-            "Its worktrees go, and with them 2 changed files in api"
+            removal_body("worktree and branch", &["2 changed files in api".into()]),
+            "Its worktree and branch go, and with them 2 changed files in api"
         );
     }
 
@@ -26185,6 +26207,7 @@ pub(crate) mod tests {
         let head = KeptHead {
             repo: "api".into(),
             sha: "3f9c2a1deadbeef".into(),
+            changes: None,
         };
         f.after_ran(after(1_990, AfterStep::Remove, vec![head]));
         let why = crate::ship_after::after_refusal(&f, AfterStep::Close).unwrap();

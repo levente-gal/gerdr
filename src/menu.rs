@@ -174,6 +174,9 @@ pub enum MenuAction {
     Inbox,
     /// Open the feature panel (the new feature dialog without features).
     Features,
+    /// The shown project's history: its shipped and abandoned features that
+    /// can come back, in the launcher (see `Gerdr::open_feature_history`).
+    FeatureHistory,
     /// The new feature dialog, from the folder of workspace `.0` (else the
     /// active one's; see `Gerdr::open_new_feature`).
     NewFeature(Option<usize>),
@@ -331,6 +334,11 @@ impl MenuItem {
             note: true,
             ..Self::new(text, MenuAction::OpenLog)
         }
+    }
+
+    /// A rule between groups of rows: a note with no text.
+    pub fn separator() -> Self {
+        Self::note("")
     }
 
     pub fn hint(mut self, hint: &str) -> Self {
@@ -615,6 +623,7 @@ impl Gerdr {
             MenuAction::Repos => self.open_repos(),
             MenuAction::Inbox => self.open_inbox(None),
             MenuAction::Features => self.open_features(),
+            MenuAction::FeatureHistory => self.open_feature_history(),
             MenuAction::NewFeature(at) => self.open_new_feature(at),
             MenuAction::ReviewPulls(at) => self.open_review_pulls(at),
             MenuAction::OpenFeature(project, slug) => self.open_linked_feature(&project, &slug),

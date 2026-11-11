@@ -430,6 +430,12 @@ mod tests {
                 let ratio = contrast(colour, p.selected);
                 assert!(ratio >= 3.0, "{name}: {what} on selected is {ratio:.2}:1");
             }
+            // A danger button's outline (Abandon), on its fill.
+            let ratio = contrast(p.error, p.element);
+            assert!(
+                ratio >= 3.0,
+                "{name}: error outline on element is {ratio:.2}:1"
+            );
             // A badge's count, or a chosen Pass button's label, on its colour.
             for (what, colour) in [
                 ("accent", p.accent),

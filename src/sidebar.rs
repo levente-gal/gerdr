@@ -1018,10 +1018,16 @@ impl Gerdr {
                 })
             }
             SidebarHit::FeaturesTitle => {
-                let tip = Tooltip::new(
-                    "The project's open features · open the feature panel",
-                    layout.features_title?,
-                );
+                // Shipped and abandoned features leave the list: say where.
+                let history = self.feature_history_count();
+                let text = match history {
+                    0 => "The project's open features · open the feature panel".to_owned(),
+                    n => format!(
+                        "The project's open features · open the feature panel · \
+                         {n} shipped or abandoned in History (right-click)"
+                    ),
+                };
+                let tip = Tooltip::new(&text, layout.features_title?);
                 Some(match self.keymap.help().key_of(Action::Features, 0) {
                     Some(key) => tip.key(&key),
                     None => tip,
@@ -1269,6 +1275,7 @@ impl Gerdr {
                     anchor: at,
                     items: vec![
                         MenuItem::new("Open features", MenuAction::Features),
+                        MenuItem::new("History\u{2026}", MenuAction::FeatureHistory),
                         MenuItem::new("New feature\u{2026}", MenuAction::NewFeature(None)),
                         MenuItem::new(
                             "Review pull requests\u{2026}",

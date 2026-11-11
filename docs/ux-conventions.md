@@ -126,8 +126,10 @@ press and drag pick whole rows and a double click opens the line in Zed.
 - Cheap destructive actions don't ask; they show an Undo toast instead.
   Reopening a done stage asks only while the next stage's agent runs; its
   toast's Undo marks the stage done again. Closing a feature's idle workspace
-  doesn't ask; its toast's Open brings it back. Abandoning a feature asks, and
-  says it can't be undone.
+  doesn't ask; its toast's Open brings it back. Abandoning a feature asks:
+  its worktrees and branches go, but their commits and uncommitted changes
+  are kept, and its toast's Restore, or its row in Find and switch, brings it
+  back open. Abandon is an outlined danger button, never the page's loudest.
 - One exception, asked for: a repository on a feature's branch never leaves the
   feature without asking, even with nothing to lose. It takes a worktree and a
   branch with it, and agents may be working there.

@@ -6389,11 +6389,11 @@ impl Painter {
         }
         let labels = FEATURE_BUTTONS.iter().copied().chain([view.remove]);
         for (i, (rect, label)) in l.buttons.iter().zip(labels).enumerate() {
-            let destructive = i == FEATURE_BUTTONS.len();
-            let style = if destructive {
-                ButtonStyle::Destructive
-            } else {
-                ButtonStyle::Plain
+            // Abandon is offered, never the loudest; removing a shipped
+            // feature's worktrees loses nothing, so it is a plain one.
+            let style = match i == FEATURE_BUTTONS.len() && label == "Abandon" {
+                true => ButtonStyle::Danger,
+                false => ButtonStyle::Plain,
             };
             let hovered = view.hover == Some(FeatureTabHit::Button(i));
             if !l.compact {
@@ -6401,7 +6401,7 @@ impl Painter {
                 continue;
             }
             self.button(c, "", *rect, (hovered, false), style, scale, p);
-            let color = if destructive { p.on_accent } else { p.text };
+            let color = p.text;
             icon_sdf(c, *rect, scale, color, |x, y| match i {
                 0 => tab(x, y, s * 0.8),
                 1 => copy(x, y, s * 1.2),

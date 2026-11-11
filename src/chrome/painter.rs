@@ -241,6 +241,9 @@ pub enum ButtonStyle {
     Passed,
     /// Filled with the error colour: the other choice made of such a pair.
     Failed,
+    /// Outlined in the error colour, its label as a plain one's: an action
+    /// that loses something, offered but not the page's loudest (Abandon).
+    Danger,
 }
 
 impl From<bool> for ButtonStyle {
@@ -899,7 +902,7 @@ impl Painter {
         let hovered = hovered && style != ButtonStyle::Off;
         if focused {
             let ring = match style {
-                ButtonStyle::Destructive | ButtonStyle::Failed => p.error,
+                ButtonStyle::Destructive | ButtonStyle::Failed | ButtonStyle::Danger => p.error,
                 ButtonStyle::Passed => p.success,
                 _ => p.accent,
             };
@@ -924,14 +927,17 @@ impl Painter {
                 p.on_accent
             }
             ButtonStyle::Quiet if !hovered => p.text,
-            ButtonStyle::Plain | ButtonStyle::Off | ButtonStyle::Quiet => {
+            ButtonStyle::Plain | ButtonStyle::Off | ButtonStyle::Quiet | ButtonStyle::Danger => {
                 let fill = if hovered { p.button_hover() } else { p.element };
-                c.rounded(x, y, w, h, r, p.border);
+                let edge = match style {
+                    ButtonStyle::Danger => p.error,
+                    _ => p.border,
+                };
+                c.rounded(x, y, w, h, r, edge);
                 c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, r - b, fill);
-                if style == ButtonStyle::Off {
-                    p.muted
-                } else {
-                    p.text
+                match style {
+                    ButtonStyle::Off => p.muted,
+                    _ => p.text,
                 }
             }
         };

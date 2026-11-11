@@ -396,7 +396,10 @@ fn finish_question(
 /// What the Ship sheet for feature `title` on `branch` says: its title,
 /// the branch once, and the steps shipping takes, a line each.
 fn ship_question(title: &str, branch: &str, steps: &[String]) -> (String, String) {
-    let body = std::iter::once(format!("From {branch}:"))
+    // Said once: a step pushing it names it already.
+    let from = (!steps.iter().any(|s| s.contains(branch))).then(|| format!("From {branch}:"));
+    let body = from
+        .into_iter()
         .chain(steps.iter().cloned())
         .collect::<Vec<_>>()
         .join("\n");
@@ -1057,14 +1060,23 @@ mod tests {
 
     #[test]
     fn the_ship_sheet_lists_the_steps_a_line_each() {
-        let steps = ["Push api".to_owned(), "Open a pull request".to_owned()];
+        let steps = [
+            "Merge into main".to_owned(),
+            "Push main to origin".to_owned(),
+        ];
         let (title, body) = ship_question("Bulk export", "feature/bulk-export", &steps);
         assert_eq!(title, "Ship \u{201c}Bulk export\u{201d}?");
         assert_eq!(
             body,
-            "From feature/bulk-export:\nPush api\nOpen a pull request"
+            "From feature/bulk-export:\nMerge into main\nPush main to origin"
         );
         assert_eq!(chrome::confirm_body_lines(&body), 3);
+        // A step naming the branch says it: no line of its own.
+        let steps = ["Push feature/b to origin".to_owned()];
+        assert_eq!(
+            ship_question("B", "feature/b", &steps).1,
+            "Push feature/b to origin"
+        );
     }
 
     #[test]

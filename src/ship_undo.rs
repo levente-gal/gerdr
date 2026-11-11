@@ -49,7 +49,7 @@ impl Gerdr {
         };
         let branch = feature.branch();
         let body = (undos.iter())
-            .map(|u| format!("\u{2022} {}", u.label(&branch)))
+            .map(|u| u.label(&branch))
             .collect::<Vec<_>>()
             .join("\n");
         let then = Then::UndoShip {
@@ -134,5 +134,32 @@ impl Gerdr {
                 said.join(", ")
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_undo_dialog_says_what_follows_not_its_question_again() {
+        let undos = [
+            ship::Undo::ClosePr {
+                repo: "shop".into(),
+                url: "https://x/pull/7".into(),
+            },
+            ship::Undo::DeleteBranch {
+                repo: "shop".into(),
+                sha: None,
+            },
+        ];
+        assert_eq!(
+            undos
+                .iter()
+                .map(|u| u.label("feature/x"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            "Its pull request closes on GitHub: https://x/pull/7\nfeature/x goes off origin"
+        );
     }
 }
