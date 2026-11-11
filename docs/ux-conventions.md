@@ -136,6 +136,11 @@ press and drag pick whole rows and a double click opens the line in Zed.
 
 - Toast levels: Success / Info for what happened, Warning for what needs a
   look, Error for what failed. Never report a failure with Info.
+- The same toast text again replaces the one showing, not a stack of it; a
+  toast whose button was done another way (the page's) goes. A toast names
+  its cause, not gerdr's files. Toasts stack above the feature tab's footer.
+- A dialog's keys at the left of its buttons start with Enter and the button
+  it presses (Cancel first on a destructive one).
 - Errors and warnings stay longer than info and pause while hovered; every
   toast can be dismissed. Toasts are painted above every non-modal popup.
 - What the user must fix (config, missing tool, unreachable source) goes to
@@ -295,6 +300,16 @@ press and drag pick whole rows and a double click opens the line in Zed.
   `element`.
 - One scrollbar (`chrome/thumb.rs`), one button painter
   (`Painter::button`), one query field with the magnifier.
+- A feature page has one filled primary button, in the tab's header at its
+  right end, whatever card it acts on (`StagePage::primary`); a card's own
+  (a finding's, a round's, a repository's on Ship) stays on it. The rare
+  ones (Start over…, Set up again, Commands…, a sandbox's Reset data… and
+  Remove sandbox…, and the feature's Open tab, Copy path, Stats, New
+  feature…, Abandon) are rows of the header's `⋯` menu (`StagePage::menu`,
+  `in_menu` in `features.rs`). A row of buttons has one style: a quiet one
+  beside outlined ones is outlined too. A page with nothing run yet says
+  what happens next (`next_section`). The tab's contents keep to 1760 px,
+  centred.
 - `[ui] motion = "full" | "reduced" | "off"`: blinking dots and pulses only
   with "full"; fades only with "full" or "reduced" (see `anim::motion`).
 - Text meets 4.5:1 contrast, marks and dots 3:1, in both themes.
