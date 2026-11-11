@@ -3756,21 +3756,31 @@ fn test_strip(rows: &[Row]) -> Option<chrome::TestStrip> {
         return None;
     }
     let mut n = crate::feature::manual::Counts::default();
+    // The user's comments are counted apart: a new one isn't a failed
+    // criterion (`strip_text` says them as comments).
     for row in rows {
+        let comment = usize::from(row.comment);
         match row.found {
-            Some(Verdict::Pass) => n.passed += 1,
+            Some(Verdict::Pass) => {
+                n.passed += 1;
+                n.comments_done += comment;
+            }
             Some(Verdict::Fail) => {
                 n.failed += 1;
+                n.comments_open += comment;
                 n.sent += usize::from(row.sent);
                 n.made += usize::from(row.made);
             }
-            None => n.untested += 1,
+            None => {
+                n.untested += 1;
+                n.comments_untested += comment;
+            }
         }
     }
     Some(chrome::TestStrip {
-        passed: n.passed,
-        failed: n.failed,
-        untested: n.untested,
+        passed: n.passed - n.comments_done,
+        failed: n.failed - n.comments_open,
+        untested: n.untested - n.comments_untested,
         text: crate::manual_test::strip_text(n),
         search: None,
     })
@@ -14395,6 +14405,30 @@ fn milestones_of(probe: Option<&Probe>, stage: Stage, at_work: bool) -> Option<P
         .then(|| milestones_section(stage.label().to_owned(), items, None).running(running))
 }
 
+/// The plan's milestones on Build's page while its build log lists none,
+/// none ticked, with what happens to them: before its agent `started`, and
+/// after, as the log is still empty.
+fn planned_milestones(probe: Option<&Probe>, started: bool) -> Option<PageSection> {
+    let docs = &probe?.docs;
+    let items = [Stage::PlanReview, Stage::Plan]
+        .iter()
+        .find_map(|s| docs.milestones.get(s).filter(|m| !m.is_empty()))?;
+    let items: Vec<(bool, String)> = items.iter().map(|(_, t)| (false, t.clone())).collect();
+    let said = match started {
+        false => {
+            "from the plan: the Build agent builds them in order and ticks each in its build log, then Verify runs the checks"
+        }
+        true => {
+            "from the plan: the build log lists none yet, so nothing is ticked; the Build agent's tab says what it is at"
+        }
+    };
+    Some(milestones_section(
+        Stage::Build.label().to_owned(),
+        &items,
+        Some(line(said, CheckTone::Note)),
+    ))
+}
+
 /// Which of `items` blink: with an agent `at_work`, those it says it is on
 /// (`marked`), else the first it hasn't done.
 fn items_running(items: &[(bool, String)], marked: &[usize], at_work: bool) -> Vec<usize> {
@@ -15730,7 +15764,11 @@ fn stage_page(
                     && matches!(state.agent_status, Some(AgentStatus::Working));
                 let building = at_work && feature.fix_round.is_none();
                 sections.extend(round_cards(feature, stage, state, actions, now));
-                sections.extend(milestones_of(state.probe, stage, building).or(counted));
+                let started = feature.runs.contains_key(&stage);
+                sections.extend(
+                    (milestones_of(state.probe, stage, building).or(counted))
+                        .or_else(|| planned_milestones(state.probe, started)),
+                );
                 sections.extend(setup_sections(feature, state, actions));
             }
             Stage::Verify => {
@@ -15746,6 +15784,14 @@ fn stage_page(
                     sections.push(lines("Files", vec![line(text, CheckTone::Note)]));
                 }
                 sections.extend(comment_sections(feature, state, actions));
+                // Its fixes made, what comes next is said under them.
+                if mark == StageMark::Current && last_round_on(feature, stage).is_some() {
+                    let next = stage.next().map_or("the next stage", Stage::label);
+                    let text = format!(
+                        "Next: Review code shows what the fixes changed, then Approve goes on to {next}"
+                    );
+                    sections.push(lines("Next", vec![line(text, CheckTone::Note)]));
+                }
             }
             Stage::ManualTest if mark == StageMark::Current => {
                 if state.criteria.is_empty() {
