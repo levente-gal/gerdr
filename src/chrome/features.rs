@@ -6189,7 +6189,7 @@ impl Painter {
             }
             None => {
                 let row = Rectangle::new((left, first.loc.y).into(), (0, first.size.h).into());
-                self.dialog_keys(&mut c, &view.keys, row, end, scale, p);
+                self.dialog_keys(&mut c, &view.keys, Some(view.create), row, end, scale, p);
             }
         }
         // Labels as short as Create's take its width (`BUTTON_MIN_WIDTH`).

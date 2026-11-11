@@ -258,7 +258,15 @@ impl Painter {
             (0, first.size.h).into(),
         );
         let keys_end = first.loc.x - QUIT_BUTTON_GAP;
-        self.dialog_keys(&mut c, quit_keys(switching), keys_row, keys_end, scale, p);
+        self.dialog_keys(
+            &mut c,
+            quit_keys(switching),
+            None,
+            keys_row,
+            keys_end,
+            scale,
+            p,
+        );
         let go = if view.stops_any() {
             ButtonStyle::Destructive
         } else {

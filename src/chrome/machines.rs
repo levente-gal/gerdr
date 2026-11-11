@@ -251,6 +251,7 @@ impl Painter {
         self.dialog_keys(
             &mut c,
             &view.keys,
+            None,
             row,
             first.loc.x - QUIT_BUTTON_GAP,
             scale,

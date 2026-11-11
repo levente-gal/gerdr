@@ -260,7 +260,7 @@ impl Painter {
         );
         let keys: &[(&str, &str)] = if view.can_bring { &KEYS } else { &KEYS[1..] };
         let keys_end = first.loc.x - QUIT_BUTTON_GAP;
-        self.dialog_keys(&mut c, keys, keys_row, keys_end, scale, p);
+        self.dialog_keys(&mut c, keys, None, keys_row, keys_end, scale, p);
         let last = BUTTONS.len() - 1;
         for (i, (rect, label)) in layout.buttons.iter().zip(BUTTONS).enumerate() {
             let style = match i {

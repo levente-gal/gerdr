@@ -240,7 +240,11 @@ impl Painter {
             }
             None => {
                 let row = Rectangle::new((left, first.loc.y).into(), (0, first.size.h).into());
-                self.dialog_keys(&mut c, &KEYS, row, end, scale, p);
+                let enter = match view.selected {
+                    0 => "Cancel",
+                    _ => view.action,
+                };
+                self.dialog_keys(&mut c, &KEYS, Some(enter), row, end, scale, p);
             }
         }
         for (i, (rect, label)) in layout
