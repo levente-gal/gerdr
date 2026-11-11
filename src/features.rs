@@ -3918,7 +3918,7 @@ fn ship_ask(feature: &Feature, probe: Option<&Probe>) -> ShipAsk {
     };
     let Some(planned) = ship_planned(feature, Some(probe)) else {
         return match &probe.reading {
-            Err(why) => ShipAsk::Blocked(blocked_text(title, &[read_blocker(why)])),
+            Err(why) => ShipAsk::Blocked(blocked_text(&[read_blocker(why)])),
             Ok(_) => ShipAsk::Checking,
         };
     };
@@ -3933,7 +3933,11 @@ fn ship_ask(feature: &Feature, probe: Option<&Probe>) -> ShipAsk {
         return ShipAsk::Finish(dirty);
     }
     if !planned.blockers.is_empty() {
-        return ShipAsk::Blocked(blocked_text(title, &planned.blockers));
+        return ShipAsk::Blocked(blocked_text(&planned.blockers));
+    }
+    // An agent works on its conflicts: what it ships is the agent's.
+    if let Some(line) = resolving_line(feature) {
+        return ShipAsk::Blocked(blocked_text(&[line.text]));
     }
     if planned.all_done {
         return ShipAsk::AllRan;
@@ -3949,16 +3953,18 @@ fn read_blocker(why: &str) -> String {
     format!("Couldn't read the code: {why}")
 }
 
-/// The warning when `title` can't ship for `blockers`: the first, and how
-/// many more.
-fn blocked_text(title: &str, blockers: &[String]) -> String {
+/// The warning when a feature can't ship for `blockers`: the first, and how
+/// many more. Its page names the feature.
+fn blocked_text(blockers: &[String]) -> String {
     let first = blockers.first().map_or("", String::as_str);
+    // What to do comes first: a toast cuts its end off.
+    let first = match first.rsplit_once(": pull ") {
+        Some((why, pull)) => format!("pull {pull} ({why})"),
+        None => first.to_owned(),
+    };
     match blockers.len() {
-        0 | 1 => format!("Can't ship \u{201c}{title}\u{201d} yet: {first}"),
-        n => format!(
-            "Can't ship \u{201c}{title}\u{201d} yet: {first}, and {} more",
-            n - 1
-        ),
+        0 | 1 => format!("Can't ship yet: {first}"),
+        n => format!("Can't ship yet: {first}, and {} more", n - 1),
     }
 }
 
@@ -4036,16 +4042,33 @@ fn check_lines(
         };
     };
     let planned = ship::plan_actions(feature, check);
+    // Failing first, each saying its way out; then the named checks passed.
+    let passed = (feature.status == Status::Open)
+        .then(|| passed_checks(feature, check, probe))
+        .flatten();
+    let resolving = resolving_line(feature);
     if !planned.blockers.is_empty() {
-        let lines = planned
-            .blockers
-            .iter()
+        let lines = (planned.blockers.iter())
             .map(|b| line(b.clone(), CheckTone::Blocker))
+            .chain(resolving)
             .collect();
-        return capped(lines, CheckTone::Blocker);
+        let mut lines = capped(lines, CheckTone::Blocker);
+        if lines.len() < MAX_CHECK_LINES {
+            lines.extend(passed);
+        }
+        return lines;
     }
     let more = feature.status == Status::Done;
+    let waits = pr_wait(feature, probe).filter(|_| more);
     let first = match (planned.nothing, planned.all_done, more) {
+        _ if let Some(resolving) = &resolving => resolving.clone(),
+        _ if let Some(waits) = &waits => {
+            let mut text = waits.clone();
+            if let Some(first) = text.get_mut(..1) {
+                first.make_ascii_uppercase();
+            }
+            line(text, CheckTone::Note)
+        }
         (true, _, false) => line(NOTHING_TICKED.into(), CheckTone::Note),
         (true, _, true) => line(TICK_MORE.into(), CheckTone::Note),
         (false, true, false) => line(ALL_RAN.into(), CheckTone::Ready),
@@ -4075,7 +4098,85 @@ fn check_lines(
         false => conflicts,
     };
     let notes = check.notes.iter().map(|n| line(n.clone(), CheckTone::Note));
-    capped(first.into_iter().chain(notes).collect(), CheckTone::Note)
+    let passed = passed.filter(|_| resolving.is_none());
+    // Shipped, what comes next: the end of its life, said plainly.
+    let next = (more && (planned.nothing || planned.all_done)).then(|| {
+        let what = worktrees_words(feature);
+        let text = match waits {
+            Some(_) => format!("Next: once it merges, Remove {what} in the header"),
+            None => format!("Next: Remove {what} in the header; Restore brings them back"),
+        };
+        line(text, CheckTone::Note)
+    });
+    let lines = first.into_iter().chain(next).chain(passed).chain(notes).collect();
+    capped(lines, CheckTone::Note)
+}
+
+/// The named checks `feature` passes before it ships, on one line ("checks
+/// passed \u{b7} review done \u{b7} base current \u{b7} no conflicts"), as
+/// `check` and `probe` read it; none when it passes none of them. Those it
+/// fails say so on lines of their own, above it.
+fn passed_checks(feature: &Feature, check: &ship::ShipCheck, probe: Option<&Probe>) -> Option<CheckLine> {
+    let stale = check.blockers.iter().any(|b| b.starts_with("Code changed since"));
+    let bases = probe.map(|p| &p.bases);
+    let open = (feature.review.as_ref()).map_or(0, |r| r.open());
+    let reviews = [Stage::AiReview, Stage::CodeReview, Stage::ManualTest];
+    let current = !check.repos.is_empty()
+        && check.repos.iter().all(|r| {
+            r.merged
+                || (!r.pulls_base()
+                    && bases.and_then(|b| b.get(&r.key)).is_some_and(|b| b.behind == 0))
+        });
+    let clean = feature.shipping.resolving.is_none()
+        && check.repos.iter().all(|r| {
+            !(r.no_merge.as_deref()).is_some_and(|why| why.contains(" conflicts in "))
+                && (bases.and_then(|b| b.get(&r.key))).is_none_or(|b| b.conflicts.is_empty())
+        });
+    let named = [
+        (feature.is_done(Stage::Verify) && !stale, "checks passed"),
+        (reviews.iter().all(|s| feature.is_done(*s)) && open == 0 && !stale, "review done"),
+        (current, "base current"),
+        (clean, "no conflicts"),
+    ];
+    let ok: Vec<&str> = named.iter().filter(|(ok, _)| *ok).map(|(_, w)| *w).collect();
+    (!ok.is_empty()).then(|| CheckLine {
+        text: format!("\u{2713} {}", ok.join(" \u{b7} ")),
+        tone: CheckTone::Ready,
+    })
+}
+
+/// What the Ship check says while an agent takes on `feature`'s conflicts
+/// with its base: Ship waits for it.
+fn resolving_line(feature: &Feature) -> Option<CheckLine> {
+    let r = feature.shipping.resolving.as_ref()?;
+    let doing = match r.planning {
+        true => "plans how to resolve",
+        false => "resolves",
+    };
+    Some(CheckLine {
+        text: format!(
+            "{}: {} {doing} the conflicts with {}: Ship waits for it",
+            r.repo, r.agent, r.onto
+        ),
+        tone: CheckTone::Note,
+    })
+}
+
+/// What a shipped `feature` waits for while its pull requests are open on
+/// GitHub, not merged yet, as `probe` last read them: "pull request open,
+/// not merged yet". None once they all merged, or with none.
+fn pr_wait(feature: &Feature, probe: Option<&Probe>) -> Option<String> {
+    let prs = &feature.shipping.prs;
+    if prs.is_empty() {
+        return None;
+    }
+    let merged = prs.iter().filter(|pr| pr_merged(probe, &pr.repo)).count();
+    match (prs.len(), merged) {
+        (n, m) if m == n => None,
+        (1, _) => Some("pull request open, not merged yet".to_owned()),
+        (n, 0) => Some(format!("{n} pull requests open, not merged yet")),
+        (n, m) => Some(format!("{m} of {n} pull requests merged; the rest open")),
+    }
 }
 
 /// What Ship's mark and the history say of a feature finished unshipped.
@@ -4123,9 +4224,12 @@ fn ship_rows(feature: &Feature, probe: Option<&Probe>) -> Vec<ShipRow> {
     };
     let mut rows = Vec::new();
     // A merged repository has nothing left to choose: but its base to push.
+    // Nor has one shipped through its pull request: it went that way.
     for repo in &check.repos {
         let route = ship::repo_plan(feature, repo).route;
-        if !repo.merged {
+        let went = feature.status == Status::Done
+            && feature.ship_done(&repo.key, ShipStep::OpenPr).is_some();
+        if !repo.merged && !went {
             rows.push(ShipRow::Route {
                 repo: repo.key.clone(),
                 route,
@@ -4336,6 +4440,11 @@ fn ship_step_row(
     };
     let why = repo.why_not(step);
     let detail = match (why, step) {
+        // The Ship check says why in full: once is enough.
+        (Some(_), ShipStep::Merge) if repo.pulls_base() => Some(CheckLine {
+            text: format!("Pull {base} first"),
+            tone: CheckTone::Blocker,
+        }),
         (Some(why), _) => Some(CheckLine {
             text: why.to_owned(),
             tone: CheckTone::Blocker,
@@ -4432,7 +4541,9 @@ fn ship_sections(
                 dot,
                 state: state_line,
                 meta: ship_repo_meta(repo, stat),
-                base: (!repo.merged)
+                // Its squash waits for the base to be pulled: its step says
+                // so, and "up to date" would read as the opposite.
+                base: (!repo.merged && !repo.pulls_base())
                     .then(|| ship_base_line(feature, probe, &repo.key))
                     .flatten(),
                 buttons,
@@ -4894,7 +5005,8 @@ fn watched(feature: &Feature) -> bool {
 /// way, as the user waits on it in its tab (and the panel closed to show
 /// that tab), else every `WATCH_EVERY`.
 fn watch_every(feature: &Feature) -> Duration {
-    if feature.squash_going() {
+    // An agent merging its base in moves it on: the check follows.
+    if feature.squash_going() || feature.shipping.resolving.is_some() {
         PANEL_EVERY
     } else {
         WATCH_EVERY
@@ -7703,7 +7815,11 @@ impl Gerdr {
             ship_read: last
                 .and_then(|p| p.ship.as_ref())
                 .is_some_and(|c| !c.unread),
-            ship_blocked: ship_planned(feature, last).is_some_and(|p| !p.blockers.is_empty()),
+            // Anything holding it up, an agent's work on its conflicts too:
+            // then the card's way out is the one primary.
+            ship_blocked: ship_planned(feature, last).is_some_and(|p| !p.blockers.is_empty())
+                || feature.shipping.resolving.is_some()
+                || last.is_some_and(|p| p.bases.values().any(|b| !b.conflicts.is_empty())),
             checks_busy: self.checks_busy(&feature.project, &feature.slug),
             setting_up: self.setting_up(&feature.project, &feature.slug),
             feature_busy: self.feature_busy(&feature.project, &feature.slug),
@@ -13056,6 +13172,8 @@ fn current_line(feature: &Feature, stage: Stage, state: &LineState, now: u64) ->
                 "shipping".into()
             } else if feature.shipping.squash_at.is_some() {
                 "merging".into()
+            } else if feature.shipping.resolving.is_some() {
+                "resolving conflicts".into()
             } else if planned.as_ref().is_some_and(|p| !p.blockers.is_empty()) {
                 "blocked".into()
             } else if planned.as_ref().is_some_and(|p| p.nothing) {
@@ -14932,8 +15050,9 @@ fn ship_base_actions(feature: &Feature, probe: Option<&Probe>) -> Vec<(PageButto
     }
     for (key, state) in probe.map(|p| &p.bases).into_iter().flatten() {
         if !state.conflicts.is_empty() {
+            // Ship is no default while they conflict: this is.
             out.push((
-                button("Resolve with agent", ButtonStyle::Plain),
+                button("Resolve with agent", ButtonStyle::Primary),
                 PanelOutcome::ResolveConflicts(key.clone(), false),
             ));
             out.push((
@@ -15463,6 +15582,14 @@ fn stage_page(
                 CheckTone::Note,
             ))
         }
+        // Shipped through a pull request not merged yet: not done yet.
+        StageMark::Done if stage == Stage::Ship && pr_wait(feature, state.probe).is_some() => {
+            feature.marks.get(&stage).map(|m| {
+                let wait = pr_wait(feature, state.probe).unwrap_or_default();
+                let when = projects::ago(now, m.at);
+                line(format!("Shipped {when} by {}: {wait}", m.by), CheckTone::Note)
+            })
+        }
         StageMark::Done => feature.marks.get(&stage).map(|m| {
             let mut text = format!("Done {} by {}", projects::ago(now, m.at), m.by);
             if let Some(by) = state.ctx.locked_by(feature, stage) {
@@ -15692,8 +15819,9 @@ fn stage_page(
                 if !prs.is_empty() {
                     sections.push(lines("Pull requests", prs));
                 }
+                // The cards' rows say what ran: the log only without them.
                 let log = ship_log_lines(feature, now);
-                if !log.is_empty() {
+                if !log.is_empty() && !carded {
                     sections.push(lines("Ship log", log));
                 }
             }
@@ -24271,11 +24399,14 @@ pub(crate) mod tests {
         let none = check_lines(&f, None, false, 2_060);
         assert_eq!(texts(&none), [("checking\u{2026}", CheckTone::Note)]);
         let blocked = probe(check(&["api is dirty", "web is behind"], &["api"], &[]));
+        // Failing first; then what passes, named on one line.
+        let passed = "\u{2713} checks passed \u{b7} review done \u{b7} no conflicts";
         assert_eq!(
             texts(&check_lines(&f, Some(&blocked), false, 2_060)),
             [
                 ("api is dirty", CheckTone::Blocker),
-                ("web is behind", CheckTone::Blocker)
+                ("web is behind", CheckTone::Blocker),
+                (passed, CheckTone::Ready)
             ]
         );
         let many = probe(check(&["a", "b", "c", "d", "e", "f"], &["api"], &[]));
@@ -24287,8 +24418,16 @@ pub(crate) mod tests {
             texts(&check_lines(&f, Some(&ready), false, 2_060)),
             [
                 ("Ready to ship", CheckTone::Ready),
+                (passed, CheckTone::Ready),
                 ("api pushes to origin", CheckTone::Note)
             ]
+        );
+        // Its base read as current: that passes too.
+        let mut current = ready.clone();
+        current.bases.insert("api".into(), ship::BaseState::default());
+        assert_eq!(
+            check_lines(&f, Some(&current), false, 2_060)[1].text,
+            "\u{2713} checks passed \u{b7} review done \u{b7} base current \u{b7} no conflicts"
         );
         // Origin's base moved on in a way that conflicts: not ready.
         let mut behind = ready.clone();
@@ -24306,6 +24445,7 @@ pub(crate) mod tests {
                     "api: origin/main has 8 new commits that conflict: take them in first",
                     CheckTone::Blocker
                 ),
+                ("\u{2713} checks passed \u{b7} review done", CheckTone::Ready),
                 ("api pushes to origin", CheckTone::Note)
             ]
         );
@@ -24319,6 +24459,7 @@ pub(crate) mod tests {
             texts(&check_lines(&f, Some(&nothing), false, 2_060)),
             [
                 (NOTHING_TICKED, CheckTone::Note),
+                ("\u{2713} checks passed \u{b7} review done", CheckTone::Ready),
                 ("web has no commits: left out", CheckTone::Note)
             ]
         );
@@ -24342,6 +24483,50 @@ pub(crate) mod tests {
         // Only while Ship is the current stage.
         let building = feature("b", vec![repo("api", true)], 3);
         assert!(check_lines(&building, Some(&ready), false, 2_060).is_empty());
+        // While an agent takes on its conflicts, Ship waits for it.
+        let mut resolving = f.clone();
+        resolving.shipping.resolving = Some(feature::Resolving {
+            at: 2_000,
+            repo: "api".into(),
+            onto: "origin/main".into(),
+            onto_sha: "c1".into(),
+            before: "c0".into(),
+            files: vec!["a.py".into()],
+            agent: "claude".into(),
+            pane: None,
+            n: 1,
+            planning: true,
+            nudged: false,
+        });
+        let lines = check_lines(&resolving, Some(&current), false, 2_060);
+        assert_eq!(
+            texts(&lines[..1]),
+            [(
+                "api: claude plans how to resolve the conflicts with origin/main: Ship waits for it",
+                CheckTone::Note
+            )]
+        );
+        assert!(matches!(ship_ask(&resolving, Some(&current)), ShipAsk::Blocked(_)));
+    }
+
+    #[test]
+    fn a_shipped_pull_request_waits_to_merge_before_it_reads_as_done() {
+        let mut f = feature("s", vec![repo("api", true)], 9);
+        f.status = Status::Done;
+        assert_eq!(pr_wait(&f, None), None, "no pull request");
+        f.shipping.prs.push(Pr {
+            repo: "api".into(),
+            url: "https://x/pull/1".into(),
+        });
+        let open = Some("pull request open, not merged yet".to_owned());
+        assert_eq!(pr_wait(&f, None), open);
+        let mut p = probe(None);
+        let merged = ship::PrState {
+            state: "MERGED".into(),
+            ..Default::default()
+        };
+        p.prs = Some(BTreeMap::from([("api".to_owned(), Ok(merged))]));
+        assert_eq!(pr_wait(&f, Some(&p)), None);
     }
 
     #[test]
@@ -24353,12 +24538,12 @@ pub(crate) mod tests {
         let blocked = probe(check(&["a", "b", "c"], &["api"], &[]));
         assert_eq!(
             ship_ask(&f, Some(&blocked)),
-            ShipAsk::Blocked("Can't ship \u{201c}T\u{201d} yet: a, and 2 more".into())
+            ShipAsk::Blocked("Can't ship yet: a, and 2 more".into())
         );
         let one = probe(check(&["a"], &["api"], &[]));
         assert_eq!(
             ship_ask(&f, Some(&one)),
-            ShipAsk::Blocked("Can't ship \u{201c}T\u{201d} yet: a".into())
+            ShipAsk::Blocked("Can't ship yet: a".into())
         );
         let dirty = Probe {
             reading: Ok(Reading {

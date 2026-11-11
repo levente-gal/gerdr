@@ -120,6 +120,12 @@ impl Gerdr {
         if let Some(why) = &failed {
             feature.log(now, format!("Undo stopped: {why}"));
         }
+        // Nothing it shipped stands any more: it isn't shipped, so Ship is
+        // to do again (not once its worktrees went: there is nothing to ship).
+        if feature.status == feature::Status::Done && !feature.shipped_any() && feature.dir.exists()
+        {
+            feature.untick(feature::Stage::Ship, now);
+        }
         self.save_feature(project, slug);
         self.probe_feature(project, slug);
         match failed {

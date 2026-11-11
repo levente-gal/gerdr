@@ -1398,6 +1398,13 @@ impl Feature {
             .filter(|d| d.undone.is_none())
     }
 
+    /// Whether something it shipped still stands: a pull request open, or
+    /// its branch merged into a base. A push alone ships nothing.
+    pub fn shipped_any(&self) -> bool {
+        (self.ship_log().iter())
+            .any(|d| d.undone.is_none() && matches!(d.step, ShipStep::OpenPr | ShipStep::Merge))
+    }
+
     /// Note that `step` of repository `repo` was undone at `now`: it counts
     /// as never run, and the record's other fields forget it too.
     pub fn ship_undid(&mut self, repo: &str, step: ShipStep, now: u64) {
