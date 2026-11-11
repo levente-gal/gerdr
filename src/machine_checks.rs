@@ -117,12 +117,17 @@ impl Files for CheckFiles {
         now.duration_since(at).unwrap_or_default()
     }
 
+    // `still_check` stays `true` here: its rule runs there, in the same
+    // shell as the kill (`guarded`), so the pid can't change in between.
     fn kill_group(&mut self, group: i32, signal: i32) {
-        self.signal(&remote::kill_group_script(group, signal_name(signal)));
+        self.signal(
+            group,
+            &remote::kill_group_script(group, signal_name(signal)),
+        );
     }
 
     fn kill_group_of(&mut self, pid: i32, signal: i32) {
-        self.signal(&remote::kill_group_of_script(pid, signal_name(signal)));
+        self.signal(pid, &remote::kill_group_of_script(pid, signal_name(signal)));
     }
 
     fn every(&self) -> Duration {
@@ -138,11 +143,40 @@ impl Files for CheckFiles {
 }
 
 impl CheckFiles {
-    fn signal(&self, script: &str) {
-        if let Err(trouble) = self.reach.script(script, &AtomicBool::new(false)) {
+    /// Runs `kill` there if `pid` still names one of the run's checks.
+    fn signal(&self, pid: i32, kill: &str) {
+        let script = guarded(&self.dir, pid, kill);
+        if let Err(trouble) = self.reach.script(&script, &AtomicBool::new(false)) {
             tracing::warn!("signalling a check on {}: {}", self.name, trouble.text());
         }
     }
+}
+
+/// `kill`, run only when `pid` passes the rule of `verify`'s `ours` there:
+/// a `*.pid` file in run folder `dir` names it and was written since that
+/// machine booted, and what runs as it is a check's script, or nothing (gone,
+/// or a zombie whose group may still have members).
+fn guarded(dir: &str, pid: i32, kill: &str) -> String {
+    format!(
+        r#"cd {dir} 2>/dev/null || exit 0
+b=$(sed -n 's/^btime //p' /proc/stat)
+[ -n "$b" ] || exit 0
+ok=
+for f in *.pid; do
+  [ -e "$f" ] || continue
+  [ "$(head -n 1 "$f" | tr -d ' ')" = {pid} ] || continue
+  [ "$(stat -c %Y "$f")" -ge "$b" ] && ok=1
+done
+[ -n "$ok" ] || exit 0
+c=$(cat /proc/{pid}/cmdline 2>/dev/null | tr '\0' ' ')
+case "$c" in
+  ''|*{script}*) ;;
+  *) exit 0 ;;
+esac
+{kill}"#,
+        dir = shell_quote(dir),
+        script = shell_quote(verify::SCRIPT),
+    )
 }
 
 fn signal_name(signal: i32) -> &'static str {
@@ -825,6 +859,37 @@ mod tests {
     fn signals_keep_to_the_two_they_are_meant_to_be() {
         assert_eq!(signal_name(libc::SIGKILL), "KILL");
         assert_eq!(signal_name(libc::SIGTERM), "TERM");
+    }
+
+    #[test]
+    fn only_a_check_of_this_boot_is_signalled_there() {
+        // `echo` for the kill: this test signals nothing.
+        let t = crate::feature::tests::Temp::new();
+        let dir = t.0.to_string_lossy().into_owned();
+        let run = |pid: i32| {
+            let script = guarded(&dir, pid, "echo go\n");
+            let out = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(&script)
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).trim() == "go"
+        };
+        let gone = 99_999_999;
+        assert!(!run(gone), "no pid file names it");
+        std::fs::write(t.0.join("0.pid"), format!("{gone}\n")).unwrap();
+        assert!(run(gone), "gone, its group may live on");
+        // This test runs as something else than a check's script.
+        let me = std::process::id() as i32;
+        std::fs::write(t.0.join("1.pid"), format!("{me}\n")).unwrap();
+        assert!(!run(me));
+        let old = std::fs::File::options()
+            .write(true)
+            .open(t.0.join("0.pid"))
+            .unwrap();
+        old.set_modified(UNIX_EPOCH + Duration::from_secs(1))
+            .unwrap();
+        assert!(!run(gone), "left from before this boot");
     }
 
     #[test]

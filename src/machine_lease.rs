@@ -280,13 +280,9 @@ impl TakeJob {
             reach.view_code(&feature, &self.places(&feature), &mut known, cancel)?;
             stopped()?;
             // Bringing it may have outlasted `RESTORE_AFTER`, and the record
-            // gone back there: then both would write it. Held, it waits anew.
-            let hold = format!(
-                "cd {} || exit 3\n[ -e {h} ] && touch {h} && echo HELD\nexit 0\n",
-                crate::desktop::shell_quote(&dir),
-                h = lease::HANDED,
-            );
-            if reach.script(&hold, cancel)?.trim() != "HELD" {
+            // gone back there: then both would write it. The claim is a rename,
+            // as putting it back is there: only one of the two gets it.
+            if reach.script(&lease::claim_script(&dir), cancel)?.trim() != "CLAIMED" {
                 return Err(TakeEnd::Failed(format!(
                     "{} took \u{201c}{}\u{201d} back while it was on the way: try again",
                     self.from_name, self.title
@@ -1406,15 +1402,23 @@ impl Gerdr {
                 continue;
             }
             let Ok(modified) = std::fs::metadata(&handed).and_then(|m| m.modified()) else {
-                // The new writer has it all.
-                self.features.handing.remove(&key);
+                // Claimed, it comes back only if the new writer gives it back.
+                if !dir.join(lease::TAKEN).exists() {
+                    // The new writer has it all.
+                    self.features.handing.remove(&key);
+                }
                 continue;
             };
             if modified.elapsed().is_ok_and(|age| age > lease::RESTORE_AFTER) {
-                if let Err(err) = restore_record(&dir) {
-                    tracing::warn!("putting {slug} back: {err}");
-                    self.features.handing.remove(&key);
-                    continue;
+                match restore_record(&dir) {
+                    // Claimed just now: the new writer has it.
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(err) => {
+                        tracing::warn!("putting {slug} back: {err}");
+                        self.features.handing.remove(&key);
+                        continue;
+                    }
+                    Ok(()) => {}
                 }
                 self.record_back(project, slug, &key);
             }
@@ -1691,6 +1695,8 @@ fn write_refusal(dir: &Path, why: String) {
     }
 }
 
+/// Put `HANDED` back in folder `dir`. A rename: `NotFound` when the new writer
+/// claimed it first (`lease::TAKEN`).
 fn restore_record(dir: &Path) -> std::io::Result<()> {
     std::fs::rename(dir.join(lease::HANDED), dir.join(store::FILE))?;
     for file in [lease::HANDED_TO, lease::ANSWER, lease::LEFT, lease::TOLD] {
@@ -1704,6 +1710,7 @@ fn restore_record(dir: &Path) -> std::io::Result<()> {
 
 /// A record handed over that nobody took while gerdr was closed goes back before
 /// the project's features are read: `HANDED` old enough, and none in its place.
+/// One claimed (`lease::TAKEN`) stays, whatever its age.
 pub fn restore_left_records(project: &str) {
     restore_left_in(&store::project_dir(None, project));
 }
@@ -1720,6 +1727,7 @@ fn restore_left_in(features: &Path) {
         if old
             && !dir.join(store::FILE).exists()
             && let Err(err) = restore_record(&dir)
+            && err.kind() != std::io::ErrorKind::NotFound
         {
             tracing::warn!("putting {} back: {err}", dir.display());
         }
@@ -1802,6 +1810,9 @@ mod tests {
         // One with a record in its place keeps that record.
         let back = at("back", old);
         std::fs::write(back.join(store::FILE), "mine").unwrap();
+        // One the new writer claimed stays claimed, however old.
+        let taken = at("taken", old);
+        std::fs::rename(taken.join(lease::HANDED), taken.join(lease::TAKEN)).unwrap();
         restore_left_in(&t);
         assert_eq!(std::fs::read_to_string(gone.join(store::FILE)).unwrap(), "gone");
         for file in [lease::HANDED, lease::HANDED_TO, lease::LEFT] {
@@ -1811,6 +1822,9 @@ mod tests {
         assert!(!fresh.join(store::FILE).exists());
         assert_eq!(std::fs::read_to_string(back.join(store::FILE)).unwrap(), "mine");
         assert!(back.join(lease::HANDED).exists());
+        assert!(!taken.join(store::FILE).exists());
+        assert!(taken.join(lease::TAKEN).exists());
+        assert!(taken.join(lease::HANDED_TO).exists());
         std::fs::remove_dir_all(&t).unwrap();
     }
 

@@ -509,7 +509,7 @@ pub fn script_path(dir: &Path, i: usize) -> PathBuf {
     dir.join(format!("{SCRIPT}{i}"))
 }
 
-const SCRIPT: &str = "gerdr-check-";
+pub(crate) const SCRIPT: &str = "gerdr-check-";
 
 /// Whether a command line is a check's script: what it runs ends by itself,
 /// and its card tells how it went.

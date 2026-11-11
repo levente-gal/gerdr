@@ -270,9 +270,9 @@ fn perform(task: &Task, step: &dyn Fn(&str)) -> OpResult {
             step("stashing…");
             git_ops::stash_push(dir)
         }
-        BatchKind::StashPop(n) => {
+        BatchKind::StashPop(n, seen) => {
             step("popping the stash…");
-            git_ops::stash_pop(dir, *n)
+            git_ops::stash_pop(dir, *n, seen)
         }
         BatchKind::StashDrop(n, seen) => {
             step("dropping the stash…");

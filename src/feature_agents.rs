@@ -2023,7 +2023,9 @@ impl Gerdr {
         let Some(all) = self.features.all.get(&project) else {
             return;
         };
-        let runs: Vec<(Feature, Stage, StageRun)> = all
+        // Slugs, not features: a feature is read where it is needed, and
+        // cloned only for the rare nudge or T3 thread.
+        let runs: Vec<(String, Stage, StageRun)> = all
             .iter()
             .filter(|f| f.status == Status::Open)
             .filter_map(|f| {
@@ -2032,12 +2034,12 @@ impl Gerdr {
                 let run = f.runs.get(&stage)?;
                 // A Build run marked done before is back: its code changed.
                 (run.ready.is_none() || stage == Stage::Build)
-                    .then(|| (f.clone(), stage, run.clone()))
+                    .then(|| (f.slug.clone(), stage, run.clone()))
             })
             .collect();
         let now = Instant::now();
-        for (feature, stage, run) in runs {
-            let key = (project.clone(), feature.slug.clone(), stage);
+        for (slug, stage, run) in runs {
+            let key = (project.clone(), slug.clone(), stage);
             // Nothing is known of it: what it wrote may not be here yet, and
             // it is there until a list of its machine's panes says otherwise.
             if (run.pane.as_deref()).is_some_and(|p| self.pane_out_of_reach(p)) {
@@ -2049,44 +2051,56 @@ impl Gerdr {
                 let alive = self.stage_run_state(&run).1;
                 let watch = self.features.agents.entry(key.clone()).or_default();
                 if held_tab_gone(watch, alive, now) && run.live() {
-                    self.forget_pane(&project, &feature.slug, stage);
+                    self.forget_pane(&project, &slug, stage);
                     continue;
                 }
-                let data = store::dir(None, &project, &feature.slug);
+                let Some(feature) = self.feature(&project, &slug) else {
+                    continue;
+                };
+                let data = store::dir(None, &project, &slug);
                 let wrote = artifacts::path(&data, stage)
-                    .map(|path| read_file(&feature, stage, &path, run.started));
+                    .map(|path| read_file(feature, stage, &path, run.started));
                 // A round's fixes are listed in the build log as this agent
                 // starts: that's gerdr's writing, not its.
                 let listed = stage == Stage::Build
                     && (feature.fix_round.as_ref()).is_some_and(|r| !r.before_fixing());
                 if alive && !listed && wrote.is_some_and(|file| file.finished().is_some()) {
-                    self.held_agent_wrote(&project, &feature.slug, stage);
+                    self.held_agent_wrote(&project, &slug, stage);
                 }
                 continue;
             }
-            if self.t3_stage_thread_sent(&feature, stage, &run) {
+            // Only a run waiting on its T3 draft can follow a thread.
+            if run.t3 == Some(crate::feature::agents::T3Run::Draft)
+                && let Some(feature) = self.feature(&project, &slug).cloned()
+                && self.t3_stage_thread_sent(&feature, stage, &run)
+            {
                 continue;
             }
             let (status, alive) = self.stage_run_state(&run);
-            let data = store::dir(None, &project, &feature.slug);
-            let need = run_needs(&feature, stage);
+            let Some(feature) = self.feature(&project, &slug) else {
+                continue;
+            };
+            let data = store::dir(None, &project, &slug);
+            let need = run_needs(feature, stage);
             let Some(path) = need.and_then(|n| n.artifact).map(|name| data.join(name)) else {
                 continue;
             };
             let build = stage == Stage::Build;
-            let deciding = crate::feature_plan_review::deciding(&feature);
+            let deciding = crate::feature_plan_review::deciding(feature).map(|r| r.stamp);
+            let fixing = (feature.fix_round.as_ref()).is_some_and(|r| !r.before_fixing());
+            let fresh_milestones = feature.fresh_milestones;
             let back = build && run.ready.is_some();
             let working = matches!(status, Some(AgentStatus::Working | AgentStatus::Blocked));
             if back || (build && working && (run.stop.is_some() || run.blocked.is_some())) {
                 // Back at Build, or going on past its stop: nothing waits.
                 if let Some(r) = self
-                    .feature_mut(&project, &feature.slug)
+                    .feature_mut(&project, &slug)
                     .and_then(|f| f.runs.get_mut(&stage))
                 {
                     r.ready = None;
                     r.stop = None;
                     r.blocked = None;
-                    self.save_feature(&project, &feature.slug);
+                    self.save_feature(&project, &slug);
                 }
             }
             let watch = self.features.agents.entry(key.clone()).or_default();
@@ -2114,16 +2128,17 @@ impl Gerdr {
             }
             // Making a round's fixes it is no milestone's agent, however
             // its log reads: the round says when it is over (`fixes_tick`).
-            if build
-                && feature
-                    .fix_round
-                    .as_ref()
-                    .is_some_and(|r| !r.before_fixing())
-            {
+            if build && fixing {
                 watch.worked |= working;
                 continue;
             }
-            let file = read_file(&feature, stage, &path, watch.after);
+            // By field, not `self.feature`: `watch` holds `self.features.agents`.
+            let Some(feature) = (self.features.all.get(&project))
+                .and_then(|all| all.iter().find(|f| f.slug == slug))
+            else {
+                continue;
+            };
+            let file = read_file(feature, stage, &path, watch.after);
             // Build's page ticks them off as they are written.
             let log = stamp(&path);
             let log_moved = build && watch.log != log;
@@ -2146,17 +2161,16 @@ impl Gerdr {
                 watch.seen_done = None;
             } else if let Some(id) = run.machine.as_deref() {
                 let since = *watch.seen_done.get_or_insert(now);
-                let slug = feature.slug.as_str();
-                if !Gerdr::machine_pulled_since(&self.machines, id, (&project, slug), since) {
+                if !Gerdr::machine_pulled_since(&self.machines, id, (&project, &slug), since) {
                     continue;
                 }
             }
             match verdict {
                 Verdict::Wait => {}
                 // Read in already: only a rewrite is news.
-                Verdict::Ready(stamp) if deciding.is_some_and(|r| r.stamp == Some(stamp)) => {
+                Verdict::Ready(stamp) if deciding.is_some_and(|s| s == Some(stamp)) => {
                     if !alive && run.live() {
-                        self.forget_pane(&project, &feature.slug, stage);
+                        self.forget_pane(&project, &slug, stage);
                     }
                 }
                 Verdict::Ready(stamp)
@@ -2176,67 +2190,69 @@ impl Gerdr {
                         watch.checking = Some(stamp);
                         match stage {
                             Stage::Build => {
-                                self.check_build_code(&project, &feature.slug, run.n, stamp);
+                                self.check_build_code(&project, &slug, run.n, stamp);
                             }
                             Stage::Plan => {
-                                self.check_plan_code(&project, &feature.slug, run.n, stamp);
+                                self.check_plan_code(&project, &slug, run.n, stamp);
                             }
                             Stage::PlanReview => {
-                                self.check_plan_review_code(&project, &feature.slug, run.n, stamp);
+                                self.check_plan_review_code(&project, &slug, run.n, stamp);
                             }
-                            _ => self.check_review_code(&project, &feature.slug, run.n, stamp),
+                            _ => self.check_review_code(&project, &slug, run.n, stamp),
                         }
                     }
                 }
-                Verdict::Ready(_) => self.stage_ready(&project, &feature.slug, stage),
+                Verdict::Ready(_) => self.stage_ready(&project, &slug, stage),
                 Verdict::Stop { done, total } => {
-                    let long = rested_enough(watch, feature.fresh_milestones, status, now);
+                    let long = rested_enough(watch, fresh_milestones, status, now);
                     match at_rest(alive, run.stop, watch.went_on, done, total) {
                         AtRest::Waits => {}
                         AtRest::Gate => {
-                            self.milestone_stop(&project, &feature.slug, run.n, done, total);
+                            self.milestone_stop(&project, &slug, run.n, done, total);
                         }
                         AtRest::GoOn if long => {
-                            self.milestone_go_on(&project, &feature.slug, run.n, done, total);
+                            self.milestone_go_on(&project, &slug, run.n, done, total);
                         }
                         AtRest::GoOn => {}
                     }
                     if !alive && run.live() {
-                        self.forget_pane(&project, &feature.slug, stage);
+                        self.forget_pane(&project, &slug, stage);
                     }
                 }
                 Verdict::Blocked(why) => {
-                    self.milestone_blocked(&project, &feature.slug, run.n, why);
+                    self.milestone_blocked(&project, &slug, run.n, why);
                     if !alive && run.pane.is_some() {
-                        self.forget_pane(&project, &feature.slug, stage);
+                        self.forget_pane(&project, &slug, stage);
                     }
                 }
                 Verdict::Nudge { absent } => {
                     let missing = watch.missing.join("; ");
-                    self.nudge_stage_agent(&feature, stage, &run, absent, missing);
+                    if let Some(feature) = self.feature(&project, &slug).cloned() {
+                        self.nudge_stage_agent(&feature, stage, &run, absent, missing);
+                    }
                 }
                 Verdict::StillBad | Verdict::Gone => {
                     if let File::Bad(stamp, lacks) = &file
                         && watch.told_bad != Some(*stamp)
                     {
                         watch.told_bad = Some(*stamp);
-                        self.tell_bad_file(&project, &feature, stage, lacks);
+                        self.tell_bad_file(&project, &slug, stage, lacks);
                     }
                     if verdict == Verdict::Gone && run.live() {
-                        self.forget_pane(&project, &feature.slug, stage);
+                        self.forget_pane(&project, &slug, stage);
                     }
                 }
             }
             if log_moved {
-                self.probe_feature(&project, &feature.slug);
+                self.probe_feature(&project, &slug);
             }
             if unblocked
                 && let Some(r) = self
-                    .feature_mut(&project, &feature.slug)
+                    .feature_mut(&project, &slug)
                     .and_then(|f| f.runs.get_mut(&stage))
             {
                 r.blocked = None;
-                self.save_feature(&project, &feature.slug);
+                self.save_feature(&project, &slug);
             }
         }
     }
@@ -2594,17 +2610,16 @@ impl Gerdr {
 
     /// `stage`'s agent left a file that can't be read and won't be told again:
     /// the page shows nothing new, so the user is told what it lacks.
-    fn tell_bad_file(&mut self, project: &str, feature: &Feature, stage: Stage, lacks: &[String]) {
+    fn tell_bad_file(&mut self, project: &str, slug: &str, stage: Stage, lacks: &[String]) {
         let label = stage.label();
         let why = lacks.join("; ");
-        let slug = feature.slug.as_str();
+        let title = (self.feature(project, slug)).map_or_else(String::new, |f| f.title.clone());
         tracing::warn!("feature {project}/{slug}: {label} not read: {why}");
         if let Some(f) = self.feature_mut(project, slug) {
             f.log(feature::now(), format!("{label} not read: {why}"));
             self.save_feature(project, slug);
         }
         let lack = lacks.first().map_or("", String::as_str);
-        let title = &feature.title;
         self.show_warning(format!(
             "{label} of \u{201c}{title}\u{201d} can't be read: {lack}. Tell its agent, or edit its file"
         ));

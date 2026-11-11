@@ -1870,29 +1870,38 @@ pub fn stash_push(dir: &Path) -> OpResult {
     op.done()
 }
 
-/// Bring stash `n` (0 the newest) back and drop it; a conflict keeps the
-/// stash.
-pub fn stash_pop(dir: &Path, n: usize) -> OpResult {
+/// Bring stash `n` (0 the newest) back and drop it, only while it is still
+/// the one `seen`; a conflict keeps the stash.
+pub fn stash_pop(dir: &Path, n: usize, seen: &StashSeen) -> OpResult {
     let mut op = Op::new(dir);
+    if !stash_unchanged(dir, n, seen) {
+        return Err(op.blocked(STASH_CHANGED));
+    }
     op.run(&["stash", "pop", &format!("stash@{{{n}}}")])?;
     op.done()
 }
 
-/// Drop stash `n` (0 the newest); only while it is still commit `oid`,
-/// when known: a stash made since shifts every `n` by one.
+/// Drop stash `n` (0 the newest); only while it is still the one `seen`.
 pub fn stash_drop(dir: &Path, n: usize, seen: &StashSeen) -> OpResult {
     let mut op = Op::new(dir);
     let name = format!("stash@{{{n}}}");
-    let same = match seen {
-        StashSeen::Oid(oid) => stash_oid(dir, n).as_deref() == Some(oid.as_str()),
-        StashSeen::Count(count) => query(dir, &["stash", "list"])
-            .is_some_and(|list| list.lines().count() == *count as usize),
-    };
-    if !same {
-        return Err(op.blocked("the stash list changed; refresh and try again"));
+    if !stash_unchanged(dir, n, seen) {
+        return Err(op.blocked(STASH_CHANGED));
     }
     op.run(&["stash", "drop", &name])?;
     op.done()
+}
+
+const STASH_CHANGED: &str = "the stash list changed; refresh and try again";
+
+/// Whether stash `n` is still the one `seen`: a stash made or dropped
+/// since shifts every `n` by one.
+fn stash_unchanged(dir: &Path, n: usize, seen: &StashSeen) -> bool {
+    match seen {
+        StashSeen::Oid(oid) => stash_oid(dir, n).as_deref() == Some(oid.as_str()),
+        StashSeen::Count(count) => query(dir, &["stash", "list"])
+            .is_some_and(|list| list.lines().count() == *count as usize),
+    }
 }
 
 /// What a stash drop saw of the stash list, so that it refuses once the
@@ -2365,7 +2374,7 @@ mod tests {
         assert_eq!(failed.log.len(), 1 + LOCK_RETRIES.len());
         assert!(failed.log.iter().all(|r| !r.ok));
         // Not a stash pop: it may have stopped half-way.
-        let failed = stash_pop(&fx.repo, 0).unwrap_err();
+        let failed = stash_pop(&fx.repo, 0, &StashSeen::Count(0)).unwrap_err();
         assert_eq!(failed.log.len(), 1);
         std::fs::remove_file(fx.repo.join(".git/index.lock")).unwrap();
         commit_paths(&fx.repo, &["a".into()], "m").unwrap();
@@ -3394,6 +3403,7 @@ mod tests {
         // Without a list read, the count seen guards it the same way.
         assert_eq!(failure(stash_drop(dir, 0, &StashSeen::Count(2))), changed);
         assert_eq!(stash_list(dir).0.lines().count(), 3);
+        assert_eq!(failure(stash_pop(dir, 0, &StashSeen::Count(2))), changed);
         assert!(stash_drop(dir, 2, &first).is_ok());
         assert!(!stash_list(dir).0.contains("first"));
     }

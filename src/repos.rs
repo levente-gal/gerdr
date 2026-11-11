@@ -631,7 +631,7 @@ pub enum BatchKind {
     /// Stash the uncommitted changes, untracked files too.
     Stash,
     /// Bring stash `n` (0 the newest) back, and drop it.
-    StashPop(usize),
+    StashPop(usize, crate::git_ops::StashSeen),
     /// Drop stash `n` (0 the newest).
     StashDrop(usize, crate::git_ops::StashSeen),
     /// Throw away the uncommitted changes to the job's files.
@@ -667,7 +667,7 @@ impl BatchKind {
             BatchKind::Abort => "Abort",
             BatchKind::Undo => "Undo",
             BatchKind::Stash => "Stash",
-            BatchKind::StashPop(_) => "Pop stash",
+            BatchKind::StashPop(..) => "Pop stash",
             BatchKind::StashDrop(..) => "Drop stash",
             BatchKind::Discard => "Discard changes",
         }
@@ -700,7 +700,7 @@ impl BatchKind {
             BatchKind::Abort => "aborted",
             BatchKind::Undo => "undone",
             BatchKind::Stash => "stashed",
-            BatchKind::StashPop(_) => "popped",
+            BatchKind::StashPop(..) => "popped",
             BatchKind::StashDrop(..) => "dropped",
             BatchKind::Discard => "discarded",
         }
@@ -2377,7 +2377,7 @@ impl Panel {
         }
     }
 
-    /// What a drop of `item`'s stash `n` checks before it goes: the
+    /// What a pop or drop of `item`'s stash `n` checks before it goes: the
     /// stash's commit as its Stashes list was read, else how many stashes
     /// the last status read counted (no git runs here, on the UI thread).
     fn stash_seen(&self, item: &RepoItem, n: usize) -> crate::git_ops::StashSeen {
@@ -3344,9 +3344,10 @@ impl Panel {
                 }
                 // The one picked in the Stashes tab, else the newest.
                 let n = self.stash_at(item);
+                let seen = self.stash_seen(item, n);
                 let kind = match button {
-                    B::StashPop => BatchKind::StashPop(n),
-                    _ => BatchKind::StashDrop(n, self.stash_seen(item, n)),
+                    B::StashPop => BatchKind::StashPop(n, seen),
+                    _ => BatchKind::StashDrop(n, seen),
                 };
                 let k = items.iter().position(|i| i.root == item.root);
                 run(kind, k.into_iter().collect())
@@ -6516,7 +6517,7 @@ mod tests {
         assert_eq!(
             press(&mut panel, mods(false, true, true), Keysym::S, &ctx),
             Some(Outcome::Batch {
-                kind: BatchKind::StashPop(0),
+                kind: BatchKind::StashPop(0, crate::git_ops::StashSeen::Count(2)),
                 jobs: jobs(&["gerdr"])
             })
         );
@@ -6633,7 +6634,7 @@ mod tests {
         assert_eq!(
             press(&mut panel, none(), Keysym::Return, &ctx),
             Some(Outcome::Batch {
-                kind: BatchKind::StashPop(2),
+                kind: BatchKind::StashPop(2, crate::git_ops::StashSeen::Count(3)),
                 jobs: jobs(&["gerdr"])
             })
         );
