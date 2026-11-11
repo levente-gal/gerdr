@@ -205,6 +205,8 @@ pub const DRAFT_OPEN: &str = "Save or discard the comment first";
 /// Why an edit or a restore does nothing in a feature's code review.
 pub const FEATURE_READ_ONLY: &str = "A feature's code review can't edit the code";
 /// The keys approving the file under review and sending it back.
+/// Why Ctrl+Enter makes no fixes while what the user wrote needs a plan.
+pub const PLAN_FIRST: &str = "What you wrote needs a plan first: Ctrl+Shift+Enter plans the fixes";
 pub const APPROVE_KEY: &str = "Ctrl+Enter";
 pub const SEND_BACK_KEY: &str = "Ctrl+Shift+Enter";
 /// The key going to the next file not viewed in a feature's code review.
@@ -789,7 +791,15 @@ impl WorktreeDiff {
         let fe = self.feature.as_ref()?;
         let has = (fe.buttons(self.diff.review.own()).iter()).any(|(b, _)| *b == button);
         if !has {
-            return Some(Done::Diff(Outcome::Notice(fe.not_now())));
+            let own = self.diff.review.own();
+            let plan_first = button == B::MakeFixes
+                && fe.role() == Role::Deciding
+                && fe.needs_plan(own)
+                && fe.buttons(own).iter().any(|(b, _)| *b == B::PlanFixes);
+            return Some(Done::Diff(Outcome::Notice(match plan_first {
+                true => PLAN_FIRST,
+                false => fe.not_now(),
+            })));
         }
         if self.diff.editing.is_some() {
             return Some(Done::Diff(Outcome::Notice(DRAFT_OPEN)));
@@ -1398,6 +1408,9 @@ impl WorktreeDiff {
                 return self.feature_press(button, env);
             }
         }
+        if !typing && crate::repos::clear_review_key(mods, sym) && self.diff.review.own() > 0 {
+            return self.click(ReposHit::Button(ReposButton::ClearReview), env);
+        }
         let v = matches!(sym, Keysym::v | Keysym::V);
         if self.doc.is_some() && v && mods.ctrl && mods.shift && !mods.alt && !mods.logo && !typing
         {
@@ -1513,9 +1526,7 @@ impl WorktreeDiff {
                     B::Comment if self.diff.on_finding() => "edit the finding".into(),
                     B::Comment => "comment on the lines".into(),
                     B::Close if self.commit.is_some() || self.doc.is_some() => "back".into(),
-                    B::Close if self.feature.as_ref().is_some_and(|f| f.inline) => {
-                        "go to the stages".into()
-                    }
+                    B::Close if self.feature.as_ref().is_some_and(|f| f.inline) => "back".into(),
                     B::Close if self.feature.as_ref().is_some_and(|f| f.back) => "back".into(),
                     B::Close => "close".into(),
                     B::NextUnviewed => "next, previous unviewed".into(),
@@ -1538,6 +1549,11 @@ impl WorktreeDiff {
                     B::SendBack if flagged.is_some() => {
                         crate::plan_doc::ASK_REVIEWER.to_lowercase()
                     }
+                    // As its button over the diff says it: "copy 2 comments".
+                    B::CopyReview => match self.diff.review.own() {
+                        1 => "copy 1 comment".into(),
+                        n => format!("copy {n} comments"),
+                    },
                     button => button.label().to_lowercase(),
                 },
                 key: match button {

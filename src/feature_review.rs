@@ -740,7 +740,7 @@ impl Gerdr {
             id: id.to_owned(),
             accept: false,
         };
-        panel.note = Some((on, field));
+        panel.open_note(on, field);
         self.stop_key_repeat();
         self.select_panel_finding(id);
     }

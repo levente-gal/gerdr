@@ -1272,6 +1272,16 @@ const fn alt_shift(syms: &'static [Keysym]) -> Chord {
 }
 
 const ENTER: &[Keysym] = &[Keysym::Return, Keysym::KP_Enter];
+/// The key deleting the review's comments, asking first: Ctrl+Del deletes
+/// all, as in the inbox.
+pub(crate) const CLEAR_REVIEW_KEY: &str = "Ctrl+Del";
+
+/// Whether the key is `CLEAR_REVIEW_KEY`.
+pub(crate) fn clear_review_key(mods: &ModifiersState, sym: Keysym) -> bool {
+    mods.ctrl
+        && !(mods.shift || mods.alt || mods.logo)
+        && matches!(sym, Keysym::Delete | Keysym::KP_Delete)
+}
 const DELETE: &[Keysym] = &[Keysym::Delete, Keysym::KP_Delete];
 
 /// An action of the panel with a chord of its own, pressed with either
@@ -1616,6 +1626,8 @@ pub(crate) fn key_name(button: ReposButton) -> &'static str {
         B::ShowCommit => "Enter",
         B::All | B::CleanOnly | B::PullRebase | B::PullMerge => "Enter",
         B::SkipDiverged | B::Cancel | B::Close | B::EditName => "Esc",
+        // Delete all, as in the inbox; asked first on a sheet.
+        B::ClearReview => CLEAR_REVIEW_KEY,
         _ => "",
     }
 }
@@ -3923,6 +3935,14 @@ impl Panel {
         }
         if let Some(button) = action_key(mods, sym) {
             return self.act(button, ctx);
+        }
+        // Not while writing: there it deletes a word.
+        if clear_review_key(mods, sym)
+            && self.focus != Focus::Field
+            && self.diff.editing.is_none()
+            && !self.diff.review.is_empty()
+        {
+            return self.act(ReposButton::ClearReview, ctx);
         }
         // Shift with the arrows or the pages scrolls the detail, with
         // either focus; in the diff, with its own, they reach the cursor's

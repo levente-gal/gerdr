@@ -2054,7 +2054,7 @@ const AGENT_MODEL_MAX: i32 = 220;
 /// Build's milestone choice: its segments' words.
 const MODE_SEGMENTS: [&str; 2] = ["One agent", "Agent per milestone"];
 /// The ways a repository can go on the Ship page, in `Route::ALL`'s order.
-const SHIP_ROUTES: [&str; 3] = ["Pull request", "Merge only", "Nothing"];
+pub const SHIP_ROUTES: [&str; 3] = ["Pull request", "Merge only", "Nothing"];
 /// How far a Ship page tick box sits in from its row's left edge.
 const SHIP_STEP_INSET: i32 = 4;
 /// The room between the recap's figure tiles.
@@ -2606,6 +2606,41 @@ impl Stack {
                     bold: false,
                 },
             );
+        }
+    }
+
+    /// `lines` in their tones; one saying "key\twhat" (the keys list) has
+    /// its key bold in a column as wide as the widest, what it does beside.
+    fn keyed_lines(&mut self, lines: &[CheckLine]) {
+        let size = Font::Body.size();
+        let key_w = (lines.iter())
+            .filter_map(|l| l.text.split_once('\t'))
+            .map(|(key, _)| (width_of(key, size).ceil() as i32 + 1) * 9 / 8)
+            .max()
+            .unwrap_or(0)
+            .min(self.w / 3);
+        let (x, w) = (self.x, self.w);
+        for line in lines {
+            let Some((key, what)) = line.text.split_once('\t') else {
+                self.text(&line.text, Font::Body, Ink::Tone(line.tone), BODY_LINE);
+                continue;
+            };
+            self.pieces.push((
+                Rectangle::new((x, self.y).into(), (key_w, BODY_LINE).into()),
+                Piece::Text {
+                    text: key.to_owned(),
+                    font: Font::Body,
+                    ink: Ink::Text,
+                    bold: true,
+                },
+            ));
+            let what_x = x + key_w + PAGE_GAP / 2;
+            (self.x, self.w) = (what_x, (x + w - what_x).max(1));
+            self.join_next(false);
+            let start = self.y;
+            self.text(what, Font::Body, Ink::Tone(line.tone), BODY_LINE);
+            self.y = self.y.max(start + BODY_LINE);
+            (self.x, self.w) = (x, w);
         }
     }
 
@@ -4218,9 +4253,7 @@ fn page_stack(
                         }
                     }
                 }
-                for line in lines {
-                    s.text(&line.text, Font::Body, Ink::Tone(line.tone), BODY_LINE);
-                }
+                s.keyed_lines(lines);
             }
             PageSection::Review(summary) => s.review_summary(k, summary, page, buttons),
             PageSection::Heading(label) => {

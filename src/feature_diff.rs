@@ -379,8 +379,10 @@ impl FeatureOf {
     /// with `own` comments of the user's: the button that is there, for the
     /// host to say what it waits for.
     pub fn deciding_button(&self, shift: bool, own: usize) -> ReposButton {
+        // Ctrl+Enter makes them, Ctrl+Shift+Enter plans them, as on every
+        // page; with findings left, Make fixes says to decide them first.
         let direct = !self.needs_plan(own);
-        match direct && (!shift || self.count(FindingState::Open) > 0) {
+        match !shift || direct && self.count(FindingState::Open) > 0 {
             true => ReposButton::MakeFixes,
             false => ReposButton::PlanFixes,
         }
@@ -416,15 +418,13 @@ impl FeatureOf {
 
     /// The key of `button` as it stands with `own` comments of the user's:
     /// empty for one not of its own.
-    pub fn key_of(&self, button: ReposButton, own: usize) -> &'static str {
+    pub fn key_of(&self, button: ReposButton, _own: usize) -> &'static str {
         use ReposButton as B;
         match button {
             B::AddComment => "Shift+C",
             B::FixAllFindings => "Shift+F",
-            B::PlanFixes if self.role() == Role::Review || !self.needs_plan(own) => {
-                crate::worktree_diff::SEND_BACK_KEY
-            }
-            B::MakeFixes | B::PlanFixes | B::ReviewFixPlan | B::Approve | B::GoOn => {
+            B::PlanFixes => crate::worktree_diff::SEND_BACK_KEY,
+            B::MakeFixes | B::ReviewFixPlan | B::Approve | B::GoOn => {
                 crate::worktree_diff::APPROVE_KEY
             }
             B::Reopen => crate::worktree_diff::SEND_BACK_KEY,
@@ -434,24 +434,18 @@ impl FeatureOf {
 
     /// Its keys as it stands with `own` comments of the user's, before the
     /// diff's own (F1).
-    pub fn keys(&self, own: usize) -> Vec<(&'static str, &'static str)> {
+    pub fn keys(&self, _own: usize) -> Vec<(&'static str, &'static str)> {
         let esc = match self.inline {
-            true => "go to the stages",
+            true => "back to the stages",
             false => "close the diff",
         };
         let mut keys = vec![("Esc", esc), ("F1", "list the keys")];
         match self.role() {
             Role::Deciding => keys.extend([
-                match self.needs_plan(own) {
-                    true => (
-                        "Ctrl+Enter",
-                        "plan the fixes, once every finding is decided",
-                    ),
-                    false => (
-                        "Ctrl+Enter",
-                        "make the fixes, once every finding is decided",
-                    ),
-                },
+                (
+                    "Ctrl+Enter",
+                    "make the fixes, once every finding is decided and nothing of yours needs a plan",
+                ),
                 ("Ctrl+Shift+Enter", "plan the fixes first"),
                 ("Shift+C", "add a comment on no line or file"),
                 ("Shift+F", "mark every undecided finding to fix"),
