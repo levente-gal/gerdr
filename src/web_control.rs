@@ -281,17 +281,35 @@ impl WebControl {
 }
 
 /// How the extension knows `pane`: with this gerdr's pid, so another's
-/// tabs aren't taken for this one's panes.
+/// tabs aren't taken for this one's panes, and a secret of this run, so a
+/// program on the socket can't name a pane by guessing its number.
 fn pane_token(pane: u32) -> String {
-    format!("{}.{pane}", std::process::id())
+    format!("{}.{}.{pane}", std::process::id(), secret())
 }
 
 /// The pane `token` names, if it is this gerdr's.
 fn token_pane(token: &str) -> Option<u32> {
-    let (pid, pane) = token.split_once('.')?;
-    (pid.parse::<u32>().ok()? == std::process::id())
+    let (pid, rest) = token.split_once('.')?;
+    let (secret_there, pane) = rest.split_once('.')?;
+    (pid.parse::<u32>().ok()? == std::process::id() && secret_there == secret())
         .then(|| pane.parse().ok())
         .flatten()
+}
+
+/// This run's secret in `pane_token`: hex, from the kernel's random uuid.
+fn secret() -> &'static str {
+    static SECRET: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    SECRET.get_or_init(|| {
+        let uuid = std::fs::read_to_string("/proc/sys/kernel/random/uuid").unwrap_or_default();
+        let hex = uuid.trim().replace('-', "");
+        if !hex.is_empty() {
+            return hex;
+        }
+        // Keyed by the system's randomness too, should `/proc` be unreadable.
+        use std::hash::{BuildHasher, Hasher};
+        let half = || std::collections::hash_map::RandomState::new().build_hasher().finish();
+        format!("{:016x}{:016x}", half(), half())
+    })
 }
 
 /// The extension's page that opens `url` for `pane`.
@@ -615,6 +633,11 @@ impl Gerdr {
                 let Some(pane) = token_pane(&pane) else {
                     return;
                 };
+                // Another connection's pane stays its own until it is gone.
+                if control.panes.get(&pane).is_some_and(|held| *held != id) {
+                    tracing::warn!("web extension: pane {pane} is another connection's");
+                    return;
+                }
                 control.panes.insert(pane, id);
                 control.history.insert(pane, WebHistory { back, forward });
                 self.preview_page(pane, &url);
@@ -855,6 +878,10 @@ mod tests {
         assert_eq!(token_pane(&pane_token(7)), Some(7));
         assert_eq!(token_pane("1.7"), None);
         assert_eq!(token_pane("7"), None);
+        let pid = std::process::id();
+        assert_eq!(token_pane(&format!("{pid}.7")), None);
+        assert_eq!(token_pane(&format!("{pid}.0123.7")), None);
+        assert!(secret().len() >= 32);
     }
 
     #[test]

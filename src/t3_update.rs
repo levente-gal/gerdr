@@ -32,7 +32,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs::File,
     io::Read,
-    os::unix::process::CommandExt,
+    os::unix::{fs::DirBuilderExt, process::CommandExt},
     path::{Path, PathBuf},
     process::{Child, Command, Output, Stdio},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -361,7 +361,12 @@ fn stop(child: &mut Child) {
 pub fn try_version(bin: &Path, version: &str, target: Option<i64>) -> Result<Option<i64>, String> {
     let dir = std::env::temp_dir().join(format!("gerdr-t3-{}-{version}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).map_err(|err| format!("{}: {err}", dir.display()))?;
+    // Made here and only ours: one of that name another user made first in
+    // the shared temp folder fails it.
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&dir)
+        .map_err(|err| format!("{}: {err}", dir.display()))?;
     let tried = try_in(&dir, bin, version, target);
     let _ = std::fs::remove_dir_all(&dir);
     tried

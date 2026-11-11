@@ -9,7 +9,7 @@
 //! `PRUNE_AFTER` are forgotten.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     io::ErrorKind,
     path::{Path, PathBuf},
 };
@@ -86,32 +86,57 @@ pub fn file(root: Option<&Path>, project: &str) -> PathBuf {
     root.join("inbox").join(format!("{project}.json"))
 }
 
+/// Inbox files last loaded as empty though they are still there, unread:
+/// saving would lose them, so they aren't saved over until a load reads them.
+static FROZEN: std::sync::Mutex<BTreeSet<PathBuf>> = std::sync::Mutex::new(BTreeSet::new());
+
 /// Project `project`'s inbox, as saved under `root`; empty when there is
-/// none or it can't be read. One that can't be read is set aside as
-/// `<id>.json.bad-<unix time>` (as `projects` does), so the next save
-/// doesn't lose it.
+/// none or it can't be read. One that can't be parsed is set aside as
+/// `<id>.json.bad-<unix time>` (as `projects` does); one that can't be read,
+/// or set aside, isn't saved over.
 pub fn load(root: Option<&Path>, project: &str) -> InboxFile {
     let path = file(root, project);
-    let raw = match std::fs::read(&path) {
-        Ok(raw) => raw,
-        Err(err) if err.kind() == ErrorKind::NotFound => return InboxFile::default(),
+    let read = match std::fs::read(&path) {
+        Ok(raw) => serde_json::from_slice(&raw).map_err(|err| {
+            tracing::warn!("reading {}: {err}", path.display());
+            crate::projects::set_aside(&path)
+        }),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(InboxFile::default()),
         Err(err) => {
             tracing::warn!("reading {}: {err}", path.display());
-            crate::projects::set_aside(&path);
-            return InboxFile::default();
+            Err(false)
         }
     };
-    serde_json::from_slice(&raw).unwrap_or_else(|err| {
-        tracing::warn!("reading {}: {err}", path.display());
-        crate::projects::set_aside(&path);
-        InboxFile::default()
-    })
+    let mut frozen = FROZEN.lock().unwrap_or_else(|e| e.into_inner());
+    match read {
+        Ok(inbox) => {
+            frozen.remove(&path);
+            inbox
+        }
+        Err(set_aside) => {
+            if !set_aside {
+                frozen.insert(path);
+            }
+            InboxFile::default()
+        }
+    }
 }
 
 /// Save project `project`'s inbox under `root`, atomically.
 pub fn save(root: Option<&Path>, project: &str, inbox: &InboxFile) -> std::io::Result<()> {
+    let path = file(root, project);
+    if FROZEN
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains(&path)
+    {
+        return Err(std::io::Error::other(format!(
+            "not saving over {}: it couldn't be read",
+            path.display()
+        )));
+    }
     let bytes = serde_json::to_vec_pretty(inbox).map_err(std::io::Error::other)?;
-    crate::projects::write_atomic(&file(root, project), &bytes)
+    crate::projects::write_atomic(&path, &bytes)
 }
 
 /// The hour "tomorrow morning" starts at, local time.

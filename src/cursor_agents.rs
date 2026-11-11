@@ -807,7 +807,15 @@ pub fn read_rows(
                 paths,
             })
         })?
-        .collect::<rusqlite::Result<_>>()?;
+        // One odd row (a field of another type) skips that chat, not all.
+        .filter_map(|row| {
+            row.inspect_err(|err| {
+                static TOLD: std::sync::Once = std::sync::Once::new();
+                TOLD.call_once(|| tracing::warn!("cursor chats: a row skipped: {err}"));
+            })
+            .ok()
+        })
+        .collect();
     let mut status = conn.prepare_cached(
         "SELECT json_extract(value, '$.status') FROM cursorDiskKV WHERE key = ?1",
     )?;
@@ -823,7 +831,8 @@ pub fn read_rows(
             None => {
                 let key = format!("composerData:{}", row.id);
                 let mut found = status.query_map([key], |r| r.get::<_, Option<String>>(0))?;
-                found.next().transpose()?.flatten()
+                // A status of another type is none.
+                found.next().and_then(Result::ok).flatten()
             }
         };
         known.insert(row.id.clone(), (row.updated_ms, row.status.clone()));
@@ -1005,8 +1014,13 @@ pub fn take_events(socket: &UnixDatagram) -> Vec<HookEvent> {
         if n == 0 {
             continue;
         }
-        match serde_json::from_slice(&buf[..n]) {
-            Ok(event) => events.push(event),
+        match serde_json::from_slice::<HookEvent>(&buf[..n]) {
+            // Any local program can send one: a time ahead of now would
+            // hold its word for ever.
+            Ok(mut event) => {
+                event.at_ms = event.at_ms.clamp(0, now_ms());
+                events.push(event);
+            }
             Err(err) => tracing::debug!("cursor hook: {err}"),
         }
     }
@@ -2003,6 +2017,33 @@ mod tests {
             })
         );
         assert_eq!(spawned[0].status, None);
+        // An odd row skips its own chat only, an odd status is none.
+        header("odd", now - 10, 0, r#"{"name":5}"#);
+        conn.execute(
+            "INSERT INTO cursorDiskKV VALUES ('composerData:unread', '{\"status\":7}')",
+            [],
+        )
+        .unwrap();
+        known.clear();
+        let rows = read_rows(&conn, now, &[], &mut known).unwrap();
+        assert!(rows.iter().all(|r| r.id != "odd"));
+        assert!(rows.iter().any(|r| r.id == "a"));
+        let unread = rows.iter().find(|r| r.id == "unread").unwrap();
+        assert_eq!(unread.status, None);
+    }
+
+    #[test]
+    fn a_hook_time_ahead_of_now_is_now() {
+        let (sender, receiver) = UnixDatagram::pair().unwrap();
+        receiver.set_nonblocking(true).unwrap();
+        for at_ms in [i64::MAX, i64::MIN, 5] {
+            let message = serde_json::to_vec(&hook("stop", None, at_ms)).unwrap();
+            sender.send(&message).unwrap();
+        }
+        let at: Vec<i64> = take_events(&receiver).iter().map(|e| e.at_ms).collect();
+        assert_eq!(at.len(), 3);
+        assert!(at[0] <= now_ms() && at[0] > 0);
+        assert_eq!(at[1..], [0, 5]);
     }
 
     fn moded(id: &str, mode: &str, updated_ms: i64) -> ChatRow {

@@ -1576,6 +1576,9 @@ pub struct Gerdr {
     pub inbox: inbox::Inbox,
     /// The scrollback viewer, while it is open over a terminal pane.
     pub scrollback: Option<scrollback::Scrollback>,
+    /// The herdr pane whose output is being read for the viewer, off the
+    /// event loop (see `scrollback_panel`).
+    pub scrollback_reading: Option<String>,
     /// The criteria strip over a sandbox's app, and what it holds.
     pub criteria_strip: criteria_strip::CriteriaStrip,
     /// gerdr's connection to the host's notification daemon; `None` without
@@ -7315,6 +7318,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         repos_drag_edge: None,
         doc_tab_shown: None,
         scrollback: None,
+        scrollback_reading: None,
         criteria_strip: Default::default(),
         thumb_drag: None,
         stopping: HashSet::new(),

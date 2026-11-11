@@ -274,9 +274,9 @@ fn perform(task: &Task, step: &dyn Fn(&str)) -> OpResult {
             step("popping the stash…");
             git_ops::stash_pop(dir, *n)
         }
-        BatchKind::StashDrop(n) => {
+        BatchKind::StashDrop(n, oid) => {
             step("dropping the stash…");
-            git_ops::stash_drop(dir, *n)
+            git_ops::stash_drop(dir, *n, oid.as_deref())
         }
         BatchKind::Discard => {
             step("discarding…");
@@ -969,7 +969,7 @@ impl Gerdr {
                     let text = text.collect::<Vec<_>>().join("\n");
                     (text, lines.into_iter().map(|(_, oid)| oid).collect())
                 }
-                DetailTab::Stashes => (git_ops::stash_list(&key.root), Vec::new()),
+                DetailTab::Stashes => git_ops::stash_list(&key.root),
             };
             let _ = tx.send(RepoEvent::Detail { key, text, oids });
         });

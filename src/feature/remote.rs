@@ -833,14 +833,32 @@ impl Reach {
         )
     }
 
-    /// The target as git and rsync write a host: no `ssh://`, and no port.
-    /// The master has connected already.
-    fn host(&self) -> &str {
+    /// The target as git and rsync write a host: no `ssh://`, no port, and
+    /// an IPv6 address in brackets, as its colons would be taken for the
+    /// path's. The master has connected already.
+    fn host(&self) -> String {
         let target = self.target.strip_prefix("ssh://").unwrap_or(&self.target);
-        match target.rsplit_once(':') {
-            Some((host, port)) if port.chars().all(|c| c.is_ascii_digit()) => host,
-            _ => target,
-        }
+        let (user, host) = match target.rsplit_once('@') {
+            Some((user, host)) => (Some(user), host),
+            None => (None, target),
+        };
+        let host = match host.strip_prefix('[') {
+            Some(rest) => rest.split_once(']').map_or(rest, |(address, _)| address),
+            // A bare IPv6 address has no port: its last colon is its own.
+            None => match host.rsplit_once(':') {
+                Some((name, port))
+                    if !name.contains(':') && port.chars().all(|c| c.is_ascii_digit()) =>
+                {
+                    name
+                }
+                _ => host,
+            },
+        };
+        let host = match host.contains(':') {
+            true => format!("[{host}]"),
+            false => host.to_owned(),
+        };
+        user.map_or_else(|| host.clone(), |user| format!("{user}@{host}"))
     }
 
     /// `path` there, as git names a remote.
@@ -1622,6 +1640,11 @@ mod tests {
         );
         assert_eq!(reach("ssh://ana@box:2222").host(), "ana@box");
         assert_eq!(reach("ana@box").rsync_path("/d/x/"), "ana@box:/d/x/");
+        assert_eq!(reach("ana@fd00::5").rsync_path("/d"), "ana@[fd00::5]:/d/");
+        assert_eq!(reach("fd00::5").host(), "[fd00::5]");
+        assert_eq!(reach("ssh://ana@[fd00::5]:2222").host(), "ana@[fd00::5]");
+        assert_eq!(reach("ssh://[fd00::5]").git_url("/r"), "ssh://[fd00::5]/r");
+        assert_eq!(reach("box").host(), "box");
     }
 
     /// A folder of its own, removed when dropped.

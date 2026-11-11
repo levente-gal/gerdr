@@ -2139,6 +2139,8 @@ fn git_command(dir: &Path, args: &[&str]) -> Command {
         .env("LC_ALL", "C")
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_EDITOR", "true")
+        // A probe's `git status` must never take index.lock from an agent.
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_INDEX_FILE")

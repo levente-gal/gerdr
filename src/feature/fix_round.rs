@@ -563,9 +563,10 @@ pub fn rounds(log: &str) -> Vec<(u32, Vec<(bool, String)>)> {
 }
 
 /// Whether `line`, what a box in the log says, is `item`: an agent may add
-/// to it, as long as it keeps what gerdr wrote.
+/// to it, as long as it keeps what gerdr wrote. `r1-1` isn't `r1-10`.
 fn is_item(line: &str, item: &str) -> bool {
-    line.starts_with(item)
+    (line.strip_prefix(item))
+        .is_some_and(|rest| !rest.starts_with(|c: char| c.is_alphanumeric() || c == '-'))
 }
 
 /// Build log `log` with round `n`'s section holding a box for each of
@@ -1108,6 +1109,11 @@ mod tests {
         assert_eq!(left(&ticked, 2, &items), items);
         // A box gone counts as not done, and so does a box of another text.
         assert_eq!(left("## Fix round 1\n\n- [x] other\n", 1, &items), items);
+        // `r1-10` ticked isn't `r1-1` ticked.
+        let bare: Vec<String> = vec!["r1-1".into(), "r1-10".into()];
+        let log = "## Fix round 1\n\n- [ ] r1-1\n- [x] r1-10, commit abc\n";
+        assert_eq!(left(log, 1, &bare), ["r1-1"]);
+        assert_eq!(with_items(log, 1, &bare), log);
     }
 
     #[test]
@@ -1162,6 +1168,12 @@ mod tests {
         assert_eq!(between, "## Notes\n\nHi\n");
         // No such round: as it was.
         assert_eq!(without_unticked(log, 9), log);
+        // A round between others: theirs stay, ticked or not.
+        let three = "## Fix round 1\n\n- [x] r1-1\n- [ ] r1-2\n\n## Fix round 2\n\n- [ ] r2-1\n\n## Fix round 3\n\n- [ ] r3-1\n- [x] r3-2\n";
+        assert_eq!(
+            without_unticked(three, 2),
+            "## Fix round 1\n\n- [x] r1-1\n- [ ] r1-2\n\n## Fix round 3\n\n- [ ] r3-1\n- [x] r3-2\n"
+        );
     }
 
     #[test]

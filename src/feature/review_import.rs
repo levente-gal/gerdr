@@ -549,7 +549,8 @@ fn placed(diff: &Diff, repo: &str, file: &str, line: Option<usize>) -> bool {
 ///
 /// - a finding naming an earlier one's id raises it again: its text and
 ///   run follow, and one sent or fixed is open again (one dismissed stays
-///   dismissed, one undecided or to fix stays so);
+///   dismissed, one undecided or to fix stays so); the user's own item, or
+///   one posted to GitHub, keeps its words, and the reviewer's are new;
 /// - any other is new, its id `r<run>-<k>`;
 /// - an earlier one sent to be fixed and not raised again is fixed.
 pub fn import(
@@ -583,6 +584,15 @@ pub fn import(
                 FindingState::Sent | FindingState::Fixed => FindingState::Open,
                 state => state,
             };
+        }
+        // The user's own words, and what went to GitHub, stay: the
+        // reviewer's go in as a new finding below.
+        let earlier = earlier.filter(|i| {
+            let f = &review.findings[*i];
+            !f.yours && f.state != FindingState::Posted
+        });
+        if let Some(i) = earlier {
+            let f = &mut review.findings[i];
             f.severity = raw.severity;
             (f.repo, f.file, f.line) = (repo, file, raw.line);
             (f.title, f.body, f.fix) = (raw.title, raw.body, raw.fix);
@@ -1189,6 +1199,30 @@ mod tests {
         assert_eq!(review.findings[1].file, "src/a.rs");
         assert_eq!(review.n, 1);
         assert_eq!(review.open(), 4);
+    }
+
+    #[test]
+    fn a_reviewer_raising_your_item_or_a_posted_one_adds_its_own() {
+        let mut review = AiReview::default();
+        let theirs = vec![raw(None, "src/a.rs", None, "theirs")];
+        import(&mut review, 1, theirs, &repos(), &diff());
+        review.findings[0].state = FindingState::Posted;
+        let own = add(&mut review, "Mine").unwrap();
+        review.findings.last_mut().unwrap().state = FindingState::Sent;
+        let again = vec![
+            raw(Some(&own), "src/a.rs", Some(12), "still broken"),
+            raw(Some("r1-1"), "src/a.rs", Some(12), "reworded"),
+        ];
+        let got = import(&mut review, 2, again, &repos(), &diff());
+        assert_eq!((got.again, got.new, got.fixed), (0, 2, 0));
+        let mine = review.finding(&own).unwrap();
+        // Your words stay; named again, it isn't fixed but open.
+        assert_eq!((&*mine.title, mine.state), ("Mine", FindingState::Open));
+        let posted = review.finding("r1-1").unwrap();
+        assert_eq!(posted.state, FindingState::Posted);
+        assert_eq!(posted.title, "theirs");
+        assert_eq!(review.finding("r2-1").unwrap().title, "still broken");
+        assert_eq!(review.finding("r2-2").unwrap().title, "reworded");
     }
 
     #[test]

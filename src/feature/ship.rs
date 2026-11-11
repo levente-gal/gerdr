@@ -943,6 +943,11 @@ pub fn update_from_base(
         super::UpdateWay::Rebase => git_ops::Integrate::Rebase,
     };
     if let Err(failed) = git_ops::integrate(dir, &onto, how) {
+        // Not stopped part way, say on one the user had going: theirs stays.
+        let own = matches!(failed.failure, git_ops::Failure::Conflict(_) | git_ops::Failure::Timeout);
+        if !own {
+            return Err(format!("{key}: couldn't take {onto} in: {}", failed.why));
+        }
         // Stopped part way: back to where it was.
         let stopped = match way {
             super::UpdateWay::Merge => crate::git::InProgress::Merge,

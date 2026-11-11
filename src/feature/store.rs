@@ -98,13 +98,30 @@ fn load_dir(folder: &Path) -> Result<(Vec<Feature>, usize), String> {
             Ok(raw) => raw,
             Err(err) if err.kind() == ErrorKind::NotFound => continue,
             Err(err) if err.kind() == ErrorKind::NotADirectory => continue,
+            // Not set aside: the file may be fine, only out of reach now.
             Err(err) => {
                 tracing::warn!("reading {}: {err}", path.display());
-                crate::projects::set_aside(&path);
                 continue;
             }
         };
         match serde_json::from_slice::<Feature>(&raw) {
+            // A copied folder (`cp -r login login-old`): saving it would go
+            // over the real one's.
+            Ok(feature) if dir.file_name() != Some(feature.slug.as_ref()) => {
+                tracing::warn!(
+                    "{} is of feature {:?}: not loaded",
+                    path.display(),
+                    feature.slug
+                );
+                crate::problems::report(
+                    "store",
+                    format!(
+                        "{} is of feature {:?}, not of its folder: it isn't loaded",
+                        path.display(),
+                        feature.slug
+                    ),
+                );
+            }
             Ok(mut feature) => {
                 let inline = holds_sides(&feature);
                 let first = inline && !dir.join(HISTORY).exists() && !dir.join(ROUNDS).exists();
@@ -381,6 +398,13 @@ fn len_of(path: &Path) -> u64 {
 
 /// Save `feature`'s record, atomically (`projects::write_atomic`).
 pub fn save(root: Option<&Path>, feature: &Feature) -> std::io::Result<()> {
+    let outside = |name: &str| name.is_empty() || name.contains('/') || name.contains("..");
+    if outside(&feature.slug) || outside(&feature.project) {
+        return Err(std::io::Error::other(format!(
+            "not saving feature {:?} of {:?}: not a folder name",
+            feature.slug, feature.project
+        )));
+    }
     save_at(&dir(root, &feature.project, &feature.slug), feature)
 }
 
@@ -694,6 +718,23 @@ mod tests {
 
     fn inode(path: &Path) -> u64 {
         std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(path).unwrap())
+    }
+
+    #[test]
+    fn a_copied_folder_isnt_loaded_and_a_slug_cant_leave_its_folder() {
+        let t = Temp::new();
+        let f = feature("a", 5);
+        save(Some(&t.0), &f).unwrap();
+        let copy = dir(Some(&t.0), "p", "a-old");
+        std::fs::create_dir_all(&copy).unwrap();
+        std::fs::copy(dir(Some(&t.0), "p", "a").join(FILE), copy.join(FILE)).unwrap();
+        assert_eq!(load_all(Some(&t.0), "p").unwrap(), [f.clone()]);
+        assert!(copy.join(FILE).is_file(), "the copy is left alone");
+        let escaping = Feature {
+            slug: "../../x".into(),
+            ..f
+        };
+        assert!(save(Some(&t.0), &escaping).is_err());
     }
 
     #[test]

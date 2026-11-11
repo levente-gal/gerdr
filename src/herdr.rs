@@ -773,7 +773,7 @@ impl Herdr {
         if let Some(err) = reply.get("error") {
             return Err(fail(&err["message"].as_str().unwrap_or("failed")));
         }
-        Ok(reply["result"].take())
+        Ok(take(&mut reply, "/result"))
     }
 
     fn get<T: for<'de> Deserialize<'de>>(
@@ -783,7 +783,8 @@ impl Herdr {
         key: &str,
     ) -> Result<T, String> {
         let mut result = self.call(method, params)?;
-        serde_json::from_value(result[key].take()).map_err(|e| format!("{method}: {e}"))
+        serde_json::from_value(take(&mut result, &format!("/{key}")))
+            .map_err(|e| format!("{method}: {e}"))
     }
 
     /// A new workspace in `dir`, labelled `label` and marked as gerdr's;
@@ -877,7 +878,7 @@ impl Herdr {
             "ratio": ratio,
         });
         let mut result = self.call("pane.move", move_params(pane_id, destination))?;
-        moved_pane(result["move_result"].take())
+        moved_pane(take(&mut result, "/move_result"))
     }
 
     /// Move `pane_id` into a new tab of `workspace_id`. Returns the pane as
@@ -889,7 +890,7 @@ impl Herdr {
     ) -> Result<PaneInfo, String> {
         let destination = json!({"type": "new_tab", "workspace_id": workspace_id, "label": null});
         let mut result = self.call("pane.move", move_params(pane_id, destination))?;
-        moved_pane(result["move_result"].take())
+        moved_pane(take(&mut result, "/move_result"))
     }
 
     /// Close a pane, ending what runs in it.
@@ -976,7 +977,7 @@ impl Herdr {
     ) -> Result<(Option<String>, Vec<Worktree>), String> {
         let mut result = self.call("worktree.list", json!({"workspace_id": workspace_id}))?;
         let repo = result["source"]["repo_name"].as_str().map(str::to_owned);
-        let worktrees = serde_json::from_value(result["worktrees"].take())
+        let worktrees = serde_json::from_value(take(&mut result, "/worktrees"))
             .map_err(|e| format!("worktree.list: {e}"))?;
         Ok((repo, worktrees))
     }
@@ -1210,7 +1211,7 @@ impl Herdr {
             "pane.read",
             json!({"pane_id": pane_id, "source": source, "lines": lines}),
         )?;
-        match result["read"]["text"].take() {
+        match take(&mut result, "/read/text") {
             Value::String(text) => Ok(text),
             _ => Err("pane.read: no text in the reply".into()),
         }
@@ -1232,7 +1233,7 @@ impl Herdr {
                 "strip_ansi": false,
             }),
         )?;
-        match result["read"]["text"].take() {
+        match take(&mut result, "/read/text") {
             Value::String(text) => Ok(text),
             _ => Err("pane.read: no text in the reply".into()),
         }
@@ -1274,7 +1275,7 @@ impl Herdr {
                 "cursor": {"row": last, "col": col},
             }),
         )?;
-        match result["text"].take() {
+        match take(&mut result, "/text") {
             Value::String(text) => Ok((text, scroll.offset_from_bottom)),
             _ => Err("pane.selection.read: no text in the reply".into()),
         }
@@ -1520,7 +1521,7 @@ fn parse_event(mut value: Value) -> Option<Event> {
         },
         "pane_moved" => Event::PaneMoved {
             previous_pane_id: string(&data["previous_pane_id"])?,
-            pane: serde_json::from_value(data["pane"].take()).ok()?,
+            pane: serde_json::from_value(take(data, "/pane")).ok()?,
         },
         "workspace_closed" => Event::WorkspaceClosed {
             workspace_id: string(&data["workspace_id"])?,
@@ -1534,6 +1535,12 @@ fn parse_event(mut value: Value) -> Option<Event> {
         }
         _ => return None,
     })
+}
+
+/// What `value` holds at JSON pointer `at`, taken out of it: null when
+/// nothing is there, as in a reply of another shape (indexing would panic).
+fn take(value: &mut Value, at: &str) -> Value {
+    value.pointer_mut(at).map(Value::take).unwrap_or_default()
 }
 
 /// The split direction as herdr names it.
@@ -1559,7 +1566,7 @@ fn moved_pane(mut result: Value) -> Result<PaneInfo, String> {
     if !changed && reason != Some("same_tab") {
         return Err(format!("pane.move: {}", reason.unwrap_or("not moved")));
     }
-    serde_json::from_value(result["pane"].take()).map_err(|e| format!("pane.move: {e}"))
+    serde_json::from_value(take(&mut result, "/pane")).map_err(|e| format!("pane.move: {e}"))
 }
 
 #[cfg(test)]
@@ -1852,5 +1859,9 @@ mod tests {
         let zoomed = moved_pane(json!({"changed": false, "reason": "zoomed_tab", "pane": pane}));
         assert_eq!(zoomed.unwrap_err(), "pane.move: zoomed_tab");
         assert!(moved_pane(json!({"changed": false, "pane": pane})).is_err());
+        // An odd reply is an error, not a panic.
+        assert!(moved_pane(json!({"changed": true, "pane": []})).is_err());
+        assert!(moved_pane(json!([])).is_err());
+        assert!(parse_event(json!({"event": "pane_moved", "data": "odd"})).is_none());
     }
 }

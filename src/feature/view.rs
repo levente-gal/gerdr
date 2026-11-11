@@ -305,10 +305,12 @@ pub fn seen_of<'a>(
 
 /// The script saying which folders of `dir` hold a record (`R <folder>`) and
 /// which don't (`N <folder>`): those are the files of an agent working there
-/// for another machine. Nothing is said of a folder that isn't there.
+/// for another machine. Nothing is said of a folder that isn't there; one
+/// that can't be read fails, so the copies kept of it stay.
 pub fn list_script(dir: &str) -> String {
     format!(
-        r#"cd {} 2>/dev/null || exit 0
+        r#"[ -e {dir} ] || exit 0
+cd {dir} && [ -r . ] || exit 3
 for d in */; do
   d=${{d%/}}
   [ -d "$d" ] || continue
@@ -317,7 +319,7 @@ for d in */; do
   else echo "N $d"; fi
 done
 "#,
-        shell_quote(dir),
+        dir = shell_quote(dir),
         file = store::FILE,
         handed = super::lease::HANDED_TO,
     )

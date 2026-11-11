@@ -1640,23 +1640,36 @@ pub fn log_file(app: &str) -> Option<std::fs::File> {
 }
 
 /// The log at `path`, open for appending, its folder made; started over
-/// once too big. `None` (and a warning) when it can't be opened.
+/// once too big, as are the other logs there (still written by programs
+/// running on, or gerdr itself). `None` (and a warning) when it can't be
+/// opened.
 pub fn append_log(path: &Path) -> Option<std::fs::File> {
     let open = || {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
+            let logs = std::fs::read_dir(dir).into_iter().flatten().flatten();
+            (logs.map(|e| e.path()))
+                .filter(|p| p.extension().is_some_and(|e| e == "log"))
+                .for_each(|log| cut_big_log(&log));
         }
-        let big = std::fs::metadata(path).is_ok_and(|m| m.len() > LOG_MAX);
+        cut_big_log(path);
         std::fs::OpenOptions::new()
             .create(true)
-            .append(!big)
-            .write(true)
-            .truncate(big)
+            .append(true)
             .open(path)
     };
     open()
         .inspect_err(|err| tracing::warn!("opening {}: {err}", path.display()))
         .ok()
+}
+
+/// Start the log at `path` over if bigger than `LOG_MAX`. Its writers
+/// append, so they carry on at its new end.
+fn cut_big_log(path: &Path) {
+    if std::fs::metadata(path).is_ok_and(|m| m.len() > LOG_MAX) {
+        let file = std::fs::OpenOptions::new().write(true).open(path);
+        let _ = file.and_then(|f| f.set_len(0));
+    }
 }
 
 #[cfg(test)]
@@ -1706,6 +1719,24 @@ mod tests {
             Some("cursor --user-data-dir=/x")
         );
         assert_eq!(with_profile_of("cursor", u32::MAX), None);
+    }
+
+    #[test]
+    fn big_logs_start_over_while_written() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("gerdr-logs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (app, other) = (dir.join("app.log"), dir.join("other.log"));
+        let mut running = super::append_log(&other).unwrap();
+        running.set_len(super::LOG_MAX + 1).unwrap();
+        super::append_log(&app).unwrap().write_all(b"app").unwrap();
+        // Opening one log cut the other, still written at its new end.
+        assert_eq!(std::fs::metadata(&other).unwrap().len(), 0);
+        running.write_all(b"on").unwrap();
+        assert_eq!(std::fs::read(&other).unwrap(), b"on");
+        super::append_log(&app).unwrap().write_all(b"!").unwrap();
+        assert_eq!(std::fs::read(&app).unwrap(), b"app!");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

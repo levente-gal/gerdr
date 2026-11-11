@@ -199,20 +199,38 @@ impl SandboxRun {
 
     /// What listens inside it, by port, leaving out the proxy's own ports.
     pub fn listening(&self) -> Vec<u16> {
+        self.listening_on(true)
+    }
+
+    /// `listening`, leaving out what is bound to loopback only, as a debugger
+    /// on 127.0.0.1:9229: only what runs there was meant to reach it.
+    pub fn listening_wide(&self) -> Vec<u16> {
+        self.listening_on(false)
+    }
+
+    fn listening_on(&self, loopback: bool) -> Vec<u16> {
         if self.on_another_machine() {
-            return (self.elsewhere.iter()).flat_map(|there| there.ports.clone()).collect();
+            // Their addresses aren't brought here: none counts as wide.
+            return match loopback {
+                true => (self.elsewhere.iter()).flat_map(|there| there.ports.clone()).collect(),
+                false => Vec::new(),
+            };
         }
         let Some(holder) = self.holder.as_ref() else {
             return Vec::new();
         };
-        let mut ports = listening_of(holder);
+        let mut ports: Vec<u16> = (listening_of(holder).into_iter())
+            .filter(|&(_, only_loopback)| loopback || !only_loopback)
+            .map(|(port, _)| port)
+            .collect();
+        ports.dedup();
         ports.retain(|port| !self.forwards.iter().any(|f| f.main_port == *port));
         ports
     }
 }
 
 /// When `listening_of` read a holder's ports, and what they were.
-type SeenPorts = (Instant, Vec<u16>);
+type SeenPorts = (Instant, Vec<(u16, bool)>);
 
 /// How long `listening_of` goes by what it last read of a holder.
 const PORTS_FRESH: Duration = Duration::from_secs(1);
@@ -225,9 +243,10 @@ thread_local! {
         std::cell::RefCell::new(HashMap::new());
 }
 
-/// The ports listening in the network namespace of `holder`, sorted, as read
+/// The ports listening in the network namespace of `holder`, sorted, each
+/// with whether it is bound to loopback only (see `listening_rows`), as read
 /// within `PORTS_FRESH`; none once it is gone.
-fn listening_of(holder: &Proc) -> Vec<u16> {
+fn listening_of(holder: &Proc) -> Vec<(u16, bool)> {
     let key = (holder.pid, holder.start);
     let now = Instant::now();
     let kept = PORTS.with_borrow(|seen| {
@@ -244,7 +263,7 @@ fn listening_of(holder: &Proc) -> Vec<u16> {
             let path = format!("/proc/{}/net/{table}", holder.pid);
             // Unreadable counts as nothing listening: the holder just ended.
             let text = fs::read_to_string(path).unwrap_or_default();
-            ports.extend(listening_in(&text));
+            ports.extend(listening_rows(&text));
         }
     }
     ports.sort_unstable();
@@ -382,6 +401,11 @@ fn end_inside(holder: &Proc) {
 
 /// The ports listening in the text of a `/proc/<pid>/net/tcp`.
 fn listening_in(table: &str) -> Vec<u16> {
+    listening_rows(table).into_iter().map(|(port, _)| port).collect()
+}
+
+/// `listening_in`, each port with whether its row is bound to loopback.
+fn listening_rows(table: &str) -> Vec<(u16, bool)> {
     const LISTEN: &str = "0A";
     table
         .lines()
@@ -390,10 +414,37 @@ fn listening_in(table: &str) -> Vec<u16> {
             let mut fields = line.split_whitespace();
             let local = fields.nth(1)?;
             let state = fields.nth(1)?;
-            let port = local.rsplit_once(':')?.1;
-            (state == LISTEN).then(|| u16::from_str_radix(port, 16).ok())?
+            let (address, port) = local.rsplit_once(':')?;
+            let port = u16::from_str_radix(port, 16).ok()?;
+            (state == LISTEN).then(|| (port, loopback(address)))
         })
         .collect()
+}
+
+/// Whether `hex`, an address of `/proc/<pid>/net/tcp` or `tcp6`, is in
+/// 127.0.0.0/8, `::1` or 127/8 mapped into IPv6. The kernel prints it as
+/// words of 32 bits in its own byte order.
+fn loopback(hex: &str) -> bool {
+    use std::net::{Ipv4Addr, Ipv6Addr};
+    let word = |at: usize| {
+        let word = hex.get(at..at + 8)?;
+        u32::from_str_radix(word, 16).ok().map(u32::to_ne_bytes)
+    };
+    match hex.len() {
+        8 => word(0).is_some_and(|bytes| Ipv4Addr::from(bytes).is_loopback()),
+        32 => {
+            let mut bytes = [0u8; 16];
+            for (at, chunk) in bytes.chunks_mut(4).enumerate() {
+                let Some(word) = word(at * 8) else {
+                    return false;
+                };
+                chunk.copy_from_slice(&word);
+            }
+            let ip = Ipv6Addr::from(bytes);
+            ip.is_loopback() || ip.to_ipv4_mapped().is_some_and(|ip| ip.is_loopback())
+        }
+        _ => false,
+    }
 }
 
 /// The port of `ports` most like a web app's: a dev server's usual ones first,
@@ -2593,6 +2644,27 @@ mod tests {
 ";
         assert_eq!(listening_in(table), [9000, 4200]);
         assert_eq!(listening_in(""), [0u16; 0]);
+    }
+
+    #[test]
+    #[cfg(target_endian = "little")]
+    fn ports_bound_to_loopback_are_told_apart() {
+        let table =
+            "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid
+   0: 0100007F:240D 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000
+   1: 0301007F:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000
+   2: 00000000:1068 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000
+   3: 0A00A8C0:0050 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000
+";
+        let wide = [(9229, true), (8080, true), (4200, false), (80, false)];
+        assert_eq!(listening_rows(table), wide);
+        let six = "  sl  local_address                         remote_address                        st
+   0: 00000000000000000000000001000000:240D 00000000000000000000000000000000:0000 0A
+   1: 0000000000000000FFFF00000100007F:1F90 00000000000000000000000000000000:0000 0A
+   2: 00000000000000000000000000000000:1068 00000000000000000000000000000000:0000 0A
+   3: 0000000000000000FFFF00000A00A8C0:0050 00000000000000000000000000000000:0000 0A
+";
+        assert_eq!(listening_rows(six), wide);
     }
 
     #[test]

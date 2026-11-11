@@ -150,7 +150,8 @@ impl Section {
                     .and_then(|n| n.split(',').next()?.parse().ok())
                     .unwrap_or(1)
             };
-            self.number = start('+');
+            // An emptied file's hunk is `+0,0`: what it lost goes back over line 1.
+            self.number = start('+').max(1);
             self.old = start('-');
             self.diff.hunks.push(Hunk {
                 context: expand(context.trim()),

@@ -183,9 +183,19 @@ impl GitStatus {
 
 /// The status of the repository `dir` is in; `None` outside one or without git.
 ///
-/// It runs every few seconds for every workspace folder, so it keeps to
-/// five git commands where it can and reads git's own files for the rest.
+/// It runs every few seconds for every workspace folder (as `read_all`),
+/// so it keeps to five git commands where it can and reads git's own files
+/// for the rest.
+#[cfg(test)]
 pub fn status(dir: &Path) -> Option<GitStatus> {
+    let mut status = own_status(dir)?;
+    (status.here, status.worktrees) = split_worktrees(worktrees(dir), status.root.as_deref());
+    Some(status)
+}
+
+/// `status` but for the worktrees, which are the same list from any of
+/// them: `read_all` reads them once per repository.
+fn own_status(dir: &Path) -> Option<GitStatus> {
     // -z: paths come unquoted, whatever is in them. --show-stash counts
     // the stashes from git itself, whichever ref store it uses.
     let out = git(
@@ -224,7 +234,6 @@ pub fn status(dir: &Path) -> Option<GitStatus> {
         status.remote.as_deref(),
         &status.local_branches,
     );
-    (status.here, status.worktrees) = worktrees(dir, status.root.as_deref());
     Some(status)
 }
 
@@ -424,15 +433,15 @@ fn git(dir: &Path, args: &[&str]) -> Option<String> {
         .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// The worktree of the repository `dir` is in at `here`, `dir`'s, and the
-/// others; none when it has no others.
-fn worktrees(dir: &Path, here: Option<&Path>) -> (Option<Worktree>, Vec<Worktree>) {
+/// The worktrees of the repository `dir` is in, the main one first; none
+/// when it has no others.
+fn worktrees(dir: &Path) -> Vec<Worktree> {
     let Some(list) = git(dir, &["worktree", "list", "--porcelain"]) else {
-        return (None, Vec::new());
+        return Vec::new();
     };
     let mut all = parse_worktrees(&list);
     if all.len() < 2 {
-        return (None, Vec::new());
+        return Vec::new();
     }
     // The first is the main worktree: what the others' branches merge into.
     all[0].main = true;
@@ -454,6 +463,14 @@ fn worktrees(dir: &Path, here: Option<&Path>) -> (Option<Worktree>, Vec<Worktree
         w.dirty = !changes.is_empty();
         w.edited = changes.lines().any(|l| !l.starts_with("??"));
     }
+    all
+}
+
+/// Of worktrees `all`, the one at `here` and the others.
+fn split_worktrees(
+    mut all: Vec<Worktree>,
+    here: Option<&Path>,
+) -> (Option<Worktree>, Vec<Worktree>) {
     let at = all.iter().position(|w| Some(w.path.as_path()) == here);
     (at.map(|i| all.remove(i)), all)
 }
@@ -582,6 +599,20 @@ fn merge_targets(dir: &Path) -> Vec<String> {
 pub fn remove_worktree(main: &Path, w: &Worktree, force: bool) -> Result<(), String> {
     if w.main {
         return Err("the main worktree stays".into());
+    }
+    // Merged or fresh is from a status read seconds old: a commit since
+    // would go with the branch.
+    if let Some(branch) = &w.branch
+        && !force
+        && (w.merged || w.fresh)
+    {
+        let tip = git_run(
+            main,
+            &["rev-parse", "--verify", &format!("refs/heads/{branch}")],
+        )?;
+        if Some(tip.trim()) != w.head.as_deref() {
+            return Err("the branch moved since; refresh and try again".into());
+        }
     }
     if w.gone {
         git_run(main, &["worktree", "prune"])?;
@@ -758,16 +789,17 @@ pub fn squash_check(main: &Path, w: &Worktree) -> Result<(), String> {
 
 /// Read the status of each of `dirs` on a thread of its own, all at once,
 /// and hand those in a repository to `send`: a round takes as long as the
-/// slowest folder, not all of them one after another.
+/// slowest folder, not all of them one after another. The worktrees are
+/// read once per repository, however many of the folders are in it.
 pub fn read_all(
     dirs: Vec<PathBuf>,
     send: impl FnOnce(HashMap<PathBuf, GitStatus>) + Send + 'static,
 ) {
     std::thread::spawn(move || {
-        let read = std::thread::scope(|scope| {
+        let statuses: Vec<(PathBuf, GitStatus)> = std::thread::scope(|scope| {
             let reads: Vec<_> = dirs
                 .into_iter()
-                .map(|dir| scope.spawn(move || Some((status(&dir)?, dir))))
+                .map(|dir| scope.spawn(move || Some((own_status(&dir)?, dir))))
                 .collect();
             reads
                 .into_iter()
@@ -775,6 +807,35 @@ pub fn read_all(
                 .map(|(status, dir)| (dir, status))
                 .collect()
         });
+        // A folder git gave no shared git folder for stands alone.
+        let repo = |dir: &Path, status: &GitStatus| -> PathBuf {
+            status.common_dir.clone().unwrap_or_else(|| dir.to_owned())
+        };
+        let mut repos: Vec<(PathBuf, &Path)> = Vec::new();
+        for (dir, status) in &statuses {
+            let common = repo(dir, status);
+            if !repos.iter().any(|(c, _)| *c == common) {
+                repos.push((common, dir));
+            }
+        }
+        let lists: HashMap<PathBuf, Vec<Worktree>> = std::thread::scope(|scope| {
+            let reads: Vec<_> = repos
+                .into_iter()
+                .map(|(common, dir)| scope.spawn(move || (common, worktrees(dir))))
+                .collect();
+            reads
+                .into_iter()
+                .filter_map(|read| read.join().ok())
+                .collect()
+        });
+        let read = statuses
+            .into_iter()
+            .map(|(dir, mut status)| {
+                let all = lists.get(&repo(&dir, &status)).cloned().unwrap_or_default();
+                (status.here, status.worktrees) = split_worktrees(all, status.root.as_deref());
+                (dir, status)
+            })
+            .collect();
         send(read)
     });
 }
@@ -1059,6 +1120,21 @@ mod tests {
         // A commit of its own makes it not.
         repo.worktree("topic");
         assert!(!repo.find("topic").fresh);
+    }
+
+    #[test]
+    fn a_commit_since_the_read_stops_a_delete() {
+        let repo = Repo::new();
+        let path = repo.0.with_file_name("new");
+        let p = path.to_str().unwrap();
+        repo.git(&repo.0, &["worktree", "add", "-q", "-b", "new", p]);
+        let stale = repo.find("new");
+        assert!(stale.fresh);
+        repo.commit(&path, "new", "fresh work");
+        assert!(remove_worktree(&repo.0, &stale, false).is_err());
+        assert!(path.exists());
+        let branches = super::git(&repo.0, &["branch", "--list", "new"]).unwrap();
+        assert!(!branches.trim().is_empty());
     }
 
     #[test]

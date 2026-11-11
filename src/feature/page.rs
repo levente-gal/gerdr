@@ -7,9 +7,9 @@
 //! `TAIL_EVERY` while the tab shows).
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, LazyLock, Mutex},
     time::Duration,
 };
 
@@ -360,32 +360,30 @@ pub fn round_stats(feature: &Feature) -> BTreeMap<u32, Result<Vec<RoundStat>, St
                 stats = Err(format!("{key} isn't there"));
                 break;
             };
-            let to = to.unwrap_or_else(|| "HEAD".to_owned());
-            let args = [
-                "diff",
-                "--numstat",
-                "--no-ext-diff",
-                "--no-textconv",
-                &from,
-                &to,
-            ];
-            match git(&repo.worktree, &args) {
-                Ok(out) => {
-                    let (added, removed) = numstat(&out);
-                    let files = out.lines().filter(|l| !l.trim().is_empty()).count();
-                    let range = format!("{from}..{to}");
-                    let commits = crate::git_ops::count_commits(&repo.worktree, &range);
-                    if (files > 0 || commits > 0)
+            let measured = match to {
+                // Both ends are fixed commits: the answer never changes.
+                Some(to) => {
+                    let span = (repo.worktree.clone(), from, to);
+                    let kept = SPANS.lock().ok().and_then(|m| m.get(&span).copied());
+                    kept.map(Ok).unwrap_or_else(|| {
+                        let measured = span_stat(&span.0, &span.1, &span.2);
+                        if let (Ok(m), Ok(mut spans)) = (&measured, SPANS.lock()) {
+                            spans.insert(span, *m);
+                        }
+                        measured
+                    })
+                }
+                None => span_stat(&repo.worktree, &from, "HEAD"),
+            };
+            match measured {
+                Ok((commits, stat)) => {
+                    if (stat.files > 0 || commits > 0)
                         && let Ok(stats) = stats.as_mut()
                     {
                         stats.push(RoundStat {
                             repo: key,
                             commits,
-                            stat: Stat {
-                                files,
-                                added,
-                                removed,
-                            },
+                            stat,
                         });
                     }
                 }
@@ -399,6 +397,34 @@ pub fn round_stats(feature: &Feature) -> BTreeMap<u32, Result<Vec<RoundStat>, St
         out.insert(round.n, stats);
     }
     out
+}
+
+/// Finished rounds' spans measured already, by worktree, from and to.
+static SPANS: LazyLock<Mutex<HashMap<(PathBuf, String, String), (usize, Stat)>>> =
+    LazyLock::new(Default::default);
+
+/// The commits and stat of `worktree` from `from` to `to`.
+fn span_stat(worktree: &Path, from: &str, to: &str) -> Result<(usize, Stat), String> {
+    let args = [
+        "diff",
+        "--numstat",
+        "--no-ext-diff",
+        "--no-textconv",
+        from,
+        to,
+    ];
+    let out = git(worktree, &args)?;
+    let (added, removed) = numstat(&out);
+    let files = out.lines().filter(|l| !l.trim().is_empty()).count();
+    let commits = crate::git_ops::count_commits(worktree, &format!("{from}..{to}"));
+    Ok((
+        commits,
+        Stat {
+            files,
+            added,
+            removed,
+        },
+    ))
 }
 
 /// The last `TAIL_LINES` lines of `text` worth showing: box drawing and

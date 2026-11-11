@@ -386,7 +386,7 @@ pub struct Panel {
     pub(crate) edited: HashSet<(PathBuf, String)>,
     /// The stash picked in the Stashes tab, by line (0 the newest).
     pub(crate) stash_pick: usize,
-    /// The commit each line of the log shows, by line; none for the
+    /// The commit each line of the log or stashes shows, by line; none for the
     /// lines saying what a list is.
     pub(crate) log_oids: Vec<Option<String>>,
     /// The commit picked in the Log tab, by line.
@@ -633,7 +633,7 @@ pub enum BatchKind {
     /// Bring stash `n` (0 the newest) back, and drop it.
     StashPop(usize),
     /// Drop stash `n` (0 the newest).
-    StashDrop(usize),
+    StashDrop(usize, Option<String>),
     /// Throw away the uncommitted changes to the job's files.
     Discard,
 }
@@ -668,7 +668,7 @@ impl BatchKind {
             BatchKind::Undo => "Undo",
             BatchKind::Stash => "Stash",
             BatchKind::StashPop(_) => "Pop stash",
-            BatchKind::StashDrop(_) => "Drop stash",
+            BatchKind::StashDrop(..) => "Drop stash",
             BatchKind::Discard => "Discard changes",
         }
         .into()
@@ -701,7 +701,7 @@ impl BatchKind {
             BatchKind::Undo => "undone",
             BatchKind::Stash => "stashed",
             BatchKind::StashPop(_) => "popped",
-            BatchKind::StashDrop(_) => "dropped",
+            BatchKind::StashDrop(..) => "dropped",
             BatchKind::Discard => "discarded",
         }
     }
@@ -717,7 +717,7 @@ impl BatchKind {
                 | BatchKind::Abort
                 | BatchKind::Undo
                 | BatchKind::DeleteBranch { .. }
-                | BatchKind::StashDrop(_)
+                | BatchKind::StashDrop(..)
                 | BatchKind::Discard
         )
     }
@@ -999,7 +999,7 @@ pub enum RepoEvent {
     Detail {
         key: DetailKey,
         text: String,
-        /// The Log tab's commit of each line (`Panel::log_oids`).
+        /// The Log or Stashes tab's commit of each line (`Panel::log_oids`).
         oids: Vec<Option<String>>,
     },
     /// A repository's diff, read for Git status read `generation`.
@@ -1648,7 +1648,7 @@ fn confirm_button(kind: &BatchKind) -> ReposButton {
         BatchKind::Abort => ReposButton::Abort,
         BatchKind::Undo => ReposButton::Undo,
         BatchKind::DeleteBranch { .. } => ReposButton::DeleteBranch,
-        BatchKind::StashDrop(_) => ReposButton::StashDrop,
+        BatchKind::StashDrop(..) => ReposButton::StashDrop,
         BatchKind::Discard => ReposButton::DiscardFile,
         _ => ReposButton::Cancel,
     }
@@ -2375,6 +2375,16 @@ impl Panel {
                 .min(item.status.stashes.saturating_sub(1) as usize),
             _ => 0,
         }
+    }
+
+    /// The commit of `item`'s stash `n`, as its Stashes list was read;
+    /// `None` when that list isn't read.
+    fn stash_oid(&self, item: &RepoItem, n: usize) -> Option<String> {
+        let (key, _) = self.detail.as_ref()?;
+        if key.tab != DetailTab::Stashes || key.root != item.root {
+            return None;
+        }
+        self.log_oids.get(n).cloned().flatten()
     }
 
     /// The repository and the files a discard throws the changes of away:
@@ -3333,7 +3343,7 @@ impl Panel {
                 let n = self.stash_at(item);
                 let kind = match button {
                     B::StashPop => BatchKind::StashPop(n),
-                    _ => BatchKind::StashDrop(n),
+                    _ => BatchKind::StashDrop(n, self.stash_oid(item, n)),
                 };
                 let k = items.iter().position(|i| i.root == item.root);
                 run(kind, k.into_iter().collect())
@@ -3497,7 +3507,7 @@ impl Panel {
                             .unwrap_or(names.first().map_or("", String::as_str));
                         format!("delete the local branch {name}")
                     }
-                    BatchKind::StashDrop(n) => format!("drop stash@{{{n}}} for good"),
+                    BatchKind::StashDrop(n, _) => format!("drop stash@{{{n}}} for good"),
                     BatchKind::Amend { .. } => match status {
                         Some(s) if s.upstream.is_some() && s.ahead == 0 => {
                             "rewrite its last commit, which is pushed: \
@@ -5149,8 +5159,8 @@ impl Panel {
                     BatchKind::DeleteBranch { names, .. } => {
                         format!("Delete the branch {}", names.join(" / "))
                     }
-                    BatchKind::StashDrop(0) => "Drop the newest stash".into(),
-                    BatchKind::StashDrop(n) => format!("Drop stash@{{{n}}}"),
+                    BatchKind::StashDrop(0, _) => "Drop the newest stash".into(),
+                    BatchKind::StashDrop(n, _) => format!("Drop stash@{{{n}}}"),
                     BatchKind::Discard => {
                         let n: usize = jobs.iter().map(|j| j.files.len()).sum();
                         let files = if n == 1 { "1 file" } else { "files" };
@@ -6518,7 +6528,7 @@ mod tests {
         assert_eq!(
             press(&mut panel, none(), Keysym::Return, &ctx),
             Some(Outcome::Batch {
-                kind: BatchKind::StashDrop(0),
+                kind: BatchKind::StashDrop(0, None),
                 jobs: jobs(&["gerdr"])
             })
         );

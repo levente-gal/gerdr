@@ -184,6 +184,9 @@ struct Books {
     legacy_frozen: bool,
     /// A digest of `state.json`'s bytes, as gerdr last read or wrote them.
     state: Option<u64>,
+    /// What `state.json` held then: the base another gerdr's changes to it
+    /// are merged against (see `merge3`).
+    state_base: Value,
 }
 
 /// Bookkeeping, not part of what a store holds.
@@ -607,6 +610,7 @@ impl Store {
     fn load_state(&mut self, path: &Path) {
         match read_state(path) {
             Ok(Some((state, written))) => {
+                self.books.state_base = serde_json::to_value(&state).unwrap_or_default();
                 self.set_state(state);
                 self.books.state = Some(written);
             }
@@ -891,20 +895,9 @@ impl Store {
             return false;
         }
         let mut all = true;
-        let state = serde_json::to_vec_pretty(&self.state()).map_err(std::io::Error::other);
-        let state = state.and_then(|json| {
-            let written = digest(&json);
-            if self.books.state != Some(written) {
-                write_atomic(&root.join("state.json"), &json)?;
-            }
-            Ok(written)
-        });
-        match state {
-            Ok(written) => self.books.state = Some(written),
-            Err(err) => {
-                tracing::warn!("saving state.json: {err}");
-                all = false;
-            }
+        if let Err(err) = self.write_state(&root.join("state.json")) {
+            tracing::warn!("saving state.json: {err}");
+            all = false;
         }
         let dir = projects_in(&root);
         for project in &self.projects {
@@ -978,6 +971,31 @@ impl Store {
             false
         });
         all
+    }
+
+    /// Write `state.json` if it changed here. If another gerdr wrote it
+    /// since this one last read or wrote it, its changes are merged in first.
+    fn write_state(&mut self, path: &Path) -> std::io::Result<()> {
+        let mut json = serde_json::to_vec_pretty(&self.state())?;
+        if self.books.state == Some(digest(&json)) {
+            return Ok(());
+        }
+        if on_disk(path, self.books.state) != self.books.state {
+            if let Ok(Some((theirs, _))) = read_state(path) {
+                let ours = serde_json::to_value(self.state())?;
+                let theirs = serde_json::to_value(theirs)?;
+                let merged = merge3(Some(&self.books.state_base), Some(&ours), Some(&theirs));
+                match merged.map(serde_json::from_value::<State>) {
+                    Some(Ok(state)) => self.set_state(state),
+                    other => tracing::warn!("merging {}: {other:?}; ours wins", path.display()),
+                }
+                json = serde_json::to_vec_pretty(&self.state())?;
+            }
+        }
+        write_atomic(path, &json)?;
+        self.books.state = Some(digest(&json));
+        self.books.state_base = serde_json::to_value(self.state())?;
+        Ok(())
     }
 
     pub fn project(&self, id: &str) -> Option<&Project> {
@@ -1279,15 +1297,35 @@ fn on_disk(path: &Path, written: Option<u64>) -> Option<u64> {
     }
 }
 
-/// Write `bytes` to `path` atomically: to `<path>.tmp`, then renamed.
-pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
+/// A three-way merge of `base` changed into `ours` and into `theirs`: a
+/// value only one side changed takes that side's change (an add or a
+/// removal alike), maps both changed merge key by key, anything else both
+/// changed is ours.
+fn merge3(base: Option<&Value>, ours: Option<&Value>, theirs: Option<&Value>) -> Option<Value> {
+    if ours == base {
+        return theirs.cloned();
     }
-    let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".tmp");
-    std::fs::write(&tmp, bytes)?;
-    std::fs::rename(&tmp, path)
+    if theirs == base || theirs == ours {
+        return ours.cloned();
+    }
+    let (Some(Value::Object(o)), Some(Value::Object(t))) = (ours, theirs) else {
+        return ours.cloned();
+    };
+    let b = base.and_then(Value::as_object);
+    let keys: BTreeSet<&String> = o
+        .keys()
+        .chain(t.keys())
+        .chain(b.into_iter().flat_map(|b| b.keys()))
+        .collect();
+    let merged = keys.into_iter().filter_map(|key| {
+        merge3(b.and_then(|b| b.get(key)), o.get(key), t.get(key)).map(|v| (key.clone(), v))
+    });
+    Some(Value::Object(merged.collect()))
+}
+
+/// Write `bytes` to `path` whole or not at all (see `ai_work::write::atomic`).
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    crate::ai_work::write::atomic(path, bytes)
 }
 
 /// Move the unreadable file at `path` out of the way of the next save, as
@@ -3008,6 +3046,44 @@ mod tests {
         reloaded.projects[0].last_used = 600;
         reloaded.save();
         assert_eq!(read_project("api", &api).unwrap().0.last_used, 600);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn two_gerdrs_saving_state_keep_each_others_changes() {
+        let root = scratch("state-merge");
+        let mut first = at(&root, two());
+        first.machine_last.insert("old".into(), "1".into());
+        first.save();
+        let (mut a, _) = Store::load_from(&root, || None);
+        let (mut b, _) = Store::load_from(&root, || None);
+        a.machine_last.remove("old");
+        a.machine_last.insert("a".into(), "2".into());
+        a.save();
+        b.machine_last.insert("b".into(), "3".into());
+        b.sidebar_width = Some(300);
+        b.save();
+        let (reread, _) = Store::load_from(&root, || None);
+        // A's removal stays removed; both adds and B's width are kept.
+        assert_eq!(reread.machine_last.keys().collect::<Vec<_>>(), ["a", "b"]);
+        assert_eq!(reread.sidebar_width, Some(300));
+        assert_eq!(b.machine_last, reread.machine_last);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn saves_at_once_dont_share_a_temporary_file() {
+        let root = scratch("atomic-race");
+        let path = root.join("state.json");
+        let writers: Vec<_> = (0..8u8)
+            .map(|n| {
+                let path = path.clone();
+                std::thread::spawn(move || (0..50).all(|_| write_atomic(&path, &[n; 4096]).is_ok()))
+            })
+            .collect();
+        assert!(writers.into_iter().all(|w| w.join().unwrap()));
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(bytes.len() == 4096 && bytes.iter().all(|b| *b == bytes[0]));
         let _ = std::fs::remove_dir_all(&root);
     }
 

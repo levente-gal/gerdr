@@ -271,6 +271,14 @@ fn restore(
     if !fits || (drop.is_empty() && put.iter().all(|(_, l)| l.is_empty())) {
         return Err("Those lines aren't in the file");
     }
+    // The diff is read lossily: a line that wasn't UTF-8 would come back wrong.
+    if put
+        .iter()
+        .flat_map(|(_, l)| l)
+        .any(|l| l.contains('\u{FFFD}'))
+    {
+        return Err("Can't restore lines that aren't UTF-8 text: restore them with git");
+    }
     let brk = match all.first().is_some_and(|l| l.ends_with("\r\n")) {
         true => "\r\n",
         false => "\n",
@@ -424,7 +432,7 @@ pub fn apply(edit: &FileEdit) -> Result<(Done, Register), String> {
     let before = read_shown(&full, &edit.path, &edit.shown)?;
     let register = taken(&before, &edit.cut).map_err(String::from)?;
     let (after, then) = cut(&before, &edit.cut).map_err(String::from)?;
-    std::fs::write(&full, &after).map_err(|e| format!("{}: {e}", edit.path))?;
+    write_whole(&full, &after).map_err(|e| format!("{}: {e}", edit.path))?;
     let done = Done {
         root: edit.root.clone(),
         path: edit.path.clone(),
@@ -442,7 +450,7 @@ pub fn paste(put: &Put, register: &Register) -> Result<Done, String> {
     let full = put.root.join(&put.path);
     let before = read_shown(&full, &put.path, &put.shown)?;
     let (after, then) = put_in(&before, put, register).map_err(String::from)?;
-    std::fs::write(&full, &after).map_err(|e| format!("{}: {e}", put.path))?;
+    write_whole(&full, &after).map_err(|e| format!("{}: {e}", put.path))?;
     Ok(Done {
         root: put.root.clone(),
         path: put.path.clone(),
@@ -474,8 +482,38 @@ pub fn redo(done: &Done, back: bool) -> Result<Spot, String> {
     if read(&full)? != *now {
         return Err(format!("{} changed since", done.path));
     }
-    std::fs::write(&full, then).map_err(|e| format!("{}: {e}", done.path))?;
+    write_whole(&full, then).map_err(|e| format!("{}: {e}", done.path))?;
     Ok(caret)
+}
+
+/// Write `text` over the file at `full` whole or not at all, so a full
+/// disk can't cut the user's file short: to a file beside it with its
+/// mode, then renamed over it.
+fn write_whole(full: &Path, text: &str) -> std::io::Result<()> {
+    use std::{io::Write as _, os::unix::fs::OpenOptionsExt as _};
+    // Through a link, what it points to changes.
+    let full = std::fs::canonicalize(full)?;
+    let mode = std::fs::metadata(&full)?.permissions();
+    let name = full.file_name().unwrap_or_default().to_string_lossy();
+    let tmp = full.with_file_name(format!(".{name}.{}.tmp", std::process::id()));
+    let written = (|| {
+        // 0600 until it has the file's mode: the text may be private.
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp)?;
+        file.write_all(text.as_bytes())?;
+        file.sync_all()?;
+        file.set_permissions(mode)?;
+        std::fs::rename(&tmp, &full)
+    })();
+    if written.is_err() {
+        // What is left of it is of no use; the error said is the write's.
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written
 }
 
 /// The text of the file at `path`.
@@ -557,10 +595,21 @@ mod tests {
         assert_eq!(after, "a\n");
         assert!(cut("a\n", &restore(vec![5], vec![])).is_err());
         assert!(cut("a\n", &restore(vec![], vec![(3, vec!["z"])])).is_err());
+        // A line read lossily isn't written back as `\u{FFFD}`.
+        assert!(cut("a\n", &restore(vec![], vec![(1, vec!["b\u{FFFD}"])])).is_err());
         assert_eq!(
             taken("a\n", &restore(vec![1], vec![])),
             Ok(Register::default())
         );
+    }
+
+    #[test]
+    fn a_restore_fills_an_emptied_file() {
+        let file = diff::parse("diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1,2 +0,0 @@\n-a\n-b\n");
+        let (restore, first) = restore_cut(&file[0], |_, _| true).unwrap();
+        assert_eq!(first, 1);
+        let (after, _) = cut("", &restore).unwrap();
+        assert_eq!(after, "a\nb\n");
     }
 
     #[test]
@@ -647,6 +696,14 @@ mod tests {
         let (done, taken) = apply(&edit(shown(2, "    b"))).unwrap();
         assert_eq!(taken.text, "\tb\n");
         assert_eq!(std::fs::read_to_string(dir.join("f")).unwrap(), "a\nc\n");
+        // Written whole: the file keeps its mode, nothing is left beside it.
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        std::fs::set_permissions(dir.join("f"), std::fs::Permissions::from_mode(0o751)).unwrap();
+        assert_eq!(redo(&done, true), Ok(spot(2, 4)));
+        assert_eq!(mode(&dir.join("f")), 0o751);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        assert_eq!(redo(&done, false), Ok(spot(2, 0)));
         assert_eq!(redo(&done, true), Ok(spot(2, 4)));
         assert_eq!(std::fs::read_to_string(dir.join("f")).unwrap(), text);
         assert_eq!(redo(&done, false), Ok(spot(2, 0)));

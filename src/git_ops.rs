@@ -1221,11 +1221,13 @@ pub fn undo(dir: &Path, before: &Head, after: &Head, soft: bool) -> OpResult {
 }
 
 /// How many commits of local branch `name` no other branch, remote branch
-/// or tag has: what deleting it loses. Zero when its changes are all in a
-/// default branch already, squashed or rebased there (see `git::merged`).
-/// `None` when git can't tell.
+/// or tag has: what deleting it loses. Its own copy on a remote doesn't
+/// count: a fetch that prunes takes that away once the remote deleted it.
+/// Zero when its changes are all in a default branch already, squashed or
+/// rebased there (see `git::merged`). `None` when git can't tell.
 pub fn unmerged_commits(dir: &Path, name: &str) -> Option<usize> {
     let exclude = format!("--exclude={name}");
+    let remote_copy = format!("--exclude=*/{name}");
     let args = [
         "rev-list",
         "--count",
@@ -1233,6 +1235,7 @@ pub fn unmerged_commits(dir: &Path, name: &str) -> Option<usize> {
         "--not",
         &exclude,
         "--branches",
+        &remote_copy,
         "--remotes",
         "--tags",
     ];
@@ -1826,13 +1829,17 @@ pub fn range_diff(
 
 /// The repository's stashes, newest first, one line each: `stash@{0} ·
 /// 2 hours ago · WIP on main: 1a2b3c4 msg`; else a line saying there are
-/// none.
-pub fn stash_list(dir: &Path) -> String {
-    let list = query(dir, &["stash", "list", "--format=%gd · %cr · %gs"]).unwrap_or_default();
+/// none. With each line's stash commit.
+pub fn stash_list(dir: &Path) -> (String, Vec<Option<String>>) {
+    let list = query(dir, &["stash", "list", "--format=%H %gd · %cr · %gs"]).unwrap_or_default();
     if list.trim().is_empty() {
-        return "No stashes".into();
+        return ("No stashes".into(), Vec::new());
     }
-    list
+    let (oids, lines): (Vec<_>, Vec<_>) = (list.lines())
+        .map(|l| l.split_once(' ').unwrap_or(("", l)))
+        .map(|(oid, line)| (Some(oid.to_owned()), line))
+        .unzip();
+    (lines.join("\n"), oids)
 }
 
 /// Throw away the uncommitted changes to `paths` (from the worktree's top
@@ -1871,10 +1878,20 @@ pub fn stash_pop(dir: &Path, n: usize) -> OpResult {
     op.done()
 }
 
-/// Drop stash `n` (0 the newest).
-pub fn stash_drop(dir: &Path, n: usize) -> OpResult {
+/// Drop stash `n` (0 the newest); only while it is still commit `oid`,
+/// when known: a stash made since shifts every `n` by one.
+pub fn stash_drop(dir: &Path, n: usize, oid: Option<&str>) -> OpResult {
     let mut op = Op::new(dir);
-    op.run(&["stash", "drop", &format!("stash@{{{n}}}")])?;
+    let name = format!("stash@{{{n}}}");
+    if let Some(oid) = oid
+        && query(dir, &["rev-parse", "--verify", "-q", &name])
+            .as_deref()
+            .map(str::trim)
+            != Some(oid)
+    {
+        return Err(op.blocked("the stash list changed; refresh and try again"));
+    }
+    op.run(&["stash", "drop", &name])?;
     op.done()
 }
 
@@ -2514,8 +2531,11 @@ mod tests {
             Failure::Blocked("1 commit only on it".into())
         );
         assert!(has_ref(r, "refs/heads/feat"));
-        // Pushed, its commits are kept on the remote.
+        // Its own remote copy isn't a home: a pruning fetch can drop it.
         git(r, &["push", "-q", "origin", "feat"]);
+        assert_eq!(unmerged_commits(r, "feat"), Some(1));
+        // Another remote branch is.
+        git(r, &["push", "-q", "origin", "feat:kept"]);
         assert_eq!(unmerged_commits(r, "feat"), Some(0));
         for name in ["merged", "feat"] {
             assert!(delete_branch(r, name, false).is_ok());
@@ -3339,17 +3359,29 @@ mod tests {
     fn lists_stashes() {
         let fx = Fx::new();
         let dir = &fx.repo;
-        assert_eq!(stash_list(dir), "No stashes");
+        assert_eq!(stash_list(dir), ("No stashes".into(), Vec::new()));
         write(dir, "a", "changed\n");
         git(dir, &["stash", "push", "-q", "-m", "first"]);
         write(dir, "a", "changed again\n");
         git(dir, &["stash", "push", "-q", "-m", "second"]);
-        let list = stash_list(dir);
+        let (list, oids) = stash_list(dir);
         let lines: Vec<&str> = list.lines().collect();
         assert_eq!(lines.len(), 2, "{list}");
         assert!(lines[0].starts_with("stash@{0} · "), "{list}");
         assert!(lines[0].ends_with("On main: second"), "{list}");
         assert!(lines[1].ends_with("On main: first"), "{list}");
+        // A stash made since shifts `first` to stash@{2}: dropping
+        // stash@{1} by its old commit is refused, by its new one it goes.
+        write(dir, "a", "third\n");
+        git(dir, &["stash", "push", "-q", "-m", "third"]);
+        let first = oids[1].as_deref();
+        assert_eq!(
+            failure(stash_drop(dir, 1, first)),
+            Failure::Blocked("the stash list changed; refresh and try again".into())
+        );
+        assert_eq!(stash_list(dir).0.lines().count(), 3);
+        assert!(stash_drop(dir, 2, first).is_ok());
+        assert!(!stash_list(dir).0.contains("first"));
     }
 
     #[test]

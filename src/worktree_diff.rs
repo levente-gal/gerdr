@@ -30,7 +30,8 @@
 
 use std::{
     path::{Path, PathBuf},
-    time::Instant,
+    sync::{Arc, Mutex, PoisonError},
+    time::{Instant, SystemTime},
 };
 
 use smithay::input::keyboard::{Keysym, ModifiersState};
@@ -80,6 +81,9 @@ pub struct WorktreeDiff {
     /// file was edited from the diff meanwhile.
     pub reading: bool,
     pub again: bool,
+    /// What the last read saw of its files and the diff it read then: a
+    /// read seeing the same takes that diff again (see `stamp`).
+    pub kept: Arc<Mutex<Option<(Stamp, Vec<FileDiff>)>>>,
     pub diff: DiffView,
     pub hover: Option<ReposHit>,
     /// The sheet asking whether to delete the review, while open: the
@@ -285,6 +289,26 @@ pub enum Done {
         root: PathBuf,
         paths: Vec<String>,
     },
+}
+
+/// What a worktree's diff is read from: its changes since its base and
+/// each changed file's size and time; `None` when its files can't be told
+/// apart from its top (`root` isn't one).
+pub type Stamp = Option<(Since, Vec<Option<(u64, SystemTime)>>)>;
+
+/// The `Stamp` of the worktree at `root` with changes `since`.
+// shortcut: an untracked folder's time misses files added deeper in it,
+// so its listing waits for another change; stamp its files if that shows.
+fn stamp(root: &Path, since: &Since) -> Stamp {
+    if !root.join(".git").exists() {
+        return None;
+    }
+    let meta = |path: &str| {
+        let meta = std::fs::symlink_metadata(root.join(path)).ok()?;
+        Some((meta.len(), meta.modified().ok()?))
+    };
+    let files = since.changes.iter().map(|c| meta(&c.path)).collect();
+    Some((since.clone(), files))
 }
 
 impl WorktreeDiff {
@@ -2032,7 +2056,7 @@ impl crate::Gerdr {
             }
             return self.commit_diff_read(wd.root.clone(), commit.oid.clone());
         }
-        let (root, target) = (wd.root.clone(), wd.target.clone());
+        let (root, target, kept) = (wd.root.clone(), wd.target.clone(), wd.kept.clone());
         let Some(tx) = self.repos_sender() else {
             return;
         };
@@ -2041,8 +2065,20 @@ impl crate::Gerdr {
         }
         std::thread::spawn(move || {
             let read = crate::git_ops::changes_since(&root, target.as_deref()).map(|since| {
-                let files =
-                    crate::git_ops::repo_diff_from(&root, &since.changes, Some(&since.base));
+                let stamp = stamp(&root, &since);
+                let mut kept = kept.lock().unwrap_or_else(PoisonError::into_inner);
+                let files = match kept.as_ref() {
+                    Some((was, files)) if stamp.is_some() && *was == stamp => files.clone(),
+                    _ => {
+                        let files = crate::git_ops::repo_diff_from(
+                            &root,
+                            &since.changes,
+                            Some(&since.base),
+                        );
+                        *kept = Some((stamp, files.clone()));
+                        files
+                    }
+                };
                 (since, files)
             });
             let _ = tx.send(crate::repos::RepoEvent::WorktreeDiff { root, read });
@@ -2448,6 +2484,31 @@ pub(crate) mod tests {
         diff_view::{DiffRow, Outcome},
         git::Change,
     };
+
+    #[test]
+    fn a_stamp_changes_with_a_changed_file() {
+        let dir = std::env::temp_dir().join(format!("gerdr-stamp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let since = Since {
+            changes: vec![Change {
+                path: "a.txt".into(),
+                orig: None,
+                code: 'M',
+            }],
+            ..Since::default()
+        };
+        // Not a worktree's top: never taken as the same.
+        assert_eq!(stamp(&dir, &since), None);
+        std::fs::create_dir(dir.join(".git")).unwrap();
+        std::fs::write(dir.join("a.txt"), "one").unwrap();
+        let first = stamp(&dir, &since);
+        assert!(first.is_some());
+        assert_eq!(stamp(&dir, &since), first);
+        std::fs::write(dir.join("a.txt"), "two!").unwrap();
+        assert_ne!(stamp(&dir, &since), first);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     pub(crate) const ENV: Env = Env {
         sheet_rows: 10,

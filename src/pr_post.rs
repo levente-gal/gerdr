@@ -714,6 +714,10 @@ fn run_git(dir: &Path, args: &[&str]) -> Result<String, String> {
         .args(args)
         .current_dir(dir)
         .env("GIT_TERMINAL_PROMPT", "0");
+    #[cfg(test)]
+    command
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1");
     // A push stuck on the network is stopped, its group with it.
     let out = crate::t3_update::output_within(command, GIT_TIME)
         .map_err(|err| format!("git {}: {err}", args[0]))?;
@@ -723,4 +727,51 @@ fn run_git(dir: &Path, args: &[&str]) -> Result<String, String> {
         return Err(why.map_or_else(|| format!("git {} failed", args[0]), str::to_owned));
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::feature::tests::{Temp, commit, run};
+
+    #[test]
+    fn a_head_moved_on_the_remote_refuses_the_push() {
+        let t = Temp::new();
+        let bare = t.0.join("origin.git");
+        let bare_arg = bare.to_str().unwrap();
+        run(&t.0, &["init", "-q", "--bare", "-b", "main", bare_arg]);
+        let mine = t.repo("api", "main");
+        run(&mine, &["remote", "add", "origin", bare_arg]);
+        run(&mine, &["push", "-q", "origin", "main"]);
+        let seen = run(&mine, &["rev-parse", "HEAD"]).trim().to_owned();
+        // Someone else pushes to the branch after it was last seen.
+        let other = t.0.join("other");
+        run(&t.0, &["clone", "-q", bare_arg, other.to_str().unwrap()]);
+        commit(&other, "b", "theirs");
+        run(&other, &["push", "-q", "origin", "main"]);
+        let theirs = run(&other, &["rev-parse", "HEAD"]).trim().to_owned();
+        commit(&mine, "a", "mine");
+        let repo = feature::Repo {
+            name: "api".into(),
+            main: mine.clone(),
+            worktree: mine.clone(),
+            base: "main".into(),
+            base_commit: seen.clone(),
+            touched: true,
+            branch: Some("main".into()),
+            project: None,
+        };
+        let mut pull = feature::pr::PullRef {
+            mine: true,
+            head_ref: "main".into(),
+            head_sha: seen,
+            ..Default::default()
+        };
+        assert!(push(&repo, &pull).is_err());
+        assert_eq!(run(&bare, &["rev-parse", "main"]).trim(), theirs);
+        // At the head GitHub has, it goes over it.
+        pull.head_sha = theirs;
+        let head = push(&repo, &pull).unwrap();
+        assert_eq!(run(&bare, &["rev-parse", "main"]).trim(), head);
+    }
 }

@@ -279,14 +279,21 @@ impl TakeJob {
             let feature = self.taken(&record)?;
             reach.view_code(&feature, &self.places(&feature), &mut known, cancel)?;
             stopped()?;
+            // Bringing it may have outlasted `RESTORE_AFTER`, and the record
+            // gone back there: then both would write it. Held, it waits anew.
+            let hold = format!(
+                "cd {} || exit 3\n[ -e {h} ] && touch {h} && echo HELD\nexit 0\n",
+                crate::desktop::shell_quote(&dir),
+                h = lease::HANDED,
+            );
+            if reach.script(&hold, cancel)?.trim() != "HELD" {
+                return Err(TakeEnd::Failed(format!(
+                    "{} took \u{201c}{}\u{201d} back while it was on the way: try again",
+                    self.from_name, self.title
+                )));
+            }
             self.settle(&feature, cancel)?;
-            step("bringing its ignored files".to_owned());
-            let missed = self.bring_ignored(reach, &feature, cancel);
-            Ok(Taken {
-                same: self.same(&record),
-                feature,
-                missed,
-            })
+            Ok((record, feature))
         })();
         match &finished {
             // It would be back there in a while anyway: sooner, if it can.
@@ -306,7 +313,14 @@ impl TakeJob {
                 }
             }
         }
-        finished
+        let (record, feature) = finished?;
+        step("bringing its ignored files".to_owned());
+        let missed = self.bring_ignored(reach, &feature, cancel);
+        Ok(Taken {
+            same: self.same(&record),
+            feature,
+            missed,
+        })
     }
 
     /// Copy the small ignored files of the feature's worktrees there, like
@@ -1691,7 +1705,12 @@ fn restore_record(dir: &Path) -> std::io::Result<()> {
 /// A record handed over that nobody took while gerdr was closed goes back before
 /// the project's features are read: `HANDED` old enough, and none in its place.
 pub fn restore_left_records(project: &str) {
-    let Ok(entries) = std::fs::read_dir(store::project_dir(None, project)) else {
+    restore_left_in(&store::project_dir(None, project));
+}
+
+/// `restore_left_records` over the features folder `features`.
+fn restore_left_in(features: &Path) {
+    let Ok(entries) = std::fs::read_dir(features) else {
         return;
     };
     for dir in entries.filter_map(Result::ok).map(|e| e.path()) {
@@ -1763,6 +1782,37 @@ fn set_sides_aside(dir: &Path, at: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_handed_record_nobody_took_comes_back_once_old() {
+        let t = std::env::temp_dir().join(format!("gerdr-lease-restore-{}", std::process::id()));
+        let at = |slug: &str, age: Duration| {
+            let dir = t.join(slug);
+            std::fs::create_dir_all(&dir).unwrap();
+            for file in [lease::HANDED, lease::HANDED_TO, lease::LEFT] {
+                std::fs::write(dir.join(file), slug).unwrap();
+            }
+            let handed = std::fs::File::options().write(true).open(dir.join(lease::HANDED));
+            handed.unwrap().set_modified(SystemTime::now() - age).unwrap();
+            dir
+        };
+        let old = lease::RESTORE_AFTER + Duration::from_secs(5);
+        let gone = at("gone", old);
+        let fresh = at("fresh", Duration::ZERO);
+        // One with a record in its place keeps that record.
+        let back = at("back", old);
+        std::fs::write(back.join(store::FILE), "mine").unwrap();
+        restore_left_in(&t);
+        assert_eq!(std::fs::read_to_string(gone.join(store::FILE)).unwrap(), "gone");
+        for file in [lease::HANDED, lease::HANDED_TO, lease::LEFT] {
+            assert!(!gone.join(file).exists(), "{file}");
+        }
+        assert!(fresh.join(lease::HANDED).exists());
+        assert!(!fresh.join(store::FILE).exists());
+        assert_eq!(std::fs::read_to_string(back.join(store::FILE)).unwrap(), "mine");
+        assert!(back.join(lease::HANDED).exists());
+        std::fs::remove_dir_all(&t).unwrap();
+    }
 
     #[test]
     fn taking_from_whats_kept_here_keeps_its_history() {

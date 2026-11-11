@@ -192,7 +192,7 @@ impl Gerdr {
         let Some(ip) = lan_ip() else {
             return self.show_error(NO_ADDRESS.into());
         };
-        let ports: Vec<String> = run.listening().iter().map(u16::to_string).collect();
+        let ports: Vec<String> = run.listening_wide().iter().map(u16::to_string).collect();
         let what = match ports.is_empty() {
             true => "what it listens on".to_owned(),
             false => format!("ports {}", ports.join(", ")),
@@ -277,7 +277,7 @@ impl Gerdr {
             }
             return;
         };
-        let ports = run.listening();
+        let ports = run.listening_wide();
         let Some(open) = self.features.build.sandbox_lan.get_mut(&key) else {
             return;
         };

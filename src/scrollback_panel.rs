@@ -3,13 +3,17 @@
 //! it, and taking the keys and the pointer while it is open.
 
 use std::{
-    path::Path,
+    path::{Path, PathBuf},
+    thread,
     time::{Duration, Instant},
 };
 
 use smithay::{
     input::keyboard::{Keysym, ModifiersState},
-    reexports::calloop::timer::{TimeoutAction, Timer},
+    reexports::calloop::{
+        channel,
+        timer::{TimeoutAction, Timer},
+    },
     utils::{Logical, Point, Rectangle},
 };
 
@@ -17,6 +21,7 @@ use crate::{
     Gerdr,
     chrome::{self, Rect, ScrollbackHit, ScrollbackRow, ScrollbackView, SearchPart},
     feature::{fix_round, setup, store},
+    herdr,
     input::{MULTI_CLICK, MULTI_CLICK_SLOP, Overlay},
     scroll::Motion,
     scrollback::{Fit, Outcome, Scrollback, Source},
@@ -161,6 +166,37 @@ fn read_log(path: &Path) -> std::io::Result<(String, u64)> {
     }
 }
 
+/// A pane's output as read off the event loop: its text, how many rows up
+/// from the bottom its view stands, and its colours (see `read_styled`).
+type PaneRead = Result<(String, u64, String), String>;
+
+/// All herdr at `socket` keeps of pane `pane_id`'s output, and its colours.
+fn read_pane(socket: PathBuf, pane_id: &str) -> PaneRead {
+    let mut herdr = herdr::Herdr::on_socket(socket);
+    let (text, from_bottom) = herdr.pane_scrollback(pane_id)?;
+    let styled = read_styled(&mut herdr, pane_id, &text);
+    Ok((text, from_bottom, styled))
+}
+
+/// The end of pane `pane_id`'s output as its terminal drew it, as
+/// many lines as `text` (all of it, read plainly) has at most, for the
+/// viewer's colours: none, the text drawn plainly, when herdr can't
+/// give it. Refused that many, it is asked for the 1000 it is known
+/// to give.
+fn read_styled(herdr: &mut herdr::Herdr, pane_id: &str, text: &str) -> String {
+    let lines = text.lines().count().max(1);
+    let read = herdr
+        .pane_styled(pane_id, lines)
+        .or_else(|err| match lines > 1000 {
+            true => herdr.pane_styled(pane_id, 1000),
+            false => Err(err),
+        });
+    read.unwrap_or_else(|err| {
+        tracing::debug!("colours of the scrollback of {pane_id}: {err}");
+        String::new()
+    })
+}
+
 /// `rect` less `by` on every side.
 fn inset(rect: Rect, by: i32) -> Rect {
     Rectangle::new(
@@ -193,30 +229,95 @@ impl Gerdr {
             return self.show_notice("Not a terminal pane".into());
         };
         self.focus_pane(|_| Some(id));
-        let read = match self.herdr.as_mut() {
-            Some(herdr) => herdr.pane_scrollback(&pane_id),
-            None => Err("no herdr session".into()),
-        };
-        let (text, from_bottom) = match read {
-            Ok(read) => read,
-            Err(err) => {
-                tracing::warn!("scrollback of {pane_id}: {err}");
-                return self.show_error(format!("Couldn't read the pane's output: {err}"));
-            }
-        };
-        let styled = self.read_styled(&pane_id, &text);
+        if let Err(err) = self.read_scrollback(&pane_id, true) {
+            tracing::warn!("scrollback of {pane_id}: {err}");
+            return self.show_error(format!("Couldn't read the pane's output: {err}"));
+        }
         let label = self.pane_bar_content(&pane_id).label;
-        // Its errors are in view now.
-        self.see_service_errors(&pane_id);
         self.close_for_scrollback();
-        let mut viewer = Scrollback::new(id, pane_id, label, &text, from_bottom);
-        viewer.set_styles(&styled);
+        // Empty until the read comes back (see `scrollback_read`).
+        let mut viewer = Scrollback::new(id, pane_id, label, "", 0);
         if let Some(fit) = self.scrollback_fit_for(id) {
             viewer.fit(fit);
         }
         self.scrollback = Some(viewer);
         // It takes the pointer from the terminal under it.
         self.refresh_pointer_focus();
+    }
+
+    /// Read pane `pane_id`'s output off the event loop, for the viewer
+    /// `opening` over it or reading it again.
+    fn read_scrollback(&mut self, pane_id: &str, opening: bool) -> Result<(), String> {
+        let socket = (self.herdr.as_ref())
+            .map(|h| h.socket().to_path_buf())
+            .ok_or("no herdr session")?;
+        let (tx, rx) = channel::channel();
+        let id = pane_id.to_owned();
+        (self.loop_handle)
+            .insert_source(rx, move |event, _, state| {
+                if let channel::Event::Msg(read) = event {
+                    state.scrollback_read(&id, opening, read);
+                }
+            })
+            .map_err(|err| err.to_string())?;
+        let id = pane_id.to_owned();
+        thread::Builder::new()
+            .name("scrollback".into())
+            .spawn(move || {
+                // The loop is gone only as gerdr quits.
+                let _ = tx.send(read_pane(socket, &id));
+            })
+            .map_err(|err| err.to_string())?;
+        self.scrollback_reading = Some(pane_id.to_owned());
+        Ok(())
+    }
+
+    /// Show what a read of pane `pane_id` gave in the viewer, opening or
+    /// reading it again. A viewer closed since, or over something else
+    /// now, drops it: nothing waits for it any more.
+    fn scrollback_read(&mut self, pane_id: &str, opening: bool, read: PaneRead) {
+        let pane = match self.scrollback.as_ref().map(|v| &v.source) {
+            Some(Source::Pane { pane, pane_id: p }) if p == pane_id => *pane,
+            _ => return,
+        };
+        if self.scrollback_reading.as_deref() != Some(pane_id) {
+            return;
+        }
+        self.scrollback_reading = None;
+        let (text, from_bottom, styled) = match read {
+            Ok(read) => read,
+            Err(err) if opening => {
+                tracing::warn!("scrollback of {pane_id}: {err}");
+                self.close_scrollback();
+                return self.show_error(format!("Couldn't read the pane's output: {err}"));
+            }
+            Err(err) => {
+                tracing::warn!("scrollback of {pane_id}: {err}");
+                return self.show_error(format!("Couldn't read the pane's output again: {err}"));
+            }
+        };
+        if opening {
+            // Its errors are in view now.
+            self.see_service_errors(pane_id);
+            let label = self.scrollback.take().map(|v| v.label).unwrap_or_default();
+            let mut viewer = Scrollback::new(pane, pane_id.to_owned(), label, &text, from_bottom);
+            viewer.set_styles(&styled);
+            if let Some(fit) = self.scrollback_fit_for(pane) {
+                viewer.fit(fit);
+            }
+            self.scrollback = Some(viewer);
+            return;
+        }
+        let Some((_, fit)) = self.scrollback_place() else {
+            return;
+        };
+        if let Some(viewer) = self.scrollback.as_mut() {
+            viewer.reload(&text, fit);
+            viewer.set_styles(&styled);
+            let n = viewer.line_count();
+            let s = if n == 1 { "" } else { "s" };
+            self.show_success(format!("Snapshot read again: {n} line{s}"));
+        }
     }
 
     /// What the viewer takes the place of goes.
@@ -367,57 +468,20 @@ impl Gerdr {
             }
             return;
         };
-        let read = match self.herdr.as_mut() {
-            Some(herdr) => herdr.pane_scrollback(&pane_id),
-            None => Err("no herdr session".into()),
-        };
-        let text = match read {
-            Ok((text, _)) => text,
-            Err(err) => {
-                tracing::warn!("scrollback of {pane_id}: {err}");
-                return self.show_error(format!("Couldn't read the pane's output again: {err}"));
-            }
-        };
-        let styled = self.read_styled(&pane_id, &text);
-        let Some((_, fit)) = self.scrollback_place() else {
+        // One read at a time: the note says it reads.
+        if self.scrollback_reading.is_some() {
             return;
-        };
-        if let Some(viewer) = self.scrollback.as_mut() {
-            viewer.reload(&text, fit);
-            viewer.set_styles(&styled);
-            let n = viewer.line_count();
-            let s = if n == 1 { "" } else { "s" };
-            self.show_success(format!("Snapshot read again: {n} line{s}"));
         }
-    }
-
-    /// The end of pane `pane_id`'s output as its terminal drew it, as
-    /// many lines as `text` (all of it, read plainly) has at most, for the
-    /// viewer's colours: none, the text drawn plainly, when herdr can't
-    /// give it. Refused that many, it is asked for the 1000 it is known
-    /// to give.
-    fn read_styled(&mut self, pane_id: &str, text: &str) -> String {
-        let lines = text.lines().count().max(1);
-        let read = self.herdr.as_mut().map(|h| {
-            h.pane_styled(pane_id, lines)
-                .or_else(|err| match lines > 1000 {
-                    true => h.pane_styled(pane_id, 1000),
-                    false => Err(err),
-                })
-        });
-        match read {
-            Some(Ok(styled)) => styled,
-            Some(Err(err)) => {
-                tracing::debug!("colours of the scrollback of {pane_id}: {err}");
-                String::new()
-            }
-            None => String::new(),
+        if let Err(err) = self.read_scrollback(&pane_id, false) {
+            tracing::warn!("scrollback of {pane_id}: {err}");
+            self.show_error(format!("Couldn't read the pane's output again: {err}"));
         }
     }
 
     /// Close the viewer.
     pub fn close_scrollback(&mut self) {
         self.scrollback = None;
+        self.scrollback_reading = None;
         // Opened from the stats panel, the viewer goes back to it.
         if let Some(panel) = self.ai_stats_behind.take() {
             self.ai_stats = Some(panel);
@@ -495,6 +559,10 @@ impl Gerdr {
             None => format!("{} lines", viewer.line_count()),
         };
         let (title, note) = match &viewer.source {
+            Source::Pane { pane_id, .. } if self.scrollback_reading.as_ref() == Some(pane_id) => (
+                format!("Scrollback snapshot · {}", viewer.label),
+                "reading".to_owned(),
+            ),
             Source::Pane { .. } => (format!("Scrollback snapshot · {}", viewer.label), note),
             Source::File { what } => (format!("{what} · {}", viewer.label), note),
             Source::SetupLog { project, slug, .. } => {

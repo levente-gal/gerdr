@@ -617,6 +617,12 @@ pub trait Files {
     fn kill_group(&mut self, group: i32, signal: i32);
     /// Send `signal` to the process group `pid` is in.
     fn kill_group_of(&mut self, pid: i32, signal: i32);
+    /// Whether `pid`, from check `i`'s pid file, may still be its script's,
+    /// so its group can be signalled: a file left from before a reboot or a
+    /// crash names whatever took the pid since.
+    fn still_check(&self, _i: usize, _pid: i32) -> bool {
+        true
+    }
     /// How often to look.
     fn every(&self) -> Duration;
     /// How a check told to stop reads when it can't be reached to stop it.
@@ -659,6 +665,13 @@ impl Files for LocalFiles<'_> {
         kill_group(unsafe { libc::getpgid(pid) }, signal);
     }
 
+    fn still_check(&self, i: usize, pid: i32) -> bool {
+        let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).ok();
+        let at = self.written(i, "pid");
+        at.zip(booted())
+            .is_some_and(|(at, booted)| ours(cmdline.as_deref(), at, booted))
+    }
+
     fn every(&self) -> Duration {
         WATCH_POLL
     }
@@ -666,6 +679,30 @@ impl Files for LocalFiles<'_> {
     fn out_of_reach(&self) -> String {
         "stopped".to_owned()
     }
+}
+
+/// Whether a pid left at `at` still names a check's script, by what runs
+/// as it now (`cmdline`, `None` when nothing does): one left before this
+/// boot names nothing of it. One that ran its script ended and leaves its
+/// group, which nothing else can take while it has members.
+/// shortcut: a pid taken again in this boot by a group's leader that ended
+/// before it is signalled isn't told apart; check its members if it bites.
+fn ours(cmdline: Option<&[u8]>, at: SystemTime, booted: SystemTime) -> bool {
+    at >= booted
+        && match cmdline {
+            // Empty: a zombie, or a kernel thread with no group of that pid.
+            Some(cmdline) if !cmdline.is_empty() => {
+                runs_check(&String::from_utf8_lossy(cmdline))
+            }
+            _ => true,
+        }
+}
+
+/// When this machine booted, to the second.
+fn booted() -> Option<SystemTime> {
+    let stat = std::fs::read_to_string("/proc/stat").ok()?;
+    let secs = stat.lines().find_map(|l| l.strip_prefix("btime "))?;
+    Some(UNIX_EPOCH + Duration::from_secs(secs.trim().parse().ok()?))
 }
 
 /// Why a terminal's text wasn't read, and what the error said.
@@ -855,14 +892,14 @@ pub fn watch_files(
                 o.keep_output(panes, &w.check.pane);
                 // What it left running in the background goes with it, as
                 // nothing else would stop it: a server would hold its port.
-                if let Some(pid) = pid {
+                if let Some(pid) = pid.filter(|&p| files.still_check(i, p)) {
                     files.kill_group(pid, libc::SIGTERM);
                 }
                 ended(i, o);
                 return false;
             }
             if ask && panes.gone(&w.check.pane) {
-                if let Some(pid) = pid {
+                if let Some(pid) = pid.filter(|&p| files.still_check(i, p)) {
                     files.kill_group(pid, libc::SIGTERM);
                 }
                 ended(i, outcome(None, Some("its terminal was closed"), true, 0));
@@ -898,7 +935,9 @@ pub fn watch_files(
                 }
                 Some((at, _)) if !w.killed && at.elapsed() >= STOP_GRACE => {
                     w.killed = true;
-                    files.kill_group_of(pid, libc::SIGKILL);
+                    if files.still_check(i, pid) {
+                        files.kill_group_of(pid, libc::SIGKILL);
+                    }
                 }
                 Some((at, cut))
                     if w.killed && at.elapsed() >= STOP_GRACE + KILL_GRACE + files.every() =>
@@ -1647,6 +1686,23 @@ mod tests {
         let outcomes = far_watch(&mut files, &mut panes, false);
         assert!(outcomes[0].timed_out);
         assert_eq!(panes.interrupted, ["p"]);
+    }
+
+    #[test]
+    fn only_a_pid_still_running_its_check_is_signalled() {
+        let booted = UNIX_EPOCH + Duration::from_secs(1000);
+        let after = booted + Duration::from_secs(5);
+        let script = b"sh\0/data/checks/3/gerdr-check-0\0".as_slice();
+        assert!(ours(Some(script), after, booted));
+        // Its script ended: what it left in its group is signalled.
+        assert!(ours(None, after, booted));
+        assert!(ours(Some(b"".as_slice()), after, booted));
+        // The pid was taken by something else.
+        assert!(!ours(Some(b"firefox\0".as_slice()), after, booted));
+        // Left before this boot: nothing of it runs.
+        let before = booted - Duration::from_secs(5);
+        assert!(!ours(Some(script), before, booted));
+        assert!(!ours(None, before, booted));
     }
 
     #[test]
