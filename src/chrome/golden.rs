@@ -1224,6 +1224,7 @@ fn dump_overlays() {
             go: "Close pane",
             selected: 1,
             hover: None,
+            loses: true,
         };
         let confirm_w = super::confirm_layout((800, 600).into()).panel.size.w;
         dump(
@@ -1240,6 +1241,7 @@ fn dump_overlays() {
             go: "Finish",
             selected: 1,
             hover: None,
+            loses: false,
         };
         dump(
             &dir,

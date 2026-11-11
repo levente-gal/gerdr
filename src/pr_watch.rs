@@ -218,13 +218,14 @@ impl Gerdr {
         let Some(f) = self.feature_mut(project, slug) else {
             return;
         };
-        if f.tick(now, BY_CI, Some(&patch)).is_none() {
+        if f.tick_said(now, BY_CI, Some(&patch), &format!("done: {note}"))
+            .is_none()
+        {
             return;
         }
         if let Some(mark) = f.marks.get_mut(&feature::Stage::Verify) {
             mark.note = note.clone();
         }
-        f.log(now, format!("Verify: {note}"));
         self.save_feature(project, slug);
         self.feature_cursor_to_current_of(project, slug);
         self.start_reviewer(project, slug, &title);

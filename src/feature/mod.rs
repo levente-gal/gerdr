@@ -986,6 +986,19 @@ impl Feature {
     /// the feature is done. Only the current stage can be ticked: stages
     /// go in order. Returns the stage ticked, or `None` when there is none.
     pub fn tick(&mut self, now: u64, by: &str, patch: Option<&str>) -> Option<Stage> {
+        let word = if by == "you" { "approved" } else { "done" };
+        self.tick_said(now, by, patch, word)
+    }
+
+    /// `tick`, the activity's one line for it saying `said` after the
+    /// stage's name: "approved", "done: every milestone ticked and committed".
+    pub fn tick_said(
+        &mut self,
+        now: u64,
+        by: &str,
+        patch: Option<&str>,
+        said: &str,
+    ) -> Option<Stage> {
         let stage = self.current()?;
         self.ran_once.remove(&stage);
         if stage >= Stage::Verify {
@@ -1003,7 +1016,7 @@ impl Feature {
         if stage == Stage::Ship {
             self.status = Status::Done;
         }
-        self.log(now, format!("{} ticked", stage.label()));
+        self.log(now, format!("{} {said}", stage.label()));
         Some(stage)
     }
 
@@ -2129,7 +2142,7 @@ pub(crate) mod tests {
         assert_eq!(f.current(), Some(Stage::PlanReview));
         assert_eq!(f.marks[&Stage::Plan].at, 11);
         assert_eq!(f.marks[&Stage::Plan].by, "you");
-        assert_eq!(f.history.last().unwrap().what, "Plan ticked");
+        assert_eq!(f.history.last().unwrap().what, "Plan approved");
         for _ in 2..8 {
             f.tick(12, "you", None).unwrap();
             assert_eq!(f.status, Status::Open);

@@ -8381,25 +8381,22 @@ impl Gerdr {
                     // Build go over them again first.
                     self.back_to_verify(project, slug);
                 } else {
-                    self.tick_feature(project, slug, Some(&reading.patch), "you");
                     let comments = criteria.iter().filter(|c| c.comment).count();
                     let n = criteria.len() - comments;
-                    if let Some(f) = self.feature_mut(project, slug) {
-                        let mut all = match n {
-                            0 => String::new(),
-                            1 => "its 1 criterion".to_owned(),
-                            n => format!("all {n} criteria"),
+                    let mut all = match n {
+                        0 => String::new(),
+                        1 => "its 1 criterion".to_owned(),
+                        n => format!("all {n} criteria"),
+                    };
+                    if comments > 0 {
+                        let done = format!("{} done", plural(comments, "comment"));
+                        all = match all.is_empty() {
+                            true => done,
+                            false => format!("{all}, {done}"),
                         };
-                        if comments > 0 {
-                            let done = format!("{} done", plural(comments, "comment"));
-                            all = match all.is_empty() {
-                                true => done,
-                                false => format!("{all}, {done}"),
-                            };
-                        }
-                        f.log(feature::now(), format!("Manual test passed: {all}"));
                     }
-                    self.save_feature(project, slug);
+                    let said = format!("passed: {all}");
+                    self.tick_feature_said(project, slug, Some(&reading.patch), "you", &said);
                     tracing::info!("manual test of {project}/{slug} passed: {n} criteria");
                 }
             }
@@ -8422,22 +8419,28 @@ impl Gerdr {
     /// Mark the current stage of feature `slug` done by `by` ("you",
     /// "gerdr"), on the code whose patch-id is `patch`, and say so.
     fn tick_feature(&mut self, project: &str, slug: &str, patch: Option<&str>, by: &str) {
+        let word = if by == "you" { "approved" } else { "done" };
+        self.tick_feature_said(project, slug, patch, by, word);
+    }
+
+    /// `tick_feature`, the activity's line saying `said` after the stage.
+    fn tick_feature_said(
+        &mut self,
+        project: &str,
+        slug: &str,
+        patch: Option<&str>,
+        by: &str,
+        said: &str,
+    ) {
         let Some(feature) = self.feature_mut(project, slug) else {
             return;
         };
-        let Some(stage) = feature.tick(feature::now(), by, patch) else {
+        let Some(stage) = feature.tick_said(feature::now(), by, patch, said) else {
             return self.show_warning("Nothing left to mark done".into());
         };
-        let shipped = feature.status == Status::Done;
-        let title = feature.title.clone();
+        let toast = done_toast(feature, stage);
         self.save_feature(project, slug);
-        self.show_success(if shipped {
-            format!("\u{201c}{title}\u{201d} is done")
-        } else if stage == Stage::AiReview {
-            "AI review done: Code review is next".to_owned()
-        } else {
-            format!("{} marked done", stage.label())
-        });
+        self.show_success(toast);
         self.feature_cursor_to_current_of(project, slug);
         self.feature_diff_changed(project, slug);
     }
@@ -10996,7 +10999,8 @@ impl Gerdr {
             self.ai_work_close(project, slug);
         }
         match abandon {
-            true => self.show_success(format!("Abandoned \u{201c}{title}\u{201d}")),
+            // Not a success: no done green on what was given up.
+            true => self.show_notice(format!("Abandoned \u{201c}{title}\u{201d}")),
             false => self.show_removed(
                 project,
                 slug,
@@ -15966,6 +15970,7 @@ fn event_tone(what: &str) -> CheckTone {
     ];
     let ready = [
         "ticked",
+        " done",
         "approved",
         "passed",
         "build done",
@@ -15978,6 +15983,22 @@ fn event_tone(what: &str) -> CheckTone {
         CheckTone::Ready
     } else {
         CheckTone::Note
+    }
+}
+
+/// What a toast says of `stage` of `feature` just marked done, one shape
+/// for every approval: the activity's line for it, then what comes next
+/// ("Plan approved · Plan review is next"), or that the feature is done.
+pub(crate) fn done_toast(feature: &Feature, stage: Stage) -> String {
+    if feature.status == Status::Done {
+        return format!("\u{201c}{}\u{201d} is done", feature.title);
+    }
+    let said = (feature.history.last())
+        .filter(|e| e.what.starts_with(stage.label()))
+        .map_or_else(|| format!("{} done", stage.label()), |e| e.what.clone());
+    match feature.current() {
+        Some(next) => format!("{said} \u{b7} {} is next", next.label()),
+        None => said,
     }
 }
 

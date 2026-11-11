@@ -43,6 +43,9 @@ pub struct ConfirmView {
     pub selected: usize,
     /// The button under the pointer.
     pub hover: Option<usize>,
+    /// Doing it loses something: its button is in the error colour, else
+    /// the primary one. Red is kept for what can't be had back.
+    pub loses: bool,
 }
 
 /// Where the parts of the confirm dialog go, in output coordinates.
@@ -166,8 +169,10 @@ impl Painter {
         }
 
         for (i, rect) in layout.buttons.iter().enumerate() {
-            let (label, style) = if i == 1 {
+            let (label, style) = if i == 1 && view.loses {
                 (view.go, ButtonStyle::Destructive)
+            } else if i == 1 {
+                (view.go, ButtonStyle::Primary)
             } else {
                 ("Cancel", ButtonStyle::Plain)
             };

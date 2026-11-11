@@ -26,7 +26,8 @@ How to use it:
   at once. One exception: a repository on a feature's branch never leaves
   the feature without asking, even with nothing to lose.
 - **C3** Dialog buttons: Cancel left and default, the action right in
-  `ButtonStyle::Destructive`. Enter means Cancel until the user moves.
+  `ButtonStyle::Destructive` when something is lost (`Then::loses`), else
+  `Primary`. Enter means Cancel until the user moves.
 - **C4** Cheap deletes don't ask. A row delete arms on the first Del
   ("Press Del again"); an Undo toast follows when it can be undone.
 - **C5** All routes reach the same path: ×, middle-click, menu entry, key,

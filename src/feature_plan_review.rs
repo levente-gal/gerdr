@@ -1014,22 +1014,18 @@ impl Gerdr {
         if f.current() != Some(STAGE) {
             return;
         }
-        f.tick(now, "you", None);
+        f.tick_said(now, "you", None, &format!("done: {note}"));
         if let Some(mark) = f.marks.get_mut(&STAGE) {
             note.clone_into(&mut mark.note);
         }
-        f.log(now, format!("Plan review done: {note}"));
+        let toast = crate::features::done_toast(f, STAGE);
         self.save_feature(project, slug);
         let key = (project.to_owned(), slug.to_owned(), STAGE);
         self.features.agents.remove(&key);
         self.feature_cursor_to_current_of(project, slug);
         // Done by one press, with nothing asked: Undo reopens it, as Reopen does.
         let undo = MenuAction::ReopenStage(project.to_owned(), slug.to_owned(), STAGE);
-        self.toast_with(
-            format!("Plan review done: {note}"),
-            Level::Success,
-            Some(("Undo".to_owned(), undo)),
-        );
+        self.toast_with(toast, Level::Success, Some(("Undo".to_owned(), undo)));
     }
 
     /// The panes of this review's agents still there: the stage's run, and

@@ -2889,8 +2889,8 @@ impl Gerdr {
         if let Some(draft) = feature::drafts::latest(&mut feature.drafts, stage) {
             draft.approved = Some(now);
         }
-        let done = format!("{} approved", doc_word(stage));
-        feature.log(now, done.clone());
+        // One line in the activity, the toast saying it as every approval's.
+        let done = crate::features::done_toast(feature, stage);
         self.save_feature(project, slug);
         self.features
             .agents
