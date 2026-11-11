@@ -149,6 +149,14 @@ impl Toast {
 /// first, the oldest of those first, so news doesn't push out what
 /// failed. The new one always stays.
 pub fn enqueue(toasts: &mut std::collections::VecDeque<Toast>, toast: Toast, now: Instant) {
+    // The same news again collapses into the new one, not a stack of it.
+    for old in toasts
+        .iter_mut()
+        .filter(|t| t.text == toast.text && !t.leaving(now))
+    {
+        old.paused = None;
+        old.until = now;
+    }
     toasts.push_back(toast);
     let newest = toasts.len() - 1;
     let mut staying: Vec<usize> = (0..newest).filter(|&i| !toasts[i].leaving(now)).collect();
@@ -255,6 +263,30 @@ impl Gerdr {
         self.toast(text, Level::Error);
     }
 
+    /// Send the toasts whose button does what `used` says on their way: it
+    /// was done another way (the page's button), so the button would only
+    /// do it again.
+    pub fn drop_toast_actions(&mut self, used: impl Fn(&MenuAction) -> bool) {
+        let now = Instant::now();
+        for toast in self.toasts.iter_mut() {
+            if toast.action.as_ref().is_some_and(|(_, a)| used(a)) && !toast.leaving(now) {
+                toast.paused = None;
+                toast.until = now;
+            }
+        }
+    }
+
+    /// The toasts offering to send feature `slug`'s fixes or write its final
+    /// plan go: that was just done, or is under way.
+    pub fn drop_fix_toasts(&mut self, project: &str, slug: &str) {
+        self.drop_toast_actions(|a| match a {
+            MenuAction::PlanFixes(p, s)
+            | MenuAction::MakeFindingFixes(p, s)
+            | MenuAction::WriteFinalPlan(p, s) => p == project && s == slug,
+            _ => false,
+        });
+    }
+
     /// Let go of the toasts that went and had `LEAVE_TIME` to fade by `now`.
     pub fn expire_toasts(&mut self, now: Instant) {
         self.toasts
@@ -262,12 +294,12 @@ impl Gerdr {
     }
 
     /// Where the toasts stack up: over the app area, above the button
-    /// unzooming a zoomed pane.
+    /// unzooming a zoomed pane, or the feature tab's footer (as
+    /// `chrome::toast_floor` has it).
     pub fn toast_rect(&self) -> Rect {
-        chrome::toast_area(
-            self.content_rect(),
-            self.unzoom_button().map(|(_, rect)| rect),
-        )
+        let footer = || self.feature_tab_parts().map(|(_, l)| l.hints);
+        let floor = self.unzoom_button().map(|(_, rect)| rect).or_else(footer);
+        chrome::toast_area(self.content_rect(), floor)
     }
 
     /// The toasts in the stack, oldest first, the ones going too.
@@ -340,6 +372,21 @@ mod tests {
             .map(|t| t.text.as_str())
             .collect();
         assert_eq!(staying, ["failed", "started", "created"]);
+    }
+
+    #[test]
+    fn the_same_news_again_collapses_into_one() {
+        let mut toasts = VecDeque::new();
+        let now = Instant::now();
+        for text in ["changed", "other", "changed"] {
+            let toast = Toast::new(text.into(), Level::Warning, None, 0, now + TOAST_TIME);
+            enqueue(&mut toasts, toast, now);
+        }
+        let staying: Vec<&str> = (toasts.iter())
+            .filter(|t| !t.view(now).leaving)
+            .map(|t| t.text.as_str())
+            .collect();
+        assert_eq!(staying, ["other", "changed"]);
     }
 
     #[test]

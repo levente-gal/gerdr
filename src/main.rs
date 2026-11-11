@@ -4017,8 +4017,13 @@ impl Gerdr {
         }
     }
 
-    /// Say `label`, for pane `pane`, didn't start, with a Retry.
+    /// Say `label`, for pane `pane`, didn't start, with a Retry: in a toast
+    /// unless its pane shows, whose placeholder says it with the same buttons.
     fn toast_not_started(&mut self, pane: u32, label: &str) {
+        let shown = (self.tab()).is_some_and(|tab| tab.expected.iter().any(|e| e.pane == pane));
+        if shown {
+            return;
+        }
         self.toast_with(
             format!("{label} didn't start"),
             Level::Error,

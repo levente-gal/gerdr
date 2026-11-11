@@ -151,7 +151,11 @@ fn file_key(what: &str) -> String {
 fn waiting_text(title: &str, review: &AiReview) -> Option<String> {
     let open = review.count(FindingState::Open);
     // Those to comment on GitHub wait for the review, not for AI review.
-    let fix = if review.posts { 0 } else { review.count(FindingState::Fix) };
+    let fix = if review.posts {
+        0
+    } else {
+        review.count(FindingState::Fix)
+    };
     let what = if open > 0 {
         format!("{} to decide", plural(open, "finding"))
     } else if fix > 0 {
@@ -469,7 +473,9 @@ impl Gerdr {
             Ok(format!("Marked to fix: {}", open.join(", ")))
         });
         if done {
-            let posts = self.feature(project, slug).is_some_and(Feature::posts_review);
+            let posts = self
+                .feature(project, slug)
+                .is_some_and(Feature::posts_review);
             if posts {
                 let text = format!("{} marked to comment on GitHub", plural(marked, "finding"));
                 return self.after_decision(project, slug, text, None);
@@ -818,6 +824,7 @@ impl Gerdr {
     }
 
     fn findings_go(&mut self, project: &str, slug: &str, unplanned: bool) {
+        self.drop_fix_toasts(project, slug);
         // A toast's button can come while the open diff has comments unsaved.
         self.feature_save_review();
         let Some(f) = self.feature(project, slug) else {

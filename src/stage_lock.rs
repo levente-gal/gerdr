@@ -292,9 +292,14 @@ impl Gerdr {
         }
         self.forget_doc_tabs(project, slug, stage);
         self.save_feature(project, slug);
-        self.show_success(match moved.first() {
-            Some((name, to)) => format!("{} started over: {name} moved to {to}", stage.label()),
-            None => format!("{} started over", stage.label()),
+        // The files' names are gerdr's own: what the user needs is that the
+        // earlier work is kept.
+        self.show_success(match moved.is_empty() {
+            false => format!(
+                "{} started over: what it made before is kept in the feature's archive",
+                stage.label()
+            ),
+            true => format!("{} started over", stage.label()),
         });
         self.probe_feature(project, slug);
         self.feature_cursor_to_current_of(project, slug);

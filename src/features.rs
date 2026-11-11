@@ -3963,9 +3963,12 @@ fn blocked_text(title: &str, blockers: &[String]) -> String {
 }
 
 /// The warning when the code of `title` changed, its marks from `stage`
-/// on gone.
+/// on gone: it names the cause, as the page it shows over may say otherwise.
 fn changed_text(title: &str, stage: Stage) -> String {
-    format!("\u{201c}{title}\u{201d} changed: back to {}", stage.label())
+    format!(
+        "The code of \u{201c}{title}\u{201d} changed since it was checked: back to {}",
+        stage.label()
+    )
 }
 
 /// The success toast once the pull requests of `title` are open:
@@ -24622,7 +24625,7 @@ pub(crate) mod tests {
     fn the_toasts_name_the_feature_and_what_happened() {
         assert_eq!(
             changed_text("Bulk", Stage::Build),
-            "\u{201c}Bulk\u{201d} changed: back to Build"
+            "The code of \u{201c}Bulk\u{201d} changed since it was checked: back to Build"
         );
         assert_eq!(
             opened_text("Bulk", 1, 0),
