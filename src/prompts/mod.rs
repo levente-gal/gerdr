@@ -11,11 +11,11 @@ pub fn builtin(name: &str) -> Option<(&'static str, u32)> {
     Some(match name {
         "discover" => (include_str!("../../assets/prompts/discover.md"), 4),
         "plan" => (include_str!("../../assets/prompts/plan.md"), 4),
-        "plan-review" => (include_str!("../../assets/prompts/plan-review.md"), 1),
+        "plan-review" => (include_str!("../../assets/prompts/plan-review.md"), 2),
         "plan-review-back" => (include_str!("../../assets/prompts/plan-review-back.md"), 1),
         "plan-final" => (include_str!("../../assets/prompts/plan-final.md"), 1),
         "build" => (include_str!("../../assets/prompts/build.md"), 7),
-        "ai-review" => (include_str!("../../assets/prompts/ai-review.md"), 3),
+        "ai-review" => (include_str!("../../assets/prompts/ai-review.md"), 4),
         "pr-review" => (include_str!("../../assets/prompts/pr-review.md"), 2),
         "fix-plan" => (include_str!("../../assets/prompts/fix-plan.md"), 2),
         "fix-go" => (include_str!("../../assets/prompts/fix-go.md"), 3),

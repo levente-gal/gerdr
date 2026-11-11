@@ -20,7 +20,8 @@ any code is written. The user decides what to do with what you find.
 {{#if plan_review.rejected}}
 
 The user rejected these and said why. Do not raise them again, in these words
-or others:
+or others. If you can't leave one out, give it the same `id`: it keeps the
+user's decision:
 
 {{plan_review.rejected}}
 {{/if}}

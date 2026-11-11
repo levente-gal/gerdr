@@ -1292,6 +1292,30 @@ mod tests {
     }
 
     #[test]
+    fn a_repeat_without_its_id_keeps_the_earlier_decision_and_says_it_changed() {
+        let mut review = AiReview::default();
+        let first = vec![
+            raw(None, "src/a.rs", Some(12), "Off by one"),
+            raw(None, "src/a.rs", Some(14), "Slow loop"),
+        ];
+        import(&mut review, 1, first, &repos(), &diff());
+        decide(&mut review, "r1-1", &Decision::Dismiss("by design".into())).unwrap();
+        // The same title on the same file, no id: the dismissed one again.
+        let mut again = raw(None, "src/a.rs", Some(13), " off  by ONE");
+        again.body = "worse now".into();
+        let same = raw(Some("r1-2"), "src/a.rs", Some(14), "Slow loop");
+        let got = import(&mut review, 2, vec![again, same], &repos(), &diff());
+        assert_eq!((got.new, got.again), (0, 2));
+        let f = review.finding("r1-1").unwrap();
+        assert_eq!((f.state, f.run, f.changed), (FindingState::Dismissed, 2, true));
+        // Raised again in the same words: not changed.
+        assert!(!review.finding("r1-2").unwrap().changed);
+        assert_eq!(sent_word(false, true), "in fix plan");
+        assert_eq!(sent_word(false, false), "being fixed");
+        assert_eq!(sent_word(true, true), "fix made");
+    }
+
+    #[test]
     fn only_a_fixed_finding_an_earlier_review_shows_leaves_the_list() {
         let state = |id: &str, state| Finding {
             id: id.into(),

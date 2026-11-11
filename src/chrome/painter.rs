@@ -1001,9 +1001,16 @@ impl Painter {
         c.rounded(x, y, w, h, r, p.border);
         c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, r - b, p.element);
         for (i, &rect) in rects.iter().enumerate() {
-            let fill = if i == on {
-                Some(p.selected)
-            } else if hover == Some(i) && !off.contains(&i) {
+            // The one picked is ringed too: a lighter fill alone is easy to
+            // miss.
+            if i == on {
+                let (x, y, w, h) = rect_px(rect, scale);
+                let r = ROW_HIGHLIGHT_RADIUS * s;
+                c.rounded(x, y, w, h, r, p.accent);
+                c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, (r - b).max(0.0), p.selected);
+                continue;
+            }
+            let fill = if hover == Some(i) && !off.contains(&i) {
                 Some(mix(p.element, p.selected, 0.5))
             } else {
                 None

@@ -11263,6 +11263,20 @@ impl Gerdr {
                 })
             }
             FeatureTabHit::PageButton(i) => {
+                // A button on a card selects that card first: the keys and
+                // the footer then aim at what was pressed.
+                let card = (self.feature_tab_parts()).and_then(|(view, _)| {
+                    (view.page.sections.into_iter())
+                        .filter_map(|s| match s {
+                            PageSection::Finding(card) => Some(card),
+                            _ => None,
+                        })
+                        .position(|c| c.buttons.contains(&i) || c.comment_buttons.contains(&i))
+                });
+                if let (Some(at), Some(panel)) = (card, self.features.panel.as_mut()) {
+                    panel.focus = TabArea::Findings;
+                    panel.finding = at;
+                }
                 let stage = (self.features.panel.as_ref())
                     .filter(|p| !p.keys)
                     .map(|p| p.page_stage(&feature));

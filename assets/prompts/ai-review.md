@@ -36,7 +36,9 @@ if it is, leave it out:
 {{#if review.dismissed}}
 
 The user dismissed these findings, for the reasons given. Do not raise
-them again:
+them again. If you find the same problem again, give it the same `id`:
+it keeps the user's decision and doesn't count as new. Only raise one again
+if the change since made it worse, and say what is new in `body`:
 
 {{review.dismissed}}
 {{/if}}
@@ -69,8 +71,10 @@ it again with the same `id`, so it keeps its place:
    - `title`: one short line. `body`: the case that goes wrong (input or
      state, then the wrong result), and why it matters.
      `fix`: how to fix it, in a sentence or two.
-   - `id`: only to raise a finding listed above again. Leave it out for
-     a new one: gerdr gives it its own.
+   - `id`: only to raise a finding listed above again, or a repeat of
+     one. Leave it out for a new one: gerdr gives it its own. Review the
+     change since the last review first (the `git diff` given for it);
+     look at the rest only for what it touches.
 
    Found nothing that matters? Write `{"findings": []}`.
 

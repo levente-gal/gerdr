@@ -1225,6 +1225,8 @@ mod tests {
         assert_eq!(again.ids[0], "r1-1");
         let kept = review.suggestion("r1-1").unwrap();
         assert_eq!(kept.title, "Reworded");
+        // Its card says it changed under the decision.
+        assert!(kept.changed);
         assert_eq!(kept.state, State::Accepted);
         assert_eq!(kept.note, "keep it short");
         assert!(!kept.dropped);
