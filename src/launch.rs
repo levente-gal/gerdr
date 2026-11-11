@@ -977,7 +977,19 @@ pub fn remove_sandbox_profiles(project: &str, slug: &str) {
 /// to `~/.local/share/gerdr/zed`, which also keeps Zed apart from one on
 /// the host.
 pub fn zed_data_dir(home: &Path, instance: &Path) -> PathBuf {
-    let dir = instance.join("zed");
+    ready_zed_dir(home, instance.join("zed"))
+}
+
+/// The data dir of the Zeds gerdr opens on worktrees, like `zed_data_dir`
+/// but a Zed process apart: the project's Zed on a multi-repository root
+/// holds the worktrees under `.features` too, and `zed --existing` hands
+/// a file to the first window that holds it (Zed 1.27), not the
+/// worktree's.
+pub fn worktree_zed_dir(home: &Path, instance: &Path) -> PathBuf {
+    ready_zed_dir(home, instance.join("zed-worktrees"))
+}
+
+fn ready_zed_dir(home: &Path, dir: PathBuf) -> PathBuf {
     if let Err(err) = link_zed_shared(&home.join(".local/share/gerdr/zed"), &dir) {
         tracing::warn!("making Zed's data dir {}: {err}", dir.display());
     }
@@ -1520,7 +1532,11 @@ fn own_instance(command: &str, instance: Option<&Path>) -> Option<(String, Optio
     .iter()
     .any(|flag| command.contains(flag))
     {
-        return None;
+        // A Zed given its data dir (see `worktree_zed_dir`) keeps it, and
+        // is still gerdr's Zed.
+        return ZEDS
+            .contains(&key.as_str())
+            .then(|| (command.to_owned(), None));
     }
     let home = home_dir()?;
     // A Flatpak app sees only its own folder.
@@ -2167,7 +2183,11 @@ mod tests {
             run("flatpak run dev.zed.Zed").unwrap(),
             "flatpak run dev.zed.Zed --user-data-dir=~/.var/app/dev.zed.Zed/gerdr-profile"
         );
-        assert_eq!(run("zed --user-data-dir /x"), None);
+        assert_eq!(
+            run("zed --user-data-dir /x").unwrap(),
+            "zed --user-data-dir /x"
+        );
+        assert_eq!(run("code --user-data-dir /x"), None);
         assert_eq!(own_instance("zed", None), None);
         assert_eq!(own_instance("cursor", None), None);
         assert_eq!(own_instance("chromium", None), None);

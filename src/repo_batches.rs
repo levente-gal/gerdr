@@ -2609,14 +2609,19 @@ impl Gerdr {
         };
         self.switch_tab(t);
         self.focus(Some(window));
-        self.zed_open_existing(root, &files);
+        let data = self.zed_data.clone();
+        self.zed_open_existing(&data, root, &files);
     }
 
     /// Open `files` of the worktree at `root` in the Zed on it (launched
-    /// `zed -n <root> …`), in whichever workspace; else in a new tab with
-    /// one, in workspace `w`.
+    /// `zed --user-data-dir <launch::worktree_zed_dir> -n <root> …`), in
+    /// whichever workspace; else in a new tab with one, in workspace `w`.
     fn open_in_worktree_zed(&mut self, w: usize, root: &Path, files: &[PathBuf]) {
-        let lead = format!("zed -n {}", desktop::shell_quote(&root.to_string_lossy()));
+        let home = crate::home_dir().unwrap_or_default();
+        let data = crate::launch::worktree_zed_dir(&home, &self.instance_dir);
+        let quote = |p: &Path| desktop::shell_quote(&p.to_string_lossy());
+        // Flags before the root: Zed takes every word after a path as a path.
+        let lead = format!("zed --user-data-dir {} -n {}", quote(&data), quote(root));
         let on_root = |command: Option<&str>| {
             command.is_some_and(|c| c == lead || c.starts_with(&format!("{lead} ")))
         };
@@ -2630,19 +2635,19 @@ impl Gerdr {
             })
         });
         let Some((w, t, window)) = found else {
-            let quoted: Vec<String> = files
-                .iter()
-                .map(|f| desktop::shell_quote(&f.to_string_lossy()))
-                .collect();
-            let command = [lead].into_iter().chain(quoted).collect::<Vec<_>>();
-            return self.new_zed_tab(w, command.join(" "));
+            let mut command = lead;
+            for file in files {
+                command.push(' ');
+                command.push_str(&quote(file));
+            }
+            return self.new_zed_tab(w, command);
         };
         if w != self.active_workspace {
             self.switch_workspace(w);
         }
         self.switch_tab(t);
         self.focus(Some(window));
-        self.zed_open_existing(root, files);
+        self.zed_open_existing(&data, root, files);
     }
 
     /// Open `file` of the checkout at `root`, at `line`, in the Zed on that
@@ -2652,13 +2657,11 @@ impl Gerdr {
         self.open_in_worktree_zed(w, root, &[place]);
     }
 
-    /// Hand `files` (`root` with none) to the Zed window used last, the
-    /// one just focused.
-    fn zed_open_existing(&mut self, root: &Path, files: &[PathBuf]) {
+    /// Hand `files` (`root` with none) to the Zed running on data dir
+    /// `data`: the window holding them, else the one used last.
+    fn zed_open_existing(&mut self, data: &Path, root: &Path, files: &[PathBuf]) {
         let mut zed = Command::new("zed");
-        zed.arg("--user-data-dir")
-            .arg(&self.zed_data)
-            .arg("--existing");
+        zed.arg("--user-data-dir").arg(data).arg("--existing");
         if files.is_empty() {
             zed.arg(root);
         }
