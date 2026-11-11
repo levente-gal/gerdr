@@ -892,8 +892,19 @@ pub fn plan_why<'a>(
         1 => why.push("1 comment of yours in the diff".to_owned()),
         n => why.push(format!("{n} comments of yours in the diff")),
     }
-    (!why.is_empty()).then(|| format!("A plan comes first: {}", why.join(", ")))
+    (!why.is_empty()).then(|| own_words(&why.join(", ")))
 }
+
+/// Why fixes holding the user's own words (`what`: "your fix of r1-2") go
+/// through a plan, in plain words: the same on every page that sends fixes.
+pub fn own_words(what: &str) -> String {
+    format!(
+        "{OWN_WORDS} ({what}): the Build agent plans them first, so you can check it read them right"
+    )
+}
+
+/// How `own_words` starts.
+pub const OWN_WORDS: &str = "Your own words are in these fixes";
 
 /// `text` with no line a Markdown heading: a plan's sections go by those.
 pub(crate) fn no_headings(text: &str) -> String {
@@ -1702,9 +1713,9 @@ mod tests {
         let id = noted.id.clone();
         assert_eq!(
             plan_why(&[noted], 2),
-            Some(format!(
-                "A plan comes first: your comment on {id}, 2 comments of yours in the diff"
-            ))
+            Some(own_words(&format!(
+                "your comment on {id}, 2 comments of yours in the diff"
+            )))
         );
     }
 

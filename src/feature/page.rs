@@ -240,6 +240,14 @@ pub fn read_docs(data: &Path) -> Docs {
             continue;
         };
         if stage != Stage::Build {
+            // The plan's milestones, for Build's page before its log lists
+            // them.
+            if matches!(stage, Stage::Plan | Stage::PlanReview)
+                && let Ok(text) = std::fs::read_to_string(&path)
+            {
+                docs.milestones
+                    .insert(stage, artifacts::milestone_items(&text));
+            }
             match preview_of(&path) {
                 Ok(blocks) => {
                     docs.previews.insert(stage, Arc::new(blocks));
@@ -708,12 +716,10 @@ mod tests {
             Some([heading("Brief")].as_slice())
         );
         assert!(docs.previews.contains_key(&Stage::Plan));
+        let both = vec![(true, "API".to_owned()), (false, "UI".to_owned())];
         assert_eq!(
             docs.milestones,
-            BTreeMap::from([(
-                Stage::Build,
-                vec![(true, "API".to_owned()), (false, "UI".to_owned())]
-            )])
+            BTreeMap::from([(Stage::Plan, both.clone()), (Stage::Build, both)])
         );
         assert_eq!(
             docs.fix_rounds,

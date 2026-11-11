@@ -1425,17 +1425,21 @@ impl Gerdr {
             return false;
         };
         let live = run.pane.as_deref().is_some_and(|p| self.pane_there(p));
-        let Some(id) = run
-            .machine
-            .as_deref()
-            .filter(|_| live && self.run_at_work(run))
-        else {
+        // Only one at work is lost by it: an idle chat's tab just goes.
+        if !live || !self.run_at_work(run) {
             return false;
+        }
+        let body = match run.machine.as_deref() {
+            Some(id) => format!(
+                "The one on {} is working: the new one takes its place and it stops",
+                self.machine_name(id)
+            ),
+            None => "The one working now stops and its tab closes: the new one takes its place"
+                .to_owned(),
         };
-        let name = self.machine_name(id);
         self.ask(
             format!("Start {} afresh?", run.agent),
-            format!("The one on {name} is working: the new one takes its place and it stops"),
+            body,
             "Start fresh",
             Then::FreshOnMachine(project.to_owned(), slug.to_owned(), stage),
         );

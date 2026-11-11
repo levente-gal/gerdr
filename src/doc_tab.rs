@@ -78,11 +78,11 @@ impl DocMode {
 
     /// What `file`'s tab can show, in the order the switch shows them. A
     /// stage's file is read on its page, so its tab has no Preview; the
-    /// evidence has no page but this.
+    /// evidence and the fix plan have no page but this, so theirs have all.
     pub fn choices(file: DocFile) -> &'static [DocMode] {
         match file {
-            DocFile::Stage(_) | DocFile::FixPlan => &[DocMode::Review, DocMode::Split],
-            DocFile::Evidence | DocFile::ConflictPlan(_) => &DocMode::ALL,
+            DocFile::Stage(_) => &[DocMode::Review, DocMode::Split],
+            DocFile::Evidence | DocFile::FixPlan | DocFile::ConflictPlan(_) => &DocMode::ALL,
             DocFile::PlanChanges | DocFile::DraftChanges(..) | DocFile::Suggestions => {
                 &[DocMode::Review]
             }

@@ -348,7 +348,7 @@ impl Gerdr {
             return self.open_doc_tab(project, slug, crate::doc_review::DocFile::FixPlan);
         }
         let title = feature.title.clone();
-        let label = fix_round::label(n, &feature.verify_fixes, &feature.fix_asked);
+        let label = fix_round::label(n);
         let path = fix_round::archive_path(&store::dir(None, project, slug), n);
         let text = match std::fs::read_to_string(&path) {
             Ok(text) => text,

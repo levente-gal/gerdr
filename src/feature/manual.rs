@@ -62,6 +62,10 @@ pub fn comment_criteria(test: Option<&ManualTest>) -> Vec<Criterion> {
         .collect()
 }
 
+/// What a Manual test comment's id starts with: "T1", apart from Code
+/// review's "C1" in the same feature. Those kept from before say "C".
+const COMMENT_PREFIX: char = 'T';
+
 /// A comment's title: its first line, cut to a few words.
 fn comment_title(text: &str) -> String {
     let line = text
@@ -84,7 +88,7 @@ fn comment_title(text: &str) -> String {
 pub fn add_comment(test: &mut Option<ManualTest>, text: &str, patch: &str, now: u64) -> String {
     let t = test.get_or_insert_with(Default::default);
     t.comments_given += 1;
-    let id = format!("C{}", t.comments_given);
+    let id = format!("{COMMENT_PREFIX}{}", t.comments_given);
     let comment = Comment {
         id: id.clone(),
         text: text.to_owned(),
@@ -168,7 +172,7 @@ pub fn restore_comment(test: &mut Option<ManualTest>, removed: Removed) -> bool 
         return false;
     }
     // Its number stays given.
-    let n = id.trim_start_matches('C').parse::<u32>().unwrap_or(0);
+    let n = (id.trim_start_matches([COMMENT_PREFIX, 'C']).parse::<u32>()).unwrap_or(0);
     t.comments_given = t.comments_given.max(n);
     t.comments
         .insert(removed.at.min(t.comments.len()), removed.comment);
@@ -806,7 +810,7 @@ mod tests {
             "p1",
             20,
         );
-        assert_eq!(id, "C1");
+        assert_eq!(id, "T1");
         let comments = comment_criteria(t.as_ref());
         assert_eq!(comments.len(), 1);
         let c = &comments[0];
@@ -827,21 +831,21 @@ mod tests {
         );
         let at = |s: &str| md.find(s).unwrap();
         assert!(
-            at("## AC-1:") < at("## C1: Comment\n\nMake the settings page"),
+            at("## AC-1:") < at("## T1: Comment\n\nMake the settings page"),
             "{md}"
         );
         let plan = fixes_plan(t.as_ref(), &criteria, "Bulk");
         let items = super::super::fix_round::items(&plan, &[]);
         assert_eq!(items.len(), 2, "{plan}");
-        assert!(items[1].starts_with("C1: "), "{items:?}");
-        assert!(criteria_block(&criteria).contains("- C1: Make the settings"));
+        assert!(items[1].starts_with("T1: "), "{items:?}");
+        assert!(criteria_block(&criteria).contains("- T1: Make the settings"));
         // Only comments: said so.
         let (_, md) = failures_markdown(t.as_ref(), &comments, "Bulk");
         assert!(md.starts_with("# Manual test comments"), "{md}");
         // Done, it passes; the next gets the next number.
         set(&mut t, c, "p1", Verdict::Pass, "", 30);
         assert_eq!(counts(t.as_ref(), &criteria).comments_done, 1);
-        assert_eq!(add_comment(&mut t, "Bigger buttons", "p1", 40), "C2");
+        assert_eq!(add_comment(&mut t, "Bigger buttons", "p1", 40), "T2");
     }
 
     #[test]
@@ -850,8 +854,8 @@ mod tests {
         add_comment(&mut t, "Bigger buttons", "p1", 10);
         let c = comment_criteria(t.as_ref()).remove(0);
         set(&mut t, &c, "p1", Verdict::Pass, "", 20);
-        assert_eq!(edit_comment(&mut t, "C1", "Bigger buttons", "p1", 30), None);
-        let was = edit_comment(&mut t, "C1", "Bigger, round buttons", "p2", 30);
+        assert_eq!(edit_comment(&mut t, "T1", "Bigger buttons", "p1", 30), None);
+        let was = edit_comment(&mut t, "T1", "Bigger, round buttons", "p2", 30);
         assert_eq!(was.as_deref(), Some("Bigger buttons"));
         let c = comment_criteria(t.as_ref()).remove(0);
         assert_eq!(c.text, "Bigger, round buttons");
@@ -863,7 +867,7 @@ mod tests {
         assert_eq!(t.as_ref().unwrap().checks.len(), 1);
         // Deleted, nothing is left; put back, all of it is.
         let before = t.clone();
-        let removed = delete_comment(&mut t, "C1").unwrap();
+        let removed = delete_comment(&mut t, "T1").unwrap();
         assert_eq!(t, None);
         assert!(restore_comment(&mut t, removed.clone()));
         let kept =
@@ -871,9 +875,9 @@ mod tests {
         assert_eq!(kept(&t), kept(&before));
         assert!(!restore_comment(&mut t, removed));
         // Its number isn't given again.
-        assert_eq!(add_comment(&mut t, "More", "p2", 40), "C2");
+        assert_eq!(add_comment(&mut t, "More", "p2", 40), "T2");
         // Clearing a comment's result keeps the comment.
-        assert!(clear(&mut t, "C1"));
+        assert!(clear(&mut t, "T1"));
         assert_eq!(comment_criteria(t.as_ref()).len(), 2);
     }
 

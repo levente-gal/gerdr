@@ -838,8 +838,9 @@ impl Gerdr {
         let title = feature.title.clone();
         self.save_feature(project, slug);
         tracing::info!("feature {project}/{slug}: Manual test fixes go back to Verify");
+        // Short: its page says the rest, for as long as the loop goes.
         self.show_notice(format!(
-            "Fixes changed \u{201c}{title}\u{201d}: back to Verify, then AI review and Code review of them, then Manual test"
+            "Fixes changed \u{201c}{title}\u{201d}: back to Verify"
         ));
         self.feature_cursor_to_current_of(project, slug);
         self.show_stage_page(project, slug);

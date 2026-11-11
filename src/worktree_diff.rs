@@ -1148,6 +1148,11 @@ impl WorktreeDiff {
                     doc.name()
                 );
             }
+            // A fix round's plan is the Build agent's, for the stage that
+            // asked: its state after the heading names both.
+            if doc.file == DocFile::FixPlan {
+                return format!("Build agent's fix plan · {}", doc.name());
+            }
             return format!("{} · {}", doc.file.stage().label(), doc.name());
         }
         let name = self.branch.clone().unwrap_or_else(|| {
@@ -1225,6 +1230,8 @@ impl WorktreeDiff {
             // over it (`ReviewSwitch::buttons`).
             if !fe.inline {
                 view.title_buttons.extend(self.feature_hints());
+                // A popup over the feature's page: a way out by the mouse too.
+                view.title_buttons.push(hint(ReposButton::Close, "Esc"));
             }
             // Findings are decided at AI review alone: past it their buttons
             // would only refuse.
@@ -2997,15 +3004,8 @@ pub(crate) mod tests {
             .iter()
             .map(|h| h.button)
             .collect();
-        assert_eq!(
-            buttons,
-            [
-                ReposButton::PrevComment,
-                ReposButton::NextComment,
-                ReposButton::CopyReview,
-                ReposButton::ClearReview
-            ]
-        );
+        // One comment: nowhere to go on to, so no Previous / Next.
+        assert_eq!(buttons, [ReposButton::CopyReview, ReposButton::ClearReview]);
         // Asked on a sheet, which takes the keys: Esc keeps it.
         let clear = ReposHit::Button(ReposButton::ClearReview);
         assert_eq!(wd.click(clear, ENV), None);

@@ -1092,7 +1092,7 @@ impl Gerdr {
             .chain(feature.past_rounds.iter().rev())
             .find(|r| r.n == n)
             .cloned();
-        let label = crate::feature::fix_round::label(n, &feature.verify_fixes, &feature.fix_asked);
+        let label = crate::feature::fix_round::label(n);
         let Some(round) = found else {
             return self.show_warning(format!("{label} is gone"));
         };
@@ -2776,7 +2776,12 @@ mod tests {
             .into_iter()
             .map(|h| h.button);
         let title =
-            title.filter(|b| !matches!(b, ReposButton::PrevComment | ReposButton::NextComment));
+            title.filter(|b| {
+                !matches!(
+                    b,
+                    ReposButton::PrevComment | ReposButton::NextComment | ReposButton::Close
+                )
+            });
         let hints = wd.hints().into_iter().map(|h| h.button).collect();
         (title.collect(), hints)
     }

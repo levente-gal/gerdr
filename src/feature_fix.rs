@@ -182,6 +182,7 @@ impl Gerdr {
             .and_then(|f| f.fix_round.as_mut())
         {
             round.items = fix_round::items(plan, &[]);
+            round.trail.unplanned = true;
         }
         self.save_feature(project, slug);
         true
@@ -1102,14 +1103,29 @@ impl Gerdr {
 
     /// Ask before dropping the open round of feature `slug`.
     pub(crate) fn ask_drop_fix_plan(&mut self, project: String, slug: String) {
-        let body = format!(
-            "What it was to fix comes back where it was, and its agent isn't stopped.\n{} stays in its folder until the next round.",
-            fix_round::FILE
-        );
+        let planned = (self.feature(&project, &slug))
+            .and_then(|f| f.fix_round.as_ref())
+            .is_none_or(FixRound::has_plan);
+        let (question, body, action) = match planned {
+            true => (
+                "Drop this fix plan?",
+                format!(
+                    "What it was to fix comes back where it was, and its agent isn't stopped.\n{} stays in its folder until the next round.",
+                    fix_round::FILE
+                ),
+                "Drop plan",
+            ),
+            false => (
+                "Drop this fix round?",
+                "What it was to fix comes back where it was, and its agent isn't stopped."
+                    .to_owned(),
+                "Drop round",
+            ),
+        };
         self.ask(
-            "Drop this fix plan?".to_owned(),
+            question.to_owned(),
             body,
-            "Drop plan",
+            action,
             Then::DropFixPlan { project, slug },
         );
     }

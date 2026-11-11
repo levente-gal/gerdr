@@ -1486,7 +1486,7 @@ impl Gerdr {
         let pane = feature.runs.get(&stage).and_then(|r| r.pane.clone());
         // The first agent gets a failed setup run again, like a fresh one.
         let first = !feature.runs.contains_key(&stage);
-        if !fresh && let Some(pane) = pane.filter(|p| self.pane_there(p)) {
+        if !fresh && let Some(pane) = pane.clone().filter(|p| self.pane_there(p)) {
             return self.focus_agent(&agents::AgentKey::Herdr(pane));
         }
         if !fresh && feature.runs.get(&stage).is_some_and(StageRun::resumes) {
@@ -1496,6 +1496,14 @@ impl Gerdr {
             return;
         }
         if self.launch_stage_agent(project, slug, stage, &[]) {
+            // The one it replaces goes with its tab and sidebar row: asked
+            // first if it was at work (`asks_before_fresh`).
+            let now = (self.feature(project, slug)).and_then(|f| f.runs.get(&stage)?.pane.clone());
+            if let Some(old) =
+                pane.filter(|p| fresh && Some(p) != now.as_ref() && self.pane_there(p))
+            {
+                self.close_herdr_pane(&old);
+            }
             self.show_agent_asking(project, slug, stage);
         }
     }

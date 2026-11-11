@@ -278,6 +278,9 @@ pub struct CommandsDialog {
     error: Option<String>,
     stale: bool,
     pub hover: Option<CommandsHit>,
+    /// Opened by Start sandbox for want of run commands: saved, the
+    /// sandbox goes on starting, as if it was pressed again.
+    pub then_sandbox: bool,
 }
 
 /// What a project's commands are as a list: each line, trimmed, the empty
@@ -364,6 +367,7 @@ impl CommandsDialog {
             error: None,
             stale: false,
             hover: None,
+            then_sandbox: false,
         };
         dialog.sort();
         dialog.focus_first();
@@ -1173,6 +1177,10 @@ impl Gerdr {
             Level::Success,
             Some(("Undo".to_owned(), MenuAction::RestoreProjectCommands(undo))),
         );
+        // What it was opened for goes on.
+        if let (true, Some(slug)) = (dialog.then_sandbox, &dialog.scope.slug) {
+            self.ask_start_sandbox(&dialog.scope.project, slug);
+        }
     }
 
     /// Write what was edited of the dialog's feature's own checks to its

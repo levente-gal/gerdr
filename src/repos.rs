@@ -8235,9 +8235,8 @@ mod tests {
         let title: Vec<(B, &str)> = title.iter().map(|h| (h.button, h.label.as_str())).collect();
         assert_eq!(
             title,
+            // One comment: no Previous / Next to go round it.
             [
-                (B::PrevComment, "Previous comment"),
-                (B::NextComment, "Next comment"),
                 (B::CopyReview, "Copy 1 comment"),
                 (B::ClearReview, "Clear review")
             ]

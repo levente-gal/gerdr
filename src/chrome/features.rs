@@ -3292,9 +3292,11 @@ impl Stack {
                 self.y += 2;
                 self.put(PROGRESS, Piece::Bar { done, total });
                 self.y += 8;
+                // The next one is marked only while its round is at work: a
+                // plan waiting has nothing going.
                 let next = (card.fixes.iter())
                     .position(|(d, _)| !d)
-                    .filter(|_| card.running.is_empty());
+                    .filter(|_| card.running.is_empty() && card.dot == Dot::Working);
                 for (i, (done, text)) in card.fixes.iter().enumerate() {
                     self.put(
                         MILESTONE_ROW,
@@ -4056,9 +4058,11 @@ fn page_stack(
             _ => Vec::new(),
         })
         .collect();
-    let free: Vec<usize> = (0..page.buttons.len())
+    let mut free: Vec<usize> = (0..page.buttons.len())
         .filter(|i| !held.contains(i))
         .collect();
+    // The primary goes rightmost, as in dialogs.
+    free.sort_by_key(|&i| page.buttons[i].style == ButtonStyle::Primary);
     let widths: Vec<i32> = (free.iter())
         .map(|i| button_width(&page.buttons[*i].label))
         .collect();
@@ -7544,6 +7548,12 @@ impl Painter {
                     let (x, y, w, h) = rect_px(rect, scale);
                     let b = (scale as f32).round().max(1.0);
                     c.rounded(x, y + h - b, w, b, 0.0, p.border);
+                    // The one with the keys says so plainly: a tint alone is
+                    // hard to see, so an accent bar runs down its left edge.
+                    if card.selected {
+                        let bar = (3.0 * scale as f32).round();
+                        c.rounded(x, y, bar, h - b, bar / 2.0, p.accent);
+                    }
                     for &i in &card.buttons {
                         if let Some(r) = l.page_buttons.get(i).copied().flatten() {
                             self.page_button(c, view, i, at(r), scale, p);
@@ -7615,10 +7625,9 @@ impl Painter {
                 let Some(PageSection::Finding(card)) = view.page.sections.get(*k) else {
                     return;
                 };
-                let open = match &card.sheet {
-                    Some(sheet) => sheet.open,
-                    None => !card.collapsed,
-                };
+                // What shows: a criterion opened to write its note in, or by
+                // a search, points down whatever the user left it as.
+                let open = !card.collapsed;
                 let n = (view.page.sections[..*k].iter())
                     .filter(|s| matches!(s, PageSection::Finding(_)))
                     .count();
