@@ -3134,7 +3134,7 @@ fn editing_actions(writing: bool) -> Vec<(PageButton, PanelOutcome)> {
 
 /// The buttons folding Manual test's criteria to their lines, or opening
 /// them to their steps: all, those passed, those read.
-fn fold_actions() -> Vec<(PageButton, PanelOutcome)> {
+pub(crate) fn fold_actions() -> Vec<(PageButton, PanelOutcome)> {
     use crate::feature::manual::FoldScope;
     // Folding goes by scope; opening only all at once: opening those passed
     // or read is rare, and has its keys (Alt+Shift+D, Alt+Shift+S).
@@ -3169,7 +3169,7 @@ const FOLD_READ: &str = "Read";
 
 /// The row over Manual test's criteria: "Fold" with its buttons of `actions`
 /// (see `fold_actions`), and opening them all.
-fn fold_toolbar(actions: &[(PageButton, PanelOutcome)]) -> PageSection {
+pub(crate) fn fold_toolbar(actions: &[(PageButton, PanelOutcome)]) -> PageSection {
     let of = |open: bool| -> Vec<usize> {
         (actions.iter().enumerate())
             .filter(|(_, (_, o))| matches!(o, PanelOutcome::FoldCriteria(_, x) if *x == open))
@@ -16553,7 +16553,7 @@ fn in_menu(button: &PageButton, outcome: &PanelOutcome) -> bool {
 /// card of its own holds it (a finding's, a round's, a repository's on Ship),
 /// the rare ones (`StagePage::menu`) off the page; and each row of buttons
 /// in one style: a quiet one beside outlined ones is outlined too.
-fn place_buttons(page: &mut StagePage) {
+pub(crate) fn place_buttons(page: &mut StagePage) {
     let menu = page.menu.clone();
     let local: Vec<usize> = (page.sections.iter())
         .flat_map(|s| match s {
@@ -17880,7 +17880,7 @@ fn fold_hint(feature: &Feature, stage: Stage) -> Option<(String, String)> {
 
 /// `label` with its first letter in lower case, as hints are written: a
 /// button's "Go to Plan" is "go to Plan" in the footer.
-fn lower_first(label: &str) -> String {
+pub(crate) fn lower_first(label: &str) -> String {
     let mut chars = label.chars();
     chars
         .next()

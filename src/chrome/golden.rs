@@ -865,61 +865,61 @@ const CASES: [(Theme, f64); 4] = [
 const GOLDEN: [[u64; 12]; 4] = [
     // Dark at 1
     [
-        0xea617f04672206a4, // sidebar
+        0xe389c22057f526b6, // sidebar
         0xed1972252f36590d, // tab_strip
         0x666fd35c1955aaa6, // pane_bar
         0x866d59a70ebe252d, // help
         0x378d0ffdb2449b77, // menu
-        0xfc09c643c2d57ae1, // switcher
-        0xe4d55e0a322e116f, // welcome
-        0x1fac2c9284ad07fa, // quit
-        0xa153da032809bb28, // project_menu
-        0xaf72881e8b741219, // project_form
+        0x222c5ec526350aca, // switcher
+        0x8cb9e7e1c80a7231, // welcome
+        0x2ffe79ab7ef15cce, // quit
+        0xf28e73b0f19af0ae, // project_menu
+        0x40b86d9394e2b0f6, // project_form
         0xbd0d423ca3de12bd, // toast
         0x1b80b690e340528a, // agent_strip
     ],
     // Dark at 2
     [
-        0x017152f1d8605ca8, // sidebar
+        0x97aae0caed2b919e, // sidebar
         0x75280e3af24f953f, // tab_strip
         0x0dc4d7db9b5967cd, // pane_bar
         0x56045b72862ed173, // help
         0xd724a365fa94d169, // menu
-        0x1a39f33e0a29f83b, // switcher
-        0xc6a2b9324f6b7b75, // welcome
-        0x91306b9e268dc79d, // quit
-        0xe4d3ddc977880896, // project_menu
-        0x1d108a7b493c0cd1, // project_form
+        0x6cc81b30f90cc5e6, // switcher
+        0x7228b99386b303e1, // welcome
+        0x0f8b61f4910134a3, // quit
+        0x50eec8407b3dab46, // project_menu
+        0xb106808fcdacd38e, // project_form
         0x8a9a152ce2a17651, // toast
         0x95f9334ab0c42dc0, // agent_strip
     ],
     // Light at 1
     [
-        0xbd043f5a886c0db4, // sidebar
+        0x7725bbc9577f3e11, // sidebar
         0xf5c707c6dab41293, // tab_strip
         0xa514c9cbf0c81198, // pane_bar
         0x8c0302567b35f0c3, // help
         0xf82050c3b2848862, // menu
-        0x422064c274f92b90, // switcher
-        0x232afdce7d51101b, // welcome
-        0xc9fc61e2fab1872e, // quit
-        0x2acadbe4552d8f00, // project_menu
-        0xe2e62fecf8cb83c6, // project_form
+        0x1c55b0ad8b473feb, // switcher
+        0xa1d750b5ccc720d1, // welcome
+        0x7a7ace7eb4d8a736, // quit
+        0x4e1920c645fb3bd9, // project_menu
+        0xba3c6be2c453a2bf, // project_form
         0x3023720e0af5627f, // toast
         0xa37db337f4fcec5f, // agent_strip
     ],
     // Light at 2
     [
-        0xd949d7e1c0297a42, // sidebar
+        0xc84048d64b689513, // sidebar
         0x65c73e85a9732c79, // tab_strip
         0x887475a089d81641, // pane_bar
         0x22f444d49649f855, // help
         0xc17d1e64d3c77f97, // menu
-        0x77eb0acf1f4d4fd5, // switcher
-        0xc5b0dff47ac46d40, // welcome
-        0x0a88810aa7ad751e, // quit
-        0xb1cf73a20f25f32b, // project_menu
-        0x527909807a17afb5, // project_form
+        0x8d2a4b7ab4c3d3b6, // switcher
+        0x6286d26d1401730a, // welcome
+        0x7986c8c8af717529, // quit
+        0x597b19b650a6f61c, // project_menu
+        0xe2c375293cea9c87, // project_form
         0xd1410a8fb372b973, // toast
         0x8aeabdb50084b1d6, // agent_strip
     ],
@@ -1617,22 +1617,22 @@ const GOLDEN_STATUS: [[u64; 2]; 4] = [
     // Dark at 1
     [
         0x3821a1cf1a7fe182, // footer
-        0x7b7eaff2a33d9052, // tasks_panel
+        0x4e0bb89f143ae0d2, // tasks_panel
     ],
     // Dark at 2
     [
         0x910ba2519163ffe3, // footer
-        0x53a939dcd1f191bc, // tasks_panel
+        0x8fcd41618448e585, // tasks_panel
     ],
     // Light at 1
     [
         0x8a8087fd34aec460, // footer
-        0x4ccf9615670317c4, // tasks_panel
+        0x73394c4c1f2ef470, // tasks_panel
     ],
     // Light at 2
     [
         0x28f7c3f0d800d54e, // footer
-        0x2864d1396204ac44, // tasks_panel
+        0xfc7ddca895c0b3ab, // tasks_panel
     ],
 ];
 
@@ -2001,47 +2001,47 @@ const FEATURES: [&str; 8] = [
 const GOLDEN_FEATURES: [[u64; 8]; 4] = [
     // Dark at 1
     [
-        0x8374c9414949fa5b, // new_feature
-        0xc87c6c9be76cea36, // new_feature_bases
-        0xa77cf538d219f4ef, // sidebar_features
-        0x4f489a294fd6cfe9, // sidebar_feature_workspace
-        0x42f966c250e9899d, // sidebar_needs_you
-        0x0cbbecc8e276c3fc, // sidebar_no_features
-        0x54cfa28809678460, // new_review
-        0xe608d8f7932ec25c, // new_review_pulls
+        0xe26d4051ade3c3c3, // new_feature
+        0x2aff067e65002fc3, // new_feature_bases
+        0x35ce95cae4a606c7, // sidebar_features
+        0xcec44541e82a9fc9, // sidebar_feature_workspace
+        0xec1b534e416312d9, // sidebar_needs_you
+        0x38dbadad2308760e, // sidebar_no_features
+        0x9b1ad4602d5dfe05, // new_review
+        0xcb449e75ac357c2f, // new_review_pulls
     ],
     // Dark at 2
     [
-        0x62ad1d17fcbe8faa, // new_feature
-        0xe00bb64532ae6b5f, // new_feature_bases
-        0x21105ece42c0dd0e, // sidebar_features
-        0x25a6c3532952ab77, // sidebar_feature_workspace
-        0x7f5b07bc5817daa7, // sidebar_needs_you
-        0xf97a94d1cbc468b6, // sidebar_no_features
-        0xc4f74b048c71b636, // new_review
-        0x2cb2e4ca6f379930, // new_review_pulls
+        0x42067dce4e972385, // new_feature
+        0x244864fbc4aa11bd, // new_feature_bases
+        0xac77be79af90543a, // sidebar_features
+        0x8fa4fa3fc01a005e, // sidebar_feature_workspace
+        0xf1b7525a91f048f0, // sidebar_needs_you
+        0xe6a933a97909111c, // sidebar_no_features
+        0xeed5e65264de763e, // new_review
+        0xe89e33c5b92d9e87, // new_review_pulls
     ],
     // Light at 1
     [
-        0x461f595ad7da5726, // new_feature
-        0x569469f7ecfe02c8, // new_feature_bases
-        0xaf41feb3e3003f04, // sidebar_features
-        0x8c099eb3525e36fa, // sidebar_feature_workspace
-        0x0f94ad20e6efe803, // sidebar_needs_you
-        0xb97e2bad7455858d, // sidebar_no_features
-        0xebbbbe15533c85e7, // new_review
-        0x603f26244a925622, // new_review_pulls
+        0x31e0e39b14a088b3, // new_feature
+        0x531fdeb26471714a, // new_feature_bases
+        0xbb1032aea480ea43, // sidebar_features
+        0x5d757742533ae5fe, // sidebar_feature_workspace
+        0x414d843532499a58, // sidebar_needs_you
+        0x474724f31cd435c8, // sidebar_no_features
+        0x0a97b8d759cc4d36, // new_review
+        0x5acb59355ac85e97, // new_review_pulls
     ],
     // Light at 2
     [
-        0x785a91256084024b, // new_feature
-        0x465dcd5a19cbedc5, // new_feature_bases
-        0x690bf93cbdab10ee, // sidebar_features
-        0x3653c34b3b5ea64a, // sidebar_feature_workspace
-        0xe73df09db1908db1, // sidebar_needs_you
-        0x7ae57ba63db05473, // sidebar_no_features
-        0xe78c007083a4debd, // new_review
-        0x42d486817798b12c, // new_review_pulls
+        0xea82b6972eed93d0, // new_feature
+        0x25afcba58c23a38c, // new_feature_bases
+        0xf2418f0f3ae45142, // sidebar_features
+        0x219fe458a0ba299a, // sidebar_feature_workspace
+        0x4b9d19393791d2df, // sidebar_needs_you
+        0xde76d59c6519cad2, // sidebar_no_features
+        0xb14912585970169a, // new_review
+        0x3df8aaffc0ac4a05, // new_review_pulls
     ],
 ];
 
@@ -2168,23 +2168,23 @@ const IDENTITY: [&str; 2] = ["identity", "identity_error"];
 const GOLDEN_IDENTITY: [[u64; 2]; 4] = [
     // Dark at 1
     [
-        0xfe9670c1db2227bb, // identity
-        0xef59994443850f38, // identity_error
+        0xbba1df5757ed413a, // identity
+        0xc87e46c74c54f9a3, // identity_error
     ],
     // Dark at 2
     [
-        0x9cace75ad1c239a3, // identity
-        0x8d7402004f72d9cb, // identity_error
+        0x870075a0e427ce44, // identity
+        0xd9d2d0de357d9d81, // identity_error
     ],
     // Light at 1
     [
-        0x2dcb64793711569e, // identity
-        0xc52c2f5d94c6d25a, // identity_error
+        0xbe719200f205e134, // identity
+        0x745354b45290cdd2, // identity_error
     ],
     // Light at 2
     [
-        0xd8b061bf59d82bc3, // identity
-        0x09a2ede92adb49a9, // identity_error
+        0x32db364b2f819350, // identity
+        0xbdb67fc735f555dc, // identity_error
     ],
 ];
 
@@ -2326,27 +2326,27 @@ fn paint_machine(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
 const GOLDEN_MACHINE: [[u64; 3]; 4] = [
     // Dark at 1
     [
-        0x0eef78ab99aee544, // machine
-        0x769aa7f1aa46bec8, // machine_connecting
-        0x34c796af55488a82, // machine_failed
+        0xfbf2969785aee1f9, // machine
+        0xf3cd997dec8c40a1, // machine_connecting
+        0x8dbd5f8d6d6adce1, // machine_failed
     ],
     // Dark at 2
     [
-        0xe5ab34736a3caf0e, // machine
-        0x78f22125390eb432, // machine_connecting
-        0x689bd69d0124f5ee, // machine_failed
+        0xe9f8f8c3ad56a8b1, // machine
+        0x43a93ca52ada3ae5, // machine_connecting
+        0xa23cd61dddc9dea9, // machine_failed
     ],
     // Light at 1
     [
-        0x86041125f2ad5a26, // machine
-        0xb8942dad552aef31, // machine_connecting
-        0x06d0f2b8806ab255, // machine_failed
+        0xc93638b8641818b0, // machine
+        0xf060613c4e2d8a04, // machine_connecting
+        0x29b9f298afe57470, // machine_failed
     ],
     // Light at 2
     [
-        0x74d988afd18b10df, // machine
-        0xe3ce3d0226d52a90, // machine_connecting
-        0x7368a8037554ece4, // machine_failed
+        0x6788a45ce6162f94, // machine
+        0x230b3c41e2777298, // machine_connecting
+        0x0aa1768d5fafc79c, // machine_failed
     ],
 ];
 
@@ -2431,7 +2431,7 @@ fn machines_panel(case: usize) -> super::MachinesPanelView {
         dot: Dot::Done,
         facts: strings(&[
             "lga@zenbook-office",
-            "up 2 h \u{b7} herdr 0.9.3 \u{b7} load 1.2 / 8",
+            "up 2h 5m \u{b7} herdr 0.9.3 \u{b7} load 1.2 / 8",
             "id 4f2a9c",
         ]),
         problem: None,
@@ -2439,25 +2439,25 @@ fn machines_panel(case: usize) -> super::MachinesPanelView {
         runs: vec![
             run(
                 "asset-tag \u{b7} Build agent",
-                "Claude \u{b7} waiting \u{b7} 12m",
+                "Claude \u{b7} your turn \u{b7} 12m",
                 Dot::Blocked,
-                &["Show", "Stop"],
+                &["Show", "Stop", "Open feature"],
             ),
             run(
                 "asset-tag \u{b7} Verify checks",
-                "3 of 5 passed",
-                Dot::Done,
-                &["Show"],
+                "3 of 5 checks passed \u{b7} 4m",
+                Dot::Working,
+                &["Show", "Open feature"],
             ),
             run(
                 "asset-tag \u{b7} sandbox",
-                "web, db \u{b7} up 40m",
-                Dot::Idle,
-                &["Show", "Stop"],
+                "running \u{b7} 40m",
+                Dot::Done,
+                &["Show", "Stop", "Open feature"],
             ),
         ],
         no_runs: "Nothing runs there".into(),
-        buttons: strings(&["Remove", "Disconnect"]),
+        buttons: strings(&["Remove", "Edit", "Disconnect"]),
         edit: None,
     };
     let build_box = MachineDetailView {
@@ -2471,9 +2471,9 @@ fn machines_panel(case: usize) -> super::MachinesPanelView {
         runs: Vec::new(),
         no_runs: "Connect it to see what runs there".into(),
         buttons: if failed {
-            strings(&["Remove", "Copy command", "Try again"])
+            strings(&["Remove", "Edit", "Copy command", "Connect"])
         } else {
-            strings(&["Remove", "Connect"])
+            strings(&["Remove", "Edit", "Connect"])
         },
         edit: None,
     };
@@ -2654,55 +2654,55 @@ fn paint_machines_panel(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64>
 const GOLDEN_MACHINES_PANEL: [[u64; 10]; 4] = [
     // Dark at 1
     [
-        0x6c76be76ec20a202, // machines_connected
-        0x5c0c9f30c41b9cb7, // machines_failed
-        0x68acdee60a479840, // machines_add
-        0x666b38884d9bc834, // machines_armed
-        0x3522e3e42ae77895, // machines_edit
-        0xe147ca1a8d60d161, // machines_edit_trying
-        0xb3742748a6e26b27, // machines_edit_failed
-        0xf28bbcfa548b5af9, // machines_edit_addresses
-        0x3ab2c25dd1809018, // machines_same_machine
-        0x2e8cf5f40c751fbf, // machines_placement
+        0x2b6bf4edd5630f87, // machines_connected
+        0x045beb82993735e7, // machines_failed
+        0x05f7f25179a25268, // machines_add
+        0x97d49b5b1499999e, // machines_armed
+        0xac9bd4743bcac9c2, // machines_edit
+        0x3499790fbe30d146, // machines_edit_trying
+        0xc9511a320db795c0, // machines_edit_failed
+        0x452a91e962ac541e, // machines_edit_addresses
+        0xfb75c83153d8c88f, // machines_same_machine
+        0xad4912224b431eb6, // machines_placement
     ],
     // Dark at 2
     [
-        0xb96159c2b6529985, // machines_connected
-        0xbab4c3d6dc450180, // machines_failed
-        0x94ee851048cd8d54, // machines_add
-        0x93844adae99b927d, // machines_armed
-        0x8927c9460ce801d2, // machines_edit
-        0xbdaef3c424e78bd1, // machines_edit_trying
-        0xa053c85ab76c2985, // machines_edit_failed
-        0x992b29897c0025c0, // machines_edit_addresses
-        0x3ee6dbac3f3333cf, // machines_same_machine
-        0x1565c18353768b79, // machines_placement
+        0x9268e79c1b845abf, // machines_connected
+        0xdc2033797711699e, // machines_failed
+        0x2229d3395be7af1d, // machines_add
+        0xceb60959e106c87d, // machines_armed
+        0x5feed0fd844a1e4f, // machines_edit
+        0xe10ff285cce6b820, // machines_edit_trying
+        0x4da219a62e940dec, // machines_edit_failed
+        0x999fae821d628445, // machines_edit_addresses
+        0xc4d75d81c92aa347, // machines_same_machine
+        0xac1a666d313f24b9, // machines_placement
     ],
     // Light at 1
     [
-        0xd0a0e9feb8489792, // machines_connected
-        0x73288713d1a4714d, // machines_failed
-        0xe47c7533e6423ea3, // machines_add
-        0x47ddbe0bf898b316, // machines_armed
-        0x401c95bc5b66f959, // machines_edit
-        0x581dfff2fb0aee78, // machines_edit_trying
-        0x63f0c7dbf7e76a68, // machines_edit_failed
-        0x97d7f2eb69f1b468, // machines_edit_addresses
-        0x485d000c3271921f, // machines_same_machine
-        0xc8b04619599ab347, // machines_placement
+        0x86f3306140451403, // machines_connected
+        0xfb4811f37a1d6ae3, // machines_failed
+        0xc3b26aee9b3362a4, // machines_add
+        0xbe436e58f64f01d4, // machines_armed
+        0x9af880b282fde20f, // machines_edit
+        0xc858b9aab67506e6, // machines_edit_trying
+        0x4bb86144a755e396, // machines_edit_failed
+        0x7f9f8c5419602d96, // machines_edit_addresses
+        0xd95b554e58f2f26a, // machines_same_machine
+        0x3796fdf9ab7d7d84, // machines_placement
     ],
     // Light at 2
     [
-        0x6e7293ad4820aa9d, // machines_connected
-        0x312bbbff08715dfc, // machines_failed
-        0x5ae080c087afd891, // machines_add
-        0xcbdf16e5f21074ee, // machines_armed
-        0x874ae6f06f83f96b, // machines_edit
-        0xd96e98c60d264a75, // machines_edit_trying
-        0x4e852a04cf2a0e42, // machines_edit_failed
-        0xf90b63f66f91ca0d, // machines_edit_addresses
-        0x5b390d8b84deb325, // machines_same_machine
-        0x4aaa6202859e537f, // machines_placement
+        0x4a60891c71cd9770, // machines_connected
+        0x54a666fe3efb3460, // machines_failed
+        0x15c02eedcc9ae0b3, // machines_add
+        0xf2519e2d6407e61e, // machines_armed
+        0xc837485eb40f56d8, // machines_edit
+        0xd008f36aed7f3fba, // machines_edit_trying
+        0xf90d8a84739e4d45, // machines_edit_failed
+        0xe5abdd3393f73c72, // machines_edit_addresses
+        0xe5c14e77205b3b64, // machines_same_machine
+        0x6d92eb3972900c4b, // machines_placement
     ],
 ];
 
@@ -2809,21 +2809,25 @@ const RESTART: [&str; 2] = ["restart", "restart_sandbox"];
 
 /// The recorded hashes of `RESTART`, per case in `CASES`.
 const GOLDEN_RESTART: [[u64; 2]; 4] = [
+    // Dark at 1
     [
-        0xb84e55277b561625, // restart
-        0x55e74402e1d07d07, // restart_sandbox
+        0x233ac5e4d1e8fbe4, // restart
+        0x7d631d6a6fe58b1e, // restart_sandbox
     ],
+    // Dark at 2
     [
-        0xf211e65cd2b4b59f, // restart
-        0x28f6476fac5dce8d, // restart_sandbox
+        0xe10f6500cd51352d, // restart
+        0xf806409ebe486a0e, // restart_sandbox
     ],
+    // Light at 1
     [
-        0x76ed5d9183dab2ce, // restart
-        0xc71a8cacc89f09c8, // restart_sandbox
+        0x87aa9167c4c13fcd, // restart
+        0x013766ace403d915, // restart_sandbox
     ],
+    // Light at 2
     [
-        0x4d6f974e84ed3255, // restart
-        0x9f6f2f448431032e, // restart_sandbox
+        0x49976c581bfaa9c3, // restart
+        0xf4a0fa4b65e1c0fd, // restart_sandbox
     ],
 ];
 
@@ -2997,39 +3001,39 @@ const COMMANDS: [&str; 6] = [
 const GOLDEN_COMMANDS: [[u64; 6]; 4] = [
     // Dark at 1
     [
-        0x01cc23970e73296a, // commands
-        0x6b7d149be6c8288d, // commands_setup
-        0x0a483d5105a303fe, // commands_stale
-        0x830a50896688ef92, // commands_low
-        0x2cf63245ef3936e1, // commands_run
-        0xa5b5119caa9366d1, // commands_feature
+        0x8948934910003701, // commands
+        0xe36104db016e0ed6, // commands_setup
+        0x6eaaa9f78af5fb15, // commands_stale
+        0xf49ab1be12a62367, // commands_low
+        0x2c3fd9fa4109884a, // commands_run
+        0xa0e9bc346c0817da, // commands_feature
     ],
     // Dark at 2
     [
-        0x11353620cd8e90a1, // commands
-        0x92013e1d5769ef4f, // commands_setup
-        0x30f7b1cc1a8fea7e, // commands_stale
-        0xa86f011bbf2d499d, // commands_low
-        0x1d116468a1b70bfc, // commands_run
-        0xe75873f406eccc33, // commands_feature
+        0x71a3270da89e0e47, // commands
+        0xd9bb577893bcd7cd, // commands_setup
+        0x5ea91e40f6792835, // commands_stale
+        0xbdf723e3a366fbb0, // commands_low
+        0xf13751978d084386, // commands_run
+        0x97fe7637fbec54a9, // commands_feature
     ],
     // Light at 1
     [
-        0x5d176de8877ab12e, // commands
-        0x60ec0fe7d2016606, // commands_setup
-        0x785f172ecdbb2f6a, // commands_stale
-        0x54550cbdd7df38fd, // commands_low
-        0xaae77eb14b58cd0a, // commands_run
-        0x7fd675d3a73a2325, // commands_feature
+        0xcd689f42fe3f3c88, // commands
+        0x2a5b2af524fb6f5c, // commands_setup
+        0x27856c7290db9bf1, // commands_stale
+        0x85b0ff253543353d, // commands_low
+        0x357b272456513d94, // commands_run
+        0x597332502b26ab0b, // commands_feature
     ],
     // Light at 2
     [
-        0xbc0650139110115e, // commands
-        0x5069c85863815686, // commands_setup
-        0x5452bf47892f82f4, // commands_stale
-        0x73c7b2fc7a2170a8, // commands_low
-        0x3079bd27df35bedc, // commands_run
-        0xb40d1c696c74d96a, // commands_feature
+        0xdc6500d5bdaead9c, // commands
+        0x416312f9a5ac3fc4, // commands_setup
+        0xe322415985254a50, // commands_stale
+        0xd777ebd60fc712aa, // commands_low
+        0x5877ebb209449bd6, // commands_run
+        0x0c21e4134d23cd90, // commands_feature
     ],
 ];
 
@@ -3163,8 +3167,8 @@ pub(super) fn feature_tab() -> super::FeatureTabView {
     });
     let hints = [
         ("Left / Right", "stage"),
-        ("Tab", "repositories"),
         ("Enter", "mark done"),
+        ("Tab", "repositories"),
         ("F1", "keys"),
     ];
     FeatureTabView {
@@ -3243,13 +3247,14 @@ pub(super) fn feature_tab() -> super::FeatureTabView {
                     lines: Vec::new(),
                 },
                 round_card(
-                    "Review 1",
+                    1,
                     Dot::Working,
                     (
                         "2 findings \u{b7} making fixes \u{b7} 1 of 2 made",
                         CheckTone::Note,
                     ),
-                    "Claude Code \u{b7} asked 30m ago \u{b7} fixes went 20m ago",
+                    "asked by AI review 30m ago \u{b7} made by the Build agent (Claude Code) \u{b7} \
+                     fixes went 20m ago",
                     &[
                         (true, "r1-1: Export drops the last row"),
                         (false, "r1-2: Long jobs lose their progress"),
@@ -3668,12 +3673,12 @@ fn feature_tab_verify_fixes() -> super::FeatureTabView {
             PageSection::Lines { label, .. } if label == "Fix round" => {
                 *label = "Fix rounds \u{b7} 2".into();
             }
-            PageSection::Round(card) if card.label == "Review 1" => {
-                card.label = "Verify 1".into();
+            PageSection::Round(card) if card.label == fix_label(1) => {
                 card.dot = Dot::Done;
-                card.state = tab_line("fixes made", CheckTone::Ready);
+                card.state = tab_line("2 of 2 made", CheckTone::Ready);
                 card.meta =
-                    "Cursor \u{b7} run 2 failed 2h ago \u{b7} finished 1h ago \u{b7} run 3 failed"
+                    "asked by Verify 2h ago \u{b7} made by the Build agent (Cursor) \u{b7} \
+                             run 2 failed 2h ago \u{b7} finished 1h ago \u{b7} run 3 failed"
                         .into();
                 card.open = false;
             }
@@ -3681,13 +3686,14 @@ fn feature_tab_verify_fixes() -> super::FeatureTabView {
         }
     }
     let PageSection::Round(newest) = round_card(
-        "Verify 2",
+        2,
         Dot::Working,
         (
             "Verify's failures \u{b7} making fixes \u{b7} 1 of 3 made",
             CheckTone::Note,
         ),
-        "Claude Code \u{b7} run 3 failed 12m ago \u{b7} fixes went 8m ago",
+        "asked by Verify 12m ago \u{b7} made by the Build agent (Claude Code) \u{b7} \
+         run 3 failed 12m ago \u{b7} fixes went 8m ago",
         &[
             (true, "Export streams its rows"),
             (false, "api: `cargo test export::` passes"),
@@ -3734,7 +3740,7 @@ fn feature_tab_open_round() -> super::FeatureTabView {
             PageSection::Lines { label, .. } if label == "Fix round" => {
                 *label = "Fix rounds \u{b7} 3".into();
             }
-            PageSection::Round(card) if card.label == "Review 1" => {
+            PageSection::Round(card) if card.label == fix_label(1) => {
                 card.dot = Dot::Done;
                 card.state = tab_line("2 of 2 made", CheckTone::Ready);
                 card.open = false;
@@ -3745,13 +3751,13 @@ fn feature_tab_open_round() -> super::FeatureTabView {
     view.page.sections.insert(
         2,
         round_card(
-            "Manual test 3",
+            3,
             Dot::Working,
             (
                 "manual test failures \u{b7} planning fixes",
                 CheckTone::Note,
             ),
-            "asked 2m ago",
+            "asked by Manual test 2m ago",
             &[],
             true,
         ),
@@ -3759,10 +3765,10 @@ fn feature_tab_open_round() -> super::FeatureTabView {
     view.page.sections.insert(
         3,
         round_card(
-            "Code review 2",
+            2,
             Dot::Idle,
             ("review comments \u{b7} fix plan ready", CheckTone::Blocker),
-            "asked 20m ago \u{b7} plan written 5m ago",
+            "asked by Code review 20m ago \u{b7} plan written 5m ago",
             &[
                 (false, "api/src/export/csv.rs:32-38"),
                 (false, "All the fixes of the plan"),
@@ -4639,10 +4645,10 @@ fn feature_tab_review_fixes() -> super::FeatureTabView {
                 lines: Vec::new(),
             },
             PageSection::Round(super::RoundCard {
-                label: "Code review 2".into(),
+                label: fix_label(2),
                 dot: super::Dot::Idle,
                 state: tab_line("review comments \u{b7} fix plan ready", CheckTone::Blocker),
-                meta: "asked 6m ago \u{b7} plan written 2m ago".into(),
+                meta: "asked by Code review 6m ago \u{b7} plan written 2m ago".into(),
                 asked: vec![
                     super::RoundAsked {
                         id: "C1".into(),
@@ -4665,10 +4671,12 @@ fn feature_tab_review_fixes() -> super::FeatureTabView {
                 buttons: vec![0, 1, 2],
             }),
             PageSection::Round(super::RoundCard {
-                label: "Code review 1".into(),
+                label: fix_label(1),
                 dot: super::Dot::Done,
                 state: tab_line("2 of 2 made", CheckTone::Ready),
-                meta: "Claude Code \u{b7} asked 1h ago \u{b7} finished 40m ago".into(),
+                meta: "asked by Code review 1h ago \u{b7} made by the Build agent (Claude Code) \
+                       \u{b7} finished 40m ago"
+                    .into(),
                 asked: Vec::new(),
                 asked_caption: "Asked to fix",
                 fixes: Vec::new(),
@@ -4690,7 +4698,7 @@ fn feature_tab_review_fixes() -> super::FeatureTabView {
                 vec![3, 4, 5],
             ),
             card(
-                "sent to Build",
+                crate::feature::review_import::sent_word(false, true),
                 "C1 \u{b7} src/login.rs:12",
                 "Rename this to say it retries",
                 false,
@@ -4959,9 +4967,9 @@ fn feature_tab_review_rounds() -> super::FeatureTabView {
                 false,
                 Vec::new(),
             ),
-            round("Review 2", "2 fixed", 1),
+            round("AI review run 2", "2 fixed", 1),
             round(
-                "Review 1",
+                "AI review run 1",
                 "1 fixed \u{b7} 1 raised again \u{b7} 1 dismissed",
                 2,
             ),
@@ -5008,7 +5016,7 @@ fn feature_tab_fixing() -> super::FeatureTabView {
     let mut view = feature_tab();
     at_stage(&mut view, 5, NodeMark::Paused, "making fixes");
     view.rail[3].mark = NodeMark::Fixing;
-    view.rail[3].line = "running again".into();
+    view.rail[3].line = "working again".into();
     turned_back(&mut view, 5);
     view.page = StagePage {
         primary: None,
@@ -5025,7 +5033,7 @@ fn feature_tab_fixing() -> super::FeatureTabView {
                 icon: AgentIcon::Claude,
                 name: "claude".into(),
                 dot: Dot::Working,
-                status: "Build agent \u{b7} running again".into(),
+                status: "Build agent \u{b7} working again".into(),
                 tail: Vec::new(),
                 buttons: vec![0],
                 picks: Vec::new(),
@@ -5034,7 +5042,7 @@ fn feature_tab_fixing() -> super::FeatureTabView {
             },
             super::PageSection::Lines {
                 label: "Findings".into(),
-                lines: vec![tab_line("2 sent to fix", CheckTone::Note)],
+                lines: vec![tab_line("2 being fixed", CheckTone::Note)],
             },
         ],
     };
@@ -5240,10 +5248,11 @@ fn feature_tab_manual_test(note: bool) -> super::FeatureTabView {
         label: label.into(),
         style,
     };
+    // Mark passed greyed while criteria are left, last before the primary.
     let mut buttons = vec![
         button("Plan fixes", ButtonStyle::Primary),
-        button("Mark passed", ButtonStyle::Plain),
         button("Start sandbox\u{2026}", ButtonStyle::Plain),
+        button("Mark passed", ButtonStyle::Off),
     ];
     let (pass, fail, plain, quiet) = (
         ButtonStyle::Passed,
@@ -5312,13 +5321,16 @@ fn feature_tab_manual_test(note: bool) -> super::FeatureTabView {
             ],
         ),
     ];
-    // The row folding them, at the caption's right.
-    let mut groups = Vec::new();
-    for word in ["Collapse", "Expand"] {
-        let at = buttons.len();
-        buttons.extend(["All", "Done", "Seen"].map(|l| button(l, plain)));
-        groups.push((word.to_owned(), (at..at + 3).collect()));
-    }
+    // The row folding them, at the caption's right, as the page has it.
+    let fold = crate::features::fold_actions();
+    let PageSection::Toolbar { groups } = crate::features::fold_toolbar(&fold) else {
+        unreachable!()
+    };
+    let at = buttons.len();
+    let groups = (groups.into_iter())
+        .map(|(word, held)| (word, held.iter().map(|i| at + i).collect()))
+        .collect();
+    buttons.extend(fold.into_iter().map(|(b, _)| b));
     let mut sections = vec![
         PageSection::Lines {
             label: "Criteria".into(),
@@ -5389,9 +5401,21 @@ fn feature_tab_manual_test(note: bool) -> super::FeatureTabView {
         text: "1 passed \u{b7} 2 failed \u{b7} 1 untested \u{b7} 1 fix made".into(),
     });
     if note {
+        // Placed before the note's Save and Discard join its card, as the
+        // page does; the primary stays the page's.
+        crate::features::place_buttons(&mut view.page);
+        let at = view.page.buttons.len();
+        view.page.buttons.extend([
+            button("Discard", ButtonStyle::Quiet),
+            button("Save", ButtonStyle::Primary),
+        ]);
+        if let Some(PageSection::Finding(card)) = view.page.sections.last_mut() {
+            card.buttons.extend([at, at + 1]);
+        }
         view.hints = [
             ("Enter", "save"),
-            ("Ctrl+Shift+Del", "discard"),
+            ("Shift+Enter", "new line"),
+            (crate::text_field::DISCARD_KEY, "discard"),
             ("Esc", "keep draft"),
         ]
         .iter()
@@ -5525,7 +5549,7 @@ fn feature_tab_manual_search() -> super::FeatureTabView {
 /// lines, from its title into its steps.
 fn feature_tab_manual_select() -> super::FeatureTabView {
     use super::{TextPick, TextSpot};
-    let mut view = feature_tab_manual_test(false);
+    let mut view = placed(feature_tab_manual_test(false));
     let frame = smithay::utils::Rectangle::from_size((860, TAB_HEIGHT).into());
     let layout = super::feature_tab_layout(&view, frame);
     let first = (layout.texts.iter())
@@ -5704,10 +5728,15 @@ fn feature_tab_manual_rounds() -> super::FeatureTabView {
     };
     let cards = [
         RoundCard {
-            label: "Manual test 3".into(),
+            label: fix_label(3),
             dot: Dot::Working,
-            state: tab_line("making fixes \u{b7} 1 of 2 made", CheckTone::Note),
-            meta: "Claude Code (opus) \u{b7} asked 20m ago \u{b7} fixes went 12m ago".into(),
+            state: tab_line(
+                "manual test failures \u{b7} making fixes \u{b7} 1 of 2 made",
+                CheckTone::Note,
+            ),
+            meta: "asked by Manual test 20m ago \u{b7} made by the Build agent (Claude Code, \
+                   opus) \u{b7} fixes went 12m ago"
+                .into(),
             asked: vec![
                 asked(
                     "AC-2",
@@ -5728,10 +5757,12 @@ fn feature_tab_manual_rounds() -> super::FeatureTabView {
             buttons: vec![first, first + 1, first + 2],
         },
         RoundCard {
-            label: "Manual test 2".into(),
+            label: fix_label(2),
             dot: Dot::Done,
             state: tab_line("2 of 2 made", CheckTone::Ready),
-            meta: "Cursor \u{b7} asked 2h ago \u{b7} fixes went 2h ago \u{b7} finished 1h ago \u{b7} took 34 min".into(),
+            meta: "asked by Manual test 2h ago \u{b7} made by the Build agent (Cursor) \u{b7} \
+                   fixes went 2h ago \u{b7} finished 1h ago \u{b7} took 34 min"
+                .into(),
             asked: vec![asked(
                 "AC-3",
                 "CSV keeps the currency",
@@ -5749,10 +5780,10 @@ fn feature_tab_manual_rounds() -> super::FeatureTabView {
             buttons: vec![first + 3, first + 4, first + 5],
         },
         RoundCard {
-            label: "Manual test 1".into(),
+            label: fix_label(1),
             dot: Dot::Unknown,
             state: tab_line("dropped", CheckTone::Note),
-            meta: "Claude Code \u{b7} asked 1d ago".into(),
+            meta: "asked by Manual test 1d ago \u{b7} made by the Build agent (Claude Code)".into(),
             asked: Vec::new(),
             asked_caption: "Asked to fix",
             fixes: Vec::new(),
@@ -5772,9 +5803,14 @@ fn feature_tab_manual_rounds() -> super::FeatureTabView {
     view
 }
 
-/// A fix round's card on a fixture's page, open or folded, with no buttons.
+/// What fix round `n` is called, as its card says it.
+fn fix_label(n: u32) -> String {
+    crate::feature::fix_round::label(n)
+}
+
+/// Fix round `n`'s card on a fixture's page, open or folded, with no buttons.
 fn round_card(
-    label: &str,
+    n: u32,
     dot: super::Dot,
     state: (&str, super::CheckTone),
     meta: &str,
@@ -5782,7 +5818,7 @@ fn round_card(
     open: bool,
 ) -> super::PageSection {
     super::PageSection::Round(super::RoundCard {
-        label: label.into(),
+        label: fix_label(n),
         dot,
         state: tab_line(state.0, state.1),
         meta: meta.into(),
@@ -5796,9 +5832,53 @@ fn round_card(
     })
 }
 
+/// `view` as the tab gets it: its buttons where `features::place_buttons`
+/// and `in_menu` put them, unless the fixture placed them; with Build's
+/// footer kept, Enter saying the primary's label (a card's, if it holds it),
+/// as the footer says the button, and Tab going to the page's cards.
+fn placed(mut view: super::FeatureTabView) -> super::FeatureTabView {
+    use super::{ButtonStyle, PageSection};
+    if view.page.primary.is_none() {
+        // Starting over is a row of `⋯`, as `features::in_menu` has it.
+        if view.page.menu.is_empty() {
+            view.page.menu = (view.page.buttons.iter().enumerate())
+                .filter(|(_, b)| b.label == "Start over\u{2026}")
+                .map(|(i, _)| i)
+                .collect();
+        }
+        crate::features::place_buttons(&mut view.page);
+    }
+    if view.hints == feature_tab().hints {
+        // Tab goes to the page's cards first, named as the footer names them.
+        let cards = (view.page.sections.iter()).find_map(|s| match s {
+            PageSection::ShipGroup(_) => Some("steps"),
+            PageSection::Finding(c) if c.sheet.is_some() => Some("criteria"),
+            PageSection::Finding(c) if c.tag.dot().is_some() => Some("checks"),
+            PageSection::Finding(_) => Some(match view.page.title.as_str() {
+                "AI review" => "findings",
+                "Plan review" => "suggestions",
+                _ => "comments",
+            }),
+            _ => None,
+        });
+        if let Some(cards) = cards {
+            view.hints[2].1 = cards.to_owned();
+        }
+        let buttons = &view.page.buttons;
+        let primary = (view.page.primary)
+            .or_else(|| buttons.iter().position(|b| b.style == ButtonStyle::Primary))
+            .and_then(|i| buttons.get(i));
+        match primary.map(|b| crate::features::lower_first(&b.label)) {
+            Some(said) => view.hints[1].1 = said,
+            None => drop(view.hints.remove(1)),
+        }
+    }
+    view
+}
+
 /// The feature tab's fixtures, by name.
 fn feature_tabs() -> [(&'static str, super::FeatureTabView); 49] {
-    [
+    let views = [
         ("tab_build", feature_tab()),
         ("tab_verify_fixes", feature_tab_verify_fixes()),
         ("tab_open_round", feature_tab_open_round()),
@@ -5857,7 +5937,8 @@ fn feature_tabs() -> [(&'static str, super::FeatureTabView); 49] {
         ("tab_manual_rounds", feature_tab_manual_rounds()),
         ("tab_manual_comment", feature_tab_manual_comment()),
         ("tab_manual_hand_back", feature_tab_manual_hand_back()),
-    ]
+    ];
+    views.map(|(name, view)| (name, placed(view)))
 }
 
 /// Each fixture at the width it shows best at, and Build at all three.
@@ -5995,263 +6076,263 @@ const FEATURE_TAB: [&str; 62] = [
 const GOLDEN_FEATURE_TAB: [[u64; 62]; 4] = [
     // Dark at 1
     [
-        0xb47edcf3deebfe55, // tab_build_860
-        0xca6c108ab52056a0, // tab_build_1180
-        0x9c264956301aa808, // tab_build_1920
-        0xe189a91009663b5f, // tab_plan_ready_1180
-        0xe5c6b54fe50866d8, // tab_verify_failed_1920
-        0x9e1fd8be91e7d60b, // tab_verify_running_1180
-        0x82bb7f6171efd999, // tab_fix_plan_860
-        0xcba33f7cc08d8eb1, // tab_ship_blocked_1180
-        0xd5b4abfb64205d75, // tab_ship_routes_1180
-        0x70b954b5b486954d, // tab_ship_routes_860
-        0xa578b0f4a8f1b12e, // tab_ship_finish_1180
-        0x426ec15d8a3d8d53, // tab_done_1920
-        0xcc415c3a7a99a7ff, // tab_later_860
-        0x675574c91a3b9277, // tab_repos_1180
-        0x5d047ed808e584b1, // tab_unfolded_860
-        0xad330f7d9a83e9a8, // tab_unfolded_1920
-        0x04e5e35642817215, // tab_shipped_1180
-        0x556855562b732ede, // tab_repos_failed_1180
-        0x41e5b8f3d720b38f, // tab_repos_error_860
-        0x59ef9c312c931cc1, // tab_more_repos_850
-        0x3bccd51bfc8c6a8e, // tab_more_repos_mid_850
-        0x54175d5f1bccfbc3, // tab_rail_wrap_500
-        0x37a219337afc6093, // tab_rail_wrap_1180
-        0xd82dd2c9a82f222d, // tab_picks_later_1180
-        0x77200a37f756c4dd, // tab_picks_running_860
-        0x5b4ea1e7416a2668, // tab_model_later_1180
-        0xf3098420783950d4, // tab_model_long_860
-        0xb26db5d5ef4fe144, // tab_t3_draft_860
-        0xe6f677143326164a, // tab_milestone_mode_1180
-        0x8d52a746f8ccb913, // tab_milestone_mode_860
-        0x8fe24ae322b3cfd9, // tab_held_860
-        0xdd57288e450f32e2, // tab_resume_1180
-        0x1d3b7ea983d73226, // tab_resume_860
-        0x37ef3c6e3ca8a6a0, // tab_fixing_1180
-        0x596b073f735ad49d, // tab_fixed_code_1180
-        0xfc1b4d7fa2e1f265, // tab_fixed_code_860
-        0x9b367d320c5201f4, // tab_approved_1180
-        0xf2b01358173773fd, // tab_locked_1180
-        0x7561d1ebf47b39af, // tab_start_over_1180
-        0xe697af65a0b1ba91, // tab_discover_brief_1180
-        0xc7901979745e2440, // tab_discover_brief_860
-        0xcc41ad7a9ec091c0, // tab_plan_long_1180
-        0xda3254659545ff6d, // tab_manual_test_1180
-        0xd356fc844361740e, // tab_manual_note_860
-        0x78612bc1f4b06081, // tab_review_rounds_1180
-        0x81505a410da083b3, // tab_verify_fixes_1180
-        0x4625fc13e9c36d62, // tab_verify_fixes_860
-        0x991d1848f7033107, // tab_review_page_1180
-        0x2dd9da03e5832c3c, // tab_open_round_1180
-        0xb5f93f894fcc0cc5, // tab_open_round_860
-        0x3ca562e56cb5ac79, // tab_manual_pages_860
-        0xf439e283f4cafda2, // tab_manual_search_860
-        0x010ec66c0954969d, // tab_manual_select_860
-        0x1aad80bb7aa1c5ad, // tab_manual_rounds_1180
-        0x7f9a9d7d6b207fa8, // tab_manual_rounds_860
-        0x3922ebde627997d0, // tab_manual_comment_860
-        0x67311e08c4f41693, // tab_manual_hand_back_1180
-        0x3d6752d6c8853c68, // tab_ship_live_1180
-        0xb57d60723e2e914c, // tab_ship_live_860
-        0xe34314fbf0654a68, // tab_ship_cards_1180
-        0x74df597c314fe9d0, // tab_ship_conflicts_860
-        0xd5db760b6970a8b8, // tab_ship_after_1180
+        0xf59c3564f0c82583, // tab_build_860
+        0x01a44deb9024d7db, // tab_build_1180
+        0x2fa9f178301b98f6, // tab_build_1920
+        0x0a078d1fed4d38e8, // tab_plan_ready_1180
+        0x368fc43ca45e7aaa, // tab_verify_failed_1920
+        0x8133bf04072dc5a9, // tab_verify_running_1180
+        0xa47c4e97f5914083, // tab_fix_plan_860
+        0x8840c7ebcb481fb5, // tab_ship_blocked_1180
+        0x95f439ea2c70cc40, // tab_ship_routes_1180
+        0xb4359324290e1108, // tab_ship_routes_860
+        0xecd72c65f997dafe, // tab_ship_finish_1180
+        0x1038fc3bf524087a, // tab_done_1920
+        0x7736e8a70e1faffc, // tab_later_860
+        0xd6a0aedff90f1aec, // tab_repos_1180
+        0x0fa34cbfc0381e89, // tab_unfolded_860
+        0x2382d36c34c898f0, // tab_unfolded_1920
+        0x1239d70019e65338, // tab_shipped_1180
+        0xb86f3e0c8dde2b73, // tab_repos_failed_1180
+        0x710a5a968936fba5, // tab_repos_error_860
+        0xdb34483069878a87, // tab_more_repos_850
+        0xcfab6f51c5c76d20, // tab_more_repos_mid_850
+        0x2708999996e02009, // tab_rail_wrap_500
+        0xd5a7cfd2419cd671, // tab_rail_wrap_1180
+        0x1fcfd851e2c58650, // tab_picks_later_1180
+        0x9c156a9a3e7914f8, // tab_picks_running_860
+        0xff1bde061997661e, // tab_model_later_1180
+        0xa9bb1bdecdee9042, // tab_model_long_860
+        0xcc759a7573a9a0af, // tab_t3_draft_860
+        0xc787f0e97371d5eb, // tab_milestone_mode_1180
+        0x7926a87a8fc35f6b, // tab_milestone_mode_860
+        0x7216ba9ac55db8a2, // tab_held_860
+        0xd2338dfb1e8335ec, // tab_resume_1180
+        0x990a13e57f472f4c, // tab_resume_860
+        0x9fdd4c64193bdeda, // tab_fixing_1180
+        0xed2eaa3c0642c7b4, // tab_fixed_code_1180
+        0x647af14a47011129, // tab_fixed_code_860
+        0xb89d80bae75e906b, // tab_approved_1180
+        0xcfa1e2c0ecd3c91c, // tab_locked_1180
+        0x37d9cbbb1bc6cdf9, // tab_start_over_1180
+        0x23513bc9794d667f, // tab_discover_brief_1180
+        0xe42e6757060a6964, // tab_discover_brief_860
+        0x488ee2f7493a9a28, // tab_plan_long_1180
+        0x47ca89127188b84c, // tab_manual_test_1180
+        0x5f07c108da9525f6, // tab_manual_note_860
+        0xc956b180dea68a89, // tab_review_rounds_1180
+        0xbd0f9d4ef654cefd, // tab_verify_fixes_1180
+        0x24f65baab12064e1, // tab_verify_fixes_860
+        0x064cf27ed58e2866, // tab_review_page_1180
+        0x3be82ff3cb796e47, // tab_open_round_1180
+        0x6df0f1a8011eb41f, // tab_open_round_860
+        0xa0f6484816ddbadc, // tab_manual_pages_860
+        0xd51edcd58f851a61, // tab_manual_search_860
+        0x62eb6b718c110cab, // tab_manual_select_860
+        0xc713e9189c682a95, // tab_manual_rounds_1180
+        0xd7c9f43be868de70, // tab_manual_rounds_860
+        0x20dee4f22a3e10a3, // tab_manual_comment_860
+        0xef5f70aae81e933b, // tab_manual_hand_back_1180
+        0x63ed977d1d407115, // tab_ship_live_1180
+        0xa1cf36655e878666, // tab_ship_live_860
+        0x758b1ac7052370f7, // tab_ship_cards_1180
+        0x72b5a4cb5b324c63, // tab_ship_conflicts_860
+        0xdd1a5ceec0f55936, // tab_ship_after_1180
     ],
     // Dark at 2
     [
-        0xc2ea94b29f651192, // tab_build_860
-        0x26c6c04b9dfb1f96, // tab_build_1180
-        0x50fe8934c5dd77a6, // tab_build_1920
-        0xd84ef3781722f490, // tab_plan_ready_1180
-        0xd1ad4571a21deadf, // tab_verify_failed_1920
-        0xb23a4ec0092115f5, // tab_verify_running_1180
-        0x28fda7ee775f9d64, // tab_fix_plan_860
-        0x64bbba562475b8c7, // tab_ship_blocked_1180
-        0x564a27492b6c6f2b, // tab_ship_routes_1180
-        0x3f98b6461d0eecbf, // tab_ship_routes_860
-        0x3679a275ae685061, // tab_ship_finish_1180
-        0x90a36aaee3d0aa1f, // tab_done_1920
-        0x6e2cb877e129791a, // tab_later_860
-        0xbadbf0842555969e, // tab_repos_1180
-        0xf1e9485ba0732337, // tab_unfolded_860
-        0xa7ba72079320f385, // tab_unfolded_1920
-        0x0a0e10a081f275bb, // tab_shipped_1180
-        0x88603a6976cde930, // tab_repos_failed_1180
-        0xffca267670c293f9, // tab_repos_error_860
-        0x8032c0fea8db8455, // tab_more_repos_850
-        0x5a5c3e13187b6a31, // tab_more_repos_mid_850
-        0xd3914f92488d4c7a, // tab_rail_wrap_500
-        0xab1ae19ad2f2ab01, // tab_rail_wrap_1180
-        0x8baf7d92f24cc865, // tab_picks_later_1180
-        0xa1e3ae31e119d46a, // tab_picks_running_860
-        0x289abf81f924a67e, // tab_model_later_1180
-        0x85a0595411690559, // tab_model_long_860
-        0x7040b1cbbb20a27a, // tab_t3_draft_860
-        0x1014c59c212547f8, // tab_milestone_mode_1180
-        0xe516174034f84704, // tab_milestone_mode_860
-        0xbd23501b70c404ee, // tab_held_860
-        0x5e8649fc158bfc2e, // tab_resume_1180
-        0x30c2ac05c31f179a, // tab_resume_860
-        0x8687d8dffc051930, // tab_fixing_1180
-        0x0313a6ac813cb556, // tab_fixed_code_1180
-        0x4f375879897ef522, // tab_fixed_code_860
-        0xb003336ceee49767, // tab_approved_1180
-        0xc4a02e8c5e16bf27, // tab_locked_1180
-        0xd146cd83aa7b15e4, // tab_start_over_1180
-        0x22f0bccd99fd3099, // tab_discover_brief_1180
-        0x2f235fbf0ce377d7, // tab_discover_brief_860
-        0x371817eb8ef63723, // tab_plan_long_1180
-        0xd9c655ce9a75a8df, // tab_manual_test_1180
-        0xa6da4ebd7e0ae33f, // tab_manual_note_860
-        0x91425db770b9136b, // tab_review_rounds_1180
-        0x2dd771800b3640b9, // tab_verify_fixes_1180
-        0x543d950cc782e769, // tab_verify_fixes_860
-        0xa37c484a9e95f3ca, // tab_review_page_1180
-        0xed7b6c4cc54b05ea, // tab_open_round_1180
-        0xfa847fd64c3ebea2, // tab_open_round_860
-        0x638d93fbc6e1f713, // tab_manual_pages_860
-        0x15a2d69adf802796, // tab_manual_search_860
-        0x9a471d9cc1895e23, // tab_manual_select_860
-        0xafed5987e588048a, // tab_manual_rounds_1180
-        0x234251df2b1dba25, // tab_manual_rounds_860
-        0x60ba07ab36204a0d, // tab_manual_comment_860
-        0xa6b58fbbabbe2e65, // tab_manual_hand_back_1180
-        0x8cae3f392a28f277, // tab_ship_live_1180
-        0x0714fb103dbedb21, // tab_ship_live_860
-        0x9dd4ca4364fd852c, // tab_ship_cards_1180
-        0x17d9364046f6e869, // tab_ship_conflicts_860
-        0x4e338059f3d706fb, // tab_ship_after_1180
+        0x2d6aca8fbc7ecea7, // tab_build_860
+        0xef45f258ba85c8b4, // tab_build_1180
+        0xaec16fd2c43a950a, // tab_build_1920
+        0x2cbae6e0739f39d9, // tab_plan_ready_1180
+        0xa081c40b4b4ceaa8, // tab_verify_failed_1920
+        0xa65137e79116be25, // tab_verify_running_1180
+        0xb15c3d134456df13, // tab_fix_plan_860
+        0xe0392d8ee4766ae9, // tab_ship_blocked_1180
+        0xab8738d29030c95f, // tab_ship_routes_1180
+        0x314ea9c8c3a7196a, // tab_ship_routes_860
+        0xd9d7e1eb039c8ecd, // tab_ship_finish_1180
+        0x33ae295fa4a13207, // tab_done_1920
+        0x72bf39899d69bb10, // tab_later_860
+        0x701c56b489a2934b, // tab_repos_1180
+        0xba22d917d82663e4, // tab_unfolded_860
+        0x1236f40b0b645932, // tab_unfolded_1920
+        0x743a412973b4cbf2, // tab_shipped_1180
+        0x570dbe27de262655, // tab_repos_failed_1180
+        0x3130d41139882790, // tab_repos_error_860
+        0xc42a7f8e6789b588, // tab_more_repos_850
+        0x9ded72870d1ce6bc, // tab_more_repos_mid_850
+        0x6c4171a05326f47c, // tab_rail_wrap_500
+        0x628eb6cc938388bb, // tab_rail_wrap_1180
+        0xb1fef72e53714af1, // tab_picks_later_1180
+        0x5c4d9bf04e3e4799, // tab_picks_running_860
+        0x3a141f5582b70c94, // tab_model_later_1180
+        0x9c71ad3517c111af, // tab_model_long_860
+        0x8327f23d0095741e, // tab_t3_draft_860
+        0xd38ee5f1e64bf3de, // tab_milestone_mode_1180
+        0x7360fb073755c151, // tab_milestone_mode_860
+        0xbcdd5f962bdca4d3, // tab_held_860
+        0xf7cd2a2e4fe83d2e, // tab_resume_1180
+        0xd8d1de1aba62cac3, // tab_resume_860
+        0xe3196de0894c4559, // tab_fixing_1180
+        0xf63c663c8b76ceff, // tab_fixed_code_1180
+        0x8fd577087eb24f5c, // tab_fixed_code_860
+        0x9db3b71317ae1033, // tab_approved_1180
+        0x09c1cff05c2fe9bb, // tab_locked_1180
+        0x490be2cd86816b8f, // tab_start_over_1180
+        0x2c77be3601a89c7a, // tab_discover_brief_1180
+        0x0f9b0e4f1555fdd4, // tab_discover_brief_860
+        0x5eec5c964437f195, // tab_plan_long_1180
+        0x94a38044af03a742, // tab_manual_test_1180
+        0x3ade3a1fbab932bf, // tab_manual_note_860
+        0xd4889f51e424e1f8, // tab_review_rounds_1180
+        0x236165d61e7bc216, // tab_verify_fixes_1180
+        0x0a5f375eb2f25ddf, // tab_verify_fixes_860
+        0x7d2c603c8c7abd4b, // tab_review_page_1180
+        0x36528fcf691de589, // tab_open_round_1180
+        0xef3019975c5ce15a, // tab_open_round_860
+        0xf8771ed20382ce3b, // tab_manual_pages_860
+        0x8a19dfbf8ecaf937, // tab_manual_search_860
+        0xcfc3aea6aedda77d, // tab_manual_select_860
+        0xf84431cae9a71278, // tab_manual_rounds_1180
+        0x938acff8f3a797e4, // tab_manual_rounds_860
+        0xd1f3747df54f3c40, // tab_manual_comment_860
+        0xe00ae8b51fe74834, // tab_manual_hand_back_1180
+        0x059cc0584be1df0f, // tab_ship_live_1180
+        0x549787437c447ffd, // tab_ship_live_860
+        0xfb9ea8145be25303, // tab_ship_cards_1180
+        0x580d897ec5bac8f1, // tab_ship_conflicts_860
+        0x71f9eae45118365c, // tab_ship_after_1180
     ],
     // Light at 1
     [
-        0xcc93820a9444ad60, // tab_build_860
-        0x80144628ff77ad97, // tab_build_1180
-        0xb761367cbc399bdc, // tab_build_1920
-        0xbd427b01de8543f6, // tab_plan_ready_1180
-        0x7c07bc659866d87e, // tab_verify_failed_1920
-        0xa69719dede91f5fc, // tab_verify_running_1180
-        0xf0f24acb3a4499c2, // tab_fix_plan_860
-        0x21a64da6beb2e85c, // tab_ship_blocked_1180
-        0xe28dcf17bde728f8, // tab_ship_routes_1180
-        0x9129f6559b8d3bb2, // tab_ship_routes_860
-        0x43ca5f1ceff3dae5, // tab_ship_finish_1180
-        0xb2b62b674cb05405, // tab_done_1920
-        0x94793a1c5513c298, // tab_later_860
-        0x6042b0328faacb8a, // tab_repos_1180
-        0xca1a6e6fdade0d8c, // tab_unfolded_860
-        0x32d0a14248d39ea4, // tab_unfolded_1920
-        0x5b330bf0d9c30f69, // tab_shipped_1180
-        0x132551d9d89f750b, // tab_repos_failed_1180
-        0x778de4b33f229650, // tab_repos_error_860
-        0x1bb6173baa5466ba, // tab_more_repos_850
-        0x8b1675c74ce8a25c, // tab_more_repos_mid_850
-        0x53506b45b74398e1, // tab_rail_wrap_500
-        0x6f93518c75bed572, // tab_rail_wrap_1180
-        0x9cbfe325692a158e, // tab_picks_later_1180
-        0x1aca17dcdd5a1050, // tab_picks_running_860
-        0x57c74b45fd9d3840, // tab_model_later_1180
-        0x5075640333ec6bb4, // tab_model_long_860
-        0x37bc390552f6fcbf, // tab_t3_draft_860
-        0xbfb3c8b9841f170b, // tab_milestone_mode_1180
-        0xf8de4ca07ffeb9b7, // tab_milestone_mode_860
-        0x54af97faefd8cf76, // tab_held_860
-        0x06e5930e69a1bf8d, // tab_resume_1180
-        0xa3c3da37be3f43ac, // tab_resume_860
-        0x25a49252fee1fa58, // tab_fixing_1180
-        0x4008805a7c38d0c6, // tab_fixed_code_1180
-        0xcd790e15ae9d5802, // tab_fixed_code_860
-        0xf19adff484ee2b2a, // tab_approved_1180
-        0x7f803f198678b403, // tab_locked_1180
-        0x7b90aece3880d81f, // tab_start_over_1180
-        0x0dd9604ad2510baf, // tab_discover_brief_1180
-        0x038d08ac68187bad, // tab_discover_brief_860
-        0x09cb9855696f5c01, // tab_plan_long_1180
-        0xa3e0ebbd2a4604b0, // tab_manual_test_1180
-        0x5673f5d1da0365bf, // tab_manual_note_860
-        0xfbb7054252355dad, // tab_review_rounds_1180
-        0xb75f19733879a5fd, // tab_verify_fixes_1180
-        0xfb4a780837534c55, // tab_verify_fixes_860
-        0xc80d83cdbecf59b3, // tab_review_page_1180
-        0x6c700d27ddec3aa3, // tab_open_round_1180
-        0x1e36b6c42c8b87c7, // tab_open_round_860
-        0x3d753e7555e243d8, // tab_manual_pages_860
-        0x31b855efdeeab544, // tab_manual_search_860
-        0xc85de47f1e15da39, // tab_manual_select_860
-        0x0734f6120bb9baa5, // tab_manual_rounds_1180
-        0xb5fc3742006aa677, // tab_manual_rounds_860
-        0x5abbfbc7357ca166, // tab_manual_comment_860
-        0x03cf422d6e9c38a1, // tab_manual_hand_back_1180
-        0xe218d2ce70539f23, // tab_ship_live_1180
-        0x040c69c1c4ed2725, // tab_ship_live_860
-        0xd2b253b0e845b093, // tab_ship_cards_1180
-        0xa5af8f745968904e, // tab_ship_conflicts_860
-        0xb3c1b8a0a72d595c, // tab_ship_after_1180
+        0x7bc1632adf75f504, // tab_build_860
+        0xc4c4404bc0f9e352, // tab_build_1180
+        0xf3a195e923659bbf, // tab_build_1920
+        0xf3c8234f6037cd89, // tab_plan_ready_1180
+        0xf2ba559116181a45, // tab_verify_failed_1920
+        0x65933052bc86b5ee, // tab_verify_running_1180
+        0x151346680d42c79b, // tab_fix_plan_860
+        0x399adaeb04c609be, // tab_ship_blocked_1180
+        0x78cc4482556111e1, // tab_ship_routes_1180
+        0x60815832a1c163bd, // tab_ship_routes_860
+        0xfdf00567d55891d2, // tab_ship_finish_1180
+        0xf8d82c4dfc5beed0, // tab_done_1920
+        0x80b218d3c3578590, // tab_later_860
+        0x5d8413c14a346179, // tab_repos_1180
+        0xbed2d37b0a881855, // tab_unfolded_860
+        0x6195fa540ae77735, // tab_unfolded_1920
+        0x5f10885975b9b165, // tab_shipped_1180
+        0xeb08d97ea3331476, // tab_repos_failed_1180
+        0xdd0983079f77bb50, // tab_repos_error_860
+        0x211c3292c855fa22, // tab_more_repos_850
+        0x4b84eab60a3e8800, // tab_more_repos_mid_850
+        0xd641c5527b5e7a9d, // tab_rail_wrap_500
+        0x2d9784015f2b41b3, // tab_rail_wrap_1180
+        0x417c4b99ed46fc45, // tab_picks_later_1180
+        0xff759a2efcb6e132, // tab_picks_running_860
+        0x49daad159aabe893, // tab_model_later_1180
+        0x0c1f74c657786aa3, // tab_model_long_860
+        0xfd42adba289f128d, // tab_t3_draft_860
+        0xc48f7901d8475ff1, // tab_milestone_mode_1180
+        0xa5d8f66f8837a37b, // tab_milestone_mode_860
+        0x7d8af9da6bd86817, // tab_held_860
+        0x7390f158b71fda01, // tab_resume_1180
+        0xdea2f6e9152ae2e4, // tab_resume_860
+        0x534fabd4b7286173, // tab_fixing_1180
+        0x54ff30dff3cdecb8, // tab_fixed_code_1180
+        0x84a149bc92c51f21, // tab_fixed_code_860
+        0x5666bec634b728ce, // tab_approved_1180
+        0x20385a3685245987, // tab_locked_1180
+        0x2290243ed3046a14, // tab_start_over_1180
+        0xcf95476c44111f84, // tab_discover_brief_1180
+        0x5ffda0d58505d23e, // tab_discover_brief_860
+        0xed990f364d1f8ed9, // tab_plan_long_1180
+        0xb5e80cc609a928cb, // tab_manual_test_1180
+        0x4d0f8bdcbd8c2267, // tab_manual_note_860
+        0x2c4eac8ccb273dcf, // tab_review_rounds_1180
+        0x5a5ee705079932d2, // tab_verify_fixes_1180
+        0x651c7a440354ac43, // tab_verify_fixes_860
+        0x4a87efc148a68718, // tab_review_page_1180
+        0x20e99dcdfdf6c253, // tab_open_round_1180
+        0x0d70f9982b14d9d9, // tab_open_round_860
+        0x852982f4f61144da, // tab_manual_pages_860
+        0xeb41c107be0e46be, // tab_manual_search_860
+        0xb071e6f5e564ae1b, // tab_manual_select_860
+        0xc6338df4f6727bbf, // tab_manual_rounds_1180
+        0x578328c8a27ea68b, // tab_manual_rounds_860
+        0xf51b2846f1949007, // tab_manual_comment_860
+        0x21f7f76e89193b64, // tab_manual_hand_back_1180
+        0x2b2c121493a9445a, // tab_ship_live_1180
+        0x48c48c65b7fcde9c, // tab_ship_live_860
+        0x5f4456243b17c3fb, // tab_ship_cards_1180
+        0xa90663d10b44dc34, // tab_ship_conflicts_860
+        0x23433599d58a2c20, // tab_ship_after_1180
     ],
     // Light at 2
     [
-        0xbfea088f607ff676, // tab_build_860
-        0xa17c6bafdd552c80, // tab_build_1180
-        0x728895e2aefa19d4, // tab_build_1920
-        0x765df7bc08d22fb0, // tab_plan_ready_1180
-        0x834e87d1b77bb685, // tab_verify_failed_1920
-        0x369b6c154bbeb471, // tab_verify_running_1180
-        0x0c25cafde96fceda, // tab_fix_plan_860
-        0x932f711ff301e42d, // tab_ship_blocked_1180
-        0xafbcb09d60998def, // tab_ship_routes_1180
-        0x808caa5b6b0c75b8, // tab_ship_routes_860
-        0x5dd3cef84fcbacae, // tab_ship_finish_1180
-        0x430e69f233dbc908, // tab_done_1920
-        0x973f418bd020aecf, // tab_later_860
-        0x064c4879c6222c88, // tab_repos_1180
-        0x1f25aa1d48d6bbee, // tab_unfolded_860
-        0xdfed50539f53e860, // tab_unfolded_1920
-        0x287d19ae79556ac4, // tab_shipped_1180
-        0xcd74d91b15d204c6, // tab_repos_failed_1180
-        0x08d76750e47fe50e, // tab_repos_error_860
-        0x5da5ba24487fb1cd, // tab_more_repos_850
-        0x252268f736131459, // tab_more_repos_mid_850
-        0x2ecf4a5cae051767, // tab_rail_wrap_500
-        0x37e61299547465a9, // tab_rail_wrap_1180
-        0xf7066df5c259ecf7, // tab_picks_later_1180
-        0xafbcd65890c85f32, // tab_picks_running_860
-        0xe21cfcfdfbe96e55, // tab_model_later_1180
-        0x7867b4cbd5bcf63d, // tab_model_long_860
-        0xf1503603cca9fe25, // tab_t3_draft_860
-        0x5d3461f75684af86, // tab_milestone_mode_1180
-        0xb12654dff37e63b8, // tab_milestone_mode_860
-        0xf7f4178225a5592c, // tab_held_860
-        0x02071bcc4b2b9ced, // tab_resume_1180
-        0xb0d99250844e1321, // tab_resume_860
-        0xe86e179b29262da5, // tab_fixing_1180
-        0xe5d00753a768c1f5, // tab_fixed_code_1180
-        0x92a7b8de454086a0, // tab_fixed_code_860
-        0x094c66e22d9bdfdb, // tab_approved_1180
-        0xf689681c2eec0052, // tab_locked_1180
-        0xba74f3edaf07f8ca, // tab_start_over_1180
-        0x85626dff437b80ab, // tab_discover_brief_1180
-        0x6955e849ed161c3d, // tab_discover_brief_860
-        0x22810cee688c087d, // tab_plan_long_1180
-        0x3ede05e76054f570, // tab_manual_test_1180
-        0x474d8c1cfa1394f7, // tab_manual_note_860
-        0x6079ecaec6644449, // tab_review_rounds_1180
-        0xfb21e0a676237f1f, // tab_verify_fixes_1180
-        0x450720c7c0073c89, // tab_verify_fixes_860
-        0xb7f9bee96811fb6a, // tab_review_page_1180
-        0x5769fb9c77de25f9, // tab_open_round_1180
-        0x760e3f7544418fa3, // tab_open_round_860
-        0xcba476b8512b8cc8, // tab_manual_pages_860
-        0x085ecd92e9b0d5f2, // tab_manual_search_860
-        0xc5481c04265fbb04, // tab_manual_select_860
-        0xee1fd2fcf94c4e4b, // tab_manual_rounds_1180
-        0x33196b42cbee501a, // tab_manual_rounds_860
-        0x93dc6362a25253e5, // tab_manual_comment_860
-        0x8391e750f3735fcf, // tab_manual_hand_back_1180
-        0xa7dbc43951d8b435, // tab_ship_live_1180
-        0x230520414df2c684, // tab_ship_live_860
-        0xc691dd63eb1f75c3, // tab_ship_cards_1180
-        0x78548434b2f6a5a6, // tab_ship_conflicts_860
-        0xafd7ea84d0219579, // tab_ship_after_1180
+        0xc49615d3e04361cd, // tab_build_860
+        0x1b07bdd50a751634, // tab_build_1180
+        0x3e50daef26371b42, // tab_build_1920
+        0x6d6c2e0fe4726777, // tab_plan_ready_1180
+        0x22787129511504f9, // tab_verify_failed_1920
+        0x14a54e53bc26a37b, // tab_verify_running_1180
+        0x85a30f2774407220, // tab_fix_plan_860
+        0x2dce2a668f55a9cb, // tab_ship_blocked_1180
+        0xafb83e1937c6eceb, // tab_ship_routes_1180
+        0x6454c2006b381b5f, // tab_ship_routes_860
+        0x4183cfc4b636bde0, // tab_ship_finish_1180
+        0xe06b101a96692704, // tab_done_1920
+        0x37e88e3f815525bd, // tab_later_860
+        0x7e270e638a986464, // tab_repos_1180
+        0xfcd3179828bdcfe5, // tab_unfolded_860
+        0xdf620e131591fc49, // tab_unfolded_1920
+        0x38aef6bff62b1904, // tab_shipped_1180
+        0x87cc23e2c5a2df7f, // tab_repos_failed_1180
+        0x9684215cec35c5b1, // tab_repos_error_860
+        0x05a4230993ec44b2, // tab_more_repos_850
+        0xd942ddc5c5277d0e, // tab_more_repos_mid_850
+        0x302139e0d1e35634, // tab_rail_wrap_500
+        0x3d3c83a1fef6fd36, // tab_rail_wrap_1180
+        0xd63fc7f72d5b327d, // tab_picks_later_1180
+        0xdf9fb93096d4acfa, // tab_picks_running_860
+        0x20d19330b6ea3255, // tab_model_later_1180
+        0x8eae0ede3db020a3, // tab_model_long_860
+        0x0b5b59025292bc90, // tab_t3_draft_860
+        0x358b5abd473b0822, // tab_milestone_mode_1180
+        0xefb87b30c713f73f, // tab_milestone_mode_860
+        0x6255f827336505d2, // tab_held_860
+        0x4a71867e3b943735, // tab_resume_1180
+        0xc4dd0f7c2b35a5c7, // tab_resume_860
+        0x3c6bb75ebfa070a2, // tab_fixing_1180
+        0x9bef71a5a982caf1, // tab_fixed_code_1180
+        0xc64a0ffb4a46ad3f, // tab_fixed_code_860
+        0x5dbc4fb3f6434bbe, // tab_approved_1180
+        0x0b145f8421d02901, // tab_locked_1180
+        0xcb41b93c53fafe09, // tab_start_over_1180
+        0x31a884c0585d1d5b, // tab_discover_brief_1180
+        0x5650b96f848f911a, // tab_discover_brief_860
+        0xdd7b4e1b42c6de0e, // tab_plan_long_1180
+        0x9382e209ca42f83f, // tab_manual_test_1180
+        0x68aa015bb4e35b49, // tab_manual_note_860
+        0xb59976a574711740, // tab_review_rounds_1180
+        0x3880f9e87be098d7, // tab_verify_fixes_1180
+        0xb8ebffba21c72cd5, // tab_verify_fixes_860
+        0xca2398197433012d, // tab_review_page_1180
+        0xdc27a92d3004a375, // tab_open_round_1180
+        0xdd54be38554baee4, // tab_open_round_860
+        0x696190c650513cfc, // tab_manual_pages_860
+        0x376359b87d8a2172, // tab_manual_search_860
+        0x365f437259b23570, // tab_manual_select_860
+        0x7848066b4f9f5302, // tab_manual_rounds_1180
+        0x2ed2f55674e2f371, // tab_manual_rounds_860
+        0x2c77aba83f813a7b, // tab_manual_comment_860
+        0x06cb976c5bd670a3, // tab_manual_hand_back_1180
+        0x01cbf011946f9dd9, // tab_ship_live_1180
+        0xb22e7a899335f593, // tab_ship_live_860
+        0x3e0ef2571cf17463, // tab_ship_cards_1180
+        0xce03c04855643b22, // tab_ship_conflicts_860
+        0x4da27bec8fcaa12f, // tab_ship_after_1180
     ],
 ];
 
@@ -6326,9 +6407,6 @@ fn dump_feature_tab() {
 
 // ---------------------------------------------------- AI review's findings
 
-/// The feature tab on AI review with a card of each kind, in the page's order:
-/// the user's own, a finding to decide, one dismissed and closed, and one to
-/// fix with the keyboard.
 /// A review page's summary, then `cards`, as
 /// `features::review_page` lays them out; `want_all` its button.
 fn review_sections(
@@ -6382,107 +6460,93 @@ fn review_sections(
     }
 }
 
+/// The feature tab on AI review with a card of each kind, in the page's order:
+/// the user's own, a finding to decide, one dismissed and closed, and one to
+/// fix with the keyboard.
 fn tab_findings() -> super::FeatureTabView {
-    use super::{ButtonStyle, FindingCard, FindingTag, PageButton};
+    use crate::feature::review_import::{Finding, FindingState, Severity};
+    use crate::review_cards::{Item, item_buttons, item_card};
     let mut view = feature_tab();
     view.focus = super::TabArea::Findings;
     view.page.title = "AI review".into();
     view.page.about = "Another model reviews the diff".into();
     view.page.buttons.clear();
     view.page.sections.clear();
-    #[allow(clippy::type_complexity)]
-    let cards: [(&[&str], FindingTag, &str, &str, &str, &str, &str, &str); 4] = [
-        (
-            &["Edit\u{2026}", "Delete"],
-            FindingTag::Yours,
-            "Rename retry",
-            "to fix",
-            "u1",
-            "It reads badly.",
-            "",
-            "",
-        ),
-        (
-            &["Fix", "Edit fix\u{2026}", "Dismiss\u{2026}", "Show in diff"],
-            FindingTag::High,
-            "Retry stops one short",
-            "",
-            "r1-1 \u{b7} login.py:6",
-            "The loop runs range(n - 1), so the last try never happens, and a caller asking for \
-             one retry gets none at all.",
-            "Fix: Stop at n.",
-            "",
-        ),
-        (
-            &["Reopen", "Comment", "Show in diff"],
-            FindingTag::High,
-            "Unused import left behind by the last refactor of the login page",
-            "dismissed: gone in the next branch \u{b7} commented",
-            "r1-3 \u{b7} login.py:1",
-            "",
-            "",
-            "",
-        ),
-        (
-            &[
-                "Reopen",
-                "Edit fix\u{2026}",
-                "Dismiss\u{2026}",
-                "Show in diff",
-            ],
-            FindingTag::Medium,
-            "Title breaks with no name",
-            "to fix",
-            "r1-2 \u{b7} login.py:2",
-            "A user with no name raises AttributeError.",
-            "Your fix: Fall back to the plain title",
-            "Mind the tests, and the greeting when the name is only spaces: it should fall back too.",
-        ),
+    let finding = |id: &str, severity, state, title: &str, line| Finding {
+        id: id.into(),
+        severity,
+        file: "login.py".into(),
+        line: Some(line),
+        title: title.into(),
+        state,
+        run: 1,
+        placed: true,
+        ..Finding::default()
+    };
+    // The user's own, one to decide, one dismissed with a comment, and one
+    // to fix with the user's fix and comment.
+    let findings = [
+        Finding {
+            yours: true,
+            file: String::new(),
+            line: None,
+            body: "It reads badly.".into(),
+            ..finding("u1", Severity::Medium, FindingState::Fix, "Rename retry", 0)
+        },
+        Finding {
+            body: "The loop runs range(n - 1), so the last try never happens, and a caller \
+                   asking for one retry gets none at all."
+                .into(),
+            fix: "Stop at n.".into(),
+            ..finding(
+                "r1-1",
+                Severity::High,
+                FindingState::Open,
+                "Retry stops one short",
+                6,
+            )
+        },
+        Finding {
+            reason: "gone in the next branch".into(),
+            note: "The branch after this one drops the old form.".into(),
+            ..finding(
+                "r1-3",
+                Severity::High,
+                FindingState::Dismissed,
+                "Unused import left behind by the last refactor of the login page",
+                1,
+            )
+        },
+        Finding {
+            body: "A user with no name raises AttributeError.".into(),
+            my_fix: Some("Fall back to the plain title".into()),
+            note: "Mind the tests, and the greeting when the name is only spaces: it should \
+                   fall back too."
+                .into(),
+            ..finding(
+                "r1-2",
+                Severity::Medium,
+                FindingState::Fix,
+                "Title breaks with no name",
+                2,
+            )
+        },
     ];
+    // Each card as the page makes it, its buttons among the page's.
     let mut made = Vec::new();
-    for (i, (labels, tag, title, state, place, body, fix, note)) in cards.into_iter().enumerate() {
+    for (i, f) in findings.iter().enumerate() {
+        let item = Item::Finding(f);
+        let actions = item_buttons(item, true, false);
+        let mut card = item_card(item, false, &actions, false);
         let at = view.page.buttons.len();
+        (card.buttons.iter_mut().chain(&mut card.comment_buttons)).for_each(|b| *b += at);
         view.page
             .buttons
-            .extend(labels.iter().map(|label| PageButton {
-                label: (*label).to_owned(),
-                style: ButtonStyle::Plain,
-            }));
-        let end = view.page.buttons.len();
-        // The comment's own buttons, on it.
-        let comment_buttons: Vec<usize> = if note.is_empty() {
-            Vec::new()
-        } else {
-            view.page
-                .buttons
-                .extend(["Edit", "Delete"].map(|label| PageButton {
-                    label: label.to_owned(),
-                    style: ButtonStyle::Plain,
-                }));
-            (end..end + 2).collect()
-        };
-        made.push(FindingCard {
-            sheet: None,
-            tag,
-            title: title.into(),
-            state: state.into(),
-            place: place.into(),
-            body: body.into(),
-            preview: Vec::new(),
-            fix: fix.into(),
-            note: String::new(),
-            comment: note.into(),
-            comment_buttons,
-            made: false,
-            faded: state.starts_with("dismissed"),
-            collapsed: state.starts_with("dismissed"),
-            folds: false,
-            stripe: (state == "to fix").then_some(super::CardStripe::ToFix),
-            field: None,
-            field_hint: "",
-            selected: i == 3,
-            buttons: (at..at + labels.len()).collect(),
-        });
+            .extend(actions.into_iter().map(|(b, _)| b));
+        // The last with the keyboard, opened.
+        card.selected = i == 3;
+        card.collapsed &= !card.selected;
+        made.push(card);
     }
     review_sections(
         &mut view.page,
@@ -6638,7 +6702,11 @@ fn finding_dialog(error: bool) -> super::FindingDialogView {
         }
     };
     super::FindingDialogView {
-        title: "Edit the fix of r1-2".into(),
+        title: format!(
+            "{} r1-2",
+            crate::feature::review_items::words(crate::feature::review_items::ItemOf::Finding)
+                .edit_title
+        ),
         about: "Title breaks with no name".into(),
         fields: vec![field(
             "Fix",
@@ -6671,38 +6739,38 @@ const FINDINGS: [&str; 4] = [
 const GOLDEN_FINDINGS: [[u64; 4]; 4] = [
     // Dark at 1
     [
-        0xedac07f02b192c27, // tab_findings_1180
-        0x5c26486ece21e1b3, // tab_findings_860
-        0xc8e97861327a6f3d, // finding_dialog
-        0x79e255ab5a829143, // finding_dialog_error
+        0x4f136c4d5a98e009, // tab_findings_1180
+        0x9faa24a9dc81d10e, // tab_findings_860
+        0xbe15a6efe4a5304a, // finding_dialog
+        0x395e21db12f14c4c, // finding_dialog_error
     ],
     // Dark at 2
     [
-        0x036cebdd30aa093c, // tab_findings_1180
-        0x8f2c714b024e6765, // tab_findings_860
-        0x43f1532742f932ff, // finding_dialog
-        0xb736e6151427fb01, // finding_dialog_error
+        0xc6a1b971977a5f50, // tab_findings_1180
+        0xf160e2cbc73a9f05, // tab_findings_860
+        0x2e982fd65dcbba89, // finding_dialog
+        0x1c54a50260a223cf, // finding_dialog_error
     ],
     // Light at 1
     [
-        0x83185b15c46e76e2, // tab_findings_1180
-        0x5d39c6d7bcf014c5, // tab_findings_860
-        0x3af0633810888402, // finding_dialog
-        0x2f19c19c900552df, // finding_dialog_error
+        0x3f6e552a11a888cd, // tab_findings_1180
+        0xfbf710b8179d3882, // tab_findings_860
+        0xc8efa4d7ca6d61b1, // finding_dialog
+        0x3068a0f01a434524, // finding_dialog_error
     ],
     // Light at 2
     [
-        0xf9659bf7778231d8, // tab_findings_1180
-        0xe5150bea7924cbf7, // tab_findings_860
-        0xa9c6bc076a8eb05a, // finding_dialog
-        0x1e721b2638489f69, // finding_dialog_error
+        0xe701bfc3657c230f, // tab_findings_1180
+        0x74d733d52ab63dab, // tab_findings_860
+        0xf28a5af0ae02e0c9, // finding_dialog
+        0x00c403fa84109bce, // finding_dialog_error
     ],
 ];
 
 #[test]
 fn ai_reviews_findings_paint_the_same_pixels() {
     let golden: Vec<&[u64]> = GOLDEN_FINDINGS.iter().map(|row| row.as_slice()).collect();
-    let view = tab_findings();
+    let view = placed(tab_findings());
     check_each(&FINDINGS, &golden, |painter, theme, scale, surface| {
         let tab = |w: i32| {
             super::feature_tab_composed(painter, &view, (w, TAB_HEIGHT).into(), theme, scale)
@@ -6729,7 +6797,7 @@ fn dump_findings() {
     let dir = std::path::PathBuf::from(dir);
     let _ = std::fs::create_dir_all(&dir);
     let painter = Painter::new();
-    let view = tab_findings();
+    let view = placed(tab_findings());
     for (theme, scale) in CASES {
         let tag = format!("{}_{}", theme.name(), scale);
         let px = |v: i32| (v as f64 * scale).round() as usize;
@@ -6752,72 +6820,6 @@ fn dump_findings() {
 
 // ------------------------------------------------ Plan review's suggestions
 
-/// A suggestion's card on a fixture's page: its buttons (`labels`, the
-/// last `quiet` of them quiet) and, but for one only to read (`quiet` all
-/// of them), those on its comment added to `page`.
-#[allow(clippy::too_many_arguments)]
-fn suggestion_card(
-    page: &mut super::StagePage,
-    labels: &[&str],
-    quiet: usize,
-    tag: super::FindingTag,
-    title: &str,
-    state: &str,
-    place: &str,
-    body: &str,
-    change: &str,
-    comment: &str,
-) -> super::FindingCard {
-    use super::{ButtonStyle, PageButton};
-    let at = page.buttons.len();
-    for (i, label) in labels.iter().enumerate() {
-        let style = match i + quiet >= labels.len() {
-            true => ButtonStyle::Quiet,
-            false => ButtonStyle::Plain,
-        };
-        page.buttons.push(PageButton {
-            label: (*label).to_owned(),
-            style,
-        });
-    }
-    let end = page.buttons.len();
-    let comment_buttons: Vec<usize> = match comment.is_empty() || quiet == labels.len() {
-        true => Vec::new(),
-        false => {
-            for label in ["Edit", "Delete"] {
-                page.buttons.push(PageButton {
-                    label: label.to_owned(),
-                    style: ButtonStyle::Plain,
-                });
-            }
-            (end..end + 2).collect()
-        }
-    };
-    let rejected = state.starts_with("rejected");
-    super::FindingCard {
-        tag,
-        title: title.into(),
-        state: state.into(),
-        place: place.into(),
-        body: body.into(),
-        preview: Vec::new(),
-        fix: change.into(),
-        note: String::new(),
-        comment: comment.into(),
-        comment_buttons,
-        made: false,
-        faded: rejected,
-        collapsed: rejected,
-        folds: false,
-        stripe: (state == "accepted").then_some(super::CardStripe::ToFix),
-        field: None,
-        field_hint: "Your comment",
-        selected: false,
-        buttons: (at..end).collect(),
-        sheet: None,
-    }
-}
-
 /// The feature tab on Plan review with the reviewer done and a card of each
 /// kind, in the page's order: the user's own (accepted), one to decide
 /// citing code (one citation not found), one accepted in the user's words
@@ -6825,9 +6827,7 @@ fn suggestion_card(
 /// with the keyboard on its field. `writing`: all decided, the final plan
 /// being written from them, so the cards are only to read.
 fn tab_plan_review(writing: bool) -> super::FeatureTabView {
-    use super::{
-        ButtonStyle, CheckTone, Dot, FindingTag, NodeMark, PageButton, PageSection, StagePage,
-    };
+    use super::{ButtonStyle, CheckTone, Dot, NodeMark, PageButton, PageSection, StagePage};
     use crate::{agent_icons::AgentIcon, feature::Stage};
     let mut view = feature_tab();
     let line = match writing {
@@ -6907,121 +6907,114 @@ fn tab_plan_review(writing: bool) -> super::FeatureTabView {
             3,
         ),
     };
-    // What each card offers: while deciding, by where it stands; while the
-    // final plan is written, only to look.
-    let offers = |deciding: &'static [&'static str], quiet: usize| -> (&[&str], usize) {
-        match writing {
-            true => (&deciding[deciding.len() - quiet..], quiet),
-            false => (deciding, quiet),
-        }
+    // Each card as the page makes it, its buttons among the page's: while
+    // deciding, by where it stands; while the final plan is written, only to
+    // look. Opened as the fixture shows them, the rejected one closed.
+    use crate::feature::plan_review::{Evidence, Kind, Placed, Source, State, Suggestion};
+    use crate::feature::review_import::Severity;
+    use crate::review_cards::{Item, item_buttons, item_card};
+    let standing = |state| if writing { State::Accepted } else { state };
+    let suggestion = |id: &str, severity, kind, plan: &str, title: &str, state| Suggestion {
+        id: id.into(),
+        severity,
+        kind,
+        plan: plan.into(),
+        title: title.into(),
+        state,
+        run: 1,
+        placed: Some(Placed::Heading(1)),
+        ..Suggestion::default()
     };
-    let own = offers(&["Edit\u{2026}", "Delete", "Show in plan"], 1);
-    let gap = offers(
-        &[
-            "Accept",
-            "Comment",
-            "Edit change\u{2026}",
-            "Reject\u{2026}",
-            "Open code",
-            "Show in plan",
-        ],
-        2,
-    );
-    let risk = offers(
-        &[
-            "Reopen",
-            "Edit change\u{2026}",
-            "Reject\u{2026}",
-            "Show in plan",
-        ],
-        1,
-    );
-    let gone = offers(&["Reopen", "Comment", "Show in plan"], 1);
-    let question = match writing {
-        true => offers(&["Show in plan"], 1),
-        false => offers(
-            &[
-                "Accept",
-                "Answer",
-                "Edit change\u{2026}",
-                "Reject\u{2026}",
-                "Show in plan",
+    let cited = |file: &str, line, found| Evidence {
+        repo: "api".into(),
+        file: file.into(),
+        line,
+        quote: String::new(),
+        found: Some(found),
+    };
+    let suggestions = [
+        Suggestion {
+            source: Source::You,
+            change: "Milestone 2 says the lockout message names the wait, not the reason.".into(),
+            ..suggestion(
+                "u1",
+                Severity::Medium,
+                Kind::Gap,
+                "",
+                "Say how a locked account is told apart from a wrong password",
+                State::Accepted,
+            )
+        },
+        Suggestion {
+            why: "Everyone signed in before the change is signed out at once, and the sessions \
+                  table keeps rows nobody reads."
+                .into(),
+            evidence: vec![
+                cited("src/session.rs", 42, true),
+                cited("src/store.rs", 118, false),
             ],
-            1,
-        ),
-    };
-    let mut cards = vec![
-        suggestion_card(
-            &mut page,
-            own.0,
-            own.1,
-            FindingTag::Yours,
-            "Say how a locked account is told apart from a wrong password",
-            "accepted",
-            "u1 \u{b7} gap",
-            "",
-            "Change: Milestone 2 says the lockout message names the wait, not the reason.",
-            "",
-        ),
-        suggestion_card(
-            &mut page,
-            gap.0,
-            gap.1,
-            FindingTag::High,
-            "No milestone moves the old sessions over",
-            if writing { "accepted" } else { "" },
-            "r1-1 \u{b7} gap \u{b7} Milestone 1 \u{b7} Sign in",
-            "Everyone signed in before the change is signed out at once, and the sessions \
-             table keeps rows nobody reads.\nCited: api/src/session.rs:42\nCited: \
-             api/src/store.rs:118 \u{b7} not found in the code",
-            "Change: Add a step to Milestone 1 that carries the old sessions over, with a test.",
-            "",
-        ),
-        suggestion_card(
-            &mut page,
-            risk.0,
-            risk.1,
-            FindingTag::Medium,
-            "The lockout clock lives in memory",
-            "accepted",
-            "r1-2 \u{b7} risk \u{b7} Milestone 2 \u{b7} Lock out",
-            "A restart forgets every count, so five tries become five per restart.",
-            "Your change: Keep the count in the users table, cleared on a good sign-in.",
-            "Only the count: the timestamps can stay in memory.",
-        ),
-        suggestion_card(
-            &mut page,
-            gone.0,
-            gone.1,
-            FindingTag::Low,
-            "Name the hash in the plan",
-            "rejected: the code picks it, the plan needn't",
-            "r1-3 \u{b7} edge case \u{b7} Milestone 1 \u{b7} Sign in",
-            "",
-            "",
-            "",
-        ),
-        suggestion_card(
-            &mut page,
-            question.0,
-            question.1,
-            FindingTag::Low,
-            "Should a locked account get an email?",
-            if writing {
-                "accepted"
-            } else {
-                "not answered yet"
+            change: "Add a step to Milestone 1 that carries the old sessions over, with a test."
+                .into(),
+            ..suggestion(
+                "r1-1",
+                Severity::High,
+                Kind::Gap,
+                "Milestone 1 \u{b7} Sign in",
+                "No milestone moves the old sessions over",
+                standing(State::Open),
+            )
+        },
+        Suggestion {
+            why: "A restart forgets every count, so five tries become five per restart.".into(),
+            my_change: Some("Keep the count in the users table, cleared on a good sign-in.".into()),
+            note: "Only the count: the timestamps can stay in memory.".into(),
+            ..suggestion(
+                "r1-2",
+                Severity::Medium,
+                Kind::Risk,
+                "Milestone 2 \u{b7} Lock out",
+                "The lockout clock lives in memory",
+                State::Accepted,
+            )
+        },
+        Suggestion {
+            reason: "the code picks it, the plan needn't".into(),
+            ..suggestion(
+                "r1-3",
+                Severity::Low,
+                Kind::EdgeCase,
+                "Milestone 1 \u{b7} Sign in",
+                "Name the hash in the plan",
+                State::Rejected,
+            )
+        },
+        Suggestion {
+            why: "The plan doesn't say, and the mailer isn't set up in this repository.".into(),
+            note: match writing {
+                true => "Not yet: a line in the log is enough for now.".into(),
+                false => String::new(),
             },
-            "r1-4 \u{b7} question \u{b7} Milestone 2 \u{b7} Lock out",
-            "The plan doesn't say, and the mailer isn't set up in this repository.",
-            "",
-            if writing {
-                "Not yet: a line in the log is enough for now."
-            } else {
-                ""
-            },
-        ),
+            ..suggestion(
+                "r1-4",
+                Severity::Low,
+                Kind::Question,
+                "Milestone 2 \u{b7} Lock out",
+                "Should a locked account get an email?",
+                standing(State::Open),
+            )
+        },
     ];
+    let mut cards = Vec::new();
+    for s in &suggestions {
+        let item = Item::Suggestion(s);
+        let actions = item_buttons(item, !writing, false);
+        let mut card = item_card(item, false, &actions, false);
+        let at = page.buttons.len();
+        (card.buttons.iter_mut().chain(&mut card.comment_buttons)).for_each(|b| *b += at);
+        page.buttons.extend(actions.into_iter().map(|(b, _)| b));
+        card.collapsed = s.state == State::Rejected;
+        cards.push(card);
+    }
     // A question's comment is its answer: being written, the field is
     // empty and says so.
     let answering = &mut cards[4];
@@ -7320,43 +7313,43 @@ const PLAN_REVIEW: [&str; 7] = [
 const GOLDEN_PLAN_REVIEW: [[u64; 7]; 4] = [
     // Dark at 1
     [
-        0x0fd5410e0b70577b, // tab_plan_review_cards_1180
-        0x10ca0907cc93d570, // tab_plan_review_cards_860
-        0xc89c9716abfe9614, // tab_plan_review_writing_1180
-        0x154aeb3cfd9938e1, // doc_suggestions_1180
-        0x6f63128edd4069b1, // doc_suggestions_850
-        0x519b46994bcca395, // finding_dialog_reject
-        0xe24c9b16b8b98f4d, // tab_plan_review_final_1180
+        0xfca0eb31cf5758de, // tab_plan_review_cards_1180
+        0x0cbedeff9342b2ae, // tab_plan_review_cards_860
+        0xcc7ae22863eced67, // tab_plan_review_writing_1180
+        0x9afd892c41b157e8, // doc_suggestions_1180
+        0xa12094154779b8df, // doc_suggestions_850
+        0x6128160606d5890e, // finding_dialog_reject
+        0x267d25019293426a, // tab_plan_review_final_1180
     ],
     // Dark at 2
     [
-        0x10dd1bf45831b889, // tab_plan_review_cards_1180
-        0x9cbf2afa646b7dd2, // tab_plan_review_cards_860
-        0x80c356333ef68629, // tab_plan_review_writing_1180
-        0x6ba33ef2efa93199, // doc_suggestions_1180
-        0xacac000bf593cb0b, // doc_suggestions_850
-        0x5db40a98428d92d3, // finding_dialog_reject
-        0x278164c80eda00d4, // tab_plan_review_final_1180
+        0x8b9968d99e3aa7ee, // tab_plan_review_cards_1180
+        0xebb2eec9ab3dbb7c, // tab_plan_review_cards_860
+        0x9c9a1a273ce3fc32, // tab_plan_review_writing_1180
+        0xb8dd8bfa55c221fc, // doc_suggestions_1180
+        0x26814b5764a0c7e5, // doc_suggestions_850
+        0x56d0fa0815bec3ca, // finding_dialog_reject
+        0x0bc1eff6f0167bfe, // tab_plan_review_final_1180
     ],
     // Light at 1
     [
-        0x329ae20a222ecaf9, // tab_plan_review_cards_1180
-        0x274b6911850ff2dc, // tab_plan_review_cards_860
-        0x505175ffcefadf32, // tab_plan_review_writing_1180
-        0xc004c28ecddd8216, // doc_suggestions_1180
-        0xb929e644bd3059f9, // doc_suggestions_850
-        0x89ae995f2bf62070, // finding_dialog_reject
-        0xbd88ac47a0d1607c, // tab_plan_review_final_1180
+        0x0dd1e7d9126bf803, // tab_plan_review_cards_1180
+        0x9621d776a38c4f1c, // tab_plan_review_cards_860
+        0x900baea579daf213, // tab_plan_review_writing_1180
+        0x3f5c1f61a4bd2248, // doc_suggestions_1180
+        0xb11d9822b77a1556, // doc_suggestions_850
+        0x41c8bd360511db68, // finding_dialog_reject
+        0x6fc24c6305870d94, // tab_plan_review_final_1180
     ],
     // Light at 2
     [
-        0x9321aa5a1b342df5, // tab_plan_review_cards_1180
-        0x1135bb3c2942c741, // tab_plan_review_cards_860
-        0x30f64acc59bb84a8, // tab_plan_review_writing_1180
-        0xe94c049f4569a3a6, // doc_suggestions_1180
-        0x9aa0c21f07ff7aef, // doc_suggestions_850
-        0xe2cb1d9d401ab9c4, // finding_dialog_reject
-        0x705389e592848914, // tab_plan_review_final_1180
+        0x3fa5f37a27a07b56, // tab_plan_review_cards_1180
+        0x7ed25786b87af0d8, // tab_plan_review_cards_860
+        0xdaafd09a48ecb284, // tab_plan_review_writing_1180
+        0x991937caceaf8188, // doc_suggestions_1180
+        0x0d8e3c393196a9a8, // doc_suggestions_850
+        0x036d59753ffc56e9, // finding_dialog_reject
+        0x88cfa478b512869c, // tab_plan_review_final_1180
     ],
 ];
 
@@ -7368,8 +7361,13 @@ fn plan_review_surface(
     i: usize,
 ) -> (MemoryRenderBuffer, i32) {
     let tab = |view: &super::FeatureTabView, w: i32| {
-        let buffer =
-            super::feature_tab_composed(painter, view, (w, TAB_HEIGHT).into(), theme, scale);
+        let buffer = super::feature_tab_composed(
+            painter,
+            &placed(view.clone()),
+            (w, TAB_HEIGHT).into(),
+            theme,
+            scale,
+        );
         (buffer, w)
     };
     match i {
@@ -7918,79 +7916,79 @@ fn paint_doc_tab(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
 const GOLDEN_DOC_TAB: [[u64; 16]; 4] = [
     // Dark at 1
     [
-        0xe3291f02faaf07c4, // doc_preview_1180
-        0x4af9130a9b0c1e78, // doc_review_1180
-        0xd56be0a254359a36, // doc_review_no_browser
-        0x163df7c54996fb12, // doc_preview_1920
-        0x146ef2c66d529cd6, // doc_split_1920
-        0x8dc4abbd4a4453aa, // doc_review_850
-        0x991e984d1cf58986, // doc_approved_1180
-        0xc795c2ffa685e118, // doc_locked_1180
-        0x3f15d5f92f9eda75, // findings_1180
-        0x8fadfc4bbd01f8f3, // popup_deciding_1180
-        0xbe2c435b869d8d35, // popup_decided_1180
-        0x6f1041c7f50aca45, // popup_code_review_850
-        0x07ad73f54e3e101c, // popup_no_comments_1180
-        0x08ab19690c613d25, // popup_no_comments_850
-        0xd21560c9a783804d, // popup_listed_1180
-        0x3b5db476e7b52529, // inline_listed_1180
+        0xd41698c0e3eb8caf, // doc_preview_1180
+        0x5b8bbb021fcfe696, // doc_review_1180
+        0x89ccc0dbabf24b9e, // doc_review_no_browser
+        0x6477071c6d9fee83, // doc_preview_1920
+        0x1a7074ec0208a07e, // doc_split_1920
+        0x3bf79e5ad23d3c97, // doc_review_850
+        0xe7dd74f87bc02f00, // doc_approved_1180
+        0x9d24752441fb2e6f, // doc_locked_1180
+        0x01ac0d21b0f208c1, // findings_1180
+        0x78a3d152b54e92ff, // popup_deciding_1180
+        0x605d2d7444c7b1cf, // popup_decided_1180
+        0x9e4eb727135dfeba, // popup_code_review_850
+        0x6d685c02515d43f0, // popup_no_comments_1180
+        0x0b0737987fdde98c, // popup_no_comments_850
+        0x657e8f85bed3c689, // popup_listed_1180
+        0x9194dd887fc48731, // inline_listed_1180
     ],
     // Dark at 2
     [
-        0xb80f9bdca4ec1495, // doc_preview_1180
-        0xd15dbc2eeae8d5cc, // doc_review_1180
-        0x7c58f8622b115083, // doc_review_no_browser
-        0xe1f51d6886965409, // doc_preview_1920
-        0xa843db297b42f35c, // doc_split_1920
-        0x0d72543f5d6587c5, // doc_review_850
-        0xc29bb6d56b5beb67, // doc_approved_1180
-        0x8a385f9aa43a43b8, // doc_locked_1180
-        0x700557f5f8cc9865, // findings_1180
-        0x78c4b839e155a578, // popup_deciding_1180
-        0x7eb4dfd72d1f662a, // popup_decided_1180
-        0x2ebeec0af5c2ef1b, // popup_code_review_850
-        0x04f0f9c1258af57a, // popup_no_comments_1180
-        0x654aa94035b7bbae, // popup_no_comments_850
-        0x8f448f5322832f16, // popup_listed_1180
-        0x9a0d83469e09aac2, // inline_listed_1180
+        0x0cf6440d43fd3a87, // doc_preview_1180
+        0x1b56b6fa51a62cf6, // doc_review_1180
+        0xdfe8c036bf434b23, // doc_review_no_browser
+        0xb3d7fcb88fa4716a, // doc_preview_1920
+        0x24e0cc8828ee1ead, // doc_split_1920
+        0x10ac82eeadf5aff3, // doc_review_850
+        0x8d9eefb4a2041616, // doc_approved_1180
+        0xeff933661765ab3b, // doc_locked_1180
+        0xe6c62d0076d5c317, // findings_1180
+        0x080afda20215a460, // popup_deciding_1180
+        0x98a4d5b3ab0e023d, // popup_decided_1180
+        0xa46ae58713877089, // popup_code_review_850
+        0xf1a468043c5318c9, // popup_no_comments_1180
+        0x1d2f421bf94ab574, // popup_no_comments_850
+        0x54807e75c602168d, // popup_listed_1180
+        0x982c48687e8278b1, // inline_listed_1180
     ],
     // Light at 1
     [
-        0xa18686a06ead007c, // doc_preview_1180
-        0xb82c5e0088f5f4c2, // doc_review_1180
-        0x64bb2e6df8dd639f, // doc_review_no_browser
-        0xf113a8e16264d641, // doc_preview_1920
-        0x6e494dd4063c4bf6, // doc_split_1920
-        0x59eff04f58c92d40, // doc_review_850
-        0x4d6fa62f8b977f1d, // doc_approved_1180
-        0xf1603167ed70f699, // doc_locked_1180
-        0xacaed3527aa1f4f0, // findings_1180
-        0xc318b335f76aa914, // popup_deciding_1180
-        0x53fda247fb4f2a78, // popup_decided_1180
-        0xdc7251d500deedf7, // popup_code_review_850
-        0x078b0def98e11797, // popup_no_comments_1180
-        0x0f750109c62c42b8, // popup_no_comments_850
-        0xa16b5b7e08cc2dc7, // popup_listed_1180
-        0xad31f141b1186eb7, // inline_listed_1180
+        0xcd264234eba1810f, // doc_preview_1180
+        0x859e4ef58cc8f0cf, // doc_review_1180
+        0x2ecc83fda8214b42, // doc_review_no_browser
+        0x223a0a300d03a011, // doc_preview_1920
+        0x09124e96d542ce6d, // doc_split_1920
+        0x4a5824c0a0271033, // doc_review_850
+        0x6eaf661db606df03, // doc_approved_1180
+        0x5714c6dfe0de599e, // doc_locked_1180
+        0x0acb6de136fdf050, // findings_1180
+        0xed4cd6ca876f4ccc, // popup_deciding_1180
+        0x91b141c5f86d175a, // popup_decided_1180
+        0x44082299c48c090a, // popup_code_review_850
+        0x515d1c0cad51c048, // popup_no_comments_1180
+        0xa8dade21e0ce5f8c, // popup_no_comments_850
+        0xbe65ba0bb90a7e79, // popup_listed_1180
+        0x0377a1efdec60699, // inline_listed_1180
     ],
     // Light at 2
     [
-        0x2ac5806777ef660a, // doc_preview_1180
-        0x6e1716682c599e65, // doc_review_1180
-        0xa3e94f33bb76c764, // doc_review_no_browser
-        0x04633b82213dc5ff, // doc_preview_1920
-        0x8d1275261b45972b, // doc_split_1920
-        0x6d05f471266e78e8, // doc_review_850
-        0x84732f985b636d39, // doc_approved_1180
-        0x153567080b2689aa, // doc_locked_1180
-        0x5688ac50adad2001, // findings_1180
-        0x12cb6fc6385c6fea, // popup_deciding_1180
-        0xccffdce2a40e4dea, // popup_decided_1180
-        0x648afae740203419, // popup_code_review_850
-        0x2435e6adfbb4e6b8, // popup_no_comments_1180
-        0x958a852299d3f6a4, // popup_no_comments_850
-        0x34dfd6786e24cd23, // popup_listed_1180
-        0xff75249516f27ec3, // inline_listed_1180
+        0xbd1515957bad3c7b, // doc_preview_1180
+        0xf61b3be6e1380db7, // doc_review_1180
+        0x60db6706cfdf6ede, // doc_review_no_browser
+        0x48731c5d5fd3003e, // doc_preview_1920
+        0x33bd6a88f463b002, // doc_split_1920
+        0x520823cb7c2526c5, // doc_review_850
+        0x83da6eb77b5aa8c1, // doc_approved_1180
+        0x6b07e7bfdc861217, // doc_locked_1180
+        0xfc151a78713bf308, // findings_1180
+        0x6ac5525e742cd634, // popup_deciding_1180
+        0xd21f3a24fcf3f5a9, // popup_decided_1180
+        0xa61a01d55df7b167, // popup_code_review_850
+        0x32ce2ad1b9798180, // popup_no_comments_1180
+        0xce9db1c39c7af1f3, // popup_no_comments_850
+        0x80b1dfb328209225, // popup_listed_1180
+        0x5ddf86739c6faafd, // inline_listed_1180
     ],
 ];
 
@@ -8036,39 +8034,39 @@ const REVIEW_VIEWS: [&str; 6] = [
 const GOLDEN_REVIEW_VIEWS: [[u64; 6]; 4] = [
     // Dark at 1
     [
-        0xc079d4a47dfb8f07, // tab_review_code_1180
-        0x0b613feab1c7e3ed, // tab_review_fixes_1180
-        0x4e58943ead4fef89, // tab_review_fixes_860
-        0x60ced7661f313794, // tab_review_ready_1180
-        0xaae0e6667caf58df, // tab_review_code_860
-        0xc51714381cece119, // tab_review_done_1180
+        0x519b4e36dce440ee, // tab_review_code_1180
+        0x7ce1d665812bfce7, // tab_review_fixes_1180
+        0xc03af1c8522a6d05, // tab_review_fixes_860
+        0x94ea673ddef9add5, // tab_review_ready_1180
+        0xf1b9c68a649f7789, // tab_review_code_860
+        0x3d672a561ce071c4, // tab_review_done_1180
     ],
     // Dark at 2
     [
-        0xfcf48c5be95bbf79, // tab_review_code_1180
-        0x7ee2c89305d11cd1, // tab_review_fixes_1180
-        0xfba43262c7d63e06, // tab_review_fixes_860
-        0xc4f6953a672794c3, // tab_review_ready_1180
-        0xeac75621de8e7164, // tab_review_code_860
-        0xecd0cd1d777ac778, // tab_review_done_1180
+        0xbdccfff34492a608, // tab_review_code_1180
+        0x512f10092713a295, // tab_review_fixes_1180
+        0x8cf03168e0c8ccb9, // tab_review_fixes_860
+        0xeb89a2967d6df8de, // tab_review_ready_1180
+        0x111c2ce2ed7ccec8, // tab_review_code_860
+        0x4e2b31bba29b9589, // tab_review_done_1180
     ],
     // Light at 1
     [
-        0xae786b051cb842b1, // tab_review_code_1180
-        0x4e624d85c2fa3dff, // tab_review_fixes_1180
-        0xdaa2934455832dda, // tab_review_fixes_860
-        0xef1bc3ecb1d7efb8, // tab_review_ready_1180
-        0xc337cdceb0414f87, // tab_review_code_860
-        0x992052e127fa1b18, // tab_review_done_1180
+        0xc2d55d74f6a99396, // tab_review_code_1180
+        0xc149ff46bc27d574, // tab_review_fixes_1180
+        0xe83b9f7827f14e1d, // tab_review_fixes_860
+        0x7ce2128c81461f4f, // tab_review_ready_1180
+        0xe7da46b12d1678b7, // tab_review_code_860
+        0x5788bfef059dac13, // tab_review_done_1180
     ],
     // Light at 2
     [
-        0xf66d26606fa40b14, // tab_review_code_1180
-        0xabc9472b73446090, // tab_review_fixes_1180
-        0xd1477e9e94b494e4, // tab_review_fixes_860
-        0x8c892e5a6b0924f8, // tab_review_ready_1180
-        0xdc3053ee5331a665, // tab_review_code_860
-        0xb52e5a4e08ebfe8c, // tab_review_done_1180
+        0x2c3e82f4218e216b, // tab_review_code_1180
+        0xb637e7a7268ef8cd, // tab_review_fixes_1180
+        0x703e9e99ac27b26f, // tab_review_fixes_860
+        0x5c8ee8b8253d1503, // tab_review_ready_1180
+        0xd534659e4fd6bd30, // tab_review_code_860
+        0x42ec2af0f1bb579f, // tab_review_done_1180
     ],
 ];
 
@@ -8079,12 +8077,12 @@ fn code_reviews_views_paint_the_same_pixels() {
         .map(|row| row.as_slice())
         .collect();
     let views = [
-        (feature_tab_review_code(), 1180),
-        (feature_tab_review_fixes(), 1180),
-        (feature_tab_review_fixes(), 860),
-        (feature_tab_review_ready(), 1180),
-        (feature_tab_review_code(), 860),
-        (feature_tab_review_done(), 1180),
+        (placed(feature_tab_review_code()), 1180),
+        (placed(feature_tab_review_fixes()), 1180),
+        (placed(feature_tab_review_fixes()), 860),
+        (placed(feature_tab_review_ready()), 1180),
+        (placed(feature_tab_review_code()), 860),
+        (placed(feature_tab_review_done()), 1180),
     ];
     check_each(&REVIEW_VIEWS, &golden, |painter, theme, scale, surface| {
         let (view, w) = &views[surface];
@@ -8108,12 +8106,12 @@ fn dump_review_views() {
     let _ = std::fs::create_dir_all(&dir);
     let painter = Painter::new();
     let views = [
-        (feature_tab_review_code(), 1180),
-        (feature_tab_review_fixes(), 1180),
-        (feature_tab_review_fixes(), 860),
-        (feature_tab_review_ready(), 1180),
-        (feature_tab_review_code(), 860),
-        (feature_tab_review_done(), 1180),
+        (placed(feature_tab_review_code()), 1180),
+        (placed(feature_tab_review_fixes()), 1180),
+        (placed(feature_tab_review_fixes()), 860),
+        (placed(feature_tab_review_ready()), 1180),
+        (placed(feature_tab_review_code()), 860),
+        (placed(feature_tab_review_done()), 1180),
     ];
     for (theme, scale) in CASES {
         for ((view, w), name) in views.iter().zip(REVIEW_VIEWS) {
@@ -8134,10 +8132,26 @@ const CHECK_CARDS: [&str; 2] = ["tab_checks_1180", "tab_checks_860"];
 
 /// The recorded hashes of `CHECK_CARDS`, per case in `CASES`.
 const GOLDEN_CHECK_CARDS: [[u64; 2]; 4] = [
-    [0x249eedb62ea74cb5, 0x17d649e3462727bf],
-    [0x13495a1e5de5b92f, 0xd2b8103bfca5c35e],
-    [0xa9eb999b1a536351, 0x4374fc732388a592],
-    [0x2dd3e85b4e42cddd, 0xa20f274d0590e49c],
+    // Dark at 1
+    [
+        0x920028fc3a703350, // tab_checks_1180
+        0xf631ddba32d9b626, // tab_checks_860
+    ],
+    // Dark at 2
+    [
+        0x7d5af7e4fc6306a3, // tab_checks_1180
+        0xdccdf337cd6f54a6, // tab_checks_860
+    ],
+    // Light at 1
+    [
+        0xd23bc5a18f0d9cdf, // tab_checks_1180
+        0x3ddc83f00dba67ed, // tab_checks_860
+    ],
+    // Light at 2
+    [
+        0x762fb848d5758cbf, // tab_checks_1180
+        0xf711ee77f32484a5, // tab_checks_860
+    ],
 ];
 
 #[test]
@@ -8146,7 +8160,7 @@ fn verifys_check_cards_paint_the_same_pixels() {
         .iter()
         .map(|row| row.as_slice())
         .collect();
-    let view = tab_checks();
+    let view = placed(tab_checks());
     check_each(&CHECK_CARDS, &golden, |painter, theme, scale, surface| {
         let w = if surface == 0 { 1180 } else { 860 };
         hash(super::feature_tab_composed(
@@ -8168,7 +8182,7 @@ fn dump_check_cards() {
     let dir = std::path::PathBuf::from(dir);
     let _ = std::fs::create_dir_all(&dir);
     let painter = Painter::new();
-    let view = tab_checks();
+    let view = placed(tab_checks());
     for (theme, scale) in CASES {
         let tag = format!("{}_{}", theme.name(), scale);
         let px = |v: i32| (v as f64 * scale).round() as usize;
@@ -8229,39 +8243,39 @@ fn paint_stats(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
 const GOLDEN_STATS: [[u64; 6]; 4] = [
     // Dark at 1
     [
-        0x7ce62109153834eb, // stats_empty
-        0x6c6105487d2a09bd, // stats_loaded
-        0x9a6b94f0298e73af, // stats_detail
-        0x7f8a74f5703ea296, // stats_error
-        0x60991de1592ee886, // stats_agents
-        0x7ad9b1510e0b96d2, // stats_delete_hover
+        0x99966c3b2506d63d, // stats_empty
+        0xe0fd68cfb391c1e1, // stats_loaded
+        0x773a2353141510e4, // stats_detail
+        0xce6f6560e912d620, // stats_error
+        0x964f17e94106c50b, // stats_agents
+        0x126ad886e81bab7a, // stats_delete_hover
     ],
     // Dark at 2
     [
-        0x42a94d0679740ce9, // stats_empty
-        0x93f49384440ab73b, // stats_loaded
-        0xb19f933e3e7a7fce, // stats_detail
-        0xb7302566af5b1ebc, // stats_error
-        0xd7503278afc50519, // stats_agents
-        0x6a0508fd8b48fcb3, // stats_delete_hover
+        0x70a4fd1990ba17c3, // stats_empty
+        0x82796315c0ea2c7e, // stats_loaded
+        0x30034c1b981d9cdb, // stats_detail
+        0xea2f727ec24cecf2, // stats_error
+        0xcd9ce23d4691ec39, // stats_agents
+        0x1710f18060c55e46, // stats_delete_hover
     ],
     // Light at 1
     [
-        0xc2fc398c9ca048e8, // stats_empty
-        0x2894911b05035e9e, // stats_loaded
-        0xc1d59a6f6af5ac0d, // stats_detail
-        0x8f259b70cfde972d, // stats_error
-        0xe49ef6e8b8245c36, // stats_agents
-        0x2a2080f3d62898ef, // stats_delete_hover
+        0x7fd4ab28632c785b, // stats_empty
+        0x3eded72ab82d41fd, // stats_loaded
+        0xa64e0ab6f835378a, // stats_detail
+        0x58f26e96381a3936, // stats_error
+        0x175c69b53e482d08, // stats_agents
+        0xe662914229435fc0, // stats_delete_hover
     ],
     // Light at 2
     [
-        0xb68169e238ab6ce5, // stats_empty
-        0x1a8ecda88d2183a2, // stats_loaded
-        0x7babe280ab55f696, // stats_detail
-        0xce7120c1de473188, // stats_error
-        0xbacf9f97ed3f17a7, // stats_agents
-        0xc0d77a6855d31869, // stats_delete_hover
+        0xe5834abec67891f5, // stats_empty
+        0xeb0812fe2bb1f9b2, // stats_loaded
+        0xd90f76b857c1ca17, // stats_detail
+        0x2d9933b9ca9b6bb8, // stats_error
+        0x0b49475463e76c6b, // stats_agents
+        0x76107a0bb1cd1b11, // stats_delete_hover
     ],
 ];
 
@@ -8302,7 +8316,7 @@ const STRIP_PANE: (i32, i32) = (1000, 640);
 
 /// The criteria strip over a sandbox's app: its row, its steps shown with
 /// the pointer on Pass, a note being written with a screenshot and the
-/// keys, a failure sent to Build with its note, and folded to its chip.
+/// keys, a failure being fixed with its note, and folded to its chip.
 fn strip_views() -> [super::CriteriaStripView; 5] {
     use super::{ButtonStyle, CriteriaStripView, StripHit, StripTag};
     let plain = |label: &str| (label.to_owned(), ButtonStyle::Plain);
@@ -8346,7 +8360,7 @@ fn strip_views() -> [super::CriteriaStripView; 5] {
     let failed = CriteriaStripView {
         open: true,
         tag: StripTag::Failed,
-        state: "sent to Build".into(),
+        state: crate::feature::review_import::sent_word(false, false).into(),
         note: "the second row reverts after a reload".into(),
         buttons: vec![
             ("Edit note\u{2026}".into(), ButtonStyle::Quiet),
@@ -8385,7 +8399,7 @@ const GOLDEN_STRIP: [[u64; 5]; 4] = [
         0x9b9e1214c2a413a5, // strip_row
         0x499a852fd941bec8, // strip_open
         0xf55cfa59cc50a01e, // strip_note
-        0x7b874b70e3adcacd, // strip_failed
+        0xffb86045763e3b31, // strip_failed
         0xe134649e78702bbf, // strip_chip
     ],
     // Dark at 2
@@ -8393,7 +8407,7 @@ const GOLDEN_STRIP: [[u64; 5]; 4] = [
         0x4ad958f67e705f77, // strip_row
         0xef8be6f34fac8adf, // strip_open
         0x4ca742e7664fdf25, // strip_note
-        0x02c2e5894b0ffbda, // strip_failed
+        0xd486a1f971ba182e, // strip_failed
         0xb63f093b83828479, // strip_chip
     ],
     // Light at 1
@@ -8401,7 +8415,7 @@ const GOLDEN_STRIP: [[u64; 5]; 4] = [
         0xeec613f4ff5d62dc, // strip_row
         0xd0f92667606918cf, // strip_open
         0x0765d00a20ba94ad, // strip_note
-        0xf558997476215cce, // strip_failed
+        0x447a4b6d574a4c8e, // strip_failed
         0x60faa77000796bed, // strip_chip
     ],
     // Light at 2
@@ -8409,7 +8423,7 @@ const GOLDEN_STRIP: [[u64; 5]; 4] = [
         0xa66aa28d6e9e00ed, // strip_row
         0xe0d2238f9a5d3a72, // strip_open
         0x850a45e49126971d, // strip_note
-        0xbbb523f9b9455746, // strip_failed
+        0x43b8569d0a629db5, // strip_failed
         0x45481f7462f5972c, // strip_chip
     ],
 ];

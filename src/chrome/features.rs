@@ -776,27 +776,33 @@ type SearchSpots = (Vec<(super::SearchPart, Rect)>, Option<Rect>);
 /// Where the criteria's search goes in `row`, from its left: its field,
 /// then while `open` how many it found and its buttons to the match
 /// before, the next and closing it, each square; and where that count goes.
+/// On a narrow row the count goes before the field gets narrower than its
+/// least, and the field before the buttons run past the row.
 fn criteria_search_parts(row: Rect, open: bool) -> SearchSpots {
     use super::SearchPart;
     let (x, y, h) = (row.loc.x, row.loc.y, row.size.h);
-    let rest = match open {
-        true => 2 * QUIT_BUTTON_GAP + SEARCH_COUNT_W + 3 * (h + QUIT_BUTTON_GAP),
-        false => 0,
+    let buttons = 3 * (h + QUIT_BUTTON_GAP);
+    let counted = row.size.w - buttons - 2 * QUIT_BUTTON_GAP - SEARCH_COUNT_W >= SEARCH_FIELD_MIN;
+    let rest = match (open, counted) {
+        (false, _) => 0,
+        (true, true) => buttons + 2 * QUIT_BUTTON_GAP + SEARCH_COUNT_W,
+        (true, false) => buttons + QUIT_BUTTON_GAP,
     };
-    let field_w = (SEARCH_FIELD_W.min(row.size.w - rest)).max(SEARCH_FIELD_MIN);
+    let room = (row.size.w - rest).max(0);
+    let field_w = SEARCH_FIELD_W.min(room).max(SEARCH_FIELD_MIN.min(room));
     let field = Rectangle::new((x, y).into(), (field_w, h).into());
     let mut parts = vec![(SearchPart::Field, field)];
     if !open {
         return (parts, None);
     }
     let count_x = x + field_w + QUIT_BUTTON_GAP;
-    let count = Rectangle::new((count_x, y).into(), (SEARCH_COUNT_W, h).into());
-    let mut at = count_x + SEARCH_COUNT_W + QUIT_BUTTON_GAP;
+    let count = counted.then(|| Rectangle::new((count_x, y).into(), (SEARCH_COUNT_W, h).into()));
+    let mut at = count.map_or(count_x, |c| c.loc.x + c.size.w + QUIT_BUTTON_GAP);
     for part in [SearchPart::Prev, SearchPart::Next, SearchPart::Close] {
         parts.push((part, Rectangle::new((at, y).into(), (h, h).into())));
         at += h + QUIT_BUTTON_GAP;
     }
-    (parts, Some(count))
+    (parts, count)
 }
 
 /// Where `strip` goes in the row at `(x, y)`, `width` wide: the bar, then its
@@ -10558,5 +10564,18 @@ mod tests {
         assert_eq!(track.loc.y, button.loc.y);
         assert_eq!(track.size.h, button.size.h);
         assert_eq!(button.loc.x + button.size.w + QUIT_BUTTON_GAP, track.loc.x);
+    }
+
+    /// On a narrow column the criteria's open search keeps to its row: the
+    /// count goes first, then the field narrows.
+    #[test]
+    fn the_criteria_search_keeps_to_a_narrow_row() {
+        for (w, counted) in [(600, true), (320, false), (200, false)] {
+            let row = Rectangle::new((10, 0).into(), (w, 32).into());
+            let (parts, count) = criteria_search_parts(row, true);
+            let end = (parts.iter()).map(|(_, r)| r.loc.x + r.size.w).max();
+            assert!(end <= Some(10 + w), "{w} wide");
+            assert_eq!(count.is_some(), counted, "{w} wide");
+        }
     }
 }
