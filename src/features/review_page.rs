@@ -205,9 +205,22 @@ fn review_notes(
         )),
         _ => {}
     }
-    let writing = (feature.plan_review.as_ref()).is_some_and(|r| r.writing);
-    if stage == Stage::PlanReview && writing && plan_review_open(feature, stage) {
-        notes.push(line(SUGGESTIONS_WRITING, CheckTone::Note));
+    let review = feature.plan_review.as_ref().filter(|_| stage == Stage::PlanReview);
+    let writing = review.is_some_and(|r| r.writing);
+    if writing && plan_review_open(feature, stage) {
+        // Once written it is no longer being written: it waits for review.
+        let note = match state.ctx.wrote(stage) {
+            true => FINAL_WRITTEN,
+            false => SUGGESTIONS_WRITING,
+        };
+        notes.push(line(note, CheckTone::Note));
+    }
+    if review.is_some_and(|r| r.asked) && plan_review_open(feature, stage) {
+        let who = (feature.runs.get(&stage)).map_or("the reviewer", |r| r.agent.as_str());
+        notes.push(line(
+            format!("Asked {who} about your notes: waiting for its answer, the next run"),
+            CheckTone::Note,
+        ));
     }
     // Make fixes is gone: not with no word of why.
     if sends_findings(feature, stage, state.ctx) == Some(PanelOutcome::SendFixes) {
@@ -217,6 +230,11 @@ fn review_notes(
     }
     notes
 }
+
+/// What the suggestions' line says once the final plan was written from
+/// them: it waits for the user's review above.
+const FINAL_WRITTEN: &str =
+    "The final plan above was written from these: Change decisions\u{2026} to change them";
 
 /// What came before the latest review: each of AI review's earlier ones, a
 /// file card folded unless `state` shows it.
@@ -258,29 +276,57 @@ pub(super) fn review_page_actions(
         return Vec::new();
     }
     let w = words_in(stage_items(stage), feature.posts_review());
-    let button = |label: &str| PageButton {
+    let button = |label: &str, on: bool| PageButton {
         label: label.to_owned(),
-        style: ButtonStyle::Plain,
+        style: match on {
+            true => ButtonStyle::Plain,
+            false => ButtonStyle::Off,
+        },
     };
     let mut out = Vec::new();
-    if offers_fix_all(feature, stage) {
-        out.push((button(w.want_all), want_all_outcome(stage)));
+    // The buttons stay while their items can be decided, greyed once there
+    // is nothing for them to do: pressed, they say why, and none shifts.
+    if can_decide(feature, stage) {
+        out.push((
+            button(w.want_all, offers_fix_all(feature, stage)),
+            want_all_outcome(stage),
+        ));
+    }
+    // Once the findings are decided the page's next step takes its place:
+    // the diff is still there to read them in.
+    let in_diff = stage == Stage::AiReview
+        && review_read(feature, stage)
+        && (feature.review.as_ref()).is_some_and(|r| {
+            r.count(FindingState::Open) == 0 && r.findings.iter().any(|f| !f.file.is_empty())
+        });
+    if in_diff {
+        out.push((button("Review in diff", true), PanelOutcome::Findings));
     }
     if can_add_comment(feature, stage) {
-        out.push((button(w.add_own), PanelOutcome::AddComment));
+        out.push((button(w.add_own, true), PanelOutcome::AddComment));
     }
     if plan_review_open(feature, stage) {
         let deciding = crate::feature_plan_review::deciding(feature);
-        if deciding.is_some_and(|r| !feature::plan_review::notes(r).is_empty()) {
-            out.push((button("Ask reviewer"), PanelOutcome::AskReviewer));
+        let review = feature.plan_review.as_ref();
+        if let Some(r) = deciding {
+            // Asked already, it waits for the answer.
+            let asks = !feature::plan_review::notes(r).is_empty() && !r.asked;
+            out.push((button("Ask reviewer", asks), PanelOutcome::AskReviewer));
         }
-        if feature.plan_review.as_ref().is_some_and(|r| r.writing) {
+        let writing = review.is_some_and(|r| r.writing);
+        if writing {
             out.push((
-                button("Change decisions\u{2026}"),
+                button("Change decisions\u{2026}", true),
                 PanelOutcome::ChangeDecisions,
             ));
         }
-        out.push((button("Skip review"), PanelOutcome::SkipPlanReview));
+        // Skipping is for a review not worth deciding: not once all is
+        // decided, nor while the final plan is written or waits.
+        let all_decided =
+            deciding.is_some_and(|r| r.open() == 0 && !r.suggestions.is_empty());
+        if !writing && !all_decided {
+            out.push((button("Skip review", true), PanelOutcome::SkipPlanReview));
+        }
     }
     out
 }

@@ -956,12 +956,16 @@ impl Gerdr {
         }
         let fresh = vec![("comments", plan_review::notes(review))];
         let Some(run) = feature.runs.get(&STAGE).cloned() else {
-            self.launch_stage_agent(project, slug, STAGE, &fresh);
+            if self.launch_stage_agent(project, slug, STAGE, &fresh) {
+                self.reviewer_asked(project, slug);
+            }
             return;
         };
         let alive = (run.pane.as_deref()).is_some_and(|p| self.pane_there(p));
         if !alive || run.held {
-            self.launch_stage_agent(project, slug, STAGE, &fresh);
+            if self.launch_stage_agent(project, slug, STAGE, &fresh) {
+                self.reviewer_asked(project, slug);
+            }
             return;
         }
         let data = store::dir(None, project, slug);
@@ -990,7 +994,18 @@ impl Gerdr {
             f.log(feature::now(), "Notes sent to the Plan review agent");
             self.save_feature(project, slug);
         }
+        self.reviewer_asked(project, slug);
         self.show_success(format!("Sent the notes to {}", run.agent));
+    }
+
+    /// The reviewer of feature `slug` was asked about the user's notes: its
+    /// page says it waits for the answer until the next run is read.
+    fn reviewer_asked(&mut self, project: &str, slug: &str) {
+        if let Some(review) = (self.feature_mut(project, slug)).and_then(|f| f.plan_review.as_mut())
+        {
+            review.asked = true;
+            self.save_feature(project, slug);
+        }
     }
 
     /// The suggestions are decided: a fresh agent writes the final plan, or,

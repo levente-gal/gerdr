@@ -3840,7 +3840,7 @@ fn stage_button(feature: &Feature, stage: Stage, ctx: RowCtx) -> Option<&'static
         PanelOutcome::SendFixes => Some("Plan fixes"),
         PanelOutcome::MakeFindingFixes => Some("Make fixes"),
         PanelOutcome::CodeReview => Some("Review code"),
-        PanelOutcome::ReviewInPlan => Some("Review in plan"),
+        PanelOutcome::ReviewInPlan => Some(crate::worktree_diff::REVIEW_IN_PLAN),
         PanelOutcome::WriteFinalPlan => {
             let accepted = (feature.plan_review.as_ref()).is_some_and(|r| r.any_accepted());
             Some(if accepted {
@@ -6349,7 +6349,8 @@ fn writers_page_actions(
         let suggestions = PanelOutcome::ReviewInPlan;
         let deciding = crate::feature_plan_review::deciding(feature);
         if deciding.is_some() && !has(&out, &suggestions) {
-            out.push((button("Review in plan", ButtonStyle::Plain), suggestions));
+            let label = crate::worktree_diff::REVIEW_IN_PLAN;
+            out.push((button(label, ButtonStyle::Plain), suggestions));
         }
     }
     // The review's own, in one order on both review pages.
@@ -19423,12 +19424,15 @@ pub(crate) mod tests {
         plan_review::import(&mut review, 1, plan_review::parse(text).unwrap());
         f.plan_review = Some(review);
         assert_eq!(page_enter(&f, stage, ctx), Some(PanelOutcome::ReviewInPlan));
-        // Questions with no answer can't all be accepted at once.
+        // Questions with no answer can't all be accepted at once: the
+        // buttons stay, greyed, so none shifts once they can be pressed.
         assert_eq!(
             names(&f),
             [
                 "Review in plan",
+                "Accept all open",
                 "Add suggestion\u{2026}",
+                "Ask reviewer",
                 "Skip review",
                 "Start over\u{2026}"
             ]
@@ -19466,13 +19470,15 @@ pub(crate) mod tests {
             page_enter(&f, stage, ctx),
             Some(PanelOutcome::WriteFinalPlan)
         );
+        // All decided: skipping the review is no longer offered.
         assert_eq!(
             names(&f),
             [
                 "Use the plan as it is",
                 "Review in plan",
+                "Accept all open",
                 "Add suggestion\u{2026}",
-                "Skip review",
+                "Ask reviewer",
                 "Start over\u{2026}"
             ]
         );
@@ -19652,7 +19658,10 @@ pub(crate) mod tests {
         let has = |label: &str, o: PanelOutcome| page.contains(&(label.to_owned(), o));
         assert!(has("Accept all open", PanelOutcome::AcceptAllSuggestions));
         assert!(has("Add suggestion\u{2026}", PanelOutcome::AddComment));
-        assert!(!page.iter().any(|(l, _)| l == "Ask reviewer"));
+        // Nothing to ask yet: greyed.
+        let ask = (page_actions(&f, Stage::PlanReview, RowCtx::default()).into_iter())
+            .find(|(b, _)| b.label == "Ask reviewer");
+        assert_eq!(ask.map(|(b, _)| b.style), Some(ButtonStyle::Off));
         // No word of AI review's.
         for (label, _) in &page {
             let label = label.to_lowercase();
@@ -22076,7 +22085,10 @@ pub(crate) mod tests {
             plain.map(|(b, o)| (b.style, o)),
             Some((ButtonStyle::Plain, PanelOutcome::SendFixes))
         );
-        assert!(!labels(&fix).contains(&"Fix all open".to_owned()));
+        // Nothing left to want: greyed, in its place.
+        let all = (page_actions(&fix, Stage::AiReview, none).into_iter())
+            .find(|(b, _)| b.label == "Fix all open");
+        assert_eq!(all.map(|(b, _)| b.style), Some(ButtonStyle::Off));
         assert_eq!(
             row_action(&fix, row, none),
             Some(PanelOutcome::MakeFindingFixes)

@@ -261,6 +261,10 @@ pub struct PlanReview {
     /// one's id is never given again.
     #[serde(default, skip_serializing_if = "super::is_zero")]
     pub own_made: u32,
+    /// The user asked the reviewer about their notes, and its answer, the
+    /// next run, isn't read yet: the page says it waits.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub asked: bool,
 }
 
 /// One run of the reviewer as read in: who ran it, when, and what it raised,
@@ -615,6 +619,7 @@ pub fn import(review: &mut PlanReview, run: u32, raws: Vec<Raw>) -> Imported {
         }
     }
     review.n = run;
+    review.asked = false;
     out
 }
 

@@ -7064,7 +7064,7 @@ fn doc_suggestions() -> super::ReposView {
         tone,
         within: None,
     };
-    view.title = "Plan review \u{b7} plan.md".into();
+    view.title = "Review in plan \u{b7} plan.md".into();
     view.summary =
         "\u{201c}Log in with a password\u{201d} \u{b7} 1 to decide \u{b7} 2 accepted \u{b7} 1 rejected"
             .into();

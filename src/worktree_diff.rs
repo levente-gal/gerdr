@@ -143,6 +143,10 @@ pub struct DocOf {
     pub suggestions: Option<crate::plan_doc::SuggestionsOf>,
 }
 
+/// What Plan review's suggestions flagged on the plan are called: the
+/// stage page's button, the tab and its heading.
+pub const REVIEW_IN_PLAN: &str = "Review in plan";
+
 impl DocOf {
     /// What its tab is called.
     pub fn tab_title(&self) -> &'static str {
@@ -151,7 +155,8 @@ impl DocOf {
             DocFile::FixPlan => "Fix plan",
             DocFile::PlanChanges => "Plan changes",
             DocFile::DraftChanges(..) => "Draft changes",
-            DocFile::Suggestions => "Suggestions",
+            // One name for the view: its button's, tab's and heading's.
+            DocFile::Suggestions => REVIEW_IN_PLAN,
             DocFile::Stage(Stage::Plan) => "Plan",
             DocFile::Stage(Stage::PlanReview) => "Final plan",
             DocFile::Stage(_) => "Brief",
@@ -1127,6 +1132,9 @@ impl WorktreeDiff {
         if let Some(doc) = &self.doc {
             if doc.evidence() {
                 return format!("Evidence of \u{201c}{}\u{201d}", doc.title);
+            }
+            if doc.file == DocFile::Suggestions {
+                return format!("{REVIEW_IN_PLAN} \u{b7} {}", doc.name());
             }
             if doc.file == DocFile::PlanChanges {
                 return format!("Plan review \u{b7} what {} changed", doc.name());
