@@ -56,7 +56,10 @@ pub(crate) const KEYS: &[(&str, &str)] = &[
     ("Left / Right", "Pick the tab or the scope that has focus"),
     ("Ctrl+PgUp / Ctrl+PgDn", "Go to the previous or next tab"),
     ("Enter", "Show the feature's stages, runs and fix rounds"),
-    ("Del", "Delete the feature's AI work kept, after asking"),
+    (
+        "Shift+Del",
+        "Delete the feature's AI work kept, after asking (its only record: never a bare Del)",
+    ),
     ("Ctrl+F / /", "Search the rows"),
     ("Ctrl+O", "Open the run's transcript or the check's log"),
     ("Ctrl+C", "Copy the row"),
@@ -593,8 +596,11 @@ impl StatsPanel {
                 return None;
             }
             Keysym::o if ctrl => return Some(self.open(now)),
-            // Searching, Del edits the query.
-            Keysym::Delete | Keysym::KP_Delete if bare && !self.searching => {
+            // Searching, Del edits the query. Shift with it: a bare Del, a
+            // focus slip, never reaches a feature's only record.
+            Keysym::Delete | Keysym::KP_Delete
+                if mods.shift && !(mods.ctrl || mods.alt || mods.logo) && !self.searching =>
+            {
                 let kept = self.selected_line(now).and_then(|l| l.delete);
                 return kept.map(Outcome::Delete);
             }
@@ -703,7 +709,7 @@ impl StatsPanel {
             hints.push(("Ctrl+O", "open"));
         }
         if line.as_ref().is_some_and(|l| l.delete.is_some()) {
-            hints.push(("Del", "delete"));
+            hints.push(("Shift+Del", "delete\u{2026}"));
         }
         hints.push(("Ctrl+F", "search"));
         if line.is_some() {
@@ -1605,7 +1611,7 @@ impl Gerdr {
             StatsHit::Back => Some(Tooltip::new("Back to the list", layout.back?).key("Esc")),
             StatsHit::Delete(i) => {
                 let rect = layout.deletes.iter().find(|(k, _)| *k == i)?.1;
-                Some(Tooltip::new("Delete its AI work", rect).key("Del"))
+                Some(Tooltip::new("Delete its AI work", rect).key("Shift+Del"))
             }
             _ => None,
         }
@@ -2221,22 +2227,26 @@ mod tests {
     }
 
     #[test]
-    fn del_asks_to_delete_the_selected_features_ai_work() {
+    fn shift_del_asks_to_delete_the_selected_features_ai_work() {
         let mut p = loaded();
-        assert_eq!(key(&mut p, Keysym::Delete), Some(Outcome::Delete(kept_alpha())));
+        let shift_del =
+            |p: &mut StatsPanel| press(p, mods(false, true), Keysym::Delete, Keysym::Delete);
+        // A bare Del never reaches the only record of a feature.
+        assert_eq!(key(&mut p, Keysym::Delete), None);
+        assert_eq!(shift_del(&mut p), Some(Outcome::Delete(kept_alpha())));
         assert_eq!(p.lines(NOW)[0].cells.last().unwrap(), "18.5 MB");
         assert!(p.view(NOW).rows.iter().all(|r| r.delete));
-        assert!(p.hints(NOW).iter().any(|(k, w)| k == "Del" && w == "delete"));
-        // Searching, Del edits the query.
+        assert!((p.hints(NOW).iter()).any(|(k, w)| k == "Shift+Del" && w == "delete\u{2026}"));
+        // Searching, it edits the query.
         key(&mut p, Keysym::slash);
-        assert_eq!(key(&mut p, Keysym::Delete), None);
+        assert_eq!(shift_del(&mut p), None);
         assert!(p.searching);
         // The Agents tab has no AI work of a feature to delete.
         let mut p = loaded();
         ctrl(&mut p, Keysym::Page_Down);
         p.view = Some(Ok(view(p.scope.clone())));
-        assert_eq!(key(&mut p, Keysym::Delete), None);
-        assert!(!p.hints(NOW).iter().any(|(k, _)| k == "Del"));
+        assert_eq!(shift_del(&mut p), None);
+        assert!(!p.hints(NOW).iter().any(|(k, _)| k == "Shift+Del"));
     }
 
     #[test]

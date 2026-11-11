@@ -3584,6 +3584,14 @@ impl Panel {
         if self.sheet.is_some() {
             return self.sheet_press(button, ctx);
         }
+        // The footer's Esc: as the key, back to the tree, then closed.
+        if button == ReposButton::Close {
+            if self.focus == Focus::Tree {
+                return Some(Outcome::Close);
+            }
+            self.focus = Focus::Tree;
+            return None;
+        }
         if button == ReposButton::ClearReview {
             if self.diff.review.is_empty() {
                 self.error = Some(NO_REVIEW.into());
@@ -4915,15 +4923,20 @@ impl Panel {
         if !self.diff.review.is_empty() {
             buttons.extend([B::CopyReview, B::SendReview, B::ClearReview]);
         }
-        buttons.push(B::Help);
+        buttons.extend([B::Help, B::Close]);
         buttons
             .into_iter()
             .map(|button| Hint {
                 button,
-                label: self.button_label(button, ctx),
+                label: match button {
+                    // Esc steps back: to the tree, then closes.
+                    B::Close if self.focus != Focus::Tree => "back".into(),
+                    B::Close => "close".into(),
+                    _ => self.button_label(button, ctx),
+                },
                 key: key_name(button).into(),
                 disabled: match self.plan(button, ctx) {
-                    _ if button == ReposButton::Help => None,
+                    _ if matches!(button, ReposButton::Help | ReposButton::Close) => None,
                     _ if button == ReposButton::ClearReview => {
                         self.diff.review.is_empty().then(|| NO_REVIEW.into())
                     }
@@ -6475,7 +6488,8 @@ mod tests {
         let ctx = ctx(&items, None);
         let mut panel = Panel::new(&items);
         let hints = panel.view("p", &ctx).hints;
-        let help = hints.last().expect("a hint");
+        // Before Esc's, the last.
+        let help = &hints[hints.len() - 2];
         assert_eq!((help.button, help.key.as_str()), (ReposButton::Help, "F1"));
         assert_eq!(help.label, "keys");
         assert_eq!(press(&mut panel, none(), Keysym::F1, &ctx), None);
@@ -8533,9 +8547,18 @@ mod tests {
                 ReposButton::MarkResolved,
                 ReposButton::Continue,
                 ReposButton::Abort,
-                ReposButton::Help
+                ReposButton::Help,
+                ReposButton::Close
             ]
         );
+        // Esc is hinted: back to the tree from elsewhere, then close.
+        let esc = |panel: &Panel| panel.view("p", &ctx).hints.last().map(|h| h.label.clone());
+        assert_eq!(esc(&panel).as_deref(), Some("close"));
+        panel.focus = Focus::Detail;
+        assert_eq!(esc(&panel).as_deref(), Some("back"));
+        assert_eq!(panel.press(ReposButton::Close, &ctx), None);
+        assert_eq!(panel.focus, Focus::Tree);
+        assert_eq!(panel.press(ReposButton::Close, &ctx), Some(Outcome::Close));
         let hints = panel.view("p", &ctx).hints;
         assert_eq!(
             hints[2].disabled.as_deref(),
