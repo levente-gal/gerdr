@@ -9166,6 +9166,10 @@ impl Gerdr {
         let layout = chrome::new_feature_layout(size, dialog.slots(), dialog.error.is_some());
         let mut picked = false;
         let outcome = match dialog.hit(&layout, pos) {
+            // The picker over the form leaves its buttons off.
+            Some(NewFeatureHit::Button(_) | NewFeatureHit::Link) if dialog.choosing.is_some() => {
+                None
+            }
             Some(NewFeatureHit::Button(chrome::CREATE)) => match dialog.create() {
                 Ok(outcome) => Some(outcome),
                 Err(why) => {
@@ -12418,10 +12422,14 @@ fn new_feature_view(dialog: &NewFeatureDialog, project: String) -> NewFeatureVie
                 true,
             ),
             Some(Ok(_)) if dialog.repos() == 0 => ("No branch matches that".to_owned(), true),
-            Some(Ok(_)) => (format!("{chosen_name} starts from"), false),
+            Some(Ok(_)) => (format!("Pick the branch {chosen_name} starts from"), false),
         }
     } else if dialog.picking && dialog.others.is_empty() {
-        ("The store has no other project to link".to_owned(), true)
+        // Nothing went wrong: there is just nothing to link.
+        (
+            "No other project to link: add one with the project menu first".to_owned(),
+            false,
+        )
     } else {
         match &dialog.root {
             Finding::Looking => ("finding repositories\u{2026}".to_owned(), false),
@@ -12562,6 +12570,8 @@ fn new_feature_view(dialog: &NewFeatureDialog, project: String) -> NewFeatureVie
         (true, _) if review.is_some() => vec![("Tab", "next"), ("Enter", "pick")],
         (true, _) => vec![("Tab", "next"), ("Enter", "use branch")],
         (false, true) if reviewing => vec![("Tab", "next"), ("Space", "pick or leave out")],
+        // Nothing to tick with no project to link.
+        (false, true) if dialog.picking && dialog.others.is_empty() => Vec::new(),
         (false, true) => vec![("Tab", "next"), ("Space", "tick")],
         (false, false) => Vec::new(),
     };
@@ -12593,6 +12603,11 @@ fn new_feature_view(dialog: &NewFeatureDialog, project: String) -> NewFeatureVie
             into: Some((_, title)),
             ..
         }) => format!("Pull requests of \u{201c}{title}\u{201d}"),
+        // A picker of its own over the form.
+        _ if chosen.is_some() && review.is_some() => {
+            format!("Pull request of \u{201c}{chosen_name}\u{201d}")
+        }
+        _ if chosen.is_some() => format!("Base branch of \u{201c}{chosen_name}\u{201d}"),
         Some(_) => format!("Review pull requests in \u{201c}{project}\u{201d}"),
         None => format!("New feature in \u{201c}{project}\u{201d}"),
     };
@@ -12627,6 +12642,7 @@ fn new_feature_view(dialog: &NewFeatureDialog, project: String) -> NewFeatureVie
         hover: dialog.hover,
         keys,
         create,
+        choosing: chosen.is_some(),
     }
 }
 

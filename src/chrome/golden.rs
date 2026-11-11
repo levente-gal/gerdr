@@ -1706,6 +1706,7 @@ fn new_feature() -> super::NewFeatureView {
             ("Esc", "clear"),
         ],
         create: super::NEW_FEATURE_BUTTONS[super::CREATE],
+        choosing: false,
     }
 }
 
@@ -1724,7 +1725,9 @@ fn new_feature_bases() -> super::NewFeatureView {
         hint: "Filter branches",
         focus: Some(0),
         slots: 4,
-        root: "assettag-mobile starts from".into(),
+        heading: "Base branch of \u{201c}assettag-mobile\u{201d}".into(),
+        root: "Pick the branch assettag-mobile starts from".into(),
+        choosing: true,
         repos: vec![
             row("dev", "default", true),
             row("feature/decode", "", false),
@@ -1786,6 +1789,7 @@ fn new_review_pulls() -> super::NewFeatureView {
         title: Line::default(),
         hint: "Filter pull requests",
         focus: Some(0),
+        choosing: true,
         root: "Open pull requests of web".into(),
         repos: vec![
             row(

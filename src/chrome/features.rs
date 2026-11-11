@@ -150,6 +150,9 @@ pub struct NewFeatureView {
     pub keys: Vec<(&'static str, &'static str)>,
     /// Its Create button's label (`NEW_FEATURE_BUTTONS`, `SAVE_PULLS`).
     pub create: &'static str,
+    /// A picker over the form: a repository's base branch or pull request,
+    /// one of the rows (radio, not tick boxes), the form's buttons off.
+    pub choosing: bool,
 }
 
 /// What the pointer is over in the new feature dialog.
@@ -6069,13 +6072,18 @@ impl Painter {
         line(&mut c, &view.root, layout.root, FONT_SIZE, root_color);
         let mut projects = layout.projects;
         projects.size.w = layout.link.loc.x - projects.loc.x - QUIT_BUTTON_GAP;
-        let hovered = view.hover == Some(NewFeatureHit::Link);
+        // The picker over the form leaves the form's buttons off.
+        let form = |style| match view.choosing {
+            true => ButtonStyle::Off,
+            false => style,
+        };
+        let hovered = view.hover == Some(NewFeatureHit::Link) && !view.choosing;
         self.button(
             &mut c,
             view.link,
             shift(layout.link),
             (hovered, false),
-            ButtonStyle::Plain,
+            form(ButtonStyle::Plain),
             scale,
             p,
         );
@@ -6097,8 +6105,14 @@ impl Painter {
                 (rect.loc.x + ROW_INSET, rect.loc.y).into(),
                 (rect.size.w - ROW_INSET, rect.size.h).into(),
             );
-            let state = if repo.touched { Check::On } else { Check::Off };
-            let box_end = self.checkbox(&mut c, check, state, false, scale, p);
+            let box_end = match view.choosing {
+                // One of them: a radio.
+                true => self.radio(&mut c, check, repo.touched, scale, p),
+                false => {
+                    let state = if repo.touched { Check::On } else { Check::Off };
+                    self.checkbox(&mut c, check, state, false, scale, p)
+                }
+            };
             let mut end = phys(rect, scale).1 - (ROW_INSET as f32 * s).round();
             if let Some(label) = &repo.base {
                 let base = shift(*base);
@@ -6181,12 +6195,12 @@ impl Painter {
         // Labels as short as Create's take its width (`BUTTON_MIN_WIDTH`).
         let labels = [NEW_FEATURE_BUTTONS[0], view.create];
         for (i, (rect, label)) in layout.buttons.iter().zip(labels).enumerate() {
-            let style = if i == CREATE {
+            let style = form(if i == CREATE {
                 ButtonStyle::Primary
             } else {
                 ButtonStyle::Plain
-            };
-            let hovered = view.hover == Some(NewFeatureHit::Button(i));
+            });
+            let hovered = view.hover == Some(NewFeatureHit::Button(i)) && !view.choosing;
             self.button(
                 &mut c,
                 label,
