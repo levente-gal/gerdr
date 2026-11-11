@@ -899,7 +899,7 @@ impl Gerdr {
             id: id.to_owned(),
             accept,
         };
-        panel.note = Some((on, field));
+        panel.open_note(on, field);
         self.stop_key_repeat();
         self.select_panel_item(ItemOf::Suggestion, id);
     }

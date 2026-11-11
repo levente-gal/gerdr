@@ -19,8 +19,9 @@
 //! the app by Esc, the same chord, or a press on the app. With the keys:
 //! Space or Enter passes, F fails, Del clears, Ctrl+PgUp / Ctrl+PgDn (or Up /
 //! Down) step through the criteria, Alt+C takes a screenshot, Ctrl+O shows the
-//! page, Alt+Down folds it. Writing a note, Enter or Esc saves it (with
-//! nothing written, Esc leaves the criterion as it was), Shift+Enter breaks
+//! page, Alt+Down folds it. Writing a note, Enter saves it; Esc never does:
+//! it leaves the criterion as it was, what is written kept as a draft for its
+//! next note (Ctrl+Shift+Del discards it), Shift+Enter breaks
 //! the line, as on the card, and Alt+C adds a screenshot.
 //!
 //! The user's own comments are rows of it too, after the criteria: Done and
@@ -81,6 +82,9 @@ pub struct CriteriaStrip {
     at: HashMap<Key, usize>,
     /// The note being written on each feature's strip.
     drafts: HashMap<Key, Draft>,
+    /// Notes Esc put away unsaved, by feature: writing the same criterion's
+    /// note again goes on with one. Esc never saves, nor throws one away.
+    parked: HashMap<Key, Draft>,
     /// Its steps show.
     open: bool,
     /// The pane whose strip has the keys.
@@ -538,6 +542,15 @@ impl Gerdr {
         if !self.keep_strip_note(target) {
             return;
         }
+        if (self.criteria_strip.parked.get(&key)).is_some_and(|d| d.criterion == c)
+            && let Some(mut draft) = self.criteria_strip.parked.remove(&key)
+        {
+            draft.had_keys = self.criteria_strip_has_keys();
+            self.criteria_strip.drafts.insert(key, draft);
+            self.criteria_strip.keys = Some(target.pane);
+            self.stop_key_repeat();
+            return;
+        }
         let note = (self.feature(&target.project, &target.slug))
             .and_then(|f| manual::check(f.manual.as_ref(), &c))
             .filter(|k| k.state == Verdict::Fail)
@@ -556,6 +569,21 @@ impl Gerdr {
         );
         self.criteria_strip.keys = Some(target.pane);
         self.stop_key_repeat();
+    }
+
+    /// Esc on the strip's note: put away unsaved, for the next note on the
+    /// same criterion; with nothing written or taken, it just closes.
+    fn park_strip_note(&mut self, target: &Target) {
+        let key = target.key();
+        let Some(draft) = self.criteria_strip.drafts.remove(&key) else {
+            return;
+        };
+        if !draft.had_keys {
+            self.drop_criteria_keys();
+        }
+        if !draft.field.trim().is_empty() || !draft.shots.is_empty() {
+            self.criteria_strip.parked.insert(key, draft);
+        }
     }
 
     /// Stop writing the strip's note, saving it as the criterion's failure if
@@ -717,11 +745,18 @@ impl Gerdr {
                 }
                 return;
             }
+            let bare = !(mods.ctrl || mods.alt || mods.shift || mods.logo);
             match sym {
-                Keysym::Return | Keysym::KP_Enter | Keysym::Escape
-                    if !mods.ctrl && !mods.alt && !mods.shift =>
-                {
+                Keysym::Return | Keysym::KP_Enter if bare => {
                     self.keep_strip_note(&target);
+                }
+                Keysym::Escape if bare => self.park_strip_note(&target),
+                Keysym::Delete | Keysym::KP_Delete if crate::text_field::discard_key(mods) => {
+                    self.criteria_strip.parked.remove(&target.key());
+                    let draft = self.criteria_strip.drafts.remove(&target.key());
+                    if draft.is_some_and(|d| !d.had_keys) {
+                        self.drop_criteria_keys();
+                    }
                 }
                 _ if alt_c => self.criterion_shot(&target),
                 _ => {

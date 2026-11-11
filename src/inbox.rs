@@ -918,8 +918,8 @@ fn action_hint(action: ItemAction) -> (&'static str, &'static str) {
     use ItemAction as A;
     match action {
         A::GoTo => ("Enter", "go to"),
-        A::Snooze => ("Ctrl+H", "snooze 1h"),
-        A::SnoozeLong => ("Ctrl+Shift+H", "until tomorrow"),
+        A::Snooze => ("Ctrl+H", "snooze"),
+        A::SnoozeLong => ("Ctrl+Shift+H", "tomorrow"),
         A::Dismiss => ("Del", "dismiss"),
         A::Restore => ("Del", "restore"),
         A::Done => ("Del", "done"),
@@ -2033,6 +2033,24 @@ impl Panel {
             None if self.show_hidden => "Filter the hidden items…",
             None => "Filter the inbox…",
         };
+        let mut hints = self.hints(
+            &item_actions,
+            selected.map(|k| listed.items[k].section),
+            listed
+                .rows
+                .iter()
+                .any(|e| matches!(e, Entry::Label(s, n, _) if s.folds() && *n > 0)),
+            list,
+        );
+        // A key the detail's buttons show says what its button says, so the
+        // two can't drift ("Open" on a gate, "Tomorrow").
+        let buttons = detail.as_ref().map_or(&[][..], |d| d.buttons.as_slice());
+        for (key, what) in &mut hints {
+            let mut on = buttons.iter().filter(|b| b.key == *key);
+            if let (Some(button), None) = (on.next(), on.next()) {
+                *what = button.label.to_lowercase();
+            }
+        }
         InboxView {
             project: list.project.map(str::to_owned),
             all: list.active.map(|_| self.all),
@@ -2053,15 +2071,7 @@ impl Panel {
                 .map(|r| r - first),
             hover: self.hover,
             detail,
-            hints: self.hints(
-                &item_actions,
-                selected.map(|k| listed.items[k].section),
-                listed
-                    .rows
-                    .iter()
-                    .any(|e| matches!(e, Entry::Label(s, n, _) if s.folds() && *n > 0)),
-                list,
-            ),
+            hints,
             empty: empty.into(),
             show_hidden: self.show_hidden,
             part,

@@ -355,6 +355,9 @@ pub struct DiffView {
     pub(crate) cursor: Option<Cursor>,
     /// The comment being written.
     pub(crate) editing: Option<Editing>,
+    /// Comments Esc put away unsaved: writing one on the same lines again
+    /// goes on with it. Esc never saves, nor throws a draft away.
+    drafts: Vec<Editing>,
     /// The user's comments on AI review's findings can change: the feature
     /// is at AI review, its findings read in.
     pub(crate) notes_open: bool,
@@ -419,13 +422,29 @@ pub(crate) struct Editing {
     root: PathBuf,
     path: String,
     lines: Vec<Quoted>,
-    field: TextField,
+    pub(crate) field: TextField,
     /// The reason AI review finding `at` (its id here) is dismissed for,
     /// written in place of a comment.
     dismiss: Option<String>,
     /// The user's comment on this AI review finding: under the finding `at`
     /// when it is new, in place of the comment `at` when it is written.
     note_on: Option<String>,
+}
+
+impl Editing {
+    /// Whether `other` writes the same comment: on the same lines, of the
+    /// same kind. Drafts go by it.
+    fn same_place(&self, other: &Editing) -> bool {
+        (self.at, &self.root, &self.path, &self.lines, &self.note_on)
+            == (
+                other.at,
+                &other.root,
+                &other.path,
+                &other.lines,
+                &other.note_on,
+            )
+            && self.dismiss == other.dismiss
+    }
 }
 
 /// A diff row by who it is, to find it again as the rows change.
@@ -1513,7 +1532,7 @@ impl DiffView {
             return;
         };
         self.signals.error = Some(None);
-        self.editing = Some(Editing {
+        self.open_editor(Editing {
             at: None,
             root,
             path,
@@ -1541,7 +1560,7 @@ impl DiffView {
             return;
         };
         self.signals.error = Some(None);
-        self.editing = Some(Editing {
+        self.open_editor(Editing {
             at: None,
             root,
             path,
@@ -1578,7 +1597,7 @@ impl DiffView {
         }
         self.signals.error = Some(None);
         self.signals.focus = true;
-        self.editing = Some(Editing {
+        self.open_editor(Editing {
             at: Some(c),
             root: comment.root.clone(),
             path: comment.path.clone(),
@@ -1632,7 +1651,7 @@ impl DiffView {
         };
         self.signals.error = Some(None);
         self.signals.focus = true;
-        self.editing = Some(Editing {
+        self.open_editor(Editing {
             at: Some(at),
             root: comment.root.clone(),
             path: comment.path.clone(),
@@ -1676,6 +1695,35 @@ impl DiffView {
         self.editing
             .as_ref()
             .is_some_and(|e| e.dismiss.is_some() && e.field.trim().is_empty())
+    }
+
+    /// Start writing `editing`, going on with the draft Esc left on the
+    /// same lines, if any.
+    fn open_editor(&mut self, mut editing: Editing) {
+        if let Some(i) = self.drafts.iter().position(|d| d.same_place(&editing)) {
+            editing.field = self.drafts.remove(i).field;
+        }
+        self.editing = Some(editing);
+    }
+
+    /// Esc in the editor: put what is written away unsaved, as a draft for
+    /// the next comment on the same lines; nothing written, it just closes.
+    fn park_comment(&mut self, ctx: &Ctx) {
+        if let Some(editing) = self.editing.take() {
+            self.drafts.retain(|d| !d.same_place(&editing));
+            if !editing.field.trim().is_empty() {
+                self.drafts.push(editing);
+            }
+        }
+        self.build_rows(ctx.sections, self.diff_anchor());
+    }
+
+    /// Discard the comment being written, and its draft.
+    fn discard_comment(&mut self, ctx: &Ctx) {
+        if let Some(editing) = self.editing.take() {
+            self.drafts.retain(|d| !d.same_place(&editing));
+        }
+        self.build_rows(ctx.sections, self.diff_anchor());
     }
 
     /// Enter, Save or Dismiss in the editor: keep what is written, as
@@ -1933,7 +1981,7 @@ impl DiffView {
                 let (id, comment) = (flag.id.clone(), &self.review.comments[c]);
                 self.signals.error = Some(None);
                 self.signals.focus = true;
-                self.editing = Some(Editing {
+                self.open_editor(Editing {
                     at: Some(c),
                     root: comment.root.clone(),
                     path: comment.path.clone(),
@@ -2131,9 +2179,10 @@ impl DiffView {
     }
 
     /// A key while a comment is being written, which takes them all: Enter
-    /// (or Ctrl+Enter) keeps it, and so does Esc (a draft is never thrown
-    /// away by it: the Discard button does that), Shift+Enter breaks the
-    /// line; Ctrl+Shift+C copies the review still.
+    /// (or Ctrl+Enter) saves it; Esc never does, nor throws it away: it is
+    /// kept as a draft (`park_comment`), and the Discard button or
+    /// Ctrl+Shift+Del discards it. Shift+Enter breaks the line; Ctrl+Shift+C
+    /// copies the review still.
     fn editor_key(
         &mut self,
         mods: &ModifiersState,
@@ -2154,14 +2203,12 @@ impl DiffView {
             return None;
         }
         if sym == Keysym::Escape && plain {
-            // Esc with no reason keeps the finding, as the editor says:
-            // nothing to warn about.
-            if self.reason_missing() {
-                self.editing = None;
-                self.build_rows(ctx.sections, self.diff_anchor());
-            } else {
-                self.save_comment(ctx);
-            }
+            self.park_comment(ctx);
+            return None;
+        }
+        if matches!(sym, Keysym::Delete | Keysym::KP_Delete) && crate::text_field::discard_key(mods)
+        {
+            self.discard_comment(ctx);
             return None;
         }
         let field = &mut self.editing.as_mut()?.field;
@@ -2199,10 +2246,7 @@ impl DiffView {
                 self.comment_file(ctx);
             }
             B::SaveComment => self.submit_comment(ctx),
-            B::DiscardComment => {
-                self.editing = None;
-                self.build_rows(ctx.sections, self.diff_anchor());
-            }
+            B::DiscardComment => self.discard_comment(ctx),
             B::DeleteComment => {
                 if let Some(editing) = &mut self.editing {
                     editing.field = TextField::multiline("");
@@ -2807,10 +2851,13 @@ impl DiffView {
             (DiffRow::EditorHint { .. }, _) => DetailRow::Note(
                 match self.editing.as_ref().is_some_and(|e| e.dismiss.is_some()) {
                     true if self.editing_of() == ItemOf::Suggestion => {
-                        "Why reject it? Enter rejects it · Esc with no reason keeps it"
+                        "Why reject it? Enter rejects it · Esc leaves it as it was"
                     }
-                    true => "Why dismiss it? Enter dismisses it · Esc with no reason keeps it",
-                    false => "Shift+Enter breaks the line · Enter or Esc keeps it",
+                    true => "Why dismiss it? Enter dismisses it · Esc leaves it as it was",
+                    false => {
+                        "Enter saves · Shift+Enter breaks the line · Esc keeps a draft · \
+                         Ctrl+Shift+Del discards"
+                    }
                 }
                 .into(),
             ),

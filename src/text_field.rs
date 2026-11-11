@@ -45,6 +45,15 @@ thread_local! {
     static TOOK: Cell<bool> = const { Cell::new(false) };
 }
 
+/// The key discarding a note or comment being written, as the footer says
+/// it: Esc never does, it keeps what is written as a draft.
+pub const DISCARD_KEY: &str = "Ctrl+Shift+Del";
+
+/// Whether the modifiers are `DISCARD_KEY`'s, with Delete.
+pub fn discard_key(mods: &ModifiersState) -> bool {
+    mods.ctrl && mods.shift && !(mods.alt || mods.logo)
+}
+
 /// Whether the key pastes: Ctrl+V (with Shift too, as in terminals) or
 /// Shift+Insert.
 pub fn is_paste(mods: &ModifiersState, sym: Keysym) -> bool {

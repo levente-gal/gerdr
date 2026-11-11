@@ -3150,11 +3150,7 @@ pub(super) fn feature_tab() -> super::FeatureTabView {
         ("Left / Right", "stage"),
         ("Tab", "repositories"),
         ("Enter", "mark done"),
-        ("Ctrl+O", "open tab"),
-        ("Ctrl+C", "copy path"),
-        ("Ctrl+N", "new"),
-        ("Del", "abandon"),
-        ("F1", "all keys"),
+        ("F1", "keys"),
     ];
     FeatureTabView {
         review_page: false,
@@ -4317,19 +4313,11 @@ fn feature_tab_brief(locked: bool) -> super::FeatureTabView {
             },
         ],
     };
-    let mut hints = vec![
-        ("Left / Right", "stage"),
-        ("Enter", "go to the current stage"),
-    ];
+    let mut hints = vec![("Left / Right", "stage"), ("Enter", "go to Plan")];
     if !locked {
         hints.push(("Ctrl+Shift+Enter", "reopen"));
     }
-    hints.extend([
-        ("Tab", "repositories"),
-        ("Ctrl+O", "open tab"),
-        ("Ctrl+C", "copy path"),
-        ("F1", "all keys"),
-    ]);
+    hints.extend([("Tab", "repositories"), ("F1", "keys")]);
     view.hints = (hints.iter())
         .map(|(k, a)| ((*k).to_owned(), (*a).to_owned()))
         .collect();
@@ -4381,11 +4369,9 @@ fn feature_tab_start_over() -> super::FeatureTabView {
     };
     let hints = [
         ("Left / Right", "stage"),
-        ("Enter", "review plan"),
+        ("Enter", "review"),
         ("Tab", "repositories"),
-        ("Ctrl+O", "open tab"),
-        ("Ctrl+C", "copy path"),
-        ("F1", "all keys"),
+        ("F1", "keys"),
     ];
     view.hints = (hints.iter())
         .map(|(k, a)| ((*k).to_owned(), (*a).to_owned()))
@@ -5334,10 +5320,14 @@ fn feature_tab_manual_test(note: bool) -> super::FeatureTabView {
         text: "1 passed \u{b7} 2 failed \u{b7} 1 untested \u{b7} 1 fix made".into(),
     });
     if note {
-        view.hints = [("Enter", "save"), ("Esc", "save")]
-            .iter()
-            .map(|(k, w)| ((*k).to_owned(), (*w).to_owned()))
-            .collect();
+        view.hints = [
+            ("Enter", "save"),
+            ("Ctrl+Shift+Del", "discard"),
+            ("Esc", "keep draft"),
+        ]
+        .iter()
+        .map(|(k, w)| ((*k).to_owned(), (*w).to_owned()))
+        .collect();
     }
     view
 }
@@ -6967,7 +6957,8 @@ fn tab_plan_review(writing: bool) -> super::FeatureTabView {
         false => vec![
             ("Enter", "save and accept"),
             ("Shift+Enter", "new line"),
-            ("Esc", "save"),
+            ("Ctrl+Shift+Del", "discard"),
+            ("Esc", "keep draft"),
         ],
     }
     .into_iter()

@@ -78,7 +78,7 @@ pub struct Words {
     pub why_hint: &'static str,
     /// The refusing dialog with nothing typed: "Say why you dismiss it."
     pub say_why: &'static str,
-    /// The rewording dialog's title, before the id: "Edit the fix of".
+    /// The rewording dialog's title, before the id: "Edit fix of", as its button says it.
     pub edit_title: &'static str,
     /// The rewording dialog's field label: "Fix".
     pub edit_label: &'static str,
@@ -98,7 +98,7 @@ pub struct Words {
     pub own_label: &'static str,
     /// That field with nothing typed: "What should change".
     pub own_placeholder: &'static str,
-    /// The dialog adding one of the user's own: "Add a comment".
+    /// The dialog adding one of the user's own: "Add comment", as its button says it.
     pub add_title: &'static str,
     /// The user's comment on one, over it: "Your comment".
     pub comment: &'static str,
@@ -131,7 +131,7 @@ const FINDING: Words = Words {
     not_placed: "not in the diff",
     why_hint: "Why this doesn't need fixing",
     say_why: "Say why you dismiss it.",
-    edit_title: "Edit the fix of",
+    edit_title: "Edit fix of",
     edit_label: "Fix",
     save_want: "Save and fix",
     say_what: "Say what to fix.",
@@ -141,7 +141,7 @@ const FINDING: Words = Words {
     reads: "code",
     own_label: "Comment",
     own_placeholder: "What should change",
-    add_title: "Add a comment",
+    add_title: "Add comment",
     comment: "Your comment",
     answer: "Your comment",
     own_goes: "It goes to the Build agent with the fixes",
@@ -168,7 +168,7 @@ const SUGGESTION: Words = Words {
     not_placed: "not placed in the plan",
     why_hint: "Why the plan doesn't need this",
     say_why: "Say why you reject it.",
-    edit_title: "Edit the change of",
+    edit_title: "Edit change of",
     edit_label: "Change",
     save_want: "Save and accept",
     say_what: "Say what the plan should change.",
@@ -178,7 +178,7 @@ const SUGGESTION: Words = Words {
     reads: "plan",
     own_label: "Suggestion",
     own_placeholder: "Its title on the first line, then the change",
-    add_title: "Add a suggestion",
+    add_title: "Add suggestion",
     comment: "Your comment",
     answer: "Your answer",
     own_goes: "It goes into the final plan",

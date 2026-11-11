@@ -124,7 +124,10 @@ impl Asked {
 /// What the dialog asks gerdr to do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FindingDialogOutcome {
+    /// Closed, what was typed kept as a draft for the next opening.
     Cancel,
+    /// Closed, what was typed thrown away (Ctrl+Shift+Del).
+    Discard,
     Save,
 }
 
@@ -171,6 +174,9 @@ impl FindingDialog {
         match sym {
             // Closed, what was typed kept for the next opening.
             Keysym::Escape => return Some(FindingDialogOutcome::Cancel),
+            Keysym::Delete | Keysym::KP_Delete if crate::text_field::discard_key(mods) => {
+                return Some(FindingDialogOutcome::Discard);
+            }
             _ if enter && mods.shift && !mods.ctrl && !others => {
                 if let Some(field) = self.fields.get_mut(self.focus) {
                     field.newline();
@@ -250,7 +256,14 @@ impl FindingDialog {
             keys.push(("Tab", "next"));
         }
         keys.push(("Shift+Enter", "new line"));
-        keys.push(("Esc", "close"));
+        // Esc never throws what was typed away: it waits as a draft.
+        match self.texts() == self.from {
+            true => keys.push(("Esc", "close")),
+            false => {
+                keys.push((crate::text_field::DISCARD_KEY, "discard"));
+                keys.push(("Esc", "keep draft"));
+            }
+        }
         FindingDialogView {
             title,
             about: self.about.clone(),
@@ -556,6 +569,10 @@ impl Gerdr {
             }
             return;
         }
+        if outcome == FindingDialogOutcome::Discard {
+            self.features.finding_drafts.remove(&key);
+            return;
+        }
         self.features.finding_drafts.remove(&key);
         let (project, slug, id) = (&dialog.project, &dialog.slug, &dialog.id);
         let first = texts.first().map_or("", String::as_str).to_owned();
@@ -844,9 +861,9 @@ mod tests {
         let view = suggestion(Ask::Edit, &["c"]).view();
         assert_eq!(view.action, "Save and accept");
         assert_eq!(view.fields[0].label, "Change");
-        assert_eq!(view.title, "Edit the change of r1-1");
+        assert_eq!(view.title, "Edit change of r1-1");
         let mut own = suggestion(Ask::Add, &[""]);
-        assert_eq!(own.view().title, "Add a suggestion");
+        assert_eq!(own.view().title, "Add suggestion");
         assert_eq!(press(&mut own, &none(), Keysym::Return), None);
         assert_eq!(own.error.as_deref(), Some(w.say_what));
         // Nothing a suggestion's dialog says speaks of fixing.

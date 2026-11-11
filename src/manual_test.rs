@@ -762,9 +762,10 @@ impl Gerdr {
 
     /// A key while the note of a criterion is being written; false when none
     /// is, or its page has gone (the note is kept then), and the key is the
-    /// tab's. Enter saves it, as does Esc; with nothing written, Enter says
-    /// why not and Esc leaves the criterion as it was. Shift+Enter breaks
-    /// the line.
+    /// tab's. Enter saves it; with nothing written, Enter says why not. Esc
+    /// never saves: it leaves the card as it was, what is written kept as a
+    /// draft for its next note, and Ctrl+Shift+Del discards that. Shift+Enter
+    /// breaks the line.
     pub(crate) fn criterion_note_key(
         &mut self,
         mods: &ModifiersState,
@@ -809,8 +810,20 @@ impl Gerdr {
                 }
                 None => self.show_warning(NO_NOTE.into()),
             },
-            Keysym::Return | Keysym::KP_Enter | Keysym::Escape => {
+            Keysym::Return | Keysym::KP_Enter => {
                 self.keep_criterion_note();
+            }
+            // Esc never saves: what is written waits as a draft for the
+            // card's next note.
+            Keysym::Escape => {
+                if let Some(panel) = self.features.panel.as_mut() {
+                    panel.park_note();
+                }
+            }
+            Keysym::Delete | Keysym::KP_Delete if crate::text_field::discard_key(mods) => {
+                if let Some(panel) = self.features.panel.as_mut() {
+                    panel.discard_note();
+                }
             }
             _ => {
                 field.key(mods, sym, typed);
@@ -1253,7 +1266,7 @@ impl Gerdr {
     fn write_criterion_note(&mut self, i: usize, note: &str) {
         let field = TextField::multiline(note);
         if let Some(panel) = self.features.panel.as_mut() {
-            panel.note = Some((CardNote::Criterion(i), field));
+            panel.open_note(CardNote::Criterion(i), field);
             // The note has the keys, not the search.
             if let Some(search) = panel.search.as_mut() {
                 search.typing = false;

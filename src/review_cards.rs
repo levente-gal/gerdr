@@ -409,7 +409,10 @@ pub(crate) fn item_hints(
         match standing {
             // One of the user's own suggestions has nothing to take back.
             Standing::Fix if yours && suggestion.is_some() => {}
-            Standing::Open | Standing::Dismissed if unanswered => hint("f", "answer".into()),
+            // It opens the answer first, `c`'s: accepted once answered.
+            Standing::Open | Standing::Dismissed if unanswered => {
+                hint("f", format!("{}\u{2026}", lower(w.want)))
+            }
             Standing::Open | Standing::Dismissed => hint("f", lower(w.want)),
             Standing::Fix => hint("f", lower(w.unwant)),
             _ => {}

@@ -1344,7 +1344,7 @@ impl Gerdr {
         }
     }
 
-    /// Open the picker of `stage`'s model (its card's button, Ctrl+Shift+I).
+    /// Open the picker of `stage`'s model (its card's button, Alt+Shift+A).
     /// An agent gerdr can't tell a model is said so: the key does nothing
     /// else there.
     pub(crate) fn pick_stage_model(&mut self, project: &str, slug: &str, stage: Stage) {

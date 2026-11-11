@@ -1272,6 +1272,16 @@ const fn alt_shift(syms: &'static [Keysym]) -> Chord {
 }
 
 const ENTER: &[Keysym] = &[Keysym::Return, Keysym::KP_Enter];
+/// The key deleting the review's comments, asking first: Ctrl+Del deletes
+/// all, as in the inbox.
+pub(crate) const CLEAR_REVIEW_KEY: &str = "Ctrl+Del";
+
+/// Whether the key is `CLEAR_REVIEW_KEY`.
+pub(crate) fn clear_review_key(mods: &ModifiersState, sym: Keysym) -> bool {
+    mods.ctrl
+        && !(mods.shift || mods.alt || mods.logo)
+        && matches!(sym, Keysym::Delete | Keysym::KP_Delete)
+}
 const DELETE: &[Keysym] = &[Keysym::Delete, Keysym::KP_Delete];
 
 /// An action of the panel with a chord of its own, pressed with either
@@ -1506,7 +1516,11 @@ const FOCUS_KEYS: &[(&str, &str)] = &[
     ),
     (
         "Enter / Shift+Enter",
-        "in a comment, keep it; a new line (Esc keeps it too)",
+        "in a comment, save it; a new line (Esc keeps it as a draft, Ctrl+Shift+Del discards it)",
+    ),
+    (
+        "Ctrl+Del",
+        "in the diff, delete the review's comments, asking first (Clear review)",
     ),
     (
         "g Space / Ctrl+click",
@@ -1616,6 +1630,8 @@ pub(crate) fn key_name(button: ReposButton) -> &'static str {
         B::ShowCommit => "Enter",
         B::All | B::CleanOnly | B::PullRebase | B::PullMerge => "Enter",
         B::SkipDiverged | B::Cancel | B::Close | B::EditName => "Esc",
+        // Delete all, as in the inbox; asked first on a sheet.
+        B::ClearReview => CLEAR_REVIEW_KEY,
         _ => "",
     }
 }
@@ -3568,6 +3584,14 @@ impl Panel {
         if self.sheet.is_some() {
             return self.sheet_press(button, ctx);
         }
+        // The footer's Esc: as the key, back to the tree, then closed.
+        if button == ReposButton::Close {
+            if self.focus == Focus::Tree {
+                return Some(Outcome::Close);
+            }
+            self.focus = Focus::Tree;
+            return None;
+        }
         if button == ReposButton::ClearReview {
             if self.diff.review.is_empty() {
                 self.error = Some(NO_REVIEW.into());
@@ -3923,6 +3947,14 @@ impl Panel {
         }
         if let Some(button) = action_key(mods, sym) {
             return self.act(button, ctx);
+        }
+        // Not while writing: there it deletes a word.
+        if clear_review_key(mods, sym)
+            && self.focus != Focus::Field
+            && self.diff.editing.is_none()
+            && !self.diff.review.is_empty()
+        {
+            return self.act(ReposButton::ClearReview, ctx);
         }
         // Shift with the arrows or the pages scrolls the detail, with
         // either focus; in the diff, with its own, they reach the cursor's
@@ -4891,15 +4923,20 @@ impl Panel {
         if !self.diff.review.is_empty() {
             buttons.extend([B::CopyReview, B::SendReview, B::ClearReview]);
         }
-        buttons.push(B::Help);
+        buttons.extend([B::Help, B::Close]);
         buttons
             .into_iter()
             .map(|button| Hint {
                 button,
-                label: self.button_label(button, ctx),
+                label: match button {
+                    // Esc steps back: to the tree, then closes.
+                    B::Close if self.focus != Focus::Tree => "back".into(),
+                    B::Close => "close".into(),
+                    _ => self.button_label(button, ctx),
+                },
                 key: key_name(button).into(),
                 disabled: match self.plan(button, ctx) {
-                    _ if button == ReposButton::Help => None,
+                    _ if matches!(button, ReposButton::Help | ReposButton::Close) => None,
                     _ if button == ReposButton::ClearReview => {
                         self.diff.review.is_empty().then(|| NO_REVIEW.into())
                     }
@@ -6451,7 +6488,8 @@ mod tests {
         let ctx = ctx(&items, None);
         let mut panel = Panel::new(&items);
         let hints = panel.view("p", &ctx).hints;
-        let help = hints.last().expect("a hint");
+        // Before Esc's, the last.
+        let help = &hints[hints.len() - 2];
         assert_eq!((help.button, help.key.as_str()), (ReposButton::Help, "F1"));
         assert_eq!(help.label, "keys");
         assert_eq!(press(&mut panel, none(), Keysym::F1, &ctx), None);
@@ -7930,7 +7968,7 @@ mod tests {
             [
                 "| why",
                 "| and b",
-                "~ Shift+Enter breaks the line · Enter or Esc keeps it",
+                "~ Enter saves · Shift+Enter breaks the line · Esc keeps a draft · Ctrl+Shift+Del discards",
                 "+c"
             ]
         );
@@ -7999,16 +8037,33 @@ mod tests {
         let rows = detail_rows(&panel.view("p", &ctx));
         assert_eq!(rows[3..9], ["+x", "+a", "+b", "> why", "> and b", "+c"]);
 
-        // c on it edits it; Esc keeps the edit, and doesn't close the
-        // panel.
+        // c on it edits it; Esc never saves the edit, nor throws it away:
+        // the next c goes on with it. It doesn't close the panel.
         panel.diff.set_cursor(6, None);
         press(&mut panel, none(), Keysym::c, &ctx);
         assert_eq!(panel.diff.editing.as_ref().map(|e| e.at), Some(Some(0)));
         type_text(&mut panel, "!", &ctx);
         assert_eq!(press(&mut panel, none(), Keysym::Escape, &ctx), None);
         assert!(panel.diff.editing.is_none());
-        assert_eq!(panel.diff.review.comments[0].text, "why\nand b!");
-        panel.diff.review.comments[0].text = "why\nand b".into();
+        assert_eq!(panel.diff.review.comments[0].text, "why\nand b");
+        press(&mut panel, none(), Keysym::c, &ctx);
+        let draft = panel
+            .diff
+            .editing
+            .as_ref()
+            .map(|e| e.field.trim().to_owned());
+        assert_eq!(draft.as_deref(), Some("why\nand b!"));
+        // Ctrl+Shift+Del discards it.
+        press(&mut panel, mods(true, true, false), Keysym::Delete, &ctx);
+        assert!(panel.diff.editing.is_none());
+        press(&mut panel, none(), Keysym::c, &ctx);
+        let edit = panel
+            .diff
+            .editing
+            .as_ref()
+            .map(|e| e.field.trim().to_owned());
+        assert_eq!(edit.as_deref(), Some("why\nand b"));
+        press(&mut panel, none(), Keysym::Escape, &ctx);
         panel.diff.rebuild(&sections(&items));
 
         // b gone, it is listed with those whose lines are gone.
@@ -8492,9 +8547,18 @@ mod tests {
                 ReposButton::MarkResolved,
                 ReposButton::Continue,
                 ReposButton::Abort,
-                ReposButton::Help
+                ReposButton::Help,
+                ReposButton::Close
             ]
         );
+        // Esc is hinted: back to the tree from elsewhere, then close.
+        let esc = |panel: &Panel| panel.view("p", &ctx).hints.last().map(|h| h.label.clone());
+        assert_eq!(esc(&panel).as_deref(), Some("close"));
+        panel.focus = Focus::Detail;
+        assert_eq!(esc(&panel).as_deref(), Some("back"));
+        assert_eq!(panel.press(ReposButton::Close, &ctx), None);
+        assert_eq!(panel.focus, Focus::Tree);
+        assert_eq!(panel.press(ReposButton::Close, &ctx), Some(Outcome::Close));
         let hints = panel.view("p", &ctx).hints;
         assert_eq!(
             hints[2].disabled.as_deref(),
