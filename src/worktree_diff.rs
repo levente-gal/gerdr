@@ -2253,11 +2253,18 @@ impl crate::Gerdr {
                 self.close_worktree_diff();
                 None
             }
-            // Back to the feature's tab; this one stays, for the next look.
+            // Back to the feature's tab, and this one closes: its comments
+            // are kept with the file, and the page opens it again. One with a
+            // comment being written stays, not to lose it.
             Done::Close if doc => {
                 let of = self.wd().and_then(|wd| wd.doc.clone());
+                let writing = self.wd().is_some_and(|wd| wd.diff.editing.is_some());
+                let id = self.tab().map(|tab| tab.id).filter(|_| !writing);
                 if let Some(of) = of {
                     self.show_feature_tab(&of.project, &of.slug);
+                }
+                if let Some((w, t)) = id.and_then(|id| self.tab_place(id)) {
+                    self.close_tab_in(w, t);
                 }
                 None
             }
