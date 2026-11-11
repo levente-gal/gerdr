@@ -428,6 +428,11 @@ impl Expected {
                 .or(self.window_of.as_ref().map(|(command, _)| command.as_str()))
                 .and_then(program)
                 .unwrap_or_else(|| "app".into()),
+            // A browser's app window is named by its id, not for people.
+            other if other.contains(web_control::EXTENSION_ID) => "the preview".into(),
+            other if other.starts_with("chrome-") || other.starts_with("chromium-") => {
+                "the browser".into()
+            }
             other => other.to_owned(),
         }
     }
