@@ -608,6 +608,8 @@ impl Store {
 
     /// Take `state.json` in; one that can't be parsed is set aside.
     fn load_state(&mut self, path: &Path) {
+        // What this gerdr changes is told from defaults until a file reads.
+        self.books.state_base = serde_json::to_value(self.state()).unwrap_or_default();
         match read_state(path) {
             Ok(Some((state, written))) => {
                 self.books.state_base = serde_json::to_value(&state).unwrap_or_default();
@@ -623,7 +625,7 @@ impl Store {
                 if std::fs::read(path).is_ok() {
                     set_aside(path);
                 } else {
-                    self.books.state_base = serde_json::to_value(self.state()).unwrap_or_default();
+                    crate::problems::report(STATE_PROBLEM, unreadable_state(path));
                 }
             }
         }
@@ -990,8 +992,8 @@ impl Store {
         let disk = on_disk(path, self.books.state);
         if disk.is_none() && path.exists() {
             // It can't be read: writing could put defaults over what it holds.
-            tracing::warn!("not saving {}: it can't be read", path.display());
-            return Ok(());
+            crate::problems::report(STATE_PROBLEM, unreadable_state(path));
+            return Err(std::io::Error::other("it can't be read"));
         }
         if disk != self.books.state
             && let Ok(Some((theirs, _))) = read_state(path)
@@ -1023,6 +1025,7 @@ impl Store {
             json = serde_json::to_vec_pretty(&self.state())?;
         }
         write_atomic(path, &json)?;
+        crate::problems::clear(STATE_PROBLEM);
         self.books.state = Some(digest(&json));
         self.books.state_base = serde_json::to_value(self.state())?;
         Ok(())
@@ -1303,6 +1306,17 @@ fn read_project(id: &str, path: &Path) -> Result<(Project, u64), String> {
         return Err(format!("id {:?} doesn't match the file name", project.id));
     }
     Ok((project, digest(&raw)))
+}
+
+/// The source of the problem of a `state.json` that can't be read.
+const STATE_PROBLEM: &str = "state";
+
+/// What the user is told of `state.json` at `path` that can't be read.
+fn unreadable_state(path: &Path) -> String {
+    format!(
+        "gerdr can't read {}: layout, history and other state changes aren't saved until it can",
+        path.display()
+    )
 }
 
 /// What `state.json` at `path` holds, and a digest of its bytes; `None` if

@@ -5104,7 +5104,7 @@ impl Panel {
                             Some(Verdict::Unmerged(n)) => {
                                 unmerged += 1;
                                 let lost = count(*n, "commit");
-                                (format!("unmerged: {lost} only on it"), Tone::Warning)
+                                (format!("unmerged: {lost} in no other branch"), Tone::Warning)
                             }
                             Some(Verdict::Blocked(why)) => {
                                 blocked += 1;
@@ -8960,7 +8960,7 @@ mod tests {
             sheet.title,
             "Delete branch: 1 clean · 1 unmerged · 1 blocked"
         );
-        assert_eq!(sheet.lines[1].1, "unmerged: 2 commits only on it");
+        assert_eq!(sheet.lines[1].1, "unmerged: 2 commits in no other branch");
         // Clean only, by default.
         assert_eq!(
             press(&mut panel, none(), Keysym::Return, &ctx),

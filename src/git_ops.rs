@@ -1253,8 +1253,8 @@ pub fn delete_branch(dir: &Path, name: &str, force: bool) -> OpResult {
     if !force {
         match unmerged_commits(dir, name) {
             Some(0) => {}
-            Some(1) => return Err(op.blocked("1 commit only on it")),
-            Some(n) => return Err(op.blocked(&format!("{n} commits only on it"))),
+            Some(1) => return Err(op.blocked("1 commit in no other branch")),
+            Some(n) => return Err(op.blocked(&format!("{n} commits in no other branch"))),
             None => return Err(op.blocked("can't tell what it would lose")),
         }
     }
@@ -2551,7 +2551,7 @@ mod tests {
         assert_eq!(unmerged_commits(r, "feat"), Some(1));
         assert_eq!(
             failure(delete_branch(r, "feat", false)),
-            Failure::Blocked("1 commit only on it".into())
+            Failure::Blocked("1 commit in no other branch".into())
         );
         assert!(has_ref(r, "refs/heads/feat"));
         // Its own remote copy isn't a home: a pruning fetch can drop it.

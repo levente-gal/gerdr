@@ -197,9 +197,12 @@ impl Gerdr {
             true => "what it listens on".to_owned(),
             false => format!("ports {}", ports.join(", ")),
         };
-        let body = format!(
+        let mut body = format!(
             "Phones and anything else on your network can then reach its app at {ip}, {what}, and its copy of the data. It closes when the sandbox stops, or on Ctrl+Shift+N."
         );
+        if let Some(local) = local_only(run) {
+            body.push_str(&format!(" {local}."));
+        }
         self.ask(
             "Open the sandbox to your network?".into(),
             body,
@@ -244,6 +247,11 @@ impl Gerdr {
                 seen.ip,
                 ports.join(", ")
             ));
+        } else if let Some(local) = (self.feature(project, slug))
+            .and_then(|f| f.sandbox.as_ref())
+            .and_then(local_only)
+        {
+            self.show_warning(local);
         }
     }
 
@@ -297,6 +305,20 @@ impl Gerdr {
             self.show_error(text);
         }
     }
+}
+
+/// What to tell when `run`'s app listens on loopback only, which stays off
+/// the network: `None` when something of it listens wider, or nothing does.
+fn local_only(run: &crate::feature::sandbox_run::SandboxRun) -> Option<String> {
+    let (all, wide) = (run.listening(), run.listening_wide());
+    if !wide.is_empty() || all.is_empty() {
+        return None;
+    }
+    let ports: Vec<String> = all.iter().map(u16::to_string).collect();
+    Some(format!(
+        "Its app listens on this machine only (ports {}): start it on 0.0.0.0 for a phone to reach it",
+        ports.join(", ")
+    ))
 }
 
 #[cfg(test)]
