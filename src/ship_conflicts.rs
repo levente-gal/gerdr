@@ -8,6 +8,7 @@
 use crate::{
     Gerdr,
     confirm::Then,
+    doc_review::{CONFLICT_PLAN_PAST, DocFile},
     feature::{
         self, Resolving, Stage, UpdateWay,
         agents::{command_line, with_prompt},
@@ -385,11 +386,73 @@ impl Gerdr {
             return;
         };
         let data = store::dir(None, project, slug);
-        let plan = resolving.plan(&data);
-        if !plan.exists() {
+        if !resolving.plan(&data).exists() {
             return self.show_warning("The plan isn't written yet".to_owned());
         }
-        self.open_in_zed(&plan, crate::launch::Place::Tab, "the plan");
+        // Reviewed as a stage's file is: Approve resolves as planned.
+        self.open_doc_tab(project, slug, DocFile::ConflictPlan(resolving.n));
+    }
+
+    /// The plan of conflicts `file` shows is approved: they are resolved as
+    /// planned, its review done.
+    pub(crate) fn approve_conflict_plan(&mut self, project: &str, slug: &str, file: DocFile) {
+        let Some(r) = (self.feature(project, slug))
+            .and_then(|f| f.shipping.resolving.clone())
+            .filter(|r| r.planning && DocFile::ConflictPlan(r.n) == file)
+        else {
+            return self.show_warning(CONFLICT_PLAN_PAST.into());
+        };
+        self.doc_done(project, slug, file);
+        self.resolve_conflicts(project, slug, &r.repo, false);
+    }
+
+    /// Send the plan of conflicts `file` shows back to its agent with
+    /// `comments` (Markdown), kept beside it: it writes the plan again.
+    pub(crate) fn send_back_conflict_plan(
+        &mut self,
+        project: &str,
+        slug: &str,
+        file: DocFile,
+        comments: String,
+    ) {
+        let Some(r) = (self.feature(project, slug))
+            .and_then(|f| f.shipping.resolving.clone())
+            .filter(|r| r.planning && DocFile::ConflictPlan(r.n) == file)
+        else {
+            return self.show_warning(CONFLICT_PLAN_PAST.into());
+        };
+        let data = store::dir(None, project, slug);
+        let sent = data.join(format!("conflicts-{}-comments.md", r.n));
+        if let Err(err) = std::fs::write(&sent, &comments) {
+            tracing::warn!("writing {}: {err}", sent.display());
+            return self.show_error(format!("Couldn't keep the comments: {err}"));
+        }
+        let line = format!(
+            "The user sent your plan back: read their comments in {} and write the plan at {} again.",
+            sent.display(),
+            r.plan(&data).display()
+        );
+        // A pane back at its shell would run the line as a command.
+        let told = match (r.pane.as_deref(), self.herdr.as_mut()) {
+            (Some(pane), Some(herdr)) => {
+                match crate::prepare::step(&herdr.process_info(pane)) {
+                    crate::prepare::Step::Busy => herdr.send_agent_line(pane, &line),
+                    _ => Err(crate::feature_build::AGENT_QUIT.to_owned()),
+                }
+            }
+            (None, _) => Err("its agent's tab is gone".to_owned()),
+            (_, None) => Err("herdr isn't connected".to_owned()),
+        };
+        if let Err(why) = told {
+            tracing::warn!("sending the conflicts plan of {project}/{slug} back: {why}");
+            return self.show_error(format!("Couldn't send the plan back: {why}"));
+        }
+        self.doc_done(project, slug, file);
+        if let Some(feature) = self.feature_mut(project, slug) {
+            feature.log(feature::now(), format!("Conflicts plan of {} sent back", r.repo));
+            self.save_feature(project, slug);
+        }
+        self.show_success(format!("Sent the plan back to {}", r.agent));
     }
 }
 
