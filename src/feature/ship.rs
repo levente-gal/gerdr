@@ -1905,7 +1905,8 @@ esac
         let (dir, command) = squash_command(&f, &check.actions);
         let linked = f.repos[1].main.clone();
         assert_eq!(dir, linked);
-        assert!(command.starts_with(&format!("cd '{}' &&", linked.display())));
+        let cd = crate::desktop::shell_quote(&linked.to_string_lossy());
+        assert!(command.starts_with(&format!("cd {cd} &&")));
 
         let gh = fake_gh(&t);
         let prs = open_prs(&f, &check.actions, &gh).unwrap();

@@ -618,9 +618,12 @@ impl Store {
             Err(err) => {
                 tracing::warn!("reading {}: {err}", path.display());
                 // Only a file that reads but doesn't parse is broken; a read
-                // error (permissions, I/O) leaves a healthy file in place.
+                // error (permissions, I/O) leaves a healthy file in place,
+                // merged later into what this gerdr changes from defaults.
                 if std::fs::read(path).is_ok() {
                     set_aside(path);
+                } else {
+                    self.books.state_base = serde_json::to_value(self.state()).unwrap_or_default();
                 }
             }
         }
@@ -984,7 +987,13 @@ impl Store {
         if self.books.state == Some(digest(&json)) {
             return Ok(());
         }
-        if on_disk(path, self.books.state) != self.books.state
+        let disk = on_disk(path, self.books.state);
+        if disk.is_none() && path.exists() {
+            // It can't be read: writing could put defaults over what it holds.
+            tracing::warn!("not saving {}: it can't be read", path.display());
+            return Ok(());
+        }
+        if disk != self.books.state
             && let Ok(Some((theirs, _))) = read_state(path)
         {
             let ours = serde_json::to_value(self.state())?;
@@ -3069,9 +3078,40 @@ mod tests {
         b.save();
         let (reread, _) = Store::load_from(&root, || None);
         // A's removal stays removed; both adds and B's width are kept.
-        assert_eq!(reread.machine_last.keys().collect::<Vec<_>>(), ["a", "b"]);
+        assert_eq!(reread.machine_last.keys().collect::<Vec<_>>(), ["ZenBook", "a", "b"]);
         assert_eq!(reread.sidebar_width, Some(300));
         assert_eq!(b.machine_last, reread.machine_last);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_state_file_that_cant_be_read_is_kept_and_merged_later() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = scratch("state-unreadable");
+        let mut first = at(&root, two());
+        first.machine_last.insert("old".into(), "1".into());
+        first.save();
+        let path = root.join("state.json");
+        let mode = |m| std::fs::set_permissions(&path, std::fs::Permissions::from_mode(m)).unwrap();
+        mode(0o000);
+        let (mut b, _) = Store::load_from(&root, || None);
+        if std::fs::read(&path).is_ok() {
+            // Root reads it anyway: nothing to test.
+            mode(0o600);
+            let _ = std::fs::remove_dir_all(&root);
+            return;
+        }
+        b.sidebar_width = Some(300);
+        b.save();
+        mode(0o600);
+        assert!(path.is_file(), "not set aside");
+        let (kept, _) = Store::load_from(&root, || None);
+        assert_eq!(kept.machine_last.keys().collect::<Vec<_>>(), ["ZenBook", "old"]);
+        assert_eq!(kept.sidebar_width, Some(280), "nothing written over it");
+        b.save();
+        let (merged, _) = Store::load_from(&root, || None);
+        assert_eq!(merged.machine_last.keys().collect::<Vec<_>>(), ["ZenBook", "old"]);
+        assert_eq!(merged.sidebar_width, Some(300));
         let _ = std::fs::remove_dir_all(&root);
     }
 

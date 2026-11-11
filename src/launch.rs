@@ -1668,7 +1668,9 @@ pub fn append_log(path: &Path) -> Option<std::fs::File> {
 fn cut_big_log(path: &Path) {
     if std::fs::metadata(path).is_ok_and(|m| m.len() > LOG_MAX) {
         let file = std::fs::OpenOptions::new().write(true).open(path);
-        let _ = file.and_then(|f| f.set_len(0));
+        if let Err(err) = file.and_then(|f| f.set_len(0)) {
+            tracing::warn!("starting {} over: {err}", path.display());
+        }
     }
 }
 

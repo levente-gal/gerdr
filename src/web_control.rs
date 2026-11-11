@@ -887,11 +887,11 @@ mod tests {
     #[test]
     fn the_boot_page_carries_the_page_encoded() {
         let url = boot_url(3, "https://github.com/cli/cli/pulls?q=is:open#top");
-        let pid = std::process::id();
+        let pane = pane_token(3);
         assert_eq!(
             url,
             format!(
-                "chrome-extension://{EXTENSION_ID}/open.html?pane={pid}.3\
+                "chrome-extension://{EXTENSION_ID}/open.html?pane={pane}\
                  &url=https%3A%2F%2Fgithub.com%2Fcli%2Fcli%2Fpulls%3Fq%3Dis%3Aopen%23top"
             )
         );
