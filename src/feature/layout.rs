@@ -1679,9 +1679,96 @@ pub fn heads(feature: &Feature) -> Vec<KeptHead> {
             Some(KeptHead {
                 repo: r.key(),
                 sha: sha.trim().to_owned(),
+                changes: None,
             })
         })
         .collect()
+}
+
+/// The ref keeping `branch`'s head, once abandoned, out of reach of `git gc`.
+fn kept_ref(branch: &str) -> String {
+    format!("refs/gerdr/kept/{branch}")
+}
+
+/// The ref keeping what `branch`'s worktree had uncommitted, once abandoned.
+fn kept_changes_ref(branch: &str) -> String {
+    format!("refs/gerdr/kept-changes/{branch}")
+}
+
+/// `heads` of `feature`, abandoned, with all it has that `remove` would lose
+/// kept: each worktree's commit under a ref of its own (its branch goes), and
+/// what it has uncommitted, untracked files too, as a stash commit under
+/// another, its stash list left as it was. `restore` puts both back. Fails
+/// before anything goes when one can't be kept.
+pub fn keep(feature: &Feature) -> Result<Vec<KeptHead>, String> {
+    let branch = feature.branch();
+    let mut heads = heads(feature);
+    for i in 0..heads.len() {
+        let Some(repo) = feature.repo(&heads[i].repo) else {
+            continue;
+        };
+        let own = repo.branch.as_deref().unwrap_or(&branch);
+        match keep_repo(repo, own, &heads[i].sha, &feature.title) {
+            Ok(changes) => heads[i].changes = changes,
+            Err(why) => {
+                // Nothing goes then: the changes kept so far go back.
+                unkeep(feature, &heads[..i]);
+                return Err(why);
+            }
+        }
+    }
+    Ok(heads)
+}
+
+/// Put back what `keep` took of `heads` into the worktrees still there:
+/// abandoning stopped before they went.
+pub fn unkeep(feature: &Feature, heads: &[KeptHead]) {
+    for head in heads {
+        let (Some(sha), Some(repo)) = (&head.changes, feature.repo(&head.repo)) else {
+            continue;
+        };
+        if repo.worktree.is_dir()
+            && let Err(err) = git(&repo.worktree, &["stash", "apply", "-q", "--index", sha])
+        {
+            tracing::warn!("putting back the changes of {}: {err}", head.repo);
+        }
+    }
+}
+
+/// `keep`'s work on `repo`, whose branch is `branch` at `sha`: its commit
+/// under a ref, and what it has uncommitted as a stash commit under another,
+/// whose commit it returns. A failure after the stash puts the changes back.
+fn keep_repo(repo: &Repo, branch: &str, sha: &str, title: &str) -> Result<Option<String>, String> {
+    let name = repo.key();
+    git(&repo.main, &["update-ref", &kept_ref(branch), sha])
+        .map_err(|err| format!("{name}: couldn't keep its commit: {err}"))?;
+    let status = git(&repo.worktree, &["status", "--porcelain", "--untracked-files=all"])
+        .map_err(|err| format!("{name}: {err}"))?;
+    if status.trim().is_empty() {
+        return Ok(None);
+    }
+    let message = format!("gerdr: {title} abandoned");
+    git(&repo.worktree, &["stash", "push", "-q", "--include-untracked", "-m", &message])
+        .map_err(|err| format!("{name}: couldn't keep its changes: {err}"))?;
+    let kept = git(&repo.worktree, &["rev-parse", "refs/stash"])
+        .map(|sha| sha.trim().to_owned())
+        .and_then(|sha| {
+            git(&repo.main, &["update-ref", &kept_changes_ref(branch), &sha]).map(|_| sha)
+        });
+    let sha = match kept {
+        Ok(sha) => sha,
+        Err(err) => {
+            if let Err(err) = git(&repo.worktree, &["stash", "pop", "-q", "--index"]) {
+                tracing::warn!("putting back the changes of {name}: {err}");
+            }
+            return Err(format!("{name}: couldn't keep its changes: {err}"));
+        }
+    };
+    // Kept by its own ref now: the user's stash list is as it was.
+    if let Err(err) = git(&repo.worktree, &["stash", "drop", "-q"]) {
+        tracing::warn!("dropping the stash keeping {name}'s changes: {err}");
+    }
+    Ok(Some(sha))
 }
 
 /// Bring back the worktrees of `feature` that `heads` names, as `remove`
@@ -1821,8 +1908,24 @@ fn restore_worktree(
     };
     made.worktrees
         .push((repo.main.clone(), repo.worktree.clone(), branched));
+    if let Some(changes) = &head.changes {
+        git(
+            &repo.worktree,
+            &["stash", "apply", "-q", "--index", changes],
+        )
+        .map_err(|err| format!("{name}: couldn't put its changes back: {err}"))?;
+    }
     if repo.touched {
         guard_worktree(repo, branch);
+    }
+    // What kept it, once abandoned, has done its job.
+    let own = repo.branch.as_deref().unwrap_or(branch);
+    for name in [kept_ref(own), kept_changes_ref(own)] {
+        if git(&repo.main, &["rev-parse", "-q", "--verify", &name]).is_ok()
+            && let Err(err) = git(&repo.main, &["update-ref", "-d", &name])
+        {
+            tracing::warn!("dropping {name}: {err}");
+        }
     }
     Ok(())
 }
@@ -2818,7 +2921,8 @@ mod tests {
             heads,
             [KeptHead {
                 repo: "app".into(),
-                sha: head.clone()
+                sha: head.clone(),
+                changes: None,
             }]
         );
         remove(&f, true).unwrap();
@@ -2843,9 +2947,44 @@ mod tests {
         let gone = [KeptHead {
             repo: "app".into(),
             sha: "0".repeat(40),
+            changes: None,
         }];
         let err = restore(&f, &gone).unwrap_err();
         assert!(err.contains("is gone"), "{err}");
+    }
+
+    #[test]
+    fn an_abandoned_feature_comes_back_with_its_commits_and_changes() {
+        let t = Temp::new();
+        let repo = t.repo("app", "main");
+        let root = find_root(&repo, &[], &[], &[]).unwrap();
+        let created = create(&root, "x", &[]).unwrap();
+        let dir = created.dir.clone();
+        let f = feature_of(&root, created, "x");
+        commit(&dir, "b", "second");
+        let head = run(&dir, &["rev-parse", "HEAD"]).trim().to_owned();
+        std::fs::write(dir.join("b"), "changed").unwrap();
+        std::fs::write(dir.join("new"), "untracked").unwrap();
+        let stashes = run(&repo, &["stash", "list"]);
+
+        let kept = keep(&f).unwrap();
+        assert_eq!(kept[0].sha, head);
+        assert!(kept[0].changes.is_some());
+        assert_eq!(run(&repo, &["stash", "list"]), stashes);
+        remove(&f, true).unwrap();
+        assert!(!branch_exists(&repo, "feature/x"));
+        // Its commit and changes outlive gc: refs keep them.
+        run(&repo, &["gc", "-q", "--prune=now"]);
+
+        restore(&f, &kept).unwrap();
+        assert_eq!(run(&dir, &["rev-parse", "HEAD"]).trim(), head);
+        assert_eq!(std::fs::read_to_string(dir.join("b")).unwrap(), "changed");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("new")).unwrap(),
+            "untracked"
+        );
+        let refs = run(&repo, &["for-each-ref", "refs/gerdr"]);
+        assert_eq!(refs.trim(), "", "kept refs go once restored");
     }
 
     #[test]

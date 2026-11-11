@@ -249,6 +249,11 @@ pub struct KeptHead {
     /// The commit its worktree was on: the branch's head, or the detached
     /// commit of a context repository.
     pub sha: String,
+    /// What it had uncommitted, untracked files too, as a stash commit kept
+    /// under `refs/gerdr/kept-changes/<branch>`: an abandoned feature's, put
+    /// back once it is restored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changes: Option<String>,
 }
 
 /// A step that followed shipping a feature.
@@ -1404,6 +1409,13 @@ impl Feature {
         (self.ship_log().into_iter().rev())
             .find(|d| d.repo == repo && same_step(d.step, step))
             .filter(|d| d.undone.is_none())
+    }
+
+    /// Whether something it shipped still stands: a pull request open, or
+    /// its branch merged into a base. A push alone ships nothing.
+    pub fn shipped_any(&self) -> bool {
+        (self.ship_log().iter())
+            .any(|d| d.undone.is_none() && matches!(d.step, ShipStep::OpenPr | ShipStep::Merge))
     }
 
     /// Note that `step` of repository `repo` was undone at `now`: it counts

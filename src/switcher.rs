@@ -128,7 +128,7 @@ pub enum Target {
     /// The feature panel on the project's features.
     Features,
     /// The worktrees of the shown project's feature `.0`, removed once it
-    /// shipped, brought back (see `Gerdr::undo_after_ship`).
+    /// shipped, or it abandoned, brought back (see `Gerdr::undo_after_ship`).
     RestoreWorktrees(String),
     /// A model for a feature stage's agent, picked (see
     /// `Gerdr::open_model_picker`).
@@ -1010,6 +1010,22 @@ impl Gerdr {
         true
     }
 
+    /// How many of the shown project's features its history lists: shipped
+    /// or abandoned, with what they had kept to come back.
+    pub fn feature_history_count(&self) -> usize {
+        (self.feature_entries().iter())
+            .filter(|item| matches!(item.target, Target::RestoreWorktrees(_)))
+            .count()
+    }
+
+    /// Open the shown project's history: the launcher on its feature rows,
+    /// those shipped or abandoned first to come back; or say it has none.
+    pub fn open_feature_history(&mut self) {
+        if !self.open_feature_picker() {
+            self.show_notice("No shipped or abandoned feature to bring back".into());
+        }
+    }
+
     /// Open the switcher as the agent picker: a row per installed agent
     /// CLI, to start in a new tab of workspace `w`.
     pub fn open_agent_picker(&mut self, w: usize) {
@@ -1381,11 +1397,23 @@ impl Gerdr {
                 crate::ship_after::after_refusal(feature, crate::feature::AfterStep::Remove)
                     .is_none()
             });
+            // The history: what was shipped or abandoned, to bring back.
             if let Some(done) = removed {
+                let when = crate::projects::ago(now, done.at);
+                let (label, detail) = match feature.status {
+                    crate::feature::Status::Abandoned => (
+                        format!("Restore \u{201c}{}\u{201d}", feature.title),
+                        format!("history \u{b7} abandoned {when}"),
+                    ),
+                    _ => (
+                        format!("Restore the worktrees of \u{201c}{}\u{201d}", feature.title),
+                        format!("history \u{b7} shipped, removed {when}"),
+                    ),
+                };
                 items.push(Item::new(
                     ItemIcon::Command,
-                    format!("Restore the worktrees of \u{201c}{}\u{201d}", feature.title),
-                    format!("removed {}", crate::projects::ago(now, done.at)),
+                    label,
+                    detail,
                     Target::RestoreWorktrees(feature.slug.clone()),
                 ));
             }

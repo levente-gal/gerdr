@@ -4410,7 +4410,7 @@ fn feature_tab_done() -> super::FeatureTabView {
         row.buttons = vec!["Open PR"];
     }
     view.sub = format!("done \u{b7} {}", view.sub);
-    view.remove = "Remove worktrees";
+    view.remove = "Remove worktree and branch";
     view.page = StagePage {
         title: "Ship".into(),
         about: Stage::Ship.about().into(),

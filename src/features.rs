@@ -3918,7 +3918,7 @@ fn ship_ask(feature: &Feature, probe: Option<&Probe>) -> ShipAsk {
     };
     let Some(planned) = ship_planned(feature, Some(probe)) else {
         return match &probe.reading {
-            Err(why) => ShipAsk::Blocked(blocked_text(title, &[read_blocker(why)])),
+            Err(why) => ShipAsk::Blocked(blocked_text(&[read_blocker(why)])),
             Ok(_) => ShipAsk::Checking,
         };
     };
@@ -3933,7 +3933,11 @@ fn ship_ask(feature: &Feature, probe: Option<&Probe>) -> ShipAsk {
         return ShipAsk::Finish(dirty);
     }
     if !planned.blockers.is_empty() {
-        return ShipAsk::Blocked(blocked_text(title, &planned.blockers));
+        return ShipAsk::Blocked(blocked_text(&planned.blockers));
+    }
+    // An agent works on its conflicts: what it ships is the agent's.
+    if let Some(line) = resolving_line(feature) {
+        return ShipAsk::Blocked(blocked_text(&[line.text]));
     }
     if planned.all_done {
         return ShipAsk::AllRan;
@@ -3949,16 +3953,18 @@ fn read_blocker(why: &str) -> String {
     format!("Couldn't read the code: {why}")
 }
 
-/// The warning when `title` can't ship for `blockers`: the first, and how
-/// many more.
-fn blocked_text(title: &str, blockers: &[String]) -> String {
+/// The warning when a feature can't ship for `blockers`: the first, and how
+/// many more. Its page names the feature.
+fn blocked_text(blockers: &[String]) -> String {
     let first = blockers.first().map_or("", String::as_str);
+    // What to do comes first: a toast cuts its end off.
+    let first = match first.rsplit_once(": pull ") {
+        Some((why, pull)) => format!("pull {pull} ({why})"),
+        None => first.to_owned(),
+    };
     match blockers.len() {
-        0 | 1 => format!("Can't ship \u{201c}{title}\u{201d} yet: {first}"),
-        n => format!(
-            "Can't ship \u{201c}{title}\u{201d} yet: {first}, and {} more",
-            n - 1
-        ),
+        0 | 1 => format!("Can't ship yet: {first}"),
+        n => format!("Can't ship yet: {first}, and {} more", n - 1),
     }
 }
 
@@ -4036,17 +4042,38 @@ fn check_lines(
         };
     };
     let planned = ship::plan_actions(feature, check);
+    // Failing first, each saying its way out; then the named checks passed.
+    let passed = (feature.status == Status::Open)
+        .then(|| passed_checks(feature, check, probe))
+        .flatten();
+    let resolving = resolving_line(feature);
     if !planned.blockers.is_empty() {
-        let lines = planned
-            .blockers
-            .iter()
+        let lines = (planned.blockers.iter())
             .map(|b| line(b.clone(), CheckTone::Failed))
+            .chain(resolving)
             .collect();
-        return capped(lines, CheckTone::Failed);
+        let mut lines = capped(lines, CheckTone::Failed);
+        if lines.len() < MAX_CHECK_LINES {
+            lines.extend(passed);
+        }
+        return lines;
     }
     let more = feature.status == Status::Done;
+    let waits = pr_wait(feature, probe).filter(|_| more);
     let first = match (planned.nothing, planned.all_done, more) {
+        _ if let Some(resolving) = &resolving => resolving.clone(),
+        _ if let Some(waits) = &waits => {
+            let mut text = waits.clone();
+            if let Some(first) = text.get_mut(..1) {
+                first.make_ascii_uppercase();
+            }
+            line(text, CheckTone::Note)
+        }
         (true, _, false) => line(NOTHING_TICKED.into(), CheckTone::Note),
+        // Its pull requests merged on GitHub: that is what shipped means.
+        (_, _, true) if !feature.shipping.prs.is_empty() && planned.steps() == 0 => {
+            line(MERGED_DONE.into(), CheckTone::Ready)
+        }
         (true, _, true) => line(TICK_MORE.into(), CheckTone::Note),
         (false, true, false) => line(ALL_RAN.into(), CheckTone::Ready),
         (false, true, true) => line(ALL_RAN_DONE.into(), CheckTone::Note),
@@ -4075,7 +4102,85 @@ fn check_lines(
         false => conflicts,
     };
     let notes = check.notes.iter().map(|n| line(n.clone(), CheckTone::Note));
-    capped(first.into_iter().chain(notes).collect(), CheckTone::Note)
+    let passed = passed.filter(|_| resolving.is_none());
+    // Shipped, what comes next: the end of its life, said plainly.
+    let next = (more && (planned.nothing || planned.all_done)).then(|| {
+        let what = worktrees_words(feature);
+        let text = match waits {
+            Some(_) => format!("Next: once it merges, Remove {what} in the header"),
+            None => format!("Next: Remove {what} in the header; Restore brings them back"),
+        };
+        line(text, CheckTone::Note)
+    });
+    let lines = first.into_iter().chain(next).chain(passed).chain(notes).collect();
+    capped(lines, CheckTone::Note)
+}
+
+/// The named checks `feature` passes before it ships, on one line ("checks
+/// passed \u{b7} review done \u{b7} base current \u{b7} no conflicts"), as
+/// `check` and `probe` read it; none when it passes none of them. Those it
+/// fails say so on lines of their own, above it.
+fn passed_checks(feature: &Feature, check: &ship::ShipCheck, probe: Option<&Probe>) -> Option<CheckLine> {
+    let stale = check.blockers.iter().any(|b| b.starts_with("Code changed since"));
+    let bases = probe.map(|p| &p.bases);
+    let open = (feature.review.as_ref()).map_or(0, |r| r.open());
+    let reviews = [Stage::AiReview, Stage::CodeReview, Stage::ManualTest];
+    let current = !check.repos.is_empty()
+        && check.repos.iter().all(|r| {
+            r.merged
+                || (!r.pulls_base()
+                    && bases.and_then(|b| b.get(&r.key)).is_some_and(|b| b.behind == 0))
+        });
+    let clean = feature.shipping.resolving.is_none()
+        && check.repos.iter().all(|r| {
+            !(r.no_merge.as_deref()).is_some_and(|why| why.contains(" conflicts in "))
+                && (bases.and_then(|b| b.get(&r.key))).is_none_or(|b| b.conflicts.is_empty())
+        });
+    let named = [
+        (feature.is_done(Stage::Verify) && !stale, "checks passed"),
+        (reviews.iter().all(|s| feature.is_done(*s)) && open == 0 && !stale, "review done"),
+        (current, "base current"),
+        (clean, "no conflicts"),
+    ];
+    let ok: Vec<&str> = named.iter().filter(|(ok, _)| *ok).map(|(_, w)| *w).collect();
+    (!ok.is_empty()).then(|| CheckLine {
+        text: format!("\u{2713} {}", ok.join(" \u{b7} ")),
+        tone: CheckTone::Ready,
+    })
+}
+
+/// What the Ship check says while an agent takes on `feature`'s conflicts
+/// with its base: Ship waits for it.
+fn resolving_line(feature: &Feature) -> Option<CheckLine> {
+    let r = feature.shipping.resolving.as_ref()?;
+    let doing = match r.planning {
+        true => "plans how to resolve",
+        false => "resolves",
+    };
+    Some(CheckLine {
+        text: format!(
+            "{}: {} {doing} the conflicts with {}: Ship waits for it",
+            r.repo, r.agent, r.onto
+        ),
+        tone: CheckTone::Note,
+    })
+}
+
+/// What a shipped `feature` waits for while its pull requests are open on
+/// GitHub, not merged yet, as `probe` last read them: "pull request open,
+/// not merged yet". None once they all merged, or with none.
+fn pr_wait(feature: &Feature, probe: Option<&Probe>) -> Option<String> {
+    let prs = &feature.shipping.prs;
+    if prs.is_empty() {
+        return None;
+    }
+    let merged = prs.iter().filter(|pr| pr_merged(probe, &pr.repo)).count();
+    match (prs.len(), merged) {
+        (n, m) if m == n => None,
+        (1, _) => Some("pull request open, not merged yet".to_owned()),
+        (n, 0) => Some(format!("{n} pull requests open, not merged yet")),
+        (n, m) => Some(format!("{m} of {n} pull requests merged; the rest open")),
+    }
 }
 
 /// What Ship's mark and the history say of a feature finished unshipped.
@@ -4083,6 +4188,9 @@ const FINISHED_UNSHIPPED: &str = "Finished without shipping";
 
 /// What the Ship check says with no step ticked.
 const NOTHING_TICKED: &str = "No step ticked: Finish ends it without shipping";
+
+/// What it says once a shipped feature's pull requests all merged.
+const MERGED_DONE: &str = "Merged on GitHub: shipped";
 
 /// What it says of a shipped feature with no step ticked.
 const TICK_MORE: &str = "Shipped: tick a step to ship more";
@@ -4123,9 +4231,12 @@ fn ship_rows(feature: &Feature, probe: Option<&Probe>) -> Vec<ShipRow> {
     };
     let mut rows = Vec::new();
     // A merged repository has nothing left to choose: but its base to push.
+    // Nor has one shipped through its pull request: it went that way.
     for repo in &check.repos {
         let route = ship::repo_plan(feature, repo).route;
-        if !repo.merged {
+        let went = feature.status == Status::Done
+            && feature.ship_done(&repo.key, ShipStep::OpenPr).is_some();
+        if !repo.merged && !went {
             rows.push(ShipRow::Route {
                 repo: repo.key.clone(),
                 route,
@@ -4336,6 +4447,11 @@ fn ship_step_row(
     };
     let why = repo.why_not(step);
     let detail = match (why, step) {
+        // The Ship check says why in full: once is enough.
+        (Some(_), ShipStep::Merge) if repo.pulls_base() => Some(CheckLine {
+            text: format!("Pull {base} first"),
+            tone: CheckTone::Blocker,
+        }),
         (Some(why), _) => Some(CheckLine {
             text: why.to_owned(),
             tone: CheckTone::Blocker,
@@ -4432,7 +4548,9 @@ fn ship_sections(
                 dot,
                 state: state_line,
                 meta: ship_repo_meta(repo, stat),
-                base: (!repo.merged)
+                // Its squash waits for the base to be pulled: its step says
+                // so, and "up to date" would read as the opposite.
+                base: (!repo.merged && !repo.pulls_base())
                     .then(|| ship_base_line(feature, probe, &repo.key))
                     .flatten(),
                 buttons,
@@ -4894,7 +5012,8 @@ fn watched(feature: &Feature) -> bool {
 /// way, as the user waits on it in its tab (and the panel closed to show
 /// that tab), else every `WATCH_EVERY`.
 fn watch_every(feature: &Feature) -> Duration {
-    if feature.squash_going() {
+    // An agent merging its base in moves it on: the check follows.
+    if feature.squash_going() || feature.shipping.resolving.is_some() {
         PANEL_EVERY
     } else {
         WATCH_EVERY
@@ -4907,7 +5026,10 @@ pub fn remove_label(feature: &Feature) -> &'static str {
     if feature.writer.is_some() && feature.status != Status::Open {
         ""
     } else if feature.status == Status::Done {
-        "Remove worktrees"
+        match feature.touched().count() > 1 {
+            true => "Remove worktrees and branches",
+            false => "Remove worktree and branch",
+        }
     } else {
         "Abandon"
     }
@@ -7700,7 +7822,11 @@ impl Gerdr {
             ship_read: last
                 .and_then(|p| p.ship.as_ref())
                 .is_some_and(|c| !c.unread),
-            ship_blocked: ship_planned(feature, last).is_some_and(|p| !p.blockers.is_empty()),
+            // Anything holding it up, an agent's work on its conflicts too:
+            // then the card's way out is the one primary.
+            ship_blocked: ship_planned(feature, last).is_some_and(|p| !p.blockers.is_empty())
+                || feature.shipping.resolving.is_some()
+                || last.is_some_and(|p| p.bases.values().any(|b| !b.conflicts.is_empty())),
             checks_busy: self.checks_busy(&feature.project, &feature.slug),
             setting_up: self.setting_up(&feature.project, &feature.slug),
             feature_busy: self.feature_busy(&feature.project, &feature.slug),
@@ -10559,7 +10685,15 @@ impl Gerdr {
             )),
             ShipAsk::AllRan => self.ship_all_ran(project, slug),
             ShipAsk::Ready(asked) => {
-                let mut steps: Vec<String> = asked.actions.iter().map(Action::label).collect();
+                let mut repos: Vec<&str> = (asked.actions.iter())
+                    .map(ship::action_repo)
+                    .filter(|r| !r.is_empty())
+                    .collect();
+                repos.dedup();
+                let one = repos.len() <= 1;
+                let mut steps: Vec<String> = (asked.actions.iter())
+                    .map(|a| a.label(&branch, one))
+                    .collect();
                 let check = probe.and_then(|p| p.ship.as_ref());
                 let removing = check.is_some_and(|c| ship::removable(&feature, c));
                 steps.extend(ship_after_line(&feature, removing));
@@ -10870,24 +11004,26 @@ impl Gerdr {
         };
         let title = feature.title.clone();
         let abandon = feature.status != Status::Done;
+        let what = worktrees_words(feature);
         let (question, go) = if abandon {
             (format!("Abandon \u{201c}{title}\u{201d}?"), "Abandon")
         } else {
             (
-                format!("Remove the worktrees of \u{201c}{title}\u{201d}?"),
-                "Remove worktrees",
+                format!("Remove the {what} of \u{201c}{title}\u{201d}?"),
+                "Remove",
             )
         };
         // Each on a line of its own: the dialog cuts a line to its width.
-        let mut lines = vec![removal_body(&losses)];
+        // Abandoned, what they have is kept to come back with it.
+        let mut lines = match abandon {
+            true => vec![format!("Its {what} go; commits and changes are kept")],
+            false => vec![removal_body(what, &losses)],
+        };
         if let Some(w) = self.feature_workspace(&project, &slug) {
             let running = self.workspace_running(w);
             lines.push(crate::feature_workspace::closing_text(&running));
         }
-        // Unlike removing a shipped feature's worktrees, nothing brings it back.
-        if abandon {
-            lines.push("Abandoning can't be undone".to_owned());
-        }
+        lines.push("Restore brings it back: its toast, or Find and switch".to_owned());
         let body = format!("{}.", lines.join(".\n"));
         let force = !losses.is_empty();
         let then = crate::confirm::Then::RemoveFeature {
@@ -10933,10 +11069,9 @@ impl Gerdr {
         }
         // Its agents on other machines go with its tabs.
         self.close_machine_panes_of(&feature);
-        // Removed, not abandoned, it can come back as it was: with these.
-        let tabs = (self.feature_workspace(project, slug))
-            .filter(|_| !abandon)
-            .map_or_else(Vec::new, |w| self.kept_tabs(w));
+        // It can come back as it was, abandoned too: with these.
+        let tabs =
+            (self.feature_workspace(project, slug)).map_or_else(Vec::new, |w| self.kept_tabs(w));
         let (project, slug) = (project.to_owned(), slug.to_owned());
         // Its workspace closes first, its terminals gone before its
         // worktrees go.
@@ -10948,12 +11083,23 @@ impl Gerdr {
                 if let Some(removal) = &removal {
                     removal.go();
                 }
-                let heads = match abandon {
-                    true => Vec::new(),
-                    false => layout::heads(&feature),
+                // Abandoned, all it has is kept first: commits, changes.
+                let (heads, result) = match abandon {
+                    true => match layout::keep(&feature) {
+                        Ok(heads) => {
+                            let result = layout::remove(&feature, force);
+                            // Stopped on the way: what stays has its changes back.
+                            if result.is_err() {
+                                layout::unkeep(&feature, &heads);
+                            }
+                            (heads, result)
+                        }
+                        Err(why) => (Vec::new(), Err(format!("nothing went: {why}"))),
+                    },
+                    false => (layout::heads(&feature), layout::remove(&feature, force)),
                 };
                 Done::Removed {
-                    result: layout::remove(&feature, force),
+                    result,
                     project,
                     slug,
                     abandon,
@@ -10992,22 +11138,18 @@ impl Gerdr {
             feature.log(now, "worktrees removed");
         }
         self.save_feature(project, slug);
-        if !abandon && !heads.is_empty() {
+        if abandon || !heads.is_empty() {
             self.note_after_ship(project, slug, feature::AfterStep::Remove, tabs, heads);
         }
         // Abandoned, it closed as it was saved.
         if !abandon {
             self.ai_work_close(project, slug);
         }
-        match abandon {
-            // Not a success: no done green on what was given up.
-            true => self.show_notice(format!("Abandoned \u{201c}{title}\u{201d}")),
-            false => self.show_removed(
-                project,
-                slug,
-                format!("Removed the worktrees of \u{201c}{title}\u{201d}"),
-            ),
-        }
+        let text = match abandon {
+            true => format!("Abandoned \u{201c}{title}\u{201d}"),
+            false => format!("Removed the worktrees of \u{201c}{title}\u{201d}"),
+        };
+        self.show_removed(project, slug, text, abandon);
         if let Some(feature) = self.feature(project, slug).cloned() {
             self.forget_on_machines(&feature);
         }
@@ -12285,11 +12427,20 @@ fn remove_repos_body(repos: usize, losses: &[String], to_context: bool) -> Strin
 
 /// What a confirm dialog about removing a feature's worktrees says of
 /// `losses`, what goes with them.
-fn removal_body(losses: &[String]) -> String {
+fn removal_body(what: &str, losses: &[String]) -> String {
     match losses {
-        [] => "Its worktrees go; nothing in them is lost".into(),
-        [one] => format!("Its worktrees go, and with them {one}"),
-        more => format!("Its worktrees go, and with them {}", more.join(", ")),
+        [] => format!("Its {what} go; nothing in them is lost"),
+        [one] => format!("Its {what} go, and with them {one}"),
+        more => format!("Its {what} go, and with them {}", more.join(", ")),
+    }
+}
+
+/// What removing `feature`'s worktrees takes, in words: "worktree and
+/// branch", or "worktrees and branches" with several repositories.
+fn worktrees_words(feature: &Feature) -> &'static str {
+    match feature.touched().count() > 1 {
+        true => "worktrees and branches",
+        false => "worktree and branch",
     }
 }
 
@@ -13078,6 +13229,8 @@ fn current_line(feature: &Feature, stage: Stage, state: &LineState, now: u64) ->
                 "shipping".into()
             } else if feature.shipping.squash_at.is_some() {
                 "merging".into()
+            } else if feature.shipping.resolving.is_some() {
+                "resolving conflicts".into()
             } else if planned.as_ref().is_some_and(|p| !p.blockers.is_empty()) {
                 "blocked".into()
             } else if planned.as_ref().is_some_and(|p| p.nothing) {
@@ -14967,8 +15120,9 @@ fn ship_base_actions(feature: &Feature, probe: Option<&Probe>) -> Vec<(PageButto
     }
     for (key, state) in probe.map(|p| &p.bases).into_iter().flatten() {
         if !state.conflicts.is_empty() {
+            // Ship is no default while they conflict: this is.
             out.push((
-                button("Resolve with agent", ButtonStyle::Plain),
+                button("Resolve with agent", ButtonStyle::Primary),
                 PanelOutcome::ResolveConflicts(key.clone(), false),
             ));
             out.push((
@@ -15504,6 +15658,14 @@ fn stage_page(
                 CheckTone::Note,
             ))
         }
+        // Shipped through a pull request not merged yet: not done yet.
+        StageMark::Done if stage == Stage::Ship && pr_wait(feature, state.probe).is_some() => {
+            feature.marks.get(&stage).map(|m| {
+                let wait = pr_wait(feature, state.probe).unwrap_or_default();
+                let when = projects::ago(now, m.at);
+                line(format!("Shipped {when} by {}: {wait}", m.by), CheckTone::Note)
+            })
+        }
         StageMark::Done => feature.marks.get(&stage).map(|m| {
             let mut text = format!("Done {} by {}", projects::ago(now, m.at), m.by);
             if let Some(by) = state.ctx.locked_by(feature, stage) {
@@ -15734,8 +15896,9 @@ fn stage_page(
                 if !prs.is_empty() {
                     sections.push(lines("Pull requests", prs));
                 }
+                // The cards' rows say what ran: the log only without them.
                 let log = ship_log_lines(feature, now);
-                if !log.is_empty() {
+                if !log.is_empty() && !carded {
                     sections.push(lines("Ship log", log));
                 }
             }
@@ -24362,11 +24525,14 @@ pub(crate) mod tests {
         let none = check_lines(&f, None, false, 2_060);
         assert_eq!(texts(&none), [("checking\u{2026}", CheckTone::Note)]);
         let blocked = probe(check(&["api is dirty", "web is behind"], &["api"], &[]));
+        // Failing first; then what passes, named on one line.
+        let passed = "\u{2713} checks passed \u{b7} review done \u{b7} no conflicts";
         assert_eq!(
             texts(&check_lines(&f, Some(&blocked), false, 2_060)),
             [
                 ("api is dirty", CheckTone::Blocker),
-                ("web is behind", CheckTone::Blocker)
+                ("web is behind", CheckTone::Blocker),
+                (passed, CheckTone::Ready)
             ]
         );
         let many = probe(check(&["a", "b", "c", "d", "e", "f"], &["api"], &[]));
@@ -24378,8 +24544,16 @@ pub(crate) mod tests {
             texts(&check_lines(&f, Some(&ready), false, 2_060)),
             [
                 ("Ready to ship", CheckTone::Ready),
+                (passed, CheckTone::Ready),
                 ("api pushes to origin", CheckTone::Note)
             ]
+        );
+        // Its base read as current: that passes too.
+        let mut current = ready.clone();
+        current.bases.insert("api".into(), ship::BaseState::default());
+        assert_eq!(
+            check_lines(&f, Some(&current), false, 2_060)[1].text,
+            "\u{2713} checks passed \u{b7} review done \u{b7} base current \u{b7} no conflicts"
         );
         // Origin's base moved on in a way that conflicts: not ready.
         let mut behind = ready.clone();
@@ -24397,6 +24571,7 @@ pub(crate) mod tests {
                     "api: origin/main has 8 new commits that conflict: take them in first",
                     CheckTone::Blocker
                 ),
+                ("\u{2713} checks passed \u{b7} review done", CheckTone::Ready),
                 ("api pushes to origin", CheckTone::Note)
             ]
         );
@@ -24410,6 +24585,7 @@ pub(crate) mod tests {
             texts(&check_lines(&f, Some(&nothing), false, 2_060)),
             [
                 (NOTHING_TICKED, CheckTone::Note),
+                (passed, CheckTone::Ready),
                 ("web has no commits: left out", CheckTone::Note)
             ]
         );
@@ -24433,6 +24609,50 @@ pub(crate) mod tests {
         // Only while Ship is the current stage.
         let building = feature("b", vec![repo("api", true)], 3);
         assert!(check_lines(&building, Some(&ready), false, 2_060).is_empty());
+        // While an agent takes on its conflicts, Ship waits for it.
+        let mut resolving = f.clone();
+        resolving.shipping.resolving = Some(feature::Resolving {
+            at: 2_000,
+            repo: "api".into(),
+            onto: "origin/main".into(),
+            onto_sha: "c1".into(),
+            before: "c0".into(),
+            files: vec!["a.py".into()],
+            agent: "claude".into(),
+            pane: None,
+            n: 1,
+            planning: true,
+            nudged: false,
+        });
+        let lines = check_lines(&resolving, Some(&current), false, 2_060);
+        assert_eq!(
+            texts(&lines[..1]),
+            [(
+                "api: claude plans how to resolve the conflicts with origin/main: Ship waits for it",
+                CheckTone::Note
+            )]
+        );
+        assert!(matches!(ship_ask(&resolving, Some(&current)), ShipAsk::Blocked(_)));
+    }
+
+    #[test]
+    fn a_shipped_pull_request_waits_to_merge_before_it_reads_as_done() {
+        let mut f = feature("s", vec![repo("api", true)], 9);
+        f.status = Status::Done;
+        assert_eq!(pr_wait(&f, None), None, "no pull request");
+        f.shipping.prs.push(Pr {
+            repo: "api".into(),
+            url: "https://x/pull/1".into(),
+        });
+        let open = Some("pull request open, not merged yet".to_owned());
+        assert_eq!(pr_wait(&f, None), open);
+        let mut p = probe(None);
+        let merged = ship::PrState {
+            state: "MERGED".into(),
+            ..Default::default()
+        };
+        p.prs = Some(BTreeMap::from([("api".to_owned(), Ok(merged))]));
+        assert_eq!(pr_wait(&f, Some(&p)), None);
     }
 
     #[test]
@@ -24444,12 +24664,12 @@ pub(crate) mod tests {
         let blocked = probe(check(&["a", "b", "c"], &["api"], &[]));
         assert_eq!(
             ship_ask(&f, Some(&blocked)),
-            ShipAsk::Blocked("Can't ship \u{201c}T\u{201d} yet: a, and 2 more".into())
+            ShipAsk::Blocked("Can't ship yet: a, and 2 more".into())
         );
         let one = probe(check(&["a"], &["api"], &[]));
         assert_eq!(
             ship_ask(&f, Some(&one)),
-            ShipAsk::Blocked("Can't ship \u{201c}T\u{201d} yet: a".into())
+            ShipAsk::Blocked("Can't ship yet: a".into())
         );
         let dirty = Probe {
             reading: Ok(Reading {
@@ -24637,7 +24857,7 @@ pub(crate) mod tests {
         // A done feature's folder is gone here: nothing to remove.
         let listed: Vec<&str> = listed(&all).iter().map(|f| f.slug.as_str()).collect();
         assert_eq!(listed, ["a"]);
-        assert_eq!(remove_label(&all[2]), "Remove worktrees");
+        assert_eq!(remove_label(&all[2]), "Remove worktree and branch");
     }
 
     #[test]
@@ -24688,12 +24908,12 @@ pub(crate) mod tests {
     #[test]
     fn removing_names_what_is_lost() {
         assert_eq!(
-            removal_body(&[]),
-            "Its worktrees go; nothing in them is lost"
+            removal_body("worktree and branch", &[]),
+            "Its worktree and branch go; nothing in them is lost"
         );
         assert_eq!(
-            removal_body(&["2 changed files in api".into()]),
-            "Its worktrees go, and with them 2 changed files in api"
+            removal_body("worktree and branch", &["2 changed files in api".into()]),
+            "Its worktree and branch go, and with them 2 changed files in api"
         );
     }
 
@@ -26074,17 +26294,10 @@ pub(crate) mod tests {
         );
         let card = group.card.as_ref().unwrap();
         assert_eq!(card.state.text, "1 step to run");
-        let last = page.sections.last().unwrap();
-        assert_eq!(
-            *last,
-            lines(
-                "Ship log",
-                vec![line(
-                    "1m ago \u{b7} api: pushed feature/s \u{b7} 3f9c2a1",
-                    CheckTone::Note
-                )]
-            )
-        );
+        // Its rows say what ran: no log repeats them.
+        assert!(!page.sections.iter().any(|s| {
+            matches!(s, PageSection::Lines { label, .. } if label == "Ship log")
+        }));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -26154,21 +26367,19 @@ pub(crate) mod tests {
             actions[undo].1,
             PanelOutcome::UndoShip("api".into(), ShipStep::Push)
         );
+        // The log, with its update from the base, once no card shows.
         assert_eq!(
-            *page.sections.last().unwrap(),
-            lines(
-                "Ship log",
-                vec![
-                    line(
-                        "just now \u{b7} api: merged origin/main \u{b7} 6496d98",
-                        CheckTone::Note
-                    ),
-                    line(
-                        "1m ago \u{b7} api: pushed feature/s \u{b7} 3f9c2a1",
-                        CheckTone::Note
-                    ),
-                ]
-            )
+            ship_log_lines(&f, 2_000),
+            vec![
+                line(
+                    "just now \u{b7} api: merged origin/main \u{b7} 6496d98",
+                    CheckTone::Note
+                ),
+                line(
+                    "1m ago \u{b7} api: pushed feature/s \u{b7} 3f9c2a1",
+                    CheckTone::Note
+                ),
+            ]
         );
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -26276,9 +26487,11 @@ pub(crate) mod tests {
         let button = group.steps[0].button.expect("its undo");
         assert_eq!(actions[button].1, PanelOutcome::UndoAfter(AfterStep::Close));
         assert_eq!(actions[button].0.label, "Undo");
-        let Some(PageSection::Lines { lines: log, .. }) = page.sections.last() else {
-            panic!("no log: {:?}", page.sections);
-        };
+        // Its cards and Afterwards say what ran: the log isn't shown again.
+        assert!(!page.sections.iter().any(|s| {
+            matches!(s, PageSection::Lines { label, .. } if label == "Ship log")
+        }));
+        let log = ship_log_lines(&f, 2_000);
         assert_eq!(log[0].text, "just now \u{b7} closed the workspace");
         // Alt+Z: off the rows, the latest; on api's, its push.
         let alt_z = |repo: Option<&str>| {
@@ -26302,6 +26515,7 @@ pub(crate) mod tests {
         let head = KeptHead {
             repo: "api".into(),
             sha: "3f9c2a1deadbeef".into(),
+            changes: None,
         };
         f.after_ran(after(1_990, AfterStep::Remove, vec![head]));
         let why = crate::ship_after::after_refusal(&f, AfterStep::Close).unwrap();
@@ -26530,7 +26744,13 @@ pub(crate) mod tests {
             page.sections[0],
             lines(
                 "Ship check",
-                vec![line("api has uncommitted changes", CheckTone::Blocker)]
+                vec![
+                    line("api has uncommitted changes", CheckTone::Blocker),
+                    line(
+                        "\u{2713} checks passed \u{b7} review done \u{b7} no conflicts",
+                        CheckTone::Ready
+                    )
+                ]
             )
         );
         // Below it, what shipping would do, and what comes after.

@@ -68,6 +68,10 @@ pub enum DocFile {
     /// `plan.md`: the plan is approved and only read, the suggestions are
     /// decided on it.
     Suggestions,
+    /// Ship's plan of how to resolve conflicts with a base, of turn `.0`
+    /// (`conflicts-<n>.md`): Approve resolves as planned, Send back has its
+    /// agent write it again with the comments.
+    ConflictPlan(u32),
 }
 
 impl DocFile {
@@ -78,6 +82,7 @@ impl DocFile {
             DocFile::Evidence => Stage::Verify,
             DocFile::FixPlan => Stage::Build,
             DocFile::PlanChanges | DocFile::Suggestions => Stage::PlanReview,
+            DocFile::ConflictPlan(_) => Stage::Ship,
             DocFile::DraftChanges(stage, _) => stage,
         }
     }
@@ -88,6 +93,7 @@ impl DocFile {
             DocFile::FixPlan => fix_round::comments_path(dir),
             // Its own: the final plan's review has Plan review's.
             DocFile::Suggestions => dir.join(SUGGESTIONS_COMMENTS),
+            DocFile::ConflictPlan(n) => dir.join(format!("conflicts-{n}-comments.json")),
             _ => comments_path(dir, self.stage()),
         }
     }
@@ -101,6 +107,8 @@ impl DocFile {
             DocFile::PlanChanges => artifacts::name(Stage::PlanReview),
             DocFile::DraftChanges(stage, _) => artifacts::name(stage),
             DocFile::Suggestions => artifacts::name(Stage::Plan),
+            // Named by its turn: its path says it.
+            DocFile::ConflictPlan(_) => None,
         }
     }
 
@@ -118,6 +126,7 @@ impl DocFile {
                 state(feature, Stage::PlanReview, docs, now)
             ),
             DocFile::Suggestions => suggestions_state(feature),
+            DocFile::ConflictPlan(n) => conflict_plan_state(feature, n),
         }
     }
 
@@ -133,6 +142,8 @@ impl DocFile {
             DocFile::DraftChanges(..) => Some(DRAFT_CHANGES_READ_ONLY),
             DocFile::Suggestions => Some(SUGGESTIONS_READ_ONLY),
             DocFile::FixPlan => fix_plan_locked(feature),
+            DocFile::ConflictPlan(n) => (conflict_plan_open(feature, n).is_none())
+                .then_some(CONFLICT_PLAN_PAST),
         }
     }
 
@@ -167,6 +178,7 @@ impl DocFile {
     pub fn path(self, dir: &Path) -> Option<PathBuf> {
         match self {
             DocFile::DraftChanges(stage, k) => crate::feature::drafts::path(dir, stage, k),
+            DocFile::ConflictPlan(n) => Some(dir.join(format!("conflicts-{n}.md"))),
             _ => Some(dir.join(self.name()?)),
         }
     }
@@ -175,6 +187,23 @@ impl DocFile {
     /// final plan's to the plan, a draft's to the one before.
     pub fn shows_changes(self) -> bool {
         matches!(self, DocFile::PlanChanges | DocFile::DraftChanges(..))
+    }
+}
+
+/// Why a plan of conflicts no agent waits on any more takes no comment.
+pub const CONFLICT_PLAN_PAST: &str = "This plan of the conflicts is past: only read";
+
+/// The conflicts feature `feature` takes on while their plan of turn `n` is
+/// written and waits for the user; none once that turn is past.
+fn conflict_plan_open(feature: Option<&Feature>, n: u32) -> Option<&crate::feature::Resolving> {
+    (feature?.shipping.resolving.as_ref()).filter(|r| r.n == n && r.planning)
+}
+
+/// How a plan of conflicts stands, as its review's header says it.
+fn conflict_plan_state(feature: Option<&Feature>, n: u32) -> String {
+    match conflict_plan_open(feature, n) {
+        Some(r) => format!("{}: {} with {}", r.repo, r.files.join(", "), r.onto),
+        None => "past".to_owned(),
     }
 }
 
@@ -612,6 +641,9 @@ impl Gerdr {
                     DocFile::DraftChanges(_, k) => {
                         Failed::Warning(format!("Draft {k} of {name} wasn't kept"))
                     }
+                    DocFile::ConflictPlan(_) => {
+                        Failed::Warning("The plan isn't written yet".into())
+                    }
                     DocFile::Stage(_) | DocFile::FixPlan => {
                         Failed::Error(format!("No {name} yet for \u{201c}{title}\u{201d}"))
                     }
@@ -748,6 +780,10 @@ impl Gerdr {
         if doc.file == DocFile::Suggestions {
             return self.write_final_plan(&doc.project, &doc.slug);
         }
+        // A plan of conflicts approved: resolved as planned.
+        if let DocFile::ConflictPlan(_) = doc.file {
+            return self.approve_conflict_plan(&doc.project, &doc.slug, doc.file);
+        }
         self.approve_doc(&doc.project, &doc.slug, doc.file.stage());
     }
 
@@ -814,6 +850,9 @@ impl Gerdr {
         // The suggestions' notes go back to their reviewer.
         if doc.file == DocFile::Suggestions {
             return self.ask_reviewer(&doc.project, &doc.slug);
+        }
+        if let DocFile::ConflictPlan(_) = doc.file {
+            return self.send_back_conflict_plan(&doc.project, &doc.slug, doc.file, comments);
         }
         // What goes back is kept with the draft it is on, for its card.
         let sent: Vec<crate::feature::fix_round::Asked> = (self.wd())

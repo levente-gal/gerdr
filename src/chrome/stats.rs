@@ -18,10 +18,14 @@ use super::{
 };
 use crate::text_field::Line;
 
-/// The most the panel takes of the output: it fits an output 870 px wide
-/// with no room to spare.
+/// The least the panel takes of the output, room allowing: it fits an
+/// output 870 px wide with no room to spare.
 const STATS_WIDTH: i32 = 870;
 const STATS_HEIGHT: i32 = 640;
+/// The most it grows to on a big output, as a share of it then: a history
+/// read in tables wants the room.
+const STATS_MAX_WIDTH: i32 = 1400;
+const STATS_MAX_HEIGHT: i32 = 1100;
 /// The title row, the row of tabs and search under it, the columns'
 /// titles and the footer.
 const TITLE: i32 = 44;
@@ -169,8 +173,10 @@ fn width(text: &str, size: f32) -> i32 {
 
 /// The panel's place on an output of `size`.
 fn panel_rect(size: Size<i32, Logical>) -> Rect {
-    let w = STATS_WIDTH.min(size.w - 2 * HELP_MARGIN).max(1);
-    let h = STATS_HEIGHT.min(size.h - 2 * HELP_MARGIN).max(1);
+    let w = (size.w * 3 / 5).clamp(STATS_WIDTH, STATS_MAX_WIDTH);
+    let h = (size.h * 3 / 4).clamp(STATS_HEIGHT, STATS_MAX_HEIGHT);
+    let w = w.min(size.w - 2 * HELP_MARGIN).max(1);
+    let h = h.min(size.h - 2 * HELP_MARGIN).max(1);
     Rectangle::new(
         (((size.w - w) / 2).max(0), ((size.h - h) / 2).max(0)).into(),
         (w, h).into(),
@@ -748,7 +754,7 @@ mod tests {
                 Rectangle::from_size(size),
                 layout.panel
             ));
-            assert!(layout.panel.size.w <= STATS_WIDTH);
+            assert!(layout.panel.size.w <= STATS_MAX_WIDTH);
             assert!(!layout.rows.is_empty());
             let last = layout.rows.last().unwrap().1;
             // Enter never acts on a row out of sight: those shown are inside.

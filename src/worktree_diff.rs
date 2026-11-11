@@ -152,6 +152,7 @@ impl DocOf {
             DocFile::PlanChanges => "Plan changes",
             DocFile::DraftChanges(..) => "Draft changes",
             DocFile::Suggestions => "Suggestions",
+            DocFile::ConflictPlan(_) => "Conflicts plan",
             DocFile::Stage(Stage::Plan) => "Plan",
             DocFile::Stage(Stage::PlanReview) => "Final plan",
             DocFile::Stage(_) => "Brief",

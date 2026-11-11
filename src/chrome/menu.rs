@@ -17,6 +17,8 @@ const MENU_GAP: i32 = 2;
 const MENU_HINT_GAP: i32 = 16;
 /// How tall a row of a message is: its lines close, as a paragraph's.
 const MENU_NOTE_HEIGHT: i32 = 20;
+/// How tall a rule between groups of rows is (a note with no text).
+const MENU_RULE_HEIGHT: i32 = 9;
 
 /// One row of a menu.
 #[derive(Clone, Debug, PartialEq)]
@@ -32,6 +34,7 @@ pub struct MenuRow {
 /// How tall `row` is in its menu.
 fn row_height(row: &MenuRow) -> i32 {
     match row.note {
+        true if row.label.is_empty() => MENU_RULE_HEIGHT,
         true => MENU_NOTE_HEIGHT,
         false => MENU_ITEM_HEIGHT,
     }
@@ -124,6 +127,12 @@ impl Painter {
                 px(item.size.w),
                 px(item.size.h),
             );
+            // A rule between groups: a line across, nothing to pick.
+            if row.note && row.label.is_empty() {
+                let rule = px(1).max(1);
+                c.fill(x, y + (h - rule) / 2, w, rule, p.border);
+                continue;
+            }
             if view.hover == Some(i) && row.enabled {
                 // The row Enter picks: lit as a list's selected row.
                 self.row_highlight(&mut c, item, (true, 0.0), scale, p);

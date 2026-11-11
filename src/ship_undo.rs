@@ -49,7 +49,7 @@ impl Gerdr {
         };
         let branch = feature.branch();
         let body = (undos.iter())
-            .map(|u| format!("\u{2022} {}", u.label(&branch)))
+            .map(|u| u.label(&branch))
             .collect::<Vec<_>>()
             .join("\n");
         let then = Then::UndoShip {
@@ -120,6 +120,12 @@ impl Gerdr {
         if let Some(why) = &failed {
             feature.log(now, format!("Undo stopped: {why}"));
         }
+        // Nothing it shipped stands any more: it isn't shipped, so Ship is
+        // to do again (not once its worktrees went: there is nothing to ship).
+        if feature.status == feature::Status::Done && !feature.shipped_any() && feature.dir.exists()
+        {
+            feature.untick(feature::Stage::Ship, now);
+        }
         self.save_feature(project, slug);
         self.probe_feature(project, slug);
         match failed {
@@ -134,5 +140,32 @@ impl Gerdr {
                 said.join(", ")
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_undo_dialog_says_what_follows_not_its_question_again() {
+        let undos = [
+            ship::Undo::ClosePr {
+                repo: "shop".into(),
+                url: "https://x/pull/7".into(),
+            },
+            ship::Undo::DeleteBranch {
+                repo: "shop".into(),
+                sha: None,
+            },
+        ];
+        assert_eq!(
+            undos
+                .iter()
+                .map(|u| u.label("feature/x"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            "Its pull request closes on GitHub: https://x/pull/7\nfeature/x goes off origin"
+        );
     }
 }

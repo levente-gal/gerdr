@@ -82,7 +82,7 @@ impl DocMode {
     pub fn choices(file: DocFile) -> &'static [DocMode] {
         match file {
             DocFile::Stage(_) | DocFile::FixPlan => &[DocMode::Review, DocMode::Split],
-            DocFile::Evidence => &DocMode::ALL,
+            DocFile::Evidence | DocFile::ConflictPlan(_) => &DocMode::ALL,
             DocFile::PlanChanges | DocFile::DraftChanges(..) | DocFile::Suggestions => {
                 &[DocMode::Review]
             }
@@ -103,7 +103,7 @@ impl DocMode {
     /// file is reviewed, the evidence is read.
     pub fn default_for(file: DocFile) -> DocMode {
         match file {
-            DocFile::Stage(_) | DocFile::FixPlan => DocMode::Review,
+            DocFile::Stage(_) | DocFile::FixPlan | DocFile::ConflictPlan(_) => DocMode::Review,
             DocFile::Evidence => DocMode::Preview,
             DocFile::PlanChanges | DocFile::DraftChanges(..) | DocFile::Suggestions => {
                 DocMode::Review
@@ -523,7 +523,9 @@ impl Gerdr {
     /// after the feature's tab, what is shown kept shown. Where it went.
     fn insert_doc_tab(&mut self, w: usize, doc: DocOf, text: String, mode: DocMode) -> usize {
         let review = match doc.file {
-            DocFile::Stage(_) | DocFile::FixPlan => review::load_file(&doc.comments),
+            DocFile::Stage(_) | DocFile::FixPlan | DocFile::ConflictPlan(_) => {
+                review::load_file(&doc.comments)
+            }
             DocFile::Evidence
             | DocFile::PlanChanges
             | DocFile::DraftChanges(..)
