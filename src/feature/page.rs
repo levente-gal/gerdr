@@ -400,8 +400,9 @@ pub fn round_stats(feature: &Feature) -> BTreeMap<u32, Result<Vec<RoundStat>, St
 }
 
 /// Finished rounds' spans measured already, by worktree, from and to.
-static SPANS: LazyLock<Mutex<HashMap<(PathBuf, String, String), (usize, Stat)>>> =
-    LazyLock::new(Default::default);
+static SPANS: LazyLock<Mutex<HashMap<SpanKey, (usize, Stat)>>> = LazyLock::new(Default::default);
+
+type SpanKey = (PathBuf, String, String);
 
 /// The commits and stat of `worktree` from `from` to `to`.
 fn span_stat(worktree: &Path, from: &str, to: &str) -> Result<(usize, Stat), String> {

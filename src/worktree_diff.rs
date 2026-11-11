@@ -56,6 +56,9 @@ use crate::{
     scroll::Motion,
 };
 
+/// A read's stamp and the diff it read.
+pub type Kept = (Stamp, Vec<FileDiff>);
+
 /// The worktree's diff while open.
 #[derive(Debug, Default)]
 pub struct WorktreeDiff {
@@ -83,7 +86,7 @@ pub struct WorktreeDiff {
     pub again: bool,
     /// What the last read saw of its files and the diff it read then: a
     /// read seeing the same takes that diff again (see `stamp`).
-    pub kept: Arc<Mutex<Option<(Stamp, Vec<FileDiff>)>>>,
+    pub kept: Arc<Mutex<Option<Kept>>>,
     pub diff: DiffView,
     pub hover: Option<ReposHit>,
     /// The sheet asking whether to delete the review, while open: the

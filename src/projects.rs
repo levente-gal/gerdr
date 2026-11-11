@@ -606,7 +606,7 @@ impl Store {
         }
     }
 
-    /// Take `state.json` in; one that can't be read is set aside.
+    /// Take `state.json` in; one that can't be parsed is set aside.
     fn load_state(&mut self, path: &Path) {
         match read_state(path) {
             Ok(Some((state, written))) => {
@@ -617,7 +617,11 @@ impl Store {
             Ok(None) => {}
             Err(err) => {
                 tracing::warn!("reading {}: {err}", path.display());
-                set_aside(path);
+                // Only a file that reads but doesn't parse is broken; a read
+                // error (permissions, I/O) leaves a healthy file in place.
+                if std::fs::read(path).is_ok() {
+                    set_aside(path);
+                }
             }
         }
     }
@@ -980,17 +984,17 @@ impl Store {
         if self.books.state == Some(digest(&json)) {
             return Ok(());
         }
-        if on_disk(path, self.books.state) != self.books.state {
-            if let Ok(Some((theirs, _))) = read_state(path) {
-                let ours = serde_json::to_value(self.state())?;
-                let theirs = serde_json::to_value(theirs)?;
-                let merged = merge3(Some(&self.books.state_base), Some(&ours), Some(&theirs));
-                match merged.map(serde_json::from_value::<State>) {
-                    Some(Ok(state)) => self.set_state(state),
-                    other => tracing::warn!("merging {}: {other:?}; ours wins", path.display()),
-                }
-                json = serde_json::to_vec_pretty(&self.state())?;
+        if on_disk(path, self.books.state) != self.books.state
+            && let Ok(Some((theirs, _))) = read_state(path)
+        {
+            let ours = serde_json::to_value(self.state())?;
+            let theirs = serde_json::to_value(theirs)?;
+            let merged = merge3(Some(&self.books.state_base), Some(&ours), Some(&theirs));
+            match merged.map(serde_json::from_value::<State>) {
+                Some(Ok(state)) => self.set_state(state),
+                other => tracing::warn!("merging {}: {other:?}; ours wins", path.display()),
             }
+            json = serde_json::to_vec_pretty(&self.state())?;
         }
         write_atomic(path, &json)?;
         self.books.state = Some(digest(&json));

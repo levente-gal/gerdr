@@ -1884,15 +1884,18 @@ pub fn stash_drop(dir: &Path, n: usize, oid: Option<&str>) -> OpResult {
     let mut op = Op::new(dir);
     let name = format!("stash@{{{n}}}");
     if let Some(oid) = oid
-        && query(dir, &["rev-parse", "--verify", "-q", &name])
-            .as_deref()
-            .map(str::trim)
-            != Some(oid)
+        && stash_oid(dir, n).as_deref() != Some(oid)
     {
         return Err(op.blocked("the stash list changed; refresh and try again"));
     }
     op.run(&["stash", "drop", &name])?;
     op.done()
+}
+
+/// The commit id of `stash@{n}` now; `None` when there is none.
+pub fn stash_oid(dir: &Path, n: usize) -> Option<String> {
+    let name = format!("stash@{{{n}}}");
+    query(dir, &["rev-parse", "--verify", "-q", &name]).map(|oid| oid.trim().to_owned())
 }
 
 /// Who commits, as git's `user.name` and `user.email` have it.

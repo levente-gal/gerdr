@@ -728,7 +728,7 @@ mod tests {
         let copy = dir(Some(&t.0), "p", "a-old");
         std::fs::create_dir_all(&copy).unwrap();
         std::fs::copy(dir(Some(&t.0), "p", "a").join(FILE), copy.join(FILE)).unwrap();
-        assert_eq!(load_all(Some(&t.0), "p").unwrap(), [f.clone()]);
+        assert_eq!(load_all(Some(&t.0), "p").unwrap(), std::slice::from_ref(&f));
         assert!(copy.join(FILE).is_file(), "the copy is left alone");
         let escaping = Feature {
             slug: "../../x".into(),

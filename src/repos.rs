@@ -2377,14 +2377,18 @@ impl Panel {
         }
     }
 
-    /// The commit of `item`'s stash `n`, as its Stashes list was read;
-    /// `None` when that list isn't read.
+    /// The commit of `item`'s stash `n`, as its Stashes list was read, or
+    /// as git has it now when that list isn't read.
     fn stash_oid(&self, item: &RepoItem, n: usize) -> Option<String> {
-        let (key, _) = self.detail.as_ref()?;
-        if key.tab != DetailTab::Stashes || key.root != item.root {
-            return None;
+        let listed = self.detail.as_ref().filter(|(key, _)| {
+            key.tab == DetailTab::Stashes && key.root == item.root
+        });
+        match listed {
+            Some(_) => self.log_oids.get(n).cloned().flatten(),
+            // No list read: take the id now, before the confirm dialog, so
+            // a stash pushed while it is open can't shift the drop.
+            None => crate::git_ops::stash_oid(&item.root, n),
         }
-        self.log_oids.get(n).cloned().flatten()
     }
 
     /// The repository and the files a discard throws the changes of away:
