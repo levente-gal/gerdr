@@ -43,6 +43,13 @@ pub fn forget(source: &'static str, text: &str) {
     problems.retain(|p| p.source != source || p.text != text);
 }
 
+/// Forget the problems from `source` whose text `gone` says no longer hold:
+/// what they were about went away.
+pub fn forget_matching(source: &'static str, gone: impl Fn(&str) -> bool) {
+    let mut problems = PROBLEMS.lock().unwrap_or_else(|e| e.into_inner());
+    problems.retain(|p| p.source != source || !gone(&p.text));
+}
+
 /// Make `texts` the problems from `source`, in place of the ones it had:
 /// none when it works again.
 pub fn set(source: &'static str, texts: Vec<String>) {

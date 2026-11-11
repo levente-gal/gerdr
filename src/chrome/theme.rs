@@ -131,6 +131,9 @@ pub(crate) struct Palette {
     pub(super) success: Rgb,
     pub(super) warning: Rgb,
     pub(super) error: Rgb,
+    /// A medium-severity finding's: orange, apart from `warning`'s yellow,
+    /// which says it is the user's turn.
+    pub(super) medium: Rgb,
     pub(super) shadow: f32,
     /// How dark the scrim behind a modal dialog is, 0 to 1.
     pub(super) scrim: f32,
@@ -173,6 +176,7 @@ pub(super) const ONE_DARK: Palette = Palette {
     success: hex(0xa1c181),
     warning: hex(0xdec184),
     error: hex(0xe08a8e),
+    medium: hex(0xd19a66),
     shadow: 0.45,
     scrim: 0.40,
     syntax: SyntaxColors {
@@ -225,6 +229,7 @@ pub(super) const ONE_LIGHT: Palette = Palette {
     success: hex(0x3a7531),
     warning: hex(0x725800),
     error: hex(0xb03e30),
+    medium: hex(0xa04a00),
     shadow: 0.18,
     scrim: 0.22,
     syntax: SyntaxColors {
@@ -286,11 +291,53 @@ impl Palette {
 
     pub(super) fn status(&self, status: AgentStatus) -> Rgb {
         match status {
-            AgentStatus::Working => self.accent,
-            AgentStatus::Blocked => self.warning,
-            AgentStatus::Done => self.success,
-            AgentStatus::Idle => self.muted,
+            AgentStatus::Working => Standing::Working.color(self),
+            AgentStatus::Blocked => Standing::Yours.color(self),
+            AgentStatus::Done => Standing::Done.color(self),
+            AgentStatus::Idle => Standing::Idle.color(self),
             AgentStatus::Unknown => self.placeholder,
+        }
+    }
+}
+
+/// How a feature, a stage or an agent stands: one word and one colour each,
+/// the same on the rail, the sidebar's cards, a stage page's cards and
+/// lines, and toasts. What colours a state goes through here (`NodeMark`,
+/// `CardTone`, `CheckTone`, `Dot`, `Palette::status`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Standing {
+    /// The user is to act: review, decide, answer, send.
+    Yours,
+    /// An agent or a job is at work on it.
+    Working,
+    /// It failed, or something blocks it.
+    Failed,
+    /// Done, approved, passed.
+    Done,
+    /// Nothing runs and nothing waits.
+    Idle,
+}
+
+impl Standing {
+    /// Its word, lowercase as drawn inline.
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Yours => "your turn",
+            Self::Working => "working",
+            Self::Failed => "failed",
+            Self::Done => "done",
+            Self::Idle => "idle",
+        }
+    }
+
+    /// Its colour: yellow, blue, red, green, grey.
+    pub(super) fn color(self, p: &Palette) -> Rgb {
+        match self {
+            Self::Yours => p.warning,
+            Self::Working => p.accent,
+            Self::Failed => p.error,
+            Self::Done => p.success,
+            Self::Idle => p.muted,
         }
     }
 }
@@ -421,6 +468,7 @@ mod tests {
                 ("success", p.success),
                 ("warning", p.warning),
                 ("error", p.error),
+                ("medium", p.medium),
                 ("comment", p.syntax.comment),
             ] {
                 // As text (a pill's word, a count, a diff's comment).
@@ -436,6 +484,7 @@ mod tests {
                 ("success", p.success),
                 ("warning", p.warning),
                 ("error", p.error),
+                ("medium", p.medium),
             ] {
                 let ratio = contrast(p.on_accent, colour);
                 assert!(ratio >= 4.5, "{name}: on_accent on {what} is {ratio:.2}:1");
@@ -443,7 +492,7 @@ mod tests {
             // A finding's "AI review" tag.
             for (what, ink, colour) in [
                 ("high", p.on_accent, p.error),
-                ("medium", p.on_accent, p.warning),
+                ("medium", p.on_accent, p.medium),
                 ("low", p.elevated, p.text),
                 ("dismissed", p.elevated, p.muted),
             ] {
@@ -454,7 +503,7 @@ mod tests {
             for (what, colour) in [
                 ("your comment", super::mix(p.elevated, p.accent, 0.18)),
                 ("high", super::mix(p.elevated, p.error, 0.32)),
-                ("medium", super::mix(p.elevated, p.warning, 0.32)),
+                ("medium", super::mix(p.elevated, p.medium, 0.32)),
                 ("low", super::mix(p.elevated, p.text, 0.24)),
             ] {
                 let ratio = contrast(p.text, colour);

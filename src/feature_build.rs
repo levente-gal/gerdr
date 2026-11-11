@@ -611,7 +611,7 @@ impl Gerdr {
         run.not_copied = report.not_copied.clone();
         run.ran = report.ran.clone();
         match &report.failed {
-            None => feature.log(now, "Set up"),
+            None => feature.log(now, "Setup done"),
             Some(why) => feature.log(now, format!("Setup failed: {why}")),
         }
         self.save_feature(project, slug);
@@ -764,13 +764,13 @@ impl Gerdr {
         if feature.status != Status::Open || feature.current() != Some(Stage::Build) {
             return;
         }
-        feature.tick(now, "gerdr", Some(patch));
+        let said = "done: every milestone ticked and committed";
+        feature.tick_said(now, "gerdr", Some(patch), said);
         if let Some(run) = feature.runs.get_mut(&Stage::Build) {
             run.ready = Some(now);
             run.stop = None;
             run.nudged = false;
         }
-        feature.log(now, "Build done: every milestone ticked and committed");
         let title = feature.title.clone();
         let checks = verify::checks(feature, &config).len();
         self.save_feature(project, slug);

@@ -215,6 +215,35 @@ pub struct ConfirmDialog {
     pub hover: Option<usize>,
 }
 
+impl Then {
+    /// Whether doing it loses something that can't be had back (work, a
+    /// process, a record): its button is red then. Going on in the flow
+    /// (ship, approve, finish, change decisions) is not, and gets the
+    /// primary button, so red keeps meaning "lost".
+    pub fn loses(&self) -> bool {
+        !matches!(
+            self,
+            Then::TakeOver(..)
+                | Then::ChangeProjectId(..)
+                | Then::RestartT3
+                | Then::ImportProfile(..)
+                | Then::ShipFeature { .. }
+                | Then::SubmitReview { .. }
+                | Then::PushPr { .. }
+                | Then::FixHere { .. }
+                | Then::MakeFixes { .. }
+                | Then::ApproveStage { .. }
+                | Then::ReopenStage { .. }
+                | Then::SkipPlanReview { .. }
+                | Then::ChangeDecisions { .. }
+                | Then::FinishFeature { .. }
+                | Then::FinishPrReview { .. }
+                | Then::UpdateBase { .. }
+                | Then::PullBase { .. }
+        )
+    }
+}
+
 /// What the confirm dialog asks gerdr to do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outcome {
@@ -945,6 +974,7 @@ impl Gerdr {
             go: dialog.go,
             selected: dialog.selected,
             hover: dialog.hover,
+            loses: dialog.then.loses(),
         })
     }
 }

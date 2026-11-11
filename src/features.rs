@@ -2570,7 +2570,7 @@ impl Rework {
             Rework::Waits => (NodeMark::Waiting, "waiting to send"),
             Rework::Closed => (NodeMark::Waiting, "agent closed"),
             Rework::Draft => (NodeMark::Waiting, "draft in T3 Code"),
-            Rework::Runs(_) => (NodeMark::Fixing, "running again"),
+            Rework::Runs(_) => (NodeMark::Fixing, "working again"),
         };
         (mark, line.to_owned())
     }
@@ -2586,11 +2586,11 @@ impl Rework {
     /// What its agent's card says.
     fn status(self) -> &'static str {
         match self {
-            Rework::Waits => "waiting for you \u{b7} send the prompt",
+            Rework::Waits => "your turn \u{b7} send the prompt",
             Rework::Closed => "its tab closed \u{b7} Start agent opens it again",
             Rework::Draft => "draft in T3 Code \u{b7} pick a model and send it",
-            Rework::Runs(Dot::Blocked) => "running again \u{b7} needs you",
-            Rework::Runs(_) => "running again",
+            Rework::Runs(Dot::Blocked) => "your turn \u{b7} it asks you something",
+            Rework::Runs(_) => "working again",
         }
     }
 
@@ -4040,9 +4040,9 @@ fn check_lines(
         let lines = planned
             .blockers
             .iter()
-            .map(|b| line(b.clone(), CheckTone::Blocker))
+            .map(|b| line(b.clone(), CheckTone::Failed))
             .collect();
-        return capped(lines, CheckTone::Blocker);
+        return capped(lines, CheckTone::Failed);
     }
     let more = feature.status == Status::Done;
     let first = match (planned.nothing, planned.all_done, more) {
@@ -4226,7 +4226,7 @@ fn ship_card_state(
             "MERGED" => (Dot::Done, line(text, CheckTone::Ready)),
             "CLOSED" => (Dot::Unknown, line(text, CheckTone::Note)),
             _ if state.failed > 0 || state.mergeable == "CONFLICTING" => {
-                (Dot::Failed, line(text, CheckTone::Blocker))
+                (Dot::Failed, line(text, CheckTone::Failed))
             }
             _ if state.running > 0 => (Dot::Working, line(text, CheckTone::Note)),
             _ if state.review == "CHANGES_REQUESTED" => {
@@ -8381,25 +8381,22 @@ impl Gerdr {
                     // Build go over them again first.
                     self.back_to_verify(project, slug);
                 } else {
-                    self.tick_feature(project, slug, Some(&reading.patch), "you");
                     let comments = criteria.iter().filter(|c| c.comment).count();
                     let n = criteria.len() - comments;
-                    if let Some(f) = self.feature_mut(project, slug) {
-                        let mut all = match n {
-                            0 => String::new(),
-                            1 => "its 1 criterion".to_owned(),
-                            n => format!("all {n} criteria"),
+                    let mut all = match n {
+                        0 => String::new(),
+                        1 => "its 1 criterion".to_owned(),
+                        n => format!("all {n} criteria"),
+                    };
+                    if comments > 0 {
+                        let done = format!("{} done", plural(comments, "comment"));
+                        all = match all.is_empty() {
+                            true => done,
+                            false => format!("{all}, {done}"),
                         };
-                        if comments > 0 {
-                            let done = format!("{} done", plural(comments, "comment"));
-                            all = match all.is_empty() {
-                                true => done,
-                                false => format!("{all}, {done}"),
-                            };
-                        }
-                        f.log(feature::now(), format!("Manual test passed: {all}"));
                     }
-                    self.save_feature(project, slug);
+                    let said = format!("passed: {all}");
+                    self.tick_feature_said(project, slug, Some(&reading.patch), "you", &said);
                     tracing::info!("manual test of {project}/{slug} passed: {n} criteria");
                 }
             }
@@ -8422,22 +8419,28 @@ impl Gerdr {
     /// Mark the current stage of feature `slug` done by `by` ("you",
     /// "gerdr"), on the code whose patch-id is `patch`, and say so.
     fn tick_feature(&mut self, project: &str, slug: &str, patch: Option<&str>, by: &str) {
+        let word = if by == "you" { "approved" } else { "done" };
+        self.tick_feature_said(project, slug, patch, by, word);
+    }
+
+    /// `tick_feature`, the activity's line saying `said` after the stage.
+    fn tick_feature_said(
+        &mut self,
+        project: &str,
+        slug: &str,
+        patch: Option<&str>,
+        by: &str,
+        said: &str,
+    ) {
         let Some(feature) = self.feature_mut(project, slug) else {
             return;
         };
-        let Some(stage) = feature.tick(feature::now(), by, patch) else {
+        let Some(stage) = feature.tick_said(feature::now(), by, patch, said) else {
             return self.show_warning("Nothing left to mark done".into());
         };
-        let shipped = feature.status == Status::Done;
-        let title = feature.title.clone();
+        let toast = done_toast(feature, stage);
         self.save_feature(project, slug);
-        self.show_success(if shipped {
-            format!("\u{201c}{title}\u{201d} is done")
-        } else if stage == Stage::AiReview {
-            "AI review done: Code review is next".to_owned()
-        } else {
-            format!("{} marked done", stage.label())
-        });
+        self.show_success(toast);
         self.feature_cursor_to_current_of(project, slug);
         self.feature_diff_changed(project, slug);
     }
@@ -9015,7 +9018,7 @@ impl Gerdr {
             removed: Vec::new(),
             history: vec![Event {
                 at: now,
-                what: "created".into(),
+                what: "Created".into(),
             }],
             shipping: Default::default(),
             ship_plan: Default::default(),
@@ -10980,6 +10983,7 @@ impl Gerdr {
             ));
         }
         let now = feature::now();
+        forget_problems_of(&title);
         if abandon {
             feature.status = Status::Abandoned;
             feature.log(now, "abandoned");
@@ -10996,7 +11000,8 @@ impl Gerdr {
             self.ai_work_close(project, slug);
         }
         match abandon {
-            true => self.show_success(format!("Abandoned \u{201c}{title}\u{201d}")),
+            // Not a success: no done green on what was given up.
+            true => self.show_notice(format!("Abandoned \u{201c}{title}\u{201d}")),
             false => self.show_removed(
                 project,
                 slug,
@@ -11818,7 +11823,8 @@ impl Gerdr {
             let watch_key = (panel.project.clone(), panel.slug.clone(), stage);
             let watch = self.features.agents.get(&watch_key);
             agent_read = watch.is_some_and(crate::feature_agents::Watch::reads);
-            crate::feature_agents::agent_line(run, stage, agent_status, watch, now)
+            let run = crate::feature_agents::as_read(feature, stage, run);
+            crate::feature_agents::agent_line(&run, stage, agent_status, watch, now)
         });
         let manual_counts = self.manual_counts(feature);
         let pane = run.and_then(|(_, run)| run.pane.as_deref());
@@ -11832,6 +11838,7 @@ impl Gerdr {
             shipping,
             agent,
             agent_status,
+            agent_standing: self.agent_standing_of(feature),
             agent_read,
             tail,
             ctx: self.row_ctx(feature),
@@ -11936,6 +11943,7 @@ impl Gerdr {
             verify: doing(Job::Verify),
             manual_gate: manual,
             code_counts: self.code_reviews.get(&key).copied(),
+            agent: self.agent_standing_of(f),
         };
         let gate = crate::feature_agents::gate_of(f, |_| manual).is_some();
         let busy = mine().next().is_some();
@@ -12612,6 +12620,8 @@ struct PanelState<'a> {
     agent: Option<String>,
     /// Its current stage's agent's status, while its tab is there.
     agent_status: Option<AgentStatus>,
+    /// Whose turn it is with that agent (see `Gerdr::agent_standing_of`).
+    agent_standing: Option<chrome::Standing>,
     /// gerdr reads what that agent wrote (`feature_agents::Watch::reads`):
     /// it waits on gerdr, not on the user.
     agent_read: bool,
@@ -12848,6 +12858,9 @@ struct LineState<'a> {
     /// Where its current agent runs, if on another machine, and whether that
     /// says all there is to say of it.
     machine: Option<(String, bool)>,
+    /// Whose turn it is with its current stage's agent, while its tab is
+    /// there (see `Gerdr::agent_standing_of`).
+    agent: Option<chrome::Standing>,
 }
 
 impl<'a> From<&PanelState<'a>> for LineState<'a> {
@@ -12861,6 +12874,7 @@ impl<'a> From<&PanelState<'a>> for LineState<'a> {
             manual_gate: state.manual_gate,
             code_counts: state.code_counts,
             machine: state.machine_line.clone(),
+            agent: state.agent_standing,
         }
     }
 }
@@ -12925,25 +12939,48 @@ fn card_tone(
     busy: bool,
 ) -> chrome::CardTone {
     let run = stage.and_then(|stage| feature.runs.get(&stage));
-    let failed = match stage {
-        Some(Stage::Build) => {
-            run.is_none() && (feature.setup.as_ref()).is_some_and(|s| s.failed.is_some())
-        }
-        Some(Stage::Verify) => (feature.verify.as_ref()).is_some_and(|v| v.passed == Some(false)),
-        Some(Stage::Ship) => {
-            ship_planned(feature, state.probe).is_some_and(|p| !p.blockers.is_empty())
-        }
-        _ => false,
-    };
-    if failed {
+    if stage.is_some_and(|stage| stage_failed(feature, stage, state.probe)) {
         chrome::CardTone::Failed
-    } else if gate {
+    } else if gate || stage.is_some_and(|stage| agent_yours(feature, stage, state)) {
         chrome::CardTone::Waits
-    } else if busy || run.is_some_and(feature::agents::StageRun::live) {
+    } else if busy || state.agent == Some(chrome::Standing::Working) {
+        chrome::CardTone::Working
+    } else if state.agent.is_none() && run.is_some_and(feature::agents::StageRun::live) {
+        // Its agent's state isn't known yet: it was started, so it works.
         chrome::CardTone::Working
     } else {
         chrome::CardTone::Idle
     }
+}
+
+/// Whether `stage` of `feature`, the one it is at, failed or is blocked: its
+/// setup failed before an agent started, its Build agent said it is
+/// blocked, Verify's checks failed, a fix plan it asked for stalled, Ship
+/// is held up. The rail, the sidebar's card and the page all say so in the
+/// error colour (`Standing::Failed`).
+fn stage_failed(feature: &Feature, stage: Stage, probe: Option<&Probe>) -> bool {
+    if feature.status != Status::Open {
+        return false;
+    }
+    let run = feature.runs.get(&stage);
+    let stalled =
+        (feature.fix_round.as_ref()).is_some_and(|r| r.stage == stage && r.stalled.is_some());
+    stalled
+        || match stage {
+            Stage::Build => {
+                let setup = (feature.setup.as_ref()).is_some_and(|s| s.failed.is_some());
+                (run.is_none() && setup) || run.is_some_and(|r| r.blocked.is_some())
+            }
+            Stage::Verify => (feature.verify.as_ref()).is_some_and(|v| v.passed == Some(false)),
+            Stage::Ship => ship_planned(feature, probe).is_some_and(|p| !p.blockers.is_empty()),
+            _ => false,
+        }
+}
+
+/// Whether the agent of `stage`, where `feature` is at, waits on the user
+/// (`feature_agents::agent_standing`).
+fn agent_yours(feature: &Feature, stage: Stage, state: &LineState) -> bool {
+    feature.current() == Some(stage) && state.agent == Some(chrome::Standing::Yours)
 }
 
 /// Whether the current `stage` of `feature` waits for the user: a file to
@@ -12953,11 +12990,12 @@ fn waits(feature: &Feature, stage: Stage, state: &LineState) -> bool {
     crate::feature_agents::gate_of(feature, |_| state.manual_gate).is_some_and(|g| g.0 == stage)
 }
 
-/// "running 14m": how long an agent started at `started` has run.
+/// "working 14m": how long an agent started at `started` has worked.
 fn running_for(now: u64, started: u64) -> String {
+    let word = chrome::Standing::Working.word();
     match projects::ago(now, started).strip_suffix(" ago") {
-        Some(long) => format!("running {long}"),
-        None => "running".to_owned(),
+        Some(long) => format!("{word} {long}"),
+        None => word.to_owned(),
     }
 }
 
@@ -12974,7 +13012,13 @@ fn current_line(feature: &Feature, stage: Stage, state: &LineState, now: u64) ->
     let agent = || match run {
         Some(run) if run.t3 == Some(feature::agents::T3Run::Draft) => "draft in T3 Code".to_owned(),
         Some(run) if run.waits_to_send() => "waiting to send".to_owned(),
-        Some(run) if run.live() => running_for(now, run.started),
+        // Whose turn it is, as the agent's card says it.
+        Some(run) if run.live() => match state.agent {
+            Some(standing @ (chrome::Standing::Yours | chrome::Standing::Done)) => {
+                standing.word().to_owned()
+            }
+            _ => running_for(now, run.started),
+        },
         Some(_) => "agent closed".to_owned(),
         None => String::new(),
     };
@@ -13078,7 +13122,10 @@ fn node_mark(feature: &Feature, stage: Stage, ctx: RowCtx, state: &LineState) ->
         StageMark::Done if turned.is_some() && stage.bound() => NodeMark::Ran,
         StageMark::Done if is_stale(feature, stage, state.probe) => NodeMark::Stale,
         StageMark::Done => NodeMark::Done,
+        StageMark::Current if stage_failed(feature, stage, state.probe) => NodeMark::Failed,
         StageMark::Current if waits(feature, stage, state) => NodeMark::Waiting,
+        // Its agent rests with its work not done: the user's turn.
+        StageMark::Current if agent_yours(feature, stage, state) => NodeMark::Waiting,
         StageMark::Current if turned == Some(stage) && at_work.is_some() => NodeMark::Paused,
         StageMark::Current => NodeMark::Current,
         StageMark::Later if left_off(feature) == Some(stage) => NodeMark::Paused,
@@ -13473,7 +13520,7 @@ fn ci_sections(
             Some(checks) => said.extend(checks.iter().map(|c| {
                 let (word, tone) = match c.state {
                     crate::ci::CiState::Passed => ("passed", CheckTone::Ready),
-                    crate::ci::CiState::Failed => ("failed", CheckTone::Blocker),
+                    crate::ci::CiState::Failed => ("failed", CheckTone::Failed),
                     crate::ci::CiState::Running => ("running", CheckTone::Note),
                     crate::ci::CiState::Unknown => ("no result", CheckTone::Blocker),
                 };
@@ -13735,15 +13782,18 @@ fn agent_card(
     let dot = match (mark, back) {
         (_, Some(Rework::Runs(dot))) => dot,
         (StageMark::Done, _) => Dot::Done,
-        (StageMark::Current, _) if run.live() => {
-            state.agent_status.map_or(Dot::Unknown, Dot::of_status)
-        }
+        // Whose turn it is, in its colour, as the words beside it say.
+        (StageMark::Current, _) if run.live() => match state.agent_standing {
+            Some(chrome::Standing::Done) => Dot::Done,
+            Some(chrome::Standing::Working) => Dot::Working,
+            _ => state.agent_status.map_or(Dot::Unknown, Dot::of_status),
+        },
         _ => Dot::Unknown,
     };
     // The card's head names the agent already.
     let status = match (current, &state.agent) {
         // On a done Build too, where fixes wait: `started` would hide that.
-        _ if run.waits_to_send() => "waiting for you \u{b7} send the prompt".to_owned(),
+        _ if run.waits_to_send() => "your turn \u{b7} send the prompt".to_owned(),
         (true, Some(line)) => (line.strip_prefix(run.agent.as_str()))
             .map_or(line.as_str(), str::trim_start)
             .to_owned(),
@@ -13763,8 +13813,10 @@ fn agent_card(
         Some((line, false)) => format!("{status} \u{b7} {line}"),
         None => status,
     };
-    // The tail read is the current stage's agent's, while its pane is.
-    let tail = match current && run.pane.is_some() {
+    // The tail read is the current stage's agent's, while its pane is, and
+    // while it says something: once its work is read, it is old news.
+    let done = state.agent_standing == Some(chrome::Standing::Done);
+    let tail = match current && run.pane.is_some() && !done {
         true => state.tail.to_vec(),
         false => Vec::new(),
     };
@@ -13772,7 +13824,10 @@ fn agent_card(
     let waits = match back {
         Some(back) => back.waits_on_you(),
         None if current && state.agent_read => false,
-        None if current => crate::feature_agents::waits_on_you(run, stage, state.agent_status),
+        None if current => {
+            let run = crate::feature_agents::as_read(feature, stage, run);
+            crate::feature_agents::waits_on_you(&run, stage, state.agent_status)
+        }
         None => run.waits_to_send(),
     };
     Some(PageSection::Agent {
@@ -13881,14 +13936,15 @@ fn fix_round_card(
 /// What open round `round` of `feature` is about and how it stands.
 fn fix_round_state(feature: &Feature, round: &FixRound) -> CheckLine {
     let waits = (feature.runs.get(&Stage::Build)).is_some_and(|run| run.waits_to_send());
+    // One colour per state, as on the rail and the sidebar's card.
     let tone = match (round.phase, round.stalled.is_some()) {
-        _ if waits => CheckTone::Note,
-        (FixPhase::Ready, _) => CheckTone::Ready,
-        (_, true) => CheckTone::Blocker,
+        _ if waits => CheckTone::Blocker,
+        (_, true) => CheckTone::Failed,
+        (FixPhase::Ready, _) => CheckTone::Blocker,
         _ => CheckTone::Note,
     };
     let said = match (waits, &round.stalled) {
-        (true, _) => "waiting for you \u{b7} send the prompt".to_owned(),
+        (true, _) => "your turn \u{b7} send the prompt".to_owned(),
         (false, Some(why)) => why.clone(),
         (false, None) => round.line(),
     };
@@ -13932,7 +13988,8 @@ fn file_line(feature: &Feature, stage: Stage, ctx: RowCtx) -> CheckLine {
     }
     let written = ctx.wrote(stage);
     match feature.runs.get(&stage) {
-        Some(run) if run.ready.is_some() => line("ready for review", CheckTone::Ready),
+        // The user's turn: in its colour, as on the rail and the sidebar.
+        Some(run) if run.ready.is_some() => line("ready for review", CheckTone::Blocker),
         // Its agent hasn't its prompt yet: nothing is being written.
         Some(run) if run.held => {
             let what = if written {
@@ -14001,7 +14058,7 @@ fn last_checks(feature: &Feature, state: &PanelState) -> Vec<CheckLine> {
             vec![line(format!("run {} passed", run.n), CheckTone::Ready)]
         }
         Some(run) if run.passed == Some(false) => {
-            let mut out = vec![line(format!("run {} failed", run.n), CheckTone::Blocker)];
+            let mut out = vec![line(format!("run {} failed", run.n), CheckTone::Failed)];
             // A check's card says how it failed; this says the rest.
             let on_card = |f: &String| {
                 (run.checks.iter())
@@ -14009,8 +14066,8 @@ fn last_checks(feature: &Feature, state: &PanelState) -> Vec<CheckLine> {
             };
             let failures = (run.failures.iter())
                 .filter(|f| !on_card(f))
-                .map(|f| line(f.clone(), CheckTone::Blocker));
-            out.extend(capped(failures.collect(), CheckTone::Blocker));
+                .map(|f| line(f.clone(), CheckTone::Failed));
+            out.extend(capped(failures.collect(), CheckTone::Failed));
             out
         }
         Some(run) => vec![line(format!("run {} running", run.n), CheckTone::Note)],
@@ -14056,7 +14113,7 @@ fn sandbox_sections(feature: &Feature, state: &PanelState) -> Vec<PageSection> {
     if let Some(why) = &run.failed {
         return vec![lines(
             "Sandbox",
-            vec![line(format!("failed: {why}"), CheckTone::Blocker)],
+            vec![line(format!("failed: {why}"), CheckTone::Failed)],
         )];
     }
     let ports_text = |ports: &[u16]| -> String {
@@ -14209,9 +14266,9 @@ fn setup_section(feature: &Feature, state: &PanelState) -> Option<PageSection> {
         .as_ref()
         .filter(|run| run.finished.is_some())?;
     let place = (state.setup_on.iter()).map(|name| line(format!("on {name}"), CheckTone::Note));
-    let failed = (run.failed.iter()).map(|why| line(format!("failed: {why}"), CheckTone::Blocker));
+    let failed = (run.failed.iter()).map(|why| line(format!("failed: {why}"), CheckTone::Failed));
     let missed = (run.not_copied.iter())
-        .map(|what| line(format!("couldn't copy {what}"), CheckTone::Blocker));
+        .map(|what| line(format!("couldn't copy {what}"), CheckTone::Failed));
     let copied = (run.copied.iter()).map(|what| line(format!("copied {what}"), CheckTone::Note));
     let ran = (run.ran.iter()).map(|what| line(format!("ran {what}"), CheckTone::Note));
     let mut out: Vec<_> = failed.chain(missed).chain(copied).chain(ran).collect();
@@ -14812,7 +14869,7 @@ fn check_now(feature: &Feature, round: &FixRound, failure: &str, open: bool) -> 
         Some(o) if o.passed() => line(format!("passed in run {}", check.run), CheckTone::Ready),
         Some(_) => line(
             format!("failed again in run {}", check.run),
-            CheckTone::Blocker,
+            CheckTone::Failed,
         ),
     })
 }
@@ -14828,7 +14885,7 @@ fn criterion_now(feature: &Feature, round: &FixRound, id: &str, open: bool) -> O
             line("passed since", CheckTone::Ready)
         }
         Some(k) if k.fix_made() => line("fix made: try it again", CheckTone::Note),
-        Some(k) if since(k) && !k.sent => line("failed again", CheckTone::Blocker),
+        Some(k) if since(k) && !k.sent => line("failed again", CheckTone::Failed),
         Some(_) if open => line("being fixed", CheckTone::Note),
         _ => line("not tried since", CheckTone::Note),
     })
@@ -15309,6 +15366,12 @@ fn draft_cards(
             n => format!("sent back with {}", plural(n, "comment")),
         };
         let (dot, state_line) = match (draft.approved, draft.sent_back) {
+            // Approved, then its stage reopened: it is up for review again,
+            // as its file's card says.
+            (Some(_), _) if latest && current && !feature.is_done(stage) => (
+                Dot::Blocked,
+                line("ready for review \u{b7} reopened", CheckTone::Blocker),
+            ),
             (Some(_), _) => (Dot::Done, line("approved", CheckTone::Ready)),
             // Sent back and not written again yet: its agent is at it.
             (None, Some(_)) if latest && current && run.is_some_and(|r| r.ready.is_none()) => (
@@ -15321,7 +15384,7 @@ fn draft_cards(
             // Sent back: not done, only over, as a dropped round reads.
             (None, Some(_)) => (Dot::Unknown, line(sent, CheckTone::Note)),
             (None, None) if latest && current => {
-                (Dot::Idle, line("ready for review", CheckTone::Ready))
+                (Dot::Blocked, line("ready for review", CheckTone::Blocker))
             }
             (None, None) => (Dot::Done, line("written", CheckTone::Note)),
         };
@@ -15450,12 +15513,13 @@ fn stage_page(
         }),
         // The bar over the page counts its criteria.
         StageMark::Current if stage == Stage::ManualTest && !state.criteria.is_empty() => None,
+        // One colour per state, as the rail and the sidebar's card say it.
         StageMark::Current => stage_line(feature, stage, state).map(|text| {
-            let failed = text.contains("failed") || text.contains("not ready");
+            let failed = stage_failed(feature, stage, state.probe) || text.contains("failed");
             let tone = if failed {
+                CheckTone::Failed
+            } else if text.contains("not ready") || waits(feature, stage, &state.into()) {
                 CheckTone::Blocker
-            } else if waits(feature, stage, &state.into()) {
-                CheckTone::Ready
             } else {
                 CheckTone::Note
             };
@@ -15548,7 +15612,7 @@ fn stage_page(
             Stage::Build => {
                 let blocked = feature.runs.get(&stage).and_then(|r| r.blocked.as_ref());
                 if let Some(blocked) = blocked {
-                    let why = line(blocked.why.clone(), CheckTone::Blocker);
+                    let why = line(blocked.why.clone(), CheckTone::Failed);
                     sections.push(lines("Blocked", vec![why]));
                 }
                 sections.extend(card());
@@ -15883,19 +15947,21 @@ fn comment_plan(feature: &Feature, probe: Option<&Probe>) -> Option<PageSection>
     })
 }
 
-/// How a line of `feature`'s history reads in the activity: a send-back
-/// or a failure as a blocker, a tick or a pass as ready, the rest a note.
+/// How a line of `feature`'s history reads in the activity: a failure as
+/// failed, a send-back as the user's turn, a tick or a pass as done, the
+/// rest a note.
 fn event_tone(what: &str) -> CheckTone {
     let lower = what.to_lowercase();
     // A stop between milestones is a pause, not a failure.
     if lower.contains("stopped after milestone") {
         return CheckTone::Note;
     }
+    let failed = ["couldn't", "refused", "failed", "stalled", "blocked"];
+    if failed.iter().any(|f| lower.contains(f)) {
+        return CheckTone::Failed;
+    }
     let blocker = [
-        "couldn't",
-        "refused",
         "sent back",
-        "failed",
         "code changed",
         "not done",
         "not read",
@@ -15905,6 +15971,7 @@ fn event_tone(what: &str) -> CheckTone {
     ];
     let ready = [
         "ticked",
+        " done",
         "approved",
         "passed",
         "build done",
@@ -15913,18 +15980,55 @@ fn event_tone(what: &str) -> CheckTone {
     ];
     if blocker.iter().any(|b| lower.contains(b)) {
         CheckTone::Blocker
-    } else if ready.iter().any(|r| lower.contains(r)) || what == "Set up" {
+    } else if ready.iter().any(|r| lower.contains(r)) || matches!(what, "Set up" | "Setup done") {
         CheckTone::Ready
     } else {
         CheckTone::Note
     }
 }
 
+/// Let go of what the problems list says of the setup and the sandbox of
+/// feature `title`, once it closed: nothing of it is left to fix there.
+/// What a removed feature's sandbox left on a machine stays.
+fn forget_problems_of(title: &str) {
+    let of = |what: &str| format!("{what} \u{201c}{title}\u{201d} ");
+    let (setup, sandbox) = (of("Setup of"), of("The sandbox of"));
+    crate::problems::forget_matching("features", |t| t.starts_with(&setup));
+    crate::problems::forget_matching(crate::feature_sandbox::PROBLEMS, |t| {
+        t.starts_with(&sandbox) && !t.ends_with("until that can be reached")
+    });
+}
+
+/// What a toast says of `stage` of `feature` just marked done, one shape
+/// for every approval: the activity's line for it, then what comes next
+/// ("Plan approved · Plan review is next"), or that the feature is done.
+pub(crate) fn done_toast(feature: &Feature, stage: Stage) -> String {
+    if feature.status == Status::Done {
+        return format!("\u{201c}{}\u{201d} is done", feature.title);
+    }
+    let said = (feature.history.last())
+        .filter(|e| e.what.starts_with(stage.label()))
+        .map_or_else(|| format!("{} done", stage.label()), |e| e.what.clone());
+    match feature.current() {
+        Some(next) => format!("{said} \u{b7} {} is next", next.label()),
+        None => said,
+    }
+}
+
+/// `what` with its first letter upper case.
+fn capitalised(what: &str) -> String {
+    let mut chars = what.chars();
+    chars.next().map_or_else(String::new, |first| {
+        first.to_uppercase().chain(chars).collect()
+    })
+}
+
 /// `feature`'s history, newest first.
 fn activity(feature: &Feature, now: u64) -> Vec<ActivityRow> {
     (feature.history.iter().rev())
         .map(|e| ActivityRow {
-            what: e.what.clone(),
+            // Capitalised as every line is, older records' "created" too.
+            what: capitalised(&e.what),
             ago: projects::ago(now, e.at),
             tone: event_tone(&e.what),
         })
@@ -16949,9 +17053,18 @@ fn tab_view(
     let stage = panel.page_stage(feature);
     let rail = Stage::ALL
         .iter()
-        .map(|s| RailNode {
-            selected: *s == stage,
-            ..rail_node(feature, *s, state, now)
+        .map(|s| {
+            let mut node = rail_node(feature, *s, state, now);
+            node.selected = *s == stage;
+            // Another stage's page shows: the stage the feature is at says
+            // so, apart from the one ringed as viewed.
+            if feature.current() == Some(*s) && *s != stage {
+                node.line = match node.line.is_empty() {
+                    true => "current".to_owned(),
+                    false => format!("current \u{b7} {}", node.line),
+                };
+            }
+            node
         })
         .collect();
     let back = rail_back(feature, state.ctx);
@@ -19135,7 +19248,7 @@ pub(crate) mod tests {
         let page = stage_page(&f, Stage::Build, &PanelState::default(), &actions, 2_000);
         assert!(page.sections.iter().any(|s| matches!(
             s,
-            PageSection::Agent { status, waits: true, .. } if status.starts_with("waiting for you")
+            PageSection::Agent { status, waits: true, .. } if status.starts_with("your turn")
         )));
         // Its tab closed: it can still open again from there.
         f.runs.insert(Stage::Build, held_run(None));
@@ -19238,12 +19351,12 @@ pub(crate) mod tests {
         assert_eq!(
             shown,
             Some((
-                "Build agent \u{b7} running again".to_owned(),
+                "Build agent \u{b7} working again".to_owned(),
                 Dot::Working,
                 vec!["Show agent".to_owned()]
             ))
         );
-        assert_eq!(node, (NodeMark::Fixing, "running again".to_owned()));
+        assert_eq!(node, (NodeMark::Fixing, "working again".to_owned()));
         let show = PanelOutcome::ShowAgent(Stage::Build);
         assert_eq!(agent_key(&f, stage, running).map(|k| k.1), Some(show));
         // Enter stays this page's: it only runs.
@@ -19255,7 +19368,7 @@ pub(crate) mod tests {
         f.runs.insert(Stage::Build, held_run(Some("p1")));
         let (shown, node) = card(&f, at_rest);
         let (status, _, buttons) = shown.unwrap();
-        assert!(status.starts_with("Build agent \u{b7} waiting for you"));
+        assert!(status.starts_with("Build agent \u{b7} your turn"));
         assert_eq!(buttons, ["Send prompt", "Show agent"]);
         assert_eq!(node, (NodeMark::Waiting, "waiting to send".to_owned()));
         assert_eq!(
@@ -19287,7 +19400,7 @@ pub(crate) mod tests {
         let page = stage_page(&f, Stage::Build, &state, &actions, 2_000);
         assert!(page.sections.iter().any(|s| matches!(
             s,
-            PageSection::Agent { status, dot: Dot::Working, .. } if status == "running again"
+            PageSection::Agent { status, dot: Dot::Working, .. } if status == "working again"
         )));
     }
 
@@ -19350,12 +19463,12 @@ pub(crate) mod tests {
             Some(PanelOutcome::StartAgent(stage, false))
         );
         let state = PanelState::default();
-        // Its suggestions' line says none is read yet, as AI review's does.
+        // Its suggestions' line says none is written yet, as a file's card does.
         let page = stage_page(&f, stage, &state, &[], 2_000);
         assert!(matches!(
             &page.sections[..],
             [PageSection::Lines { label, lines }]
-                if label == "Suggestions" && lines[0].text == "not read yet"
+                if label == "Suggestions" && lines[0].text == "not written yet"
         ));
         // Read in with two to decide: they are cards, and shown in the plan.
         let text = r#"{"suggestions": [{"kind": "question", "plan": "M1", "title": "Which?",
@@ -21278,7 +21391,7 @@ pub(crate) mod tests {
         assert_eq!(card.label, "Review 1");
         assert_eq!(card.state.text, "Verify failures \u{b7} fix plan ready");
         assert!(card.meta.ends_with("plan written 15m ago"), "{}", card.meta);
-        assert_eq!(card.state.tone, CheckTone::Ready);
+        assert_eq!(card.state.tone, CheckTone::Blocker);
         let held: Vec<&str> = (card.buttons)
             .iter()
             .map(|i| actions[*i].0.label.as_str())
@@ -24968,7 +25081,7 @@ pub(crate) mod tests {
         let node = rail_node(&f, Stage::Build, &state, 2_000);
         assert_eq!(
             (node.mark, node.line.as_str()),
-            (NodeMark::Current, "running 16m")
+            (NodeMark::Current, "working 16m")
         );
         // Stopped after a milestone: Continue first, and how far it got.
         f.runs.get_mut(&Stage::Build).unwrap().stop = Some(feature::agents::Stop {
@@ -25020,12 +25133,12 @@ pub(crate) mod tests {
                 "Setup",
                 vec![line(
                     "failed: api: `npm ci` exited with 1",
-                    CheckTone::Blocker
+                    CheckTone::Failed
                 )]
             ))
         );
         assert!(matches!(page.sections[0], PageSection::Agent { .. }));
-        assert_eq!(page.status.map(|s| s.tone), Some(CheckTone::Blocker));
+        assert_eq!(page.status.map(|s| s.tone), Some(CheckTone::Failed));
     }
 
     /// `f`'s Build page sections, past its agent's card and what's picked.
@@ -25189,7 +25302,11 @@ pub(crate) mod tests {
         assert_eq!(*buttons, [1, 2]);
         assert_eq!(
             page.sections[1],
-            file("plan.md", line("ready for review", CheckTone::Ready), &[0])
+            file(
+                "plan.md",
+                line("ready for review", CheckTone::Blocker),
+                &[0]
+            )
         );
         let node = rail_node(&f, Stage::Plan, &state, 2_000);
         assert_eq!(
@@ -25517,7 +25634,7 @@ pub(crate) mod tests {
         let page = stage_page(&f, Stage::Verify, &state, &actions, 2_000);
         assert_eq!(
             page.status.as_ref().map(|s| s.tone),
-            Some(CheckTone::Blocker)
+            Some(CheckTone::Failed)
         );
         let PageSection::Lines { label, lines } = &page.sections[0] else {
             panic!("the checks' lines");
@@ -25526,15 +25643,15 @@ pub(crate) mod tests {
         assert_eq!(
             texts(lines),
             [
-                ("run 2 failed", CheckTone::Blocker),
-                ("api: `npm test` exited with 1", CheckTone::Blocker),
-                ("web: lint", CheckTone::Blocker),
+                ("run 2 failed", CheckTone::Failed),
+                ("api: `npm test` exited with 1", CheckTone::Failed),
+                ("web: lint", CheckTone::Failed),
             ]
         );
         let node = rail_node(&f, Stage::Verify, &state, 2_000);
         assert_eq!(
             (node.mark, node.line.as_str()),
-            (NodeMark::Waiting, "failed")
+            (NodeMark::Failed, "failed")
         );
         // While they run, what they do.
         let state = PanelState {
@@ -26434,7 +26551,7 @@ pub(crate) mod tests {
         let node = rail_node(&f, Stage::Ship, &state, 2_000);
         assert_eq!(
             (node.mark, node.line.as_str()),
-            (NodeMark::Current, "blocked")
+            (NodeMark::Failed, "blocked")
         );
         let ready = probe(check(&[], &["api"], &[]));
         let state = PanelState {
@@ -26484,12 +26601,35 @@ pub(crate) mod tests {
         let status = |back| card_status(&f, &state, false, false, back, 0);
         let runs = status(Some(Rework::Runs(Dot::Working)));
         assert_eq!(runs.0, Some(Stage::Build));
-        assert_eq!(runs.1, "Build \u{b7} running again");
+        assert_eq!(runs.1, "Build \u{b7} working again");
         assert_eq!(runs.2, Working);
         let waits = status(Some(Rework::Waits));
         assert_eq!(waits.1, "Build \u{b7} waiting to send");
         assert_eq!(waits.2, Waits);
         assert_eq!(status(None).0, f.current());
+    }
+
+    #[test]
+    fn an_approval_logs_one_line_and_its_toast_says_it_and_what_is_next() {
+        let mut f = feature("d", vec![repo("api", true)], 1);
+        assert_eq!(f.current(), Some(Stage::Plan));
+        let before = f.history.len();
+        f.tick(5, "you", None);
+        assert_eq!(f.history.len(), before + 1);
+        assert_eq!(
+            done_toast(&f, Stage::Plan),
+            "Plan approved \u{b7} Plan review is next"
+        );
+        f.tick_said(
+            6,
+            "gerdr",
+            None,
+            "done: every milestone ticked and committed",
+        );
+        assert_eq!(
+            done_toast(&f, Stage::PlanReview),
+            "Plan review done: every milestone ticked and committed \u{b7} Build is next"
+        );
     }
 
     #[test]
@@ -26608,11 +26748,11 @@ pub(crate) mod tests {
                     CheckTone::Blocker
                 ),
                 ("Set up", "4m ago", CheckTone::Ready),
-                ("touched web", "6m ago", CheckTone::Note),
+                ("Touched web", "6m ago", CheckTone::Note),
                 (
                     "Verify run 1 failed: api: npm test",
                     "7m ago",
-                    CheckTone::Blocker
+                    CheckTone::Failed
                 ),
                 ("Plan sent back (1)", "9m ago", CheckTone::Blocker),
                 ("Brief ticked", "11m ago", CheckTone::Ready),
@@ -26629,7 +26769,7 @@ pub(crate) mod tests {
             ("Plan approved", CheckTone::Ready),
             ("Brief sent back (2)", CheckTone::Blocker),
             ("Verify run 3 passed", CheckTone::Ready),
-            ("Verify run 3 failed: api: npm test", CheckTone::Blocker),
+            ("Verify run 3 failed: api: npm test", CheckTone::Failed),
             (
                 "Verify's failures sent to the Build agent (fix 1 of 3)",
                 CheckTone::Note,
@@ -26643,11 +26783,11 @@ pub(crate) mod tests {
             ("Shipping stopped: no gh", CheckTone::Blocker),
             (
                 "Plan refused: the agent changed the code in api",
-                CheckTone::Blocker,
+                CheckTone::Failed,
             ),
             (
                 "Build agent couldn't start: no coding agent CLI installed",
-                CheckTone::Blocker,
+                CheckTone::Failed,
             ),
         ] {
             assert_eq!(event_tone(what), tone, "{what}");
@@ -26728,7 +26868,7 @@ pub(crate) mod tests {
             card,
             Some(&file(
                 "plan.md",
-                line("ready for review", CheckTone::Ready),
+                line("ready for review", CheckTone::Blocker),
                 &[held, approve]
             ))
         );
@@ -27055,11 +27195,14 @@ pub(crate) mod tests {
             page.sections.first(),
             Some(&lines(
                 "Blocked",
-                vec![line("the plan names no such table", CheckTone::Blocker)]
+                vec![line("the plan names no such table", CheckTone::Failed)]
             ))
         );
         let node = rail_node(&f, Stage::Build, &state, 2_000);
-        assert_eq!(node.line, "blocked");
+        assert_eq!(
+            (node.mark, node.line.as_str()),
+            (NodeMark::Failed, "blocked")
+        );
     }
 
     #[test]
@@ -27285,6 +27428,7 @@ pub(crate) mod tests {
                 manual_gate: None,
                 code_counts: None,
                 machine,
+                agent: None,
             };
             card_line(&f, Some(Stage::Plan), &state, 2_000)
         };

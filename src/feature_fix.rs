@@ -743,9 +743,10 @@ impl Gerdr {
         self.doc_reread_shown(project, slug, DocFile::FixPlan);
         // Code review's page shows it.
         self.probe_feature(project, slug);
-        let text = format!("The fix plan of \u{201c}{title}\u{201d} is ready to review");
+        let text = format!("The fix plan of \u{201c}{title}\u{201d} is ready for review");
         self.notify_feature(project, slug, None, &text);
-        self.show_success(text);
+        // The user's turn: yellow, as the rail and the card say it.
+        self.show_warning(text);
     }
 
     /// Send the plan of feature `slug` back with the user's `comments`.

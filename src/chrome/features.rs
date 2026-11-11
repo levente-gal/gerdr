@@ -24,7 +24,8 @@ use super::{
     segment, segment_tint, status_dot, tab, trash,
 };
 use super::{
-    bars, code_mark, eye, flask, magnifier, plan_review_mark, ship_arrow, sparkle, text_lines,
+    Standing, bars, code_mark, eye, flask, magnifier, plan_review_mark, ship_arrow, sparkle,
+    text_lines,
 };
 use crate::text_field::Line;
 use crate::{
@@ -358,20 +359,24 @@ pub struct FeatureRepoRow {
 /// How a line of the Ship check reads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum CheckTone {
-    /// What stops shipping: in the warning colour.
+    /// The user's turn: something to review, decide or act on. In the
+    /// warning colour (`Standing::Yours`).
     Blocker,
-    /// It can ship: in the success colour.
+    /// Done, passed, it can ship: in the success colour.
     Ready,
     /// Worth knowing, or still being checked: muted.
     Note,
+    /// It failed, or something blocks it: in the error colour.
+    Failed,
 }
 
 impl CheckTone {
     pub(super) fn color(self, p: &Palette) -> Rgb {
         match self {
-            Self::Blocker => p.warning,
-            Self::Ready => p.success,
+            Self::Blocker => Standing::Yours.color(p),
+            Self::Ready => Standing::Done.color(p),
             Self::Note => p.muted,
+            Self::Failed => Standing::Failed.color(p),
         }
     }
 }
@@ -503,6 +508,9 @@ pub enum NodeMark {
     /// on its account and the next move not its own, or the one the flow has
     /// since gone back from. An accent ring round its number.
     Paused,
+    /// The current stage, failed or blocked: Verify's checks failed, setup
+    /// failed, Build blocked, a fix plan stalled, Ship blocked. A red dot.
+    Failed,
 }
 
 impl NodeMark {
@@ -511,9 +519,10 @@ impl NodeMark {
     /// mark: 3:1 at least).
     pub(super) fn dot_color(self, p: &Palette) -> Rgb {
         match self {
-            Self::Done => p.success,
-            Self::Current | Self::Fixing | Self::Paused => p.accent,
-            Self::Stale | Self::Waiting => p.warning,
+            Self::Done => Standing::Done.color(p),
+            Self::Current | Self::Fixing | Self::Paused => Standing::Working.color(p),
+            Self::Stale | Self::Waiting => Standing::Yours.color(p),
+            Self::Failed => Standing::Failed.color(p),
             Self::Ran => p.muted,
             Self::Later => p.placeholder,
         }
@@ -535,8 +544,9 @@ impl NodeMark {
             Self::Current => "current",
             Self::Later => "later",
             Self::Stale => "code changed",
-            Self::Waiting => "waiting for you",
-            Self::Fixing => "running again",
+            Self::Waiting => Standing::Yours.word(),
+            Self::Failed => Standing::Failed.word(),
+            Self::Fixing => "working again",
             Self::Ran => "ran once",
             Self::Paused => "last worked on",
         }
@@ -556,7 +566,7 @@ pub struct RailBack {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RailNode {
     pub label: String,
-    /// One short line under the label ("2h ago", "running 14m", "ready
+    /// One short line under the label ("2h ago", "working 14m", "ready
     /// for review", "failed"), or empty.
     pub line: String,
     pub mark: NodeMark,
@@ -607,7 +617,7 @@ pub struct PageButton {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AgentChip {
     pub icon: AgentIcon,
-    /// Only its tooltip says it.
+    /// Beside its logo, where the row has room; else its tooltip says it.
     pub name: String,
     pub lit: bool,
     /// It can't be picked: it built the code this stage reviews.
@@ -1059,7 +1069,7 @@ pub(super) fn pill_inks(tag: FindingTag, faded: bool, p: &Palette) -> (Rgb, Rgb)
     }
     match tag {
         FindingTag::High => (p.error, super::sidebar::ink_on(p.error, p)),
-        FindingTag::Medium => (p.warning, super::sidebar::ink_on(p.warning, p)),
+        FindingTag::Medium => (p.medium, super::sidebar::ink_on(p.medium, p)),
         FindingTag::Yours => (mix(p.background, p.accent, PILL_TINT), p.text),
         _ => (p.element, p.text),
     }
@@ -2049,6 +2059,8 @@ const PICK_ICON: i32 = 14;
 /// `placeholder`: a logo plainly dimmer than one that can be.
 const PICK_OFF: f32 = 0.5;
 const PICK_LABEL: i32 = 48;
+/// The room after a chip's name.
+const PICK_NAME_PAD: i32 = 8;
 /// The widest the button picking an agent's model gets.
 const AGENT_MODEL_MAX: i32 = 220;
 /// Build's milestone choice: its segments' words.
@@ -2092,7 +2104,6 @@ pub(super) enum Ink {
     Text,
     Muted,
     Error,
-    Accent,
     Tone(CheckTone),
 }
 
@@ -2102,7 +2113,6 @@ impl Ink {
             Self::Text => p.text,
             Self::Muted => p.muted,
             Self::Error => p.error,
-            Self::Accent => p.accent,
             Self::Tone(tone) => tone.color(p),
         }
     }
@@ -2392,7 +2402,7 @@ const STAT_NAME_MIN: i32 = 40;
 
 /// An activity row's dot in `spot`, by its `tone`: a tick in the success
 /// colour for what went through, a filled dot in the warning colour for
-/// what was sent back or failed, and a ring in the muted colour for the
+/// what was sent back, a cross in the error colour for what failed, and a ring in the muted colour for the
 /// rest. Told apart by their shapes too, not by colour alone.
 fn activity_dot(c: &mut Canvas, spot: Rect, tone: CheckTone, scale: f64, p: &Palette) {
     let s = scale as f32;
@@ -2401,6 +2411,7 @@ fn activity_dot(c: &mut Canvas, spot: Rect, tone: CheckTone, scale: f64, p: &Pal
     match tone {
         CheckTone::Ready => icon_sdf(c, spot, scale, color, |x, y| check(x, y, s * 0.95)),
         CheckTone::Blocker => icon_sdf(c, spot, scale, color, |x, y| x.hypot(y) - d / 2.0),
+        CheckTone::Failed => icon_sdf(c, spot, scale, color, |x, y| cross(x, y, s * 0.8)),
         CheckTone::Note => icon_sdf(c, spot, scale, color, |x, y| {
             stage_dot(StageMark::Later, x, y, d)
         }),
@@ -3487,7 +3498,7 @@ impl Stack {
 
     /// A collapsed card's one line: tag, title and where it stands cut to fit,
     /// its first button at the right.
-    /// `text`, what a card was decided to be, bold at `x`, `y`: in the accent while to fix. How wide it ran.
+    /// `text`, what a card was decided to be, bold at `x`, `y`: in the done colour while to fix. How wide it ran.
     fn decision_word(&mut self, text: &str, stripe: Option<CardStripe>, x: i32, y: i32) -> i32 {
         // Bold runs wider than it measures.
         let w = (width_of(text, Font::Small.size()).ceil() as i32 + 1) * 9 / 8;
@@ -3496,8 +3507,9 @@ impl Stack {
             Piece::Text {
                 text: text.to_owned(),
                 font: Font::Small,
+                // Decided: the done colour, apart from the selection's accent.
                 ink: match stripe {
-                    Some(CardStripe::ToFix) => Ink::Accent,
+                    Some(CardStripe::ToFix) => Ink::Tone(CheckTone::Ready),
                     _ => Ink::Text,
                 },
                 bold: true,
@@ -3879,9 +3891,15 @@ fn rows_height(placed: &[(i32, i32)]) -> i32 {
 
 /// The page's column: the selected stage's title, about, status, buttons
 /// and sections, then the activity if it has no column.
-/// How wide `n` agent chips' outline is, with the room.
-fn agent_picks_width(n: usize) -> i32 {
-    n as i32 * PICK_CHIP + 2 * PICK_TRACK_PAD
+/// How wide an agent's chip is: its logo, then its name, so two agents of
+/// one logo are told apart without a tooltip.
+fn pick_chip_width(name: &str) -> i32 {
+    PICK_CHIP + width_of(name, SMALL_FONT_SIZE).ceil() as i32 + PICK_NAME_PAD
+}
+
+/// How wide the chips of agents `names` are together, with the room.
+fn agent_picks_width(names: &[&str]) -> i32 {
+    names.iter().map(|n| pick_chip_width(n)).sum::<i32>() + 2 * PICK_TRACK_PAD
 }
 
 /// How wide the button picking an agent's model is, its label ending in an
@@ -3890,23 +3908,29 @@ fn agent_model_width(label: &str) -> i32 {
     button_width(label).min(AGENT_MODEL_MAX)
 }
 
-/// Where `n` agent chips go on a row at `(x, y)`, `room` wide: their
-/// outline and each chip, narrower alike when they don't fit.
-fn agent_pick_rects(n: usize, x: i32, y: i32, room: i32) -> (Rect, Vec<Rect>) {
+/// Where the chips of agents `names` go on a row at `(x, y)`, `room` wide:
+/// their outline and each chip, each with its name; logos alone, narrower
+/// alike, when they don't fit.
+fn agent_pick_rects(names: &[&str], x: i32, y: i32, room: i32) -> (Rect, Vec<Rect>) {
+    let n = names.len();
     let inner = (room - 2 * PICK_TRACK_PAD).max(1);
-    let w = PICK_CHIP.min(inner / n.max(1) as i32);
-    let chips: Vec<Rect> = (0..n as i32)
-        .map(|i| {
-            Rectangle::new(
-                (x + PICK_TRACK_PAD + i * w, y + PICK_TRACK_PAD).into(),
-                (w, PICK_TRACK - 2 * PICK_TRACK_PAD).into(),
-            )
+    let named: Vec<i32> = names.iter().map(|n| pick_chip_width(n)).collect();
+    let widths = match named.iter().sum::<i32>() <= inner {
+        true => named,
+        false => vec![PICK_CHIP.min(inner / n.max(1) as i32); n],
+    };
+    let mut at = x + PICK_TRACK_PAD;
+    let chips: Vec<Rect> = (widths.iter())
+        .map(|w| {
+            let chip = Rectangle::new(
+                (at, y + PICK_TRACK_PAD).into(),
+                (*w, PICK_TRACK - 2 * PICK_TRACK_PAD).into(),
+            );
+            at += w;
+            chip
         })
         .collect();
-    let track = Rectangle::new(
-        (x, y).into(),
-        (n as i32 * w + 2 * PICK_TRACK_PAD, PICK_TRACK).into(),
-    );
+    let track = Rectangle::new((x, y).into(), (at - x + PICK_TRACK_PAD, PICK_TRACK).into());
     (track, chips)
 }
 
@@ -4107,7 +4131,8 @@ fn page_stack(
                         // The model after the chips, who give way to it.
                         let taken = model_w.map_or(0, |w| w + QUIT_BUTTON_GAP);
                         let room = (end - from - taken).max(1);
-                        let (track, chips) = agent_pick_rects(picks.len(), from, row, room);
+                        let names: Vec<&str> = picks.iter().map(|c| c.name.as_str()).collect();
+                        let (track, chips) = agent_pick_rects(&names, from, row, room);
                         if let Some(w) = model_w {
                             let x = track.loc.x + track.size.w + QUIT_BUTTON_GAP;
                             let w = w.min((end - x).max(1));
@@ -4121,7 +4146,8 @@ fn page_stack(
                 // A run: buttons, chips, then its model, at the head's end
                 // while its name and some of its status keep room, else in
                 // rows below.
-                let chips = (!picks.is_empty()).then(|| agent_picks_width(picks.len()));
+                let names: Vec<&str> = picks.iter().map(|c| c.name.as_str()).collect();
+                let chips = (!picks.is_empty()).then(|| agent_picks_width(&names));
                 let widths: Vec<i32> = widths.chain(chips).chain(model_w).collect();
                 let name_w = measure_bold(name, FONT_SIZE)
                     .unwrap_or_else(|| width_of(name, FONT_SIZE))
@@ -4144,7 +4170,7 @@ fn page_stack(
                 }
                 if let (Some(w), Some(place)) = (chips, placed.get(held.len())) {
                     let (x, y) = spot(place);
-                    choices.picks = Some(agent_pick_rects(picks.len(), x, y, w));
+                    choices.picks = Some(agent_pick_rects(&names, x, y, w));
                 }
                 if let (Some(w), Some(place)) = (model_w, placed.last()) {
                     choices.model =
@@ -6500,8 +6526,12 @@ impl Painter {
                     (label.size.w, NODE_LINE).into(),
                 );
                 let color = match node.mark {
-                    NodeMark::Current | NodeMark::Fixing | NodeMark::Paused => p.accent,
-                    NodeMark::Waiting | NodeMark::Stale => p.warning,
+                    NodeMark::Current
+                    | NodeMark::Fixing
+                    | NodeMark::Paused
+                    | NodeMark::Waiting
+                    | NodeMark::Stale
+                    | NodeMark::Failed => node.mark.dot_color(p),
                     _ => p.muted,
                 };
                 self.centred_cut(c, &node.line, DETAIL_FONT_SIZE, line, false, scale, color);
@@ -6623,20 +6653,15 @@ impl Painter {
         match mark {
             NodeMark::Done | NodeMark::Stale | NodeMark::Ran => {
                 let color = match mark {
-                    NodeMark::Done => p.success,
-                    NodeMark::Stale => p.warning,
+                    NodeMark::Done | NodeMark::Stale => mark.dot_color(p),
                     _ => p.muted,
                 };
                 disc(c, 0.0, color);
                 disc(c, ring, mix(p.background, color, 0.18));
                 icon_sdf(c, spot, scale, color, |x, y| check(x, y, s * 1.1));
             }
-            NodeMark::Current | NodeMark::Waiting | NodeMark::Fixing => {
-                let color = if mark == NodeMark::Waiting {
-                    p.warning
-                } else {
-                    p.accent
-                };
+            NodeMark::Current | NodeMark::Waiting | NodeMark::Fixing | NodeMark::Failed => {
+                let color = mark.dot_color(p);
                 disc(c, 0.0, color);
                 self.bold_centred(c, &number, spot, scale, p.on_accent);
             }
@@ -7274,7 +7299,19 @@ impl Painter {
                             true => mix(p.element, p.placeholder, PICK_OFF),
                             false => segment_tint(i, on, &off, p),
                         };
-                        agent_icon(c, *rect, PICK_ICON, chip.icon, tint, scale);
+                        let logo = Rectangle::new(
+                            rect.loc,
+                            (rect.size.w.min(PICK_CHIP), rect.size.h).into(),
+                        );
+                        agent_icon(c, logo, PICK_ICON, chip.icon, tint, scale);
+                        // Its name, where the row has room for it.
+                        if rect.size.w > PICK_CHIP {
+                            let label = Rectangle::new(
+                                (rect.loc.x + PICK_CHIP - 4, rect.loc.y).into(),
+                                (rect.size.w - PICK_CHIP + 4, rect.size.h).into(),
+                            );
+                            line(c, &chip.name, label, SMALL_FONT_SIZE, tint);
+                        }
                     }
                 }
                 let model_spot = l.agent_model.filter(|_| model.is_some()).map(at);
@@ -7494,7 +7531,7 @@ impl Painter {
                     let (x, y, _, h) = rect_px(rect, scale);
                     let s = scale as f32;
                     let colour = match stripe {
-                        CardStripe::ToFix => p.accent,
+                        CardStripe::ToFix => Standing::Done.color(p),
                         CardStripe::Sent => p.muted,
                     };
                     let inset = AGENT_RADIUS * s;
@@ -7816,9 +7853,9 @@ impl CardTone {
     pub(super) fn mark_color(self, p: &Palette) -> Rgb {
         match self {
             Self::Idle => p.placeholder,
-            Self::Working => p.accent,
-            Self::Waits => p.warning,
-            Self::Failed => p.error,
+            Self::Working => Standing::Working.color(p),
+            Self::Waits => Standing::Yours.color(p),
+            Self::Failed => Standing::Failed.color(p),
         }
     }
 
@@ -9768,7 +9805,7 @@ mod tests {
 
     #[test]
     fn agent_chips_too_wide_together_share_the_room() {
-        let (track, chips) = agent_pick_rects(8, 10, 20, 150);
+        let (track, chips) = agent_pick_rects(&["Claude Code"; 8], 10, 20, 150);
         assert!(track.size.w <= 150, "{track:?}");
         assert_eq!(chips[0].size.w, chips[7].size.w);
         assert!(chips[7].loc.x + chips[7].size.w <= 10 + 150, "{chips:?}");

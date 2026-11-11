@@ -532,15 +532,18 @@ pub fn visible(
         .collect()
 }
 
-/// Whether the tab strip's inbox button counts `item`: a gate waiting for
-/// the user, an agent blocked or done, a service's error not looked at (as its workspace's count in the
+/// Whether the tab strip's inbox button counts `item`: what is the user's
+/// turn, as the sidebar's "Needs you" list and its Features count say it.
+/// A gate waiting for the user, an agent asking something or a test run
+/// failed (one done is listed, not counted: a stage agent's gate counts
+/// for it), a service's error not looked at (as its workspace's count in the
 /// sidebar), a pull request asking for review, a failed CI of `main`,
 /// `master`, `dev` or `develop`.
 pub fn counted(item: &InboxItem) -> bool {
     match &item.detail {
         Detail::Gate { .. } => true,
-        Detail::Agent { status, .. } => {
-            matches!(status, AgentStatus::Blocked | AgentStatus::Done)
+        Detail::Agent { status, test, .. } => {
+            *status == AgentStatus::Blocked || *test == Some(CiState::Failed)
         }
         Detail::Service { seen, ignored, .. } => !seen && !ignored,
         Detail::Ci { subject, state, .. } => {

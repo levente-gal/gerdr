@@ -119,8 +119,11 @@ press and drag pick whole rows and a double click opens the line in Zed.
 - Ask before anything that stops a running process, deletes unmerged work or
   can't be undone. Don't ask when nothing is lost (idle chat, empty shell).
 - Dialog buttons: Cancel on the left, the action on the right. Destructive
-  actions are painted in the error colour and are never the default:
-  Enter on a destructive dialog means Cancel until the user moves to it.
+  actions (`confirm::Then::loses`: something is lost for good) are painted
+  in the error colour; an action that goes on in the flow (Ship, Approve,
+  Finish, Change decisions) is the primary button, so red keeps meaning
+  "lost". Neither is the default: Enter on a dialog means Cancel until the
+  user moves to its action.
 - A dialog offers "Don't ask again" only where the choice is remembered and
   can be found again in Settings.
 - Cheap destructive actions don't ask; they show an Undo toast instead.
@@ -298,10 +301,31 @@ press and drag pick whole rows and a double click opens the line in Zed.
 - `[ui] motion = "full" | "reduced" | "off"`: blinking dots and pulses only
   with "full"; fades only with "full" or "reduced" (see `anim::motion`).
 - Text meets 4.5:1 contrast, marks and dots 3:1, in both themes.
+- One word and one colour per state, the same on the rail, the sidebar's
+  cards, a stage page's lines and cards, agent cards, toasts and the activity
+  (`chrome::Standing` in `chrome/theme.rs`; `NodeMark`, `CardTone`,
+  `CheckTone`, `Dot` and `Palette::status` take their colours from it):
+  "your turn" yellow (the warning colour), "working" blue (the accent),
+  "failed" or "blocked" red (the error colour), "done" green (the success
+  colour), idle grey. A stage that failed or is blocked (`stage_failed` in
+  `features.rs`) is red on all of them. A stage agent says whose turn it is
+  and, when it's the user's, why ("your turn · it stopped before brief.md was
+  ready"), from `feature_agents::agent_standing`, which the rail line, the
+  sidebar card and the agent card all read. A decided card (accepted, to fix)
+  is marked in the done colour, never in the selection's accent.
+  Toasts keep to it: a file or plan ready for review is the user's turn, a
+  warning (yellow); a stage done a success (green); a failure an error (red).
 - Severity is a pill before the item's title (`pill_inks` / `pill_mark` in
-  `chrome/features.rs`): high and medium filled with their colour, low on the
-  element colour, the user's own tinted with the accent. Each severity has its
-  own mark (triangle, diamond, ring), so colour is never the only sign.
+  `chrome/features.rs`): high filled with the error colour, medium with its
+  own orange (`Palette::medium`, apart from the yellow of "your turn"), low on
+  the element colour, the user's own tinted with the accent. Each severity has
+  its own mark (triangle, diamond, ring), so colour is never the only sign.
+- Approving a stage logs one line, "Plan approved" ("Build done: …" when gerdr
+  marks it), and its toast says that line and what comes next ("Plan approved
+  · Plan review is next", `features::done_toast`).
+- The "Needs you" list and the inbox's count hold only what is the user's
+  turn: gates, agents asking something, failed test runs, errors not looked
+  at, reviews asked for. A finished agent is listed in the inbox, not counted.
 - AI review's and Plan review's pages share one layout
   (`features/review_page.rs`): the agent's card, what the stage made (Plan
   review's final plan), a summary (a pill per severity that goes to its first

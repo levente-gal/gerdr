@@ -1224,6 +1224,7 @@ fn dump_overlays() {
             go: "Close pane",
             selected: 1,
             hover: None,
+            loses: true,
         };
         let confirm_w = super::confirm_layout((800, 600).into()).panel.size.w;
         dump(
@@ -1240,6 +1241,7 @@ fn dump_overlays() {
             go: "Finish",
             selected: 1,
             hover: None,
+            loses: false,
         };
         dump(
             &dir,
@@ -3083,7 +3085,7 @@ pub(super) fn feature_tab() -> super::FeatureTabView {
                 0 => "2h ago".into(),
                 1 => "1h ago".into(),
                 2 => "skipped".into(),
-                3 => "running 14m".into(),
+                3 => "working 14m".into(),
                 _ => String::new(),
             },
             mark: match i {
@@ -3319,7 +3321,7 @@ fn feature_tab_plan_ready() -> super::FeatureTabView {
                 icon: AgentIcon::Codex,
                 name: "codex".into(),
                 dot: Dot::Idle,
-                status: "waiting for you \u{b7} tab 2".into(),
+                status: "your turn \u{b7} tab 2".into(),
                 tail: Vec::new(),
                 buttons: vec![1],
                 picks: Vec::new(),
@@ -3328,7 +3330,7 @@ fn feature_tab_plan_ready() -> super::FeatureTabView {
             },
             PageSection::File {
                 name: "plan.md".into(),
-                state: tab_line("ready for review", CheckTone::Ready),
+                state: tab_line("ready for review", CheckTone::Blocker),
                 buttons: vec![0, 2],
             },
         ],
@@ -3423,7 +3425,7 @@ fn feature_tab_discover_brief() -> super::FeatureTabView {
                 icon: AgentIcon::Claude,
                 name: "claude".into(),
                 dot: Dot::Idle,
-                status: "waiting for you \u{b7} tab 2".into(),
+                status: "your turn \u{b7} tab 2".into(),
                 tail: Vec::new(),
                 buttons: vec![1],
                 picks: Vec::new(),
@@ -3432,7 +3434,7 @@ fn feature_tab_discover_brief() -> super::FeatureTabView {
             },
             PageSection::File {
                 name: "brief.md".into(),
-                state: tab_line("ready for review", CheckTone::Ready),
+                state: tab_line("ready for review", CheckTone::Blocker),
                 buttons: vec![0, 2],
             },
             PageSection::Doc {
@@ -3627,7 +3629,7 @@ fn feature_tab_fix_plan() -> super::FeatureTabView {
         0,
         PageSection::File {
             name: "Fix plan".into(),
-            state: tab_line("Verify failures \u{b7} fix plan ready", CheckTone::Ready),
+            state: tab_line("Verify failures \u{b7} fix plan ready", CheckTone::Blocker),
             buttons: vec![0, 1, 2],
         },
     );
@@ -3736,7 +3738,7 @@ fn feature_tab_open_round() -> super::FeatureTabView {
         round_card(
             "Code review 2",
             Dot::Idle,
-            ("review comments \u{b7} fix plan ready", CheckTone::Ready),
+            ("review comments \u{b7} fix plan ready", CheckTone::Blocker),
             "asked 20m ago \u{b7} plan written 5m ago",
             &[
                 (false, "api/src/export/csv.rs:32-38"),
@@ -4358,7 +4360,7 @@ fn feature_tab_start_over() -> super::FeatureTabView {
                 icon: crate::agent_icons::AgentIcon::Claude,
                 name: "claude".into(),
                 dot: super::Dot::Idle,
-                status: "waiting for you \u{b7} tab 2".into(),
+                status: "your turn \u{b7} tab 2".into(),
                 tail: Vec::new(),
                 buttons: vec![1],
                 picks: Vec::new(),
@@ -4367,7 +4369,7 @@ fn feature_tab_start_over() -> super::FeatureTabView {
             },
             PageSection::File {
                 name: "plan.md".into(),
-                state: tab_line("ready for review", CheckTone::Ready),
+                state: tab_line("ready for review", CheckTone::Blocker),
                 buttons: vec![0],
             },
             PageSection::Doc {
@@ -4602,7 +4604,7 @@ fn feature_tab_review_fixes() -> super::FeatureTabView {
             PageSection::Round(super::RoundCard {
                 label: "Code review 2".into(),
                 dot: super::Dot::Idle,
-                state: tab_line("review comments \u{b7} fix plan ready", CheckTone::Ready),
+                state: tab_line("review comments \u{b7} fix plan ready", CheckTone::Blocker),
                 meta: "asked 6m ago \u{b7} plan written 2m ago".into(),
                 asked: vec![
                     super::RoundAsked {
@@ -4816,7 +4818,7 @@ fn feature_tab_held() -> super::FeatureTabView {
             icon: AgentIcon::from_agent("Claude Code"),
             name: "Claude Code".into(),
             dot: Dot::Blocked,
-            status: "waiting for you \u{b7} send the prompt".into(),
+            status: "your turn \u{b7} send the prompt".into(),
             tail: Vec::new(),
             buttons: vec![0, 1],
             picks,
@@ -4945,7 +4947,7 @@ fn feature_tab_review_rounds() -> super::FeatureTabView {
 fn feature_tab_fixed_code() -> super::FeatureTabView {
     use super::NodeMark;
     let mut view = feature_tab();
-    at_stage(&mut view, 3, NodeMark::Current, "running 2m");
+    at_stage(&mut view, 3, NodeMark::Current, "working 2m");
     for node in &mut view.rail[4..=5] {
         node.mark = NodeMark::Ran;
         node.line = "1h ago".into();
@@ -6994,7 +6996,7 @@ fn tab_plan_review_final() -> super::FeatureTabView {
     let plan = [
         PageSection::File {
             name: "plan-final.md".into(),
-            state: tab_line("ready for review", CheckTone::Ready),
+            state: tab_line("ready for review", CheckTone::Blocker),
             buttons: Vec::new(),
         },
         PageSection::Doc {
@@ -7153,31 +7155,31 @@ fn doc_suggestions() -> super::ReposView {
         head(
             "medium",
             Some("accepted"),
-            Tone::Warning,
+            Tone::Medium,
             "suggestion 2 of 3",
         ),
         said(
             "The lockout clock lives in memory",
             false,
-            Some(Tone::Warning),
+            Some(Tone::Medium),
         ),
         said(
             "Your change: Keep the count in the users table, cleared on a good sign-in.",
             true,
-            Some(Tone::Warning),
+            Some(Tone::Medium),
         ),
         DetailRow::CommentHead {
             who: "Your comment",
             finding: None,
             place: String::new(),
-            within: Some(Tone::Warning),
+            within: Some(Tone::Medium),
         },
         DetailRow::Comment {
             text: "Only the count: the timestamps can stay in memory.".into(),
             first: false,
             last: true,
             tone: None,
-            within: Some(Tone::Warning),
+            within: Some(Tone::Medium),
         },
         head("low", Some("rejected"), Tone::Muted, "suggestion 3 of 3"),
         said("Name the hash in the plan", false, Some(Tone::Muted)),
@@ -7502,20 +7504,20 @@ fn findings_view() -> super::ReposView {
         head("high", None, Tone::Error, "finding 1 of 4"),
         line("The parser splits on spaces", false, Some(Tone::Error)),
         line("Fix: split on NUL", true, Some(Tone::Error)),
-        head("medium", Some("to fix"), Tone::Warning, "finding 2 of 4"),
-        line("No timeout on the status read", false, Some(Tone::Warning)),
+        head("medium", Some("to fix"), Tone::Medium, "finding 2 of 4"),
+        line("No timeout on the status read", false, Some(Tone::Medium)),
         DetailRow::CommentHead {
             who: "Your comment",
             finding: None,
             place: String::new(),
-            within: Some(Tone::Warning),
+            within: Some(Tone::Medium),
         },
         DetailRow::Comment {
             text: "Keep it under a second".into(),
             first: false,
             last: true,
             tone: None,
-            within: Some(Tone::Warning),
+            within: Some(Tone::Medium),
         },
         head("low", None, Tone::Normal, "finding 3 of 4"),
         line("This name says too little", false, Some(Tone::Normal)),

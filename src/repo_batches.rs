@@ -557,7 +557,7 @@ fn paste_said(put: &Put, register: &diff_edit::Register) -> String {
 fn level(tone: Tone) -> Level {
     match tone {
         Tone::Success => Level::Success,
-        Tone::Warning => Level::Warning,
+        Tone::Warning | Tone::Medium => Level::Warning,
         Tone::Error => Level::Error,
         Tone::Muted | Tone::Normal => Level::Info,
     }

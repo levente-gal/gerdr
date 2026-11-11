@@ -515,6 +515,8 @@ pub enum Tone {
     Success,
     Warning,
     Error,
+    /// A medium-severity finding's own colour, apart from `Warning`.
+    Medium,
 }
 
 /// The last batch's result, between the field and the footer: `Commit and
@@ -2847,6 +2849,7 @@ fn tone_color(tone: Tone, p: &Palette) -> Rgb {
         Tone::Success => p.success,
         Tone::Warning => p.warning,
         Tone::Error => p.error,
+        Tone::Medium => p.medium,
     }
 }
 
