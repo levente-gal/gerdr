@@ -3596,7 +3596,7 @@ fn feature_tab_verify_running() -> super::FeatureTabView {
             lines: Vec::new(),
         }],
     };
-    // The checks and the code graph run, shown under the header.
+    // The checks and the code graph run, shown under the rail.
     let row = |word, what: &str, steps, took: &str, buttons, node| super::RunningRow {
         word,
         what: what.into(),

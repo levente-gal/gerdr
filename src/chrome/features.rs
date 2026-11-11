@@ -193,7 +193,8 @@ pub struct NewFeatureLayout {
 /// error line if `error`, centred on an output of `size`: as many
 /// repositories as fit.
 pub fn new_feature_layout(size: Size<i32, Logical>, repos: usize, error: bool) -> NewFeatureLayout {
-    let error_h = if error { QUIT_BODY + QUIT_LINE_GAP } else { 0 };
+    // Its line has room kept, so the dialog doesn't grow when one shows.
+    let error_h = QUIT_BODY + QUIT_LINE_GAP;
     let fixed = 2 * QUIT_PADDING
         + QUIT_TITLE
         + QUIT_LINE_GAP
@@ -228,7 +229,8 @@ pub fn new_feature_layout(size: Size<i32, Logical>, repos: usize, error: bool) -
     };
     let title = next(QUIT_TITLE);
     let field = next(QUIT_BUTTON);
-    let error = error.then(|| next(QUIT_BODY));
+    let error_line = next(QUIT_BODY);
+    let error = error.then_some(error_line);
     let root = next(QUIT_BODY);
     let projects = next(QUIT_BUTTON);
     let link_w = button_width(LINK_BUTTON[0]).max(button_width(LINK_BUTTON[1]));
@@ -4514,12 +4516,10 @@ fn lay_out_tab(view: &FeatureTabView, frame: Rect) -> FeatureTabLayout {
     let title = Rectangle::new((x, top).into(), (text_w, TAB_TITLE).into());
     let sub = Rectangle::new((x, top + TAB_TITLE).into(), (text_w, TAB_SUB).into());
 
-    // The work running, under the header; then the rail: a slot per
-    // stage, its node at the slot's top middle.
-    let (running_card, running, running_more) =
-        running_spots(view, x, top + header_h + RAIL_GAP, inner);
-    let run_h = running_card.map_or(0, |c| c.size.h + RUN_BELOW);
-    let rail_top = top + header_h + run_h + RAIL_GAP + RAIL_BACK;
+    // The rail under the header: a slot per stage, its node at the slot's
+    // top middle. It stays put whatever runs: the card of work running goes
+    // under it.
+    let rail_top = top + header_h + RAIL_GAP + RAIL_BACK;
     let n = view.rail.len().max(1) as i32;
     let slot = |i: i32| (x + inner * i / n, x + inner * (i + 1) / n);
     // A label on two lines puts its node's short line under them: the
@@ -4530,22 +4530,25 @@ fn lay_out_tab(view: &FeatureTabView, frame: Rect) -> FeatureTabLayout {
             let (left, next) = slot(i);
             rail_label(&node.label, next - left - 4).len() > 1
         });
-    // So is one that says what ran a done stage.
-    let ran = view.rail.iter().any(|node| node.agent.is_some());
+    // The line saying what ran a done stage has its room from the start, so
+    // the page doesn't drop once the first stage is done.
     let rail_h = NODE
         + NODE_GAP
         + NODE_LABEL
         + NODE_LINE
         + if wraps { RAIL_LABEL_STEP } else { 0 }
-        + if ran { NODE_LINE } else { 0 };
+        + NODE_LINE;
     let nodes = (0..view.rail.len() as i32)
         .map(|i| {
             let (left, next) = slot(i);
             Rectangle::new((left, rail_top).into(), (next - left, rail_h).into())
         })
         .collect();
-    // Under the rail's rule, the columns; or across it all, the review.
+    // Under the rail's rule, the work running, then the columns; or across
+    // it all, the review.
     let rule_end = rail_top + rail_h + RAIL_GAP + 1;
+    let (running_card, running, running_more) = running_spots(view, x, rule_end + RUN_BELOW, inner);
+    let rule_end = rule_end + running_card.map_or(0, |c| c.size.h + 2 * RUN_BELOW);
     let review_switch = view
         .review_switch
         .as_ref()
@@ -8137,6 +8140,9 @@ mod tests {
             l.error
                 .is_some_and(|e| e.loc.y > l.field.loc.y && e.loc.y < l.root.loc.y)
         );
+        // An error showing doesn't grow it.
+        let calm = new_feature_layout((1920, 1080).into(), 3, false);
+        assert_eq!((calm.panel, calm.root), (l.panel, l.root));
         let short = new_feature_layout((800, 360).into(), 30, false);
         assert!(!short.rows.is_empty() && short.rows.len() < 30);
         assert!(short.panel.size.h <= 360);
@@ -9048,11 +9054,11 @@ mod tests {
         view
     }
 
-    /// Work running gets a card under the header that moves the rail down;
+    /// Work running gets a card under the rail, which stays put;
     /// a row goes to its stage's page and its buttons press; ticking time
     /// draws only the head again.
     #[test]
-    fn work_running_shows_under_the_header() {
+    fn work_running_shows_under_the_rail() {
         use crate::chrome::Theme;
         use std::time::{Duration, Instant};
         let view = running_view();
@@ -9065,13 +9071,10 @@ mod tests {
             "two rows and the count"
         );
         assert!(
-            l.nodes[0].loc.y >= card.loc.y + card.size.h,
-            "the rail goes under it"
+            card.loc.y >= l.nodes[0].loc.y + l.nodes[0].size.h,
+            "it goes under the rail"
         );
-        assert_eq!(
-            l.nodes[0].loc.y - plain.nodes[0].loc.y,
-            card.size.h + RUN_BELOW
-        );
+        assert_eq!(l.nodes[0].loc.y, plain.nodes[0].loc.y, "the rail stays");
         assert!(l.running_more.is_some());
         let first = &l.running[0];
         assert!(first.bar.is_some() && l.running[1].bar.is_none());

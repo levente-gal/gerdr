@@ -270,7 +270,7 @@ press and drag pick whole rows and a double click opens the line in Zed.
   its top.
 - Work running on a feature off the thread (setup, checks, code graph,
   sandbox, ship…) shows on every page of its feature tab, in a card under the
-  header: a row each, with a spinner, a lowercase word, what it does now, a
+  rail, which stays put: a row each, with a spinner, a lowercase word, what it does now, a
   bar when it counts steps, how long it has run, and the buttons its stage's
   page has for it (Log, Stop). A row goes to that stage's page. Work shows
   there only once it ran 300 ms; past three rows the card counts the rest.

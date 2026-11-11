@@ -1089,10 +1089,20 @@ impl NewFeatureDialog {
     /// The row slots it makes room for: a filter narrowing the branches
     /// doesn't resize it, or the field being typed in would move.
     fn slots(&self) -> usize {
+        // A picker over the form is no shorter than the form: the dialog
+        // doesn't jump as it opens and closes.
         match (&self.choosing, &self.review) {
-            (Some(_), Some(_)) => self.pulls_offered().len(),
-            (Some(_), None) => self.branches_offered().len(),
+            (Some(_), Some(_)) => self.pulls_offered().len().max(self.form_rows()),
+            (Some(_), None) => self.branches_offered().len().max(self.form_rows()),
             (None, _) => self.repos(),
+        }
+    }
+
+    /// How many rows the form has, its repositories, under the picker.
+    fn form_rows(&self) -> usize {
+        match &self.root {
+            Finding::Found(root) => root.repos.len(),
+            _ => 0,
         }
     }
 
