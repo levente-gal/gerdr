@@ -466,6 +466,9 @@ pub struct Counts {
     pub comments_open: usize,
     /// Of those untested, the comments to look at again.
     pub comments_untested: usize,
+    /// Those sent are in a fix plan still made or waiting for the user
+    /// (`review_import::sent_word`).
+    pub planning: bool,
 }
 
 impl Counts {

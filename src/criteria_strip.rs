@@ -249,7 +249,7 @@ impl Gerdr {
         };
         let state = match (row.made, row.sent) {
             (true, _) => "fix made: try again",
-            (false, true) => "sent to Build",
+            (false, true) => crate::feature::review_import::sent_word(false, row.planning),
             (false, false) => "",
         };
         let keys = self.criteria_strip_has_keys();
@@ -864,6 +864,7 @@ mod tests {
             comment: false,
             open: false,
             seen: false,
+            planning: false,
         }
     }
 

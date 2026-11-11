@@ -3328,7 +3328,9 @@ fn criterion_card(
     };
     let state = match (row.made, row.sent, row.retest) {
         (true, _, _) => format!("fix made: {again}"),
-        (false, true, _) => "sent to Build".to_owned(),
+        (false, true, _) => {
+            crate::feature::review_import::sent_word(false, row.planning).to_owned()
+        }
         (false, false, Some(n)) => format!("changed by fix round {n}: {again}"),
         (false, false, None) if row.comment && row.found == Some(Verdict::Fail) => {
             "open".to_owned()
@@ -23299,7 +23301,7 @@ pub(crate) mod tests {
             _ => None,
         });
         let (name, said, buttons) = card.expect("the round's card");
-        assert_eq!(name, "Review 1");
+        assert_eq!(name, "AI review run 1");
         assert_eq!(said.text, "1 fixed \u{b7} 1 raised again");
         assert_eq!(view.page.buttons[buttons[0]].label, "Show");
 
@@ -24038,6 +24040,7 @@ pub(crate) mod tests {
             seen: false,
             shots: Vec::new(),
             comment: true,
+            planning: false,
         };
         let buttons = |row: &Row| -> Vec<(String, ButtonStyle, PanelOutcome)> {
             (criterion_buttons(2, row).into_iter())
@@ -24175,6 +24178,7 @@ pub(crate) mod tests {
             seen: false,
             shots: Vec::new(),
             comment: false,
+            planning: false,
         };
         let rows = vec![
             row(
@@ -24368,6 +24372,7 @@ pub(crate) mod tests {
             retest: None,
             shots: Vec::new(),
             comment: false,
+            planning: false,
         };
         let rows = vec![
             row(None, ""),
@@ -24526,6 +24531,7 @@ pub(crate) mod tests {
             retest: None,
             shots: Vec::new(),
             comment: false,
+            planning: false,
         };
         let rows = vec![
             row(Some(Verdict::Fail), true, true),
@@ -24661,6 +24667,7 @@ pub(crate) mod tests {
             retest: None,
             shots: Vec::new(),
             comment: false,
+            planning: false,
         };
         let rows = vec![row(Some(Verdict::Pass)), row(Some(Verdict::Pass))];
         let ctx = RowCtx {
@@ -24815,6 +24822,7 @@ pub(crate) mod tests {
             retest: None,
             shots: Vec::new(),
             comment: false,
+            planning: false,
         };
         let rows = vec![row(Some(Verdict::Pass)), row(Some(Verdict::Fail))];
         let ctx = RowCtx {

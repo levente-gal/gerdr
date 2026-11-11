@@ -420,7 +420,7 @@ pub fn diff_with(
         );
         out.then(Follow::Outputs {
             files: vec![review_import::REVIEW.to_owned()],
-            reason: format!("AI review {n} read"),
+            reason: format!("AI review run {n} read"),
         });
     }
     let read = digest

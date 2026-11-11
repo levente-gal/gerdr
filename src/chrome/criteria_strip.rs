@@ -68,7 +68,7 @@ pub struct CriteriaStripView {
     pub place: String,
     pub title: String,
     pub tag: StripTag,
-    /// "fix made: try again", "sent to Build", or nothing.
+    /// "fix made: try again", "being fixed" or "in fix plan", or nothing.
     pub state: String,
     /// Its Given, When and Then, a line each.
     pub steps: Vec<String>,
