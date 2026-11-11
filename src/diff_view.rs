@@ -50,6 +50,11 @@ pub const READ_ONLY: &str = "A commit's diff can't be edited";
 pub(crate) const NOWHERE: &str = "Move the cursor to a line first";
 /// Why a comment that went to the Build agent can't be changed.
 pub const SENT_COMMENT: &str = "That comment went to the Build agent to fix";
+/// The button showing the commit a comment's fix was made in, and its key.
+pub const SHOW_FIX: &str = "Show fix";
+pub const SHOW_FIX_KEY: &str = "Shift+O";
+/// Why Shift+O does nothing: the cursor isn't on a comment whose fix is made.
+pub const NO_FIX_COMMIT: &str = "Move the cursor to a comment whose fix is made first";
 /// Why `f` does nothing on a comment of the user's own.
 pub const YOUR_COMMENT: &str = "This is your comment: c edits it, Del deletes it";
 /// Why a dismissal did nothing.
@@ -258,6 +263,12 @@ pub enum Outcome {
     /// Ask whether to delete those on lines no longer in the diff, then
     /// `drop_outdated`.
     ClearOutdated,
+    /// Show what commit `oid` of the checkout at `root` changed: where a
+    /// comment's fix was made ("fix made in 1a2b3c4").
+    ShowCommit {
+        root: PathBuf,
+        oid: String,
+    },
 }
 
 impl Outcome {
@@ -1883,6 +1894,17 @@ impl DiffView {
         }
     }
 
+    /// The commit the fix of the comment at the cursor was made in, to
+    /// show; why not when it has none.
+    fn fix_commit(&self) -> Outcome {
+        let fixed = self.finding_here().and_then(|(c, flag)| {
+            let oid = flag.fixed_in.clone()?;
+            let root = self.review.comments.get(c)?.root.clone();
+            Some(Outcome::ShowCommit { root, oid })
+        });
+        fixed.unwrap_or(Outcome::Notice(NO_FIX_COMMIT))
+    }
+
     /// Whether the cursor is on an AI review finding.
     pub fn on_finding(&self) -> bool {
         self.finding_here().is_some()
@@ -3015,8 +3037,15 @@ impl DiffView {
         });
         // In its card's order on the stage's page: the decision, what
         // the user says of it, then refusing it.
-        let (refuse, want): (Vec<Hint>, Vec<Hint>) =
+        let (refuse, mut want): (Vec<Hint>, Vec<Hint>) =
             choices.into_iter().partition(|h| h.key == "Del");
+        // Where its fix was made, to see.
+        if flag.fixed_in.is_some() {
+            want.push(Hint {
+                label: SHOW_FIX.into(),
+                ..keyed(B::ShowCommit, SHOW_FIX_KEY)
+            });
+        }
         want.into_iter()
             .chain(say.into_iter().flatten())
             .chain(refuse)
@@ -3524,6 +3553,9 @@ impl DiffView {
                     return None;
                 }
             }
+            Keysym::o | Keysym::O if mods.shift && !(mods.ctrl || mods.alt || mods.logo) => {
+                return Some(Some(self.fix_commit()));
+            }
             Keysym::e | Keysym::E if mods.shift && !(mods.ctrl || mods.alt || mods.logo) => {
                 if !self.edit_fix() {
                     return None;
@@ -3949,6 +3981,9 @@ impl DiffView {
                 }
             }
             return Some(None);
+        }
+        if hit == ReposHit::Button(ReposButton::ShowCommit) {
+            return Some(Some(self.fix_commit()));
         }
         if hit == ReposHit::Button(ReposButton::DismissFinding) {
             self.signals.focus = true;

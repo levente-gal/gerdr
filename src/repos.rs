@@ -1200,6 +1200,11 @@ pub fn from_diff(outcome: diff_view::Outcome) -> Outcome {
         D::Paste(put) => Outcome::Paste(put),
         D::UndoCut(file) => Outcome::UndoCut(file),
         D::RedoCut(file) => Outcome::RedoCut(file),
+        D::ShowCommit { root, oid } => Outcome::OpenCommit {
+            root,
+            line: oid.clone(),
+            oid,
+        },
         D::Toggle { .. } | D::Clear | D::ClearOutdated => Outcome::Notice("Done in the panel"),
     }
 }

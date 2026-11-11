@@ -2057,6 +2057,26 @@ impl crate::Gerdr {
         self.refresh_pointer_focus();
     }
 
+    /// Show commit `oid` of a feature's repository at `root`, where a comment's
+    /// fix was made, read-only over the feature's review: closing it goes
+    /// back to the feature's page.
+    fn open_fix_commit(&mut self, root: PathBuf, oid: String) {
+        let label = (self.wd().and_then(|wd| wd.feature.as_ref()))
+            .and_then(|fe| fe.repos.iter().find(|r| r.root == root))
+            .map_or_else(|| root.display().to_string(), |r| r.name.clone());
+        if self.repos.worktree.is_some() {
+            self.close_worktree_diff();
+        }
+        self.tooltip.hide();
+        self.chrome.drop_tooltip();
+        let line = format!("{oid} \u{b7} where the fix was made");
+        let commit = CommitOf { oid, line };
+        let wd = WorktreeDiff::of_commit(root, label, commit, self.active_workspace);
+        self.repos.worktree = Some(wd);
+        self.worktree_diff_read();
+        self.refresh_pointer_focus();
+    }
+
     /// The reviews of worktrees' diffs: read when first wanted, those of
     /// worktrees gone, on another branch or too old dropped.
     fn worktree_reviews(&mut self) -> &mut crate::review::Worktrees {
@@ -2314,6 +2334,10 @@ impl crate::Gerdr {
             }
             Done::Diff(Outcome::Toggle { root, path }) if feature => {
                 self.feature_toggle(&root, &path);
+                None
+            }
+            Done::Diff(Outcome::ShowCommit { root, oid }) if feature => {
+                self.open_fix_commit(root, oid);
                 None
             }
             Done::TickFiles { root, paths } => {

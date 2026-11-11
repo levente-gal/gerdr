@@ -3379,6 +3379,44 @@ mod tests {
     }
 
     #[test]
+    fn a_comment_whose_fix_is_made_opens_the_commit_it_was_made_in() {
+        use crate::diff_view::{NO_FIX_COMMIT, Outcome, SHOW_FIX};
+        let mut wd = popup(Stage::CodeReview, Vec::new(), Review::default());
+        let root = wd.feature.as_ref().unwrap().repos[0].root.clone();
+        let note = Comment {
+            root: root.clone(),
+            path: "src/a.rs".into(),
+            text: "Rename it".into(),
+            flag: Some(Flag {
+                id: "C1".into(),
+                state: FindingState::Sent,
+                yours: true,
+                sent: true,
+                made: true,
+                fixed_in: Some("1a2b3c4".into()),
+                ..Flag::default()
+            }),
+            ..Comment::default()
+        };
+        let o = Keysym::O;
+        let shift = mods(false, true);
+        assert_eq!(
+            wd.key(&shift, Keysym::o, o, POPUP_ENV),
+            Some(Done::Diff(Outcome::Notice(NO_FIX_COMMIT)))
+        );
+        wd.feature.as_mut().unwrap().sent_notes = vec![note];
+        wd.feature.as_mut().unwrap().focus = Some("C1".into());
+        wd.place_findings(POPUP_ENV);
+        let shown = wd.view(POPUP_ENV).row_buttons;
+        assert!(shown.iter().any(|(_, h)| h.label == SHOW_FIX), "{shown:?}");
+        let commit = Some(Done::Diff(Outcome::ShowCommit {
+            root,
+            oid: "1a2b3c4".into(),
+        }));
+        assert_eq!(wd.key(&shift, Keysym::o, o, POPUP_ENV), commit);
+    }
+
+    #[test]
     fn a_general_comment_is_listed_first_gone_to_edited_and_deleted() {
         use crate::{chrome::DetailRow, diff_view::DiffRow};
         let own = Review {
