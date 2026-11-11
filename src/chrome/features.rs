@@ -733,8 +733,12 @@ pub struct TestStrip {
     pub untested: usize,
     /// "3 passed · 1 failed · 2 untested".
     pub text: String,
-    /// The search through the criteria, open; closed, a button opens it.
+    /// The search through the criteria, open; closed, its empty field
+    /// opens it. It heads the criteria's list on the page.
     pub search: Option<super::SearchBar>,
+    /// Under it while it looks for something: "showing 1 of 4 criteria
+    /// saying …".
+    pub shown: Option<String>,
 }
 
 impl TestStrip {
@@ -755,55 +759,50 @@ pub struct TestStripSpots {
     pub bar: Option<Rect>,
     /// The words.
     pub text: Rect,
-    /// The search's parts, at the row's right: its button, or its field
-    /// and the button closing it.
-    pub search: Vec<(super::SearchPart, Rect)>,
-    /// Where the open search says how many criteria it shows.
-    pub count: Option<Rect>,
 }
+
+/// What the criteria's search field says while empty.
+pub const CRITERIA_SEARCH_HINT: &str = "Search the criteria";
 
 /// How wide the criteria's search field is at most, and at least; room for
 /// how many it shows.
-const STRIP_SEARCH_W: i32 = 260;
-const STRIP_SEARCH_MIN: i32 = 120;
-const STRIP_COUNT_W: i32 = 76;
+const SEARCH_FIELD_W: i32 = 260;
+const SEARCH_FIELD_MIN: i32 = 120;
+const SEARCH_COUNT_W: i32 = 76;
+
+/// A search's parts, each where it goes, and where its count goes.
+type SearchSpots = (Vec<(super::SearchPart, Rect)>, Option<Rect>);
+
+/// Where the criteria's search goes in `row`, from its left: its field,
+/// then while `open` how many it found and its buttons to the match
+/// before, the next and closing it, each square; and where that count goes.
+fn criteria_search_parts(row: Rect, open: bool) -> SearchSpots {
+    use super::SearchPart;
+    let (x, y, h) = (row.loc.x, row.loc.y, row.size.h);
+    let rest = match open {
+        true => 2 * QUIT_BUTTON_GAP + SEARCH_COUNT_W + 3 * (h + QUIT_BUTTON_GAP),
+        false => 0,
+    };
+    let field_w = (SEARCH_FIELD_W.min(row.size.w - rest)).max(SEARCH_FIELD_MIN);
+    let field = Rectangle::new((x, y).into(), (field_w, h).into());
+    let mut parts = vec![(SearchPart::Field, field)];
+    if !open {
+        return (parts, None);
+    }
+    let count_x = x + field_w + QUIT_BUTTON_GAP;
+    let count = Rectangle::new((count_x, y).into(), (SEARCH_COUNT_W, h).into());
+    let mut at = count_x + SEARCH_COUNT_W + QUIT_BUTTON_GAP;
+    for part in [SearchPart::Prev, SearchPart::Next, SearchPart::Close] {
+        parts.push((part, Rectangle::new((at, y).into(), (h, h).into())));
+        at += h + QUIT_BUTTON_GAP;
+    }
+    (parts, Some(count))
+}
 
 /// Where `strip` goes in the row at `(x, y)`, `width` wide: the bar, then its
-/// words, then at the right its search (`open`: its field).
-fn test_strip_spots(x: i32, y: i32, width: i32, open: bool) -> TestStripSpots {
-    use super::SearchPart;
+/// words.
+fn test_strip_spots(x: i32, y: i32, width: i32) -> TestStripSpots {
     let h = REVIEW_SWITCH_H;
-    let right = x + width;
-    let mut search = Vec::new();
-    let mut count = None;
-    let width = if open {
-        // Its buttons to the match before and the next, and closing it.
-        let mut left = right;
-        let mut buttons = Vec::new();
-        for part in [SearchPart::Close, SearchPart::Next, SearchPart::Prev] {
-            left -= h;
-            buttons.push((part, Rectangle::new((left, y).into(), (h, h).into())));
-            left -= QUIT_BUTTON_GAP;
-        }
-        let count_at = left - STRIP_COUNT_W;
-        let field_w = STRIP_SEARCH_W.min(width / 2).max(STRIP_SEARCH_MIN);
-        let field_x = (count_at - QUIT_BUTTON_GAP - field_w).max(x);
-        let field = Rectangle::new(
-            (field_x, y).into(),
-            ((count_at - QUIT_BUTTON_GAP - field_x).max(0), h).into(),
-        );
-        count = Some(Rectangle::new(
-            (count_at, y).into(),
-            (STRIP_COUNT_W, h).into(),
-        ));
-        search.push((SearchPart::Field, field));
-        search.extend(buttons.into_iter().rev());
-        (field_x - COLUMN_GAP - x).max(0)
-    } else {
-        let button = Rectangle::new((right - h, y).into(), (h, h).into());
-        search.push((SearchPart::Open, button));
-        (button.loc.x - COLUMN_GAP - x).max(0)
-    };
     let has_bar = width >= REVIEW_BAR_W + COLUMN_GAP + REVIEW_LEFT_MIN;
     let bar = has_bar.then(|| {
         Rectangle::new(
@@ -813,12 +812,7 @@ fn test_strip_spots(x: i32, y: i32, width: i32, open: bool) -> TestStripSpots {
     });
     let text_x = bar.map_or(x, |bar| bar.loc.x + bar.size.w + COLUMN_GAP);
     let text = Rectangle::new((text_x, y).into(), ((x + width - text_x).max(0), h).into());
-    TestStripSpots {
-        bar,
-        text,
-        search,
-        count,
-    }
+    TestStripSpots { bar, text }
 }
 
 /// A bar counting `total` things in `bar`: each of `parts` fills its share in
@@ -1394,7 +1388,7 @@ pub enum FeatureTabHit {
     Fold(usize),
     /// A review summary's pill: go to the first card with its tag.
     Jump(FindingTag),
-    /// A part of the criteria's search, on the line under the rail.
+    /// A part of the criteria's search, heading their list on the page.
     Search(super::SearchPart),
     /// A row of the strip of work running, as `FeatureTabView::running`.
     Running(usize),
@@ -1495,11 +1489,10 @@ pub fn feature_tab_field(view: &FeatureTabView, frame: Rect, scale: f64) -> Opti
     // The criteria's search, while it has the keys.
     let search = (view.test_strip.as_ref()).and_then(|s| s.search.as_ref());
     if let Some(bar) = search.filter(|b| b.focused) {
-        let spots = layout.test_strip.as_ref()?;
-        let (_, area) = (spots.search.iter()).find(|(p, _)| *p == super::SearchPart::Field)?;
+        let area = layout.search_part(view, super::SearchPart::Field)?;
         return Some(FieldSpot {
-            area: *area,
-            text: super::search_field_text(*area, scale),
+            area,
+            text: super::search_field_text(area, scale),
             size: FONT_SIZE,
             line: bar.query.clone(),
         });
@@ -1574,11 +1567,6 @@ impl FeatureTabLayout {
         if let Some(n) = self.nodes.iter().position(on) {
             return Some(FeatureTabHit::Node(n));
         }
-        if let Some(spots) = &self.test_strip
-            && let Some((part, _)) = spots.search.iter().find(|(_, r)| on(r))
-        {
-            return Some(FeatureTabHit::Search(*part));
-        }
         if let Some(spots) = &self.review_switch {
             if let Some(i) = spots.segments.iter().position(on) {
                 return Some(FeatureTabHit::ReviewView(i));
@@ -1608,11 +1596,15 @@ impl FeatureTabLayout {
             let at = Point::from((pos.x, pos.y + down));
             let found = match column {
                 TabColumn::Repos => self.repo_at(at),
-                TabColumn::Page => self
-                    .page_buttons
-                    .iter()
-                    .position(|b| b.is_some_and(|b| b.contains(at)))
-                    .map(FeatureTabHit::PageButton)
+                TabColumn::Page => (self.criteria_search().into_iter())
+                    .flat_map(|(parts, _)| parts)
+                    .find(|(_, r)| r.contains(at))
+                    .map(|(part, _)| FeatureTabHit::Search(part))
+                    .or_else(|| {
+                        (self.page_buttons.iter())
+                            .position(|b| b.is_some_and(|b| b.contains(at)))
+                            .map(FeatureTabHit::PageButton)
+                    })
                     .or_else(|| self.agent_pick_at(view, at))
                     .or_else(|| {
                         (self.agent_model?.contains(at)).then_some(FeatureTabHit::AgentModel)
@@ -1809,9 +1801,45 @@ impl FeatureTabLayout {
     /// How far down the page to scroll, from `down`, to show line `line`
     /// of its text.
     pub fn reveal_line(&self, line: usize, down: f64) -> Option<f64> {
-        let place = self.columns[TabColumn::Page as usize]?;
         let t = self.texts.get(line)?;
         let r = self.pieces[TabColumn::Page as usize].get(t.piece)?.0;
+        self.reveal_rect(r, down)
+    }
+
+    /// How far down the page to scroll, from `down`, to show the
+    /// criteria's search.
+    pub fn reveal_search(&self, down: f64) -> Option<f64> {
+        let (parts, _) = self.criteria_search()?;
+        self.reveal_rect(parts.first()?.1, down)
+    }
+
+    /// The criteria's search heading their list on the page, if it shows
+    /// one: its parts and its count, unscrolled.
+    fn criteria_search(&self) -> Option<SearchSpots> {
+        (self.pieces[TabColumn::Page as usize].iter()).find_map(|(r, piece)| match piece {
+            Piece::Search { open, .. } => Some(criteria_search_parts(*r, *open)),
+            _ => None,
+        })
+    }
+
+    /// Where part `part` of the criteria's search shows on the tab,
+    /// scrolled as `view` is: `None` while it is scrolled away.
+    pub fn search_part(&self, view: &FeatureTabView, part: super::SearchPart) -> Option<Rect> {
+        let col = TabColumn::Page as usize;
+        let (parts, _) = self.criteria_search()?;
+        let (_, r) = parts.into_iter().find(|(p, _)| *p == part)?;
+        let down = view.scroll[col].round() as i32;
+        let area = Rectangle::new((r.loc.x, r.loc.y - down).into(), r.size);
+        let place = self.columns[col]?;
+        let inside =
+            area.loc.y >= place.loc.y && area.loc.y + area.size.h <= place.loc.y + place.size.h;
+        inside.then_some(area)
+    }
+
+    /// How far down the page to scroll, from `down`, to show `r` (as the
+    /// page lays it out, unscrolled).
+    fn reveal_rect(&self, r: Rect, down: f64) -> Option<f64> {
+        let place = self.columns[TabColumn::Page as usize]?;
         let top = f64::from(r.loc.y - place.loc.y) - f64::from(CARD_PAD);
         let bottom = f64::from(r.loc.y - place.loc.y + r.size.h) + f64::from(CARD_PAD);
         let view = f64::from(place.size.h);
@@ -1977,12 +2005,16 @@ const REPOS_CARD_SHARE: i32 = 40;
 const REPO_LINE_MIN: i32 = 40;
 /// Room for a dot left of a row's text.
 const DOT_ROOM: i32 = 18;
+/// The room a line of the page's text has over its font's size, and the
+/// tighter room of a card's tail line: the lines grow with the text.
+const LINE_LEAD: i32 = 7;
+const TAIL_LEAD: i32 = 5;
 /// A line of small text, of body text, and of an agent's pane.
-const SMALL_LINE: i32 = 20;
-pub(crate) const BODY_LINE: i32 = 22;
+const SMALL_LINE: i32 = Font::Small.size() as i32 + LINE_LEAD;
+pub(crate) const BODY_LINE: i32 = Font::Body.size() as i32 + LINE_LEAD;
 /// How high a stage page's title is.
 const TITLE_LINE: i32 = BODY_LINE + 6;
-const TAIL_LINE: i32 = 18;
+const TAIL_LINE: i32 = Font::Small.size() as i32 + TAIL_LEAD;
 /// The gap between the parts of a page.
 const PAGE_GAP: i32 = 16;
 /// The gap between a review's heading and the card under it.
@@ -2072,7 +2104,9 @@ fn toolbar_width(groups: &[(String, Vec<usize>)], page: &StagePage) -> i32 {
 fn toolbar_button_width(label: &str) -> i32 {
     width_of(label, FONT_SIZE).ceil() as i32 + 2 * TOOLBAR_PADDING
 }
-const AGENT_HEAD: i32 = 28;
+/// An agent or file card's head: as high as a title line, its name being
+/// body text in bold.
+const AGENT_HEAD: i32 = TITLE_LINE;
 /// Where an agent card's name starts, past its logo and dot.
 const AGENT_TEXT_AT: i32 = 36;
 /// The room an agent card keeps for its status beside its buttons.
@@ -2106,7 +2140,7 @@ const SHIP_STEP_INSET: i32 = 4;
 const RECAP_TILE_GAP: i32 = 28;
 const AGENT_RADIUS: f32 = 6.0;
 /// A milestone's row, and the progress bar's height.
-const MILESTONE_ROW: i32 = 22;
+const MILESTONE_ROW: i32 = BODY_LINE;
 const PROGRESS: i32 = 6;
 /// The most lines a wrapped text takes; the last ends in "…".
 const MAX_WRAP: usize = 4;
@@ -2121,11 +2155,14 @@ pub(super) enum Font {
 }
 
 impl Font {
-    fn size(self) -> f32 {
+    /// Its size: the one the page's text is measured and painted at, and
+    /// its lines (`BODY_LINE`, `SMALL_LINE`, `TAIL_LINE`) grow from. A step
+    /// over the chrome's own, as the page is read, not glanced at.
+    const fn size(self) -> f32 {
         match self {
-            Self::Heading => LABEL_FONT_SIZE,
-            Self::Body => FONT_SIZE,
-            Self::Small => SMALL_FONT_SIZE,
+            Self::Heading => TAB_TITLE_FONT,
+            Self::Body => LABEL_FONT_SIZE,
+            Self::Small => FONT_SIZE,
             Self::Detail => DETAIL_FONT_SIZE,
         }
     }
@@ -2243,6 +2280,10 @@ pub(super) enum Piece {
     YourComment,
     /// The note being written on the card of `StagePage::sections[i]`.
     CardField(usize),
+    /// The criteria's search, heading their list: its field, and while
+    /// `open` how many it found and its buttons (see
+    /// `criteria_search_parts`).
+    Search { bar: super::SearchBar, open: bool },
     /// How a check stands, on its card. It blinks when at work: see
     /// `feature_tab_blinkers`.
     CheckDot(Dot),
@@ -4169,10 +4210,13 @@ fn page_stack(
     // The toolbar went at the right of the caption before it.
     let mut beside = None;
     let sheet = |k: usize| matches!(page.sections.get(k), Some(PageSection::Finding(c)) if c.sheet.is_some());
+    let mut searched = false;
     for (k, section) in page.sections.iter().enumerate() {
         if matches!(section, PageSection::Doc { here: false, .. }) || beside == Some(k) {
             continue;
         }
+        // The criteria's search heads their list, over its first row.
+        let search = (view.test_strip.as_ref()).filter(|_| sheet(k) && !searched);
         // A sheet's rows go one under the other, a rule between them; a
         // heading's cards go right under it.
         let under_heading = k > 0
@@ -4180,8 +4224,24 @@ fn page_stack(
             && matches!(page.sections.get(k - 1), Some(PageSection::Heading(_)));
         if under_heading {
             s.y += HEADING_GAP;
-        } else if !(sheet(k) && k > 0 && (sheet(k - 1) || beside == Some(k - 1))) {
+        } else if search.is_some()
+            || !(sheet(k) && k > 0 && (sheet(k - 1) || beside == Some(k - 1)))
+        {
             s.y += PAGE_GAP;
+        }
+        if let Some(strip) = search {
+            searched = true;
+            let bar = (strip.search.clone()).unwrap_or_else(|| super::SearchBar {
+                placeholder: CRITERIA_SEARCH_HINT.into(),
+                ..Default::default()
+            });
+            let open = strip.search.is_some();
+            s.put(REVIEW_SWITCH_H, Piece::Search { bar, open });
+            if let Some(shown) = &strip.shown {
+                s.y += FINDING_GAP;
+                s.text(shown, Font::Body, Ink::Tone(CheckTone::Note), BODY_LINE);
+            }
+            s.y += FINDING_GAP;
         }
         match section {
             PageSection::Doc { blocks, .. } => s.doc(blocks),
@@ -4246,8 +4306,8 @@ fn page_stack(
                 let names: Vec<&str> = picks.iter().map(|c| c.name.as_str()).collect();
                 let chips = (!picks.is_empty()).then(|| agent_picks_width(&names));
                 let widths: Vec<i32> = widths.chain(chips).chain(model_w).collect();
-                let name_w = measure_bold(name, FONT_SIZE)
-                    .unwrap_or_else(|| width_of(name, FONT_SIZE))
+                let name_w = measure_bold(name, Font::Body.size())
+                    .unwrap_or_else(|| width_of(name, Font::Body.size()))
                     .ceil() as i32;
                 let fits = row_width(&widths) <= inner - AGENT_TEXT_AT - name_w - AGENT_STATUS_MIN;
                 let placed = rows_from_right(&widths, inner_x, inner_right);
@@ -4673,10 +4733,7 @@ fn lay_out_tab(view: &FeatureTabView, frame: Rect) -> FeatureTabLayout {
         .map(|switch| review_switch_spots(switch, x, rule_end + REVIEW_SWITCH_GAP, inner));
     let test_strip = (view.test_strip.as_ref())
         .filter(|_| review_switch.is_none())
-        .map(|strip| {
-            let open = strip.search.is_some();
-            test_strip_spots(x, rule_end + REVIEW_SWITCH_GAP, inner, open)
-        });
+        .map(|_| test_strip_spots(x, rule_end + REVIEW_SWITCH_GAP, inner));
     let rule_end = match review_switch.is_some() || test_strip.is_some() {
         true => rule_end + 2 * REVIEW_SWITCH_GAP + REVIEW_SWITCH_H,
         false => rule_end,
@@ -5289,7 +5346,10 @@ fn repo_chip_dot(chip: Rect) -> Rect {
 
 /// Where a milestone row's mark goes.
 fn milestone_mark(row: Rect) -> Rect {
-    Rectangle::new((row.loc.x, row.loc.y + 4).into(), (14, 14).into())
+    Rectangle::new(
+        (row.loc.x, row.loc.y + (row.size.h - 14) / 2).into(),
+        (14, 14).into(),
+    )
 }
 
 /// The blinking dot (`DOT` across) over a repository's still dot's
@@ -5697,6 +5757,7 @@ fn piece_hovered(
         | (Piece::ShipStep(..), H::ShipRow(_))
         | (Piece::Agent(_), H::AgentPick(_) | H::AgentModel) => true,
         (Piece::FindingCard(k) | Piece::Fold(k), H::Finding(n) | H::Fold(n)) => finding(*k) == n,
+        (Piece::Search { .. }, H::Search(_)) => true,
         (Piece::Repo(i), H::Repo(r) | H::RepoButton(r, _) | H::RepoRemove(r)) => r == *i,
         _ => false,
     }
@@ -6886,12 +6947,6 @@ impl Painter {
         let (Some(strip), Some(spots)) = (&view.test_strip, &l.test_strip) else {
             return;
         };
-        let hover = match view.hover {
-            Some(FeatureTabHit::Search(part)) => Some(part),
-            _ => None,
-        };
-        let bar = strip.search.as_ref();
-        self.search_bar(c, bar, &spots.search, spots.count, hover, scale, p);
         if let Some(bar) = spots.bar.filter(|_| strip.total() > 0) {
             let parts = [(strip.passed, p.success), (strip.failed, p.error)];
             count_bar(c, bar, &parts, strip.total(), scale, p);
@@ -7241,7 +7296,10 @@ impl Painter {
                 }
             }
             Piece::ItemMark(mark) => {
-                let spot = Rectangle::new((rect.loc.x, rect.loc.y + 4).into(), (14, 14).into());
+                let spot = Rectangle::new(
+                    (rect.loc.x, rect.loc.y + (BODY_LINE - 14) / 2).into(),
+                    (14, 14).into(),
+                );
                 match mark {
                     ItemMark::Bullet => {
                         icon_sdf(c, spot, scale, p.muted, |x, y| x.hypot(y) - 2.0 * s)
@@ -7253,7 +7311,7 @@ impl Painter {
                         stage_dot(StageMark::Later, x, y, 9.0 * s)
                     }),
                     ItemMark::Number(n) => {
-                        line(c, &number_mark(*n), rect, FONT_SIZE, p.muted);
+                        line(c, &number_mark(*n), rect, Font::Body.size(), p.muted);
                     }
                     ItemMark::Under => {}
                 }
@@ -7325,7 +7383,7 @@ impl Painter {
                 } else {
                     p.muted
                 };
-                line(c, text, text_rect, SMALL_FONT_SIZE, color);
+                line(c, text, text_rect, Font::Small.size(), color);
             }
             Piece::MilestoneMode { fresh } => {
                 let Some((track, segments)) = l.milestone_mode.as_ref() else {
@@ -7416,7 +7474,7 @@ impl Painter {
                 let label =
                     Rectangle::new((text_x, rect.loc.y).into(), (text_w, CHECKBOX_ROW).into());
                 let ink = if step.off { p.muted } else { p.text };
-                line(c, &step.label, label, FONT_SIZE, ink);
+                line(c, &step.label, label, Font::Body.size(), ink);
                 if let Some(detail) = &step.detail {
                     let under = Rectangle::new(
                         (text_x, rect.loc.y + CHECKBOX_ROW).into(),
@@ -7426,7 +7484,7 @@ impl Painter {
                         c,
                         &detail.text,
                         under,
-                        SMALL_FONT_SIZE,
+                        Font::Small.size(),
                         detail.tone.color(p),
                     );
                 }
@@ -7538,14 +7596,14 @@ impl Painter {
                 );
                 let (tx, tend) = phys(text, scale);
                 let hb = band(text, scale);
-                let after = self.bold_text(c, name, FONT_SIZE, tx, tend, hb, scale, p.text);
+                let after = self.bold_text(c, name, Font::Body.size(), tx, tend, hb, scale, p.text);
                 let status_at = after + (8.0 * s).round();
                 match *waits {
                     // What it waits for, in the colour of its frame.
                     true => self.bold_text(
                         c,
                         status,
-                        SMALL_FONT_SIZE,
+                        Font::Small.size(),
                         status_at,
                         tend,
                         hb,
@@ -7555,7 +7613,7 @@ impl Painter {
                     false => self.text(
                         c,
                         status,
-                        SMALL_FONT_SIZE,
+                        Font::Small.size(),
                         status_at,
                         tend,
                         hb,
@@ -7672,10 +7730,11 @@ impl Painter {
                     Rectangle::new(head.loc, ((end_x - head.loc.x).max(1), AGENT_HEAD).into());
                 let (tx, tend) = phys(text, scale);
                 let hb = band(text, scale);
-                let after = self.bold_text(c, name, FONT_SIZE, tx, tend, hb, scale, p.text);
+                let after = self.bold_text(c, name, Font::Body.size(), tx, tend, hb, scale, p.text);
                 let ink = Ink::Tone(state.tone).color(p);
                 let from = after + (8.0 * s).round();
-                self.text(c, &state.text, SMALL_FONT_SIZE, from, tend, hb, scale, ink);
+                let small = Font::Small.size();
+                self.text(c, &state.text, small, from, tend, hb, scale, ink);
                 for &i in buttons {
                     if let Some(r) = l.page_buttons.get(i).copied().flatten() {
                         self.page_button(c, view, i, at(r), scale, p);
@@ -7845,6 +7904,14 @@ impl Painter {
                 let hint = card.field_hint;
                 self.field_of_lines(c, text, hint, rect, true, scale, p);
             }
+            Piece::Search { bar, open } => {
+                let (parts, count) = criteria_search_parts(rect, *open);
+                let hover = match view.hover {
+                    Some(FeatureTabHit::Search(part)) => Some(part),
+                    _ => None,
+                };
+                self.search_bar(c, Some(bar), &parts, count, hover, scale, p);
+            }
             // A dot at work blinks: it is composed over the tab.
             Piece::CheckDot(dot) => status_dot(c, rect, *dot, scale, p),
             Piece::Button(i) => self.page_button(c, view, *i, rect, scale, p),
@@ -7852,7 +7919,10 @@ impl Painter {
                 let Some(a) = view.activity.get(*row) else {
                     return;
                 };
-                let dot = Rectangle::new((rect.loc.x + 1, rect.loc.y + 5).into(), (8, 8).into());
+                let dot = Rectangle::new(
+                    (rect.loc.x + 1, rect.loc.y + (TAIL_LINE - 8) / 2).into(),
+                    (8, 8).into(),
+                );
                 activity_dot(c, dot, a.tone, scale, p);
                 let ago = Rectangle::new(rect.loc, (rect.size.w, TAIL_LINE).into());
                 let (ax, aend) = phys(ago, scale);
@@ -7873,7 +7943,7 @@ impl Painter {
                         (rect.loc.x + DOT_ROOM, rect.loc.y + j as i32 * TAIL_LINE).into(),
                         ((rect.size.w - DOT_ROOM - room).max(1), TAIL_LINE).into(),
                     );
-                    line(c, text, r, SMALL_FONT_SIZE, p.text);
+                    line(c, text, r, Font::Small.size(), p.text);
                 }
             }
         }
@@ -7942,7 +8012,7 @@ impl Painter {
         let pad = (f64::from(DOC_CODE_PAD) * scale) as f32;
         let (from, to) = (x + pad, x + w - pad);
         let b = band(rect, scale);
-        self.mono_text(c, text, SMALL_FONT_SIZE, from, to, b, scale, p.text);
+        self.mono_text(c, text, Font::Small.size(), from, to, b, scale, p.text);
     }
 
     /// The page's button `i` in `rect`.

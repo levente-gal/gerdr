@@ -3808,6 +3808,7 @@ fn test_strip(rows: &[Row]) -> Option<chrome::TestStrip> {
         untested: n.untested - n.comments_untested,
         text: crate::manual_test::strip_text(n),
         search: None,
+        shown: None,
     })
 }
 
@@ -12133,8 +12134,7 @@ impl Gerdr {
                 ))
             }
             FeatureTabHit::Search(part) => {
-                let spots = layout.test_strip.as_ref()?;
-                let (_, spot) = spots.search.iter().find(|(p, _)| *p == part)?;
+                let spot = layout.search_part(&view, part)?;
                 let text = match part {
                     chrome::SearchPart::Close => "Close the search (Esc)",
                     chrome::SearchPart::Field => return None,
@@ -12142,7 +12142,7 @@ impl Gerdr {
                     chrome::SearchPart::Next => "Next match (N)",
                     _ => "Search the criteria (/ or Ctrl+F)",
                 };
-                Some(Tooltip::new(text, *spot))
+                Some(Tooltip::new(text, spot))
             }
             // The fold buttons over the criteria: what they fold, and the key.
             FeatureTabHit::PageButton(i) => {
@@ -18050,20 +18050,16 @@ fn tab_view(
     let needle = search
         .map(crate::manual_test::Search::needle)
         .filter(|n| !n.is_empty());
+    let mut said = None;
     if let Some(needle) = &needle {
         let shown = crate::manual_test::shown(&state.criteria, needle, whole);
-        // Over the list, how many of it show: the count by the field is of
-        // the places found, more than one in a criterion as may be.
+        // Under the field, how many of the list show: the count by the field
+        // is of the places found, more than one in a criterion as may be.
         let k = shown.iter().filter(|s| **s).count();
-        let said = format!(
+        said = Some(format!(
             "showing {k} of {} saying \u{201c}{needle}\u{201d}",
             plural(shown.len(), "criterion").replace("criterions", "criteria")
-        );
-        if let Some(PageSection::Lines { lines, .. }) = (page.sections.iter_mut())
-            .find(|s| matches!(s, PageSection::Lines { label, .. } if label == "Criteria"))
-        {
-            lines.push(line(said, CheckTone::Note));
-        }
+        ));
         let sheets = (page.sections.iter_mut()).filter_map(|s| match s {
             PageSection::Finding(card) if card.sheet.is_some() => Some(card),
             _ => None,
@@ -18239,11 +18235,12 @@ fn tab_view(
         .then(|| test_strip(&state.criteria))
         .flatten()
         .map(|mut strip| {
+            strip.shown = said;
             // Its count is of the places found, as the page lays them out:
             // `Gerdr::feature_tab_view` gives it.
             strip.search = panel.search.as_ref().map(|search| chrome::SearchBar {
                 query: search.query.line(),
-                placeholder: "Search the criteria".into(),
+                placeholder: chrome::CRITERIA_SEARCH_HINT.into(),
                 count: String::new(),
                 found: needle.is_none(),
                 focused: search.typing,

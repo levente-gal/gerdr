@@ -546,6 +546,18 @@ impl Gerdr {
             panel.search.get_or_insert_with(Search::default).typing = true;
         }
         self.stop_key_repeat();
+        // Its field heads the list: it shows, however far down the page was.
+        let Some((_, layout)) = self.feature_tab_parts() else {
+            return;
+        };
+        if let Some(panel) = self.features.panel.as_mut() {
+            let scroll = &mut panel.scroll[TabColumn::Page as usize];
+            if let Some(to) = layout.reveal_search(scroll.pos())
+                && to != scroll.pos()
+            {
+                scroll.jump(to);
+            }
+        }
     }
 
     /// Close the criteria's search: they all show again.

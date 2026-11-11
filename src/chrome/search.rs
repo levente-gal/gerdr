@@ -31,7 +31,7 @@ const SEARCH_TICK: i32 = 2;
 
 /// The search: what is typed, what it says while empty, and how many
 /// places it found (`3 of 17`, `No matches`; empty with nothing typed).
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SearchBar {
     pub query: crate::text_field::Line,
     pub placeholder: String,

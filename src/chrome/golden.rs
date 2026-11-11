@@ -5382,6 +5382,7 @@ fn feature_tab_manual_test(note: bool) -> super::FeatureTabView {
     // Its counts go in the bar over the page.
     view.test_strip = Some(super::TestStrip {
         search: None,
+        shown: None,
         passed: 1,
         failed: 2,
         untested: 1,
@@ -5504,12 +5505,13 @@ fn feature_tab_manual_search() -> super::FeatureTabView {
     if let Some(strip) = view.test_strip.as_mut() {
         strip.search = Some(SearchBar {
             query: Line::from(needle),
-            placeholder: "Search the criteria".into(),
+            placeholder: super::CRITERIA_SEARCH_HINT.into(),
             count: "1 of 2".into(),
             found: true,
             focused: true,
             whole: false,
         });
+        strip.shown = Some("showing 1 of 4 criteria saying \u{201c}total\u{201d}".into());
     }
     view.marks.found_at = Some(0);
     view.hints = [("Enter", "to the criteria"), ("Esc", "clear")]
