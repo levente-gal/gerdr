@@ -124,7 +124,10 @@ impl Asked {
 /// What the dialog asks gerdr to do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FindingDialogOutcome {
+    /// Closed, what was typed kept as a draft for the next opening.
     Cancel,
+    /// Closed, what was typed thrown away (Ctrl+Shift+Del).
+    Discard,
     Save,
 }
 
@@ -171,6 +174,9 @@ impl FindingDialog {
         match sym {
             // Closed, what was typed kept for the next opening.
             Keysym::Escape => return Some(FindingDialogOutcome::Cancel),
+            Keysym::Delete | Keysym::KP_Delete if crate::text_field::discard_key(mods) => {
+                return Some(FindingDialogOutcome::Discard);
+            }
             _ if enter && mods.shift && !mods.ctrl && !others => {
                 if let Some(field) = self.fields.get_mut(self.focus) {
                     field.newline();
@@ -250,7 +256,14 @@ impl FindingDialog {
             keys.push(("Tab", "next"));
         }
         keys.push(("Shift+Enter", "new line"));
-        keys.push(("Esc", "close"));
+        // Esc never throws what was typed away: it waits as a draft.
+        match self.texts() == self.from {
+            true => keys.push(("Esc", "close")),
+            false => {
+                keys.push((crate::text_field::DISCARD_KEY, "discard"));
+                keys.push(("Esc", "keep draft"));
+            }
+        }
         FindingDialogView {
             title,
             about: self.about.clone(),
@@ -554,6 +567,10 @@ impl Gerdr {
             } else {
                 self.features.finding_drafts.insert(key, texts);
             }
+            return;
+        }
+        if outcome == FindingDialogOutcome::Discard {
+            self.features.finding_drafts.remove(&key);
             return;
         }
         self.features.finding_drafts.remove(&key);

@@ -61,10 +61,15 @@ How to use it:
   never gets a second meaning in another panel. Grep the chord before you add
   it, and check the prefix keys in `keys.rs` and the help panel.
 - **K2** Esc steps back one level: query, then sub-mode, then close. A draft
-  is never thrown away. The footer hint says "clear" or "close" to match.
+  is never thrown away, and never saved by Esc either: it waits unsaved for
+  the next opening, Enter saves it, Ctrl+Shift+Del discards it. The footer
+  hint says "clear", "back", "close" or "keep draft" to match.
 - **K3** Footer hints, the F1 sheet and the handler agree. The hint shows the
   real chord ("Shift+R", not "R"), and clicking a hint does the same as the
-  key (`chrome/hints.rs`).
+  key (`chrome/hints.rs`). A key that does what a button does is hinted with
+  the button's label, taken from it (the feature tab's `said`), not written
+  again. Enter is the page's primary, Ctrl+Enter the gate, Ctrl+Shift+Enter
+  the way back; Del never abandons a feature.
 - **K4** Every mouse action has a key, and every key action can be reached by
   mouse or menu: rename, context menus, row buttons.
 - **K5** Shift+Tab goes back; Ctrl+J/K move; Ctrl+N/P never move.
