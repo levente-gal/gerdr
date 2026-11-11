@@ -2941,6 +2941,81 @@ impl DiffView {
         }
     }
 
+    /// What can be decided of the finding the cursor is on, as its first
+    /// row's buttons say it (the footer lists them too); none off one.
+    pub fn finding_buttons(&self) -> Vec<Hint> {
+        use ReposButton as B;
+        let hint = |button: B| Hint {
+            button,
+            label: button.label().into(),
+            key: key_name(button).into(),
+            disabled: None,
+        };
+        // On the user's comment on one, what is done is to that comment.
+        let Some((c, flag)) = self.finding_here().filter(|_| self.note_here().is_none()) else {
+            return Vec::new();
+        };
+        let keyed = |button: B, key: &str| Hint {
+            key: key.into(),
+            label: decide_label(flag.of, flag.pr, button, flag.state),
+            ..hint(button)
+        };
+        let words = review_items::words_in(flag.of, flag.pr);
+        let choices = match flag.state {
+            // Frozen, it is only read: nothing on it would be taken.
+            _ if flag.frozen.is_some() => Vec::new(),
+            FindingState::Fix if flag.yours => vec![
+                Hint {
+                    label: words.edit_own.into(),
+                    ..keyed(B::Comment, "c")
+                },
+                Hint {
+                    label: "Delete".into(),
+                    ..keyed(B::DismissFinding, "Del")
+                },
+            ],
+            _ if flag.yours => Vec::new(),
+            // A question is accepted by answering it.
+            FindingState::Open if flag.unanswered => vec![keyed(B::DismissFinding, "Del")],
+            FindingState::Open => {
+                vec![keyed(B::FixFinding, "f"), keyed(B::DismissFinding, "Del")]
+            }
+            FindingState::Fix => {
+                vec![
+                    keyed(B::ReopenFinding, "f"),
+                    keyed(B::DismissFinding, "Del"),
+                ]
+            }
+            FindingState::Dismissed => {
+                vec![keyed(B::FixFinding, "f"), keyed(B::ReopenFinding, "Del")]
+            }
+            FindingState::Sent | FindingState::Fixed | FindingState::Posted => Vec::new(),
+        };
+        // What the user can say of a reviewer's finding.
+        let say = (!flag.yours && self.note_refused(flag).is_none()).then(|| {
+            let comment = (!self.has_note(c)).then(|| Hint {
+                label: match flag.unanswered {
+                    true => "Answer".into(),
+                    false => B::Comment.label().into(),
+                },
+                ..keyed(B::Comment, "c")
+            });
+            // A dismissed finding's fix waits for it to be reopened.
+            let fix = review_items::editable(flag.of, &flag.id, flag.state)
+                .is_ok()
+                .then(|| Hint {
+                    label: words.edit.into(),
+                    ..keyed(B::EditFix, "Shift+E")
+                });
+            comment.into_iter().chain(fix)
+        });
+        // In its card's order on the stage's page: the decision, what
+        // the user says of it, then refusing it.
+        let (refuse, want): (Vec<Hint>, Vec<Hint>) =
+            choices.into_iter().partition(|h| h.key == "Del");
+        want.into_iter().chain(say.into_iter().flatten()).chain(refuse).collect()
+    }
+
     /// The buttons on the diff rows in view, `shown` (by index among
     /// them): writing a comment on the cursor's lines, at the cursor; the
     /// comment being written kept, dropped or deleted, under it.
@@ -3026,70 +3101,9 @@ impl DiffView {
             return buttons;
         }
         // On a finding, what can be decided of it, on its first row.
-        if let Some((c, flag)) = self.finding_here() {
-            let first = self.find_row(&RowKey::Comment(c)).and_then(at);
-            let keyed = |button: B, key: &str| Hint {
-                key: key.into(),
-                label: decide_label(flag.of, flag.pr, button, flag.state),
-                ..hint(button)
-            };
-            let words = review_items::words_in(flag.of, flag.pr);
-            let choices = match flag.state {
-                // Frozen, it is only read: nothing on it would be taken.
-                _ if flag.frozen.is_some() => Vec::new(),
-                FindingState::Fix if flag.yours => vec![
-                    Hint {
-                        label: words.edit_own.into(),
-                        ..keyed(B::Comment, "c")
-                    },
-                    Hint {
-                        label: "Delete".into(),
-                        ..keyed(B::DismissFinding, "Del")
-                    },
-                ],
-                _ if flag.yours => Vec::new(),
-                // A question is accepted by answering it.
-                FindingState::Open if flag.unanswered => vec![keyed(B::DismissFinding, "Del")],
-                FindingState::Open => {
-                    vec![keyed(B::FixFinding, "f"), keyed(B::DismissFinding, "Del")]
-                }
-                FindingState::Fix => {
-                    vec![
-                        keyed(B::ReopenFinding, "f"),
-                        keyed(B::DismissFinding, "Del"),
-                    ]
-                }
-                FindingState::Dismissed => {
-                    vec![keyed(B::FixFinding, "f"), keyed(B::ReopenFinding, "Del")]
-                }
-                FindingState::Sent | FindingState::Fixed | FindingState::Posted => Vec::new(),
-            };
-            // What the user can say of a reviewer's finding.
-            let say = (!flag.yours && self.note_refused(flag).is_none()).then(|| {
-                let comment = (!self.has_note(c)).then(|| Hint {
-                    label: match flag.unanswered {
-                        true => "Answer".into(),
-                        false => B::Comment.label().into(),
-                    },
-                    ..keyed(B::Comment, "c")
-                });
-                // A dismissed finding's fix waits for it to be reopened.
-                let fix = review_items::editable(flag.of, &flag.id, flag.state)
-                    .is_ok()
-                    .then(|| Hint {
-                        label: words.edit.into(),
-                        ..keyed(B::EditFix, "Shift+E")
-                    });
-                comment.into_iter().chain(fix)
-            });
-            // In its card's order on the stage's page: the decision, what
-            // the user says of it, then refusing it.
-            if let Some(i) = first {
-                let (refuse, want): (Vec<Hint>, Vec<Hint>) =
-                    choices.into_iter().partition(|h| h.key == "Del");
-                buttons.extend(want.into_iter().map(|h| (i, h)));
-                buttons.extend(say.into_iter().flatten().map(|h| (i, h)));
-                buttons.extend(refuse.into_iter().map(|h| (i, h)));
+        if let Some((c, _)) = self.finding_here() {
+            if let Some(i) = self.find_row(&RowKey::Comment(c)).and_then(at) {
+                buttons.extend(self.finding_buttons().into_iter().map(|h| (i, h)));
             }
             return buttons;
         }

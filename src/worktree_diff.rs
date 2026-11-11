@@ -1531,7 +1531,7 @@ impl WorktreeDiff {
             buttons.extend([B::CopyReview, B::ClearReview]);
         }
         buttons.extend([B::Help, B::Close]);
-        buttons
+        let mut hints: Vec<Hint> = buttons
             .into_iter()
             .map(|button| Hint {
                 button,
@@ -1596,7 +1596,18 @@ impl WorktreeDiff {
                     .find(|hint| hint.button == button)
                     .and_then(|hint| hint.disabled.clone()),
             })
-            .collect()
+            .collect();
+        // On a finding or suggestion, what its buttons decide, by their
+        // words ("f accept", "Del reject…"), after the comment's hint.
+        let decide = (self.diff.finding_buttons().into_iter())
+            .filter(|h| h.button != B::Comment)
+            .map(|h| Hint {
+                label: h.label.to_lowercase(),
+                ..h
+            });
+        let at = hints.iter().position(|h| h.button == B::Comment).map_or(0, |i| i + 1);
+        hints.splice(at..at, decide);
+        hints
     }
 
     /// A click on `hit`, in the panel; the sheet takes them while open.
