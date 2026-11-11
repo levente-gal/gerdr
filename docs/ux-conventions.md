@@ -313,6 +313,8 @@ press and drag pick whole rows and a double click opens the line in Zed.
   ready"), from `feature_agents::agent_standing`, which the rail line, the
   sidebar card and the agent card all read. A decided card (accepted, to fix)
   is marked in the done colour, never in the selection's accent.
+  Toasts keep to it: a file or plan ready for review is the user's turn, a
+  warning (yellow); a stage done a success (green); a failure an error (red).
 - Severity is a pill before the item's title (`pill_inks` / `pill_mark` in
   `chrome/features.rs`): high filled with the error colour, medium with its
   own orange (`Palette::medium`, apart from the yellow of "your turn"), low on

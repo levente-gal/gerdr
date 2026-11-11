@@ -2726,7 +2726,8 @@ impl Gerdr {
             doc_word(stage)
         );
         self.notify_feature(project, slug, pane, &summary);
-        self.show_success(summary);
+        // The user's turn: yellow, as the rail and the card say it.
+        self.show_warning(summary);
     }
 
     /// Notify `summary` of feature `slug`, unless its agent's tab (`pane`)

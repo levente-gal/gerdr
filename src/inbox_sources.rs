@@ -810,7 +810,7 @@ fn gate_words(gate: &Gate) -> (String, String, Option<&'static str>) {
             Some(crate::feature::fix_round::FILE),
         ),
         GateKind::FixPlan => (
-            format!("The fix plan of “{title}” is ready to review"),
+            format!("The fix plan of “{title}” is ready for review"),
             "review it, then make the fixes".to_owned(),
             Some(crate::feature::fix_round::FILE),
         ),
@@ -1583,7 +1583,7 @@ mod tests {
         let plan = gate_items(&[failed], 1_000_000);
         assert_eq!(
             plan[0].title,
-            "The fix plan of “export title” is ready to review"
+            "The fix plan of “export title” is ready for review"
         );
         assert!(matches!(
             plan[0].detail,
