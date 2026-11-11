@@ -242,6 +242,8 @@ const MIN_PANE: i32 = 80;
 /// key opens goes.
 const MENU_KEY_INDENT: i32 = 8;
 const REAP_INTERVAL: Duration = Duration::from_millis(500);
+/// How often logs grown past their cap are started over.
+const LOG_CUT_INTERVAL: Duration = Duration::from_secs(600);
 /// How often the agent cards are refreshed from herdr, for what changes
 /// without an event (terminal titles).
 const AGENT_INTERVAL: Duration = Duration::from_secs(1);
@@ -7486,6 +7488,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             state.reap_children();
             state.place_booting();
             TimeoutAction::ToDuration(REAP_INTERVAL)
+        })?;
+    // Logs still written by programs running on are cut back now and then.
+    event_loop
+        .handle()
+        .insert_source(Timer::from_duration(LOG_CUT_INTERVAL), |_, _, _| {
+            let cut = std::thread::Builder::new().name("log cut".into());
+            if let Err(err) = cut.spawn(launch::cut_big_logs) {
+                tracing::warn!("cutting big logs: {err}");
+            }
+            TimeoutAction::ToDuration(LOG_CUT_INTERVAL)
         })?;
 
     // The first run turns the session gerdr used before projects into one.
