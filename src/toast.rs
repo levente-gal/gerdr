@@ -297,9 +297,11 @@ impl Gerdr {
     /// unzooming a zoomed pane, or the feature tab's footer (as
     /// `chrome::toast_floor` has it).
     pub fn toast_rect(&self) -> Rect {
-        let footer = || self.feature_tab_parts().map(|(_, l)| l.hints);
+        let area = self.content_rect();
+        let footer =
+            || (self.feature_tab_view()).map(|view| chrome::feature_toast_floor(&view, area));
         let floor = self.unzoom_button().map(|(_, rect)| rect).or_else(footer);
-        chrome::toast_area(self.content_rect(), floor)
+        chrome::toast_area(area, floor)
     }
 
     /// The toasts in the stack, oldest first, the ones going too.

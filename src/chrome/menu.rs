@@ -29,6 +29,9 @@ pub struct MenuRow {
     pub enabled: bool,
     /// A line of a message, not a choice: shorter, its lines read as one.
     pub note: bool,
+    /// It loses something (Abandon): its label in the error colour, but
+    /// while lit, where the text colour reads better on the highlight.
+    pub danger: bool,
 }
 
 /// How tall `row` is in its menu.
@@ -133,11 +136,16 @@ impl Painter {
                 c.fill(x, y + (h - rule) / 2, w, rule, p.border);
                 continue;
             }
-            if view.hover == Some(i) && row.enabled {
+            let lit = view.hover == Some(i) && row.enabled;
+            if lit {
                 // The row Enter picks: lit as a list's selected row.
                 self.row_highlight(&mut c, item, (true, 0.0), scale, p);
             }
-            let color = if row.enabled { p.text } else { p.muted };
+            let color = match (row.enabled, row.danger && !lit) {
+                (false, _) => p.muted,
+                (true, true) => p.error,
+                (true, false) => p.text,
+            };
             let (left, right) = (x as f32 + PADDING * s, (x + w) as f32 - PADDING * s);
             let mut label_end = right;
             if let Some(hint) = &row.hint {
@@ -182,6 +190,7 @@ mod tests {
                 hint: hint.then(|| "Ctrl+B x".into()),
                 enabled: true,
                 note: false,
+                danger: false,
             })
             .collect()
     }
@@ -195,6 +204,7 @@ mod tests {
             hint: None,
             enabled: false,
             note: true,
+            danger: false,
         };
         menu.splice(0..0, [note("one line"), note("and the next")]);
         let (panel, items) = menu_layout(anchor, &menu, (1200, 800).into());

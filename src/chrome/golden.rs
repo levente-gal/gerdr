@@ -220,6 +220,7 @@ fn menu() -> MenuView {
             hint: None,
             enabled: true,
             note: false,
+            danger: false,
         }],
         hover: Some(0),
     }
@@ -232,6 +233,7 @@ fn full_menu() -> MenuView {
         hint: hint.map(str::to_owned),
         enabled,
         note: false,
+        danger: false,
     };
     MenuView {
         anchor: Rect::new((40, 60).into(), (160, 32).into()),

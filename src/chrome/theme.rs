@@ -435,6 +435,20 @@ mod tests {
     }
 
     #[test]
+    fn a_danger_row_of_a_menu_reads_on_the_popup() {
+        // Lit, it takes the text colour: the error one is too faint there.
+        for (name, p) in [
+            ("One Dark", &ONE_DARK),
+            ("One Light", &ONE_LIGHT),
+            ("One Light page", &ONE_LIGHT_PAGE),
+        ] {
+            let p: &Palette = p;
+            let ratio = contrast(p.error, p.elevated);
+            assert!(ratio >= 4.5, "{name}: error on a popup is {ratio:.2}:1");
+        }
+    }
+
+    #[test]
     fn a_hovered_button_shows_on_a_selected_row_and_its_label_reads() {
         for (name, p) in [
             ("One Dark", &ONE_DARK),

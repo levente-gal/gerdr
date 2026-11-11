@@ -9861,6 +9861,18 @@ impl Gerdr {
         if self.criteria_search_key(mods, sym, typed) {
             return None;
         }
+        // F10 (Shift+F10, the Menu key) opens the `⋯` menu, its first row
+        // picked: the arrows, Enter and Esc go on in it.
+        let menu_key =
+            matches!(sym, Keysym::F10 | Keysym::Menu) && !(mods.ctrl || mods.alt || mods.logo);
+        if menu_key && let Some(feature) = self.panel_feature().cloned() {
+            let ctx = self.row_ctx(&feature);
+            self.open_feature_menu(&feature, ctx);
+            if let Some(menu) = self.context_menu.as_mut() {
+                menu.step_to_end(false);
+            }
+            return None;
+        }
         let plain = !(mods.ctrl || mods.shift || mods.alt || mods.logo);
         // On the rail over the review, Tab and Down go back to it: the page
         // has nothing else to go to.
@@ -11943,14 +11955,25 @@ impl Gerdr {
                 PanelOutcome::New,
                 PanelOutcome::Remove,
             ];
+            let last = chrome::FEATURE_BUTTONS.len();
             let labels = chrome::FEATURE_BUTTONS.iter().copied().chain([view.remove]);
-            items.extend((labels.zip(outcomes).enumerate()).map(|(i, (label, o))| {
-                let row = item(label, o);
-                match header_key(i) {
-                    Some(key) => row.hint(key),
-                    None => row,
+            for (i, (label, o)) in labels.zip(outcomes).enumerate() {
+                // A rule sets the page's rows apart, and the one removing
+                // the feature from those that only open something.
+                if (i == 0 && !items.is_empty()) || i == last {
+                    items.push(MenuItem::note(""));
                 }
-            }));
+                let mut row = item(label, o);
+                if let Some(key) = header_key(i) {
+                    row = row.hint(key);
+                }
+                // Abandon loses work; removing a shipped feature's
+                // worktrees doesn't, so that row is plain.
+                if i == last && label == "Abandon" {
+                    row = row.danger();
+                }
+                items.push(row);
+            }
         }
         if !items.is_empty() {
             self.open_menu(MenuSpec { anchor, items });
@@ -17116,6 +17139,10 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 7] = [
             ("Ctrl+N", "new feature"),
             ("Ctrl+Shift+L", "show or hide all repositories"),
             (
+                "F10",
+                "open the \u{22ef} menu: Start over, Set up again, Commands, Abandon and more",
+            ),
+            (
                 "Del",
                 "on a repository of several, remove it (one on the branch asks, others press \
                  twice); on a card, what the card says; never the feature",
@@ -17725,9 +17752,14 @@ fn writers_tab_hints(
         .map(|(_, w)| w.clone())
         .collect();
     hints.retain(|(k, w)| k != "Enter" || !gates.contains(w));
+    hints.push(hint(MENU_KEY, "more actions"));
     hints.push(hint("F1", "keys"));
     hints
 }
+
+/// The key opening the feature tab's `⋯` menu (Shift+F10 and the Menu key
+/// too, as a context menu's).
+pub(crate) const MENU_KEY: &str = "F10";
 
 /// Manual test's gate on `stage`'s page of `feature`, where its criteria
 /// are tried: Ctrl+Enter makes the fixes (or marks it passed with none to
@@ -19984,6 +20016,7 @@ pub(crate) mod tests {
                 "Tab",
                 "Ctrl+Shift+U",
                 "Ctrl+E",
+                "F10",
                 "F1",
             ]
         );
@@ -21026,7 +21059,7 @@ pub(crate) mod tests {
                 pair("Left / Right", "stage"),
                 pair("Enter", "start agent"),
                 pair("Tab", "repositories"),
-                pair("F1", "keys")
+                pair("F10", "more actions")
             ]
         );
         assert_eq!(

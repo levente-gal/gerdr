@@ -1163,7 +1163,7 @@ impl<K: PartialEq> Overlay<K> {
 /// unzooming a zoomed pane, else the feature tab's footer, so they cover
 /// neither.
 pub fn toast_floor(view: &ChromeView, area: Rect) -> Option<Rect> {
-    let footer = || (view.features.as_ref()).map(|f| feature_tab_layout(f, area).hints);
+    let footer = || (view.features.as_ref()).map(|f| feature_toast_floor(f, area));
     view.unzoom.or_else(footer)
 }
 

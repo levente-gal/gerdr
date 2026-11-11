@@ -329,6 +329,8 @@ pub struct MenuItem {
     pub enabled: bool,
     /// A line of text, not a choice (see `note`).
     pub note: bool,
+    /// It loses something: drawn in the error colour (see `danger`).
+    pub danger: bool,
 }
 
 impl MenuItem {
@@ -339,7 +341,14 @@ impl MenuItem {
             action,
             enabled: true,
             note: false,
+            danger: false,
         }
+    }
+
+    /// A row that loses something (Abandon), in the error colour.
+    pub fn danger(mut self) -> Self {
+        self.danger = true;
+        self
     }
 
     /// A line of a message the menu says (`text`): it can't be picked, and
@@ -408,6 +417,7 @@ impl ContextMenu {
                 hint: item.hint.clone(),
                 enabled: item.enabled,
                 note: item.note,
+                danger: item.danger,
             })
             .collect()
     }

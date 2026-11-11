@@ -4540,6 +4540,34 @@ thread_local! {
 }
 
 /// `feature_tab_layout`, laying out.
+/// What the toasts stack up above on the feature tab in `frame`: its footer,
+/// or the selected card when it sits where they would cover it (at the
+/// bottom right) and there is room above it for a few of them.
+pub fn feature_toast_floor(view: &FeatureTabView, frame: Rect) -> Rect {
+    use super::{TOAST_GAP, TOAST_MARGIN, TOAST_TALL, TOAST_WIDTH};
+    let l = feature_tab_layout(view, frame);
+    let cards = (view.page.sections.iter()).filter_map(|s| match s {
+        PageSection::Finding(card) => Some(card.selected),
+        _ => None,
+    });
+    let selected = cards.zip(&l.finding_cards).find(|(on, _)| *on);
+    let Some((_, card)) = selected else {
+        return l.hints;
+    };
+    let mut card = *card;
+    card.loc.y -= view.scroll[TabColumn::Page as usize].round() as i32;
+    let stack = 2 * (TOAST_TALL + TOAST_GAP) + TOAST_MARGIN;
+    let toasts_left = frame.loc.x + frame.size.w - TOAST_MARGIN - TOAST_WIDTH;
+    let under = card.loc.x + card.size.w > toasts_left
+        && card.loc.y + card.size.h > l.hints.loc.y - stack
+        && card.loc.y < l.hints.loc.y;
+    let room = card.loc.y - frame.loc.y >= stack;
+    match under && room {
+        true => card,
+        false => l.hints,
+    }
+}
+
 /// The page's primary button the header shows, if any: not on Code review's
 /// page under the rail, whose line has its own.
 fn header_primary(view: &FeatureTabView) -> Option<usize> {
