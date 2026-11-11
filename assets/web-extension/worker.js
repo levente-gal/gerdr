@@ -1,7 +1,8 @@
 // gerdr's end of the web pages it shows (see gerdr's `web_control`).
 //
-// gerdr opens each page at open.html?pane=<pane>&url=<page>: the tab is
-// then known as that pane's, and the page goes on to its own (open.js), in
+// gerdr opens each page at open.html?pane=<code>&url=<page>: the tab is
+// then known as that pane's, by the code until gerdr tells its pane's name
+// for it, and the page goes on to its own (open.js), in
 // place of itself: going back never lands on it. gerdr is told where
 // each pane's tab is whenever it changes, whether it can go back or
 // forward, and when it closes, over the native messaging host; it can send
@@ -573,6 +574,14 @@ async function startThread(tab) {
 
 async function command(message) {
   await loaded;
+  // A tab is known by its boot page's code until gerdr tells it the
+  // pane's own name (see `boot`): from then on, by that.
+  if (message.type === "pane") {
+    for (const id of Object.keys(panes)) {
+      if (panes[id] === message.code) panes[id] = message.pane;
+    }
+    return save();
+  }
   const tab = tabOf(message.pane);
   if (tab === undefined) return;
   try {

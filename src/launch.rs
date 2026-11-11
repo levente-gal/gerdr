@@ -1647,10 +1647,7 @@ pub fn append_log(path: &Path) -> Option<std::fs::File> {
     let open = || {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
-            let logs = std::fs::read_dir(dir).into_iter().flatten().flatten();
-            (logs.map(|e| e.path()))
-                .filter(|p| p.extension().is_some_and(|e| e == "log"))
-                .for_each(|log| cut_big_log(&log));
+            cut_logs_in(dir);
         }
         cut_big_log(path);
         std::fs::OpenOptions::new()
@@ -1661,6 +1658,22 @@ pub fn append_log(path: &Path) -> Option<std::fs::File> {
     open()
         .inspect_err(|err| tracing::warn!("opening {}: {err}", path.display()))
         .ok()
+}
+
+/// Start every log of gerdr's and its apps' over that grew past
+/// `LOG_MAX` since it was opened: the logs of programs that run for days.
+pub fn cut_big_logs() {
+    let state = state_dir();
+    cut_logs_in(&state);
+    cut_logs_in(&state.join("launch"));
+}
+
+/// Start each `*.log` in `dir` over that is bigger than `LOG_MAX`.
+fn cut_logs_in(dir: &Path) {
+    let logs = std::fs::read_dir(dir).into_iter().flatten().flatten();
+    (logs.map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|e| e == "log"))
+        .for_each(|log| cut_big_log(&log));
 }
 
 /// Start the log at `path` over if bigger than `LOG_MAX`. Its writers

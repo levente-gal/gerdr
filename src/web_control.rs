@@ -34,7 +34,8 @@ use std::{
         net::{UnixListener, UnixStream},
     },
     path::{Path, PathBuf},
-    time::Duration,
+    sync::{Mutex, PoisonError},
+    time::{Duration, Instant},
 };
 
 use serde::{Deserialize, Serialize};
@@ -157,10 +158,33 @@ enum FromBrowser {
     },
 }
 
+impl FromBrowser {
+    /// The token or boot page code of the pane it is about.
+    fn pane_mut(&mut self) -> &mut String {
+        match self {
+            Self::Page { pane, .. }
+            | Self::Closed { pane }
+            | Self::Unscoped { pane, .. }
+            | Self::Scoped { pane }
+            | Self::Shot { pane, .. }
+            | Self::Open { pane, .. }
+            | Self::Ready { pane }
+            | Self::Line { pane, .. }
+            | Self::Scroll { pane, .. }
+            | Self::NoThread { pane, .. } => pane,
+        }
+    }
+}
+
 /// What gerdr asks the extension to do with a pane's tab.
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 enum ToBrowser<'a> {
+    /// Know the tab its boot page named by `code` by `pane` from now on.
+    Pane {
+        code: &'a str,
+        pane: String,
+    },
     Navigate {
         pane: String,
         url: &'a str,
@@ -278,6 +302,31 @@ impl WebControl {
     pub fn socket(&self) -> Option<&Path> {
         self.socket.as_deref()
     }
+
+    /// The pane `said` names, from connection `id`: by its token, or by its
+    /// boot page's code (see `claim`). The connection claiming a pane by its
+    /// code holds it, and is told its token to use from then on.
+    fn pane_for(&mut self, id: u64, said: &str) -> Option<u32> {
+        if let Some(pane) = token_pane(said) {
+            return Some(pane);
+        }
+        let mut codes = CODES.lock().unwrap_or_else(PoisonError::into_inner);
+        let claimed = claim(&mut codes, id, said)?;
+        drop(codes);
+        let pane = claimed.inspect_err(|why| tracing::warn!("web extension: {why}")).ok()?;
+        if self.panes.insert(pane, id) != Some(id) {
+            let told = ToBrowser::Pane {
+                code: said,
+                pane: pane_token(pane),
+            };
+            if let (Ok(message), Some(stream)) =
+                (serde_json::to_vec(&told), self.connections.get_mut(&id))
+            {
+                let _ = stream.write_all(&framed(&message));
+            }
+        }
+        Some(pane)
+    }
 }
 
 /// How the extension knows `pane`: with this gerdr's pid, so another's
@@ -296,29 +345,86 @@ fn token_pane(token: &str) -> Option<u32> {
         .flatten()
 }
 
-/// This run's secret in `pane_token`: hex, from the kernel's random uuid.
+/// This run's secret in `pane_token`.
 fn secret() -> &'static str {
     static SECRET: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    SECRET.get_or_init(|| {
-        let uuid = std::fs::read_to_string("/proc/sys/kernel/random/uuid").unwrap_or_default();
-        let hex = uuid.trim().replace('-', "");
-        if !hex.is_empty() {
-            return hex;
-        }
-        // Keyed by the system's randomness too, should `/proc` be unreadable.
-        use std::hash::{BuildHasher, Hasher};
-        let half = || std::collections::hash_map::RandomState::new().build_hasher().finish();
-        format!("{:016x}{:016x}", half(), half())
-    })
+    SECRET.get_or_init(random_hex)
 }
+
+/// 128 random bits or so, in hex: from the kernel's random uuid.
+fn random_hex() -> String {
+    let uuid = std::fs::read_to_string("/proc/sys/kernel/random/uuid").unwrap_or_default();
+    let hex = uuid.trim().replace('-', "");
+    if !hex.is_empty() {
+        return hex;
+    }
+    // Keyed by the system's randomness too, should `/proc` be unreadable.
+    use std::hash::{BuildHasher, Hasher};
+    let half = || std::collections::hash_map::RandomState::new().build_hasher().finish();
+    format!("{:016x}{:016x}", half(), half())
+}
+
+/// How long a boot page's code waits for its tab to claim it.
+const CODE_WAIT: Duration = Duration::from_secs(60);
+
+/// The code a pane's boot page carries in place of its token, which shows
+/// in the browser's command line to any program of the user's: when it
+/// was made, and the connection that claimed it (see `pane_for`).
+struct Code {
+    code: String,
+    made: Instant,
+    claimer: Option<u64>,
+}
+
+/// Each pane's last boot page code, by pane.
+static CODES: Mutex<std::collections::BTreeMap<u32, Code>> =
+    Mutex::new(std::collections::BTreeMap::new());
 
 /// The extension's page that opens `url` for `pane`.
 pub fn boot_url(pane: u32, url: &str) -> String {
     format!(
         "chrome-extension://{EXTENSION_ID}/open.html?pane={}&url={}",
-        pane_token(pane),
+        boot_code(pane),
         percent_encoded(url)
     )
+}
+
+/// The code of `pane`'s boot page: its last while unclaimed and fresh, as
+/// a command is made again before it runs, else a new one.
+fn boot_code(pane: u32) -> String {
+    let mut codes = CODES.lock().unwrap_or_else(PoisonError::into_inner);
+    let fresh = |c: &Code| c.claimer.is_none() && c.made.elapsed() < CODE_WAIT;
+    if !codes.get(&pane).is_some_and(fresh) {
+        let code = Code {
+            code: random_hex(),
+            made: Instant::now(),
+            claimer: None,
+        };
+        codes.insert(pane, code);
+    }
+    codes[&pane].code.clone()
+}
+
+/// What a boot page's code `said` by connection `id` gives: the pane, for
+/// the first connection to bring it within `CODE_WAIT`, and again for it
+/// alone; `Err` for another, or one too late.
+fn claim(
+    codes: &mut std::collections::BTreeMap<u32, Code>,
+    id: u64,
+    said: &str,
+) -> Option<Result<u32, String>> {
+    let (&pane, code) = codes.iter_mut().find(|(_, c)| c.code == said)?;
+    Some(match code.claimer {
+        Some(by) if by == id => Ok(pane),
+        Some(_) => Err(format!("pane {pane}'s code came again, from another connection")),
+        None if code.made.elapsed() >= CODE_WAIT => {
+            Err(format!("pane {pane}'s code came too late"))
+        }
+        None => {
+            code.claimer = Some(id);
+            Ok(pane)
+        }
+    })
 }
 
 /// `text` with every byte but the unreserved ones percent-encoded.
@@ -546,6 +652,18 @@ impl Gerdr {
 
     fn take_web_event(&mut self, event: Event) {
         let control = &mut self.web_control;
+        // From here on a message names its pane by its token.
+        let event = match event {
+            Event::Message(id, mut message) => {
+                let said = message.pane_mut();
+                let Some(pane) = control.pane_for(id, said) else {
+                    return;
+                };
+                *said = pane_token(pane);
+                Event::Message(id, message)
+            }
+            event => event,
+        };
         match event {
             Event::Connected(id, stream) => {
                 control.connections.insert(id, stream);
@@ -885,9 +1003,31 @@ mod tests {
     }
 
     #[test]
+    fn a_boot_page_code_names_its_pane_once() {
+        let mut codes = std::collections::BTreeMap::new();
+        let code = |made: Instant| Code {
+            code: "c0de".into(),
+            made,
+            claimer: None,
+        };
+        codes.insert(5, code(Instant::now()));
+        assert_eq!(claim(&mut codes, 1, "c0de"), Some(Ok(5)));
+        // Its own connection again, before it heard the token.
+        assert_eq!(claim(&mut codes, 1, "c0de"), Some(Ok(5)));
+        assert!(matches!(claim(&mut codes, 2, "c0de"), Some(Err(_))));
+        assert_eq!(claim(&mut codes, 2, "other"), None);
+        let Some(long_ago) = Instant::now().checked_sub(CODE_WAIT) else {
+            return;
+        };
+        codes.insert(5, code(long_ago));
+        assert!(matches!(claim(&mut codes, 1, "c0de"), Some(Err(_))));
+    }
+
+    #[test]
     fn the_boot_page_carries_the_page_encoded() {
         let url = boot_url(3, "https://github.com/cli/cli/pulls?q=is:open#top");
-        let pane = pane_token(3);
+        let pane = boot_code(3);
+        assert!(!url.contains(&pane_token(3)), "its token shows in the browser's command line");
         assert_eq!(
             url,
             format!(

@@ -417,7 +417,11 @@ fn span_stat(worktree: &Path, from: &str, to: &str) -> Result<(usize, Stat), Str
     let out = git(worktree, &args)?;
     let (added, removed) = numstat(&out);
     let files = out.lines().filter(|l| !l.trim().is_empty()).count();
-    let commits = crate::git_ops::count_commits(worktree, &format!("{from}..{to}"));
+    // Not `git_ops::count_commits`: its 0 on failure would be kept for good.
+    let range = format!("{from}..{to}");
+    let count = git(worktree, &["rev-list", "--count", &range])?;
+    let commits = (count.trim().parse())
+        .map_err(|err| format!("counting commits in {range}: {err}"))?;
     Ok((
         commits,
         Stat {

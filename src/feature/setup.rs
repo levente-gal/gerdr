@@ -438,6 +438,8 @@ d={dir}
 log={log}
 GERDR_FEATURE={slug}
 export GERDR_FEATURE
+{marker}=$d
+export {marker}
 rm -rf "$d"
 mkdir -p "$d" "$(dirname "$log")"
 leave() {{ printf '%s\n' "$2" > "$d/$1.new" && mv "$d/$1.new" "$d/$1"; }}
@@ -448,6 +450,8 @@ printf '%s\n' "{start} $(date -u '+%Y-%m-%d %H:%M UTC')" >> "$log"
         dir = q(dir),
         log = q(log),
         slug = q(slug),
+        // What the setup starts is told apart by it (see `verify::MARKER`).
+        marker = super::verify::MARKER,
         start = RUN_START,
     );
     for note in notes {
